@@ -2442,7 +2442,7 @@ test("flush-failed snapshot gets a real write-back retry on read paths, not just
   )
 })
 
-test("workflow notification turn is recognized on a FULL prompt match, not just the prefix (#1)", () => {
+test("workflow notification requires a FULL prompt match or a trusted Bot checkpoint continuation (#1)", () => {
   // #1: a user can paste the short TRIGGER prefix (from a log / code sample); only the
   // FULL prompt is treated as internal plumbing, so a pasted prefix is neutralized as
   // ordinary text instead of being silently swallowed. The full-match compare now lives
@@ -2452,8 +2452,13 @@ test("workflow notification turn is recognized on a FULL prompt match, not just 
   // hand-rolled compare.
   assert.match(
     agentIpcSource,
-    /matchesWorkflowNotificationPrompt = isWorkflowNotificationTurnMessage\(message\)/,
-    "an internal workflow turn requires the shared full-match helper"
+    /matchesWorkflowNotificationPrompt =\s*isWorkflowNotificationTurnMessage\(message\)/,
+    "ordinary workflow notification recognition uses the shared full-match helper"
+  )
+  assert.match(
+    agentIpcSource,
+    /isWorkflowNotificationTurnMessage\(message\) \|\|\s*\(continueBotTaskCheckpointId !== undefined && workflowNotificationClaim !== undefined\)/,
+    "the additional recognition path requires both a validated Bot checkpoint and its workflow instance"
   )
   assert.match(
     agentIpcSource,
@@ -2738,8 +2743,8 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   )
   assert.match(
     agentIpcSource,
-    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner \}\s*\)/,
-    "notification turn uses the atomic async claim"
+    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner, \.\.\.workflowNotificationClaim \}\s*\)/,
+    "notification turn uses the atomic async claim with its original owner and optional validated instance"
   )
   const notificationClaimStart = agentIpcSource.indexOf(
     "claimWorkflowNotification(pendingWorkflowRun.runId, runToken)"

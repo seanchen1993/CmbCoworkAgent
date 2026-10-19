@@ -8,6 +8,8 @@ import type { QueuedMessage } from "../types"
 import type { ThreadActions } from "./thread-context"
 import { getQueuedModelContent } from "./queued-message-content"
 import { botErrorMessage } from "./bot-error-message"
+import type { FileAttachment } from "../../../shared/file-attachment"
+import { buildAttachmentMessageParts } from "../../../shared/attachment-message-parts"
 
 type Queue = Pick<ThreadActions, "getQueuedMessage" | "updateQueuedMessage" | "deleteQueuedMessage">
 const UNKNOWN = "发送确认未收到，原消息和附件已保留。请重试发送。"
@@ -17,6 +19,33 @@ export function validateBotDraft(draft: QueuedMessage): string | null {
   return !message || message.length > 64_000 || message.includes("\0")
     ? "消息和附件内容超出发送限制，请调整后重试。"
     : null
+}
+
+/** New-chat sends enter the original durable queue without submitting a target's existing draft. */
+export function queueBotChatDraft(
+  queue: Pick<ThreadActions, "addQueuedMessage" | "deleteQueuedMessage">,
+  text: string,
+  attachments: readonly FileAttachment[]
+): QueuedMessage {
+  const now = new Date()
+  const draft: QueuedMessage = {
+    id: crypto.randomUUID(),
+    text: text.trim() || (attachments.length ? "请分析以下文件内容。" : ""),
+    ...buildAttachmentMessageParts(attachments),
+    created_at: now,
+    updated_at: now
+  }
+  const invalid = validateBotDraft(draft)
+  if (invalid) throw new Error(invalid)
+  let storageError: string | null = "消息未能保存，未发送。"
+  queue.addQueuedMessage(draft, (error) => {
+    storageError = error
+  })
+  if (storageError) {
+    queue.deleteQueuedMessage(draft.id)
+    throw new Error(storageError)
+  }
+  return draft
 }
 
 async function checkFor(draft: QueuedMessage): Promise<BotRequestCheck> {

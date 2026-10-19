@@ -68,6 +68,47 @@
   border-bottom: 1px solid var(--bot-line);
   font-size: 14px;
 }
+.bot-new-chat-recipients {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.bot-new-chat-recipients > input {
+  min-width: 140px;
+}
+.bot-new-chat-recipient {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 4px 3px 8px;
+  border-radius: 12px;
+  background: var(--bot-agent-bubble);
+}
+.bot-new-chat-recipient > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bot-new-chat-recipient > .bot-icon-button {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+.bot-new-chat-pending {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border: 1px solid var(--bot-line);
+  border-radius: 50%;
+  color: var(--muted-foreground);
+}
 .bot-new-chat-draft {
   display: flex;
   flex-wrap: wrap;
@@ -86,6 +127,7 @@
 .bot-new-chat-draft textarea {
   flex: 1;
   min-width: 0;
+  field-sizing: content;
   max-height: 180px;
   padding: 6px 0;
   resize: none;
@@ -894,6 +936,129 @@ button.bot-json-caret:focus-visible {
   outline-offset: 3px;
   resize: vertical;
 }
+/* Creation follows the name/character-first flow; existing edit dialogs keep their layout. */
+.bot-create-dialog {
+  --background: #fafafa;
+  --foreground: #242424;
+  --muted-foreground: #828282;
+  --border: #e4e4e4;
+  --accent: #ececec;
+  --bot-avatar-monochrome: #242424;
+  width: min(440px, calc(100vw - 32px));
+  gap: 0;
+  padding: 0;
+  border-color: var(--border);
+  border-radius: 16px;
+  background: var(--background);
+  color: var(--foreground);
+}
+.dark .bot-create-dialog {
+  --background: #1f1f1f;
+  --foreground: #ededed;
+  --muted-foreground: #aaa;
+  --border: #343434;
+  --accent: #2b2b2b;
+  --bot-avatar-monochrome: #ededed;
+}
+.bot-create-heading {
+  flex-shrink: 0;
+  padding: 22px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.bot-create-heading h2 {
+  font-size: 15px;
+  font-weight: 600;
+}
+.bot-create-form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.bot-create-body {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  min-height: 0;
+  gap: 12px;
+  padding: 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.bot-create-avatar {
+  display: flex;
+  min-height: 104px;
+  align-items: center;
+  justify-content: center;
+}
+.bot-create-name {
+  margin: 0;
+}
+.bot-create-name input {
+  width: 100%;
+  height: 40px;
+  text-align: center;
+  font-size: 14px;
+  background: transparent;
+}
+.bot-create-name input:focus-visible {
+  outline: 2px solid #1084fe;
+  outline-offset: 0;
+}
+.bot-create-dialog .bot-appearance-picker {
+  width: min(320px, 100%);
+  margin: 0 auto;
+  padding: 0;
+}
+.bot-create-dialog .bot-shape-picker {
+  column-gap: 8px;
+}
+.bot-create-dialog .bot-color-picker {
+  width: min(252px, 100%);
+  margin: 24px auto 8px;
+  gap: 18px;
+}
+.bot-create-advanced {
+  display: flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.bot-create-advanced:hover,
+.bot-create-advanced:focus-visible {
+  color: var(--foreground);
+}
+.bot-create-advanced svg {
+  transition: transform 140ms ease;
+}
+.bot-create-advanced[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+.bot-create-footer {
+  flex-shrink: 0;
+  flex-direction: row;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+.bot-create-footer button {
+  border-radius: 999px;
+}
+.bot-create-footer button:first-child {
+  border: 1px solid var(--border);
+}
+.bot-create-footer button[type="submit"]:disabled {
+  background: color-mix(in srgb, var(--foreground) 12%, var(--background));
+  color: color-mix(in srgb, var(--foreground) 35%, var(--background));
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bot-create-advanced svg {
+    transition: none;
+  }
+}
 .bot-color {
   width: 20px;
   height: 20px;
@@ -1167,6 +1332,9 @@ button.bot-json-caret:focus-visible {
   justify-content: space-between;
   gap: 16px;
 }
+.bot-question-card header > span:first-child {
+  font-weight: 600;
+}
 .bot-question-status {
   flex-shrink: 0;
   color: var(--bot-muted);
@@ -1193,6 +1361,39 @@ button.bot-json-caret:focus-visible {
 .bot-question-history[data-state="cancelled"] .bot-question-card,
 .bot-question-history[data-state="interrupted"] .bot-question-card {
   color: var(--bot-muted);
+}
+.bot-question-history[data-state="ignored"] .bot-question-card {
+  padding: 16px;
+  box-shadow: inset 0 0 0 1px var(--bot-line);
+}
+.bot-question-ignored-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 8px;
+  color: color-mix(in srgb, var(--bot-text) 35%, transparent);
+}
+.bot-question-ignored-option > div {
+  min-width: 0;
+  padding: 2px 6px;
+}
+.bot-question-ignored-option p {
+  margin-top: 0;
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+.bot-question-ignored-key,
+.bot-question-key {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border: 1px solid var(--bot-line);
+  border-radius: 8px;
+  background: var(--bot-hover);
+  font-size: 12px;
 }
 .bot-question-input {
   padding: 16px;
@@ -1242,7 +1443,7 @@ button.bot-json-caret:focus-visible {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 28px;
   align-items: center;
-  border-radius: 12px;
+  border-radius: 16px;
 }
 .bot-question-option:hover,
 .bot-question-option[data-selected="true"] {
@@ -1251,24 +1452,24 @@ button.bot-json-caret:focus-visible {
 .bot-question-option > button:first-child {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
+  gap: 4px;
   padding: 8px;
   text-align: left;
   min-width: 0;
 }
 .bot-question-key {
-  width: 22px;
-  flex-shrink: 0;
   color: var(--bot-muted);
-  font-size: 12px;
-  text-align: center;
+}
+.bot-question-option > button:first-child > span:last-child {
+  min-width: 0;
+  padding: 2px 6px;
 }
 .bot-question-option small {
   display: block;
-  margin-top: 2px;
+  margin-top: 0;
   color: var(--bot-muted);
-  font-size: 12px;
-  line-height: 18px;
+  font-size: inherit;
+  line-height: inherit;
 }
 .bot-question-input textarea {
   grid-column: 1 / -1;

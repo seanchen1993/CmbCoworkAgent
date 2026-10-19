@@ -121,6 +121,7 @@ export interface ManagedNotificationDispatch {
   threadId: string
   kind: "workflow" | "coordinator"
   key: string
+  runStartedAt?: string
 }
 
 export class PendingNotificationScheduler {
@@ -617,7 +618,14 @@ export class PendingNotificationScheduler {
       return { started: false, reason: "no-pending-notification" }
     }
 
-    if (await this.dispatchManaged({ threadId, kind: "workflow", key: run.runId }))
+    if (
+      await this.dispatchManaged({
+        threadId,
+        kind: "workflow",
+        key: run.runId,
+        runStartedAt: run.startedAt
+      })
+    )
       return { started: false, reason: "managed-queue" }
 
     const existingLease = getLocalThreadRunLease(threadId)

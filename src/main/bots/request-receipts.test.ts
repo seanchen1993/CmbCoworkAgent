@@ -30,6 +30,60 @@ const check = (requestId: string, message = "Synthetic") => ({
 })
 
 describe("private Bot inbox receipts", () => {
+  it("keeps compacted legacy workflow Stop receipts across the instance-key upgrade", () => {
+    const f = fixture()
+    const requestId = `notification:${f.bot.threadId}:workflow:wf_legacy`
+    const notice = f.store.enqueue(
+      { botId: f.bot.id, requestId, message: "Internal" },
+      { kind: "notification", notificationKind: "workflow", key: "wf_legacy" }
+    )
+    f.store.transition(notice.id, "cancelled")
+    expect(
+      f.store.hasLegacyWorkflowNotification(
+        f.bot.id,
+        f.bot.threadId,
+        "wf_legacy",
+        new Date(500).toISOString()
+      )
+    ).toBe(true)
+    f.advance(1)
+    for (let i = 0; i < 100; i++) {
+      const tail = f.store.enqueue({
+        botId: f.bot.id,
+        requestId: `legacy-tail-${i}`,
+        message: "Tail"
+      })
+      f.store.transition(tail.id, "cancelled")
+    }
+    f.advance(31 * 86400000)
+    expect(f.store.pruneTaskHistory()).toBe(1)
+    expect(() => f.store.getTask(notice.id)).toThrow()
+    expect(
+      f.store.hasLegacyWorkflowNotification(
+        f.bot.id,
+        f.bot.threadId,
+        "wf_legacy",
+        new Date(500).toISOString()
+      )
+    ).toBe(true)
+    expect(
+      f.store.hasLegacyWorkflowNotification(
+        f.bot.id,
+        f.bot.threadId,
+        "wf_legacy",
+        new Date(2000).toISOString()
+      )
+    ).toBe(false)
+    expect(() =>
+      f.store.hasLegacyWorkflowNotification(
+        f.peer.id,
+        f.bot.threadId,
+        "wf_legacy",
+        new Date(500).toISOString()
+      )
+    ).toThrow("不属于")
+  })
+
   it("distinguishes accepted, conflicting and absent requests before any transcript exists", () => {
     const f = fixture()
     const task = f.store.enqueue({ botId: f.bot.id, requestId: "first", message: "Synthetic" })

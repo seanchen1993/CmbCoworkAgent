@@ -27,7 +27,11 @@ export async function resolveBotWorkspaceFile(
     )
   }
   // macOS /tmp and /var may be aliases of /private; accept either spelling of this workspace.
-  if (!inside(resolve(workspace), candidate) && !inside(root, candidate))
+  if (
+    !inside(resolve(workspace), candidate) &&
+    !inside(root, candidate) &&
+    !(options.allowAbsolute && isAbsolute(fileId))
+  )
     throw new BotError("INVALID_INPUT", "文件不在此 Bot 工作目录中")
   const actual = await realpath(candidate)
   if (!inside(root, actual)) throw new BotError("INVALID_INPUT", "文件链接超出此 Bot 工作目录")

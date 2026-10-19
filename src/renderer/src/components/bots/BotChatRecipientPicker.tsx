@@ -14,17 +14,35 @@ interface RecipientOption {
 export function BotChatRecipientPicker({
   bots,
   groups,
+  selectedIds,
+  pendingNames,
+  selectedCount,
   disabled,
-  onSelect
+  onSelect,
+  onCommit,
+  onRemoveLast
 }: {
   bots: BotDefinition[]
   groups: BotGroup[]
+  selectedIds: readonly string[]
+  pendingNames: readonly string[]
+  selectedCount: number
   disabled: boolean
   onSelect(value: string, name?: string): void
+  onCommit(): void
+  onRemoveLast(): void
 }) {
   const [query, setQuery] = useState("")
   const [open, setOpen] = useState(true)
   const [active, setActive] = useState(0)
+  const [previousCount, setPreviousCount] = useState(selectedCount)
+  if (previousCount !== selectedCount) {
+    setPreviousCount(selectedCount)
+    if (selectedCount > previousCount) {
+      setQuery("")
+      setActive(0)
+    }
+  }
   const input = useRef<HTMLInputElement>(null)
   const list = useRef<HTMLDivElement>(null)
   const listId = useId()
@@ -34,38 +52,47 @@ export function BotChatRecipientPicker({
     const matches: RecipientOption[] = [
       ...bots
         .filter(
-          (bot) => !bot.archived && !bot.deleting && bot.name.toLocaleLowerCase().includes(needle)
+          (bot) =>
+            !bot.archived &&
+            !bot.deleting &&
+            !selectedIds.includes(bot.id) &&
+            bot.name.toLocaleLowerCase().includes(needle)
         )
         .map((bot) => ({ value: `bot:${bot.id}`, label: bot.name, bot })),
-      ...groups
+      ...(selectedCount ? [] : groups)
         .filter((group) => !group.deleting && group.name.toLocaleLowerCase().includes(needle))
         .map((group) => ({ value: `group:${group.id}`, label: group.name }))
     ]
     const create = {
       value: "new-bot",
-      label: name ? `创建名为“${name}”的 Bot` : "创建新 Bot",
+      label: selectedCount ? `将“${name}”添加为新 Bot` : `创建名为“${name}”的 Bot`,
       name: name || undefined
     }
-    return name
+    return name && !pendingNames.some((pending) => pending.toLocaleLowerCase() === needle)
       ? [...matches, create]
-      : [create, { value: "new-group", label: "创建群聊" }, ...matches]
-  }, [bots, groups, query])
-  const selected = Math.min(active, options.length - 1)
+      : matches
+  }, [bots, groups, query, selectedIds, pendingNames, selectedCount])
+  const selected = Math.min(active, Math.max(0, options.length - 1))
+  const expanded = open && !disabled && options.length > 0
   const choose = (index: number) => {
     if (disabled) return
     const option = options[index]
     if (!option) return
     // A dialog opened by this option must return to the persistent combobox, not a removed option.
     input.current?.focus({ preventScroll: true })
-    setOpen(false)
     onSelect(option.value, option.name)
+    if (option.value.startsWith("bot:") || (option.value === "new-bot" && selectedCount)) {
+      setQuery("")
+      setActive(0)
+      setOpen(true)
+    } else setOpen(false)
   }
   useEffect(() => {
     if (open)
       list.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" })
   }, [open, selected, query])
   return (
-    <Popover open={open && !disabled} onOpenChange={setOpen}>
+    <Popover open={expanded} onOpenChange={setOpen}>
       <PopoverAnchor asChild>
         <input
           ref={input}
@@ -74,9 +101,9 @@ export function BotChatRecipientPicker({
           role="combobox"
           aria-label="选择聊天收件人"
           aria-autocomplete="list"
-          aria-expanded={open && !disabled}
-          aria-controls={open && !disabled ? listId : undefined}
-          aria-activedescendant={open && !disabled ? `${listId}-${selected}` : undefined}
+          aria-expanded={expanded}
+          aria-controls={expanded ? listId : undefined}
+          aria-activedescendant={expanded ? `${listId}-${selected}` : undefined}
           autoComplete="off"
           placeholder="搜索 Bot，或输入新名字…"
           maxLength={80}
@@ -93,6 +120,7 @@ export function BotChatRecipientPicker({
             if (event.nativeEvent.isComposing || event.keyCode === 229) return
             if (event.key === "ArrowDown" || event.key === "ArrowUp") {
               event.preventDefault()
+              if (!options.length) return
               setOpen(true)
               setActive(
                 open
@@ -102,18 +130,27 @@ export function BotChatRecipientPicker({
               )
             } else if (event.key === "Enter") {
               event.preventDefault()
-              if (open) choose(selected)
+              if (!query.trim() && selectedCount) onCommit()
+              else if (open) choose(selected)
               else setOpen(true)
+            } else if (event.key === "Backspace" && !query && selectedCount) {
+              event.preventDefault()
+              onRemoveLast()
+            } else if ((event.key === "Tab" || event.key === ",") && query.trim() && open) {
+              event.preventDefault()
+              choose(selected)
             } else if (event.key === "Escape") {
               event.preventDefault()
-              setOpen(false)
+              if (query) setQuery("")
+              else setOpen(false)
             }
           }}
         />
       </PopoverAnchor>
       <PopoverContent
+        role="presentation"
         data-bot-popup
-        className="bot-recipient-options max-h-80 overflow-y-auto rounded-2xl p-1.5"
+        className="bot-workspace-menu bot-recipient-options max-h-80 overflow-y-auto rounded-2xl p-1.5"
         align="start"
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => event.preventDefault()}
@@ -130,7 +167,7 @@ export function BotChatRecipientPicker({
               role="option"
               aria-selected={index === selected}
               tabIndex={-1}
-              className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm aria-selected:bg-muted"
+              className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm aria-selected:bg-accent"
               onMouseDown={(event) => event.preventDefault()}
               onMouseEnter={() => setActive(index)}
               onClick={() => choose(index)}

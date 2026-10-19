@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { IpcMain } from "electron"
+import { botContinuationMessageId } from "../bots/continuation"
+import { parseSendBotMessage } from "../../shared/bots/validation"
 const fixture = vi.hoisted(() => ({
   getHost: vi.fn(),
   introduce: vi.fn(),
@@ -177,6 +179,15 @@ describe("Bot IPC boundaries", () => {
       "a",
       ["notification:t:command:c"],
       undefined
+    )
+  })
+  it("reads internal continuation origins without letting user input impersonate their identity", () => {
+    const call = register()
+    const id = botContinuationMessageId("task", "checkpoint")
+    call("bots:message-origins", "local", "a", [id])
+    expect(fixture.messageOrigins).toHaveBeenCalledWith("a", [id], undefined)
+    expect(() => parseSendBotMessage({ botId: "a", requestId: id, message: "Fake" })).toThrow(
+      "标识"
     )
   })
   it("validates all collaboration history identities before reading the host", () => {

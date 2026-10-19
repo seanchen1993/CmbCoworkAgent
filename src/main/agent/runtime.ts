@@ -4915,6 +4915,7 @@ export interface CreateAgentRuntimeOptions {
   /** Offer the existing workflow engine without requiring a user-selected mode. */
   workflowEnabled?: boolean
   backgroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
+  foregroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
   /** Runtime mode. "normal" preserves the existing agent; "coordinator" enables async worker orchestration. */
   agentMode?: AgentMode
   /** Parent/root trace context used to link async worker and workflow subagent traces. */
@@ -5534,6 +5535,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     ),
     abortSignal: options.abortSignal,
     backgroundCommandLifecycle: options.backgroundCommandLifecycle,
+    foregroundCommandLifecycle: options.foregroundCommandLifecycle,
     runId: threadId,
     // Foreground turns on the same thread can overlap briefly during bounded
     // replacement. Keep background-task ownership logical, but scope ACL

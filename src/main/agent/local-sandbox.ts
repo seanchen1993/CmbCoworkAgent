@@ -353,6 +353,8 @@ function gitConfigEnvironmentPreamble(
  */
 export interface LocalSandboxOptions {
   backgroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
+  /** Foreground handoff only; explicit background commands retain their existing policy. */
+  foregroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
   /** Host grant/policy realm; file operations still use rootDir. */
   modWorkspace?: string
   /** Runtime capabilities must also constrain SDK calls that bypass model middleware. */
@@ -754,6 +756,7 @@ export class LocalSandbox
   /** AbortSignal: when signalled, in-flight child processes are killed immediately. */
   private abortSignal?: AbortSignal
   private backgroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
+  private foregroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
   /** Whether the conversation-level abort signal has been triggered. */
   get isAborted(): boolean {
     return this.abortSignal?.aborted ?? false
@@ -2121,6 +2124,7 @@ export class LocalSandbox
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
     this.backgroundCommandLifecycle = options.backgroundCommandLifecycle
+    this.foregroundCommandLifecycle = options.foregroundCommandLifecycle
 
     // Prewarm sandbox state during construction so command execution avoids
     // kicking off expensive setup work on the hot path.
@@ -7333,16 +7337,30 @@ export class LocalSandbox
   /** Workflow worktree teardown must not inspect/delete a checkout while one of
    * its background commands is still unwinding. Ordinary callers may keep using
    * the void wrapper above; lifecycle cleanup awaits this stronger variant. */
-  static async cancelBackgroundTasksAndWait(threadId: string): Promise<void> {
-    const completions = LocalSandbox.cancelBackgroundTasksForThread(threadId)
+  static async cancelBackgroundTasksAndWait(
+    threadId: string,
+    taskIds?: readonly string[]
+  ): Promise<void> {
+    const completions = LocalSandbox.cancelBackgroundTasksForThread(
+      threadId,
+      taskIds && new Set(taskIds)
+    )
     await Promise.allSettled(completions)
   }
 
   // Keyed by the actual Runtime signal, so a stale run cannot move a newer run's command.
   private static readonly foregroundHandoffs = new WeakMap<AbortSignal, Set<() => boolean>>()
+  private static readonly foregroundYieldRequests = new WeakMap<AbortSignal, () => boolean>()
 
-  static yieldForegroundCommands(signal: AbortSignal): number {
+  static yieldForegroundCommands(signal: AbortSignal, stillPending?: () => boolean): number {
     if (signal.aborted) return 0
+    if (stillPending) {
+      if (!stillPending()) {
+        LocalSandbox.foregroundYieldRequests.delete(signal)
+        return 0
+      }
+      LocalSandbox.foregroundYieldRequests.set(signal, stillPending)
+    }
     let transferred = 0
     for (const handoff of [...(LocalSandbox.foregroundHandoffs.get(signal) ?? [])]) {
       if (handoff()) transferred++
@@ -7359,7 +7377,7 @@ export class LocalSandbox
     releaseHumanGate?: () => void
   ): Promise<ExecuteResponse> {
     const ownerSignal = this.abortSignal!,
-      lifecycle = this.backgroundCommandLifecycle!
+      lifecycle = (this.foregroundCommandLifecycle ?? this.backgroundCommandLifecycle)!
     const task = {
       id: randomUUID(),
       threadId: this.runId,
@@ -7453,6 +7471,18 @@ export class LocalSandbox
             const handoffs = LocalSandbox.foregroundHandoffs.get(ownerSignal) ?? new Set()
             handoffs.add(handoff)
             LocalSandbox.foregroundHandoffs.set(ownerSignal, handoffs)
+            if (LocalSandbox.foregroundYieldRequests.has(ownerSignal))
+              queueMicrotask(() => {
+                const pending = LocalSandbox.foregroundYieldRequests.get(ownerSignal)
+                try {
+                  if (pending?.()) handoff()
+                  else LocalSandbox.foregroundYieldRequests.delete(ownerSignal)
+                } catch (error) {
+                  // An unavailable inbox must never detach a process or throw from a microtask.
+                  LocalSandbox.foregroundYieldRequests.delete(ownerSignal)
+                  console.error("[LocalSandbox] Foreground yield request unavailable", error)
+                }
+              })
           }
           return () => {
             rawActive = false
@@ -7552,10 +7582,14 @@ export class LocalSandbox
     return settled
   }
 
-  private static cancelBackgroundTasksForThread(threadId?: string): Promise<void>[] {
+  private static cancelBackgroundTasksForThread(
+    threadId?: string,
+    taskIds?: ReadonlySet<string>
+  ): Promise<void>[] {
     const completions: Promise<void>[] = []
     for (const [taskId, task] of LocalSandbox.backgroundTasks) {
       if (threadId !== undefined && task.threadId !== threadId) continue
+      if (taskIds && !taskIds.has(taskId)) continue
       if (!task.completed) {
         console.log(
           `[LocalSandbox] cancelling background task ${taskId} (command: ${task.command}) for thread ${task.threadId}`
@@ -7601,9 +7635,13 @@ export class LocalSandbox
       }
     }
     const humanGateLease = await this.requestHumanGateForExecute(preResult)
-    if (this.backgroundCommandLifecycle && this.abortSignal && !this.worktreeIsolation &&
-        readOnlyShellExecutionContext.getStore() !== true &&
-        (!getModCallContext() || getModCallContext()?.identity.agentId === "main")) {
+    if (
+      (this.foregroundCommandLifecycle ?? this.backgroundCommandLifecycle) &&
+      this.abortSignal &&
+      !this.worktreeIsolation &&
+      readOnlyShellExecutionContext.getStore() !== true &&
+      (!getModCallContext() || getModCallContext()?.identity.agentId === "main")
+    ) {
       return this.executeWithForegroundHandoff(
         () => this.executeAfterPreToolUse(command, requestedCwd, requestedArgs, preResult),
         humanGateLease?.release

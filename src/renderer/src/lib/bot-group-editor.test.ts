@@ -8,11 +8,12 @@ import {
   groupEditorDraft,
   groupEditorExtensions,
   groupEditorOffset,
+  groupEditorDeleteMention,
   groupEditorLineBoundary,
   groupEditorMotionPlugin,
   groupEditorClipboardPlugin
 } from "./bot-group-editor"
-import { groupMessageRecipients } from "./bot-group-mentions"
+import { groupMessageRecipients, groupMentionQuery } from "./bot-group-mentions"
 
 const schema = getSchema(groupEditorExtensions())
 const member = { start: 0, end: 3, botId: "a", label: "甲乙" }
@@ -96,6 +97,69 @@ describe("group editor draft projection", () => {
       })
     ).toBe(true)
     expect(groupEditorDraft(state.doc.toJSON()).mentions).toEqual([])
+  })
+
+  it("returns a backspaced member to @, rebases later identities and restores exact IDs on undo", () => {
+    const text = "@甲乙 @丙丁"
+    const mentions = [member, { start: 4, end: 7, botId: "b", label: "丙丁" }]
+    const doc = schema.nodeFromJSON(groupEditorContent(text, mentions))
+    let state = EditorState.create({
+      schema,
+      doc,
+      selection: TextSelection.create(doc, 2),
+      plugins: [history()]
+    })
+    const view = {
+      get state() {
+        return state
+      },
+      dispatch: (transaction: typeof state.tr) => {
+        state = state.apply(transaction)
+      }
+    }
+    expect(groupEditorDeleteMention(view, true)).toBe(true)
+    const changed = groupEditorDraft(state.doc.toJSON())
+    expect(changed).toEqual({
+      text: "@ @丙丁",
+      mentions: [{ start: 2, end: 5, botId: "b", label: "丙丁" }]
+    })
+    expect(
+      groupMentionQuery(
+        changed.text,
+        groupEditorOffset(state.doc, state.selection.from),
+        changed.mentions
+      )
+    ).toEqual({ start: 0, end: 1, query: "" })
+    expect(groupMessageRecipients(changed.mentions, ["a", "b"]).ids).toEqual(["b"])
+    expect(undo(state, view.dispatch)).toBe(true)
+    expect(groupEditorDraft(state.doc.toJSON())).toEqual({ text, mentions })
+    expect(redo(state, view.dispatch)).toBe(true)
+    expect(groupEditorDraft(state.doc.toJSON())).toEqual(changed)
+  })
+
+  it("keeps forward deletion atomic and leaves ordinary text or nonempty selections to the editor", () => {
+    const doc = schema.nodeFromJSON(
+      groupEditorContent("前 @甲乙 后", [{ ...member, start: 2, end: 5 }])
+    )
+    let state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 3) })
+    const view = {
+      get state() {
+        return state
+      },
+      dispatch: (transaction: typeof state.tr) => {
+        state = state.apply(transaction)
+      }
+    }
+    expect(groupEditorDeleteMention(view, false)).toBe(true)
+    expect(groupEditorDraft(state.doc.toJSON())).toEqual({ text: "前  后", mentions: [] })
+    const previous = state
+    expect(groupEditorDeleteMention(view, true)).toBe(false)
+    expect(state).toBe(previous)
+    state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 1, 4) })
+    const selected = state
+    expect(groupEditorDeleteMention(view, true)).toBe(false)
+    expect(groupEditorDeleteMention(view, false)).toBe(false)
+    expect(state).toBe(selected)
   })
 
   it("projects Shift+Enter hard breaks without dropping later atoms", () => {

@@ -1400,8 +1400,13 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertMatches(
     agentIpc,
-    /claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner \}\s*\)/,
-    "a workflow summary claims a run its own surface owes, not whichever is newest"
+    /claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner, \.\.\.workflowNotificationClaim \}\s*\)/,
+    "a workflow summary retains its surface owner and the validated Bot instance filter"
+  )
+  assertMatches(
+    agentIpc,
+    /const workflowNotificationClaim = botWorkflowNotificationClaim\(\s*runExecutionContext,\s*initialInvokeMetadata\s*\)/,
+    "the optional workflow instance filter is validated against the local Bot lease and metadata"
   )
   assertIncludes(
     agentIpc,

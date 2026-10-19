@@ -2,6 +2,7 @@ import { formatBotMessageReply } from "../../../shared/bots/message-reply"
 import { describe, expect, it } from "vitest"
 import type { BotDefinition, BotTask, BotTaskOrigin } from "../../../shared/bots/contracts"
 import { BOT_REPLY_FILES_PREFIX } from "../../../shared/bots/file-delivery"
+import { formatSkillUseBlock } from "../../../shared/skill-use-block"
 import {
   privateBotTasksByBot,
   botTaskPreview,
@@ -201,4 +202,27 @@ it("hides the partial final attachment in a bounded snapshot without reading its
   expect(preview).toContain("visible.csv")
   expect(preview).toContain("请核对")
   expect(preview).not.toMatch(/attachment|private-dir|private body/)
+})
+
+it.each([false, true])(
+  "projects selected-skill user text without exposing transport instructions (bounded: %s)",
+  (bounded) => {
+    const current = task("skill-preview", { kind: "user" })
+    const text = "请梳理 CSV 核对技能的输入、触发条件和验收要求。"
+    const message = `${text}\n\n${formatSkillUseBlock({
+      name: "skill-creator",
+      path: "/private/skills/skill-creator/SKILL.md",
+      description: "A long skill description. ".repeat(30)
+    })}`
+    current.message = bounded ? message.slice(0, 600) : message
+    expect(botTaskPreview(current)).toBe(text)
+    expect(current.message).toBe(bounded ? message.slice(0, 600) : message)
+    expect(current.message).toContain("<CMBDEVCLAW-SKILL-USE-V1>")
+  }
+)
+
+it("preserves a user's plain mention of the skill marker without a transport payload", () => {
+  const current = task("marker-prose", { kind: "user" })
+  current.message = "请解释 <CMBDEVCLAW-SKILL-USE-V1> 这个字面量；不要改写这段说明。"
+  expect(botTaskPreview(current)).toBe(current.message)
 })

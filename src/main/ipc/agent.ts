@@ -444,6 +444,13 @@ import {
   type AgentRunDelivery,
   type AgentRunExecutionContext
 } from "../agent/agent-run-service"
+import {
+  assertBotModelCheckpoint,
+  assertBotPrivateContinuationCheckpoint,
+  botGroupResumeCheckpoint,
+  botPrivateContinuationCheckpoint,
+  botWorkflowNotificationClaim
+} from "../agent/bot-checkpoint-resume"
 import { isManagedTransportWindow } from "../agent/managed-transport-delivery"
 
 function withHarnessStageInvalidation(
@@ -5380,7 +5387,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           `[Agent][Queue] queued current-run message ${messageId} for thread ${threadId}`
         )
         // Only the trusted Bot path opts into process handoff. Desktop queue semantics stay unchanged.
-        if (request.owner === "bot") LocalSandbox.yieldForegroundCommands(activeController.signal)
+        if (request.owner === "bot")
+          LocalSandbox.yieldForegroundCommands(
+            activeController.signal,
+            () =>
+              ownsLease() &&
+              activeRuns.get(threadId) === activeController &&
+              !activeController.signal.aborted &&
+              isCurrentRunMessageQueueOwner(threadId, preparer.runToken) &&
+              peekCurrentRunMessageQueue(threadId).length > 0
+          )
         return { queued: true }
       })
     } finally {
@@ -5830,10 +5846,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         .startsWith(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)
       const isTrustedCoordinatorNotificationInvoke =
         coordinatorInternalNotification === true && hasCoordinatorNotificationPrefixAtInvoke
+      const resumeCheckpointId = botGroupResumeCheckpoint(runExecutionContext, initialInvokeMetadata)
+      const continueBotTaskCheckpointId = botPrivateContinuationCheckpoint(
+        runExecutionContext,
+        initialInvokeMetadata
+      )
+      const workflowNotificationClaim = botWorkflowNotificationClaim(
+        runExecutionContext,
+        initialInvokeMetadata
+      )
+      const isBotCheckpointResumeInvoke = resumeCheckpointId !== undefined
       const isBotInternalTurnInvoke =
         runExecutionContext.source === "bot" &&
         (runExecutionContext.commandInternalNotification === true ||
-          runExecutionContext.botIntroduction === true) &&
+          runExecutionContext.botIntroduction === true ||
+          isBotCheckpointResumeInvoke ||
+          continueBotTaskCheckpointId !== undefined) &&
         initialInvokeMetadata.botHostId === "local" &&
         typeof initialInvokeMetadata.botId === "string"
       // A completed background workflow delivers its result via an INTERNAL
@@ -5847,7 +5875,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // having workflow capability. A normal-mode Bot additionally requires a
       // host-owned receipt flag; user text cannot impersonate its result turn.
       const isWorkflowNotificationInvoke =
-        isWorkflowNotificationTurnMessage(message) &&
+        (isWorkflowNotificationTurnMessage(message) ||
+          (continueBotTaskCheckpointId !== undefined && workflowNotificationClaim !== undefined)) &&
         (initialInvokeAgentMode === "workflow" ||
           (runExecutionContext.source === "bot" &&
             runExecutionContext.workflowInternalNotification === true &&
@@ -7085,7 +7114,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // counts (#1, source-checked by content since a transport flag wouldn't
           // survive the renderer→main chain). The prefix branch below neutralizes a
           // pasted prefix as ordinary text.
-          const matchesWorkflowNotificationPrompt = isWorkflowNotificationTurnMessage(message)
+          const matchesWorkflowNotificationPrompt =
+            isWorkflowNotificationTurnMessage(message) ||
+            (continueBotTaskCheckpointId !== undefined && workflowNotificationClaim !== undefined)
           // Neutralize a pasted prefix of EITHER internal marker: the TURN trigger OR
           // the V1 notification marker. The renderer AND the export path both hide any
           // message starting with these (the V1 marker carries a runId suffix, so they
@@ -7109,9 +7140,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const pendingWorkflowRun = await workflowRunManager.claimPendingNotificationAsync(
               workspacePath,
               threadId,
-              { owner: backgroundNotificationOwner }
+              { owner: backgroundNotificationOwner, ...workflowNotificationClaim }
             )
             if (!pendingWorkflowRun) {
+              if (workflowNotificationClaim && (resumeCheckpointId || continueBotTaskCheckpointId))
+                throw new Error("后台任务结果版本已改变，已停止自动续办。")
               console.log("[Workflow] Ignoring stale workflow notification trigger", { threadId })
               safeSendToWindow(window, channel, { type: "done" })
               finishTraceInBackground(tracer, "success", "WORKFLOW_NOTIFICATION_STALE", "Agent")
@@ -7124,10 +7157,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 pendingWorkflowRun.threadId,
                 pendingWorkflowRun
               )
-              effectiveMessage = buildWorkflowNotificationMessage(
+              const workflowResultMessage = buildWorkflowNotificationMessage(
                 pendingWorkflowRun,
                 workflowOutputFile
               )
+              effectiveMessage = continueBotTaskCheckpointId
+                ? `${message}\n\n${workflowResultMessage}`
+                : workflowResultMessage
               modelInputMessage = effectiveMessage
               // Preserve the delivered workflow result as goal-evaluator evidence so
               // the (deferred, never-evaluated) launch turn's use of a workflow is
@@ -7320,7 +7356,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               syncUsedSkillsContext()
             }
           })
-          runExecutionContext.onSteeringReady?.()
+          runExecutionContext.onSteeringReady?.(
+            runExecutionContext.source === "bot"
+              ? (stillPending) =>
+                  LocalSandbox.yieldForegroundCommands(abortController.signal, () => {
+                    const lease = getLocalThreadRunLease(threadId)
+                    return (
+                      lease?.owner === "bot" &&
+                      lease.runId === runExecutionContext.localRunLease?.runId &&
+                      activeRuns.get(threadId) === abortController &&
+                      !abortController.signal.aborted &&
+                      stillPending()
+                    )
+                  })
+              : undefined
+          )
 
           const persistedCoordinatorSelectedSkill = parseCoordinatorSelectedSkillMetadata(metadata)
           const persistedCoordinatorTurnPrompt = parseCoordinatorTurnPromptMetadata(metadata)
@@ -7918,8 +7968,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             })
           }
 
-          const userHumanMessage = isCoordinatorNotificationTurn
+          const userHumanMessage = isCoordinatorNotificationTurn || isBotCheckpointResumeInvoke
             ? undefined
+            : continueBotTaskCheckpointId
+              ? new HumanMessage({
+                  id: userMessageId,
+                  content: effectiveMessage,
+                  // Keep a durable source boundary after newer private turns. The standard
+                  // notification flag removes it from storage, losing routine/peer attribution.
+                  // Reuse the original visible-text projection; Bots hides this Host-only ID.
+                  additional_kwargs: {
+                    [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
+                    [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: "续办后台任务"
+                  }
+                })
             : isBotInternalTurnInvoke
               ? new HumanMessage({
                   id: userMessageId,
@@ -8018,6 +8080,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   : undefined,
               workflowEnabled: runExecutionContext.workflowEnabled,
               backgroundCommandLifecycle: runExecutionContext.backgroundCommandLifecycle,
+              foregroundCommandLifecycle: runExecutionContext.foregroundCommandLifecycle,
               extraSystemPrompt: runExecutionContext.extraSystemPrompt,
               additionalTools: runExecutionContext.additionalTools,
               toolConcurrencyQueueId: runExecutionContext.toolConcurrencyQueueId,
@@ -8068,6 +8131,30 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             try {
               soloTaskTraceManager?.setModelId(candidateId)
               agent = await invokeRuntimeFactory.create(candidateId)
+              if (resumeCheckpointId)
+                assertBotModelCheckpoint(resumeCheckpointId, await agent.getState(streamConfig))
+              if (continueBotTaskCheckpointId) {
+                if (!userMessageId) throw new Error("Bot 续办消息标识缺失，已停止自动续办。")
+                assertBotPrivateContinuationCheckpoint(
+                  continueBotTaskCheckpointId,
+                  await agent.getState(streamConfig)
+                )
+                // Ordinary Human entries are durably announced before invoke above. Internal
+                // turns skip that path; retain this hidden boundary through the same writer.
+                userTranscriptMessagePersisted = persistVisibleUserTranscriptMessage(
+                  threadId,
+                  "续办后台任务",
+                  userMessageId,
+                  goalTranscriptBoundary
+                )
+                if (
+                  !userTranscriptMessagePersisted &&
+                  !getThreadMessagesByIds(threadId, [userMessageId]).some(
+                    (entry) => entry.role === "user" && entry.content === "续办后台任务"
+                  )
+                )
+                  throw new Error("Bot 续办来源未能保存，已停止自动续办，请检查原任务。")
+              }
               if (workspacePath)
                 await getModsManager()?.startFunctionTurn({
                   workspace: workspacePath,
@@ -8083,7 +8170,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 })
               throwIfInvokeAborted()
               // First attempt sends the message; subsequent attempts resume from checkpoint
-              const input = isFirstAttempt ? { messages: humanMessages } : null
+              const input = isFirstAttempt && !resumeCheckpointId ? { messages: humanMessages } : null
               stream = await agent.stream(input, streamConfig)
               throwIfInvokeAborted()
               usedModelId = candidateId

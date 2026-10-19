@@ -1,4 +1,5 @@
 import path from "node:path"
+import { realpath } from "node:fs/promises"
 import {
   WORKSPACE_FILE_PREVIEW_CANCELLED,
   WORKSPACE_FILE_PREVIEW_MAX_TEXT_BYTES,
@@ -130,11 +131,24 @@ async function openPreviewFile(
     trustedRootPath = path.resolve(source.trustedRootPath)
   } else {
     if (!workspacePath) throw new Error("No workspace folder linked")
-    const resolved = resolveWorkspacePreviewCandidate(
-      source.filePath,
-      workspacePath,
-      source.workspacePathKind
-    )
+    let resolved: { root: string; candidate: string }
+    try {
+      resolved = resolveWorkspacePreviewCandidate(
+        source.filePath,
+        workspacePath,
+        source.workspacePathKind
+      )
+    } catch (error) {
+      // Historical absolute paths can name an alias of the same directory.
+      // Keep relative conventions unchanged and recheck the canonical boundary.
+      if (source.workspacePathKind !== "absolute" || !path.isAbsolute(source.filePath)) throw error
+      try {
+        const [file, root] = await Promise.all([realpath(source.filePath), realpath(workspacePath)])
+        resolved = resolveWorkspacePreviewCandidate(file, root, "absolute")
+      } catch {
+        throw error
+      }
+    }
     candidate = resolved.candidate
     trustedRootPath = resolved.root
   }

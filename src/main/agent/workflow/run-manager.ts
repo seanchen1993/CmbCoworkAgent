@@ -1533,10 +1533,12 @@ class WorkflowRunManager {
   async findPendingNotificationAsync(
     workspacePath: string,
     threadId: string,
-    options: { owner?: WorkflowNotificationOwner } = {}
+    options: { owner?: WorkflowNotificationOwner; runId?: string; startedAt?: string } = {}
   ): Promise<PersistedWorkflowRun | null> {
     const ownedByCaller = (run: PersistedWorkflowRun): boolean =>
-      options.owner === undefined || (run.notificationOwner ?? "desktop") === options.owner
+      (options.owner === undefined || (run.notificationOwner ?? "desktop") === options.owner) &&
+      (options.runId === undefined || run.runId === options.runId) &&
+      (options.startedAt === undefined || run.startedAt === options.startedAt)
     for (const snapshot of this.flushFailedRuns.values()) {
       if (
         snapshot.threadId === threadId &&
@@ -1562,7 +1564,7 @@ class WorkflowRunManager {
   async claimPendingNotificationAsync(
     workspacePath: string,
     threadId: string,
-    options: { owner?: WorkflowNotificationOwner } = {}
+    options: { owner?: WorkflowNotificationOwner; runId?: string; startedAt?: string } = {}
   ): Promise<PersistedWorkflowRun | null> {
     const run = await this.findPendingNotificationAsync(workspacePath, threadId, options)
     if (!run || this.inFlightNotifications.has(run.runId)) return null

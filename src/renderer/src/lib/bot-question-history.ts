@@ -2,11 +2,13 @@ import type { Message, ToolCall, ToolResult, UserInputRequest } from "@/types"
 import type { BotMessageOrigin } from "../../../shared/bots/contracts"
 import { buildToolResultAssociations, getWorkerToolUiKey } from "./worker-tool-result-key"
 import { botToolResultStatus } from "./bot-tool-result-status"
+import { isFreeformUserInputOption } from "../../../shared/user-input-options"
 
 type Answer = { text: string; additionalText?: string }
+type QuestionOptions = UserInputRequest["questions"][number]["options"]
 export interface BotQuestionHistory {
   status: "submitted" | "ignored" | "auto_resolved" | "cancelled" | "interrupted"
-  questions: Array<{ id: string; question: string; answer?: Answer }>
+  questions: Array<{ id: string; question: string; options?: QuestionOptions; answer?: Answer }>
 }
 
 const record = (value: unknown): Record<string, unknown> | null =>
@@ -16,7 +18,28 @@ const record = (value: unknown): Record<string, unknown> | null =>
 const text = (value: unknown, max: number): value is string =>
   typeof value === "string" && Boolean(value.trim()) && value.length <= max
 
-function questionSources(tool: ToolCall): BotQuestionHistory["questions"] | null {
+function historyOptions(value: unknown): QuestionOptions | undefined {
+  if (!Array.isArray(value) || value.length > 5) return undefined
+  const options: QuestionOptions = []
+  for (const item of value) {
+    const option = record(item)
+    if (
+      !option ||
+      !text(option.label, 80) ||
+      typeof option.description !== "string" ||
+      option.description.length > 240
+    )
+      return undefined
+    if (!isFreeformUserInputOption(option.label))
+      options.push({ label: option.label, description: option.description })
+  }
+  return options
+}
+
+function questionSources(
+  tool: ToolCall,
+  showOptions = false
+): BotQuestionHistory["questions"] | null {
   if (tool.name !== "request_user_input") return null
   const values = tool.args?.questions
   if (!Array.isArray(values) || !values.length || values.length > 10) return null
@@ -32,7 +55,12 @@ function questionSources(tool: ToolCall): BotQuestionHistory["questions"] | null
     )
       return null
     ids.add(question.id)
-    questions.push({ id: question.id, question: question.question })
+    const options = showOptions ? historyOptions(question.options) : undefined
+    questions.push({
+      id: question.id,
+      question: question.question,
+      ...(options ? { options } : {})
+    })
   }
   return questions
 }
@@ -102,6 +130,24 @@ export function pendingBotQuestionCallId(
   return null
 }
 
+/** Child or ambiguous calls keep their direct answer form instead of using the main inbox. */
+export function isMainBotQuestionCall(
+  messages: readonly Message[],
+  callId: string | null
+): boolean {
+  if (!callId) return false
+  let matched = false
+  for (const message of messages) {
+    if (message.role !== "assistant") continue
+    for (const call of message.tool_calls ?? []) {
+      if (call.id !== callId) continue
+      if (matched || message.subagent_tool_call_id) return false
+      matched = true
+    }
+  }
+  return matched
+}
+
 /** Read-only receipt projection. A default option or timer is never a user answer. */
 export function botQuestionHistory(
   tool: ToolCall,
@@ -123,7 +169,7 @@ export function botQuestionHistory(
     const status = receipt?.status
     if (status !== "submitted" && status !== "ignored" && status !== "auto_resolved") return null
     const answers = record(receipt?.answers)
-    const questions = sources
+    const questions = status === "ignored" ? (questionSources(tool, true) ?? sources) : sources
     if (!answers) return null
     if (status === "ignored" && Object.keys(answers).length) return null
     const projected: BotQuestionHistory["questions"] = []

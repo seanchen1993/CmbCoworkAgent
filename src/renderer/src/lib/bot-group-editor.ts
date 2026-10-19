@@ -5,6 +5,7 @@ import Text from "@tiptap/extension-text"
 import HardBreak from "@tiptap/extension-hard-break"
 import { Placeholder, UndoRedo } from "@tiptap/extensions"
 import { Plugin, TextSelection } from "@tiptap/pm/state"
+import type { EditorView } from "@tiptap/pm/view"
 import { Slice, type Node as EditorNode } from "@tiptap/pm/model"
 import { validGroupMentions, type BotGroupMention } from "./bot-group-mentions"
 
@@ -61,6 +62,22 @@ export function groupEditorOffset(doc: EditorNode, position: number): number {
   ).length
 }
 
+/** Match Grok's Mention backspace: return to the trigger without retaining its recipient ID. */
+export function groupEditorDeleteMention(
+  view: Pick<EditorView, "state" | "dispatch">,
+  backward: boolean
+): boolean {
+  const { state } = view
+  const { $from, empty, from } = state.selection
+  const node = backward ? $from.nodeBefore : $from.nodeAfter
+  if (!empty || node?.type.name !== "groupMention") return false
+  const start = backward ? from - node.nodeSize : from
+  const transaction = state.tr.delete(start, start + node.nodeSize)
+  if (backward) transaction.insertText("@", start)
+  view.dispatch(transaction)
+  return true
+}
+
 export const GroupMentionNode = Node.create({
   name: "groupMention",
   group: "inline",
@@ -73,20 +90,10 @@ export const GroupMentionNode = Node.create({
   renderText: ({ node }) => `@${node.attrs.label}`,
   renderHTML: ({ node }) => ["span", { "data-group-mention": "" }, `@${node.attrs.label}`],
   addKeyboardShortcuts() {
-    const remove = (backward: boolean) => {
-      const { state, view } = this.editor
-      const { $from, empty, from } = state.selection
-      const node = backward ? $from.nodeBefore : $from.nodeAfter
-      if (!empty || node?.type.name !== this.name) return false
-      view.dispatch(
-        state.tr.delete(
-          backward ? from - node.nodeSize : from,
-          backward ? from : from + node.nodeSize
-        )
-      )
-      return true
+    return {
+      Backspace: () => groupEditorDeleteMention(this.editor.view, true),
+      Delete: () => groupEditorDeleteMention(this.editor.view, false)
     }
-    return { Backspace: () => remove(true), Delete: () => remove(false) }
   },
   addProseMirrorPlugins() {
     return [

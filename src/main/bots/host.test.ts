@@ -5,6 +5,7 @@ import { BotStore } from "./store"
 import { LocalBotHost, type BotRunPort } from "./host"
 import { parseCreateBot, parseSendBotMessage, parseUpdateBot } from "../../shared/bots/validation"
 import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
+import { botContinuationMessageId } from "./continuation"
 
 const databases: NativeSqliteAdapter[] = []
 const hosts: LocalBotHost[] = []
@@ -25,6 +26,206 @@ afterEach(async () => {
 })
 
 describe("Bot control state", () => {
+  it("retains verified peer outputs across a private turn and sends one original reply", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input),
+      other = db.create(input)
+    const root = db.enqueue({ botId: a.id, requestId: "peer-root", message: "Prepare report" })
+    db.transition(root.id, "running")
+    const peer = db.delegate(root.id, b.id, "Write once", "report")
+    const files = [{ filePath: "/workspace/report.md", name: "report.md", size: 12 }]
+    db.transition(peer.id, "running")
+    db.deferTask(peer.id, "saved", files)
+    const alias = botContinuationMessageId(peer.id, "saved")
+    expect(db.messageOrigins(b.id, [alias])).toEqual([
+      { id: peer.id, requestId: alias, origin: peer.origin, state: "queued" }
+    ])
+    expect(db.messageOrigins(other.id, [alias])).toEqual([])
+    const direct = db.enqueue({
+      botId: b.id,
+      requestId: "peer-private",
+      message: "Private correction"
+    })
+    expect(db.nextQueued([])?.id).toBe(direct.id)
+    db.transition(direct.id, "running")
+    db.settle(direct.id, "completed", null, "43")
+    expect(db.continuationFiles(peer.id)).toEqual(files)
+    db.transition(peer.id, "running")
+    db.settle(peer.id, "completed", null, "Report complete", db.continuationFiles(peer.id))
+    db.flushReplies()
+    db.flushReplies()
+    const replies = db.recentTasks().filter((t) => t.requestId === `reply-${peer.id}`)
+    expect(replies).toHaveLength(1)
+    expect(replies[0]).toMatchObject({ botId: a.id, origin: { replyFiles: files } })
+    expect(replies[0].message).not.toContain("Private correction")
+    expect(db.taskCheckpoint(peer.id)).toBeUndefined()
+    expect(db.continuationFiles(peer.id)).toEqual([])
+    expect(db.messageOrigins(b.id, [alias])[0].state).toBe("completed")
+  })
+  it("rejects malformed continuation files and never relabels an exact user receipt as background work", () => {
+    const db = store(),
+      bot = db.create(input)
+    const routine = db.enqueue(
+      { botId: bot.id, requestId: "routine-root", message: "Check" },
+      { kind: "schedule", scheduleId: "routine" }
+    )
+    db.transition(routine.id, "running")
+    const file = { filePath: "/workspace/data", name: "data", size: 1 }
+    expect(() => db.deferTask(routine.id, "saved", Array(9).fill(file))).toThrow("文件引用")
+    expect(db.getTask(routine.id).state).toBe("running")
+    db.deferTask(routine.id, "saved", [file])
+    const alias = botContinuationMessageId(routine.id, "saved")
+    expect(db.messageOrigins(bot.id, [alias])[0].origin.kind).toBe("schedule")
+    // Legacy/direct Store calls still cannot turn a real user receipt into routine provenance.
+    db.enqueue({ botId: bot.id, requestId: alias, message: "Literal user input" })
+    expect(db.messageOrigins(bot.id, [alias])).toEqual([])
+    expect(
+      db.messageOrigins(bot.id, [botContinuationMessageId("missing", "saved"), "malformed"])
+    ).toEqual([])
+    databases
+      .at(-1)!
+      .run("UPDATE bot_tasks SET continuation_files_json='{}' WHERE id=?", [routine.id])
+    expect(() => db.continuationFiles(routine.id)).toThrow("已损坏")
+    db.settle(routine.id, "cancelled", null)
+    expect(db.continuationFiles(routine.id)).toEqual([])
+  })
+  it("settles a deferred group peer reply after restart without replay or a second receipt", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input)
+    const group = db.saveGroup({ name: "Group receipt", memberIds: [a.id, b.id] })
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "group-receipt-root",
+      text: "Review",
+      targetBotIds: [a.id]
+    })
+    const root = db.recentTasks()[0]
+    db.transition(root.id, "running")
+    const peer = db.delegate(root.id, b.id, "Verify", "verify")
+    db.transition(peer.id, "running")
+    db.settle(peer.id, "completed", null, "Verified")
+    db.flushReplies()
+    const receipt = db.recentTasks().find((t) => t.requestId === `reply-${peer.id}`)!
+    db.settle(root.id, "completed", null, "Root done")
+    db.transition(receipt.id, "running")
+    db.deferTask(receipt.id, "saved")
+    db.recover()
+    db.recover()
+    expect(db.getTask(receipt.id).state).toBe("interrupted")
+    expect(db.nextQueued([])).toBeNull()
+    expect(db.groupMessages(group.id).filter((m) => m.id === `result-${receipt.id}`)).toHaveLength(
+      1
+    )
+    expect(db.messageOrigins(a.id, [botContinuationMessageId(receipt.id, "saved")])).toEqual([])
+    expect(
+      db.messageOrigins(a.id, [botContinuationMessageId(receipt.id, "saved")], group.id)[0].state
+    ).toBe("interrupted")
+  })
+  it("closes a deferred private peer task once after recovery without replaying its files", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input)
+    const root = db.enqueue({ botId: a.id, requestId: "recover-root", message: "Review" })
+    db.transition(root.id, "running")
+    const peer = db.delegate(root.id, b.id, "Verify", "verify")
+    db.settle(root.id, "completed", null, "Waiting asynchronously")
+    db.transition(peer.id, "running")
+    db.deferTask(peer.id, "saved", [{ filePath: "/workspace/file", name: "file", size: 1 }])
+    db.recover()
+    db.recover()
+    expect(db.getTask(peer.id).state).toBe("interrupted")
+    expect(db.taskCheckpoint(peer.id)).toBeUndefined()
+    db.flushReplies()
+    db.flushReplies()
+    const replies = db.recentTasks().filter((t) => t.requestId === `reply-${peer.id}`)
+    expect(replies).toHaveLength(1)
+    expect(replies[0].origin).not.toHaveProperty("replyFiles", expect.anything())
+    expect(replies[0].message).not.toContain("/workspace/file")
+  })
+  it("cancels a deferred group task once without consuming its queued private message", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input)
+    const group = db.saveGroup({ name: "Cancel pause", memberIds: [a.id, b.id] })
+    const host = new LocalBotHost(db, { acquire: () => null, onAvailable: () => () => {} })
+    hosts.push(host)
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "cancel-pause",
+      text: "Group",
+      targetBotIds: [a.id]
+    })
+    const original = db.recentTasks()[0]
+    db.transition(original.id, "running")
+    db.deferTask(original.id, "checkpoint")
+    const direct = db.enqueue({
+      botId: a.id,
+      requestId: "private-after-cancel",
+      message: "Private"
+    })
+    host.cancel(original.id)
+    host.cancel(original.id)
+    expect(db.getTask(original.id).state).toBe("cancelled")
+    expect(db.taskCheckpoint(original.id)).toBeUndefined()
+    expect(db.nextQueued([])?.id).toBe(direct.id)
+    expect(db.groupMessages(group.id).filter((m) => m.authorBotId === a.id)).toHaveLength(1)
+  })
+  it("keeps a yielded group task's identity, prioritizes private input and settles one group result", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input)
+    const group = db.saveGroup({ name: "Model pause", memberIds: [a.id, b.id] })
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "group-pause",
+      text: "Write once",
+      targetBotIds: [a.id]
+    })
+    const original = db.recentTasks()[0]
+    expect(db.taskCheckpoint(original.id)).toBeUndefined()
+    db.transition(original.id, "running")
+    db.deferTask(original.id, "checkpoint")
+    const direct = db.enqueue({ botId: a.id, requestId: "private-priority", message: "Private" })
+    expect(db.nextQueued([])?.id).toBe(direct.id)
+    db.transition(direct.id, "running")
+    expect(db.nextQueued([])).toBeNull()
+    db.settle(direct.id, "completed", null, "Private reply")
+    expect(db.nextQueued([])?.id).toBe(original.id)
+    expect(db.taskCheckpoint(original.id)).toBe("checkpoint")
+    db.transition(original.id, "running")
+    db.settle(original.id, "completed", null, "Group result")
+    expect(db.taskCheckpoint(original.id)).toBeUndefined()
+    expect(db.getTask(original.id)).toMatchObject({ ...original, state: "completed" })
+    expect(db.groupMessages(group.id).filter((m) => m.authorBotId === a.id)).toHaveLength(1)
+    expect(db.recentTasks()).toHaveLength(2)
+    expect(() => db.deferTask(direct.id, "bad")).toThrow()
+    expect(() => db.deferTask(original.id, "late")).toThrow()
+  })
+
+  it("does not replay a yielded group checkpoint after process recovery", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input)
+    const group = db.saveGroup({ name: "Recover pause", memberIds: [a.id, b.id] })
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "recover-pause",
+      text: "Group",
+      targetBotIds: [a.id]
+    })
+    const original = db.recentTasks()[0]
+    db.transition(original.id, "running")
+    db.deferTask(original.id, "saved-checkpoint")
+    const direct = db.enqueue({ botId: a.id, requestId: "recover-private", message: "Private" })
+    db.recover()
+    expect(db.getTask(original.id).state).toBe("interrupted")
+    expect(db.taskCheckpoint(original.id)).toBeUndefined()
+    expect(db.nextQueued([])?.id).toBe(direct.id)
+    db.recover()
+    expect(db.groupMessages(group.id).filter((m) => m.authorBotId === a.id)).toHaveLength(1)
+  })
   it("reports only actual profile field changes without changing the stored definition shape", () => {
     const db = store(),
       bot = db.create(input),
@@ -279,6 +480,66 @@ describe("Bot control state", () => {
     expect(db.getTask(groupTask.id).state).toBe("queued")
     expect(db.getTask(peerTask.id).state).toBe("queued")
     expect(cancelBackground.mock.calls).toEqual([[a.threadId]])
+  })
+  it("withdraws only a paused source's exact foreground command after its real stop receipt", async () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input)
+    let release!: () => void
+    const cancelCommands = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve
+        })
+    )
+    const host = new LocalBotHost(db, {
+      acquire: () => null,
+      onAvailable: () => () => {},
+      cancelCommands
+    })
+    hosts.push(host)
+    const root = db.enqueue({ botId: a.id, requestId: "cancel-root", message: "Delegate once" })
+    db.transition(root.id, "running")
+    const peer = db.delegate(root.id, b.id, "Command", "foreground")
+    db.settle(root.id, "completed", null, "Assigned")
+    db.transition(peer.id, "running")
+    db.acceptCommand(
+      peer.id,
+      {
+        id: "owned-command",
+        threadId: b.threadId,
+        command: "node job",
+        cwd: "/test",
+        startedAt: 1
+      },
+      true
+    )
+    db.deferTask(peer.id, "saved")
+    const direct = db.enqueue({ botId: b.id, requestId: "new-private", message: "Private" })
+    host.cancel(peer.id)
+    host.cancel(peer.id)
+    await vi.waitFor(() => expect(cancelCommands).toHaveBeenCalledOnce())
+    expect(db.getTask(peer.id).state).toBe("queued")
+    expect(db.getTask(direct.id).state).toBe("queued")
+    expect(cancelCommands.mock.calls).toEqual([[b.threadId, ["owned-command"]]])
+    db.settleCommand({
+      id: "owned-command",
+      threadId: b.threadId,
+      output: "Stopped",
+      exitCode: 130,
+      cancelled: true,
+      truncated: false
+    })
+    expect(db.getTask(peer.id).state).toBe("queued")
+    release()
+    await vi.waitFor(() => expect(db.getTask(peer.id).state).toBe("cancelled"))
+    db.flushReplies()
+    const reply = db.recentTasks().find((task) => task.requestId === `reply-${peer.id}`)!
+    expect(reply.message).toContain("以下命令已实际启动")
+    expect(reply.message).toContain('"state":"cancelled"')
+    expect(reply.message).not.toContain("Private")
+    expect(db.activities().find((activity) => activity.id === b.id)?.preview).toBe("已停止")
+    expect(db.recentTasks().filter((t) => t.origin.kind === "notification")).toEqual([])
   })
   it("stops detached work even after its launching inbox task completed", () => {
     const db = store(),
@@ -958,6 +1219,87 @@ describe("Bot control state", () => {
     expect(db.nextQueued([])).toBeNull()
   })
 
+  it("deduplicates a workflow instance but accepts a resumed instance with the same run id", async () => {
+    const db = store(),
+      host = new LocalBotHost(db, { acquire: () => null, onAvailable: () => () => {} })
+    hosts.push(host)
+    const bot = host.create(input)
+    const firstAt = "2026-10-18T13:00:00.000Z"
+    const resumedAt = "2026-10-18T13:01:00.000Z"
+    host.enqueueNotification(
+      bot.id,
+      bot.threadId,
+      "workflow",
+      "wf_same",
+      "Internal",
+      undefined,
+      firstAt
+    )
+    const first = db.recentTasks()[0]
+    host.cancel(first.id)
+    host.enqueueNotification(
+      bot.id,
+      bot.threadId,
+      "workflow",
+      "wf_same",
+      "Internal",
+      undefined,
+      firstAt
+    )
+    expect(db.recentTasks()).toHaveLength(1)
+    host.enqueueNotification(
+      bot.id,
+      bot.threadId,
+      "workflow",
+      "wf_same",
+      "Internal",
+      undefined,
+      resumedAt
+    )
+    const next = db.nextQueued([])!
+    expect(next.id).not.toBe(first.id)
+    expect(next.origin).toMatchObject({
+      kind: "notification",
+      key: "wf_same",
+      runStartedAt: resumedAt
+    })
+    expect(db.getTask(first.id).state).toBe("cancelled")
+  })
+
+  it("does not revive a stopped legacy receipt when instance identities are introduced", async () => {
+    const db = store(),
+      host = new LocalBotHost(db, { acquire: () => null, onAvailable: () => () => {} })
+    hosts.push(host)
+    const bot = host.create(input)
+    host.enqueueNotification(bot.id, bot.threadId, "workflow", "wf_legacy", "Internal")
+    const legacy = db.recentTasks()[0]
+    host.cancel(legacy.id)
+    host.enqueueNotification(
+      bot.id,
+      bot.threadId,
+      "workflow",
+      "wf_legacy",
+      "Internal",
+      undefined,
+      new Date(500).toISOString()
+    )
+    expect(db.recentTasks()).toHaveLength(1)
+    expect(db.nextQueued([])).toBeNull()
+    // A later explicitly retried instance remains eligible; the old Stop is unchanged.
+    host.enqueueNotification(
+      bot.id,
+      bot.threadId,
+      "workflow",
+      "wf_legacy",
+      "Internal",
+      undefined,
+      new Date(2000).toISOString()
+    )
+    expect(db.recentTasks()).toHaveLength(2)
+    expect(db.getTask(legacy.id).state).toBe("cancelled")
+    expect(db.nextQueued([])?.origin).toMatchObject({ runStartedAt: new Date(2000).toISOString() })
+  })
+
   it("publishes completion only after durable settlement and does not poison the queue if notification fails", async () => {
     const db = store(),
       reported = vi.fn()
@@ -1374,6 +1716,206 @@ describe("Bot control state", () => {
 })
 
 describe("Bot host scheduling", () => {
+  it("dispatches a withdrawn continuation's receipt while the independent private turn remains waiting", async () => {
+    const db = store(),
+      sender = db.create(input),
+      worker = db.create(input)
+    const root = db.enqueue({ botId: sender.id, requestId: "withdraw-root", message: "Delegate" })
+    db.transition(root.id, "running")
+    const background = db.delegate(root.id, worker.id, "Wait for a decision", "withdraw-child")
+    db.settle(root.id, "completed", null, "Dispatched")
+    let yieldBackground!: () => void
+    let finishPrivate!: () => void
+    const files = [{ filePath: "/workspace/partial.json", name: "partial.json", size: 44 }]
+    const acquired: string[] = []
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      acquire: (_bot, task) => ({
+        release() {},
+        yieldToUser: (pending) => {
+          if (pending()) yieldBackground()
+        },
+        execute: async (signal, waiting) => {
+          acquired.push(task.id)
+          host.onSteeringReady(task.id)
+          if (task.id === background.id) {
+            await new Promise<void>((resolve) => {
+              yieldBackground = resolve
+            })
+            return { state: "deferred", checkpointId: "saved", files }
+          }
+          if (task.origin.kind === "user") {
+            waiting(true)
+            await new Promise<void>((resolve) => {
+              finishPrivate = () => {
+                signal.removeEventListener("abort", finishPrivate)
+                resolve()
+              }
+              signal.addEventListener("abort", finishPrivate, { once: true })
+            })
+            waiting(false)
+          }
+          return { state: "completed", result: "Finished" }
+        }
+      })
+    }
+    const host = new LocalBotHost(db, runtime, 2)
+    hosts.push(host)
+    await vi.waitFor(() => expect(yieldBackground).toBeDefined())
+    const direct = host.send({
+      botId: worker.id,
+      requestId: "withdraw-private",
+      message: "Private choice"
+    })
+    await vi.waitFor(() => expect(db.getTask(direct.id).state).toBe("waiting_user"))
+    expect(db.taskCheckpoint(background.id)).toBe("saved")
+    host.cancel(background.id)
+    host.cancel(background.id)
+    await vi.waitFor(() =>
+      expect(
+        db.recentTasks().find((task) => task.requestId === `reply-${background.id}`)?.state
+      ).toBe("completed")
+    )
+    expect(db.getTask(direct.id).state).toBe("waiting_user")
+    expect(db.getTask(background.id).state).toBe("cancelled")
+    expect(db.continuationFiles(background.id)).toEqual([])
+    const replies = db.recentTasks().filter((task) => task.requestId === `reply-${background.id}`)
+    expect(replies).toHaveLength(1)
+    expect(replies[0].message).not.toContain(files[0].filePath)
+    expect(acquired).toEqual([background.id, direct.id, replies[0].id])
+    finishPrivate()
+  })
+  it("still yields for an earlier private message when the newest queued message is cancelled", async () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input)
+    const group = db.saveGroup({ name: "Private cancellation", memberIds: [a.id, b.id] })
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "group-pending",
+      text: "Group",
+      targetBotIds: [a.id]
+    })
+    let pendingUser: (() => boolean) | undefined
+    let finish!: () => void
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      acquire: (_bot, task) => ({
+        yieldToUser: (pending) => {
+          pendingUser = pending
+        },
+        execute: async () => {
+          if (task.origin.kind === "discussion") return { state: "completed", result: "(pass)" }
+          host.onSteeringReady(db.recentTasks().find((t) => t.origin.kind === "group")!.id)
+          await new Promise<void>((resolve) => {
+            finish = resolve
+          })
+          return { state: "completed" }
+        },
+        release: () => undefined
+      })
+    }
+    const host = new LocalBotHost(db, runtime, 1)
+    hosts.push(host)
+    await vi.waitFor(() => expect(finish).toBeDefined())
+    const first = host.send({ botId: a.id, requestId: "earlier-user", message: "First" })
+    const last = host.send({ botId: a.id, requestId: "newest-user", message: "Last" })
+    host.cancel(last.id)
+    expect(pendingUser?.()).toBe(true)
+    host.cancel(first.id)
+    expect(pendingUser?.()).toBe(false)
+    finish()
+  })
+  it.each(["group", "bot", "schedule", "command"] as const)(
+    "yields %s at a model boundary, runs private input, then resumes the same task after lease release",
+    async (kind) => {
+      const db = store(),
+        a = db.create(input),
+        b = db.create(input)
+      const group = db.saveGroup({ name: "Priority", memberIds: [a.id, b.id] })
+      if (kind === "group")
+        db.sendGroup({
+          groupId: group.id,
+          requestId: "host-pause",
+          text: "Group",
+          targetBotIds: [a.id]
+        })
+      else if (kind === "bot") {
+        const root = db.enqueue({ botId: b.id, requestId: "host-root", message: "Delegate" })
+        db.transition(root.id, "running")
+        db.delegate(root.id, a.id, "Background", "host-pause")
+        db.settle(root.id, "completed", null, "Sent")
+      } else
+        db.enqueue(
+          { botId: a.id, requestId: "host-pause", message: "Background result" },
+          kind === "command"
+            ? { kind: "notification", notificationKind: "command", key: "command" }
+            : { kind: "schedule", scheduleId: "routine" }
+        )
+      const original = db.recentTasks().find((t) => t.botId === a.id)!
+      const files = [{ filePath: "/workspace/report.md", name: "report.md", size: 12 }]
+      const order: string[] = []
+      let finishGroup!: () => void
+      let busy = 0
+      const runtime: BotRunPort = {
+        onAvailable: () => () => {},
+        acquire: (_bot, task) => {
+          expect(busy).toBe(0)
+          busy++
+          return {
+            yieldToUser: (pending) => {
+              if (pending()) finishGroup()
+            },
+            execute: async () => {
+              if (task.origin.kind === "discussion") return { state: "completed", result: "(pass)" }
+              const checkpoint = db.taskCheckpoint(task.id)
+              order.push(
+                task.origin.kind === "user" ? "private" : checkpoint ? "resume" : "background"
+              )
+              host.onSteeringReady(task.id)
+              if (task.id === original.id && !checkpoint) {
+                await new Promise<void>((resolve) => {
+                  finishGroup = resolve
+                })
+                return { state: "deferred", checkpointId: "checkpoint", files }
+              }
+              if (task.id === original.id) expect(db.continuationFiles(task.id)).toEqual(files)
+              return {
+                state: "completed",
+                result: task.origin.kind === "user" ? "Private reply" : "Group reply"
+              }
+            },
+            release: () => {
+              busy--
+              order.push("release")
+            }
+          }
+        }
+      }
+      const host = new LocalBotHost(db, runtime, 1)
+      hosts.push(host)
+      await vi.waitFor(() => expect(order).toEqual(["background"]))
+      const direct = host.send({ botId: a.id, requestId: "host-private", message: "Private" })
+      await vi.waitFor(() => expect(db.getTask(original.id).state).toBe("completed"))
+      expect(db.getTask(direct.id).state).toBe("completed")
+      expect(order.slice(0, 6)).toEqual([
+        "background",
+        "release",
+        "private",
+        "release",
+        "resume",
+        "release"
+      ])
+      expect(db.recentTasks().filter((t) => t.id === original.id)).toHaveLength(1)
+      if (kind === "group")
+        expect(
+          db
+            .groupMessages(group.id)
+            .filter((m) => m.authorBotId === a.id)
+            .map((m) => m.text)
+        ).toEqual(["Group reply"])
+    }
+  )
   it("keeps peer handoffs and their receipts inside the group, including deduplication and member removal", () => {
     const db = store(),
       a = db.create(input),

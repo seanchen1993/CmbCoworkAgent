@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   botQuestionHistory,
+  isMainBotQuestionCall,
   pendingBotQuestionCallId,
   stoppedBotQuestionHistory
 } from "./bot-question-history"
@@ -125,6 +126,23 @@ describe("Bot pending question ownership", () => {
     tool_calls: [{ ...tool, id: callId }]
   })
 
+  it("reserves composer replies for one proven main question, retaining child and ambiguous forms", () => {
+    const call = message("main", "question")
+    expect(isMainBotQuestionCall([call], "question")).toBe(true)
+    expect(isMainBotQuestionCall([call], null)).toBe(false)
+    expect(isMainBotQuestionCall([call], "missing")).toBe(false)
+    expect(isMainBotQuestionCall([{ ...call, subagent_tool_call_id: "child" }], "question")).toBe(
+      false
+    )
+    expect(isMainBotQuestionCall([call, { ...call, id: "duplicate" }], "question")).toBe(false)
+    expect(
+      isMainBotQuestionCall(
+        [call, { ...call, id: "child", subagent_tool_call_id: "child" }],
+        "question"
+      )
+    ).toBe(false)
+  })
+
   it("matches the latest loaded call despite runtime free-form option filtering", () => {
     expect(
       pendingBotQuestionCallId([message("older", "old"), message("latest", "new")], request)
@@ -160,6 +178,29 @@ describe("Bot pending question ownership", () => {
 })
 
 describe("Bot settled question history", () => {
+  it("retains only the choices actually offered by the original tool for ignored history", () => {
+    const history = botQuestionHistory(tool, receipt("ignored"))
+    expect(history?.questions[0]).toMatchObject({
+      options: question.options.slice(1)
+    })
+    expect(history?.questions[0].answer).toBeUndefined()
+  })
+
+  it("keeps old or invalid option metadata compact without inventing choices", () => {
+    for (const options of [
+      undefined,
+      "unknown",
+      [{ label: "Broken", description: 42 }],
+      Array(6).fill({ label: "Too many", description: "" })
+    ]) {
+      const history = botQuestionHistory(
+        { ...tool, args: { questions: [{ ...question, options }] } },
+        receipt("ignored")
+      )
+      expect(history?.questions[0]).toEqual({ id: question.id, question: question.question })
+    }
+  })
+
   it("reuses the original exact cancellation receipt without treating it as an answer", () => {
     const content = `Tool call ${tool.name} with id ${tool.id} was cancelled - another message came in before it could be completed.`
     expect(botQuestionHistory(tool, { content })).toEqual({

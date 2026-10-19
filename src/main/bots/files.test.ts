@@ -15,6 +15,23 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 describe("Bot files", () => {
+  it("accepts an absolute native workspace alias while keeping relative IDs and realpath boundaries strict", async () => {
+    const root = await fixture(),
+      workspace = join(root, "workspace"),
+      alias = join(root, "old-workspace")
+    await mkdir(workspace)
+    await symlink(workspace, alias, process.platform === "win32" ? "junction" : "dir")
+    await writeFile(join(workspace, "report.txt"), "original")
+    expect(
+      await resolveBotWorkspaceFile(workspace, join(alias, "report.txt"), { allowAbsolute: true })
+    ).toBe(await resolveBotWorkspaceFile(workspace, "report.txt"))
+    await expect(resolveBotWorkspaceFile(workspace, join(alias, "report.txt"))).rejects.toThrow()
+    await writeFile(join(root, "private.txt"), "unrelated")
+    await symlink(join(root, "private.txt"), join(workspace, "escape.txt"))
+    await expect(
+      resolveBotWorkspaceFile(workspace, join(alias, "escape.txt"), { allowAbsolute: true })
+    ).rejects.toThrow()
+  })
   it("accepts native Runtime paths only within the current workspace, without widening UI file IDs", async () => {
     const root = await fixture(),
       workspace = join(root, "workspace")
@@ -78,9 +95,9 @@ describe("Bot files", () => {
     const payload = new TextEncoder().encode('{"case":"drop"}').buffer
     await copyBotFileBytes(target, payload)
     expect(await readFile(target, "utf8")).toBe('{"case":"drop"}')
-    await expect(copyBotFileBytes(join(root, "bad.json"), new ArrayBuffer(5 * 1024 * 1024 + 1))).rejects.toThrow(
-      "5 MiB"
-    )
+    await expect(
+      copyBotFileBytes(join(root, "bad.json"), new ArrayBuffer(5 * 1024 * 1024 + 1))
+    ).rejects.toThrow("5 MiB")
     expect((await readdir(root)).some((name) => name.endsWith(".part"))).toBe(false)
   })
   it("rejects a substituted import directory and leaves existing destinations unchanged on read failure", async () => {

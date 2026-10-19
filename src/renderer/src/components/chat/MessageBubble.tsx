@@ -1249,6 +1249,14 @@ function MessageBubbleImpl({
                   <ModCards key={toolId} threadId={threadId} callId={resolvedToolCall.id ?? ""} />
                 )
 
+              // Bot chat has explicit product cards above; unknown tool families
+              // must never fall back to the developer transcript UI. Full details
+              // remain available through the existing execution-process toggle.
+              if (presentation === "bot" && !showExecutionDetails)
+                return (
+                  <ModCards key={toolId} threadId={threadId} callId={resolvedToolCall.id ?? ""} />
+                )
+
               // 工具执行完成后，显示折叠的标题
               return (
                 <div

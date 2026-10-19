@@ -3,12 +3,66 @@ import { DatabaseSync } from "node:sqlite"
 import { NativeSqliteAdapter } from "../../../main/db/native-sqlite-adapter"
 import { BotStore } from "../../../main/bots/store"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { BotDraftSender } from "./bot-draft-sender"
+import { BotDraftSender, queueBotChatDraft } from "./bot-draft-sender"
 import { getQueuedModelContent } from "./queued-message-content"
 import { BOT_REQUEST_RECEIPT_RETENTION_MS, type BotTask } from "../../../shared/bots/contracts"
 import type { QueuedMessage } from "../types"
 
 afterEach(() => vi.unstubAllGlobals())
+
+describe("new-chat queue ownership", () => {
+  function queue(error: string | null = null) {
+    vi.stubGlobal("crypto", webcrypto)
+    let queued: QueuedMessage | undefined
+    return {
+      get: () => queued,
+      addQueuedMessage: vi.fn<Parameters<typeof queueBotChatDraft>[0]["addQueuedMessage"]>(
+        (draft, persist) => {
+          queued = draft
+          persist?.(error)
+        }
+      ),
+      deleteQueuedMessage: vi.fn<Parameters<typeof queueBotChatDraft>[0]["deleteQueuedMessage"]>(
+        () => {
+          queued = undefined
+        }
+      )
+    }
+  }
+  it("persists only the new text and retained attachment without reading or clearing the target draft", () => {
+    const q = queue()
+    const attachment = {
+      filename: "核验.csv",
+      filePath: "shared/a/核验.csv",
+      content: "amount\n43",
+      mimeType: "text/csv",
+      size: 9,
+      truncated: false
+    }
+    const draft = queueBotChatDraft(q, " 核对附件 ", [attachment])
+    expect(q.get()).toBe(draft)
+    expect(draft.text).toBe("核对附件")
+    expect(getQueuedModelContent(draft, "bot")).toContain('path="shared/a/核验.csv"')
+    expect(getQueuedModelContent(draft, "bot")).toContain("amount\n43")
+    expect(draft.botReplyTo).toBeUndefined()
+    expect(q.deleteQueuedMessage).not.toHaveBeenCalled()
+  })
+  it("rolls back the newly queued item when persistence fails", () => {
+    const q = queue("storage full")
+    expect(() => queueBotChatDraft(q, "只发送本条", [])).toThrow("storage full")
+    expect(q.get()).toBeUndefined()
+    expect(q.deleteQueuedMessage).toHaveBeenCalledExactlyOnceWith(expect.any(String))
+  })
+  it.each(["", " ", "x".repeat(64_001), "bad\0input"])(
+    "rejects invalid new content before persisting: %#",
+    (text) => {
+      const q = queue()
+      expect(() => queueBotChatDraft(q, text, [])).toThrow("超出发送限制")
+      expect(q.addQueuedMessage).not.toHaveBeenCalled()
+    }
+  )
+})
+
 function fixture() {
   vi.stubGlobal("crypto", webcrypto)
   const date = new Date(1000)

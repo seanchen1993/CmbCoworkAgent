@@ -5,6 +5,7 @@ import { projectVisibleChatSearchContent } from "../../../shared/chat-search-vis
 import { projectMarkdownVisibleText } from "../../../shared/markdown-visible-text"
 import type { ThreadStateSummary } from "./thread-context"
 import { BOT_REPLY_FILES_PREFIX } from "../../../shared/bots/file-delivery"
+import { stripSkillUseBlockForDisplay } from "../../../shared/skill-use-block"
 
 /** Background work outlives the launching Bot turn; reuse the Runtime's sidebar summary. */
 export function botConversationState(
@@ -44,6 +45,7 @@ export function botTaskPreview(task: BotTask): string {
   if (task.origin.kind === "user" && task.origin.replyTo)
     text = parseBotMessageReply(text)?.message ?? text
   if (task.origin.kind === "user") {
+    text = stripSkillUseBlockForDisplay(text)?.rest ?? text
     // Snapshots are bounded before reaching the UI: their final attachment may be partial.
     const opening = text.lastIndexOf("<attachment ")
     if (opening > text.lastIndexOf("</attachment>")) {

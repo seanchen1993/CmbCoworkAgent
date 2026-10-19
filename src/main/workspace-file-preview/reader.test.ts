@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { dirname, join, posix } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, describe, expect, it } from "vitest"
@@ -108,6 +108,30 @@ describe("workspace file preview reader", () => {
 
     expect(page.result.content).toBe("inside")
     expect(page.resolvedPath).toBe(await realpath(filePath))
+  })
+
+  it("reads a historical absolute directory alias only when it resolves inside the same workspace", async () => {
+    const filePath = await tempFile("report.txt", "original artifact")
+    const alias = join(dirname(await tempFile("placeholder.txt", "")), "old-workspace")
+    await symlink(dirname(filePath), alias, process.platform === "win32" ? "junction" : "dir")
+    const page = await readPreviewTextPage(
+      workspaceSource(join(alias, "report.txt"), "absolute"),
+      dirname(filePath),
+      0,
+      cancellation()
+    )
+    expect(page.result.content).toBe("original artifact")
+    expect(page.resolvedPath).toBe(await realpath(filePath))
+    const outside = await tempFile("private.txt", "unrelated data")
+    await symlink(outside, join(dirname(filePath), "escape.txt"))
+    await expect(
+      readPreviewTextPage(
+        workspaceSource(join(alias, "escape.txt"), "absolute"),
+        dirname(filePath),
+        0,
+        cancellation()
+      )
+    ).rejects.toThrow("Access denied")
   })
 
   it("rejects an absolute renderer candidate outside the authoritative workspace", async () => {

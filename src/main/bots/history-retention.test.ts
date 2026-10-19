@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
+import { botContinuationMessageId } from "./continuation"
 
 const DAY = 86400000
 const databases: NativeSqliteAdapter[] = []
@@ -99,6 +100,11 @@ describe("Bot control history retention", () => {
       { id: task.id, requestId: task.requestId, origin: task.origin, state: "completed" }
     ])
     expect(f.reopen().messageOrigins(f.peer.id, [task.requestId])).toEqual([])
+    const continuation = botContinuationMessageId(task.id, "saved")
+    expect(f.reopen().messageOrigins(f.bot.id, [continuation])).toEqual([
+      { id: task.id, requestId: continuation, origin: task.origin, state: "completed" }
+    ])
+    expect(f.reopen().messageOrigins(f.peer.id, [continuation])).toEqual([])
   })
   it("keeps exchange references and provenance after task pruning without duplicating durable messages", () => {
     const f = fixture()
@@ -143,6 +149,11 @@ describe("Bot control history retention", () => {
       { id: dispatch.id, origin: { kind: "bot", fromBotId: f.bot.id, expectsReply: true } }
     ])
     expect(reopened.messageOrigins(f.bot.id, [dispatch.requestId])).toEqual([])
+    const continuation = botContinuationMessageId(dispatch.id, "saved")
+    expect(reopened.messageOrigins(f.peer.id, [continuation])).toMatchObject([
+      { id: dispatch.id, requestId: continuation, origin: dispatch.origin, state: "completed" }
+    ])
+    expect(reopened.messageOrigins(f.bot.id, [continuation])).toEqual([])
     expect(() =>
       reopened.enqueue({
         botId: f.peer.id,

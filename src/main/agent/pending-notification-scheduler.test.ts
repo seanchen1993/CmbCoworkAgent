@@ -186,12 +186,18 @@ afterEach(() => {
 
 describe("pending notification scheduler", () => {
   it("dispatches durable managed work without claiming or running a desktop summary", async () => {
-    const runs = pendingRuns(persistedRun({ notificationOwner: "desktop" }))
+    const run = persistedRun({ notificationOwner: "desktop" })
+    const runs = pendingRuns(run)
     const { scheduler, startRun } = createHarness({ agentMode: "workflow" })
     const dispatch = vi.fn(async () => true)
     scheduler.setManagedDispatcher(dispatch)
     expect(await scheduler.check(THREAD)).toEqual({ started: false, reason: "managed-queue" })
-    expect(dispatch).toHaveBeenCalledWith({ threadId: THREAD, kind: "workflow", key: "wf_1" })
+    expect(dispatch).toHaveBeenCalledWith({
+      threadId: THREAD,
+      kind: "workflow",
+      key: "wf_1",
+      runStartedAt: run.startedAt
+    })
     expect(startRun).not.toHaveBeenCalled()
     expect(await runs.deliverOne()).not.toBeNull()
   })

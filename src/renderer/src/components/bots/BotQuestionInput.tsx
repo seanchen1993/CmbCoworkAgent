@@ -8,6 +8,7 @@ export function BotQuestionInput({
   activeIndex,
   draft,
   complete,
+  useComposerForSingleAnswer = false,
   remainingLabel,
   onChoose,
   onAdditional,
@@ -21,6 +22,7 @@ export function BotQuestionInput({
   activeIndex: number
   draft?: UserInputDraftAnswer
   complete: boolean
+  useComposerForSingleAnswer?: boolean
   remainingLabel: string | null
   onChoose(index: number): void
   onAdditional(index: number): void
@@ -32,7 +34,9 @@ export function BotQuestionInput({
 }) {
   const question = request.questions[activeIndex]
   const titleId = `${request.requestId}-question`
-  const answered = draft?.type === "other" ? Boolean(draft.text.length) : draft !== undefined
+  const answered = draft?.type === "other" ? Boolean(draft.text.trim().length) : draft !== undefined
+  const showCustomInput =
+    request.questions.length > 1 || !useComposerForSingleAnswer || draft?.type === "other"
   return (
     <div className="bot-question-history">
       <section
@@ -108,30 +112,32 @@ export function BotQuestionInput({
             )
           })}
         </div>
-        <div className="bot-question-custom">
-          <textarea
-            rows={1}
-            aria-label="自定义回答"
-            placeholder="其他，请说明…"
-            value={draft?.type === "other" ? draft.text : ""}
-            onFocus={() => {
-              if (draft?.type !== "other") onEditCustom("")
-            }}
-            onChange={(event) => onEditCustom(event.target.value)}
-            onKeyDown={(event) => {
-              if (
-                event.key !== "Enter" ||
-                event.shiftKey ||
-                event.nativeEvent.isComposing ||
-                event.nativeEvent.keyCode === 229
-              )
-                return
-              event.preventDefault()
-              event.stopPropagation()
-              if (answered) onContinue()
-            }}
-          />
-        </div>
+        {showCustomInput && (
+          <div className="bot-question-custom">
+            <textarea
+              rows={1}
+              aria-label="自定义回答"
+              placeholder="其他，请说明…"
+              value={draft?.type === "other" ? draft.text : ""}
+              onFocus={() => {
+                if (draft?.type !== "other") onEditCustom("")
+              }}
+              onChange={(event) => onEditCustom(event.target.value)}
+              onKeyDown={(event) => {
+                if (
+                  event.key !== "Enter" ||
+                  event.shiftKey ||
+                  event.nativeEvent.isComposing ||
+                  event.nativeEvent.keyCode === 229
+                )
+                  return
+                event.preventDefault()
+                event.stopPropagation()
+                if (answered) onContinue()
+              }}
+            />
+          </div>
+        )}
         {(request.questions.length > 1 || answered) && (
           <footer>
             {request.questions.length > 1 ? (

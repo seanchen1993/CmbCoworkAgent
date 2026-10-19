@@ -8,7 +8,8 @@ import {
   existsSync,
   readFileSync,
   readdirSync,
-  truncateSync
+  truncateSync,
+  symlinkSync
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -425,9 +426,19 @@ describe("Bot browser ownership and control", () => {
     ).rejects.toThrow("不属于")
     await expect(
       service.act("group-g--a", { action: "upload", name: "Upload", fileId: secret }, signal())
-    ).rejects.toThrow("不在")
+    ).rejects.toMatchObject({ name: "BotError", code: "INVALID_INPUT" })
+    expect(context.entries.every((page) => page.setInputFiles.mock.calls.length === 0)).toBe(true)
     await service.act("group-g--a", { action: "upload", name: "Upload", fileId: shared }, signal())
     expect(context.entries[0].setInputFiles).toHaveBeenCalledWith(realpathSync(shared))
+    const groupAlias = join(directory, "old-group-g")
+    symlinkSync(group, groupAlias, process.platform === "win32" ? "junction" : "dir")
+    await service.act(
+      "group-g--b",
+      { action: "upload", name: "Upload", fileId: join(groupAlias, "shared.txt") },
+      signal()
+    )
+    expect(context.entries[1].setInputFiles).toHaveBeenCalledExactlyOnceWith(realpathSync(shared))
+    expect(context.entries[2].setInputFiles).not.toHaveBeenCalled()
     await service.removeBot("a")
     expect(context.entries[0].closed).toBe(true)
     expect(context.entries[1].closed).toBe(false)
@@ -629,6 +640,97 @@ describe("Bot browser ownership and control", () => {
       if ((await service.preview("a")).control === "human") await service.giveBack("a")
       await input
     }
+  })
+
+  it("keeps a queued peer input valid when another Bot closes its page", async () => {
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    const results = await Promise.allSettled([
+      service.act("a", { action: "close", pageId: a.pageId }, signal()),
+      service.act(
+        "b",
+        { action: "fill", pageId: b.pageId, role: "textbox", name: "Name", text: "peer input" },
+        signal()
+      )
+    ])
+    expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"])
+    expect(context.entries[1].fill).toHaveBeenCalledExactlyOnceWith("peer input")
+    expect(context.entries[1].closed).toBe(false)
+  })
+
+  it.each(["close", "remove"] as const)(
+    "keeps an in-flight peer observation valid when another Bot's page is subject to %s",
+    async (action) => {
+      await service.act("a", { action: "observe" }, signal())
+      const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+      const entered = deferred()
+      const finish = deferred()
+      context.entries[1].snapshot.mockImplementationOnce(async () => {
+        entered.resolve()
+        await finish.promise
+        return '- textbox "Peer field"'
+      })
+      const pending = service.act("b", { action: "observe", pageId: b.pageId }, signal())
+      const settled = Promise.allSettled([pending])
+      await entered.promise
+      const closing = action === "close" ? context.entries[0].close() : service.removeBot("a")
+      finish.resolve()
+      const [result] = await settled
+      await closing
+      expect(result.status).toBe("fulfilled")
+      if (result.status !== "fulfilled") throw result.reason
+      expect(JSON.parse(result.value)).toMatchObject({
+        pageId: b.pageId,
+        content: '- textbox "Peer field"'
+      })
+      expect(context.entries[0].closed).toBe(true)
+      expect(context.entries[1].closed).toBe(false)
+    }
+  )
+
+  it.each(["close", "remove"] as const)(
+    "rejects an observation whose own page is subject to %s before its result is returned",
+    async (action) => {
+      const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+      const entered = deferred()
+      const finish = deferred()
+      context.entries[0].snapshot.mockImplementationOnce(async () => {
+        entered.resolve()
+        await finish.promise
+        return '- textbox "Stale field"'
+      })
+      const pending = service.act("a", { action: "observe", pageId: a.pageId }, signal())
+      const rejected = expect(pending).rejects.toThrow()
+      await entered.promise
+      const closing = action === "close" ? context.entries[0].close() : service.removeBot("a")
+      finish.resolve()
+      await rejected
+      await closing
+      if (action === "close") expect((await service.preview("a")).pages).toEqual([])
+      else await expect(service.preview("a")).rejects.toThrow("已删除")
+      expect(context.entries).toHaveLength(1)
+    }
+  )
+
+  it("rejects a target closed while its page metadata is being read", async () => {
+    const engine = await launch()
+    launch.mockResolvedValue(engine)
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const entered = deferred()
+    const finish = deferred()
+    engine.getTitle = async () => {
+      entered.resolve()
+      await finish.promise
+      return "Closed target"
+    }
+    const pending = service.act("a", { action: "observe", pageId: a.pageId }, signal())
+    const settled = Promise.allSettled([pending])
+    await entered.promise
+    await context.entries[0].close()
+    finish.resolve()
+    const [result] = await settled
+    expect(result.status).toBe("rejected")
+    expect(context.entries).toHaveLength(1)
   })
 
   it("registers a newly created peer page before applying human-tab ownership", async () => {

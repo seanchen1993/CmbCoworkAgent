@@ -10,7 +10,12 @@ describe("Bot notification routing", () => {
       () => ({ metadata: JSON.stringify(metadata) }),
       () => ({ enqueueNotification })
     )
-    const notice = { threadId: "group-g-a", kind: "workflow" as const, key: "wf-1" }
+    const notice = {
+      threadId: "group-g-a",
+      kind: "workflow" as const,
+      key: "wf-1",
+      runStartedAt: "2026-10-18T13:00:00.000Z"
+    }
     expect(await dispatch(notice)).toBe(false)
     expect(enqueueNotification).not.toHaveBeenCalled()
     metadata = { botId: "a", botHostId: "local", botGroupId: "g" }
@@ -21,7 +26,8 @@ describe("Bot notification routing", () => {
       "workflow",
       "wf-1",
       WORKFLOW_NOTIFICATION_TURN_PROMPT,
-      "g"
+      "g",
+      notice.runStartedAt
     )
   })
   it("does not run a foreign host locally or silently bypass an unavailable Bot queue", async () => {

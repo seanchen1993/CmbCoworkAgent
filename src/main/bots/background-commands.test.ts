@@ -32,6 +32,33 @@ function fixture() {
 }
 
 describe("Bot native command receipts", () => {
+  it.each(["completed", "cancelled", "restart"] as const)(
+    "retains a yielded command receipt without re-enqueueing the command after %s",
+    (outcome) => {
+      const { store, task, command, result } = fixture()
+      store.acceptCommand(task.id, command)
+      store.transition(task.id, "completed")
+      store.settleCommand(result)
+      const notice = store.nextQueued([])!
+      store.transition(notice.id, "running")
+      store.deferTask(notice.id, "command-result-boundary")
+      const direct = store.enqueue({ botId: notice.botId, requestId: "private", message: "43?" })
+      expect(store.nextQueued([])?.id).toBe(direct.id)
+      store.transition(direct.id, "running")
+      store.settle(direct.id, "completed", null, "43")
+      if (outcome === "restart") store.recover()
+      else {
+        store.transition(notice.id, "running")
+        store.settle(notice.id, outcome, null, "Result")
+      }
+      store.settleCommand(result)
+      expect(store.getTask(notice.id).state).toBe(outcome === "restart" ? "interrupted" : outcome)
+      expect(store.taskCheckpoint(notice.id)).toBeUndefined()
+      expect(store.nextQueued([])).toBeNull()
+      expect(store.recentTasks().filter((t) => t.requestId === notice.requestId)).toHaveLength(1)
+      expect(store.activeCommandThreads()).toEqual([])
+    }
+  )
   it.each(["completed", "superseded"] as const)(
     "continues the original user's profile update after a %s model round",
     (state) => {

@@ -68,6 +68,136 @@ function fixture(accepted = vi.fn()) {
 }
 
 describe("Bot foreground command handoff", () => {
+  it("also transfers the next command in the same batch while the exact private input remains queued", async () => {
+    const first = fixture(),
+      second = fixture()
+    Reflect.set(second.sandbox, "abortSignal", first.controller.signal)
+    Reflect.set(second.sandbox, "runId", first.sandbox.runId)
+    let pending = true
+    const one = first.sandbox.execute("echo first")
+    await first.entered.promise
+    expect(LocalSandbox.yieldForegroundCommands(first.controller.signal, () => pending)).toBe(1)
+    await one
+    const two = second.sandbox.execute("echo second")
+    try {
+      await second.entered.promise
+      await vi.waitFor(() => expect(second.accepted).toHaveBeenCalledOnce(), { timeout: 200 })
+      expect((await two).output).toContain("was not restarted")
+      expect(first.signal().aborted).toBe(false)
+      expect(second.signal().aborted).toBe(false)
+    } finally {
+      pending = false
+      first.raw.resolve(result)
+      second.raw.resolve(result)
+      await two
+    }
+  })
+  it("does not transfer a later command after the queued input was consumed or withdrawn", async () => {
+    const f = fixture()
+    let pending = true
+    expect(LocalSandbox.yieldForegroundCommands(f.controller.signal, () => pending)).toBe(0)
+    pending = false
+    const running = f.sandbox.execute("echo unchanged")
+    await f.entered.promise
+    await Promise.resolve()
+    expect(f.accepted).not.toHaveBeenCalled()
+    f.raw.resolve(result)
+    expect(await running).toEqual(result)
+  })
+  it("keeps a different runtime signal out of a pending batch handoff", async () => {
+    const first = fixture(),
+      other = fixture()
+    LocalSandbox.yieldForegroundCommands(first.controller.signal, () => true)
+    const running = other.sandbox.execute("echo other-run")
+    await other.entered.promise
+    await Promise.resolve()
+    expect(other.accepted).not.toHaveBeenCalled()
+    other.raw.resolve(result)
+    expect(await running).toEqual(result)
+  })
+  it("keeps waiting when the pending-input check becomes unavailable", async () => {
+    const f = fixture(),
+      report = vi.spyOn(console, "error").mockImplementation(() => {})
+    let available = true
+    LocalSandbox.yieldForegroundCommands(f.controller.signal, () => {
+      if (!available) throw new Error("inbox unavailable")
+      return true
+    })
+    available = false
+    const running = f.sandbox.execute("echo retained")
+    await f.entered.promise
+    try {
+      await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
+      expect(f.accepted).not.toHaveBeenCalled()
+    } finally {
+      f.raw.resolve(result)
+      await running
+    }
+  })
+  it("never transfers a later command before its actual approval", async () => {
+    const f = fixture(),
+      approval = deferred<ApprovalDecision>()
+    const requestApproval = vi.fn(() => approval.promise)
+    f.sandbox.setOrchestrator(
+      new ToolOrchestrator(
+        new ApprovalStore(),
+        (command, mode, cwd) => f.sandbox.executeRaw(command, mode, undefined, undefined, { cwd }),
+        requestApproval,
+        () => false
+      )
+    )
+    LocalSandbox.yieldForegroundCommands(f.controller.signal, () => true)
+    const running = f.sandbox.execute("node handoff.js")
+    try {
+      await vi.waitFor(() => expect(requestApproval).toHaveBeenCalledOnce())
+      expect(f.execute).not.toHaveBeenCalled()
+      expect(f.accepted).not.toHaveBeenCalled()
+      approval.resolve({ type: "approve", tool_call_id: "test" })
+      await f.entered.promise
+      await vi.waitFor(() => expect(f.accepted).toHaveBeenCalledOnce())
+      expect((await running).exitCode).toBeNull()
+    } finally {
+      approval.resolve({ type: "approve", tool_call_id: "test" })
+      f.raw.resolve(result)
+      await running
+    }
+  })
+  it("can reserve only foreground handoff without enabling the explicit background lifecycle", async () => {
+    const f = fixture()
+    Reflect.set(f.sandbox, "foregroundCommandLifecycle", {
+      accepted: f.accepted,
+      settled: f.settled
+    })
+    Reflect.set(f.sandbox, "backgroundCommandLifecycle", undefined)
+    const running = f.sandbox.execute("echo source-owned")
+    await f.entered.promise
+    expect(LocalSandbox.yieldForegroundCommands(f.controller.signal)).toBe(1)
+    await running
+    f.raw.resolve(result)
+    await vi.waitFor(() => expect(f.settled).toHaveBeenCalledOnce())
+    expect(f.execute).toHaveBeenCalledOnce()
+  })
+  it("cancels only the requested transferred command, retaining another on the same thread", async () => {
+    const first = fixture(),
+      second = fixture()
+    Reflect.set(second.sandbox, "runId", first.sandbox.runId)
+    const one = first.sandbox.execute("echo first"),
+      two = second.sandbox.execute("echo second")
+    await Promise.all([first.entered.promise, second.entered.promise])
+    LocalSandbox.yieldForegroundCommands(first.controller.signal)
+    LocalSandbox.yieldForegroundCommands(second.controller.signal)
+    await Promise.all([one, two])
+    const stop = LocalSandbox.cancelBackgroundTasksAndWait(first.sandbox.runId, [
+      first.accepted.mock.calls[0][0].id
+    ])
+    expect(first.signal().aborted).toBe(true)
+    expect(second.signal().aborted).toBe(false)
+    first.raw.resolve(result)
+    await stop
+    expect(second.settled).not.toHaveBeenCalled()
+    second.raw.resolve(result)
+    await vi.waitFor(() => expect(second.settled).toHaveBeenCalledOnce())
+  })
   it("keeps one original command alive, then publishes after hooks and physical termination", async () => {
     const f = fixture(),
       termination = deferred<void>(),

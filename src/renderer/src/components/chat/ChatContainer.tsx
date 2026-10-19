@@ -28,7 +28,7 @@ import {
 } from "./chat-presentation-context"
 import { projectBotExecution } from "@/lib/bot-execution-visibility"
 import { botMessageHasEntranceBody } from "@/lib/bot-message-entrance"
-import { pendingBotQuestionCallId } from "@/lib/bot-question-history"
+import { isMainBotQuestionCall, pendingBotQuestionCallId } from "@/lib/bot-question-history"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkBreaks from "remark-breaks"
 import type { VirtuosoHandle } from "react-virtuoso"
@@ -920,6 +920,8 @@ export interface ManagedChatTurn {
   busy: boolean
   /** Detached work may be busy while the inbox can immediately handle another message. */
   busySubmitLabel?: string
+  /** Presentation hint only; the Host still validates the exact source and run lease. */
+  canReplyToQuestionsInComposer?: boolean
   placeholder: string
 }
 
@@ -3572,21 +3574,28 @@ export function ChatContainer({
     displayMessageProjection.changedMessages,
     displayMessagesStructureVersion
   )
-  const inlineQuestionCallId = useMemo(
-    () =>
+  const inlineQuestion = useMemo(() => {
+    const callId =
       surface === "bot" && canAnswerUserInput && pendingUserInput?.threadId === threadId
         ? pendingBotQuestionCallId(displayMessages, pendingUserInput)
-        : null,
-    [
-      surface,
-      canAnswerUserInput,
-      threadId,
-      pendingUserInput,
-      displayMessages,
-      displayMessagesStructureVersion,
-      toolDerivationProjection.version
-    ]
-  )
+        : null
+    return callId ? { callId, isMain: isMainBotQuestionCall(displayMessages, callId) } : null
+  }, [
+    surface,
+    canAnswerUserInput,
+    threadId,
+    pendingUserInput,
+    displayMessages,
+    displayMessagesStructureVersion,
+    toolDerivationProjection.version
+  ])
+  const inlineQuestionCallId = inlineQuestion?.callId ?? null
+  const botQuestionUsesComposer =
+    surface === "bot" &&
+    !readOnly &&
+    managedTurn?.canReplyToQuestionsInComposer === true &&
+    pendingUserInput?.questions.length === 1 &&
+    inlineQuestion?.isMain === true
   const presentInlineQuestion = useCallback(
     (tool: ToolCall, result?: Pick<ToolResult, "content" | "is_error">) =>
       !showExecutionDetails && !searchOpen && !result && tool.id === inlineQuestionCallId
@@ -5421,7 +5430,8 @@ export function ChatContainer({
   const effectiveComposerControlsDisabled =
     composerControlsDisabled || contextReminderPending || readOnly || bizRetryPending
   const inputPlaceholder = useMemo(() => {
-    if (managedTurn) return managedTurn.placeholder
+    if (managedTurn)
+      return botQuestionUsesComposer ? "输入你的回答，或聊点别的" : managedTurn.placeholder
     if (bizRetryPending) return "请在决策入口操作"
     if (resolvedReadOnlyReason) return resolvedReadOnlyReason
     if (contextReminderPending) return "请先处理上下文提醒"
@@ -5448,6 +5458,7 @@ export function ChatContainer({
     bizRetryPending,
     contextReminderPending,
     managedTurn,
+    botQuestionUsesComposer,
     goalUi.goal,
     hasPendingFilePayload,
     hasActiveGoalRunning,
@@ -8021,6 +8032,7 @@ export function ChatContainer({
           request={pendingUserInput}
           onSubmit={handleUserInputSubmit}
           presentation="bot"
+          useComposerForSingleAnswer={botQuestionUsesComposer}
         />
       )}
       {isLoading && (

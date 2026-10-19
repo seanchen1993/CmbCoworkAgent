@@ -162,13 +162,17 @@ export type BotTaskOrigin =
       kind: "notification"
       notificationKind: "workflow" | "coordinator" | "command"
       key: string
+      /** Workflow run IDs survive retry; the original instance timestamp fences its receipt. */
+      runStartedAt?: string
       groupId?: string
     }
   | { kind: "schedule"; scheduleId: string }
+  | { kind: "discussion"; groupId: string; messageId: string; round: number }
   | { kind: "group"; groupId: string; messageId: string }
 
 export function botTaskGroupId(task: Pick<BotTask, "origin">): string | undefined {
   return task.origin.kind === "group" ||
+    task.origin.kind === "discussion" ||
     task.origin.kind === "notification" ||
     task.origin.kind === "bot"
     ? task.origin.groupId

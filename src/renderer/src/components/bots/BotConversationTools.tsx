@@ -31,7 +31,7 @@ import {
 } from "../chat/chat-presentation-context"
 import { delegatedTaskReceipt } from "@/lib/bot-exchange-view"
 import { BotExchangePanel } from "./BotExchangePanel"
-import { quietBotTurnMessageIds } from "@/lib/bot-routine-visibility"
+import { mergeBotMessageOrigins, hiddenBotTaskMessageIds } from "@/lib/bot-routine-visibility"
 import { BotBrowserHelpCard } from "./BotBrowserHelpCard"
 import { BotDeliveredFile } from "./BotDeliveredFile"
 import { parseBotFileDelivery } from "../../../../shared/bots/file-delivery"
@@ -118,10 +118,7 @@ export function BotConversationTools({
       disposed = true
     }
   }, [client, botId, groupId, threadId, windowKey, context])
-  const taskByMessage = useMemo(
-    () => new Map([...origins, ...tasks].map((task) => [task.requestId, task])),
-    [tasks, origins]
-  )
+  const taskByMessage = useMemo(() => mergeBotMessageOrigins(origins, tasks), [tasks, origins])
   const replySource = useMemo(
     () =>
       groupId
@@ -164,7 +161,7 @@ export function BotConversationTools({
     }
     return {
       ...view,
-      quietMessages: quietBotTurnMessageIds(messages, taskByMessage),
+      quietMessages: hiddenBotTaskMessageIds(messages, taskByMessage),
       stoppedQuestions: showExecutionDetails
         ? new Map<string, QuestionHistory>()
         : stoppedBotQuestionHistory(messages, taskByMessage)

@@ -10,7 +10,7 @@ export function createBotNotificationDispatcher(
   readThread: (id: string) => { metadata: string | null } | null | undefined,
   getHost: () => Pick<LocalBotHost, "enqueueNotification">
 ): (notice: ManagedNotificationDispatch) => Promise<boolean> {
-  return async ({ threadId, kind, key }) => {
+  return async ({ threadId, kind, key, runStartedAt }) => {
     const thread = readThread(threadId)
     if (!thread) return false
     let metadata: Record<string, unknown>
@@ -31,7 +31,8 @@ export function createBotNotificationDispatcher(
       kind,
       key,
       kind === "workflow" ? WORKFLOW_NOTIFICATION_TURN_PROMPT : COORDINATOR_NOTIFICATION_PROMPT,
-      typeof metadata.botGroupId === "string" ? metadata.botGroupId : undefined
+      typeof metadata.botGroupId === "string" ? metadata.botGroupId : undefined,
+      runStartedAt
     )
     return true
   }

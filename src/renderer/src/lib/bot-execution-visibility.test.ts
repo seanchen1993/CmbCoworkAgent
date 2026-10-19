@@ -21,6 +21,100 @@ const result = (id: string, is_error = false, content = "done"): Message => ({
 })
 
 describe("Bot execution presentation", () => {
+  it.each([
+    [
+      "bot_deliver_files",
+      {},
+      {
+        kind: "bot-file-delivery",
+        files: [{ filePath: "/workspace/result.md", name: "result.md", size: 2 }]
+      }
+    ],
+    ["bot_delegate", {}, { taskId: "delegation-id" }],
+    ["bot_update_profile", { name: "核对助手" }, { name: "核对助手", instructions: "核对" }],
+    [
+      "bot_schedule",
+      { action: "save" },
+      {
+        id: "routine",
+        botId: "bot",
+        version: 1,
+        name: "Review",
+        message: "Review",
+        frequency: "once",
+        enabled: false,
+        nextRunAt: null,
+        timezone: "UTC",
+        runAt: "2030-01-01T00:00:00Z"
+      }
+    ],
+    [
+      "request_user_input",
+      {
+        questions: [
+          {
+            id: "choice",
+            header: "选择",
+            question: "继续吗？",
+            options: [
+              { label: "Continue", description: "继续" },
+              { label: "End", description: "结束" }
+            ]
+          }
+        ]
+      },
+      {
+        status: "submitted",
+        answers: {
+          choice: { type: "option", questionId: "choice", optionIndex: 0, label: "Continue" }
+        }
+      }
+    ]
+  ] as const)("preserves validated user-facing %s presentations", (name, args, receipt) => {
+    const message = {
+      ...call("product", name),
+      tool_calls: [{ id: "call-product", name, args }]
+    } as Message
+    const returned = result("product", false, JSON.stringify(receipt))
+    expect(isBotExecutionTool(message.tool_calls![0], { content: returned.content })).toBe(false)
+    expect(projectBotExecution([message, returned], false, new Set()).hiddenMessages.size).toBe(0)
+  })
+
+  it("folds a returned subagent task without hiding its visible reply or Mod card", () => {
+    const task = call("child", "task")
+    const reply = call("reply", "task", "核对完成，合计43。")
+    const messages = [task, result("child", false, "合计43"), reply, result("reply")]
+    const view = projectBotExecution(messages, false, new Set())
+    expect([...view.hiddenMessages]).toEqual(["child"])
+    expect(view.foldedTools.size).toBe(2)
+    expect(projectBotExecution(messages, false, new Set(["call-child"])).hiddenMessages.size).toBe(
+      0
+    )
+  })
+
+  it("folds live subagent records while preserving approvals and exceptional results", () => {
+    const task = call("child", "task")
+    expect(isBotExecutionTool(task.tool_calls![0])).toBe(true)
+    const live = new Map<string, Pick<ToolCallState, "status">>([
+      [getWorkerToolUiKey("child", "call-child", 0), { status: "running" as const }]
+    ])
+    expect(projectBotExecution([task], true, new Set(), null, live).foldedTools.size).toBe(1)
+    live.set(getWorkerToolUiKey("child", "call-child", 0), { status: "awaiting_approval" })
+    expect(projectBotExecution([task], true, new Set(), null, live).foldedTools.size).toBe(0)
+    for (const returned of [
+      result("child", true, "Child failed"),
+      result(
+        "child",
+        false,
+        "Tool call task with id call-child was cancelled - another message came in before it could be completed."
+      )
+    ]) {
+      const view = projectBotExecution([task, returned], false, new Set())
+      expect(view.hiddenMessages.size).toBe(0)
+      expect(view.foldedTools.size).toBe(0)
+    }
+  })
+
   it("folds a confirmed background launch without hiding its progress, approval or Mod card", () => {
     const receipt = JSON.stringify({
       status: "launched",
@@ -39,7 +133,7 @@ describe("Bot execution presentation", () => {
       result("progress", false, receipt)
     ]
     expect([...projectBotExecution(messages, true, new Set()).hiddenMessages]).toEqual(["launch"])
-    expect(isBotExecutionTool(launch.tool_calls![0])).toBe(false)
+    expect(isBotExecutionTool(launch.tool_calls![0])).toBe(true)
     expect(projectBotExecution([launch], true, new Set()).foldedTools.size).toBe(0)
     expect(
       projectBotExecution(messages, false, new Set(["call-launch", "call-progress"])).hiddenMessages
@@ -56,7 +150,7 @@ describe("Bot execution presentation", () => {
       expect(
         projectBotExecution([launch, result("launch", false, content)], false, new Set())
           .hiddenMessages.size
-      ).toBe(0)
+      ).toBe(1)
     }
     expect(
       projectBotExecution([launch, result("launch", true, receipt)], false, new Set())
@@ -117,26 +211,26 @@ describe("Bot execution presentation", () => {
   })
 
   it.each(["search_tool", "inspect_tool", "invoke_deferred_tool"])(
-    "preserves unknown %s receipts instead of silently folding them",
+    "keeps unknown %s receipts in execution details rather than exposing raw cards",
     (name) => {
       const message = call("unknown", name)
       const content = '{"error":"post-hook response"}'
-      expect(isBotExecutionTool(message.tool_calls![0], { content })).toBe(false)
+      expect(isBotExecutionTool(message.tool_calls![0], { content })).toBe(true)
       expect(
         projectBotExecution([message, result("unknown", false, content)], false, new Set())
           .hiddenMessages.size
-      ).toBe(0)
+      ).toBe(1)
     }
   )
 
   it.each(["custom_tool", "mcp_custom_tool", "mcp__unknown", "mcp____tool", "mcp__server__"])(
-    "keeps unrecognized tool family %s visible",
+    "folds unrecognized tool family %s by default",
     (name) => {
-      expect(isBotExecutionTool({ id: "unknown", name, args: {} })).toBe(false)
+      expect(isBotExecutionTool({ id: "unknown", name, args: {} })).toBe(true)
       expect(
         projectBotExecution([call("unknown", name), result("unknown")], false, new Set())
           .hiddenMessages.size
-      ).toBe(0)
+      ).toBe(1)
     }
   )
 
@@ -174,7 +268,18 @@ describe("Bot execution presentation", () => {
     "Y_FAILED\n[Command failed with exit code 7, elapsed: 3s]",
     'Error: No background task found with id "missing-1017Y".',
     "Task polling aborted: conversation was cancelled by user.",
-    "[Hook blocked] denied",
+    "[Hook blocked] denied"
+  ])("keeps exceptional task_output records available for the compact issue UI: %s", (content) => {
+    const view = projectBotExecution(
+      [call("output", "task_output"), result("output", false, content)],
+      true,
+      new Set()
+    )
+    expect(view.hiddenMessages.size).toBe(0)
+    expect(view.foldedTools.size).toBe(0)
+  })
+
+  it.each([
     "custom post-hook response",
     "[Command succeeded with exit code 0, elapsed: 1s]\npost-hook warning",
     JSON.stringify({ retrieval_status: "not_ready", elapsed: 2 }),
@@ -192,14 +297,14 @@ describe("Bot execution presentation", () => {
       partialOutput: { error: "denied" }
     }),
     "{broken json"
-  ])("keeps exceptional or unknown task_output records visible: %s", (content) => {
+  ])("keeps unrecognized task_output payloads out of default chat: %s", (content) => {
     const view = projectBotExecution(
       [call("output", "task_output"), result("output", false, content)],
       true,
       new Set()
     )
-    expect(view.hiddenMessages.size).toBe(0)
-    expect(view.foldedTools.size).toBe(0)
+    expect([...view.hiddenMessages]).toEqual(["output"])
+    expect(view.foldedTools.size).toBe(1)
   })
 
   it("keeps missing and explicitly failed task_output results visible", () => {
@@ -261,9 +366,16 @@ describe("Bot execution presentation", () => {
       call("answer", "read_file", "Here is the result"),
       result("answer"),
       call("files", "bot_deliver_files"),
-      result("files"),
+      result(
+        "files",
+        false,
+        JSON.stringify({
+          kind: "bot-file-delivery",
+          files: [{ filePath: "/workspace/result.md", name: "result.md", size: 2 }]
+        })
+      ),
       call("peer", "bot_delegate"),
-      result("peer"),
+      result("peer", false, '{"taskId":"delegation-id"}'),
       { id: "thought", role: "assistant", content: "<think>analysis</think>" } as Message
     ]
     const view = projectBotExecution(messages, false, new Set())
@@ -274,7 +386,7 @@ describe("Bot execution presentation", () => {
     ])
     expect(messages).toHaveLength(10)
   })
-  it("never folds pending, failed, cancelled, unknown or interactive tools", () => {
+  it("folds unknown records but keeps pending, failed, cancelled and interactive presentations", () => {
     const messages = [
       call("pending"),
       call("failed"),
@@ -300,8 +412,8 @@ describe("Bot execution presentation", () => {
       result("mod")
     ]
     const view = projectBotExecution(messages, false, new Set(["call-mod"]))
-    expect([...view.hiddenMessages]).toEqual([])
-    expect([...view.foldedTools]).toEqual([])
+    expect([...view.hiddenMessages]).toEqual(["custom"])
+    expect([...view.foldedTools]).toEqual([getWorkerToolUiKey("custom", "call-custom", 0)])
   })
   it.each([
     ["bot_request_browser_help", {}],
@@ -377,7 +489,7 @@ describe("Bot execution presentation", () => {
     states.set(getWorkerToolUiKey("failed", "call-failed", 0), { status: "failed" })
     expect([
       ...projectBotExecution(messages, true, new Set(["call-mod"]), null, states).hiddenMessages
-    ]).toEqual(["running", "queued"])
+    ]).toEqual(["running", "queued", "unknown"])
     expect(projectBotExecution(messages, false, new Set(), null, states).hiddenMessages.size).toBe(
       0
     )
@@ -424,10 +536,16 @@ describe("Bot execution presentation", () => {
     expect(committed).toHaveLength(1)
     expect(live.at(-1)?.content).toBe("")
   })
-  it("folds only valid successful routine reads, preserving changes, errors, pending and Mod UI", () => {
+  it("folds routine records, preserving validated changes, errors, pending and Mod UI", () => {
     const scheduleCall = (id: string, action: string): Message => ({
       ...call(id, "bot_schedule"),
-      tool_calls: [{ id: `call-${id}`, name: "bot_schedule", args: { action } }]
+      tool_calls: [
+        {
+          id: `call-${id}`,
+          name: "bot_schedule",
+          args: { action, ...(action === "remove" ? { id: "routine" } : {}) }
+        }
+      ]
     })
     const messages = [
       scheduleCall("list", "list"),
@@ -438,7 +556,22 @@ describe("Bot execution presentation", () => {
       scheduleCall("failed-routine", "list"),
       result("failed-routine", true, "[]"),
       scheduleCall("saved", "save"),
-      result("saved", false, "{}"),
+      result(
+        "saved",
+        false,
+        JSON.stringify({
+          id: "routine",
+          botId: "bot",
+          version: 1,
+          name: "Review",
+          message: "Review",
+          frequency: "once",
+          enabled: false,
+          nextRunAt: null,
+          timezone: "UTC",
+          runAt: "2030-01-01T00:00:00Z"
+        })
+      ),
       scheduleCall("removed", "remove"),
       result("removed", false, "例行任务已删除，排队中的触发已取消。"),
       scheduleCall("mod-routine", "list"),
@@ -446,9 +579,9 @@ describe("Bot execution presentation", () => {
     ]
     expect([
       ...projectBotExecution(messages, false, new Set(["call-mod-routine"])).hiddenMessages
-    ]).toEqual(["list"])
+    ]).toEqual(["list", "invalid-list"])
     expect([
       ...projectBotExecution(messages, true, new Set(["call-mod-routine"])).hiddenMessages
-    ]).toEqual(["list"])
+    ]).toEqual(["list", "invalid-list"])
   })
 })

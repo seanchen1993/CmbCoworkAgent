@@ -159,7 +159,6 @@ export class BotBrowserService {
     this.pages.set(entry.id, entry)
     page.on("close", () => {
       this.pages.delete(entry.id)
-      this.generation++
       if (
         this.human?.botId === botId &&
         ![...this.pages.values()].some((item) => item.botId === botId)
@@ -266,6 +265,7 @@ export class BotBrowserService {
   private check(signal: AbortSignal, generation: number, botId: string): void {
     signal.throwIfAborted()
     if (this.stopping) throw new BotError("STOPPING", "浏览器正在退出")
+    if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
     if (this.human?.botId === botId || generation !== this.generation)
       throw new BotError("CONFLICT", "浏览器控制权已改变，请等待用户归还，再重新观察页面")
   }
@@ -495,12 +495,17 @@ export class BotBrowserService {
           }),
           truncated: elements.length > 20
         }))
+        const pages = await this.pageList(botId)
         this.check(signal, generation, botId)
+        // A page closing does not revoke another Bot's control. Validate this exact
+        // target before returning its observation instead of advancing the shared lease.
+        if (page.isClosed() || this.pages.get(entry.id) !== entry)
+          throw new BotError("CONFLICT", "页面已关闭，请重新观察")
         return JSON.stringify({
           pageId: entry.id,
           url: page.url(),
           generation,
-          pages: await this.pageList(botId),
+          pages,
           downloads: entry.downloads,
           upload,
           fileInputs,
@@ -675,7 +680,6 @@ export class BotBrowserService {
   }
   async removeBot(botId: string): Promise<void> {
     this.retiredBots.add(botId)
-    this.generation++
     const belongs = (scope: string) =>
       scope === botId || (!botId.startsWith("group-") && scope.endsWith(`--${botId}`))
     if (this.human && belongs(this.human.botId)) this.human = null

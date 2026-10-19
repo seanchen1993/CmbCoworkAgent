@@ -9,9 +9,13 @@ import type { BotMemoryMaintainer } from "./memory-maintainer"
 import type { BotBrowserService } from "./browser"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
 import type { BotPeerDeliveryFiles } from "./tools"
+import type { UserInputRequest } from "../types"
+import type { LocalThreadRunLease } from "../agent/thread-run-lease"
+import { botContinuationMessageId, type BotStoppedTaskContext } from "./continuation"
 
 const fixture = vi.hoisted(() => ({
   thread: vi.fn(),
+  realpath: vi.fn(),
   create: vi.fn(),
   defaultModel: vi.fn(),
   update: vi.fn(),
@@ -19,6 +23,9 @@ const fixture = vi.hoisted(() => ({
   managedDelivery: vi.fn<(...args: unknown[]) => object>(() => ({})),
   mirror: vi.fn(),
   steer: vi.fn(),
+  activeLease: vi.fn<() => LocalThreadRunLease | undefined>(),
+  pendingQuestion: vi.fn<() => UserInputRequest | null>(),
+  answerQuestion: vi.fn(),
   steeringReady: vi.fn(),
   announce: vi.fn(),
   release: vi.fn(),
@@ -30,6 +37,11 @@ const fixture = vi.hoisted(() => ({
   cancelCommands: vi.fn(),
   commandLifecycle: vi.fn(() => ({ accepted: vi.fn(), settled: vi.fn() })),
   profileContinuation: vi.fn<() => string | null>(() => null),
+  groupCheckpoint: vi.fn<() => string | undefined>(() => undefined),
+  continuationFiles: vi.fn<() => BotDeliveredFile[]>(() => []),
+  commandResults: vi.fn<() => Record<string, unknown>[]>(() => []),
+  stoppedTasks: vi.fn<() => BotStoppedTaskContext[]>(() => []),
+  checkpointTuple: vi.fn(),
   profileTools: vi.fn<(...args: unknown[]) => string[]>(() => ["own-profile"]),
   cancelWorkers: vi.fn(),
   waitWorkers: vi.fn(),
@@ -57,6 +69,10 @@ vi.mock("../db", () => ({
   updateThread: fixture.update,
   createThread: fixture.create
 }))
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
+  realpathSync: fixture.realpath
+}))
 vi.mock("../models/registry", () => ({
   getAvailableModelConfigOrDefault: fixture.defaultModel,
   toModelRef: (model: { ref: string }) => model.ref
@@ -70,7 +86,13 @@ vi.mock("../agent/agent-run-service", () => ({
   startAgentRun: fixture.start,
   steerAgentRun: fixture.steer
 }))
-vi.mock("../agent/runtime", () => ({ withToolFileWriteLock: fixture.fileLock }))
+vi.mock("../agent/runtime", () => ({
+  withToolFileWriteLock: fixture.fileLock,
+  withCheckpointer: (
+    _thread: string,
+    read: (saver: { getTuple: typeof fixture.checkpointTuple }) => unknown
+  ) => read({ getTuple: fixture.checkpointTuple })
+}))
 vi.mock("../agent/managed-transport-delivery", () => ({
   createManagedTransportAgentRunDelivery: fixture.managedDelivery,
   announceManagedTurnUserMessage: fixture.announce
@@ -80,8 +102,13 @@ vi.mock("../agent/renderer-stream-mirror", () => ({
 }))
 vi.mock("../agent/thread-run-lease", () => ({
   claimLocalThreadRunLease: () => ({ acquired: true }),
+  getLocalThreadRunLease: fixture.activeLease,
   releaseLocalThreadRunLease: fixture.release,
   onLocalThreadRunLeaseReleased: () => () => {}
+}))
+vi.mock("../services/user-input", () => ({
+  getPendingUserInputForThread: fixture.pendingQuestion,
+  submitUserInputResponse: fixture.answerQuestion
 }))
 vi.mock("../agent/pending-notification-scheduler", () => ({
   pendingNotificationScheduler: { requestCheck: fixture.check, check: fixture.check }
@@ -149,6 +176,10 @@ function port() {
         onSteeringReady: fixture.steeringReady,
         commandLifecycle: fixture.commandLifecycle,
         profileContinuationRequest: fixture.profileContinuation,
+        taskCheckpoint: fixture.groupCheckpoint,
+        continuationFiles: fixture.continuationFiles,
+        continuationCommandResults: fixture.commandResults,
+        stoppedTaskContext: fixture.stoppedTasks,
         publishGroupFiles: fixture.publishFiles
       }) as unknown as LocalBotHost,
     {} as BotBrowserService,
@@ -166,9 +197,27 @@ function metadata(groupId?: string) {
 }
 beforeEach(() => {
   vi.clearAllMocks()
+  fixture.realpath.mockReset().mockImplementation(() => {
+    throw new Error("Missing synthetic path")
+  })
+  fixture.activeLease.mockReset().mockReturnValue({
+    threadId: task.threadId,
+    owner: "bot",
+    runId: task.id,
+    acquiredAt: "2026-10-18T00:00:00.000Z"
+  })
+  fixture.pendingQuestion.mockReset().mockReturnValue(null)
+  fixture.answerQuestion.mockReset().mockReturnValue(true)
   fixture.verifyFiles.mockReset().mockResolvedValue([])
   fixture.memoryEnabled = true
   fixture.profileContinuation.mockReturnValue(null)
+  fixture.groupCheckpoint.mockReset().mockReturnValue(undefined)
+  fixture.commandResults.mockReset().mockReturnValue([])
+  fixture.continuationFiles.mockReset().mockReturnValue([])
+  fixture.stoppedTasks.mockReset().mockReturnValue([])
+  fixture.checkpointTuple
+    .mockReset()
+    .mockResolvedValue({ checkpoint: { id: "yielded-checkpoint" } })
   fixture.memorySnapshot.mockReset().mockReturnValue([])
   fixture.defaultModel.mockReturnValue({ ref: "custom:available-default" })
   fixture.hasNotifications.mockReturnValue(true)
@@ -186,6 +235,50 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
+  it.each([undefined, "g"])(
+    "canonicalizes an existing owned workspace alias without changing thread identity (group=%s)",
+    (groupId) => {
+      const current = { ...metadata(groupId), workspacePath: "/old-profile/owned-workspace" }
+      fixture.thread.mockReturnValue({ metadata: JSON.stringify(current) })
+      const expected = `/synthetic/workspaces/${groupId ? `group-${groupId}` : "a"}`
+      fixture.realpath.mockReturnValue(expected)
+      expect(
+        prepareBotThread(
+          bot,
+          groupId
+            ? { threadId: "group-g-a", origin: { kind: "group", groupId, messageId: "m" } }
+            : undefined
+        )
+      ).toBe(expected)
+      const saved = JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata)
+      expect(saved).toMatchObject({ ...current, workspacePath: expected })
+      expect(fixture.create).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(["other directory", "missing directory"])(
+    "keeps the original workspace fence for a %s",
+    (condition) => {
+      fixture.thread.mockReturnValue({
+        metadata: JSON.stringify({ ...metadata(), workspacePath: "/unrelated" })
+      })
+      if (condition === "other directory") fixture.realpath.mockReturnValue("/other")
+      prepareBotThread(bot)
+      expect(JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata).workspacePath).toBe(
+        "/unrelated"
+      )
+    }
+  )
+
+  it("does not inspect or rebind a workspace owned by another Bot", () => {
+    fixture.thread.mockReturnValue({
+      metadata: JSON.stringify({ ...metadata(), botId: "other", workspacePath: "/old-profile" })
+    })
+    expect(() => prepareBotThread(bot)).toThrow("身份不一致")
+    expect(fixture.realpath).not.toHaveBeenCalled()
+    expect(fixture.update).not.toHaveBeenCalled()
+  })
+
   it("silences only the no-op background commit notice and preserves meaningful events", async () => {
     await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
     const deps = fixture.managedDelivery.mock.calls.at(-1)![0] as {
@@ -547,8 +640,110 @@ describe("Bot Runtime integration", () => {
         .acquire(bot, { ...task, origin })!
         .execute(new AbortController().signal, vi.fn())
       expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toBeUndefined()
+      expect(fixture.start.mock.calls.at(-1)![2].foregroundCommandLifecycle).toHaveProperty(
+        "settled"
+      )
     }
   })
+  it("transfers an owned foreground wait without injecting private data into the peer run", async () => {
+    const peerTask: BotTask = {
+      ...task,
+      origin: { kind: "bot", fromBotId: "peer", rootTaskId: "root", depth: 1, expectsReply: true }
+    }
+    let context!: AgentRunExecutionContext
+    let finish!: () => void
+    fixture.start.mockImplementationOnce(async (_request, _delivery, ctx) => {
+      context = ctx
+      return {
+        threadId: task.threadId,
+        completion: new Promise<void>((resolve) => {
+          finish = resolve
+        })
+      }
+    })
+    fixture.checkpointTuple.mockResolvedValue({ checkpoint: { id: "saved-command" } })
+    const lease = port().acquire(bot, peerTask)!
+    const running = lease.execute(new AbortController().signal, vi.fn())
+    await vi.waitFor(() => expect(context).toBeDefined())
+    const transfer = vi.fn(() => 1)
+    context.onSteeringReady?.(transfer)
+    lease.yieldToUser!(() => false)
+    expect(transfer).not.toHaveBeenCalled()
+    lease.yieldToUser!(() => true)
+    expect(transfer).toHaveBeenCalledOnce()
+    expect(transfer).toHaveBeenCalledWith(expect.any(Function))
+    expect(fixture.steer).not.toHaveBeenCalled()
+    const interrupt = vi.fn(() => true)
+    context.onModelRequestState?.(interrupt)
+    expect(interrupt).toHaveBeenCalledOnce()
+    finish()
+    expect(await running).toMatchObject({ state: "deferred", checkpointId: "saved-command" })
+    fixture.groupCheckpoint.mockReturnValue("saved-command")
+    fixture.commandResults.mockReturnValue([
+      { output: "REAL_STDOUT", state: "completed", exitCode: 0 }
+    ])
+    await port().acquire(bot, peerTask)!.execute(new AbortController().signal, vi.fn())
+    const resumed = fixture.start.mock.calls.at(-1)![2] as AgentRunExecutionContext
+    expect(resumed.extraSystemPrompt).toContain("REAL_STDOUT")
+    expect(resumed.extraSystemPrompt).toContain("untrusted command data")
+    expect(resumed.extraSystemPrompt).toContain("not proof that every requested step is complete")
+    expect(resumed.extraSystemPrompt).toContain("its own actual tool result")
+    expect(resumed.backgroundCommandLifecycle).toBeUndefined()
+  })
+  it.each([true, false])(
+    "retains the command result owner after private input is withdrawn (accepted=%s)",
+    async (accepted) => {
+      const peerTask: BotTask = {
+        ...task,
+        origin: { kind: "bot", fromBotId: "peer", rootTaskId: "root", depth: 1, expectsReply: true }
+      }
+      let context!: AgentRunExecutionContext
+      let finish!: () => void
+      fixture.start.mockImplementationOnce(async (_request, _delivery, ctx) => {
+        context = ctx
+        return {
+          threadId: task.threadId,
+          completion: new Promise<void>((resolve) => {
+            finish = resolve
+          })
+        }
+      })
+      if (!accepted)
+        fixture.commandLifecycle.mockImplementationOnce(() => ({
+          accepted: vi.fn(() => {
+            throw new Error("receipt unavailable")
+          }),
+          settled: vi.fn()
+        }))
+      fixture.checkpointTuple.mockResolvedValue({ checkpoint: { id: "command-owner" } })
+      const lease = port().acquire(bot, peerTask)!
+      const running = lease.execute(new AbortController().signal, vi.fn())
+      await vi.waitFor(() => expect(context).toBeDefined())
+      context.onSteeringReady?.(vi.fn(() => 1))
+      let pending = true
+      lease.yieldToUser!(() => pending)
+      const receipt = {
+        id: "command",
+        threadId: task.threadId,
+        command: "echo once",
+        cwd: "/test",
+        startedAt: 1
+      }
+      if (accepted) context.foregroundCommandLifecycle!.accepted(receipt)
+      else
+        expect(() => context.foregroundCommandLifecycle!.accepted(receipt)).toThrow(
+          "receipt unavailable"
+        )
+      pending = false
+      const interrupt = vi.fn(() => true)
+      context.onModelRequestState?.(interrupt)
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      finish()
+      const result = await running
+      expect(interrupt).toHaveBeenCalledTimes(accepted ? 1 : 0)
+      expect(result.state).toBe(accepted ? "deferred" : "completed")
+    }
+  )
   it.each([false, true])(
     "rechecks queued worker receipts under the execution lease (pending: %s)",
     async (pending) => {
@@ -570,6 +765,7 @@ describe("Bot Runtime integration", () => {
     [{ kind: "introduction" }, "first conversation after the user created you"],
     [{ kind: "user" }, "direct user request in your private conversation"],
     [{ kind: "group", groupId: "g", messageId: "m" }, "direct user request in a group"],
+    [{ kind: "discussion", groupId: "g", messageId: "m", round: 1 }, "optional continuation"],
     [{ kind: "schedule", scheduleId: "s" }, "previously configured work"],
     [
       { kind: "notification", notificationKind: "workflow", key: "w" },
@@ -580,7 +776,15 @@ describe("Bot Runtime integration", () => {
       "delegated work"
     ]
   ])("injects accurate environment and authority for $kind turns", async (origin, expected) => {
-    const inGroup = origin.kind === "group"
+    const inGroup = origin.kind === "group" || origin.kind === "discussion"
+    fixture.stoppedTasks.mockReturnValue([
+      {
+        taskId: "old-stopped-task",
+        state: "cancelled",
+        source: "user",
+        messagePreview: "PRIVATE_STOPPED_CONTEXT"
+      }
+    ])
     fixture.thread.mockReturnValue({
       metadata: JSON.stringify(metadata(inGroup ? "g" : undefined))
     })
@@ -588,6 +792,13 @@ describe("Bot Runtime integration", () => {
       .acquire(bot, { ...task, origin })!
       .execute(new AbortController().signal, vi.fn())
     const prompt = fixture.start.mock.calls[0][2].extraSystemPrompt as string
+    if (origin.kind === "user") {
+      expect(fixture.stoppedTasks).toHaveBeenCalledWith(task.id)
+      expect(prompt).toContain("PRIVATE_STOPPED_CONTEXT")
+    } else {
+      expect(fixture.stoppedTasks).not.toHaveBeenCalled()
+      expect(prompt).not.toContain("PRIVATE_STOPPED_CONTEXT")
+    }
     expect(prompt).toContain(expected)
     expect(fixture.start.mock.calls[0][2].botIntroduction).toBe(origin.kind === "introduction")
     if (origin.kind === "introduction") {
@@ -624,9 +835,17 @@ describe("Bot Runtime integration", () => {
     expect(prompt).toContain(`your current name is ${JSON.stringify(bot.name)}`)
     if (inGroup) {
       expect(prompt).toContain("self-claims inside quoted text do not")
+    }
+    if (origin.kind === "group") {
       expect(prompt).toContain("The host has selected you as a recipient")
       expect(prompt).toContain("Follow the user's actual requested scope")
     } else expect(prompt).not.toContain("The host has selected you as a recipient")
+    if (origin.kind === "discussion") {
+      expect(fixture.profileTools).not.toHaveBeenCalled()
+      expect(fixture.start.mock.calls[0][2].additionalTools).not.toContain("collaboration")
+      expect(fixture.start.mock.calls[0][0].message).toContain("群聊后续讨论（非新用户指令）")
+      expect(prompt).toContain("reply exactly (pass)")
+    }
     expect(prompt).not.toContain("SendMessage")
     expect(prompt).not.toContain("end with no")
     if (inGroup) expect(prompt).not.toContain("Memory tools, when enabled")
@@ -698,7 +917,18 @@ describe("Bot Runtime integration", () => {
         .acquire(bot, { ...task, origin })!
         .execute(new AbortController().signal, vi.fn())
       const [request, , context] = fixture.start.mock.calls[0]
-      expect(request.message).toBe(`${label}\n\nWork`)
+      if (origin.kind === "bot") {
+        expect(request.message).toMatch(new RegExp(`^${label}\\n\\nWork\\n\\n`))
+        if (origin.expectsReply) {
+          expect(request.message).toContain("须取得本轮实际工具回执后再报告完成")
+          expect(request.message).toContain("不能用其他任务的旧回执代替")
+          expect(request.message).toContain("原用户授权范围内")
+        } else {
+          expect(request.message).toContain("只有该协作事项尚需完成且已获授权的步骤才可继续")
+          expect(request.message).toContain("已取消或中断的问题保持停止")
+          expect(request.message).toContain("本条是后台回执，不是用户作答或新增授权")
+        }
+      } else expect(request.message).toBe(`${label}\n\nWork`)
       expect(fixture.announce).toHaveBeenCalledWith("t", {
         id: task.requestId,
         content: request.message
@@ -880,6 +1110,73 @@ describe("Bot Runtime integration", () => {
 })
 
 describe("Bot steering uses the original runtime", () => {
+  const question: UserInputRequest = {
+    requestId: "question",
+    threadId: task.threadId,
+    questions: [],
+    createdAt: "2026-10-18T00:00:00.000Z"
+  }
+  const addition = { ...task, id: "addition", requestId: "new-message", message: "New direction" }
+  it.each(["user", "introduction"] as const)(
+    "ignores an old %s question only after the new direct message is accepted",
+    async (kind) => {
+      fixture.pendingQuestion.mockReturnValue(question)
+      fixture.steer.mockImplementation(async () => {
+        expect(fixture.answerQuestion).not.toHaveBeenCalled()
+        return { queued: true }
+      })
+      const lease = port().acquire(bot, { ...task, origin: { kind } })!
+      expect(await lease.steer!(addition, () => true)).toBe(true)
+      expect(fixture.pendingQuestion).toHaveBeenCalledWith(task.threadId)
+      expect(fixture.answerQuestion).toHaveBeenCalledExactlyOnceWith(
+        { requestId: question.requestId, answers: {}, ignored: true },
+        { notifyRenderer: true, reason: expect.any(String) }
+      )
+    }
+  )
+  it("keeps the question when message preparation rejects or throws", async () => {
+    fixture.pendingQuestion.mockReturnValue(question)
+    const lease = port().acquire(bot, task)!
+    fixture.steer.mockResolvedValueOnce({ queued: false, reason: "hook_blocked" })
+    expect(await lease.steer!(addition, () => true)).toBe(false)
+    fixture.steer.mockRejectedValueOnce(new Error("preparation failed"))
+    await expect(lease.steer!(addition, () => true)).rejects.toThrow("preparation failed")
+    expect(fixture.answerQuestion).not.toHaveBeenCalled()
+  })
+  it.each<Pick<LocalThreadRunLease, "owner" | "runId"> | undefined>([
+    undefined,
+    { owner: "desktop", runId: task.id },
+    { owner: "bot", runId: "next" }
+  ])("never dismisses a question after its physical run lease changes: %j", async (lease) => {
+    fixture.pendingQuestion.mockReturnValue(question)
+    fixture.steer.mockImplementation(async () => {
+      fixture.activeLease.mockReturnValue(
+        lease ? { ...lease, threadId: task.threadId, acquiredAt: "now" } : undefined
+      )
+      return { queued: true }
+    })
+    expect(await port().acquire(bot, task)!.steer!(addition, () => true)).toBe(true)
+    expect(fixture.answerQuestion).not.toHaveBeenCalled()
+  })
+  it("also releases an old-context question created while message preparation was pending", async () => {
+    fixture.steer.mockImplementation(async () => {
+      fixture.pendingQuestion.mockReturnValue(question)
+      return { queued: true }
+    })
+    expect(await port().acquire(bot, task)!.steer!(addition, () => true)).toBe(true)
+    expect(fixture.answerQuestion).toHaveBeenCalledOnce()
+  })
+  it("preserves a new question after the new message has already entered the graph", async () => {
+    fixture.steer.mockImplementation(async (request) => {
+      expect(request.message.beforeInject()).toBe(true)
+      fixture.pendingQuestion.mockReturnValue({ ...question, requestId: "new-question" })
+      return { queued: true }
+    })
+    const inject = vi.fn(() => true)
+    expect(await port().acquire(bot, task)!.steer!(addition, inject)).toBe(true)
+    expect(inject).toHaveBeenCalledOnce()
+    expect(fixture.answerQuestion).not.toHaveBeenCalled()
+  })
   it("keeps pending interaction waits on the original steering path", async () => {
     let context!: AgentRunExecutionContext
     let finish!: () => void
@@ -904,6 +1201,7 @@ describe("Bot steering uses the original runtime", () => {
     await context.interactionWaitHooks!.onWaitEnd(event)
     expect(await lease.steer!(task, () => true)).toBe(true)
     expect(interrupt).not.toHaveBeenCalled()
+    expect(fixture.answerQuestion).not.toHaveBeenCalled()
     await context.interactionWaitHooks!.onWaitEnd(event)
     expect(await lease.steer!(task, () => true)).toBe(false)
     expect(interrupt).toHaveBeenCalledOnce()
@@ -978,18 +1276,288 @@ describe("Bot steering uses the original runtime", () => {
     expect((await pending).state).toBe("completed")
   })
   it.each<BotTask["origin"]>([
-    { kind: "group", groupId: "group", messageId: "message" },
-    { kind: "bot", fromBotId: "peer", rootTaskId: "root", depth: 1, expectsReply: true },
-    { kind: "schedule", scheduleId: "routine" },
-    { kind: "notification", notificationKind: "command", key: "command" }
+    { kind: "notification", notificationKind: "workflow", key: "workflow" },
+    { kind: "notification", notificationKind: "coordinator", key: "coordinator" }
   ])("does not expose model interruption for $kind ownership", async (origin) => {
-    if (origin.kind === "group")
-      fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata(origin.groupId)) })
     await port()
       .acquire(bot, { ...task, origin })!
       .execute(new AbortController().signal, vi.fn())
     expect(fixture.start.mock.calls.at(-1)![2].onModelRequestState).toBeUndefined()
   })
+  it("yields only the owned group model, retains its checkpoint and adds no user message on resume", async () => {
+    const groupTask: BotTask = {
+      ...task,
+      threadId: "group-g-a",
+      origin: { kind: "group", groupId: "g", messageId: "message" }
+    }
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+    fixture.activeLease.mockReturnValue({
+      threadId: groupTask.threadId,
+      runId: task.id,
+      owner: "bot",
+      acquiredAt: "now"
+    })
+    let context!: AgentRunExecutionContext
+    let finish!: () => void
+    fixture.start.mockImplementation(async (_request, _delivery, incoming) => {
+      context = incoming
+      return {
+        completion: new Promise<void>((resolve) => {
+          finish = resolve
+        })
+      }
+    })
+    const lease = port().acquire(bot, groupTask)!
+    const pending = lease.execute(new AbortController().signal, vi.fn())
+    await vi.waitFor(() => expect(context).toBeDefined())
+    const interrupt = vi.fn(() => true)
+    context.onModelRequestState!(interrupt)
+    lease.yieldToUser!(() => true)
+    expect(interrupt).toHaveBeenCalledOnce()
+    lease.yieldToUser!(() => true)
+    context.onModelRequestState!(interrupt)
+    expect(interrupt).toHaveBeenCalledOnce()
+    expect(fixture.steer).not.toHaveBeenCalled()
+    finish()
+    expect(await pending).toEqual({ state: "deferred", checkpointId: "yielded-checkpoint" })
+    expect(fixture.checkpointTuple).toHaveBeenCalledWith({
+      configurable: { thread_id: groupTask.threadId }
+    })
+    fixture.groupCheckpoint.mockReturnValue("yielded-checkpoint")
+    fixture.announce.mockClear()
+    fixture.start.mockImplementation(
+      async (_request, _delivery, next: AgentRunExecutionContext) => {
+        expect(next.resumeCheckpointId).toBe("yielded-checkpoint")
+        expect(next.extraSystemPrompt).toContain("No answer to the dismissed question was selected")
+        next.onRunTerminated?.({ outcome: "success", code: "done" })
+        return { completion: Promise.resolve() }
+      }
+    )
+    expect(
+      (await port().acquire(bot, groupTask)!.execute(new AbortController().signal, vi.fn())).state
+    ).toBe("completed")
+    expect(fixture.announce).not.toHaveBeenCalled()
+  })
+
+  it.each<BotTask["origin"]>([
+    { kind: "group", groupId: "g", messageId: "message" },
+    { kind: "bot", fromBotId: "b", rootTaskId: "root", depth: 1, expectsReply: true },
+    { kind: "schedule", scheduleId: "routine" },
+    { kind: "notification", notificationKind: "command", key: "command" },
+    {
+      kind: "notification",
+      notificationKind: "workflow",
+      key: "workflow",
+      runStartedAt: "2026-10-18T13:00:00.000Z"
+    }
+  ])(
+    "dismisses only the owned $kind question, waits for the next model boundary and respects cancelled input",
+    async (origin) => {
+      const groupTask: BotTask = {
+        ...task,
+        origin
+      }
+      fixture.thread.mockReturnValue({
+        metadata: JSON.stringify(metadata(origin.kind === "group" ? "g" : undefined))
+      })
+      let context!: AgentRunExecutionContext
+      let finish!: () => void
+      fixture.start.mockImplementation(async (_request, _delivery, incoming) => {
+        context = incoming
+        return {
+          completion: new Promise<void>((resolve) => {
+            finish = resolve
+          })
+        }
+      })
+      const lease = port().acquire(bot, groupTask)!
+      const pending = lease.execute(new AbortController().signal, vi.fn())
+      await vi.waitFor(() => expect(context).toBeDefined())
+      const wait = { id: "question", kind: "user_input" as const, threadId: task.threadId }
+      await context.interactionWaitHooks!.onWaitStart(wait)
+      fixture.pendingQuestion.mockReturnValue({
+        requestId: "question",
+        threadId: task.threadId,
+        createdAt: "now",
+        questions: []
+      })
+      lease.yieldToUser!(() => false)
+      expect(fixture.answerQuestion).not.toHaveBeenCalled()
+      lease.yieldToUser!(() => true)
+      expect(fixture.answerQuestion.mock.calls[0][0]).toEqual({
+        requestId: "question",
+        answers: {},
+        ignored: true
+      })
+      await context.interactionWaitHooks!.onWaitEnd(wait)
+      const interrupt = vi.fn(() => true)
+      context.onModelRequestState!(interrupt)
+      expect(interrupt).toHaveBeenCalledOnce()
+      finish()
+      expect((await pending).state).toBe("deferred")
+    }
+  )
+  it.each<BotTask["origin"]>([
+    { kind: "bot", fromBotId: "b", rootTaskId: "root", depth: 1, expectsReply: true },
+    { kind: "schedule", scheduleId: "routine" },
+    { kind: "notification", notificationKind: "command", key: "command" },
+    {
+      kind: "notification",
+      notificationKind: "workflow",
+      key: "workflow",
+      runStartedAt: "2026-10-18T13:00:00.000Z"
+    }
+  ])(
+    "continues $kind on the latest private history with a new internal identity and original authority",
+    async (origin) => {
+      const background = { ...task, origin }
+      let context!: AgentRunExecutionContext
+      let finish!: () => void
+      const files = [{ filePath: "/synthetic/workspaces/a/report.md", name: "report.md", size: 40 }]
+      fixture.start.mockImplementation(async (_request, _delivery, incoming) => {
+        context = incoming
+        fixture.deliveryTools.mock.calls.at(-1)![2]!(files, "delivered-before-pause")
+        return {
+          completion: new Promise<void>((resolve) => {
+            finish = resolve
+          })
+        }
+      })
+      const lease = port().acquire(bot, background)!
+      const pending = lease.execute(new AbortController().signal, vi.fn())
+      await vi.waitFor(() => expect(context).toBeDefined())
+      const interrupt = vi.fn(() => true)
+      context.onModelRequestState!(interrupt)
+      lease.yieldToUser!(() => true)
+      expect(interrupt).toHaveBeenCalledOnce()
+      finish()
+      const deferred = await pending
+      expect(deferred).toEqual({
+        state: "deferred",
+        checkpointId: "yielded-checkpoint",
+        ...(origin.kind === "bot" ? { files } : {})
+      })
+      fixture.groupCheckpoint.mockReturnValue("yielded-checkpoint")
+      fixture.continuationFiles.mockReturnValue(origin.kind === "bot" ? files : [])
+      fixture.verifyFiles.mockResolvedValue(files)
+      fixture.announce.mockClear()
+      fixture.start.mockImplementation(async (request, _delivery, incoming) => {
+        expect(request.userMessageId).toBe(botContinuationMessageId(task.id, "yielded-checkpoint"))
+        expect(request.userMessageId).not.toBe(task.requestId)
+        expect(request.message).toContain("INTERNAL_BOT_TASK_CONTINUATION")
+        expect(request.message).not.toContain("本条是新到达的协作任务")
+        expect(request.message).toContain(task.message)
+        expect(request.message).toContain("private conversation is not handoff data")
+        expect(request.message).toContain("ask for that missing choice again and wait")
+        expect(request.message).toContain("neither an answer nor permission to bypass")
+        expect(incoming.resumeCheckpointId).toBeUndefined()
+        expect(incoming.continueBotTaskCheckpointId).toBe("yielded-checkpoint")
+        expect(incoming.allowTrustedTransportSkillMarker).toBe(false)
+        expect(incoming.localRunLease).toMatchObject({
+          owner: "bot",
+          runId: task.id,
+          managedExternally: true
+        })
+        expect(incoming.extraSystemPrompt).toContain(
+          origin.kind === "bot"
+            ? "delegated work"
+            : origin.kind === "schedule"
+              ? "a scheduled invocation"
+              : "a background execution result"
+        )
+        expect(incoming.commandInternalNotification).toBe(
+          origin.kind === "notification" && origin.notificationKind === "command"
+        )
+        expect(incoming.botWorkflowNotification).toEqual(
+          origin.kind === "notification" && origin.notificationKind === "workflow"
+            ? { runId: origin.key, startedAt: origin.runStartedAt }
+            : undefined
+        )
+        incoming.onFinalAssistant?.({
+          messageId: "resumed-final",
+          finalText: "Original task result"
+        })
+        incoming.onRunTerminated?.({ outcome: "success", code: "done" })
+        return { completion: Promise.resolve() }
+      })
+      const signal = new AbortController().signal
+      expect(await port().acquire(bot, background)!.execute(signal, vi.fn())).toEqual({
+        state: "completed",
+        result: "Original task result",
+        ...(origin.kind === "bot" ? { files } : {})
+      })
+      expect(fixture.announce).not.toHaveBeenCalled()
+      if (origin.kind === "bot")
+        expect(fixture.verifyFiles).toHaveBeenCalledWith(
+          "/synthetic/workspaces/a",
+          [files[0].filePath],
+          signal
+        )
+      else expect(fixture.verifyFiles).not.toHaveBeenCalled()
+      expect(fixture.summary).not.toHaveBeenCalled()
+    }
+  )
+  it("refuses missing or escaped retained peer files before starting a continuation model", async () => {
+    fixture.groupCheckpoint.mockReturnValue("saved")
+    fixture.continuationFiles.mockReturnValue([
+      { filePath: "/other/private.md", name: "private.md", size: 1 }
+    ])
+    fixture.verifyFiles.mockRejectedValue(new Error("File is outside workspace"))
+    const background: BotTask = {
+      ...task,
+      origin: { kind: "bot", fromBotId: "b", rootTaskId: "root", depth: 1, expectsReply: true }
+    }
+    await expect(
+      port().acquire(bot, background)!.execute(new AbortController().signal, vi.fn())
+    ).rejects.toThrow("outside workspace")
+    expect(fixture.start).not.toHaveBeenCalled()
+    expect(fixture.publishFiles).not.toHaveBeenCalled()
+  })
+  it.each(["missing-checkpoint", "stopped", "foreign-lease"])(
+    "does not resume group work with an invalid continuation (%s)",
+    async (boundary) => {
+      const groupTask: BotTask = {
+        ...task,
+        origin: { kind: "group", groupId: "g", messageId: "message" }
+      }
+      fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+      let context!: AgentRunExecutionContext
+      let finish!: () => void
+      fixture.start.mockImplementation(async (_request, _delivery, incoming) => {
+        context = incoming
+        return {
+          completion: new Promise<void>((resolve) => {
+            finish = resolve
+          })
+        }
+      })
+      const controller = new AbortController()
+      const lease = port().acquire(bot, groupTask)!
+      const pending = lease.execute(controller.signal, vi.fn())
+      await vi.waitFor(() => expect(context).toBeDefined())
+      if (boundary === "foreign-lease")
+        fixture.activeLease.mockReturnValue({
+          threadId: task.threadId,
+          runId: "other",
+          owner: "bot",
+          acquiredAt: "now"
+        })
+      const interrupt = vi.fn(() => true)
+      context.onModelRequestState!(interrupt)
+      lease.yieldToUser!(() => true)
+      if (boundary === "missing-checkpoint") fixture.checkpointTuple.mockResolvedValue(undefined)
+      if (boundary === "stopped") controller.abort()
+      finish()
+      if (boundary === "foreign-lease") {
+        expect(interrupt).not.toHaveBeenCalled()
+        expect((await pending).state).not.toBe("deferred")
+        expect(fixture.checkpointTuple).not.toHaveBeenCalled()
+      } else {
+        await expect(pending).rejects.toThrow()
+      }
+    }
+  )
+
   it("offers saved inbox messages only after the runtime announces prompt readiness", async () => {
     fixture.start.mockImplementation(
       async (_request, _delivery, context: AgentRunExecutionContext) => {
@@ -1028,6 +1596,7 @@ describe("Bot steering uses the original runtime", () => {
     expect(beforeInject).not.toHaveBeenCalled() // only the graph's injection boundary may claim it
   })
   it("does not inject private user messages into peers, routines or another conversation", async () => {
+    fixture.pendingQuestion.mockReturnValue(question)
     const beforeInject = vi.fn(() => true)
     const routine = { ...task, origin: { kind: "schedule" as const, scheduleId: "routine" } }
     expect(await port().acquire(bot, routine)!.steer!(task, beforeInject)).toBe(false)
@@ -1035,6 +1604,15 @@ describe("Bot steering uses the original runtime", () => {
       await port().acquire(bot, task)!.steer!({ ...task, threadId: "foreign" }, beforeInject)
     ).toBe(false)
     expect(await port().acquire(bot, task)!.steer!(routine, beforeInject)).toBe(false)
+    for (const origin of [
+      { kind: "group", groupId: "group", messageId: "message" },
+      { kind: "bot", fromBotId: "peer", rootTaskId: "root", depth: 1, expectsReply: true },
+      { kind: "notification", notificationKind: "command", key: "command" }
+    ] as BotTask["origin"][]) {
+      expect(await port().acquire(bot, { ...task, origin })!.steer!(task, beforeInject)).toBe(false)
+      expect(await port().acquire(bot, task)!.steer!({ ...task, origin }, beforeInject)).toBe(false)
+    }
     expect(fixture.steer).not.toHaveBeenCalled()
+    expect(fixture.answerQuestion).not.toHaveBeenCalled()
   })
 })

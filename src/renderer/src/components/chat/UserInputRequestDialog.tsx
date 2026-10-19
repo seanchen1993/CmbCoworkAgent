@@ -19,6 +19,7 @@ interface UserInputRequestDialogProps {
   onSubmit: (response: UserInputResponse) => void
   onLayoutChange?: (layout: UserInputRequestDialogLayout | null) => void
   presentation?: "workbench" | "bot"
+  useComposerForSingleAnswer?: boolean
 }
 
 export interface UserInputRequestDialogLayout {
@@ -36,7 +37,8 @@ export function UserInputRequestDialog({
   request,
   onSubmit,
   onLayoutChange,
-  presentation = "workbench"
+  presentation = "workbench",
+  useComposerForSingleAnswer = false
 }: UserInputRequestDialogProps): React.JSX.Element | null {
   const dialogRef = useRef<HTMLDivElement>(null)
   const [draftAnswers, setDraftAnswers] = useState<Record<string, DraftAnswer>>({})
@@ -131,8 +133,8 @@ export function UserInputRequestDialog({
 
   const canSubmit = useMemo(() => {
     if (!request) return false
-    return userInputAnswers(request.questions, draftAnswers) !== null
-  }, [draftAnswers, request])
+    return userInputAnswers(request.questions, draftAnswers, presentation === "bot") !== null
+  }, [draftAnswers, request, presentation])
 
   if (!request) return null
   const activeQuestion = request.questions[Math.min(activeIndex, request.questions.length - 1)]
@@ -199,7 +201,7 @@ export function UserInputRequestDialog({
 
   function submitDraftAnswers(drafts: Readonly<Record<string, DraftAnswer>>): void {
     if (!request) return
-    const answers = userInputAnswers(request.questions, drafts)
+    const answers = userInputAnswers(request.questions, drafts, presentation === "bot")
     if (!answers) return
     onSubmit({
       requestId: request.requestId,
@@ -216,6 +218,7 @@ export function UserInputRequestDialog({
         activeIndex={Math.min(activeIndex, request.questions.length - 1)}
         draft={activeDraft}
         complete={canSubmit}
+        useComposerForSingleAnswer={useComposerForSingleAnswer}
         remainingLabel={
           remainingSeconds === null
             ? null
@@ -230,7 +233,8 @@ export function UserInputRequestDialog({
           if (canSubmit) handleSubmit()
           else {
             const next = request.questions.findIndex(
-              (question) => userInputAnswers([question], draftAnswers) === null
+              (question) =>
+                userInputAnswers([question], draftAnswers, presentation === "bot") === null
             )
             if (next >= 0) setActiveIndex(next)
           }

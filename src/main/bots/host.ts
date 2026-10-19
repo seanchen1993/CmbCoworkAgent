@@ -21,21 +21,33 @@ import {
   type SendBotGroupMessageInput
 } from "../../shared/bots/contracts"
 import type { BotStore } from "./store"
+import { canDeferBotTask } from "./continuation"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
 import type { BackgroundCommandLifecycle } from "../agent/background-command-lifecycle"
 
 export interface BotRunLease {
   /** Reuse the active runtime's user-prompt pipeline; inbox remains queued until injection. */
   steer?(task: BotTask, beforeInject: () => boolean): Promise<boolean>
+  /** Yield at a model boundary; keep background-task ownership separate from private input. */
+  yieldToUser?(stillPending: () => boolean): void
   execute(
     signal: AbortSignal,
     waiting: (value: boolean) => void
-  ): Promise<{
-    state: "completed" | "failed" | "outcome_unknown" | "superseded"
-    error?: string
-    result?: string
-    files?: BotDeliveredFile[]
-  }>
+  ): Promise<
+    | {
+        state: "completed" | "failed" | "outcome_unknown" | "superseded"
+        error?: string
+        result?: string
+        files?: BotDeliveredFile[]
+      }
+    | {
+        state: "deferred"
+        checkpointId: string
+        error?: never
+        result?: never
+        files?: BotDeliveredFile[]
+      }
+  >
   release(): void
 }
 
@@ -43,6 +55,7 @@ export interface BotRunPort {
   browser?: boolean
   /** Cancel only this conversation's detached work through the existing managers. */
   cancelBackground?(threadId: string): void | Promise<void>
+  cancelCommands?(threadId: string, ids: readonly string[]): Promise<void>
   recover?(threadIds: string[], signal: AbortSignal): Promise<void>
   /** Claim the existing runtime's thread lease before changing durable task state. */
   acquire(bot: BotDefinition, task: BotTask): BotRunLease | null
@@ -70,6 +83,7 @@ export class LocalBotHost {
     }
   >()
   private readonly deletions = new Map<string, Promise<void>>()
+  private readonly commandCancellations = new Map<string, { botId: string; done: Promise<void> }>()
   private readonly listeners = new Set<(event: BotChangeEvent) => void>()
   private readonly unsubscribe: () => void
   private readonly lifecycle = new AbortController()
@@ -226,9 +240,15 @@ export class LocalBotHost {
     this.requireRunning()
     const previous = existing ? this.store.getGroup(existing.id) : undefined
     const group = this.store.saveGroup(input, existing)
+    const membershipChanged =
+      previous && JSON.stringify(previous.memberIds) !== JSON.stringify(group.memberIds)
     for (const [id, run] of this.active) {
       const task = this.store.getTask(id)
-      if (botTaskGroupId(task) === group.id && !group.memberIds.includes(task.botId))
+      if (
+        botTaskGroupId(task) === group.id &&
+        (!group.memberIds.includes(task.botId) ||
+          (membershipChanged && task.origin.kind === "discussion"))
+      )
         run.controller.abort()
     }
     for (const id of previous?.memberIds ?? []) {
@@ -254,7 +274,9 @@ export class LocalBotHost {
   }
   sendGroup(input: SendBotGroupMessageInput): void {
     this.requireRunning()
+    const obsolete = this.store.groupDiscussionTask(input.groupId, input.requestId)
     this.store.sendGroup(input)
+    if (obsolete) this.cancel(obsolete)
     this.changed()
     this.wake()
   }
@@ -427,7 +449,8 @@ export class LocalBotHost {
     kind: "workflow" | "coordinator",
     key: string,
     message: string,
-    groupId?: string
+    groupId?: string,
+    runStartedAt?: string
   ): void {
     this.requireRunning()
     const bot = this.store.getBot(botId)
@@ -438,19 +461,39 @@ export class LocalBotHost {
       const group = this.store.getGroup(groupId)
       if (group.deleting || !group.memberIds.includes(botId)) return
     }
+    if (
+      runStartedAt !== undefined &&
+      (kind !== "workflow" || !runStartedAt.trim() || runStartedAt.length > 100)
+    )
+      throw new BotError("INVALID_INPUT", "后台通知运行版本无效")
+    if (
+      runStartedAt &&
+      this.store.hasLegacyWorkflowNotification(botId, threadId, key, runStartedAt)
+    )
+      return
     this.store.enqueue(
-      { botId, requestId: `notification:${threadId}:${kind}:${key}`, message },
-      { kind: "notification", notificationKind: kind, key, ...(groupId ? { groupId } : {}) }
+      {
+        botId,
+        requestId: `notification:${threadId}:${kind}:${key}${runStartedAt ? `:${runStartedAt}` : ""}`,
+        message
+      },
+      {
+        kind: "notification",
+        notificationKind: kind,
+        key,
+        ...(groupId ? { groupId } : {}),
+        ...(runStartedAt ? { runStartedAt } : {})
+      }
     )
     this.changed()
     this.wake()
   }
 
-  commandLifecycle(sourceTaskId: string): BackgroundCommandLifecycle {
+  commandLifecycle(sourceTaskId: string, continueSource = false): BackgroundCommandLifecycle {
     return {
       accepted: (command) => {
         this.requireRunning()
-        this.store.acceptCommand(sourceTaskId, command)
+        this.store.acceptCommand(sourceTaskId, command, continueSource)
         this.changed()
       },
       settled: (result) => {
@@ -482,6 +525,22 @@ export class LocalBotHost {
 
   private steerDirectMessage(task: BotTask): void {
     if (task.state !== "queued" || task.origin.kind !== "user") return
+    const backgroundRun = [...this.active.values()].find(
+      (candidate) => candidate.botId === task.botId && canDeferBotTask(candidate.task)
+    )
+    if (backgroundRun?.steeringReady && !backgroundRun.controller.signal.aborted) {
+      backgroundRun.lease.yieldToUser?.(
+        () =>
+          !this.stopping &&
+          !this.faulted &&
+          !backgroundRun.controller.signal.aborted &&
+          this.active.get(backgroundRun.task.id) === backgroundRun &&
+          this.store
+            .pendingConversationTasks(task.botId)
+            .some((pending) => pending.state === "queued" && pending.origin.kind === "user")
+      )
+      return
+    }
     const run = [...this.active.values()].find(
       (candidate) =>
         candidate.task.threadId === task.threadId &&
@@ -522,12 +581,32 @@ export class LocalBotHost {
     const run = this.active.get(taskId)
     if (
       !run ||
-      (run.task.origin.kind !== "user" && run.task.origin.kind !== "introduction") ||
+      (!canDeferBotTask(run.task) && !["user", "introduction"].includes(run.task.origin.kind)) ||
       run.controller.signal.aborted
     )
       return
     run.steeringReady = true
     for (const task of this.store.pendingConversationTasks(run.botId)) this.steerDirectMessage(task)
+  }
+
+  taskCheckpoint(taskId: string): string | undefined {
+    this.requireRunning()
+    return this.store.taskCheckpoint(taskId)
+  }
+
+  continuationFiles(taskId: string): BotDeliveredFile[] {
+    this.requireRunning()
+    return this.store.continuationFiles(taskId)
+  }
+
+  continuationCommandResults(taskId: string): Record<string, unknown>[] {
+    this.requireRunning()
+    return this.store.continuationCommandResults(taskId)
+  }
+
+  stoppedTaskContext(taskId: string) {
+    this.requireRunning()
+    return this.store.stoppedTaskContext(taskId)
   }
 
   updateOwnProfile(
@@ -567,20 +646,64 @@ export class LocalBotHost {
 
   cancel(taskId: string): void {
     this.requireRunning()
+    if (this.commandCancellations.has(taskId)) return
     const task = this.store.getTask(taskId)
+    if (task.origin.kind === "group" || task.origin.kind === "discussion")
+      this.store.stopGroupDiscussion(task.origin.groupId, task.origin.messageId)
     const active =
       this.active.get(taskId) ?? [...this.active.values()].find((run) => run.steered.has(taskId))
     if (active) {
       // Durable cancellation only after runtime cleanup, never while tools are still unwinding.
       active.controller.abort()
     } else if (task.state === "queued") {
-      this.store.transition(taskId, "cancelled")
+      const commands = this.store.continuationCommandIds(task.id)
+      if (commands.length && this.runtime.cancelCommands) {
+        // Keep the source pending and excluded from dispatch until physical cleanup and its receipt settle.
+        const done = Promise.resolve()
+          .then(async () => {
+            try {
+              await this.runtime.cancelCommands!(task.threadId, commands)
+              if (this.store.getTask(task.id).state !== "queued") return
+              const results = this.store.continuationCommandResults(task.id)
+              if (!commands.every((id) => results.some((result) => result.task_id === id)))
+                throw new Error("原命令的停止回执未确认，请检查进程及结果。")
+              this.store.settle(task.id, this.stopping ? "interrupted" : "cancelled", null)
+            } catch (error) {
+              if (error instanceof BotError && error.code === "NOT_FOUND") return
+              this.faulted = true
+              this.store.settle(
+                task.id,
+                "outcome_unknown",
+                error instanceof Error ? error.message : "命令停止结果未确认"
+              )
+              this.reportError(error)
+            } finally {
+              this.commandCancellations.delete(task.id)
+              this.changed()
+              this.wake()
+            }
+          })
+          .catch((error) => {
+            this.faulted = true
+            this.reportError(error)
+          })
+        this.commandCancellations.set(task.id, { botId: task.botId, done })
+        return
+      }
+      if (this.store.taskCheckpoint(taskId)) this.store.settle(taskId, "cancelled", null)
+      else this.store.transition(taskId, "cancelled")
       this.changed()
+      this.wake()
     }
   }
 
   stopConversation(botId: string, groupId?: string): void {
     const bot = groupId ? this.getGroupMember(groupId, botId) : this.getBot(botId)
+    if (groupId) {
+      const review = this.store.groupDiscussionTask(groupId)
+      this.store.stopGroupDiscussion(groupId)
+      if (review) this.cancel(review)
+    }
     const threadId = groupId ? `group-${groupId}-${botId}` : bot.threadId
     // Read the inbox now, rather than a possibly stale renderer snapshot.
     // cancel() retains runtime cleanup and leaves group work untouched.
@@ -590,7 +713,11 @@ export class LocalBotHost {
   }
 
   hasActiveRuns(): boolean {
-    return this.active.size > 0 || this.store.activeCommandThreads().length > 0
+    return (
+      this.active.size > 0 ||
+      this.commandCancellations.size > 0 ||
+      this.store.activeCommandThreads().length > 0
+    )
   }
 
   private wake(): void {
@@ -619,7 +746,11 @@ export class LocalBotHost {
       }
     }
     this.store.flushReplies()
-    const excluded = new Set([...this.active.values()].map((run) => run.botId))
+    this.store.advanceGroupDiscussions()
+    const excluded = new Set([
+      ...[...this.active.values()].map((run) => run.botId),
+      ...[...this.commandCancellations.values()].map((run) => run.botId)
+    ])
     while (!this.stopping && this.active.size < this.concurrency) {
       const task = this.store.nextQueued([...excluded])
       if (!task) return
@@ -659,6 +790,8 @@ export class LocalBotHost {
     let finalText: string | undefined
     let files: BotDeliveredFile[] | undefined
     let waitingCount = 0
+    let deferredCheckpoint: string | undefined
+    let deferredFiles: BotDeliveredFile[] | undefined
     try {
       const result = await lease.execute(controller.signal, (waiting) => {
         if (controller.signal.aborted) return
@@ -666,32 +799,51 @@ export class LocalBotHost {
         this.store.transition(task.id, waitingCount > 0 ? "waiting_user" : "running")
         this.changed()
       })
-      state = result.state
-      reason = result.error ?? null
-      finalText = result.result
-      files = result.files
+      if (result.state === "deferred") {
+        deferredCheckpoint = result.checkpointId
+        deferredFiles = result.files
+      } else {
+        state = result.state
+        reason = result.error ?? null
+        finalText = result.result
+        files = result.files
+      }
     } catch (error) {
       state = "failed"
       reason = error instanceof Error ? error.message : "任务执行失败"
     } finally {
       if (controller.signal.aborted) {
+        deferredCheckpoint = undefined
         state = this.stopping ? "interrupted" : "cancelled"
         reason = this.stopping ? "应用退出，任务已中断；请检查已有结果后继续。" : null
+        const commands = this.store.continuationCommandIds(task.id)
+        if (commands.length) {
+          try {
+            await this.runtime.cancelCommands?.(task.threadId, commands)
+          } catch (error) {
+            this.faulted = true
+            state = "outcome_unknown"
+            reason = "任务命令停止结果未确认，请检查已有进程及结果。"
+            this.reportError(error)
+          }
+        }
       }
       try {
         // These messages were consumed by this exact graph, not separate queued runs.
         // Unconsumed messages stay queued and run normally after the lease releases.
-        this.store.settleRun(
-          task.id,
-          this.active.get(task.id)?.steered ?? [],
-          state,
-          reason,
-          finalText,
-          files
-        )
+        if (deferredCheckpoint) this.store.deferTask(task.id, deferredCheckpoint, deferredFiles)
+        else
+          this.store.settleRun(
+            task.id,
+            this.active.get(task.id)?.steered ?? [],
+            state,
+            reason,
+            finalText,
+            files
+          )
         this.changed()
         try {
-          this.runtime.onSettled?.(task, state, finalText)
+          if (!deferredCheckpoint) this.runtime.onSettled?.(task, state, finalText)
         } catch (error) {
           this.reportError(error)
         }
@@ -730,6 +882,7 @@ export class LocalBotHost {
         .map((run) => run.done)
         .concat(
           [...this.deletions.values()],
+          [...this.commandCancellations.values()].map((run) => run.done),
           [this.recovery],
           backgroundStops.map((stop) => Promise.resolve(stop))
         )

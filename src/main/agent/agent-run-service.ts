@@ -151,8 +151,12 @@ export interface AgentRunExecutionContext {
   /** Trusted host opt-in; never read from renderer input or inherited by leaf agents. */
   workflowEnabled?: boolean
   backgroundCommandLifecycle?: CreateAgentRuntimeOptions["backgroundCommandLifecycle"]
+  /** Preserve a managed task's owner when a private message detaches only its foreground wait. */
+  foregroundCommandLifecycle?: CreateAgentRuntimeOptions["foregroundCommandLifecycle"]
   /** Only a host-owned durable workflow receipt may invoke the internal summary turn. */
   workflowInternalNotification?: boolean
+  /** Identity of the original workflow result owned by a durable local Bot receipt. */
+  botWorkflowNotification?: { runId: string; startedAt: string }
   /** Bot-host receipt only; cannot be supplied through a renderer request. */
   commandInternalNotification?: boolean
   /** First conversation cue issued only by the Bot host; never a renderer-authored message. */
@@ -168,10 +172,14 @@ export interface AgentRunExecutionContext {
   onFinalAssistant?: (result: AgentRunFinalAssistant) => void | Promise<void>
   onRunCancelled?: () => void
   /** The original user-prompt/steer pipeline is ready; trusted inboxes can offer saved messages. */
-  onSteeringReady?: () => void
+  onSteeringReady?: (yieldForegroundCommands?: (stillPending: () => boolean) => number) => void
   /** Trusted Bot inbox only: the exact active main-model round can be superseded.
    * Undefined ends that opportunity; tools, compaction and leaf models do not expose it. */
   onModelRequestState?: (interrupt: (() => boolean) | undefined) => void
+  /** Trusted local Bot only. Resume its exact yielded model checkpoint without adding a message. */
+  resumeCheckpointId?: string
+  /** Trusted private Bot task continuation. Keep newer completed private history instead of restoring its old branch. */
+  continueBotTaskCheckpointId?: string
   /**
    * Fires exactly once per run, before its completion promise settles.
    *
@@ -211,8 +219,11 @@ let agentRunImplementation: AgentRunImplementation | null = null
 let agentGoalControlImplementation: AgentGoalControlImplementation | null = null
 let activeAgentRunInspector: ActiveAgentRunInspector = () => false
 let activeAgentRunCanceller: ActiveAgentRunCanceller = () => false
-let agentRunSteerer: (request: AgentRunSteerRequest) => Promise<AgentRunSteerResult> = async () => ({
-  queued: false, reason: "run_not_ready"
+let agentRunSteerer: (
+  request: AgentRunSteerRequest
+) => Promise<AgentRunSteerResult> = async () => ({
+  queued: false,
+  reason: "run_not_ready"
 })
 
 export function registerAgentRunSteerer(

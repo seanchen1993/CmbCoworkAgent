@@ -1,10 +1,10 @@
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { botErrorMessage } from "@/lib/bot-error-message"
+import { botCreateShortcut } from "@/lib/bot-create-shortcut"
 import { BotGroupAvatar } from "./BotGroupAvatar"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import {
   Archive,
-  ChevronDown,
   CircleAlert,
   ChevronRight,
   Loader2,
@@ -49,7 +49,7 @@ import {
   botFileRefreshKey
 } from "@/lib/bot-task-view"
 import { orderBotConversations } from "@/lib/bot-sidebar-view"
-import { groupDraftKey, useBotGroupDrafts } from "@/lib/bot-group-drafts"
+import { groupDraftKey, sendGroupDraft, useBotGroupDrafts } from "@/lib/bot-group-drafts"
 import {
   bindBotConversationDraft,
   restoreBotConversationDraft,
@@ -57,7 +57,12 @@ import {
   pruneBotConversationDrafts
 } from "@/lib/bot-conversation-draft"
 import { BotDraftFileTransfer, validateNewChatFiles } from "@/lib/bot-new-chat-files"
-import { BotDraftSender, validateBotDraft } from "@/lib/bot-draft-sender"
+import {
+  botChatRecipientKey,
+  materializeBotChatRecipients,
+  type BotChatRecipient
+} from "@/lib/bot-chat-recipients"
+import { BotDraftSender, queueBotChatDraft, validateBotDraft } from "@/lib/bot-draft-sender"
 import { BotStorefrontIcon } from "./BotStorefrontIcon"
 import { botGroupBrowserScope, BOT_REQUEST_RECEIPT_LIMIT } from "../../../../shared/bots/contracts"
 import type {
@@ -124,7 +129,8 @@ function BotEditor({
   onClose,
   onSaved,
   returnFocusTo,
-  nameOnly = false
+  nameOnly = false,
+  initialName = ""
 }: {
   bot: BotDefinition | null
   client: BotClient
@@ -132,19 +138,23 @@ function BotEditor({
   onSaved(bot: BotDefinition): void
   returnFocusTo?: HTMLElement | null
   nameOnly?: boolean
+  initialName?: string
 }) {
   const models = useAppStore((state) => state.models)
   const trigger = useRef(returnFocusTo ?? document.activeElement)
   const [input, setInput] = useState<CreateBotInput>(
     () =>
       bot ?? {
-        name: "",
+        name: initialName,
         instructions: "",
         ...createBotAppearance(),
         modelRef: null
       }
   )
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false)
+  const [advanced, setAdvanced] = useState(false)
+  const creating = !bot && !nameOnly
+  const settingsId = useId()
   const [saving, setSaving] = useState(false)
   const lock = useRef(false)
   const [error, setError] = useState<string | null>(null)
@@ -180,98 +190,136 @@ function BotEditor({
         }}
       >
         <DialogContent
-          className="bot-editor flex max-h-[calc(100dvh-3rem)] flex-col sm:max-w-[440px]"
+          className={`bot-editor flex max-h-[calc(100dvh-3rem)] flex-col sm:max-w-[440px]${creating ? " bot-create-dialog" : ""}`}
           onCloseAutoFocus={(event) => {
             if (!(trigger.current instanceof HTMLElement) || !trigger.current.isConnected) return
             event.preventDefault()
             trigger.current.focus({ preventScroll: true })
           }}
         >
-          <DialogHeader>
-            <DialogTitle>{nameOnly ? "重命名 Bot" : bot ? "编辑 Bot" : "新建 Bot"}</DialogTitle>
-            <DialogDescription>
+          <DialogHeader className={creating ? "bot-create-heading" : undefined}>
+            <DialogTitle>{nameOnly ? "重命名 Bot" : bot ? "编辑 Bot" : "创建新 Bot"}</DialogTitle>
+            <DialogDescription className={creating ? "sr-only" : undefined}>
               {nameOnly ? "修改名称不会改变对话和工作资料。" : "为 Bot 起个名字，告诉它负责什么。"}
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={submit} className="min-h-0 space-y-5 overflow-y-auto overscroll-contain">
-            {!nameOnly && (
-              <div className="flex flex-col items-center gap-4 py-2">
-                <BotAvatar color={input.color} shape={input.shape} size={90} />
-                <BotAppearancePicker
-                  value={input}
-                  onChange={(appearance) => setInput((value) => ({ ...value, ...appearance }))}
-                />
-              </div>
-            )}
-            <label className="bot-field">
-              名称
-              <input
-                required
-                maxLength={80}
-                autoFocus
-                value={input.name}
-                onChange={(event) => setInput((value) => ({ ...value, name: event.target.value }))}
-                placeholder="例如：研发搭档"
-              />
-            </label>
-            {!nameOnly && (
-              <>
-                <label className="bot-field">
-                  职责
-                  <textarea
-                    rows={3}
-                    maxLength={8000}
-                    value={input.instructions}
-                    onChange={(event) =>
-                      setInput((value) => ({ ...value, instructions: event.target.value }))
-                    }
-                    placeholder="描述它擅长什么、如何与你合作…"
-                  />
-                </label>
-                <label className="bot-field">
-                  模型
-                  <Select
-                    value={input.modelRef ?? "default"}
-                    disabled={saving}
-                    onValueChange={(modelRef) =>
-                      setInput((value) => ({
-                        ...value,
-                        modelRef: modelRef === "default" ? null : modelRef
-                      }))
-                    }
-                  >
-                    <SelectTrigger aria-label="模型" className="h-11 rounded-xl shadow-none">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
-                      <SelectItem value="default">使用默认模型</SelectItem>
-                      {models.map((model) => (
-                        <SelectItem key={model.id} value={model.id}>
-                          {model.name}
-                        </SelectItem>
-                      ))}
-                      {input.modelRef && !models.some((model) => model.id === input.modelRef) && (
-                        <SelectItem value={input.modelRef}>当前模型（未连接）</SelectItem>
-                      )}
-                    </SelectContent>
-                  </Select>
-                </label>
-                <button
-                  type="button"
-                  className="text-xs text-muted-foreground underline underline-offset-4"
-                  disabled={saving}
-                  onClick={() => setModelSettingsOpen(true)}
+          <form
+            onSubmit={submit}
+            className={
+              creating ? "bot-create-form" : "min-h-0 space-y-5 overflow-y-auto overscroll-contain"
+            }
+          >
+            <div className={creating ? "bot-create-body" : "space-y-5"}>
+              {!nameOnly && (
+                <div
+                  className={
+                    creating ? "bot-create-avatar" : "flex flex-col items-center gap-4 py-2"
+                  }
                 >
-                  管理模型与 API 配置
-                </button>
-              </>
-            )}
-            {error && (
-              <p role="alert" className="text-sm text-destructive">
-                {error}
-              </p>
-            )}
-            <DialogFooter>
+                  <BotAvatar color={input.color} shape={input.shape} size={90} />
+                  {!creating && (
+                    <BotAppearancePicker
+                      value={input}
+                      disabled={saving}
+                      onChange={(appearance) => setInput((value) => ({ ...value, ...appearance }))}
+                    />
+                  )}
+                </div>
+              )}
+              <label className={creating ? "bot-field bot-create-name" : "bot-field"}>
+                <span className={creating ? "sr-only" : undefined}>Bot 名称</span>
+                <input
+                  required
+                  maxLength={80}
+                  autoFocus
+                  disabled={saving}
+                  value={input.name}
+                  onChange={(event) =>
+                    setInput((value) => ({ ...value, name: event.target.value }))
+                  }
+                  placeholder={creating ? "给你的 Bot 起个名字" : "例如：研发搭档"}
+                />
+              </label>
+              {creating && (
+                <>
+                  <BotAppearancePicker
+                    value={input}
+                    disabled={saving}
+                    onChange={(appearance) => setInput((value) => ({ ...value, ...appearance }))}
+                  />
+                  <button
+                    type="button"
+                    className="bot-create-advanced"
+                    aria-expanded={advanced}
+                    aria-controls={settingsId}
+                    disabled={saving}
+                    onClick={() => setAdvanced((value) => !value)}
+                  >
+                    <ChevronRight size={14} aria-hidden="true" />
+                    更多设置
+                  </button>
+                </>
+              )}
+              {!nameOnly && (!creating || advanced) && (
+                <div id={creating ? settingsId : undefined} className="space-y-5">
+                  <label className="bot-field">
+                    职责
+                    <textarea
+                      rows={3}
+                      maxLength={8000}
+                      disabled={saving}
+                      value={input.instructions}
+                      onChange={(event) =>
+                        setInput((value) => ({ ...value, instructions: event.target.value }))
+                      }
+                      placeholder="描述它擅长什么、如何与你合作…"
+                    />
+                  </label>
+                  <label className="bot-field">
+                    模型
+                    <Select
+                      value={input.modelRef ?? "default"}
+                      disabled={saving}
+                      onValueChange={(modelRef) =>
+                        setInput((value) => ({
+                          ...value,
+                          modelRef: modelRef === "default" ? null : modelRef
+                        }))
+                      }
+                    >
+                      <SelectTrigger aria-label="模型" className="h-11 rounded-xl shadow-none">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
+                        <SelectItem value="default">使用默认模型</SelectItem>
+                        {models.map((model) => (
+                          <SelectItem key={model.id} value={model.id}>
+                            {model.name}
+                          </SelectItem>
+                        ))}
+                        {input.modelRef && !models.some((model) => model.id === input.modelRef) && (
+                          <SelectItem value={input.modelRef}>当前模型（未连接）</SelectItem>
+                        )}
+                      </SelectContent>
+                    </Select>
+                  </label>
+                  <button
+                    type="button"
+                    className="text-xs text-muted-foreground underline underline-offset-4"
+                    disabled={saving}
+                    onClick={() => setModelSettingsOpen(true)}
+                  >
+                    管理模型与 API 配置
+                  </button>
+                </div>
+              )}
+              {error && (
+                <p role="alert" className="text-sm text-destructive">
+                  {error}
+                </p>
+              )}
+            </div>
+            <DialogFooter className={creating ? "bot-create-footer" : undefined}>
               <Button type="button" variant="ghost" disabled={saving} onClick={onClose}>
                 取消
               </Button>
@@ -281,7 +329,7 @@ function BotEditor({
                 disabled={saving || !input.name.trim()}
               >
                 {saving && <Loader2 className="mr-2 size-4 animate-spin" />}
-                {bot ? "保存" : "创建 Bot"}
+                {saving && creating ? "创建中…" : bot ? "保存" : "创建"}
               </Button>
             </DialogFooter>
           </form>
@@ -413,6 +461,8 @@ function BotConversation({
       configureModel: onConfigureModel,
       busy: Boolean(running) || backgroundBusy,
       busySubmitLabel: "发送消息",
+      canReplyToQuestionsInComposer:
+        running?.origin.kind === "user" || running?.origin.kind === "introduction",
       placeholder: `给 ${bot.name} 发消息…`
     }),
     [
@@ -605,6 +655,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const [searchOpen, setSearchOpen] = useState(false)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const [newChat, setNewChat] = useState(false)
+  const [newChatRecipients, setNewChatRecipients] = useState<BotChatRecipient[]>([])
   const [newChatDraft, setNewChatDraft] = useState("")
   const newChatDraftRef = useRef("")
   const [newChatFiles, setNewChatFiles] = useState<File[]>([])
@@ -629,8 +680,10 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const [newChatError, setNewChatError] = useState<string | null>(null)
   const newChatAttempt = useRef(0)
   const creatingChat = useRef(false)
-  const createdChatBot = useRef<BotDefinition | null>(null)
   const createdChatGroup = useRef<BotGroup | null>(null)
+  const createdChatRecipients = useRef(new Map<string, BotDefinition>())
+  const privateChatRecipient = useRef<BotDefinition | null>(null)
+  const newChatCreateIntent = useRef<"draft" | "send" | null>(null)
   const threadContext = useThreadContext()
   useEffect(
     () => () => {
@@ -643,18 +696,70 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     setNewChat(false)
   }
   const [groupEditor, setGroupEditor] = useState<BotGroup | "new" | null>(null)
+  const groupEditorTrigger = useRef<HTMLElement | null>(null)
+  const openGroupEditor = (group: BotGroup | "new", trigger?: HTMLElement | null) => {
+    groupEditorTrigger.current =
+      trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    setGroupEditor(group)
+  }
   const selectedGroup = snapshot?.groups.find((group) => group.id === groupId) ?? null
   const [deleting, setDeleting] = useState<BotDefinition | null>(null)
   const [deletingGroup, setDeletingGroup] = useState<BotGroup | null>(null)
   const [renamingGroup, setRenamingGroup] = useState<BotGroup | null>(null)
   const [renaming, setRenaming] = useState<BotDefinition | null>(null)
   const [editor, setEditor] = useState<BotDefinition | "new" | null>(null)
+  const [newBotName, setNewBotName] = useState("")
   const editorTrigger = useRef<HTMLElement | null>(null)
   const profileMenuTrigger = useRef<HTMLButtonElement | null>(null)
+  const newConversationTrigger = useRef<HTMLButtonElement | null>(null)
+  const openNewChat = useCallback(() => {
+    if (creatingChat.current) return
+    newChatAttempt.current++
+    createdChatGroup.current = null
+    createdChatRecipients.current.clear()
+    privateChatRecipient.current = null
+    setNewChatRecipients([])
+    setNewChat(true)
+    setNewChatError(null)
+  }, [])
+  useEffect(() => {
+    const create = (event: KeyboardEvent) => {
+      const action = botCreateShortcut(event)
+      if (!action) return
+      const state = useAppStore.getState()
+      const trigger = newConversationTrigger.current
+      if (
+        state.mainView !== "bots" ||
+        state.showCustomizeView ||
+        !trigger?.isConnected ||
+        trigger.disabled ||
+        trigger.closest("[inert]") ||
+        document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')
+      )
+        return
+      event.preventDefault()
+      if (action === "bot") trigger.click()
+      else if (!document.querySelector(".bot-new-chat")) openNewChat()
+    }
+    document.addEventListener("keydown", create)
+    return () => document.removeEventListener("keydown", create)
+  }, [openNewChat])
+  const newMenuTransfersFocus = useRef(false)
   const openBotEditor = (bot: BotDefinition, trigger?: HTMLElement | null) => {
     editorTrigger.current =
       trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
     setEditor(bot)
+  }
+  const openNewBot = (
+    name = "",
+    trigger?: HTMLElement | null,
+    intent: "draft" | "send" | null = null
+  ) => {
+    editorTrigger.current =
+      trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    setNewBotName(name)
+    newChatCreateIntent.current = intent
+    setEditor("new")
   }
   const visible = useMemo(
     () =>
@@ -714,13 +819,17 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     selected ? threadSummaries[selected.threadId] : undefined,
     Boolean(selected && snapshot?.backgroundThreads?.includes(selected.threadId))
   )
-  const carryGroupDraft = async (group: BotGroup, isCurrent: () => boolean) => {
+  const carryGroupDraft = async (
+    group: BotGroup,
+    isCurrent: () => boolean,
+    replacePrepared = false
+  ) => {
     const text = newChatDraftRef.current
     const key = groupDraftKey(client.hostId, group.id)
     // New chat can target a group before its conversation has mounted after restart.
     useBotGroupDrafts.getState().restore(key)
     const current = useBotGroupDrafts.getState().drafts[key]
-    if (current?.storageError) throw new Error(current.storageError)
+    if (current?.storageError && !replacePrepared) throw new Error(current.storageError)
     if (current?.sending) throw new Error("群聊消息正在发送，请稍后重试。")
     const files = newChatFilesRef.current
     const member = snapshot?.bots.find(
@@ -733,7 +842,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
           member.id,
           group.id,
           files,
-          current?.attachments ?? [],
+          replacePrepared ? [] : (current?.attachments ?? []),
           isCurrent
         )
       : []
@@ -742,30 +851,99 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
       throw new Error("群聊草稿已变化，请重试。")
     if (!text.trim() && !attachments.length) return
     useBotGroupDrafts.getState().edit(key, {
-      text:
-        current?.text.trim() && text.trim() ? `${current.text}\n\n${text}` : current?.text || text,
-      attachments: [...(current?.attachments ?? []), ...attachments]
+      text: replacePrepared
+        ? text
+        : current?.text.trim() && text.trim()
+          ? `${current.text}\n\n${text}`
+          : current?.text || text,
+      attachments: replacePrepared ? attachments : [...(current?.attachments ?? []), ...attachments]
     })
+    const storageError = useBotGroupDrafts.getState().drafts[key]?.storageError
+    if (storageError) throw new Error(storageError)
   }
-  const selectNewChat = async (value: string, createdGroup?: BotGroup, newBotName = "新建 Bot") => {
+  const clearNewChatDraft = () => {
+    editNewChatDraft("")
+    editNewChatFiles([])
+    newChatTransfer.current.clear()
+  }
+  const addNewChatRecipient = (recipient: BotChatRecipient) => {
+    const key = botChatRecipientKey(recipient)
+    if (creatingChat.current || newChatRecipients.some((item) => botChatRecipientKey(item) === key))
+      return
+    if (newChatRecipients.length >= 8) {
+      setNewChatError("一次最多选择 8 个 Bot。")
+      return
+    }
+    setNewChatRecipients((items) =>
+      items.some((item) => botChatRecipientKey(item) === key) || items.length >= 8
+        ? items
+        : [...items, recipient]
+    )
+    setNewChatError(null)
+    createdChatGroup.current = null
+    privateChatRecipient.current = null
+  }
+  const selectNewChat = async (
+    value: string,
+    createdGroup?: BotGroup,
+    send = false,
+    createdBot?: BotDefinition
+  ) => {
     if (creatingChat.current) return
-    if (value === "new-group") {
-      if (!createdChatGroup.current) {
-        setGroupEditor("new")
-        return
-      }
-      createdGroup = createdChatGroup.current
-      value = `group:${createdGroup.id}`
+    const onlyRecipient = newChatRecipients.length === 1 ? newChatRecipients[0] : undefined
+    if (
+      value === "recipients" &&
+      onlyRecipient?.kind === "bot" &&
+      privateChatRecipient.current?.id === onlyRecipient.id
+    ) {
+      value = `bot:${onlyRecipient.id}`
+      createdBot = privateChatRecipient.current
+    }
+    if (
+      value === "recipients" &&
+      newChatRecipients.length === 1 &&
+      newChatRecipients[0].kind === "new"
+    ) {
+      openNewBot(newChatRecipients[0].name, undefined, send ? "send" : "draft")
+      return
     }
     creatingChat.current = true
     const attempt = ++newChatAttempt.current
     setNewChatBusy(true)
     setNewChatError(null)
     try {
+      let preparedGroup = false
+      if (value === "recipients") {
+        const recipients = await materializeBotChatRecipients(
+          client,
+          newChatRecipients,
+          snapshot?.bots ?? [],
+          createdChatRecipients.current,
+          () => attempt === newChatAttempt.current
+        )
+        const names = recipients.map((bot) => bot.name)
+        const name = names.join("、")
+        createdGroup =
+          createdChatGroup.current ??
+          (await client.saveGroup({
+            name: name.length <= 120 ? name : `${names[0]}等 ${names.length} 位 Bot`,
+            memberIds: recipients.map((bot) => bot.id)
+          }))
+        createdChatGroup.current = createdGroup
+        if (attempt !== newChatAttempt.current) return
+        value = `group:${createdGroup.id}`
+        preparedGroup = true
+      }
       if (value.startsWith("group:")) {
         const group = createdGroup ?? snapshot?.groups.find((item) => item.id === value.slice(6))
         if (!group) throw new Error("群聊已不可用")
-        await carryGroupDraft(group, () => attempt === newChatAttempt.current)
+        await carryGroupDraft(group, () => attempt === newChatAttempt.current, preparedGroup)
+        if (attempt !== newChatAttempt.current) return
+        if (send) {
+          // Ownership passes to the existing persistent group draft before any network call.
+          clearNewChatDraft()
+          await sendGroupDraft(client, group)
+        }
         if (attempt !== newChatAttempt.current) return
         setGroupId(group.id)
         updateView({
@@ -775,19 +953,22 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
         })
       } else {
         const bot =
-          value === "new-bot"
-            ? ((createdChatBot.current?.name === newBotName ? createdChatBot.current : null) ??
-              (await client.create({
-                name: newBotName,
-                instructions: "",
-                ...createBotAppearance(),
-                modelRef: null
-              })))
-            : snapshot?.bots.find((item) => item.id === value.slice(4) && !item.archived)
-        if (!bot) throw new Error("Bot 已不可用")
+          createdBot ??
+          snapshot?.bots.find(
+            (item) => item.id === value.slice(4) && !item.archived && !item.deleting
+          )
+        if (
+          !bot ||
+          bot.id !== value.slice(4) ||
+          bot.hostId !== client.hostId ||
+          bot.archived ||
+          bot.deleting
+        )
+          throw new Error("Bot 已不可用")
         if (attempt !== newChatAttempt.current) return
-        if (value === "new-bot") createdChatBot.current = bot
-        await client.open(bot.id)
+        // Explicit first sends must reach the durable inbox before opening can start a greeting.
+        // BotConversation opens after handoff; the original user enqueue suppresses introduction.
+        if (!send) await client.open(bot.id)
         if (attempt !== newChatAttempt.current) return
         const restoreError = restoreBotConversationDraft(
           threadContext,
@@ -801,28 +982,51 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
           bot.id,
           undefined,
           newChatFilesRef.current,
-          threadContext.getThreadState(bot.threadId).draftAttachments ?? [],
+          send ? [] : threadContext.getThreadState(bot.threadId).draftAttachments,
           () => attempt === newChatAttempt.current
         )
         if (attempt !== newChatAttempt.current) return
         const text = newChatDraftRef.current
-        if (text.trim()) {
-          const current = threadContext.getThreadState(bot.threadId).draftInput
-          threadContext
-            .getThreadActions(bot.threadId)
-            .setDraftInput(current.trim() ? `${current}\n\n${text}` : text)
+        const actions = threadContext.getThreadActions(bot.threadId)
+        if (send) {
+          if (
+            threadContext.getThreadState(bot.threadId).queuedMessages.length >=
+            BOT_REQUEST_RECEIPT_LIMIT
+          )
+            throw new Error("待发送消息过多，请先处理已有消息。")
+          const draft = queueBotChatDraft(actions, text, attachments)
+          clearNewChatDraft()
+          await new BotDraftSender(
+            client,
+            bot.id,
+            actions,
+            (error) => {
+              if (error) toast.error(error)
+            },
+            () => {}
+          ).send(draft)
+          if (attempt !== newChatAttempt.current) return
+        } else {
+          const current = threadContext.getThreadState(bot.threadId)
+          if (text.trim())
+            actions.setDraftInput(
+              current.draftInput.trim() ? `${current.draftInput}\n\n${text}` : text
+            )
+          if (attachments.length)
+            actions.setDraftAttachments([...current.draftAttachments, ...attachments])
+          const saveError = saveBotConversationDraft(
+            threadContext,
+            client.hostId,
+            bot.id,
+            bot.threadId
+          )
+          if (saveError) {
+            // The source still owns these bytes if the target could not persist them.
+            actions.setDraftInput(current.draftInput)
+            actions.setDraftAttachments(current.draftAttachments)
+            throw new Error(saveError)
+          }
         }
-        if (attachments.length)
-          threadContext
-            .getThreadActions(bot.threadId)
-            .setDraftAttachments((current) => [...current, ...attachments])
-        const saveError = saveBotConversationDraft(
-          threadContext,
-          client.hostId,
-          bot.id,
-          bot.threadId
-        )
-        if (saveError) toast.error(saveError)
         setSelectedId(bot.id)
         setGroupId(null)
         updateView({
@@ -835,9 +1039,10 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
       setShowHidden(false)
       setShowArchived(false)
       setDetailOpen(false)
-      editNewChatDraft("")
-      editNewChatFiles([])
-      newChatTransfer.current.clear()
+      clearNewChatDraft()
+      createdChatRecipients.current.clear()
+      createdChatGroup.current = null
+      privateChatRecipient.current = null
       setNewChat(false)
     } catch (cause) {
       if (attempt === newChatAttempt.current) setNewChatError(botErrorMessage(cause))
@@ -1243,20 +1448,48 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             >
               <Search size={19} />
             </button>
-            <button
-              className="bot-icon-button bot-toolbar-action"
-              aria-label="新建聊天"
-              disabled={newChatBusy}
-              onClick={() => {
-                newChatAttempt.current++
-                createdChatBot.current = null
-                createdChatGroup.current = null
-                setNewChat(true)
-                setNewChatError(null)
-              }}
-            >
-              <Plus size={22} />
-            </button>
+            <ContextMenu>
+              <ContextMenuTrigger asChild>
+                <button
+                  ref={newConversationTrigger}
+                  className="bot-icon-button bot-toolbar-action"
+                  aria-label="新建 Bot"
+                  disabled={newChatBusy}
+                  onClick={(event) => openNewBot("", event.currentTarget)}
+                >
+                  <Plus size={22} />
+                </button>
+              </ContextMenuTrigger>
+              <ContextMenuContent
+                data-bot-popup
+                className="bot-workspace-menu rounded-xl p-1.5"
+                onCloseAutoFocus={(event) => {
+                  if (newMenuTransfersFocus.current) {
+                    event.preventDefault()
+                    newMenuTransfersFocus.current = false
+                  }
+                }}
+              >
+                <ContextMenuItem
+                  disabled={newChatBusy}
+                  onSelect={() => {
+                    newMenuTransfersFocus.current = true
+                    openNewBot("", newConversationTrigger.current)
+                  }}
+                >
+                  新建 Bot
+                </ContextMenuItem>
+                <ContextMenuItem
+                  disabled={newChatBusy}
+                  onSelect={() => {
+                    newMenuTransfersFocus.current = true
+                    openNewChat()
+                  }}
+                >
+                  新建群聊
+                </ContextMenuItem>
+              </ContextMenuContent>
+            </ContextMenu>
           </div>
           {searchOpen && (
             <label className="bot-search">
@@ -1525,13 +1758,38 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             <BotNewChat
               bots={snapshot?.bots ?? []}
               groups={snapshot?.groups ?? []}
+              recipients={newChatRecipients}
               draft={newChatDraft}
               files={newChatFiles}
               busy={newChatBusy}
               error={newChatError}
               onDraft={editNewChatDraft}
               onFiles={editNewChatFiles}
-              onSelect={(value, name) => void selectNewChat(value, undefined, name)}
+              onSelect={(value, name) => {
+                if (value === "new-bot") {
+                  if (newChatRecipients.length >= 8) setNewChatError("一次最多选择 8 个 Bot。")
+                  else if (name && newChatRecipients.length)
+                    addNewChatRecipient({ kind: "new", name })
+                  else openNewBot(name, undefined, "draft")
+                } else if (value.startsWith("bot:"))
+                  addNewChatRecipient({ kind: "bot", id: value.slice(4) })
+                else void selectNewChat(value)
+              }}
+              onRemoveRecipient={(key) => {
+                if (creatingChat.current) return
+                setNewChatRecipients((items) =>
+                  items.filter((item) => botChatRecipientKey(item) !== key)
+                )
+                createdChatRecipients.current.delete(key)
+                createdChatGroup.current = null
+                privateChatRecipient.current = null
+              }}
+              onCommit={() => {
+                void selectNewChat("recipients")
+              }}
+              onSend={() => {
+                void selectNewChat("recipients", undefined, true)
+              }}
               onClose={closeNewChat}
             />
           ) : selectedGroup ? (
@@ -1543,7 +1801,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               backgroundThreads={snapshot?.backgroundThreads ?? []}
               revision={snapshot?.revision ?? 0}
               client={client}
-              onEdit={() => setGroupEditor(selectedGroup)}
+              onEdit={() => openGroupEditor(selectedGroup)}
               onDetails={() => setDetailOpen(!detailOpen)}
               detailOpen={detailOpen}
               detailsTriggerRef={detailTriggerRef}
@@ -1586,7 +1844,6 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                     waiting={selectedState === "waiting_user"}
                   />
                   <span>{selected.name}</span>
-                  <ChevronDown size={13} />
                 </button>
                 <button
                   className="bot-icon-button"
@@ -1619,10 +1876,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               <p>交代目标，随时回来查看进展。</p>
               <Button
                 className="rounded-full px-6"
-                onClick={() => {
-                  createdChatBot.current = null
-                  setNewChat(true)
-                }}
+                onClick={(event) => openNewBot("", event.currentTarget)}
               >
                 <Plus size={16} className="mr-2" />
                 创建 Bot
@@ -1713,7 +1967,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                     </p>
                     <button
                       className="bot-member-add"
-                      onClick={() => setGroupEditor(selectedGroup)}
+                      onClick={() => openGroupEditor(selectedGroup)}
                     >
                       <Settings2 size={18} />
                       群聊设置
@@ -1996,6 +2250,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
         {groupEditor && (
           <BotGroupEditor
             group={groupEditor === "new" ? null : groupEditor}
+            returnFocusTo={groupEditorTrigger.current}
             bots={snapshot?.bots ?? []}
             client={client}
             onClose={() => setGroupEditor(null)}
@@ -2026,10 +2281,24 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
         {editor && (
           <BotEditor
             bot={editor === "new" ? null : editor}
+            initialName={newBotName}
             client={client}
             returnFocusTo={editorTrigger.current}
-            onClose={() => setEditor(null)}
+            onClose={() => {
+              newChatCreateIntent.current = null
+              setEditor(null)
+            }}
             onSaved={(bot) => {
+              const intent = newChatCreateIntent.current
+              newChatCreateIntent.current = null
+              if (editor === "new" && newChat && intent) {
+                setEditor(null)
+                setNewChatRecipients([{ kind: "bot", id: bot.id }])
+                privateChatRecipient.current = bot
+                void selectNewChat(`bot:${bot.id}`, undefined, intent === "send", bot)
+                return
+              }
+              if (editor === "new" && newChat) closeNewChat()
               setSelectedId(bot.id)
               setGroupId(null)
               setShowArchived(bot.archived)

@@ -332,13 +332,9 @@ describe("recoverFlushFailedRun instance fence", () => {
     }, 2)
     try {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 20))
-      expect(
-        await workflowRunManager.retryPersistFlushFailedRun(
-          workspace,
-          THREAD_ID,
-          runId
-        )
-      ).toBe(false)
+      expect(await workflowRunManager.retryPersistFlushFailedRun(workspace, THREAD_ID, runId)).toBe(
+        false
+      )
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 20))
     } finally {
       clearInterval(ticker)
@@ -382,17 +378,10 @@ describe("recoverFlushFailedRun instance fence", () => {
     const compact = record(runId, RESUMED_STARTED_AT, "completed")
     privates.flushFailedRuns.set(runId, compact)
     privates.flushFailedJournalSources.set(runId, "sidecar")
-    privates.flushFailedReservedBytes.set(
-      runId,
-      WORKFLOW_FLUSH_FAILURE_METADATA_RESERVATION_BYTES
-    )
+    privates.flushFailedReservedBytes.set(runId, WORKFLOW_FLUSH_FAILURE_METADATA_RESERVATION_BYTES)
     privates.flushFailedEpochs.set(runId, workflowThreadDisposalEpoch(THREAD_ID))
 
-    const resumed = await workflowRunManager.getFlushFailedRunForResume(
-      workspace,
-      THREAD_ID,
-      runId
-    )
+    const resumed = await workflowRunManager.getFlushFailedRunForResume(workspace, THREAD_ID, runId)
     expect(resumed?.status).toBe("completed")
     expect(resumed?.journal).toEqual(initial.journal)
     expect(privates.flushFailedRuns.get(runId)?.journal).toEqual([])
@@ -458,6 +447,67 @@ describe("recoverFlushFailedRun instance fence", () => {
         startedAt: RESUMED_STARTED_AT
       })
     ).toBe(false)
+  })
+
+  test("a durable receipt claims only its exact workflow instance and owner", async () => {
+    const newer = seedFlushFailedSnapshot(generateWorkflowRunId(), RESUMED_STARTED_AT)
+    const original = seedFlushFailedSnapshot(generateWorkflowRunId(), FIRST_STARTED_AT)
+    const target = {
+      owner: "desktop" as const,
+      runId: original.runId,
+      startedAt: FIRST_STARTED_AT
+    }
+    expect(
+      await workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID, target)
+    ).toMatchObject({ runId: original.runId, startedAt: FIRST_STARTED_AT })
+    workflowRunManager.clearNotificationInFlight(original.runId)
+    for (const changed of [
+      { ...target, startedAt: RESUMED_STARTED_AT },
+      { ...target, owner: "managed" as const },
+      { ...target, runId: "missing" }
+    ])
+      expect(
+        await workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID, changed)
+      ).toBeNull()
+    expect(
+      await workflowRunManager.claimPendingNotificationAsync(workspace, "other-thread", target)
+    ).toBeNull()
+    expect(privates.inFlightNotifications.size).toBe(0)
+    // Ordinary discovery still takes the first pending candidate without a receipt filter.
+    expect(
+      await workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID)
+    ).toMatchObject({ runId: newer.runId })
+  })
+
+  test("disk notification discovery keeps the requested instance instead of the newest run", async () => {
+    const first = record(generateWorkflowRunId(), FIRST_STARTED_AT, "completed")
+    const second = record(generateWorkflowRunId(), RESUMED_STARTED_AT, "completed")
+    for (const run of [first, second]) {
+      const store = createWorkflowRunStore({
+        workspacePath: workspace,
+        threadId: THREAD_ID,
+        initial: run
+      })
+      expect(await store.flush()).toBe(true)
+    }
+    expect(
+      await workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID, {
+        owner: "desktop",
+        runId: first.runId,
+        startedAt: first.startedAt
+      })
+    ).toMatchObject({ runId: first.runId, startedAt: FIRST_STARTED_AT })
+    workflowRunManager.clearNotificationInFlight(first.runId)
+    expect(
+      await workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID, {
+        owner: "desktop",
+        runId: first.runId,
+        startedAt: second.startedAt
+      })
+    ).toBeNull()
+    expect(
+      await workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID)
+    ).toMatchObject({ runId: second.runId })
   })
 
   test("concurrent async notification claims can acquire one run only once", async () => {
