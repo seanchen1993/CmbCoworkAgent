@@ -29,6 +29,8 @@ root 已完整阅读原实施者 `edbcc351` 检查点（十五项 beta 能力保
 
 integration 产品 `b479d51d`（后续仅文档提交 `3852c709`），Node 22 运行 `vitest run src/main/bots src/main/ipc/bots.test.ts`：21 文件、317 测试通过，exit 0，日志 `/tmp/m05-root-beta-baseline.log`。这是既有功能单元/组件边界基线，不代替新增任务、实际 UI 或最终能力矩阵验收；未调用真实模型/网关。
 
+补充独立基线：`vitest run src/renderer/src/lib/bot` 29 文件、222 测试通过，日志 `/tmp/m05-root-beta-view-baseline.log`；shared bots file-delivery/client-registry 与 IPC bot-files 3 文件、18 测试通过，日志 `/tmp/m05-root-beta-ui-baseline.log`（名称含 UI，但实际仅三组边界测试）。合计 557 项现有检查，无真实 App/原生界面验收声明。全部句柄退出 0，无用户 profile 或服务变更。
+
 原写者已保全五文件 M04 dirty 为 `9e83c3048`，在 `codex/beta-local-unification-m05` 正常合入设计文档后 HEAD `8545a4ea`，初始 clean。正在 M05-01 接口/能力矩阵调查，尚未提交 M05 产品实现。
 
 网关本机工程已定位并只读核对 HEAD `e744c6d7`，现有 `Dockerfile`/`README.md`/`pom.xml` 用户改动保持原样。网关当前明确忽略群消息，不宣称群平台已打通。原实施树五个未提交 M04 修复保留；本轮不接管用户预览，不恢复自动续跑，无真实平台/内网/推送/部署。

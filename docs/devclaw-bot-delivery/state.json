@@ -274,13 +274,15 @@
   "complex_effort": "xhigh",
   "simple_effort": "high",
   "active": true,
-  "status": "M05_01_interface_review_in_progress",
+  "status": "M05_02_03_implementing",
   "candidate_commit": null,
   "agent": "/root/service_conversation_sol",
   "worktree": "/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6",
   "branch": "codex/beta-local-unification-m05",
   "preserved_wip_commit": "9e83c3048",
-  "worktree_checkpoint": "8545a4ea"
+  "worktree_checkpoint": "8545a4ea",
+  "interface_checkpoint": "edbcc351684f9c794185c30f0c3e4e407711f09c",
+  "design_checkpoint": "9675f8b43a83f2b060c22e22cee82bb65a37b9f0"
 },
   "scheduler": {
     "kind": "heartbeat",
@@ -296,7 +298,7 @@
   "tasks": [
     {
       "id": "M05-beta-local-unification",
-      "status": "ready",
+      "status": "implementing",
       "spec": "tasks/M05-beta-local-unification.md",
       "design": "reviews/M05-beta-local-unification-design.md",
       "acceptance": "reviews/M05-acceptance.md",
@@ -322,11 +324,11 @@
       "slices": [
         {
           "id": "M05-01",
-          "status": "ready"
+          "status": "reviewed"
         },
         {
           "id": "M05-02",
-          "status": "pending"
+          "status": "implementing"
         },
         {
           "id": "M05-03",
@@ -341,7 +343,7 @@
           "status": "pending"
         }
       ],
-      "checkpoint": "Design/task list ready. Original writer interrupted with five dirty files preserved. Await initial interface checkpoint; user preview unchanged; M04 not accepted as unified product.",
+      "checkpoint": "Root reviewed edbcc351 interfaces and 15-capability matrix, froze design in 9675f8b4, dispatched same original sol/xhigh for M05-02/03 product implementation. Default resident run limit2; new work max1 slot; mock text/work instructions only, real backend deferred.",
       "prior_historical_tasks_sha256": "a0944681efa620df834ba591318694ed0a085014984e77da8441808271691827"
     },
     {
