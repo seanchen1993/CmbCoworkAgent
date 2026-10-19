@@ -156,6 +156,49 @@ function coordinationEnvelope(
   }
   return value as unknown as ExpertCoordinationEnvelope
 }
+/** Safe shape metadata only. Never return text, unknown keys or provider errors. */
+export function summarizeCoordinationOutput(raw: string) {
+  const summary = {
+    length: raw.length,
+    utf8Bytes: Buffer.byteLength(raw, "utf8"),
+    fenced: /^\s*```/.test(raw),
+    json: "parse_error" as "parse_error" | "object" | "array" | "scalar",
+    rootFieldCount: 0,
+    reply: "missing" as "missing" | "nonempty_string" | "empty_string" | "other",
+    intent: "missing" as "missing" | "null" | "create_task" | "append_task" | "other",
+    intentFieldCount: 0
+  }
+  try {
+    const value: unknown = JSON.parse(raw)
+    summary.json = Array.isArray(value)
+      ? "array"
+      : value !== null && typeof value === "object"
+        ? "object"
+        : "scalar"
+    if (summary.json !== "object") return summary
+    const record = value as Record<string, unknown>
+    summary.rootFieldCount = Object.keys(record).length
+    if (Object.hasOwn(record, "reply"))
+      summary.reply =
+        typeof record.reply === "string"
+          ? record.reply.trim()
+            ? "nonempty_string"
+            : "empty_string"
+          : "other"
+    if (Object.hasOwn(record, "intent")) {
+      const intent = record.intent
+      if (intent === null) summary.intent = "null"
+      else if (typeof intent === "object" && !Array.isArray(intent)) {
+        summary.intentFieldCount = Object.keys(intent).length
+        const kind = (intent as { kind?: unknown }).kind
+        summary.intent = kind === "create_task" || kind === "append_task" ? kind : "other"
+      } else summary.intent = "other"
+    }
+  } catch {
+    /* Only the fixed parse_error enum is retained. */
+  }
+  return summary
+}
 /** All model-shape failures share one safe, recoverable protocol outcome. */
 export function parseCoordination(
   raw: string,
