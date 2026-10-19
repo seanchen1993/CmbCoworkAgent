@@ -96,7 +96,21 @@ function PlaybackHistoryStatus({
   status: BrowserPlaybackHistoryEntry["status"]
   error?: string
 }): React.JSX.Element {
+  const [errorCopied, setErrorCopied] = useState(false)
   const label = formatPlaybackHistoryStatus(status)
+
+  const handleCopyError = async (): Promise<void> => {
+    if (!error) return
+    try {
+      await navigator.clipboard.writeText(error)
+      setErrorCopied(true)
+      window.setTimeout(() => setErrorCopied(false), 1500)
+      toast.success("异常信息已复制")
+    } catch {
+      toast.error("复制异常信息失败")
+    }
+  }
+
   switch (status) {
     case "completed":
       return (
@@ -114,13 +128,31 @@ function PlaybackHistoryStatus({
       )
     case "error":
       return (
-        <span className="inline-flex items-center gap-1.5 text-red-500">
+        <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-red-500">
           <XCircle className="size-3.5 shrink-0" strokeWidth={2} />
           {label}
           {error ? (
             <IconPopoverButton
               icon={<Info className="size-3.5" strokeWidth={2} />}
-              popoverContent={<span className="whitespace-pre-wrap break-words">{error}</span>}
+              popoverContent={
+                <div className="flex min-w-0 flex-col gap-2">
+                  <span className="whitespace-pre-wrap break-words">{error}</span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 self-end px-2 text-[11px]"
+                    onClick={() => void handleCopyError()}
+                  >
+                    {errorCopied ? (
+                      <Check className="size-3.5" strokeWidth={1.8} />
+                    ) : (
+                      <Copy className="size-3.5" strokeWidth={1.8} />
+                    )}
+                    {errorCopied ? "已复制" : "复制异常"}
+                  </Button>
+                </div>
+              }
               popoverClassName="max-h-64 w-80 max-w-80 overflow-auto text-destructive"
               className="size-5 p-0 text-red-500 hover:text-red-600"
               aria-label="查看回放错误信息"
@@ -169,6 +201,7 @@ export function BrowserRecordingListDialog({
   const [detailCopied, setDetailCopied] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
+  const [historyCurrentPage, setHistoryCurrentPage] = useState(1)
   const [displayNameFilter, setDisplayNameFilter] = useState("")
   const [activeTab, setActiveTab] = useState<"recordings" | "history">("recordings")
   const detailDraftsRef = useRef(new Map<string, DetailDraftState>())
@@ -203,6 +236,13 @@ export function BrowserRecordingListDialog({
   const currentPageSafe = Math.max(1, Math.min(currentPage, totalPages))
   const pageStart = (currentPageSafe - 1) * PAGE_SIZE
   const currentEntries = filteredEntries.slice(pageStart, pageStart + PAGE_SIZE)
+  const historyTotalPages = Math.max(1, Math.ceil(playbackHistory.length / PAGE_SIZE))
+  const historyCurrentPageSafe = Math.max(1, Math.min(historyCurrentPage, historyTotalPages))
+  const historyPageStart = (historyCurrentPageSafe - 1) * PAGE_SIZE
+  const currentPlaybackHistory = playbackHistory.slice(
+    historyPageStart,
+    historyPageStart + PAGE_SIZE
+  )
   const selectedEntry =
     currentEntries.find((entry) => entry.fileName === selectedFileName) ?? currentEntries[0] ?? null
 
@@ -830,69 +870,101 @@ export function BrowserRecordingListDialog({
                 暂无回放历史。执行录制脚本后，运行结果会保存在这里。
               </div>
             ) : (
-              <div className="overflow-hidden rounded-xl border border-border/70">
-                <table className="w-full table-fixed border-collapse text-left text-[12px]">
-                  <colgroup>
-                    <col />
-                    <col className="w-[210px]" />
-                    <col className="w-[100px]" />
-                    <col className="w-[100px]" />
-                    <col className="w-[100px]" />
-                    <col className="w-[120px]" />
-                  </colgroup>
-                  <thead className="sticky top-0 z-10 bg-muted/95 text-[11px] font-medium text-muted-foreground backdrop-blur">
-                    <tr>
-                      <th className="border-b border-border/70 px-4 py-3">脚本名称</th>
-                      <th className="border-b border-border/70 px-4 py-3">运行时间</th>
-                      <th className="border-b border-border/70 px-4 py-3 text-right">运行进度</th>
-                      <th className="border-b border-border/70 px-4 py-3 text-right">执行步骤</th>
-                      <th className="border-b border-border/70 px-4 py-3 text-right">耗时</th>
-                      <th className="border-b border-border/70 px-4 py-3">运行状态</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {playbackHistory.map((entry) => {
-                      const libraryEntry = findHistoryLibraryEntry(entry)
-                      return (
-                        <tr key={entry.id} className="border-b border-border/60 last:border-0">
-                          <td
-                            className="truncate px-4 py-3 font-medium text-foreground"
-                            title={entry.scriptName}
-                          >
-                            <button
-                              type="button"
-                              className="max-w-full truncate text-left text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
-                              disabled={!libraryEntry}
-                              onClick={() => openHistoryScript(entry)}
-                              title={
-                                libraryEntry
-                                  ? `打开录制脚本：${entry.scriptName}`
-                                  : `录制脚本已不存在：${entry.scriptName}`
-                              }
+              <div className="flex min-h-0 flex-col gap-3">
+                <div className="overflow-hidden rounded-xl border border-border/70">
+                  <table className="w-full table-fixed border-collapse text-left text-[12px]">
+                    <colgroup>
+                      <col />
+                      <col className="w-[210px]" />
+                      <col className="w-[100px]" />
+                      <col className="w-[100px]" />
+                      <col className="w-[100px]" />
+                      <col className="w-[170px]" />
+                    </colgroup>
+                    <thead className="sticky top-0 z-10 bg-muted/95 text-[11px] font-medium text-muted-foreground backdrop-blur">
+                      <tr>
+                        <th className="border-b border-border/70 px-4 py-3">脚本名称</th>
+                        <th className="border-b border-border/70 px-4 py-3">运行时间</th>
+                        <th className="border-b border-border/70 px-4 py-3 text-right">运行进度</th>
+                        <th className="border-b border-border/70 px-4 py-3 text-right">执行步骤</th>
+                        <th className="border-b border-border/70 px-4 py-3 text-right">耗时</th>
+                        <th className="border-b border-border/70 px-4 py-3">运行状态</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {currentPlaybackHistory.map((entry) => {
+                        const libraryEntry = findHistoryLibraryEntry(entry)
+                        return (
+                          <tr key={entry.id} className="border-b border-border/60 last:border-0">
+                            <td
+                              className="truncate px-4 py-3 font-medium text-foreground"
+                              title={entry.scriptName}
                             >
-                              {entry.scriptName}
-                            </button>
-                          </td>
-                          <td className="px-4 py-3 tabular-nums text-muted-foreground">
-                            {formatRecordingTime(entry.runAt)}
-                          </td>
-                          <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
-                            {entry.progressPercent}%
-                          </td>
-                          <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
-                            {entry.completedSteps}/{entry.totalSteps} 步
-                          </td>
-                          <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
-                            {formatPlaybackDuration(entry.durationMs)}
-                          </td>
-                          <td className="px-4 py-3">
-                            <PlaybackHistoryStatus status={entry.status} error={entry.error} />
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
+                              <button
+                                type="button"
+                                className="max-w-full truncate text-left text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                                disabled={!libraryEntry}
+                                onClick={() => openHistoryScript(entry)}
+                                title={
+                                  libraryEntry
+                                    ? `打开录制脚本：${entry.scriptName}`
+                                    : `录制脚本已不存在：${entry.scriptName}`
+                                }
+                              >
+                                {entry.scriptName}
+                              </button>
+                            </td>
+                            <td className="px-4 py-3 tabular-nums text-muted-foreground">
+                              {formatRecordingTime(entry.runAt)}
+                            </td>
+                            <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
+                              {entry.progressPercent}%
+                            </td>
+                            <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
+                              {entry.completedSteps}/{entry.totalSteps} 步
+                            </td>
+                            <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
+                              {formatPlaybackDuration(entry.durationMs)}
+                            </td>
+                            <td className="whitespace-nowrap px-4 py-3">
+                              <PlaybackHistoryStatus status={entry.status} error={entry.error} />
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+                  <span>
+                    共 {playbackHistory.length} 条，当前第 {historyCurrentPageSafe}/
+                    {historyTotalPages} 页
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-7 rounded-md px-2 text-[11px]"
+                      disabled={historyCurrentPageSafe <= 1}
+                      onClick={() => setHistoryCurrentPage((page) => Math.max(1, page - 1))}
+                    >
+                      上一页
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-7 rounded-md px-2 text-[11px]"
+                      disabled={historyCurrentPageSafe >= historyTotalPages}
+                      onClick={() =>
+                        setHistoryCurrentPage((page) => Math.min(historyTotalPages, page + 1))
+                      }
+                    >
+                      下一页
+                    </Button>
+                  </div>
+                </div>
               </div>
             )}
           </div>
