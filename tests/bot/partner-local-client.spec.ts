@@ -386,3 +386,129 @@ test("current authorization is read under owner credential and strictly validate
     }
   )
 })
+
+test("text delivery receipts match the exact operation, target, actor and frozen CAS payload", async () => {
+  const head = {
+    spaceId: "A",
+    groupId: "group",
+    taskId: "task",
+    botId: "expert",
+    revision: 1,
+    versionId: "v1",
+    number: 1,
+    status: "pending",
+    reviewerPrincipalId: "business",
+    feedbackMessageId: null,
+    updatedAt: "2026-10-19T01:00:00.000Z"
+  }
+  let receipt: any = {
+    versionId: "v1",
+    decision: null,
+    summary: {
+      taskId: "task",
+      taskVersion: 2,
+      taskStatus: "awaiting_business",
+      head,
+      canReview: true
+    }
+  }
+  const publish = {
+    commandId: "publish",
+    taskId: "task",
+    runId: "run",
+    expectedTaskVersion: 1,
+    expectedReviewVersion: 0
+  }
+  await serverFixture(
+    async (d) => {
+      const client = new PartnerLocalClient(d)
+      try {
+        await client.publishTextDelivery(publish)
+        const original = structuredClone(receipt)
+        for (const mutate of [
+          (v: any) => {
+            v.versionId = "other"
+          },
+          (v: any) => {
+            v.summary.taskVersion = 3
+          },
+          (v: any) => {
+            v.summary.head.revision = 2
+          },
+          (v: any) => {
+            v.summary.head.reviewerPrincipalId = "owner"
+          },
+          (v: any) => {
+            v.summary.head.extra = true
+          }
+        ]) {
+          receipt = structuredClone(original)
+          mutate(receipt)
+          await assert.rejects(client.publishTextDelivery(publish), /INVALID_PAYLOAD/)
+        }
+        const reject = {
+          commandId: "reject",
+          taskId: "task",
+          versionId: "v1",
+          expectedTaskVersion: 2,
+          expectedReviewVersion: 1,
+          decision: "reject" as const,
+          comment: "修改意见"
+        }
+        receipt = {
+          versionId: "v1",
+          summary: {
+            taskId: "task",
+            taskVersion: 3,
+            taskStatus: "active",
+            head: {
+              ...head,
+              revision: 2,
+              status: "changes_requested",
+              feedbackMessageId: "feedback"
+            },
+            canReview: false
+          },
+          decision: {
+            id: "decision",
+            spaceId: "A",
+            taskId: "task",
+            versionId: "v1",
+            principalId: "business",
+            decision: "reject",
+            comment: "修改意见",
+            createdAt: head.updatedAt,
+            feedbackMessageId: "feedback",
+            taskVersion: 3
+          }
+        }
+        await client.decideTextDelivery(reject)
+        const good = structuredClone(receipt)
+        for (const mutate of [
+          (v: any) => {
+            v.decision.comment = "改写意见"
+          },
+          (v: any) => {
+            v.decision.principalId = "owner"
+          },
+          (v: any) => {
+            v.decision.versionId = "other"
+          },
+          (v: any) => {
+            v.summary.head.feedbackMessageId = "different"
+          },
+          (v: any) => {
+            v.summary.head.revision = 3
+          }
+        ]) {
+          receipt = structuredClone(good)
+          mutate(receipt)
+          await assert.rejects(client.decideTextDelivery(reject), /INVALID_PAYLOAD/)
+        }
+      } finally {
+        client.close()
+      }
+    },
+    () => ({ value: receipt })
+  )
+})

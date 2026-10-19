@@ -276,6 +276,11 @@ export function registerPartnerDevHandlers(
     "tasks",
     "read",
     "updates",
+    "delivery",
+    "deliveryVersion",
+    "publish",
+    "review",
+    "retryRevision",
     "send",
     "cancel"
   ] as const) {

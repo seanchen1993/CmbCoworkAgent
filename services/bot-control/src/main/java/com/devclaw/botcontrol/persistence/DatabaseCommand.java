@@ -12,7 +12,7 @@ public final class DatabaseCommand {
                 DatabaseReadiness.requireConnection(source);
                 int migrated = "migrate".equals(args[0]) ? new MigrationRunner(source).migrate() : 0;
                 DatabaseReadiness.requireReady(source);
-                System.out.println("{\"status\":\"verified\",\"migrations\":" + migrated + ",\"version\":7}");
+                System.out.println("{\"status\":\"verified\",\"migrations\":" + migrated + ",\"version\":8}");
             }
         } catch (DatabaseFailure e) { System.out.println("{\"status\":\"failed\",\"category\":\"" + e.category().name() + "\"}"); System.exit(1); }
         catch (Throwable e) { System.out.println("{\"status\":\"failed\",\"category\":\"DB_CONFIGURATION\"}"); System.exit(1); }

@@ -1,3 +1,4 @@
+import { ServiceDeliveryCard } from "./ServiceDeliveryCard"
 import { useEffect, useRef, useState } from "react"
 import { ArrowUp, Loader2, Plus, RefreshCw, Square } from "lucide-react"
 import { BotAvatar } from "./BotAvatar"
@@ -170,7 +171,9 @@ export function ServiceExpertConversation({
         requestValues = [...entryValues.current]
         requestNext = entryCursor
         requestPages = loadedEntries.current
-        const pending = requestValues.filter((r) => busy(r.status)).map((r) => r.requestId)
+        const pending = requestValues
+          .filter((r) => busy(r.status) || r.publication?.state === "saving")
+          .map((r) => r.requestId)
         for (let i = 0; i < pending.length; i += 40) {
           const updates = await api.updates({
             conversationId: id,
@@ -245,7 +248,9 @@ export function ServiceExpertConversation({
       unsubscribe?.()
     }
   }, [api])
-  const polling = tasks.some((t) => busy(t.status)) || entries.some((e) => busy(e.status))
+  const polling =
+    tasks.some((t) => busy(t.status)) ||
+    entries.some((e) => busy(e.status) || e.publication?.state === "saving")
   useEffect(() => {
     if (!polling) return
     const timer = setTimeout(() => void refresh(true), 2000)
@@ -386,6 +391,22 @@ export function ServiceExpertConversation({
                   <small>仅分析你提供的任务文本，结果为草稿。</small>
                 </div>
               )}
+              {selected && overview.conversationId && (
+                <ServiceDeliveryCard
+                  key={overview.conversationId + ":" + selected}
+                  api={api}
+                  conversationId={overview.conversationId}
+                  taskRef={selected}
+                  entries={entries}
+                  localPending={entries.some(
+                    (e) =>
+                      !e.supersededBy &&
+                      (busy(e.status) || e.status === "outcome_unknown" || e.status === "blocked")
+                  )}
+                  onChange={() => void refresh()}
+                  onNew={() => select(null)}
+                />
+              )}
               {entries.map((entry) => (
                 <article key={entry.requestId} className="service-expert-exchange">
                   <div className="service-expert-user">
@@ -435,7 +456,26 @@ export function ServiceExpertConversation({
                         </div>
                         <small>
                           分析记录 · {formatMessageTimeLabel(Date.parse(entry.result.settledAt))}
+                          {entry.publication?.state === "saving" && " · 分析完成，成果保存中"}
+                          {entry.publication?.state === "blocked" && " · 成果保存受阻"}
                         </small>
+                        {entry.publication?.state === "history" && (
+                          <Button
+                            variant="outline"
+                            disabled={working}
+                            onClick={() =>
+                              void action(async (g, id, ref) => {
+                                await api.publish({
+                                  conversationId: id!,
+                                  requestId: entry.requestId
+                                })
+                                if (valid(g, id, ref)) await refresh()
+                              })
+                            }
+                          >
+                            提交为成果
+                          </Button>
+                        )}
                       </div>
                     </div>
                   )}
@@ -461,7 +501,11 @@ export function ServiceExpertConversation({
                 maxLength={16384}
                 rows={3}
                 value={text}
-                disabled={working || !!pendingSend.current}
+                disabled={
+                  working ||
+                  !!pendingSend.current ||
+                  tasks.find((t) => t.taskRef === selected)?.delivery?.taskStatus === "completed"
+                }
                 onChange={(e) => setText(e.target.value)}
                 placeholder={
                   selected
@@ -471,11 +515,20 @@ export function ServiceExpertConversation({
               />
               <div>
                 <small>
-                  {selected && entries.some((e) => busy(e.status))
+                  {selected &&
+                  entries.some((e) => busy(e.status) || e.publication?.state === "saving")
                     ? "补充已保存后，将等待前一轮结束。"
                     : "仅使用当前任务材料 · 本机保留历史"}
                 </small>
-                <Button type="submit" disabled={working || !text.trim() || !overview.selectedModel}>
+                <Button
+                  type="submit"
+                  disabled={
+                    working ||
+                    !text.trim() ||
+                    !overview.selectedModel ||
+                    tasks.find((t) => t.taskRef === selected)?.delivery?.taskStatus === "completed"
+                  }
+                >
                   {working ? <Loader2 className="animate-spin" size={16} /> : <ArrowUp size={16} />}{" "}
                   {pendingSend.current ? "重试原请求" : "发送"}
                 </Button>
@@ -508,7 +561,12 @@ export function ServiceExpertConversation({
           >
             <strong>{task.title}</strong>
             <small>
-              {task.taskNumber ?? "正在保存"} · {SERVICE_STATUS[task.status]}
+              {task.taskNumber ?? "正在保存"} ·{" "}
+              {task.delivery?.taskStatus === "completed"
+                ? "已确认完成"
+                : task.delivery?.head?.status === "pending"
+                  ? "待确认"
+                  : SERVICE_STATUS[task.status]}
             </small>
           </button>
         ))}

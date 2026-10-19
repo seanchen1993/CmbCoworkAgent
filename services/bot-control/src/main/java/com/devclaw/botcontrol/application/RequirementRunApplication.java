@@ -96,7 +96,10 @@ public final class RequirementRunApplication {
                 if (!deadline.isAfter(d.observedAt) || deadline.isAfter(d.observedAt.plusMillis(MAX_DEADLINE_MILLIS))) throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);
                 Group g = group(db, requester, d.groupId);
                 if (runs.activeCount(g.id) >= g.limits.maxRuns) throw new ApplicationFault(ErrorCode.RATE_LIMITED);
-                return new Enqueued(runs.enqueue(commandId, hash, d, deadline, d.status == DispatchStatus.READY ? Status.QUEUED : Status.WAITING_NODE));
+                JdbcTextDeliveryStore deliveries=new JdbcTextDeliveryStore(c,requester.spaceId);
+                if(deliveries.head(taskId)!=null&&deliveries.active(taskId,null))throw new ApplicationFault(ErrorCode.INPUT_CHANGED);
+                Run created=runs.enqueue(commandId, hash, d, deadline, d.status == DispatchStatus.READY ? Status.QUEUED : Status.WAITING_NODE);
+                TextDeliveryApplication.freeze(c,created);return new Enqueued(created);
             });
         });
     }
@@ -133,11 +136,13 @@ public final class RequirementRunApplication {
         public final Bot bot; public final BotVersion botVersion; public final Group group; public final Task task;
         public final java.util.List<TaskMessageResult> messages;
         public final GroupMemoryValues.Snapshot memorySnapshot;
+        public final com.fasterxml.jackson.databind.JsonNode deliveryInput;
         private Input(Connection c, JdbcApplicationStore db, Run run) throws SQLException {
             bot=db.bot(run.botId);botVersion=db.version(run.botVersionId);group=db.group(run.groupId);task=new JdbcTaskStore(c,run.spaceId).task(run.taskId);
             if(bot==null||botVersion==null||group==null||task==null)throw JdbcApplicationStore.corrupt();
             if(task.version!=run.taskVersion)throw new ApplicationFault(ErrorCode.INPUT_CHANGED);
             messages=new JdbcTaskStore(c,run.spaceId).requirementMessages(task,run.botId);
+            deliveryInput=TextDeliveryApplication.input(c,run);
             memorySnapshot=new JdbcGroupMemoryStore(c,run.spaceId).freeze(run,botVersion.config.memoryPolicy.wire());
         }
     }

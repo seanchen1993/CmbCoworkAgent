@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto"
+import type { ServiceDeliveryView, TextDeliverySummary } from "../../../shared/bot/text-delivery"
+import type { ServiceDeliveryAction } from "./service-delivery-store"
 import { serviceConversationInput } from "./service-conversation-boundary"
 import type { Group } from "../../../shared/bot/contracts.generated"
 import type {
@@ -44,14 +47,32 @@ const uncertain = new Set([
   "STORAGE_FAILURE",
   "OUTCOME_UNKNOWN"
 ])
-function view(r: ServiceRequestRecord): ServiceRequestView {
+function view(r: ServiceRequestRecord, store: ServiceConversationStore): ServiceRequestView {
+  const publication = store.deliveries.get(r.scopeKey, "publish:" + r.requestId)
   return {
     requestId: r.requestId,
     taskRef: r.taskRef,
     text: r.text,
+    ...(r.supersededBy ? { supersededBy: r.supersededBy } : {}),
     status: r.status,
     notice: r.notice,
     runId: r.runId,
+    ...(r.status === "succeeded"
+      ? {
+          publication: {
+            state: publication
+              ? publication.phase === "done"
+                ? ("published" as const)
+                : publication.phase === "blocked"
+                  ? ("blocked" as const)
+                  : ("saving" as const)
+              : r.autoDelivery
+                ? ("saving" as const)
+                : ("history" as const),
+            notice: publication?.notice ?? null
+          }
+        }
+      : {}),
     result: r.result,
     createdAt: r.createdAt
   }
@@ -98,6 +119,7 @@ export class ServiceConversationService {
   private pumping?: Promise<void>
   private stopped = false
   private afterSeq = 0
+  private deliveryAfter = 0
   constructor(private readonly deps: ServiceConversationDependencies) {}
   async open(): Promise<ServiceConversationOverview> {
     const overview = await this.deps.overview()
@@ -160,13 +182,19 @@ export class ServiceConversationService {
       { c, key, conversation } = await this.authorized(v.conversationId)
     const records = this.deps.store.taskPage(key, conversation.id, after(v.cursor, key, "tasks")),
       page = records.slice(0, SERVICE_PAGE_SIZE)
-    // Scope permission was revalidated above, including on terminal-only pages.
+    await this.loadSummaries(
+      c,
+      key,
+      page.map(({ task }) => task)
+    )
+    await this.assertCurrent(key)
     return {
       items: page.map(({ task }) => ({
         taskRef: task.ref,
         taskNumber: task.task?.taskNumber ?? null,
         title: task.title,
-        status: this.deps.store.latest(key, task.ref)?.status ?? "saved"
+        status: this.deps.store.latest(key, task.ref)?.status ?? "saved",
+        delivery: this.deps.store.deliveries.summary(key, task.ref)
       })),
       nextCursor:
         records.length > SERVICE_PAGE_SIZE
@@ -193,7 +221,9 @@ export class ServiceConversationService {
     await this.assertCurrent(key)
     this.wake()
     return {
-      items: [...page].reverse().map((r) => view(this.deps.store.request(key, r.requestId))),
+      items: [...page]
+        .reverse()
+        .map((r) => view(this.deps.store.request(key, r.requestId), this.deps.store)),
       nextCursor: records.length > SERVICE_PAGE_SIZE ? cursor(key, ref, page.at(-1)!.seq) : null
     }
   }
@@ -213,7 +243,7 @@ export class ServiceConversationService {
         })
       )
     await this.assertCurrent(key)
-    return records.map((r) => view(this.deps.store.request(key, r.requestId)))
+    return records.map((r) => view(this.deps.store.request(key, r.requestId), this.deps.store))
   }
   async send(raw: unknown): Promise<ServiceRequestView> {
     const v = serviceConversationInput("send", raw),
@@ -228,11 +258,22 @@ export class ServiceConversationService {
       if (old.runId) await this.inspect(c, old)
       await this.assertCurrent(key)
       this.wake()
-      return view(this.deps.store.request(key, requestId))
+      return view(this.deps.store.request(key, requestId), this.deps.store)
+    }
+    if (ref) {
+      const summary = await this.currentSummary(c, key, ref)
+      if (summary.taskStatus === "completed") throw new PartnerLocalFault("INPUT_CHANGED")
     }
     if (!conversation.model) throw new PartnerLocalFault("MODEL_UNAVAILABLE")
     const selected = await this.deps.model(conversation.model.ref)
     if (selected.hash !== conversation.model.hash) throw new PartnerLocalFault("MODEL_CHANGED")
+    await this.assertCurrent(key)
+    if (
+      ref &&
+      (this.deps.store.deliveries.hasReviewIntent(key, ref) ||
+        this.deps.store.deliveries.summary(key, ref)?.taskStatus === "completed")
+    )
+      throw new PartnerLocalFault("INPUT_CHANGED")
     const accepted = this.deps.store.accept(
       c.scope,
       conversation.id,
@@ -243,7 +284,321 @@ export class ServiceConversationService {
     )
     // Model is frozen for EACH accepted intent, before its first remote write.
     this.wake()
-    return view(accepted)
+    return view(accepted, this.deps.store)
+  }
+  private async loadSummaries(
+    c: ServiceConversationContext,
+    key: string,
+    tasks: Array<{ ref: string; task: { id: string } | null }>
+  ): Promise<void> {
+    const existing = tasks.filter((t) => t.task)
+    if (!existing.length) return
+    const summaries = await c.client.deliverySummaries(existing.map((t) => t.task!.id))
+    await this.assertCurrent(key)
+    for (const value of summaries) {
+      const record = existing.find((t) => t.task!.id === value.taskId)!
+      if (
+        value.head &&
+        (value.head.botId !== c.scope.botId || value.head.groupId !== c.scope.groupId)
+      )
+        throw new PartnerLocalFault("FORBIDDEN")
+      this.deps.store.deliveries.saveSummary(key, record.ref, value)
+    }
+  }
+  private async currentSummary(
+    c: ServiceConversationContext,
+    key: string,
+    ref: string
+  ): Promise<TextDeliverySummary> {
+    const task = this.deps.store.task(key, ref)
+    if (!task.task) throw new PartnerLocalFault("INPUT_CHANGED")
+    await this.loadSummaries(c, key, [task])
+    return this.deps.store.deliveries.summary(key, ref)!
+  }
+  async delivery(raw: unknown): Promise<ServiceDeliveryView | null> {
+    const v = serviceConversationInput("delivery", raw),
+      { c, key, conversation } = await this.authorized(v.conversationId),
+      ref = partnerId(v.taskRef),
+      task = this.deps.store.task(key, ref)
+    if (task.conversationId !== conversation.id) throw new PartnerLocalFault("FORBIDDEN")
+    if (!task.task) return null
+    const summary = await this.currentSummary(c, key, ref),
+      page = await c.client.deliveryVersions(
+        task.task.id,
+        v.before === null ? undefined : Number(v.before)
+      )
+    await this.assertCurrent(key)
+    return {
+      summary,
+      versions: page.items,
+      nextBefore: page.nextBefore,
+      actions: this.deps.store.deliveries.actions(key, ref).map((a) => ({
+        id: a.id,
+        kind: a.kind,
+        state: a.phase === "done" ? "done" : a.phase === "blocked" ? "blocked" : "saving",
+        notice: a.notice,
+        requestId: a.requestId
+      }))
+    }
+  }
+  async deliveryVersion(raw: unknown) {
+    const v = serviceConversationInput("deliveryVersion", raw),
+      { c, key, conversation } = await this.authorized(v.conversationId),
+      task = this.deps.store.task(key, partnerId(v.taskRef))
+    if (task.conversationId !== conversation.id || !task.task)
+      throw new PartnerLocalFault("FORBIDDEN")
+    const detail = await c.client.deliveryVersion(task.task.id, partnerId(v.versionId))
+    await this.assertCurrent(key)
+    if (detail.version.botId !== c.scope.botId || detail.version.groupId !== c.scope.groupId)
+      throw new PartnerLocalFault("FORBIDDEN")
+    return detail
+  }
+  private action(
+    key: string,
+    ref: string,
+    id: string,
+    kind: ServiceDeliveryAction["kind"]
+  ): ServiceDeliveryAction {
+    return {
+      id,
+      scopeKey: key,
+      taskRef: ref,
+      kind,
+      phase: "prepare",
+      notice: null,
+      requestId: null,
+      runId: null,
+      versionId: null,
+      comment: null,
+      commandId: "td:" + randomUUID(),
+      expectedTaskVersion: null,
+      expectedReviewVersion: null,
+      receipt: null,
+      model: null,
+      revisionRequestId: kind === "reject" || kind === "retry" ? randomUUID() : null
+    }
+  }
+  private schedulePublication(r: ServiceRequestRecord): void {
+    const action: ServiceDeliveryAction = {
+      id: "publish:" + r.requestId,
+      scopeKey: r.scopeKey,
+      taskRef: r.taskRef,
+      kind: "publish",
+      phase: "prepare",
+      notice: null,
+      requestId: r.requestId,
+      runId: r.runId,
+      versionId: null,
+      comment: null,
+      commandId: "td-publish:" + randomUUID(),
+      expectedTaskVersion: r.taskVersion,
+      expectedReviewVersion: null,
+      receipt: null,
+      model: null,
+      revisionRequestId: null
+    }
+    this.deps.store.deliveries.accept(action)
+    this.deps.store.update(r.scopeKey, r.requestId, (value) => {
+      value.publicationScheduled = true
+    })
+  }
+  async publish(raw: unknown): Promise<void> {
+    const v = serviceConversationInput("publish", raw),
+      { c, key, conversation } = await this.authorized(v.conversationId),
+      r = this.deps.store.request(key, partnerId(v.requestId))
+    if (r.conversationId !== conversation.id || !r.runId) throw new PartnerLocalFault("FORBIDDEN")
+    await this.inspect(c, r)
+    await this.assertCurrent(key)
+    const current = this.deps.store.request(key, r.requestId)
+    if (current.status !== "succeeded") throw new PartnerLocalFault("INPUT_CHANGED")
+    this.schedulePublication(current)
+    this.wake()
+  }
+  async review(raw: unknown): Promise<void> {
+    const v = serviceConversationInput("review", raw),
+      { c, key, conversation } = await this.authorized(v.conversationId),
+      ref = partnerId(v.taskRef),
+      task = this.deps.store.task(key, ref)
+    if (task.conversationId !== conversation.id) throw new PartnerLocalFault("FORBIDDEN")
+    const action = this.action(
+      key,
+      ref,
+      partnerId(v.operationId),
+      v.decision as "approve" | "reject"
+    )
+    action.versionId = partnerId(v.versionId)
+    action.comment = v.comment as string | null
+    const prior = this.deps.store.deliveries.get(key, action.id)
+    if (prior) {
+      this.deps.store.deliveries.accept(action)
+      await this.currentSummary(c, key, ref)
+      this.wake()
+      return
+    }
+    const summary = await this.currentSummary(c, key, ref)
+    if (!summary.canReview || summary.head?.versionId !== action.versionId)
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    if (this.deps.store.hasTaskPending(key, ref) || this.deps.store.deliveries.hasPending(key, ref))
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    action.expectedTaskVersion = summary.taskVersion
+    action.expectedReviewVersion = summary.head.revision
+    action.phase = "remote"
+    if (action.kind === "reject" && conversation.model) action.model = conversation.model
+    await this.assertCurrent(key)
+    // No await between this final admission check and the durable review intent.
+    if (this.deps.store.hasTaskPending(key, ref) || this.deps.store.deliveries.hasPending(key, ref))
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    this.deps.store.deliveries.accept(action)
+    this.wake()
+  }
+  async retryRevision(raw: unknown): Promise<void> {
+    const v = serviceConversationInput("retryRevision", raw),
+      { c, key, conversation } = await this.authorized(v.conversationId),
+      ref = partnerId(v.taskRef),
+      prior = this.deps.store.deliveries.get(key, partnerId(v.actionId))
+    if (
+      !prior ||
+      prior.taskRef !== ref ||
+      prior.receipt?.decision?.decision !== "reject" ||
+      !prior.revisionRequestId
+    )
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    const replay = this.deps.store.deliveries.get(key, partnerId(v.operationId))
+    if (replay) {
+      if (
+        replay.kind !== "retry" ||
+        replay.taskRef !== ref ||
+        replay.versionId !== prior.versionId ||
+        replay.comment !== prior.comment
+      )
+        throw new PartnerLocalFault("COMMAND_CONFLICT")
+      await this.currentSummary(c, key, ref)
+      this.wake()
+      return
+    }
+    const old =
+      this.deps.store.findRequest(key, prior.revisionRequestId) ??
+      (prior.sourceRequestId ? this.deps.store.findRequest(key, prior.sourceRequestId) : null)
+    if (old?.runId) await this.inspect(c, old)
+    const previous = old ? this.deps.store.request(key, old.requestId) : null
+    if (previous && !["failed", "cancelled", "blocked"].includes(previous.status))
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    if (
+      this.deps.store.hasTaskPending(key, ref, previous?.requestId) ||
+      this.deps.store.deliveries.hasPending(key, ref)
+    )
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    const summary = await this.currentSummary(c, key, ref)
+    if (
+      summary.taskStatus !== "active" ||
+      summary.head?.versionId !== prior.receipt.versionId ||
+      summary.head.reviewerPrincipalId !== c.scope.businessPrincipalId
+    )
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    if (!conversation.model) throw new PartnerLocalFault("MODEL_UNAVAILABLE")
+    const model = await this.deps.model(conversation.model.ref)
+    if (model.hash !== conversation.model.hash) throw new PartnerLocalFault("MODEL_CHANGED")
+    const action = this.action(key, ref, partnerId(v.operationId), "retry")
+    action.phase = "revision"
+    action.sourceRequestId = previous?.requestId ?? null
+    action.receipt = prior.receipt
+    action.versionId = prior.versionId
+    action.comment = prior.comment
+    action.model = model
+    action.expectedTaskVersion = summary.taskVersion
+    await this.assertCurrent(key)
+    if (
+      this.deps.store.hasTaskPending(key, ref, previous?.requestId) ||
+      this.deps.store.deliveries.hasPending(key, ref) ||
+      (previous && this.deps.store.request(key, previous.requestId).supersededBy)
+    )
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    this.deps.store.deliveries.accept(action)
+    this.wake()
+  }
+  private async advanceDelivery(
+    c: ServiceConversationContext,
+    original: ServiceDeliveryAction
+  ): Promise<void> {
+    const store = this.deps.store,
+      actions = store.deliveries,
+      key = original.scopeKey,
+      task = store.task(key, original.taskRef)
+    if (!task.task) throw new PartnerLocalFault("INPUT_CHANGED")
+    let a = actions.get(key, original.id)!
+    if (a.phase === "prepare") {
+      const summary = await this.currentSummary(c, key, a.taskRef)
+      a.expectedReviewVersion = summary.head?.revision ?? 0
+      a.phase = "remote"
+      actions.save(a)
+    }
+    if (a.phase === "remote") {
+      const base = {
+        commandId: a.commandId,
+        taskId: task.task.id,
+        expectedTaskVersion: a.expectedTaskVersion!,
+        expectedReviewVersion: a.expectedReviewVersion!
+      }
+      const receipt =
+        a.kind === "publish"
+          ? await c.client.publishTextDelivery({ ...base, runId: a.runId! })
+          : await c.client.decideTextDelivery({
+              ...base,
+              versionId: a.versionId!,
+              decision: a.kind as "approve" | "reject",
+              comment: a.comment
+            })
+      a = {
+        ...a,
+        receipt,
+        expectedTaskVersion:
+          a.kind === "reject" ? receipt.summary.taskVersion : a.expectedTaskVersion,
+        phase: a.kind === "reject" ? "revision" : "done",
+        notice: null
+      }
+      actions.save(a)
+      // A receipt proves the old mutation, never the current mutable review head.
+      await this.currentSummary(c, key, a.taskRef)
+    }
+    if (a.phase === "revision") {
+      const summary = await this.currentSummary(c, key, a.taskRef)
+      const existing = store.findRequest(key, a.revisionRequestId!)
+      if (existing) {
+        a.requestId = existing.requestId
+        a.phase = "done"
+        actions.save(a)
+        return
+      }
+      if (summary.taskStatus !== "active" || summary.head?.versionId !== a.receipt!.versionId)
+        throw new PartnerLocalFault("INPUT_CHANGED")
+      if (!a.model) throw new PartnerLocalFault("MODEL_UNAVAILABLE")
+      const model = await this.deps.model(a.model.ref)
+      if (model.hash !== a.model.hash) throw new PartnerLocalFault("MODEL_CHANGED")
+      await this.assertCurrent(key)
+      if (a.sourceRequestId) {
+        const source = store.request(key, a.sourceRequestId)
+        if (source.runId) await this.inspect(c, source)
+        const known = store.request(key, source.requestId)
+        if (!["failed", "cancelled", "blocked"].includes(known.status))
+          throw new PartnerLocalFault("INPUT_CHANGED")
+        store.update(key, known.requestId, (r) => {
+          r.supersededBy = a.revisionRequestId!
+        })
+      }
+      const conversation = store.requireConversation(c.scope, task.conversationId)
+      const r = store.acceptRevision(
+        c.scope,
+        conversation.id,
+        task.ref,
+        a.revisionRequestId!,
+        a.receipt!.decision!.comment!,
+        model,
+        a.expectedTaskVersion ?? a.receipt!.summary.taskVersion
+      )
+      a.requestId = r.requestId
+      a.phase = "done"
+      actions.save(a)
+    }
   }
   async cancel(raw: unknown): Promise<void> {
     const v = serviceConversationInput("cancel", raw),
@@ -353,7 +708,27 @@ export class ServiceConversationService {
             })
         }
       }
-      pending = this.deps.store.hasPending(key)
+      let deliveries = this.deps.store.deliveries.pending(key, this.deliveryAfter)
+      if (!deliveries.length) {
+        this.deliveryAfter = 0
+        deliveries = this.deps.store.deliveries.pending(key)
+      }
+      for (const action of deliveries) {
+        this.deliveryAfter = action.seq!
+        if (this.stopped) break
+        const current = await this.deps.context()
+        if (serviceScopeKey(current.scope) !== key) break
+        try {
+          await this.advanceDelivery(current, action)
+        } catch (error) {
+          const code = safeCode(error),
+            latest = this.deps.store.deliveries.get(key, action.id)!
+          latest.notice = code
+          if (!uncertain.has(code)) latest.phase = "blocked"
+          this.deps.store.deliveries.save(latest)
+        }
+      }
+      pending = this.deps.store.hasPending(key) || this.deps.store.deliveries.hasPending(key)
     } catch {
       /* No cached disclosure/replay when current authorization fails. */
     }
@@ -420,7 +795,8 @@ export class ServiceConversationService {
       value.status = status as ServiceRequestRecord["status"]
       value.result = remote.result
       value.notice =
-        status === "failed" && ["MODEL_CHANGED", "MODEL_UNAVAILABLE"].includes(value.notice ?? "")
+        ["starting", "running", "failed"].includes(status) &&
+        ["MODEL_CHANGED", "MODEL_UNAVAILABLE"].includes(value.notice ?? "")
           ? value.notice
           : status === "outcome_unknown"
             ? "需要核对执行结果；不会自动重新分析"
@@ -436,10 +812,16 @@ export class ServiceConversationService {
       key = original.scopeKey,
       id = original.requestId
     let r = store.request(key, id)
-    if (r.phase === "terminal") return
+    if (r.phase === "terminal") {
+      if (r.autoDelivery && r.status === "succeeded" && !r.publicationScheduled)
+        this.schedulePublication(r)
+      return
+    }
     if (r.runId) {
       await this.inspect(c, r)
       r = store.request(key, id)
+      if (r.autoDelivery && r.status === "succeeded" && !r.publicationScheduled)
+        this.schedulePublication(r)
       if (r.cancelRequested && r.phase !== "terminal") {
         if (["queued", "waiting_node"].includes(r.status)) {
           try {
@@ -460,6 +842,13 @@ export class ServiceConversationService {
         v.phase = "terminal"
         v.status = "cancelled"
         v.notice = "请求已取消"
+      })
+      return
+    }
+    if (store.deliveries.hasPending(key, r.taskRef)) {
+      store.update(key, id, (v) => {
+        v.status = "next_round"
+        v.notice = "已保存，将在成果保存后继续处理"
       })
       return
     }

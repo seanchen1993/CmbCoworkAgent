@@ -25,11 +25,11 @@ final class PartnerHttpHandler {
     static final String CONTROL="/api/bot/local/v1/control",NODE="/api/bot/local/v1/node";
     private final PartnerLaunchConfig config;private final RequirementRunApplication runs;private final RuntimeNodeApplication nodes;private final LocalAuthenticatedNodeAdapter adapter;private final GroupMemoryApplication memories;
     private final Semaphore admission=new Semaphore(4);private final ObjectMapper json=CompatibilityProbe.strictMapper();private final ContractBoundary boundary=new ContractBoundary();
-    private final ExpertMemoryApplication expertMemories;
+    private final ExpertMemoryApplication expertMemories;private final TextDeliveryApplication deliveries;
     PartnerHttpHandler(PartnerLaunchConfig config,DataSource source){
         this.config=config;nodes=new RuntimeNodeApplication(source,config.legacy.identity,config.access,TransactionObserver.NONE);runs=new RequirementRunApplication(source,config.legacy.identity,config.access,TransactionObserver.NONE);adapter=new LocalAuthenticatedNodeAdapter(config.credentials,nodes,runs);
         memories=new GroupMemoryApplication(source,config.legacy.identity,TransactionObserver.NONE);
-        expertMemories=new ExpertMemoryApplication(source,config.legacy.identity);
+        expertMemories=new ExpertMemoryApplication(source,config.legacy.identity);deliveries=new TextDeliveryApplication(source,config.legacy.identity,TransactionObserver.NONE);
         json.getFactory().setStreamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(16).maxStringLength(65536).maxNumberLength(128).build());
     }
     boolean accepts(String path){return path!=null&&path.startsWith("/api/bot/local/");}
@@ -56,6 +56,11 @@ final class PartnerHttpHandler {
     private Object control(JsonNode body,TrustedContext actor){
         String op=text(body,"operation");switch(op){
             case "identity":exact(body,"operation");return json.createObjectNode().put("spaceId",actor.spaceId).put("principalId",actor.principalId);
+            case "deliverySummaries":exact(body,"operation","taskIds");JsonNode taskIds=body.get("taskIds");if(!taskIds.isArray()||taskIds.size()>40)throw fault(ErrorCode.INVALID_PAYLOAD);List<String> ids=new ArrayList<String>();for(JsonNode value:taskIds){if(!value.isTextual())throw fault(ErrorCode.INVALID_PAYLOAD);ids.add(value.textValue());}return deliveries.summaries(actor,ids);
+            case "deliveryVersions":exact(body,"operation","taskId","before");return deliveries.versions(actor,id(body,"taskId"),number(body,"before",1));
+            case "deliveryVersion":exact(body,"operation","taskId","versionId");return deliveries.read(actor,id(body,"taskId"),id(body,"versionId"));
+            case "publishTextDelivery":exact(body,"operation","commandId","taskId","runId","expectedTaskVersion","expectedReviewVersion");return deliveries.publish(actor,id(body,"commandId"),id(body,"taskId"),id(body,"runId"),number(body,"expectedTaskVersion",1),number(body,"expectedReviewVersion",0));
+            case "decideTextDelivery":exact(body,"operation","commandId","taskId","versionId","expectedTaskVersion","expectedReviewVersion","decision","comment");JsonNode comment=body.get("comment");if(!comment.isNull()&&!comment.isTextual())throw fault(ErrorCode.INVALID_PAYLOAD);return deliveries.decide(actor,id(body,"commandId"),id(body,"taskId"),id(body,"versionId"),number(body,"expectedTaskVersion",1),number(body,"expectedReviewVersion",0),text(body,"decision"),comment.isNull()?null:comment.textValue());
             case "listExpertMemories":exact(body,"operation","botId");return expertMemories.list(actor,id(body,"botId"));
             case "createExpertMemory":exact(body,"operation","botId","commandId","text");return expertMemories.create(actor,id(body,"botId"),id(body,"commandId"),text(body,"text"));
             case "updateExpertMemory":exact(body,"operation","botId","memoryId","commandId","expectedVersion","text","status");return expertMemories.update(actor,id(body,"botId"),id(body,"memoryId"),id(body,"commandId"),number(body,"expectedVersion",1),text(body,"text"),text(body,"status"));

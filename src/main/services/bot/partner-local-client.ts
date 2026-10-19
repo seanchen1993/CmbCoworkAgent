@@ -1,3 +1,11 @@
+import type { TextDeliverySummary } from "../../../shared/bot/text-delivery"
+import {
+  parseDeliverySummary,
+  parseDeliveryVersion,
+  parseDeliveryReceipt,
+  parseDeliveryDetail,
+  parseDeliveryInput
+} from "./text-delivery-validation"
 import { request } from "node:http"
 import Ajv from "ajv/dist/2020"
 import addFormats from "ajv-formats"
@@ -328,7 +336,8 @@ export class PartnerLocalClient {
         "group",
         "task",
         "messages",
-        "memorySnapshot"
+        "memorySnapshot",
+        ...(Object.hasOwn(v.input as object, "deliveryInput") ? ["deliveryInput"] : [])
       ])
     if (!Array.isArray(raw.messages) || raw.messages.length > 50)
       throw new PartnerLocalFault("INVALID_PAYLOAD")
@@ -340,6 +349,13 @@ export class PartnerLocalClient {
         group: partnerSchema("Group", raw.group),
         task: partnerSchema("Task", raw.task),
         messages: raw.messages.map((m) => partnerSchema<TaskMessageResult>("TaskMessageResult", m)),
+        deliveryInput: parseDeliveryInput(
+          raw.deliveryInput,
+          this.descriptor.spaceId,
+          (raw.task as Task).id,
+          run.id,
+          run.taskVersion
+        ),
         memorySnapshot: parseRunMemorySnapshot(
           raw.memorySnapshot,
           this.descriptor.spaceId,
@@ -486,6 +502,113 @@ export class PartnerLocalClient {
       ["task"]
     )
     return partnerSchema("Task", v.task)
+  }
+  async deliverySummaries(taskIds: string[]): Promise<TextDeliverySummary[]> {
+    if (!taskIds.length || taskIds.length > 40 || new Set(taskIds).size !== taskIds.length)
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    const v = partnerObject(
+      await this.control("business", "deliverySummaries", { taskIds: taskIds.map(partnerId) }),
+      ["items"]
+    )
+    if (!Array.isArray(v.items) || v.items.length !== taskIds.length)
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    const found = new Set<string>()
+    return v.items.map((raw) => {
+      const task = partnerId((raw as TextDeliverySummary).taskId)
+      if (!taskIds.includes(task) || found.has(task)) throw new PartnerLocalFault("INVALID_PAYLOAD")
+      found.add(task)
+      return parseDeliverySummary(raw, this.descriptor.spaceId, task)
+    })
+  }
+  async deliveryVersions(taskId: string, before = Number.MAX_SAFE_INTEGER) {
+    const v = partnerObject(
+      await this.control("business", "deliveryVersions", { taskId: partnerId(taskId), before }),
+      ["items", "nextBefore"]
+    )
+    if (
+      !Array.isArray(v.items) ||
+      v.items.length > 40 ||
+      (v.nextBefore !== null && (!Number.isSafeInteger(v.nextBefore) || Number(v.nextBefore) < 1))
+    )
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    const items = v.items.map((raw) =>
+      parseDeliveryVersion(raw, this.descriptor.spaceId, taskId, false)
+    )
+    if (
+      items.some((item, i) => item.number >= (i ? items[i - 1].number : before)) ||
+      (v.nextBefore !== null && v.nextBefore !== items.at(-1)?.number)
+    )
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    return { items, nextBefore: v.nextBefore as number | null }
+  }
+  async deliveryVersion(taskId: string, versionId: string) {
+    return parseDeliveryDetail(
+      await this.control("business", "deliveryVersion", {
+        taskId: partnerId(taskId),
+        versionId: partnerId(versionId)
+      }),
+      this.descriptor.spaceId,
+      taskId,
+      versionId
+    )
+  }
+  async publishTextDelivery(input: {
+    commandId: string
+    taskId: string
+    runId: string
+    expectedTaskVersion: number
+    expectedReviewVersion: number
+  }) {
+    const receipt = parseDeliveryReceipt(
+        await this.control("business", "publishTextDelivery", input),
+        this.descriptor.spaceId,
+        input.taskId
+      ),
+      { summary } = receipt
+    if (
+      receipt.decision !== null ||
+      summary.head?.versionId !== receipt.versionId ||
+      summary.head.status !== "pending" ||
+      summary.taskStatus !== "awaiting_business" ||
+      summary.taskVersion !== input.expectedTaskVersion + 1 ||
+      summary.head.revision !== input.expectedReviewVersion + 1 ||
+      summary.head.reviewerPrincipalId !== this.descriptor.businessPrincipalId
+    )
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    return receipt
+  }
+  async decideTextDelivery(input: {
+    commandId: string
+    taskId: string
+    versionId: string
+    expectedTaskVersion: number
+    expectedReviewVersion: number
+    decision: "approve" | "reject"
+    comment: string | null
+  }) {
+    const receipt = parseDeliveryReceipt(
+        await this.control("business", "decideTextDelivery", input),
+        this.descriptor.spaceId,
+        input.taskId
+      ),
+      { summary, decision } = receipt
+    if (
+      receipt.versionId !== input.versionId ||
+      !decision ||
+      decision.decision !== input.decision ||
+      decision.comment !== input.comment ||
+      decision.principalId !== this.descriptor.businessPrincipalId ||
+      decision.taskVersion !== input.expectedTaskVersion + 1 ||
+      summary.taskVersion !== input.expectedTaskVersion + 1 ||
+      summary.head?.versionId !== input.versionId ||
+      summary.head.revision !== input.expectedReviewVersion + 1 ||
+      summary.head.reviewerPrincipalId !== this.descriptor.businessPrincipalId ||
+      summary.head.status !== (input.decision === "approve" ? "completed" : "changes_requested") ||
+      summary.taskStatus !== (input.decision === "approve" ? "completed" : "active") ||
+      summary.head.feedbackMessageId !== decision.feedbackMessageId
+    )
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    return receipt
   }
   async enqueue(
     task: Task,

@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { join } from "node:path"
 import { chmod, symlink, link, unlink } from "node:fs/promises"
 import { withPartnerHttpFixture, partnerPrincipals } from "../../../deploy/dev/service/partner-http.mjs"
-import { partnerBootstrapConfig, partnerProcessInfo } from "../../../deploy/dev/service/partner-dev.mjs"
+import { partnerBootstrapConfig, partnerProcessInfo, partnerMigrationCountAccepted } from "../../../deploy/dev/service/partner-dev.mjs"
 import { partnerEntry, partnerCompose, partnerPrivateFile, partnerWrite } from "../../../deploy/dev/service/partner-dev-resources.mjs"
 import { validateHttpPrincipals } from "../../../deploy/dev/service/http-fixture.mjs"
 import { privateTemp, removePrivateTemp } from "../../../deploy/dev/process.mjs"
@@ -75,4 +75,9 @@ test("Partner process diagnostics with live or reused PID remain errors, not per
 test("Partner process identity still reads exact stamp and rejects invalid PID before probes", async () => {
   assert.equal(await partnerProcessInfo(123, { exists() {}, async read() { return "exact-owner-stamp" } }), "exact-owner-stamp")
   for (const pid of [0, 1, -1, "123", NaN]) await assert.rejects(partnerProcessInfo(pid, { exists() { throw Error("MUST_NOT_PROBE") }, read() { throw Error("MUST_NOT_READ") } }), /PARTNER_DEV/)
+})
+
+test("Partner startup accepts new V8 and supported V5/V6/V7 upgrades, rejects stale or invalid counts", () => {
+  for (const value of [0,1,2,3,8]) assert.equal(partnerMigrationCountAccepted(value),true)
+  for (const value of [7,9,-1,1.5,"8",null,undefined]) assert.equal(partnerMigrationCountAccepted(value),false)
 })

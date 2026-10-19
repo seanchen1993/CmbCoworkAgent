@@ -1,3 +1,4 @@
+import type { ServiceDeliveryView, TextDeliveryDetail, TextDeliverySummary } from "./text-delivery"
 /** Service-managed text conversations. No credentials, filesystem paths or RunSpec input. */
 export type ServiceRequestStatus =
   | "saved"
@@ -25,6 +26,7 @@ export interface ServiceTaskView {
   taskNumber: string | null
   title: string
   status: ServiceRequestStatus
+  delivery?: TextDeliverySummary | null
 }
 export interface ServiceRequestView {
   requestId: string
@@ -33,6 +35,8 @@ export interface ServiceRequestView {
   status: ServiceRequestStatus
   notice: string | null
   runId: string | null
+  supersededBy?: string
+  publication?: { state: "saving" | "blocked" | "published" | "history"; notice: string | null }
   result: {
     runId: string
     attemptId: string
@@ -73,5 +77,30 @@ export interface ServiceConversationApi {
     requestId: string
     text: string
   }): Promise<ServiceRequestView>
+  delivery(input: {
+    conversationId: string
+    taskRef: string
+    before: number | null
+  }): Promise<ServiceDeliveryView | null>
+  deliveryVersion(input: {
+    conversationId: string
+    taskRef: string
+    versionId: string
+  }): Promise<TextDeliveryDetail>
+  publish(input: { conversationId: string; requestId: string }): Promise<void>
+  review(input: {
+    conversationId: string
+    taskRef: string
+    operationId: string
+    versionId: string
+    decision: "approve" | "reject"
+    comment: string | null
+  }): Promise<void>
+  retryRevision(input: {
+    conversationId: string
+    taskRef: string
+    actionId: string
+    operationId: string
+  }): Promise<void>
   cancel(input: { conversationId: string; requestId: string }): Promise<void>
 }

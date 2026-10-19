@@ -2939,3 +2939,48 @@ button.bot-inline-mention:focus-visible {
     width: 210px;
   }
 }
+
+.service-delivery-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  margin: 12px 0 20px;
+  background: var(--background);
+}
+.service-delivery-card header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.service-delivery-card small {
+  display: block;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+  margin: 8px 0;
+}
+.service-delivery-card select {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: var(--background);
+}
+.service-delivery-card textarea {
+  display: block;
+  width: 100%;
+  min-height: 90px;
+  margin: 8px 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+}
+.service-delivery-card button {
+  margin: 6px 8px 6px 0;
+}
+.service-delivery-feedback {
+  display: block;
+  white-space: pre-wrap;
+  margin-top: 6px;
+}

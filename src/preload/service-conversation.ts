@@ -15,5 +15,10 @@ export const serviceConversationApi: ServiceConversationApi = {
   read: (input) => ipcRenderer.invoke("serviceConversation:read", input),
   updates: (input) => ipcRenderer.invoke("serviceConversation:updates", input),
   send: (input) => ipcRenderer.invoke("serviceConversation:send", input),
+  delivery: (input) => ipcRenderer.invoke("serviceConversation:delivery", input),
+  deliveryVersion: (input) => ipcRenderer.invoke("serviceConversation:deliveryVersion", input),
+  publish: (input) => ipcRenderer.invoke("serviceConversation:publish", input),
+  review: (input) => ipcRenderer.invoke("serviceConversation:review", input),
+  retryRevision: (input) => ipcRenderer.invoke("serviceConversation:retryRevision", input),
   cancel: (input) => ipcRenderer.invoke("serviceConversation:cancel", input)
 }

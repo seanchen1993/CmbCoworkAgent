@@ -100,7 +100,7 @@ public final class TaskApplication {
                         TaskMessageResult message = new TaskMessageResult(); message.taskVersion = current.version; message.message = new TaskMessage();
                         TaskMessage m = message.message; m.id = newId(); m.spaceId = actor.spaceId; m.taskId = current.id; m.authorPrincipalId = actor.principalId;
                         m.text = r.text; m.artifactVersions = Collections.emptyList(); m.createdAt = JdbcApplicationStore.text(now);
-                        tasks.advance(current, previous); observer.reached(TransactionObserver.Stage.VERSION_WRITTEN); tasks.message(message, r.targetBotId);
+                        TextDeliveryApplication.message(c,current,message); tasks.advance(current, previous); observer.reached(TransactionObserver.Stage.VERSION_WRITTEN); tasks.message(message, r.targetBotId);
                         observer.reached(TransactionObserver.Stage.MEMBER_WRITTEN); result = message; receiptTarget = m.id; break;
                     }
                     case GET_EVENTS: {
@@ -144,11 +144,18 @@ public final class TaskApplication {
         Bot bot = db.bot(binding.botId); BotVersion version = db.version(binding.botVersionId);
         if (bot == null || version == null || bot.status != BotStatus.ACTIVE || !bot.id.equals(version.botId) || !group.spaceId.equals(version.spaceId)) throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);
     }
+    private static boolean sameInitialStages(Task current,Task historical) {
+        if(current.stages.size()!=historical.stages.size())return false;
+        for(int i=0;i<current.stages.size();i++){
+            Stage a=current.stages.get(i),b=historical.stages.get(i);
+            if(!a.id.equals(b.id)||a.kind!=b.kind||b.status!=(i==0?StageStatus.ACTIVE:StageStatus.PENDING)||!b.inputArtifactVersions.isEmpty()||!b.outputArtifactVersions.isEmpty())return false;
+        }return true;
+    }
     private void verifyReceipt(Operation op, TrustedContext actor, String path, JdbcTaskStore tasks, JdbcApplicationStore.Receipt r) throws SQLException {
         try {
             if (op == Operation.CREATE_TASK) {
                 Task historical = boundary.readResponse(op.wire, r.status, r.body, TaskResult.class).task; Task stored = task(tasks, r.target, true);
-                if (!actor.spaceId.equals(historical.spaceId) || !r.target.equals(historical.id) || !stored.groupId.equals(historical.groupId) || !stored.taskNumber.equals(historical.taskNumber) || !stored.createdAt.equals(historical.createdAt) || !historical.createdAt.equals(historical.updatedAt) || !stored.title.equals(historical.title) || !stored.goal.equals(historical.goal) || historical.version != 1L || historical.status != TaskStatus.ACTIVE || !historical.inputArtifactVersions.isEmpty() || !Arrays.equals(JdbcApplicationStore.json(stored.stages), JdbcApplicationStore.json(historical.stages)) || !Objects.equals(stored.currentStageId, historical.currentStageId)) throw JdbcApplicationStore.corrupt();
+                if (!actor.spaceId.equals(historical.spaceId) || !r.target.equals(historical.id) || !stored.groupId.equals(historical.groupId) || !stored.taskNumber.equals(historical.taskNumber) || !stored.createdAt.equals(historical.createdAt) || !historical.createdAt.equals(historical.updatedAt) || !stored.title.equals(historical.title) || !stored.goal.equals(historical.goal) || historical.version != 1L || historical.status != TaskStatus.ACTIVE || !historical.inputArtifactVersions.isEmpty() || !sameInitialStages(stored,historical) || !Objects.equals(stored.currentStageId, historical.currentStageId)) throw JdbcApplicationStore.corrupt();
             } else {
                 TaskMessageResult historical = boundary.readResponse(op.wire, r.status, r.body, TaskMessageResult.class); TaskMessageResult stored = tasks.message(r.target);
                 if (!actor.spaceId.equals(historical.message.spaceId) || !actor.principalId.equals(historical.message.authorPrincipalId) || !path.equals(historical.message.taskId) || !r.target.equals(historical.message.id) || !Arrays.equals(JdbcApplicationStore.json(historical), JdbcApplicationStore.json(stored))) throw JdbcApplicationStore.corrupt();
