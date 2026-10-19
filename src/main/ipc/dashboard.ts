@@ -30,6 +30,7 @@ import {
 import { ProjectModePageCache } from "./project-mode-page-cache"
 import { fetchProjectModeCommitIds } from "./project-mode-commit-ids"
 import { fetchCompleteProjectDevMetrics } from "./project-mode-dev-metrics"
+import { describeDashboardEsQuery } from "../services/dashboard-es-query-diagnostics"
 import { loadTraceExportDetails } from "./dashboard-trace-export"
 import {
   buildToolUsageAggs,
@@ -330,7 +331,11 @@ function getErrorDetail(error: Error): string {
   return parts.length > 0 ? `${error.message}: ${parts.join(" <- ")}` : error.message
 }
 
-function makeEsUnavailableError(nodes: string[], lastError: Error | null): Error {
+function makeEsUnavailableError(
+  nodes: string[],
+  lastError: Error | null,
+  queryContext?: { index: string; operation: string } & ReturnType<typeof describeDashboardEsQuery>
+): Error {
   const detail = lastError ? getErrorDetail(lastError) : "unknown error"
   // 体积超限和节点不可达是两类问题：前者重试多少次、换几个节点都一样，报成
   // 「请检查网络连接」只会把排查引到错误方向（本次线上就是这么被误导的）。
@@ -341,7 +346,7 @@ function makeEsUnavailableError(nodes: string[], lastError: Error | null): Error
     })
   }
   if (getDashboardEsHttpErrorStatus(lastError) === 400) {
-    console.warn("[Dashboard] ES rejected query parameters:", detail)
+    console.error("[Dashboard] ES rejected query parameters:", queryContext ?? {}, detail)
     return new Error("统计查询失败：ES 拒绝了查询参数（HTTP 400），请检查客户端版本或索引配置", {
       cause: lastError
     })
@@ -397,7 +402,11 @@ async function esQuery(
   } catch (error) {
     if (isDashboardEsRequestCancelled(error) || isDashboardRequestCancelled(error)) throw error
     if (!isDashboardEsWorkerUnavailable(error)) {
-      throw makeEsUnavailableError(nodes, error instanceof Error ? error : new Error(String(error)))
+      throw makeEsUnavailableError(nodes, error instanceof Error ? error : new Error(String(error)), {
+        index,
+        operation: options?.operation ?? "search",
+        ...describeDashboardEsQuery(body)
+      })
     }
 
     // Packaging failures should not make a small dashboard query unusable. This
