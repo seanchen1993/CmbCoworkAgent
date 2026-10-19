@@ -112,3 +112,16 @@ root 审实际 diff 与保留矩阵、独立运行关键本地 SQLite/Runtime/IP
 - 离线只持久排队，恢复不重复执行；未知投递不自动重发。解绑/撤销后拒新消息，停未开始的相关执行并阻止待回传自动发出，历史保留；不把撤销等同删数据。
 - 外部仅文字与同受众工作工具；文件/shell/浏览器/MCP/技能/私人记忆/配置/子代理均不开放。桌面查看外部工作不自动使该会话获得 owner 权限，不跨受众复制文件、记忆或模型上下文。桌面私有主/工作完整 beta 功能不受此策略影响。
 - 验收只证明本地客户端边界与模拟收发；真实群提及、身份校验、设备路由、附件、租约/permit、平台送达和生产授权留给 M06-IM。
+
+实施接点已审：独立 `simulation:true` DTO 不接受 thread/audience/owner/path/model，由绑定解析。可在既有可信 `RemoteTurnPolicy` 增加可选工具/技能/专家 allowlist 与 `disableHooks`，默认 undefined 保持 beta 行为；mock 实际工具执行同样拒绝未列名工具，不能仅从模型列表隐藏。全局 hook 在 Runtime 构造前的 SessionStart/UserPromptSubmit 也要使用本轮 disabled HookScope，后续工具/Stop 继承；不修改用户全局 hook 设置。渠道独立空 workspace 不带 feature/project/plugin，上下文禁个人记忆和 AGENTS。设备离线只影响模拟入口与队列，不阻塞本机 beta。桌面向外部工作追加时仍沿原受众，并明确会回复该模拟渠道。
+
+## 12. M05-05 清理与旧数据的验收出口
+
+04 切片通过后，由同一实施者继续，不另启产品写者。清理优先保证用户只看到一套 Bot 产品：
+
+- 移除 `ServiceExpertConversation`、`useServiceExpertChats` 与 BotsWorkspace 的专属选择/列表/路由，移除 CustomizeView 的 PartnerDevPanel 页面。保留 beta 原新建/编辑和所有配置页，历史 selectedId 回到可用普通 Bot/空态，不触发旧服务连接。
+- 从 App 启动、活跃任务检测、退出、IPC、preload 移除旧 PartnerDev/ServiceConversation 运行接线；不构造旧 controller、worker、router，也不默认注册旧 input-only requirement 引擎。正常 beta 与生产 IM V1 运行入口不动。旧 Java/协议及必要历史验证源码仍保留到 M06，须与新 App 默认依赖断开、注明历史用途。
+- 用单独只读适配访问已存在的旧 journal；不要通过构造旧 Store 触发建表、恢复或网络连接。无旧表为正常空态，旧 pending/unknown 原样显示为历史事实。历史入口放工作区设置中的次要位置，不在左侧创建新服务 Bot。
+- 历史可按会话/任务有界分页查看并导出；导出仅本机存有的记录，注明未包含未同步的 Java 数据。不输出连接密钥/令牌，不从历史文本执行工具。原表、profile 和旧 Java 数据不删除或改写。
+- 若有可核实的旧专家职责快照，可由用户显式填入原 Bot 编辑器并保存为普通 Bot；不得自动授予旧服务身份桌面能力。缺少本地职责时明确未保存，不猜测或后台连接旧服务补取。不得将旧请求/结果批量转换成新执行。
+- 最终从实际旧数据副本升级、关库/重开、宽窄/明暗界面及普通 Bot/工作闭环核验；检查旧 worker 启动次数为零、Java/MySQL 停用不影响新链路。beta 全能力矩阵、生产 IM V1 与受影响 Runtime/hook 回归通过后才称本轮完成。
