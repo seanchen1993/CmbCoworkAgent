@@ -6,6 +6,7 @@ export interface PartnerWorkerClient {
   observe(): Promise<void>
   poll(): Promise<Array<{ id: string; status: string }>>
   claim(id: string): Promise<PartnerRequirementRun>
+  recover?(id: string): Promise<PartnerRequirementRun>
 }
 export interface PartnerWorkerExecutor {
   execute(run: PartnerRequirementRun): Promise<PartnerRequirementResult>
@@ -102,7 +103,11 @@ export class PartnerLocalWorker {
       for (const item of runs) {
         if (!this.current(g)) break
         if (this.finished.has(item.id)) continue
-        const run = validatePartnerRun(await this.deps.client.claim(item.id))
+        const run = validatePartnerRun(
+          await (item.status === "running" && this.deps.client.recover
+            ? this.deps.client.recover(item.id)
+            : this.deps.client.claim(item.id))
+        )
         if (!this.current(g)) break // A stopped node never starts a late claim.
         this.active = run
         this.report()

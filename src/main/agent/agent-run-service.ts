@@ -103,7 +103,11 @@ export interface AgentGoalControlResult {
 export interface AgentRunExecutionContext {
   source: StandardTurnSource
   /** Trusted main-process profile. Never read from AgentInvokeParams/renderer/IM. */
-  partnerInputOnly?: { systemPrompt: string; modelRef: string }
+  partnerInputOnly?: {
+    systemPrompt: string
+    modelRef: string
+    modelConfigHash?: string
+  }
   localRunLease?: {
     owner: LocalThreadRunOwner
     runId: string

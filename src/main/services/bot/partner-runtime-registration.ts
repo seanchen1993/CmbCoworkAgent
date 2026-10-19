@@ -21,11 +21,19 @@ export function registerPartnerInputOnlyRuntime(): void {
             typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
         }
       },
-      async resolveModel(modelRef) {
-        if (modelRef === PARTNER_FAKE_MODEL_REF) return new PartnerFakeRequirementModel({})
+      async resolveModel(modelRef, configHash) {
+        if (modelRef === PARTNER_FAKE_MODEL_REF && !configHash)
+          return new PartnerFakeRequirementModel({})
         const { getModelConfigByRef } = await import("../../models/registry")
         const config = getModelConfigByRef(modelRef)
         if (!config) throw new InputOnlyRequirementFault("EXECUTION_FAILED")
+        if (configHash !== undefined) {
+          const { instantiateBoundServiceModel } = await import("./service-model-binding")
+          return instantiateBoundServiceModel(modelRef, configHash, config, async (snapshot) => {
+            const { getModelInstance } = await import("../../agent/runtime")
+            return getModelInstance(snapshot, undefined, 1)
+          })
+        }
         const { getModelInstance } = await import("../../agent/runtime")
         return getModelInstance(config, undefined, 1)
       }

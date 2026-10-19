@@ -341,3 +341,48 @@ test("no closed client requests and no cross-node poll runs", async () => {
     })
   )
 })
+
+test("current authorization is read under owner credential and strictly validates grant scope/version/lifetime shape", async () => {
+  const base = {
+    id: "grant",
+    groupId: "group",
+    nodeId: "node",
+    ownerPrincipalId: "owner",
+    workspaceRef: "view",
+    version: 3,
+    enabled: true,
+    expiresAt: new Date(Date.now() + 60000).toISOString(),
+    createdAt: "2026-10-19T00:00:00.000Z",
+    updatedAt: "2026-10-19T00:00:00.000Z"
+  }
+  let grant: unknown = base
+  await serverFixture(
+    async (d, seen) => {
+      const client = new PartnerLocalClient(d)
+      try {
+        const value = await client.currentAuthorization("group")
+        assert.equal(value!.spaceId, d.spaceId)
+        assert.equal(value!.version, 3)
+        assert.equal(value!.nodeId, "node")
+        assert.equal(seen[0].headers.authorization, `Bearer ${d.ownerToken}`)
+        for (const patch of [
+          { groupId: "another" },
+          { enabled: "true" },
+          { version: 0 },
+          { expiresAt: "bad" },
+          { workspaceRef: "../path" },
+          { extra: true }
+        ]) {
+          grant = { ...base, ...patch }
+          await assert.rejects(client.currentAuthorization("group"), /INVALID_PAYLOAD/)
+        }
+      } finally {
+        client.close()
+      }
+    },
+    (_request, body) => {
+      assert.deepEqual(body, { operation: "authorization", groupId: "group" })
+      return { value: { grant } }
+    }
+  )
+})

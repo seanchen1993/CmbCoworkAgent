@@ -1,3 +1,4 @@
+import { serviceConversationApi } from "./service-conversation"
 import { localBotsApi } from "./bots"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type {
@@ -2939,6 +2940,7 @@ const api = {
       }
     }
   },
+  serviceConversation: serviceConversationApi,
   partnerDev: {
     createExpert: (input: { name: string; instructions: string }) => ipcRenderer.invoke("partnerDev:createExpert", input),
     startExpert: () => ipcRenderer.invoke("partnerDev:startExpert"),

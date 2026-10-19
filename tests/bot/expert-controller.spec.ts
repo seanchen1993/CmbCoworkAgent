@@ -53,12 +53,26 @@ class Client extends PartnerLocalClient {
   override async observe() {
     this.calls.push({ kind: "observe" })
   }
+  grant: Awaited<ReturnType<PartnerLocalClient["currentAuthorization"]>> = null
+  override async currentAuthorization() {
+    return this.grant
+  }
   override async authorizationVersion() {
     return 0
   }
   override async authorize() {
     this.calls.push({ kind: "authorize" })
-    return 1
+    this.grant = {
+      spaceId: "A",
+      groupId: this.input.group.id,
+      nodeId: "node",
+      ownerPrincipalId: "owner",
+      workspaceRef: "view",
+      version: (this.grant?.version ?? 0) + 1,
+      enabled: true,
+      expiresAt: new Date(Date.now() + 86400000).toISOString()
+    }
+    return this.grant.version
   }
   override async poll() {
     return []
@@ -170,6 +184,25 @@ test("Group admin without expert maintenance can reconnect without calling maint
     assert.equal(status.canManageExpertMemory, false)
     assert.equal(status.expertMemoryAdopted, true)
     assert.equal((await f.controller.startExpert()).nodeEnabled, true)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test("repeated explicit start reuses current matching live authorization; expired/revoked grant requires new explicit grant", async () => {
+  const f = await fixture()
+  try {
+    await f.controller.createExpert("专家", "职责")
+    await f.controller.startExpert()
+    const version = f.client.grant!.version
+    await f.controller.stopNode()
+    await f.controller.startExpert()
+    assert.equal(f.client.grant!.version, version)
+    assert.equal(f.client.calls.filter((c) => c.kind === "authorize").length, 1)
+    f.client.grant!.enabled = false
+    await f.controller.stopNode()
+    await f.controller.startExpert()
+    assert.equal(f.client.grant!.version, version + 1)
   } finally {
     await f.controller.shutdown()
   }

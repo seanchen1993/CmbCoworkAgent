@@ -115,6 +115,16 @@ export function partnerSchema<T>(name: string, value: unknown): T {
 }
 const ERROR_CODES = new Set(Object.keys(schemas.$defs).length ? schemas.$defs.ErrorCode.enum : [])
 type Json = Record<string, unknown>
+export interface PartnerNodeAuthorization {
+  spaceId: string
+  groupId: string
+  nodeId: string
+  ownerPrincipalId: string
+  workspaceRef: string
+  version: number
+  enabled: boolean
+  expiresAt: string
+}
 export interface LocalRunView {
   run: Json
   result: PartnerRequirementResult | null
@@ -288,6 +298,22 @@ export class PartnerLocalClient {
         .run as PartnerRequirementRun
     )
   }
+  async recover(runId: string): Promise<PartnerRequirementRun> {
+    const value = partnerObject(await this.node("inspect", { runId: partnerId(runId) }), [
+      "run",
+      "result"
+    ])
+    const run = validatePartnerRun(value.run as PartnerRequirementRun)
+    const d = this.descriptor
+    if (
+      run.id !== runId ||
+      run.spaceId !== d.spaceId ||
+      run.nodeId !== d.nodeId ||
+      run.ownerPrincipalId !== d.ownerPrincipalId
+    )
+      throw new PartnerLocalFault("FORBIDDEN")
+    return run
+  }
   private attempt(run: PartnerRequirementRun): Json {
     const r = validatePartnerRun(run)
     return { runId: r.id, attemptId: r.attemptId, leaseId: r.leaseId, fence: r.fence }
@@ -376,6 +402,48 @@ export class PartnerLocalClient {
   }
   async cancelPending(runId: string, expectedVersion: number): Promise<void> {
     await this.control("business", "cancelPending", { runId: partnerId(runId), expectedVersion })
+  }
+  async currentAuthorization(groupId: string): Promise<PartnerNodeAuthorization | null> {
+    const value = partnerObject(
+      await this.control("owner", "authorization", { groupId: partnerId(groupId) }),
+      ["grant"]
+    )
+    if (value.grant === null) return null
+    const grant = partnerObject(value.grant, [
+      "id",
+      "groupId",
+      "nodeId",
+      "ownerPrincipalId",
+      "workspaceRef",
+      "version",
+      "enabled",
+      "expiresAt",
+      "createdAt",
+      "updatedAt"
+    ])
+    for (const key of ["id", "groupId", "nodeId", "ownerPrincipalId", "workspaceRef"])
+      partnerId(grant[key])
+    if (
+      grant.groupId !== groupId ||
+      typeof grant.enabled !== "boolean" ||
+      ![grant.expiresAt, grant.createdAt, grant.updatedAt].every(
+        (v) =>
+          typeof v === "string" &&
+          /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(v) &&
+          Number.isFinite(Date.parse(v))
+      )
+    )
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    return {
+      spaceId: this.descriptor.spaceId,
+      groupId,
+      nodeId: String(grant.nodeId),
+      ownerPrincipalId: String(grant.ownerPrincipalId),
+      workspaceRef: String(grant.workspaceRef),
+      version: this.grantVersion(grant),
+      enabled: grant.enabled,
+      expiresAt: String(grant.expiresAt)
+    }
   }
   async authorizationVersion(groupId: string): Promise<number> {
     const v = partnerObject(
@@ -668,6 +736,12 @@ export class PartnerLocalClient {
       result.outcome === "failed" &&
       result.text === "MEMORY_CHANGED"
     )
+  }
+  async getBusinessGroup(groupId: string): Promise<Group> {
+    return partnerSchema<{ group: Group }>(
+      "GroupResult",
+      await this.call(`/api/bot/v1/groups/${partnerId(groupId)}`, "business", "GET")
+    ).group
   }
   async getGroup(groupId: string): Promise<Group> {
     return partnerSchema<{ group: Group }>(
