@@ -298,7 +298,9 @@
       "attempt_id": "M04-sol-xhigh",
       "report": "attempts/M04-sol-xhigh.md",
       "agent": "/root/service_conversation_sol",
-      "baseline": "247f1ec4"
+      "baseline": "247f1ec4",
+      "acceptance": "reviews/M04-acceptance.md",
+      "checkpoint": "Java初稿实施中，原子代理获builder独占首轮授权，DB尚未启动；root已提前核查UI/上下文/命令恢复/SQL批读设计。contextSourceIds≤12/24K已冻结。用户preview及数据保留，Mac仍锁屏。"
     },
     {
       "id": "M03-delivery-review",

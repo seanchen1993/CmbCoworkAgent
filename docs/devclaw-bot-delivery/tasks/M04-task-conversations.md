@@ -36,7 +36,7 @@
 
 主对话的创建/转达采用有界、可校验的typed意图；实施先给root具体协议。模型只提出意图，main核对当前scope、Bot、角色及允许目标，服务端再验证权限。目标引用只能是已提供给本次主对话的同scope Task或main新建结果。创建/转达命令与父请求先持久再发HTTP；模型推理成功但副作用未知时重放原命令，不重新问模型、不新建命令。需要多个阶段时明确顺序和恢复点，禁止半条卡片指向未建立Task。
 
-已冻结协议：主对话使用单次纯文本协调profile，closed JSON envelope为`{reply: string, intent: null | {kind: 'create_task', sourceRequestId: string, title: string} | {kind: 'append_task', sourceRequestId: string, targetTaskRef: string}}`，每轮最多一个意图。任务profile仍输出普通文本。模型不得提供actor、path、command、CAS、执行模型或重写后的副作用正文；main从原用户消息和明确带入的冻结上下文构造工作材料。sourceRequestId和目标白名单必须核验，解析失败不执行，显示明确错误；普通回复不覆盖命令真实状态。服务的窄协调事务验证source main Run/actor/profile并保存parentMainRequest→Task回执，后续执行走原outbox和单worker；丢回包恢复原command不重问模型。主对话任务卡只由真实回执投影。
+已冻结协议：主对话使用单次纯文本协调profile，closed JSON envelope为`{reply: string, intent: null | {kind: 'create_task', sourceRequestId: string, title: string, contextSourceIds: string[]} | {kind: 'append_task', sourceRequestId: string, targetTaskRef: string}}`，每轮最多一个意图。任务profile仍输出普通文本。模型不得提供actor、path、command、CAS、执行模型或重写后的副作用正文；main从原用户消息和明确带入的冻结上下文构造工作材料。sourceRequestId和目标白名单必须核验，解析失败不执行，显示明确错误；普通回复不覆盖命令真实状态。服务的窄协调事务验证source main Run/actor/profile并保存parentMainRequest→Task回执，后续执行走原outbox和单worker；丢回包恢复原command不重问模型。主对话任务卡只由真实回执投影。 创建意图的contextSourceIds必填，最多12个，只能指向本次freeze里的主会话消息，合计UTF8最多24K；当前末条用户消息始终作为新Task目标，不再重复携入。[]明确不带历史，不回退为整段主对话；所选source IDs随action持久，服务再次核验与复制原文。向运行中Task转达时，先保存精确目标和原命令，状态为下一轮待发，目标idle后再提交；父main请求在协调落实前保留pending，后续主消息不提前推进服务版本。完成的最后同步接纳点同时检查该Task的待发协调动作，unknown仍待核对而不重跑。
 
 仅去掉框架强制的需求文档/修订模板，保留BotVersion里用户自己的专家职责instructions。purpose/profile持久纳入claim/attempt绑定，旧M03及升级时在途Run按旧快照恢复，不把旧输出解释为新主对话JSON，不绕过unknown。
 
