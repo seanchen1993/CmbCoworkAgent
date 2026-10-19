@@ -618,6 +618,29 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
       return generatedSelectorForElement(element);
     }
 
+    function stableCheckableLabelSelector(element) {
+      if (!(element instanceof Element)) return "";
+      const label = element.closest("label");
+      if (!(label instanceof HTMLLabelElement)) return "";
+      const control = label.control;
+      if (!(control instanceof HTMLInputElement)) return "";
+      const inputType = text(control.type).toLowerCase();
+      if (inputType !== "radio" && inputType !== "checkbox") return "";
+
+      const attributes = ['type="' + cssAttributeValue(inputType) + '"'];
+      const name = text(control.name);
+      const value = text(control.value);
+      if (name) attributes.push('name="' + cssAttributeValue(name) + '"');
+      if (value) attributes.push('value="' + cssAttributeValue(value) + '"');
+      const selector = "label:has(input[" + attributes.join("][") + "])";
+      try {
+        const matches = Array.from(document.querySelectorAll(selector));
+        return matches.length === 1 && matches[0] === label ? selector : "";
+      } catch {
+        return "";
+      }
+    }
+
     function selectorForFrameElementAtIndex(index) {
       const numericIndex = Number(index);
       if (!Number.isInteger(numericIndex) || numericIndex < 0) return "";
@@ -764,8 +787,12 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
     }
 
     window.__pw_recorderRecordAction = async (action) => {
-      const selector = normalizeRecordedSelector(selectorForRecorderAction(action));
-      const element = resolveElement(selector);
+      const recordedSelector = normalizeRecordedSelector(selectorForRecorderAction(action));
+      const recordedElement = resolveElement(recordedSelector);
+      const checkableLabelSelector =
+        action?.name === "click" ? stableCheckableLabelSelector(recordedElement) : "";
+      const selector = checkableLabelSelector || recordedSelector;
+      const element = checkableLabelSelector ? resolveElement(checkableLabelSelector) : recordedElement;
       const locator = locatorForElement(element, selector || undefined);
       const selectedFileName =
         action?.name === "fill" ? fakePathFileName(action?.text) : "";
