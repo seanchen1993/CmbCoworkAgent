@@ -1,3 +1,8 @@
+import {
+  expertContextDigest,
+  summarizeCoordinationOutput
+} from "../../src/main/services/bot/expert-conversation-validation"
+import type { ExpertConversationInput } from "../../src/shared/bot/expert-conversation"
 import assert from "node:assert/strict"
 import test from "node:test"
 import type { TaskMessageResult } from "../../src/shared/bot/contracts.generated"
@@ -651,4 +656,93 @@ test("frozen revision text and explicit messages share the 60K input budget with
     assert.equal(f.stats.models, 0)
     assert.equal(f.stats.personal, 0)
     assert.equal(f.stats.tools.length, 0)
+  }))
+
+test("coordination failure diagnostics contain only safe shape metadata", () => {
+  const secret = "SECRET_PROVIDER_AND_USER_MATERIAL"
+  for (const raw of [
+    secret,
+    "```json\n" + JSON.stringify({ reply: secret, intent: null }) + "\n```",
+    JSON.stringify({ reply: secret, intent: null, [secret]: secret }),
+    JSON.stringify({ reply: "", intent: { kind: secret, [secret]: secret } }),
+    JSON.stringify([secret]),
+    JSON.stringify(secret),
+    JSON.stringify({
+      reply: secret,
+      intent: {
+        kind: "create_task",
+        sourceRequestId: secret,
+        title: secret,
+        contextSourceIds: [secret]
+      }
+    })
+  ]) {
+    const summary = summarizeCoordinationOutput(raw)
+    assert.deepEqual(
+      Object.keys(summary).sort(),
+      [
+        "length",
+        "utf8Bytes",
+        "fenced",
+        "json",
+        "rootFieldCount",
+        "reply",
+        "intent",
+        "intentFieldCount"
+      ].sort()
+    )
+    assert.equal(summary.length, raw.length)
+    assert.equal(summary.utf8Bytes, Buffer.byteLength(raw, "utf8"))
+    assert.equal(JSON.stringify(summary).includes(secret), false)
+    assert.ok(["parse_error", "object", "array", "scalar"].includes(summary.json))
+  }
+  assert.equal(summarizeCoordinationOutput("```json\n{}\n```").fenced, true)
+  assert.equal(summarizeCoordinationOutput('{"reply":"yes","intent":null}').intent, "null")
+})
+
+test("actual restricted main protocol failure logs shape without raw and remains failed", () =>
+  withSqlite(async (db) => {
+    const raw = "PROVIDER_USER_SECRET <not-json>",
+      f = setup(db, { response: new AIMessage(raw) })
+    const unsigned: Omit<ExpertConversationInput, "digest"> = {
+      profile: "expert_main_v1",
+      taskId: f.run.taskId,
+      taskVersion: f.run.taskVersion,
+      sourceRequestId: "request",
+      messages: [{ role: "user", text: "只是咨询", sourceId: "task", taskVersion: 1 }],
+      targets: []
+    }
+    const conversation = { ...unsigned, digest: expertContextDigest(unsigned) }
+    f.input.conversationInput = conversation
+    f.run.executionProfile = conversation.profile
+    f.run.contextDigest = conversation.digest
+    let failures = 0
+    const notices: unknown[][] = [],
+      previous = console.warn
+    console.warn = (...args) => {
+      notices.push(args)
+    }
+    try {
+      const executor = new PartnerRequirementExecutor({
+        ...f.dependencies,
+        onProtocolFailure: () => {
+          failures++
+        }
+      })
+      const result = await executor.execute(f.run)
+      assert.equal(result.outcome, "failed")
+      assert.equal(failures, 1)
+      assert.equal(f.stats.models, 1)
+      assert.equal(f.stats.tools.length, 0)
+      assert.equal(f.stats.personal, 0)
+      const diagnostic = notices.filter(
+        (entry) => entry[0] === "[Partner][CoordinationOutputInvalid]"
+      )
+      assert.equal(diagnostic.length, 1)
+      assert.deepEqual(diagnostic[0][1], { runId: f.run.id, ...summarizeCoordinationOutput(raw) })
+      assert.equal(JSON.stringify(notices).includes(raw), false)
+      assert.equal(result.text.includes(raw), false)
+    } finally {
+      console.warn = previous
+    }
   }))

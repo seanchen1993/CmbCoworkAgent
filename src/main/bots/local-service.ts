@@ -31,7 +31,11 @@ export function getBotBrowserService(): BotBrowserService {
       botDirectory(
         join(getCmbCoworkAgentDataRoot(), "bots"),
         "workspaces",
-        scope.startsWith("group-") ? scope.split("--")[0] : scope
+        scope.startsWith("group-")
+          ? scope.split("--")[0]
+          : scope.startsWith("work-")
+            ? scope.split("--")[1]
+            : scope
       )
   ))
 }
@@ -98,7 +102,30 @@ export function getLocalBotHost(): LocalBotHost {
             role: message.role,
             text: message.role === "assistant" ? splitBotInlineReasoning(text).body : text
           }
-        }
+        },
+        (threadId, ids) =>
+          getThreadMessagesByIds(threadId, ids).flatMap((message) => {
+            if (
+              (message.role !== "user" && message.role !== "assistant") ||
+              !Number.isSafeInteger(message.ordinal)
+            )
+              return []
+            const text =
+              typeof message.content === "string"
+                ? message.content
+                : message.content
+                    .filter((b) => b.type === "text")
+                    .map((b) => b.text ?? "")
+                    .join("\n")
+            return [
+              {
+                id: message.id,
+                ordinal: message.ordinal!,
+                role: message.role,
+                text: message.role === "assistant" ? splitBotInlineReasoning(text).body : text
+              }
+            ]
+          })
       ),
       createLocalBotRunPort(
         getBotMemoryService(),

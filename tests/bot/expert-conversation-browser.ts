@@ -89,7 +89,10 @@ async function main() {
         reads: 0,
         lists: 0,
         completes: 0,
-        reopens: 0
+        reopens: 0,
+        retries: 0,
+        maxRead: 0,
+        maxUpdates: 0
       }
       const tasks = Array.from({ length: 41 }, (_, i) => ({
         taskRef: "task-" + (i + 1),
@@ -148,6 +151,7 @@ async function main() {
           }))
         ]
       ])
+      const retries: Array<{ taskRef: string; requestId: string; operationId: string }> = []
       let taskCount = 41
       let loseSendReply = false
       const committed = new Map<string, any>()
@@ -184,7 +188,8 @@ async function main() {
             selectedTask: structuredClone(tasks.find((t) => t.taskRef === v.selectedRef)),
             items: structuredClone(filtered.slice(after, after + 40)),
             nextCursor: filtered.length > after + 40 ? String(after + 40) : null,
-            pending: [...records.values()].flat().some((r) => r.status === "running")
+            pending:
+              retries.length > 0 || [...records.values()].flat().some((r) => r.status === "running")
           }
         },
         read: async (v: any) => {
@@ -195,16 +200,19 @@ async function main() {
           }
           const all = records.get(v.taskRef) ?? [],
             end = v.cursor ? Number(v.cursor) : all.length
+          stats.maxRead = Math.max(stats.maxRead, Math.min(40, end))
           return {
             items: structuredClone(all.slice(Math.max(0, end - 40), end)),
             nextCursor: end > 40 ? String(end - 40) : null,
             task: structuredClone(tasks.find((t) => t.taskRef === v.taskRef))
           }
         },
-        updates: async (v: any) =>
-          structuredClone(
+        updates: async (v: any) => {
+          stats.maxUpdates = Math.max(stats.maxUpdates, v.requestIds.length)
+          return structuredClone(
             (records.get(v.taskRef) ?? []).filter((r) => v.requestIds.includes(r.requestId))
-          ),
+          )
+        },
         chat: async (v: any) => {
           if (committed.has(v.requestId)) return structuredClone(committed.get(v.requestId))
           stats.sends++
@@ -251,7 +259,11 @@ async function main() {
           task.taskStatus = v.action === "complete" ? "completed" : "active"
           stats[v.action === "complete" ? "completes" : "reopens"]++
         },
-        retryChat: async () => {}
+        retryChat: async (v: any) => {
+          stats.retries++
+          retries.push(v)
+          // The real IPC acknowledges the action before its child request exists.
+        }
       }
       w.fixtureLocalBot = {
         hostId: "local",
@@ -294,6 +306,52 @@ async function main() {
       }
       w.m04 = {
         stats,
+        seedFailure: (id: string, older = false) => {
+          const failed = {
+            requestId: id,
+            taskRef: "main",
+            text: "仅咨询 " + id,
+            status: "failed",
+            notice: "COORDINATION_INVALID_OUTPUT",
+            result: null,
+            runId: "run-" + id,
+            createdAt: new Date().toISOString()
+          }
+          const later = older
+            ? Array.from({ length: 41 }, (_, i) => ({
+                ...failed,
+                requestId: id + "-later-" + i,
+                text: "已有讨论 " + i,
+                status: "succeeded",
+                notice: null
+              }))
+            : []
+          records.set("main", [...(records.get("main") ?? []), failed, ...later])
+        },
+        applyRetry: (label: string) => {
+          setTimeout(() => {
+            const action = retries.shift()!
+            const list = records.get(action.taskRef)!,
+              source = list.find((r) => r.requestId === action.requestId)
+            const requestId = "ec-retry:" + action.operationId
+            source.supersededBy = requestId
+            list.push({
+              ...source,
+              requestId,
+              supersededBy: undefined,
+              status: "succeeded",
+              notice: null,
+              runId: "run-" + requestId,
+              result: {
+                runId: "run-" + requestId,
+                attemptId: "attempt-" + requestId,
+                outcome: "succeeded",
+                text: label,
+                settledAt: new Date().toISOString()
+              }
+            })
+          }, 50)
+        },
         limitTasks: (count: number) => {
           taskCount = count
         },
@@ -491,7 +549,47 @@ async function main() {
     await page.locator('.service-chat-task-row[title="历史任务 6"]').waitFor()
     assert.equal(await page.evaluate(() => (window as any).m04.stats.lists), beforeExpand)
     assert.equal(await page.getByRole("button", { name: "更多任务", exact: true }).count(), 0)
+    await page.evaluate(() => {
+      ;(window as any).m04.seedFailure("retry-first", true)
+      ;(window as any).remountM04()
+    })
+    await page.getByRole("textbox", { name: "给专家发消息" }).waitFor()
+    await page.getByRole("button", { name: "加载更早消息" }).click()
+    await page.getByText("仅咨询 retry-first", { exact: true }).waitFor()
+    await page.getByRole("button", { name: "重试", exact: true }).click()
+    await page.waitForFunction(() => (window as any).m04.stats.retries === 1)
+    await page.evaluate(() => (window as any).m04.applyRetry("无需切换即可看到重试结果"))
+    await page.getByText("无需切换即可看到重试结果", { exact: true }).waitFor()
+    assert.equal(await page.getByRole("button", { name: "重试", exact: true }).count(), 0)
+    await page.evaluate(() => {
+      ;(window as any).m04.seedFailure("retry-remount")
+      ;(window as any).remountM04()
+    })
+    await page.getByRole("button", { name: "重试", exact: true }).click()
+    await page.waitForFunction(() => (window as any).m04.stats.retries === 2)
+    await page.evaluate(() => (window as any).remountM04())
+    await page.getByText("仅咨询 retry-remount", { exact: true }).waitFor()
+    await page.evaluate(() => (window as any).m04.applyRetry("重挂后自动发现后台结果"))
+    await page.getByText("重挂后自动发现后台结果", { exact: true }).waitFor()
+    assert.equal(await page.getByRole("button", { name: "重试", exact: true }).count(), 0)
+    await page.evaluate(() => {
+      ;(window as any).m04.seedFailure("retry-switch")
+      ;(window as any).remountM04()
+    })
+    await page.getByRole("button", { name: "重试", exact: true }).click()
+    await page.waitForFunction(() => (window as any).m04.stats.retries === 3)
+    await page.locator('.service-chat-task-row[title="整理季度安排"]').click()
+    await page.getByRole("textbox", { name: "给任务发消息" }).waitFor()
+    await page.evaluate(() => (window as any).m04.applyRetry("回主对话可见且不污染任务会话"))
+    await page.waitForTimeout(2500)
+    assert.equal(await page.getByText("回主对话可见且不污染任务会话", { exact: true }).count(), 0)
+    await page.getByRole("button", { name: "工作协调专家 主对话" }).click()
+    await page.getByText("回主对话可见且不污染任务会话", { exact: true }).waitFor()
+    assert.equal(await page.getByRole("button", { name: "重试", exact: true }).count(), 0)
     const stats = await page.evaluate(() => (window as any).m04.stats)
+    assert.ok(stats.maxRead <= 40)
+    assert.ok(stats.maxUpdates <= 40)
+    assert.equal(stats.retries, 3)
     assert.equal(stats.localWrites, 0)
     assert.equal(stats.sends, 4)
     assert.equal(stats.cancels.length, 1)

@@ -7374,6 +7374,12 @@ export class LocalSandbox
     await Promise.allSettled(completions)
   }
 
+  /** Trusted host receipts can stop exact detached commands without cancelling a peer's other work. */
+  static async cancelBackgroundCommandIdsAndWait(commandIds: readonly string[]): Promise<void> {
+    const completions = LocalSandbox.cancelBackgroundTasksForThread(undefined, new Set(commandIds))
+    await Promise.allSettled(completions)
+  }
+
   // Keyed by the actual Runtime signal, so a stale run cannot move a newer run's command.
   private static readonly foregroundHandoffs = new WeakMap<AbortSignal, Set<() => boolean>>()
 
@@ -7588,10 +7594,14 @@ export class LocalSandbox
     return settled
   }
 
-  private static cancelBackgroundTasksForThread(threadId?: string): Promise<void>[] {
+  private static cancelBackgroundTasksForThread(
+    threadId?: string,
+    commandIds?: ReadonlySet<string>
+  ): Promise<void>[] {
     const completions: Promise<void>[] = []
     for (const [taskId, task] of LocalSandbox.backgroundTasks) {
       if (threadId !== undefined && task.threadId !== threadId) continue
+      if (commandIds && !commandIds.has(taskId)) continue
       if (!task.completed) {
         console.log(
           `[LocalSandbox] cancelling background task ${taskId} (command: ${task.command}) for thread ${task.threadId}`

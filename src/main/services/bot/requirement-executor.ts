@@ -2,6 +2,7 @@ import { parseDeliveryInput } from "./text-delivery-validation"
 import {
   parseExpertInput,
   parseCoordination,
+  summarizeCoordinationOutput,
   EXPERT_MAIN_TEXT_PROMPT,
   EXPERT_TASK_TEXT_PROMPT
 } from "./expert-conversation-validation"
@@ -395,6 +396,10 @@ export class PartnerRequirementExecutor {
                 try {
                   parseCoordination(result.finalText, prompt.conversation)
                 } catch (error) {
+                  console.warn("[Partner][CoordinationOutputInvalid]", {
+                    runId: run.id,
+                    ...summarizeCoordinationOutput(result.finalText)
+                  })
                   this.deps.onProtocolFailure?.(run)
                   throw error
                 }

@@ -67,6 +67,14 @@ export function useServiceExpertChats(
   const [tick, setTick] = useState(0)
   const refreshLock = useRef(false)
   const [pending, setPending] = useState(false)
+  const [discovering, setDiscovering] = useState(false)
+  const retrySource = useRef<{
+    conversationId: string
+    taskRef: string
+    requestId: string
+    accepted: boolean
+  } | null>(null)
+  const selectionRead = useRef<number | null>(null)
   const [error, setError] = useState<string | null>(null),
     [working, setWorking] = useState(false),
     [draft, setDraftState] = useState("")
@@ -75,8 +83,17 @@ export function useServiceExpertChats(
     selectionGeneration = useRef(0),
     suspended = useRef(false),
     lock = useRef(false)
-  const values = useRef({ overview, tasks, entries, selectedRef, active, query })
-  values.current = { overview, tasks, entries, selectedRef, active, query }
+  const values = useRef({
+    overview,
+    tasks,
+    entries,
+    selectedRef,
+    active,
+    query,
+    pending,
+    discovering
+  })
+  values.current = { overview, tasks, entries, selectedRef, active, query, pending, discovering }
   const pendingSend = useRef(
     new Map<
       string,
@@ -106,6 +123,8 @@ export function useServiceExpertChats(
     setTaskCursor(null)
     setEntryCursor(null)
     setPending(false)
+    setDiscovering(false)
+    retrySource.current = null
     setSelectedTask(undefined)
     pendingSend.current.clear()
   }, [])
@@ -196,7 +215,13 @@ export function useServiceExpertChats(
     setEntryCursor(null)
     setSelectedTask(undefined)
     setError(null)
-    if (!api || !conversationId || !ref || ref === SERVICE_NEW_TASK || !active) return
+    retrySource.current = null
+    selectionRead.current = null
+    const readable = !!api && !!conversationId && !!ref && ref !== SERVICE_NEW_TASK && active
+    // An ordered summary→latest read also recovers actions accepted before a remount.
+    setDiscovering(readable)
+    if (!api || !conversationId || !readable || !ref) return
+    selectionRead.current = sg
     void api
       .read({ conversationId, taskRef: ref, cursor: null })
       .then((page) => {
@@ -209,6 +234,12 @@ export function useServiceExpertChats(
       .catch((error) => {
         if (valid(g, conversationId) && sg === selectionGeneration.current)
           setError(serviceError(error))
+      })
+      .finally(() => {
+        if (selectionRead.current === sg) {
+          selectionRead.current = null
+          if (mounted.current) setTick((value) => value + 1)
+        }
       })
   }, [api, conversationId, ref, active, valid])
   const draftKey = conversationId
@@ -244,7 +275,8 @@ export function useServiceExpertChats(
       sg = selectionGeneration.current,
       current = values.current,
       id = current.overview!.conversationId!,
-      q = current.query
+      q = current.query,
+      retryAtStart = retrySource.current
     try {
       const page = await api.chatTasks({
         conversationId: id,
@@ -268,9 +300,36 @@ export function useServiceExpertChats(
           page.selectedTask ?? page.items.find((t) => t.taskRef === current.selectedRef)
         if (summary && sg === selectionGeneration.current) setSelectedTask(summary)
       }
-      const requestIds = current.entries.filter(serviceBusy).map((r) => r.requestId)
       const taskRef = current.selectedRef ?? current.overview!.mainTaskRef
-      if (current.active && taskRef && sg === selectionGeneration.current) {
+      if (
+        current.active &&
+        taskRef &&
+        taskRef !== SERVICE_NEW_TASK &&
+        sg === selectionGeneration.current &&
+        selectionRead.current !== sg
+      ) {
+        let known = current.entries
+        const readIds = new Set<string>()
+        // Pending actions can create a request after retryChat has already returned.
+        // Read only the latest bounded page, including the pending→idle trailing pass.
+        if (page.pending || current.pending || current.discovering) {
+          const latest = await api.read({ conversationId: id, taskRef, cursor: null })
+          if (!valid(g, id) || sg !== selectionGeneration.current) return
+          known = merge(known, latest.items, (r) => r.requestId)
+          for (const entry of latest.items) readIds.add(entry.requestId)
+          setEntries((old) => merge(old, latest.items, (r) => r.requestId))
+        }
+        const source = retryAtStart
+        const sourceId =
+          source?.conversationId === id && source.taskRef === taskRef ? source.requestId : null
+        const requestIds = [
+          ...new Set([
+            ...known
+              .filter((r) => serviceBusy(r) && !readIds.has(r.requestId))
+              .map((r) => r.requestId),
+            ...(sourceId && !readIds.has(sourceId) ? [sourceId] : [])
+          ])
+        ]
         for (let i = 0; i < requestIds.length; i += 40) {
           const updates = await api.updates({
             conversationId: id,
@@ -278,8 +337,27 @@ export function useServiceExpertChats(
             requestIds: requestIds.slice(i, i + 40)
           })
           if (!valid(g, id) || sg !== selectionGeneration.current) return
+          known = merge(known, updates, (r) => r.requestId)
           setEntries((old) => merge(old, updates, (r) => r.requestId))
         }
+        const replacement = sourceId
+          ? known.find((r) => r.requestId === sourceId)?.supersededBy
+          : undefined
+        if (replacement && !known.some((r) => r.requestId === replacement)) {
+          const child = await api.updates({
+            conversationId: id,
+            taskRef,
+            requestIds: [replacement]
+          })
+          if (!valid(g, id) || sg !== selectionGeneration.current) return
+          setEntries((old) => merge(old, child, (r) => r.requestId))
+        }
+        if (
+          retrySource.current === retryAtStart &&
+          (replacement || (!page.pending && retryAtStart?.accepted))
+        )
+          retrySource.current = null
+        setDiscovering(false)
       }
       if (valid(g, id)) setError(null)
     } catch (error) {
@@ -290,6 +368,7 @@ export function useServiceExpertChats(
     }
   }, [api, valid])
   const polling =
+    discovering ||
     pending ||
     entries.some(serviceBusy) ||
     tasks.some(
@@ -311,7 +390,7 @@ export function useServiceExpertChats(
       void refresh()
     }, 2000)
     return () => clearTimeout(timer)
-  }, [polling, conversationId, pending, entries, tasks, tick, refresh])
+  }, [polling, conversationId, pending, discovering, entries, tasks, tick, refresh])
   const moreTasks = async () => {
     if (!api || !conversationId || !taskCursor) return
     const g = generation.current,
@@ -454,13 +533,21 @@ export function useServiceExpertChats(
       }),
     retry: (requestId: string) =>
       run(async () => {
-        if (api && conversationId && ref)
-          await api.retryChat({
-            conversationId,
-            taskRef: ref,
-            requestId,
-            operationId: crypto.randomUUID()
-          })
+        if (!api || !conversationId || !ref) return
+        const g = generation.current,
+          sg = selectionGeneration.current
+        retrySource.current = { conversationId, taskRef: ref, requestId, accepted: false }
+        setDiscovering(true)
+        await api.retryChat({
+          conversationId,
+          taskRef: ref,
+          requestId,
+          operationId: crypto.randomUUID()
+        })
+        if (valid(g, conversationId) && sg === selectionGeneration.current) {
+          retrySource.current = { conversationId, taskRef: ref, requestId, accepted: true }
+          setDiscovering(true)
+        }
       })
   }
 }
