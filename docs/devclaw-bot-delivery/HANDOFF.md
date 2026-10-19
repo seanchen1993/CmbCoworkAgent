@@ -1,3 +1,13 @@
+# 2026-10-19 M05 已授权：beta 全能力保留、本地体系、右侧独立任务
+
+最新用户决定覆盖下方 M04 与更早架构：独立任务放 beta 右侧；新建 Bot 与专家统一 UI 和本地 Runtime；beta 所有现有功能保留，只做扩展。业务数据本地权威。后端可以先 mock，真实 Java 接入/精简及合入 IM 工程延后，不阻塞本地 MVP。
+
+设计 `reviews/M05-beta-local-unification-design.md`，任务清单 `tasks/M05-beta-local-unification.md`，验收 `reviews/M05-acceptance.md`。root 设计/审查/验收，原 `/root/service_conversation_sol`（gpt-6.1-sol/xhigh）唯一实施，先给 M05-01 接口和保留矩阵检查点，再分片实现。M04 首轮 d9efa226 已合入 b479d51d，但未通过新融合目标验收；原实施树五文件 dirty 完整保留，先保存 WIP，不 reset。
+
+实际网关 `/Users/heyirui/Downloads/LF39_devclaw_im_gateway_0821`，HEAD e744c6d7，原有 Dockerfile/README.md/pom.xml 修改不动。已只读核对身份/WSS/permit/ACK/outbox，现 ingress 明确忽略群消息。当前只实现开发 mock 边界与真实 App 本地闭环，不写网关、不宣称真实招乎已打通。
+
+integration HEAD 起点 b479d51d；实施树仍为 beta-merge-review/agent-channel-integration-research-7ff0d6，计划分支 codex/beta-local-unification-m05。用户预览保留，所有旧 PID/端口只是历史，更新前实际重查。Java/DB 构建本轮无需启动，scheduler 保持 PAUSED，不 push/deploy、不读写用户凭据。下方均为历史检查点，不据其恢复旧服务方案。
+
 # 2026-10-19 M04 已授权实施：主对话与独立任务会话，UI融入beta
 
 用户明确“可以，注意UI上的展示要合理，现在看起来与现有UI有割裂，你看下这点，开始实施”。root冻结设计，原`/root/service_conversation_sol`（gpt-6.1-sol/xhigh）唯一产品实施；任务`tasks/M04-task-conversations.md`。目标integration基线`247f1ec4`；实施树`/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6`已从此基线建`codex/bot-task-conversations-m04`，旧提交保留。root独占设计/state/HANDOFF/reviews，实施者仅产品/测试/attempt，不派生、不push/deploy。
