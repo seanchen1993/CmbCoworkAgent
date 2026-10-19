@@ -1,3 +1,11 @@
+# 2026-10-19 M02 服务专家私聊已授权
+
+用户明确继续下一步，并固定后续分工：root 设计和验收，gpt-6.1-sol 实施；复杂任务 xhigh，简单 high。M02 是复杂链路，任务 `tasks/M02-service-conversation.md` 已ready。目标基准e80f741c，沿用附属工作树 `/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6`、新分支 `codex/bot-service-conversation-m02`。旧high代理 `/root/beta_merge_sol` 已完成只读核查、clean且结束，无产品改动；xhigh writer实际ID见state，不能重复派写者。
+
+设计：当前已配置单服务专家在beta工作区中私聊；窄API+持久journal承接单次发送/create或message/enqueue，展示会话与Task执行Thread分离，服务Task/Run明确建模。补充先留待下一轮，避免改变当前冻结Task.version。enqueue前按完整scope和commandId冻结模型ref/非密钥配置hash；单node worker按精确claim身份路由，旧dev仍fake，服务绑定缺失不fallback。运行后持久结果回到原任务/会话，重开不重跑。真实模型能力沿用受限零工具resolver，测试只fake；多专家目录、换机历史、文件工具和正式成果确认不在此片。
+
+root独占状态/任务/集成分支；实施只写附属树和attempts/M02-sol-xhigh.md。按任务矩阵验证实际Java+隔离MySQL+SQLite/worker/DeepAgent以及真实UI，不调用真实模型/内网、不推送部署或恢复自动任务，不改用户App/数据。下方M01完成出口保留为历史，不代表M02已完成。
+
 # 2026-10-19 beta 合并已验收
 
 用户要求 beta 合入 integration，root 设计与质量把控、gpt-6.1-sol/high 实施。已完成：beta `91554cbc` 与 integration `d76f3020` 的真实双亲候选 `bac6d2e7`，root 审查后正常合入目标 `codex/devclaw-bot-integration`，合并提交 `f47861fe`。目标工作树 `/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork`，产品树与验收候选完全一致。本轮新提交未推送。
