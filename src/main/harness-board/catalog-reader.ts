@@ -267,6 +267,8 @@ function projectBoardConfigForDetails(
   }
   const knowledgeConfig = isRecord(config.knowledge_config) ? config.knowledge_config : null
   const nextAction = projectNextAction(knowledgeConfig?.nextAction)
+  const artifactConfig = isRecord(config.artifact_sync) ? config.artifact_sync : null
+  const artifactNextAction = projectNextAction(artifactConfig?.nextAction)
   const apiVersion =
     typeof config.apiVersion === "number" || typeof config.apiVersion === "string"
       ? config.apiVersion
@@ -280,6 +282,14 @@ function projectBoardConfigForDetails(
           knowledge_config: {
             sync_type: text(knowledgeConfig.sync_type, 256),
             ...(nextAction ? { nextAction } : {})
+          }
+        }
+      : {}),
+    ...(artifactConfig
+      ? {
+          artifact_sync: {
+            sync_type: text(artifactConfig.sync_type, 256),
+            ...(artifactNextAction ? { nextAction: artifactNextAction } : {})
           }
         }
       : {})
