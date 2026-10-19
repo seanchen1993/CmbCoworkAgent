@@ -9,7 +9,7 @@ import { once } from "node:events"
 import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import AdmZip from "adm-zip"
-import type { ElectronApplication, Page } from "playwright"
+import type { ElectronApplication, Locator, Page } from "playwright"
 import type { DevelopmentBusinessTrialStatus } from "../src/shared/mods/development"
 import { extensionContextStorageKey } from "../src/main/harness-board/extension-context"
 import { snapshotDerivationSource } from "../src/main/plugins/derivation-source"
@@ -134,6 +134,18 @@ async function trial() {
   assert(value, "Original host must return a trial record")
   return value
 }
+async function showTrialSession(record: Locator) {
+  await record.getByRole("button", {
+    name: /^(查看试用会话与原工具确认|收起试用会话)$/
+  }).waitFor({ timeout: 5000 })
+  const open = record.getByRole("button", { name: "查看试用会话与原工具确认", exact: true })
+  if (await open.isVisible()) await open.click()
+}
+async function showCheckpointRecord(record: Locator) {
+  const summary = record.locator("summary").filter({ hasText: "原生检查点与流程决策记录" })
+  if (!(await summary.evaluate(element => (element.parentElement as HTMLDetailsElement).open)))
+    await summary.click()
+}
 async function showCreator() {
   await page.getByText("Isolated business creator", { exact: true }).first().click()
   await page.waitForSelector("textarea.composer-textarea")
@@ -199,7 +211,7 @@ function prepareCollectorDependencies(record: DevelopmentBusinessTrialStatus) {
   cpSync(dependencies, join(collector, "node_modules"), { recursive: true })
 }
 async function configureCurrentTrial(expectedId: string) {
-  const dialog = page.getByRole("dialog", { name: "隔离试用业务插件" })
+  const dialog = page.getByRole("dialog", { name: "插件试用与整轮验收" })
   await dialog.getByRole("checkbox", { name: /我已核对此候选版本和目标/ }).check()
   await dialog.getByRole("button", { name: "确认创建隔离试用", exact: true }).click()
   let prepared = await until(
@@ -390,7 +402,7 @@ async function main() {
     )
     const firstPrepared = await configureCurrentTrial(first.id)
     const firstSnapshotDigest = (await snapshotDerivationSource(firstPrepared.source)).digest
-    const dialog = page.getByRole("dialog", { name: "隔离试用业务插件" })
+    const dialog = page.getByRole("dialog", { name: "插件试用与整轮验收" })
     const started = Date.now()
     await dialog.getByRole("button", { name: "确认并启动试用", exact: true }).click()
     await dialog.getByRole("button", { name: "Close", exact: true }).click()
@@ -402,10 +414,7 @@ async function main() {
       "Original creator composer must stay editable while the embedded trial session is read-only"
     )
     await page.getByRole("button", { name: "业务插件试用中", exact: true }).click()
-    await page
-      .getByRole("article", { name: "业务插件组装确认" })
-      .getByRole("button", { name: "隔离试用此版本", exact: true })
-      .click()
+    await page.getByRole("button", { name: "继续查看本轮试用与验收", exact: true }).click()
     let firstTrialThreadId: string | undefined
     const checked = await until(
       async () => {
@@ -415,7 +424,9 @@ async function main() {
           assert(current.observation?.threadId)
           // Inspect the actual live Mod at an already-required native approval boundary.
           // After retirement AbovePrompt is not a durable message and must not be replayed.
-          await dialog.getByRole("region", { name: "原流程运行记录" })
+          const record = dialog.getByRole("region", { name: "原流程运行记录" })
+          await showTrialSession(record)
+          await record
             .getByText("业务试用审阅标识：初版", { exact: true })
             .waitFor({ state: "visible", timeout: 5000 })
           firstTrialThreadId = current.observation.threadId
@@ -510,6 +521,7 @@ async function main() {
     assert.equal(checked.current.observation!.sourceNodeStatus, "done")
     assert.equal(checked.current.observation!.stageAttribution, "decision-source")
     const nativeRecord = dialog.getByRole("region", { name: "原流程运行记录" })
+    await showCheckpointRecord(nativeRecord)
     await nativeRecord.getByText("最近决策来源节点", { exact: true }).waitFor()
     assert((await nativeRecord.innerText()).includes(stopped.observation.stageId ?? "尚无阶段记录"))
     evidence.firstTrial = {
@@ -532,10 +544,7 @@ async function main() {
     await dialog.getByRole("button", { name: "Close", exact: true }).click()
     await creatorComposer.fill("")
     await page.getByRole("button", { name: "业务插件组装", exact: true }).click()
-    await page
-      .getByRole("article", { name: "业务插件组装确认" })
-      .getByRole("button", { name: "隔离试用此版本", exact: true })
-      .click()
+    await page.getByRole("button", { name: "继续查看本轮试用与验收", exact: true }).click()
     await dialog
       .getByRole("textbox", { name: "业务插件试用反馈", exact: true })
       .fill(
@@ -568,6 +577,7 @@ async function main() {
       90000
     )
     const revisedConversation = dialog.getByRole("region", { name: "原流程运行记录" })
+    await showTrialSession(revisedConversation)
     await revisedConversation
       .getByText("业务试用审阅标识：修订版", { exact: true })
       .waitFor({ state: "visible", timeout: 5000 })
@@ -599,7 +609,7 @@ async function main() {
     // The original customization view restores its trial dialog after a process restart.
     // Use the new page's locator and its normal Close control before sidebar navigation.
     // The old `dialog` locator belongs to the terminated Electron renderer.
-    const restoredDialog = page.getByRole("dialog", { name: "隔离试用业务插件" })
+    const restoredDialog = page.getByRole("dialog", { name: "插件试用与整轮验收" })
     await restoredDialog.getByRole("button", { name: "Close", exact: true }).click()
     await restoredDialog.waitFor({ state: "hidden" })
     evidence.restartRestoredDialogDismissed = {
@@ -662,7 +672,7 @@ async function main() {
     evidence.failureDiagnostics = await Promise.all([
       observe("native-trial", trial),
       observe("trial-dom", async () => page.getByRole("dialog", {
-        name: "隔离试用业务插件"
+        name: "插件试用与整轮验收"
       }).evaluate((element) => ({
         text: (element.textContent ?? "").slice(0, 32768),
         html: element.outerHTML.slice(0, 131072)

@@ -125,6 +125,23 @@ it("rejects resources the original Host source boundary cannot retain instead of
   expect(f.sessions.trialRequest(scope)).toBeUndefined()
 })
 
+it("reuses the original exact request while its isolated trial is leased instead of detaching it", async () => {
+  const f = await fixture()
+  const first = await requestCreatorHostBusinessTrial(f.input)
+  const draft = f.sessions.read(scope, first.request.draftId)
+  roots.add(dirname(draft.directory))
+  const lease = f.sessions.acquireDevelopment(scope, draft.id, draft.revision, () => {})
+  try {
+    const reopened = await requestCreatorHostBusinessTrial(f.input)
+    expect(reopened.request.id).toBe(first.request.id)
+    expect(reopened.request.origin).toEqual(origin)
+    expect(f.sessions.developmentStatus(scope, draft.id)?.activeRuns).toBe(1)
+    expect(reopened.executed).toBe(false)
+  } finally {
+    lease.release()
+  }
+})
+
 it("honors source authority before importing a package and does not grant approval", async () => {
   const f = await fixture()
   await expect(

@@ -4,6 +4,7 @@ import { existsSync, mkdirSync } from "node:fs"
 import { resolve } from "node:path"
 import { build } from "esbuild"
 import { chromium } from "playwright"
+import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
 async function main() {
   const root = resolve(__dirname, "..")
@@ -44,6 +45,7 @@ async function main() {
       createRoot(document.getElementById("root")).render(<ModsDevelopmentPanel threadId="chat" workspaceHint="C:/creator" mode="chat"/>);
     ` },
     bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic",
+    plugins: [browserWorkerPlugin()],
     alias: { "@": resolve(root, "src/renderer/src") },
     define: { "process.env.NODE_ENV": '"production"' },
     loader: { ".md": "text", ".png": "dataurl" }
@@ -77,12 +79,12 @@ async function main() {
     await page.getByRole("alert").filter({ hasText: "MODS_CONFIG_SOURCE_CHANGED" }).waitFor()
     assert.equal(await page.getByLabel("服务密钥", { exact: true }).count(), 0)
     await page.evaluate("window.fixture.business('needs-review')")
-    const install = page.getByRole("button", { name: "安装独立插件", exact: true })
+    const install = page.getByRole("button", { name: "保存为新插件并安装", exact: true })
     const exportButton = page.getByRole("button", { name: "导出插件包…", exact: true })
     await page.getByRole("article", { name: "业务插件组装确认" }).waitFor()
     assert.equal(await install.isEnabled(), false)
     await page.evaluate("window.fixture.business('needs-approval')")
-    await page.waitForFunction("[...document.querySelectorAll('button')].some(b=>b.textContent==='安装独立插件'&&!b.disabled)")
+    await page.waitForFunction("[...document.querySelectorAll('button')].some(b=>b.textContent==='保存为新插件并安装'&&!b.disabled)")
     await install.evaluate(button => { (button as HTMLButtonElement).click(); (button as HTMLButtonElement).click() })
     assert.equal(await page.evaluate("window.fixture.calls.filter(x=>x.kind==='business-install').length"), 1)
     assert.deepEqual(await page.evaluate("window.fixture.calls.find(x=>x.kind==='business-install')"), {

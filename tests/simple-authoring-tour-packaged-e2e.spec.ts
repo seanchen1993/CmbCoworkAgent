@@ -147,8 +147,8 @@ async function main() {
       if (task === 0) {
         await page.getByRole("heading", { name: "说说你想让助手做什么", exact: true }).waitFor()
         const create = page.getByRole("region", { name: "灵件对话创作", exact: true })
-        await create.getByRole("heading", { name: "在所选聊天制作灵件", exact: true }).waitFor()
-        await create.getByRole("button", { name: "开启灵件并开始制作", exact: true }).waitFor()
+        await create.getByRole("heading", { name: "在所选聊天使用创造者模式", exact: true }).waitFor()
+        await create.getByRole("button", { name: "进入创造者模式", exact: true }).waitFor()
         assert.equal(
           await page.getByRole("region", { name: "从已有插件创建", exact: true }).isVisible(),
           false

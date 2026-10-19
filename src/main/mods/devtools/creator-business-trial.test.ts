@@ -25,6 +25,14 @@ import { publishDevelopmentTurnSettlement } from "../v2/development-turn-settlem
 import { businessCreatorScopeKey } from "./creator-business-draft"
 import { ModDevelopmentService, setModDevelopmentService } from "./development-service"
 import { AuthoringDraftStore } from "./authoring-store"
+import * as trialEvidenceAdapter from "./adapters/autobiz-trial-evidence"
+import { registerLegacyCompositionAdmission } from "../../harness-board/project-runtime/composition-legacy-production"
+import { prepareAgentRunAdmission } from "../../agent/agent-run-admission"
+import { currentRuntimePluginSource, withRuntimePluginSource } from "../../plugins/runtime-source-scope"
+import {
+  executeProjectCheckpoint,
+  projectCheckpointAvailable
+} from "../../harness-board/project-runtime/project-checkpoint"
 
 const boundary = vi.hoisted(() => ({
   ready: false,
@@ -47,7 +55,8 @@ const boundary = vi.hoisted(() => ({
 // Only orchestration seams are controlled here. Original SQLite CAS, retained package
 // capture/content proof and main-only provider routing are real. Actual original Python,
 // native configuration/approvals and managed agent execution have separate App acceptance.
-vi.mock("../../harness-board/service", () => ({
+vi.mock("../../harness-board/service", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../harness-board/service")>(),
   createHarnessProject: async (
     input: HarnessProjectCreateInput,
     source: {
@@ -87,7 +96,8 @@ vi.mock("../../harness-board/service", () => ({
     boundary.feature(input)
   }
 }))
-vi.mock("../../harness-board/managed-run-controller", () => ({
+vi.mock("../../harness-board/managed-run-controller", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../harness-board/managed-run-controller")>(),
   managedRunController: {
     start: async (input: { projectId: string; featureId: string; workspacePath: string }) => {
       boundary.start(input)
@@ -111,7 +121,8 @@ vi.mock("../../harness-board/managed-run-controller", () => ({
     }
   }
 }))
-vi.mock("../../harness-board/managed-run-store", () => ({
+vi.mock("../../harness-board/managed-run-store", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../harness-board/managed-run-store")>(),
   managedRunStore: {
     listEvents: () => ({ events: [], hasMore: false }),
     getLatestRun: (id: string) => {
@@ -161,7 +172,8 @@ vi.mock("../../harness-board/project-runtime-function-source", () => ({
     }
   })
 }))
-vi.mock("../../agent/agent-run-service", () => ({
+vi.mock("../../agent/agent-run-service", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../agent/agent-run-service")>(),
   createBrowserWindowAgentRunDelivery: () => ({}),
   cancelActiveAgentRun: (id: string) => {
     boundary.cancel(id)
@@ -171,7 +183,8 @@ vi.mock("../../agent/agent-run-service", () => ({
   },
   isAgentRunBusy: () => boundary.busy
 }))
-vi.mock("../../db", () => ({
+vi.mock("../../db", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../db")>(),
   getThreadCore: () => ({
     created_at: 1,
     metadata: JSON.stringify({
@@ -185,16 +198,24 @@ vi.mock("../../db", () => ({
   })
 }))
 vi.mock("../../agent/workflow/run-manager", () => ({
+  deferOwnedRuntimeWorkflowSettlement: () => ({ deferred: false }),
   workflowRunManager: {
     cancelAndWait: async (id: string) => {
       boundary.workflowCancel(id)
     }
   }
 }))
-vi.mock("../../harness-board/notifications", () => ({
+vi.mock("../../mcp/capability-service", () => ({
+  closeProjectCapabilityMcpService: vi.fn(async () => {})
+}))
+vi.mock("../../harness-board/notifications", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../harness-board/notifications")>(),
   harnessNotifications: { pending: () => [] }
 }))
-vi.mock("../../services/notification-actions", () => ({ decideNotification: vi.fn() }))
+vi.mock("../../services/notification-actions", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/notification-actions")>(),
+  decideNotification: vi.fn()
+}))
 
 const cleanup: Array<() => void | Promise<void>> = []
 afterEach(async () => {
@@ -561,10 +582,55 @@ it("retains already confirmed terminal history when its original source is later
   internal.onPhysicalSettlement!({ ...physical, confirmed: true })
   boundary.run!.status = "completed"
   await f.trial().refresh(f.input())
+  expect(f.trial().status(f.scope)?.journey?.candidateCurrent).toBe(true)
+  expect(f.trial().status(f.scope, { planId: "changed-plan", digest: "c".repeat(64) })?.journey)
+    .toMatchObject({ candidateCurrent: false, canDeliver: false })
+  expect(f.trial().status(f.scope, null)?.journey)
+    .toMatchObject({ candidateCurrent: false, canDeliver: false })
   boundary.source = false
+  expect(f.trial().status(f.scope)?.journey)
+    .toMatchObject({ candidateCurrent: false, canDeliver: false })
   f.reload()
   expect(f.trial().status(f.scope)).toMatchObject({ phase: "completed", canStart: false })
+  expect(f.trial().status(f.scope)?.journey)
+    .toMatchObject({ candidateCurrent: false, canDeliver: false })
+  expect(boundary.start).toHaveBeenCalledTimes(1)
 })
+
+it.each([false, true])(
+  "describes only the opted-in pending creator admission (%s), without admitting checkpoint execution before publication",
+  async optIn => {
+    // Only the adapter's Python contract-discovery seam is controlled. The creator's
+    // scoped registration, frozen store, nonce/source proof and original admission are real.
+    const contracts = vi.spyOn(trialEvidenceAdapter, "readAutobizTrialEvidenceContracts")
+      .mockResolvedValue(optIn ? [{ nodeId: "draft", checkId: "postcheck",
+        contractDigest: "a".repeat(64), artifacts: [{ id: "report", path: "report.md" }] }] : undefined)
+    cleanup.push(() => contracts.mockRestore())
+    const f = await fixture()
+    await f.prepare()
+    await f.start()
+    boundary.run!.currentSession = undefined
+    cleanup.push(registerLegacyCompositionAdmission())
+    const admission = await prepareAgentRunAdmission({ threadId: "original-managed-thread",
+      message: "Run the genuine pending original stage", streamRequestId: "pending-request" },
+      { source: "desktop" })
+    expect(admission).toBeDefined()
+    await withRuntimePluginSource(admission!.context.pluginSourceSnapshot, async () => {
+      const source = currentRuntimePluginSource()!
+      if (optIn) expect(source.stagePrompt).toContain("project_checkpoint")
+      else expect(source.stagePrompt).toBeUndefined()
+      expect(projectCheckpointAvailable()).toBe(false)
+      await expect(executeProjectCheckpoint({ checkpoint: "draft_done",
+        expectedStateDigest: "b".repeat(64) })).rejects.toThrow("UNAVAILABLE")
+    })
+    boundary.run!.currentSession = { threadId: "original-managed-thread" }
+    withRuntimePluginSource(admission!.context.pluginSourceSnapshot, () => {
+      expect(projectCheckpointAvailable()).toBe(optIn)
+    })
+    await admission!.settle()
+    expect(boundary.start).toHaveBeenCalledTimes(1)
+  }
+)
 
 it("cancels a just-admitted original session before the controller publishes currentSession", async () => {
   const f = await fixture()

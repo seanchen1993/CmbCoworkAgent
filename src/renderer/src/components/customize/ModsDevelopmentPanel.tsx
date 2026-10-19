@@ -6,7 +6,9 @@ import {
   developmentNextStep
 } from "./development-trial-view"
 import { WandSparkles } from "lucide-react"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import {
+  Dialog, DialogContent, DialogDescription, DialogTitle, DialogTrigger
+} from "@/components/ui/dialog"
 import { rememberReuseSelection } from "./development-reuse-receipts"
 import type { DevelopmentSetupApi } from "./development-creation-setup"
 import { enterCreatorMode } from "./creator-mode-entry"
@@ -25,6 +27,12 @@ import { FunctionUserConfig } from "./FunctionUserConfig"
 import { BusinessCreatorReviewCard } from "./BusinessCreatorReviewCard"
 import { BusinessCreatorTrialDialog } from "./BusinessCreatorTrialDialog"
 import { CreatorPlanningPanel } from "./CreatorPlanningPanel"
+import { CreatorProjectDeliveryCard } from "./CreatorProjectDeliveryCard"
+import { CreatorPluginModularizationCard } from "./CreatorPluginModularizationCard"
+import { creatorJourneyView } from "./creator-journey-view"
+import { CreatorTrialJourneyCard } from "./CreatorTrialJourneyCard"
+import { CreatorWorkspaceNavigation } from "./CreatorWorkspaceNavigation"
+import { isHostBusinessCreatorReview } from "./creator-project-route"
 
 const phases: Record<DevelopmentTrialStatus["phase"], string> = {
   "needs-approval": "等待你确认能力",
@@ -177,6 +185,7 @@ function ScopedDevelopment({
   promotionBlocked: boolean
 }) {
   const [open, setOpen] = useState(false)
+  const workspaceBody = useRef<HTMLElement>(null)
   const focusChatAfterClose = useRef(false)
   const [status, setStatus] = useState<DevelopmentStatus | null>(null)
   const [busy, setBusy] = useState(false)
@@ -192,6 +201,7 @@ function ScopedDevelopment({
   const announcedCompositionFailure = useRef("")
   const announcedReuse = useRef("")
   const [projectPreviewOpen, setProjectPreviewOpen] = useState(false)
+  const [creatorOptionsOpen, setCreatorOptionsOpen] = useState(false)
   const [businessTrialOpen, setBusinessTrialOpen] = useState(false)
   const accept = useCallback(
     (next: DevelopmentStatus) => {
@@ -288,7 +298,11 @@ function ScopedDevelopment({
   const stopCreation = () =>
     void operate(
       (expectedWorkspace) => api.setEnabled({ threadId, expectedWorkspace, enabled: false }),
-      accept
+      next => {
+        accept(next)
+        focusChatAfterClose.current = true
+        setOpen(false)
+      }
     )
   const creatorMode = status?.mode === "creator" || (status?.mode === undefined && status?.enabled)
   const awaitingApproval =
@@ -350,6 +364,8 @@ function ScopedDevelopment({
     }
   }, [mode, configurationId])
   const projectTrialId = status?.projectTrial?.id
+  const projectJourney = status?.projectTrial ? creatorJourneyView(status.projectTrial.journey,
+    { threadId, digest: status.projectTrial.digest }) : undefined
   const announcedProjectTrial = useRef<string | undefined>(undefined)
   useEffect(() => {
     if (mode === "chat" && projectTrialId && announcedProjectTrial.current !== projectTrialId) {
@@ -358,8 +374,28 @@ function ScopedDevelopment({
     }
   }, [mode, projectTrialId])
   const businessReview = status?.business?.review
-  const businessTrialDiagnostic = status?.business?.trialDiagnostic
-  const businessTrial = businessTrialDiagnostic ? undefined : status?.business?.trial
+  const hostBusinessReview = isHostBusinessCreatorReview(status?.projectTrial, businessReview)
+  const useProjectCandidate = !!status?.projectTrial && (!businessReview || hostBusinessReview)
+  const modularization = status?.business?.modularization
+  const announcedModularization = useRef("")
+  useEffect(() => {
+    if (mode === "chat" && modularization?.phase === "needs-confirmation" &&
+      announcedModularization.current !== modularization.requestId) {
+      announcedModularization.current = modularization.requestId
+      setOpen(true)
+    }
+  }, [mode, modularization?.phase, modularization?.requestId])
+  const projectCreation = !!businessReview || !!status?.projectTrial
+  const businessTrialDiagnostic = hostBusinessReview ? undefined : status?.business?.trialDiagnostic
+  const businessTrial = hostBusinessReview || businessTrialDiagnostic ? undefined : status?.business?.trial
+  useEffect(() => {
+    if (businessTrialOpen && hostBusinessReview) {
+      setBusinessTrialOpen(false)
+      if (mode === "chat") setOpen(true)
+    }
+  }, [businessTrialOpen, hostBusinessReview, mode])
+  const businessJourney = businessTrial ? creatorJourneyView(businessTrial.journey,
+    { threadId, digest: businessTrial.digest }) : undefined
   const announcedBusinessTrial = useRef("")
   const businessTrialAttention = businessTrial &&
     ["needs-confirmation", "failed", "unknown"].includes(businessTrial.phase)
@@ -388,12 +424,17 @@ function ScopedDevelopment({
     }
     if (!awaitingApproval) announcedApproval.current = ""
   }, [mode, awaitingApproval, approvalKey])
-  const label = businessTrialDiagnostic ? "业务试用记录待核对"
+  const label = modularization?.phase === "needs-confirmation" ? "确认插件模块化"
+    : hostBusinessReview ? projectJourney?.label ?? "确认项目真实试用"
+    : businessTrialDiagnostic ? "业务试用记录待核对"
     : businessTrial?.phase === "unknown" ? "业务试用结果待核对"
     : businessTrial && ["needs-configuration", "ready"].includes(businessTrial.phase) ? "配置业务试用"
     : businessTrial?.phase === "running" ? "业务插件试用中"
+    : businessJourney?.passed ? "整轮试用已通过"
+    : businessTrial?.phase === "completed" ? "试用已结束，核对验收"
+    : businessTrial?.phase === "failed" ? "业务试用失败，查看诊断"
     : businessReview ? businessReview.phase === "unknown" ? "插件结果待核对" : "业务插件组装"
-    : projectTrialId ? "确认项目真实试用"
+    : projectTrialId ? projectJourney?.label ?? "确认项目真实试用"
     : configurationId ? "填写插件参数"
     : undoBusy ? "正在撤销修改"
     : status?.undo?.phase === "failed" ? "撤销结果待核对"
@@ -424,7 +465,7 @@ function ScopedDevelopment({
               : status?.trials.some((row) => ["queued", "preflight", "retiring"].includes(row.phase))
                 ? "正在准备试用"
                 : composition?.phase === "active" ? "组合已应用"
-                  : reuse?.phase === "active" ? "已保存跨聊天复用" : "Mod 状态"
+                  : reuse?.phase === "active" ? "已保存跨聊天复用" : "创作工作区"
   const saveForReuse =
     onReuse ??
     (onOpenWorkbench
@@ -434,17 +475,46 @@ function ScopedDevelopment({
           onOpenWorkbench()
         }
       : undefined)
+  const continueModularization = async (next: DevelopmentStatus) => {
+    const prepared = next.business?.modularization
+    if (prepared?.phase !== "ready" || !prepared.inspectionId || !onRequestRepair) return
+    await onRequestRepair(
+      `原始插件“${prepared.sourceName}”的首次模块化已由我确认，来源摘要 ${prepared.sourceDigest}，已准备的 inspectionId 为 ${prepared.inspectionId}。请先通过 mod_business inspect 读取这一 inspectionId 的真实模块目录、资源、Hooks 和配置契约，再根据原需求继续组合、准备候选并请求试用。不要重新猜测原始接口，不把模块化准备成功当作业务验收通过。`
+    )
+    if (!live.current) return
+    focusChatAfterClose.current = true
+    setOpen(false)
+    if (mode === "entry") onReturnToChat?.()
+  }
+  const showNavigation = projectCreation || !status?.trials.length
+  const nextWorkspaceStep = modularization?.phase === "needs-confirmation" ? "create"
+    : (useProjectCandidate && projectJourney?.passed) || businessJourney?.passed ? "delivery"
+      : useProjectCandidate && ["failed", "unknown", "needs-transition"].includes(status?.projectTrial?.journey?.phase ?? "")
+        ? "acceptance"
+        : businessTrial && ["completed", "failed", "unknown"].includes(businessTrial.phase)
+          ? "acceptance" : projectCreation ? "trial" : "create"
+  const navigate = (target: "create" | "trial" | "acceptance" | "delivery") => {
+    if (target === "create" && onReturnToChat) {
+      focusChatAfterClose.current = true
+      setOpen(false)
+      if (mode === "entry") onReturnToChat()
+      return
+    }
+    workspaceBody.current?.querySelector<HTMLElement>(`[data-creator-section="${target}"]`)
+      ?.scrollIntoView({ block: "start", behavior: "smooth" })
+  }
   const content = (
     <section
       aria-label="灵件对话创作"
+      ref={workspaceBody}
       className={
         mode === "chat"
-          ? "space-y-3 text-sm"
-          : "mx-auto max-w-3xl space-y-3 rounded-xl border bg-card p-4"
+          ? "min-w-0 space-y-5 text-sm"
+          : "mx-auto max-w-5xl space-y-5 rounded-xl border bg-card p-4"
       }
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="font-semibold">{mode === "chat" ? "Mod 状态" : "在所选聊天使用创造者模式"}</h2>
+        <h2 className="font-semibold">{mode === "chat" ? "当前创作" : "在所选聊天使用创造者模式"}</h2>
         <button
           type="button"
           className="rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent"
@@ -457,36 +527,84 @@ function ScopedDevelopment({
           刷新状态
         </button>
       </div>
+      {(!awaitingApproval || projectCreation) && <div className="space-y-3 rounded-xl border bg-muted/30 p-4" aria-label="创作流程导航">
+        <p className="text-sm font-medium">
+          {hostBusinessReview && status?.projectTrial ? `${status.projectTrial.name} · 版本 ${status.projectTrial.revision}`
+            : businessReview ? `${businessReview.name} · v${businessReview.version}`
+            : status?.projectTrial ? `${status.projectTrial.name} · 版本 ${status.projectTrial.revision}`
+              : "从需求到可复用插件"}
+        </p>
+        {useProjectCandidate && projectJourney && <div role="status" className="space-y-1 text-sm">
+          <p className="font-medium">{projectJourney.label}</p>
+          <p className="text-xs text-muted-foreground">下一步：{projectJourney.nextStep}</p>
+        </div>}
+        {businessTrial && <p role="status" className="text-xs text-muted-foreground">
+          {businessJourney?.passed ? "本轮原生检查与推进凭据已确认通过。请再核对业务效果，然后保存为新插件。"
+            : businessTrial.phase === "completed" ? "原运行已结束。请先查看整轮原检查点、产物与反馈，再选择保存为新插件。"
+            : businessTrial.phase === "running" ? "本轮试用进行中，所有阶段会话在同一轮记录中查看。"
+              : businessTrial.phase === "failed" ? "本轮未完成。请查看未通过的检查和诊断，再回原聊天修改。"
+                : "下一步：打开本轮试用，核对候选、参数与权限后运行。"}
+        </p>}
+        {projectCreation && <p className="text-xs leading-5 text-muted-foreground">
+          需求和修改始终在原聊天中进行。独立项目和阶段会话是同一轮试用的执行记录，
+          请在这里核对整轮结果，再保存或导出插件。
+        </p>}
+        {mode === "entry" && showNavigation && <CreatorWorkspaceNavigation onNavigate={navigate} currentStep={nextWorkspaceStep} />}
+        {onReturnToChat && <button type="button" className={button}
+          onClick={() => {
+            focusChatAfterClose.current = true
+            setOpen(false)
+            if (mode === "entry") onReturnToChat()
+          }}>返回原聊天继续创作</button>}
+      </div>}
       {status?.planning?.diagnostic && <p role="status" className="text-xs text-muted-foreground">
         {status.planning.diagnostic}
       </p>}
       {businessTrialDiagnostic && <p role="alert" className="text-sm text-destructive">
         隔离试用记录暂不可用：{businessTrialDiagnostic}。请核对原记录；这里不会启动或重放试用。
       </p>}
-      {businessReview && (
-        <BusinessCreatorReviewCard review={businessReview} busy={busy}
-          onTrial={api.businessTrial && !businessTrialDiagnostic ? () => { setOpen(false); setBusinessTrialOpen(true) } : undefined}
-          onApprove={() => void operate(expectedWorkspace => api.approveBusiness({
-            threadId, expectedWorkspace, planId: businessReview.planId, digest: businessReview.digest
-          }), accept)}
-          onExport={() => void operate(expectedWorkspace => api.exportBusiness({
-            threadId, expectedWorkspace, planId: businessReview.planId, digest: businessReview.digest
-          }), accept)}
-          onRead={() => void (businessReview.canReconcile
-            ? operate(expectedWorkspace => api.reconcileBusiness({
-              threadId, expectedWorkspace, planId: businessReview.planId, digest: businessReview.digest
-            }), accept) : read())} />
+      {modularization && <CreatorPluginModularizationCard status={modularization} busy={busy}
+        onConfirm={api.approveModularization ? () => void operate(async (expectedWorkspace, assertCurrent) => {
+          await enterCreatorMode(settingsApi, api, threadId, expectedWorkspace, assertCurrent)
+          assertCurrent()
+          return api.approveModularization!({ threadId, expectedWorkspace,
+            requestId: modularization.requestId, sourceDigest: modularization.sourceDigest })
+        }, async next => { accept(next); await continueModularization(next) }) : undefined}
+        onContinue={onRequestRepair ? () => void operate(
+          (expectedWorkspace, assertCurrent) => enterCreatorMode(settingsApi, api, threadId, expectedWorkspace, assertCurrent),
+          async next => { accept(next); await continueModularization(next) }
+        ) : undefined} />}
+      {(projectCreation || !!status?.configuration || !status?.trials.length) && <>
+      <section data-creator-section="trial" aria-label="试用当前候选" className="scroll-mt-4 space-y-3">
+      <h3 className="font-semibold">运行试用与核对结果</h3>
+      {!businessReview && !status?.projectTrial && <p className="text-sm text-muted-foreground">
+        还没有准备好项目候选。回到原聊天提出需求，助手准备好当前版本后，将在这里显示试用入口。
+      </p>}
+      {businessReview && !hostBusinessReview && (
+        <div className="space-y-2 rounded-xl border bg-card p-4">
+          <p className="font-medium">{businessReview.name} · v{businessReview.version}</p>
+          <p className="text-xs leading-5 text-muted-foreground">试用保留原插件，运行与本次创作关联。查看整轮记录和各阶段校验后，再决定是否保存为新插件。</p>
+          {api.businessTrial && !businessTrialDiagnostic && <button type="button" className={primaryButton}
+            disabled={busy} onClick={() => { setOpen(false); setBusinessTrialOpen(true) }}>
+            {businessTrial ? "继续查看本轮试用与验收" : "配置并试用此版本"}
+          </button>}
+        </div>
       )}
       {status?.projectTrial && (
         <article className="space-y-3 rounded-xl border bg-card p-3" aria-label="项目真实试用请求">
+          {!useProjectCandidate && <p className="text-xs font-medium text-muted-foreground">其他项目试用记录 · 与当前组装来源不同</p>}
           <p className="text-sm font-medium">{status.projectTrial.name} · 版本 {status.projectTrial.revision}</p>
           <p className="text-xs leading-5 text-muted-foreground">
-            已准备独立试用；尚未执行。确认后使用原项目运行器，从起点执行真实阶段并校验产物。
-            修改源码不会改动正在运行的版本，也不会自动重跑原任务。当前入口适用于标准宿主项目插件，
-            不会将已有 Python 业务插件转换为纯函数扩展。
+            此候选使用原项目运行器试用。各阶段分别执行，但归属于下面同一轮试用；
+            产物和校验统一汇总。修改源码后需准备新版本，不会改动正在运行的任务。
           </p>
           <ProjectDevelopmentPreviewPanel key={status.projectTrial.id} threadId={threadId}
-            workspace={status.workspace} request={status.projectTrial} />
+            workspace={status.workspace} request={status.projectTrial} showJourney={!useProjectCandidate}
+            onRequestRepair={onRequestRepair} onReturnToChat={() => {
+              focusChatAfterClose.current = true
+              setOpen(false)
+              if (mode === "entry") onReturnToChat?.()
+            }} />
         </article>
       )}
       {status?.configuration && (
@@ -503,6 +621,43 @@ function ScopedDevelopment({
             initiallyOpen onSaved={() => void read(false)} />
         </article>
       )}
+      </section>
+      <section data-creator-section="acceptance" aria-label="创作验收入口" className="scroll-mt-4 space-y-3 rounded-xl border p-4">
+        <h3 className="font-semibold">验收整轮试用</h3>
+        <p className="text-sm text-muted-foreground">
+          会话结束、代码检查通过和插件安装成功分别代表不同结果。业务通过需要原流程的阶段、必需产物、校验及人工确认凭据。
+        </p>
+        {useProjectCandidate && status?.projectTrial && <CreatorTrialJourneyCard threadId={threadId}
+          digest={status.projectTrial.digest} journey={status.projectTrial.journey} />}
+        {businessReview && !hostBusinessReview && api.businessTrial && !businessTrialDiagnostic ? <button type="button" className={button}
+          onClick={() => { setOpen(false); setBusinessTrialOpen(true) }}>查看本轮阶段和验收记录</button>
+          : !status?.projectTrial && <p className="text-xs text-muted-foreground">项目候选准备后将在这里显示逐阶段校验；缺少凭据时显示待核对。</p>}
+      </section>
+      <section data-creator-section="delivery" aria-label="保存插件交付" className="scroll-mt-4 space-y-3">
+        <h3 className="font-semibold">保存为插件并复用</h3>
+        {useProjectCandidate && status?.projectTrial && <CreatorProjectDeliveryCard threadId={threadId} workspace={status.workspace}
+          request={status.projectTrial} delivery={status.projectDelivery} api={api} onStatus={accept} />}
+        {businessReview ? <BusinessCreatorReviewCard review={businessReview} busy={busy}
+          presentation={hostBusinessReview ? "source" : "delivery"}
+          onTrial={!hostBusinessReview && api.businessTrial && !businessTrialDiagnostic ? () => { setOpen(false); setBusinessTrialOpen(true) } : undefined}
+          onApprove={() => void operate(expectedWorkspace => api.approveBusiness({
+            threadId, expectedWorkspace, planId: businessReview.planId, digest: businessReview.digest
+          }), accept)}
+          onExport={() => void operate(expectedWorkspace => api.exportBusiness({
+            threadId, expectedWorkspace, planId: businessReview.planId, digest: businessReview.digest
+          }), accept)}
+          onRead={() => void (businessReview.canReconcile
+            ? operate(expectedWorkspace => api.reconcileBusiness({
+              threadId, expectedWorkspace, planId: businessReview.planId, digest: businessReview.digest
+          }), accept) : read())} /> : !status?.projectTrial && <p className="text-sm text-muted-foreground">
+            项目插件准备完成后，将在这里确认安装为独立插件或导出 ZIP；当前聊天中的单个 Mod 可在下方保存复用。
+          </p>}
+      </section>
+      </>}
+      <details data-creator-section="create" className="scroll-mt-4 space-y-3 rounded-xl border p-4"
+        open={!businessReview && !status?.projectTrial || awaitingApproval > 0 || failed || uncertain}>
+      <summary className="cursor-pointer font-semibold">Mod 组件、聊天组合与高级制作设置</summary>
+      <p className="text-xs leading-5 text-muted-foreground">这里管理当前聊天中的 Mod。项目试用、整轮验收和插件交付分别在上方独立区域查看。</p>
       {reuse && (
         <DevelopmentReusePlanCard plan={reuse} save={status?.save} current={reuseCurrent} busy={busy}
           onApprove={() => {
@@ -837,7 +992,8 @@ function ScopedDevelopment({
         )
       })}
       {status?.enabled && (
-        <details className="rounded-lg border px-3 py-2 text-xs text-muted-foreground">
+        <details className="rounded-lg border px-3 py-2 text-xs text-muted-foreground"
+          onToggle={event => setCreatorOptionsOpen(event.currentTarget.open)}>
           <summary className="cursor-pointer">创作选项</summary>
           <div className="mt-3 flex flex-wrap gap-2">
             {onReturnToChat && (
@@ -857,7 +1013,7 @@ function ScopedDevelopment({
             </button>
           </div>
           <p className="mt-2">结束创作会停止这段聊天的灵件试用。项目试用请从任务页面停止。</p>
-          <CreatorPlanningPanel api={api} threadId={threadId} workspace={status.workspace} />
+          {creatorOptionsOpen && <CreatorPlanningPanel api={api} threadId={threadId} workspace={status.workspace} />}
         </details>
       )}
       {status?.enabled && (
@@ -952,6 +1108,7 @@ function ScopedDevelopment({
           )}
         </details>
       )}
+      </details>
       {busy && (
         <p role="status" className="text-sm">
           正在确认操作结果…
@@ -986,11 +1143,23 @@ function ScopedDevelopment({
       )}
     </section>
   )
-  const businessTrialDialog = !businessTrialDiagnostic && businessReview && status?.workspace && api.businessTrial && (
-    <BusinessCreatorTrialDialog open={businessTrialOpen} onOpenChange={setBusinessTrialOpen}
+  const businessTrialDialog = !hostBusinessReview && !businessTrialDiagnostic && businessReview && status?.workspace && api.businessTrial && (
+    <BusinessCreatorTrialDialog open={businessTrialOpen} onOpenChange={(next) => {
+      setBusinessTrialOpen(next)
+    }}
       threadId={threadId} workspace={status.workspace} review={businessReview}
       trial={businessTrial} api={api.businessTrial} onStatus={accept}
-      onRequestRepair={onRequestRepair} />
+      onRequestRepair={onRequestRepair} onReturnToCreator={() => {
+        setBusinessTrialOpen(false)
+        setOpen(false)
+        onReturnToChat?.()
+      }} onOpenDelivery={() => {
+        setBusinessTrialOpen(false)
+        setOpen(true)
+        requestAnimationFrame(() => workspaceBody.current
+          ?.querySelector<HTMLElement>('[data-creator-section="delivery"]')
+          ?.scrollIntoView({ block: "start" }))
+      }} />
   )
   if (mode === "entry") return <>{content}{businessTrialDialog}</>
   return (
@@ -1018,8 +1187,8 @@ function ScopedDevelopment({
           创造者模式
         </button>
       </div>
-      <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
+      <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
         <button
           type="button"
           className="inline-flex items-center gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2.5 py-1.5 text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -1036,8 +1205,8 @@ function ScopedDevelopment({
           )}
           {message && <span className="text-amber-700 dark:text-amber-400">需核对</span>}
         </button>
-      </PopoverTrigger>
-      <PopoverContent
+      </DialogTrigger>
+      <DialogContent
         onCloseAutoFocus={(event) => {
           if (focusChatAfterClose.current) {
             focusChatAfterClose.current = false
@@ -1047,13 +1216,19 @@ function ScopedDevelopment({
             }
           }
         }}
-        align="start"
-        side="top"
-        className="max-h-[min(70vh,640px)] w-[min(420px,calc(100vw-24px))] overflow-y-auto"
+        className="h-[92vh] w-[calc(100vw-1rem)] max-w-6xl overflow-hidden p-4 sm:p-6"
+        style={{
+          gridTemplateRows: showNavigation ? "auto auto auto minmax(0,1fr)" : "auto auto minmax(0,1fr)",
+          // Viewport changes must reflow immediately; open/close keyframe animations remain intact.
+          transitionProperty: "none"
+        }}
       >
-        {content}
-      </PopoverContent>
-      </Popover>
+        <DialogTitle>插件创作工作区</DialogTitle>
+        <DialogDescription>原聊天负责需求和修改，工作区负责试用、验收和保存交付。</DialogDescription>
+        {showNavigation && <CreatorWorkspaceNavigation onNavigate={navigate} currentStep={nextWorkspaceStep} />}
+        <div className="min-h-0 overflow-y-auto pr-1">{content}</div>
+      </DialogContent>
+      </Dialog>
       {businessTrialDialog}
     </div>
   )

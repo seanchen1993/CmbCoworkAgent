@@ -260,6 +260,12 @@ describe("natural language project authoring actions", () => {
       request: { draftId: "docs-test", revision: 3, goal: "实际生成并复核文档" } } })
     expect(projectAuthoringSessions.developmentStatus(scope, "docs-test"))
       .toMatchObject({ status: "prepared", executed: false, activeRuns: 0 })
+    const readTrial = JSON.parse(await author.invoke({ action: "project_read", id: "docs-test" }))
+    expect(readTrial.result.trial).toMatchObject({ id: trial.result.request.id,
+      draftId: "docs-test", revision: 3, goal: "实际生成并复核文档" })
+    const listTrial = JSON.parse(await author.invoke({ action: "project_list" }))
+    expect(listTrial.result).toContainEqual(expect.objectContaining({ id: "docs-test",
+      trial: expect.objectContaining({ id: trial.result.request.id }) }))
     expect(service.requestTrial).not.toHaveBeenCalled()
     expect(author.schema.safeParse({ action: "project_install" }).success).toBe(false)
     expect(author.schema.safeParse({ action: "project_approve" }).success).toBe(false)

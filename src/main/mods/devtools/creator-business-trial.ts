@@ -30,6 +30,10 @@ import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 import { readRuntimeScopedFile } from "../../harness-board/project-runtime/safe-files"
 import { readPluginManifest } from "../../plugins/manifest"
 import { prepareAutobizBusinessTrial } from "./adapters/autobiz-business-trial"
+import { autobizTrialEvidenceOwner, readAutobizTrialEvidenceContracts } from "./adapters/autobiz-trial-evidence"
+import { CreatorLegacyTrialEvidence } from "./creator-trial-legacy-evidence"
+import type { RuntimePluginSourceBinding } from "../../plugins/runtime-source-scope"
+import { projectCreatorLegacyTrialJourney } from "./creator-trial-legacy-journey"
 import { projectRuntimeFunctionSource } from "../../harness-board/project-runtime-function-source"
 import {
   readCompositionUnitContext,
@@ -86,6 +90,7 @@ export class CreatorBusinessTrials {
   private readonly cancellation = new Map<string, AbortController>()
   private readonly stopProvider: () => void
   private readonly stopSettlement: () => void
+  private readonly evidence: CreatorLegacyTrialEvidence
   private closed = false
   constructor(
     private readonly deps: {
@@ -106,6 +111,15 @@ export class CreatorBusinessTrials {
     }
   ) {
     this.snapshots = new RetainedPackageSnapshots(join(deps.root, "packages"))
+    this.evidence = new CreatorLegacyTrialEvidence(deps.root, {
+      settings: deps.settings,
+      owner: binding => this.evidenceOwner(binding),
+      canDescribe: binding => this.evidenceDescriptionAvailable(binding),
+      changed: id => {
+        const record = this.read(id)
+        if (record) deps.changed(record.scope.threadId)
+      }
+    })
     this.stopProvider = registerInternalHarnessProjectProvider(
       (id) => this.internal(id),
       (id) => this.captureIdentity(id),
@@ -138,6 +152,57 @@ export class CreatorBusinessTrials {
   }
   private key(id: string) {
     return `mods-business-trial-v1:${id}`
+  }
+  private evidenceBinding(binding: Readonly<RuntimePluginSourceBinding>) {
+    if (binding.mode !== "legacy") return undefined
+    const record = this.read(binding.projectId)
+    if (!record || !record.plugin || !record.workspace || !record.project || !record.packageDigest ||
+      record.nonce !== this.nonce || record.phase !== "running" || record.stopRequested ||
+      binding.operationId !== record.id || binding.featureId !== record.featureId ||
+      binding.packageDigest !== record.packageDigest || binding.plugin.id !== record.plugin.id ||
+      !isSameWorkspacePath(binding.plugin.path, record.plugin.path) ||
+      !isSameWorkspacePath(binding.workspace, record.workspace)) return undefined
+    const native = managedRunStore.getLatestRun(record.id, record.featureId)
+    const thread = getThreadCore(binding.threadId)
+    if (!native || native.status !== "running" ||
+      (record.runId && native.runId !== record.runId) ||
+      !thread || JSON.stringify(captureThreadIncarnation(thread)) !== binding.incarnationKey)
+      return undefined
+    let metadata: Record<string, unknown>
+    try { metadata = JSON.parse(thread.metadata ?? "null") } catch { return undefined }
+    const feature = metadata?.harnessFeature as Record<string, unknown> | undefined
+    if (feature?.projectId !== record.id || feature.slug !== record.featureId ||
+      feature.runId !== native.runId || typeof metadata.workspacePath !== "string" ||
+      !isSameWorkspacePath(metadata.workspacePath, record.workspace)) return undefined
+    return { record, native, thread }
+  }
+  private evidenceDescriptionAvailable(binding: Readonly<RuntimePluginSourceBinding>) {
+    const admitted = this.evidenceBinding(binding)
+    if (!admitted) return false
+    this.authority(admitted.record)
+    this.proof(admitted.record).assertCurrent()
+    const current = this.evidenceBinding(binding)
+    return !!current && current.native.runId === admitted.native.runId &&
+      current.thread.metadata === admitted.thread.metadata
+  }
+  private evidenceOwner(binding: Readonly<RuntimePluginSourceBinding>) {
+    const admitted = this.evidenceBinding(binding)
+    if (!admitted || admitted.native.currentSession?.threadId !== binding.threadId) return undefined
+    const { record, native, thread } = admitted
+    const guard = () => {
+      this.authority(record)
+      this.proof(record).assertCurrent()
+      const current = this.read(record.id)
+      const run = managedRunStore.getLatestRun(record.id, record.featureId)
+      if (!current || current.stopRequested || current.phase !== "running" ||
+        current.nonce !== this.nonce || (current.runId && current.runId !== native.runId) ||
+        run?.runId !== native.runId || run.status !== "running" ||
+        run.currentSession?.threadId !== binding.threadId ||
+        getThreadCore(binding.threadId)?.metadata !== thread.metadata ||
+        !matchesThreadIncarnation(getThreadCore(binding.threadId), captureThreadIncarnation(thread)))
+        throw Error("BUSINESS_TRIAL_EVIDENCE_SCOPE_CHANGED")
+    }
+    return autobizTrialEvidenceOwner(record, native.runId, guard)
   }
   private pointer(scope: DevelopmentScope) {
     return `mods-business-trial-current-v1:${businessCreatorScopeKey(scope)}`
@@ -306,7 +371,8 @@ export class CreatorBusinessTrials {
       throw Error("BUSINESS_TRIAL_VERSION_CHANGED")
     return this.status(scope)
   }
-  status(scope: DevelopmentScope): DevelopmentBusinessTrialStatus | undefined {
+  status(scope: DevelopmentScope,
+    currentCandidate?: { planId: string; digest: string } | null): DevelopmentBusinessTrialStatus | undefined {
     const record = this.current(scope)
     if (!record) return undefined
     this.assertOwner(record)
@@ -363,6 +429,36 @@ export class CreatorBusinessTrials {
         /* Original source/configuration approval remains mandatory. */
       }
     }
+    const sessionFacts = run && record.runId === run.runId && record.workspace
+      ? projectCreatorBusinessTrialSessions(
+          { projectId: record.id, featureId: record.featureId,
+            runId: run.runId, workspacePath: record.workspace },
+          managedRunStore.listEvents(run, undefined, 200), getThreadCore)
+      : undefined
+    let journey: DevelopmentBusinessTrialStatus["journey"]
+    if (record.project && record.plugin && record.packageDigest && record.workspace) {
+      try {
+        const manifest = this.evidence.source(record.id, record.featureId, record.packageDigest)
+        if (manifest) journey = projectCreatorLegacyTrialJourney({
+          projectId: record.id, creatorThreadId: scope.threadId,
+          candidateDigest: record.candidate.digest, packageDigest: record.packageDigest,
+          candidateCurrent: !invalidSource && (currentCandidate === undefined ||
+            (currentCandidate !== null && currentCandidate.planId === record.planId &&
+              currentCandidate.digest === record.candidate.digest)),
+          workspace: record.workspace, featureId: record.featureId,
+          runId: run?.runId, phase,
+          currentStageId: run?.lastDecision?.policyResult.facts?.currentNodeId,
+          manifest,
+          ...this.evidence.read(record.id, record.featureId),
+          sessions: sessionFacts?.sessions ?? [],
+          sessionsTruncated: sessionFacts?.sessionsTruncated,
+          sessionsUnavailable: !sessionFacts || sessionFacts.sessionsUnavailable
+        })
+      } catch {
+        // Missing source/journal remains an evidence gap. Status readback cannot execute
+        // a validator, repair a business state file or silently manufacture a PASS.
+      }
+    }
     return {
       id: record.id,
       version: record.version,
@@ -394,6 +490,7 @@ export class CreatorBusinessTrials {
           : []),
         ...(restarted ? ["应用已重启；仅可核对原运行结果，不恢复旧批准或自动重放。"] : [])
       ],
+      ...(journey ? { journey } : {}),
       ...(record.project
         ? {
             observation: {
@@ -403,12 +500,7 @@ export class CreatorBusinessTrials {
               runId: record.runId,
               status: run?.status ?? record.phase,
               threadId: run?.currentSession?.threadId,
-              ...(run && record.runId === run.runId
-                ? projectCreatorBusinessTrialSessions(
-                    { projectId: record.id, featureId: record.featureId,
-                      runId: run.runId, workspacePath: record.workspace! },
-                    managedRunStore.listEvents(run, undefined, 200), getThreadCore)
-                : {}),
+              ...(sessionFacts ?? {}),
               stageId: run?.lastDecision?.policyResult.facts?.currentNodeId,
               ...(run?.lastDecision?.policyResult.facts
                 ? {
@@ -471,6 +563,7 @@ export class CreatorBusinessTrials {
       )
       if (!manifestFile.bytes) throw Error("BUSINESS_TRIAL_RUNTIME_REQUIRED")
       const manifest = parseProjectRuntimeManifest(JSON.parse(manifestFile.bytes.toString("utf8")))
+      this.evidence.freezeSource(record.id, record.featureId, snapshot.digest, manifest)
       const metadata = readPluginManifest(snapshot.root)?.manifest
       if (!metadata) throw Error("BUSINESS_TRIAL_SOURCE_INVALID")
       record.packageDigest = snapshot.digest
@@ -777,6 +870,9 @@ export class CreatorBusinessTrials {
         cancellation.signal
       )
       guard()
+      const contracts = await readAutobizTrialEvidenceContracts(record)
+      guard()
+      if (contracts) this.evidence.freeze(record.id, record.featureId, contracts)
       record.phase = "running"
       this.persist(record)
       const run = await managedRunController.start({
@@ -1004,11 +1100,13 @@ export class CreatorBusinessTrials {
     this.persist(record, true, true)
   }
   close() {
+    if (this.closed) return
     for (const controller of this.cancellation.values())
       controller.abort(Error("BUSINESS_TRIAL_CLOSED"))
     this.closed = true
     this.stopSettlement()
     this.stopProvider()
+    this.evidence.close()
     this.proofs.clear()
   }
 }

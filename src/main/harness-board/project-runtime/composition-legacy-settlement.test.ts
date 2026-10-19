@@ -47,7 +47,11 @@ import {
   currentRuntimePluginSource,
   withRuntimePluginSource
 } from "../../plugins/runtime-source-scope"
-import { projectCheckpointAvailable, registerProjectCheckpointProvider } from "./project-checkpoint"
+import {
+  projectCheckpointAvailable,
+  registerProjectCheckpointProvider,
+  registerScopedProjectCheckpointProvider
+} from "./project-checkpoint"
 import { classifyManagedAgentFailure } from "../../agent/managed-agent-failure"
 
 const cleanup: Array<() => void | Promise<void>> = []
@@ -134,6 +138,34 @@ it("admits an exact creator candidate through the original source guard without 
   boundary.deferred = false
   await admission.settle()
   expect(boundary.close).toHaveBeenCalledOnce()
+})
+
+it("announces creator checkpoints only when its exact pending source binding has a registered native provider", async () => {
+  let expected: { root: string; digest: string; workspace: string } | undefined
+  const execute = vi.fn(async () => { throw Error("ADMISSION_MUST_NOT_EXECUTE_CHECKPOINT") })
+  cleanup.push(registerScopedProjectCheckpointProvider({
+    available: binding => !!expected && binding.mode === "legacy" &&
+      binding.projectId === "creator-business-trial:trial" &&
+      binding.operationId === "creator-business-trial:trial" &&
+      binding.featureId === "alpha" && binding.threadId === "original-thread" &&
+      binding.plugin.id === "original-uuid" && binding.plugin.path === expected.root &&
+      binding.packageDigest === expected.digest && binding.workspace === expected.workspace,
+    execute
+  }))
+  const admission = await fixture(async (source, workspace, root) => {
+    const retained = new RetainedPackageSnapshots(join(root, "retained")).capture(source)
+    expected = { root: retained.root, digest: retained.digest, workspace }
+  }, { kind: "creator-business-trial" })
+  withRuntimePluginSource(admission.context.pluginSourceSnapshot, () => {
+    const source = currentRuntimePluginSource()!
+    expect(source.stagePrompt).toContain("project_checkpoint")
+    expect(projectCheckpointAvailable()).toBe(true)
+    expected = undefined
+    expect(projectCheckpointAvailable()).toBe(false)
+  })
+  expect(execute).not.toHaveBeenCalled()
+  boundary.deferred = false
+  await admission.settle()
 })
 
 it("rechecks the original creator owner before admitting completion or publishing another source operation", async () => {

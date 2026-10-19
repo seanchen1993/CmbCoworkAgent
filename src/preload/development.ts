@@ -6,6 +6,14 @@ export function createDevelopmentBridge(
   subscribe: (channel: string, callback: (payload: unknown) => void) => () => void
 ): DevelopmentApi {
   return {
+    prepareProjectDelivery: input => invoke("mods:development:prepare-project-delivery", input) as
+      ReturnType<NonNullable<DevelopmentApi["prepareProjectDelivery"]>>,
+    installProjectDelivery: input => invoke("mods:development:install-project-delivery", input) as
+      ReturnType<NonNullable<DevelopmentApi["installProjectDelivery"]>>,
+    exportProjectDelivery: input => invoke("mods:development:export-project-delivery", input) as
+      ReturnType<NonNullable<DevelopmentApi["exportProjectDelivery"]>>,
+    approveModularization: input => invoke("mods:development:approve-modularization", input) as
+      ReturnType<NonNullable<DevelopmentApi["approveModularization"]>>,
     businessTrial: {
       source: createNativeProjectSourceBridge(invoke, "mods:development:business-trial"),
       request: (input) =>

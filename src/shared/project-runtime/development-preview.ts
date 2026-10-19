@@ -1,9 +1,12 @@
+import type { CreatorProjectTrialJourney } from "../mods/creator-trial-journey"
+
 export interface ProjectPreviewDraft {
   id: string
   name: string
   revision: number
   digest?: string
   projectId?: string
+  journey?: CreatorProjectTrialJourney
   recovery?: {
     projectId: string
     revision: number

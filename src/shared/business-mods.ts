@@ -14,7 +14,9 @@ export interface BusinessModKernel {
   version: string
   resources: string[]
   /** Omitted only for pre-adapter catalogs using the legacy compatibility projection. */
-  runtime?: { adapter: BusinessModAssemblyAdapterId }
+  runtime?:
+    | { adapter: "autobiz-v1" }
+    | { adapter: "host-linear-v1"; capabilities?: ProjectRuntimeManifest["capabilities"] }
   boardConfigPath?: string
   pluginFields?: Record<string, unknown>
 }
@@ -139,7 +141,7 @@ export interface BusinessModAssemblyLock {
   kernel: {
     id: string
     version: string
-    runtime?: { adapter: BusinessModAssemblyAdapterId }
+    runtime?: BusinessModKernel["runtime"]
     files: Array<{ path: string; digest: string }>
   }
   sources: Array<{ name: string; digest: string; mods: string[] }>

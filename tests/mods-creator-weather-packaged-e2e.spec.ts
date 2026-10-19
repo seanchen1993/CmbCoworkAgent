@@ -338,6 +338,9 @@ async function main() {
         threadId: scope.threadId
       })
     const send = async (text: string) => {
+      const workspace = page!.getByRole("dialog", { name: "插件创作工作区", exact: true })
+      if (await workspace.isVisible())
+        await workspace.getByRole("button", { name: "Close", exact: true }).click()
       await page!.locator("textarea.composer-textarea").fill(text)
       await page!.getByRole("button", { name: "发送消息", exact: true }).click()
     }
@@ -528,6 +531,7 @@ async function main() {
         ),
       "formal command registration"
     )
+    await page.keyboard.press("Escape")
     await page.getByRole("button", { name: "查看任务进展", exact: true }).click()
     await page.getByRole("tab", { name: "高级设置", exact: true }).click()
     await page.getByRole("button", { name: /set-weather.*设置本地天气文字/ }).waitFor()

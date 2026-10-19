@@ -25,7 +25,9 @@ function fixture() {
     undoTrial: vi.fn(),
     approveBusiness: vi.fn(),
     exportBusiness: vi.fn(),
-    reconcileBusiness: vi.fn()
+    reconcileBusiness: vi.fn(),
+    prepareProjectDelivery: vi.fn(), installProjectDelivery: vi.fn(),
+    exportProjectDelivery: vi.fn(), approveModularization: vi.fn()
   }
   const trustedEvent = {} as IpcMainInvokeEvent
   registerModsDevelopmentHandlers(
@@ -48,6 +50,31 @@ function fixture() {
 }
 
 describe("development IPC authority", () => {
+  it("admits only exact native delivery and modularization identities without caller paths or PASS facts", () => {
+    const f = fixture()
+    const scope = { threadId: "creator", expectedWorkspace: "workspace" }
+    const requestId = "3e901082-1468-4c56-962c-d48e60d9c9b6"
+    const digest = "a".repeat(64)
+    const cases = [
+      ["prepare-project-delivery", f.actions.prepareProjectDelivery,
+        { ...scope, requestId, digest, name: "new-project", version: "1.0.0" }],
+      ["install-project-delivery", f.actions.installProjectDelivery,
+        { ...scope, deliveryId: requestId, digest }],
+      ["export-project-delivery", f.actions.exportProjectDelivery,
+        { ...scope, deliveryId: requestId, digest }],
+      ["approve-modularization", f.actions.approveModularization,
+        { ...scope, requestId, sourceDigest: digest }]
+    ] as const
+    for (const [channel, action, input] of cases) {
+      expect(() => f.run(channel, input, {} as IpcMainInvokeEvent)).toThrow("UNTRUSTED")
+      for (const extra of [{ sourceRoot: "C:/other" }, { output: "C:/out.zip" },
+        { passed: true }, { confirmed: true }, { permissions: ["process.exec"] }])
+        expect(() => f.run(channel, { ...input, ...extra })).toThrow("DEVELOPMENT_INPUT")
+      expect(action).not.toHaveBeenCalled()
+      f.run(channel, input)
+      expect(action).toHaveBeenCalledExactlyOnceWith(input)
+    }
+  })
   it("admits exact native planning selection and withdrawal without accepting tool, grant or result facts", () => {
     const f = fixture(),
       scope = { threadId: "thread", expectedWorkspace: "workspace" }

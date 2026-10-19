@@ -7,7 +7,12 @@ import {
   issueRuntimePluginSourceToken,
   withRuntimePluginSource
 } from "../plugins/runtime-source-scope"
-import { registerStageCheckReceiptSink } from "./stage-check-receipts"
+import {
+  registerStageCheckReceiptSink,
+  registerStageCheckReceiptObserver,
+  prepareStageCheckReceipts
+} from "./stage-check-receipts"
+import type { HookResult } from "./types"
 import { STAGE_CHECK_RECEIPT_PREFIX } from "../../shared/project-runtime/stage-check-receipt"
 vi.mock("../mods/manager", () => ({ getModsManager: () => ({ isEnabled: () => false }) }))
 vi.mock("../storage", () => ({
@@ -24,6 +29,69 @@ afterEach(() =>
     .reverse()
     .forEach((fn) => fn())
 )
+
+it("admits only main-registered exact receipt observers and isolates observation failures", async () => {
+  const plugin = { id: "plugin", path: "C:/retained" } as PluginMetadata
+  const binding = { mode: "legacy" as const, threadId: "thread", incarnationKey: "incarnation",
+    projectId: "creator-business-trial:owned", operationId: "trial", workspace: "C:/trial",
+    packageDigest: "a".repeat(64), stageId: "review", plugin }
+  const hook = { id: "original", event: "PreToolUse", type: "command", enabled: true,
+    pluginId: plugin.id, hookSourceRoot: plugin.path } as PluginHookMetadata
+  const receipt = { apiVersion: "devclaw.stage-check/v1", nodeId: "review", checkId: "postcheck",
+    contractDigest: "b".repeat(64), outcome: "passed", artifacts: [] }
+  const result = () => ({ stdout: STAGE_CHECK_RECEIPT_PREFIX +
+    Buffer.from(JSON.stringify(receipt)).toString("base64") } as HookResult)
+  const context = { sessionId: "thread", workspacePath: "C:/trial" }
+  const observe = vi.fn(async () => { throw Error("readback unavailable") })
+  const failed = vi.fn()
+  const token = issueRuntimePluginSourceToken(binding)
+  await withRuntimePluginSource(token, async () => {
+    expect(prepareStageCheckReceipts(hook, context, result())).toBeUndefined()
+    cleanup.push(registerStageCheckReceiptObserver({
+      available: current => current.projectId === binding.projectId &&
+        current.packageDigest === binding.packageDigest,
+      observe, failed
+    }))
+    await expect(prepareStageCheckReceipts(hook, context, result())!()).resolves.toBeUndefined()
+    expect(observe).toHaveBeenCalledTimes(1)
+    expect(failed).toHaveBeenCalledTimes(1)
+    const malformed = { stdout: STAGE_CHECK_RECEIPT_PREFIX + "invalid" } as HookResult
+    await expect(prepareStageCheckReceipts(hook, context, malformed)!()).resolves.toBeUndefined()
+    expect(failed).toHaveBeenCalledTimes(2)
+  })
+})
+
+it.each(["mandatory-rejects", "observer-rejects"])(
+  "preserves original composition decisions when %s", async mode => {
+  const plugin = { id: "plugin", path: "C:/retained" } as PluginMetadata
+  const observe = vi.fn(async () => {
+    if (mode === "observer-rejects") throw Error("optional readback failed")
+  })
+  cleanup.push(registerStageCheckReceiptObserver({ available: () => true, observe }))
+  cleanup.push(registerStageCheckReceiptSink(async () => {
+    if (mode === "mandatory-rejects") throw Error("mandatory rejection")
+  }))
+  const token = issueRuntimePluginSourceToken({ threadId: "thread", incarnationKey: "incarnation",
+    projectId: "composition-legacy:run:unit", operationId: "run", workspace: "C:/trial",
+    packageDigest: "a".repeat(64), stageId: "review", plugin })
+  await withRuntimePluginSource(token, async () => {
+    const hook = { id: "original", type: "command", event: "PreToolUse", pluginId: plugin.id,
+      hookSourceRoot: plugin.path } as PluginHookMetadata
+    const result = { stdout: STAGE_CHECK_RECEIPT_PREFIX + Buffer.from(JSON.stringify({
+      apiVersion: "devclaw.stage-check/v1", nodeId: "review", checkId: "postcheck",
+      contractDigest: "b".repeat(64), outcome: "passed", artifacts: []
+    })).toString("base64") } as HookResult
+    const commit = prepareStageCheckReceipts(hook,
+      { sessionId: "thread", workspacePath: "C:/trial" }, result)!
+    if (mode === "mandatory-rejects") {
+      await expect(commit()).rejects.toThrow("mandatory rejection")
+      expect(observe).not.toHaveBeenCalled()
+    } else {
+      await expect(commit()).resolves.toBeUndefined()
+      expect(observe).toHaveBeenCalledTimes(1)
+    }
+  })
+})
 it.each(["success", "block", "halt", "exit", "forced", "cancel"])(
   "only commits genuine successful command receipts after original %s decision",
   async (mode) => {

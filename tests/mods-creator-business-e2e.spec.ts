@@ -333,7 +333,7 @@ async function main() {
       "Model must not install"
     )
     const card = page.getByRole("article", { name: "业务插件组装确认" })
-    await card.getByRole("button", { name: "安装独立插件", exact: true }).click()
+    await card.getByRole("button", { name: "保存为新插件并安装", exact: true }).click()
     const installed = await until(
       status,
       (value) => value.business?.review?.phase === "installed",
@@ -398,6 +398,7 @@ async function main() {
     assert.equal(contract.apiVersion, "devclaw.project-runtime/v2")
     assert.equal(contract.extensionContract.context.configuration, "host-resolved")
     assert.equal((await snapshotDerivationSource(original)).digest, originalDigest)
+    await page.getByRole("button", { name: "返回原聊天继续创作", exact: true }).click()
     await page
       .locator("textarea.composer-textarea")
       .fill(
@@ -414,7 +415,7 @@ async function main() {
         ),
       "same-name update review"
     )
-    assert.equal(await card.getByRole("button", { name: "安装独立插件", exact: true }).count(), 0)
+    assert.equal(await card.getByRole("button", { name: "保存为新插件并安装", exact: true }).count(), 0)
     assert(
       !readFileSync(join(installedPlugin.path, extensionPath), "utf8").includes("修订版"),
       "Dialogue authoring must not overwrite the installed version"

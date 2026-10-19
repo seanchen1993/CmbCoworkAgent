@@ -7,6 +7,28 @@ import {
 import { assertHostRuntimeSupported } from "../harness-board/project-runtime/host-validators"
 import { parseSkillNameFromFrontmatterYaml } from "../skills/frontmatter"
 
+/** Shared declarations may be referenced by several stages; conflicting IDs remain invalid. */
+function mergeDeclarations<T extends { id: string }>(values: T[]): T[] {
+  const canonical = (value: unknown): unknown =>
+    Array.isArray(value)
+      ? value.map(canonical)
+      : value && typeof value === "object"
+        ? Object.fromEntries(
+            Object.entries(value)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([key, item]) => [key, canonical(item)])
+          )
+        : value
+  const result = new Map<string, T>()
+  for (const value of values) {
+    const previous = result.get(value.id)
+    if (previous && JSON.stringify(canonical(previous)) !== JSON.stringify(canonical(value)))
+      throw Error("PROJECT_RUNTIME_MANIFEST_INVALID")
+    if (!previous) result.set(value.id, value)
+  }
+  return [...result.values()]
+}
+
 /** Static projection to the existing Host state owner, executor, checks and approvals. */
 export const hostLinearBusinessModAdapter: BusinessModAssemblyAdapter = {
   id: "host-linear-v1",
@@ -75,17 +97,20 @@ export const hostLinearBusinessModAdapter: BusinessModAssemblyAdapter = {
         title: mod.title,
         skill: mod.skill.entry
       })),
-      actions: context.modules.flatMap((mod) => mod.host!.actions),
-      artifacts: context.modules.flatMap((mod) => mod.host!.artifacts),
-      checks: context.modules.flatMap((mod) => mod.host!.checks),
-      environment: context.modules.flatMap((mod) => mod.host!.environment),
-      capabilities: {
-        execution: true,
-        conditionalTransition: false,
-        idempotency: false,
-        reconciliation: false,
-        cancellation: true
-      }
+      actions: mergeDeclarations(context.modules.flatMap((mod) => mod.host!.actions)),
+      artifacts: mergeDeclarations(context.modules.flatMap((mod) => mod.host!.artifacts)),
+      checks: mergeDeclarations(context.modules.flatMap((mod) => mod.host!.checks)),
+      environment: mergeDeclarations(context.modules.flatMap((mod) => mod.host!.environment)),
+      capabilities:
+        context.kernel.runtime?.adapter === "host-linear-v1" && context.kernel.runtime.capabilities
+          ? structuredClone(context.kernel.runtime.capabilities)
+          : {
+              execution: true,
+              conditionalTransition: false,
+              idempotency: false,
+              reconciliation: false,
+              cancellation: true
+            }
     }
     const envelope = wrapProjectRuntimeManifest(
       runtime,

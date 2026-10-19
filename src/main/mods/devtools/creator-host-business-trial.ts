@@ -61,6 +61,14 @@ export async function requestCreatorHostBusinessTrial(input: {
       resourcePaths
     ))
   input.guard()
+  const existingRequest = sessions.trialRequest(input.scope)
+  if (existingRequest?.draftId === draft.id && existingRequest.revision === draft.revision &&
+    existingRequest.digest === draft.source.digest && existingRequest.goal === input.goal.trim() &&
+    JSON.stringify(existingRequest.origin) === JSON.stringify(input.origin)) {
+    // Reopening the exact candidate returns its original request and observation. It must
+    // not detach the running project by manufacturing another authoring request identity.
+    return { phase: "needs-approval" as const, executed: false as const, request: existingRequest }
+  }
   const actions = source.bundle.files.some(
     (file) => file.path === "devclaw.project-actions.lock.json"
   )

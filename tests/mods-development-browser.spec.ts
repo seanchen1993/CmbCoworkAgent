@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { build } from "esbuild"
 import { chromium } from "playwright"
+import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
 async function main() {
   const output = resolve("output/sparks-ux-redesign-20261010", `development-browser-${Date.now()}`)
@@ -50,6 +51,7 @@ async function main() {
   `
     },
     bundle: true,
+    plugins: [browserWorkerPlugin()],
     loader: { ".md": "text", ".png": "dataurl" },
     jsx: "automatic",
     write: false,
@@ -93,7 +95,7 @@ async function main() {
     await call("failRead")
     await call("mount", "chat")
     await page.getByText("需核对", { exact: true }).waitFor()
-    await page.getByRole("button", { name: "Mod 状态", exact: true }).click()
+    await page.getByRole("button", { name: "创作工作区", exact: true }).click()
     await page.getByRole("button", { name: "刷新状态", exact: true }).click()
     await page.getByText("需核对", { exact: true }).waitFor({ state: "hidden" })
     await page.keyboard.press("Escape")
@@ -171,6 +173,7 @@ async function main() {
     await page.setViewportSize({ width: 540, height: 920 })
     await page.screenshot({ path: join(output, "development-narrow.png"), fullPage: true })
     assert.equal(await page.getByRole("button", {name:"确认并应用到这段聊天"}).count(), 0)
+    await page.keyboard.press("Escape")
     await page.getByRole("button", { name: "普通模式", exact: true }).click()
     await page.getByRole("button", { name: "普通模式", exact: true, pressed: true }).waitFor()
     await page.getByRole("button", { name: "试用失败 · 查看处理", exact: true }).click()
@@ -199,7 +202,12 @@ async function main() {
     const retryRepair = page.getByRole("button", { name: "修复并重新检查", exact: true })
     assert(await retryRepair.isEnabled(), "a rejected repair must leave the card open and allow retry")
     assert.equal(((await call("get")) as { returned: number }).returned, beforeRepair.returned)
-    assert.equal(await page.getByRole("textbox", { name: "原聊天输入框" }).inputValue(), "保留尚未发送的需求")
+    // The native modal intentionally hides its background from the accessibility tree.
+    // Observe the retained draft without interacting through the modal; after successful
+    // repair below, the ordinary role lookup and focus checks must work again.
+    assert.equal(await page.getByRole("textbox", {
+      name: "原聊天输入框", includeHidden: true
+    }).inputValue(), "保留尚未发送的需求")
     assert.equal(((await call("get")) as { calls: unknown[][] }).calls.filter(([name]) => name === "approve").length,
       approvalsBeforeRepair, "repair failure must not approve a candidate")
     await call("deferRepair")
@@ -214,6 +222,8 @@ async function main() {
     assert.equal(await retryRepair.count(), 0, "only a successfully accepted repair closes the card")
     assert.equal(((await call("get")) as { returned: number }).returned, beforeRepair.returned + 1)
     assert.equal(await page.getByRole("textbox", { name: "原聊天输入框" }).inputValue(), "保留尚未发送的需求")
+    assert(await page.getByRole("textbox", { name: "原聊天输入框" }).isEditable(),
+      "accepted repair must close the modal and restore the retained editable composer")
     assert(((await call("repairState")) as { repairs: string[] }).repairs.every(text => !text.includes("SECRET_PRIVATE_PATH")))
     assert.equal(((await call("get")) as { calls: unknown[][] }).calls.filter(([name]) => name === "approve").length,
       approvalsBeforeRepair, "submitting repair never substitutes for exact-version human approval")

@@ -153,6 +153,10 @@ export class ModDevelopmentService {
   }
   private configurationStatus?: (threadId: string) => DevelopmentStatus["configuration"]
   private projectTrialStatus?: (threadId: string) => DevelopmentStatus["projectTrial"]
+  private projectDeliveryStatus?: (threadId: string) => DevelopmentStatus["projectDelivery"]
+  configureProjectDeliveryStatus(read: NonNullable<ModDevelopmentService["projectDeliveryStatus"]>): void {
+    this.projectDeliveryStatus = read
+  }
   private businessStatus?: (threadId: string) => DevelopmentStatus["business"]
   configureBusinessStatus(read: NonNullable<ModDevelopmentService["businessStatus"]>): void {
     this.businessStatus = read
@@ -406,6 +410,7 @@ export class ModDevelopmentService {
     const save = this.compositionSaveStatus?.(threadId)
     const configuration = this.configurationStatus?.(threadId)
     const projectTrial = this.projectTrialStatus?.(threadId)
+    const projectDelivery = this.projectDeliveryStatus?.(threadId)
     const business = this.businessStatus?.(threadId)
     const reuse = this.reuse?.status(scope)
     const undo = this.undoStatus?.(threadId)
@@ -420,6 +425,7 @@ export class ModDevelopmentService {
       ...(save ? { save } : {}),
       ...(configuration ? { configuration } : {}),
       ...(projectTrial ? { projectTrial } : {}),
+      ...(projectDelivery ? { projectDelivery } : {}),
       ...(business ? { business } : {}),
       ...(reuse ? { reuse } : {}),
       ...(undo ? { undo } : {}),

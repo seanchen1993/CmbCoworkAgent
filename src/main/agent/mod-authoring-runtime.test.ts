@@ -40,6 +40,13 @@ it("admits the real creator tool and its built-in guidance without personal skil
   expect(types.result.nextCursor).toBeGreaterThan(0)
 })
 
+it("explains original-plugin modularization, native journey evidence and explicit independent delivery", () => {
+  const prompt = modAuthoringRuntimePrompt([{ name: "mod_business" }, { name: "mod_authoring" }])
+  for (const text of ["inspect_raw", "read_raw_asset", "request_modularization", "trial.journey",
+    "制作→试用→验收→保存", "指定独立新名称与版本", "模型终止", "阶段回退与中间重跑仍不提供"])
+    expect(prompt).toContain(text)
+})
+
 it("does not inject creator tools or guidance into another scope, a subagent, a project runtime or a disabled chat", () => {
   fixture()
   for (const other of [

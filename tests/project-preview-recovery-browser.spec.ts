@@ -100,7 +100,7 @@ async function main() {
     assert.equal(await page.getByText("原项目 original-project-A", { exact: true }).count(), 0)
     assert.equal(await page.getByRole("checkbox").isChecked(), false)
     await page.evaluate("window.fixture.show('A')")
-    await page.getByRole("button", { name: "打开试用项目", exact: true }).click()
+    await page.getByRole("button", { name: "查看本轮执行与阶段操作", exact: true }).click()
     await page.getByText("原项目 original-project-A", { exact: true }).waitFor()
     await page.evaluate("window.fixture.scenario('needs-confirmation',true)")
     await recover.waitFor()

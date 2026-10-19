@@ -158,4 +158,22 @@ describe("development preload bridge", () => {
       ["mods:development:reconcile-business", input]
     ])
   })
+  it("bridges explicit project delivery and original plugin modularization as native scoped actions", async () => {
+    const invoke = vi.fn<(channel: string, input: unknown) => Promise<unknown>>(async () => ({}))
+    const api = createDevelopmentBridge(invoke, () => () => {})
+    const scope = { threadId: "creator", expectedWorkspace: "workspace" }
+    const prepare = { ...scope, requestId: "request", digest: "source", name: "new-plugin", version: "1.0.0" }
+    const delivery = { ...scope, deliveryId: "delivery", digest: "package" }
+    const modularize = { ...scope, requestId: "migration", sourceDigest: "source" }
+    await api.prepareProjectDelivery!(prepare)
+    await api.installProjectDelivery!(delivery)
+    await api.exportProjectDelivery!(delivery)
+    await api.approveModularization!(modularize)
+    expect(invoke.mock.calls).toEqual([
+      ["mods:development:prepare-project-delivery", prepare],
+      ["mods:development:install-project-delivery", delivery],
+      ["mods:development:export-project-delivery", delivery],
+      ["mods:development:approve-modularization", modularize]
+    ])
+  })
 })

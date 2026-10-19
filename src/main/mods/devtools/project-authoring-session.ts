@@ -23,6 +23,11 @@ import type { ProjectActionBinding } from "../../../shared/project-runtime/actio
 import type { AuthoringAtomicSettings } from "./authoring-config-snapshot"
 import type { DevelopmentProjectTrialRequest } from "../../../shared/mods/development"
 import { normalizeProjectResourcePaths } from "./project-resource-paths"
+import type { HostProjectOperation, HostProjectState } from "../../../shared/project-runtime/host-types"
+import {
+  projectCreatorTrialJourney,
+  type CreatorTrialProjectReference
+} from "./creator-trial-journey"
 
 export interface ProjectDraft {
   id: string
@@ -114,6 +119,84 @@ export class ProjectAuthoringSessions {
   }
 
   private trialRequests = new Map<string, DevelopmentProjectTrialRequest>()
+  private trialProjects = new Map<string, CreatorTrialProjectReference>()
+  private trialObservation?: (projectId: string) => {
+    project?: HostProjectState
+    operations: HostProjectOperation[]
+  }
+
+  /** Configure native journal readback only; this does not restore any preview registration. */
+  configureTrialObservation(read: NonNullable<ProjectAuthoringSessions["trialObservation"]>) {
+    this.trialObservation = read
+  }
+
+  private trialProject(scope: DevelopmentScope): CreatorTrialProjectReference | undefined {
+    const key = this.key(scope)
+    const cached = this.trialProjects.get(key)
+    if (cached) return structuredClone(cached)
+    const raw = this.persistence?.settings.getSetting(`project-authoring-trial-project:${key}`, "")
+    if (!raw || Buffer.byteLength(raw) > 16000) return undefined
+    let value: CreatorTrialProjectReference
+    try { value = JSON.parse(raw) } catch { return undefined }
+    if (!value || !/^[a-f0-9-]{36}$/.test(value.requestId) ||
+      !/^[a-z][a-z0-9-]{0,47}$/.test(value.draftId) ||
+      !Number.isSafeInteger(value.revision) || value.revision < 1 || value.revision > 8 ||
+      !/^[a-f0-9]{64}$/.test(value.candidateDigest) ||
+      !/^[a-f0-9-]{36}$/.test(value.projectId) ||
+      !/^dev-project-preview:[a-f0-9-]{36}$/.test(value.installedPluginId) ||
+      !/^[a-f0-9]{64}$/.test(value.pluginDigest) ||
+      typeof value.workspace !== "string" || !value.workspace || value.workspace.length > 8000)
+      return undefined
+    return value
+  }
+
+  bindTrialProject(scope: DevelopmentScope, draftId: string, project: HostProjectState,
+    guard: () => void) {
+    guard()
+    const request = this.trialRequest(scope)
+    // Preview tooling also supports manually authored projects without a creator request.
+    if (!request || request.draftId !== draftId) return
+    const draft = this.read(scope, draftId)
+    if (draft.source.digest !== request.digest || draft.revision !== request.revision)
+      throw Error("PROJECT_DRAFT_REVISION_CHANGED")
+    if (!/^dev-project-preview:[a-f0-9-]{36}$/.test(project.installedPluginId))
+      throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
+    const reference: CreatorTrialProjectReference = {
+      requestId: request.id, draftId, revision: request.revision,
+      candidateDigest: request.digest, projectId: project.projectId,
+      installedPluginId: project.installedPluginId, pluginDigest: project.pluginDigest,
+      workspace: project.workspace
+    }
+    const key = this.key(scope)
+    if (this.persistence) {
+      const setting = `project-authoring-trial-project:${key}`
+      const absent = "\0project-trial-project-absent"
+      const before = this.persistence.settings.getSetting(setting, absent)
+      guard()
+      if (!this.persistence.settings.compareAndSetSetting(setting,
+        before === absent ? undefined : before, JSON.stringify(reference)))
+        throw Error("PROJECT_DRAFT_REVISION_CHANGED")
+    }
+    this.trialProjects.set(key, reference)
+    this.changed(scope.threadId)
+  }
+
+  notifyTrialProject(projectId: string) {
+    // Only scopes already read in this process receive an update. Durable observation is
+    // still available through the original scope after restart, without execution replay.
+    for (const [key, session] of this.sessions) {
+      const request = this.trialRequests.get(key)
+      const reference = this.trialProjects.get(key)
+      if (request && reference?.projectId === projectId && session.drafts.has(request.draftId)) {
+        const scope = this.trialScopes.get(key)
+        if (scope) {
+          try { this.changed(scope.threadId) }
+          catch { /* A closed observer must not change the original project's result. */ }
+        }
+      }
+    }
+  }
+  private trialScopes = new Map<string, DevelopmentScope>()
 
   trialRequest(scope: DevelopmentScope): DevelopmentProjectTrialRequest | undefined {
     const key = this.key(scope)
@@ -128,15 +211,32 @@ export class ProjectAuthoringSessions {
       !Number.isSafeInteger(request.revision) || !/^[a-f0-9]{64}$/.test(request.digest))
       return undefined
     const draft = this.session(scope)?.drafts.get(request.draftId)
-    if (!draft || draft.revision !== request.revision || draft.source.digest !== request.digest)
+    const reference = this.trialProject(scope)
+    const bound = reference?.requestId === request.id && reference.draftId === request.draftId &&
+      reference.candidateDigest === request.digest && reference.revision === request.revision
+    const candidateCurrent = !!draft && draft.revision === request.revision &&
+      draft.source.digest === request.digest
+    if (!draft || (!candidateCurrent && !bound))
       return undefined
     if (request.origin && (request.origin.kind !== "business-assembly" ||
       !/^[a-f0-9-]{36}$/.test(request.origin.planId) ||
       !/^[a-f0-9-]{36}$/.test(request.origin.copyId) ||
       !/^[a-f0-9]{64}$/.test(request.origin.digest))) return undefined
+    this.trialRequests.set(key, request)
+    this.trialScopes.set(key, structuredClone(scope))
+    if (bound) this.trialProjects.set(key, reference)
+    let journey: DevelopmentProjectTrialRequest["journey"]
+    if (bound) {
+      let observed: { project?: HostProjectState; operations: HostProjectOperation[] }
+      try { observed = this.trialObservation?.(reference.projectId) ?? { operations: [] } }
+      catch { observed = { operations: [] } }
+      journey = projectCreatorTrialJourney({ reference, creatorThreadId: scope.threadId,
+        candidateCurrent, ...observed })
+    }
     return { id: request.id, draftId: request.draftId, name: draft.name,
       revision: request.revision, digest: request.digest, goal: request.goal,
-      ...(request.origin ? { origin: structuredClone(request.origin) } : {}) }
+      ...(request.origin ? { origin: structuredClone(request.origin) } : {}),
+      ...(journey ? { journey } : {}) }
   }
 
   /** Only prepares a trusted UI request; actual project creation/start remains a native action. */
@@ -150,6 +250,13 @@ export class ProjectAuthoringSessions {
     if (!goal.trim() || goal.length > 8000) throw Error("PROJECT_TRIAL_GOAL_REQUIRED")
     const draft = this.read(scope, id)
     if (draft.revision !== revision) throw Error("PROJECT_DRAFT_REVISION_CHANGED")
+    const previous = this.trialRequest(scope)
+    if (previous?.journey && previous.draftId === id && previous.revision === revision &&
+      previous.digest === draft.source.digest && previous.goal === goal.trim() &&
+      JSON.stringify(previous.origin) === JSON.stringify(origin))
+      return { phase: "needs-approval" as const, executed: false as const, request: previous }
+    if (previous?.journey && this.development.read(scope, previous.draftId)?.activeRuns)
+      throw Error("PROJECT_DEV_RUNNING")
     const result = await this.inspect(scope, id, revision, "dev", guard, actions)
     if (!result || (result as ProjectDevelopmentView).status !== "prepared")
       throw Error("PROJECT_DEV_DOCTOR_FAILED")

@@ -1,5 +1,6 @@
 import type { AuthoringDocument, AuthoringScope } from "./authoring"
 import type { CreatorPlanningApi } from "./creator-planning"
+import type { CreatorProjectTrialJourney } from "./creator-trial-journey"
 
 export type DevelopmentWaitingReason =
   | "turn-finishing"
@@ -29,6 +30,7 @@ export interface DevelopmentProjectTrialRequest {
   revision: number
   digest: string
   goal: string
+  journey?: CreatorProjectTrialJourney
   /** Immutable authoring provenance only. It never grants installation or execution. */
   origin?: { kind: "business-assembly"; planId: string; copyId: string; digest: string }
 }
@@ -43,6 +45,7 @@ export interface DevelopmentBusinessTrialSession {
   incarnation: { token: string | null; legacyCreatedAt: number }
 }
 export interface DevelopmentBusinessTrialStatus {
+  journey?: CreatorProjectTrialJourney
   id: string
   version: number
   planId: string
@@ -102,6 +105,7 @@ export interface DevelopmentBusinessTrialApi {
   feedback(input: DevelopmentBusinessTrialScope & { message: string }): Promise<DevelopmentStatus>
 }
 export interface DevelopmentBusinessStatus {
+  modularization?: import("../plugin-modularization").PluginModularizationStatus
   trial?: DevelopmentBusinessTrialStatus
   trialDiagnostic?: string
   drafts: Array<{ id: string; name: string; revision: number; digest: string; modIds: string[] }>
@@ -224,6 +228,7 @@ export interface DevelopmentTrialStatus {
 }
 
 export interface DevelopmentStatus {
+  projectDelivery?: CreatorProjectDeliveryStatus
   planning?: import("./creator-planning").CreatorPlanningStatus
   save?: DevelopmentCompositionSaveStatus
   workspace: string
@@ -254,6 +259,18 @@ export interface DevelopmentStatus {
 
 /** Renderer controls are deliberately separate from the model's draft/trial request tool. */
 export interface DevelopmentApi extends Partial<CreatorPlanningApi> {
+  prepareProjectDelivery?(input: AuthoringScope & {
+    requestId: string; digest: string; name: string; version: string
+  }): Promise<DevelopmentStatus>
+  installProjectDelivery?(input: AuthoringScope & {
+    deliveryId: string; digest: string
+  }): Promise<DevelopmentStatus>
+  exportProjectDelivery?(input: AuthoringScope & {
+    deliveryId: string; digest: string
+  }): Promise<DevelopmentStatus>
+  approveModularization?(input: AuthoringScope & {
+    requestId: string; sourceDigest: string
+  }): Promise<DevelopmentStatus>
   businessTrial?: DevelopmentBusinessTrialApi
   status(input: { threadId: string }): Promise<DevelopmentStatus>
   setEnabled(input: AuthoringScope & { enabled: boolean }): Promise<DevelopmentStatus>
@@ -290,4 +307,21 @@ export interface DevelopmentApi extends Partial<CreatorPlanningApi> {
   cancelComposition(input: AuthoringScope): Promise<DevelopmentStatus>
   undoTrial(input: AuthoringScope): Promise<DevelopmentStatus>
   onChanged(callback: (event: { threadId: string }) => void): () => void
+}
+
+/** A checked independent package; saving or installing never proves business acceptance. */
+export interface CreatorProjectDeliveryStatus {
+  id: string
+  requestId: string
+  sourceDigest: string
+  name: string
+  version: string
+  digest: string
+  phase: "needs-confirmation" | "installing" | "installed" | "exporting" |
+    "exported" | "failed" | "unknown"
+  canInstall: boolean
+  canExport: boolean
+  pluginId?: string
+  output?: string
+  error?: string
 }

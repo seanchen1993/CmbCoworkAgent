@@ -20,7 +20,8 @@ export function BusinessCreatorReviewCard({
   onApprove,
   onExport,
   onRead,
-  onTrial
+  onTrial,
+  presentation = "delivery"
 }: {
   review: Review
   busy: boolean
@@ -28,7 +29,9 @@ export function BusinessCreatorReviewCard({
   onExport(): void
   onRead(): void
   onTrial?(): void
+  presentation?: "delivery" | "source"
 }) {
+  const sourceOnly = presentation === "source"
   const installable =
     !review.exportOnly && review.canConfirm && ["needs-approval", "exported"].includes(review.phase)
   const exportable =
@@ -36,20 +39,26 @@ export function BusinessCreatorReviewCard({
   return (
     <article
       aria-label="业务插件组装确认"
-      className="space-y-3 rounded-xl border border-primary/20 bg-primary/5 p-3 text-sm"
+      className="space-y-4 rounded-xl border border-primary/20 bg-primary/5 p-4 text-sm"
     >
-      <p className="break-words font-medium">
-        {review.name} · v{review.version}
-      </p>
+      <div>
+        <h4 className="font-semibold">{sourceOnly ? "组装来源与候选版本" : review.exportOnly ? "保存插件更新包" : "保存为新的独立插件"}</h4>
+        <p className="mt-1 break-words text-sm">{review.name} · v{review.version}</p>
+      </div>
       <p role="status" className="text-xs leading-5">
-        {descriptions[review.phase]}
+        {sourceOnly && review.phase === "needs-approval"
+          ? "原组装候选已准备；使用项目候选入口试用、验收并保存为新插件。"
+          : descriptions[review.phase]}
       </p>
       <p className="text-xs leading-5 text-muted-foreground">
-        {review.exportOnly
+        {sourceOnly ? "保留原生组装预审、业务步骤、检查提示与来源标识。此处不再重复安装或导出；上方项目候选入口使用相同的组装来源。"
+          : review.exportOnly
           ? "此候选用于更新已安装同名插件。先导出ZIP，再在原‘安装插件’入口确认更新；保留原UUID和配置，权限变化需重新确认。"
           : "安装会新增一份独立插件，保留原插件。安装不会授予运行权限，也不会开始任务。导出使用原生保存窗口选择位置，与安装分别确认。"}
       </p>
-      <ol className="list-inside list-decimal space-y-1 text-xs" aria-label="组合的业务步骤">
+      <details className="rounded-lg border bg-background/60 p-3 text-xs">
+      <summary className="cursor-pointer font-medium">核对插件内容（{review.steps.length} 个步骤{review.extensions?.length ? `、${review.extensions.length} 个扩展` : ""}）</summary>
+      <ol className="mt-3 list-inside list-decimal space-y-1 text-xs" aria-label="组合的业务步骤">
         {review.steps.map((step) => (
           <li key={step.id}>
             {step.title} · {step.sourceName}
@@ -65,6 +74,7 @@ export function BusinessCreatorReviewCard({
           ))}
         </ul>
       )}
+      </details>
       {!!review.diagnostics.length && (
         <div role="status" className="space-y-1 rounded border p-2 text-xs">
           <p>检查提示：</p>
@@ -76,29 +86,33 @@ export function BusinessCreatorReviewCard({
         </div>
       )}
       <div className="flex flex-wrap gap-2">
-        {onTrial && (
+        {!sourceOnly && onTrial && (
           <button type="button" className={button} disabled={busy} onClick={onTrial}>
             隔离试用此版本
           </button>
         )}
-        {!review.exportOnly && (
+        {!sourceOnly && !review.exportOnly && (
           <button
             type="button"
             className={`${button} border-primary bg-primary text-primary-foreground hover:bg-primary/90`}
             disabled={busy || !installable}
             onClick={onApprove}
           >
-            安装独立插件
+            保存为新插件并安装
           </button>
         )}
-        <button type="button" className={button} disabled={busy || !exportable} onClick={onExport}>
+        {!sourceOnly && <button type="button" className={button} disabled={busy || !exportable} onClick={onExport}>
           {review.exportOnly ? "导出更新包…" : "导出插件包…"}
-        </button>
+        </button>}
         <button type="button" className={button} disabled={busy} onClick={onRead}>
           {review.canReconcile ? "核对中断结果" : "核对状态"}
         </button>
       </div>
-      {onTrial && (
+      {!sourceOnly && ["installed", "exported"].includes(review.phase) && <div className="space-y-1 rounded-lg border bg-background/60 p-3 text-xs">
+        <p className="font-medium">下一步：{review.phase === "installed" ? "从“添加功能 → 我已添加”找到这份新插件，再从它的项目入口使用。" : "将 ZIP 交给其他用户，从“安装插件”导入。"}</p>
+        <p className="text-muted-foreground">每个使用环境单独填写用户参数、知识库目录并确认源码及运行权限。保存插件不包含本轮试用数据和本机授权。</p>
+      </div>}
+      {!sourceOnly && onTrial && (
         <p className="text-xs leading-5 text-muted-foreground">
           试用使用独立目录，不会安装正式插件。参数、源码权限和实际操作仍需分别确认；运行结果以原流程检查为准。
         </p>

@@ -62,6 +62,15 @@ export function assembleBusinessMods(
   const main = kernels[0],
     kernel = main.catalog.kernel!
   const adapter = resolveBusinessModAssemblyAdapter(kernel)
+  const runtimeDeclaration =
+    adapter.id === "host-linear-v1"
+      ? {
+          adapter: "host-linear-v1" as const,
+          ...(kernel.runtime?.adapter === "host-linear-v1" && kernel.runtime.capabilities
+            ? { capabilities: structuredClone(kernel.runtime.capabilities) }
+            : {})
+        }
+      : { adapter: "autobiz-v1" as const }
   for (const source of sources) {
     const identity = source.catalog.kernel ?? source.catalog.kernelRef!
     if (identity.id !== kernel.id || identity.version !== kernel.version)
@@ -363,7 +372,7 @@ export function assembleBusinessMods(
       kind: "catalog",
       kernel: {
         ...kernel,
-        runtime: { adapter: adapter.id },
+        runtime: runtimeDeclaration,
         resources: kernelFiles.map((file) => file.path)
       },
       modules: selected.map(({ mod }) => mod),
@@ -377,7 +386,7 @@ export function assembleBusinessMods(
     kernel: {
       id: kernel.id,
       version: kernel.version,
-      runtime: { adapter: adapter.id },
+      runtime: runtimeDeclaration,
       files: kernelFiles.map(({ path, digest }) => ({ path, digest }))
     },
     sources: sources.map((source) => ({

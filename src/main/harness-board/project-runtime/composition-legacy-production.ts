@@ -18,7 +18,11 @@ import {
   captureThreadIncarnation,
   matchesThreadIncarnation
 } from "../../services/thread-incarnation"
-import { issueRuntimePluginSourceToken } from "../../plugins/runtime-source-scope"
+import {
+  issueRuntimePluginSourceToken,
+  type RuntimePluginSourceBinding
+} from "../../plugins/runtime-source-scope"
+import { projectCheckpointDescriptionAvailableForBinding } from "./project-checkpoint"
 import { readRuntimeRequiredHooks } from "../../plugins/runtime-required-hooks"
 import {
   readInternalHarnessProject,
@@ -395,27 +399,30 @@ export function registerLegacyCompositionAdmission(): () => void {
       incoming.signal?.throwIfAborted()
       assertOwner()
     }
+    const binding: RuntimePluginSourceBinding = {
+      mode: "legacy",
+      capabilitySources: [],
+      threadId: request.threadId,
+      incarnationKey: JSON.stringify(incarnation),
+      projectId: feature.projectId,
+      featureId: internal.featureId,
+      operationId: internal.ownerKind === "creator-business-trial"
+        ? internal.trialId
+        : internal.compositionRunId,
+      stageId: "original-managed-stage",
+      requiredHooks: readRuntimeRequiredHooks(plugin, { legacy: true }),
+      plugin,
+      workspace: String(metadata.workspacePath),
+      packageDigest: digest
+    }
+    assertRuntime()
+    if (internal.ownerKind !== "creator-business-trial" ||
+      projectCheckpointDescriptionAvailableForBinding(binding)) {
+      binding.stagePrompt =
+        "For this internal composition use project_checkpoint when available to advance original checkpoints. Supply the target checkpoint and current original state file SHA-256. Original checks and human gates remain mandatory. Do not replace this with direct state edits or a generic shell transition. Unknown transitions require user reconciliation, never replay."
+    }
     const token = issueRuntimePluginSourceToken(
-      {
-        mode: "legacy",
-        capabilitySources: [],
-        threadId: request.threadId,
-        incarnationKey: JSON.stringify(incarnation),
-        projectId: feature.projectId,
-        featureId: internal.featureId,
-        operationId: internal.ownerKind === "creator-business-trial"
-          ? internal.trialId
-          : internal.compositionRunId,
-        stageId: "original-managed-stage",
-        requiredHooks: readRuntimeRequiredHooks(plugin, { legacy: true }),
-        ...(internal.ownerKind === "creator-business-trial" ? {} : {
-          stagePrompt:
-            "For this internal composition use project_checkpoint when available to advance original checkpoints. Supply the target checkpoint and current original state file SHA-256. Original checks and human gates remain mandatory. Do not replace this with direct state edits or a generic shell transition. Unknown transitions require user reconciliation, never replay."
-        }),
-        plugin,
-        workspace: String(metadata.workspacePath),
-        packageDigest: digest
-      },
+      binding,
       () => {
         guard()
         inputs?.assertCurrent()

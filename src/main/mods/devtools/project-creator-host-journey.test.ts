@@ -74,13 +74,22 @@ async function fixture(template: "harness-lite" | "harness-data", invalidReview:
   const project = await service.localCreate({ projectId, name: draft.name,
     workspace: lease.snapshot.workspace, installedPluginId: plugin.id, goal: request.request.goal })
   await registry.bind(project, snapshots.read(project.pluginDigest).root)
-  return { root, scope, sessions, draft, service, registry, project, observed }
+  sessions.configureTrialObservation(id => ({ project: service.get(id), operations: service.operations(id, 100) }))
+  sessions.bindTrialProject(scope, draft.id, project, () => {})
+  return { root, scope, sessions, draft, service, registry, project, observed, controls }
 }
 
 it.each(["harness-lite", "harness-data"] as const)(
   "%s: creates the original isolated preview and executes every real stage with pinned source and receipts",
   async template => {
     const f = await fixture(template, false)
+    const requested = f.sessions.trialRequest(f.scope)!
+    const reopened = await f.sessions.requestTrial(f.scope, f.draft.id, f.draft.revision,
+      requested.goal, () => {})
+    expect(reopened.request.id).toBe(requested.id)
+    await expect(f.sessions.requestTrial(f.scope, f.draft.id, f.draft.revision,
+      "another goal must not detach this trial", () => {})).rejects.toThrow("PROJECT_DEV_RUNNING")
+    expect(f.sessions.trialRequest(f.scope)?.id).toBe(requested.id)
     const changed = f.draft.source.files.map(file => file.path.startsWith("skills/")
       ? { ...file, text: file.text + "\nNEW_VERSION_MUST_WAIT\n" } : file)
     await f.sessions.save(f.scope, { id: f.draft.id, name: f.draft.name,
@@ -104,9 +113,25 @@ it.each(["harness-lite", "harness-data"] as const)(
     expect(f.observed).toHaveLength(project.manifest.stages.length)
     expect(f.observed.at(-1)!.previous.length).toBeGreaterThan(0)
     expect(f.observed.some(row => row.instruction.includes("NEW_VERSION_MUST_WAIT"))).toBe(false)
+    expect(f.sessions.trialRequest(f.scope)?.journey).toMatchObject({
+      projectId: project.projectId, phase: "passed", canDeliver: false
+    })
     f.registry.finish(project, f.scope, f.service.operations(project.projectId))
     expect(f.sessions.developmentStatus(f.scope, f.draft.id)).toMatchObject({ activeRuns: 0,
       currentRevision: 2, pendingRevision: null })
+    // Finishing removes execution authority; the independently scoped observation remains
+    // readable after restart, including when the author has already edited the next version.
+    const restored = new ProjectAuthoringSessions()
+    restored.configurePersistence(f.controls, join(f.root, "source"))
+    restored.configureTrialObservation(id => ({ project: f.service.get(id),
+      operations: f.service.operations(id, 100) }))
+    expect(restored.trialRequest(f.scope)?.journey).toMatchObject({ phase: "passed", canDeliver: false })
+    expect(restored.developmentStatus(f.scope, f.draft.id)).toBeUndefined()
+    restored.setChanged(() => { throw Error("window closed") })
+    expect(() => restored.notifyTrialProject(project.projectId)).not.toThrow()
+    expect(f.observed).toHaveLength(project.manifest.stages.length)
+    expect(restored.trialRequest({ ...f.scope, incarnation: { token: "other-chat", legacyCreatedAt: 1 } }))
+      .toBeUndefined()
   }
 )
 
@@ -131,6 +156,11 @@ it.each(["harness-lite", "harness-data"] as const)(
         expect(f.sessions.developmentStatus(f.scope, f.draft.id)?.activeRuns).toBe(1)
         // A known validation failure may be explicitly finished; it is not an unknown action.
         expect(result.status).toBe("failed")
+        expect(f.sessions.trialRequest(f.scope)?.journey).toMatchObject({
+          phase: "failed", canDeliver: false, stages: expect.arrayContaining([
+            expect.objectContaining({ id: "review", status: "failed" })
+          ])
+        })
         f.registry.finish(project, f.scope, f.service.operations(project.projectId))
         expect(f.sessions.developmentStatus(f.scope, f.draft.id)?.activeRuns).toBe(0)
       }

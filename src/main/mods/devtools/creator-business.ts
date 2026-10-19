@@ -38,6 +38,7 @@ import type { CreatorBusinessTrials, BusinessTrialCandidate } from "./creator-bu
 import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 import { readRuntimeScopedFile } from "../../harness-board/project-runtime/safe-files"
 import { requestCreatorHostBusinessTrial } from "./creator-host-business-trial"
+import { CreatorPluginModularization } from "./creator-plugin-modularization"
 
 type Review = NonNullable<DevelopmentBusinessStatus["review"]>
 type Source = { pluginId: string; directory: string; identity: string; digest: string }
@@ -91,6 +92,7 @@ function sourceText(path: string, bytes: Buffer) {
 export class CreatorBusinessService {
   private trials?: CreatorBusinessTrials
   private readonly drafts: CreatorBusinessDrafts
+  private readonly modularization: CreatorPluginModularization
   private readonly inspections = new Map<string, Inspection>()
   private readonly previews = new Map<string, Preview>()
   private readonly live = new Set<string>()
@@ -112,11 +114,45 @@ export class CreatorBusinessService {
     }
   ) {
     this.drafts = new CreatorBusinessDrafts(deps.settings)
+    this.modularization = new CreatorPluginModularization({
+      root: deps.root,
+      plugins: deps.plugins,
+      identity: pluginIdentity,
+      context: (threadId, author) => this.context(threadId, author),
+      busy: deps.busy,
+      changed: deps.changed,
+      register: async (scope, source, snapshot) => {
+        const context = this.context(scope.threadId, false)
+        if (!same(context.scope, scope)) throw Error("BUSINESS_CREATOR_SOURCE_CHANGED")
+        const view = await deps.assembly.inspect(
+          source.directory,
+          this.owner(scope),
+          context.assertCurrent
+        )
+        context.assertCurrent()
+        if (view.sourceDigest !== snapshot.digest) throw Error("BUSINESS_CREATOR_SOURCE_CHANGED")
+        this.assertSource(source)
+        if (this.inspections.size >= 64)
+          this.inspections.delete(this.inspections.keys().next().value!)
+        this.inspections.set(view.id, {
+          scope: businessCreatorScopeKey(scope),
+          source,
+          view,
+          catalog: businessModCatalog(snapshot)
+        })
+        return view
+      }
+    })
     this.stopIdle = deps.onIdle?.((threadId) => {
       if (this.closed) return
       try {
-        const record = this.record(this.context(threadId, false).scope)
-        if (record && this.live.has(record.review.planId)) deps.changed(threadId)
+        const scope = this.context(threadId, false).scope
+        const record = this.record(scope)
+        if (
+          (record && this.live.has(record.review.planId)) ||
+          this.modularization.status(scope)?.phase === "needs-confirmation"
+        )
+          deps.changed(threadId)
       } catch {
         /* Idle events can outlive a removed conversation. */
       }
@@ -162,6 +198,8 @@ export class CreatorBusinessService {
     const context = this.context(scope.threadId, false)
     if (!same(context.scope, scope)) throw Error("BUSINESS_TRIAL_SCOPE_CHANGED")
     this.assertTrialSources(candidate.sources)
+    for (const source of candidate.sources)
+      await this.modularization.verifyOriginal(source, context.assertCurrent)
     const source = await this.deps.assembly.readCheckedSource(
       this.owner(scope),
       candidate.copyId,
@@ -170,6 +208,8 @@ export class CreatorBusinessService {
     )
     guard()
     this.assertTrialSources(candidate.sources)
+    for (const source of candidate.sources)
+      await this.modularization.verifyOriginal(source, context.assertCurrent)
     return { root: source.root, contentIdentity: derivationContentIdentity(source.files) }
   }
   async requestTrial(
@@ -364,7 +404,10 @@ export class CreatorBusinessService {
     }
     let trial: DevelopmentBusinessStatus["trial"], trialDiagnostic: string | undefined
     try {
-      trial = this.trials?.status(context.scope)
+      trial = this.trials?.status(
+        context.scope,
+        review ? { planId: review.planId, digest: review.digest } : null
+      )
     } catch {
       trialDiagnostic =
         "业务试用记录或来源无法核对。原草稿与发布记录仍保留；试用操作已阻止，请核对原任务，不会恢复旧批准或重放。"
@@ -379,7 +422,10 @@ export class CreatorBusinessService {
       })),
       ...(review ? { review } : {}),
       ...(trial ? { trial } : {}),
-      ...(trialDiagnostic ? { trialDiagnostic } : {})
+      ...(trialDiagnostic ? { trialDiagnostic } : {}),
+      ...(this.modularization.status(context.scope)
+        ? { modularization: this.modularization.status(context.scope) }
+        : {})
     }
   }
   catalog(threadId: string) {
@@ -392,7 +438,9 @@ export class CreatorBusinessService {
         version: plugin.version,
         enabled: plugin.enabled,
         businessMods: plugin.businessModCount ?? 0,
-        functionMods: plugin.businessExtensionCount ?? 0
+        functionMods: plugin.businessExtensionCount ?? 0,
+        canInspectOriginal: true,
+        originalSourceAction: "inspect_raw"
       })),
       ...this.status(threadId)
     }
@@ -432,10 +480,52 @@ export class CreatorBusinessService {
     })
     return { ...view, catalog: businessModCatalog(snapshot) }
   }
+  inspectRaw(threadId: string, pluginId: string) {
+    return this.modularization.inspectRaw(threadId, pluginId)
+  }
+  readRawInspection(threadId: string, rawInspectionId: string) {
+    return this.modularization.readRawInspection(threadId, rawInspectionId)
+  }
+  readRawAsset(threadId: string, rawInspectionId: string, path: string) {
+    return this.modularization.readRawAsset(threadId, rawInspectionId, path)
+  }
+  async requestModularization(
+    threadId: string,
+    input: {
+      rawInspectionId: string
+      sourceDigest: string
+      catalog?: unknown
+      modularizationFiles?: Array<{ path: string; text: string }>
+    },
+    turnId: string,
+    assertTurn: () => void
+  ) {
+    await this.modularization.requestModularization(threadId, input, turnId, assertTurn)
+    return this.status(threadId)
+  }
+  async approveModularization(
+    threadId: string,
+    workspace: string,
+    input: { requestId: string; sourceDigest: string }
+  ) {
+    await this.modularization.approveModularization(threadId, workspace, input)
+    return this.status(threadId)
+  }
   private assertSource(source: Source) {
     const plugin = this.deps.plugins().find((item) => item.id === source.pluginId)
     if (!plugin || pluginIdentity(plugin) !== source.identity)
       throw Error("BUSINESS_CREATOR_SOURCE_CHANGED")
+    this.modularization.assertSource(source, plugin.path)
+  }
+  private async snapshotSource(source: Source, guard: () => void) {
+    this.assertSource(source)
+    await this.modularization.verifyOriginal(source, guard)
+    const snapshot = await snapshotDerivationSource(source.directory)
+    guard()
+    this.assertSource(source)
+    await this.modularization.verifyOriginal(source, guard)
+    if (snapshot.digest !== source.digest) throw Error("BUSINESS_CREATOR_SOURCE_CHANGED")
+    return snapshot
   }
   private inspection(scope: DevelopmentScope, id: string) {
     const value = this.inspections.get(id)
@@ -447,7 +537,7 @@ export class CreatorBusinessService {
   async inspectionPage(threadId: string, inspectionId: string) {
     const context = this.context(threadId),
       inspected = this.inspection(context.scope, inspectionId)
-    const snapshot = await snapshotDerivationSource(inspected.source.directory)
+    const snapshot = await this.snapshotSource(inspected.source, context.assertCurrent)
     context.assertCurrent()
     this.assertSource(inspected.source)
     if (snapshot.digest !== inspected.source.digest) throw Error("BUSINESS_CREATOR_SOURCE_CHANGED")
@@ -471,7 +561,7 @@ export class CreatorBusinessService {
   async readAsset(threadId: string, inspectionId: string, path: string) {
     const context = this.context(threadId),
       inspected = this.inspection(context.scope, inspectionId)
-    const snapshot = await snapshotDerivationSource(inspected.source.directory)
+    const snapshot = await this.snapshotSource(inspected.source, context.assertCurrent)
     context.assertCurrent()
     this.assertSource(inspected.source)
     if (snapshot.digest !== inspected.source.digest) throw Error("BUSINESS_CREATOR_SOURCE_CHANGED")
@@ -512,7 +602,7 @@ export class CreatorBusinessService {
     const context = this.context(threadId),
       inspected = this.inspection(context.scope, inspectionId)
     if (!Number.isSafeInteger(cursor) || cursor < 0) throw Error("BUSINESS_CREATOR_CURSOR_INVALID")
-    const snapshot = await snapshotDerivationSource(inspected.source.directory)
+    const snapshot = await this.snapshotSource(inspected.source, context.assertCurrent)
     context.assertCurrent()
     this.assertSource(inspected.source)
     if (snapshot.digest !== inspected.source.digest) throw Error("BUSINESS_CREATOR_SOURCE_CHANGED")
@@ -600,6 +690,8 @@ export class CreatorBusinessService {
     const sources = input.sources.map(
       (item) => this.inspection(context.scope, item.inspectionId).source
     )
+    for (const source of sources)
+      await this.modularization.verifyOriginal(source, context.assertCurrent)
     const request = { ...input, sources: [...input.sources] }
     const draftRefs: Preview["drafts"] = []
     if ((input.drafts?.length ?? 0) > 4) throw Error("BUSINESS_DRAFT_LIMIT")
@@ -637,6 +729,8 @@ export class CreatorBusinessService {
     }
     const view = await this.deps.assembly.preview(owner, request, context.assertCurrent)
     context.assertCurrent()
+    for (const source of sources)
+      await this.modularization.verifyOriginal(source, context.assertCurrent)
     for (const source of sources) this.assertSource(source)
     if (this.previews.size >= 32) this.previews.delete(this.previews.keys().next().value!)
     this.previews.set(view.previewId, {
@@ -728,7 +822,7 @@ export class CreatorBusinessService {
   ) {
     for (const source of input.sources) {
       this.assertSource(source)
-      if ((await snapshotDerivationSource(source.directory)).digest !== source.digest)
+      if ((await this.snapshotSource(source, context.assertCurrent)).digest !== source.digest)
         throw Error("BUSINESS_CREATOR_SOURCE_CHANGED")
       context.assertCurrent()
     }
@@ -904,6 +998,7 @@ export class CreatorBusinessService {
   }
   close() {
     this.trials?.close()
+    this.modularization.close()
     this.closed = true
     this.live.clear()
     this.stopSettlement()

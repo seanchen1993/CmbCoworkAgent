@@ -262,6 +262,9 @@ const readConfig = () =>
 const status = () =>
   page!.evaluate((input) => window.api.mods.development.status(input), { threadId: scope.threadId })
 async function chat(text: string) {
+  const workspace = page!.getByRole("dialog", { name: "插件创作工作区", exact: true })
+  if (await workspace.isVisible())
+    await workspace.getByRole("button", { name: "Close", exact: true }).click()
   await page!.locator("textarea.composer-textarea").fill(text)
   await page!.getByRole("button", { name: "发送消息", exact: true }).click()
 }
@@ -280,7 +283,8 @@ async function requestConfig(upgrade: boolean, digest?: string) {
       (!digest || value.configuration.digest === digest),
     "fresh native configuration editor"
   )
-  await page!.getByRole("button", { name: "发送消息", exact: true }).waitFor({ state: "visible" })
+  await page!.getByRole("button", { name: "发送消息", exact: true, includeHidden: true })
+    .waitFor({ state: "visible" })
 }
 async function migrationDialog(response: 0 | 1) {
   await app!.evaluate(({ dialog }, response) => {
@@ -300,6 +304,9 @@ const dialogCount = () =>
         .__foundationMigrationDialogs ?? 0
   )
 async function showChat() {
+  const workspace = page!.getByRole("dialog", { name: "插件创作工作区", exact: true })
+  if (await workspace.isVisible())
+    await workspace.getByRole("button", { name: "Close", exact: true }).click()
   await page!.getByText(title, { exact: true }).first().click()
   await page!.locator("textarea.composer-textarea").waitFor()
 }
@@ -373,7 +380,7 @@ async function openInterruptedBusinessReview() {
   assert.equal(before.business?.review?.canConfirm, false)
   assert.equal(before.business?.review?.canReconcile, true)
   const card = page!.getByRole("article", { name: "业务插件组装确认" })
-  // Sidebar navigation may dismiss the popover opened by the initial status read.
+  // Sidebar navigation may dismiss the workspace opened by the initial status read.
   // Reopen the original readback entry without restoring creator-mode admission.
   if (!(await card.isVisible()))
     await page!.getByRole("button", { name: "插件结果待核对", exact: true }).click()
@@ -390,7 +397,7 @@ async function openInterruptedBusinessReview() {
     planId: after.business?.review?.planId,
     canConfirm: after.business?.review?.canConfirm,
     canReconcile: after.business?.review?.canReconcile,
-    mechanism: "Original interrupted-result popover trigger; no creator authorization or replay"
+    mechanism: "Original interrupted-result workspace trigger; no creator authorization or replay"
   }
 }
 async function secretProof(view: FunctionUserConfigView, key: string) {
@@ -551,7 +558,7 @@ async function main() {
     )
     await armLostReceipt("install")
     const businessCard = () => page!.getByRole("article", { name: "业务插件组装确认" })
-    await businessCard().getByRole("button", { name: "安装独立插件", exact: true }).click()
+    await businessCard().getByRole("button", { name: "保存为新插件并安装", exact: true }).click()
     const unknownInstall = await until(
       status,
       (value) => value.business?.review?.phase === "unknown",

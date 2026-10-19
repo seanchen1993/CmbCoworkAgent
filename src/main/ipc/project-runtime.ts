@@ -83,6 +83,10 @@ export function registerProjectRuntimeHandlers(
     if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed())
       owner.webContents.send("mods:development-changed", { threadId })
   })
+  projectAuthoringSessions.configureTrialObservation((projectId) => ({
+    project: platform().get(projectId),
+    operations: platform().operations(projectId, 100)
+  }))
   registerBuiltinProjectFacts((threadId, workspace) => {
     if (!service) return undefined
     const row = getThreadCore(threadId)
@@ -150,6 +154,12 @@ export function registerProjectRuntimeHandlers(
         },
         inspectOperation: inspectHostProjectExecution,
         executeSkill: async (context) => {
+          const bindThread = context.bindThread
+          context.bindThread = (threadId) => {
+            bindThread(threadId)
+            projectAuthoringSessions.notifyTrialProject(context.project.projectId)
+          }
+          projectAuthoringSessions.notifyTrialProject(context.project.projectId)
           context.internalCompositionUnit = internalCompositionProject(context.project.projectId)
           const libraryPath = join(getOpenworkDir(), "local-projects", "library.sqlite")
           if (existsSync(libraryPath)) {
@@ -435,6 +445,7 @@ export function registerProjectRuntimeHandlers(
             await api.start(operation.operationId)
           } finally {
             runOwners.delete(operation.operationId)
+            projectAuthoringSessions.notifyTrialProject(projectId)
           }
         } else throw Error("PROJECT_INVALID_COMMAND")
       }
@@ -442,6 +453,7 @@ export function registerProjectRuntimeHandlers(
       const updated = api.get(projectId)!
       if (isProjectPreviewId(updated.installedPluginId))
         projectPreviewRegistry.complete(updated, api.operations(projectId, 100))
+      projectAuthoringSessions.notifyTrialProject(projectId)
       return view(projectId)
     }
   )

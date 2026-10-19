@@ -11,7 +11,10 @@ import type { DerivationFile, DerivationSnapshot } from "./derivation-source"
 import { parsePortableBusinessModUserConfig } from "./business-mod-user-config"
 import { validateToolSchema } from "../mods/v2/tool-schema"
 import type { ModObject } from "../../shared/mods/types"
-import { parseProjectRuntimeManifestV1 } from "../../shared/project-runtime"
+import {
+  parseProjectRuntimeManifestV1,
+  type ProjectRuntimeManifest
+} from "../../shared/project-runtime"
 import { assertHostRuntimeSupported } from "../harness-board/project-runtime/host-validators"
 
 const identifier = /^[a-zA-Z0-9][\w.-]{0,79}$/
@@ -124,10 +127,34 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
     let runtime: NonNullable<BusinessModCatalog["kernel"]>["runtime"]
     if (data.runtime !== undefined) {
       const declaration = businessModObject(data.runtime)
-      fields(declaration, ["adapter"])
+      fields(declaration, ["adapter", "capabilities"])
       if (declaration.adapter !== "autobiz-v1" && declaration.adapter !== "host-linear-v1")
         throw Error("BUSINESS_MOD_ASSEMBLY_ADAPTER_UNSUPPORTED")
-      runtime = { adapter: declaration.adapter }
+      if (declaration.adapter === "autobiz-v1" && Object.hasOwn(declaration, "capabilities"))
+        throw Error("BUSINESS_MOD_KERNEL_RUNTIME_CONFLICT")
+      let capabilities: ProjectRuntimeManifest["capabilities"] | undefined
+      if (Object.hasOwn(declaration, "capabilities") && declaration.capabilities === undefined)
+        throw Error("BUSINESS_MOD_HOST_CAPABILITIES_INVALID")
+      if (declaration.capabilities !== undefined) {
+        const original = businessModObject(declaration.capabilities)
+        const keys = [
+          "execution",
+          "conditionalTransition",
+          "idempotency",
+          "reconciliation",
+          "cancellation"
+        ] as const
+        fields(original, [...keys])
+        if (keys.some((key) => typeof original[key] !== "boolean"))
+          throw Error("BUSINESS_MOD_HOST_CAPABILITIES_INVALID")
+        capabilities = Object.fromEntries(
+          keys.map((key) => [key, original[key]])
+        ) as ProjectRuntimeManifest["capabilities"]
+      }
+      runtime =
+        declaration.adapter === "host-linear-v1"
+          ? { adapter: "host-linear-v1", ...(capabilities ? { capabilities } : {}) }
+          : { adapter: "autobiz-v1" }
     }
     if (
       runtime?.adapter === "host-linear-v1"

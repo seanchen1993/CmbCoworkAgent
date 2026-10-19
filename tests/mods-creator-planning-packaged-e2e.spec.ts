@@ -166,6 +166,9 @@ async function main() {
     }
     const send = async (stage: string, advice: "a" | "b" | "none") => {
       const count = requests.length
+      const workspace = page.getByRole("dialog", { name: "插件创作工作区", exact: true })
+      if (await workspace.isVisible())
+        await workspace.getByRole("button", { name: "Close", exact: true }).click()
       await page
         .locator("textarea.composer-textarea")
         .fill(`PLANNING_STAGE_${stage}:只解释下一步，不执行工具。`)

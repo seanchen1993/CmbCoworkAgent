@@ -67,6 +67,7 @@ import {
 import { ModsManager, setModsManager, setModsUnavailable } from "../mods/manager"
 import { ModError, modErrorCode } from "../mods/errors"
 import { installPluginFromDir } from "./plugins"
+import { CreatorProjectDeliveries } from "../mods/devtools/creator-project-delivery"
 import { bundledModExamplesRoot } from "../mods/bundled-examples"
 import { readManagedModDeployment } from "../mods/policy"
 import { ModCommandQueue } from "../mods/command-queue"
@@ -1368,7 +1369,55 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   development.configureBusinessStatus(threadId => {
     try { return creatorBusiness.status(threadId) } catch { return undefined }
   })
+  const creatorProjectDeliveries = new CreatorProjectDeliveries({
+    root: join(getOpenworkDir(), "creator-project-deliveries"),
+    settings: manager.store,
+    sessions: projectAuthoringSessions,
+    context: threadId => development.reuseContext(threadId),
+    occupied: threadId => !!getLocalThreadRunLease(threadId) ||
+      manager.functionTurns.hasUnsettled(threadId) || functions.configurationBusy(threadId),
+    plugins: getPlugins,
+    install: installDerivedPluginDirectory,
+    invalidate: () => { invalidateEnabledSkillsCache(); invalidatePluginHooksCache() },
+    changed: threadId => {
+      const owner = window()
+      if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed())
+        owner.webContents.send("mods:development-changed", { threadId })
+    }
+  })
+  development.configureProjectDeliveryStatus(threadId => {
+    try { return creatorProjectDeliveries.status(threadId) } catch { return undefined }
+  })
   registerModsDevelopmentHandlers(ipcMain, development, trusted, {
+    approveModularization: async input => {
+      await creatorBusiness.approveModularization(input.threadId, input.expectedWorkspace, input)
+      return development.status(input.threadId)
+    },
+    prepareProjectDelivery: async input => {
+      await creatorProjectDeliveries.prepare(input.threadId, input.expectedWorkspace, input)
+      return development.status(input.threadId)
+    },
+    installProjectDelivery: async input => {
+      await creatorProjectDeliveries.install(input.threadId, input.expectedWorkspace, input)
+      return development.status(input.threadId)
+    },
+    exportProjectDelivery: async input => {
+      const context = development.reuseContext(input.threadId)
+      if (context.scope.workspace !== input.expectedWorkspace) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+      const candidate = creatorProjectDeliveries.status(input.threadId)
+      if (candidate?.id !== input.deliveryId || candidate.digest !== input.digest || !candidate.canExport)
+        throw Error("PROJECT_DELIVERY_REVIEW_REQUIRED")
+      const owner = window()
+      if (!owner || owner.isDestroyed()) throw Error("DEVELOPMENT_WINDOW_CHANGED")
+      const result = await dialog.showSaveDialog(owner, { title: "保存为新的插件 ZIP",
+        defaultPath: `${candidate.name}-${candidate.version}.zip`,
+        filters: [{ name: "插件 ZIP", extensions: ["zip"] }] })
+      context.assertCurrent()
+      if (owner !== window() || owner.isDestroyed()) throw Error("DEVELOPMENT_WINDOW_CHANGED")
+      if (!result.canceled && result.filePath)
+        await creatorProjectDeliveries.export(input.threadId, input.expectedWorkspace, input, result.filePath)
+      return development.status(input.threadId)
+    },
     reconcileBusiness: async input => {
       await creatorBusiness.reconcile(input.threadId, input.expectedWorkspace, input)
       return development.status(input.threadId)

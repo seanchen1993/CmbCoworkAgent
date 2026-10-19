@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import { mkdtempSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
-import { join } from "node:path"
+import { basename, join, toNamespacedPath } from "node:path"
 import type { DevelopmentScope } from "../v2/development-session"
 import type { ClawActionDescriptor } from "../../../shared/mods/claw-actions"
 import type { AuthoringSourceBundle } from "./authoring-bundle"
@@ -47,6 +47,13 @@ const identity = (scope: DevelopmentScope, id: string) =>
   createHash("sha256")
     .update(JSON.stringify([scope.threadId, scope.workspace, scope.incarnation, id]))
     .digest("hex")
+
+function freshTrialWorkspace(root: string): string {
+  // Windows' native mkdtemp needs the extended prefix when its random suffix crosses
+  // MAX_PATH. Keep that filesystem detail out of native project/SDK scope identities.
+  const created = mkdtempSync(toNamespacedPath(join(root, "trial-workspace-")))
+  return join(root, basename(created))
+}
 
 /** Immutable packages; only the idle preview pointer changes. No installation or execution authority. */
 export class ProjectDevelopmentSessions {
@@ -178,7 +185,7 @@ export class ProjectDevelopmentSessions {
     const workspace =
       options.retainedWorkspace ??
       (options.freshWorkspace
-        ? mkdtempSync(join(entry.root, "trial-workspace-"))
+        ? freshTrialWorkspace(entry.root)
         : entry.current.workspace)
     guard()
     // A model save guard belongs to its tool turn. Retain only the actual preview lease guard.

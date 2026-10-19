@@ -27,4 +27,6 @@ description: 在创造者模式中根据一句话需求制作、修改或组合�
 
 使用实际开放的 mod_business 工具读取 catalog/inspect，不假造内核或来源。新的线性业务优先采用 host-linear-v1，模块在 host 字段声明阶段、产物及实际检查，stage Skill取真实skill.entry；依赖必须明确，知识和配置须在真实请求及工具结果中验证。保留所有声明资源及检查，资源缺失时拒绝，不把目录存在当知识已加载。
 
+原始插件尚未模块化时，用 `mod_business.inspect_raw(pluginId)` 读取真实来源与迁移材料，按文件使用 `read_raw_asset`，再用 `request_modularization` 准备候选。原生用户确认后，读取 `status.modularization.inspectionId`，按普通 `inspect/preview/request_trial/request_review` 继续；不修改原插件，不跳过无法映射的 Hooks、知识、配置、上下文与检查。阶段会话由原执行器隔离，试用进度和原生验收凭据关联回原创作会话的“创作工作区”。Host 用 `project_list/project_read`、业务插件用 `mod_business.status` 读取对应 `journey`；模型完成、项目创建或单次聊天成功都不能代替整轮检查。反馈在原聊天继续，用户在“保存”页明确命名并确认安装或导出新插件。保存、安装与业务验收分别说明，阶段回退和中间重跑仍暂缓。
+
 原 AutoBiz 保留 autobiz-v1 受审适配、Python执行器、知识、Hooks与checkpoint；不能改标Host绕过原规则，也不能把旧board上下文入口塞进Host。原生 request_trial根据真实候选选择原Host试用或原旧项目路径，不先安装候选、不继承旧批准。结果未知先核对，阶段快照与中间重跑仍未提供。

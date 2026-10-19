@@ -139,6 +139,62 @@ export function createModBusinessTool(input: {
           case "status":
             result = documentResult(service.status(input.threadId), args.cursor)
             break
+          case "inspect_raw":
+            if (args.rawInspectionId)
+              result = documentResult(
+                await service.readRawInspection(input.threadId, args.rawInspectionId),
+                args.cursor
+              )
+            else {
+              if (!args.pluginId) throw Error("BUSINESS_CREATOR_PLUGIN_REQUIRED")
+              result = documentResult(
+                await service.inspectRaw(input.threadId, args.pluginId),
+                args.cursor
+              )
+            }
+            break
+          case "read_raw_asset":
+            if (!args.rawInspectionId || !args.path) throw Error("BUSINESS_CREATOR_ASSET_REQUIRED")
+            result = documentResult(
+              await service.readRawAsset(input.threadId, args.rawInspectionId, args.path),
+              args.cursor
+            )
+            break
+          case "request_modularization":
+            if (!args.rawInspectionId || !args.sourceDigest)
+              throw Error("PLUGIN_MODULARIZATION_INSPECT_FIRST")
+            development!.claimAuthoringBudget(input.threadId, lease!.runId, "candidate")
+            {
+              const status = await service.requestModularization(
+                input.threadId,
+                {
+                  rawInspectionId: args.rawInspectionId,
+                  sourceDigest: args.sourceDigest,
+                  catalog: args.modularizationCatalog,
+                  modularizationFiles: args.modularizationFiles
+                },
+                lease!.runId,
+                assertTurn
+              )
+              const modularization = status.modularization
+              result = {
+                ...(modularization
+                  ? {
+                      modularization: {
+                        requestId: modularization.requestId,
+                        sourceDigest: modularization.sourceDigest,
+                        sourceName: modularization.sourceName,
+                        phase: modularization.phase,
+                        resources: modularization.resources,
+                        modCount: modularization.mods.length,
+                        canConfirm: modularization.canConfirm
+                      }
+                    }
+                  : {}),
+                detailsAction: "status(cursor)"
+              }
+            }
+            break
           case "example":
             if (!args.exampleId) throw Error("BUSINESS_CREATOR_EXAMPLE_REQUIRED")
             result = documentResult(
@@ -281,6 +337,37 @@ export function createModBusinessTool(input: {
                 assertTurn
               )
               result = {
+                ...("projectTrial" in status && status.projectTrial
+                  ? {
+                      trialRoute: "trialRoute" in status ? status.trialRoute : undefined,
+                      executed: "executed" in status ? status.executed : undefined,
+                      projectTrial: {
+                        id: status.projectTrial.id,
+                        draftId: status.projectTrial.draftId,
+                        name: status.projectTrial.name,
+                        revision: status.projectTrial.revision,
+                        digest: status.projectTrial.digest,
+                        ...(status.projectTrial.origin
+                          ? { origin: status.projectTrial.origin }
+                          : {}),
+                        ...(status.projectTrial.journey
+                          ? {
+                              journey: {
+                                projectId: status.projectTrial.journey.projectId,
+                                candidateDigest: status.projectTrial.journey.candidateDigest,
+                                phase: status.projectTrial.journey.phase,
+                                canDeliver: status.projectTrial.journey.canDeliver,
+                                operationsTruncated:
+                                  status.projectTrial.journey.operationsTruncated,
+                                stages: status.projectTrial.journey.stages.map(
+                                  ({ id, status }) => ({ id, status })
+                                )
+                              }
+                            }
+                          : {})
+                      }
+                    }
+                  : {}),
                 trial: status.trial
                   ? {
                       id: status.trial.id,
@@ -290,7 +377,10 @@ export function createModBusinessTool(input: {
                       canPrepare: status.trial.canPrepare
                     }
                   : undefined,
-                detailsAction: "status(cursor)"
+                detailsAction:
+                  "projectTrial" in status && status.projectTrial
+                    ? "Use mod_authoring project_list/project_read(id=projectTrial.draftId) to read the original trial request and native journey in this creator conversation; preparation is not execution or validation success."
+                    : "status(cursor)"
               }
             }
             break
@@ -332,7 +422,8 @@ export function createModBusinessTool(input: {
         const code =
           error instanceof BusinessModDuplicateIdError
             ? error.code
-            : error instanceof Error && error.message !== BUSINESS_MOD_DUPLICATE_ID_CODE &&
+            : error instanceof Error &&
+                error.message !== BUSINESS_MOD_DUPLICATE_ID_CODE &&
                 /^[A-Z][A-Z0-9_]+$/.test(error.message)
               ? error.message
               : "BUSINESS_CREATOR_OPERATION_FAILED"
@@ -352,6 +443,8 @@ export function createModBusinessTool(input: {
     {
       name: "mod_business",
       description:
+        "request_modularization also accepts modularizationFiles:[{path,text}] for a classic Skill-only plugin needing a first Host contract, extra Skills or knowledge. These are additive-only bounded text files (32 files, 64 KiB each, 256 KiB total) under skills/, mods/business/, tests/, knowledge/, references/, scripts/, agents/ or workflows/. Include real tests/project-contract.json and all new resources in the explicit catalog closure. No original file, identity, runtime or credential path can be overwritten; case and parent/file collisions fail. Original sourceDigest remains the approval anchor. The native card lists every added file digest; changed additions require a new request and confirmation. Added code is not executed by source materialization, and Host trial and source permissions remain separate native confirmation. " +
+        "For an original plugin without business Mods, inspect_raw(pluginId) first. It returns a native rawInspectionId, immutable sourceDigest, file inventory and either a static Host catalog candidate or explicit migration blockers. To read later pages, reuse inspect_raw(rawInspectionId,cursor); read_raw_asset(rawInspectionId,path,cursor) reads only bounded filtered source assets with credential display redaction. Preserve original Hooks, knowledge/context, configuration and checks. For unknown/legacy workflows, author a complete modularizationCatalog using the reviewed static adapters, never guess dependencies or execute an invented adapter. request_modularization(rawInspectionId,sourceDigest,modularizationCatalog?) prepares an additive native confirmation card; end the turn. It does not write or install. Only the user can approve creation of a private full-source candidate. After confirmation, status.modularization.inspectionId is an ordinary assembly inspectionId: inspect it, preview selected Mods, request_trial, then request_review for separate install/export confirmation. A static candidate is not a successful business trial. Original source changes invalidate it; approval is not restored after restart. " +
         "request_trial(previewId,goal) prepares this exact checked candidate for an isolated native-confirmed trial, without installing it. End this turn; the user confirms allocation, fills original configuration, grants the exact package source and selects original business context before starting the original project/managed runner. status includes real trial/run observations and saved feedback; physical cleanup is separate from business completion. Do not claim prepared means executed or passed. Changed candidates need a fresh trial/directory; unknown is never replayed. " +
         "catalog includes bundledExamples shipped SDK source templates. If knowledge-sync/context support is missing, example(exampleId:autobiz-knowledge,cursor?) provides actual Python, native Skill and extension declarations without preinstalling a source plugin; concatenate exact pages then save draft.extensions and all files using the actual inspected kernel. No example grants installation or source authority. All list responses are bounded: catalog(cursor), inspect(pluginId) then inspect(inspectionId,cursor) for nextCursor pages. read_mod(inspectionId,modId,cursor) reads one exact contract. read_preview(previewId,cursor) reads full frozen preview including files and diagnostics. Large read/read_asset/read_mod/read_preview/status documents return json-pages; concatenate jsonChunk in cursor order then parse JSON, always retaining the same identity. assets(inspectionId,cursor?) pages actual declared source paths/digests before read_asset; do not guess Python interfaces. " +
         "Create and compose real business Mods, including Python validators, Skills and namespaced function extensions. This is independent of the pure-function compiler. catalog lists actual installed source plugin IDs and current-chat persistent drafts. inspect(pluginId) returns a bounded native inspectionId plus exact catalog/kernel identity; read_asset(inspectionId,path) reads only declared resources, never credentials or arbitrary host paths. save(id,name,revision,inspectionId,modules?,extensions?,files) creates/updates an independent kernelRef-only Mod draft; use exact returned revision. All source files must stay inside each declared skills/<skill>/ or mods/business/<modId>/ namespace. Supply real module node/artifact/input/output/validator definitions and implementation files, not placeholder success. The host binds the kernel identity from the inspected installed source; drafts cannot replace trusted kernel files. read(id) recovers source; catalog lists drafts after restart. preview(name,version,sources:[{inspectionId,modIds}],drafts?:[{id,revision,modIds}],order?,acceptFixedWorkflow?) uses the original assembler with required dependency closure and preserves knowledge/Hooks. Inspect each real source first, include exactly one kernel source, and add the chosen draft Mods. Resolve diagnostics; acknowledgement does not fill missing resources. request_review(previewId) materializes/checks the exact package and shows trusted install/export controls in this chat. End this turn for confirmation; it never installs, approves, grants permissions, exports to a model-supplied path or executes a business stage. New source/revision requires a fresh preview/review. For an already installed output name, request_review yields an exportOnly candidate: export the update ZIP and use the original Install Plugin confirmation to update while retaining its UUID and configuration; permission changes require fresh confirmation. Do not claim the create-only installer updated it. Unknown effects are never retried. Stage rollback/debug is not provided.",
@@ -362,6 +455,9 @@ export function createModBusinessTool(input: {
             "example",
             "status",
             "inspect",
+            "inspect_raw",
+            "read_raw_asset",
+            "request_modularization",
             "read_mod",
             "read_preview",
             "assets",
@@ -377,6 +473,18 @@ export function createModBusinessTool(input: {
           cursor: z.number().int().min(0).max(2_000_000).optional(),
           modId: z.string().min(1).max(80).optional(),
           inspectionId: z.string().uuid().optional(),
+          rawInspectionId: z.string().uuid().optional(),
+          sourceDigest: z
+            .string()
+            .regex(/^[a-f0-9]{64}$/)
+            .optional(),
+          modularizationCatalog: z.record(z.string(), z.unknown()).optional(),
+          modularizationFiles: z
+            .array(
+              z.object({ path: z.string().min(1).max(160), text: z.string().max(65536) }).strict()
+            )
+            .max(32)
+            .optional(),
           path: z.string().min(1).max(512).optional(),
           id: z
             .string()

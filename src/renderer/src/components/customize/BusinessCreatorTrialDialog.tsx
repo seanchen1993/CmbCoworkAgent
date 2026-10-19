@@ -12,6 +12,7 @@ import type {
 import type { ThreadMessagesPage, ThreadMessagesPageOptions } from "../../../../main/types"
 import type { CompositionUnitContextOptions } from "../../../../shared/project-runtime/composition-api"
 import { compositionProblem } from "@/lib/project-composition-ui"
+import { CreatorTrialJourneyCard } from "./CreatorTrialJourneyCard"
 import {
   businessCreatorTrialScope,
   businessCreatorTrialView,
@@ -49,18 +50,27 @@ type Props = {
   api: DevelopmentBusinessTrialApi
   onStatus(status: DevelopmentStatus): void
   onRequestRepair?: (message: string) => void | Promise<void>
+  onReturnToCreator?: () => void
+  onOpenDelivery?: () => void
 }
 
 /** Only host-returned trial identities can reach the native editor or original runner. */
 export function BusinessCreatorTrialDialog(props: Props) {
   const [goalDraft, setGoalDraft] = useState({ key: "", message: "" })
   const [feedbackDraft, setFeedbackDraft] = useState({ key: "", message: "" })
+  const preserveDestinationFocus = useRef(false)
   const goalKey = JSON.stringify([props.review.planId, props.review.digest])
   const feedbackKey = props.trial?.id ?? ""
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent className="max-h-[90vh] w-[calc(100vw-1rem)] max-w-5xl overflow-y-auto">
-        <DialogTitle>隔离试用业务插件</DialogTitle>
+      <DialogContent className="max-h-[90vh] w-[calc(100vw-1rem)] max-w-5xl overflow-y-auto"
+        onCloseAutoFocus={event => {
+          if (preserveDestinationFocus.current) {
+            preserveDestinationFocus.current = false
+            event.preventDefault()
+          }
+        }}>
+        <DialogTitle>插件试用与整轮验收</DialogTitle>
         {props.open && (
           <TrialContents
             key={JSON.stringify([
@@ -71,6 +81,14 @@ export function BusinessCreatorTrialDialog(props: Props) {
               props.trial?.id
             ])}
             {...props}
+            onReturnToCreator={props.onReturnToCreator ? () => {
+              preserveDestinationFocus.current = true
+              props.onReturnToCreator?.()
+            } : undefined}
+            onOpenDelivery={props.onOpenDelivery ? () => {
+              preserveDestinationFocus.current = true
+              props.onOpenDelivery?.()
+            } : undefined}
             goal={goalDraft.key === goalKey ? goalDraft.message : ""}
             onGoalChange={(message) => setGoalDraft({ key: goalKey, message })}
             feedback={feedbackDraft.key === feedbackKey ? feedbackDraft.message : ""}
@@ -165,6 +183,14 @@ function TrialContents(
       <p className="text-sm">
         {review.name} · v{review.version}
       </p>
+      <div className="flex flex-wrap gap-2 rounded-lg border bg-muted/30 p-3">
+        {props.onReturnToCreator && <button type="button" className={button} onClick={props.onReturnToCreator}>
+          返回原创造者聊天
+        </button>}
+        {props.onOpenDelivery && <button type="button" className={button} onClick={props.onOpenDelivery}>
+          查看保存为新插件入口
+        </button>}
+      </div>
       <p className="text-sm text-muted-foreground">
         在独立目录中执行此候选的原业务流程，不安装到正式插件库。新候选需要新的试用；不会替换正在运行的源码，也不会自动重放结果未知的操作。
       </p>
@@ -215,7 +241,8 @@ function TrialContents(
       {trial && scope && (
         <>
           <section aria-label="当前业务试用" className="space-y-3 rounded border p-3">
-            <h3 className="font-medium">{trial.name}</h3>
+            <h3 className="font-medium">本轮试用 · {trial.name}</h3>
+            <p className="text-xs leading-5 text-muted-foreground">所有阶段会话归属这一轮试用。请在运行记录中核对流程检查、产物与人工确认，不能以单个会话完成判断整个插件成功。</p>
             <p className="whitespace-pre-wrap break-words text-sm">试用目标：{trial.goal}</p>
             <p role="status" className="text-sm">
               {phases[trial.phase]}
@@ -298,7 +325,7 @@ function TrialContents(
               <p className="mt-2 break-all">内容摘要：{trial.digest}</p>
             </details>
           </section>
-          {trial.observation && <TrialObservation key={trial.id} trial={trial} />}
+          {trial.observation && <TrialObservation key={trial.id} trial={trial} creatorThreadId={threadId} />}
           {trial.observation && (
             <TrialHumanGates
               key={JSON.stringify([scope.trialId, scope.expectedVersion])}
@@ -578,9 +605,12 @@ function TrialContext({
   )
 }
 
-function TrialObservation({ trial }: { trial: DevelopmentBusinessTrialStatus }) {
+function TrialObservation({ trial, creatorThreadId }: {
+  trial: DevelopmentBusinessTrialStatus
+  creatorThreadId: string
+}) {
   const observation = trial.observation!
-  const [sessionOpen, setSessionOpen] = useState(true)
+  const [sessionOpen, setSessionOpen] = useState(false)
   const [selectedThread, setSelectedThread] = useState<string | null>(
     () => observation.sessions?.[0]?.threadId ?? null
   )
@@ -590,7 +620,15 @@ function TrialObservation({ trial }: { trial: DevelopmentBusinessTrialStatus }) 
   const { selected, mode } = businessCreatorTrialSessionView(trial, selectedThread)
   return (
     <section aria-label="原流程运行记录" className="min-w-0 space-y-3 rounded border p-3">
-      <h3 className="font-medium">原流程运行记录</h3>
+      <h3 className="font-medium">整轮试用的原流程运行记录</h3>
+      {trial.journey ? <CreatorTrialJourneyCard threadId={creatorThreadId} digest={trial.digest}
+        journey={trial.journey} /> : <p className="rounded-lg bg-muted/40 p-3 text-sm" role="status">
+        {trial.phase === "completed"
+          ? "原运行已结束；请核对下方原检查点与产物。这里尚未提供完整的逐阶段验收凭据，不能据此判定整轮业务通过。"
+          : "当前结果以原流程检查记录为准。各阶段会话仅是本轮试用的执行明细。"}
+      </p>}
+      <details className="rounded-lg border p-3">
+      <summary className="cursor-pointer text-sm font-medium">原生检查点与流程决策记录</summary>
       <dl className="grid gap-2 text-sm">
         <div>
           <dt>原运行状态</dt>
@@ -620,10 +658,25 @@ function TrialObservation({ trial }: { trial: DevelopmentBusinessTrialStatus }) 
           {observation.reason}
         </p>
       )}
+      </details>
       <p className="text-xs text-muted-foreground">
         节点信息来自最近一次原流程决策，不代表下一步正在执行的位置，也不能代替检查点凭据。会话结束不等于业务阶段通过；请核对原产物和检查结果。
       </p>
       {!!observation.sessions?.length && (
+        <>
+        <details className="rounded-lg border p-3">
+        <summary className="cursor-pointer text-sm font-medium">本轮共 {observation.sessions.length} 个阶段执行会话，展开查看所属关系</summary>
+        <ol className="mt-3 grid gap-2 sm:grid-cols-2" aria-label="同一轮试用的阶段会话">
+          {observation.sessions.map((session, index) => <li key={session.threadId} className="rounded-lg border p-3 text-xs">
+            <p className="font-medium">{index + 1}. {session.nodeId ?? "原流程阶段"}</p>
+            <p className="mt-1 text-muted-foreground">{session.endedAt ? "执行已结束，业务检查需另行核对" : "尚无结束记录"}</p>
+            <button type="button" className="mt-2 underline" onClick={() => {
+              setSelectedThread(session.threadId)
+              setSessionOpen(true)
+            }}>查看执行明细</button>
+          </li>)}
+        </ol>
+        </details>
         <div className="flex flex-wrap items-center gap-2">
           <label>
             查看本次试用会话
@@ -657,6 +710,7 @@ function TrialObservation({ trial }: { trial: DevelopmentBusinessTrialStatus }) 
             查看当前运行会话
           </button>
         </div>
+        </>
       )}
       {observation.sessionsTruncated && (
         <p role="status">仅显示当前原运行最近的会话记录，较早记录已截断。</p>

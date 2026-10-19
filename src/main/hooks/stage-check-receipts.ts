@@ -22,6 +22,18 @@ export interface StageCheckInvocation {
 }
 type Sink = (invocation: StageCheckInvocation) => Promise<void>
 let sink: Sink | undefined
+interface ReceiptObserver {
+  available(binding: Readonly<RuntimePluginSourceBinding>): boolean
+  observe: Sink
+  failed?(error: unknown, binding: Readonly<RuntimePluginSourceBinding>): void
+}
+const observers = new Set<ReceiptObserver>()
+/** Main-owned readback only. An observer never grants execution or weakens a mandatory sink. */
+export function registerStageCheckReceiptObserver(observer: ReceiptObserver): () => void {
+  if (observers.size >= 16) throw Error("STAGE_CHECK_OBSERVER_LIMIT")
+  observers.add(observer)
+  return () => { observers.delete(observer) }
+}
 export function registerStageCheckReceiptSink(next: Sink): () => void {
   if (sink) throw Error("STAGE_CHECK_SINK_ALREADY_REGISTERED")
   sink = next
@@ -38,39 +50,56 @@ export function prepareStageCheckReceipts(
   if (!result.stdout.split(/\r?\n/).some((line) => line.startsWith(STAGE_CHECK_RECEIPT_PREFIX)))
     return undefined
   const binding = currentRuntimePluginSource()
-  if (!binding?.projectId.startsWith("composition-legacy:") || !sink) return undefined
+  if (!binding) return undefined
+  const mandatory = binding.projectId.startsWith("composition-legacy:") ? sink : undefined
+  const selected = [...observers].filter(observer => {
+    try { return observer.available(binding) } catch { return false }
+  })
+  if (!mandatory && !selected.length) return undefined
   const actual = hook as PluginHookMetadata
-  if (
-    (hook.type ?? "command") !== "command" ||
-    hook.async ||
-    actual.pluginId !== binding.plugin.id ||
-    !hook.hookSourceRoot ||
-    !isSameWorkspacePath(hook.hookSourceRoot, binding.plugin.path)
-  )
-    throw Error("STAGE_CHECK_SOURCE_INVALID")
   const receipts: StageCheckReceipt[] = []
   const remainder: string[] = []
-  for (const line of result.stdout.split(/\r?\n/)) {
-    if (!line.startsWith(STAGE_CHECK_RECEIPT_PREFIX)) {
-      remainder.push(line)
-      continue
-    }
-    const encoded = line.slice(STAGE_CHECK_RECEIPT_PREFIX.length)
-    if (encoded.length > 90_000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded))
-      throw Error("STAGE_CHECK_RECEIPT_LIMIT")
-    const bytes = Buffer.from(encoded, "base64")
-    if (bytes.length > 65536 || bytes.toString("base64") !== encoded || receipts.length >= 32)
-      throw Error("STAGE_CHECK_RECEIPT_LIMIT")
-    receipts.push(
-      parseStageCheckReceipt(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)))
+  try {
+    if (
+      (hook.type ?? "command") !== "command" ||
+      hook.async ||
+      actual.pluginId !== binding.plugin.id ||
+      !hook.hookSourceRoot ||
+      !isSameWorkspacePath(hook.hookSourceRoot, binding.plugin.path)
     )
+      throw Error("STAGE_CHECK_SOURCE_INVALID")
+    for (const line of result.stdout.split(/\r?\n/)) {
+      if (!line.startsWith(STAGE_CHECK_RECEIPT_PREFIX)) {
+        remainder.push(line)
+        continue
+      }
+      const encoded = line.slice(STAGE_CHECK_RECEIPT_PREFIX.length)
+      if (encoded.length > 90_000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded))
+        throw Error("STAGE_CHECK_RECEIPT_LIMIT")
+      const bytes = Buffer.from(encoded, "base64")
+      if (bytes.length > 65536 || bytes.toString("base64") !== encoded || receipts.length >= 32)
+        throw Error("STAGE_CHECK_RECEIPT_LIMIT")
+      receipts.push(
+        parseStageCheckReceipt(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)))
+      )
+    }
+    result.stdout = remainder.join("\n")
+  } catch (error) {
+    if (mandatory) throw error
+    result.stdout = result.stdout.split(/\r?\n/)
+      .filter(line => !line.startsWith(STAGE_CHECK_RECEIPT_PREFIX)).join("\n")
+    return async () => {
+      for (const observer of selected) {
+        try { observer.failed?.(error, binding) }
+        catch { /* Readback failure cannot change the original Hook decision. */ }
+      }
+    }
   }
-  result.stdout = remainder.join("\n")
-  const commit = sink
+  const commit = mandatory
   return async () => {
     context.signal?.throwIfAborted()
     assertCurrentRuntimePluginSourceContent()
-    await commit({
+    const invocation: StageCheckInvocation = {
       binding,
       hookId: hook.id,
       hook: {
@@ -82,7 +111,19 @@ export function prepareStageCheckReceipts(
       },
       receipts,
       signal: context.signal
-    })
+    }
+    if (commit) await commit(invocation)
+    for (const observer of selected) {
+      if (!observers.has(observer)) continue
+      try {
+        assertCurrentRuntimePluginSourceContent()
+        if (!observer.available(binding)) throw Error("STAGE_CHECK_OBSERVER_SCOPE_CHANGED")
+        await observer.observe(invocation)
+      } catch (error) {
+        try { observer.failed?.(error, binding) }
+        catch { /* A readback diagnostic cannot replace the original Hook decision. */ }
+      }
+    }
     context.signal?.throwIfAborted()
     assertCurrentRuntimePluginSourceContent()
   }

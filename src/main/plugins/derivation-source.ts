@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto"
 import { lstat, readdir, realpath, open, mkdir, writeFile, chmod } from "node:fs/promises"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
-import { parseProjectRuntimeManifest } from "../../shared/project-runtime"
+import {
+  parseProjectRuntimeManifest,
+  preserveProjectRuntimeEnvelope
+} from "../../shared/project-runtime"
 
 export const DERIVATION_LIMITS = {
   files: 4096,
@@ -238,7 +241,11 @@ export async function snapshotDerivationSource(directory: string): Promise<Deriv
   }
 }
 
-export function renameDerivation(snapshot: DerivationSnapshot, name: string): DerivationFile[] {
+export function renameDerivation(
+  snapshot: DerivationSnapshot,
+  name: string,
+  version?: string
+): DerivationFile[] {
   if (
     !/^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,79}$/u.test(name) ||
     /[. ]$/.test(name) ||
@@ -250,17 +257,24 @@ export function renameDerivation(snapshot: DerivationSnapshot, name: string): De
     let bytes = file.bytes
     if (snapshot.manifests.includes(file.path)) {
       const manifest = packageJson(bytes)
-      bytes = Buffer.from(JSON.stringify({ ...manifest, name }, null, 2) + "\n")
+      bytes = Buffer.from(JSON.stringify({ ...manifest, name,
+        ...(version === undefined ? {} : { version }) }, null, 2) + "\n")
     } else if (file.path === "devclaw.project-runtime.json") {
       const manifest = packageJson(bytes)
-      const plugin = manifest.plugin as Record<string, unknown> | undefined
+      const v2 = manifest.apiVersion === "devclaw.project-runtime/v2"
+      const runtime = v2 ? parseProjectRuntimeManifest(manifest) : manifest
+      const plugin = runtime.plugin as Record<string, unknown> | undefined
       if (!plugin || plugin.id !== snapshot.name) throw Error("项目清单身份约束不支持")
+      const renamed = {
+        ...runtime,
+        plugin: { ...plugin, id: name,
+          ...(plugin.name === snapshot.name ? { name } : {}),
+          ...(version === undefined ? {} : { version }) }
+      }
       bytes = Buffer.from(
         JSON.stringify(
-          {
-            ...manifest,
-            plugin: { ...plugin, id: name, ...(plugin.name === snapshot.name ? { name } : {}) }
-          },
+          v2 ? preserveProjectRuntimeEnvelope(manifest,
+            parseProjectRuntimeManifest(renamed)) : renamed,
           null,
           2
         ) + "\n"

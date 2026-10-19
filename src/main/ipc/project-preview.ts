@@ -38,6 +38,7 @@ export function registerProjectPreviewHandlers(
   }
   ipc.handle("project-preview:list", (event, threadId: string) => {
     const { scope } = context(event, threadId)
+    const request = projectAuthoringSessions.trialRequest(scope)
     const drafts: ProjectPreviewDraft[] = projectAuthoringSessions.list(scope).map((draft) => {
       const projectId = projectPreviewRegistry.projectFor(scope, draft.id)
       const saved = projectId ? undefined : projectPreviewRegistry.retained(scope, draft.id)
@@ -48,6 +49,7 @@ export function registerProjectPreviewHandlers(
         revision: draft.revision,
         digest: draft.source.digest,
         projectId,
+        ...(request?.draftId === draft.id && request.journey ? { journey: request.journey } : {}),
         ...(saved
           ? {
               recovery: {
@@ -153,6 +155,7 @@ export function registerProjectPreviewHandlers(
         guard()
         await projectPreviewRegistry.bind(project, retainedRoot(project))
         bound = true
+        projectAuthoringSessions.bindTrialProject(scope, input.draftId, project, guard)
         return projectId
       } catch (error) {
         if (!bound) {
@@ -235,6 +238,7 @@ export function registerProjectPreviewHandlers(
           cancelPrepared: (id) => api.cancel(id)
         })
         release = undefined
+        projectAuthoringSessions.bindTrialProject(scope, draft.id, project, guard)
         return project.projectId
       } finally {
         release?.()

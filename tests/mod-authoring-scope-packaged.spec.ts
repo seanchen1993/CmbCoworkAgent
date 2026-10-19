@@ -476,7 +476,7 @@ async function main() {
       false
     )
     const initialGlobal = await page.evaluate(() => window.api.mods.globalEnabled())
-    await page.getByRole("button", { name: "Mod 状态", exact: true }).click()
+    await page.getByRole("button", { name: "创作工作区", exact: true }).click()
     await page.getByRole("button", { name: "刷新状态", exact: true }).waitFor()
     assert.equal(
       (
@@ -514,7 +514,7 @@ async function main() {
     )
     await turn(scope.second, "other-chat")
     await select("Authoring scope creator")
-    await page.getByRole("button", { name: "Mod 状态", exact: true }).click()
+    await page.getByRole("button", { name: "创作工作区", exact: true }).click()
     await page.locator("summary").filter({ hasText: "创作选项" }).click()
     await page.getByRole("button", { name: "结束创作并停止本会话试用", exact: true }).click()
     await page.getByRole("button", { name: "普通模式", exact: true, pressed: true }).waitFor()

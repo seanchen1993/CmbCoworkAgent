@@ -1,10 +1,11 @@
-import { readFile, readdir, rm, writeFile } from "node:fs/promises"
-import { basename, dirname, join, resolve } from "node:path"
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
+import { basename, dirname, isAbsolute, join, resolve, toNamespacedPath } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import * as tooling from "./project-tooling"
 import type { DevelopmentScope } from "../v2/development-session"
 import { ProjectAuthoringSessions } from "./project-authoring-session"
+import { ProjectDevelopmentSessions } from "./project-development-session"
 
 const scope: DevelopmentScope = {
   threadId: "development-project",
@@ -90,6 +91,48 @@ it("allocates an empty private workspace for every native trial and retains earl
   expect(await readdir(third.snapshot.workspace)).toEqual([])
   third.release()
 })
+
+it.skipIf(process.platform !== "win32")(
+  "creates real Windows trials beyond MAX_PATH without exposing namespace prefixes or reusing earlier workspaces",
+  async () => {
+    const { draft } = await fixture()
+    const cleanupRoot = dirname(draft.directory)
+    const suffixLength = `/${draft.id}-development-`.length + 36
+    const ownerLength = 239 - suffixLength
+    const prefix = join(cleanupRoot, "long-native-owner-")
+    const ownerRoot = prefix + "x".repeat(ownerLength - prefix.length)
+    await mkdir(toNamespacedPath(ownerRoot), { recursive: true })
+    const development = new ProjectDevelopmentSessions()
+    await development.stage(scope, draft, ownerRoot, () => {})
+    const first = development.acquire(scope, draft.id, draft.revision, () => {},
+      { freshWorkspace: true })
+    expect(dirname(first.snapshot.workspace).length).toBe(239)
+    expect(first.snapshot.workspace.length).toBeGreaterThan(260)
+    expect(isAbsolute(first.snapshot.workspace)).toBe(true)
+    expect(first.snapshot.workspace.startsWith("\\\\?\\")).toBe(false)
+    expect((await stat(first.snapshot.workspace)).isDirectory()).toBe(true)
+    await writeFile(join(first.snapshot.workspace, "earlier.txt"), "Earlier trial artifact")
+    first.release()
+
+    const second = development.acquire(scope, draft.id, draft.revision, () => {},
+      { freshWorkspace: true })
+    expect(second.snapshot.workspace).not.toBe(first.snapshot.workspace)
+    expect(second.snapshot.workspace.startsWith("\\\\?\\")).toBe(false)
+    expect(await readdir(second.snapshot.workspace)).toEqual([])
+    expect(await readFile(join(first.snapshot.workspace, "earlier.txt"), "utf8"))
+      .toBe("Earlier trial artifact")
+    second.release()
+
+    // Source recovery does not select a previous run's artifacts for a new goal.
+    const restarted = new ProjectDevelopmentSessions()
+    await restarted.stage(scope, draft, ownerRoot, () => {})
+    const third = restarted.acquire(scope, draft.id, draft.revision, () => {},
+      { freshWorkspace: true })
+    expect([first.snapshot.workspace, second.snapshot.workspace]).not.toContain(third.snapshot.workspace)
+    expect(await readdir(third.snapshot.workspace)).toEqual([])
+    third.release()
+  }
+)
 
 it("pins an active preview and promotes only the newest queued revision after settlement", async () => {
   const { sessions, save } = await fixture()

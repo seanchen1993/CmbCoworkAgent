@@ -5,6 +5,7 @@ import type {
 } from "../../../../shared/project-runtime/development-preview"
 import { isSameWorkspacePath } from "../../../../shared/workspace-path"
 import type { DevelopmentProjectTrialRequest } from "../../../../shared/mods/development"
+import { CreatorTrialJourneyCard } from "./CreatorTrialJourneyCard"
 const LocalProjectRun = lazy(() =>
   import("../harness-board/LocalProjectsPanel").then((module) => ({
     default: module.LocalProjectRun
@@ -15,21 +16,30 @@ export function ProjectDevelopmentPreviewPanel(props: {
   threadId: string
   workspace: string
   request?: DevelopmentProjectTrialRequest
+  onRequestRepair?: (message: string) => void | Promise<void>
+  onReturnToChat?: () => void
+  showJourney?: boolean
 }) {
   const api = window.api.harnessBoard?.localProjects?.preview
   if (!api) return null
-  return <ScopedPreview key={JSON.stringify(props)} {...props} api={api} />
+  return <ScopedPreview key={JSON.stringify([props.threadId, props.workspace, props.request?.id])} {...props} api={api} />
 }
 function ScopedPreview({
   threadId,
   workspace,
   api,
-  request
+  request,
+  onRequestRepair,
+  onReturnToChat,
+  showJourney = true
 }: {
   threadId: string
   workspace: string
   api: ProjectPreviewApi
   request?: DevelopmentProjectTrialRequest
+  onRequestRepair?: (message: string) => void | Promise<void>
+  onReturnToChat?: () => void
+  showJourney?: boolean
 }) {
   const [drafts, setDrafts] = useState<ProjectPreviewDraft[]>([])
   const [error, setError] = useState("")
@@ -37,6 +47,8 @@ function ScopedPreview({
   const [goal, setGoal] = useState(request?.goal ?? "")
   const [confirmed, setConfirmed] = useState(false)
   const [selected, setSelected] = useState<string>()
+  const [feedback, setFeedback] = useState("")
+  const [feedbackSaved, setFeedbackSaved] = useState(false)
   const requestDraftId = request?.draftId
   const requestRevision = request?.revision
   const requestDigest = request?.digest
@@ -109,20 +121,29 @@ function ScopedPreview({
       unsubscribe?.()
     }
   }, [act, read, threadId, invalidate])
+  const running = drafts.some(draft => draft.journey?.phase === "running")
+  useEffect(() => {
+    if (!running) return
+    const timer = setInterval(() => {
+      if (live.current && !pending.current) void read().catch(() => {})
+    }, 2500)
+    return () => clearInterval(timer)
+  }, [running, read])
   return (
     <section className="space-y-3 rounded border p-3" aria-label="项目模板隔离试用">
       <div className="flex flex-wrap justify-between gap-2">
-        <h3 className="font-medium">在独立项目中试用</h3>
+        <h3 className="font-medium">当前创作的项目试用</h3>
         <button type="button" className="underline" disabled={busy} onClick={() => void act(read)}>
           刷新项目草稿
         </button>
       </div>
       <p className="text-xs text-muted-foreground">
-        新试用使用独立空文件夹，保留以往产物。重启后可重新核对并恢复原项目，恢复本身不执行阶段。
+        试用项目与本次原聊天、候选版本关联。各步骤的执行会话统一归入同一轮，
+        下方按阶段汇总结果。试用保留以往产物；恢复记录本身不执行阶段。
       </p>
       {!drafts.length && (
         <p className="text-sm">
-          先在当前聊天描述需要两个阶段完成的项目，让助手准备试用，再刷新这里的列表。
+          先在原聊天描述项目需求，让助手准备当前候选，再刷新这里的列表。
         </p>
       )}
       {error && (
@@ -184,7 +205,7 @@ function ScopedPreview({
                   className="underline"
                   onClick={() => setSelected(draft.projectId)}
                 >
-                  打开试用项目
+                  查看本轮执行与阶段操作
                 </button>
                 <button
                   type="button"
@@ -303,13 +324,42 @@ function ScopedPreview({
               </button>
             )}
           </div>
+          {showJourney && (draft.projectId || draft.recovery || draft.journey) && <CreatorTrialJourneyCard
+            threadId={threadId} digest={draft.digest} journey={draft.journey} />}
         </article>
       ))}
       {selected && (
+        <section aria-label="本轮试用项目执行" className="min-w-0 space-y-3 rounded-xl border p-3">
+        <h4 className="font-medium">同一轮试用中的阶段操作</h4>
+        <p className="text-xs text-muted-foreground">在这里执行、确认和推进原项目阶段；完成单个会话后，返回上方整轮验收查看检查结果。</p>
         <Suspense fallback={<p>正在打开试用项目…</p>}>
           <LocalProjectRun key={selected} projectId={selected} onChanged={() => void act(read)} />
         </Suspense>
+        </section>
       )}
+      {request && (onRequestRepair || onReturnToChat) && <section aria-label="回原创作对话优化" className="space-y-3 rounded-xl border p-4">
+        <h4 className="font-medium">效果需要调整？回到原聊天继续修改</h4>
+        <p className="text-xs text-muted-foreground">修改会生成新候选和新一轮试用，不替换当前执行中的版本；原产物与检查记录保留。</p>
+        {onRequestRepair && <>
+          <label className="grid gap-1 text-sm">希望如何改进
+            <textarea value={feedback} maxLength={8000} className="min-h-20 rounded border bg-background p-2"
+              onChange={event => { setFeedback(event.target.value); setFeedbackSaved(false) }} />
+          </label>
+          <button type="button" className="rounded border px-3 py-2 text-sm disabled:opacity-50"
+            disabled={busy || !feedback.trim()} onClick={() => void act(async () => {
+              const submittedFeedback = feedback
+              await read()
+              if (!live.current) return
+              await onRequestRepair(`请继续优化原聊天中准备的项目插件“${request.name}”。本次试用请求 ${request.id}，草稿 ${request.draftId}，版本 ${request.revision}，候选摘要 ${request.digest}。请先读取原试用的整轮阶段、产物和校验记录；结果未知的操作不要重放。我的修改要求：${submittedFeedback.trim()}。修改后准备新候选和新的试用，不修改正在运行的版本。`)
+              if (!live.current) return
+              setFeedback(current => current === submittedFeedback ? "" : current)
+              setFeedbackSaved(true)
+            })}>提交到原聊天继续优化</button>
+        </>}
+        {feedbackSaved && <p role="status" className="text-sm">刚才提交的修改需求已发送到原创造者聊天，可返回查看并继续讨论。{feedback && "输入框中保留的新内容尚未提交。"}</p>}
+        {onReturnToChat && <button type="button" className="rounded border px-3 py-2 text-sm"
+          onClick={onReturnToChat}>返回原创造者聊天</button>}
+      </section>}
     </section>
   )
 }

@@ -95,9 +95,10 @@ async function showAuthor(id: string) {
   if (await back.isVisible()) await back.click()
   await page.getByText("Project recovery acceptance", { exact: true }).first().click()
   const region = page.getByRole("region", { name: "灵件对话创作", exact: true })
-  const status = page.getByRole("button", { name: /^(Mod 状态|确认项目真实试用)$/ })
+  const status = page.getByLabel("聊天模式与 Mod 状态", { exact: true })
+    .locator('button[aria-haspopup="dialog"]')
   const deadline = Date.now() + 20000
-  // Source status may automatically open this same popover after restart. Observe the
+  // Source status may automatically open this same workspace after restart. Observe the
   // actual native trigger state instead of blindly toggling an asynchronously opened view.
   while (!(await region.isVisible()) && Date.now() < deadline) {
     if ((await status.getAttribute("aria-expanded")) === "false") {
@@ -508,7 +509,32 @@ async function main() {
     )
     assert.equal(view.project.status, "completed")
     evidence.completed = view
+    const creatorResult = await until(
+      () => page.evaluate((threadId) => window.api.mods.development.status({ threadId }), author),
+      (status) => status.projectTrial?.journey?.phase === "passed",
+      "original creator receives the complete native trial result"
+    )
+    const journey = creatorResult.projectTrial!.journey!
+    assert.equal(journey.creatorThreadId, author)
+    assert.equal(journey.projectId, projectId)
+    assert.equal(journey.candidateDigest, creatorResult.projectTrial!.digest)
+    assert.equal(journey.candidateCurrent, true)
+    assert.equal(journey.canDeliver, true)
+    assert.equal(journey.operationsTruncated, false)
+    assert.equal(journey.stages.length, 2)
+    for (const stage of journey.stages) {
+      assert.equal(stage.status, "passed")
+      assert.equal(stage.sessions.length, 1)
+      assert(stage.checks.length > 0 && stage.checks.every((check) => check.result === "passed"))
+      assert.notEqual(stage.sessions[0].threadId, author, "Stage isolation must remain intact")
+    }
+    assert.notEqual(journey.stages[0].sessions[0].threadId, journey.stages[1].sessions[0].threadId)
+    evidence.creatorJourney = journey
     panel = await showAuthor(author)
+    const acceptance = page.getByRole("region", { name: "整轮项目试用验收", exact: true })
+    await acceptance.getByText("整轮试用已通过", { exact: true }).waitFor()
+    assert.equal(await acceptance.getByLabel("本轮阶段验收", { exact: true })
+      .locator(":scope > li").count(), 2)
     await panel.getByLabel("这次试用希望完成什么").fill("第二个独立试用，不继承前次产物")
     await panel.getByRole("checkbox").check()
     await panel.getByRole("button", { name: "创建试用项目（稍后开始任务）", exact: true }).click()

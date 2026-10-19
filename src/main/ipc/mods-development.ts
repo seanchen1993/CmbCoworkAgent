@@ -21,6 +21,12 @@ export function registerModsDevelopmentHandlers(
     approveBusiness?(input: AuthoringScope & { planId: string; digest: string }): Promise<unknown>
     exportBusiness?(input: AuthoringScope & { planId: string; digest: string }): Promise<unknown>
     reconcileBusiness?(input: AuthoringScope & { planId: string; digest: string }): Promise<unknown>
+    prepareProjectDelivery?(input: AuthoringScope & {
+      requestId: string; digest: string; name: string; version: string
+    }): Promise<unknown>
+    installProjectDelivery?(input: AuthoringScope & { deliveryId: string; digest: string }): Promise<unknown>
+    exportProjectDelivery?(input: AuthoringScope & { deliveryId: string; digest: string }): Promise<unknown>
+    approveModularization?(input: AuthoringScope & { requestId: string; sourceDigest: string }): Promise<unknown>
   }
 ) {
   const register = <S extends z.ZodType>(
@@ -35,6 +41,24 @@ export function registerModsDevelopmentHandlers(
       return run(parsed.data)
     })
   }
+  register("prepare-project-delivery", scope.extend({ requestId: z.string().uuid(),
+    digest: z.string().regex(/^[a-f0-9]{64}$/), name: z.string().regex(/^[a-z][a-z0-9-]{0,47}$/),
+    version: z.string().max(64).regex(/^\d+\.\d+\.\d+$/) }).strict(), input => {
+    if (!actions?.prepareProjectDelivery) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
+    return actions.prepareProjectDelivery(input)
+  })
+  for (const name of ["install-project-delivery", "export-project-delivery"] as const) {
+    register(name, scope.extend({ deliveryId: z.string().uuid(), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict(), input => {
+      const action = name === "install-project-delivery" ? actions?.installProjectDelivery : actions?.exportProjectDelivery
+      if (!action) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
+      return action(input)
+    })
+  }
+  register("approve-modularization", scope.extend({ requestId: z.string().uuid(),
+    sourceDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict(), input => {
+    if (!actions?.approveModularization) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
+    return actions.approveModularization(input)
+  })
   register("status", z.object({ threadId: scope.shape.threadId }).strict(), (input) =>
     service.refreshReuse(input.threadId)
   )
