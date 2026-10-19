@@ -219,11 +219,12 @@ describe("Workflow child code attribution at startup", () => {
 })
 
 // Team's runner is a closure in the runtime factory. Check the actual entry
-// points as well as the behavior above: the old helper tests passed while its
+// points (inside the synchronous session-capture wrapper) as well as the
+// behavior above: the old helper tests passed while its
 // callers only synchronized after observing a new Skill read.
 describe("subagent attribution initialization order", () => {
   it.each([
-    ["../runtime.ts", "coordinatorWorkerRunner", "syncWorkerSkillAttribution"],
+    ["../runtime.ts", "runCoordinatorWorkerTurn", "syncWorkerSkillAttribution"],
     ["./subagent.ts", "runOnce", "syncSkillAttribution"]
   ])(
     "initializes %s after trace reset and before runtime creation",
