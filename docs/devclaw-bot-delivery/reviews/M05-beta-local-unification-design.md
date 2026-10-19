@@ -98,6 +98,8 @@ root 审实际 diff 与保留矩阵、独立运行关键本地 SQLite/Runtime/IP
 
 实施早审补充：工作发起的协作使用可信 `rootWorkId` 标识整条协作归属，单跳回传目标仍由 `returnWorkId` 表示。工作及其协作后代共同使用新增工作执行配额，不能占满两槽而间接阻塞主对话；原 beta 普通主会话/群协作的容量规则不变。完成门禁检查关联协作、待回传结果和后台命令；摘要优先反映仍在运行/等待的执行，不能被后来排队的补充覆盖。若目标已完成/删除，迟到回传保留可见事实并跳过派发，不自动重新运行，也不能抛错阻塞整个队列。上述查询只读有界元数据，不逐工作加载消息正文。
 
+完成与停止的归属补充：动态 workflow/coordinator 仅检查或停止工作自身固定 thread；协作前台执行与待回传按可信 `rootWorkId` 归属，协作后台 shell 按 control 中 `source_task_id` 找到的固定 command IDs 归属。不得因为某 Bot 曾协作过，就扫描或取消其整个主 thread。LocalSandbox 既有取消入口可增可选 command-ID 过滤，原调用行为不变，未匹配命令的通知与恢复不变。协作 Bot 已返回后自行运行的独立 workflow 仍归它自己的主对话，本轮不宣称将这类后续后台工作聚合进原工作；未来需要时再扩展可信来源关联。验收覆盖历史协作 Bot 的无关后台运行既不阻止完成、也不被停止。
+
 ## 11. M05-04 模拟渠道接口与展示决定
 
 仅在 M05-02/03 本地切片冻结复验后进入产品实现。使用既有 control 库中的独立 mock binding/conversation/event/outbox 记录，运行仍走原 Runtime。开发 DTO 不改变生产 `RemoteImEventV1`，不新增 WSS 或 Java 服务。
