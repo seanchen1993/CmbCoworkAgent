@@ -24,6 +24,7 @@ import {
 } from "./catalog-protocol"
 import { HARNESS_WORKER_RESOURCE_LIMITS, harnessWorkerOptions } from "./worker-limits"
 import { HARNESS_PROJECT_TEXT_MAX_CHARS } from "./store-limits"
+import { protectMarketDirectory } from "../services/market-content"
 import {
   HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES,
   HARNESS_FRAMEWORK_DEPLOY_UNIT_CONTEXT_MAX_ENTRIES
@@ -111,36 +112,41 @@ async function makeCatalog(size: number): Promise<{ projects: string; plugins: s
 }
 
 describe("Harness catalog reader", () => {
-  it("preserves artifact session actions in detail contexts without changing knowledge config", async () => {
-    const paths = await makeCatalog(1)
-    const configPath = join(paths.plugins, "..", "plugin", "board_core", "board_config.json")
-    const config = JSON.parse(readFileSync(configPath, "utf8"))
-    const artifactConfig = {
-      sync_type: "invoke_session",
-      nextAction: {
-        slashSkill: "artifact-sync",
-        userMessage: "${projectCode} ${feature} ${leanToken}",
-        dialogTips: "发起产物同步"
+  it.each([false, true])(
+    "preserves artifact and knowledge actions in protected config: %s",
+    async (protectedContent) => {
+      const paths = await makeCatalog(1)
+      const configPath = join(paths.plugins, "..", "plugin", "board_core", "board_config.json")
+      const config = JSON.parse(readFileSync(configPath, "utf8"))
+      const artifactConfig = {
+        sync_type: "invoke_session",
+        nextAction: {
+          slashSkill: "artifact-sync",
+          userMessage: "${projectCode} ${feature} ${leanToken}",
+          dialogTips: "发起产物同步"
+        }
       }
-    }
-    const knowledgeConfig = {
-      sync_type: "invoke_session",
-      nextAction: { slashSkill: "knowledge-sync" }
-    }
-    writeFileSync(
-      configPath,
-      JSON.stringify({
-        ...config,
+      const knowledgeConfig = {
+        sync_type: "invoke_session",
+        nextAction: { slashSkill: "knowledge-sync" }
+      }
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          ...config,
+          ...(protectedContent ? { padding: "x".repeat(800_000) } : {}),
+          artifact_sync: artifactConfig,
+          knowledge_config: knowledgeConfig
+        })
+      )
+      if (protectedContent) protectMarketDirectory(join(paths.plugins, "..", "plugin"))
+      const result = readHarnessProjectContexts(paths.projects, paths.plugins, ["project-0"])
+      expect(result.projects["project-0"]?.configSnapshot?.value).toMatchObject({
         artifact_sync: artifactConfig,
         knowledge_config: knowledgeConfig
       })
-    )
-    const result = readHarnessProjectContexts(paths.projects, paths.plugins, ["project-0"])
-    expect(result.projects["project-0"]?.configSnapshot?.value).toMatchObject({
-      artifact_sync: artifactConfig,
-      knowledge_config: knowledgeConfig
-    })
-  })
+    }
+  )
 
   it("keeps a near-limit project/plugin response paged and below the IPC byte cap", async () => {
     const paths = await makeCatalog(1_000)

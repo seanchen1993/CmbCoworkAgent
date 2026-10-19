@@ -1765,6 +1765,7 @@ interface CustomAPI {
     supportedExtensions: () => Promise<string[]>
   }
   skills: {
+    protectMarketInstalls: (names: string[]) => Promise<{ success: boolean; error?: string }>
     catalog: {
       read: (
         input: SkillPluginCatalogPageInput,
@@ -1822,7 +1823,7 @@ interface CustomAPI {
     upload: (
       buffer: ArrayBuffer,
       fileName: string,
-      options?: { allowNestedNameDuplicates?: boolean }
+      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local" }
     ) => Promise<{
       success: boolean
       skillName?: string

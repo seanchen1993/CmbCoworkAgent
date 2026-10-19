@@ -1,3 +1,4 @@
+import { findProtectedMarketRoot } from "../services/market-content"
 import { IpcMain, shell } from "electron"
 import {
   getHooks,
@@ -276,7 +277,7 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
   })
 
   ipcMain.handle("hooks:skills:list", async (): Promise<SkillHookMetadata[]> => {
-    return getEnabledSkillHookMetadata()
+    return getEnabledSkillHookMetadata().filter((hook) => !findProtectedMarketRoot(hook.skillRoot))
   })
 
   ipcMain.handle("hooks:create", async (_event, config: HookUpsert): Promise<{ id: string }> => {

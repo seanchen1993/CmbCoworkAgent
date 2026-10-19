@@ -1695,21 +1695,9 @@ export function SkillsPanel(): React.JSX.Element {
     return files
   }, [])
 
-  const shouldHideMarketInstalledFeaturedFiles = useCallback(
-    (skill: SkillMetadata): boolean => {
-      if (skill.source !== "user") return false
-      if (!marketSkillCatalogReady || !currentUserIdCandidatesReady) return false
-      const marketInfo = marketSkillMap[normalizeSkillName(skill.name)]
-      if (!marketInfo) return false
-      if (doesSkillMarketInfoBelongToCurrentUser(marketInfo, currentUserIdCandidates)) return false
-      return isFeaturedSkill(marketInfo)
-    },
-    [
-      currentUserIdCandidates,
-      currentUserIdCandidatesReady,
-      marketSkillCatalogReady,
-      marketSkillMap
-    ]
+  const shouldHideSkillFiles = useCallback(
+    (skill: SkillMetadata): boolean => skill.contentOrigin !== "local",
+    []
   )
 
   const onToggleSkill = useCallback(
@@ -1721,7 +1709,7 @@ export function SkillsPanel(): React.JSX.Element {
       setExpandedSkills(next)
 
       if (!wasExpanded) {
-        if (shouldHideMarketInstalledFeaturedFiles(skill)) {
+        if (shouldHideSkillFiles(skill)) {
           setSelectedSkill(skill)
           setSelectedFilePath(null)
           setSelectedFileContent(null)
@@ -1740,12 +1728,12 @@ export function SkillsPanel(): React.JSX.Element {
         }
       }
     },
-    [ensureSkillFiles, loadFileContent, shouldHideMarketInstalledFeaturedFiles]
+    [ensureSkillFiles, loadFileContent, shouldHideSkillFiles]
   )
 
   const onSelectFile = useCallback(
     async (skill: SkillMetadata, filePath: string) => {
-      if (shouldHideMarketInstalledFeaturedFiles(skill)) {
+      if (shouldHideSkillFiles(skill)) {
         setSelectedSkill(skill)
         setSelectedFilePath(null)
         setSelectedFileContent(null)
@@ -1755,7 +1743,7 @@ export function SkillsPanel(): React.JSX.Element {
       }
       await loadFileContent(skill, filePath)
     },
-    [loadFileContent, shouldHideMarketInstalledFeaturedFiles]
+    [loadFileContent, shouldHideSkillFiles]
   )
 
   const toggleDirNode = useCallback((nodeId: string) => {
@@ -1974,21 +1962,13 @@ export function SkillsPanel(): React.JSX.Element {
     () => !!selectedSkillMarketInfo || selectedSkillUploadedByMe,
     [selectedSkillMarketInfo, selectedSkillUploadedByMe]
   )
-  const isMarketInstalledFeaturedSkill = useCallback(
-    (skill: SkillMetadata | null | undefined): boolean => {
-      if (!skill || skill.source !== "user") return false
-      if (isSkillUploadedInPanel(skill)) return false
-      return isFeaturedSkill(resolveMarketInfo(skill))
-    },
-    [isSkillUploadedInPanel, resolveMarketInfo]
-  )
   const selectedSkillHideContent = useMemo(
-    () => isMarketInstalledFeaturedSkill(selectedSkill),
-    [isMarketInstalledFeaturedSkill, selectedSkill]
+    () => !!selectedSkill && selectedSkill.contentOrigin !== "local",
+    [selectedSkill]
   )
   const selectedSkillCanEdit = useMemo(
-    () => !!selectedSkill && selectedSkillUploadedInPanel,
-    [selectedSkill, selectedSkillUploadedInPanel]
+    () => selectedSkill?.contentOrigin === "local",
+    [selectedSkill]
   )
   const selectedSkillShowPublishButton = useMemo(
     () => !!selectedSkill && selectedSkill.source !== "project" && selectedSkillUploadedInPanel,
@@ -2006,8 +1986,8 @@ export function SkillsPanel(): React.JSX.Element {
     if (orgInstalledSkillNames.has(normalizeSkillName(skill.name))) return false
     return true
   }, [isSkillUploadedInPanel, orgInstalledSkillNames, selectedSkill])
-  const selectedSkillDeleteDisabledReason = selectedSkillHideContent
-    ? "精品技能是内置技能，不允许删除。你可以点击按钮不启动这个技能。"
+  const selectedSkillDeleteDisabledReason = selectedSkill?.source === "project"
+    ? "内置技能不允许删除，可以停用。"
     : undefined
 
   const saveSkillFileContent = useCallback(
@@ -2446,7 +2426,7 @@ export function SkillsPanel(): React.JSX.Element {
         }
         deleteDisabledReason={selectedSkillDeleteDisabledReason}
         onPublish={
-          selectedSkill && selectedSkillShowPublishButton
+          selectedSkill?.contentOrigin === "local" && selectedSkillShowPublishButton
             ? () => openPublishDialog(selectedSkill)
             : undefined
         }
@@ -3066,7 +3046,7 @@ function SkillItem(props: {
         >
           {hideFileTree ? (
             <div className="pl-7 pr-2 py-2 text-xs text-muted-foreground">
-              精品技能不支持查看，可以直接使用。
+              内容受保护，可直接使用。仅自己上传的原始技能支持查看和在线编辑。
             </div>
           ) : treeNodes.length > 0 ? (
             <SkillFileTree
@@ -3537,7 +3517,7 @@ export function SkillDetail(props: {
       {hideContentPreview ? (
         <div className="flex-1 min-h-0 p-4">
           <div className="rounded-lg border border-status-warning/25 bg-status-warning/10 px-4 py-3 text-sm text-status-warning">
-            精品技能不支持查看，可以直接使用。
+            内容受保护，可直接使用。仅自己上传的原始技能支持查看和在线编辑。
           </div>
         </div>
       ) : isEditing && canEditCurrentFile ? (

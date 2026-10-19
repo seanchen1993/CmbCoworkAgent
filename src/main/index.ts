@@ -1,3 +1,4 @@
+import { cleanupMarketRuntimeContent } from "./services/market-content"
 import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
 import { initializeNotificationRuntime } from "./notification-runtime"
 import { notificationService } from "./services/notification-service"
@@ -1685,6 +1686,7 @@ if (browserNativeMessagingHostLaunch) {
       pet: getPetWindowDebugInfo()
     })
     if (quitCleanupDone) {
+      cleanupMarketRuntimeContent()
       // Cleanup already finished during a previous will-quit cycle.
       // Let Electron quit naturally — this gives Chromium time to properly
       // release the CDP debug socket, preventing zombie sockets on Windows.

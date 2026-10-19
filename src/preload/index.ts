@@ -2306,6 +2306,8 @@ const api = {
     }
   },
   skills: {
+    protectMarketInstalls: (names: string[]): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke("skills:protectMarketInstalls", names),
     catalog: {
       read: (
         input: SkillPluginCatalogPageInput,
@@ -2406,7 +2408,7 @@ const api = {
     upload: (
       buffer: ArrayBuffer,
       fileName: string,
-      options?: { allowNestedNameDuplicates?: boolean }
+      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local" }
     ): Promise<{
       success: boolean
       skillName?: string

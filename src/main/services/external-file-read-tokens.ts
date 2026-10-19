@@ -1,3 +1,4 @@
+import { findProtectedMarketRoot, MARKET_CONTENT_DENIED } from "./market-content"
 import { randomUUID } from "node:crypto"
 import { realpath } from "node:fs/promises"
 import path from "node:path"
@@ -80,7 +81,12 @@ function buildAllowedRelativePaths(
   for (const rawPath of trustedRelativePaths) {
     if (typeof rawPath !== "string" || !rawPath || rawPath.length > 32_768) return null
     const candidate = path.resolve(rootPath, rawPath.replace(/^[/\\]+/, ""))
-    if (!isPathInside(rootPath, candidate) || isProtectedPath(candidate)) return null
+    if (
+      !isPathInside(rootPath, candidate) ||
+      isProtectedPath(candidate) ||
+      findProtectedMarketRoot(candidate)
+    )
+      return null
     allowed.add(normalizeRelativePathKey(path.relative(rootPath, candidate)))
   }
   return allowed.size > 0 ? allowed : null
@@ -106,6 +112,7 @@ export function issueExternalFileReadGrant(
     return { error: "Invalid external preview root" }
   }
 
+  if (findProtectedMarketRoot(trustedRootPath)) return { error: MARKET_CONTENT_DENIED }
   const rootPath = path.resolve(trustedRootPath)
   if (!path.isAbsolute(rootPath) || isProtectedPath(rootPath)) {
     return { error: "Access denied: path is protected" }
@@ -171,7 +178,11 @@ export async function resolveExternalFileReadGrant(
   const candidate = path.isAbsolute(requestedPath)
     ? path.resolve(requestedPath)
     : path.resolve(entry.rootPath, requestedPath)
-  if (!isPathInside(entry.rootPath, candidate) || isProtectedPath(candidate)) {
+  if (
+    !isPathInside(entry.rootPath, candidate) ||
+    isProtectedPath(candidate) ||
+    findProtectedMarketRoot(candidate)
+  ) {
     return { error: "Access denied: path outside trusted preview root" }
   }
   const relativePathKey = normalizeRelativePathKey(path.relative(entry.rootPath, candidate))
@@ -184,7 +195,11 @@ export async function resolveExternalFileReadGrant(
       realpath(entry.rootPath),
       realpath(candidate)
     ])
-    if (!isPathInside(realRoot, realCandidate) || isProtectedPath(realCandidate)) {
+    if (
+      !isPathInside(realRoot, realCandidate) ||
+      isProtectedPath(realCandidate) ||
+      findProtectedMarketRoot(realCandidate)
+    ) {
       return { error: "Access denied: symlink target outside trusted preview root" }
     }
     return { filePath: realCandidate, rootPath: realRoot }
