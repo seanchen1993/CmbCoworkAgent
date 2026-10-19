@@ -26,6 +26,8 @@ import { InfoHint } from "./dashboard-shared"
 import { KnowledgeActiveDetailsDialog } from "../KnowledgeActiveDetailsDialog"
 
 const COLORS = ["#3b82f6", "#14b8a6", "#8b5cf6", "#f59e0b", "#f97316", "#94a3b8"]
+const distributionColor = (index: number): string =>
+  COLORS[index] ?? `hsl(${(index * 137.508) % 360} 65% 50%)`
 const SCOPE_NOTES: Record<DashboardKnowledgeCommitRateUnavailableReason, string> = {
   multipleRooms: "多选室时不展示",
   unclassified: "未归属没有室编号",
@@ -118,33 +120,26 @@ function Distribution({
 }): React.JSX.Element {
   const rows = items ?? []
   const total = rows.reduce((sum, row) => sum + row.value, 0)
-  const chart =
-    rows.length > 6
-      ? [
-          ...rows.slice(0, 5),
-          { name: "其他", value: rows.slice(5).reduce((sum, row) => sum + row.value, 0) }
-        ]
-      : rows
   return (
     <div className="flex h-[clamp(240px,38vh,320px)] min-w-0 flex-col rounded-xl border border-border bg-card p-4">
       <div className="text-xs font-medium">{title}</div>
       {loading || error || total === 0 ? (
         <Status loading={loading} error={error} empty={total === 0} />
       ) : (
-        <div className="mt-3 flex min-h-0 flex-1 items-center gap-3 overflow-y-auto">
+        <div className="mt-3 flex min-h-0 flex-1 items-center gap-3">
           <div className="relative h-44 w-40 shrink-0">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
-                  data={chart}
+                  data={rows}
                   dataKey="value"
                   nameKey="name"
                   innerRadius={49}
                   outerRadius={70}
                   stroke="none"
                 >
-                  {chart.map((row, index) => (
-                    <Cell key={`${row.name}-${index}`} fill={COLORS[index % COLORS.length]} />
+                  {rows.map((row, index) => (
+                    <Cell key={`${row.name}-${index}`} fill={distributionColor(index)} />
                   ))}
                 </Pie>
                 <ChartTooltip
@@ -161,18 +156,25 @@ function Distribution({
               <span className="text-[10px] text-muted-foreground">总数</span>
             </div>
           </div>
-          <div className="min-w-0 flex-1 space-y-2.5">
-            {chart.map((row, index) => (
+          <div
+            className="max-h-full min-h-0 min-w-0 flex-1 space-y-2.5 overflow-y-auto overscroll-contain py-1 pr-2"
+            tabIndex={0}
+            role="region"
+            aria-label={`${title}图例，共 ${rows.length} 类`}
+          >
+            {rows.map((row, index) => (
               <div key={`${row.name}-${index}`} className="flex items-center gap-1.5 text-[10px]">
                 <span
                   className="size-2 shrink-0 rounded-sm"
-                  style={{ backgroundColor: COLORS[index % COLORS.length] }}
+                  style={{ backgroundColor: distributionColor(index) }}
                 />
                 <span className="min-w-0 flex-1 truncate" title={row.name}>
                   {row.name}
                 </span>
-                <span className="font-medium tabular-nums">{number(row.value)}</span>
-                <span className="w-10 text-right text-muted-foreground">
+                <span className="shrink-0 whitespace-nowrap font-medium tabular-nums">
+                  {number(row.value)}
+                </span>
+                <span className="w-10 shrink-0 text-right text-muted-foreground">
                   {percent(row.value / total)}
                 </span>
               </div>
