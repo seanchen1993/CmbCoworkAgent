@@ -30,6 +30,7 @@ const fixture = vi.hoisted(() => ({
   cancelCommands: vi.fn(),
   commandLifecycle: vi.fn(() => ({ accepted: vi.fn(), settled: vi.fn() })),
   profileContinuation: vi.fn<() => string | null>(() => null),
+  workTools: vi.fn<(...args: unknown[]) => string[]>(() => ["works"]),
   profileTools: vi.fn<(...args: unknown[]) => string[]>(() => ["own-profile"]),
   cancelWorkers: vi.fn(),
   waitWorkers: vi.fn(),
@@ -52,6 +53,7 @@ const fixture = vi.hoisted(() => ({
   verifyFiles: vi.fn(),
   publishFiles: vi.fn()
 }))
+vi.mock("./work-tools", () => ({ createBotWorkTools: fixture.workTools }))
 vi.mock("../db", () => ({
   getThreadCore: fixture.thread,
   updateThread: fixture.update,
@@ -721,9 +723,10 @@ describe("Bot Runtime integration", () => {
       allowTrustedTransportSkillMarker: true,
       capabilityService: fixture.scope,
       toolConcurrencyQueueId: "a",
-      userInputWithoutToolLock: false,
-      botBrowserToolsOwnFileLock: false,
+      userInputWithoutToolLock: true,
+      botBrowserToolsOwnFileLock: true,
       additionalTools: [
+        "works",
         "delivery",
         "own-profile",
         "private-memory",

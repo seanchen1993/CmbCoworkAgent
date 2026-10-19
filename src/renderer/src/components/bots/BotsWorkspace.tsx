@@ -98,6 +98,10 @@ import { BotMessageFilePreview } from "./BotMessageFilePreview"
 import { useBots } from "./use-bots"
 import { useBotReadState } from "./use-bot-read-state"
 import { localBotClient } from "./client"
+import { botWorkClient } from "@/lib/bot-work-client"
+import { useBotWorks } from "./use-bot-works"
+import { BotWorkPanel } from "./BotWorkPanel"
+import type { BotWorkItem } from "../../../../shared/bots/work"
 import { botChatAccent } from "@/lib/bot-chat-accent"
 import { BotWorkspaceMenu } from "./BotWorkspaceMenu"
 import { BotPanelDivider } from "./BotPanelDivider"
@@ -309,21 +313,26 @@ function BotEditor({
 
 function BotConversation({
   bot,
+  work,
   bots,
   schedules,
   tasks,
   backgroundBusy,
   client,
-  onConfigureModel
+  onConfigureModel,
+  onOpenWork
 }: {
   bot: BotDefinition
+  work?: BotWorkItem | null
   bots: BotDefinition[]
   schedules: BotSchedule[]
   tasks: BotTask[]
   backgroundBusy: boolean
   client: BotClient
   onConfigureModel(): void
+  onOpenWork(workId: string): void
 }) {
+  const threadId = work?.threadId ?? bot.threadId
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [draftStorageError, setDraftStorageError] = useState<string | null>(null)
@@ -331,14 +340,10 @@ function BotConversation({
   const [sendingRevision, setSendingRevision] = useState(0)
   const sender = useMemo(
     () =>
-      new BotDraftSender(
-        client,
-        bot.id,
-        threadContext.getThreadActions(bot.threadId),
-        setError,
-        () => setSendingRevision((revision) => revision + 1)
+      new BotDraftSender(client, bot.id, threadContext.getThreadActions(threadId), setError, () =>
+        setSendingRevision((revision) => revision + 1)
       ),
-    [client, bot.id, bot.threadId, threadContext]
+    [client, bot.id, threadId, threadContext]
   )
   const submitDraft = useCallback<NonNullable<ManagedChatTurn["submitDraft"]>>(
     (draft) => sender.send(draft),
@@ -361,10 +366,11 @@ function BotConversation({
             threadContext,
             client.hostId,
             bot.id,
-            bot.threadId,
+            threadId,
             (message) => {
               if (!disposed) setDraftStorageError(message)
-            }
+            },
+            work?.id
           )
           setReady(true)
         }
@@ -376,7 +382,7 @@ function BotConversation({
       disposed = true
       unbindDraft?.()
     }
-  }, [bot.id, bot.threadId, bot.modelRef, client, threadContext])
+  }, [bot.id, threadId, bot.modelRef, client, threadContext])
   const running = tasks.find(active)
   const queued = tasks.filter((task) => task.state === "queued")
   const submit = useCallback<ManagedChatTurn["submit"]>(
@@ -397,7 +403,7 @@ function BotConversation({
         throw cause
       }
     },
-    [bot.id, bot.threadId, client, threadContext]
+    [bot.id, threadId, client, threadContext]
   )
   const cancel = useCallback(async () => {
     sender.stopPreparing()
@@ -476,23 +482,26 @@ function BotConversation({
       <BotConversationTools
         client={client}
         botId={bot.id}
+        conversationThreadId={threadId}
+        onOpenWork={onOpenWork}
         tasks={tasks}
         bots={bots}
         schedules={schedules}
       >
         <ChatContainer
-          threadId={bot.threadId}
+          threadId={threadId}
           surface="bot"
           managedTurn={managedTurn}
-          readOnlyReason={bot.archived ? "Bot 已归档，恢复后可以继续对话。" : null}
+          readOnlyReason={
+            bot.archived
+              ? "Bot 已归档，恢复后可以继续对话。"
+              : work?.state === "completed"
+                ? "工作已完成，点击右侧「继续处理」可在原会话继续。"
+                : null
+          }
         />
       </BotConversationTools>
-      <BotMessageFilePreview
-        botId={bot.id}
-        threadId={bot.threadId}
-        name={bot.name}
-        client={client}
-      />
+      <BotMessageFilePreview botId={bot.id} threadId={threadId} name={bot.name} client={client} />
     </>
   )
 }
@@ -683,24 +692,26 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     : selectedId
       ? (snapshot?.bots.find((bot) => bot.id === selectedId) ?? null)
       : (visible[0] ?? null)
-  const activityByConversation = useMemo(
+  const mainActivityByConversation = useMemo(
     () => new Map((snapshot?.activities ?? []).map((item) => [`${item.kind}:${item.id}`, item])),
     [snapshot?.activities]
   )
-  const selectedConversationKey = selectedGroup
-    ? `group:${selectedGroup.id}`
-    : `bot:${selected?.id}`
-  useEffect(() => {
-    setSuppressedRead(null)
-  }, [selectedConversationKey, newChat])
-  useBotReadState(
-    client,
-    newChat || suppressedRead === selectedConversationKey
-      ? undefined
-      : activityByConversation.get(
-          selectedGroup ? `group:${selectedGroup.id}` : `bot:${selected?.id}`
-        )
-  )
+  const activityByConversation = useMemo(() => {
+    const result = new Map(mainActivityByConversation)
+    for (const work of snapshot?.workActivity ?? []) {
+      const key = `bot:${work.botId}`,
+        main = result.get(key)
+      result.set(key, {
+        kind: "bot",
+        id: work.botId,
+        version: main?.version ?? 0,
+        updatedAt: Math.max(main?.updatedAt ?? 0, work.updatedAt),
+        preview: work.updatedAt > (main?.updatedAt ?? 0) ? work.preview : (main?.preview ?? ""),
+        unread: Boolean(main?.unread || work.unread)
+      })
+    }
+    return result
+  }, [mainActivityByConversation, snapshot?.workActivity])
   const tasksByBot = useMemo(
     () => privateBotTasksByBot(snapshot?.bots ?? [], snapshot?.tasks ?? []),
     [snapshot?.bots, snapshot?.tasks]
@@ -715,11 +726,40 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     }
     return result
   }, [snapshot?.tasks])
-  const tasks = selected ? (tasksByBot.get(selected.id) ?? []) : []
+  const activeWorkId = selected ? (view.activeWorkIdByBot?.[selected.id] ?? null) : null
+  const works = useBotWorks(client, selected?.id, activeWorkId, snapshot?.revision ?? 0)
+  const selectedWork = activeWorkId && works.selected?.id === activeWorkId ? works.selected : null
+  const selectedThreadId = selectedWork?.threadId ?? selected?.threadId ?? ""
+  const conversationClient = useMemo(
+    () => (selectedWork ? botWorkClient(client, selectedWork) : client),
+    [client, selectedWork?.id, selectedWork?.threadId]
+  )
+  const selectWork = (id: string | null) => {
+    if (!selected) return
+    const prefs = useBotViewStore.getState().hosts[client.hostId]
+    updateView({ activeWorkIdByBot: { ...prefs?.activeWorkIdByBot, [selected.id]: id } })
+  }
+  const tasks = selected ? (tasksByThread.get(selectedThreadId) ?? []) : []
   const selectedState = botConversationState(
     tasks,
-    selected ? threadSummaries[selected.threadId] : undefined,
-    Boolean(selected && snapshot?.backgroundThreads?.includes(selected.threadId))
+    selected ? threadSummaries[selectedThreadId] : undefined,
+    Boolean(selected && snapshot?.backgroundThreads?.includes(selectedThreadId))
+  )
+  const selectedConversationKey = selectedGroup
+    ? `group:${selectedGroup.id}`
+    : activeWorkId
+      ? `work:${activeWorkId}`
+      : `bot:${selected?.id}`
+  useEffect(() => {
+    setSuppressedRead(null)
+  }, [selectedConversationKey, newChat])
+  useBotReadState(
+    client,
+    newChat || suppressedRead === selectedConversationKey
+      ? undefined
+      : activeWorkId
+        ? selectedWork?.activity
+        : mainActivityByConversation.get(selectedConversationKey)
   )
   const carryGroupDraft = async (group: BotGroup, isCurrent: () => boolean) => {
     const text = newChatDraftRef.current
@@ -833,6 +873,12 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
         setSelectedId(bot.id)
         setGroupId(null)
         updateView({
+          activeWorkIdByBot: {
+            ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
+            [bot.id]: null
+          }
+        })
+        updateView({
           hiddenBotIds: (
             useBotViewStore.getState().hosts[client.hostId]?.hiddenBotIds ?? []
           ).filter((id) => id !== bot.id)
@@ -865,7 +911,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   }
   const copyConversationId = async (bot: BotDefinition) => {
     try {
-      await navigator.clipboard.writeText(bot.threadId)
+      await navigator.clipboard.writeText(bot.id === selected?.id ? selectedThreadId : bot.threadId)
       toast.success("已复制对话 ID")
     } catch (cause) {
       toast.error(botErrorMessage(cause))
@@ -906,7 +952,13 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     if (!activity?.unread) setSuppressedRead(key)
     try {
       if (activity?.unread) {
-        await client.markRead(kind, id, activity.version)
+        const main = mainActivityByConversation.get(key)
+        const work =
+          kind === "bot" ? snapshot?.workActivity?.find((item) => item.botId === id) : undefined
+        await Promise.all([
+          ...(main?.version ? [client.markRead(kind, id, main.version)] : []),
+          ...(work?.version && client.works ? [client.works.markAllRead(id, work.version)] : [])
+        ])
         setSuppressedRead((previous) => (previous === key ? null : previous))
       } else await client.markUnread(kind, id)
     } catch (cause) {
@@ -1664,7 +1716,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   onClick={() => setDetailOpen(!detailOpen)}
                 >
                   <BotRuntimeAvatar
-                    threadId={selected.threadId}
+                    threadId={selectedThreadId}
                     settlement={tasksByBot.get(selected.id)?.at(-1)}
                     color={selected.color}
                     shape={selected.shape}
@@ -1672,7 +1724,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                     busy={selectedState === "running"}
                     waiting={selectedState === "waiting_user"}
                   />
-                  <span>{selected.name}</span>
+                  <span>{selectedWork?.title ?? selected.name}</span>
                   <ChevronDown size={13} />
                 </button>
                 <button
@@ -1684,20 +1736,35 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   <PanelRight size={19} />
                 </button>
               </header>
-              <BotConversation
-                key={`${selected.hostId}:${selected.id}`}
-                bot={selected}
-                onConfigureModel={() => openBotEditor(selected)}
-                bots={snapshot?.bots ?? []}
-                schedules={snapshot?.schedules ?? []}
-                tasks={tasks}
-                backgroundBusy={Boolean(
-                  snapshot?.backgroundThreads?.includes(selected.threadId) ||
-                  threadSummaries[selected.threadId]?.workflowRunning ||
-                  threadSummaries[selected.threadId]?.hasRunningCoordinatorWorker
-                )}
-                client={client}
-              />
+              {activeWorkId && (
+                <div className="bot-work-breadcrumb">
+                  <button onClick={() => selectWork(null)}>← {selected.name} 主对话</button>
+                  <span>{selectedWork?.state === "completed" ? "已完成" : "独立工作"}</span>
+                </div>
+              )}
+              {activeWorkId && !selectedWork ? (
+                <div className="bot-empty" role="status">
+                  {works.error ?? "正在读取工作会话…"}
+                  <button onClick={() => void works.refresh()}>重试</button>
+                </div>
+              ) : (
+                <BotConversation
+                  key={`${selected.hostId}:${selected.id}:${selectedThreadId}`}
+                  bot={selected}
+                  work={selectedWork}
+                  onConfigureModel={() => openBotEditor(selected)}
+                  onOpenWork={(id) => selectWork(id)}
+                  bots={snapshot?.bots ?? []}
+                  schedules={snapshot?.schedules ?? []}
+                  tasks={tasks}
+                  backgroundBusy={Boolean(
+                    snapshot?.backgroundThreads?.includes(selectedThreadId) ||
+                    threadSummaries[selectedThreadId]?.workflowRunning ||
+                    threadSummaries[selectedThreadId]?.hasRunningCoordinatorWorker
+                  )}
+                  client={conversationClient}
+                />
+              )}
             </>
           ) : (
             <div className="bot-empty">
@@ -1983,14 +2050,19 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                 >
                   {detailTab === "files" ? (
                     <BotFilesPanel
-                      key={selected.id}
+                      key={selectedThreadId}
                       bot={selected}
                       peers={snapshot?.bots ?? []}
-                      client={client}
+                      client={conversationClient}
+                      conversationThreadId={selectedThreadId}
                       refreshKey={botFileRefreshKey(tasks)}
                     />
                   ) : detailTab === "computer" ? (
-                    <BotBrowserPanel key={selected.id} botId={selected.id} client={client} />
+                    <BotBrowserPanel
+                      key={selectedThreadId}
+                      botId={selected.id}
+                      client={conversationClient}
+                    />
                   ) : detailTab === "memory" ? (
                     <BotMemoryPanel
                       key={`${client.hostId}:${selected.id}`}
@@ -2021,22 +2093,27 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                           (item) => item.botId === selected.id
                         )}
                       />
+                      <BotWorkPanel
+                        key={`${client.hostId}:${selected.id}`}
+                        client={client}
+                        botId={selected.id}
+                        controller={works}
+                        selected={selectedWork}
+                        onSelect={selectWork}
+                        disabled={Boolean(selected.archived || selected.deleting)}
+                      />
                       <section className="bot-detail-section">
-                        <h3>最近工作</h3>
-                        {tasks.length ? (
-                          tasks
-                            .slice(-6)
-                            .reverse()
-                            .map((task) => (
-                              <div className="bot-task-item" key={task.id}>
-                                <span>{STATE_LABELS[task.state]}</span>
-                                <p>{botTaskPreview(task)}</p>
-                                {task.error && <small>{task.error}</small>}
-                              </div>
-                            ))
-                        ) : (
-                          <p>交办工作后，进展会显示在这里。</p>
-                        )}
+                        <h3>当前会话执行</h3>
+                        {tasks
+                          .slice(-6)
+                          .reverse()
+                          .map((task) => (
+                            <div className="bot-task-item" key={task.id}>
+                              <span>{STATE_LABELS[task.state]}</span>
+                              <p>{botTaskPreview(task)}</p>
+                              {task.error && <small>{task.error}</small>}
+                            </div>
+                          ))}
                       </section>
                     </>
                   )}

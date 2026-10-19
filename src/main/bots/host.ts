@@ -1,8 +1,14 @@
 import {
+  botWorkBrowserScope,
+  type BotWorkItem,
+  type CreateBotWorkInput
+} from "../../shared/bots/work"
+import {
   BOT_PROTOCOL_VERSION,
   LOCAL_BOT_HOST_ID,
   BotError,
   botTaskGroupId,
+  botTaskWorkFamily,
   type BotChangeEvent,
   type BotDefinition,
   type BotSnapshot,
@@ -45,7 +51,7 @@ export interface BotRunPort {
   cancelBackground?(threadId: string): void | Promise<void>
   recover?(threadIds: string[], signal: AbortSignal): Promise<void>
   /** Claim the existing runtime's thread lease before changing durable task state. */
-  acquire(bot: BotDefinition, task: BotTask): BotRunLease | null
+  acquire(bot: BotDefinition, task: BotTask, work?: BotWorkItem): BotRunLease | null
   onAvailable(listener: () => void): () => void
   onSettled?(task: BotTask, state: BotTaskState, result?: string): void
 }
@@ -110,7 +116,11 @@ export class LocalBotHost {
   /** Browser scopes are existing private Bots or existing groups, never arbitrary directories. */
   browserScope(id: string): string {
     this.requireRunning()
-    if (id.startsWith("group-")) {
+    if (id.startsWith("work-")) {
+      const [workId, botId, extra] = id.slice(5).split("--")
+      if (!workId || !botId || extra) throw new BotError("INVALID_INPUT", "工作浏览器目标无效")
+      this.getWork(botId, workId)
+    } else if (id.startsWith("group-")) {
       const [groupId, memberId, extra] = id.slice(6).split("--")
       if (!memberId || extra) throw new BotError("INVALID_INPUT", "请选择要查看的群成员浏览器")
       this.getGroupMember(groupId, memberId)
@@ -148,6 +158,7 @@ export class LocalBotHost {
       schedules: this.store.schedules(),
       groups: this.store.groups(),
       activities: this.store.activities(),
+      workActivity: this.store.workActivities(),
       backgroundThreads: this.store.activeCommandThreads()
     }
   }
@@ -185,28 +196,119 @@ export class LocalBotHost {
     return bot
   }
 
+  /** Tool authority is the still-live host lease, never a model-supplied task or request key. */
+  workToolSource(taskId: string): BotTask {
+    this.requireRunning()
+    const run = this.active.get(taskId)
+    if (!run || run.controller.signal.aborted) throw new BotError("CONFLICT", "当前执行已停止")
+    const task = this.store.getTask(taskId)
+    if (botTaskGroupId(task)) throw new BotError("CONFLICT", "请在私聊主会话中管理独立工作")
+    return task
+  }
+  changeWorkFromTool(
+    source: { taskId: string; callId: string; key: string },
+    workId: string,
+    version: number,
+    action: "complete" | "continue"
+  ) {
+    const task = this.workToolSource(source.taskId)
+    if (!this.store.hasDirectUserRequest(task.id))
+      throw new BotError("CONFLICT", "只有当前用户明确指令可以完成或继续工作")
+    const result = this.store.changeWork(task.botId, workId, version, source.callId, action, source)
+    this.changed()
+    this.wake()
+    return result
+  }
+  sendWork(
+    source: { taskId: string; callId: string; key: string },
+    workId: string,
+    message: string
+  ) {
+    this.workToolSource(source.taskId)
+    const result = this.store.sendWork(source, workId, message)
+    this.changed()
+    this.wake()
+    return result
+  }
+  getWork(botId: string, workId: string) {
+    this.getBot(botId)
+    return this.store.getWork(botId, workId)
+  }
+  markWorksRead(botId: string, throughVersion: number) {
+    this.requireRunning()
+    this.store.markWorksRead(botId, throughVersion)
+    this.changed()
+  }
+  workSummaries(botId: string, workIds: string[]) {
+    this.getBot(botId)
+    return this.store.workSummaries(botId, workIds)
+  }
+  listWorks(botId: string, cursor?: string, query?: string) {
+    this.getBot(botId)
+    return this.store.listWorks(botId, cursor, query)
+  }
+  createWork(input: CreateBotWorkInput, source?: { taskId: string; callId: string; key: string }) {
+    this.requireRunning()
+    if (source) this.workToolSource(source.taskId)
+    const receipt = this.store.createWork(input, source)
+    this.changed()
+    this.wake()
+    return receipt
+  }
+  changeWork(
+    botId: string,
+    workId: string,
+    version: number,
+    operationId: string,
+    action: "complete" | "continue"
+  ) {
+    this.requireRunning()
+    const result = this.store.changeWork(botId, workId, version, operationId, action)
+    this.changed()
+    this.wake()
+    return result
+  }
+  initializeWorkThread(botId: string, workId: string) {
+    this.store.initializeWorkThread(botId, workId)
+  }
+  conversation(botId: string, workId?: string) {
+    const bot = this.getBot(botId),
+      work = workId ? this.getWork(botId, workId) : undefined
+    return {
+      bot,
+      work,
+      threadId: work?.threadId ?? bot.threadId,
+      browserScope: work ? botWorkBrowserScope(work.id, bot.id) : bot.id
+    }
+  }
   markUnread(kind: "bot" | "group", id: string): void {
     this.requireRunning()
     this.store.markUnread(kind, id)
     this.changed()
   }
-  exchange(botId: string, taskId: string, groupId?: string) {
+  exchange(botId: string, taskId: string, groupId?: string, workId?: string) {
     this.requireRunning()
-    return this.store.exchange(botId, taskId, groupId)
+    return this.store.exchange(botId, taskId, groupId, workId)
   }
-  exchangeHistory(botId: string, taskId: string, groupId?: string, before?: string) {
+  exchangeHistory(
+    botId: string,
+    taskId: string,
+    groupId?: string,
+    before?: string,
+    workId?: string
+  ) {
     this.requireRunning()
-    return this.store.exchangeHistory(botId, taskId, groupId, before)
+    return this.store.exchangeHistory(botId, taskId, groupId, before, workId)
   }
-  messageOrigins(botId: string, messageIds: string[], groupId?: string) {
+  messageOrigins(botId: string, messageIds: string[], groupId?: string, workId?: string) {
     this.requireRunning()
-    return this.store.messageOrigins(botId, messageIds, groupId)
+    return this.store.messageOrigins(botId, messageIds, groupId, workId)
   }
-  requestReceipts(botId: string, checks: BotRequestCheck[]) {
+  requestReceipts(botId: string, checks: BotRequestCheck[], workId?: string) {
     this.requireRunning()
-    return this.store.requestReceipts(botId, checks)
+    return this.store.requestReceipts(botId, checks, workId)
   }
-  markRead(kind: "bot" | "group", id: string, throughVersion: number): void {
+  markRead(kind: "bot" | "group" | "work", id: string, throughVersion: number): void {
     this.requireRunning()
     this.store.markRead(kind, id, throughVersion)
     this.changed()
@@ -432,14 +534,20 @@ export class LocalBotHost {
     this.requireRunning()
     const bot = this.store.getBot(botId)
     if (bot.archived || bot.deleting) return
-    const expectedThread = groupId ? `group-${groupId}-${botId}` : bot.threadId
+    const work = this.store.workForThread(botId, threadId)
+    const expectedThread = work?.threadId ?? (groupId ? `group-${groupId}-${botId}` : bot.threadId)
     if (threadId !== expectedThread) throw new BotError("CONFLICT", "后台通知不属于此 Bot 会话")
     if (groupId) {
       const group = this.store.getGroup(groupId)
       if (group.deleting || !group.memberIds.includes(botId)) return
     }
     this.store.enqueue(
-      { botId, requestId: `notification:${threadId}:${kind}:${key}`, message },
+      {
+        botId,
+        ...(work ? { workId: work.id } : {}),
+        requestId: `notification:${threadId}:${kind}:${key}`,
+        message
+      },
       { kind: "notification", notificationKind: kind, key, ...(groupId ? { groupId } : {}) }
     )
     this.changed()
@@ -466,9 +574,9 @@ export class LocalBotHost {
     }
   }
 
-  messageReply(botId: string, messageId: string) {
+  messageReply(botId: string, messageId: string, workId?: string) {
     this.requireRunning()
-    return this.store.messageReply(botId, messageId)
+    return this.store.messageReply(botId, messageId, workId)
   }
 
   send(input: SendBotMessageInput): BotTask {
@@ -527,7 +635,12 @@ export class LocalBotHost {
     )
       return
     run.steeringReady = true
-    for (const task of this.store.pendingConversationTasks(run.botId)) this.steerDirectMessage(task)
+    for (const task of this.store.pendingConversationTasks(
+      run.botId,
+      botTaskGroupId(run.task),
+      run.task.workId
+    ))
+      this.steerDirectMessage(task)
   }
 
   updateOwnProfile(
@@ -579,14 +692,29 @@ export class LocalBotHost {
     }
   }
 
-  stopConversation(botId: string, groupId?: string): void {
+  stopConversation(botId: string, groupId?: string, workId?: string): void {
     const bot = groupId ? this.getGroupMember(groupId, botId) : this.getBot(botId)
-    const threadId = groupId ? `group-${groupId}-${botId}` : bot.threadId
+    if (groupId && workId) throw new BotError("INVALID_INPUT", "群与工作目标不能混用")
+    const threadId = workId
+      ? this.getWork(botId, workId).threadId
+      : groupId
+        ? `group-${groupId}-${botId}`
+        : bot.threadId
     // Read the inbox now, rather than a possibly stale renderer snapshot.
     // cancel() retains runtime cleanup and leaves group work untouched.
-    for (const task of this.store.pendingConversationTasks(botId, groupId)) this.cancel(task.id)
-    this.store.suppressCommands(threadId)
-    void Promise.resolve(this.runtime.cancelBackground?.(threadId)).catch(this.reportError)
+    const pending = workId
+      ? this.store.pendingWorkFamily(botId, workId)
+      : this.store.pendingConversationTasks(botId, groupId)
+    const threads = new Set([
+      threadId,
+      ...pending.map((task) => task.threadId),
+      ...(workId ? this.store.workCommandThreads(botId, workId) : [])
+    ])
+    for (const task of pending) this.cancel(task.id)
+    for (const current of threads) {
+      this.store.suppressCommands(current)
+      void Promise.resolve(this.runtime.cancelBackground?.(current)).catch(this.reportError)
+    }
   }
 
   hasActiveRuns(): boolean {
@@ -619,12 +747,19 @@ export class LocalBotHost {
       }
     }
     this.store.flushReplies()
-    const excluded = new Set([...this.active.values()].map((run) => run.botId))
+    const excluded = new Set([...this.active.values()].map((run) => run.task.threadId))
     while (!this.stopping && this.active.size < this.concurrency) {
-      const task = this.store.nextQueued([...excluded])
+      const task = this.store.nextQueued(
+        [...excluded],
+        ![...this.active.values()].some((run) => !!botTaskWorkFamily(run.task))
+      )
       if (!task) return
-      excluded.add(task.botId)
-      const lease = this.runtime.acquire(this.store.getBot(task.botId), task)
+      excluded.add(task.threadId)
+      const lease = this.runtime.acquire(
+        this.store.getBot(task.botId),
+        task,
+        task.workId ? this.store.getWork(task.botId, task.workId) : undefined
+      )
       if (!lease) continue
       try {
         this.store.transition(task.id, "running")

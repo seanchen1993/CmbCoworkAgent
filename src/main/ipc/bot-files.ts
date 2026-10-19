@@ -86,11 +86,17 @@ export function registerBotFileHandlers(
   ipcMain: IpcMain,
   hostFor: (id: unknown) => LocalBotHost
 ): void {
-  const context = (hostId: unknown, botId: unknown, groupId: unknown) => {
+  const context = (hostId: unknown, botId: unknown, groupId: unknown, workId?: unknown) => {
     const host = hostFor(hostId),
       id = botIdentifier(botId)
     const group = groupId === undefined ? undefined : botIdentifier(groupId)
-    const validate = () => (group ? host.getGroupMember(group, id) : host.getBot(id))
+    const workKey = workId === undefined ? undefined : botIdentifier(workId)
+    if (group && workKey) throw new BotError("INVALID_INPUT", "工作与群会话不能混用")
+    const work = workKey ? host.getWork(id, workKey) : undefined
+    const validate = () => {
+      if (workKey) host.getWork(id, workKey)
+      return group ? host.getGroupMember(group, id) : host.getBot(id)
+    }
     const bot = validate()
     const workspace = prepareBotThread(
       bot,
@@ -99,8 +105,12 @@ export function registerBotFileHandlers(
             threadId: `group-${group}-${bot.id}`,
             origin: { kind: "group", groupId: group, messageId: "files" }
           }
-        : undefined
+        : work
+          ? { threadId: work.threadId, origin: { kind: "user" } }
+          : undefined,
+      work
     )
+    if (work) host.initializeWorkThread(id, work.id)
     return { host, bot, workspace, group, validate }
   }
   const cleanupOwners = new Set<number>()
@@ -116,8 +126,15 @@ export function registerBotFileHandlers(
   }
   ipcMain.handle(
     "bots:files:list",
-    async (event, hostId: unknown, botId: unknown, next: unknown, groupId: unknown) => {
-      const { workspace } = context(hostId, botId, groupId)
+    async (
+      event,
+      hostId: unknown,
+      botId: unknown,
+      next: unknown,
+      groupId: unknown,
+      workId: unknown
+    ) => {
+      const { workspace } = context(hostId, botId, groupId, workId)
       const owner = event.sender.id
       attachCleanup(event)
       const scan = next == null ? await openWorkspaceFileScan(owner, workspace) : cursor(next)
@@ -151,7 +168,8 @@ export function registerBotFileHandlers(
     groupId: unknown,
     maxFiles: unknown,
     asAttachments: boolean,
-    maxChars: unknown = 24_000
+    maxChars: unknown = 24_000,
+    workId?: unknown
   ): Promise<string[] | FileAttachment[]> => {
     const limit = maxFiles === undefined ? 20 : maxFiles
     if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 20)
@@ -163,7 +181,7 @@ export function registerBotFileHandlers(
       maxChars > 24_000
     )
       throw new BotError("INVALID_INPUT", "附件字符预算无效")
-    const { bot, workspace, validate } = context(hostId, botId, groupId)
+    const { bot, workspace, validate } = context(hostId, botId, groupId, workId)
     if (bot.archived) throw new BotError("CONFLICT", "请先恢复 Bot")
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!window) throw new Error("操作窗口已关闭")
@@ -209,11 +227,11 @@ export function registerBotFileHandlers(
     }
     return asAttachments ? attachments : imported
   }
-  ipcMain.handle("bots:files:import", (event, hostId, botId, groupId, maxFiles) =>
-    importFiles(event, hostId, botId, groupId, maxFiles, false)
+  ipcMain.handle("bots:files:import", (event, hostId, botId, groupId, maxFiles, workId) =>
+    importFiles(event, hostId, botId, groupId, maxFiles, false, 24_000, workId)
   )
-  ipcMain.handle("bots:files:attach", (event, hostId, botId, maxFiles, maxChars, groupId) =>
-    importFiles(event, hostId, botId, groupId, maxFiles, true, maxChars)
+  ipcMain.handle("bots:files:attach", (event, hostId, botId, maxFiles, maxChars, groupId, workId) =>
+    importFiles(event, hostId, botId, groupId, maxFiles, true, maxChars, workId)
   )
   ipcMain.handle(
     "bots:files:attach-bytes",
@@ -223,7 +241,8 @@ export function registerBotFileHandlers(
       botId: unknown,
       values: unknown,
       maxChars: unknown,
-      groupId: unknown
+      groupId: unknown,
+      workId: unknown
     ) => {
       if (
         !Array.isArray(values) ||
@@ -252,7 +271,7 @@ export function registerBotFileHandlers(
           throw new BotError("INVALID_INPUT", "拖入文件无效或超过 5 MiB")
         return { fileName, bytes }
       })
-      const { bot, workspace, validate } = context(hostId, botId, groupId)
+      const { bot, workspace, validate } = context(hostId, botId, groupId, workId)
       if (bot.archived) throw new BotError("CONFLICT", "请先恢复 Bot")
       attachCleanup(event)
       const attachments: FileAttachment[] = []
@@ -279,8 +298,15 @@ export function registerBotFileHandlers(
   )
   ipcMain.handle(
     "bots:files:export",
-    async (event, hostId: unknown, botId: unknown, id: unknown, groupId: unknown) => {
-      const { workspace, validate } = context(hostId, botId, groupId)
+    async (
+      event,
+      hostId: unknown,
+      botId: unknown,
+      id: unknown,
+      groupId: unknown,
+      workId: unknown
+    ) => {
+      const { workspace, validate } = context(hostId, botId, groupId, workId)
       // Transcript previews carry absolute Runtime paths; the same workspace and
       // realpath checks still apply before showing a native destination dialog.
       const source = await resolveBotWorkspaceFile(workspace, fileId(id), { allowAbsolute: true })
@@ -304,9 +330,16 @@ export function registerBotFileHandlers(
       botId: unknown,
       id: unknown,
       targetId: unknown,
-      groupId: unknown
+      groupId: unknown,
+      workId: unknown
     ) => {
-      const { host, bot: sourceBot, workspace, group, validate } = context(hostId, botId, groupId)
+      const {
+        host,
+        bot: sourceBot,
+        workspace,
+        group,
+        validate
+      } = context(hostId, botId, groupId, workId)
       const targetBot = host.getBot(botIdentifier(targetId))
       if (targetBot.archived || (!group && sourceBot.id === targetBot.id))
         throw new BotError("CONFLICT", "请选择另一个未归档的 Bot")

@@ -61,7 +61,21 @@ export function pruneBotDraftRecords(prefix: string, hostId: string, ids: readon
   const removed: string[] = []
   for (let index = 0; index < storage.length; index++) {
     const key = storage.key(index)
-    if (key?.startsWith(hostPrefix) && !keep.has(key)) removed.push(key)
+    if (key?.startsWith(hostPrefix) && !keep.has(key)) {
+      let ownsWork = false
+      try {
+        const identity = JSON.parse(key.slice(prefix.length))
+        ownsWork =
+          Array.isArray(identity) &&
+          identity.length === 3 &&
+          identity[0] === hostId &&
+          ids.includes(identity[1]) &&
+          typeof identity[2] === "string"
+      } catch {
+        /* Malformed records remain eligible for cleanup. */
+      }
+      if (!ownsWork) removed.push(key)
+    }
   }
   for (const key of removed) storage.removeItem(key)
 }

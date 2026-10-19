@@ -1,6 +1,27 @@
 # M05 — beta 本地统一实施检查点
 
-状态：M05-01 只读调查及接口待审。gpt-6.1-sol / xhigh，唯一实施者；尚未修改 M05 产品、运行新测试/构建或启动 App/Java/数据库。root 反馈接口后再实施。
+状态：M05-02/03 实施中，尚未冻结或验收。gpt-6.1-sol / xhigh，唯一实施者。已正常合入 root 接口提交9675f8b4（merge c05f5bfb）；以下 M05-01 内容保留为历史调查，原“尚未改产品”只描述该检查点。
+
+## M05-02/03 当前实现检查点
+
+- 已写（未提交、尚未场景验证）：shared Work DTO/validation、control.sqlite 增量目录/命令/执行关联、Host 真实目标与 thread 调度、原 Runtime 线程确保/Work 工具扩展、work IPC/preload、文件目标贯通、原 BotsWorkspace/ChatContainer 实际 thread 绑定、右侧 Work 列表及完成/继续、独立草稿键。没有另建文本引擎或 JSON final 协议。
+- 工作与协作 lineage 使用 rootWorkId，单跳回传使用 returnWorkId；同一工作族最多一个驻留执行，主对话优先，原普通 Bot/群全局并发机制保留。完成门禁已加入 peer/outbox/background，晚到失效目标回执保留并跳过；摘要使用元数据聚合，不读工作正文。
+- 原 Bot thread/职责/模型/文件/记忆/群/例行未迁移重建；新 Work 固定 thread 与 initialized 证明。真实消息库确保尚待相关回归。旧 Service 入口/worker 尚未去除，不计本次完成；mock 尚未实施。
+- 首轮 Node 类型 `/tmp/m05-node-initial.log` exit2，仅新未用类型 import；已移除。第二轮 `/tmp/m05-node-core.log` exit0。Web 初轮 `/tmp/m05-web-initial.log` 已无诊断，待确认进程退出码。尚未运行新 SQLite/Host/UI 场景、完整构建或真实模型。
+- 下一检查点：新 Store/Host 故障与并发场景、受影响 beta/IPC/Runtime 回归、统一真实 ChatContainer 隔离 App 截图。当前不能称完整可验收切片。没有 App/Java/数据库/用户 profile 操作；唯一测试进程为自有 tsc，无后台产品资源。
+
+
+
+## M05-02/03 WIP 本地检查点（不是候选冻结）
+
+- `work.ts`、`work-tools.ts` / `.test.ts`、`work.test.ts`、`bot-work-client.ts`、`bot-work-receipt.ts`、`BotWorkPanel.tsx`、`use-bot-works.ts` 是新增文件；其余实际接点为 Store/Host/local-service/runtime-adapter/prompt、bots/bot-files IPC/preload、shared contracts/validation、原 BotsWorkspace/BotConversationTools/BotFilesPanel/view-store、原草稿存储和 bots.css。全部在本人实施树。
+- 原本机链已写：manual / Runtime tool 创建 → 同事务固定 work/thread/首 BotTask → 原 Runtime 运行/原 ChatContainer 选择 → 同 work 修改 → 显式完成/继续。右侧工作目录与 actual thread、原文件/浏览器/引用/回执/草稿/通知/协作返还已接线；真实 App 场景仍待验证，不能以代码接线宣称端到端通过。
+- 目录：普通稳定 ordinal 分页40（41探测），另优先活动/未读入口≤6。展开项按ID摘要≤40一批刷新，不载入正文；有历史主/工作各自已读，snapshot 仅每Bot工作未读汇总，显式批量已读使用捕获的每Bot工作活动游标，不清后续新回复。
+- 自测：Node22 下 `node node_modules/vitest/vitest.mjs run src/main/bots src/main/ipc/bots.test.ts src/main/ipc/bot-files.test.ts src/renderer/src/lib/bot-conversation-draft.test.ts` → 25文件346/346，`/tmp/m05-work-read-tests.log` exit0。覆盖原 beta Runtime/调度/浏览器/记忆/例行/文件/群/协作/后台/retention、IPC，加新工作幂等/CAS/完成门禁/peer配额/45项分页/旧工作等待优先/已读边界/草稿分离。没有真实模型调用。
+- 类型：`node node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false` `/tmp/m05-node-read-scope.log` exit0；web同命令换web项目 `/tmp/m05-web-read-scope.log` exit0。此前 `/tmp/m05-web-initial.log`、`node-core`、`node-work-ui`、`web-work-ui`也已确认exit0。
+- 首轮失败保留：112中8失败（内部新requestId字符与原receipt校验不兼容、测试对工作/peer先后期待过强、IPC多一个可选参数）；改为合法持久requestId，并保留校验、修正精确预期。第二轮165中3失败为旧IPC尾可选参数和Runtime新增tools/人工等待锁选项的预期，调整相应断言后165/165。后续完整上述346/346通过，不将首轮写作全绿。
+- 资源：只运行本树tsc/Vitest，均退出；无 App、UI fixture、Java builder、DB、容器或用户profile操作。未改Java/deploy/LF39。
+- **未完成**：真实 ChatContainer 隔离 App/文件生成及预览闭环、UI迟到切换/分页与回执入口测试、少数归档/删除/协作收尾核查、更多持久重开故障；M05-04 mock尚未开始；M05-05旧Service入口/worker和CustomizeView归档出口尚未实施。因此这里只保存WIP供root早审，不请求标记完成或集成。
 
 ## 保全与基线
 

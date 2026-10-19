@@ -29,6 +29,7 @@ import {
   ChatMessagePresentationContext,
   ChatToolPresentationContext
 } from "../chat/chat-presentation-context"
+import { botWorkReceipt } from "@/lib/bot-work-receipt"
 import { delegatedTaskReceipt } from "@/lib/bot-exchange-view"
 import { BotExchangePanel } from "./BotExchangePanel"
 import { quietBotTurnMessageIds } from "@/lib/bot-routine-visibility"
@@ -55,6 +56,8 @@ export function BotConversationTools({
   client,
   botId,
   groupId,
+  conversationThreadId,
+  onOpenWork,
   tasks,
   bots,
   schedules,
@@ -64,6 +67,8 @@ export function BotConversationTools({
   client: BotClient
   botId: string
   groupId?: string
+  conversationThreadId?: string
+  onOpenWork?(workId: string): void
   tasks: BotTask[]
   bots: BotDefinition[]
   schedules?: readonly BotSchedule[]
@@ -73,7 +78,8 @@ export function BotConversationTools({
   const [exchangeId, setExchangeId] = useState<string | null>(null)
   const bot = bots.find((item) => item.id === botId)
   const exchangeTrigger = useRef<HTMLButtonElement | null>(null)
-  const threadId = groupId ? `group-${groupId}-${botId}` : (bot?.threadId ?? null)
+  const threadId =
+    conversationThreadId ?? (groupId ? `group-${groupId}-${botId}` : (bot?.threadId ?? null))
   const context = useThreadContext()
   const savedExecutionDetails = useBotViewStore((state) =>
     Boolean(state.hosts[client.hostId]?.showExecutionDetails)
@@ -207,6 +213,20 @@ export function BotConversationTools({
             {profileEvent}
           </div>
         )
+      const workReceipt = botWorkReceipt(tool, result, botId)
+      if (workReceipt && onOpenWork)
+        return (
+          <button
+            type="button"
+            className="bot-exchange-link"
+            onClick={() => onOpenWork(workReceipt.id)}
+          >
+            <span>
+              {workReceipt.label} · {workReceipt.title}
+            </span>
+            <ChevronRight size={14} />
+          </button>
+        )
       const scheduleReceipt = !showExecutionDetails ? botScheduleReceipt(tool, result) : null
       if (scheduleReceipt && scheduleReceipt.action !== "list") {
         if (scheduleReceipt.action === "remove")
@@ -288,6 +308,7 @@ export function BotConversationTools({
     },
     [
       bots,
+      onOpenWork,
       schedules,
       tasks,
       client,

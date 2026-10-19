@@ -77,7 +77,7 @@ describe("Bot IPC boundaries", () => {
     expect(() => call("bots:message-reply", "local", "bot", "other/thread")).toThrow()
     expect(fixture.messageReply).not.toHaveBeenCalled()
     call("bots:message-reply", "local", "bot", "message")
-    expect(fixture.messageReply).toHaveBeenCalledWith("bot", "message")
+    expect(fixture.messageReply).toHaveBeenCalledWith("bot", "message", undefined)
   })
 
   it("validates exact same-group history targets and retains numeric backward cursors", () => {
@@ -125,15 +125,15 @@ describe("Bot IPC boundaries", () => {
     expect(() => call("bots:stop-conversation", "local", "a", "../g")).toThrow()
     expect(fixture.stopConversation).not.toHaveBeenCalled()
     call("bots:stop-conversation", "local", "a")
-    expect(fixture.stopConversation).toHaveBeenCalledExactlyOnceWith("a", undefined)
+    expect(fixture.stopConversation).toHaveBeenCalledExactlyOnceWith("a", undefined, undefined)
     call("bots:stop-conversation", "local", "a", "g")
-    expect(fixture.stopConversation).toHaveBeenLastCalledWith("a", "g")
+    expect(fixture.stopConversation).toHaveBeenLastCalledWith("a", "g", undefined)
   })
   it("validates bounded private receipt queries before accessing the Host", () => {
     const call = register()
     const valid = [{ requestId: "request-1", messageHash: "a".repeat(64) }]
     call("bots:request-receipts", "local", "bot-1", valid)
-    expect(fixture.requestReceipts).toHaveBeenCalledWith("bot-1", valid)
+    expect(fixture.requestReceipts).toHaveBeenCalledWith("bot-1", valid, undefined)
     fixture.requestReceipts.mockClear()
     for (const checks of [
       null,
@@ -171,11 +171,12 @@ describe("Bot IPC boundaries", () => {
       expect(() => call("bots:message-origins", ...args)).toThrow()
     expect(fixture.messageOrigins).not.toHaveBeenCalled()
     call("bots:message-origins", "local", "a", ["m"], "g")
-    expect(fixture.messageOrigins).toHaveBeenCalledWith("a", ["m"], "g")
+    expect(fixture.messageOrigins).toHaveBeenCalledWith("a", ["m"], "g", undefined)
     call("bots:message-origins", "local", "a", ["notification:t:command:c"])
     expect(fixture.messageOrigins).toHaveBeenLastCalledWith(
       "a",
       ["notification:t:command:c"],
+      undefined,
       undefined
     )
   })
@@ -190,7 +191,7 @@ describe("Bot IPC boundaries", () => {
       expect(() => call("bots:exchange", ...args)).toThrow()
     expect(fixture.exchange).not.toHaveBeenCalled()
     call("bots:exchange", "local", "a", "task", "group")
-    expect(fixture.exchange).toHaveBeenCalledWith("a", "task", "group")
+    expect(fixture.exchange).toHaveBeenCalledWith("a", "task", "group", undefined)
     for (const args of [
       ["remote", "a", "task"],
       ["local", "../a", "task"],
@@ -201,7 +202,7 @@ describe("Bot IPC boundaries", () => {
       expect(() => call("bots:exchange-history", ...args)).toThrow()
     expect(fixture.exchangeHistory).not.toHaveBeenCalled()
     call("bots:exchange-history", "local", "a", "task", "group", "cursor")
-    expect(fixture.exchangeHistory).toHaveBeenCalledWith("a", "task", "group", "cursor")
+    expect(fixture.exchangeHistory).toHaveBeenCalledWith("a", "task", "group", "cursor", undefined)
   })
 
   it("validates manual unread requests before mutating a host", () => {

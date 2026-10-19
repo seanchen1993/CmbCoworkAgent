@@ -10,6 +10,7 @@ export interface BotSidebarSection {
 }
 
 export interface BotViewState {
+  activeWorkIdByBot: Record<string, string | null>
   selectedId: string | null
   groupId: string | null
   detailOpen: boolean
@@ -27,6 +28,7 @@ export interface BotViewState {
   sections: BotSidebarSection[]
 }
 export const DEFAULT_BOT_VIEW: BotViewState = {
+  activeWorkIdByBot: {},
   selectedId: null,
   groupId: null,
   detailOpen: true,

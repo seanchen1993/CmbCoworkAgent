@@ -89,6 +89,28 @@ describe("private Bot drafts in the original ThreadContext", () => {
     })
     unbind()
   })
+  it("keeps main and work drafts, references and retained attachments separate across pruning and remount", () => {
+    const main = fixture(),
+      work = fixture()
+    main.actions.setDraftInput("Main draft")
+    work.actions.setDraftInput("Work draft")
+    work.actions.setDraftAttachments([file])
+    saveBotConversationDraft(main.context, "local", "a", "main")
+    saveBotConversationDraft(work.context, "local", "a", "work-thread", "work-id")
+    pruneBotConversationDrafts("local", ["a"])
+    const restoredMain = fixture(),
+      restoredWork = fixture()
+    restoreBotConversationDraft(restoredMain.context, "local", "a", "main")
+    restoreBotConversationDraft(restoredWork.context, "local", "a", "work-thread", "work-id")
+    expect(restoredMain.state()).toMatchObject({ draftInput: "Main draft", draftAttachments: [] })
+    expect(restoredWork.state()).toMatchObject({
+      draftInput: "Work draft",
+      draftAttachments: [file]
+    })
+    const another = fixture()
+    restoreBotConversationDraft(another.context, "local", "a", "other-thread", "other-id")
+    expect(another.state().draftInput).toBe("")
+  })
   it("initializes the original queue and history before any restored composer action", () => {
     const f = fixture()
     f.actions.setDraftInput("Saved")

@@ -1,3 +1,4 @@
+import { botWorkBrowserScope, type BotWorkItem } from "../../shared/bots/work"
 import { notifyIfBackground } from "../services/notify"
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
 import { join } from "node:path"
@@ -43,6 +44,7 @@ import { workflowRunManager } from "../agent/workflow/run-manager"
 import { LocalSandbox } from "../agent/local-sandbox"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import { getGlobalMcpCapabilityService } from "../mcp/capability-service"
+import { createBotWorkTools } from "./work-tools"
 import { buildBotPrompt } from "./prompt"
 import { hasBotWorkflowCapability } from "../agent/workflow/bot-capability"
 import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry"
@@ -75,7 +77,8 @@ function botModelId(bot: BotDefinition): string | undefined {
 
 export function prepareBotThread(
   bot: BotDefinition,
-  task?: Pick<BotTask, "threadId" | "origin">
+  task?: Pick<BotTask, "threadId" | "origin">,
+  work?: BotWorkItem
 ): string {
   const groupId = task ? (botTaskGroupId(task) ?? null) : null
   const threadId = task?.threadId ?? bot.threadId
@@ -93,20 +96,28 @@ export function prepareBotThread(
     if (
       metadata.botId !== bot.id ||
       metadata.botHostId !== "local" ||
-      (metadata.botGroupId ?? null) !== groupId
+      (metadata.botGroupId ?? null) !== groupId ||
+      (metadata.botWorkId ?? null) !== (work?.id ?? null) ||
+      (work &&
+        (work.threadId !== threadId ||
+          work.botId !== bot.id ||
+          metadata.botAudienceKey !== work.audienceKey ||
+          metadata.workspacePath !== workspacePath))
     )
       throw new Error("Bot 会话身份不一致，已停止执行")
     updateThread(threadId, {
       metadata: JSON.stringify({
         ...metadata,
-        title: bot.name,
+        title: work?.title ?? bot.name,
         memoryEnabled: false,
         model
       })
     })
   } else {
+    if (work?.threadInitialized) throw new Error("工作会话记录缺失，已停止以避免丢失历史")
     createThread(threadId, {
-      title: bot.name,
+      title: work?.title ?? bot.name,
+      ...(work ? { botWorkId: work.id, botAudienceKey: work.audienceKey } : {}),
       botId: bot.id,
       botHostId: "local",
       botGroupId: groupId,
@@ -186,7 +197,7 @@ export function createLocalBotRunPort(
     onAvailable(listener) {
       return onLocalThreadRunLeaseReleased(listener)
     },
-    acquire(bot, task) {
+    acquire(bot, task, work) {
       const claim = claimLocalThreadRunLease({
         threadId: task.threadId,
         owner: "bot",
@@ -242,7 +253,8 @@ export function createLocalBotRunPort(
             onWaiting(active)
           }
           signal.throwIfAborted()
-          const workspacePath = prepareBotThread(bot, task)
+          const workspacePath = prepareBotThread(bot, task, work)
+          if (work) getHost().initializeWorkThread(bot.id, work.id)
           const peerReplyFiles =
             task.origin.kind === "bot" && !task.origin.expectsReply && !botTaskGroupId(task)
               ? parseBotFileDelivery(
@@ -409,6 +421,7 @@ export function createLocalBotRunPort(
                       ...createBotCollaborationTools(task.id, getHost, signal)
                     ]
                   : [
+                      ...createBotWorkTools(task.id, getHost, signal),
                       ...createBotDeliveryTools(
                         workspacePath,
                         signal,
@@ -426,19 +439,31 @@ export function createLocalBotRunPort(
                           )
                         : []),
                       ...createBotMemoryTools(bot, memory, signal, task.origin.kind === "user"),
-                      ...createBotBrowserTools(bot, browser, signal, waiting),
+                      ...createBotBrowserTools(
+                        bot,
+                        browser,
+                        signal,
+                        waiting,
+                        work ? botWorkBrowserScope(work.id, bot.id) : bot.id,
+                        async (upload) => {
+                          const { withToolFileWriteLock } = await import("../agent/runtime")
+                          return withToolFileWriteLock(toolConcurrencyQueueId, upload)
+                        }
+                      ),
                       ...createBotCollaborationTools(task.id, getHost, signal),
                       ...createBotScheduleTools(bot, task, getHost, signal)
                     ],
                 toolConcurrencyQueueId,
                 // Waiting for a human does not touch shared files; peers must keep working.
-                userInputWithoutToolLock: Boolean(botTaskGroupId(task)),
-                botBrowserToolsOwnFileLock: Boolean(groupId),
+                userInputWithoutToolLock: true,
+                botBrowserToolsOwnFileLock: true,
                 remotePolicy: { disableScheduler: true },
                 verifyResolvedThread: (resolved) =>
                   resolved.metadata.botId === bot.id &&
                   resolved.metadata.botHostId === "local" &&
                   (resolved.metadata.botGroupId ?? null) === (botTaskGroupId(task) ?? null) &&
+                  (resolved.metadata.botWorkId ?? null) === (work?.id ?? null) &&
+                  (!work || resolved.metadata.botAudienceKey === work.audienceKey) &&
                   resolved.workspacePath === workspacePath
                     ? null
                     : "Bot 工作目录或会话已改变，请重新打开后重试。",

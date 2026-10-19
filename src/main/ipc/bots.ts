@@ -12,7 +12,9 @@ import {
   parseGroup,
   parseGroupMessage,
   parseGroupHistoryCursor,
-  parseBotRequestChecks
+  parseBotRequestChecks,
+  parseCreateBotWork,
+  parseBotWorkLifecycle
 } from "../../shared/bots/validation"
 import { prepareBotThread } from "../bots/runtime-adapter"
 import {
@@ -121,36 +123,89 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
     hostFor(hostId).sendGroup(parseGroupMessage(input))
   )
   powerMonitor.on("resume", () => subscribedHost?.resume())
-  ipcMain.handle("bots:open", (_event, hostId: unknown, id: unknown) => {
-    const host = hostFor(hostId)
-    const bot = host.getBot(botIdentifier(id))
-    prepareBotThread(bot)
-    host.introduce(bot.id)
-    return { threadId: bot.threadId }
+  ipcMain.handle(
+    "bots:work:list",
+    (_event, hostId: unknown, botId: unknown, cursor: unknown, query: unknown) => {
+      if (cursor !== undefined && (typeof cursor !== "string" || cursor.length > 1024))
+        throw new BotError("INVALID_INPUT", "工作游标无效")
+      if (query !== undefined && typeof query !== "string")
+        throw new BotError("INVALID_INPUT", "工作搜索无效")
+      return hostFor(hostId).listWorks(
+        botIdentifier(botId),
+        cursor as string | undefined,
+        query as string | undefined
+      )
+    }
+  )
+  ipcMain.handle("bots:work:summaries", (_event, hostId: unknown, botId: unknown, ids: unknown) => {
+    if (!Array.isArray(ids) || ids.length > 40 || new Set(ids).size !== ids.length)
+      throw new BotError("INVALID_INPUT", "工作摘要批次无效")
+    return hostFor(hostId).workSummaries(botIdentifier(botId), ids.map(botIdentifier))
+  })
+  ipcMain.handle(
+    "bots:work:mark-all-read",
+    (_event, hostId: unknown, botId: unknown, version: unknown) => {
+      if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1)
+        throw new BotError("INVALID_INPUT", "工作已读位置无效")
+      return hostFor(hostId).markWorksRead(botIdentifier(botId), version)
+    }
+  )
+  ipcMain.handle("bots:work:get", (_event, hostId: unknown, botId: unknown, workId: unknown) =>
+    hostFor(hostId).getWork(botIdentifier(botId), botIdentifier(workId))
+  )
+  ipcMain.handle("bots:work:create", (_event, hostId: unknown, input: unknown) =>
+    hostFor(hostId).createWork(parseCreateBotWork(input))
+  )
+  ipcMain.handle("bots:work:lifecycle", (_event, hostId: unknown, input: unknown) => {
+    const v = parseBotWorkLifecycle(input)
+    return hostFor(hostId).changeWork(v.botId, v.workId, v.expectedVersion, v.operationId, v.action)
+  })
+  ipcMain.handle("bots:open", (_event, hostId: unknown, id: unknown, workId: unknown) => {
+    const host = hostFor(hostId),
+      bot = host.getBot(botIdentifier(id)),
+      work = workId == null ? undefined : host.getWork(bot.id, botIdentifier(workId))
+    prepareBotThread(
+      bot,
+      work ? { threadId: work.threadId, origin: { kind: "user" } } : undefined,
+      work
+    )
+    if (work) host.initializeWorkThread(bot.id, work.id)
+    else host.introduce(bot.id)
+    return { threadId: work?.threadId ?? bot.threadId }
   })
   ipcMain.handle("bots:snapshot", (_event, hostId: unknown) => hostFor(hostId).snapshot())
   ipcMain.handle(
     "bots:exchange",
-    (_event, hostId: unknown, botId: unknown, taskId: unknown, groupId: unknown) =>
+    (_event, hostId: unknown, botId: unknown, taskId: unknown, groupId: unknown, workId: unknown) =>
       hostFor(hostId).exchange(
         botIdentifier(botId),
         botIdentifier(taskId),
-        groupId == null ? undefined : botIdentifier(groupId)
+        groupId == null ? undefined : botIdentifier(groupId),
+        workId == null ? undefined : botIdentifier(workId)
       )
   )
   ipcMain.handle(
     "bots:exchange-history",
-    (_event, hostId: unknown, botId: unknown, taskId: unknown, groupId: unknown, before: unknown) =>
+    (
+      _event,
+      hostId: unknown,
+      botId: unknown,
+      taskId: unknown,
+      groupId: unknown,
+      before: unknown,
+      workId: unknown
+    ) =>
       hostFor(hostId).exchangeHistory(
         botIdentifier(botId),
         botIdentifier(taskId),
         groupId == null ? undefined : botIdentifier(groupId),
-        before == null ? undefined : botIdentifier(before)
+        before == null ? undefined : botIdentifier(before),
+        workId == null ? undefined : botIdentifier(workId)
       )
   )
   ipcMain.handle(
     "bots:message-origins",
-    (_event, hostId: unknown, botId: unknown, ids: unknown, groupId: unknown) => {
+    (_event, hostId: unknown, botId: unknown, ids: unknown, groupId: unknown, workId: unknown) => {
       if (!Array.isArray(ids) || ids.length > 100)
         throw new BotError("INVALID_INPUT", "消息来源查询无效")
       return hostFor(hostId).messageOrigins(
@@ -162,7 +217,8 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
             throw new BotError("INVALID_INPUT", "消息标识格式无效")
           return id
         }),
-        groupId == null ? undefined : botIdentifier(groupId)
+        groupId == null ? undefined : botIdentifier(groupId),
+        workId == null ? undefined : botIdentifier(workId)
       )
     }
   )
@@ -172,22 +228,27 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
   })
   ipcMain.handle(
     "bots:request-receipts",
-    (_event, hostId: unknown, botId: unknown, checks: unknown) =>
-      hostFor(hostId).requestReceipts(botIdentifier(botId), parseBotRequestChecks(checks))
+    (_event, hostId: unknown, botId: unknown, checks: unknown, workId: unknown) =>
+      hostFor(hostId).requestReceipts(
+        botIdentifier(botId),
+        parseBotRequestChecks(checks),
+        workId == null ? undefined : botIdentifier(workId)
+      )
   )
   ipcMain.handle(
     "bots:stop-conversation",
-    (_event, hostId: unknown, botId: unknown, groupId: unknown) =>
+    (_event, hostId: unknown, botId: unknown, groupId: unknown, workId: unknown) =>
       hostFor(hostId).stopConversation(
         botIdentifier(botId),
-        groupId === undefined ? undefined : botIdentifier(groupId)
+        groupId === undefined ? undefined : botIdentifier(groupId),
+        workId == null ? undefined : botIdentifier(workId)
       )
   )
   ipcMain.handle(
     "bots:mark-read",
     (_event, hostId: unknown, kind: unknown, id: unknown, version: unknown) => {
       if (
-        (kind !== "bot" && kind !== "group") ||
+        (kind !== "bot" && kind !== "group" && kind !== "work") ||
         !Number.isSafeInteger(version) ||
         Number(version) < 1
       )
@@ -254,8 +315,12 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
   )
   ipcMain.handle(
     "bots:message-reply",
-    (_event, hostId: unknown, botId: unknown, messageId: unknown) =>
-      hostFor(hostId).messageReply(botIdentifier(botId), botIdentifier(messageId))
+    (_event, hostId: unknown, botId: unknown, messageId: unknown, workId: unknown) =>
+      hostFor(hostId).messageReply(
+        botIdentifier(botId),
+        botIdentifier(messageId),
+        workId == null ? undefined : botIdentifier(workId)
+      )
   )
   ipcMain.handle("bots:cancel", (_event, hostId: unknown, taskId: unknown) =>
     hostFor(hostId).cancel(botIdentifier(taskId))
