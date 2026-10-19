@@ -1,3 +1,13 @@
+# 2026-10-19 M04 已授权实施：主对话与独立任务会话，UI融入beta
+
+用户明确“可以，注意UI上的展示要合理，现在看起来与现有UI有割裂，你看下这点，开始实施”。root冻结设计，原`/root/service_conversation_sol`（gpt-6.1-sol/xhigh）唯一产品实施；任务`tasks/M04-task-conversations.md`。目标integration基线`247f1ec4`；实施树`/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6`已从此基线建`codex/bot-task-conversations-m04`，旧提交保留。root独占设计/state/HANDOFF/reviews，实施者仅产品/测试/attempt，不派生、不push/deploy。
+
+已批准：专家主对话真实问答与明确交办/转达，具体任务独立会话，主/任务列表和消息输入沿用beta样式；新流程不强制需求文档、成果版本或独立退回表单。任务结果普通消息，用户轻量完成，继续处理重开同Task。协调profile每次一个受限JSON意图，main核验scope/source/目标白名单并先持久命令，Java窄事务保存回执，unknown只恢复原命令不重推理。保留用户专家instructions和旧M03快照/数据；冻结包含assistant的有界上下文。不能只换皮或留假任务卡。
+
+已向实施者下发完整任务单和接口，允许产品与非DB检查；Java builder/DB harness先报告，由root协调独占。root随后独立review、关键测试、实际UI截图验收，再正常合入与受控更新预览。Mac当前锁屏，已异步请用户方便时解锁，代码与隔离测试继续；没有UI实测就不能声称原生验收。
+
+用户预览仍按下段记录保留：session50615/supervisor27333/App27558/Java27495:61613/Partner MySQL运行；实施者不得操作profile/凭据/真实模型或关闭用户App。root更新前须核对无在途工作，使用绝对Node22+绝对preview脚本守卫stop/start。原B00 MySQL停止、ES/S3保留，定时仍PAUSED。本片实施中未验收，旧M03完成状态不覆盖本任务。
+
 # 2026-10-19 真实模型闭环已验证，保持运行供用户测试
 
 用户明确“用现有模型配置接上真实模型，把专家配置好，完整测试交办、退回修改和确认”。仅将现有 `custom:cheap / deepseek-v4-flash` 及对应凭据复用至独立预览profile（文件0600），原 `~/.cmbcoworkagent` 配置不变，没有复制其他模型或私有历史。专家“需求交付专家”已创建；实际原生确认后本机启用24小时，仅处理交办文本，无源码/文件工具。
