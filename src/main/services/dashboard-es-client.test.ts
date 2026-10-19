@@ -24,6 +24,7 @@ import {
   DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
 } from "./dashboard-es-protocol"
 import { prepareDashboardFieldCapsRequest } from "./dashboard-es-field-caps-request"
+import { fetchCompleteProjectDevMetrics } from "../ipc/project-mode-dev-metrics"
 import {
   fetchRecentConstraintFiles,
   resolveRecentConstraintFields
@@ -77,6 +78,44 @@ beforeAll(async () => {
   server = createServer((request, response) => {
     const index = request.url?.split("/").filter(Boolean)[0]
     request.resume()
+    if (index === "project-dev-cursor") {
+      let text = ""
+      request.setEncoding("utf8")
+      request.on("data", (chunk) => {
+        text += chunk
+      })
+      request.on("end", () => {
+        const body = JSON.parse(text)
+        const after = body.aggs.dev_metrics.composite.after
+        if (after && Object.keys(after).length !== 3) {
+          response.writeHead(400, { "content-type": "application/json" })
+          response.end(
+            JSON.stringify({ error: { reason: "[after] has 2 value(s) but [sources] has 3" } })
+          )
+          return
+        }
+        response.writeHead(200, { "content-type": "application/json" })
+        response.end(
+          JSON.stringify({
+            aggregations: {
+              dev_metrics: after
+                ? {
+                    buckets: [
+                      { key: { project: "p", feature: "late", node: "Dev-实现" }, doc_count: 3 }
+                    ]
+                  }
+                : {
+                    buckets: [
+                      { key: { project: "p", feature: null, node: "Dev-实现" }, doc_count: 2 }
+                    ],
+                    after_key: { project: "p", node: "Dev-实现" }
+                  }
+            }
+          })
+        )
+      })
+      return
+    }
     if (index === "field-caps-native" || index === "field-caps-legacy") {
       const url = new URL(request.url!, serverUrl)
       if (url.pathname.endsWith("/_field_caps")) {
@@ -246,6 +285,29 @@ function query(client: DashboardEsWorkerClient, index: string, signal?: AbortSig
 }
 
 describe("Dashboard ES worker", () => {
+  it("repairs nullable composite cursor dimensions through the production worker HTTP path", async () => {
+    const client = createClient()
+    const execute = (body: Record<string, unknown>) =>
+      client.query({
+        nodes: [serverUrl],
+        method: "POST",
+        path: "/project-dev-cursor/_search",
+        headers: { "content-type": "application/json" },
+        bodyText: JSON.stringify(body),
+        timeoutMs: 5000
+      })
+    await expect(
+      execute({
+        aggs: { dev_metrics: { composite: { after: { project: "p", node: "Dev-实现" } } } }
+      })
+    ).rejects.toMatchObject({
+      cause: { message: expect.stringContaining("[after] has 2 value(s) but [sources] has 3") }
+    })
+    await expect(fetchCompleteProjectDevMetrics(["p"], [], execute)).resolves.toEqual(
+      new Map([["p", { conversations: 5, features: 1 }]])
+    )
+  })
+
   it.each(["native", "legacy"])(
     "runs field_caps and recent-file aggregation over HTTP with %s mappings",
     async (mapping) => {

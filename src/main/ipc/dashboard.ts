@@ -22,7 +22,7 @@ import {
 } from "./project-attention-ranking"
 import { isNestedMappingError } from "./dashboard-es-nested-mapping"
 import { queryWithToolUsageMappingFallback } from "./dashboard-tool-usage-query"
-import { buildUserProfileIdFilter } from "./dashboard-user-profile-query"
+import { fetchUserProfileDirectory } from "./dashboard-user-profile-query"
 import {
   projectModeMetricTimeFilters,
   assertProjectModeResultComplete
@@ -5916,53 +5916,15 @@ async function fetchSkillUserStats(
 
 async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
   requireDashboardAccess()
-  const sanitizedSapIds = Array.from(new Set(sapIds.map((id) => id.trim()).filter(Boolean))).slice(
-    0,
-    500
-  )
-
-  if (sanitizedSapIds.length === 0) {
-    return {
-      aggregations: {
-        by_sap: { buckets: [] }
-      }
-    }
-  }
+  const sanitizedSapIds = Array.from(new Set(sapIds.map((id) => id.trim()).filter(Boolean)))
 
   // 用户资料查询属于目录/统计数据，不做组织级数据权限过滤。
-  const body = {
-    size: 0,
-    query: {
-      bool: {
-        filter: [buildUserProfileIdFilter(sanitizedSapIds)]
-      }
-    },
-    aggs: {
-      by_sap: {
-        terms: {
-          field: "sapId",
-          size: Math.min(Math.max(sanitizedSapIds.length * 5, 100), 2000)
-        },
-        aggs: {
-          latest_user_info: {
-            top_hits: {
-              size: 1,
-              sort: [{ startedAt: { order: "desc" } }],
-              _source: {
-                includes: ["userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
-              }
-            }
-          },
-          user_name: { terms: { field: "userName", size: 1 } },
-          org_name: { terms: { field: "orgName", size: 1 } }
-        }
-      }
-    }
-  }
-  return esQuery(getEsIndex("trace"), body, {
-    projection: { kind: "user-directory" },
-    outputByteLimit: DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
-  })
+  return fetchUserProfileDirectory(sanitizedSapIds, (body) =>
+    esQuery(getEsIndex("trace"), body, {
+      projection: { kind: "user-directory" },
+      outputByteLimit: DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
+    })
+  )
 }
 
 function readUserDirectoryProjection(raw: unknown): {
@@ -13082,6 +13044,7 @@ async function fetchProjectModePageUsage(
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
   const body = {
     size: 0,
+    track_total_hits: false,
     query: {
       bool: {
         filter: [
@@ -16432,7 +16395,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
                 .map((id) => id.trim())
                 .filter(Boolean)
             )
-          ).slice(0, 500)
+          )
         : []
       if (import.meta.env.DEV) {
         const projected = projectDashboardEsResponse(
