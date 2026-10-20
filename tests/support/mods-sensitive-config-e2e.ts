@@ -1,3 +1,4 @@
+import { openModUserConfig, openModsSettings } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -110,10 +111,8 @@ export async function verifySensitiveConfiguration(
     )
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("敏感参数验证", { exact: true }).first().click()
-  await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-  await page.getByRole("button", { name: "Function Mods", exact: true }).click()
-  const form = page.locator(`[data-function-user-config="${mod.pluginId}"]`)
-  await form.locator("summary").click()
+  await openModsSettings(page)
+  const form = await openModUserConfig(page, mod.pluginId)
   const token = form.getByLabel("服务密钥 · 必填", { exact: true })
   await token.waitFor()
   assert.equal(await token.getAttribute("type"), "password")
@@ -300,9 +299,8 @@ export async function verifySensitiveConfiguration(
     "Actual control SQLite and WAL contain no test secret plaintext after protected saves and guest reloads"
   )
   await page.getByText("敏感参数验证", { exact: true }).first().click()
-  await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-  await page.getByRole("button", { name: "Function Mods", exact: true }).click()
-  await form.locator("summary").click()
+  await openModsSettings(page)
+  await openModUserConfig(page, mod.pluginId)
   await token.waitFor()
   assert.equal(await token.inputValue(), "")
   assert(await tokenRow.getByRole("button", { name: "保存", exact: true }).isDisabled())

@@ -1,3 +1,4 @@
+import { openModUserConfig, openModsSettings } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { join } from "node:path"
 import AdmZip from "adm-zip"
@@ -58,10 +59,8 @@ export async function verifyConfigurationReload(
   const commands = () => page.evaluate((id) => window.api.mods.commands(id), threadId)
   assert.equal((await commands()).find((row) => row.command === "reload-read")?.name, "warm")
   await page.getByText("插件参数安全应用", { exact: true }).first().click()
-  await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-  await page.getByRole("button", { name: "Function Mods", exact: true }).click()
-  const form = page.locator(`[data-function-user-config="${mod.pluginId}"]`)
-  await form.locator("summary").click()
+  await openModsSettings(page)
+  const form = await openModUserConfig(page, mod.pluginId)
   await form.getByLabel("重载风格").fill("formal")
   await form.getByRole("button", { name: "保存", exact: true }).click()
   await until(async () => {
@@ -75,7 +74,10 @@ export async function verifyConfigurationReload(
   pass("Real parameter save retains old effectsful startup until native explicit reload")
   const reload = form.getByRole("button", { name: "重新加载当前组合", exact: true })
   await reload.click()
-  await form.getByRole("status").filter({ hasText: "当前对话已应用" }).waitFor()
+  await until(async () => {
+    await openModUserConfig(page, mod.pluginId)
+    return form.getByRole("status").filter({ hasText: "当前对话已应用" }).isVisible()
+  }, "current settings form shows the explicitly reloaded configuration")
   assert.equal((await commands()).find((row) => row.command === "reload-read")?.name, "formal")
   await page.screenshot({ path: join(artifacts, "configuration-reloaded.png"), fullPage: true })
   pass(
@@ -91,7 +93,10 @@ export async function verifyConfigurationReload(
     return view.state === "failed" && view.savedRevision === 2
   }, "second saved version awaits an explicit restart")
   await reload.click()
-  await form.getByRole("status").filter({ hasText: "当前组合已停用" }).waitFor()
+  await until(async () => {
+    await openModUserConfig(page, mod.pluginId)
+    return form.getByRole("status").filter({ hasText: "当前组合已停止" }).isVisible()
+  }, "current settings form shows the stopped composition")
   assert.deepEqual(await commands(), [])
   await page.screenshot({
     path: join(artifacts, "configuration-reload-stopped.png"),

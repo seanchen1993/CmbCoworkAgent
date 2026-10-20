@@ -1,3 +1,4 @@
+import { openModUserConfig, openModsSettings } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { createServer, type ServerResponse } from "node:http"
 import { join } from "node:path"
@@ -210,10 +211,8 @@ export async function verifyConfiguration(
     pass(
       "Actual idle callbacks adopt the new registration after original task cleanup without another user command"
     )
-    await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-    await page.getByRole("button", { name: "Function Mods", exact: true }).click()
-    const form = page.locator(`[data-function-user-config="${mod.pluginId}"]`)
-    await form.locator("summary").click()
+    await openModsSettings(page)
+    const form = await openModUserConfig(page, mod.pluginId)
     await form.getByLabel("回复风格").waitFor()
     assert.equal(await form.getByLabel("回复风格").inputValue(), "formal")
     await form.getByRole("status").filter({ hasText: "当前对话已应用" }).waitFor()
@@ -229,10 +228,8 @@ export async function verifyConfiguration(
     assert.equal(persisted.savedRevision, 1)
     assert.equal(persisted.fields.find((field) => field.key === "tone")?.value, "formal")
     pass("Reloaded renderer reads the same actual SQLite revision and author value")
-    await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-    await page.getByRole("button", { name: "Function Mods", exact: true }).click()
-    const specialForm = page.locator(`[data-function-user-config="${mod.pluginId}"]`)
-    await specialForm.locator("summary").click()
+    await openModsSettings(page)
+    const specialForm = await openModUserConfig(page, mod.pluginId)
     await specialForm.getByLabel("检查列表 第 1 项", { exact: true }).waitFor()
     assert.equal(
       await specialForm.getByLabel("原有单项 第 1 项", { exact: true }).inputValue(),

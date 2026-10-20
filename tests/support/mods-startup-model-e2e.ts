@@ -1,3 +1,5 @@
+import { openModUserConfig, openModsSettings } from "./mods-sidebar-navigation"
+import type { ModCommandDescriptor } from "../../src/shared/mods/types"
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
 import { writeFileSync } from "node:fs"
@@ -125,15 +127,32 @@ export async function verifyStartupModel(
       on("session.start",async($,e,next)=>{
         const before=next.budget;
         const text=await $.model.complete({model:"default",system:"NATIVE_STARTUP_RULE",prompt:"STARTUP_INPUT",maxTokens:32});
-        ${modelWaitMs ? `const after=next.budget;
+        ${
+          modelWaitMs
+            ? `const after=next.budget;
           if(after.ms!==10000||before.remainingMs-after.remainingMs>2000)
-            throw Error("model wait consumed the own hook budget");` : ""}
+            throw Error("model wait consumed the own hook budget");`
+            : ""
+        }
         await $.command.register({name:"startup-result",description:options.tone+":"+text,immediate:true});return next(e)
       });on("command.run",{command:"startup-result"},async($)=>({text:"RESULT:"+options.tone}))
     }`,
       true
     )
-    const commands = () => page.evaluate((id) => window.api.mods.commands(id), id)
+    const commands = async () => {
+      let rows: ModCommandDescriptor[] | undefined
+      await until(async () => {
+        try {
+          rows = await page.evaluate((id) => window.api.mods.commands(id), id)
+          return true
+        } catch (error) {
+          if (String(error).includes("MODS_RUNTIME_SESSION_BUSY")) return false
+          throw error
+        }
+      }, "startup registration is ready for a read-only command listing")
+      assert(rows)
+      return rows
+    }
     assert(
       (await commands()).some(
         (row) => row.command === "startup-result" && row.name === "warm:STARTUP_MODEL_OK"
@@ -145,13 +164,14 @@ export async function verifyStartupModel(
     pass(
       "Real first startup analyzes once with both installed components and its actual prompt snapshot"
     )
-    if (modelWaitMs) pass("Actual utility guest and configured HTTP model exceed ten seconds without consuming the hook's ten-second own budget")
+    if (modelWaitMs)
+      pass(
+        "Actual utility guest and configured HTTP model exceed ten seconds without consuming the hook's ten-second own budget"
+      )
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("启动分析与组合验证", { exact: true }).first().click()
-    await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-    await page.getByRole("button", { name: "Function Mods", exact: true }).click()
-    const form = page.locator(`[data-function-user-config="${mod.pluginId}"]`)
-    await form.locator("summary").click()
+    await openModsSettings(page)
+    const form = await openModUserConfig(page, mod.pluginId)
     await form.getByLabel("分析风格").fill("formal")
     await form.getByRole("button", { name: "保存", exact: true }).click()
     await until(async () => {
@@ -171,6 +191,14 @@ export async function verifyStartupModel(
       "A normal parameter save keeps the running composition and makes zero extra model requests"
     )
     await form.getByRole("button", { name: "重新加载当前组合", exact: true }).click()
+    await until(
+      async () =>
+        (await commands()).some(
+          (row) => row.command === "startup-result" && row.name === "formal:STARTUP_MODEL_OK"
+        ),
+      "explicit reload publishes the new model-backed registration"
+    )
+    await openModUserConfig(page, mod.pluginId)
     await form.getByText("当前对话已应用", { exact: true }).waitFor({
       timeout: modelWaitMs ? 60000 : 15000
     })
@@ -188,7 +216,7 @@ export async function verifyStartupModel(
     )
     await page.screenshot({ path: join(artifacts, "startup-model-reloaded.png"), fullPage: true })
     const composer = page.locator("textarea.composer-textarea")
-    await page.getByRole("button", { name: "返回会话", exact: true }).click()
+    await page.getByRole("button", { name: "返回应用", exact: true }).click()
     await composer.fill("/startup-result")
     // Follow the real slash picker: first Enter selects the command, then submit it.
     await composer.press("Enter")

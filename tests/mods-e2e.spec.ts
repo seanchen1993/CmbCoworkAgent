@@ -3420,8 +3420,7 @@ async function runMain(failures: unknown[]): Promise<void> {
       .getByText("备注：这是保存到项目的偏好 · 视图：构建", { exact: true })
       .waitFor()
     pass("pane preferences survive renderer reload and complete application restart")
-    await page!.getByRole("button", { name: "自定义设置", exact: true }).click()
-    await page!.getByRole("button", { name: "Function Mods", exact: true }).click()
+    await openModsSettings(page!)
     await page!
       .locator('[data-function-mod-id="function-commands"]')
       .getByRole("button", { name: "撤销权限", exact: true })

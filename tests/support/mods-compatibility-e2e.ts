@@ -1,3 +1,4 @@
+import { openModsSettings } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { join } from "node:path"
 import { writeFileSync } from "node:fs"
@@ -64,10 +65,11 @@ export async function verifyCompatibility(
   )
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Compatibility inspection", { exact: true }).first().click()
-  await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-  await page.getByRole("button", { name: "Function Mods", exact: true }).click()
+  await openModsSettings(page)
   assert.equal(await page.locator("[data-mods-locked]").count(), 0)
-  const row = page.locator('[data-function-mod-id="compatibility-check"]')
+  const row = page
+    .locator("[data-mods-settings]")
+    .locator('[data-function-mod-id="compatibility-check"]')
   await row.waitFor({ state: "attached" })
   await row.evaluate((node) => {
     for (let parent = node.parentElement; parent; parent = parent.parentElement)

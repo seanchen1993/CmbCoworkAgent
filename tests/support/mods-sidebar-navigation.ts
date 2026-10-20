@@ -1,4 +1,4 @@
-import type { Page } from "playwright"
+import type { Locator, Page } from "playwright"
 
 /** Follow the production entry after thread hydration; never skip a not-yet-mounted button. */
 export async function openModsResults(page: Page): Promise<void> {
@@ -20,4 +20,15 @@ export async function openModsSettings(page: Page): Promise<void> {
     .getByRole("button", { name: "我已添加", exact: true })
     .click()
   await page.locator("[data-mods-settings]").waitFor()
+}
+
+/** Select the active settings form; retained sidebar copies and nested help stay untouched. */
+export async function openModUserConfig(page: Page, pluginId: string): Promise<Locator> {
+  const form = page
+    .locator("[data-mods-settings]")
+    .locator(`[data-function-user-config="${pluginId}"]`)
+  await form.waitFor({ state: "visible" })
+  if (!(await form.evaluate((element) => (element as HTMLDetailsElement).open)))
+    await form.locator(":scope > summary").click()
+  return form
 }
