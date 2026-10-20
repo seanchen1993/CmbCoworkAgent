@@ -105,13 +105,13 @@ export function BotWorkPanel({
     ...controller.items.filter((item) => !controller.priority.some((v) => v.id === item.id))
   ]
   return (
-    <section className="bot-detail-section bot-works" aria-label="独立工作">
+    <section className="bot-detail-section bot-works" aria-label="独立任务">
       <div className="bot-works-heading">
-        <h3>独立工作</h3>
+        <h3>独立任务</h3>
         <button
           disabled={disabled || saving}
           onClick={() => setEditing(!editing)}
-          aria-label="新建独立工作"
+          aria-label="新建独立任务"
         >
           <Plus size={16} />
         </button>
@@ -126,7 +126,7 @@ export function BotWorkPanel({
             </button>
             <button disabled={disabled || saving} onClick={() => void lifecycle()}>
               {selected.state === "completed" ? <RotateCcw size={13} /> : <Check size={13} />}{" "}
-              {selected.state === "completed" ? "继续处理" : "完成工作"}
+              {selected.state === "completed" ? "继续处理" : "完成任务"}
             </button>
           </div>
         </div>
@@ -140,7 +140,7 @@ export function BotWorkPanel({
           className="bot-work-create"
         >
           <label>
-            工作名称
+            任务名称
             <input
               value={title}
               maxLength={160}
@@ -163,15 +163,15 @@ export function BotWorkPanel({
               取消
             </button>
             <button disabled={disabled || saving || !title.trim() || !goal.trim()} type="submit">
-              交办工作
+              交办任务
             </button>
           </div>
         </form>
       )}
       <input
         className="bot-work-search"
-        aria-label="搜索工作"
-        placeholder="搜索工作…"
+        aria-label="搜索任务"
+        placeholder="搜索任务…"
         value={controller.query}
         onChange={(e) => {
           setLimit(6)
@@ -184,7 +184,7 @@ export function BotWorkPanel({
           <button onClick={() => void controller.refresh()}>刷新</button>
         </p>
       )}
-      <div className="bot-work-list" aria-label="全部工作">
+      <div className="bot-work-list" aria-label="全部任务">
         {directory.slice(0, limit).map((work) => (
           <button
             className="bot-work-row"
@@ -204,7 +204,7 @@ export function BotWorkPanel({
           </button>
         ))}
       </div>
-      {!directory.length && !controller.loading && <p>明确交办的工作会在这里保留独立会话。</p>}
+      {!directory.length && !controller.loading && <p>明确交办的任务会在这里保留独立会话。</p>}
       {(directory.length > limit || controller.cursor) && (
         <button
           disabled={controller.loading}
@@ -213,7 +213,7 @@ export function BotWorkPanel({
             setLimit((v) => v + 40)
           }}
         >
-          更多工作
+          更多任务
         </button>
       )}
     </section>

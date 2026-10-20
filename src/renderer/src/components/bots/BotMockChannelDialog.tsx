@@ -344,13 +344,13 @@ export function BotMockChannelDialog({
                         onClose()
                       }}
                     >
-                      打开独立工作
+                      打开独立任务
                     </button>
                   )}
                 </article>
               ))}
               {!entries.length && (
-                <p>尚无消息。普通问答保持在此渠道；明确交办后才会创建独立工作。</p>
+                <p>尚无消息。普通问答保持在此渠道；明确交办后才会创建独立任务。</p>
               )}
             </div>
             <form

@@ -107,13 +107,6 @@ import { botChatAccent } from "@/lib/bot-chat-accent"
 import { BotWorkspaceMenu } from "./BotWorkspaceMenu"
 import { BotPanelDivider } from "./BotPanelDivider"
 import { useBotViewStore, DEFAULT_BOT_VIEW, clampBotPanelWidth } from "./view-store"
-import { ServiceExpertConversation, SERVICE_EXPERT_SELECTION } from "./ServiceExpertConversation"
-import {
-  SERVICE_NEW_TASK,
-  serviceSelection,
-  serviceTaskRef,
-  useServiceExpertChats
-} from "./useServiceExpertChats"
 import "./bots.css"
 
 const COLORS = ["#ed2040", "#168bea", "#ffb800", "#9a65ee", "#37b897", "#f07e4a"]
@@ -412,7 +405,9 @@ function BotConversation({
   }, [sender, client, bot.id])
   const managedTurn = useMemo<ManagedChatTurn>(
     () => ({
-      ...(work?.source ? {textOnlyReason:"模拟渠道仅支持文字和同受众工作，不支持附件、技能或本机资源。"} : {}),
+      ...(work?.source
+        ? { textOnlyReason: "模拟渠道仅支持文字和同受众工作，不支持附件、技能或本机资源。" }
+        : {}),
       submit,
       submitDraft,
       validateDraft: validateBotDraft,
@@ -596,7 +591,12 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const view = useBotViewStore((state) => state.hosts[client.hostId] ?? DEFAULT_BOT_VIEW)
   const updateView = (patch: Partial<typeof view>) =>
     useBotViewStore.getState().update(client.hostId, patch)
-  const { selectedId, groupId, showArchived, detailOpen, detailTab } = view
+  const { groupId, showArchived, detailOpen, detailTab } = view
+  // Old service routes are view preferences, never local Bot identities.
+  const legacySelection =
+    view.selectedId === "service-expert-conversation" ||
+    view.selectedId?.startsWith("service-expert-conversation:")
+  const selectedId = legacySelection ? null : view.selectedId
   const setSelectedId = (selectedId: string | null) => updateView({ selectedId })
   const setGroupId = (groupId: string | null) => updateView({ groupId })
   const setShowArchived = (showArchived: boolean) => updateView({ showArchived })
@@ -696,6 +696,10 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     : selectedId
       ? (snapshot?.bots.find((bot) => bot.id === selectedId) ?? null)
       : (visible[0] ?? null)
+  useEffect(() => {
+    if (!legacySelection || !snapshot) return
+    useBotViewStore.getState().update(client.hostId, { selectedId: visible[0]?.id ?? null })
+  }, [client.hostId, legacySelection, snapshot, visible])
   const mainActivityByConversation = useMemo(
     () => new Map((snapshot?.activities ?? []).map((item) => [`${item.kind}:${item.id}`, item])),
     [snapshot?.activities]
@@ -918,7 +922,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const copyConversationId = async (bot: BotDefinition) => {
     try {
       if (bot.id === selected?.id && activeWorkId && !selectedWork)
-        throw new Error("工作会话尚未读取，请重试后再复制。")
+        throw new Error("任务会话尚未读取，请重试后再复制。")
       await navigator.clipboard.writeText(bot.id === selected?.id ? selectedThreadId : bot.threadId)
       toast.success("已复制对话 ID")
     } catch (cause) {
@@ -1214,19 +1218,6 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
       </BotRowMenu>
     )
   }
-  const [serviceTaskLimit, setServiceTaskLimit] = useState(5)
-  const serviceActive = !!selectedId?.startsWith(SERVICE_EXPERT_SELECTION) && !groupId && !newChat
-  const selectService = (ref: string | null) => {
-    setNewChat(false)
-    updateView({ selectedId: serviceSelection(ref), groupId: null })
-  }
-  const service = useServiceExpertChats(
-    window.api.serviceConversation,
-    serviceTaskRef(selectedId),
-    serviceActive,
-    query,
-    selectService
-  )
   const renderConversations = (bots: BotDefinition[], groups: BotGroup[]) =>
     orderBotConversations(bots, groups, activityByConversation).map((item) =>
       item.kind === "bot" ? renderBotRow(item.value) : renderGroupRow(item.value)
@@ -1364,64 +1355,6 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             </label>
           )}
           <BotConversationList label={showArchived ? "已归档 Bot" : "Bot 会话"}>
-            {!showArchived && window.api.serviceConversation && (
-              <section className="service-chat-list" aria-label="服务专家会话">
-                <button
-                  className="bot-list-item"
-                  data-selected={serviceActive && !serviceTaskRef(selectedId)}
-                  onClick={() => selectService(null)}
-                >
-                  <BotAvatar color="#168bea" shape="circle" size={32} />
-                  <span className="bot-list-copy">
-                    <strong>{service.overview?.expertName ?? "服务专家"}</strong>
-                    <small>主对话</small>
-                  </span>
-                </button>
-                <button
-                  className="service-chat-list-more"
-                  onClick={() => selectService(SERVICE_NEW_TASK)}
-                >
-                  新任务
-                </button>
-                {service.tasks.slice(0, serviceTaskLimit).map((task) => (
-                  <button
-                    key={task.taskRef}
-                    className="bot-list-item service-chat-task-row"
-                    data-selected={serviceActive && serviceTaskRef(selectedId) === task.taskRef}
-                    title={task.title}
-                    onClick={() => selectService(task.taskRef)}
-                  >
-                    <span
-                      className="service-chat-task-dot"
-                      data-completed={task.taskStatus === "completed"}
-                    />
-                    <span className="bot-list-copy">
-                      <strong>{task.title}</strong>
-                      <small>
-                        {task.taskStatus === "completed"
-                          ? "已完成"
-                          : task.status === "succeeded"
-                            ? "已回复"
-                            : task.busy
-                              ? "正在处理"
-                              : "任务会话"}
-                      </small>
-                    </span>
-                  </button>
-                ))}
-                {(service.tasks.length > serviceTaskLimit || service.taskCursor) && (
-                  <button
-                    className="service-chat-list-more"
-                    onClick={() => {
-                      setServiceTaskLimit((value) => value + 40)
-                      if (service.tasks.length <= serviceTaskLimit) void service.moreTasks()
-                    }}
-                  >
-                    更多任务
-                  </button>
-                )}
-              </section>
-            )}
             {(pinnedBots.length > 0 ||
               visibleGroups.some((group) => pinnedGroupIds.includes(group.id))) && (
               <div className="bot-pinned-list" aria-label="已置顶的 Bot">
@@ -1615,20 +1548,17 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               )
             )}
             {!snapshot && !error && <Loader2 className="mx-auto mt-12 size-5 animate-spin" />}
-            {snapshot &&
-              !visible.length &&
-              !visibleGroups.length &&
-              !service.overview?.conversationId && (
-                <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-                  {query
-                    ? "没有匹配的会话"
-                    : showArchived
-                      ? "没有已归档的 Bot"
-                      : showHidden
-                        ? "没有隐藏的会话"
-                        : "创建你的第一个 Bot"}
-                </p>
-              )}
+            {snapshot && !visible.length && !visibleGroups.length && (
+              <p className="px-4 py-8 text-center text-sm text-muted-foreground">
+                {query
+                  ? "没有匹配的会话"
+                  : showArchived
+                    ? "没有已归档的 Bot"
+                    : showHidden
+                      ? "没有隐藏的会话"
+                      : "创建你的第一个 Bot"}
+              </p>
+            )}
           </BotConversationList>
           <footer className="bots-sidebar-footer">
             {sidebarCollapsed ? [footerActions[1], footerActions[0]] : footerActions}
@@ -1646,13 +1576,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               {error}
             </div>
           )}
-          {serviceActive ? (
-            <ServiceExpertConversation
-              controller={service}
-              taskRef={serviceTaskRef(selectedId)}
-              onSelect={selectService}
-            />
-          ) : !snapshot ? (
+          {!snapshot ? (
             <div className="bot-empty" role="status">
               {error ? (
                 <>
@@ -1747,18 +1671,18 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               {activeWorkId && (
                 <div className="bot-work-breadcrumb">
                   <button onClick={() => selectWork(null)}>← {selected.name} 主对话</button>
-                  <span>{selectedWork?.state === "completed" ? "已完成" : "独立工作"}</span>
+                  <span>{selectedWork?.state === "completed" ? "已完成" : "独立任务"}</span>
                 </div>
               )}
               {selectedWork?.source && (
                 <div className="bot-work-source" role="note">
-                  模拟渠道工作 ·
+                  模拟渠道任务 ·
                   此处文字与结果将回到原模拟渠道。仅支持文字和同受众工作，不提供本机文件、电脑或私人记忆。
                 </div>
               )}
               {activeWorkId && !selectedWork ? (
                 <div className="bot-empty" role="status">
-                  {works.error ?? "正在读取工作会话…"}
+                  {works.error ?? "正在读取任务会话…"}
                   <button onClick={() => void works.refresh()}>重试</button>
                 </div>
               ) : (
@@ -2074,7 +1998,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   !selectedWork &&
                   (detailTab === "files" || detailTab === "computer") ? (
                     <div className="bot-detail-section" role="status">
-                      <p>{works.error ?? "正在读取工作会话，资源面板暂不可用…"}</p>
+                      <p>{works.error ?? "正在读取任务会话，资源面板暂不可用…"}</p>
                       <button onClick={() => void works.refresh()}>重试</button>
                       <button onClick={() => selectWork(null)}>返回主对话</button>
                     </div>
@@ -2138,7 +2062,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                         )}
                       />
                       <section className="bot-detail-section">
-                        <h3>当前会话执行</h3>
+                        <h3>最近活动</h3>
                         {tasks
                           .slice(-6)
                           .reverse()

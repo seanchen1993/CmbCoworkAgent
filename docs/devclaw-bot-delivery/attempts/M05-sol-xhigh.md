@@ -2,6 +2,18 @@
 
 状态：**M05-02/03 已经 root 独立验收并正常合入 cbfa8239；本树已FF到 a6f9ace1。现实施 M05-04，未冻结、未验收。** gpt-6.1-sol/xhigh 唯一写者，不派生。只读最新设计§11，旧Service清理留M05-05；不写Java/LF39、不操作用户App/profile/真实模型/数据库。
 
+## M05-UI：融合界面展示切片（仅编译/构建，停写待 root 看 UI）
+
+本轮用户只授权先看融合后的完整UI，功能验证继续暂停。从clean `a33259483` 增量完成以下5个renderer文件，不改主进程/IPC/Runtime/Store/Java/DB/旧数据，不新增测试、不运行任何功能单测/E2E/模型或App。
+
+- `BotsWorkspace.tsx`：移除旧服务专家左侧专区、嵌套Task列表、ServiceExpertConversation分流与useServiceExpertChats/API挂载。正常Bot统一原BotConversation/ChatContainer，独立任务只在右侧BotWorkPanel；旧service-expert-conversation选择不再解释为Bot ID，回退首个普通可见Bot或空态并保存普通选择。群聊、搜索/置顶/分组/隐藏/归档/删除、原完整Bot编辑、右侧职责/资料库/电脑/记忆/例行均保留；“当前会话执行”改为“最近活动”。
+- `CustomizeView.tsx`：移除DevClaw伙伴菜单/lazy import/面板render；旧partnerDev或未知设置跳转回通用页，既有commitPolicy→skills兼容与所有有效beta设置页保留，包括专家团和机器人管理。默认renderer不再依赖PartnerDevPanel/ExpertMemoryPanel或旧service聊天hook；旧源码与数据保留。
+- `BotWorkPanel.tsx`、`bot-work-receipt.ts`、`BotMockChannelDialog.tsx`：仅把新区域用户文案统一为“独立任务/完成任务/任务名称/搜索任务/更多任务”等；代码BotWork类型和行为不改。mock功能仍是此前未验收WIP，本轮没有修复或继续其旅程。
+- **编译/展示检查，不是功能验收**：Node `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false` → `/tmp/m05-ui-node.log` **exit0**；Web同命令换tsconfig.web.json → `/tmp/m05-ui-web.log` **exit0**；空envDir隔离 `node node_modules/electron-vite/bin/electron-vite.js build --config /tmp/m05-electron-vite.config.mjs --mode m05-isolated` → `/tmp/m05-ui-build.log` **exit0**。node均沿用指定Node22。没有加载真实env，没有打开Electron。
+- 构建前root已精确关闭其UI副本69107/69097并释放out；本次out/main、preload及renderer均包含当前UI提交。root自行重开原隔离profile查看，不使用旧partner-preview，不操作用户预览/凭据。
+- 主进程只读事实已报root：index仍调用registerPartnerDevHandlers并立即构造旧controller（构造函数本身为空，journal/conversations/executor懒创建）。root明确本切片不改main/IPC/worker接线，后续授权功能验证时再拆；本次UI不触发旧服务API。历史归档/导出与M05-05默认链清理未开始，不能宣称完整M05完成。
+- `git diff --check`通过。提交后停写；本轮只有已退出tsc/build句柄，没有自有App/provider/Java/DB进程，root原用户窗口未动。
+
 ## M05-04 用户暂停：仅看当前 UI（非候选，未验收）
 
 用户要求“先别验证功能，我先看当前UI交互”后停止新实施和功能验证，仅核对/清理本人测试与保存WIP。当前更多菜单模拟弹窗、渠道历史/来源提示、外部Work文字限定与资源区提示已写；原beta ChatContainer继续复用，普通本地功能未裁剪。已完成/待完成沿下方WIP事实，不把本提交作为完整04交付。
