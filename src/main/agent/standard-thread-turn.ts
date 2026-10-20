@@ -740,6 +740,12 @@ export function createStandardTurnTrace(input: {
 }
 
 export interface RemoteTurnPolicy {
+  allowedToolNames?: string[]
+  allowedSkillNames?: string[]
+  allowedExpertNames?: string[]
+  disableHooks?: boolean
+  /** Explicit transport isolation; existing disableAgentsPrompt semantics stay unchanged. */
+  omitPromptExtensions?: boolean
   disableScheduler?: boolean
   disableSkillEvolution?: boolean
   disableRequestUserInput?: boolean
@@ -802,6 +808,21 @@ function applyRemoteTurnPolicy(
     ...(policy.sharedTaskContext ? { sharedTaskContext: true, memoryEnabled: false } : {}),
     ...(policy.disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
     ...(policy.disableMcpTools ? { disableMcpTools: true } : {}),
+    ...(policy.allowedToolNames !== undefined ? { allowedToolNames: policy.allowedToolNames } : {}),
+    ...(policy.allowedSkillNames !== undefined
+      ? { allowedSkillNames: policy.allowedSkillNames }
+      : {}),
+    ...(policy.allowedExpertNames !== undefined
+      ? { allowedExpertNames: policy.allowedExpertNames }
+      : {}),
+    ...(policy.omitPromptExtensions
+      ? {
+          harnessAgentsPrompt: undefined,
+          pluginPromptInject: undefined,
+          additionalAgentsWorkspacePaths: [],
+          additionalAgentsWorkspaceMappings: []
+        }
+      : {}),
     ...(policy.blockedToolNames ? { blockedToolNames: policy.blockedToolNames } : {}),
     ...(policy.filesystemAccess ? { filesystemAccess: policy.filesystemAccess } : {}),
     ...(policy.autoApproveFileEdits ? { autoApproveFileEdits: true } : {}),

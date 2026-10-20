@@ -94,7 +94,8 @@ export function registerBotFileHandlers(
     if (group && workKey) throw new BotError("INVALID_INPUT", "工作与群会话不能混用")
     const work = workKey ? host.getWork(id, workKey) : undefined
     const validate = () => {
-      if (workKey) host.getWork(id, workKey)
+      if (workKey && host.getWork(id, workKey).source)
+        throw new BotError("CONFLICT", "模拟渠道仅支持文字，尚不开放本机文件和附件")
       return group ? host.getGroupMember(group, id) : host.getBot(id)
     }
     const bot = validate()

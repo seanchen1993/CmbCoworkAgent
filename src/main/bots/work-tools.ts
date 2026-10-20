@@ -45,7 +45,7 @@ export function createBotWorkTools(
       async ({ cursor, query }, config) =>
         invoke("bot_work_list", config.toolCall?.id, (host) => {
           const task = host.workToolSource(taskId)
-          return host.listWorks(task.botId, cursor, query)
+          return host.workTargets(task.id, cursor, query)
         }),
       {
         name: "bot_work_list",

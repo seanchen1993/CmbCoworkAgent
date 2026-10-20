@@ -1,4 +1,5 @@
-import { BrowserWindow, powerMonitor, type IpcMain } from "electron"
+import { BrowserWindow, powerMonitor, type IpcMain, type IpcMainInvokeEvent } from "electron"
+import { parseBotMockBinding, parseBotMockEvent } from "../bots/mock-channel-validation"
 import { BotError, LOCAL_BOT_HOST_ID } from "../../shared/bots/contracts"
 import {
   botIdentifier,
@@ -56,6 +57,26 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
   }
 
   registerBotFileHandlers(ipcMain, hostFor)
+  const mockDesktop=(event:IpcMainInvokeEvent,hostId:unknown)=>{
+    if(!event.senderFrame||event.senderFrame!==event.sender.mainFrame||!BrowserWindow.fromWebContents(event.sender))throw new BotError("CONFLICT","模拟绑定只能从本机桌面窗口操作")
+    return hostFor(hostId)
+  }
+  const mockCursor=(value:unknown):string|undefined=>{if(value===undefined)return undefined;if(typeof value!=="string"||value.length>1024)throw new BotError("INVALID_INPUT","模拟游标无效");return value}
+  ipcMain.handle("bots:mock:bindings",(event,hostId,botId,before)=>mockDesktop(event,hostId).mockBindings(botIdentifier(botId),mockCursor(before)))
+  ipcMain.handle("bots:mock:binding",(event,hostId,botId,id)=>mockDesktop(event,hostId).mockBinding(botIdentifier(botId),botIdentifier(id)))
+  ipcMain.handle("bots:mock:create",(event,hostId,input)=>mockDesktop(event,hostId).createMockBinding(parseBotMockBinding(input)))
+  ipcMain.handle("bots:mock:inject",(event,hostId,input)=>mockDesktop(event,hostId).injectMockEvent(parseBotMockEvent(input)))
+  ipcMain.handle("bots:mock:revoke",(event,hostId,botId,id,version)=>{
+    const host=mockDesktop(event,hostId)
+    if(!Number.isSafeInteger(version)||version<1)throw new BotError("INVALID_INPUT","模拟授权版本无效")
+    return host.revokeMockBinding(botIdentifier(botId),botIdentifier(id),version)
+  })
+  ipcMain.handle("bots:mock:online",(event,hostId,botId,id,online)=>{
+    const host=mockDesktop(event,hostId)
+    if(typeof online!=="boolean")throw new BotError("INVALID_INPUT","模拟在线状态无效")
+    return host.setMockOnline(botIdentifier(botId),botIdentifier(id),online)
+  })
+  ipcMain.handle("bots:mock:history",(event,hostId,botId,id,before)=>mockDesktop(event,hostId).mockHistory(botIdentifier(botId),botIdentifier(id),mockCursor(before)))
   ipcMain.handle(
     "bots:browser:preview",
     (_event, hostId: unknown, id: unknown, pageId: unknown) => {

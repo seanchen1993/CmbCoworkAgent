@@ -1,4 +1,5 @@
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
+import { createRuntimeToolAllowlistMiddleware } from "./runtime-tool-allowlist"
 import { randomUUID } from "crypto"
 import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 import { foregroundToolPolicy } from "./foreground-tool-policy"
@@ -2394,6 +2395,7 @@ function assembleDeepAgent(
     mainSubagentsEnabled = true,
     filesystemAccess,
     mainBlockedToolNames = [],
+    mainAllowedToolNames,
     managedExecution = false,
     notifiedBackgroundCommands = false,
     backgroundCommandShellSyntax = "posix",
@@ -3395,7 +3397,8 @@ function assembleDeepAgent(
                 : undefined
             )
           ]
-        : [])
+        : []),
+      ...(mainAllowedToolNames!==undefined?[createRuntimeToolAllowlistMiddleware(mainAllowedToolNames)]:[])
     ],
     ...(responseFormat != null && { responseFormat }),
     contextSchema,
@@ -4948,6 +4951,8 @@ export interface CreateAgentRuntimeOptions {
   disableMcpTools?: boolean
   /** Exact main-agent tool names hidden and hard-blocked by a transport policy. */
   blockedToolNames?: string[]
+  /** Undefined preserves beta's tool surface; an explicit transport allowlist rejects unknown names. */
+  allowedToolNames?: string[]
   /** AbortSignal — when signalled, any running child process is killed immediately. */
   abortSignal?: AbortSignal
   /** Optional hooks invoked when the model fetch layer retries / resolves. */
@@ -5495,7 +5500,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
   )
 
-  const baseHooks = getEnabledHooks(workspacePath)
+  const baseHooks = hookScope.disabled?[]:getEnabledHooks(workspacePath)
   console.log(`[Runtime] Loaded ${baseHooks.length} base enabled hooks`)
 
   const backend = new LocalSandbox({
@@ -5992,7 +5997,7 @@ The workspace root is: ${fileRoot}`
   }
 
   const capabilityService = createScopedMcpCapabilityService(
-    options.capabilityService ?? getGlobalMcpCapabilityService(),
+    options.capabilityService ?? (disableMcpTools?{listTools:async()=>[],getTool:async()=>null,invoke:async()=>{throw new Error("MCP disabled for this source")},invalidate:async()=>{},close:async()=>{}}:getGlobalMcpCapabilityService()),
     hookScope,
     resolveHooksForContext,
     onHookResult,
@@ -6434,7 +6439,7 @@ The workspace root is: ${fileRoot}`
     options.filesystemAccess
   ).filter((tool) => {
     const name = (tool as { name?: string }).name
-    return !name || !runtimeBlockedToolNames.has(name)
+    return (!name || !runtimeBlockedToolNames.has(name)) && (options.allowedToolNames===undefined || (typeof name==="string"&&options.allowedToolNames.includes(name)))
   })
   const hasNamedTool = (name: string): boolean => {
     return finalTools.some((tool) => (tool as { name?: string }).name === name)
@@ -7543,11 +7548,12 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     filesystemSystemPrompt,
     subagentExtraSystemPrompt: taskSubagentExtraSystemPrompt,
     subagentExtraSystemPromptForRestrictedRoles: projectModeTaskSubagentsInheritFullContext,
-    mainTodosEnabled: !isCoordinatorMode,
-    mainFilesystemEnabled: !isCoordinatorMode,
+    mainTodosEnabled: !isCoordinatorMode && (options.allowedToolNames===undefined||options.allowedToolNames.includes("write_todos")),
+    mainFilesystemEnabled: !isCoordinatorMode && (options.allowedToolNames===undefined||options.allowedToolNames.some(name=>["read_file","write_file","edit_file","ls","glob","grep","execute"].includes(name))),
     mainSubagentsEnabled,
     filesystemAccess: options.filesystemAccess,
     mainBlockedToolNames: [...runtimeBlockedToolNames],
+    mainAllowedToolNames:options.allowedToolNames,
     managedExecution,
     // Background command ownership is a trusted host capability, not a mode
     // chosen by the model. Never inherit it into the actual workflow executor.

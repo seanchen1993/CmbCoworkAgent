@@ -1,4 +1,5 @@
 import type { BotWorkClient } from "./work"
+import type { BotMockClient, BotMockSource } from "./mock-channel"
 import type { WorkspaceFileScanEntry } from "../workspace-file-scan"
 import type { BotDeliveredFile } from "./file-delivery"
 import type {
@@ -101,6 +102,8 @@ export interface BotTask {
   threadId: string
   requestId: string
   workId?: string
+  /** Frozen by the host, including when the desktop views/continues an external work. */
+  mockSource?: BotMockSource
   message: string
   state: BotTaskState
   error: string | null
@@ -144,6 +147,7 @@ export function botTaskStateLabel(state: BotTaskState): string {
 }
 
 export type BotTaskOrigin =
+  | { kind: "mock"; bindingId: string; eventId: string }
   | { kind: "user"; replyTo?: Pick<BotMessageReply, "id" | "ordinal" | "role"> }
   | { kind: "introduction" }
   | { kind: "work"; sourceTaskId: string }
@@ -358,6 +362,7 @@ export interface WriteBotMemoryInput {
 export type BotGroupHistoryCursor = number | { targetMessageId: string }
 
 export interface BotClient {
+  mock?: BotMockClient
   readonly hostId: string
   readonly filePreview: BotFilePreviewTransport
   readonly works?: BotWorkClient

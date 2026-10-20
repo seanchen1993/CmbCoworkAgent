@@ -1,6 +1,23 @@
 # M05 — beta 本地统一实施检查点
 
-状态：**M05-02/03 本地统一工作切片进入 review_pending，本次提交后停写产品，等待 root 独立复验。整个 M05 尚未完成：M05-04 mock 与 M05-05 旧服务入口/worker清理尚未实施。** gpt-6.1-sol / xhigh，唯一实施者。原 WIP `358eaf689` 保留；本节为最终当前事实，后面的“未验证/未运行App/尚未改产品”均为有日期顺序的历史检查点。
+状态：**M05-02/03 已经 root 独立验收并正常合入 cbfa8239；本树已FF到 a6f9ace1。现实施 M05-04，未冻结、未验收。** gpt-6.1-sol/xhigh 唯一写者，不派生。只读最新设计§11，旧Service清理留M05-05；不写Java/LF39、不操作用户App/profile/真实模型/数据库。
+
+## M05-04 WIP 检查点（非候选，继续实施）
+
+- 当前真实完成：mock DTO/严格边界、原control.sqlite绑定/事件/回传表与BotTask原子接纳、固定渠道Thread/Work来源冻结、离线/撤销/未知送达、Host及7个desktop-only IPC/preload接口、标准Runtime可选工具/技能/专家allowlist及disabled HookScope、generic持久mock Thread执行守卫。原beta默认策略不变；新增 `omitPromptExtensions` 仅mock清私人扩展提示，不扩大旧 `disableAgentsPrompt` 语义。
+- `/tmp/m05-mock-store-wip.log`：`node node_modules/vitest/vitest.mjs run src/main/bots/mock-channel.test.ts src/main/bots/work.test.ts src/main/bots/work-tools.test.ts` **24/24 exit0**。7条新native SQLite/Host测试覆盖事件与Task回滚、幂等/错payload/群触发/跨受众、工作来源及引用准确目标、offline/revoke/archive发送前竞争、仅mock离线、unknown不盲重发及关库重开。
+- `/tmp/m05-mock-node-wip.log`：`node node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false` **exit0**。首轮类型失败见下方历史，未隐藏；本次未跑Web/完整构建/实际App，也未完成Runtime与IPC故障矩阵。
+- 尚未完成：当前Bot更多菜单模拟弹窗、渠道历史/回传状态/右侧来源及资源限制UI；标准Runtime allowlist/Hook/私人上下文实际守卫回归；完整真实隔离App模拟渠道旅程与受影响beta回归。当前不freeze、不宣称M05-04可验收。测试资源仅已退出Vitest/tsc，自有SQLite夹具已关闭，无Electron/Java/DB/容器/真实模型资源。
+
+## 历史：M05-04 接口与第一实现检查点（当时尚未测试）
+
+- 独立开发DTO `shared/bots/mock-channel.ts`，simulation:true，binding固定Bot/dm或group/channelKey/label/允许sender IDs；事件只接受binding/event/message/sender/text/结构化mention/原渠道Bot reply ID，不接受owner/thread/path/model。生产RemoteImEventV1不变。
+- 新 `mock-channel-store.ts` 复用原control.sqlite和Store savepoint：四张mock binding/conversation/event/outbox表、同scope索引；事件和原BotTask同事务、payload hash去重；固定渠道main Thread，Task mock_source_json与Work source_json冻结binding/version/受众/事件路由。离线仅mock队列停止，普通beta继续；撤销拒新接纳、取消queued、阻止pending回传。outbox先sending再模拟送达；重开sending为unknown，不盲重发。
+- 受众从Host/Store真实source解析到工作工具、Thread确保/initialized、主与work Runtime/提示/资料/电脑。工作工具的hasWorkUserRequest与beta原hasDirectUserRequest分开，渠道事件不会解锁profile/配置/原协作；模型只能看同受众工作。owner打开外部Work仍固定外部来源，正文与结果归原模拟渠道。
+- 标准startAgentRun/RemoteTurnPolicy可选allowedToolNames/allowedSkillNames/allowedExpertNames（undefined保留beta）以及disableHooks。allowlist最终模型可见与工具调用双守卫，未知名拒；关闭文件middleware、todos、MCP初始化/技能/专家/私人记忆/AGENTS、使用空独立mock workspace和普通文本提示。HookScope.disabled在SessionStart/UserPromptSubmit首次fire前生效，继承到后续工具/Stop，不改变普通beta scope。
+- generic agent invoke/resume/interrupt仅对持久botMockBindingId的Thread增加窄Host策略守卫，防桌面查看/伪造source逃逸；metadata feature/project/plugin等必须为空，binding当前版本执行前复核。
+- 当前代码是未完成初稿：共享/Store/Host/Runtime/资料隔离已开始接线；IPC/preload/更多菜单模拟弹窗、原渠道状态/分页、真实App旅程和故障矩阵尚未完成。首轮Node类型 `/tmp/m05-mock-node-first.log` exit2仅disabled MCP stub.invalidate需Promise及新增origin switch分支；已窄修，未宣称后续通过。尚无本片App/Java/DB进程。
+
 
 ## 3511dbe19 后的唯一验收补修：转达来源
 

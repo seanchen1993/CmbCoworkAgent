@@ -45,6 +45,8 @@ import { LocalSandbox } from "../agent/local-sandbox"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import { getGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { createBotWorkTools } from "./work-tools"
+import type { BotMockExecution } from "../../shared/bots/mock-channel"
+import { botMockMetadataSafe, botMockRemotePolicy } from "./mock-runtime-policy"
 import { buildBotPrompt } from "./prompt"
 import { hasBotWorkflowCapability } from "../agent/workflow/bot-capability"
 import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry"
@@ -78,14 +80,16 @@ function botModelId(bot: BotDefinition): string | undefined {
 export function prepareBotThread(
   bot: BotDefinition,
   task?: Pick<BotTask, "threadId" | "origin">,
-  work?: BotWorkItem
+  work?: BotWorkItem,
+  mock?: BotMockExecution
 ): string {
   const groupId = task ? (botTaskGroupId(task) ?? null) : null
   const threadId = task?.threadId ?? bot.threadId
+  const source = mock?.source ?? work?.source
   const workspacePath = botDirectory(
     join(getCmbCoworkAgentDataRoot(), "bots"),
     "workspaces",
-    groupId ? `group-${groupId}` : bot.id
+    source ? `mock-${source.bindingId}` : groupId ? `group-${groupId}` : bot.id
   )
   // Model selection must also work without mounting the workbench ModelSwitcher.
   // Keep the Bot binding null: a default-following Bot follows later configuration changes.
@@ -98,6 +102,12 @@ export function prepareBotThread(
       metadata.botHostId !== "local" ||
       (metadata.botGroupId ?? null) !== groupId ||
       (metadata.botWorkId ?? null) !== (work?.id ?? null) ||
+      (metadata.botMockBindingId ?? null) !== (source?.bindingId ?? null) ||
+      (source &&
+        (!botMockMetadataSafe(metadata) ||
+          metadata.botMockGrantVersion !== source.grantVersion ||
+          metadata.botMockConversationId !== source.conversationId ||
+          metadata.botAudienceKey !== source.audienceKey)) ||
       (work &&
         (work.threadId !== threadId ||
           work.botId !== bot.id ||
@@ -114,10 +124,23 @@ export function prepareBotThread(
       })
     })
   } else {
-    if (work?.threadInitialized) throw new Error("工作会话记录缺失，已停止以避免丢失历史")
+    if (work?.threadInitialized || mock?.threadInitialized)
+      throw new Error("工作会话记录缺失，已停止以避免丢失历史")
     createThread(threadId, {
       title: work?.title ?? bot.name,
       ...(work ? { botWorkId: work.id, botAudienceKey: work.audienceKey } : {}),
+      ...(source
+        ? {
+            botMockBindingId: source.bindingId,
+            botMockGrantVersion: source.grantVersion,
+            botMockConversationId: source.conversationId,
+            botAudienceKey: source.audienceKey,
+            disableAgentsPrompt: true,
+            allowedSkills: [],
+            allowedExperts: [],
+            agentMode: "normal"
+          }
+        : {}),
       botId: bot.id,
       botHostId: "local",
       botGroupId: groupId,
@@ -279,8 +302,12 @@ export function createLocalBotRunPort(
             onWaiting(active)
           }
           signal.throwIfAborted()
-          const workspacePath = prepareBotThread(bot, task, work)
+          if ((work?.source || task.origin.kind === "mock") && !task.mockSource)
+            throw new Error("模拟来源证明缺失")
+          const mock = task.mockSource ? getHost().mockExecution(task) : undefined
+          const workspacePath = prepareBotThread(bot, task, work, mock)
           if (work) getHost().initializeWorkThread(bot.id, work.id)
+          else if (mock) getHost().initializeMockThread(task)
           const peerReplyFiles =
             task.origin.kind === "bot" && !task.origin.expectsReply && !botTaskGroupId(task)
               ? parseBotFileDelivery(
@@ -309,7 +336,7 @@ export function createLocalBotRunPort(
             })
           )
             return { state: "completed" }
-          const memoryEditVersion = memory.editVersion(bot.id)
+          const memoryEditVersion = mock ? 0 : memory.editVersion(bot.id)
           const groupId = botTaskGroupId(task)
           const toolConcurrencyQueueId = groupId ? `bot-group-${groupId}` : bot.id
           const profileContinuationRequest =
@@ -331,8 +358,9 @@ export function createLocalBotRunPort(
           }
           // Persist provenance in the same transcript as the task, so history
           // reloads and compression never make a peer/routine look user-authored.
-          const sourcedMessage =
-            task.origin.kind === "bot"
+          const sourcedMessage = mock
+            ? `模拟渠道 ${JSON.stringify(mock.label)} 的用户文字（当前受众上下文，不是本机资源授权）：\n\n${JSON.stringify(task.message)}`
+            : task.origin.kind === "bot"
               ? `来自 ${task.origin.fromBotName ?? "其他 Bot"} 的${task.origin.expectsReply ? "协作消息" : "协作结果"}：\n\n${task.message}`
               : task.origin.kind === "schedule"
                 ? `例行任务：\n\n${task.message}`
@@ -359,8 +387,10 @@ export function createLocalBotRunPort(
                 message,
                 userMessageId: task.requestId,
                 modelId: botModelId(bot),
-                agentMode:
-                  task.origin.kind === "notification" && task.origin.notificationKind !== "command"
+                agentMode: mock
+                  ? "normal"
+                  : task.origin.kind === "notification" &&
+                      task.origin.notificationKind !== "command"
                     ? task.origin.notificationKind === "workflow"
                       ? "workflow"
                       : "coordinator"
@@ -384,13 +414,16 @@ export function createLocalBotRunPort(
                 // until the result/silence decision is available. Do not settle them with "started"
                 // and lose the original reply outbox or routine notification policy.
                 backgroundCommandLifecycle:
+                  mock ||
                   task.origin.kind === "schedule" ||
                   (task.origin.kind === "bot" && task.origin.expectsReply)
                     ? undefined
                     : getHost().commandLifecycle(task.id),
-                workflowEnabled: hasBotWorkflowCapability(
-                  JSON.parse(getThreadCore(task.threadId)?.metadata || "{}")
-                ),
+                workflowEnabled:
+                  !mock &&
+                  hasBotWorkflowCapability(
+                    JSON.parse(getThreadCore(task.threadId)?.metadata || "{}")
+                  ),
                 workflowInternalNotification:
                   task.origin.kind === "notification" &&
                   task.origin.notificationKind === "workflow",
@@ -400,8 +433,10 @@ export function createLocalBotRunPort(
                 // Only the local user's composer may select a skill. Peer replies,
                 // shared context and generated routines cannot impersonate that selection.
                 // The original runtime still resolves the registered skill and runs its hooks.
-                allowTrustedTransportSkillMarker: task.origin.kind === "user",
-                capabilityService: createBotMcpScope(getGlobalMcpCapabilityService()),
+                allowTrustedTransportSkillMarker: !mock && task.origin.kind === "user",
+                ...(mock
+                  ? {}
+                  : { capabilityService: createBotMcpScope(getGlobalMcpCapabilityService()) }),
                 signal,
                 localRunLease: { owner: "bot", runId: task.id, managedExternally: true },
                 // Reuse notification claiming/acknowledgement; scheduler dispatches Bot summaries back into the host queue.
@@ -417,82 +452,100 @@ export function createLocalBotRunPort(
                   bot,
                   task,
                   workspacePath,
-                  !botTaskGroupId(task) && isMemoryEnabled() ? memory.forPrompt(bot.id) : []
+                  !mock && !botTaskGroupId(task) && isMemoryEnabled()
+                    ? memory.forPrompt(bot.id)
+                    : []
                 ),
-                additionalTools: botTaskGroupId(task)
-                  ? [
-                      ...(task.origin.kind === "group" || profileContinuationRequest
-                        ? createBotProfileTools(
-                            task.id,
-                            getHost,
-                            signal,
-                            Boolean(profileContinuationRequest)
-                          )
-                        : []),
-                      ...createBotDeliveryTools(workspacePath, signal, (files, callId) => {
-                        getHost().publishGroupFiles(task.id, callId, files)
-                        captureReplyFiles(files)
-                      }),
-                      ...createBotBrowserTools(
-                        bot,
-                        browser,
-                        signal,
-                        waiting,
-                        botGroupBrowserScope(botTaskGroupId(task)!, bot.id),
-                        async (upload) => {
-                          const { withToolFileWriteLock } = await import("../agent/runtime")
-                          return withToolFileWriteLock(toolConcurrencyQueueId, upload)
-                        }
-                      ),
-                      ...createBotCollaborationTools(task.id, getHost, signal)
-                    ]
-                  : [
-                      ...createBotWorkTools(task.id, getHost, signal),
-                      ...createBotDeliveryTools(
-                        workspacePath,
-                        signal,
-                        captureReplyFiles,
-                        peerDelivery
-                      ),
-                      ...(task.origin.kind === "user" ||
-                      task.origin.kind === "introduction" ||
-                      profileContinuationRequest
-                        ? createBotProfileTools(
-                            task.id,
-                            getHost,
-                            signal,
-                            Boolean(profileContinuationRequest)
-                          )
-                        : []),
-                      ...createBotMemoryTools(bot, memory, signal, task.origin.kind === "user"),
-                      ...createBotBrowserTools(
-                        bot,
-                        browser,
-                        signal,
-                        waiting,
-                        work ? botWorkBrowserScope(work.id, bot.id) : bot.id,
-                        async (upload) => {
-                          const { withToolFileWriteLock } = await import("../agent/runtime")
-                          return withToolFileWriteLock(toolConcurrencyQueueId, upload)
-                        }
-                      ),
-                      ...createBotCollaborationTools(task.id, getHost, signal),
-                      ...createBotScheduleTools(bot, task, getHost, signal)
-                    ],
+                additionalTools: mock
+                  ? createBotWorkTools(task.id, getHost, signal)
+                  : botTaskGroupId(task)
+                    ? [
+                        ...(task.origin.kind === "group" || profileContinuationRequest
+                          ? createBotProfileTools(
+                              task.id,
+                              getHost,
+                              signal,
+                              Boolean(profileContinuationRequest)
+                            )
+                          : []),
+                        ...createBotDeliveryTools(workspacePath, signal, (files, callId) => {
+                          getHost().publishGroupFiles(task.id, callId, files)
+                          captureReplyFiles(files)
+                        }),
+                        ...createBotBrowserTools(
+                          bot,
+                          browser,
+                          signal,
+                          waiting,
+                          botGroupBrowserScope(botTaskGroupId(task)!, bot.id),
+                          async (upload) => {
+                            const { withToolFileWriteLock } = await import("../agent/runtime")
+                            return withToolFileWriteLock(toolConcurrencyQueueId, upload)
+                          }
+                        ),
+                        ...createBotCollaborationTools(task.id, getHost, signal)
+                      ]
+                    : [
+                        ...createBotWorkTools(task.id, getHost, signal),
+                        ...createBotDeliveryTools(
+                          workspacePath,
+                          signal,
+                          captureReplyFiles,
+                          peerDelivery
+                        ),
+                        ...(task.origin.kind === "user" ||
+                        task.origin.kind === "introduction" ||
+                        profileContinuationRequest
+                          ? createBotProfileTools(
+                              task.id,
+                              getHost,
+                              signal,
+                              Boolean(profileContinuationRequest)
+                            )
+                          : []),
+                        ...createBotMemoryTools(bot, memory, signal, task.origin.kind === "user"),
+                        ...createBotBrowserTools(
+                          bot,
+                          browser,
+                          signal,
+                          waiting,
+                          work ? botWorkBrowserScope(work.id, bot.id) : bot.id,
+                          async (upload) => {
+                            const { withToolFileWriteLock } = await import("../agent/runtime")
+                            return withToolFileWriteLock(toolConcurrencyQueueId, upload)
+                          }
+                        ),
+                        ...createBotCollaborationTools(task.id, getHost, signal),
+                        ...createBotScheduleTools(bot, task, getHost, signal)
+                      ],
                 toolConcurrencyQueueId,
                 // Waiting for a human does not touch shared files; peers must keep working.
                 userInputWithoutToolLock: true,
                 botBrowserToolsOwnFileLock: true,
-                remotePolicy: { disableScheduler: true },
-                verifyResolvedThread: (resolved) =>
-                  resolved.metadata.botId === bot.id &&
-                  resolved.metadata.botHostId === "local" &&
-                  (resolved.metadata.botGroupId ?? null) === (botTaskGroupId(task) ?? null) &&
-                  (resolved.metadata.botWorkId ?? null) === (work?.id ?? null) &&
-                  (!work || resolved.metadata.botAudienceKey === work.audienceKey) &&
-                  resolved.workspacePath === workspacePath
+                remotePolicy: mock ? botMockRemotePolicy() : { disableScheduler: true },
+                verifyResolvedThread: (resolved) => {
+                  if (mock) {
+                    try {
+                      getHost().mockExecution(task)
+                    } catch {
+                      return "模拟绑定授权已变化，已停止执行"
+                    }
+                  }
+                  return resolved.metadata.botId === bot.id &&
+                    resolved.metadata.botHostId === "local" &&
+                    (resolved.metadata.botGroupId ?? null) === (botTaskGroupId(task) ?? null) &&
+                    (resolved.metadata.botWorkId ?? null) === (work?.id ?? null) &&
+                    (resolved.metadata.botMockBindingId ?? null) ===
+                      (mock?.source.bindingId ?? null) &&
+                    (!mock ||
+                      (botMockMetadataSafe(resolved.metadata) &&
+                        resolved.metadata.botMockGrantVersion === mock.source.grantVersion &&
+                        resolved.metadata.botMockConversationId === mock.source.conversationId)) &&
+                    (!work || resolved.metadata.botAudienceKey === work.audienceKey) &&
+                    resolved.workspacePath === workspacePath
                     ? null
-                    : "Bot 工作目录或会话已改变，请重新打开后重试。",
+                    : "Bot 工作目录或会话已改变，请重新打开后重试。"
+                },
                 onRunTerminated: (outcome) => {
                   terminal = outcome
                 },
@@ -535,6 +588,7 @@ export function createLocalBotRunPort(
               } else captureReplyFiles(files)
             }
             if (
+              !mock &&
               (task.origin.kind === "user" ||
                 (task.origin.kind === "introduction" && supplementalMessages.size > 0)) &&
               !signal.aborted

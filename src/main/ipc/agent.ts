@@ -308,6 +308,8 @@ import {
   type HookScopeController
 } from "../hooks/scope"
 import { createPersistentThreadHookScope } from "../hooks/thread-scope-persistence"
+import { createHookScope } from "../hooks/scope"
+import { assertBotMockThreadEntry } from "../bots/mock-runtime-policy"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
@@ -5810,6 +5812,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const initialInvokeThread = getThreadCore(threadId)
       const initialInvokeParsedMetadata = parseStandardThreadMetadata(initialInvokeThread?.metadata)
       const initialInvokeMetadata = initialInvokeParsedMetadata.metadata
+      assertBotMockThreadEntry(initialInvokeMetadata,runExecutionContext)
       const initialInvokeAgentMode = initialInvokeParsedMetadata.agentMode
       const initialInvokeCoordinatorRequest = resolveCoordinatorModeRequest(
         message,
@@ -6512,6 +6515,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             goalTranscriptBoundary
           )
         }
+        if(runExecutionContext.remotePolicy?.disableHooks)turnState.hookScope=createHookScope({disabled:true})
         const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
         const desktopCompletionCursor = captureStreamAssistantCursor(threadId)
         let turnStateShouldDispose = false
@@ -7020,6 +7024,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               console.warn("[Agent] Failed to parse thread metadata, using empty object")
           })
           metadata = parsedThreadMetadata.metadata
+          assertBotMockThreadEntry(metadata,runExecutionContext)
           const requirementRuntimeOptions = getRequirementRuntimeOptions(metadata)
           ensureThreadForkBoundaryMarkerEra(threadId, metadata)
           console.log("[Agent] Thread metadata:", metadata)
@@ -10217,6 +10222,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           console.warn("[Agent] Failed to parse thread metadata, using empty object")
       })
       let metadata = parsedThreadMetadata.metadata
+      assertBotMockThreadEntry(metadata)
       const requirementRuntimeOptions = getRequirementRuntimeOptions(metadata)
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = parsedThreadMetadata.workspacePath
@@ -11583,6 +11589,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         console.warn("[Agent] Failed to parse thread metadata, using empty object")
     })
     const metadata = parsedThreadMetadata.metadata
+    assertBotMockThreadEntry(metadata)
     const requirementRuntimeOptions = getRequirementRuntimeOptions(metadata)
     ensureThreadForkBoundaryMarkerEra(threadId, metadata)
     const workspacePath = parsedThreadMetadata.workspacePath
