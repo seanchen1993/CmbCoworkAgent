@@ -122,6 +122,7 @@ const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 const nativeClosePrompt = createNativeClosePrompt()
 const mainLogForwardingGate = createMainLogForwardingGate()
 let mainWindow: BrowserWindow | null = null
+let mainWindowStartupReady = false
 let mainWindowUnresponsive = false
 const trustedMainRendererUrl = resolveTrustedRendererUrl(
   app.isPackaged
@@ -933,6 +934,9 @@ function createWindow(): void {
  * 供单实例唤起、宠物窗口交互等入口复用，覆盖主窗口被销毁、最小化和隐藏三种情况。
  */
 function ensureMainWindowVisible(): BrowserWindow | null {
+  // A second launch may arrive while initialization is pending or after it failed.
+  // The normal startup path must create the first window after registering IPC.
+  if (!mainWindowStartupReady) return null
   clearAppAttention()
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow()
@@ -1539,6 +1543,7 @@ if (browserNativeMessagingHostLaunch) {
 
     const initialModelCatalogLoad = startBuiltinModelCatalogRefresh()
     createWindow()
+    mainWindowStartupReady = true
     // An IM turn must not depend on someone having the desktop open, and must
     // not be tied to whichever window happened to be focused when it arrived.
     // The managed delivery broadcasts on the thread-scoped channel the renderer
