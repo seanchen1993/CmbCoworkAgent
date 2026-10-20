@@ -4,7 +4,6 @@ import {
   assertOriginalUpload,
   findProtectedMarketRoot,
   protectMarketDirectory,
-  isMarketProtectionComplete,
   MARKET_CONTENT_DENIED
 } from "../services/market-content"
 import AdmZip from "adm-zip"
@@ -793,36 +792,6 @@ export async function listPluginSkills(): Promise<SkillMetadata[]> {
 }
 
 export function registerSkillsHandlers(ipcMain: IpcMain): void {
-  ipcMain.handle("skills:protectMarketInstalls", async (_event, names: string[]) => {
-    try {
-      if (
-        !Array.isArray(names) ||
-        names.length > 10_000 ||
-        names.some((name) => typeof name !== "string" || name.length > 512)
-      ) {
-        return { success: false, error: "无效的市场安装记录" }
-      }
-      const installedNames = new Set(names.map((name) => name.trim().toLowerCase()))
-      const customDir = getCustomSkillsDir()
-      const skills = await discoverSkills(customDir)
-      let changed = false
-      for (const skill of skills) {
-        if (!installedNames.has(skill.name.trim().toLowerCase())) continue
-        if (existsSync(path.join(skill.rootDir, ".cmb-original-upload.json"))) continue
-        if (!isMarketProtectionComplete(skill.rootDir)) {
-          protectMarketDirectory(skill.rootDir)
-          changed = true
-        }
-      }
-      if (changed) {
-        invalidateEnabledSkillsCache()
-        notifyHooksChanged("market-content-protected")
-      }
-      return { success: true }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : "迁移市场技能失败" }
-    }
-  })
   console.log("[Skills] Registering skills handlers...")
 
   ipcMain.handle(

@@ -2316,8 +2316,6 @@ const api = {
     }
   },
   skills: {
-    protectMarketInstalls: (names: string[]): Promise<{ success: boolean; error?: string }> =>
-      ipcRenderer.invoke("skills:protectMarketInstalls", names),
     catalog: {
       read: (
         input: SkillPluginCatalogPageInput,

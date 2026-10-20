@@ -2,8 +2,6 @@ import {
   readContentFileSync,
   encodeMarketContent,
   findProtectedMarketRoot,
-  protectMarketDirectory,
-  isMarketProtectionComplete,
   resolveMarketRuntimePath
 } from "./services/market-content"
 import { basename, isAbsolute, join, relative, resolve } from "path"
@@ -3205,18 +3203,6 @@ export function getPlugins(): PluginMetadata[] {
   }
 }
 
-export function protectLegacyMarketPluginContent(): void {
-  for (const plugin of getPlugins()) {
-    if (
-      plugin.origin === "market" &&
-      existsSync(plugin.path) &&
-      !isMarketProtectionComplete(plugin.path)
-    ) {
-      protectMarketDirectory(plugin.path)
-    }
-  }
-}
-
 function writePlugins(items: PluginMetadata[]): void {
   getOpenworkDir()
   writeFileSync(PLUGINS_FILE, JSON.stringify(items, null, 2))
@@ -3281,7 +3267,6 @@ export function setPluginOriginsBatch(
   const next = items.map((item) => {
     const desired = byId.get(item.id)
     if (!desired || item.origin === desired || item.origin === "market") return item
-    if (desired === "market" && existsSync(item.path)) protectMarketDirectory(item.path)
     changed = true
     return { ...item, origin: desired }
   })

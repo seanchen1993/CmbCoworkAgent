@@ -1780,7 +1780,6 @@ interface CustomAPI {
     supportedExtensions: () => Promise<string[]>
   }
   skills: {
-    protectMarketInstalls: (names: string[]) => Promise<{ success: boolean; error?: string }>
     catalog: {
       read: (
         input: SkillPluginCatalogPageInput,
