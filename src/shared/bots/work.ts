@@ -1,3 +1,4 @@
+import type { BotWorkConversationLink } from "./conversation"
 import type { BotTask, BotTaskState, BotConversationActivity } from "./contracts"
 import type { BotMockSource } from "./mock-channel"
 
@@ -17,6 +18,7 @@ export interface BotWorkSummary {
   backgroundBusy: boolean
   activity?: BotConversationActivity
   source?: BotMockSource
+  conversation?: BotWorkConversationLink
 }
 export interface BotWorkItem extends BotWorkSummary {
   goal: string

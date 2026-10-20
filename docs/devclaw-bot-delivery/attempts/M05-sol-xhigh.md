@@ -1,6 +1,26 @@
 # M05 — beta 本地统一实施检查点
 
-状态：**M05-02/03 已经 root 独立验收并正常合入 cbfa8239；本树已FF到 a6f9ace1。现实施 M05-04，未冻结、未验收。** gpt-6.1-sol/xhigh 唯一写者，不派生。只读最新设计§11，旧Service清理留M05-05；不写Java/LF39、不操作用户App/profile/真实模型/数据库。
+状态：**M05-06 本机会话关联实施中，未冻结、未验收。M05-02/03与UI/模型窄修已完成，M05-04/05完整验证仍暂停；下方旧状态为历史记录。** gpt-6.1-sol/xhigh 唯一写者，不派生。只读最新设计§11，旧Service清理留M05-05；不写Java/LF39、不操作用户App/profile/真实模型/数据库。
+
+## M05-06 本机对话关联：冻结接口已读，开始实施（未验收）
+
+root冻结设计M05-local-conversation-link-design.md及06A-D，产品起点852fc3e4；不合root协调文档、不动当前运行out和用户profile，不恢复04/05完整验证。只新增本片必要本地/fake测试。
+
+- 接口：Task沿现有BotWork ID，承载ref判别local_thread/project_session/cloud_session；仅local适配，后两者明确unsupported，未来不建空表。关联来源existing/created与preparing/bound/detaching/detached为当前恢复/删除的真实消费者。
+- 已有普通会话接纳保留原Thread/消息/目录/model/mode/memory及其他设置，不发首轮；无持久目录先使用原入口选择，不补全局目录。跨两个SQLite用固定意图+incarnation+initialized握手，不能伪称跨库事务；失败/崩溃只恢复绑定、不运行模型，忙/审批/真实后台先处理，草稿/队列保留不自动发送。
+- 两入口将共用同一ManagedConversation/ThreadState/queue/draft，bare agent IPC即使idle也不能绕Host；文件预览保留，视觉编辑注入同Host submit，模型/模式/目录改动走一致门禁。只将Host可信本机Work放入普通列表，main/group/mock不放开。fork由main剥离关联/source，成为新的普通会话。
+- 解除必须实际可达且不删历史/不运行；旧命令不能复活。普通删除先显式解除再沿原删除；Bot归档保留只读，删除Bot时existing会话解除保留，created沿原明确确认的删除范围。
+- 当前第一小步：typed ref与必要partial unique迁移开始写。现work.thread_id inline UNIQUE需要迁到detached=0唯一，允许解除后新的明确关联而保留旧Task真实ref；root已批准真实SQLite非空/故障回滚/重开/重复升级验证。不复制历史、不把threadId改成假占位。尚未测试/未build，尚无可验收纵向路径；后续Store/Host关联握手与IPC、原Runtime设置保留、双入口UI、相关测试未完成。
+
+### 06A 首个 Store 检查点（WIP，非纵向完成）
+
+新增 shared/bots/conversation.ts 和 main/bots/conversation-link-{schema,validation,store}.ts；BotStore 挂原control事务journal，typed local/project/cloud ref，只有local可接纳。existing prepare不建BotTask，preparing/detaching禁止发送；原operation/fingerprint幂等，解除后旧command不可复活，sameThread新的明确操作可重新关联。work摘要/list排除已解除，保留旧行/历史。
+
+- migration保留全部列、source、显式索引/trigger以及sqlite_sequence high-water，未知外键/生成字段拒绝并原子回滚；从inline thread UNIQUE变为detached=0部分唯一。真实磁盘重开、900序号已删后新建901、重复升级后902已测。
+- archive新增真实work_id，首次升级在原唯一历史上回填；view/receipt/prune不用当前thread推断历史work，防解除后重绑收据串目标。
+- `Node22 node_modules/vitest/vitest.mjs run src/main/bots/conversation-link.test.ts src/main/bots/request-receipts.test.ts src/main/bots/history-retention.test.ts` → `/tmp/m05-06-store-second.log` **3文件14/14 exit0**。首轮13/14，测试用enqueue前旧version错打CAS而未达busy门禁；改用当前version后真实busy拒绝通过，未改产品绕门禁。SQLite写拒绝后仍bound、future ref拒绝、旧command/迟到bound拒绝、任务receipt双scope均覆盖。
+- 首轮Node检查仅新journal两个未使用局部变量，已删除；`Node22 node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false` → `/tmp/m05-06-node-store.log` **exit0**。尚无06 App/模型/build，不覆盖运行out，无自有常驻进程。
+- 未完成：main跨库身份握手/恢复、Host待办门禁/Runtime原设置保留、裸IPC及fork/delete守卫、双入口共享受管UI/停放旧queue/原预览与visual edit、06必要纵向测试。不能以Store检查当完整06验收。
 
 ## 模型选择窄修：缺配置/凭据的明确 pinned 选择不再静默换供应商
 
