@@ -324,6 +324,10 @@ jobs:
           node-version: "22"
           cache: "npm"
 
+      # No npm dependencies required; verify Windows checkout preserves checksum-verified patch bytes.
+      - name: Verify native patch checkout integrity
+        run: node --test tests/langchain-patch-checkout.spec.mjs
+
       - name: Decrypt .env for build
         run: node scripts/env-crypt.mjs decrypt-file .env
         env:
