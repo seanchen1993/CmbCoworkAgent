@@ -569,6 +569,7 @@ jobs:
           path: |
             output/mods-v2-validation/actions-packaged/packaged-validation.json
             output/mods-v2-validation/actions-packaged/result.json
+            output/mods-v2-validation/actions-packaged/packaged-runtime-evidence.json
             output/mods-v2-validation/actions-packaged/*.png
           if-no-files-found: warn
           retention-days: 14

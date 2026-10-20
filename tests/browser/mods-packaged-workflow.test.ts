@@ -72,6 +72,7 @@ it("requires Windows packaged validation before upload/release and keeps diagnos
   ).toEqual([
     "output/mods-v2-validation/actions-packaged/packaged-validation.json",
     "output/mods-v2-validation/actions-packaged/result.json",
+    "output/mods-v2-validation/actions-packaged/packaged-runtime-evidence.json",
     "output/mods-v2-validation/actions-packaged/*.png"
   ])
 })

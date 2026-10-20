@@ -6,43 +6,10 @@ import { performance } from "node:perf_hooks"
 import AdmZip from "adm-zip"
 import type { ElectronApplication, Page } from "playwright"
 import { startModsModelServer } from "./mods-model-server"
-
-interface ProcessIdentity {
-  pid: number
-  parent: number
-  born: string
-}
-
-async function readProcesses(app: ElectronApplication, pids: number[]): Promise<ProcessIdentity[]> {
-  assert(pids.length > 0 && pids.every((pid) => Number.isSafeInteger(pid) && pid > 0))
-  return app.evaluate(async (_, ids) => {
-    const { execFile } = process.getBuiltinModule("node:child_process")
-    const { join } = process.getBuiltinModule("node:path")
-    const shell = join(
-      process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:/Windows",
-      "System32/WindowsPowerShell/v1.0/powershell.exe"
-    )
-    const filter = ids.map((id) => `ProcessId = ${id}`).join(" OR ")
-    const query =
-      `Get-CimInstance Win32_Process -Filter '${filter}' | Select-Object ` +
-      "@{Name='pid';Expression={$_.ProcessId}},@{Name='parent';Expression={$_.ParentProcessId}}," +
-      "@{Name='born';Expression={$_.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress"
-    const raw = await new Promise<string>((resolve, reject) => {
-      execFile(
-        shell,
-        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", query],
-        { encoding: "utf8", windowsHide: true, timeout: 10_000 },
-        (error, stdout) => {
-          if (error) reject(error)
-          else resolve(stdout)
-        }
-      )
-    })
-    if (!raw.trim()) return []
-    const value = JSON.parse(raw) as ProcessIdentity | ProcessIdentity[]
-    return Array.isArray(value) ? value : [value]
-  }, pids)
-}
+import {
+  readWindowsProcessIdentities,
+  WindowsProcessQueryError
+} from "./mods-windows-process-observer"
 
 /** Uses the production package and public IPC. This does not install or test the NSIS installer. */
 export async function verifyPackagedRuntime(
@@ -280,7 +247,7 @@ export async function verifyPackagedRuntime(
       return true
     }, "packaged real parent and grandchild reported their PIDs")
     assert.equal(new Set(pids).size, 2)
-    const before = await readProcesses(app, pids)
+    const before = await readWindowsProcessIdentities(pids)
     assert.equal(before.length, 2)
     assert(before.every((row) => pids.includes(row.pid) && Number.isFinite(Date.parse(row.born))))
     assert.equal(before.find((row) => row.pid === pids[1])!.parent, pids[0])
@@ -290,7 +257,7 @@ export async function verifyPackagedRuntime(
       jobThread
     )
     await until(async () => {
-      const after = await readProcesses(app, pids)
+      const after = await readWindowsProcessIdentities(pids)
       return before.every(
         (original) => !after.some((row) => row.pid === original.pid && row.born === original.born)
       )
@@ -298,7 +265,7 @@ export async function verifyPackagedRuntime(
     jobReaped = true
     evidence.job = {
       before,
-      after: await readProcesses(app, pids),
+      after: await readWindowsProcessIdentities(pids),
       cancellation: "revokeFunction",
       elapsedMs: performance.now() - phaseStartedAt
     }
@@ -421,6 +388,8 @@ export async function verifyPackagedRuntime(
     evidence.complete = true
   } catch (reason) {
     failures.push(reason)
+    if (reason instanceof WindowsProcessQueryError)
+      evidence.processQueryFailure = reason.diagnostics
   } finally {
     if (jobThread && !jobReaped)
       await attempt(() =>
