@@ -11,14 +11,49 @@ import type {
   ProjectPreviewDraft
 } from "../../shared/project-runtime/development-preview"
 import { runtimeDirectory } from "../harness-board/project-runtime/safe-files"
+import type { ProjectStageDebugSessions } from "../mods/devtools/project-stage-debug"
+import type { ProjectStageDebugApi } from "../../shared/project-runtime/stage-debug"
+import { z } from "zod"
 
 export function registerProjectPreviewHandlers(
   ipc: IpcMain,
   trusted: (event: IpcMainInvokeEvent) => unknown,
   platform: () => HostProjectService,
-  retainedRoot: (project: HostProjectState) => string
+  retainedRoot: (project: HostProjectState) => string,
+  stageDebug?: () => ProjectStageDebugSessions
 ) {
   const recovering = new Set<string>()
+  if (stageDebug) {
+    const threadId = z.string().min(1).max(256)
+    const digest = z.string().regex(/^[a-f0-9]{64}$/)
+    const prepare = z.object({ threadId, snapshotId: digest,
+      draftId: z.string().regex(/^[a-z][a-z0-9-]{0,47}$/), revision: z.number().int().min(1).max(8),
+      expectedDigest: digest, mode: z.enum(["stage", "downstream"]) }).strict()
+    const comparison = z.object({ threadId, projectId: z.string().uuid() }).strict()
+    const create = z.object({ threadId, preparationId: z.string().uuid(), expectedDigest: digest }).strict()
+    ipc.handle("project-preview:stage-debug-compare", async (event, value: { threadId: string; projectId: string }) => {
+      trusted(event)
+      const input = comparison.parse(value)
+      return stageDebug().compare(context(event, input.threadId), input)
+    })
+    ipc.handle("project-preview:stage-debug-list", (event, value: string) => {
+      trusted(event)
+      const current = context(event, threadId.parse(value))
+      return stageDebug().list(current)
+    })
+    ipc.handle("project-preview:stage-debug-prepare", async (event,
+      value: Parameters<ProjectStageDebugApi["prepare"]>[0]) => {
+      trusted(event)
+      const input = prepare.parse(value)
+      return stageDebug().prepare(context(event, input.threadId), input)
+    })
+    ipc.handle("project-preview:stage-debug-create", async (event,
+      value: Parameters<ProjectStageDebugApi["create"]>[0]) => {
+      trusted(event)
+      const input = create.parse(value)
+      return stageDebug().create(context(event, input.threadId), input)
+    })
+  }
   function context(event: IpcMainInvokeEvent, threadId: string) {
     trusted(event)
     if (typeof threadId !== "string" || !threadId || threadId.length > 256)
@@ -73,7 +108,8 @@ export function registerProjectPreviewHandlers(
                     .operations(project.projectId, 100)
                     .some((operation) =>
                       ["started", "cancel_requested", "unknown"].includes(operation.status)
-                    )
+                    ),
+                ...(project && stageDebug?.().isBranch(project) ? { debugBranch: true } : {})
               }
             }
           : {}),
@@ -176,6 +212,8 @@ export function registerProjectPreviewHandlers(
       const saved = projectPreviewRegistry.retained(scope, input.draftId)
       const api = platform()
       const project = saved && api.get(saved.projectId)
+      if (project && stageDebug?.().isBranch(project))
+        throw Error("PROJECT_STAGE_DEBUG_RECONFIRMATION_REQUIRED")
       if (
         !saved ||
         !project ||
@@ -263,8 +301,10 @@ export function registerProjectPreviewHandlers(
           input.draftId,
           project,
           project ? api.operations(project.projectId, 100) : [],
-          (id) => api.cancel(id)
+          (id) => api.cancel(id),
+          stageDebug?.().finishOptions(project)
         )
+        stageDebug?.().end(project)
         return
       }
       if (!project) throw Error("PROJECT_NOT_FOUND")
@@ -272,8 +312,10 @@ export function registerProjectPreviewHandlers(
         project,
         scope,
         api.operations(project.projectId, 100),
-        (operationId) => api.cancel(operationId)
+        (operationId) => api.cancel(operationId),
+        stageDebug?.().finishOptions(project)
       )
+      stageDebug?.().end(project)
     }
   )
 }

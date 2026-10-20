@@ -31,6 +31,8 @@ it("admits the real creator tool and its built-in guidance without personal skil
   const tools = createModAuthoringRuntimeTools(scope)
   expect(tools.map((tool) => tool.name)).toEqual(["mod_authoring", "mod_composition", "mod_configuration", "mod_business"])
   expect(modAuthoringRuntimePrompt(tools)).not.toBeNull()
+  expect(modAuthoringRuntimePrompt(tools)).toContain("native.project-stage-debug/stages@1.0.0")
+  expect(modAuthoringRuntimePrompt(tools)).toContain("不得编造公共 create/start/approve 动作")
   const overview = JSON.parse(await tools[0].invoke({ action: "catalog" }))
   expect(overview).toMatchObject({ ok: true, result: { contract: "cmb-desktop-authoring-v2" } })
   expect(overview.result.package["mods/manifest.json"]).toMatchObject({ apiVersion: "cmb.mods/v2" })
@@ -43,7 +45,9 @@ it("admits the real creator tool and its built-in guidance without personal skil
 it("explains original-plugin modularization, native journey evidence and explicit independent delivery", () => {
   const prompt = modAuthoringRuntimePrompt([{ name: "mod_business" }, { name: "mod_authoring" }])
   for (const text of ["inspect_raw", "read_raw_asset", "request_modularization", "trial.journey",
-    "制作→试用→验收→保存", "指定独立新名称与版本", "模型终止", "阶段回退与中间重跑仍不提供"])
+    "制作→试用→验收→保存", "指定独立新名称与版本", "模型终止",
+    "project_stage_debug_list", "project_stage_debug_prepare", "仅支持受控文件阶段",
+    "创建和启动不能由模型代批", "不能删除这些行为来获得调试通过"])
     expect(prompt).toContain(text)
 })
 
@@ -103,7 +107,8 @@ it("guides business candidates through an uninstalled native trial before separa
   expect(business).toContain("选择实际业务上下文")
   expect(business).toContain("创建新的隔离试用，不复用旧目录或批准")
   expect(business).toContain("停止和物理收尾结果分开核对")
-  expect(business).toContain("阶段回退调试仍不提供")
+  expect(business).toContain("阶段调试使用下述受控 Host 快照入口")
+  expect(business).toContain("不删除业务 Hooks 或外部依赖来绕过支持范围")
   expect(business).toContain("host-linear-v1")
   expect(business).toContain("不能改成 Host 声明绕过原规则")
   expect(business).toContain("完整保留所声明资源")

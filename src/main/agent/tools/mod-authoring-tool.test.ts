@@ -9,6 +9,7 @@ import { projectAuthoringSessions } from "../../mods/devtools/project-authoring-
 import { DevelopmentCandidateError } from "../../mods/devtools/development-candidate-diagnostics"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { CreatorRequestBudgets } from "../../mods/devtools/creator-request-budget"
+import * as stageDebug from "../../mods/devtools/project-stage-debug"
 
 vi.mock("../../storage", () => ({ getPlugins: vi.fn(() => []) }))
 
@@ -38,6 +39,23 @@ afterEach(() => {
 })
 
 describe("conversation Mod tool", () => {
+  it("can inspect native stage baselines and request a plan but has no debug approval action", async () => {
+    const service = fixture()
+    const scope = { threadId, workspace, incarnation: { token: "creator", legacyCreatedAt: 1 } }
+    Object.assign(service, { projectAuthoringContext: () => ({ scope, assertCurrent: () => {} }),
+      assertScope: vi.fn() })
+    const list = vi.fn(() => ({ snapshots: [], branches: [], diagnostics: [] }))
+    vi.spyOn(stageDebug, "getProjectStageDebugSessions").mockReturnValue({ list } as unknown as
+      ReturnType<typeof stageDebug.getProjectStageDebugSessions>)
+    const author = createModAuthoringTool({ threadId, workspace })
+    expect(JSON.parse(await author.invoke({ action: "project_stage_debug_list" }))).toMatchObject({ ok: true })
+    expect(list).toHaveBeenCalledWith({ scope, guard: expect.any(Function) })
+    await expect(author.invoke({ action: "project_stage_debug_create" } as never)).rejects.toThrow()
+    releaseLocalThreadRunLease(threadId, "desktop", "first")
+    expect(JSON.parse(await author.invoke({ action: "project_stage_debug_list" })))
+      .toMatchObject({ ok: false, error: "DEVELOPMENT_TURN_CHANGED" })
+    expect(list).toHaveBeenCalledTimes(1)
+  })
   it("retains the request repair budget when tools are rebuilt during the same native run", async () => {
     const service = fixture()
     const ledger = new CreatorRequestBudgets()

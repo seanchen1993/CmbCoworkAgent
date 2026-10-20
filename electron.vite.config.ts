@@ -34,7 +34,8 @@ function copyResources(): { name: string; closeBundle: () => void } {
         ["sparks-task-workbench/consumer", "task-workbench-consumer"],
         ["sparks-task-workbench/behavior-prefix", "task-behavior-prefix"],
         ["sparks-task-workbench/behavior-compact", "task-behavior-compact"],
-        ["sparks-edit-reminder", "edit-reminder"]
+        ["sparks-edit-reminder", "edit-reminder"],
+        ["sparks-stage-debugger", "stage-debugger"]
       ]) {
         mirrorRequiredDirectorySync(
           resolve("examples", source),

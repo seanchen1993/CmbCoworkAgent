@@ -31,7 +31,11 @@ it("lists offline Chinese cards without project scope or installation effects", 
   const value = (await handlers.get("mods:community-examples:list")!(event)) as {
     examples: unknown[]
   }
-  expect(value.examples).toHaveLength(8)
+  expect(value.examples).toHaveLength(9)
+  expect(value.examples).toContainEqual(expect.objectContaining({
+    id: "stage-debugger", pluginName: "stage-debugger", title: "阶段调试工作台",
+    origin: "devclaw", sourcePath: "examples/sparks-stage-debugger", version: "1.0.0"
+  }))
   expect(value.examples).toContainEqual(
     expect.objectContaining({
       id: "token-weather",
@@ -129,4 +133,35 @@ it("installs a local example from the fixed bundled directory with the same veri
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+it("uses the original pinned installer and explicit approval contract for the stage debugger", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "stage-debugger-example-ipc-"))
+  const root = join(directory, "community-originals")
+  const source = join(directory, "platform-examples", "stage-debugger")
+  try {
+    await mkdir(root)
+    await cp(resolve("examples/sparks-stage-debugger"), source, { recursive: true })
+    registerCommunityExampleHandlers(
+      { handle: (name: string, fn: Handler) => handlers.set(name, fn) } as never,
+      root, () => { if (!allowed) throw Error("DENIED") }
+    )
+    install.mockImplementation(async (directory, name, verify, current) => {
+      expect(directory).toBe(source)
+      expect(name).toBe("stage-debugger")
+      await verify(directory)
+      current()
+      return { pluginId: "installed-stage-debugger", pluginName: name,
+        alreadyInstalled: false, requiresApproval: true }
+    })
+    await expect(handlers.get("mods:community-examples:install")!(event, {
+      exampleId: "stage-debugger", path: "C:/untrusted"
+    })).rejects.toThrow("MODS_COMMUNITY_EXAMPLE_INVALID")
+    expect(install).not.toHaveBeenCalled()
+    await expect(handlers.get("mods:community-examples:install")!(event, {
+      exampleId: "stage-debugger"
+    })).resolves.toEqual({ pluginId: "installed-stage-debugger", pluginName: "stage-debugger",
+      alreadyInstalled: false, requiresApproval: true })
+    expect(install).toHaveBeenCalledOnce()
+  } finally { await rm(directory, { recursive: true, force: true }) }
 })

@@ -23,6 +23,8 @@ import { isProjectPreviewId, projectPreviewRegistry } from "../mods/devtools/pro
 import { registerProjectPreviewHandlers } from "./project-preview"
 import { registerProjectRuntimeModsHandlers } from "./project-runtime-mods"
 import { projectAuthoringSessions } from "../mods/devtools/project-authoring-session"
+import { ProjectStageDebugSessions, configureProjectStageDebugResolver } from "../mods/devtools/project-stage-debug"
+import { getModsManager } from "../mods/manager"
 import { ProjectLibrary } from "../harness-board/project-runtime/project-library"
 import { registerProjectCompositionHandlers } from "./project-composition"
 import { createLegacyCompositionDependencies } from "../harness-board/project-runtime/composition-legacy-production"
@@ -44,6 +46,36 @@ export function registerProjectRuntimeHandlers(
   let service: HostProjectService | undefined
   let snapshots: HostPackageSnapshots | undefined
   let library: ProjectLibrary | undefined
+  let debugging: ProjectStageDebugSessions | undefined
+  function stageDebug() {
+    const manager = getModsManager()
+    if (!manager) throw Error("DEVELOPMENT_DISABLED")
+    debugging ??= new ProjectStageDebugSessions({
+      root: join(getOpenworkDir(), "project-stage-debug"), settings: manager.store,
+      sessions: projectAuthoringSessions, registry: projectPreviewRegistry, platform,
+      retainedRoot: (project) => snapshots!.read(project.pluginDigest).root,
+      assertInspectionScope: (scope) => {
+        const thread = getThreadCore(scope.threadId)
+        const metadata = typeof thread?.metadata === "string"
+          ? JSON.parse(thread.metadata) : thread?.metadata
+        if (!matchesThreadIncarnation(thread, scope.incarnation) ||
+          typeof metadata?.workspacePath !== "string" ||
+          !isSameWorkspacePath(metadata.workspacePath, scope.workspace))
+          throw Error("PROJECT_STAGE_DEBUG_INSPECTION_SCOPE_CHANGED")
+      },
+      assertWorkspaceIdle: (workspace) => {
+        for (const lease of listLocalThreadRunLeases()) {
+          const raw = getThreadCore(lease.threadId)?.metadata
+          const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
+          if (typeof metadata?.workspacePath === "string" &&
+            isSameWorkspacePath(metadata.workspacePath, workspace))
+            throw Error("PROJECT_STAGE_DEBUG_SOURCE_UNSETTLED")
+        }
+      }
+    })
+    return debugging
+  }
+  configureProjectStageDebugResolver(stageDebug)
   const runOwners = new Map<string, BrowserWindow>()
   const compositions = registerProjectCompositionHandlers(ipc, {
     trusted, host: platform,
@@ -127,6 +159,12 @@ export function registerProjectRuntimeHandlers(
       )
       snapshots = new HostPackageSnapshots(join(root, "packages"))
       service = new HostProjectService(store, snapshots, {
+        assertCommand: (project, kind) => stageDebug().assertCommand(project, kind),
+        authorizeStageBranch: async (context) => stageDebug().authorizeBranch(context),
+        beforeExecuteStage: async (context) => {
+          if (isProjectPreviewId(context.project.installedPluginId))
+            await stageDebug().beforeExecute(context)
+        },
         resolveInstalledPlugin: async (id) => {
           const plugin = isProjectPreviewId(id)
             ? projectPreviewRegistry.resolve(id)
@@ -152,8 +190,21 @@ export function registerProjectRuntimeHandlers(
           )
             throw Error("PROJECT_PLUGIN_UNAVAILABLE")
         },
+        authorizeInspection: async (project, operation) => {
+          const inspection = await stageDebug().authorizeInspection(project, operation)
+          if (inspection) return inspection
+          // Ordinary projects retain their original authorization requirements.
+          if (isProjectPreviewId(project.installedPluginId)) {
+            projectPreviewRegistry.assertProject(project)
+            return
+          }
+          if (!getPlugins().some((plugin) =>
+            plugin.id === project.installedPluginId && plugin.enabled))
+            throw Error("PROJECT_PLUGIN_UNAVAILABLE")
+        },
         inspectOperation: inspectHostProjectExecution,
         executeSkill: async (context) => {
+          context.stageDebug = stageDebug().executionPolicy(context.project)
           const bindThread = context.bindThread
           context.bindThread = (threadId) => {
             bindThread(threadId)
@@ -231,7 +282,8 @@ export function registerProjectRuntimeHandlers(
       if (current.pluginDigest !== project.pluginDigest) throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
     })
   })
-  registerProjectPreviewHandlers(ipc, trusted, platform, (project) => snapshots!.read(project.pluginDigest).root)
+  registerProjectPreviewHandlers(ipc, trusted, platform,
+    (project) => snapshots!.read(project.pluginDigest).root, stageDebug)
   registerProjectRuntimeModsHandlers(ipc, trusted, platform,
     project => snapshots!.read(project.pluginDigest).root, internalCompositionProject)
   function view(projectId: string) {
@@ -410,6 +462,7 @@ export function registerProjectRuntimeHandlers(
       const current = view(projectId)
       if (!command || typeof command !== "object" || Array.isArray(command))
         throw Error("PROJECT_INVALID_COMMAND")
+      stageDebug().assertCommand(current.project, command.kind)
       if (isProjectPreviewId(current.project.installedPluginId) &&
         command.kind !== "cancel" && command.kind !== "reconcile")
         projectPreviewRegistry.assertProject(current.project)
@@ -453,6 +506,7 @@ export function registerProjectRuntimeHandlers(
       const updated = api.get(projectId)!
       if (isProjectPreviewId(updated.installedPluginId))
         projectPreviewRegistry.complete(updated, api.operations(projectId, 100))
+      if (updated.status === "completed") stageDebug().end(updated)
       projectAuthoringSessions.notifyTrialProject(projectId)
       return view(projectId)
     }

@@ -90,10 +90,17 @@ async function platformResources() {
   return { root: join(destination, "community-originals"), destination }
 }
 
-it("ships all five local packages with distinct provenance and exact canonical bytes", async () => {
+it("ships every named local package including the independent stage debugger with exact canonical bytes", async () => {
   const { root: bundledRoot, destination } = await platformResources()
-  expect(PLATFORM_EXAMPLES).toHaveLength(5)
-  expect(new Set(BUNDLED_EXAMPLES.map((example) => example.id)).size).toBe(8)
+  expect(PLATFORM_EXAMPLES.map(example => example.id)).toEqual([
+    "task-workbench-provider", "task-workbench-consumer", "task-behavior-prefix",
+    "task-behavior-compact", "edit-reminder", "stage-debugger"
+  ])
+  expect(new Set(BUNDLED_EXAMPLES.map((example) => example.id)).size).toBe(9)
+  expect(PLATFORM_EXAMPLES.find(example => example.id === "stage-debugger")).toMatchObject({
+    pluginName: "stage-debugger", title: "阶段调试工作台", origin: "devclaw",
+    sourcePath: "examples/sparks-stage-debugger", version: "1.0.0"
+  })
   for (const example of PLATFORM_EXAMPLES) {
     expect(communityExampleId(example.id)).toBe(example.id)
     const directory = join(destination, "platform-examples", example.id)

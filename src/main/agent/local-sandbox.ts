@@ -129,9 +129,13 @@ import {
 } from "./shell-file-effects"
 import { extractShellCommandReadPaths } from "./shell-command-profile"
 import {
+  openStableFileHandle,
+  readStableFileHandleBounded,
   openStableWritableFileHandle,
   type StableWritableFileHandle
 } from "../services/stable-file-handle"
+import { currentStageDebugSourcePolicy } from "../plugins/runtime-source-scope"
+import { assertStageDebugToolCall, isStageDebugPolicyError, type StageDebugFilePolicy } from "../harness-board/project-runtime/stage-debug-policy"
 import {
   getHarnessStageAttributionForCodeGeneration,
   markHarnessStageAttributionDirty,
@@ -776,6 +780,7 @@ export class LocalSandbox
   }
   /** Cached from parent's private fields to avoid (this as any) scattered everywhere */
   private readonly _resolvePath: (key: string) => string
+  private readonly stageDebugFilePolicy?: StageDebugFilePolicy
   private readonly _virtualMode: boolean
   private readonly _cwd: string
   private readonly _maxFileSizeBytes: number
@@ -2095,6 +2100,7 @@ export class LocalSandbox
     // symlinked `rootDir`, but mixing that lexical alias with the canonical
     // boundary would falsely reject the default cwd as outside the worktree.
     this.workingDir = options.worktreeIsolation?.workspaceRoot ?? options.rootDir ?? process.cwd()
+    this.stageDebugFilePolicy = currentStageDebugSourcePolicy()
     this.worktreeIsolation = options.worktreeIsolation
       ? Object.freeze({ ...options.worktreeIsolation })
       : undefined
@@ -2170,6 +2176,17 @@ export class LocalSandbox
     // and writing to system root fails on macOS (SIP) and Windows (permissions).
     // MUST run before caching _resolvePath below, so the cache captures the patched version.
     this.patchResolvePath()
+
+    if (this.stageDebugFilePolicy) {
+      const policy = this.stageDebugFilePolicy
+      const internals = getFilesystemBackendInternals(this)
+      const original = internals.resolvePath.bind(this)
+      internals.resolvePath = (key: string) => {
+        const target = original(key === "/" ? policy.workspace : key)
+        assertStageDebugToolCall(policy, "read_file", { file_path: target })
+        return target
+      }
+    }
 
     // Cache the upstream wrapper once; protected options are mirrored from the
     // same constructor input so this code does not depend on private fields.
@@ -3284,6 +3301,9 @@ export class LocalSandbox
         LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput)
       )
     }
+    if (this.stageDebugFilePolicy)
+      assertStageDebugToolCall(this.stageDebugFilePolicy, toolName,
+        LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput))
     return preResult
   }
 
@@ -4402,7 +4422,7 @@ export class LocalSandbox
           ? updatedArgs.limit
           : limit
     } catch (error) {
-      if (isHookHaltError(error) || isFailureFuseHaltError(error)) throw error
+      if (isHookHaltError(error) || isFailureFuseHaltError(error) || isStageDebugPolicyError(error)) throw error
       throw error
     }
     if (this.isHiddenSkillPath(effectiveFilePath)) {
@@ -4475,7 +4495,7 @@ export class LocalSandbox
           this._skillHooksFired.add(skillHookKey)
         }
       } catch (hookError) {
-        if (isHookHaltError(hookError) || isFailureFuseHaltError(hookError)) throw hookError
+        if (isHookHaltError(hookError) || isFailureFuseHaltError(hookError) || isStageDebugPolicyError(hookError)) throw hookError
         console.warn("[Hooks] PreSkillUse error:", hookError)
       }
 
@@ -4591,7 +4611,7 @@ export class LocalSandbox
       }
       return finalResult
     } catch (e: unknown) {
-      if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
+      if (isHookHaltError(e) || isFailureFuseHaltError(e) || isStageDebugPolicyError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return await this.applyPostToolUseHookToText(
         "read_file",
@@ -4618,6 +4638,21 @@ export class LocalSandbox
     displayPath: string,
     maxBytes?: number
   ): Promise<{ buffer: Buffer; resolvedPath: string }> {
+    if (this.stageDebugFilePolicy) {
+      const policy = this.stageDebugFilePolicy
+      assertStageDebugToolCall(policy, "read_file", { file_path: resolvedPath })
+      const sourceRelative = path.relative(policy.snapshotRoot, resolvedPath)
+      const root = !sourceRelative.startsWith("..") && !path.isAbsolute(sourceRelative)
+        ? policy.snapshotRoot : policy.workspace
+      const opened = await openStableFileHandle(root, resolvedPath)
+      try {
+        if ((await opened.handle.stat()).nlink !== 1) throw Error("PROJECT_STAGE_DEBUG_LINK_UNSUPPORTED")
+        const buffer = await readStableFileHandleBounded(opened, maxBytes ?? this._maxFileSizeBytes)
+        await opened.assertPathIdentity()
+        assertStageDebugToolCall(policy, "read_file", { file_path: resolvedPath })
+        return { buffer, resolvedPath }
+      } finally { await opened.handle.close() }
+    }
     const assertReadableRegularFile = (stat: { isFile(): boolean; size: number }): void => {
       if (!stat.isFile()) {
         throw new Error(`File '${displayPath}' not found`)
@@ -5146,7 +5181,34 @@ export class LocalSandbox
       }
       getModCallContext()?.assertLive?.()
       this.retainedSourceGuard?.()
-      const r = await super.write(effectiveFilePath, effectiveContent)
+      let r: WriteResult
+      if (this.stageDebugFilePolicy) {
+        const policy = this.stageDebugFilePolicy
+        assertStageDebugToolCall(policy, "write_file", { filePath: resolvedPath })
+        await fs.mkdir(path.dirname(resolvedPath), { recursive: true })
+        assertStageDebugToolCall(policy, "write_file", { filePath: resolvedPath })
+        const parentIdentity = await fs.stat(path.dirname(resolvedPath), { bigint: true })
+        assertStageDebugToolCall(policy, "write_file", { filePath: resolvedPath })
+        // Unlike an overwrite path, exclusive creation cannot truncate a replaced file.
+        const opened = await fs.open(resolvedPath, "wx")
+        try {
+          const [stat, pathEntry, currentParent] = await Promise.all([
+            opened.stat({ bigint: true }),
+            fs.lstat(resolvedPath, { bigint: true }),
+            fs.stat(path.dirname(resolvedPath), { bigint: true })
+          ])
+          if (!stat.isFile() || stat.nlink !== 1n || !pathEntry.isFile() || pathEntry.isSymbolicLink() ||
+              stat.dev !== pathEntry.dev || stat.ino !== pathEntry.ino || pathEntry.nlink !== 1n ||
+              currentParent.dev !== parentIdentity.dev || currentParent.ino !== parentIdentity.ino)
+            throw Error("PROJECT_STAGE_DEBUG_PATH_CHANGED")
+          // Check the current namespace immediately before writing through the opened handle.
+          // This is an application boundary, not a directory lock or an OS sandbox.
+          assertStageDebugToolCall(policy, "write_file", { filePath: resolvedPath })
+          await opened.writeFile(effectiveContent, "utf-8")
+          assertStageDebugToolCall(policy, "write_file", { filePath: resolvedPath })
+        } finally { await opened.close() }
+        r = { path: effectiveFilePath, filesUpdate: null }
+      } else r = await super.write(effectiveFilePath, effectiveContent)
       if (!r.error) {
         await this.recordReadTime(resolvedPath)
         await noteFileToolWrite(resolvedPath, effectiveContent)
@@ -5187,7 +5249,7 @@ export class LocalSandbox
       return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
     } catch (e) {
       this.markHarnessStageAttributionDirty()
-      if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
+      if (isHookHaltError(e) || isFailureFuseHaltError(e) || isStageDebugPolicyError(e)) throw e
       console.warn("[Hooks] PostToolUse write error:", e)
       return result
     }
@@ -5387,7 +5449,10 @@ export class LocalSandbox
         }
         let managedCapability: StableWritableFileHandle | null = null
         try {
-          if (managedWorkflowScriptEdit) {
+          if (this.stageDebugFilePolicy) {
+            assertStageDebugToolCall(this.stageDebugFilePolicy, "edit_file", { filePath: resolvedPath })
+            managedCapability = await openStableWritableFileHandle(this.stageDebugFilePolicy.workspace, resolvedPath)
+          } else if (managedWorkflowScriptEdit) {
             if (!this._workflowScriptsDir) {
               return {
                 error: `Access denied — '${effectiveFilePath}' is not an editable workflow script.`
@@ -5454,6 +5519,8 @@ export class LocalSandbox
           }
           if (managedCapability) {
             getModCallContext()?.assertLive?.()
+            if (this.stageDebugFilePolicy)
+              assertStageDebugToolCall(this.stageDebugFilePolicy, "edit_file", { filePath: resolvedPath })
             await this.writeStableFileHandleEncoded(managedCapability, expectedContent, encoding)
             await this.recordStableReadTime(managedCapability)
           } else {
@@ -5516,12 +5583,12 @@ export class LocalSandbox
         return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
       } catch (e) {
         this.markHarnessStageAttributionDirty()
-        if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
+        if (isHookHaltError(e) || isFailureFuseHaltError(e) || isStageDebugPolicyError(e)) throw e
         console.warn("[Hooks] PostToolUse edit error:", e)
         return result
       }
     } catch (e: unknown) {
-      if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
+      if (isHookHaltError(e) || isFailureFuseHaltError(e) || isStageDebugPolicyError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return { error: `Error editing file '${effectiveFilePath}': ${msg}` }
     }

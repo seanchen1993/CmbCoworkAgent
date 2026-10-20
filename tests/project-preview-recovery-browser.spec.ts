@@ -43,18 +43,18 @@ async function main() {
       import React from 'react';import {createRoot} from 'react-dom/client';
       import {ProjectDevelopmentPreviewPanel} from './src/renderer/src/components/customize/ProjectDevelopmentPreviewPanel';
       const root=createRoot(document.getElementById('root')),listeners=new Set(),recoveries=[],finishes=[],active=new Set();
-      let version=1,status='needs-confirmation',unknown=false,pending,epoch=0,retained=true;
+      let version=1,status='needs-confirmation',unknown=false,pending,epoch=0,retained=true,debugBranch=false;
       window.api={mods:{development:{onChanged:fn=>{listeners.add(fn);return()=>listeners.delete(fn)}}},harnessBoard:{localProjects:{preview:{
         list:async threadId=>({threadId,workspace:'C:/creator/'+threadId,drafts:[{id:'docs',name:'文档 '+threadId,revision:2,digest:'d'.repeat(64),
           ...(active.has(threadId)?{projectId:'original-project-'+threadId}:retained?{recovery:{projectId:'original-project-'+threadId,
             revision:2,digest:'d'.repeat(64),workspace:'C:/original/'+threadId,goal:'保留原始需求',projectVersion:status==='missing'?null:version,
-            status,hasUnconfirmedEffects:unknown}}:{})}]}),
+            status,hasUnconfirmedEffects:unknown,debugBranch}}:{})}]}),
         recover:input=>{recoveries.push(input);return new Promise(resolve=>pending=()=>{active.add(input.threadId);resolve(input.projectId)})},
         finish:async input=>{finishes.push(input);retained=false},create:async()=>{throw Error('Recovery must not create a replacement project')}
       }}}};
       const show=threadId=>root.render(<React.StrictMode><ProjectDevelopmentPreviewPanel key={++epoch} threadId={threadId} workspace={'C:/creator/'+threadId}/></React.StrictMode>);
       window.fixture={recoveries,finishes,show,resolve:()=>pending(),bump:()=>{version++;for(const fn of listeners)fn({threadId:'A'})},
-        scenario:(next,unconfirmed=false)=>{active.clear();retained=true;status=next;unknown=unconfirmed;show('A')}};
+        scenario:(next,unconfirmed=false,debug=false)=>{active.clear();retained=true;status=next;unknown=unconfirmed;debugBranch=debug;show('A')}};
       show('A');
     `
     }
@@ -126,6 +126,24 @@ async function main() {
     await page.evaluate("window.fixture.scenario('missing')")
     await page.getByRole("button", { name: "清除未创建记录（保留文件）", exact: true }).click()
     assert.equal(await page.evaluate("window.fixture.finishes.length"), 2)
+    const recoveryCount = await page.evaluate("window.fixture.recoveries.length")
+    await page.evaluate("window.fixture.scenario('needs-confirmation',false,true)")
+    await page.getByText("调试分支仅保留历史记录", { exact: false }).waitFor()
+    assert.equal(await recover.count(), 0, "Cold debug branches must never offer ordinary native recovery")
+    await page.getByRole("button", { name: "查看调试分支历史与待核对结果", exact: true }).click()
+    await page.getByText("原项目 original-project-A", { exact: true }).waitFor()
+    await page.getByText("隔离调试分支的阶段操作", { exact: true }).waitFor()
+    assert.equal(await page.evaluate("window.fixture.recoveries.length"), recoveryCount,
+      "Inspecting historical debug results must not restore live execution")
+    await page.getByRole("button", { name: "结束保留的试用（保留文件）", exact: true }).click()
+    assert.equal(await page.evaluate("window.fixture.finishes.length"), 3)
+    await page.getByRole("button", { name: "创建试用项目（稍后开始任务）", exact: true }).waitFor()
+    await page.evaluate("window.fixture.scenario('needs-confirmation',true,true)")
+    await page.getByText("请先查看保留的执行记录并核对实际结果", { exact: false }).waitFor()
+    assert.equal(await recover.count(), 0)
+    assert.equal(await page.getByRole("button", { name: "结束保留的试用（保留文件）", exact: true }).isDisabled(), true,
+      "Unconfirmed debug effects retain native ownership and cannot be ended or replayed")
+    assert.equal(await page.evaluate("window.fixture.recoveries.length"), recoveryCount)
     assert.deepEqual(errors, [])
     await page.screenshot({ path: resolve(artifacts, "recovery-controls.png"), fullPage: true })
     console.log(

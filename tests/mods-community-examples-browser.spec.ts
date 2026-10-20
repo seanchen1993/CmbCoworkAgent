@@ -105,7 +105,7 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
       await click("确认并使用")
     }
     await page.getByRole("heading", { name: "挑一个小帮手" }).waitFor()
-    assert.equal(await page.getByRole("article").count(), 8)
+    assert.equal(await page.getByRole("article").count(), PLATFORM_EXAMPLES.length + 3)
     assert.deepEqual((await get()).calls, [])
     await card("用量天气").locator("summary").click()
     await card("用量天气").getByRole("button", { name: "查看官方源码", exact: true }).click()
@@ -198,6 +198,19 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
         .getByText(/默认文件 edit-reminder.txt 只创建一次/)
         .isVisible()
     )
+
+    await card("阶段调试工作台").locator("summary").click()
+    assert(await card("阶段调试工作台").getByText(/准备方案不会执行/).isVisible())
+    assert.equal(await card("阶段调试工作台").getByRole("button", { name: "查看官方源码" }).count(), 0)
+    await start("阶段调试工作台")
+    assert(await page.getByRole("button", { name: "确认并使用" }).isDisabled())
+    assert.equal((await get()).calls.filter(row => row[0] === "grant").length, 2)
+    assert((await get()).calls.some(row => row[0] === "install" && row[1] === "stage-debugger"))
+    await confirm()
+    await card("阶段调试工作台").getByRole("button", { name: "正在使用" }).waitFor()
+    state = await get()
+    assert(state.claw.active.capabilities.some(row => row.name === "stage-debugger"))
+    assert.deepEqual(state.claw.active.models, { default: "chosen", roles: { Explore: "fast" } })
 
     await call("disabled")
     await start("危险命令确认")
@@ -308,7 +321,7 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
         await page.locator('[data-active="true"]').waitFor()
       }
       await page.getByRole("article", { name: "用量天气", exact: true }).waitFor()
-      assert.equal(await page.getByRole("article").count(), 8)
+      assert.equal(await page.getByRole("article").count(), PLATFORM_EXAMPLES.length + 3)
       assert.equal(await page.getByRole("alert").count(), 0)
       assert.equal(await page.getByRole("dialog").count(), 0)
       assert.deepEqual((await get()).calls, [])
@@ -341,7 +354,7 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
         2
       )
     )
-    console.log(`PASS official examples browser: 14 scenarios; ${output}`)
+    console.log(`PASS official examples browser: 15 scenarios; ${output}`)
   } finally {
     await browser.close()
   }

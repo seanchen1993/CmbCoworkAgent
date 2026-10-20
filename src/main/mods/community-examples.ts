@@ -101,6 +101,16 @@ export const PLATFORM_EXAMPLES: readonly CommunityExample[] = [
     origin: "devclaw",
     sourcePath: "examples/sparks-edit-reminder",
     version: "1.0.0"
+  },
+  {
+    id: "stage-debugger",
+    pluginName: "stage-debugger",
+    title: "阶段调试工作台",
+    description: "在独立侧栏发现真实阶段快照、准备调试方案、观察固定候选的原生结果。",
+    usage: "在原创造会话添加并授权；完成受支持的 Host 文件流程试用、保存仅修改 Skill 正文的新候选后，打开侧栏刷新并选择快照和候选。准备方案不会执行，转到原生工作区后仍需重新准备、核对确认，再创建和启动。隔离分支不加载本灵件。",
+    origin: "devclaw",
+    sourcePath: "examples/sparks-stage-debugger",
+    version: "1.0.0"
   }
 ]
 
@@ -111,6 +121,12 @@ export const BUNDLED_EXAMPLES: readonly CommunityExample[] = [
 
 // Fixed executable bytes from the canonical directories copied by the build resource mirror.
 const platformFiles: Record<string, Record<string, string>> = {
+  "stage-debugger": {
+    "hooks/hooks.json": "1c3cfc433b9383b0f6d714b7599d81bbc585d104ae2dffe321a190d81010ce5b",
+    "hooks/register.ts": "a2b64e1c7a5e91eea7f2ddb0230908101695c064f09a8ba5b1738a370e1912c7",
+    "plugin.json": "b7cf01b329ff798633cf7c90c09db81ef91c9ea0cfb5f89c2b92fa98902d8a14",
+    "README.md": "682390bee8d740d19f8af5ff702fd7fcdcac2b12fd4708d638fed1efbb44ace6"
+  },
   "task-workbench-provider": {
     "hooks/hooks.json": "1c3cfc433b9383b0f6d714b7599d81bbc585d104ae2dffe321a190d81010ce5b",
     "hooks/register.ts": "e5e8f877bde33aef2d41029dac9b0ff7b677a7e85c39deb114649c1fc2f89e0a",

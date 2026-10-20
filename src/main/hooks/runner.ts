@@ -39,6 +39,8 @@ import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { withCompletionModelBudget } from "../agent/mods-model-boundary"
 import { isCreatorBudgetError, readCreatorBudgetErrorCode } from "../mods/devtools/creator-model-accounting"
 import { readHookModelAccounting, type HookModelAccounting } from "./model-accounting"
+import { assertStageDebugToolCall } from "../harness-board/project-runtime/stage-debug-policy"
+import { HookHaltError } from "./halt"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -1965,6 +1967,16 @@ export async function runHooks(
   context: HookContext,
   onHookResult?: HookResultCallback
 ): Promise<HookResult | null> {
+  const source = currentRuntimePluginSource()
+  if (source?.stageDebug) {
+    // Preserve mandatory checks by refusing the unsupported run, never suppressing a Hook.
+    if (getModsManager()?.isActive(source.stageDebug.workspace))
+      throw new HookHaltError({ hookEvent: event, fallbackReason: "PROJECT_STAGE_DEBUG_MODS_UNSUPPORTED" })
+    if (hooks.some(hook => hookMatchesRunCriteria(hook, event, context)))
+      throw new HookHaltError({ hookEvent: event, fallbackReason: `PROJECT_STAGE_DEBUG_HOOK_UNSUPPORTED:${event}` })
+    if (event === "PreToolUse") assertStageDebugToolCall({ ...source.stageDebug,
+      snapshotRoot: source.plugin.path }, context.toolName ?? "", context.toolArgs)
+  }
   const accounting = readHookModelAccounting(context)
   const generation = currentOnceGeneration(getOnceSessionId(context))
   const callContext = getModCallContext()

@@ -146,6 +146,16 @@ export class HostProjectStore {
   }
 
   create(input: HostProjectCreateInput): HostProjectState {
+    return this.createAtStage(input)
+  }
+
+  /** Main-only branch construction after service-owned baseline admission, never a stage advance. */
+  createBranch(input: HostProjectCreateInput, stageId: string): HostProjectState {
+    hostText(stageId)
+    return this.createAtStage(input, stageId)
+  }
+
+  private createAtStage(input: HostProjectCreateInput, stageId?: string): HostProjectState {
     hostRecord(input, [
       "projectId",
       "name",
@@ -159,7 +169,7 @@ export class HostProjectStore {
     ])
     if (!isAbsolute(input.workspace)) hostStateError("WORKSPACE_INVALID")
     const timestamp = this.now()
-    const state = parseHostProjectState({
+    let state = parseHostProjectState({
       ...input,
       workspace: resolve(input.workspace),
       schemaVersion: 1,
@@ -170,6 +180,11 @@ export class HostProjectStore {
       createdAt: timestamp,
       updatedAt: timestamp
     })
+    if (stageId !== undefined) {
+      const stageIndex = state.manifest.stages.findIndex((stage) => stage.id === stageId)
+      if (stageIndex < 0) hostStateError("BRANCH_STAGE_MISSING")
+      state = parseHostProjectState({ ...state, stageIndex })
+    }
     return this.transaction(() => {
       if (this.get(state.projectId)) hostStateError("PROJECT_EXISTS")
       this.db

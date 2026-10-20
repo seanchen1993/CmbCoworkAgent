@@ -23,6 +23,7 @@ import { PROJECT_ACTION_LOCK_PATH } from "../../../shared/project-runtime/action
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { DevelopmentCandidateError } from "../../mods/devtools/development-candidate-diagnostics"
 import { CREATOR_REQUEST_LIMITS } from "../../mods/devtools/creator-request-budget"
+import { getProjectStageDebugSessions } from "../../mods/devtools/project-stage-debug"
 
 const schema = z
   .object({
@@ -48,6 +49,8 @@ const schema = z
       "project_test",
       "project_dev",
       "project_request_trial",
+      "project_stage_debug_list",
+      "project_stage_debug_prepare",
       "project_list",
       "project_pack",
       "project_actions",
@@ -64,6 +67,8 @@ const schema = z
     revision: z.number().int().min(0).optional(),
     instruction: z.string().min(1).max(2000).optional(),
     goal: z.string().min(1).max(8000).optional(),
+    snapshotId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    debugMode: z.enum(["stage", "downstream"]).optional(),
     kind: z.enum(["command", "tool", "rule", "panel", "flow-action"]).optional(),
     files: z
       .array(z.object({ path: z.string().max(240), text: z.string().max(65536) }))
@@ -186,6 +191,22 @@ export function createModAuthoringTool(input: {
         }
         let result: unknown
         switch (args.action) {
+          case "project_stage_debug_list": {
+            result = getProjectStageDebugSessions().list(project())
+            break
+          }
+          case "project_stage_debug_prepare": {
+            const context = project()
+            if (!args.snapshotId) throw Error("PROJECT_STAGE_DEBUG_SNAPSHOT_REQUIRED")
+            const candidate = projectAuthoringSessions.read(context.scope, id())
+            if (candidate.revision !== revision()) throw Error("PROJECT_DRAFT_REVISION_CHANGED")
+            result = await getProjectStageDebugSessions().prepare(context, {
+              threadId, snapshotId: args.snapshotId, draftId: candidate.id,
+              revision: candidate.revision, expectedDigest: candidate.source.digest,
+              mode: args.debugMode ?? "stage"
+            })
+            break
+          }
           case "project_actions": {
             const context = project()
             const catalog = await projectCatalog(context)

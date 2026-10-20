@@ -5,7 +5,7 @@ import { readCoordinatorWorkerModsContext } from "../agent/coordinator-worker-mo
 import { readNativeChildModsContext } from "../agent/native-child-mods-context"
 import { getThreadCore } from "../db"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
-import { captureRuntimePluginSourceAuthorityGuard } from "../plugins/runtime-source-scope"
+import { captureRuntimePluginSourceAuthorityGuard, currentStageDebugSourcePolicy } from "../plugins/runtime-source-scope"
 import type { FunctionConversationGraphBinding } from "../agent/mods-conversation"
 import type { FunctionSessionAppendTicket } from "./v2/session-append-ticket"
 import type { FunctionSessionAppendResult } from "../../shared/mods/v2/session-append"
@@ -2588,7 +2588,9 @@ export class ModsManager {
   isEnabled(workspace: string): boolean {
     const cached = this.settings.get(this.canonical.get(workspace) ?? workspace)
     if (cached?.enabled === false) return false
-    return this.globalEnabled() && this.config(this.workspaceKey(workspace)).enabled
+    const enabled = this.globalEnabled() && this.config(this.workspaceKey(workspace)).enabled
+    if (enabled && currentStageDebugSourcePolicy()) throw Error("PROJECT_STAGE_DEBUG_MODS_UNSUPPORTED")
+    return enabled
   }
 
   async createCompletionGate(workspace: string, threadId: string, context: () => ModObject) {
@@ -2851,20 +2853,30 @@ export class ModsManager {
   }
 
   isActive(workspace: string): boolean {
-    if (this.policy.required) return true
+    if (this.policy.required) {
+      if (currentStageDebugSourcePolicy()) throw Error("PROJECT_STAGE_DEBUG_MODS_UNSUPPORTED")
+      return true
+    }
     const cached = this.settings.get(this.canonical.get(workspace) ?? workspace)
     if (cached && !cached.enabled && !cached.policy) return false
     if (!this.globalEnabled()) return false
     const value = this.config(this.workspaceKey(workspace))
-    return value.enabled || value.policy
+    const active = value.enabled || value.policy
+    if (active && currentStageDebugSourcePolicy()) throw Error("PROJECT_STAGE_DEBUG_MODS_UNSUPPORTED")
+    return active
   }
 
   protects(workspace: string): boolean {
-    if (this.policy.required) return true
+    if (this.policy.required) {
+      if (currentStageDebugSourcePolicy()) throw Error("PROJECT_STAGE_DEBUG_MODS_UNSUPPORTED")
+      return true
+    }
     const cached = this.settings.get(this.canonical.get(workspace) ?? workspace)
     if (cached?.policy === false) return false
     if (!this.globalEnabled()) return false
-    return this.config(this.workspaceKey(workspace)).policy
+    const active = this.config(this.workspaceKey(workspace)).policy
+    if (active && currentStageDebugSourcePolicy()) throw Error("PROJECT_STAGE_DEBUG_MODS_UNSUPPORTED")
+    return active
   }
 
   async publish<T>(workspace: string, value: T, callId?: string, signal?: AbortSignal): Promise<T> {

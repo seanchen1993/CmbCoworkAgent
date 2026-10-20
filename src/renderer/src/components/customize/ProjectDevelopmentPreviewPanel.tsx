@@ -1,3 +1,4 @@
+import type { StageDebugReviewIntent } from "../../../../shared/mods/v2/project-stage-debug-review"
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import type {
   ProjectPreviewApi,
@@ -6,6 +7,7 @@ import type {
 import { isSameWorkspacePath } from "../../../../shared/workspace-path"
 import type { DevelopmentProjectTrialRequest } from "../../../../shared/mods/development"
 import { CreatorTrialJourneyCard } from "./CreatorTrialJourneyCard"
+import { ProjectStageDebugPanel } from "./ProjectStageDebugPanel"
 const LocalProjectRun = lazy(() =>
   import("../harness-board/LocalProjectsPanel").then((module) => ({
     default: module.LocalProjectRun
@@ -18,6 +20,7 @@ export function ProjectDevelopmentPreviewPanel(props: {
   request?: DevelopmentProjectTrialRequest
   onRequestRepair?: (message: string) => void | Promise<void>
   onReturnToChat?: () => void
+  stageDebugReview?: StageDebugReviewIntent
   showJourney?: boolean
 }) {
   const api = window.api.harnessBoard?.localProjects?.preview
@@ -31,6 +34,7 @@ function ScopedPreview({
   request,
   onRequestRepair,
   onReturnToChat,
+  stageDebugReview,
   showJourney = true
 }: {
   threadId: string
@@ -39,6 +43,7 @@ function ScopedPreview({
   request?: DevelopmentProjectTrialRequest
   onRequestRepair?: (message: string) => void | Promise<void>
   onReturnToChat?: () => void
+  stageDebugReview?: StageDebugReviewIntent
   showJourney?: boolean
 }) {
   const [drafts, setDrafts] = useState<ProjectPreviewDraft[]>([])
@@ -47,11 +52,25 @@ function ScopedPreview({
   const [goal, setGoal] = useState(request?.goal ?? "")
   const [confirmed, setConfirmed] = useState(false)
   const [selected, setSelected] = useState<string>()
+  const [selectedDebug, setSelectedDebug] = useState(false)
+  const [debugOpen, setDebugOpen] = useState(!!stageDebugReview)
   const [feedback, setFeedback] = useState("")
   const [feedbackSaved, setFeedbackSaved] = useState(false)
   const requestDraftId = request?.draftId
   const requestRevision = request?.revision
   const requestDigest = request?.digest
+  const openedByReview = useRef(!!stageDebugReview)
+  const debugOpenRef = useRef(debugOpen)
+  debugOpenRef.current = debugOpen
+  useEffect(() => {
+    if (stageDebugReview) {
+      if (!debugOpenRef.current) openedByReview.current = true
+      setDebugOpen(true)
+    } else if (openedByReview.current) {
+      openedByReview.current = false
+      setDebugOpen(false)
+    }
+  }, [stageDebugReview?.id])
   const facts = useRef("")
   const live = useRef(false),
     sequence = useRef(0),
@@ -203,7 +222,7 @@ function ScopedPreview({
                 <button
                   type="button"
                   className="underline"
-                  onClick={() => setSelected(draft.projectId)}
+                  onClick={() => { setSelectedDebug(false); setSelected(draft.projectId) }}
                 >
                   查看本轮执行与阶段操作
                 </button>
@@ -233,7 +252,9 @@ function ScopedPreview({
                   原试用文件夹：{draft.recovery.workspace}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  {draft.recovery.status === "draft-changed"
+                  {draft.recovery.debugBranch
+                    ? "调试分支仅保留历史记录，请结束保留试用，再从原阶段快照准备新分支。旧执行授权不会恢复，原文件和检查记录保留。"
+                    : draft.recovery.status === "draft-changed"
                     ? "草稿已改变，不能将新代码替换进原试用。可保留文件并结束旧试用，再创建新版本。"
                     : draft.recovery.status === "missing"
                       ? "未找到已创建项目，可清除未完成的创建记录；文件仍保留。"
@@ -241,10 +262,18 @@ function ScopedPreview({
                         ? "原项目已完成，可结束试用并保留项目记录与产物。"
                         : "尚未恢复执行权限。重新核对会检查原项目、源码版本和当前授权；原来尚未执行的任务须重新准备与确认。"}
                   {draft.recovery.hasUnconfirmedEffects
-                    ? " 原任务结果尚未确认。恢复后请在原执行记录中核对结果，不能直接重跑或结束试用。"
+                    ? draft.recovery.debugBranch
+                      ? " 原任务结果尚未确认。请先查看保留的执行记录并核对实际结果，不能直接重跑或结束试用。"
+                      : " 原任务结果尚未确认。恢复后请在原执行记录中核对结果，不能直接重跑或结束试用。"
                     : ""}
                 </p>
-                {draft.recovery.status === "needs-confirmation" && (
+                {draft.recovery.debugBranch && draft.recovery.status !== "missing" && (
+                  <button type="button" className="underline" onClick={() => {
+                    setSelectedDebug(true)
+                    setSelected(draft.recovery!.projectId)
+                  }}>查看调试分支历史与待核对结果</button>
+                )}
+                {!draft.recovery.debugBranch && draft.recovery.status === "needs-confirmation" && (
                   <button
                     type="button"
                     className="rounded border px-3 py-2 disabled:opacity-50"
@@ -261,6 +290,7 @@ function ScopedPreview({
                           expectedProjectVersion: saved.projectVersion!
                         })
                         if (!live.current) return
+                        setSelectedDebug(false)
                         setSelected(projectId)
                         setConfirmed(false)
                         await read()
@@ -314,6 +344,7 @@ function ScopedPreview({
                       goal
                     })
                     if (!live.current) return
+                    setSelectedDebug(false)
                     setSelected(projectId)
                     setConfirmed(false)
                     await read()
@@ -328,10 +359,25 @@ function ScopedPreview({
             threadId={threadId} digest={draft.digest} journey={draft.journey} />}
         </article>
       ))}
+      {api.stageDebug && <details className="rounded-xl border p-3" open={debugOpen}
+        onToggle={event => setDebugOpen(event.currentTarget.open)}>
+        <summary className="cursor-pointer text-sm font-medium"
+          onClick={() => { openedByReview.current = false }}>按阶段修改与隔离调试</summary>
+        {debugOpen && <div className="mt-3"><ProjectStageDebugPanel threadId={threadId}
+          workspace={workspace} draftId={stageDebugReview?.draftId ?? requestDraftId} preview={api}
+          stageDebugReview={stageDebugReview}
+          selectedProjectId={selected}
+          onOpenProject={projectId => { setSelectedDebug(true); setSelected(projectId) }}
+          onFinishProject={projectId => setSelected(current => current === projectId ? undefined : current)}
+          onOpenSource={projectId => { setSelectedDebug(false); setSelected(projectId) }}
+          onRequestRepair={onRequestRepair} onReturnToChat={onReturnToChat} /></div>}
+      </details>}
       {selected && (
         <section aria-label="本轮试用项目执行" className="min-w-0 space-y-3 rounded-xl border p-3">
-        <h4 className="font-medium">同一轮试用中的阶段操作</h4>
-        <p className="text-xs text-muted-foreground">在这里执行、确认和推进原项目阶段；完成单个会话后，返回上方整轮验收查看检查结果。</p>
+        <h4 className="font-medium">{selectedDebug ? "隔离调试分支的阶段操作" : "同一轮试用中的阶段操作"}</h4>
+        <p className="text-xs text-muted-foreground">{selectedDebug
+          ? "在原生入口重新授权并执行所选范围；调试结果回到“按阶段修改与隔离调试”查看，不计为原项目整轮通过。"
+          : "在这里执行、确认和推进原项目阶段；完成单个会话后，返回上方整轮验收查看检查结果。"}</p>
         <Suspense fallback={<p>正在打开试用项目…</p>}>
           <LocalProjectRun key={selected} projectId={selected} onChanged={() => void act(read)} />
         </Suspense>

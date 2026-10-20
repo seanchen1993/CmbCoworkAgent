@@ -1,3 +1,4 @@
+import type { StageDebugReviewIntent } from "../../../../shared/mods/v2/project-stage-debug-review"
 import { developmentCapabilityLabel } from "./development-capability-label"
 import {
   developmentCapabilitySummary,
@@ -157,6 +158,11 @@ function CreatorWorkspaceEntry({ onSelect }: { onSelect?: () => Promise<void> })
   )
 }
 
+function reviewTargetsProjectTrial(intent: StageDebugReviewIntent, trial: DevelopmentStatus["projectTrial"]): boolean {
+  return !!trial && intent.draftId === trial.draftId && intent.revision === trial.revision &&
+    intent.candidateDigest === trial.digest
+}
+
 function ScopedDevelopment({
   threadId,
   workspaceHint,
@@ -201,6 +207,7 @@ function ScopedDevelopment({
   const announcedCompositionFailure = useRef("")
   const announcedReuse = useRef("")
   const [projectPreviewOpen, setProjectPreviewOpen] = useState(false)
+  const [stageDebugReview, setStageDebugReview] = useState<StageDebugReviewIntent>()
   const [creatorOptionsOpen, setCreatorOptionsOpen] = useState(false)
   const [businessTrialOpen, setBusinessTrialOpen] = useState(false)
   const accept = useCallback(
@@ -305,6 +312,41 @@ function ScopedDevelopment({
       }
     )
   const creatorMode = status?.mode === "creator" || (status?.mode === undefined && status?.enabled)
+  const creatorReady = !!status?.enabled && !!creatorMode
+  const inlineStageDebugReview = stageDebugReview && reviewTargetsProjectTrial(stageDebugReview, status?.projectTrial)
+    ? stageDebugReview : undefined
+  const independentStageDebugReview = inlineStageDebugReview ? undefined : stageDebugReview
+  useEffect(() => {
+    const reviewApi = window.api.mods.stageDebugReview
+    if (!creatorMode || !status?.workspace || !reviewApi) {
+      setStageDebugReview(undefined)
+      return
+    }
+    let cancelled = false
+    const workspace = status.workspace
+    let observed = ""
+    const refreshReview = async () => {
+      try {
+        // Read back from the native ephemeral ledger. Event JSON alone never selects a plan.
+        const intent = await reviewApi.current(threadId)
+        if (cancelled || !intent || intent.threadId !== threadId || intent.expiresAt <= Date.now() ||
+          normalizeWorkspacePathKey(intent.workspace) !== normalizeWorkspacePathKey(workspace) ||
+          intent.id === observed) return
+        observed = intent.id
+        setStageDebugReview(intent)
+        setProjectPreviewOpen(!reviewTargetsProjectTrial(intent, status?.projectTrial))
+        setOpen(true)
+        requestAnimationFrame(() => workspaceBody.current
+          ?.querySelector<HTMLElement>('[data-creator-stage-debug-review]')
+          ?.scrollIntoView({ block: "start" }))
+      } catch { if (!cancelled) setStageDebugReview(undefined) }
+    }
+    const stop = reviewApi.onRequested(intent => {
+      if (intent.threadId === threadId) void refreshReview()
+    })
+    void refreshReview()
+    return () => { cancelled = true; stop() }
+  }, [threadId, status?.workspace, creatorMode, status?.projectTrial?.draftId, status?.projectTrial?.revision, status?.projectTrial?.digest])
   const awaitingApproval =
     status?.trials.filter((row) => row.phase === "needs-approval").length ?? 0
   const active = status?.trials.some(
@@ -527,12 +569,23 @@ function ScopedDevelopment({
           刷新状态
         </button>
       </div>
+      {status && !creatorReady && <section aria-label="重新进入创造者模式" className="space-y-3 rounded-xl border bg-muted/30 p-4">
+        <h3 className="font-medium">本次创作控制尚未开启</h3>
+        <p className="text-sm leading-6 text-muted-foreground">
+          当前处于普通模式，或应用重启后尚未重新进入创造者模式。项目候选与阶段调试历史需要重新进入后读取；没有显示记录，不表示候选、阶段快照或试用历史已丢失。
+        </p>
+        <p className="text-xs leading-5 text-muted-foreground">
+          请明确重新进入后查看原候选与阶段调试历史。重新进入只建立本次创作控制，历史文件与检查记录保留；不会恢复旧分支的运行授权或工具批准，也不会把历史通过结果计为新执行的验收。新的执行须重新确认。
+        </p>
+        <button type="button" className={primaryButton} disabled={busy}
+          onClick={() => changeMode("creator")}>重新进入创造者模式</button>
+      </section>}
       {(!awaitingApproval || projectCreation) && <div className="space-y-3 rounded-xl border bg-muted/30 p-4" aria-label="创作流程导航">
         <p className="text-sm font-medium">
           {hostBusinessReview && status?.projectTrial ? `${status.projectTrial.name} · 版本 ${status.projectTrial.revision}`
             : businessReview ? `${businessReview.name} · v${businessReview.version}`
             : status?.projectTrial ? `${status.projectTrial.name} · 版本 ${status.projectTrial.revision}`
-              : "从需求到可复用插件"}
+              : creatorReady ? "从需求到可复用插件" : "重新进入后查看原会话的持久创作记录"}
         </p>
         {useProjectCandidate && projectJourney && <div role="status" className="space-y-1 text-sm">
           <p className="font-medium">{projectJourney.label}</p>
@@ -577,7 +630,7 @@ function ScopedDevelopment({
       {(projectCreation || !!status?.configuration || !status?.trials.length) && <>
       <section data-creator-section="trial" aria-label="试用当前候选" className="scroll-mt-4 space-y-3">
       <h3 className="font-semibold">运行试用与核对结果</h3>
-      {!businessReview && !status?.projectTrial && <p className="text-sm text-muted-foreground">
+      {creatorReady && !businessReview && !status?.projectTrial && <p className="text-sm text-muted-foreground">
         还没有准备好项目候选。回到原聊天提出需求，助手准备好当前版本后，将在这里显示试用入口。
       </p>}
       {businessReview && !hostBusinessReview && (
@@ -591,7 +644,8 @@ function ScopedDevelopment({
         </div>
       )}
       {status?.projectTrial && (
-        <article className="space-y-3 rounded-xl border bg-card p-3" aria-label="项目真实试用请求">
+        <article className="space-y-3 rounded-xl border bg-card p-3" aria-label="项目真实试用请求"
+          data-creator-stage-debug-review={inlineStageDebugReview ? true : undefined}>
           {!useProjectCandidate && <p className="text-xs font-medium text-muted-foreground">其他项目试用记录 · 与当前组装来源不同</p>}
           <p className="text-sm font-medium">{status.projectTrial.name} · 版本 {status.projectTrial.revision}</p>
           <p className="text-xs leading-5 text-muted-foreground">
@@ -600,6 +654,7 @@ function ScopedDevelopment({
           </p>
           <ProjectDevelopmentPreviewPanel key={status.projectTrial.id} threadId={threadId}
             workspace={status.workspace} request={status.projectTrial} showJourney={!useProjectCandidate}
+            stageDebugReview={inlineStageDebugReview}
             onRequestRepair={onRequestRepair} onReturnToChat={() => {
               focusChatAfterClose.current = true
               setOpen(false)
@@ -631,7 +686,7 @@ function ScopedDevelopment({
           digest={status.projectTrial.digest} journey={status.projectTrial.journey} />}
         {businessReview && !hostBusinessReview && api.businessTrial && !businessTrialDiagnostic ? <button type="button" className={button}
           onClick={() => { setOpen(false); setBusinessTrialOpen(true) }}>查看本轮阶段和验收记录</button>
-          : !status?.projectTrial && <p className="text-xs text-muted-foreground">项目候选准备后将在这里显示逐阶段校验；缺少凭据时显示待核对。</p>}
+          : creatorReady && !status?.projectTrial && <p className="text-xs text-muted-foreground">项目候选准备后将在这里显示逐阶段校验；缺少凭据时显示待核对。</p>}
       </section>
       <section data-creator-section="delivery" aria-label="保存插件交付" className="scroll-mt-4 space-y-3">
         <h3 className="font-semibold">保存为插件并复用</h3>
@@ -655,7 +710,8 @@ function ScopedDevelopment({
       </section>
       </>}
       <details data-creator-section="create" className="scroll-mt-4 space-y-3 rounded-xl border p-4"
-        open={!businessReview && !status?.projectTrial || awaitingApproval > 0 || failed || uncertain}>
+        open={!businessReview && !status?.projectTrial || awaitingApproval > 0 || failed || uncertain ||
+          !!independentStageDebugReview && projectPreviewOpen}>
       <summary className="cursor-pointer font-semibold">Mod 组件、聊天组合与高级制作设置</summary>
       <p className="text-xs leading-5 text-muted-foreground">这里管理当前聊天中的 Mod。项目试用、整轮验收和插件交付分别在上方独立区域查看。</p>
       {reuse && (
@@ -1018,9 +1074,10 @@ function ScopedDevelopment({
       )}
       {status?.enabled && (
         <details className="rounded-lg border px-3 py-2 text-xs text-muted-foreground"
-          onToggle={(event) => setProjectPreviewOpen(event.currentTarget.open)}>
+          open={projectPreviewOpen} onToggle={(event) => setProjectPreviewOpen(event.currentTarget.open)}>
           <summary className="cursor-pointer">高级：独立项目试用</summary>
-          {projectPreviewOpen && <ProjectDevelopmentPreviewPanel threadId={threadId} workspace={status.workspace} />}
+          {projectPreviewOpen && <div data-creator-stage-debug-review><ProjectDevelopmentPreviewPanel
+            threadId={threadId} workspace={status.workspace} stageDebugReview={independentStageDebugReview} /></div>}
         </details>
       )}
       {!!status?.drafts.length && !reuse && !status.trials.some((row) => row.phase === "active") && (

@@ -31,7 +31,8 @@ import { createWorkflowChildModsRuntime } from "./workflow-child-mods-context"
 import { createHookAccountingBinder, type HookAccountingBinder } from "../hooks/model-accounting"
 import { createClawSkillsMiddleware } from "./claw-skills-middleware"
 import { readNativeSkillUsagePolicy } from "../plugins/native-skill-usage"
-import { currentRuntimePluginSource } from "../plugins/runtime-source-scope"
+import { assertCurrentRuntimePluginSourceContent, currentRuntimePluginSource } from "../plugins/runtime-source-scope"
+import { isSameWorkspacePath } from "../../shared/workspace-path"
 import { captureNativeCapabilityContext } from "../mods/project-capability-context"
 import { randomUUID } from "node:crypto"
 import { createModAttachmentTransform, type ModAttachmentTransform } from "./mods-prompt-attachment"
@@ -48,6 +49,10 @@ import { restrictClawMcpService } from "../mods/claw-mcp"
 import { createFunctionToolBatchMiddleware, type FunctionToolBatchOptions } from "./mods-tool-batch"
 import { createFunctionPeerMiddleware } from "./mods-peer-inbox"
 import { createModAgentRoleLimits } from "./mods-agent-role-limits"
+import {
+  createStageDebugFileMiddleware,
+  STAGE_DEBUG_TOOL_NAMES
+} from "../harness-board/project-runtime/stage-debug-policy"
 import {
   createInstructionsLoadedMiddleware,
   type InstructionsLoadedOptions
@@ -280,7 +285,7 @@ import {
   getLspConfig,
   isThreadMemoryEnabled
 } from "../storage"
-import { runHooks, type HookContext } from "../hooks/runner"
+import { hookMatchesRunCriteria, runHooks, type HookContext } from "../hooks/runner"
 import type { HookEvent } from "../hooks/types"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { bindHookExecutionResult } from "../hooks/execution-result"
@@ -5798,6 +5803,35 @@ export function captureAgentCreatorAccounting(options: Pick<CreateAgentRuntimeOp
 }
 
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
+  const debugSource = currentRuntimePluginSource()
+  const stageDebug = debugSource?.stageDebug
+  const assertStageDebugEnvironment = () => {
+    if (!stageDebug) return
+    if (!isSameWorkspacePath(stageDebug.workspace, options.workspacePath) ||
+        !isSameWorkspacePath(stageDebug.workspace, debugSource!.workspace))
+      throw Error("PROJECT_STAGE_DEBUG_SCOPE_CHANGED")
+    if (getModsManager()?.isActive(stageDebug.workspace))
+      throw Error("PROJECT_STAGE_DEBUG_MODS_UNSUPPORTED")
+    for (const hook of getEnabledHooks(stageDebug.workspace)) {
+      if (!hook.enabled) continue
+      const fileEvent = ["PreToolUse", "PostToolUse", "PostToolUseFailure"].includes(hook.event)
+      if (fileEvent && !STAGE_DEBUG_TOOL_NAMES.some(toolName => hookMatchesRunCriteria(
+        { ...hook, if: undefined, once: false }, hook.event,
+        { workspacePath: stageDebug.workspace, sessionId: options.threadId, toolName }
+      ))) continue
+      throw Error(`PROJECT_STAGE_DEBUG_HOOK_UNSUPPORTED:${hook.event}`)
+    }
+    assertCurrentRuntimePluginSourceContent()
+  }
+  assertStageDebugEnvironment()
+  if (stageDebug) {
+    if (options.flowFiles || options.flowPromptOnly || options.worktreeIsolation ||
+        options.agentMode && options.agentMode !== "normal")
+      throw Error("PROJECT_STAGE_DEBUG_RUNTIME_UNSUPPORTED")
+    options = { ...options, disableSubagents: true, disableMcpTools: true, memoryEnabled: false, toolStrategy: "standard",
+      allowedToolNames: STAGE_DEBUG_TOOL_NAMES.filter(name => !options.allowedToolNames || options.allowedToolNames.includes(name)),
+      additionalTools: [] }
+  }
   const accounting = captureAgentCreatorAccounting(options)
   const traceId = accounting ? readCreatorTraceId(options.traceContext) : undefined
   const creatorAccounting = accounting?.forTrace(traceId, options.abortSignal)
@@ -8519,6 +8553,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     onNativeConversationTranscriptFlush: options.onNativeConversationTranscriptFlush,
     nativeConversationInput: options.nativeConversationInput,
     middleware: [
+      ...(stageDebug ? [createStageDebugFileMiddleware({ ...stageDebug,
+        snapshotRoot: debugSource!.plugin.path }, assertStageDebugEnvironment)] : []),
       ...(options.onModelBoundary || assertFixedSourceContent
         ? [
             createRuntimeSourceBoundary(assertFixedSourceContent, options.onModelBoundary)

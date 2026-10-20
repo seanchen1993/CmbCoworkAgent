@@ -16,6 +16,8 @@ export interface ProjectPreviewDraft {
     projectVersion: number | null
     status: "needs-confirmation" | "draft-changed" | "missing" | "completed"
     hasUnconfirmedEffects: boolean
+    /** Debug lineage is historical after restart; ordinary recovery cannot revive execution. */
+    debugBranch?: boolean
   }
   development?: {
     devId: string
@@ -28,6 +30,7 @@ export interface ProjectPreviewDraft {
   }
 }
 export interface ProjectPreviewApi {
+  stageDebug?: import("./stage-debug").ProjectStageDebugApi
   list(
     threadId: string
   ): Promise<{ threadId: string; workspace: string; drafts: ProjectPreviewDraft[] }>

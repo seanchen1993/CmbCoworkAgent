@@ -1037,6 +1037,10 @@ interface CustomAPI {
     collectSnapshotGarbage: import("../shared/project-runtime/snapshot-maintenance").SnapshotMaintenanceApi["collectSnapshotGarbage"]
     releaseRuntimeSession: import("../shared/mods/v2/runtime-sessions").FunctionRuntimeSessionsApi["releaseRuntimeSession"]
     resumeRuntimeSession: import("../shared/mods/v2/runtime-sessions").FunctionRuntimeSessionsApi["resumeRuntimeSession"]
+    stageDebugReview: {
+      current(threadId: string): Promise<import("../shared/mods/v2/project-stage-debug-review").StageDebugReviewIntent | undefined>
+      onRequested(callback: (intent: import("../shared/mods/v2/project-stage-debug-review").StageDebugReviewIntent) => void): () => void
+    }
     development: import("../shared/mods/development").DevelopmentApi
     skillEvaluation: import("../shared/mods/skill-evaluation").SkillEvaluationApi
     evaluation: import("../shared/mods/evaluation-api").EvaluationApi

@@ -46,10 +46,43 @@ import { FunctionRegisteredTools } from "./v2/registered-tools"
 import { getModCallContext } from "./context"
 import type { McpCapabilityTool } from "../mcp/capability-types"
 import { beforeModToolExecution } from "./execution-error"
+import { issueRuntimePluginSourceToken, withRuntimePluginSource } from "../plugins/runtime-source-scope"
+import type { PluginMetadata } from "../types"
 
 const cleanup: Array<() => void> = []
 afterEach(() => {
   for (const fn of cleanup.splice(0)) fn()
+})
+
+it("refuses dynamically enabled Mods inside a native stage-debug token without changing settings", async () => {
+  const f = await fixture(undefined, () => true)
+  f.manager.configure(f.root, false, false)
+  const token = issueRuntimePluginSourceToken({
+    mode: "host", threadId: "debug", incarnationKey: "incarnation", projectId: "branch",
+    operationId: "operation", workspace: f.root, packageDigest: "a".repeat(64), stageId: "review",
+    stageDebug: { workspace: f.root, baselineId: "baseline" },
+    plugin: { id: "source", path: f.root } as PluginMetadata
+  }, undefined, () => { f.manager.isEnabled(f.root) })
+  withRuntimePluginSource(token, () => {
+    expect(f.manager.isEnabled(f.root)).toBe(false)
+    expect(f.manager.isActive(f.root)).toBe(false)
+    expect(f.manager.protects(f.root)).toBe(false)
+    f.manager.configure(f.root, true, false)
+    expect(() => f.manager.isEnabled(f.root)).toThrow("PROJECT_STAGE_DEBUG_MODS_UNSUPPORTED")
+    expect(() => f.manager.isActive(f.root)).toThrow("PROJECT_STAGE_DEBUG_MODS_UNSUPPORTED")
+  })
+  expect(f.manager.isEnabled(f.root)).toBe(true)
+  f.manager.configure(f.root, false, true)
+  const policyToken = issueRuntimePluginSourceToken({
+    mode: "host", threadId: "debug", incarnationKey: "incarnation", projectId: "branch",
+    operationId: "operation", workspace: f.root, packageDigest: "a".repeat(64), stageId: "review",
+    stageDebug: { workspace: f.root, baselineId: "baseline" },
+    plugin: { id: "source", path: f.root } as PluginMetadata
+  })
+  withRuntimePluginSource(policyToken, () => {
+    expect(() => f.manager.protects(f.root)).toThrow("PROJECT_STAGE_DEBUG_MODS_UNSUPPORTED")
+  })
+  expect(f.manager.protects(f.root)).toBe(true)
 })
 
 it("does not read application settings repeatedly for an already disabled unprotected project", async () => {

@@ -22,6 +22,9 @@ import { projectFunctionSessionApiMessages } from "../mods/v2/session-api-transc
 import { registerPromptComposerHandlers } from "./mods-prompt"
 import { FunctionDesktopBroker } from "../mods/v2/desktop-broker"
 import { nativePlatformProviders } from "../mods/v2/platform-native-providers"
+import { createProjectStageDebugPlatformProvider } from "../mods/v2/platform-project-stage-debug-provider"
+import { ProjectStageDebugReviewHub } from "../mods/v2/project-stage-debug-review-hub"
+import { getProjectStageDebugSessions } from "../mods/devtools/project-stage-debug"
 import { writeFunctionClipboard } from "../mods/v2/native-clipboard"
 import { registerDesktopHandlers } from "./mods-desktop"
 import { registerFunctionConfigHandlers } from "./mods-config"
@@ -369,10 +372,36 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     }
   })
   manager.setFunctionConversations(conversations)
+  const stageDebugReviews = new ProjectStageDebugReviewHub(intent => {
+    const target = window()
+    if (!target || target.isDestroyed()) return false
+    target.webContents.send("mods:project-stage-debug-review", intent)
+    return true
+  }, async intent => {
+    const creator = development.projectAuthoringContext(intent.threadId)
+    creator.assertCurrent()
+    if (creator.scope.workspace !== intent.workspace ||
+      JSON.stringify(creator.scope.incarnation) !== JSON.stringify(intent.incarnation) ||
+      !manager.isEnabled(intent.workspace)) throw Error("PROJECT_STAGE_DEBUG_REVIEW_STALE")
+    const sources = await functions.status(intent.workspace)
+    creator.assertCurrent()
+    if (!sources.some(source => source.name === intent.caller.name && source.digest === intent.caller.digest &&
+      source.state === "ready")) throw Error("PROJECT_STAGE_DEBUG_REVIEW_STALE")
+  })
+  ipcMain.handle("mods:project-stage-debug-review-current", async (event, threadId: unknown) => {
+    trusted(event)
+    if (typeof threadId !== "string" || !threadId || threadId.length > 256)
+      throw Error("PROJECT_STAGE_DEBUG_PUBLIC_INPUT_INVALID")
+    const context = development.projectAuthoringContext(threadId)
+    context.assertCurrent()
+    const intent = await stageDebugReviews.current(threadId, context.scope.workspace, context.scope.incarnation)
+    context.assertCurrent()
+    return intent
+  })
   const functions = new FunctionModsManager(
     manager.store,
     {
-      platformNativeProviders: () => nativePlatformProviders(async (context, runId) => {
+      platformNativeProviders: () => [...nativePlatformProviders(async (context, runId) => {
         context.assertCurrent()
         const owner = window()
         if (!owner || owner.isDestroyed()) return false
@@ -384,7 +413,19 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         })
         context.assertCurrent()
         return result.response === 0
-      }),
+      }), createProjectStageDebugPlatformProvider({
+        creator: context => {
+          context.assertCurrent()
+          const creator = development.projectAuthoringContext(context.threadId)
+          creator.assertCurrent()
+          return { scope: creator.scope, guard: creator.assertCurrent }
+        },
+        debug: getProjectStageDebugSessions,
+        drafts: scope => projectAuthoringSessions.list(scope).map(draft => ({
+          id: draft.id, name: draft.name, revision: draft.revision, digest: draft.source.digest
+        })),
+        openReview: request => stageDebugReviews.request(request)
+      })],
       plugins: getPlugins,
       freshClassicPluginSources: getPlugins,
       installedPluginIds: getInstalledPluginIds,

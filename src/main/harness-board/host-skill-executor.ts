@@ -203,6 +203,7 @@ export async function executeHostProjectSkill(
       projectId: project.projectId,
       operationId: context.operation.operationId,
       workspace: project.workspace,
+      ...(context.stageDebug ? { stageDebug: context.stageDebug } : {}),
       packageDigest: project.pluginDigest,
       stageId: context.operation.stageId,
       stagePrompt,

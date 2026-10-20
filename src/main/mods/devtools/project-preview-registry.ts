@@ -329,6 +329,14 @@ export class ProjectPreviewRegistry {
     return undefined
   }
 
+  /** Native snapshot ownership lookup; never infer creator authority from a model field. */
+  scopeForProject(project: HostProjectState): DevelopmentScope | undefined {
+    const entry = this.entries.get(project.installedPluginId)
+    if (!entry?.project || entry.projectId !== project.projectId) return undefined
+    this.assertProject(project)
+    return structuredClone(entry.scope)
+  }
+
   describe(project: HostProjectState) {
     if (!isProjectPreviewId(project.installedPluginId)) return undefined
     try {
@@ -346,7 +354,8 @@ export class ProjectPreviewRegistry {
     project: HostProjectState,
     scope: DevelopmentScope,
     operations: HostProjectOperation[],
-    cancel?: (operationId: string) => HostProjectOperation
+    cancel?: (operationId: string) => HostProjectOperation,
+    options: { preserveSucceeded?: boolean } = {}
   ) {
     const entry = this.entries.get(project.installedPluginId)
     if (
@@ -362,6 +371,7 @@ export class ProjectPreviewRegistry {
     )
       throw Error("PROJECT_PREVIEW_UNSETTLED")
     for (const operation of operations) {
+      if (operation.status === "succeeded" && options.preserveSucceeded) continue
       if (operation.status === "prepared" || operation.status === "succeeded") {
         if (!cancel || cancel(operation.operationId).status !== "cancelled")
           throw Error("PROJECT_PREVIEW_UNSETTLED")
@@ -399,7 +409,8 @@ export class ProjectPreviewRegistry {
     draftId: string,
     project: HostProjectState | undefined,
     operations: HostProjectOperation[],
-    cancel: (id: string) => HostProjectOperation
+    cancel: (id: string) => HostProjectOperation,
+    options: { preserveSucceeded?: boolean } = {}
   ) {
     const saved = this.retained(scope, draftId)
     if (!saved || this.entries.has(saved.id)) throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
@@ -425,6 +436,7 @@ export class ProjectPreviewRegistry {
           operation.pluginDigest !== project.pluginDigest
         )
           throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
+        if (operation.status === "succeeded" && options.preserveSucceeded) continue
         if (
           ["prepared", "succeeded"].includes(operation.status) &&
           cancel(operation.operationId).status !== "cancelled"

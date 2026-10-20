@@ -3129,6 +3129,14 @@ const api = {
     }
   },
   mods: {
+    stageDebugReview: {
+      current: (threadId: string) => ipcRenderer.invoke("mods:project-stage-debug-review-current", threadId) as Promise<import("../shared/mods/v2/project-stage-debug-review").StageDebugReviewIntent | undefined>,
+      onRequested: (callback: (intent: import("../shared/mods/v2/project-stage-debug-review").StageDebugReviewIntent) => void) => {
+        const handler = (_event: unknown, intent: import("../shared/mods/v2/project-stage-debug-review").StageDebugReviewIntent) => callback(intent)
+        ipcRenderer.on("mods:project-stage-debug-review", handler)
+        return () => ipcRenderer.removeListener("mods:project-stage-debug-review", handler)
+      }
+    },
     ...createPlatformBridge((channel, input) => ipcRenderer.invoke(channel, input)),
     onPlatformChanged: (callback: (event: { threadId: string }) => void) => {
       const handler = (_event: unknown, value: unknown) => {
@@ -4697,6 +4705,12 @@ const api = {
         remove: (projectId: string, id: string) => ipcRenderer.invoke("project-runtime:library-remove", projectId, id)
       },
       preview: {
+        stageDebug: {
+          compare: (input: Parameters<NonNullable<import("../shared/project-runtime/stage-debug").ProjectStageDebugApi["compare"]>>[0]) => ipcRenderer.invoke("project-preview:stage-debug-compare", input),
+          list: (threadId: string) => ipcRenderer.invoke("project-preview:stage-debug-list", threadId),
+          prepare: (input: Parameters<import("../shared/project-runtime/stage-debug").ProjectStageDebugApi["prepare"]>[0]) => ipcRenderer.invoke("project-preview:stage-debug-prepare", input),
+          create: (input: Parameters<import("../shared/project-runtime/stage-debug").ProjectStageDebugApi["create"]>[0]) => ipcRenderer.invoke("project-preview:stage-debug-create", input)
+        },
         list: (threadId: string) => ipcRenderer.invoke("project-preview:list", threadId),
         create: (input: Parameters<import("../shared/project-runtime/development-preview").ProjectPreviewApi["create"]>[0]) => ipcRenderer.invoke("project-preview:create", input),
         recover: (input: Parameters<import("../shared/project-runtime/development-preview").ProjectPreviewApi["recover"]>[0]) => ipcRenderer.invoke("project-preview:recover", input),

@@ -17,7 +17,7 @@ async function main() {
       import {ModsDevelopmentPanel} from "./src/renderer/src/components/customize/ModsDevelopmentPanel";
       import {CreatorProjectDeliveryCard} from "./src/renderer/src/components/customize/CreatorProjectDeliveryCard";
       import {CreatorTrialJourneyCard} from "./src/renderer/src/components/customize/CreatorTrialJourneyCard";
-      const calls=[];const listeners=new Set();
+      const calls=[];const listeners=new Set();const reviewListeners=new Set();let reviewIntent;
       let current={threadId:"creator",workspace:"C:/creator",enabled:true,mode:"creator",drafts:[],trials:[],
         business:{drafts:[],review:{planId:"plan",phase:"needs-approval",name:"独立测试插件",version:"1.0.0",
           digest:"a".repeat(64),copyId:"new-plugin",canConfirm:true,diagnostics:[],
@@ -26,17 +26,19 @@ async function main() {
         approveBusiness:async input=>{calls.push(["install",input]);current.business.review={...current.business.review,phase:"installed",pluginId:"installed-copy"};return structuredClone(current)},
         exportBusiness:async input=>{calls.push(["export",input]);current.business.review={...current.business.review,phase:"exported",output:"C:/chosen/plugin.zip"};return structuredClone(current)}};
       const settings={globalEnabled:async()=>true,status:async()=>({workspace:"C:/creator",enabled:true,outputPolicy:true,mods:[],diagnostics:[]})};
-      window.api={mods:{development:api,...settings}};
+      window.api={mods:{development:api,...settings,stageDebugReview:{current:async()=>{if(reviewIntent?.expiresAt<=Date.now())calls.push(["review-current-expired"]);return structuredClone(reviewIntent)},onRequested:fn=>{reviewListeners.add(fn);return()=>reviewListeners.delete(fn)}}}};
       const root=createRoot(document.getElementById("root"));
       const renderMain=()=>root.render(<ModsDevelopmentPanel threadId="creator" workspaceHint="C:/creator" mode="chat" api={api} onReturnToChat={()=>document.getElementById("composer").focus()} onRequestRepair={async message=>{calls.push(["repair",message])}}/>);
       renderMain();
       const request={id:"request",draftId:"draft",name:"host-source",revision:3,digest:"b".repeat(64),goal:"验收"};
-      let delivery;
+      let delivery;let persistentColdTrial;
       const renderHost=()=>root.render(<CreatorProjectDeliveryCard threadId="creator" workspace="C:/creator" request={request} delivery={delivery} api={api} onStatus={next=>{delivery=next.projectDelivery;renderHost()}}/>);
       api.prepareProjectDelivery=async input=>{calls.push(["prepare-host",input]);delivery={id:"delivery",requestId:request.id,sourceDigest:request.digest,name:input.name,version:input.version,digest:"c".repeat(64),phase:"needs-confirmation",canInstall:true,canExport:true};return {...structuredClone(current),projectDelivery:structuredClone(delivery)}};
       api.installProjectDelivery=async input=>{calls.push(["install-host",input]);delivery={...delivery,phase:"installed",canInstall:false,pluginId:"host-copy"};return {...structuredClone(current),projectDelivery:structuredClone(delivery)}};
       api.exportProjectDelivery=async input=>{calls.push(["export-host",input]);delivery={...delivery,phase:"exported",output:"C:/chosen/host.zip"};return {...structuredClone(current),projectDelivery:structuredClone(delivery)}};
-      api.setMode=async()=>structuredClone(current);
+      api.setMode=async input=>{calls.push(["set-mode",input]);current.mode=input.mode;
+        if(input.mode==="creator"){current.enabled=true;if(persistentColdTrial)current.projectTrial=structuredClone(persistentColdTrial)}
+        return structuredClone(current)};
       api.approveModularization=async input=>{calls.push(["modularize",input]);current.business.modularization={...current.business.modularization,phase:"ready",canConfirm:false,inspectionId:"native-new-inspection"};return structuredClone(current)};
       const renderJourney=mode=>{
         // Controlled read-only native-status fixture exercises the actual aggregate renderer;
@@ -69,7 +71,26 @@ async function main() {
         renderMain();
         listeners.forEach(fn=>fn({threadId:"creator"}));
       };
-      window.fixture={calls,host:renderHost,journey:renderJourney,hostRoute:renderHostRoute,
+      const requestNativeReview=(mode="none")=>{
+        current.business={drafts:[]};
+        if(mode==="none")delete current.projectTrial;
+        else current.projectTrial={id:"native-existing-request",draftId:"native-review-draft",revision:2,digest:"d".repeat(64),name:"应保留的原试用",goal:"原生保留目标"};
+        const different=mode==="different";
+        const selectedRevision=mode==="revision"?3:2;const selectedDigest=(different||mode==="digest"?"f":"d").repeat(64);
+        reviewIntent={id:"native-review-intent-"+mode,threadId:"creator",workspace:"C:/creator",incarnation:{token:"native",legacyCreatedAt:1},
+          snapshotId:"native-review-snapshot",draftId:different?"native-other-draft":"native-review-draft",revision:selectedRevision,candidateDigest:selectedDigest,mode:"stage",caller:{name:"独立调试助手",digest:"e".repeat(64)},expiresAt:Date.now()+(mode==="expired"?-1000:60000)};
+        window.api.harnessBoard={localProjects:{preview:{list:async threadId=>({threadId,workspace:"C:/creator",drafts:[{id:"native-review-draft",name:"原生建议候选",revision:mode==="revision"?3:2,digest:(mode==="digest"?"f":"d").repeat(64)},{id:"native-other-draft",name:"另一原生候选",revision:2,digest:"f".repeat(64)}]}),
+          stageDebug:{list:async()=>({snapshots:[{id:"native-review-snapshot",projectId:"native-original",stageId:"review",stageTitle:"原生复核阶段",sourceDigest:"c".repeat(64),createdAt:1,fileCount:1,totalBytes:2}],branches:[],diagnostics:[]}),prepare:async input=>{calls.push(["review-auto-prepare",input]);throw Error("must require explicit native prepare")},create:async input=>{calls.push(["review-auto-create",input]);throw Error("must require explicit native create")}}}}};
+        renderMain();listeners.forEach(fn=>fn({threadId:"creator"}));reviewListeners.forEach(fn=>fn(reviewIntent));
+      };
+      const coldCreator=()=>{
+        persistentColdTrial={id:"persisted-cold-request",draftId:"native-review-draft",name:"持久化项目与S6历史",revision:2,digest:"d".repeat(64),goal:"保留历史，仅核对"};
+        current.enabled=false;current.mode="normal";current.business={drafts:[]};delete current.projectTrial;reviewIntent=undefined;
+        window.api.harnessBoard.localProjects.preview.list=async threadId=>{calls.push(["cold-history-list"]);return {threadId,workspace:"C:/creator",drafts:[{id:"native-review-draft",name:"冷启动保留的项目候选",revision:2,digest:"d".repeat(64),recovery:{projectId:"cold-branch",revision:2,digest:"d".repeat(64),workspace:"C:/retained-branch",goal:"保留历史，仅核对",projectVersion:1,status:"needs-confirmation",debugBranch:true,hasUnconfirmedEffects:false}}]}};
+        window.api.harnessBoard.localProjects.preview.stageDebug.list=async()=>({snapshots:[{id:"cold-input",projectId:"original",stageId:"review",stageTitle:"保留的阶段起点",sourceDigest:"c".repeat(64),createdAt:1,fileCount:1,totalBytes:2}],branches:[{id:"cold-branch",projectId:"cold-branch",sourceProjectId:"original",snapshotId:"cold-input",candidateDigest:"d".repeat(64),currentCandidateMatches:true,stageId:"review",mode:"stage",status:"passed",diagnostics:["冷启动保留的调试记录；本进程没有此分支的运行授权。"]}],diagnostics:[]});
+        renderMain();listeners.forEach(fn=>fn({threadId:"creator"}));
+      };
+      window.fixture={calls,cold: coldCreator,host:renderHost,journey:renderJourney,hostRoute:renderHostRoute,nativeReview:requestNativeReview,
         hostRoutePassed:()=>{const journey=structuredClone(hostRouteEvidence);journey.phase="passed";journey.canDeliver=true;journey.stages[0].status="passed";current.projectTrial.journey=journey;listeners.forEach(fn=>fn({threadId:"creator"}))},
         changeHost:()=>{request.digest="d".repeat(64);renderHost()},modularize:()=>{current.business={drafts:[],modularization:{requestId:"migration",sourceDigest:"e".repeat(64),sourceName:"原始插件",phase:"needs-confirmation",summary:"保留原运行器、配置与校验，拆分可识别步骤",resources:8,mods:[{id:"step-a",title:"识别阶段"}],diagnostics:[],canConfirm:true}};renderMain()}};
     `
@@ -353,6 +374,101 @@ async function main() {
     await page.getByRole("dialog", { name: "插件试用与整轮验收", exact: true }).waitFor()
     assert.equal(await page.evaluate("window.fixture.calls.filter(row=>row[0]==='legacy-trial-request').length"), 1,
       "Opening the original legacy route must never itself request or approve execution")
+    await page.keyboard.press("Escape")
+    await page.getByRole("dialog", { name: "插件试用与整轮验收", exact: true }).waitFor({ state: "detached" })
+    await page.evaluate("window.fixture.nativeReview()")
+    await workspace.waitFor()
+    const advancedReview = workspace.getByText("高级：独立项目试用", { exact: true }).locator("..")
+    await advancedReview.waitFor()
+    assert.equal(await advancedReview.evaluate(element => (element as HTMLDetailsElement).open), true,
+      "A native Mod review must open the actual containing details even when no projectTrial card exists")
+    const nativeReviewPanel = advancedReview.getByRole("region", { name: "阶段隔离调试", exact: true })
+    await nativeReviewPanel.getByText("建议来自 Mod：独立调试助手", { exact: true }).waitFor()
+    assert.equal(await nativeReviewPanel.getByLabel("选择阶段输入快照", { exact: true }).inputValue(), "native-review-snapshot")
+    assert.equal(await nativeReviewPanel.getByLabel("选择已保存的最新候选", { exact: true }).inputValue(), "native-review-draft")
+    assert.equal(await workspace.getByRole("article", { name: "项目真实试用请求", exact: true }).count(), 0)
+    assert.equal(await page.evaluate("window.fixture.calls.filter(row=>row[0]==='review-auto-prepare'||row[0]==='review-auto-create').length"), 0,
+      "Review navigation may neither prepare nor confirm execution")
+    await page.screenshot({ path: join(output, "native-review-open-without-project-trial.png"), fullPage: true })
+    for (const mode of ["matching", "different", "revision", "digest"]) {
+      console.log("Native review route mode", mode)
+      await page.evaluate(mode => (window as unknown as { fixture: { nativeReview(mode: string): void } }).fixture.nativeReview(mode), mode)
+      const originalTrial = workspace.getByRole("article", { name: "项目真实试用请求", exact: true })
+      await originalTrial.getByText("应保留的原试用 · 版本 2", { exact: true }).waitFor()
+      await page.waitForFunction(() => document.querySelectorAll('[aria-label="阶段隔离调试"]').length === 1)
+      const selectedPanel = workspace.getByRole("region", { name: "阶段隔离调试", exact: true })
+      try {
+        await selectedPanel.getByText("建议来自 Mod：独立调试助手", { exact: true }).waitFor()
+      } catch (error) {
+        writeFileSync(join(output, "native-review-route-failure.json"), JSON.stringify({ mode,
+          state: await page.evaluate(() => ({ text: document.body.innerText,
+            details: [...document.querySelectorAll("details")].map(element => ({ summary: element.querySelector("summary")?.textContent, open: element.open })),
+            reviewHeaders: [...document.querySelectorAll('[aria-label="Mod 提交的阶段调试建议"]')].map(element => element.textContent) })), errors }, null, 2))
+        await page.screenshot({ path: join(output, "native-review-route-failure.png"), fullPage: true })
+        throw error
+      }
+      assert.equal(await selectedPanel.getByLabel("选择已保存的最新候选", { exact: true }).inputValue(),
+        mode === "different" ? "native-other-draft" : "native-review-draft")
+      assert.equal(await advancedReview.evaluate(element => (element as HTMLDetailsElement).open), mode !== "matching")
+      if (mode !== "matching") assert.equal(
+        await workspace.getByText("Mod 组件、聊天组合与高级制作设置", { exact: true }).locator("..").evaluate(element => (element as HTMLDetailsElement).open), true,
+        "Independent native review must also open the actual ancestor disclosure, not just its nested details")
+      assert.equal(await originalTrial.getByRole("region", { name: "阶段隔离调试", exact: true }).count(), mode === "matching" ? 1 : 0,
+        "Only an exact request revision/digest match may route review into the original trial card")
+      assert.equal(await workspace.locator('[aria-label="Mod 提交的阶段调试建议"]').count(), 1,
+        "One native intent must expose one review target, while retaining the original trial")
+    }
+    await workspace.getByRole("button", { name: "返回原聊天继续创作", exact: true }).click()
+    await workspace.waitFor({ state: "detached" })
+    await page.evaluate("window.fixture.nativeReview('expired')")
+    // Await native readback, rather than allowing the timeout to stand in for a result.
+    await page.waitForFunction(() => (window as unknown as { fixture: { calls: unknown[][] } }).fixture.calls.some(row => row[0] === "review-current-expired"))
+    assert.equal(await workspace.count(), 0, "An expired intent must not reopen or confirm native review")
+    const retainedTrial = await page.evaluate(() => window.api.mods.development.status({ threadId: "creator" }))
+    assert.equal(retainedTrial.projectTrial?.id, "native-existing-request")
+    assert.equal(retainedTrial.projectTrial?.draftId, "native-review-draft")
+    assert.equal(retainedTrial.projectTrial?.digest, "d".repeat(64))
+    assert.equal(await page.evaluate("window.fixture.calls.filter(row=>row[0]==='review-auto-prepare'||row[0]==='review-auto-create').length"), 0)
+
+
+    await page.evaluate("window.fixture.cold()")
+    const rail = page.getByLabel("聊天模式与 Mod 状态", { exact: true })
+    await page.waitForFunction(() => document.querySelector('[aria-label="聊天模式"] button[aria-pressed="true"]')?.textContent?.trim() === "普通模式")
+    await rail.locator('button[aria-haspopup="dialog"]').click()
+    await workspace.waitFor()
+    const coldEntry = workspace.getByRole("region", { name: "重新进入创造者模式", exact: true })
+    await coldEntry.getByText("本次创作控制尚未开启", { exact: true }).waitFor()
+    await coldEntry.getByText(/不表示候选、阶段快照或试用历史已丢失/).waitFor()
+    assert.equal(await workspace.getByText(/还没有准备好项目候选/).count(), 0,
+      "A cold creator scope must not imply that persisted source/history has been deleted")
+    assert.equal(await workspace.getByText("高级：独立项目试用", { exact: true }).count(), 0)
+    assert.equal(await page.evaluate("window.fixture.calls.filter(row=>row[0]==='cold-history-list').length"), 0,
+      "Opening the cold-state explanation must not silently enable or read creator history")
+    const beforeModeChanges = await page.evaluate("window.fixture.calls.filter(row=>row[0]==='set-mode').length")
+    await page.screenshot({ path: join(output, "cold-creator-explicit-entry.png"), fullPage: true })
+    await coldEntry.getByRole("button", { name: "重新进入创造者模式", exact: true }).click()
+    await workspace.getByRole("article", { name: "项目真实试用请求", exact: true }).getByText("持久化项目与S6历史 · 版本 2", { exact: true }).waitFor()
+    assert.equal(await page.evaluate("window.fixture.calls.filter(row=>row[0]==='set-mode').length"), beforeModeChanges + 1)
+    assert.deepEqual(await page.evaluate("window.fixture.calls.filter(row=>row[0]==='set-mode').at(-1)[1]"),
+      { threadId: "creator", expectedWorkspace: "C:/creator", mode: "creator" })
+    assert.equal(await coldEntry.count(), 0)
+    const coldTrial = workspace.getByRole("article", { name: "项目真实试用请求", exact: true })
+    await coldTrial.getByText(/调试分支仅保留历史记录/).waitFor()
+    await coldTrial.getByText("按阶段修改与隔离调试", { exact: true }).click()
+    const coldDebug = coldTrial.getByRole("region", { name: "阶段隔离调试", exact: true })
+    await coldDebug.locator("summary").filter({ hasText: "隔离调试结果与来源对照" }).click()
+    await coldDebug.getByText("冷启动保留的调试记录；本进程没有此分支的运行授权。", { exact: true }).waitFor()
+    assert.equal(await workspace.getByText("整轮试用已通过", { exact: true }).count(), 0)
+    assert.equal(await page.evaluate("window.fixture.calls.filter(row=>row[0]==='review-auto-prepare'||row[0]==='review-auto-create').length"), 0,
+      "Reentering creator mode must not prepare/create or restore a branch execution grant")
+    await page.screenshot({ path: join(output, "cold-history-readonly-after-entry.png"), fullPage: true })
+    await workspace.getByRole("button", { name: "返回原聊天继续创作", exact: true }).click()
+    await rail.getByRole("button", { name: "普通模式", exact: true }).click()
+    await page.waitForFunction(() => document.querySelector('[aria-label="聊天模式"] button[aria-pressed="true"]')?.textContent?.trim() === "普通模式")
+    assert.equal(await rail.getByRole("button", { name: "普通模式", exact: true }).getAttribute("aria-pressed"), "true")
+    assert.equal(await page.evaluate("window.fixture.calls.filter(row=>row[0]==='set-mode').at(-1)[1].mode"), "normal",
+      "Normal mode remains an explicit user choice and must not auto-reenter creator mode")
+
     assert.deepEqual(errors, [])
     console.log(
       "PASS creator workspace navigation, long-flow disclosure, delivery, chat return, mobile bounds and 18-stage native-status aggregate verdicts"

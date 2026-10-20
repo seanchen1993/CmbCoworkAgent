@@ -14,6 +14,8 @@ export interface RuntimeCapabilitySource {
 }
 
 export interface RuntimePluginSourceBinding {
+  /** Main-issued file-only debug admission, never reconstructed from thread metadata. */
+  stageDebug?: { workspace: string; baselineId: string }
   /** Host-validated requirements belonging to the exact retained parent package. */
   requiredHooks?: readonly string[]
   mode?: "host" | "legacy" | "capabilities"
@@ -74,6 +76,13 @@ function freeze<T>(value: T): T {
   return value
 }
 const source = new AsyncLocalStorage<Readonly<RuntimePluginSourceBinding> | undefined>()
+
+/** Main-only opaque admission projection. No authority callbacks: safe in Mods predicates. */
+export function currentStageDebugSourcePolicy():
+  Readonly<{ workspace: string; baselineId: string; snapshotRoot: string }> | undefined {
+  const binding = source.getStore()
+  return binding?.stageDebug ? { ...binding.stageDebug, snapshotRoot: binding.plugin.path } : undefined
+}
 
 /** Main-process only: the caller first verifies the retained package and thread incarnation. */
 export function issueRuntimePluginSourceToken(
