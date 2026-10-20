@@ -415,8 +415,8 @@ export function BrowserRecordingListDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88vh] max-w-[1300px] gap-0 overflow-hidden border-border/70 p-0 shadow-2xl">
-        <DialogHeader className="border-b border-border/70 bg-[linear-gradient(180deg,color-mix(in_srgb,var(--primary)_7%,transparent),transparent)] px-5 pt-2 pb-1">
+      <DialogContent className="flex max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-[1300px] flex-col gap-0 overflow-hidden border-border/70 p-0 shadow-2xl sm:max-h-[88vh]">
+        <DialogHeader className="shrink-0 border-b border-border/70 bg-[linear-gradient(180deg,color-mix(in_srgb,var(--primary)_7%,transparent),transparent)] px-5 pt-2 pb-1">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="flex min-w-0 flex-col gap-2">
               <DialogTitle className="text-base">录制列表</DialogTitle>
@@ -472,8 +472,8 @@ export function BrowserRecordingListDialog({
         </DialogHeader>
 
         {activeTab === "recordings" ? (
-          <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-            <div className="flex min-h-0 w-full min-w-0 flex-col border-b border-border/70 lg:w-1/2 lg:flex-none lg:border-b-0 lg:border-r">
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto [scrollbar-gutter:stable] lg:flex-row lg:overflow-hidden">
+            <div className="flex min-h-0 w-full min-w-0 flex-none flex-col border-b border-border/70 lg:w-1/2 lg:border-b-0 lg:border-r">
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-5">
                 {error ? (
                   <div className="rounded-xl border border-status-warning/30 bg-status-warning/10 px-4 py-5 text-sm text-status-warning">
@@ -688,7 +688,7 @@ export function BrowserRecordingListDialog({
               </div>
             </div>
 
-            <div className="flex min-h-0 w-full min-w-0 flex-col lg:w-1/2 lg:flex-none">
+            <div className="flex min-h-0 w-full min-w-0 flex-none flex-col lg:w-1/2">
               <div className="border-b border-border/70 px-5 py-4">
                 <div className="flex flex-col gap-3">
                   <div className="flex-1 min-w-0">
