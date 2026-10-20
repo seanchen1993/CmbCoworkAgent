@@ -40,7 +40,7 @@ export class BotDraftSender {
     private readonly report: (message: string | null) => void,
     private readonly changed: () => void,
     private readonly now = Date.now,
-    private readonly target?: {botId:string;workId:string}
+    private readonly target?: { botId: string; workId: string }
   ) {}
 
   stopPreparing(): void {
@@ -83,6 +83,15 @@ export class BotDraftSender {
     this.changed()
     this.report(null)
     try {
+      if (
+        draft.botHandoffTarget &&
+        (!this.target ||
+          draft.botHandoffTarget.botId !== this.target.botId ||
+          draft.botHandoffTarget.workId !== this.target.workId)
+      )
+        throw new Error(
+          "此草稿属于此前的 Bot 任务，未确认发送不能转成新的任务请求。请先核对原任务记录；确认后可删除旧草稿并明确发送新消息。"
+        )
       const message = getQueuedModelContent(draft, "bot").trim()
       const validationError = validateBotDraft(draft)
       if (validationError) throw new Error(validationError)
@@ -97,7 +106,7 @@ export class BotDraftSender {
       this.queue.updateQueuedMessage(
         draft.id,
         {
-          ...(this.target ? {botHandoffTarget:this.target}:{}),
+          ...(this.target ? { botHandoffTarget: this.target } : {}),
           handoffRequestedAt: draft.handoffRequestedAt ?? new Date(this.now())
         },
         (error) => {

@@ -1,6 +1,71 @@
 # M05 — beta 本地统一实施检查点
 
-状态：**M05-06 本机会话关联实施中，未冻结、未验收。M05-02/03与UI/模型窄修已完成，M05-04/05完整验证仍暂停；下方旧状态为历史记录。** gpt-6.1-sol/xhigh 唯一写者，不派生。只读最新设计§11，旧Service清理留M05-05；不写Java/LF39、不操作用户App/profile/真实模型/数据库。
+状态：**M05-06 候选完成，提交后冻结停写，等待 root 独立验收/集成。M05-02/03与UI/模型窄修已完成，M05-04/05完整验证仍暂停；下方旧状态为历史记录。** gpt-6.1-sol/xhigh 唯一写者，不派生。只读最新设计§11，旧Service清理留M05-05；不写Java/LF39、不操作用户App/profile/真实模型/数据库。
+
+## M05-06 最终候选与实际证据（2026-10-20）
+
+产品基线 `852fc3e466f23486482b21e9ea326aa98f9043f2`；中途保全 `ca0369d3`、`884c63c02`，最终候选为本段同次提交，准确 SHA 随交付消息报告。只写原实施树；root 集成树、运行中的用户预览/profile/凭据、默认 `out` 未动。Java/网关/ES/数据库/真实模型未运行，未启动子代理、未推送/部署。M05-04/05完整功能验证继续暂停。
+
+### 新增文件清单（相对852fc3e4）
+
+- `src/main/bots/conversation-link-authority.ts`
+- `src/main/bots/conversation-link-schema.ts`
+- `src/main/bots/conversation-link-service.test.ts`
+- `src/main/bots/conversation-link-service.ts`
+- `src/main/bots/conversation-link-store.ts`
+- `src/main/bots/conversation-link-validation.ts`
+- `src/main/bots/conversation-link.test.ts`
+- `src/renderer/src/components/bots/BotConversation.tsx`
+- `src/renderer/src/components/bots/ConversationTaskControls.tsx`
+- `src/renderer/src/components/bots/LinkedBotConversation.tsx`
+- `src/renderer/src/components/bots/use-bot-conversation-link.ts`
+- `src/renderer/src/lib/bot-conversation-transition.test.ts`
+- `src/renderer/src/lib/bot-conversation-transition.ts`
+- `src/shared/bots/conversation.ts`
+- `tests/bot-conversation-link-hook-browser.spec.ts`
+- `tests/bots-conversation-link-app.spec.ts`
+
+### 最终行为及边界
+
+- 一个 Bot Task 绑定真实固定 Thread，普通对话/Bot任务两个入口共用消息、原草稿/附件/队列、Host执行与停止；不复制历史。明确关联已有普通本机会话不发送首轮，保留原目录、model、agentMode、memory及其他原设置。created任务可在普通对话列表发现并打开同Thread；main/group/mock不开放为owner普通会话。
+- control journal `preparing → bound / detaching → detached` 与原消息库incarnation/metadata握手，跨库失败只恢复原意图，不启动模型；existing preparing恢复仍经真实idle/审批/Goal/后台门禁。right-pane expose真实IPC可恢复metadata已写/未写两种情况。解除保留历史且旧操作不复活，原会话删除前有实际解除入口；Bot删除保留existing、清理created，失败重试保留正确归属。
+- partial unique迁移保留旧列/source/receipt/索引/trigger与AUTOINCREMENT high-water，未知外键/生成字段明确拒绝并回滚。archive保存真实work_id，不用新绑定解释旧收据；detached历史不被通知/删除枚举重新接管。
+- 只有Host可信本机Work进入受管路径；idle裸invoke/resume/interrupt也不能绕Host。任务模型控件实际改Thread.model，主Bot默认值不替换原会话模型。原目录恰为Bot目录时保留bot.id原文件锁；其他同真实目录关联共享realpath锁，browser upload用同锁/原顺序。
+- 队列关联时核原ordinary交接、解除时批量核Bot收据，最多32条/批；明确停放未发送草稿。已有botHandoffTarget即使超过receipt retention，也不能在重关联/发送时换成另一目标；未知保留身份并拒绝重发。持久写失败不假装解除成功。
+- 未关联普通/项目/远程对话不lookup、不订阅Bot，不因可选Bot服务错误阻断原workbench。当前候选会话查询按已选Thread与coalesced revision有界读；迟到A不能覆盖B，无逐任务正文轮询。布局复用原ChatContainer：ownerConversation模型/模式工具栏在文字下方，Bot main仍原紧凑布局；仅`!stream`发送按钮禁用并提示准备中，不改发送/调度。
+- 已批准限制：关联任务内暂不启动桌面 `/goal` 与 Mods 控制，给出可达的解除入口后恢复原普通控制；保留原设置/状态数据，不创建第二Goal调度器。项目/云仅typed ref，当前明确unsupported，不静默落本地。没有宣称全部普通会话控制关联后无差异。
+
+### 实际命令与结果
+
+所有下述 `Node22` 均为 `/Users/heyirui/.npm/_npx/52027bd8fc0022aa/node_modules/node/bin/node`。
+
+| 检查 | 精确命令（Node22后参数）与日志 | 结果 |
+| --- | --- | --- |
+| Store非空迁移/重开/原receipt | `node_modules/vitest/vitest.mjs run src/main/bots/conversation-link.test.ts src/main/bots/request-receipts.test.ts src/main/bots/history-retention.test.ts`；`/tmp/m05-06-store-second.log` | 14/14 exit0 |
+| 关联/Runtime/锁/文件 | `node_modules/vitest/vitest.mjs run src/main/bots/conversation-link.test.ts src/main/bots/conversation-link-service.test.ts src/main/bots/runtime-adapter.test.ts src/main/bots/work.test.ts src/main/ipc/bot-files.test.ts`；`/tmp/m05-06-core-third.log` | 88/88 exit0 |
+| 删除真实Host/IPC、恢复right expose | `node_modules/vitest/vitest.mjs run src/main/ipc/bots.test.ts`；先`/tmp/m05-06-delete-second.log`，补恢复为`/tmp/m05-06-expose-ipc.log` | 新删除5/5；最终新删除/恢复7/7 exit0（全文件计数另root日志） |
+| 最后队列/目标/普通分类 | `node_modules/vitest/vitest.mjs run src/renderer/src/lib/bot-conversation-transition.test.ts src/renderer/src/lib/bot-draft-sender.test.ts src/renderer/src/lib/thread-classification.test.ts`；`/tmp/m05-06-view-final.log` | 3文件17/17 exit0 |
+| hook隔离/切换迟到 | `--import tsx tests/bot-conversation-link-hook-browser.spec.ts`；`/tmp/m05-06-hook-browser.log` | exit0；普通/项目/远程0lookup/订阅，A→普通、A→B迟到保护，同scope最多1在途 |
+| Node类型 | `node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false`；`/tmp/m05-06-node-final.log` | exit0 |
+| Web类型 | `node_modules/typescript/bin/tsc --noEmit -p tsconfig.web.json --composite false`；`/tmp/m05-06-web-final.log` | exit0；随后TabbedPanel仅Prettier换行 |
+| 新增文件格式/增量格式 | `node_modules/prettier/bin/prettier.cjs --check`（新增文件列表）；`/tmp/m05-06-format-new-check.log`，局部write日志`/tmp/m05-06-format.log`、`/tmp/m05-06-tabs-format.log` | exit0；未大面积格式化旧文件 |
+| 实际完整App窄旅程 | `M05_KEEP_FIXTURE=1 Node22 --import tsx tests/bots-conversation-link-app.spec.ts`；`/tmp/m05-06-app-fifth.log`、布局最终`/tmp/m05-06-app-final-second.log` | 均exit0，5次localhost固定模型，真实App/IPC/Host/Thread/Runtime/ChatContainer，不stub聊天组件 |
+
+App实际验证：原普通Thread回复→显式关联0额外BotTask→两入口修改且provider输入含上一助手→原文件实际预览→双入口模型更改相互一致→完成/裸IPC拒绝/继续→解除回普通且原目录/模型/历史保留；另新建独立Task在普通侧栏打开同Thread，不混入原会话。没有把固定模型文本当文件写入工具成功；本片仅验证已有自有`existing.md`预览。截图 `/tmp/m05-06-linked-conversation.png`、`/tmp/m05-06-created-conversation.png`；created图正文完整，最终输入区上下分行，root已目视接受。linked图在continue后重hydrate瞬间取到空消息区域，后续测试已加同一已有助手正文可见再截图的等待；未为这一截图再增加模型旅程。所有自有App/server已finally关闭；保留的自有临时fixture仅供复验，不含用户配置/密钥。
+
+### 隔离正常构建与资源
+
+- `Node22 node_modules/electron-vite/bin/electron-vite.js build --config /tmp/m05-06-vite.config.mjs --mode m05-06-isolated`，日志 `/tmp/m05-06-build-final.log`（exit0），最后仅格式整理的重build `/tmp/m05-06-build-final-format.log`（exit0）。main/preload/renderer全部输出 `/tmp/m05-06-out-843qqwqs`，入口 `/tmp/m05-06-out-843qqwqs/main/index.js`。原正常生产entry，不含测试入口/flags；空envDir `/tmp/m05-empty-vite-env`，保留宿主HOME，未加载用户凭据。
+- 临时config仅移除原硬编码写repo `out` 的 `copy-resources` 插件，复制同一正常resources/skills/package到独立目录；`node_modules`指向本树已有依赖。可供root独立Electron打开，也可root停预览后按正常项目build重新生成。当前用户默认out的399文件 `[size,mtime_ns]` 对比 `/tmp/m05-06-live-out-before.json` 全部一致。
+- 构建/检查均无常驻服务；唯一临时localhost模型已关闭。未占Java/DB锁、无新增容器/卷，无用户App/浏览器操作。
+
+### 初轮失败及未冒称范围
+
+- Store首轮用enqueue前旧work version触发CAS而未测busy；修正测试取当前version后busy路径通过。Runtime新测试漏`initializeWorkThread`替身，两失败仅补fixture后过。
+- 实际Host删除初轮发现created先detach导致失败重试漏删，产品保留created绑定到真实delete成功后，重试回归通过。
+- App首轮脚本误用不存在的`agent.onStream`，后改真实`streamAgent`出口；两轮初始普通输入无invoke是fixture没等Thread真实stream/history hydration，输入未丢，补只读就绪条件后完整旅程通过。另一轮脚本reload后`__name`辅助未恢复，修fixture addInitScript。之后临时强制覆写React Context readiness方法会被正常新Context替换，导致夹具等待超时；按root要求删除该模拟和额外断言，不以其判断产品失败。仅保留正常就绪等待及按钮窄代码审查。
+- `ipc-view-first.log`命令含不存在的visual-submit-guards test路径，该文件未执行，不能算覆盖。原文件预览与Host路由由实际App、IPC/files及源码审查证明；不声称完整04/05、所有普通beta功能/生产性能或真实模型已验收。
+- root独立28+85=113项已收到，作为外部复验记录，未冒充本人命令或重复扩大测试。无ES变化；结构性查询范围为选中Thread/有界摘要与32条receipt批次，没有生产耗时结论。
 
 ## M05-06 本机对话关联：冻结接口已读，开始实施（未验收）
 

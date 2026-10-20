@@ -26,8 +26,26 @@ export function isHarnessProjectModeThread(thread: Thread | null | undefined): b
 
 /** A candidate is resolved against the local Host before any managed controls mount. */
 export function isLocalWorkConversation(thread: Thread | null | undefined): boolean {
-  const m=thread?.metadata
-  return Boolean(m?.botHostId === "local" && typeof m.botWorkId === "string" && m.botAudienceKey === "desktop" && !m.botMockBindingId && !m.botGroupId)
+  const m = thread?.metadata
+  return Boolean(
+    m?.botHostId === "local" &&
+    typeof m.botWorkId === "string" &&
+    m.botAudienceKey === "desktop" &&
+    !m.botMockBindingId &&
+    !m.botGroupId
+  )
+}
+
+export function isManagedLocalWorkConversation(thread: Thread | null | undefined): boolean {
+  const metadata = thread?.metadata
+  return (
+    isLocalWorkConversation(thread) &&
+    !isHarnessProjectModeThread(thread) &&
+    !metadata?.remoteState &&
+    !metadata?.remoteReadOnly &&
+    metadata?.targetKind !== "inbox" &&
+    !metadata?.imDeliveryContext
+  )
 }
 
 export function isBotThread(thread: Thread | null | undefined): boolean {
@@ -35,7 +53,11 @@ export function isBotThread(thread: Thread | null | undefined): boolean {
 }
 
 export function isRegularChatThread(thread: Thread | null | undefined): boolean {
-  return Boolean(thread) && !isHarnessProjectModeThread(thread) && (!isBotThread(thread) || isLocalWorkConversation(thread))
+  return (
+    Boolean(thread) &&
+    !isHarnessProjectModeThread(thread) &&
+    (!isBotThread(thread) || isLocalWorkConversation(thread))
+  )
 }
 
 export function findFirstChatThread(threads: Thread[]): Thread | null {

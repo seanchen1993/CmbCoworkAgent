@@ -9323,6 +9323,7 @@ export function ChatContainer({
                     <div
                       ref={dropZoneRef}
                       data-bot-composer={managedTurn ? true : undefined}
+                      data-bot-owner-composer={managedTurn?.ownerConversation ? true : undefined}
                       className={cn(
                         "relative flex-1 min-w-0 flex flex-col overflow-hidden rounded-[28px] border border-border/80 shadow-sm transition-colors duration-300",
                         pendingUserInput
@@ -9578,12 +9579,14 @@ export function ChatContainer({
                                 <button
                                   type="submit"
                                   disabled={
-                                    managedTurn
+                                    !stream ||
+                                    (managedTurn
                                       ? !input.trim() && totalPendingFileCount === 0
                                       : isModCommandInput
                                         ? slash.mode.kind === "slash"
-                                        : goalSendButtonDisabledWhileLoading
+                                        : goalSendButtonDisabledWhileLoading)
                                   }
+                                  title={!stream ? "会话准备中，请稍后发送" : undefined}
                                   aria-label={
                                     managedTurn
                                       ? (managedTurn.busySubmitLabel ?? "加入待办")
@@ -9633,6 +9636,7 @@ export function ChatContainer({
                               <button
                                 type="submit"
                                 disabled={
+                                  !stream ||
                                   effectiveInputDisabled ||
                                   (!input.trim() &&
                                     !hasPendingFilePayload &&
@@ -9641,6 +9645,7 @@ export function ChatContainer({
                                   (slash.mode.kind === "slash" &&
                                     !isBareGoalSlashCommandInput(input))
                                 }
+                                title={!stream ? "会话准备中，请稍后发送" : undefined}
                                 className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                               >
                                 <ArrowUp className="size-5" strokeWidth={1.75} />

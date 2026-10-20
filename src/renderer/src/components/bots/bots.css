@@ -1415,6 +1415,14 @@ button.bot-json-caret:focus-visible {
 [data-bot-composer] [data-composer-actions] button {
   pointer-events: auto;
 }
+/* Linked owner conversations retain the standard model/mode controls below the input. */
+[data-bot-owner-composer] .composer-textarea {
+  padding: 14px 16px 8px;
+}
+[data-bot-owner-composer] [data-composer-actions] {
+  position: static;
+  padding: 0 8px 8px;
+}
 .bot-group-avatar {
   position: relative;
   width: 42px;
