@@ -1,4 +1,6 @@
+import type { BotWorkConversationLink } from "./conversation"
 import type { BotTask, BotTaskState, BotConversationActivity } from "./contracts"
+import type { BotMockSource } from "./mock-channel"
 
 /** A durable conversation for a continuing piece of work; not an execution. */
 export interface BotWorkSummary {
@@ -15,6 +17,8 @@ export interface BotWorkSummary {
   pendingPeers: number
   backgroundBusy: boolean
   activity?: BotConversationActivity
+  source?: BotMockSource
+  conversation?: BotWorkConversationLink
 }
 export interface BotWorkItem extends BotWorkSummary {
   goal: string

@@ -1,9 +1,15 @@
+import { BotWorkConversationJournal } from "./conversation-link-store"
+import { readWorkConversationRecord } from "./conversation-link-validation"
+import { upgradeWorkConversationSchema } from "./conversation-link-schema"
 import type {
   BotWorkItem,
   BotWorkReceipt,
   CreateBotWorkInput,
   BotWorkPage
 } from "../../shared/bots/work"
+import type { BotMockSource } from "../../shared/bots/mock-channel"
+import { BotMockChannelStore } from "./mock-channel-store"
+import { assertBotMockText, parseBotMockSource } from "./mock-channel-validation"
 import { cleanUserAttachmentContentForDisplay } from "../../shared/user-attachment-display"
 import { createHash, randomUUID } from "node:crypto"
 import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
@@ -104,6 +110,8 @@ const TRANSITIONS: Record<BotTaskState, readonly BotTaskState[]> = {
 
 /** Stores control data only. Messages/checkpoints remain in the existing runtime stores. */
 export class BotStore {
+  readonly conversations: BotWorkConversationJournal
+  readonly mock: BotMockChannelStore
   private transactionSerial = 0
   constructor(
     private readonly db: NativeSqliteAdapter,
@@ -251,6 +259,7 @@ export class BotStore {
         "CREATE INDEX IF NOT EXISTS bot_tasks_work_family ON bot_tasks(json_extract(origin_json,'$.rootWorkId'),state)"
       )
       db.run("CREATE INDEX IF NOT EXISTS bot_tasks_updated ON bot_tasks(updated_at,id)")
+      upgradeWorkConversationSchema(db)
       // Conversation references outlive disposable execution records. Payload stays in the Runtime
       // transcript; only messages never persisted there (e.g. cancelled before start) need a fallback.
       db.run(`CREATE TABLE IF NOT EXISTS bot_exchange_archive (
@@ -258,21 +267,37 @@ export class BotStore {
         message TEXT,state TEXT NOT NULL,error TEXT,created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,origin_json TEXT NOT NULL,thread_id TEXT NOT NULL
       );
-      CREATE VIEW IF NOT EXISTS bot_exchange_records AS
-        SELECT id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id FROM bot_tasks
-        UNION ALL
-        SELECT id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id FROM bot_exchange_archive;
       CREATE INDEX IF NOT EXISTS bot_exchange_archive_pair ON bot_exchange_archive(
         min(bot_id,json_extract(origin_json,'$.fromBotId')),
         max(bot_id,json_extract(origin_json,'$.fromBotId')),
         COALESCE(json_extract(origin_json,'$.groupId'),''),created_at,id
       ) WHERE json_extract(origin_json,'$.kind')='bot' AND json_extract(origin_json,'$.expectsReply')=1;`)
+      if (!this.rows("PRAGMA table_info(bot_exchange_archive)").some((v) => v.name === "work_id")) {
+        db.run("ALTER TABLE bot_exchange_archive ADD COLUMN work_id TEXT")
+        // At this upgrade old databases still have at most one historical work per thread.
+        // Store its identity now; after detach/relink the same thread is no longer authority.
+        db.run(`UPDATE bot_exchange_archive SET work_id=(SELECT w.id FROM bot_work_items w
+          WHERE w.thread_id=bot_exchange_archive.thread_id AND w.bot_id=bot_exchange_archive.bot_id)`)
+      }
+      db.run(`DROP VIEW IF EXISTS bot_exchange_records;
+        CREATE VIEW bot_exchange_records AS
+        SELECT id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id,work_id FROM bot_tasks
+        UNION ALL
+        SELECT id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id,work_id FROM bot_exchange_archive;`)
       db.run(`CREATE INDEX IF NOT EXISTS bot_tasks_exchange_pair ON bot_tasks(
         min(bot_id,json_extract(origin_json,'$.fromBotId')),
         max(bot_id,json_extract(origin_json,'$.fromBotId')),
         COALESCE(json_extract(origin_json,'$.groupId'),''),created_at,id
       ) WHERE json_extract(origin_json,'$.kind')='bot' AND json_extract(origin_json,'$.expectsReply')=1`)
     })
+    this.conversations = new BotWorkConversationJournal(db,this,<T>(fn:()=>T)=>this.transaction(fn),()=>this.changed(),this.now)
+    this.mock = new BotMockChannelStore(
+      db,
+      this,
+      (body) => this.transaction(body),
+      () => this.changed(),
+      this.now
+    )
   }
 
   private rows(sql: string, args: readonly unknown[] = []): Record<string, unknown>[] {
@@ -371,7 +396,7 @@ export class BotStore {
     return this.rows(
       `SELECT c.id AS bot_id,c.version,c.updated_at,c.preview,
       EXISTS(SELECT 1 FROM bot_work_items w JOIN bot_activity a ON a.kind='work' AND a.id=w.id
-        WHERE w.bot_id=c.id AND w.audience_key='desktop' AND a.attention_version>a.seen_version) AS unread
+        WHERE w.bot_id=c.id AND w.detached=0 AND a.attention_version>a.seen_version) AS unread
       FROM bot_activity c JOIN bots b ON b.id=c.id WHERE c.kind='work-bot'`
     ).map((row) => ({
       botId: String(row.bot_id),
@@ -392,7 +417,7 @@ export class BotStore {
       if (!clock || throughVersion > Number(clock.version))
         throw new BotError("CONFLICT", "工作已读位置尚未存在")
       this.db.run(
-        `UPDATE bot_activity SET seen_version=MAX(seen_version,MIN(version,?)) WHERE kind='work' AND id IN (SELECT id FROM bot_work_items WHERE bot_id=? AND audience_key='desktop')`,
+        `UPDATE bot_activity SET seen_version=MAX(seen_version,MIN(version,?)) WHERE kind='work' AND id IN (SELECT id FROM bot_work_items WHERE bot_id=?)`,
         [throughVersion, botId]
       )
       this.changed()
@@ -473,6 +498,9 @@ export class BotStore {
       threadId: String(row.thread_id),
       requestId: String(row.request_id),
       ...(row.work_id == null ? {} : { workId: String(row.work_id) }),
+      ...(row.mock_source_json == null
+        ? {}
+        : { mockSource: parseBotMockSource(JSON.parse(String(row.mock_source_json))) }),
       message: String(row.message),
       state: row.state as BotTaskState,
       error: row.error == null ? null : String(row.error),
@@ -501,6 +529,10 @@ export class BotStore {
       executionState: (row.execution_state ?? null) as BotWorkItem["executionState"],
       pendingPeers: Number(row.pending_peers ?? 0),
       backgroundBusy: Boolean(row.background_busy),
+      ...(row.conversation_json == null ? {} : {conversation: readWorkConversationRecord(row.conversation_json,String(row.thread_id))}),
+      ...(row.source_json == null
+        ? {}
+        : { source: parseBotMockSource(JSON.parse(String(row.source_json))) }),
       ...(row.activity_version
         ? {
             activity: {
@@ -542,7 +574,7 @@ export class BotStore {
     return this.work(row)
   }
   workForThread(botId: string, threadId: string): BotWorkItem | null {
-    const row = this.rows("SELECT id FROM bot_work_items WHERE bot_id=? AND thread_id=?", [
+    const row = this.rows("SELECT id FROM bot_work_items WHERE bot_id=? AND thread_id=? AND detached=0", [
       botId,
       threadId
     ])[0]
@@ -567,14 +599,14 @@ export class BotStore {
       throw new BotError("INVALID_INPUT", "工作摘要批次无效")
     if (!workIds.length) return []
     const rows = this.rows(
-      `SELECT w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,
-      ${this.workActivityProjection()} FROM bot_work_items w WHERE w.bot_id=? AND w.audience_key='desktop' AND w.id IN (${workIds.map(() => "?").join(",")})`,
+      `SELECT w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,
+      ${this.workActivityProjection()} FROM bot_work_items w WHERE w.bot_id=? AND w.id IN (${workIds.map(() => "?").join(",")})`,
       [botId, ...workIds]
     )
     if (rows.length !== workIds.length) throw new BotError("NOT_FOUND", "工作摘要不属于当前 Bot")
     return rows.map((row) => this.workSummary(row))
   }
-  listWorks(botId: string, cursor?: string, query = ""): BotWorkPage {
+  listWorks(botId: string, cursor?: string, query = "", audience?: string): BotWorkPage {
     this.getBot(botId)
     if (typeof query !== "string" || query.length > 160)
       throw new BotError("INVALID_INPUT", "工作搜索无效")
@@ -584,29 +616,30 @@ export class BotStore {
         const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"))
         if (
           !Array.isArray(value) ||
-          value.length !== 3 ||
+          value.length !== 4 ||
           value[0] !== botId ||
           value[1] !== query ||
-          !Number.isSafeInteger(value[2]) ||
-          value[2] < 1
+          value[2] !== (audience ?? null) ||
+          !Number.isSafeInteger(value[3]) ||
+          value[3] < 1
         )
           throw Error()
-        before = value[2]
+        before = value[3]
       } catch {
         throw new BotError("INVALID_INPUT", "工作分页游标无效")
       }
     }
     const rows = this.rows(
-      `SELECT w.ordinal,w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,
+      `SELECT w.ordinal,w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,
       ${this.workActivityProjection()}
-      FROM bot_work_items w WHERE w.bot_id=? AND w.audience_key='desktop' AND w.ordinal<? AND (?='' OR instr(lower(w.title),lower(?))>0) ORDER BY w.ordinal DESC LIMIT 41`,
-      [botId, before, query, query]
+      FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? AND (? IS NULL OR w.audience_key=?) AND w.ordinal<? AND (?='' OR instr(lower(w.title),lower(?))>0) ORDER BY w.ordinal DESC LIMIT 41`,
+      [botId, audience ?? null, audience ?? null, before, query, query]
     )
     return {
       items: rows.slice(0, 40).map((row) => this.workSummary(row)),
       priority: this.rows(
-        `SELECT w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,
-        ${this.workActivityProjection()} FROM bot_work_items w WHERE w.bot_id=? AND w.audience_key='desktop' AND w.state='active'
+        `SELECT w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,
+        ${this.workActivityProjection()} FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? AND (? IS NULL OR w.audience_key=?) AND w.state='active'
         AND (?='' OR instr(lower(w.title),lower(?))>0) AND w.id IN (
           SELECT work_id FROM bot_tasks WHERE work_id IS NOT NULL AND state IN ('queued','running','waiting_user')
           UNION SELECT json_extract(origin_json,'$.rootWorkId') FROM bot_tasks WHERE state IN ('queued','running','waiting_user') AND json_extract(origin_json,'$.rootWorkId') IS NOT NULL
@@ -614,13 +647,13 @@ export class BotStore {
           UNION SELECT x.id FROM bot_commands c JOIN bot_work_items x ON x.thread_id=c.thread_id WHERE c.state='accepted'
           UNION SELECT json_extract(t.origin_json,'$.rootWorkId') FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE c.state='accepted')
         ORDER BY CASE execution_state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,w.updated_at DESC,w.ordinal DESC LIMIT 6`,
-        [botId, query, query]
+        [botId, audience ?? null, audience ?? null, query, query]
       ).map((row) => this.workSummary(row)),
       nextCursor:
         rows.length > 40
-          ? Buffer.from(JSON.stringify([botId, query, Number(rows[39].ordinal)])).toString(
-              "base64url"
-            )
+          ? Buffer.from(
+              JSON.stringify([botId, query, audience ?? null, Number(rows[39].ordinal)])
+            ).toString("base64url")
           : null
     }
   }
@@ -663,19 +696,21 @@ export class BotStore {
       const bot = this.getBot(input.botId)
       if (bot.archived || bot.deleting) throw new BotError("CONFLICT", "请先恢复 Bot")
       let sourceThread = bot.threadId
+      let mockSource: BotMockSource | undefined
       if (source) {
         const task = this.getTask(source.taskId)
         if (
           task.botId !== bot.id ||
           task.workId ||
           botTaskGroupId(task) ||
-          !this.hasDirectUserRequest(task.id) ||
+          !this.hasWorkUserRequest(task.id) ||
           !ACTIVE_STATES.includes(task.state as (typeof ACTIVE_STATES)[number]) ||
           !source.callId ||
           !source.key
         )
           throw new BotError("CONFLICT", "只能从当前主对话的用户交办创建工作")
         sourceThread = task.threadId
+        mockSource = task.mockSource
       }
       const ids = input.contextMessageIds ?? []
       if (
@@ -712,8 +747,19 @@ export class BotStore {
             now = this.now(),
             threadId = `bot-work-${id}`
           this.db.run(
-            "INSERT INTO bot_work_items(id,bot_id,thread_id,parent_thread_id,title,goal,audience_key,created_at,updated_at) VALUES(?,?,?,?,?,?,'desktop',?,?)",
-            [id, bot.id, threadId, sourceThread, input.title.trim(), input.goal.trim(), now, now]
+            "INSERT INTO bot_work_items(id,bot_id,thread_id,parent_thread_id,title,goal,audience_key,created_at,updated_at,source_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            [
+              id,
+              bot.id,
+              threadId,
+              sourceThread,
+              input.title.trim(),
+              input.goal.trim(),
+              mockSource?.audienceKey ?? "desktop",
+              now,
+              now,
+              mockSource ? JSON.stringify(mockSource) : null
+            ]
           )
           const message =
             input.goal.trim() +
@@ -723,7 +769,8 @@ export class BotStore {
               : "")
           const task = this.enqueue(
             { botId: bot.id, workId: id, requestId: `work-start-${id}`, message },
-            source ? { kind: "work", sourceTaskId: source.taskId } : { kind: "user" }
+            source ? { kind: "work", sourceTaskId: source.taskId } : { kind: "user" },
+            mockSource
           )
           return { work: this.getWork(bot.id, id), task }
         },
@@ -739,12 +786,12 @@ export class BotStore {
     return this.transaction(() => {
       const task = this.getTask(source.taskId)
       if (
-        !this.hasDirectUserRequest(task.id) ||
+        !this.hasWorkUserRequest(task.id) ||
         !ACTIVE_STATES.includes(task.state as (typeof ACTIVE_STATES)[number]) ||
         botTaskGroupId(task)
       )
         throw new BotError("CONFLICT", "当前会话不能转达工作消息")
-      this.getWork(task.botId, workId)
+      this.assertWorkAudience(task, workId)
       const fingerprint = createHash("sha256")
         .update(JSON.stringify([task.botId, workId, message]))
         .digest("hex")
@@ -761,7 +808,8 @@ export class BotStore {
                 .update(JSON.stringify([task.id, source.callId]))
                 .digest("hex")}`
             },
-            { kind: "work", sourceTaskId: task.id }
+            { kind: "work", sourceTaskId: task.id },
+            task.mockSource
           ),
         source
       )
@@ -780,6 +828,13 @@ export class BotStore {
       const bot = this.getBot(botId)
       if (bot.archived || bot.deleting) throw new BotError("CONFLICT", "请先恢复 Bot")
       const work = this.getWork(botId, workId)
+      if(work.conversation && work.conversation.state!=="bound")throw new BotError("CONFLICT","任务会话尚未就绪或已解除关联。")
+      if (source) {
+        const task = this.getTask(source.taskId)
+        if (!this.hasWorkUserRequest(task.id))
+          throw new BotError("CONFLICT", "只有当前用户明确指令可改变工作")
+        this.assertWorkAudience(task, workId)
+      } else if (work.source && action === "continue") this.mock.validateSource(work.source, botId)
       const fingerprint = createHash("sha256")
         .update(JSON.stringify([botId, workId, expectedVersion, action]))
         .digest("hex")
@@ -989,6 +1044,8 @@ export class BotStore {
 
   hasDirectUserRequest(taskId: string): boolean {
     const task = this.getTask(taskId)
+    if (task.mockSource || (task.workId && this.getWork(task.botId, task.workId).source))
+      return false
     if (task.state !== "running") return false
     if (task.origin.kind === "user") return true
     if (task.origin.kind === "group") {
@@ -1004,6 +1061,20 @@ export class BotStore {
       )
     }
     return task.origin.kind === "introduction" && this.injectedUserRequestId(task) !== null
+  }
+
+  hasWorkUserRequest(taskId: string): boolean {
+    const task = this.getTask(taskId)
+    if (!task.mockSource) return this.hasDirectUserRequest(taskId)
+    this.mock.execution(task)
+    return task.state === "running" && (task.origin.kind === "mock" || task.origin.kind === "user")
+  }
+  assertWorkAudience(task: BotTask, workId: string): BotWorkItem {
+    const work = this.getWork(task.botId, workId)
+    if (work.audienceKey !== (task.mockSource?.audienceKey ?? "desktop"))
+      throw new BotError("CONFLICT", "工作不属于当前会话受众")
+    if (task.mockSource) this.mock.execution(task)
+    return work
   }
 
   private injectedUserRequestId(task: BotTask): string | null {
@@ -1120,6 +1191,7 @@ export class BotStore {
         throw new BotError("CONFLICT", "请先停止当前任务，再删除 Bot")
       const threads = new Set([
         bot.threadId,
+        ...this.mock.threads(id),
         ...this.rows("SELECT thread_id FROM bot_work_items WHERE bot_id=?", [id]).map((row) =>
           String(row.thread_id)
         ),
@@ -1127,6 +1199,11 @@ export class BotStore {
           String(row.thread_id)
         )
       ])
+      // User-owned/admitted conversations survive Bot deletion, including conversations
+      // explicitly detached earlier. Disposable task history cannot retake their ownership.
+      for (const row of this.rows(`SELECT thread_id FROM bot_work_items WHERE bot_id=? AND
+        (detached=1 OR json_extract(conversation_json,'$.origin')='existing')`, [id]))
+        threads.delete(String(row.thread_id))
       for (const group of this.groups()) {
         // A Bot may have left a group; its former member thread still needs cleanup.
         threads.add(`group-${group.id}-${id}`)
@@ -1177,6 +1254,7 @@ export class BotStore {
       )
       this.db.run("DELETE FROM bot_activity WHERE kind='work-bot' AND id=?", [id])
       this.db.run("DELETE FROM bot_work_items WHERE bot_id=?", [id])
+      this.mock.removeBot(id)
       this.db.run("DELETE FROM bots WHERE id=?", [id])
       this.db.run("DELETE FROM bot_activity WHERE kind='bot' AND id=?", [id])
       this.changed()
@@ -1208,8 +1286,24 @@ export class BotStore {
     return reply
   }
 
-  enqueue(input: SendBotMessageInput, origin: BotTaskOrigin = { kind: "user" }): BotTask {
+  enqueue(
+    input: SendBotMessageInput,
+    origin: BotTaskOrigin = { kind: "user" },
+    mockSource?: BotMockSource
+  ): BotTask {
     return this.transaction(() => {
+      const targetWork = input.workId ? this.getWork(input.botId, input.workId) : null
+      if(targetWork?.conversation && targetWork.conversation.state!=="bound")throw new BotError("CONFLICT","任务会话正在关联或已解除，不能发送；请返回原对话核对。")
+      mockSource = mockSource ?? targetWork?.source
+      if (mockSource) {
+        this.mock.validateSource(mockSource, input.botId)
+        assertBotMockText(input.message)
+        if (input.replyToId)
+          throw new BotError("INVALID_INPUT", "模拟渠道仅支持普通文字，请使用原渠道消息引用")
+        if (targetWork && targetWork.audienceKey !== mockSource.audienceKey)
+          throw new BotError("CONFLICT", "模拟渠道受众不一致")
+      } else if (origin.kind === "mock" || targetWork?.source)
+        throw new BotError("CONFLICT", "模拟来源证明缺失")
       const prior = this.rows("SELECT * FROM bot_tasks WHERE request_id=?", [input.requestId])[0]
       if (prior) {
         const previousOrigin = this.task(prior).origin
@@ -1217,6 +1311,7 @@ export class BotStore {
           previousOrigin.kind === "user" ? previousOrigin.replyTo?.id : undefined
         if (
           prior.bot_id !== input.botId ||
+          JSON.stringify(this.task(prior).mockSource) !== JSON.stringify(mockSource) ||
           prior.message !== input.message ||
           previousReply !== input.replyToId ||
           (prior.work_id ?? null) !== (input.workId ?? null)
@@ -1275,7 +1370,7 @@ export class BotStore {
       const id = randomUUID(),
         now = this.now()
       this.db.run(
-        "INSERT INTO bot_tasks (id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id,work_id) VALUES (?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?)",
+        "INSERT INTO bot_tasks (id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id,work_id,mock_source_json) VALUES (?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?,?)",
         [
           id,
           bot.id,
@@ -1285,10 +1380,12 @@ export class BotStore {
           now,
           JSON.stringify(origin),
           work?.threadId ??
+            (mockSource ? this.mock.thread(mockSource) : undefined) ??
             (botTaskGroupId({ origin })
               ? `group-${botTaskGroupId({ origin })}-${bot.id}`
               : bot.threadId),
-          work?.id ?? null
+          work?.id ?? null,
+          mockSource ? JSON.stringify(mockSource) : null
         ]
       )
       if (work)
@@ -1375,7 +1472,7 @@ export class BotStore {
     // A single SQLite read sees task pruning and receipt insertion atomically.
     const rows = this.rows(
       `SELECT request_id,bot_id,COALESCE(json_extract(origin_json,'$.groupId'),'') AS group_id,
-        message,NULL AS message_hash,(SELECT w.id FROM bot_work_items w WHERE w.thread_id=bot_exchange_records.thread_id AND w.bot_id=bot_exchange_records.bot_id) AS work_id FROM bot_exchange_records WHERE request_id IN (${placeholders})
+        message,NULL AS message_hash,work_id FROM bot_exchange_records WHERE request_id IN (${placeholders})
        UNION ALL SELECT request_id,bot_id,COALESCE(group_id,''),NULL,message_hash,work_id
         FROM bot_task_receipts WHERE request_id IN (${placeholders})`,
       [...ids, ...ids]
@@ -1684,7 +1781,7 @@ export class BotStore {
             task.origin.kind === "bot"
               ? `来自 ${task.origin.fromBotName ?? "其他 Bot"} 的${task.origin.expectsReply ? "协作消息" : "协作结果"}：\n\n`
               : "例行任务：\n\n"
-          this.db.run("INSERT INTO bot_exchange_archive VALUES (?,?,?,?,?,?,?,?,?,?)", [
+          this.db.run("INSERT INTO bot_exchange_archive(id,bot_id,request_id,message,state,error,created_at,updated_at,origin_json,thread_id,work_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)", [
             row.id,
             row.bot_id,
             row.request_id,
@@ -1694,18 +1791,20 @@ export class BotStore {
             row.created_at,
             row.updated_at,
             row.origin_json,
-            row.thread_id
+            row.thread_id,
+            row.work_id
           ])
         }
         this.db.run(
-          "INSERT OR IGNORE INTO bot_task_receipts(request_id,bot_id,group_id,message_hash,finished_at,work_id) VALUES (?,?,?,?,?,?)",
+          "INSERT OR IGNORE INTO bot_task_receipts(request_id,bot_id,group_id,message_hash,finished_at,work_id,mock_source_json) VALUES (?,?,?,?,?,?,?)",
           [
             row.request_id,
             row.bot_id,
             botTaskGroupId(this.task(row)) ?? null,
             createHash("sha256").update(String(row.message)).digest("hex"),
             row.updated_at,
-            row.work_id ?? null
+            row.work_id ?? null,
+            row.mock_source_json ?? null
           ]
         )
         this.db.run("DELETE FROM bot_tasks WHERE id=?", [row.id])
@@ -1723,8 +1822,10 @@ export class BotStore {
   notificationThreadIds(): string[] {
     return this.rows(
       `SELECT thread_id FROM bots WHERE archived=0 AND deleting=0
-      UNION SELECT w.thread_id FROM bot_work_items w JOIN bots b ON b.id=w.bot_id WHERE b.archived=0 AND b.deleting=0
-      UNION SELECT t.thread_id FROM bot_tasks t JOIN bots b ON b.id=t.bot_id WHERE b.archived=0 AND b.deleting=0
+      UNION SELECT w.thread_id FROM bot_work_items w JOIN bots b ON b.id=w.bot_id WHERE b.archived=0 AND b.deleting=0 AND w.detached=0
+      UNION SELECT c.thread_id FROM bot_mock_conversations c JOIN bots b ON b.id=c.bot_id WHERE b.archived=0 AND b.deleting=0
+      UNION SELECT t.thread_id FROM bot_tasks t JOIN bots b ON b.id=t.bot_id WHERE b.archived=0 AND b.deleting=0 AND
+        (t.work_id IS NULL OR EXISTS(SELECT 1 FROM bot_work_items w WHERE w.id=t.work_id AND w.detached=0))
       UNION SELECT 'group-'||g.id||'-'||member.value FROM bot_groups g,
         json_each(g.payload,'$.memberIds') member JOIN bots b ON b.id=member.value
         WHERE b.archived=0 AND b.deleting=0 AND COALESCE(json_extract(g.payload,'$.deleting'),0)=0`
@@ -1738,7 +1839,8 @@ export class BotStore {
     const row = this.rows(
       `SELECT t.* FROM bot_tasks t JOIN bots b ON b.id=t.bot_id
       WHERE t.state='queued' AND b.archived=0 AND b.deleting=0 ${exclusion}
-      AND (t.work_id IS NULL OR EXISTS(SELECT 1 FROM bot_work_items own WHERE own.id=t.work_id AND own.bot_id=t.bot_id AND own.state='active'))
+      AND ${this.mock.runnableSql("t")}
+      AND (t.work_id IS NULL OR EXISTS(SELECT 1 FROM bot_work_items own WHERE own.id=t.work_id AND own.bot_id=t.bot_id AND own.state='active' AND own.detached=0 AND (own.conversation_json IS NULL OR json_extract(own.conversation_json,'$.state')='bound')))
       AND (json_extract(t.origin_json,'$.rootWorkId') IS NULL OR EXISTS(SELECT 1 FROM bot_work_items root JOIN bots owner ON owner.id=root.bot_id WHERE root.id=json_extract(t.origin_json,'$.rootWorkId') AND root.state='active' AND owner.archived=0 AND owner.deleting=0))
       ${allowWork ? "" : "AND t.work_id IS NULL AND json_extract(t.origin_json,'$.rootWorkId') IS NULL"}
       AND NOT EXISTS (SELECT 1 FROM bot_tasks a WHERE a.thread_id=t.thread_id AND a.state IN ('running','waiting_user'))
@@ -1748,6 +1850,9 @@ export class BotStore {
       excludedThreads
     )[0]
     return row ? this.task(row) : null
+  }
+  pendingTasksForThread(threadId: string): BotTask[] {
+    return this.rows("SELECT * FROM bot_tasks WHERE thread_id=? AND state IN ('queued','running','waiting_user')", [threadId]).map((row) => this.task(row))
   }
 
   transition(id: string, state: BotTaskState, error: string | null = null): BotTask {
@@ -1817,12 +1922,14 @@ export class BotStore {
           },
           true
         )
+      this.mock.recover()
     })
   }
 
   acceptCommand(sourceTaskId: string, command: BackgroundCommandStart): void {
     this.transaction(() => {
       const source = this.getTask(sourceTaskId)
+      if (source.mockSource) throw new BotError("CONFLICT", "模拟渠道不允许本机后台命令")
       const bot = this.getBot(source.botId)
       const groupId = botTaskGroupId(source)
       if (
@@ -1958,6 +2065,7 @@ export class BotStore {
     const outputs = parseBotOutputFiles(outputFiles)
     return this.transaction(() => {
       const source = this.getTask(fromTaskId)
+      if (source.mockSource) throw new BotError("CONFLICT", "模拟渠道不能调用本机协作")
       if (!ACTIVE_STATES.includes(source.state as (typeof ACTIVE_STATES)[number]))
         throw new BotError("CONFLICT", "当前任务已结束，不能继续交办")
       if (targetBotId === source.botId) throw new BotError("INVALID_INPUT", "不能向自己交办任务")
@@ -2081,6 +2189,8 @@ export class BotStore {
       const alreadySettled = this.getTask(id).state === state
       const visibleResult = result ? splitBotInlineReasoning(result).body : undefined
       const task = this.transition(id, state, error)
+      if (task.mockSource && !alreadySettled)
+        this.mock.settle(task, state, visibleResult || error || botTaskStateLabel(state))
       const silentSchedule =
         task.origin.kind === "schedule" &&
         state === "completed" &&

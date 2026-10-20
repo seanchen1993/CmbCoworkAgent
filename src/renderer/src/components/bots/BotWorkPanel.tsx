@@ -1,4 +1,5 @@
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
+import { useAppStore } from "@/lib/store"
 import { Plus, ArrowLeft, Check, RotateCcw } from "lucide-react"
 import type { BotClient } from "../../../../shared/bots/contracts"
 import type { BotWorkItem, BotWorkSummary } from "../../../../shared/bots/work"
@@ -41,6 +42,29 @@ export function BotWorkPanel({
     [error, setError] = useState<string | null>(null),
     [limit, setLimit] = useState(6)
   const operation = useRef<{ fingerprint: string; id: string } | null>(null)
+  const threadWorkspace=useAppStore(state=>state.threads.find(thread=>thread.thread_id===selected?.threadId)?.metadata?.workspacePath)
+  const [workspace,setWorkspace]=useState<{id:string;path:string}|null>(null)
+  useEffect(()=>{
+    let disposed=false
+    setWorkspace(null)
+    if(selected&&!selected.source)void window.api.threads.get(selected.threadId).then(row=>{
+      const path=row?.metadata?.workspacePath
+      if(!disposed&&typeof path==="string")setWorkspace({id:selected.id,path})
+    }).catch(()=>{})
+    return()=>{disposed=true}
+  },[selected?.id,selected?.threadId,selected?.threadInitialized,selected?.conversation?.state,threadWorkspace])
+  const openConversation=async()=>{
+    if(!selected||!client.conversations)return
+    const owner=botId,id=selected.id
+    setSaving(true);setError(null)
+    try{
+      const work=await client.conversations.expose(owner,id)
+      await useAppStore.getState().loadThreads()
+      if(controller.current.current.botId!==owner||controller.current.current.selectedId!==id)return
+      await useAppStore.getState().selectThread(work.threadId)
+    }catch(cause){if(controller.current.current.botId===owner)setError(botErrorMessage(cause))}
+    finally{setSaving(false)}
+  }
   const command = (fingerprint: string) => {
     if (operation.current?.fingerprint !== fingerprint)
       operation.current = { fingerprint, id: crypto.randomUUID() }
@@ -105,13 +129,13 @@ export function BotWorkPanel({
     ...controller.items.filter((item) => !controller.priority.some((v) => v.id === item.id))
   ]
   return (
-    <section className="bot-detail-section bot-works" aria-label="独立工作">
+    <section className="bot-detail-section bot-works" aria-label="独立任务">
       <div className="bot-works-heading">
-        <h3>独立工作</h3>
+        <h3>独立任务</h3>
         <button
           disabled={disabled || saving}
           onClick={() => setEditing(!editing)}
-          aria-label="新建独立工作"
+          aria-label="新建独立任务"
         >
           <Plus size={16} />
         </button>
@@ -126,9 +150,11 @@ export function BotWorkPanel({
             </button>
             <button disabled={disabled || saving} onClick={() => void lifecycle()}>
               {selected.state === "completed" ? <RotateCcw size={13} /> : <Check size={13} />}{" "}
-              {selected.state === "completed" ? "继续处理" : "完成工作"}
+              {selected.state === "completed" ? "继续处理" : "完成任务"}
             </button>
+            {!selected.source && client.conversations && <button disabled={saving} onClick={()=>void openConversation()}>在对话模式打开</button>}
           </div>
+          {workspace?.id===selected.id && <small className="block truncate" title={workspace.path}>工作目录：{workspace.path}{selected.conversation?.origin==="existing"?"":"（Bot共享目录）"}</small>}
         </div>
       )}
       {editing && (
@@ -140,7 +166,7 @@ export function BotWorkPanel({
           className="bot-work-create"
         >
           <label>
-            工作名称
+            任务名称
             <input
               value={title}
               maxLength={160}
@@ -163,15 +189,15 @@ export function BotWorkPanel({
               取消
             </button>
             <button disabled={disabled || saving || !title.trim() || !goal.trim()} type="submit">
-              交办工作
+              交办任务
             </button>
           </div>
         </form>
       )}
       <input
         className="bot-work-search"
-        aria-label="搜索工作"
-        placeholder="搜索工作…"
+        aria-label="搜索任务"
+        placeholder="搜索任务…"
         value={controller.query}
         onChange={(e) => {
           setLimit(6)
@@ -184,7 +210,7 @@ export function BotWorkPanel({
           <button onClick={() => void controller.refresh()}>刷新</button>
         </p>
       )}
-      <div className="bot-work-list" aria-label="全部工作">
+      <div className="bot-work-list" aria-label="全部任务">
         {directory.slice(0, limit).map((work) => (
           <button
             className="bot-work-row"
@@ -197,11 +223,14 @@ export function BotWorkPanel({
               {work.activity?.unread ? "● " : ""}
               {work.title}
             </span>
-            <small>{status(work)}</small>
+            <small>
+              {work.source ? "模拟渠道 · " : ""}
+              {status(work)}
+            </small>
           </button>
         ))}
       </div>
-      {!directory.length && !controller.loading && <p>明确交办的工作会在这里保留独立会话。</p>}
+      {!directory.length && !controller.loading && <p>明确交办的任务会在这里保留独立会话。</p>}
       {(directory.length > limit || controller.cursor) && (
         <button
           disabled={controller.loading}
@@ -210,7 +239,7 @@ export function BotWorkPanel({
             setLimit((v) => v + 40)
           }}
         >
-          更多工作
+          更多任务
         </button>
       )}
     </section>

@@ -1,7 +1,8 @@
+import { BotConversation } from "./BotConversation"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { botErrorMessage } from "@/lib/bot-error-message"
 import { BotGroupAvatar } from "./BotGroupAvatar"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   Archive,
   ChevronDown,
@@ -20,7 +21,6 @@ import {
   X
 } from "lucide-react"
 import { toast } from "sonner"
-import { ChatContainer, type ManagedChatTurn } from "@/components/chat/ChatContainer"
 import { Button } from "@/components/ui/button"
 import { CustomModelDialog } from "@/components/chat/CustomModelDialog"
 import {
@@ -51,19 +51,16 @@ import {
 import { orderBotConversations } from "@/lib/bot-sidebar-view"
 import { groupDraftKey, useBotGroupDrafts } from "@/lib/bot-group-drafts"
 import {
-  bindBotConversationDraft,
   restoreBotConversationDraft,
   saveBotConversationDraft,
   pruneBotConversationDrafts
 } from "@/lib/bot-conversation-draft"
 import { BotDraftFileTransfer, validateNewChatFiles } from "@/lib/bot-new-chat-files"
-import { BotDraftSender, validateBotDraft } from "@/lib/bot-draft-sender"
 import { BotStorefrontIcon } from "./BotStorefrontIcon"
-import { botGroupBrowserScope, BOT_REQUEST_RECEIPT_LIMIT } from "../../../../shared/bots/contracts"
+import { botGroupBrowserScope } from "../../../../shared/bots/contracts"
 import type {
   BotClient,
   BotDefinition,
-  BotSchedule,
   BotTask,
   BotGroup,
   CreateBotInput
@@ -72,7 +69,6 @@ import { BotAvatar } from "./BotAvatar"
 import { BotRuntimeAvatar } from "./BotRuntimeAvatar"
 import { BotAppearancePicker, BotAvatarEditor } from "./BotAppearancePicker"
 import { createBotAppearance } from "../../../../shared/bots/appearance"
-import { BotConversationTools } from "./BotConversationTools"
 import { BotDeleteDialog } from "./BotDeleteDialog"
 import { BotMemoryPanel } from "./BotMemoryPanel"
 import { BotSchedulePanel } from "./BotSchedulePanel"
@@ -94,25 +90,17 @@ import { BotConversationList } from "./BotConversationList"
 import { BotProfileLabel } from "./BotProfileLabel"
 import { BotBrowserPanel } from "./BotBrowserPanel"
 import { BotFilesPanel } from "./BotFilesPanel"
-import { BotMessageFilePreview } from "./BotMessageFilePreview"
 import { useBots } from "./use-bots"
 import { useBotReadState } from "./use-bot-read-state"
 import { localBotClient } from "./client"
 import { botWorkClient } from "@/lib/bot-work-client"
 import { useBotWorks } from "./use-bot-works"
 import { BotWorkPanel } from "./BotWorkPanel"
-import type { BotWorkItem } from "../../../../shared/bots/work"
+import { BotMockChannelDialog } from "./BotMockChannelDialog"
 import { botChatAccent } from "@/lib/bot-chat-accent"
 import { BotWorkspaceMenu } from "./BotWorkspaceMenu"
 import { BotPanelDivider } from "./BotPanelDivider"
 import { useBotViewStore, DEFAULT_BOT_VIEW, clampBotPanelWidth } from "./view-store"
-import { ServiceExpertConversation, SERVICE_EXPERT_SELECTION } from "./ServiceExpertConversation"
-import {
-  SERVICE_NEW_TASK,
-  serviceSelection,
-  serviceTaskRef,
-  useServiceExpertChats
-} from "./useServiceExpertChats"
 import "./bots.css"
 
 const COLORS = ["#ed2040", "#168bea", "#ffb800", "#9a65ee", "#37b897", "#f07e4a"]
@@ -127,7 +115,6 @@ const STATE_LABELS: Record<BotTask["state"], string> = {
   superseded: "已由新消息接续",
   outcome_unknown: "需要核对结果"
 }
-const active = (task: BotTask) => task.state === "running" || task.state === "waiting_user"
 
 function BotEditor({
   bot,
@@ -311,200 +298,6 @@ function BotEditor({
   )
 }
 
-function BotConversation({
-  bot,
-  work,
-  bots,
-  schedules,
-  tasks,
-  backgroundBusy,
-  client,
-  onConfigureModel,
-  onOpenWork
-}: {
-  bot: BotDefinition
-  work?: BotWorkItem | null
-  bots: BotDefinition[]
-  schedules: BotSchedule[]
-  tasks: BotTask[]
-  backgroundBusy: boolean
-  client: BotClient
-  onConfigureModel(): void
-  onOpenWork(workId: string): void
-}) {
-  const threadId = work?.threadId ?? bot.threadId
-  const [ready, setReady] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [draftStorageError, setDraftStorageError] = useState<string | null>(null)
-  const threadContext = useThreadContext()
-  const [sendingRevision, setSendingRevision] = useState(0)
-  const sender = useMemo(
-    () =>
-      new BotDraftSender(client, bot.id, threadContext.getThreadActions(threadId), setError, () =>
-        setSendingRevision((revision) => revision + 1)
-      ),
-    [client, bot.id, threadId, threadContext]
-  )
-  const submitDraft = useCallback<NonNullable<ManagedChatTurn["submitDraft"]>>(
-    (draft) => sender.send(draft),
-    [sender]
-  )
-  const reconcileDrafts = useCallback<NonNullable<ManagedChatTurn["reconcileDrafts"]>>(
-    (drafts) => sender.reconcile(drafts),
-    [sender]
-  )
-  useEffect(() => {
-    let disposed = false
-    let unbindDraft: (() => void) | undefined
-    setReady(false)
-    client
-      .open(bot.id)
-      .then(async () => {
-        await useAppStore.getState().loadThreads()
-        if (!disposed) {
-          unbindDraft = bindBotConversationDraft(
-            threadContext,
-            client.hostId,
-            bot.id,
-            threadId,
-            (message) => {
-              if (!disposed) setDraftStorageError(message)
-            },
-            work?.id
-          )
-          setReady(true)
-        }
-      })
-      .catch((cause) => {
-        if (!disposed) setError(botErrorMessage(cause))
-      })
-    return () => {
-      disposed = true
-      unbindDraft?.()
-    }
-  }, [bot.id, threadId, bot.modelRef, client, threadContext])
-  const running = tasks.find(active)
-  const queued = tasks.filter((task) => task.state === "queued")
-  const submit = useCallback<ManagedChatTurn["submit"]>(
-    async (input, options) => {
-      const messages = input?.messages
-      const message = Array.isArray(messages) && messages.length === 1 ? messages[0]?.content : null
-      if (typeof message !== "string" || !message.trim() || options?.command) {
-        setError("此请求不能作为 Bot 消息发送，请从当前审批卡片操作。")
-        return
-      }
-      const visibleId = options?.config?.configurable?.hook_turn_id
-      const requestId = typeof visibleId === "string" ? visibleId : crypto.randomUUID()
-      setError(null)
-      try {
-        await client.send({ botId: bot.id, requestId, message })
-      } catch (cause) {
-        setError(botErrorMessage(cause))
-        throw cause
-      }
-    },
-    [bot.id, threadId, client, threadContext]
-  )
-  const cancel = useCallback(async () => {
-    sender.stopPreparing()
-    await client.stopConversation(bot.id)
-  }, [sender, client, bot.id])
-  const managedTurn = useMemo<ManagedChatTurn>(
-    () => ({
-      submit,
-      submitDraft,
-      validateDraft: validateBotDraft,
-      reconcileDrafts,
-      sendingDraftIds: sender.sending,
-      maxPendingDrafts: BOT_REQUEST_RECEIPT_LIMIT,
-      draftReceiptRevision: tasks
-        .map((task) => `${task.id}:${task.updatedAt}:${task.state}`)
-        .join("|"),
-      attachFiles: (maxFiles, maxChars) => client.attachFiles(bot.id, maxFiles, maxChars),
-      attachFileBytes: (files, maxChars) => client.attachFileBytes(bot.id, files, maxChars),
-      cancel,
-      configureModel: onConfigureModel,
-      busy: Boolean(running) || backgroundBusy,
-      busySubmitLabel: "发送消息",
-      placeholder: `给 ${bot.name} 发消息…`
-    }),
-    [
-      submit,
-      submitDraft,
-      reconcileDrafts,
-      sender,
-      sendingRevision,
-      tasks,
-      cancel,
-      running,
-      backgroundBusy,
-      bot.id,
-      bot.name,
-      client,
-      onConfigureModel
-    ]
-  )
-  if (!ready)
-    return (
-      <div className="bot-empty">
-        {error ? <p role="alert">{error}</p> : <Loader2 className="size-5 animate-spin" />}
-      </div>
-    )
-  return (
-    <>
-      {draftStorageError && (
-        <div role="alert" className="bot-notice">
-          {draftStorageError}
-        </div>
-      )}
-      {error && (
-        <div role="alert" className="bot-notice">
-          <CircleAlert size={15} />
-          <span>{error}</span>
-          <button aria-label="关闭提示" onClick={() => setError(null)}>
-            <X size={14} />
-          </button>
-        </div>
-      )}
-      {queued.length > 0 && (
-        <div className="bot-queue" aria-live="polite">
-          <span>{queued.length} 条待办</span>
-          <span className="truncate">{botTaskPreview(queued[0])}</span>
-          <button
-            onClick={() =>
-              void client.cancel(queued[0].id).catch((cause) => toast.error(botErrorMessage(cause)))
-            }
-          >
-            撤回
-          </button>
-        </div>
-      )}
-      <BotConversationTools
-        client={client}
-        botId={bot.id}
-        conversationThreadId={threadId}
-        onOpenWork={onOpenWork}
-        tasks={tasks}
-        bots={bots}
-        schedules={schedules}
-      >
-        <ChatContainer
-          threadId={threadId}
-          surface="bot"
-          managedTurn={managedTurn}
-          readOnlyReason={
-            bot.archived
-              ? "Bot 已归档，恢复后可以继续对话。"
-              : work?.state === "completed"
-                ? "工作已完成，点击右侧「继续处理」可在原会话继续。"
-                : null
-          }
-        />
-      </BotConversationTools>
-      <BotMessageFilePreview botId={bot.id} threadId={threadId} name={bot.name} client={client} />
-    </>
-  )
-}
 
 function GroupBrowser({
   group,
@@ -593,7 +386,12 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const view = useBotViewStore((state) => state.hosts[client.hostId] ?? DEFAULT_BOT_VIEW)
   const updateView = (patch: Partial<typeof view>) =>
     useBotViewStore.getState().update(client.hostId, patch)
-  const { selectedId, groupId, showArchived, detailOpen, detailTab } = view
+  const { groupId, showArchived, detailOpen, detailTab } = view
+  // Old service routes are view preferences, never local Bot identities.
+  const legacySelection =
+    view.selectedId === "service-expert-conversation" ||
+    view.selectedId?.startsWith("service-expert-conversation:")
+  const selectedId = legacySelection ? null : view.selectedId
   const setSelectedId = (selectedId: string | null) => updateView({ selectedId })
   const setGroupId = (groupId: string | null) => updateView({ groupId })
   const setShowArchived = (showArchived: boolean) => updateView({ showArchived })
@@ -665,6 +463,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const [renamingGroup, setRenamingGroup] = useState<BotGroup | null>(null)
   const [renaming, setRenaming] = useState<BotDefinition | null>(null)
   const [editor, setEditor] = useState<BotDefinition | "new" | null>(null)
+  const [mockBot, setMockBot] = useState<BotDefinition | null>(null)
   const editorTrigger = useRef<HTMLElement | null>(null)
   const profileMenuTrigger = useRef<HTMLButtonElement | null>(null)
   const openBotEditor = (bot: BotDefinition, trigger?: HTMLElement | null) => {
@@ -692,6 +491,10 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     : selectedId
       ? (snapshot?.bots.find((bot) => bot.id === selectedId) ?? null)
       : (visible[0] ?? null)
+  useEffect(() => {
+    if (!legacySelection || !snapshot) return
+    useBotViewStore.getState().update(client.hostId, { selectedId: visible[0]?.id ?? null })
+  }, [client.hostId, legacySelection, snapshot, visible])
   const mainActivityByConversation = useMemo(
     () => new Map((snapshot?.activities ?? []).map((item) => [`${item.kind}:${item.id}`, item])),
     [snapshot?.activities]
@@ -914,7 +717,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const copyConversationId = async (bot: BotDefinition) => {
     try {
       if (bot.id === selected?.id && activeWorkId && !selectedWork)
-        throw new Error("工作会话尚未读取，请重试后再复制。")
+        throw new Error("任务会话尚未读取，请重试后再复制。")
       await navigator.clipboard.writeText(bot.id === selected?.id ? selectedThreadId : bot.threadId)
       toast.success("已复制对话 ID")
     } catch (cause) {
@@ -1210,19 +1013,6 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
       </BotRowMenu>
     )
   }
-  const [serviceTaskLimit, setServiceTaskLimit] = useState(5)
-  const serviceActive = !!selectedId?.startsWith(SERVICE_EXPERT_SELECTION) && !groupId && !newChat
-  const selectService = (ref: string | null) => {
-    setNewChat(false)
-    updateView({ selectedId: serviceSelection(ref), groupId: null })
-  }
-  const service = useServiceExpertChats(
-    window.api.serviceConversation,
-    serviceTaskRef(selectedId),
-    serviceActive,
-    query,
-    selectService
-  )
   const renderConversations = (bots: BotDefinition[], groups: BotGroup[]) =>
     orderBotConversations(bots, groups, activityByConversation).map((item) =>
       item.kind === "bot" ? renderBotRow(item.value) : renderGroupRow(item.value)
@@ -1360,64 +1150,6 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             </label>
           )}
           <BotConversationList label={showArchived ? "已归档 Bot" : "Bot 会话"}>
-            {!showArchived && window.api.serviceConversation && (
-              <section className="service-chat-list" aria-label="服务专家会话">
-                <button
-                  className="bot-list-item"
-                  data-selected={serviceActive && !serviceTaskRef(selectedId)}
-                  onClick={() => selectService(null)}
-                >
-                  <BotAvatar color="#168bea" shape="circle" size={32} />
-                  <span className="bot-list-copy">
-                    <strong>{service.overview?.expertName ?? "服务专家"}</strong>
-                    <small>主对话</small>
-                  </span>
-                </button>
-                <button
-                  className="service-chat-list-more"
-                  onClick={() => selectService(SERVICE_NEW_TASK)}
-                >
-                  新任务
-                </button>
-                {service.tasks.slice(0, serviceTaskLimit).map((task) => (
-                  <button
-                    key={task.taskRef}
-                    className="bot-list-item service-chat-task-row"
-                    data-selected={serviceActive && serviceTaskRef(selectedId) === task.taskRef}
-                    title={task.title}
-                    onClick={() => selectService(task.taskRef)}
-                  >
-                    <span
-                      className="service-chat-task-dot"
-                      data-completed={task.taskStatus === "completed"}
-                    />
-                    <span className="bot-list-copy">
-                      <strong>{task.title}</strong>
-                      <small>
-                        {task.taskStatus === "completed"
-                          ? "已完成"
-                          : task.status === "succeeded"
-                            ? "已回复"
-                            : task.busy
-                              ? "正在处理"
-                              : "任务会话"}
-                      </small>
-                    </span>
-                  </button>
-                ))}
-                {(service.tasks.length > serviceTaskLimit || service.taskCursor) && (
-                  <button
-                    className="service-chat-list-more"
-                    onClick={() => {
-                      setServiceTaskLimit((value) => value + 40)
-                      if (service.tasks.length <= serviceTaskLimit) void service.moreTasks()
-                    }}
-                  >
-                    更多任务
-                  </button>
-                )}
-              </section>
-            )}
             {(pinnedBots.length > 0 ||
               visibleGroups.some((group) => pinnedGroupIds.includes(group.id))) && (
               <div className="bot-pinned-list" aria-label="已置顶的 Bot">
@@ -1611,20 +1343,17 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               )
             )}
             {!snapshot && !error && <Loader2 className="mx-auto mt-12 size-5 animate-spin" />}
-            {snapshot &&
-              !visible.length &&
-              !visibleGroups.length &&
-              !service.overview?.conversationId && (
-                <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-                  {query
-                    ? "没有匹配的会话"
-                    : showArchived
-                      ? "没有已归档的 Bot"
-                      : showHidden
-                        ? "没有隐藏的会话"
-                        : "创建你的第一个 Bot"}
-                </p>
-              )}
+            {snapshot && !visible.length && !visibleGroups.length && (
+              <p className="px-4 py-8 text-center text-sm text-muted-foreground">
+                {query
+                  ? "没有匹配的会话"
+                  : showArchived
+                    ? "没有已归档的 Bot"
+                    : showHidden
+                      ? "没有隐藏的会话"
+                      : "创建你的第一个 Bot"}
+              </p>
+            )}
           </BotConversationList>
           <footer className="bots-sidebar-footer">
             {sidebarCollapsed ? [footerActions[1], footerActions[0]] : footerActions}
@@ -1642,13 +1371,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               {error}
             </div>
           )}
-          {serviceActive ? (
-            <ServiceExpertConversation
-              controller={service}
-              taskRef={serviceTaskRef(selectedId)}
-              onSelect={selectService}
-            />
-          ) : !snapshot ? (
+          {!snapshot ? (
             <div className="bot-empty" role="status">
               {error ? (
                 <>
@@ -1743,12 +1466,18 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               {activeWorkId && (
                 <div className="bot-work-breadcrumb">
                   <button onClick={() => selectWork(null)}>← {selected.name} 主对话</button>
-                  <span>{selectedWork?.state === "completed" ? "已完成" : "独立工作"}</span>
+                  <span>{selectedWork?.state === "completed" ? "已完成" : "独立任务"}</span>
+                </div>
+              )}
+              {selectedWork?.source && (
+                <div className="bot-work-source" role="note">
+                  模拟渠道任务 ·
+                  此处文字与结果将回到原模拟渠道。仅支持文字和同受众工作，不提供本机文件、电脑或私人记忆。
                 </div>
               )}
               {activeWorkId && !selectedWork ? (
                 <div className="bot-empty" role="status">
-                  {works.error ?? "正在读取工作会话…"}
+                  {works.error ?? "正在读取任务会话…"}
                   <button onClick={() => void works.refresh()}>重试</button>
                 </div>
               ) : (
@@ -1957,6 +1686,14 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                       <Settings2 className="mr-2 size-4" />
                       编辑 Bot
                     </button>
+                    {client.mock && (
+                      <button
+                        className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
+                        onClick={() => setMockBot(selected)}
+                      >
+                        模拟 IM 接入
+                      </button>
+                    )}
                     <button
                       className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
                       onClick={() => void archive(selected)}
@@ -2056,9 +1793,14 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   !selectedWork &&
                   (detailTab === "files" || detailTab === "computer") ? (
                     <div className="bot-detail-section" role="status">
-                      <p>{works.error ?? "正在读取工作会话，资源面板暂不可用…"}</p>
+                      <p>{works.error ?? "正在读取任务会话，资源面板暂不可用…"}</p>
                       <button onClick={() => void works.refresh()}>重试</button>
                       <button onClick={() => selectWork(null)}>返回主对话</button>
+                    </div>
+                  ) : selectedWork?.source &&
+                    (detailTab === "files" || detailTab === "computer") ? (
+                    <div className="bot-detail-section" role="note">
+                      模拟渠道仅支持文字；此工作无法访问本机资料库和电脑。
                     </div>
                   ) : detailTab === "files" ? (
                     <BotFilesPanel
@@ -2115,7 +1857,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                         )}
                       />
                       <section className="bot-detail-section">
-                        <h3>当前会话执行</h3>
+                        <h3>最近活动</h3>
                         {tasks
                           .slice(-6)
                           .reverse()
@@ -2197,6 +1939,27 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             returnFocusTo={editorTrigger.current}
             onClose={() => setRenaming(null)}
             onSaved={() => setRenaming(null)}
+          />
+        )}
+        {mockBot && client.mock && (
+          <BotMockChannelDialog
+            key={`${client.hostId}:${mockBot.id}`}
+            bot={mockBot}
+            client={client}
+            revision={snapshot?.revision ?? 0}
+            onClose={() => setMockBot(null)}
+            onOpenWork={(id) => {
+              updateView({
+                selectedId: mockBot.id,
+                groupId: null,
+                detailOpen: true,
+                detailTab: "details",
+                activeWorkIdByBot: {
+                  ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
+                  [mockBot.id]: id
+                }
+              })
+            }}
           />
         )}
         {editor && (

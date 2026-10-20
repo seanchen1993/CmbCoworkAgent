@@ -4,6 +4,21 @@ import { LOCAL_BOT_HOST_ID, type BotChangeEvent, type BotClient } from "../share
 /** Narrow named operations only; no generic IPC invocation is exposed to renderer code. */
 export const localBotsApi: BotClient = {
   hostId: LOCAL_BOT_HOST_ID,
+  conversations: {
+    resolve: threadId => ipcRenderer.invoke("bots:conversation:resolve", LOCAL_BOT_HOST_ID, threadId),
+    link: input => ipcRenderer.invoke("bots:conversation:link", LOCAL_BOT_HOST_ID, input),
+    expose: (botId,workId) => ipcRenderer.invoke("bots:conversation:expose", LOCAL_BOT_HOST_ID, botId,workId),
+    unlink: (botId,workId,version) => ipcRenderer.invoke("bots:conversation:unlink", LOCAL_BOT_HOST_ID, botId,workId,version)
+  },
+  mock:{
+    binding:(botId,id)=>ipcRenderer.invoke("bots:mock:binding",LOCAL_BOT_HOST_ID,botId,id),
+    bindings:(botId,before)=>ipcRenderer.invoke("bots:mock:bindings",LOCAL_BOT_HOST_ID,botId,before),
+    create:input=>ipcRenderer.invoke("bots:mock:create",LOCAL_BOT_HOST_ID,input),
+    revoke:(botId,id,version)=>ipcRenderer.invoke("bots:mock:revoke",LOCAL_BOT_HOST_ID,botId,id,version),
+    online:(botId,id,online)=>ipcRenderer.invoke("bots:mock:online",LOCAL_BOT_HOST_ID,botId,id,online),
+    inject:input=>ipcRenderer.invoke("bots:mock:inject",LOCAL_BOT_HOST_ID,input),
+    history:(botId,id,before)=>ipcRenderer.invoke("bots:mock:history",LOCAL_BOT_HOST_ID,botId,id,before)
+  },
   works: {
     markAllRead: (botId, version) =>
       ipcRenderer.invoke("bots:work:mark-all-read", LOCAL_BOT_HOST_ID, botId, version),

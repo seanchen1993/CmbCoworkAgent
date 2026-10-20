@@ -30,12 +30,12 @@ export function botWorkReceipt(
       return null
     return {
       id,
-      title: typeof work.title === "string" ? work.title : "查看工作会话",
+      title: typeof work.title === "string" ? work.title : "查看任务会话",
       label: {
-        bot_work_create: "已交办工作",
-        bot_work_send: "已接纳工作补充",
-        bot_work_complete: "工作已完成",
-        bot_work_continue: "已继续原工作"
+        bot_work_create: "已交办任务",
+        bot_work_send: "已接纳任务补充",
+        bot_work_complete: "任务已完成",
+        bot_work_continue: "已继续原任务"
       }[tool.name]!
     }
   } catch {

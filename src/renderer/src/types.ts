@@ -371,6 +371,9 @@ export interface QueuedMessage {
   skillBlock?: string
   builtinBrowser?: boolean
   modelId?: string
+  /** Explicit link/unlink parks old drafts across remount/restart. */
+  parkedForConversationLink?: boolean
+  botHandoffTarget?: { botId:string;workId:string }
   handoffRequestedAt?: Date
   created_at: Date
   updated_at: Date

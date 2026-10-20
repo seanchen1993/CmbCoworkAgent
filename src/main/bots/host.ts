@@ -3,6 +3,11 @@ import {
   type BotWorkItem,
   type CreateBotWorkInput
 } from "../../shared/bots/work"
+import type {
+  BotMockEvent,
+  BotMockTransport,
+  CreateBotMockBinding
+} from "../../shared/bots/mock-channel"
 import {
   BOT_PROTOCOL_VERSION,
   LOCAL_BOT_HOST_ID,
@@ -86,6 +91,7 @@ export class LocalBotHost {
   private stopping = false
   private faulted = false
   private scheduled = false
+  private mockDelivering: Promise<void> | null = null
   private scheduleTimer: ReturnType<typeof setTimeout> | undefined
   private lastHistoryMaintenance = -Infinity
 
@@ -94,7 +100,8 @@ export class LocalBotHost {
     private readonly runtime: BotRunPort,
     private readonly concurrency = 2,
     private readonly reportError: (error: unknown) => void = console.error,
-    private readonly nextSchedule?: (input: BotScheduleInput, from: Date) => string | null
+    private readonly nextSchedule?: (input: BotScheduleInput, from: Date) => string | null,
+    private readonly mockTransport: BotMockTransport = { send: async () => "sent" }
   ) {
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16)
       throw new Error("Invalid Bot concurrency")
@@ -122,7 +129,8 @@ export class LocalBotHost {
     if (id.startsWith("work-")) {
       const [workId, botId, extra] = id.slice(5).split("--")
       if (!workId || !botId || extra) throw new BotError("INVALID_INPUT", "工作浏览器目标无效")
-      this.getWork(botId, workId)
+      if (this.getWork(botId, workId).source)
+        throw new BotError("CONFLICT", "模拟渠道不开放本机浏览器")
     } else if (id.startsWith("group-")) {
       const [groupId, memberId, extra] = id.slice(6).split("--")
       if (!memberId || extra) throw new BotError("INVALID_INPUT", "请选择要查看的群成员浏览器")
@@ -205,6 +213,12 @@ export class LocalBotHost {
     const run = this.active.get(taskId)
     if (!run || run.controller.signal.aborted) throw new BotError("CONFLICT", "当前执行已停止")
     const task = this.store.getTask(taskId)
+    if (task.mockSource) this.store.mock.execution(task)
+    else if (
+      task.origin.kind === "mock" ||
+      (task.workId && this.store.getWork(task.botId, task.workId).source)
+    )
+      throw new BotError("CONFLICT", "模拟来源证明缺失")
     if (botTaskGroupId(task)) throw new BotError("CONFLICT", "请在私聊主会话中管理独立工作")
     return task
   }
@@ -215,11 +229,11 @@ export class LocalBotHost {
     action: "complete" | "continue"
   ) {
     const task = this.workToolSource(source.taskId)
-    if (!this.store.hasDirectUserRequest(task.id))
+    if (!this.store.hasWorkUserRequest(task.id))
       throw new BotError("CONFLICT", "只有当前用户明确指令可以完成或继续工作")
     const pending = action === "complete" ? await this.pendingWork(task.botId, workId) : false
     this.workToolSource(source.taskId)
-    if (!this.store.hasDirectUserRequest(task.id))
+    if (!this.store.hasWorkUserRequest(task.id))
       throw new BotError("CONFLICT", "当前用户指令已不可用")
     const result = this.store.changeWork(
       task.botId,
@@ -240,7 +254,7 @@ export class LocalBotHost {
     message: string
   ) {
     const task = this.workToolSource(source.taskId)
-    if (!this.store.hasDirectUserRequest(task.id))
+    if (!this.store.hasWorkUserRequest(task.id))
       throw new BotError("CONFLICT", "只有当前用户明确指令可以转达工作消息")
     const result = this.store.sendWork(source, workId, message)
     this.changed()
@@ -250,6 +264,13 @@ export class LocalBotHost {
   getWork(botId: string, workId: string) {
     this.getBot(botId)
     return this.store.getWork(botId, workId)
+  }
+  /** Available only while remove() owns the deleting fence; never exposed through renderer reads. */
+  getWorkForDeletion(botId:string,workId:string) {
+    this.requireRunning()
+    if(!this.deletions.has(botId)||!this.store.getBot(botId).deleting)
+      throw new BotError("CONFLICT","任务解绑仅可由正在进行的 Bot 删除协调执行。")
+    return this.store.getWork(botId,workId)
   }
   markWorksRead(botId: string, throughVersion: number) {
     this.requireRunning()
@@ -263,6 +284,57 @@ export class LocalBotHost {
   listWorks(botId: string, cursor?: string, query?: string) {
     this.getBot(botId)
     return this.store.listWorks(botId, cursor, query)
+  }
+  workTargets(taskId: string, cursor?: string, query?: string) {
+    const task = this.workToolSource(taskId)
+    return this.store.listWorks(
+      task.botId,
+      cursor,
+      query,
+      task.mockSource?.audienceKey ?? "desktop"
+    )
+  }
+  mockBindings(botId: string, before?: string) {
+    this.requireRunning()
+    return this.store.mock.bindings(botId, before)
+  }
+  mockBinding(botId:string,id:string){this.requireRunning();return this.store.mock.get(botId,id)}
+  createMockBinding(input: CreateBotMockBinding) {
+    this.requireRunning()
+    const result = this.store.mock.create(input)
+    this.changed()
+    return result
+  }
+  setMockOnline(botId: string, id: string, online: boolean) {
+    this.requireRunning()
+    const result = this.store.mock.setOnline(botId, id, online)
+    this.changed()
+    this.wake()
+    return result
+  }
+  revokeMockBinding(botId: string, id: string, version: number) {
+    this.requireRunning()
+    const result = this.store.mock.revoke(botId, id, version)
+    this.changed()
+    return result
+  }
+  injectMockEvent(input: BotMockEvent) {
+    this.requireRunning()
+    const result = this.store.mock.inject(input)
+    this.changed()
+    this.wake()
+    return result
+  }
+  mockHistory(botId: string, id: string, before?: string) {
+    this.requireRunning()
+    return this.store.mock.history(botId, id, before)
+  }
+  mockExecution(task: BotTask) {
+    this.requireRunning()
+    return this.store.mock.execution(task)
+  }
+  initializeMockThread(task: BotTask) {
+    if (task.mockSource) this.store.mock.initialize(task.mockSource)
   }
   createWork(input: CreateBotWorkInput, source?: { taskId: string; callId: string; key: string }) {
     this.requireRunning()
@@ -303,6 +375,18 @@ export class LocalBotHost {
   }
   initializeWorkThread(botId: string, workId: string) {
     this.store.initializeWorkThread(botId, workId)
+  }
+  get conversationLinks() { return this.store.conversations }
+  conversationLinkChanged() { this.changed() }
+  async assertConversationLinkIdle(threadId: string, botId?: string, workId?: string) {
+    this.requireRunning()
+    await this.recovery
+    if (await this.runtime.hasPendingWork?.([threadId]))
+      throw new BotError("CONFLICT", "请先处理此会话的后台执行和待通知结果。")
+    this.requireRunning()
+    if (this.store.pendingTasksForThread(threadId).length)
+      throw new BotError("CONFLICT", "请先处理此会话的待办和正在执行的消息。")
+    if (botId && workId) this.store.conversations.assertIdle(botId,workId)
   }
   conversation(botId: string, workId?: string) {
     const bot = this.getBot(botId),
@@ -751,7 +835,27 @@ export class LocalBotHost {
   }
 
   hasActiveRuns(): boolean {
-    return this.active.size > 0 || this.store.activeCommandThreads().length > 0
+    return (
+      this.active.size > 0 ||
+      Boolean(this.mockDelivering) ||
+      this.store.activeCommandThreads().length > 0
+    )
+  }
+
+  private mockRecoveryComplete = false
+  private mockRecoveryTimer: ReturnType<typeof setTimeout> | undefined
+  private pumpMockRecovery(): void {
+    if (this.mockRecoveryComplete || this.mockRecoveryTimer) return
+    if (!this.store.mock.recoverInterruptedBatch()) {
+      this.mockRecoveryComplete = true
+      return
+    }
+    // Yield between bounded recovery batches, including when the simulated sender is immediate.
+    this.mockRecoveryTimer = setTimeout(() => {
+      this.mockRecoveryTimer = undefined
+      this.wake()
+    }, 0)
+    this.mockRecoveryTimer.unref?.()
   }
 
   private wake(): void {
@@ -770,7 +874,12 @@ export class LocalBotHost {
   }
 
   private pump(): void {
-    if (!this.active.size && Date.now() - this.lastHistoryMaintenance >= 10 * 60_000) {
+    this.pumpMockRecovery()
+    if (
+      this.mockRecoveryComplete &&
+      !this.active.size &&
+      Date.now() - this.lastHistoryMaintenance >= 10 * 60_000
+    ) {
       this.lastHistoryMaintenance = Date.now()
       try {
         this.store.pruneTaskHistory()
@@ -780,6 +889,7 @@ export class LocalBotHost {
       }
     }
     this.store.flushReplies()
+    this.pumpMockDelivery()
     const excluded = new Set([...this.active.values()].map((run) => run.task.threadId))
     while (!this.stopping && this.active.size < this.concurrency) {
       const task = this.store.nextQueued(
@@ -815,6 +925,33 @@ export class LocalBotHost {
       })
       this.changed()
     }
+  }
+
+  private pumpMockDelivery(): void {
+    if (this.mockDelivering || this.stopping) return
+    const reply = this.store.mock.beginDelivery()
+    if (!reply) return
+    this.changed()
+    this.mockDelivering = Promise.resolve()
+      .then(async () => {
+        if (!this.store.mock.mayDeliver(reply.id)) return
+        let state: "sent" | "unknown" = "unknown"
+        try {
+          state = await this.mockTransport.send(reply)
+        } catch {
+          /* A transport exception is not proof of non-delivery. */
+        }
+        this.store.mock.delivered(reply.id, state)
+        this.changed()
+      })
+      .catch((error) => {
+        this.faulted = true
+        this.reportError(error)
+      })
+      .finally(() => {
+        this.mockDelivering = null
+        this.wake()
+      })
   }
 
   private async execute(
@@ -884,6 +1021,8 @@ export class LocalBotHost {
   async stop(): Promise<void> {
     if (!this.stopping) {
       this.stopping = true
+      if (this.mockRecoveryTimer) clearTimeout(this.mockRecoveryTimer)
+      this.mockRecoveryTimer = undefined
       this.lifecycle.abort()
       clearTimeout(this.scheduleTimer)
       this.unsubscribe()
@@ -899,6 +1038,7 @@ export class LocalBotHost {
         .concat(
           [...this.deletions.values()],
           [this.recovery],
+          this.mockDelivering ? [this.mockDelivering] : [],
           backgroundStops.map((stop) => Promise.resolve(stop))
         )
     )

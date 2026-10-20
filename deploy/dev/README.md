@@ -1,3 +1,13 @@
+# 当前本地 Bot MVP
+
+当前 App 使用原 beta 的 `npm run dev`（`dev:bot-preview` 为同一入口），不依赖 Java、MySQL、ES 或旧伙伴服务。正常 Bot、右侧独立任务、本机对话关联与明确标注的模拟 IM 均使用本地 Store/Thread/Runtime。使用已有依赖与模型配置；本地模拟不等于真实渠道接通。
+
+旧 `deploy/dev/service/partner-preview.mjs` 已退出当前 App 启动链路，`start` 明确拒绝；`status:legacy-bot-preview`、`stop:legacy-bot-preview` 仅为尚在运行的旧预览保留生命周期兼容。不要用旧 Java 预览脚本启动本轮 MVP。旧服务数据库不迁移、不主动删除；App 不读取或重放旧专家记录。
+
+`test:legacy-bot-partner-client` 只验证保留的旧客户端协议，不验证当前 App。旧服务专属 UI 和对应浏览器夹具已移除。下文 F05 与 service 目录属于历史后端开发工具，当前本地产品启动不使用它们。
+
+---
+
 # F05 本地开发替身与兼容探针
 
 这里只交付 dev 工具，不是伙伴生产服务。生产方向仍是 **Java 模块化单体 / JDK 8 / MySQL 5.7**；Node 22 仅用于现有仓库的离线开发编排。没有 Spring Boot 服务骨架、Bot CRUD、企业登录、正式招乎协议、持久任务/Outbox、Runtime、发布、S3 或 ES 联调。

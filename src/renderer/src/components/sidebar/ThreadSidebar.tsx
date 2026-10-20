@@ -63,7 +63,7 @@ import {
   listCompleteThreadGroupSelection,
   type ThreadGroupSelectionEntry
 } from "@/lib/thread-group-selection"
-import { isHarnessFeatureThread, isHarnessProjectModeThread, isRegularChatThread } from "@/lib/thread-classification"
+import { isHarnessFeatureThread, isHarnessProjectModeThread, isRegularChatThread, isLocalWorkConversation } from "@/lib/thread-classification"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
@@ -756,7 +756,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
     let sortIndex = 0
 
     for (const thread of threads) {
-      if (isHarnessProjectModeThread(thread) || thread.metadata?.botId) continue
+      if (isHarnessProjectModeThread(thread) || (thread.metadata?.botId && !isLocalWorkConversation(thread))) continue
       const path = getThreadWorkspacePath(
         thread,
         threadStateSummaries[thread.thread_id]?.workspacePath

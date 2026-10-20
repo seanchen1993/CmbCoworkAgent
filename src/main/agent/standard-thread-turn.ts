@@ -1,4 +1,5 @@
 import { resolve } from "node:path"
+import { SelectedModelUnavailableError } from "../models/selection-error"
 import type {
   HarnessAgentmdLoadStatusItem,
   HarnessDeployUnitMapping,
@@ -709,7 +710,10 @@ export async function resolveStandardTurnRouting(
     requestedModelId: input.requestedModelId,
     continuation: input.continuation,
     routingMode: input.routingMode ?? getGlobalRoutingMode()
-  }).catch(() => null)
+  }).catch((error) => {
+    if (error instanceof SelectedModelUnavailableError) throw error
+    return null
+  })
   const effectiveModelId = result?.resolvedModelId ?? input.requestedModelId
   const primaryTier = result?.resolvedTier ?? "premium"
   return {
@@ -740,6 +744,14 @@ export function createStandardTurnTrace(input: {
 }
 
 export interface RemoteTurnPolicy {
+  allowedToolNames?: string[]
+  allowedSkillNames?: string[]
+  allowedExpertNames?: string[]
+  disableHooks?: boolean
+  /** Treat untrusted transport text literally, without slash/prefix controllers. */
+  disableMessageControls?: boolean
+  /** Explicit transport isolation; existing disableAgentsPrompt semantics stay unchanged. */
+  omitPromptExtensions?: boolean
   disableScheduler?: boolean
   disableSkillEvolution?: boolean
   disableRequestUserInput?: boolean
@@ -802,6 +814,21 @@ function applyRemoteTurnPolicy(
     ...(policy.sharedTaskContext ? { sharedTaskContext: true, memoryEnabled: false } : {}),
     ...(policy.disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
     ...(policy.disableMcpTools ? { disableMcpTools: true } : {}),
+    ...(policy.allowedToolNames !== undefined ? { allowedToolNames: policy.allowedToolNames } : {}),
+    ...(policy.allowedSkillNames !== undefined
+      ? { allowedSkillNames: policy.allowedSkillNames }
+      : {}),
+    ...(policy.allowedExpertNames !== undefined
+      ? { allowedExpertNames: policy.allowedExpertNames }
+      : {}),
+    ...(policy.omitPromptExtensions
+      ? {
+          harnessAgentsPrompt: undefined,
+          pluginPromptInject: undefined,
+          additionalAgentsWorkspacePaths: [],
+          additionalAgentsWorkspaceMappings: []
+        }
+      : {}),
     ...(policy.blockedToolNames ? { blockedToolNames: policy.blockedToolNames } : {}),
     ...(policy.filesystemAccess ? { filesystemAccess: policy.filesystemAccess } : {}),
     ...(policy.autoApproveFileEdits ? { autoApproveFileEdits: true } : {}),

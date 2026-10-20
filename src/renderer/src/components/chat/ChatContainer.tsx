@@ -912,6 +912,10 @@ const CHAT_SURFACE_CONFIG: Record<ChatSurface, ChatSurfaceConfig> = {
 }
 
 export interface ManagedChatTurn {
+  /** Trusted local task: preserve the Thread's original model/mode controls. */
+  ownerConversation?: boolean
+  /** A trusted external work stays text-only even when opened on the desktop. */
+  textOnlyReason?: string
   /** Host-owned file selection; returns references to files retained in its workspace. */
   attachFiles?(maxFiles: number, maxChars: number): Promise<FileAttachment[]>
   attachFileBytes?(
@@ -2676,9 +2680,9 @@ export function ChatContainer({
   )
 
   // ── File attachments state ──
-  const [localAttachments, setLocalAttachments] = useState<FileAttachment[]>([])
-  const attachments = managedTurn ? draftAttachments : localAttachments
-  const setAttachments = managedTurn ? setDraftAttachments : setLocalAttachments
+  // The actual Thread owns draft attachments across both entrances and association.
+  const attachments = draftAttachments
+  const setAttachments = setDraftAttachments
   const [mentionedFiles, setMentionedFiles] = useState<MentionedWorkspaceFile[]>([])
   const [attachmentLoading, setAttachmentLoading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
@@ -2853,6 +2857,7 @@ export function ChatContainer({
   )
 
   const handleAttachClick = useCallback(async () => {
+    if (managedTurn?.textOnlyReason) { setError(managedTurn.textOnlyReason); return }
     if (managedTurn?.attachFiles) {
       await addManagedAttachments(managedTurn.attachFiles)
       return
@@ -2887,6 +2892,7 @@ export function ChatContainer({
       e.preventDefault()
       e.stopPropagation()
       setDragOver(false)
+      if (managedTurn?.textOnlyReason) { setError(managedTurn.textOnlyReason); return }
       if (attachmentLoading || managedAttachmentPendingRef.current) return
       const files = e.dataTransfer.files
       if (files.length > 0) {
@@ -5351,12 +5357,12 @@ export function ChatContainer({
   const modCommands = useModCommands(threadId)
   const isModCommandInput = modCommands.handles(input.trim())
   const slash = useSlashCommands({
-    input,
-    skills: enabledSkillsForSlash,
+    input: managedTurn?.textOnlyReason ? "" : input,
+    skills: managedTurn?.textOnlyReason ? [] : enabledSkillsForSlash,
     skillSelected: selectedSkill !== null,
     browserSelected: selectedBuiltinBrowser,
     modCommands: managedTurn ? undefined : modCommands.items,
-    generalCommands: managedTurn ? [BUILTIN_BROWSER_COMMAND] : undefined
+    generalCommands: managedTurn?.textOnlyReason ? [] : managedTurn ? [BUILTIN_BROWSER_COMMAND] : undefined
   })
   const loadMoreWorkspaceMentionFiles = useCallback(
     async (signal: AbortSignal) => {
@@ -5399,7 +5405,7 @@ export function ChatContainer({
     cursorOffset: inputRef.current?.selectionStart ?? input.length,
     workspaceFiles,
     loadMoreWorkspaceFiles: loadMoreWorkspaceMentionFiles,
-    disabled: slash.mode.kind === "slash" || !workspacePath
+    disabled: Boolean(managedTurn?.textOnlyReason) || slash.mode.kind === "slash" || !workspacePath
   })
   const slashPopoverKind = slash.mode.kind
   const hasPendingGoalTransportPayload =
@@ -5780,6 +5786,7 @@ export function ChatContainer({
   const handleSubmit = async (e: React.FormEvent, defaultText = ""): Promise<void> => {
     e.preventDefault()
     const trimmedInput = defaultText || input.trim()
+    if (managedTurn?.textOnlyReason && (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser)) { setError(managedTurn.textOnlyReason); return }
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -5787,17 +5794,17 @@ export function ChatContainer({
     // popover branch returns before reaching handleSubmit. Kept here so any
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
+    if (managedTurn && (isGoalSlashInput || modCommands.handles(trimmedInput))) {
+      setError(
+        managedTurn.ownerConversation ? "关联任务由同一 Bot 调度。使用 Goal 或 Mods 控制前，请在会话顶部解除任务关联；原消息与设置会保留。" : "Bot 工作区暂不支持 Goal 和 Mods 控制命令。请直接描述任务，或在原工作台使用这些命令。"
+      )
+      return
+    }
     if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
     if (readOnly) return
     if (contextReminderPending) return
     if (managedTurn?.submitDraft && queuedMessages.length >= (managedTurn.maxPendingDrafts ?? 32)) {
       setError("待确认消息已满，请先处理已有消息后再发送。")
-      return
-    }
-    if (managedTurn && (isGoalSlashInput || modCommands.handles(trimmedInput))) {
-      setError(
-        "Bot 工作区暂不支持 Goal 和 Mods 控制命令。请直接描述任务，或在原工作台使用这些命令。"
-      )
       return
     }
     if (!managedTurn && modCommands.mayHandle(trimmedInput)) {
@@ -6632,6 +6639,7 @@ export function ChatContainer({
         await managedTurn.submitDraft(queued)
         return
       }
+      if (queued.botHandoffTarget) { setError("此草稿曾交给 Bot 任务，请先核对原任务记录。不要重复发送；确认后可删除旧草稿并明确发送新消息。"); return }
       if (!stream) return
       const fullMessage = getQueuedModelContent(queued)
       if (!fullMessage.trim()) {
@@ -6825,7 +6833,7 @@ export function ChatContainer({
   useEffect(() => {
     if (managedTurn?.submitDraft) return
     if (isLoading || pendingApproval || historyLoading) return
-    const handedOff = queuedMessages.filter((queued) => queued.handoffRequestedAt)
+    const handedOff = queuedMessages.filter((queued) => queued.handoffRequestedAt && !queued.botHandoffTarget)
     if (handedOff.length === 0) return
 
     let cancelled = false
@@ -6930,7 +6938,7 @@ export function ChatContainer({
     // before a previously injected guided turn whose acknowledgement is late.
     if (queuedMessages.some((queued) => queued.handoffRequestedAt)) return
     const next = queuedMessages[0]
-    if (!next) return
+    if (!next || next.parkedForConversationLink || next.botHandoffTarget) return
 
     if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return
     submitQueuedMessage(next)
@@ -8442,7 +8450,7 @@ export function ChatContainer({
                         onApprovalDecision={handleApprovalDecision}
                         onEditUserMessage={handleEditUserMessage}
                         onSetGoalFromMessage={managedTurn ? undefined : handleSetGoalFromMessage}
-                        onForkFromMessage={managedTurn ? undefined : handleForkFromMessage}
+                        onForkFromMessage={managedTurn && !managedTurn.ownerConversation ? undefined : handleForkFromMessage}
                         forkingMessageId={forkingMessageId}
                         onOpenHookLogBucket={handleOpenHookLogBucket}
                         threadId={threadId}
@@ -9315,6 +9323,7 @@ export function ChatContainer({
                     <div
                       ref={dropZoneRef}
                       data-bot-composer={managedTurn ? true : undefined}
+                      data-bot-owner-composer={managedTurn?.ownerConversation ? true : undefined}
                       className={cn(
                         "relative flex-1 min-w-0 flex flex-col overflow-hidden rounded-[28px] border border-border/80 shadow-sm transition-colors duration-300",
                         pendingUserInput
@@ -9478,6 +9487,7 @@ export function ChatContainer({
                         ref={inputRef}
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
+                        onPaste={managedTurn?.textOnlyReason ? (e) => {if(e.clipboardData.files.length){e.preventDefault();setError(managedTurn.textOnlyReason!)}} : undefined}
                         onCompositionStart={() => {
                           isComposingRef.current = true
                         }}
@@ -9510,6 +9520,7 @@ export function ChatContainer({
                             popoverContent={ATTACH_FILE_POPOVER_CONTENT}
                             popoverClassName="max-w-64 leading-relaxed"
                             disabled={
+                              Boolean(managedTurn?.textOnlyReason) ||
                               (managedTurn?.attachFiles
                                 ? effectiveInputDisabled
                                 : effectiveComposerControlsDisabled) ||
@@ -9521,9 +9532,9 @@ export function ChatContainer({
                             className="size-7 rounded-md p-0 text-muted-foreground hover:bg-muted/50 disabled:opacity-40 disabled:cursor-not-allowed"
                             onClick={handleAttachClick}
                           />
-                          <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
-                          {!managedTurn && <ModelSwitcher threadId={threadId} />}
-                          {!managedTurn && (
+                          {!managedTurn?.textOnlyReason && <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />}
+                          {(!managedTurn || managedTurn.ownerConversation) && <ModelSwitcher threadId={threadId} />}
+                          {(!managedTurn || managedTurn.ownerConversation) && (
                             <AgentModeSwitcher
                               showWorkflow
                               mode={
@@ -9568,12 +9579,14 @@ export function ChatContainer({
                                 <button
                                   type="submit"
                                   disabled={
-                                    managedTurn
+                                    !stream ||
+                                    (managedTurn
                                       ? !input.trim() && totalPendingFileCount === 0
                                       : isModCommandInput
                                         ? slash.mode.kind === "slash"
-                                        : goalSendButtonDisabledWhileLoading
+                                        : goalSendButtonDisabledWhileLoading)
                                   }
+                                  title={!stream ? "会话准备中，请稍后发送" : undefined}
                                   aria-label={
                                     managedTurn
                                       ? (managedTurn.busySubmitLabel ?? "加入待办")
@@ -9623,6 +9636,7 @@ export function ChatContainer({
                               <button
                                 type="submit"
                                 disabled={
+                                  !stream ||
                                   effectiveInputDisabled ||
                                   (!input.trim() &&
                                     !hasPendingFilePayload &&
@@ -9631,6 +9645,7 @@ export function ChatContainer({
                                   (slash.mode.kind === "slash" &&
                                     !isBareGoalSlashCommandInput(input))
                                 }
+                                title={!stream ? "会话准备中，请稍后发送" : undefined}
                                 className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                               >
                                 <ArrowUp className="size-5" strokeWidth={1.75} />

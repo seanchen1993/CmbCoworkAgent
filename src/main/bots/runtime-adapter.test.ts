@@ -8,6 +8,7 @@ import type { BotMemoryService } from "./memory"
 import type { BotMemoryMaintainer } from "./memory-maintainer"
 import type { BotBrowserService } from "./browser"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
+import type { BotWorkItem } from "../../shared/bots/work"
 import type { BotPeerDeliveryFiles } from "./tools"
 
 const fixture = vi.hoisted(() => ({
@@ -156,12 +157,14 @@ const task: BotTask = {
   updatedAt: 1,
   origin: { kind: "user" }
 }
-function port() {
+function port(linked?:BotWorkItem) {
   return createLocalBotRunPort(
     { editVersion: () => 7, forPrompt: fixture.memorySnapshot } as unknown as BotMemoryService,
     () =>
       ({
         getBot: (id: string) => ({ ...bot, id }),
+        getWork: () => linked,
+        initializeWorkThread:()=>{},
         onSteeringReady: fixture.steeringReady,
         commandLifecycle: fixture.commandLifecycle,
         profileContinuationRequest: fixture.profileContinuation,
@@ -206,6 +209,27 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
+  it.each(["/original/workspace","/synthetic/workspaces/a"])("preserves linked Thread settings/model and shares the real Bot file lock when applicable (%s)",async(workspacePath)=>{
+    const linked:BotWorkItem={id:"linked",botId:bot.id,threadId:"existing",parentThreadId:bot.threadId,title:"Task title",goal:"Continue",audienceKey:"desktop",state:"active",version:1,threadInitialized:true,createdAt:1,updatedAt:1,executionState:null,pendingPeers:0,backgroundBusy:false,conversation:{origin:"existing",state:"bound",ref:{kind:"local_thread",threadId:"existing",incarnation:{token:"token",legacyCreatedAt:1}}}}
+    const original={...metadata(),workspacePath,model:"custom:original",memoryEnabled:true,agentMode:"coordinator",title:"Original title",botWorkId:linked.id,botAudienceKey:"desktop",botLocalConversation:true,botWorkOrigin:"existing",cmb_thread_incarnation:"token"}
+    fixture.thread.mockReturnValue({thread_id:"existing",created_at:1,metadata:JSON.stringify(original)})
+    expect(prepareBotThread(bot,{threadId:linked.threadId,origin:{kind:"user"}},linked)).toBe(workspacePath)
+    expect(fixture.update).not.toHaveBeenCalled()
+    await port(linked).acquire(bot,{...task,threadId:linked.threadId,workId:linked.id},linked)!.execute(new AbortController().signal,vi.fn())
+    expect(fixture.start.mock.calls[0][0]).toMatchObject({modelId:"custom:original",agentMode:"coordinator",threadId:"existing"})
+    const context=fixture.start.mock.calls[0][2] as AgentRunExecutionContext
+    expect(context.toolConcurrencyQueueId).toBe(workspacePath==="/synthetic/workspaces/a"?bot.id:"workspace:/original/workspace")
+    expect(context.verifyResolvedThread!({workspacePath,metadata:original})).toBeNull()
+    const upload=vi.fn(async()=>"uploaded")
+    const withUpload=fixture.browserTools.mock.calls.at(-1)![5] as (operation:()=>Promise<string>)=>Promise<string>
+    await withUpload(upload)
+    expect(fixture.fileLock).toHaveBeenCalledWith(context.toolConcurrencyQueueId,upload)
+    expect(upload).toHaveBeenCalledTimes(1)
+    expect(fixture.update).not.toHaveBeenCalled()
+    fixture.thread.mockReturnValue({thread_id:"existing",created_at:1,metadata:JSON.stringify({...original,cmb_thread_incarnation:"replacement"})})
+    expect(context.verifyResolvedThread!({workspacePath,metadata:original})).toContain("身份已变化")
+  })
+
   it("requires the fixed initialized work Thread identity instead of recreating missing history", () => {
     const work: any = {
       id: "w",

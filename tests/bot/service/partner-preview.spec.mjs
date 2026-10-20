@@ -5,6 +5,7 @@ import { createRequire } from "node:module"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { EventEmitter } from "node:events"
+import { spawnSync } from "node:child_process"
 import {
   closePreview,
   disabledViteKeys,
@@ -240,4 +241,15 @@ test("manual dialog subscription stays until page close and cleanup retains unre
   assert.deepEqual(events, ["app", "service"])
   otherPage.emit("close")
   assert.equal(otherPage.listenerCount("dialog"), 0)
+})
+
+test("legacy start rejects before any App, Java or profile initialization", () => {
+  const result = spawnSync(
+    process.execPath,
+    [new URL("../../../deploy/dev/service/partner-preview.mjs", import.meta.url).pathname, "start"],
+    { encoding: "utf8", timeout: 5000 }
+  )
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /LEGACY_PREVIEW_UNSUPPORTED/)
+  assert.equal(result.stdout, "")
 })
