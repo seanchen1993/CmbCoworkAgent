@@ -22,6 +22,8 @@ async function main(): Promise<void> {
       </div>
       <span>编辑流水线配置</span>
       <button>保存</button>
+      <section aria-label="计划发送"><button>发送</button></section>
+      <section aria-label="缺少主题"><button>发送</button></section>
       <table><tbody><tr><td>首面进企</td></tr></tbody></table>
       <div class="ant-radio-group">
         <label class="ant-radio-button-wrapper">
@@ -72,6 +74,21 @@ async function main(): Promise<void> {
     assert.equal(
       await record('internal:role=button[name="保存"i]'),
       'internal:role=button[name="保存"i]'
+    )
+    await page
+      .getByLabel("缺少主题")
+      .getByRole("button", { name: "发送" })
+      .evaluate((node) => {
+        node.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, composed: true }))
+      })
+    const duplicateButton = await record('internal:role=button[name="发送"s]')
+    assert.equal(
+      duplicateButton,
+      'internal:label="缺少主题"i >> internal:role=button[name="发送"i]'
+    )
+    assert.equal(
+      formatPlaywrightSelector(duplicateButton),
+      'getByLabel("缺少主题").getByRole("button", { name: "发送" })'
     )
     const radioLabel = await record('internal:text="首面进企"s >> nth=1')
     assert.equal(

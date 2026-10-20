@@ -136,7 +136,6 @@ function PlaybackHistoryStatus({
               icon={<Info className="size-3.5" strokeWidth={2} />}
               popoverContent={
                 <div className="flex min-w-0 flex-col gap-2">
-                  <span className="whitespace-pre-wrap break-words">{error}</span>
                   <Button
                     type="button"
                     size="sm"
@@ -151,6 +150,7 @@ function PlaybackHistoryStatus({
                     )}
                     {errorCopied ? "已复制" : "复制异常"}
                   </Button>
+                  <span className="whitespace-pre-wrap break-words">{error}</span>
                 </div>
               }
               popoverClassName="max-h-64 w-80 max-w-80 overflow-auto text-destructive"
