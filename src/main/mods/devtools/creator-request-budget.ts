@@ -106,6 +106,109 @@ function validTraceUsage(usage: Omit<CreatorTraceUsage, "traceId">): boolean {
   )
 }
 
+const CREATOR_BUDGET_CACHE_ENTRIES = 32
+const CREATOR_BUDGET_CACHE_BYTES = 4 * MAX_CREATOR_BUDGET_BYTES
+interface BudgetCacheEntry {
+  raw: string
+  rows: CreatorRequestObservation[]
+  bytes: number
+}
+interface BudgetCache {
+  entries: Map<string, BudgetCacheEntry>
+  bytes: number
+}
+// Identity is the native settings owner, never a workspace string or a model-supplied key.
+// Weak ownership lets closed settings stores and their caches be collected together.
+const budgetCaches = new WeakMap<object, BudgetCache>()
+const validatedBudgetRows = new WeakSet<object>()
+function validBudgetRow(row: CreatorRequestObservation): boolean {
+  if (row && validatedBudgetRows.has(row)) return true
+  return !(
+    !row ||
+    typeof row.runId !== "string" ||
+    !row.runId ||
+    row.runId.length > 160 ||
+    Object.keys(row).some(
+      (key) =>
+        ![
+          "runId",
+          "startedAt",
+          "operations",
+          "candidates",
+          "groupId",
+          "nativeRuns",
+          "model"
+        ].includes(key)
+    ) ||
+    (row.groupId !== undefined &&
+      (typeof row.groupId !== "string" || !row.groupId || row.groupId.length > 160)) ||
+    (row.nativeRuns !== undefined &&
+      (!Array.isArray(row.nativeRuns) ||
+        row.nativeRuns.length > CREATOR_REQUEST_LIMITS.operations ||
+        row.nativeRuns.some((id) => typeof id !== "string" || !id || id.length > 160) ||
+        new Set(row.nativeRuns).size !== row.nativeRuns.length)) ||
+    (row.model !== undefined && !validModelObservation(row.model)) ||
+    !Number.isSafeInteger(row.startedAt) ||
+    row.startedAt < 0 ||
+    !Number.isSafeInteger(row.operations) ||
+    row.operations < 0 ||
+    row.operations > CREATOR_REQUEST_LIMITS.operations ||
+    !Number.isSafeInteger(row.candidates) ||
+    row.candidates < 0 ||
+    row.candidates > CREATOR_REQUEST_LIMITS.candidates
+  )
+}
+function validBudgetRows(rows: CreatorRequestObservation[]): boolean {
+  return Array.isArray(rows) && rows.length <= CREATOR_REQUEST_LIMITS.retainedRequests &&
+    rows.every(validBudgetRow) && new Set(rows.map(row => row.runId)).size === rows.length
+}
+function freezeBudgetValue(value: unknown): void {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return
+  for (const child of Object.values(value)) freezeBudgetValue(child)
+  Object.freeze(value)
+}
+function forgetBudget(owner: object, key: string): void {
+  const cache = budgetCaches.get(owner), previous = cache?.entries.get(key)
+  if (!cache || !previous) return
+  cache.entries.delete(key)
+  cache.bytes -= previous.bytes
+}
+function cachedBudget(owner: object, key: string, raw: string): BudgetCacheEntry | undefined {
+  const cache = budgetCaches.get(owner), entry = cache?.entries.get(key)
+  if (!cache || !entry) return undefined
+  if (entry.raw !== raw) { forgetBudget(owner, key); return undefined }
+  cache.entries.delete(key)
+  cache.entries.set(key, entry)
+  return entry
+}
+function rememberBudget(owner: object, key: string, raw: string,
+  rows: CreatorRequestObservation[]): boolean {
+  // Validate newly created rows too: native clock/policy providers remain subject to the
+  // original schema. Previously proven frozen rows need no repeated full-history traversal.
+  if (!validBudgetRows(rows)) { forgetBudget(owner, key); return false }
+  freezeBudgetValue(rows)
+  for (const row of rows) validatedBudgetRows.add(row)
+  const cache: BudgetCache = budgetCaches.get(owner) ?? { entries: new Map(), bytes: 0 }
+  budgetCaches.set(owner, cache)
+  forgetBudget(owner, key)
+  const bytes = Buffer.byteLength(raw)
+  cache.entries.set(key, { raw, rows, bytes })
+  cache.bytes += bytes
+  while (cache.entries.size > CREATOR_BUDGET_CACHE_ENTRIES ||
+    cache.bytes > CREATOR_BUDGET_CACHE_BYTES) {
+    const oldest = cache.entries.keys().next().value
+    if (oldest === undefined) break
+    forgetBudget(owner, oldest)
+  }
+  return true
+}
+/** Counts only; neither validated rows nor a mutable cache reference leave this module. */
+export function creatorRequestBudgetCacheDiagnosticsForTests(settings: AuthoringAtomicSettings) {
+  const cache = budgetCaches.get(settings)
+  return { entries: cache?.entries.size ?? 0, bytes: cache?.bytes ?? 0,
+    maxEntries: CREATOR_BUDGET_CACHE_ENTRIES, maxBytes: CREATOR_BUDGET_CACHE_BYTES }
+}
+
 export function creatorModelSummary(model: CreatorModelObservation | undefined) {
   const reported = model?.attempts.filter((attempt) => attempt.state === "reported") ?? []
   const traces = new Map(
@@ -168,13 +271,20 @@ export class CreatorRequestBudgets {
     private readonly now: () => number = Date.now
   ) {}
 
+  private cacheOwner(): object { return this.settings ?? this.memory }
+
   private key(scope: string) {
     return "creator-request-budget:" + createHash("sha256").update(scope).digest("hex")
   }
 
   private read(key: string) {
     const raw = this.settings?.getSetting(key, absent) ?? this.memory.get(key) ?? absent
-    if (raw === absent) return { raw, rows: [] as CreatorRequestObservation[] }
+    if (raw === absent) {
+      forgetBudget(this.cacheOwner(), key)
+      return { raw, rows: [] as CreatorRequestObservation[] }
+    }
+    const cached = cachedBudget(this.cacheOwner(), key, raw)
+    if (cached) return { raw, rows: cached.rows }
     if (Buffer.byteLength(raw) > MAX_CREATOR_BUDGET_BYTES)
       throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
     let rows: CreatorRequestObservation[]
@@ -183,46 +293,7 @@ export class CreatorRequestBudgets {
     } catch {
       throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
     }
-    if (
-      !Array.isArray(rows) ||
-      rows.length > CREATOR_REQUEST_LIMITS.retainedRequests ||
-      rows.some(
-        (row) =>
-          !row ||
-          typeof row.runId !== "string" ||
-          !row.runId ||
-          row.runId.length > 160 ||
-          Object.keys(row).some(
-            (key) =>
-              ![
-                "runId",
-                "startedAt",
-                "operations",
-                "candidates",
-                "groupId",
-                "nativeRuns",
-                "model"
-              ].includes(key)
-          ) ||
-          (row.groupId !== undefined &&
-            (typeof row.groupId !== "string" || !row.groupId || row.groupId.length > 160)) ||
-          (row.nativeRuns !== undefined &&
-            (!Array.isArray(row.nativeRuns) ||
-              row.nativeRuns.length > CREATOR_REQUEST_LIMITS.operations ||
-              row.nativeRuns.some((id) => typeof id !== "string" || !id || id.length > 160) ||
-              new Set(row.nativeRuns).size !== row.nativeRuns.length)) ||
-          (row.model !== undefined && !validModelObservation(row.model)) ||
-          !Number.isSafeInteger(row.startedAt) ||
-          row.startedAt < 0 ||
-          !Number.isSafeInteger(row.operations) ||
-          row.operations < 0 ||
-          row.operations > CREATOR_REQUEST_LIMITS.operations ||
-          !Number.isSafeInteger(row.candidates) ||
-          row.candidates < 0 ||
-          row.candidates > CREATOR_REQUEST_LIMITS.candidates
-      ) ||
-      new Set(rows.map((row) => row.runId)).size !== rows.length
-    )
+    if (!rememberBudget(this.cacheOwner(), key, raw, rows))
       throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
     return { raw, rows }
   }
@@ -281,7 +352,7 @@ export class CreatorRequestBudgets {
         attempts: [],
         historicalUsageUnknown: !!existing,
         cost: { state: "unavailable" as const, reason: "pricing-unavailable" as const },
-        ...(policy.hardMoneyLimit ? { hardMoneyLimit: policy.hardMoneyLimit } : {})
+        ...(policy.hardMoneyLimit ? { hardMoneyLimit: { ...policy.hardMoneyLimit } } : {})
       }
     }
     if (
@@ -323,8 +394,9 @@ export class CreatorRequestBudgets {
     if (row.model.attempts.length >= row.model.limit)
       throw Error("DEVELOPMENT_MODEL_ATTEMPT_BUDGET")
     const id = randomUUID()
-    row.model.attempts.push({ id, state: "pending", ...(traceId ? { traceId } : {}) })
-    this.write(key, raw, rows)
+    const next: CreatorRequestObservation = { ...row, model: { ...row.model,
+      attempts: [...row.model.attempts, { id, state: "pending", ...(traceId ? { traceId } : {}) }] } }
+    this.write(key, raw, rows.map(value => value === row ? next : value))
     return id
   }
 
@@ -336,10 +408,9 @@ export class CreatorRequestBudgets {
   ): void {
     const key = this.key(scope),
       { raw, rows } = this.read(key)
-    const attempt = rows
-      .find((row) => row.runId === boundRunId)
-      ?.model?.attempts.find((item) => item.id === attemptId)
-    if (!attempt) throw Error("DEVELOPMENT_MODEL_ACCOUNTING_SCOPE")
+    const row = rows.find(value => value.runId === boundRunId)
+    const attempt = row?.model?.attempts.find(item => item.id === attemptId)
+    if (!row || !attempt) throw Error("DEVELOPMENT_MODEL_ACCOUNTING_SCOPE")
     const reported = [usage?.inputTokens, usage?.outputTokens].every(
       (value) => Number.isSafeInteger(value) && value! >= 0
     )
@@ -356,12 +427,12 @@ export class CreatorRequestBudgets {
       if (attempt.state === "unknown" || state === "reported")
         throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
     }
-    attempt.state = state
-    delete attempt.inputTokens
-    delete attempt.outputTokens
+    const next: CreatorModelObservation["attempts"][number] = { ...attempt, state }
+    delete next.inputTokens
+    delete next.outputTokens
     if (reported)
-      Object.assign(attempt, { inputTokens: usage!.inputTokens, outputTokens: usage!.outputTokens })
-    this.write(key, raw, rows)
+      Object.assign(next, { inputTokens: usage!.inputTokens, outputTokens: usage!.outputTokens })
+    this.writeAttempt(key, raw, rows, row, attempt, next)
   }
 
   recordModelTrace(scope: string, boundRunId: string, snapshot: CreatorTraceUsage): void {
@@ -369,11 +440,10 @@ export class CreatorRequestBudgets {
     if (!validTraceUsage(usage)) throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
     const key = this.key(scope),
       { raw, rows } = this.read(key)
-    const attempt = rows
-      .find((row) => row.runId === boundRunId)
-      ?.model?.attempts.find((item) => item.traceId === traceId)
+    const row = rows.find(value => value.runId === boundRunId)
+    const attempt = row?.model?.attempts.find(item => item.traceId === traceId)
     // The collector may publish its initial zero before any provider request has occurred.
-    if (!attempt) return
+    if (!row || !attempt) return
     const previous = attempt.traceUsage
     if (
       previous &&
@@ -381,8 +451,16 @@ export class CreatorRequestBudgets {
     )
       throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
     if (JSON.stringify(previous) === JSON.stringify(usage)) return
-    attempt.traceUsage = usage
-    this.write(key, raw, rows)
+    this.writeAttempt(key, raw, rows, row, attempt, { ...attempt, traceUsage: usage })
+  }
+
+  private writeAttempt(key: string, raw: string, rows: CreatorRequestObservation[],
+    row: CreatorRequestObservation, previous: CreatorModelObservation["attempts"][number],
+    next: CreatorModelObservation["attempts"][number]): void {
+    if (!row.model) throw Error("DEVELOPMENT_MODEL_ACCOUNTING_SCOPE")
+    const updated = { ...row, model: { ...row.model,
+      attempts: row.model.attempts.map(value => value === previous ? next : value) } }
+    this.write(key, raw, rows.map(value => value === row ? updated : value))
   }
 
   private write(key: string, raw: string, rows: CreatorRequestObservation[]): void {
@@ -390,13 +468,16 @@ export class CreatorRequestBudgets {
     if (Buffer.byteLength(value) > MAX_CREATOR_BUDGET_BYTES)
       throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
     if (this.settings) {
-      if (!this.settings.compareAndSetSetting(key, raw === absent ? undefined : raw, value))
+      if (!this.settings.compareAndSetSetting(key, raw === absent ? undefined : raw, value)) {
+        forgetBudget(this.cacheOwner(), key)
         throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
+      }
     } else {
       if (!this.memory.has(key) && this.memory.size >= 32)
         throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
       this.memory.set(key, value)
     }
+    rememberBudget(this.cacheOwner(), key, value, rows)
   }
 
   claim(
@@ -442,22 +523,9 @@ export class CreatorRequestBudgets {
       operations: record.operations + Number(kind === "operation"),
       candidates: record.candidates + Number(kind === "candidate")
     }
-    const value = JSON.stringify(
-      [...rows.filter((row) => row !== existing), next].slice(
-        -CREATOR_REQUEST_LIMITS.retainedRequests
-      )
-    )
-    if (Buffer.byteLength(value) > MAX_CREATOR_BUDGET_BYTES)
-      throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
-    if (this.settings) {
-      if (!this.settings.compareAndSetSetting(key, raw === absent ? undefined : raw, value))
-        throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
-    } else {
-      // Production uses durable settings; the fallback is bounded for isolated service hosts.
-      if (!this.memory.has(key) && this.memory.size >= 32)
-        throw Error("DEVELOPMENT_BUDGET_UNCONFIRMED")
-      this.memory.set(key, value)
-    }
-    return next
+    this.write(key, raw,
+      [...rows.filter(row => row !== existing), next].slice(-CREATOR_REQUEST_LIMITS.retainedRequests))
+    // Public callers may edit their observations; no frozen cache-owned object escapes.
+    return structuredClone(next)
   }
 }
