@@ -1,3 +1,9 @@
+# 2026-10-20 当前：M05-06 本机对话关联实施
+
+用户批准任务可以由本机、项目或未来云端会话承载，先关联本机「对话模式」。root 已记录 `reviews/M05-local-conversation-link-design.md` 与任务清单 M05-06；原 `/root/service_conversation_sol`（6.1-sol/xhigh）仍唯一产品写者，实施树起点 clean852fc3e4。目标同一 Thread 双入口、保留历史/目录/执行设置、显式接纳已有普通会话及未来类型边界，不再复制一套对话。
+
+本片必要验证已授权；此前 M05-04/05 完整验证仍暂停，不误合整条未验收 WIP。当前预览仍给用户使用，构建前 root 重新核验并协调关闭自己的精确进程；不得依据下方旧 PID 操作。原数据与 DeepSeek 配置完整保留，不启动 Java/IM/ES、不恢复定时、不 push/deploy。下一步原实施者按冻结设计实现，root 审查和更新 UI。
+
 # 2026-10-20 模型修复已验收：预览可继续使用 DeepSeek
 
 窄修复852fc3e4已完成，sol停写/树clean；root独立17项、源码审查，以及原生App同profile重启后一次真实DeepSeek短回复通过。此前预览漏带凭据＋pinned静默回退导致选择看似不保持；现已恢复cheap对应既有凭据并拒绝显式模型无配置/凭据时换供应商。UI模型选择重启保留，示例通知已返回正文/右侧已回复，未确认完成业务任务。详见 `reviews/M05-model-selection-fix.md`。
