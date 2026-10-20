@@ -265,6 +265,13 @@ export class LocalBotHost {
     this.getBot(botId)
     return this.store.getWork(botId, workId)
   }
+  /** Available only while remove() owns the deleting fence; never exposed through renderer reads. */
+  getWorkForDeletion(botId:string,workId:string) {
+    this.requireRunning()
+    if(!this.deletions.has(botId)||!this.store.getBot(botId).deleting)
+      throw new BotError("CONFLICT","任务解绑仅可由正在进行的 Bot 删除协调执行。")
+    return this.store.getWork(botId,workId)
+  }
   markWorksRead(botId: string, throughVersion: number) {
     this.requireRunning()
     this.store.markWorksRead(botId, throughVersion)
@@ -368,6 +375,18 @@ export class LocalBotHost {
   }
   initializeWorkThread(botId: string, workId: string) {
     this.store.initializeWorkThread(botId, workId)
+  }
+  get conversationLinks() { return this.store.conversations }
+  conversationLinkChanged() { this.changed() }
+  async assertConversationLinkIdle(threadId: string, botId?: string, workId?: string) {
+    this.requireRunning()
+    await this.recovery
+    if (await this.runtime.hasPendingWork?.([threadId]))
+      throw new BotError("CONFLICT", "请先处理此会话的后台执行和待通知结果。")
+    this.requireRunning()
+    if (this.store.pendingTasksForThread(threadId).length)
+      throw new BotError("CONFLICT", "请先处理此会话的待办和正在执行的消息。")
+    if (botId && workId) this.store.conversations.assertIdle(botId,workId)
   }
   conversation(botId: string, workId?: string) {
     const bot = this.getBot(botId),

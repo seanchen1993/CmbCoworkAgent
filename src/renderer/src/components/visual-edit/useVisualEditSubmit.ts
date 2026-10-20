@@ -123,6 +123,14 @@ export function useVisualEditSubmit(threadId: string): {
           clearError()
         }
 
+        const metadata=useAppStore.getState().threads.find(thread=>thread.thread_id===threadId)?.metadata
+        if(metadata?.botLocalConversation === true) {
+          const link=await window.api.bots.conversations!.resolve(threadId)
+          if(!link || link.work.threadId!==threadId) throw new Error("任务关联已变化，请重新打开会话。")
+          await window.api.bots.send({botId:link.bot.id,workId:link.work.id,requestId:visibleMessage.id,message:prompt})
+          setActiveTab("agent")
+          return true
+        }
         appendMessage(visibleMessage)
         clearFinishedWorkflowRun()
         const startTime = Date.now()

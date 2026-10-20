@@ -20,3 +20,18 @@ export interface LinkBotWorkConversationInput {
   goal: string
   conversation: BotWorkConversationRef
 }
+export interface BotWorkConversationResolution {
+  bot: import("./contracts").BotDefinition
+  work: import("./work").BotWorkItem
+  workspacePath: string
+}
+export interface BotConversationClient {
+  resolve(threadId: string): Promise<BotWorkConversationResolution | null>
+  link(input: LinkBotWorkConversationInput): Promise<import("./work").BotWorkItem>
+  expose(botId: string, workId: string): Promise<import("./work").BotWorkItem>
+  unlink(
+    botId: string,
+    workId: string,
+    expectedVersion: number
+  ): Promise<import("./work").BotWorkItem>
+}

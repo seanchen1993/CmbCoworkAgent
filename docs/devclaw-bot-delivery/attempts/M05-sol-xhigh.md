@@ -22,6 +22,18 @@ root冻结设计M05-local-conversation-link-design.md及06A-D，产品起点852f
 - 首轮Node检查仅新journal两个未使用局部变量，已删除；`Node22 node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false` → `/tmp/m05-06-node-store.log` **exit0**。尚无06 App/模型/build，不覆盖运行out，无自有常驻进程。
 - 未完成：main跨库身份握手/恢复、Host待办门禁/Runtime原设置保留、裸IPC及fork/delete守卫、双入口共享受管UI/停放旧queue/原预览与visual edit、06必要纵向测试。不能以Store检查当完整06验收。
 
+### 06A/B/C 第二个 WIP 检查点（未冻结，真实App待做）
+
+- main新增conversation-link-service/authority：原workflow→thread mutation锁、incarnation、原LocalRunLease、Goal/审批/checkpoint未结算与真实背景manager门禁；跨库prepare→保护metadata→bound，恢复不派发。原BotWork created公开同Thread可在运行时建立引用；existing preparing恢复仍走真实idle门禁。新增typed conversations IPC/preload只桌面顶层接纳，不接受renderer权限/path。裸invoke/resume/interrupt在原agent入口经control+可信lease拦截，idle同样不可绕Host。
+- Runtime/Files/Browser读真实关联Thread的workspace/model/mode/memory，保留用户旧设置，异步再次核身份。existing使用原Bot目录时保留bot.id原文件锁；其他同实际目录关联用realpath共同key，browser upload复用同key和原file→browser顺序，不扩全局普通thread调度。绑定Bot职责不重写旧Thread信息，当前关联goal作为标明的参考进入原Runtime。
+- Bot删除窄可信getWorkForDeletion仅真实remove fence可读；existing解绑保留、created仍由原deleteThread删除，不先detach（否则失败重试会误漏删）。普通删除要求可达的明确解除入口；fork原main白名单不复制Bot/source身份。detached历史从通知/删除枚举排除，不从旧Task反接管。
+- BotConversation抽取共享；普通TabbedPanel只有本机Work元数据candidate才读Host/等待，未关联普通/项目/远程不依赖Bot可用性。正常原ChatContainer不改裸路由。Task两个入口均原ModelSwitcher/AgentModeSwitcher实际编辑Thread，Bot main仍原配置；右侧显示实际目录/在对话模式打开，普通入口有准确返回/完成继续/解除。文件tab/预览保留，visual edit经Host，不走裸stream。
+- 原Thread queue/草稿共用。关联前原handoff reconciliation，解除前Bot receipts；parked标记与Bot handoff目标随原队列持久，已交办草稿不能降为普通auto-drain。附件由同Thread draftAttachments持有，避免关联卸载丢失原局部附件。Goal/Mods控制暂不在受管任务启动，轻量说明+实际解除后恢复原普通路径，root已明确批准；不新增第二Goal调度器。
+- 必要检查：`Node22 node_modules/vitest/vitest.mjs run src/main/bots/conversation-link.test.ts src/main/bots/conversation-link-service.test.ts src/main/bots/runtime-adapter.test.ts src/main/bots/work.test.ts src/main/ipc/bot-files.test.ts` → `/tmp/m05-06-core-third.log` **88/88 exit0**；后续IPC删除/恢复收口另日志。Runtime新增两目录模型/模式保留、原锁+upload一次、incarnation漂移拒绝。首轮新Runtime用例漏fixture.initializeWorkThread导致2失败，只补测试替身后过。
+- `...vitest.mjs run src/main/ipc/bots.test.ts src/renderer/src/lib/bot-draft-sender.test.ts src/renderer/src/lib/bot-conversation-draft.test.ts src/renderer/src/components/visual-edit/visual-submit-guards.test.ts` → `/tmp/m05-06-ipc-view-first.log` **实际发现3文件34项 exit0**（visual文件不存在未执行，不能算覆盖）。删除初轮5项中1失败，暴露created先detach→cleanup失败→重试漏删，产品已修；`/tmp/m05-06-delete-second.log` 5/5 exit0。新右侧expose在metadata未写/已写两种preparing真实IPC恢复纳入后续日志。
+- Node `/tmp/m05-06-node-main-fourth.log`、Web `/tmp/m05-06-web-third.log` **exit0**（后续UI可用性/恢复小改最终再检查）。所有node绝对路径 `/Users/heyirui/.npm/_npx/52027bd8fc0022aa/node_modules/node/bin/node`。
+- 仍未完成：06真实隔离App窄旅程、队列/迟到响应UI必要固定断言、最终受影响检查/格式/候选收口。root允许仅独立/tmp out构建+自有profile/localhost模型，当前用户out不得写；发现原copy-resources plugin硬编码out，需要临时config移除此插件并向独立目录复制相同资源，先审写路径后执行。无Java/DB/ES/真实模型/用户profile操作，不恢复04/05全验收。
+
 ## 模型选择窄修：缺配置/凭据的明确 pinned 选择不再静默换供应商
 
 用户仅重新授权排查示例任务fetch failed与DeepSeek选择保持问题，**完整M05-04/05功能验证仍暂停**。从clean `a81b5f455` 实施root批准的最小改动；未操作用户/隔离预览UI、profile、真实密钥/模型、Java/网关/ES/DB。

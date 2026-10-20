@@ -366,6 +366,7 @@ export interface BotClient {
   readonly hostId: string
   readonly filePreview: BotFilePreviewTransport
   readonly works?: BotWorkClient
+  readonly conversations?: import("./conversation").BotConversationClient
   /** Optional group scope resolves to its shared workspace after validating current membership. */
   listFiles(botId: string, cursor?: string, groupId?: string, workId?: string): Promise<BotFilePage>
   cancelFileList(cursor: string): Promise<void>

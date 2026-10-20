@@ -912,6 +912,8 @@ const CHAT_SURFACE_CONFIG: Record<ChatSurface, ChatSurfaceConfig> = {
 }
 
 export interface ManagedChatTurn {
+  /** Trusted local task: preserve the Thread's original model/mode controls. */
+  ownerConversation?: boolean
   /** A trusted external work stays text-only even when opened on the desktop. */
   textOnlyReason?: string
   /** Host-owned file selection; returns references to files retained in its workspace. */
@@ -2678,9 +2680,9 @@ export function ChatContainer({
   )
 
   // ── File attachments state ──
-  const [localAttachments, setLocalAttachments] = useState<FileAttachment[]>([])
-  const attachments = managedTurn ? draftAttachments : localAttachments
-  const setAttachments = managedTurn ? setDraftAttachments : setLocalAttachments
+  // The actual Thread owns draft attachments across both entrances and association.
+  const attachments = draftAttachments
+  const setAttachments = setDraftAttachments
   const [mentionedFiles, setMentionedFiles] = useState<MentionedWorkspaceFile[]>([])
   const [attachmentLoading, setAttachmentLoading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
@@ -5792,17 +5794,17 @@ export function ChatContainer({
     // popover branch returns before reaching handleSubmit. Kept here so any
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
+    if (managedTurn && (isGoalSlashInput || modCommands.handles(trimmedInput))) {
+      setError(
+        managedTurn.ownerConversation ? "关联任务由同一 Bot 调度。使用 Goal 或 Mods 控制前，请在会话顶部解除任务关联；原消息与设置会保留。" : "Bot 工作区暂不支持 Goal 和 Mods 控制命令。请直接描述任务，或在原工作台使用这些命令。"
+      )
+      return
+    }
     if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
     if (readOnly) return
     if (contextReminderPending) return
     if (managedTurn?.submitDraft && queuedMessages.length >= (managedTurn.maxPendingDrafts ?? 32)) {
       setError("待确认消息已满，请先处理已有消息后再发送。")
-      return
-    }
-    if (managedTurn && (isGoalSlashInput || modCommands.handles(trimmedInput))) {
-      setError(
-        "Bot 工作区暂不支持 Goal 和 Mods 控制命令。请直接描述任务，或在原工作台使用这些命令。"
-      )
       return
     }
     if (!managedTurn && modCommands.mayHandle(trimmedInput)) {
@@ -6637,6 +6639,7 @@ export function ChatContainer({
         await managedTurn.submitDraft(queued)
         return
       }
+      if (queued.botHandoffTarget) { setError("此草稿曾交给 Bot 任务，请先核对原任务记录。不要重复发送；确认后可删除旧草稿并明确发送新消息。"); return }
       if (!stream) return
       const fullMessage = getQueuedModelContent(queued)
       if (!fullMessage.trim()) {
@@ -6830,7 +6833,7 @@ export function ChatContainer({
   useEffect(() => {
     if (managedTurn?.submitDraft) return
     if (isLoading || pendingApproval || historyLoading) return
-    const handedOff = queuedMessages.filter((queued) => queued.handoffRequestedAt)
+    const handedOff = queuedMessages.filter((queued) => queued.handoffRequestedAt && !queued.botHandoffTarget)
     if (handedOff.length === 0) return
 
     let cancelled = false
@@ -6935,7 +6938,7 @@ export function ChatContainer({
     // before a previously injected guided turn whose acknowledgement is late.
     if (queuedMessages.some((queued) => queued.handoffRequestedAt)) return
     const next = queuedMessages[0]
-    if (!next) return
+    if (!next || next.parkedForConversationLink || next.botHandoffTarget) return
 
     if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return
     submitQueuedMessage(next)
@@ -8447,7 +8450,7 @@ export function ChatContainer({
                         onApprovalDecision={handleApprovalDecision}
                         onEditUserMessage={handleEditUserMessage}
                         onSetGoalFromMessage={managedTurn ? undefined : handleSetGoalFromMessage}
-                        onForkFromMessage={managedTurn ? undefined : handleForkFromMessage}
+                        onForkFromMessage={managedTurn && !managedTurn.ownerConversation ? undefined : handleForkFromMessage}
                         forkingMessageId={forkingMessageId}
                         onOpenHookLogBucket={handleOpenHookLogBucket}
                         threadId={threadId}
@@ -9529,8 +9532,8 @@ export function ChatContainer({
                             onClick={handleAttachClick}
                           />
                           {!managedTurn?.textOnlyReason && <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />}
-                          {!managedTurn && <ModelSwitcher threadId={threadId} />}
-                          {!managedTurn && (
+                          {(!managedTurn || managedTurn.ownerConversation) && <ModelSwitcher threadId={threadId} />}
+                          {(!managedTurn || managedTurn.ownerConversation) && (
                             <AgentModeSwitcher
                               showWorkflow
                               mode={

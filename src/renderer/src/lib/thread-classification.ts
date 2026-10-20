@@ -24,12 +24,18 @@ export function isHarnessProjectModeThread(thread: Thread | null | undefined): b
   return isHarnessFeatureThread(thread) || isHarnessProjectSessionThread(thread)
 }
 
+/** A candidate is resolved against the local Host before any managed controls mount. */
+export function isLocalWorkConversation(thread: Thread | null | undefined): boolean {
+  const m=thread?.metadata
+  return Boolean(m?.botHostId === "local" && typeof m.botWorkId === "string" && m.botAudienceKey === "desktop" && !m.botMockBindingId && !m.botGroupId)
+}
+
 export function isBotThread(thread: Thread | null | undefined): boolean {
   return typeof thread?.metadata?.botId === "string" && thread.metadata.botId.length > 0
 }
 
 export function isRegularChatThread(thread: Thread | null | undefined): boolean {
-  return Boolean(thread) && !isHarnessProjectModeThread(thread) && !isBotThread(thread)
+  return Boolean(thread) && !isHarnessProjectModeThread(thread) && (!isBotThread(thread) || isLocalWorkConversation(thread))
 }
 
 export function findFirstChatThread(threads: Thread[]): Thread | null {

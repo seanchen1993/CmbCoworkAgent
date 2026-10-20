@@ -12,6 +12,8 @@ import { basename, dirname } from "node:path"
 import type { LocalBotHost } from "../bots/host"
 import { BotError } from "../../shared/bots/contracts"
 import { botIdentifier } from "../../shared/bots/validation"
+import { getThreadCore } from "../db"
+import { verifyWorkConversationThread } from "../bots/conversation-link-authority"
 import { prepareBotThread } from "../bots/runtime-adapter"
 import { resolveBotWorkspaceFile } from "../bots/workspace-file"
 import { botImportDestination, copyBotFile, copyBotFileBytes } from "../bots/file-copy"
@@ -94,8 +96,15 @@ export function registerBotFileHandlers(
     if (group && workKey) throw new BotError("INVALID_INPUT", "工作与群会话不能混用")
     const work = workKey ? host.getWork(id, workKey) : undefined
     const validate = () => {
-      if (workKey && host.getWork(id, workKey).source)
-        throw new BotError("CONFLICT", "模拟渠道仅支持文字，尚不开放本机文件和附件")
+      if(workKey) {
+        const current=host.getWork(id,workKey)
+        if(current.source)throw new BotError("CONFLICT", "模拟渠道仅支持文字，尚不开放本机文件和附件")
+        if(current.conversation) {
+          const row=getThreadCore(current.threadId)
+          if(!row||current.conversation.state!=="bound") throw new BotError("CONFLICT","任务会话关联已变化，请重新打开资料库。")
+          verifyWorkConversationThread(current,row,JSON.parse(row.metadata||"{}"))
+        }
+      }
       return group ? host.getGroupMember(group, id) : host.getBot(id)
     }
     const bot = validate()

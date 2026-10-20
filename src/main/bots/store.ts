@@ -1199,6 +1199,11 @@ export class BotStore {
           String(row.thread_id)
         )
       ])
+      // User-owned/admitted conversations survive Bot deletion, including conversations
+      // explicitly detached earlier. Disposable task history cannot retake their ownership.
+      for (const row of this.rows(`SELECT thread_id FROM bot_work_items WHERE bot_id=? AND
+        (detached=1 OR json_extract(conversation_json,'$.origin')='existing')`, [id]))
+        threads.delete(String(row.thread_id))
       for (const group of this.groups()) {
         // A Bot may have left a group; its former member thread still needs cleanup.
         threads.add(`group-${group.id}-${id}`)
@@ -1817,9 +1822,10 @@ export class BotStore {
   notificationThreadIds(): string[] {
     return this.rows(
       `SELECT thread_id FROM bots WHERE archived=0 AND deleting=0
-      UNION SELECT w.thread_id FROM bot_work_items w JOIN bots b ON b.id=w.bot_id WHERE b.archived=0 AND b.deleting=0
+      UNION SELECT w.thread_id FROM bot_work_items w JOIN bots b ON b.id=w.bot_id WHERE b.archived=0 AND b.deleting=0 AND w.detached=0
       UNION SELECT c.thread_id FROM bot_mock_conversations c JOIN bots b ON b.id=c.bot_id WHERE b.archived=0 AND b.deleting=0
-      UNION SELECT t.thread_id FROM bot_tasks t JOIN bots b ON b.id=t.bot_id WHERE b.archived=0 AND b.deleting=0
+      UNION SELECT t.thread_id FROM bot_tasks t JOIN bots b ON b.id=t.bot_id WHERE b.archived=0 AND b.deleting=0 AND
+        (t.work_id IS NULL OR EXISTS(SELECT 1 FROM bot_work_items w WHERE w.id=t.work_id AND w.detached=0))
       UNION SELECT 'group-'||g.id||'-'||member.value FROM bot_groups g,
         json_each(g.payload,'$.memberIds') member JOIN bots b ON b.id=member.value
         WHERE b.archived=0 AND b.deleting=0 AND COALESCE(json_extract(g.payload,'$.deleting'),0)=0`
@@ -1844,6 +1850,9 @@ export class BotStore {
       excludedThreads
     )[0]
     return row ? this.task(row) : null
+  }
+  pendingTasksForThread(threadId: string): BotTask[] {
+    return this.rows("SELECT * FROM bot_tasks WHERE thread_id=? AND state IN ('queued','running','waiting_user')", [threadId]).map((row) => this.task(row))
   }
 
   transition(id: string, state: BotTaskState, error: string | null = null): BotTask {

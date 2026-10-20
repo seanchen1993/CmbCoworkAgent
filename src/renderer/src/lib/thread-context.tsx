@@ -988,6 +988,8 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
     skillBlock: typeof item.skillBlock === "string" ? item.skillBlock : undefined,
     builtinBrowser: item.builtinBrowser === true,
     modelId: typeof item.modelId === "string" ? item.modelId : undefined,
+    parkedForConversationLink: item.parkedForConversationLink === true,
+    ...(item.botHandoffTarget && typeof item.botHandoffTarget.botId === "string" && typeof item.botHandoffTarget.workId === "string" ? {botHandoffTarget:item.botHandoffTarget}:{}),
     handoffRequestedAt:
       handoffRequestedAt && !Number.isNaN(handoffRequestedAt.getTime())
         ? handoffRequestedAt

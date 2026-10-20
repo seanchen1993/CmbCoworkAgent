@@ -85,6 +85,7 @@ export function getVisualEditThreadSubmitDisabledReason(
 ): string | null {
   if (!thread) return "线程信息尚未就绪，请稍后再提交视觉标注。"
   const metadata = thread.metadata ?? {}
+  if(metadata.botLocalConversation === true && metadata.botHostId === "local" && typeof metadata.botWorkId === "string" && metadata.botAudienceKey === "desktop" && !metadata.botMockBindingId && !metadata.botGroupId) return null
   if (
     (typeof metadata.botId === "string" && typeof metadata.botHostId === "string") ||
     Object.prototype.hasOwnProperty.call(metadata, "cmb_devclaw_partner_task")

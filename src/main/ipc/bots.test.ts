@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { IpcMain } from "electron"
 const fixture = vi.hoisted(() => ({
   getHost: vi.fn(),
+  conversationLinks:{forBot:()=>[],forThread:()=>null},
   introduce: vi.fn(),
   getThread: vi.fn(),
   removeBot: vi.fn(),
@@ -57,6 +58,7 @@ vi.mock("../bots/local-service", () => ({
     removeGroup: fixture.removeBrowserGroup
   })
 }))
+vi.mock("../bots/conversation-link-service",()=>({resolveWorkConversation:vi.fn(),exposeWorkConversation:vi.fn(),linkExistingConversation:vi.fn(),unlinkWorkConversation:vi.fn(),unlinkDeletingWorkConversation:vi.fn()}))
 vi.mock("../db", () => ({ getThreadCore: fixture.getThread }))
 vi.mock("../bots/runtime-adapter", () => ({ prepareBotThread: vi.fn() }))
 vi.mock("./bot-files", () => ({ registerBotFileHandlers: vi.fn() }))

@@ -1,3 +1,4 @@
+import { assertWorkConversationEntry } from "../bots/conversation-link-authority"
 import { foregroundToolPolicy } from "../agent/foreground-tool-policy"
 import { isPersonalMemoryEnabled } from "../agent/personal-context"
 import { managedBizRetryService } from "../harness-board/biz-retry-service"
@@ -1095,6 +1096,14 @@ function rejectDesktopRunForForeignOwner(
   context: AgentRunExecutionContext = { source: "desktop" },
   internalNotificationKind?: "coordinator" | "workflow"
 ): boolean {
+  const row = getThreadCore(threadId)
+  try {
+    assertWorkConversationEntry(threadId,row,parseStandardThreadMetadata(row?.metadata).metadata,context)
+  } catch (error) {
+    safeSendToWindow(window,channel,{type:"error",error:"BOT_WORK_MANAGED_CONVERSATION",message:error instanceof Error ? error.message : "请从任务会话继续。"})
+    safeSendToWindow(window,channel,{type:"done"})
+    return true
+  }
   const lease = getLocalThreadRunLease(threadId)
   if (!lease) return false
   if (context.allowForeignOwnerGoalControl) return false

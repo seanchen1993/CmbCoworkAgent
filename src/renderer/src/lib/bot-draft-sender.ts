@@ -39,7 +39,8 @@ export class BotDraftSender {
     private readonly queue: Queue,
     private readonly report: (message: string | null) => void,
     private readonly changed: () => void,
-    private readonly now = Date.now
+    private readonly now = Date.now,
+    private readonly target?: {botId:string;workId:string}
   ) {}
 
   stopPreparing(): void {
@@ -96,6 +97,7 @@ export class BotDraftSender {
       this.queue.updateQueuedMessage(
         draft.id,
         {
+          ...(this.target ? {botHandoffTarget:this.target}:{}),
           handoffRequestedAt: draft.handoffRequestedAt ?? new Date(this.now())
         },
         (error) => {

@@ -1,3 +1,9 @@
+import { useAppStore } from "@/lib/store"
+import { useBotConversationLink } from "@/components/bots/use-bot-conversation-link"
+import { LinkedBotConversation } from "@/components/bots/LinkedBotConversation"
+import { ConversationTaskControls } from "@/components/bots/ConversationTaskControls"
+import { isRegularChatThread,isLocalWorkConversation,isHarnessProjectModeThread } from "@/lib/thread-classification"
+import { isRemoteInboxThread } from "@/lib/remote-thread-display"
 import { lazy, Suspense, useEffect, useRef } from "react"
 import { useThreadActions, useThreadStateSelector } from "@/lib/thread-context"
 import { TabBar } from "./TabBar"
@@ -24,6 +30,10 @@ export function TabbedPanel({
   readOnlyReason = null,
   onHarnessSessionCreated
 }: TabbedPanelProps): React.JSX.Element {
+  const row=useAppStore(state=>state.threads.find(thread=>thread.thread_id===threadId))
+  const managedCandidate=isLocalWorkConversation(row) && !isHarnessProjectModeThread(row) && !isRemoteInboxThread(row) && !row?.metadata?.remoteState && !row?.metadata?.remoteReadOnly
+  const linked=useBotConversationLink(threadId,managedCandidate)
+  const mayAssociate=Boolean(window.api.bots?.conversations && isRegularChatThread(row) && !isRemoteInboxThread(row) && !row?.metadata?.remoteState && !row?.metadata?.remoteReadOnly && !row?.metadata?.scheduledTaskId && !threadId.startsWith("heartbeat"))
   const activeTab = useThreadStateSelector(threadId, (state) => state.activeTab) ?? "agent"
   const openFiles = useThreadStateSelector(threadId, (state) => state.openFiles) ?? []
   const pendingApproval = useThreadStateSelector(threadId, (state) => state.pendingApproval)
@@ -52,6 +62,7 @@ export function TabbedPanel({
 
   return (
     <div className="flex flex-1 flex-col min-w-0 min-h-0 overflow-hidden">
+      {(linked.value || mayAssociate) && !linked.loading && !linked.error && <ConversationTaskControls threadId={threadId} link={linked.value} refresh={linked.refresh} />}
       {/* Tab Bar (optional - can be rendered externally in titlebar) */}
       {showTabBar && <TabBar />}
 
@@ -60,7 +71,7 @@ export function TabbedPanel({
 
       {/* Content Area */}
       <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
-        {isAgentTab ? (
+        {linked.loading ? <div className="flex flex-1 items-center justify-center"><Loader2 className="animate-spin size-5" /></div> : linked.error ? <div role="alert" className="p-4">{linked.error}<button onClick={linked.refresh} className="ml-2 rounded border px-2">重试读取</button></div> : isAgentTab ? linked.value ? <LinkedBotConversation key={threadId} link={linked.value} /> : (
           <ChatContainer
             key={threadId}
             threadId={threadId}

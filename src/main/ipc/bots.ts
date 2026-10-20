@@ -27,6 +27,8 @@ import {
 import { getThreadCore } from "../db"
 import type { ThreadDeletionService } from "./threads"
 import { registerBotFileHandlers } from "./bot-files"
+import { exposeWorkConversation, linkExistingConversation, resolveWorkConversation, unlinkWorkConversation, unlinkDeletingWorkConversation } from "../bots/conversation-link-service"
+import { localWorkConversationRef } from "../bots/conversation-link-validation"
 
 function localHost(id: unknown) {
   if (id !== LOCAL_BOT_HOST_ID) throw new BotError("UNSUPPORTED_HOST", "此版本仅支持本机 Bot")
@@ -62,6 +64,25 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
     return hostFor(hostId)
   }
   const mockCursor=(value:unknown):string|undefined=>{if(value===undefined)return undefined;if(typeof value!=="string"||value.length>1024)throw new BotError("INVALID_INPUT","模拟游标无效");return value}
+  ipcMain.handle("bots:conversation:resolve",(event,hostId,threadId)=>resolveWorkConversation(mockDesktop(event,hostId),botIdentifier(threadId)))
+  ipcMain.handle("bots:conversation:expose",async(event,hostId,botId,workId)=>{
+    const host=mockDesktop(event,hostId),bot=host.getBot(botIdentifier(botId)),work=host.getWork(bot.id,botIdentifier(workId))
+    if(work.source) throw new BotError("CONFLICT","模拟渠道任务不能转为本机私有对话。")
+    if(!work.conversation) {
+      prepareBotThread(bot,{threadId:work.threadId,origin:{kind:"user"}},work)
+      host.initializeWorkThread(bot.id,work.id)
+    }
+    return exposeWorkConversation(host,bot.id,work.id)
+  })
+  ipcMain.handle("bots:conversation:link",(event,hostId,input)=>{
+    const host=mockDesktop(event,hostId)
+    if(!input||typeof input!=="object"||Array.isArray(input)||Object.keys(input).some(key=>!["botId","operationId","title","goal","conversation"].includes(key))||typeof input.title!=="string"||typeof input.goal!=="string") throw new BotError("INVALID_INPUT","关联参数无效")
+    return linkExistingConversation(host,{botId:botIdentifier(input.botId),operationId:botIdentifier(input.operationId),title:input.title,goal:input.goal,conversation:localWorkConversationRef(input.conversation)})
+  })
+  ipcMain.handle("bots:conversation:unlink",(event,hostId,botId,workId,version)=>{
+    if(!Number.isSafeInteger(version)||version<1)throw new BotError("INVALID_INPUT","任务版本无效")
+    return unlinkWorkConversation(mockDesktop(event,hostId),botIdentifier(botId),botIdentifier(workId),version)
+  })
   ipcMain.handle("bots:mock:bindings",(event,hostId,botId,before)=>mockDesktop(event,hostId).mockBindings(botIdentifier(botId),mockCursor(before)))
   ipcMain.handle("bots:mock:binding",(event,hostId,botId,id)=>mockDesktop(event,hostId).mockBinding(botIdentifier(botId),botIdentifier(id)))
   ipcMain.handle("bots:mock:create",(event,hostId,input)=>mockDesktop(event,hostId).createMockBinding(parseBotMockBinding(input)))
@@ -315,6 +336,10 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
     const target = parseExistingVersion({ id, version })!
     if (!deleteThread) throw new BotError("CONFLICT", "会话清理服务尚未就绪")
     return host.remove(target.id, target.version, async (threadIds) => {
+      for (const work of host.conversationLinks.forBot(target.id)) {
+        if(work.conversation?.origin === "existing" && work.conversation.state !== "detached")
+          await unlinkDeletingWorkConversation(host,target.id,work.id,work.version)
+      }
       for (const threadId of threadIds) {
         const thread = getThreadCore(threadId)
         if (!thread) continue // Retry after an earlier thread was already removed.

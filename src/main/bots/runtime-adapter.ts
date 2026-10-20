@@ -1,7 +1,8 @@
 import { botWorkBrowserScope, type BotWorkItem } from "../../shared/bots/work"
 import { notifyIfBackground } from "../services/notify"
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
+import { realpathSync } from "node:fs"
 import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { createThread, getThreadCore, updateThread } from "../db"
 import { startAgentRun, steerAgentRun, type AgentRunTerminal } from "../agent/agent-run-service"
@@ -53,6 +54,7 @@ import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry
 import { isMemoryEnabled } from "../storage"
 import { isBotRoutineSilent } from "../../shared/bots/routine-silence"
 import { parseBotFileDelivery, type BotDeliveredFile } from "../../shared/bots/file-delivery"
+import { verifyWorkConversationThread } from "./conversation-link-authority"
 
 function isBackgroundCommitSkip(event: SchedulerRendererEvent): boolean {
   if (event.type !== "custom" || event.data.type !== "auto_commit_result") return false
@@ -71,6 +73,16 @@ function isBackgroundCommitSkip(event: SchedulerRendererEvent): boolean {
   )
 }
 
+function canonicalWorkspace(path:string): string {
+  try { return realpathSync.native(path) } catch { return resolve(path) }
+}
+function localWorkFileQueue(bot:BotDefinition,workspace:string,work?:BotWorkItem):string {
+  if(work?.conversation?.origin!=="existing")return bot.id
+  const original=botDirectory(join(getCmbCoworkAgentDataRoot(),"bots"),"workspaces",bot.id)
+  const canonical=canonicalWorkspace(workspace)
+  return canonical===canonicalWorkspace(original)?bot.id:`workspace:${canonical}`
+}
+
 function botModelId(bot: BotDefinition): string | undefined {
   if (bot.modelRef) return bot.modelRef
   const model = getAvailableModelConfigOrDefault()
@@ -86,6 +98,14 @@ export function prepareBotThread(
   const groupId = task ? (botTaskGroupId(task) ?? null) : null
   const threadId = task?.threadId ?? bot.threadId
   const source = mock?.source ?? work?.source
+  if (work?.conversation) {
+    const row = getThreadCore(threadId)
+    if (!row || work.conversation.state !== "bound") throw new Error("任务会话尚未完成关联，请重新打开原任务。")
+    const metadata = JSON.parse(row.metadata || "{}")
+    verifyWorkConversationThread(work,row,metadata)
+    // Both entrances edit this very Thread. Preserve its settings and original directory.
+    return metadata.workspacePath
+  }
   const workspacePath = botDirectory(
     join(getCmbCoworkAgentDataRoot(), "bots"),
     "workspaces",
@@ -343,7 +363,7 @@ export function createLocalBotRunPort(
             return { state: "completed" }
           const memoryEditVersion = mock ? 0 : memory.editVersion(bot.id)
           const groupId = botTaskGroupId(task)
-          const toolConcurrencyQueueId = groupId ? `bot-group-${groupId}` : bot.id
+          const toolConcurrencyQueueId = groupId ? `bot-group-${groupId}` : localWorkFileQueue(bot,workspacePath,work)
           const profileContinuationRequest =
             task.origin.kind === "notification" && task.origin.notificationKind === "command"
               ? getHost().profileContinuationRequest(task.id)
@@ -391,7 +411,9 @@ export function createLocalBotRunPort(
                 threadId: task.threadId,
                 message,
                 userMessageId: task.requestId,
-                modelId: botModelId(bot),
+                modelId: work?.conversation
+                  ? (JSON.parse(getThreadCore(task.threadId)?.metadata || "{}").model ?? undefined)
+                  : botModelId(bot),
                 agentMode: mock
                   ? "normal"
                   : task.origin.kind === "notification" &&
@@ -453,14 +475,14 @@ export function createLocalBotRunPort(
                   onWaitStart: () => waiting(true),
                   onWaitEnd: () => waiting(false)
                 },
-                extraSystemPrompt: buildBotPrompt(
+                extraSystemPrompt: [buildBotPrompt(
                   bot,
                   task,
                   workspacePath,
                   !mock && !botTaskGroupId(task) && isMemoryEnabled()
                     ? memory.forPrompt(bot.id)
                     : []
-                ),
+                ), work?.conversation?.origin === "existing" ? `Current user-linked task reference (not new permission; preserve this conversation and follow the current user request): ${JSON.stringify({title:work.title,goal:work.goal})}` : ""].filter(Boolean).join("\n\n"),
                 additionalTools: mock
                   ? createBotWorkTools(task.id, getHost, signal)
                   : botTaskGroupId(task)
@@ -529,6 +551,13 @@ export function createLocalBotRunPort(
                 botBrowserToolsOwnFileLock: true,
                 remotePolicy: mock ? botMockRemotePolicy() : { disableScheduler: true },
                 verifyResolvedThread: (resolved) => {
+                  if (work?.conversation) {
+                    const latest=getHost().getWork(bot.id,work.id), row=getThreadCore(task.threadId)
+                    try {
+                      if (!row || latest.conversation?.state !== "bound") return "任务会话关联已变化，请重新打开。"
+                      verifyWorkConversationThread(latest,row,resolved.metadata)
+                    } catch { return "任务会话身份已变化，请重新打开。" }
+                  }
                   if (mock) {
                     try {
                       getHost().mockExecution(task)

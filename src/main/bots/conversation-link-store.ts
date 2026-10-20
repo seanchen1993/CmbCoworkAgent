@@ -45,6 +45,12 @@ export class BotWorkConversationJournal {
     ])[0]
     return row ? this.owner.getWork(String(row.bot_id), String(row.id)) : null
   }
+  forBot(botId: string) {
+    return this.rows(
+      "SELECT id FROM bot_work_items WHERE bot_id=? AND conversation_json IS NOT NULL",
+      [botId]
+    ).map((row) => this.owner.getWork(botId, String(row.id)))
+  }
   private save(workId: string, record: WorkConversationRecord, detached = false) {
     this.db.run(
       "UPDATE bot_work_items SET conversation_json=?,detached=?,version=version+1,updated_at=? WHERE id=?",
@@ -111,7 +117,7 @@ export class BotWorkConversationJournal {
       this.db.run("INSERT INTO bot_work_commands(command_id,fingerprint,receipt) VALUES(?,?,?)", [
         commandId,
         fingerprint,
-        JSON.stringify({ workId: id })
+        JSON.stringify({ workId: id, botId: bot.id })
       ])
       this.changed()
       return this.owner.getWork(bot.id, id)
