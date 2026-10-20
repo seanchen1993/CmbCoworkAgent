@@ -1,0 +1,691 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-20",
+  "branch": "codex/mods-v2",
+  "codeCommit": "32332655656d98c58291397bae665abf3aa41ee6",
+  "remoteVerified": true,
+  "jointAcceptancePassed": true,
+  "completeS6": false,
+  "scope": "S6首批Host受控文件阶段快照、独立调试、有限Mod接续和文件摘要比较",
+  "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+  "sourceFiles": 4802,
+  "codeCommitProof": {
+    "path": "output/creator-journey-20261020/commit-source-proof-32332655656d98c58291397bae665abf3aa41ee6.json",
+    "sha256": "16933293c19014e3493f7bf76ff4e2e30a87c59740924763f5bd03b33b3d6309",
+    "byteExactFiles": 3059,
+    "normalizedFiles": 1742,
+    "historicalCheckoutExceptionFiles": 1
+  },
+  "build": {
+    "mode": "normal electron-vite build, not packaged ASAR",
+    "mainSha256": "d2d95825df0dbc3bab2e8e0edcced3a999016bb15420f3291c4f1bd8ec8e7d38",
+    "installedAppReplaced": false
+  },
+  "initialFullRegression": {
+    "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+    "passed": false,
+    "files": 1547,
+    "passedTests": 15310,
+    "failedTests": 1,
+    "skippedTests": 77,
+    "failures": [
+      {
+        "file": "C:/ai/CmbCoworkAgent-mods-v2/src/main/agent/native-shared-stream.integration.test.ts",
+        "title": "keeps complete values and updates with one real tool call and full child checkpoint",
+        "durationMs": 5253.646000000001,
+        "kind": "test_timeout",
+        "originalTimeoutMs": 5000,
+        "rawEvidence": "output/creator-journey-20261020/s6-full-r3-vitest.json"
+      }
+    ],
+    "standaloneGroupsPassed": 16,
+    "fullRegressionRerunAfterDelta": false
+  },
+  "finalIncrementalAcceptance": {
+    "changedFromFull": [
+      [
+        ".gitattributes",
+        "110a1c321caf9ec7fe0863e74caf29992671f74a4c18299d53816c08a36aba6a"
+      ],
+      [
+        "src/main/agent/native-shared-stream.integration.test.ts",
+        "ec2f9a31cc884fe2f67b29becb0ce5f567e74c988a5370460d178bc75d530320"
+      ],
+      [
+        "src/main/db/function-conversation-native-destination.test.ts",
+        "a18192db190d1643ca077299bcce8338f4b484eadaf8ce33312a494c5a366867"
+      ],
+      [
+        "src/main/db/function-conversation-native-destination.ts",
+        "a297c4a1862d246ec62c992a2bd1f31c37b3abf72bca64f310a1f0987f3f073d"
+      ],
+      [
+        "src/main/mods/stage-debugger-distribution.test.ts",
+        "bdd030f3e58e0de1cb91ce716a28e8ec0eeb5e433522b89c8e1d499b974a0ce5"
+      ]
+    ],
+    "note": "全量首轮1项超时已修复；最终仅5文件差异，其中1个生产文件为固定列名预计算。已对全部相关原生边界、S6和正常应用链重新验收，未宣称最终源码单次全量全绿。",
+    "nativeBoundaryFiles": 14,
+    "nativeBoundaryPassed": 269,
+    "s6FocusedFiles": 30,
+    "s6FocusedPassed": 546,
+    "originalSharedFilePassed": 24,
+    "originalSharedTimeoutMs": 5000,
+    "originalSharedTargetDurationMs": 4426.813699999999,
+    "browserSuites": 6,
+    "normalElectronJourneys": 2,
+    "sourceUnchangedDuringChecks": true
+  },
+  "checks": [
+    {
+      "step": "changed-eslint",
+      "args": [
+        "node_modules/eslint/bin/eslint.js",
+        "src/main/agent/local-sandbox-stage-debug.test.ts",
+        "src/main/agent/local-sandbox.ts",
+        "src/main/agent/mod-authoring-runtime.test.ts",
+        "src/main/agent/mod-authoring-runtime.ts",
+        "src/main/agent/native-shared-stream.integration.test.ts",
+        "src/main/agent/runtime.ts",
+        "src/main/agent/tools/mod-authoring-tool.test.ts",
+        "src/main/agent/tools/mod-authoring-tool.ts",
+        "src/main/db/function-conversation-native-destination.test.ts",
+        "src/main/db/function-conversation-native-destination.ts",
+        "src/main/harness-board/host-skill-executor.ts",
+        "src/main/harness-board/project-runtime/bounded-project-files.test.ts",
+        "src/main/harness-board/project-runtime/bounded-project-files.ts",
+        "src/main/harness-board/project-runtime/host-service.ts",
+        "src/main/harness-board/project-runtime/host-stage-branch.test.ts",
+        "src/main/harness-board/project-runtime/host-store.ts",
+        "src/main/harness-board/project-runtime/stage-branch-compatibility.test.ts",
+        "src/main/harness-board/project-runtime/stage-branch-compatibility.ts",
+        "src/main/harness-board/project-runtime/stage-debug-file-comparison.ts",
+        "src/main/harness-board/project-runtime/stage-debug-policy.test.ts",
+        "src/main/harness-board/project-runtime/stage-debug-policy.ts",
+        "src/main/hooks/runner.ts",
+        "src/main/hooks/stage-debug-hooks.test.ts",
+        "src/main/ipc/mods-community-examples.test.ts",
+        "src/main/ipc/mods.ts",
+        "src/main/ipc/project-preview.ts",
+        "src/main/ipc/project-runtime.ts",
+        "src/main/ipc/project-stage-debug-ipc.test.ts",
+        "src/main/mods/community-examples.test.ts",
+        "src/main/mods/community-examples.ts",
+        "src/main/mods/devtools/creator-request-budget.test.ts",
+        "src/main/mods/devtools/creator-request-budget.ts",
+        "src/main/mods/devtools/project-preview-registry.ts",
+        "src/main/mods/devtools/project-stage-debug-admission.test.ts",
+        "src/main/mods/devtools/project-stage-debug-admission.ts",
+        "src/main/mods/devtools/project-stage-debug.test.ts",
+        "src/main/mods/devtools/project-stage-debug.ts",
+        "src/main/mods/devtools/project-stage-snapshots.test.ts",
+        "src/main/mods/devtools/project-stage-snapshots.ts",
+        "src/main/mods/manager.test.ts",
+        "src/main/mods/manager.ts",
+        "src/main/mods/stage-debugger-distribution.test.ts",
+        "src/main/mods/v2/platform-project-stage-debug-provider.test.ts",
+        "src/main/mods/v2/platform-project-stage-debug-provider.ts",
+        "src/main/mods/v2/platform-project-stage-debug.integration.test.ts",
+        "src/main/mods/v2/project-stage-debug-review-hub.test.ts",
+        "src/main/mods/v2/project-stage-debug-review-hub.ts",
+        "src/main/plugins/runtime-source-scope.ts",
+        "src/preload/index.d.ts",
+        "src/preload/index.ts",
+        "src/renderer/src/components/customize/ModsDevelopmentPanel.tsx",
+        "src/renderer/src/components/customize/ProjectDevelopmentPreviewPanel.tsx",
+        "src/renderer/src/components/customize/ProjectStageDebugComparisonCard.tsx",
+        "src/renderer/src/components/customize/ProjectStageDebugPanel.tsx",
+        "src/shared/mods/community-examples.ts",
+        "src/shared/mods/v2/project-stage-debug-capability.ts",
+        "src/shared/mods/v2/project-stage-debug-review.ts",
+        "src/shared/project-runtime/development-preview.ts",
+        "src/shared/project-runtime/stage-debug.ts",
+        "tests/creator-workspace-browser.spec.ts",
+        "tests/mods-community-examples-browser.spec.ts",
+        "tests/project-preview-recovery-browser.spec.ts",
+        "tests/project-stage-debug-browser.spec.ts",
+        "tests/project-stage-debug-comparison-browser.spec.ts",
+        "tests/project-stage-debug-e2e.spec.ts",
+        "tests/project-stage-debug-mod-native-e2e.spec.ts",
+        "tests/support/project-stage-debug-model.ts",
+        "--format",
+        "json",
+        "--output-file",
+        "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-eslint.json"
+      ],
+      "startedAt": "2026-10-20T03:38:21.410Z",
+      "completedAt": "2026-10-20T03:38:38.354Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-changed-eslint.log",
+      "passed": true
+    },
+    {
+      "step": "node-types-first",
+      "args": [
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "-p",
+        "tsconfig.node.json",
+        "--composite",
+        "false"
+      ],
+      "startedAt": "2026-10-20T03:38:39.361Z",
+      "completedAt": "2026-10-20T03:39:25.154Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-node-types-first.log",
+      "passed": true
+    },
+    {
+      "step": "native-db-boundaries",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "--maxWorkers=1",
+        "src/main/db/function-conversation-native-destination.test.ts",
+        "src/main/db/function-conversation-native-destination-constant.test.ts",
+        "src/main/db/native-sqlite-adapter.test.ts",
+        "src/main/db/function-conversation-thread-identity-read.test.ts",
+        "src/main/db/function-conversation-projection-receipt.test.ts",
+        "src/main/checkpointer/function-conversation-checkpoint-membership.test.ts",
+        "src/main/services/thread-incarnation.test.ts",
+        "src/main/mods/v2/conversation-shared-restore.test.ts",
+        "src/main/mods/v2/conversation-shared-checkpointer.test.ts",
+        "src/main/mods/v2/conversation-child-family.test.ts",
+        "src/main/agent/mods-conversation-shared-invocation.test.ts",
+        "src/main/agent/function-conversation-native-tools.test.ts",
+        "src/main/agent/native-model-current.test.ts",
+        "src/main/agent/native-shared-stream.integration.test.ts",
+        "--reporter=default",
+        "--reporter=json",
+        "--outputFile=C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-native-db.json"
+      ],
+      "startedAt": "2026-10-20T03:39:26.152Z",
+      "completedAt": "2026-10-20T03:40:57.447Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-native-db-boundaries.log",
+      "passed": true
+    },
+    {
+      "step": "focused",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "--maxWorkers=1",
+        "--reporter=default",
+        "--reporter=json",
+        "--outputFile=C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-focused.json",
+        "src/main/agent/local-sandbox-stage-debug.test.ts",
+        "src/main/harness-board/host-skill-executor.test.ts",
+        "src/main/hooks/stage-debug-hooks.test.ts",
+        "src/main/ipc/project-preview.test.ts",
+        "src/main/ipc/project-stage-debug-ipc.test.ts",
+        "src/main/mods/manager.test.ts",
+        "src/main/plugins/runtime-source-scope.test.ts",
+        "src/main/agent/tools/mod-authoring-tool.test.ts",
+        "src/main/harness-board/project-runtime/host-service.test.ts",
+        "src/main/harness-board/project-runtime/host-stage-branch.test.ts",
+        "src/main/harness-board/project-runtime/host-store.test.ts",
+        "src/main/harness-board/project-runtime/stage-debug-policy.test.ts",
+        "src/main/mods/devtools/project-stage-debug-admission.test.ts",
+        "src/main/mods/devtools/project-stage-debug.test.ts",
+        "src/main/mods/devtools/project-stage-snapshots.test.ts",
+        "src/main/agent/mod-authoring-runtime.test.ts",
+        "src/main/harness-board/project-runtime/stage-branch-compatibility.test.ts",
+        "src/main/harness-board/project-runtime/bounded-project-files.test.ts",
+        "src/main/mods/v2/platform-project-stage-debug-provider.test.ts",
+        "src/main/mods/v2/platform-project-stage-debug.integration.test.ts",
+        "src/main/mods/v2/project-stage-debug-review-hub.test.ts",
+        "src/main/mods/devtools/creator-request-budget.test.ts",
+        "src/main/mods/community-examples.test.ts",
+        "src/main/mods/stage-debugger-distribution.test.ts",
+        "src/main/ipc/mods-community-examples.test.ts",
+        "src/main/ipc/upstream-plugins-install.test.ts",
+        "src/main/mods/devtools/project-creator-host-journey.test.ts",
+        "src/main/agent/function-conversation-native-keeper.test.ts",
+        "src/main/agent/native-conversation-stream-projection.integration.test.ts",
+        "src/main/harness-board/catalog-reader.test.ts"
+      ],
+      "startedAt": "2026-10-20T03:40:58.409Z",
+      "completedAt": "2026-10-20T03:45:49.025Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-focused.log",
+      "passed": true
+    },
+    {
+      "step": "foundations",
+      "args": [
+        "scripts/apply-langchain-native-foundations.mjs",
+        "--check"
+      ],
+      "startedAt": "2026-10-20T03:45:50.009Z",
+      "completedAt": "2026-10-20T03:45:51.286Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-foundations.log",
+      "passed": true
+    },
+    {
+      "step": "web-types",
+      "args": [
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "-p",
+        "tsconfig.web.json",
+        "--composite",
+        "false"
+      ],
+      "startedAt": "2026-10-20T03:45:52.261Z",
+      "completedAt": "2026-10-20T03:46:44.479Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-web-types.log",
+      "passed": true
+    },
+    {
+      "step": "project-stage-debug-browser",
+      "args": [
+        "node_modules/tsx/dist/cli.mjs",
+        "tests/project-stage-debug-browser.spec.ts"
+      ],
+      "startedAt": "2026-10-20T03:46:45.447Z",
+      "completedAt": "2026-10-20T03:46:58.388Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-project-stage-debug-browser.log",
+      "passed": true
+    },
+    {
+      "step": "project-stage-debug-comparison-browser",
+      "args": [
+        "node_modules/tsx/dist/cli.mjs",
+        "tests/project-stage-debug-comparison-browser.spec.ts"
+      ],
+      "startedAt": "2026-10-20T03:46:59.359Z",
+      "completedAt": "2026-10-20T03:47:03.900Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-project-stage-debug-comparison-browser.log",
+      "passed": true
+    },
+    {
+      "step": "project-preview-browser",
+      "args": [
+        "node_modules/tsx/dist/cli.mjs",
+        "tests/project-preview-browser.spec.ts"
+      ],
+      "startedAt": "2026-10-20T03:47:04.890Z",
+      "completedAt": "2026-10-20T03:47:09.774Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-project-preview-browser.log",
+      "passed": true
+    },
+    {
+      "step": "project-preview-recovery-browser",
+      "args": [
+        "node_modules/tsx/dist/cli.mjs",
+        "tests/project-preview-recovery-browser.spec.ts"
+      ],
+      "startedAt": "2026-10-20T03:47:10.772Z",
+      "completedAt": "2026-10-20T03:47:15.611Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-project-preview-recovery-browser.log",
+      "passed": true
+    },
+    {
+      "step": "creator-workspace-browser",
+      "args": [
+        "node_modules/tsx/dist/cli.mjs",
+        "tests/creator-workspace-browser.spec.ts"
+      ],
+      "startedAt": "2026-10-20T03:47:16.669Z",
+      "completedAt": "2026-10-20T03:47:34.479Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-creator-workspace-browser.log",
+      "passed": true
+    },
+    {
+      "step": "mods-community-examples-browser",
+      "args": [
+        "node_modules/tsx/dist/cli.mjs",
+        "tests/mods-community-examples-browser.spec.ts"
+      ],
+      "startedAt": "2026-10-20T03:47:35.457Z",
+      "completedAt": "2026-10-20T03:47:42.540Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-mods-community-examples-browser.log",
+      "passed": true
+    },
+    {
+      "step": "build",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "build"
+      ],
+      "startedAt": "2026-10-20T03:47:43.515Z",
+      "completedAt": "2026-10-20T03:48:45.224Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-build.log",
+      "passed": true
+    },
+    {
+      "step": "native",
+      "args": [
+        "node_modules/tsx/dist/cli.mjs",
+        "tests/project-stage-debug-e2e.spec.ts"
+      ],
+      "startedAt": "2026-10-20T03:48:46.192Z",
+      "completedAt": "2026-10-20T03:49:38.558Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-native.log",
+      "passed": true
+    },
+    {
+      "step": "native-mod",
+      "args": [
+        "node_modules/tsx/dist/cli.mjs",
+        "tests/project-stage-debug-mod-native-e2e.spec.ts"
+      ],
+      "startedAt": "2026-10-20T03:49:39.583Z",
+      "completedAt": "2026-10-20T03:50:11.358Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "97b3eca2d1ba746ed2d604db3b05b1ab4c6ad156148e4a96845f8cc8dcc0db4f",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-closure-r8-native-mod.log",
+      "passed": true
+    }
+  ],
+  "originalStandaloneChecks": [
+    {
+      "name": "test:adoption",
+      "step": "test-adoption",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:adoption"
+      ],
+      "startedAt": "2026-10-20T02:57:20.782Z",
+      "completedAt": "2026-10-20T02:57:52.057Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-adoption.log",
+      "passed": true
+    },
+    {
+      "name": "test:messages",
+      "step": "test-messages",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:messages"
+      ],
+      "startedAt": "2026-10-20T02:57:53.063Z",
+      "completedAt": "2026-10-20T02:58:35.343Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-messages.log",
+      "passed": true
+    },
+    {
+      "name": "test:hooks",
+      "step": "test-hooks",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:hooks"
+      ],
+      "startedAt": "2026-10-20T02:58:36.362Z",
+      "completedAt": "2026-10-20T03:00:37.436Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-hooks.log",
+      "passed": true
+    },
+    {
+      "name": "test:plugins",
+      "step": "test-plugins",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:plugins"
+      ],
+      "startedAt": "2026-10-20T03:00:38.430Z",
+      "completedAt": "2026-10-20T03:00:57.862Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-plugins.log",
+      "passed": true
+    },
+    {
+      "name": "test:task-cards",
+      "step": "test-task-cards",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:task-cards"
+      ],
+      "startedAt": "2026-10-20T03:00:58.842Z",
+      "completedAt": "2026-10-20T03:01:02.686Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-task-cards.log",
+      "passed": true
+    },
+    {
+      "name": "test:merge",
+      "step": "test-merge",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:merge"
+      ],
+      "startedAt": "2026-10-20T03:01:03.670Z",
+      "completedAt": "2026-10-20T03:01:09.902Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-merge.log",
+      "passed": true
+    },
+    {
+      "name": "test:workflow",
+      "step": "test-workflow",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:workflow"
+      ],
+      "startedAt": "2026-10-20T03:01:10.886Z",
+      "completedAt": "2026-10-20T03:08:23.114Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-workflow.log",
+      "passed": true
+    },
+    {
+      "name": "test:desktop-agent-baseline",
+      "step": "test-desktop-agent-baseline",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:desktop-agent-baseline"
+      ],
+      "startedAt": "2026-10-20T03:08:24.091Z",
+      "completedAt": "2026-10-20T03:08:46.293Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-desktop-agent-baseline.log",
+      "passed": true
+    },
+    {
+      "name": "test:im-v1",
+      "step": "test-im-v1",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:im-v1"
+      ],
+      "startedAt": "2026-10-20T03:08:47.289Z",
+      "completedAt": "2026-10-20T03:10:33.542Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-im-v1.log",
+      "passed": true
+    },
+    {
+      "name": "test:mods:flows:recovery-runtime",
+      "step": "test-mods-flows-recovery-runtime",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:mods:flows:recovery-runtime"
+      ],
+      "startedAt": "2026-10-20T03:10:34.525Z",
+      "completedAt": "2026-10-20T03:10:51.786Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-mods-flows-recovery-runtime.log",
+      "passed": true
+    },
+    {
+      "name": "test:mods:authoring:runtime",
+      "step": "test-mods-authoring-runtime",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:mods:authoring:runtime"
+      ],
+      "startedAt": "2026-10-20T03:10:52.777Z",
+      "completedAt": "2026-10-20T03:11:04.919Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-mods-authoring-runtime.log",
+      "passed": true
+    },
+    {
+      "name": "test:mods:authoring:install-runtime",
+      "step": "test-mods-authoring-install-runtime",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:mods:authoring:install-runtime"
+      ],
+      "startedAt": "2026-10-20T03:11:05.895Z",
+      "completedAt": "2026-10-20T03:11:30.376Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-mods-authoring-install-runtime.log",
+      "passed": true
+    },
+    {
+      "name": "test:mods:flows:files:runtime",
+      "step": "test-mods-flows-files-runtime",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:mods:flows:files:runtime"
+      ],
+      "startedAt": "2026-10-20T03:11:31.357Z",
+      "completedAt": "2026-10-20T03:12:07.077Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-mods-flows-files-runtime.log",
+      "passed": true
+    },
+    {
+      "name": "test:mods:evaluation:runtime",
+      "step": "test-mods-evaluation-runtime",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:mods:evaluation:runtime"
+      ],
+      "startedAt": "2026-10-20T03:12:08.052Z",
+      "completedAt": "2026-10-20T03:12:19.570Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-mods-evaluation-runtime.log",
+      "passed": true
+    },
+    {
+      "name": "test:mods-skill-evaluation-runtime",
+      "step": "test-mods-skill-evaluation-runtime",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:mods-skill-evaluation-runtime"
+      ],
+      "startedAt": "2026-10-20T03:12:20.542Z",
+      "completedAt": "2026-10-20T03:12:34.422Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-mods-skill-evaluation-runtime.log",
+      "passed": true
+    },
+    {
+      "name": "test:mods:ui-colors",
+      "step": "test-mods-ui-colors",
+      "args": [
+        "C:\\Users\\87624\\AppData\\Roaming\\fnm\\node-versions\\v22.22.2\\installation\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:mods:ui-colors"
+      ],
+      "startedAt": "2026-10-20T03:12:35.380Z",
+      "completedAt": "2026-10-20T03:13:09.209Z",
+      "exitCode": 0,
+      "sourceUnchanged": true,
+      "sourceSnapshotSha256": "67ba0fee04e1b1a4d67de4a7d961ab7563972276e3f69bd3baf1ceafd6c77a35",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\s6-full-r3-test-mods-ui-colors.log",
+      "passed": true
+    }
+  ],
+  "rejectedOptimization": "不缓存回调期间的metadata解析，以保留JSON解析器恢复后对坏代际的失效检查；不删SQL、来源、描述符、尾部保护或原5秒门禁。",
+  "limitations": [
+    "当前不支持任意配置/context/Hooks/SharedMods/MCP/外部动作或AutoBiz原业务回退。",
+    "文件快照不等于完整模型上下文、会话记忆、外部知识或非确定性输出恢复。",
+    "不是操作系统沙箱；只支持read_file/write_file/edit_file及明确受控文件范围。",
+    "单阶段通过不计整轮通过；允许保存未验收源码，但安装/导出不代表业务验收。",
+    "重启不恢复隔离分支执行权；新创造者控制会话仅支持受控历史核对及只读比较。",
+    "Mod只发现/准备/请求原生复核，不能创建/批准/启动；没有实时订阅。",
+    "原生验收为确定性本地模型；来源批准用真实Renderer API，未覆盖通用授权弹窗DOM。",
+    "共享流原5秒门本机复验通过，不是跨设备性能保证；未定量验证模型token或全应用加速。"
+  ]
+}
