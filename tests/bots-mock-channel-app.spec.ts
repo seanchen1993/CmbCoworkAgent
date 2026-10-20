@@ -9,16 +9,34 @@ import { _electron } from "playwright"
 
 async function main() {
   const root = resolve("."),
+    out = process.env.M05_MOCK_APP_OUT,
     dir = await mkdtemp(join(tmpdir(), "m05-mock-channel-app-")),
     binary = createRequire(import.meta.url)("electron") as string
+  assert.ok(
+    out?.startsWith("/tmp/"),
+    "Set M05_MOCK_APP_OUT to an independent /tmp production build"
+  )
   let app: Awaited<ReturnType<typeof _electron.launch>> | undefined
   const calls: Array<{ tools: string[]; lastUser: string }> = [],
     errors: string[] = []
-  let hooks=0
-  const advertised:string[][]=[]
+  let hooks = 0
+  const hookCalls: Array<{ sessionId: string; event: string }> = []
+  const advertised: string[][] = []
   const server = createServer(async (req, res) => {
     try {
-      if(req.url==="/hook"){hooks++;for await(const _ of req){};res.writeHead(200,{"content-type":"application/json"});res.end("{}");return}
+      if (req.url === "/hook") {
+        hooks++
+        let raw = ""
+        for await (const chunk of req) raw += chunk
+        const payload = JSON.parse(raw)
+        hookCalls.push({
+          sessionId: String(payload.session_id),
+          event: String(payload.hook_event_name)
+        })
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end("{}")
+        return
+      }
       let raw = ""
       for await (const chunk of req) raw += chunk
       const body = JSON.parse(raw),
@@ -32,27 +50,50 @@ async function main() {
         turn = messages.slice(lastUser + 1)
       const all = JSON.stringify(messages)
       const used = turn.flatMap((m: any) => (m.tool_calls ?? []).map((t: any) => t.function?.name))
-      const visible=(body.tools??[]).map((v:any)=>v.function?.name).sort()
+      const visible = (body.tools ?? []).map((v: any) => v.function?.name).sort()
       advertised.push(visible)
-      const external=user.includes("模拟渠道")
-      if(external){
-        assert.deepEqual(visible,["bot_work_complete","bot_work_continue","bot_work_create","bot_work_list","bot_work_send"])
-        assert.ok(!all.includes("M05_OWNER_PRIVATE_MEMORY"),"external runtime cannot load owner's private memory")
+      const external = all.includes("clearly simulated external text conversation")
+      if (external) {
+        assert.deepEqual(visible, [
+          "bot_work_complete",
+          "bot_work_continue",
+          "bot_work_create",
+          "bot_work_list",
+          "bot_work_send"
+        ])
+        assert.ok(
+          !all.includes("M05_OWNER_PRIVATE_MEMORY"),
+          "external runtime cannot load owner's private memory"
+        )
       }
-      calls.push({tools:used,lastUser:user.slice(0,200)})
-      let reply="模拟渠道普通问答已回复。",call:{name:string;args:Record<string,unknown>}|undefined
-      if(user.includes("MOCK_CREATE")){
-        if(!used.includes("bot_work_create"))call={name:"bot_work_create",args:{requestKey:"mock-work",title:"渠道周末安排",goal:"MOCK_WORK_GOAL：拟一份周末安排，只需文字。",contextMessageIds:[]}}
-        else reply="渠道工作已交办，可继续修改。"
-      }else if(user.includes("MOCK_WORK_GOAL"))reply="渠道工作第一版：周六讨论。"
-      else if(user.includes("MOCK_EDIT")){
-        assert.ok(all.includes("渠道工作第一版"),"desktop edit keeps previous assistant in the external work")
-        assert.ok(!all.includes("OWNER_PING"),"work does not import owner's main thread")
-        reply="渠道工作第二版：周日讨论。"
-      }else if(user.includes("MOCK_UNSAFE")){
-        if(!used.includes("read_file"))call={name:"read_file",args:{file_path:"/private-owner-fixture"}}
-        else reply="此渠道无法读取本机文件。"
-      }else if(user.includes("OWNER_PING"))reply="本机主对话保持可用。"
+      calls.push({ tools: used, lastUser: user.slice(0, 200) })
+      let reply = "模拟渠道普通问答已回复。",
+        call: { name: string; args: Record<string, unknown> } | undefined
+      if (user.includes("MOCK_CREATE")) {
+        if (!used.includes("bot_work_create"))
+          call = {
+            name: "bot_work_create",
+            args: {
+              requestKey: "mock-work",
+              title: "渠道周末安排",
+              goal: "MOCK_WORK_GOAL：拟一份周末安排，只需文字。",
+              contextMessageIds: []
+            }
+          }
+        else reply = "渠道工作已交办，可继续修改。"
+      } else if (user.includes("MOCK_WORK_GOAL")) reply = "渠道工作第一版：周六讨论。"
+      else if (user.includes("MOCK_EDIT")) {
+        assert.ok(
+          all.includes("渠道工作第一版"),
+          "desktop edit keeps previous assistant in the external work"
+        )
+        assert.ok(!all.includes("OWNER_PING"), "work does not import owner's main thread")
+        reply = "渠道工作第二版：周日讨论。"
+      } else if (user.includes("MOCK_UNSAFE")) {
+        if (!used.includes("read_file"))
+          call = { name: "read_file", args: { file_path: "/private-owner-fixture" } }
+        else reply = "此渠道无法读取本机文件。"
+      } else if (user.includes("OWNER_PING")) reply = "本机主对话保持可用。"
       const delta = call
         ? {
             tool_calls: [
@@ -146,7 +187,7 @@ async function main() {
     console.log("stage: launching isolated App", dir)
     app = await _electron.launch({
       executablePath: binary,
-      args: [join(root, "out/main/index.js"), `--user-data-dir=${join(dir, "electron-profile")}`],
+      args: [join(out!, "main/index.js"), `--user-data-dir=${join(dir, "electron-profile")}`],
       cwd: root,
       env,
       timeout: 60000
@@ -174,6 +215,19 @@ async function main() {
       )
     const page = await app.firstWindow()
     page.setDefaultTimeout(30000)
+    // This Playwright version treats a Promise as truthy in waitForFunction; await IPC in Node.
+    const waitApi = async <T>(
+      condition: (arg: T) => Promise<boolean>,
+      argument: T,
+      options: { timeout?: number } = {}
+    ) => {
+      const deadline = Date.now() + (options.timeout ?? 30000)
+      do {
+        if (await page.evaluate(condition, argument)) return
+        await page.waitForTimeout(100)
+      } while (Date.now() < deadline)
+      throw new Error("Fixture API condition did not become true before its deadline")
+    }
     page.on("pageerror", (error) => {
       errors.push(error.message)
       console.error("renderer", error.message)
@@ -201,98 +255,325 @@ async function main() {
         modelRef: "custom:m05-local"
       })
     }, `http://127.0.0.1:${address.port}/v1`)
-    await page.evaluate(async ({botId,url})=>{
-      const api=(window as any).api
-      await api.bots.writeMemory(botId,{name:"Private",content:"M05_OWNER_PRIVATE_MEMORY"})
-      for(const event of ["SessionStart","UserPromptSubmit","PreToolUse","PostToolUse","Stop","SessionEnd"])
-        await api.hooks.create({event,type:"http",url,enabled:true,timeout:5000})
-    },{botId:bot.id,url:`http://127.0.0.1:${address.port}/hook`})
+    await page.evaluate(
+      async ({ botId, url }) => {
+        const api = (window as any).api
+        await api.bots.writeMemory(botId, { name: "Private", content: "M05_OWNER_PRIVATE_MEMORY" })
+        for (const event of [
+          "SessionStart",
+          "UserPromptSubmit",
+          "PreToolUse",
+          "PostToolUse",
+          "Stop",
+          "SessionEnd"
+        ])
+          await api.hooks.create({ event, type: "http", url, enabled: true, timeout: 5000 })
+      },
+      { botId: bot.id, url: `http://127.0.0.1:${address.port}/hook` }
+    )
     console.log("stage: profile-model-bot-created")
     await page.getByText("Bots", { exact: true }).first().click()
     await page.getByText("本机协作专家", { exact: true }).first().click()
-    await page.waitForFunction(async()=>!(await (window as any).api.bots.snapshot()).tasks.some((t:any)=>["queued","running","waiting_user"].includes(t.state)),undefined,{timeout:90000})
-    const hookBaseline=hooks
-    if(await page.getByRole("button",{name:"打开 Bot 详情",exact:true}).isVisible())await page.getByRole("button",{name:"打开 Bot 详情",exact:true}).click()
-    await page.getByRole("button",{name:"更多 Bot 操作",exact:true}).click()
-    await page.getByRole("button",{name:"模拟 IM 接入",exact:true}).click()
-    const modal=page.locator("[data-bot-mock-dialog]")
+    await page.evaluate(async (id) => (window as any).api.bots.open(id), bot.id)
+    await waitApi(
+      async () => {
+        const tasks = (await (window as any).api.bots.snapshot()).tasks
+        return (
+          tasks.some((t: any) => t.origin.kind === "introduction" && t.state === "completed") &&
+          !tasks.some((t: any) => ["queued", "running", "waiting_user"].includes(t.state))
+        )
+      },
+      undefined,
+      { timeout: 90000 }
+    )
+    await page.getByText("模拟渠道普通问答已回复。", { exact: true }).last().waitFor()
+    const hookBaseline = hooks
+    const assertOwnerHooksOnly = () =>
+      assert.ok(
+        hookCalls.every((call) => call.sessionId === bot.threadId),
+        "external turns must never execute any lifecycle hook"
+      )
+    if (await page.getByRole("button", { name: "打开 Bot 详情", exact: true }).isVisible())
+      await page.getByRole("button", { name: "打开 Bot 详情", exact: true }).click()
+    await page.getByRole("button", { name: "更多 Bot 操作", exact: true }).click()
+    await page.getByRole("button", { name: "模拟 IM 接入", exact: true }).click()
+    const modal = page.locator("[data-bot-mock-dialog]")
     await modal.waitFor()
-    await modal.getByRole("button",{name:"新建绑定",exact:true}).click()
-    await modal.getByLabel("渠道标识",{exact:true}).fill("dm-alice")
-    await modal.getByLabel("显示名称",{exact:true}).fill("Alice 个人模拟")
-    await modal.getByLabel("允许的模拟用户 ID",{exact:true}).fill("alice")
-    await modal.getByRole("button",{name:"创建模拟绑定",exact:true}).click()
-    await modal.getByText("模拟设备在线",{exact:false}).waitFor()
-    const binding=await page.evaluate(async id=>(await (window as any).api.bots.mock.bindings(id)).items[0],bot.id)
-    const sendMock=async(text:string)=>{await modal.getByLabel("模拟消息",{exact:true}).fill(text);await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve()))));await modal.getByRole("button",{name:"发送模拟消息",exact:true}).click();await page.waitForFunction(()=>!document.querySelector("[data-bot-mock-dialog] textarea")?.getAttribute("disabled"))}
-    const waitResult=async(text:string)=>{await page.waitForFunction(async({botId,bindingId,text})=>(await (window as any).api.bots.mock.history(botId,bindingId)).items.some((v:any)=>v.kind==="bot"&&v.state==="sent"&&v.text.includes(text)),{botId:bot.id,bindingId:binding.id,text},{timeout:90000})}
+    await modal.getByRole("button", { name: "新建绑定", exact: true }).click()
+    await modal.getByLabel("渠道标识", { exact: true }).fill("dm-alice")
+    await modal.getByLabel("显示名称", { exact: true }).fill("Alice 个人模拟")
+    await modal.getByLabel("允许的模拟用户 ID", { exact: true }).fill("alice")
+    await modal.getByRole("button", { name: "创建模拟绑定", exact: true }).click()
+    await modal.getByText("模拟设备在线", { exact: false }).waitFor()
+    const binding = await page.evaluate(
+      async (id) => (await (window as any).api.bots.mock.bindings(id)).items[0],
+      bot.id
+    )
+    const sendMock = async (text: string) => {
+      await modal.getByLabel("模拟消息", { exact: true }).fill(text)
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+          )
+      )
+      await modal.getByRole("button", { name: "发送模拟消息", exact: true }).click()
+      await page.waitForFunction(
+        () => !document.querySelector("[data-bot-mock-dialog] textarea")?.getAttribute("disabled")
+      )
+    }
+    const waitResult = async (text: string) => {
+      await waitApi(
+        async ({ botId, bindingId, text }) =>
+          (await (window as any).api.bots.mock.history(botId, bindingId)).items.some(
+            (v: any) => v.kind === "bot" && v.state === "sent" && v.text.includes(text)
+          ),
+        { botId: bot.id, bindingId: binding.id, text },
+        { timeout: 90000 }
+      )
+    }
     await sendMock("MOCK_QA：只是咨询，不建工作。")
     await waitResult("普通问答")
-    assert.equal((await page.evaluate(async id=>(await (window as any).api.bots.works.list(id)).items,bot.id)).length,0)
-    assert.equal(hooks,hookBaseline,"external first SessionStart/UserPrompt/Stop cannot run hooks")
+    assert.equal(
+      (
+        await page.evaluate(
+          async (id) => (await (window as any).api.bots.works.list(id)).items,
+          bot.id
+        )
+      ).length,
+      0
+    )
+    assertOwnerHooksOnly()
     await sendMock("MOCK_CREATE：请独立交办周末安排。")
     await waitResult("渠道工作第一版")
-    const work=await page.evaluate(async id=>(await (window as any).api.bots.works.list(id)).items[0],bot.id)
-    assert.equal(work.source.bindingId,binding.id)
-    assert.equal(hooks,hookBaseline,"external tools cannot run Pre/Post hooks")
-    await modal.getByRole("button",{name:"打开独立工作",exact:true}).last().click()
+    const work = await page.evaluate(
+      async (id) => (await (window as any).api.bots.works.list(id)).items[0],
+      bot.id
+    )
+    assert.equal(work.source.bindingId, binding.id)
+    assertOwnerHooksOnly()
+    await modal.getByRole("button", { name: "打开独立任务", exact: true }).last().click()
     await page.locator(`[data-chat-thread-id="${work.threadId}"]`).waitFor()
-    await page.getByText("模拟渠道工作 ·",{exact:false}).waitFor()
-    const composer=page.locator(".bots-conversation [data-bot-composer] textarea").first()
-    assert.equal(await page.getByRole("button",{name:"添加文件",exact:true}).isEnabled(),false)
+    await page.getByText("模拟渠道任务 ·", { exact: false }).waitFor()
+    const composer = page.locator(".bots-conversation [data-bot-composer] textarea").first()
+    assert.equal(
+      await page.getByRole("button", { name: "添加文件", exact: true }).isEnabled(),
+      false
+    )
+    await page.waitForFunction((id) => {
+      const element = document.querySelector(`[data-chat-thread-id="${id}"]`)
+      if (!element) return false
+      let fiber = (element as any)[
+        Object.getOwnPropertyNames(element).find((key) => key.startsWith("__reactFiber"))!
+      ]
+      while (fiber) {
+        const value = fiber.memoizedProps?.value
+        if (value?.getStreamData && value?.getThreadState)
+          return Boolean(value.getStreamData(id).stream && !value.getThreadState(id).historyLoading)
+        fiber = fiber.return
+      }
+      return false
+    }, work.threadId)
+    await page.getByText("渠道工作第一版：周六讨论。", { exact: true }).last().waitFor()
+    const messagesBefore = await page.evaluate(
+      async (id) => (window as any).api.threads.getMessages(id),
+      work.threadId
+    )
+    const tasksBefore = await page.evaluate(
+      async () => (await (window as any).api.bots.snapshot()).tasks.length
+    )
+    for (const entry of ["invoke", "resume", "interrupt"]) {
+      const rejection = await page.evaluate(
+        async ({ id, entry }) =>
+          new Promise((resolve, reject) => {
+            let cleanup = () => {}
+            const events: unknown[] = []
+            const timer = setTimeout(() => {
+              cleanup()
+              reject(new Error("raw entry did not deliver a terminal rejection"))
+            }, 5000)
+            const onEvent = (event) => {
+              if (event.type === "error" || event.type === "done") events.push(event)
+              // The real preload closes the request listener at its first error terminal.
+              if (event.type === "error" || event.type === "done") {
+                clearTimeout(timer)
+                cleanup()
+                resolve(events)
+              }
+            }
+            cleanup =
+              entry === "interrupt"
+                ? (window as any).api.agent.interrupt(id, { type: "approve" }, onEvent)
+                : (window as any).api.agent.streamAgent(
+                    id,
+                    "MOCK_RAW_BYPASS",
+                    entry === "resume" ? { resume: true } : null,
+                    onEvent,
+                    "custom:m05-local"
+                  )
+          }),
+        { id: work.threadId, entry }
+      )
+      assert.ok(JSON.stringify(rejection).includes("BOT_WORK_MANAGED_CONVERSATION"), entry)
+      assert.deepEqual(
+        (rejection as Array<{ type: string }>).map((event) => event.type),
+        ["error"]
+      )
+    }
+    assert.deepEqual(
+      await page.evaluate(async (id) => (window as any).api.threads.getMessages(id), work.threadId),
+      messagesBefore
+    )
+    assert.equal(
+      await page.evaluate(async () => (await (window as any).api.bots.snapshot()).tasks.length),
+      tasksBefore
+    )
+    assert.ok(!calls.some((call) => call.lastUser.includes("MOCK_RAW_BYPASS")))
     await composer.fill("MOCK_EDIT：改成周日。")
-    await composer.press("Enter")
+    await page
+      .locator(`[data-chat-thread-id="${work.threadId}"] button[type="submit"]`)
+      .last()
+      .click()
     await waitResult("渠道工作第二版")
-    assert.equal(hooks,hookBaseline,"desktop view must preserve external source policy")
-    await page.getByText("渠道工作第二版：周日讨论。",{exact:true}).last().waitFor()
-    await page.getByRole("button",{name:"完成工作",exact:true}).click()
-    await page.getByRole("button",{name:"继续处理",exact:true}).waitFor()
-    await page.getByRole("button",{name:"继续处理",exact:true}).click()
-    await page.getByRole("button",{name:"完成工作",exact:true}).waitFor()
-    await page.screenshot({path:"/tmp/m05-mock-channel-work.png"})
-    const openModal=async()=>{await page.getByRole("button",{name:"更多 Bot 操作",exact:true}).click();await page.getByRole("button",{name:"模拟 IM 接入",exact:true}).click();await modal.waitFor()}
+    await page.getByText("MOCK_EDIT：改成周日。", { exact: true }).last().waitFor()
+    await waitApi(
+      async (id) =>
+        !(await (window as any).api.bots.snapshot()).tasks.some(
+          (t: any) => t.workId === id && ["queued", "running", "waiting_user"].includes(t.state)
+        ),
+      work.id
+    )
+    console.log("stage: external-work-desktop-edit-settled")
+    assertOwnerHooksOnly()
+    await page.getByText("渠道工作第二版：周日讨论。", { exact: true }).last().waitFor()
+    await page.getByRole("button", { name: "完成任务", exact: true }).click()
+    await page.getByRole("button", { name: "继续处理", exact: true }).waitFor()
+    await page.getByRole("button", { name: "继续处理", exact: true }).click()
+    await page.getByRole("button", { name: "完成任务", exact: true }).waitFor()
+    await page.screenshot({ path: "/tmp/m05-mock-channel-work.png" })
+    const openModal = async () => {
+      await page.getByRole("button", { name: "更多 Bot 操作", exact: true }).click()
+      await page.getByRole("button", { name: "模拟 IM 接入", exact: true }).click()
+      await modal.waitFor()
+    }
     await openModal()
-    await modal.getByRole("button",{name:"模拟离线",exact:true}).click()
+    await modal.getByRole("button", { name: "模拟离线", exact: true }).click()
     await sendMock("MOCK_OFFLINE：离线排队。")
-    await modal.getByText("等待执行",{exact:false}).last().waitFor()
-    const before=calls.length
+    await modal.getByText("等待执行", { exact: false }).last().waitFor()
+    const before = calls.length
     await page.waitForTimeout(200)
-    assert.equal(calls.length,before)
-    await modal.getByRole("button",{name:"恢复在线",exact:true}).click()
-    await page.waitForFunction(async({botId,bindingId})=>(await (window as any).api.bots.mock.history(botId,bindingId)).items.filter((v:any)=>v.kind==="bot"&&v.state==="sent").length>=5,{botId:bot.id,bindingId:binding.id},{timeout:90000})
+    assert.equal(calls.length, before)
+    await modal.getByRole("button", { name: "恢复在线", exact: true }).click()
+    await waitApi(
+      async ({ botId, bindingId }) =>
+        (await (window as any).api.bots.mock.history(botId, bindingId)).items.filter(
+          (v: any) => v.kind === "bot" && v.state === "sent"
+        ).length >= 5,
+      { botId: bot.id, bindingId: binding.id },
+      { timeout: 90000 }
+    )
     await sendMock("MOCK_UNSAFE：试图读取本机文件。")
     await waitResult("无法读取")
-    assert.equal(hooks,hookBaseline)
-    await modal.getByRole("button",{name:"新建绑定",exact:true}).click()
-    await modal.getByLabel("受众类型",{exact:true}).selectOption("group")
-    await modal.getByLabel("渠道标识",{exact:true}).fill("group-team")
-    await modal.getByLabel("显示名称",{exact:true}).fill("小组模拟")
-    await modal.getByLabel("允许的模拟用户 ID",{exact:true}).fill("alice,bob")
-    await modal.getByRole("button",{name:"创建模拟绑定",exact:true}).click()
-    await modal.getByLabel("模拟发送者",{exact:true}).selectOption("bob")
+    assertOwnerHooksOnly()
+    await modal.getByRole("button", { name: "新建绑定", exact: true }).click()
+    await modal.getByLabel("受众类型", { exact: true }).selectOption("group")
+    await modal.getByLabel("渠道标识", { exact: true }).fill("group-team")
+    await modal.getByLabel("显示名称", { exact: true }).fill("小组模拟")
+    await modal.getByLabel("允许的模拟用户 ID", { exact: true }).fill("alice,bob")
+    await modal.getByRole("button", { name: "创建模拟绑定", exact: true }).click()
+    await modal.getByLabel("模拟发送者", { exact: true }).selectOption("bob")
     await sendMock("MOCK_GROUP_IGNORED：文字 @Bot 不应触发。")
-    await modal.getByText("群消息未触发 Bot",{exact:false}).waitFor()
-    const groupBinding=await page.evaluate(async id=>(await (window as any).api.bots.mock.bindings(id)).items.find((b:any)=>b.kind==="group"),bot.id)
-    await modal.getByLabel("结构化 @ 此 Bot",{exact:false}).check()
+    await modal.getByText("群消息未触发 Bot", { exact: false }).waitFor()
+    const groupBinding = await page.evaluate(
+      async (id) =>
+        (await (window as any).api.bots.mock.bindings(id)).items.find(
+          (b: any) => b.kind === "group"
+        ),
+      bot.id
+    )
+    await modal.getByLabel("@ 此 Bot", { exact: false }).check()
     await sendMock("MOCK_GROUP_QA：结构化提及后回复。")
-    await page.waitForFunction(async({botId,id})=>(await (window as any).api.bots.mock.history(botId,id)).items.some((v:any)=>v.kind==="bot"&&v.state==="sent"),{botId:bot.id,id:groupBinding.id},{timeout:90000})
-    assert.equal(hooks,hookBaseline)
-    await page.screenshot({path:"/tmp/m05-mock-channel-dialog.png"})
-    await page.getByRole("button",{name:"Close",exact:true}).click()
-    await page.locator(".bots-conversation").getByRole("button",{name:/主对话$/}).click()
+    await waitApi(
+      async ({ botId, id }) =>
+        (await (window as any).api.bots.mock.history(botId, id)).items.some(
+          (v: any) => v.kind === "bot" && v.state === "sent"
+        ),
+      { botId: bot.id, id: groupBinding.id },
+      { timeout: 90000 }
+    )
+    assertOwnerHooksOnly()
+    const firstGroupReply = await page.evaluate(
+      async ({ botId, id }) =>
+        (await (window as any).api.bots.mock.history(botId, id)).items.find(
+          (v) => v.kind === "bot" && v.state === "sent"
+        ),
+      { botId: bot.id, id: groupBinding.id }
+    )
+    await modal.getByLabel("@ 此 Bot", { exact: true }).uncheck()
+    await modal.getByLabel("引用渠道消息", { exact: true }).selectOption(firstGroupReply.id)
+    await sendMock("MOCK_GROUP_QUOTE：回复本群消息无需再次提及。")
+    await waitApi(
+      async ({ botId, id }) =>
+        (await (window as any).api.bots.mock.history(botId, id)).items.filter(
+          (v) => v.kind === "bot" && v.state === "sent"
+        ).length === 2,
+      { botId: bot.id, id: groupBinding.id }
+    )
+    await modal.getByRole("button", { name: "模拟离线", exact: true }).click()
+    await modal.getByLabel("@ 此 Bot", { exact: true }).check()
+    await sendMock("MOCK_REVOKE_PENDING：撤销前离线排队。")
+    await waitApi(
+      async ({ botId, id }) =>
+        (await (window as any).api.bots.mock.history(botId, id)).items.some(
+          (v) => v.text.includes("MOCK_REVOKE_PENDING") && v.state === "queued"
+        ),
+      { botId: bot.id, id: groupBinding.id }
+    )
+    const callsBeforeRevoke = calls.length
+    page.once("dialog", (dialog) => void dialog.accept())
+    await modal.getByRole("button", { name: "撤销绑定", exact: true }).click()
+    await modal.getByRole("button", { name: "撤销绑定", exact: true }).isDisabled()
+    await waitApi(
+      async ({ botId, id }) =>
+        (await (window as any).api.bots.mock.history(botId, id)).items.some(
+          (v) => v.text.includes("MOCK_REVOKE_PENDING") && v.state === "cancelled"
+        ),
+      { botId: bot.id, id: groupBinding.id }
+    )
+    assert.equal(calls.length, callsBeforeRevoke)
+    assert.equal(
+      await modal.getByRole("button", { name: "发送模拟消息", exact: true }).isDisabled(),
+      true
+    )
+    await page.screenshot({ path: "/tmp/m05-mock-channel-dialog.png" })
+    await page.getByRole("button", { name: "Close", exact: true }).click()
+    await page
+      .locator(".bots-conversation")
+      .getByRole("button", { name: /主对话$/ })
+      .click()
     await composer.fill("OWNER_PING：本机主对话仍可用。")
-    await composer.press("Enter")
-    await page.getByText("本机主对话保持可用。",{exact:true}).last().waitFor({timeout:90000})
-    assert.ok(hooks>hookBaseline,"ordinary beta still executes configured hooks")
-    assert.ok(advertised.some(v=>v.includes("write_file")),"owner runtime retains beta tools")
-    assert.deepEqual(errors,[])
-    console.log("complete: real App modal/channel/runtime/work/edit/complete/continue/offline/group/allowlist/hooks",{calls:calls.length,hooks})
+    await page.locator(".bots-conversation button[type=submit]").last().click()
+    await page.getByText("本机主对话保持可用。", { exact: true }).last().waitFor({ timeout: 90000 })
+    assert.ok(hooks > hookBaseline, "ordinary beta still executes configured hooks")
+    assert.ok(
+      advertised.some((v) => v.includes("write_file")),
+      "owner runtime retains beta tools"
+    )
+    assert.deepEqual(errors, [])
+    console.log(
+      "complete: real App modal/channel/runtime/work/edit/complete/continue/offline/group/allowlist/hooks",
+      { calls: calls.length, hooks }
+    )
   } catch (error) {
     console.error(
       "artifact-directory",
       dir,
       "last model phases",
-      JSON.stringify(calls)
+      JSON.stringify(calls),
+      "fixture errors",
+      JSON.stringify(errors),
+      "hook scopes",
+      JSON.stringify(hookCalls)
     )
     if (app) {
       const page = await app.firstWindow().catch(() => null)
@@ -306,7 +587,6 @@ async function main() {
     await new Promise<void>((resolve) => server.close(() => resolve()))
     // Keep only diagnostic logs; the isolated profiles and their fixture-only credentials are removed.
     for (const key of [
-      "HOME",
       "USERPROFILE",
       "APPDATA",
       "LOCALAPPDATA",

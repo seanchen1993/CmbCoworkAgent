@@ -1098,7 +1098,9 @@ function rejectDesktopRunForForeignOwner(
 ): boolean {
   const row = getThreadCore(threadId)
   try {
-    assertWorkConversationEntry(threadId,row,parseStandardThreadMetadata(row?.metadata).metadata,context)
+    const metadata = parseStandardThreadMetadata(row?.metadata).metadata
+    assertWorkConversationEntry(threadId, row, metadata, context)
+    assertBotMockThreadEntry(metadata, context)
   } catch (error) {
     safeSendToWindow(window,channel,{type:"error",error:"BOT_WORK_MANAGED_CONVERSATION",message:error instanceof Error ? error.message : "请从任务会话继续。"})
     safeSendToWindow(window,channel,{type:"done"})
@@ -5821,7 +5823,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const initialInvokeThread = getThreadCore(threadId)
       const initialInvokeParsedMetadata = parseStandardThreadMetadata(initialInvokeThread?.metadata)
       const initialInvokeMetadata = initialInvokeParsedMetadata.metadata
-      assertBotMockThreadEntry(initialInvokeMetadata,runExecutionContext)
       const initialInvokeAgentMode = initialInvokeParsedMetadata.agentMode
       const initialInvokeCoordinatorRequest = resolveCoordinatorModeRequest(
         message,
@@ -10231,7 +10232,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           console.warn("[Agent] Failed to parse thread metadata, using empty object")
       })
       let metadata = parsedThreadMetadata.metadata
-      assertBotMockThreadEntry(metadata)
       const requirementRuntimeOptions = getRequirementRuntimeOptions(metadata)
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = parsedThreadMetadata.workspacePath
@@ -11598,7 +11598,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         console.warn("[Agent] Failed to parse thread metadata, using empty object")
     })
     const metadata = parsedThreadMetadata.metadata
-    assertBotMockThreadEntry(metadata)
     const requirementRuntimeOptions = getRequirementRuntimeOptions(metadata)
     ensureThreadForkBoundaryMarkerEra(threadId, metadata)
     const workspacePath = parsedThreadMetadata.workspacePath

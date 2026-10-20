@@ -33,6 +33,10 @@ const LABELS: Record<string, string> = {
 const merge = <T extends { id: string }>(older: T[], latest: T[]) => [
   ...new Map([...older, ...latest].map((v) => [v.id, v])).values()
 ]
+const mergeBindings = (older: BotMockBinding[], latest: BotMockBinding[]) =>
+  merge(older, latest).sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))
+const mergeHistory = (older: BotMockFeedEntry[], latest: BotMockFeedEntry[]) =>
+  merge(older, latest).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
 
 /** Explicit local simulation. It uses the original Bot runtime and never connects to an IM service. */
 export function BotMockChannelDialog({
@@ -64,6 +68,7 @@ export function BotMockChannelDialog({
     [text, setText] = useState(""),
     [mention, setMention] = useState(false),
     [reply, setReply] = useState("")
+  const [historyNotice, setHistoryNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false),
     [error, setError] = useState<string | null>(null)
   const current = useRef({ id, epoch: 0 })
@@ -85,7 +90,7 @@ export function BotMockChannelDialog({
   }
   const list = useCallback(async () => {
     const p = await api.bindings(bot.id)
-    setBindings((old) => merge(old, p.items))
+    setBindings((old) => mergeBindings(old, p.items))
     setBindingCursor(p.before)
     setId((old) => old || p.items[0]?.id || "")
   }, [api, bot.id])
@@ -99,34 +104,80 @@ export function BotMockChannelDialog({
       current.current.epoch++
     }
   }, [list])
-  const historyCursor = useRef<string | null | undefined>(undefined)
-  const refresh = useRef<{running:Promise<void>|null;requested:boolean}>({running:null,requested:false})
-  const reload = useCallback(():Promise<void> => {
-    refresh.current.requested=true
-    if(refresh.current.running)return refresh.current.running
-    const run=async()=>{
-      while(refresh.current.requested){
-        refresh.current.requested=false
-        const selected=current.current.id,epoch=current.current.epoch
-        if(!selected)continue
+  const historyWindow = useRef<{
+    items: BotMockFeedEntry[]
+    before: string | null | undefined
+    generation: number
+  }>({ items: [], before: undefined, generation: 0 })
+  const refresh = useRef<{ running: Promise<void> | null; requested: boolean }>({
+    running: null,
+    requested: false
+  })
+  const reload = useCallback((): Promise<void> => {
+    refresh.current.requested = true
+    if (refresh.current.running) return refresh.current.running
+    const run = async () => {
+      while (refresh.current.requested) {
+        refresh.current.requested = false
+        const selected = current.current.id,
+          epoch = current.current.epoch
+        if (!selected) continue
         try {
-          const [b,p]=await Promise.all([api.binding(bot.id,selected),api.history(bot.id,selected)])
-          if(current.current.id!==selected||current.current.epoch!==epoch)continue
-          setBinding(b);setBindings(old=>merge(old,[b]))
-          setEntries(old=>merge(old,p.items).sort((a,b)=>a.createdAt-b.createdAt||a.id.localeCompare(b.id)))
-          if(historyCursor.current===undefined){historyCursor.current=p.before;setCursor(p.before)}
-          setSender(old=>b.allowedSenderIds.includes(old)?old:b.allowedSenderIds[0]);setError(null)
-        }catch(e){if(current.current.id===selected&&current.current.epoch===epoch)setError(botErrorMessage(e))}
+          const [b, p] = await Promise.all([
+            api.binding(bot.id, selected),
+            api.history(bot.id, selected)
+          ])
+          if (current.current.id !== selected || current.current.epoch !== epoch) continue
+          const previous = historyWindow.current
+          const overlaps = p.items.some((item) => previous.items.some((old) => old.id === item.id))
+          // A disjoint latest page cannot be joined with the old cursor without skipping history.
+          // Reset only this bounded window; the new cursor exposes every omitted older row.
+          if (previous.before === undefined || (p.items.length > 0 && !overlaps)) {
+            historyWindow.current = {
+              items: mergeHistory([], p.items),
+              before: p.before,
+              generation: previous.generation + 1
+            }
+            setCursor(p.before)
+            if (previous.items.length)
+              setHistoryNotice("新增消息较多，已显示最近消息；可加载更早消息继续查看。")
+          } else {
+            historyWindow.current = { ...previous, items: mergeHistory(previous.items, p.items) }
+          }
+          setEntries(historyWindow.current.items)
+          setBinding(b)
+          setBindings((old) => mergeBindings(old, [b]))
+          setSender((old) => (b.allowedSenderIds.includes(old) ? old : b.allowedSenderIds[0]))
+          setError(null)
+        } catch (e) {
+          if (current.current.id === selected && current.current.epoch === epoch)
+            setError(botErrorMessage(e))
+        }
       }
     }
-    refresh.current.running=run().finally(()=>{refresh.current.running=null})
+    refresh.current.running = run().finally(() => {
+      refresh.current.running = null
+    })
     return refresh.current.running
-  },[api,bot.id])
-  useEffect(()=>{
-    current.current.epoch++;historyCursor.current=undefined
-    setBinding(null);setEntries([]);setCursor(null);setReply("");setText("");setError(null)
-  },[id])
-  useEffect(()=>{void reload()},[id,revision,reload])
+  }, [api, bot.id])
+  useEffect(() => {
+    current.current.epoch++
+    historyWindow.current = {
+      items: [],
+      before: undefined,
+      generation: historyWindow.current.generation + 1
+    }
+    setBinding(null)
+    setEntries([])
+    setCursor(null)
+    setReply("")
+    setText("")
+    setError(null)
+    setHistoryNotice(null)
+  }, [id])
+  useEffect(() => {
+    void reload()
+  }, [id, revision, reload])
   const action = async (fn: () => Promise<void>) => {
     if (busy) return
     setBusy(true)
@@ -154,7 +205,7 @@ export function BotMockChannelDialog({
         createCommand.current = { fingerprint, id: crypto.randomUUID() }
       const b = await api.create({ ...input, operationId: createCommand.current.id })
       createCommand.current = null
-      setBindings((old) => merge(old, [b]))
+      setBindings((old) => mergeBindings(old, [b]))
       setId(b.id)
       setCreating(false)
     })
@@ -188,10 +239,17 @@ export function BotMockChannelDialog({
       if (!cursor) return
       const selected = id,
         epoch = current.current.epoch,
-        p = await api.history(bot.id, id, cursor)
-      if (current.current.id !== selected || current.current.epoch !== epoch) return
-      setEntries((old) => merge(p.items, old).sort((a,b)=>a.createdAt-b.createdAt||a.id.localeCompare(b.id)))
-      historyCursor.current=p.before
+        generation = historyWindow.current.generation
+      const p = await api.history(bot.id, selected, cursor)
+      if (
+        current.current.id !== selected ||
+        current.current.epoch !== epoch ||
+        historyWindow.current.generation !== generation
+      )
+        return
+      const items = mergeHistory(p.items, historyWindow.current.items)
+      historyWindow.current = { items, before: p.before, generation }
+      setEntries(items)
       setCursor(p.before)
     })
   return (
@@ -225,7 +283,7 @@ export function BotMockChannelDialog({
               onClick={() =>
                 void action(async () => {
                   const p = await api.bindings(bot.id, bindingCursor)
-                  setBindings((old) => merge(old, p.items))
+                  setBindings((old) => mergeBindings(old, p.items))
                   setBindingCursor(p.before)
                 })
               }
@@ -244,7 +302,11 @@ export function BotMockChannelDialog({
           >
             <label>
               受众类型
-              <select value={kind} onChange={(e) => setKind(e.target.value as "dm" | "group")}>
+              <select
+                aria-label="受众类型"
+                value={kind}
+                onChange={(e) => setKind(e.target.value as "dm" | "group")}
+              >
                 <option value="dm">个人</option>
                 <option value="group">群</option>
               </select>
@@ -325,6 +387,7 @@ export function BotMockChannelDialog({
                 撤销绑定
               </button>
             </div>
+            {historyNotice && <p role="status">{historyNotice}</p>}
             <div className="bot-mock-history" aria-label="模拟渠道消息">
               {cursor && (
                 <button disabled={busy} onClick={() => void more()}>
@@ -382,7 +445,7 @@ export function BotMockChannelDialog({
                       disabled={Boolean(pending)}
                       onChange={(e) => setMention(e.target.checked)}
                     />
-                    结构化 @ 此 Bot
+                    @ 此 Bot
                   </label>
                 )}
                 <select
@@ -417,6 +480,16 @@ export function BotMockChannelDialog({
                 value={pending?.bindingId === id ? pending.text : text}
                 disabled={Boolean(pending) || binding.revoked}
                 maxLength={30000}
+                onPaste={(event) => {
+                  if (!event.clipboardData.files.length) return
+                  event.preventDefault()
+                  setError("模拟渠道仅支持文字，尚不支持图片或附件。")
+                }}
+                onDrop={(event) => {
+                  if (!event.dataTransfer.files.length) return
+                  event.preventDefault()
+                  setError("模拟渠道仅支持文字，尚不支持图片或附件。")
+                }}
                 onChange={(e) => setText(e.target.value)}
               />
               <button

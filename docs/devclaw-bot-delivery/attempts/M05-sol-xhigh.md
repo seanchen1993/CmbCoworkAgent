@@ -1,6 +1,46 @@
 # M05 — beta 本地统一实施检查点
 
-状态：**M05-06 候选完成，提交后冻结停写，等待 root 独立验收/集成。M05-02/03与UI/模型窄修已完成，M05-04/05完整验证仍暂停；下方旧状态为历史记录。** gpt-6.1-sol/xhigh 唯一写者，不派生。只读最新设计§11，旧Service清理留M05-05；不写Java/LF39、不操作用户App/profile/真实模型/数据库。
+状态：**M05-06 dd12f43f 已由root验收并交付预览。用户2026-10-20重新授权M05-04/05，当前04检查点已自测保存、停写待root独立复验；05待root确认后进入；下方暂停说明均为历史。** gpt-6.1-sol/xhigh 唯一写者，不派生。只读最新设计§11，旧Service清理留M05-05；不写Java/LF39、不操作用户App/profile/真实模型/数据库。
+
+## M05-04 最终自测检查点（待 root 验收，05未开始）
+
+当前分支`codex/beta-local-unification-m05`，基线`dd12f43fa588f3ad2e53647842fabfa51af1698a`；本段同次提交为04审查检查点。保留已验收06与beta所有默认行为，未做05旧入口后台拆除。此处“通过”仅下列实际隔离检查，不等于真实IM/Java/生产群接通。
+
+- 最终实际App：`M05_MOCK_APP_OUT=/tmp/m05-04-out-jxhhbstc Node22 --import tsx tests/bots-mock-channel-app.spec.ts` → `/tmp/m05-04-app-final-queued.log` **exit0**。12次localhost固定模型，个人问答不建任务→真实工具创建→桌面改外部任务并回原渠道→完成/继续→仅模拟渠道离线排队恢复→群正文@不触发、结构化@触发、引用同群Bot回复触发→离线待执行消息在撤销后cancelled/不调用模型→owner主对话仍完整工具与hooks。模型可见恰为5个work工具，意外read_file不能执行，私人记忆标记不进入外部模型上下文。
+- 新实证修复：原agent.ts在channel错误通知前裸assert mock来源，拒绝虽有效但renderer悬挂。现在invoke/resume/interrupt共用`rejectDesktopRunForForeignOwner`已有catch发error+done；移除三个外层裸throw，保留执行内二次校验。实际App逐个原生API收到`BOT_WORK_MANAGED_CONVERSATION`终态error，消息数组/Task数完全不增、模型/hooks不运行。现有preload遇error会deliver-and-close，回调不再接收随后done；未改变此beta语义，main仍发送done。
+- hook证据按真实HTTP协议`session_id`逐条核对：所有收到的hook只能属于owner Bot主Thread，任何外部Thread会失败；owner确有hook及完整工具。旧全局baseline在owner介绍尾部并行时不可靠，已替换为来源断言，不通过关闭owner hooks“通过”检查。mock scope单元覆盖SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/Stop/SessionEnd及继承默认不变。
+- 新user气泡显示原正文；权限说明固定在系统prompt，authority仍由binding/control/metadata和实际工具守卫执行，不依赖文本。旧历史不改写，不全局吞相似字符串。弹窗不显示授权版本，@标签用户化。实际图`/tmp/m05-mock-channel-work.png`及`/tmp/m05-mock-channel-dialog.png`，真实beta外壳/ChatContainer，无stub聊天组件。
+
+所有`Node22`均为`/Users/heyirui/.npm/_npx/52027bd8fc0022aa/node_modules/node/bin/node`。
+
+| 检查 | 精确命令（Node22后参数） | 日志/实际结果 |
+| --- | --- | --- |
+| 受影响核心/06保留 | `node_modules/vitest/vitest.mjs run src/main/bots/mock-channel.test.ts src/main/bots/mock-runtime-policy.test.ts src/main/hooks/mock-scope.test.ts src/main/agent/runtime-tool-allowlist.test.ts src/main/agent/standard-thread-turn.test.ts src/main/bots/runtime-adapter.test.ts src/main/bots/host.test.ts src/main/bots/work.test.ts src/main/ipc/bots.test.ts src/main/bots/conversation-link.test.ts src/main/bots/conversation-link-service.test.ts` | `/tmp/m05-04-core-final.log` **11文件193/193 exit0**，在最后裸入口通知修复前；该窄修另实际App/类型/入口检查 |
+| 弹窗连续分页/迟到 | `--import tsx tests/bots-mock-dialog-browser.spec.ts` | `/tmp/m05-04-dialog-first.log` **exit0**；171历史全可达，latest≤40，末页刷新不复活cursor、49/41条突发重置窗口无缺口、晚到旧页与切binding保护、附件粘贴拒绝 |
+| Node类型 | `node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false` | `/tmp/m05-04-node-final.log`及最后`/tmp/m05-04-node-entry-fix.log` **exit0** |
+| Web类型 | `node_modules/typescript/bin/tsc --noEmit -p tsconfig.web.json --composite false` | `/tmp/m05-04-web-final.log` **exit0** |
+| 原Runtime入口结构 | `--import tsx tests/desktop-agent-runtime-entrypoints.spec.ts` | `/tmp/m05-04-entrypoints.log` **exit0** |
+| 隔离正常生产build | `node_modules/electron-vite/bin/electron-vite.js build --config /tmp/m05-04-vite.config.mjs --mode m05-04-isolated` | `/tmp/m05-04-build-entry-fix.log` **exit0**；main/preload/renderer全部独立/tmp，空envDir、无测试entry/构建flags |
+
+性能/恢复：`mock-channel.test`含105条旧interrupted，state/id partial index，冻结高水位+afterId范围扫描，每批最多40个metadata（已存在outbox也推进），实际40/40/25、EXPLAIN命中；事务提交后才前移，Host批间timer让出并在stop清理。既有unknown送达不盲重发、真实SQLite重开/事件唯一、撤销/跨受众/伪造来源/原生写拒绝/owner未读captured clock都通过。新UI按latest40+稳定cursor，有断档风险时明确重置最近窗口并重分页，不全量扫历史或逐任务正文读取。没有ES变化/生产耗时结论。
+
+首轮失败准确记录：旧标签、wrap-label无明确aria、未等真实stream/history均修夹具或最小accessibility；`waitForFunction(async predicate)`在当前Playwright只把Promise当truthy而不按false轮询是API等待根因，已仅04夹具7处改Node端100ms串行await poll，严格断言/超时未放宽；同步DOM等待不变。裸入口前置throw是真产品缺陷且已修。一次新夹具等preload的error后再等done超时是测试误读终态清理，已按原API语义断言error。最后撤销负例曾忘群@，该消息正确ignored，补明确@并先等queued后再撤销，未改产品触发规则。过程中一次Python替换匹配失败导致后续旧fixture意外再跑，已自然finally清理；不计产品通过证据。最后上述App exit0才是正确等待条件下完整通过。
+
+资源：隔离正常产物`/tmp/m05-04-out-jxhhbstc/main/index.js`，config`/tmp/m05-04-vite.config.mjs`；只去掉原硬编码写repo out的copy-resources插件并复制相同资源，沿06已验证方法，不加载用户env。用户运行out的602个文件size/mtime与`/tmp/m05-04-user-out-before.json`完全相同。所有自有App/server已finally关闭、App profile已删除，ps确认mock App剩余0；裸入口悬挂那轮仅精确SIGTERM自己App96607，日志和finally均保留。未操作用户91596/profile/真实配置、Java/DB/LF39/ES/真实模型，无容器/后台测试残留，无push/deploy/定时操作。
+
+待root设计审查的静态边界（未擅改权限语义）：bot级未确认event marker若恰逢绑定撤销，当前UI禁止核对、Store先active拒绝旧receipt，可能持续阻止该Bot其他渠道发送。已报告root，建议仅放开owner对原event/hash已持久receipt的只读核对或显式保留原记录后放弃待核对标记；不允许盲重发。04仍是待审检查点，未宣称所有组合场景已验收。05尚未开始；旧后台链/只读历史出口按§12待04确认。
+
+## 历史：M05-04 恢复检查点（dd12f43f 起，当时尚未冻结）
+
+已只读root最新abb13ef8设计§11/§12、06设计与当前任务/交接，未合并或编辑root文档。原WIP本地binding/event/来源/outbox与标准Runtime策略保留，生产IM V1、Java/LF39不改。此轮只写实施树产品/必要测试/本attempt，不派生、不调用真实模型、不操作用户App/profile/凭据、不给运行中的repo out写入。
+
+- 实际App停点：原测试使用过时“模拟渠道工作/打开独立工作/完成工作”等标签、未等实际Thread stream/history就绪，未出现MOCK_EDIT模型调用。仅更新夹具为当前“独立任务”标签及只读就绪等待后，真实桌面编辑/原渠道第二版可见；未放宽/跳过结果断言，也未替换Context方法。
+- `/tmp/m05-04-resume-app-fourth.log` **exit0**：11次localhost固定模型，实际App modal个人问答不建Task→真实工具创建→桌面修改原渠道回传→完成继续→离线排队恢复→群结构化提及→意外read_file被真实工具边界拒绝→本机main仍全工具/hooks。当前构建 `/tmp/m05-04-out-jxhhbstc`（最初源dd12f43f+UI分页/aria修复）。App/server已finally关闭，临时profile已删除。前两轮分别intro尚未接纳导致hook基线race、旧来源标签等待；第三轮桌面修改已通过后卡wrap-label“受众类型”exact选择器；补明确aria-label后第四轮过，均保留日志。
+- 产品收口：mock弹窗latest40与旧窗口无重叠时明确返回最近页并用新cursor重新分页，旧more回包由window generation拦截，终态null游标不因刷新复活；绑定列表按创建时间稳定新近优先。文本输入明确拒绝粘贴/拖入附件。原任务来源/授权/事件fingerprint不变。
+- 恢复泵：interrupted receipts一次高水位+稳定afterId，索引metadata每批≤40，LEFT JOIN已存在回执也推进，事务成功后才前移cursor，Host以timer批间让出；不改interrupted事实、不重跑模型/送达。新增state/id partial index。105条检查返回40/40/25，EXPLAIN命中；最初新EXPLAIN暴露SQLite优先旧state索引+临时排序，已改为state/id partial索引后通过，未通过放宽断言掩盖。
+- `/tmp/m05-04-dialog-first.log` **exit0**：真实Dialog+隔离Electron，171条历史、末页刷新、49/41条突发无漏页、晚到旧页丢弃、切binding、同轮受限请求并发/消息粘贴拒绝。`/tmp/m05-04-resume-core-third.log` **6文件37/37 exit0**，含mock9、policy1、hook1、allowlist1、standard8、IPC17。
+- root视觉收口批准：仅真实mock新user消息使用原正文，不再在气泡渲染JSON引号/权限长说明；来源仍由control/metadata冻结，权限边界保留固定系统提示与RemoteTurnPolicy，不做全局显示字符串剥离、不重写旧历史。隐藏弹窗grantVersion，@标签用户化。此后最终增量build、App/类型和受影响回归进行中，尚非最终结果。
+- 05尚未开始；将拆默认App旧Partner/Service运行接线，单独只读历史白名单查看/完整导出，不通过旧Store恢复或联网，不删除旧表/源码。04冻结/复验前不继续05产品。
 
 ## M05-06 最终候选与实际证据（2026-10-20）
 

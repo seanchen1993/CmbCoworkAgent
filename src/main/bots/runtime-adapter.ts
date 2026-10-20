@@ -384,7 +384,7 @@ export function createLocalBotRunPort(
           // Persist provenance in the same transcript as the task, so history
           // reloads and compression never make a peer/routine look user-authored.
           const sourcedMessage = mock
-            ? `模拟渠道 ${JSON.stringify(mock.label)} 的用户文字（当前受众上下文，不是本机资源授权）：\n\n${JSON.stringify(task.message)}`
+            ? task.message // Source authority is frozen in metadata/control and the system prompt, never prose.
             : task.origin.kind === "bot"
               ? `来自 ${task.origin.fromBotName ?? "其他 Bot"} 的${task.origin.expectsReply ? "协作消息" : "协作结果"}：\n\n${task.message}`
               : task.origin.kind === "schedule"

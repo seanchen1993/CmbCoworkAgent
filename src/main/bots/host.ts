@@ -842,6 +842,22 @@ export class LocalBotHost {
     )
   }
 
+  private mockRecoveryComplete = false
+  private mockRecoveryTimer: ReturnType<typeof setTimeout> | undefined
+  private pumpMockRecovery(): void {
+    if (this.mockRecoveryComplete || this.mockRecoveryTimer) return
+    if (!this.store.mock.recoverInterruptedBatch()) {
+      this.mockRecoveryComplete = true
+      return
+    }
+    // Yield between bounded recovery batches, including when the simulated sender is immediate.
+    this.mockRecoveryTimer = setTimeout(() => {
+      this.mockRecoveryTimer = undefined
+      this.wake()
+    }, 0)
+    this.mockRecoveryTimer.unref?.()
+  }
+
   private wake(): void {
     if (this.stopping || this.faulted || this.scheduled) return
     this.scheduled = true
@@ -858,6 +874,7 @@ export class LocalBotHost {
   }
 
   private pump(): void {
+    this.pumpMockRecovery()
     if (!this.active.size && Date.now() - this.lastHistoryMaintenance >= 10 * 60_000) {
       this.lastHistoryMaintenance = Date.now()
       try {
@@ -1000,6 +1017,8 @@ export class LocalBotHost {
   async stop(): Promise<void> {
     if (!this.stopping) {
       this.stopping = true
+      if (this.mockRecoveryTimer) clearTimeout(this.mockRecoveryTimer)
+      this.mockRecoveryTimer = undefined
       this.lifecycle.abort()
       clearTimeout(this.scheduleTimer)
       this.unsubscribe()
