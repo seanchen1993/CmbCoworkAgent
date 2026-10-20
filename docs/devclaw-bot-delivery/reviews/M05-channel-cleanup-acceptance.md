@@ -1,6 +1,6 @@
 # M05-04/05 渠道模拟与旧链路清理验收
 
-状态：2026-10-20 用户恢复实施；尚未接受新候选。起点为实施分支 `dd12f43f`，保留已验收的本机对话关联。root 设计与验收，原 6.1-sol/xhigh 唯一产品写者。本文记录此次证据，不覆盖以前的验收历史。
+状态：2026-10-20 用户恢复实施；`94fb4fe9` 的渠道主路径检查点已独立复验，撤销后失回执的恢复出口正在补齐，随后继续旧链路清理，尚未最终集成。起点为实施分支 `dd12f43f`，保留已验收的本机对话关联。root 设计与验收，原 6.1-sol/xhigh 唯一产品写者。本文记录此次证据，不覆盖以前的验收历史。
 
 ## 范围
 
@@ -18,9 +18,17 @@
 4. 已用 SQLite backup 建立 root 私有验收副本 `/var/folders/kq/m0q4z3m91tx9fpfbf501hfrr0000gn/T/m05-05-legacy-readonly-x5sh1stx/legacy.sqlite`，`quick_check=ok`，同目录 `proof.json` 记录逐表行数和内容哈希，不含正文。副本无 WAL，关闭后 immutable 只读校验；原运行库不使用 immutable。
 5. 初步源码确认仍有 `registerPartnerDevHandlers`、`hasActivePartnerDevRun`、`stopPartnerDev`、preload 旧 API 和 `registerPartnerInputOnlyRuntime`。不能仅删除可见入口就宣称旧运行链路已清理。
 
+## 04 检查点证据
+
+- `94fb4fe94f0206d91f84d66dfec7f98d7db52438` 的真实隔离 App 旅程通过，日志 `/tmp/m05-04-app-final-queued.log`：12 次 localhost 固定模型调用，个人问答、真实工具建任务、桌面修改回原渠道、完成/继续、离线恢复、群提及和同群引用、撤销取消待执行、普通 Bot 工具与 hooks 保持。此证据不是生产 IM 联调。
+- root 独立执行 mock、策略、hook、实际工具白名单、标准 Runtime 及 IPC 六文件，37/37，`/tmp/m05-04-root-final.log`，exit0。实施者另有193项受影响核心及 Node/Web、独立正常构建，精确记录在其 attempt。原生 invoke/resume/interrupt 拒绝通过已有通知通道结束，未产生消息、Task 或模型调用。
+- 弹窗171条历史、末页、突发消息超40、迟到旧页及切绑定检查通过。恢复查询采用一次高水位及稳定 id 游标，单批40条元数据，105条实际40/40/25；EXPLAIN 使用部分索引，批间让出事件循环。只报告结构性优化和本地测试，没有 ES 改动或生产耗时数据。
+- root 已跑生产 IM V1 全部19个脚本，均 exit0，报告 `/var/folders/kq/m0q4z3m91tx9fpfbf501hfrr0000gn/T/m05-root-im-regression-szpp3l2n/report.json`。仅 localhost/隔离 profile；Java/MySQL/真实模型未启动。
+- 仍需窄修：已持久事件的回执丢失后若绑定撤销，不应永久锁住 Bot 其他模拟渠道。允许 owner 按完整事件标识与 fingerprint 只读核对旧回执；没有旧回执仍拒绝新事件，不能盲重发。明确未落盘的撤销事件需显式结束核对出口，保留记录，不能自动清除未知状态。
+
 ## 最终验收待补
 
-- [ ] M05-04 实际 App 全流程、分页/迟到响应、权限及恢复检查点。
+- [ ] M05-04 主路径已过；补失回执与撤销组合后冻结。
 - [ ] M05-05 拆线、只读历史和导出、无旧 worker/默认引擎启动证据。
 - [ ] 实际旧数据副本升级/重开前后记录不变，普通 Bot 和本机对话关联回归。
 - [ ] 受影响 beta、生产 IM V1、Runtime/hook、Node/Web 类型与隔离构建。
