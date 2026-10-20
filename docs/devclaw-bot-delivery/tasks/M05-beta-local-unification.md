@@ -1,13 +1,13 @@
 # M05 beta UI、本地任务与渠道入口融合
 
-状态：implementing，M05-01 接口检查点 edbcc351 已由 root 审查，按设计第 10 节进入 M05-02/03。用户 2026-10-19 明确开始实施；后续补充允许后端 mock，真实 Java/IM 合仓延后。设计为 `../reviews/M05-beta-local-unification-design.md`，它覆盖 M04 冲突规则。
+状态：implementing。M05-02/03 本地切片已验收合入；M05-04 模拟渠道正在实施，M05-05 清理与最终验收仍待完成。用户 2026-10-19 明确开始实施；后续补充允许后端 mock，真实 Java/IM 合仓延后。设计为 `../reviews/M05-beta-local-unification-design.md`，它覆盖 M04 冲突规则。
 
 ## 分工、树与恢复
 
 - root 独占设计、任务单、state/HANDOFF/reviews、集成与最终验收。
 - 原 `/root/service_conversation_sol`，gpt-6.1-sol/xhigh，唯一产品写者，不派生子代理。
 - integration：`/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork`，`codex/devclaw-bot-integration`，起点 `b479d51d700b81871a4c22feaa751484f2488827`。
-- 实施：`/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6`，分支 `codex/beta-local-unification-m05`。原五个未提交 M04 修复已保全为 `9e83c3048`；正常合入文档后提交接口检查点 `edbcc351`，现正实施 M05-02/03。不重放旧任务，不 reset/rebase 覆盖既有工作。
+- 实施：`/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6`，分支 `codex/beta-local-unification-m05`。原五个未提交 M04 修复已保全为 `9e83c3048`；正常合入文档后提交接口检查点 `edbcc351`，现正实施 M05-04，WIP 5dad1a2f 已保存但未冻结验收。不重放旧任务，不 reset/rebase 覆盖既有工作。
 - 实施者只改产品、必要测试、窄 package scripts 及本人 `attempts/M05-sol-xhigh.md`。不修改 root 的设计/state/HANDOFF，不写 LF39 工程，不操作用户预览/profile/凭据/真实模型或数据库。
 
 ## 任务清单与交付顺序

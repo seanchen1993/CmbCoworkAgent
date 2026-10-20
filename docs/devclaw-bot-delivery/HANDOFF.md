@@ -6,6 +6,8 @@
 
 M05-02/03候选3af3c2e9已由root独立复验并正常合入cbfa8239；产品与候选一致。核心27文件375项、视图/shared32文件231项（有重叠）、Node/Web、隔离完整build、真实App12次localhost模型文件/修改/完成继续/主工作并发/目标资源隔离、45项目录UI通过，日志`/tmp/m05-root-local-*.log`。最后审查收紧sendWork：仅当前直接用户指令可转达，notification/schedule/peer reply不产生新工作指令。已读最终明暗主题与文件预览，旧专家并列入口尚待05移除；当前只是本地切片通过，不是整个M05完成。下一步同一sol/xhigh按设计第11节实施M05-04模拟渠道，随后05清理/升级/完整回归。
 
+2026-10-20 续接：同一写者保存 M05-04 WIP `5dad1a2f`（非冻结候选、未合入），模拟 Store/Host/来源/Runtime 策略与 IPC/preload 已接线；实施者报告24项检查与Node类型通过，UI/实际App仍在做。root 已早审引用回原工作、离线投递竞态、显式 prompt/hook 策略，并要求外部 work 也纳入 owner 未读汇总。新设计第12节已在 `706942c1` 固定后续清理与只读历史出口。不得因 WIP 自测通过称04或整体完成。
+
 实际网关 `/Users/heyirui/Downloads/LF39_devclaw_im_gateway_0821`，HEAD e744c6d7，原有 Dockerfile/README.md/pom.xml 修改不动。已只读核对身份/WSS/permit/ACK/outbox，现 ingress 明确忽略群消息。当前只实现开发 mock 边界与真实 App 本地闭环，不写网关、不宣称真实招乎已打通。
 
 integration 产品起点 b479d51d，现已含上述本地切片；实施树仍为 beta-merge-review/agent-channel-integration-research-7ff0d6，分支 codex/beta-local-unification-m05。用户预览尚未升级，所有旧 PID/端口只是历史，更新前实际重查。Java/DB 构建本轮无需启动，scheduler 保持 PAUSED，不 push/deploy、不读写用户凭据。下方均为历史检查点，不据其恢复旧服务方案。

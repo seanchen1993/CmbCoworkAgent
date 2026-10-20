@@ -38,6 +38,10 @@ root 已完整阅读原实施者 `edbcc351` 检查点（十五项 beta 能力保
 - 最终明/暗主题与文件预览已目视，新增区域沿用beta tokens。完整窄窗/迁移旧数据/真实模型演示与旧默认worker移除仍待M05-05；不得用当前截图中尚存旧Service入口宣称UI全部统一。
 - 测试自有Electron、localhost provider及临时profile均退出/回收；Java/MySQL未启动、用户预览未升级。M05-04已放行，同一写者继续mock，M06真实后端仍延后。
 
+### M05-04 实施中（2026-10-20，未验收）
+
+`5dad1a2f` 为保全 WIP，产品继续写入，尚未 freeze。实施者报告 `/tmp/m05-mock-store-wip.log` 24/24、`/tmp/m05-mock-node-wip.log` exit0；不等于 root 独立验收，也不含模拟弹窗/实际App闭环。root 已审早期来源、引用和投递策略，继续检查 owner 未读汇总及 Runtime/hook 默认行为保留。真实后端与用户预览未改。
+
 ### 实施中检查点（尚未验收）
 
 原实施者保存 WIP `358eaf689`，30 文件含 8 新文件，并继续实施；不是冻结候选，不集成。实施者报告核心/IPC/Runtime 25 文件、346/346 检查通过（`/tmp/m05-work-read-tests.log`），Node/Web 类型通过（`/tmp/m05-node-read-scope.log`、`/tmp/m05-web-read-scope.log`）。包括主/工作精确已读和批量确认的迟到版本边界。root 已做来源/目标/并发/后台边界早审，但尚未对该检查点独立复验或实际 App 验收。动态 workflow/coordinator 完成门禁、真实 UI、mock 与旧路径清理仍在后续工作中。
