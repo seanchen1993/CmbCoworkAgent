@@ -1,4 +1,6 @@
-# 2026-10-20 当前：M05-06 本机对话关联实施
+# 2026-10-20 当前：M05-06 已交付预览，等待 UI 反馈
+
+候选 `dd12f43fa588f3ad2e53647842fabfa51af1698a` 已冻结在原实施分支，root 113项、Node/Web、源码及原生同profile UI检查通过。预览PID91596/supervisor91586，exec session88579；原两任务、历史、目录和DeepSeek配置保留，已停在读书会任务右侧入口。备份 `m05-pre-conversation-link-82a36a9bac`；升级证明在原profile的`conversation-link-upgrade.json`。6.1-sol/xhigh已停写。用户解锁后检查完成；无真实模型调用。见`reviews/M05-local-conversation-link-acceptance.md`。M05-04/05仍暂停，实施分支含未验收WIP，未整分支合并或push。
 
 用户批准任务可以由本机、项目或未来云端会话承载，先关联本机「对话模式」。root 已记录 `reviews/M05-local-conversation-link-design.md` 与任务清单 M05-06；原 `/root/service_conversation_sol`（6.1-sol/xhigh）仍唯一产品写者，实施树起点 clean852fc3e4。目标同一 Thread 双入口、保留历史/目录/执行设置、显式接纳已有普通会话及未来类型边界，不再复制一套对话。
 
