@@ -1,3 +1,11 @@
+# 2026-10-20 用户先看 UI：实施与功能验证已暂停
+
+用户明确“稍等，先别验证功能了，我先看下现在的ui交互”。原sol/xhigh已停止并保存clean WIP `a33259483`；不是冻结候选，不合入、不继续05或测试，等待用户界面反馈。其所有测试App/provider均已finally退出。完整mock旅程仍有工作修改结果显示超时，Node最后一轮新增测试字段已补但未重跑，不能标通过。
+
+root已用现有08:51 out打开独立UI预览，未再构建/跑功能验证。工作树beta-merge-review；profile `/Users/heyirui/.devclaw-bot-b00/runtime/m05-ui-preview-whpkhytt`，App PID69107，launcher exec session93274，脚本 `/tmp/m05-open-ui-preview.cjs`，位置记录 `/tmp/m05-ui-preview-location.json`。复制原预览本地DB、模型/设置用于界面查看，原窗口/数据未改；main和Bot库使用SQLite backup，thread文件只作本地UI副本（readonly backup曾失败，不宣称迁移验收）。不启动Java/网关或模型夹具。用户手动查看Bots右侧独立工作和更多菜单的模拟IM入口；旧服务入口仍未清理，整体尚未完成。
+
+保持该UI窗口供用户看；未来接续先重查实际进程/分支，不用历史PID直接关闭。当前原预览supervisor44758/App45144/Java45067仍在，另一原beta App45310也保留；未接管或停用。下方M05实施计划保持，但以本段用户暂停为准。
+
 # 2026-10-19 M05 已授权：beta 全能力保留、本地体系、右侧独立任务
 
 最新用户决定覆盖下方 M04 与更早架构：独立任务放 beta 右侧；新建 Bot 与专家统一 UI 和本地 Runtime；beta 所有现有功能保留，只做扩展。业务数据本地权威。后端可以先 mock，真实 Java 接入/精简及合入 IM 工程延后，不阻塞本地 MVP。
