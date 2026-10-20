@@ -1,3 +1,17 @@
+# 2026-10-20 模型修复已验收：预览可继续使用 DeepSeek
+
+窄修复852fc3e4已完成，sol停写/树clean；root独立17项、源码审查，以及原生App同profile重启后一次真实DeepSeek短回复通过。此前预览漏带凭据＋pinned静默回退导致选择看似不保持；现已恢复cheap对应既有凭据并拒绝显式模型无配置/凭据时换供应商。UI模型选择重启保留，示例通知已返回正文/右侧已回复，未确认完成业务任务。详见 `reviews/M05-model-selection-fix.md`。
+
+当前预览App77657/supervisor77648/session73160，profile仍m05-ui-preview-whpkhytt，使用新 `/tmp/m05-open-connected-preview.cjs`（无失效代理、原数据保留）。根默认和专家绑定均custom:cheap；原~/.cmbcoworkagent未改、无凭据输出。PID以实际核对为准。完整功能验证/IM/Java仍暂停；窄修复通过不等于04通过，不合入整条WIP、不push/deploy/恢复定时。等用户下一步。
+
+# 2026-10-20 当前：仅修复模型连接和手动模型选择
+
+用户要求排查示例独立任务 fetch failed，复用现有 deepseek-v4 配置，并解释手动选择不能保持。此授权仅恢复模型问题的最小修复和必要验证，M05-04/05 全功能验证仍暂停。root 管配置/预览与验收，原 sol/xhigh 负责窄产品改动。
+
+已确认：新预览 m05-ui-preview-whpkhytt 只复制模型参数，遗漏 .env 的 DeepSeek 凭据；Bot SQLite model_ref 仍为 custom:cheap，但日志显示 pinned routing 将请求静默回退到 builtin MiniMax。原全局与旧预览的对应凭据一致且存在。root 已仅将 cheap 对应凭据恢复到当前预览 .env（0600，无秘密输出，源不改）；尚需重开同 profile 清除内存配置缓存。启动器另留有旧 UI 预览的失效代理配置，应在本次模型可用预览中移除；不把它未经验证地认作 DeepSeek 请求失败根因。
+
+批准 sol 最小修复：明确指定的 pinned 模型缺配置或凭据时给出可操作错误，不静默切换；standard routing 不吞此专用错误；auto/未指定行为不变。当前预览专家和示例通过原 beta UI 创建并保存在本地：需求交付专家、示例｜周末读书会通知。示例任务已停止，模型尚无成功回复，主/任务切换实际可见。配置和示例收据在 profile 的 expert-setup.json / example-work-ui.json。运行PID需重查，不依据下面历史PID操作。
+
 # 2026-10-20 最新指令：先完成 UI 融合，功能验证仍暂停
 
 UI 切片已保存 `a81b5f4550d091deaf023264c8ed78b5798076e9`，实施树clean，sol停写。root读完五个renderer文件改动；Node/Web编译与隔离build由实施者完成exit0，未做任何功能验证。原生CUA已显示并置前统一Bots界面：旧专家专区消失，右侧独立任务、职责/资料/电脑/例行/最近活动保留。旧设置入口源码已移除；旧数据未删除，旧主进程接线按本轮限定保留。
