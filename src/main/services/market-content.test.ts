@@ -4,7 +4,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync
 } from "node:fs"
@@ -79,6 +81,63 @@ describe("market content storage and runtime", () => {
     expect(isMarketProtectionComplete(root)).toBe(true)
     expect(readContentFileSync(join(root, "SKILL.md"), "utf8")).toBe("encoded")
     expect(readFileSync(join(root, "notes.txt"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
+  })
+
+  it("preserves packed Git metadata and read-only indexes in newly protected bundles", () => {
+    const root = fixture()
+    const repo = join(root, "sys")
+    mkdirSync(repo)
+    const git = (...args: string[]): string =>
+      execFileSync("git", ["-C", repo, "-c", "core.hooksPath=", ...args], {
+        encoding: "utf8"
+      })
+    git("init", "--quiet")
+    git("config", "user.name", "Market regression")
+    git("config", "user.email", "market-test@example.invalid")
+    git("config", "core.autocrlf", "false")
+    writeFileSync(join(repo, "script.cjs"), "console.log('market-script')\n")
+    git("add", "script.cjs")
+    git("commit", "--quiet", "-m", "fixture")
+    git("gc", "--prune=now", "--quiet")
+    const gitRoot = join(repo, ".git")
+    const metadata = new Map<string, Buffer>()
+    const snapshot = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const file = join(dir, entry.name)
+        if (entry.isDirectory()) snapshot(file)
+        else if (entry.isFile()) metadata.set(file, readFileSync(file))
+      }
+    }
+    snapshot(gitRoot)
+    const index = [...metadata.keys()].find((file) => file.endsWith(".idx"))!
+    expect(index).toBeTruthy()
+    expect(statSync(index).mode & 0o200).toBe(0)
+    const head = git("rev-parse", "HEAD")
+    protectMarketDirectory(root)
+    for (const [file, bytes] of metadata) expect(readFileSync(file).equals(bytes)).toBe(true)
+    expect(statSync(index).mode & 0o200).toBe(0)
+    expect(git("rev-parse", "HEAD")).toBe(head)
+    git("fsck", "--full")
+    expect(readFileSync(join(repo, "script.cjs"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
+    const runtime = materializeMarketRuntimeRoot(root)
+    expect(
+      execFileSync("git", ["-C", join(runtime, "sys"), "rev-parse", "HEAD"], { encoding: "utf8" })
+    ).toBe(head)
+  })
+
+  it("leaves gitdir pointer files unchanged in new bundles", () => {
+    const root = fixture()
+    const repo = join(root, "sys")
+    mkdirSync(repo)
+    const pointer = "gitdir: ../other-repository/.git/worktrees/sys\n"
+    writeFileSync(join(repo, ".git"), pointer)
+    writeFileSync(join(repo, "SKILL.md"), "private instructions")
+    protectMarketDirectory(root)
+    expect(readFileSync(join(repo, ".git"), "utf8")).toBe(pointer)
+    expect(readFileSync(join(repo, "SKILL.md"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
+    expect(readFileSync(join(materializeMarketRuntimeRoot(root), "sys", ".git"), "utf8")).toBe(
+      pointer
+    )
   })
 
   it("encodes every asset once and preserves nested skill discovery and decoded runtime reads", async () => {

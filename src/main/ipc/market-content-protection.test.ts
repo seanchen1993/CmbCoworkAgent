@@ -132,18 +132,16 @@ describe("market content IPC regression", () => {
       (await invoke("skills:write", { skillPath: skill.path, content: md + "\nedit" })).success
     ).toBe(true)
     expect((await invoke("skills:exportForMarket", skill.path)).success).toBe(true)
-    // Migration evidence must not accidentally lock a newly uploaded original.
-    expect((await invoke("skills:protectMarketInstalls", [skill.name])).success).toBe(true)
-    expect((await invoke("skills:read", skill.path)).success).toBe(true)
   })
 
-  it("encodes legacy market skills based on installation evidence", async () => {
+  it("keeps installed legacy skills unchanged when reading the catalog", async () => {
     const root = join(storage.getCustomSkillsDir(), "legacy-market")
     mkdirSync(root)
     writeFileSync(join(root, "SKILL.md"), original("legacy-market"))
-    expect((await invoke("skills:protectMarketInstalls", ["legacy-market"])).success).toBe(true)
-    expect(readFileSync(join(root, "SKILL.md"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
-    expect((await invoke("skills:read", join(root, "SKILL.md"))).success).toBe(false)
+    const content = readFileSync(join(root, "SKILL.md"))
+    await skills.listAllSkills()
+    expect(readFileSync(join(root, "SKILL.md"))).toEqual(content)
+    expect(handlers.has("skills:protectMarketInstalls")).toBe(false)
   })
 
   it("protects the complete plugin while preserving runtime components and local plugin editing", async () => {
@@ -168,6 +166,8 @@ describe("market content IPC regression", () => {
       )
     )
     zip.addFile("run.cjs", Buffer.from("console.log('working')"))
+    zip.addFile(".git/config", Buffer.from("[core]\nrepositoryformatversion = 0\n"))
+    zip.addFile("sys/.git", Buffer.from("gitdir: ../.git/modules/sys\n"))
     const installed = await invoke("plugins:install", {
       buffer: bytes(zip.toBuffer()),
       fileName: "plugin.zip",
@@ -177,6 +177,12 @@ describe("market content IPC regression", () => {
     let plugin = storage.getPlugins().find((item) => item.name === "market-plugin")!
     expect(readFileSync(join(plugin.path, "plugin.json"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
     expect(readFileSync(join(plugin.path, "run.cjs"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
+    expect(readFileSync(join(plugin.path, ".git", "config"), "utf8")).toBe(
+      "[core]\nrepositoryformatversion = 0\n"
+    )
+    expect(readFileSync(join(plugin.path, "sys", ".git"), "utf8")).toBe(
+      "gitdir: ../.git/modules/sys\n"
+    )
     const detail = await invoke("plugins:getDetail", plugin.id)
     expect(detail.skills).toContain("plugin-action")
     expect(detail.hookCount).toBe(1)
@@ -414,4 +420,84 @@ describe("market content IPC regression", () => {
       renameSync(backup, custom)
     }
   })
+
+  it("registers downstream IPC without migrating legacy or partially protected plugins", async () => {
+    const snapshots = new Map<string, Buffer>()
+    const record = (file: string, content: Buffer | string): void => {
+      writeFileSync(file, content)
+      snapshots.set(file, readFileSync(file))
+    }
+    const roots: string[] = []
+    for (const name of ["legacy-plain", "legacy-partial", "legacy-failing", "legacy-unknown"]) {
+      const root = join(storage.getPluginsDir(), name)
+      roots.push(root)
+      mkdirSync(join(root, "sys", ".git", "objects", "pack"), { recursive: true })
+      record(join(root, "plugin.json"), JSON.stringify({ name }))
+      record(join(root, "SKILL.md"), original(name))
+      record(join(root, "sys", ".git", "objects", "pack", "fixture.idx"), "git metadata")
+      if (name === "legacy-partial") {
+        record(
+          join(root, "SKILL.md"),
+          MARKET_CONTENT_PREFIX + Buffer.from(original(name)).toString("base64")
+        )
+        record(join(root, ".cmb-market-content.json"), '{"version":1,"complete":false}')
+        record(
+          join(root, "sys", ".git", "objects", "pack", "fixture.idx"),
+          MARKET_CONTENT_PREFIX + Buffer.from("git metadata").toString("base64")
+        )
+      } else if (name === "legacy-failing") {
+        // The old startup migration throws when trying to overwrite this path.
+        mkdirSync(join(root, ".cmb-market-content.json"))
+      }
+      storage.upsertPlugin({
+        id: name,
+        name,
+        version: "1.0.0",
+        description: "",
+        author: "",
+        path: root,
+        enabled: true,
+        skillCount: 1,
+        mcpServerCount: 0,
+        ...(name === "legacy-unknown" ? {} : { origin: "market" as const }),
+        createdAt: "",
+        updatedAt: ""
+      })
+    }
+    const channels = new Map<string, (...args: unknown[]) => unknown>()
+    const ipc = {
+      handle: (channel: string, handler: (...args: unknown[]) => unknown) =>
+        channels.set(channel, handler),
+      on: vi.fn()
+    }
+    const { registerPluginHandlers } = await import("./plugins")
+    const { registerPluginFileHandlers } = await import("./plugin-files")
+    const { registerSandboxHandlers } = await import("./sandbox")
+    const { registerHooksHandlers } = await import("./hooks")
+    const { registerRoutingHandlers } = await import("./routing")
+    const { registerNotificationHandlers } = await import("./notifications")
+    const { registerLspHandlers } = await import("./lsp")
+    registerPluginHandlers(ipc as never)
+    registerPluginFileHandlers(ipc as never)
+    registerSandboxHandlers(ipc as never)
+    registerHooksHandlers(ipc as never)
+    registerRoutingHandlers(ipc as never)
+    registerNotificationHandlers(ipc as never)
+    registerLspHandlers(ipc as never)
+    for (const channel of [
+      "plugins:list",
+      "plugins:listFiles",
+      "sandbox:getMode",
+      "hooks:list",
+      "routing:getMode",
+      "appNotifications:list",
+      "lsp:getConfig"
+    ]) {
+      expect(channels.has(channel), channel).toBe(true)
+    }
+    storage.setPluginOriginsBatch([{ id: "legacy-unknown", origin: "market" }])
+    for (const [file, content] of snapshots) expect(readFileSync(file).equals(content)).toBe(true)
+    expect(existsSync(join(roots[0], ".cmb-market-content.json"))).toBe(false)
+    expect(existsSync(join(roots[3], ".cmb-market-content.json"))).toBe(false)
+  }, 60_000)
 })

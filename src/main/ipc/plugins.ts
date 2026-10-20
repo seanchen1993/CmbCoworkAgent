@@ -15,7 +15,6 @@ import { existsSync, mkdirSync, rmSync } from "fs"
 import { v4 as uuid } from "uuid"
 import {
   getPluginsDir,
-  protectLegacyMarketPluginContent,
   getPlugins,
   getPluginHooks,
   getEnabledPluginHookMetadata,
@@ -680,7 +679,6 @@ export async function exportPluginForMarketZip(
 }
 
 export function registerPluginHandlers(ipcMain: IpcMain): void {
-  protectLegacyMarketPluginContent()
   console.log("[Plugins] Registering plugin handlers...")
   const pluginMutex = createAsyncMutex()
 

@@ -87,13 +87,21 @@ export function getMarketContentStoredLimit(filePath: string, maxBytes: number):
   return findProtectedMarketRoot(filePath) ? Math.ceil(maxBytes / 3) * 4 + prefix.length : maxBytes
 }
 
-function walkFiles(root: string, visit: (filePath: string) => void): void {
+function walkFiles(
+  root: string,
+  visit: (filePath: string) => void,
+  includeGitMetadata = false,
+  visitDirectory?: (directory: string) => void
+): void {
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (entry.name === MARKET_CONTENT_MARKER) continue
+    if (!includeGitMetadata && entry.name.toLowerCase() === ".git") continue
     const target = join(root, entry.name)
     if (entry.isSymbolicLink()) throw new Error("市场资源不能包含符号链接")
-    if (entry.isDirectory()) walkFiles(target, visit)
-    else if (entry.isFile()) visit(target)
+    if (entry.isDirectory()) {
+      visitDirectory?.(target)
+      walkFiles(target, visit, includeGitMetadata, visitDirectory)
+    } else if (entry.isFile()) visit(target)
   }
 }
 
@@ -172,11 +180,18 @@ export function materializeMarketRuntimeRoot(root: string): string {
   runtimeRoot ??= mkdtempSync(join(tmpdir(), "cmb-market-runtime-"))
   const targetRoot = mkdtempSync(join(runtimeRoot, "resource-"))
   try {
-    walkFiles(root, (filePath) => {
-      const target = join(targetRoot, relative(root, filePath))
-      mkdirSync(dirname(target), { recursive: true })
-      writeFileSync(target, readContentFileSync(filePath), { mode: lstatSync(filePath).mode })
-    })
+    // Preserve embedded repositories for script execution without encoding Git
+    // metadata in the installed directory.
+    walkFiles(
+      root,
+      (filePath) => {
+        const target = join(targetRoot, relative(root, filePath))
+        mkdirSync(dirname(target), { recursive: true })
+        writeFileSync(target, readContentFileSync(filePath), { mode: lstatSync(filePath).mode })
+      },
+      true,
+      (directory) => mkdirSync(join(targetRoot, relative(root, directory)), { recursive: true })
+    )
     writeFileSync(
       join(targetRoot, MARKET_CONTENT_MARKER),
       JSON.stringify({ version: 1, runtime: true })
