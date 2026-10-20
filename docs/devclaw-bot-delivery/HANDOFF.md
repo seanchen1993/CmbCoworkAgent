@@ -1,4 +1,12 @@
-# 2026-10-20 当前：恢复渠道模拟与旧代码清理
+# 2026-10-20 当前：渠道模拟与旧代码清理已交付
+
+最终实施候选 `bbe06f47862894550d50c7a4b62dbfe741cc23cf`，正常合入 `codex/devclaw-bot-integration` 为 `301a99a7a4e677deaa8684dc964d024f40bc502f`。root 独立回归、三视角审查和定向修复复验通过，原 6.1-sol/xhigh 唯一实施者已停写。验收详见 `reviews/M05-channel-cleanup-acceptance.md`，任务单 M05-04/05 accepted_merged；下方暂停/实施状态仅为历史。
+
+当前同 profile 预览 PID7094 / supervisor7084 / exec session10025，路径 `/Users/heyirui/.devclaw-bot-b00/runtime/m05-ui-preview-whpkhytt`；更新前完整备份 `m05-pre-channel-cleanup-c1d7637b48`，原 out 保存于 `/tmp/m05-before-channel-cleanup-out-c1d7637b48`。88个 profile 文件备份逐一校验；重开后原2 Bot、2 Work、12 Task、4相关Thread、37消息及模型/凭据配置哈希一致，证明文件 `channel-cleanup-upgrade.json`。原生界面已核对本机对话返回 Bot、右侧两任务、历史/目录/DeepSeek，以及“更多 Bot 操作 → 模拟 IM 接入”。当前停在模拟入口，未建绑定或调用真实模型。
+
+已取消旧专家数据迁移、历史查看和导出，不主动删除旧表/profile/Java数据。旧 App UI/API/启动退出/默认 input-only 接线已拆；1251个 App 可达模块中旧服务为0，beta/requirements/生产IM保留。真实 LF39/Java/IM、项目/云端会话适配延期。当前授权工作完成，等待用户反馈或新范围；不 push/deploy，不恢复定时，不自动追加模型测试。操作任何预览前仍需核对实际进程，不能仅凭本文 PID。
+
+# 历史：2026-10-20 恢复渠道模拟与旧代码清理
 
 ## 2026-10-20 当前授权：恢复 M05-04 渠道模拟与 M05-05 清理
 

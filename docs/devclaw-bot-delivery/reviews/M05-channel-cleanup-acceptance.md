@@ -1,6 +1,6 @@
 # M05-04/05 渠道模拟与旧链路清理验收
 
-状态：2026-10-20 最终候选 `bbe06f47862894550d50c7a4b62dbfe741cc23cf` 已由 root 验收，正在正常集成与同 profile 预览更新。渠道主路径、撤销后失回执出口、默认旧链路清理及审查返工均通过。用户明确“不用管旧专家的数据”，取消历史查看、导出和迁移。起点为实施分支 `dd12f43f`，保留已验收的本机对话关联。root 设计与验收，原 6.1-sol/xhigh 唯一产品写者。本文记录此次证据，不覆盖以前的验收历史。
+状态：2026-10-20 最终候选 `bbe06f47862894550d50c7a4b62dbfe741cc23cf` 已由 root 验收，正常合入 integration 为 `301a99a7a4e677deaa8684dc964d024f40bc502f`，同 profile 预览已更新。渠道主路径、撤销后失回执出口、默认旧链路清理及审查返工均通过。用户明确“不用管旧专家的数据”，取消历史查看、导出和迁移。起点为实施分支 `dd12f43f`，保留已验收的本机对话关联。root 设计与验收，原 6.1-sol/xhigh 唯一产品写者。本文记录此次证据，不覆盖以前的验收历史。
 
 ## 范围
 
@@ -32,8 +32,8 @@
 - [x] M05-05 拆线、冗余 UI/API 删除、无旧 worker/默认引擎启动证据。
 - [x] 普通 Bot 和本机对话关联回归；旧数据专项验证已按用户要求取消。
 - [x] 受影响 beta、生产 IM V1、Runtime/hook、Node/Web 类型与隔离构建；最终窄修另补影响范围检查。
-- [ ] 简化审查、候选冻结、root 独立复验和正常集成。
-- [ ] 备份后更新用户同 profile 预览，核对原任务、消息、目录及模型配置。
+- [x] 简化审查、候选冻结、root 独立复验和正常集成。
+- [x] 备份后更新用户同 profile 预览，核对原任务、消息、目录及模型配置。
 
 ## 1caeee24 候选独立复验与审查返工
 
@@ -53,3 +53,10 @@
 - 窄复核另发现保留内部协议串被通用历史过滤，最终 `bbe06f47` 复用既有过滤判定明确拒收，普通 /goal 和 coordinator 前缀继续接纳。主进程与弹窗共享纯校验：新消息先验证再保存 pending；原 pending 不凭错误字符串清除。root 两文件13项和默认依赖断链均通过，报告 `/var/folders/kq/m0q4z3m91tx9fpfbf501hfrr0000gn/T/m05-root-text-final-43nkrvdp/report.json`；最终1251个可达模块，旧服务0，正常 Bot/requirements/IM 保留。
 - 实施者最终实际弹窗 `/tmp/m05-05-shared-validation-dialog.log` exit0：171条连续分页及 lost-ack/撤销/结束核对/重挂保持，保留标记与附件/技能四类无效输入均无 inject/pending，仍可编辑后正常发送。最终 Node/Web 与正常 main/preload/renderer 隔离构建通过；没有再重复7/12次模型旅程。
 - 最终构建 `/tmp/m05-05-controls-out-6f0cuab0`，证明 `/tmp/m05-05-shared-validation-build-proof.json`；application SHA256 `b6306a4aad47714c586cc1c454735ef99239a62d7b01a8464c19ed8eeeb6f786`，无测试入口。前面的623、96、69、13等存在重叠，不相加宣传总量。
+
+## 集成与原预览升级
+
+- 正常 merge 无冲突；集成树产品、测试、package、deploy 与最终候选完全一致，历史24项任务语义 SHA256 仍为 `3c8227cc9edc329a1da12d3ff762fe0cd626a8d549ec21a251f63a23be5a948b`。未 push。
+- 原 App91596 空闲且无输入，原生正常退出后再备份；完整 profile `/Users/heyirui/.devclaw-bot-b00/runtime/m05-pre-channel-cleanup-c1d7637b48`，88文件逐一哈希一致，旧构建 `/tmp/m05-before-channel-cleanup-out-c1d7637b48`。关闭后只读 SQLite 缺少 WAL 时采用确认进程退出且无 WAL 的 immutable 读，未修改原库；运行中核对使用普通只读连接。
+- 同 profile 新预览 PID7094 / supervisor7084 / session10025。升级后原2个 Bot、2个 Work、12个 Task、4个相关 Thread、37条消息、模型/凭据和记忆设置哈希一致，原任务仍 active，没有代用户完成或继续。证明：`/Users/heyirui/.devclaw-bot-b00/runtime/m05-ui-preview-whpkhytt/channel-cleanup-upgrade.json`。
+- 原生检查显示原读书会修改历史、DeepSeek 选择及原工作目录；本机对话返回同一 Bot 任务，右侧两任务可见，“更多 Bot 操作 → 模拟 IM 接入”弹窗正常打开。未新增绑定或调用真实模型。此轮真实 IM/LF39/Java 仍未接通，后续独立实施。

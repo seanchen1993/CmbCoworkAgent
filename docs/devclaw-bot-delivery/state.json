@@ -3,7 +3,29 @@
   "updated_on": "2026-10-20",
   "project": "DevClaw Bot",
   "phase": "M05_BETA_LOCAL_UNIFICATION",
-  "status": "implementing",
+  "status": "accepted_scoped_delivery",
+  "channel_cleanup": {
+    "status": "accepted_merged_preview_running",
+    "candidate_commit": "bbe06f47862894550d50c7a4b62dbfe741cc23cf",
+    "merge_commit": "301a99a7a4e677deaa8684dc964d024f40bc502f",
+    "acceptance": "reviews/M05-channel-cleanup-acceptance.md",
+    "scope": "M05-04 local personal/group mock ingress and M05-05 legacy App cleanup; M05-06 shared local conversation preserved",
+    "legacy_data": "Cancelled by user; no migration, history viewer, export or deletion",
+    "preview_profile": "/Users/heyirui/.devclaw-bot-b00/runtime/m05-ui-preview-whpkhytt",
+    "preview_pid": 7094,
+    "preview_supervisor": 7084,
+    "preview_session": 10025,
+    "backup": "/Users/heyirui/.devclaw-bot-b00/runtime/m05-pre-channel-cleanup-c1d7637b48",
+    "upgrade_proof": "/Users/heyirui/.devclaw-bot-b00/runtime/m05-ui-preview-whpkhytt/channel-cleanup-upgrade.json",
+    "preview_verified": "Same 2 bots, 2 works, 12 tasks, 4 bot threads, 37 messages and model/credential config hashes; native linked-chat to Bot navigation and mock dialog visible; no real model invoked",
+    "checks": "Root 623 regression tests, 19 IM V1 scripts and 8 desktop/dependency scripts; subsequent 96 recovery, 69 control plus 4 scripts, 13 final text checks; counts overlap. Actual isolated App 12-call main journey, 7-call narrow controls, 171-row dialog; Node/Web and normal build passed",
+    "deferred": [
+      "Real IM/LF39 integration and platform authorization/delivery",
+      "Project/cloud conversation adapters",
+      "Mock channel file/tool access beyond text and same-audience work tools"
+    ],
+    "pushed": false
+  },
   "local_conversation_link": {
     "status": "accepted_scoped_preview",
     "candidate_commit": "dd12f43fa588f3ad2e53647842fabfa51af1698a",
@@ -18,7 +40,7 @@
     "limitations": [
       "Project/cloud references reserved; only local adapter implemented",
       "Managed Goal/Mods require explicit unlink",
-      "M05-04/05 broad validation and full branch merge remain pending"
+      "M05-04/05 accepted and merged; current preview is recorded in channel_cleanup"
     ],
     "pushed": false
   },
@@ -231,8 +253,8 @@
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
     "code_baseline": "4d778d28972eb9a60fe792bd0a9c5450f4c5f0ee",
-    "last_accepted_commit": "5beb5c604779593a6d818a2ac30c0cd2316c3d49",
-    "last_accepted_task": "M03-delivery-review"
+    "last_accepted_commit": "301a99a7a4e677deaa8684dc964d024f40bc502f",
+    "last_accepted_task": "M05-04/05 with M05-06 local conversation linkage"
   },
   "authorization": {
   "approved_work": [
@@ -291,15 +313,15 @@
     "spawn_descendants": false,
     "complex_effort": "xhigh",
     "simple_effort": "high",
-    "active": true,
-    "status": "M05_04_05_resumed",
-    "candidate_commit": "dd12f43fa588f3ad2e53647842fabfa51af1698a",
+    "active": false,
+    "status": "M05_04_05_accepted_stopped",
+    "candidate_commit": "bbe06f47862894550d50c7a4b62dbfe741cc23cf",
     "agent": "/root/service_conversation_sol",
     "worktree": "/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6",
     "branch": "codex/beta-local-unification-m05",
     "preserved_wip_commit": "9e83c3048",
-    "worktree_checkpoint": "dd12f43fa588f3ad2e53647842fabfa51af1698a",
-    "worktree_checkpoint_status": "Clean dd12f43f with accepted M05-06 and unaccepted M05-04 WIP; same sole writer resumes mock channel then legacy cleanup",
+    "worktree_checkpoint": "bbe06f47862894550d50c7a4b62dbfe741cc23cf",
+    "worktree_checkpoint_status": "Clean accepted candidate; sole writer stopped. Root merged and updated the existing preview.",
     "interface_checkpoint": "edbcc351684f9c794185c30f0c3e4e407711f09c",
     "design_checkpoint": "9675f8b43a83f2b060c22e22cee82bb65a37b9f0"
   },
@@ -928,7 +950,7 @@
     ,
     {"id":"R01-A8","status":"accepted","spec":"tasks/R01-A8.md","attempt_id":"R01-A8-root","report":"attempts/R01-A8-root.md","java_report":"attempts/R01-A8-java.md","worktree":"/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork","baseline":"2f914995","implementation_strategy":"root App and same gpt-6.1-sol/high a6_java_execution Java, disjoint file scopes; Java builder/DB exclusive until frozen","java_agent_id":"/root/a6_java_execution","dispatch_status":"sent_same_original_high","live_commands":[],"prior_tasks_count":15,"prior_tasks_sha256":"0fbb35328b09820b694e8de9032af0f7c0fffc956c13f5b8b5268b3ea96b643f","started_at_utc":"2026-10-12T11:44:36Z","model":"simulated only","next":"A8 local simulated-model memory milestone complete; wait for human next scope. No automatic extraction/crossGroup learning/vector/real model or Zhaohu/cloud/intranet/deploy/push/timer.","verification":{"baseline_app":"b8b32f exit0 71 baseline affected App/Thread/actual graph/partner tests after first private DTO changes","memory_unit":"32a279 exit0 33=old16 executor+new17 memory/Controller/actual zero-tool graph; no real model","first_tsc":"39735/818520 exit2 memoryPolicy inference; fixed explicit callback return type, 96333 rerun in progress","rootBuild":"97365/1c6fbe exit0 genuine49main/23test JDK8,67JUnit,1884parity0/audit class52/libs34; jar d7c4e1ca3a1b10d3730c2a4ee8663cd2cde30b1a8bacabee77bcab55f4a70055","rootUnits":"6992/1e20cd exit0 App92; service336e1a57; F03dc2fc424; IPC30804/e1cec610; browser72854/da3860; main+affectedTest91082/8c3f1f0","rootMemoryFailure":"18056/02a178 exit1 command-cas GROUP_MEMORY_BOUNDARY; owned5985f0/c60a1823/33059/Java52277:55553 exactclean; A8-J1 samechild safe diagnostic only","rootTypes":"99843/a41c93 main0,9510/28f6c2web0; latest21789/9780a4web0; finalmain+test includes new validation0","rootActualMemoryJourney":"7155/3e2b73 exit0 realJava+MySQL57+AppWorker+SQLite+actualDeepAgent fake4/tools0, twoTasksReuse/inflightAbort/noAutoReplay/disabledEmpty/newSQLiteMemoryPersists/history; exact058813/b455/33060/Java52742:55997 removed original3samehealthy","rootAppBuild":"88061/8e1d60 exit0 main/preload/renderer build","rootBrowserFinal":"77988/0ab302 exit0 actualReactChromium fakeIPC errors0","rootLegacyPending":"99658/87897b33passed includes pendingA7disabled fingerprint unchanged","rootUnitsFinal":"31824/2b93ff exit0 93 App tests after pendingA7 compatibility;16019/c8aea3 main+allaffected-test0;service683aab58 includes durable13 safe classifier cases","rootCatalog":"53990/b82cf3 exit0 2realDB22tables/noFK/6migrations/history5preserved/timeouts1024/1025ms exactclean","rootEnvironmentIncident":"originalmysql693a1c3 OOM true exited at2026-10-12T14:26:44.796998112Z, discoveredb6d447; no data/volume deletion.4e3a32 volume-name precheck failed beforeaction; corrected actual dev-data label/owner check fa19a0 exactdockerstart only.780075 fullB00proof healthy same3IDs/mounts/volume/daemon; ephemeralmysqlport33063","rootJ1":"samehigh safeclassifierreviewed, independent4bb7db13casespassed/durable58suite; Javajar unchanged","rootJ2":"actual source8cd144/66ded9 read finiteV5window only; no productlease change; old70749 failed OUTCOME_UNKNOWN exactclean; finalApp16819/e9540e closed0","rootFinalBuild":"1526/128ea7 exit0 true23test recompiled after J2 qualification; main unchanged already root49compiled97365;67JUnit/1884parity0/sixmigration/class52/lib34 audit jar76e6447ea65bce27dd337f03c9002d76d47a3f0b028e40fd7b46a4484ca677a4","rootJ2CompilationFailure":"39428/d447d7 exit1 testCompile;89516/a27f7e exact Timestamp ambiguous sql/security; one line java.sql.Timestamp qualified, no productchange","rootMemoryFinal":"26816/791fea exit0 actualV5upgrade42/empty41; allscope/source/CAS/replay/rollback/unknowncommit/frozeninput/renew+settleterminalcapacity/disabled/expiredunknown/budget100/10/Unicode/realJavareopen/withdrawcurrentACL; exact9664/bb5b33065 anddd79/a22733066 removed,original3samehealthy","rootPersistent":"2831/7e3634 exit0 genuine Java+MySQL stoprestart identicalmemorylist/credentials/container/volume/owner;08d31e14/Java64373:53132 precise testproject removed original3samehealthy","rootOldPartnerFinal":"53288/10172f exit0 oldPartnerHTTP25 denials/auth4methods/poll8/clarification/start-renew-settle/result;96bf/454c5b/33069/Java65051:53157 exactremoved original3samehealthy","rootActualMemoryFinal":"91341/0459d8 finaljar76e6 exit0 actualJavaHTTP/MySQL57/AppWorker/SQLite/DeepAgent fake4/tools0 twoTasksReuse/changecancel/noautoreplay/disabledEmpty/freshSQLitekeepsmemory/history;fccc823c/9384ab0c/33070/Java65274:53248 exactremoved original3samehealthy"},"java":"samehigh quotaerrored confirmedstopped; rootserialJ2 one-line compile fix/independent review+build, no newwriter","latest_checkpoint":"Accepted f1067cc3 after independent source review/JDK8+MySQL/realcrosslayer+UI+all key regressions; all commands/resourcesclosed, original15records retained exactly. Historical failures preserved, no unknown writes replayed.","recovery":"2026-10-13T00:39Z humancontinue, usage ordinaryAllowed true 0/58%, advertisedtimepassed; samehigh quotaerrored interrupt confirmedstopped, pgrepjavaemptyc333ff, 17464unavailable outcomeunknown(notcountpass); allcodepreserved, rootserialindependentbuild next, no newagent/model/reset/credits","source_snapshot":{"files":58,"sha256":"ee5619243e45de216c01a63912a9203c0b19c529401b13d89ed569cd220ab0d5","jar_sha256":"76e6447ea65bce27dd337f03c9002d76d47a3f0b028e40fd7b46a4484ca677a4"},"accepted_code_commit":"f1067cc3b56312adbf1ebe620b1daaa779b64cef","accepted_at_utc":"2026-10-13T00:49:18Z","acceptance_review":"reviews/R01-A8-acceptance.md","open_review_items":[],"historical_unexplained_failures":["worker92097 GROUP_MEMORY_CHECK","root18056 GROUP_MEMORY_BOUNDARY; pre-J1 flags unavailable"],"terminal_audit":"a8013c Javaabsent;59f87a onlyoriginal3sameIDhealthy/3volumes/devnetwork/runtimeonlydev,0testcontainersnetworksvolumesdirs/defaultPartnernotcreated, originalmysql33063;2ff1e3 actualtimerPAUSED;0f633d58sourceee5619/76e6;58verifiedsourceslocalcommitf1067cc3 normalhooks notbypassed"}
   ],
-  "next_action": "Same service_conversation_sol xhigh closes mock lost-ack/revocation recovery, then removes obsolete App UI/IPC/preload/startup/shutdown/input-only wiring. No legacy expert data migration, history UI or export per latest user. Root independently reviews, tests and merges accepted candidate; updates existing preview after backup. Preserve beta and local conversation linkage. No real models/LF39 writes/push/deploy/timer.",
+  "next_action": "Current authorized M05-04/05 work is complete, merged and visible in the same preview. User may use Bot > more > simulated IM ingress. Await user feedback or next scope; real IM/LF39 and project/cloud adapters are deferred. No automatic model calls, push/deploy or timer changes.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
@@ -939,6 +961,6 @@
     "previous_interruption": "Originalworkeractualusage-limit error after3045checkpoint; resumedsameoriginalafteractualquota recovery. Nocredits/reset/account/modelchange.",
     "last_verified_limits": {"verified_at_utc":"2026-10-07T10:30:05Z","actual_error":"You have hit your usage limit; try again at4:29PM","advertised_timezone":"notreturned; previouslocalAsia/Shanghai inferred","ordinaryUsageAllowed":true,"primary_used_percent":2,"secondary_used_percent":16,"primary_resets_at_utc":"2026-10-07T15:29:46Z","secondary_resets_at_utc":"2026-10-14T03:29:55Z","agent_previous_status":"actualerrored; interruptconfirmedstopped","worker_head":"5e6d4b430cc47c1148a70ed5d7f615ab94aa11b2","worker_clean":"d92e47","next":"sameoriginalhigh sameA02 audit-only afteractualstop/resourcechecks; no credits/reset/account/modelchange/newwriter/automaticresume","policy":"Currentordinaryusageallowed andoldadvertisedtimepassed. Only recover SAME stoppedoriginalhigh, auditlost19326result first; fresh tests wait maindecision. No reset/purchase/modelaccountchange; automaticPAUSED."}
   },
-  "recovery_notes": "Latest authorization resumes M05-04/05 and necessary tests. Preserve accepted dd12f43f local conversation link and beta data/features. Root owns coordination docs/preview; sole sol/xhigh writer owns product/tests. Independent temporary build/profile/localhost fixture; no mutation of running preview/out or original credentials/data. Historical task objects preserved. Latest user removed legacy expert data work; cancel readonly history/export requirements from older design sections.",
+  "recovery_notes": "Latest user cancellation of legacy expert data work respected. No history/export/migration or old table/profile deletion. Beta and local conversation linkage preserved. Original sol/xhigh writer stopped; root completed review, normal merge and backed-up preview upgrade. Historical task objects unchanged.",
   "current_task_id": "M05-beta-local-unification"
 }

@@ -125,6 +125,8 @@ root 审实际 diff 与保留矩阵、独立运行关键本地 SQLite/Runtime/IP
 
 实施接点已审：独立 `simulation:true` DTO 不接受 thread/audience/owner/path/model，由绑定解析。可在既有可信 `RemoteTurnPolicy` 增加可选工具/技能/专家 allowlist 与 `disableHooks`，默认 undefined 保持 beta 行为；mock 实际工具执行同样拒绝未列名工具，不能仅从模型列表隐藏。全局 hook 在 Runtime 构造前的 SessionStart/UserPromptSubmit 也要使用本轮 disabled HookScope，后续工具/Stop 继承；不修改用户全局 hook 设置。渠道独立空 workspace 不带 feature/project/plugin，上下文禁个人记忆和 AGENTS。设备离线只影响模拟入口与队列，不阻塞本机 beta。桌面向外部工作追加时仍沿原受众，并明确会回复该模拟渠道。
 
+模拟输入的保留协议边界：普通 `/goal` 与 coordinator 前缀按原文字接纳；会被通用历史过滤的内部 workflow/turn-completion 标记明确拒收，不得先接纳后隐藏。弹窗与主进程共享纯校验，新消息在保存 pending 之前验证；已有 pending 始终保留原事件核对语义，不根据错误文本推断提交失败。
+
 ## 12. M05-05 清理与旧数据的验收出口
 
 **最新用户修正：不用管旧专家的数据。** 下列旧数据只读适配、历史查看/导出、职责迁移和旧数据副本专项验收取消，不创建相关 UI/API；旧记录不迁移、不重放，也不主动删除。此修正优先于本节及第8/10节历史约定。M05-05 只执行旧默认 App 运行接线与冗余 UI/API 清理，以及 beta/本机对话关联回归。
