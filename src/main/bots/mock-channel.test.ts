@@ -51,6 +51,26 @@ function finish(store: BotStore, id: string, text = "Actual answer") {
   store.settle(id, "completed", null, text)
 }
 describe("local simulated channels", () => {
+  it("inspects only exact persisted receipts after revocation or archive, without readmitting events", () => {
+    const f = fixture(),
+      a = f.binding(),
+      input = f.event(a.id)
+    const receipt = f.store.mock.inject(input)
+    f.store.mock.revoke(f.bot.id, a.id, a.grantVersion)
+    expect(f.store.mock.inject(input)).toEqual(receipt)
+    expect(() => f.store.mock.inject({ ...input, text: "Different" })).toThrow("不同内容")
+    expect(() => f.store.mock.inject({ ...input, messageId: "Different" })).toThrow("不同内容")
+    expect(() => f.store.mock.inject(f.event(a.id, "not-persisted"))).toThrow()
+    f.store.update({
+      ...f.store.getBot(f.bot.id),
+      expectedVersion: f.store.getBot(f.bot.id).version,
+      archived: true
+    })
+    expect(f.store.mock.inject(input)).toEqual(receipt)
+    expect(f.store.recentTasks()).toHaveLength(1)
+    f.db.run("UPDATE bot_mock_events SET receipt_json=json_set(receipt_json,'$.taskId','wrong')")
+    expect(() => f.store.mock.inject(input)).toThrow("回执与原记录不一致")
+  })
   it("binds fixed audiences, admits one execution per event, and uses structured group mentions or its own sent reply", () => {
     const f = fixture(),
       a = f.binding(),

@@ -1,6 +1,15 @@
 # M05 — beta 本地统一实施检查点
 
-状态：**M05-06 dd12f43f 已由root验收并交付预览。用户2026-10-20重新授权M05-04/05，当前04检查点已自测保存、停写待root独立复验；05待root确认后进入；下方暂停说明均为历史。** gpt-6.1-sol/xhigh 唯一写者，不派生。只读最新设计§11，旧Service清理留M05-05；不写Java/LF39、不操作用户App/profile/真实模型/数据库。
+状态：**M05-06 dd12f43f 已由root验收并交付预览。用户2026-10-20重新授权M05-04/05，当前04检查点已获root认可并补失回执收口，05按用户新授权仅拆旧默认链路；下方暂停说明均为历史。** gpt-6.1-sol/xhigh 唯一写者，不派生。只读最新设计§11，旧Service清理留M05-05；不写Java/LF39、不操作用户App/profile/真实模型/数据库。
+
+## 2026-10-20：04失回执收口，05按用户新指令取消旧数据工作
+
+- Root已认可94fb4fe9实际12call主路径，独立37项与生产IM V1的19脚本通过。当前继续04窄修及05默认断链，不再等待用户许可。用户新指令“不用管旧专家的数据”覆盖原§12：本轮不做历史reader/Settings/查看导出/职责迁移，不读取用户库，不删旧表。
+- inject先核当前Bot归属，再精确核binding/eventId/messageId/完整规范化payload fingerprint/原receipt关联；旧receipt只读核对可越过revoked/archived，无旧receipt仍按原active门禁拒新，不产生第二Task。
+- Dialog仅当前binding的pending允许“核对原事件”；明确结束时先将原事件保存到本机只读保留记录，再清pending，失败不清。保留记录分页5条，不自动发送；正常新发送仍禁。这个新mock核对记录不是已取消的旧专家历史功能。
+- `Node22 node_modules/vitest/vitest.mjs run src/main/bots/mock-channel.test.ts` → `/tmp/m05-04-revoked-receipt.log` **10/10 exit0**，含撤销/归档后同回执、不同正文/message拒绝、无receipt拒绝、损坏receipt拒绝，Task始终1。
+- `Node22 --import tsx tests/bots-mock-dialog-browser.spec.ts` → `/tmp/m05-04-revoked-dialog-second.log` **exit0**：既有171条分页/晚回保护，lostack后撤销仍精确核对、同event仅1身份，未持久时显式结束/重挂保留而不发送。首轮`/tmp/m05-04-revoked-dialog.log`超时是新增fixture在空文本时等待发送按钮enabled；改为等待真实在线再填文本，产品未放宽。
+- 增量Node类型`/tmp/m05-04-revoked-node.log` exit0；Web类型结果随后最终05检查统一记录。未重跑12call App/Java/DB/真实模型，所有自有Dialog App均finally关闭，未写用户out。
 
 ## M05-04 最终自测检查点（待 root 验收，05未开始）
 

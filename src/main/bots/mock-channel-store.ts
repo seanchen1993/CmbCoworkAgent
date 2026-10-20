@@ -356,18 +356,40 @@ export class BotMockChannelStore {
     const input = parseBotMockEvent(raw),
       fingerprint = createHash("sha256").update(JSON.stringify(input)).digest("hex")
     return this.transaction(() => {
-      const binding = this.active(input.bindingId)
-      if (!binding.allowedSenderIds.includes(input.senderId))
-        throw new BotError("CONFLICT", "此模拟身份未获该会话授权")
+      const stored = this.rows("SELECT * FROM bot_mock_bindings WHERE id=?", [input.bindingId])[0]
+      if (!stored) throw new BotError("NOT_FOUND", "模拟绑定不存在")
+      // Desktop receipt inspection remains available after revocation; it grants no new execution.
+      const binding = this.get(String(stored.bot_id), input.bindingId)
       const old = this.rows(
         "SELECT * FROM bot_mock_events WHERE binding_id=? AND (event_id=? OR message_id=?) LIMIT 2",
         [binding.id, input.eventId, input.messageId]
       )
       if (old.length) {
-        if (old.some((row) => row.event_id !== input.eventId || row.fingerprint !== fingerprint))
+        if (
+          old.length !== 1 ||
+          old.some(
+            (row) =>
+              row.event_id !== input.eventId ||
+              row.message_id !== input.messageId ||
+              row.fingerprint !== fingerprint ||
+              JSON.stringify(parseBotMockEvent(JSON.parse(String(row.payload_json)))) !==
+                JSON.stringify(input)
+          )
+        )
           throw new BotError("CONFLICT", "模拟事件标识已用于不同内容")
-        return JSON.parse(String(old[0].receipt_json))
+        const receipt: BotMockEventReceipt = JSON.parse(String(old[0].receipt_json))
+        if (
+          receipt.eventId !== input.eventId ||
+          receipt.taskId !== old[0].task_id ||
+          !["accepted", "ignored"].includes(receipt.status) ||
+          (receipt.status === "accepted") !== Boolean(receipt.taskId)
+        )
+          throw new BotError("CONFLICT", "模拟事件回执与原记录不一致")
+        return receipt
       }
+      this.active(input.bindingId)
+      if (!binding.allowedSenderIds.includes(input.senderId))
+        throw new BotError("CONFLICT", "此模拟身份未获该会话授权")
       const quoted = input.replyToMessageId
         ? this.rows(
             "SELECT id,work_id,text FROM bot_mock_outbox WHERE binding_id=? AND id=? AND state='sent'",

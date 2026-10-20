@@ -14,10 +14,10 @@ async function main() {
     const result = await build({
       stdin: {
         contents: `import React,{useState} from 'react';import {createRoot} from 'react-dom/client';import {BotMockChannelDialog} from './src/renderer/src/components/bots/BotMockChannelDialog';
-const binding=(id,createdAt)=>({simulation:true,id,botId:'owner',kind:'group',channelKey:id,label:id,allowedSenderIds:['alice'],grantVersion:1,revoked:false,online:true,createdAt});
-const state=window.fixture={rows:80,calls:[],held:[],holdNext:false,active:0,max:0};
-const api={bindings:async()=>({items:[binding('A',1),binding('B',2)],before:null}),binding:async(_bot,id)=>binding(id,id==='A'?1:2),history:async(_bot,id,before)=>{state.calls.push({id,before});state.active++;state.max=Math.max(state.max,state.active);try{const total=id==='A'?state.rows:1,top=before?Number(before):total;const items=Array.from({length:Math.min(40,top)},(_,i)=>({id:id+'-'+(top-i),kind:'user',text:'message '+id+' '+(top-i),senderId:'alice',replyToMessageId:null,state:'ignored',createdAt:top-i}));const page={items,before:top>40?String(top-40):null};if(state.holdNext){state.holdNext=false;await new Promise(done=>state.held.push(done))}return page}finally{state.active--}}};
-function Fixture(){const [revision,setRevision]=useState(0);state.bump=()=>setRevision(v=>v+1);return <BotMockChannelDialog client={{hostId:'local',mock:api}} bot={{id:'owner',name:'Expert',archived:false}} revision={revision} onClose={()=>{}} onOpenWork={()=>{}}/>};createRoot(document.getElementById('root')).render(<Fixture/>);`,
+const binding=(id,createdAt)=>({simulation:true,id,botId:'owner',kind:'group',channelKey:id,label:id,allowedSenderIds:['alice'],grantVersion:1,revoked:state.revoked,online:true,createdAt});
+const state=window.fixture={rows:80,calls:[],held:[],holdNext:false,active:0,max:0,revoked:false,injects:[],accept:true,receipts:new Map()};
+const api={inject:async(event)=>{state.injects.push(event);if(state.receipts.has(event.eventId))return state.receipts.get(event.eventId);if(state.revoked)throw new Error('模拟授权已撤销');if(state.accept)state.receipts.set(event.eventId,{eventId:event.eventId,status:'accepted',taskId:'saved'});throw new Error('回包丢失')},bindings:async()=>({items:[binding('A',1),binding('B',2)],before:null}),binding:async(_bot,id)=>binding(id,id==='A'?1:2),history:async(_bot,id,before)=>{state.calls.push({id,before});state.active++;state.max=Math.max(state.max,state.active);try{const total=id==='A'?state.rows:1,top=before?Number(before):total;const items=Array.from({length:Math.min(40,top)},(_,i)=>({id:id+'-'+(top-i),kind:'user',text:'message '+id+' '+(top-i),senderId:'alice',replyToMessageId:null,state:'ignored',createdAt:top-i}));const page={items,before:top>40?String(top-40):null};if(state.holdNext){state.holdNext=false;await new Promise(done=>state.held.push(done))}return page}finally{state.active--}}};
+function Fixture(){const [revision,setRevision]=useState(0),[mount,setMount]=useState(0);state.remount=()=>setMount(v=>v+1);state.bump=()=>setRevision(v=>v+1);return <BotMockChannelDialog key={mount} client={{hostId:'local',mock:api}} bot={{id:'owner',name:'Expert',archived:false}} revision={revision} onClose={()=>{}} onOpenWork={()=>{}}/>};createRoot(document.getElementById('root')).render(<Fixture/>);`,
         resolveDir: resolve("."),
         loader: "tsx"
       },
@@ -142,6 +142,55 @@ function Fixture(){const [revision,setRevision]=useState(0);state.bump=()=>setRe
       .getByRole("alert")
       .getByText(/仅支持文字/)
       .waitFor()
+    await page.getByLabel("模拟消息", { exact: true }).fill("lost ack")
+    await page.getByRole("button", { name: "发送模拟消息", exact: true }).click()
+    await page.getByRole("button", { name: "核对原事件", exact: true }).waitFor()
+    await page.evaluate(() => {
+      ;(window as any).fixture.revoked = true
+      ;(window as any).fixture.bump()
+    })
+    await page.getByText("已撤销", { exact: true }).waitFor()
+    await page.getByRole("button", { name: "核对原事件", exact: true }).click()
+    await page.waitForFunction(() => !localStorage.getItem("bot-mock-pending:local:owner"))
+    assert.equal(await page.evaluate(() => (window as any).fixture.injects.length), 2)
+    assert.equal(
+      await page.evaluate(
+        () => new Set((window as any).fixture.injects.map((v: any) => v.eventId)).size
+      ),
+      1
+    )
+    await page.evaluate(() => {
+      ;(window as any).fixture.revoked = false
+      ;(window as any).fixture.accept = false
+      ;(window as any).fixture.bump()
+    })
+    await page.getByText("模拟设备在线", { exact: true }).waitFor()
+    await page.getByLabel("模拟消息", { exact: true }).fill("not persisted")
+    await page.getByRole("button", { name: "发送模拟消息", exact: true }).click()
+    await page.getByRole("button", { name: "核对原事件", exact: true }).waitFor()
+    await page.evaluate(() => {
+      ;(window as any).fixture.revoked = true
+      ;(window as any).fixture.bump()
+    })
+    await page.getByRole("button", { name: "保留记录并结束核对", exact: true }).click()
+    assert.equal(
+      await page.evaluate(
+        () => JSON.parse(localStorage.getItem("bot-mock-pending:local:owner:retained")!).length
+      ),
+      1
+    )
+    assert.equal(
+      await page.evaluate(() => (window as any).fixture.injects.length),
+      3,
+      "ending check never resends"
+    )
+    await page.evaluate(() => (window as any).fixture.remount())
+    await page.getByText("已结束核对的本机记录（1）", { exact: true }).click()
+    await page.getByText("not persisted", { exact: true }).waitFor()
+    assert.equal(
+      await page.getByRole("button", { name: "发送模拟消息", exact: true }).isDisabled(),
+      true
+    )
     assert.deepEqual(errors, [])
     console.log(
       "dialog proof",

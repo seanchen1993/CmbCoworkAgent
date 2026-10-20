@@ -75,6 +75,16 @@ export function BotMockChannelDialog({
   current.current.id = id
   const createCommand = useRef<{ fingerprint: string; id: string } | null>(null)
   const pendingKey = `bot-mock-pending:${client.hostId}:${bot.id}`
+  const retainedKey = `${pendingKey}:retained`
+  const [retained, setRetained] = useState<BotMockEvent[]>(() => {
+    try {
+      const records = JSON.parse(localStorage.getItem(retainedKey) ?? "[]")
+      return Array.isArray(records) ? records : []
+    } catch {
+      return []
+    }
+  })
+  const [retainedPage, setRetainedPage] = useState(0)
   const [pending, setPending] = useState<BotMockEvent | null>(() => {
     try {
       const v = JSON.parse(localStorage.getItem(pendingKey) ?? "null")
@@ -234,6 +244,17 @@ export function BotMockChannelDialog({
       setReply("")
       await reload()
     })
+  const endCheck = () =>
+    action(async () => {
+      if (!pending || pending.bindingId !== id) return
+      const records = [...retained.filter((v) => v.eventId !== pending.eventId), pending]
+      // Save first. A quota/storage failure must keep the original pending event intact.
+      localStorage.setItem(retainedKey, JSON.stringify(records))
+      setRetained(records)
+      setRetainedPage(Math.floor((records.length - 1) / 5))
+      persist(null)
+      setText("")
+    })
   const more = () =>
     action(async () => {
       if (!cursor) return
@@ -352,8 +373,7 @@ export function BotMockChannelDialog({
                   ? "已撤销"
                   : binding.online
                     ? "模拟设备在线"
-                    : "模拟设备离线 · 仅排队"}{" "}
-                · 授权版本 {binding.grantVersion}
+                    : "模拟设备离线 · 仅排队"}
               </span>
               <button
                 disabled={busy || binding.revoked}
@@ -472,6 +492,11 @@ export function BotMockChannelDialog({
                       返回原渠道核对
                     </button>
                   )}
+                  {pending.bindingId === id && (binding.revoked || bot.archived) && (
+                    <button type="button" disabled={busy} onClick={() => void endCheck()}>
+                      保留记录并结束核对
+                    </button>
+                  )}
                 </p>
               )}
               <textarea
@@ -496,8 +521,7 @@ export function BotMockChannelDialog({
                 type="submit"
                 disabled={
                   busy ||
-                  binding.revoked ||
-                  bot.archived ||
+                  ((!pending || pending.bindingId !== id) && (binding.revoked || bot.archived)) ||
                   bot.deleting ||
                   Boolean(pending && pending.bindingId !== id) ||
                   (!pending && !text.trim())
@@ -507,6 +531,29 @@ export function BotMockChannelDialog({
               </button>
             </form>
           </>
+        )}
+        {retained.length > 0 && (
+          <details>
+            <summary>已结束核对的本机记录（{retained.length}）</summary>
+            <p>仅保留原事件供查看，不代表已接纳或已送达，不会再次发送。</p>
+            {retained.slice(retainedPage * 5, retainedPage * 5 + 5).map((v) => (
+              <article key={v.eventId}>
+                <small>
+                  {v.bindingId} · {v.eventId} · {v.messageId}
+                </small>
+                <p>{v.text}</p>
+              </article>
+            ))}
+            <button disabled={retainedPage === 0} onClick={() => setRetainedPage((v) => v - 1)}>
+              上一页记录
+            </button>
+            <button
+              disabled={(retainedPage + 1) * 5 >= retained.length}
+              onClick={() => setRetainedPage((v) => v + 1)}
+            >
+              下一页记录
+            </button>
+          </details>
         )}
         {error && (
           <p role="alert">
