@@ -774,12 +774,25 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
     function selectorForRecorderAction(action) {
       const selector = typeof action?.selector === "string" ? action.selector : "";
       const actionName = typeof action?.name === "string" ? action.name : "";
+      const hoveredElement = resolveElement(lastHoveredActionSelector);
+      let selectorMatches = [];
+      try {
+        selectorMatches = selector
+          ? injectedScript.querySelectorAll(
+              injectedScript.parseSelector(selector),
+              injectedScript.document
+            )
+          : [];
+      } catch {}
+      const hoveredElementMatchesAction =
+        hoveredElement && selectorMatches.includes(hoveredElement);
       if (
         (actionName === "click" || actionName === "check" || actionName === "uncheck") &&
         selector &&
         lastHoveredActionSelector &&
-        isTransientActionSelector(selector) &&
-        resolveElement(lastHoveredActionSelector)
+        hoveredElement &&
+        (isTransientActionSelector(selector) ||
+          (selectorMatches.length > 1 && hoveredElementMatchesAction))
       ) {
         return lastHoveredActionSelector;
       }
