@@ -4,6 +4,8 @@
 
 ## 分工、树与恢复
 
+当前UI切片已完成并展示：提交a81b5f455、实施树clean、唯一写者停写；root已审五个renderer文件并原生显示融合UI。等待用户交互反馈，功能验证仍暂停；此次只算UI预览交付，不接受04功能或启动05其余事项。
+
 - root 独占设计、任务单、state/HANDOFF/reviews、集成与最终验收。
 - 原 `/root/service_conversation_sol`，gpt-6.1-sol/xhigh，唯一产品写者，不派生子代理。
 - integration：`/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork`，`codex/devclaw-bot-integration`，起点 `b479d51d700b81871a4c22feaa751484f2488827`。
