@@ -15,7 +15,7 @@ import type { RunnableConfig } from "@langchain/core/runnables"
 import { mergeConfigs } from "@langchain/core/runnables"
 import { tool } from "@langchain/core/tools"
 import { Annotation, Command, END, START, StateGraph } from "@langchain/langgraph"
-import { ChatOpenAI } from "@langchain/openai"
+import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
 import { createMiddleware } from "langchain"
 import { z } from "zod"
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest"
@@ -71,6 +71,9 @@ import * as appDb from "../db"
 
 let directory = ""
 const cleanups: Array<() => Promise<void>> = []
+const fixtureFetch = globalThis.fetch
+const fixtureHttpOrigins = new Set<string>()
+const unexpectedNetworkRequests: string[] = []
 beforeAll(async () => {
   directory = mkdtempSync(join(tmpdir(), "cmb-shared-stream-actual-"))
   paths.database = join(directory, "actual.sqlite")
@@ -84,6 +87,7 @@ afterEach(async () => {
       .map((close) => close())
   )
   vi.restoreAllMocks()
+  unexpectedNetworkRequests.length = 0
   const failures = results
     .filter((result) => result.status === "rejected")
     .map((result) => result.reason as unknown)
@@ -201,6 +205,7 @@ async function fixture(
     runId = "",
     leased = false,
     listening = false,
+    httpOrigin = "",
     effects = 0,
     finished = 0
   let closing: Promise<void> | undefined
@@ -329,6 +334,7 @@ async function fixture(
           for (const result of results)
             if (result.status === "rejected") failures.push(result.reason)
         })
+        fixtureHttpOrigins.delete(httpOrigin)
         await attempt(() => removeOwnedDirectory(root, directory, "workspace-"))
         if (failures.length === 1) throw failures[0]
         if (failures.length)
@@ -344,6 +350,19 @@ async function fixture(
   })
   const address = server.address()
   if (!address || typeof address === "string") throw Error("ACTUAL_SHARED_STREAM_HTTP_REQUIRED")
+  httpOrigin = `http://127.0.0.1:${address.port}`
+  fixtureHttpOrigins.add(httpOrigin)
+  // This is a local HTTP protocol regression. Tokenizer bookkeeping must not silently
+  // introduce a second provider/network dependency after the actual SSE has completed.
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const url = new URL(typeof input === "string" ? input :
+      input instanceof URL ? input.href : input.url)
+    if (!fixtureHttpOrigins.has(url.origin)) {
+      unexpectedNetworkRequests.push(url.origin)
+      return Promise.reject(Error("ACTUAL_SHARED_STREAM_EXTERNAL_NETWORK_FORBIDDEN"))
+    }
+    return fixtureFetch(input, init)
+  })
   manager = new ModsManager(
     join(root, "control.sqlite"),
     () => [],
@@ -574,16 +593,29 @@ async function fixture(
       factory.mockRestore()
     })
   }
+  const modelParameters = {
+    model: "actual-shared-model",
+    apiKey: "local-test-key",
+    streaming: true,
+    streamUsage: false,
+    maxRetries: 0,
+    configuration: { baseURL: `${httpOrigin}/v1` }
+  }
+  const completions = new ChatOpenAICompletions(modelParameters)
+  let localTokenEstimates = 0
+  // As in the existing native compaction/function-completion model policy, only auxiliary
+  // estimated usage is local. No provider-reported usage, native payload or tool fact is replaced.
+  completions.getNumTokens = async (content: unknown) => {
+    localTokenEstimates++
+    const text = typeof content === "string" ? content : JSON.stringify(content) ?? ""
+    return Math.ceil(text.length / 4)
+  }
+  // bindTools/withConfig construct another ChatOpenAI from its original fields. Passing the
+  // real completions instance here preserves the local estimator in that actual execution path.
+  const model = new ChatOpenAI({ ...modelParameters, completions })
   const agent = createFunctionConversationSharedAgent(
     {
-      model: new ChatOpenAI({
-        model: "actual-shared-model",
-        apiKey: "local-test-key",
-        streaming: true,
-        streamUsage: false,
-        maxRetries: 0,
-        configuration: { baseURL: `http://127.0.0.1:${address.port}/v1` }
-      }),
+      model,
       tools: options.tool ? [actualTool] : [],
       middleware: [
         observe,
@@ -771,6 +803,8 @@ async function fixture(
     release: () => release.resolve(),
     effects: () => effects,
     finished: () => finished,
+    localTokenEstimates: () => localTokenEstimates,
+    unexpectedNetworkRequests: () => [...unexpectedNetworkRequests],
     phase,
     async assertDrained() {
       for (const scope of scopes) await scope.whenDrained()
@@ -1034,6 +1068,8 @@ describe("actual native Shared streams", () => {
     expect(final.at(-1)?.content).toBe("complete shared answer")
     expect(f.effects()).toBe(1)
     expect(f.requests).toHaveLength(2)
+    expect(f.localTokenEstimates()).toBeGreaterThan(0)
+    expect(f.unexpectedNetworkRequests()).toEqual([])
     const saved = await f.verifySaved(3)
     expect(saved.native.map(serializeFunctionConversationNativeMessage)).toEqual(
       final.map(serializeFunctionConversationNativeMessage)
