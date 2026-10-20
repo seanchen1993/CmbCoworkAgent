@@ -13,7 +13,8 @@ export function botMockRemotePolicy(): RemoteTurnPolicy {
     allowedSkillNames: [],
     allowedExpertNames: [],
     disableHooks: true,
-    omitPromptExtensions:true,
+    disableMessageControls: true,
+    omitPromptExtensions: true,
     disableScheduler: true,
     disableSkillEvolution: true,
     disableRequestUserInput: true,
@@ -40,6 +41,7 @@ export function assertBotMockThreadEntry(
     !context.verifyResolvedThread ||
     !policy?.disableHooks ||
     !policy.omitPromptExtensions ||
+    !policy.disableMessageControls ||
     !policy.disableMcpTools ||
     !policy.disableMemoryInjection ||
     !policy.disableAgentsPrompt ||

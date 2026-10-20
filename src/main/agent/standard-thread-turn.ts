@@ -748,6 +748,8 @@ export interface RemoteTurnPolicy {
   allowedSkillNames?: string[]
   allowedExpertNames?: string[]
   disableHooks?: boolean
+  /** Treat untrusted transport text literally, without slash/prefix controllers. */
+  disableMessageControls?: boolean
   /** Explicit transport isolation; existing disableAgentsPrompt semantics stay unchanged. */
   omitPromptExtensions?: boolean
   disableScheduler?: boolean

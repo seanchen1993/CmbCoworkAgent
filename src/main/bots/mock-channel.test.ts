@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { LocalBotHost } from "./host"
@@ -44,7 +44,16 @@ function fixture(path = ":memory:") {
     mentionsBotIds: [],
     ...extra
   })
-  return { db, store, bot, binding, event }
+  return {
+    db,
+    store,
+    bot,
+    binding,
+    event,
+    advance: (ms: number) => {
+      time += ms
+    }
+  }
 }
 function finish(store: BotStore, id: string, text = "Actual answer") {
   store.transition(id, "running")
@@ -344,6 +353,53 @@ describe("local simulated channels", () => {
         )
       )
     ).toContain("bot_mock_interrupted")
+  })
+  it("finishes every old mock receipt through the host pump before pruning its source tasks", async () => {
+    const f = fixture(),
+      a = f.binding()
+    const scalar = (sql: string) => Number(f.db.exec(sql)[0].values[0][0])
+    for (let i = 0; i < 105; i++) f.store.mock.inject(f.event(a.id, `interrupted-${i}`))
+    f.db.run("UPDATE bot_tasks SET state='interrupted'")
+    f.advance(31 * 86400000)
+    for (let i = 0; i < 100; i++) {
+      const task = f.store.enqueue({
+        botId: f.bot.id,
+        requestId: `newer-${i}`,
+        message: "Already done"
+      })
+      finish(f.store, task.id)
+    }
+    f.store.mock.setOnline(f.bot.id, a.id, false)
+    expect(scalar("SELECT COUNT(*) FROM bot_mock_outbox")).toBe(0)
+    const maintenanceCounts: number[] = [],
+      prune = f.store.pruneTaskHistory.bind(f.store)
+    const maintenance = vi.spyOn(f.store, "pruneTaskHistory").mockImplementation(() => {
+      maintenanceCounts.push(scalar("SELECT COUNT(*) FROM bot_mock_outbox"))
+      return prune()
+    })
+    const acquire = vi.fn(() => null),
+      send = vi.fn(async () => "sent" as const),
+      errors: unknown[] = []
+    const host = new LocalBotHost(
+      f.store,
+      { onAvailable: () => () => {}, acquire },
+      2,
+      (error) => errors.push(error),
+      undefined,
+      { send }
+    )
+    hosts.push(host)
+    await vi.waitFor(() => expect(maintenance).toHaveBeenCalledOnce())
+    expect(maintenanceCounts).toEqual([105])
+    expect(scalar("SELECT COUNT(*) FROM bot_mock_outbox")).toBe(105)
+    expect(scalar("SELECT COUNT(*) FROM bot_mock_events WHERE execution_state='interrupted'")).toBe(
+      105
+    )
+    expect(scalar("SELECT COUNT(*) FROM bot_mock_events WHERE execution_state='queued'")).toBe(0)
+    expect(scalar("SELECT COUNT(*) FROM bot_tasks WHERE state='interrupted'")).toBe(5)
+    expect(acquire).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+    expect(errors).toEqual([])
   })
   it("reopens persisted original events and sending receipts without rerunning or resending", () => {
     const dir = mkdtempSync(join(tmpdir(), "m05-mock-reopen-")),

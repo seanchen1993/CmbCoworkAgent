@@ -17,7 +17,7 @@ async function main() {
     "Set M05_MOCK_APP_OUT to an independent /tmp production build"
   )
   let app: Awaited<ReturnType<typeof _electron.launch>> | undefined
-  const calls: Array<{ tools: string[]; lastUser: string }> = [],
+  const calls: Array<{ tools: string[]; lastUser: string; external: boolean }> = [],
     errors: string[] = []
   let hooks = 0
   const hookCalls: Array<{ sessionId: string; event: string }> = []
@@ -66,7 +66,7 @@ async function main() {
           "external runtime cannot load owner's private memory"
         )
       }
-      calls.push({ tools: used, lastUser: user.slice(0, 200) })
+      calls.push({ tools: used, lastUser: user.slice(0, 200), external })
       let reply = "模拟渠道普通问答已回复。",
         call: { name: string; args: Record<string, unknown> } | undefined
       if (user.includes("MOCK_CREATE")) {
@@ -301,6 +301,148 @@ async function main() {
         hookCalls.every((call) => call.sessionId === bot.threadId),
         "external turns must never execute any lifecycle hook"
       )
+    if (process.env.M05_MOCK_MESSAGE_CONTROLS_ONLY === "1") {
+      const prefixes = ["[coordinator] hello", "#coordinator hello", "/goal 目标"]
+      for (const [index, first] of prefixes.entries()) {
+        const binding = await page.evaluate(
+          async ({ botId, index }) =>
+            (window as any).api.bots.mock.create({
+              simulation: true,
+              botId,
+              operationId: `controls-${index}`,
+              kind: "dm",
+              channelKey: `controls-${index}`,
+              label: `Controls ${index}`,
+              allowedSenderIds: ["alice"]
+            }),
+          { botId: bot.id, index }
+        )
+        let threadId = ""
+        for (const [round, text] of [first, `普通后续 ${index}`].entries()) {
+          const receipt = await page.evaluate(
+            async ({ bindingId, index, round, text }) =>
+              (window as any).api.bots.mock.inject({
+                simulation: true,
+                bindingId,
+                eventId: `controls-${index}-${round}`,
+                messageId: `controls-msg-${index}-${round}`,
+                senderId: "alice",
+                text,
+                mentionsBotIds: []
+              }),
+            { bindingId: binding.id, index, round, text }
+          )
+          await waitApi(
+            async (taskId) => {
+              const task = (await (window as any).api.bots.snapshot()).tasks.find(
+                (v: any) => v.id === taskId
+              )
+              return task && !["queued", "running", "waiting_user"].includes(task.state)
+            },
+            receipt.taskId,
+            { timeout: 90000 }
+          )
+          const task = await page.evaluate(
+            async (taskId) =>
+              (await (window as any).api.bots.snapshot()).tasks.find((v: any) => v.id === taskId),
+            receipt.taskId
+          )
+          assert.equal(task.state, "completed", `literal control text finishes normally: ${text}`)
+          threadId ||= task.threadId
+          assert.equal(task.threadId, threadId)
+          const detail = await page.evaluate(
+            async (id) => ({
+              thread: await (window as any).api.threads.get(id),
+              goal: await (window as any).api.threads.getGoalState(id),
+              messages: await (window as any).api.threads.getMessages(id)
+            }),
+            threadId
+          )
+          assert.equal(detail.thread.metadata.agentMode, "normal")
+          assert.equal(detail.goal.goal, null, "mock text cannot create or adopt a Goal")
+          assert.ok(
+            detail.messages.some((v: any) => v.role === "user" && v.content === text),
+            "original text remains visible"
+          )
+          assert.equal(
+            calls.at(-1)?.lastUser,
+            text,
+            "model receives the original control-like text"
+          )
+          assertOwnerHooksOnly()
+        }
+      }
+      assert.equal(
+        calls.filter((v) => v.external).length,
+        6,
+        "exactly one model turn per external message, no sub-scheduler"
+      )
+      assert.equal(
+        (await page.evaluate(async () => (await (window as any).api.bots.snapshot()).tasks)).length,
+        7
+      )
+      assert.equal(
+        (
+          await page.evaluate(
+            async (id) => (await (window as any).api.bots.works.list(id)).items,
+            bot.id
+          )
+        ).length,
+        0
+      )
+      // Positive beta control: an ordinary /goal status command is handled without a model turn.
+      const ownerWorkspace = join(dir, "owner-workspace")
+      await mkdir(ownerWorkspace)
+      const ordinary = await page.evaluate(
+        async ({ workspacePath }) =>
+          (window as any).api.threads.create({
+            workspacePath,
+            agentMode: "normal",
+            model: "custom:m05-local"
+          }),
+        { workspacePath: ownerWorkspace }
+      )
+      const positiveId = typeof ordinary === "string" ? ordinary : ordinary.thread_id
+      const beforeControl = calls.length
+      const control = await page.evaluate(
+        async (threadId) =>
+          new Promise<any[]>((resolve, reject) => {
+            const events: any[] = []
+            const timer = setTimeout(() => reject(new Error("ordinary goal status timeout")), 10000)
+            ;(window as any).api.agent.streamAgent(
+              threadId,
+              "/goal",
+              null,
+              (event: any) => {
+                events.push(event)
+                if (event.type === "done" || event.type === "error") {
+                  clearTimeout(timer)
+                  resolve(events)
+                }
+              },
+              "custom:m05-local"
+            )
+          }),
+        positiveId
+      )
+      assert.ok(!control.some((v) => v.type === "error"))
+      assert.ok(
+        control.some((v) => v.type === "custom" && v.data?.type === "goal_notice"),
+        "ordinary beta still parses /goal"
+      )
+      assert.equal(calls.length, beforeControl)
+      assert.deepEqual(errors, [])
+      console.log("complete: literal mock message controls", {
+        prefixes,
+        externalTurns: 6,
+        normalMode: true,
+        goals: 0,
+        extraTasks: 0,
+        ownerGoalStatusHandled: true,
+        calls: calls.length
+      })
+      return
+    }
     if (await page.getByRole("button", { name: "打开 Bot 详情", exact: true }).isVisible())
       await page.getByRole("button", { name: "打开 Bot 详情", exact: true }).click()
     await page.getByRole("button", { name: "更多 Bot 操作", exact: true }).click()

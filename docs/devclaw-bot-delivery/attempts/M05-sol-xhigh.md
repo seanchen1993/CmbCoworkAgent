@@ -1,6 +1,28 @@
 # M05 — beta 本地统一实施检查点
 
-状态：**M05-06 dd12f43f 已由root验收；04主路径94fb4fe9经root认可，失回执窄修9130de36a已保存。05默认断链/旧UI清理自测完成，本段同次提交为最终冻结候选，停写待root独立审查。用户已取消旧专家数据处理，未做历史reader/导出/迁移，也未主动删除原库。** gpt-6.1-sol/xhigh 唯一写者，不派生、不push。下方旧暂停/“05未开始”等均为当时历史。
+状态：**M05-06 dd12f43f 已由root验收；04主路径94fb4fe9经root认可，失回执窄修9130de36a已保存。05默认断链/旧UI清理已自测，三视角确认P1/P2已收口，本段同次提交为返工冻结候选，停写待root独立审查。用户已取消旧专家数据处理，未做历史reader/导出/迁移，也未主动删除原库。** gpt-6.1-sol/xhigh 唯一写者，不派生、不push。下方旧暂停/“05未开始”等均为当时历史。
+
+## 三视角审查返工：P1 消息控制 / P2 恢复清理顺序（最终冻结）
+
+起点`1caeee24eaf02c198b43447f52ffa85501f62514`；本段同次提交为返工候选，准确SHA见交付消息。只收口root确认的两项，不新增用户功能；默认用户out/profile/真实模型及旧专家数据均未触碰。
+
+- **P2**：`LocalBotHost.pump`仅在`mockRecoveryComplete`后进入原maintenance，其余beta清理条件/40条批次+timer yield/游标索引均不改。新增经过真实Host泵的回归：105条31天旧interrupted（events仍queued）、100条较新终态、binding offline；首次真实`pruneTaskHistory`调用之前已有105个SQLite outbox；随后真实删除100旧Task但105个events全为interrupted、0queued，runtime acquire/transport send均0。既有40/40/25+EXPLAIN测试保留。
+- **P1**：新增可选`RemoteTurnPolicy.disableMessageControls`，只有可信mock置true，`assertBotMockThreadEntry`缺失/false都拒绝；默认undefined保留beta/生产IM。invoke最初及effectiveMessage的forced-coordinator解析、前缀commit来源、Goal slash/抢占/消息边界与runGoal绑定/续轮、内部marker解释、Mods.startFunctionTurn，以及steer已有显式skill选项统一受该可信开关约束。外部按普通文字保留原文显示与模型输入；没有包裹/改写原用户字串，也未删除已有Goal。renderer不能给执行context注入此策略。
+- source仍是原binding/版本/受众/Task证明；Runtime仍5个work工具allowlist和执行守卫，owner正常beta能力不裁剪。普通resume/interrupt已在来源早拒绝，不能绕过可信Host。
+
+| 实际检查（Node22路径同上） | 命令/日志 | 结果 |
+| --- | --- | --- |
+| P2实际Host + 恢复/历史 | `node_modules/vitest/vitest.mjs run src/main/bots/mock-channel.test.ts src/main/bots/host.test.ts src/main/bots/history-retention.test.ts`；`/tmp/m05-05-recovery-prune.log` | 3文件96/96 exit0；root另独立96/96 |
+| P1策略/Runtime保留 | `node_modules/vitest/vitest.mjs run src/main/bots/mock-runtime-policy.test.ts src/main/bots/runtime-adapter.test.ts src/main/agent/standard-thread-turn.test.ts src/main/hooks/mock-scope.test.ts src/main/agent/runtime-tool-allowlist.test.ts`；`/tmp/m05-05-controls-core.log` | 5文件69/69 exit0 |
+| 原beta控制正例/架构 | `--import tsx`分别运行`tests/goals.spec.ts`、`tests/coordinator-mode.spec.ts`、`tests/desktop-agent-runtime-entrypoints.spec.ts`、`tests/standard-thread-turn-architecture.spec.ts`；`/tmp/m05-05-controls-entrypoints.log` | 4脚本均exit0，普通Goal/两种coordinator前缀保持 |
+| Node类型 | `node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false`；`/tmp/m05-05-controls-node.log` | exit0；P2先行类型`/tmp/m05-05-recovery-node.log`也exit0 |
+| 独立增量构建 | `node_modules/electron-vite/bin/electron-vite.js build --config /tmp/m05-05-controls-vite.config.mjs --mode m05-isolated`；`/tmp/m05-05-controls-build.log` | exit0；仅main重建，未变preload/renderer/resources取自前完整隔离build，无测试entry |
+| 实际App定向7call | `M05_MOCK_MESSAGE_CONTROLS_ONLY=1 M05_MOCK_APP_OUT=/tmp/m05-05-controls-out-6f0cuab0 Node22 --import tsx tests/bots-mock-channel-app.spec.ts`；`/tmp/m05-05-controls-app-second.log` | session27394已收exit0；3个空个人模拟渠道首条分别`[coordinator] hello`、`#coordinator hello`、`/goal 目标`，各加1次普通后续；6个外部原文/normal/0Goal/0多余Task/恰5工具，另1次owner介绍。普通beta `/goal`状态仍处理且0额外模型。未重跑旧12call |
+| 局部格式 | 4个本轮新增/修改小文件Prettier check；`/tmp/m05-05-controls-format.log` | exit0，agent大文件只局部手工对齐新增块，不整仓format |
+
+App初轮`/tmp/m05-05-controls-app.log`已完成同样6个外部反例，最后普通beta正例因新增fixture错把`streamAgent`位置参数API当对象API而clone失败；按真实签名修正夹具后第二轮全通过，产品未为夹具放宽。两次均finally关闭自有Electron/localhost服务器并删除隔离profile，未用Context方法替换或假消息就绪。
+
+最终产物`/tmp/m05-05-controls-out-6f0cuab0/main/index.js`；proof `/tmp/m05-05-controls-build-proof.json`，application **8,050,141bytes**，sha256 **e6f50a5096b15082855163ea078bb75fe640e58f564ea631a102cdc4c2e156f1**。默认用户out仍602文件path/size/mtime_ns完全不变。当前无自有App/server/Java/DB/容器或后台测试残留；仅/tmp构建/日志保留。旧截图及12call证据仅对应前主路径，P1/P2无布局变化，当前以新7call和新hash为准。保存此候选后停止写入与测试，等待root最终独立复验/集成。
 
 ## M05-04/05 冻结交接（2026-10-20）
 

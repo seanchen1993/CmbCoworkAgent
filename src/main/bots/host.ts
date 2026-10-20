@@ -875,7 +875,11 @@ export class LocalBotHost {
 
   private pump(): void {
     this.pumpMockRecovery()
-    if (!this.active.size && Date.now() - this.lastHistoryMaintenance >= 10 * 60_000) {
+    if (
+      this.mockRecoveryComplete &&
+      !this.active.size &&
+      Date.now() - this.lastHistoryMaintenance >= 10 * 60_000
+    ) {
       this.lastHistoryMaintenance = Date.now()
       try {
         this.store.pruneTaskHistory()
