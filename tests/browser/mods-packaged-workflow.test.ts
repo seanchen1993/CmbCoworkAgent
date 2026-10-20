@@ -42,6 +42,16 @@ it("requires Windows packaged validation before upload/release and keeps diagnos
   const steps = workflow.jobs.build.steps
   const index = (name: string) => steps.findIndex((step) => step.name === name)
   const validation = index("Validate Mods in Windows package")
+  const cli = index("Prepare host CLI for Windows package validation")
+  expect(cli).toBeGreaterThan(index("Package (Other platforms)"))
+  expect(cli).toBeLessThan(validation)
+  expect(steps[cli].if).toBe("matrix.platform == 'win'")
+  expect(steps[cli]["continue-on-error"]).toBeUndefined()
+  expect(String(steps[cli].run)).toContain(
+    'npm install --global --prefix "$taskCliPrefix" @anthropic-ai/claude-code@2.1.295'
+  )
+  expect(String(steps[cli].run)).toContain("$env:GITHUB_PATH")
+  expect(String(steps[cli].run)).toContain("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }")
   expect(validation).toBeGreaterThan(index("Package (Other platforms)"))
   expect(validation).toBeLessThan(index("Upload installer"))
   expect(validation).toBeLessThan(index("Upload to GitHub Release"))

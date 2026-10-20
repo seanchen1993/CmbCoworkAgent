@@ -2,6 +2,10 @@
 
 继续使用现有GitHub Actions构建安装包。Windows打包结束后，工作流先启动刚生成的 `dist/win-unpacked/CMBDevClaw.exe` 运行包内Mods检查，再上传安装包和unpacked产物。仅tag运行会创建draft release；本次分支手动运行没有创建release。检查失败会阻止该Windows job发布。
 
+Windows 包内检查中的 PTY 用例调用宿主 PATH 上真实的 `claude.cmd --version`，并不验证应用捆绑了 Claude CLI。Actions 在独立的 runner 临时目录安装固定版本 `@anthropic-ai/claude-code@2.1.295`，检查版本并将 shim 目录加入后续步骤的 PATH；不会改写应用依赖、EXE 或 ASAR。本地运行同一命令前也需准备真实 Claude CLI 与 Git Bash，不能用模拟 shim 替代。
+
+界面导航使用当前生产入口“查看任务进展 → 结果”；设置验证使用“自定义设置 → 高级自定义 → 灵件管理 → 我已添加”。这些操作保留实际点击和等待，不通过跳过缺失入口或增加全局超时来放行检查。
+
 验证调用：
 
 ```powershell

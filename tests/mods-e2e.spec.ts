@@ -1,5 +1,5 @@
 import { verifyDesktopLatencyDiagnostics } from "./support/mods-desktop-latency-e2e"
-import { openModsResults } from "./support/mods-sidebar-navigation"
+import { openModsResults, openModsSettings } from "./support/mods-sidebar-navigation"
 import { verifyClientBusy } from "./support/mods-client-busy-e2e"
 import { verifyBase64 } from "./support/mods-base64-e2e"
 import { verifyEncoding } from "./support/mods-encoding-e2e"
@@ -720,9 +720,7 @@ async function runMain(failures: unknown[]): Promise<void> {
         assert.equal(restored.digest, mod.digest)
         assert.equal(restored.state, "ready")
       }
-      await page!.getByRole("button", { name: "自定义设置", exact: true }).click()
-      await page!.getByRole("button", { name: "Function Mods", exact: true }).click()
-      await page!.locator("[data-mods-settings]").waitFor()
+      await openModsSettings(page!)
       await page!.screenshot({ path: join(artifacts, "settings.png") })
       pass("packaged preload and React settings retain project grants after reload")
       return
@@ -1084,9 +1082,7 @@ async function runMain(failures: unknown[]): Promise<void> {
     )
     assert(!JSON.stringify(revokedCards).includes("actionId"))
     pass("revocation invalidates existing cards")
-    await page!.getByRole("button", { name: "自定义设置", exact: true }).click()
-    await page!.getByRole("button", { name: "Function Mods", exact: true }).click()
-    await page!.locator("[data-mods-settings]").waitFor()
+    await openModsSettings(page!)
     await page!.locator("[data-mods-audit] > summary").click()
     await page!.getByText("审计摘要", { exact: true }).first().waitFor()
     await page!.screenshot({ path: join(artifacts, "settings.png") })

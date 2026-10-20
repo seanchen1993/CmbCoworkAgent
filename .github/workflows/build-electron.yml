@@ -540,7 +540,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Validate the exact Windows package produced above; do not rebuild or install here.
+      # PTY validation exercises the existing host CLI, not a bundled CLI or a mock shim.
+      # Keep this prerequisite isolated from application dependencies and pin its version.
+      - name: Prepare host CLI for Windows package validation
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $taskCliPrefix = Join-Path $env:RUNNER_TEMP 'mods-validation-cli'
+          npm install --global --prefix "$taskCliPrefix" @anthropic-ai/claude-code@2.1.295
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $taskCliPrefix 'claude.cmd') --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $taskCliPrefix | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # Validate the exact Windows package produced above; do not rebuild or install the app here.
       # A failed check blocks uploads/release. Linux keeps its existing native/GLIBC checks.
       - name: Validate Mods in Windows package
         if: matrix.platform == 'win'
