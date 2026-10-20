@@ -1,6 +1,6 @@
 # M05-04/05 渠道模拟与旧链路清理验收
 
-状态：2026-10-20 用户恢复实施；渠道主路径、撤销后失回执出口及默认旧链路清理已实现。`1caeee24` 独立回归通过后发现两项边界问题，原实施者正窄修，尚未最终集成。用户随后明确“不用管旧专家的数据”，取消历史查看、导出和迁移。起点为实施分支 `dd12f43f`，保留已验收的本机对话关联。root 设计与验收，原 6.1-sol/xhigh 唯一产品写者。本文记录此次证据，不覆盖以前的验收历史。
+状态：2026-10-20 最终候选 `bbe06f47862894550d50c7a4b62dbfe741cc23cf` 已由 root 验收，正在正常集成与同 profile 预览更新。渠道主路径、撤销后失回执出口、默认旧链路清理及审查返工均通过。用户明确“不用管旧专家的数据”，取消历史查看、导出和迁移。起点为实施分支 `dd12f43f`，保留已验收的本机对话关联。root 设计与验收，原 6.1-sol/xhigh 唯一产品写者。本文记录此次证据，不覆盖以前的验收历史。
 
 ## 范围
 
@@ -44,9 +44,12 @@
   1. **P2**：Host首批40条恢复后立即历史清理，可能删除超过30天、非最近100的尚未补回执记录。复用 `mockRecoveryComplete`，恢复完成后才维护；补实际 Host+过期积压回归。
   2. **P1**：mock消息改传原文后，首条 `[coordinator]`/`#coordinator` 会进入桌面模式提交并写坏后续 mock 所需 normal 模式；`/goal` 也会早于工具边界启动 Goal。保持消息原文，在可信 mock 策略下禁止消息触发桌面控制解析；原本机/生产 IM 默认不变。需独立实际 App 窄验证及后续普通消息可用证明。
 
-候选因此尚未最终验收或合并，以上通过项不能代替这两个问题的复验。
+上述为 `1caeee24` 审查时的返工决定，后续复验如下。
 
 ## 审查问题定向复验
 
 - P2 已由 root 独立复验：3文件96/96，日志 `/var/folders/kq/m0q4z3m91tx9fpfbf501hfrr0000gn/T/m05-root-repair-h8svso32/vitest.log`。实际 Host 泵恢复105条31天旧 interrupted，另有100条新终态；首次真实历史清理之前105个回执已全部落盘，随后按原保留规则清理100条旧Task，未调用Runtime或发送端。原每批40和索引策略保持。
-- P1 正在验证可信模拟策略下禁止消息控制入口，保留原文；未改变普通 beta/生产 IM 默认语义。该项通过前不更新用户预览。
+- P1 在 `4cdadbae` 已通过：root 独立5文件69项及 Goal/coordinator/两架构脚本4项均 exit0，报告 `/var/folders/kq/m0q4z3m91tx9fpfbf501hfrr0000gn/T/m05-root-controls-0k02it8_/report.json`。实际 App 窄旅程 `/tmp/m05-05-controls-app-second.log` exit0：3个空渠道的两种 coordinator 前缀、/goal 及各自后续共6次外部调用，原文保存、normal 模式、无 Goal/额外 Task、仅5工具；普通 beta /goal 状态命令仍处理且不调模型。加 owner 初始调用共7次 localhost 调用。第一次仅正例夹具误用 API 参数，修夹具后通过，不隐去失败。
+- 窄复核另发现保留内部协议串被通用历史过滤，最终 `bbe06f47` 复用既有过滤判定明确拒收，普通 /goal 和 coordinator 前缀继续接纳。主进程与弹窗共享纯校验：新消息先验证再保存 pending；原 pending 不凭错误字符串清除。root 两文件13项和默认依赖断链均通过，报告 `/var/folders/kq/m0q4z3m91tx9fpfbf501hfrr0000gn/T/m05-root-text-final-43nkrvdp/report.json`；最终1251个可达模块，旧服务0，正常 Bot/requirements/IM 保留。
+- 实施者最终实际弹窗 `/tmp/m05-05-shared-validation-dialog.log` exit0：171条连续分页及 lost-ack/撤销/结束核对/重挂保持，保留标记与附件/技能四类无效输入均无 inject/pending，仍可编辑后正常发送。最终 Node/Web 与正常 main/preload/renderer 隔离构建通过；没有再重复7/12次模型旅程。
+- 最终构建 `/tmp/m05-05-controls-out-6f0cuab0`，证明 `/tmp/m05-05-shared-validation-build-proof.json`；application SHA256 `b6306a4aad47714c586cc1c454735ef99239a62d7b01a8464c19ed8eeeb6f786`，无测试入口。前面的623、96、69、13等存在重叠，不相加宣传总量。
