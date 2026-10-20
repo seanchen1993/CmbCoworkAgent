@@ -1,5 +1,7 @@
 # DevClaw Bot 长程交付与断点续跑
 
+**2026-10-20 开发者交接：** 请先阅读 [PR：beta Bot 融合改动与接手说明](PR-beta-local-bot-integration.md)。文档按最终实现整理独立任务、本机会话关联、模拟 IM、模型修复、旧链路清理及验证证据，并明确当前只合入 beta `91554cbc`：远端 beta `650c6ba3` 之间的三个后续提交尚待语义合并。下方按时间保留的设计和过程状态不代表当前最终范围。
+
 **2026-10-19 最新 M05（覆盖下方 M04 与更早架构）：** 用户授权保留 beta 全功能、只做扩展，业务数据/Runtime 本地权威；独立任务放 beta 右侧，新建 Bot 与专家统一 UI。后端可先 mock，真实 Java 接入/精简及 IM 合仓延后，不阻塞 App MVP。root 设计验收，原 gpt-6.1-sol/xhigh 唯一实施。设计 `reviews/M05-beta-local-unification-design.md`，清单 `tasks/M05-beta-local-unification.md`，验收 `reviews/M05-acceptance.md`。
 
 M04 首轮 d9efa226 已合入 b479d51d，但用户指出双 UI 未融合，不能视为新目标验收。五文件未提交修复保留，先保存 WIP，再按 M05 扩展 beta 本地链路。实际网关 `/Users/heyirui/Downloads/LF39_devclaw_im_gateway_0821` 已只读核对，现有三文件用户改动不动；群消息目前在 ingress 被忽略。当前不写网关、不接真实招乎、不 push/deploy，scheduler 仍 PAUSED，用户预览与历史数据保留。
