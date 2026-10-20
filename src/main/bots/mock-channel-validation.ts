@@ -29,7 +29,7 @@ function ids(input: unknown, max: number): string[] {
 export function assertBotMockText(input: string): void {
   // Transport markup is not an attachment/skill grant, including when pasted from the desktop.
   if (
-    /<(?:user_attachment|attached_files?|file_attachment|skill|builtin_browser|bot-message-reply)\b|\[\[skill:|<\/?(?:cmb|devclaw)[-_]/i.test(
+    /<(?:attachment|user_attachment|attached_files?|file_attachment|skill|builtin_browser|bot-message-reply)\b|\[\[skill:|<\/?(?:cmb(?:devclaw)?|devclaw)[-_]/i.test(
       input
     )
   )

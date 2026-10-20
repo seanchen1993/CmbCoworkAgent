@@ -67,6 +67,19 @@ describe("local simulated channels",()=>{
     f.db.run("UPDATE bot_mock_events SET payload_json=json_set(payload_json,'$.text','corrupt') WHERE task_id=?",[source.id])
     expect(()=>f.store.mock.execution(work.task)).toThrow("不一致")
   })
+  it("aggregates external work unread at the owner Bot boundary and respects the captured seen clock",()=>{
+    const f=fixture(),a=f.binding(),e=f.store.mock.inject(f.event(a.id));f.store.transition(e.taskId!,"running")
+    const work=f.store.createWork({botId:f.bot.id,operationId:"create",title:"External",goal:"Draft"},{taskId:e.taskId!,callId:"create",key:"create"})
+    finish(f.store,work.task.id,"First")
+    const captured=f.store.workActivities().find(v=>v.botId===f.bot.id)!
+    expect(captured.unread).toBe(true)
+    const second=f.store.enqueue({botId:f.bot.id,workId:work.work.id,requestId:"second",message:"Edit"});finish(f.store,second.id,"Second")
+    f.store.markWorksRead(f.bot.id,captured.version)
+    expect(f.store.workActivities().find(v=>v.botId===f.bot.id)?.unread).toBe(true)
+    f.store.markWorksRead(f.bot.id,f.store.workActivities().find(v=>v.botId===f.bot.id)!.version)
+    expect(f.store.workActivities().find(v=>v.botId===f.bot.id)?.unread).toBe(false)
+    expect(f.store.listWorks(f.bot.id,undefined,"","desktop").items).toHaveLength(0)
+  })
   it("routes an active work reply to that exact thread and retains a completed target reference without auto-reopening",()=>{
     const f=fixture(),a=f.binding(),e=f.store.mock.inject(f.event(a.id))
     f.store.transition(e.taskId!,"running")

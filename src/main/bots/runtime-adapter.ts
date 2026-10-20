@@ -107,7 +107,12 @@ export function prepareBotThread(
         (!botMockMetadataSafe(metadata) ||
           metadata.botMockGrantVersion !== source.grantVersion ||
           metadata.botMockConversationId !== source.conversationId ||
-          metadata.botAudienceKey !== source.audienceKey)) ||
+          metadata.botAudienceKey !== source.audienceKey ||
+          metadata.workspacePath !== workspacePath ||
+          metadata.agentMode !== "normal" ||
+          metadata.disableAgentsPrompt !== true ||
+          !Array.isArray(metadata.allowedSkills) || metadata.allowedSkills.length!==0 ||
+          !Array.isArray(metadata.allowedExperts) || metadata.allowedExperts.length!==0)) ||
       (work &&
         (work.threadId !== threadId ||
           work.botId !== bot.id ||

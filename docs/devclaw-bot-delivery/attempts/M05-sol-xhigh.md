@@ -2,6 +2,16 @@
 
 状态：**M05-02/03 已经 root 独立验收并正常合入 cbfa8239；本树已FF到 a6f9ace1。现实施 M05-04，未冻结、未验收。** gpt-6.1-sol/xhigh 唯一写者，不派生。只读最新设计§11，旧Service清理留M05-05；不写Java/LF39、不操作用户App/profile/真实模型/数据库。
 
+## M05-04 用户暂停：仅看当前 UI（非候选，未验收）
+
+用户要求“先别验证功能，我先看当前UI交互”后停止新实施和功能验证，仅核对/清理本人测试与保存WIP。当前更多菜单模拟弹窗、渠道历史/来源提示、外部Work文字限定与资源区提示已写；原beta ChatContainer继续复用，普通本地功能未裁剪。已完成/待完成沿下方WIP事实，不把本提交作为完整04交付。
+
+- 本轮退出证据：`/tmp/m05-mock-boundary-second.log` **5文件19/19 exit0**（首轮18/19，Hook fixture传错filterScopedHooks签名已修）；`/tmp/m05-mock-ipc-first.log` **3文件26/26 exit0**，两命令有重叠。Web `/tmp/m05-mock-web-ui.log` exit0为UI初版；Node `/tmp/m05-mock-node-ui.log` exit2仅新增factory测试漏workspacePath，已补该测试字段但按暂停指令未重跑，不能宣称当前Node全过。
+- `/tmp/m05-mock-build-first.log` **exit0**，main/preload输出08:51:06，renderer随后完成；包含当前UI源码（modal单flight/epoch、cursor初始化哨兵、文字限定粘贴/既有payload守卫均08:49:48修改，早于该构建）。构建仅空envDir的m05-isolated，无真实env。暂停后没有重建。
+- 真实App夹具三轮均**未通过**：first超时因详情已开却等待“打开详情”；second在create消息受控输入尚未提交时未形成work；third加入两帧后实际原Runtime已走普通问答、work-create及work首轮（5次localhost固定调用），随后桌面修改结果显示超时。后续修改/完成/继续/离线/群完整旅程尚不能作为通过证据。无真实模型调用。
+- 三轮App均finally关闭本人Electron/localhost provider并清除自有profile；最后session16757已确认exit1，build88620 exit0；Node24976 exit2、IPC66010 exit0、boundary82041 exit0。暂停后ps未发现本人测试App、tsc/vitest/fixture进程，不存在需root接管的本人App PID；没有Java/DB/容器句柄。
+- root查看UI最短路径：本树已有 `out/main/index.js`，使用原beta Electron入口和**新的隔离profile**，Bots→当前Bot→右侧详情→更多Bot操作→“模拟 IM 接入”。不用旧partner-preview（会起Java/MySQL），不复用用户profile。这里只交UI供检查，功能未验收；源码WIP保存后停写等待新指令。
+
 ## M05-04 WIP 检查点（非候选，继续实施）
 
 - 当前真实完成：mock DTO/严格边界、原control.sqlite绑定/事件/回传表与BotTask原子接纳、固定渠道Thread/Work来源冻结、离线/撤销/未知送达、Host及7个desktop-only IPC/preload接口、标准Runtime可选工具/技能/专家allowlist及disabled HookScope、generic持久mock Thread执行守卫。原beta默认策略不变；新增 `omitPromptExtensions` 仅mock清私人扩展提示，不扩大旧 `disableAgentsPrompt` 语义。

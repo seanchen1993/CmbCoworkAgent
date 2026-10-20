@@ -34,10 +34,11 @@ const fixture = vi.hoisted(() => ({
   getWork: vi.fn(),
   createWork: vi.fn(),
   changeWork: vi.fn(),
-  markWorksRead: vi.fn()
+  markWorksRead: vi.fn(),
+  windowFor:vi.fn(()=>({})),mockBindings:vi.fn(),mockBinding:vi.fn(),createMockBinding:vi.fn(),injectMockEvent:vi.fn(),revokeMockBinding:vi.fn(),setMockOnline:vi.fn(),mockHistory:vi.fn()
 }))
 vi.mock("electron", () => ({
-  BrowserWindow: { getAllWindows: () => [] },
+  BrowserWindow: { getAllWindows: () => [], fromWebContents:fixture.windowFor },
   powerMonitor: { on: vi.fn() }
 }))
 vi.mock("../bots/local-service", () => ({
@@ -61,7 +62,7 @@ vi.mock("../bots/runtime-adapter", () => ({ prepareBotThread: vi.fn() }))
 vi.mock("./bot-files", () => ({ registerBotFileHandlers: vi.fn() }))
 import { registerBotHandlers } from "./bots"
 
-function register(deleteThread?: Parameters<typeof registerBotHandlers>[1]) {
+function register(deleteThread?: Parameters<typeof registerBotHandlers>[1], event:unknown={}) {
   const handlers = new Map<string, (...args: unknown[]) => unknown>()
   registerBotHandlers(
     {
@@ -69,13 +70,33 @@ function register(deleteThread?: Parameters<typeof registerBotHandlers>[1]) {
     } as unknown as IpcMain,
     deleteThread
   )
-  return (channel: string, ...args: unknown[]) => handlers.get(channel)!({}, ...args)
+  return (channel: string, ...args: unknown[]) => handlers.get(channel)!(event, ...args)
 }
 beforeEach(() => {
   vi.clearAllMocks()
   fixture.getHost.mockImplementation(() => fixture)
 })
 describe("Bot IPC boundaries", () => {
+  it("keeps simulation binding authority in a top-level local desktop window and rejects injected source/paths",()=>{
+    const frame={},event={senderFrame:frame,sender:{mainFrame:frame}}
+    const call=register(undefined,event)
+    const input={simulation:true,botId:"a",operationId:"bind",kind:"dm",channelKey:"dm-a",label:"Personal",allowedSenderIds:["alice"]}
+    call("bots:mock:create","local",input)
+    expect(fixture.createMockBinding).toHaveBeenCalledWith(input)
+    for(const extra of [{owner:true},{threadId:"private"},{source:{audienceKey:"desktop"}},{modelRef:"model"},{workspacePath:"/private"}])expect(()=>call("bots:mock:create","local",{...input,...extra})).toThrow()
+    const message={simulation:true,bindingId:"b",eventId:"e",messageId:"m",senderId:"alice",text:"Hello",mentionsBotIds:[]}
+    call("bots:mock:inject","local",message)
+    expect(fixture.injectMockEvent).toHaveBeenCalledWith(message)
+    for(const extra of [{origin:"user"},{mockSource:{}},{workId:"w"},{threadId:"private"},{credentials:"secret"}])expect(()=>call("bots:mock:inject","local",{...message,...extra})).toThrow()
+    expect(()=>call("bots:mock:inject","local",{...message,text:'<attachment filename="private">x</attachment>'})).toThrow()
+    expect(()=>register(undefined,{...event,senderFrame:{}})("bots:mock:create","local",input)).toThrow("桌面")
+    fixture.windowFor.mockReturnValueOnce(null as any)
+    expect(()=>call("bots:mock:create","local",input)).toThrow("桌面")
+    expect(()=>call("bots:mock:create","remote",input)).toThrow()
+    expect(()=>call("bots:mock:online","local","a","b","yes")).toThrow()
+    expect(()=>call("bots:mock:revoke","local","a","b",0)).toThrow()
+    expect(()=>call("bots:mock:history","local","a","b","x".repeat(1025))).toThrow()
+  })
   it("accepts only bounded local work controls and never renderer authority or conversation paths", () => {
     const call = register(),
       input = { botId: "a", operationId: "create", title: "Draft", goal: "Prepare" }

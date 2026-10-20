@@ -197,7 +197,10 @@ export function BotWorkPanel({
               {work.activity?.unread ? "● " : ""}
               {work.title}
             </span>
-            <small>{status(work)}</small>
+            <small>
+              {work.source ? "模拟渠道 · " : ""}
+              {status(work)}
+            </small>
           </button>
         ))}
       </div>

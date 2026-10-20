@@ -382,7 +382,7 @@ export class BotStore {
     return this.rows(
       `SELECT c.id AS bot_id,c.version,c.updated_at,c.preview,
       EXISTS(SELECT 1 FROM bot_work_items w JOIN bot_activity a ON a.kind='work' AND a.id=w.id
-        WHERE w.bot_id=c.id AND w.audience_key='desktop' AND a.attention_version>a.seen_version) AS unread
+        WHERE w.bot_id=c.id AND a.attention_version>a.seen_version) AS unread
       FROM bot_activity c JOIN bots b ON b.id=c.id WHERE c.kind='work-bot'`
     ).map((row) => ({
       botId: String(row.bot_id),
@@ -403,7 +403,7 @@ export class BotStore {
       if (!clock || throughVersion > Number(clock.version))
         throw new BotError("CONFLICT", "工作已读位置尚未存在")
       this.db.run(
-        `UPDATE bot_activity SET seen_version=MAX(seen_version,MIN(version,?)) WHERE kind='work' AND id IN (SELECT id FROM bot_work_items WHERE bot_id=? AND audience_key='desktop')`,
+        `UPDATE bot_activity SET seen_version=MAX(seen_version,MIN(version,?)) WHERE kind='work' AND id IN (SELECT id FROM bot_work_items WHERE bot_id=?)`,
         [throughVersion, botId]
       )
       this.changed()
@@ -2038,6 +2038,7 @@ export class BotStore {
     const outputs = parseBotOutputFiles(outputFiles)
     return this.transaction(() => {
       const source = this.getTask(fromTaskId)
+      if (source.mockSource) throw new BotError("CONFLICT", "模拟渠道不能调用本机协作")
       if (!ACTIVE_STATES.includes(source.state as (typeof ACTIVE_STATES)[number]))
         throw new BotError("CONFLICT", "当前任务已结束，不能继续交办")
       if (targetBotId === source.botId) throw new BotError("INVALID_INPUT", "不能向自己交办任务")

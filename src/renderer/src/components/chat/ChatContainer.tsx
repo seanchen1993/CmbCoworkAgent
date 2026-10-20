@@ -912,6 +912,8 @@ const CHAT_SURFACE_CONFIG: Record<ChatSurface, ChatSurfaceConfig> = {
 }
 
 export interface ManagedChatTurn {
+  /** A trusted external work stays text-only even when opened on the desktop. */
+  textOnlyReason?: string
   /** Host-owned file selection; returns references to files retained in its workspace. */
   attachFiles?(maxFiles: number, maxChars: number): Promise<FileAttachment[]>
   attachFileBytes?(
@@ -2853,6 +2855,7 @@ export function ChatContainer({
   )
 
   const handleAttachClick = useCallback(async () => {
+    if (managedTurn?.textOnlyReason) { setError(managedTurn.textOnlyReason); return }
     if (managedTurn?.attachFiles) {
       await addManagedAttachments(managedTurn.attachFiles)
       return
@@ -2887,6 +2890,7 @@ export function ChatContainer({
       e.preventDefault()
       e.stopPropagation()
       setDragOver(false)
+      if (managedTurn?.textOnlyReason) { setError(managedTurn.textOnlyReason); return }
       if (attachmentLoading || managedAttachmentPendingRef.current) return
       const files = e.dataTransfer.files
       if (files.length > 0) {
@@ -5351,12 +5355,12 @@ export function ChatContainer({
   const modCommands = useModCommands(threadId)
   const isModCommandInput = modCommands.handles(input.trim())
   const slash = useSlashCommands({
-    input,
-    skills: enabledSkillsForSlash,
+    input: managedTurn?.textOnlyReason ? "" : input,
+    skills: managedTurn?.textOnlyReason ? [] : enabledSkillsForSlash,
     skillSelected: selectedSkill !== null,
     browserSelected: selectedBuiltinBrowser,
     modCommands: managedTurn ? undefined : modCommands.items,
-    generalCommands: managedTurn ? [BUILTIN_BROWSER_COMMAND] : undefined
+    generalCommands: managedTurn?.textOnlyReason ? [] : managedTurn ? [BUILTIN_BROWSER_COMMAND] : undefined
   })
   const loadMoreWorkspaceMentionFiles = useCallback(
     async (signal: AbortSignal) => {
@@ -5399,7 +5403,7 @@ export function ChatContainer({
     cursorOffset: inputRef.current?.selectionStart ?? input.length,
     workspaceFiles,
     loadMoreWorkspaceFiles: loadMoreWorkspaceMentionFiles,
-    disabled: slash.mode.kind === "slash" || !workspacePath
+    disabled: Boolean(managedTurn?.textOnlyReason) || slash.mode.kind === "slash" || !workspacePath
   })
   const slashPopoverKind = slash.mode.kind
   const hasPendingGoalTransportPayload =
@@ -5780,6 +5784,7 @@ export function ChatContainer({
   const handleSubmit = async (e: React.FormEvent, defaultText = ""): Promise<void> => {
     e.preventDefault()
     const trimmedInput = defaultText || input.trim()
+    if (managedTurn?.textOnlyReason && (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser)) { setError(managedTurn.textOnlyReason); return }
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -9478,6 +9483,7 @@ export function ChatContainer({
                         ref={inputRef}
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
+                        onPaste={managedTurn?.textOnlyReason ? (e) => {if(e.clipboardData.files.length){e.preventDefault();setError(managedTurn.textOnlyReason!)}} : undefined}
                         onCompositionStart={() => {
                           isComposingRef.current = true
                         }}
@@ -9510,6 +9516,7 @@ export function ChatContainer({
                             popoverContent={ATTACH_FILE_POPOVER_CONTENT}
                             popoverClassName="max-w-64 leading-relaxed"
                             disabled={
+                              Boolean(managedTurn?.textOnlyReason) ||
                               (managedTurn?.attachFiles
                                 ? effectiveInputDisabled
                                 : effectiveComposerControlsDisabled) ||
@@ -9521,7 +9528,7 @@ export function ChatContainer({
                             className="size-7 rounded-md p-0 text-muted-foreground hover:bg-muted/50 disabled:opacity-40 disabled:cursor-not-allowed"
                             onClick={handleAttachClick}
                           />
-                          <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
+                          {!managedTurn?.textOnlyReason && <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />}
                           {!managedTurn && <ModelSwitcher threadId={threadId} />}
                           {!managedTurn && (
                             <AgentModeSwitcher

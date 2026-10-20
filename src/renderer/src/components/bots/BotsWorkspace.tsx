@@ -101,6 +101,7 @@ import { localBotClient } from "./client"
 import { botWorkClient } from "@/lib/bot-work-client"
 import { useBotWorks } from "./use-bot-works"
 import { BotWorkPanel } from "./BotWorkPanel"
+import { BotMockChannelDialog } from "./BotMockChannelDialog"
 import type { BotWorkItem } from "../../../../shared/bots/work"
 import { botChatAccent } from "@/lib/bot-chat-accent"
 import { BotWorkspaceMenu } from "./BotWorkspaceMenu"
@@ -411,6 +412,7 @@ function BotConversation({
   }, [sender, client, bot.id])
   const managedTurn = useMemo<ManagedChatTurn>(
     () => ({
+      ...(work?.source ? {textOnlyReason:"模拟渠道仅支持文字和同受众工作，不支持附件、技能或本机资源。"} : {}),
       submit,
       submitDraft,
       validateDraft: validateBotDraft,
@@ -432,6 +434,7 @@ function BotConversation({
       submit,
       submitDraft,
       reconcileDrafts,
+      work?.source,
       sender,
       sendingRevision,
       tasks,
@@ -665,6 +668,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const [renamingGroup, setRenamingGroup] = useState<BotGroup | null>(null)
   const [renaming, setRenaming] = useState<BotDefinition | null>(null)
   const [editor, setEditor] = useState<BotDefinition | "new" | null>(null)
+  const [mockBot, setMockBot] = useState<BotDefinition | null>(null)
   const editorTrigger = useRef<HTMLElement | null>(null)
   const profileMenuTrigger = useRef<HTMLButtonElement | null>(null)
   const openBotEditor = (bot: BotDefinition, trigger?: HTMLElement | null) => {
@@ -1746,6 +1750,12 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   <span>{selectedWork?.state === "completed" ? "已完成" : "独立工作"}</span>
                 </div>
               )}
+              {selectedWork?.source && (
+                <div className="bot-work-source" role="note">
+                  模拟渠道工作 ·
+                  此处文字与结果将回到原模拟渠道。仅支持文字和同受众工作，不提供本机文件、电脑或私人记忆。
+                </div>
+              )}
               {activeWorkId && !selectedWork ? (
                 <div className="bot-empty" role="status">
                   {works.error ?? "正在读取工作会话…"}
@@ -1957,6 +1967,14 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                       <Settings2 className="mr-2 size-4" />
                       编辑 Bot
                     </button>
+                    {client.mock && (
+                      <button
+                        className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
+                        onClick={() => setMockBot(selected)}
+                      >
+                        模拟 IM 接入
+                      </button>
+                    )}
                     <button
                       className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
                       onClick={() => void archive(selected)}
@@ -2059,6 +2077,11 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                       <p>{works.error ?? "正在读取工作会话，资源面板暂不可用…"}</p>
                       <button onClick={() => void works.refresh()}>重试</button>
                       <button onClick={() => selectWork(null)}>返回主对话</button>
+                    </div>
+                  ) : selectedWork?.source &&
+                    (detailTab === "files" || detailTab === "computer") ? (
+                    <div className="bot-detail-section" role="note">
+                      模拟渠道仅支持文字；此工作无法访问本机资料库和电脑。
                     </div>
                   ) : detailTab === "files" ? (
                     <BotFilesPanel
@@ -2197,6 +2220,27 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             returnFocusTo={editorTrigger.current}
             onClose={() => setRenaming(null)}
             onSaved={() => setRenaming(null)}
+          />
+        )}
+        {mockBot && client.mock && (
+          <BotMockChannelDialog
+            key={`${client.hostId}:${mockBot.id}`}
+            bot={mockBot}
+            client={client}
+            revision={snapshot?.revision ?? 0}
+            onClose={() => setMockBot(null)}
+            onOpenWork={(id) => {
+              updateView({
+                selectedId: mockBot.id,
+                groupId: null,
+                detailOpen: true,
+                detailTab: "details",
+                activeWorkIdByBot: {
+                  ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
+                  [mockBot.id]: id
+                }
+              })
+            }}
           />
         )}
         {editor && (

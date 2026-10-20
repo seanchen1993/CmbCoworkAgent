@@ -266,6 +266,8 @@ export class BotMockChannelStore {
     if (task.workId) {
       const work = this.owner.getWork(task.botId, task.workId)
       if (
+        task.threadId !== work.threadId ||
+        (task.origin.kind !== "user" && task.origin.kind !== "mock" && task.origin.kind !== "work") ||
         !work.source ||
         work.source.bindingId !== source.bindingId ||
         work.source.grantVersion !== source.grantVersion ||
@@ -273,6 +275,18 @@ export class BotMockChannelStore {
         work.source.conversationId !== source.conversationId
       )
         throw new BotError("CONFLICT", "工作与模拟受众不一致")
+      if (task.origin.kind === "mock") {
+        const event = this.rows("SELECT task_id FROM bot_mock_events WHERE binding_id=? AND event_id=?",[source.bindingId,source.eventId])[0]
+        if (task.origin.bindingId!==source.bindingId || task.origin.eventId!==source.eventId || event?.task_id!==task.id)
+          throw new BotError("CONFLICT","模拟执行与来源事件不一致")
+      }
+      if (task.origin.kind === "work") {
+        const command=this.rows("SELECT receipt FROM bot_work_commands WHERE source_task_id=? AND (json_extract(receipt,'$.task.id')=? OR json_extract(receipt,'$.id')=?) LIMIT 1",[task.origin.sourceTaskId,task.id,task.id])[0]
+        const receipt=command ? JSON.parse(String(command.receipt)) : null
+        const original=receipt?.task ?? receipt
+        if (!original || original.botId!==task.botId || original.id!==task.id || JSON.stringify(parseBotMockSource(original.mockSource))!==JSON.stringify(source))
+          throw new BotError("CONFLICT","工作原始指令与模拟受众不一致")
+      }
       return {
         source,
         threadId: work.threadId,
@@ -514,10 +528,11 @@ export class BotMockChannelStore {
       }
     const rows = this.rows(
       `SELECT * FROM (
-      SELECT 'event-'||e.event_id AS id,'user' AS kind,json_extract(e.payload_json,'$.text') AS text,json_extract(e.payload_json,'$.senderId') AS sender,json_extract(e.payload_json,'$.replyToMessageId') AS reply,COALESCE(t.state,e.execution_state) AS state,NULL AS work_id,e.created_at FROM bot_mock_events e LEFT JOIN bot_tasks t ON t.id=e.task_id WHERE e.binding_id=?
-      UNION ALL SELECT id,'bot',text,'Bot',reply_to_message_id,state,work_id,created_at FROM bot_mock_outbox WHERE binding_id=?
-    ) WHERE created_at<? OR (created_at=? AND id<?) ORDER BY created_at DESC,id DESC LIMIT 41`,
-      [bindingId, bindingId, time, time, key]
+        SELECT * FROM (SELECT 'event-'||e.event_id AS id,'user' AS kind,json_extract(e.payload_json,'$.text') AS text,json_extract(e.payload_json,'$.senderId') AS sender,json_extract(e.payload_json,'$.replyToMessageId') AS reply,COALESCE(t.state,e.execution_state) AS state,NULL AS work_id,e.created_at
+          FROM bot_mock_events e LEFT JOIN bot_tasks t ON t.id=e.task_id WHERE e.binding_id=? AND (e.created_at<? OR (e.created_at=? AND 'event-'||e.event_id<?)) ORDER BY e.created_at DESC,e.event_id DESC LIMIT 41)
+        UNION ALL SELECT * FROM (SELECT id,'bot',text,'Bot',reply_to_message_id,state,work_id,created_at FROM bot_mock_outbox WHERE binding_id=? AND (created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT 41)
+      ) ORDER BY created_at DESC,id DESC LIMIT 41`,
+      [bindingId,time,time,key,bindingId,time,time,key]
     )
     const items: BotMockFeedEntry[] = rows
       .slice(0, 40)
