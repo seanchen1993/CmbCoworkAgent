@@ -13,6 +13,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { botErrorMessage } from "@/lib/bot-error-message"
+import { assertBotMockText } from "../../../../shared/bots/mock-text"
 
 const LABELS: Record<string, string> = {
   queued: "等待执行",
@@ -223,19 +224,20 @@ export function BotMockChannelDialog({
     action(async () => {
       if (!binding) return
       const bId = binding.id
-      const event =
-        pending?.bindingId === bId
-          ? pending
-          : {
-              simulation: true as const,
-              bindingId: bId,
-              eventId: crypto.randomUUID(),
-              messageId: crypto.randomUUID(),
-              senderId: sender,
-              text,
-              mentionsBotIds: mention ? [bot.id] : [],
-              ...(reply ? { replyToMessageId: reply } : {})
-            }
+      const original = pending?.bindingId === bId ? pending : null
+      if (!original) assertBotMockText(text)
+      const event = original
+        ? original
+        : {
+            simulation: true as const,
+            bindingId: bId,
+            eventId: crypto.randomUUID(),
+            messageId: crypto.randomUUID(),
+            senderId: sender,
+            text,
+            mentionsBotIds: mention ? [bot.id] : [],
+            ...(reply ? { replyToMessageId: reply } : {})
+          }
       persist(event) // Store the original event before IPC; a lost reply must never create a new event.
       await api.inject(event)
       persist(null)

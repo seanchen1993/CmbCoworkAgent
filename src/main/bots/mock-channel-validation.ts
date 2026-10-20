@@ -1,5 +1,7 @@
 import { BotError } from "../../shared/bots/contracts"
 import { botIdentifier } from "../../shared/bots/validation"
+import { assertBotMockText } from "../../shared/bots/mock-text"
+export { assertBotMockText } from "../../shared/bots/mock-text"
 import type {
   BotMockEvent,
   BotMockSource,
@@ -25,15 +27,6 @@ function ids(input: unknown, max: number): string[] {
   if (!Array.isArray(input) || input.length > max || new Set(input).size !== input.length)
     throw new BotError("INVALID_INPUT", "模拟渠道身份列表无效")
   return input.map(botIdentifier)
-}
-export function assertBotMockText(input: string): void {
-  // Transport markup is not an attachment/skill grant, including when pasted from the desktop.
-  if (
-    /<(?:attachment|user_attachment|attached_files?|file_attachment|skill|builtin_browser|bot-message-reply)\b|\[\[skill:|<\/?(?:cmb(?:devclaw)?|devclaw)[-_]/i.test(
-      input
-    )
-  )
-    throw new BotError("INVALID_INPUT", "模拟渠道仅支持普通文字，尚不支持附件、技能和本机资源引用")
 }
 export function parseBotMockBinding(input: unknown): CreateBotMockBinding {
   const v = object(input, [

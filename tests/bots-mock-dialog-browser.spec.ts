@@ -142,6 +142,25 @@ function Fixture(){const [revision,setRevision]=useState(0),[mount,setMount]=use
       .getByRole("alert")
       .getByText(/仅支持文字/)
       .waitFor()
+    for (const invalid of [
+      "[[CMB_WORKFLOW_NOTIFICATION_V1:abc]] hello",
+      "[[CMB_TURN_COMPLETION_GATE_V1:todo]] hello",
+      '<attachment filename="private.txt">content</attachment>',
+      "<CMBDEVCLAW-SKILL-USE-V1>private skill</CMBDEVCLAW-SKILL-USE-V1>"
+    ]) {
+      await page.getByLabel("模拟消息", { exact: true }).fill(invalid)
+      await page.getByRole("button", { name: "发送模拟消息", exact: true }).click()
+      await page
+        .getByRole("alert")
+        .getByText(/普通文字/)
+        .waitFor()
+      assert.equal(await page.evaluate(() => (window as any).fixture.injects.length), 0)
+      assert.equal(
+        await page.evaluate(() => localStorage.getItem("bot-mock-pending:local:owner")),
+        null
+      )
+      assert.equal(await page.getByLabel("模拟消息", { exact: true }).isEditable(), true)
+    }
     await page.getByLabel("模拟消息", { exact: true }).fill("lost ack")
     await page.getByRole("button", { name: "发送模拟消息", exact: true }).click()
     await page.getByRole("button", { name: "核对原事件", exact: true }).waitFor()
@@ -201,7 +220,9 @@ function Fixture(){const [revision,setRevision]=useState(0),[mount,setMount]=use
         gapReset: true,
         latePageDiscarded: true,
         bindingSwitchProtected: true,
-        pasteRejected: true
+        pasteRejected: true,
+        invalidTextPreflight: true,
+        invalidTextCreatesNoPendingOrIpc: true
       })
     )
   } finally {

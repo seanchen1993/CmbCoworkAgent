@@ -7,6 +7,12 @@ import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { LocalBotHost } from "./host"
 import type { BotMockEvent } from "../../shared/bots/mock-channel"
+import {
+  TURN_COMPLETION_GATE_MARKER_PREFIX,
+  WORKFLOW_NOTIFICATION_MARKER_PREFIX,
+  WORKFLOW_NOTIFICATION_TURN_PROMPT,
+  WORKFLOW_NOTIFICATION_TURN_TRIGGER
+} from "../../shared/checkpoint-transcript"
 
 const databases: NativeSqliteAdapter[] = [],
   hosts: LocalBotHost[] = []
@@ -60,6 +66,67 @@ function finish(store: BotStore, id: string, text = "Actual answer") {
   store.settle(id, "completed", null, text)
 }
 describe("local simulated channels", () => {
+  it("rejects invisible reserved protocol text before channel or desktop work admission, while ordinary controls stay literal", async () => {
+    const f = fixture(),
+      a = f.binding()
+    const source = f.store.mock.inject(f.event(a.id, "source"))
+    f.store.transition(source.taskId!, "running")
+    const work = f.store.createWork(
+      { botId: f.bot.id, operationId: "create", title: "External", goal: "Draft" },
+      { taskId: source.taskId!, callId: "create", key: "create" }
+    )
+    finish(f.store, source.taskId!)
+    finish(f.store, work.task.id)
+    f.store.mock.setOnline(f.bot.id, a.id, false)
+    const acquire = vi.fn(() => null),
+      host = new LocalBotHost(f.store, { onAvailable: () => () => {}, acquire })
+    hosts.push(host)
+    const scalar = (sql: string) => Number(f.db.exec(sql)[0].values[0][0])
+    const taskCount = scalar("SELECT COUNT(*) FROM bot_tasks"),
+      eventCount = scalar("SELECT COUNT(*) FROM bot_mock_events")
+    const reserved = [
+      `${WORKFLOW_NOTIFICATION_MARKER_PREFIX}abc]] hello`,
+      `  ${TURN_COMPLETION_GATE_MARKER_PREFIX}todo]] hello`,
+      WORKFLOW_NOTIFICATION_TURN_TRIGGER,
+      WORKFLOW_NOTIFICATION_TURN_PROMPT
+    ]
+    for (const [i, text] of reserved.entries()) {
+      expect(() => host.injectMockEvent(f.event(a.id, `reserved-${i}`, { text }))).toThrow(
+        "内部协议标记"
+      )
+      expect(() =>
+        host.send({
+          botId: f.bot.id,
+          workId: work.work.id,
+          requestId: `reserved-desktop-${i}`,
+          message: text
+        })
+      ).toThrow("内部协议标记")
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(scalar("SELECT COUNT(*) FROM bot_tasks")).toBe(taskCount)
+    expect(scalar("SELECT COUNT(*) FROM bot_mock_events")).toBe(eventCount)
+    expect(acquire).not.toHaveBeenCalled()
+    for (const [i, text] of [
+      "/goal 目标",
+      "[coordinator] hello",
+      "#coordinator hello",
+      "说明中提到 [[CMB_WORKFLOW_NOTIFICATION_V1:abc]]"
+    ].entries()) {
+      const receipt = host.injectMockEvent(f.event(a.id, `literal-${i}`, { text }))
+      expect(f.store.getTask(receipt.taskId!).message).toBe(text)
+      const task = host.send({
+        botId: f.bot.id,
+        workId: work.work.id,
+        requestId: `literal-desktop-${i}`,
+        message: text
+      })
+      expect(task.message).toBe(text)
+    }
+    expect(scalar("SELECT COUNT(*) FROM bot_tasks")).toBe(taskCount + 8)
+    expect(scalar("SELECT COUNT(*) FROM bot_mock_events")).toBe(eventCount + 4)
+    expect(acquire).not.toHaveBeenCalled()
+  })
   it("inspects only exact persisted receipts after revocation or archive, without readmitting events", () => {
     const f = fixture(),
       a = f.binding(),

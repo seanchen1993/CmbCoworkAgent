@@ -1,6 +1,28 @@
 # M05 — beta 本地统一实施检查点
 
-状态：**M05-06 dd12f43f 已由root验收；04主路径94fb4fe9经root认可，失回执窄修9130de36a已保存。05默认断链/旧UI清理已自测，三视角确认P1/P2已收口，本段同次提交为返工冻结候选，停写待root独立审查。用户已取消旧专家数据处理，未做历史reader/导出/迁移，也未主动删除原库。** gpt-6.1-sol/xhigh 唯一写者，不派生、不push。下方旧暂停/“05未开始”等均为当时历史。
+状态：**M05-06 dd12f43f 已由root验收；04主路径94fb4fe9经root认可，失回执窄修9130de36a已保存。05默认断链/旧UI清理已自测，三视角P1/P2及共享保留协议输入预检已收口，本段同次提交为最终返工冻结候选，停写待root独立审查。用户已取消旧专家数据处理，未做历史reader/导出/迁移，也未主动删除原库。** gpt-6.1-sol/xhigh 唯一写者，不派生、不push。下方旧暂停/“05未开始”等均为当时历史。
+
+## 最终增量：共享 mock 文本预检与保留协议限制
+
+起点`4cdadbae87d443bfdafd1fc6743dab29c892881c`，本段同次提交为当前最终冻结候选，准确SHA见交付消息。没有再跑7call/12call模型旅程，前实际App证明保留。
+
+- 发现原文以`[[CMB_WORKFLOW_NOTIFICATION_V1:...]]`、`[[CMB_TURN_COMPLETION_GATE_V1:...]]`等内部协议开头会被通用历史过滤隐藏。新增唯一共享纯校验`src/shared/bots/mock-text.ts`：复用原`isWorkflowPlumbingTranscriptContent`和保留TURN trigger常量，明确拒收隐藏协议标记；不改全局过滤、不包裹全部文本。普通`/goal`、`[coordinator]`、`#coordinator`以及正文中提及标记依然原文允许。
+- 主模拟`inject/parseBotMockEvent`与桌面向外部work发送`enqueue`均使用同一断言。真实Host回归覆盖两入口4种保留串，拒绝后事件/Task计数不变、runtime acquire为0；3种普通前缀及说明性文本在两入口都原样接纳。
+- Dialog只对**新发送**在生成UUID/写入pending之前调用该共享校验；附件/skill/保留协议同源拒绝并保持输入可编辑，0inject/0pending。既有pending不按错误文字猜提交结果、不静默清掉；仍按原事件核对，撤销/归档的显式保留出口不变。这是文本模拟的内部协议例外，非普通命令黑名单。
+
+实际检查（Node22绝对路径同前）：
+
+| 检查 | 精确命令/日志 | 实际结果 |
+| --- | --- | --- |
+| 两入口Host/策略 | `node_modules/vitest/vitest.mjs run src/main/bots/mock-channel.test.ts src/main/bots/mock-runtime-policy.test.ts`；`/tmp/m05-05-shared-validation-core.log` | 13/13 exit0；提取共享前的`reserved-text.log`也13/13 |
+| 真实Dialog | `--import tsx tests/bots-mock-dialog-browser.spec.ts`；`/tmp/m05-05-shared-validation-dialog.log` | exit0：4种无效文本0IPC/0pending/仍可编辑，之后正常发送、lostack/revoked/结束核对重挂、171分页和迟到窗口保护均过 |
+| Node/Web类型 | `node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false`、同参数`tsconfig.web.json` | `/tmp/m05-05-shared-validation-node.log`、`web.log`均exit0 |
+| 正常隔离完整build | `node_modules/electron-vite/bin/electron-vite.js build --config /tmp/m05-05-shared-validation-vite.config.mjs --mode m05-isolated` | `/tmp/m05-05-shared-validation-build.log` exit0，main/preload/renderer完整重新构建、无测试entry，空envDir和环境白名单 |
+| 局部formatter | 5个本轮源码/测试Prettier check | `/tmp/m05-05-shared-validation-format.log` exit0，`git diff --check`通过 |
+
+最终产物仍`/tmp/m05-05-controls-out-6f0cuab0/main/index.js`，新proof`/tmp/m05-05-shared-validation-build-proof.json`。application 8050418bytes、sha256 `b6306a4aad47714c586cc1c454735ef99239a62d7b01a8464c19ed8eeeb6f786`；preload `faadd0bf8a9a24a99f90c30a8c239019e385cdeaff9b83db33b0daba910220a9`；renderer HTML `6736fec15091e191fc6beeac09f6c9634497620053403486a6aed98ab197bf49`。先前reserved-only/controls proof仅保留为历史，**当前以本段完整build proof为准**。
+
+所有自有Dialog App和测试/构建session已退出，无自有模型服务/App/Java/DB/容器残留。用户out602文件path/size/mtime_ns完全未变、原profile及旧库未触碰。不继续扩功能/验证，保存后停写待root验收。
 
 ## 三视角审查返工：P1 消息控制 / P2 恢复清理顺序（最终冻结）
 
