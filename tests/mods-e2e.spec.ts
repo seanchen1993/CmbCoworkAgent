@@ -309,7 +309,7 @@ async function runMain(failures: unknown[]): Promise<void> {
           env,
           timeout: 60_000
         })
-    if (focus === "agent-spawn") {
+    if (["agent-spawn", "config", "startup-model"].includes(focus ?? "")) {
       app.process().stdout?.on("data", chunk => appendFileSync(join(artifacts, "main.stdout.log"), chunk))
       app.process().stderr?.on("data", chunk => appendFileSync(join(artifacts, "main.stderr.log"), chunk))
     }

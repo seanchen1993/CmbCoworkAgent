@@ -126,7 +126,9 @@ export async function verifyStartupModel(
       });
       on("session.start",async($,e,next)=>{
         const before=next.budget;
-        const text=await $.model.complete({model:"default",system:"NATIVE_STARTUP_RULE",prompt:"STARTUP_INPUT",maxTokens:32});
+        const reply=await $.model.complete({model:"default",system:"NATIVE_STARTUP_RULE",prompt:"STARTUP_INPUT",maxTokens:32});
+        if(!reply.isAnswered)throw Error("startup model did not answer");
+        const text=reply.text;
         ${
           modelWaitMs
             ? `const after=next.budget;
@@ -153,8 +155,21 @@ export async function verifyStartupModel(
       assert(rows)
       return rows
     }
+    const startupCommands = await commands()
+    writeFileSync(
+      join(artifacts, "startup-registration.json"),
+      JSON.stringify(
+        {
+          commands: startupCommands,
+          logs: await page.evaluate((id) => window.api.mods.logs(id), id),
+          requests
+        },
+        null,
+        2
+      )
+    )
     assert(
-      (await commands()).some(
+      startupCommands.some(
         (row) => row.command === "startup-result" && row.name === "warm:STARTUP_MODEL_OK"
       )
     )
@@ -199,9 +214,12 @@ export async function verifyStartupModel(
       "explicit reload publishes the new model-backed registration"
     )
     await openModUserConfig(page, mod.pluginId)
-    await form.getByText("当前对话已应用", { exact: true }).waitFor({
-      timeout: modelWaitMs ? 60000 : 15000
-    })
+    await form
+      .getByRole("status")
+      .filter({ hasText: "当前对话已应用" })
+      .waitFor({
+        timeout: modelWaitMs ? 60000 : 15000
+      })
     assert(
       (await commands()).some(
         (row) => row.command === "startup-result" && row.name === "formal:STARTUP_MODEL_OK"

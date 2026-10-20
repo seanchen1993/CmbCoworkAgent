@@ -68,6 +68,32 @@ export class FunctionSessionActivity {
     return true
   }
 
+  /** Brief native reads may overlap an explicit click. Observe real settlement, never cancel work. */
+  async pauseForRetirementWhenIdle(signal: AbortSignal, waitMs = 250): Promise<boolean> {
+    signal.throwIfAborted()
+    if (this.pauseForRetirement()) return true
+    if (this.closed || this.paused) return false
+    return new Promise<boolean>((resolve, reject) => {
+      const finish = (paused: boolean, error?: unknown) => {
+        clearTimeout(timer)
+        this.retirementWaiters.delete(attempt)
+        signal.removeEventListener("abort", cancel)
+        if (error !== undefined) reject(error)
+        else resolve(paused)
+      }
+      const cancel = () => finish(false, signal.reason)
+      const attempt = () => {
+        if (this.closed) finish(false)
+        else if (this.pauseForRetirement()) finish(true)
+      }
+      const timer = setTimeout(() => finish(false), waitMs)
+      this.retirementWaiters.add(attempt)
+      signal.addEventListener("abort", cancel, { once: true })
+      if (signal.aborted) cancel()
+      else attempt()
+    })
+  }
+
   /** Explicit stop freezes new entry before awaiting already-owned foreground cleanup. */
   async pauseAndWaitForRetirement(): Promise<void> {
     if (this.closed || this.paused) throw new ModFunctionError("MODS_SESSION_CLOSED")

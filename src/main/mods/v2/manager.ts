@@ -545,7 +545,10 @@ export class FunctionModsManager {
   private readonly sessions = new Map<string, SessionEntry>()
   private readonly platformHub: PlatformCapabilityHub
   private readonly runtimeReservations = new Map<string, object>()
-  private readonly pendingSessionBuilds = new Map<string, Promise<SessionEntry>>()
+  private readonly pendingSessionBuilds = new Map<string, {
+    epoch: number
+    promise: Promise<SessionEntry>
+  }>()
   private readonly probeRetirements = new Map<string, Promise<void>>()
   private capacityReclaim?: Promise<void>
   private readonly hostOnlySites: FunctionHostOnlySites
@@ -855,11 +858,13 @@ export class FunctionModsManager {
         if (!this.host.captureSiteGuard) throw new ModFunctionError("MODS_UI_SITE_BINDING_REQUIRED")
         const captured = this.host.captureSiteGuard(workspace, threadId)
         const epoch = this.epoch(workspace)
+        const stopped = Boolean(this.reloadControl.error(workspace, threadId))
         return () => {
           captured()
           this.assertEndAdmission(workspace, threadId)
           this.host.assertThread?.(workspace, threadId)
-          if (this.closed || this.epoch(workspace) !== epoch || !this.host.protects?.(workspace))
+          if (this.closed || this.epoch(workspace) !== epoch || !this.host.protects?.(workspace) ||
+            Boolean(this.reloadControl.error(workspace, threadId)) !== stopped)
             throw new ModFunctionError("MODS_SCOPE_CHANGED")
         }
       },
@@ -2208,6 +2213,7 @@ export class FunctionModsManager {
           this.activateConversationOwner(replacement)
           this.clearRuntimeStop(key)
           control.applied()
+          this.hostOnlySites.closeThread(threadId)
         } catch (error) {
           if (replacement) {
             if (this.sessions.get(key) === replacement) this.sessions.delete(key)
@@ -2265,7 +2271,7 @@ export class FunctionModsManager {
           : "旧组件的操作或清理尚未确认结束，暂时不能重新初始化。请先核对未完成操作，稍后再试。")
     if (!previous && !this.reloadControl.error(workspace, threadId)) return view
     if (this.applying.has(key) || this.host.configurationBusy?.(threadId)) return view
-    if (previous && !previous.activity.pauseIfIdle(false)) return view
+    if (previous && !await previous.activity.pauseForRetirementWhenIdle(signal)) return view
     const lease = claimConfigurationReload(threadId)
     if (!lease) { previous?.activity.resume(); return view }
     let control: ReturnType<FunctionConfigurationReloadControl["begin"]>
@@ -2297,7 +2303,7 @@ export class FunctionModsManager {
           prepared.capacityReservation = reservation
           prepared.created = entry => { replacement = entry }
           guard()
-          if (previous?.activity.foregroundSize)
+          if (previous?.activity.retirementBlockingSize)
             throw new ModFunctionError("MODS_CONFIG_RELOAD_BUSY")
           if (previous && [...previous.snapshots.keys()].sort().join("\0") !==
             [...prepared.snapshots.keys()].sort().join("\0"))
@@ -2327,6 +2333,7 @@ export class FunctionModsManager {
           this.clearRuntimeStop(key)
           control.applied()
           if (this.lostEntries.get(key) === lost) this.lostEntries.delete(key)
+          this.hostOnlySites.closeThread(threadId)
         } catch (error) {
           if (replacement) {
             this.candidates.delete(replacement)
@@ -3707,12 +3714,19 @@ export class FunctionModsManager {
         "MODS_CONFIG_RELOAD_STOPPED: 组件运行已停止。请先核对未完成操作的结果，再到插件参数明确重新加载当前组合。")
     }
     let pending = this.pendingSessionBuilds.get(key)
+    if (pending && pending.epoch !== this.epoch(workspace)) {
+      // Catalog changes cancel the previous generation. New callers await its physical
+      // cleanup, but must never adopt its rejected initialization or replay its effects.
+      await pending.promise.catch(() => {})
+      return this.session(workspace, threadId, registrationOnly)
+    }
     if (!pending) {
-      pending = this.buildEntry(workspace, threadId, registrationOnly)
+      pending = { epoch: this.epoch(workspace),
+        promise: this.buildEntry(workspace, threadId, registrationOnly) }
       this.pendingSessionBuilds.set(key, pending)
     }
     try {
-      const created = await pending
+      const created = await pending.promise
       if (currentRuntimePluginSource()?.mode === "host" &&
         created.runtimeSourceToken !== captureRuntimePluginSourceToken())
         throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
@@ -6676,10 +6690,9 @@ export class FunctionModsManager {
     const enabled = this.host.enabled(workspace)
     const protects = readProtection()
     if (!enabled && !protects) return { state: "inactive", reason: "mods-disabled" }
-    if (this.reloadControl.error(workspace, threadId))
-      // Electron invoke preserves Error.message but drops custom properties such as code.
-      throw new ModFunctionError("MODS_CONFIG_RELOAD_STOPPED",
-        "MODS_CONFIG_RELOAD_STOPPED: 当前组件已停止；请查看恢复选项，核对未完成操作后明确重新加载。")
+    // A stopped guest cannot execute again, but the original application remains usable.
+    // Protected content still passes through the native-only publication pipeline.
+    const stopped = Boolean(this.reloadControl.error(workspace, threadId))
     if (this.pendingSiteMounts.size >= 32) throw new ModFunctionError("MODS_UI_SITE_MOUNT_CAPACITY")
     const request = { workspace, threadId, valid: true }
     const epoch = this.epoch(workspace)
@@ -6689,7 +6702,8 @@ export class FunctionModsManager {
       this.host.assertThread?.(workspace, threadId)
       this.assertEndAdmission(workspace, threadId)
       if (!request.valid || this.closed || this.epoch(workspace) !== epoch ||
-        this.host.enabled(workspace) !== enabled || readProtection() !== protects)
+        this.host.enabled(workspace) !== enabled || readProtection() !== protects ||
+        Boolean(this.reloadControl.error(workspace, threadId)) !== stopped)
         throw new ModFunctionError("MODS_SCOPE_CHANGED")
       if (retained) {
         const ambient = captureRuntimePluginSourceToken()
@@ -6707,7 +6721,7 @@ export class FunctionModsManager {
       assertCurrent()
       // A visible site is an entry point: approved modules must start without a command warmup.
       // Inspect grants before allocating a runtime, and retain cancellation during discovery.
-      let hasFunctions = enabled && (!!retained || this.hasSources(workspace, threadId))
+      let hasFunctions = enabled && !stopped && (!!retained || this.hasSources(workspace, threadId))
       // turn.step can retain a native-only session while installed functions await approval.
       // Its presence alone must not turn every ordinary transcript slot into a retired site.
       // Recheck current authority unless this exact resident has actual loaded functions.

@@ -7,7 +7,6 @@ import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionModsManager } from "./manager"
 import { compileFunctionPlugin } from "./loader"
 import { FunctionUserConfigValues } from "./user-config-values"
-import { functionSiteErrorCode } from "../../../renderer/src/lib/function-site-recovery"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -17,7 +16,8 @@ afterEach(async () => {
 async function fixture(
   drain: (batch: number) => Promise<void> = async () => {},
   configured = false,
-  loaded: (batch: number) => Promise<void> = async () => {}
+  loaded: (batch: number) => Promise<void> = async () => {},
+  protectedMode = false
 ) {
   const root = await mkdtemp(join(tmpdir(), "mods-runtime-recovery-"))
   const path = join(root, "plugin")
@@ -57,7 +57,10 @@ async function fixture(
     {
       plugins: () => [{ id: "p", name: "recovery-demo", path, enabled: true }],
       enabled: () => true,
-      publish: async (_workspace, value) => value,
+      protects: () => protectedMode,
+      captureSiteGuard: () => () => {},
+      publish: async (_workspace, value) => protectedMode
+        ? JSON.parse(JSON.stringify(value).replaceAll("PRIVATE_BODY", "SAFE_BODY")) : value,
       changed
     },
     () => {
@@ -114,14 +117,10 @@ it("retires only the lost entry and requires trusted explicit initialization wit
   await Promise.all(f.guests[0].map((guest) => guest.dispose()))
   expect(await running).toBeInstanceOf(Error)
   await expect(f.manager.siteRender(f.root, "lost", dead!, facts)).rejects.toThrow()
-  await expect(f.manager.siteMount(f.root, "lost", "AssistantMessage")).rejects.toMatchObject({
-    code: "MODS_CONFIG_RELOAD_STOPPED"
+  await expect(f.manager.siteMount(f.root, "lost", "AssistantMessage")).resolves.toBeNull()
+  await expect(f.manager.siteMountOutcome(f.root, "lost", "AssistantMessage")).resolves.toEqual({
+    state: "inactive", reason: "no-protection-or-functions"
   })
-  const stopped = await f.manager.siteMount(f.root, "lost", "AssistantMessage").catch(error => error as Error)
-  expect(stopped).toBeInstanceOf(Error)
-  // Electron serializes only the message, not ModFunctionError.code.
-  const remote = new Error(`Error invoking remote method: ${(stopped as Error).message}`)
-  expect(functionSiteErrorCode(remote)).toBe("MODS_CONFIG_RELOAD_STOPPED")
   await expect(f.manager.commands(f.root, "lost")).resolves.toEqual([])
   expect(f.read("starts")).toBe(2)
   expect(f.read("effects")).toBe(1)
@@ -155,6 +154,31 @@ it("retires only the lost entry and requires trusted explicit initialization wit
   expect((await f.manager.siteRender(f.root, "healthy", healthy!, facts))?.generation).toBe(
     stable?.generation
   )
+})
+
+it("keeps stopped transcript content protected without replaying guests and retires it on recovery", async () => {
+  const f = await fixture(undefined, false, undefined, true)
+  const [command] = await f.manager.commands(f.root, "lost")
+  await Promise.all(f.guests[0].map(guest => guest.dispose()))
+  await expect(f.manager.runCommand(f.root, "lost", command, "",
+    new AbortController().signal)).rejects.toThrow()
+  const owner = await f.manager.siteMount(f.root, "lost", "AssistantMessage")
+  expect(owner).toBeTypeOf("string")
+  const frame = await f.manager.siteRender(f.root, "lost", owner!, {
+    text: "PRIVATE_BODY", isFirstOfReply: true
+  })
+  expect(JSON.stringify(frame)).toContain("SAFE_BODY")
+  expect(JSON.stringify(frame)).not.toContain("PRIVATE_BODY")
+  expect(f.read("starts")).toBe(1)
+  expect(f.read("effects")).toBeUndefined()
+  const signal = new AbortController().signal
+  const view = await f.manager.userConfig(f.root, "lost", "p", signal, () => {})
+  await f.manager.reloadUserConfig(f.root, "lost", "p", view.digest,
+    view.savedRevision, signal, () => {})
+  await expect(f.manager.siteRender(f.root, "lost", owner!, {
+    text: "PRIVATE_BODY", isFirstOfReply: true
+  })).rejects.toThrow()
+  expect(f.read("starts")).toBe(2)
 })
 
 it("offers explicit recovery when settings are opened directly after guest loss", async () => {

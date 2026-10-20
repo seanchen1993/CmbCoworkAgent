@@ -18,6 +18,8 @@ import {
   releaseLocalThreadRunLease
 } from "../../agent/thread-run-lease"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
+import type { FunctionSessionActivity } from "./session-activity"
+import type { FunctionSession } from "./session"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -180,6 +182,45 @@ async function fixture(startup = 'await $.store.set("startup",options.tone)', ho
     reload
   }
 }
+
+it("a new catalog generation never inherits the rejected build of an invalidated source", async () => {
+  const f = await fixture()
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const load = f.load.getMockImplementation()!
+  f.load.mockImplementationOnce(async (...args) => {
+    entered.resolve()
+    await release.promise
+    return load(...args)
+  })
+  const old = f.manager.commands(f.root, f.threadId).then(() => undefined, error => error)
+  await entered.promise
+  f.manager.invalidate(f.root)
+  const fresh = f.manager.commands(f.root, f.threadId)
+  release.resolve()
+  expect(await old).toBeInstanceOf(Error)
+  expect((await fresh)[0].name).toBe("warm")
+  expect(f.load).toHaveBeenCalledTimes(2)
+}, 8000)
+
+it("explicit reload retires cancellable native UI while still draining its real resource", async () => {
+  const f = await fixture()
+  await f.manager.commands(f.root, f.threadId)
+  const { sessions } = f.manager as unknown as {
+    sessions: Map<string, { activity: FunctionSessionActivity; session: FunctionSession }>
+  }
+  const entry = sessions.get(JSON.stringify([f.root, f.threadId]))!
+  const drawing = entry.activity.retainRetirableUiResource()
+  const close = entry.session.close.bind(entry.session)
+  vi.spyOn(entry.session, "close").mockImplementation((strict) => {
+    drawing.release()
+    return close(strict)
+  })
+  f.save("formal")
+  expect(await f.reload()).toMatchObject({ state: "applied" })
+  expect(entry.activity.size).toBe(0)
+  expect((await f.manager.commands(f.root, f.threadId))[0].name).toBe("formal")
+}, 8000)
 
 async function secondPlugin(f: Awaited<ReturnType<typeof fixture>>, startup = "") {
   const path = join(f.root, "second")

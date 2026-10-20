@@ -2,6 +2,34 @@ import { expect, it, vi } from "vitest"
 import { FunctionSessionActivity } from "./session-activity"
 import { dispatchFunctionStream } from "./stream-dispatcher"
 
+it("explicit retirement observes a short native read settling without cancelling it", async () => {
+  const activity = new FunctionSessionActivity()
+  const release = activity.retainFresh()
+  const controller = new AbortController()
+  const admission = activity.pauseForRetirementWhenIdle(controller.signal)
+  expect(activity.foregroundSize).toBe(1)
+  release()
+  expect(await admission).toBe(true)
+  expect(controller.signal.aborted).toBe(false)
+  expect(() => activity.retainFresh()).toThrow("MODS_CONFIG_APPLYING")
+  activity.resume()
+  activity.retainFresh()()
+})
+
+it("bounded retirement admission leaves running work untouched on timeout or cancellation", async () => {
+  const activity = new FunctionSessionActivity()
+  const release = activity.retainFresh()
+  const controller = new AbortController()
+  expect(await activity.pauseForRetirementWhenIdle(controller.signal, 1)).toBe(false)
+  expect(activity.foregroundSize).toBe(1)
+  const pending = activity.pauseForRetirementWhenIdle(controller.signal)
+  const rejected = expect(pending).rejects.toThrow("caller left")
+  controller.abort(Error("caller left"))
+  await rejected
+  release()
+  activity.retainFresh()()
+})
+
 it.each([false, true])(
   "native retainFresh does not lend its token to an expired ordinary ALS caller (throws=%s)",
   async (failed) => {
