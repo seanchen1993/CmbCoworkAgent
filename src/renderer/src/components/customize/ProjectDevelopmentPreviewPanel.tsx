@@ -359,7 +359,7 @@ function ScopedPreview({
             threadId={threadId} digest={draft.digest} journey={draft.journey} />}
         </article>
       ))}
-      {api.stageDebug && <details className="rounded-xl border p-3" open={debugOpen}
+      {api.stageDebug && <details data-creator-guide="stage-debug" className="rounded-xl border p-3" open={debugOpen}
         onToggle={event => setDebugOpen(event.currentTarget.open)}>
         <summary className="cursor-pointer text-sm font-medium"
           onClick={() => { openedByReview.current = false }}>按阶段修改与隔离调试</summary>

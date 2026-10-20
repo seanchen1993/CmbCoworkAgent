@@ -6,7 +6,9 @@ import {
   developmentRepairPrompt,
   developmentNextStep
 } from "./development-trial-view"
-import { WandSparkles } from "lucide-react"
+import { BookOpen, WandSparkles } from "lucide-react"
+import { AnchoredGuide } from "../guides/AnchoredGuide"
+import { creatorWorkspaceGuide, creatorWorkspaceGuideSteps } from "./creator-workspace-guide"
 import {
   Dialog, DialogContent, DialogDescription, DialogTitle, DialogTrigger
 } from "@/components/ui/dialog"
@@ -191,6 +193,7 @@ function ScopedDevelopment({
   promotionBlocked: boolean
 }) {
   const [open, setOpen] = useState(false)
+  const [guideRequest, setGuideRequest] = useState(0)
   const workspaceBody = useRef<HTMLElement>(null)
   const focusChatAfterClose = useRef(false)
   const [status, setStatus] = useState<DevelopmentStatus | null>(null)
@@ -555,8 +558,11 @@ function ScopedDevelopment({
           : "mx-auto max-w-5xl space-y-5 rounded-xl border bg-card p-4"
       }
     >
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div data-creator-guide="overview" className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="font-semibold">{mode === "chat" ? "当前创作" : "在所选聊天使用创造者模式"}</h2>
+        <AnchoredGuide active={!!status && (mode === "entry" || open)}
+          config={creatorWorkspaceGuide} steps={creatorWorkspaceGuideSteps}
+          rootRef={workspaceBody} request={guideRequest} />
         <button
           type="button"
           className="rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent"
@@ -603,7 +609,7 @@ function ScopedDevelopment({
           请在这里核对整轮结果，再保存或导出插件。
         </p>}
         {mode === "entry" && showNavigation && <CreatorWorkspaceNavigation onNavigate={navigate} currentStep={nextWorkspaceStep} />}
-        {onReturnToChat && <button type="button" className={button}
+        {onReturnToChat && <button type="button" className={button} data-creator-guide="chat"
           onClick={() => {
             focusChatAfterClose.current = true
             setOpen(false)
@@ -1073,7 +1079,7 @@ function ScopedDevelopment({
         </details>
       )}
       {status?.enabled && (
-        <details className="rounded-lg border px-3 py-2 text-xs text-muted-foreground"
+        <details data-creator-guide="project-preview" className="rounded-lg border px-3 py-2 text-xs text-muted-foreground"
           open={projectPreviewOpen} onToggle={(event) => setProjectPreviewOpen(event.currentTarget.open)}>
           <summary className="cursor-pointer">高级：独立项目试用</summary>
           {projectPreviewOpen && <div data-creator-stage-debug-review><ProjectDevelopmentPreviewPanel
@@ -1244,6 +1250,11 @@ function ScopedDevelopment({
           创造者模式
         </button>
       </div>
+      <button type="button" title="查看插件制作与阶段调试的分步说明"
+        className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent"
+        onClick={() => { setOpen(true); setGuideRequest(current => current + 1) }}>
+        <BookOpen className="size-3.5" aria-hidden="true" />使用指引
+      </button>
       <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
         <button
