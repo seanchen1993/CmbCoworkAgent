@@ -1,4 +1,5 @@
 import { resolve } from "node:path"
+import { SelectedModelUnavailableError } from "../models/selection-error"
 import type {
   HarnessAgentmdLoadStatusItem,
   HarnessDeployUnitMapping,
@@ -709,7 +710,10 @@ export async function resolveStandardTurnRouting(
     requestedModelId: input.requestedModelId,
     continuation: input.continuation,
     routingMode: input.routingMode ?? getGlobalRoutingMode()
-  }).catch(() => null)
+  }).catch((error) => {
+    if (error instanceof SelectedModelUnavailableError) throw error
+    return null
+  })
   const effectiveModelId = result?.resolvedModelId ?? input.requestedModelId
   const primaryTier = result?.resolvedTier ?? "premium"
   return {

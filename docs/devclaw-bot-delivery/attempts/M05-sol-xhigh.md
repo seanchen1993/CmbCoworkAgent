@@ -2,6 +2,28 @@
 
 状态：**M05-02/03 已经 root 独立验收并正常合入 cbfa8239；本树已FF到 a6f9ace1。现实施 M05-04，未冻结、未验收。** gpt-6.1-sol/xhigh 唯一写者，不派生。只读最新设计§11，旧Service清理留M05-05；不写Java/LF39、不操作用户App/profile/真实模型/数据库。
 
+## 模型选择窄修：缺配置/凭据的明确 pinned 选择不再静默换供应商
+
+用户仅重新授权排查示例任务fetch failed与DeepSeek选择保持问题，**完整M05-04/05功能验证仍暂停**。从clean `a81b5f455` 实施root批准的最小改动；未操作用户/隔离预览UI、profile、真实密钥/模型、Java/网关/ES/DB。
+
+### 诊断与范围
+
+- 只读代码确认BotEditor选择经bots:update→Host→Store带CAS持久model_ref；原主会话/独立任务Runtime都取Bot.modelRef。root提供当前预览运行证据：Bot已保存custom:cheap，但该拷贝profile缺对应凭据，路由从custom:cheap静默改为builtin:minimax，且launcher另有人为死代理。凭据恢复/移除预览代理由root独自处理，本人没有读取或输出凭据，也不把环境修复归为产品代码修复。
+- `routing/index.ts` 只在pinned且requestedModelId非空时，缺配置或空白凭据抛 `SelectedModelUnavailableError`，不调用默认选择。`models/selection-error.ts` 仅显示安全ref（白名单格式）与“管理模型与API配置”补齐/重新选择提示；任意URL/凭据式输入不回显。未指定/空白请求和auto原逻辑保留。
+- `standard-thread-turn.ts` 包装层原本吞所有routing错误并可能继续；本次只重新抛出这类明确选择错误，其余原容错不变。有效pin仍只有同一模型候选；不改变Bot存储、UI、既有runtime能力/调度、其他provider或自动路由。
+- custom-models参数文件直接外部修改的内存raw cache失效问题只报告未扩修；现UI保存会更新cache并setDefault广播，root已选择同profile退出重开载入。没有另建配置迁移或模型引擎。
+
+### 必要针对性验证
+
+node均指定Node22，workdir本实施树。以下不是完整M05功能验收。
+
+1. `node node_modules/vitest/vitest.mjs run src/main/routing/model-registry-integration.test.ts src/main/agent/pinned-model-routing.test.ts src/main/agent/standard-thread-turn.test.ts` → **3文件17/17 exit0**，`/tmp/m05-pinned-model-second.log`。覆盖显式pin删除/无key拒绝、同ref补合成key后恢复、默认resolver零调用、包装层错误不吞、Runtime和ChatOpenAI构造spy均0、有效pin唯一候选、安全错误不回显带凭据URL；原auto容量与continuation检查保持。首轮 `/tmp/m05-pinned-model-first.log` **exit1**：13项通过，新wrapper suite因fixture漏harness-board模块mock在导入时失败；仅补fixture隔离后通过，未掩盖。
+2. `node node_modules/vitest/vitest.mjs run src/main/bots/runtime-adapter.test.ts -t 'initializes a new default-following Bot|does not invent a model'` → **2/2 exit0、54项未运行**，`/tmp/m05-pinned-model-bot.log`。确认新Bot默认模型首次绑定、默认变化与显式Bot pin，以及无可用模型不伪造；没有重跑无关全套。
+3. `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false` → **exit0**，`/tmp/m05-pinned-model-node.log`。
+4. root原生退出其预览70535/70525、ps确认退出并释放out后，`node node_modules/electron-vite/bin/electron-vite.js build --config /tmp/m05-electron-vite.config.mjs --mode m05-isolated` → **exit0**，`/tmp/m05-pinned-model-build.log`。沿原空envDir隔离配置，不带真实env/凭据、不启动App；out包含本次修复及先前融合UI。
+
+本轮仅5个产品/测试文件与本人attempt，git diff --check通过；新增小文件按仓库Prettier，既有大文件仅窄diff。所有本人Vitest/tsc/build进程均退出，无App/provider/Java/DB句柄。提交后停写，root负责独立检查和同profile真实DeepSeek短回复；本人没有宣称真实DeepSeek已验收。旧mock修改结果超时和M05-05清理不在本次处理范围。
+
 ## M05-UI：融合界面展示切片（仅编译/构建，停写待 root 看 UI）
 
 本轮用户只授权先看融合后的完整UI，功能验证继续暂停。从clean `a33259483` 增量完成以下5个renderer文件，不改主进程/IPC/Runtime/Store/Java/DB/旧数据，不新增测试、不运行任何功能单测/E2E/模型或App。
