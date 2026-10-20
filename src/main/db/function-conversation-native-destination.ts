@@ -135,42 +135,55 @@ function destinationSnapshot(db: NativeSqliteAdapter, original: MappingEntries,
   const values = Object.freeze([target.threadId, parent.threadId, checkpointThreadId,
     destinationThreadId, parent.conversationId, parent.branchId, target.conversationId,
     target.branchId, target.logicalSessionId, parent.logicalSessionId])
-  const checkThread = (row: SqlRow, name: string, incarnation: ThreadIncarnation) => {
-    const createdAt = row[`${prefix}${name}_created_at`], rawMetadata = row[`${prefix}${name}_metadata`]
+  // Only fixed SQL alias strings are reused. Every read and incarnation interpretation stays fresh.
+  const createdAtKeys: string[] = [], metadataKeys: string[] = [], refKeys: string[][] = []
+  for (let index = 0; index < threads.length; index++) {
+    createdAtKeys[index] = `${prefix}${threads[index]}_created_at`
+    metadataKeys[index] = `${prefix}${threads[index]}_metadata`
+  }
+  for (let index = 0; index < refs.length; index++) {
+    const keys: string[] = []
+    for (let field = 0; field < fields.length; field++)
+      keys[field] = `${prefix}${refs[index]}_${fields[field]}`
+    refKeys[index] = keys
+  }
+  const aliasCollisionsKey = `${prefix}alias_collisions`
+  const checkThread = (row: SqlRow, index: number, incarnation: ThreadIncarnation) => {
+    const createdAt = row[createdAtKeys[index]], rawMetadata = row[metadataKeys[index]]
     if (typeof createdAt !== "number" ||
       (rawMetadata !== null && typeof rawMetadata !== "string") ||
       !matchesThreadIncarnation({ created_at: createdAt, metadata: rawMetadata }, incarnation)) fail()
   }
-  const checkRef = (row: SqlRow, name: string, ref: FunctionConversationRef) => {
-    if (row[`${prefix}${name}_kind`] !== ref.kind ||
-      row[`${prefix}${name}_checkpoint_namespace`] !== ref.checkpointNamespace ||
-      row[`${prefix}${name}_thread_id`] !== ref.threadId ||
-      row[`${prefix}${name}_incarnation_key`] !== incarnationKey(ref.incarnation) ||
-      row[`${prefix}${name}_workspace`] !== ref.workspace) fail()
+  const checkRef = (row: SqlRow, index: number, ref: FunctionConversationRef) => {
+    const keys = refKeys[index]
+    if (row[keys[1]] !== ref.kind ||
+      row[keys[2]] !== ref.checkpointNamespace ||
+      row[keys[3]] !== ref.threadId ||
+      row[keys[4]] !== incarnationKey(ref.incarnation) ||
+      row[keys[5]] !== ref.workspace) fail()
   }
   return () => {
     const row = read(values)
-    if (!row || row[`${prefix}alias_collisions`] !== 0) fail()
+    if (!row || row[aliasCollisionsKey] !== 0) fail()
     for (let index = 0; index < original.length; index++) {
       const entry = original[index]
       if (row[entry[0]] !== entry[1]) fail()
     }
-    checkThread(row, "target_thread", target.incarnation)
-    checkThread(row, "parent_thread", parent.incarnation)
-    checkThread(row, "checkpoint_thread", checkpoint)
-    checkThread(row, "destination_thread", destination)
-    checkRef(row, "target_ref", target)
-    checkRef(row, "parent_ref", parent)
+    checkThread(row, 0, target.incarnation)
+    checkThread(row, 1, parent.incarnation)
+    checkThread(row, 2, checkpoint)
+    checkThread(row, 3, destination)
+    checkRef(row, 0, target)
+    checkRef(row, 1, parent)
     // The original child relation must still agree with its recorded invocation.
-    if (row[`${prefix}target_ref_invocation_id`] !== invocationId) fail()
-    if (row[`${prefix}destination_thread_metadata`] !== originalMetadata) fail()
+    if (row[refKeys[0][0]] !== invocationId) fail()
+    if (row[metadataKeys[3]] !== originalMetadata) fail()
     const result: ScopeThread[] = []
     const incarnations = [target.incarnation, parent.incarnation, checkpoint, destination]
     for (let index = 0; index < threads.length; index++) {
-      const name = threads[index]
       result[index] = { id: values[index], incarnation: incarnations[index],
-        createdAt: row[`${prefix}${name}_created_at`] as number,
-        metadata: row[`${prefix}${name}_metadata`] as string | null }
+        createdAt: row[createdAtKeys[index]] as number,
+        metadata: row[metadataKeys[index]] as string | null }
     }
     return result
   }

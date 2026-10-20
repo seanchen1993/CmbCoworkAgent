@@ -68,6 +68,53 @@ describe("original native shared destination data", () => {
     prepare.mockRestore()
   })
 
+  it("keeps every fixed thread interpretation fresh after a temporary source parser replacement", () => {
+    const f = fixture(), child = f.create()
+    const raw = f.db.exec("SELECT metadata FROM threads WHERE thread_id=?", [f.parent.threadId])[0]
+      .values[0][0] as string
+    const parseOriginal = JSON.parse
+    const changed = JSON.stringify({ ...parseOriginal(raw), cmb_thread_incarnation: randomUUID() })
+    f.db.run("UPDATE threads SET metadata=? WHERE thread_id=?", [changed, f.parent.threadId])
+    let substitute = false
+    const parse = vi.spyOn(JSON, "parse").mockImplementation((text, reviver) =>
+      parseOriginal(substitute && text === changed ? raw : text, reviver))
+    try {
+      const original = readFunctionConversationNativeDestination(f.db, child, f.parent, () => {
+        f.guard()
+        substitute = true
+      })
+      // The next data-only check has the same raw SQL text but the restored real interpretation.
+      // A callback-time private interpretation must never become a retained authority cache.
+      substitute = false
+      expect(() => assertFunctionConversationNativeDestinationDataCurrent(original, f.db)).toThrow(
+        "MODS_CONVERSATION_DESTINATION_CHANGED")
+    } finally { parse.mockRestore() }
+  })
+
+  it("still parses each fixed thread's unchanged and changed metadata on every fresh data read", () => {
+    const f = fixture(), child = f.create()
+    const original = readFunctionConversationNativeDestination(f.db, child, f.parent, f.guard)
+    const raw = f.db.exec("SELECT metadata FROM threads WHERE thread_id=?", [f.parent.threadId])[0]
+      .values[0][0] as string
+    const parseOriginal = JSON.parse
+    const changed = JSON.stringify({ ...parseOriginal(raw), extra: "same incarnation, new text" })
+    let initialReads = 0, changedReads = 0
+    const parse = vi.spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+      if (text === raw) initialReads++
+      if (text === changed) changedReads++
+      return parseOriginal(text, reviver)
+    })
+    try {
+      assertFunctionConversationNativeDestinationDataCurrent(original, f.db)
+      assertFunctionConversationNativeDestinationDataCurrent(original, f.db)
+      expect(initialReads).toBe(6) // target, parent and checkpoint are three independent checks.
+      f.db.run("UPDATE threads SET metadata=? WHERE thread_id=?", [changed, f.parent.threadId])
+      assertFunctionConversationNativeDestinationDataCurrent(original, f.db)
+      assertFunctionConversationNativeDestinationDataCurrent(original, f.db)
+      expect(changedReads).toBe(6)
+    } finally { parse.mockRestore() }
+  })
+
   it.each(["target_json", "parent_json", "invocation_id", "checkpoint_thread_id",
     "checkpoint_incarnation", "destination_thread_id", "destination_incarnation",
     "metadata_json", "metadata_digest"])("reads a new %s mapping value after the original source returns",
