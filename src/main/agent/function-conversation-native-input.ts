@@ -217,7 +217,9 @@ export function captureFunctionConversationNativeInput(
         !transcriptData.matches(originalWrite))) fail()
     }
     const database = getDb(), thread = getThreadCore(threadId)
-    if (!thread || canonical(workspacePath(thread.metadata)) !== workspace) fail()
+    // Keep the original persistent key, but resolve both sides equally for Windows 8.3 aliases.
+    const admittedWorkspace = canonical(workspace)
+    if (!thread || canonical(workspacePath(thread.metadata)) !== admittedWorkspace) fail()
     const incarnation = Object.freeze(captureThreadIncarnation(thread))
     const lease = getLocalThreadRunLease(threadId), ownsLease = captureLocalThreadRunLease(threadId)
     if (!lease || !ownsLease || lease.runId !== physicalRunId) fail()
@@ -243,7 +245,7 @@ export function captureFunctionConversationNativeInput(
         const original = directory(path), target = path === workspace ? original : directory(workspace)
         if (!sameDirectory(original, directoryIdentity) || !sameDirectory(target, directoryIdentity))
           fail()
-      } else if (canonical(path) !== workspace) fail()
+      } else if (canonical(path) !== admittedWorkspace || canonical(workspace) !== admittedWorkspace) fail()
       assertDataCurrent()
     }
     const assertCurrent = () => {

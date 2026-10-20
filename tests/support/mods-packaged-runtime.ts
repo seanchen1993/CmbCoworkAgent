@@ -321,6 +321,15 @@ export async function verifyPackagedRuntime(
         (id) => window.api.threads.getMessages(id),
         historyThread
       )
+      evidence.history = {
+        modelRequests: server!.requests.length,
+        messages: messages.map(row => ({ role: row.role, content: row.content.slice(0, 160) }))
+      }
+      const errorCard = page.getByText("代理出错", { exact: true })
+      if (await errorCard.isVisible()) {
+        const reason = (await errorCard.locator("..").innerText()).slice(0, 800)
+        throw Error(`PACKAGED_ORDINARY_CHAT_FAILED: ${reason}`)
+      }
       return (
         messages.length === 2 &&
         messages[1].content === "SPAWN_COLD_DONE" &&
@@ -388,6 +397,7 @@ export async function verifyPackagedRuntime(
     evidence.complete = true
   } catch (reason) {
     failures.push(reason)
+    evidence.failure = reason instanceof Error ? reason.message.slice(0, 1200) : "Unknown failure"
     if (reason instanceof WindowsProcessQueryError)
       evidence.processQueryFailure = reason.diagnostics
   } finally {

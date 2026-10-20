@@ -115,7 +115,10 @@ export function captureFunctionConversationNativeRun(
   const thread = readFunctionConversationThreadIdentityCurrent(database, authority.threadId)
   if (!thread) changed()
   const admittedMetadata = thread.metadata, admittedPath = workspacePath(admittedMetadata)
-  if (threadWorkspace(admittedMetadata, admittedPath) !== authority.workspace) changed()
+  // The persistent workspace key uses fs.realpathSync, which preserves Windows 8.3
+  // segments. Compare both paths with the native resolver without changing stored keys/grants.
+  const admittedWorkspace = threadWorkspace(null, authority.workspace)
+  if (threadWorkspace(admittedMetadata, admittedPath) !== admittedWorkspace) changed()
   // Fix the proof mode at capture. Windows can cheaply resolve the actual directory object
   // through either path, including junctions. Never downgrade an admitted identity to strings.
   let directory: DirectoryIdentity | undefined
@@ -161,7 +164,7 @@ export function captureFunctionConversationNativeRun(
       if (!sameDirectory(metadataDirectory, directory) ||
         !sameDirectory(canonicalDirectory, directory)) changed()
     } else if (threadWorkspace(current.metadata, sameMetadata ? admittedPath : undefined) !==
-      authority.workspace) changed()
+      admittedWorkspace || threadWorkspace(null, authority.workspace) !== admittedWorkspace) changed()
     const actualLease = getLocalThreadRunLease(authority.threadId)
     if (!actualLease || actualLease.threadId !== lease.threadId ||
       actualLease.owner !== lease.owner || actualLease.runId !== lease.runId ||

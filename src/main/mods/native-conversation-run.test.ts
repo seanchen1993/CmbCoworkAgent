@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, rmdirSync,
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, rmdirSync,
   statSync, symlinkSync, unlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, relative, resolve } from "node:path"
@@ -81,8 +81,7 @@ afterAll(async () => {
   rmSync(directory, { recursive: true, force: true })
 })
 
-function fixture() {
-  const path = realpathSync(mkdtempSync(join(directory, "workspace-")))
+function fixture(path = realpathSync(mkdtempSync(join(directory, "workspace-")))) {
   const workspace = process.platform === "win32" ? path.toLowerCase() : path
   const threadId = randomUUID()
   const physicalRunId = randomUUID()
@@ -128,6 +127,24 @@ function removeOwnedEmptyWorkspace(path: string): void {
 }
 
 describe("actual native conversation run proof", () => {
+  const shortPath = `${process.env.SystemDrive ?? "C:"}\\PROGRA~1`
+  const hasShortPath = process.platform === "win32" && existsSync(shortPath) &&
+    realpathSync(shortPath).toLowerCase() !== realpathSync.native(shortPath).toLowerCase()
+  it.runIf(hasShortPath).each([false, true])(
+    "accepts the same actual Windows 8.3 directory with unsupported IDs=%s", (unsupportedIds) => {
+      // Read-only system directory: only this suite's SQLite thread/lease records are created.
+      const f = fixture(shortPath)
+      if (unsupportedIds) {
+        fsProbe.zeroIdentityPaths.add(shortPath.toLowerCase())
+        fsProbe.zeroIdentityPaths.add(realpathSync.native(shortPath).toLowerCase())
+      }
+      const { proof } = captureFunctionConversationNativeRun(f.input)
+      const run = readFunctionConversationNativeRun(proof, f.authority)
+      run.assertCurrent()
+      expect(run.lease.runId).toBe(f.physicalRunId)
+    }
+  )
+
   it("captures a frozen physical run independently of the Hook turn id", () => {
     const f = fixture()
     const captured = captureFunctionConversationNativeRun(f.input)

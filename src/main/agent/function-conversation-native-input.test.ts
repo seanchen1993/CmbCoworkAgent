@@ -1,6 +1,6 @@
 import { HumanMessage } from "@langchain/core/messages"
 import { randomUUID } from "node:crypto"
-import { mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest"
@@ -42,9 +42,10 @@ afterAll(async () => {
 })
 
 /** Source lifetime belongs to this real physical lease, independently of candidate authority. */
-function fixture() {
+function fixture(workspacePath?: string) {
   const root = realpathSync(mkdtempSync(join(directory, "workspace-")))
-  const workspace = process.platform === "win32" ? root.toLowerCase() : root
+  const path = workspacePath ?? root
+  const workspace = process.platform === "win32" ? path.toLowerCase() : path
   const threadId = randomUUID(), physicalRunId = randomUUID()
   const thread = appDb.createThread(threadId, { workspacePath: workspace })
   const database = appDb.getDb(), incarnation = captureThreadIncarnation(thread)
@@ -119,6 +120,18 @@ function fixture() {
 }
 
 describe("actual user input private source", () => {
+  const shortPath = `${process.env.SystemDrive ?? "C:"}\\PROGRA~1`
+  const hasShortPath = process.platform === "win32" && existsSync(shortPath) &&
+    realpathSync(shortPath).toLowerCase() !== realpathSync.native(shortPath).toLowerCase()
+  it.runIf(hasShortPath)("accepts actual Windows 8.3 user input without changing its workspace key", () => {
+    const f = fixture(shortPath)
+    const receipt = captureFunctionConversationNativeInput(f.source())
+    const source = readFunctionConversationNativeInput(receipt)
+    source.assertCurrent()
+    expect(source.workspace).toBe(shortPath.toLowerCase())
+    expect(source.physicalRunId).toBe(f.physicalRunId)
+  })
+
   it("pins the actual successful writer and original raw baseline in an opaque intent", () => {
     const f = fixture(), message = new HumanMessage({ id: randomUUID(), content: "actual user" })
     const write = { id: message.id!, role: "user" as const, content: "actual user",
