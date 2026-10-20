@@ -2,6 +2,39 @@ import { readFileSync } from "node:fs"
 import { parse } from "yaml"
 import { expect, it } from "vitest"
 
+it("installs skipped JavaScript foundations on Linux before the read-only build gate", () => {
+  const workflow = parse(readFileSync(".github/workflows/build-electron.yml", "utf8")) as {
+    jobs: { build: { steps: Array<Record<string, unknown>> } }
+  }
+  const steps = workflow.jobs.build.steps
+  const index = (name: string) => steps.findIndex((step) => step.name === name)
+  const install = index("Install native JavaScript foundations (Linux)")
+  const verify = index("Verify native JavaScript foundations")
+  expect(install).toBeGreaterThan(index("Install dependencies (Linux)"))
+  expect(verify).toBeGreaterThan(install)
+  expect(verify).toBeLessThan(index("Build"))
+  expect(steps[install].if).toBe("runner.os == 'Linux'")
+  expect(steps[install].run).toBe("node scripts/apply-langchain-native-foundations.mjs")
+  expect(steps[verify].if).toBeUndefined()
+  expect(steps[verify].run).toBe("node scripts/apply-langchain-native-foundations.mjs --check")
+  for (const step of [steps[install], steps[verify]]) {
+    expect(step["continue-on-error"]).toBeUndefined()
+  }
+  expect(steps[index("Install dependencies (Linux)")].run).toBe(
+    "npm ci --ignore-scripts --include=optional"
+  )
+  expect(steps[index("Download node-pty binary from manylinux_2_28 job")].if).toBe(
+    "runner.os == 'Linux'"
+  )
+  expect(String(steps[index("Package (Linux x64)")].run)).toContain("--config.npmRebuild=false")
+  const pkg = JSON.parse(readFileSync("package.json", "utf8")) as {
+    scripts: { prebuild: string }
+  }
+  expect(pkg.scripts.prebuild).toMatch(
+    /^node scripts\/apply-langchain-native-foundations\.mjs --check && /
+  )
+})
+
 it("requires Windows packaged validation before upload/release and keeps diagnostic uploads bounded", () => {
   const workflow = parse(readFileSync(".github/workflows/build-electron.yml", "utf8")) as {
     jobs: { build: { steps: Array<Record<string, unknown>> } }

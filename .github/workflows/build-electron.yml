@@ -344,8 +344,9 @@ jobs:
         shell: pwsh
         run: npm ci --include=optional
 
-      # Linux 加 --ignore-scripts:跳过 package.json 的 postinstall (electron-rebuild
-      # -f -w node-pty),因为那条会在 ubuntu 24.04 宿主 (glibc 2.39) 上编一份坏的
+      # Linux 加 --ignore-scripts:跳过全部 postinstall，包括原生 JS 补丁安装和
+      # electron-rebuild -f -w node-pty；下方单独恢复 JS 补丁安装，避免在
+      # ubuntu 24.04 宿主 (glibc 2.39) 上编一份坏的
       # pty.node,即便后面 artifact 会覆盖也是浪费 + 有一定概率因 node-gyp/python
       # 环境问题让 npm install 直接红。我们要的 Linux pty.node 由上游 manylinux_2_28
       # job 产出,artifact 下载过来即可。
@@ -371,6 +372,15 @@ jobs:
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: npm ci --ignore-scripts --include=optional
+
+      # Restore only the skipped JavaScript patch installer, without rebuilding node-pty.
+      # Keep prebuild read-only: a missing or changed foundation must still fail the build.
+      - name: Install native JavaScript foundations (Linux)
+        if: runner.os == 'Linux'
+        run: node scripts/apply-langchain-native-foundations.mjs
+
+      - name: Verify native JavaScript foundations
+        run: node scripts/apply-langchain-native-foundations.mjs --check
 
       # Windows 侧仅校验 prebuild 已存在,不重新编译。
       # node-pty 自带 prebuilds/win32-x64/pty.node 可直接用,rebuild 反而需要
