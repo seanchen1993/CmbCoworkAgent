@@ -215,6 +215,14 @@ async function main() {
       )
     const page = await app.firstWindow()
     page.setDefaultTimeout(30000)
+    assert.deepEqual(
+      await page.evaluate(() => ({
+        partner: Object.hasOwn(window.api, "partnerDev"),
+        service: Object.hasOwn(window.api, "serviceConversation")
+      })),
+      { partner: false, service: false },
+      "retired services are absent from the real preload"
+    )
     // This Playwright version treats a Promise as truthy in waitForFunction; await IPC in Node.
     const waitApi = async <T>(
       condition: (arg: T) => Promise<boolean>,
@@ -450,7 +458,19 @@ async function main() {
     await page.getByRole("button", { name: "继续处理", exact: true }).waitFor()
     await page.getByRole("button", { name: "继续处理", exact: true }).click()
     await page.getByRole("button", { name: "完成任务", exact: true }).waitFor()
+    await page.setViewportSize({ width: 1440, height: 960 })
     await page.screenshot({ path: "/tmp/m05-mock-channel-work.png" })
+    await page.getByRole("button", { name: "Bot 工作区设置", exact: true }).click()
+    await page.getByRole("combobox", { name: "主题", exact: true }).click()
+    await page.getByRole("option", { name: "深色", exact: true }).click()
+    await page.keyboard.press("Escape")
+    await page.setViewportSize({ width: 1080, height: 860 })
+    await page.screenshot({ path: "/tmp/m05-mock-channel-work-dark-narrow.png" })
+    await page.getByRole("button", { name: "Bot 工作区设置", exact: true }).click()
+    await page.getByRole("combobox", { name: "主题", exact: true }).click()
+    await page.getByRole("option", { name: "浅色", exact: true }).click()
+    await page.keyboard.press("Escape")
+    await page.setViewportSize({ width: 1440, height: 960 })
     const openModal = async () => {
       await page.getByRole("button", { name: "更多 Bot 操作", exact: true }).click()
       await page.getByRole("button", { name: "模拟 IM 接入", exact: true }).click()

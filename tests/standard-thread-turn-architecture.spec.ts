@@ -150,9 +150,22 @@ assertIncludes(
   "invalid feature bindings cannot silently remove Harness repository context"
 )
 assert(
-  count(desktop, "parseStandardThreadMetadata(") === 9,
-  "all nine desktop Thread metadata reads use the shared parser, including the remote inbox guard"
+  count(desktop, "parseStandardThreadMetadata(") === 10,
+  "all ten desktop Thread metadata reads use the shared parser, including the managed conversation guard"
 )
+const managedEntryGuard = desktop.slice(
+  desktop.indexOf("function rejectDesktopRunForForeignOwner("),
+  desktop.indexOf(
+    "const lease = getLocalThreadRunLease(threadId)",
+    desktop.indexOf("function rejectDesktopRunForForeignOwner(")
+  )
+)
+for (const statement of [
+  "parseStandardThreadMetadata(row?.metadata).metadata",
+  "assertWorkConversationEntry(threadId, row, metadata, context)",
+  "assertBotMockThreadEntry(metadata, context)"
+])
+  assertIncludes(managedEntryGuard, statement, `managed entry guard retains ${statement}`)
 for (const metadataField of [
   'typeof metadata.workspacePath === "string"',
   'typeof metadata.model === "string"',

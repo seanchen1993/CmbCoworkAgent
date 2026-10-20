@@ -1,4 +1,3 @@
-import { serviceConversationApi } from "./service-conversation"
 import { localBotsApi } from "./bots"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type {
@@ -2939,26 +2938,6 @@ const api = {
         ipcRenderer.removeListener(channel, handler)
       }
     }
-  },
-  serviceConversation: serviceConversationApi,
-  partnerDev: {
-    createExpert: (input: { name: string; instructions: string }) => ipcRenderer.invoke("partnerDev:createExpert", input),
-    startExpert: () => ipcRenderer.invoke("partnerDev:startExpert"),
-    listExpertMemories: () => ipcRenderer.invoke("partnerDev:listExpertMemories"),
-    createExpertMemory: (input: { text: string }) => ipcRenderer.invoke("partnerDev:createExpertMemory", input),
-    updateExpertMemory: (input: import("../shared/bot/expert-memory").ExpertMemoryUpdate) => ipcRenderer.invoke("partnerDev:updateExpertMemory", input),
-    disableExpertMemory: (input: { memoryId: string; expectedVersion: number }) => ipcRenderer.invoke("partnerDev:disableExpertMemory", input),
-    getStatus: () => ipcRenderer.invoke("partnerDev:getStatus"),
-    importConnection: () => ipcRenderer.invoke("partnerDev:importConnection"),
-    chooseWorkspace: () => ipcRenderer.invoke("partnerDev:chooseWorkspace"),
-    connect: () => ipcRenderer.invoke("partnerDev:connect"),
-    disconnect: () => ipcRenderer.invoke("partnerDev:disconnect"),
-    stopNode: () => ipcRenderer.invoke("partnerDev:stopNode"),
-    revokeLocalAuthorization: () => ipcRenderer.invoke("partnerDev:revokeLocalAuthorization"),
-    sendMessage: (input: {mentioned:boolean;text:string}) => ipcRenderer.invoke("partnerDev:sendMessage",input),
-    analyzeTask: (input: {taskNumber:string}) => ipcRenderer.invoke("partnerDev:analyzeTask",input),
-    inspectRun: (input: {runId:string}) => ipcRenderer.invoke("partnerDev:inspectRun",input),
-    cancelPending: (input: {runId:string;expectedVersion:number}) => ipcRenderer.invoke("partnerDev:cancelPending",input)
   },
   builtinRobot: {
     cancelThread: (threadId: string): Promise<boolean> =>

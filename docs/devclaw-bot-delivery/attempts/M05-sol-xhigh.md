@@ -1,6 +1,44 @@
 # M05 — beta 本地统一实施检查点
 
-状态：**M05-06 dd12f43f 已由root验收并交付预览。用户2026-10-20重新授权M05-04/05，当前04检查点已获root认可并补失回执收口，05按用户新授权仅拆旧默认链路；下方暂停说明均为历史。** gpt-6.1-sol/xhigh 唯一写者，不派生。只读最新设计§11，旧Service清理留M05-05；不写Java/LF39、不操作用户App/profile/真实模型/数据库。
+状态：**M05-06 dd12f43f 已由root验收；04主路径94fb4fe9经root认可，失回执窄修9130de36a已保存。05默认断链/旧UI清理自测完成，本段同次提交为最终冻结候选，停写待root独立审查。用户已取消旧专家数据处理，未做历史reader/导出/迁移，也未主动删除原库。** gpt-6.1-sol/xhigh 唯一写者，不派生、不push。下方旧暂停/“05未开始”等均为当时历史。
+
+## M05-04/05 冻结交接（2026-10-20）
+
+当前分支 `codex/beta-local-unification-m05`。04独立检查点`94fb4fe94f0206d91f84d66dfec7f98d7db52438`、失回执收口`9130de36a`；05为本段同次提交，准确SHA随交付消息。只改原实施树，root目标/docs均只读；默认用户`out`602文件逐个path/size/mtime_ns与本轮开始完全相同（`/tmp/m05-05-user-out-proof.json`）。未操作用户App/profile/凭据、真实模型、Java/MySQL/ES/LF39、定时或容器。
+
+### 05实际删除/保留
+
+- `src/main/index.ts`移除旧Partner注册、active-run参与、两处退出stop；`ipc/agent.ts`仅去input-only旧注册，保留标准Runtime/requirements/生产IM。
+- 删除旧 `ipc/partner-dev.ts`及其只验证旧入口的测试，preload独立service adapter及API/type声明退出App。删除旧5个renderer文件：PartnerDevPanel/ExpertMemoryPanel/ServiceExpertConversation/useServiceExpertChats/ServiceDeliveryCard，删除257行专属CSS及4份旧UI浏览器脚本/3份专属fixture。没有残留默认旧UI请求。
+- `src/main/services/bot`27个legacy协议/客户端/故障验证文件仍供`tests/bot`历史Java harness使用，新增README明确不入App、不用于旧数据恢复；没有构造旧controller/worker/router/journal Store。旧Java/协议与原DB数据不删。
+- `dev:bot-preview`沿原beta `electron-vite dev`，无Java依赖；旧生命周期改明确`status:legacy-bot-preview`/`stop:legacy-bot-preview`。旧绝对脚本`status/stop`兼容原运行预览，`start`在任何claim/profile/Java动作前明确拒绝并提示本地入口。`test:legacy-bot-partner-client`只保留旧客户端协议，删除指向已删UI的test脚本。未修改真正partner-dev后端脚本。
+- 原beta聊天、详情、工具、资料库、电脑、例行、协作/后台保留；独立任务只在右侧。已验收06同Thread双入口/目录/模型/草稿/解除删除协议没有产品更改。本片保留06已批准限制：受管任务内不启动另一Goal/Mods调度器，解除后原能力恢复。mock仍文字+同受众5工具，桌面打开不升权，非生产IM。
+
+### 精确检查及日志
+
+所有 Node22 为 `/Users/heyirui/.npm/_npx/52027bd8fc0022aa/node_modules/node/bin/node`；以下均已收取**exit0**，没有将编译或固定模型文字当作真实渠道/付费模型验收。
+
+| 检查 | Node22后精确参数/配置 | 日志与结果 |
+| --- | --- | --- |
+| 默认依赖断链 | `--import tsx tests/bots-legacy-disconnection.spec.ts` | `/tmp/m05-05-disconnection.log`：1250可达模块，legacy0，原Bot/requirements/IM仍可达 |
+| 旧生命周期 | `--test tests/bot/service/partner-preview.spec.mjs` | `/tmp/m05-05-legacy-lifecycle.log`：10/10，含start无初始化拒绝、保留stop所有权/人工确认监听 |
+| Node类型 | `node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false` | `/tmp/m05-05-node.log` exit0 |
+| Web类型 | `node_modules/typescript/bin/tsc --noEmit -p tsconfig.web.json --composite false` | `/tmp/m05-05-web.log` exit0 |
+| beta/06/core | `node_modules/vitest/vitest.mjs run src/main/bots src/main/ipc/bots.test.ts src/main/ipc/bot-files.test.ts src/main/hooks/mock-scope.test.ts src/main/agent/runtime-tool-allowlist.test.ts src/main/agent/standard-thread-turn.test.ts` | `/tmp/m05-05-core.log`：31文件384/384 |
+| renderer/shared | `node_modules/vitest/vitest.mjs run src/renderer/src/lib/bot* src/shared/bots/file-delivery.test.ts src/shared/bots/client-registry.test.ts` | `/tmp/m05-05-view.log`：33文件237/237 |
+| 标准Runtime架构 | `--import tsx tests/standard-thread-turn-architecture.spec.ts` | `/tmp/m05-05-standard-architecture.log`：精确parser数10，新增同一早拒绝catch内部parser/work/mock结构断言；root亦独立该脚本exit0 |
+| 正常生产隔离build | `node_modules/electron-vite/bin/electron-vite.js build --config /tmp/m05-05-vite.config.mjs --mode m05-isolated` | `/tmp/m05-05-build.log` exit0；空envDir/继承环境白名单，无真实env/测试entry；移除仅硬编码out的copy插件后同等拷自有资源 |
+| 实际App | `M05_MOCK_APP_OUT=/tmp/m05-05-out-zyrtwmff Node22 --import tsx tests/bots-mock-channel-app.spec.ts` | `/tmp/m05-05-app-final.log` exit0：12localhost calls/12owner hooks，真实preload旧API均不存在，原04全既定旅程通过 |
+| 局部formatter | `node_modules/prettier/bin/prettier.cjs --check` 新增/本轮改动小文件清单见`/tmp/m05-05-format-final.log` | exit0，未整仓format；首次格式检查2文件warning，mjs只格式新增长提示，README仅格式新增前言保留旧正文原格式 |
+
+上列core/view是本方自测，不声称与root去重计数；root独立65文件623/623及桌面8脚本最终均通过，日志由root掌管。root生产IM V1 19脚本先前全通过，本片未改IM实现，不重复真实服务。04最终12call前的193/171既有证明保留，不无理由扩测试。
+
+### App/产物与资源
+
+- 独立正常产物：`/tmp/m05-05-out-zyrtwmff`，入口`main/index.js`。`/tmp/m05-05-build-proof.json`记录各入口字节/sha256；application 8,049,196bytes、sha256 `ee549617b275cdf61fd8a3363786fb2be29dfcf52c8effdf61d8951e0930eefa`。main/preload/renderer全在该/tmp；无e2e测试entry。源代码build后仅tests/docs/legacy脚本提示格式变化，App产品源未变。
+- 宽屏明色：`/tmp/m05-mock-channel-work.png`（1440×960）；窄屏暗色：`/tmp/m05-mock-channel-work-dark-narrow.png`（1080×860）；模拟弹窗`/tmp/m05-mock-channel-dialog.png`。真实beta外壳/ChatContainer，暗色通过设置菜单正常切换，不仅class；窄图捕获菜单关闭动画残影，不将其当新增布局问题或多跑模型。
+- App fixture自有目录`/var/folders/kq/m0q4z3m91tx9fpfbf501hfrr0000gn/T/m05-mock-channel-app-NqujJE`仅保留诊断log，App/server已finally关闭、自有agent/electron配置已移除；session36788退出0。本轮所有Dialog Apps也已关闭。`ps`无本人04/05 App/test/server残留，无Java/DB/容器资源。仅保留正常/tmp build、配置、日志和截图供root复验。
+- 未覆盖：真实IM/LF39/Java合仓与真实模型属于后续授权；本轮明确模拟，不声称生产接通。旧专家历史按用户取消要求不迁移/查看/导出、不自动恢复。不存在待继续后台测试。
 
 ## 2026-10-20：04失回执收口，05按用户新指令取消旧数据工作
 

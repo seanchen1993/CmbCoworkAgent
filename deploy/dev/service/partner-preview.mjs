@@ -1,4 +1,4 @@
-/** Local-only, foreground App preview. Ctrl+C or `stop` closes this App first. */
+/** Legacy Java-backed preview lifecycle. Only status/stop remain supported by the current App. */
 import { createRequire } from "node:module"
 import { constants } from "node:fs"
 import { open, readdir, readFile, unlink } from "node:fs/promises"
@@ -404,7 +404,12 @@ function bootstrapNode22() {
 if (process.argv[1] && resolve(process.argv[1]) === self) {
   try {
     check(process.argv.length === 3 && ["start", "status", "stop"].includes(process.argv[2]))
-    if (!bootstrapNode22()) {
+    if (process.argv[2] === "start") {
+      console.error(
+        "LEGACY_PREVIEW_UNSUPPORTED: 当前本地 MVP 请使用 npm run dev；此脚本仅保留旧预览的 status/stop。"
+      )
+      process.exitCode = 1
+    } else if (!bootstrapNode22()) {
       let entry
       try {
         entry = await partnerEntry({ create: process.argv[2] === "start" })

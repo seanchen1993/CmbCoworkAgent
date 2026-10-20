@@ -450,7 +450,6 @@ import {
   type AgentRunExecutionContext
 } from "../agent/agent-run-service"
 import { isManagedTransportWindow } from "../agent/managed-transport-delivery"
-import { registerPartnerInputOnlyRuntime } from "../services/bot/partner-runtime-registration"
 
 function withHarnessStageInvalidation(
   callback: HookResultCallback,
@@ -5774,7 +5773,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     return true
   })
   registerAgentGoalControlImplementation(executeAgentGoalControl)
-  registerPartnerInputOnlyRuntime()
 
   registerAgentRunImplementation((request, delivery, incomingRunExecutionContext) => {
     // onRunTerminated is contracted to fire exactly once per run, and this body
