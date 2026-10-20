@@ -20,11 +20,15 @@ vi.mock("../models/registry", () => ({
   getAvailableModelConfigOrDefault: state.defaultLookup,
   getModelConfigs: () => [],
   getModelByTier: () => null,
-  toModelRef: (c: any) => `${c.source}:${c.id}`
+  toModelRef: (c: { source: string; id: string }) => `${c.source}:${c.id}`
 }))
 vi.mock("./runtime", () => ({ createAgentRuntime: state.createRuntime }))
 vi.mock("../harness-board/service", () => ({
-  buildHarnessFeatureAgentContext:vi.fn(),getHarnessProjectAdapterSnapshot:vi.fn(),readHarnessFeatureMetadata:vi.fn(),resolveHarnessFeaturePluginIdentity:vi.fn(),resolveHarnessFeatureCurrentStage:vi.fn()
+  buildHarnessFeatureAgentContext: vi.fn(),
+  getHarnessProjectAdapterSnapshot: vi.fn(),
+  readHarnessFeatureMetadata: vi.fn(),
+  resolveHarnessFeaturePluginIdentity: vi.fn(),
+  resolveHarnessFeatureCurrentStage: vi.fn()
 }))
 vi.mock("@langchain/openai", () => ({ ChatOpenAI: state.createProvider }))
 vi.mock("../db", () => ({ getThreadCore: () => null, updateThread: vi.fn() }))
