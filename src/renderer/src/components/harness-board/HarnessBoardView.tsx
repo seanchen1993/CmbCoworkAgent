@@ -8370,7 +8370,7 @@ function ProjectFeatureSidebar({
                           {visibleProjectSessions.map((session) => {
                             const thread = threadsById.get(session.threadId)
                             if (!thread) return null
-                            return renderThreadItem(thread, `所属项目：${group.project.name}`, () =>
+                            return renderThreadItem(thread, getThreadTitle(thread), () =>
                               onSelectProjectSession(
                                 group.project.projectId,
                                 thread.thread_id,
@@ -8540,7 +8540,7 @@ function ProjectFeatureSidebar({
                                     if (!thread) return null
                                     return renderThreadItem(
                                       thread,
-                                      `所属项目：${group.project.name} / ${featureGroup.title}`,
+                                      getThreadTitle(thread),
                                       () =>
                                         onSelectSession(
                                           group.project.projectId,

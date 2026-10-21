@@ -7,7 +7,7 @@ import { normalizeSkillId } from "../skills/ids"
 import { createThreadService } from "../services/thread-service"
 import { materializeHarnessFeatureThreadGrant } from "../services/im/feature-thread-grant"
 import type { ImGrantRouteIdentity } from "../services/im/remote-grant-store"
-import { generateTitle } from "../services/title-generator"
+import { generateProjectThreadTitle } from "../services/project-thread-title"
 import { getDisabledSkills } from "../storage"
 import type { AgentInvokeParams, SkillMetadata, Thread } from "../types"
 import { getHarnessProjectAdapterSnapshot } from "./service"
@@ -29,6 +29,7 @@ interface PreparedHarnessMessage {
   modelMessage: string
   displayMessage: string
   userMessageId: string
+  skillName?: string
 }
 
 interface PreparedManagedAgentRun {
@@ -151,7 +152,8 @@ async function prepareHarnessMessage(
   return {
     modelMessage,
     displayMessage: modelMessage,
-    userMessageId: uuid()
+    userMessageId: uuid(),
+    skillName: skill.name
   }
 }
 
@@ -285,7 +287,7 @@ export async function createAndStartManagedHarnessSession(
   input: CreateManagedHarnessSessionInput
 ): Promise<{ threadId: string; thread: Thread }> {
   const prepared = await prepareManagedHarnessSession(input)
-  const thread = await createManagedHarnessSession(input)
+  const thread = await createManagedHarnessSession(input, prepared.skillName)
   await startManagedHarnessSession(input, thread.threadId, prepared)
   return thread
 }
@@ -323,13 +325,20 @@ export async function startManagedHarnessSession(
 }
 
 export async function createManagedHarnessSession(
-  input: CreateManagedHarnessSessionInput
+  input: CreateManagedHarnessSessionInput,
+  skillName?: string
 ): Promise<{ threadId: string; thread: Thread }> {
   const titleSource = input.nextAction.userMessage?.trim() ?? ""
+  const title = titleSource
+    ? await generateProjectThreadTitle(titleSource, skillName, {
+        projectId: input.projectId,
+        slug: input.featureId
+      })
+    : undefined
   const thread = await createThreadService(
     {
       workspacePath: input.workspacePath,
-      ...(titleSource ? { title: generateTitle(titleSource) } : {}),
+      ...(title ? { title } : {}),
       harnessFeature: {
         projectId: input.projectId,
         slug: input.featureId,

@@ -1033,7 +1033,11 @@ interface AppState {
   finalizeThreadDeletions: (threadIds: Iterable<string>) => void
   updateThread: (threadId: string, updates: Partial<Thread>) => Promise<void>
   patchThreadMetadata: (threadId: string, patch: ThreadMetadataPatch) => Promise<void>
-  generateTitleForFirstMessage: (threadId: string, content: string) => Promise<void>
+  generateTitleForFirstMessage: (
+    threadId: string,
+    content: string,
+    skillName?: string
+  ) => Promise<void>
 
   // Model actions
   loadModels: (force?: boolean) => Promise<void>
@@ -1564,9 +1568,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
-  generateTitleForFirstMessage: async (threadId: string, content: string) => {
+  generateTitleForFirstMessage: async (threadId: string, content: string, skillName?: string) => {
     try {
-      const generatedTitle = await window.api.threads.generateTitle(content)
+      const generatedTitle = await window.api.threads.generateTitle(content, {
+        threadId,
+        skillName
+      })
       await get().updateThread(threadId, { title: generatedTitle })
     } catch (error) {
       console.error("[Store] Failed to generate title:", error)

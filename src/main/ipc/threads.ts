@@ -95,6 +95,7 @@ import {
   getProjectThreadDataDirectory
 } from "../agent/context-history-path"
 import { generateTitle } from "../services/title-generator"
+import { generateProjectThreadTitle } from "../services/project-thread-title"
 import { imRemoteAccessService } from "../services/im/remote-access-service"
 import {
   finalizeWorkflowWorktreeRecord,
@@ -4186,7 +4187,23 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   )
 
   // Generate a title from a message
-  ipcMain.handle("threads:generateTitle", async (_event, message: string) => {
-    return generateTitle(message)
-  })
+  ipcMain.handle(
+    "threads:generateTitle",
+    async (_event, message: string, context?: { threadId: string; skillName?: string }) => {
+      try {
+        if (context?.threadId) {
+          const thread = getThreadCore(context.threadId)
+          const metadata = thread?.metadata ? JSON.parse(thread.metadata) : undefined
+          return await generateProjectThreadTitle(
+            message,
+            context.skillName,
+            metadata?.harnessFeature
+          )
+        }
+      } catch (error) {
+        console.warn("[Threads] Failed to resolve title context:", error)
+      }
+      return generateTitle(message)
+    }
+  )
 }

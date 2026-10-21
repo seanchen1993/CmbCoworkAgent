@@ -3065,7 +3065,8 @@ export async function buildHarnessFeatureAgentContext(
  */
 export async function resolveHarnessFeatureCurrentStage(
   projectId: string,
-  slug: string
+  slug: string,
+  options: { labelOnly?: boolean } = {}
 ): Promise<{ name: string; status: string | null } | null> {
   try {
     const normalizedProjectId = normalizeText(projectId).trim()
@@ -3078,7 +3079,7 @@ export async function resolveHarnessFeatureCurrentStage(
       "run",
       normalizedSlug
     )
-    return resolveCurrentStageFromSnapshot(snapshot)
+    return resolveCurrentStageFromSnapshot(snapshot, options.labelOnly)
   } catch {
     return null
   }
@@ -3133,7 +3134,8 @@ export async function inspectHarnessManagedFeatureStatus(
 }
 
 function resolveCurrentStageFromSnapshot(
-  snapshot: Record<string, unknown>
+  snapshot: Record<string, unknown>,
+  labelOnly = false
 ): { name: string; status: string | null } | null {
   const run = isObject(snapshot.run) ? snapshot.run : {}
   const currentNodeId = normalizeText(run.currentNodeId).trim()
@@ -3148,20 +3150,22 @@ function resolveCurrentStageFromSnapshot(
   return resolveCurrentStageFromWorkflow(
     workflow,
     currentNodeId,
-    runNode?.nodeStatus ?? run.currentNodeStatus
+    runNode?.nodeStatus ?? run.currentNodeStatus,
+    labelOnly
   )
 }
 
 function resolveCurrentStageFromWorkflow(
   workflow: HarnessWorkflow,
   currentNodeId: string,
-  rawStatus: unknown
+  rawStatus: unknown,
+  labelOnly = false
 ): { name: string; status: string | null } | null {
   const node = workflow.nodes.find((item) => item.id === currentNodeId)
   const label = normalizeText(node?.label).trim()
   if (!label) return null
   const group = normalizeText(node?.group).trim()
-  const name = group ? `${group}-${label}` : label
+  const name = group && !labelOnly ? `${group}-${label}` : label
   const nodeStatus = normalizeNodeStatus(rawStatus)
   const status = nodeStatus === UNKNOWN_NODE_STATUS ? null : DEFAULT_NODE_STATUS_LABELS[nodeStatus]
 

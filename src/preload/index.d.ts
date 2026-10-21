@@ -1290,7 +1290,10 @@ interface CustomAPI {
         created_at: Date | string | number
       }>
     }>
-    generateTitle: (message: string) => Promise<string>
+    generateTitle: (
+      message: string,
+      context?: { threadId: string; skillName?: string }
+    ) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
   }
   models: {

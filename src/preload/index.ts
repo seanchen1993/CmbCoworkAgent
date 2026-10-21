@@ -1343,8 +1343,11 @@ const api = {
         }>
       }>
     },
-    generateTitle: (message: string): Promise<string> => {
-      return ipcRenderer.invoke("threads:generateTitle", message)
+    generateTitle: (
+      message: string,
+      context?: { threadId: string; skillName?: string }
+    ): Promise<string> => {
+      return ipcRenderer.invoke("threads:generateTitle", message, context)
     },
     onThreadsChanged: (callback: () => void): (() => void) => {
       const handler = (): void => {

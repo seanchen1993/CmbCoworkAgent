@@ -965,6 +965,7 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
     attachmentDisplayPrefix:
       typeof item.attachmentDisplayPrefix === "string" ? item.attachmentDisplayPrefix : undefined,
     skillBlock: typeof item.skillBlock === "string" ? item.skillBlock : undefined,
+    skillName: typeof item.skillName === "string" ? item.skillName : undefined,
     builtinBrowser: item.builtinBrowser === true,
     modelId: typeof item.modelId === "string" ? item.modelId : undefined,
     handoffRequestedAt:

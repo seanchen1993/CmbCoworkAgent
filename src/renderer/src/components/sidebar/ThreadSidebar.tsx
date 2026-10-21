@@ -381,11 +381,11 @@ function ThreadListItemImpl({
             isUnread &&
             !isRunning && <span className="size-2 rounded-full bg-status-info shrink-0" />
           )}
-          <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
-            <span className="absolute right-0 text-[10px] text-muted-foreground transition-opacity group-hover:opacity-0">
+          <span className="relative ml-auto flex h-6 shrink-0 items-center justify-end overflow-hidden">
+            <span className="text-[10px] text-muted-foreground group-hover:hidden group-focus-within:hidden">
               {formatCompactTime(thread.updated_at)}
             </span>
-            <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
+            <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:static group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:static group-focus-within:opacity-100">
               <IconPopoverButton
                 icon={<Pencil className="size-3" />}
                 popoverContent="重命名会话"
