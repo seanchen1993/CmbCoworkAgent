@@ -22,7 +22,8 @@ const templates: [AuthoringTemplateKind, string][] = [
   ["tool", "工具"],
   ["rule", "规则"],
   ["panel", "面板"],
-  ["flow-action", "流程动作"]
+  ["flow-action", "流程动作"],
+  ["state-extension", "状态决策骨架（未迁移）"]
 ]
 const inputClass = "devclaw-input w-full min-w-0 text-sm"
 const buttonClass = "rounded border px-3 py-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"

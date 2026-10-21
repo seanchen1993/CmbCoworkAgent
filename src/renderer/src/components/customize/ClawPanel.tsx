@@ -29,6 +29,8 @@ import { BusinessModAssemblyPanel } from "./BusinessModAssemblyPanel"
 import { hasUsableClawComponents, newClawCapability } from "@/lib/claw-capability-usage"
 import type { SimpleAuthoringPracticeIntent } from "@/lib/simple-authoring-intent"
 import { goToConfigurationThread, useConfigurationDraft } from "@/lib/configuration-target"
+import { ModsUsageSetup } from "./ModsUsageSetup"
+import { ModsUsageSettingsEntry } from "./ModsUsageSettingsEntry"
 
 const empty = (): ClawProfile => ({
   id: flowDraftId("claw"),
@@ -330,7 +332,9 @@ function ClawSettings({
         mutation.kind === "save"
           ? "版本已保存，尚未应用。点击“应用到所选聊天”后生效；不会自动执行任务。"
           : next.active
-            ? `已在这段聊天使用 ${next.active.name}。点击“去这段聊天使用”即可进入。`
+            ? next.enabled
+              ? `已在这段聊天使用 ${next.active.name}。点击“去这段聊天使用”即可进入。`
+              : `已绑定 ${next.active.name}，灵件开关尚未开启。请先核对下方应用及当前项目目录的灵件使用设置。`
             : "本聊天已恢复原来的灵件、模型、技能和工具设置。"
       )
     } catch (cause) {
@@ -456,14 +460,13 @@ function ClawSettings({
           </button>
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={() => navigate("mods")}>
-            添加功能
-          </Button>
+          <ModsUsageSettingsEntry disabled={busy} />
           <Button variant="ghost" size="sm" onClick={() => navigate("flows")}>
             管理聊天任务模板
           </Button>
         </div>
       </header>
+      <ModsUsageSetup threadId={threadId} workspaceHint={workspaceHint ?? view?.workspace} />
       {assemblyVisited && <div hidden={!assemblyOpen} inert={!assemblyOpen}>
         <BusinessModAssemblyPanel threadId={threadId} workspace={workspaceHint ?? view?.workspace}
           initialPluginId={assemblySource} active={assemblyOpen} />
@@ -517,13 +520,8 @@ function ClawSettings({
             <p className="text-xs text-muted-foreground">
               项目的必需检查和内容保护仍然生效。组合可以增加检查规则，不能取消必需的检查。
             </p>
-            {!view.enabled && (
-              <p className="text-amber-600">
-                应用或本项目的灵件功能未开启，组合暂不生效。请到“添加功能”开启。
-              </p>
-            )}
             {!view.applicable && (
-              <p className="text-amber-600">当前会话不适用此组合，请在支持的本地项目会话中配置。</p>
+              <p className="text-amber-600">这段会话由项目阶段、工作流或其他运行器管理，不能绑定聊天搭配。请在普通本地聊天配置；项目流程可从下方已安装插件进入原项目。</p>
             )}
             {view.issues.map((issue) => (
               <p key={issue} role="alert" className="text-destructive">
@@ -754,7 +752,7 @@ function ClawSettings({
                     hasUsableClawComponents(item, view.usageContext ?? "chat")
                   ) && (
                     <p className="text-sm text-muted-foreground">
-                      当前场景没有适用功能。可到“添加功能”管理插件，或调整下方聊天设置。
+                      当前场景没有适用功能。可到“灵件与使用设置”管理插件，或调整下方聊天设置。
                     </p>
                   )}
                   {[

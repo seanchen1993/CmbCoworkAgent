@@ -18,6 +18,10 @@ import { AuthoringPreflightClient } from "./authoring-preflight-client"
 import { compileFunctionPlugin } from "../v2/loader"
 import { readPureFunctionSource } from "./authoring-install-source"
 import { AuthoringVersionRepository } from "./authoring-version-repository"
+import { AuthoringDraftStore } from "./authoring-store"
+import { ModDevelopmentService, type DevelopmentRuntime } from "./development-service"
+import { ModControlStore } from "../control-store"
+import type { DevelopmentRevision } from "../v2/development-session"
 
 const installationId = "12345678-1234-4234-8234-123456789abc"
 const source = () =>
@@ -91,6 +95,98 @@ const fakeChecks = () =>
     .mockResolvedValue(analysis() as Awaited<ReturnType<AuthoringPreflightClient["run"]>>)
 
 describe("immutable authoring preparation", () => {
+  it("saves the generated state extension and prepares its actual checked trial while retaining native confirmation", async () => {
+    const settings = new ModControlStore(join(directory, "creator.sqlite"))
+    const staged: DevelopmentRevision[] = []
+    const approve = vi.fn(() => {
+      throw Error("UNEXPECTED_AUTOMATIC_APPROVAL")
+    })
+    const runtime: DevelopmentRuntime = {
+      developmentRetention: () => ({ releasable: true, revisions: [] }),
+      developmentStatus: () =>
+        staged.map((revision) => ({
+          ...revision,
+          capabilities: [...revision.capabilities],
+          phase: "needs-approval"
+        })),
+      stageDevelopment: (_scope, revision, guard) => {
+        guard()
+        staged.push(revision)
+      },
+      approveDevelopment: approve,
+      stopDevelopment: () => {
+        /* No execution is started by this preparation. */
+      }
+    }
+    const service = new ModDevelopmentService({
+      drafts: new AuthoringDraftStore(settings),
+      runtime,
+      versionsRoot: join(directory, "creator-versions"),
+      workerEntry,
+      context: (threadId) => ({
+        scope: {
+          threadId,
+          workspace: directory,
+          incarnation: { token: "native-test-owner", legacyCreatedAt: 1 }
+        },
+        assertCurrent: () => {
+          /* Fixed native test owner. */
+        }
+      }),
+      changed: () => {
+        /* No renderer is attached in this native preparation test. */
+      }
+    })
+    try {
+      await service.setMode("creator", directory, "creator")
+      const generated = createAuthoringTemplate({
+        id: "state-draft",
+        name: "状态扩展",
+        instruction: "保留原 writer",
+        kind: "state-extension"
+      })
+      const saved = service.save("creator", {
+        id: "state-draft",
+        name: "状态扩展",
+        expectedRevision: 0,
+        files: generated.files
+      })
+      expect(saved.source.digest).toBe(generated.digest)
+      const status = await service.requestTrial(
+        "creator",
+        "state-draft",
+        saved.revision,
+        "native-creator-turn",
+        new AbortController().signal,
+        () => {
+          /* The creator turn remains current. */
+        }
+      )
+      expect(status.trials).toEqual([
+        expect.objectContaining({
+          draftId: "state-draft",
+          phase: "needs-approval",
+          validation: "authorized-real",
+          capabilities: expect.arrayContaining(["platform.act"])
+        })
+      ])
+      expect(staged).toHaveLength(1)
+      expect(
+        JSON.parse(
+          readFileSync(join(staged[0].sourcePath, "references/state-migration-plan.json"), "utf8")
+        )
+      ).toMatchObject({
+        stateMigration: "not-migrated",
+        execution: "unverified",
+        writerBound: false
+      })
+      expect(approve).not.toHaveBeenCalled()
+      expect(service.read("creator", "state-draft").revision).toBe(saved.revision)
+    } finally {
+      settings.close()
+    }
+  }, 20_000)
+
   it("deletes only a validated unused record and honors a late retention decision", async () => {
     fakeChecks()
     const repo = repository()
@@ -120,34 +216,54 @@ describe("immutable authoring preparation", () => {
     ).toBe("broken")
   })
 
-  it("runs the actual isolated Worker and retains exact source, without installation effects", async () => {
-    const repo = repository(),
-      request = input()
-    const result = await repo.prepare(request)
-    expect(result.record.source).toEqual(request.source)
-    expect(result.record.coverage).toBe("prepared-source-only-v1")
-    expect(repo.assertPrepared(result.token)).toEqual(result.record)
-    expect((await compileFunctionPlugin(repo.preparedSourceDirectory(result.token))).digest).toBe(
-      result.record.compiledDigest
-    )
-    expect(readdirSync(join(directory, "versions"))).toEqual([result.record.versionId])
-    expect(
-      readFileSync(
-        join(directory, "versions", result.record.versionId, "source", "mods/main.ts"),
-        "utf8"
+  it.each(["command", "state-extension"] as const)(
+    "runs the actual isolated Worker for %s and retains exact source, without installation effects",
+    async (kind) => {
+      const repo = repository(),
+        request = input()
+      request.source = createAuthoringTemplate({
+        id: "test",
+        name: "测试",
+        instruction: "示例",
+        kind
+      })
+      const result = await repo.prepare(request)
+      expect(result.record.source).toEqual(request.source)
+      expect(result.record.coverage).toBe("prepared-source-only-v1")
+      if (kind === "state-extension") {
+        expect(result.review.registrationEventsVerified).toBe(true)
+        expect(result.review.sdkMethods).toContain("platform.act")
+        expect(result.record.source.files).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ path: "references/state-migration-plan.json" }),
+            expect.objectContaining({ path: "tests/state-decision-cases.json" })
+          ])
+        )
+      }
+      expect(repo.assertPrepared(result.token)).toEqual(result.record)
+      expect((await compileFunctionPlugin(repo.preparedSourceDirectory(result.token))).digest).toBe(
+        result.record.compiledDigest
       )
-    ).toBe(request.source.files.find((file) => file.path === "mods/main.ts")!.text)
-    const reopened = repository()
-    expect(reopened.read(result.record.versionId)).toEqual(result.record)
-    expect(() => reopened.assertPrepared(result.token)).toThrow("TOKEN")
-    expect(() => repo.assertPrepared({ ...result.token })).toThrow("TOKEN")
-    const fresh = await reopened.revalidate(result.record.versionId, {
-      signal: new AbortController().signal,
-      assertCurrent: () => {}
-    })
-    expect(reopened.assertPrepared(fresh.token)).toEqual(result.record)
-    expect(readdirSync(join(directory, "versions"))).toEqual([result.record.versionId])
-  }, 20_000)
+      expect(readdirSync(join(directory, "versions"))).toEqual([result.record.versionId])
+      expect(
+        readFileSync(
+          join(directory, "versions", result.record.versionId, "source", "mods/main.ts"),
+          "utf8"
+        )
+      ).toBe(request.source.files.find((file) => file.path === "mods/main.ts")!.text)
+      const reopened = repository()
+      expect(reopened.read(result.record.versionId)).toEqual(result.record)
+      expect(() => reopened.assertPrepared(result.token)).toThrow("TOKEN")
+      expect(() => repo.assertPrepared({ ...result.token })).toThrow("TOKEN")
+      const fresh = await reopened.revalidate(result.record.versionId, {
+        signal: new AbortController().signal,
+        assertCurrent: () => {}
+      })
+      expect(reopened.assertPrepared(fresh.token)).toEqual(result.record)
+      expect(readdirSync(join(directory, "versions"))).toEqual([result.record.versionId])
+    },
+    20_000
+  )
 
   it("real Worker type failure cannot publish a version", async () => {
     const request = input()
@@ -401,6 +517,10 @@ describe("immutable authoring preparation", () => {
     ".mcp.json",
     "hooks/hooks.json",
     "skills/test/SKILL.md",
+    "references/run.py",
+    "references/run.ts",
+    "tests/run.js",
+    "scripts/writer.py",
     "package.json",
     ".claude-plugin/plugin.json"
   ])("rejects mixed or unexplained file %s even if malformed", (path) => {

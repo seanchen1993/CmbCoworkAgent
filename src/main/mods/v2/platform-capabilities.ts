@@ -541,8 +541,8 @@ export class PlatformCapabilities {
       const active = this.running.get(key)
       if (active && JSON.stringify(active.ref) !== JSON.stringify(ref))
         platformError("MODS_PLATFORM_REQUEST_CONFLICT")
-      const result = this.receipt(key, ref)
-      if (method === "platform.cancel" && active) {
+      const result = this.receipt(key, ref, plugin)
+      if (method === "platform.cancel" && active && result.status === "running") {
         const provider = this.assertInfo(ref)
         const saved = this.host.hub.record(this.namespace(), key) as ModObject
         const action = provider.descriptor.actions.find((action) => action.id === saved.action)
@@ -563,11 +563,28 @@ export class PlatformCapabilities {
         .digest("hex")
     )
   }
-  private receipt(key: string, ref: PlatformCapabilityRef): PlatformCapabilityActionResult {
+  private receipt(
+    key: string,
+    ref: PlatformCapabilityRef,
+    caller: FunctionPlugin
+  ): PlatformCapabilityActionResult {
     const saved = this.host.hub.record(this.namespace(), key) as ModObject | undefined
     if (!saved || JSON.stringify(saved.ref) !== JSON.stringify(ref))
       platformError("MODS_PLATFORM_REQUEST_UNKNOWN")
     const result = saved.result as unknown as PlatformCapabilityActionResult
+    // A new implementation may inspect the old request, but cannot adopt its result as
+    // its own success or cancel work from another source. Session generations can change.
+    const callerDigest = this.source(caller).digest
+    const providerDigest = this.assertInfo(ref).source.digest
+    if (saved.callerDigest !== callerDigest || saved.providerDigest !== providerDigest)
+      return {
+        requestKey: result.requestKey,
+        status: "unknown",
+        error:
+          typeof saved.callerDigest !== "string" || typeof saved.providerDigest !== "string"
+            ? "历史动作缺少源码版本记录，请核对原始结果"
+            : "动作来自不同源码版本，请核对原始结果"
+      }
     // Process death or a previous source leaves an outcome to be checked, never replayed.
     return platformCopy(
       result.status === "running" && !this.running.has(key)
@@ -619,16 +636,10 @@ export class PlatformCapabilities {
     const key = nativeMode ? `native:${nativeMode}:${requestId}` : requestId
     if (parent?.requests?.has(key) && this.running.has(key))
       platformError("MODS_PLATFORM_REQUEST_REENTRANT")
+    const callerDigest = this.source(caller).digest
+    const providerDigest = provider.source.digest
     const fingerprint = createHash("sha256")
-      .update(
-        JSON.stringify([
-          ref,
-          row.action,
-          row.input,
-          this.source(caller).digest,
-          provider.source.digest
-        ])
-      )
+      .update(JSON.stringify([ref, row.action, row.input, callerDigest, providerDigest]))
       .digest("hex")
     const saved = nativeMode
       ? undefined
@@ -636,7 +647,7 @@ export class PlatformCapabilities {
     if (nativeMode && this.running.has(key)) return this.running.get(key)!.promise
     if (saved) {
       if (saved.fingerprint !== fingerprint) platformError("MODS_PLATFORM_REQUEST_CONFLICT")
-      return this.running.get(key)?.promise ?? this.receipt(key, ref)
+      return this.running.get(key)?.promise ?? this.receipt(key, ref, caller)
     }
     if (!nativeMode && this.running.size >= 16) platformError("MODS_PLATFORM_ACTION_LIMIT")
     const controller = new AbortController()
@@ -650,7 +661,14 @@ export class PlatformCapabilities {
         this.host.hub.save(
           this.namespace(),
           key,
-          platformJson({ fingerprint, ref, action: action.id, result })
+          platformJson({
+            fingerprint,
+            ref,
+            action: action.id,
+            callerDigest,
+            providerDigest,
+            result
+          })
         )
     }
     // Durable intent precedes guest entry. A crash at either side is conservatively unknown.

@@ -13,10 +13,16 @@ const bundle = await build({
     loader: "tsx",
     contents: `
 import React from 'react';import{createRoot}from'react-dom/client';import{CustomizeView}from${JSON.stringify(join(renderer, "components/customize/CustomizeView.tsx"))};
-let workspace='C:/isolated/A',listeners=[];const calls=[];
+import {useAppStore} from '@/lib/store';
+let workspace='C:/isolated/A',listeners=[],installed=[];const calls=[];window.projectMounts=[];
 const view=()=>({workspace,revision:workspace.endsWith('A')?1:2,bindingRevision:0,profiles:[],active:{id:'claw-a',name:workspace.endsWith('A')?'A private draft':'B private draft',capabilities:[]},enabled:true,applicable:true,issues:[],capabilities:[]});
 window.api={plugins:{list:async()=>[]},mods:{communityExamples:{list:async()=>({examples:[]})},authoring:{list:async()=>({workspace,drafts:[]})},globalEnabled:async()=>false,status:async()=>({workspace,mods:[],functionMods:[],diagnostics:[]}),clawView:async()=>{window.clawReads=(window.clawReads??0)+1;return view()},clawChange:async(t,m)=>{calls.push(['clawChange',m]);return view()},flowCatalog:async()=>({available:true,hostAvailable:true,workspace,plugins:[],actions:[],agents:[],models:[],features:[]}),flowList:async()=>[{revision:1,digest:'f'.repeat(64),definition:{id:'fixture',name:'B fixture',schemaVersion:2,maxExecutions:1,execution:{profile:'prompt-only-v1'},steps:[{id:'agent',name:'Agent',kind:'agent',enabled:true}]}}],clawSources:async()=>({skills:[],mcp:[]}),onConfigurationChanged:cb=>{listeners.push(cb);return()=>{}},evaluation:{list:async()=>({ok:true,value:{workspace,evaluations:[]}})},skillEvaluation:{list:async()=>({ok:true,value:{workspace,candidates:[{candidateId:'candidate-b',name:'B candidate',skillId:'skill-b'}],records:[]}}),prepare:async input=>{calls.push(['skillPrepare',input]);return{ok:false,code:'INVALID'}}}}};
+window.api.featureGates={isEnabled:async()=>({enabled:false,reason:'fixture-disabled'})};
+window.api.plugins.list=async()=>installed;
 window.fixture={calls,change:()=>{workspace='C:/isolated/B';listeners.forEach(fn=>fn())},readB:()=>{workspace='C:/isolated/B'}};
+window.fixture.projectPlugins=()=>{installed=['project-a','project-b'].map(id=>({id,name:id,version:'1.0.0',enabled:true,hasProjectMode:true,skillCount:1,mcpServerCount:0}));listeners.forEach(fn=>fn())};
+window.fixture.replaceSource=()=>{installed=installed.map(row=>({...row,path:'C:/replacement/'+row.id,updatedAt:'2026-10-21T10:00:00Z'}));listeners.forEach(fn=>fn())};
+window.fixture.account=()=>{useAppStore.getState().accountRevision++;useAppStore.getState().setShowCustomizeView(true,'mods')};
 createRoot(document.getElementById('root')).render(<CustomizeView/>);`
   },
   bundle: true,
@@ -35,9 +41,25 @@ createRoot(document.getElementById('root')).render(<CustomizeView/>);`
     {
       name: "fixture",
       setup(b) {
+        // The child has independent native/browser coverage; this verifies only parent selection/laziness/scope.
+        b.onResolve({ filter: /^\.\/NativeNodeComposer$/ }, (a) =>
+          a.importer.endsWith("ModsPanel.tsx")
+            ? { path: "native-selection", namespace: "selection-probe" }
+            : undefined
+        )
+        b.onLoad({ filter: /.*/, namespace: "selection-probe" }, () => ({
+          loader: "tsx",
+          resolveDir: root,
+          contents: `import React,{useEffect}from'react';export function NativeNodeComposer({threadId,workspace,pluginId}){useEffect(()=>{window.projectMounts.push(['mount',threadId,workspace,pluginId]);return()=>window.projectMounts.push(['unmount',threadId,workspace,pluginId])},[threadId,workspace,pluginId]);return <section aria-label="selected-native-project">{pluginId} {workspace}</section>}`
+        }))
         // Full chat rendering is unrelated to Settings retention; the real panel remains under test.
-        b.onResolve({filter:/(?:ChatContainer|TabbedPanel)$/},()=>({path:"ChatContainer",namespace:"chat-empty"}))
-        b.onLoad({filter:/.*/,namespace:"chat-empty"},()=>({contents:"export const ChatContainer=()=>null;export const TabbedPanel=()=>null"}))
+        b.onResolve({ filter: /(?:ChatContainer|TabbedPanel)$/ }, () => ({
+          path: "ChatContainer",
+          namespace: "chat-empty"
+        }))
+        b.onLoad({ filter: /.*/, namespace: "chat-empty" }, () => ({
+          contents: "export const ChatContainer=()=>null;export const TabbedPanel=()=>null"
+        }))
         b.onResolve({ filter: /^(?:@\/lib\/store|\.\.\/\.\.\/lib\/store)$/ }, () => ({
           path: "store",
           namespace: "fixture"
@@ -101,12 +123,15 @@ async function dismissTour(page) {
     await tour.getByRole("button", { name: "关闭示例演练", exact: true }).click()
 }
 async function navigate(page, name) {
-  const advanced = page.getByRole("button", { name: "高级自定义", exact: true })
+  const group = page.getByRole("button", {
+    name: name === "灵件与使用设置" ? "基础功能" : "高级自定义",
+    exact: true
+  })
   if (
-    ["搭配管理", "聊天任务模板", "灵件管理"].includes(name) &&
-    (await advanced.getAttribute("aria-expanded")) === "false"
+    ["搭配管理", "聊天任务模板", "灵件与使用设置"].includes(name) &&
+    (await group.getAttribute("aria-expanded")) === "false"
   )
-    await advanced.click()
+    await group.click()
   await page
     .locator("nav")
     .filter({ has: page.getByRole("button", { name: "高级自定义", exact: true }) })
@@ -136,6 +161,58 @@ async function assertInert(page, locator) {
   }
 }
 try {
+  {
+    const { page, errors } = await open("mods")
+    await page
+      .getByRole("navigation", { name: "灵件工作区", exact: true })
+      .getByRole("button", { name: "我已添加", exact: true })
+      .waitFor()
+    assert.equal(
+      await page.getByRole("region", { name: "selected-native-project", exact: true }).count(),
+      0
+    )
+    assert.deepEqual(await page.evaluate(() => window.projectMounts), [])
+    await page.evaluate(() => window.fixture.projectPlugins())
+    const first = page.getByRole("article", { name: "project-a", exact: true })
+    await first.getByRole("button", { name: "查看项目流程", exact: true }).click()
+    await first.getByRole("region", { name: "selected-native-project", exact: true }).waitFor()
+    const second = page.getByRole("article", { name: "project-b", exact: true })
+    await second.getByRole("button", { name: "查看项目流程", exact: true }).click()
+    await second.getByRole("region", { name: "selected-native-project", exact: true }).waitFor()
+    assert.equal(
+      await page.getByRole("region", { name: "selected-native-project", exact: true }).count(),
+      1
+    )
+    assert.deepEqual(await page.evaluate(() => window.projectMounts), [
+      ["mount", "t", "C:/isolated/A", "project-a"],
+      ["unmount", "t", "C:/isolated/A", "project-a"],
+      ["mount", "t", "C:/isolated/A", "project-b"]
+    ])
+    await page.evaluate(() => window.fixture.replaceSource())
+    await page.waitForFunction(() => window.projectMounts.length === 5)
+    assert.equal(await page.getByRole("region", { name: "selected-native-project", exact: true }).count(), 1)
+    await page.evaluate(() => window.fixture.account())
+    await page
+      .getByRole("region", { name: "selected-native-project", exact: true })
+      .waitFor({ state: "detached" })
+    await page
+      .getByRole("article", { name: "project-b", exact: true })
+      .getByRole("button", { name: "查看项目流程", exact: true })
+      .click()
+    await page.getByRole("region", { name: "selected-native-project", exact: true }).waitFor()
+    await chooseB(page)
+    await page
+      .getByRole("region", { name: "selected-native-project", exact: true })
+      .waitFor({ state: "detached" })
+    assert.deepEqual(errors, [])
+    assert.deepEqual(await page.evaluate(() => window.fixture.calls), [])
+    result.projectEntry = {
+      singleLazySelection: true,
+      accountAndWorkspaceReset: true,
+      noProjectCreated: true
+    }
+    await page.close()
+  }
   for (const mode of ["internal-flow-button", "sidebar-tab", "overview"]) {
     const { page, errors } = await open()
     const name = await editor(page)
@@ -189,6 +266,12 @@ try {
   }
   {
     const { page, errors } = await open("mods")
+    await page.waitForTimeout(100)
+    assert.deepEqual(errors, [])
+    await page
+      .getByRole("navigation", { name: "灵件工作区", exact: true })
+      .getByRole("button", { name: "对话创作", exact: true })
+      .click()
     await page.getByRole("button", { name: "高级：手动组装、源码与历史版本", exact: true }).click()
     if (await page.getByRole("button", { name: "高级：编辑源码与历史版本", exact: true }).count())
       await page.getByRole("button", { name: "高级：编辑源码与历史版本", exact: true }).click()
@@ -198,15 +281,19 @@ try {
     await name.fill("Unsaved authoring title")
     await navigate(page, "聊天任务模板")
     await assertInert(page, name)
-    await navigate(page, "灵件管理")
+    await navigate(page, "灵件与使用设置")
     assert.equal(await name.inputValue(), "Unsaved authoring title")
     await navigate(page, "对话创作")
     await assertInert(page, name)
-    await navigate(page, "灵件管理")
+    await navigate(page, "灵件与使用设置")
     assert.equal(await name.inputValue(), "Unsaved authoring title")
     await navigate(page, "聊天任务模板")
     await chooseB(page)
-    await navigate(page, "灵件管理")
+    await navigate(page, "灵件与使用设置")
+    await page
+      .getByRole("navigation", { name: "灵件工作区", exact: true })
+      .getByRole("button", { name: "对话创作", exact: true })
+      .click()
     await page.getByRole("button", { name: "高级：手动组装、源码与历史版本", exact: true }).click()
     if (await page.getByRole("button", { name: "高级：编辑源码与历史版本", exact: true }).count())
       await page.getByRole("button", { name: "高级：编辑源码与历史版本", exact: true }).click()

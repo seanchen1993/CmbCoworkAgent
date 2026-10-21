@@ -160,7 +160,7 @@ async function main() {
     await page.getByRole("button",{name:"高级特性",exact:true}).click()
     await page.getByRole("button",{name:"任务画布",exact:true}).click()
     await page.getByRole("region",{name:"TaskMmdPanel",exact:true}).getByText("目标 a -").waitFor()
-    await page.getByRole("button",{name:"灵件管理",exact:true}).click()
+    await page.getByRole("navigation").filter({has:page.getByRole("button",{name:"基础功能",exact:true})}).getByRole("button",{name:"灵件与使用设置",exact:true}).click()
     const mods=page.getByRole("region",{name:"ModsPanel",exact:true})
     await mods.getByText("目标 b C:/new-beta").waitFor()
     await page.evaluate(()=>{(window as unknown as ConfigurationWindow).holdLoad=true})

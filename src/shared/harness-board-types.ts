@@ -515,6 +515,8 @@ export interface HarnessProjectListItem {
     id: string
     name: string
     type: HarnessAdapterType
+    /** Historical project binding for diagnostics; absence is not a version mismatch. */
+    boundVersion?: string
   }
   creator?: HarnessProjectCreatorMetadata
   boardCompatibility: HarnessBoardCompatibility

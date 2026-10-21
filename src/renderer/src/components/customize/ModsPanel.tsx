@@ -4,7 +4,7 @@ import {
   sameSimpleAuthoringScope,
   type SimpleAuthoringPracticeIntent
 } from "@/lib/simple-authoring-intent"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import type { ModWorkspaceStatus } from "../../../../shared/mods/types"
 import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import { Button } from "@/components/ui/button"
@@ -15,6 +15,7 @@ import { openDerivedProject } from "@/lib/derived-project-intent"
 import { openPluginSettings } from "@/lib/plugin-settings-intent"
 import { useFeatureGate } from "@/lib/feature-gates"
 import { installedModUseState } from "@/lib/installed-mod-use-state"
+import { installedProjectPluginIdentity } from "@/lib/native-project-binding"
 import type { ClawView } from "../../../../shared/mods/claw"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import type { PluginInstallResult } from "../../../../shared/plugin-install"
@@ -27,6 +28,7 @@ import { ModsImportGuide } from "./ModsImportGuide"
 import { SparksDocumentationLink } from "./SparksDocumentationLink"
 import { OfficialSparksExamples } from "./OfficialSparksExamples"
 import { SparksOperationError } from "./SparksOperationError"
+import { ModsUsageSetup } from "./ModsUsageSetup"
 import { RuntimeSessions } from "./RuntimeSessions"
 import { SnapshotMaintenance } from "./SnapshotMaintenance"
 import { readReuseSelection, subscribeReuseSelection } from "./development-reuse-receipts"
@@ -38,6 +40,10 @@ import {
   DialogDescription,
   DialogFooter
 } from "@/components/ui/dialog"
+
+const NativeNodeComposer = lazy(() =>
+  import("./NativeNodeComposer").then((module) => ({ default: module.NativeNodeComposer }))
+)
 
 async function readWorkspaceStatus(threadId: string | null): Promise<ModWorkspaceStatus | null> {
   if (!threadId) return null
@@ -75,12 +81,13 @@ export function ModsPanel({
   active?: boolean
   navigationRequest?: {
     id: number
-    section: "examples" | "create"
+    section: "examples" | "create" | "installed"
     practice?: SimpleAuthoringPracticeIntent
   }
   onSectionChange?: (section: "examples" | "create" | "installed") => void
 }): React.JSX.Element {
-  const [section, setSection] = useState<"examples" | "create" | "installed">("create")
+  const [section, setSection] = useState<"examples" | "create" | "installed">("installed")
+  const accountRevision = useAppStore((state) => state.accountRevision)
   const [advanced, setAdvanced] = useState(false)
   const [manualOpen, setManualOpen] = useState(false)
   const [maintenanceOpen, setMaintenanceOpen] = useState(false)
@@ -90,7 +97,7 @@ export function ModsPanel({
     pluginId: string
     name: string
   } | null>(null)
-  const [settingsVisited, setSettingsVisited] = useState(false)
+  const [settingsVisited, setSettingsVisited] = useState(true)
   const [consumedNavigation, setConsumedNavigation] = useState<number | null>(null)
   useEffect(() => {
     if (active) onSectionChange?.(section)
@@ -98,6 +105,7 @@ export function ModsPanel({
   if (active && navigationRequest && navigationRequest.id !== consumedNavigation) {
     setConsumedNavigation(navigationRequest.id)
     setSection(navigationRequest.section)
+    if (navigationRequest.section === "installed") setSettingsVisited(true)
     if (navigationRequest.section === "create") {
       setAdvanced(false)
       setManualOpen(false)
@@ -296,7 +304,7 @@ export function ModsPanel({
         </p>
         {settingsVisited && (
           <ModsSettings
-            key={JSON.stringify([threadId, normalizeWorkspacePathKey(workspaceHint)])}
+            key={JSON.stringify([accountRevision, threadId, normalizeWorkspacePathKey(workspaceHint)])}
             threadId={threadId}
             workspaceHint={workspaceHint}
             active={active && section === "installed"}
@@ -344,6 +352,16 @@ export function ModsSettings({
   onDerive?: (plugin: { id: string; name: string }) => void
 }): React.JSX.Element {
   const projectMode = useFeatureGate(FEATURE_GATES.projectMode)
+  const account = useAppStore((state) => state.accountRevision)
+  const projectScope = JSON.stringify([account, threadId, normalizeWorkspacePathKey(workspaceHint)])
+  const [projectSelection, setProjectSelection] = useState<{ scope: string; pluginId: string | null }>({
+    scope: projectScope,
+    pluginId: null
+  })
+  if (projectSelection.scope !== projectScope)
+    setProjectSelection({ scope: projectScope, pluginId: null })
+  const selectedProjectPlugin =
+    projectSelection.scope === projectScope ? projectSelection.pluginId : null
   const uploadInput = useRef<HTMLInputElement>(null)
   const [notice, setNotice] = useState("")
   const [installed, setInstalled] = useState<Awaited<ReturnType<typeof window.api.plugins.list>>>(
@@ -468,6 +486,7 @@ export function ModsSettings({
           查看已添加的功能及所选聊天的实际使用状态。插件启停会影响使用它的其他聊天。
         </p>
       </div>
+      <ModsUsageSetup threadId={threadId} workspaceHint={workspaceHint} active={active} />
       {installedMods.length > 0 && (
         <ModsSetupProgress
           installed={installedMods.length > 0}
@@ -624,6 +643,22 @@ export function ModsSettings({
               {plugin.hasProjectMode && (
                 <Button
                   size="sm"
+                  variant="outline"
+                  disabled={busy || !threadId || !status || !!status.recovery || !active}
+                  aria-expanded={selectedProjectPlugin === plugin.id}
+                  onClick={() =>
+                    setProjectSelection({
+                      scope: projectScope,
+                      pluginId: selectedProjectPlugin === plugin.id ? null : plugin.id
+                    })
+                  }
+                >
+                  {selectedProjectPlugin === plugin.id ? "收起项目流程" : "查看项目流程"}
+                </Button>
+              )}
+              {plugin.hasProjectMode && (
+                <Button
+                  size="sm"
                   disabled={busy || !plugin.enabled || !projectMode.enabled}
                   onClick={() => openDerivedProject(plugin.id, plugin.name)}
                 >
@@ -649,6 +684,17 @@ export function ModsSettings({
                 卸载
               </Button>
             </div>
+            {active && selectedProjectPlugin === plugin.id && plugin.hasProjectMode && threadId && status && !status.recovery && (
+              <Suspense fallback={<p role="status">正在读取项目流程…</p>}>
+                <NativeNodeComposer
+                  key={JSON.stringify([projectScope, installedProjectPluginIdentity(plugin)])}
+                  threadId={threadId}
+                  workspace={status.workspace}
+                  pluginId={plugin.id}
+                  initialOpen
+                />
+              </Suspense>
+            )}
             {plugin.hasProjectMode && !plugin.enabled && (
               <p className="text-xs text-muted-foreground">
                 先启用插件，再新建项目。已有项目继续使用原来的设置。

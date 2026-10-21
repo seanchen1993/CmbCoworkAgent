@@ -71,7 +71,7 @@ function publicError(error: unknown): string {
   if (/DEVELOPMENT_SETUP_PARTIAL/.test(message))
     return "部分开关可能已开启，但创作尚未确认。保留已有设置，请刷新状态后再试；不会自动关闭其它会话使用的功能。"
   if (/DEVELOPMENT_SETTINGS_RECOVERY/.test(message))
-    return "项目设置需要恢复，请到“添加功能 → 我已添加”查看提示。"
+    return "项目设置需要恢复，请到“灵件与使用设置 → 我已添加”查看提示。"
   if (/DEVELOPMENT_CREATOR_UNAVAILABLE/.test(message))
     return "尚未进入创造者模式，请刷新状态后重试。"
   if (/WORKSPACE_REQUIRED|LOCAL_WORKSPACE/.test(message)) return "请先选择本地项目，再制作灵件。"
@@ -1773,7 +1773,7 @@ function ScopedDevelopment({
             onOpenWorkbench()
           }}
         >
-          打开灵件管理
+          打开灵件与使用设置
         </button>
       )}
     </section>

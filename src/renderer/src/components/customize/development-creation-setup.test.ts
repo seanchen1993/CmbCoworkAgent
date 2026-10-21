@@ -10,7 +10,8 @@ function fixture(global = false, enabled = false) {
     globalEnabled: vi.fn(async () => global),
     status: vi.fn(async () => ({ ...status })),
     configureGlobal: vi.fn(async (value: boolean) => { global = value; return value }),
-    configure: vi.fn(async (_thread: string, value: boolean, policy: boolean) => {
+    configure: vi.fn(async (_thread: string, value: boolean, policy: boolean, workspace: string) => {
+      expect(workspace).toBe(status.workspace)
       status = { ...status, enabled: value, outputPolicy: policy }
     })
   } satisfies DevelopmentSetupApi
@@ -22,8 +23,28 @@ describe("explicit creation setup", () => {
     const { api } = fixture()
     await prepareDevelopmentCreation(api, "thread", "c:/project", () => {})
     expect(api.configureGlobal).toHaveBeenCalledWith(true)
-    expect(api.configure).toHaveBeenCalledWith("thread", true, true, "c:/project")
+    expect(api.configure).toHaveBeenCalledWith("thread", true, true, "C:/Project")
   })
+  it.each(["C:/Repo/A", "C:\\REPO\\A"])(
+    "writes only the fresh native canonical workspace for hint %s and retains its current policy",
+    async (hint) => {
+      const { api, change } = fixture()
+      change({ workspace: "C:\\Repo\\A", outputPolicy: true })
+      api.configureGlobal.mockImplementation(async () => {
+        change({ workspace: "c:\\repo\\a", outputPolicy: false })
+        return true
+      })
+      api.configure.mockImplementation(async (thread, enabled, policy, expectedWorkspace) => {
+        expect(thread).toBe("thread")
+        // Match the native IPC's strict canonical comparison, not a normalized renderer hint.
+        expect(expectedWorkspace).toBe("c:\\repo\\a")
+        expect(policy).toBe(false)
+        change({ enabled, outputPolicy: policy })
+      })
+      await prepareDevelopmentCreation(api, "thread", hint, () => {})
+      expect(api.configure).toHaveBeenCalledExactlyOnceWith("thread", true, false, "c:\\repo\\a")
+    }
+  )
   it("does not rewrite existing settings", async () => {
     const { api } = fixture(true, true)
     await prepareDevelopmentCreation(api, "thread", "C:/Project", () => {})

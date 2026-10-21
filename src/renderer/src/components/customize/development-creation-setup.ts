@@ -40,7 +40,7 @@ export async function prepareDevelopmentCreation(
     verify(current)
     if (!current.enabled) {
       changed = true
-      await api.configure(threadId, true, current.outputPolicy, workspace)
+      await api.configure(threadId, true, current.outputPolicy, current.workspace)
       assertCurrent()
       const updated = await api.status(threadId)
       verify(updated)

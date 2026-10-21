@@ -72,7 +72,7 @@ async function main() {
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("三任务导览同包验收", { exact: true }).first().click()
     await page.locator("textarea.composer-textarea").fill(draft)
-    await openModsAdvancedSettings(page, "灵件管理")
+    await openModsAdvancedSettings(page, "灵件与使用设置")
     const tour = page.getByRole("region", { name: "任务示例演练", exact: true })
     assert.equal(await page.getByRole("button", { name: "任务示例演练", exact: true }).count(), 0)
     assert.equal(await page.getByRole("button", { name: "本页任务示例", exact: true }).count(), 0)
@@ -107,7 +107,7 @@ async function main() {
     assert.equal(await page.locator("textarea.composer-textarea").inputValue(), draft)
     assert.deepEqual(await page.evaluate((id) => window.api.threads.getMessages(id), threadId), [])
     assert.equal((await page.evaluate((id) => window.api.mods.flowRuns(id), threadId)).length, 0)
-    await openModsAdvancedSettings(page, "灵件管理")
+    await openModsAdvancedSettings(page, "灵件与使用设置")
     await page.getByRole("button", { name: "任务示例演练", exact: true }).click()
     await tour.waitFor()
     await page.keyboard.press("Escape")
@@ -175,7 +175,7 @@ async function main() {
     checks.push(
       "Three tasks × three real rendered previews at desktop and 375px; keyboard progression and Escape preserve combination draft"
     )
-    await openModsAdvancedSettings(page, "灵件管理")
+    await openModsAdvancedSettings(page, "灵件与使用设置")
     await openModsAdvancedSettings(page, "搭配管理")
     assert.equal(await simple.getByLabel("组合名称", { exact: true }).inputValue(), profileDraft)
     await app.evaluate(({ BrowserWindow }) =>

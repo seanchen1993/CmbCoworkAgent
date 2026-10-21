@@ -2,10 +2,15 @@ import {
   autobizKnowledgeExample,
   readAutobizKnowledgeExample
 } from "./business-adapters/autobiz-example"
+import {
+  autobizStateExample,
+  readAutobizStateExample
+} from "./business-adapters/autobiz-state-example"
 
 /** Closed host-owned templates; manifest authors cannot add readers or executable loaders. */
 const exampleRegistry = [
-  { descriptor: autobizKnowledgeExample, read: readAutobizKnowledgeExample }
+  { descriptor: autobizKnowledgeExample, read: readAutobizKnowledgeExample },
+  { descriptor: autobizStateExample, read: readAutobizStateExample }
 ] as const
 
 export const bundledBusinessModExamples: ReadonlyArray<

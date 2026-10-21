@@ -1,4 +1,12 @@
-export type AuthoringTemplateKind = "command" | "tool" | "rule" | "panel" | "flow-action"
+export const AUTHORING_TEMPLATE_KINDS = [
+  "command",
+  "tool",
+  "rule",
+  "panel",
+  "flow-action",
+  "state-extension"
+] as const
+export type AuthoringTemplateKind = (typeof AUTHORING_TEMPLATE_KINDS)[number]
 export interface AuthoringFile {
   path: string
   text: string

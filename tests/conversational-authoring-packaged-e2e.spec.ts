@@ -278,7 +278,7 @@ async function main() {
     await page.reload()
     await page.getByText("描述需求制作与节点组合验收", { exact: true }).first().click()
     await enterModsCreatorChat(page, threadId, workspace)
-    await openModsAdvancedSettings(page, "灵件管理")
+    await openModsAdvancedSettings(page, "灵件与使用设置")
     await page
       .getByRole("navigation", { name: "灵件工作区" })
       .getByRole("button", { name: "对话创作", exact: true })

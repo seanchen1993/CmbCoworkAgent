@@ -32,10 +32,15 @@ createRoot(document.getElementById('root')).render(<Fixture/>);`
     {
       name: "store",
       setup(b) {
-        b.onResolve({ filter: /^@\/lib\/store$/ }, () => ({ path: "store", namespace: "fixture" }))
+        // Only installed settings are exercised; no authoring editor is opened in this fixture.
+        b.onResolve({filter:/^\.\/ModCreator$/},args=>args.importer.endsWith('ModsPanel.tsx')?{path:'creator',namespace:'unused-creator'}:undefined)
+        b.onLoad({filter:/.*/,namespace:'unused-creator'},()=>({contents:'export const ModCreator=()=>null'}))
+        b.onResolve({ filter: /^(?:@\/lib\/store|\.\/store)$/ }, args =>
+          args.path === "@/lib/store" || args.importer.replaceAll("\\", "/").includes("/src/renderer/src/lib/")
+            ? { path: "store", namespace: "fixture" } : undefined)
         b.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
           contents:
-            "export const useAppStore={getState:()=>({bumpPluginVersion:()=>{},setShowCustomizeView:()=>{}})}"
+            "const state={accountRevision:0,bumpPluginVersion:()=>{},setShowCustomizeView:()=>{}};export const useAppStore=selector=>selector(state);useAppStore.getState=()=>state;export const isThreadDeletionPending=()=>false;export const isThreadRetired=()=>false"
         }))
       }
     }

@@ -20,6 +20,7 @@ import { resolveModelDisplay } from "@/lib/model-display"
 import { BuiltinRunOverview } from "./BuiltinRunOverview"
 import type { ModCommandDescriptor } from "../../../../shared/mods/types"
 import { chatClawEffectiveView } from "@/lib/chat-claw-effective-view"
+import { ModsUsageSettingsEntry } from "../customize/ModsUsageSettingsEntry"
 
 export function ClawSidebar({
   threadId,
@@ -192,6 +193,9 @@ export function ClawSidebar({
           </button>
         ))}
       </nav>
+      <div className="border-b px-4 py-2">
+        <ModsUsageSettingsEntry />
+      </div>
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4">
         <div hidden={tab !== "run"} inert={tab !== "run"} className="space-y-4">
           {taskOverview}
@@ -265,7 +269,7 @@ export function ClawSidebar({
               <div role="alert" className="space-y-1 text-xs text-destructive">
                 <p>
                   {effective?.state === "disabled"
-                    ? "灵件功能已关闭。进入创造者模式可开启，也可在高级自定义的灵件管理中调整。"
+                    ? "灵件功能已关闭。点击上方‘灵件与使用设置’，核对当前聊天后明确开启，无需进入创造者模式。"
                     : "这段聊天的组合暂不可用，请在‘管理助手组合’中核对。"}
                 </p>
                 {effective?.issues.map((issue) => <p key={issue}>{issue}</p>)}

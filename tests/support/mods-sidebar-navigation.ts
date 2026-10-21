@@ -74,15 +74,22 @@ export async function openModsFlowHistory(page: Page, runId: string): Promise<Lo
 
 export async function openModsAdvancedSettings(
   page: Page,
-  section: "灵件管理" | "搭配管理" | "聊天任务模板"
+  section: "灵件与使用设置" | "搭配管理" | "聊天任务模板"
 ): Promise<void> {
-  const advanced = page.getByRole("button", { name: "高级自定义", exact: true })
-  if (!(await advanced.isVisible()))
+  const group = page.getByRole("button", {
+    name: section === "灵件与使用设置" ? "基础功能" : "高级自定义",
+    exact: true
+  })
+  if (!(await group.isVisible()))
     await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-  await advanced.waitFor({ state: "visible" })
+  await group.waitFor({ state: "visible" })
   await dismissModsTour(page)
-  if ((await advanced.getAttribute("aria-expanded")) === "false") await advanced.click()
-  await page.getByRole("button", { name: section, exact: true }).click()
+  if ((await group.getAttribute("aria-expanded")) === "false") await group.click()
+  await page
+    .getByRole("navigation")
+    .filter({ has: group })
+    .getByRole("button", { name: section, exact: true })
+    .click()
   if (section === "聊天任务模板") {
     const details = page.locator("[data-diy-flows] > details")
     await details.waitFor({ state: "visible" })
@@ -107,7 +114,7 @@ export async function openModsClawMoreSettings(page: Page): Promise<void> {
 
 /** Open the installed Mod settings through the current production navigation. */
 export async function openModsSettings(page: Page): Promise<void> {
-  await openModsAdvancedSettings(page, "灵件管理")
+  await openModsAdvancedSettings(page, "灵件与使用设置")
   await page
     .getByRole("navigation", { name: "灵件工作区", exact: true })
     .getByRole("button", { name: "我已添加", exact: true })

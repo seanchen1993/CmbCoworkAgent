@@ -41,7 +41,7 @@ export function NativePluginCapabilities({
       const next = nativePluginCapabilities(plugins, skills, JSON.parse(identities))
       setRows(next)
       setSelected((id) =>
-        next.some((row) => row.pluginId === id && row.enabled && row.projectMode) ? id : null
+        next.some((row) => row.pluginId === id && row.projectMode) ? id : null
       )
     } catch (cause) {
       if (sequence.current === request) {
@@ -176,7 +176,7 @@ export function NativePluginCapabilities({
       </div>
       {selected && !busy && (
         <NativeNodeComposer
-          key={selected}
+          key={JSON.stringify([selected, pluginVersion])}
           threadId={threadId}
           workspace={workspace}
           pluginId={selected}

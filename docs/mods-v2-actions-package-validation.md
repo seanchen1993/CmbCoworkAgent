@@ -1,5 +1,115 @@
 # Actions中的Windows包内验证
 
+## 2026-10-21 可执行状态 Mod 与内置创造链更新
+
+本节对应 `30cbfeaf2` 之后的本地增量，下节已成功的 Actions 仅证明前一构建。
+新提交与对应 Actions 尚待末轮验证、提交和构建后核对，不能用相同的 `1.5.9` 版本号
+或旧构建回执证明本次新增入口已经随安装包交付。
+本轮增加 `app.asar.unpacked/out/resources/mods/autobiz-state-machine` 源码资源，应使用
+完整新安装包或解压目录，单独替换 `app.asar` 会缺少内置生成所需文件。
+
+本次复用既有 Function Mods 的事件、工具、能力动作、原生进程与问题确认接口。
+AutoBiz 的固定业务图、原 Hooks、知识绑定、业务校验、兼容写入器与持久对账留在插件中，
+没有新增平台专用业务状态机 API。平台增量为通用的源码版本绑定动作回执，以及创造者
+生成、原始插件转换诊断、保存与试用路径的同步支持。
+
+- `mod_authoring` 新增 `state-extension` 决策骨架；默认不推进，未绑定原写入器与完成
+  真实试用前保持“未迁移、未验证”。内置原始转换的 `stateControl` 返回状态写入候选、
+  Hooks、配置、知识和既有执行权限边界，组装声明不再被当成状态控制迁移证明。
+- `mod_business example(autobiz-state-machine)` 返回随应用分发的八个真实源码资源，
+  可经原生保存、组合、试用、审批生成插件；不是依赖开发者机器 output 目录的桥接。
+- 独立场景 `examples/mods-release-review` 使用同一公共机制，验证状态控制没有增加
+  AutoBiz 专用平台执行分支。示例保留明确的会话状态与跨重启能力记录边界。
+- 最新 AutoBiz 为 `autobiz-function-state-mods-20261021@1.0.4`，输出目录为
+  `output/deliveries/autobiz-function-state-20261021-root-r7`。ZIP 的 SHA-256 为
+  `a1c9babdfaa4a7bc77d8fd7d5fcd814ad51f862b6ef2831fbdf5317dd8b7a733`。
+  静态转换报告记录生成当时未执行；当前真实执行结论以同目录
+  `runtime-verification.json` 为准，不混用两种报告。
+
+| 验证范围 | 已完成结果及边界 |
+| --- | --- |
+| 最终 r7 真实运行 | 真实 QuickJS、命令与能力动作、原生进程到 Python，七个主阶段至归档通过；12 次合法提交、6 次缺产物拒绝、102 次真实进程调用。原固定五角色 workflow、真实 Git worktree、Maven、Review、UTest、E2E 与原知识/产物链均实际执行。采用确定性的模型夹具，不代表远程模型质量验收或最新打包 UI 整机验收。 |
+| 确认与对账 | 确认期间篡改设计及重新同步原锁仍拒绝提交；精确重新确认后通过。重复请求及重建运行时后的只读对账不改写状态。七项日志故障断言覆盖回复丢失、无物理凭证、旧源码与历史结果。 |
+| 原业务约束 | 16 条原 Hooks 声明逐字节保留，其中 15 条在完整流程实际执行；新进程路径的设计批准由精确原生问题承接，不宣称旧命令条件 Hook 已被触发。前端性能 Hook 九项真实 Git 断言通过。 |
+| 公共接口 | 七文件联合 52/52，含 SQLite 关闭重开、真实文件副作用、不同调用方和提供方源码，以及独立业务示例。源码变化或历史身份不明时返回未知，不自动认领成功或重放。 |
+| 内置创造与转换 | 真实保存、隔离 Worker、检查、原生待审批及保留原资源等九文件 161/161；内置八资源与真实注册专项 18/18；创造器浏览器 7/7。 |
+| 统一使用入口 | 基础功能与聊天工作台统一为“灵件与使用设置”，我已添加默认展示，并同页懒加载项目流程。明确开启、最新回答保护、恢复异常、目录不符、切聊天及账号的浏览器四组通过；设置整页七组含同版本替换退役旧预览通过。 |
+| 项目绑定诊断 | 十一条真实浏览器路径通过，含跨目录原生入口、停用/卸载、兼容性、历史版本诊断、同版本来源替换，以及面板卸载后的迟返导航阻断；原生只读投影及绑定分类六项定向通过。未绕过原生项目准入或保存旧版本代码。 |
+| Windows 路径与明确启用 | 原实现对等价路径的斜杠、大小写差异可能通过显示校验却被原生精确写入拒绝。现在以刚读取且验证通过的规范路径写入，保留最新回答保护及原生严格匹配；旧实现可复现失败，修复后设置辅助函数 9/9、使用入口浏览器四组通过。 |
+| 静态检查 | Node/Web 类型检查通过；新增源码窄 ESLint 无错误与警告，既有修改文件无 ESLint 错误；不为消除既有格式警告重排无关文件。 |
+
+本轮完整 `npm test` 于 2026-10-21 18:16 完成，退出码为 0。Vitest 的 1,593 个文件中
+1,577 通过、16 按条件跳过；15,830 项用例中 15,746 通过、84 跳过，无失败。后续 adoption、
+消息、Hooks、插件、合并、workflow、桌面基线、IM、恢复、作者安装、文件、评测与界面
+独立脚本链全部完成，见[退出回执](../output/mods-state-existing-api-npm-test-final-result.json)
+及[完整日志](../output/mods-state-existing-api-npm-test-final.log)。使用入口是在这轮长回归
+期间追加的增量，以上定向浏览器、范围隔离与静态检查
+分别覆盖其最终源码，不能将此前的旧导航测试结果当作本次入口已验收。
+可选详细设计的开启仍沿原入口；新状态工具不负责开启它。旧 Skill/CLI 保留兼容路径，
+未全部拦截；Windows 本地 NTFS 兼容提交不等于任意系统的跨文件事务，归档移动与
+checkpoint 不构成统一事务。详细操作和边界见
+[插件创造、转换、组合与使用说明](sparks/creator-plugin-workflow.md)。
+
+## 2026-10-21 GitHub Actions 交付验收（30cbfeaf2）
+
+生产功能提交为 `485e467ccda4a575c7e2212071e063f7dc6f784b`；包内交互验收修复提交为
+`30cbfeaf2cd4754e19732ceec593b26eeae98045`。仅推送 `codex/mods-v2`，未修改其他分支。
+[本次 Actions](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39565486636)
+的 Linux 原生依赖、Linux 打包和 Windows 打包三个 job 均为 `success`。
+
+- [Windows 完整解压包](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39565486636/artifacts/12329568814)
+- [Windows 安装包](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39565486636/artifacts/12329648138)
+- [Linux 安装包](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39565486636/artifacts/12330575083)
+- [包内验证证据](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39565486636/artifacts/12330172020)
+
+请安装或使用完整新目录，不仅替换 `app.asar`。本轮包含原生控制器与插件恢复资源。
+版本号仍为 `1.5.9`，应使用上述精确提交对应的产物，不能以相同版本号推断早期构建已包含本轮能力。
+本次没有创建发布标签或 Release。
+
+| 验证 | 本轮结果及边界 |
+| --- | --- |
+| 新生产 ASAR | GitHub 包内 15 项检查全部通过，包括真实模型回答持久化和重载、QuickJS、语法 worker、Code diff、面板焦点、PTY、原生子孙进程回收及配置保留。不是 NSIS 安装/卸载测试。 |
+| 内置示例 | 九项真实安装、初始未批准、重复安装及同名个人版本冲突保护通过。不是九项业务逐一执行。 |
+| AutoBiz 最终组合包 | `autobiz-original-mods-recovery-20261021@1.0.3` 原生集成链路通过：外部样例知识、16 个原 Hooks、原五角色 Workflow、两个真实 Git worktree、Maven、Review、UTest、E2E、显式合入、CodeDone、CICD 和归档。可选详细设计按原协议跳过；不宣称新 ASAR 整机或远程模型业务质量验收。 |
+| 恢复与交付 | 真实 native owner 及工具联合 37/37；新增启用链原生 25/25、浏览器 15 个场景通过；历史未知交付、恢复历史、子试用再次恢复和仅规划发布丢失专项通过。 |
+| 创造者与指引 | 聊天直接切换、真实创作记录门控、普通模式隐藏、图标锚点、重开、账号与聊天变化、迟到响应、窄屏回归通过。普通模式不挂指引全页面扫描。 |
+| 静态检查 | Node/Web 类型检查通过；208 文件功能提交中 192 个代码文件 ESLint 无错误；后续四个测试及辅助文件窄 lint、diff-check 通过。 |
+
+GitHub 新产物的 `app.asar` SHA-256 为
+`f17fae5d98f715772482ddcee64b4b8dbf52e8cd292427e41b9e75fd74ab0799`；
+EXE 为 `851172fc7bc50b371dad111d7c7f8532994ed5d8575ef5a4bf4002d3d8513d2d`。
+[下载回来的原生包内回执](../output/github-package-r46-ci-evidence/packaged-validation.json)
+为 `passed=true`、`checks=15`、`childExitCode=0`；
+[运行回执](../output/github-package-r46-ci-evidence/packaged-runtime-evidence.json)
+和[示例回执](../output/github-package-r46-ci-evidence/packaged-community-examples.json)
+均为 `complete=true`，失败计数为零。这些本地证据路径不随 Git 提交分发，可在说明附件中读取副本。
+
+首轮新包的 Windows 验收被窄屏侧栏遮挡后方徽章阻断，安装包构建本身成功。修复后的验证器
+等待 `ui.open` 已打开的真实结果页，并通过可见按钮收起侧栏，不强制点击、不改 DOM 状态、
+不删除原有断言。900px 浏览器回归及上述第二轮真实 GitHub ASAR 验证均通过。
+
+本地首轮完整 Vitest 保留原始退出 1：1,587 文件中 1,568 通过、5 失败、14 跳过；
+15,794 用例中 15,706 通过、6 失败、82 跳过。该轮执行期间仍有并行修复落地，不能作为
+最终冻结源码的单次全绿证明。六项失败分别通过以下末轮验证收口：
+
+- checkpoint 夹具使用严格递增时间戳，保留产品保留策略及 COMMIT 断言，整文件 25/25。
+- 两个聊天插件用例按新显式启用机制验证停用状态不可执行、卸载仍拒绝，整文件 4/4。
+- CJS node-first 保留原 4,500ms 时限，独立运行实际 552ms，通过。
+- 双模型、工具与完整持久化的 Shared stream 用例明确使用单项 10 秒功能预算，整组 24/24，
+  三次重复通过；产品期限、身份和持久化校验不变，不把测试预算调整表述为性能提升。
+- 恢复计划发布丢失对应修复后的交叉回归整文件 14/14。
+
+原 `npm test` 后续独立脚本链已于 2026-10-21 16:13 完成，退出码为 0，见
+[独立脚本链结果](../output/github-package-r46-functional-standalones-result.json)与
+[完整日志](../output/github-package-r46-functional-standalones.log)。此前失败用例的专项复验与
+这次独立脚本链分别记录，不据此宣称完整 `npm test` 在同一次执行中全部通过。
+性能优化按用户要求留到出包后处理；当前恢复不承诺 Git 回滚、活跃工作树及任意外部系统的自动恢复。
+
+AutoBiz 的状态推进仍由原 Skill、Hooks 与脚本维护 `.autobizdevops/state.json`。
+业务 Mod 目录当前负责构建时组合契约；Function Mod 才是通过公共接口加载的可执行扩展。
+“状态机 Mod 决策、平台受控提交”属于后续机制设计，本次包没有完成该整体迁移。
+详见[插件创造、转换、组合与使用说明](sparks/creator-plugin-workflow.md)。
+
 ## 2026-10-21 最新本地联合验收（R42）
 
 本轮仅修改 `codex/mods-v2`，以 `6284164e2d9d1f67da8a0326a77a86e47a3be1e7` 为基线，冻结 168 个代码、测试及配置路径，另保存 803 个 renderer 源码和样式输入摘要。Node 为 v22.22.2，依赖锁文件未改变。详细回执保存在本工作树 `output/mods-test-refresh-20261020/final-validation-summary.json`，该本地证据目录不随源码提交。

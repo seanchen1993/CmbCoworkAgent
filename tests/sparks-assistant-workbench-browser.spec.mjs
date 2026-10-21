@@ -147,22 +147,11 @@ try {
   await page.screenshot({ path: join(output, "creator-first-375.png") })
   await page.getByRole("button", { name: "浏览灵件示例", exact: true }).click()
   assert.equal(await tour.count(), 0, "Browsing examples must leave the real page visible")
-  await page.getByRole("button", { name: "任务示例演练", exact: true }).click()
-  await tour.getByRole("heading", { name: "选择业务示例，先演练再操作" }).waitFor()
-  for (const task of ["0", "1", "2"]) {
-    await tour.getByLabel("选择任务", { exact: true }).selectOption(task)
-    await tour.locator("button.bg-primary").click()
-    await tour.locator("button.bg-primary").click()
-    assert.equal(await tour.getByLabel("示例界面预览").getAttribute("data-tour-preview-stage"), "2")
-    assert.equal(
-      await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),
-      false
-    )
-  }
+  assert.equal(await page.getByRole("button", { name: "任务示例演练", exact: true }).count(), 0,
+    "Browsing installed examples in ordinary mode must not expose creator guidance")
   assert.deepEqual(await page.evaluate(() => window.calls), [])
-  await tour.getByRole("button", { name: "关闭示例，自己操作", exact: true }).click()
   assert.equal(await tour.count(), 0)
-  assert.equal(await page.evaluate(() => localStorage.getItem("devclaw.sparks-tour.v1")), "seen")
+  assert.equal(await page.evaluate(() => localStorage.getItem("devclaw.sparks-tour.v1")), null)
   await page.reload()
   await page.addStyleTag({ content: css })
   await page.addScriptTag({ content: bundle.outputFiles[0].text })
@@ -172,13 +161,13 @@ try {
   assert.equal(await page.getByRole("button", { name: "进入创造者模式", exact: true }).count(), 1)
   for (const name of ["用一句话定制助手", "想让助手怎么做，直接说", "找一点灵感"])
     assert.equal(await page.getByRole("heading", { name, exact: true }).count(), 1)
-  for (const name of ["基础功能", "高级特性"]) {
+  for (const name of ["高级特性"]) {
     assert.equal(
       await page.getByRole("button", { name, exact: true }).getAttribute("aria-expanded"),
       "false"
     )
   }
-  await page.getByRole("button", { name: "基础功能", exact: true }).click()
+  assert.equal(await page.getByRole("button", { name: "基础功能", exact: true }).getAttribute("aria-expanded"), "true")
   await page.getByRole("button", { name: "通用", exact: true }).click()
   await page.getByText("GeneralPanel", { exact: true }).waitFor()
   await page.getByRole("button", { name: "对话创作", exact: true }).first().click()
@@ -219,14 +208,14 @@ try {
   await page.getByText("创建试用区域", { exact: true }).waitFor()
   await advanced()
   await page.getByLabel("未保存源码").fill("preserve my unsaved source")
-  await page.getByRole("button", { name: "任务示例演练", exact: true }).click()
-  await tour.getByLabel("选择任务", { exact: true }).selectOption("0")
-  await tour.getByRole("button", { name: "关闭示例，自己操作", exact: true }).click()
+  assert.equal(await page.getByRole("button", { name: "任务示例演练", exact: true }).count(), 0)
+  await page.getByRole("button", { name: "挑选使用", exact: true }).click()
+  assert.equal(await page.getByLabel("未保存源码").isVisible(), false)
   await advanced()
   assert.equal(
     await page.getByLabel("未保存源码").inputValue(),
     "preserve my unsaved source",
-    "Guide subpage navigation must retain the authoring draft"
+    "Installed-example subpage navigation must retain the authoring draft"
   )
   await page.getByRole("button", { name: "我已添加", exact: true }).click()
   assert.equal(await page.getByLabel("未保存源码").isVisible(), false)
@@ -240,7 +229,7 @@ try {
     else await page.getByRole("button", { name: "我已添加", exact: true }).click()
     await page.getByRole("button", { name: "对话创作", exact: true }).first().click()
     await page.evaluate(() => window.saveReuse())
-    await page.getByRole("button", { name: "灵件管理", exact: true }).click()
+    await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
     await page.getByText("聊天保存的灵件", { exact: true }).waitFor()
     assert.equal(
       await page

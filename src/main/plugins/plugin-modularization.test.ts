@@ -196,6 +196,49 @@ function legacyFixture() {
 }
 
 describe("original plugin first modularization", () => {
+  it("keeps state ownership and preservation sources explicit instead of treating assembly metadata as executable migration", () => {
+    const { source, catalog } = legacyFixture()
+    addFile(source, "scripts/state_store.py", "# Original unique writer; preserve exactly.\n")
+    addFile(source, "mods/example.ts", "export const unverified = true\n")
+    addFile(source, BUSINESS_MOD_MANIFEST, JSON.stringify(catalog))
+    const inspected = inspectPluginModularization(source)
+    expect(inspected.status).toBe("already-modular")
+    expect(inspected.stateControl).toMatchObject({
+      authority: "original-plugin-writer",
+      migration: "not-migrated",
+      functionExtensions: "present-unverified",
+      graph: "author-confirmation-required",
+      execution: "unverified",
+      next: { tool: "mod_authoring", action: "scaffold", kind: "state-extension" }
+    })
+    expect(inspected.stateControl.sources).toMatchObject({
+      writerCandidates: ["scripts/state_store.py"],
+      hooks: ["hooks/hooks.json"],
+      configuration: expect.arrayContaining(["board/config.json", "plugin.json"]),
+      knowledge: expect.arrayContaining(["knowledge/policy.md"]),
+      functionEntries: ["mods/example.ts"]
+    })
+    expect(inspected.warnings.join(" ")).toContain("业务组装声明不等于状态控制已迁移")
+  })
+
+  it("retains existing Host authority and does not force native projects into a plugin state engine", () => {
+    const source = fixture({ hooks: true })
+    const before = source.files.map((file) => [file.path, file.digest])
+    const inspected = inspectPluginModularization(source)
+    expect(inspected.stateControl).toMatchObject({
+      authority: "existing-host",
+      migration: "not-required-for-host",
+      execution: "unverified"
+    })
+    const candidate = createPluginModularizationCandidate(source, {
+      confirmed: true,
+      sourceDigest: source.digest
+    })
+    for (const [path, digest] of before)
+      expect(candidate.files.find((file) => file.path === path)?.digest).toBe(digest)
+    expect(candidate.inspection.stateControl.migration).toBe("not-required-for-host")
+  })
+
   it("accepts the reviewed adapter's derived config while retaining original source bytes and rules", () => {
     const { source, catalog } = legacyFixture()
     const original = source.files.find((file) => file.path === "board/config.json")!

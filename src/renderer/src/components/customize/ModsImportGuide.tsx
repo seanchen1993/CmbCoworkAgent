@@ -86,7 +86,7 @@ export function ModsImportGuide() {
           <li>
             <strong>2. 开启并授权</strong>
             <p className="mt-1 text-muted-foreground">
-              项目与技能插件：在卡片上点击“启用插件”。灵件：打开灵件和项目开关，再核对并确认权限。
+              项目与技能插件：在卡片上点击“启用插件”。灵件：在“灵件与使用设置 → 我已添加”点击“启用应用和当前项目灵件”，再核对并确认权限；Claw 工作台可直接打开“灵件与使用设置”。
             </p>
           </li>
           <li>

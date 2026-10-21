@@ -144,7 +144,7 @@ try {
       await page.getByRole("button", { name: "添加 / 授权灵件", exact: true }).click()
     else if (path === "ordinary")
       await page.getByRole("button", { name: "普通模式", exact: true }).click()
-    else await page.getByRole("button", { name: "灵件管理", exact: true }).click()
+    else await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
     await assertInert(page, name)
     if (path === "ordinary")
       await page.getByRole("button", { name: "创作者模式", exact: true }).click()
@@ -214,7 +214,7 @@ try {
   {
     const { page, errors } = await open("flows")
     await draft(page)
-    await page.getByRole("button", { name: "灵件管理", exact: true }).click()
+    await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
     await page.evaluate(() => {
       window.fixture.change()
       window.moveWorkspace("C:/isolated/B")

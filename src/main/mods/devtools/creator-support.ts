@@ -364,6 +364,19 @@ export const CREATOR_S1_SUPPORT = Object.freeze({
   },
   conditionalCapabilities: CREATOR_CONDITIONAL_CAPABILITIES,
   authoringConstraints: {
+    stateExtensions: {
+      scaffold: { tool: "mod_authoring", action: "scaffold", kind: "state-extension" },
+      artifact: "executable-decision-scaffold",
+      stateMigration: "not-migrated",
+      execution: "unverified",
+      originalInspection: { tool: "mod_business", action: "inspect_raw", field: "stateControl" },
+      requirements: [
+        "未知图由作者确认；业务组装声明不等于可执行状态 Mod。",
+        "保留原 Hooks、知识、配置、检查与唯一状态写入器；既有 Host authority 不强制迁移。",
+        "state.set ifVersion 仅为会话内 CAS；platform 动作结果不等于业务提交或多文件原子事务。",
+        "骨架默认 hold；真实 writer 绑定及批准测试之前，不称迁移完成，不构造 committed 回执。"
+      ]
+    },
     usageMetrics:
       "Token 上下文占用与累计输入/输出用量是不同指标。必须先用当前构建的 SDK catalog/types 发现真实字段及来源，再按各自语义取数；字段未提供或未统计时显示“暂无统计”，不得默认 0 当作已测量，也不得据此虚构 session API。"
   },

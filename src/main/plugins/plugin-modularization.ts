@@ -15,6 +15,7 @@ import { parseSkillFrontmatter, parseSkillNameFromFrontmatterYaml } from "../ski
 import { isMap, isScalar, parseDocument } from "yaml"
 import { isSupportedHookEvent } from "../hooks/types"
 import { types } from "node:util"
+import { inspectPluginStateControl } from "./plugin-state-control-audit"
 import {
   AUTHORING_BUNDLE_LIMITS,
   createAuthoringSourceBundle
@@ -668,12 +669,14 @@ export function inspectPluginModularization(
     sourceDigest: snapshot.digest,
     status: "needs-authoring",
     runtime: "unknown",
+    stateControl: inspectPluginStateControl(snapshot, "unknown"),
     files: snapshot.files.map(({ path, digest, bytes }) => ({ path, digest, bytes: bytes.length })),
     excluded: [...snapshot.excluded],
     stages: [],
     warnings: [
       "模块化候选保留原文件；排除的凭据、缓存和运行数据不复制。源代码中自行硬编码的凭据须先清理。",
-      "静态检查通过仅表示候选可继续原生试用与审批，不代表业务验证成功或已安装。"
+      "静态检查通过仅表示候选可继续原生试用与审批，不代表业务验证成功或已安装。",
+      "业务组装声明不等于状态控制已迁移；原 Hooks、知识、配置与状态写入器继续保留。可用 state-extension 模板生成可执行决策骨架，未知图须作者确认，绑定原写入器并真实验证后才能称状态迁移。"
     ],
     blockers: [],
     nextAction: "author-migration-plan"
@@ -689,11 +692,13 @@ export function inspectPluginModularization(
           : catalog.kernel?.runtime?.adapter === "autobiz-v1"
             ? "legacy"
             : "unknown"
+      view.stateControl = inspectPluginStateControl(snapshot, view.runtime)
       return view
     }
     const runtime = readRuntime(snapshot)
     if (runtime) {
       view.runtime = runtime.mode
+      view.stateControl = inspectPluginStateControl(snapshot, view.runtime)
       view.stages = runtime.stages.map(({ id, title, skill, checkIds }) => ({
         id,
         title,

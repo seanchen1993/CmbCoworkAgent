@@ -124,7 +124,7 @@ async function main() {
     await page.getByRole("button", { name: "自定义设置", exact: true }).click()
     const skip = page.getByRole("button", { name: "跳过导览", exact: true })
     if (await skip.isVisible()) await skip.click()
-    await page.getByRole("button", { name: "添加功能", exact: true }).click()
+    await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
     if (await skip.isVisible()) await skip.click()
     await page.getByRole("button", { name: "我已添加", exact: true }).click()
     const mods = page.locator("[data-mods-settings]")

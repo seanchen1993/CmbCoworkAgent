@@ -1113,7 +1113,10 @@ function toProjectListItem(
     harnessAdapter: {
       id: plugin?.id ?? adapterId,
       name: plugin?.name ?? adapterName,
-      type: "plugin"
+      type: "plugin",
+      ...(typeof stored.version === "string" && stored.version.trim()
+        ? { boundVersion: stored.version.trim() }
+        : {})
     },
     ...(project.creator ? { creator: project.creator } : {}),
     boardCompatibility,

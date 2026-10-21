@@ -1102,7 +1102,7 @@ export function PluginDetailPanel(props: {
               <p className="mt-1 text-sm text-muted-foreground leading-relaxed">
                 插件是一个可分发的功能包，可以把技能、MCP 服务、Hooks 和静态资源放在一起安装、启用、禁用和卸载。
                 适合把一套完整工作流交给团队复用，而不是让每个人分别添加技能、连接器和 Hook 规则。
-                如果插件包含灵件，安装后请到“自定义助手 → 添加功能”核对权限并启用。
+                如果插件包含灵件，安装后打开“灵件与使用设置 → 我已添加”核对权限并启用；Claw 工作台也可直接打开“灵件与使用设置”。
               </p>
             </div>
           </div>

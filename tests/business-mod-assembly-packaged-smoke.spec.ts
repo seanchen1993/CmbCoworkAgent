@@ -523,9 +523,9 @@ async function main() {
     // observes the persisted chat; no injected store or test-only scope.
     await page.reload()
     await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-    if (!(await page.getByRole("button", { name: "灵件管理", exact: true }).isVisible()))
+    if (!(await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).isVisible()))
       await page.getByRole("button", { name: "高级自定义", exact: true }).click()
-    await page.getByRole("button", { name: "灵件管理", exact: true }).click()
+    await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
     await page.getByRole("combobox", { name: "配置目标聊天", exact: true }).click()
     await page.getByRole("option", { name: /Packaged business Mods authoring/ }).click()
     await page.getByRole("button", { name: "我已添加", exact: true }).click()
@@ -559,9 +559,9 @@ async function main() {
         // A new panel owns one source/kernel. Do not mix two assembled parent packages.
         await page.reload()
         await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-        if (!(await page.getByRole("button", { name: "灵件管理", exact: true }).isVisible()))
+        if (!(await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).isVisible()))
           await page.getByRole("button", { name: "高级自定义", exact: true }).click()
-        await page.getByRole("button", { name: "灵件管理", exact: true }).click()
+        await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
         await page.getByRole("combobox", { name: "配置目标聊天", exact: true }).click()
         await page.getByRole("option", { name: /Packaged business Mods authoring/ }).click()
       }

@@ -62,6 +62,29 @@ afterEach(() => {
   releaseLocalThreadRunLease(threadId, "desktop", "turn")
 })
 describe("native business authoring tool", () => {
+  it("exposes the executable state example through the closed schema and existing source-only reader", async () => {
+    const f = fixture()
+    f.service.example.mockResolvedValue({
+      exampleId: "autobiz-state-machine",
+      installed: false,
+      draft: { files: [] }
+    })
+    expect(
+      f.tool.schema.safeParse({ action: "example", exampleId: "autobiz-state-machine" }).success
+    ).toBe(true)
+    expect(
+      f.tool.schema.safeParse({ action: "example", exampleId: "../../local-file" }).success
+    ).toBe(false)
+    expect(
+      JSON.parse(await f.tool.invoke({ action: "example", exampleId: "autobiz-state-machine" }))
+    ).toMatchObject({
+      ok: true,
+      result: { exampleId: "autobiz-state-machine", installed: false }
+    })
+    expect(f.service.example).toHaveBeenCalledWith(threadId, "autobiz-state-machine")
+    expect(f.service.requestTrialPreview).not.toHaveBeenCalled()
+    expect(f.service.requestReview).not.toHaveBeenCalled()
+  })
   it("describes conditional native recovery without granting model-side recovery actions", () => {
     const { tool } = fixture()
     expect(tool.description).toContain("This tool cannot execute or approve stage recovery")

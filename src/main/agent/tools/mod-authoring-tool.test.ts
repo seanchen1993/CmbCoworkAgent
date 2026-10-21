@@ -39,34 +39,64 @@ afterEach(() => {
 })
 
 describe("conversation Mod tool", () => {
+  it("discovers the state extension kind through the actual tool schema and emits a bounded unverified executable scaffold", async () => {
+    fixture()
+    const author = createModAuthoringTool({ threadId, workspace })
+    const result = JSON.parse(
+      await author.invoke({
+        action: "scaffold",
+        id: "state-example",
+        name: "状态扩展",
+        instruction: "保留原状态 writer",
+        kind: "state-extension"
+      })
+    )
+    expect(result.ok).toBe(true)
+    expect(JSON.stringify(result)).toContain("state-migration-plan.json")
+    expect(JSON.stringify(result)).toContain("AUTHOR_CONFIRMATION_REQUIRED")
+    expect(JSON.stringify(result)).toContain("not-migrated")
+    expect(author.description).toContain("NOT migrated business state")
+  })
   it("can inspect native stage baselines and request a plan but has no debug approval action", async () => {
     const service = fixture()
     const scope = { threadId, workspace, incarnation: { token: "creator", legacyCreatedAt: 1 } }
-    Object.assign(service, { projectAuthoringContext: () => ({ scope, assertCurrent: () => {} }),
-      assertScope: vi.fn() })
+    Object.assign(service, {
+      projectAuthoringContext: () => ({ scope, assertCurrent: () => {} }),
+      assertScope: vi.fn()
+    })
     const list = vi.fn(() => ({ snapshots: [], branches: [], diagnostics: [] }))
-    vi.spyOn(stageDebug, "getProjectStageDebugSessions").mockReturnValue({ list } as unknown as
-      ReturnType<typeof stageDebug.getProjectStageDebugSessions>)
+    vi.spyOn(stageDebug, "getProjectStageDebugSessions").mockReturnValue({
+      list
+    } as unknown as ReturnType<typeof stageDebug.getProjectStageDebugSessions>)
     const author = createModAuthoringTool({ threadId, workspace })
-    expect(JSON.parse(await author.invoke({ action: "project_stage_debug_list" }))).toMatchObject({ ok: true })
+    expect(JSON.parse(await author.invoke({ action: "project_stage_debug_list" }))).toMatchObject({
+      ok: true
+    })
     expect(list).toHaveBeenCalledWith({ scope, guard: expect.any(Function) })
     await expect(author.invoke({ action: "project_stage_debug_create" } as never)).rejects.toThrow()
     releaseLocalThreadRunLease(threadId, "desktop", "first")
-    expect(JSON.parse(await author.invoke({ action: "project_stage_debug_list" })))
-      .toMatchObject({ ok: false, error: "DEVELOPMENT_TURN_CHANGED" })
+    expect(JSON.parse(await author.invoke({ action: "project_stage_debug_list" }))).toMatchObject({
+      ok: false,
+      error: "DEVELOPMENT_TURN_CHANGED"
+    })
     expect(list).toHaveBeenCalledTimes(1)
   })
   it("retains the request repair budget when tools are rebuilt during the same native run", async () => {
     const service = fixture()
     const ledger = new CreatorRequestBudgets()
-    Object.assign(service, { claimAuthoringBudget: (_thread: string, run: string, kind: "operation" | "candidate") =>
-      ledger.claim(workspace, run, kind) })
+    Object.assign(service, {
+      claimAuthoringBudget: (_thread: string, run: string, kind: "operation" | "candidate") =>
+        ledger.claim(workspace, run, kind)
+    })
     const files = [{ path: "mods/main.ts", text: "export const register = () => {}" }]
     const args = { action: "submit" as const, id: "demo", name: "Demo", revision: 0, files }
     for (let i = 0; i < 3; i++)
-      expect(JSON.parse(await createModAuthoringTool({ threadId, workspace }).invoke(args)).ok).toBe(true)
-    expect(JSON.parse(await createModAuthoringTool({ threadId, workspace }).invoke(args)))
-      .toMatchObject({ ok: false, error: "DEVELOPMENT_REPAIR_BUDGET" })
+      expect(
+        JSON.parse(await createModAuthoringTool({ threadId, workspace }).invoke(args)).ok
+      ).toBe(true)
+    expect(
+      JSON.parse(await createModAuthoringTool({ threadId, workspace }).invoke(args))
+    ).toMatchObject({ ok: false, error: "DEVELOPMENT_REPAIR_BUDGET" })
     expect(service.submit).toHaveBeenCalledTimes(3)
     expect(ledger.latest(workspace)).toMatchObject({ runId: "first", candidates: 3, operations: 4 })
   })

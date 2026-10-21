@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { openNativeNodePlan } from "@/lib/node-composition-intent"
-import { openExistingPluginProject } from "@/lib/derived-project-intent"
+import { openDerivedProject, openExistingPluginProject } from "@/lib/derived-project-intent"
+import { captureConfigurationScope } from "@/lib/configuration-target"
+import { useAppStore } from "@/lib/store"
+import { openPluginSettings } from "@/lib/plugin-settings-intent"
+import { installedProjectPluginIdentity, nativeProjectBindings, type InstalledProjectPlugin } from "@/lib/native-project-binding"
 import { useFeatureGate } from "@/lib/feature-gates"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import type { NativeNodeCatalog, NativeNodePlan } from "../../../../shared/node-composition"
@@ -66,7 +70,12 @@ function NativeNodeSelection({
   onContinue?: () => void
 }) {
   const scope = { threadId, expectedWorkspace: workspace }
+  const ownerAccount = useRef(useAppStore.getState().accountRevision).current
   const [projects, setProjects] = useState<HarnessProjectListItem[]>([])
+  const [inventory, setInventory] = useState<HarnessProjectListItem[]>([])
+  const [installed, setInstalled] = useState<InstalledProjectPlugin>()
+  const [inventoryRead, setInventoryRead] = useState(false)
+  const [inventoryError, setInventoryError] = useState("")
   const [projectId, setProjectId] = useState(initialProjectId ?? "")
   const [catalog, setCatalog] = useState<NativeNodeCatalog | null>(null)
   const [selected, setSelected] = useState<string[]>([])
@@ -76,20 +85,41 @@ function NativeNodeSelection({
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(true)
   const sequence = useRef(0)
+  const [refreshRevision, setRefreshRevision] = useState(0)
   useEffect(() => {
     const requests = sequence
     const request = ++sequence.current
-    void window.api.nodeComposition
-      .projects(scope)
-      .then((items) => {
+    setBusy(true)
+    setInventoryError("")
+    setInventoryRead(false)
+    setCatalog(null)
+    setPlan(null)
+    void Promise.all([
+      window.api.nodeComposition.projects(scope),
+      pluginId
+        ? Promise.all([window.api.harnessBoard.listProjects(), window.api.plugins.list()])
+          .then(([all, plugins]) => ({ all, plugin: plugins.find((item) => item.id === pluginId), error: "" }))
+          .catch((cause) => ({ all: [], plugin: undefined, error: String(cause.message ?? cause) }))
+        : Promise.resolve(null)
+    ])
+      .then(([items, details]) => {
         if (request !== sequence.current) return
+        if (ownerAccount !== useAppStore.getState().accountRevision)
+          throw Error("账号已变化，请在当前账号重新打开项目流程。")
+        if (details) {
+          setInventory(details.all)
+          setInstalled(details.plugin)
+          setInventoryRead(!details.error)
+          setInventoryError(details.error)
+        }
         if (pluginId) items = items.filter((item) => item.harnessAdapter.id === pluginId)
+        if (details && !details.error && !details.plugin?.enabled) items = []
         setProjects(items)
         if (initialProjectId && items.some((item) => item.projectId === initialProjectId)) {
           void load(initialProjectId)
         } else if (initialProjectId) {
           setProjectId("")
-          setError("新项目暂不可用，请确认插件已启用后重试。")
+          setError("当前聊天目录中该项目暂不可用，请查看绑定详情或进入原项目核对插件和兼容性。")
         }
       })
       .catch((cause) => {
@@ -103,7 +133,32 @@ function NativeNodeSelection({
     }
     // The owner keys this component by thread and workspace.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [refreshRevision])
+  const related = pluginId && inventoryRead
+    ? nativeProjectBindings(pluginId, workspace, projects, inventory, installed) : []
+  async function openProject(project?: HarnessProjectListItem) {
+    const request = sequence.current
+    const current = captureConfigurationScope({ threadId, workspace })
+    const assertCurrent = () => {
+      if (request !== sequence.current || !current() || ownerAccount !== useAppStore.getState().accountRevision)
+        throw Error("聊天、目录或账号已变化，请重新读取项目绑定。")
+    }
+    setError("")
+    try {
+      assertCurrent()
+      if (pluginId && installed) {
+        const live = (await window.api.plugins.list()).find((item) => item.id === pluginId)
+        assertCurrent()
+        if (!live || !live.enabled || installedProjectPluginIdentity(live) !== installedProjectPluginIdentity(installed))
+          throw Error("插件已停用、移除或版本已变化，请重新读取项目绑定。")
+      }
+      if (project) openExistingPluginProject(project, scope)
+      else if (installed) openDerivedProject(installed.id, installed.name, scope)
+      onContinue?.()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
   async function load(projectId: string) {
     const request = ++sequence.current
     setCatalog(null)
@@ -116,8 +171,12 @@ function NativeNodeSelection({
     }
     setBusy(true)
     try {
+      if (ownerAccount !== useAppStore.getState().accountRevision)
+        throw Error("账号已变化，请在当前账号重新打开项目流程。")
       const value = await window.api.nodeComposition.catalog({ ...scope, projectId })
       if (request !== sequence.current) return
+      if (ownerAccount !== useAppStore.getState().accountRevision)
+        throw Error("账号已变化，请在当前账号重新打开项目流程。")
       const template = value.config.templates.find((item) => item.templateType === "custom") ??
         value.config.templates[0]
       setCatalog(value)
@@ -156,6 +215,7 @@ function NativeNodeSelection({
   const custom = template?.templateType === "custom"
   const required = new Set(template?.requiredNodes ?? [])
   const selectedProject = projects.find((item) => item.projectId === projectId)
+  const selectedBinding = related.find((item) => item.project.projectId === projectId)
   const visibleNodes = custom || !template
     ? catalog?.nodes ?? []
     : (template.nodes ?? []).flatMap((id) => catalog?.nodes.find((node) => node.id === id) ?? [])
@@ -178,11 +238,36 @@ function NativeNodeSelection({
           ))}
         </select>
       </label>
+      <Button size="sm" variant="outline" disabled={busy}
+        onClick={() => setRefreshRevision((value) => value + 1)}>重新读取项目绑定</Button>
       {!busy && !projects.length && (
-        <p className="text-sm">
-          {pluginId ? "这个工作区没有绑定此插件版本的可用项目。" : "这个工作区还没有可用项目。"}
-          请先为插件新建项目，或回到对应项目的聊天再打开此页。
-        </p>
+        <div className="space-y-2 text-sm">
+          <p>{error ? "当前项目流程尚未读取成功，请重新核对绑定。"
+            : pluginId ? "当前聊天目录没有可读取流程的关联项目。" : "当前聊天目录还没有可用项目。"}</p>
+          <p className="break-all text-xs text-muted-foreground">当前聊天目录：{workspace}</p>
+          {pluginId && inventoryRead && !installed && <p>所选插件已移除，请先重新安装并核对来源。</p>}
+          {installed && !installed.enabled && <p>所选插件已停用。管理并明确启用后，再重新读取项目绑定。</p>}
+          {pluginId && inventoryRead && !related.length && installed?.enabled &&
+            <p>尚未找到使用此插件的活动项目。可以先创建独立项目，创建不会自动执行任务。</p>}
+          {inventoryError && <p role="alert">项目绑定详情读取失败：{inventoryError}。请重新读取，不能据此认定没有项目。</p>}
+          {related.map(({ project, reason, versionChanged, boundVersion }) => (
+            <div className="space-y-1 rounded-lg border p-3" key={project.projectId}>
+              <strong>{project.name}</strong>
+              <p className="break-all text-xs text-muted-foreground">项目工作区：{project.workspacePath} / {project.projectDir}</p>
+              <p>{reason === "other-workspace" ? "项目绑定在其他目录，请打开已绑定项目使用。"
+                : reason === "incompatible" ? project.boardCompatibility.message || project.boardCompatibility.label
+                  : reason === "disabled" ? "插件未启用。" : reason === "missing" ? "插件未安装。"
+                    : "此项目暂未通过当前目录的流程检查，请进入原项目核对。"}</p>
+              {versionChanged && <p>项目记录版本 {boundVersion}，与当前安装版本 {installed?.version} 不同。进入后将重新核对当前安装源码，项目可能暂不可用；这里不会迁移项目。</p>}
+              <Button size="sm" variant="outline" disabled={!installed?.enabled}
+                onClick={() => void openProject(project)}>打开已绑定项目：{project.name}</Button>
+            </div>
+          ))}
+          <div className="flex flex-wrap gap-2">
+            {installed?.enabled && <Button size="sm" onClick={() => void openProject()}>新建此插件项目</Button>}
+            {pluginId && <Button size="sm" variant="outline" onClick={() => openPluginSettings(pluginId)}>管理所选插件</Button>}
+          </div>
+        </div>
       )}
       {busy && (
         <p role="status" className="text-sm">
@@ -192,6 +277,12 @@ function NativeNodeSelection({
       {error && (
         <p role="alert" className="break-words text-sm text-destructive">
           {error}
+        </p>
+      )}
+      {selectedBinding?.versionChanged && (
+        <p role="status" className="text-sm text-amber-600">
+          项目记录版本 {selectedBinding.boundVersion}，与当前安装版本 {installed?.version} 不同。
+          进入后将重新核对当前安装源码，项目可能暂不可用；这里不会迁移项目。
         </p>
       )}
       {catalog && (
@@ -280,14 +371,7 @@ function NativeNodeSelection({
         </>
       )}
       {selectedProject && (
-        <Button variant="outline" disabled={busy} onClick={() => {
-          try {
-            openExistingPluginProject(selectedProject, scope)
-            onContinue?.()
-          } catch (cause) {
-            setError(cause instanceof Error ? cause.message : String(cause))
-          }
-        }}>
+        <Button variant="outline" disabled={busy} onClick={() => void openProject(selectedProject)}>
           在原项目中使用
         </Button>
       )}

@@ -8,6 +8,7 @@ import { FunctionGuestRuntime } from "../v2/guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES } from "../v2/session"
 import { checkFunctionAuthorTypes } from "./authoring-check"
 import { AUTHORING_TEMPLATE_KINDS, createAuthoringTemplate } from "./authoring-templates"
+import { createAuthoringSourceBundle } from "./authoring-bundle"
 
 const roots: string[] = []
 async function materialize(bundle: ReturnType<typeof createAuthoringTemplate>) {
@@ -54,27 +55,32 @@ describe("installable authoring starters", () => {
 
   it("starts the generated tool and serves its exact registered schema and handler", async () => {
     const instruction = "按原文整理，不补造结论。"
-    const root = await materialize(createAuthoringTemplate({
-      kind: "tool",
-      id: "created-example",
-      name: "工具模板",
-      instruction
-    }))
+    const root = await materialize(
+      createAuthoringTemplate({
+        kind: "tool",
+        id: "created-example",
+        name: "工具模板",
+        instruction
+      })
+    )
     const compiled = await compileFunctionPlugin(root)
-    const session = new FunctionSession([
+    const session = new FunctionSession(
+      [
+        {
+          name: compiled.name,
+          root: compiled.root,
+          tier: "user",
+          guest: await FunctionGuestRuntime.create(compiled.code),
+          capabilities: [...SESSION_CAPABILITIES]
+        }
+      ],
       {
-        name: compiled.name,
-        root: compiled.root,
-        tier: "user",
-        guest: await FunctionGuestRuntime.create(compiled.code),
-        capabilities: [...SESSION_CAPABILITIES]
+        workspace: root,
+        threadId: "template-test",
+        assertLive: () => {},
+        publish: async (value) => value
       }
-    ], {
-      workspace: root,
-      threadId: "template-test",
-      assertLive: () => {},
-      publish: async value => value
-    })
+    )
     try {
       await session.start()
       const tools = await session.registeredTools()
@@ -91,16 +97,125 @@ describe("installable authoring starters", () => {
         required: ["text"],
         additionalProperties: false
       })
-      const result = await session.interceptTool({
-        tool: tools[0].name,
-        tool_use_id: "starter-format",
-        text: "待整理内容"
-      }, undefined, async () => {
-        throw Error("Generated tool must not fall through to a native tool")
-      })
+      const result = await session.interceptTool(
+        {
+          tool: tools[0].name,
+          tool_use_id: "starter-format",
+          text: "待整理内容"
+        },
+        undefined,
+        async () => {
+          throw Error("Generated tool must not fall through to a native tool")
+        }
+      )
       expect(result).toEqual({ result: `${instruction}\n待整理内容` })
     } finally {
       await session.close()
+    }
+  })
+
+  it("executes the generated decision skeleton and an explicitly authored edge without pretending to commit", async () => {
+    const scaffold = createAuthoringTemplate({
+      kind: "state-extension",
+      id: "policy-example",
+      name: "状态决策",
+      instruction: "保留原 writer 和检查。"
+    })
+    const plan = JSON.parse(
+      scaffold.files.find((file) => file.path === "references/state-migration-plan.json")!.text
+    )
+    expect(plan).toMatchObject({
+      stateMigration: "not-migrated",
+      writerBound: false,
+      execution: "unverified",
+      graph: { confirmed: false, transitions: [] }
+    })
+    expect(
+      JSON.parse(
+        scaffold.files.find((file) => file.path === "tests/state-decision-cases.json")!.text
+      ).executed
+    ).toBe(false)
+    for (const confirmed of [false, true]) {
+      const source = createAuthoringSourceBundle(
+        scaffold.files.map((file) =>
+          file.path === "mods/main.ts" && confirmed
+            ? {
+                ...file,
+                text: file.text.replace(
+                  "confirmed: false, transitions: []",
+                  'confirmed: true, transitions: [{ from: "draft", event: "review", to: "reviewing", requiredChecks: ["original-artifact-check"] }]'
+                )
+              }
+            : file
+        )
+      )
+      const root = await materialize(source)
+      const compiled = await compileFunctionPlugin(root)
+      const plugin = {
+        name: compiled.name,
+        root: compiled.root,
+        tier: "user" as const,
+        guest: await FunctionGuestRuntime.create(compiled.code),
+        capabilities: [...SESSION_CAPABILITIES]
+      }
+      const session = new FunctionSession([plugin], {
+        workspace: root,
+        threadId: "state-template-test",
+        assertLive: () => {},
+        publish: async (value) => value
+      })
+      try {
+        const query = {
+          ref: { provider: compiled.name, id: "state-decision", version: "1.0.0" },
+          target: { kind: "current" }
+        }
+        const input = { currentState: "draft", event: "review" }
+        const actual = await session.platform.act(
+          plugin,
+          { ...query, action: "evaluate", input, requestKey: "evaluate" },
+          new AbortController().signal
+        )
+        expect(actual).toMatchObject({
+          status: "succeeded",
+          value: {
+            decision: confirmed ? "proposal" : "hold",
+            writerBound: false,
+            execution: "unverified"
+          }
+        })
+        if (confirmed)
+          expect(actual.value).toMatchObject({
+            to: "reviewing",
+            requiredChecks: ["original-artifact-check"]
+          })
+        expect(
+          await session.platform
+            .act(
+              plugin,
+              {
+                ...query,
+                action: "evaluate",
+                input: { ...input, passed: true },
+                requestKey: "forged"
+              },
+              new AbortController().signal
+            )
+            .then(
+              () => "accepted",
+              () => "rejected"
+            )
+        ).toBe("rejected")
+        expect(
+          await session.platform.call(
+            plugin,
+            "platform.read",
+            [query],
+            new AbortController().signal
+          )
+        ).toMatchObject({ status: "unknown", revision: 0 })
+      } finally {
+        await session.close()
+      }
     }
   })
 

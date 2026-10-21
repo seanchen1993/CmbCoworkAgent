@@ -112,6 +112,19 @@ async function makeCatalog(size: number): Promise<{ projects: string; plugins: s
 }
 
 describe("Harness catalog reader", () => {
+  it("projects the stored binding version independently of the current installed version", async () => {
+    const paths = await makeCatalog(1)
+    const storedBefore = readFileSync(paths.projects, "utf8")
+    const plugins = JSON.parse(readFileSync(paths.plugins, "utf8"))
+    plugins[0].version = "2.0.0"
+    writeFileSync(paths.plugins, JSON.stringify(plugins))
+    const result = readHarnessCatalogPage(paths.projects, paths.plugins, {})
+    expect(result.projects[0].harnessAdapter).toMatchObject({
+      id: "adapter-0", name: "Adapter 0", boundVersion: "1.0.0"
+    })
+    expect(result.registry[0].version).toBe("2.0.0")
+    expect(readFileSync(paths.projects, "utf8")).toBe(storedBefore)
+  })
   it("excludes a native Host package with same-named ordinary board data from the legacy registry", async () => {
     const paths = await makeCatalog(1)
     const plugin = JSON.parse(readFileSync(paths.plugins, "utf8"))[0]

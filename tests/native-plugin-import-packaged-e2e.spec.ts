@@ -82,7 +82,7 @@ async function picker(path: string | null) {
   }, path)
 }
 async function installedView() {
-  await page!.getByRole("button", { name: "添加功能", exact: true }).click()
+  await page!.getByRole("navigation").filter({ has: page!.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
   await page!
     .getByRole("navigation", { name: "灵件工作区" })
     .getByRole("button", { name: "我已添加", exact: true })

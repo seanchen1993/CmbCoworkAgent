@@ -36,8 +36,18 @@ async function main() {
     bundle: true,
     write: false,
     platform: "browser",
+    loader: { ".png": "dataurl", ".md": "text" },
     format: "iife",
     jsx: "automatic",
+    plugins: [{
+      name: "authoring-library-boundaries",
+      setup(builder) {
+        // This fixture exercises the actual draft editor, not the separately tested chat workspace.
+        builder.onResolve({ filter: /^\.\/ModsDevelopmentPanel$/ }, (args) => args.importer.endsWith("ModCreator.tsx") ? { path: "panel", namespace: "authoring-boundary" } : undefined)
+        builder.onResolve({ filter: /^@\/lib\/store$/ }, () => ({ path: "store", namespace: "authoring-boundary" }))
+        builder.onLoad({ filter: /.*/, namespace: "authoring-boundary" }, (args) => ({ loader: "js", contents: args.path === "panel" ? 'export function ModsDevelopmentPanel(){return null}' : 'export const useAppStore=Object.assign((selector)=>selector?selector({threads:[]}):({threads:[]}),{getState:()=>({threads:[]})})' }))
+      }
+    }],
     define: { "process.env.NODE_ENV": '"development"' }
   })
   const browser = await chromium.launch({
@@ -59,11 +69,13 @@ async function main() {
     assert.deepEqual(await page.evaluate("window.creatorFixture.calls"), [])
     await page.getByRole("button", { name: "打开草稿库" }).click()
     await page.getByRole("button", { name: "新建草稿" }).click()
-    assert.equal(await page.getByLabel("组件模板").locator("option").count(), 5)
+    assert.equal(await page.getByLabel("组件模板").locator("option").count(), 6)
+    await page.getByLabel("组件模板").selectOption({ label: "状态决策骨架（未迁移）" })
     await page.getByLabel("草稿标识").fill("example")
     await page.getByLabel("草稿名称").fill("Example")
     await page.getByLabel("用途说明").fill("原始说明")
     await page.getByRole("button", { name: "生成模板源码" }).click()
+    assert.equal(await page.evaluate("window.creatorFixture.calls.find(c=>c[0]==='generate')[1].kind"), "state-extension")
     await page.getByLabel("源码文件").selectOption("mods/main.ts")
     await page.getByLabel("文件源码").fill("const exact = '编辑源码'\n")
     await page
@@ -83,7 +95,7 @@ async function main() {
       ),
       "const exact = '编辑源码'\n"
     )
-    checks.push("Five templates generate only local source; save preserves exact edited text")
+    checks.push("Six templates include an explicitly unmigrated state scaffold; generation stays source-only")
     await page.getByLabel("源码文件").selectOption("mods/main.ts")
     await page.getByLabel("文件源码").fill("version two")
     await page.getByRole("button", { name: "保存源码版本" }).click()

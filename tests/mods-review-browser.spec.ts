@@ -25,6 +25,13 @@ async function mount(page: Page, contents: string) {
       {
         name: "unrelated-app-store",
         setup(builder) {
+          // This suite exercises installed settings; authoring has its own browser/worker suite.
+          builder.onResolve({ filter: /^\.\/ModCreator$/ }, args =>
+            args.importer.endsWith("ModsPanel.tsx")
+              ? { path: "creator", namespace: "unused-creator" } : undefined)
+          builder.onLoad({ filter: /.*/, namespace: "unused-creator" }, () => ({
+            contents: "export const ModCreator=()=>null"
+          }))
           // No code leaf is used by these empty-state/eligibility fixtures.
           builder.onResolve({ filter: /^\.\/FunctionCode$/ }, () => ({
             path: "code",
@@ -33,13 +40,14 @@ async function mount(page: Page, contents: string) {
           builder.onLoad({ filter: /.*/, namespace: "unused-code-leaf" }, () => ({
             contents: "export const FunctionCode=()=>null"
           }))
-          builder.onResolve({ filter: /^@\/lib\/store$/ }, () => ({
-            path: "store",
-            namespace: "fixture"
-          }))
+          builder.onResolve({ filter: /^(?:@\/lib\/store|\.\/store)$/ }, (args) =>
+            args.path === "@/lib/store" || args.importer.replaceAll("\\", "/").includes("/src/renderer/src/lib/")
+              ? { path: "store", namespace: "fixture" }
+              : undefined
+          )
           builder.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
             contents:
-              "export const isThreadDeletionPending=()=>false;export const isThreadRetired=()=>false;export const useAppStore={getState:()=>({bumpPluginVersion(){},setShowCustomizeView:(...args)=>window.fixtureNavigation=args})}"
+              "export const isThreadDeletionPending=()=>false;export const isThreadRetired=()=>false;const state={accountRevision:0,bumpPluginVersion(){},setShowCustomizeView:(...args)=>window.fixtureNavigation=args};export const useAppStore=selector=>selector(state);useAppStore.getState=()=>state"
           }))
         }
       }
@@ -436,7 +444,9 @@ async function verifyChatScope(page: Page) {
   assert.deepEqual(await page.evaluate("window.fixture.calls().filter(x=>x[0]!=='capability')"), [])
   await page.getByText("Native fallback", { exact: true }).waitFor()
   assert.deepEqual(await page.evaluate("window.fixture.calls()"), [["capability", "a", "workspace-a"]])
-  assert.deepEqual(await page.evaluate("window.fixture.listeners()"), { onConfigurationChanged: 1 })
+  assert.deepEqual(await page.evaluate("window.fixture.listeners()"), {
+    onConfigurationChanged: 1, onCardsChanged: 1
+  })
   await page.evaluate("window.fixture.enabled(true)")
   await page.waitForFunction("window.fixture.calls().some(x=>x[0]==='siteMount')")
   for (const name of [
@@ -470,9 +480,10 @@ async function verifyChatScope(page: Page) {
     number
   >
   assert.equal(disabledListeners.onConfigurationChanged, 1)
+  assert.equal(disabledListeners.onCardsChanged, 1)
   assert(
     Object.entries(disabledListeners).every(
-      ([name, count]) => name === "onConfigurationChanged" || count === 0
+      ([name, count]) => ["onConfigurationChanged", "onCardsChanged"].includes(name) || count === 0
     )
   )
   await page.evaluate("window.fixture.hold();window.fixture.enabled(true)")
@@ -493,13 +504,16 @@ async function verifyChatScope(page: Page) {
   assert.equal(await page.getByText("Native fallback", { exact: true }).count(), 0)
   await page.evaluate("window.fixture.close()")
   await settle(page)
+  const closedListeners = await page.evaluate("window.fixture.listeners()") as Record<string, number>
+  assert.equal(closedListeners.onConfigurationChanged, 0)
+  assert.equal(closedListeners.onCardsChanged, 0)
   assert(
     Object.values(
       (await page.evaluate("window.fixture.listeners()")) as Record<string, number>
     ).every((count) => count === 0)
   )
   pass(
-    "chat scope skips all Mods IPC/listeners without workspace or with Mods off, discards stale enable, and retains genuine enabled errors"
+    "chat scope skips Mods reads without workspace/off, retains exactly the capability/configuration invalidators while off, discards stale enable and releases both listeners on unmount"
   )
 }
 
@@ -635,12 +649,13 @@ async function verifyUsageGuide(page: Page) {
   await page.getByRole("button", { name: "对话创作", exact: true }).click()
   await page.getByText("灵件使用指南", { exact: true }).click()
   const guideSummary = page.locator("summary").filter({
-    hasText: "安装、启用和查看结果"
+    hasText: "描述需求、确认应用和查看结果"
   })
   await guideSummary.waitFor({ state: "visible" })
   assert.equal(await page.getByRole("tab", { name: "快速上手" }).isVisible(), false)
   await guideSummary.click()
   await page.getByRole("tab", { name: "快速上手" }).waitFor()
+  await page.getByText("高级：安装现成插件并使用命令", { exact: true }).click()
   await page.getByRole("button", { name: "复制 /claw-info", exact: true }).click()
   await page.getByText("已复制，回到聊天框粘贴后发送。", { exact: true }).waitFor()
   assert.deepEqual(await page.evaluate("window.fixture.copies()"), ["/claw-info"])
@@ -660,7 +675,8 @@ async function verifyUsageGuide(page: Page) {
   await page.getByRole("tab", { name: "常见问题" }).click()
   await page.getByText("灵件和插件是什么关系？", { exact: true }).click()
   await page.getByText("插件是安装包", { exact: false }).waitFor()
-  await page.getByRole("button", { name: "管理聊天任务模板" }).click()
+  await page.getByText("高级：手动管理任务方案", { exact: true }).click()
+  await page.getByRole("button", { name: "打开任务方案编辑器", exact: true }).click()
   assert.deepEqual(await page.evaluate("window.fixtureNavigation"), [true, "flows"])
   assert.deepEqual(await page.evaluate("window.fixture.calls()"), [])
   pass(

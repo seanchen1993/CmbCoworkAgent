@@ -749,6 +749,24 @@ async function runMain(failures: unknown[]): Promise<void> {
       assert(files.some((file) => file.endsWith("/out/main/function-mod-host.js")))
       assert(!files.some((file) => file.endsWith("/mods-e2e.js")))
       assert(files.some((file) => file.endsWith(".wasm") && file.includes("/@jitl/")))
+      for (const name of [
+        "register.ts",
+        "graph.ts",
+        "adapter.py",
+        "commit.py",
+        "journal.py",
+        "stage_checks.py",
+        "hook_checks.py",
+        "SKILL.md"
+      ]) {
+        const resource = `out/resources/mods/autobiz-state-machine/${name}`
+        assert(files.includes(`/${resource}`), `Missing packaged state extension: ${name}`)
+        assert.deepEqual(
+          readFileSync(join(packaged.path + ".unpacked", resource)),
+          readFileSync(join(root, "resources/mods/autobiz-state-machine", name)),
+          `Packaged state extension differs from source: ${name}`
+        )
+      }
       pass("production ASAR starts without a test entry and contains the isolated runtime")
       await page!.evaluate(() => window.api.mods.installExamples())
       const initial = await page!.evaluate((id) => window.api.mods.status(id), threadId)

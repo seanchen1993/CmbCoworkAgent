@@ -1,6 +1,8 @@
 import { createAuthoringSourceBundle } from "./authoring-bundle"
+import { createStateExtensionTemplate } from "./state-extension-template"
+import { AUTHORING_TEMPLATE_KINDS } from "../../../shared/mods/authoring"
 
-export const AUTHORING_TEMPLATE_KINDS = ["command", "tool", "rule", "panel", "flow-action"] as const
+export { AUTHORING_TEMPLATE_KINDS }
 export type AuthoringTemplateKind = (typeof AUTHORING_TEMPLATE_KINDS)[number]
 
 /** Deterministic starter source. User text is serialized as a literal, never inserted as code. */
@@ -23,6 +25,7 @@ export function createAuthoringTemplate(input: {
     input.instruction.length > 2000
   )
     throw Error("AUTHORING_TEMPLATE_INPUT")
+  if (input.kind === "state-extension") return createStateExtensionTemplate(input)
   const literal = JSON.stringify
   const id = literal(input.id),
     title = literal(input.name),

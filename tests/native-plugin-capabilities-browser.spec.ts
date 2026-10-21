@@ -20,7 +20,7 @@ async function main() {
       const plugins=[['original','原版 AutoBiz',true,true],['derived','我的 AutoBiz v2',true,true],['off','已停用插件',false,true],['function','功能插件',true,false]].map(([id,name,enabled,hasProjectMode])=>({id,name,enabled,hasProjectMode,version:'1.0',description:'本地已安装插件',skillCount:id==='function'?0:3,...(id==='derived'?{businessModCount:5,businessExtensionCount:1}:{})}));
       const projects=['original','derived'].map(id=>({projectId:id+'-project',name:id+' 项目',harnessAdapter:{id,type:'plugin'}}));
       window.togglePlugin=(id,enabled)=>{plugins.find(p=>p.id===id).enabled=enabled;window.bumpVersion()};
-      window.api={plugins:{list:async()=>{window.calls.push(['list']);if(window.fail)throw Error('目录不可读');const value=structuredClone(plugins);if(window.deferList)return new Promise(resolve=>window.finishList=()=>resolve(value));return value}},skills:{listPlugins:async()=>plugins.filter(p=>p.enabled&&p.skillCount).map(p=>({pluginId:p.id,name:'build-'+p.id,path:p.id,isProjectModePlugin:p.hasProjectMode}))},nodeComposition:{projects:async()=>projects,catalog:async(input)=>{window.calls.push(['catalog',input]);return {project:projects.find(p=>p.projectId===input.projectId),nodes:[],config:{nodes:[],templates:[{id:'custom',templateType:'custom',requiredNodes:[],name:'自选'}]}}}}};
+      window.api={harnessBoard:{listProjects:async()=>structuredClone(projects)},plugins:{list:async()=>{window.calls.push(['list']);if(window.fail)throw Error('目录不可读');const value=structuredClone(plugins);if(window.deferList)return new Promise(resolve=>window.finishList=()=>resolve(value));return value}},skills:{listPlugins:async()=>plugins.filter(p=>p.enabled&&p.skillCount).map(p=>({pluginId:p.id,name:'build-'+p.id,path:p.id,isProjectModePlugin:p.hasProjectMode}))},nodeComposition:{projects:async()=>projects,catalog:async(input)=>{window.calls.push(['catalog',input]);return {project:projects.find(p=>p.projectId===input.projectId),nodes:[],config:{nodes:[],templates:[{id:'custom',templateType:'custom',requiredNodes:[],name:'自选'}]}}}}};
       const root=createRoot(document.getElementById('root'));
       window.renderNative=()=>root.render(<NativePluginCapabilities threadId='thread' workspace='C:/fixture' functionPluginIds={['function']} onAssemble={id=>window.calls.push(['assemble',id])}/>);
       window.renderNative();
@@ -47,7 +47,7 @@ async function main() {
             loader: "js",
             resolveDir: process.cwd(),
             contents: args.path.endsWith("store")
-              ? "import {useSyncExternalStore} from 'react'; let version=0;const listeners=new Set();window.bumpVersion=()=>{version++;listeners.forEach(fn=>fn())};export const useAppStore=selector=>useSyncExternalStore(fn=>{listeners.add(fn);return()=>listeners.delete(fn)},()=>selector({pluginVersion:version}));"
+              ? "import {useSyncExternalStore} from 'react'; let version=0;const listeners=new Set();window.bumpVersion=()=>{version++;listeners.forEach(fn=>fn())};export const useAppStore=selector=>useSyncExternalStore(fn=>{listeners.add(fn);return()=>listeners.delete(fn)},()=>selector({pluginVersion:version}));useAppStore.getState=()=>({accountRevision:1,currentThreadId:'thread',threads:[{thread_id:'thread',metadata:{workspacePath:'C:/fixture'}}]});"
               : args.path.endsWith("plugin-settings-intent")
                 ? "export const openPluginSettings=id=>window.calls.push(['manage',id])"
                 : args.path.endsWith("feature-gates")

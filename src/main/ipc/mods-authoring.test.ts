@@ -79,7 +79,7 @@ it("requires explicit exact scope and source before source history cleanup throu
   expect((await bridge.list("thread")).drafts).toEqual([])
 })
 
-it.each(["command", "tool", "rule", "panel", "flow-action"] as const)(
+it.each(["command", "tool", "rule", "panel", "flow-action", "state-extension"] as const)(
   "generates %s without saving, installing or applying",
   async (kind) => {
     const { bridge, drafts } = setup()

@@ -94,6 +94,22 @@ describe("creator support scopes", () => {
     expect(guidance).toContain("不得据此虚构 session API")
   })
 
+  it("discovers an executable decision scaffold without claiming declaration-only state migration", () => {
+    const states = CREATOR_S1_SUPPORT.authoringConstraints.stateExtensions
+    expect(states.scaffold).toEqual({
+      tool: "mod_authoring",
+      action: "scaffold",
+      kind: "state-extension"
+    })
+    expect(states).toMatchObject({
+      artifact: "executable-decision-scaffold",
+      stateMigration: "not-migrated",
+      execution: "unverified"
+    })
+    expect(states.requirements.join(" ")).toContain("既有 Host authority 不强制迁移")
+    expect(states.requirements.join(" ")).toContain("会话内 CAS")
+  })
+
   it("keeps export, debug and complex AutoBiz recovery claims bounded", () => {
     const [delivery, debug] = CREATOR_CONDITIONAL_CAPABILITIES
     expect(delivery.guarantees.join(" ")).toContain("不会安装、授权或执行")

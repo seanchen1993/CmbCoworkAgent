@@ -1,0 +1,5 @@
+{
+  "name": "mods-release-review",
+  "version": "1.0.0",
+  "description": "使用现有 Mods API 实现发布审核状态机：实际校验、并发控制和可检查的推进结果"
+}

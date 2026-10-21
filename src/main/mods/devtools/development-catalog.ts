@@ -10,6 +10,7 @@ import {
 } from "../v2/development-session"
 import { functionAuthoringDeclarations } from "./authoring-declarations"
 import { CREATOR_S1_SUPPORT } from "./creator-support"
+import { AUTHORING_TEMPLATE_KINDS } from "../../../shared/mods/authoring"
 
 export const DEVELOPMENT_COUNTER_EXAMPLE = `import type { Register } from "claude-code"
 export const register: Register = (on) => {
@@ -31,6 +32,7 @@ export function developmentCatalog() {
   return {
     contract: "cmb-desktop-authoring-v2",
     support: CREATOR_S1_SUPPORT,
+    authoringTemplates: [...AUTHORING_TEMPLATE_KINDS],
     types: functionAuthoringDeclarations("result-v1"),
     events: FUNCTION_COMPATIBILITY_EVENT_NAMES.map((name) => ({
       name,
@@ -49,6 +51,7 @@ export function developmentCatalog() {
     examples: { toolCounter: DEVELOPMENT_COUNTER_EXAMPLE },
     deliveryGuidance: [
       CREATOR_S1_SUPPORT.authoringConstraints.usageMetrics,
+      "状态扩展用 scaffold(kind:state-extension) 生成真实 Function Mod、迁移计划与未执行测试入口，再 save/check/request_trial。默认只 hold；未确认原图、绑定原 writer 并实际验证前必须显示‘可执行决策骨架，未迁移状态’。inspect_raw.stateControl 保留原状态工具、Hooks、配置及知识来源；已有 Host authority 无需强制迁移。",
       "创造者模式按自然语言需求选择复用、组合或编写；不要让用户先配置添加功能、常用搭配或执行步骤。连续修改先 list/read 更新当前开发组件，保留已有功能。",
       "使用闭合的 SDK 路径和 literal 事件；SDK 对象或方法不能传给辅助函数、动态索引或外部代码。纯辅助函数只接收普通数据；SDK 调用直接写在有明确 $ 参数的事件处理器中，否则检查会报告 MODS_SDK_UNVERIFIED，保留草稿后按诊断修复。",
       "组合用 mod_composition list 搜索摘要，details 按需读取配置 schema；stage 同轮累积并深合并配置，可引用真实模型、技能、MCP 和已保存步骤。save/apply_saved 保存套用命名组合，undo/cancel 撤销选择或取消排队。提交后结束本轮，再核对真实回执。",
@@ -130,6 +133,7 @@ export function developmentCatalogPage(
       trialEventConsent: catalog.trialEventConsent,
       authorizedTrialEventConsent: catalog.authorizedTrialEventConsent,
       package: catalog.package,
+      authoringTemplates: catalog.authoringTemplates,
       deliveryGuidance: catalog.deliveryGuidance,
       limitations: catalog.limitations,
       discovery:

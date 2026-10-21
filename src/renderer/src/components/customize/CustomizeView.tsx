@@ -137,7 +137,6 @@ const MENU_GROUPS: MenuGroup[] = [
     id: "creatorAdvanced",
     label: "高级自定义",
     items: [
-      { tab: "mods", label: "灵件管理", icon: Webhook },
       { tab: "claw", label: "搭配管理", icon: Sparkles },
       { tab: "flows", label: "聊天任务模板", icon: GitBranch }
     ]
@@ -146,6 +145,7 @@ const MENU_GROUPS: MenuGroup[] = [
     id: "basic",
     label: "基础功能",
     items: [
+      { tab: "mods", label: "灵件与使用设置", icon: Webhook },
       { tab: "general", label: "通用", icon: Settings2 },
       { tab: "appearance", label: "外观", icon: Palette },
       { tab: "skills", label: "技能", icon: Sparkles },
@@ -239,7 +239,7 @@ export function CustomizeView(): React.JSX.Element {
   const [modsNavigation, setModsNavigation] = useState<{
     id: number
     scope: string
-    section: "examples" | "create"
+    section: "examples" | "create" | "installed"
     practice?: SimpleAuthoringPracticeIntent
   } | null>(null)
   const [practiceIntent, setPracticeIntent] = useState<SimpleAuthoringPracticeIntent>()
@@ -313,7 +313,8 @@ export function CustomizeView(): React.JSX.Element {
       Object.fromEntries(
         MENU_GROUPS.map((group) => [
           group.id,
-          group.id === "creator" || group.items.some((item) => item.tab === activeTab)
+          group.id === "creator" || group.id === "basic" ||
+            group.items.some((item) => item.tab === activeTab)
         ])
       ) as Record<MenuGroupId, boolean>
   )
@@ -410,7 +411,9 @@ export function CustomizeView(): React.JSX.Element {
   useEffect(() => {
     const section =
       customizeInitialTab === "mods" &&
-      (customizeInitialSection === "create" || customizeInitialSection === "examples")
+      (customizeInitialSection === "create" ||
+        customizeInitialSection === "examples" ||
+        customizeInitialSection === "installed")
         ? customizeInitialSection
         : null
     const request = section ? JSON.stringify([customizeInitialTab, section]) : null
