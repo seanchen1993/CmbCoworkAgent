@@ -1377,6 +1377,13 @@ function isDashboardProjectModeAdmin(
   return getDashboardAllowedIds().has(access.ystId)
 }
 
+function getDashboardOrgFilterDefaults(): string[] {
+  const access = requireDashboardAccess()
+  if (isDashboardProjectModeAdmin(access)) return []
+  const room = access.upperOrgLv1.trim()
+  return room ? [room] : []
+}
+
 function requireDashboardProjectModeAccess(): DashboardAccessContext {
   const access = getDashboardAccessContext()
   if (!access.loggedIn) throw new Error("请先登录后再查看项目运营面板")
@@ -15587,6 +15594,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle("dashboard:isProjectModeAllowed", async () => {
     return isDashboardProjectModeAllowed()
   })
+
+  _ipcMain.handle("dashboard:orgFilterDefaults", () => getDashboardOrgFilterDefaults())
 
   _ipcMain.handle("dashboard:isAnalysisAgentAllowed", async () => {
     return isDashboardAnalysisAgentAllowed()

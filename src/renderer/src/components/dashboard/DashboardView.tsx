@@ -5,6 +5,7 @@
  */
 import { KnowledgeOverviewPanel } from "./panels/KnowledgeOverviewPanel"
 import { useKnowledgeOverview } from "./use-knowledge-overview"
+import { DashboardOrgScope } from "./DashboardOrgScope"
 import {
   isValidElement,
   memo,
@@ -990,6 +991,7 @@ function OrgFilterBar({
             variant="outline"
             size="sm"
             className="h-7 w-[240px] justify-between gap-1 text-xs font-normal"
+            title={triggerLabel}
             disabled={loading && options.length === 0}
           >
             <span className={cn("truncate", value.length === 0 && "text-muted-foreground")}>
@@ -2760,6 +2762,18 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
 })
 
 export function DashboardView(): React.JSX.Element {
+  return (
+    <DashboardOrgScope>
+      {(rooms) => <DashboardContent initialOrgLv1List={rooms} />}
+    </DashboardOrgScope>
+  )
+}
+
+function DashboardContent({
+  initialOrgLv1List
+}: {
+  initialOrgLv1List: string[]
+}): React.JSX.Element {
   const {
     granularity,
     range,
@@ -2811,7 +2825,7 @@ export function DashboardView(): React.JSX.Element {
     setOrgFilter,
     drillDownUserOrg,
     resetUserOrgDrilldown
-  } = useDashboard()
+  } = useDashboard(initialOrgLv1List)
 
   const [exporting, setExporting] = useState(false)
   const [projectMetricRefreshKey, setProjectMetricRefreshKey] = useState(0)
