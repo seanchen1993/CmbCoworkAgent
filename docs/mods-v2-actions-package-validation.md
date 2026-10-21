@@ -16,8 +16,25 @@
 示例回归共 67 个文件、947 项通过；Node/Web 类型检查及生产构建通过。改动文件的
 ESLint 无新增错误，AddHookDialog 原有 18 项错误已与修改前逐条核对一致，未宣称全部
 lint 已清零。
-GitHub Actions 的精确功能提交、验收回执与 `1.5.11` 完整包下载入口将在完成后补记，
-下节 `1.5.10` 的结果仅代表上一轮构建。
+本轮功能提交为 `86c3530cd413ef7f3735c0ba2f320505602b6030`，已推送到
+`codex/mods-v2`。[本轮 GitHub Actions](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39609177511)
+已对该精确提交构建成功，manylinux 原生依赖、Windows 打包及 Linux 打包三个任务全部
+通过。Windows 原有 15 项 Mods 包内校验和三种真实历史滚动场景均通过；下节 `1.5.10`
+的结果仅代表上一轮构建，不能与本轮包混用。
+
+两份小型验证附件已实际下载，并核对运行 ID、提交及 GitHub 摘要；未下载应用大包。
+本轮 `app.asar` 的 SHA-256 为
+`55889053681ab87be7365ed64b1f0c6eb73eea3b3803f6aa0e8cd5f2a93ad3c8`。
+
+- [Windows 完整解压包 1.5.11](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39609177511/artifacts/12350407009)
+- [Windows 安装包 1.5.11](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39609177511/artifacts/12349728695)
+- [Linux 安装包 1.5.11](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39609177511/artifacts/12350092596)
+- [Linux 完整解压包 1.5.11](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39609177511/artifacts/12350257369)
+- [Windows Mods 验收证据](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39609177511/artifacts/12350336181)
+- [Windows 历史滚动验收证据](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39609177511/artifacts/12350490588)
+
+应使用完整新安装包或解压目录，不只替换 `app.asar`。本轮未创建发布标签或 Release、
+未改用户现有安装目录，也未实际执行 NSIS 安装与卸载；后续文档提交只补记验收结果。
 
 ## 2026-10-21 聊天历史交互性能更新（1.5.10）
 
