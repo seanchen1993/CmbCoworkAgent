@@ -4,8 +4,8 @@
 
 本轮针对拖动聊天区右侧滚动条、向上浏览历史、分页跳动和受保护消息加载等待进行公共
 渲染链路修复，不修改 AutoBiz 业务协议或已交付插件。版本调整为 `1.5.10`，包内资源仍须
-整体更新。以下先记录本地验证；本轮 GitHub Actions 的准确提交、状态和产物单独补记，
-不能用下节 `1.5.9` 的成功构建证明本轮已打包成功。
+整体更新。以下记录本地验证及本轮精确提交的远端包内回执，不能用下节 `1.5.9` 的
+成功构建代替本轮验收。
 
 ### 修复范围
 
@@ -34,6 +34,8 @@
 验证中文输入。第三组安装并明确授权随应用分发的 Function Mod，通过真实 QuickJS
 注册和原生绘制检查确认运行。消息采用可重复的测试样本，经公开接口实际持久化；
 不提交模型问题，消息界面使用真实实现，不回退到旧安装包。
+为减少驱动差异，测试关闭 GPU 并使用移出桌面的隔离窗口；记录的是该测试条件下的
+应用交互，不替代用户前台窗口的 GPU 绘制延迟测试。隔离代理配置也不等于系统级断网。
 
 | 场景 | 松开滚动条至可读正文 | 分页锚点偏移 | 挂载消息峰值 | 中文输入耗时 |
 | --- | --- | --- | --- | --- |
@@ -67,7 +69,34 @@ IO 观测混合拖动过程和回调延迟的最长无正文区间约 181/326/1,
 运行时及界面链全部完成。额外浏览器回归中，聊天导航 18 项、真实应用导航 17 项、
 聊天布局 16 项及白屏流式场景 5 项均通过；性能组件检查覆盖 8 个独立入口。
 Node/Web 类型检查及改动代码 ESLint 均无错误，未将仓库原有格式警告计为零。
-最终源码构建及上表三组复验均已通过；远端包内结果另行补记，不能将启动验证视为通过。
+最终源码构建及上表三组复验均已通过。
+
+### GitHub Actions 包内验收与下载
+
+本轮功能提交为 `5caec9b40b3ba857e892a46a2a83b84480c8550f`，已推送到
+`codex/mods-v2`。[本轮 Actions](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39603984936)
+已对该精确提交构建成功：manylinux 原生依赖、Linux 打包及 Windows 打包三个任务全部通过。
+Windows 原有 15 项 Mods 包内校验及新增普通、保护、真实 Function Mod 三种历史滚动场景
+全部通过。四份验证回执均对应同一 `app.asar`，SHA-256 为
+`78ec51a65656a351de14057129847c34d09570db86ed409d5cc196ee031a2369`。
+两份小型验证附件已实际下载并核对 GitHub 提供的摘要、运行 ID 和提交身份；未下载大包。
+
+CI 中三种场景均实际分页并到达 `history-thumb-0`，锚点偏移分别为 -1/0/0 px，连续稳定
+12 帧；松手至正文可读分别约 10–29、30–57、30–115 ms。CI 的连续移动与 IO 回调混合
+观测仍记录约 813/375/1,172 ms 的最长无正文区间，同样不能宣称零闪屏；该硬件结果也
+不与上表本机数据混用。回执中的源码摘要与本机 LF 字节不同，所记录 15 个路径均已逐一
+核对为 Windows CRLF 差异；执行包身份以以上 ASAR 摘要为准。
+
+- [Windows 完整解压包 1.5.10](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39603984936/artifacts/12346959073)
+- [Windows 安装包 1.5.10](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39603984936/artifacts/12347489084)
+- [Linux 安装包 1.5.10](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39603984936/artifacts/12348336016)
+- [Linux 完整解压包 1.5.10](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39603984936/artifacts/12347997771)
+- [Windows Mods 验收证据](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39603984936/artifacts/12348127790)
+- [Windows 历史滚动验收证据](https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/39603984936/artifacts/12347324228)
+
+建议解压完整新目录试用，保留现有应用数据；不要只替换 `app.asar`，避免资源与代码版本
+混用。本轮未创建标签或 Release、未替换用户 Downloads 安装目录；打包及包内测试通过
+不等于已实际执行 NSIS 安装与卸载。后续文档提交仅补记本次回执，不改变该构建的源码。
 
 ## 2026-10-21 可执行状态 Mod 与内置创造链更新
 
