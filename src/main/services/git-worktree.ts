@@ -76,6 +76,7 @@ const WORKTREE_INTERNAL_EXCLUDES_FILE_NAME = ".cmb-internal-excludes"
 const WORKTREE_INTERNAL_EXCLUDES = "**/.cmbdevclaw/**\n"
 const WORKFLOW_WORKTREE_DIFF_SUMMARY_MAX_CHARS = 32 * 1024
 const WORKFLOW_WORKTREE_RECORD_MAX_BYTES = 256 * 1024
+const WORKFLOW_WORKTREE_ERROR_MAX_CHARS = 8 * 1024
 const WORKFLOW_WORKTREE_EXCLUDES_MAX_BYTES = 1024 * 1024
 const WORKFLOW_WORKTREE_RECORD_SCAN_MAX_FILES = 2048
 const WORKFLOW_WORKTREE_RECORD_SCAN_MAX_DIRECTORY_ENTRIES = 4096
@@ -120,12 +121,25 @@ export interface WorkflowWorktreeInfo {
 
 type GitWorktreeErrorCode = "merge-conflict" | "dirty-deliverable" | "source-busy" | "unsafe-state"
 
+function boundedWorktreeError(message: string): string {
+  if (message.length <= WORKFLOW_WORKTREE_ERROR_MAX_CHARS) return message
+  const marker = "\n...[worktree diagnostic truncated]...\n"
+  const retained = Math.floor((WORKFLOW_WORKTREE_ERROR_MAX_CHARS - marker.length) / 2)
+  // Keep both the operation/reason and Git's final diagnostic. Avoid cutting a
+  // UTF-16 surrogate pair when a repository path contains supplementary Unicode.
+  let head = message.slice(0, retained)
+  let tail = message.slice(-retained)
+  if (/[\uD800-\uDBFF]$/.test(head)) head = head.slice(0, -1)
+  if (/^[\uDC00-\uDFFF]/.test(tail)) tail = tail.slice(1)
+  return `${head}${marker}${tail}`
+}
+
 class GitWorktreeError extends Error {
   constructor(
     message: string,
     readonly code: GitWorktreeErrorCode = "unsafe-state"
   ) {
-    super(message)
+    super(boundedWorktreeError(message))
     this.name = "GitWorktreeError"
   }
 }
@@ -1008,20 +1022,77 @@ function isWorkflowWorktreeRecord(value: unknown): value is WorkflowWorktreeReco
   )
 }
 
-/** Atomically persist one worktree ownership record. Per-record files avoid lost
- * updates when several fan-out agents settle concurrently. */
+const worktreeRecordWriteLocks = new Map<string, Promise<void>>()
+
+/** Atomically persist one worktree ownership record. Serialize validation and
+ * publication so concurrent writers cannot replace a different owner's proof. */
 export async function persistWorkflowWorktreeRecord(
   record: WorkflowWorktreeRecord,
   appDataRoot = defaultWorktreeAppDataRoot()
 ): Promise<void> {
-  const target = worktreeRecordPath(record.commonDir, record.id, appDataRoot)
+  // Reject bad NEW writes before creating directories or replacing an existing
+  // ownership proof. The reader's limit is also the writer's contract.
+  const snapshot = { ...record }
+  if (
+    !isWorkflowWorktreeRecord(snapshot) ||
+    [
+      snapshot.id,
+      snapshot.runId,
+      snapshot.threadId,
+      snapshot.directory,
+      snapshot.workspaceDirectory,
+      snapshot.sourceRoot,
+      snapshot.sourceBranch,
+      snapshot.gitRoot,
+      snapshot.commonDir
+    ].some((value) => value.trim().length === 0)
+  ) {
+    throw new GitWorktreeError("refusing to persist an invalid workflow worktree record")
+  }
+  const serialized = `${JSON.stringify(snapshot, null, 2)}\n`
+  if (Buffer.byteLength(serialized, "utf8") > WORKFLOW_WORKTREE_RECORD_MAX_BYTES) {
+    throw new GitWorktreeError("workflow worktree record exceeds the safe record-byte limit")
+  }
+  const identity = workflowWorktreeOwnershipIdentity(snapshot)
+  const target = worktreeRecordPath(snapshot.commonDir, snapshot.id, appDataRoot)
+  const key = canonicalKey(target)
+  const previous = worktreeRecordWriteLocks.get(key) ?? Promise.resolve()
+  const operation = previous.then(async () => {
+    try {
+      const existing: unknown = JSON.parse(
+        (await readStableWorktreeFile(target, WORKFLOW_WORKTREE_RECORD_MAX_BYTES)).toString("utf8")
+      )
+      if (
+        !isWorkflowWorktreeRecord(existing) ||
+        workflowWorktreeOwnershipIdentity(existing) !== identity
+      ) {
+        throw new GitWorktreeError("refusing to overwrite a different worktree ownership record")
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+    await writeWorkflowWorktreeRecord(target, serialized)
+  })
+  const tail = operation.then(
+    () => undefined,
+    () => undefined
+  )
+  worktreeRecordWriteLocks.set(key, tail)
+  try {
+    await operation
+  } finally {
+    if (worktreeRecordWriteLocks.get(key) === tail) worktreeRecordWriteLocks.delete(key)
+  }
+}
+
+async function writeWorkflowWorktreeRecord(target: string, serialized: string): Promise<void> {
   const recordsRoot = path.dirname(target)
   await fs.mkdir(recordsRoot, { recursive: true })
   const temp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
   const handle = await fs.open(temp, "w", 0o600)
   let writeComplete = false
   try {
-    await handle.writeFile(`${JSON.stringify(record, null, 2)}\n`, "utf8")
+    await handle.writeFile(serialized, "utf8")
     await handle.sync()
     writeComplete = true
   } finally {
@@ -1482,7 +1553,7 @@ export async function createWorkflowWorktree(
       input.signal
     )
 
-    const info = await pickAvailableName(repo, source, root, runShort, labelPart)
+    const info = await pickAvailableName(repo, source, root, runShort, labelPart, input.appDataRoot)
 
     let ownershipRecord: WorkflowWorktreeRecord | undefined
     if (input.persistOwnership) {
@@ -1633,7 +1704,8 @@ async function pickAvailableName(
   source: WorkflowWorktreeSource,
   root: string,
   runShort: string,
-  labelPart: string
+  labelPart: string,
+  appDataRoot?: string
 ): Promise<WorkflowWorktreeInfo> {
   for (let attempt = 0; attempt < MAX_NAME_ATTEMPTS; attempt += 1) {
     const suffix = randomBytes(4).toString("hex")
@@ -1649,6 +1721,24 @@ async function pickAvailableName(
       `refs/heads/${branch}`
     ])
     if (refCheck.code === 0) continue
+
+    // A removed checkout/ref can still have a durable ownership tombstone while
+    // its terminal run snapshot is being persisted. Reserve that ID in every
+    // compatible read root, including when a resumed run now uses a custom home.
+    // Only inspect presence; existing manifests are never migrated or repaired.
+    let reserved = false
+    for (const sourceRoot of worktreeAppDataReadRoots(appDataRoot)) {
+      try {
+        await fs.lstat(worktreeRecordPath(repo.commonDir, name, sourceRoot))
+        reserved = true
+        break
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw new GitWorktreeError(`cannot verify worktree ownership reservation: ${String(error)}`)
+        }
+      }
+    }
+    if (reserved) continue
 
     return {
       name,
