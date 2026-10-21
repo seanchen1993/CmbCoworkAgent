@@ -53,8 +53,11 @@ function resolveWorkspacePath(threadId: string): string | null {
   }
 }
 
+/** Read-time diagnostics only; never written back into the persisted run. */
+export type WorkflowRunForRenderer = PersistedWorkflowRun & { worktreeReadError?: string }
+
 export interface WorkflowHydrateResult {
-  latestRun: PersistedWorkflowRun | null
+  latestRun: WorkflowRunForRenderer | null
   activeRunId: string | null
   hasPendingNotification: boolean
   /**
@@ -72,7 +75,9 @@ export interface WorkflowHydrateResult {
  * main-side via loadWorkflowRun, never from a renderer round-trip, so dropping it
  * here is safe. `script` is intentionally kept — the run dialog renders it.
  */
-function stripJournalForRenderer(run: PersistedWorkflowRun | null): PersistedWorkflowRun | null {
+function stripJournalForRenderer(
+  run: WorkflowRunForRenderer | null
+): WorkflowRunForRenderer | null {
   if (!run || run.journal.length === 0) return run
   return { ...run, journal: [] }
 }
@@ -102,6 +107,32 @@ async function persistActionWorktreeRecord(
  * worktree, so expose it as recoverable on the first history/hydrate read after a
  * restart. This keeps recovery usable even when no new workflow is launched. */
 async function reconcileWorktreeRecordsForRenderer(
+  workspacePath: string,
+  threadId: string,
+  run: PersistedWorkflowRun | null
+): Promise<WorkflowRunForRenderer | null> {
+  try {
+    return await reconcileWorktreeRecords(workspacePath, threadId, run)
+  } catch (error) {
+    // The run was already read successfully. Repository/ownership metadata may
+    // have moved or become unreadable since execution; it must not hide results
+    // and logs. Keep ownership checks fail-closed for worktree actions.
+    console.warn("[Workflow] Failed to reconcile worktrees for run details:", {
+      threadId,
+      runId: run?.runId,
+      error
+    })
+    return run
+      ? {
+          ...run,
+          worktreeReadError:
+            "Worktree 状态核对失败，交付物暂为只读。运行结果和日志仍可查看，请刷新后重试。"
+        }
+      : null
+  }
+}
+
+async function reconcileWorktreeRecords(
   workspacePath: string,
   threadId: string,
   run: PersistedWorkflowRun | null
@@ -317,7 +348,7 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
     async (
       _event,
       { threadId, runId }: { threadId: string; runId: string }
-    ): Promise<PersistedWorkflowRun | null> => {
+    ): Promise<WorkflowRunForRenderer | null> => {
       const workspacePath = resolveWorkspacePath(threadId)
       if (!workspacePath) return null
       // A flush-failed run's disk copy is stale; serve its true in-memory terminal
