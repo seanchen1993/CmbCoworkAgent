@@ -28,6 +28,7 @@ import {
   UserMessageExpansionStore
 } from "./user-message-expansion-context"
 import { subscribeToMessageDiscard, type MessageAttempts } from "@/lib/message-discard-events"
+import { projectChatVirtualWindow } from "./chat-virtual-window"
 import type { ChatSearchLocation, ChatSearchReveal } from "../../../../shared/chat-search-types"
 import type {
   ChatScrollVirtualRangeRef,
@@ -82,10 +83,11 @@ export const resolveChatMessageVirtualInitialLocation = (
 export function resolveChatScrollVirtualRangeSnapshot(
   messages: readonly Message[],
   visibleMessageIndexes: readonly number[],
-  { startIndex, endIndex }: ListRange
+  { startIndex, endIndex }: ListRange,
+  firstItemIndex = 0
 ): ChatScrollVirtualRangeSnapshot | null {
-  const firstMessageIndex = visibleMessageIndexes[startIndex]
-  const lastMessageIndex = visibleMessageIndexes[endIndex]
+  const firstMessageIndex = visibleMessageIndexes[startIndex - firstItemIndex]
+  const lastMessageIndex = visibleMessageIndexes[endIndex - firstItemIndex]
   const firstMessage = messages[firstMessageIndex]
   return firstMessageIndex === undefined || lastMessageIndex === undefined
     ? null
@@ -335,6 +337,11 @@ interface ChatVirtualListContext {
   footer: React.ReactNode
 }
 
+interface ChatVirtualMessageRow {
+  identity: string
+  messageIndex: number
+}
+
 function ChatVirtualListHeader({
   context
 }: {
@@ -402,6 +409,20 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   onAtBottomStateChange,
   footer
 }: ChatMessageVirtualListProps): React.JSX.Element | null {
+  const virtualRows = useMemo(() => visibleMessageIndexes.map(messageIndex => {
+    const message = messages[messageIndex]
+    const identity = message ? JSON.stringify([message.role, message.id, message.tool_call_id ?? "",
+      message.provider_source_id ?? "", message.provider_occurrence ?? ""])
+      : `missing:${messageIndex}`
+    return { identity, messageIndex }
+  }), [messages, visibleMessageIndexes])
+  const virtualIdentities = useMemo(() => virtualRows.map(row => row.identity), [virtualRows])
+  const virtualPositionByIdentity = useMemo(() =>
+    new Map(virtualRows.map((row, index) => [row.identity, index])), [virtualRows])
+  const [previousVirtualWindow, setVirtualWindow] = useState(() =>
+    projectChatVirtualWindow(null, threadId, virtualIdentities))
+  const virtualWindow = projectChatVirtualWindow(previousVirtualWindow, threadId, virtualIdentities)
+  if (virtualWindow !== previousVirtualWindow) setVirtualWindow(virtualWindow)
   const turnNoticePlacements = useMemo(
     () =>
       placeFunctionTurnNotices(
@@ -496,10 +517,11 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       navigatorVirtualRangeRef.current = resolveChatScrollVirtualRangeSnapshot(
         messages,
         visibleMessageIndexes,
-        range
+        range,
+        virtualWindow.firstItemIndex
       )
     },
-    [messages, navigatorVirtualRangeRef, visibleMessageIndexes]
+    [messages, navigatorVirtualRangeRef, visibleMessageIndexes, virtualWindow.firstItemIndex]
   )
 
   const handleItemsRendered = (): void => {
@@ -727,14 +749,15 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     <ReasoningExpansionContext.Provider value={reasoningExpansion.choices}>
     <UserMessageExpansionContext.Provider value={userMessageExpansion.choices}>
       <div ref={presentationRoot} className="relative" data-chat-initial-presentation={presentationReady ? "ready" : "pending"}>
-      <Virtuoso<number, ChatVirtualListContext>
-        key={threadId}
+      <Virtuoso<ChatVirtualMessageRow, ChatVirtualListContext>
+        key={virtualWindow.key}
+        firstItemIndex={virtualWindow.firstItemIndex}
         // Clip paint only; keep authorized site scheduling, geometry and scroll measurement live.
         style={presentationReady ? undefined : { clipPath: "inset(50%)" }}
         inert={!presentationReady}
         aria-hidden={!presentationReady || undefined}
         ref={virtuosoRef}
-        data={visibleMessageIndexes}
+        data={virtualRows}
         customScrollParent={customScrollParent}
         initialTopMostItemIndex={resolvedInitialTopMostItemIndex}
         alignToBottom
@@ -742,18 +765,22 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         followOutput={false}
         skipAnimationFrameInResizeObserver
         atBottomStateChange={onAtBottomStateChange}
-        defaultItemHeight={112}
+        // Probe the actual initial row instead of estimating a tall transcript from a
+        // fixed short-message height. Pending content is still measured independently.
         increaseViewportBy={{ top: 600, bottom: 900 }}
-        computeItemKey={(_index, messageIndex) => {
-          const message = messages[messageIndex]
-          return message ? `${message.role}:${message.id}` : messageIndex
-        }}
+        computeItemKey={(_index, row) => row.identity}
         itemsRendered={handleItemsRendered}
         rangeChanged={handleVirtualRangeChanged}
         totalListHeightChanged={onContentHeightChanged}
         context={{ header: historyHeader, footer: footerContent }}
         components={chatVirtualListComponents}
-        itemContent={(visibleIndex, messageIndex) => renderMessage(visibleIndex, messageIndex)}
+        itemContent={(_absoluteIndex, row) => {
+          // Virtuoso can expose its previous measured row during the prepend transaction.
+          // Resolve that exact identity in the new projection, never read its old numeric slot.
+          const visibleIndex = virtualPositionByIdentity.get(row.identity)
+          return visibleIndex === undefined ? null
+            : renderMessage(visibleIndex, visibleMessageIndexes[visibleIndex])
+        }}
       />
       {!presentationReady && <div aria-hidden="true" className="pointer-events-none absolute inset-x-3 top-3 space-y-3">
         <div className="h-3 w-1/2 rounded bg-muted" />

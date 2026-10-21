@@ -1,6 +1,6 @@
 {
   "name": "cmbdevclaw",
-  "version": "1.5.9",
+  "version": "1.5.10",
   "description": "CMBDevClaw description",
   "author": {
     "name": "CMBDevClaw",
@@ -51,6 +51,8 @@
     "test:task-cards": "npx tsx tests/task-cards.spec.ts",
     "test:subagent-order:e2e": "npm run build && npx tsx tests/subagent-tool-order-e2e.spec.ts",
     "test:chat-navigation:browser": "tsx tests/chat-navigation-browser.spec.ts",
+    "test:chat:performance": "tsx tests/mods-chat-scope-stability-browser.spec.ts && tsx tests/chat-scroll-navigator-performance-browser.spec.ts && tsx tests/chat-virtual-history-layout-browser.spec.ts && tsx tests/chat-history-scroll-browser.spec.ts && tsx tests/message-user-overflow-browser.spec.ts && tsx tests/sidebar-resize-performance-browser.spec.ts && tsx tests/right-resize-lifecycle-browser.spec.ts && tsx tests/markdown-parse-cache-browser.spec.ts",
+    "test:chat:interaction:e2e": "npm run build && tsx tests/chat-history-interaction-e2e.spec.ts",
     "test:thread-context:hmr": "tsx tests/thread-context-hmr-browser.spec.ts && tsx tests/thread-context-vite-hmr-browser.spec.ts",
     "test:chat-layout:browser": "node tests/chat-layout-browser.spec.mjs",
     "test:chat-layout:e2e": "npm run build && node tests/chat-layout-e2e.spec.mjs",

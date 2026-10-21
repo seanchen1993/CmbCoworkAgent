@@ -24,12 +24,24 @@ async function activeMatch(page: Page) {
     const registry = (CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights
     const range = [...(registry.get("chat-search-active") ?? [])][0]
     const rect = range?.getBoundingClientRect()
+    const textElement =
+      range?.startContainer.nodeType === Node.ELEMENT_NODE
+        ? (range.startContainer as Element)
+        : range?.startContainer.parentElement
+    const textStyle = textElement ? getComputedStyle(textElement) : undefined
     const viewport = document.getElementById("viewport")!
     const box = viewport.getBoundingClientRect()
     return {
       status: document.querySelector("[aria-live]")?.textContent,
       scrollTop: viewport.scrollTop,
-      visible: Boolean(rect && rect.top >= box.top && rect.bottom <= box.bottom),
+      visible: Boolean(
+        rect &&
+        rect.top >= box.top &&
+        rect.bottom <= box.bottom &&
+        textStyle?.visibility === "visible" &&
+        textStyle.display !== "none" &&
+        !textElement?.closest('[inert], [aria-hidden="true"], [hidden]')
+      ),
       highlightedText: range?.toString() ?? ""
     }
   })
@@ -102,8 +114,8 @@ async function main(): Promise<void> {
                     return selector({ workspacePath: "C:/workspace", workspaceFiles: [] });
                   }`
                 : args.path === "hooks"
-                ? "export const HookLogChip=()=>null"
-                : `import {StreamingMarkdown} from ${JSON.stringify(join(projectRoot, "src/renderer/src/components/chat/StreamingMarkdown.tsx"))};
+                  ? "export const HookLogChip=()=>null"
+                  : `import {StreamingMarkdown} from ${JSON.stringify(join(projectRoot, "src/renderer/src/components/chat/StreamingMarkdown.tsx"))};
           export function MessageBubble({message}) {
             window.chatNavigationMetrics.renders++;
             return <StreamingMarkdown>{message.content}</StreamingMarkdown>
@@ -153,7 +165,53 @@ async function main(): Promise<void> {
     try {
       results.push({ name, passed: true, details: await run() })
     } catch (error) {
-      results.push({ name, passed: false, error: String(error) })
+      const failure = {
+        message: error instanceof Error ? error.stack : String(error),
+        dom: await page.evaluate(() => ({
+          expandButtons: [...document.querySelectorAll("button")].filter(
+            (node) => node.textContent?.trim() === "展开全文"
+          ).length,
+          expandButtonStyles: [...document.querySelectorAll("button")]
+            .filter((node) => node.textContent?.trim() === "展开全文")
+            .map((node) => {
+              const ancestors: unknown[] = []
+              let current: HTMLElement | null = node
+              while (current && ancestors.length < 8) {
+                const style = getComputedStyle(current)
+                ancestors.push({
+                  tag: current.tagName,
+                  style: current.getAttribute("style"),
+                  display: style.display,
+                  visibility: style.visibility,
+                  hidden: current.hidden,
+                  ariaHidden: current.getAttribute("aria-hidden"),
+                  inert: current.inert,
+                  top: current.getBoundingClientRect().top,
+                  height: current.getBoundingClientRect().height
+                })
+                current = current.parentElement
+              }
+              return ancestors
+            }),
+          contexts: [...document.querySelectorAll("[data-chat-search-context-key]")].map(
+            (node) => ({
+              key: node.getAttribute("data-chat-search-context-key"),
+              length: node.textContent?.length
+            })
+          ),
+          messages: [...document.querySelectorAll<HTMLElement>("[data-chat-message-id]")].map(
+            (node) => ({
+              id: node.dataset.chatMessageId,
+              length: node.textContent?.length,
+              top: node.getBoundingClientRect().top,
+              height: node.getBoundingClientRect().height
+            })
+          ),
+          scrollTop: document.getElementById("viewport")?.scrollTop
+        }))
+      }
+      await page.screenshot({ path: join(artifacts, `failure-${results.length}.png`) })
+      results.push({ name, passed: false, error: JSON.stringify(failure) })
     }
     console.log(JSON.stringify(results.at(-1)))
   }
@@ -186,8 +244,9 @@ async function main(): Promise<void> {
       await driveLink.click()
       await customLink.click()
       const events = await page.evaluate(
-        () => (window as unknown as { resourcePreviewEvents: Array<Record<string, unknown>> })
-          .resourcePreviewEvents
+        () =>
+          (window as unknown as { resourcePreviewEvents: Array<Record<string, unknown>> })
+            .resourcePreviewEvents
       )
       assert.deepEqual(
         events.map((event) => event.filePath),
@@ -200,6 +259,15 @@ async function main(): Promise<void> {
     ): Promise<void> => {
       await page.evaluate((value) => window.chatNavigationFixture.mountSearch(value), kind)
       await page.getByPlaceholder("在当前会话中搜索").waitFor()
+      if (kind === "folded") {
+        // This fixture uses raw Virtuoso: its initial LAST transaction hides the
+        // measured list until positioning completes. Start search only when its
+        // existing folded-body control is genuinely available, like the app's
+        // initial-presentation boundary. Geometry alone also exists while hidden.
+        await page
+          .getByRole("button", { name: "展开全文", exact: true })
+          .waitFor({ state: "visible", timeout: 5000 })
+      }
       // Let the search's initial focus/selection frame finish before entering the query.
       await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => done())))
       await page.getByPlaceholder("在当前会话中搜索").fill("needle")

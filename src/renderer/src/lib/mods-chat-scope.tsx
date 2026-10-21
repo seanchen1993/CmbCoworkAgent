@@ -1,7 +1,7 @@
 import { FunctionSiteLifetime } from "./function-site-lifecycle"
 import { FunctionSitePresentationCache } from "./function-site-presentation"
 import { isModSiteChangeScope } from "../../../shared/mods/types"
-import { createContext, useContext, useEffect, useCallback, useRef, useState, type ComponentType } from "react"
+import { createContext, useContext, useEffect, useCallback, useMemo, useRef, useState, type ComponentType } from "react"
 
 export const ModsChatScope = createContext<{
   threadId: string
@@ -106,17 +106,25 @@ export function useModsChatState(
     if (request?.identity === identity && !request.current()) retryRef.current()
   })
   const current = snapshot?.identity === identity && identity.key === key && snapshot.current()
-  const isCurrent = () => Boolean(workspace?.trim() && snapshot?.identity === identity &&
-    identity.key === key && snapshot.current() && typeof snapshot.enabled === "boolean")
-  return {
-    enabled: Boolean(workspace?.trim() && current && snapshot?.enabled),
-    ready: Boolean(workspace?.trim() && current && typeof snapshot?.enabled === "boolean"),
-    error: !workspace?.trim() ? "无法确认当前聊天的工作区，请重新读取聊天信息。"
-      : current ? snapshot?.error : undefined,
+  const isCurrent = useCallback(() => Boolean(workspace?.trim() && snapshot?.identity === identity &&
+    identity.key === key && snapshot.current() && typeof snapshot.enabled === "boolean"),
+  [workspace, snapshot, identity, key])
+  const enabled = Boolean(workspace?.trim() && current && snapshot?.enabled)
+  const ready = Boolean(workspace?.trim() && current && typeof snapshot?.enabled === "boolean")
+  const error = !workspace?.trim() ? "无法确认当前聊天的工作区，请重新读取聊天信息。"
+    : current ? snapshot?.error : undefined
+  const cache = current ? snapshot?.presentationCache : null
+  // A token, scroll indicator or composer update must not broadcast unchanged display
+  // authorization to every mounted history row. Captured callbacks still use the revoked
+  // decision's live ticket, so stable identity never revives an obsolete permission.
+  return useMemo(() => ({
+    enabled,
+    ready,
+    error,
     retry,
     isCurrent,
-    presentationCache: current ? snapshot?.presentationCache : null
-  }
+    presentationCache: cache
+  }), [enabled, ready, error, retry, isCurrent, cache])
 }
 
 export function useModsChatReady(threadId: string): boolean {

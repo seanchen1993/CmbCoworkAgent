@@ -56,6 +56,12 @@ describe("chat scroll navigator virtualization bridge", () => {
         endIndex: 1
       })
     ).toMatchObject({ firstMessageIndex: 3, lastMessageIndex: 3 })
+    expect(
+      resolveChatScrollVirtualRangeSnapshot(messages, [1, 3], {
+        startIndex: 1_000_000_001,
+        endIndex: 1_000_000_001
+      }, 1_000_000_000)
+    ).toMatchObject({ firstMessageIndex: 3, lastMessageIndex: 3 })
   })
 })
 

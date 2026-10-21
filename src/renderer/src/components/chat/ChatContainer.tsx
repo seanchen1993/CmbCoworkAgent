@@ -395,12 +395,14 @@ interface PendingDurableHistoryAnchor {
   previousLoadedMessageCount: number
   attempt: number
   stableFrames: number
+  lastRevealAttempt?: number
 }
 
 interface PendingChatSessionAnchor extends ChatScrollSessionAnchor {
   threadId: string
   attempt: number
   stableFrames: number
+  lastRevealAttempt?: number
 }
 
 function interruptionNoticeCopy(
@@ -2362,17 +2364,19 @@ export function ChatContainer({
     "binding" in chatFlow ? chatFlow.binding : undefined
   )
   const currentModel = clawDefaultModel ?? threadModel
+  const hasCurrentThread = Boolean(currentThread)
+  const reloadMissingThread = useCallback(() => {
+    void useAppStore.getState().loadThreads().catch(() => {})
+  }, [])
   const modsChatScope = useMemo(
     () => ({
       threadId,
       ...modsChatState,
       // A missing directory entry is still loading; a loaded entry without workspace is an error.
-      error: currentThread ? modsChatState.error : undefined,
-      retry: currentForkWorkspacePath ? modsChatState.retry : () => {
-        void useAppStore.getState().loadThreads().catch(() => {})
-      }
+      error: hasCurrentThread ? modsChatState.error : undefined,
+      retry: currentForkWorkspacePath ? modsChatState.retry : reloadMissingThread
     }),
-    [threadId, modsChatState, currentThread, currentForkWorkspacePath]
+    [threadId, modsChatState, hasCurrentThread, currentForkWorkspacePath, reloadMissingThread]
   )
   const functionTurnNotices = useFunctionTurnNotices(threadId, modsChatEnabled)
   const autoApproveGitPush =
@@ -4728,17 +4732,26 @@ export function ChatContainer({
         const currentOffset = target.getBoundingClientRect().top - viewportTop
         const delta = currentOffset - anchor.offsetFromViewportTop
         if (Math.abs(delta) > 1) viewport.scrollTop += delta
-        anchor.stableFrames = Math.abs(delta) <= 1 ? anchor.stableFrames + 1 : 0
+        const pendingPresentation = viewport.querySelector(
+          "[data-function-site-pending], [data-function-site][aria-busy='true']"
+        )
+        anchor.stableFrames = Math.abs(delta) <= 1 && !pendingPresentation
+          ? anchor.stableFrames + 1 : 0
         if (anchor.stableFrames >= CHAT_SESSION_ANCHOR_STABLE_FRAMES) {
           finish()
           return
         }
-      } else if (anchor.attempt === 0) {
-        virtuosoRef.current?.scrollToIndex({
-          index: visibleIndex,
-          align: "start",
-          behavior: "auto"
-        })
+      } else {
+        anchor.stableFrames = 0
+        if (anchor.attempt - (anchor.lastRevealAttempt ?? Number.NEGATIVE_INFINITY) >=
+          CHAT_HISTORY_ANCHOR_STABLE_FRAMES) {
+          anchor.lastRevealAttempt = anchor.attempt
+          virtuosoRef.current?.scrollToIndex({
+            index: visibleIndex,
+            align: "start",
+            behavior: "auto"
+          })
+        }
       }
 
       anchor.attempt += 1
@@ -4901,14 +4914,28 @@ export function ChatContainer({
       if (viewport && target) {
         const delta = target.getBoundingClientRect().top - anchor.viewportTop
         if (Math.abs(delta) > 1) viewport.scrollTop += delta
-        anchor.stableFrames = Math.abs(delta) <= 1 ? anchor.stableFrames + 1 : 0
+        // A stable skeleton/cached frame can still change height when its protected
+        // read completes. Keep restoration alive until mounted presentations settle.
+        const pendingPresentation = viewport.querySelector(
+          "[data-function-site-pending], [data-function-site][aria-busy='true']"
+        )
+        anchor.stableFrames = Math.abs(delta) <= 1 && !pendingPresentation
+          ? anchor.stableFrames + 1 : 0
         if (anchor.stableFrames >= CHAT_HISTORY_ANCHOR_STABLE_FRAMES) {
           finishRestore()
           return
         }
       }
       const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
-      if (!target && anchor.attempt === 0 && visibleIndex !== undefined) {
+      if (!target) anchor.stableFrames = 0
+      // Resize/prepend compensation can evict an anchor after the first frame.
+      // Reveal it again through the public relative-index API, with enough spacing
+      // for Virtuoso's own short measurement retry to finish before another request.
+      // Keep the last attempt on this anchor across streaming-driven effect restarts.
+      if (!target && visibleIndex !== undefined &&
+        anchor.attempt - (anchor.lastRevealAttempt ?? Number.NEGATIVE_INFINITY) >=
+          CHAT_HISTORY_ANCHOR_STABLE_FRAMES) {
+        anchor.lastRevealAttempt = anchor.attempt
         virtuosoRef.current?.scrollToIndex({
           index: visibleIndex,
           align: "start",

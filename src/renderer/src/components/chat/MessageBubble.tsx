@@ -4,6 +4,7 @@ import { ModCards } from "./ModCards"
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { useReasoningExpansion } from "./reasoning-expansion-context"
 import { useUserMessageExpansion } from "./user-message-expansion-context"
+import { observeUserContentOverflow } from "./user-content-overflow"
 import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
 import { parseGoalNoticeText } from "../../../../shared/goal-notice-presentation"
 import { stripThinkBlocksForDisplay } from "../../../../shared/think-block-display"
@@ -507,25 +508,19 @@ function MessageBubbleImpl({
     messageRevision
   )
 
-  // Measure the rendered, authorized content before paint. Observe the uncapped inner layout so
-  // late protected content and width changes are detected even while the outer height stays 260px.
+  // The initial ResizeObserver notification arrives before paint. Its uncapped inner
+  // geometry avoids forcing layout for every newly mounted virtual user row.
   useLayoutEffect(() => {
     if (message.role !== "user") return
     const el = userContentRef.current
     const layout = userContentLayoutRef.current
     if (!el || !layout) return
-    const measure = (): void => {
-      if (layout.querySelector("[data-function-site-pending]")) {
-        setUserContentOverflow(false)
-        return
-      }
-      setUserContentOverflow(el.scrollHeight > USER_MESSAGE_COLLAPSED_MAX_PX + 8)
-    }
-    measure()
-    if (typeof ResizeObserver === "undefined") return
-    const observer = new ResizeObserver(() => measure())
-    observer.observe(layout)
-    return () => observer.disconnect()
+    return observeUserContentOverflow(
+      el,
+      layout,
+      USER_MESSAGE_COLLAPSED_MAX_PX,
+      setUserContentOverflow
+    )
   }, [message.role, message.content])
 
   // 判断是否显示 MessageHead：如果当前不是用户消息，且是第一条非用户消息
@@ -943,7 +938,9 @@ function MessageBubbleImpl({
               )}
               style={!userContentExpanded ? { maxHeight: USER_MESSAGE_COLLAPSED_MAX_PX } : undefined}
             >
-              <div ref={userContentLayoutRef}>{content}</div>
+              <div ref={userContentLayoutRef} className="flow-root">
+                {content}
+              </div>
             </div>
             {userContentOverflow && (
               <button

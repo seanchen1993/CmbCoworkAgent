@@ -41,6 +41,16 @@ export interface ChatScrollNavigatorRenderProps {
   virtualRangeRef: ChatScrollVirtualRangeRef
 }
 
+/** Marker selection changes independently of transcript data and must not render its rows. */
+const ChatScrollTranscript = memo(function ChatScrollTranscript({
+  children,
+  ...navigation
+}: ChatScrollNavigatorRenderProps & {
+  children: (props: ChatScrollNavigatorRenderProps) => ReactNode
+}) {
+  return <>{children(navigation)}</>
+})
+
 interface ChatScrollNavigatorProps {
   messages: Message[]
   questionStructureRevision: number
@@ -823,6 +833,7 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
                 <button
                   type="button"
                   data-chat-scroll-marker=""
+                  aria-current={isActive ? "location" : undefined}
                   ref={(node) => {
                     if (node) buttonRefs.current.set(index, node)
                     else buttonRefs.current.delete(index)
@@ -913,6 +924,12 @@ export function ChatScrollNavigator({
   children
 }: ChatScrollNavigatorProps): React.JSX.Element {
   const userMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
+  const mountedQuestionRevision = useRef(0)
+  const mountedQuestionIndexes = useRef<{
+    projection: Map<string, number>
+    revision: number
+    indexes: number[]
+  } | null>(null)
   const virtualRangeRef = useRef<ChatScrollVirtualRangeSnapshot | null>(null)
   const requestedUserQuestionIndexRef = useRef<number | null>(null)
   const requestedUserQuestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -936,20 +953,30 @@ export function ChatScrollNavigator({
   const onRevealMessageRef = useRef(onRevealMessage)
   const onScrollToQuestionRef = useRef(onScrollToQuestion)
   const scrollToMessageByIdRef = useRef(scrollToMessageById)
+  const currentQuestionProjection = useRef({
+    messages, questionIndexByMessageId, userMessageIds, userMessageIndexes
+  })
   useLayoutEffect(() => {
     userMessageIdsRef.current = userMessageIds
     onRevealMessageRef.current = onRevealMessage
     onScrollToQuestionRef.current = onScrollToQuestion
     scrollToMessageByIdRef.current = scrollToMessageById
-  }, [onRevealMessage, onScrollToQuestion, scrollToMessageById, userMessageIds])
+    currentQuestionProjection.current = {
+      messages, questionIndexByMessageId, userMessageIds, userMessageIndexes
+    }
+  }, [messages, onRevealMessage, onScrollToQuestion, questionIndexByMessageId,
+    scrollToMessageById, userMessageIds, userMessageIndexes])
 
   const setMessageRef = useCallback<MessageRefSetter>(
     (messageId: string, role: Message["role"]) =>
       (node: HTMLDivElement | null): void => {
         if (node && role === "user") {
-          userMessageRefs.current.set(messageId, node)
-        } else {
-          userMessageRefs.current.delete(messageId)
+          if (userMessageRefs.current.get(messageId) !== node) {
+            userMessageRefs.current.set(messageId, node)
+            mountedQuestionRevision.current++
+          }
+        } else if (userMessageRefs.current.delete(messageId)) {
+          mountedQuestionRevision.current++
         }
       },
     []
@@ -959,12 +986,22 @@ export function ChatScrollNavigator({
     const viewport = getViewport(scrollContainerRef.current)
     if (!viewport) return -1
 
-    const renderedQuestionIndexes: number[] = []
-    for (const messageId of userMessageRefs.current.keys()) {
-      const index = questionIndexByMessageId.get(messageId)
-      if (index !== undefined) renderedQuestionIndexes.push(index)
+    const { messages, questionIndexByMessageId, userMessageIds, userMessageIndexes } =
+      currentQuestionProjection.current
+    let mounted = mountedQuestionIndexes.current
+    if (!mounted || mounted.projection !== questionIndexByMessageId ||
+        mounted.revision !== mountedQuestionRevision.current) {
+      const indexes: number[] = []
+      for (const messageId of userMessageRefs.current.keys()) {
+        const index = questionIndexByMessageId.get(messageId)
+        if (index !== undefined) indexes.push(index)
+      }
+      indexes.sort((left, right) => left - right)
+      mounted = { projection: questionIndexByMessageId,
+        revision: mountedQuestionRevision.current, indexes }
+      mountedQuestionIndexes.current = mounted
     }
-    renderedQuestionIndexes.sort((left, right) => left - right)
+    const renderedQuestionIndexes = mounted.indexes
 
     // A tall assistant/tool row can occupy the whole viewport while its owning user row is
     // already outside Virtuoso's overscan window. rangeChanged records the underlying transcript
@@ -1023,7 +1060,7 @@ export function ChatScrollNavigator({
       nearBottom ? viewportBottomAnchor : viewportAnchor
     )
     return measuredQuestionIndex >= 0 ? measuredQuestionIndex : rangeQuestionIndex
-  }, [messages, questionIndexByMessageId, scrollContainerRef, userMessageIds, userMessageIndexes])
+  }, [scrollContainerRef])
 
   const scrollToUserQuestionByIndex = useCallback(
     (index: number): void => {
@@ -1078,9 +1115,8 @@ export function ChatScrollNavigator({
     const viewport = getViewport(scrollContainerRef.current)
     if (!viewport) return
 
-    // Coalesce scroll events to one measurement per frame. The measurement
-    // walks user messages with getBoundingClientRect, so running it on every
-    // raw scroll event is an O(n) layout hotspot on long conversations.
+    // Keep this listener stable while tokens arrive. Mounted positions are rebuilt only when
+    // rows or the question projection change; geometry is sampled at most once per frame.
     let frame: number | null = null
     const measure = (): void => {
       frame = null
@@ -1117,15 +1153,17 @@ export function ChatScrollNavigator({
       setActiveQuestionIndex(getCurrentUserQuestionIndex())
     })
     return () => cancelAnimationFrame(frame)
-  }, [getCurrentUserQuestionIndex, userMessageIds.length])
+  }, [getCurrentUserQuestionIndex, questionIndexByMessageId])
 
   const hasQuestions = questions.length > 0
   const hasNavigationMarkers = hasQuestions || gapBeforeQuestionIndex !== null
   const reserveLeftSpace = hasNavigationMarkers && !rightPanelCollapsed
-
   return (
     <>
-      {children({ hasQuestions, reserveLeftSpace, setMessageRef, virtualRangeRef })}
+      <ChatScrollTranscript hasQuestions={hasQuestions} reserveLeftSpace={reserveLeftSpace}
+        setMessageRef={setMessageRef} virtualRangeRef={virtualRangeRef}>
+        {children}
+      </ChatScrollTranscript>
       {hasNavigationMarkers && (
         <ChatScrollMarkerRail
           questions={questions}

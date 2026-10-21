@@ -561,6 +561,31 @@ jobs:
         shell: pwsh
         run: node --import tsx scripts/run-mods-packaged-e2e.ts "dist/win-unpacked" "output/mods-v2-validation/actions-packaged"
 
+      - name: Validate chat history interactions in Windows package
+        if: matrix.platform == 'win'
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          COMPOSITION_E2E_PACKAGED_DIR: dist/win-unpacked
+          COMPOSITION_E2E_ARTIFACT_ROOT: output/chat-history-package-validation
+        run: node --import tsx tests/chat-history-interaction-e2e.spec.ts
+
+      - name: Upload chat interaction validation evidence
+        if: always() && matrix.platform == 'win'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CMBDevClaw-win-chat-validation-${{ steps.pkg.outputs.version }}
+          path: |
+            output/chat-history-package-validation/**/acceptance.json
+            output/chat-history-package-validation/**/*.ndjson
+            output/chat-history-package-validation/**/history-thumb.png
+            output/chat-history-package-validation/**/failure.png
+            output/chat-history-package-validation/**/blank-*.png
+            output/chat-history-package-validation/**/main.stdout.log
+            output/chat-history-package-validation/**/main.stderr.log
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload Mods package validation evidence
         if: always() && matrix.platform == 'win'
         uses: actions/upload-artifact@v4

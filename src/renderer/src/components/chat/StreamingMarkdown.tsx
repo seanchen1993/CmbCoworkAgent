@@ -24,6 +24,7 @@ import {
   useMarkdownFilePreviewComponents
 } from "./markdown-file-preview-components"
 import { isLocalFileLikeHref } from "@/lib/markdown-file-preview-links"
+import { remarkCompletedMarkdownParseCache } from "@/lib/markdown-parse-cache"
 
 interface StreamingMarkdownProps {
   children: string
@@ -82,6 +83,7 @@ function MarkdownCodeBlock({
 // Hoisted to module scope so the prop identities stay stable across renders
 // (recreating these every render makes react-markdown redo work and churns GC).
 const REMARK_PLUGINS = [remarkGfm]
+const COMPLETED_REMARK_PLUGINS = [remarkGfm, remarkCompletedMarkdownParseCache]
 const REHYPE_PLUGINS = [rehypeHighlight]
 // While streaming we skip syntax highlighting (the expensive rehype pass) and
 // reuse a single empty array identity so react-markdown doesn't see a new prop.
@@ -246,7 +248,7 @@ const MarkdownFragment = memo(function MarkdownFragment({
       data-chat-search-source-end={start + text.length}
     >
       <ReactMarkdown
-        remarkPlugins={REMARK_PLUGINS}
+        remarkPlugins={isStreaming ? REMARK_PLUGINS : COMPLETED_REMARK_PLUGINS}
         rehypePlugins={isStreaming ? NO_REHYPE_PLUGINS : REHYPE_PLUGINS}
         components={components}
         urlTransform={threadId ? transformStreamingMarkdownUrl : undefined}

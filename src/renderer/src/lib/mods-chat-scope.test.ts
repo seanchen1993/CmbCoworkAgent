@@ -4,7 +4,17 @@ import ts from "typescript"
 import { afterEach, expect, it, vi } from "vitest"
 const hooks = vi.hoisted(() => ({ index: 0, rendering: false, rerender: false, slots: [] as unknown[],
   effects: [] as Array<() => void>, rollbacks: [] as Array<() => void>, cleanups: [] as Array<() => void> }))
-vi.mock("react", async importOriginal => ({
+vi.mock("react", async importOriginal => {
+  const memo = <T>(create: () => T, deps?: readonly unknown[]): T => {
+    const index = hooks.index++
+    const previous = hooks.slots[index] as { deps?: readonly unknown[]; value: T } | undefined
+    if (previous?.deps && deps && deps.length === previous.deps.length &&
+      deps.every((value, i) => Object.is(value, previous.deps?.[i]))) return previous.value
+    const value = create()
+    hooks.slots[index] = { deps, value }
+    return value
+  }
+  return ({
   ...(await importOriginal<typeof import("react")>()),
   useState: <T>(initial: T) => {
     const index = hooks.index++
@@ -16,7 +26,8 @@ vi.mock("react", async importOriginal => ({
     if (!(index in hooks.slots)) hooks.slots[index] = { current: initial }
     return hooks.slots[index]
   },
-  useCallback: <T>(callback: T) => { hooks.index++; return callback },
+  useCallback: <T>(callback: T, deps?: readonly unknown[]) => memo(() => callback, deps),
+  useMemo: memo,
   useEffect: (effect: () => void | (() => void), deps?: unknown[]) => {
     const index = hooks.index++
     const previous = hooks.slots[index] as { deps?: unknown[]; cleanup?: () => void } | undefined
@@ -30,7 +41,8 @@ vi.mock("react", async importOriginal => ({
       if (slot.cleanup) hooks.cleanups.push(slot.cleanup)
     })
   }
-}))
+  })
+})
 import { useModsChatState } from "./mods-chat-scope"
 const readState = useModsChatState // Explicit hook harness; no mounted React component.
 
@@ -91,6 +103,29 @@ it("requires one scoped host decision before admitting an inactive native displa
   await settle()
   expect(f.render()).toMatchObject({ enabled: false, ready: true })
   expect(f.read).toHaveBeenCalledTimes(1)
+})
+
+it("keeps the admitted context stable across unrelated renders and revokes it synchronously", async () => {
+  const f = setup()
+  f.render()
+  f.requests[0].resolve(true)
+  await settle()
+  const admitted = f.render()
+  for (let i = 0; i < 30; i++) {
+    expect(f.render()).toBe(admitted)
+    expect(f.render().isCurrent).toBe(admitted.isCurrent)
+  }
+  expect(f.read).toHaveBeenCalledTimes(1)
+  f.notify()
+  expect(admitted.isCurrent()).toBe(false)
+  expect(f.render()).not.toBe(admitted)
+  expect(f.render().ready).toBe(false)
+  f.requests[1].resolve(true)
+  await settle()
+  const replacement = f.render()
+  expect(replacement.isCurrent).not.toBe(admitted.isCurrent)
+  expect(replacement.isCurrent()).toBe(true)
+  expect(admitted.isCurrent()).toBe(false)
 })
 
 it("keeps failures closed and exposes a read-only retry", async () => {
@@ -190,8 +225,8 @@ it("the real ChatContainer provider carries revocation, error and retry contract
   const retry = vi.fn(), isCurrent = () => false
   const modsChatState = { enabled: false, ready: false, error: "denied", retry, isCurrent }
   const loadThreads = vi.fn(async () => {})
-  const context = { threadId: "thread", modsChatState, currentThread: {},
-    currentForkWorkspacePath: "workspace", useAppStore: { getState: () => ({ loadThreads }) } }
+  const context = { threadId: "thread", modsChatState, hasCurrentThread: true,
+    currentForkWorkspacePath: "workspace", reloadMissingThread: () => { void loadThreads() } }
   const read = () => runInNewContext(ts.transpileModule(`(${callback})()`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
   }).outputText, context) as typeof modsChatState
@@ -204,7 +239,7 @@ it("the real ChatContainer provider carries revocation, error and retry contract
   missingWorkspace.retry()
   await settle()
   expect(loadThreads).toHaveBeenCalledOnce()
-  Object.assign(context, { currentThread: null })
+  context.hasCurrentThread = false
   expect(read().error).toBeUndefined()
   expect(read().ready).toBe(false)
 })

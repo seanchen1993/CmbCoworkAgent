@@ -34,7 +34,9 @@ interface Site {
 /** Every host-owned slot has a bounded intent ledger and callback generation lifetime. */
 export class FunctionUiSites {
   private readonly slots = new Map<string, Site>()
-  private serial: Promise<unknown> = Promise.resolve()
+  private readonly queues = new Map<string, Promise<void>>()
+  private pending = 0
+  private closed = false
 
   constructor(private readonly host: PaneHost & {
     userMessageOrigin?(messageId: string): FunctionPluginPromptOrigin | undefined
@@ -69,12 +71,23 @@ export class FunctionUiSites {
     })
   }
 
-  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
-    const result = this.serial.then(() => {
+  private enqueue<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    if (this.closed) return Promise.reject(new ModFunctionError("MODS_UI_SITE_CLOSED"))
+    // Bound physical in-flight work too: an unmounted owner cannot manufacture
+    // unlimited independent queues while an older host callback is still pending.
+    if (this.pending >= 512) return Promise.reject(new ModFunctionError("MODS_UI_SITE_QUEUE_LIMIT"))
+    this.pending++
+    const result = (this.queues.get(key) ?? Promise.resolve()).then(() => {
+      if (this.closed) throw new ModFunctionError("MODS_UI_SITE_CLOSED")
       this.host.assertLive()
       return fn()
     })
-    this.serial = result.catch(() => {})
+    const tail = result.then(() => undefined, () => undefined)
+    this.queues.set(key, tail)
+    void tail.then(() => {
+      this.pending--
+      if (this.queues.get(key) === tail) this.queues.delete(key)
+    })
     return result
   }
 
@@ -85,6 +98,7 @@ export class FunctionUiSites {
 
   /** No Session recursion: this private native fact also guards SDK drawing receipts. */
   private native(owner: string): Site {
+    if (this.closed) throw new ModFunctionError("MODS_UI_SITE_CLOSED")
     const site = this.slots.get(owner)
     if (!site) throw new ModFunctionError("MODS_UI_SITE_CLOSED")
     if (site.component === "AskUserQuestion" &&
@@ -93,8 +107,9 @@ export class FunctionUiSites {
     return site
   }
 
-  mount(component: FunctionUiSite, messageId?: string, expectedRequestId?: string): Promise<string> {
-    return this.enqueue(async () => {
+  async mount(component: FunctionUiSite, messageId?: string, expectedRequestId?: string): Promise<string> {
+    functionUiSite(component)
+    return this.enqueue(`mount:${component}`, async () => {
       functionUiSite(component)
       const nativeRequest = component === "AskUserQuestion" ? this.host.pendingQuestion?.() : undefined
       if (component === "AskUserQuestion" && (!nativeRequest ||
@@ -126,6 +141,10 @@ export class FunctionUiSites {
       } else {
         const previous = [...this.slots.values()].find((entry) => entry.component === component)
         if (previous) await this.unmount(previous.owner)
+        this.host.assertLive()
+        if (this.closed) throw new ModFunctionError("MODS_UI_SITE_CLOSED")
+        if (nativeRequest && this.host.pendingQuestion?.() !== nativeRequest)
+          throw new ModFunctionError("MODS_UI_QUESTION_STALE")
       }
       const owner = randomUUID()
       this.slots.set(owner, { component, messageId, owner, nativeRequest: nativeRequest ?? undefined,
@@ -135,7 +154,7 @@ export class FunctionUiSites {
   }
 
   render(owner: string, props: ModObject): Promise<FunctionPaneSnapshot> {
-    return this.enqueue(async () => {
+    return this.enqueue(`owner:${owner}`, async () => {
       // enqueue has just checked the full lifecycle at execution, without an intervening await.
       const site = this.native(owner)
       // Only the mounted, immutable message ID can select a main-process durable source.
@@ -257,6 +276,7 @@ export class FunctionUiSites {
     return changed
   }
   close(): void {
+    this.closed = true
     for (const site of this.slots.values()) site.drawings.close()
     this.slots.clear()
   }

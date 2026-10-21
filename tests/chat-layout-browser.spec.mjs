@@ -122,6 +122,18 @@ try {
     }
     console.log(JSON.stringify(results.at(-1)))
   }
+  async function revealReasoning(index) {
+    // This is the bare list fixture, without ChatContainer's composer/viewport anchors.
+    // Revisit the target after a disclosure changes its height rather than clicking a
+    // stale virtual row while the native list finishes its previous measurement.
+    await page.evaluate((index) => window.chatLayoutFixture.seek(index), index)
+    await page.locator('[data-chat-initial-presentation="ready"]').waitFor()
+    const button = page
+      .locator(`[data-chat-message-id="message-${index}"]`)
+      .getByRole("button", { name: "思考", exact: true })
+    await button.waitFor({ state: "visible" })
+    return button
+  }
   await check("virtual row spacing is included in measured heights", async () => {
     const rows = await page.locator("[data-item-index]").evaluateAll((elements) =>
       elements.map((el) => ({
@@ -147,7 +159,9 @@ try {
     return rows
   })
   await check("expanded reasoning survives virtual unmount", async () => {
-    const button = page.locator('[data-chat-message-id="message-198"] button[aria-expanded]')
+    const button = page
+      .locator('[data-chat-message-id="message-198"]')
+      .getByRole("button", { name: "思考", exact: true })
     await button.click()
     assert.equal(await button.getAttribute("aria-expanded"), "true")
     await page.waitForTimeout(300)
@@ -164,7 +178,9 @@ try {
       window.chatLayoutFixture.stream(2)
       window.chatLayoutFixture.seek(199)
     })
-    const button = page.locator('[data-chat-message-id="message-199"] button[aria-expanded]')
+    const button = page
+      .locator('[data-chat-message-id="message-199"]')
+      .getByRole("button", { name: "思考", exact: true })
     await button.waitFor()
     await page.waitForTimeout(250)
     assert.equal(await button.getAttribute("aria-expanded"), "true")
@@ -179,7 +195,9 @@ try {
     assert.equal(await button.getAttribute("aria-expanded"), "false")
   })
   await check("long streaming reasoning follows the tail without blank frames", async () => {
-    const button = page.locator('[data-chat-message-id="message-199"] button[aria-expanded]')
+    const button = page
+      .locator('[data-chat-message-id="message-199"]')
+      .getByRole("button", { name: "思考", exact: true })
     if ((await button.getAttribute("aria-expanded")) !== "true") await button.click()
     await page.waitForTimeout(300)
     await page.evaluate(() => window.chatLayoutFixture.follow())
@@ -238,7 +256,9 @@ try {
   })
   await check("automatic reasoning remains open after reasoning-only completion", async () => {
     await page.evaluate(() => window.chatLayoutFixture.resetAutomatic())
-    const button = page.locator('[data-chat-message-id="message-199"] button[aria-expanded]')
+    const button = page
+      .locator('[data-chat-message-id="message-199"]')
+      .getByRole("button", { name: "思考", exact: true })
     await button.waitFor()
     assert.equal(await button.getAttribute("aria-expanded"), "true")
     await page.evaluate(() => window.chatLayoutFixture.complete())
@@ -254,7 +274,9 @@ try {
       window.chatLayoutFixture.stream(5)
       window.chatLayoutFixture.answer()
     })
-    const button = page.locator('[data-chat-message-id="message-199"] button[aria-expanded]')
+    const button = page
+      .locator('[data-chat-message-id="message-199"]')
+      .getByRole("button", { name: "思考", exact: true })
     assert.equal(await button.getAttribute("aria-expanded"), "false")
     await page.evaluate(() => window.chatLayoutFixture.stream(6))
     assert.equal(
@@ -267,14 +289,18 @@ try {
     "manual reopen before the answer does not suppress the existing automatic collapse",
     async () => {
       await page.evaluate(() => window.chatLayoutFixture.resetAutomatic())
-      const button = page.locator('[data-chat-message-id="message-199"] button[aria-expanded]')
-      await button.waitFor()
+      const button = await revealReasoning(199)
+      assert.equal(await button.getAttribute("aria-expanded"), "true")
       await button.click()
+      await revealReasoning(199)
+      assert.equal(await button.getAttribute("aria-expanded"), "false")
       await button.click()
       assert.equal(await button.getAttribute("aria-expanded"), "true")
       await page.evaluate(() => window.chatLayoutFixture.answer())
+      await revealReasoning(199)
       assert.equal(await button.getAttribute("aria-expanded"), "false")
       await button.click()
+      assert.equal(await button.getAttribute("aria-expanded"), "true")
       await page.evaluate(() => window.chatLayoutFixture.answer())
       assert.equal(
         await button.getAttribute("aria-expanded"),
@@ -336,7 +362,7 @@ try {
     await check(`reasoning catches up ${phase} completion while unmounted`, async () => {
       await page.evaluate(() => window.chatLayoutFixture.resetAutomatic())
       const row = page.locator('[data-chat-message-id="message-199"]')
-      const button = row.locator("button[aria-expanded]")
+      const button = row.getByRole("button", { name: "思考", exact: true })
       await button.waitFor()
       assert.equal(await button.getAttribute("aria-expanded"), "true")
       await page.evaluate(() => window.chatLayoutFixture.seek(0))
@@ -373,7 +399,9 @@ try {
           window.chatLayoutFixture.resetAutomatic()
           window.chatLayoutFixture.answer()
         })
-        const button = page.locator('[data-chat-message-id="message-199"] button[aria-expanded]')
+        const button = page
+          .locator('[data-chat-message-id="message-199"]')
+          .getByRole("button", { name: "思考", exact: true })
         await button.waitFor()
         assert.equal(await button.getAttribute("aria-expanded"), "false")
         await page.evaluate(
@@ -394,7 +422,7 @@ try {
       window.chatLayoutFixture.answer()
     })
     const row = page.locator('[data-chat-message-id="message-199"]')
-    const button = row.locator("button[aria-expanded]")
+    const button = row.getByRole("button", { name: "思考", exact: true })
     await button.waitFor()
     assert.equal(await button.getAttribute("aria-expanded"), "false")
     await button.click()

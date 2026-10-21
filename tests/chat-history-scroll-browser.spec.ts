@@ -68,6 +68,7 @@ async function main() {
       }
       window.historyScroll={calls,held:()=>held.length,hold:()=>{hold=true},
         release:()=>{hold=false;held.splice(0).forEach(resolve=>resolve())},
+        unmount:()=>host.render(null),
         jump:index=>virtual.current.scrollToIndex({index,align:"start",behavior:"auto"})};
       host.render(<Fixture/>);}
     `,
@@ -174,6 +175,24 @@ async function main() {
       JSON.stringify({ expandedHeight, restoredUser })
     )
     assert.deepEqual(errors, [])
+    const deletionReads = await page.evaluate(async () => {
+      const original = Range.prototype.getBoundingClientRect
+      let reads = 0
+      Range.prototype.getBoundingClientRect = function () {
+        reads++
+        return original.call(this)
+      }
+      try {
+        const history = (window as unknown as { historyScroll: { unmount(): void } }).historyScroll
+        history.unmount()
+        for (let frame = 0; frame < 3; frame++)
+          await new Promise<void>((done) => requestAnimationFrame(() => done()))
+        return reads
+      } finally {
+        Range.prototype.getBoundingClientRect = original
+      }
+    })
+    assert.equal(deletionReads, 0, "Deleting protected history must not force content layout")
     console.log(
       "PASS real Virtuoso history recycling keeps protected content, row height and user expansion"
     )

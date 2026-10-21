@@ -63,6 +63,7 @@ const DashboardView = lazy(() =>
   import("@/components/dashboard/DashboardView").then((m) => ({ default: m.DashboardView }))
 )
 import { ResizeHandle } from "@/components/ui/resizable"
+import { useSidebarResizePreview } from "@/lib/sidebar-resize-preview"
 import { ResourcePanelOverlay } from "@/components/panels/ResourcePanelOverlay"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
@@ -210,11 +211,15 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
 function AnimatedThreadSidebar({
   hidden,
   width,
-  onResize
+  onResize,
+  onResizeEnd,
+  onResizeCancel
 }: {
   hidden: boolean
   width: number
   onResize: (totalDelta: number) => void
+  onResizeEnd: (totalDelta: number) => void
+  onResizeCancel: () => void
 }): React.JSX.Element {
   return (
     <div
@@ -223,12 +228,17 @@ function AnimatedThreadSidebar({
       className={`flex shrink-0 overflow-hidden transition-[width,opacity] duration-300 ease-out ${
         hidden ? "pointer-events-none opacity-0" : "opacity-100"
       }`}
-      style={{ width: hidden ? 0 : width + LEFT_RESIZE_HANDLE_WIDTH }}
+      style={{
+        width: hidden
+          ? 0
+          : `calc(var(--app-sidebar-width, ${width}px) + ${LEFT_RESIZE_HANDLE_WIDTH}px)`,
+        transitionDuration: "var(--app-sidebar-resize-duration, 300ms)"
+      }}
     >
-      <div style={{ width }} className="shrink-0">
+      <div style={{ width: `var(--app-sidebar-width, ${width}px)` }} className="shrink-0">
         <ThreadSidebar />
       </div>
-      <ResizeHandle onDrag={onResize} />
+      <ResizeHandle onDrag={onResize} onDragEnd={onResizeEnd} onDragCancel={onResizeCancel} />
     </div>
   )
 }
@@ -663,18 +673,7 @@ function App(): React.JSX.Element {
     return () => window.removeEventListener("resize", updateZoom)
   }, [])
 
-  const leftMinWidth = LEFT_MIN
-
-  const handleLeftResize = useCallback(
-    (totalDelta: number) => {
-      if (!dragStartWidths.current) {
-        dragStartWidths.current = { left: leftWidth, right: 0 }
-      }
-      const newWidth = dragStartWidths.current.left + totalDelta
-      setLeftWidth(Math.min(LEFT_MAX, Math.max(leftMinWidth, newWidth)))
-    },
-    [leftWidth, leftMinWidth]
-  )
+  const leftResize = useSidebarResizePreview(leftWidth, setLeftWidth, LEFT_MIN, LEFT_MAX)
 
   const handleRightResize = useCallback(
     (totalDelta: number) => {
@@ -703,6 +702,13 @@ function App(): React.JSX.Element {
     },
     [browserFullscreen, browserFullscreenRightPercent, leftWidth, rightWidth]
   )
+
+  const finishRightResize = useCallback(() => {
+    // ResizeHandle flushes its last pointer frame before this callback. The
+    // earlier document mouseup listener alone can otherwise leave a stale start.
+    dragStartWidths.current = null
+    browserFullscreenSplitStartRef.current = null
+  }, [])
 
   const handleWorkerSplitResize = useCallback(
     (totalDelta: number) => {
@@ -1296,7 +1302,9 @@ function App(): React.JSX.Element {
                   <AnimatedThreadSidebar
                     hidden={browserFullscreen}
                     width={leftWidth}
-                    onResize={handleLeftResize}
+                    onResize={leftResize.preview}
+                    onResizeEnd={leftResize.finish}
+                    onResizeCancel={leftResize.cancel}
                   />
                 )}
 
@@ -1388,7 +1396,11 @@ function App(): React.JSX.Element {
                   !rightPanelCollapsed &&
                   !isAgentFocusActive && (
                     <div className="max-[1050px]:hidden">
-                      <ResizeHandle onDrag={handleRightResize} />
+                      <ResizeHandle
+                        onDrag={handleRightResize}
+                        onDragEnd={finishRightResize}
+                        onDragCancel={finishRightResize}
+                      />
                     </div>
                   )}
                 {renderedMainView === "thread" && renderedThreadId && (
@@ -1410,7 +1422,13 @@ function App(): React.JSX.Element {
                   !isAgentFocusActive &&
                   rightModule !== "claw" && (
                   <>
-                    {showRightResizeHandle && <ResizeHandle onDrag={handleRightResize} />}
+                    {showRightResizeHandle && (
+                      <ResizeHandle
+                        onDrag={handleRightResize}
+                        onDragEnd={finishRightResize}
+                        onDragCancel={finishRightResize}
+                      />
+                    )}
                     {/* Right Panel - floating style */}
                     <div
                       style={fullscreenRightPanelStyle}
@@ -1437,12 +1455,16 @@ function App(): React.JSX.Element {
                   <>
                     <div
                       data-app-route-control
-                      style={{ width: leftWidth }}
+                      style={{ width: `var(--app-sidebar-width, ${leftWidth}px)` }}
                       className="relative z-[60] shrink-0"
                     >
                       <ThreadSidebar />
                     </div>
-                    <ResizeHandle onDrag={handleLeftResize} />
+                    <ResizeHandle
+                      onDrag={leftResize.preview}
+                      onDragEnd={leftResize.finish}
+                      onDragCancel={leftResize.cancel}
+                    />
                   </>
                 )}
                 <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
@@ -1469,7 +1491,9 @@ function App(): React.JSX.Element {
                   <AnimatedThreadSidebar
                     hidden={browserFullscreen}
                     width={leftWidth}
-                    onResize={handleLeftResize}
+                    onResize={leftResize.preview}
+                    onResizeEnd={leftResize.finish}
+                    onResizeCancel={leftResize.cancel}
                   />
                 )}
                 <main
@@ -1547,7 +1571,13 @@ function App(): React.JSX.Element {
                   rightModule !== "claw" &&
                   !isHarnessAgentFocusActive && (
                     <>
-                      {showRightResizeHandle && <ResizeHandle onDrag={handleRightResize} />}
+                      {showRightResizeHandle && (
+                        <ResizeHandle
+                          onDrag={handleRightResize}
+                          onDragEnd={finishRightResize}
+                          onDragCancel={finishRightResize}
+                        />
+                      )}
                       <div
                         style={fullscreenRightPanelStyle}
                         className={fullscreenRightPanelClassName}
@@ -1581,12 +1611,16 @@ function App(): React.JSX.Element {
                   <>
                     <div
                       data-app-route-control
-                      style={{ width: leftWidth }}
+                      style={{ width: `var(--app-sidebar-width, ${leftWidth}px)` }}
                       className="relative z-[60] shrink-0"
                     >
                       <ThreadSidebar />
                     </div>
-                    <ResizeHandle onDrag={handleLeftResize} />
+                    <ResizeHandle
+                      onDrag={leftResize.preview}
+                      onDragEnd={leftResize.finish}
+                      onDragCancel={leftResize.cancel}
+                    />
                   </>
                 )}
                 <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">

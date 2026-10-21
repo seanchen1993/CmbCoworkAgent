@@ -30,6 +30,7 @@ import { validateFunctionNativeContent } from "../../../../shared/mods/v2/engine
 import { functionInlineLabel, functionInlineTree, functionNativeHint,
   functionNativeProps } from "../../lib/function-native-content"
 import { functionSitePresentationKey } from "../../lib/function-site-presentation"
+import { observeFunctionSiteGeometry, type FunctionSiteGeometry } from "../../lib/function-site-geometry"
 
 const DEFAULT_SITE_CLASS_NAME =
   "mx-auto w-full max-w-3xl overflow-auto text-xs text-muted-foreground"
@@ -226,10 +227,15 @@ function FunctionSiteSurface({
     presentationCache?.invalidateKey(presentationInput.current.key, false, presentationRow)
   }
   presentationInput.current = { inputKey, key: presentationKey }
-  const cachedPresentation = presentationCache?.read(presentationKey) ?? null
-  const [, setPresentationRevision] = useState(0)
+  const [presentationRevision, setPresentationRevision] = useState(0)
+  const cachedPresentation = useMemo(() => presentationCache?.read(presentationKey) ?? null,
+    [presentationCache, presentationKey, presentationRevision])
   const cachedSection = useRef<HTMLDivElement>(null)
   const [cachedGeometry, setCachedGeometry] = useState<{ presentation: object; width: number } | null>(null)
+  const measuredPresentation = useRef<{
+    frame: NonNullable<typeof frame>
+    geometry: FunctionSiteGeometry
+  } | null>(null)
   // A pending first read may finish for an earlier assistant prefix. Any intervening
   // replacement (including A -> B -> A) irreversibly ends that prefix lineage.
   const prefixLineage = useRef({ key: inputKey, epoch: 0 })
@@ -303,27 +309,35 @@ function FunctionSiteSurface({
     const node = cachedSection.current
     const presentation = cachedPresentation?.presentation
     if (!node || !presentation || snapshot) return
-    const measure = () => {
-      const width = node.getBoundingClientRect().width
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries.find(value => value.target === node)
+      if (!entry) return
+      const width = entry.borderBoxSize?.[0]?.inlineSize ?? entry.contentRect.width
       setCachedGeometry((previous) => previous?.presentation === presentation && previous.width === width
         ? previous : { presentation, width })
-    }
-    const observer = new ResizeObserver(measure)
+    })
     observer.observe(node)
-    measure()
     return () => observer.disconnect()
   }, [snapshot, cachedPresentation?.presentation])
+  useLayoutEffect(() => {
+    const node = section.current
+    if (!presentationCache || !node || !snapshot || !frame || !presentationKey) return
+    return observeFunctionSiteGeometry(node, geometry => {
+      if (frameRef.current === frame && frame.ticket.current() &&
+        frame.inputRevision === inputVersion.current.revision)
+        measuredPresentation.current = { frame, geometry }
+    })
+  }, [presentationCache, snapshot, frame, presentationKey])
   useLayoutEffect(() => () => {
-    // Measure and copy only when virtualization removes the row, never on every token.
-    // Layout cleanup still owns the DOM and precedes closing its drawing lifetime.
+    // Deletion interleaves DOM writes across rows. Never force layout here: use the last
+    // observation for this exact protected frame; a cold frame can retain its natural size.
     const current = frameRef.current
     const node = section.current
     if (!presentationCache || !current?.ticket.current() || !current.presentationCurrent ||
       current.owner !== ownerRef.current || current.inputRevision !== inputVersion.current.revision ||
       !canRetainRef.current || !node) return
-    const range = document.createRange()
-    range.selectNodeContents(node)
-    const bounds = range.getBoundingClientRect()
+    const measured = measuredPresentation.current
+    const bounds = measured?.frame === current ? measured.geometry : { height: 0, width: 0 }
     presentationCache.save(presentationKeyRef.current, component, current.snapshot,
       bounds.height, current.presentationCurrent, bounds.width)
   }, [presentationCache, component])
