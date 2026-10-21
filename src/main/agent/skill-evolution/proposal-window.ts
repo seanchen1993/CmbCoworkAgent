@@ -146,8 +146,7 @@ function loadActiveSkills(threadId: string): { skills: string[]; skillSource: st
     return { skills: [], skillSource: [] }
   }
   // Warm the cache without re-writing the row we just read.
-  threadActiveSkills.set(threadId, stored.skills)
-  threadActiveSkillSource.set(threadId, stored.skillSource)
+  rememberActiveSkills(threadId, stored.skills, stored.skillSource, false)
   return { skills: stored.skills, skillSource: stored.skillSource }
 }
 

@@ -31,6 +31,7 @@ import {
   getThreadActiveSkills,
   getThreadActiveSkillSource,
   mergeThreadActiveSkills,
+  resetSkillProposalWindow,
   setThreadActiveSkills
 } from "./proposal-window"
 
@@ -88,6 +89,25 @@ describe("sticky active skills survive losing the in-memory cache", () => {
   it("reports no skills for a thread that never used one", () => {
     expect(getThreadActiveSkills("thread-never-used")).toEqual([])
     expect(getThreadActiveSkillSource("thread-never-used")).toEqual([])
+  })
+
+  it("retains the parent's skills across overnight work, window resets and 300 child sets", () => {
+    const threadId = "overnight-parent"
+    const clock = vi.spyOn(Date, "now")
+    try {
+      const started = new Date("2026-10-20T21:14:00+08:00").getTime()
+      clock.mockReturnValue(started)
+      setThreadActiveSkills(threadId, ["autodev-code"], ["plugin:p/autodev-code"])
+      resetSkillProposalWindow(threadId)
+      clock.mockReturnValue(started + 12 * 60 * 60 * 1000)
+      for (let i = 0; i < 300; i += 1) {
+        setThreadActiveSkills(`overnight-child-${i}`, ["child-skill"], [], { persist: false })
+      }
+      expect(getThreadActiveSkills(threadId)).toEqual(["autodev-code"])
+      expect(getThreadActiveSkillSource(threadId)).toEqual(["plugin:p/autodev-code"])
+    } finally {
+      clock.mockRestore()
+    }
   })
 })
 
