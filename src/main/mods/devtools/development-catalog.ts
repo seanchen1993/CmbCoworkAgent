@@ -12,7 +12,7 @@ import { functionAuthoringDeclarations } from "./authoring-declarations"
 import { CREATOR_S1_SUPPORT } from "./creator-support"
 import { AUTHORING_TEMPLATE_KINDS } from "../../../shared/mods/authoring"
 
-export const DEVELOPMENT_COUNTER_EXAMPLE = `import type { Register } from "claude-code"
+export const DEVELOPMENT_COUNTER_EXAMPLE = `import type { Register } from "devclaw-mods"
 export const register: Register = (on) => {
   let calls = 0
   on("tool.call", async ($, event, next) => {

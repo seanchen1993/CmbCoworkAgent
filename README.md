@@ -19,7 +19,7 @@
 | MCP 扩展 | MCP 连接器管理、连通性测试、懒加载工具检索 |
 | 插件系统 | 插件安装（ZIP/目录）、启停、卸载；插件内 `skills` 与 `.mcp.json` 自动注册 |
 | Sparks 灵件 | 项目授权的可编程扩展、命令、工具、交互面板与完成检查规则；默认关闭，按版本摘要明确授权；见[官方说明](docs/sparks/README.md) |
-| Hook 系统 | 全局、工作区、插件、技能 Hook；支持 Claude Code hooks settings、`SKILL.md` frontmatter、`once`、`onBlock` 与强制修订/停止 |
+| Hook 系统 | 全局、工作区、插件、技能 Hook；支持按事件分组的嵌套配置、`SKILL.md` frontmatter、`once`、`onBlock` 与强制修订/停止 |
 | 自优化 | Trace 收集与回放、候选技能生成、审批后写回技能目录 |
 | 定时任务 | 按频率自动触发 Agent 执行（once/manual/hourly/daily/weekdays/weekly/interval） |
 | Heartbeat | 固定线程心跳巡检、`HEARTBEAT.md` 驱动、静默 ACK 过滤与通知 |
@@ -125,7 +125,6 @@ flowchart LR
 | `docs/chatx-unified-builtin-robot-v1-design.md` | ChatX 统一内置机器人 V1 架构、协议、安全与 clean-cut 改造方案 |
 | `docs/chatx-project-feature-binding-v1-design.md` | 统一机器人绑定 Project Mode Feature 的领域模型、运行链路与生命周期设计 |
 | `docs/chatx-unified-bot-collaboration-brief.md` | ChatX 方案的多智能体协作上下文、并行评审任务与交付模板 |
-| `docs/claude-code-push-commit-tech-reference.md` | Claude Code `commit/push` 技术方案分析与本项目落地参考 |
 
 ## 数据存储
 

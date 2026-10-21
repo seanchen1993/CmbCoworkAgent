@@ -3,7 +3,7 @@ import type { FunctionModelProtocol } from "../../../shared/mods/v2/model-protoc
 export const FUNCTION_AUTHORING_DECLARATIONS = String.raw`// CMB Mods authoring contract, desktop subset v2.
 // This is not the complete upstream SDK. No DOM, Node, arbitrary package imports or testing kit.
 // Supported authoring families: command, agent registry/spawn, clock, state, env, process, http, session identity, basic UI.
-declare module "claude-code" {
+declare namespace DevClawMods {
   export type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
   export type JsonObject = { [key: string]: Json }
   export interface EngineInterface {}
@@ -136,6 +136,8 @@ declare module "claude-code" {
   }
   export type Register<Owner extends string=string> = (on:On<Owner>,options:JsonObject)=>void
 }
+declare module "devclaw-mods" { export = DevClawMods }
+declare module "claude-code" { export = DevClawMods }
 interface AbortSignal {readonly aborted:boolean;readonly reason:unknown;throwIfAborted():void;
   addEventListener(type:"abort",listener:()=>void,options?:{once?:boolean}):void;removeEventListener(type:"abort",listener:()=>void):void}
 declare var AbortSignal:{prototype:AbortSignal;abort(reason?:unknown):AbortSignal;any(signals:AbortSignal[]):AbortSignal}

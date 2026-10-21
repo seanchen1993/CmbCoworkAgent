@@ -34,7 +34,7 @@ export function createAuthoringTemplate(input: {
   const start = `on("session.start", async ($, event, next) => { ${command}; return next(event) })`
   let source: string
   if (input.kind === "command" || input.kind === "flow-action") {
-    source = `import type { Register } from "claude-code"
+    source = `import type { Register } from "devclaw-mods"
 export const register: Register<${id}> = (on) => {
   ${start}
   on("command.run", { command: ${id} }, (_sdk, event) => {

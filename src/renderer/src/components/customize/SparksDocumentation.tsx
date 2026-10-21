@@ -16,6 +16,11 @@ import migration from "../../../../../docs/sparks/migration.md?raw"
 import cookbook from "../../../../../docs/sparks/plugin-cookbook.md?raw"
 import troubleshooting from "../../../../../docs/sparks/troubleshooting.md?raw"
 import reference from "../../../../../docs/sparks/reference.md?raw"
+import creatorPluginWorkflow from "../../../../../docs/sparks/creator-plugin-workflow.md?raw"
+import businessModAssembly from "../../../../../docs/sparks/business-mod-assembly.md?raw"
+import platformAuthoringLifecycle from "../../../../../docs/sparks/platform-authoring-lifecycle.md?raw"
+import stageDebugModExtension from "../../../../../docs/sparks/stage-debug-mod-extension.md?raw"
+import autobizCompositionExample from "../../../../../docs/sparks/autobiz-composition-example.md?raw"
 import { SparksDocumentationImage } from "./SparksDocumentationImage"
 
 const content: Record<SparksDocumentFile, string> = {
@@ -29,7 +34,12 @@ const content: Record<SparksDocumentFile, string> = {
   "migration.md": migration,
   "plugin-cookbook.md": cookbook,
   "troubleshooting.md": troubleshooting,
-  "reference.md": reference
+  "reference.md": reference,
+  "creator-plugin-workflow.md": creatorPluginWorkflow,
+  "business-mod-assembly.md": businessModAssembly,
+  "platform-authoring-lifecycle.md": platformAuthoringLifecycle,
+  "stage-debug-mod-extension.md": stageDebugModExtension,
+  "autobiz-composition-example.md": autobizCompositionExample
 }
 
 export default function SparksDocumentation({ onClose, initialFile = "README.md" }: {
@@ -69,7 +79,7 @@ export default function SparksDocumentation({ onClose, initialFile = "README.md"
       <DialogContent className="flex h-[min(88vh,900px)] w-[calc(100vw-2rem)] max-w-6xl flex-col gap-3 p-4 sm:p-6">
         <DialogHeader className="shrink-0 pr-7">
           <DialogTitle>DevClaw Sparks 官方说明</DialogTitle>
-          <DialogDescription>灵件的使用步骤、操作示例与开发参考。</DialogDescription>
+          <DialogDescription>灵件、插件与项目流程的使用步骤、操作示例和开发参考。</DialogDescription>
         </DialogHeader>
         <div className="flex min-h-0 flex-1 flex-col gap-4 md:flex-row">
           <nav aria-label="说明章节" className="shrink-0 md:w-48 md:overflow-y-auto">

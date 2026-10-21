@@ -69,6 +69,25 @@ afterEach(async () => {
 })
 
 describe("compiled claude-code state helpers in isolated guest", () => {
+  it("resolves platform and compatibility names to the same isolated helper instance", async () => {
+    const plugin = await compile(
+      "return {same:atom===compatibleAtom}",
+      'import {atom} from "devclaw-mods";import {atom as compatibleAtom} from "claude-code"'
+    )
+    const guest = await FunctionGuestRuntime.create(plugin.code)
+    try {
+      const result = await guest.invoke("0", {}, async () => { throw Error("No host calls") }, {
+        event: "command.run", origin: { plugin: "engine", tier: "core" }, capabilities: [],
+        plugin: { name: plugin.name, root: plugin.root }
+      })
+      expect(result.value).toMatchObject({ same: true })
+    } finally {
+      guest.dispose()
+    }
+    await expect(compile('return import("devclaw-mods")')).rejects.toThrow("MODS_IMPORT_DENIED")
+    await expect(compile("return 1", 'import {atom} from "devclaw-mods/extra";atom()'))
+      .rejects.toThrow("MODS_IMPORT_DENIED")
+  })
   it("copies refs, freezes nested initial and preserves null versus absence", async () => {
     const { result } = await run(`
       const ref={plugin:"state-library",key:"count"};

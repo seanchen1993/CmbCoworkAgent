@@ -9,7 +9,7 @@ export function createStateExtensionTemplate(input: {
   const id = JSON.stringify(input.id)
   const title = JSON.stringify(input.name)
   const instruction = JSON.stringify(input.instruction)
-  const source = `import type { Register, JsonObject } from "claude-code"
+  const source = `import type { Register, JsonObject } from "devclaw-mods"
 // Replace only after reviewing the original graph, Hooks, configuration, knowledge and writer.
 const policy: { confirmed: boolean; transitions: Array<{ from: string; event: string; to: string; requiredChecks: string[] }> } = { confirmed: false, transitions: [] }
 function decide(input: JsonObject): JsonObject {

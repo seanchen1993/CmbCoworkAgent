@@ -29,6 +29,13 @@ async function main() {
       </div>);`
     },
     bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic",
+    plugins: [{ name: "external-reference-failure-fixture", setup(builder) {
+      builder.onLoad({ filter: /[\\/]docs[\\/]sparks[\\/]reference\.md$/ }, (args) => ({
+        contents: readFileSync(args.path, "utf8") +
+          "\n[测试外部参考](https://example.invalid/documentation-reference)\n",
+        loader: "text"
+      }))
+    } }],
     alias: { "@": resolve("src/renderer/src") }, loader: { ".md": "text", ".png": "dataurl" },
     define: { "process.env.NODE_ENV": '"production"' }
   })
@@ -45,9 +52,9 @@ async function main() {
     if (css) await page.addStyleTag({ path: join(assets, css) })
     await page.getByRole("link", { name: /官方说明/ }).click()
     await page.getByRole("dialog", { name: "DevClaw Sparks 官方说明" }).waitFor()
-    assert.equal(await page.getByRole("navigation", { name: "说明章节" }).getByRole("button").count(), 11)
+    assert.equal(await page.getByRole("navigation", { name: "说明章节" }).getByRole("button").count(), 16)
     assert.deepEqual(await page.evaluate("window.calls"), [])
-    checks.push("All eleven bundled chapters open without network or business IPC")
+    checks.push("All sixteen bundled chapters open without network or business IPC")
     const overview = await page.getByRole("article").innerText()
     assert.match(overview, /聊天中的唯一输入框/)
     assert.match(overview, /普通模式/)
@@ -98,6 +105,26 @@ async function main() {
     await page.getByRole("heading", { name: "只写技能和节点，制作自己的项目插件", exact: true }).waitFor()
     await page.getByRole("article").getByRole("link", { name: "返回概览", exact: true }).click()
     checks.push("Project platform and authoring chapters are linked offline with honest version and recovery boundaries")
+    const addedChapters = [
+      ["插件创造与使用", "插件创造、转换、组合与使用说明"],
+      ["业务 Mods 组装", "业务 Mods 组装与执行适配"],
+      ["试用与版本恢复", "制作、真实试用与版本恢复"],
+      ["阶段调试扩展", "第三方阶段调试 Mod 接入协议"],
+      ["AutoBiz 组合示例", "AutoBiz 项目组合示例"]
+    ]
+    for (const [chapter, heading] of addedChapters) {
+      await page.getByRole("navigation").getByRole("button", { name: chapter, exact: true }).click()
+      await page.getByRole("article").getByRole("heading", { name: heading, exact: true }).waitFor()
+      assert.equal(await page.locator('button[aria-current="page"]').textContent(), chapter)
+    }
+    await page.getByRole("navigation").getByRole("button", { name: "概览", exact: true }).click()
+    await page.getByRole("article").getByRole("link", { name: "业务 Mods 组装与执行适配", exact: true }).click()
+    await page.getByRole("article").getByRole("heading", { name: "业务 Mods 组装与执行适配", exact: true }).waitFor()
+    await page.getByRole("navigation").getByRole("button", { name: "概览", exact: true }).click()
+    await page.getByRole("article").getByRole("link", { name: "插件制作、试用、验收与保存", exact: true }).click()
+    await page.getByRole("article").getByRole("heading", { name: "插件创造、转换、组合与使用说明", exact: true }).waitFor()
+    await page.getByRole("navigation").getByRole("button", { name: "概览", exact: true }).click()
+    checks.push("Five complete creator, assembly, lifecycle, recovery and AutoBiz guides are reachable through real bundled chapter entries and overview links")
     await page.getByRole("article").getByRole("link", { name: "查看完整操作示例", exact: true }).click()
     await page.getByRole("heading", { name: "从已有插件创建与组合", exact: true }).waitFor()
     assert.equal(await page.getByRole("article").locator("pre").count(), 3)
@@ -124,9 +151,9 @@ async function main() {
     await page.getByRole("navigation").getByRole("button", { name: "开发参考", exact: true }).click()
     assert.equal(await page.getByRole("article").locator('a[href*="src/main"]').count(), 0)
     await page.evaluate("window.failExternal=true")
-    await page.getByRole("article").getByRole("link", { name: "创建", exact: true }).click()
+    await page.getByRole("article").getByRole("link", { name: "测试外部参考", exact: true }).click()
     await page.getByRole("alert").waitFor()
-    assert.deepEqual(await page.evaluate("window.calls"), ["https://code.claude.com/docs/zh-CN/plugins/mods/create"])
+    assert.deepEqual(await page.evaluate("window.calls"), ["https://example.invalid/documentation-reference"])
     assert.equal(await page.getByRole("dialog").isVisible(), true)
     checks.push("Repository paths cannot navigate the app; external failures preserve offline reading")
     await page.getByRole("navigation").getByRole("button", { name: "安装与复用", exact: true }).click()
@@ -156,6 +183,7 @@ async function main() {
     for (const chapter of chapters) {
       await page.getByRole("navigation").getByRole("button", { name: chapter, exact: true }).click()
       const article = page.getByRole("article")
+      assert.doesNotMatch(await article.innerText(), /claude[\s-]*code/iu, chapter)
       assert.equal(await article.getByRole("img", { name: /图片无法显示/ }).count(), 0, chapter)
       for (const image of await article.locator("img").all()) {
         await image.scrollIntoViewIfNeeded()

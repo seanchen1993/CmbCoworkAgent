@@ -292,7 +292,8 @@ export async function compileFunctionPlugin(
               loader: "js"
             }))
             builder.onResolve({ filter: /.*/ }, (args) => {
-              if (args.path === "claude-code" && args.kind === "import-statement")
+              if ((args.path === "devclaw-mods" || args.path === "claude-code") &&
+                args.kind === "import-statement")
                 return { path: "claude-code", namespace: "function-state-library" }
               if (args.kind !== "import-statement" || !args.path.startsWith("."))
                 throw Error("MODS_IMPORT_DENIED")

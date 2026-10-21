@@ -9,7 +9,12 @@ export const SPARKS_DOCUMENTS = [
   { file: "migration.md", title: "适配已有插件" },
   { file: "plugin-cookbook.md", title: "插件开发入门" },
   { file: "troubleshooting.md", title: "排障与限制" },
-  { file: "reference.md", title: "开发参考" }
+  { file: "reference.md", title: "开发参考" },
+  { file: "creator-plugin-workflow.md", title: "插件创造与使用" },
+  { file: "business-mod-assembly.md", title: "业务 Mods 组装" },
+  { file: "platform-authoring-lifecycle.md", title: "试用与版本恢复" },
+  { file: "stage-debug-mod-extension.md", title: "阶段调试扩展" },
+  { file: "autobiz-composition-example.md", title: "AutoBiz 组合示例" }
 ] as const
 
 export type SparksDocumentFile = (typeof SPARKS_DOCUMENTS)[number]["file"]

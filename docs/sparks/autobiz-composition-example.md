@@ -4,7 +4,7 @@
 
 ## 安装两份插件
 
-打开 DevClaw 的 **自定义助手**，在“我已添加”区域点 **上传插件（ZIP）**，依次选择：
+打开 **自定义设置 → 基础功能 → 灵件与使用设置 → 我已添加**，点 **上传插件（ZIP）**，依次选择：
 
 1. `autobiz-project-composition-demo.zip`：AutoBiz 完整流程示例。
 2. `project-docs-composition-demo.zip`：基于 `project-docs-lite` 0.2.0 的文档编写与审核示例。

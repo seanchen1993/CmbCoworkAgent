@@ -27,7 +27,7 @@ export async function checkFunctionAuthorTypes(directory: string) {
   }
   const canonical = (file: string) =>
     process.platform === "win32" ? resolve(file).toLowerCase() : resolve(file)
-  const sdkPath = resolve(compiled.root, ".__cmb_authoring__/claude-code.d.ts")
+  const sdkPath = resolve(compiled.root, ".__cmb_authoring__/devclaw-mods.d.ts")
   const sources = new Map(
     Object.entries(compiled.authoringSources!).map(([name, text]) => [
       canonical(resolve(compiled.root, name)),
@@ -85,7 +85,7 @@ export async function checkFunctionAuthorTypes(directory: string) {
     getDirectories: () => [],
     resolveModuleNames: (names, containing) =>
       names.map((name) => {
-        if (name === "claude-code")
+        if (name === "devclaw-mods" || name === "claude-code")
           return { resolvedFileName: sdkPath, extension: ts.Extension.Dts }
         if (!name.startsWith(".")) return undefined
         const requested = resolve(dirname(containing), name),

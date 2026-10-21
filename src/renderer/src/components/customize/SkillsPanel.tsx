@@ -810,7 +810,7 @@ const SKILL_HOOK_JSON_EXAMPLE = `[
   }
 ]`
 
-// Claude Code 嵌套格式：按事件名分组，每组多个 matcher，每个 matcher 又可挂多个 hook。
+// 按事件分组的嵌套格式：按事件名分组，每组多个 matcher，每个 matcher 又可挂多个 hook。
 // timeout 单位是秒（运行时自动 ×1000 转毫秒）。
 const SKILL_HOOK_CC_EXAMPLE = `{
   "PreToolUse": [
@@ -1165,7 +1165,7 @@ function SkillsGuide(): React.JSX.Element {
 
             <SkillGuideSubSection
               title="最小配置示例"
-              summary="支持 SKILL.md frontmatter、扁平数组和 Claude Code 嵌套格式；运行时自动识别。"
+              summary="支持 SKILL.md frontmatter、扁平数组和按事件分组的嵌套格式；运行时自动识别。"
             >
               <div className="space-y-3 text-sm text-muted-foreground">
                 <p className="font-medium text-foreground/85">
@@ -1177,7 +1177,7 @@ function SkillsGuide(): React.JSX.Element {
                 <p>
                   frontmatter 使用 YAML，字段无需加引号；内部
                   <code className="mx-1 font-mono text-foreground/85">hooks</code>
-                  结构与 Claude Code hooks settings 一致，并支持
+                  结构与按事件分组的嵌套配置一致，并支持
                   <code className="mx-1 font-mono text-foreground/85">once</code>、
                   <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>、
                   <code className="mx-1 font-mono text-foreground/85">timeoutMs</code>、
@@ -1198,7 +1198,7 @@ function SkillsGuide(): React.JSX.Element {
                   <code>{SKILL_HOOK_JSON_EXAMPLE}</code>
                 </pre>
                 <p className="font-medium text-foreground/85">
-                  Claude Code 嵌套格式（兼容 CC 写法）
+                  按事件分组的嵌套格式
                 </p>
                 <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
                   <code>{SKILL_HOOK_CC_EXAMPLE}</code>
@@ -1238,7 +1238,7 @@ function SkillsGuide(): React.JSX.Element {
                   <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
                   通常相同；要访问用户当前工作区，请优先读取
                   <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>
-                  ；兼容 Claude Code 写法时也可以读取
+                  ；兼容已有脚本时也可以读取
                   <code className="mx-1 font-mono text-foreground/85">CLAUDE_PROJECT_DIR</code>。
                 </p>
                 <div className="space-y-1">

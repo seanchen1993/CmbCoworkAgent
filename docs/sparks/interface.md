@@ -29,7 +29,7 @@
 [创建教程](create.md)的结构。
 
 ```ts
-import type { Register } from "claude-code"
+import type { Register } from "devclaw-mods"
 
 export const register: Register = (on) => {
   let clicks = 0

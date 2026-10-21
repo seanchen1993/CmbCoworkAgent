@@ -73,7 +73,8 @@ export async function readFunctionAuthorTypes(
     )
       throw Error("MODS_TYPES_CLOSED_CONTRACT")
     if (ts.isModuleDeclaration(item)) {
-      if (!ts.isStringLiteral(item.name) || item.name.text !== "claude-code")
+      if (!ts.isStringLiteral(item.name) ||
+        (item.name.text !== "devclaw-mods" && item.name.text !== "claude-code"))
         throw Error("MODS_TYPES_MODULE")
       if (item.body && ts.isModuleBlock(item.body))
         for (const declaration of item.body.statements) {

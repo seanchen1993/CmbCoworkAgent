@@ -156,13 +156,13 @@ const EVENT_BADGE: Record<
     label: "权限申请",
     className: "bg-yellow-500/15 text-yellow-600 dark:text-yellow-400",
     english: "PermissionRequest",
-    tip: "Agent 申请执行权限时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
+    tip: "Agent 申请执行权限时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / 嵌套配置导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   PermissionDenied: {
     label: "权限拒绝",
     className: "bg-red-500/15 text-red-600 dark:text-red-400",
     english: "PermissionDenied",
-    tip: "权限申请被拒绝时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
+    tip: "权限申请被拒绝时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / 嵌套配置导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   Setup: {
     label: "初始化",
@@ -174,13 +174,13 @@ const EVENT_BADGE: Record<
     label: "目录变更",
     className: "bg-lime-500/15 text-lime-600 dark:text-lime-400",
     english: "CwdChanged",
-    tip: "工作目录变更时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
+    tip: "工作目录变更时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / 嵌套配置导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   FileChanged: {
     label: "文件变更",
     className: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
     english: "FileChanged",
-    tip: "工作区文件变更时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
+    tip: "工作区文件变更时触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / 嵌套配置导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   }
 }
 
@@ -259,7 +259,7 @@ const HOOK_CONFIG_EXTENSION_FIELDS: Array<{ key: string; description: string }> 
   {
     key: "once",
     description:
-      "兼容 Claude Code 的一次性执行开关。设为 true 后，同一会话里同一条 Hook 第一次成功执行（exit=0）后不再重复执行；不同事件、来源或 Hook ID 分别计算。脚本失败 / 超时（exit≠0）不会标记为已执行，下次匹配时仍会再试。会话结束（线程删除或应用退出）会清除已执行状态；编辑、禁用再启用、删除该 Hook 也会立即清除。注意：在 SubagentStop / Notification / SessionStart / SessionEnd 等 fire-and-forget 事件下，并发触发可能仍执行多次，如需严格只跑一次请使用 PreToolUse / PostToolUse / Stop 等同步事件。"
+      "一次性执行开关。设为 true 后，同一会话里同一条 Hook 第一次成功执行（exit=0）后不再重复执行；不同事件、来源或 Hook ID 分别计算。脚本失败 / 超时（exit≠0）不会标记为已执行，下次匹配时仍会再试。会话结束（线程删除或应用退出）会清除已执行状态；编辑、禁用再启用、删除该 Hook 也会立即清除。注意：在 SubagentStop / Notification / SessionStart / SessionEnd 等 fire-and-forget 事件下，并发触发可能仍执行多次，如需严格只跑一次请使用 PreToolUse / PostToolUse / Stop 等同步事件。"
   },
   {
     key: "persistAfterInterrupt",
@@ -274,22 +274,22 @@ const HOOK_CONFIG_EXTENSION_FIELDS: Array<{ key: string; description: string }> 
   {
     key: "timeout",
     description:
-      "超时时间。扁平数组 / 单对象格式按毫秒解释；Claude Code hooks settings 格式按秒解释。"
+      "超时时间。扁平数组 / 单对象格式按毫秒解释；按事件分组的嵌套配置按秒解释。"
   },
   {
     key: "timeoutMs",
     description:
-      "CMB 扩展字段，始终按毫秒解释；在 Claude Code hooks settings / SKILL.md frontmatter 中优先级高于 timeout。"
+      "CMB 扩展字段，始终按毫秒解释；在按事件分组的嵌套配置 / SKILL.md frontmatter 中优先级高于 timeout。"
   },
   {
     key: "id",
     description:
-      "可选稳定 ID；在 Claude Code 多 Hook 格式里建议填写，方便一次性执行、日志和后续定位保持稳定。"
+      "可选稳定 ID；在多 Hook 嵌套格式里建议填写，方便一次性执行、日志和后续定位保持稳定。"
   },
   {
     key: "model / modelId",
     description:
-      "自然语言策略 Hook 的判决模型。兼容 Claude Code 的 model，也支持 CMB 原生 modelId。"
+      "自然语言策略 Hook 的判决模型。支持 model 字段和原生 modelId 字段。"
   }
 ]
 
@@ -1977,12 +1977,12 @@ function HooksGuide(): React.JSX.Element {
 
           <GuideSubSection
             title="支持格式"
-            summary="扁平数组（推荐）、Claude Code hooks settings、带 hooks 包裹层，以及 SKILL.md frontmatter 都支持。"
+            summary="扁平数组（推荐）、按事件分组的嵌套配置、带 hooks 包裹层，以及 SKILL.md frontmatter 都支持。"
           >
             <div className="space-y-2 text-sm text-muted-foreground">
               <p>推荐用扁平数组格式（顶层是数组），可以在一个文件里放多条规则，结构最直观。</p>
               <p>
-                也支持 Claude Code 风格的
+                也支持按事件分组的嵌套格式
                 <code className="mx-1 font-mono text-foreground/85">{`{ EventName: [...] }`}</code>
                 ，以及带
                 <code className="mx-1 font-mono text-foreground/85">hooks</code>
@@ -1991,7 +1991,7 @@ function HooksGuide(): React.JSX.Element {
                 形式。
               </p>
               <p>
-                SKILL.md frontmatter 的 hooks 字段使用 YAML，内部结构与 Claude Code hooks settings
+                SKILL.md frontmatter 的 hooks 字段使用 YAML，内部结构与按事件分组的嵌套配置
                 一致，并额外支持
                 <code className="mx-1 font-mono text-foreground/85">once</code>、
                 <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>、
@@ -2027,7 +2027,7 @@ function HooksGuide(): React.JSX.Element {
           </GuideSubSection>
 
           <GuideSubSection
-            title="最小示例：Claude Code 多 Hook 格式"
+            title="最小示例：多 Hook 嵌套格式"
             summary="timeout 单位是秒，运行时自动转成毫秒。"
           >
             <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
@@ -2125,12 +2125,12 @@ function HooksGuide(): React.JSX.Element {
 
           <GuideSubSection
             title="当前支持的文件格式"
-            summary="工作区目前支持单对象格式，以及 Claude Code 风格的 hooks settings / plugin wrapper。"
+            summary="工作区目前支持单对象格式，以及按事件分组的嵌套配置或插件包裹格式。"
           >
             <div className="space-y-2 text-sm text-muted-foreground">
               <p>单文件单 Hook：顶层就是一个对象，适合项目里快速挂一条规则。</p>
               <p>
-                Claude Code 风格多 Hook：顶层是
+                按事件分组的多 Hook 配置：顶层是
                 <code className="mx-1 font-mono text-foreground/85">{`{ EventName: [...] }`}</code>
                 的 hooks settings。
               </p>
@@ -2155,7 +2155,7 @@ function HooksGuide(): React.JSX.Element {
           </GuideSubSection>
 
           <GuideSubSection
-            title="最小示例：Claude Code 多 Hook"
+            title="最小示例：多 Hook 嵌套配置"
             summary="适合一份文件里放多条规则；这里的 timeout 单位是秒，运行时会自动转成毫秒。"
           >
             <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
@@ -2189,7 +2189,7 @@ function HooksGuide(): React.JSX.Element {
                 <code className="mx-1 font-mono text-foreground/85">timeoutMs</code>、
                 <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>和
                 <code className="mx-1 font-mono text-foreground/85">forcedReason</code>；如果使用
-                Claude Code 多 Hook 格式，
+                多 Hook 嵌套格式，
                 <code className="mx-1 font-mono text-foreground/85">timeout</code>
                 按秒解释。
               </p>

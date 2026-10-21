@@ -53,6 +53,29 @@ it("checks the shipped typed-counter starter without a generated editor declarat
   expect(result.diagnostics).toEqual([])
 })
 
+it.each([
+  ["devclaw-mods", "devclaw-mods"],
+  ["devclaw-mods", "claude-code"],
+  ["claude-code", "devclaw-mods"]
+])("shares declared nouns and owner state across %s imports and %s contracts", async (sdk, module) => {
+  const source = `import type {Register} from "${sdk}";
+    export const register:Register<"author">=on=>{on("command.run",async $=>{
+      const text=await $.helper.ping();
+      const old=await $.state.get({plugin:"author",key:"count"});
+      await $.state.set({plugin:"author",key:"count"},(old.value??0)+1);
+      return {text};
+    })}`
+  const root = await fixture(source, contract.replace('"claude-code"', JSON.stringify(module)))
+  expect((await checkFunctionAuthorTypes(root)).diagnostics).toEqual([])
+  expect((await compileFunctionPlugin(root)).authorTypes).toMatchObject({
+    nouns: ["helper"], state: { author: ["count"] }
+  })
+  await writeFile(join(root, "hooks/register.ts"), source.replace("(old.value??0)+1", '"wrong"'))
+  const invalid = await checkFunctionAuthorTypes(root)
+  expect(invalid.valid).toBe(false)
+  expect(invalid.diagnostics.some((entry) => entry.message.includes("number"))).toBe(true)
+})
+
 it("reports a missing startup return at its source line and accepts the continuation", async () => {
   const source = [
     'import type { Register } from "claude-code"',

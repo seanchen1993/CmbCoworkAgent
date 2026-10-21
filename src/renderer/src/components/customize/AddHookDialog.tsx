@@ -664,7 +664,7 @@ exit 0
     outputNotes: [
       "非阻塞 stdout / stderr / additionalContext / systemMessage 只保留在 Hook 执行记录里，不会注入模型上下文，也不会触发修订。",
       "如需让 Agent 重新审视本轮结果，返回 `decision=block` 与 `reason`，会进入修订流程；blocking 的 `additionalContext` / `systemMessage` 会进入修订提示。",
-      "如需直接终止本轮（不修订、不报错），返回 `continue=false` 与 `stopReason`；优先级高于 `decision=block`，对齐 Claude Code 的 preventContinuation 语义。",
+      "如需直接终止本轮（不修订、不报错），返回 `continue=false` 与 `stopReason`；优先级高于 `decision=block`。",
       "PostSkillUse 的修订次数与 Stop Hook 分开计算，避免技能后检查抢占最终 Stop 验收额度。",
       "如果用户中止本轮或运行异常导致未进入结束阶段，pending 的 PostSkillUse 不会补跑。"
     ],
@@ -969,7 +969,7 @@ exit 0
       "当前事件适合做任务验收和结果复查，发现质量问题时可以要求 Agent 返工，或直接终止本轮。",
     outputNotes: [
       "返回 `decision=block` 或 `exit=2` → 触发修订流程，把 `reason` 与 `additionalContext` 喂回 Agent 让它重做（受最大修订次数限制）。",
-      "返回 `continue=false` 与 `stopReason` → 直接终止本轮，不修订、不报错；优先级高于 `decision=block`，对齐 Claude Code 的 preventContinuation 语义。",
+      "返回 `continue=false` 与 `stopReason` → 直接终止本轮，不修订、不报错；优先级高于 `decision=block`。",
       "`additionalContext` 仅在 block 路径生效，会一起带进修订提示；halt 路径不会注入下一轮。"
     ],
     outputExample: `# 要求 Agent 修订后再结束（默认）
@@ -1397,7 +1397,7 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
     },
     {
       key: "CLAUDE_PROJECT_DIR",
-      description: "WORKSPACE_PATH 的兼容别名，方便直接复用 Claude Code 社区脚本。"
+      description: "WORKSPACE_PATH 的兼容别名，供使用该变量名的现有脚本读取当前项目目录。"
     },
     {
       key: "HOOK_SOURCE_TYPE",
@@ -2131,7 +2131,7 @@ export function AddHookDialog(props: {
               </div>
               <p className="text-xs text-muted-foreground">
                 {hookType === "command"
-                  ? "执行 Shell 命令，exit=2 时阻断；exit=0 可返回 Claude Code JSON 输出"
+                  ? "执行 Shell 命令，exit=2 时阻断；exit=0 可返回结构化 JSON 结果"
                   : hookType === "http"
                     ? "POST 事件 JSON 到你配置的 URL；响应解析等同 command stdout。无 SSRF 防护，URL 自负风险"
                     : "用自然语言描述合规规则，由行内 LLM 实时判决是否允许执行"}
@@ -2687,9 +2687,9 @@ export function AddHookDialog(props: {
                     本会话成功执行一次后跳过
                   </label>
                   <p className="text-xs text-muted-foreground">
-                    兼容 Claude Code 的
+                    设置
                     <code className="mx-1 font-mono text-foreground/85">once: true</code>
-                    。同一会话里，同一条 Hook
+                    后，同一会话里，同一条 Hook
                     第一次成功执行（exit=0）后不再重复执行；不同事件、来源或 Hook ID
                     分别计算。脚本失败或超时（exit≠0）不会标记为已执行，下次匹配时仍会再试。
                     会话结束、编辑、禁用再启用或删除该 Hook 都会立即清除"已执行"状态。

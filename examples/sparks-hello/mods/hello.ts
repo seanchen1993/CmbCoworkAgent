@@ -1,4 +1,4 @@
-import type { Register } from "claude-code"
+import type { Register } from "devclaw-mods"
 
 export const register: Register = (on) => {
   on("session.start", async ($, event, next) => {
