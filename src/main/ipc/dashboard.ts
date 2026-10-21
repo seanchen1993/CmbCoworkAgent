@@ -6405,8 +6405,8 @@ function assembleAdvancedFeatureCards(
           (m.imSendFailed > 0 ? `(异常 ${m.imSendFailed})` : ""),
         items: [
           { label: "收到", count: imInbound, tone: "neutral" },
-          { label: "已完成", count: m.imCompleted, tone: "good" },
-          { label: "回复", count: m.imReplied, tone: "neutral" },
+          { label: "处理完成", count: m.imCompleted, tone: "good" },
+          { label: "回复条数", count: m.imReplied, tone: "neutral" },
           { label: "主动推送", count: m.imPushed, tone: "good" },
           { label: "审批/提问", count: m.imCards, tone: "neutral" },
           // Covers both a send that failed outright and one the gateway never
