@@ -10,6 +10,9 @@ import type {
   KnowledgeWorkspaceSyncResult
 } from "../../shared/knowledge-base-types"
 import { resolve } from "node:path"
+import { stripVTControlCharacters } from "node:util"
+import { formatKnowledgeSyncError } from "./knowledge-sync-error"
+import { formatGmt8Timestamp } from "../../shared/gmt8-time"
 import { getLocalThreadRunLeases } from "../agent/thread-run-lease"
 import { getThreadCore } from "../db"
 import { getUserInfo } from "../storage"
@@ -38,6 +41,7 @@ let refreshing = false
 let syncingId: string | null = null
 let syncingRole: KnowledgeWorkspaceRole | null = null
 let queryError: string | null = null
+const previewRevisions = new Map<string, number>()
 
 function pathKey(path: string): string {
   const normalized = resolve(path)
@@ -99,7 +103,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function errorMessage(error: unknown, item?: KnowledgeBaseStateItem): string {
   let message =
     error instanceof AggregateError
-      ? [error.message, ...error.errors.map((nested) => errorMessage(nested, item))].join("；")
+      ? errorMessage(error.errors[0], item)
       : error instanceof Error
         ? error.message
         : String(error)
@@ -107,7 +111,7 @@ function errorMessage(error: unknown, item?: KnowledgeBaseStateItem): string {
     if (source) message = message.split(source).join("<knowledge-repository>")
   }
   message = message.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+(?::[^\s/@]*)?@/gi, "$1<credentials>@")
-  return message.slice(0, 4_096)
+  return stripVTControlCharacters(message).slice(0, 4_096)
 }
 
 async function queryCloudKnowledgeBases(): Promise<ReturnType<typeof parseCloudKnowledgeItems>> {
@@ -218,7 +222,12 @@ async function syncWorkspace(
     }
   } catch (error) {
     const blocked = error instanceof KnowledgeRepositoryLocalChangesError
-    const message = errorMessage(error, item)
+    const message = blocked ? error.message : formatKnowledgeSyncError(error)
+    if (!blocked) {
+      console.warn(
+        `[knowledge_manage] ${item.idKey}/${role} 同步失败：${errorMessage(error, item)}`
+      )
+    }
     await updateWorkspace(item.idKey, {
       role,
       status: blocked ? "blocked" : "failed",
@@ -226,6 +235,9 @@ async function syncWorkspace(
     })
     return { role, status: blocked ? "paused" : "failed", message }
   } finally {
+    if (role === "read") {
+      previewRevisions.set(item.idKey, (previewRevisions.get(item.idKey) ?? 0) + 1)
+    }
     syncingRole = null
   }
 }
@@ -236,6 +248,14 @@ async function syncStateItem(item: KnowledgeBaseStateItem): Promise<KnowledgeBas
   const succeeded = workspaces.filter(
     (entry) => entry.status === "downloaded" || entry.status === "up_to_date"
   )
+  if (succeeded.length === 2) {
+    const state = await readKnowledgeState()
+    const current = state?.knowledgeBases.find((entry) => entry.idKey === item.idKey)
+    if (state && current) {
+      current.lastSuccessfulSyncAt = formatGmt8Timestamp()
+      await writeKnowledgeState(state)
+    }
+  }
   const allLatest = workspaces.every((entry) => entry.status === "up_to_date")
   const status =
     succeeded.length === 2
@@ -252,12 +272,17 @@ async function syncStateItem(item: KnowledgeBaseStateItem): Promise<KnowledgeBas
       ? allLatest
         ? "知识库已是最新"
         : "知识库更新成功"
-      : workspaces
-          .map(
+      : workspaces.every(
             (entry) =>
-              `${entry.role === "read" ? "读取内容" : "沉淀工作区"}${entry.status === "failed" ? "更新失败：" : entry.status === "paused" ? "暂停更新：" : ""}${entry.message}`
+              entry.status === workspaces[0].status && entry.message === workspaces[0].message
           )
-          .join("；")
+        ? `读取内容、沉淀工作区${status === "failed" ? "更新失败" : "暂停更新"}：${workspaces[0].message}`
+        : workspaces
+            .map(
+              (entry) =>
+                `${entry.role === "read" ? "读取内容" : "沉淀工作区"}${entry.status === "failed" ? "更新失败：" : entry.status === "paused" ? "暂停更新：" : ""}${entry.message}`
+            )
+            .join("；")
   return { idKey: item.idKey, status, message, workspaces }
 }
 
@@ -276,7 +301,13 @@ async function listFromState(state: KnowledgeBaseState | null): Promise<Knowledg
         }))
       )
       const read = workspaces.find((entry) => entry.role === "read")!
-      return { ...item, workspaces, localPath: read.localPath, localValid: read.localValid }
+      return {
+        ...item,
+        workspaces,
+        previewRevision: previewRevisions.get(item.idKey) ?? 0,
+        localPath: read.localPath,
+        localValid: read.localValid
+      }
     })
   )
   return {

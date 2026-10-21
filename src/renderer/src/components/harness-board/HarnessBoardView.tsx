@@ -88,6 +88,7 @@ import { ThreadGroupDeleteDialog } from "@/components/sidebar/ThreadGroupDeleteD
 import { KnowledgeBaseSelector } from "@/components/harness-board/KnowledgeBaseSelector"
 import { KnowledgeBaseSyncPanel } from "@/components/harness-board/KnowledgeBaseSyncPanel"
 import { useKnowledgeBases } from "@/components/harness-board/useKnowledgeBases"
+import { useKnowledgePreviews } from "@/components/harness-board/useKnowledgePreviews"
 import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
 import { ArtifactAccumulationButton } from "./ArtifactAccumulationButton"
 import { ManagedRunTimeline } from "@/components/harness-board/ManagedRunPanel"
@@ -150,7 +151,6 @@ import type {
   HarnessHookLogView,
   HarnessProjectCreateInput,
   HarnessProjectDetailViewModel,
-  HarnessKnowledgePreviewResult,
   HarnessProjectListItem,
   HarnessBoardCatalogPageResult,
   HarnessProjectMetadataUpdateInput,
@@ -3027,8 +3027,9 @@ function ProjectFormDialog({
             </section>
 
             <section className="rounded-md border border-border bg-muted/30 p-3">
-              <div className="mb-3 text-sm font-semibold">插件配置</div>
+              <div className="mb-3 text-sm font-semibold">项目开发配置</div>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                插件选择 *
                 <AdapterPicker
                   value={form.adapterId}
                   registry={registry}
@@ -3254,8 +3255,9 @@ function ProjectEditDialog({
             </section>
 
             <section className="rounded-md border border-border bg-muted/30 p-3">
-              <div className="mb-3 text-sm font-semibold">插件配置</div>
+              <div className="mb-3 text-sm font-semibold">项目开发配置</div>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                插件选择 *
                 <AdapterPicker
                   value={form.adapterId}
                   registry={registry}
@@ -8574,18 +8576,14 @@ export function HarnessBoardView({
     cleanIpcError
   )
   const [syncingKnowledgeBaseIds, setSyncingKnowledgeBaseIds] = useState<Set<string>>(new Set())
-  const [expandedKnowledgePreviewAdapterIds, setExpandedKnowledgePreviewAdapterIds] = useState<
-    Set<string>
-  >(new Set())
-  const [loadingKnowledgePreviewAdapterIds, setLoadingKnowledgePreviewAdapterIds] = useState<
-    Set<string>
-  >(new Set())
-  const [knowledgePreviewsByAdapterId, setKnowledgePreviewsByAdapterId] = useState<
-    Record<string, HarnessKnowledgePreviewResult>
-  >({})
-  const [selectedKnowledgePreviewPaths, setSelectedKnowledgePreviewPaths] = useState<
-    Record<string, string | null>
-  >({})
+  const {
+    expandedIds: expandedKnowledgePreviewAdapterIds,
+    loadingIds: loadingKnowledgePreviewAdapterIds,
+    previews: knowledgePreviewsByAdapterId,
+    selectedPaths: selectedKnowledgePreviewPaths,
+    setSelectedPaths: setSelectedKnowledgePreviewPaths,
+    toggle: handleToggleKnowledgeBasePreview
+  } = useKnowledgePreviews(projectModeTab === "constraint-sync", knowledgeBaseResult, cleanIpcError)
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
   const [updatingFeatureDeployUnits, setUpdatingFeatureDeployUnits] = useState(false)
   const [updatingPluginNames, setUpdatingPluginNames] = useState<Set<string>>(new Set())
@@ -9063,49 +9061,6 @@ export function HarnessBoardView({
     ]
   )
 
-  const loadKnowledgeBasePreview = useCallback(
-    async (idKey: string): Promise<void> => {
-      if (loadingKnowledgePreviewAdapterIds.has(idKey)) return
-      setLoadingKnowledgePreviewAdapterIds((current) => new Set(current).add(idKey))
-      try {
-        const preview = await window.api.harnessBoard.getKnowledgePreview(idKey)
-        if (boardMountedRef.current) {
-          setKnowledgePreviewsByAdapterId((current) => ({ ...current, [idKey]: preview }))
-        }
-      } catch (error) {
-        const message = cleanIpcError(error)
-        if (boardMountedRef.current && !/superseded|cancelled|aborted/i.test(message)) {
-          toast.error(message)
-        }
-      } finally {
-        if (boardMountedRef.current) {
-          setLoadingKnowledgePreviewAdapterIds((current) => {
-            const next = new Set(current)
-            next.delete(idKey)
-            return next
-          })
-        }
-      }
-    },
-    [loadingKnowledgePreviewAdapterIds]
-  )
-
-  const handleToggleKnowledgeBasePreview = useCallback(
-    (idKey: string): void => {
-      const expanded = expandedKnowledgePreviewAdapterIds.has(idKey)
-      setExpandedKnowledgePreviewAdapterIds((current) => {
-        const next = new Set(current)
-        if (expanded) next.delete(idKey)
-        else next.add(idKey)
-        return next
-      })
-      if (!expanded && !knowledgePreviewsByAdapterId[idKey]) {
-        void loadKnowledgeBasePreview(idKey)
-      }
-    },
-    [expandedKnowledgePreviewAdapterIds, knowledgePreviewsByAdapterId, loadKnowledgeBasePreview]
-  )
-
   const handleSyncKnowledgeBase = useCallback(
     async (idKey: string): Promise<void> => {
       if (syncingKnowledgeBaseIds.has(idKey)) return
@@ -9127,16 +9082,8 @@ export function HarnessBoardView({
         })
         await loadKnowledgeBases()
       }
-      if (expandedKnowledgePreviewAdapterIds.has(idKey)) {
-        void loadKnowledgeBasePreview(idKey)
-      }
     },
-    [
-      expandedKnowledgePreviewAdapterIds,
-      loadKnowledgeBasePreview,
-      loadKnowledgeBases,
-      syncingKnowledgeBaseIds
-    ]
+    [loadKnowledgeBases, syncingKnowledgeBaseIds]
   )
 
   const refreshFeaturePublicConstraints = useCallback(
@@ -12114,7 +12061,6 @@ export function HarnessBoardView({
                 onRefreshAll={() => loadKnowledgeBases(true)}
                 onSync={handleSyncKnowledgeBase}
                 onTogglePreview={handleToggleKnowledgeBasePreview}
-                onRefreshPreview={loadKnowledgeBasePreview}
                 onSelectPreviewPath={(idKey, path) =>
                   setSelectedKnowledgePreviewPaths((current) => ({ ...current, [idKey]: path }))
                 }

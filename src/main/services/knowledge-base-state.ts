@@ -13,6 +13,8 @@ export interface CloudKnowledgeBase {
   idKey: string
   name: string
   description: string
+  ownerId: string
+  ownerName: string
   repoUrl: string
   sshUrl: string | null
   gitRef: string
@@ -88,6 +90,8 @@ export function parseCloudKnowledgeItems(value: unknown): CloudKnowledgeBase[] {
       typeof raw.description !== "string" ||
       typeof raw.repoUrl !== "string" ||
       typeof raw.gitRef !== "string" ||
+      (raw.ownerId != null && typeof raw.ownerId !== "string") ||
+      (raw.ownerName != null && typeof raw.ownerName !== "string") ||
       (raw.sshUrl !== null && typeof raw.sshUrl !== "string")
     ) {
       throw new Error("知识库配置项字段类型无效")
@@ -97,7 +101,9 @@ export function parseCloudKnowledgeItems(value: unknown): CloudKnowledgeBase[] {
       raw.name !== raw.name.trim() ||
       raw.name.length > 128 ||
       raw.description.length > 300 ||
-      raw.gitRef.length > 255
+      raw.gitRef.length > 255 ||
+      (typeof raw.ownerId === "string" && raw.ownerId.length > 32) ||
+      (typeof raw.ownerName === "string" && raw.ownerName.length > 64)
     ) {
       throw new Error("知识库配置项字段无效")
     }
@@ -109,7 +115,16 @@ export function parseCloudKnowledgeItems(value: unknown): CloudKnowledgeBase[] {
     if (seen.has(idKey)) throw new Error(`知识库 idKey 重复：${idKey}`)
     knowledgeDirectory(idKey, "read")
     seen.add(idKey)
-    return { idKey, name, description, repoUrl, sshUrl, gitRef }
+    return {
+      idKey,
+      name,
+      description,
+      repoUrl,
+      sshUrl,
+      gitRef,
+      ownerId: typeof raw.ownerId === "string" ? raw.ownerId : "",
+      ownerName: typeof raw.ownerName === "string" ? raw.ownerName : ""
+    }
   })
 }
 
@@ -153,7 +168,10 @@ export async function readKnowledgeState(): Promise<KnowledgeBaseState | null> {
     if (
       !isRecord(raw) ||
       raw.type !== "public" ||
-      (raw.visibility !== "visible" && raw.visibility !== "unavailable")
+      (raw.visibility !== "visible" && raw.visibility !== "unavailable") ||
+      (raw.lastSuccessfulSyncAt !== undefined &&
+        (typeof raw.lastSuccessfulSyncAt !== "string" ||
+          !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw.lastSuccessfulSyncAt)))
     ) {
       throw new Error("知识库本地状态无效")
     }
@@ -161,6 +179,9 @@ export async function readKnowledgeState(): Promise<KnowledgeBaseState | null> {
       ...source,
       type: "public",
       visibility: raw.visibility,
+      ...(typeof raw.lastSuccessfulSyncAt === "string"
+        ? { lastSuccessfulSyncAt: raw.lastSuccessfulSyncAt }
+        : {}),
       workspaces: parseWorkspaces(raw.workspaces)
     }
   })
@@ -188,6 +209,7 @@ export function mergeCloudKnowledgeState(
       ...item,
       type: "public",
       visibility: "visible",
+      ...(old?.lastSuccessfulSyncAt ? { lastSuccessfulSyncAt: old.lastSuccessfulSyncAt } : {}),
       workspaces: KNOWLEDGE_WORKSPACE_ROLES.map((role) => {
         const workspace = old?.workspaces.find((entry) => entry.role === role)
         return workspace && !sourceChanged

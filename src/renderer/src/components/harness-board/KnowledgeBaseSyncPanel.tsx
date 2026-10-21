@@ -1,15 +1,35 @@
-import { ChevronDown, ChevronRight, FolderOpen, Loader2, RefreshCw } from "lucide-react"
+import { ChevronDown, ChevronRight, FolderOpen, Info, Loader2, RefreshCw } from "lucide-react"
 import type { HarnessKnowledgePreviewResult } from "../../../../shared/harness-board-types"
-import type { KnowledgeBaseListResult } from "../../../../shared/knowledge-base-types"
+import type {
+  KnowledgeBaseListItem,
+  KnowledgeBaseListResult
+} from "../../../../shared/knowledge-base-types"
 import { Button } from "@/components/ui/button"
+import { Badge, badgeVariants, type BadgeProps } from "@/components/ui/badge"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { KnowledgePreviewPanel } from "./KnowledgePreviewPanel"
 
-const STATUS_LABELS = {
-  not_downloaded: "未下载",
-  success: "已下载",
-  failed: "更新失败",
-  blocked: "暂停更新"
-} as const
+function knowledgeStatus(
+  item: KnowledgeBaseListItem,
+  syncing: boolean
+): { label: string; variant: BadgeProps["variant"] } {
+  const workspaces = item.workspaces
+  if (syncing || workspaces.some((workspace) => workspace.syncing))
+    return { label: "同步中", variant: "info" }
+  const hasDownloaded = workspaces.some(
+    (workspace) => workspace.status === "success" && workspace.localValid
+  )
+  if (workspaces.some((workspace) => workspace.status === "failed")) {
+    return { label: hasDownloaded ? "部分更新失败" : "更新失败", variant: "critical" }
+  }
+  if (workspaces.some((workspace) => workspace.status === "blocked" || workspace.inUse))
+    return { label: "暂停更新", variant: "warning" }
+  if (workspaces.every((workspace) => workspace.status === "success" && workspace.localValid))
+    return { label: "已下载", variant: "nominal" }
+  if (workspaces.some((workspace) => workspace.status === "success" && !workspace.localValid))
+    return { label: "目录不可用", variant: "critical" }
+  return { label: hasDownloaded ? "部分下载" : "未下载", variant: "outline" }
+}
 
 export function KnowledgeBaseSyncPanel({
   result,
@@ -22,7 +42,6 @@ export function KnowledgeBaseSyncPanel({
   onRefreshAll,
   onSync,
   onTogglePreview,
-  onRefreshPreview,
   onSelectPreviewPath,
   onOpenPath
 }: {
@@ -36,7 +55,6 @@ export function KnowledgeBaseSyncPanel({
   onRefreshAll: () => void | Promise<void>
   onSync: (idKey: string) => void | Promise<void>
   onTogglePreview: (idKey: string) => void
-  onRefreshPreview: (idKey: string) => void | Promise<void>
   onSelectPreviewPath: (idKey: string, path: string | null) => void
   onOpenPath: (path: string) => void
 }): React.JSX.Element {
@@ -44,15 +62,24 @@ export function KnowledgeBaseSyncPanel({
   return (
     <section className="rounded-md border border-border bg-background shadow-sm">
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <div>
+        <div className="flex items-center gap-1.5">
           <h2 className="text-sm font-semibold text-foreground">公共系统约束</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {result?.ready === false
-              ? result.queryError
-                ? "配置获取失败"
-                : "云端配置尚未就绪"
-              : `${items.length} 个知识库`}
-          </p>
+          <TooltipProvider delayDuration={150}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="知识库自动更新与可见范围说明"
+                  className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <Info className="size-3.5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="z-[70] max-w-72">
+                知识库将定时自动拉取，可见的知识库由你所在的组织管理。
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
         <Button
           variant="outline"
@@ -82,9 +109,19 @@ export function KnowledgeBaseSyncPanel({
           </div>
         ) : (
           items.map((item) => {
-            const syncing = syncingIds.has(item.idKey) || result?.syncingIds.includes(item.idKey)
+            const syncing =
+              syncingIds.has(item.idKey) || result?.syncingIds.includes(item.idKey) === true
             const expanded = expandedIds.has(item.idKey)
             const historical = item.visibility !== "visible"
+            const status = knowledgeStatus(item, syncing)
+            const owner = [item.ownerName, item.ownerId].filter((value) => value.trim()).join("/")
+            const commonError =
+              item.workspaces[0]?.lastError &&
+              item.workspaces.every(
+                (workspace) => workspace.lastError === item.workspaces[0].lastError
+              )
+                ? item.workspaces[0].lastError
+                : null
             return (
               <div
                 key={item.idKey}
@@ -97,28 +134,80 @@ export function KnowledgeBaseSyncPanel({
                     aria-expanded={expanded}
                     onClick={() => onTogglePreview(item.idKey)}
                   >
-                    <div className="truncate text-sm font-semibold text-foreground">
-                      {item.name}
+                    <div className="flex min-w-0 items-center gap-2 overflow-hidden">
+                      <span
+                        className="min-w-0 truncate text-sm font-semibold text-foreground"
+                        title={item.name}
+                      >
+                        {item.name}
+                      </span>
+                      <Badge
+                        variant="outline"
+                        className="max-w-32 shrink-0 font-normal normal-case tracking-normal text-muted-foreground"
+                        title={item.gitRef}
+                      >
+                        <span className="truncate">{item.gitRef}</span>
+                      </Badge>
+                      <Badge
+                        variant={status.variant}
+                        className="shrink-0 font-normal normal-case tracking-normal"
+                      >
+                        {status.label}
+                      </Badge>
+                      <Badge
+                        variant="outline"
+                        className="shrink-0 font-normal normal-case tracking-normal text-muted-foreground"
+                        title="最近成功更新时间（GMT+8）"
+                      >
+                        {item.lastSuccessfulSyncAt ?? "暂无成功更新"}
+                      </Badge>
+                      {owner && (
+                        <Badge
+                          variant="outline"
+                          className="max-w-48 shrink-0 font-normal normal-case tracking-normal text-muted-foreground"
+                          title={`维护人：${owner}`}
+                        >
+                          <span className="truncate">维护人：{owner}</span>
+                        </Badge>
+                      )}
+                      {historical && (
+                        <TooltipProvider delayDuration={150}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span
+                                className={badgeVariants({
+                                  variant: "outline",
+                                  className:
+                                    "shrink-0 font-normal normal-case tracking-normal text-muted-foreground"
+                                })}
+                              >
+                                已不再可用
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="z-[70] max-w-72">
+                              该知识库对您所在组织不再可用
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      )}
                     </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      {item.gitRef}
-                      {historical ? " · 当前不可见" : ""}
-                    </div>
-                    {item.workspaces.map((workspace) => (
-                      <div key={workspace.role} className="mt-1 text-xs text-muted-foreground">
-                        {workspace.role === "read" ? "读取内容" : "沉淀工作区"}：
-                        {workspace.syncing
-                          ? "同步中"
-                          : workspace.inUse
-                            ? "沉淀会话运行中，暂停更新"
-                            : !workspace.localValid && workspace.status === "success"
-                              ? "目录不可用"
-                              : STATUS_LABELS[workspace.status]}
-                        {workspace.lastError && (
-                          <span className="text-status-critical"> · {workspace.lastError}</span>
-                        )}
+                    {!commonError &&
+                      item.workspaces
+                        .filter((workspace) => workspace.lastError)
+                        .map((workspace) => (
+                          <div
+                            key={workspace.role}
+                            className="mt-1 break-words text-xs text-status-critical"
+                          >
+                            {workspace.role === "read" ? "读取内容" : "沉淀工作区"}：
+                            {workspace.lastError}
+                          </div>
+                        ))}
+                    {commonError && (
+                      <div className="mt-1 break-words text-xs text-status-critical">
+                        {commonError}
                       </div>
-                    ))}
+                    )}
                   </button>
                   <div className="flex shrink-0 items-center gap-2">
                     {item.localValid && (
@@ -162,7 +251,6 @@ export function KnowledgeBaseSyncPanel({
                     loading={loadingPreviewIds.has(item.idKey)}
                     selectedPath={selectedPreviewPaths[item.idKey] ?? null}
                     onSelectPath={(path) => onSelectPreviewPath(item.idKey, path)}
-                    onRefresh={() => onRefreshPreview(item.idKey)}
                   />
                 )}
               </div>

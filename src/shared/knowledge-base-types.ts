@@ -13,10 +13,13 @@ export interface KnowledgeBaseStateItem {
   type: "public"
   name: string
   description: string
+  ownerId: string
+  ownerName: string
   repoUrl: string
   sshUrl: string | null
   gitRef: string
   visibility: KnowledgeBaseVisibility
+  lastSuccessfulSyncAt?: string
   workspaces: KnowledgeWorkspaceState[]
 }
 
@@ -34,6 +37,8 @@ export interface KnowledgeWorkspaceListItem extends KnowledgeWorkspaceState {
 
 export interface KnowledgeBaseListItem extends KnowledgeBaseStateItem {
   workspaces: KnowledgeWorkspaceListItem[]
+  /** Runtime revision after read synchronization; never persisted in the state file. */
+  previewRevision: number
   /** Default preview always uses the read workspace. */
   localPath: string
   localValid: boolean

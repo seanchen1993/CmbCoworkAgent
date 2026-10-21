@@ -23,6 +23,8 @@ const cloud = (idKey: string) => ({
   idKey,
   name: idKey,
   description: "description",
+  ownerId: "",
+  ownerName: "",
   repoUrl: "https://example.com/repo.git",
   sshUrl: null,
   gitRef: "main"
@@ -119,5 +121,71 @@ describe("knowledge cloud state", () => {
         }
       ])[0].name
     ).toBe("知识库 A")
+  })
+})
+
+describe("knowledge library success time", () => {
+  it("retains the recorded time across cloud refresh, source changes, disappearance and recovery", async () => {
+    const initial = mergeCloudKnowledgeState(null, [cloud("one")])
+    initial.knowledgeBases[0].lastSuccessfulSyncAt = "2026-10-21 10:00:00"
+    await writeKnowledgeState(initial)
+    const stored = await readKnowledgeState()
+    for (const items of [[], [cloud("one")], [{ ...cloud("one"), gitRef: "release" }]]) {
+      const next = mergeCloudKnowledgeState(stored, items)
+      expect(next.knowledgeBases[0].lastSuccessfulSyncAt).toBe("2026-10-21 10:00:00")
+    }
+  })
+
+  it("does not invent a success time for a new library and rejects non-GMT+8 text formats", async () => {
+    const state = mergeCloudKnowledgeState(null, [cloud("one")])
+    expect(state.knowledgeBases[0].lastSuccessfulSyncAt).toBeUndefined()
+    state.knowledgeBases[0].lastSuccessfulSyncAt = "2026-10-21T02:00:00Z"
+    await writeKnowledgeState(state)
+    await expect(readKnowledgeState()).rejects.toThrow("本地状态无效")
+  })
+})
+
+describe("knowledge maintainers", () => {
+  it("persists cloud owner fields, refreshes them, and retains them for unavailable libraries", async () => {
+    const source = { ...cloud("one"), ownerName: "测试维护人", ownerId: "12345" }
+    const state = mergeCloudKnowledgeState(null, parseCloudKnowledgeItems([source]))
+    await writeKnowledgeState(state)
+    expect((await readKnowledgeState())!.knowledgeBases[0]).toMatchObject({
+      ownerName: "测试维护人",
+      ownerId: "12345"
+    })
+    const changed = mergeCloudKnowledgeState(state, [
+      { ...source, ownerName: "新维护人", ownerId: "67890" }
+    ])
+    expect(changed.knowledgeBases[0]).toMatchObject({ ownerName: "新维护人", ownerId: "67890" })
+    expect(mergeCloudKnowledgeState(changed, []).knowledgeBases[0]).toMatchObject({
+      visibility: "unavailable",
+      ownerName: "新维护人",
+      ownerId: "67890"
+    })
+  })
+
+  it("accepts absent maintainer fields as empty values", () => {
+    const source: Record<string, unknown> = { ...cloud("one") }
+    delete source.ownerId
+    delete source.ownerName
+    expect(parseCloudKnowledgeItems([source])[0]).toMatchObject({ ownerName: "", ownerId: "" })
+    expect(parseCloudKnowledgeItems([{ ...source, ownerName: "只有姓名" }])[0]).toMatchObject({
+      ownerName: "只有姓名",
+      ownerId: ""
+    })
+    expect(parseCloudKnowledgeItems([{ ...source, ownerId: "12345" }])[0]).toMatchObject({
+      ownerName: "",
+      ownerId: "12345"
+    })
+  })
+
+  it.each([
+    { ownerId: 42 },
+    { ownerName: {} },
+    { ownerId: "x".repeat(33) },
+    { ownerName: "x".repeat(65) }
+  ])("rejects invalid owner fields: %j", (invalid) => {
+    expect(() => parseCloudKnowledgeItems([{ ...cloud("one"), ...invalid }])).toThrow()
   })
 })

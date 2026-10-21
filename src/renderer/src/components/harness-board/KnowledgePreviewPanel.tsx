@@ -6,10 +6,8 @@ import {
   File,
   Folder,
   FolderOpen,
-  Loader2,
-  RefreshCw
+  Loader2
 } from "lucide-react"
-import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import type { HarnessKnowledgePreviewFile, HarnessKnowledgePreviewResult } from "@/types"
@@ -23,7 +21,6 @@ interface KnowledgePreviewPanelProps {
   loading: boolean
   selectedPath: string | null
   onSelectPath: (path: string | null) => void
-  onRefresh: () => void | Promise<void>
 }
 
 function normalizeTreePath(path: string): string {
@@ -104,8 +101,7 @@ export function KnowledgePreviewPanel({
   preview,
   loading,
   selectedPath,
-  onSelectPath,
-  onRefresh
+  onSelectPath
 }: KnowledgePreviewPanelProps): React.JSX.Element {
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set(["/"]))
   const skipNextAutoSelectRef = useRef(false)
@@ -210,27 +206,12 @@ export function KnowledgePreviewPanel({
     <div className="mt-3 overflow-hidden rounded-md border border-border bg-background">
       <div className="flex h-10 items-center justify-between border-b border-border px-3">
         <div className="min-w-0">
-          <div className="truncate text-xs font-medium text-foreground">系统约束预览</div>
           {preview?.path && (
             <div className="truncate text-[11px] text-muted-foreground" title={preview.path}>
               {preview.path}
             </div>
           )}
         </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          disabled={loading}
-          title="刷新系统约束预览"
-          onClick={() => void onRefresh()}
-        >
-          {loading ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
-            <RefreshCw className="size-3.5" />
-          )}
-        </Button>
       </div>
 
       {loading ? (

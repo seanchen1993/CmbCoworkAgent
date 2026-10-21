@@ -43,6 +43,8 @@ const item = {
   idKey: "kb-main",
   name: "Main knowledge",
   description: "",
+  ownerId: "",
+  ownerName: "",
   repoUrl: "https://git.example.test/main.git",
   sshUrl: null,
   gitRef: "main"
@@ -373,4 +375,100 @@ it("uses only the normal periodic refresh for failures", async () => {
   await vi.advanceTimersByTimeAsync(90 * 60_000)
   await vi.waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(2))
   await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
+})
+
+it("stores a single friendly description from the first underlying failure and deduplicates the toast", async () => {
+  await seed()
+  const first = new Error(
+    `Command failed: git clone ${item.repoUrl}\nremote: \u001b[31mIncorrect username or password (access token)\u001b[0m\nfatal: Authentication failed`
+  )
+  const second = new Error("Remote branch master1 not found in upstream origin")
+  mocks.syncKnowledgeRepository.mockRejectedValue(
+    new AggregateError([first, second], "知识库 HTTPS 克隆失败，SSH 兜底也失败")
+  )
+  const log = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+  const result = await syncKnowledgeBase(item.idKey)
+  const message = "仓库认证失败，请检查本机 Git 凭据是否有效，并确认账号具有仓库访问权限。"
+  expect(result).toMatchObject({
+    status: "failed",
+    message: `读取内容、沉淀工作区更新失败：${message}`
+  })
+  const saved = (await readKnowledgeState())!.knowledgeBases[0]
+  expect(saved.workspaces.map((workspace) => workspace.lastError)).toEqual([message, message])
+  expect(saved.lastSuccessfulSyncAt).toBeUndefined()
+  expect(log).toHaveBeenCalledTimes(2)
+  const logs = log.mock.calls.map((call) => call[0]).join("\n")
+  expect(logs).toContain("Authentication failed")
+  expect(logs).not.toContain(item.repoUrl)
+  expect(logs).not.toContain("master1")
+  expect(logs).not.toContain("\u001b")
+})
+
+it("keeps different workspace failure descriptions separate", async () => {
+  await seed()
+  mocks.syncKnowledgeRepository
+    .mockRejectedValueOnce(new Error("fatal: Authentication failed"))
+    .mockRejectedValueOnce(new Error("Remote branch main not found in upstream origin"))
+  vi.spyOn(console, "warn").mockImplementation(() => undefined)
+  const result = await syncKnowledgeBase(item.idKey)
+  expect(result.message).toContain("读取内容更新失败：仓库认证失败")
+  expect(result.message).toContain("沉淀工作区更新失败：配置的知识库分支不存在")
+})
+
+it("records one GMT+8 success time only when both workspaces succeed, including an up-to-date check", async () => {
+  await seed()
+  vi.useFakeTimers({ toFake: ["Date"] })
+  vi.setSystemTime(new Date("2026-10-21T02:03:04Z"))
+  await syncKnowledgeBase(item.idKey)
+  expect((await readKnowledgeState())!.knowledgeBases[0].lastSuccessfulSyncAt).toBe(
+    "2026-10-21 10:03:04"
+  )
+  vi.setSystemTime(new Date("2026-10-21T03:04:05Z"))
+  mocks.syncKnowledgeRepository.mockResolvedValue({ updated: false })
+  await expect(syncKnowledgeBase(item.idKey)).resolves.toMatchObject({ status: "up_to_date" })
+  const saved = JSON.parse(await readFile(knowledgeStatePath(), "utf8"))
+  expect(saved.knowledgeBases[0].lastSuccessfulSyncAt).toBe("2026-10-21 11:04:05")
+  expect(
+    saved.knowledgeBases[0].workspaces.every(
+      (workspace) => !Object.hasOwn(workspace, "lastSuccessfulSyncAt")
+    )
+  ).toBe(true)
+})
+
+it.each(["failure", "blocked"])(
+  "preserves the last full success time on a partial %s",
+  async (reason) => {
+    const state = await seed(true)
+    state.knowledgeBases[0].lastSuccessfulSyncAt = "2026-10-20 15:30:00"
+    await writeKnowledgeState(state)
+    mocks.syncKnowledgeRepository.mockRejectedValueOnce(
+      reason === "blocked"
+        ? new KnowledgeRepositoryLocalChangesError()
+        : new Error("Connection timed out")
+    )
+    vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    await expect(syncKnowledgeBase(item.idKey)).resolves.toMatchObject({ status: "partial" })
+    expect((await readKnowledgeState())!.knowledgeBases[0].lastSuccessfulSyncAt).toBe(
+      "2026-10-20 15:30:00"
+    )
+  }
+)
+
+it("signals preview refresh after read updates even when write fails, without refreshing on list polls", async () => {
+  await seed(true)
+  const before = (await listKnowledgeBases()).knowledgeBases[0].previewRevision
+  mocks.syncKnowledgeRepository.mockRejectedValueOnce(new Error("network failure"))
+  vi.spyOn(console, "warn").mockImplementation(() => undefined)
+  await syncKnowledgeBase(item.idKey)
+  const afterFailure = (await listKnowledgeBases()).knowledgeBases[0].previewRevision
+  expect(afterFailure).toBe(before + 1)
+  expect((await listKnowledgeBases()).knowledgeBases[0].previewRevision).toBe(afterFailure)
+  mocks.syncKnowledgeRepository
+    .mockResolvedValueOnce({ updated: false })
+    .mockRejectedValueOnce(new KnowledgeRepositoryLocalChangesError())
+  await syncKnowledgeBase(item.idKey)
+  expect((await listKnowledgeBases()).knowledgeBases[0].previewRevision).toBe(afterFailure + 1)
+  expect(
+    JSON.parse(await readFile(knowledgeStatePath(), "utf8")).knowledgeBases[0]
+  ).not.toHaveProperty("previewRevision")
 })
