@@ -42,12 +42,16 @@ import {
 import { builtinChangeReviewService } from "../mods/builtins/change-review"
 import { captureThreadIncarnation } from "../services/thread-incarnation"
 import { executeHostProjectSkill } from "./host-skill-executor"
-import { HostProjectService, type HostProjectServiceDependencies } from "./project-runtime/host-service"
+import {
+  HostProjectService,
+  type HostProjectServiceDependencies
+} from "./project-runtime/host-service"
 import { HostProjectStore } from "./project-runtime/host-store"
 import { HostPackageSnapshots } from "./project-runtime/package-snapshots"
 import { hostProjectFixture } from "./project-runtime/host-fixtures.test-helper"
 import { withProjectActionScope } from "./project-action-scope"
 import { resolveClawThread } from "../mods/claw-scope"
+import { configureStageRecoveryHookJournal } from "../hooks/stage-recovery-journal"
 
 const cleanup: Array<() => void> = []
 const owner = {
@@ -73,7 +77,11 @@ async function fixture(
     join(pluginRoot, "plugin.json"),
     '{"name":"docs","version":"1.0.0","skills":"skills"}'
   )
-  if (mcp) writeFileSync(join(pluginRoot,".mcp.json"),JSON.stringify({mcpServers:{local:{command:"node",args:[]}}}))
+  if (mcp)
+    writeFileSync(
+      join(pluginRoot, ".mcp.json"),
+      JSON.stringify({ mcpServers: { local: { command: "node", args: [] } } })
+    )
   for (const stage of manifest.stages) {
     mkdirSync(join(pluginRoot, "skills", stage.id), { recursive: true })
     writeFileSync(join(pluginRoot, stage.skill!), `---\nname: ${stage.id}\n---\nPinned Skill`)
@@ -107,7 +115,8 @@ async function fixture(
       enabled: true
     }),
     authorize: async () => {},
-    executeSkill: (context) => executeHostProjectSkill({...context, internalCompositionUnit: internal}, owner),
+    executeSkill: (context) =>
+      executeHostProjectSkill({ ...context, internalCompositionUnit: internal }, owner),
     ...dependencies
   })
   await service.localCreate({
@@ -129,6 +138,58 @@ afterEach(() => {
 })
 
 describe("original agent run bridge", () => {
+  it("retains a genuine agent terminal while an unresolved recovery Hook keeps the overall operation unknown", async () => {
+    const f = await fixture()
+    configureStageRecoveryHookJournal({
+      begin: () => {
+        throw Error("unused")
+      },
+      unresolved: () => true
+    })
+    registerAgentRunImplementation(async (_request, _delivery, context) => {
+      writeFileSync(join(f.workspace, "document.md"), "Actually settled model output")
+      context.onRunTerminated?.({ outcome: "success", code: "physical-agent-complete" })
+    })
+    const operation = f.service.prepare({
+      projectId: "local-docs",
+      expectedVersion: 1,
+      idempotencyKey: "separate-physical-agent-fact"
+    })
+    // The native wrapper, rather than model input, supplies the recovery policy.
+    const execute = f.service as unknown as { deps: HostProjectServiceDependencies }
+    const original = execute.deps.executeSkill
+    execute.deps.executeSkill = (context) =>
+      original({
+        ...context,
+        stageDebug: {
+          workspace: f.workspace,
+          baselineId: "native-baseline",
+          commandHooks: {
+            readOnlyRoots: [f.pluginRoot],
+            networkAccess: "explicitly-approved"
+          }
+        }
+      })
+    try {
+      await expect(f.service.start(operation.operationId)).resolves.toMatchObject({
+        status: "unknown",
+        receipts: [],
+        execution: {
+          terminal: {
+            outcome: "success",
+            code: "physical-agent-complete"
+          }
+        }
+      })
+    } finally {
+      configureStageRecoveryHookJournal({
+        begin: () => {
+          throw Error("unused")
+        },
+        unresolved: () => false
+      })
+    }
+  })
   it("runs an isolated Host stage through the real Claw selector without borrowing a parent", async () => {
     const f = await fixture(false, true)
     let resolved = false
@@ -139,18 +200,30 @@ describe("original agent run bridge", () => {
       expect(metadata.isInternalFlowRuntime).toBe(true)
       expect(metadata.parentThreadId).toBeUndefined()
       expect(currentRuntimePluginSource()?.mode).toBe("host")
-      await withProjectActionScope(request.threadId, metadata.hostProjectRuntime,
-        () => { expect(mock.thread).toBe(row) }, async () => {
-          expect(resolveClawThread(request.threadId, id => id === row.thread_id ? row : null))
-            .toBeNull()
+      await withProjectActionScope(
+        request.threadId,
+        metadata.hostProjectRuntime,
+        () => {
+          expect(mock.thread).toBe(row)
+        },
+        async () => {
+          expect(
+            resolveClawThread(request.threadId, (id) => (id === row.thread_id ? row : null))
+          ).toBeNull()
           resolved = true
           writeFileSync(join(f.workspace, "document.md"), "Original isolated Host stage")
           context.onRunTerminated?.({ outcome: "success", code: "normal" })
-        })
+        }
+      )
     })
-    const operation = f.service.prepare({ projectId: "local-docs", expectedVersion: 1,
-      idempotencyKey: "isolated-claw-selector" })
-    await expect(f.service.start(operation.operationId)).resolves.toMatchObject({ status: "succeeded" })
+    const operation = f.service.prepare({
+      projectId: "local-docs",
+      expectedVersion: 1,
+      idempotencyKey: "isolated-claw-selector"
+    })
+    await expect(f.service.start(operation.operationId)).resolves.toMatchObject({
+      status: "succeeded"
+    })
     expect(resolved).toBe(true)
   })
   it.each(["completed", "failed"])(
@@ -170,12 +243,15 @@ describe("original agent run bridge", () => {
       registerAgentRunImplementation(async (_request, _delivery, context) => {
         sourceToken = context.pluginSourceSnapshot
         // Capture the original bound guard, rather than reading ALS from the test continuation.
-        const { captureRuntimePluginSourceContentGuard } = await import("../plugins/runtime-source-scope")
+        const { captureRuntimePluginSourceContentGuard } =
+          await import("../plugins/runtime-source-scope")
         assertSource = captureRuntimePluginSourceContentGuard()!
         context.onRunTerminated?.({ outcome: "success", code: "foreground-returned" })
       })
       const operation = f.service.prepare({
-        projectId: "local-docs", expectedVersion: 1, idempotencyKey: `workflow-${outcome}`
+        projectId: "local-docs",
+        expectedVersion: 1,
+        idempotencyKey: `workflow-${outcome}`
       })
       const pending = f.service.start(operation.operationId)
       await registered.promise
@@ -183,8 +259,11 @@ describe("original agent run bridge", () => {
       expect(mock.closeMcp).not.toHaveBeenCalled()
       expect(assertSource).not.toThrow()
       writeFileSync(join(f.workspace, "document.md"), "Written by the background child")
-      const cleanup = settleWorkflow(outcome === "failed" ? Error("WORKFLOW_SOURCE_OWNER_NOT_SUCCEEDED") : undefined)
-      if (outcome === "failed") await expect(cleanup).rejects.toThrow("PROJECT_WORKFLOW_CLEANUP_UNCONFIRMED")
+      const cleanup = settleWorkflow(
+        outcome === "failed" ? Error("WORKFLOW_SOURCE_OWNER_NOT_SUCCEEDED") : undefined
+      )
+      if (outcome === "failed")
+        await expect(cleanup).rejects.toThrow("PROJECT_WORKFLOW_CLEANUP_UNCONFIRMED")
       else await cleanup
       const result = await pending
       expect(result.status).toBe(outcome === "completed" ? "succeeded" : "unknown")
@@ -199,17 +278,21 @@ describe("original agent run bridge", () => {
   it("rejects an already-retired workflow failure before recording host stage success", async () => {
     const f = await fixture()
     mock.deferWorkflows.mockReturnValueOnce({
-      deferred: false, failure: Error("WORKFLOW_SOURCE_OWNER_NOT_SUCCEEDED")
+      deferred: false,
+      failure: Error("WORKFLOW_SOURCE_OWNER_NOT_SUCCEEDED")
     })
     registerAgentRunImplementation(async (_request, _delivery, context) => {
       writeFileSync(join(f.workspace, "document.md"), "Partial output from a failed child")
       context.onRunTerminated?.({ outcome: "success", code: "late-parent-success" })
     })
     const operation = f.service.prepare({
-      projectId: "local-docs", expectedVersion: 1, idempotencyKey: "retired-workflow-failure"
+      projectId: "local-docs",
+      expectedVersion: 1,
+      idempotencyKey: "retired-workflow-failure"
     })
     await expect(f.service.start(operation.operationId)).resolves.toMatchObject({
-      status: "unknown", receipts: [],
+      status: "unknown",
+      receipts: [],
       execution: { terminal: { outcome: "unknown", code: "project_workflow_cleanup_unconfirmed" } }
     })
     expect(mock.closeMcp).toHaveBeenCalledTimes(1)
@@ -223,10 +306,13 @@ describe("original agent run bridge", () => {
       context.onRunTerminated?.({ outcome: "success", code: "child-caught-revocation" })
     })
     const operation = f.service.prepare({
-      projectId: "local-docs", expectedVersion: 1, idempotencyKey: "final-source-revoked"
+      projectId: "local-docs",
+      expectedVersion: 1,
+      idempotencyKey: "final-source-revoked"
     })
     await expect(f.service.start(operation.operationId)).resolves.toMatchObject({
-      status: "unknown", receipts: [],
+      status: "unknown",
+      receipts: [],
       execution: { terminal: { outcome: "unknown", code: "project_runtime_inputs_changed" } }
     })
     expect(mock.closeMcp).toHaveBeenCalledTimes(1)
@@ -238,23 +324,41 @@ describe("original agent run bridge", () => {
       writeFileSync(join(f.workspace, "document.md"), "No MCP declaration")
       context.onRunTerminated?.({ outcome: "success", code: "normal" })
     })
-    const operation = f.service.prepare({ projectId: "local-docs", expectedVersion: 1, idempotencyKey: "empty-mcp" })
-    await expect(f.service.start(operation.operationId)).resolves.toMatchObject({ status: "succeeded" })
-    expect(mock.closeMcp).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ kind: "host-plugin-source" }))
-  })
-  it.each(["disabled", "uninstalled"])("revokes host runtime/source boundaries when the installation is %s", async (change) => {
-    const f = await fixture()
-    registerAgentRunImplementation(async (_request, _delivery, context) => {
-      expect(currentRuntimePluginSource()?.plugin.enabled).toBe(true)
-      if (change === "disabled") mock.plugins[0].enabled = false
-      else mock.plugins = []
-      expect(() => currentRuntimePluginSource()).toThrow("PLUGIN_UNAVAILABLE")
-      expect(() => assertCurrentRuntimePluginSourceContent()).toThrow("PLUGIN_UNAVAILABLE")
-      context.onRunTerminated?.({ outcome: "unknown", code: "source-revoked" })
+    const operation = f.service.prepare({
+      projectId: "local-docs",
+      expectedVersion: 1,
+      idempotencyKey: "empty-mcp"
     })
-    const operation = f.service.prepare({ projectId: "local-docs", expectedVersion: 1, idempotencyKey: change })
-    await expect(f.service.start(operation.operationId)).resolves.toMatchObject({ status: "unknown", receipts: [] })
+    await expect(f.service.start(operation.operationId)).resolves.toMatchObject({
+      status: "succeeded"
+    })
+    expect(mock.closeMcp).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ kind: "host-plugin-source" })
+    )
   })
+  it.each(["disabled", "uninstalled"])(
+    "revokes host runtime/source boundaries when the installation is %s",
+    async (change) => {
+      const f = await fixture()
+      registerAgentRunImplementation(async (_request, _delivery, context) => {
+        expect(currentRuntimePluginSource()?.plugin.enabled).toBe(true)
+        if (change === "disabled") mock.plugins[0].enabled = false
+        else mock.plugins = []
+        expect(() => currentRuntimePluginSource()).toThrow("PLUGIN_UNAVAILABLE")
+        expect(() => assertCurrentRuntimePluginSourceContent()).toThrow("PLUGIN_UNAVAILABLE")
+        context.onRunTerminated?.({ outcome: "unknown", code: "source-revoked" })
+      })
+      const operation = f.service.prepare({
+        projectId: "local-docs",
+        expectedVersion: 1,
+        idempotencyKey: change
+      })
+      await expect(f.service.start(operation.operationId)).resolves.toMatchObject({
+        status: "unknown",
+        receipts: []
+      })
+    }
+  )
   it("retains pinned runtime bytes when an enabled installation is updated", async () => {
     const f = await fixture()
     registerAgentRunImplementation(async (_request, _delivery, context) => {
@@ -267,60 +371,100 @@ describe("original agent run bridge", () => {
       writeFileSync(join(f.workspace, "document.md"), "Pinned version")
       context.onRunTerminated?.({ outcome: "success", code: "normal" })
     })
-    const operation = f.service.prepare({ projectId: "local-docs", expectedVersion: 1, idempotencyKey: "pinned" })
-    await expect(f.service.start(operation.operationId)).resolves.toMatchObject({ status: "succeeded" })
-  })
-  it("waits for only its source-token MCP service to close before publishing a successful terminal", async()=>{
-    const f=await fixture(false,false,true)
-    let enter!:()=>void,release!:()=>void
-    const entered=new Promise<void>(resolve=>{enter=resolve})
-    const closing=new Promise<void>(resolve=>{release=resolve})
-    mock.closeMcp.mockImplementation(async()=>{enter();await closing})
-    registerAgentRunImplementation(async(_request,_delivery,context)=>{
-      writeFileSync(join(f.workspace,"document.md"),"actual document")
-      context.onRunTerminated?.({outcome:"success",code:"normal"})
+    const operation = f.service.prepare({
+      projectId: "local-docs",
+      expectedVersion: 1,
+      idempotencyKey: "pinned"
     })
-    const operation=f.service.prepare({projectId:"local-docs",expectedVersion:1,idempotencyKey:"mcp-drain"})
-    const pending=f.service.start(operation.operationId)
+    await expect(f.service.start(operation.operationId)).resolves.toMatchObject({
+      status: "succeeded"
+    })
+  })
+  it("waits for only its source-token MCP service to close before publishing a successful terminal", async () => {
+    const f = await fixture(false, false, true)
+    let enter!: () => void, release!: () => void
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve
+    })
+    const closing = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    mock.closeMcp.mockImplementation(async () => {
+      enter()
+      await closing
+    })
+    registerAgentRunImplementation(async (_request, _delivery, context) => {
+      writeFileSync(join(f.workspace, "document.md"), "actual document")
+      context.onRunTerminated?.({ outcome: "success", code: "normal" })
+    })
+    const operation = f.service.prepare({
+      projectId: "local-docs",
+      expectedVersion: 1,
+      idempotencyKey: "mcp-drain"
+    })
+    const pending = f.service.start(operation.operationId)
     await entered
     expect(f.service.operations("local-docs")[0].status).toBe("started")
-    expect(mock.closeMcp).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({kind:"host-plugin-source"}))
+    expect(mock.closeMcp).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ kind: "host-plugin-source" })
+    )
     release()
-    await expect(pending).resolves.toMatchObject({status:"succeeded"})
+    await expect(pending).resolves.toMatchObject({ status: "succeeded" })
   })
-  it("keeps ownership unknown when scoped MCP cleanup cannot be confirmed",async()=>{
-    const f=await fixture(false,false,true)
+  it("keeps ownership unknown when scoped MCP cleanup cannot be confirmed", async () => {
+    const f = await fixture(false, false, true)
     mock.closeMcp.mockRejectedValueOnce(Error("MODS_MCP_CLEANUP_UNCONFIRMED"))
-    registerAgentRunImplementation(async(_request,_delivery,context)=>{
-      writeFileSync(join(f.workspace,"document.md"),"actual write")
-      context.onRunTerminated?.({outcome:"success",code:"normal"})
+    registerAgentRunImplementation(async (_request, _delivery, context) => {
+      writeFileSync(join(f.workspace, "document.md"), "actual write")
+      context.onRunTerminated?.({ outcome: "success", code: "normal" })
     })
-    const operation=f.service.prepare({projectId:"local-docs",expectedVersion:1,idempotencyKey:"mcp-unknown"})
-    await expect(f.service.start(operation.operationId)).resolves.toMatchObject({status:"unknown",receipts:[],
-      execution:{terminal:{outcome:"unknown",code:"project_mcp_cleanup_unconfirmed"}}})
+    const operation = f.service.prepare({
+      projectId: "local-docs",
+      expectedVersion: 1,
+      idempotencyKey: "mcp-unknown"
+    })
+    await expect(f.service.start(operation.operationId)).resolves.toMatchObject({
+      status: "unknown",
+      receipts: [],
+      execution: { terminal: { outcome: "unknown", code: "project_mcp_cleanup_unconfirmed" } }
+    })
   })
-  it("does not preserve an earlier success label when the original run-body promise rejects",async()=>{
-    const f=await fixture()
-    registerAgentRunImplementation(async(_request,_delivery,context)=>{
-      context.onRunTerminated?.({outcome:"success",code:"early-label"})
+  it("does not preserve an earlier success label when the original run-body promise rejects", async () => {
+    const f = await fixture()
+    registerAgentRunImplementation(async (_request, _delivery, context) => {
+      context.onRunTerminated?.({ outcome: "success", code: "early-label" })
       throw Error("physical body failed after terminal callback")
     })
-    const operation=f.service.prepare({projectId:"local-docs",expectedVersion:1,idempotencyKey:"body-unknown"})
-    await expect(f.service.start(operation.operationId)).resolves.toMatchObject({status:"unknown",receipts:[],
-      execution:{terminal:{outcome:"unknown",code:"runtime_completion_rejected"}}})
+    const operation = f.service.prepare({
+      projectId: "local-docs",
+      expectedVersion: 1,
+      idempotencyKey: "body-unknown"
+    })
+    await expect(f.service.start(operation.operationId)).resolves.toMatchObject({
+      status: "unknown",
+      receipts: [],
+      execution: { terminal: { outcome: "unknown", code: "runtime_completion_rejected" } }
+    })
   })
 
-  it.each([false, true])("isolates the original host runtime to its exact retained source (internal=%s)", async (internal) => {
-    const { service } = await fixture(false, internal)
-    registerAgentRunImplementation(async (_request, _delivery, context) => {
-      expect(currentRuntimePluginSource()?.capabilitySources).toEqual([])
-      expect(currentRuntimePluginSource()?.mode).toBe("host")
-      expect(currentRuntimePluginSource()?.preserveParentContext).toBe(true)
-      context.onRunTerminated?.({outcome: "success", code: "normal"})
-    })
-    const operation = service.prepare({projectId:"local-docs",expectedVersion:1,idempotencyKey:"internal"})
-    await service.start(operation.operationId)
-  })
+  it.each([false, true])(
+    "isolates the original host runtime to its exact retained source (internal=%s)",
+    async (internal) => {
+      const { service } = await fixture(false, internal)
+      registerAgentRunImplementation(async (_request, _delivery, context) => {
+        expect(currentRuntimePluginSource()?.capabilitySources).toEqual([])
+        expect(currentRuntimePluginSource()?.mode).toBe("host")
+        expect(currentRuntimePluginSource()?.preserveParentContext).toBe(true)
+        context.onRunTerminated?.({ outcome: "success", code: "normal" })
+      })
+      const operation = service.prepare({
+        projectId: "local-docs",
+        expectedVersion: 1,
+        idempotencyKey: "internal"
+      })
+      await service.start(operation.operationId)
+    }
+  )
   it("closes the registered renderer stream when original admission rejects before returning a handle", async () => {
     const { service } = await fixture()
     const start = vi
@@ -518,7 +662,8 @@ describe("original agent run bridge", () => {
     expect(service.cancel(operation.operationId).status).toBe("cancel_requested")
     await observedAbort.promise
     expect(service.operations("local-docs")[0]).toMatchObject({
-      status: "cancel_requested", receipts: []
+      status: "cancel_requested",
+      receipts: []
     })
     expect(service.operations("local-docs")[0].execution?.terminal).toBeNull()
     expect(mock.closeMcp).not.toHaveBeenCalled()
@@ -533,61 +678,74 @@ describe("original agent run bridge", () => {
     expect(service.get("local-docs")?.version).toBe(1)
   })
   it.each([
-    "missing-terminal", "unknown-terminal", "cleanup-failure", "workflow-failure",
-    "changed-source", "changed-knowledge", "changed-thread", "revoked-installation"
-  ])(
-    "keeps actual cancellation unknown with %s",
-    async (failure) => {
-      let knowledgePath = ""
-      const { service, workspace } = await fixture(false, false, false, {
-        inputIdentity: () => knowledgePath ? readFileSync(knowledgePath, "utf8") : "unloaded"
+    "missing-terminal",
+    "unknown-terminal",
+    "cleanup-failure",
+    "workflow-failure",
+    "changed-source",
+    "changed-knowledge",
+    "changed-thread",
+    "revoked-installation"
+  ])("keeps actual cancellation unknown with %s", async (failure) => {
+    let knowledgePath = ""
+    const { service, workspace } = await fixture(false, false, false, {
+      inputIdentity: () => (knowledgePath ? readFileSync(knowledgePath, "utf8") : "unloaded")
+    })
+    knowledgePath = join(workspace, "knowledge.md")
+    writeFileSync(knowledgePath, "Original knowledge")
+    const entered = Promise.withResolvers<void>()
+    if (failure === "cleanup-failure")
+      mock.closeMcp.mockRejectedValueOnce(Error("scoped peer did not close"))
+    if (failure === "workflow-failure")
+      mock.deferWorkflows.mockReturnValueOnce({
+        deferred: false,
+        failure: Error("child cleanup failed")
       })
-      knowledgePath = join(workspace, "knowledge.md")
-      writeFileSync(knowledgePath, "Original knowledge")
-      const entered = Promise.withResolvers<void>()
-      if (failure === "cleanup-failure")
-        mock.closeMcp.mockRejectedValueOnce(Error("scoped peer did not close"))
-      if (failure === "workflow-failure")
-        mock.deferWorkflows.mockReturnValueOnce({ deferred: false, failure: Error("child cleanup failed") })
-      registerAgentRunImplementation(async (_request, _delivery, context) => {
-        const sourceRoot = currentRuntimePluginSource()!.plugin.path
-        writeFileSync(join(workspace, "document.md"), "Effect completed before cancellation")
-        entered.resolve()
-        await new Promise<void>((resolve) => {
-          if (context.signal!.aborted) resolve()
-          else context.signal!.addEventListener("abort", () => resolve(), { once: true })
+    registerAgentRunImplementation(async (_request, _delivery, context) => {
+      const sourceRoot = currentRuntimePluginSource()!.plugin.path
+      writeFileSync(join(workspace, "document.md"), "Effect completed before cancellation")
+      entered.resolve()
+      await new Promise<void>((resolve) => {
+        if (context.signal!.aborted) resolve()
+        else context.signal!.addEventListener("abort", () => resolve(), { once: true })
+      })
+      if (failure === "changed-source")
+        writeFileSync(join(sourceRoot, "skills/draft/SKILL.md"), "Changed retained source")
+      if (failure === "changed-knowledge") writeFileSync(knowledgePath!, "Changed knowledge")
+      if (failure === "changed-thread")
+        mock.thread!.metadata = JSON.stringify({
+          ...JSON.parse(mock.thread!.metadata),
+          cmb_thread_incarnation: "replaced"
         })
-        if (failure === "changed-source")
-          writeFileSync(join(sourceRoot, "skills/draft/SKILL.md"), "Changed retained source")
-        if (failure === "changed-knowledge") writeFileSync(knowledgePath!, "Changed knowledge")
-        if (failure === "changed-thread")
-          mock.thread!.metadata = JSON.stringify({ ...JSON.parse(mock.thread!.metadata), cmb_thread_incarnation: "replaced" })
-        if (failure === "revoked-installation") mock.plugins = []
-        expect(() => currentRuntimePluginSource()).toThrow()
-        context.onRunCancelled?.()
-        if (failure !== "missing-terminal")
-          context.onRunTerminated?.({
-            outcome: failure === "unknown-terminal" ? "unknown" : "success",
-            code: "physical_cancel_confirmed"
-          })
-      })
-      const operation = service.prepare({
+      if (failure === "revoked-installation") mock.plugins = []
+      expect(() => currentRuntimePluginSource()).toThrow()
+      context.onRunCancelled?.()
+      if (failure !== "missing-terminal")
+        context.onRunTerminated?.({
+          outcome: failure === "unknown-terminal" ? "unknown" : "success",
+          code: "physical_cancel_confirmed"
+        })
+    })
+    const operation = service.prepare({
+      projectId: "local-docs",
+      expectedVersion: 1,
+      idempotencyKey: `physical-cancellation-${failure}`
+    })
+    const completion = service.start(operation.operationId)
+    await entered.promise
+    expect(service.cancel(operation.operationId).status).toBe("cancel_requested")
+    const result = await completion
+    expect(result.status).toBe("unknown")
+    expect(result.receipts).toEqual([])
+    expect(service.get("local-docs")?.version).toBe(1)
+    expect(() =>
+      service.prepare({
         projectId: "local-docs",
         expectedVersion: 1,
-        idempotencyKey: `physical-cancellation-${failure}`
+        idempotencyKey: `retry-${failure}`
       })
-      const completion = service.start(operation.operationId)
-      await entered.promise
-      expect(service.cancel(operation.operationId).status).toBe("cancel_requested")
-      const result = await completion
-      expect(result.status).toBe("unknown")
-      expect(result.receipts).toEqual([])
-      expect(service.get("local-docs")?.version).toBe(1)
-      expect(() => service.prepare({
-        projectId: "local-docs", expectedVersion: 1, idempotencyKey: `retry-${failure}`
-      })).toThrow()
-    }
-  )
+    ).toThrow()
+  })
   it.each(["missing", "unknown"])(
     "keeps unknown ownership after cancellation with %s terminal evidence",
     async (evidence) => {

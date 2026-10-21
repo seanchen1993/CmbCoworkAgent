@@ -17,6 +17,7 @@ import { loadAgentProfilesAsync } from "../agent/agent-registry"
 import { getModelConfigs } from "../models/registry"
 import { listClawSkillSources } from "../mods/claw-skills"
 import { discoverAutobizFlowFeatures } from "../mods/adapters/autobiz-flow-catalog"
+import { readFlowUnitTestReadiness } from "../mods/flows/template-readiness"
 
 export function assertOrdinaryFlowMetadata(metadata: Record<string, unknown>): void {
   if (!isOrdinaryFlowMetadata(metadata)) throw Error("DIY 流程当前只支持普通本地项目会话")
@@ -46,7 +47,9 @@ export function registerModsFlowHandlers(
       typeof thread.metadata === "string" ? JSON.parse(thread.metadata) : thread.metadata
     if (!metadata || typeof metadata !== "object" || Array.isArray(metadata))
       throw Error("FLOW_SCOPE_INVALID")
-    assertOrdinaryFlowMetadata(projectActionFlowMetadata(threadId, metadata) as Record<string, unknown>)
+    assertOrdinaryFlowMetadata(
+      projectActionFlowMetadata(threadId, metadata) as Record<string, unknown>
+    )
     return workspace
   }
   const scope = (event: IpcMainInvokeEvent, threadId: string) => {
@@ -105,11 +108,12 @@ export function registerModsFlowHandlers(
   ipcMain.handle("mods:flow-catalog", async (event, threadId: string): Promise<FlowCatalog> => {
     const fence = catalogFence(event, threadId)
     const { workspace } = fence
-    const [plugins, profiles, legacyDiscovery, skills] = await Promise.all([
+    const [plugins, profiles, legacyDiscovery, skills, unitTest] = await Promise.all([
       functions.status(workspace),
       loadAgentProfilesAsync(workspace),
       discoverAutobizFlowFeatures(workspace),
-      listClawSkillSources()
+      listClawSkillSources(),
+      readFlowUnitTestReadiness(workspace)
     ])
     fence.assertCurrent()
     const enabled = manager.isEnabled(workspace)
@@ -121,6 +125,7 @@ export function registerModsFlowHandlers(
     const catalog: FlowCatalog = {
       available: true,
       hostAvailable: enabled,
+      unitTest,
       workspace,
       ...(!enabled
         ? {

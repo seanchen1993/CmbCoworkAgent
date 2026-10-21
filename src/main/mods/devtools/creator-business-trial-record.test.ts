@@ -229,6 +229,20 @@ it("also checks the real project binding before a process-local proof can back e
   expect(() => assertCreatorBusinessTrialProofBinding(record, admitted)).toThrow("PROOF_CHANGED")
 })
 
+it("retains a verified recovery binding and cannot reuse its execution proof after recovery identity changes", () => {
+  const record = running()
+  record.recovery = { sourceId: "creator-business-trial:33333333-3333-4333-8333-333333333333",
+    preparationId: "44444444-4444-4444-8444-444444444444", evidenceDigest: "a".repeat(64) }
+  expect(parse(record).recovery).toEqual(record.recovery)
+  const admitted = { ...proof(record), recovery: structuredClone(record.recovery) }
+  expect(() => assertCreatorBusinessTrialProofBinding(record, admitted)).not.toThrow()
+  record.recovery.evidenceDigest = "b".repeat(64)
+  expect(() => assertCreatorBusinessTrialProofBinding(record, admitted)).toThrow("PROOF_CHANGED")
+  expect(() => parse({ ...request(), recovery: record.recovery })).toThrow("RECORD_INVALID")
+  record.recovery.preparationId = "not-a-native-id"
+  expect(() => parse(record)).toThrow("RECORD_INVALID")
+})
+
 it.each([
   "root",
   "digest",

@@ -25,6 +25,12 @@ export function setProjectRuntimeFunctions(
   current = { manager, workspaceKey, workspaceControl }
 }
 
+/** Main-only recovery adapters reuse the original configuration owner, never a second store. */
+export function getProjectRuntimeFunctionManager(): FunctionModsManager {
+  if (!current) throw Error("PROJECT_MODS_RUNTIME_UNAVAILABLE")
+  return current.manager
+}
+
 export function projectRuntimeFunctionSource(project: Pick<HostProjectState,
   "workspace" | "projectId" | "pluginDigest" | "installedPluginId" | "packageId">, root: string) {
   if (!current) throw Error("PROJECT_MODS_RUNTIME_UNAVAILABLE")

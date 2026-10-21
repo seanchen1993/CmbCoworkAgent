@@ -13,6 +13,7 @@ import type { ThreadMessagesPage, ThreadMessagesPageOptions } from "../../../../
 import type { CompositionUnitContextOptions } from "../../../../shared/project-runtime/composition-api"
 import { compositionProblem } from "@/lib/project-composition-ui"
 import { CreatorTrialJourneyCard } from "./CreatorTrialJourneyCard"
+import { PluginStageRecoveryCard } from "./PluginStageRecoveryCard"
 import {
   businessCreatorTrialScope,
   businessCreatorTrialView,
@@ -326,6 +327,19 @@ function TrialContents(
             </details>
           </section>
           {trial.observation && <TrialObservation key={trial.id} trial={trial} creatorThreadId={threadId} />}
+          {api.recovery &&
+            (trial.stageRecovery ||
+              ["completed", "failed", "cancelled", "unknown"].includes(trial.phase)) && (
+              <PluginStageRecoveryCard
+                key={`recovery:${trial.id}`}
+                threadId={threadId}
+                workspace={workspace}
+                trial={trial}
+                api={api.recovery}
+                disabled={busy || !current}
+                onChanged={() => act(() => window.api.mods.development.status({ threadId }))}
+              />
+            )}
           {trial.observation && (
             <TrialHumanGates
               key={JSON.stringify([scope.trialId, scope.expectedVersion])}

@@ -39,7 +39,8 @@ function fixture() {
     list: vi.fn(() => ({ snapshots: [], branches: [], diagnostics: [] })),
     compare: vi.fn(async () => ({})),
     prepare: vi.fn(async () => ({})),
-    create: vi.fn(async () => ({}))
+    create: vi.fn(async () => ({})),
+    reconcileHooks: vi.fn(async () => ({ remaining: 0, diagnostics: [] }))
   }
   const resolve = vi.fn(() => backend as unknown as ProjectStageDebugSessions)
   registerProjectPreviewHandlers(
@@ -77,10 +78,34 @@ it("checks the native caller before initializing or accessing the debug service"
     ["list", "creator"],
     ["prepare", prepareInput],
     ["create", {}],
+    ["reconcile-hooks", {}],
     ["compare", { threadId: "creator", projectId: "11111111-1111-4111-8111-111111111111" }]
   ])
     await expect(f.invoke(String(kind), input)).rejects.toThrow("UNTRUSTED_NATIVE_CALL")
   expect(f.resolve).not.toHaveBeenCalled()
+})
+
+it("passes only exact native recovery consent and leaves outcome inspection read-only", async () => {
+  const f = fixture()
+  const base = { threadId: "creator", preparationId: "11111111-1111-4111-8111-111111111111",
+    expectedDigest: "b".repeat(64) }
+  const approved = { ...base, recoveryApproval: {
+    policyDigest: "a".repeat(64), allowNetworkSideEffects: true
+  } }
+  await f.invoke("create", approved)
+  expect(f.backend.create).toHaveBeenCalledWith(expect.objectContaining({ guard: expect.any(Function) }), approved)
+  await expect(f.invoke("create", { ...base, recoveryApproval: {
+    policyDigest: "a".repeat(64), allowNetworkSideEffects: false
+  } })).rejects.toThrow()
+  await expect(f.invoke("create", { ...approved, recoveryApproval: {
+    ...approved.recoveryApproval, secret: "private"
+  } })).rejects.toThrow()
+  const inspect = { threadId: "creator", projectId: base.preparationId }
+  await f.invoke("reconcile-hooks", inspect)
+  expect(f.backend.reconcileHooks).toHaveBeenCalledWith(expect.objectContaining({ guard: expect.any(Function) }), inspect)
+  await expect(f.invoke("reconcile-hooks", { ...inspect, outcome: "completed" })).rejects.toThrow()
+  await expect(f.invoke("reconcile-hooks", { ...inspect, threadId: "other" })).rejects.toThrow("SCOPE_CHANGED")
+  expect(f.backend.reconcileHooks).toHaveBeenCalledTimes(1)
 })
 
 it("derives creator scope natively and refuses forged authority or workspace fields", async () => {

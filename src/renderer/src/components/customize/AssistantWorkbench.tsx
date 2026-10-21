@@ -78,7 +78,7 @@ export function AssistantWorkbench({
               [
                 ["mods", "管理灵件"],
                 ["claw", "管理常用搭配"],
-                ["flows", "管理执行步骤"],
+                ["flows", "聊天任务模板"],
                 ["evaluation", "查看效果测试"]
               ] as const
             ).map(([tab, label]) => (

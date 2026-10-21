@@ -282,7 +282,7 @@ async function main() {
       )
     )
     pass("真实聊天显式启动、冻结本次目标、按钮不误发草稿；运行摘要进入模型，普通追问不重启流程")
-    await openModsAdvancedSettings(page, "步骤管理")
+    await openModsAdvancedSettings(page, "聊天任务模板")
     pass("生产 React 人工暂停与点击确认、最终原生重验、完成记录")
     const second = await page.evaluate(
       ({ threadId, saved }) =>

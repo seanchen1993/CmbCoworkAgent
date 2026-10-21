@@ -19,7 +19,7 @@ export function FlowTaskEntry() {
         size="sm"
         onClick={() => useAppStore.getState().setShowCustomizeView(true, "flows")}
       >
-        按步骤执行 · 管理步骤与记录
+        聊天任务模板 · 选择下一条任务的顺序
       </Button>
     </div>
   )

@@ -20,7 +20,7 @@ async function main() {
       const calls=[];const listeners=new Set();const reviewListeners=new Set();let reviewIntent;
       let current={threadId:"creator",workspace:"C:/creator",enabled:true,mode:"creator",drafts:[],trials:[],
         business:{drafts:[],review:{planId:"plan",phase:"needs-approval",name:"独立测试插件",version:"1.0.0",
-          digest:"a".repeat(64),copyId:"new-plugin",canConfirm:true,diagnostics:[],
+          digest:"a".repeat(64),contentDigest:"1".repeat(64),copyId:"new-plugin",canConfirm:true,diagnostics:[],
           steps:Array.from({length:18},(_,index)=>({id:"stage-"+index,title:"流程阶段 "+(index+1),sourceName:"来源模块"}))}}};
       const api={status:async()=>structuredClone(current),onChanged:fn=>{listeners.add(fn);return()=>listeners.delete(fn)},
         approveBusiness:async input=>{calls.push(["install",input]);current.business.review={...current.business.review,phase:"installed",pluginId:"installed-copy"};return structuredClone(current)},
@@ -99,6 +99,8 @@ async function main() {
     jsx: "automatic",
     platform: "browser",
     format: "iife",
+    define: { "import.meta.env": "{}", "import.meta.hot": "undefined",
+      "import.meta.url": '"http://creator.fixture/test-bundle.js"' },
     write: false,
     plugins: [browserWorkerPlugin()],
     loader: { ".md": "text", ".png": "dataurl" },
@@ -141,7 +143,8 @@ async function main() {
     assert.equal(await page.getByRole("list", { name: "组合的业务步骤" }).isVisible(), false)
     await page.getByRole("button", { name: /4 · 保存为插件/ }).click()
     await page.getByRole("button", { name: "保存为新插件并安装", exact: true }).click()
-    await page.getByText(/从“添加功能 → 我已添加”找到这份新插件/).waitFor()
+    await page.getByRole("region", { name: "已安装插件开始使用", exact: true }).waitFor()
+    await page.getByRole("button", { name: "开始使用", exact: true }).waitFor()
     assert.equal(await page.evaluate("window.fixture.calls[0][1].digest"), "a".repeat(64))
     assert.equal(
       await page.getByText("整轮试用已通过", { exact: true }).count(),
@@ -269,9 +272,10 @@ async function main() {
     )
     await page.evaluate("window.fixture.changeHost()")
     await page
-      .getByText("下方原交付记录属于另一候选，请重新核对当前版本后准备保存。", { exact: true })
+      .getByText(/^下方交付记录属于历史候选/)
       .waitFor()
-    assert.equal(await page.getByRole("button", { name: "确认安装新插件", exact: true }).count(), 0)
+    assert.equal(await page.getByRole("button", { name: "确认安装新插件", exact: true }).isDisabled(), true)
+    assert.equal(await page.getByRole("region", { name: "已安装插件开始使用", exact: true }).count(), 0)
     await page.evaluate("window.fixture.modularize()")
     await page.getByRole("article", { name: "原始插件首次模块化确认", exact: true }).waitFor()
     assert.equal(

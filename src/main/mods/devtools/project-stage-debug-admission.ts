@@ -15,6 +15,7 @@ import {
 import { readPackageExtensionContract } from "../../plugins/extension-contract"
 import { capturePackageMetadataGuard } from "../../harness-board/project-runtime/package-snapshots"
 import { packageUsesSharedMods } from "../../harness-board/project-runtime/package-preflight"
+import { isConfigurationOnlyPackage } from "../v2/configuration-only-package"
 import {
   readRuntimeScopedFile,
   runtimeDirectory,
@@ -22,6 +23,11 @@ import {
 } from "../../harness-board/project-runtime/safe-files"
 import { discoverSkillsSync } from "../../skills/discovery"
 import { isSupportedHookEvent } from "../../hooks/types"
+import {
+  assertStageRecoveryDeclaration,
+  readStageRecoveryPolicy,
+  type StageRecoveryPolicy
+} from "../../harness-board/project-runtime/stage-recovery-policy"
 
 function deny(code: string): never {
   throw Error(`PROJECT_STAGE_DEBUG_${code}`)
@@ -45,9 +51,14 @@ function json(root: string, path: string, required = false): unknown {
 }
 
 /** An empty declaration may remain byte-for-byte. No disabled/nonmatching handler is discarded. */
-function emptyHooks(input: unknown) {
+function emptyHooks(input: unknown, recovery?: StageRecoveryPolicy) {
   if (Array.isArray(input)) {
-    if (input.length) deny("HOOKS_UNSUPPORTED")
+    if (input.length && !recovery) deny("HOOKS_UNSUPPORTED")
+    for (const entry of input) {
+      const hook = record(entry)
+      if (!isSupportedHookEvent(hook.event)) deny("HOOK_DECLARATION_INVALID")
+      assertStageRecoveryDeclaration(hook, recovery!)
+    }
     return
   }
   const raw = record(input)
@@ -63,24 +74,31 @@ function emptyHooks(input: unknown) {
   }
   for (const [event, matchers] of Object.entries(events)) {
     if (!isSupportedHookEvent(event) || !Array.isArray(matchers)) deny("HOOK_DECLARATION_INVALID")
-    if (matchers.length) deny("HOOKS_UNSUPPORTED")
+    if (matchers.length && !recovery) deny("HOOKS_UNSUPPORTED")
+    for (const matcher of matchers) {
+      const row = record(matcher)
+      if (!Array.isArray(row.hooks)) deny("HOOK_DECLARATION_INVALID")
+      for (const hook of row.hooks) assertStageRecoveryDeclaration(record(hook), recovery!)
+    }
   }
 }
 
-function skillHooks(root: string, skill: string) {
+function skillHooks(root: string, skill: string, recovery?: StageRecoveryPolicy) {
   const text = read(root, skill, true)!
   const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n)?/.exec(text)
   if (header) {
     const yaml = parseDocument(header[1])
     if (yaml.errors.length || !isMap(yaml.contents)) deny("SKILL_DECLARATION_INVALID")
     const fields = record(yaml.toJS({ maxAliasCount: 32 }))
-    if (Object.keys(fields).some((key) => key.toLowerCase() === "hooks"))
-      deny("SKILL_HOOKS_UNSUPPORTED")
+    if (Object.keys(fields).some((key) => key.toLowerCase() === "hooks")) {
+      if (!recovery || !Object.hasOwn(fields, "hooks")) deny("SKILL_HOOKS_UNSUPPORTED")
+      emptyHooks(fields.hooks, recovery)
+    }
   } else if (text.startsWith("---")) deny("SKILL_DECLARATION_INVALID")
   const directory = posix.dirname(skill)
   for (const entry of ["hooks.json", "hooks/hooks.json"]) {
     const hooks = json(root, directory === "." ? entry : `${directory}/${entry}`)
-    if (hooks !== undefined) emptyHooks(hooks)
+    if (hooks !== undefined) emptyHooks(hooks, recovery)
   }
 }
 
@@ -90,11 +108,13 @@ function skillHooks(root: string, skill: string) {
  */
 export function assertStageDebugPackageSupported(
   root: string,
-  manifest: ProjectRuntimeManifest
+  manifest: ProjectRuntimeManifest,
+  options: { frozenInputsBound?: boolean } = {}
 ): void {
   try {
     runtimeDirectory(root)
     const sourceGuard = capturePackageMetadataGuard(root)
+    const recovery = readStageRecoveryPolicy(root)
     const original = readPluginManifest(root)
     if (!original) deny("MANIFEST_MISSING")
     const raw = record(json(root, original.relPath, true))
@@ -114,15 +134,21 @@ export function assertStageDebugPackageSupported(
     for (const key of ["hooks", "mods", "mcpServers"])
       if (raw[key] !== undefined && (typeof raw[key] !== "string" || !raw[key]))
         deny("MANIFEST_INVALID")
-    if (Object.hasOwn(raw, "userConfig") || Object.hasOwn(raw, "userConfigSchema"))
+    if (
+      !options.frozenInputsBound &&
+      (Object.hasOwn(raw, "userConfig") || Object.hasOwn(raw, "userConfigSchema"))
+    )
       deny("CONFIGURATION_UNSUPPORTED")
     const contract = readPackageExtensionContract(root)
     // No cross-branch provider, mutable context or external knowledge binding is silently omitted.
-    if (contract?.context) deny("CONTEXT_UNSUPPORTED")
+    if (contract?.context && !options.frozenInputsBound) deny("CONTEXT_UNSUPPORTED")
+    if (contract?.context?.provider?.entry && !recovery?.contextProvider)
+      deny("CONTEXT_PROVIDER_RECOVERY_REQUIRED")
     if (contract?.verifiedArtifacts) deny("VERIFIED_ARTIFACTS_UNSUPPORTED")
     if (parsed.mcpServers !== undefined || json(root, ".mcp.json") !== undefined)
       deny("MCP_UNSUPPORTED")
-    if (packageUsesSharedMods(root, parsed)) deny("SHARED_MODS_UNSUPPORTED")
+    if (packageUsesSharedMods(root, parsed) && !isConfigurationOnlyPackage(root))
+      deny("SHARED_MODS_UNSUPPORTED")
     if (
       manifest.checks.some(
         (check) => check.kind === "action" || check.actionId || check.sideEffect !== "read"
@@ -138,11 +164,11 @@ export function assertStageDebugPackageSupported(
 
     const hookPath = parsed.hooks ?? DEFAULT_PLUGIN_HOOKS_PATH
     const declaredHooks = json(root, hookPath, parsed.hooks !== undefined)
-    if (declaredHooks !== undefined) emptyHooks(declaredHooks)
+    if (declaredHooks !== undefined) emptyHooks(declaredHooks, recovery)
     const capabilities = parsePluginCapabilities(json(root, "devclaw.capabilities.json"))
     for (const capability of capabilities?.capabilities ?? []) {
       if (
-        capability.requiredHooks?.length ||
+        (capability.requiredHooks?.length && !recovery) ||
         capability.requiredMcpServers?.length ||
         capability.inputs?.length ||
         capability.dependsOn.length
@@ -163,7 +189,7 @@ export function assertStageDebugPackageSupported(
     for (const source of getPluginSkillSearchSources(root, parsed))
       for (const skill of discoverSkillsSync(source.sourceDir, source.maxDepth))
         skills.add(relative(root, skill.skillMdPath).replace(/\\/g, "/"))
-    for (const skill of skills) skillHooks(root, skill)
+    for (const skill of skills) skillHooks(root, skill, recovery)
     sourceGuard()
   } catch (error) {
     if (error instanceof Error && /^PROJECT_STAGE_DEBUG_[A-Z_]+$/.test(error.message)) throw error

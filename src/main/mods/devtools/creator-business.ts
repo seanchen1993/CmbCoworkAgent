@@ -12,7 +12,10 @@ import type { PluginMetadata } from "../../types"
 import type { DevelopmentContext } from "./development-service"
 import type { DevelopmentScope } from "../v2/development-session"
 import { observeDevelopmentTurnSettlement } from "../v2/development-turn-settlement"
-import { BusinessModAssemblyService } from "../../plugins/business-mod-assembly-service"
+import {
+  BusinessModAssemblyService,
+  isBusinessModPublicationNotStarted
+} from "../../plugins/business-mod-assembly-service"
 import {
   businessModCatalog,
   businessModPath,
@@ -111,6 +114,7 @@ export class CreatorBusinessService {
       busy(threadId: string): boolean
       onIdle?(listener: (threadId: string) => void): () => void
       changed(threadId: string): void
+      normalizeWorkspace?(workspace: string): string
     }
   ) {
     this.drafts = new CreatorBusinessDrafts(deps.settings)
@@ -221,7 +225,7 @@ export class CreatorBusinessService {
     const context = this.context(threadId, false),
       record = this.record(context.scope)
     if (
-      context.scope.workspace !== workspace ||
+      context.scope.workspace !== (this.deps.normalizeWorkspace?.(workspace) ?? workspace) ||
       !record ||
       record.review.planId !== input.planId ||
       record.review.digest !== input.digest ||
@@ -340,6 +344,8 @@ export class CreatorBusinessService {
       !record.review ||
       !/^[a-f0-9-]{36}$/.test(record.review.planId) ||
       !/^[a-f0-9]{64}$/.test(record.review.digest) ||
+      (record.review.contentDigest !== undefined &&
+        !/^[a-f0-9]{64}$/.test(record.review.contentDigest)) ||
       !Array.isArray(record.sources) ||
       record.sources.length > 8 ||
       !Array.isArray(record.drafts) ||
@@ -394,13 +400,17 @@ export class CreatorBusinessService {
         review.phase = "needs-review"
       if (!this.live.has(review.planId) && ["installing", "exporting"].includes(review.phase))
         review.phase = "unknown"
+      if (record?.effect?.kind === "export" && ["unknown", "exporting"].includes(review.phase))
+        review.pendingOutput = record.effect.output
       review.canConfirm =
         this.live.has(review.planId) &&
         record!.settled &&
         !this.deps.busy(threadId) &&
         ["needs-approval", "installed", "exported"].includes(review.phase)
       review.canReconcile =
-        review.phase === "unknown" && !this.writing.has(threadId) && !this.deps.busy(threadId)
+        (review.phase === "unknown" || (!!review.pluginId && !review.contentDigest)) &&
+        !this.writing.has(threadId) &&
+        !this.deps.busy(threadId)
     }
     let trial: DevelopmentBusinessStatus["trial"], trialDiagnostic: string | undefined
     try {
@@ -780,6 +790,12 @@ export class CreatorBusinessService {
         allowInstalledNameForExport: true
       }))
     await this.deps.assembly.check(owner, copy.copyId, copy.digest, context.assertCurrent)
+    const checkedSource = await this.deps.assembly.readCheckedSource(
+      owner,
+      copy.copyId,
+      copy.digest,
+      context.assertCurrent
+    )
     assertTurn()
     const record: Record = {
       version: 1,
@@ -795,6 +811,7 @@ export class CreatorBusinessService {
         version: copy.version,
         digest: copy.digest,
         copyId: copy.copyId,
+        contentDigest: derivationContentIdentity(checkedSource.files),
         steps: preview.view.steps,
         ...(copy.pluginId ? { pluginId: copy.pluginId } : {}),
         ...(copy.exportOnly ? { exportOnly: true } : {}),
@@ -836,7 +853,7 @@ export class CreatorBusinessService {
     const context = this.context(threadId, false),
       record = this.record(context.scope)
     if (
-      context.scope.workspace !== workspace ||
+      context.scope.workspace !== (this.deps.normalizeWorkspace?.(workspace) ?? workspace) ||
       !record ||
       record.review.planId !== input.planId ||
       record.review.digest !== input.digest
@@ -871,9 +888,10 @@ export class CreatorBusinessService {
       record.review.phase = "installed"
       record.review.pluginId = copy.pluginId
       this.persist(record, context.assertCurrent)
-    } catch {
-      record.review.phase = effects ? "unknown" : "failed"
-      record.review.error = effects
+    } catch (error) {
+      const uncertain = effects && !isBusinessModPublicationNotStarted(error)
+      record.review.phase = uncertain ? "unknown" : "failed"
+      record.review.error = uncertain
         ? "BUSINESS_CREATOR_INSTALL_UNCONFIRMED"
         : "BUSINESS_CREATOR_INPUT_CHANGED"
       this.live.delete(record.review.planId)
@@ -918,8 +936,9 @@ export class CreatorBusinessService {
         record.review.phase = beforePhase
         record.review.error = "BUSINESS_CREATOR_EXPORT_EXISTS"
       } else {
-        record.review.phase = effects ? "unknown" : "failed"
-        record.review.error = effects
+        const uncertain = effects && !isBusinessModPublicationNotStarted(error)
+        record.review.phase = uncertain ? "unknown" : "failed"
+        record.review.error = uncertain
           ? "BUSINESS_CREATOR_EXPORT_UNCONFIRMED"
           : "BUSINESS_CREATOR_INPUT_CHANGED"
         this.live.delete(record.review.planId)
@@ -935,19 +954,29 @@ export class CreatorBusinessService {
     const context = this.context(threadId, false),
       record = this.record(context.scope)
     if (
-      context.scope.workspace !== workspace ||
+      context.scope.workspace !== (this.deps.normalizeWorkspace?.(workspace) ?? workspace) ||
       !record ||
       record.review.planId !== input.planId ||
       record.review.digest !== input.digest
     )
       throw Error("BUSINESS_CREATOR_REVIEW_CHANGED")
     if (this.writing.has(threadId) || this.deps.busy(threadId)) throw Error("BUSINESS_CREATOR_BUSY")
-    if (this.status(threadId).review?.phase !== "unknown")
+    if (!this.status(threadId).review?.canReconcile)
       throw Error("BUSINESS_CREATOR_OUTCOME_NOT_UNKNOWN")
+    const previous = this.deps.settings.getSetting(this.key(context.scope), "")
+    const guard = () => {
+      context.assertCurrent()
+      if (this.deps.settings.getSetting(this.key(context.scope), "") !== previous)
+        throw Error("BUSINESS_CREATOR_REVIEW_CHANGED")
+    }
     this.writing.add(threadId)
     try {
       const effect =
-        record.effect ??
+        (record.review.pluginId &&
+        !record.review.contentDigest &&
+        ["installed", "exported"].includes(record.review.phase)
+          ? { kind: "install" as const }
+          : record.effect) ??
         (record.review.phase === "installing"
           ? { kind: "install" as const }
           : record.review.phase === "exporting" && record.review.output
@@ -959,10 +988,10 @@ export class CreatorBusinessService {
             record.review.copyId,
             input.digest,
             effect,
-            context.assertCurrent
+            guard
           )
         : { outcome: "unknown" as const, reason: "BUSINESS_CREATOR_EFFECT_IDENTITY_MISSING" }
-      context.assertCurrent()
+      guard()
       const current = this.record(context.scope)
       if (
         !current ||
@@ -970,10 +999,24 @@ export class CreatorBusinessService {
         current.review.digest !== input.digest
       )
         throw Error("BUSINESS_CREATOR_REVIEW_CHANGED")
+      try {
+        const copy = await this.deps.assembly.readCheckedSource(
+          this.owner(context.scope),
+          record.review.copyId,
+          record.review.digest,
+          guard
+        )
+        guard()
+        record.review.contentDigest = derivationContentIdentity(copy.files)
+      } catch {
+        guard()
+        // A retained immutable package can be unavailable after export. Keep the exact export
+        // fact, but do not invent the installed content identity needed to start using it.
+      }
       record.review.reconciliation = {
         outcome: observation.outcome,
         checkedAt: Date.now(),
-        ...(observation.outcome === "unknown" ? { reason: observation.reason } : {})
+        ...("reason" in observation ? { reason: observation.reason } : {})
       }
       this.live.delete(input.planId)
       record.settled = false
@@ -986,11 +1029,14 @@ export class CreatorBusinessService {
         record.review.phase = "exported"
         record.review.output = observation.output
         delete record.review.error
+      } else if (observation.outcome === "not-executed") {
+        record.review.phase = record.review.pluginId ? "installed" : "failed"
+        record.review.error = observation.reason
       } else {
         record.review.phase = "unknown"
         record.review.error = observation.reason
       }
-      this.persist(record, context.assertCurrent)
+      this.persist(record, guard)
     } finally {
       this.writing.delete(threadId)
     }

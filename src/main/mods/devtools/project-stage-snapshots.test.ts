@@ -99,6 +99,25 @@ async function fixture() {
 }
 
 describe("native stage input snapshots", () => {
+  it("binds only a validated opaque configuration identity into immutable stage metadata", async () => {
+    const f = await fixture()
+    const recoveryInputs = { schemaVersion: 1 as const, id: randomUUID(), digest: "a".repeat(64) }
+    const captured = await f.snapshots.capture({ ...f.input, recoveryInputs })
+    expect(f.snapshots.read(captured.id, f.input.scopeKey).recoveryInputs).toEqual(recoveryInputs)
+    recoveryInputs.digest = "b".repeat(64)
+    expect(f.snapshots.read(captured.id, f.input.scopeKey).recoveryInputs?.digest).toBe(
+      "a".repeat(64)
+    )
+    await expect(
+      f.snapshots.capture({
+        ...f.input,
+        recoveryInputs: { ...recoveryInputs, rawSecret: "must-never-enter-metadata" }
+      } as never)
+    ).rejects.toThrow("RECOVERY_INPUTS_INVALID")
+    await expect(
+      f.snapshots.capture({ ...f.input, recoveryInputs: { ...recoveryInputs, digest: "forged" } })
+    ).rejects.toThrow("RECOVERY_INPUTS_INVALID")
+  })
   it("restores complete binary inputs and empty directories in an independent branch after restart", async () => {
     const f = await fixture()
     const captured = await f.snapshots.capture(f.input)

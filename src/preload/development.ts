@@ -1,5 +1,6 @@
 import type { DevelopmentApi } from "../shared/mods/development"
 import { createNativeProjectSourceBridge } from "./native-project-source"
+import { createPluginStageRecoveryBridge } from "./plugin-stage-recovery"
 
 export function createDevelopmentBridge(
   invoke: (channel: string, input: unknown) => Promise<unknown>,
@@ -12,9 +13,12 @@ export function createDevelopmentBridge(
       ReturnType<NonNullable<DevelopmentApi["installProjectDelivery"]>>,
     exportProjectDelivery: input => invoke("mods:development:export-project-delivery", input) as
       ReturnType<NonNullable<DevelopmentApi["exportProjectDelivery"]>>,
+    reconcileProjectDelivery: input => invoke("mods:development:reconcile-project-delivery", input) as
+      ReturnType<NonNullable<DevelopmentApi["reconcileProjectDelivery"]>>,
     approveModularization: input => invoke("mods:development:approve-modularization", input) as
       ReturnType<NonNullable<DevelopmentApi["approveModularization"]>>,
     businessTrial: {
+      recovery: createPluginStageRecoveryBridge(invoke),
       source: createNativeProjectSourceBridge(invoke, "mods:development:business-trial"),
       request: (input) =>
         invoke("mods:development:business-trial:request", input) as ReturnType<

@@ -1,4 +1,22 @@
 import type { Locator, Page } from "playwright"
+import assert from "node:assert/strict"
+import { normalizeWorkspacePathKey } from "../../src/shared/workspace-path"
+
+/** Use the production chat switch; never write creator state or a grant from the fixture. */
+export async function enterModsCreatorChat(page: Page, threadId: string, workspace: string) {
+  const chat = page.locator(`[data-chat-thread-id=${JSON.stringify(threadId)}]`)
+  const creator = chat.getByRole("button", { name: "创造者模式", exact: true })
+  await creator.waitFor({ state: "visible" })
+  if ((await creator.getAttribute("aria-pressed")) !== "true") await creator.click()
+  await chat.getByRole("button", { name: "创造者模式", exact: true, pressed: true }).waitFor()
+  const actual = await page.evaluate(
+    (id) => window.api.mods.development.status({ threadId: id }),
+    threadId
+  )
+  assert.equal(actual.threadId, threadId)
+  assert.equal(normalizeWorkspacePathKey(actual.workspace), normalizeWorkspacePathKey(workspace))
+  assert.equal(actual.mode, "creator")
+}
 
 async function dismissModsTour(page: Page): Promise<void> {
   const tour = page.getByRole("region", { name: "任务示例演练", exact: true })
@@ -56,7 +74,7 @@ export async function openModsFlowHistory(page: Page, runId: string): Promise<Lo
 
 export async function openModsAdvancedSettings(
   page: Page,
-  section: "灵件管理" | "搭配管理" | "步骤管理"
+  section: "灵件管理" | "搭配管理" | "聊天任务模板"
 ): Promise<void> {
   const advanced = page.getByRole("button", { name: "高级自定义", exact: true })
   if (!(await advanced.isVisible()))
@@ -65,6 +83,12 @@ export async function openModsAdvancedSettings(
   await dismissModsTour(page)
   if ((await advanced.getAttribute("aria-expanded")) === "false") await advanced.click()
   await page.getByRole("button", { name: section, exact: true }).click()
+  if (section === "聊天任务模板") {
+    const details = page.locator("[data-diy-flows] > details")
+    await details.waitFor({ state: "visible" })
+    if (!(await details.evaluate((element) => (element as HTMLDetailsElement).open)))
+      await details.locator(":scope > summary").click()
+  }
 }
 
 export async function openModsClawEditor(page: Page): Promise<void> {

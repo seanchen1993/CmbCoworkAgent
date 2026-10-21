@@ -85,7 +85,7 @@ async function main() {
     )
 
     await mount(page, `host.render(<FlowsPanel threadId='a'/>);`)
-    await page.getByText("配好步骤，保存后在聊天中开始任务。", { exact: true }).waitFor()
+    await page.getByText("为下一条聊天选一个执行顺序，返回聊天后输入目标并发送。", { exact: true }).waitFor()
     assert.equal(
       await page.getByRole("button", { name: "新建代码检视流程", exact: true }).isEnabled(),
       true
@@ -98,7 +98,7 @@ async function main() {
         .isVisible(),
       false
     )
-    await page.getByRole("button", { name: "流程配置说明", exact: true }).click()
+    await page.getByRole("button", { name: "聊天任务模板说明", exact: true }).click()
     assert.equal(
       await page
         .getByText("项目要求的完成检查和人工确认仍会执行。关闭配置页面不会停止任务。", {
@@ -109,7 +109,7 @@ async function main() {
     )
     await page
       .getByText(
-        "这里负责创建和修改执行步骤。保存后点击“去这段聊天使用”，在聊天输入框填写任务并明确发送。",
+        "点击“选用并返回聊天”会保存并选择模板。随后在原聊天输入目标并发送，才会按模板执行。",
         {
           exact: true
         }

@@ -30,7 +30,16 @@ export function registerProjectPreviewHandlers(
       draftId: z.string().regex(/^[a-z][a-z0-9-]{0,47}$/), revision: z.number().int().min(1).max(8),
       expectedDigest: digest, mode: z.enum(["stage", "downstream"]) }).strict()
     const comparison = z.object({ threadId, projectId: z.string().uuid() }).strict()
-    const create = z.object({ threadId, preparationId: z.string().uuid(), expectedDigest: digest }).strict()
+    const create = z.object({ threadId, preparationId: z.string().uuid(), expectedDigest: digest,
+      recoveryApproval: z.object({ policyDigest: digest,
+        allowNetworkSideEffects: z.literal(true) }).strict().optional() }).strict()
+    const reconcileHooks = z.object({ threadId, projectId: z.string().uuid(),
+      approveNetworkInspection: z.literal(true).optional() }).strict()
+    ipc.handle("project-preview:stage-debug-reconcile-hooks", async (event, value: unknown) => {
+      trusted(event)
+      const input = reconcileHooks.parse(value)
+      return stageDebug().reconcileHooks(context(event, input.threadId), input)
+    })
     ipc.handle("project-preview:stage-debug-compare", async (event, value: { threadId: string; projectId: string }) => {
       trusted(event)
       const input = comparison.parse(value)

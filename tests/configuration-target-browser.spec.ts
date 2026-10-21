@@ -134,7 +134,7 @@ async function main() {
     await choose("C:/alpha")
     assert.equal(await claw.getByLabel("ClawPanel草稿").inputValue(),"保留B草稿")
     assert.equal(await page.evaluate(()=> (window as unknown as ConfigurationWindow).readTarget().threadId),"b")
-    await page.getByRole("button",{name:"步骤管理",exact:true}).click()
+    await page.getByRole("button",{name:"聊天任务模板",exact:true}).click()
     await page.getByRole("region",{name:"FlowsPanel",exact:true}).waitFor()
     page.once("dialog",dialog=>dialog.dismiss())
     await choose("C:/alpha")

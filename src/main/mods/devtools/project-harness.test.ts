@@ -20,6 +20,10 @@ import { discoverSkillsSync } from "../../skills/discovery"
 import { HostProjectStore } from "../../harness-board/project-runtime/host-store"
 import { HostProjectService } from "../../harness-board/project-runtime/host-service"
 import { validateHostStage } from "../../harness-board/project-runtime/host-validators"
+import {
+  wrapProjectRuntimeManifest,
+  CONTEXT_HANDOFF_PROTOCOL
+} from "../../../shared/project-runtime"
 
 const roots: string[] = []
 afterEach(async () => {
@@ -39,6 +43,40 @@ function edit(bundle: AuthoringSourceBundle, change: (value: HarnessDefinition) 
 }
 
 describe("declarative Harness authoring", () => {
+  it("compares compiled runtime semantics while preserving an independent extension envelope", () => {
+    const base = source()
+    const extended = createAuthoringSourceBundle(
+      base.files.map((file) =>
+        file.path === "devclaw.project-runtime.json"
+          ? {
+              ...file,
+              text: JSON.stringify(
+                wrapProjectRuntimeManifest(JSON.parse(file.text), {
+                  apiVersion: "devclaw.extension-contract/v1",
+                  requires: [CONTEXT_HANDOFF_PROTOCOL],
+                  context: {
+                    sourceAccess: "read-only",
+                    mutableData: "host",
+                    configuration: "host-resolved",
+                    knowledge: { required: false },
+                    provider: { entry: "hooks/provider.py", operations: ["session-context"] }
+                  }
+                })
+              )
+            }
+          : file
+      )
+    )
+    expect(inspectProjectSource(extended).report.diagnostics).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "PROJECT_HARNESS_STALE" })])
+    )
+    const stale = edit(extended, (harness) => {
+      harness.nodes[0].title = "Actual node change"
+    })
+    expect(inspectProjectSource(stale).report.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "PROJECT_HARNESS_STALE" })])
+    )
+  })
   it("requires both review outputs and rejects changing the preserved draft", async () => {
     const root = await mkdtemp(join(tmpdir(), "harness-review-copy-"))
     roots.push(root)

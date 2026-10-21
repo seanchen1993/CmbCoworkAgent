@@ -15,7 +15,9 @@ describe("creator support scopes", () => {
       CREATOR_CONDITIONAL_CAPABILITIES.map((value) => [value.scope, value.availability])
     ).toEqual([
       ["host-project", "conditional"],
-      ["host-project", "conditional"]
+      ["host-project", "conditional"],
+      ["plugin-owned-project", "conditional"],
+      ["plugin-delivery", "conditional"]
     ])
   })
 
@@ -97,8 +99,21 @@ describe("creator support scopes", () => {
     expect(delivery.guarantees.join(" ")).toContain("不会安装、授权或执行")
     expect(delivery.guarantees.join(" ")).toContain("不代表真实业务验收通过")
     expect(debug.guarantees.join(" ")).toContain("不恢复数据库、网络、发布或 Git 状态")
-    expect(debug.guarantees.join(" ")).toContain(
-      "复杂 AutoBiz 的配置、知识、Hooks 与 workflow 恢复尚未支持"
+    expect(debug.guarantees.join(" ")).toContain("真实终态可冷核对")
+    const plugin = CREATOR_CONDITIONAL_CAPABILITIES.find(
+      (item) => item.id === "plugin-owned-stage-recovery"
+    )!
+    expect(plugin.operations.every((item) => item.kind === "native")).toBe(true)
+    expect(plugin.operations.map((item) => item.operation)).toEqual(
+      expect.arrayContaining(["inspect", "latest", "prepare", "apply", "reconcile"])
     )
+    expect(plugin.guarantees.join(" ")).toContain("不自动重放 apply")
+    expect(
+      plugin.preconditions.find((item) => item.id === "declared-adapter")?.description
+    ).toContain("原锁文件")
+    const deliveryRecovery = CREATOR_CONDITIONAL_CAPABILITIES.find(
+      (item) => item.id === "native-plugin-delivery-recovery-and-use"
+    )!
+    expect(deliveryRecovery.guarantees.join(" ")).toContain("不自动启用")
   })
 })

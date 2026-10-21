@@ -16,6 +16,8 @@ export interface ProjectFunctionSourceReview {
     scanIncomplete: boolean
     hasConfiguration?: boolean
     configurationReady?: boolean
+    /** Native metadata/configuration only: never a guest or execution approval. */
+    configurationOnly?: true
   }
 }
 export interface ProjectFunctionSourceApi {

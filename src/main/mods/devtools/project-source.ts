@@ -16,6 +16,8 @@ export const isProjectSourcePath = (path: string, resourcePaths: readonly string
   [
     "plugin.json",
     "devclaw.project-runtime.json",
+    "devclaw.stage-recovery.json",
+    "devclaw.stage-recovery-adapter.json",
     "devclaw.capabilities.json",
     "devclaw.business-assembly.json",
     "devclaw.portability.json",
@@ -65,6 +67,7 @@ export async function readProjectSource(
               mod.entry,
               ...mod.resources,
               ...(mod.contextProvider ? [mod.contextProvider.entry] : []),
+              ...(mod.stageRecoveryAdapter ? [mod.stageRecoveryAdapter.entry] : []),
               ...(mod.skills ?? [])
             ])
           ])

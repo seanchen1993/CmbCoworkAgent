@@ -40,7 +40,7 @@ export const creatorWorkspaceGuideSteps: readonly AnchoredGuideStep[] = [
     id: "debug",
     title: "从阶段快照隔离调试",
     description:
-      "这里可以按阶段修改与隔离调试。先真实试用产生阶段进入快照，结束旧执行并释放占用，再修改目标或后续未共享的 Skill 正文，准备并明确确认新分支，在新分支重新批准、运行和比较。当前仅支持受控文件阶段；AutoBiz 的配置、知识、Hooks 和 workflow 尚待适配。没有项目或快照时需先完成前置步骤。",
+      "Host 项目先真实试用产生阶段进入快照，结束旧执行并核对结果，再修改目标或后续未共享的 Skill 正文，确认独立分支并重新批准运行。已冻结的配置与知识、已声明恢复协议的 Hooks 和上下文脚本可按条件保留。插件自有流程在试用卡检查“插件阶段恢复”，须有插件适配器并分别确认规划与应用；Git、活跃工作树和外部状态不会自动回退。没有项目或快照时先完成前置步骤。",
     selectors: [
       '[data-creator-guide="stage-debug"] > summary',
       '[data-creator-guide="project-preview"] > summary',
@@ -52,7 +52,7 @@ export const creatorWorkspaceGuideSteps: readonly AnchoredGuideStep[] = [
     id: "delivery",
     title: "保存成独立的新插件",
     description:
-      "在这里确认独立名称与版本，安装到本机或导出 ZIP，原插件保留。可以提前保存未验收源码，但保存不代表通过；正式使用前应完成当前候选的整轮验收。单阶段调试通过不等于整轮通过。",
+      "确认独立名称与版本后安装或导出 ZIP，原插件保留。响应异常先点“核对实际交付结果”，不要重复提交；安装后点“开始使用”补齐配置和知识并定位真实入口。可以保存未验收源码，但保存和单阶段通过都不代表整轮验收通过。",
     selectors: ['[data-creator-section="delivery"]', '[data-creator-section="create"]']
   },
   {

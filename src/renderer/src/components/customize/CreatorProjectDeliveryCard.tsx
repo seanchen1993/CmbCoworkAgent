@@ -5,14 +5,15 @@ import type {
   DevelopmentStatus
 } from "../../../../shared/mods/development"
 import { isSameWorkspacePath } from "../../../../shared/workspace-path"
-import { projectDeliveryError } from "./project-delivery-view"
+import { projectDeliveryError, projectDeliveryReconciliationText } from "./project-delivery-view"
+import { InstalledPluginStartUse } from "./InstalledPluginStartUse"
 
 const button = "rounded-lg border px-3 py-2 text-sm hover:bg-accent disabled:opacity-50"
 
 export function CreatorProjectDeliveryCard(props: {
   threadId: string
   workspace: string
-  request: DevelopmentProjectTrialRequest
+  request?: DevelopmentProjectTrialRequest
   delivery?: DevelopmentStatus["projectDelivery"]
   api: DevelopmentApi
   onStatus(status: DevelopmentStatus): void
@@ -22,8 +23,8 @@ export function CreatorProjectDeliveryCard(props: {
       key={JSON.stringify([
         props.threadId,
         props.workspace,
-        props.request.id,
-        props.request.digest
+        props.request?.id,
+        props.request?.digest
       ])}
       {...props}
     />
@@ -38,11 +39,16 @@ function ScopedDelivery({
   api,
   onStatus
 }: Parameters<typeof CreatorProjectDeliveryCard>[0]) {
-  const initialName = /^[a-z][a-z0-9-]{0,40}$/.test(request.name)
-    ? `${request.name}-custom`
-    : "my-created-plugin"
+  const current =
+    !!request && delivery?.requestId === request.id && delivery.sourceDigest === request.digest
+  const initialName =
+    current && delivery
+      ? delivery.name
+      : request && /^[a-z][a-z0-9-]{0,40}$/.test(request.name)
+        ? `${request.name}-custom`
+        : "my-created-plugin"
   const [name, setName] = useState(initialName)
-  const [version, setVersion] = useState("1.0.0")
+  const [version, setVersion] = useState(current && delivery ? delivery.version : "1.0.0")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   const live = useRef(true)
@@ -53,7 +59,12 @@ function ScopedDelivery({
       live.current = false
     }
   }, [])
-  const current = delivery?.requestId === request.id && delivery.sourceDigest === request.digest
+  const unresolved = !!delivery && ["unknown", "installing", "exporting"].includes(delivery.phase)
+  const accept = (next: DevelopmentStatus) => {
+    if (next.threadId !== threadId || !isSameWorkspacePath(next.workspace, workspace))
+      throw Error("DEVELOPMENT_SCOPE_CHANGED")
+    onStatus(next)
+  }
   const act = async (call: () => Promise<DevelopmentStatus>) => {
     if (pending.current || !live.current) return
     pending.current = true
@@ -62,11 +73,18 @@ function ScopedDelivery({
     try {
       const next = await call()
       if (!live.current) return
-      if (next.threadId !== threadId || !isSameWorkspacePath(next.workspace, workspace))
-        throw Error("DEVELOPMENT_SCOPE_CHANGED")
-      onStatus(next)
+      accept(next)
     } catch (cause) {
-      if (live.current) setError(projectDeliveryError(cause))
+      if (live.current) {
+        setError(projectDeliveryError(cause))
+        // Read actual native facts after a lost reply; never retry the side-effecting action.
+        try {
+          const next = await api.status({ threadId })
+          if (live.current) accept(next)
+        } catch {
+          /* Retain the original failure and offer native reconciliation. */
+        }
+      }
     } finally {
       if (live.current) {
         pending.current = false
@@ -79,65 +97,77 @@ function ScopedDelivery({
       aria-label="项目候选保存为新插件"
       className="space-y-4 rounded-xl border border-primary/20 bg-primary/5 p-4"
     >
-      <h4 className="font-semibold">保存当前项目候选为新插件</h4>
+      <h4 className="font-semibold">{request ? "保存当前项目候选为新插件" : "核对历史插件交付"}</h4>
       <p className="text-xs leading-5 text-muted-foreground">
-        保存会冻结当前候选源码，创建独立的新插件，保留原插件。可保存尚未完成试用的候选；
-        保存、安装和导出均不代表业务验收通过。试用记录对应上方来源版本，改名后的插件没有因此自动重跑。
+        {request
+          ? "保存会冻结当前候选源码，创建独立的新插件，保留原插件。可保存尚未完成试用的候选；保存、安装和导出均不代表业务验收通过。试用记录对应上方来源版本，改名后的插件没有因此自动重跑。"
+          : "原候选已变化或当前没有试用请求。此处只核对历史安装、导出事实；不会重放操作，也不能沿用旧版本批准。新交付需准备新候选并重新确认。"}
       </p>
-      <div className="grid gap-3 sm:grid-cols-2">
-        <label className="grid gap-1 text-sm">
-          新插件标识
-          <input
-            aria-label="新插件标识"
-            value={name}
-            maxLength={48}
-            disabled={busy}
-            className="rounded border bg-background px-3 py-2"
-            placeholder="my-created-plugin"
-            onChange={(event) => setName(event.target.value)}
-          />
-          <span className="text-xs text-muted-foreground">
-            以小写字母开头，最多 48 位，只含小写字母、数字和短横线，与已安装插件区分。
-          </span>
-        </label>
-        <label className="grid content-start gap-1 text-sm">
-          新插件版本
-          <input
-            aria-label="新插件版本"
-            value={version}
-            maxLength={64}
-            disabled={busy}
-            className="rounded border bg-background px-3 py-2"
-            placeholder="1.0.0"
-            onChange={(event) => setVersion(event.target.value)}
-          />
-        </label>
-      </div>
-      <button
-        type="button"
-        className={button}
-        disabled={busy || !name.trim() || !version.trim() || !api.prepareProjectDelivery}
-        onClick={() =>
-          void act(() =>
-            api.prepareProjectDelivery!({
-              threadId,
-              expectedWorkspace: workspace,
-              requestId: request.id,
-              digest: request.digest,
-              name: name.trim(),
-              version: version.trim()
-            })
-          )
-        }
-      >
-        准备保存为新插件
-      </button>
-      {delivery && !current && (
-        <p role="status" className="text-sm">
-          下方原交付记录属于另一候选，请重新核对当前版本后准备保存。
+      {request && (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="grid gap-1 text-sm">
+              新插件标识
+              <input
+                aria-label="新插件标识"
+                value={name}
+                maxLength={48}
+                disabled={busy}
+                className="rounded border bg-background px-3 py-2"
+                placeholder="my-created-plugin"
+                onChange={(event) => setName(event.target.value)}
+              />
+              <span className="text-xs text-muted-foreground">
+                以小写字母开头，最多 48 位，只含小写字母、数字和短横线，与已安装插件区分。
+              </span>
+            </label>
+            <label className="grid content-start gap-1 text-sm">
+              新插件版本
+              <input
+                aria-label="新插件版本"
+                value={version}
+                maxLength={64}
+                disabled={busy}
+                className="rounded border bg-background px-3 py-2"
+                placeholder="1.0.0"
+                onChange={(event) => setVersion(event.target.value)}
+              />
+            </label>
+          </div>
+          <button
+            type="button"
+            className={button}
+            disabled={
+              busy || unresolved || !name.trim() || !version.trim() || !api.prepareProjectDelivery
+            }
+            onClick={() =>
+              void act(() =>
+                api.prepareProjectDelivery!({
+                  threadId,
+                  expectedWorkspace: workspace,
+                  requestId: request.id,
+                  digest: request.digest,
+                  name: name.trim(),
+                  version: version.trim()
+                })
+              )
+            }
+          >
+            准备保存为新插件
+          </button>
+        </>
+      )}
+      {unresolved && (
+        <p className="text-sm text-muted-foreground">
+          上一次交付结果尚未核实。请先使用下方“核对实际交付结果”，避免重复安装或导出。
         </p>
       )}
-      {delivery && current && (
+      {delivery && !current && (
+        <p role="status" className="text-sm">
+          下方交付记录属于历史候选，仍可核对其实际结果；安装、导出和开始使用不能沿用到当前候选。
+        </p>
+      )}
+      {delivery && (
         <div className="space-y-3 rounded-lg border bg-background p-4">
           <p className="font-medium">
             {delivery.name} · v{delivery.version}
@@ -156,49 +186,88 @@ function ScopedDelivery({
                       : "交付结果待核对，请刷新工作区并检查实际结果。"}
           </p>
           <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              className={`${button} border-primary bg-primary text-primary-foreground hover:bg-primary/90`}
-              disabled={busy || !delivery.canInstall || !api.installProjectDelivery}
-              onClick={() =>
-                void act(() =>
-                  api.installProjectDelivery!({
-                    threadId,
-                    expectedWorkspace: workspace,
-                    deliveryId: delivery.id,
-                    digest: delivery.digest
-                  })
-                )
-              }
-            >
-              确认安装新插件
-            </button>
-            <button
-              type="button"
-              className={button}
-              disabled={busy || !delivery.canExport || !api.exportProjectDelivery}
-              onClick={() =>
-                void act(() =>
-                  api.exportProjectDelivery!({
-                    threadId,
-                    expectedWorkspace: workspace,
-                    deliveryId: delivery.id,
-                    digest: delivery.digest
-                  })
-                )
-              }
-            >
-              导出新插件 ZIP…
-            </button>
+            {request && (
+              <>
+                <button
+                  type="button"
+                  className={`${button} border-primary bg-primary text-primary-foreground hover:bg-primary/90`}
+                  disabled={busy || !current || !delivery.canInstall || !api.installProjectDelivery}
+                  onClick={() =>
+                    void act(() =>
+                      api.installProjectDelivery!({
+                        threadId,
+                        expectedWorkspace: workspace,
+                        deliveryId: delivery.id,
+                        digest: delivery.digest
+                      })
+                    )
+                  }
+                >
+                  确认安装新插件
+                </button>
+                <button
+                  type="button"
+                  className={button}
+                  disabled={busy || !current || !delivery.canExport || !api.exportProjectDelivery}
+                  onClick={() =>
+                    void act(() =>
+                      api.exportProjectDelivery!({
+                        threadId,
+                        expectedWorkspace: workspace,
+                        deliveryId: delivery.id,
+                        digest: delivery.digest
+                      })
+                    )
+                  }
+                >
+                  导出新插件 ZIP…
+                </button>
+              </>
+            )}
+            {delivery.canReconcile && api.reconcileProjectDelivery && (
+              <button
+                type="button"
+                className={button}
+                disabled={busy}
+                onClick={() =>
+                  void act(() =>
+                    api.reconcileProjectDelivery!({
+                      threadId,
+                      expectedWorkspace: workspace,
+                      deliveryId: delivery.id,
+                      digest: delivery.digest
+                    })
+                  )
+                }
+              >
+                核对实际交付结果
+              </button>
+            )}
           </div>
-          {delivery.pluginId && (
-            <p className="text-xs text-muted-foreground">
-              下一步：在“添加功能 → 我已添加”找到“{delivery.name}
-              ”，从其项目入口使用；首次使用需填写参数并确认权限。
+          {delivery.reconciliation && (
+            <p role="status" className="text-sm">
+              {projectDeliveryReconciliationText(delivery.reconciliation.outcome)}
             </p>
+          )}
+          {delivery.pluginId && current && (
+            <InstalledPluginStartUse
+              threadId={threadId}
+              workspace={workspace}
+              pluginId={delivery.pluginId}
+              expected={{ name: delivery.name, version: delivery.version, digest: delivery.digest }}
+            />
           )}
           {delivery.output && (
             <p className="break-all text-xs text-muted-foreground">导出位置：{delivery.output}</p>
+          )}
+          {delivery.pendingOutput && (
+            <div className="space-y-1 text-xs text-muted-foreground">
+              <p className="break-all">待核对导出目标：{delivery.pendingOutput}</p>
+              <p>
+                若存在不完整或冲突文件，请先保留并移到其他位置，再核对实际交付结果；
+                确认未执行后重新准备、选择新的文件名并明确导出。系统不会覆盖或删除该文件。
+              </p>
+            </div>
           )}
           <details className="text-xs text-muted-foreground">
             <summary className="cursor-pointer">保存来源与版本</summary>

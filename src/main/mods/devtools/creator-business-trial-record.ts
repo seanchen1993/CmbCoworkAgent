@@ -40,8 +40,11 @@ export interface CreatorBusinessTrialRecord {
   feedback: Array<{ id: string; at: number; message: string }>
   physical?: Array<{ threadId: string; requestId: string; confirmed?: boolean }>
   stopRequested?: boolean
+  /** Native adapter verified an independent output copy; initialization must not reset it. */
+  recovery?: { sourceId: string; preparationId: string; evidenceDigest: string }
 }
 export interface CreatorBusinessTrialProofBinding {
+  recovery?: CreatorBusinessTrialRecord["recovery"]
   accountingRunId?: string
   root: string
   packageDigest: string
@@ -285,7 +288,8 @@ export function parseCreatorBusinessTrialRecord(
       "runId",
       "error",
       "physical",
-      "stopRequested"
+      "stopRequested",
+      "recovery"
     ]
   )
   if (
@@ -304,6 +308,13 @@ export function parseCreatorBusinessTrialRecord(
   text(row.featureId, 256)
   boolean(row.settled)
   if (row.stopRequested !== undefined) boolean(row.stopRequested)
+  if (row.recovery !== undefined) {
+    const recovery = object(row.recovery, ["sourceId", "preparationId", "evidenceDigest"])
+    text(recovery.sourceId, 256)
+    if (typeof recovery.preparationId !== "string" || !uuid.test(recovery.preparationId)) invalid()
+    digest(recovery.evidenceDigest)
+    if (!row.project || !row.workspace || row.phase === "needs-confirmation") invalid()
+  }
   for (const key of ["turnId", "runId", "accountingRunId"])
     if (row[key] !== undefined) text(row[key], 256)
   if (row.error !== undefined) text(row.error, 8192, true, true)
@@ -413,6 +424,7 @@ export function assertCreatorBusinessTrialProofBinding(
     record.goal !== proof.goal ||
     record.planId !== proof.planId ||
     record.accountingRunId !== proof.accountingRunId ||
+    JSON.stringify(record.recovery) !== JSON.stringify(proof.recovery) ||
     JSON.stringify(record.scope) !== JSON.stringify(proof.scope) ||
     JSON.stringify(record.plugin) !== JSON.stringify(proof.plugin) ||
     JSON.stringify(record.candidate) !== JSON.stringify(proof.candidate) ||

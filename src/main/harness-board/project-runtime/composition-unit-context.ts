@@ -63,6 +63,8 @@ export async function readCompositionUnitContext(input: {
   })
   if (!prepared) throw Error("COMPOSITION_UNIT_CONTEXT_UNSUPPORTED")
   try {
+    if (prepared.recoveryBound)
+      throw Error("PROJECT_STAGE_DEBUG_CONTEXT_PROVIDER_NATIVE_EXECUTION_REQUIRED")
     guard()
     const result = await execute(prepared.invocation.executable, prepared.invocation.args, {
       cwd: input.plugin.path, windowsHide: true, timeout: 15_000, maxBuffer: 512 * 1024,

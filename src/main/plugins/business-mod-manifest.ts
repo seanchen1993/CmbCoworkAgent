@@ -298,6 +298,7 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
         "configSchema",
         "userConfig",
         "contextProvider",
+        "stageRecoveryAdapter",
         "skills"
       ])
       const id = businessModId(item.id),
@@ -357,6 +358,37 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
             : { knowledgeBinding: provider.knowledgeBinding as string })
         }
       }
+      let stageRecoveryAdapter: BusinessModExtensionDefinition["stageRecoveryAdapter"]
+      if (item.stageRecoveryAdapter !== undefined) {
+        const recovery = businessModObject(item.stageRecoveryAdapter)
+        fields(recovery, [
+          "apiVersion",
+          "entry",
+          "runtime",
+          "isolation",
+          "codeSource",
+          "externalEffects"
+        ])
+        const recoveryEntry = businessModPath(recovery.entry)
+        if (
+          recovery.apiVersion !== "devclaw.plugin-stage-recovery/v1" ||
+          recovery.runtime !== "python" ||
+          recovery.isolation !== "private-output-copy" ||
+          recovery.codeSource !== "keep" ||
+          recovery.externalEffects !== "network-requires-confirmation" ||
+          !recoveryEntry.startsWith(`mods/business/${id}/`) ||
+          !recoveryEntry.endsWith(".py")
+        )
+          throw Error("BUSINESS_MOD_STAGE_RECOVERY_ADAPTER_INVALID")
+        stageRecoveryAdapter = {
+          apiVersion: "devclaw.plugin-stage-recovery/v1",
+          entry: recoveryEntry,
+          runtime: "python",
+          isolation: "private-output-copy",
+          codeSource: "keep",
+          externalEffects: "network-requires-confirmation"
+        }
+      }
       return {
         id,
         title: text(item.title),
@@ -370,6 +402,7 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
         ...(item.usage === undefined ? {} : { usage: parseCapabilityUsage(item.usage) }),
         ...(configSchema ? { configSchema: structuredClone(configSchema) } : {}),
         ...(contextProvider ? { contextProvider } : {}),
+        ...(stageRecoveryAdapter ? { stageRecoveryAdapter } : {}),
         ...(skills?.length ? { skills } : {}),
         ...(item.userConfig === undefined
           ? {}

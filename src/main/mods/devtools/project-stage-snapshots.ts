@@ -1,5 +1,8 @@
-import { readBoundedProjectFiles, isSensitiveProjectFilePath,
-  type ProjectFileInventory } from "../../harness-board/project-runtime/bounded-project-files"
+import {
+  readBoundedProjectFiles,
+  isSensitiveProjectFilePath,
+  type ProjectFileInventory
+} from "../../harness-board/project-runtime/bounded-project-files"
 import { randomUUID } from "node:crypto"
 import { mkdirSync, readdirSync } from "node:fs"
 import { lstat, mkdir, open, readdir, rm } from "node:fs/promises"
@@ -28,6 +31,7 @@ import {
   readRuntimeScopedFileAsync,
   runtimeDirectoryAsync
 } from "../../harness-board/project-runtime/safe-files-async"
+import type { StageRecoveryInputSnapshot } from "./stage-recovery-inputs"
 
 export const PROJECT_STAGE_SNAPSHOT_LIMITS = {
   ...HOST_PACKAGE_LIMITS,
@@ -53,6 +57,7 @@ export interface StageInputSnapshot {
   sourceDigest: string
   sourceDeclarationDigest: string
   inputIdentity: string
+  recoveryInputs?: StageRecoveryInputSnapshot
   workspaceIdentity: string
   files: SnapshotFile[]
   directories: string[]
@@ -64,6 +69,7 @@ interface CaptureInput {
   operation: HostProjectOperation
   sourceRoot: string
   inputIdentity: string
+  recoveryInputs?: StageRecoveryInputSnapshot
   guard(): void
   signal?: AbortSignal
 }
@@ -112,6 +118,19 @@ function bind(project: HostProjectState, operation: HostProjectOperation) {
 function metadataIdentity(snapshot: Omit<StageInputSnapshot, "id">): string {
   return runtimeDigest(JSON.stringify(snapshot))
 }
+function assertRecoveryInputs(value: StageRecoveryInputSnapshot | undefined): void {
+  if (value === undefined) return
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).sort().join(",") !== "digest,id,schemaVersion" ||
+    value.schemaVersion !== 1 ||
+    !/^[a-f0-9-]{36}$/.test(value.id) ||
+    !digestPattern.test(value.digest)
+  )
+    fail("RECOVERY_INPUTS_INVALID")
+}
 
 /** Main-only, bounded workspace snapshots. Full package validation belongs to the caller's
  * original Host guard; this service neither copies package source nor grants execution authority.
@@ -152,6 +171,7 @@ export class ProjectStageSnapshots {
     input.signal?.throwIfAborted()
     text(input.scopeKey)
     text(input.inputIdentity)
+    assertRecoveryInputs(input.recoveryInputs)
     if (this.capturing) fail("BUSY")
     this.capacity()
     const project = parseHostProjectState(structuredClone(input.project))
@@ -252,6 +272,7 @@ export class ProjectStageSnapshots {
         sourceDigest: project.pluginDigest,
         sourceDeclarationDigest,
         inputIdentity: input.inputIdentity,
+        ...(input.recoveryInputs ? { recoveryInputs: structuredClone(input.recoveryInputs) } : {}),
         workspaceIdentity: runtimeDirectoryIdentity(workspace),
         files,
         directories,
@@ -329,6 +350,7 @@ export class ProjectStageSnapshots {
     )
       fail("METADATA_CHANGED")
     const project = parseHostProjectState(value!.project)
+    assertRecoveryInputs(value!.recoveryInputs)
     const operation = parseHostOperation(value!.operation)
     bind(project, operation)
     if (
@@ -401,13 +423,23 @@ export class ProjectStageSnapshots {
     )
   }
   /** Fully verify immutable baseline bytes for a read-only comparison. No restoration or grants. */
-  async inspectFiles(id: string, scopeKey: string, guard: () => void,
-    signal?: AbortSignal): Promise<{ snapshot: StageInputSnapshot; inventory: ProjectFileInventory }> {
+  async inspectFiles(
+    id: string,
+    scopeKey: string,
+    guard: () => void,
+    signal?: AbortSignal
+  ): Promise<{ snapshot: StageInputSnapshot; inventory: ProjectFileInventory }> {
     guard()
     const snapshot = this.read(id, scopeKey)
-    const current = () => { signal?.throwIfAborted(); guard(); this.assertRoot() }
+    const current = () => {
+      signal?.throwIfAborted()
+      guard()
+      this.assertRoot()
+    }
     const inventory = await readBoundedProjectFiles(join(this.root, id, "files"), {
-      guard: current, signal, expected: snapshot
+      guard: current,
+      signal,
+      expected: snapshot
     })
     current()
     if (!same(this.read(id, scopeKey), snapshot)) fail("METADATA_CHANGED")
@@ -484,7 +516,10 @@ export class ProjectStageSnapshots {
   ): Promise<Map<string, Buffer>> {
     try {
       const inventory = await readBoundedProjectFiles(root, {
-        guard, signal, expected: snapshot, collect
+        guard,
+        signal,
+        expected: snapshot,
+        collect
       })
       return inventory.buffers
     } catch (error) {

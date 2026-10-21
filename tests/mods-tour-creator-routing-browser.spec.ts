@@ -18,7 +18,7 @@ async function main() {
       window.api={mods:{globalEnabled:async()=>{window.calls.push(['read-global']);return true},
         status:async threadId=>{window.calls.push(['read-settings',threadId]);return {workspace:'C:/Owned/Workspace',enabled:true}},
         configureGlobal:async()=>{throw Error('Unexpected global mutation')},configure:async()=>{throw Error('Unexpected project mutation')},
-        development:{setMode:async input=>{window.calls.push(['mode',input]);if(window.routingScenario.error)throw Error(window.routingScenario.error);return {threadId:input.threadId,workspace:input.expectedWorkspace,enabled:true,mode:input.mode,drafts:[],trials:[]}}}}};
+        development:{status:async({threadId})=>({threadId,workspace:'C:/Owned/Workspace',enabled:true,mode:'creator'}),onChanged:()=>()=>{},setMode:async input=>{window.calls.push(['mode',input]);if(window.routingScenario.error)throw Error(window.routingScenario.error);return {threadId:input.threadId,workspace:input.expectedWorkspace,enabled:true,mode:input.mode,drafts:[],trials:[]}}}}};
       function Fixture(){const showing=useAppStore(state=>state.showCustomizeView);return <>
         <textarea id='composer' aria-label='原聊天草稿' defaultValue='保留原来的任务草稿'/>
         {showing&&<SettingsReturnFocusContext.Provider value={()=>{window.calls.push(['focus-composer']);document.getElementById('composer').focus()}}><CustomizeView/></SettingsReturnFocusContext.Provider>}
@@ -74,6 +74,16 @@ async function main() {
         (window as unknown as { routingScenario: unknown }).routingScenario = scenario
       }, scenario)
       await page.addScriptTag({ content: bundle.outputFiles[0].text })
+      if (scenario.unavailable) {
+        await page.getByRole("button", { name: "返回应用", exact: true }).waitFor()
+        assert.equal(await page.getByRole("button", { name: "任务示例演练", exact: true }).count(), 0)
+        const calls = await page.evaluate(() => (window as unknown as { calls: unknown[][] }).calls)
+        assert.deepEqual(calls.filter(([name]) => name === "mode" || name === "read-global"), [])
+        assert.deepEqual(errors, [])
+        results.push({ ...scenario, calls, errors, guideSuppressed: true })
+        await page.close()
+        continue
+      }
       const panelDraft = scenario.tab === "claw" ? "ClawPanel草稿" : "FlowsPanel草稿"
       if (scenario.tab !== "mods") await page.getByLabel(panelDraft, { exact: true }).fill("保留页面草稿")
       await page.getByRole("button", { name: "任务示例演练", exact: true }).click()

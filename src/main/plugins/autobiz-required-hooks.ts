@@ -3,12 +3,20 @@ import mergeReviewedKernel from "./autobiz-business-kernel-merge-reviewed.json"
 import wakeupReviewedKernel from "./autobiz-business-kernel-wakeup-reviewed.json"
 import specRoleReviewedKernel from "./autobiz-business-kernel-spec-role-reviewed.json"
 import utestLiteralReviewedKernel from "./autobiz-business-kernel-utest-literal-reviewed.json"
+import original234ReviewedKernel from "./autobiz-business-kernel-original-234-reviewed.json"
+import original234PreparationReviewedKernel from "./autobiz-business-kernel-original-234-delivery-reviewed.json"
 
 /** Identity classification only. Existing reviewed-package admission still verifies every source byte. */
 export function isReviewedAutobizKernelIdentity(kernel: { id: string; version: string }): boolean {
-  return [reviewedKernel, mergeReviewedKernel, wakeupReviewedKernel, specRoleReviewedKernel, utestLiteralReviewedKernel].some(
-    (profile) => kernel.id === profile.id && kernel.version === profile.version
-  )
+  return [
+    reviewedKernel,
+    mergeReviewedKernel,
+    wakeupReviewedKernel,
+    specRoleReviewedKernel,
+    utestLiteralReviewedKernel,
+    original234ReviewedKernel,
+    original234PreparationReviewedKernel
+  ].some((profile) => kernel.id === profile.id && kernel.version === profile.version)
 }
 
 /** Reviewed AutoBiz v1 constraints. Prompt augmentation and critic logging remain composable. */
@@ -34,7 +42,10 @@ const PINNED_ORIGINAL_REQUIRED = [
 /** Pure portable IDs using the original CC parser's Event:group:handler identity.
  * Call only after admission to the supported AutoBiz adapter. This list grants no source authority.
  */
-export function reviewedAutobizRequiredHookIds(value: unknown): string[] {
+export function reviewedAutobizRequiredHookIds(
+  value: unknown,
+  kernel?: { id: string; version: string }
+): string[] {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw Error("AUTOBIZ_REQUIRED_HOOKS_INVALID")
   const raw = value as Record<string, unknown>
@@ -45,8 +56,18 @@ export function reviewedAutobizRequiredHookIds(value: unknown): string[] {
   // The original admitted 49-file adapter predates the larger reviewed business kernel.
   const currentKernel =
     Object.hasOwn(input, "PostToolUse") || JSON.stringify(input).includes("-X utf8")
+  const original234 = [original234ReviewedKernel, original234PreparationReviewedKernel].some(
+    (profile) => kernel?.id === profile.id && kernel?.version === profile.version
+  )
   const required: readonly (readonly ["PreToolUse" | "PostToolUse", string, number])[] =
-    currentKernel ? REQUIRED : PINNED_ORIGINAL_REQUIRED
+    currentKernel
+      ? [
+          ...REQUIRED,
+          ...(original234
+            ? [["PreToolUse", "python -X utf8 hooks/utest_deadline_guard.py", 1] as const]
+            : [])
+        ]
+      : PINNED_ORIGINAL_REQUIRED
   const counts = new Map<string, number>()
   const result: string[] = []
   for (const event of ["PreToolUse", "PostToolUse"] as const) {

@@ -1,4 +1,5 @@
 import { createNativeProjectSourceBridge } from "./native-project-source"
+import { createPluginStartUseBridge } from "./plugin-start-use"
 import type { PluginInstallMode, PluginInstallResult } from "../shared/plugin-install"
 import { WINDOW_PRESENTATION_CHANGED, WINDOW_PRESENTATION_READ, type WindowPresentationSnapshot } from "../shared/window-presentation"
 import { createCommunityExamplesBridge } from "./community-examples"
@@ -3429,6 +3430,7 @@ const api = {
     }
   },
   plugins: {
+    ...createPluginStartUseBridge((channel, input) => ipcRenderer.invoke(channel, input)),
     // Existing plugin APIs remain independent of project-scoped module grants.
     list: (): Promise<PluginMetadata[]> =>
       ipcRenderer.invoke("plugins:list") as Promise<PluginMetadata[]>,
@@ -4706,6 +4708,7 @@ const api = {
       },
       preview: {
         stageDebug: {
+          reconcileHooks: (input: Parameters<NonNullable<import("../shared/project-runtime/stage-debug").ProjectStageDebugApi["reconcileHooks"]>>[0]) => ipcRenderer.invoke("project-preview:stage-debug-reconcile-hooks", input),
           compare: (input: Parameters<NonNullable<import("../shared/project-runtime/stage-debug").ProjectStageDebugApi["compare"]>>[0]) => ipcRenderer.invoke("project-preview:stage-debug-compare", input),
           list: (threadId: string) => ipcRenderer.invoke("project-preview:stage-debug-list", threadId),
           prepare: (input: Parameters<import("../shared/project-runtime/stage-debug").ProjectStageDebugApi["prepare"]>[0]) => ipcRenderer.invoke("project-preview:stage-debug-prepare", input),

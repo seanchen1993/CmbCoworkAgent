@@ -1,7 +1,7 @@
 import { currentNativeConfigurationScope } from "./native-configuration-scope"
 import { captureProjectActionContentGuard } from "../../harness-board/project-action-scope"
 import { retainOriginalActionText } from "./action-result-text"
-import { assertUserConfigSchemaCurrent } from "./user-config-migration"
+import { assertUserConfigSchemaCurrent, userConfigSchemaDigest, userConfigRecordDigest } from "./user-config-migration"
 import { FunctionDevelopmentSessions, DEVELOPMENT_CAPABILITIES, developmentCapabilities, type DevelopmentScope, type DevelopmentRevision, type DevelopmentStatus, type DevelopmentActivation, type DevelopmentCandidate } from "./development-session"
 import { developmentUiOnly } from "./development-conversation-owner"
 import { PlatformCapabilityHub } from "./platform-capabilities-hub"
@@ -36,7 +36,7 @@ import { getModCallContext } from "../context"
 import { validateFunctionTurnStepInput } from "./turn-contract"
 import { validateModelToolInput } from "./tool-sdk"
 import { assertFunctionSourcesCurrent } from "./source-adoption-fence"
-import { FunctionUserConfigValues } from "./user-config-values"
+import { FunctionUserConfigValues, type NativeStageUserConfiguration } from "./user-config-values"
 import { resolveFunctionUserConfig } from "../../../shared/mods/v2/user-config"
 import { synchronizePromptContext } from "../../../shared/mods/v2/prompt-context"
 import { publishPromptAttachmentInput } from "./prompt-attachment-publication"
@@ -114,10 +114,12 @@ import { invokeCreatorPlanningGuest } from "../devtools/creator-planning-guest"
 import type { CreatorPlanningReference } from "../../../shared/mods/creator-planning"
 import {
   compileFunctionPlugin,
+  compileFunctionConfiguration,
   projectFunctionComponents,
   type CompiledFunctionPlugin,
   type FunctionComponentProjection
 } from "./loader"
+import { isConfigurationOnlyPackage } from "./configuration-only-package"
 import { resolveClawComponents } from "../../../shared/mods/claw-components"
 import { bindFunctionComponentAudit } from "./component-audit"
 import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from "./session"
@@ -193,6 +195,7 @@ import {
 export interface RuntimeFunctionSourceFacts {
   name: string
   digest: string
+  configurationOnly?: true
   userConfig?: CompiledFunctionPlugin["userConfig"]
   userConfigSchema?: CompiledFunctionPlugin["userConfigSchema"]
 }
@@ -527,8 +530,11 @@ export type PreparedClawAction =
 
 export class FunctionModsManager {
   private readonly userConfigValues: FunctionUserConfigValues
-  private readonly configurationSourceCache = new FunctionConfigurationSourceCache(16,
-    path => compileFunctionPlugin(path, { captureSources: true }))
+  private readonly configurationSourceCache = new FunctionConfigurationSourceCache(16, (path) =>
+    isConfigurationOnlyPackage(path)
+      ? compileFunctionConfiguration(path, { captureSources: true })
+      : compileFunctionPlugin(path, { captureSources: true })
+  )
   private readonly statusSourceCache = new FunctionConfigurationSourceCache(64)
   private readonly clawSelections = new Map<string, { epoch: number; active: ClawProfile | null }>()
   private readonly preparingSelection = new AsyncLocalStorage<{
@@ -1501,23 +1507,32 @@ export class FunctionModsManager {
   }
 
   /** Read-only host package admission. Calling this never executes or authorizes a Mod. */
-  async prepareRuntimeSourceFacts(input: { workspace: string; plugin: ModPluginSource }):
-    Promise<RuntimeFunctionSourceFacts | undefined> {
+  async prepareRuntimeSourceFacts(input: {
+    workspace: string
+    plugin: ModPluginSource
+  }): Promise<RuntimeFunctionSourceFacts | undefined> {
     if (this.closed || !input.workspace || !input.plugin.enabled)
       throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
-    if (!this.isSource(input.plugin)) return undefined
+    if (!this.isSource(input.plugin) && !isConfigurationOnlyPackage(input.plugin.path))
+      return undefined
     await this.configurationSourceCache.read(input.plugin.path)
     return this.getRuntimeSourceFacts(input)
   }
 
   /** Synchronous consumers must preload first and recheck the same package byte proof. */
-  getRuntimeSourceFacts(input: { workspace: string; plugin: ModPluginSource }):
-    RuntimeFunctionSourceFacts | undefined {
+  getRuntimeSourceFacts(input: {
+    workspace: string
+    plugin: ModPluginSource
+  }): RuntimeFunctionSourceFacts | undefined {
     const compiled = this.retainedRuntimeCompilation(input)
     if (!compiled) return undefined
-    return structuredClone({ name: compiled.name, digest: compiled.digest,
+    return structuredClone({
+      name: compiled.name,
+      digest: compiled.digest,
+      ...(compiled.configurationOnly ? { configurationOnly: true as const } : {}),
       ...(compiled.userConfig ? { userConfig: compiled.userConfig } : {}),
-      ...(compiled.userConfigSchema ? { userConfigSchema: compiled.userConfigSchema } : {}) })
+      ...(compiled.userConfigSchema ? { userConfigSchema: compiled.userConfigSchema } : {})
+    })
   }
 
   private retainedRuntimeCompilation(input: {workspace:string;plugin:ModPluginSource}): CompiledFunctionPlugin | undefined {
@@ -1538,43 +1553,85 @@ export class FunctionModsManager {
   assertRuntimeSourceConfiguration(input: { workspace: string; plugin: ModPluginSource }): void {
     if (this.closed || !input.workspace || !input.plugin.enabled)
       throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
-    if (!this.isSource(input.plugin)) return
+    if (!this.isSource(input.plugin) && !isConfigurationOnlyPackage(input.plugin.path)) return
     const compiled = this.retainedRuntimeCompilation(input)
     if (!compiled) throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
     assertConfigurationSourcesCurrent(input.plugin.path, compiled)
     if (compiled.userConfig)
-      this.userConfigValues.resolve(input.workspace, compiled.name, compiled.userConfig, compiled.userConfigSchema)
+      this.userConfigValues.resolve(
+        input.workspace,
+        compiled.name,
+        compiled.userConfig,
+        compiled.userConfigSchema
+      )
     assertConfigurationSourcesCurrent(input.plugin.path, compiled)
   }
 
   /** Original native Mod grant workflow for an exact host-owned retained package. */
-  async runtimeSourceReview(input: { workspace: string; plugin: ModPluginSource; scope: RuntimeFunctionGrantScope }) {
+  async runtimeSourceReview(input: {
+    workspace: string
+    plugin: ModPluginSource
+    scope: RuntimeFunctionGrantScope
+  }) {
     const facts = await this.prepareRuntimeSourceFacts(input)
     if (!facts) return undefined
     const compiled = this.configurationSourceCache.peek(input.plugin.path)!
-    const sdk = await analyzeFunctionSdk(compiled)
-    assertConfigurationSourcesCurrent(input.plugin.path, compiled)
-    const grant = this.functionSourceGrant(input.workspace, facts.name, input.scope)
     let configurationReady = true
     if (compiled.userConfig) {
-      try { this.userConfigValues.resolve(input.workspace, compiled.name, compiled.userConfig, compiled.userConfigSchema) }
-      catch (error) {
-        if (!(error instanceof ModFunctionError) || !/^(MODS_USER_CONFIG_|MODS_SECRET_)/.test(error.code)) throw error
+      try {
+        this.userConfigValues.resolve(
+          input.workspace,
+          compiled.name,
+          compiled.userConfig,
+          compiled.userConfigSchema
+        )
+      } catch (error) {
+        if (
+          !(error instanceof ModFunctionError) ||
+          !/^(MODS_USER_CONFIG_|MODS_SECRET_)/.test(error.code)
+        )
+          throw error
         configurationReady = false
       }
     }
-    return { ...facts, configurationReady, capabilities: [...SESSION_CAPABILITIES],
-      scannedMethods: [...new Set(sdk.usages.map(item => item.method))].slice(0, 64),
+    if (compiled.configurationOnly) {
+      assertConfigurationSourcesCurrent(input.plugin.path, compiled)
+      return {
+        ...facts,
+        configurationOnly: true as const,
+        configurationReady,
+        capabilities: [],
+        scannedMethods: [],
+        scanIncomplete: false,
+        state: "ready" as const
+      }
+    }
+    const sdk = await analyzeFunctionSdk(compiled)
+    assertConfigurationSourcesCurrent(input.plugin.path, compiled)
+    const grant = this.functionSourceGrant(input.workspace, facts.name, input.scope)
+    return {
+      ...facts,
+      configurationReady,
+      capabilities: [...SESSION_CAPABILITIES],
+      scannedMethods: [...new Set(sdk.usages.map((item) => item.method))].slice(0, 64),
       scanIncomplete: sdk.truncated || !sdk.registrationEventsVerified,
-      state: !this.host.enabled(input.workspace) ? "disabled" as const
-        : grant?.enabled && grant.digest === facts.digest ? "ready" as const : "needs-approval" as const }
+      state: !this.host.enabled(input.workspace)
+        ? ("disabled" as const)
+        : grant?.enabled && grant.digest === facts.digest
+          ? ("ready" as const)
+          : ("needs-approval" as const)
+    }
   }
 
   /** Main-only final configuration/source consent fence; never creates a grant or a runtime. */
-  assertRuntimeSourceReady(input: { workspace: string; plugin: ModPluginSource; scope: RuntimeFunctionGrantScope }): void {
+  assertRuntimeSourceReady(input: {
+    workspace: string
+    plugin: ModPluginSource
+    scope: RuntimeFunctionGrantScope
+  }): void {
     this.assertRuntimeSourceConfiguration(input)
     const compiled = this.retainedRuntimeCompilation(input)
-    if (!compiled) return
+    if (!compiled || compiled.configurationOnly) return
     const grant = this.functionSourceGrant(input.workspace, compiled.name, input.scope)
     if (!this.host.enabled(input.workspace) || !grant?.enabled || grant.digest !== compiled.digest)
       throw new ModFunctionError("PROJECT_MODS_APPROVAL_REQUIRED")
@@ -1588,6 +1645,132 @@ export class FunctionModsManager {
       throw new ModFunctionError("MODS_APPROVAL_STALE")
     const compiled = await this.configurationSourceCache.read(input.plugin.path)
     await this.approveCompiledSource(input.workspace, compiled, input.digest, assertCallerCurrent, input.scope)
+  }
+  /** Main-only recovery input. Never publish this record or its sealed references to a guest/UI. */
+  async captureStageRecoveryConfiguration(
+    workspace: string,
+    sourceRoot: string,
+    guard: () => void
+  ) {
+    guard()
+    const plugin = {
+      id: "native-stage-recovery",
+      name: readPluginManifest(sourceRoot)?.manifest.name ?? "",
+      path: sourceRoot,
+      enabled: true
+    }
+    const facts = await this.prepareRuntimeSourceFacts({ workspace, plugin })
+    guard()
+    if (!facts?.userConfig) return undefined
+    const configuration = this.userConfigValues.captureStageRecovery(
+      workspace,
+      facts.name,
+      facts.userConfig,
+      facts.userConfigSchema
+    )
+    const captured = { sourceRoot, sourceDigest: facts.digest, configuration }
+    this.assertStageRecoveryConfiguration(captured)
+    guard()
+    return captured
+  }
+
+  assertStageRecoveryConfiguration(snapshot: {
+    sourceRoot: string
+    sourceDigest: string
+    configuration: NativeStageUserConfiguration
+  }): void {
+    const config = snapshot.configuration
+    const source = this.getRuntimeSourceFacts({
+      workspace: config.workspace,
+      plugin: {
+        id: "native-stage-recovery",
+        name: config.plugin,
+        path: snapshot.sourceRoot,
+        enabled: true
+      }
+    })
+    if (
+      !source?.userConfig ||
+      source.name !== config.plugin ||
+      source.digest !== snapshot.sourceDigest ||
+      userConfigSchemaDigest(source.userConfig) !== userConfigSchemaDigest(config.schema) ||
+      JSON.stringify(source.userConfigSchema) !== JSON.stringify(config.declaration) ||
+      JSON.stringify(this.userConfigValues.identity(config.workspace, config.plugin)) !==
+        JSON.stringify(config.identity)
+    )
+      throw new ModFunctionError("MODS_CONFIG_VALUE_CHANGED")
+    const current = this.userConfigValues.captureStageRecovery(
+      config.workspace,
+      config.plugin,
+      config.schema,
+      config.declaration
+    )
+    if (userConfigRecordDigest(current.record) !== userConfigRecordDigest(config.record))
+      throw new ModFunctionError("MODS_CONFIG_VALUE_CHANGED")
+  }
+
+  async bindStageRecoveryConfiguration(
+    snapshot: {
+      sourceRoot: string
+      sourceDigest: string
+      configuration: NativeStageUserConfiguration
+    },
+    target: { workspace: string; packageRoot: string },
+    overrides: ModObject,
+    guard: () => void
+  ): Promise<void> {
+    guard()
+    this.assertStageRecoveryConfiguration(snapshot)
+    const facts = await this.prepareRuntimeSourceFacts({
+      workspace: target.workspace,
+      plugin: {
+        id: "native-stage-recovery",
+        name: readPluginManifest(target.packageRoot)?.manifest.name ?? "",
+        path: target.packageRoot,
+        enabled: true
+      }
+    })
+    guard()
+    this.assertStageRecoveryConfiguration(snapshot)
+    const config = snapshot.configuration
+    if (
+      !facts?.userConfig ||
+      facts.name !== config.plugin ||
+      userConfigSchemaDigest(facts.userConfig) !== userConfigSchemaDigest(config.schema) ||
+      JSON.stringify(facts.userConfigSchema) !== JSON.stringify(config.declaration)
+    )
+      throw new ModFunctionError("MODS_USER_CONFIG_MIGRATION_CHANGED")
+    this.userConfigValues.forkStageRecovery(config, target.workspace, overrides, () => {
+      guard()
+      this.assertStageRecoveryConfiguration(snapshot)
+      this.getRuntimeSourceFacts({
+        workspace: target.workspace,
+        plugin: {
+          id: "native-stage-recovery",
+          name: readPluginManifest(target.packageRoot)?.manifest.name ?? "",
+          path: target.packageRoot,
+          enabled: true
+        }
+      })
+    })
+    this.configurationChanged(target.workspace)
+  }
+
+  stageRecoveryConfigurationMatches(
+    snapshot: {
+      sourceRoot: string
+      sourceDigest: string
+      configuration: NativeStageUserConfiguration
+    },
+    targetWorkspace: string,
+    overrides: ModObject
+  ): boolean {
+    this.assertStageRecoveryConfiguration(snapshot)
+    return this.userConfigValues.stageRecoveryMatches(
+      snapshot.configuration,
+      targetWorkspace,
+      overrides
+    )
   }
   /** Host-only saved binding. Caller must first validate this key against its captured directory schema. */
   readUserConfigDirectoryIdentity(workspace: string, pluginName: string, key: string): string | undefined {
@@ -1622,7 +1805,11 @@ export class FunctionModsManager {
   private configurationSource(pluginId: string) {
     const native = currentNativeConfigurationScope()
     if (native) return native.plugin.id === pluginId ? native.plugin : undefined
-    return this.sources().find(item => item.id === pluginId)
+    const source = this.sources().find((item) => item.id === pluginId)
+    if (source || currentRuntimePluginSource()) return source
+    return this.host
+      .plugins()
+      .find((item) => item.id === pluginId && isConfigurationOnlyPackage(item.path))
   }
   private assertConfigurationThread(workspace: string, threadId: string) {
     const native = currentNativeConfigurationScope()
@@ -2601,11 +2788,15 @@ export class FunctionModsManager {
           plugin.path,
           normalizePluginRelativePath(nativePath) ?? nativePath
         )
-        if (
-          statSync(file).size <= 32768 &&
-          JSON.parse(readFileSync(file, "utf8")).apiVersion === "cmb.mods/v2"
-        )
-          return true
+        if (statSync(file).size <= 32768) {
+          const declaration = JSON.parse(readFileSync(file, "utf8"))
+          if (declaration.apiVersion === "cmb.mods/v2") {
+            // Real entries retain the existing hot path; entry-less candidates require a
+            // fresh static metadata proof before exclusion from executable sources.
+            if (Object.hasOwn(declaration, "entry") || Object.hasOwn(declaration, "claw")) return true
+            return !isConfigurationOnlyPackage(plugin.path)
+          }
+        }
       } catch {
         return true
       }
@@ -2949,7 +3140,11 @@ export class FunctionModsManager {
 
   private async compileStatusSource(path: string): Promise<CompiledFunctionPlugin> {
     // Byte proofs are rechecked for each read. Authorization is read below, never cached.
-    return (currentRuntimePluginSource() ? this.configurationSourceCache : this.statusSourceCache).read(path)
+    const compiled = await (
+      currentRuntimePluginSource() ? this.configurationSourceCache : this.statusSourceCache
+    ).read(path)
+    if (compiled.configurationOnly) throw new ModFunctionError("MODS_CONFIGURATION_ONLY")
+    return compiled
   }
 
   private functionSourceGrant(workspace: string, name: string, explicit?: RuntimeFunctionGrantScope): ModGrant | null {
@@ -3114,6 +3309,7 @@ export class FunctionModsManager {
 
   private async approveCompiledSource(workspace: string, compiled: CompiledFunctionPlugin,
     digest: string, assertCallerCurrent: () => void, scope?: RuntimeFunctionGrantScope): Promise<void> {
+    if (compiled.configurationOnly) throw new ModFunctionError("MODS_APPROVAL_STALE")
     const epoch = this.epoch(workspace)
     const assertApproval = () => {
       assertCallerCurrent()
@@ -4029,6 +4225,7 @@ export class FunctionModsManager {
             const compiled = original ? original.compiled : runtimeSource
               ? await this.configurationSourceCache.read(source.path)
               : await compileFunctionPlugin(source.path)
+            if (compiled.configurationOnly) throw new ModFunctionError("MODS_CONFIGURATION_ONLY")
             if (compiled.name === CONTEXT_METER_NAME)
               throw new ModFunctionError("MODS_RESERVED_BUILTIN_NAME")
             if (
@@ -4095,7 +4292,7 @@ export class FunctionModsManager {
             const compiled = await this.configurationSourceCache.read(localDevelopment.revision.sourcePath)
             localDevelopment.assertCurrent()
             assertLive()
-            if (compiled.digest !== localDevelopment.revision.compiledDigest || compiled.userConfig ||
+            if (compiled.configurationOnly || compiled.digest !== localDevelopment.revision.compiledDigest || compiled.userConfig ||
               plugins.some(plugin => plugin.name === compiled.name) || compiled.name === CONTEXT_METER_NAME)
               throw new ModFunctionError("MODS_DEVELOPMENT_SOURCE_CHANGED")
             // Trial runs represent the full draft. Never silently omit a draft's other-mode modules.

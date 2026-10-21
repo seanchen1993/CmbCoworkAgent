@@ -13,6 +13,11 @@ import {
 } from "../../plugins/business-mod-diagnostics"
 import { BUSINESS_MOD_MANIFEST, type BusinessModDefinition } from "../../../shared/business-mods"
 import { BusinessModAssemblyService } from "../../plugins/business-mod-assembly-service"
+import { observeProjectDeliveryInstallation } from "../../plugins/plugin-delivery-observation"
+import {
+  derivationContentIdentity,
+  snapshotDerivationSource
+} from "../../plugins/derivation-source"
 import type { PluginMetadata } from "../../types"
 import { publishDevelopmentTurnSettlement } from "../v2/development-turn-settlement"
 import { BusinessDraftLimitError, businessDraftLimitHint } from "./creator-business-draft"
@@ -189,7 +194,7 @@ async function fixture() {
       guard: () => void,
       verify: (path: string) => Promise<void>
     ) => {
-      const target = join(root, "installed", id)
+      const target = join(root, "installed", name.replace(/[^a-zA-Z0-9-_.\u4e00-\u9fff]/g, "-"))
       await cp(source, target, { recursive: true })
       await verify(target)
       guard()
@@ -197,10 +202,13 @@ async function fixture() {
       return { success: true }
     }
   )
+  await mkdir(join(root, "installed"))
   const assembly = new BusinessModAssemblyService(join(root, "assemblies"), {
     plugins: () => plugins,
     validatePackage: vi.fn(async () => {}),
     install,
+    observeInstallation: (input, guard) =>
+      observeProjectDeliveryInstallation(join(root, "installed"), () => plugins, input, guard),
     invalidate: () => {}
   })
   const values = new Map<string, string>()
@@ -237,7 +245,8 @@ async function fixture() {
     context,
     readContext: context,
     busy: () => busy,
-    changed
+    changed,
+    normalizeWorkspace: (workspace: string) => workspace.toLowerCase()
   }
   const create = () => {
     const service = new CreatorBusinessService(deps)
@@ -273,14 +282,14 @@ async function fixture() {
       sources: [{ inspectionId: inspected.id, modIds: ["source"] }],
       drafts: [{ id: draft.id, revision: draft.revision, modIds: ["user.quality"] }]
     })
-  const review = async () => {
+  const review = async (turnId = "turn") => {
     const prepared = await preview()
-    return service.requestReview("creator", prepared.previewId, "turn", () => {})
+    return service.requestReview("creator", prepared.previewId, turnId, () => {})
   }
-  const settle = async () => {
+  const settle = async (turnId = "turn") => {
     publishDevelopmentTurnSettlement({
       threadId: "creator",
-      turnId: "turn",
+      turnId,
       incarnation: scope.incarnation,
       outcome: "completed"
     })
@@ -313,6 +322,241 @@ async function fixture() {
 }
 
 describe("native current-chat business Mod authoring", () => {
+  it("binds installation handoff to content identity and upgrades old installed receipts by exact readback", async () => {
+    const f = await fixture()
+    const ready = await f.review()
+    const source = await snapshotDerivationSource(
+      join(f.root, "assemblies", ready.review!.copyId, "source")
+    )
+    expect(ready.review!.contentDigest).toBe(derivationContentIdentity(source.files))
+    expect(ready.review!.contentDigest).not.toBe(ready.review!.digest)
+    await f.settle()
+    await f.service.approve("creator", "workspace", ready.review!)
+    const entry = [...f.values.entries()].find(([key]) =>
+      key.startsWith("mods-creator-business-review-v1:")
+    )!
+    const legacy = JSON.parse(entry[1])
+    delete legacy.review.contentDigest
+    delete legacy.effect
+    f.values.set(entry[0], JSON.stringify(legacy))
+    expect(f.service.status("creator").review!.canReconcile).toBe(true)
+    const current = await f.service.reconcile("creator", "workspace", ready.review!)
+    expect(current.review).toMatchObject({
+      phase: "installed",
+      contentDigest: ready.review!.contentDigest,
+      pluginId: f.plugins.at(-1)!.id,
+      canConfirm: false,
+      canReconcile: false,
+      reconciliation: { outcome: "installed" }
+    })
+    expect(f.install).toHaveBeenCalledOnce()
+    await expect(f.service.approve("creator", "workspace", ready.review!)).rejects.toThrow(
+      "REVIEW_REQUIRED"
+    )
+  })
+  it("settles absent installation without replay and requires a new review, model settlement and approval", async () => {
+    const f = await fixture()
+    const ready = await f.review()
+    await f.settle()
+    f.install.mockImplementationOnce(async () => {
+      throw Error("uncertain before original copy")
+    })
+    const input = { planId: ready.review!.planId, digest: ready.review!.digest }
+    expect((await f.service.approve("creator", "WORKSPACE", input)).review!.phase).toBe("unknown")
+    expect((await f.service.reconcile("creator", "WORKSPACE", input)).review).toMatchObject({
+      phase: "failed",
+      canConfirm: false,
+      reconciliation: { outcome: "not-executed" }
+    })
+    expect(f.install).toHaveBeenCalledOnce()
+    await expect(f.service.approve("creator", "workspace", input)).rejects.toThrow(
+      "REVIEW_REQUIRED"
+    )
+    const next = await f.review("fresh-confirmation-turn")
+    expect(next.review!.planId).not.toBe(input.planId)
+    expect(next.review!.copyId).toBe(ready.review!.copyId)
+    await f.settle("turn")
+    expect(f.service.status("creator").review!.canConfirm).toBe(false)
+    await expect(f.service.approve("creator", "workspace", next.review!)).rejects.toThrow(
+      "REVIEW_REQUIRED"
+    )
+    await f.settle("fresh-confirmation-turn")
+    expect(f.service.status("creator").review!.canConfirm).toBe(true)
+    expect((await f.service.approve("creator", "workspace", next.review!)).review).toMatchObject({
+      phase: "installed",
+      pluginId: f.plugins.at(-1)!.id
+    })
+    expect(f.install).toHaveBeenCalledTimes(2)
+  })
+
+  it("settles absent business export then explicitly rechecks source and publishes only the new approved output", async () => {
+    const f = await fixture()
+    const ready = await f.review()
+    await f.settle()
+    const original = f.assembly.export.bind(f.assembly)
+    const call = vi.spyOn(f.assembly, "export").mockImplementationOnce(async (...args) => {
+      await original(...args)
+      throw Error("reply lost after native ZIP publication")
+    })
+    const output = join(f.root, "missing-first-output.zip")
+    const input = { planId: ready.review!.planId, digest: ready.review!.digest }
+    await f.service.exportTrusted("creator", "workspace", input, output)
+    await rm(output)
+    expect((await f.service.reconcile("creator", "workspace", input)).review).toMatchObject({
+      phase: "failed",
+      canConfirm: false,
+      reconciliation: { outcome: "not-executed", reason: "BUSINESS_MOD_EXPORT_NOT_PRESENT" }
+    })
+    await expect(f.service.exportTrusted("creator", "workspace", input, output)).rejects.toThrow(
+      "REVIEW_REQUIRED"
+    )
+    expect(call).toHaveBeenCalledOnce()
+    const next = await f.review("new-export-turn")
+    await f.settle("new-export-turn")
+    const nextOutput = join(f.root, "explicit-new-output.zip")
+    expect(
+      (await f.service.exportTrusted("creator", "workspace", next.review!, nextOutput)).review
+    ).toMatchObject({ phase: "exported", output: nextOutput })
+    expect(new AdmZip(nextOutput).readAsText("mods/business/user.quality/check.py")).toContain(
+      "missing required evidence"
+    )
+    expect(call).toHaveBeenCalledTimes(2)
+    expect(f.install).not.toHaveBeenCalled()
+  })
+
+  it("does not erase an installed business plugin when the later export is absent", async () => {
+    const f = await fixture()
+    const ready = await f.review()
+    await f.settle()
+    const input = { planId: ready.review!.planId, digest: ready.review!.digest }
+    await f.service.approve("creator", "workspace", input)
+    const pluginId = f.plugins.at(-1)!.id
+    const original = f.assembly.export.bind(f.assembly)
+    vi.spyOn(f.assembly, "export").mockImplementationOnce(async (...args) => {
+      await original(...args)
+      throw Error("lost later export reply")
+    })
+    const output = join(f.root, "later-missing.zip")
+    await f.service.exportTrusted("creator", "workspace", input, output)
+    await rm(output)
+    expect((await f.service.reconcile("creator", "workspace", input)).review).toMatchObject({
+      phase: "installed",
+      pluginId,
+      canConfirm: false,
+      reconciliation: { outcome: "not-executed" }
+    })
+    const next = await f.review("new-installed-export-turn")
+    expect(next.review).toMatchObject({ phase: "installed", pluginId, canConfirm: false })
+    await f.settle("new-installed-export-turn")
+    await f.service.exportTrusted(
+      "creator",
+      "workspace",
+      next.review!,
+      join(f.root, "fresh-export.zip")
+    )
+    expect(f.install).toHaveBeenCalledOnce()
+  })
+
+  it("retains a conflicting partial ZIP until the user relocates it, then requires a fresh review for true export", async () => {
+    const f = await fixture()
+    const ready = await f.review()
+    await f.settle()
+    const original = f.assembly.export.bind(f.assembly)
+    const call = vi.spyOn(f.assembly, "export").mockImplementationOnce(async (...args) => {
+      await original(...args)
+      throw Error("lost output reply")
+    })
+    const output = join(f.root, "partial.zip")
+    await f.service.exportTrusted("creator", "workspace", ready.review!, output)
+    await writeFile(output, "retain partial output as user evidence")
+    expect((await f.service.reconcile("creator", "workspace", ready.review!)).review).toMatchObject(
+      {
+        phase: "unknown",
+        pendingOutput: output,
+        canConfirm: false,
+        reconciliation: { outcome: "conflict" }
+      }
+    )
+    await expect(f.review()).rejects.toThrow("OUTCOME_UNCONFIRMED")
+    const retained = join(f.root, "user-retained-partial.zip")
+    await cp(output, retained)
+    await rm(output)
+    expect((await f.service.reconcile("creator", "workspace", ready.review!)).review).toMatchObject(
+      { phase: "failed", canConfirm: false, reconciliation: { outcome: "not-executed" } }
+    )
+    const fresh = await f.review("fresh-after-conflict")
+    await f.settle("fresh-after-conflict")
+    const next = join(f.root, "explicit-after-conflict.zip")
+    expect(
+      (await f.service.exportTrusted("creator", "workspace", fresh.review!, next)).review
+    ).toMatchObject({ phase: "exported", output: next })
+    expect(new AdmZip(next).readAsText("mods/business/user.quality/check.py")).toContain(
+      "missing required evidence"
+    )
+    expect(await readFile(retained, "utf8")).toBe("retain partial output as user evidence")
+    expect(call).toHaveBeenCalledTimes(2)
+  })
+
+  it("does not overwrite a newer same-plan result while an asynchronous readback is pending", async () => {
+    const f = await fixture()
+    const ready = await f.review()
+    await f.settle()
+    const install = f.assembly.install.bind(f.assembly)
+    vi.spyOn(f.assembly, "install").mockImplementationOnce(async (...args) => {
+      await install(...args)
+      throw Error("lost install response")
+    })
+    await f.service.approve("creator", "workspace", ready.review!)
+    let release!: () => void
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const observe = f.assembly.observe.bind(f.assembly)
+    const read = vi.spyOn(f.assembly, "observe").mockImplementationOnce(async (...args) => {
+      await barrier
+      return observe(...args)
+    })
+    const first = f.service.reconcile("creator", "workspace", ready.review!)
+    await vi.waitFor(() => expect(read).toHaveBeenCalledOnce())
+    await expect(f.service.reconcile("creator", "workspace", ready.review!)).rejects.toThrow("BUSY")
+    const key = [...f.values.keys()].find((key) =>
+      key.startsWith("mods-creator-business-review-v1:")
+    )!
+    const newer = JSON.parse(f.values.get(key)!)
+    newer.review.error = "newer durable result"
+    f.values.set(key, JSON.stringify(newer))
+    release()
+    await expect(first).rejects.toThrow("REVIEW_CHANGED")
+    expect(JSON.parse(f.values.get(key)!).review.error).toBe("newer durable result")
+    expect(f.install).toHaveBeenCalledOnce()
+  })
+
+  it("recognizes a native pre-publication failure without trusting a copied message or restoring confirmation", async () => {
+    const f = await fixture()
+    const ready = await f.review()
+    await f.settle()
+    await writeFile(
+      join(f.root, "assemblies", ready.review!.copyId, "source", "skills/source/SKILL.md"),
+      "changed after native check"
+    )
+    expect((await f.service.approve("creator", "workspace", ready.review!)).review).toMatchObject({
+      phase: "failed",
+      canConfirm: false
+    })
+    expect(f.install).not.toHaveBeenCalled()
+    const g = await fixture()
+    const other = await g.review()
+    await g.settle()
+    vi.spyOn(g.assembly, "install").mockRejectedValueOnce(
+      Object.assign(Error("BUSINESS_MOD_INSTALL_NOT_STARTED"), {
+        nativePublicationNotStarted: true
+      })
+    )
+    expect((await g.service.approve("creator", "workspace", other.review!)).review).toMatchObject({
+      phase: "unknown",
+      canConfirm: false
+    })
+  })
   it("keeps legacy unknown outcomes without a durable effect identity unknown rather than guessing by name", async () => {
     const f = await fixture(),
       ready = await f.review()
@@ -377,7 +621,7 @@ describe("native current-chat business Mod authoring", () => {
     installed.id = "another-uuid"
     expect((await f.service.reconcile("creator", "workspace", input)).review).toMatchObject({
       phase: "unknown",
-      reconciliation: { outcome: "unknown" }
+      reconciliation: { outcome: "conflict" }
     })
     installed.id = id
     await writeFile(join(installed.path, "skills/source/SKILL.md"), "modified")

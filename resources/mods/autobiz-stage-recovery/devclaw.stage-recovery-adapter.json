@@ -1,0 +1,8 @@
+{
+  "apiVersion": "devclaw.plugin-stage-recovery/v1",
+  "entry": "mods/stage-recovery/adapter.py",
+  "runtime": "python",
+  "isolation": "private-output-copy",
+  "codeSource": "keep",
+  "externalEffects": "network-requires-confirmation"
+}

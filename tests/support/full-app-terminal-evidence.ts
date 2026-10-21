@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs"
 import { join, resolve } from "node:path"
 
@@ -26,12 +27,13 @@ export function readFullAppTerminalEvidence(input: {
   repository: string
   workflow: unknown
   submissions: unknown[]
+  promotion?: unknown
 }) {
   const workflow = object(input.workflow),
     result = object(workflow.result)
   assert.equal(workflow.status, "completed")
   assert.equal(result.ok, true)
-  assert.equal(result.finalStatus, "succeeded")
+  assert.equal(result.finalStatus, input.promotion ? "awaiting_user_confirmation" : "succeeded")
   assert(
     array(workflow.agents).length > 0 &&
       array(workflow.agents).every((agent) => object(agent).status === "completed"),
@@ -54,6 +56,27 @@ export function readFullAppTerminalEvidence(input: {
   )
   const manifest = object(JSON.parse(readFileSync(join(runsRoot, runId, "manifest.json"), "utf8")))
   assert.equal(manifest.runId, runId)
+  if (input.promotion) {
+    const promotion = object(input.promotion),
+      actual = object(promotion.mainPromotion),
+      persisted = object(manifest.mainPromotion),
+      prepared = object(object(result.verification).mainPromotion)
+    assert.equal(promotion.success, true)
+    assert.equal(promotion.status, "succeeded")
+    assert.equal(promotion.runId, runId)
+    assert.equal(manifest.status, "succeeded")
+    assert.equal(actual.status, "merged")
+    assert.equal(persisted.status, "merged")
+    assert(
+      typeof prepared.approvalDigest === "string" && /^[a-f0-9]{64}$/.test(prepared.approvalDigest)
+    )
+    assert.equal(actual.approvalDigest, prepared.approvalDigest)
+    assert.equal(persisted.approvalDigest, prepared.approvalDigest)
+    assert.equal(actual.approvedBy, "explicit-native-app-acceptance-fixture")
+    assert.equal(persisted.approvedBy, actual.approvedBy)
+    assert.deepEqual(actual.snapshot, persisted.snapshot)
+    assert.deepEqual(actual.repositories, persisted.repositories)
+  }
   const deliveries = Object.entries(object(manifest.batches)).filter(
     ([, row]) => object(row).type === "delivery"
   )
@@ -146,16 +169,59 @@ export function readFullAppTerminalEvidence(input: {
   assert.equal(e2eResult.success, true)
   assert.equal(e2eResult.status, "verified")
   assert.deepEqual(e2e.cleanupErrors, [])
-  const registeredWorktrees = git("worktree", "list", "--porcelain")
-    .split("\n")
-    .filter((line) => line.startsWith("worktree "))
-    .map((line) => line.slice("worktree ".length))
-  assert.equal(
-    registeredWorktrees.length,
-    1,
-    "Only the original main checkout may remain registered"
+  const registeredWorktrees = git("worktree", "list", "--porcelain", "-z")
+    .split("\0")
+    .filter((field) => field.startsWith("worktree "))
+    .map((field) => field.slice("worktree ".length))
+  const expectedWorktrees = [realpathSync(input.repository)]
+  if (input.promotion) {
+    const promoted = object(object(manifest.mainPromotion).repositories),
+      snapshot = object(object(object(manifest.mainPromotion).snapshot).repositories)
+    for (const [ref, row] of Object.entries(object(manifest.repositories))) {
+      const binding = object(row),
+        canonical = binding.integrationRepositoryRef ?? ref
+      if (canonical !== ref) continue
+      const integration = object(binding.integration),
+        item = object(snapshot[ref])
+      assert.equal(integration.owner, "plugin")
+      assert.equal(binding.baseBranch, "main")
+      assert.equal(binding.headSha, head)
+      assert.equal(item.candidateSha, head)
+      assert.equal(object(promoted[ref]).status, "merged")
+      assert.equal(object(promoted[ref]).commitSha, head)
+      const path = join(
+        input.workspace,
+        ".autobizdevops/worktrees",
+        runId,
+        createHash("sha256").update(ref).digest("hex").slice(0, 12),
+        "integration"
+      )
+      assert.equal(resolve(String(integration.worktreePath)), resolve(path))
+      assert.equal(resolve(String(item.worktreePath)), resolve(path))
+      const at = (...args: string[]) =>
+        execFileSync("git", ["-C", path, ...args], {
+          encoding: "utf8",
+          windowsHide: true,
+          stdio: "pipe"
+        }).trim()
+      assert.equal(realpathSync(at("rev-parse", "--show-toplevel")), realpathSync(path))
+      assert.equal(at("branch", "--show-current"), integration.branchName)
+      assert.equal(item.branchName, integration.branchName)
+      assert.equal(at("rev-parse", "HEAD"), head)
+      assert.equal(at("status", "--porcelain"), "")
+      assert.equal(
+        realpathSync(resolve(path, at("rev-parse", "--git-common-dir"))),
+        realpathSync(resolve(input.repository, git("rev-parse", "--git-common-dir")))
+      )
+      expectedWorktrees.push(realpathSync(path))
+    }
+    assert(expectedWorktrees.length > 1, "Original isolated integration checkout must remain")
+  }
+  assert.deepEqual(
+    registeredWorktrees.map((path) => realpathSync(path)).sort(),
+    expectedWorktrees.sort(),
+    "Only the original main and exact native promoted integration checkouts may remain registered"
   )
-  assert.equal(realpathSync(registeredWorktrees[0]), realpathSync(input.repository))
   return {
     manifest,
     proof,

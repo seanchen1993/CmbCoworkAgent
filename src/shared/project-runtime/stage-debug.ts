@@ -20,6 +20,11 @@ export interface StageDebugPreparation {
   affectedStageIds: string[]
   diagnostics: string[]
   canCreate: boolean
+  recovery?: {
+    profile: "prompt-only" | "windows-sandbox"
+    policyDigest: string
+    requiresNetworkApproval: boolean
+  }
 }
 
 export interface StageDebugBranchView {
@@ -65,6 +70,11 @@ export interface StageDebugFileComparison {
 export interface ProjectStageDebugApi {
   /** Optional only for compatibility with older native bridges. */
   compare?(input: { threadId: string; projectId: string }): Promise<StageDebugFileComparison>
+  reconcileHooks?(input: {
+    threadId: string
+    projectId: string
+    approveNetworkInspection?: true
+  }): Promise<{ remaining: number; diagnostics: string[]; requiresNetworkInspection?: true }>
   list(threadId: string): Promise<{
     snapshots: StageDebugSnapshotView[]
     branches: StageDebugBranchView[]
@@ -82,5 +92,6 @@ export interface ProjectStageDebugApi {
     threadId: string
     preparationId: string
     expectedDigest: string
+    recoveryApproval?: { policyDigest: string; allowNetworkSideEffects: true }
   }): Promise<{ projectId: string }>
 }

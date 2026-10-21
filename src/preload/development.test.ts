@@ -168,11 +168,13 @@ describe("development preload bridge", () => {
     await api.prepareProjectDelivery!(prepare)
     await api.installProjectDelivery!(delivery)
     await api.exportProjectDelivery!(delivery)
+    await api.reconcileProjectDelivery!(delivery)
     await api.approveModularization!(modularize)
     expect(invoke.mock.calls).toEqual([
       ["mods:development:prepare-project-delivery", prepare],
       ["mods:development:install-project-delivery", delivery],
       ["mods:development:export-project-delivery", delivery],
+      ["mods:development:reconcile-project-delivery", delivery],
       ["mods:development:approve-modularization", modularize]
     ])
   })

@@ -1,12 +1,22 @@
 import { readPackageExtensionContract } from "../../plugins/extension-contract"
+import type { StageRecoveryCommandPolicy } from "./stage-recovery-policy"
+import { readStageRecoveryPolicy } from "./stage-recovery-policy"
+import { prepareStageRecoveryReadOnlyRoots } from "../../hooks/stage-recovery-command"
 import type {
   HostActionResult,
   HostExecutionTicket,
   HostProjectOperation,
-  HostProjectState
+  HostProjectState,
+  HostContextProviderApproval,
+  HostContextProviderRequest
 } from "../../../shared/project-runtime/host-types"
 import { HostProjectCoordinator } from "./host-coordinator"
-import { HostPackageSnapshots } from "./package-snapshots"
+import { HostPackageSnapshots, capturePackageMetadataGuard } from "./package-snapshots"
+import {
+  derivationContentIdentity,
+  snapshotDerivationSource
+} from "../../plugins/derivation-source"
+import type { PluginStartUseIdentity } from "../../../shared/plugin-start-use"
 import { assertStageBranchSourceCompatible } from "./stage-branch-compatibility"
 import { HostProjectStore } from "./host-store"
 import { hostGoal, hostRecord, hostStateError, hostText } from "./host-state-protocol"
@@ -55,11 +65,22 @@ export interface HostStageBranchAdmissionContext {
 }
 
 export type HostProjectCommandKind =
-  | "prepare" | "approve" | "start" | "validate" | "advance" | "reconcile" | "cancel"
+  | "prepare"
+  | "approve"
+  | "start"
+  | "validate"
+  | "advance"
+  | "reconcile"
+  | "cancel"
 
 export interface HostSkillExecutionContext {
   /** Main-only file-scoped debug policy; never restored from a renderer request or old approval. */
-  stageDebug?: { workspace: string; baselineId: string }
+  stageDebug?: {
+    workspace: string
+    baselineId: string
+    allowPromptHooks?: boolean
+    commandHooks?: StageRecoveryCommandPolicy
+  }
   /** Main-only directory visibility for an engine unit owned by a project composition. */
   internalCompositionUnit?: boolean
   knowledgeReference?: string
@@ -86,18 +107,23 @@ export interface HostSkillExecutionContext {
 }
 
 export interface HostProjectServiceDependencies {
+  /** Native local physical receipts only, before ordinary unknown-result inspection. */
+  reconcileRecoveryHooks?: (project: HostProjectState) => Promise<void>
   /** Main-only policy shared by every native producer, including calls outside desktop IPC. */
   assertCommand?: (project: HostProjectState, kind: HostProjectCommandKind) => void
   resolveInstalledPlugin: (installedPluginId: string) => Promise<HostInstalledPackage | undefined>
   authorize: (project: HostProjectState, operation: HostProjectOperation) => Promise<void>
   /** Main-only read/check authority. Used only by reconcile; never admits execution or approval. */
   authorizeInspection?: (
-    project: HostProjectState, operation: HostProjectOperation
+    project: HostProjectState,
+    operation: HostProjectOperation
   ) => Promise<void | { assertCurrent(): void }>
   /** Use the original lifecycle, with ALL Skill/Hook/script/resource reads bound to snapshotRoot. */
   executeSkill: (context: HostSkillExecutionContext) => Promise<HostActionResult["outcome"]>
   /** Main-only snapshot preparation, after start and before the original executor. */
-  beforeExecuteStage?: (context: HostSkillExecutionContext & { inputIdentity: string }) => Promise<void>
+  beforeExecuteStage?: (
+    context: HostSkillExecutionContext & { inputIdentity: string }
+  ) => Promise<void>
   /** Native baseline authority. Its function guard cannot be provided through renderer data. */
   authorizeStageBranch?: (
     context: HostStageBranchAdmissionContext
@@ -135,14 +161,23 @@ export class HostProjectService {
         const operation = this.operation(ticket.operationId)
         const externalGuard = this.operationInputs.get(operation.operationId)
         const execution = this.executionContext(project, operation, ticket)
-        const authorityIdentity = this.deps.captureInputAuthorityIdentity?.(project, execution.snapshotRoot) ??
-          captureProjectRuntimeInputAuthorityIdentity(project, execution.snapshotRoot) ?? (() => undefined)
+        const authorityIdentity =
+          this.deps.captureInputAuthorityIdentity?.(project, execution.snapshotRoot) ??
+          captureProjectRuntimeInputAuthorityIdentity(project, execution.snapshotRoot) ??
+          (() => undefined)
         const admittedAuthority = authorityIdentity()
-        const metadata = (state: HostProjectState) => JSON.stringify({
-          version: state.version, stageIndex: state.stageIndex, pluginDigest: state.pluginDigest,
-          packageId: state.packageId, packageVersion: state.packageVersion, workspace: state.workspace,
-          installedPluginId: state.installedPluginId, goal: state.goal, manifest: state.manifest
-        })
+        const metadata = (state: HostProjectState) =>
+          JSON.stringify({
+            version: state.version,
+            stageIndex: state.stageIndex,
+            pluginDigest: state.pluginDigest,
+            packageId: state.packageId,
+            packageVersion: state.packageVersion,
+            workspace: state.workspace,
+            installedPluginId: state.installedPluginId,
+            goal: state.goal,
+            manifest: state.manifest
+          })
         const admittedMetadata = metadata(project)
         let active = true
         const assertOperationCurrent = (settling: boolean) => {
@@ -150,10 +185,17 @@ export class HostProjectService {
           const current = this.store.get(project.projectId)
           const owned = this.store.getOperation(ticket.operationId)
           const live = owned?.status === "started" && owned.cancelRequestedAt === null
-          const cancelling = settling && signal.aborted && owned?.status === "cancel_requested" &&
+          const cancelling =
+            settling &&
+            signal.aborted &&
+            owned?.status === "cancel_requested" &&
             owned.cancelRequestedAt !== null
-          if (!current || metadata(current) !== admittedMetadata || (!live && !cancelling) ||
-            owned?.inputFingerprint !== ticket.inputFingerprint)
+          if (
+            !current ||
+            metadata(current) !== admittedMetadata ||
+            (!live && !cancelling) ||
+            owned?.inputFingerprint !== ticket.inputFingerprint
+          )
             hostStateError("OPERATION_SCOPE_CHANGED")
           if (authorityIdentity() !== admittedAuthority) hostStateError("INPUT_CHANGED")
         }
@@ -187,6 +229,9 @@ export class HostProjectService {
             assertInputsCurrent()
           }
           const outcome = await deps.executeSkill(context)
+          // Recheck the native policy after physical work, before producing an operation
+          // result. Recovery Hook uncertainty must not be laundered by an executor label.
+          this.assertCommand(project, "validate")
           if (outcome === "cancelled") assertSettlementCurrent()
           else assertInputsCurrent()
           return outcome
@@ -214,14 +259,21 @@ export class HostProjectService {
     if (!installed?.enabled || installed.installedPluginId !== installedPluginId)
       hostStateError("PLUGIN_UNAVAILABLE")
     const snapshot = this.snapshots.capture(installed.root)
-    if (snapshot.digest !== expectedDigest || snapshot.manifest.plugin.id !== installed.packageId ||
-        snapshot.manifest.plugin.version !== installed.packageVersion)
+    if (
+      snapshot.digest !== expectedDigest ||
+      snapshot.manifest.plugin.id !== installed.packageId ||
+      snapshot.manifest.plugin.version !== installed.packageVersion
+    )
       hostStateError("PACKAGE_IDENTITY_MISMATCH")
     assertHostPackageSupported(snapshot.root, snapshot.manifest)
     const current = await this.deps.resolveInstalledPlugin(installedPluginId)
-    if (!current?.enabled || current.installedPluginId !== installedPluginId ||
-        current.root !== installed.root || current.packageId !== installed.packageId ||
-        current.packageVersion !== installed.packageVersion)
+    if (
+      !current?.enabled ||
+      current.installedPluginId !== installedPluginId ||
+      current.root !== installed.root ||
+      current.packageId !== installed.packageId ||
+      current.packageVersion !== installed.packageVersion
+    )
       hostStateError("PACKAGE_IDENTITY_MISMATCH")
     return this.snapshots.read(expectedDigest)
   }
@@ -233,6 +285,17 @@ export class HostProjectService {
   async prepareRuntimeInputs(projectId: string): Promise<void> {
     const project = this.project(projectId)
     const root = this.snapshot(project).root
+    if (
+      process.platform === "win32" &&
+      readStageRecoveryPolicy(root)?.hookExecution === "windows-sandbox"
+    )
+      await prepareStageRecoveryReadOnlyRoots([root], () => {
+        if (
+          JSON.stringify(this.project(projectId)) !== JSON.stringify(project) ||
+          this.snapshot(project).root !== root
+        )
+          hostStateError("INPUT_CHANGED")
+      })
     await (this.deps.prepareInputIdentity?.(project, root) ??
       prepareProjectRuntimeInputIdentity(project, root))
   }
@@ -269,8 +332,17 @@ export class HostProjectService {
   async createBranchAtStage(input: HostStageBranchInput): Promise<HostProjectState> {
     const authorize = this.deps.authorizeStageBranch
     if (!authorize) hostStateError("BRANCH_UNSUPPORTED")
-    hostRecord(input, ["baselineId", "sourceProjectId", "expectedSourceVersion", "stageId",
-      "projectId", "name", "workspace", "installedPluginId", "goal"])
+    hostRecord(input, [
+      "baselineId",
+      "sourceProjectId",
+      "expectedSourceVersion",
+      "stageId",
+      "projectId",
+      "name",
+      "workspace",
+      "installedPluginId",
+      "goal"
+    ])
     input = structuredClone(input)
     hostText(input.baselineId)
     hostText(input.stageId)
@@ -286,20 +358,39 @@ export class HostProjectService {
     if (stageIndex > source.stageIndex) hostStateError("BRANCH_STAGE_NOT_REACHED")
     const assertSourceSettled = () => {
       const operations = this.store.listOperations(source.projectId, 200)
-      if (operations.length >= 200 || operations.some((operation) =>
-        ["prepared", "started", "cancel_requested", "succeeded", "unknown"].includes(operation.status) ||
-        (operation.startedAt !== null && (!operation.execution?.terminal ||
-          operation.execution.terminal.outcome === "unknown" ||
-          operation.execution.terminal.settledAt < operation.startedAt))))
+      if (
+        operations.length >= 200 ||
+        operations.some(
+          (operation) =>
+            ["prepared", "started", "cancel_requested", "succeeded", "unknown"].includes(
+              operation.status
+            ) ||
+            (operation.startedAt !== null &&
+              (!operation.execution?.terminal ||
+                operation.execution.terminal.outcome === "unknown" ||
+                operation.execution.terminal.settledAt < operation.startedAt))
+        )
+      )
         hostStateError("BRANCH_SOURCE_UNSETTLED")
       // Imported prefix data is not execution evidence. A branch without its own verified prefix
       // must refer back to the original source baseline instead of laundering imported inputs.
       for (const stage of source.manifest.stages.slice(0, stageIndex)) {
-        const operation = operations.find((value) => value.stageId === stage.id &&
-          value.status === "transitioned" && value.pluginDigest === source.pluginDigest &&
-          value.expectedVersion < source.version)
-        if (!operation || stage.checkIds.some((id) => !operation.receipts.some((receipt) =>
-          receipt.checkId === id && receipt.result === "passed")))
+        const operation = operations.find(
+          (value) =>
+            value.stageId === stage.id &&
+            value.status === "transitioned" &&
+            value.pluginDigest === source.pluginDigest &&
+            value.expectedVersion < source.version
+        )
+        if (
+          !operation ||
+          stage.checkIds.some(
+            (id) =>
+              !operation.receipts.some(
+                (receipt) => receipt.checkId === id && receipt.result === "passed"
+              )
+          )
+        )
           hostStateError("BRANCH_PREFIX_UNVERIFIED")
       }
     }
@@ -308,80 +399,16 @@ export class HostProjectService {
     const workspace = runtimeDirectory(input.workspace)
     const originalWorkspace = normalizeWorkspacePathKey(source.workspace)
     const targetWorkspace = normalizeWorkspacePathKey(workspace)
-    if (originalWorkspace === targetWorkspace ||
+    if (
+      originalWorkspace === targetWorkspace ||
       originalWorkspace.startsWith(`${targetWorkspace}/`) ||
-      targetWorkspace.startsWith(`${originalWorkspace}/`)) hostStateError("BRANCH_WORKSPACE_INVALID")
+      targetWorkspace.startsWith(`${originalWorkspace}/`)
+    )
+      hostStateError("BRANCH_WORKSPACE_INVALID")
     return withSnapshotRetention([this.snapshots.root], async () => {
       const sourceSnapshot = this.snapshot(source)
       const installed = await this.deps.resolveInstalledPlugin(hostText(input.installedPluginId))
       if (!installed?.enabled || installed.installedPluginId !== input.installedPluginId)
-        hostStateError("PLUGIN_UNAVAILABLE")
-      const snapshot = this.snapshots.capture(installed.root)
-      if (snapshot.manifest.plugin.id !== installed.packageId ||
-        snapshot.manifest.plugin.version !== installed.packageVersion)
-        hostStateError("PACKAGE_IDENTITY_MISMATCH")
-      assertHostPackageSupported(snapshot.root, snapshot.manifest)
-      // This first native adapter permits implementation edits only in unshared target/downstream
-      // Skill files. A changed contract, context provider, Hook or shared helper needs an earlier
-      // baseline/provider; merely importing old upstream outputs cannot prove compatibility.
-      assertStageBranchSourceCompatible(sourceSnapshot.root, snapshot.root,
-        source.manifest, snapshot.manifest, input.stageId)
-      const candidate: HostProjectState = {
-        projectId: input.projectId, name: input.name, workspace,
-        installedPluginId: installed.installedPluginId, goal: input.goal,
-        packageId: installed.packageId, packageVersion: installed.packageVersion,
-        pluginDigest: snapshot.digest, manifest: snapshot.manifest,
-        schemaVersion: 1, stateOwner: "host", version: 1, stageIndex, status: "active",
-        createdAt: Date.now(), updatedAt: Date.now()
-      }
-      const admission = await authorize({ input: structuredClone(input),
-        source: structuredClone(source), candidate: structuredClone(candidate),
-        sourceSnapshotRoot: sourceSnapshot.root, candidateSnapshotRoot: snapshot.root })
-      if (!admission || typeof admission.assertCurrent !== "function")
-        hostStateError("BRANCH_ADMISSION_INVALID")
-      await (this.deps.prepareInputIdentity?.(candidate, snapshot.root) ??
-        prepareProjectRuntimeInputIdentity(candidate, snapshot.root))
-      const current = await this.deps.resolveInstalledPlugin(input.installedPluginId)
-      if (!current?.enabled || current.installedPluginId !== installed.installedPluginId ||
-        current.root !== installed.root || current.packageId !== installed.packageId ||
-        current.packageVersion !== installed.packageVersion)
-        hostStateError("PACKAGE_IDENTITY_MISMATCH")
-      // No await follows these native source/snapshot checks and the final admission fence.
-      if (JSON.stringify(this.project(source.projectId)) !== sourceState)
-        hostStateError("BRANCH_SOURCE_CHANGED")
-      assertSourceSettled()
-      this.snapshots.read(source.pluginDigest)
-      this.snapshots.read(snapshot.digest)
-      admission.assertCurrent()
-      return this.store.createBranch({
-        projectId: candidate.projectId, name: candidate.name, goal: candidate.goal,
-        workspace: candidate.workspace, installedPluginId: candidate.installedPluginId,
-        packageId: candidate.packageId, packageVersion: candidate.packageVersion,
-        pluginDigest: candidate.pluginDigest, manifest: candidate.manifest
-      }, input.stageId)
-    })
-  }
-
-  async localCreate(input: {
-    projectId: string
-    name: string
-    workspace: string
-    installedPluginId: string
-    goal: string
-  }): Promise<HostProjectState> {
-    return withSnapshotRetention([this.snapshots.root], async () => {
-      hostRecord(input, ["projectId", "name", "workspace", "installedPluginId", "goal"])
-      input = structuredClone(input)
-      hostText(input.projectId)
-      hostText(input.name)
-      hostGoal(input.goal)
-      const workspace = runtimeDirectory(input.workspace)
-      const installed = await this.deps.resolveInstalledPlugin(hostText(input.installedPluginId))
-      if (
-        !installed ||
-        !installed.enabled ||
-        installed.installedPluginId !== input.installedPluginId
-      )
         hostStateError("PLUGIN_UNAVAILABLE")
       const snapshot = this.snapshots.capture(installed.root)
       if (
@@ -390,12 +417,155 @@ export class HostProjectService {
       )
         hostStateError("PACKAGE_IDENTITY_MISMATCH")
       assertHostPackageSupported(snapshot.root, snapshot.manifest)
+      // This first native adapter permits implementation edits only in unshared target/downstream
+      // Skill files. A changed contract, context provider, Hook or shared helper needs an earlier
+      // baseline/provider; merely importing old upstream outputs cannot prove compatibility.
+      assertStageBranchSourceCompatible(
+        sourceSnapshot.root,
+        snapshot.root,
+        source.manifest,
+        snapshot.manifest,
+        input.stageId
+      )
+      const candidate: HostProjectState = {
+        projectId: input.projectId,
+        name: input.name,
+        workspace,
+        installedPluginId: installed.installedPluginId,
+        goal: input.goal,
+        packageId: installed.packageId,
+        packageVersion: installed.packageVersion,
+        pluginDigest: snapshot.digest,
+        manifest: snapshot.manifest,
+        schemaVersion: 1,
+        stateOwner: "host",
+        version: 1,
+        stageIndex,
+        status: "active",
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      }
+      const admission = await authorize({
+        input: structuredClone(input),
+        source: structuredClone(source),
+        candidate: structuredClone(candidate),
+        sourceSnapshotRoot: sourceSnapshot.root,
+        candidateSnapshotRoot: snapshot.root
+      })
+      if (!admission || typeof admission.assertCurrent !== "function")
+        hostStateError("BRANCH_ADMISSION_INVALID")
+      await (this.deps.prepareInputIdentity?.(candidate, snapshot.root) ??
+        prepareProjectRuntimeInputIdentity(candidate, snapshot.root))
+      const current = await this.deps.resolveInstalledPlugin(input.installedPluginId)
+      if (
+        !current?.enabled ||
+        current.installedPluginId !== installed.installedPluginId ||
+        current.root !== installed.root ||
+        current.packageId !== installed.packageId ||
+        current.packageVersion !== installed.packageVersion
+      )
+        hostStateError("PACKAGE_IDENTITY_MISMATCH")
+      // No await follows these native source/snapshot checks and the final admission fence.
+      if (JSON.stringify(this.project(source.projectId)) !== sourceState)
+        hostStateError("BRANCH_SOURCE_CHANGED")
+      assertSourceSettled()
+      this.snapshots.read(source.pluginDigest)
+      this.snapshots.read(snapshot.digest)
+      admission.assertCurrent()
+      return this.store.createBranch(
+        {
+          projectId: candidate.projectId,
+          name: candidate.name,
+          goal: candidate.goal,
+          workspace: candidate.workspace,
+          installedPluginId: candidate.installedPluginId,
+          packageId: candidate.packageId,
+          packageVersion: candidate.packageVersion,
+          pluginDigest: candidate.pluginDigest,
+          manifest: candidate.manifest
+        },
+        input.stageId
+      )
+    })
+  }
+
+  async localCreate(
+    input: {
+      projectId: string
+      name: string
+      workspace: string
+      installedPluginId: string
+      goal: string
+      expectedPlugin?: PluginStartUseIdentity
+    },
+    assertCreatorCurrent: () => void = () => {}
+  ): Promise<HostProjectState> {
+    return withSnapshotRetention([this.snapshots.root], async () => {
+      assertCreatorCurrent()
+      hostRecord(input, [
+        "projectId",
+        "name",
+        "workspace",
+        "installedPluginId",
+        "goal",
+        ...(Object.hasOwn(input, "expectedPlugin") ? ["expectedPlugin"] : [])
+      ])
+      input = structuredClone(input)
+      const { expectedPlugin, ...projectInput } = input
+      if (expectedPlugin) {
+        hostRecord(expectedPlugin, ["pluginId", "name", "version", "digest"])
+        if (
+          hostText(expectedPlugin.pluginId) !== input.installedPluginId ||
+          typeof expectedPlugin.digest !== "string" ||
+          !/^[a-f0-9]{64}$/.test(expectedPlugin.digest)
+        )
+          hostStateError("PACKAGE_IDENTITY_MISMATCH")
+        hostText(expectedPlugin.name)
+        hostText(expectedPlugin.version)
+      } else if (Object.hasOwn(input, "expectedPlugin")) hostStateError("SCHEMA_INVALID")
+      hostText(input.projectId)
+      hostText(input.name)
+      hostGoal(input.goal)
+      const workspace = runtimeDirectory(input.workspace)
+      const installed = await this.deps.resolveInstalledPlugin(hostText(input.installedPluginId))
+      assertCreatorCurrent()
+      if (
+        !installed ||
+        !installed.enabled ||
+        installed.installedPluginId !== input.installedPluginId
+      )
+        hostStateError("PLUGIN_UNAVAILABLE")
+      const assertSourceCurrent = expectedPlugin
+        ? capturePackageMetadataGuard(installed.root)
+        : () => {}
+      const snapshot = this.snapshots.capture(installed.root)
+      if (
+        snapshot.manifest.plugin.id !== installed.packageId ||
+        snapshot.manifest.plugin.version !== installed.packageVersion
+      )
+        hostStateError("PACKAGE_IDENTITY_MISMATCH")
+      const assertRetainedCurrent = expectedPlugin
+        ? capturePackageMetadataGuard(snapshot.root)
+        : () => {}
+      if (
+        expectedPlugin &&
+        (expectedPlugin.name !== installed.packageId ||
+          expectedPlugin.version !== installed.packageVersion ||
+          derivationContentIdentity((await snapshotDerivationSource(snapshot.root)).files) !==
+            expectedPlugin.digest)
+      )
+        hostStateError("PACKAGE_IDENTITY_MISMATCH")
+      assertCreatorCurrent()
+      assertSourceCurrent()
+      assertRetainedCurrent()
+      assertHostPackageSupported(snapshot.root, snapshot.manifest)
       for (const stage of snapshot.manifest.stages) {
         if (!readRuntimeScopedFile(snapshot.root, stage.skill!, 256 * 1024).present)
           hostStateError("SKILL_MISSING")
       }
       // Recheck the host catalog after capture: update/disable cannot race project binding silently.
       const current = await this.deps.resolveInstalledPlugin(input.installedPluginId)
+      assertCreatorCurrent()
       if (
         !current ||
         !current.enabled ||
@@ -406,7 +576,7 @@ export class HostProjectService {
       )
         hostStateError("PACKAGE_IDENTITY_MISMATCH")
       const creation = {
-        ...input,
+        ...projectInput,
         workspace,
         packageId: installed.packageId,
         packageVersion: installed.packageVersion,
@@ -425,6 +595,21 @@ export class HostProjectService {
       }
       await (this.deps.prepareInputIdentity?.(preparation, snapshot.root) ??
         prepareProjectRuntimeInputIdentity(preparation, snapshot.root))
+      if (expectedPlugin) {
+        const final = await this.deps.resolveInstalledPlugin(input.installedPluginId)
+        assertCreatorCurrent()
+        if (
+          !final?.enabled ||
+          final.installedPluginId !== installed.installedPluginId ||
+          final.root !== installed.root ||
+          final.packageId !== installed.packageId ||
+          final.packageVersion !== installed.packageVersion
+        )
+          hostStateError("PACKAGE_IDENTITY_MISMATCH")
+        assertSourceCurrent()
+        assertRetainedCurrent()
+      }
+      assertCreatorCurrent()
       return this.store.create(creation)
     })
   }
@@ -448,7 +633,8 @@ export class HostProjectService {
     return this.store.prepare({
       ...input,
       stageId: stage.id,
-      inputFingerprint: this.fingerprint(project)
+      inputFingerprint: this.fingerprint(project),
+      ...this.contextProviderRequest(project)
     })
   }
 
@@ -459,11 +645,13 @@ export class HostProjectService {
       inputFingerprint: string
       decision: "approved" | "rejected"
       actorId: string
+      contextProviderApproval?: HostContextProviderApproval
     }
   ): HostProjectOperation {
     const operation = this.operation(operationId)
     const project = this.project(operation.projectId)
     this.assertCommand(project, "approve")
+    this.assertContextProviderRequest(project, operation)
     if (this.fingerprint(project) !== operation.inputFingerprint) hostStateError("INPUT_CHANGED")
     return this.store.decideApproval(operationId, input)
   }
@@ -474,6 +662,7 @@ export class HostProjectService {
   ): Promise<HostProjectOperation> {
     const operation = this.operation(operationId)
     this.assertCommand(this.project(operation.projectId), "start")
+    this.assertContextProviderRequest(this.project(operation.projectId), operation)
     if (!options) return this.coordinator.executePrepared(operationId)
     if (this.operationInputs.has(operationId)) hostStateError("OPERATION_BUSY")
     let active = true
@@ -495,7 +684,10 @@ export class HostProjectService {
     this.assertCommand(project, "validate")
     const stage = project.manifest.stages[project.stageIndex]
     if (!stage) hostStateError("PROJECT_COMPLETED")
-    if (stage.actionIds.length && operation.execution?.terminal?.outcome !== "success")
+    if (
+      (stage.actionIds.length || operation.contextProvider) &&
+      operation.execution?.terminal?.outcome !== "success"
+    )
       hostStateError("ACTION_EXECUTION_REQUIRED")
     this.snapshot(project)
     await this.deps.authorize(structuredClone(project), structuredClone(operation))
@@ -576,6 +768,7 @@ export class HostProjectService {
 
   async reconcile(operationId: string): Promise<HostProjectOperation> {
     const operation = this.operation(operationId)
+    await this.deps.reconcileRecoveryHooks?.(this.project(operation.projectId))
     this.assertCommand(this.project(operation.projectId), "reconcile")
     const inspect = this.deps.inspectOperation
     if (!inspect) hostStateError("RECONCILE_UNSUPPORTED")
@@ -604,6 +797,35 @@ export class HostProjectService {
 
   private project(id: string): HostProjectState {
     return this.store.get(id) ?? hostStateError("PROJECT_MISSING")
+  }
+  private contextProviderRequest(project: HostProjectState): {
+    contextProvider?: HostContextProviderRequest
+  } {
+    const root = this.snapshot(project).root
+    const provider = readPackageExtensionContract(root)?.context?.provider
+    if (!provider?.entry) return {}
+    const policy = readStageRecoveryPolicy(root)
+    if (
+      process.platform !== "win32" ||
+      policy?.hookExecution !== "windows-sandbox" ||
+      !policy.contextProvider
+    )
+      hostStateError("CONTEXT_PROVIDER_RECOVERY_REQUIRED")
+    return {
+      contextProvider: {
+        protocol: "devclaw.context-text/v1",
+        policyDigest: runtimeDigest(JSON.stringify([project.pluginDigest, provider.entry, policy])),
+        notice:
+          "此阶段将执行保留的上下文脚本，使用受限令牌和独立可变目录。脚本可能访问网络；外部效果不能自动撤回。请单独批准本次阶段的精确脚本与策略。"
+      }
+    }
+  }
+  private assertContextProviderRequest(project: HostProjectState, operation: HostProjectOperation) {
+    if (
+      JSON.stringify(this.contextProviderRequest(project).contextProvider) !==
+      JSON.stringify(operation.contextProvider)
+    )
+      hostStateError("CONTEXT_PROVIDER_POLICY_CHANGED")
   }
   private assertCommand(project: HostProjectState, kind: HostProjectCommandKind): void {
     this.deps.assertCommand?.(structuredClone(project), kind)

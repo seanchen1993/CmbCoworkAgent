@@ -45,6 +45,8 @@ export interface DevelopmentBusinessTrialSession {
   incarnation: { token: string | null; legacyCreatedAt: number }
 }
 export interface DevelopmentBusinessTrialStatus {
+  /** Native recovery provenance for locating the original pending operation after restart. */
+  stageRecovery?: { sourceTrialId: string; preparationId: string; started?: boolean }
   journey?: CreatorProjectTrialJourney
   id: string
   version: number
@@ -85,6 +87,7 @@ export interface DevelopmentBusinessTrialStatus {
 }
 export type DevelopmentBusinessTrialScope = AuthoringScope & { trialId: string; digest: string; expectedVersion: number }
 export interface DevelopmentBusinessTrialApi {
+  recovery?: import("./plugin-stage-recovery").PluginStageRecoveryApi
   /** Same original editor and source approval, resolving the opaque trial ID in main. */
   source: import("../project-runtime/function-source").ProjectFunctionSourceApi
   request(input: AuthoringScope & { planId: string; digest: string; goal: string }): Promise<DevelopmentStatus>
@@ -125,6 +128,7 @@ export interface DevelopmentBusinessStatus {
     version: string
     digest: string
     copyId: string
+    contentDigest?: string
     steps: Array<{ id: string; title: string; sourceName: string }>
     extensions?: Array<{ id: string; title: string; sourceName: string }>
     diagnostics: string[]
@@ -132,13 +136,14 @@ export interface DevelopmentBusinessStatus {
     canReconcile?: boolean
     reconciliation?: {
       checkedAt: number
-      outcome: "installed" | "exported" | "unknown"
+      outcome: "installed" | "exported" | "not-executed" | "conflict" | "unknown"
       reason?: string
     }
     exportOnly?: boolean
     pluginId?: string
     error?: string
     output?: string
+    pendingOutput?: string
   }
 }
 export interface DevelopmentCompositionStatus {
@@ -268,6 +273,9 @@ export interface DevelopmentApi extends Partial<CreatorPlanningApi> {
   exportProjectDelivery?(input: AuthoringScope & {
     deliveryId: string; digest: string
   }): Promise<DevelopmentStatus>
+  reconcileProjectDelivery?(input: AuthoringScope & {
+    deliveryId: string; digest: string
+  }): Promise<DevelopmentStatus>
   approveModularization?(input: AuthoringScope & {
     requestId: string; sourceDigest: string
   }): Promise<DevelopmentStatus>
@@ -321,7 +329,15 @@ export interface CreatorProjectDeliveryStatus {
     "exported" | "failed" | "unknown"
   canInstall: boolean
   canExport: boolean
+  canReconcile?: boolean
+  operation?: "install" | "export"
+  reconciliation?: {
+    outcome: "installed" | "exported" | "not-executed" | "conflict" | "unknown"
+    checkedAt: number
+    reason?: string
+  }
   pluginId?: string
   output?: string
+  pendingOutput?: string
   error?: string
 }

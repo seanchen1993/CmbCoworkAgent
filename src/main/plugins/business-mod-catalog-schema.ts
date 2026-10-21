@@ -121,7 +121,18 @@ export const businessModCatalogSchema = z
               })
               .strict()
               .optional(),
-            skills: paths.optional()
+            skills: paths.optional(),
+            stageRecoveryAdapter: z
+              .object({
+                apiVersion: z.literal("devclaw.plugin-stage-recovery/v1"),
+                entry: z.string(),
+                runtime: z.literal("python"),
+                isolation: z.literal("private-output-copy"),
+                codeSource: z.literal("keep"),
+                externalEffects: z.literal("network-requires-confirmation")
+              })
+              .strict()
+              .optional()
           })
           .strict()
       )

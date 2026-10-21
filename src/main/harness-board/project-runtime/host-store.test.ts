@@ -33,6 +33,53 @@ afterEach(() => {
 })
 
 describe("persistent host project state", () => {
+  it("binds separate context-script consent to the exact durable operation even for automatic stages", () => {
+    const f = fixture()
+    const contextProvider = {
+      protocol: "devclaw.context-text/v1" as const,
+      policyDigest: "a".repeat(64),
+      notice: "Provider may access a network; approve this exact operation."
+    }
+    const operation = f.store.prepare({ ...prepareFixture(), contextProvider })
+    expect(() => f.store.start(operation.operationId, TEST_FINGERPRINT)).toThrow(
+      "CONTEXT_PROVIDER_APPROVAL_REQUIRED"
+    )
+    const approval = {
+      expectedVersion: operation.expectedVersion,
+      inputFingerprint: operation.inputFingerprint,
+      decision: "approved" as const,
+      actorId: "native-user"
+    }
+    expect(() => f.store.decideApproval(operation.operationId, approval)).toThrow(
+      "CONTEXT_PROVIDER_APPROVAL_REQUIRED"
+    )
+    expect(() =>
+      f.store.decideApproval(operation.operationId, {
+        ...approval,
+        contextProviderApproval: { policyDigest: "b".repeat(64), allowNetworkSideEffects: true }
+      })
+    ).toThrow("CONTEXT_PROVIDER_APPROVAL_REQUIRED")
+    f.store.decideApproval(operation.operationId, {
+      ...approval,
+      contextProviderApproval: {
+        policyDigest: contextProvider.policyDigest,
+        allowNetworkSideEffects: true
+      }
+    })
+    const cold = openStore(f.path)
+    expect(cold.getOperation(operation.operationId)).toMatchObject({
+      contextProvider,
+      approval: {
+        contextProviderApproval: {
+          policyDigest: contextProvider.policyDigest,
+          allowNetworkSideEffects: true
+        }
+      }
+    })
+    expect(cold.start(operation.operationId, TEST_FINGERPRINT)).toMatchObject({
+      operationId: operation.operationId
+    })
+  })
   it("serializes distinct project ids sharing a workspace across store instances", () => {
     const { store, root, path } = fixture()
     const other = openStore(path)

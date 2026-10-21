@@ -191,7 +191,7 @@ export const autobizBusinessModAdapter: BusinessModAssemblyAdapter = {
           : "hooks/hooks.json"
       const file = context.files.find((entry) => entry.path === hooksPath)
       if (!file) throw Error("AUTOBIZ_REQUIRED_HOOKS_SOURCE_MISSING")
-      requiredHooks = reviewedAutobizRequiredHookIds(JSON.parse(file.bytes.toString("utf8")))
+      requiredHooks = reviewedAutobizRequiredHookIds(JSON.parse(file.bytes.toString("utf8")), kernel)
     }
     return {
       runtime: wrapProjectRuntimeManifest(

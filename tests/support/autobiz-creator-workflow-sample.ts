@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { execFile } from "node:child_process"
 import { createHash } from "node:crypto"
 import { readFile, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { isAbsolute, join, relative } from "node:path"
 import { promisify } from "node:util"
 import { runWorkflowEngine } from "../../src/main/agent/workflow/engine"
 import { validateWorkflowScript } from "../../src/main/agent/workflow/script"
@@ -25,6 +25,7 @@ export interface SampleCodeResult {
   passed: boolean
   observerSnapshots: unknown[]
   knowledgeSha256: string
+  integrationWorkspace?: string
 }
 
 /** Original workflow engine and actual AutoBiz worktrees, with controlled child execution.
@@ -151,15 +152,15 @@ return await parallel([
   const finished = await input.code("finish-run")
   assert.equal(finished.aggregate.passed, true)
   assert.equal(finished.deliveries.length, 2)
+  const mergedWorkspace =
+    finished.integrationWorkspace ?? join(input.workspace, "repositories/creator-code")
+  const mergedRelative = relative(input.workspace, mergedWorkspace)
+  assert(!isAbsolute(mergedRelative) && !mergedRelative.split(/[\\/]/).includes(".."))
   for (const item of finished.deliveries)
     assert.equal(
       (
         await readFile(
-          join(
-            input.workspace,
-            "repositories/creator-code",
-            item.batchId === "B001" ? "cap.py" : "next.py"
-          ),
+          join(mergedWorkspace, item.batchId === "B001" ? "cap.py" : "next.py"),
           "utf8"
         )
       ).includes("raise ValueError"),

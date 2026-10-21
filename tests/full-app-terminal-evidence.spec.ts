@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -199,6 +200,99 @@ try {
     batches: { ...manifest.batches, B001: { ...manifest.batches.B001, mergeCommitSha: other } }
   })
   refuses(() => verify())
+  const integration = join(
+    workspace,
+    ".autobizdevops/worktrees",
+    runId,
+    createHash("sha256").update("default").digest("hex").slice(0, 12),
+    "integration"
+  )
+  git("worktree", "add", "-b", "fixture/integration", integration, commit)
+  const approvalDigest = "c".repeat(64)
+  const promotion = {
+    status: "merged",
+    approvalDigest,
+    approvedBy: "explicit-native-app-acceptance-fixture",
+    snapshot: {
+      repositories: {
+        default: {
+          candidateSha: commit,
+          branchName: "fixture/integration",
+          worktreePath: integration
+        }
+      }
+    },
+    repositories: { default: { status: "merged", commitSha: commit } }
+  }
+  const promotedManifest = {
+    ...manifest,
+    status: "succeeded",
+    mainPromotion: promotion,
+    repositories: {
+      default: {
+        baseBranch: "main",
+        headSha: commit,
+        integration: {
+          owner: "plugin",
+          branchName: "fixture/integration",
+          worktreePath: integration,
+          headSha: commit
+        }
+      }
+    }
+  }
+  const waitingWorkflow = {
+    ...workflow,
+    result: {
+      ...workflow.result,
+      finalStatus: "awaiting_user_confirmation",
+      verification: { mainPromotion: { approvalDigest } }
+    }
+  }
+  const nativePromotion = { success: true, runId, status: "succeeded", mainPromotion: promotion }
+  saveManifest(promotedManifest)
+  const promoted = verify({ workflow: waitingWorkflow, promotion: nativePromotion })
+  assert.equal(promoted.mainGit.registeredWorktrees.length, 2)
+  assertions++
+  refuses(() => verify({ workflow: waitingWorkflow }))
+  refuses(() => verify({ workflow, promotion: nativePromotion }))
+  refuses(() =>
+    verify({ workflow: waitingWorkflow, promotion: { ...nativePromotion, success: false } })
+  )
+  refuses(() =>
+    verify({
+      workflow: waitingWorkflow,
+      promotion: {
+        ...nativePromotion,
+        mainPromotion: { ...promotion, approvalDigest: "d".repeat(64) }
+      }
+    })
+  )
+  refuses(() =>
+    verify({
+      workflow: waitingWorkflow,
+      promotion: { ...nativePromotion, mainPromotion: { ...promotion, approvedBy: "model" } }
+    })
+  )
+  saveManifest({
+    ...promotedManifest,
+    repositories: {
+      default: {
+        ...promotedManifest.repositories.default,
+        integration: {
+          ...promotedManifest.repositories.default.integration,
+          worktreePath: repository
+        }
+      }
+    }
+  })
+  refuses(() => verify({ workflow: waitingWorkflow, promotion: nativePromotion }))
+  saveManifest(promotedManifest)
+  const unrelated = join(workspace, "unrelated-worktree")
+  git("worktree", "add", "-b", "fixture/unrelated", unrelated, commit)
+  refuses(() => verify({ workflow: waitingWorkflow, promotion: nativePromotion }))
+  git("worktree", "remove", unrelated)
+  git("worktree", "remove", integration)
 } finally {
   // Verified absolute test-owned directory; no user workspace is removed.
   rmSync(root, { recursive: true, force: true })

@@ -232,7 +232,7 @@ async function main() {
     await save(definition)
     await page.reload()
     await page.getByText("参数表单真实联调", { exact: true }).first().click()
-    await openModsAdvancedSettings(page, "步骤管理")
+    await openModsAdvancedSettings(page, "聊天任务模板")
     await page.getByRole("button", { name: "表单到真实动作", exact: true }).click()
     const prepare = page.locator('[data-flow-step="prepare"]')
     await prepare.getByRole("button", { name: "配置步骤：准备文件", exact: true }).click()

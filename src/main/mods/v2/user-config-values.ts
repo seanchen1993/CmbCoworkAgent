@@ -21,6 +21,16 @@ import {
   type UserConfigRecord as ConfigRecord
 } from "./user-config-migration"
 
+/** Main-only recovery material. Sealed values remain bound to their original workspace. */
+export interface NativeStageUserConfiguration {
+  workspace: string
+  plugin: string
+  schema: FunctionUserConfig
+  declaration?: FunctionUserConfigSchema
+  record: ConfigRecord
+  identity: { savedRevision: number; storedRecordDigest: string; schemaVersion: number }
+}
+
 /** Ordinary values and opaque OS-encrypted fields share one durable revision. */
 export class FunctionUserConfigValues {
   private readonly secrets: FunctionUserConfigSecrets
@@ -79,6 +89,145 @@ export class FunctionUserConfigValues {
             schemaVersion: Number(parsed.schemaVersion),
             schemaDigest: String(parsed.schemaDigest)
           })
+    }
+  }
+
+  captureStageRecovery(
+    workspace: string,
+    plugin: string,
+    schema: FunctionUserConfig,
+    declaration?: FunctionUserConfigSchema
+  ): NativeStageUserConfiguration {
+    const identity = this.identity(workspace, plugin)
+    const original = this.read(workspace, plugin)
+    this.resolve(workspace, plugin, schema, declaration)
+    const values: ModObject = {},
+      sealed: Record<string, string> = {}
+    for (const [key, field] of Object.entries(schema)) {
+      if (field.sensitive) {
+        if (Object.hasOwn(original.values, key))
+          throw new ModFunctionError("MODS_SECRET_STORAGE_INVALID")
+        if (original.sealed && Object.hasOwn(original.sealed, key))
+          sealed[key] = original.sealed[key]
+      } else if (Object.hasOwn(original.values, key))
+        values[key] = structuredClone(original.values[key])
+    }
+    if (JSON.stringify(this.identity(workspace, plugin)) !== JSON.stringify(identity))
+      throw new ModFunctionError("MODS_CONFIG_VALUE_CHANGED")
+    return structuredClone({
+      workspace,
+      plugin,
+      schema,
+      ...(declaration ? { declaration } : {}),
+      record: {
+        revision: original.revision,
+        values,
+        ...(Object.keys(sealed).length ? { sealed } : {}),
+        ...(original.schemaVersion === undefined
+          ? {}
+          : {
+              schemaVersion: original.schemaVersion,
+              schemaDigest: original.schemaDigest
+            })
+      },
+      identity
+    })
+  }
+
+  private recoveryValues(snapshot: NativeStageUserConfiguration, overrides: ModObject): ModObject {
+    const values = structuredClone(snapshot.record.values)
+    for (const [key, field] of Object.entries(snapshot.schema)) {
+      if (field.sensitive && snapshot.record.sealed && Object.hasOwn(snapshot.record.sealed, key))
+        values[key] = this.secrets.open(
+          snapshot.workspace,
+          snapshot.plugin,
+          key,
+          field,
+          snapshot.record.sealed[key]
+        )
+    }
+    for (const [key, value] of Object.entries(overrides)) {
+      const field = Object.hasOwn(snapshot.schema, key) ? snapshot.schema[key] : undefined
+      if (!field || field.type !== "directory" || field.sensitive || field.multiple)
+        throw new ModFunctionError("MODS_USER_CONFIG_INVALID")
+      this.validateKind(key, field, value as FunctionConfigValue)
+      values[key] = value
+    }
+    return resolveFunctionUserConfig(snapshot.schema, values)
+  }
+
+  /** Native creation after explicit recovery review. Re-seals secrets, transfers no grants. */
+  forkStageRecovery(
+    snapshot: NativeStageUserConfiguration,
+    targetWorkspace: string,
+    overrides: ModObject,
+    assertLive: () => void
+  ) {
+    const guard = () => {
+      assertLive()
+      if (
+        targetWorkspace === snapshot.workspace ||
+        JSON.stringify(this.identity(snapshot.workspace, snapshot.plugin)) !==
+          JSON.stringify(snapshot.identity)
+      )
+        throw new ModFunctionError("MODS_CONFIG_VALUE_CHANGED")
+    }
+    guard()
+    const target = this.read(targetWorkspace, snapshot.plugin)
+    if (
+      target.revision !== 0 ||
+      Object.keys(target.values).length ||
+      Object.keys(target.sealed ?? {}).length ||
+      target.schemaVersion !== undefined
+    )
+      throw new ModFunctionError("MODS_CONFIG_VALUE_CHANGED")
+    const resolved = this.recoveryValues(snapshot, overrides)
+    const values: ModObject = {},
+      sealed: Record<string, string> = {}
+    for (const [key, field] of Object.entries(snapshot.schema)) {
+      if (!Object.hasOwn(resolved, key)) continue
+      if (field.sensitive)
+        sealed[key] = this.secrets.seal(
+          targetWorkspace,
+          snapshot.plugin,
+          key,
+          field,
+          resolved[key] as FunctionConfigValue
+        )
+      else values[key] = structuredClone(resolved[key])
+    }
+    guard()
+    this.commit(
+      targetWorkspace,
+      snapshot.plugin,
+      target,
+      values,
+      sealed,
+      0,
+      guard,
+      snapshot.declaration
+        ? {
+            schemaVersion: snapshot.declaration.version,
+            schemaDigest: userConfigSchemaDigest(snapshot.schema)
+          }
+        : undefined
+    )
+    return this.identity(targetWorkspace, snapshot.plugin)
+  }
+
+  stageRecoveryMatches(
+    snapshot: NativeStageUserConfiguration,
+    targetWorkspace: string,
+    overrides: ModObject
+  ): boolean {
+    try {
+      return (
+        encodeModJson(
+          this.resolve(targetWorkspace, snapshot.plugin, snapshot.schema, snapshot.declaration)
+        ) === encodeModJson(this.recoveryValues(snapshot, overrides))
+      )
+    } catch {
+      return false
     }
   }
 

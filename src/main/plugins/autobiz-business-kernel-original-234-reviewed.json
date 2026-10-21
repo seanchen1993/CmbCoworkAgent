@@ -1,0 +1,1872 @@
+{
+  "id": "autobiz.original-234-kernel",
+  "version": "1.0.1",
+  "files": [
+    {
+      "path": ".mcp.json",
+      "digest": "b56663cd262d426c5358c01822c8cf253a41c3d237d7937402207dbbfd1ac1df"
+    },
+    {
+      "path": "agents/analyst.md",
+      "digest": "43746dd0c9f87fc6fde7129df3b983cecc648afabf58ea1149dca47296d27770"
+    },
+    {
+      "path": "agents/critic_autodev_design_zh.md",
+      "digest": "40314ff7e393ada78596e1345a33fb7e6ec062de0fb4cc3626666cfc522655ce"
+    },
+    {
+      "path": "agents/critic_autodev_plan_zh.md",
+      "digest": "18f3d979c6b4ff493f7534af99142cb01bb2510383e4aabf95b9564d49ce9314"
+    },
+    {
+      "path": "agents/critic_autodev_zh.md",
+      "digest": "5f25e604d883c99e445f5acae4a095250f7219ad56abf052c72cecd2767419e4"
+    },
+    {
+      "path": "agents/critic.md",
+      "digest": "ef6d9d5d4db719a9d45c7392e356ba9e6a2c204855990b9b14574b22eb92c520"
+    },
+    {
+      "path": "agents/explore_spec.md",
+      "digest": "667864b823622f8a49cc9c13ecbe9b328e3d9d3320be54aaaab3e03fe1bc711c"
+    },
+    {
+      "path": "agents/explore.md",
+      "digest": "503afe816625faf96414f465a19deaa5e3c2b0d258433178ae2bdbb1fc98f2f9"
+    },
+    {
+      "path": "agents/reviewer.md",
+      "digest": "498e9249c2deb3a8f9712ef7f8023aa3719601f5ebf8a0819ba4aae5ce52d2ca"
+    },
+    {
+      "path": "agents/test-engineer.md",
+      "digest": "13af7c2e785fe5ee79077b3d2e24f5bf0e07e4147825d294c68b3ac63d4cf667"
+    },
+    {
+      "path": "agents/verification.md",
+      "digest": "16505d992e24cb484f25bee5ed282b892947f46ba9c90164b188d46ff5285956"
+    },
+    {
+      "path": "board_core/__init__.py",
+      "digest": "25aab116e97a70cd6484d5b48acbde6ec6b0bf426516b5b2dcf9aa83c29ab77c"
+    },
+    {
+      "path": "board_core/artifact_paths.py",
+      "digest": "0bd374b847104d0d597bd39bc501b4d2b75fc9b66a0707eaa59402ac94c4014e"
+    },
+    {
+      "path": "board_core/artifacts.py",
+      "digest": "77d5a82fac397a8a7f411398944dc650ca8fdb541cf65af0eea6f598ceef2c6f"
+    },
+    {
+      "path": "board_core/contracts.py",
+      "digest": "d9fc05934e3e4c01be9a37c600ad9d5ce0012a73834585dcca7462df5ae348e5"
+    },
+    {
+      "path": "board_core/state_store.py",
+      "digest": "d0f4195f46ebcb64bd294d2dfe52eb1f7748cf2946d7dc2c7c15f3cdb0045a80"
+    },
+    {
+      "path": "board_core/state.py",
+      "digest": "b38163da388370af59eeb612fa9df6f44d5e8c215f6ae5169d4bd822e5ab71cc"
+    },
+    {
+      "path": "board_core/workflow_closure.py",
+      "digest": "e7b6e7556102d8e0fb137cbb3a3a1551178f4eb9e65699224ea283a3b20a1b4f"
+    },
+    {
+      "path": "board_core/workflow_compiler.py",
+      "digest": "46ff11027fdf54b2a742b09eca581ff45dbf6ed9049216a145e61423626ea5eb"
+    },
+    {
+      "path": "board_core/workflow.py",
+      "digest": "425ab825a8625ea24b75c7a8d87837e003f95108caa390876a0c56827c70a7d0"
+    },
+    {
+      "path": "hooks/agents_repo.py",
+      "digest": "67254d8fe0dc624c6c55b395500f44dc628b18e993d3a02a25175e58bde8a2bb"
+    },
+    {
+      "path": "hooks/artifact_ref_validator.py",
+      "digest": "bd37b50c5390466760979f31cc3e1461e2319d3905846e2e357d2578ba606e29"
+    },
+    {
+      "path": "hooks/augment_explore_task_prompt.py",
+      "digest": "c0e3de4880e9a7c0bd00abf1e8890ad3a5d0de4e0e04292b6aac5b8ad6d0e617"
+    },
+    {
+      "path": "hooks/augment_test_engineer_task_prompt.py",
+      "digest": "46300dc375b953492560e69b14731a11e29d47c03741a78d8c024db2901266f0"
+    },
+    {
+      "path": "hooks/batch_lease_manager.py",
+      "digest": "4b2a1ac05ad4f2659e1d038c547ee27af4b6207abf39b71c5fc9f078c6411966"
+    },
+    {
+      "path": "hooks/batch_merger.py",
+      "digest": "59c1022e70cdecdf370889751bf993157c0bdb835cf4b1af3cd6c89e896286f4"
+    },
+    {
+      "path": "hooks/blocker_registry.py",
+      "digest": "99008b7dcc7c300051fe030dfa6958b7da1cd33e68196439e1b8d84f15001575"
+    },
+    {
+      "path": "hooks/candidate_digest.py",
+      "digest": "466eb1bbe3b0359f18ee7e1e6ce758bfb99f9e9406f772162cb3478c9c696811"
+    },
+    {
+      "path": "hooks/candidate_manager.py",
+      "digest": "c765a9df546a0f6e5bf6e1e9c32f644114d79f644f4f7ee5412fe5f3b002f73b"
+    },
+    {
+      "path": "hooks/check_plugin_read.py",
+      "digest": "7755d3901089dc503a8eb9aaaa6a568ad351e273e6d1ee712b3cb2b557350dee"
+    },
+    {
+      "path": "hooks/check_skill_artifact_drift.py",
+      "digest": "66b1a6b52581e2bbb84c6009d3c77e7f0cbe3f8ed673e49931bf701c78be6e0f"
+    },
+    {
+      "path": "hooks/check_state_read.py",
+      "digest": "f1c63cf0a934b5ad232022bb83a5481947c09e668eb28b054d0f10cd436f93b8"
+    },
+    {
+      "path": "hooks/check-secrets-new.py",
+      "digest": "38214433b6e305974e81a35c5768f98b6ddd199421c56395c58de6ae90662d2f"
+    },
+    {
+      "path": "hooks/code_execution_guard.py",
+      "digest": "7b76a041d6234261f69952435d4ea896364cb6a9c04e1656a9806c3da84fbdf9"
+    },
+    {
+      "path": "hooks/code_shell_analysis.py",
+      "digest": "b0a8662776f39b4c697a3023807c53b7eaf9324d183ac351239756bb3f3ef7a2"
+    },
+    {
+      "path": "hooks/code_task_context.py",
+      "digest": "dc0b65e6a4e52513a7a39134d2010b2ff7fba3898c084bc85ff4252b111221d8"
+    },
+    {
+      "path": "hooks/collect-knowledge.js",
+      "digest": "405c948b60ea7c79d255c9795697255dbe5f5c4ac1290a2a135fcba5e39d840f"
+    },
+    {
+      "path": "hooks/commit_message.py",
+      "digest": "7e3b451741467bff5bc6398e89a9e574a7982fbdc0c48b4dd61ace1ae2a2c4b1"
+    },
+    {
+      "path": "hooks/conflict_resolution_agent.py",
+      "digest": "ce6930a6c35d9a3b7e3aa84f6685eae2374a72a4946d93a7a5cf195195aa8675"
+    },
+    {
+      "path": "hooks/conflict_types.py",
+      "digest": "9413f96a8104132ba471169e94bf515380df7e4c47ab606fc6cc0268b25f491b"
+    },
+    {
+      "path": "hooks/critic_review_log_writer.py",
+      "digest": "2a1e79e42950d7e4a8454c56438fa9a1f749adab00ea665c5a3b957ea2e44aa1"
+    },
+    {
+      "path": "hooks/design_contract_lock.py",
+      "digest": "0188e30c7ec1ac555a5cbc96f401049d1a59b4ed4388412e7d850d34dc289147"
+    },
+    {
+      "path": "hooks/e2e_quality_check.py",
+      "digest": "6418fabcedd4856b1d9145bb9527c8b9589ba2bd40d779b787d5e1ec1de52b8c"
+    },
+    {
+      "path": "hooks/e2e_result_writer.py",
+      "digest": "a55f232de0554b2143d66415e1d6b1f46ecc9866498de47639729b14ce389ba6"
+    },
+    {
+      "path": "hooks/e2e_trust_common.py",
+      "digest": "25ca0675070b81f5524207ad102128bbae7bb84e45056560c2d83b521cc8ad14"
+    },
+    {
+      "path": "hooks/engineering_cache.py",
+      "digest": "2dd6ec7e8ab0d1e62ece95ee8762f7a1139217b9245b47fe76cef3c251efa2ce"
+    },
+    {
+      "path": "hooks/engineering_context.py",
+      "digest": "a5a6e76914bbd77e46dcfd48a4224be340fe4bdd642e4e9f0964b4b93b9ae0df"
+    },
+    {
+      "path": "hooks/engineering_contract.py",
+      "digest": "9cfedcae3bcb3c60456db8ba14f98b7d2c705576e832be74eda16d28e7951107"
+    },
+    {
+      "path": "hooks/engineering_dependencies.py",
+      "digest": "edd177ff58a699aaa8ec68dce6d263167d9858ef9fd53cd4568490745c119c64"
+    },
+    {
+      "path": "hooks/engineering_diagnostics.py",
+      "digest": "b1e38fb69b7b3476d7e172d29ace969944417301cc9f40b0481fd2e110a5b9cd"
+    },
+    {
+      "path": "hooks/engineering_environment.py",
+      "digest": "f1b8e9d8b683dcd4f680bca81e4fa547d52842d8b1aa7fcf5f74c42b5a517217"
+    },
+    {
+      "path": "hooks/engineering_facts.py",
+      "digest": "e0ab13024ee02ee519256cdb5a60a71290bd96614799cde5c6364b977cad3ec9"
+    },
+    {
+      "path": "hooks/engineering_observability.py",
+      "digest": "3f05aade345712dd6decb00a7acb7e53b674428ba66df72018b1bfe4dbeaa609"
+    },
+    {
+      "path": "hooks/engineering_paths.py",
+      "digest": "b7826d3fe354f6f5b14b49c22f0df0f698c2d98fcb594f1b350b3b9b1727caff"
+    },
+    {
+      "path": "hooks/evidence_audit.py",
+      "digest": "2354cca32a86a0317d32ba6f7cc91cc6ff57d99b0ba35574e5e83434468348f4"
+    },
+    {
+      "path": "hooks/evidence_integrity_gate.py",
+      "digest": "8014cc7bccf7fdad5c9c9b63c08560c1c97ac10eb47817ba2a5bf339c7af4f26"
+    },
+    {
+      "path": "hooks/evidence_kernel.py",
+      "digest": "7511d4e8875d8cdec7a4f63eb2d3b65cab32b4f2f73ac5d07adf1d08f311e6a9"
+    },
+    {
+      "path": "hooks/evidence_store.py",
+      "digest": "b879772259af8bcab664bd4013ad9322c34af09ff9329180fcc2d714449a2316"
+    },
+    {
+      "path": "hooks/frontend_route_write_guard.py",
+      "digest": "bc0bcde2073c3d33ae4c3fe0543e2eb7bea13a01baa628197beba9375fac3dc9"
+    },
+    {
+      "path": "hooks/hooks.json",
+      "digest": "d6a8f46ca040528e76aa78262fba314b717cb6942ac5d6c745ba1f5985e5a21e"
+    },
+    {
+      "path": "hooks/human_gate_design_done.py",
+      "digest": "d8af30dd92e621dcd53bcbdf8d6eb770d564ef2fbb467fd241b4cb147692ea67"
+    },
+    {
+      "path": "hooks/implementation_scope.py",
+      "digest": "f6a8cd0bf2ec3734539d9da4ea3afa0446a917f8738bcc66b0b8d2d7e25826c4"
+    },
+    {
+      "path": "hooks/init_validate.py",
+      "digest": "aaf134f29f8eb5470d8e9ef9473c62ad7ad7ddaa4bd3754517536585c4cc61f6"
+    },
+    {
+      "path": "hooks/init_workspace.py",
+      "digest": "a64e0d531ca494a8160466e2d00008a4c2e9746d58d3af949df4124676e35b5a"
+    },
+    {
+      "path": "hooks/inspect_skill_contract.py",
+      "digest": "8cf13c6712f0d8c824d43d68034ddfbb7889abca2223aa94aeb57014b3263245"
+    },
+    {
+      "path": "hooks/inspect_test_environment.py",
+      "digest": "5d2188565f007074b4e11de2651dbcf144ec3e6c1034c0761de8cc124c3957fa"
+    },
+    {
+      "path": "hooks/inspect_workflow_templates.py",
+      "digest": "25f5b86b54997865179f297173479f16871932d61df37edb81140174dfd46fe8"
+    },
+    {
+      "path": "hooks/json_writer_common.py",
+      "digest": "7ad1dd698faeb990779fd0b8b749f712d02e1e4427ec5761d1b5a1f699328754"
+    },
+    {
+      "path": "hooks/merge_resolution_context.py",
+      "digest": "25d6db2b97a3b8bc0622b36e06608c114a6e9e9506ad551dfa7901fa8d75fe0c"
+    },
+    {
+      "path": "hooks/merge_resolution.py",
+      "digest": "2c11a1be51fded313e4f1754fa4bcaebcd0621d5d0813cc448b1cb8f391ed850"
+    },
+    {
+      "path": "hooks/package.json",
+      "digest": "e1c4c46af2057f6f11ddc684d26ab411381b11263d5d610cd15764624c2174d8"
+    },
+    {
+      "path": "hooks/parallel_batch_dag.py",
+      "digest": "355e1250df9b2fd9d57b937de8ff5f2b4635f855b5f5a0fff9a3e7e41efe3174"
+    },
+    {
+      "path": "hooks/parallel_batch_lifecycle.py",
+      "digest": "d8c7ab570ee00e548568e24203f6c3f2645b3424f05dbb6b5908988d961a7bd8"
+    },
+    {
+      "path": "hooks/parallel_batch_scheduler.py",
+      "digest": "1f6f1846c4dd4109cf2fed6efbd3a1532cd0ca63ef9df464c70ebbed33925508"
+    },
+    {
+      "path": "hooks/parallel_batch_stage.py",
+      "digest": "e4da4a3552786177be121a195513777583d1e5df2a238792b887ca330e2601c0"
+    },
+    {
+      "path": "hooks/parallel_dispatch.py",
+      "digest": "3c59802e83a3ab9296871c55bf9bb5035dcbc11841af404f778da1300f33ad26"
+    },
+    {
+      "path": "hooks/parallel_evidence_aggregate.py",
+      "digest": "031a92659cd48cfb2cbf4eb0c3da7973b38a084bcfcc2b1b0e37b27505e1263c"
+    },
+    {
+      "path": "hooks/parallel_failure_classifier.py",
+      "digest": "a80cb8d5ef3fdd30b6b378a618f35d989a619e493804187e3a53dfbf82552e45"
+    },
+    {
+      "path": "hooks/parallel_failure.py",
+      "digest": "70ebbee64670d40f15783e83b5d3b24a213e997911012007ba985fbf8808d84a"
+    },
+    {
+      "path": "hooks/parallel_final_verify.py",
+      "digest": "23c045814ef1c12126e257d383e8e97a6b31e663537367f59854b1546a7c50d5"
+    },
+    {
+      "path": "hooks/parallel_integration.py",
+      "digest": "aebad4a070cde54264b453814730c1a5688a08c71a5faf60f2ab2cdfc62c91d4"
+    },
+    {
+      "path": "hooks/parallel_merge_train.py",
+      "digest": "034350af7fca3f68a4e60e9560de2fba05eaface52eda3c14ffc4064430e86ea"
+    },
+    {
+      "path": "hooks/parallel_repair.py",
+      "digest": "96634cfe9021ef3b054175c7f0a4c74ffb4681ec1f4dc233b9c808ce1e4bd873"
+    },
+    {
+      "path": "hooks/parallel_runtime.py",
+      "digest": "c4165c869a965de755a35e594f8aed776276b399c33540abcc0f9523fbb9b2bc"
+    },
+    {
+      "path": "hooks/parallel_validation_ownership.py",
+      "digest": "fccb158c5dd5634068f735b58b8cd030ecfe3cf9465ec3e9b28eb94fa3555cad"
+    },
+    {
+      "path": "hooks/paths.py",
+      "digest": "85e8a0f59873c674395d74f96cc2a4cdc469f30edcc143183a345f5e891298c9"
+    },
+    {
+      "path": "hooks/performance_checker.py",
+      "digest": "2f314041ae5a8ac0146f33d85cacecc693191d6b62be6b3a40ef181fd4b23ae6"
+    },
+    {
+      "path": "hooks/plan_granularity.py",
+      "digest": "b0e3ffa3c976d64b81294f1e51bb2b25b3c3cb4755ed8fd5eb36462c323fd57d"
+    },
+    {
+      "path": "hooks/plan_json.py",
+      "digest": "23b0d2e2a00496fb32f0ca065843a060e6f3736d038a83f39cf93ccf8180d150"
+    },
+    {
+      "path": "hooks/plan_scope.py",
+      "digest": "77aac4931f7e02aea78fb296154f969cd4d9d624b691ce7de97c3cab8483b14b"
+    },
+    {
+      "path": "hooks/plan_write_ownership.py",
+      "digest": "2eaf5aa30404d9733a567c5f88e4ae0bf624bb2be1018ed7e21620de0ccfad10"
+    },
+    {
+      "path": "hooks/plan_writer.py",
+      "digest": "dcd23b64e69f403c3a5946eebc826dec9b0ea55dc104ba6c81730cbeeb41d323"
+    },
+    {
+      "path": "hooks/query_json_fields.py",
+      "digest": "60e222d03c0365dd29ab9232cb4f71c1163001e9d951229be06d43094f1c3afc"
+    },
+    {
+      "path": "hooks/render_collected_session_context.py",
+      "digest": "e15a6fa5275027b895977033008e5ba379499a0a08d17c3f1e06b9b85eff469d"
+    },
+    {
+      "path": "hooks/render_frontend_test_reference.py",
+      "digest": "b81ce2644fef22de542e9f8b8a8ab1a17a693316ee1e010fe286c09db921824f"
+    },
+    {
+      "path": "hooks/render_session_context.py",
+      "digest": "262f2d3f945adfadee73e1184fa995342bcba97789029889d0c2c30a90f74741"
+    },
+    {
+      "path": "hooks/render_spring_test_reference.py",
+      "digest": "b174043fda0afa177fde7c85a93089ee2e0ff3c411c838b4691af31e4245271d"
+    },
+    {
+      "path": "hooks/repository_snapshot.py",
+      "digest": "a36926993d2513faa821857715cc3056add916222159908a260e0879a5aec806"
+    },
+    {
+      "path": "hooks/resolve_frontend_html_route.py",
+      "digest": "d0befd80898da8b2af980906dd41282d8df707c7d7fa90039bd300ef08c3eb03"
+    },
+    {
+      "path": "hooks/resolve_next_skill.py",
+      "digest": "4810b36e73c959e4284d7c855a5b38f040d884cd68a38790a18c0cd11948b1bb"
+    },
+    {
+      "path": "hooks/result_writer_common.py",
+      "digest": "4564b691678f39ad28b929bc89077dcad98bafc5bacf6d93dcea4fc3f69807c6"
+    },
+    {
+      "path": "hooks/rollback_stage.py",
+      "digest": "83ecab41999afd22ef15eb32f28b02febbde75d509d488475ed56d8a502ccfba"
+    },
+    {
+      "path": "hooks/route_checkpoint.py",
+      "digest": "e71ea46deb86ac558151b299eb388e4ee9362c9599310a32123bd8986a9c530a"
+    },
+    {
+      "path": "hooks/run_advisory_smoke.py",
+      "digest": "ac1ef623bfb9e85736e0fba0a3d8f63aa54c25791e31666ffbddb611882d4365"
+    },
+    {
+      "path": "hooks/run_e2e_command.py",
+      "digest": "3af8f3c99077162a539b226db2774411973be9bbde916c4fd2ff6a307c764641"
+    },
+    {
+      "path": "hooks/run_utest_command.py",
+      "digest": "ef5be087a752a8f39a45e87185fdf8d69fd6d67a101487089e80efb29f5fc405"
+    },
+    {
+      "path": "hooks/runtime_artifact_guard.py",
+      "digest": "58995104159e8c6d4b6cadf9fce7d6a09309c885a5f39cfb8e331160e3348c63"
+    },
+    {
+      "path": "hooks/runtime_guidance.py",
+      "digest": "61f703bbdc326715cfe58c8aac58ea97cf20893e3dc1337d0ea51865d1c7ab67"
+    },
+    {
+      "path": "hooks/skip_node.py",
+      "digest": "5867c2a50a6f3668d138f7f9ed4fda372b6152eef1fe894c2554244a6acdf26f"
+    },
+    {
+      "path": "hooks/smoke_plan_writer.py",
+      "digest": "96cdd1802edde13c88e8813f2d69a82a669add400c02825dd61896c6f8171178"
+    },
+    {
+      "path": "hooks/source_context.py",
+      "digest": "497f9697155fd6bc53649202789eb5f59b5b94bef587bd97420ea132a98e0aec"
+    },
+    {
+      "path": "hooks/source_references.py",
+      "digest": "471b59aee5b3d608ef14bc5e4e559b3d1257283eafc36aeff1ae66249122f263"
+    },
+    {
+      "path": "hooks/spec_contract.py",
+      "digest": "d9deec199729d9f3e6ba4fa7c7514536313557d88b2db0f9b84d448626b060aa"
+    },
+    {
+      "path": "hooks/specs_hook_context.py",
+      "digest": "538d6466c08ee8f297f193d204f291734fe8c53986011784f1539cd86182abe8"
+    },
+    {
+      "path": "hooks/stage_gate.py",
+      "digest": "dfb48e1c223e04cc927fd0be1b8d1de9db97c63a0c4c96fa8273936d18ce6c1b"
+    },
+    {
+      "path": "hooks/state_checkpoint.py",
+      "digest": "ee7840670a79bc3f93219c5e0e9a50d9744c5edeb893fefce3c745adcfd53c9f"
+    },
+    {
+      "path": "hooks/sync_agents.py",
+      "digest": "bacc8f00fbfc00ae25e39e471f34ccf61b2ba21cafd6e36a2feb6f97b30c7360"
+    },
+    {
+      "path": "hooks/task_run_integrity.py",
+      "digest": "3ac8b0965608902e6ef92a3708311e462883becd0ab4f41d90e0596c683518bf"
+    },
+    {
+      "path": "hooks/task_runner.py",
+      "digest": "4fc696c521024ad23ab60b94b6df24e7c2d45b16d389c6fc26a0c266df576823"
+    },
+    {
+      "path": "hooks/ui_context_writer.py",
+      "digest": "6caa50e095bda043832d610a97d3c39d4440f4cdbf42edf3f8909371760ef5e8"
+    },
+    {
+      "path": "hooks/ui_context.py",
+      "digest": "eed8f09603d2917ab2f86744c677b965af7bdf0006d4af47faee4edb7e49891a"
+    },
+    {
+      "path": "hooks/unit_test_result_writer.py",
+      "digest": "de197622e7f72b1d98c79c275d273f80ad584e9bd4f545e95fd70deba61b5da8"
+    },
+    {
+      "path": "hooks/update_checkpoint.py",
+      "digest": "62410d9af62129b6f4a34ee0f1a3e24c6111f14d5111fdadcab314231663654a"
+    },
+    {
+      "path": "hooks/utest_assignment_router.py",
+      "digest": "78cca3b5015e2272a0aead7a4fafb60e07be393b64841d5a66f45ac16923026a"
+    },
+    {
+      "path": "hooks/utest_blocked_writer.py",
+      "digest": "217618c78ad756d1624a305bedf541b5e8ecb4477e5e46599c093ad4d3b89f6e"
+    },
+    {
+      "path": "hooks/utest_control.py",
+      "digest": "b212f0bbbff7e7ad2517db69fa59288dfb32a7d59605dd6e0202e14fa12fc544"
+    },
+    {
+      "path": "hooks/utest_deadline_guard.py",
+      "digest": "88b00ca6adecbe7b1f66293697205f166d54b2593f7a6006cd637630fbe69dbc"
+    },
+    {
+      "path": "hooks/utest_plan_contract.py",
+      "digest": "c73485c1fac746a509d1ca8faca698f380f52dbdd44f07e14084a058617ccd0a"
+    },
+    {
+      "path": "hooks/utest_policy.py",
+      "digest": "82b5fafcadb94a58be4654eb3f1bc243c13b69703d2a885a488ce71e12d34c3d"
+    },
+    {
+      "path": "hooks/utest_presets.py",
+      "digest": "74516ec16c452c5480080428a5834b0a9f7c864836c292460288a5632819a687"
+    },
+    {
+      "path": "hooks/utest_runtime.py",
+      "digest": "15721d3030a89007e83ba156f974d1ec9c075ca16754c45f089212d1ff8ae8b6"
+    },
+    {
+      "path": "hooks/utest_test_environment.py",
+      "digest": "b28eca54503340d00432b8f5faf23b5e1350c8388d3c31ccd891ac883e76c719"
+    },
+    {
+      "path": "hooks/utest_workspace_binding.py",
+      "digest": "cb06c138a6867a4cc46540ef21df1565e090291fee8aa7644caf8fc8a9648701"
+    },
+    {
+      "path": "hooks/validate_utest_source_bug.py",
+      "digest": "4a5cbe5c562f6758a6a56776778dfe1ff13c1f765c3c4c5d9d3b09fae5a240be"
+    },
+    {
+      "path": "hooks/validation_policy.py",
+      "digest": "cd9485bd0eb5a46a3d35387a10614dab1b8c13f33bbc3173f7c1ea984cae3e06"
+    },
+    {
+      "path": "hooks/verified_digest_guard.py",
+      "digest": "85daf9c9e5d45f96de28b07bcd4f6f464b59a18106f9e4f81c0d1c08714d45af"
+    },
+    {
+      "path": "hooks/verify_decision_writer.py",
+      "digest": "16cf575bbd78c3b706fa7de825f1638102c27e05d5d42dbd10601d14ccfd1ec5"
+    },
+    {
+      "path": "hooks/workflow_launcher.py",
+      "digest": "18bddbe01882adf1f79f8fa1331ac1bcdb57e1b842f9cf991c06d1508c1af474"
+    },
+    {
+      "path": "hooks/workflow_sandbox_contract.py",
+      "digest": "b21e341065b9fce2c4613a655b22092133a492fce3e7874c30bebb59ecadcd85"
+    },
+    {
+      "path": "hooks/worktree_manager.py",
+      "digest": "bb50d48fc44b977bc28da040ce87c0db9730e2da1e8fa7503bf6315f2f18860d"
+    },
+    {
+      "path": "inspect_state.py",
+      "digest": "90e0370e86953ffba58ca11ca9386ed46d5720ccc480dfd17e9c6ef834ed404b"
+    },
+    {
+      "path": "read_state_json.py",
+      "digest": "651850d138f67ee85fecc2a540f7d8f3710f4f612410b48fc7c06ea8cef1665f"
+    },
+    {
+      "path": "skills/autobiz/hooks/biz_validate.py",
+      "digest": "9b570a02de45972bd01a0387686217b16ff2837bfba67051a67aed87df816b90"
+    },
+    {
+      "path": "skills/autobiz/hooks/prd_rules.py",
+      "digest": "4cc531702ff45e9a9082ef5465f5040068f44bbc9c5de34e786e7b20f9cd638b"
+    },
+    {
+      "path": "skills/autobiz/references/ui-context.md",
+      "digest": "aa4daf576e951704c8af731f4d9a79d31a9f53aa461fb226f5f0582eb0caf632"
+    },
+    {
+      "path": "skills/autobiz/SKILL.md",
+      "digest": "45c862b4e5c0c486eeede2878b8a402d6c94da2577fa74cdcd17c1b118468b8a"
+    },
+    {
+      "path": "skills/autobizdevops-artifact-sync/config/artifact-sync.json",
+      "digest": "9aee27b91b3fc57de999542f4f880e0b3db31fb5bb6613bafac656be689b7ca0"
+    },
+    {
+      "path": "skills/autobizdevops-artifact-sync/references/feature-api-detail.md",
+      "digest": "db6ac6e4cd14c2e0ce26eeb10b4f776bfd40dd2b7e17c13109a73d6e6ce6fe6d"
+    },
+    {
+      "path": "skills/autobizdevops-artifact-sync/references/sync-runtime.md",
+      "digest": "41801add5ec97db63696da4e26bab9634da3185a16441e1de88d993ded109ca9"
+    },
+    {
+      "path": "skills/autobizdevops-artifact-sync/scripts/artifact_sync_utils.py",
+      "digest": "6ce4fb25fdf5d22f8f4845f4ffe154b55e11fc369fef65e06713bf1266512d66"
+    },
+    {
+      "path": "skills/autobizdevops-artifact-sync/scripts/sync_artifacts.py",
+      "digest": "2967d6d252f6f8b55ba85f20e156773620a96219724d439dba5016bda169b5e7"
+    },
+    {
+      "path": "skills/autobizdevops-artifact-sync/SKILL.md",
+      "digest": "b5f4d9bc27e54c8fb6e58eb3f548b6a08373313d67bfeb5b014ad5dd7fd73063"
+    },
+    {
+      "path": "skills/autobizdevops-rollback/agents/openai.yaml",
+      "digest": "54e5203ed53f60fc671f32b755a12528ed11f80c2870b1ed5d50b5a6e316b5b3"
+    },
+    {
+      "path": "skills/autobizdevops-rollback/SKILL.md",
+      "digest": "16ad5f7648cc3b3bd0474308ca9f0d1923de7af0d146c334d459a23af6decddd"
+    },
+    {
+      "path": "skills/autodev/autodev-e2e/reference/e2e-quality-gate.md",
+      "digest": "1d4ca1e3ca5e6e4c6839508104050027165e8dcbb7f8ef7bb00b0ac4b201cb8b"
+    },
+    {
+      "path": "skills/autodev/autodev-e2e/reference/test-playwright-script.md",
+      "digest": "9a3635ae7403e9e2c31a55634c2d48b9d4beca5250919e58aba232969fc1422e"
+    },
+    {
+      "path": "skills/autodev/autodev-e2e/reference/testcase-generation.md",
+      "digest": "78d37c58044d25f3547a3a730e22d19e7c96719cb2c244365a1162d1d85a9e31"
+    },
+    {
+      "path": "skills/autodev/autodev-e2e/SKILL.md",
+      "digest": "0bfdffd6914c19392c742740b5770426ec39c0efce2b54b434bcc064bfea52bd"
+    },
+    {
+      "path": "skills/autodev/autodev-e2e/templates/smoke_test_plan.json",
+      "digest": "85a3a38cccf6a44335cfe26c0c45e437eded2e19672da86e8b0e50000d1f6978"
+    },
+    {
+      "path": "skills/autodev/autodev-frontend/route/with-absolute-html/SKILL.md",
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "skills/autodev/autodev-frontend/SKILL.md",
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "skills/autodev/autodev-reviewer/references/schemas.md",
+      "digest": "a7602add2a0cc71c6793ead2e1801aa07408d43659e0c83e730deb03dd76c235"
+    },
+    {
+      "path": "skills/autodev/autodev-reviewer/SKILL.md",
+      "digest": "a92386f5e7020ebf72e258d396dfb0e20429517cc46ba8372c2b1a9e37eb2ec4"
+    },
+    {
+      "path": "skills/autodev/autodev-utest/reference/frontend-test-patterns.md",
+      "digest": "7750e672ef2542853af8cc686288beb6e5575d06c31e37b0ade2c1ad9a4936b2"
+    },
+    {
+      "path": "skills/autodev/autodev-utest/reference/legacy-static-test-patterns.md",
+      "digest": "cfb46d9727ba83de4dfc822625af939d8c26fc51ed6e8cdca1b9ae152459fb73"
+    },
+    {
+      "path": "skills/autodev/autodev-utest/reference/LICENSE.spring-testing-skills-Apache-2.0.txt",
+      "digest": "ba6fad3f5af3a381bedbe0095a8b5b2a6ee2f60fd77fa257b8146490ed3ef50d"
+    },
+    {
+      "path": "skills/autodev/autodev-utest/reference/LICENSE.vuejs-ai-MIT.txt",
+      "digest": "99b7cc1943387f143ba6e9477cfc076bebeaa3eff6dd7800637d4d8990d10b19"
+    },
+    {
+      "path": "skills/autodev/autodev-utest/reference/spring-test-patterns.md",
+      "digest": "aacdd4875cf423f6eb06f588e1dcf44fb0927e4f5ba1465e428d8c446df9dd04"
+    },
+    {
+      "path": "skills/autodev/autodev-utest/reference/test-engineer-task-protocol.md",
+      "digest": "b1a851b5d04d1332014a8236ee52b9d7d9d330fb105f4adc008485d000284941"
+    },
+    {
+      "path": "skills/autodev/autodev-utest/reference/test-environment-profiles.md",
+      "digest": "9b1e8b0838451d239b5f762361e07320fa317d68c7c7810fd332f6816df48ca6"
+    },
+    {
+      "path": "skills/autodev/autodev-utest/SKILL.md",
+      "digest": "a30098d312d772d21da7e43bbf66ee2c5c97089692a3e11a5e1cbcaeb21f5b84"
+    },
+    {
+      "path": "skills/autodev/autodev-verify/SKILL.md",
+      "digest": "27718d998b5b39c431f62de899f4cdb1334f4da9f10c46df66a0920dcb83525e"
+    },
+    {
+      "path": "skills/autodev/hooks/artifact_check.py",
+      "digest": "f489b608013a1e9c502f177847e8579d3c1527f2742f885d34c6ac34f096c935"
+    },
+    {
+      "path": "skills/autodev/hooks/common.py",
+      "digest": "6542517997ddbcb1ba062c4543224aa38392449afe1a359fab24265278106867"
+    },
+    {
+      "path": "skills/autodev/hooks/password-encrypt/scripts/password-encrypt.py",
+      "digest": "70d00eb265e1ca9b2a9d63f2f7346ad3f9d8b66b6cc864d2d4983e0762520c09"
+    },
+    {
+      "path": "skills/autodev/hooks/password-encrypt/scripts/password-encrypt.sh",
+      "digest": "f501c4032ec59c875d7f6da2b9e9c0929d78c26bf1bcf585210174317dfc29de"
+    },
+    {
+      "path": "skills/autodev/hooks/password-encrypt/SKILL.md",
+      "digest": "397483c58466e52b083991589ada8385122a2451e0b8594068fa7a927e817b07"
+    },
+    {
+      "path": "skills/autodev/hooks/repair_registry.py",
+      "digest": "3d14cd6a9626f8ab697bcf6d5b8ff9ae282de32a4cbfd8722f346f87a6bfe78d"
+    },
+    {
+      "path": "skills/autodev/SKILL.md",
+      "digest": "90130d449ec61dc641f68c65218e721161f1a65422311d77bdf7a51e86f9b0a0"
+    },
+    {
+      "path": "skills/autoops/SKILL.md",
+      "digest": "c608dac8464d53a45dbc056f22ac7350c5b9e86ecba55c4a5e57ae3108894a59"
+    },
+    {
+      "path": "skills/references/ask-user-question.md",
+      "digest": "682127e3a1606b23e5145f98660595720fb2a10ae4ecb38faf01ea9a3e7761f8"
+    },
+    {
+      "path": "skills/references/domain-context.md",
+      "digest": "82366a374b00a80798bfa81ff1647e1aa58ef6293360b1c3431c98b68d349c2a"
+    },
+    {
+      "path": "skills/references/review-protocol-design.md",
+      "digest": "e67ca3b7c08236169ba56661841f7e95bf9242bfc8dd0a0bc396f3923fd2fb50"
+    },
+    {
+      "path": "skills/references/review-protocol-plan.md",
+      "digest": "af8fd03b6deb88e221fa96c45eb0ce584604a265993f3b35032d4aa5270ab39e"
+    },
+    {
+      "path": "skills/references/review-protocol-specs.md",
+      "digest": "20907ae316482a6c0c4877b7047e3ae6df9cb1af950018553e18aae963ead235"
+    },
+    {
+      "path": "skills/references/test-quality.md",
+      "digest": "9b5acd3bec0e07cd01bff0af3435dbd377e37fec12d7db759fa0b79fcc8ac914"
+    },
+    {
+      "path": "skills/references/ui-continuation-guide.md",
+      "digest": "6b4962423252c6e9c9ef42048d4393add7e2cb699c8d60d52f90dbdbf1dad3cd"
+    },
+    {
+      "path": "skills/SKILL.md",
+      "digest": "557bbc1169238d9cf97e5584023f01620c20788e27aa4b4ad4c7ab2d24e65d83"
+    },
+    {
+      "path": "workflows/code-batched-execution.workflow.js",
+      "digest": "e969a48b8e4e7e58b98c06dad74c272896bd2261079a1d0b6abb77edac70c400"
+    }
+  ],
+  "modules": {
+    "biz.prd": {
+      "definitionDigest": "b81898da75524713d5c94add78d112573cca37ad73e4eab90ebc97e1a4abcb51",
+      "files": {
+        "skills/autobiz/autobiz-requirement-discuss/SKILL.md": "cde81c39f1119da4dcf5dd420d52c1acd0964708d8f5df8dc994815ed5467c52",
+        "skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md": "516fea0cc4f780adf80f57295b8a6259715c6975c21a65d3237f1413235eb68f",
+        "skills/autobiz/autobiz-requirement-discuss/references/default-rules.md": "93a3d3737cb37f08f30489c5160b37556b80d5e2178b62e5b408f6f77c4b479f",
+        "skills/autobiz/autobiz-requirement-discuss/references/prd_module.md": "e13f37c6154cb8786c19035828531200b0b87988afa80b211efdb0eb3b4ac130",
+        "skills/autobiz/autobiz-requirement-discuss/references/prd-formatter.md": "6e98b2c860aa1c19c76d30a805793f14a5a67a52645afdceb2153e6fa8e0f31c",
+        "skills/autobiz/autobiz-requirement-discuss/references/source-context.md": "76c67c8cba17c1281807af2d241b5446349ac8f716552993e0d48de974bad4f1"
+      }
+    },
+    "dev.specs": {
+      "definitionDigest": "1c782e66d81ab8f232aa9cbd78b4258f973118aba2a1a66bf4f3f0872c67ac86",
+      "files": {
+        "skills/autodev/autodev-specs/SKILL.md": "a7099db69fad501ecd44ae6ba3570f0ce99f9c9c124cc326939ea2c9f44a96ce",
+        "skills/autodev/autodev-specs/templates/proposal.md": "59b8f420c0fdcadca4be8e756a641a9d83187c6c2344ada653554f13f0aa1c5c",
+        "skills/autodev/autodev-specs/templates/spec.md": "fdff9779a37251300161741441d6d7b93fc68f6b15ae7396e919880270cbc4bb"
+      }
+    },
+    "dev.design": {
+      "definitionDigest": "90daa1bedd2d1f9908480ecc3253d2bc2f499e818c20fb22796ebe013abf492b",
+      "files": {
+        "skills/autodev/autodev-design/SKILL.md": "6ba2bab52a2dafb4cfeed262691d467258d9b1f14127885c1965a1067ee8c8dd",
+        "skills/autodev/autodev-design/templates/design.md": "9adc2975e825f627546f247878ef926c6bc8e04871329e4e5a908f0009919fe4"
+      }
+    },
+    "dev.plan": {
+      "definitionDigest": "1844a67ffc9964326fd731907456fc012e4bb3cbd913444c04c3a9b34d5aff87",
+      "files": {
+        "skills/autodev/autodev-plan/SKILL.md": "740f96a1e5d63b81c2662210340d89d12ca930ee416e123a98e2ed5600a1ea3c",
+        "skills/autodev/autodev-plan/references/task-planning.md": "3665008d5d66d154e8daa38e271a2f425f9373fe22c8a1ac2aca772bf382b9bd",
+        "skills/autodev/autodev-plan/templates/plan.md": "ecbf085a76c3f8ffe9f34dcd90c275703e40dace34a0abdf7612ea528d9d7f39",
+        "skills/autodev/autodev-plan/templates/task-groups.json": "35afb343efdc7a4450e368cb9dddf55b253a380020505af2cc6af9ac6f3bace1"
+      }
+    },
+    "dev.code": {
+      "definitionDigest": "95e6c089e7483c7af08055e0f1329a58c052840d842061d7d4ba97c5f99a571d",
+      "files": {
+        "skills/autodev/autodev-code/SKILL.md": "eca87dc88fbd11d967ee8a758d28aeff7ad83b7f32198c90ae09e2dc9f5d1944",
+        "skills/autodev/autodev-code/references/batch-workflow-guide.md": "a615a31122d486717b5aab7786bfebdce3f1e50076b76a4d1c072f2ca85dd9c2",
+        "skills/autodev/autodev-code/references/frontend-html/references/assets-processing-guide.md": "3be39ec1a451e8bddd0f6fae69a3af0d8c0306fab80711edad8991bd5faef446",
+        "skills/autodev/autodev-code/references/frontend-html/references/html-post-review.md": "2401e2cac99540e8508402da1cecc0a31935a012978ee2303e7f82ba17ffde3a",
+        "skills/autodev/autodev-code/references/frontend-html/scripts/html_static_checker.py": "a275643b8ec77b472799e2cd183c7ed6d691fff86bb6c9bfa6c1449074e03223",
+        "skills/autodev/autodev-code/references/frontend-html/scripts/review_runner.py": "dbb3e0b334b3f0e334596900aadf753dffff4ab4187bcc08efd4574d39ba0586",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/component-slot-map.md": "7932efd5b695db494fce87a9e677d675af852a3ec11d4d746538b26a65eca623",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/components-match-rules.md": "74c84a924c73f36dfdea6e0a93583d3b713049f951c1266866504e7786e30e08",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/html-parser.md": "b6c65549c77500684bc6b173b8e77c588ae0aacd943cda4b1b0315da263c9280",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/html-templates/llm-prompt-template.md": "b3d5d2309510c305b1f381de0aa1ab6f5dc95e324cc1e353e1b6aead0c01dc6c",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/html-templates/pure-div-converter.md": "363e794b7ec22ac7f3de21d53b2a2c3e66fc81e66b2aca44f10ab09a88a8d9a1",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/html-templates/pure-div-core.md": "0334a9389af8c4b2e314a2a2b1411fbd3cd789387b6f6934fd3c2718c785d049",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/interaction-contracts.md": "9dda18b79401a7d629cce5be07c1d0767a3372960202eefed1ee67fce3a18409",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/page-archetypes.md": "a4c4b8da59dc712c1b1bd5edcdc7a355bd139cc7b5f778315a4e086dedb7ffe5",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/scripts/analyze_absolute_html.py": "6db15a53f1b8b2c0cd1ab8a9d7e72b7c2befcb03585af2d2d824bd293091cb59",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py": "d2842bdf43c83b740190371fa2d0ccf99bc5a547f82771f0a87490ddf0122de4",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/scripts/process_assets.py": "feebbf452c81e0ee4de0a08900621d7a5306f6767866dcafa6eb361aaf4e9157",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/scripts/render_react_antd_preview.py": "46119631b32285b660aca72dbbe9bdd207a25474051456dbff585480907e600c",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/SKILL.md": "9d99db27d75953acbd9648492b72cb810c4555e56385054092241ca3aee5c7b3",
+        "skills/autodev/autodev-code/references/frontend-html/with-standard-html/references/ant-design-conversion.md": "29a1f295817ab13e22bbcc784c2f85ecf37973b68080baafcb7f727455110e0b",
+        "skills/autodev/autodev-code/references/frontend-html/with-standard-html/references/standard-html-parser.md": "f169e16629aac2c379195f685c00983af26d8a644db4171e0d12399b64323493",
+        "skills/autodev/autodev-code/references/frontend-html/with-standard-html/scripts/audit_antd_coverage.py": "517691dceb31f92e5b2143f764a9c787d6fd8d8de016971abe151adcb8b85318",
+        "skills/autodev/autodev-code/references/frontend-html/with-standard-html/SKILL.md": "938219b4ce24e6aad58a4ce7f4a316a400bc30a569ebcb909bc0febfdf46dfe9"
+      }
+    },
+    "ops.cicd": {
+      "definitionDigest": "292e2347f3f1021284ef85e304e40ac4cbc10bbffdc2db3f3dc84f6a6a3f125a",
+      "files": {
+        "skills/autoops/autoops-cicd/SKILL.md": "fa6a76199da535bc9e3e6acd1d9e7b7bc45d31815070553f581a67ab2ad3f820",
+        "skills/autoops/autoops-cicd/hooks/poll_pipeline_status.py": "de399b4853444d61da7089c3a5303181154d16afb63e6bca2c251e89493dafeb"
+      }
+    },
+    "ops.archive": {
+      "definitionDigest": "bcce3cd99357b49fadd04ad5a87984e7b159071cfdf2df1531df62b06be7057b",
+      "files": {
+        "skills/autoops/autoops-archive/SKILL.md": "e9b0a93e6a6fa8902800be44403e84f38c0eed316c81824c7d5e82072bf3e83f"
+      }
+    },
+    "dev.detail_design": {
+      "definitionDigest": "20441bf03b5fe5461316b16beede4ba684e17f21a8d484bf39fcbaa292377503",
+      "files": {
+        "skills/autodev/autodev-detail-design/SKILL.md": "cdb1a4d072838fd56d34d6a575871e78c2415abe207b3d6e0a5be75ebb2ffa8a",
+        "skills/autodev/autodev-detail-design/reference/template.md": "cc5a5dda20189c7244f7898979a51bf04a33d64cbd562aecc7aba4f45697ff33"
+      }
+    }
+  },
+  "inspectCommandsDigest": "e79a717662a8e46abd6febd954495c62ecc7839f443fa141448d9f0cf43d790d",
+  "workflow": {
+    "skipPolicy": {
+      "lockedNodes": []
+    },
+    "templates": {
+      "standard": {
+        "kind": "profile",
+        "label": "标准",
+        "description": "完整主干流程（Biz→Dev→Ops），不含可选动态节点；动态节点可在流程中按需开启。"
+      },
+      "lean": {
+        "kind": "nodeSubset",
+        "label": "精简路线",
+        "description": "修接口 / 小需求：specs（轻量）→ code → 归档；契约不含 design/PLAN，code 直接从 proposal 与 specs 推导任务。",
+        "nodes": [
+          "dev.specs",
+          "dev.code",
+          "ops.archive"
+        ]
+      }
+    },
+    "profiles": {
+      "standard": {
+        "label": "不需要，进入 autodev-specs",
+        "description": "不先转换 HTML 设计稿，直接进入 autodev-specs。"
+      }
+    },
+    "dynamicStages": [
+      {
+        "id": "detail_design_before_code",
+        "phase": "Dev",
+        "label": "详细设计",
+        "description": "在进入代码实现前生成更细的文件级详细设计。",
+        "order": 100,
+        "choiceCheckpoint": "plan_done",
+        "defaultDecision": "pending",
+        "insertAfter": "dev.plan",
+        "enableTargetCheckpoint": "detail_design_in_progress",
+        "skipTargetCheckpoint": "code_in_progress",
+        "enableLabel": "需要，生成详细设计",
+        "skipLabel": "不需要，直接编码",
+        "enableDescription": "先进入 autodev-detail-design，生成 DETAIL_DESIGN.md 后再进入代码实现。",
+        "skipDescription": "不生成 DETAIL_DESIGN.md，直接进入 autodev-code。",
+        "nodes": [
+          {
+            "id": "dev.detail_design",
+            "phase": "Dev",
+            "label": "详细设计",
+            "skill": "autodev-detail-design",
+            "checkpointPrefix": "detail_design",
+            "description": "生成代码实现前的文件级详细设计 \n 产物：DETAIL_DESIGN.md（文件级详细设计：到文件的修改方案）",
+            "artifacts": {
+              "inputs": [
+                {
+                  "id": "proposal",
+                  "label": "变更提案",
+                  "artifactType": "file",
+                  "path": "proposal.md",
+                  "required": true,
+                  "extract": {
+                    "degrade": "无 proposal 时以 specs 与 design 界定范围"
+                  }
+                },
+                {
+                  "id": "specs",
+                  "label": "行为规格",
+                  "artifactType": "file",
+                  "path": "specs/**/*.md",
+                  "required": true,
+                  "extract": {
+                    "degrade": "无 specs 时与用户确认行为预期"
+                  }
+                },
+                {
+                  "id": "design",
+                  "label": "技术设计",
+                  "artifactType": "file",
+                  "path": "design.md",
+                  "required": true,
+                  "extract": {
+                    "degrade": "无 design 时基于现有代码模式细化方案，并记录设计基准缺失"
+                  }
+                },
+                {
+                  "id": "plan_json",
+                  "label": "计划机器事实源",
+                  "artifactType": "json",
+                  "path": "plan.json",
+                  "required": true,
+                  "extract": {
+                    "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能只依赖 PLAN.md 推进详细设计"
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "id": "detail_design",
+                  "label": "详细设计",
+                  "artifactType": "file",
+                  "path": "DETAIL_DESIGN.md",
+                  "required": true
+                }
+              ]
+            },
+            "validators": []
+          }
+        ]
+      }
+    ],
+    "checkpoints": {
+      "initial": [
+        "prd_in_progress",
+        "specs_in_progress",
+        "design_in_progress",
+        "plan_in_progress",
+        "cicd_in_progress"
+      ],
+      "transitions": {
+        "prd_in_progress": [
+          "prd_done"
+        ],
+        "prd_done": [
+          "specs_in_progress"
+        ],
+        "specs_in_progress": [
+          "specs_done"
+        ],
+        "specs_done": [
+          "design_in_progress"
+        ],
+        "design_in_progress": [
+          "design_done"
+        ],
+        "design_done": [
+          "plan_in_progress"
+        ],
+        "plan_in_progress": [
+          "plan_done"
+        ],
+        "plan_done": [
+          "code_in_progress"
+        ],
+        "code_in_progress": [
+          "code_done"
+        ],
+        "code_done": [
+          "cicd_in_progress"
+        ],
+        "cicd_in_progress": [
+          "cicd_done"
+        ],
+        "cicd_done": [
+          "archived"
+        ],
+        "needs_fix": [
+          "prd_in_progress",
+          "specs_in_progress",
+          "design_in_progress",
+          "plan_in_progress",
+          "code_in_progress",
+          "cicd_in_progress"
+        ],
+        "archived": []
+      },
+      "stageLabels": {
+        "prd_in_progress": "Biz / 需求澄清与 PRD",
+        "prd_done": "Biz / PRD",
+        "specs_in_progress": "Specs",
+        "specs_done": "Specs 完成",
+        "design_in_progress": "技术设计",
+        "design_done": "技术设计完成",
+        "plan_in_progress": "Plan",
+        "plan_done": "Plan 完成",
+        "code_in_progress": "Code",
+        "code_done": "Code 完成",
+        "cicd_in_progress": "CI/CD",
+        "cicd_done": "CI/CD 完成",
+        "needs_fix": "需要修复",
+        "archived": "已归档"
+      }
+    },
+    "nodes": [
+      {
+        "id": "biz.prd",
+        "label": "需求澄清与 PRD",
+        "group": "Biz",
+        "skill": "autobiz-requirement-discuss",
+        "order": 10,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          }
+        },
+        "description": "澄清需求并生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）、UI_CONTEXT.json（UI 范围机器事实源）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autobiz-requirement-discuss",
+              "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：需求澄清与 PRD。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autobiz-requirement-discuss",
+              "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：需求澄清与 PRD。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autodev-specs",
+              "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。",
+              "dialogTips": "通过 /autodev-specs 路由到行为规格；UI 范围以 UI_CONTEXT.json 为机器事实源，前端实现后续在 /autodev-code 内部按 FRONTEND_ROUTE.json 分流。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "prd_in_progress",
+          "prd_done"
+        ],
+        "artifacts": {
+          "inputs": [],
+          "outputs": [
+            {
+              "id": "prd",
+              "label": "PRD文档",
+              "artifactType": "file",
+              "path": "PRD.md",
+              "required": true
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围机器事实源",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true
+            }
+          ]
+        },
+        "validators": [
+          "ui_context_json"
+        ],
+        "hookDefinitions": [
+          {
+            "id": "biz-prd-validate",
+            "label": "PRD 产物校验",
+            "event": "PostSkillUse",
+            "required": true
+          }
+        ]
+      },
+      {
+        "id": "dev.specs",
+        "label": "行为规格",
+        "group": "Dev",
+        "skill": "autodev-specs",
+        "order": 30,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [
+              "Explore",
+              "critic"
+            ],
+            "customSubagentFiles": [
+              "agents/explore.md",
+              "agents/critic.md"
+            ]
+          }
+        },
+        "description": "生成 proposal 与行为规格 \n 产物：proposal.md（变更提案：本轮目标、范围与非目标）、specs/**/*.md（行为规格：各能力 Requirement/Scenario 契约）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autodev-specs",
+              "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：行为规格。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autodev-specs",
+              "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：行为规格。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autodev-design",
+              "userMessage": "请使用 /autodev-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：技术设计。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "specs_in_progress",
+          "specs_done"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "prd",
+              "label": "PRD文档",
+              "artifactType": "file",
+              "path": "PRD.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 PRD 时基于用户描述直接澄清行为契约，沉淀到 proposal 与 specs"
+              }
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时，本阶段必须基于用户已确认范围生成并锁定，不能从 PRD 正文临时推导"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "proposal",
+              "label": "变更提案",
+              "artifactType": "file",
+              "path": "proposal.md",
+              "required": true
+            },
+            {
+              "id": "specs",
+              "label": "行为规格",
+              "artifactType": "file",
+              "path": "specs/**/*.md",
+              "required": true
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true
+            }
+          ]
+        },
+        "validators": [
+          "proposal_contract",
+          "specs_contract",
+          "capability_spec_correspondence",
+          "ui_context_json"
+        ]
+      },
+      {
+        "id": "dev.design",
+        "label": "技术设计",
+        "group": "Dev",
+        "skill": "autodev-design",
+        "order": 40,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [
+              "Explore",
+              "critic"
+            ],
+            "customSubagentFiles": [
+              "agents/explore.md",
+              "agents/critic_autodev_design_zh.md"
+            ]
+          }
+        },
+        "description": "探索并生成技术设计 \n 产物：design.md 与 .design-contract.lock.json（已校验的 API/数据/技术决策快照）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autodev-design",
+              "userMessage": "请使用 /autodev-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：技术设计。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autodev-design",
+              "userMessage": "请使用 /autodev-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：技术设计。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autodev-plan",
+              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：执行计划。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "design_in_progress",
+          "design_done"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "proposal",
+              "label": "变更提案",
+              "artifactType": "file",
+              "path": "proposal.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 proposal 时基于用户直供需求与代码探索建立上下文，并把边界假设记入 design.md 风险"
+              }
+            },
+            {
+              "id": "specs",
+              "label": "行为规格",
+              "artifactType": "file",
+              "path": "specs/**/*.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 specs 时与用户确认行为预期后再设计，未确认行为全部记为待确认风险"
+              }
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 补齐并锁定，不能自行推断 UI 范围"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "design",
+              "label": "技术设计",
+              "artifactType": "file",
+              "path": "design.md",
+              "required": true
+            },
+            {
+              "id": "design_contract_lock",
+              "label": "设计契约锁",
+              "artifactType": "json",
+              "path": ".design-contract.lock.json",
+              "required": true
+            }
+          ]
+        },
+        "validators": [
+          "design_contract",
+          "design_contract_lock",
+          "ui_context_json"
+        ]
+      },
+      {
+        "id": "dev.plan",
+        "label": "执行计划",
+        "group": "Dev",
+        "skill": "autodev-plan",
+        "order": 50,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [
+              "Explore",
+              "critic"
+            ],
+            "customSubagentFiles": [
+              "agents/explore.md",
+              "agents/critic_autodev_plan_zh.md"
+            ]
+          }
+        },
+        "description": "基于已确认设计生成可执行任务计划。先生成 plan.json（任务 DAG 机器事实源）与 Batch 供 Critic 回检，回检收敛后定稿 plan.json，再投影 PLAN.md（人类执行计划视图）。",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autodev-plan",
+              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：执行计划。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autodev-plan",
+              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：执行计划。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autodev-code",
+              "userMessage": "请使用 /autodev-code 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：代码实现。如果需要code前的详细设计，可以先使用/autodev-detail-design生成详细设计方案。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "plan_in_progress",
+          "plan_done"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "proposal",
+              "label": "变更提案",
+              "artifactType": "file",
+              "path": "proposal.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 proposal 时回到 /autodev-design 补齐设计依据，再重新生成计划"
+              }
+            },
+            {
+              "id": "specs",
+              "label": "行为规格",
+              "artifactType": "file",
+              "path": "specs/**/*.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 specs 时回到 /autodev-specs 补齐行为契约，不能只凭 design.md 拆任务"
+              }
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 补齐并锁定，不能自行推断 UI 任务"
+              }
+            },
+            {
+              "id": "design",
+              "label": "已确认技术设计",
+              "artifactType": "file",
+              "path": "design.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 design.md 时回到 /autodev-design 生成并确认技术设计，不能直接生成计划"
+              }
+            },
+            {
+              "id": "design_contract_lock",
+              "label": "Design 已锁定契约",
+              "artifactType": "json",
+              "path": ".design-contract.lock.json",
+              "required": true,
+              "extract": {
+                "degrade": "缺少设计契约锁说明 /autodev-design 未完成；回到 Design 校验并生成锁后再进入 Plan"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "plan",
+              "label": "执行计划",
+              "artifactType": "file",
+              "path": "PLAN.md",
+              "required": true
+            },
+            {
+              "id": "plan_json",
+              "label": "计划机器结构化内容",
+              "artifactType": "json",
+              "path": "plan.json",
+              "required": true
+            }
+          ]
+        },
+        "validators": [
+          "ui_context_json",
+          "plan_json_contract",
+          "plan_json_initial_tasks",
+          "parallel_batch_pipeline_contract",
+          "plan_task_granularity",
+          "plan_scenario_coverage"
+        ],
+        "rollback": {
+          "archive": [
+            "plans"
+          ]
+        }
+      },
+      {
+        "id": "dev.code",
+        "label": "代码实现",
+        "group": "Dev",
+        "skill": "autodev-code",
+        "order": 60,
+        "runtimePolicy": {
+          "agentMode": "workflow",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [
+              "verification"
+            ],
+            "customSubagentFiles": [
+              "agents/verification.md"
+            ]
+          }
+        },
+        "description": "根据规格、设计和计划实现代码 \n 产物：项目源代码；PLAN.md 任务状态与完成记录就地回写（无独立文档产物；执行协议以 autodev-code skill 正文为准）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autodev-code",
+              "userMessage": "请使用 /autodev-code 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：代码实现。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autodev-code",
+              "userMessage": "请使用 /autodev-code 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：代码实现。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autoops-cicd",
+              "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：CI/CD。批次内 review、test、B-E2E 与证据汇总已完成，不重复执行。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "code_in_progress",
+          "code_done"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "proposal",
+              "label": "变更提案",
+              "artifactType": "file",
+              "path": "proposal.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 proposal 时以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
+              }
+            },
+            {
+              "id": "specs",
+              "label": "行为规格",
+              "artifactType": "file",
+              "path": "specs/**/*.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 specs 时以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
+              }
+            },
+            {
+              "id": "prd_optional",
+              "label": "PRD参考",
+              "artifactType": "file",
+              "path": "PRD.md",
+              "required": false,
+              "extract": {
+                "degrade": "无 PRD 时，以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
+              }
+            },
+            {
+              "id": "design",
+              "label": "技术设计",
+              "artifactType": "file",
+              "path": "design.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 design 时基于 已有产物 与现有代码模式自行做最小实现决策，并在完成摘要中记录关键决策"
+              }
+            },
+            {
+              "id": "plan_json",
+              "label": "计划机器事实源",
+              "artifactType": "json",
+              "path": "plan.json",
+              "required": true,
+              "extract": {
+                "degrade": "无 plan.json 或结构已过时时，回到 /autodev-plan 清理并按当前唯一结构重新生成；不得建立旁路任务队列"
+              }
+            },
+            {
+              "id": "detail_design_optional",
+              "label": "详细设计参考",
+              "artifactType": "file",
+              "path": "DETAIL_DESIGN.md",
+              "required": false,
+              "extract": {
+                "degrade": "无 DETAIL_DESIGN 时按 design.md 与 PLAN.md 的任务执行包直接实现"
+              }
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围机器事实源",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时先询问用户是否需要生成前端代码，再回到 /autodev-specs 或 /autodev-plan 补齐"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "evidence_stream",
+              "label": "证据流",
+              "artifactType": "json",
+              "path": "evidence/EVIDENCE.jsonl",
+              "required": true,
+              "extract": {
+                "degrade": "缺失时由 task_runner 首次验证时在 Feature 产物目录原子创建；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
+              }
+            }
+          ]
+        },
+        "validators": [
+          "ui_context_json",
+          "plan_json_contract",
+          "plan_task_detail_schema",
+          "plan_ref_resolution",
+          "frontend_route_gate",
+          "evidence_detail_quality",
+          "code_done_gate",
+          "evidence_integrity"
+        ],
+        "guards": [
+          "code_compile"
+        ],
+        "rollback": {
+          "archive": [
+            ".parallel-runs",
+            ".task-runs",
+            ".runtime",
+            "evidence",
+            "FRONTEND_ROUTE.json",
+            "SMOKE_TEST_PLAN.json",
+            "SMOKE_RESULT.json",
+            "completion-proposal.json",
+            "REQUIREMENTS_EVAL.md",
+            "UNIT_TEST_REPORT.md",
+            "UNIT_TEST_RESULT.json",
+            "test-output.log",
+            "E2E_TEST_CASES.yaml",
+            "E2E_REPORT.md",
+            "E2E_RESULT.json",
+            "E2E_QUALITY_SCAN.json",
+            "e2e-run.log",
+            "e2e-diagnostics",
+            "VERIFY_REPORT.md",
+            "VERIFY_DECISION.json",
+            "FIX_REQUEST.json",
+            "FEATURE_API_DETAIL.md",
+            "ARTIFACT_CATALOG.json",
+            "sync-status.json",
+            "artifact-sync",
+            "hooks.ndjson"
+          ]
+        }
+      },
+      {
+        "id": "ops.cicd",
+        "label": "CI/CD",
+        "group": "Ops",
+        "skill": "autoops-cicd",
+        "order": 100,
+        "description": "CI/CD 流水线和 PR 准备 \n 产物：CICD_CHECKLIST.md（CI/CD 清单：流水线与交付检查项）、PR_BODY.md（PR 描述正文：变更说明与风险，可选）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autoops-cicd",
+              "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：CI/CD。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autoops-cicd",
+              "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：CI/CD。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autoops-archive",
+              "userMessage": "请使用 /autoops-archive 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：归档。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "cicd_in_progress",
+          "cicd_done"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "evidence_stream",
+              "label": "批次流水线验证证据",
+              "artifactType": "json",
+              "path": "evidence/EVIDENCE.jsonl",
+              "required": true,
+              "extract": {
+                "degrade": "缺失时回到 Code 的 Batch 流水线补齐 review、test 与 B-E2E 证据"
+              }
+            },
+            {
+              "id": "prd_optional",
+              "label": "PRD参考",
+              "artifactType": "file",
+              "path": "PRD.md",
+              "required": false,
+              "extract": {
+                "degrade": "未提供时允许继续，写明需求文档缺失或未提供"
+              }
+            },
+            {
+              "id": "design_optional",
+              "label": "技术设计参考",
+              "artifactType": "file",
+              "path": "design.md",
+              "required": false,
+              "extract": {
+                "degrade": "未提供时允许继续，写明设计文档缺失或未提供"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "cicd_checklist",
+              "label": "CI/CD 清单",
+              "artifactType": "file",
+              "path": "CICD_CHECKLIST.md",
+              "required": true
+            },
+            {
+              "id": "pr_body",
+              "label": "PR 描述",
+              "artifactType": "file",
+              "path": "PR_BODY.md",
+              "required": false
+            }
+          ]
+        },
+        "validators": []
+      },
+      {
+        "id": "ops.archive",
+        "label": "归档",
+        "group": "Ops",
+        "skill": "autoops-archive",
+        "order": 110,
+        "description": "Feature 归档 \n 产物：归档记录（状态置为 archived，无独立文档产物）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autoops-archive",
+              "userMessage": "请使用 /autoops-archive 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：归档。"
+            }
+          },
+          {
+            "nodeStatus": "archived",
+            "label": "已归档",
+            "nextAction": {
+              "slashSkill": "autoops-archive",
+              "userMessage": "请使用 /autoops-archive 查看当前 Feature 的归档状态。",
+              "dialogTips": "当前阶段：归档。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "archived"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "cicd_checklist",
+              "label": "CI/CD 清单",
+              "artifactType": "file",
+              "path": "CICD_CHECKLIST.md",
+              "required": true,
+              "extract": {
+                "degrade": "无清单时按 Feature 目录现有产物核对后归档，并标注缺项"
+              }
+            }
+          ],
+          "outputs": []
+        },
+        "validators": []
+      }
+    ],
+    "transitions": [
+      {
+        "id": "prd-to-specs",
+        "from": {
+          "nodeId": "biz.prd",
+          "state": "done"
+        },
+        "to": {
+          "nodeId": "dev.specs",
+          "state": "in_progress"
+        }
+      },
+      {
+        "id": "specs-to-design",
+        "from": {
+          "nodeId": "dev.specs",
+          "state": "done"
+        },
+        "to": {
+          "nodeId": "dev.design",
+          "state": "in_progress"
+        }
+      },
+      {
+        "id": "design-to-plan",
+        "from": {
+          "nodeId": "dev.design",
+          "state": "done"
+        },
+        "to": {
+          "nodeId": "dev.plan",
+          "state": "in_progress"
+        }
+      },
+      {
+        "id": "plan-to-code",
+        "from": {
+          "nodeId": "dev.plan",
+          "state": "done"
+        },
+        "to": {
+          "nodeId": "dev.code",
+          "state": "in_progress"
+        }
+      },
+      {
+        "id": "code-to-cicd",
+        "from": {
+          "nodeId": "dev.code",
+          "state": "done"
+        },
+        "to": {
+          "nodeId": "ops.cicd",
+          "state": "in_progress"
+        }
+      },
+      {
+        "id": "cicd-to-archive",
+        "from": {
+          "nodeId": "ops.cicd",
+          "state": "done"
+        },
+        "to": {
+          "nodeId": "ops.archive",
+          "state": "archived"
+        }
+      }
+    ]
+  }
+}

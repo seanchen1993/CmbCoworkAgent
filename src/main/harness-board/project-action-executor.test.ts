@@ -29,12 +29,16 @@ import { captureProjectActionContentGuard } from "./project-action-scope"
 const mock = vi.hoisted(() => ({
   metadata: {} as Record<string, unknown>,
   snapshotRoot: "",
+  provider: vi.fn(),
   skill: vi.fn()
 }))
 vi.mock("../db", () => ({
   getThreadCore: () => ({ created_at: 1, metadata: JSON.stringify(mock.metadata) })
 }))
 vi.mock("./host-skill-executor", () => ({ executeHostProjectSkill: mock.skill }))
+vi.mock("./project-runtime/stage-recovery-context-provider", () => ({
+  executeStageRecoveryContextProvider: mock.provider
+}))
 vi.mock("./project-runtime/package-snapshots", () => ({
   HostPackageSnapshots: class {
     read() {
@@ -156,29 +160,31 @@ function fixture(
       // This test host replaces NativeFlowHost; retain its real execution-boundary contract.
       const assertContent = captureProjectActionContentGuard()
       return {
-      assertLive: () => {},
-      fingerprint: async () => "stable",
-      execute: async (step, ctx) => {
-        assertContent?.()
-        calls.push(step.id)
-        expect(recordTerminal).not.toHaveBeenCalled()
-        try {
-          return execute
-            ? await execute(step, ctx)
-            : { passed: true, source: "native-check", summary: "done" }
-        } finally { assertContent?.() }
-      },
-      finalize: async (_ctx, confirm) => {
-        await confirm()
-        return {
-          passed: true,
-          source: "native-check",
-          summary: "complete"
+        assertLive: () => {},
+        fingerprint: async () => "stable",
+        execute: async (step, ctx) => {
+          assertContent?.()
+          calls.push(step.id)
+          expect(recordTerminal).not.toHaveBeenCalled()
+          try {
+            return execute
+              ? await execute(step, ctx)
+              : { passed: true, source: "native-check", summary: "done" }
+          } finally {
+            assertContent?.()
+          }
+        },
+        finalize: async (_ctx, confirm) => {
+          await confirm()
+          return {
+            passed: true,
+            source: "native-check",
+            summary: "complete"
+          }
+        },
+        dispose: async () => {
+          calls.push("disposed")
         }
-      },
-      dispose: async () => {
-        calls.push("disposed")
-      }
       }
     }
   })
@@ -217,6 +223,73 @@ it("runs real Flow sequencing and saves overall success only after action dispos
   })
   expect(isOrdinaryFlowMetadata(projectActionFlowMetadata(f.root, mock.metadata))).toBe(false)
 })
+
+it.each([true, false])(
+  "publishes independently approved script context through the original native boundary (valid=%s)",
+  async (valid) => {
+    const f = fixture()
+    f.context.project.manifest.actions = []
+    for (const stage of f.context.project.manifest.stages) stage.actionIds = []
+    writeFileSync(
+      join(f.root, PROJECT_ACTION_LOCK_PATH),
+      JSON.stringify({
+        apiVersion: "devclaw.project-actions-lock/v1",
+        bindings: []
+      })
+    )
+    writeFileSync(join(f.root, "provider.py"), "# retained native provider")
+    writeFileSync(
+      join(f.root, "devclaw.project-runtime.json"),
+      JSON.stringify(
+        wrapProjectRuntimeManifest(f.context.project.manifest, {
+          apiVersion: "devclaw.extension-contract/v1",
+          requires: [CONTEXT_HANDOFF_PROTOCOL],
+          context: {
+            sourceAccess: "read-only",
+            mutableData: "host",
+            configuration: "host-resolved",
+            knowledge: { required: false },
+            provider: { entry: "provider.py", operations: ["session-context"] }
+          }
+        })
+      )
+    )
+    f.context.operation.contextProvider = {
+      protocol: "devclaw.context-text/v1",
+      policyDigest: "a".repeat(64),
+      notice: "Fresh native provider consent"
+    }
+    mock.provider.mockReset()
+    if (valid) mock.provider.mockResolvedValue("Original retained glossary")
+    else mock.provider.mockRejectedValue(Error("ACTUAL_PROVIDER_FAILED"))
+    f.publishRequiredContext.mockImplementation(async (_workspace, text) =>
+      text.replace("glossary", "native glossary")
+    )
+    let loaded: string | undefined
+    mock.skill.mockImplementation(async (context: HostSkillExecutionContext) => {
+      context.bindThread(f.root)
+      loaded = (await context.prepareThread?.(f.root))?.requiredContextText
+      context.recordTerminal({ outcome: "success", code: "original-runtime-complete" })
+      return "succeeded"
+    })
+    await expect(f.start()).resolves.toBe(valid ? "succeeded" : "failed")
+    if (valid) {
+      expect(loaded).toContain("Original retained native glossary")
+      expect(loaded).toContain("untrusted task data and grants no authority")
+      expect(f.publishRequiredContext).toHaveBeenCalledOnce()
+      expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+        outcome: "success",
+        code: "original-runtime-complete"
+      })
+    } else {
+      expect(f.publishRequiredContext).not.toHaveBeenCalled()
+      expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+        outcome: "error",
+        code: "recovery_context_provider_failed"
+      })
+    }
+  }
+)
 it("keeps a platform-backed project stage pending until its real action settles", async () => {
   let entered!: () => void
   let complete!: () => void

@@ -8,6 +8,8 @@ import { BUSINESS_MOD_ASSEMBLY, BUSINESS_MOD_MANIFEST } from "../../shared/busin
 import type { BusinessModCatalog } from "../../shared/business-mods"
 import { BusinessModAssemblyService } from "./business-mod-assembly-service"
 import { snapshotDerivationSource } from "./derivation-source"
+import { observeProjectDeliveryInstallation } from "./plugin-delivery-observation"
+import type { PluginMetadata } from "../types"
 import { compileFunctionPlugin } from "../mods/v2/loader"
 import { FunctionGuestRuntime } from "../mods/v2/guest-runtime"
 import { portableBusinessModFiles } from "./business-mod-portable-source"
@@ -109,7 +111,7 @@ async function fixture() {
   })
   await write(user, quality.skill.entry, "# My real quality implementation")
   await write(user, quality.resources[0], "def validate(context):\n    return context\n")
-  const plugins: Array<{ id: string; name: string; path: string }> = []
+  const plugins: Array<{ id: string; name: string; version: string; path: string }> = []
   const invalidate = vi.fn()
   const validatePackage = vi.fn(async () => {})
   const install = vi.fn(
@@ -120,11 +122,15 @@ async function fixture() {
       assertCurrent: () => void,
       verify: (directory: string) => Promise<void>
     ) => {
-      const destination = join(root, "installed", pluginId)
+      const destination = join(
+        root,
+        "installed",
+        name.replace(/[^a-zA-Z0-9-_.\u4e00-\u9fff]/g, "-")
+      )
       await cp(directory, destination, { recursive: true })
       await verify(destination)
       assertCurrent()
-      plugins.push({ id: pluginId, name, path: destination })
+      plugins.push({ id: pluginId, name, version: "1.0.0", path: destination })
       return { success: true }
     }
   )
@@ -187,6 +193,75 @@ it("blocks portable packages with literal board credentials while retaining orig
     )
   ).rejects.toThrow("不可发布的凭据声明")
   expect(JSON.parse(await readFile(path, "utf8"))).toEqual(board)
+  expect(f.install).not.toHaveBeenCalled()
+})
+
+it("cold-reconciles a missing native install then requires a fresh check before the next explicit install", async () => {
+  const f = await fixture()
+  await mkdir(join(f.root, "installed"))
+  const preview = await f.service.preview("owner", f.request, guard)
+  const copy = await f.service.create("owner", preview.previewId, randomUUID(), guard)
+  await f.service.check("owner", copy.copyId, copy.digest, guard)
+  const create = () =>
+    new BusinessModAssemblyService(join(f.root, "work"), {
+      plugins: () => f.plugins as PluginMetadata[],
+      install: f.install,
+      invalidate: f.invalidate,
+      observeInstallation: (input, current) =>
+        observeProjectDeliveryInstallation(
+          join(f.root, "installed"),
+          () => f.plugins as PluginMetadata[],
+          input,
+          current
+        )
+    })
+  f.install.mockImplementationOnce(async () => {
+    throw Error("copy did not begin; reply uncertain")
+  })
+  await expect(create().install("owner", copy.copyId, copy.digest, guard)).rejects.toThrow(
+    "reply uncertain"
+  )
+  const restarted = create()
+  expect(
+    await restarted.observe("owner", copy.copyId, copy.digest, { kind: "install" }, guard)
+  ).toMatchObject({ outcome: "not-executed" })
+  await expect(restarted.install("owner", copy.copyId, copy.digest, guard)).rejects.toThrow(
+    "INSTALL_UNCONFIRMED"
+  )
+  expect(f.install).toHaveBeenCalledOnce()
+  await restarted.check("owner", copy.copyId, copy.digest, guard)
+  expect(f.install).toHaveBeenCalledOnce()
+  const installed = await restarted.install("owner", copy.copyId, copy.digest, guard)
+  expect(installed.status).toBe("installed")
+  expect(f.install).toHaveBeenCalledTimes(2)
+  expect(
+    await create().observe("owner", copy.copyId, copy.digest, { kind: "install" }, guard)
+  ).toEqual({ outcome: "installed", pluginId: installed.pluginId })
+})
+
+it("cold-reconciles missing ZIP publication without rearming the old export until an explicit fresh check", async () => {
+  const f = await fixture()
+  const preview = await f.service.preview("owner", f.request, guard)
+  const copy = await f.service.create("owner", preview.previewId, randomUUID(), guard)
+  await f.service.check("owner", copy.copyId, copy.digest, guard)
+  const output = join(f.root, "old-output.zip")
+  await f.service.export("owner", copy.copyId, copy.digest, output, guard)
+  await rm(output)
+  const restarted = new BusinessModAssemblyService(join(f.root, "work"), {
+    plugins: () => f.plugins as PluginMetadata[],
+    install: f.install,
+    invalidate: f.invalidate
+  })
+  expect(
+    await restarted.observe("owner", copy.copyId, copy.digest, { kind: "export", output }, guard)
+  ).toMatchObject({ outcome: "not-executed" })
+  const next = join(f.root, "next-explicit-output.zip")
+  await expect(restarted.export("owner", copy.copyId, copy.digest, next, guard)).rejects.toThrow(
+    "EXPORT_UNCONFIRMED"
+  )
+  await restarted.check("owner", copy.copyId, copy.digest, guard)
+  await restarted.export("owner", copy.copyId, copy.digest, next, guard)
+  expect(new AdmZip(next).getEntry("hooks/check.py")).not.toBeNull()
   expect(f.install).not.toHaveBeenCalled()
 })
 

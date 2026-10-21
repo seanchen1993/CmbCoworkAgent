@@ -17,6 +17,7 @@ import { readRuntimeScopedFile } from "../src/main/harness-board/project-runtime
 import { compositionEnvironment } from "./support/mods-composition-fixtures"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
 import { waitForAsyncEvidence } from "./support/async-evidence"
+import { enterModsCreatorChat } from "./support/mods-sidebar-navigation"
 import {
   HARNESS_PACKAGE_ID,
   HARNESS_DRAFT,
@@ -65,8 +66,7 @@ async function main() {
     )
     await page.addLocatorHandler(
       page.getByRole("dialog", { name: "项目模式使用引导", exact: true }),
-      async (guide) =>
-        guide.getByRole("button", { name: "知道了，不再提示", exact: true }).click()
+      async (guide) => guide.getByRole("button", { name: "知道了，不再提示", exact: true }).click()
     )
     page.on("pageerror", (error) => errors.push(error.message))
     await page.waitForFunction(() => Boolean(window.api?.harnessBoard?.localProjects))
@@ -94,12 +94,6 @@ async function main() {
         const id = (thread as unknown as { thread_id: string }).thread_id
         await window.api.workspace.set(id, workspace)
         await window.api.mods.configure(id, true, true)
-        const status = await window.api.mods.status(id)
-        await window.api.mods.development.setEnabled({
-          threadId: id,
-          expectedWorkspace: status.workspace,
-          enabled: true
-        })
         return id
       },
       { url: model.url, workspace }
@@ -110,6 +104,7 @@ async function main() {
       ;(window as unknown as { __name: unknown }).__name = (value: unknown) => value
     })
     await page.getByText("技能与节点作者验收", { exact: true }).first().click()
+    await enterModsCreatorChat(page, author, workspace)
     const installed = await page.evaluate(() => window.api.plugins.list())
     const authorResult = await page.evaluate(
       (id) =>
@@ -318,9 +313,7 @@ async function main() {
       view = await waitForAsyncEvidence(
         read,
         (state) =>
-          stage === "draft"
-            ? state.project.stageIndex === 1
-            : state.project.status === "completed",
+          stage === "draft" ? state.project.stageIndex === 1 : state.project.status === "completed",
         `harness ${stage} native transition`,
         15_000
       )

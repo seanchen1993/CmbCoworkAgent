@@ -30,7 +30,10 @@ import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 import { readRuntimeScopedFile } from "../../harness-board/project-runtime/safe-files"
 import { readPluginManifest } from "../../plugins/manifest"
 import { prepareAutobizBusinessTrial } from "./adapters/autobiz-business-trial"
-import { autobizTrialEvidenceOwner, readAutobizTrialEvidenceContracts } from "./adapters/autobiz-trial-evidence"
+import {
+  autobizTrialEvidenceOwner,
+  readAutobizTrialEvidenceContracts
+} from "./adapters/autobiz-trial-evidence"
 import { CreatorLegacyTrialEvidence } from "./creator-trial-legacy-evidence"
 import type { RuntimePluginSourceBinding } from "../../plugins/runtime-source-scope"
 import { projectCreatorLegacyTrialJourney } from "./creator-trial-legacy-journey"
@@ -68,6 +71,14 @@ import {
   type CreatorBusinessTrialRecord as TrialRecord,
   type CreatorBusinessTrialProofBinding
 } from "./creator-business-trial-record"
+import type { PluginStageRecoveryOwner, PluginStageRecoveryReceipt } from "./plugin-stage-recovery"
+import { prepareStageRecoveryReadOnlyRoots } from "../../hooks/stage-recovery-command"
+import {
+  PluginStageRecoveryInputs,
+  type PluginRecoveryInputHandle
+} from "./plugin-stage-recovery-inputs"
+import { getOpenworkDir } from "../../storage"
+import { readBoundedProjectFiles } from "../../harness-board/project-runtime/bounded-project-files"
 export type { BusinessTrialCandidate } from "./creator-business-trial-record"
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 const terminal = new Set(["completed", "failed", "cancelled"])
@@ -92,6 +103,15 @@ export class CreatorBusinessTrials {
   private readonly stopSettlement: () => void
   private readonly evidence: CreatorLegacyTrialEvidence
   private closed = false
+  private readonly recoveryOwnerCache = new Map<string, PluginStageRecoveryOwner>()
+  private recoveryInputs?: PluginStageRecoveryInputs
+  private readonly recoveryOwners = new WeakMap<
+    PluginStageRecoveryOwner,
+    {
+      record: TrialRecord
+      inputs?: PluginRecoveryInputHandle
+    }
+  >()
   constructor(
     private readonly deps: {
       root: string
@@ -113,9 +133,9 @@ export class CreatorBusinessTrials {
     this.snapshots = new RetainedPackageSnapshots(join(deps.root, "packages"))
     this.evidence = new CreatorLegacyTrialEvidence(deps.root, {
       settings: deps.settings,
-      owner: binding => this.evidenceOwner(binding),
-      canDescribe: binding => this.evidenceDescriptionAvailable(binding),
-      changed: id => {
+      owner: (binding) => this.evidenceOwner(binding),
+      canDescribe: (binding) => this.evidenceDescriptionAvailable(binding),
+      changed: (id) => {
         const record = this.read(id)
         if (record) deps.changed(record.scope.threadId)
       }
@@ -156,24 +176,48 @@ export class CreatorBusinessTrials {
   private evidenceBinding(binding: Readonly<RuntimePluginSourceBinding>) {
     if (binding.mode !== "legacy") return undefined
     const record = this.read(binding.projectId)
-    if (!record || !record.plugin || !record.workspace || !record.project || !record.packageDigest ||
-      record.nonce !== this.nonce || record.phase !== "running" || record.stopRequested ||
-      binding.operationId !== record.id || binding.featureId !== record.featureId ||
-      binding.packageDigest !== record.packageDigest || binding.plugin.id !== record.plugin.id ||
+    if (
+      !record ||
+      !record.plugin ||
+      !record.workspace ||
+      !record.project ||
+      !record.packageDigest ||
+      record.nonce !== this.nonce ||
+      record.phase !== "running" ||
+      record.stopRequested ||
+      binding.operationId !== record.id ||
+      binding.featureId !== record.featureId ||
+      binding.packageDigest !== record.packageDigest ||
+      binding.plugin.id !== record.plugin.id ||
       !isSameWorkspacePath(binding.plugin.path, record.plugin.path) ||
-      !isSameWorkspacePath(binding.workspace, record.workspace)) return undefined
+      !isSameWorkspacePath(binding.workspace, record.workspace)
+    )
+      return undefined
     const native = managedRunStore.getLatestRun(record.id, record.featureId)
     const thread = getThreadCore(binding.threadId)
-    if (!native || native.status !== "running" ||
+    if (
+      !native ||
+      native.status !== "running" ||
       (record.runId && native.runId !== record.runId) ||
-      !thread || JSON.stringify(captureThreadIncarnation(thread)) !== binding.incarnationKey)
+      !thread ||
+      JSON.stringify(captureThreadIncarnation(thread)) !== binding.incarnationKey
+    )
       return undefined
     let metadata: Record<string, unknown>
-    try { metadata = JSON.parse(thread.metadata ?? "null") } catch { return undefined }
+    try {
+      metadata = JSON.parse(thread.metadata ?? "null")
+    } catch {
+      return undefined
+    }
     const feature = metadata?.harnessFeature as Record<string, unknown> | undefined
-    if (feature?.projectId !== record.id || feature.slug !== record.featureId ||
-      feature.runId !== native.runId || typeof metadata.workspacePath !== "string" ||
-      !isSameWorkspacePath(metadata.workspacePath, record.workspace)) return undefined
+    if (
+      feature?.projectId !== record.id ||
+      feature.slug !== record.featureId ||
+      feature.runId !== native.runId ||
+      typeof metadata.workspacePath !== "string" ||
+      !isSameWorkspacePath(metadata.workspacePath, record.workspace)
+    )
+      return undefined
     return { record, native, thread }
   }
   private evidenceDescriptionAvailable(binding: Readonly<RuntimePluginSourceBinding>) {
@@ -182,8 +226,11 @@ export class CreatorBusinessTrials {
     this.authority(admitted.record)
     this.proof(admitted.record).assertCurrent()
     const current = this.evidenceBinding(binding)
-    return !!current && current.native.runId === admitted.native.runId &&
+    return (
+      !!current &&
+      current.native.runId === admitted.native.runId &&
       current.thread.metadata === admitted.thread.metadata
+    )
   }
   private evidenceOwner(binding: Readonly<RuntimePluginSourceBinding>) {
     const admitted = this.evidenceBinding(binding)
@@ -194,12 +241,18 @@ export class CreatorBusinessTrials {
       this.proof(record).assertCurrent()
       const current = this.read(record.id)
       const run = managedRunStore.getLatestRun(record.id, record.featureId)
-      if (!current || current.stopRequested || current.phase !== "running" ||
-        current.nonce !== this.nonce || (current.runId && current.runId !== native.runId) ||
-        run?.runId !== native.runId || run.status !== "running" ||
+      if (
+        !current ||
+        current.stopRequested ||
+        current.phase !== "running" ||
+        current.nonce !== this.nonce ||
+        (current.runId && current.runId !== native.runId) ||
+        run?.runId !== native.runId ||
+        run.status !== "running" ||
         run.currentSession?.threadId !== binding.threadId ||
         getThreadCore(binding.threadId)?.metadata !== thread.metadata ||
-        !matchesThreadIncarnation(getThreadCore(binding.threadId), captureThreadIncarnation(thread)))
+        !matchesThreadIncarnation(getThreadCore(binding.threadId), captureThreadIncarnation(thread))
+      )
         throw Error("BUSINESS_TRIAL_EVIDENCE_SCOPE_CHANGED")
     }
     return autobizTrialEvidenceOwner(record, native.runId, guard)
@@ -285,7 +338,7 @@ export class CreatorBusinessTrials {
   }
   private authority(record: TrialRecord) {
     this.assertOwner(record)
-    this.deps.assertSources(record.candidate.sources)
+    if (!record.recovery) this.deps.assertSources(record.candidate.sources)
   }
   private operation(record: TrialRecord) {
     this.authority(record)
@@ -371,8 +424,10 @@ export class CreatorBusinessTrials {
       throw Error("BUSINESS_TRIAL_VERSION_CHANGED")
     return this.status(scope)
   }
-  status(scope: DevelopmentScope,
-    currentCandidate?: { planId: string; digest: string } | null): DevelopmentBusinessTrialStatus | undefined {
+  status(
+    scope: DevelopmentScope,
+    currentCandidate?: { planId: string; digest: string } | null
+  ): DevelopmentBusinessTrialStatus | undefined {
     const record = this.current(scope)
     if (!record) return undefined
     this.assertOwner(record)
@@ -429,31 +484,46 @@ export class CreatorBusinessTrials {
         /* Original source/configuration approval remains mandatory. */
       }
     }
-    const sessionFacts = run && record.runId === run.runId && record.workspace
-      ? projectCreatorBusinessTrialSessions(
-          { projectId: record.id, featureId: record.featureId,
-            runId: run.runId, workspacePath: record.workspace },
-          managedRunStore.listEvents(run, undefined, 200), getThreadCore)
-      : undefined
+    const sessionFacts =
+      run && record.runId === run.runId && record.workspace
+        ? projectCreatorBusinessTrialSessions(
+            {
+              projectId: record.id,
+              featureId: record.featureId,
+              runId: run.runId,
+              workspacePath: record.workspace
+            },
+            managedRunStore.listEvents(run, undefined, 200),
+            getThreadCore
+          )
+        : undefined
     let journey: DevelopmentBusinessTrialStatus["journey"]
     if (record.project && record.plugin && record.packageDigest && record.workspace) {
       try {
         const manifest = this.evidence.source(record.id, record.featureId, record.packageDigest)
-        if (manifest) journey = projectCreatorLegacyTrialJourney({
-          projectId: record.id, creatorThreadId: scope.threadId,
-          candidateDigest: record.candidate.digest, packageDigest: record.packageDigest,
-          candidateCurrent: !invalidSource && (currentCandidate === undefined ||
-            (currentCandidate !== null && currentCandidate.planId === record.planId &&
-              currentCandidate.digest === record.candidate.digest)),
-          workspace: record.workspace, featureId: record.featureId,
-          runId: run?.runId, phase,
-          currentStageId: run?.lastDecision?.policyResult.facts?.currentNodeId,
-          manifest,
-          ...this.evidence.read(record.id, record.featureId),
-          sessions: sessionFacts?.sessions ?? [],
-          sessionsTruncated: sessionFacts?.sessionsTruncated,
-          sessionsUnavailable: !sessionFacts || sessionFacts.sessionsUnavailable
-        })
+        if (manifest)
+          journey = projectCreatorLegacyTrialJourney({
+            projectId: record.id,
+            creatorThreadId: scope.threadId,
+            candidateDigest: record.candidate.digest,
+            packageDigest: record.packageDigest,
+            candidateCurrent:
+              !invalidSource &&
+              (currentCandidate === undefined ||
+                (currentCandidate !== null &&
+                  currentCandidate.planId === record.planId &&
+                  currentCandidate.digest === record.candidate.digest)),
+            workspace: record.workspace,
+            featureId: record.featureId,
+            runId: run?.runId,
+            phase,
+            currentStageId: run?.lastDecision?.policyResult.facts?.currentNodeId,
+            manifest,
+            ...this.evidence.read(record.id, record.featureId),
+            sessions: sessionFacts?.sessions ?? [],
+            sessionsTruncated: sessionFacts?.sessionsTruncated,
+            sessionsUnavailable: !sessionFacts || sessionFacts.sessionsUnavailable
+          })
       } catch {
         // Missing source/journal remains an evidence gap. Status readback cannot execute
         // a validator, repair a business state file or silently manufacture a PASS.
@@ -461,6 +531,18 @@ export class CreatorBusinessTrials {
     }
     return {
       id: record.id,
+      ...(record.recovery
+        ? {
+            stageRecovery: {
+              sourceTrialId: record.recovery.sourceId,
+              preparationId: record.recovery.preparationId,
+              started:
+                !!record.runId ||
+                !!record.physical?.length ||
+                ["starting", "running"].includes(record.phase)
+            }
+          }
+        : {}),
       version: record.version,
       planId: record.planId,
       digest: record.candidate.digest,
@@ -712,7 +794,533 @@ export class CreatorBusinessTrials {
       })) ?? []
     )
   }
+  /** Main-only ended-owner readback. It neither revives a run nor inherits its old approval. */
+  private recoveryInputService(record: TrialRecord) {
+    const source = projectRuntimeFunctionSource(
+      {
+        projectId: record.id,
+        workspace: record.workspace!,
+        pluginDigest: record.packageDigest!,
+        installedPluginId: record.plugin!.id,
+        packageId: record.plugin!.name
+      },
+      record.plugin!.path
+    )
+    return (this.recoveryInputs ??= new PluginStageRecoveryInputs({
+      root: join(this.deps.root, "recovery-inputs"),
+      contextDataRoot: join(getOpenworkDir(), "plugin-data"),
+      normalizeConfigurationWorkspace: (workspace) =>
+        projectRuntimeFunctionSource(
+          {
+            projectId: record.id,
+            workspace,
+            pluginDigest: record.packageDigest!,
+            installedPluginId: record.plugin!.id,
+            packageId: record.plugin!.name
+          },
+          record.plugin!.path
+        ).input.workspace,
+      manager: source.manager
+    }))
+  }
+  /** Historical ownership readback: it grants neither a fresh proof nor permission to reset. */
+  adoptedRecoveryStatus(
+    scope: DevelopmentScope,
+    preparationId: string,
+    targetId: string,
+    evidenceDigest: string
+  ) {
+    const target = this.read(targetId)
+    if (
+      !target?.recovery ||
+      !target.workspace ||
+      !target.plugin ||
+      !target.packageDigest ||
+      !same(target.scope, scope) ||
+      target.recovery.preparationId !== preparationId ||
+      target.recovery.evidenceDigest !== evidenceDigest ||
+      this.deps.settings.getSetting(
+        `mods-business-trial-recovery-adoption-v1:${preparationId}`,
+        ""
+      ) !== targetId
+    )
+      throw Error("BUSINESS_TRIAL_RECOVERY_ADOPTION_CHANGED")
+    const binding = JSON.stringify([
+      target.scope,
+      target.workspace,
+      target.workspaceIdentity,
+      target.packageDigest,
+      target.plugin,
+      target.recovery
+    ])
+    const guard = () => {
+      const current = this.read(targetId)
+      if (
+        !current ||
+        JSON.stringify([
+          current.scope,
+          current.workspace,
+          current.workspaceIdentity,
+          current.packageDigest,
+          current.plugin,
+          current.recovery
+        ]) !== binding
+      )
+        throw Error("BUSINESS_TRIAL_RECOVERY_ADOPTION_CHANGED")
+      this.authority(current)
+      if (
+        this.deps.settings.getSetting(
+          `mods-business-trial-recovery-adoption-v1:${preparationId}`,
+          ""
+        ) !== targetId
+      )
+        throw Error("BUSINESS_TRIAL_RECOVERY_ADOPTION_CHANGED")
+    }
+    guard()
+    return {
+      guard,
+      canResume:
+        ["needs-configuration", "ready"].includes(target.phase) &&
+        !target.runId &&
+        !target.physical?.length &&
+        !this.writing.has(targetId)
+    }
+  }
+  async adoptedRecoveryOwner(
+    scope: DevelopmentScope,
+    preparationId: string,
+    targetId: string,
+    evidenceDigest: string
+  ): Promise<PluginStageRecoveryOwner> {
+    const target = this.read(targetId)
+    if (
+      !target?.recovery ||
+      !target.workspace ||
+      !target.plugin ||
+      !target.packageDigest ||
+      !same(target.scope, scope) ||
+      target.recovery.preparationId !== preparationId ||
+      target.recovery.evidenceDigest !== evidenceDigest ||
+      this.deps.settings.getSetting(
+        `mods-business-trial-recovery-adoption-v1:${preparationId}`,
+        ""
+      ) !== targetId
+    )
+      throw Error("BUSINESS_TRIAL_RECOVERY_ADOPTION_CHANGED")
+    const identity = this.identity(target)
+    const available = () => {
+      const current = this.read(targetId)
+      if (
+        !current ||
+        ![target.nonce, this.nonce].includes(current.nonce) ||
+        this.identity({ ...current, nonce: target.nonce }) !== identity ||
+        !["needs-configuration", "ready"].includes(current.phase) ||
+        current.runId ||
+        current.physical?.length ||
+        this.writing.has(targetId)
+      )
+        throw Error("BUSINESS_TRIAL_RECOVERY_ALREADY_STARTED")
+      this.authority(current)
+    }
+    available()
+    await this.snapshots.readAsync(target.packageDigest)
+    if (process.platform === "win32")
+      await prepareStageRecoveryReadOnlyRoots([target.plugin.path], available)
+    await this.snapshots.readAsync(target.packageDigest)
+    const packageGuard = await this.snapshots.captureGuardAsync(target.packageDigest)
+    const inputs = this.recoveryInputService(target)
+    const guard = () => {
+      available()
+      packageGuard()
+      inputs.assertTargetCurrent(targetId)
+      available()
+    }
+    const binding = await inputs.targetInputs(targetId, { guard: available })
+    if (process.platform === "win32" && binding.readOnlyRoots.length)
+      await prepareStageRecoveryReadOnlyRoots(binding.readOnlyRoots, available)
+    guard()
+    const owner: PluginStageRecoveryOwner = {
+      id: target.recovery.sourceId,
+      scope: structuredClone(scope),
+      workspace: target.workspace,
+      packageRoot: target.plugin.path,
+      packageDigest: target.packageDigest,
+      featureId: target.featureId,
+      inputsDigest: binding.inputsDigest,
+      readOnlyRoots: binding.readOnlyRoots,
+      ...(binding.providerInput ? { providerInput: binding.providerInput } : {}),
+      guard,
+      assertInputsCurrent: async () => {
+        guard()
+        binding.providerInput?.assertCurrent()
+        guard()
+      },
+      assertAdoptionAvailable: (id, evidence) => {
+        if (id !== preparationId || evidence !== evidenceDigest)
+          throw Error("BUSINESS_TRIAL_RECOVERY_ADOPTION_CHANGED")
+        guard()
+      }
+    }
+    this.recoveryOwners.set(owner, { record: target })
+    return owner
+  }
+  async endedRecoveryOwner(scope: DevelopmentScope, id: string): Promise<PluginStageRecoveryOwner> {
+    const cached = this.recoveryOwnerCache.get(id)
+    if (cached && same(cached.scope, scope)) {
+      try {
+        cached.guard()
+        await cached.assertInputsCurrent?.()
+        cached.guard()
+        return cached
+      } catch {
+        this.recoveryOwnerCache.delete(id)
+      }
+    }
+    const record = this.read(id)
+    if (
+      !record?.project ||
+      !record.plugin ||
+      !record.packageDigest ||
+      !record.workspace ||
+      !same(record.scope, scope) ||
+      this.writing.has(id)
+    )
+      throw Error("BUSINESS_TRIAL_RECOVERY_OWNER_REQUIRED")
+    const original = this.identity(record)
+    const assertEnded = () => {
+      const current = this.read(id)
+      if (
+        !current ||
+        this.identity(current) !== original ||
+        current.runId !== record.runId ||
+        !same(current.physical, record.physical) ||
+        this.writing.has(id)
+      )
+        throw Error("BUSINESS_TRIAL_RECOVERY_OWNER_CHANGED")
+      this.authority(current)
+      const run = managedRunStore.getLatestRun(id, record.featureId)
+      if (
+        !run ||
+        !record.runId ||
+        run.runId !== record.runId ||
+        !terminal.has(run.status) ||
+        current.phase === "unknown" ||
+        record.physical?.some((fact) => fact.confirmed !== true) ||
+        !record.physical?.length ||
+        (run.currentSession?.threadId && isAgentRunBusy(run.currentSession.threadId)) ||
+        record.physical.some((fact) => isAgentRunBusy(fact.threadId))
+      )
+        throw Error("BUSINESS_TRIAL_RECOVERY_REQUIRES_PHYSICAL_SETTLEMENT")
+    }
+    assertEnded()
+    // Hardening changes Windows ctime. Verify exact retained bytes on both sides, then adopt
+    // metadata guards; never ignore a changed guard or grant broad access to a user directory.
+    await this.snapshots.readAsync(record.packageDigest)
+    const beforeProtection = await readBoundedProjectFiles(record.workspace, { guard: assertEnded })
+    assertEnded()
+    if (process.platform === "win32")
+      await prepareStageRecoveryReadOnlyRoots([record.plugin.path, record.workspace], assertEnded)
+    await this.snapshots.readAsync(record.packageDigest)
+    await readBoundedProjectFiles(record.workspace, {
+      guard: assertEnded,
+      expected: beforeProtection
+    })
+    assertEnded()
+    const packageGuard = await this.snapshots.captureGuardAsync(record.packageDigest)
+    const guard = () => {
+      assertEnded()
+      packageGuard()
+      assertEnded()
+    }
+    const inputs = this.recoveryInputService(record)
+    const inputHandle = await inputs.capture({
+      sourceId: record.id,
+      workspace: record.workspace,
+      packageRoot: record.plugin.path,
+      packageId: record.plugin.name,
+      packageVersion: record.plugin.version,
+      packageDigest: record.packageDigest,
+      guard: assertEnded
+    })
+    guard()
+    const provider = await inputs.prepareProviderInputs(inputHandle, assertEnded)
+    const readOnlyRoots = await inputs.readOnlyRoots(inputHandle, assertEnded)
+    if (process.platform === "win32" && readOnlyRoots.length)
+      await prepareStageRecoveryReadOnlyRoots(readOnlyRoots, guard)
+    await inputs.assertCurrent(inputHandle, assertEnded)
+    guard()
+    guard()
+    const owner: PluginStageRecoveryOwner = {
+      id,
+      scope: structuredClone(scope),
+      workspace: record.workspace,
+      packageRoot: record.plugin.path,
+      packageDigest: record.packageDigest,
+      featureId: record.featureId,
+      stages: parseProjectRuntimeManifest(
+        JSON.parse(
+          readRuntimeScopedFile(
+            record.plugin.path,
+            "devclaw.project-runtime.json",
+            256 * 1024
+          ).bytes!.toString("utf8")
+        )
+      ).stages.map((stage) => ({
+        id: stage.id,
+        title: stage.title
+      })),
+      inputsDigest: inputs.identity(inputHandle),
+      readOnlyRoots,
+      ...(provider
+        ? {
+            providerInput: {
+              directory: provider.directory,
+              ...(provider.knowledgeRoot ? { knowledgeRoot: provider.knowledgeRoot } : {}),
+              ...(provider.configuration ? { configuration: provider.configuration } : {})
+            }
+          }
+        : {}),
+      guard: () => {
+        // The retained package and native inputs are fully fenced before/after each command.
+        // File-by-file copy checks only need live scope/physical ownership: rewalking every
+        // package/knowledge file for each copied artifact creates multiplicative IO.
+        assertEnded()
+      },
+      assertInputsCurrent: async () => {
+        guard()
+        await inputs.assertCurrent(inputHandle, assertEnded)
+        guard()
+      },
+      assertAdoptionAvailable: (preparationId, evidenceDigest) => {
+        guard()
+        const targetId = this.deps.settings.getSetting(
+          `mods-business-trial-recovery-adoption-v1:${preparationId}`,
+          ""
+        )
+        const target = targetId && this.read(targetId)
+        if (
+          !target ||
+          !target.recovery ||
+          target.recovery.sourceId !== record.id ||
+          target.recovery.preparationId !== preparationId ||
+          target.recovery.evidenceDigest !== evidenceDigest ||
+          !["needs-configuration", "ready"].includes(target.phase) ||
+          target.runId ||
+          target.physical?.length
+        )
+          throw Error("BUSINESS_TRIAL_RECOVERY_ALREADY_STARTED")
+        this.authority(target)
+        guard()
+      }
+    }
+    owner.guard()
+    this.recoveryOwners.set(owner, { record, inputs: inputHandle })
+    if (this.recoveryOwnerCache.size >= 32)
+      this.recoveryOwnerCache.delete(this.recoveryOwnerCache.keys().next().value!)
+    this.recoveryOwnerCache.set(id, owner)
+    return owner
+  }
+  async adoptRecoveredTrial(
+    owner: PluginStageRecoveryOwner,
+    receipt: PluginStageRecoveryReceipt,
+    assertNativeReceipt: () => void
+  ): Promise<{ trialId: string; projectId: string }> {
+    const original = this.recoveryOwners.get(owner)
+    if (!original) throw Error("BUSINESS_TRIAL_RECOVERY_NATIVE_OWNER_REQUIRED")
+    const guard = () => {
+      owner.guard()
+      assertNativeReceipt()
+      owner.guard()
+    }
+    guard()
+    if (
+      receipt.sourceId !== owner.id ||
+      receipt.packageRoot !== owner.packageRoot ||
+      receipt.packageDigest !== owner.packageDigest ||
+      receipt.featureId !== owner.featureId
+    )
+      throw Error("BUSINESS_TRIAL_RECOVERY_RECEIPT_CHANGED")
+    const indexKey = `mods-business-trial-recovery-adoption-v1:${receipt.preparationId}`
+    const previous = this.deps.settings.getSetting(indexKey, "")
+    const adoptedId = previous || namespace + randomUUID()
+    if (!/^creator-business-trial:[a-f0-9-]{36}$/.test(adoptedId))
+      throw Error("BUSINESS_TRIAL_RECOVERY_ADOPTION_CHANGED")
+    if (previous) {
+      const adopted = this.read(previous)
+      if (
+        adopted &&
+        (!adopted.recovery ||
+          adopted.recovery.evidenceDigest !== receipt.evidenceDigest ||
+          adopted.workspace !== receipt.workspace ||
+          !same(adopted.scope, owner.scope))
+      )
+        throw Error("BUSINESS_TRIAL_RECOVERY_ADOPTION_CHANGED")
+      // A reserved ID without a row is a resumable native intent, not a second new project.
+      if (adopted) {
+        if (adopted.nonce !== this.nonce) {
+          if (
+            !["needs-configuration", "ready"].includes(adopted.phase) ||
+            adopted.runId ||
+            adopted.physical?.length
+          )
+            throw Error("BUSINESS_TRIAL_RECOVERY_ALREADY_STARTED")
+          const file = readRuntimeScopedFile(
+            owner.packageRoot,
+            "devclaw.project-runtime.json",
+            256 * 1024
+          )
+          if (!file.bytes) throw Error("BUSINESS_TRIAL_RUNTIME_REQUIRED")
+          const manifest = parseProjectRuntimeManifest(JSON.parse(file.bytes.toString("utf8")))
+          const adapterContext = await prepareAutobizBusinessTrial(adopted.plugin!, manifest)
+          const packageGuard = await this.snapshots.captureGuardAsync(owner.packageDigest)
+          guard()
+          adopted.nonce = this.nonce
+          adopted.phase = "needs-configuration"
+          this.proofs.set(adopted.id, {
+            root: owner.packageRoot,
+            packageDigest: owner.packageDigest,
+            candidate: structuredClone(adopted.candidate),
+            plugin: structuredClone(adopted.plugin!),
+            workspace: adopted.workspace!,
+            workspaceIdentity: adopted.workspaceIdentity!,
+            featureId: adopted.featureId,
+            scope: structuredClone(adopted.scope),
+            planId: adopted.planId,
+            goal: adopted.goal,
+            recovery: structuredClone(adopted.recovery),
+            adapterContext,
+            assertCurrent: () => {
+              packageGuard()
+              this.recoveryInputs!.assertTargetCurrent(adopted.id)
+            }
+          })
+          this.persist(adopted)
+        }
+        const pointer = this.pointer(adopted.scope),
+          before = this.deps.settings.getSetting(pointer, "")
+        if (
+          before !== adopted.id &&
+          !this.deps.settings.compareAndSetSetting(pointer, before || undefined, adopted.id)
+        )
+          throw Error("BUSINESS_TRIAL_VERSION_CHANGED")
+        return { trialId: adopted.id, projectId: adopted.id }
+      }
+    } else if (!this.deps.settings.compareAndSetSetting(indexKey, undefined, adoptedId)) {
+      throw Error("BUSINESS_TRIAL_RECOVERY_ADOPTION_CHANGED")
+    }
+    const sourceRecord = original.record
+    if (!original.inputs) throw Error("BUSINESS_TRIAL_RECOVERY_NATIVE_INPUTS_REQUIRED")
+    const workspaceIdentity = runtimeDirectoryIdentity(receipt.workspace)
+    const record: TrialRecord = {
+      schemaVersion: 1,
+      version: 1,
+      id: adoptedId,
+      scope: structuredClone(owner.scope),
+      planId: sourceRecord.planId,
+      candidate: structuredClone(sourceRecord.candidate),
+      goal: sourceRecord.goal,
+      phase: "needs-configuration",
+      settled: true,
+      nonce: this.nonce,
+      workspace: receipt.workspace,
+      workspaceIdentity,
+      packageDigest: owner.packageDigest,
+      plugin: { ...sourceRecord.plugin!, id: "" },
+      featureId: owner.featureId,
+      feedback: [],
+      recovery: {
+        sourceId: owner.id,
+        preparationId: receipt.preparationId,
+        evidenceDigest: receipt.evidenceDigest
+      }
+    }
+    record.plugin!.id = record.id
+    record.project = {
+      ...structuredClone(sourceRecord.project!),
+      projectId: record.id,
+      workspacePath: dirname(record.workspace!),
+      projectDir: basename(record.workspace!),
+      "harness-adapter": { ...sourceRecord.project!["harness-adapter"], id: record.id },
+      lifecycle: { status: "active", createAt: new Date().toISOString() }
+    }
+    const manifestFile = readRuntimeScopedFile(
+      owner.packageRoot,
+      "devclaw.project-runtime.json",
+      256 * 1024
+    )
+    if (!manifestFile.bytes) throw Error("BUSINESS_TRIAL_RUNTIME_REQUIRED")
+    const manifest = parseProjectRuntimeManifest(JSON.parse(manifestFile.bytes.toString("utf8")))
+    const adapterContext = await prepareAutobizBusinessTrial(record.plugin!, manifest)
+    guard()
+    const packageGuard = await this.snapshots.captureGuardAsync(owner.packageDigest)
+    guard()
+    await this.recoveryInputs!.bind(
+      original.inputs,
+      {
+        projectId: record.id,
+        workspace: record.workspace!,
+        packageRoot: owner.packageRoot,
+        installedPluginId: record.id
+      },
+      guard
+    )
+    guard()
+    this.proofs.set(record.id, {
+      root: owner.packageRoot,
+      packageDigest: owner.packageDigest,
+      candidate: structuredClone(record.candidate),
+      plugin: structuredClone(record.plugin!),
+      workspace: record.workspace!,
+      workspaceIdentity,
+      featureId: record.featureId,
+      scope: structuredClone(record.scope),
+      planId: record.planId,
+      goal: record.goal,
+      recovery: structuredClone(record.recovery),
+      adapterContext,
+      assertCurrent: () => {
+        packageGuard()
+        this.recoveryInputs!.assertTargetCurrent(record.id)
+      }
+    })
+    this.evidence.freezeSource(record.id, record.featureId, owner.packageDigest, manifest)
+    guard()
+    this.persist(record, false)
+    guard()
+    if (this.deps.settings.getSetting(indexKey, "") !== record.id)
+      throw Error("BUSINESS_TRIAL_RECOVERY_ADOPTION_CHANGED")
+    const pointer = this.pointer(record.scope),
+      before = this.deps.settings.getSetting(pointer, "")
+    if (!this.deps.settings.compareAndSetSetting(pointer, before || undefined, record.id))
+      throw Error("BUSINESS_TRIAL_VERSION_CHANGED")
+    this.deps.changed(record.scope.threadId)
+    return { trialId: record.id, projectId: record.id }
+  }
   private proof(record: TrialRecord) {
+    if (record.recovery) {
+      let native: Record<string, unknown>
+      try {
+        native = JSON.parse(
+          this.deps.settings.getSetting(
+            `plugin-stage-recovery-v1:${record.recovery.preparationId}`,
+            "null"
+          )
+        )
+      } catch {
+        throw Error("BUSINESS_TRIAL_RECOVERY_NOT_CONFIRMED")
+      }
+      if (
+        !native ||
+        native.phase !== "adopted" ||
+        native.recoveredTrialId !== record.id ||
+        native.recoveredProjectId !== record.id ||
+        native.workspace !== record.workspace ||
+        native.packageDigest !== record.packageDigest ||
+        native.sourceId !== record.recovery.sourceId ||
+        native.evidenceDigest !== record.recovery.evidenceDigest
+      )
+        throw Error("BUSINESS_TRIAL_RECOVERY_NOT_CONFIRMED")
+    }
     const proof = this.proofs.get(record.id)
     if (!proof) throw Error("BUSINESS_TRIAL_RECONCILIATION_REQUIRED")
     assertCreatorBusinessTrialProofBinding(record, proof)
@@ -733,7 +1341,8 @@ export class CreatorBusinessTrials {
       record.goal,
       record.featureId,
       record.selection,
-      record.accountingRunId
+      record.accountingRunId,
+      record.recovery
     ])
   }
   private captureIdentity(id: string) {
@@ -832,43 +1441,45 @@ export class CreatorBusinessTrials {
       this.persist(record)
       const workspace = record.workspace!,
         projectDir = basename(workspace)
-      await createHarnessProject(
-        {
-          adapterId: record.plugin!.id,
-          adapterType: "plugin",
-          name: record.candidate.name,
-          description: record.goal,
-          projectCode: "TRIAL" + record.featureId.replaceAll("-", ""),
-          projectDir,
-          projectFromLean: false,
-          systemId: "CREATOR-TRIAL",
-          systemName: "隔离候选试用",
-          workspacePath: dirname(workspace)
-        },
-        {
-          projectId: record.id,
-          plugin: record.plugin!,
-          guard,
-          signal: cancellation.signal,
-          bindProject: (project) => {
-            this.operation(record)
-            record.project = project
-            this.persist(record)
+      if (!record.recovery)
+        await createHarnessProject(
+          {
+            adapterId: record.plugin!.id,
+            adapterType: "plugin",
+            name: record.candidate.name,
+            description: record.goal,
+            projectCode: "TRIAL" + record.featureId.replaceAll("-", ""),
+            projectDir,
+            projectFromLean: false,
+            systemId: "CREATOR-TRIAL",
+            systemName: "隔离候选试用",
+            workspacePath: dirname(workspace)
+          },
+          {
+            projectId: record.id,
+            plugin: record.plugin!,
+            guard,
+            signal: cancellation.signal,
+            bindProject: (project) => {
+              this.operation(record)
+              record.project = project
+              this.persist(record)
+            }
           }
-        }
-      )
+        )
       guard()
-      await createHarnessFeature(
-        {
-          projectId: record.id,
-          feature: record.featureId,
-          ...(this.mappings(record).length ? { selectedDeployUnits: this.mappings(record) } : {}),
-          sessionContextInjectionSource: "plugin",
-          sessionWorkspace: { source: "directory", path: workspace }
-        },
-        guard,
-        cancellation.signal
-      )
+      if (!record.recovery)
+        await createHarnessFeature(
+          {
+            projectId: record.id,
+            feature: record.featureId,
+            ...(this.mappings(record).length ? { selectedDeployUnits: this.mappings(record) } : {}),
+            sessionContextInjectionSource: "plugin",
+            sessionWorkspace: { source: "directory", path: workspace }
+          },
+          guard,
+          cancellation.signal
+        )
       guard()
       const contracts = await readAutobizTrialEvidenceContracts(record)
       guard()
@@ -1107,6 +1718,8 @@ export class CreatorBusinessTrials {
     this.stopSettlement()
     this.stopProvider()
     this.evidence.close()
+    this.recoveryInputs?.close()
+    this.recoveryOwnerCache.clear()
     this.proofs.clear()
   }
 }

@@ -660,7 +660,7 @@ async function verifyUsageGuide(page: Page) {
   await page.getByRole("tab", { name: "常见问题" }).click()
   await page.getByText("灵件和插件是什么关系？", { exact: true }).click()
   await page.getByText("插件是安装包", { exact: false }).waitFor()
-  await page.getByRole("button", { name: "管理执行步骤" }).click()
+  await page.getByRole("button", { name: "管理聊天任务模板" }).click()
   assert.deepEqual(await page.evaluate("window.fixtureNavigation"), [true, "flows"])
   assert.deepEqual(await page.evaluate("window.fixture.calls()"), [])
   pass(

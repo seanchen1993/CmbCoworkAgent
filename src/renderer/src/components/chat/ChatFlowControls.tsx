@@ -120,12 +120,12 @@ export function ChatFlowControls({
           variant="outline"
           onClick={() => useAppStore.getState().setShowCustomizeView(true, "flows")}
         >
-          管理执行步骤
+          管理聊天任务模板
         </Button>
       </div>
       {!flow.flows.length && !binding?.active?.flow && !flow.loading && (
         <p className="text-xs text-muted-foreground">
-          暂无已保存步骤，可先管理执行步骤；普通聊天可直接发送。
+          暂无已保存步骤，可先管理聊天任务模板；普通聊天可直接发送。
         </p>
       )}
       {!flow.enabled && flow.choice && (

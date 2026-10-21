@@ -26,6 +26,7 @@ export function registerModsDevelopmentHandlers(
     }): Promise<unknown>
     installProjectDelivery?(input: AuthoringScope & { deliveryId: string; digest: string }): Promise<unknown>
     exportProjectDelivery?(input: AuthoringScope & { deliveryId: string; digest: string }): Promise<unknown>
+    reconcileProjectDelivery?(input: AuthoringScope & { deliveryId: string; digest: string }): Promise<unknown>
     approveModularization?(input: AuthoringScope & { requestId: string; sourceDigest: string }): Promise<unknown>
   }
 ) {
@@ -47,9 +48,10 @@ export function registerModsDevelopmentHandlers(
     if (!actions?.prepareProjectDelivery) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
     return actions.prepareProjectDelivery(input)
   })
-  for (const name of ["install-project-delivery", "export-project-delivery"] as const) {
+  for (const name of ["install-project-delivery", "export-project-delivery", "reconcile-project-delivery"] as const) {
     register(name, scope.extend({ deliveryId: z.string().uuid(), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict(), input => {
-      const action = name === "install-project-delivery" ? actions?.installProjectDelivery : actions?.exportProjectDelivery
+      const action = name === "install-project-delivery" ? actions?.installProjectDelivery :
+        name === "export-project-delivery" ? actions?.exportProjectDelivery : actions?.reconcileProjectDelivery
       if (!action) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
       return action(input)
     })

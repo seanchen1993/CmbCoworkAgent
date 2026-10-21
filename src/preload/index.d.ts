@@ -1,4 +1,5 @@
 import type { PluginInstallMode, PluginInstallResult } from "../shared/plugin-install"
+import type { PreparePluginStartUse } from "../shared/plugin-start-use"
 import type { WindowPresentationBridge } from "../shared/window-presentation"
 import type {
   EfficiencyDevComputeResult,
@@ -2321,6 +2322,8 @@ interface CustomAPI {
     onStatus: (callback: (status: BuiltinRobotStatus) => void) => () => void
   }
   plugins: {
+    prepareStartUse: PreparePluginStartUse
+    enableStartUse: PreparePluginStartUse
     list: () => Promise<PluginMetadata[]>
     install: (
       buffer: ArrayBuffer,

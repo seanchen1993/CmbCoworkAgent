@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import type { ProjectDeliveryObservation } from "./plugin-delivery-observation"
 import { isDeepStrictEqual } from "node:util"
 import { prepareNodeCompositionFiles } from "./derivation-node-composition"
 import { prepareFlowCompositionFiles } from "./derivation-flow-composition"
@@ -78,6 +79,10 @@ export interface DerivationServiceDependencies {
     verify: (directory: string) => Promise<void>
   ): Promise<{ success: boolean; error?: string }>
   invalidate(): void
+  observeInstallation?(
+    input: { pluginId: string; name: string; version: string; digest: string },
+    guard: () => void
+  ): Promise<ProjectDeliveryObservation>
 }
 
 export class PluginDerivationService {

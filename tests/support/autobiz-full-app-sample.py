@@ -293,13 +293,36 @@ def implementation(workspace: Path, feature: str, run_id: str, batch_id: str) ->
         "implementationEvidenceId": receipt.get("implementationEvidenceId")}
 
 
-def utest(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict:
+def utest(workspace: Path, feature: str, run_id: str, batch_id: str, dispatch_auth: dict | None = None) -> dict:
     from hooks.parallel_runtime import acquire_lease, release_lease
     from hooks.parallel_batch_stage import start_stage, complete_stage, gate_batch
     from hooks.worktree_manager import seal_parallel_batch
     from hooks.run_utest_command import execute_utest_command
+    if dispatch_auth is not None:
+        # Use the actual public CLI parser/authority scope, rather than calling an
+        # unbound stage function while the current dispatcher owns this lifecycle.
+        import contextlib
+        import io
+        from hooks import parallel_batch_stage as native_stage
+        def invoke_stage(action, *, stage=None, metadata=None):
+            argv = [action, "--workspace", str(workspace), "--feature", feature,
+                "--run-id", run_id, "--batch-id", batch_id,
+                "--dispatch-generation", str(dispatch_auth["generation"]),
+                "--dispatch-token", dispatch_auth["token"]]
+            if stage is not None:
+                argv.extend(["--stage", stage])
+            if metadata is not None:
+                argv.extend(["--metadata-json", json.dumps(metadata)])
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                native_stage.main(argv)
+            return json.loads(output.getvalue())
+        start_stage = lambda *_args: invoke_stage("start", stage=_args[-1])
+        complete_stage = lambda *_args, metadata: invoke_stage("complete", stage=_args[-1], metadata=metadata)
+        gate_batch = lambda *_args: invoke_stage("gate")
     worktree, branch, task_id, index = batch_context(workspace, feature, run_id, batch_id)
-    token = acquire_lease(workspace, feature, run_id, batch_id, ttl_seconds=600)["ownerToken"]
+    token = acquire_lease(workspace, feature, run_id, batch_id, ttl_seconds=600,
+        **({"dispatch_auth": dispatch_auth} if dispatch_auth is not None else {}))["ownerToken"]
     checked(start_stage(workspace, feature, run_id, batch_id, "test"))
     module, function, positive, negative = ("cap", "successor", 3, 0) if index == 1 else (
         "next", "double", 4, -2)

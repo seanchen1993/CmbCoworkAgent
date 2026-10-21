@@ -1,4 +1,6 @@
 import type { DevelopmentBusinessStatus } from "../../../../shared/mods/development"
+import { InstalledPluginStartUse } from "./InstalledPluginStartUse"
+import { projectDeliveryReconciliationText } from "./project-delivery-view"
 
 type Review = NonNullable<DevelopmentBusinessStatus["review"]>
 const button = "rounded-lg border px-3 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50"
@@ -21,6 +23,7 @@ export function BusinessCreatorReviewCard({
   onExport,
   onRead,
   onTrial,
+  startUseScope,
   presentation = "delivery"
 }: {
   review: Review
@@ -29,6 +32,7 @@ export function BusinessCreatorReviewCard({
   onExport(): void
   onRead(): void
   onTrial?(): void
+  startUseScope?: { threadId: string; workspace: string }
   presentation?: "delivery" | "source"
 }) {
   const sourceOnly = presentation === "source"
@@ -105,13 +109,25 @@ export function BusinessCreatorReviewCard({
           {review.exportOnly ? "导出更新包…" : "导出插件包…"}
         </button>}
         <button type="button" className={button} disabled={busy} onClick={onRead}>
-          {review.canReconcile ? "核对中断结果" : "核对状态"}
+          {review.canReconcile ? "核对实际交付结果" : "核对状态"}
         </button>
       </div>
       {!sourceOnly && ["installed", "exported"].includes(review.phase) && <div className="space-y-1 rounded-lg border bg-background/60 p-3 text-xs">
-        <p className="font-medium">下一步：{review.phase === "installed" ? "从“添加功能 → 我已添加”找到这份新插件，再从它的项目入口使用。" : "将 ZIP 交给其他用户，从“安装插件”导入。"}</p>
+        <p className="font-medium">{review.phase === "installed" ? "插件已安装，可在下方核对配置并直接进入对应使用入口。" : "将 ZIP 交给其他用户，从“安装插件”导入。"}</p>
         <p className="text-muted-foreground">每个使用环境单独填写用户参数、知识库目录并确认源码及运行权限。保存插件不包含本轮试用数据和本机授权。</p>
       </div>}
+      {!sourceOnly && review.pluginId && startUseScope && review.contentDigest && (
+        <InstalledPluginStartUse
+          {...startUseScope}
+          pluginId={review.pluginId}
+          expected={{ name: review.name, version: review.version, digest: review.contentDigest }}
+        />
+      )}
+      {!sourceOnly && review.pluginId && !review.contentDigest && (
+        <p className="text-xs text-muted-foreground">
+          这是较早的交付记录，请先核对实际交付结果，补齐精确安装内容身份后再开始使用。
+        </p>
+      )}
       {!sourceOnly && onTrial && (
         <p className="text-xs leading-5 text-muted-foreground">
           试用使用独立目录，不会安装正式插件。参数、源码权限和实际操作仍需分别确认；运行结果以原流程检查为准。
@@ -119,13 +135,20 @@ export function BusinessCreatorReviewCard({
       )}
       {review.reconciliation && (
         <p role="status" className="text-xs text-muted-foreground">
-          {review.reconciliation.outcome === "unknown"
-            ? `尚不能确认结果：${review.reconciliation.reason ?? "缺少完整凭据"}。未重复安装或导出。`
-            : "已根据原操作记录及实际文件核对结果；没有重新执行操作，也没有恢复安装授权。"}
+          {projectDeliveryReconciliationText(review.reconciliation.outcome)}
         </p>
       )}
       {review.output && (
         <p className="break-all text-xs text-muted-foreground">导出位置：{review.output}</p>
+      )}
+      {review.pendingOutput && (
+        <div className="space-y-1 text-xs text-muted-foreground">
+          <p className="break-all">待核对导出目标：{review.pendingOutput}</p>
+          <p>
+            若存在不完整或冲突文件，请先保留并移到其他位置，再核对实际交付结果。
+            确认未执行后，让创造者重新准备当前候选，在新方案中确认导出；不会自动覆盖或删除原文件。
+          </p>
+        </div>
       )}
       <details className="text-xs text-muted-foreground">
         <summary className="cursor-pointer">来源与版本</summary>

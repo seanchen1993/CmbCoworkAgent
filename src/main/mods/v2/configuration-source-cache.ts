@@ -1,4 +1,5 @@
-import { compileFunctionPlugin, type CompiledFunctionPlugin } from "./loader"
+import { compileFunctionConfiguration, compileFunctionPlugin, type CompiledFunctionPlugin } from "./loader"
+import { isConfigurationOnlyPackage } from "./configuration-only-package"
 import { assertFunctionSourcesCurrent } from "./source-adoption-fence"
 import { realpathSync } from "node:fs"
 
@@ -33,7 +34,8 @@ export class FunctionConfigurationSourceCache {
 
   constructor(
     private readonly capacity = 16,
-    private readonly compile = (path: string) => compileFunctionPlugin(path)
+    private readonly compile = (path: string) => isConfigurationOnlyPackage(path)
+      ? compileFunctionConfiguration(path) : compileFunctionPlugin(path)
   ) {}
 
   /** Main-process identity consumers may reuse only a still-proved completed compilation. */

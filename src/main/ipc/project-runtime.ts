@@ -19,18 +19,29 @@ import { getProjectActionRuntime } from "../harness-board/project-action-runtime
 import { projectActionResults } from "../harness-board/project-action-results"
 import { readProjectActionLock } from "../harness-board/project-runtime/action-input"
 import { isSameWorkspacePath } from "../../shared/workspace-path"
-import { isProjectPreviewId, projectPreviewRegistry } from "../mods/devtools/project-preview-registry"
+import {
+  isProjectPreviewId,
+  projectPreviewRegistry
+} from "../mods/devtools/project-preview-registry"
 import { registerProjectPreviewHandlers } from "./project-preview"
 import { registerProjectRuntimeModsHandlers } from "./project-runtime-mods"
 import { projectAuthoringSessions } from "../mods/devtools/project-authoring-session"
-import { ProjectStageDebugSessions, configureProjectStageDebugResolver } from "../mods/devtools/project-stage-debug"
+import {
+  ProjectStageDebugSessions,
+  configureProjectStageDebugResolver
+} from "../mods/devtools/project-stage-debug"
+import { StageRecoveryInputs } from "../mods/devtools/stage-recovery-inputs"
+import { getProjectRuntimeFunctionManager } from "../harness-board/project-runtime-function-source"
 import { getModsManager } from "../mods/manager"
 import { ProjectLibrary } from "../harness-board/project-runtime/project-library"
 import { registerProjectCompositionHandlers } from "./project-composition"
 import { createLegacyCompositionDependencies } from "../harness-board/project-runtime/composition-legacy-production"
 import { createBrowserWindowAgentRunDelivery } from "../agent/agent-run-service"
 import { assertOriginalProjectWorkspaceIdle } from "../harness-board/project-runtime/composition-workspace-busy"
-import { listLocalThreadRunLeases, registerLocalThreadRunAdmissionGuard } from "../agent/thread-run-lease"
+import {
+  listLocalThreadRunLeases,
+  registerLocalThreadRunAdmissionGuard
+} from "../agent/thread-run-lease"
 import type { ProjectLibraryApi } from "../../shared/project-runtime/project-library"
 import type {
   LocalProjectCommand,
@@ -51,24 +62,37 @@ export function registerProjectRuntimeHandlers(
     const manager = getModsManager()
     if (!manager) throw Error("DEVELOPMENT_DISABLED")
     debugging ??= new ProjectStageDebugSessions({
-      root: join(getOpenworkDir(), "project-stage-debug"), settings: manager.store,
-      sessions: projectAuthoringSessions, registry: projectPreviewRegistry, platform,
+      root: join(getOpenworkDir(), "project-stage-debug"),
+      settings: manager.store,
+      recoveryInputs: new StageRecoveryInputs({
+        root: join(getOpenworkDir(), "project-stage-debug", "recovery-inputs"),
+        contextDataRoot: join(getOpenworkDir(), "plugin-data"),
+        normalizeConfigurationWorkspace: workspace => manager.workspaceKey(workspace),
+        manager: getProjectRuntimeFunctionManager()
+      }),
+      sessions: projectAuthoringSessions,
+      registry: projectPreviewRegistry,
+      platform,
       retainedRoot: (project) => snapshots!.read(project.pluginDigest).root,
       assertInspectionScope: (scope) => {
         const thread = getThreadCore(scope.threadId)
-        const metadata = typeof thread?.metadata === "string"
-          ? JSON.parse(thread.metadata) : thread?.metadata
-        if (!matchesThreadIncarnation(thread, scope.incarnation) ||
+        const metadata =
+          typeof thread?.metadata === "string" ? JSON.parse(thread.metadata) : thread?.metadata
+        if (
+          !matchesThreadIncarnation(thread, scope.incarnation) ||
           typeof metadata?.workspacePath !== "string" ||
-          !isSameWorkspacePath(metadata.workspacePath, scope.workspace))
+          !isSameWorkspacePath(metadata.workspacePath, scope.workspace)
+        )
           throw Error("PROJECT_STAGE_DEBUG_INSPECTION_SCOPE_CHANGED")
       },
       assertWorkspaceIdle: (workspace) => {
         for (const lease of listLocalThreadRunLeases()) {
           const raw = getThreadCore(lease.threadId)?.metadata
           const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
-          if (typeof metadata?.workspacePath === "string" &&
-            isSameWorkspacePath(metadata.workspacePath, workspace))
+          if (
+            typeof metadata?.workspacePath === "string" &&
+            isSameWorkspacePath(metadata.workspacePath, workspace)
+          )
             throw Error("PROJECT_STAGE_DEBUG_SOURCE_UNSETTLED")
         }
       }
@@ -78,20 +102,31 @@ export function registerProjectRuntimeHandlers(
   configureProjectStageDebugResolver(stageDebug)
   const runOwners = new Map<string, BrowserWindow>()
   const compositions = registerProjectCompositionHandlers(ipc, {
-    trusted, host: platform,
-    legacy: input => createLegacyCompositionDependencies({ ...input,
-      delivery: context => createBrowserWindowAgentRunDelivery(input.owner(context)) }),
-    bindOwner: (operation, owner) => { runOwners.set(operation.operationId, owner) },
+    trusted,
+    host: platform,
+    legacy: (input) =>
+      createLegacyCompositionDependencies({
+        ...input,
+        delivery: (context) => createBrowserWindowAgentRunDelivery(input.owner(context))
+      }),
+    bindOwner: (operation, owner) => {
+      runOwners.set(operation.operationId, owner)
+    },
     assertWorkspaceIdle: (workspace) => {
       for (const lease of listLocalThreadRunLeases()) {
         const raw = getThreadCore(lease.threadId)?.metadata
         const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
-        if (typeof metadata?.workspacePath === "string" &&
-          isSameWorkspacePath(metadata.workspacePath, workspace)) throw Error("COMPOSITION_WORKSPACE_BUSY")
+        if (
+          typeof metadata?.workspacePath === "string" &&
+          isSameWorkspacePath(metadata.workspacePath, workspace)
+        )
+          throw Error("COMPOSITION_WORKSPACE_BUSY")
       }
-      assertOriginalProjectWorkspaceIdle(workspace,
+      assertOriginalProjectWorkspaceIdle(
+        workspace,
         join(getOpenworkDir(), "local-projects", "state.sqlite"),
-        join(getOpenworkDir(), "legacy-project-runtime", "operations.sqlite"))
+        join(getOpenworkDir(), "legacy-project-runtime", "operations.sqlite")
+      )
     }
   })
   function compositionGuard<T>(workspace: string, work: () => T): T {
@@ -100,15 +135,18 @@ export function registerProjectRuntimeHandlers(
     return compositions().guardWorkspaceMutation(workspace, work)
   }
   function internalCompositionProject(projectId: string): boolean {
-    return projectId.startsWith("composition:") &&
+    return (
+      projectId.startsWith("composition:") &&
       existsSync(join(getOpenworkDir(), "project-compositions", "state.sqlite")) &&
       Boolean(compositions().parentForHostUnit(projectId))
+    )
   }
   registerLocalThreadRunAdmissionGuard((threadId, work) => {
     const raw = getThreadCore(threadId)?.metadata
     const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
     return typeof metadata?.workspacePath === "string"
-      ? compositionGuard(metadata.workspacePath, work) : work()
+      ? compositionGuard(metadata.workspacePath, work)
+      : work()
   })
   projectAuthoringSessions.setChanged((threadId) => {
     const owner = mainWindow()
@@ -159,6 +197,7 @@ export function registerProjectRuntimeHandlers(
       )
       snapshots = new HostPackageSnapshots(join(root, "packages"))
       service = new HostProjectService(store, snapshots, {
+        reconcileRecoveryHooks: (project) => stageDebug().reconcileNativeHookFacts(project),
         assertCommand: (project, kind) => stageDebug().assertCommand(project, kind),
         authorizeStageBranch: async (context) => stageDebug().authorizeBranch(context),
         beforeExecuteStage: async (context) => {
@@ -198,8 +237,11 @@ export function registerProjectRuntimeHandlers(
             projectPreviewRegistry.assertProject(project)
             return
           }
-          if (!getPlugins().some((plugin) =>
-            plugin.id === project.installedPluginId && plugin.enabled))
+          if (
+            !getPlugins().some(
+              (plugin) => plugin.id === project.installedPluginId && plugin.enabled
+            )
+          )
             throw Error("PROJECT_PLUGIN_UNAVAILABLE")
         },
         inspectOperation: inspectHostProjectExecution,
@@ -221,18 +263,22 @@ export function registerProjectRuntimeHandlers(
           if (!owner || owner.isDestroyed()) throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
           const { executeHostProjectStage } =
             await import("../harness-board/project-action-executor")
-          try { return await executeHostProjectStage(context, owner, () => {
-            const current = store.get(context.project.projectId)
-            const operation = store.getOperation(context.operation.operationId)
-            if (
-              !current ||
-              current.version !== context.ticket.expectedVersion ||
-              current.pluginDigest !== context.ticket.pluginDigest ||
-              operation?.status !== "started" ||
-              operation.cancelRequestedAt !== null
-            )
-              throw Error("PROJECT_ACTION_OPERATION_CHANGED")
-          }) } finally { runOwners.delete(context.operation.operationId) }
+          try {
+            return await executeHostProjectStage(context, owner, () => {
+              const current = store.get(context.project.projectId)
+              const operation = store.getOperation(context.operation.operationId)
+              if (
+                !current ||
+                current.version !== context.ticket.expectedVersion ||
+                current.pluginDigest !== context.ticket.pluginDigest ||
+                operation?.status !== "started" ||
+                operation.cancelRequestedAt !== null
+              )
+                throw Error("PROJECT_ACTION_OPERATION_CHANGED")
+            })
+          } finally {
+            runOwners.delete(context.operation.operationId)
+          }
         }
       })
       service.recoverInterrupted()
@@ -254,44 +300,76 @@ export function registerProjectRuntimeHandlers(
     return { project, library }
   }
   ipc.handle("project-runtime:library-list", (event, projectId: string) =>
-    libraryScope(event, projectId).library.list(projectId))
-  ipc.handle("project-runtime:library-capture", (event, projectId: string, input: Parameters<ProjectLibraryApi["capture"]>[1]) => {
-    const { project, library } = libraryScope(event, projectId)
-    const operations = platform().operations(projectId, 50)
-    if (operations.some((item) => ["started", "cancel_requested"].includes(item.status)))
-      throw Error("PROJECT_LIBRARY_BUSY")
-    const operation = operations.find((item) => item.operationId === input?.operationId)
-    if (!operation) throw Error("PROJECT_LIBRARY_CHECK_REQUIRED")
-    snapshots!.read(project.pluginDigest)
-    return library.capture(project, operation, input)
-  })
+    libraryScope(event, projectId).library.list(projectId)
+  )
+  ipc.handle(
+    "project-runtime:library-capture",
+    (event, projectId: string, input: Parameters<ProjectLibraryApi["capture"]>[1]) => {
+      const { project, library } = libraryScope(event, projectId)
+      const operations = platform().operations(projectId, 50)
+      if (operations.some((item) => ["started", "cancel_requested"].includes(item.status)))
+        throw Error("PROJECT_LIBRARY_BUSY")
+      const operation = operations.find((item) => item.operationId === input?.operationId)
+      if (!operation) throw Error("PROJECT_LIBRARY_CHECK_REQUIRED")
+      snapshots!.read(project.pluginDigest)
+      return library.capture(project, operation, input)
+    }
+  )
   ipc.handle("project-runtime:library-read", (event, projectId: string, id: string, path: string) =>
-    libraryScope(event, projectId).library.read(projectId, id, path))
+    libraryScope(event, projectId).library.read(projectId, id, path)
+  )
   ipc.handle("project-runtime:library-remove", (event, projectId: string, id: string) =>
-    libraryScope(event, projectId).library.remove(projectId, id))
-  ipc.handle("project-runtime:library-reuse", (event, sourceProjectId: string, id: string, targetProjectId: string) => {
-    libraryScope(event, sourceProjectId)
-    return libraryScope(event, targetProjectId).library.reuse(sourceProjectId, id, targetProjectId)
-  })
-  ipc.handle("project-runtime:library-send", (event, projectId: string, id: string, input: Parameters<ProjectLibraryApi["send"]>[2]) => {
-    const { project, library } = libraryScope(event, projectId)
-    // Preview projects can never publish outside the isolated development workspace.
-    if (isProjectPreviewId(project.installedPluginId)) throw Error("PROJECT_LIBRARY_PREVIEW_LOCAL_ONLY")
-    return library.send(projectId, id, input, () => {
-      const current = libraryScope(event, projectId).project
-      if (current.pluginDigest !== project.pluginDigest) throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
-    })
-  })
-  registerProjectPreviewHandlers(ipc, trusted, platform,
-    (project) => snapshots!.read(project.pluginDigest).root, stageDebug)
-  registerProjectRuntimeModsHandlers(ipc, trusted, platform,
-    project => snapshots!.read(project.pluginDigest).root, internalCompositionProject)
+    libraryScope(event, projectId).library.remove(projectId, id)
+  )
+  ipc.handle(
+    "project-runtime:library-reuse",
+    (event, sourceProjectId: string, id: string, targetProjectId: string) => {
+      libraryScope(event, sourceProjectId)
+      return libraryScope(event, targetProjectId).library.reuse(
+        sourceProjectId,
+        id,
+        targetProjectId
+      )
+    }
+  )
+  ipc.handle(
+    "project-runtime:library-send",
+    (event, projectId: string, id: string, input: Parameters<ProjectLibraryApi["send"]>[2]) => {
+      const { project, library } = libraryScope(event, projectId)
+      // Preview projects can never publish outside the isolated development workspace.
+      if (isProjectPreviewId(project.installedPluginId))
+        throw Error("PROJECT_LIBRARY_PREVIEW_LOCAL_ONLY")
+      return library.send(projectId, id, input, () => {
+        const current = libraryScope(event, projectId).project
+        if (current.pluginDigest !== project.pluginDigest)
+          throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
+      })
+    }
+  )
+  registerProjectPreviewHandlers(
+    ipc,
+    trusted,
+    platform,
+    (project) => snapshots!.read(project.pluginDigest).root,
+    stageDebug
+  )
+  registerProjectRuntimeModsHandlers(
+    ipc,
+    trusted,
+    platform,
+    (project) => snapshots!.read(project.pluginDigest).root,
+    internalCompositionProject
+  )
   function view(projectId: string) {
     if (internalCompositionProject(projectId)) throw Error("COMPOSITION_USE_PARENT_PROJECT")
     const api = platform()
     const project = api.get(projectId)
     if (!project) throw Error("PROJECT_NOT_FOUND")
-    return { project, operations: api.operations(projectId, 20), preview: projectPreviewRegistry.describe(project) }
+    return {
+      project,
+      operations: api.operations(projectId, 20),
+      preview: projectPreviewRegistry.describe(project)
+    }
   }
   ipc.handle("project-runtime:templates", async (event) => {
     trusted(event)
@@ -337,16 +415,15 @@ export function registerProjectRuntimeHandlers(
       cursor = page[page.length - 1].projectId
       if (page.length < 100) break
     }
-    return visible
-      .map((project) => ({
-        projectId: project.projectId,
-        name: project.name,
-        workspace: project.workspace,
-        status: project.status,
-        stageIndex: project.stageIndex,
-        updatedAt: project.updatedAt,
-        packageVersion: project.packageVersion
-      }))
+    return visible.map((project) => ({
+      projectId: project.projectId,
+      name: project.name,
+      workspace: project.workspace,
+      status: project.status,
+      stageIndex: project.stageIndex,
+      updatedAt: project.updatedAt,
+      packageVersion: project.packageVersion
+    }))
   })
   ipc.handle("project-runtime:get", (event, id: string) => {
     trusted(event)
@@ -442,14 +519,67 @@ export function registerProjectRuntimeHandlers(
         workspace: string
         installedPluginId: string
         goal: string
+        expectedPlugin?: import("../../shared/plugin-start-use").PluginStartUseIdentity
+        startUseScope?: import("../../shared/plugin-derivation").PluginDerivationScope
       }
     ) => {
       trusted(event)
       if (!input || typeof input !== "object" || Array.isArray(input))
         throw Error("PROJECT_INVALID_INPUT")
-      if (typeof input.installedPluginId !== "string" || isProjectPreviewId(input.installedPluginId))
+      if (
+        typeof input.installedPluginId !== "string" ||
+        isProjectPreviewId(input.installedPluginId)
+      )
         throw Error("PROJECT_PREVIEW_EXPLICIT_ENTRY_REQUIRED")
-      const project = await platform().localCreate({ ...input, projectId: randomUUID() })
+      const { startUseScope, ...creation } = input
+      let assertCurrent = () => {
+        trusted(event)
+      }
+      if (input.expectedPlugin !== undefined || startUseScope !== undefined) {
+        if (
+          !input.expectedPlugin ||
+          !startUseScope ||
+          Array.isArray(startUseScope) ||
+          Object.keys(startUseScope).length !== 2 ||
+          typeof startUseScope.threadId !== "string" ||
+          !startUseScope.threadId ||
+          startUseScope.threadId.length > 200 ||
+          typeof startUseScope.expectedWorkspace !== "string" ||
+          !startUseScope.expectedWorkspace ||
+          startUseScope.expectedWorkspace.length > 4096
+        )
+          throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
+        const source = getThreadCore(startUseScope.threadId)
+        if (!source) throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
+        const incarnation = captureThreadIncarnation(source)
+        let sourceWorkspace: unknown
+        try {
+          const metadata =
+            typeof source.metadata === "string" ? JSON.parse(source.metadata) : source.metadata
+          sourceWorkspace = metadata?.workspacePath
+        } catch {
+          throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
+        }
+        if (
+          typeof sourceWorkspace !== "string" ||
+          !isSameWorkspacePath(sourceWorkspace, startUseScope.expectedWorkspace)
+        )
+          throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
+        assertCurrent = () => {
+          trusted(event)
+          const current = getThreadCore(startUseScope.threadId)
+          if (
+            !matchesThreadIncarnation(current, incarnation) ||
+            current?.metadata !== source.metadata
+          )
+            throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
+        }
+      }
+      assertCurrent()
+      const project = await platform().localCreate(
+        { ...creation, projectId: randomUUID() },
+        assertCurrent
+      )
       trusted(event)
       return view(project.projectId)
     }
@@ -462,9 +592,14 @@ export function registerProjectRuntimeHandlers(
       const current = view(projectId)
       if (!command || typeof command !== "object" || Array.isArray(command))
         throw Error("PROJECT_INVALID_COMMAND")
-      stageDebug().assertCommand(current.project, command.kind)
-      if (isProjectPreviewId(current.project.installedPluginId) &&
-        command.kind !== "cancel" && command.kind !== "reconcile")
+      // Local native receipts are reconciled by the service before unresolved-Hook guards.
+      // This never authorizes an external inspector or an execution.
+      if (command.kind !== "reconcile") stageDebug().assertCommand(current.project, command.kind)
+      if (
+        isProjectPreviewId(current.project.installedPluginId) &&
+        command.kind !== "cancel" &&
+        command.kind !== "reconcile"
+      )
         projectPreviewRegistry.assertProject(current.project)
       // Native cancellation never depends on an invalid configuration or unavailable knowledge.
       if (command.kind !== "cancel") await api.prepareRuntimeInputs(projectId)
@@ -485,7 +620,10 @@ export function registerProjectRuntimeHandlers(
             expectedVersion: command.expectedVersion,
             inputFingerprint: command.inputFingerprint,
             decision: command.decision,
-            actorId: "desktop-user"
+            actorId: "desktop-user",
+            ...(command.contextProviderApproval !== undefined
+              ? { contextProviderApproval: command.contextProviderApproval }
+              : {})
           })
         else if (command.kind === "advance") api.transition(operation.operationId)
         else if (command.kind === "cancel") api.cancel(operation.operationId)

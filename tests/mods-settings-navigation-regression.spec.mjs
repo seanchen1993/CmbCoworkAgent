@@ -35,6 +35,9 @@ createRoot(document.getElementById('root')).render(<CustomizeView/>);`
     {
       name: "fixture",
       setup(b) {
+        // Full chat rendering is unrelated to Settings retention; the real panel remains under test.
+        b.onResolve({filter:/(?:ChatContainer|TabbedPanel)$/},()=>({path:"ChatContainer",namespace:"chat-empty"}))
+        b.onLoad({filter:/.*/,namespace:"chat-empty"},()=>({contents:"export const ChatContainer=()=>null;export const TabbedPanel=()=>null"}))
         b.onResolve({ filter: /^(?:@\/lib\/store|\.\.\/\.\.\/lib\/store)$/ }, () => ({
           path: "store",
           namespace: "fixture"
@@ -42,7 +45,7 @@ createRoot(document.getElementById('root')).render(<CustomizeView/>);`
         b.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
           resolveDir: root,
           loader: "js",
-          contents: `import{useSyncExternalStore}from'react';let state={currentThreadId:'t',showCustomizeView:true,customizeInitialTab:location.hash.slice(1),threads:[{thread_id:'t',title:'Workspace A',metadata:{workspacePath:'C:/isolated/A'}},{thread_id:'b',title:'Workspace B',metadata:{workspacePath:'C:/isolated/B'}}],setShowCustomizeView:(_open,tab)=>{state={...state,customizeInitialTab:tab};subscribers.forEach(fn=>fn())}};window.moveWorkspace=workspace=>{state={...state,threads:[{thread_id:'t',metadata:{workspacePath:workspace}}]};subscribers.forEach(fn=>fn())};const subscribers=new Set();export const useAppStore=(select)=>{const value=useSyncExternalStore(fn=>{subscribers.add(fn);return()=>subscribers.delete(fn)},()=>state);return select?select(value):value};useAppStore.getState=()=>state;useAppStore.subscribe=fn=>{subscribers.add(fn);return()=>subscribers.delete(fn)};export const isThreadDeletionPending=()=>false;export const isThreadRetired=()=>false;`
+          contents: `import{useSyncExternalStore}from'react';let state={accountRevision:0,currentThreadId:'t',showCustomizeView:true,customizeInitialTab:location.hash.slice(1),threads:[{thread_id:'t',title:'Workspace A',metadata:{workspacePath:'C:/isolated/A'}},{thread_id:'b',title:'Workspace B',metadata:{workspacePath:'C:/isolated/B'}}],setShowCustomizeView:(_open,tab)=>{const previous=state;state={...state,customizeInitialTab:tab};subscribers.forEach(fn=>fn(state,previous))}};window.moveWorkspace=workspace=>{const previous=state;state={...state,threads:[{thread_id:'t',metadata:{workspacePath:workspace}}]};subscribers.forEach(fn=>fn(state,previous))};const subscribers=new Set();export const useAppStore=(select)=>{const value=useSyncExternalStore(fn=>{subscribers.add(fn);return()=>subscribers.delete(fn)},()=>state);return select?select(value):value};useAppStore.getState=()=>state;useAppStore.subscribe=fn=>{subscribers.add(fn);return()=>subscribers.delete(fn)};export const isThreadDeletionPending=()=>false;export const isThreadRetired=()=>false;`
         }))
         b.onResolve({ filter: /\?worker$/ }, () => ({ path: "worker", namespace: "worker" }))
         b.onLoad({ filter: /.*/, namespace: "worker" }, () => ({
@@ -100,7 +103,7 @@ async function dismissTour(page) {
 async function navigate(page, name) {
   const advanced = page.getByRole("button", { name: "高级自定义", exact: true })
   if (
-    ["搭配管理", "步骤管理", "灵件管理"].includes(name) &&
+    ["搭配管理", "聊天任务模板", "灵件管理"].includes(name) &&
     (await advanced.getAttribute("aria-expanded")) === "false"
   )
     await advanced.click()
@@ -139,13 +142,13 @@ try {
     await name.waitFor()
     await name.fill("Unsaved reviewer configuration")
     if (mode === "internal-flow-button") {
-      const control = page.getByRole("button", { name: "管理执行步骤", exact: true })
+      const control = page.getByRole("button", { name: "管理聊天任务模板", exact: true })
       await control.scrollIntoViewIfNeeded()
       const box = await control.boundingBox()
       assert(box.y >= 0 && box.y + box.height <= 650)
       await control.click()
     } else if (mode === "overview") await navigate(page, "对话创作")
-    else await navigate(page, "步骤管理")
+    else await navigate(page, "聊天任务模板")
     await assertInert(page, name)
     await navigate(page, "搭配管理")
     await name.waitFor()
@@ -165,7 +168,7 @@ try {
     const name = await editor(page)
     await name.waitFor()
     await name.fill("A draft must not enter B")
-    await navigate(page, "步骤管理")
+    await navigate(page, "聊天任务模板")
     await chooseB(page)
     await name.waitFor({ state: "detached" })
     await navigate(page, "搭配管理")
@@ -193,7 +196,7 @@ try {
     await page.getByRole("button", { name: "新建草稿", exact: true }).click()
     const name = page.getByLabel("草稿名称")
     await name.fill("Unsaved authoring title")
-    await navigate(page, "步骤管理")
+    await navigate(page, "聊天任务模板")
     await assertInert(page, name)
     await navigate(page, "灵件管理")
     assert.equal(await name.inputValue(), "Unsaved authoring title")
@@ -201,7 +204,7 @@ try {
     await assertInert(page, name)
     await navigate(page, "灵件管理")
     assert.equal(await name.inputValue(), "Unsaved authoring title")
-    await navigate(page, "步骤管理")
+    await navigate(page, "聊天任务模板")
     await chooseB(page)
     await navigate(page, "灵件管理")
     await page.getByRole("button", { name: "高级：手动组装、源码与历史版本", exact: true }).click()

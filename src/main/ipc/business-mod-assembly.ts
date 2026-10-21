@@ -5,11 +5,15 @@ import { getThreadCore } from "../db"
 import {
   getOpenworkDir,
   getPlugins,
+  getPluginsDir,
+  getInstalledPluginIds,
   invalidateEnabledSkillsCache,
   invalidatePluginHooksCache
 } from "../storage"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import { BusinessModAssemblyService } from "../plugins/business-mod-assembly-service"
+import { observeProjectDeliveryInstallation, readProjectDeliveryInventory } from "../plugins/plugin-delivery-observation"
+import { withPluginCatalogMutation } from "../plugins/catalog-mutation"
 import { installDerivedPluginDirectory, inspectCompletePluginDirectory } from "./plugins"
 import type {
   BusinessModAssemblyApi,
@@ -21,13 +25,16 @@ export function registerBusinessModAssemblyHandlers(
   window: () => BrowserWindow | null
 ) {
   let instance: BusinessModAssemblyService | undefined
+  const inventory = () => readProjectDeliveryInventory(getPluginsDir(), getInstalledPluginIds, getPlugins)
   const service = () =>
     (instance ??= new BusinessModAssemblyService(
       join(getOpenworkDir(), "business-mod-assemblies"),
       {
-        plugins: getPlugins,
+        plugins: inventory,
         validatePackage: inspectCompletePluginDirectory,
         install: installDerivedPluginDirectory,
+        observeInstallation: (input, guard) => withPluginCatalogMutation(() =>
+          observeProjectDeliveryInstallation(getPluginsDir(), inventory, input, guard)),
         invalidate: () => {
           invalidateEnabledSkillsCache()
           invalidatePluginHooksCache()

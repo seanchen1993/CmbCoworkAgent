@@ -3,6 +3,7 @@ import { isSameWorkspacePath } from "../../shared/workspace-path"
 import { AsyncLocalStorage } from "node:async_hooks"
 import type { PluginCapability } from "../../shared/plugin-capabilities"
 import type { PluginMetadata } from "../types"
+import type { StageRecoveryCommandPolicy } from "../harness-board/project-runtime/stage-recovery-policy"
 import {
   acquireSnapshotPathLeases, withSnapshotPathRetention, type SnapshotLease
 } from "../harness-board/project-runtime/snapshot-retention"
@@ -15,7 +16,8 @@ export interface RuntimeCapabilitySource {
 
 export interface RuntimePluginSourceBinding {
   /** Main-issued file-only debug admission, never reconstructed from thread metadata. */
-  stageDebug?: { workspace: string; baselineId: string }
+  stageDebug?: { workspace: string; baselineId: string; allowPromptHooks?: boolean;
+    commandHooks?: StageRecoveryCommandPolicy }
   /** Host-validated requirements belonging to the exact retained parent package. */
   requiredHooks?: readonly string[]
   mode?: "host" | "legacy" | "capabilities"
@@ -79,7 +81,8 @@ const source = new AsyncLocalStorage<Readonly<RuntimePluginSourceBinding> | unde
 
 /** Main-only opaque admission projection. No authority callbacks: safe in Mods predicates. */
 export function currentStageDebugSourcePolicy():
-  Readonly<{ workspace: string; baselineId: string; snapshotRoot: string }> | undefined {
+  Readonly<{ workspace: string; baselineId: string; snapshotRoot: string; allowPromptHooks?: boolean;
+    commandHooks?: StageRecoveryCommandPolicy }> | undefined {
   const binding = source.getStore()
   return binding?.stageDebug ? { ...binding.stageDebug, snapshotRoot: binding.plugin.path } : undefined
 }

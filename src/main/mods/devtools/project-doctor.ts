@@ -86,8 +86,10 @@ export function inspectProjectSource(
   if (get(HARNESS_SOURCE_PATH)) {
     try {
       const compiled = compileProjectHarness(bundle)
-      const expected = JSON.parse(
-        compiled.files.find((file) => file.path === "devclaw.project-runtime.json")!.text
+      const expected = parseProjectRuntimeManifest(
+        JSON.parse(
+          compiled.files.find((file) => file.path === "devclaw.project-runtime.json")!.text
+        )
       )
       if (JSON.stringify(expected) !== JSON.stringify(manifest))
         issue(
@@ -110,8 +112,20 @@ export function inspectProjectSource(
       typeof plugin !== "object" ||
       Array.isArray(plugin) ||
       Object.keys(plugin).some(
-        (key) => !["name", "version", "description", "author", "mods", "hooks", "mcpServers",
-          "userConfig", "userConfigSchema", "skills", "cmbCompatibility"].includes(key)
+        (key) =>
+          ![
+            "name",
+            "version",
+            "description",
+            "author",
+            "mods",
+            "hooks",
+            "mcpServers",
+            "userConfig",
+            "userConfigSchema",
+            "skills",
+            "cmbCompatibility"
+          ].includes(key)
       ) ||
       !("name" in plugin) ||
       plugin.name !== manifest.plugin.id ||

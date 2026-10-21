@@ -45,6 +45,82 @@ function fixture() {
 }
 
 describe("confined stage debug package admission", () => {
+  it("admits metadata-only configuration only behind a native frozen input binding and keeps guest behavior denied", () => {
+    const f = fixture()
+    const userConfig = {
+      audience: { type: "string", title: "Audience", description: "", default: "reviewers" }
+    }
+    f.put("plugin.json", { ...f.metadata, userConfig })
+    expect(f.check).toThrow("CONFIGURATION_UNSUPPORTED")
+    expect(() =>
+      assertStageDebugPackageSupported(f.root, f.manifest(), { frozenInputsBound: true })
+    ).not.toThrow()
+    f.put("mods/manifest.json", {
+      apiVersion: "cmb.mods/v2",
+      id: f.metadata.name,
+      entry: "register.ts"
+    })
+    f.put("mods/register.ts", "export function register() {}")
+    expect(() =>
+      assertStageDebugPackageSupported(f.root, f.manifest(), { frozenInputsBound: true })
+    ).toThrow("SHARED_MODS_UNSUPPORTED")
+  })
+  it("preserves explicitly declared synchronous model gates through package and Skill discovery", () => {
+    const f = fixture()
+    f.put("devclaw.stage-recovery.json", {
+      apiVersion: "devclaw.stage-recovery/v1",
+      hookExecution: "prompt-only",
+      externalEffects: "deny"
+    })
+    const hooks = {
+      hooks: {
+        PostSkillUse: [
+          {
+            matcher: "*",
+            hooks: [{ type: "prompt", prompt: "Check the actual artifacts", fallback: "block" }]
+          }
+        ]
+      }
+    }
+    f.put("hooks/hooks.json", hooks)
+    f.put("skills/draft/hooks.json", hooks)
+    expect(f.check).not.toThrow()
+    expect(JSON.parse(readFileSync(join(f.root, "hooks/hooks.json"), "utf8"))).toEqual(hooks)
+    f.put("skills/draft/hooks.json", {
+      hooks: {
+        Stop: [
+          {
+            hooks: [
+              { type: "command", command: "do-not-replace-the-original-command", fallback: "block" }
+            ]
+          }
+        ]
+      }
+    })
+    expect(f.check).toThrow("PROJECT_STAGE_DEBUG_HOOK_PROFILE_UNSUPPORTED")
+  })
+  it("requires a network-aware command profile and preserves original Hook bytes", () => {
+    const f = fixture()
+    f.put("devclaw.stage-recovery.json", {
+      apiVersion: "devclaw.stage-recovery/v1",
+      hookExecution: "windows-sandbox",
+      externalEffects: "network-requires-confirmation"
+    })
+    const hooks = [
+      {
+        id: "required",
+        event: "PostSkillUse",
+        type: "command",
+        command: "python retained-validator.py",
+        fallback: "block"
+      }
+    ]
+    f.put("hooks/hooks.json", hooks)
+    expect(f.check).not.toThrow()
+    expect(JSON.parse(readFileSync(join(f.root, "hooks/hooks.json"), "utf8"))).toEqual(hooks)
+    f.put("hooks/hooks.json", [{ ...hooks[0], async: true }])
+    expect(f.check).toThrow("PROJECT_STAGE_DEBUG_HOOK_PROFILE_UNSUPPORTED")
+  })
   it("admits the actual project-lite template with static knowledge and an ordinary board-named resource", () => {
     const f = fixture()
     f.put("knowledge/policy.md", "A complete immutable package knowledge body.\n")

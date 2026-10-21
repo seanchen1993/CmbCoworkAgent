@@ -4,6 +4,15 @@ import { createHostProjectInputIdentity } from "../harness-board/project-runtime
 import { readModsChatDisplayCapability } from "./mods-display-capability"
 import { registerBuiltinAdvisorHandlers } from "./builtin-advisor"
 import { registerCommunityExampleHandlers } from "./mods-community-examples"
+import { registerPluginStartUseHandlers } from "./plugin-start-use"
+import { PluginStartUseService } from "../plugins/plugin-start-use"
+import { pluginStartUseConfigurationIssues } from "../plugins/plugin-start-use-diagnostics"
+import { pluginChatStartUseEntries } from "../plugins/plugin-chat-start-use"
+import { notifyHooksChanged } from "../hooks/notifications"
+import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
+import { listPluginSkills } from "./skills"
+import { getEnabledPluginSkillSourceMetadata } from "../storage"
+import { readNativeSkillUsagePolicy } from "../plugins/native-skill-usage"
 import { bundledCommunityExamplesRoot } from "../mods/community-examples"
 import { registerSkillEvaluationHandlers } from "./mods-skill-evaluation"
 import { createSkillEvaluationService } from "../mods/evaluation/skill-factory"
@@ -61,6 +70,8 @@ import {
   setGitChangeNoticeEnabled,
   getOpenworkDir,
   getPlugins,
+  setPluginEnabled,
+  getPluginsDir,
   getInstalledPluginIds,
   setModsGlobalEnabled,
   getStoredDefaultModelId,
@@ -71,6 +82,8 @@ import { ModsManager, setModsManager, setModsUnavailable } from "../mods/manager
 import { ModError, modErrorCode } from "../mods/errors"
 import { installPluginFromDir } from "./plugins"
 import { CreatorProjectDeliveries } from "../mods/devtools/creator-project-delivery"
+import { observeProjectDeliveryInstallation, readProjectDeliveryInventory } from "../plugins/plugin-delivery-observation"
+import { withPluginCatalogMutation } from "../plugins/catalog-mutation"
 import { bundledModExamplesRoot } from "../mods/bundled-examples"
 import { readManagedModDeployment } from "../mods/policy"
 import { ModCommandQueue } from "../mods/command-queue"
@@ -139,6 +152,8 @@ import { CreatorCompositionHistory } from "../mods/devtools/creator-composition-
 import { CreatorReuseService } from "../mods/devtools/creator-reuse"
 import { CreatorBusinessService, setCreatorBusinessService } from "../mods/devtools/creator-business"
 import { CreatorBusinessTrials } from "../mods/devtools/creator-business-trial"
+import { PluginStageRecoverySessions } from "../mods/devtools/plugin-stage-recovery"
+import { registerPluginStageRecoveryHandlers } from "./plugin-stage-recovery"
 import { registerCreatorBusinessTrialHandlers } from "./creator-business-trial"
 import { isInternalHarnessProjectId } from "../harness-board/internal-project-context"
 import { BusinessModAssemblyService } from "../plugins/business-mod-assembly-service"
@@ -1162,6 +1177,48 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     }
   })
   setModDevelopmentService(development)
+  registerPluginStartUseHandlers(ipcMain, new PluginStartUseService({
+    plugins: getPlugins,
+    enable: async (pluginId, guard) => {
+      guard()
+      setPluginEnabled(pluginId, true)
+      manager.pluginsChanged([pluginId])
+      invalidateEnabledSkillsCache()
+      invalidatePluginHooksCache()
+      await invalidateGlobalMcpCapabilityService("plugin:start-use-enable")
+      notifyHooksChanged("plugin-enabled-changed")
+    },
+    diagnostics: async (plugin, input, guard) => {
+      const facts = await functions.prepareRuntimeSourceFacts({ workspace: input.expectedWorkspace, plugin })
+      guard()
+      if (!facts?.userConfig) return []
+      const view = await functions.userConfig(
+        input.expectedWorkspace, input.threadId, plugin.id, new AbortController().signal, guard
+      )
+      guard()
+      return pluginStartUseConfigurationIssues(view)
+    },
+    chatEntries: async (plugin, input, guard) => {
+      guard()
+      const sources = getEnabledPluginSkillSourceMetadata().filter(source =>
+        source.pluginId === plugin.id && source.pluginRoot === plugin.path)
+      const [mods, skills] = await Promise.all([
+        functions.status(input.expectedWorkspace), listPluginSkills(sources)
+      ])
+      const usage = await readNativeSkillUsagePolicy([plugin], () => ({ usage: "chat", assertCurrent: guard }))
+      guard()
+      usage?.assertCurrent()
+      return pluginChatStartUseEntries(plugin.id, mods,
+        usage ? skills.filter(skill => usage.allowsSkill(skill.path)) : skills)
+    }
+  }), {
+    trusted,
+    normalizeWorkspace: workspace => manager.workspaceKey(workspace),
+    context: threadId => {
+      const context = development.reuseContext(threadId)
+      return { workspace: context.scope.workspace, assertCurrent: context.assertCurrent }
+    }
+  })
   development.configurePlanning(new CreatorPlanningService({
     settings: manager.store,
     current: (threadId, workspace) => {
@@ -1367,14 +1424,19 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   })
   development.configureTrialUndoStop((scope, id, turnId, guard) => trialUndo.request(scope, id, turnId, guard))
   development.configureTrialUndoStatus(threadId => trialUndo.status(threadId))
+  const readDeliveryPlugins = () => readProjectDeliveryInventory(
+    getPluginsDir(), getInstalledPluginIds, getPlugins)
   const creatorBusiness = new CreatorBusinessService({
     root: join(getOpenworkDir(), "creator-business"), settings: manager.store,
     assembly: new BusinessModAssemblyService(join(getOpenworkDir(), "creator-business-assemblies"), {
-      plugins: getPlugins, validatePackage: inspectCompletePluginDirectory,
+      plugins: readDeliveryPlugins, validatePackage: inspectCompletePluginDirectory,
       install: installDerivedPluginDirectory,
+      observeInstallation: (input, guard) => withPluginCatalogMutation(() =>
+        observeProjectDeliveryInstallation(getPluginsDir(), readDeliveryPlugins, input, guard)),
       invalidate: () => { invalidateEnabledSkillsCache(); invalidatePluginHooksCache() }
     }),
-    plugins: getPlugins,
+    plugins: readDeliveryPlugins,
+    normalizeWorkspace: workspace => manager.workspaceKey(workspace),
     context: threadId => development.projectAuthoringContext(threadId),
     readContext: threadId => development.reuseContext(threadId),
     busy: threadId => !!getLocalThreadRunLease(threadId) ||
@@ -1391,7 +1453,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         owner.webContents.send("mods:development-changed", { threadId })
     }
   })
-  creatorBusiness.configureTrials(new CreatorBusinessTrials({
+  const creatorBusinessTrials = new CreatorBusinessTrials({
     root: join(getOpenworkDir(), "creator-business", "trials"),
     settings: manager.store,
     context: threadId => development.reuseContext(threadId),
@@ -1404,7 +1466,29 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     },
     candidate: (scope, candidate, guard) => creatorBusiness.trialCandidate(scope, candidate, guard),
     assertSources: sources => creatorBusiness.assertTrialSources(sources)
-  }))
+  })
+  creatorBusiness.configureTrials(creatorBusinessTrials)
+  const pluginStageRecoveries: PluginStageRecoverySessions = new PluginStageRecoverySessions({
+    root: join(getOpenworkDir(), "creator-business", "trials"),
+    settings: manager.store,
+    owner: (scope, id) => creatorBusinessTrials.endedRecoveryOwner(scope, id),
+    adoptedOwner: (scope, preparationId, targetId, evidenceDigest) =>
+      creatorBusinessTrials.adoptedRecoveryOwner(scope, preparationId, targetId, evidenceDigest),
+    adoptionStatus: (scope, preparationId, targetId, evidenceDigest) =>
+      creatorBusinessTrials.adoptedRecoveryStatus(scope, preparationId, targetId, evidenceDigest),
+    adopt: (owner, receipt) => creatorBusinessTrials.adoptRecoveredTrial(owner, receipt,
+      () => pluginStageRecoveries.assertReceipt(receipt)),
+    changed: threadId => {
+      const owner = window()
+      if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed())
+        owner.webContents.send("mods:development-changed", { threadId })
+    }
+  })
+  registerPluginStageRecoveryHandlers(ipcMain, pluginStageRecoveries, {
+    trusted,
+    normalizeWorkspace: workspace => manager.workspaceKey(workspace),
+    context: threadId => development.reuseContext(threadId)
+  })
   registerCreatorBusinessTrialHandlers(ipcMain, creatorBusiness, development, trusted, window)
   setCreatorBusinessService(creatorBusiness)
   development.configureBusinessStatus(threadId => {
@@ -1417,8 +1501,11 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     context: threadId => development.reuseContext(threadId),
     occupied: threadId => !!getLocalThreadRunLease(threadId) ||
       manager.functionTurns.hasUnsettled(threadId) || functions.configurationBusy(threadId),
-    plugins: getPlugins,
+    plugins: readDeliveryPlugins,
     install: installDerivedPluginDirectory,
+    normalizeWorkspace: workspace => manager.workspaceKey(workspace),
+    observeInstallation: (input, guard) => withPluginCatalogMutation(() =>
+      observeProjectDeliveryInstallation(getPluginsDir(), readDeliveryPlugins, input, guard)),
     invalidate: () => { invalidateEnabledSkillsCache(); invalidatePluginHooksCache() },
     changed: threadId => {
       const owner = window()
@@ -1442,9 +1529,13 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       await creatorProjectDeliveries.install(input.threadId, input.expectedWorkspace, input)
       return development.status(input.threadId)
     },
+    reconcileProjectDelivery: async input => {
+      await creatorProjectDeliveries.reconcile(input.threadId, input.expectedWorkspace, input)
+      return development.status(input.threadId)
+    },
     exportProjectDelivery: async input => {
       const context = development.reuseContext(input.threadId)
-      if (context.scope.workspace !== input.expectedWorkspace) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+      if (context.scope.workspace !== manager.workspaceKey(input.expectedWorkspace)) throw Error("DEVELOPMENT_SCOPE_CHANGED")
       const candidate = creatorProjectDeliveries.status(input.threadId)
       if (candidate?.id !== input.deliveryId || candidate.digest !== input.digest || !candidate.canExport)
         throw Error("PROJECT_DELIVERY_REVIEW_REQUIRED")
@@ -1469,7 +1560,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     },
     exportBusiness: async input => {
       const context = development.reuseContext(input.threadId)
-      if (context.scope.workspace !== input.expectedWorkspace) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+      if (context.scope.workspace !== manager.workspaceKey(input.expectedWorkspace)) throw Error("DEVELOPMENT_SCOPE_CHANGED")
       const owner = window()
       if (!owner || owner.isDestroyed()) throw Error("DEVELOPMENT_WINDOW_CHANGED")
       const result = await dialog.showSaveDialog(owner, {
@@ -1669,6 +1760,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     stopPolicyObservations()
     setModDevelopmentService(undefined)
     creatorComposition.close()
+    pluginStageRecoveries.close()
     creatorBusiness.close()
     setCreatorBusinessService(undefined)
     setCreatorUserConfigService(undefined)

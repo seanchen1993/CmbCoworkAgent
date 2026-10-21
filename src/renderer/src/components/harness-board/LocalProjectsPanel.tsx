@@ -6,6 +6,13 @@ import { navigateProjectThread } from "./project-thread-navigation"
 import { SparksDocumentationLink } from "../customize/SparksDocumentationLink"
 import { projectRuntimeRecoveryMessage } from "./project-runtime-message"
 import { projectLocalMetrics } from "../../../../shared/project-runtime/metrics"
+import { useAppStore } from "@/lib/store"
+import {
+  dismissHostPluginStartUse,
+  hostPluginStartUseCurrent,
+  useHostPluginStartUseIntent,
+  type HostPluginStartUseIntent
+} from "@/lib/plugin-start-use-intent"
 import type {
   LocalProjectCommand,
   LocalProjectSummary,
@@ -51,6 +58,11 @@ export function LocalProjectsPanel() {
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<unknown>()
   const [loading, setLoading] = useState(false)
+  const startUseIntent = useHostPluginStartUseIntent()
+  const [startUse, setStartUse] = useState<HostPluginStartUseIntent>()
+  const [templatesReady, setTemplatesReady] = useState(false)
+  const accountRevision = useAppStore((state) => state.accountRevision)
+  const threads = useAppStore((state) => state.threads)
   const sequence = useRef(0)
   const refresh = async (more = false) => {
     const token = ++sequence.current
@@ -63,6 +75,7 @@ export function LocalProjectsPanel() {
       ])
       if (token !== sequence.current) return
       setTemplates(nextTemplates)
+      setTemplatesReady(true)
       setProjects((previous) =>
         more
           ? [
@@ -83,6 +96,32 @@ export function LocalProjectsPanel() {
       sequence.current++
     }
   }, [])
+  useEffect(() => {
+    if (!startUseIntent || loading || !templatesReady) return
+    const identity = startUseIntent.report.identity
+    const matches = templates.filter((item) => item.installedPluginId === identity.pluginId)
+    if (
+      !hostPluginStartUseCurrent(startUseIntent) ||
+      matches.length !== 1 ||
+      matches[0].name !== identity.name ||
+      matches[0].version !== identity.version ||
+      matches[0].unavailableReason
+    ) {
+      setError(Error("PROJECT_HOST_PACKAGE_IDENTITY_MISMATCH"))
+    } else {
+      setSelected(undefined)
+      setStartUse(startUseIntent)
+      setCreating(true)
+    }
+    dismissHostPluginStartUse(startUseIntent.id)
+  }, [startUseIntent, loading, templatesReady, templates])
+  useEffect(() => {
+    if (startUse && !hostPluginStartUseCurrent(startUse)) {
+      setCreating(false)
+      setStartUse(undefined)
+      setError(Error("PLUGIN_START_USE_SCOPE_CHANGED"))
+    }
+  }, [startUse, accountRevision, threads])
   return (
     <section aria-label="本地项目任务" className="space-y-4 rounded-xl border bg-background p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -106,6 +145,7 @@ export function LocalProjectsPanel() {
             type="button"
             onClick={() => {
               setSelected(undefined)
+              setStartUse(undefined)
               setCreating(true)
             }}
             className="underline"
@@ -117,8 +157,13 @@ export function LocalProjectsPanel() {
       {!!error && <ProjectError error={error} />}
       {creating ? (
         <CreateLocalProject
+          key={startUse?.id ?? "manual"}
           templates={templates}
-          onCancel={() => setCreating(false)}
+          startUse={startUse}
+          onCancel={() => {
+            setCreating(false)
+            setStartUse(undefined)
+          }}
           onCreated={(view) => {
             setCreating(false)
             setSelected(view.project.projectId)
@@ -181,10 +226,12 @@ function ProjectError({ error }: { error: unknown }) {
 
 function CreateLocalProject({
   templates,
+  startUse,
   onCancel,
   onCreated
 }: {
   templates: LocalProjectTemplate[]
+  startUse?: HostPluginStartUseIntent
   onCancel: () => void
   onCreated: (view: LocalProjectView) => void
 }) {
@@ -192,7 +239,9 @@ function CreateLocalProject({
   const [goal, setGoal] = useState("")
   const [workspace, setWorkspace] = useState("")
   const [template, setTemplate] = useState(
-    templates.find((item) => !item.unavailableReason)?.installedPluginId ?? ""
+    startUse?.report.identity.pluginId ??
+      templates.find((item) => !item.unavailableReason)?.installedPluginId ??
+      ""
   )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>()
@@ -214,11 +263,36 @@ function CreateLocalProject({
         setBusy(true)
         setError(undefined)
         try {
+          if (startUse) {
+            if (!hostPluginStartUseCurrent(startUse)) throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
+            const actual = await window.api.plugins.prepareStartUse(startUse.input)
+            if (!active.current) return
+            const fixed = startUse.report.identity
+            if (
+              !hostPluginStartUseCurrent(startUse) ||
+              actual.kind !== "host-project" ||
+              !actual.canOpen ||
+              actual.identity.pluginId !== fixed.pluginId ||
+              actual.identity.name !== fixed.name ||
+              actual.identity.version !== fixed.version ||
+              actual.identity.digest !== fixed.digest
+            )
+              throw Error("PROJECT_HOST_PACKAGE_IDENTITY_MISMATCH")
+          }
           const result = await window.api.harnessBoard.localProjects.create({
             name: name.trim(),
             goal: goal.trim(),
             workspace,
-            installedPluginId: template
+            installedPluginId: template,
+            ...(startUse
+              ? {
+                  expectedPlugin: startUse.report.identity,
+                  startUseScope: {
+                    threadId: startUse.input.threadId,
+                    expectedWorkspace: startUse.input.expectedWorkspace
+                  }
+                }
+              : {})
           })
           if (active.current) onCreated(result)
         } catch (cause) {
@@ -239,7 +313,7 @@ function CreateLocalProject({
         <select
           required
           value={template}
-          disabled={busy}
+          disabled={busy || !!startUse}
           onChange={(event) => setTemplate(event.target.value)}
           className="rounded border bg-background p-2"
         >
@@ -335,8 +409,18 @@ function CreateLocalProject({
   )
 }
 
-export function LocalProjectRun({ projectId, onChanged }: { projectId: string; onChanged: () => void }) {
+export function LocalProjectRun({
+  projectId,
+  onChanged
+}: {
+  projectId: string
+  onChanged: () => void
+}) {
   const [packageFunctionsReady, setPackageFunctionsReady] = useState(false)
+  const [providerConsent, setProviderConsent] = useState<{
+    operationId: string
+    policyDigest: string
+  }>()
   const [versions, setVersions] =
     useState<import("../../../../shared/project-runtime/version-report").ProjectVersionReport>()
   const [view, setView] = useState<LocalProjectView>()
@@ -451,7 +535,11 @@ export function LocalProjectRun({ projectId, onChanged }: { projectId: string; o
   )
   const stageActions =
     project.manifest.actions?.filter((item) => stage?.actionIds?.includes(item.id)) ?? []
-  const canCheckFilesOnly = stageActions.length === 0
+  const canCheckFilesOnly = stageActions.length === 0 && !operation?.contextProvider
+  const providerApproved =
+    !operation?.contextProvider ||
+    (providerConsent?.operationId === operation.operationId &&
+      providerConsent.policyDigest === operation.contextProvider.policyDigest)
   const prepareAnd = async (kind: "start" | "validate") => {
     const next = await command({
       kind: "prepare",
@@ -462,7 +550,10 @@ export function LocalProjectRun({ projectId, onChanged }: { projectId: string; o
       (item) => item.expectedVersion === project.version && item.status === "prepared"
     )
     if (!prepared) throw Error("PROJECT_PREPARE_NOT_CONFIRMED")
-    if (stage?.approval !== "human" || prepared.approval?.decision === "approved")
+    if (
+      (stage?.approval !== "human" && !prepared.contextProvider) ||
+      prepared.approval?.decision === "approved"
+    )
       await command({ kind, operationId: prepared.operationId })
   }
   return (
@@ -476,11 +567,13 @@ export function LocalProjectRun({ projectId, onChanged }: { projectId: string; o
         </button>
       </div>
       <p className="whitespace-pre-wrap break-words text-sm">{project.goal}</p>
-      {view.preview && <p className="rounded bg-muted p-2 text-sm">
-        {view.preview.state === "active"
-          ? `隔离试用版本 ${view.preview.revision}。此任务固定当前源码，结束本次试用后可创建新版本；不会更新正式插件。`
-          : "此试用已结束或随应用重启失效，历史仍可查看。请回制作会话重新准备，不能从旧试用继续执行。"}
-      </p>}
+      {view.preview && (
+        <p className="rounded bg-muted p-2 text-sm">
+          {view.preview.state === "active"
+            ? `隔离试用版本 ${view.preview.revision}。此任务固定当前源码，结束本次试用后可创建新版本；不会更新正式插件。`
+            : "此试用已结束或随应用重启失效，历史仍可查看。请回制作会话重新准备，不能从旧试用继续执行。"}
+        </p>
+      )}
       {stageActions.length > 0 && (
         <div className="space-y-1 rounded bg-muted/30 p-3 text-sm">
           <p>助手完成本阶段后，将按顺序调用以下插件功能：</p>
@@ -509,10 +602,16 @@ export function LocalProjectRun({ projectId, onChanged }: { projectId: string; o
         ))}
       </ol>
       {!!error && <ProjectError error={error} />}
-      {project.status === "active" && view.preview?.state !== "expired" &&
-        !["started", "cancel_requested", "unknown"].includes(operation?.status ?? "") &&
-        <ProjectFunctionConsent key={project.version} projectId={projectId}
-          version={project.version} onReady={setPackageFunctionsReady} />}
+      {project.status === "active" &&
+        view.preview?.state !== "expired" &&
+        !["started", "cancel_requested", "unknown"].includes(operation?.status ?? "") && (
+          <ProjectFunctionConsent
+            key={project.version}
+            projectId={projectId}
+            version={project.version}
+            onReady={setPackageFunctionsReady}
+          />
+        )}
       {operation && (
         <p role="status" className="text-sm">
           {busy ? "正在处理当前阶段，可在会话中查看助手工作。" : operationNames[operation.status]}
@@ -523,7 +622,13 @@ export function LocalProjectRun({ projectId, onChanged }: { projectId: string; o
           打开“查看本次会话”可查看实时进度，处理文件修改等确认。确认后助手会继续执行。
         </p>
       )}
-      <fieldset disabled={view.preview?.state === "expired" && !["started", "cancel_requested"].includes(operation?.status ?? "")} className="flex flex-wrap gap-3 text-sm">
+      <fieldset
+        disabled={
+          view.preview?.state === "expired" &&
+          !["started", "cancel_requested"].includes(operation?.status ?? "")
+        }
+        className="flex flex-wrap gap-3 text-sm"
+      >
         {stage && !operation && (
           <>
             <button
@@ -546,38 +651,50 @@ export function LocalProjectRun({ projectId, onChanged }: { projectId: string; o
             )}
           </>
         )}
-        {operation?.status === "prepared" && stage?.approval === "human" && !operation.approval && (
-          <>
-            <p className="w-full text-sm">
-              进入“{stage.title}”前需要你确认。
-              {canCheckFilesOnly
-                ? "可批准助手执行，也可仅检查已有成果。"
-                : "批准后将执行助手任务和上方列出的插件功能。"}
-            </p>
-            <button
-              type="button"
-              disabled={busy || !packageFunctionsReady}
-              className="rounded border px-3 py-2"
-              onClick={() =>
-                void act(async () => {
-                  await command({
-                    kind: "approve",
-                    operationId: operation.operationId,
-                    expectedVersion: operation.expectedVersion,
-                    inputFingerprint: operation.inputFingerprint,
-                    decision: "approved"
-                  })
-                  await command({ kind: "start", operationId: operation.operationId })
-                })
-              }
-            >
-              批准并执行
-            </button>
-            {canCheckFilesOnly && (
+        {operation?.status === "prepared" &&
+          (stage?.approval === "human" || operation.contextProvider) &&
+          !operation.approval && (
+            <>
+              <p className="w-full text-sm">
+                进入“{stage?.title}”前需要你确认。
+                {canCheckFilesOnly
+                  ? "可批准助手执行，也可仅检查已有成果。"
+                  : "批准后将执行助手任务和上方列出的插件功能。"}
+              </p>
+              {operation.contextProvider && (
+                <div
+                  className="w-full space-y-2 rounded border p-3"
+                  aria-label="本次上下文脚本执行确认"
+                >
+                  <p>{operation.contextProvider.notice}</p>
+                  <p className="break-all text-xs text-muted-foreground">
+                    本次操作 {operation.operationId} · 策略{" "}
+                    {operation.contextProvider.policyDigest.slice(0, 12)}
+                  </p>
+                  <label className="flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      disabled={busy}
+                      checked={providerApproved}
+                      onChange={(event) =>
+                        setProviderConsent(
+                          event.target.checked
+                            ? {
+                                operationId: operation.operationId,
+                                policyDigest: operation.contextProvider!.policyDigest
+                              }
+                            : undefined
+                        )
+                      }
+                    />
+                    我已核对本次上下文脚本及其网络、外部副作用，同意仅此阶段操作执行。
+                  </label>
+                </div>
+              )}
               <button
                 type="button"
-                disabled={busy}
-                className="underline"
+                disabled={busy || !packageFunctionsReady || !providerApproved}
+                className="rounded border px-3 py-2"
                 onClick={() =>
                   void act(async () => {
                     await command({
@@ -585,37 +702,66 @@ export function LocalProjectRun({ projectId, onChanged }: { projectId: string; o
                       operationId: operation.operationId,
                       expectedVersion: operation.expectedVersion,
                       inputFingerprint: operation.inputFingerprint,
-                      decision: "approved"
+                      decision: "approved",
+                      ...(operation.contextProvider
+                        ? {
+                            contextProviderApproval: {
+                              policyDigest: operation.contextProvider.policyDigest,
+                              allowNetworkSideEffects: true as const
+                            }
+                          }
+                        : {})
                     })
-                    await command({ kind: "validate", operationId: operation.operationId })
+                    await command({ kind: "start", operationId: operation.operationId })
                   })
                 }
               >
-                批准，仅检查已有成果
+                批准并执行
               </button>
-            )}
-            <button
-              type="button"
-              disabled={busy}
-              className="underline"
-              onClick={() =>
-                void act(() =>
-                  command({
-                    kind: "approve",
-                    operationId: operation.operationId,
-                    expectedVersion: operation.expectedVersion,
-                    inputFingerprint: operation.inputFingerprint,
-                    decision: "rejected"
-                  })
-                )
-              }
-            >
-              拒绝本次执行
-            </button>
-          </>
-        )}
+              {canCheckFilesOnly && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  className="underline"
+                  onClick={() =>
+                    void act(async () => {
+                      await command({
+                        kind: "approve",
+                        operationId: operation.operationId,
+                        expectedVersion: operation.expectedVersion,
+                        inputFingerprint: operation.inputFingerprint,
+                        decision: "approved"
+                      })
+                      await command({ kind: "validate", operationId: operation.operationId })
+                    })
+                  }
+                >
+                  批准，仅检查已有成果
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={busy}
+                className="underline"
+                onClick={() =>
+                  void act(() =>
+                    command({
+                      kind: "approve",
+                      operationId: operation.operationId,
+                      expectedVersion: operation.expectedVersion,
+                      inputFingerprint: operation.inputFingerprint,
+                      decision: "rejected"
+                    })
+                  )
+                }
+              >
+                拒绝本次执行
+              </button>
+            </>
+          )}
         {operation?.status === "prepared" &&
-          (stage?.approval !== "human" || operation.approval?.decision === "approved") && (
+          ((stage?.approval !== "human" && !operation.contextProvider) ||
+            operation.approval?.decision === "approved") && (
             <>
               <button
                 type="button"

@@ -1,4 +1,5 @@
-import { CHAT_COMPOSER_FOCUS_EVENT, consumeChatComposerFocus, requestChatFlowUse } from "@/lib/chat-flow-use"
+import { requestChatFlowUse } from "@/lib/chat-flow-use"
+import { useChatComposerFocus } from "@/lib/use-chat-composer-focus"
 import { sameSimpleAuthoringScope } from "@/lib/simple-authoring-intent"
 import { useSimpleAuthoringTask, dismissSimpleAuthoringTask } from "@/lib/simple-authoring-composer"
 import { currentChatFlowChoice } from "@/lib/chat-flow-choice"
@@ -2355,20 +2356,7 @@ export function ChatContainer({
   const chatFlow = useChatFlow(threadId, currentForkWorkspacePath, modsChatEnabled && !readOnly && isOrdinaryFlowMetadata(currentThread?.metadata))
   const latestChatFlow = useRef(chatFlow)
   latestChatFlow.current = chatFlow
-  useEffect(() => {
-    let frame: number | undefined
-    const focus = () => {
-      if (frame !== undefined) cancelAnimationFrame(frame)
-      frame = requestAnimationFrame(() => {
-      if (useAppStore.getState().currentThreadId === threadId && !useAppStore.getState().showCustomizeView && currentForkWorkspacePath &&
-        consumeChatComposerFocus({ threadId, workspace: currentForkWorkspacePath }))
-        inputRef.current?.focus({ preventScroll: true })
-      })
-    }
-    focus()
-    window.addEventListener(CHAT_COMPOSER_FOCUS_EVENT, focus)
-    return () => { if (frame !== undefined) cancelAnimationFrame(frame); window.removeEventListener(CHAT_COMPOSER_FOCUS_EVENT, focus) }
-  }, [threadId, currentForkWorkspacePath, showCustomizeView])
+  useChatComposerFocus(inputRef, threadId, currentForkWorkspacePath, showCustomizeView)
   const clawDefaultModel = chatClawDefaultModel(
     chatFlow.enabled,
     "binding" in chatFlow ? chatFlow.binding : undefined
@@ -7739,11 +7727,12 @@ export function ChatContainer({
 
   const enterCreatorFromChat = useCallback(async (prompt?: string, selectMissing = false) => {
     const initial = creatorNavigation.current
+    const accountRevision = useAppStore.getState().accountRevision
     const assertThread = () => {
       const current = creatorNavigation.current
       const state = useAppStore.getState()
       const target = state.threads.find(thread => thread.thread_id === threadId)
-      if (current.threadId !== threadId || current.readOnly ||
+      if (state.accountRevision !== accountRevision || current.threadId !== threadId || current.readOnly ||
         state.currentThreadId !== threadId || !target ||
         !isDevelopmentThreadMetadata(target.metadata))
         throw Error("聊天已变化，请在目标聊天重新进入创造者模式。")

@@ -57,6 +57,7 @@ import {
   createStageDebugFileMiddleware,
   STAGE_DEBUG_TOOL_NAMES
 } from "../harness-board/project-runtime/stage-debug-policy"
+import { assertStageRecoveryHookSupported } from "../harness-board/project-runtime/stage-recovery-policy"
 import {
   createInstructionsLoadedMiddleware,
   type InstructionsLoadedOptions
@@ -5824,7 +5825,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         { ...hook, if: undefined, once: false }, hook.event,
         { workspacePath: stageDebug.workspace, sessionId: options.threadId, toolName }
       ))) continue
-      throw Error(`PROJECT_STAGE_DEBUG_HOOK_UNSUPPORTED:${hook.event}`)
+      assertStageRecoveryHookSupported({ ...stageDebug, snapshotRoot: debugSource!.plugin.path }, hook)
     }
     assertCurrentRuntimePluginSourceContent()
   }

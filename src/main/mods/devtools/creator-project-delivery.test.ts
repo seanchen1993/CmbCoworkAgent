@@ -1,4 +1,4 @@
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { randomUUID } from "node:crypto"
@@ -9,6 +9,7 @@ import type { PluginMetadata } from "../../types"
 import type { DevelopmentScope } from "../v2/development-session"
 import type { DerivationServiceDependencies } from "../../plugins/derivation-service"
 import { CreatorProjectDeliveries } from "./creator-project-delivery"
+import { observeProjectDeliveryInstallation } from "../../plugins/plugin-delivery-observation"
 import { ProjectAuthoringSessions } from "./project-authoring-session"
 import { ProjectPreviewRegistry } from "./project-preview-registry"
 import { HostProjectStore } from "../../harness-board/project-runtime/host-store"
@@ -29,10 +30,18 @@ async function fixture(v2 = false) {
   const root = await mkdtemp(join(tmpdir(), "creator-project-delivery-"))
   cleanup.push(() => rm(root, { recursive: true, force: true }))
   const values = new Map<string, string>()
+  let failReceipt: "installed" | "exported" | undefined
   const settings = {
     getSetting: (key: string, fallback = "") => values.get(key) ?? fallback,
     compareAndSetSetting: (key: string, previous: string | undefined, value: string) => {
       if (values.get(key) !== previous) return false
+      if (
+        key.startsWith("creator-project-delivery-v1:") &&
+        JSON.parse(value).status.phase === failReceipt
+      ) {
+        failReceipt = undefined
+        throw Error("simulated process receipt lost after native effect")
+      }
       values.set(key, value)
       return true
     }
@@ -48,22 +57,46 @@ async function fixture(v2 = false) {
   let occupied = false
   const plugins: PluginMetadata[] = []
   let installFailure = false
+  let orphanInstall = false
+  let inventoryFailure = false
   let installBarrier: Promise<void> | undefined
   const installed = vi.fn<DerivationServiceDependencies["install"]>(
     async (source, name, id, guard, verify) => {
       if (installBarrier) await installBarrier
       guard()
       if (installFailure) throw Error("original native installer uncertain")
-      const directory = join(root, "installed", id)
+      const directory = join(root, "installed", name)
       await cp(source, directory, { recursive: true })
       await verify(directory)
       guard()
+      if (orphanInstall) throw Error("simulated copy before registry commit")
       plugins.push({ id, name, version: "1.2.3", enabled: true, path: directory } as PluginMetadata)
       return { success: true }
     }
   )
   const invalidated = vi.fn()
   const changed = vi.fn()
+  await mkdir(join(root, "installed"))
+  const observeInstallation = vi.fn(
+    (
+      input: {
+        pluginId: string
+        name: string
+        version: string
+        digest: string
+      },
+      guard: () => void
+    ) =>
+      observeProjectDeliveryInstallation(
+        join(root, "installed"),
+        () => {
+          if (inventoryFailure) throw Error("native registry unreadable")
+          return plugins
+        },
+        input,
+        guard
+      )
+  )
   const create = () =>
     new CreatorProjectDeliveries({
       root: join(root, "delivery"),
@@ -81,6 +114,8 @@ async function fixture(v2 = false) {
       occupied: () => occupied,
       plugins: () => plugins,
       install: installed,
+      normalizeWorkspace: (workspace) => workspace.toLowerCase(),
+      observeInstallation,
       invalidate: invalidated,
       changed,
       actions: async () => []
@@ -217,6 +252,7 @@ async function fixture(v2 = false) {
     resources,
     plugins,
     installed,
+    observeInstallation,
     invalidated,
     create,
     prepare,
@@ -236,6 +272,15 @@ async function fixture(v2 = false) {
     },
     failInstall: () => {
       installFailure = true
+    },
+    orphanInstall: () => {
+      orphanInstall = true
+    },
+    failInventory: () => {
+      inventoryFailure = true
+    },
+    failReceipt: (phase: "installed" | "exported") => {
+      failReceipt = phase
     },
     blockInstall: (barrier: Promise<void>) => {
       installBarrier = barrier
@@ -545,5 +590,342 @@ describe("Creator checked project delivery", () => {
     await f.delivery.export(f.scope.threadId, f.scope.workspace, f.input(prepared!), corrected)
     expect(new AdmZip(corrected).getEntry("devclaw.package-report.json")).not.toBeNull()
     expect(f.installed).not.toHaveBeenCalled()
+  })
+
+  it("reads an actual installation after its success receipt is lost without retry or approval recovery", async () => {
+    const f = await fixture()
+    const prepared = (await f.prepare())!
+    f.failReceipt("installed")
+    await expect(
+      f.delivery.install(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).rejects.toThrow("receipt lost")
+    expect(f.delivery.status(f.scope.threadId)).toMatchObject({
+      phase: "unknown",
+      canReconcile: true
+    })
+    const restarted = f.create()
+    const result = await restarted.reconcile(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    expect(result).toMatchObject({
+      phase: "installed",
+      pluginId: f.plugins[0].id,
+      canInstall: false,
+      canExport: false,
+      canReconcile: false,
+      reconciliation: { outcome: "installed" }
+    })
+    expect(f.installed).toHaveBeenCalledOnce()
+    await expect(
+      restarted.install(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).rejects.toThrow("REVIEW_REQUIRED")
+    // Explicit preparation rechecks the same package and exact installed identity; it can only
+    // confirm a new export, never create a second installation.
+    const reviewed = await restarted.prepare(f.scope.threadId, f.scope.workspace, {
+      requestId: f.request.id,
+      digest: f.request.digest,
+      name: prepared.name,
+      version: prepared.version
+    })
+    expect(reviewed).toMatchObject({ id: prepared.id, canInstall: false, canExport: true })
+    const output = join(f.root, "recovered-export.zip")
+    await restarted.export(f.scope.threadId, f.scope.workspace, f.input(prepared), output)
+    expect(new AdmZip(output).readAsText("hooks/original.py")).toBe(f.resources[1].text)
+    expect(f.installed).toHaveBeenCalledOnce()
+  })
+
+  it("recovers a prepared but never confirmed delivery after restart only through fresh preparation", async () => {
+    const f = await fixture()
+    const prepared = (await f.prepare())!
+    const restarted = f.create()
+    await expect(
+      restarted.prepare(f.scope.threadId, f.scope.workspace, {
+        requestId: f.request.id,
+        digest: f.request.digest,
+        name: "new-attempt",
+        version: "1.0.0"
+      })
+    ).rejects.toThrow("OUTCOME_UNCONFIRMED")
+    expect(
+      await restarted.reconcile(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).toMatchObject({
+      phase: "failed",
+      canInstall: false,
+      canExport: false,
+      reconciliation: { outcome: "not-executed", reason: "PROJECT_DELIVERY_NOT_STARTED" }
+    })
+    const fresh = await restarted.prepare(f.scope.threadId, f.scope.workspace, {
+      requestId: f.request.id,
+      digest: f.request.digest,
+      name: "fresh-confirmation",
+      version: "1.0.0"
+    })
+    expect(fresh).toMatchObject({ phase: "needs-confirmation", canInstall: true })
+    expect(fresh!.id).not.toBe(prepared.id)
+    expect(f.installed).not.toHaveBeenCalled()
+  })
+
+  it("settles absent failed installation, but never treats unreadable inventory or orphan copies as absence", async () => {
+    const f = await fixture()
+    const prepared = (await f.prepare())!
+    f.failInstall()
+    await expect(
+      f.delivery.install(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).rejects.toThrow()
+    expect(
+      await f.delivery.reconcile(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).toMatchObject({ phase: "failed", reconciliation: { outcome: "not-executed" } })
+    expect((await f.prepare("new-explicit-attempt"))!.canInstall).toBe(true)
+    const g = await fixture()
+    const gp = (await g.prepare())!
+    g.failInstall()
+    await expect(
+      g.delivery.install(g.scope.threadId, g.scope.workspace, g.input(gp))
+    ).rejects.toThrow()
+    g.failInventory()
+    expect(
+      await g.delivery.reconcile(g.scope.threadId, g.scope.workspace, g.input(gp))
+    ).toMatchObject({ phase: "unknown", reconciliation: { outcome: "unknown" } })
+    const h = await fixture()
+    const hp = (await h.prepare())!
+    h.orphanInstall()
+    await expect(
+      h.delivery.install(h.scope.threadId, h.scope.workspace, h.input(hp))
+    ).rejects.toThrow()
+    expect(
+      await h.delivery.reconcile(h.scope.threadId, h.scope.workspace, h.input(hp))
+    ).toMatchObject({
+      phase: "unknown",
+      reconciliation: {
+        outcome: "conflict",
+        reason: "PROJECT_DELIVERY_INSTALL_DIRECTORY_UNCONFIRMED"
+      }
+    })
+  })
+
+  it("rejects same-name foreign installation, changed bytes and linked installed directories", async () => {
+    for (const change of ["foreign-id", "bytes", "link"] as const) {
+      const f = await fixture()
+      const prepared = (await f.prepare())!
+      f.failReceipt("installed")
+      await expect(
+        f.delivery.install(f.scope.threadId, f.scope.workspace, f.input(prepared))
+      ).rejects.toThrow()
+      if (change === "foreign-id") f.plugins[0].id = randomUUID()
+      else if (change === "bytes")
+        await writeFile(join(f.plugins[0].path, "hooks/original.py"), "# altered\n")
+      else {
+        const original = f.plugins[0].path
+        const moved = join(f.root, "moved-source")
+        await cp(original, moved, { recursive: true })
+        await rm(original, { recursive: true })
+        await symlink(moved, original, process.platform === "win32" ? "junction" : "dir")
+      }
+      const observed = await f.delivery.reconcile(
+        f.scope.threadId,
+        f.scope.workspace,
+        f.input(prepared)
+      )
+      expect(observed).toMatchObject({ phase: "unknown", canInstall: false, canExport: false })
+      expect(observed!.reconciliation!.outcome).not.toBe("installed")
+      await expect(f.prepare("forbidden-retry")).rejects.toThrow("OUTCOME_UNCONFIRMED")
+      expect(f.installed).toHaveBeenCalledOnce()
+    }
+  })
+
+  it("reads exact exported bytes after lost receipt and keeps previously installed identity separate", async () => {
+    const f = await fixture()
+    const prepared = (await f.prepare())!
+    await f.delivery.install(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    f.failReceipt("exported")
+    const output = join(f.root, "published-before-reply.zip")
+    await expect(
+      f.delivery.export(f.scope.threadId, f.scope.workspace, f.input(prepared), output)
+    ).rejects.toThrow("receipt lost")
+    expect(f.delivery.status(f.scope.threadId)).toMatchObject({
+      phase: "unknown",
+      pluginId: f.plugins[0].id,
+      operation: "export"
+    })
+    const restarted = f.create()
+    expect(
+      await restarted.reconcile(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).toMatchObject({
+      phase: "exported",
+      output,
+      pluginId: f.plugins[0].id,
+      canInstall: false,
+      canExport: false,
+      reconciliation: { outcome: "exported" }
+    })
+    expect(new AdmZip(output).readAsText("hooks/original.py")).toBe(f.resources[1].text)
+    expect(f.installed).toHaveBeenCalledOnce()
+  })
+
+  it("does not accept missing, partial, foreign, linked or changed exported artifacts as success", async () => {
+    for (const change of ["missing", "partial", "foreign", "link"] as const) {
+      const f = await fixture()
+      const prepared = (await f.prepare())!
+      f.failReceipt("exported")
+      const output = join(f.root, "uncertain.zip")
+      await expect(
+        f.delivery.export(f.scope.threadId, f.scope.workspace, f.input(prepared), output)
+      ).rejects.toThrow()
+      const original = await readFile(output)
+      if (change === "missing") await rm(output)
+      else if (change === "partial") await writeFile(output, original.subarray(0, 40))
+      else if (change === "foreign") await writeFile(output, Buffer.alloc(original.length))
+      else {
+        const target = join(f.root, "external.zip")
+        await writeFile(target, original)
+        await rm(output)
+        // File symlinks require extra Windows privilege; a junction to a directory also has to
+        // remain a conflict, and exercises the ordinary no-privilege Windows link boundary.
+        if (process.platform === "win32") await symlink(f.root, output, "junction")
+        else await symlink(target, output)
+      }
+      const observed = await f
+        .create()
+        .reconcile(f.scope.threadId, f.scope.workspace, f.input(prepared))
+      expect(observed).toMatchObject({
+        phase: change === "missing" ? "failed" : "unknown",
+        canInstall: false,
+        canExport: false,
+        reconciliation: { outcome: change === "missing" ? "not-executed" : "conflict" }
+      })
+      expect(f.installed).not.toHaveBeenCalled()
+    }
+  })
+
+  it("retains successful install when absent export is settled and permits explicit export re-review", async () => {
+    const f = await fixture()
+    const prepared = (await f.prepare())!
+    await f.delivery.install(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    f.failReceipt("exported")
+    const output = join(f.root, "missing-export.zip")
+    await expect(
+      f.delivery.export(f.scope.threadId, f.scope.workspace, f.input(prepared), output)
+    ).rejects.toThrow()
+    await rm(output)
+    const restarted = f.create()
+    expect(
+      await restarted.reconcile(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).toMatchObject({
+      phase: "installed",
+      pluginId: f.plugins[0].id,
+      canExport: false,
+      canInstall: false,
+      reconciliation: { outcome: "not-executed" }
+    })
+    expect(
+      await restarted.prepare(f.scope.threadId, f.scope.workspace, {
+        requestId: f.request.id,
+        digest: f.request.digest,
+        name: prepared.name,
+        version: prepared.version
+      })
+    ).toMatchObject({ canExport: true, canInstall: false })
+  })
+
+  it("resolves a partial ZIP conflict only after explicit user relocation, readback and fresh confirmation", async () => {
+    const f = await fixture()
+    const prepared = (await f.prepare())!
+    f.failReceipt("exported")
+    const output = join(f.root, "partial-user-output.zip")
+    await expect(
+      f.delivery.export(f.scope.threadId, f.scope.workspace, f.input(prepared), output)
+    ).rejects.toThrow("receipt lost")
+    await writeFile(output, "partial publication; retain for manual investigation")
+    expect(
+      await f.delivery.reconcile(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).toMatchObject({
+      phase: "unknown",
+      pendingOutput: output,
+      reconciliation: { outcome: "conflict" }
+    })
+    await expect(f.prepare("premature-retry")).rejects.toThrow("OUTCOME_UNCONFIRMED")
+    const retained = join(f.root, "user-retained-partial.zip")
+    await cp(output, retained)
+    await rm(output)
+    expect(
+      await f.delivery.reconcile(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).toMatchObject({
+      phase: "failed",
+      canExport: false,
+      reconciliation: { outcome: "not-executed" }
+    })
+    const fresh = (await f.prepare("new-explicit-package"))!
+    expect(fresh.id).not.toBe(prepared.id)
+    const next = join(f.root, "new-explicit-output.zip")
+    await f.delivery.export(f.scope.threadId, f.scope.workspace, f.input(fresh), next)
+    expect(new AdmZip(next).readAsText("hooks/original.py")).toBe(f.resources[1].text)
+    expect(await readFile(retained, "utf8")).toContain("retain for manual investigation")
+    expect(f.installed).not.toHaveBeenCalled()
+  })
+
+  it("keeps readback historical after candidate change without admitting old execution", async () => {
+    const f = await fixture()
+    const prepared = (await f.prepare())!
+    f.failReceipt("installed")
+    await expect(
+      f.delivery.install(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).rejects.toThrow()
+    await f.saveNewRevision()
+    expect(
+      await f.delivery.reconcile(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).toMatchObject({ phase: "installed", canInstall: false, canExport: false })
+    await expect(
+      f.delivery.export(
+        f.scope.threadId,
+        f.scope.workspace,
+        f.input(prepared),
+        join(f.root, "old.zip")
+      )
+    ).rejects.toThrow()
+    expect(f.installed).toHaveBeenCalledOnce()
+  })
+
+  it("rejects cross-scope readback, occupied or concurrent reconcile and changed CAS records", async () => {
+    const f = await fixture()
+    const prepared = (await f.prepare())!
+    f.failInstall()
+    await expect(
+      f.delivery.install(f.scope.threadId, f.scope.workspace.toUpperCase(), f.input(prepared))
+    ).rejects.toThrow()
+    await expect(
+      f.delivery.reconcile(f.scope.threadId, "other-workspace", f.input(prepared))
+    ).rejects.toThrow()
+    f.occupied(true)
+    await expect(
+      f.delivery.reconcile(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).rejects.toThrow("BUSY")
+    f.occupied(false)
+    let release!: () => void
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    f.observeInstallation.mockImplementationOnce(async (_input, guard) => {
+      await barrier
+      guard()
+      return { outcome: "not-executed" }
+    })
+    const first = f.delivery.reconcile(
+      f.scope.threadId,
+      f.scope.workspace.toUpperCase(),
+      f.input(prepared)
+    )
+    await vi.waitFor(() => expect(f.observeInstallation).toHaveBeenCalledOnce())
+    await expect(
+      f.delivery.reconcile(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).rejects.toThrow("BUSY")
+    const key = [...f.values.keys()].find((key) => key.startsWith("creator-project-delivery-v1:"))!
+    const replaced = JSON.parse(f.values.get(key)!)
+    replaced.status.error = "newer-native-observation"
+    f.values.set(key, JSON.stringify(replaced))
+    release()
+    await expect(first).rejects.toThrow("PROJECT_DELIVERY_CHANGED")
+    expect(JSON.parse(f.values.get(key)!).status.error).toBe("newer-native-observation")
+    f.changeScope()
+    await expect(
+      f.delivery.reconcile(f.scope.threadId, f.scope.workspace, f.input(prepared))
+    ).rejects.toThrow()
   })
 })

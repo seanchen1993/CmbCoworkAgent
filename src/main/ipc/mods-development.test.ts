@@ -27,7 +27,7 @@ function fixture() {
     exportBusiness: vi.fn(),
     reconcileBusiness: vi.fn(),
     prepareProjectDelivery: vi.fn(), installProjectDelivery: vi.fn(),
-    exportProjectDelivery: vi.fn(), approveModularization: vi.fn()
+    exportProjectDelivery: vi.fn(), reconcileProjectDelivery: vi.fn(), approveModularization: vi.fn()
   }
   const trustedEvent = {} as IpcMainInvokeEvent
   registerModsDevelopmentHandlers(
@@ -61,6 +61,8 @@ describe("development IPC authority", () => {
       ["install-project-delivery", f.actions.installProjectDelivery,
         { ...scope, deliveryId: requestId, digest }],
       ["export-project-delivery", f.actions.exportProjectDelivery,
+        { ...scope, deliveryId: requestId, digest }],
+      ["reconcile-project-delivery", f.actions.reconcileProjectDelivery,
         { ...scope, deliveryId: requestId, digest }],
       ["approve-modularization", f.actions.approveModularization,
         { ...scope, requestId, sourceDigest: digest }]

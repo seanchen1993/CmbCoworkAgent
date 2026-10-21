@@ -16,12 +16,15 @@ async function main() {
       import React from "react"; import {createRoot} from "react-dom/client";
       import {ModsDevelopmentPanel} from "./src/renderer/src/components/customize/ModsDevelopmentPanel";
       import {AnchoredGuide} from "./src/renderer/src/components/guides/AnchoredGuide";
+      import {useAppStore} from "./src/renderer/src/lib/store";
       const calls=[],listeners=new Set();
       const current={threadId:"creator",workspace:"C:/guide",enabled:true,mode:"creator",drafts:[],trials:[],
         projectTrial:{id:"request",draftId:"draft",name:"两阶段审查",revision:1,digest:"a".repeat(64),goal:"审查文件"}};
       const business=(name)=>async()=>{calls.push(["business",name]);throw Error("A guide must not execute "+name)};
       const development={status:async()=>structuredClone(current),onChanged:fn=>{listeners.add(fn);return()=>listeners.delete(fn)},
-        setMode:business("mode"),approveBusiness:business("install"),requestTrial:business("trial")};
+        setMode:async input=>{calls.push(["mode",input]);current.mode=input.mode;return {...structuredClone(current),threadId:input.threadId}},
+        reconcileProjectDelivery:async input=>{calls.push(["delivery-reconcile",input]);current.projectDelivery={...current.projectDelivery,phase:"failed",canReconcile:false,reconciliation:{outcome:"not-executed",checkedAt:1}};return {...structuredClone(current),threadId:input.threadId}},
+        approveBusiness:business("install"),requestTrial:business("trial")};
       const configKey=c=>"fixture-guide:"+c.guideId+":"+c.revision;
       const state=c=>JSON.parse(localStorage.getItem(configKey(c))||'{"shownCount":0,"acknowledged":false}');
       const write=(c,s)=>localStorage.setItem(configKey(c),JSON.stringify(s));
@@ -34,8 +37,9 @@ async function main() {
       window.api={uiGuides,mods:{development,globalEnabled:async()=>true,status:async()=>({workspace:"C:/guide",enabled:true,outputPolicy:true,mods:[],diagnostics:[]})},
         harnessBoard:{localProjects:{preview}}};
       const root=createRoot(document.getElementById("root"));
+      let delayed=false;const delayedReads=[];
       const render=(thread="creator")=>root.render(<React.StrictMode><ModsDevelopmentPanel key={thread} threadId={thread}
-        workspaceHint="C:/guide" mode="chat" api={{...development,status:async()=>({...structuredClone(current),threadId:thread})}}
+        workspaceHint="C:/guide" mode="chat" api={{...development,status:async()=>{const result={...structuredClone(current),threadId:thread};if(delayed)return new Promise(resolve=>delayedReads.push(()=>resolve(result)));return result}}}
         onReturnToChat={()=>document.getElementById("composer").focus()}/></React.StrictMode>);
       const visibilityConfig={guideId:"creator-guide-visibility-check",revision:1,maxShowCount:1};
       const visibilitySteps=[{id:"visible",title:"工作区可操作后显示",description:"被其他导览遮盖时等待，不消耗首次展示。",selectors:['[data-visible-target]']}];
@@ -43,7 +47,13 @@ async function main() {
         return <div id="covered" inert aria-hidden="true"><section ref={ref}><h2 data-visible-target>被遮盖的工作区</h2>
           <AnchoredGuide active config={visibilityConfig} rootRef={ref} steps={visibilitySteps}/></section></div>}
       window.fixture={calls,render,covered:()=>root.render(<React.StrictMode><CoveredGuide/></React.StrictMode>),state:()=>state({guideId:"mods-creator-workspace-stage-debug",revision:1}),
-        noPreview:()=>{delete window.api.harnessBoard.localProjects.preview;render()}};
+        noPreview:()=>{delete window.api.harnessBoard.localProjects.preview;render()},
+        ordinary:()=>{current.mode="normal";delete current.projectTrial;current.drafts=[];current.trials=[];render("ordinary")},
+        nativeWork:()=>{current.projectTrial={id:"native-request",draftId:"native-draft",name:"Native candidate",revision:1,digest:"b".repeat(64),goal:"Native creation"};listeners.forEach(fn=>fn({threadId:"ordinary"}))},
+        delay:()=>{current.mode="creator";delayed=true},pending:()=>delayedReads.length,
+        nativeDelivery:()=>{current.mode="creator";delete current.projectTrial;current.projectDelivery={id:"native-delivery",requestId:"old-request",sourceDigest:"c".repeat(64),name:"historical",version:"1.0.0",digest:"d".repeat(64),phase:"unknown",canInstall:false,canExport:false,canReconcile:true};render("delivery")},
+        release:()=>{delayed=false;delayedReads.splice(0).forEach(fn=>fn())},
+        account:()=>{current.mode="normal";delete current.projectTrial;useAppStore.setState({accountRevision:useAppStore.getState().accountRevision+1})}};
       render();
     `
     },
@@ -208,6 +218,64 @@ async function main() {
       await page.evaluate("window.fixture.calls.filter(row=>row[0]==='business')"),
       []
     )
+    // The actual chat mode controls do not require visiting settings. A mode selection
+    // alone is not a creation intent; only native authoring records expose the workspace.
+    await page.evaluate("window.fixture.ordinary()")
+    const creator = page.getByRole("button", { name: "创造者模式", exact: true })
+    await creator.waitFor()
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-app-guide="creator"]')?.getAttribute("aria-pressed") ===
+        "false"
+    )
+    assert.equal(await page.getByRole("button", { name: "使用指引", exact: true }).count(), 0)
+    assert.equal(await page.locator('[data-app-guide="workspace"]').count(), 0)
+    await creator.click()
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-app-guide="creator"]')?.getAttribute("aria-pressed") ===
+        "true"
+    )
+    assert.equal(
+      await page.locator('[data-app-guide="workspace"]').count(),
+      0,
+      "A native mode receipt alone must not invent plugin creation"
+    )
+    await page.getByRole("button", { name: "使用指引", exact: true }).waitFor()
+    await page.evaluate("window.fixture.nativeWork()")
+    await workspace.waitFor()
+    await page.screenshot({ path: join(output, "native-creation-workspace.png") })
+    await workspace.getByRole("button", { name: "Close", exact: true }).click()
+    await page.getByRole("button", { name: "普通模式", exact: true }).click()
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-app-guide="creator"]')?.getAttribute("aria-pressed") ===
+        "false"
+    )
+    assert.equal(await workspace.count(), 0)
+    assert.equal(await page.getByRole("button", { name: "使用指引", exact: true }).count(), 0)
+    // A delayed previous-account status cannot restore creator controls in the new scope.
+    await page.evaluate("window.fixture.delay();window.fixture.render('stale')")
+    await page.waitForFunction("window.fixture.pending()>0")
+    await page.evaluate("window.fixture.account()")
+    await page.waitForFunction("window.fixture.pending()>1")
+    await page.evaluate("window.fixture.release()")
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-app-guide="creator"]')?.getAttribute("aria-pressed") ===
+        "false"
+    )
+    assert.equal(await page.locator('[data-app-guide="workspace"]').count(), 0)
+    await page.evaluate("window.fixture.nativeDelivery()")
+    await page.locator('[data-app-guide="workspace"]').click()
+    await page.getByRole("heading", { name: "核对历史插件交付", exact: true }).waitFor()
+    assert.equal(
+      await page.getByRole("button", { name: "准备保存为新插件", exact: true }).count(),
+      0
+    )
+    assert.equal(await page.getByRole("button", { name: "确认安装新插件", exact: true }).count(), 0)
+    await page.getByRole("button", { name: "核对实际交付结果", exact: true }).click()
+    await page.getByText(/已核实：未发现本次交付的执行结果/).waitFor()
     assert.deepEqual(errors, [])
     console.log(
       "PASS creator anchored guide: first use, seven real destinations, stage disclosure, back/skip/close/Escape, reload persistence, manual reopen and mobile; no business actions"

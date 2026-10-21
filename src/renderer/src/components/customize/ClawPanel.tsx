@@ -460,7 +460,7 @@ function ClawSettings({
             添加功能
           </Button>
           <Button variant="ghost" size="sm" onClick={() => navigate("flows")}>
-            管理执行步骤
+            管理聊天任务模板
           </Button>
         </div>
       </header>

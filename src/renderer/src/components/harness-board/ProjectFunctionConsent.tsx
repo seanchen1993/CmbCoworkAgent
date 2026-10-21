@@ -23,6 +23,7 @@ export function ProjectFunctionConsent({
   const [busy, setBusy] = useState(false)
   const pending = useRef(false)
   const generation = useRef(0)
+  const configurationOnly = review?.source?.configurationOnly === true
   const refresh = async () => {
     const token = ++generation.current
     setError("")
@@ -56,16 +57,19 @@ export function ProjectFunctionConsent({
       ) : (
         review?.source && (
           <>
-            <p>本包灵件：{review.source.name}</p>
+            <p>{configurationOnly ? "本包原生配置" : "本包灵件"}：{review.source.name}</p>
             <p className="break-all">源码摘要：{review.source.digest}</p>
-            <p className="break-all">授权目录：{review.workspace}</p>
+            <p className="break-all">{configurationOnly ? "配置目录" : "授权目录"}：{review.workspace}</p>
             <p>
-              {review.source.state === "ready"
+              {configurationOnly
+                ? "此包只声明原生参数，不运行 Mod 代码，也不需要授予虚拟机权限。参数就绪后，阶段操作仍须按原流程确认。"
+                : review.source.state === "ready"
                 ? "此目录已授权当前源码版本。"
                 : review.source.state === "disabled"
                   ? "应用灵件功能已关闭，请先按原设置启用。"
                   : "当前源码版本尚未获准在此目录运行。"}
             </p>
+            {!configurationOnly && <>
             <p>
               静态识别的调用：{review.source.scannedMethods.join("、") || "未识别到直接 SDK 调用"}
             </p>
@@ -77,7 +81,8 @@ export function ProjectFunctionConsent({
               <p className="break-words">{review.source.capabilities.join("、")}</p>
             </details>
             <p>授权沿用原灵件权限机制；文件、网络、进程和工具操作仍按原规则单独确认。</p>
-            {review.workspaceEnabled === false && review.globallyEnabled !== false && (
+            </>}
+            {!configurationOnly && review.workspaceEnabled === false && review.globallyEnabled !== false && (
               <p>
                 确认权限将启用当前项目目录的灵件功能。同目录的其他聊天也会使用此前已授权的功能；不会启用其他目录或更改全局开关。
               </p>
@@ -100,9 +105,11 @@ export function ProjectFunctionConsent({
               </>
             )}
             {review.source.configurationReady === false && (
-              <p role="alert">请先补齐必需参数或确认配置迁移，再授权并运行本包功能。</p>
+              <p role="alert">{configurationOnly
+                ? "请先补齐必需参数或确认配置迁移，再按原项目入口准备阶段操作。"
+                : "请先补齐必需参数或确认配置迁移，再授权并运行本包功能。"}</p>
             )}
-            {review.source.state === "needs-approval" && (
+            {!configurationOnly && review.source.state === "needs-approval" && (
               <>
                 <label className="flex items-start gap-2">
                   <input
@@ -162,7 +169,7 @@ export function ProjectFunctionConsent({
         )
       )}
       <button type="button" disabled={busy} className="underline" onClick={() => void refresh()}>
-        重新核对本包权限
+        {configurationOnly ? "重新核对本包参数" : "重新核对本包权限"}
       </button>
     </section>
   )

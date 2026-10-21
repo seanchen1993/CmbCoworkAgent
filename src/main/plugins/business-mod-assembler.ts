@@ -16,6 +16,7 @@ import { parseSkillNameFromFrontmatterYaml } from "../skills/frontmatter"
 import { assertProjectNodeAgentResources } from "./project-agent-resources"
 import { BusinessModDuplicateIdError } from "./business-mod-diagnostics"
 import { projectRuntimeExtensionContract } from "../../shared/project-runtime"
+import { assertBusinessModStageRecoveryProjection } from "./business-mod-stage-recovery"
 import {
   describeBusinessModAssemblyRuntime,
   resolveBusinessModAssemblyAdapter
@@ -203,6 +204,9 @@ export function assembleBusinessMods(
   const providers = extensions.filter(({ mod }) => mod.contextProvider)
   if (providers.length > 1) throw Error("所选业务 Mods 包含多个上下文提供器，请保留一个")
   const contextProvider = providers[0]?.mod.contextProvider
+  const recoveryAdapters = extensions.filter(({ mod }) => mod.stageRecoveryAdapter)
+  if (recoveryAdapters.length > 1) throw Error("BUSINESS_MOD_STAGE_RECOVERY_ADAPTER_CONFLICT")
+  const recoveryAdapter = recoveryAdapters[0]?.mod.stageRecoveryAdapter
   if (!selected.length || selected.length > 32 || extensions.length > 32)
     throw Error("请保留1至32个业务步骤，常驻扩展最多32个")
   if (extensions.length && !/^[a-zA-Z0-9][\w.-]{0,99}$/.test(request.name))
@@ -219,6 +223,8 @@ export function assembleBusinessMods(
     }
     if (mod.contextProvider && !files.has(mod.contextProvider.entry))
       throw Error(`上下文提供器实现未包含在 Mod 资源闭包中：${mod.id}`)
+    if (mod.stageRecoveryAdapter && !files.has(mod.stageRecoveryAdapter.entry))
+      throw Error("BUSINESS_MOD_STAGE_RECOVERY_ADAPTER_RESOURCE_MISSING")
     for (const id of mod.dependencies.advisory)
       if (!chosen.has(id)) diagnostics.push(`${mod.title}：未选择建议搭配 ${id}`)
   }
@@ -315,6 +321,7 @@ export function assembleBusinessMods(
     })
   )
   add(generated("devclaw.project-runtime.json", projection.runtime))
+  if (recoveryAdapter) add(generated("devclaw.stage-recovery-adapter.json", recoveryAdapter))
   add(
     generated("devclaw.capabilities.json", {
       apiVersion: "devclaw.capabilities/v1",
@@ -378,6 +385,10 @@ export function assembleBusinessMods(
       modules: selected.map(({ mod }) => mod),
       ...(extensions.length ? { extensions: extensions.map(({ mod }) => mod) } : {})
     })
+  )
+  assertBusinessModStageRecoveryProjection(
+    { ...main.catalog, extensions: extensions.map(({ mod }) => mod) },
+    new Map([...files.values()].map((file) => [file.path, file.bytes]))
   )
   const lock: BusinessModAssemblyLock = {
     apiVersion: "devclaw.business-assembly/v1",

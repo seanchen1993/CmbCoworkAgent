@@ -63,6 +63,15 @@ export interface BusinessModExtensionDefinition {
     knowledgeBinding?: string
     required: boolean
   }
+  /** Plugin-owned recovery protocol; selection never grants execution or repository reset. */
+  stageRecoveryAdapter?: {
+    apiVersion: "devclaw.plugin-stage-recovery/v1"
+    entry: string
+    runtime: "python"
+    isolation: "private-output-copy"
+    codeSource: "keep"
+    externalEffects: "network-requires-confirmation"
+  }
   /** Auxiliary native Skills exposed through the plugin's ordinary search roots. */
   skills?: string[]
 }

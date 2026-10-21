@@ -30,6 +30,7 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
+import { useDevelopmentCreatorMode } from "@/lib/use-development-mode"
 import { cn } from "@/lib/utils"
 import {
   sameSimpleAuthoringScope,
@@ -138,7 +139,7 @@ const MENU_GROUPS: MenuGroup[] = [
     items: [
       { tab: "mods", label: "灵件管理", icon: Webhook },
       { tab: "claw", label: "搭配管理", icon: Sparkles },
-      { tab: "flows", label: "步骤管理", icon: GitBranch }
+      { tab: "flows", label: "聊天任务模板", icon: GitBranch }
     ]
   },
   {
@@ -255,6 +256,7 @@ export function CustomizeView(): React.JSX.Element {
   }, [])
   const {
     setShowCustomizeView,
+    accountRevision,
     customizeInitialTab,
     customizeInitialSection,
     pendingEvolution,
@@ -342,6 +344,12 @@ export function CustomizeView(): React.JSX.Element {
       : !targetValid || !isDevelopmentThreadMetadata(currentThread?.metadata)
         ? "请在上方选择普通本地聊天，再进入创造者模式。"
         : undefined
+  const creatorGuideMode = useDevelopmentCreatorMode(
+    !creatorUnavailable && ["mods", "claw", "flows"].includes(activeTab) ? currentThreadId : null,
+    !creatorUnavailable && ["mods", "claw", "flows"].includes(activeTab)
+      ? currentWorkspacePath
+      : null
+  )
   const startCreator = async () => {
     if (creatorPending.current) return
     if (creatorUnavailable || !currentThreadId || !currentWorkspacePath) {
@@ -511,11 +519,17 @@ export function CustomizeView(): React.JSX.Element {
           <ConfigurationTargetPicker threads={threads} />
         )}
         <SparksTour
+          key={JSON.stringify([
+            accountRevision,
+            currentThreadId,
+            currentWorkspacePath,
+            creatorGuideMode
+          ])}
           ref={tourRef}
           onOpenChange={setTourOpen}
           activePage={activeTab}
           activeSection={tourModsSection}
-          visible={["mods", "claw", "flows"].includes(activeTab)}
+          visible={creatorGuideMode}
           onPractice={(task) => {
             if (!currentThreadId) {
               setCreatorError(creatorUnavailable ?? "请先在上方选择一段具有本地项目目录的聊天。")
@@ -523,7 +537,8 @@ export function CustomizeView(): React.JSX.Element {
             }
             if (task === "inspect") {
               openBuiltinNavigation("diff", {
-                threadId: currentThreadId, workspace: currentWorkspacePath
+                threadId: currentThreadId,
+                workspace: currentWorkspacePath
               })
             } else {
               void startCreator()

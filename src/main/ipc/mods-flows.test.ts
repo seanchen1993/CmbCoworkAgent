@@ -14,8 +14,10 @@ const state = vi.hoisted(() => ({
   skills: vi.fn(async () => []),
   featureOpen: vi.fn(),
   featureRead: vi.fn(),
-  featureClose: vi.fn(async () => undefined)
+  featureClose: vi.fn(async () => undefined),
+  unitTest: vi.fn(async () => ({ ready: false }))
 }))
+vi.mock("../mods/flows/template-readiness", () => ({ readFlowUnitTestReadiness: state.unitTest }))
 vi.mock("../mods/claw-skills", () => ({ listClawSkillSources: state.skills }))
 vi.mock("../mods/flows/native-mcp", () => ({ listNativeMcpTools: state.mcp }))
 vi.mock("../db", () => ({
@@ -51,9 +53,25 @@ beforeEach(() => {
   state.present = true
   state.mcp.mockReset().mockResolvedValue([])
   state.skills.mockReset().mockResolvedValue([])
-  state.featureOpen.mockReset().mockRejectedValue(Object.assign(Error("missing"), { code: "ENOENT" }))
+  state.featureOpen
+    .mockReset()
+    .mockRejectedValue(Object.assign(Error("missing"), { code: "ENOENT" }))
   state.featureRead.mockReset()
   state.featureClose.mockClear()
+  state.unitTest.mockReset().mockResolvedValue({ ready: false })
+})
+it("publishes read-only native test readiness and keeps the catalog scope fence across its await", async () => {
+  const f = fixture()
+  state.unitTest.mockResolvedValueOnce({ ready: true, command: "npm run test" } as never)
+  expect(await f.call("catalog", "thread")).toMatchObject({
+    unitTest: { ready: true, command: "npm run test" }
+  })
+  expect(state.unitTest).toHaveBeenCalledWith("project")
+  state.unitTest.mockImplementationOnce(async () => {
+    state.metadata.workspacePath = "other"
+    return { ready: false }
+  })
+  await expect(f.call("catalog", "thread")).rejects.toThrow("FLOW_SCOPE_CHANGED")
 })
 it("requires a trusted exact resume payload and a lowercase SHA256 source digest", async () => {
   const f = fixture()
@@ -501,23 +519,33 @@ it.each(["workspace", "incarnation", "frame", "navigation"])(
   }
 )
 
-
 it("returns a scope-checked active summary without exposing the task or mutating runs", () => {
   const f = fixture()
-  const summary = {runId: "active", threadId: "owner", flowName: "Review", status: "waiting" as const}
+  const summary = {
+    runId: "active",
+    threadId: "owner",
+    flowName: "Review",
+    status: "waiting" as const
+  }
   const read = vi.spyOn(FlowManager.prototype, "activeSummary").mockReturnValue(summary)
   expect(f.call("active", "thread")).toEqual(summary)
   expect(read).toHaveBeenCalledWith("project", "thread")
   expect(f.store.setSetting).not.toHaveBeenCalled()
   expect(() => f.call("active", "thread", {} as IpcMainInvokeEvent)).toThrow("MODS_IPC_SENDER")
-  read.mockImplementation(() => { state.present = false; return summary })
+  read.mockImplementation(() => {
+    state.present = false
+    return summary
+  })
   expect(() => f.call("active", "thread")).toThrow()
 })
 
 it("rejects an active owner whose workspace changed and returns null when no owner exists", () => {
-  const f = fixture(id => id === "owner" ? "foreign" : "project")
+  const f = fixture((id) => (id === "owner" ? "foreign" : "project"))
   const read = vi.spyOn(FlowManager.prototype, "activeSummary").mockReturnValue({
-    runId: "active", threadId: "owner", flowName: "Review", status: "waiting"
+    runId: "active",
+    threadId: "owner",
+    flowName: "Review",
+    status: "waiting"
   })
   expect(() => f.call("active", "thread")).toThrow("FLOW_SCOPE_CHANGED")
   read.mockReturnValue(null)

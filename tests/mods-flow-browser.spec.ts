@@ -57,7 +57,8 @@ const settle = (page: Page) =>
 export async function mount(
   page: Page,
   body = "host.render(<FlowsPanel threadId='a'/>);",
-  plugins: Plugin[] = []
+  plugins: Plugin[] = [],
+  advanced = true
 ) {
   const result = await build({
     stdin: {
@@ -77,6 +78,7 @@ export async function mount(
       import {ScrollArea} from ${source("components/ui/scroll-area.tsx")};
       import {selectChatFlow} from  ${source("lib/chat-flow-choice.ts")};
       import {useChatFlow} from ${source("lib/use-chat-flow.ts")};
+      import {useChatComposerFocus} from ${source("lib/use-chat-composer-focus.ts")};
       import {ClawPanel} from ${source("components/customize/ClawPanel.tsx")};
       import {ChatFlowControls} from ${source("components/chat/ChatFlowControls.tsx")};
       import {ChatFlowTaskCards} from ${source("components/chat/ChatFlowTaskCards.tsx")};
@@ -138,6 +140,7 @@ export async function mount(
       function Probe(){useEffect(()=>{panelMounts++;return()=>{panelUnmounts++}},[]);return <p>受控插件结果</p>}
       function ChatFixture({id,enabled=true,withChild=false,taskOverview,taskWorking=false}) {
         const flow=useChatFlow(id,id,enabled);
+        const composerInput=useRef(null);useChatComposerFocus(composerInput,id,id,false);
         const [input,setInput]=useState(''),[childClicks,setChildClicks]=useState(0),[submitError,setSubmitError]=useState('');
         const visible=useAppStore(s=>s.rightModule==='claw'&&!s.rightPanelCollapsed);
         window.chat=flow;
@@ -147,7 +150,7 @@ export async function mount(
           {submitError&&<p role="alert">{submitError}</p>}
           <form onSubmit={async e=>{e.preventDefault();const submitted=input;setSubmitError('');if(flow.choice){try{if(await start(submitted))setInput(value=>value===submitted?'':value)}catch(error){setSubmitError(error.message)}}else{calls.push(['chat',id,input]);setInput('')}}}>
           <ClawComposerBar threadId={id} flow={flow}>{withChild&&<button type="button" aria-label="灵件工作台" onClick={()=>setChildClicks(n=>n+1)}>灵件 {childClicks}</button>}</ClawComposerBar>
-          <textarea aria-label="聊天消息" className="composer-textarea" value={input} onChange={e=>setInput(e.target.value)}/>
+          <textarea ref={composerInput} aria-label="聊天消息" className="composer-textarea" value={input} onChange={e=>setInput(e.target.value)}/>
           <button type="submit" disabled={flow.choice&&(flow.busy||flow.active||!flow.enabled)}>{flow.choice?'按此步骤执行':'发送聊天'}</button></form>
           <div hidden={!visible} inert={!visible}><ClawSidebarHost threadId={id}/></div>
           <ClawSidebar threadId={id} flow={flow} disabled={false} taskOverview={taskOverview} taskWorking={taskWorking} onStart={start} onFollowUp={text=>setInput(text)} onRequestCreator={async text=>{calls.push(["creator",id,text]);if(deferCreator){deferCreator=false;await new Promise(resolve=>finishCreator=resolve)}setInput(value=>[value,text].filter(Boolean).join("\\n\\n"))}}><Probe/></ClawSidebar>
@@ -206,6 +209,11 @@ export async function mount(
   await page.goto("about:blank")
   await page.setContent('<div id="root"></div>')
   await page.addScriptTag({ content: result.outputFiles[0].text })
+  // Existing editor/engine regressions explicitly opt into the retained advanced editor.
+  if (advanced) {
+    const disclosure = page.locator("[data-diy-flows] > details")
+    if (await disclosure.count()) await disclosure.evaluate(element => { (element as HTMLDetailsElement).open = true })
+  }
 }
 
 export async function chooseSteps(page: Page, value?: string) {
@@ -223,6 +231,12 @@ export async function chooseSteps(page: Page, value?: string) {
   assert(value, "The real catalog must contain a selectable saved flow")
   await select.selectOption(value)
   await page.keyboard.press("Escape")
+}
+export async function openAdvancedFlowEditor(page: Page) {
+  const disclosure = page.locator("[data-diy-flows] > details")
+  await disclosure.waitFor()
+  if (!await disclosure.evaluate(element => (element as HTMLDetailsElement).open))
+    await disclosure.locator(":scope > summary").click()
 }
 
 export async function startFromEditor(page: Page) {
@@ -354,6 +368,7 @@ async function lifecycle(page: Page) {
   await page.getByRole("button", { name: "保存流程", exact: true }).click()
   await page.waitForFunction("window.fixture.calls.some(c=>c[0]==='save')")
   await page.evaluate("window.fixture.render('b')")
+  await openAdvancedFlowEditor(page)
   await page.getByRole("button", { name: "Flow b", exact: true }).click()
   await page.evaluate("window.fixture.finishSave()")
   await settle(page)
@@ -366,6 +381,7 @@ async function lifecycle(page: Page) {
   await page.evaluate("window.fixture.deferCatalog();window.fixture.render('a')")
   await page.waitForFunction("window.fixture.catalogPending()")
   await page.evaluate("window.fixture.render('b')")
+  await openAdvancedFlowEditor(page)
   await page.getByRole("button", { name: "Flow b", exact: true }).waitFor()
   await page.evaluate("window.fixture.finishCatalog()")
   await settle(page)
@@ -455,7 +471,7 @@ async function boundedReads(page: Page) {
 
 async function navigationAndScale(page: Page) {
   await mount(page, "host.render(<FlowTaskEntry/>);")
-  await page.getByRole("button", { name: "按步骤执行 · 管理步骤与记录", exact: true }).click()
+  await page.getByRole("button", { name: "聊天任务模板 · 选择下一条任务的顺序", exact: true }).click()
   assert.deepEqual(await page.evaluate("window.fixture.navigation()"), [[true, "flows"]])
   assert.deepEqual(await page.evaluate("window.fixture.calls"), [])
   assert.equal(await page.evaluate("window.fixture.listeners()"), 0)
@@ -1062,7 +1078,7 @@ async function nativeSteps(page: Page) {
   await page.addStyleTag({ path: join(assets, css) })
   await page.setViewportSize({ width: 1280, height: 960 })
   await page.getByRole("button", { name: "Flow a", exact: true }).click()
-  await page.getByText("如何开始任务？", { exact: true }).click()
+  await page.getByText("聊天任务模板怎么用？", { exact: true }).click()
   const everydayGuide = await page.locator("[data-flow-usage]").innerText()
   assert.match(everydayGuide, /无需先配置任务方案/)
   assert.match(everydayGuide, /任务进展/)
@@ -1096,7 +1112,7 @@ async function nativeSteps(page: Page) {
   assert.match(guide, /普通发送也不会自动执行已保存方案/)
   assert.doesNotMatch(guide, /聊天输入框始终用于普通聊天|在流程任务中.*填写目标/)
   assert.doesNotMatch(guide, /上述四类步骤|不会自动变成新的步骤类型/)
-  await page.getByText("如何开始任务？", { exact: true }).click()
+  await page.getByText("聊天任务模板怎么用？", { exact: true }).click()
   assert.equal(await page.evaluate("window.fixture.calls.filter(c=>c[0]==='mcpTools').length"), 0)
   await page.getByRole("button", { name: "添加技能任务", exact: true }).click()
   const skill = page.getByLabel("使用哪个技能")
@@ -1183,6 +1199,7 @@ async function nativeSteps(page: Page) {
   await page.evaluate("window.fixture.deferMcp()")
   await page.getByRole("button", { name: "加载 MCP 工具目录", exact: true }).click()
   await page.evaluate("window.fixture.render('b')")
+  await openAdvancedFlowEditor(page)
   await page.getByRole("button", { name: "Flow b", exact: true }).click()
   await page.getByRole("button", { name: "添加外部工具（MCP）", exact: true }).click()
   await page.evaluate("window.fixture.finishMcp()")

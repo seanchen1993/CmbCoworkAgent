@@ -7,6 +7,8 @@ import { readPackageExtensionContract } from "../../plugins/extension-contract"
 import { readRuntimeScopedFile, runtimeRelativePath } from "../project-runtime/safe-files"
 import { createAsyncMutex } from "../../utils/fs"
 import { isInternalHarnessProjectId } from "../internal-project-context"
+import { readProjectRecoveryContext } from "../project-runtime/recovery-context"
+import type { ProjectRecoveryContext } from "../project-runtime/recovery-context"
 
 type Operation = "session-context" | "sync-knowledge"
 type Invocation = { executable: string; args: string[] }
@@ -69,6 +71,8 @@ export async function prepareExtensionContext(input: {
   configuration?: ExtensionContextConfig
   /** Main-derived project identity for configuration reads before a model token exists. */
   projectId?: string
+  /** Main-only per-run writable scratch; never accepted from model/renderer JSON. */
+  recoveryContext?: ProjectRecoveryContext
 }) {
   const contract = readPackageExtensionContract(input.sourceRoot)
   const context = contract?.context
@@ -97,6 +101,7 @@ export async function prepareExtensionContext(input: {
   if (typeof plugin.name !== "string" || typeof plugin.version !== "string" || !record(board))
     throw Error("EXTENSION_CONTEXT_SOURCE_INVALID")
   const binding = context.knowledge.binding
+  const recovery = input.recoveryContext ?? readProjectRecoveryContext(input.workspace, { name: plugin.name, version: plugin.version })
   let boundKnowledge = binding
     ? await (input.configuration?.directoryBinding(plugin.name, binding) ??
         directoryResolver?.(
@@ -109,6 +114,7 @@ export async function prepareExtensionContext(input: {
     : undefined
   // Directory bindings are read-only knowledge sources. With no binding value, the original
   // plugin-wide cache semantics remain; required knowledge is checked during actual loading.
+  if (recovery?.knowledgeRoot) boundKnowledge = recovery.knowledgeRoot
   if (boundKnowledge) {
     if (!isAbsolute(boundKnowledge)) throw Error("EXTENSION_CONTEXT_CONFIGURATION_INVALID")
     boundKnowledge = await realpath(boundKnowledge)
@@ -136,11 +142,12 @@ export async function prepareExtensionContext(input: {
   )
   await mkdir(input.dataRoot, { recursive: true })
   const root = await realpath(input.dataRoot)
-  const data = join(root, identity)
+  const data = recovery?.directory ?? join(root, identity)
   await mkdir(data, { recursive: true })
   const actual = await realpath(data)
-  if (relative(root, actual) !== identity || !(await lstat(data)).isDirectory())
+  if ((!recovery && relative(root, actual) !== identity) || !(await lstat(data)).isDirectory())
     throw Error("EXTENSION_CONTEXT_DATA_SCOPE_CHANGED")
+  recovery?.assertCurrent()
   let lock = locks.get(actual)
   if (!lock) {
     if (locks.size >= 128) throw Error("EXTENSION_CONTEXT_BUSY")
@@ -198,7 +205,10 @@ export async function prepareExtensionContext(input: {
       throw Error("EXTENSION_CONTEXT_INVOCATION_UNSUPPORTED")
     assertCurrent?.()
     return {
-      ...(assertCurrent ? { assertCurrent } : {}),
+      ...(recovery ? { recoveryBound: true as const } : {}),
+      ...((assertCurrent || recovery) ? { assertCurrent: () => {
+        assertCurrent?.(); recovery?.assertCurrent()
+      } } : {}),
       invocation: {
         ...input.invocation,
         args: [

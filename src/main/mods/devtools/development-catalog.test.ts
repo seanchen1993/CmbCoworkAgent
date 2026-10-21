@@ -17,12 +17,19 @@ it("freezes a discoverable S1 promise using real supported sites, events and SDK
     throw Error("expected support profile")
   const support = page.content
   expect(support.id).toBe("creator-s1-2026-10-16")
-  expect(support.sites.every(site => FUNCTION_UI_SITES.includes(site as typeof FUNCTION_UI_SITES[number])))
-    .toBe(true)
-  expect([...support.localMethods, ...support.authorizedMethods]
-    .filter(method => !FUNCTION_SDK_METHODS.some(known => known === method))).toEqual([])
-  expect(support.events.every(event => getFunctionEventSupport(event)?.availability === "bounded"))
-    .toBe(true)
+  expect(
+    support.sites.every((site) =>
+      FUNCTION_UI_SITES.includes(site as (typeof FUNCTION_UI_SITES)[number])
+    )
+  ).toBe(true)
+  expect(
+    [...support.localMethods, ...support.authorizedMethods].filter(
+      (method) => !FUNCTION_SDK_METHODS.some((known) => known === method)
+    )
+  ).toEqual([])
+  expect(
+    support.events.every((event) => getFunctionEventSupport(event)?.availability === "bounded")
+  ).toBe(true)
   expect(support.onUnsupported).toContain("保留当前运行版、草稿和可用组合")
   expect(support.unsupported).toContain("自动启动任意已保存 Flow")
   expect(JSON.stringify(page).length).toBeLessThan(8000)
@@ -32,9 +39,11 @@ it("reuses the support source in full catalog and bounded discovery instead of d
   const support = developmentCatalogPage("support")
   const overview = developmentCatalogPage()
   expect(full.support).toBe(CREATOR_S1_SUPPORT)
-  if (!("content" in support) || !overview.supportProfile)
-    throw Error("expected discovery pages")
-  expect(support.content).toBe(full.support)
+  if (!("content" in support) || !overview.supportProfile) throw Error("expected discovery pages")
+  expect(support.content).toEqual({
+    ...full.support,
+    conditionalCapabilities: full.support.conditionalCapabilities.slice(0, 2)
+  })
   expect(full.deliveryGuidance).toContain(full.support.authoringConstraints.usageMetrics)
   expect(overview.supportProfile.scope).toBe(full.support.scope)
   expect(overview.supportProfile.conditionalCapabilities).toEqual(
@@ -46,6 +55,28 @@ it("reuses the support source in full catalog and bounded discovery instead of d
   )
   expect(JSON.stringify(support).length).toBeLessThan(8000)
   expect(JSON.stringify(overview).length).toBeLessThan(8000)
+})
+
+it("discovers every conditional capability through bounded support pages without losing native consent conditions", () => {
+  const all: unknown[] = []
+  let cursor: number | undefined = 0
+  while (cursor !== undefined) {
+    const page = developmentCatalogPage("support", cursor)
+    if (!("content" in page) || typeof page.content !== "object" || Array.isArray(page.content))
+      throw Error("expected support page")
+    expect(JSON.stringify(page).length).toBeLessThan(8000)
+    expect(page.content.scope).toBe(CREATOR_S1_SUPPORT.scope)
+    all.push(...page.content.conditionalCapabilities)
+    cursor = "nextCursor" in page ? page.nextCursor : undefined
+  }
+  expect(all).toEqual(CREATOR_S1_SUPPORT.conditionalCapabilities)
+  for (const invalid of [
+    -1,
+    0.5,
+    Number.NaN,
+    CREATOR_S1_SUPPORT.conditionalCapabilities.length + 1
+  ])
+    expect(() => developmentCatalogPage("support", invalid)).toThrow("DEVELOPMENT_CATALOG_CURSOR")
 })
 
 afterEach(async () => {
@@ -101,7 +132,9 @@ it("returns actionable source diagnostics for a real syntax error", async () => 
 
 it("typechecks the first-release authorized discovery and document actions against the shipped contract", async () => {
   const root = await source()
-  await writeFile(join(root, "mods/main.ts"), `import type {Register} from "claude-code"
+  await writeFile(
+    join(root, "mods/main.ts"),
+    `import type {Register} from "claude-code"
 export const register:Register=(on)=>{
   on("command.run",{command:"review"},async($)=>{
     const entries=await $.fs.list(".")
@@ -113,7 +146,8 @@ export const register:Register=(on)=>{
     const answer=await $.model.complete({model:"default",prompt:text})
     return{text:answer.isAnswered?answer.text:String(entries.length+tools.length)}
   })
-}`)
+}`
+  )
   const result = await analyzeAuthoringPreview(root)
   expect(result.typecheck.diagnostics).toEqual([])
   expect(result.sdk.strictCompatible).toBe(true)

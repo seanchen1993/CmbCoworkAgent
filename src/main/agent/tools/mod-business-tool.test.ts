@@ -62,6 +62,15 @@ afterEach(() => {
   releaseLocalThreadRunLease(threadId, "desktop", "turn")
 })
 describe("native business authoring tool", () => {
+  it("describes conditional native recovery without granting model-side recovery actions", () => {
+    const { tool } = fixture()
+    expect(tool.description).toContain("This tool cannot execute or approve stage recovery")
+    expect(tool.description).toContain("follow nextCursor")
+    expect(tool.description).toContain("fresh user confirmation")
+    expect(tool.description).not.toContain("Stage rollback/debug is not provided")
+    expect(tool.schema.safeParse({ action: "apply_recovery" }).success).toBe(false)
+  })
+
   it("exposes the native migration schema as exact bounded document pages", async () => {
     const f = fixture()
     let response = JSON.parse(await f.tool.invoke({ action: "modularization_schema" }))

@@ -1,7 +1,9 @@
 import type {
   HostProjectOperation,
   HostProjectState,
-  HostValidationReceipt
+  HostValidationReceipt,
+  HostContextProviderRequest,
+  HostContextProviderApproval
 } from "../../../shared/project-runtime/host-types"
 import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 
@@ -184,7 +186,10 @@ export function parseHostOperation(value: unknown): HostProjectOperation {
     "expectedVersion",
     "stageId",
     "idempotencyKey",
-    "inputFingerprint"
+    "inputFingerprint",
+    ...(value && typeof value === "object" && Object.hasOwn(value, "contextProvider")
+      ? ["contextProvider"]
+      : [])
   ])
   if (
     raw.schemaVersion !== 1 ||
@@ -220,6 +225,8 @@ export function parseHostOperation(value: unknown): HostProjectOperation {
     idempotencyKey: hostText(raw.idempotencyKey),
     inputFingerprint: hostDigest(raw.inputFingerprint)
   }
+  if (Object.hasOwn(raw, "contextProvider"))
+    operation.contextProvider = parseHostContextProvider(raw.contextProvider)
   if (raw.execution !== null) {
     const execution = hostRecord(raw.execution, ["threadId", "terminal"])
     operation.execution = { threadId: hostText(execution.threadId), terminal: null }
@@ -241,7 +248,12 @@ export function parseHostOperation(value: unknown): HostProjectOperation {
       "decidedAt",
       "operationId",
       "expectedVersion",
-      "inputFingerprint"
+      "inputFingerprint",
+      ...(raw.approval &&
+      typeof raw.approval === "object" &&
+      Object.hasOwn(raw.approval, "contextProviderApproval")
+        ? ["contextProviderApproval"]
+        : [])
     ])
     if (
       (approval.decision !== "approved" && approval.decision !== "rejected") ||
@@ -258,6 +270,17 @@ export function parseHostOperation(value: unknown): HostProjectOperation {
       expectedVersion: operation.expectedVersion,
       inputFingerprint: operation.inputFingerprint
     }
+    if (Object.hasOwn(approval, "contextProviderApproval"))
+      operation.approval.contextProviderApproval = parseHostContextProviderApproval(
+        approval.contextProviderApproval,
+        operation.contextProvider?.policyDigest
+      )
+    if (
+      operation.contextProvider &&
+      approval.decision === "approved" &&
+      !operation.approval.contextProviderApproval
+    )
+      hostStateError("CONTEXT_PROVIDER_APPROVAL_REQUIRED")
   }
   if (
     new Set(operation.receipts.map((receipt) => receipt.checkId)).size !==
@@ -274,4 +297,27 @@ export function parseHostOperation(value: unknown): HostProjectOperation {
   )
     return hostStateError("RECEIPT_MISMATCH")
   return operation
+}
+
+export function parseHostContextProvider(value: unknown): HostContextProviderRequest {
+  const raw = hostRecord(value, ["protocol", "policyDigest", "notice"])
+  if (raw.protocol !== "devclaw.context-text/v1") hostStateError("SCHEMA_INVALID")
+  return {
+    protocol: raw.protocol,
+    policyDigest: hostDigest(raw.policyDigest),
+    notice: hostText(raw.notice, 2048)
+  }
+}
+export function parseHostContextProviderApproval(
+  value: unknown,
+  expectedDigest: string | undefined
+): HostContextProviderApproval {
+  const raw = hostRecord(value, ["policyDigest", "allowNetworkSideEffects"])
+  if (
+    !expectedDigest ||
+    raw.policyDigest !== expectedDigest ||
+    raw.allowNetworkSideEffects !== true
+  )
+    hostStateError("CONTEXT_PROVIDER_APPROVAL_REQUIRED")
+  return { policyDigest: hostDigest(raw.policyDigest), allowNetworkSideEffects: true }
 }

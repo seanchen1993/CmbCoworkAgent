@@ -7,6 +7,7 @@ import { readPackageExtensionContract } from "../../plugins/extension-contract"
 import { readPluginManifest } from "../../plugins/manifest"
 import { packageUsesSharedMods } from "./package-preflight"
 import { readProjectActionLock } from "./action-input"
+import { readProjectRecoveryContext } from "./recovery-context"
 import {
   readRuntimeScopedFile,
   runtimeDigest,
@@ -67,7 +68,7 @@ export function createHostProjectInputIdentity(
   }
 ) {
   const authority = (workspace: string, names: readonly string[]) => ({
-    config: names.map(name => ({ name, ...manager.readUserConfigIdentity(workspace, name) })),
+    config: names.map((name) => ({ name, ...manager.readUserConfigIdentity(workspace, name) })),
     rules: host.rules(workspace, names)
   })
   const source = (project: ProjectRuntimeInputScope, root: string) => ({
@@ -92,9 +93,9 @@ export function createHostProjectInputIdentity(
       if (packageUsesSharedMods(root, metadata) && !own)
         throw Error("PROJECT_INPUT_SOURCE_NOT_PREPARED")
       const lock = readProjectActionLock(root, project.manifest)
-      const names = [...new Set([
-        ...(own ? [own.name] : []), ...lock.bindings.map(item => item.ref.plugin)
-      ])].sort()
+      const names = [
+        ...new Set([...(own ? [own.name] : []), ...lock.bindings.map((item) => item.ref.plugin)])
+      ].sort()
       // Only the current physical operation retains this immutable name list, never a global map.
       const workspace = project.workspace
       return () => runtimeDigest(JSON.stringify(authority(workspace, names)))
@@ -139,32 +140,53 @@ export function createHostProjectInputIdentity(
         if (!host.contextDataRoot || !metadata.version)
           throw Error("PROJECT_KNOWLEDGE_ROOT_UNAVAILABLE")
         const board = readRuntimeScopedFile(root, "board_core/board_config.json", 262_144)
-        if (!board.bytes) throw Error("PROJECT_KNOWLEDGE_SOURCE_MISSING")
-        const key = extensionContextStorageKey(
-          { name: metadata.name, version: metadata.version },
-          board.bytes,
-          context,
-          boundKnowledge
-        )
-        const data = join(host.contextDataRoot, key)
-        if (!boundKnowledge)
-          knowledge = fingerprintProjectKnowledge(
-            join(data, "knowledge"),
-            context.knowledge.required
+        if (board.bytes) {
+          const key = extensionContextStorageKey(
+            { name: metadata.name, version: metadata.version },
+            board.bytes,
+            context,
+            boundKnowledge
           )
-        const original = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(board.bytes))
-        let mutable = original.supported_deploy_units ?? null
-        if (existsSync(data)) {
-          const configuration = readRuntimeScopedFile(data, "board_config.json", 262_144)
-          if (configuration.bytes) {
-            const current = JSON.parse(
-              new TextDecoder("utf-8", { fatal: true }).decode(configuration.bytes)
+          const recovery = readProjectRecoveryContext(project.workspace, {
+            name: metadata.name,
+            version: metadata.version
+          })
+          const data = recovery?.directory ?? join(host.contextDataRoot, key)
+          if (!boundKnowledge)
+            knowledge = fingerprintProjectKnowledge(
+              recovery?.knowledgeRoot ?? join(data, "knowledge"),
+              context.knowledge.required
             )
-            if (Array.isArray(current.supported_deploy_units))
-              mutable = current.supported_deploy_units
+          const original = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(board.bytes))
+          let mutable = original.supported_deploy_units ?? null
+          if (existsSync(data)) {
+            const configuration = readRuntimeScopedFile(data, "board_config.json", 262_144)
+            if (configuration.bytes) {
+              const current = JSON.parse(
+                new TextDecoder("utf-8", { fatal: true }).decode(configuration.bytes)
+              )
+              if (Array.isArray(current.supported_deploy_units))
+                mutable = current.supported_deploy_units
+            }
           }
+          mutableContext = runtimeDigest(JSON.stringify(mutable))
+          recovery?.assertCurrent()
+        } else {
+          // Generic text providers do not imply a legacy board/cache layout.
+          const recovery = readProjectRecoveryContext(project.workspace, {
+            name: metadata.name,
+            version: metadata.version
+          })
+          if (!boundKnowledge && recovery?.knowledgeRoot)
+            knowledge = fingerprintProjectKnowledge(
+              recovery.knowledgeRoot,
+              context.knowledge.required
+            )
+          if (context.knowledge.required && knowledge === undefined)
+            throw Error("PROJECT_KNOWLEDGE_REQUIRED")
+          mutableContext = runtimeDigest("generic-native-context-provider/v1")
+          recovery?.assertCurrent()
         }
-        mutableContext = runtimeDigest(JSON.stringify(mutable))
       }
       return runtimeDigest(
         JSON.stringify({

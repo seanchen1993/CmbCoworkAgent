@@ -24,6 +24,8 @@ type DebugList = Awaited<ReturnType<ProjectStageDebugApi["list"]>>
 function stageDebugErrorMessage(cause: unknown): string {
   const code = cause instanceof Error ? cause.message : String(cause)
   const original = "原项目、产物和检查要求均保留，请继续使用原项目入口。"
+  if (/RECOVERY_APPROVAL_REQUIRED/.test(code))
+    return "本次 Hooks 恢复需要重新核对命令与外部副作用。请重新准备方案，阅读说明并单独勾选确认；旧方案的确认不会继承。"
   if (/SOURCE_UNSETTLED|DEV_RUNNING|OPERATION_ACTIVE|WORKSPACE_BUSY/.test(code))
     return "原试用仍占用输入或执行权限。请先打开原试用记录：正在运行时先停止并核对，结果未知时先核对；确认已停止后使用上方“结束本次试用”释放占用，再刷新准备。无须先完成整个项目。"
   if (/HOOKS?_UNSUPPORTED|SKILL_HOOKS_/.test(code))
@@ -111,10 +113,21 @@ function ScopedStageDebug({
   const [mode, setMode] = useState<"stage" | "downstream">("stage")
   const [preparation, setPreparation] = useState<StageDebugPreparation>()
   const [confirmed, setConfirmed] = useState(false)
+  const [recoveryApproval, setRecoveryApproval] = useState<{
+    preparationId: string
+    policyDigest: string
+  }>()
   const [feedback, setFeedback] = useState("")
   const [feedbackSent, setFeedbackSent] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const [hookInspection, setHookInspection] = useState<{
+    projectId: string
+    remaining: number
+    diagnostics: string[]
+    requiresNetworkInspection?: true
+  }>()
+  const [hookNetworkApproval, setHookNetworkApproval] = useState("")
   const live = useRef(false),
     locked = useRef(false),
     readSequence = useRef(0)
@@ -126,10 +139,15 @@ function ScopedStageDebug({
   const epoch = useRef(0)
   const snapshot = data.snapshots.find((item) => item.id === snapshotId)
   const candidate = drafts.find((item) => item.id === candidateId)
+  const recoveryApproved = !preparation?.recovery?.requiresNetworkApproval || (
+    recoveryApproval?.preparationId === preparation.id &&
+    recoveryApproval.policyDigest === preparation.recovery.policyDigest
+  )
   const invalidate = () => {
     epoch.current++
     setPreparation(undefined)
     setConfirmed(false)
+    setRecoveryApproval(undefined)
   }
   const read = useCallback(async () => {
     const sequence = ++readSequence.current
@@ -430,6 +448,26 @@ function ScopedStageDebug({
                   {message}
                 </p>
               ))}
+              {preparation.recovery?.requiresNetworkApproval && (
+                <div className="space-y-2 rounded border border-amber-500/50 p-3 text-sm">
+                  <p>
+                    本方案包含命令 Hooks。Windows 文件隔离限制其写入范围，但不保证阻断所有网络访问；
+                    Hook 对外部系统产生的影响不会随文件快照自动回退。原 Hooks 与必需检查仍会执行。
+                  </p>
+                  <label className="flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      checked={recoveryApproved}
+                      disabled={busy || !preparation.canCreate}
+                      onChange={(event) => setRecoveryApproval(event.target.checked ? {
+                        preparationId: preparation.id,
+                        policyDigest: preparation.recovery!.policyDigest
+                      } : undefined)}
+                    />
+                    我已核对本次命令 Hooks 的网络与外部副作用，并同意为此方案重新确认。
+                  </label>
+                </div>
+              )}
               <label className="flex items-start gap-2">
                 <input
                   type="checkbox"
@@ -445,16 +483,24 @@ function ScopedStageDebug({
                 disabled={
                   busy ||
                   !confirmed ||
+                  !recoveryApproved ||
                   !preparation.canCreate ||
                   !preparation.affectedStageIds.length
                 }
                 onClick={() =>
                   void act(async () => {
+                    if (!recoveryApproved) throw Error("PROJECT_STAGE_DEBUG_RECOVERY_APPROVAL_REQUIRED")
                     const ticket = epoch.current
                     const created = await api.create({
                       threadId,
                       preparationId: preparation.id,
-                      expectedDigest: preparation.candidateDigest
+                      expectedDigest: preparation.candidateDigest,
+                      ...(preparation.recovery?.requiresNetworkApproval ? {
+                        recoveryApproval: {
+                          policyDigest: preparation.recovery.policyDigest,
+                          allowNetworkSideEffects: true as const
+                        }
+                      } : {})
                     })
                     if (!live.current) return
                     if (ticket !== epoch.current) throw Error("PROJECT_STAGE_DEBUG_SOURCE_CHANGED")
@@ -512,6 +558,42 @@ function ScopedStageDebug({
                       {message}
                     </p>
                   ))}
+                  {branch.status === "unknown" && api.reconcileHooks && (
+                    <section aria-label="核对本分支 Hooks 结果" className="space-y-2 rounded border p-2">
+                      <p className="text-xs">
+                        先核对宿主记录的 Hooks 真实终态，不重跑命令。核对 Hooks 不等于阶段通过；
+                        随后仍须在原生阶段操作区核对执行与产物，结束旧试用后再确认新分支。
+                      </p>
+                      {hookInspection?.projectId === branch.projectId && (
+                        <div role="status" className="space-y-1 text-xs">
+                          <p>仍待核实的 Hook：{hookInspection.remaining}</p>
+                          {hookInspection.diagnostics.map((message, index) => <p key={index}>{message}</p>)}
+                        </div>
+                      )}
+                      {hookInspection?.projectId === branch.projectId &&
+                        hookInspection.requiresNetworkInspection && (
+                        <label className="flex items-start gap-2 text-xs">
+                          <input type="checkbox" disabled={busy}
+                            checked={hookNetworkApproval === branch.projectId}
+                            onChange={event => setHookNetworkApproval(event.target.checked ? branch.projectId : "")} />
+                          我同意本次原生恢复检查器核对外部结果；这不会批准重跑原 Hook 或自动回滚外部系统。
+                        </label>
+                      )}
+                      <button type="button" className="rounded border px-3 py-2 text-xs disabled:opacity-50"
+                        disabled={busy || (hookInspection?.projectId === branch.projectId &&
+                          hookInspection.requiresNetworkInspection === true && hookNetworkApproval !== branch.projectId)}
+                        onClick={() => void act(async () => {
+                          const next = await api.reconcileHooks!({ threadId, projectId: branch.projectId,
+                            ...(hookNetworkApproval === branch.projectId ? { approveNetworkInspection: true as const } : {}) })
+                          if (!live.current) return
+                          setHookInspection({ projectId: branch.projectId, ...next })
+                          setHookNetworkApproval("")
+                          await read()
+                        })}>
+                        核对 Hooks 真实结果
+                      </button>
+                    </section>
+                  )}
                   <button
                     type="button"
                     className="underline"

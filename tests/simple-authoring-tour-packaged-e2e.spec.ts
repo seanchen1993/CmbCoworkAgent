@@ -7,7 +7,11 @@ import type { ElectronApplication, Page } from "playwright"
 import { compositionEnvironment } from "./support/mods-composition-fixtures"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
 import { waitForAsyncEvidence } from "./support/async-evidence"
-import { openModsAdvancedSettings, openModsSettings } from "./support/mods-sidebar-navigation"
+import {
+  enterModsCreatorChat,
+  openModsAdvancedSettings,
+  openModsSettings
+} from "./support/mods-sidebar-navigation"
 import { simpleTourTasks } from "../src/renderer/src/components/customize/simple-tour-tasks"
 import { normalizeWorkspacePathKey } from "../src/shared/workspace-path"
 
@@ -70,9 +74,13 @@ async function main() {
     await page.locator("textarea.composer-textarea").fill(draft)
     await openModsAdvancedSettings(page, "灵件管理")
     const tour = page.getByRole("region", { name: "任务示例演练", exact: true })
-    await page.getByRole("button", { name: "任务示例演练", exact: true }).click()
-    await tour.waitFor()
-    await page.keyboard.press("Escape")
+    assert.equal(await page.getByRole("button", { name: "任务示例演练", exact: true }).count(), 0)
+    assert.equal(await page.getByRole("button", { name: "本页任务示例", exact: true }).count(), 0)
+    assert.equal(
+      (await page.evaluate((id) => window.api.mods.development.status({ threadId: id }), threadId))
+        .mode,
+      "normal"
+    )
     // Enable editing through the real settings UI before creating the retained local draft.
     await openModsSettings(page)
     await page.getByRole("checkbox", { name: "允许使用灵件", exact: true }).click()
@@ -88,6 +96,23 @@ async function main() {
       (status) => status.enabled,
       "project Mods opt-in persisted",
       20_000
+    )
+    assert.equal(
+      await page.getByRole("button", { name: "任务示例演练", exact: true }).count(),
+      0,
+      "Enabling Mods alone must not enter creator mode or reveal its manual guide"
+    )
+    await page.getByRole("button", { name: "返回应用", exact: true }).click()
+    await enterModsCreatorChat(page, threadId, workspace)
+    assert.equal(await page.locator("textarea.composer-textarea").inputValue(), draft)
+    assert.deepEqual(await page.evaluate((id) => window.api.threads.getMessages(id), threadId), [])
+    assert.equal((await page.evaluate((id) => window.api.mods.flowRuns(id), threadId)).length, 0)
+    await openModsAdvancedSettings(page, "灵件管理")
+    await page.getByRole("button", { name: "任务示例演练", exact: true }).click()
+    await tour.waitFor()
+    await page.keyboard.press("Escape")
+    checks.push(
+      "Ordinary mode and Mods opt-in hide creator guides; the real chat mode switch preserves the draft without messages or runs"
     )
     await openModsAdvancedSettings(page, "搭配管理")
     const simple = page.getByRole("region", { name: "简单组合", exact: true })
@@ -222,19 +247,25 @@ async function main() {
     completed = true
   } catch (error) {
     errors.push(error instanceof Error ? (error.stack ?? error.message) : String(error))
-    failureState = await page?.evaluate(async () => {
-      const thread = (await window.api.threads.list()).find(
-        (row) => row.title === "三任务导览同包验收"
-      )
-      const status = thread
-        ? await window.api.mods.development.status({ threadId: thread.thread_id })
-        : null
-      return {
-        thread,
-        status: status && { enabled: status.enabled, mode: status.mode, workspace: status.workspace },
-        text: document.body.innerText
-      }
-    }).catch((error) => ({ observationError: String(error) }))
+    failureState = await page
+      ?.evaluate(async () => {
+        const thread = (await window.api.threads.list()).find(
+          (row) => row.title === "三任务导览同包验收"
+        )
+        const status = thread
+          ? await window.api.mods.development.status({ threadId: thread.thread_id })
+          : null
+        return {
+          thread,
+          status: status && {
+            enabled: status.enabled,
+            mode: status.mode,
+            workspace: status.workspace
+          },
+          text: document.body.innerText
+        }
+      })
+      .catch((error) => ({ observationError: String(error) }))
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => undefined)
     throw error
   } finally {

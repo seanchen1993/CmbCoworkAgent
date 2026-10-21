@@ -3,7 +3,8 @@ import {
   type FunctionModelProtocol
 } from "../../../shared/mods/v2/model-protocol"
 import { createHash } from "node:crypto"
-import { bindFunctionSourceProofs, sourceProof, type FunctionSourceProof } from "./source-adoption-fence"
+import { assertFunctionSourcesCurrent, bindFunctionSourceProofs, sourceProof, type FunctionSourceProof } from "./source-adoption-fence"
+import { readConfigurationOnlyPackage } from "./configuration-only-package"
 import { lstatSync, realpathSync, statSync } from "node:fs"
 import { dirname, extname, relative, resolve } from "node:path"
 import type { ModObject } from "../../../shared/mods/types"
@@ -36,6 +37,8 @@ import { assembleFunctionComponents, type CompiledFunctionComponent } from "./co
 export { projectFunctionComponents, type FunctionComponentProjection } from "./component-projection"
 
 export interface CompiledFunctionPlugin {
+  /** Main-only configuration metadata; never a guest execution source. */
+  configurationOnly?: true
   name: string
   modelProtocol: FunctionModelProtocol
   root: string
@@ -54,6 +57,38 @@ export interface CompiledFunctionPlugin {
   actions?: ClawActionExport[]
   components?: ClawComponentExport[]
   componentModules?: Record<string, CompiledFunctionComponent>
+}
+
+/** Configuration readers may use native schema metadata without constructing a dummy guest.
+ * Behavioral packages still take the unchanged ordinary compiler and all of its module checks.
+ */
+export async function compileFunctionConfiguration(
+  directory: string,
+  tooling?: { captureSources: boolean }
+): Promise<CompiledFunctionPlugin> {
+  let metadata: ReturnType<typeof readConfigurationOnlyPackage>
+  try { metadata = readConfigurationOnlyPackage(realpathSync(directory)) }
+  catch { return compileFunctionPlugin(directory, tooling) }
+  const sources = [...metadata.captured].sort(([a], [b]) => a.localeCompare(b))
+  const compiled: CompiledFunctionPlugin = {
+    configurationOnly: true,
+    name: metadata.name,
+    root: metadata.root,
+    profile: CLAUDE_MODS_PROFILE,
+    modelProtocol: metadata.modelProtocol,
+    digest: createHash("sha256").update(JSON.stringify({
+      configurationOnly: 1, hostRevision: FUNCTION_HOST_REVISION, sources
+    })).digest("hex"),
+    code: "", options: {}, clients: {}, environment: { read: [], write: [] },
+    userConfig: metadata.userConfig,
+    ...(metadata.userConfigSchema ? { userConfigSchema: metadata.userConfigSchema } : {}),
+    sources: sources.map(([path]) => path),
+    ...(tooling?.captureSources ? { authoringSources: Object.fromEntries(sources), authoringEntries: [] } : {})
+  }
+  bindFunctionSourceProofs(compiled, metadata.proofs, metadata.missing, true,
+    { device: metadata.rootIdentity.dev, inode: metadata.rootIdentity.ino })
+  assertFunctionSourcesCurrent(compiled)
+  return compiled
 }
 
 async function read(root: string, path: string, limit: number) {

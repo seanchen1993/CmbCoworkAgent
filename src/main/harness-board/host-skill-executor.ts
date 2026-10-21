@@ -1,4 +1,5 @@
 import type { BrowserWindow } from "electron"
+import { hasUnresolvedStageRecoveryHook } from "../hooks/stage-recovery-journal"
 import { randomUUID } from "node:crypto"
 import { AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL } from "../../shared/harness-board-types"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
@@ -144,7 +145,9 @@ export async function executeHostProjectSkill(
         throw Error("PROJECT_WORKFLOW_CLEANUP_UNCONFIRMED", { cause: workflowFailure })
       try {
         if (
-          context.signal.aborted && terminal && terminal.outcome !== "unknown" &&
+          context.signal.aborted &&
+          terminal &&
+          terminal.outcome !== "unknown" &&
           context.assertSettlementCurrent
         ) {
           // The original run and its owned workflows have physically stopped. Inspect the
@@ -173,9 +176,10 @@ export async function executeHostProjectSkill(
     else await finalize(settlement.failure)
   }
   const assertInstallationCurrent = () => {
-    if (isProjectPreviewId(project.installedPluginId))
-      projectPreviewRegistry.assertProject(project)
-    else if (!getPlugins().some((plugin) => plugin.id === project.installedPluginId && plugin.enabled))
+    if (isProjectPreviewId(project.installedPluginId)) projectPreviewRegistry.assertProject(project)
+    else if (
+      !getPlugins().some((plugin) => plugin.id === project.installedPluginId && plugin.enabled)
+    )
       hostStateError("PLUGIN_UNAVAILABLE")
   }
   const assertThreadCurrent = () => {
@@ -316,16 +320,23 @@ export async function executeHostProjectSkill(
     } catch (error) {
       terminal = {
         outcome: "unknown",
-        code: error instanceof Error && error.message === "PROJECT_WORKFLOW_CLEANUP_UNCONFIRMED"
-          ? "project_workflow_cleanup_unconfirmed"
-          : error instanceof Error && error.message === "PROJECT_RUNTIME_INPUTS_CHANGED"
-            ? "project_runtime_inputs_changed"
-            : "project_mcp_cleanup_unconfirmed"
+        code:
+          error instanceof Error && error.message === "PROJECT_WORKFLOW_CLEANUP_UNCONFIRMED"
+            ? "project_workflow_cleanup_unconfirmed"
+            : error instanceof Error && error.message === "PROJECT_RUNTIME_INPUTS_CHANGED"
+              ? "project_runtime_inputs_changed"
+              : "project_mcp_cleanup_unconfirmed"
       }
       closeUnknownStream()
     }
   }
   if (!terminal) closeUnknownStream()
+  const recoveryHooksUnresolved =
+    !!context.stageDebug?.commandHooks &&
+    hasUnresolvedStageRecoveryHook(project.projectId, context.operation.operationId)
+  if (recoveryHooksUnresolved) {
+    closeUnknownStream()
+  }
   const result: AgentRunTerminal = terminal ?? {
     outcome: "unknown",
     code: "runtime_terminal_missing"
@@ -338,6 +349,9 @@ export async function executeHostProjectSkill(
         ? "cancelled"
         : result.outcome
   context.recordTerminal({ outcome, code: result.code })
+  // Preserve the actual settled agent fact separately from the unresolved Hook result.
+  // The Host owner still refuses both PASS and reconciliation until Hook evidence is checked.
+  if (recoveryHooksUnresolved) return "unknown"
   if (outcome === "unknown") return "unknown"
   if (outcome === "cancelled") return "cancelled"
   return result.outcome === "success"

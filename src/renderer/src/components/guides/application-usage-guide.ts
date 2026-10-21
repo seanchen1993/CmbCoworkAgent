@@ -24,7 +24,7 @@ export const applicationUsageGuideSteps: readonly AnchoredGuideStep[] = [
     id: "customize",
     title: "自定义助手入口",
     description:
-      "这个星光图标打开自定义助手，可以浏览灵件、搭配和步骤管理。已有业务示例仍在“任务示例演练”中。先继续认识聊天里的常用位置。",
+      "这个星光图标打开自定义助手，可以浏览灵件、搭配和聊天任务模板。已有业务示例仍在“任务示例演练”中。先继续认识聊天里的常用位置。",
     selectors: ['[data-app-guide="customize"]']
   },
   {

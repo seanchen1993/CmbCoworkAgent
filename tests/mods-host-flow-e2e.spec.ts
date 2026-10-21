@@ -329,7 +329,7 @@ async function main() {
     assert.equal(bound.active?.flow?.definition.schemaVersion, 2)
     await page.reload()
     await page.getByText("无插件宿主流程", { exact: true }).first().click()
-    await openModsAdvancedSettings(page, "步骤管理")
+    await openModsAdvancedSettings(page, "聊天任务模板")
     await page.getByRole("button", { name: "host-chain", exact: true }).click()
     assert.equal(await page.getByLabel("所属插件", { exact: true }).count(), 0)
     await page.screenshot({ path: join(artifacts, "host-no-plugin-editor.png") })

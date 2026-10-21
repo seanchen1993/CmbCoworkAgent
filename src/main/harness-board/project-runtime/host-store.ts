@@ -9,7 +9,8 @@ import type {
   HostExecutionTicket,
   HostProjectCreateInput,
   HostProjectOperation,
-  HostProjectState
+  HostProjectState,
+  HostContextProviderApproval
 } from "../../../shared/project-runtime/host-types"
 import {
   hostDigest,
@@ -19,7 +20,9 @@ import {
   hostText,
   parseHostOperation,
   parseHostProjectState,
-  parseHostReceipt
+  parseHostReceipt,
+  parseHostContextProvider,
+  parseHostContextProviderApproval
 } from "./host-state-protocol"
 
 const ACTIVE_STATUSES = ["prepared", "started", "cancel_requested", "succeeded", "unknown"]
@@ -201,13 +204,15 @@ export class HostProjectStore {
       "expectedVersion",
       "stageId",
       "idempotencyKey",
-      "inputFingerprint"
+      "inputFingerprint",
+      ...(Object.hasOwn(input, "contextProvider") ? ["contextProvider"] : [])
     ])
     hostText(input.projectId)
     hostInteger(input.expectedVersion, 1)
     hostText(input.stageId)
     hostText(input.idempotencyKey)
     hostDigest(input.inputFingerprint)
+    if (Object.hasOwn(input, "contextProvider")) parseHostContextProvider(input.contextProvider)
     return this.transaction(() => {
       const previous = this.db
         .prepare("SELECT id FROM host_operations WHERE project_id=? AND idempotency_key=?")
@@ -217,7 +222,8 @@ export class HostProjectStore {
         if (
           operation.expectedVersion !== input.expectedVersion ||
           operation.stageId !== input.stageId ||
-          operation.inputFingerprint !== input.inputFingerprint
+          operation.inputFingerprint !== input.inputFingerprint ||
+          JSON.stringify(operation.contextProvider) !== JSON.stringify(input.contextProvider)
         )
           hostStateError("IDEMPOTENCY_CONFLICT")
         return operation
@@ -269,13 +275,29 @@ export class HostProjectStore {
       inputFingerprint: string
       decision: "approved" | "rejected"
       actorId: string
+      contextProviderApproval?: HostContextProviderApproval
     }
   ): HostProjectOperation {
-    hostRecord(input, ["expectedVersion", "inputFingerprint", "decision", "actorId"])
+    hostRecord(input, [
+      "expectedVersion",
+      "inputFingerprint",
+      "decision",
+      "actorId",
+      ...(Object.hasOwn(input, "contextProviderApproval") ? ["contextProviderApproval"] : [])
+    ])
     return this.transaction(() => {
       const operation = this.requireOperation(operationId)
       const state = this.requireProject(operation.projectId)
       this.assertCurrent(state, operation)
+      const providerApproval =
+        input.contextProviderApproval !== undefined
+          ? parseHostContextProviderApproval(
+              input.contextProviderApproval,
+              operation.contextProvider?.policyDigest
+            )
+          : undefined
+      if (operation.contextProvider && input.decision === "approved" && !providerApproval)
+        hostStateError("CONTEXT_PROVIDER_APPROVAL_REQUIRED")
       if (
         operation.status !== "prepared" ||
         input.expectedVersion !== operation.expectedVersion ||
@@ -286,7 +308,9 @@ export class HostProjectStore {
       if (operation.approval) {
         if (
           operation.approval.decision !== input.decision ||
-          operation.approval.actorId !== input.actorId
+          operation.approval.actorId !== input.actorId ||
+          JSON.stringify(operation.approval.contextProviderApproval) !==
+            JSON.stringify(providerApproval)
         )
           hostStateError("APPROVAL_ALREADY_DECIDED")
         return operation
@@ -297,7 +321,8 @@ export class HostProjectStore {
         decidedAt: this.now(),
         operationId,
         expectedVersion: operation.expectedVersion,
-        inputFingerprint: operation.inputFingerprint
+        inputFingerprint: operation.inputFingerprint,
+        ...(providerApproval ? { contextProviderApproval: providerApproval } : {})
       }
       if (input.decision === "rejected") operation.status = "cancelled"
       return this.saveOperation(operation)
@@ -525,6 +550,14 @@ export class HostProjectStore {
     if (operation.inputFingerprint !== hostDigest(fingerprint)) hostStateError("INPUT_CHANGED")
   }
   private assertApproval(state: HostProjectState, operation: HostProjectOperation): void {
+    if (operation.contextProvider) {
+      if (operation.approval?.decision !== "approved")
+        hostStateError("CONTEXT_PROVIDER_APPROVAL_REQUIRED")
+      parseHostContextProviderApproval(
+        operation.approval.contextProviderApproval,
+        operation.contextProvider.policyDigest
+      )
+    }
     if (
       state.manifest.stages[state.stageIndex].approval === "human" &&
       operation.approval?.decision !== "approved"

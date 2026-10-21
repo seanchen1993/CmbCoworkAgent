@@ -38,7 +38,9 @@ export function developmentCatalog() {
     })),
     sdkMethods: [...FUNCTION_SDK_METHODS],
     trialCapabilities: [...DEVELOPMENT_CAPABILITIES],
-    authorizedTrialCapabilities: DEVELOPMENT_REAL_CAPABILITIES.filter(value => !value.startsWith("event:")),
+    authorizedTrialCapabilities: DEVELOPMENT_REAL_CAPABILITIES.filter(
+      (value) => !value.startsWith("event:")
+    ),
     trialEventEnvelope: [...DEVELOPMENT_EVENT_CAPABILITIES],
     trialEventConsent:
       "这组固定事件范围随 SDK 一起由用户确认；加载后逐项校验实际注册，拒绝通配符和范围外事件。",
@@ -95,8 +97,21 @@ export function developmentCatalogPage(
   cursor = 0
 ) {
   const catalog = developmentCatalog()
-  if (section === "support") return {
-    contract: catalog.contract, section, content: catalog.support
+  if (section === "support") {
+    const capabilities = catalog.support.conditionalCapabilities
+    if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > capabilities.length)
+      throw Error("DEVELOPMENT_CATALOG_CURSOR")
+    const size = 2
+    return {
+      contract: catalog.contract,
+      section,
+      cursor,
+      content: {
+        ...catalog.support,
+        conditionalCapabilities: capabilities.slice(cursor, cursor + size)
+      },
+      ...(cursor + size < capabilities.length ? { nextCursor: cursor + size } : {})
+    }
   }
   if (section === "overview")
     return {
@@ -118,7 +133,7 @@ export function developmentCatalogPage(
       deliveryGuidance: catalog.deliveryGuidance,
       limitations: catalog.limitations,
       discovery:
-        "用 catalogSection=types/events/sdk 分页读取精确声明；nextCursor 存在时继续，缺省返回入门范围。"
+        "用 catalogSection=support/types/events/sdk 分页读取精确声明；nextCursor 存在时继续，缺省返回入门范围。"
     }
   const value =
     section === "types" ? catalog.types : section === "events" ? catalog.events : catalog.sdkMethods

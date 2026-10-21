@@ -1336,6 +1336,8 @@ async function runHarnessInvocationAsync(
         "此插件的知识同步尚未提供独立可变数据目录，已停止同步以保留受保护源码。请绑定已同步知识，或使用支持独立数据目录的适配版本。"
       ), { code: "HARNESS_KNOWLEDGE_SYNC_SOURCE_IMMUTABLE" })
     if (beforeSpawn) await beforeSpawn()
+    if (extensionContext?.recoveryBound)
+      throw Error("PROJECT_STAGE_DEBUG_CONTEXT_PROVIDER_NATIVE_EXECUTION_REQUIRED")
     extensionContext?.assertCurrent?.()
     if (signal?.aborted) throw harnessDetailCancelledError()
     const { cwd } = configured

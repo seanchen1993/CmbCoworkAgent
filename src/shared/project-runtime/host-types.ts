@@ -40,6 +40,17 @@ export interface HostActionPrepareInput {
   stageId: string
   idempotencyKey: string
   inputFingerprint: string
+  contextProvider?: HostContextProviderRequest
+}
+
+export interface HostContextProviderRequest {
+  protocol: "devclaw.context-text/v1"
+  policyDigest: string
+  notice: string
+}
+export interface HostContextProviderApproval {
+  policyDigest: string
+  allowNetworkSideEffects: true
 }
 
 export interface HostValidationReceipt {
@@ -86,6 +97,7 @@ export interface HostProjectOperation extends HostActionPrepareInput {
     operationId: string
     expectedVersion: number
     inputFingerprint: string
+    contextProviderApproval?: HostContextProviderApproval
   }
   receipts: HostValidationReceipt[]
 }

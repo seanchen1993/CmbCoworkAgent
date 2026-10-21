@@ -32,6 +32,11 @@ export function portableBusinessModFiles(snapshot: DerivationSnapshot): Derivati
     snapshot.files.some((file) => file.path === "mods/manifest.json")
   )
     paths.push("mods/manifest.json")
+  if (
+    catalog.extensions?.some((extension) => extension.stageRecoveryAdapter) &&
+    snapshot.files.some((file) => file.path === "devclaw.stage-recovery-adapter.json")
+  )
+    paths.push("devclaw.stage-recovery-adapter.json")
   // Explicit tutorial allowlist. These are source-side reproduction aids, not runtime resources
   // and are never implicitly materialized into generated plugins by the assembler.
   for (const path of [

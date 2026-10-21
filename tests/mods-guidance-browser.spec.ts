@@ -33,7 +33,7 @@ async function main() {
     const navigation = await page.evaluate(() =>
       (window as unknown as { fixture: { navigation(): unknown[][] } }).fixture.navigation())
     assert.deepEqual(navigation, [[true, "flows"]])
-    await flowGuide.getByText("如何开始任务？", { exact: true }).click()
+    await flowGuide.getByText("聊天任务模板怎么用？", { exact: true }).click()
     assert.match(await flowGuide.innerText(), /无需先配置任务方案/)
     assert.doesNotMatch(await flowGuide.innerText(), /先加载工具列表/)
     await flowGuide.getByText("高级：使用手动保存的任务方案", { exact: true }).click()

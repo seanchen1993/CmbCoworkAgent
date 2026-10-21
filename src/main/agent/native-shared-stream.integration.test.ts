@@ -1040,6 +1040,8 @@ describe("actual native Shared streams", () => {
     await f.assertDrained()
   })
 
+  // Two real HTTP model turns, one real tool call, and full persisted checkpoint authentication
+  // need a functional integration budget; this is not a product latency deadline.
   it("keeps complete values and updates with one real tool call and full child checkpoint", async () => {
     const f = await fixture({ tool: true })
     const frames = await f.execute(async (config) => {
@@ -1075,7 +1077,7 @@ describe("actual native Shared streams", () => {
       final.map(serializeFunctionConversationNativeMessage)
     )
     await f.assertDrained()
-  })
+  }, 10_000)
 
   it("returns both complete HTTP message chunks and the accepted completed value", async () => {
     const f = await fixture()

@@ -53,7 +53,8 @@ export function registerNativeProjectSourceHandlers(
               scannedMethods: source.scannedMethods,
               scanIncomplete: source.scanIncomplete,
               hasConfiguration: !!source.userConfig && Object.keys(source.userConfig).length > 0,
-              configurationReady: source.configurationReady
+              configurationReady: source.configurationReady,
+              ...(source.configurationOnly ? { configurationOnly: true as const } : {})
             }
           }
         : {})

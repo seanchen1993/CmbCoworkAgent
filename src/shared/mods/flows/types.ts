@@ -169,6 +169,8 @@ export interface FlowCatalog {
   available: boolean
   /** Host execution is separate from installed Function Mod availability. */
   hostAvailable?: boolean
+  /** Read-only readiness, not an execution approval or a passing test result. */
+  unitTest?: { ready: boolean; command?: string; reason?: string }
   workspace?: string
   reason?: string
   plugins: { id: string; name: string; authorized: boolean }[]

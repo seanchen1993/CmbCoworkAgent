@@ -39,7 +39,7 @@ def checked(value: dict) -> dict:
     return value
 
 
-def prepare(workspace: Path, feature: str, knowledge: str) -> dict:
+def prepare(workspace: Path, feature: str, knowledge: str, production_compile: str | None = None) -> dict:
     from hooks import plan_writer
 
     feature_dir = workspace / ".autobizdevops/features" / feature
@@ -51,10 +51,20 @@ def prepare(workspace: Path, feature: str, knowledge: str) -> dict:
     git(repo, "init", "-b", "main")
     git(repo, "config", "user.email", "creator-sample@example.invalid")
     git(repo, "config", "user.name", "Controlled creator integration")
-    (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n.cmbdevclaw/\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n.cmbdevclaw/\n" +
+        ("target/\n" if production_compile else ""), encoding="utf-8")
     (repo / "README.md").write_text("# Controlled backend sample\nKnowledge context SHA256: " +
         hashlib.sha256(knowledge.encode()).hexdigest() + "\n", encoding="utf-8")
     (repo / "pyproject.toml").write_text('[project]\nname="creator-code-sample"\nversion="0.0.1"\n', encoding="utf-8")
+    if production_compile == "maven-java":
+        (repo / "pom.xml").write_text('''<project xmlns="http://maven.apache.org/POM/4.0.0">
+<modelVersion>4.0.0</modelVersion><groupId>controlled.sample</groupId>
+<artifactId>original-autobiz-boundary</artifactId><version>1.0.0</version>
+<properties><maven.compiler.release>17</maven.compiler.release></properties>
+<build><plugins>
+<plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-resources-plugin</artifactId><version>3.4.0</version></plugin>
+<plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.15.0</version></plugin>
+</plugins></build></project>\n''', encoding="utf-8")
     git(repo, "add", ".")
     git(repo, "commit", "-m", "Initialize controlled backend sample")
     body = {"schemaVersion": "autodev.plan.v2", "featureId": feature, "tasks": []}
@@ -102,7 +112,8 @@ def bash_test(worktree: Path, test_name: str, *, expected: int = 0) -> dict:
 
 
 def run(workspace: Path, feature: str, plugin_root: Path, knowledge: str, expect_observer: bool,
-        phase: str = "run", selected_batch: str | None = None) -> dict:
+        phase: str = "run", selected_batch: str | None = None,
+        production_compile: str | None = None) -> dict:
     from hooks.parallel_batch_scheduler import create_run, schedule
     from hooks.parallel_batch_stage import start_stage, complete_stage, gate_batch
     from hooks.parallel_runtime import acquire_lease, release_lease, load_manifest
@@ -194,8 +205,50 @@ def run(workspace: Path, feature: str, plugin_root: Path, knowledge: str, expect
             '    if isinstance(value, bool) or not isinstance(value, int):\n'
             '        raise ValueError("integer required")\n'
             f"    return {operation}\n")
+        if production_compile == "maven-java":
+            classname = "Delivery" + filename.split(".")[0].title()
+            java_file = worktree / "src/main/java" / (classname + ".java")
+            java_file.parent.mkdir(parents=True, exist_ok=True)
+            java_file.write_text(f"public class {classname} {{\n"
+                "  public static void main(String[] args) {\n"
+                "    long value = Long.parseLong(args[0]);\n"
+                f"    System.out.println({operation});\n  }}\n}}\n", encoding="utf-8")
+            code = ("from pathlib import Path\nimport subprocess\n"
+                f"def {function}(value):\n"
+                '    if isinstance(value, bool) or not isinstance(value, int):\n'
+                '        raise ValueError("integer required")\n'
+                f'    source = Path(__file__).parent / "src/main/java/{classname}.java"\n'
+                '    return int(subprocess.run(["java", str(source), str(value)], check=True,\n'
+                '        capture_output=True, text=True, timeout=30).stdout.strip())\n')
         (worktree / filename).write_text(code, encoding="utf-8")
         observe(f"{batch_id}-implementation-running")
+        compile_receipt = None
+        if production_compile == "maven-java":
+            from hooks.task_runner import prepare_compile, record_compile, TaskRunnerError
+            try:
+                finish_implementation(workspace, feature, task_id, worktree,
+                    started["runId"], no_code_change_why=None, supporting_files=[],
+                    parallel_run_id=run_id, lease_token=token, workspace_ref="default")
+            except TaskRunnerError as error:
+                if "production_compile_result_missing" not in str(error):
+                    raise
+            else:
+                raise ValueError("required_production_compile_gate_was_not_enforced")
+            argv = ["mvn", "-o", "-q", "-DskipTests", "compile"]
+            attempt = prepare_compile(workspace, feature, task_id, worktree, started["runId"],
+                argv=argv, execution_cwd=worktree, parallel_run_id=run_id,
+                lease_token=token, workspace_ref="default")
+            bash = os.environ.get("GIT_BASH_PATH", r"C:\Program Files\Git\bin\bash.exe")
+            compiled = subprocess.run([bash, "-c", " ".join(shlex.quote(a) for a in argv)],
+                cwd=worktree, capture_output=True, text=True, encoding="utf-8", timeout=90)
+            log_path = feature_dir / (batch_id + "-actual-production-compile.log")
+            log_path.write_text(compiled.stdout + compiled.stderr, encoding="utf-8")
+            compile_receipt = record_compile(workspace, feature, task_id, worktree,
+                started["runId"], attempt_id=attempt["attemptId"], exit_code=compiled.returncode,
+                log_exit_code=0, output_file=log_path, parallel_run_id=run_id,
+                lease_token=token, workspace_ref="default")
+            if not compile_receipt.get("passed"):
+                raise ValueError("real_production_compile_failed:" + log_path.read_text("utf-8"))
         ok, implementation = finish_implementation(workspace, feature, task_id, worktree,
             started["runId"], no_code_change_why=None, supporting_files=[],
             parallel_run_id=run_id, lease_token=token, workspace_ref="default")
@@ -275,6 +328,7 @@ def run(workspace: Path, feature: str, plugin_root: Path, knowledge: str, expect
         observe(f"{batch_id}-review-and-actual-test-gated")
         receipt = {"phase": "batch-gated", "runId": run_id, "batchId": batch_id,
             "delivery": deliveries[-1], "negativeFailedTest": negative_failed_test,
+            "productionCompile": compile_receipt,
             "observerSnapshots": snapshots.copy()}
         write_json(batch_receipt_path, receipt)
         if phase == "run-batch":
@@ -294,7 +348,13 @@ def run(workspace: Path, feature: str, plugin_root: Path, knowledge: str, expect
     # retired duplicate candidate verification is not re-created here.
     promoted = checked(promote_candidate(workspace, feature, run_id, wave=1,
         repository_ref=candidate["repositoryRef"], allow_unverified=True))
-    joint = bash_test(repo, "discover")
+    merged_manifest = load_manifest(workspace, feature, run_id)
+    integration = merged_manifest["repositories"][candidate["repositoryRef"]].get("integration")
+    integration_repo = Path(integration["worktreePath"]) if integration else repo
+    integration_repo.resolve(strict=True).relative_to(workspace)
+    if git(integration_repo, "rev-parse", "HEAD") != candidate["candidateSha"]:
+        raise ValueError("actual_integration_head_must_match_promoted_candidate")
+    joint = bash_test(integration_repo, "discover")
     e2e = checked(begin_e2e(workspace, feature, run_id))
     e2e_test = bash_test(Path(e2e["worktrees"][candidate["repositoryRef"]]), "discover")
     finished = checked(finish_e2e(workspace, feature, run_id, passed=True, metadata={
@@ -310,6 +370,7 @@ def run(workspace: Path, feature: str, plugin_root: Path, knowledge: str, expect
         "negativeFailedTest": negative_failed_test,
         "deliveries": deliveries, "candidate": candidate, "promoted": promoted,
         "jointTest": joint, "e2e": finished, "aggregate": aggregate,
+        "integrationWorkspace": str(integration_repo),
         "observerSnapshots": snapshots, "manifest": load_manifest(workspace, feature, run_id),
         "limits": "Real original scheduler/tasks/tests/merge/E2E, deterministic sample source/review; no LLM semantic quality claim"}
     write_json(feature_dir / "creator-code-sample.json", result)
@@ -325,6 +386,7 @@ def main() -> None:
     parser.add_argument("--feature", default="alpha")
     parser.add_argument("--knowledge-text-file", type=Path, required=True)
     parser.add_argument("--expect-observer", choices=("true", "false"), default="true")
+    parser.add_argument("--production-compile", choices=("maven-java",))
     args = parser.parse_args()
     plugin = args.plugin_root.resolve(strict=True)
     workspace = args.workspace.resolve(strict=True)
@@ -336,8 +398,9 @@ def main() -> None:
     sys.path.insert(0, str(plugin))
     if args.command == "run-batch" and args.batch_id is None:
         raise ValueError("run_batch_requires_explicit_batch_id")
-    result = prepare(workspace, args.feature, knowledge) if args.command == "prepare" else run(
-        workspace, args.feature, plugin, knowledge, args.expect_observer == "true", args.command, args.batch_id)
+    result = prepare(workspace, args.feature, knowledge, args.production_compile) if args.command == "prepare" else run(
+        workspace, args.feature, plugin, knowledge, args.expect_observer == "true", args.command,
+        args.batch_id, args.production_compile)
     print(json.dumps(result, ensure_ascii=False))
 
 

@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs"
+import { readdir, readFile } from "node:fs/promises"
 import { join, relative } from "node:path"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
@@ -36,20 +36,40 @@ const FIXED_DECORATIVE_SURFACE_ALLOWANCES: Readonly<Record<string, number>> = {
   "components/ui/toggle-thumb.tsx:bg-[#fff]": 1
 }
 
-function rendererSourceFiles(directory: string): string[] {
-  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(directory, entry.name)
-    if (entry.isDirectory()) return rendererSourceFiles(path)
-    return /\.tsx?$/.test(entry.name) && !entry.name.endsWith(".test.ts") ? [path] : []
-  })
-}
+type RendererFile = { file: string; source: string }
+const FILE_CONCURRENCY = 8
+const isRendererSource = (file: string) => /\.tsx?$/.test(file) && !file.endsWith(".test.ts")
 
-function rendererStyleFiles(directory: string): string[] {
-  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(directory, entry.name)
-    if (entry.isDirectory()) return rendererStyleFiles(path)
-    return entry.name.endsWith(".css") ? [path] : []
-  })
+async function readRendererSnapshot(): Promise<RendererFile[]> {
+  const directories = [RENDERER_ROOT]
+  const files: string[] = []
+  while (directories.length) {
+    const batch = await Promise.all(
+      directories.splice(0, FILE_CONCURRENCY).map(async (directory) => ({
+        directory,
+        entries: await readdir(directory, { withFileTypes: true })
+      }))
+    )
+    for (const { directory, entries } of batch)
+      for (const entry of entries) {
+        const file = join(directory, entry.name)
+        if (entry.isDirectory()) directories.push(file)
+        else if (isRendererSource(file) || file.endsWith(".css")) files.push(file)
+      }
+  }
+  const snapshot: RendererFile[] = []
+  // Bound pending IO and preserve deterministic ordering across assertions and platforms.
+  files.sort()
+  for (let index = 0; index < files.length; index += FILE_CONCURRENCY)
+    snapshot.push(
+      ...(await Promise.all(
+        files.slice(index, index + FILE_CONCURRENCY).map(async (file) => ({
+          file,
+          source: await readFile(file, "utf8")
+        }))
+      ))
+    )
+  return snapshot
 }
 
 function isBrightSurfaceColor(red: number, green: number, blue: number, alpha = 1): boolean {
@@ -57,13 +77,24 @@ function isBrightSurfaceColor(red: number, green: number, blue: number, alpha = 
 }
 
 describe("theme surface policy", () => {
-  let rendererSources: Array<{ file: string; source: string }>
+  let rendererSources: RendererFile[]
+  let rendererStyles: RendererFile[]
+  let rendererContents: Map<string, string>
+  const sourcesUnder = (directory: string) =>
+    rendererSources.filter(
+      ({ file }) => file.startsWith(directory + "/") || file.startsWith(directory + "\\")
+    )
+  const readRendererFile = (file: string) => {
+    const source = rendererContents.get(file)
+    if (source === undefined) throw Error(`Renderer source was not captured: ${file}`)
+    return source
+  }
 
-  beforeAll(() => {
-    rendererSources = rendererSourceFiles(RENDERER_ROOT).map((file) => ({
-      file,
-      source: readFileSync(file, "utf8")
-    }))
+  beforeAll(async () => {
+    const snapshot = await readRendererSnapshot()
+    rendererSources = snapshot.filter(({ file }) => isRendererSource(file))
+    rendererStyles = snapshot.filter(({ file }) => file.endsWith(".css"))
+    rendererContents = new Map(snapshot.map(({ file, source }) => [file, source]))
   })
 
   it("pairs legacy light status surfaces with a dark override", () => {
@@ -85,8 +116,8 @@ describe("theme surface policy", () => {
   })
 
   it("keeps component CSS surfaces on semantic theme tokens", () => {
-    const violations = rendererStyleFiles(RENDERER_ROOT).flatMap((file) => {
-      const css = readFileSync(file, "utf8").replace(HTML_PREVIEW_LIGHT_CANVAS_RULE, "")
+    const violations = rendererStyles.flatMap(({ file, source }) => {
+      const css = source.replace(HTML_PREVIEW_LIGHT_CANVAS_RULE, "")
       const runtimeCss = file.endsWith("index.css")
         ? css.replace(/:root\s*\{[\s\S]*?\n\}/, "")
         : css
@@ -121,9 +152,7 @@ describe("theme surface policy", () => {
   })
 
   it("keeps known rich-content surfaces theme-driven", () => {
-    const css = rendererStyleFiles(RENDERER_ROOT)
-      .map((file) => readFileSync(file, "utf8"))
-      .join("\n")
+    const css = rendererStyles.map(({ source }) => source).join("\n")
     const selectors = [
       ".streaming-markdown-inline-code",
       ".streaming-markdown-code-block",
@@ -146,11 +175,8 @@ describe("theme surface policy", () => {
     const fixedLightCanvas =
       /useDarkTheme=\{false\}|theme:\s*["']github-light["']|\bbg-\[rgba\(255,255,255|\bbg-white\b|\btext-black\b|background(?:Color)?:\s*["'](?:white|#fff(?:fff)?)["']/gi
     const violations = componentRoots.flatMap((root) =>
-      rendererSourceFiles(root).flatMap((file) => {
-        const source = readFileSync(file, "utf8").replace(
-          /dark:(?:hover:)?bg-white(?:\/(?:\[[^\]]+\]|\d+))?/g,
-          ""
-        )
+      sourcesUnder(root).flatMap(({ file, source: content }) => {
+        const source = content.replace(/dark:(?:hover:)?bg-white(?:\/(?:\[[^\]]+\]|\d+))?/g, "")
         return [...source.matchAll(fixedLightCanvas)].map((match) => ({
           file,
           value: match[0]
@@ -167,8 +193,8 @@ describe("theme surface policy", () => {
       /(?:(?:[a-z-]+):)*bg-(?:slate|gray|zinc|stone|neutral)-(?:50|100|200|300|400|500|600|700|800|900|950)(?!\d)(?:\/(?:\[[^\]]+\]|\d+))?|(?:(?:[a-z-]+):)*bg-\[(?:#[0-9a-f]{3,8}|rgba?\([^\]]+\))\](?:\/(?:\[[^\]]+\]|\d+))?|background(?:Color)?\s*:\s*["'](?:#[0-9a-f]{3,8}|rgba?\([^"']+\))["']/gi
     const usageCounts = new Map<string, number>()
     const sourceViolations = componentRoots.flatMap((root) =>
-      rendererSourceFiles(root).flatMap((file) => {
-        const source = readFileSync(file, "utf8").replace(/\{\/\*[\s\S]*?\*\/\}/g, (comment) =>
+      sourcesUnder(root).flatMap(({ file, source: content }) => {
+        const source = content.replace(/\{\/\*[\s\S]*?\*\/\}/g, (comment) =>
           comment.replace(/[^\n]/g, " ")
         )
         const relativeFile = relative(RENDERER_ROOT, file).replace(/\\/g, "/")
@@ -188,8 +214,8 @@ describe("theme surface policy", () => {
     )
 
     const fixedCssSurface = /background(?:-color)?\s*:\s*(#[0-9a-f]{3,8}|rgba?\([^;]+\))\s*;/gi
-    const cssViolations = rendererStyleFiles(RENDERER_ROOT).flatMap((file) => {
-      let css = readFileSync(file, "utf8").replace(HTML_PREVIEW_LIGHT_CANVAS_RULE, "")
+    const cssViolations = rendererStyles.flatMap(({ file, source }) => {
+      let css = source.replace(HTML_PREVIEW_LIGHT_CANVAS_RULE, "")
       if (file.endsWith("index.css")) css = css.replace(/:root\s*\{[\s\S]*?\n\}/, "")
       return [...css.matchAll(fixedCssSurface)].map((match) => ({
         file,
@@ -203,12 +229,12 @@ describe("theme surface policy", () => {
   it("reserves the fixed light canvas for isolated HTML previews", () => {
     const skillsPanelPath = join(RENDERER_ROOT, "components/customize/SkillsPanel.tsx")
     const chatHtmlPreviewPath = join(RENDERER_ROOT, "components/chat/previews/HtmlPreview.tsx")
-    const usages = rendererSourceFiles(RENDERER_ROOT).filter((file) =>
-      readFileSync(file, "utf8").includes("html-preview-light-canvas")
-    )
-    const skillsPanel = readFileSync(skillsPanelPath, "utf8")
-    const chatHtmlPreview = readFileSync(chatHtmlPreviewPath, "utf8")
-    const css = readFileSync(join(RENDERER_ROOT, "index.css"), "utf8")
+    const usages = rendererSources
+      .filter(({ source }) => source.includes("html-preview-light-canvas"))
+      .map(({ file }) => file)
+    const skillsPanel = readRendererFile(skillsPanelPath)
+    const chatHtmlPreview = readRendererFile(chatHtmlPreviewPath)
+    const css = readRendererFile(join(RENDERER_ROOT, "index.css"))
 
     expect(usages).toEqual([chatHtmlPreviewPath, skillsPanelPath])
     expect(skillsPanel).toMatch(
@@ -222,8 +248,8 @@ describe("theme surface policy", () => {
 
   it("keeps inline SVG icons inheriting their semantic text color", () => {
     const invalidCurrentColor = /fill=["']curreColor["']/gi
-    const violations = rendererSourceFiles(RENDERER_ROOT).flatMap((file) =>
-      [...readFileSync(file, "utf8").matchAll(invalidCurrentColor)].map((match) => ({
+    const violations = rendererSources.flatMap(({ file, source }) =>
+      [...source.matchAll(invalidCurrentColor)].map((match) => ({
         file,
         value: match[0]
       }))
@@ -234,8 +260,8 @@ describe("theme surface policy", () => {
 
   it("keeps semantic status text stable on hover", () => {
     const statusHoverText = /(?:hover|group-hover):text-status-(?:critical|warning|nominal|info)\b/g
-    const violations = rendererSourceFiles(RENDERER_ROOT).flatMap((file) =>
-      [...readFileSync(file, "utf8").matchAll(statusHoverText)].map((match) => ({
+    const violations = rendererSources.flatMap(({ file, source }) =>
+      [...source.matchAll(statusHoverText)].map((match) => ({
         file,
         value: match[0]
       }))
@@ -245,12 +271,9 @@ describe("theme surface policy", () => {
   })
 
   it("keeps shared chrome roles separate from accent decoration", () => {
-    const button = readFileSync(join(RENDERER_ROOT, "components/ui/button.tsx"), "utf8")
-    const sidebar = readFileSync(
-      join(RENDERER_ROOT, "components/sidebar/ThreadSidebar.tsx"),
-      "utf8"
-    )
-    const themeCss = readFileSync(join(RENDERER_ROOT, "index.css"), "utf8")
+    const button = readRendererFile(join(RENDERER_ROOT, "components/ui/button.tsx"))
+    const sidebar = readRendererFile(join(RENDERER_ROOT, "components/sidebar/ThreadSidebar.tsx"))
+    const themeCss = readRendererFile(join(RENDERER_ROOT, "index.css"))
 
     expect(button).toContain("bg-button text-button-foreground")
     expect(sidebar).toMatch(
@@ -262,22 +285,16 @@ describe("theme surface policy", () => {
   })
 
   it("keeps embedded code and diagram renderers on shared theme tokens", () => {
-    const codeViewer = readFileSync(join(RENDERER_ROOT, "components/tabs/CodeViewer.tsx"), "utf8")
-    const codeHighlightWorker = readFileSync(
-      join(RENDERER_ROOT, "components/tabs/code-highlight-worker.ts"),
-      "utf8"
+    const codeViewer = readRendererFile(join(RENDERER_ROOT, "components/tabs/CodeViewer.tsx"))
+    const codeHighlightWorker = readRendererFile(
+      join(RENDERER_ROOT, "components/tabs/code-highlight-worker.ts")
     )
-    const scriptEditor = readFileSync(
-      join(RENDERER_ROOT, "components/browser/BrowserScriptEditor.tsx"),
-      "utf8"
+    const scriptEditor = readRendererFile(
+      join(RENDERER_ROOT, "components/browser/BrowserScriptEditor.tsx")
     )
-    const taskMmd = readFileSync(
-      join(RENDERER_ROOT, "components/customize/TaskMmdPanel.tsx"),
-      "utf8"
-    )
-    const claudeCode = readFileSync(
-      join(RENDERER_ROOT, "components/customize/ClaudeCodePanel.tsx"),
-      "utf8"
+    const taskMmd = readRendererFile(join(RENDERER_ROOT, "components/customize/TaskMmdPanel.tsx"))
+    const claudeCode = readRendererFile(
+      join(RENDERER_ROOT, "components/customize/ClaudeCodePanel.tsx")
     )
 
     expect(codeHighlightWorker).toContain("createCssVariablesTheme")
@@ -290,7 +307,7 @@ describe("theme surface policy", () => {
   })
 
   it("keeps file-preview code blocks block-level and padded", () => {
-    const themeCss = readFileSync(join(RENDERER_ROOT, "index.css"), "utf8")
+    const themeCss = readRendererFile(join(RENDERER_ROOT, "index.css"))
     const rule = themeCss.match(/\.markdown-preview code\.hljs\s*\{([^}]+)\}/)?.[1]
     const markup = renderToStaticMarkup(
       createElement(MarkdownPreview, {
@@ -309,8 +326,8 @@ describe("theme surface policy", () => {
   })
 
   it("keeps Recharts tooltip text paired with its themed surface", () => {
-    const dashboardSource = rendererSourceFiles(join(RENDERER_ROOT, "components/dashboard"))
-      .map((file) => readFileSync(file, "utf8"))
+    const dashboardSource = sourcesUnder(join(RENDERER_ROOT, "components/dashboard"))
+      .map(({ source }) => source)
       .join("\n")
     const themedTooltipSurfaces = [
       ...dashboardSource.matchAll(/backgroundColor:\s*["']var\(--color-card\)["']([\s\S]{0,180})/g)
@@ -323,7 +340,7 @@ describe("theme surface policy", () => {
   })
 
   it("keeps the embedded diff viewer connected to the active theme", () => {
-    const source = readFileSync(join(RENDERER_ROOT, "components/chat/DiffDisplay.tsx"), "utf8")
+    const source = readRendererFile(join(RENDERER_ROOT, "components/chat/DiffDisplay.tsx"))
 
     expect(source).not.toContain("useDarkTheme={false}")
     expect(source).not.toMatch(/diffViewerBackground:\s*["']#fff(?:fff)?["']/i)
@@ -333,7 +350,7 @@ describe("theme surface policy", () => {
   })
 
   it("keeps the global toaster connected to the active application theme", () => {
-    const source = readFileSync(join(RENDERER_ROOT, "App.tsx"), "utf8")
+    const source = readRendererFile(join(RENDERER_ROOT, "App.tsx"))
 
     expect(source).toContain("subscribeThemePreference")
     expect(source).toContain("getThemeDefinition(themePreference).colorScheme")
@@ -342,7 +359,7 @@ describe("theme surface policy", () => {
   })
 
   it("keeps context reminders distinct from ordinary unread indicators", () => {
-    const source = readFileSync(join(RENDERER_ROOT, "components/sidebar/ThreadSidebar.tsx"), "utf8")
+    const source = readRendererFile(join(RENDERER_ROOT, "components/sidebar/ThreadSidebar.tsx"))
     const reminderPattern =
       /hasContextReminder(?:Thread)?[\s\S]{0,180}?<span\s+className="([^"]*\bsize-2\b[^"]*)"/g
     const unreadPattern =
@@ -359,11 +376,8 @@ describe("theme surface policy", () => {
   })
 
   it("keeps merged right-panel sizing and chat notices theme-aware", () => {
-    const rightPanel = readFileSync(join(RENDERER_ROOT, "components/panels/RightPanel.tsx"), "utf8")
-    const chatContainer = readFileSync(
-      join(RENDERER_ROOT, "components/chat/ChatContainer.tsx"),
-      "utf8"
-    )
+    const rightPanel = readRendererFile(join(RENDERER_ROOT, "components/panels/RightPanel.tsx"))
+    const chatContainer = readRendererFile(join(RENDERER_ROOT, "components/chat/ChatContainer.tsx"))
 
     expect(rightPanel).toContain("const workspacePanelRef = useRef<HTMLDivElement>(null)")
     expect(rightPanel).toContain("workspacePanelRef.current.clientHeight")

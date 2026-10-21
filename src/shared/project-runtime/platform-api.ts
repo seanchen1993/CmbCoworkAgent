@@ -24,6 +24,7 @@ export type LocalProjectCommand =
       expectedVersion: number
       inputFingerprint: string
       decision: "approved" | "rejected"
+      contextProviderApproval?: import("./host-types").HostContextProviderApproval
     }
   | { kind: "start" | "validate" | "advance" | "cancel" | "reconcile"; operationId: string }
 
@@ -44,6 +45,8 @@ export interface LocalProjectApi {
     workspace: string
     installedPluginId: string
     goal: string
+    expectedPlugin?: import("../plugin-start-use").PluginStartUseIdentity
+    startUseScope?: import("../plugin-derivation").PluginDerivationScope
   }): Promise<LocalProjectView>
   command(projectId: string, command: LocalProjectCommand): Promise<LocalProjectView>
 }

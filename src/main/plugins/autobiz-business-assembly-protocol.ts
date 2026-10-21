@@ -6,6 +6,8 @@ import mergeReviewed from "./autobiz-business-kernel-merge-reviewed.json"
 import wakeupReviewed from "./autobiz-business-kernel-wakeup-reviewed.json"
 import specRoleReviewed from "./autobiz-business-kernel-spec-role-reviewed.json"
 import utestLiteralReviewed from "./autobiz-business-kernel-utest-literal-reviewed.json"
+import original234Reviewed from "./autobiz-business-kernel-original-234-reviewed.json"
+import original234PreparationReviewed from "./autobiz-business-kernel-original-234-delivery-reviewed.json"
 import reviewedWorkflow from "./autobiz-business-routing-reviewed.json"
 import { projectBusinessModNodes, projectBusinessModWorkflowRouting } from "./business-mod-workflow"
 import {
@@ -20,6 +22,7 @@ import {
 } from "../../shared/project-runtime"
 import { AUTOBIZ_CONTEXT_OUTPUT } from "../../shared/project-runtime/autobiz-handoff"
 import { assertProjectNodeAgentResources } from "./project-agent-resources"
+import { assertBusinessModStageRecoveryProjection } from "./business-mod-stage-recovery"
 
 interface Snapshot {
   files: readonly { path: string; bytes: Buffer }[]
@@ -30,10 +33,19 @@ export interface ReviewedBusinessKernel {
   inspectCommandsDigest: string
   files: Array<{ path: string; digest: string }>
   modules: Record<string, { definitionDigest: string; files: Record<string, string> }>
+  workflow?: Record<string, unknown>
 }
 // Each independently reviewed version pins its complete byte closure. Never accept a profile
 // supplied by a plugin or infer trust from a newer version number.
-const reviewedKernels: readonly ReviewedBusinessKernel[] = [reviewed, mergeReviewed, wakeupReviewed, specRoleReviewed, utestLiteralReviewed]
+const reviewedKernels: readonly ReviewedBusinessKernel[] = [
+  reviewed,
+  mergeReviewed,
+  wakeupReviewed,
+  specRoleReviewed,
+  utestLiteralReviewed,
+  original234Reviewed,
+  original234PreparationReviewed
+]
 const digest = (value: Buffer | string) => createHash("sha256").update(value).digest("hex")
 const canonical = (value: unknown): unknown =>
   Array.isArray(value)
@@ -128,6 +140,7 @@ export function verifyReviewedBusinessAssembly(
       if (row.path === BUSINESS_MOD_ASSEMBLY || !bytes || digest(bytes) !== row.digest) return false
     }
     const catalog = parseBusinessModCatalog(json(files, BUSINESS_MOD_MANIFEST))
+    const recoveryEntry = assertBusinessModStageRecoveryProjection(catalog, files)
     assertAutobizRuntime(catalog.kernel?.runtime)
     if (
       !catalog.kernel ||
@@ -151,6 +164,7 @@ export function verifyReviewedBusinessAssembly(
         expected.filter((row) => row.path.endsWith(".py")).map((row) => row.path)
       )
     const userSkills: string[] = []
+    if (recoveryEntry) allowedPython.add(recoveryEntry)
     for (const [index, raw] of mods.entries()) {
       const mod = object(raw),
         definition = catalog.modules[index]
@@ -179,16 +193,20 @@ export function verifyReviewedBusinessAssembly(
       )
         return false
       const original = kernel.modules[definition.id]
-      const agentResources = assertProjectNodeAgentResources(definition.node, path => files.get(path))
+      const agentResources = assertProjectNodeAgentResources(definition.node, (path) =>
+        files.get(path)
+      )
       if (original) {
         if (digest(JSON.stringify(canonical(definition))) !== original.definitionDigest)
           return false
         for (const path of agentResources) {
           const pins = [
-            ...kernel.files.filter(file => file.path === path).map(file => file.digest),
-            ...Object.values(kernel.modules).flatMap(module => module.files[path] ? [module.files[path]] : [])
+            ...kernel.files.filter((file) => file.path === path).map((file) => file.digest),
+            ...Object.values(kernel.modules).flatMap((module) =>
+              module.files[path] ? [module.files[path]] : []
+            )
           ]
-          if (!pins.length || pins.some(pin => pin !== digest(files.get(path)!))) return false
+          if (!pins.length || pins.some((pin) => pin !== digest(files.get(path)!))) return false
         }
         for (const [path, expectedDigest] of Object.entries(original.files)) {
           const bytes = files.get(path)
@@ -207,8 +225,13 @@ export function verifyReviewedBusinessAssembly(
         )
           return false
         const skillRoot = definition.skill.entry.slice(0, -"/SKILL.md".length) + "/"
-        if (agentResources.some(path => !path.startsWith(skillRoot) &&
-          !path.startsWith(`mods/business/${definition.id}/`))) return false
+        if (
+          agentResources.some(
+            (path) =>
+              !path.startsWith(skillRoot) && !path.startsWith(`mods/business/${definition.id}/`)
+          )
+        )
+          return false
         userSkills.push(`skills/${String(definition.node.skill)}/`)
       }
     }
@@ -250,6 +273,7 @@ export function verifyReviewedBusinessAssembly(
       for (const resource of [
         definition.entry,
         ...definition.resources,
+        ...(definition.stageRecoveryAdapter ? [definition.stageRecoveryAdapter.entry] : []),
         ...(definition.skills ?? [])
       ]) {
         if (
@@ -311,13 +335,22 @@ export function verifyReviewedBusinessAssembly(
       const contract = projectRuntimeExtensionContract(runtime)
       const manifest = parseProjectRuntimeManifest(runtime)
       if (contract?.verifiedArtifacts) {
-        const outputs = catalog.modules.flatMap(mod => {
+        const outputs = catalog.modules.flatMap((mod) => {
           const artifacts = object(mod.node.artifacts ?? {})
           return Array.isArray(artifacts.outputs) ? artifacts.outputs.map(object) : []
         })
-        if (manifest.mode !== "legacy" || !manifest.artifacts.some(output =>
-          output.id === AUTOBIZ_CONTEXT_OUTPUT.id && output.path === AUTOBIZ_CONTEXT_OUTPUT.path && output.required) ||
-          contract.verifiedArtifacts.artifactIds.some(id => outputs.filter(output => output.id === id).length !== 1))
+        if (
+          manifest.mode !== "legacy" ||
+          !manifest.artifacts.some(
+            (output) =>
+              output.id === AUTOBIZ_CONTEXT_OUTPUT.id &&
+              output.path === AUTOBIZ_CONTEXT_OUTPUT.path &&
+              output.required
+          ) ||
+          contract.verifiedArtifacts.artifactIds.some(
+            (id) => outputs.filter((output) => output.id === id).length !== 1
+          )
+        )
           return false
       }
       if (
@@ -360,7 +393,10 @@ export function verifyReviewedBusinessAssembly(
         (profile) => profile.id === kernel.id && profile.version === kernel.version
       )
     ) {
-      const projected = projectBusinessModWorkflow(catalog.modules, reviewedWorkflow)
+      const projected = projectBusinessModWorkflow(
+        catalog.modules,
+        kernel.workflow ?? reviewedWorkflow
+      )
       if (!projected.requiresFixedWorkflowAcknowledgement) routes.push(projected)
     }
     if (

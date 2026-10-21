@@ -11,7 +11,7 @@ import type { ElectronApplication, Page } from "playwright"
 import { compositionEnvironment } from "./support/mods-composition-fixtures"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
 import { waitForAsyncEvidence } from "./support/async-evidence"
-import { openModsAdvancedSettings } from "./support/mods-sidebar-navigation"
+import { enterModsCreatorChat, openModsAdvancedSettings } from "./support/mods-sidebar-navigation"
 import {
   derivationContentIdentity,
   snapshotDerivationSource
@@ -219,6 +219,10 @@ async function main() {
     })
     page = await app.firstWindow()
     page.setDefaultTimeout(30000)
+    await page.addLocatorHandler(
+      page.locator('[aria-label="插件创作使用指引"], [aria-label="应用使用指引"]').first(),
+      async (guide) => guide.getByRole("button", { name: "跳过指引", exact: true }).click()
+    )
     page.on("pageerror", (error) => errors.push(error.message))
     await page.waitForFunction(() =>
       Boolean(window.api?.pluginDerivation && window.api?.nodeComposition)
@@ -273,14 +277,13 @@ async function main() {
     )
     await page.reload()
     await page.getByText("描述需求制作与节点组合验收", { exact: true }).first().click()
+    await enterModsCreatorChat(page, threadId, workspace)
     await openModsAdvancedSettings(page, "灵件管理")
     await page
       .getByRole("navigation", { name: "灵件工作区" })
       .getByRole("button", { name: "对话创作", exact: true })
       .click()
-    await page
-      .getByRole("button", { name: "高级：手动组装、源码与历史版本", exact: true })
-      .click()
+    await page.getByRole("button", { name: "高级：手动组装、源码与历史版本", exact: true }).click()
     await page.getByRole("button", { name: "从已有插件创建", exact: true }).click()
     const panel = page.getByRole("region", { name: "从已有插件创建", exact: true })
     await panel.getByLabel("选择原插件").selectOption(originalPlugin.id)

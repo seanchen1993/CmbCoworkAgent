@@ -22,7 +22,7 @@ import { waitForOriginalWorkflowTerminal } from "./support/full-app-workflow-wai
 import { endFullAppModelError, flushFullAppSseHeaders } from "./support/full-app-sse-headers"
 import { readFullAppTerminalEvidence } from "./support/full-app-terminal-evidence"
 import { modelText, originalWorkflowLauncherArguments, originalWorkflowWorkerReply,
-  shellQuote, toolJson, workflowWorkerSteps,
+  shellQuote, toolJson, workflowWorkerSteps, originalFullAppProfile, originalMainPromotionArguments,
   type FullAppStep } from "./support/autobiz-full-app-model"
 import { createHeadlessProjectCompositionLaunch, projectCompositionCandidate,
   projectCompositionEnvironment } from "./support/project-composition-e2e-fixtures"
@@ -45,11 +45,13 @@ const metadata = JSON.parse(zip.readAsText("plugin.json"))
 const boardBytes = zip.readFile("board_core/board_config.json")!
 const board = JSON.parse(boardBytes.toString("utf8"))
 const envelope = JSON.parse(zip.readAsText("devclaw.project-runtime.json"))
+const packageProfile = originalFullAppProfile(JSON.parse(zip.readAsText("devclaw.business-assembly.json")).kernel)
 assert.deepEqual(board.workflow.nodes.map((node: { id: string }) => node.id), [
   "biz.prd", "dev.specs", "dev.design", "dev.plan", "dev.code", "ops.cicd", "ops.archive"
 ])
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex")
-const sample = resolve("tests/support/autobiz-full-app-sample.py")
+const sample = resolve(packageProfile.parentSample)
+const workerSample = resolve(packageProfile.workerSample)
 const feature = "app-complete"
 const rule = "FULL_APP_KNOWLEDGE_RULE: integer-only APIs; booleans/text rejected; negative values tested; local evidence only; enterprise acceptance needs_review."
 const knowledge = join(fixture.isolated, "knowledge"), knowledgeFile = join(knowledge, "sample-context.txt")
@@ -71,8 +73,11 @@ fixture.env.NODE_OPTIONS = `--require "${network.replaceAll("\\", "/")}"`
 const requests: unknown[] = [], errors: string[] = [], approvals: unknown[] = [], workflowRuns: unknown[] = []
 const evidence: Record<string, unknown> = { passed: false, candidate, archive,
   archiveSha256: hash(archiveBytes), sampleSha256: hash(readFileSync(sample)),
+  workerSampleSha256: hash(readFileSync(workerSample)), packageProfile,
   stageTimeoutMs: 90000, overallWatchdogMs: 900000,
-  originalVersionLimit: "Frozen1.0.1 default5worker+2Batch original dispatcher requests three30minute waits after real lifecycles finish; independently reproduced without advancing virtual time. This case uses separately reviewed1.0.3 source preserving the1.0.2 completion wakeup and correcting the original Specs role; it never changes original wait constants at runtime.",
+  originalVersionLimit: packageProfile.requiresPromotion
+    ? "Exact supplied 234-file source / original plugin 1.0.87, independently reviewed author kernel 1.0.3. Native five-role Workflow, production compile/evidence and explicit integration promotion are preserved. No runtime patch or altered wait constants."
+    : "Frozen1.0.1 default5worker+2Batch original dispatcher requests three30minute waits after real lifecycles finish; independently reproduced without advancing virtual time. This case uses separately reviewed1.0.3 source preserving the1.0.2 completion wakeup and correcting the original Specs role; it never changes original wait constants at runtime.",
   limits: "Controlled local model/sample code and approval harness; original native execution, Python checks, Git/merge and archive. No enterprise CI or human business acceptance claim." }
 type Message = { role: string; content: unknown; tool_call_id?: string }
 type Call = { actor: string; step: FullAppStep }
@@ -132,7 +137,11 @@ function parentProgram(skill: string, skillPath: string): FullAppStep[] {
         assert.equal(workflowTerminal.status, "completed")
         assert(workflowTerminal.agents.every(agent => agent.status === "completed"),
           "No errored/cached child may masquerade as a successful native execution")
-        assert.equal(toolJson(workflowTerminal.result).finalStatus, "succeeded")
+        const terminal = toolJson(workflowTerminal.result)
+        assert.equal(terminal.finalStatus, packageProfile.workflowTerminal)
+        if (packageProfile.requiresPromotion)
+          steps.push(execute("original-explicit-main-promotion", join(source, "hooks/parallel_integration.py"),
+            originalMainPromotionArguments(terminal, feature)))
         steps.push(checkpoint("code_done"))
       }
     }
@@ -197,6 +206,13 @@ const server = createServer(async (request, response) => {
               scope: "Actual original launcher output and original call; not a whole-Code4h deadline" }
           }
         }
+        if (call.step.key === "original-explicit-main-promotion") {
+          const actual = toolJson(content)
+          assert.equal(actual.success, true)
+          assert.equal(actual.status, "succeeded")
+          assert.equal(actual.runId, toolJson(workflowTerminal!.result).runId)
+          evidence.nativePromotion = actual
+        }
         if (call.step.key === "read-real-production-source")
           assert(content.includes('raise ValueError("integer required")'), "Review must receive actual source")
         if (call.step.key === "original-specs-task") {
@@ -224,7 +240,7 @@ const server = createServer(async (request, response) => {
         step = steps.find(item => !done.has(item.key))
         delta = { role: "assistant", content: `${specsReportMarker}\n## 现有能力\n${join(workspace, "existing_input.py")}:2 使用type(value) is not int拒绝布尔和文本；:4 原样保留负整数。\n## 需求约束\n${rule}\n来源：${join(knowledge, "CALC/rules.md")}。\n## 信息缺口\n未找到加一和乘二实现，需要父步骤根据真实需求生成Specs。` }
       } else if (worker) {
-        const plan = workflowWorkerSteps({ prompt, source, workspace, feature, sample })
+        const plan = workflowWorkerSteps({ prompt, source, workspace, feature, sample: workerSample })
         if (["implementation", "review", "utest", "e2e"].includes(plan.kind))
           plan.steps.unshift(read("chosen-knowledge-rule", join(knowledge, "CALC/rules.md")))
         step = plan.steps.find(item => !done.has(item.key))
@@ -558,7 +574,8 @@ async function main() {
     const plans = JSON.parse(readFileSync(join(archived, "plan.json"), "utf8"))
     const terminalEvidence = readFullAppTerminalEvidence({ workspace, archived,
       repository: join(workspace, "repositories/creator-code"), workflow: workflowTerminal,
-      submissions: evidence.structuredOutputSubmissions as unknown[] })
+      submissions: evidence.structuredOutputSubmissions as unknown[],
+      ...(packageProfile.requiresPromotion ? { promotion: evidence.nativePromotion } : {}) })
     const manifest = terminalEvidence.manifest
     evidence.nativeTerminalProjection = terminalEvidence
     assert([...outputs.values()].some(row => row.negativeFailedTest), "Real failed UTest and original gate rejection required")
@@ -568,8 +585,14 @@ async function main() {
       item.step.key === "actual-original-implementation")
     assert.equal(actualImplementations.length, 2, "Exactly two original implementation child HTTP calls")
     assert.equal(new Set(actualImplementations.map(item => item.actor)).size, 2)
-    const implementationFacts = [...outputs.values()].filter(row => row.actualGitWorktree)
+    const implementationFacts = [...outputs.values()].filter(row => packageProfile.requiresPromotion
+      ? row.actualProductionCompile : row.actualGitWorktree)
     assert.equal(implementationFacts.length, 2)
+    if (packageProfile.requiresPromotion) for (const implementation of implementationFacts) {
+      assert.equal((implementation.actualProductionCompile as Record<string, unknown>).passed, true)
+      assert.equal(implementation.negativeMissingCompile, true)
+      assert.equal(implementation.negativeUnauthorizedWrite, true)
+    }
     evidence.result = { latest, workflow: workflowTerminal, state, plans, manifest,
       childModelRequests: actualChildren.length, archive: archived,
       actualImplementationChildren: actualImplementations, workerToolOutputs: Object.fromEntries(outputs) }

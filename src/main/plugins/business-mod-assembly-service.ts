@@ -8,7 +8,7 @@ import {
   renameSync,
   writeFileSync
 } from "node:fs"
-import { lstat, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import AdmZip from "adm-zip"
 import type {
@@ -30,6 +30,7 @@ import {
 import { businessModCatalog } from "./business-mod-manifest"
 import { assembleBusinessMods } from "./business-mod-assembler"
 import { describeBusinessModAssemblyRuntime } from "./business-mod-assembly-adapter"
+import { observeProjectDeliveryExport } from "./plugin-delivery-observation"
 
 interface InspectionRecord {
   owner: string
@@ -48,22 +49,28 @@ interface CopyRecord extends BusinessModCopy {
   owner: string
   requestId: string
   previewId: string
-  installation?: { pluginId: string; digest: string }
+  installation?: { pluginId: string; digest: string; observedAbsent?: true }
   exportIntent?: {
     output: string
     digest: string
     archiveDigest: string
     bytes: number
     completed?: true
+    observedAbsent?: true
   }
 }
 export type BusinessModObservation =
   | { outcome: "installed"; pluginId: string }
   | { outcome: "exported"; output: string }
   | { outcome: "unknown"; reason: string }
+  | { outcome: "not-executed" | "conflict"; reason: string }
 const uuid = /^[a-f0-9-]{36}$/
 const ttl = 10 * 60_000
-const pathIdentity = (path: string) => (process.platform === "win32" ? path.toLowerCase() : path)
+const notStartedErrors = new WeakSet<object>()
+/** A host-only fact, never accepted from an error message, renderer object or plugin declaration. */
+export function isBusinessModPublicationNotStarted(error: unknown): boolean {
+  return !!error && typeof error === "object" && notStartedErrors.has(error)
+}
 
 /** Host-owned materialization/installation transactions. Renderer never chooses a source file path. */
 export class BusinessModAssemblyService {
@@ -94,7 +101,9 @@ export class BusinessModAssemblyService {
         (record.exportOnly !== undefined && typeof record.exportOnly !== "boolean") ||
         (record.installation !== undefined &&
           (!uuid.test(record.installation.pluginId) ||
-            record.installation.digest !== record.digest)) ||
+            record.installation.digest !== record.digest ||
+            (record.installation.observedAbsent !== undefined &&
+              record.installation.observedAbsent !== true))) ||
         (record.exportIntent !== undefined &&
           (typeof record.exportIntent.output !== "string" ||
             !record.exportIntent.output ||
@@ -103,6 +112,8 @@ export class BusinessModAssemblyService {
             !Number.isSafeInteger(record.exportIntent.bytes) ||
             record.exportIntent.bytes < 1 ||
             record.exportIntent.bytes > 80 * 1024 * 1024 ||
+            (record.exportIntent.observedAbsent !== undefined &&
+              record.exportIntent.observedAbsent !== true) ||
             (record.exportIntent.completed !== undefined &&
               record.exportIntent.completed !== true)))
       )
@@ -385,6 +396,44 @@ export class BusinessModAssemblyService {
       if ((await snapshotDerivationSource(before.root)).digest !== expectedDigest)
         throw Error("检查期间生成插件已变化")
       guard()
+      // Readback alone never rearms publication. A newly requested check must re-observe absence
+      // before retiring the previous attempt identity and accepting a new explicit confirmation.
+      if (record.installation && !record.pluginId && record.status !== "installed") {
+        const observation = await this.deps.observeInstallation?.(
+          {
+            pluginId: record.installation.pluginId,
+            name: record.name,
+            version: record.version,
+            digest: derivationContentIdentity(before.files)
+          },
+          guard
+        )
+        guard()
+        if (observation?.outcome === "installed") {
+          record.pluginId = record.installation.pluginId
+          record.status = "installed"
+        } else if (observation?.outcome === "not-executed") delete record.installation
+        else throw Error("BUSINESS_MOD_INSTALL_UNCONFIRMED")
+      }
+      if (
+        record.exportIntent &&
+        (!record.exportIntent.completed || record.exportIntent.observedAbsent)
+      ) {
+        const observation = await observeProjectDeliveryExport(
+          {
+            output: record.exportIntent.output,
+            digest: record.exportIntent.archiveDigest,
+            bytes: record.exportIntent.bytes
+          },
+          guard
+        )
+        guard()
+        if (observation.outcome === "exported") {
+          record.exportIntent.completed = true
+          delete record.exportIntent.observedAbsent
+        } else if (observation.outcome === "not-executed") delete record.exportIntent
+        else throw Error("BUSINESS_MOD_EXPORT_UNCONFIRMED")
+      }
       record.status = record.status === "installed" ? "installed" : "checked"
       this.persist(record)
       return this.view(record)
@@ -410,6 +459,7 @@ export class BusinessModAssemblyService {
     expectedDigest: string,
     guard: () => void
   ): Promise<BusinessModCopy> {
+    let publicationStarted = false
     return this.locked(async () => {
       const record = this.record(owner, copyId)
       guard()
@@ -435,6 +485,7 @@ export class BusinessModAssemblyService {
         // Record the original install UUID before the original installer can change external state.
         record.installation = { pluginId, digest: expectedDigest }
         this.persist(record)
+        publicationStarted = true
         const result = await this.deps.install(
           temporary,
           record.name,
@@ -462,6 +513,16 @@ export class BusinessModAssemblyService {
         )
           await rm(temporary, { recursive: true, force: true })
       }
+    }).catch((error) => {
+      if (error && typeof error === "object") {
+        if (
+          !publicationStarted &&
+          !(error instanceof Error && error.message === "BUSINESS_MOD_INSTALL_UNCONFIRMED")
+        )
+          notStartedErrors.add(error)
+        else notStartedErrors.delete(error)
+      }
+      throw error
     })
   }
   export(
@@ -471,6 +532,7 @@ export class BusinessModAssemblyService {
     outputFile: string,
     guard: () => void
   ): Promise<BusinessModExport> {
+    let publicationStarted = false
     return this.locked(async () => {
       const record = this.record(owner, copyId)
       guard()
@@ -480,7 +542,10 @@ export class BusinessModAssemblyService {
       if (snapshot.digest !== expectedDigest) throw Error("导出内容与已检查插件不一致")
       const output = resolve(outputFile)
       if (!output.toLowerCase().endsWith(".zip")) throw Error("请选择新的 ZIP 文件")
-      if (record.exportIntent && !record.exportIntent.completed)
+      if (
+        record.exportIntent &&
+        (!record.exportIntent.completed || record.exportIntent.observedAbsent)
+      )
         throw Error("BUSINESS_MOD_EXPORT_UNCONFIRMED")
       const zip = new AdmZip()
       for (const file of snapshot.files) zip.addFile(file.path, file.bytes, "", file.mode & 0o777)
@@ -496,6 +561,7 @@ export class BusinessModAssemblyService {
         bytes: bytes.length
       }
       this.persist(record)
+      publicationStarted = true
       try {
         await writeFile(output, bytes, { flag: "wx" })
       } catch (error) {
@@ -509,6 +575,16 @@ export class BusinessModAssemblyService {
       record.exportIntent.completed = true
       this.persist(record)
       return { output, digest: expectedDigest, files: snapshot.files.length }
+    }).catch((error) => {
+      if (error && typeof error === "object") {
+        if (
+          !publicationStarted &&
+          !(error instanceof Error && error.message === "BUSINESS_MOD_EXPORT_UNCONFIRMED")
+        )
+          notStartedErrors.add(error)
+        else notStartedErrors.delete(error)
+      }
+      throw error
     })
   }
   /** Observe only host journaled identities. This never retries installation or ZIP publication. */
@@ -532,6 +608,39 @@ export class BusinessModAssemblyService {
           const pluginId = record.installation?.pluginId ?? record.pluginId
           if (!pluginId)
             return { outcome: "unknown", reason: "BUSINESS_MOD_INSTALL_IDENTITY_MISSING" }
+          if (this.deps.observeInstallation) {
+            const observed = await this.deps.observeInstallation(
+              {
+                pluginId,
+                name: record.name,
+                version: record.version,
+                digest: derivationContentIdentity(source.files)
+              },
+              guard
+            )
+            guard()
+            if ((await snapshotDerivationSource(source.root)).digest !== expectedDigest)
+              return { outcome: "conflict", reason: "BUSINESS_MOD_COPY_CHANGED" }
+            if (observed.outcome === "installed") {
+              record.pluginId = pluginId
+              record.status = "installed"
+              this.persist(record)
+              return { outcome: "installed", pluginId }
+            }
+            if (observed.outcome === "not-executed") {
+              if (record.status === "installed" || record.pluginId)
+                return { outcome: "conflict", reason: "BUSINESS_MOD_INSTALLED_COPY_MISSING" }
+              if (!record.installation)
+                return { outcome: "unknown", reason: "BUSINESS_MOD_INSTALL_IDENTITY_MISSING" }
+              record.installation.observedAbsent = true
+              this.persist(record)
+              return { outcome: "not-executed", reason: "BUSINESS_MOD_INSTALL_NOT_PRESENT" }
+            }
+            return {
+              outcome: observed.outcome === "conflict" ? "conflict" : "unknown",
+              reason: observed.reason ?? "BUSINESS_MOD_INSTALL_OBSERVATION_UNAVAILABLE"
+            }
+          }
           const matches = this.deps.plugins().filter((item) => item.id === pluginId)
           if (matches.length !== 1 || matches[0].name !== record.name || !matches[0].path)
             return { outcome: "unknown", reason: "BUSINESS_MOD_INSTALL_IDENTITY_UNCONFIRMED" }
@@ -560,53 +669,26 @@ export class BusinessModAssemblyService {
         const intent = record.exportIntent
         if (!intent || resolve(operation.output) !== intent.output)
           return { outcome: "unknown", reason: "BUSINESS_MOD_EXPORT_IDENTITY_MISSING" }
-        const output = resolve(intent.output),
-          stat = await lstat(output)
-        if (
-          !stat.isFile() ||
-          stat.isSymbolicLink() ||
-          stat.nlink !== 1 ||
-          stat.size !== intent.bytes ||
-          pathIdentity(await realpath(output)) !== pathIdentity(output)
+        const output = resolve(intent.output)
+        const observed = await observeProjectDeliveryExport(
+          {
+            output,
+            digest: intent.archiveDigest,
+            bytes: intent.bytes
+          },
+          guard
         )
-          return { outcome: "unknown", reason: "BUSINESS_MOD_EXPORT_CONTENT_CHANGED" }
-        const handle = await open(output, "r")
-        try {
-          const before = await handle.stat()
-          if (before.ino !== stat.ino || before.dev !== stat.dev || before.size !== intent.bytes)
-            return { outcome: "unknown", reason: "BUSINESS_MOD_OBSERVATION_CHANGED" }
-          const bytes = Buffer.alloc(intent.bytes)
-          let offset = 0
-          while (offset < bytes.length) {
-            const read = await handle.read(
-              bytes,
-              offset,
-              Math.min(1024 * 1024, bytes.length - offset),
-              offset
-            )
-            if (!read.bytesRead)
-              return { outcome: "unknown", reason: "BUSINESS_MOD_EXPORT_CONTENT_CHANGED" }
-            offset += read.bytesRead
-          }
-          const after = await handle.stat(),
-            current = await lstat(output)
-          guard()
-          if (
-            after.ino !== before.ino ||
-            after.size !== before.size ||
-            after.mtimeMs !== before.mtimeMs ||
-            current.isSymbolicLink() ||
-            current.ino !== before.ino ||
-            current.dev !== before.dev ||
-            current.nlink !== 1 ||
-            pathIdentity(await realpath(output)) !== pathIdentity(output) ||
-            createHash("sha256").update(bytes).digest("hex") !== intent.archiveDigest
-          )
-            return { outcome: "unknown", reason: "BUSINESS_MOD_EXPORT_CONTENT_CHANGED" }
-        } finally {
-          await handle.close()
-        }
         guard()
+        if (observed.outcome === "not-executed") {
+          intent.observedAbsent = true
+          this.persist(record)
+          return { outcome: "not-executed", reason: "BUSINESS_MOD_EXPORT_NOT_PRESENT" }
+        }
+        if (observed.outcome !== "exported")
+          return {
+            outcome: observed.outcome === "conflict" ? "conflict" : "unknown",
+            reason: observed.reason ?? "BUSINESS_MOD_EXPORT_CONTENT_CHANGED"
+          }
         if (!intent.completed) {
           intent.completed = true
           this.persist(record)

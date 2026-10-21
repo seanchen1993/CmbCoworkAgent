@@ -12,7 +12,7 @@ import {
 } from "../plugins/runtime-source-scope"
 import { startOwnedHookCommand } from "./owned-command"
 import { findHookProcessCleanupError } from "./owned-process-error"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import * as chardet from "jschardet"
@@ -41,6 +41,9 @@ import { isCreatorBudgetError, readCreatorBudgetErrorCode } from "../mods/devtoo
 import { readHookModelAccounting, type HookModelAccounting } from "./model-accounting"
 import { assertStageDebugToolCall } from "../harness-board/project-runtime/stage-debug-policy"
 import { HookHaltError } from "./halt"
+import { assertStageRecoveryHookSupported } from "../harness-board/project-runtime/stage-recovery-policy"
+import { prepareStageRecoveryCommand } from "./stage-recovery-command"
+import { beginStageRecoveryHook, type StageRecoveryHookSettlement } from "./stage-recovery-journal"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -806,6 +809,30 @@ async function executeCommandHook(
     cmd = "/bin/sh"
     args = ["-c", command]
   }
+  const source = currentRuntimePluginSource()
+  let recoveryCleanup: (() => Promise<void>) | undefined
+  if (source?.stageDebug) {
+    if (!source.stageDebug.commandHooks) throw Error("PROJECT_STAGE_DEBUG_COMMAND_CONFIRMATION_REQUIRED")
+    const plan = await prepareStageRecoveryCommand({
+      workspace: source.stageDebug.workspace,
+      snapshotRoot: source.plugin.path,
+      policy: source.stageDebug.commandHooks,
+      env,
+      shell: cmd,
+      args,
+      windowsShellCommand,
+      stdin: stdinPayload,
+      commandCwd: cwd,
+      guard: assertCurrentRuntimePluginSourceContent,
+      signal
+    })
+    cmd = plan.executable
+    args = plan.args
+    cwd = plan.cwd
+    env = plan.env
+    recoveryCleanup = plan.cleanup
+    windowsShellCommand = undefined
+  }
   const stdout: Buffer[] = [], stderr: Buffer[] = []
   let outputBytes = 0, outputTruncated = false, timedOut = false
   const collect = (target: Buffer[], chunk: Buffer): void => {
@@ -817,12 +844,22 @@ async function executeCommandHook(
     } else target.push(chunk)
   }
   let owned: ReturnType<typeof startOwnedHookCommand>
+  let recoveryJournal: StageRecoveryHookSettlement | undefined
+  const settleJournal = (exitCode: number | null, uncertain: boolean) => {
+    const current = recoveryJournal
+    recoveryJournal = undefined
+    current?.settle(exitCode, uncertain, createHash("sha256")
+      .update(Buffer.concat(stdout)).update(Buffer.from([0])).update(Buffer.concat(stderr)).digest("hex"))
+  }
   try {
+    if (source?.stageDebug?.commandHooks) recoveryJournal = beginStageRecoveryHook(source, hook)
     owned = startOwnedHookCommand({
       executable: cmd, args, windowsShellCommand, cwd, env, stdin: stdinPayload, signal,
       stdout: chunk => collect(stdout, chunk), stderr: chunk => collect(stderr, chunk)
     })
   } catch (error) {
+    settleJournal(null, true)
+    await recoveryCleanup?.()
     signal?.throwIfAborted()
     // Preserve ordinary missing-interpreter failure semantics; uncertain physical cleanup
     // after a real spawn is deliberately not caught here.
@@ -833,6 +870,7 @@ async function executeCommandHook(
   try {
     // A deadline requests cleanup; it cannot manufacture a settled execution before close.
     const result = await owned.completion
+    settleJournal(result.code, timedOut || outputTruncated || !!result.error || !!signal?.aborted)
     signal?.throwIfAborted()
     const decoded = decodeHookOutput(Buffer.concat(stdout), Buffer.concat(stderr))
     return {
@@ -846,6 +884,8 @@ async function executeCommandHook(
     }
   } finally {
     clearTimeout(timer)
+    settleJournal(null, true)
+    await recoveryCleanup?.()
   }
 }
 
@@ -1972,8 +2012,15 @@ export async function runHooks(
     // Preserve mandatory checks by refusing the unsupported run, never suppressing a Hook.
     if (getModsManager()?.isActive(source.stageDebug.workspace))
       throw new HookHaltError({ hookEvent: event, fallbackReason: "PROJECT_STAGE_DEBUG_MODS_UNSUPPORTED" })
-    if (hooks.some(hook => hookMatchesRunCriteria(hook, event, context)))
-      throw new HookHaltError({ hookEvent: event, fallbackReason: `PROJECT_STAGE_DEBUG_HOOK_UNSUPPORTED:${event}` })
+    for (const hook of hooks) {
+      if (!hookMatchesRunCriteria(hook, event, context)) continue
+      try {
+        assertStageRecoveryHookSupported({ ...source.stageDebug, snapshotRoot: source.plugin.path }, hook)
+      } catch (error) {
+        throw new HookHaltError({ hookEvent: event, fallbackReason:
+          error instanceof Error ? `${error.message}:${event}` : `PROJECT_STAGE_DEBUG_HOOK_UNSUPPORTED:${event}` })
+      }
+    }
     if (event === "PreToolUse") assertStageDebugToolCall({ ...source.stageDebug,
       snapshotRoot: source.plugin.path }, context.toolName ?? "", context.toolArgs)
   }

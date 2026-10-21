@@ -241,15 +241,43 @@ internal static class WindowsBackgroundJobController
 
     private static int Main(string[] args)
     {
-        bool isArgvCmd = args.Length >= 2 && args[1] == "argv-cmd";
-        bool isHook = args.Length >= 2 && (args[1] == "hook-argv" || isArgvCmd);
-        bool isArgv = args.Length >= 2 && (args[1] == "argv" || isHook);
+        bool isRecovery = args.Length >= 2 &&
+            (args[1] == "recovery-argv-file" || args[1] == "recovery-cmd-file");
+        bool isArgvCmd = args.Length >= 2 &&
+            (args[1] == "argv-cmd" || args[1] == "recovery-cmd-file");
+        bool isHook = !isRecovery && args.Length >= 2 && (args[1] == "hook-argv" || isArgvCmd);
+        bool isArgv = args.Length >= 2 && (args[1] == "argv" || isHook || isRecovery);
         if ((!isArgv && args.Length != 2) || args.Length < (isArgv ? 3 : 2) || string.IsNullOrWhiteSpace(args[0]))
         {
             Console.Error.WriteLine("[LocalSandbox] Background shell path is missing");
             return 126;
         }
         if (isArgvCmd && args.Length != 4) return 126;
+        byte[] recoveryInput = null;
+        if (isRecovery)
+        {
+            // The outer native controller already owns this sandbox's lifetime and Job.
+            // Codex's sandbox command does not forward stdin; restore only the host-frozen
+            // bounded byte payload, without interpolating JSON into a command line.
+            try
+            {
+                if (!Path.IsPathRooted(args[2])) return 126;
+                using (FileStream input = new FileStream(args[2], FileMode.Open, FileAccess.Read,
+                    FileShare.Read))
+                {
+                    if (input.Length > 1000000) return 126;
+                    recoveryInput = new byte[(int)input.Length];
+                    int offset = 0;
+                    while (offset < recoveryInput.Length)
+                    {
+                        int count = input.Read(recoveryInput, offset, recoveryInput.Length - offset);
+                        if (count == 0) return 126;
+                        offset += count;
+                    }
+                }
+            }
+            catch { return 126; }
+        }
 
         string jobError;
         if (!InitializeKillOnCloseJob(out jobError))
@@ -260,7 +288,7 @@ internal static class WindowsBackgroundJobController
             return 125;
         }
 
-        if (isArgv && !WatchHostLifetime(args[2])) return 125;
+        if (isArgv && !isRecovery && !WatchHostLifetime(args[2])) return 125;
 
         bool isCmdShell = IsCmdShell(args[1]);
 
@@ -331,6 +359,15 @@ internal static class WindowsBackgroundJobController
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
+        if (isRecovery)
+        {
+            string recoveryCwd = Environment.GetEnvironmentVariable("CMB_STAGE_RECOVERY_COMMAND_CWD");
+            if (string.IsNullOrWhiteSpace(recoveryCwd) || !Path.IsPathRooted(recoveryCwd) ||
+                !Directory.Exists(recoveryCwd)) return 126;
+            // The native producer validates this path against the branch and pinned source.
+            // The command still runs inside the same restricted token and owned Job.
+            startInfo.WorkingDirectory = recoveryCwd;
+        }
 
         using (Process child = new Process { StartInfo = startInfo })
         {
@@ -351,7 +388,7 @@ internal static class WindowsBackgroundJobController
             }
 
             string hookNonce = null;
-            if (isArgv)
+            if (isArgv && !isRecovery)
             {
                 // Private protocol prefix: distinguish executable startup failure from exit 126.
                 // Write before pumping either child stream; the Mods host removes this prefix.
@@ -372,7 +409,8 @@ internal static class WindowsBackgroundJobController
             Stream childInput = isCmdShell ? null : child.StandardInput.BaseStream;
             Task inputPump = isCmdShell
                 ? Task.FromResult(0)
-                : Console.OpenStandardInput().CopyToAsync(childInput).ContinueWith(
+                : (isRecovery ? (Stream)new MemoryStream(recoveryInput, false) :
+                    Console.OpenStandardInput()).CopyToAsync(childInput).ContinueWith(
                     delegate
                     {
                         try { childInput.Close(); } catch { }

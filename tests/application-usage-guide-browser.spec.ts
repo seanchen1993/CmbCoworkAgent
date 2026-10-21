@@ -38,7 +38,9 @@ async function main() {
       import {openApplicationUsageGuide} from './src/renderer/src/components/guides/application-usage-guide';
       window.calls=[];const business=name=>()=>window.calls.push(['business',name]);
       window.guideUsage={shown:0,acknowledged:false,reads:0};
-      window.api={uiGuides:{recordDisplay:async()=>{const s=window.guideUsage;if(s.acknowledged||s.shown>=1)return false;s.shown++;return true},
+      const nativeListeners=new Set();window.nativeMode='creator';window.nativeModeCalls=0;
+      window.setNativeMode=mode=>{window.nativeMode=mode;for(const fn of nativeListeners)fn({threadId:window.guideState.currentThreadId})};
+      window.api={mods:{development:{status:async({threadId})=>{window.nativeModeCalls++;return {threadId,workspace:'C:/guide',enabled:true,mode:window.nativeMode}},onChanged:fn=>{nativeListeners.add(fn);return()=>nativeListeners.delete(fn)}}},uiGuides:{recordDisplay:async()=>{const s=window.guideUsage;if(s.acknowledged||s.shown>=1)return false;s.shown++;return true},
         getState:async()=>{const s=window.guideUsage;s.reads++;return {shouldShow:!s.acknowledged&&s.shown<1}},
         acknowledge:async()=>{window.guideUsage.acknowledged=true}}};
       function Fixture(){return <><header style={{height:100}}>
@@ -69,9 +71,10 @@ async function main() {
             namespace: "guide-fixture"
           }))
           builder.onLoad({ filter: /.*/, namespace: "guide-fixture" }, () => ({
-            contents: `const listeners=new Set();window.guideState={mainView:'thread',currentThreadId:null,threads:[],setSidebarCollapsed:value=>{window.calls.push(['sidebar',value]);document.getElementById('navigation').hidden=value}};
+            resolveDir: process.cwd(),
+            contents: `import{useSyncExternalStore}from'react';const listeners=new Set();window.guideState={mainView:'thread',currentThreadId:null,threads:[],setSidebarCollapsed:value=>{window.calls.push(['sidebar',value]);document.getElementById('navigation').hidden=value}};
                 window.updateGuideScope=value=>{Object.assign(window.guideState,value);listeners.forEach(listener=>listener())};
-                export const useAppStore={getState:()=>window.guideState,subscribe:listener=>{listeners.add(listener);return()=>listeners.delete(listener)}}`
+                export const useAppStore=selector=>useSyncExternalStore(listener=>{listeners.add(listener);return()=>listeners.delete(listener)},()=>selector(window.guideState));useAppStore.getState=()=>window.guideState;useAppStore.subscribe=listener=>{listeners.add(listener);return()=>listeners.delete(listener)}`
           }))
         }
       }
@@ -91,6 +94,26 @@ async function main() {
     const guide = page.locator('[aria-label="应用使用指引"]')
     const help = page.getByRole("button", { name: "使用指引", exact: true })
     assert.equal(await guide.count(), 0, "No extra automatic overlay before help is requested")
+    await help.click()
+    assert.equal(await guide.count(), 0, "Manual help must also respect ordinary mode")
+    await page.evaluate(() => {
+      const fixture = window as unknown as GuideFixtureWindow & {
+        guideUsage: { acknowledged: boolean }
+      }
+      fixture.guideUsage.acknowledged = true
+      fixture.updateGuideScope({
+        accountRevision: 1,
+        mainView: "thread",
+        currentThreadId: "local",
+        threads: [
+          { thread_id: "local", metadata: { agentMode: "normal", workspacePath: "C:/guide" } }
+        ]
+      })
+      document
+        .querySelector('[data-app-guide="creator"]:not([inert] *)')
+        ?.setAttribute("aria-pressed", "true")
+    })
+    await page.waitForFunction("window.guideUsage.reads>0")
     await help.click()
     const ids = ["navigation", "customize", "creator", "composer", "workspace", "progress"]
     for (const [index, id] of ids.entries()) {
@@ -130,10 +153,23 @@ async function main() {
     assert(box && box.x >= 0 && box.y >= 0 && box.x + box.width <= 390 && box.y + box.height <= 740)
     await page.screenshot({ path: join(output, "narrow-control-guide.png") })
     await page.evaluate(() => document.getElementById("replacement")?.remove())
-    await guide.getByRole("status").waitFor()
-    assert.match(await guide.getByRole("status").innerText(), /暂未显示这个控件/)
-    await guide.getByRole("button", { name: "下一步", exact: true }).click()
-    await page.locator('[data-ui-guide-current="composer"]').waitFor()
+    await guide.waitFor({ state: "hidden" })
+    assert.equal(
+      await page.locator("[data-ui-guide-current]").count(),
+      0,
+      "Leaving the creator control closes its guide instead of retaining a stale anchor"
+    )
+    await page.evaluate(() => {
+      const button = document.createElement("button")
+      button.dataset.appGuide = "creator"
+      button.setAttribute("aria-pressed", "true")
+      document.getElementById("scroll")?.append(button)
+    })
+    await page.waitForFunction(
+      "document.querySelector('[data-app-guide=creator][aria-pressed=true]')"
+    )
+    await help.click()
+    await guide.getByText("第 1 / 6 步", { exact: true }).waitFor()
     await page.keyboard.press("Escape")
     await guide.waitFor({ state: "hidden" })
     await page.waitForFunction(() => document.activeElement?.id === "help")
@@ -142,6 +178,13 @@ async function main() {
     await guide.getByText("第 1 / 6 步", { exact: true }).waitFor()
     await guide.getByRole("button", { name: "跳过指引", exact: true }).click()
     await help.click()
+    await guide.getByRole("button", { name: "关闭使用指引", exact: true }).click()
+    await page.evaluate(() => document.querySelector('[data-app-guide="workspace"]')?.remove())
+    await help.click()
+    await guide.getByText("第 1 / 5 步", { exact: true }).waitFor()
+    for (let index = 0; index < 4; index++)
+      await guide.getByRole("button", { name: "下一步", exact: true }).click()
+    await page.locator('[data-ui-guide-current="progress"]').waitFor()
     await guide.getByRole("button", { name: "关闭使用指引", exact: true }).click()
     assert.equal(await page.getByLabel("原聊天草稿").inputValue(), "不要改动我的草稿")
     assert.deepEqual(await page.evaluate("window.calls.filter(row=>row[0]==='business')"), [])

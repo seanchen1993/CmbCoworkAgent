@@ -6,7 +6,7 @@ export type CreatorCapabilityDiscovery =
 
 export interface CreatorConditionalCapability {
   id: string
-  scope: "host-project"
+  scope: "host-project" | "plugin-owned-project" | "plugin-delivery"
   availability: "conditional"
   description: string
   operations: readonly CreatorCapabilityDiscovery[]
@@ -98,7 +98,7 @@ export const CREATOR_CONDITIONAL_CAPABILITIES = [
     scope: "host-project",
     availability: "conditional",
     description:
-      "受控文件阶段可从实际阶段进入快照准备独立 stage/downstream 调试分支；不是复杂业务恢复保证。",
+      "Host 阶段可从真实进入快照创建独立 stage/downstream 分支；已声明恢复协议的 Hooks、原生配置、知识及上下文脚本按各自隔离与批准条件保留。",
     operations: [
       debugList,
       { kind: "tool", tool: "mod_authoring", arguments: { action: "project_stage_debug_prepare" } },
@@ -123,7 +123,7 @@ export const CREATOR_CONDITIONAL_CAPABILITIES = [
       {
         id: "fresh-native-consent",
         description:
-          "prepare 只准备；用户核对精确候选摘要后在原生卡 create，再重新批准并从原项目入口明确运行。"
+          "prepare 只准备；用户核对精确候选摘要后在原生卡 create，命令 Hooks 和脚本 provider 另行确认网络副作用，再逐阶段重新批准运行。"
       }
     ],
     blockers: [
@@ -164,7 +164,7 @@ export const CREATOR_CONDITIONAL_CAPABILITIES = [
         ],
         owner: "host-adapter-maintainer",
         reason:
-          "配置、共享知识/上下文、Hooks、MCP、外部动作或自定义 workflow 尚无此阶段隔离适配；保留完整原插件，不删除功能绕过检查。",
+          "原生配置与知识必须已冻结绑定；Hooks/脚本 provider 必须有兼容恢复声明。行为共享 Mods、MCP、外部动作和未适配 workflow 仍被阻断，不删除功能绕过检查。",
         next: debugList
       },
       {
@@ -180,7 +180,170 @@ export const CREATOR_CONDITIONAL_CAPABILITIES = [
     nextDiscovery: debugList,
     guarantees: [
       "仅恢复受控工作区文件，不恢复数据库、网络、发布或 Git 状态。",
-      "复杂 AutoBiz 的配置、知识、Hooks 与 workflow 恢复尚未支持；单阶段通过也不等于整轮验收。"
+      "命令 Hook 的真实终态可冷核对，但不能代替原生阶段与产物校验；单阶段通过不等于整轮验收。",
+      "插件自有状态使用独立 plugin-owned-stage-recovery 适配协议，不冒充 Host 快照能力。"
+    ]
+  },
+  {
+    id: "plugin-owned-stage-recovery",
+    scope: "plugin-owned-project",
+    availability: "conditional",
+    description:
+      "已适配插件通过自己的规划、应用和验证脚本，将已结束试用恢复为新的独立副本，继续沿用原业务引擎与 Hooks。",
+    operations: [
+      {
+        kind: "native",
+        api: "window.api.mods.development.businessTrial.recovery",
+        operation: "inspect",
+        entry: "插件试用 → 插件阶段恢复 → 检查阶段恢复条件"
+      },
+      {
+        kind: "native",
+        api: "window.api.mods.development.businessTrial.recovery",
+        operation: "prepare",
+        entry: "插件阶段恢复 → 核对实际版本与起点 → 确认规划"
+      },
+      {
+        kind: "native",
+        api: "window.api.mods.development.businessTrial.recovery",
+        operation: "apply",
+        entry: "插件阶段恢复 → 核对方案和产物 → 确认创建独立试用"
+      },
+      {
+        kind: "native",
+        api: "window.api.mods.development.businessTrial.recovery",
+        operation: "latest",
+        entry: "插件阶段恢复 → 读取已保存的恢复记录"
+      },
+      {
+        kind: "native",
+        api: "window.api.mods.development.businessTrial.recovery",
+        operation: "reconcile",
+        entry: "插件阶段恢复 → 核对记录；必要时重新批准只读验证"
+      }
+    ],
+    preconditions: [
+      {
+        id: "native-ended-owner",
+        description: "原试用和关联物理执行已结算，Main 核实保留包、工作区、会话身份及配置知识。"
+      },
+      {
+        id: "declared-adapter",
+        description:
+          "精确保留包声明 devclaw.stage-recovery-adapter.json；业务组装扩展的 adapter 资源完整纳入原锁文件。"
+      },
+      {
+        id: "exact-fresh-consent",
+        description:
+          "第一次批准绑定插件、适配器和输入摘要；第二次批准绑定实际方案摘要。Windows 文件隔离不保证阻断所有网络。"
+      }
+    ],
+    blockers: [
+      {
+        signals: [
+          "PLUGIN_STAGE_RECOVERY_ADAPTER_REQUIRED",
+          "PLUGIN_STAGE_RECOVERY_ADAPTER_INVALID"
+        ],
+        owner: "host-adapter-maintainer",
+        reason:
+          "插件作者须先声明并验证插件自有恢复协议，重新组装和安装新版本；不能靠平台名称特例注入。",
+        next: projectList
+      },
+      {
+        signals: [
+          "PLUGIN_STAGE_RECOVERY_OUTCOME_UNCONFIRMED",
+          "PLUGIN_STAGE_RECOVERY_FRESH_APPROVAL_REQUIRED"
+        ],
+        owner: "user",
+        reason: "读取原生恢复记录；未知命令不得重放，仅在真实成功终态确认后重新批准验证和接管。",
+        next: {
+          kind: "native",
+          api: "window.api.mods.development.businessTrial.recovery",
+          operation: "latest",
+          entry: "插件阶段恢复 → 读取已保存的恢复记录"
+        }
+      },
+      {
+        signals: [
+          "PLUGIN_STAGE_RECOVERY_ADAPTER_FAILED",
+          "PROJECT_FILE_OBSERVATION_SENSITIVE_PATH"
+        ],
+        owner: "host-adapter-maintainer",
+        reason: "当前副本恢复不回滚 Git 或外部工作树；插件必须补充私有仓库与工作树重绑定适配。",
+        next: projectList
+      }
+    ],
+    nextDiscovery: {
+      kind: "native",
+      api: "window.api.mods.development.businessTrial.recovery",
+      operation: "inspect",
+      entry: "插件试用 → 插件阶段恢复"
+    },
+    guarantees: [
+      "保留原 Hooks、知识和必需产物校验，不继承旧授权，不把恢复成功当业务通过。",
+      "未知结果只核对；确认成功后也仅验证和接管，不自动重放 apply。",
+      "原项目保持不变，外部系统、数据库和 Git 状态不会随副本自动恢复。"
+    ]
+  },
+  {
+    id: "native-plugin-delivery-recovery-and-use",
+    scope: "plugin-delivery",
+    availability: "conditional",
+    description:
+      "安装和导出异常可核对实际结果；安装成功后从精确安装身份诊断配置、权限和真实使用入口。",
+    operations: [
+      {
+        kind: "native",
+        api: "window.api.mods.development",
+        operation: "reconcileProjectDelivery",
+        entry: "保存为新插件 → 核对实际交付结果"
+      },
+      {
+        kind: "native",
+        api: "window.api.mods.development",
+        operation: "reconcileBusiness",
+        entry: "业务插件保存 → 核对实际交付结果"
+      },
+      {
+        kind: "native",
+        api: "window.api.plugins",
+        operation: "prepareStartUse",
+        entry: "安装成功 → 开始使用 → 配置与环境核对"
+      }
+    ],
+    preconditions: [
+      {
+        id: "exact-delivery-record",
+        description: "使用 Main 持久交付记录与实际候选摘要；历史候选效果可核对但不代表当前版本。"
+      },
+      {
+        id: "real-installed-identity",
+        description: "开始使用核对安装 UUID、名称、版本和完整内容摘要；原生入口独立检查配置和权限。"
+      }
+    ],
+    blockers: [
+      {
+        signals: ["PROJECT_DELIVERY_OUTCOME_UNCONFIRMED", "BUSINESS_CREATOR_OUTCOME_UNCONFIRMED"],
+        owner: "user",
+        reason:
+          "先只读核对安装目录与导出文件；冲突保留证据处理后重新核对，确认未执行才可重新准备和批准。",
+        next: {
+          kind: "native",
+          api: "window.api.mods.development",
+          operation: "reconcileProjectDelivery",
+          entry: "保存为新插件 → 核对实际交付结果"
+        }
+      }
+    ],
+    nextDiscovery: {
+      kind: "native",
+      api: "window.api.plugins",
+      operation: "prepareStartUse",
+      entry: "安装成功 → 开始使用"
+    },
+    guarantees: [
+      "只读诊断不安装、不执行、不自动启用；配置和代码批准分别由用户确认。",
+      "聊天扩展显示真实注册命令或可调用技能；项目流程定位实际项目入口，创建后仍需明确启动。"
     ]
   }
 ] as const satisfies readonly CreatorConditionalCapability[]
