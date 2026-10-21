@@ -8,6 +8,15 @@ import type { FlowDefinition, FlowRun } from "../src/shared/mods/flows/types"
 import { compositionEnvironment, compositionPlugin } from "./support/mods-composition-fixtures"
 import { componentsPlugin } from "./support/mods-components-fixtures"
 import { startFlowModel } from "./support/mods-flow-model"
+import {
+  closeModsProgress,
+  openModsAdvancedSettings,
+  openModsClawEditor,
+  openModsClawMoreSettings,
+  openModsFlowHistory,
+  openModsFlowPreset,
+  openModsProgress
+} from "./support/mods-sidebar-navigation"
 
 const root = resolve(__dirname, "..")
 const artifacts = join(root, "output/mods-components-e2e")
@@ -83,15 +92,26 @@ async function saveProfile(profile: ClawProfile, apply = false) {
   )
 }
 async function command(name: string, text = "inspect") {
+  // Re-read a catalog invalidated by configuration; never replay enqueue or a command.
+  const descriptor = await until(
+    () =>
+      page.evaluate(
+        async ({ threadId, name }) => {
+          try {
+            return (await window.api.mods.commands(threadId)).find((row) => row.command === name)
+          } catch (error) {
+            if (!String(error).includes("MODS_SCOPE_CHANGED")) throw error
+            return undefined
+          }
+        },
+        { threadId, name }
+      ),
+    (row) => Boolean(row),
+    `Missing current command ${name}`
+  )
   const job = await page.evaluate(
-    async ({ threadId, name, text }) => {
-      const descriptor = (await window.api.mods.commands(threadId)).find(
-        (row) => row.command === name
-      )
-      if (!descriptor) throw Error(`Missing command ${name}`)
-      return window.api.mods.enqueue(threadId, descriptor, { text })
-    },
-    { threadId, name, text }
+    ({ threadId, descriptor, text }) => window.api.mods.enqueue(threadId, descriptor!, { text }),
+    { threadId, descriptor, text }
   )
   const result = await until(
     () =>
@@ -196,8 +216,8 @@ async function main() {
 
     await page.reload()
     await page.getByText("组件 DIY 实机演示", { exact: true }).first().click()
-    await page.getByRole("button", { name: "自定义", exact: true }).click()
-    await page.getByRole("button", { name: "我的 Claw", exact: true }).click()
+    await openModsAdvancedSettings(page, "搭配管理")
+    await openModsClawEditor(page)
     await page.getByRole("button", { name: "我的组件组合", exact: true }).click()
     for (const name of ["components-a", "components-b"]) {
       await page.getByLabel(`选择能力 ${name}`, { exact: true }).check()
@@ -205,7 +225,7 @@ async function main() {
     }
     await page.getByLabel("选择组件 components-a · 自动改写", { exact: true }).uncheck()
     await page.getByLabel("选择组件 components-a · 基础能力", { exact: true }).uncheck()
-    assert(await page.getByRole("button", { name: "保存能力组合", exact: true }).isDisabled())
+    assert(await page.getByRole("button", { name: "保存组合", exact: true }).isDisabled())
     await page.getByRole("button", { name: "加入所需依赖", exact: true }).click()
     assert(await page.getByLabel("选择组件 components-a · 基础能力", { exact: true }).isChecked())
     await page.getByLabel("设置 组件配置 components-a · 代码检视 · 标记", { exact: true }).check()
@@ -216,7 +236,8 @@ async function main() {
     await page
       .getByLabel("组件配置 components-b · 生成报告 · 标记", { exact: true })
       .fill("report-beta")
-    await page.getByLabel("Claw 默认模型", { exact: true }).selectOption("custom:components")
+    await openModsClawMoreSettings(page)
+    await page.getByLabel("聊天默认模型", { exact: true }).selectOption("custom:components")
     for (const width of [1366, 1024, 800]) {
       await app!.evaluate(({ BrowserWindow }, width) => {
         const window = BrowserWindow.getAllWindows()[0]
@@ -227,14 +248,18 @@ async function main() {
       await page.locator("[data-claw-components]").first().scrollIntoViewIfNeeded()
       await page.screenshot({ path: join(artifacts, `component-editor-${width}.png`) })
     }
-    await page.getByRole("button", { name: "保存能力组合", exact: true }).click()
+    await page.getByRole("button", { name: "保存组合", exact: true }).click()
     await until(
       () => page.evaluate((id) => window.api.mods.clawView(id), threadId),
       (view) => view.profiles.some((profile) => profile.capabilities.length === 2),
       "Component save did not persist"
     )
-    await page.getByRole("button", { name: "应用到当前对话", exact: true }).click()
-  await page.getByRole("button", { name: "确认应用", exact: true }).click()
+    await page
+      .getByRole("button", { name: "我的组件组合", exact: true })
+      .locator("..")
+      .getByRole("button", { name: "应用到所选聊天", exact: true })
+      .click()
+    await page.getByRole("button", { name: "确认应用", exact: true }).click()
     const applied = await until(
       () => page.evaluate((id) => window.api.mods.clawView(id), threadId),
       (view) => view.active?.capabilities.length === 2,
@@ -264,7 +289,7 @@ async function main() {
       "Only selected entries execute; dependency ordering and per-component config remain isolated"
     )
 
-    await page.getByRole("button", { name: "回到聊天使用", exact: true }).click()
+    await page.getByRole("button", { name: "返回应用", exact: true }).click()
     await page.locator("textarea.composer-textarea").fill("使用当前组件组合说明代码检视流程")
     await page.locator("textarea.composer-textarea").press("Enter")
     await page
@@ -332,18 +357,14 @@ async function main() {
       { threadId, definition }
     )
     profile = { ...profile, flow: saved }
-    await saveProfile(profile, true)
+    const appliedFlow = await saveProfile(profile, true)
     await page.reload()
     await page.getByText("组件 DIY 实机演示", { exact: true }).first().click()
-    await page.getByRole("button", { name: "打开 Claw 工作台", exact: true }).click()
-    await page
-      .getByText("使用已应用 Claw 的流程副本。", { exact: false })
-      .waitFor({ state: "attached" })
-    await page.getByRole("button", { name: "选择发送方式", exact: true }).click()
-    await page.getByRole("button", { name: "执行流程", exact: true }).click()
+    const preset = await openModsFlowPreset(page)
+    await preset.selectOption(`claw:${appliedFlow.bindingRevision}`)
     await page.locator("textarea.composer-textarea").fill("检视 orders 并合并两个插件组件的结果")
-    await page.getByRole("button", { name: "收起 Claw 工作台", exact: true }).click()
-    await page.getByRole("button", { name: "发送并执行流程", exact: true }).click()
+    await closeModsProgress(page)
+    await page.getByRole("button", { name: "发送消息", exact: true }).click()
     const started = (
       await until(
         () => page.evaluate((id) => window.api.mods.flowRuns(id), threadId),
@@ -369,11 +390,11 @@ async function main() {
       saveProfile({ ...profile, name: "Cannot switch while running" }, true),
       /busy|运行|任务|审批|lease/i
     )
-    await page.getByRole("button", { name: "同意并继续", exact: true }).click()
+    const taskPanel = await openModsProgress(page)
+    await taskPanel.getByRole("button", { name: "同意并继续", exact: true }).click()
     await runState(started.id, "complete")
-    await page.getByText("流程任务 · 组件跨包协作 · 查看进度与结果", { exact: true }).click()
-    const completeDetails = page.locator(`[data-flow-run="${started.id}"]`)
-    await completeDetails.getByText("组件跨包协作 · 已完成", { exact: true }).waitFor()
+    const completeDetails = await openModsFlowHistory(page, started.id)
+    await completeDetails.getByText("当前任务 · 已完成", { exact: true }).waitFor()
     for (const name of ["只检视不改写", "跨包生成报告"]) {
       await completeDetails
         .getByRole("listitem")
@@ -381,9 +402,7 @@ async function main() {
         .getByText("查看结果与证据", { exact: true })
         .click()
     }
-    await completeDetails
-      .getByText("组件跨包协作 · 已完成", { exact: true })
-      .scrollIntoViewIfNeeded()
+    await completeDetails.getByText("当前任务 · 已完成", { exact: true }).scrollIntoViewIfNeeded()
     await page.screenshot({ path: join(artifacts, "component-chat-complete.png") })
     await completeDetails.screenshot({ path: join(artifacts, "component-complete-evidence.png") })
     pass(

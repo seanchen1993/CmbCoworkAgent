@@ -620,7 +620,9 @@ export async function mcpProbe(scope: Scope, node: string, server: string): Prom
     return { direct, eager, callbacks, lostReply, audit }
   } finally {
     deleteMcpConnector(id)
-    await service.close()
+    // This is the application singleton. Retire the fixture transport, not the service.
+    await service.invalidate("mods-e2e-probe-finished")
+    await service.listTools() // Subsequent UI/command preparation must still be admitted.
   }
 }
 export function setThreadBusy(threadId: string, busy: boolean): void {

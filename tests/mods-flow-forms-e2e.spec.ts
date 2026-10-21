@@ -2,16 +2,27 @@
 import assert from "node:assert/strict"
 import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
-import { _electron, type ElectronApplication, type Page } from "playwright"
+import type { ElectronApplication, Page } from "playwright"
 import type { FlowDefinition, FlowRun, SavedFlow } from "../src/shared/mods/flows/types"
 import { compositionEnvironment } from "./support/mods-composition-fixtures"
 import { flowFormsPlugin } from "./support/mods-flow-forms-fixtures"
 import { startFlowModel } from "./support/mods-flow-model"
+import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
+import {
+  closeModsProgress,
+  openModsAdvancedSettings,
+  openModsFlowHistory,
+  openModsFlowPreset
+} from "./support/mods-sidebar-navigation"
 
 const root = resolve(__dirname, "..")
-const artifacts = join(root, "output/mods-flow-forms-e2e")
+const requestedArtifacts = process.env.CMB_MODS_CORE_E2E_ARTIFACTS
+const artifacts = requestedArtifacts
+  ? resolve(requestedArtifacts)
+  : join(root, "output/mods-flow-forms-e2e")
 const { isolated, workspace, env } = compositionEnvironment(root)
 mkdirSync(artifacts, { recursive: true })
+const launchApp = createModsCoreLauncher(root, isolated, env, artifacts)
 for (const name of ["report.json", "failure.json", "failure.png"])
   rmSync(join(artifacts, name), { force: true })
 const checks: string[] = []
@@ -97,13 +108,7 @@ async function main() {
   const model = await startFlowModel(workspace)
   const watchdog = setTimeout(() => void app?.close(), 360_000)
   try {
-    app = await _electron.launch({
-      executablePath: join(root, "tests/support/electron-launcher.cmd"),
-      args: [join(root, "out/main/index.js"), `--user-data-dir=${join(isolated, "electron")}`],
-      cwd: root,
-      env,
-      timeout: 60_000
-    })
+    app = await launchApp(60_000)
     page = await app.firstWindow()
     page.on("pageerror", (error) => errors.push(error.message))
     await app.evaluate(({ ipcMain, dialog }) => {
@@ -115,6 +120,7 @@ async function main() {
       })) as typeof dialog.showMessageBox
     })
     await page.waitForFunction(() => Boolean(window.api?.mods?.flowSave))
+    await page.addInitScript("window.__name = value => value")
     await page.evaluate(() => {
       ;(window as unknown as { __name: unknown }).__name = (value: unknown) => value
     })
@@ -226,9 +232,8 @@ async function main() {
     await save(definition)
     await page.reload()
     await page.getByText("参数表单真实联调", { exact: true }).first().click()
-    await page.getByRole("button", { name: "自定义", exact: true }).click()
-    await page.getByRole("button", { name: "DIY 流程", exact: true }).click()
-    await page.getByRole("button", { name: "表单到真实动作 · v1", exact: true }).click()
+    await openModsAdvancedSettings(page, "步骤管理")
+    await page.getByRole("button", { name: "表单到真实动作", exact: true }).click()
     const prepare = page.locator('[data-flow-step="prepare"]')
     await prepare.getByRole("button", { name: "配置步骤：准备文件", exact: true }).click()
     await prepare.getByLabel("动作输入 · Feature", { exact: true }).fill("autobiz-feature")
@@ -295,7 +300,7 @@ async function main() {
       models: { default: "custom:forms", roles: {} },
       flow: saved
     }
-    await page.evaluate(
+    const binding = await page.evaluate(
       async ({ threadId, profile }) => {
         let view = await window.api.mods.clawView(threadId)
         view = await window.api.mods.clawChange(threadId, {
@@ -304,26 +309,27 @@ async function main() {
           workspace: view.workspace,
           revision: view.revision
         })
-        await window.api.mods.clawChange(threadId, {
+        return window.api.mods.clawChange(threadId, {
           kind: "apply",
           id: profile.id,
           workspace: view.workspace,
-          revision: view.revision
+          revision: view.revision,
+          bindingRevision: view.bindingRevision
         })
       },
       { threadId, profile }
     )
-    await page.getByRole("button", { name: "到聊天启动此流程", exact: true }).click()
+    await page.getByRole("button", { name: "去这段聊天使用", exact: true }).click()
     await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()[0].setContentSize(1366, 900)
     )
-    await page
-      .getByText("使用已应用 Claw 的流程副本。", { exact: false })
-      .waitFor({ state: "attached" })
-    await page.getByRole("button", { name: "选择发送方式", exact: true }).click()
-    await page.getByRole("button", { name: "执行流程", exact: true }).click()
+    const selection = await openModsFlowPreset(page)
+    await selection.selectOption(`claw:${binding.bindingRevision}`)
+    assert.equal(await selection.inputValue(), `claw:${binding.bindingRevision}`)
+    assert.equal((await page.evaluate((id) => window.api.mods.flowRuns(id), threadId)).length, 0)
+    await closeModsProgress(page)
     await page.locator("textarea.composer-textarea").fill("执行刚刚保存的参数表单")
-    await page.getByRole("button", { name: "发送并执行流程", exact: true }).click()
+    await page.getByRole("button", { name: "发送消息", exact: true }).click()
     const started = (
       await until(
         () => page.evaluate((id) => window.api.mods.flowRuns(id), threadId),
@@ -338,7 +344,8 @@ async function main() {
     assert.deepEqual(result.config, { strict: false, retries: 0, note: "" })
     assert.deepEqual(await counts(), [1, 1])
     assert.equal(model.requests.length, 0)
-    await page.getByText("流程任务 · 表单到真实动作 · 查看进度与结果", { exact: true }).click()
+    const history = await openModsFlowHistory(page, complete.id)
+    assert.equal(await history.getAttribute("data-flow-run"), complete.id)
     await page.screenshot({ path: join(artifacts, "forms-chat-complete.png") })
     pass(
       "Saved form runs through actual chat/Claw/QuickJS; predecessor output is consumed and explicit constants override it"

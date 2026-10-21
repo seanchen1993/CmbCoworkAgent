@@ -5,6 +5,7 @@ import { join, resolve } from "node:path"
 import { createHash } from "node:crypto"
 import AdmZip from "adm-zip"
 import type { ElectronApplication } from "playwright"
+import { openModsProgress } from "./support/mods-sidebar-navigation"
 import {
   createHeadlessProjectCompositionLaunch,
   projectCompositionCandidate,
@@ -152,9 +153,7 @@ async function main() {
     )
     await page.reload()
     await page.getByText("Configuration acceptance A", { exact: true }).first().click()
-    await page.getByRole("button", { name: "打开当前助手", exact: true }).click()
-    const sidebar = page.getByRole("complementary", { name: "当前助手", exact: true })
-    await sidebar.getByRole("tab", { name: "设置", exact: true }).click()
+    const sidebar = await openModsProgress(page, "高级设置")
     await sidebar
       .getByRole("button", { name: /configuration-weather.*weather isolated command/ })
       .waitFor()
@@ -164,16 +163,32 @@ async function main() {
         .count(),
       0
     )
-    await sidebar.getByText("高级：手动管理组合", { exact: true }).click()
-    await sidebar.getByRole("button", { name: "管理助手组合", exact: true }).click()
-    await page.getByRole("button", { name: "跳过导览", exact: true }).click()
+    const manageCombinations = async () => {
+      await openModsProgress(page, "高级设置")
+      const summary = sidebar.getByText("高级：手动管理组合", { exact: true })
+      if (
+        !(await summary.evaluate((element) => (element.parentElement as HTMLDetailsElement).open))
+      )
+        await summary.click()
+      await sidebar.getByRole("button", { name: "管理助手组合", exact: true }).click()
+    }
+    await manageCombinations()
+    // Task examples are manual; opening configuration must not start a page tour.
+    assert.equal(await page.getByRole("region", { name: "任务示例演练", exact: true }).count(), 0)
     const picker = page.getByRole("combobox", { name: "配置目标聊天", exact: true })
-    const selectedB = await picker
-      .locator("option")
-      .filter({ hasText: "Configuration acceptance B" })
-      .getAttribute("value")
-    assert(selectedB)
-    await picker.selectOption(selectedB)
+    const chooseB = async () => {
+      await picker.click()
+      await page
+        .getByRole("combobox", { name: "搜索配置聊天", exact: true })
+        .fill("Configuration acceptance B")
+      await page
+        .getByRole("option", {
+          name: `Configuration acceptance B · ${fixture.workspace}`,
+          exact: true
+        })
+        .click()
+    }
+    await chooseB()
     await page.getByText("当前组合：replay saved combination", { exact: true }).waitFor()
     await page.getByText("高级编辑与已保存组合", { exact: true }).click()
     const applySaved = async (name: string) => {
@@ -211,18 +226,11 @@ async function main() {
       0
     )
     checks.push("Returning from target B leaves actual chat A and Weather command visible")
-    await sidebar.getByText("高级：手动管理组合", { exact: true }).click()
-    await sidebar.getByRole("button", { name: "管理助手组合", exact: true }).click()
-    const bValue = await picker
-      .locator("option")
-      .filter({ hasText: "Configuration acceptance B" })
-      .getAttribute("value")
-    assert(bValue)
-    await picker.selectOption(bValue)
+    await manageCombinations()
+    await chooseB()
     await page.getByText("当前组合：replay saved combination", { exact: true }).waitFor()
     await page.getByRole("button", { name: "去这段聊天使用", exact: true }).click()
-    await page.getByRole("button", { name: "打开当前助手", exact: true }).click()
-    await sidebar.getByRole("tab", { name: "设置", exact: true }).click()
+    await openModsProgress(page, "高级设置")
     await sidebar
       .getByRole("button", { name: /configuration-replay.*replay isolated command/ })
       .waitFor()

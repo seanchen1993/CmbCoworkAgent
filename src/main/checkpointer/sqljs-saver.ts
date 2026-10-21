@@ -2222,7 +2222,9 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     config: RunnableConfig,
     checkpoint: Checkpoint,
     metadata: CheckpointMetadata,
-    observer: SqlJsSaverCommitObserver
+    observer: SqlJsSaverCommitObserver,
+    assertCurrent?: () => void,
+    onCommitted?: () => void
   ): Promise<RunnableConfig> {
     const configurable = { ...config.configurable }
     const threadId = configurable.thread_id
@@ -2260,7 +2262,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       assertDatabase()
       const database = this.db
       if (!database) throw new Error("SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED")
-      const result = await this.putUnlocked(fixedConfig, snapshot, fixedMetadata)
+      const result = await this.putUnlocked(fixedConfig, snapshot, fixedMetadata, assertCurrent,
+        onCommitted)
       assertDatabase(database)
       if (result.configurable?.thread_id !== threadId ||
         (result.configurable?.checkpoint_ns ?? "") !== namespace ||
@@ -2318,9 +2321,12 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private async putUnlocked(
     config: RunnableConfig,
     checkpoint: Checkpoint,
-    metadata: CheckpointMetadata
+    metadata: CheckpointMetadata,
+    assertCurrent?: () => void,
+    onCommitted?: () => void
   ): Promise<RunnableConfig> {
     await this.initialize()
+    assertCurrent?.()
     if (!this.db) throw new Error("Database not initialized")
     const database = this.db
 
@@ -2432,6 +2438,9 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     while (!committed) {
       let transactionStarted = false
       try {
+        // Recheck after namespace admission and every asynchronous serialization/rebase.
+        // This host-only guard must run before any durable mutation, not just its observer.
+        assertCurrent?.()
         database.run("BEGIN IMMEDIATE")
         transactionStarted = true
 
@@ -2550,6 +2559,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         database.run("COMMIT")
         transactionStarted = false
         committed = true
+        // A host mutation must retain this fact even if a post-COMMIT read/observer fails.
+        onCommitted?.()
       } catch (error) {
         if (transactionStarted) {
           try {
@@ -2737,10 +2748,12 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
   }
 
-  async putWrites(config: RunnableConfig, writes: PendingWrite[], taskId: string): Promise<void> {
+  async putWrites(config: RunnableConfig, writes: PendingWrite[], taskId: string,
+    assertCurrent?: () => void): Promise<void> {
+    assertCurrent?.()
     const threadId = config.configurable?.thread_id
     if (typeof threadId !== "string" || !threadId) {
-      return this.putWritesUnlocked(config, writes, taskId)
+      return this.putWritesUnlocked(config, writes, taskId, assertCurrent)
     }
     const checkpointNs = config.configurable?.checkpoint_ns ?? ""
     const intentKey = this.checkpointNamespaceQueueKey(threadId, checkpointNs)
@@ -2751,7 +2764,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     let release: (() => void) | null = null
     try {
       release = await this.acquireCheckpointNamespace(threadId, checkpointNs)
-      await this.putWritesUnlocked(config, writes, taskId)
+      await this.putWritesUnlocked(config, writes, taskId, assertCurrent)
     } finally {
       release?.()
       const remaining = (checkpointNamespacePendingWriteIntents.get(intentKey) ?? 1) - 1
@@ -2763,9 +2776,11 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private async putWritesUnlocked(
     config: RunnableConfig,
     writes: PendingWrite[],
-    taskId: string
+    taskId: string,
+    assertCurrent?: () => void
   ): Promise<void> {
     await this.initialize()
+    assertCurrent?.()
     if (!this.db) throw new Error("Database not initialized")
     const database = this.db
 
@@ -2786,6 +2801,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     )
     let transactionStarted = false
     try {
+      assertCurrent?.()
       database.run("BEGIN IMMEDIATE")
       transactionStarted = true
       for (let idx = 0; idx < serializedWrites.length; idx += 1) {

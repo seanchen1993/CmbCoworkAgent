@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react"
 import {
   fillPromptSnapshot,
   validPromptSnapshot,
@@ -20,6 +20,7 @@ import { movePromptDecorations } from "./prompt-decoration"
 
 type Editor = {
   readonly threadId: string
+  readonly generation: object
   changed(): void
   composition(value: boolean): void
   reset(): void
@@ -47,14 +48,53 @@ export function usePromptComposer(options: {
   useLayoutEffect(() => {
     current.current = options
   })
+  const threadLifetime = useRef<AbortController | null>(null)
+  useLayoutEffect(() => {
+    const lifetime = new AbortController()
+    threadLifetime.current = lifetime
+    return () => {
+      if (threadLifetime.current === lifetime) threadLifetime.current = null
+      lifetime.abort()
+    }
+  }, [threadId])
   const editor = useRef<Editor | null>(null)
+  const generation = useMemo(() => ({ threadId, enabled, textarea }), [threadId, enabled, textarea])
+  const committedGeneration = useRef<{
+    scope: typeof generation
+    threadId: string
+    enabled: boolean
+    installation: ReturnType<typeof Promise.withResolvers<Editor | undefined>>
+  } | null>(null)
+  useLayoutEffect(() => {
+    const committed = {
+      scope: generation,
+      threadId,
+      enabled,
+      installation: Promise.withResolvers<Editor | undefined>()
+    }
+    committedGeneration.current = committed
+    return () => {
+      if (committedGeneration.current === committed) committedGeneration.current = null
+      // A replacement can be cancelled before its passive effect ever installs an editor.
+      // Wake admitted submissions so off/thread-change/unmount cannot strand their lock.
+      committed.installation.resolve(undefined)
+    }
+  }, [generation, threadId, enabled])
+  const [installed, setInstalled] = useState<{ generation: object; handle: Editor } | null>(null)
+  const isReady =
+    enabled && installed?.generation === generation && installed.handle === editor.current
   const [paint, setPaint] = useState<{ text: string; decorations: FunctionPromptDecoration[] }>({
     text: "",
     decorations: []
   })
   const [suggestion, setSuggestion] = useState("")
   useEffect(() => {
-    if (!enabled) return
+    const installation = committedGeneration.current
+    if (!installation || installation.scope !== generation) return
+    if (!enabled) {
+      installation.installation.resolve(undefined)
+      return
+    }
     const owner = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
       byte.toString(16).padStart(2, "0")
     ).join("")
@@ -85,6 +125,7 @@ export function usePromptComposer(options: {
     const ownsComposer = () =>
       alive &&
       editor.current === handle &&
+      committedGeneration.current === installation &&
       current.current.threadId === threadId &&
       current.current.enabled
     const assertComposer = () => {
@@ -249,6 +290,7 @@ export function usePromptComposer(options: {
     }
     const handle: Editor = {
       threadId,
+      generation: installation,
       changed() {
         validated = undefined
         handle.clearSuggestion()
@@ -465,6 +507,9 @@ export function usePromptComposer(options: {
       }
     }
     editor.current = handle
+    // Installation is synchronous; flush still awaits this owner's discovery and active rules.
+    setInstalled({ generation, handle })
+    installation.installation.resolve(handle)
     const onSelect = () => {
       snapshot()
       if (
@@ -677,7 +722,10 @@ export function usePromptComposer(options: {
       controller?.close()
       dialogObserver.disconnect()
       setSuggestion("")
-      if (editor.current === handle) editor.current = null
+      if (editor.current === handle) {
+        editor.current = null
+        setInstalled((previous) => (previous?.handle === handle ? null : previous))
+      }
       stop()
       stopChange?.()
       node?.removeEventListener("select", onSelect)
@@ -687,11 +735,12 @@ export function usePromptComposer(options: {
       node?.removeEventListener("blur", onPointer)
       void window.api.mods.promptDetach(threadId, owner).catch(() => undefined)
     }
-  }, [threadId, enabled, textarea])
+  }, [threadId, enabled, textarea, generation])
   useEffect(() => {
     if (options.working) editor.current?.clearSuggestion()
   }, [options.working])
   return {
+    isReady,
     decorations: enabled ? paint.decorations : [],
     suggestion: enabled && !options.working ? suggestion : "",
     acceptSuggestion: () => editor.current?.acceptSuggestion() ?? false,
@@ -706,17 +755,57 @@ export function usePromptComposer(options: {
     isSubmissionConfirmed: (draft: { text: string; revision: number }) =>
       editor.current?.isSubmissionConfirmed(draft) ?? false,
     flushSubmission: async () => {
+      if (!isReady || editor.current !== installed?.handle) throw Error("MODS_PROMPT_EDITOR_CLOSED")
       let active = editor.current
-      if (!active || active.threadId !== threadId) throw Error("MODS_PROMPT_EDITOR_CLOSED")
+      const lifetime = threadLifetime.current
+      if (
+        !lifetime ||
+        lifetime.signal.aborted ||
+        !active ||
+        active.threadId !== threadId ||
+        active.generation !== committedGeneration.current
+      )
+        throw Error("MODS_PROMPT_EDITOR_CLOSED")
       const intent = active.captureSubmission()
+      const waitWhileMounted = async <T>(pending: Promise<T>): Promise<T> => {
+        const retired = Promise.withResolvers<never>()
+        const abort = () => retired.reject(Error("MODS_PROMPT_EDITOR_CLOSED"))
+        lifetime.signal.addEventListener("abort", abort, { once: true })
+        if (lifetime.signal.aborted) abort()
+        try {
+          return await Promise.race([pending, retired.promise])
+        } finally {
+          lifetime.signal.removeEventListener("abort", abort)
+        }
+      }
       while (true) {
         try {
-          return await active.flushSubmission(intent)
+          // Unmount/thread replacement must release the submit lock even if an old
+          // SDK request never replies. Same-thread enabled changes retain their intent.
+          return await waitWhileMounted(active.flushSubmission(intent))
         } catch (cause) {
-          const next = editor.current
+          if (lifetime.signal.aborted || threadLifetime.current !== lifetime) throw cause
+          const candidate = committedGeneration.current
+          if (
+            !candidate ||
+            candidate === active.generation ||
+            candidate.threadId !== threadId ||
+            !candidate.enabled ||
+            current.current.threadId !== threadId ||
+            !current.current.enabled
+          )
+            throw cause
+          // A committed same-thread replacement can precede its passive effect. Wait only
+          // for that real installation; cancellation must not follow a later generation.
+          const next: Editor | undefined = await waitWhileMounted<Editor | undefined>(
+            candidate.installation.promise
+          )
           if (
             !next ||
+            committedGeneration.current !== candidate ||
+            editor.current !== next ||
             next === active ||
+            next.generation !== candidate ||
             next.threadId !== threadId ||
             current.current.threadId !== threadId ||
             !current.current.enabled

@@ -9,15 +9,6 @@ export interface SparksTourHandle {
   dismiss(): void
 }
 const STORAGE_KEY = "devclaw.sparks-tour.v1"
-let dismissedInMemory = false
-function hasSeenTour(): boolean {
-  if (dismissedInMemory) return true
-  try {
-    return localStorage.getItem(STORAGE_KEY) === "seen"
-  } catch {
-    return false
-  }
-}
 
 export function SparksTour({
   ref,
@@ -36,7 +27,7 @@ export function SparksTour({
   onNavigate(page: Destination, section?: "examples" | "create"): void
   onPractice?(task: SimpleAuthoringPracticeIntent["task"], suggestedName?: string): void
 }) {
-  const [open, setOpen] = useState(() => !hasSeenTour())
+  const [open, setOpen] = useState(false)
   const [task, setTask] = useState(0)
   const region = useRef<HTMLElement>(null)
   const reopenButton = useRef<HTMLButtonElement>(null)
@@ -52,7 +43,6 @@ export function SparksTour({
     if (region.current) region.current.scrollTop = 0
   }, [task, open, visible])
   const dismiss = () => {
-    dismissedInMemory = true
     try {
       localStorage.setItem(STORAGE_KEY, "seen")
     } catch {
@@ -80,7 +70,7 @@ export function SparksTour({
             setOpen(true)
           }}
         >
-          看看这页怎么用
+          本页任务示例
         </button>
         <button
           type="button"
@@ -91,7 +81,7 @@ export function SparksTour({
           }}
         >
           <BookOpen className="size-3.5" aria-hidden="true" />
-          新功能导览
+          任务示例演练
         </button>
       </div>
     )
@@ -99,7 +89,7 @@ export function SparksTour({
     <section
       ref={region}
       tabIndex={-1}
-      aria-label="新功能导览"
+      aria-label="任务示例演练"
       data-sparks-tour-open
       className="absolute inset-0 z-20 overflow-y-auto bg-background px-4 py-4 sm:px-6"
       onKeyDown={(event) => {
@@ -112,10 +102,10 @@ export function SparksTour({
     >
       <div className="mx-auto max-w-2xl">
         <div className="flex items-start justify-between gap-3">
-          <h2 className="font-semibold">先选一件想做的事，跟着示例看一遍</h2>
+          <h2 className="font-semibold">选择业务示例，先演练再操作</h2>
           <button
             type="button"
-            aria-label="跳过导览"
+            aria-label="关闭示例演练"
             className="rounded p-1.5 hover:bg-muted"
             onClick={dismiss}
           >
@@ -160,7 +150,7 @@ export function SparksTour({
           className="mt-4 rounded px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted"
           onClick={dismiss}
         >
-          关闭导览，自己操作
+          关闭示例，自己操作
         </button>
       </div>
     </section>

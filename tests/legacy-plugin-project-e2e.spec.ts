@@ -8,6 +8,12 @@ import AdmZip from "adm-zip"
 import type { ElectronApplication, Page } from "playwright"
 import type { SavedFlow } from "../src/shared/mods/flows/types"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
+import { waitForAsyncEvidence } from "./support/async-evidence"
+import {
+  closeModsProgress,
+  openModsFlowPreset,
+  openModsProgress
+} from "./support/mods-sidebar-navigation"
 
 const root = resolve(__dirname, "..")
 const requireLocal = createRequire(join(root, "package.json"))
@@ -190,7 +196,9 @@ async function main() {
     )
 
     await page.getByText(name, { exact: true }).first().waitFor()
-    const pluginRow = page.getByRole("button").filter({ has: page.getByText(name, { exact: true }) })
+    const pluginRow = page
+      .getByRole("button")
+      .filter({ has: page.getByText(name, { exact: true }) })
     assert.equal(await pluginRow.count(), 1)
     await page.screenshot({ path: join(artifacts, "legacy-plugin.png") })
     pass("traditional Plugin remains visible in its original UI navigation")
@@ -435,19 +443,28 @@ async function main() {
         await Promise.race([back.waitFor(), projects.waitFor()])
         if (await back.isVisible()) await back.click()
         await projects.click()
+        // This isolated profile enters project mode for the first time; acknowledge its guide
+        // through the visible UI before selecting the feature behind the modal overlay.
+        const guide = page.getByRole("dialog", { name: "项目模式使用引导", exact: true })
+        await guide.getByRole("button", { name: "知道了，不再提示", exact: true }).click()
+        await guide.waitFor({ state: "hidden" })
         await page.getByText("Legacy feature Flow", { exact: true }).first().click()
-        await page.getByRole("button", { name: "当前助手", exact: true }).click()
-        await page.getByRole("complementary", { name: "当前助手", exact: true }).waitFor()
-        await page.getByRole("button", { name: "选择发送方式", exact: true }).click()
-        await page.getByRole("button", { name: "按步骤执行", exact: true }).click()
-        await page.locator("textarea.composer-textarea").fill("Verify legacy project Flow from UI")
-        await page.getByRole("button", { name: "发送并执行流程", exact: true }).click()
-        await page.waitForFunction(
-          async (id) => (await window.api.mods.flowRuns(id)).length > 0,
-          threadId,
-          { timeout: 30000 }
+        const selection = await openModsFlowPreset(page)
+        await selection.selectOption(`claw:${binding.bindingRevision}`)
+        assert.equal(await selection.inputValue(), `claw:${binding.bindingRevision}`)
+        assert.equal(
+          (await page.evaluate((id) => window.api.mods.flowRuns(id), threadId)).length,
+          0
         )
-        run = (await page.evaluate((id) => window.api.mods.flowRuns(id), threadId))[0]
+        await closeModsProgress(page)
+        await page.locator("textarea.composer-textarea").fill("Verify legacy project Flow from UI")
+        await page.getByRole("button", { name: "发送消息", exact: true }).click()
+        run = (await waitForAsyncEvidence(
+          () => page.evaluate((id) => window.api.mods.flowRuns(id), threadId),
+          rows => rows.length > 0,
+          "legacy feature flow started through the actual UI",
+          30_000
+        ))[0]
         await page.screenshot({ path: join(artifacts, "harness-feature-claw-flow.png") })
       } else {
         run = await page.evaluate(
@@ -464,19 +481,27 @@ async function main() {
           { threadId, runId: run.id }
         )
         if (waiting && ["waiting", "failed", "cancelled"].includes(waiting.status)) break
-        await new Promise(resolve => setTimeout(resolve, 100))
+        await new Promise((resolve) => setTimeout(resolve, 100))
       } while (Date.now() < deadline)
       assert.equal(waiting?.status, "waiting", JSON.stringify(waiting))
       assert.equal(waiting.pendingApproval?.stepId, "confirm")
-      await page.evaluate(({ threadId, runId }) => window.api.mods.flowCancel(threadId, runId), {
-        threadId,
-        runId: run.id
-      })
-      await page.waitForFunction(
-        async ({ threadId, runId }) =>
-          (await window.api.mods.flowRun(threadId, runId))?.status === "cancelled",
-        { threadId, runId: run.id },
-        { timeout: 30000 }
+      if (kind === "feature") {
+        const progress = await openModsProgress(page)
+        const current = progress.locator(`[data-flow-run="${run.id}"]`)
+        await current.getByRole("region", { name: "人工成果确认", exact: true }).waitFor()
+        await current.getByRole("button", { name: "停止任务", exact: true }).click()
+      } else {
+        await page.evaluate(({ threadId, runId }) => window.api.mods.flowCancel(threadId, runId), {
+          threadId,
+          runId: run.id
+        })
+      }
+      await waitForAsyncEvidence(
+        () => page.evaluate(({ threadId, runId }) => window.api.mods.flowRun(threadId, runId),
+          { threadId, runId: run.id }),
+        value => value?.status === "cancelled",
+        "legacy flow cancellation persisted",
+        30_000
       )
       pass(
         `Local legacy ${kind} binding supports Claw apply/start, real host preparation and approval/cancel`

@@ -7,6 +7,11 @@ import { join, resolve } from "node:path"
 import type { ElectronApplication } from "playwright"
 import { compositionEnvironment } from "./support/mods-composition-fixtures"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
+import {
+  closeModsProgress,
+  openModsFlowPreset,
+  openModsProgress
+} from "./support/mods-sidebar-navigation"
 
 const root = resolve(__dirname, "..")
 assert(process.env.CMB_MODS_PACKAGED_DIR, "Packaged directory required")
@@ -36,9 +41,25 @@ assert.equal(evidence.asarBefore, process.env.CMB_MODS_EXPECTED_ASAR_SHA256)
 const requests: number[] = []
 const completed: number[] = []
 const failures: string[] = []
+const slowStreamStarted = Promise.withResolvers<void>()
+const releaseSlowStream = Promise.withResolvers<void>()
+let slowStreamPrefixWritten = false
 let app: ElectronApplication | undefined
 let expired = false
 const pause = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
+async function waitForSlowStream() {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      slowStreamStarted.promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(Error("Slow navigation response did not start")), 15000)
+      })
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
 const messageText = (content: unknown): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -77,7 +98,21 @@ const server = createServer(async (req, res) => {
         })}\n\n`
       )
     emit(`NAV_OUTPUT_${turn}_START\n`)
-    for (let index = 0; index < (turn === 2 ? 80 : 2); index++) {
+    if (turn === 2) {
+      slowStreamPrefixWritten = true
+      const closed = Promise.withResolvers<never>()
+      const onClose = () => closed.reject(Error("Navigation closed the held response"))
+      res.once("close", onClose)
+      slowStreamStarted.resolve()
+      try {
+        // Protection may defer native text publication until capture completes. Hold the actual
+        // response open until the UI has returned to A, rather than waiting for raw first-token text.
+        await Promise.race([releaseSlowStream.promise, closed.promise])
+      } finally {
+        res.off("close", onClose)
+      }
+    }
+    for (let index = 0; index < 2; index++) {
       await pause(100)
       if (res.destroyed) throw Error("Stream closed before completion")
       emit("继续处理隔离测试。")
@@ -100,6 +135,7 @@ async function main() {
     expired = true
     void app?.close()
   }, 120000)
+  let closeFailure: { error: unknown } | undefined
   try {
     app = await launch(30000)
     const page = await app.firstWindow()
@@ -151,26 +187,41 @@ async function main() {
       await composer.fill(`NAV_INPUT_${turn}`)
       await composer.press("Enter")
       if (turn === 2) {
-        await page
-          .getByText(/NAV_OUTPUT_2_START/)
-          .first()
-          .waitFor()
+        await waitForSlowStream()
+        await page.getByText("NAV_INPUT_2", { exact: true }).waitFor()
+        await page.getByRole("button", { name: "停止生成", exact: true }).waitFor()
+        assert(slowStreamPrefixWritten, "Actual response bytes must precede navigation")
+        assert(!completed.includes(2), "Navigation starts while the model response is open")
         await page.getByText("NAV_CHAT_B", { exact: true }).first().click()
+        await page.locator(`[data-chat-thread-id="${ids[1]}"]`).waitFor()
         await composer.waitFor()
         assert.equal(await page.getByText(/NAV_OUTPUT_2_START/).count(), 0)
+        assert.equal(await page.getByText("NAV_INPUT_2", { exact: true }).count(), 0)
         await composer.fill("NAV_B_UNSENT_DRAFT")
         await page.getByText("NAV_CHAT_A", { exact: true }).first().click()
-        await page
-          .getByText(/NAV_OUTPUT_2_START/)
-          .first()
-          .waitFor()
+        await page.locator(`[data-chat-thread-id="${ids[0]}"]`).waitFor()
+        await page.getByText("NAV_INPUT_2", { exact: true }).waitFor()
+        await page.getByRole("button", { name: "停止生成", exact: true }).waitFor()
         assert.equal(requests.length, 2, "Navigation must not send a task")
         assert(!completed.includes(2), "A to B to A must occur before the slow stream ends")
+        evidence.streamingNavigation = {
+          turn,
+          prefixWritten: slowStreamPrefixWritten,
+          requests: [...requests],
+          completedBeforeRelease: [...completed]
+        }
+        releaseSlowStream.resolve()
       }
       await page
         .getByText(new RegExp(`NAV_OUTPUT_${turn}_DONE`))
         .first()
         .waitFor()
+      if (turn === 2)
+        assert.equal(
+          await page.getByText(/NAV_OUTPUT_2_START/).count(),
+          1,
+          "The streamed prefix must remain in the protected final answer after navigation"
+        )
       // Last-token visibility precedes runtime finalization and timing persistence.
       await page.getByRole("button", { name: "停止生成", exact: true }).waitFor({ state: "hidden" })
       const end = Date.now() + 15000
@@ -217,10 +268,15 @@ async function main() {
       writeFileSync(join(artifacts, `history-turn-${turn}.json`), JSON.stringify(rows, null, 2))
       assert(settled, `Turn ${turn} must finish and persist complete stable timing metadata`)
       const tokens = rows.flatMap(
-        (row) => messageText(row.content).match(/NAV_(?:INPUT_\d+|OUTPUT_\d+_DONE)/g) ?? []
+        (row) =>
+          messageText(row.content).match(/NAV_(?:INPUT_\d+|OUTPUT_\d+_(?:START|DONE))/g) ?? []
       )
       for (let prior = 1; prior <= turn; prior++) {
-        for (const marker of [`NAV_INPUT_${prior}`, `NAV_OUTPUT_${prior}_DONE`])
+        for (const marker of [
+          `NAV_INPUT_${prior}`,
+          `NAV_OUTPUT_${prior}_START`,
+          `NAV_OUTPUT_${prior}_DONE`
+        ])
           assert.equal(
             tokens.filter((token) => token === marker).length,
             1,
@@ -236,24 +292,24 @@ async function main() {
     }
     evidence.persistedHistory = previous
     await composer.fill("NAV_A_UNSENT_DRAFT")
-    await page.getByRole("button", { name: "选择发送方式", exact: true }).click()
-    await page.getByRole("button", { name: "按步骤执行", exact: true }).click()
-    assert.match(
-      await page.getByRole("button", { name: "选择发送方式", exact: true }).innerText(),
-      /按步骤执行/
-    )
-    await page.getByRole("button", { name: "选择发送方式", exact: true }).click()
-    await page.getByRole("button", { name: "直接聊天", exact: true }).click()
-    assert.match(
-      await page.getByRole("button", { name: "选择发送方式", exact: true }).innerText(),
-      /直接聊天/
-    )
+    // The removed send-mode menu is now an explicit preset in task-progress settings.
+    // Opening/closing these views must preserve the draft without starting a task.
+    const preset = await openModsFlowPreset(page)
+    assert.equal(await preset.inputValue(), "")
+    assert.equal(await preset.locator("option:checked").innerText(), "普通聊天，不使用步骤")
+    assert.equal((await page.evaluate((id) => window.api.mods.flowRuns(id), ids[0])).length, 0)
+    await openModsProgress(page, "当前任务")
+    await closeModsProgress(page)
     assert.equal(await composer.inputValue(), "NAV_A_UNSENT_DRAFT")
     await page.getByRole("tab", { name: "项目模式", exact: true }).click()
     assert.equal(
       await page.getByRole("tab", { name: "项目模式", exact: true }).getAttribute("aria-selected"),
       "true"
     )
+    // This fresh profile must acknowledge the actual first-entry modal before switching back.
+    const projectGuide = page.getByRole("dialog", { name: "项目模式使用引导", exact: true })
+    await projectGuide.getByRole("button", { name: "知道了，不再提示", exact: true }).click()
+    await projectGuide.waitFor({ state: "hidden" })
     await page.getByRole("tab", { name: "对话模式", exact: true }).click()
     assert.equal(
       await page.getByRole("tab", { name: "对话模式", exact: true }).getAttribute("aria-selected"),
@@ -281,14 +337,35 @@ async function main() {
     evidence.asarAfter = hash()
     assert.equal(evidence.asarAfter, evidence.asarBefore)
     evidence.passed = true
+  } catch (error) {
+    evidence.stack = error instanceof Error ? error.stack : undefined
+    try {
+      const page = app?.windows()[0]
+      if (page) await page.screenshot({ path: join(artifacts, "failure.png") })
+    } catch (screenshotError) {
+      evidence.screenshotError = String(screenshotError)
+      console.error("Navigation failure screenshot failed:", screenshotError)
+    }
+    throw error
   } finally {
     clearTimeout(watchdog)
-    if (app) await app.close()
+    releaseSlowStream.resolve()
+    try {
+      if (app) await app.close()
+    } catch (closeError) {
+      closeFailure = { error: closeError }
+      evidence.closeError = String(closeError)
+      console.error("Closing navigation runtime failed:", closeError)
+    }
   }
+  if (closeFailure) throw closeFailure.error
 }
 main()
   .catch((error) => {
+    console.error(error)
+    evidence.passed = false
     evidence.error = String(error)
+    evidence.stack ??= error instanceof Error ? error.stack : undefined
     process.exitCode = 1
   })
   .finally(() => {

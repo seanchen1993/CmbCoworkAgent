@@ -70,7 +70,7 @@ it("mirrors all four canonical files byte-for-byte and verifies every pinned has
   const hooks = JSON.parse(await readFile(join(f.destination, "hooks/hooks.json"), "utf8"))
   expect(hooks).toEqual({ modules: ["./register.ts"] })
   const config = await readFile("electron.vite.config.ts", "utf8")
-  expect(config).toContain('["sparks-stage-debugger", "stage-debugger"]')
+  expect(config).toContain('await mirrorBundledModExamples(resolve("."), resolve("out/resources/bundled-mods"))')
   const pkg = JSON.parse(await readFile("package.json", "utf8"))
   expect(pkg.build.asarUnpack).toContain("out/resources/mods/**")
 })

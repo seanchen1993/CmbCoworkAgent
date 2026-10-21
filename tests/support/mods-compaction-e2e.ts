@@ -210,7 +210,18 @@ export async function verifyCompactionHooks(
 
     await page.evaluate(() => window.api.mods.configureGlobal(false))
     const offBefore = summaries()
+    const beforeContinuation = modelServer.requests.length
     await invoke(`COMPACTION_PROBE off-seed-one\n${seed}`)
+    const resumed = modelServer.requests.slice(beforeContinuation).filter(request =>
+      !isCompactionSummaryRequest(request))
+    assert.equal(resumed.length, 1, "The first post-compaction task must call the provider once")
+    const resumedMessages = resumed[0].messages
+    assert(Array.isArray(resumedMessages))
+    const texts = resumedMessages.map(message => JSON.stringify(message))
+    assert.equal(texts.filter(text => text.includes("COMPACTION_PROBE off-seed-one")).length, 1,
+      "The new native user input must appear exactly once")
+    assert(!texts.some(text => text.includes("COMPACTION_PROBE seed-two")),
+      "Post-compaction continuation must not replay the summarized raw SQL history")
     await invoke(`COMPACTION_PROBE off-seed-two\n${seed}`)
     await invoke(
       "COMPACTION_PROBE [mods-compaction-force-overflow] continue after actual automatic compaction"

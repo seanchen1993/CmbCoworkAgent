@@ -187,16 +187,17 @@ export async function mount(
             contents: args.path.endsWith("thread-context")
               ? "export const useThreadStateSelector=()=>true"
               : `import {useSyncExternalStore} from 'react';
-                const listeners=new Set();const notify=()=>{for(const fn of listeners)fn()};
-                const state={currentThreadId:'a',mainView:'thread',rightModule:'work',rightPanelCollapsed:true,
+                const listeners=new Set();let previous;const notify=()=>{const before=previous;previous={...state};for(const fn of listeners)fn(state,before)};
+                const state={accountRevision:0,currentThreadId:'a',mainView:'thread',rightModule:'work',rightPanelCollapsed:true,
                   threads:[{thread_id:'a',metadata:{workspacePath:'a',agentMode:'normal'}},{thread_id:'b',metadata:{workspacePath:'b',agentMode:'normal'}}],
                   models:[{id:'m2',name:'Model Two',model:'model-two',source:'custom',provider:'custom',available:true}],
                   setRightModule:value=>{state.rightModule=value;notify()},setRightPanelCollapsed:value=>{state.rightPanelCollapsed=value;notify()},
                   selectThread:async(id)=>{state.currentThreadId=id;(window.navigationCalls??=[]).push(['thread',id]);notify()},
-                  setShowCustomizeView:(...args)=>{(window.navigationCalls??=[]).push(args)}};
+                  setShowCustomizeView:(...args)=>{(window.navigationCalls??=[]).push(args)}};previous={...state};
                 export const useAppStore=selector=>useSyncExternalStore(fn=>{listeners.add(fn);return()=>listeners.delete(fn)},()=>selector(state));
                 useAppStore.getState=()=>state;
-                useAppStore.subscribe=listener=>{const notifyState=()=>listener(state);listeners.add(notifyState);return()=>listeners.delete(notifyState)};`
+                useAppStore.subscribe=listener=>{listeners.add(listener);return()=>listeners.delete(listener)};
+                export const isThreadDeletionPending=()=>false;export const isThreadRetired=()=>false;`
           }))
         }
       }

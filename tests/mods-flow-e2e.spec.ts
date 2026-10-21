@@ -1,4 +1,5 @@
 import { verifyClawJourney } from "./support/mods-claw-e2e"
+import { closeModsProgress, openModsAdvancedSettings, openModsFlowHistory, openModsFlowPreset, openModsProgress } from "./support/mods-sidebar-navigation"
 /** Isolated production Electron + React + IPC + Agent tools + real Autobiz business checks. */
 import assert from "node:assert/strict"
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs"
@@ -159,7 +160,6 @@ async function main() {
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("Autobiz DIY Flow E2E", { exact: true }).first().click()
     if (process.env.CMB_E2E_CLAW_ONLY === "1") {
-      await page.getByRole("button", { name: "自定义", exact: true }).click()
       await verifyClawJourney(page, threadId, artifacts)
       pass("真实 Claw A/B 组合和普通聊天 Hook 验证通过")
       return
@@ -220,18 +220,17 @@ async function main() {
       ({ threadId, definition }) => window.api.mods.flowSave(threadId, definition, 0),
       { threadId, definition }
     )
-    await page.getByRole("button", { name: "Claw 工作台", exact: true }).click()
-    await page
-      .getByLabel("对话使用的 DIY 流程")
-      .selectOption(`${saved.definition.id}:${saved.revision}`)
+    await (await openModsFlowPreset(page)).selectOption(`${saved.definition.id}:${saved.revision}`)
     assert.equal((await page.evaluate((id) => window.api.mods.flowRuns(id), threadId)).length, 0)
-    await page.getByRole("button", { name: "选择发送方式", exact: true }).click()
-    await page.getByRole("button", { name: "执行流程", exact: true }).click()
-    await page.locator("textarea.composer-textarea").fill("本次目标：核实订单导出的七项真实业务断言")
-    await page.getByRole("button", { name: "发送并执行流程", exact: true }).click()
-    await page.locator("[data-chat-flow] [data-flow-run]").waitFor({ timeout: 60000 })
+    await closeModsProgress(page)
+    await page
+      .locator("textarea.composer-textarea")
+      .fill("本次目标：核实订单导出的七项真实业务断言")
+    await page.getByRole("button", { name: "发送消息", exact: true }).click()
+    const taskPanel = await openModsProgress(page)
+    await taskPanel.locator("[data-flow-run]").waitFor({ timeout: 60000 })
     const started = (await readRun(
-      (await page.locator("[data-chat-flow] [data-flow-run]").getAttribute("data-flow-run"))!
+      (await taskPanel.locator("[data-flow-run]").getAttribute("data-flow-run"))!
     ))!
     assert.equal(started.taskGoal, "本次目标：核实订单导出的七项真实业务断言")
     assert.equal(started.flow.definition.goal, definition.goal)
@@ -255,9 +254,9 @@ async function main() {
     pass("真实 Agent 使用所选模型；原始业务测试失败后进入修复，再通过7项独立断言；禁用步骤零请求")
     assert(model.requests.some((request) => request.prompt.includes(started.taskGoal!)))
     await page.locator("textarea.composer-textarea").fill("这是一条未发送的聊天草稿")
-    await page.getByRole("region", { name: "人工成果确认" }).waitFor()
+    await taskPanel.getByRole("region", { name: "人工成果确认" }).waitFor()
     await page.screenshot({ path: join(artifacts, "approval.png") })
-    await page.getByRole("button", { name: "同意并继续", exact: true }).click()
+    await taskPanel.getByRole("button", { name: "同意并继续", exact: true }).click()
     const complete = await until(started.id, "complete")
     assert(complete.attempts.some((a) => a.stepId === "__final" && a.status === "passed"))
     await page.screenshot({ path: join(artifacts, "complete.png") })
@@ -266,8 +265,8 @@ async function main() {
       "这是一条未发送的聊天草稿"
     )
     await page.locator("textarea.composer-textarea").fill("")
-    await page.getByText(/流程任务 · Autobiz 自选修复流程 · 查看进度与结果/).click()
-    await page.getByRole("button", { name: "带运行摘要追问", exact: true }).click()
+    await openModsFlowHistory(page, started.id)
+    await taskPanel.getByRole("button", { name: "继续处理这个任务", exact: true }).click()
     const followup = await page.locator("textarea.composer-textarea").inputValue()
     assert(followup.includes(started.id))
     await page.getByRole("button", { name: "发送消息", exact: true }).waitFor()
@@ -283,8 +282,7 @@ async function main() {
       )
     )
     pass("真实聊天显式启动、冻结本次目标、按钮不误发草稿；运行摘要进入模型，普通追问不重启流程")
-    await page.getByRole("button", { name: "自定义", exact: true }).click()
-    await page.getByRole("button", { name: "DIY 流程", exact: true }).click()
+    await openModsAdvancedSettings(page, "步骤管理")
     pass("生产 React 人工暂停与点击确认、最终原生重验、完成记录")
     const second = await page.evaluate(
       ({ threadId, saved }) =>

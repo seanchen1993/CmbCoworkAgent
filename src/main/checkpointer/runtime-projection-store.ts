@@ -3082,6 +3082,7 @@ function readCanonicalBoundedCheckpointTuple(input: {
         messages: window.messages, originalMessageCount: count }) })
     if (!tuple || typeof tuple !== "object") throw Error("MODS_CONVERSATION_DISPLAY_SOURCE_INVALID")
     return { ...tuple, __cmb_canonical_display_membership: membership ?? null,
+      __cmb_ordinary_display_coverage: verifier.ordinaryCoverage(),
       __cmb_canonical_display_omissions: verifier.omissions(),
       __cmb_canonical_display_witnesses: window.messages.flatMap(message => {
       const witness = message && typeof message === "object" ? witnesses.get(message) : undefined

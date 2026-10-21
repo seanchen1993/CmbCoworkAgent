@@ -45,6 +45,7 @@ export async function verifyImperativeFocus(
     on("command.run",{command:"focus-request"},async($)=>({text:"COMMAND_FOCUS:"+JSON.stringify(await $.ui.focus({requestId:"focus-demo",key:"target"}))}));
     on("ui.input",async($,e,next)=>{await $.store.set("mode",e.value);return next(e)});
     on("ui.focus",async($,e,next)=>{
+      if(e.origin?.kind!=="plugin"||!e.focused||e.plugin!=="imperative-focus")return next(e);
       const mode=await $.store.get("mode");
       if(mode==="delay"||mode==="reload"||mode==="revoke") { $.ui.log("WAIT:"+mode);await $.clock.sleep(1000) }
       const result=await next(mode==="rewrite"?{...e,element:"alternate"}:e);
@@ -100,105 +101,144 @@ export async function verifyImperativeFocus(
       key
     )
   const modelCount = requests.length
-  await send("/focus-open now")
-  await source.waitFor()
-  await source.fill("success")
-  await until(() => hasLog("RESULT:success:{}"), "SDK receives an actual focus acknowledgement")
-  assert(await focused("target"))
-  await page.screenshot({ path: join(artifacts, "imperative-focus-success.png") })
-  pass("imperative focus moves the real DOM and settles an awaiting guest callback without a model")
-
-  const buttonSource = pane.getByRole("button", { name: "Focus by button", exact: true })
-  await buttonSource.click()
-  await until(() => hasLog("PRESS_WAIT"), "button callback is pending")
-  await buttonSource.press("Enter")
-  await until(() => hasLog("PRESS_RESULT:"), "button callback receives its focus result")
-  assert(
-    (await logs()).some((row) => row.text === "PRESS_RESULT:{}"),
-    "busy controls must retain keyboard ownership for SDK focus"
-  )
-  assert.equal((await logs()).filter((row) => row.text === "PRESS_WAIT").length, 1)
-  assert(await focused("source"))
-  pass(
-    "a busy button retains keyboard ownership for SDK focus while duplicate activation remains blocked"
-  )
-
-  await source.fill("veto")
-  await until(() => hasLog('RESULT:veto:{"deny"'), "late hook veto remains authoritative")
-  assert(await focused("source"))
-  await source.fill("empty-veto")
-  await until(() => hasLog('RESULT:empty-veto:{"deny":""}'), "empty denial also prevents DOM focus")
-  assert(await focused("source"))
-  pass("an explicit empty deny string preserves actual focus before the chain can move it")
-  await source.fill("rewrite")
-  await until(() => hasLog("RESULT:rewrite:{}"), "hook-rewritten target acknowledged")
-  assert(await focused("alternate"))
-  pass(
-    "focus middleware can veto after next or select another owned drawn target before any DOM move"
-  )
-
-  await send("/focus-request now")
-  await until(
-    async () => (await page.getByText('COMMAND_FOCUS:{"deny"', { exact: false }).count()) > 0,
-    "composer ownership refuses a command focus request"
-  )
-  assert(!(await focused("target")))
-  pass("SDK focus refuses to steal keyboard ownership from the native composer")
-
-  await source.fill("delay")
-  await until(() => hasLog("WAIT:delay"), "focus hook waits")
-  await composer.fill("keep typing")
-  await until(() => hasLog('RESULT:delay:{"deny"'), "competing person intent invalidates focus")
-  assert(await composer.evaluate((element) => document.activeElement === element))
-  assert.equal(await composer.inputValue(), "keep typing")
-  pass("a new person intent cancels a pending focus move and preserves native composer text")
-
-  await source.fill("reload")
-  await until(() => hasLog("WAIT:reload"), "reload focus hook waits")
-  await page.reload({ waitUntil: "domcontentloaded" })
-  await page.getByText("Imperative focus E2E", { exact: true }).first().click()
-  await until(
-    () => hasLog('RESULT:reload:{"deny"'),
-    "reload cannot replay a keyboard ownership acknowledgement"
-  )
-  assert(!(await focused("target")))
-  pass("renderer reload cannot reuse a focus ownership probe from its previous lifecycle")
-  await openModsResults(page)
-
-  await source.fill("revoke")
-  await until(() => hasLog("WAIT:revoke"), "revocation focus hook waits")
-  await page.evaluate((id) => window.api.mods.revokeFunction(id, "imperative-focus"), threadId)
-  await until(async () => (await pane.count()) === 0, "revocation removes the pending pane")
-  assert(!(await focused("target")))
-  assert.equal(requests.length, modelCount)
-  await page.evaluate(() => window.api.mods.configureGlobal(false))
-  assert.deepEqual(await page.evaluate((id) => window.api.mods.panes(id), threadId), [])
-  await composer.fill("native composer with Mods off")
-  assert.equal(await composer.inputValue(), "native composer with Mods off")
-  await page.screenshot({ path: join(artifacts, "imperative-focus-off.png") })
-  writeFileSync(
-    join(artifacts, "imperative-focus-evidence.json"),
-    JSON.stringify(
-      {
-        actualDom: true,
-        actualGuest: true,
-        actualSession: true,
-        lateVeto: true,
-        emptyVeto: true,
-        rewrittenTarget: true,
-        composerOwnership: true,
-        competingIntent: true,
-        reload: true,
-        revoke: true,
-        off: true,
-        modelRequests: requests.length - modelCount
-      },
-      null,
-      2
+  try {
+    await send("/focus-open now")
+    await source.waitFor()
+    await source.fill("success")
+    await until(() => hasLog("RESULT:success:{}"), "SDK receives an actual focus acknowledgement")
+    assert(await focused("target"))
+    await page.screenshot({ path: join(artifacts, "imperative-focus-success.png") })
+    pass(
+      "imperative focus moves the real DOM and settles an awaiting guest callback without a model"
     )
-  )
-  await page.evaluate(() => window.api.mods.configureGlobal(true))
-  pass(
-    "revocation and global off remove pending focus UI while leaving the original composer usable"
-  )
+
+    const buttonSource = pane.getByRole("button", { name: "Focus by button", exact: true })
+    await buttonSource.click()
+    await until(() => hasLog("PRESS_WAIT"), "button callback is pending")
+    await buttonSource.press("Enter")
+    await until(() => hasLog("PRESS_RESULT:"), "button callback receives its focus result")
+    assert(
+      (await logs()).some((row) => row.text === "PRESS_RESULT:{}"),
+      "busy controls must retain keyboard ownership for SDK focus"
+    )
+    assert.equal((await logs()).filter((row) => row.text === "PRESS_WAIT").length, 1)
+    assert(await focused("source"))
+    pass(
+      "a busy button retains keyboard ownership for SDK focus while duplicate activation remains blocked"
+    )
+
+    await source.fill("veto")
+    await until(() => hasLog('RESULT:veto:{"deny"'), "late hook veto remains authoritative")
+    assert(await focused("source"))
+    await source.fill("empty-veto")
+    await until(
+      () => hasLog('RESULT:empty-veto:{"deny":""}'),
+      "empty denial also prevents DOM focus"
+    )
+    assert(await focused("source"))
+    pass("an explicit empty deny string preserves actual focus before the chain can move it")
+    await source.fill("rewrite")
+    await until(() => hasLog("RESULT:rewrite:{}"), "hook-rewritten target acknowledged")
+    assert(await focused("alternate"))
+    pass(
+      "focus middleware can veto after next or select another owned drawn target before any DOM move"
+    )
+
+    await send("/focus-request now")
+    await until(
+      async () => (await page.getByText('COMMAND_FOCUS:{"deny"', { exact: false }).count()) > 0,
+      "composer ownership refuses a command focus request"
+    )
+    assert(!(await focused("target")))
+    pass("SDK focus refuses to steal keyboard ownership from the native composer")
+
+    await source.fill("delay")
+    await until(() => hasLog("WAIT:delay"), "focus hook waits")
+    await composer.fill("keep typing")
+    await until(() => hasLog('RESULT:delay:{"deny"'), "competing person intent invalidates focus")
+    assert(await composer.evaluate((element) => document.activeElement === element))
+    assert.equal(await composer.inputValue(), "keep typing")
+    pass("a new person intent cancels a pending focus move and preserves native composer text")
+
+    await source.fill("reload")
+    await until(() => hasLog("WAIT:reload"), "reload focus hook waits")
+    await page.reload({ waitUntil: "domcontentloaded" })
+    await page.getByText("Imperative focus E2E", { exact: true }).first().click()
+    await until(
+      () => hasLog('RESULT:reload:{"deny"'),
+      "reload cannot replay a keyboard ownership acknowledgement"
+    )
+    assert(!(await focused("target")))
+    pass("renderer reload cannot reuse a focus ownership probe from its previous lifecycle")
+    await openModsResults(page)
+
+    await source.fill("revoke")
+    await until(() => hasLog("WAIT:revoke"), "revocation focus hook waits")
+    await page.evaluate((id) => window.api.mods.revokeFunction(id, "imperative-focus"), threadId)
+    await until(async () => (await pane.count()) === 0, "revocation removes the pending pane")
+    assert(!(await focused("target")))
+    assert.equal(requests.length, modelCount)
+    await page.evaluate(() => window.api.mods.configureGlobal(false))
+    assert.deepEqual(await page.evaluate((id) => window.api.mods.panes(id), threadId), [])
+    await composer.fill("native composer with Mods off")
+    assert.equal(await composer.inputValue(), "native composer with Mods off")
+    await page.screenshot({ path: join(artifacts, "imperative-focus-off.png") })
+    writeFileSync(
+      join(artifacts, "imperative-focus-evidence.json"),
+      JSON.stringify(
+        {
+          actualDom: true,
+          actualGuest: true,
+          actualSession: true,
+          lateVeto: true,
+          emptyVeto: true,
+          rewrittenTarget: true,
+          composerOwnership: true,
+          competingIntent: true,
+          reload: true,
+          revoke: true,
+          off: true,
+          modelRequests: requests.length - modelCount
+        },
+        null,
+        2
+      )
+    )
+    await page.evaluate(() => window.api.mods.configureGlobal(true))
+    pass(
+      "revocation and global off remove pending focus UI while leaving the original composer usable"
+    )
+  } catch (error) {
+    try {
+      writeFileSync(
+        join(artifacts, "imperative-focus-failure.json"),
+        JSON.stringify(
+          {
+            error: error instanceof Error ? error.stack : String(error),
+            logs: await logs(),
+            modelRequests: requests.length - modelCount,
+            dom: await page.evaluate(() => {
+              const pane = document.querySelector('[data-function-pane="focus-demo"]')
+              const input = pane?.querySelector<HTMLInputElement>(
+                '[data-function-control="source"]'
+              )
+              return {
+                paneGeneration: pane?.getAttribute("data-function-pane-generation"),
+                sourceValue: input?.value,
+                sourceDisabled: input?.disabled,
+                sourceReadOnly: input?.readOnly,
+                sourceAriaDisabled: input?.getAttribute("aria-disabled"),
+                activeControl: (document.activeElement as HTMLElement)?.dataset.functionControl
+              }
+            })
+          },
+          null,
+          2
+        )
+      )
+    } catch (diagnosticError) {
+      console.error("Unable to preserve imperative focus failure", diagnosticError)
+    }
+    throw error
+  }
 }

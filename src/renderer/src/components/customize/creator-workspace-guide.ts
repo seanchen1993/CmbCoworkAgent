@@ -59,7 +59,7 @@ export const creatorWorkspaceGuideSteps: readonly AnchoredGuideStep[] = [
     id: "components",
     title: "继续组合 Mods，并随时重看指引",
     description:
-      "这里管理当前聊天的 Mod 组件、聊天组合及高级设置；项目试用和交付在上方独立区域。需要调整功能时回到原聊天描述修改。完成、跳过或关闭本指引后，仍可从工作区或聊天模式栏的“使用指引”重新开始。",
+      "这里管理当前聊天的 Mod 组件、聊天组合及高级设置；项目试用和交付在上方独立区域。需要调整功能时回到原聊天描述修改。完成、跳过或关闭本指引后，仍可从工作区的“使用指引”重新开始；聊天模式栏的“使用指引”介绍应用控件位置。",
     selectors: ['[data-creator-section="create"] > summary']
   }
 ]

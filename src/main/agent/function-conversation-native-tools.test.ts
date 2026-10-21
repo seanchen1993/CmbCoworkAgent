@@ -13,8 +13,10 @@ import { createAgent, createMiddleware } from "langchain"
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 import { z } from "zod"
 import { FunctionConversationStore } from "../db/function-conversation-store"
-import { ModsManager, type ModThreadBinding } from "../mods/manager"
+import { ModsManager, setModsManager, type ModThreadBinding } from "../mods/manager"
 import { DEFAULT_MOD_POLICY } from "../mods/policy"
+import { createHookScope } from "../hooks/scope"
+import { createToolHookMiddleware } from "./tool-hooks"
 import { FunctionConversationCoordinator } from "../mods/v2/conversation-coordinator"
 import { projectFunctionSessionApiMessages } from "../mods/v2/session-api-transcript"
 import { captureThreadIncarnation, matchesThreadIncarnation } from
@@ -23,7 +25,8 @@ import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "./thread-run-lease"
 import { installFunctionConversationNativeNode, readFunctionConversationNativeNodeSlot,
   type FunctionConversationNativeNodeSlot } from "./function-conversation-native-node"
-import { installFunctionConversationNativeTools, type FunctionNativeToolReturnView } from
+import { captureCurrentFunctionNativeToolCompletion, installFunctionConversationNativeTools,
+  type FunctionNativeToolReturnView } from
   "./function-conversation-native-tools"
 import { createFunctionConversationSharedAgent } from "./mods-conversation-shared-invocation"
 
@@ -65,10 +68,10 @@ class LocalModel extends BaseChatModel {
 }
 
 /** Actual AppDB, authority, independent physical lease, coordinator and policy admission. */
-async function fixture() {
+async function fixture(globalEnabled: () => boolean = () => true) {
   const root = mkdtempSync(join(directory, "workspace-"))
   const manager = new ModsManager(join(root, "control.sqlite"), () => [], async () => true,
-    () => undefined, undefined, { ...DEFAULT_MOD_POLICY, required: false }, () => true)
+    () => undefined, undefined, { ...DEFAULT_MOD_POLICY, required: false }, globalEnabled)
   manager.configure(root, false, false)
   const workspace = manager.workspaceKey(root), threadId = randomUUID(), turnId = randomUUID()
   const physicalRunId = randomUUID(), controller = new AbortController()
@@ -120,7 +123,8 @@ async function fixture() {
     releaseLocalThreadRunLease(threadId, "desktop", physicalRunId)
     manager.close(); rmSync(root, { recursive: true, force: true })
   })
-  return { runtime, store, saver, config, controller, retire: () => { retired = true },
+  return { runtime, store, saver, config, controller, manager, workspace, threadId, turnId,
+    authority: instance.authority, retire: () => { retired = true },
     changePolicy: () => manager.configure(root, false, false) }
 }
 
@@ -172,6 +176,56 @@ describe("original known ToolNode request and completed output provenance", () =
     expect(f.store.readRows(f.runtime.target.ref)).toHaveLength(0)
     expect((await kept(f)).filter(ToolMessage.isInstance).map(message => message.content))
       .toEqual(["ordinary actual tool body"])
+  })
+
+  it("isolates an ordinary shared child's real tool Hooks from its native parent ToolNode", async () => {
+    const f = await fixture(() => false)
+    setModsManager(f.manager)
+    cleanups.push(() => setModsManager(undefined))
+    expect(f.manager.isActive(f.workspace)).toBe(false)
+    const childEffect = vi.fn(() => "actual ordinary child file body")
+    const childTool = tool(childEffect, { name: "actual_child_read", schema: z.object({}) })
+    const childModel = provider([{ name: childTool.name, id: "actual-child-read", args: {} }])
+    const captureRuntime = vi.fn(() => { throw Error("ORDINARY_CHILD_CANNOT_CAPTURE_NATIVE") })
+    const flush = vi.fn(() => { throw Error("ORDINARY_CHILD_CANNOT_FLUSH_NATIVE") })
+    const hooks = () => createToolHookMiddleware({ runtimeAuthority: f.authority,
+      workspacePath: f.workspace, threadId: f.threadId, hookTurnId: f.turnId,
+      hookScope: createHookScope(), resolveHooksForContext: () => [] })
+    const child = createFunctionConversationSharedAgent({ model: childModel, tools: [childTool],
+      middleware: [hooks()] }, () => undefined, { store: f.store, agentId: "ordinary_shared_child",
+      model: "actual_ordinary_child_model", captureRuntime, flush })
+    let parentEffects = 0
+    const assertAncestorStillRejects = () => expect(() => captureCurrentFunctionNativeToolCompletion(
+      f.authority, { name: "forged_child_call", id: "forged", args: {} }))
+      .toThrow("MODS_CONVERSATION_NATIVE_TOOL_SOURCE_INVALID")
+    const parentTool = tool(async () => {
+      parentEffects++
+      assertAncestorStillRejects()
+      const result = await f.manager.withSharedAgent(f.authority, "actual-ordinary-child",
+        f.controller.signal, { blockedToolNames: new Set(), readOnly: true }, () => child.invoke({
+          messages: [new HumanMessage("actual child request")] }, {
+          signal: f.controller.signal, configurable: { thread_id: f.threadId } }))
+      assertAncestorStillRejects()
+      expect(result.messages.filter(ToolMessage.isInstance).map(message => message.content))
+        .toEqual(["actual ordinary child file body"])
+      return "actual parent retained the child result"
+    }, { name: "actual_parent_task", schema: z.object({}) })
+    const parentModel = provider([{ name: parentTool.name, id: "actual-parent-task", args: {} }])
+    const parent = createAgent({ model: parentModel, tools: [parentTool], middleware: [hooks()],
+      checkpointer: f.saver })
+    const views: FunctionNativeToolReturnView[] = []
+    install(f, parent.graph, async view => { views.push(view); return view.message })
+    await parent.invoke({ messages: [new HumanMessage("actual parent request")] }, f.config)
+    expect(parentEffects).toBe(1)
+    expect(childEffect).toHaveBeenCalledTimes(1)
+    expect(childModel.requests).toHaveLength(2)
+    expect(parentModel.requests).toHaveLength(2)
+    expect(views).toHaveLength(1)
+    expect(parentModel.requests[1].filter(ToolMessage.isInstance).map(message => message.content))
+      .toEqual(["actual parent retained the child result"])
+    expect(captureRuntime).not.toHaveBeenCalled()
+    expect(flush).not.toHaveBeenCalled()
+    expect(f.store.readRows(f.runtime.target.ref)).toHaveLength(0)
   })
 
   it("uses the actual requested name when the final ToolMessage has no optional name/status", async () => {

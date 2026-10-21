@@ -29,7 +29,7 @@ export function FunctionQuestionSite({
       renderNative={(safe) => {
         try {
           return (
-            <div className="flex min-h-0 w-full min-w-0 flex-col">
+            <div className="flex w-full min-w-0 shrink-0 flex-col">
               {renderQuestions(functionQuestionPresentation(request.questions, safe.questions))}
             </div>
           )

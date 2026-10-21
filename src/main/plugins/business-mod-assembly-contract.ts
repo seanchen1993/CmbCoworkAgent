@@ -42,6 +42,10 @@ export interface BusinessModAssemblyAdapter {
   ownsKernelIdentity?(kernel: BusinessModKernel): boolean
   /** Adapter-owned derived files must never be copied as opaque kernel resources. */
   reservedPaths(kernel: BusinessModKernel): string[]
+  /** Returns only adapter-owned source paths whose lossless static projection was checked. */
+  assertModularizationSource?(
+    context: Pick<BusinessModAdapterContext, "kernel" | "snapshot" | "modules">
+  ): string[]
   project(context: BusinessModAdapterContext): BusinessModAdapterProjection
 }
 

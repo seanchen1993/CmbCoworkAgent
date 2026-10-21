@@ -19,7 +19,8 @@ import type {
   DevelopmentTrialStatus
 } from "../../../shared/mods/development"
 import type { AuthoringAtomicSettings } from "./authoring-config-snapshot"
-import type { CreatorReuseService } from "./creator-reuse"
+import { CreatorReuseService } from "./creator-reuse"
+import { ClawStore } from "../claw-store"
 import { CreatorPlanningService } from "./creator-planning"
 
 afterEach(() => vi.restoreAllMocks())
@@ -72,7 +73,7 @@ it("still stops on a genuine scope change rather than swallowing it as optional 
   ).rejects.toThrow("DEVELOPMENT_SCOPE_CHANGED")
 })
 
-function fixture(normalizeWorkspace?: (workspace: string) => string) {
+function fixture(normalizeWorkspace?: (workspace: string) => string, workspace = "workspace") {
   const settings = new Map<string, string>()
   const storage: AuthoringAtomicSettings = {
     getSetting: (key, fallback) => settings.get(key) ?? fallback ?? "",
@@ -116,7 +117,7 @@ function fixture(normalizeWorkspace?: (workspace: string) => string) {
       const captured = token
       return {
         scope: {
-          workspace: "workspace",
+          workspace,
           threadId,
           incarnation: { token: captured, legacyCreatedAt: 1 }
         },
@@ -159,6 +160,162 @@ function fixture(normalizeWorkspace?: (workspace: string) => string) {
     }
   }
 }
+
+describe("normalized development write scopes", () => {
+  const raw = "C:\\Users\\87624\\Project"
+  const normalize = (value: string) => value.replace(/\\/g, "/").toLowerCase()
+  const canonical = normalize(raw)
+  const approval = {
+    planId: "missing",
+    sourceDigest: "b".repeat(64),
+    compiledDigest: "a".repeat(64),
+    targetProfileDigest: "c".repeat(64)
+  }
+  function reuse(f: ReturnType<typeof fixture>) {
+    const unavailable = () => {
+      throw Error("Unexpected installation effect")
+    }
+    const service = new CreatorReuseService({
+      settings: f.storage,
+      drafts: f.drafts,
+      claws: new ClawStore({ getSetting: f.storage.getSetting, setSetting: unavailable }),
+      install: {
+        list: unavailable,
+        prepare: unavailable,
+        apply: unavailable,
+        resolveInstalled: unavailable,
+        discardPrepared: unavailable
+      },
+      readContext: (threadId) => f.service.reuseContext(threadId),
+      readDraft: (threadId, id) => f.service.read(threadId, id),
+      identity: (threadId) => threadId,
+      available: async () => [],
+      stopTrial: unavailable,
+      approveInstalled: unavailable,
+      applySelection: unavailable,
+      runtimeReady: () => false,
+      assertAuthorized: unavailable,
+      busy: () => false,
+      onIdle: () => () => {},
+      changed: () => {}
+    })
+    f.service.configureReuse(service)
+    return service
+  }
+  it("accepts raw Windows paths for creator mode and enable changes", async () => {
+    const f = fixture(normalize, canonical)
+    await expect(f.service.setMode("one", raw, "creator")).resolves.toMatchObject({
+      workspace: canonical,
+      enabled: true,
+      mode: "creator"
+    })
+    await expect(f.service.setMode("one", raw, "normal")).resolves.toMatchObject({ mode: "normal" })
+    await expect(f.service.setEnabled("one", raw, false)).resolves.toMatchObject({ enabled: false })
+    await expect(f.service.setEnabled("one", raw, true)).resolves.toMatchObject({
+      workspace: canonical,
+      enabled: true
+    })
+  })
+  it("retains trial approval source/revision checks and the original canonical runtime scope", async () => {
+    const f = fixture(normalize, canonical)
+    await f.service.setEnabled("one", canonical, true)
+    vi.mocked(f.runtime.developmentStatus).mockReturnValue([
+      {
+        componentId: "demo",
+        draftId: "demo",
+        revision: 1,
+        compiledDigest: "a".repeat(64),
+        bundleDigest: "b".repeat(64),
+        capabilities: ["http.fetch"],
+        phase: "needs-approval",
+        validation: "authorized-real"
+      }
+    ])
+    await expect(
+      f.service.approve("one", raw, "demo", 2, "a".repeat(64), "b".repeat(64))
+    ).rejects.toThrow("DEVELOPMENT_APPROVAL_STALE")
+    await expect(
+      f.service.approve("one", raw, "demo", 1, "a".repeat(64), "c".repeat(64))
+    ).rejects.toThrow("DEVELOPMENT_APPROVAL_SOURCE_REQUIRED")
+    expect(f.runtime.approveDevelopment).not.toHaveBeenCalled()
+    await f.service.approve("one", raw, "demo", 1, "a".repeat(64), "b".repeat(64))
+    expect(f.runtime.approveDevelopment).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ workspace: canonical, threadId: "one" }),
+      "demo",
+      "a".repeat(64),
+      ["http.fetch"],
+      expect.any(Function)
+    )
+  })
+  it("reaches reuse approval and promotion checks without treating equivalent paths as new scopes", async () => {
+    const f = fixture(normalize, canonical)
+    await f.service.setEnabled("one", canonical, true)
+    const service = reuse(f)
+    try {
+      await expect(f.service.approveReuse("one", raw, approval)).rejects.toThrow(
+        "CREATOR_REUSE_APPROVAL_CHANGED"
+      )
+      f.save()
+      expect(() => f.service.promote("one", raw, "demo", 2)).toThrow("AUTHORING_VERSION_CHANGED")
+      expect(f.service.promote("one", raw, "demo", 1).workspace).toBe(canonical)
+      await f.service.stop("one", raw, "demo")
+      expect(f.runtime.stopDevelopment).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ workspace: canonical, threadId: "one" }),
+        "demo",
+        expect.any(Function)
+      )
+    } finally {
+      service.close()
+    }
+  })
+  it("rejects different directories at every write entry before any effect", async () => {
+    const f = fixture(normalize, canonical)
+    await f.service.setEnabled("one", canonical, true)
+    f.save()
+    const service = reuse(f)
+    const other = "C:\\Users\\87624\\Different"
+    try {
+      for (const action of [
+        () => f.service.setMode("one", other, "creator"),
+        () => f.service.setEnabled("one", other, true),
+        () => f.service.approveReuse("one", other, approval),
+        () => f.service.approve("one", other, "demo", 1, "a".repeat(64)),
+        () => f.service.stop("one", other, "demo")
+      ])
+        await expect(action()).rejects.toThrow("DEVELOPMENT_SCOPE_CHANGED")
+      expect(() => f.service.promote("one", other, "demo", 1)).toThrow("DEVELOPMENT_SCOPE_CHANGED")
+      expect(f.runtime.approveDevelopment).not.toHaveBeenCalled()
+      expect(f.runtime.stopDevelopment).not.toHaveBeenCalled()
+      expect(f.drafts.list(canonical)).toEqual([])
+    } finally {
+      service.close()
+    }
+  })
+  it("does not renew an old incarnation guard when the path still matches", async () => {
+    const f = fixture(normalize, canonical)
+    await f.service.setEnabled("one", canonical, true)
+    const previous = f.service.projectAuthoringContext("one")
+    vi.mocked(f.runtime.stopDevelopment).mockImplementation(async (_scope, _id, guard) => {
+      f.changeIdentity()
+      guard()
+    })
+    await expect(f.service.stop("one", raw, "demo")).rejects.toThrow("DEVELOPMENT_SCOPE_CHANGED")
+    expect(() => previous.assertCurrent()).toThrow("DEVELOPMENT_SCOPE_CHANGED")
+    expect(f.service.status("one")).toMatchObject({ enabled: false, mode: "normal" })
+  })
+  it("keeps exact comparison when no workspace normalizer is configured", async () => {
+    const f = fixture(undefined, canonical)
+    await expect(f.service.setMode("one", raw, "creator")).rejects.toThrow(
+      "DEVELOPMENT_SCOPE_CHANGED"
+    )
+    await expect(f.service.setEnabled("one", raw, true)).rejects.toThrow(
+      "DEVELOPMENT_SCOPE_CHANGED"
+    )
+    await expect(f.service.setEnabled("one", canonical, true)).resolves.toMatchObject({
+      enabled: true
+    })
+  })
+})
 
 function mockPreparedVersions() {
   const records = new WeakMap<object, PreparedAuthoringVersion>()

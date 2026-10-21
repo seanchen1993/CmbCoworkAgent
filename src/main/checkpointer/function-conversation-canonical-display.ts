@@ -1,4 +1,5 @@
 import { types } from "node:util"
+import { createHash } from "node:crypto"
 import { realpathSync } from "node:fs"
 import type { BaseMessage } from "@langchain/core/messages"
 import type { Checkpoint, CheckpointTuple } from "@langchain/langgraph-checkpoint"
@@ -39,6 +40,9 @@ import { canonicalDisplayColumnsDigest, canonicalDisplayValueDigest, canonicalCh
   "./function-conversation-canonical-display-worker"
 import { formatSealedThreadMessageColumns } from "../thread-message-hydration/page-reader"
 import type { CanonicalThreadDisplayWitness } from "../thread-message-hydration/protocol"
+
+import { readOrdinaryToolDisplayCoverage, ORDINARY_CHECKPOINT_COVERAGE_BYTE_LIMIT } from
+  "./function-conversation-ordinary-display"
 
 const sourceBrand = Symbol("canonical-checkpoint-display-source")
 export interface FunctionConversationCanonicalDisplaySource {
@@ -280,6 +284,8 @@ export function verifyCanonicalCheckpointWorkerDisplay(value: unknown, threadId:
   onCompleteCanonicalTranscript?: () => void): unknown {
   let completeCanonicalTranscript = false
   const fingerprint = canonicalDisplayValueDigest(value)
+  const ordinaryCoverage = own(value, "__cmb_ordinary_display_coverage")
+  const ordinaryFinalChecks: Array<() => void> = []
   const witnesses = own(value, "__cmb_canonical_display_witnesses")
   const membership = own(value, "__cmb_canonical_display_membership")
   const omissions = own(value, "__cmb_canonical_display_omissions")
@@ -345,6 +351,51 @@ export function verifyCanonicalCheckpointWorkerDisplay(value: unknown, threadId:
       if (!actual || own(channels, "__cmb_original_message_count") !== actual.snapshot.nativeMessageCount)
         fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
       completeCanonicalTranscript = actual.snapshot.members.length === actual.snapshot.nativeMessageCount
+      // Ordinary rows stay ordinary. Complete native payload evidence proves only that the
+      // already-durable transcript covers this exact checkpoint, so no migration is needed.
+      if (ordinaryCoverage !== undefined && ordinaryCoverage !== null) {
+        if (!Array.isArray(ordinaryCoverage) || types.isProxy(ordinaryCoverage)) fail()
+        const byOrdinal = new Map<number, { payload: string; messageId: string }>()
+        const seenIds = new Set(actual.snapshot.members.map(member => member.uuid))
+        const memberOrdinals = new Set(actual.snapshot.members.map(member => member.ordinal))
+        let bytes = 0
+        for (const entry of ordinaryCoverage) {
+          const ordinal = own(entry, "ordinal"), payload = own(entry, "payload")
+          const columnsDigest = own(entry, "columnsDigest")
+          if (typeof ordinal !== "number" || !Number.isSafeInteger(ordinal) || ordinal < 0 ||
+            ordinal >= actual.snapshot.nativeMessageCount || byOrdinal.has(ordinal) ||
+            memberOrdinals.has(ordinal) ||
+            typeof payload !== "string" || typeof columnsDigest !== "string") fail()
+          bytes += Buffer.byteLength(payload, "utf8") + 128
+          if (bytes > ORDINARY_CHECKPOINT_COVERAGE_BYTE_LIMIT) fail()
+          const covered = readOrdinaryToolDisplayCoverage(database, threadId, payload)
+          if (!covered || covered.columnsDigest !== columnsDigest || seenIds.has(covered.messageId)) fail()
+          if (reader.readColumns(covered.messageId) !== undefined) fail()
+          seenIds.add(covered.messageId)
+          byOrdinal.set(ordinal, { payload, messageId: covered.messageId })
+          ordinaryFinalChecks.push(() => {
+            const current = readOrdinaryToolDisplayCoverage(database, threadId, payload)
+            if (getDb() !== database || current?.messageId !== covered.messageId ||
+              current.columnsDigest !== columnsDigest) fail()
+          })
+        }
+        if (byOrdinal.size) {
+          if (byOrdinal.size + actual.snapshot.members.length !== actual.snapshot.nativeMessageCount) fail()
+          const digest = createHash("sha256").update("[")
+          const members = new Map(actual.snapshot.members.map(member => [member.ordinal, member]))
+          for (let ordinal = 0; ordinal < actual.snapshot.nativeMessageCount; ordinal++) {
+            const member = members.get(ordinal), ordinary = byOrdinal.get(ordinal)
+            const payload = member ? readCanonicalCheckpointDisplayMemberRow(database,
+              actual.target, actual.snapshot, member).nativePayload : ordinary?.payload
+            if (payload === undefined) fail()
+            if (ordinal) digest.update(",")
+            digest.update(JSON.stringify(payload))
+          }
+          if (digest.update("]").digest("hex") !== actual.snapshot.nativeSnapshotDigest)
+            fail("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+          completeCanonicalTranscript = true
+        } else if (!completeCanonicalTranscript) fail()
+      }
       for (const member of actual.snapshot.members) {
         // One full row at a time: the reader keeps only private fingerprints and ledger receipts.
         readCanonicalCheckpointDisplayMemberRow(database, actual.target, actual.snapshot, member)
@@ -371,17 +422,19 @@ export function verifyCanonicalCheckpointWorkerDisplay(value: unknown, threadId:
     verifyCanonicalThreadDisplayWitnessesInScope(reader, evidence)
     reader.runGuard(sourceGuard)
   })
-  // The final read B succeeded. Only pure wire and cheap source checks follow it.
+  // The scope ran the final source callback and canonical B read. Re-read every ordinary
+  // column/side-table classification afterwards too; no host callback follows these reads.
+  for (const check of ordinaryFinalChecks) check()
   if (canonicalDisplayValueDigest(value) !== fingerprint) fail()
   if (!value || typeof value !== "object") fail()
   const { __cmb_canonical_display_witnesses, __cmb_canonical_display_membership,
-    __cmb_canonical_display_omissions, ...tuple } =
+    __cmb_canonical_display_omissions, __cmb_ordinary_display_coverage, ...tuple } =
     value as Record<string, unknown>
   void __cmb_canonical_display_witnesses
   void __cmb_canonical_display_membership
   void __cmb_canonical_display_omissions
-  // A verified mixed checkpoint can still contain ordinary rows absent from the durable table.
-  // Only complete native membership proves that legacy UI migration is unnecessary.
+  void __cmb_ordinary_display_coverage
+  // Unknown/uncovered mixed history retains the original fail-closed migration path.
   if (completeCanonicalTranscript) onCompleteCanonicalTranscript?.()
   return tuple
 }

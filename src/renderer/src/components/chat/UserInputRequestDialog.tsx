@@ -425,7 +425,7 @@ function ActiveUserInputRequestDialog({
           </section>
         </div>
 
-        <div className="flex items-center justify-between gap-2 border-t border-border px-4 py-3">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border px-4 py-3">
           <nav className="flex items-center gap-1" aria-label="问题导航">
             {shownQuestions.map((question, questionIndex) => (
               <Button
@@ -476,7 +476,7 @@ function ActiveUserInputRequestDialog({
       >
         <div
           className={cn(
-            "flex items-center gap-3 px-4",
+            "flex shrink-0 items-center gap-3 px-4",
             collapsed ? "h-full py-0" : "border-b border-border py-3"
           )}
         >
@@ -507,7 +507,13 @@ function ActiveUserInputRequestDialog({
           </Button>
         </div>
 
-        <div className={collapsed ? "hidden" : "contents"}>
+        <div
+          role="region"
+          aria-label="问题内容与补充说明"
+          tabIndex={0}
+          data-user-input-content
+          className={collapsed ? "hidden" : "min-h-0 flex-1 overflow-y-auto overscroll-contain"}
+        >
           <FunctionFeedback threadId={request.threadId} requestId={request.requestId} />
           <FunctionQuestionSite
             key={request.requestId}

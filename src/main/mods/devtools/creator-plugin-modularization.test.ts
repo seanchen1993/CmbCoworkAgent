@@ -202,6 +202,28 @@ async function fixture() {
 }
 
 describe("Creator original plugin modularization journey", () => {
+  it("reads and redacts larger source files for paged inspection without mutating source", async () => {
+    const f = await fixture()
+    const text = 'api_key = "PRIVATE_LARGE_SOURCE_CANARY"\n' + "# reviewed source\n".repeat(16_000)
+    await write(f.source, "hooks/large-source.py", text)
+    const inspected = await f.service.inspectRaw("creator", f.plugin.id)
+    expect(inspected).toHaveProperty("schemaAction", "modularization_schema(cursor)")
+    const read = await f.service.readRawAsset(
+      "creator",
+      inspected.rawInspectionId,
+      "hooks/large-source.py"
+    )
+    expect(Buffer.byteLength(read.text)).toBeGreaterThan(64 * 1024)
+    expect(read).toMatchObject({
+      redacted: true,
+      originalPreserved: true,
+      sourceDigest: inspected.sourceDigest
+    })
+    expect(read.text).not.toContain("PRIVATE_LARGE_SOURCE_CANARY")
+    expect(read.text.endsWith("# reviewed source\n")).toBe(true)
+    expect(await readFile(join(f.source, "hooks/large-source.py"), "utf8")).toBe(text)
+  })
+
   it.each([
     {
       key: "connection",

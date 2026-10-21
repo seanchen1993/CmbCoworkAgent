@@ -104,24 +104,28 @@ export async function verifyFileReadOptions(
     default: { value: "ACTUAL_READ_TEXT 中文" },
     optional: { value: "ACTUAL_READ_TEXT 中文" },
     text: { value: "ACTUAL_READ_TEXT 中文" },
-    bytes: { error: "MODS_FS_BYTES_UNSUPPORTED" },
+    bytes: { error: "MODS_FS_BYTES_POLICY" },
     invalid: { error: "MODS_FS_OPTIONS" },
     unknown: { error: "MODS_FS_OPTIONS" },
-    rewritten: { error: "MODS_FS_BYTES_UNSUPPORTED" },
+    rewritten: { error: "MODS_FS_BYTES_POLICY" },
     legacy: { value: "ACTUAL_READ_TEXT 中文" }
   })
   const canonicalProject = realpathSync(project)
   const scope = process.platform === "win32" ? canonicalProject.toLowerCase() : canonicalProject
   assert.deepEqual(
     evidence.observed,
-    ["note.txt", "note.txt", "note.txt", "rewrite", "legacy"].map((path) => ({
-      path: join(scope, path),
-      as: "text"
-    }))
+    [
+      { path: "note.txt", as: "text" },
+      { path: "note.txt", as: "text" },
+      { path: "note.txt", as: "text" },
+      { path: "note.txt", as: "bytes" },
+      { path: "rewrite", as: "text" },
+      { path: "legacy", as: "text" }
+    ].map(({ path, as }) => ({ path: join(scope, path), as }))
   )
   assert.equal(requests.length, before)
   pass(
-    "actual text read mode reaches hooks while byte, malformed and rewritten modes cannot silently return text"
+    "protected text read reaches hooks while byte mode is refused by policy and malformed options remain invalid"
   )
   await page.screenshot({ path: join(artifacts, "file-read-options.png") })
   try {

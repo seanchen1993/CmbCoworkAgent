@@ -11,7 +11,7 @@ import type { FlowDefinition } from "../src/shared/mods/flows/types"
 import { compositionEnvironment } from "./support/mods-composition-fixtures"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
 import { attemptModsE2eCleanup, runModsE2eWithFailures } from "./support/mods-e2e-failures"
-import { openModsResults } from "./support/mods-sidebar-navigation"
+import { openModsFlowHistory, openModsResults } from "./support/mods-sidebar-navigation"
 
 const root = resolve(__dirname, "..")
 assert(process.env.CMB_MODS_PACKAGED_DIR?.trim(), "A real production package is required")
@@ -457,17 +457,12 @@ async function run(failures: unknown[]) {
     )
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("DIY 入门包验收", { exact: true }).first().click()
-    const sidebar = page.locator('aside[aria-label="Claw 工作台"]')
-    if (!(await sidebar.isVisible()))
-      await page.getByRole("button", { name: "打开 Claw 工作台", exact: true }).click()
-    await sidebar.getByRole("button", { name: "运行", exact: true }).click()
-    await page.getByText("流程任务 · 文本检视与汇报 · 查看进度与结果", { exact: true }).click()
-    const runPane = page.locator('[data-flow-run="' + run.id + '"]')
-    await runPane.waitFor({ state: "visible" })
+    const runPane = await openModsFlowHistory(page, run.id)
     for (const summary of await runPane.getByText("查看结果与证据", { exact: true }).all())
       await summary.click()
-    assert(await runPane.getByText(providerAnswers[1], { exact: true }).isVisible())
-    assert(await runPane.getByText(providerAnswers[2], { exact: true }).isVisible())
+    const history = runPane.getByRole("list", { name: "步骤执行记录", exact: true })
+    assert(await history.getByText(providerAnswers[1], { exact: true }).isVisible())
+    assert(await history.getByText(providerAnswers[2], { exact: true }).isVisible())
     await page.screenshot({ path: join(artifacts, "04-action-flow.png") })
     pass(
       "Original kit actions pass the real review output object to report and both honor applied model B"

@@ -17,7 +17,11 @@ import { wrapFunctionConversationNativeInvocation } from "./function-conversatio
 import { createFunctionConversationNativeAgent } from "./native-agent-factory"
 import { captureFunctionConversationNativeTaskConfig,
   createFunctionConversationSharedAgent } from "./mods-conversation-shared-invocation"
-import { FunctionConversationDeliveryBridge } from "../checkpointer/function-conversation-delivery"
+import { FunctionConversationDeliveryBridge, readFunctionConversationState,
+  type FunctionConversationDeliveryBinding } from "../checkpointer/function-conversation-delivery"
+import { createFunctionConversationIdleEditor } from "../checkpointer/function-conversation-idle-editor"
+import { captureFunctionConversationCompactionSource, commitFunctionConversationCompactionBoundary }
+  from "../checkpointer/function-conversation-compaction-boundary"
 import { assertFunctionConversationForkReady } from "../db/function-conversation-fork-gate"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import { sameFunctionConversationTranscriptStamp } from
@@ -92,6 +96,7 @@ import { currentCompletionBudget } from "../mods/v2/completion-budget"
 import { getLocalThreadRunLease } from "./thread-run-lease"
 import {
   captureThreadMutationLease,
+  isThreadMutationLeaseCurrent,
   withThreadMutationLeaseLock
 } from "../ipc/thread-run-mutation-lock"
 import type { ModJson } from "../../shared/mods/types"
@@ -8350,6 +8355,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       if (typeof candidate !== "object") return String(candidate)
       if (BaseMessage.isInstance(candidate))
         return visit({
+          ...candidate.toDict(),
           type: candidate.getType(),
           id: candidate.id,
           content: candidate.content,
@@ -8383,110 +8389,170 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     if (!agentToUpdate) throw new ModError("MODS_SESSION_UNAVAILABLE")
     const lease = captureThreadMutationLease(threadId)
     if (!lease) throw new ModError("MODS_SESSION_UNAVAILABLE")
-    const config = { configurable: { thread_id: threadId } }
-    const beforePrepare = (await agentToUpdate.getState(config)) as unknown as {
-      values?: { messages?: readonly unknown[] }
-      config?: { configurable?: { checkpoint_id?: string } }
-    }
-    const expectedCheckpointId = beforePrepare.config?.configurable?.checkpoint_id
-    if (!Array.isArray(beforePrepare.values?.messages)) throw new ModError("MODS_CONTEXT_CHANGED")
-    const liveMessages = messages.filter((message): message is BaseMessage =>
-      BaseMessage.isInstance(message)
-    )
-    if (liveMessages.length !== messages.length) throw new ModError("MODS_CONTEXT_CHANGED")
-    const plan = await controller.prepareLatest(liveMessages, state, instructions, signal)
-    if ("skip" in plan) return { skip: plan.skip } as ModJson
-    signal.throwIfAborted()
-    return withThreadMutationLeaseLock(lease, async () => {
+    const compactManager = getModsManager()
+    const database = getDb()
+    const assertRuntime = modRuntimeAuthority && compactManager
+      ? compactManager.captureFunctionRuntimeGuard(modRuntimeAuthority) : undefined
+    let editing = true
+    let checkpointUpdated = false
+    const assertIdle = () => {
+      if (!editing) throw new ModError("MODS_CONTEXT_CHANGED")
+      signal.throwIfAborted()
+      assertFixedSourceContent?.()
+      assertRuntime?.()
+      if (runtimeAgentRef.current !== agentToUpdate || getDb() !== database ||
+        getModsManager() !== compactManager || !isThreadMutationLeaseCurrent(lease))
+        throw new ModError("MODS_CONTEXT_CHANGED")
       if (getLocalThreadRunLease(threadId)) throw new ModError("MODS_CONTEXT_COMPACTION_ACTIVE")
-      const current = (await agentToUpdate.getState(config)) as unknown as {
+      signal.throwIfAborted()
+    }
+    try {
+      assertIdle()
+      const conversationStore = compactManager?.captureFunctionConversationStore()
+      const root = modRuntimeAuthority && conversationStore?.findMain({
+        workspace: modRuntimeAuthority.workspace, threadId,
+        incarnation: lease.incarnation, checkpointNamespace: "" }, assertIdle)
+      if (!root || !conversationStore || !assertRuntime || !compactManager)
+        throw new ModError("MODS_SESSION_UNAVAILABLE")
+      // Idle editing must not inherit the completed turn's physical native-run admission.
+      // The override stays in this host closure; the graph and its normal Saver remain unchanged.
+      let idleSaver = checkpointer
+      let idleBinding: FunctionConversationDeliveryBinding | undefined
+      if (root && conversationStore) {
+        const tuple = await checkpointer.getTuple({ configurable: { thread_id: threadId } })
+        assertIdle()
+        const raw = tuple?.checkpoint.channel_values.cmbFunctionConversation
+        const target = raw === undefined ? root : conversationStore.selectBranch(root,
+          readFunctionConversationState(raw).branchId, assertIdle)
+        idleBinding = {
+          target, checkpointThreadId: threadId, checkpointIncarnation: lease.incarnation,
+          signal, assertCurrent: assertIdle
+        }
+        idleSaver = createFunctionConversationIdleEditor(checkpointer, conversationStore,
+          idleBinding, () => { checkpointUpdated = true })
+      }
+      const config = { configurable: { thread_id: threadId, __pregel_checkpointer: idleSaver } }
+      const beforePrepare = (await agentToUpdate.getState(config)) as unknown as {
         values?: { messages?: readonly unknown[] }
         config?: { configurable?: { checkpoint_id?: string } }
       }
-      const currentMessages = current.values?.messages
-      if (
-        !Array.isArray(currentMessages) ||
-        stableMessageFingerprint(currentMessages) !== stableMessageFingerprint(messages) ||
-        (expectedCheckpointId !== undefined &&
-          current.config?.configurable?.checkpoint_id !== expectedCheckpointId)
+      assertIdle()
+      const expectedCheckpointId = beforePrepare.config?.configurable?.checkpoint_id
+      const expectedStateFingerprint = stableMessageFingerprint(beforePrepare.values)
+      if (!Array.isArray(beforePrepare.values?.messages)) throw new ModError("MODS_CONTEXT_CHANGED")
+      const liveMessages = messages.filter((message): message is BaseMessage =>
+        BaseMessage.isInstance(message)
       )
+      if (liveMessages.length !== messages.length) throw new ModError("MODS_CONTEXT_CHANGED")
+      if (stableMessageFingerprint(beforePrepare.values.messages) !== stableMessageFingerprint(messages))
         throw new ModError("MODS_CONTEXT_CHANGED")
-      modRuntimeAuthority?.assertLive()
-      const committed = plan.commitArchive ? await plan.commitArchive(signal) : undefined
-      const messagesToCommit = committed?.messages ?? plan.messages
-      const updateToCommit = committed?.update ?? plan.update
-      let checkpointUpdated = false
-      try {
-        signal.throwIfAborted()
-        const updatedConfig = await agentToUpdate.updateState(
-          config,
-          {
-            messages: [new RemoveMessage({ id: "__remove_all__" }), ...messagesToCommit],
-            ...updateToCommit
-          },
-          "model_request"
-        )
-        checkpointUpdated = true
-        signal.throwIfAborted()
-        await checkpointer.flushStrict()
-        signal.throwIfAborted()
-        const committedState = (await agentToUpdate.getState(config)) as unknown as {
+      const plan = await controller.prepareLatest(liveMessages, state, instructions, signal)
+      assertIdle()
+      if ("skip" in plan) return { skip: plan.skip } as ModJson
+      signal.throwIfAborted()
+      return await withThreadMutationLeaseLock(lease, async () => {
+        assertIdle()
+        const current = (await agentToUpdate.getState(config)) as unknown as {
+          values?: { messages?: readonly unknown[] }
           config?: { configurable?: { checkpoint_id?: string } }
-          values?: Record<string, unknown>
         }
-        const committedId = (updatedConfig as { configurable?: { checkpoint_id?: string } })
-          .configurable?.checkpoint_id
+        assertIdle()
+        const currentMessages = current.values?.messages
         if (
-          !committedId ||
-          committedState.config?.configurable?.checkpoint_id !== committedId ||
-          !hasSameCompactionEvidence(committedState.values, updateToCommit)
+          !Array.isArray(currentMessages) ||
+          stableMessageFingerprint(current.values) !== expectedStateFingerprint ||
+          stableMessageFingerprint(currentMessages) !== stableMessageFingerprint(messages) ||
+          (expectedCheckpointId !== undefined &&
+            current.config?.configurable?.checkpoint_id !== expectedCheckpointId)
         )
           throw new ModError("MODS_CONTEXT_CHANGED")
-        signal.throwIfAborted()
         modRuntimeAuthority?.assertLive()
-      } catch (error) {
-        // updateState can fail before a checkpoint is durable. Compensate the
-        // staged archive in that case; a flush failure keeps the pointer because
-        // SQLite may already have committed the checkpoint before WAL syncing.
-        if (committed && plan.rollbackArchive && !checkpointUpdated) {
-          try {
-            await plan.rollbackArchive(signal)
-          } catch {
-            // Preserve the original mutation error; the archive path is never
-            // reported as a successful result below.
-          }
-        }
-        throw error
-      }
-      const compactManager = getModsManager()
-      if (compactManager && modRuntimeAuthority) {
-        compactManager.updateFunctionSessionMessages(modRuntimeAuthority, messagesToCommit, {
-          _summarizationEvent: updateToCommit._summarizationEvent
-        })
-        const currentSession = compactManager.captureFunctionSession(workspacePath, threadId)
+        if (!idleBinding) throw new ModError("MODS_SESSION_UNAVAILABLE")
+        const compactSource = await captureFunctionConversationCompactionSource({
+          saver: checkpointer, store: conversationStore, control: compactManager.store,
+          database, binding: idleBinding
+        }, { configurable: { thread_id: threadId, checkpoint_ns: "",
+          checkpoint_id: current.config?.configurable?.checkpoint_id } })
+        assertIdle()
+        const committed = plan.commitArchive ? await plan.commitArchive(signal) : undefined
+        const messagesToCommit = committed?.messages ?? plan.messages
+        const updateToCommit = committed?.update ?? plan.update
         try {
-          currentSession.assertLive()
-          if (currentSession.request) {
-            compactManager.updateFunctionSessionRequest(modRuntimeAuthority, {
-              ...currentSession.request,
-              messages: messagesToCommit
-            })
+          assertIdle()
+          const updatedConfig = await agentToUpdate.updateState(
+            config,
+            {
+              messages: [new RemoveMessage({ id: "__remove_all__" }), ...messagesToCommit],
+              ...updateToCommit
+            },
+            "model_request"
+          )
+          checkpointUpdated = true
+          assertIdle()
+          await checkpointer.flushStrict()
+          assertIdle()
+          const committedState = (await agentToUpdate.getState(config)) as unknown as {
+            config?: { configurable?: { checkpoint_id?: string } }
+            values?: Record<string, unknown>
           }
-        } finally {
-          currentSession.release()
+          assertIdle()
+          const committedId = (updatedConfig as { configurable?: { checkpoint_id?: string } })
+            .configurable?.checkpoint_id
+          if (
+            !committedId ||
+            committedState.config?.configurable?.checkpoint_id !== committedId ||
+            !hasSameCompactionEvidence(committedState.values, updateToCommit)
+          )
+            throw new ModError("MODS_CONTEXT_CHANGED")
+          signal.throwIfAborted()
+          modRuntimeAuthority?.assertLive()
+          await commitFunctionConversationCompactionBoundary(compactSource, updatedConfig)
+          assertIdle()
+        } catch (error) {
+          // updateState can fail before a checkpoint is durable. Compensate the
+          // staged archive in that case; a flush failure keeps the pointer because
+          // SQLite may already have committed the checkpoint before WAL syncing.
+          if (committed && plan.rollbackArchive && !checkpointUpdated) {
+            try {
+              await plan.rollbackArchive(signal)
+            } catch {
+              // Preserve the original mutation error; the archive path is never
+              // reported as a successful result below.
+            }
+          }
+          throw error
         }
-      }
-      const projectedMessages = parseModJson(
-        encodeModJson(projectFunctionSessionMessages(messagesToCommit))
-      )
-      if (!isModJson(projectedMessages)) throw new ModError("MODS_SDK_RESULT")
-      await plan.afterCommit?.(signal)
-      return {
-        messages: projectedMessages,
-        tokensBefore: plan.estimatedTokensBefore,
-        tokensAfter: plan.estimatedTokensAfter
-      }
-    })
+        if (compactManager && modRuntimeAuthority) {
+          compactManager.updateFunctionSessionMessages(modRuntimeAuthority, messagesToCommit, {
+            _summarizationEvent: updateToCommit._summarizationEvent
+          })
+          const currentSession = compactManager.captureFunctionSession(workspacePath, threadId)
+          try {
+            currentSession.assertLive()
+            if (currentSession.request) {
+              compactManager.updateFunctionSessionRequest(modRuntimeAuthority, {
+                ...currentSession.request,
+                messages: messagesToCommit
+              })
+            }
+          } finally {
+            currentSession.release()
+          }
+        }
+        const projectedMessages = parseModJson(
+          encodeModJson(projectFunctionSessionMessages(messagesToCommit))
+        )
+        if (!isModJson(projectedMessages)) throw new ModError("MODS_SDK_RESULT")
+        await plan.afterCommit?.(signal)
+        return {
+          messages: projectedMessages,
+          tokensBefore: plan.estimatedTokensBefore,
+          tokensAfter: plan.estimatedTokensAfter
+        }
+      })
+    } finally {
+      editing = false
+    }
   }
 
   const modFunctionRuntimeReady =

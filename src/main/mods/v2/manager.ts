@@ -578,6 +578,7 @@ export class FunctionModsManager {
   private readonly releasedSessions = new Map<string, RuntimeStopReceipt>()
   private runtimeReceiptError?: string
   private readonly operations = new AsyncLocalStorage<FunctionOperationScope>()
+  private readonly turnOwners = new WeakMap<AbortSignal, Map<string, { entry?: SessionEntry }>>()
   private readonly stopConfigurationIdle: () => void
   private readonly configurationIdleListeners = new Set<(threadId: string) => void>()
   private readonly namedStates = new Map<
@@ -1026,9 +1027,29 @@ export class FunctionModsManager {
     for (const name of native) {
       const method = this[name]
       if (typeof method !== "function") throw Error("MODS_ENTRY_METHOD_INVALID")
-      Object.defineProperty(this, name, { configurable: true, value: (...args: unknown[]) =>
-        this.withOperation(String(args[0]), String(args[1]), name, applyBefore.has(name),
-          () => Reflect.apply(method, this, args)) })
+      Object.defineProperty(this, name, { configurable: true, value: (...args: unknown[]) => {
+        const workspace = String(args[0]), threadId = String(args[1])
+        const terminal = name === "turnComplete"
+        const inherited = terminal ? this.operations.getStore() : undefined
+        // A native main retains its actual start identity even when idle dispatch has no ALS.
+        // A child retains its parent's exact entry before detaching that expired admission.
+        const input = terminal ? args[2] as FunctionTurnComplete : undefined
+        const origin = terminal ? args[3] as AbortSignal | undefined : undefined
+        const ownerKey = input ? JSON.stringify([workspace, threadId, input.turnId]) : undefined
+        const owner = origin && ownerKey ? this.turnOwners.get(origin)?.get(ownerKey) : undefined
+        const expected = terminal
+          ? !input?.agentId ? owner?.entry
+            : inherited?.workspace === workspace && inherited.threadId === threadId
+              ? inherited.entry : undefined
+          : undefined
+        const run = () => this.withOperation(workspace, threadId, name, applyBefore.has(name),
+          () => Reflect.apply(method, this, args), expected)
+        if (!terminal) return run()
+        if (!input?.agentId && !owner)
+          return Promise.reject(new ModFunctionError("MODS_SCOPE_CHANGED"))
+        return withFreshFunctionSessionActivity(() => this.operations.exit(run))
+          .finally(() => { if (origin && ownerKey) this.turnOwners.get(origin)?.delete(ownerKey) })
+      } })
     }
   }
 
@@ -1103,7 +1124,11 @@ export class FunctionModsManager {
   }
 
   private async withOperation(workspace: string, threadId: string, method: PropertyKey,
-    applyBefore: boolean, run: () => Promise<unknown>): Promise<unknown> {
+    applyBefore: boolean, run: () => Promise<unknown>, terminalEntry?: SessionEntry): Promise<unknown> {
+    const terminal = method === "turnComplete"
+    const key = JSON.stringify([workspace, threadId])
+    if (terminal && this.sessions.get(key) !== terminalEntry)
+      throw new ModFunctionError("MODS_SCOPE_CHANGED")
     this.assertClassicEndStage(threadId)
     const end = this.endingEntries.get(JSON.stringify([workspace, threadId]))
     const classicEnd = method === "classicEvent" && this.hasClassicEndProof(threadId) &&
@@ -1119,7 +1144,7 @@ export class FunctionModsManager {
       candidate.workspace === workspace && candidate.threadId === threadId)
       throw new ModFunctionError("MODS_CONFIG_RELOAD_REENTRANT",
         "组件启动期间不能再次进入自己的任务处理链；请将此操作放到启动完成后。", true)
-    await this.admitHostSourceSession(workspace, threadId)
+    if (!terminal) await this.admitHostSourceSession(workspace, threadId)
     const parent = this.operations.getStore()
     if (parent?.workspace === workspace && parent.threadId === threadId) {
       if (!parent.active && !parent.entry?.activity.withinEntry)
@@ -1127,7 +1152,6 @@ export class FunctionModsManager {
       return run()
     }
     this.development?.assertAdmission(workspace, threadId)
-    const key = JSON.stringify([workspace, threadId])
     const probeRetirement = this.probeRetirements.get(key)
     if (probeRetirement) await probeRetirement
     const released = this.releasedSessions.get(key)
@@ -1137,6 +1161,8 @@ export class FunctionModsManager {
     if (applyBefore && original && !this.endingEntries.has(key)) await this.applyConfigurationIfIdle(original)
     const application = this.applying.get(key)
     if (application && !this.endingEntries.has(key)) await application
+    if (terminal && this.sessions.get(key) !== terminalEntry)
+      throw new ModFunctionError("MODS_SCOPE_CHANGED")
     if (!classicEnd) this.assertEndAdmission(workspace, threadId)
     const scope: FunctionOperationScope = {
       workspace, threadId, active: true
@@ -5453,6 +5479,14 @@ export class FunctionModsManager {
     input: FunctionTurnStart,
     signal: AbortSignal
   ): Promise<void> {
+    // The original native lifecycle signal is an opaque host identity. Keep even the absence
+    // of a loaded entry, so a late terminal cannot attach itself to a newly installed plugin.
+    const owner: { entry?: SessionEntry } = {}
+    let owners = this.turnOwners.get(signal)
+    if (!owners) this.turnOwners.set(signal, owners = new Map())
+    const ownerKey = JSON.stringify([workspace, threadId, input.turnId])
+    if (owners.has(ownerKey)) throw new ModFunctionError("MODS_TURN_SCOPE_CHANGED")
+    owners.set(ownerKey, owner)
     if (!this.host.enabled(workspace) || !this.hasSources(workspace, threadId)) return
     if (
       !this.sessions.has(JSON.stringify([workspace, threadId])) &&
@@ -5460,6 +5494,7 @@ export class FunctionModsManager {
     )
       return
     const entry = await this.session(workspace, threadId)
+    owner.entry = entry
     entry.completionProofs.clear()
     const safe = await this.host.publish(workspace, input as unknown as ModJson, signal)
     await entry.session!.turnStart(safe as unknown as FunctionTurnStart, signal)
@@ -6270,6 +6305,8 @@ export class FunctionModsManager {
     if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
       throw new ModFunctionError("MODS_SCOPE_CHANGED")
     const safe = await this.host.publish(workspace, input as unknown as ModJson, signal)
+    if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+      throw new ModFunctionError("MODS_SCOPE_CHANGED")
     const result = await entry.session!.turnComplete(
       safe as unknown as FunctionTurnComplete,
       signal

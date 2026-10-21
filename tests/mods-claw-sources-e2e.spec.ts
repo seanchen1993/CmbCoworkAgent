@@ -1,5 +1,6 @@
 /** Real Electron, installed Skill/QuickJS guests and local MCP transports; isolated user data. */
 import assert from "node:assert/strict"
+import { openModsAdvancedSettings, openModsClawEditor, openModsClawMoreSettings } from "./support/mods-sidebar-navigation"
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { createServer } from "node:http"
 import { join, resolve } from "node:path"
@@ -300,6 +301,32 @@ async function main() {
       )
     await bind(thread, profile)
     const command = async (id: string, serverName: string) => {
+      // Applying a selection can leave the previous runtime physically retiring while
+      // React starts the replacement. Observe native readiness without invoking a guest
+      // or retrying command discovery/enqueue after a potentially effective operation.
+      const deadline = performance.now() + 20_000
+      for (;;) {
+        const runtime = await page.evaluate((id) => window.api.mods.runtimeSessions(id), id)
+        assert(!runtime.error, runtime.error)
+        const sessions = runtime.sessions.filter((session) => session.threadId === id)
+        for (const session of sessions) {
+          assert(!session.error, JSON.stringify(session))
+          assert(!["failed", "stopped"].includes(session.state), JSON.stringify(session))
+        }
+        if (
+          runtime.reserved === 0 &&
+          runtime.retiring === 0 &&
+          sessions.every(
+            (session) => ["resident", "discovery"].includes(session.state) && session.canRelease
+          )
+        )
+          break
+        assert(
+          performance.now() < deadline,
+          `Command runtime did not settle: ${JSON.stringify(runtime)}`
+        )
+        await new Promise((done) => setTimeout(done, 100))
+      }
       const job = await page.evaluate(
         async ({ id, serverName }) => {
           const descriptor = (await window.api.mods.commands(id)).find(
@@ -630,13 +657,10 @@ async function main() {
     await bind(thread, profile)
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("Skill MCP selected", { exact: true }).first().click()
-    await page.getByRole("button", { name: "当前助手", exact: true }).click()
-    await page.getByRole("tab", { name: "设置", exact: true }).click()
-    await page.getByText("高级：手动管理组合", { exact: true }).click()
-    await page.getByRole("button", { name: "管理助手组合", exact: true }).click()
+    await openModsAdvancedSettings(page, "搭配管理")
     await page.locator("[data-claw-settings]").waitFor()
-    await page.getByText("高级编辑与已保存组合", { exact: true }).click()
-    await page.getByText("更多设置：技能、工具、模型与步骤", { exact: true }).click()
+    await openModsClawEditor(page)
+    await openModsClawMoreSettings(page)
     await page
       .locator("[data-claw-settings]")
       .getByRole("heading", { name: "技能", exact: true })

@@ -32,10 +32,16 @@ it("lists offline Chinese cards without project scope or installation effects", 
     examples: unknown[]
   }
   expect(value.examples).toHaveLength(9)
-  expect(value.examples).toContainEqual(expect.objectContaining({
-    id: "stage-debugger", pluginName: "stage-debugger", title: "阶段调试工作台",
-    origin: "devclaw", sourcePath: "examples/sparks-stage-debugger", version: "1.0.0"
-  }))
+  expect(value.examples).toContainEqual(
+    expect.objectContaining({
+      id: "stage-debugger",
+      pluginName: "stage-debugger",
+      title: "阶段调试工作台",
+      origin: "devclaw",
+      sourcePath: "examples/sparks-stage-debugger",
+      version: "1.0.0"
+    })
+  )
   expect(value.examples).toContainEqual(
     expect.objectContaining({
       id: "token-weather",
@@ -72,7 +78,8 @@ it("rejects untrusted calls and extra renderer paths before invoking installatio
 it("passes only the fixed verified resource directory and rechecks sender lifetime", async () => {
   install.mockImplementation(async (directory, name, verify, current) => {
     expect(name).toBe("token-weather")
-    expect(directory).toBe(resolve("resources/mods/community-originals/token-weather"))
+    expect(directory).not.toBe(resolve("resources/mods/community-originals/token-weather"))
+    expect(directory).toMatch(/cmb-builtin-example-/)
     await verify(directory)
     event.sender.mainFrame = {}
     current()
@@ -108,7 +115,8 @@ it("installs a local example from the fixed bundled directory with the same veri
       }
     )
     install.mockImplementation(async (source, name, verify, current) => {
-      expect(source).toBe(provider)
+      expect(source).not.toBe(provider)
+      expect(source).toMatch(/cmb-builtin-example-/)
       expect(name).toBe("task-workbench-provider")
       await verify(source)
       current()
@@ -144,24 +152,43 @@ it("uses the original pinned installer and explicit approval contract for the st
     await cp(resolve("examples/sparks-stage-debugger"), source, { recursive: true })
     registerCommunityExampleHandlers(
       { handle: (name: string, fn: Handler) => handlers.set(name, fn) } as never,
-      root, () => { if (!allowed) throw Error("DENIED") }
+      root,
+      () => {
+        if (!allowed) throw Error("DENIED")
+      }
     )
     install.mockImplementation(async (directory, name, verify, current) => {
-      expect(directory).toBe(source)
+      expect(directory).not.toBe(source)
+      expect(directory).toMatch(/cmb-builtin-example-/)
       expect(name).toBe("stage-debugger")
       await verify(directory)
       current()
-      return { pluginId: "installed-stage-debugger", pluginName: name,
-        alreadyInstalled: false, requiresApproval: true }
+      return {
+        pluginId: "installed-stage-debugger",
+        pluginName: name,
+        alreadyInstalled: false,
+        requiresApproval: true
+      }
     })
-    await expect(handlers.get("mods:community-examples:install")!(event, {
-      exampleId: "stage-debugger", path: "C:/untrusted"
-    })).rejects.toThrow("MODS_COMMUNITY_EXAMPLE_INVALID")
+    await expect(
+      handlers.get("mods:community-examples:install")!(event, {
+        exampleId: "stage-debugger",
+        path: "C:/untrusted"
+      })
+    ).rejects.toThrow("MODS_COMMUNITY_EXAMPLE_INVALID")
     expect(install).not.toHaveBeenCalled()
-    await expect(handlers.get("mods:community-examples:install")!(event, {
-      exampleId: "stage-debugger"
-    })).resolves.toEqual({ pluginId: "installed-stage-debugger", pluginName: "stage-debugger",
-      alreadyInstalled: false, requiresApproval: true })
+    await expect(
+      handlers.get("mods:community-examples:install")!(event, {
+        exampleId: "stage-debugger"
+      })
+    ).resolves.toEqual({
+      pluginId: "installed-stage-debugger",
+      pluginName: "stage-debugger",
+      alreadyInstalled: false,
+      requiresApproval: true
+    })
     expect(install).toHaveBeenCalledOnce()
-  } finally { await rm(directory, { recursive: true, force: true }) }
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })

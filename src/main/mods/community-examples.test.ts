@@ -1,16 +1,23 @@
-import { afterEach, expect, it } from "vitest"
+import { afterEach, expect, it, vi } from "vitest"
+import * as fsPromises from "node:fs/promises"
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import {
   COMMUNITY_EXAMPLES,
   PLATFORM_EXAMPLES,
   BUNDLED_EXAMPLES,
   bundledCommunityExamplesRoot,
   communityExampleId,
-  verifyCommunityExample
+  verifyCommunityExample,
+  withMaterializedCommunityExample
 } from "./community-examples"
 import { mirrorRequiredDirectorySync } from "../build/directory-mirror"
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:fs/promises")>()
+  return { ...original, rm: vi.fn(original.rm) }
+})
 
 const root = resolve("resources/mods/community-originals")
 const temporary: string[] = []
@@ -46,7 +53,7 @@ it("ships byte-identical pinned originals, provenance and license through the re
     "resources/mods/community-originals/** -text"
   )
   expect(bundledCommunityExamplesRoot(resolve("installed/app.asar/out/main"))).toBe(
-    resolve("installed/app.asar.unpacked/out/resources/mods/community-originals")
+    resolve("installed/app.asar/out/resources/bundled-mods/community-originals")
   )
 })
 
@@ -92,14 +99,21 @@ async function platformResources() {
 
 it("ships every named local package including the independent stage debugger with exact canonical bytes", async () => {
   const { root: bundledRoot, destination } = await platformResources()
-  expect(PLATFORM_EXAMPLES.map(example => example.id)).toEqual([
-    "task-workbench-provider", "task-workbench-consumer", "task-behavior-prefix",
-    "task-behavior-compact", "edit-reminder", "stage-debugger"
+  expect(PLATFORM_EXAMPLES.map((example) => example.id)).toEqual([
+    "task-workbench-provider",
+    "task-workbench-consumer",
+    "task-behavior-prefix",
+    "task-behavior-compact",
+    "edit-reminder",
+    "stage-debugger"
   ])
   expect(new Set(BUNDLED_EXAMPLES.map((example) => example.id)).size).toBe(9)
-  expect(PLATFORM_EXAMPLES.find(example => example.id === "stage-debugger")).toMatchObject({
-    pluginName: "stage-debugger", title: "阶段调试工作台", origin: "devclaw",
-    sourcePath: "examples/sparks-stage-debugger", version: "1.0.0"
+  expect(PLATFORM_EXAMPLES.find((example) => example.id === "stage-debugger")).toMatchObject({
+    pluginName: "stage-debugger",
+    title: "阶段调试工作台",
+    origin: "devclaw",
+    sourcePath: "examples/sparks-stage-debugger",
+    version: "1.0.0"
   })
   for (const example of PLATFORM_EXAMPLES) {
     expect(communityExampleId(example.id)).toBe(example.id)
@@ -144,3 +158,80 @@ it("rejects an installed local package with extra code and directory links", asy
     verifyCommunityExample(bundledRoot, "task-workbench-provider", linked)
   ).rejects.toThrow("MODS_COMMUNITY_INTEGRITY")
 })
+
+it("reports only the pinned relative file when an integrity check fails", async () => {
+  const { root: bundledRoot, destination } = await platformResources()
+  await writeFile(
+    join(destination, "platform-examples/task-workbench-consumer/hooks/register.ts"),
+    "tampered"
+  )
+  await expect(verifyCommunityExample(bundledRoot, "task-workbench-consumer")).rejects.toThrow(
+    "MODS_COMMUNITY_INTEGRITY: task-workbench-consumer · hooks/register.ts 的内容与内置版本不一致"
+  )
+  await expect(
+    verifyCommunityExample(join(destination, "missing-private-path"), "token-weather")
+  ).rejects.toThrow(
+    "MODS_COMMUNITY_INTEGRITY: token-weather · 文件缺失、不可读取或目录类型不受支持"
+  )
+})
+
+it("describes context weather separately from cumulative input/output usage", () => {
+  const weather = COMMUNITY_EXAMPLES.find((example) => example.id === "token-weather")!
+  expect(weather.description).toContain("上下文占用")
+  expect(weather.usage).toContain("不是累计输入/输出 Token")
+  expect(weather.usage).toContain("尚无上下文读数")
+})
+
+it("stages only verified same-archive bytes into physical files and always cleans up", async () => {
+  const { root: bundledRoot } = await platformResources()
+  let staged = ""
+  await expect(
+    withMaterializedCommunityExample(bundledRoot, "task-workbench-consumer", async (directory) => {
+      staged = directory
+      await expect(
+        verifyCommunityExample(bundledRoot, "task-workbench-consumer", directory)
+      ).resolves.toBe(directory)
+      throw Error("installer rejected")
+    })
+  ).rejects.toThrow("installer rejected")
+  await expect(readFile(join(staged, "plugin.json"))).rejects.toMatchObject({ code: "ENOENT" })
+})
+
+it.each([false, true])(
+  "does not replace an install outcome with a staging cleanup error: %s",
+  async (failed) => {
+    const { root: bundledRoot } = await platformResources()
+    const remove = vi
+      .mocked(fsPromises.rm)
+      .mockRejectedValueOnce(
+        Object.assign(Error("staging directory held by scanner"), { code: "EPERM" })
+      )
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
+    let staged = ""
+    try {
+      const result = withMaterializedCommunityExample(
+        bundledRoot,
+        "task-workbench-consumer",
+        async (directory) => {
+          staged = directory
+          if (failed) throw Error("original install failure")
+          return { pluginId: "installed", requiresApproval: true }
+        }
+      )
+      if (failed) await expect(result).rejects.toThrow("original install failure")
+      else await expect(result).resolves.toEqual({ pluginId: "installed", requiresApproval: true })
+      expect(remove).toHaveBeenCalledWith(dirname(staged), {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 50
+      })
+      expect(warning).toHaveBeenCalledOnce()
+    } finally {
+      remove.mockRestore()
+      warning.mockRestore()
+      expect(dirname(staged)).toContain("cmb-builtin-example-")
+      await rm(dirname(staged), { recursive: true, force: true })
+    }
+  }
+)

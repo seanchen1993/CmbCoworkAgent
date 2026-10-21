@@ -520,6 +520,7 @@ export function ClawComposerBar({
         <button
           type="button"
           aria-label="查看任务进展"
+          data-app-guide="progress"
           aria-live={attention ? "polite" : undefined}
           onClick={() => openClawSidebar("run")}
           className={`flex min-w-0 items-center gap-1.5 rounded-lg px-2 py-1.5 hover:bg-muted ${attention ? "bg-amber-500/10 text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}

@@ -7,6 +7,7 @@ import {
   developmentNextStep
 } from "./development-trial-view"
 import { BookOpen, WandSparkles } from "lucide-react"
+import { openApplicationUsageGuide } from "../guides/application-usage-guide"
 import { AnchoredGuide } from "../guides/AnchoredGuide"
 import { creatorWorkspaceGuide, creatorWorkspaceGuideSteps } from "./creator-workspace-guide"
 import {
@@ -193,7 +194,6 @@ function ScopedDevelopment({
   promotionBlocked: boolean
 }) {
   const [open, setOpen] = useState(false)
-  const [guideRequest, setGuideRequest] = useState(0)
   const workspaceBody = useRef<HTMLElement>(null)
   const focusChatAfterClose = useRef(false)
   const [status, setStatus] = useState<DevelopmentStatus | null>(null)
@@ -562,7 +562,7 @@ function ScopedDevelopment({
         <h2 className="font-semibold">{mode === "chat" ? "当前创作" : "在所选聊天使用创造者模式"}</h2>
         <AnchoredGuide active={!!status && (mode === "entry" || open)}
           config={creatorWorkspaceGuide} steps={creatorWorkspaceGuideSteps}
-          rootRef={workspaceBody} request={guideRequest} />
+          rootRef={workspaceBody} />
         <button
           type="button"
           className="rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent"
@@ -1240,6 +1240,7 @@ function ScopedDevelopment({
         </button>
         <button
           type="button"
+          data-app-guide="creator"
           aria-pressed={!!creatorMode}
           className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 ${creatorMode ? "bg-primary/10 font-medium text-primary" : "text-muted-foreground"}`}
           title="开启此项目的 Mod 功能，直接描述创建、修改或组合需求"
@@ -1250,9 +1251,9 @@ function ScopedDevelopment({
           创造者模式
         </button>
       </div>
-      <button type="button" title="查看插件制作与阶段调试的分步说明"
+      <button type="button" title="查看应用图标、创造者模式、工作区与任务进展的位置"
         className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent"
-        onClick={() => { setOpen(true); setGuideRequest(current => current + 1) }}>
+        onClick={openApplicationUsageGuide}>
         <BookOpen className="size-3.5" aria-hidden="true" />使用指引
       </button>
       <Dialog open={open} onOpenChange={setOpen}>
@@ -1260,6 +1261,7 @@ function ScopedDevelopment({
         <button
           type="button"
           className="inline-flex items-center gap-1.5 rounded-lg border border-border/70 bg-background/80 px-2.5 py-1.5 text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          data-app-guide="workspace"
           aria-label={`${label}${awaitingApproval ? `，${awaitingApproval} 项待确认` : ""}`}
         >
           {label}

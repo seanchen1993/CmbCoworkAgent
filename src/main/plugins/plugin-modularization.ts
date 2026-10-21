@@ -22,7 +22,12 @@ import {
 import { normalizeProjectResourcePaths } from "../mods/devtools/project-resource-paths"
 import { parsePluginCapabilities } from "../../shared/plugin-capabilities"
 import { assembleBusinessMods } from "./business-mod-assembler"
+import { resolveBusinessModAssemblyAdapter } from "./business-mod-assembly-adapter"
 import { redactPluginSourceCredentials } from "./plugin-source-redaction"
+import {
+  assertBusinessModCatalogShape,
+  BusinessModCatalogValidationError
+} from "./business-mod-catalog-schema"
 import {
   businessModCatalog,
   businessModPath,
@@ -47,6 +52,8 @@ const pluginFieldNames = [
   "description",
   "author",
   "license",
+  "keywords",
+  "useScenario",
   "hooks",
   "skills",
   "mcpServers",
@@ -165,6 +172,20 @@ function modularizationDiagnostic(error: unknown) {
       "原能力目录包含多流程、额外能力、依赖或强制 Hook；请保留这些入口和约束后显式迁移。",
     PLUGIN_MODULARIZATION_RESOURCE_LOSS:
       "候选未包含全部原资源；请补齐知识、脚本、Hooks 与相对引用闭包。",
+    PLUGIN_MODULARIZATION_KERNEL_REQUIRED:
+      "原始插件首次模块化须声明完整 kernel（id、version、resources 与受审 runtime）；kernelRef 仅用于已有内核的扩展草稿。",
+    BUSINESS_MOD_KERNEL_RUNTIME_CONFLICT:
+      "kernel.runtime 与配置路径冲突：host-linear-v1 不接受 boardConfigPath；受审旧流程适配器需要原配置路径，且不能包含 Host 阶段声明。",
+    BUSINESS_MOD_ASSEMBLY_ADAPTER_UNSUPPORTED:
+      "仅可使用原生 modularization_schema 列出的受审静态适配器，不能注册或猜测作者脚本适配器。",
+    PLUGIN_MODULARIZATION_METADATA_CHANGED:
+      "kernel.pluginFields 必须保留原 hooks、mcpServers、userConfig、keywords 与 useScenario；请按脱敏原清单核对声明。",
+    PLUGIN_MODULARIZATION_ADAPTER_MAPPING_REQUIRED:
+      "原流程需由对应受审静态适配器解释；不能将旧流程改标为 Host，或猜测新的执行语义。",
+    PLUGIN_MODULARIZATION_WORKFLOW_MAPPING_REQUIRED:
+      "原流程的主干、动态阶段、路由或状态规则无法无损映射；请保留全部节点与约束，不能压平流程或丢弃分支来通过首次模块化。",
+    PLUGIN_MODULARIZATION_PROVIDER_MISSING:
+      "原知识或上下文入口缺少对应提供器；需保留原协议和真实资源，不能改为空上下文。",
     PLUGIN_MODULARIZATION_RUNTIME_CHANGED:
       "候选改变了原阶段、产物、检查、环境声明或人工审批；必须先保持原契约完整。",
     BUSINESS_MOD_HOST_DECLARATION_CONFLICT:
@@ -546,7 +567,7 @@ function checkProjection(
   )
     throw Error("PLUGIN_MODULARIZATION_ADAPTER_MAPPING_REQUIRED")
   const fields = pluginFields(snapshot)
-  for (const key of ["hooks", "mcpServers", "userConfig"])
+  for (const key of ["hooks", "mcpServers", "userConfig", "keywords", "useScenario"])
     if (!same(fields[key], catalog.kernel.pluginFields?.[key]))
       throw Error("PLUGIN_MODULARIZATION_METADATA_CHANGED")
   if (fields.skills !== undefined && fields.skills !== "skills" && !same(fields.skills, ["skills"]))
@@ -588,9 +609,23 @@ function checkProjection(
       order: catalog.modules.map((mod) => mod.id)
     }
   )
+  // Validate the assembler's real topological order, including dependency/insertAfter effects.
+  // Inspecting only catalog.modules order would let those constraints reverse the original route.
+  const projectedSourcePaths = new Set(
+    resolveBusinessModAssemblyAdapter(catalog.kernel).assertModularizationSource?.({
+      kernel: catalog.kernel,
+      snapshot,
+      modules: projection.steps.map((step) => catalog.modules.find((mod) => mod.id === step.id)!)
+    }) ?? []
+  )
   if (projection.missingProviders.length) throw Error("PLUGIN_MODULARIZATION_PROVIDER_MISSING")
   for (const file of authored.files) {
-    if (generatedPaths.has(file.path) || snapshot.manifests.includes(file.path)) continue
+    if (
+      generatedPaths.has(file.path) ||
+      snapshot.manifests.includes(file.path) ||
+      projectedSourcePaths.has(file.path)
+    )
+      continue
     if (!projection.files.some((entry) => entry.path === file.path && entry.digest === file.digest))
       throw Error("PLUGIN_MODULARIZATION_RESOURCE_LOSS")
   }
@@ -708,7 +743,7 @@ export function inspectPluginModularization(
 }
 
 /** Produces additive source only. Caller owns freshness, isolated writing and native review. */
-export function createPluginModularizationCandidate(
+function modularizationCandidate(
   snapshot: DerivationSnapshot,
   input: PluginModularizationConfirmation
 ) {
@@ -749,5 +784,75 @@ export function createPluginModularizationCandidate(
       bytes: Buffer.byteLength(text),
       digest: sha(Buffer.from(text))
     }))
+  }
+}
+
+/** Surface trusted, bounded repair diagnostics without exposing parser input or credential values. */
+export function createPluginModularizationCandidate(
+  snapshot: DerivationSnapshot,
+  input: PluginModularizationConfirmation
+) {
+  if (input.confirmed !== true) throw Error("PLUGIN_MODULARIZATION_CONFIRMATION_REQUIRED")
+  if (input.sourceDigest !== snapshot.digest) throw Error("PLUGIN_MODULARIZATION_SOURCE_CHANGED")
+  try {
+    if (input.catalog !== undefined) assertBusinessModCatalogShape(input.catalog)
+    return modularizationCandidate(snapshot, input)
+  } catch (error) {
+    if (error instanceof BusinessModCatalogValidationError) throw error
+    const diagnostic = modularizationDiagnostic(error)
+    const parserHints: Record<string, { path: string; message: string }> = {
+      "业务 Mods 来源协议无效": {
+        path: "catalog",
+        message:
+          "apiVersion 必须为 devclaw.business-mods/v1，kind 必须为 catalog，kernel 和 kernelRef 只能声明一个。原始插件首次模块化需要 kernel。"
+      },
+      "业务 Mods 内核版本必须精确": {
+        path: "catalog.kernel.version",
+        message: "内核版本须为精确的语义版本，例如 1.0.0。"
+      },
+      "业务 Mods 节点标识重复或不一致": {
+        path: "catalog.modules",
+        message: "每个模块的 id 必须唯一并等于 node.id；node.skill 须为真实技能名。"
+      },
+      "业务 Mod 检查声明与实际节点不一致": {
+        path: "catalog.modules",
+        message: "checks.validators/guards 必须与该模块 node.validators/guards 一致，保留原检查。"
+      },
+      "业务 Mod 技能入口与节点不一致": {
+        path: "catalog.modules",
+        message:
+          "skill.entry 必须在 skills/ 下且以 /<node.skill>/SKILL.md 结尾；skill.resources 使用实际包内路径。"
+      },
+      "共享内核不能包含未选择的业务 Skill": {
+        path: "catalog.kernel.resources",
+        message:
+          "kernel.resources 不能重复包含 modules[].skill.entry；业务技能及其目录资源归该模块 skill.resources，共享 Hooks、知识与辅助入口仍需完整保留。"
+      }
+    }
+    const hint = error instanceof Error ? parserHints[error.message] : undefined
+    const credentialConfig =
+      error instanceof Error && error.message.startsWith("业务配置包含不可发布的凭据声明")
+    const missingResource =
+      error instanceof Error && error.message.startsWith("业务 Mod 必需资源缺失或已排除：")
+    throw new BusinessModCatalogValidationError(
+      [
+        {
+          path: hint?.path ?? (missingResource ? "catalog.resources" : "catalog"),
+          code: credentialConfig
+            ? "PLUGIN_MODULARIZATION_CREDENTIAL_CONFIGURATION_REQUIRED"
+            : missingResource
+              ? "PLUGIN_MODULARIZATION_RESOURCE_LOSS"
+              : diagnostic.code,
+          message: credentialConfig
+            ? "原业务配置包含具体凭据值，须改为安装后绑定或环境占位声明后重新检查；原值不显示、不复制到新清单，也不能删除配置规则来通过。"
+            : missingResource
+              ? "声明的资源未在当前过滤源码中找到；按 inspect_raw 文件清单核对路径，不恢复已排除的凭据或运行数据。"
+              : (hint?.message ?? diagnostic.message)
+        }
+      ],
+      error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message)
+        ? error.message
+        : "BUSINESS_MOD_CATALOG_INVALID"
+    )
   }
 }

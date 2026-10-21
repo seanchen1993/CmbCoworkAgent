@@ -178,10 +178,10 @@ export function createFunctionConversationNativeHost(input: {
   const calls = new FunctionConversationNativeCalls(runtime)
   const projection = createNativeConversationStreamProjection({ runtime, store,
     sharedSource: input.sharedSource })
-  const nativeInput = input.nativeInput ? createFunctionConversationNativeInputRetention({
+  const nativeInput = createFunctionConversationNativeInputRetention({
     source: input.nativeInput, runtime, store, agentId: input.agentId, flush,
     register: projection.register
-  }) : undefined
+  })
   const producer = Object.freeze({})
   const keepers = new WeakMap<FunctionConversationNativeNodeSlot, FunctionConversationNativeKeeper>()
   const finalized = new WeakMap<FunctionConversationNativeNodeSlot, {
@@ -947,7 +947,7 @@ export function createFunctionConversationNativeHost(input: {
       const book = mapData(deferredSources, source)
       if (book) { book.closed = true; book.records.clear(); Reflect.apply(nativeMapDelete, deferredSources, [source]) }
     },
-    ...(nativeInput ? { retainInput: nativeInput.retainInput } : {}),
+    retainInput: nativeInput.retainInput,
     registerHistorical: projection.registerHistorical,
     captureReturnMessageSource: projection.captureReturnMessageSource,
     registerIntake: projection.registerIntake,

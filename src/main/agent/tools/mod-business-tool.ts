@@ -10,6 +10,10 @@ import {
 } from "../../mods/devtools/creator-business-draft"
 import type { BusinessModInspection } from "../../../shared/business-mods"
 import {
+  businessModCatalogSchema,
+  BusinessModCatalogValidationError
+} from "../../plugins/business-mod-catalog-schema"
+import {
   BusinessModDuplicateIdError,
   BUSINESS_MOD_DUPLICATE_ID_CODE,
   BUSINESS_MOD_DUPLICATE_ID_RECOVERY
@@ -138,6 +142,22 @@ export function createModBusinessTool(input: {
             break
           case "status":
             result = documentResult(service.status(input.threadId), args.cursor)
+            break
+          case "modularization_schema":
+            result = documentResult(
+              {
+                schema: z.toJSONSchema(businessModCatalogSchema),
+                rules: [
+                  "First modularization requires kernel, not kernelRef. Use exact inspected package paths and original node objects; never invent dependencies or checks.",
+                  "kernel.runtime.adapter=host-linear-v1 forbids boardConfigPath and requires modules[].host with real native checks. The reviewed legacy adapter autobiz-v1 requires boardConfigPath and forbids modules[].host; do not relabel a legacy board as Host.",
+                  "Each module requires id,title,node,skill:{entry,resources},resources,dependencies:{required,advisory},checks:{validators,guards}. id equals node.id; skill.entry ends with /<node.skill>/SKILL.md. checks match node.validators/guards.",
+                  "kernel.pluginFields must preserve original hooks,mcpServers,userConfig,keywords,useScenario. Declare the full source resource closure including Hooks, configuration, knowledge, scripts and relative references.",
+                  "Keep module skill entries and their relative directory closure in that module's skill.resources. kernel.resources contains shared resources and auxiliary Skills, excluding all modules[].skill.entry and source plugin manifests; boardConfigPath is derived by its reviewed adapter. Do not use a whole skills/ kernel resource when it contains module entries.",
+                  "The schema checks structure only. The native parser, reviewed adapter and resource/contract preservation checks remain authoritative. Inspect structured diagnostics before revising the same proposal."
+                ]
+              },
+              args.cursor
+            )
             break
           case "inspect_raw":
             if (args.rawInspectionId)
@@ -420,16 +440,25 @@ export function createModBusinessTool(input: {
         return JSON.stringify({ ok: true, result })
       } catch (error) {
         const code =
-          error instanceof BusinessModDuplicateIdError
+          error instanceof BusinessModCatalogValidationError
             ? error.code
-            : error instanceof Error &&
-                error.message !== BUSINESS_MOD_DUPLICATE_ID_CODE &&
-                /^[A-Z][A-Z0-9_]+$/.test(error.message)
-              ? error.message
-              : "BUSINESS_CREATOR_OPERATION_FAILED"
+            : error instanceof BusinessModDuplicateIdError
+              ? error.code
+              : error instanceof Error &&
+                  error.message !== BUSINESS_MOD_DUPLICATE_ID_CODE &&
+                  /^[A-Z][A-Z0-9_]+$/.test(error.message)
+                ? error.message
+                : "BUSINESS_CREATOR_OPERATION_FAILED"
         return JSON.stringify({
           ok: false,
           error: code,
+          ...(error instanceof BusinessModCatalogValidationError
+            ? {
+                diagnostics: error.diagnostics,
+                recovery:
+                  "读取 modularization_schema，按 diagnostics.path 修复同一迁移计划并重新请求；保留原插件、Hooks、配置、知识、检查与产物。未准备确认卡。"
+              }
+            : {}),
           ...(error instanceof BusinessModDuplicateIdError
             ? { modId: error.modId, recovery: BUSINESS_MOD_DUPLICATE_ID_RECOVERY }
             : {}),
@@ -444,7 +473,7 @@ export function createModBusinessTool(input: {
       name: "mod_business",
       description:
         "request_modularization also accepts modularizationFiles:[{path,text}] for a classic Skill-only plugin needing a first Host contract, extra Skills or knowledge. These are additive-only bounded text files (32 files, 64 KiB each, 256 KiB total) under skills/, mods/business/, tests/, knowledge/, references/, scripts/, agents/ or workflows/. Include real tests/project-contract.json and all new resources in the explicit catalog closure. No original file, identity, runtime or credential path can be overwritten; case and parent/file collisions fail. Original sourceDigest remains the approval anchor. The native card lists every added file digest; changed additions require a new request and confirmation. Added code is not executed by source materialization, and Host trial and source permissions remain separate native confirmation. " +
-        "For an original plugin without business Mods, inspect_raw(pluginId) first. It returns a native rawInspectionId, immutable sourceDigest, file inventory and either a static Host catalog candidate or explicit migration blockers. To read later pages, reuse inspect_raw(rawInspectionId,cursor); read_raw_asset(rawInspectionId,path,cursor) reads only bounded filtered source assets with credential display redaction. Preserve original Hooks, knowledge/context, configuration and checks. For unknown/legacy workflows, author a complete modularizationCatalog using the reviewed static adapters, never guess dependencies or execute an invented adapter. request_modularization(rawInspectionId,sourceDigest,modularizationCatalog?) prepares an additive native confirmation card; end the turn. It does not write or install. Only the user can approve creation of a private full-source candidate. After confirmation, status.modularization.inspectionId is an ordinary assembly inspectionId: inspect it, preview selected Mods, request_trial, then request_review for separate install/export confirmation. A static candidate is not a successful business trial. Original source changes invalidate it; approval is not restored after restart. " +
+        "For an original plugin without business Mods, inspect_raw(pluginId) first. It returns a native rawInspectionId, immutable sourceDigest, file inventory and either a static Host catalog candidate or explicit migration blockers. To read later pages, reuse inspect_raw(rawInspectionId,cursor); read_raw_asset(rawInspectionId,path,cursor) reads filtered UTF-8 source assets up to 1 MiB with credential display redaction and exact JSON document pages. Preserve original Hooks, knowledge/context, configuration and checks. Before authoring modularizationCatalog, read modularization_schema(cursor?) for its native JSON schema and adapter rules. For unknown/legacy workflows, author a complete catalog using the reviewed static adapters, never guess dependencies or execute an invented adapter. Rejections return bounded diagnostics.path/code/message; repair the same plan from those diagnostics, never delete original constraints to pass. request_modularization(rawInspectionId,sourceDigest,modularizationCatalog?) prepares an additive native confirmation card; end the turn. It does not write or install. Only the user can approve creation of a private full-source candidate. After confirmation, status.modularization.inspectionId is an ordinary assembly inspectionId: inspect it, preview selected Mods, request_trial, then request_review for separate install/export confirmation. A static candidate is not a successful business trial. Original source changes invalidate it; approval is not restored after restart. " +
         "request_trial(previewId,goal) prepares this exact checked candidate for an isolated native-confirmed trial, without installing it. End this turn; the user confirms allocation, fills original configuration, grants the exact package source and selects original business context before starting the original project/managed runner. status includes real trial/run observations and saved feedback; physical cleanup is separate from business completion. Do not claim prepared means executed or passed. Changed candidates need a fresh trial/directory; unknown is never replayed. " +
         "catalog includes bundledExamples shipped SDK source templates. If knowledge-sync/context support is missing, example(exampleId:autobiz-knowledge,cursor?) provides actual Python, native Skill and extension declarations without preinstalling a source plugin; concatenate exact pages then save draft.extensions and all files using the actual inspected kernel. No example grants installation or source authority. All list responses are bounded: catalog(cursor), inspect(pluginId) then inspect(inspectionId,cursor) for nextCursor pages. read_mod(inspectionId,modId,cursor) reads one exact contract. read_preview(previewId,cursor) reads full frozen preview including files and diagnostics. Large read/read_asset/read_mod/read_preview/status documents return json-pages; concatenate jsonChunk in cursor order then parse JSON, always retaining the same identity. assets(inspectionId,cursor?) pages actual declared source paths/digests before read_asset; do not guess Python interfaces. " +
         "Create and compose real business Mods, including Python validators, Skills and namespaced function extensions. This is independent of the pure-function compiler. catalog lists actual installed source plugin IDs and current-chat persistent drafts. inspect(pluginId) returns a bounded native inspectionId plus exact catalog/kernel identity; read_asset(inspectionId,path) reads only declared resources, never credentials or arbitrary host paths. save(id,name,revision,inspectionId,modules?,extensions?,files) creates/updates an independent kernelRef-only Mod draft; use exact returned revision. All source files must stay inside each declared skills/<skill>/ or mods/business/<modId>/ namespace. Supply real module node/artifact/input/output/validator definitions and implementation files, not placeholder success. The host binds the kernel identity from the inspected installed source; drafts cannot replace trusted kernel files. read(id) recovers source; catalog lists drafts after restart. preview(name,version,sources:[{inspectionId,modIds}],drafts?:[{id,revision,modIds}],order?,acceptFixedWorkflow?) uses the original assembler with required dependency closure and preserves knowledge/Hooks. Inspect each real source first, include exactly one kernel source, and add the chosen draft Mods. Resolve diagnostics; acknowledgement does not fill missing resources. request_review(previewId) materializes/checks the exact package and shows trusted install/export controls in this chat. End this turn for confirmation; it never installs, approves, grants permissions, exports to a model-supplied path or executes a business stage. New source/revision requires a fresh preview/review. For an already installed output name, request_review yields an exportOnly candidate: export the update ZIP and use the original Install Plugin confirmation to update while retaining its UUID and configuration; permission changes require fresh confirmation. Do not claim the create-only installer updated it. Unknown effects are never retried. Stage rollback/debug is not provided.",
@@ -456,6 +485,7 @@ export function createModBusinessTool(input: {
             "status",
             "inspect",
             "inspect_raw",
+            "modularization_schema",
             "read_raw_asset",
             "request_modularization",
             "read_mod",
@@ -470,7 +500,7 @@ export function createModBusinessTool(input: {
           ]),
           pluginId: z.string().min(1).max(256).optional(),
           exampleId: z.enum(["autobiz-knowledge"]).optional(),
-          cursor: z.number().int().min(0).max(2_000_000).optional(),
+          cursor: z.number().int().min(0).max(8_000_000).optional(),
           modId: z.string().min(1).max(80).optional(),
           inspectionId: z.string().uuid().optional(),
           rawInspectionId: z.string().uuid().optional(),

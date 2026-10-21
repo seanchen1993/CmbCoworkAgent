@@ -14,6 +14,7 @@ import { usePromptComposer } from "@/lib/use-prompt-composer"
 import { useFunctionDesktop } from "@/lib/use-function-desktop"
 import { useChatTransientToasts } from "@/lib/use-chat-transient-toasts"
 import { submitAfterPromptEdit } from "@/lib/prompt-edit-submission"
+import { isPromptSubmissionReady } from "@/lib/prompt-submission-readiness"
 import { PromptDecorations } from "./PromptDecorations"
 import { useChatFlow } from "@/lib/use-chat-flow"
 import { ClawSidebar, ClawComposerBar } from "./ClawSidebar"
@@ -5302,6 +5303,11 @@ export function ChatContainer({
     enabled: modsChatEnabled && !effectiveInputDisabled, textarea: inputRef,
     read: readPromptDraft, apply: applyPromptDraft, onError: setError,
     working: isLoading || chatFlow.active || chatFlow.busy || Boolean(pendingApproval) || approvalQueue.length > 0 })
+  const promptSubmissionReadiness = {
+    workspace: currentForkWorkspacePath, modsEnabled: modsChatEnabled,
+    modsReady: modsChatState.ready, editorReady: promptComposer.isReady,
+    isCurrent: modsChatState.isCurrent }
+  const promptSubmissionReady = isPromptSubmissionReady(promptSubmissionReadiness)
   useFunctionDesktop(threadId, modsChatEnabled && !readOnly, chatRootRef,
     isLoading || chatFlow.active || chatFlow.busy)
   const inputPlaceholder = useMemo(() => {
@@ -5673,6 +5679,7 @@ export function ChatContainer({
   const handleSubmit = async (e: React.FormEvent, defaultText = ""): Promise<void> => {
     e.preventDefault()
     if (isComposingRef.current) return
+    if (!defaultText && !isPromptSubmissionReady(promptSubmissionReadiness)) return
     const selectedFlow = !defaultText && chatFlow.choice
     if (selectedFlow) {
       try {
@@ -9664,7 +9671,7 @@ export function ChatContainer({
                               {(canSubmitGoalCommandWhileLoading || isModCommandInput || localCommandTarget) && (
                                 <button
                                   type="submit"
-                                  disabled={!localCommandTarget && (isModCommandInput ? slash.mode.kind === "slash" : goalSendButtonDisabledWhileLoading)}
+                                  disabled={!promptSubmissionReady || (!localCommandTarget && (isModCommandInput ? slash.mode.kind === "slash" : goalSendButtonDisabledWhileLoading))}
                                   aria-label={localCommandTarget ? "打开内置功能" : isModCommandInput ? "执行灵件操作" : "发送 goal 命令"}
                                   className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                                 >
@@ -9710,7 +9717,7 @@ export function ChatContainer({
                                 aria-label="发送消息"
                                 title={chatFlow.choice ? `使用已选任务方案“${chatFlow.choice.name}”` : "发送消息"}
                                 disabled={
-                                  (chatFlow.choice ? chatFlow.busy || chatFlow.active || Boolean(chatFlow.workspaceActive) || !chatFlow.enabled : !localCommandTarget && (
+                                  !promptSubmissionReady || (chatFlow.choice ? chatFlow.busy || chatFlow.active || Boolean(chatFlow.workspaceActive) || !chatFlow.enabled : !localCommandTarget && (
                                   !stream ||
                                   effectiveInputDisabled ||
                                   (!input.trim() &&

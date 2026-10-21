@@ -40,17 +40,20 @@ async function main() {
       window.api.mods.onCardsChanged=()=>()=>{};
       window.api.mods.siteMountOutcome=async(thread,component)=>{const owner='first-'+(++seq);
         calls.push(['mount',owner]);owners.set(owner,component);return {state:'mounted',owner}};
-      window.api.mods.siteRender=async(thread,owner,props)=>{calls.push(['render',owner]);
+      window.api.mods.siteRender=async(thread,owner,props)=>{calls.push(['render',owner,owners.get(owner)]);
         await new Promise(r=>pending.push(r));return {key:owner,id:owner,plugin:'engine',
         generation:owner,title:'message',rows:2,closeOnEscape:false,
         tree:{type:'Text',props:{},children:['SAFE '+props.index]},
         nativeContent:{component:owners.get(owner),entries:[{ref:0,props}]}}};
       window.api.mods.siteUnmount=async(thread,owner)=>{calls.push(['unmount',owner]);owners.delete(owner)};
-      function Fixture(){const state=useModsChatState('first','C:/first'),[optional,setOptional]=useState(false);
+      function Fixture(){const state=useModsChatState('first','C:/first'),[optional,setOptional]=useState(false),[withMessage,setWithMessage]=useState(false);
         window.first.showOptional=()=>setOptional(true);
+        window.first.showMessage=()=>setWithMessage(true);
         return <ModsChatScope.Provider value={{threadId:'first',...state}}>
-        {optional?['AbovePrompt','PromptHint','SessionMode','TurnDuration'].map(component=><FunctionSite
-          key={component} threadId='first' component={component} facts={{}}/>):
+        {optional?<>{['AbovePrompt','PromptHint','SessionMode','Spinner'].map(component=><FunctionSite
+          key={component} threadId='first' component={component} facts={{}}/>)}
+          {withMessage&&<FunctionSite threadId='first' component='AssistantMessage' messageId='active-message'
+            facts={{index:99}} fallback={<p>RAW 99</p>}/>}</>:
         <div className='mx-auto w-full max-w-3xl'>{Array.from({length:8},(_,index)=>{
           const site=<FunctionSite key={index} threadId='first'
           component={index===0?'UserMessage':'AssistantMessage'} messageId={'message-'+index} facts={{index}}
@@ -136,15 +139,40 @@ async function main() {
     await page.evaluate("window.first.repair();window.first.configure(false)")
     await page.getByRole("button", { name: "RAW 7", exact: true }).waitFor()
     console.log("PASS inactive host decision renders native content directly; revocation, failure and late results remain guarded")
+    // A revoked read retains its physical queue slot until it settles. Drain obsolete reads
+    // before measuring the new decoration requests, rather than counting their old gates.
+    await page.evaluate("window.first.release()")
+    await page.evaluate(() => new Promise<void>(done => requestAnimationFrame(() => requestAnimationFrame(() => done()))))
+    const beforeOptionalRenders = await page.evaluate(
+      "window.first.calls.filter(call=>call[0]==='render').length"
+    ) as number
     await page.evaluate("window.first.configure(true,true);window.first.showOptional()")
     await page.waitForFunction("document.querySelectorAll('[data-function-site]').length===4")
     assert.equal(await page.locator("[data-function-site-pending]").count(), 0)
     assert.equal(await page.getByRole("status").count(), 0)
     await page.evaluate("window.first.resolve(true)")
-    await page.waitForFunction("window.first.held()===4")
+    await page.waitForFunction("window.first.held()===3")
+    const decorationReads = await page.evaluate(
+      `window.first.calls.filter(call=>call[0]==='render').slice(${beforeOptionalRenders}).map(call=>call[2])`
+    ) as string[]
+    assert.equal(decorationReads.length, 3, "Count actual new decoration reads, not revoked old gates")
+    assert(decorationReads.every(component => ["AbovePrompt", "PromptHint", "SessionMode", "Spinner"].includes(component)))
     assert.equal(await page.locator("[data-function-site-pending]").count(), 0)
     assert.equal(await page.getByRole("status").count(), 0)
     console.log("PASS optional input decorations introduce no pending bars or loading text while capability and drawings load")
+    await page.evaluate("window.first.showMessage()")
+    await page.waitForFunction("window.first.held()===4")
+    assert.equal(await page.evaluate("window.first.calls.filter(call=>call[0]==='render').at(-1)[2]"),
+      "AssistantMessage", "The fourth physical request must belong to the new transcript message")
+    assert.equal(await page.locator('[data-function-site="AssistantMessage"]').count(), 1)
+    assert.equal(await page.locator("[data-function-site-pending]").count(), 1)
+    assert.equal(await page.getByText("RAW 99", { exact: true }).count(), 0)
+    await page.evaluate("window.first.release()")
+    await page.getByText("SAFE 99", { exact: true }).waitFor()
+    await page.waitForFunction("window.first.held()>0")
+    await page.evaluate("window.first.release()")
+    assert.equal(await page.locator("[data-function-site-pending]").count(), 0)
+    console.log("PASS three stalled optional decorations leave the fourth real FunctionSite slot available for a protected message")
     assert.deepEqual(errors, [])
   } finally { await browser.close() }
 }

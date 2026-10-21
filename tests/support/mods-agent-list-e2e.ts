@@ -4,6 +4,7 @@ import { join } from "node:path"
 import AdmZip from "adm-zip"
 import type { Page } from "playwright"
 import type { FunctionAgentInfo } from "../../src/shared/mods/v2/agent-list"
+import { waitForChildProbe } from "./mods-child-protocol-evidence"
 
 const actualChildId =
   /^mod-task:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
@@ -125,7 +126,9 @@ export async function verifyAgentList(
   const task = async (suffix = "") => {
     // Virtualized historical rows may unmount when the new answer arrives.
     const before = new Set(await completedAnswers())
+    const beforeRequests = requests.length
     await send("[mods-child] [mods-agent-list] " + suffix)
+    await waitForChildProbe(requests, beforeRequests, until)
     await until(
       async () =>
         (await idle()) && (await completedAnswers()).some((messageId) => !before.has(messageId)),
@@ -174,23 +177,27 @@ export async function verifyAgentList(
   const beforeStall = requests.length
   const beforeStallIds = new Set(refused.map((agent) => agent.id))
   await send("[mods-child] [mods-agent-list] [child-stall]")
-  await until(
-    async () =>
-      requests.slice(beforeStall).some((request) => {
-        const body = request as { messages?: Array<{ role: string }> }
-        return (
-          body.messages?.at(-1)?.role === "tool" &&
-          JSON.stringify(body).includes("[mods-child-worker] [mods-agent-list] [stall]")
-        )
-      }),
-    "actual child stream is pending"
-  )
+  await waitForChildProbe(requests, beforeStall, until)
   const active = (await inspect()).current
   assert.equal(active.length, 3)
   const pending = active.filter((agent) => !beforeStallIds.has(agent.id))
   assert.equal(pending.length, 1)
   assert.match(pending[0].id, actualChildId)
   assert.equal(pending[0].status, "running")
+  await until(
+    async () => page.evaluate(async (id) => {
+      const transcripts = await window.api.threads.getSubagentTranscripts(id)
+      for (const [executionId, transcript] of Object.entries(transcripts)) {
+        if (!executionId.startsWith("mods-child-task::invocation-")) continue
+        if (!JSON.stringify(transcript).includes("[mods-child-worker] [mods-agent-list] [stall]"))
+          continue
+        const value = await window.api.threads.getSubagentTranscript(id, executionId)
+        if (JSON.stringify(value.messages).includes("MODS_CHILD_PARTIAL")) return true
+      }
+      return false
+    }, id),
+    "actual child partial answer reaches its native transcript before cancellation"
+  )
   await page.getByRole("button", { name: "停止生成", exact: true }).click()
   await until(idle, "original stop settles child")
   const stopped = (await inspect()).current
@@ -200,6 +207,12 @@ export async function verifyAgentList(
   assert.deepEqual(stopped.find((agent) => agent.id === completed.current[0].id), completed.current[0])
   pass("original cancellation marks the live child killed and permits a later metadata query")
   await page.reload({ waitUntil: "domcontentloaded" })
+  // DOMContentLoaded precedes chat hydration and the mounted desktop owner. Read the
+  // restored real answer before issuing another command through that desktop scope.
+  await page.getByText("Agent instances E2E", { exact: true }).first().click()
+  await page.getByText("MODS_CHILD_OK", { exact: true }).last().waitFor()
+  await page.getByText("正在加载会话历史", { exact: true }).waitFor({ state: "hidden" })
+  await composer.click()
   const restored = (await inspect()).current
   assert.equal(restored.length, 3)
   assert.equal(restored.find((agent) => agent.id === pending[0].id)?.status, "killed")
@@ -247,8 +260,28 @@ export async function verifyAgentList(
   await page.evaluate(() => window.api.mods.configureGlobal(false))
   try {
     const before = requests.length
-    await task()
-    assert(JSON.stringify(requests.slice(before)).includes("AGENT_LIST_ORIGINAL_OFF_READ"))
+    await task("[mods-agent-list-off]")
+    const offRequests = requests.slice(before) as Array<{
+      messages: Array<{ role: string; content?: unknown; tool_call_id?: string;
+        tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }> }>
+    }>
+    const children = offRequests.filter((request) => {
+      const content = JSON.stringify(request.messages.findLast((row) => row.role === "user")?.content)
+      return content?.includes("[mods-child-worker]") && content.includes("[mods-agent-list-off]")
+    })
+    assert(children.length >= 2, "Explicit off mode must reach the child and its real read result")
+    const reads = new Map(children.flatMap((request) => request.messages.flatMap(
+      (message) => message.tool_calls ?? []
+    )).filter((call) => ["Read", "read_file"].includes(call.function.name)).map((call) => [call.id, call]))
+    assert.equal(reads.size, 1, "The native child reads once without replaying the tool")
+    const read = reads.get("mods-child-inspect")
+    assert(read, "Use the native read invocation identity")
+    assert.deepEqual(JSON.parse(read.function.arguments), { file_path: "claw-notes" })
+    assert(children.some((request) => {
+      const result = request.messages.at(-1)
+      return result?.role === "tool" && result.tool_call_id === read.id &&
+        JSON.stringify(result.content).includes("AGENT_LIST_ORIGINAL_OFF_READ")
+    }), "The native read returns the actual original file contents")
     await page.screenshot({ path: join(artifacts, "agent-instances-off.png") })
     pass("Mods off preserves native child execution and file reading without instance hooks")
   } finally {

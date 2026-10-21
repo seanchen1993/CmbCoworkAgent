@@ -4,15 +4,16 @@ import { defineConfig } from "electron-vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import { mirrorRequiredDirectorySync } from "./src/main/build/directory-mirror"
+import { mirrorBundledModExamples } from "./src/main/build/bundled-mod-examples"
 // import {app} from "electron"
 
 const pkg = JSON.parse(readFileSync("./package.json", "utf-8"))
 
 // Plugin to copy resources to output
-function copyResources(): { name: string; closeBundle: () => void } {
+function copyResources(): { name: string; closeBundle: () => Promise<void> } {
   return {
     name: "copy-resources",
-    closeBundle(): void {
+    async closeBundle(): Promise<void> {
       const srcIcon = resolve("resources/icon.png")
       const destDir = resolve("out/resources")
       const destIcon = resolve("out/resources/icon.png")
@@ -29,19 +30,7 @@ function copyResources(): { name: string; closeBundle: () => void } {
       const destSkills = resolve("out/skills")
       mirrorRequiredDirectorySync(srcSkills, destSkills)
       mirrorRequiredDirectorySync(resolve("resources/mods"), resolve("out/resources/mods"))
-      for (const [source, name] of [
-        ["sparks-task-workbench/provider", "task-workbench-provider"],
-        ["sparks-task-workbench/consumer", "task-workbench-consumer"],
-        ["sparks-task-workbench/behavior-prefix", "task-behavior-prefix"],
-        ["sparks-task-workbench/behavior-compact", "task-behavior-compact"],
-        ["sparks-edit-reminder", "edit-reminder"],
-        ["sparks-stage-debugger", "stage-debugger"]
-      ]) {
-        mirrorRequiredDirectorySync(
-          resolve("examples", source),
-          resolve("out/resources/mods/platform-examples", name)
-        )
-      }
+      await mirrorBundledModExamples(resolve("."), resolve("out/resources/bundled-mods"))
       mirrorRequiredDirectorySync(
         resolve("examples/autobiz-stage-checks"),
         resolve("out/resources/project-composition/autobiz")

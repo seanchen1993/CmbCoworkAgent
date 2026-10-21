@@ -301,15 +301,49 @@ export async function verifyClassicOutput(
           ),
         "set failure observer mode"
       )
+      const completedMcpAnswers = () => page.evaluate(async (id) => {
+        const messages = await window.api.threads.getMessages(id)
+        return messages.filter(message => message.role === "assistant" &&
+          (typeof message.content === "string"
+            ? message.content === "MODEL_CLASSIC_MCP_OK"
+            : message.content.some(block => block.type === "text" &&
+              block.text === "MODEL_CLASSIC_MCP_OK"))).map(message => message.id)
+      }, threadId)
       for (const action of ["cancel", "revoke"] as const) {
         const begin = requests.length,
           closed = closedStalls()
+        const beforeAudit = new Set(
+          (await page.evaluate((id) => window.api.mods.audit(id), threadId)).map(row => row.callId)
+        )
+        const counter = readFileSync(join(project, "mcp-sdk-counter.txt"), "utf8")
+        const beforeAnswers = new Set(await completedMcpAnswers())
         await composer.fill("[mods-classic-mcp]")
         await submit.click()
         await until(
           async () => requests.length >= begin + 2,
           "failure observer reaches upstream model"
         )
+        type ProtocolRequest = {
+          messages: Array<{ role: string; content: unknown; tool_call_id?: string }>
+          tools?: Array<{ function: { name: string; parameters: {
+            type?: string; properties?: Record<string, unknown>
+          } } }>
+          max_tokens?: number
+        }
+        const initial = requests[begin] as ProtocolRequest
+        const observation = requests[begin + 1] as ProtocolRequest
+        assert.equal(requests.length - begin, 2, "one native MCP step and one stalled observer")
+        assert.equal(initial.messages.at(-1)?.role, "user")
+        assert.match(JSON.stringify(initial.messages.at(-1)?.content), /\[mods-classic-mcp\]/)
+        const advertised = initial.tools?.find(tool =>
+          tool.function.name === "mcp__modsSdkFixture__mods_error")
+        assert(advertised, "the actual native MCP error tool must be callable without discovery")
+        assert.equal(advertised.function.parameters.type, "object")
+        assert.deepEqual(advertised.function.parameters.properties, {})
+        assert.equal(observation.tools, undefined, "the observer uses the direct model SDK")
+        assert.equal(observation.messages.at(-1)?.role, "user")
+        assert.equal(observation.messages.at(-1)?.content, "[stall] MCP failure observation")
+        assert.equal(observation.max_tokens, 64)
         if (action === "cancel")
           await page.getByRole("button", { name: "停止生成", exact: true }).click()
         else
@@ -319,17 +353,59 @@ export async function verifyClassicOutput(
           )
         await until(
           async () =>
-            closedStalls() > closed &&
+            closedStalls() === closed + 1 &&
             (await page.getByRole("button", { name: "停止生成", exact: true }).count()) === 0,
           "failure observation closes upstream transport"
         )
-        assert.equal(requests.length - begin, 2)
+        // Revoking a plugin stops its observer, while the native chat retains its owner and
+        // completes the original failed MCP result. Cancelling the chat permits no final step.
+        assert.equal(requests.length - begin, action === "cancel" ? 2 : 3)
+        if (action === "revoke") {
+          const continuation = requests[begin + 2] as ProtocolRequest
+          assert(continuation.tools?.some(tool =>
+            tool.function.name === "mcp__modsSdkFixture__mods_error"))
+          assert.equal(continuation.messages.at(-1)?.role, "tool")
+          assert.equal(continuation.messages.at(-1)?.tool_call_id, "classic-mcp-error")
+          assert.equal(continuation.messages.at(-1)?.content,
+            "MCP tool error: CLASSIC_MCP_REPLACEMENT")
+          await until(async () => (await completedMcpAnswers())
+            .filter(id => !beforeAnswers.has(id)).length === 1,
+          "native continuation durably publishes its own new answer after plugin revocation")
+        }
+        assert.equal((await completedMcpAnswers()).filter(id => !beforeAnswers.has(id)).length,
+          action === "cancel" ? 0 : 1)
+        assert.equal(readFileSync(join(project, "mcp-sdk-counter.txt"), "utf8"), counter + "error\n")
+        const receipts = (await page.evaluate((id) => window.api.mods.audit(id), threadId))
+          .filter(row => !beforeAudit.has(row.callId))
+        const mcp = receipts.filter(row => row.toolId.startsWith("mcp:") &&
+          row.identity?.toolCallId === "classic-mcp-error")
+        assert.equal(mcp.length, 1, "the failed MCP tool executes once without retries")
+        assert.equal(mcp[0].status, "failed")
+        const model = receipts.filter(row => row.toolId === "model.complete")
+        assert.equal(model.length, 1, "the observer makes one real model call")
+        assert.equal(model[0].status, "unknown", "interruption cannot claim a completed model result")
+        assert.equal(model[0].identity?.turnId, mcp[0].identity?.turnId)
+        assert.deepEqual(model[0].modelUsage, {
+          modelRef: "custom:mods-model-fixture", outputTokenLimit: 64
+        }, "a stalled response has its real token cap, without invented final token usage")
+        writeFileSync(join(artifacts, `classic-observer-${action}-evidence.json`), JSON.stringify({
+          requestPhases: action === "cancel"
+            ? ["native-mcp", "observer-stall"]
+            : ["native-mcp", "observer-stall", "native-error-continuation"],
+          modelUsage: model[0].modelUsage,
+          modelStatus: model[0].status,
+          mcpStatus: mcp[0].status,
+          actualMcpExecutions: 1,
+          closedObserverStreams: closedStalls() - closed
+        }, null, 2))
         assert(
           !(await page.evaluate((id) => window.api.mods.logs(id), threadId)).some(
             (row) => row.text === "OBS_LATE_FINISH"
           )
         )
-        pass(`${action} cancels the actual MCP failure observer without a late model continuation`)
+        pass(action === "cancel"
+          ? "cancel closes the actual MCP failure observer without a late model continuation"
+          : "revoke closes only the MCP failure observer while native chat retains its failed tool result")
       }
     } finally {
       await app.evaluate(

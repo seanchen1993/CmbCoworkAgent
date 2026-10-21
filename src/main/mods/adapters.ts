@@ -12,6 +12,8 @@ import { FunctionToolResults } from "./v2/tool-result"
 import type { ToolMessage } from "@langchain/core/messages"
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import { assertModRuntimeAuthority } from "./runtime-instance"
+import { captureCurrentFunctionNativeToolCompletion } from
+  "../agent/function-conversation-native-tools"
 
 const nativeNames = new Set([
   "ls",
@@ -32,9 +34,20 @@ export function withModToolCall<T, R extends ToolRequest>(
   binding: ModThreadBinding,
   request: R,
   delegatedNames: ReadonlySet<string>,
-  handler: (request: R) => Promise<T>
+  handler: (request: R, nativePublish?: <V>(value: V) => Promise<V>,
+    nativeTail?: <V>(handler: () => Promise<V>) => Promise<V>) => Promise<T>
 ): Promise<T | ToolMessage> {
   const manager = getModsManager()
+  const completion = binding.runtimeAuthority && request.toolCall
+    ? captureCurrentFunctionNativeToolCompletion(binding.runtimeAuthority, request.toolCall) : undefined
+  const runHandler = (received: R) => completion
+    ? completion.run(() => handler(received, completion.publish, completion.runTail)) : handler(received)
+  const recover = <V>(pending: Promise<V>): Promise<V> => pending.catch(error => {
+    // Only a fulfilled original native handler can finish a certified withdrawn guest fold.
+    const recovered = completion?.recover(error)
+    if (recovered) return recovered.value as V
+    throw error
+  })
   let assertRuntime: (() => void) | undefined
   const assertLive = (): void => {
     if (!binding.runtimeAuthority) return
@@ -49,16 +62,18 @@ export function withModToolCall<T, R extends ToolRequest>(
     assertRuntime?.()
   }
   const native = (): Promise<T> => {
+    if (completion?.isWithdrawn()) return runHandler(request)
     if (!binding.runtimeAuthority) return handler(request)
-    return handler(request).then(value => {
+    return runHandler(request).then(value => {
       assertLive()
       return value
     })
   }
+  if (completion?.isWithdrawn()) return recover(native())
   assertLive()
   if (manager && binding.runtimeAuthority)
     assertRuntime = manager.captureFunctionRuntimeGuard(binding.runtimeAuthority)
-  if (!manager || !request.toolCall?.name || !manager.isActive(binding.workspace)) return native()
+  if (!manager || !request.toolCall?.name || !manager.isActive(binding.workspace)) return recover(native())
   const tool = request.toolCall
   // Tool-call metadata belongs to renderer/trace attribution, never SDK authority.
   const agentId = binding.runtimeAuthority?.agentId ?? binding.agentId ?? "main"
@@ -106,9 +121,9 @@ export function withModToolCall<T, R extends ToolRequest>(
         nativeNames.has(tool.name!) ||
         (delegatedNames.has(tool.name!) && tool.name !== "task_output")
       const value = delegated
-        ? await handler({ ...request, toolCall: { ...tool, args } })
+        ? await runHandler({ ...request, toolCall: { ...tool, args } })
         : await manager.dispatch(currentBinding, `host:${tool.name}`, args, (args) =>
-            handler({ ...request, toolCall: { ...tool, args } })
+            runHandler({ ...request, toolCall: { ...tool, args } })
           )
       assertLive()
       const published = await manager.publish(binding.workspace, value, callId, signal)
@@ -117,11 +132,11 @@ export function withModToolCall<T, R extends ToolRequest>(
     })
   }
   const intercept = manager.getFunctionToolHandler(binding.workspace)
-  if (!intercept) return execute(tool.args ?? {})
+  if (!intercept) return recover(execute(tool.args ?? {}))
   const results = new FunctionToolResults<T>(tool.name!, callId)
   const input = { ...(filterModData(tool.args ?? {}, false) as ModObject) }
   delete input.agentId
-  return intercept(
+  return recover(intercept(
     { ...binding, agentId, workspace: identity.workspace },
     {
       ...input,
@@ -171,7 +186,7 @@ export function withModToolCall<T, R extends ToolRequest>(
       )
       assertLive()
       return published
-    })
+    }))
 }
 
 interface MethodSpec {

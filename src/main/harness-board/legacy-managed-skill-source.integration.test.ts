@@ -1,7 +1,6 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
-import AdmZip from "adm-zip"
+import { join } from "node:path"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import type { PluginMetadata } from "../types"
 import type { AgentRunDelivery } from "../agent/agent-run-service"
@@ -30,6 +29,7 @@ import { prepareManagedHarnessSession } from "./auto-mode-action-executor"
 import { LegacyProjectRuntimeService } from "./project-runtime/legacy-runtime-service"
 import { LegacyOperationStore } from "./project-runtime/legacy-operation-store"
 import { HostPackageSnapshots } from "./project-runtime/package-snapshots"
+import { hostProjectFixture } from "./project-runtime/host-fixtures.test-helper"
 import { withLegacyProjectSkillSource } from "./project-runtime/legacy-entry-gate"
 import { getPluginSkillSearchSources, readPluginManifest } from "../plugins/manifest"
 import { SkillLifecycleRegistry } from "../agent/skill-lifecycle/registry"
@@ -37,7 +37,11 @@ import { parseSkillUseBlock } from "../agent/skill-lifecycle/marker"
 import { runtimeDirectory } from "./project-runtime/safe-files"
 import { currentRuntimePluginSource } from "../plugins/runtime-source-scope"
 
-const archive = resolve("output/deliveries/mods-creator-workflow-wakeup-20261017-v102-v2/10-完整AutoBiz+并行进度+知识版-1.0.2.zip")
+const skillNames = [
+  "autobiz-requirement-discuss",
+  ...Array.from({ length: 14 }, (_, index) => `legacy-fixture-stage-${index + 2}`)
+]
+const originalSkillBody = "Read the retained fixture requirements before proposing changes."
 const delivery: AgentRunDelivery = { window: {} as BrowserWindow, send: vi.fn(), isAvailable: () => true }
 let root = "", cleanup: (() => void) | undefined
 let preparedFixture: ReturnType<typeof setup>
@@ -57,16 +61,30 @@ afterEach(() => {
 function setup() {
   const installed = join(root, "installed"), workspace = join(root, "workspace")
   mkdirSync(installed); mkdirSync(workspace)
-  const zip = new AdmZip(readFileSync(archive))
-  for (const entry of zip.getEntries().filter(row => !row.isDirectory)) {
-    if (entry.entryName.split(/[\\/]/).includes("..")) throw Error("fixture archive path")
-    const target = join(installed, entry.entryName)
-    mkdirSync(resolve(target, ".."), { recursive: true }); writeFileSync(target, entry.getData())
+  // A small real package keeps source pinning independent of historical delivery artifacts.
+  // All fifteen Skills still pass through durable snapshots and the production async scanner.
+  const metadata = { name: "legacy-managed-skills-fixture", version: "1.0.0", skills: "skills" }
+  writeFileSync(join(installed, "plugin.json"), JSON.stringify(metadata))
+  const manifest = hostProjectFixture(workspace).manifest
+  manifest.plugin = { id: metadata.name, version: metadata.version }
+  manifest.mode = "legacy"
+  manifest.stateOwner = "plugin"
+  manifest.stages = skillNames.map((name, index) => ({
+    ...manifest.stages[0],
+    id: `stage-${index + 1}`,
+    title: name,
+    skill: `skills/autobiz/${name}/SKILL.md`
+  }))
+  writeFileSync(join(installed, "devclaw.project-runtime.json"), JSON.stringify(manifest))
+  for (const name of skillNames) {
+    const directory = join(installed, "skills/autobiz", name)
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(join(directory, "SKILL.md"),
+      `---\nname: ${name}\ndescription: Retained legacy fixture Skill ${name}\n---\n${originalSkillBody}\n`)
   }
-  const metadata = JSON.parse(readFileSync(join(installed, "plugin.json"), "utf8"))
   state.plugin = { id: "actual-installed-uuid", name: metadata.name, path: installed,
     version: metadata.version, description: "", author: "", enabled: true,
-    skillCount: 15, hookCount: 12, mcpServerCount: 2, createdAt: "", updatedAt: "" }
+    skillCount: 15, hookCount: 0, mcpServerCount: 0, createdAt: "", updatedAt: "" }
   const snapshots = new HostPackageSnapshots(join(root, "snapshots"))
   const snapshot = snapshots.capture(installed)
   const store = new LegacyOperationStore(join(root, "operations.sqlite"))
@@ -115,6 +133,10 @@ it("builds an exact native managed Skill block from the real retained fifteen-Sk
       pluginId: state.plugin!.id, pluginName: state.plugin!.name,
       pluginRoot: f.snapshot.root, isProjectModePlugin: true })))
   expect(skills).toHaveLength(15)
+  expect(skills.map(skill => skill.name).sort()).toEqual([...skillNames].sort())
+  expect(readFileSync(parsed.skillPath, "utf8")).toContain(originalSkillBody)
+  expect(readFileSync(parsed.skillPath, "utf8")).not.toContain("Changed live installation")
+  expect(f.snapshot.manifest).toMatchObject({ mode: "legacy", stateOwner: "plugin" })
   expect(f.store.list("project")).toEqual([])
   expect(currentRuntimePluginSource()).toBeUndefined()
 })

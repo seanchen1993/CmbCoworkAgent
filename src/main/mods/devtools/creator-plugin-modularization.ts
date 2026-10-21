@@ -14,6 +14,7 @@ import {
 } from "../../plugins/plugin-modularization"
 import { businessModPath } from "../../plugins/business-mod-manifest"
 import { redactPluginSourceCredentials } from "../../plugins/plugin-source-redaction"
+import { BusinessModCatalogValidationError } from "../../plugins/business-mod-catalog-schema"
 import {
   snapshotDerivationSource,
   writeDerivationFiles,
@@ -147,19 +148,30 @@ export class CreatorPluginModularization {
     const id = randomUUID()
     if (this.raw.size >= 64) this.raw.delete(this.raw.keys().next().value!)
     this.raw.set(id, { scope: businessCreatorScopeKey(context.scope), source, id })
-    return { rawInspectionId: id, ...view, untrustedSource: true }
+    return {
+      rawInspectionId: id,
+      ...view,
+      schemaAction: "modularization_schema(cursor)",
+      untrustedSource: true
+    }
   }
   async readRawInspection(threadId: string, rawInspectionId: string) {
     const context = this.current(threadId)
     const { snapshot } = await this.rawSnapshot(context.scope, rawInspectionId)
-    return { rawInspectionId, ...inspectPluginModularization(snapshot), untrustedSource: true }
+    return {
+      rawInspectionId,
+      ...inspectPluginModularization(snapshot),
+      schemaAction: "modularization_schema(cursor)",
+      untrustedSource: true
+    }
   }
   async readRawAsset(threadId: string, rawInspectionId: string, path: string) {
     const context = this.current(threadId)
     const { snapshot } = await this.rawSnapshot(context.scope, rawInspectionId)
     businessModPath(path)
     const file = snapshot.files.find((item) => item.path === path)
-    if (!file || file.bytes.length > 64 * 1024) throw Error("BUSINESS_CREATOR_ASSET_UNAVAILABLE")
+    // Tool transport pages the redacted document; larger reviewed source must remain inspectable.
+    if (!file || file.bytes.length > 1024 * 1024) throw Error("BUSINESS_CREATOR_ASSET_UNAVAILABLE")
     const original = new TextDecoder("utf-8", { fatal: true }).decode(file.bytes)
     // Schema-aware JSON and conservative assignment redaction affect display only, never source bytes.
     let redacted = false
@@ -302,12 +314,16 @@ export class CreatorPluginModularization {
       request.status.inspectionId = inspection.id
       request.status.summary =
         "模块化源码候选已就绪。继续组合选择步骤，先试用核对产物与检查，再保存安装或导出为新插件。"
-    } catch {
+    } catch (error) {
       request.status.phase = "failed"
       request.status.error = "PLUGIN_MODULARIZATION_INPUT_CHANGED_OR_INVALID"
       request.status.diagnostics.push(
         "原插件未修改。来源或契约无法核对，请重新检查原插件并生成新的确认请求。"
       )
+      if (error instanceof BusinessModCatalogValidationError)
+        request.status.diagnostics.push(
+          ...error.diagnostics.map(({ path, code, message }) => `${path}: ${code} — ${message}`)
+        )
     }
     this.deps.changed(threadId)
     return this.status(context.scope)

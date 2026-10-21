@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { join } from "node:path"
 import AdmZip from "adm-zip"
 import type { Page } from "playwright"
+import { openModsAdvancedSettings, openModsClawEditor } from "./mods-sidebar-navigation"
 
 /** Upload real modules, choose them in production React, and observe real normal-turn hooks. */
 export async function verifyClawJourney(page: Page, threadId: string, artifacts: string) {
@@ -58,11 +59,16 @@ export async function verifyClawJourney(page: Page, threadId: string, artifacts:
       { threadId, name }
     )
   }
-  await page.getByRole("button", { name: "助手组合", exact: true }).click()
+  await openModsAdvancedSettings(page, "搭配管理")
+  await openModsClawEditor(page)
   await page.getByLabel("助手组合名称").fill("仅 A 参与聊天")
   await page.getByLabel("选择能力 claw-a").check()
   await page.getByRole("button", { name: "保存组合", exact: true }).click()
-  await page.getByRole("button", { name: "应用到当前对话", exact: true }).click()
+  await page
+    .getByRole("button", { name: "仅 A 参与聊天", exact: true })
+    .locator("..")
+    .getByRole("button", { name: "应用到所选聊天", exact: true })
+    .click()
   await page.getByRole("button", { name: "确认应用", exact: true }).click()
   await page.getByText("当前组合：仅 A 参与聊天", { exact: true }).waitFor()
   await page.screenshot({ path: join(artifacts, "claw-profile.png") })
@@ -91,12 +97,14 @@ export async function verifyClawJourney(page: Page, threadId: string, artifacts:
     return JSON.parse(result!.result!.text).count as number
   }
   const send = async (text: string) => {
-    await page.getByRole("button", { name: "回到聊天使用", exact: true }).click()
+    await page.getByRole("button", { name: "返回应用", exact: true }).click()
     const label = text.includes("说明 A 模式") ? "CLAW-A-READY" : "CLAW-B-READY"
     await page.locator("textarea.composer-textarea").fill(text)
     await page.locator("textarea.composer-textarea").press("Enter")
-    await page.getByText("普通聊天答复：已读取本次问题与运行摘要。 " + label, {exact:true}).first().waitFor({timeout:60000})
-
+    await page
+      .getByText("普通聊天答复：已读取本次问题与运行摘要。 " + label, { exact: true })
+      .first()
+      .waitFor({ timeout: 60000 })
   }
   const commandsA = await page.evaluate((id) => window.api.mods.commands(id), threadId)
   assert.deepEqual(
@@ -128,18 +136,16 @@ export async function verifyClawJourney(page: Page, threadId: string, artifacts:
   assert(slashResult, "The production composer must route /claw-a to the selected Mod")
   assert.equal(JSON.parse(slashResult.result!.text).count, 1)
 
-  await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-  await page.getByRole("button", { name: "助手组合", exact: true }).click()
+  await openModsAdvancedSettings(page, "搭配管理")
+  await openModsClawEditor(page)
   await page.getByRole("button", { name: "新建", exact: true }).click()
   await page.getByLabel("助手组合名称").fill("仅 B 参与聊天")
   await page.getByLabel("选择能力 claw-b").check()
   await page.getByRole("button", { name: "保存组合", exact: true }).click()
   await page
-    .locator("aside")
-    .filter({ hasText: "已保存组合" })
-    .locator("div.rounded-lg")
-    .filter({ hasText: "仅 B 参与聊天" })
-    .getByRole("button", { name: "应用到当前对话", exact: true })
+    .getByRole("button", { name: "仅 B 参与聊天", exact: true })
+    .locator("..")
+    .getByRole("button", { name: "应用到所选聊天", exact: true })
     .click()
   await page.getByRole("button", { name: "确认应用", exact: true }).click()
   await page.getByText("当前组合：仅 B 参与聊天", { exact: true }).waitFor()

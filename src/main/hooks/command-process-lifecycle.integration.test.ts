@@ -36,9 +36,34 @@ import type { HookConfig, HookResult } from "./types"
 
 const roots: string[] = []
 const oldPath = process.env.PATH
-const bash = process.env.GIT_BASH_PATH
-const python = process.env.HOOK_TEST_PYTHON || "C:/Program Files/Python312/python.exe"
 const windows = process.platform === "win32"
+const bash =
+  process.env.GIT_BASH_PATH ||
+  (windows
+    ? [
+        ...[process.env.ProgramFiles, process.env.ProgramW6432]
+          .filter(Boolean)
+          .map((folder) => join(folder!, "Git", "bin", "bash.exe")),
+        ...(spawnSync("where.exe", ["git.exe"], {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: 5000
+        })
+          .stdout?.trim()
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .map((git) => join(dirname(git), "..", "bin", "bash.exe")) ?? [])
+      ].find((path) => existsSync(path))
+    : undefined)
+const python =
+  process.env.HOOK_TEST_PYTHON ||
+  (windows
+    ? spawnSync("python.exe", ["-I", "-B", "-c", "import sys;print(sys.executable)"], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 5000
+      }).stdout?.trim()
+    : "python3")
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 const alive = (pid: number): boolean => {
   try {
@@ -119,8 +144,14 @@ it("does not spawn an already cancelled Hook", async () => {
 it.runIf(windows).each(["timeout", "cancel", "output-limit"] as const)(
   "original runHooks %s physically reaps real Git Bash/Python tree before settlement",
   async (mode) => {
-    expect(bash && existsSync(bash)).toBe(true)
-    expect(existsSync(python)).toBe(true)
+    expect(
+      bash && existsSync(bash),
+      "Git Bash is required; set GIT_BASH_PATH if not discoverable"
+    ).toBe(true)
+    expect(
+      python && existsSync(python),
+      "Python is required; set HOOK_TEST_PYTHON if not on PATH"
+    ).toBe(true)
     process.env.PATH = dirname(bash!) + ";" + oldPath
     const workspace = root(),
       script = join(workspace, "sample.py")
@@ -139,7 +170,7 @@ it.runIf(windows).each(["timeout", "cancel", "output-limit"] as const)(
     const quote = (value: string) => '"' + value.replace(/\\/g, "/") + '"'
     const config = {
       ...hook(
-        `exec ${quote(python)} -I -B ${quote(script)} ${quote(pidFile)} ${quote(doneFile)} ${quote(marker)}`
+        `exec ${quote(python!)} -I -B ${quote(script)} ${quote(pidFile)} ${quote(doneFile)} ${quote(marker)}`
       ),
       shell: "bash" as const
     }

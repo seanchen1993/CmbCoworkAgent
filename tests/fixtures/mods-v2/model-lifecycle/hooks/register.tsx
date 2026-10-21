@@ -14,9 +14,11 @@ export function register(on) {
     }
   })
   on("tool.call", { tool: "mcp__model-lifecycle__probe" }, async ($) => {
-    const fork = await $.model.fork({ prompt: "[lifecycle-fork]", maxTokens: 64 })
+    const fork = await $.model.fork({ prompt: "[lifecycle-fork]" })
     const label = await $.model.classify("[lifecycle-classify]", ["ready", "blocked"], { maxTokens: 16 })
-    return { result: { fork, label } }
+    if (!fork.isAnswered) throw Error("Lifecycle fork did not answer")
+    if (label !== "ready") throw Error("Lifecycle classification failed")
+    return { result: { fork: fork.text, label } }
   })
   on("command.run", { command: "lifecycle-pane" }, async ($) => {
     await $.ui.open({ id: "lifecycle", title: "Lifecycle E2E", rows: 3, closeOnEscape: true })

@@ -350,7 +350,15 @@ it.each(["grant", "source", "workspace", "cancelled"] as const)(
       if (!graph) throw Error("ACTUAL_CHILD_GRAPH_REQUIRED")
       releaseLocalThreadRunLease(f.threadId, "desktop", f.runId)
       parent.release()
-      expect(() => f.prepared.target.assertCurrent()).toThrow()
+      // A resident session target survives its first physical turn. The retired turn's
+      // authority/factory still cannot admit another child or regain execution rights.
+      expect(() => f.prepared.target.assertCurrent()).not.toThrow()
+      expect(() => parent.authority.assertLive()).toThrow("MODS_RUNTIME_INSTANCE_EXPIRED")
+      expect(() => f.coordinator.registerIndependentChild(proof, { invocation: {},
+        physicalThreadId: childId, runId, agentId, checkpointIncarnation: captureThreadIncarnation(row),
+        signal, assertCurrent: () => child.authority.assertLive() }))
+        .toThrow("MODS_RUNTIME_INSTANCE_EXPIRED")
+      expect(() => child.authority.assertLive()).not.toThrow()
       expect(() => graph.assertCurrent()).not.toThrow()
       if (mode === "grant") await f.functions.revoke(f.workspace, f.source.id)
       else if (mode === "source") {
@@ -365,6 +373,9 @@ it.each(["grant", "source", "workspace", "cancelled"] as const)(
         ])
       }
       expect(() => graph.assertCurrent()).toThrow()
+      expect(() => f.prepared.target.assertCurrent()).toThrow()
+      expect(f.writerCalls()).toBe(0)
+      expect(f.saved()).toEqual({ canonical: 0, projection: 0, receipts: 0 })
     } finally {
       close()
       child.release()

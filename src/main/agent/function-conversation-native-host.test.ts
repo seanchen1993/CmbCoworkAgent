@@ -18,7 +18,15 @@ import { Command } from "@langchain/langgraph"
 import { createAgent, createMiddleware } from "langchain"
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 import { z } from "zod"
-import { ModsManager, type ModThreadBinding } from "../mods/manager"
+import { ModsManager, setModsManager, type ModThreadBinding } from "../mods/manager"
+import { createModModelBoundary } from "./mods-model-boundary"
+import { createToolHookMiddleware } from "./tool-hooks"
+import { createFunctionPeerMiddleware } from "./mods-peer-inbox"
+import { withFunctionExecution } from "../mods/v2/execution-context"
+import { issueRuntimePluginSourceToken, withRuntimePluginSource } from
+  "../plugins/runtime-source-scope"
+import type { PluginMetadata, PluginHookMetadata } from "../types"
+import type { HookConfig } from "../hooks/types"
 import { DEFAULT_MOD_POLICY } from "../mods/policy"
 import { FunctionModsManager } from "../mods/v2/manager"
 import { FunctionGuestRuntime } from "../mods/v2/guest-runtime"
@@ -37,6 +45,7 @@ import { assertFunctionConversationNativeHostInstallation,
   createFunctionConversationNativeHost } from "./function-conversation-native-host"
 import { captureFunctionConversationNativeInput } from "./function-conversation-native-input"
 import { wrapFunctionConversationNativeInvocation } from "./function-conversation-native-invocation"
+import { wrapFunctionConversationInvocation } from "./mods-conversation-invocation"
 import { createFunctionConversationNativeInputRetention } from "./function-conversation-native-input-retention"
 import { createNativeConversationStreamProjection } from "./native-conversation-stream-projection"
 import * as nativeStreamProjection from "./native-conversation-stream-projection"
@@ -45,9 +54,17 @@ import { createFunctionConversationNativeAdoption } from "./function-conversatio
 import { serializeFunctionConversationNativeMessage } from "./function-conversation-native-message"
 import { deserializeFunctionConversationNativeMessage } from "./function-conversation-native-message"
 import { captureNativeMessage } from "./native-message-capture"
+import { runCompletionHooksWithRevision } from "./skill-lifecycle/completion-hooks"
+import { createHookScope } from "../hooks/scope"
+import { readFunctionConversationPresentationDisposition } from
+  "../db/function-conversation-presentation-disposition"
 import { captureFunctionConversationTaskBinding, createFunctionConversationMiddleware } from
   "./mods-conversation"
 import { FunctionConversationDeliveryBridge } from "../checkpointer/function-conversation-delivery"
+import { createFunctionConversationIdleEditor } from "../checkpointer/function-conversation-idle-editor"
+import { captureFunctionConversationCompactionSource, commitFunctionConversationCompactionBoundary,
+  readFunctionConversationCompactionBoundary } from "../checkpointer/function-conversation-compaction-boundary"
+import { ModControlStore } from "../mods/control-store"
 import { captureConversationCheckpointRead, readFunctionConversationCheckpointMembership,
   functionConversationRowDigest } from "../checkpointer/function-conversation-checkpoint-membership"
 import { createFunctionConversationRecoveryResolver } from "../ipc/function-conversation-recovery"
@@ -60,6 +77,7 @@ import { isFunctionConversationNotice, isFunctionConversationToolSystemSide } fr
 
 const paths = vi.hoisted(() => ({ database: "" }))
 vi.mock("../storage", () => ({ getDbPath: () => paths.database,
+  getHookLoggingConfig: () => ({ diagnostic: false }), getUserInfo: () => undefined,
   getMemorySessionOptInMigrationState: () => ({ migrated: true }),
   markMemorySessionOptInMigrated: vi.fn() }))
 vi.mock("electron", () => ({ app: { getPath: () => tmpdir(), getName: () => "test",
@@ -113,13 +131,14 @@ function nativeMessages(value: unknown): BaseMessage[] {
 
 /** Actual installed/approved/resident QuickJS Hook, original manager and physical run ownership. */
 async function fixture(options: { protected?: boolean; hook?: boolean;
+  globalEnabled?: () => boolean; optionalPolicy?: boolean; fullLifecycle?: boolean;
   onFlush?: (uuid: string) => void | Promise<void>; input?: HumanMessage; visible?: string;
   onInputGuard?: () => void } = {}) {
   const root = mkdtempSync(join(directory, "workspace-"))
   const manager = new ModsManager(join(root, "control.sqlite"), () => [],
     async () => true, () => undefined, undefined, { ...DEFAULT_MOD_POLICY,
-      required: options.protected === true,
-      redactLiterals: options.protected ? ["native-secret-canary"] : [] })
+      required: options.protected === true && !options.optionalPolicy,
+      redactLiterals: options.protected ? ["native-secret-canary"] : [] }, options.globalEnabled)
   manager.configure(root, true, options.protected === true)
   const workspace = manager.workspaceKey(root), threadId = randomUUID(), turnId = randomUUID()
   const physicalRunId = randomUUID(), thread = appDb.createThread(threadId, { workspacePath: workspace })
@@ -146,6 +165,7 @@ async function fixture(options: { protected?: boolean; hook?: boolean;
     assertLive: guard }
   const instance = manager.createRuntimeAuthority(physical)
   const unbind = manager.bindThread({ ...physical, runtimeAuthority: instance.authority })
+  if (options.fullLifecycle) manager.bindFunctionPeerEndpoint(instance.authority)
   const store = new FunctionConversationStore(database)
   const coordinator = new FunctionConversationCoordinator(store, {
     authorities: { get: scope => manager.getFunctionConversationAuthority(scope) },
@@ -185,6 +205,7 @@ async function fixture(options: { protected?: boolean; hook?: boolean;
   const functions = new FunctionModsManager(manager.store, {
     plugins: () => options.hook === false ? [] : [{ id: "actual-native-hook", name: "native-host-hook",
       path: plugin, enabled: true }], enabled: key => manager.isEnabled(key),
+    protects: key => manager.protects(key),
     publish: (key, value, signal) => manager.publish(key, value, undefined, signal),
     changed: () => undefined
   }, () => {
@@ -197,6 +218,20 @@ async function fixture(options: { protected?: boolean; hook?: boolean;
     }, stop() { for (const guest of guests) guest.dispose() } }
   })
   manager.attachFunctions({ invalidate: key => functions.invalidate(key),
+    ...(options.fullLifecycle ? {
+      invalidateAll: () => functions.invalidateAll(),
+      turnStep: functions.turnStep.bind(functions),
+      classicEvent: functions.classicEvent.bind(functions),
+      presentationEvent: functions.presentationEvent.bind(functions),
+      registeredTools: functions.registeredTools.bind(functions),
+      toolCall: (binding: ModThreadBinding, input: ModObject,
+        core: (input: ModObject, signal: AbortSignal) => Promise<ModObject>) =>
+        withFunctionExecution({ runtimeAuthority: binding.runtimeAuthority,
+          workspace: binding.workspace, threadId: binding.threadId, agentId: binding.agentId,
+          turnId: binding.turnId, userInitiated: false, leased: true, immediate: false },
+        () => functions.interceptTool(binding.workspace, binding.threadId, input, binding.signal,
+          core, manager.functionModelHookSource(binding.runtimeAuthority)))
+    } : {}),
     closeThread: id => functions.closeThread(id), close: () => functions.close(),
     appendConversation: (key, id, ticket) => {
       appends++
@@ -243,9 +278,10 @@ async function fixture(options: { protected?: boolean; hook?: boolean;
     manager.close(); rmSync(root, { recursive: true, force: true })
   })
   return { root, manager, runtime, store, saver, host, completed, flushes,
-    database, threadId, incarnation, physicalRunId, controller, counts: () => ({ appends, loads, guardCalls }), guard, unbind,
+    authority: instance.authority, workspace,
+    database, threadId, turnId, incarnation, physicalRunId, controller, counts: () => ({ appends, loads, guardCalls }), guard, unbind,
     nativeInput,
-    async nextCandidate() {
+    async nextCandidate(withoutInput = false) {
       host.close(); await host.whenDrained(); runtime.close(); unbind(); instance.release()
       const nextInstance = manager.createRuntimeAuthority(physical)
       const nextUnbind = manager.bindThread({ ...physical, runtimeAuthority: nextInstance.authority })
@@ -254,7 +290,8 @@ async function fixture(options: { protected?: boolean; hook?: boolean;
       const nextRuntime = manager.captureFunctionNativeConversationRuntime(nextInstance.authority)
       if (!nextRuntime) throw Error("ACTUAL_NEXT_NATIVE_RUNTIME_REQUIRED")
       const nextHost = createFunctionConversationNativeHost({ runtime: nextRuntime, store,
-        nativeInput, agentId: "main", model: "actual-next-provider", flush })
+        nativeInput: withoutInput ? undefined : nativeInput,
+        agentId: "main", model: "actual-next-provider", flush })
       cleanups.push(async () => {
         nextHost.close(); await nextHost.whenDrained(); nextRuntime.close()
         nextUnbind(); nextInstance.release()
@@ -337,6 +374,109 @@ function assertCanonical(f: Awaited<ReturnType<typeof fixture>>, messages: BaseM
 }
 
 describe("actual native host factory through graph, resident Hook, protector and AppDB", () => {
+  it.each(["current", "reopened control store", "new ordinary tail", "new canonical tail", "same checkpoint content",
+    "same checkpoint event", "same checkpoint versions", "SQL content", "SQL role", "SQL metadata",
+    "other incarnation", "other branch", "public marker"])(
+    "authenticates a compacted native SQL prefix with %s", async change => {
+      const original = new HumanMessage({ id: randomUUID(), content: "original summary source" })
+      const f = await fixture({ hook: false, input: original })
+      const model = new ActualModel("generate", "missing")
+      const binding = Object.freeze({ ...f.runtime.binding, target: f.runtime.target.ref,
+        assertCurrent: f.runtime.assertCurrent.bind(f.runtime) })
+      const graph = createAgent({ model, middleware: [f.host.middleware,
+        createFunctionConversationMiddleware({ store: f.store,
+          capture: task => captureFunctionConversationTaskBinding(task, binding) })],
+        checkpointer: new FunctionConversationDeliveryBridge(f.store, () => binding).wrap(f.saver) })
+      f.host.install(graph.graph)
+      const conversation = wrapFunctionConversationInvocation(graph, { store: f.store, binding,
+        history: { saver: f.saver, assertCurrent: binding.assertCurrent,
+          register: f.host.registerHistorical }, onIntakeNotes: f.host.registerIntake })
+      await wrapFunctionConversationNativeInvocation(conversation, f.host, f.runtime)
+        .invoke({ messages: [original] }, { configurable: { thread_id: f.threadId } })
+      const config = { configurable: { thread_id: f.threadId, checkpoint_ns: "" } }
+      const before = await f.saver.getTuple(config)
+      if (!before) throw Error("ACTUAL_COMPACTION_SOURCE_REQUIRED")
+      const idleBinding = { ...binding, signal: f.controller.signal, assertCurrent: f.guard }
+      let control = f.manager.store
+      let saver = f.saver
+      const host = { saver: f.saver, store: f.store, control, database: f.database,
+        binding: idleBinding }
+      const source = await captureFunctionConversationCompactionSource(host, before.config)
+      const summary = new HumanMessage({ id: randomUUID(), content: "actual compacted context",
+        additional_kwargs: { lc_source: "summarization" } })
+      const checkpoint = { ...before.checkpoint, id: randomUUID(),
+        ts: new Date(Date.parse(before.checkpoint.ts) + 1000).toISOString(),
+        channel_values: { ...before.checkpoint.channel_values, messages: [summary] } }
+      const editor = createFunctionConversationIdleEditor(f.saver, f.store, idleBinding)
+      const saved = await editor.put(before.config, checkpoint, { source: "update", step: 99, parents: {} })
+      const expectedId = f.store.readRows(f.runtime.target.ref).at(-1)?.uuid
+      if (!expectedId) throw Error("ACTUAL_CANONICAL_BOUNDARY_REQUIRED")
+      if (change !== "public marker") await commitFunctionConversationCompactionBoundary(source, saved)
+      if (change === "reopened control store") {
+        control = new ModControlStore(join(f.root, "control.sqlite"))
+        cleanups.push(() => control.close())
+        await f.saver.close()
+        saver = new SqlJsSaver(join(f.root, "actual-checkpoint.sqlite"))
+        cleanups.push(() => saver.close())
+        await saver.initialize()
+      }
+      if (change === "same checkpoint content")
+        await f.saver.put(saved, { ...checkpoint,
+          channel_values: { ...checkpoint.channel_values, messages: [new HumanMessage("forged summary")] }
+        }, { source: "update", step: 100, parents: {} })
+      if (change === "same checkpoint event" || change === "same checkpoint versions")
+        await f.saver.put(saved, { ...checkpoint,
+          ...(change === "same checkpoint event" ? { channel_values: { ...checkpoint.channel_values,
+            _summarizationEvent: { cutoffIndex: 9999, summaryMessage: summary }
+          } } : { channel_versions: { ...checkpoint.channel_versions, messages: 9999 } })
+        }, { source: "update", step: 100, parents: {} })
+      if (change.startsWith("SQL ")) {
+        const column = change === "SQL content" ? "content_json"
+          : change === "SQL role" ? "role" : "name"
+        f.database.run(`UPDATE thread_messages SET ${column}=? WHERE thread_id=? AND message_id=?`,
+          [change === "SQL content" ? JSON.stringify("forged body")
+            : change === "SQL role" ? "user" : "forged", f.threadId, expectedId])
+      }
+      if (change === "new ordinary tail") appDb.upsertThreadMessages(f.threadId, [{
+        id: "actual-new-tail", role: "user", content: "new unsaved ordinary input", created_at: new Date()
+      }])
+      if (change === "new canonical tail") {
+        const next = await f.nextCandidate(true), nextModel = new ActualModel("generate", "missing")
+        // A real native producer with no Saver appends a genuinely newer canonical SQL row,
+        // leaving the already committed compacted checkpoint unchanged.
+        const nextGraph = createAgent({ model: nextModel, middleware: [next.host.middleware] })
+        next.host.install(nextGraph.graph)
+        await nextGraph.invoke({ messages: [new HumanMessage("new unsaved native task")] },
+          next.host.configure({ configurable: { thread_id: f.threadId } }))
+        expect(nextModel.requests).toHaveLength(1)
+      }
+      const current = await saver.getTuple(saved)
+      if (!current) throw Error("ACTUAL_COMPACTED_CHECKPOINT_REQUIRED")
+      const reading = readFunctionConversationCompactionBoundary({ ...host, control, saver,
+        ...(change === "other incarnation" ? { binding: { ...idleBinding,
+          target: { ...idleBinding.target, incarnation: { ...f.incarnation, token: randomUUID() } }
+        } } : change === "other branch" ? { binding: { ...idleBinding,
+          target: { ...idleBinding.target, branchId: randomUUID() }
+        } } : {}) }, current)
+      if (["same checkpoint content", "same checkpoint event", "same checkpoint versions",
+        "SQL content", "SQL role", "SQL metadata", "other incarnation", "other branch"].includes(change)) {
+        await expect(reading).rejects.toThrow()
+        expect(model.requests).toHaveLength(1)
+      } else if (change === "public marker") {
+        expect(await reading).toBeUndefined()
+        const canonical = appDb.getThreadMessagesByIds(f.threadId, [expectedId])[0]
+        expect(() => persistedMessageToRuntimeMessage(canonical)).toThrow("RECOVERY_REQUIRED")
+      } else {
+        expect(await reading).toBe(expectedId)
+        const tail = appDb.getThreadMessagesAfterAnyId(f.threadId, [expectedId])
+        if (change === "new canonical tail") {
+          expect(tail).toHaveLength(1)
+          expect(() => persistedMessageToRuntimeMessage(tail[0])).toThrow("RECOVERY_REQUIRED")
+        } else expect(tail.map(message => message.id)).toEqual(change === "new ordinary tail"
+          ? ["actual-new-tail"] : [])
+      }
+    })
+
   it.each([[undefined, 1], [undefined, 2], ["actual_completed_agent", 1],
     ["actual_completed_agent", 2]] as const)(
     "keeps Main UI actor %s for %s real HTTP chunks without changing their native names",
@@ -694,6 +834,148 @@ describe("actual native host factory through graph, resident Hook, protector and
     expect(f.counts().appends).toBe(2)
   })
 
+  it.each(["Stop", "PostSkillUse", "CompletionGate", "Resume"])(
+    "retains a genuine %s repair as protected plumbing without replaying the external input",
+    async trigger => {
+      const original = new HumanMessage({ id: randomUUID(), content: "external native-secret-canary" })
+      const f = await fixture({ protected: true, input: original })
+      const model = new ActualModel("generate", "missing")
+      const createNativeAgent = (host: typeof f.host, runtime: typeof f.runtime) => {
+        const binding = Object.freeze({ ...runtime.binding, target: runtime.target.ref,
+          assertCurrent: runtime.assertCurrent.bind(runtime) })
+        const delivery = new FunctionConversationDeliveryBridge(f.store, () => binding)
+        const graph = createAgent({ model, middleware: [host.middleware,
+          createFunctionConversationMiddleware({ store: f.store,
+            capture: task => captureFunctionConversationTaskBinding(task, binding) })],
+          checkpointer: delivery.wrap(f.saver) })
+        host.install(graph.graph)
+        // Match the production factory: prove and rebind checkpoint history before
+        // the native output wrapper accepts values owned by a replacement runtime.
+        const conversation = wrapFunctionConversationInvocation(graph, { store: f.store,
+          binding, history: { saver: f.saver,
+            assertCurrent: runtime.assertCurrent.bind(runtime), register: host.registerHistorical },
+          onIntakeNotes: host.registerIntake })
+        return wrapFunctionConversationNativeInvocation(conversation, host, runtime)
+      }
+      let current = { host: f.host, runtime: f.runtime }
+      let wrapped = createNativeAgent(current.host, current.runtime)
+      const config = { configurable: { thread_id: f.threadId } }
+      await wrapped.invoke({ messages: [original] }, config)
+      const initial = f.store.readReceipt(f.runtime.target.ref, original.id!)
+      if (trigger === "Resume") {
+        current = await f.nextCandidate(true)
+        wrapped = createNativeAgent(current.host, current.runtime)
+        const resumed = await wrapped.stream(null, { ...config, streamMode: "values" })
+        for await (const value of resumed) expect(value).toBeDefined()
+        expect(model.requests).toHaveLength(1)
+      }
+      let postCalls = 0, stopCalls = 0, gateCalls = 0
+      let revision: import("./skill-lifecycle/completion-hooks").CompletionRevisionInput | undefined
+      const outcome = await runCompletionHooksWithRevision({
+        threadId: f.threadId, workspacePath: f.root, turnId: f.turnId, runId: f.physicalRunId,
+        abortSignal: f.controller.signal, hookScope: createHookScope(),
+        getStopContext: () => ({ assistantResponse: "actual native answer" }),
+        runPostSkillUseHooks: async () => trigger === "PostSkillUse" && postCalls++ === 0
+          ? { exitCode: 2, stdout: "", stderr: "", blocked: true,
+            decision: "block", reason: "repair native-secret-canary" } : null,
+        runStopHooks: async () => ["Stop", "Resume"].includes(trigger) && stopCalls++ === 0
+          ? { exitCode: 0, stdout: "", stderr: "", blocked: false,
+            stopFeedbackContinuation: true, additionalContext: "repair native-secret-canary" } : null,
+        completionGate: async () => trigger === "CompletionGate" && gateCalls++ === 0
+          ? { decision: "revise", reason: "repair native-secret-canary" } : { decision: "pass" },
+        maxRevisionAttempts: 2, revisionPromptPrefix: "actual host repair",
+        sendNotice: () => undefined, sendError: value => { throw Error(value) },
+        runRevision: async (_prompt, signal, input) => {
+          expect(input).toBeDefined()
+          revision = input
+          if (trigger === "Resume") {
+            const stream = await wrapped.stream(input!, { ...config, signal, streamMode: "values" })
+            for await (const value of stream) expect(value).toBeDefined()
+          } else await wrapped.invoke(input!, { ...config, signal })
+        }
+      })
+      expect(outcome).toBe("passed")
+      expect(model.requests).toHaveLength(2)
+      expect(f.store.readReceipt(f.runtime.target.ref, original.id!)).toEqual(initial)
+      expect(revision).toBeDefined()
+      const message = revision!.messages[0]
+      expect(message.id).not.toBe(original.id)
+      const retained = model.requests[1].find(value => value.id === message.id)
+      expect(retained?.content).toContain("HOOK ")
+      expect(retained?.content).toContain("[REDACTED]")
+      expect(retained?.content).not.toContain("native-secret-canary")
+      const row = f.store.readReceipt(current.runtime.target.ref, message.id!)!
+      expect(row.nativePayload).toContain("[REDACTED]")
+      expect(row.nativePayload).not.toContain("native-secret-canary")
+      const columns = readFunctionConversationRawProjection(f.database, f.threadId, message.id!)!
+      expect(columns.content_json).toBe(JSON.stringify(""))
+      expect(readFunctionConversationPresentationDisposition(f.database, {
+        target: current.runtime.target.ref, row, threadId: f.threadId,
+        incarnation: f.incarnation, assertCurrent: f.guard
+      }, columns).kind).toBe("plumbing")
+      // Certificates expire after the original callback, and ordinary duplicate input
+      // still fails its original one-shot rule. Neither can cause another model call.
+      await expect(current.host.retainInput!(revision!, config)).rejects.toThrow(
+        "MODS_COMPLETION_REVISION_INPUT_INVALID")
+      if (trigger !== "Resume")
+        await expect(current.host.retainInput!({ messages: [original] }, config)).rejects.toThrow(
+          "MODS_CONVERSATION_NATIVE_INPUT_RETENTION_INVALID")
+      expect(model.requests).toHaveLength(2)
+    }
+  )
+
+  it.each(["drain", "poison"])(
+    "keeps the original input and physical work boundary during completion %s", async boundary => {
+      const gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
+      let inspect = false, drained = false, sourceDrain: Promise<void> | undefined
+      const original = new HumanMessage({ id: randomUUID(), content: "actual source before repair" })
+      const f = await fixture({ protected: true, input: original,
+        onInputGuard() {
+          if (inspect && !sourceDrain)
+            sourceDrain = f.host.whenDrained().then(() => { drained = true })
+        },
+        onFlush() {
+          if (inspect) { entered.resolve(); return gate.promise }
+          return undefined
+        } })
+      const config = { configurable: { thread_id: f.threadId } }
+      await f.host.retainInput({ messages: [original] }, config)
+      if (boundary === "poison")
+        await expect(f.host.retainInput({ messages: [original] }, config)).rejects.toThrow()
+      inspect = boundary === "drain"
+      let calls = 0
+      try {
+        await runCompletionHooksWithRevision({
+          threadId: f.threadId, workspacePath: f.root, turnId: f.turnId, runId: f.physicalRunId,
+          abortSignal: f.controller.signal, hookScope: createHookScope(),
+          getStopContext: () => ({}), runPostSkillUseHooks: async () => null,
+          runStopHooks: async () => calls++ === 0
+            ? { exitCode: 0, stdout: "", stderr: "", blocked: false,
+              stopFeedbackContinuation: true, additionalContext: "actual repair" } : null,
+          maxRevisionAttempts: 1, revisionPromptPrefix: "host",
+          sendNotice: () => undefined, sendError: value => { throw Error(value) },
+          runRevision: async (_prompt, _signal, input) => {
+            const pending = f.host.retainInput(input!, config)
+            void pending.catch(() => undefined)
+            if (boundary === "poison") {
+              await expect(pending).rejects.toThrow("MODS_CONVERSATION_NATIVE_INPUT_RETENTION_INVALID")
+              expect(f.store.readRows(f.runtime.target.ref)).toHaveLength(1)
+              return
+            }
+            await entered.promise
+            await new Promise(resolve => setImmediate(resolve))
+            expect(sourceDrain).toBeDefined()
+            expect(drained).toBe(false)
+            gate.resolve()
+            await pending
+            await sourceDrain
+            expect(drained).toBe(true)
+          }
+        })
+      } finally { gate.resolve() }
+    }
+  )
+
   it("reuses one acknowledged input on a true replacement runtime without replaying its Hook", async () => {
     const original = new HumanMessage({ id: randomUUID(), content: "actual saved handoff" })
     const f = await fixture({ input: original })
@@ -975,6 +1257,173 @@ describe("actual native host factory through graph, resident Hook, protector and
       expect(drained).toBe(true)
     } finally { gate.resolve(); await pending.catch(() => undefined) }
   })
+
+  it.each(["off", "off-on", "handler-fails"] as const)(
+    "finishes only the admitted native tool and original protected model after %s", async change => {
+      let enabled = true
+      const f = await fixture({ protected: true, optionalPolicy: true, fullLifecycle: true,
+        globalEnabled: () => enabled })
+      setModsManager(f.manager)
+      cleanups.push(() => setModsManager(undefined))
+      const model = new ActualModel("stream", "missing", { tool: true })
+      const boundary = createModModelBoundary(model, f.manager, f.authority,
+        { turnId: f.turnId, model: "actual-local-provider" })
+      let entered!: () => void, release!: () => void
+      const started = new Promise<void>(resolve => { entered = resolve })
+      const hold = new Promise<void>(resolve => { release = resolve })
+      let effects = 0
+      const oldGuestGuard = f.manager.captureFunctionRuntimeGuard(f.authority)
+      const graph = createAgent({ model: boundary, checkpointer: f.saver,
+        middleware: [f.host.middleware, createFunctionPeerMiddleware(
+          () => f.manager.functionPeerEndpoint(f.authority), () => f.authority, true),
+        createToolHookMiddleware({
+          runtimeAuthority: f.authority, workspacePath: f.workspace, threadId: f.threadId,
+          hookTurnId: f.turnId, hookScope: createHookScope(), resolveHooksForContext: () => []
+        })], tools: [tool(async ({ value }: { value: string }) => {
+          effects++
+          expect(value).toBe("real-args")
+          entered()
+          await hold
+          if (change === "handler-fails") throw Error("ORIGINAL_NATIVE_HANDLER_FAILURE")
+          return "native-secret-canary native answer"
+        }, { name: "actual_native_tool", description: "Actual pending native tool",
+          schema: z.object({ value: z.string() }) })] })
+      f.host.install(graph.graph)
+      const pending = graph.invoke({ messages: [new HumanMessage("original native question")] },
+        f.host.configure({ configurable: { thread_id: f.threadId }, signal: f.controller.signal }))
+      void pending.catch(() => undefined)
+      try {
+        await Promise.race([started, pending.then(() => {
+          throw Error("ORIGINAL_NATIVE_TOOL_DID_NOT_START")
+        })])
+        enabled = false
+        f.manager.invalidateAll()
+        expect(() => oldGuestGuard()).toThrow("MODS_CALL_SCOPE_CHANGED")
+        expect(() => f.manager.captureFunctionRuntimeGuard(f.authority))
+          .toThrow("MODS_CALL_SCOPE_CHANGED")
+        if (change === "off-on") {
+          enabled = true
+          f.manager.invalidateAll()
+          expect(() => oldGuestGuard()).toThrow("MODS_CALL_SCOPE_CHANGED")
+          expect(f.manager.functionUserScope(f.workspace, f.threadId)).toEqual({})
+        }
+        release()
+        if (change === "handler-fails") {
+          await expect(pending).rejects.toThrow("ORIGINAL_NATIVE_HANDLER_FAILURE")
+          expect(model.requests).toHaveLength(1)
+        } else {
+          const result = await pending
+          expect(model.requests).toHaveLength(2)
+          const nextTool = model.requests[1].find(ToolMessage.isInstance)
+          expect(nextTool?.tool_call_id).toBe("original-native-call")
+          expect(JSON.stringify(nextTool)).not.toContain("native-secret-canary")
+          expect(JSON.stringify(nextTool)).toContain("native answer")
+          const rows = assertCanonical(f, nativeMessages(result.messages))
+          expect(rows.filter(row => row.door === "tool-result")).toHaveLength(1)
+          for (const row of rows) {
+            const raw = readFunctionConversationRawProjection(f.database, f.threadId, row.uuid)
+            expect(JSON.stringify(raw)).not.toContain("native-secret-canary")
+          }
+          expect(f.counts().appends).toBe(1)
+        }
+        expect(effects).toBe(1)
+        expect(() => oldGuestGuard()).toThrow("MODS_CALL_SCOPE_CHANGED")
+      } finally { release(); await pending.catch(() => undefined) }
+    })
+
+  it.each(["continue", "required-halt", "source-changed"] as const)(
+    "keeps the once-only native PostToolUse lower and mandatory check after %s", async outcome => {
+      let enabled = true
+      const f = await fixture({ protected: true, optionalPolicy: true, fullLifecycle: true,
+        globalEnabled: () => enabled })
+      setModsManager(f.manager)
+      cleanups.push(() => setModsManager(undefined))
+      let entered!: () => void, release!: () => void
+      const started = new Promise<void>(resolve => { entered = resolve })
+      const hold = new Promise<void>(resolve => { release = resolve })
+      const calls = { ordinary: 0, required: 0, tool: 0 }
+      const server = createServer((request, response) => {
+        const actual = async () => {
+          if (request.url === "/ordinary") {
+            calls.ordinary++
+            entered()
+            await hold
+            response.end("{}")
+          } else {
+            calls.required++
+            response.end(JSON.stringify(outcome === "required-halt"
+              ? { continue: false, stopReason: "ORIGINAL_REQUIRED_POST_HALT" } : {}))
+          }
+        }
+        void actual().catch(error => response.destroy(error))
+      })
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
+      const address = server.address()
+      if (!address || typeof address === "string") throw Error("ACTUAL_HOOK_HTTP_ADDRESS_REQUIRED")
+      cleanups.push(async () => {
+        release()
+        server.closeAllConnections()
+        await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+      })
+      const plugin = { id: "native-required-post", name: "native-required-post", path: f.root,
+        enabled: true } as PluginMetadata
+      const common = { event: "PostToolUse" as const, enabled: true, type: "http" as const,
+        createdAt: "", updatedAt: "" }
+      const ordinary: HookConfig = { ...common, id: "actual-settings-post",
+        url: `http://127.0.0.1:${address.port}/ordinary` }
+      const required: PluginHookMetadata = { ...common, id: `plugin:${plugin.id}/gate`,
+        pluginId: plugin.id, pluginName: plugin.name, pluginEnabled: true,
+        pluginRoot: f.root, hookSourceRoot: f.root, hookSourceType: "plugin", hookPath: "hooks.json",
+        url: `http://127.0.0.1:${address.port}/required` }
+      const marker = join(f.root, "actual-required-source.txt")
+      writeFileSync(marker, "ORIGINAL_REQUIRED_SOURCE")
+      const token = issueRuntimePluginSourceToken({ plugin, mode: "legacy", threadId: f.threadId,
+        incarnationKey: f.incarnation.token ?? String(f.incarnation.legacyCreatedAt),
+        projectId: "actual-native-post", operationId: "native-post",
+        workspace: f.workspace, packageDigest: "b".repeat(64), stageId: "actual-post",
+        requiredHooks: ["gate"] }, () => {
+        if (readFileSync(marker, "utf8") !== "ORIGINAL_REQUIRED_SOURCE")
+          throw Error("ORIGINAL_REQUIRED_SOURCE_CHANGED")
+      }, f.guard)
+      const model = new ActualModel("stream", "missing", { tool: true })
+      const graph = createAgent({ model: createModModelBoundary(model, f.manager, f.authority,
+        { turnId: f.turnId, model: "actual-local-provider" }), checkpointer: f.saver,
+        middleware: [f.host.middleware, createFunctionPeerMiddleware(
+          () => f.manager.functionPeerEndpoint(f.authority), () => f.authority, true),
+        createToolHookMiddleware({ runtimeAuthority: f.authority,
+          workspacePath: f.workspace, threadId: f.threadId, hookTurnId: f.turnId,
+          hookScope: createHookScope(), resolveHooksForContext: event =>
+            event === "PostToolUse" ? [ordinary, required] : [required] })],
+        tools: [tool(async () => { calls.tool++; return "native-secret-canary actual result" },
+          { name: "actual_native_tool", description: "Actual original native result",
+            schema: z.object({ value: z.string() }) })] })
+      f.host.install(graph.graph)
+      const pending = withRuntimePluginSource(token, () => graph.invoke({ messages: [
+        new HumanMessage("actual pending native post hook") ] },
+      f.host.configure({ configurable: { thread_id: f.threadId }, signal: f.controller.signal })))
+      void pending.catch(() => undefined)
+      try {
+        await Promise.race([started, pending.then(() => {
+          throw Error("ORIGINAL_NATIVE_POST_HOOK_DID_NOT_START")
+        })])
+        enabled = false
+        f.manager.invalidateAll()
+        if (outcome === "source-changed") writeFileSync(marker, "REPLACED_REQUIRED_SOURCE")
+        release()
+        if (outcome === "continue") {
+          const result = await pending
+          expect(model.requests).toHaveLength(2)
+          expect(JSON.stringify(model.requests[1])).not.toContain("native-secret-canary")
+          assertCanonical(f, nativeMessages(result.messages))
+          expect(calls).toEqual({ ordinary: 1, required: 1, tool: 1 })
+        } else {
+          await expect(pending).rejects.toThrow(outcome === "required-halt"
+            ? "ORIGINAL_REQUIRED_POST_HALT" : "ORIGINAL_REQUIRED_SOURCE_CHANGED")
+          expect(model.requests).toHaveLength(1)
+          expect(calls).toEqual({ ordinary: 1, required: outcome === "required-halt" ? 1 : 0, tool: 1 })
+        }
+      } finally { release(); await pending.catch(() => undefined) }
+    })
 
   it.each([["generate", "missing"], ["generate", "reused"],
     ["stream", "missing"], ["stream", "reused"]] as const)(

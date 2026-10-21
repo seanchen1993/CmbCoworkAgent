@@ -96,6 +96,8 @@ export class FunctionConversationDeliveryBridge {
     recover(config: RunnableConfig, binding: FunctionConversationDeliveryBinding): Promise<void>
     captureRecovery(config: RunnableConfig, binding: FunctionConversationDeliveryBinding):
       Promise<FunctionConversationCheckpointMembershipProof>
+    readVerifiedRecovery(config: RunnableConfig, binding: FunctionConversationDeliveryBinding):
+      Promise<CheckpointTuple>
   } {
     if (!(saver instanceof SqlJsSaver)) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINTER_REQUIRED")
     const preparations = new WeakMap<FunctionConversationPreparedCheckpoint, {
@@ -190,7 +192,8 @@ export class FunctionConversationDeliveryBridge {
         return membershipAdmission(binding, state, cut)
       }, guard)
       if (!captured.proof) return undefined
-      return { committed: mintTuple(fixed, binding, captured.tuple, captured.proof, expected),
+      return { tuple: captured.tuple,
+        committed: mintTuple(fixed, binding, captured.tuple, captured.proof, expected),
         membership: captured.proof }
     }
     const consume = (prepared: FunctionConversationPreparedCheckpoint, config: RunnableConfig) => {
@@ -251,6 +254,13 @@ export class FunctionConversationDeliveryBridge {
         if (!captured?.committed) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_CHANGED")
         this.acknowledge(captured.committed)
         return captured.membership
+      },
+      readVerifiedRecovery: async (config, binding) => {
+        const captured = await mint(config, binding)
+        if (!captured?.committed || !captured.tuple)
+          throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_CHANGED")
+        this.acknowledge(captured.committed)
+        return captured.tuple
       }
     }
   }
@@ -279,13 +289,13 @@ export class FunctionConversationDeliveryBridge {
   }
 
   /** Host convenience adapter; only the actual SqlJsSaver implementation performs put. */
-  wrap(saver: SqlJsSaver): SqlJsSaver {
+  wrap(saver: SqlJsSaver, assertCurrent?: () => void, onCommitted?: () => void): SqlJsSaver {
     const observer = this.bindSaver(saver), methods = new Map<PropertyKey, unknown>()
     const put = async (config: RunnableConfig, checkpoint: Checkpoint, metadata: CheckpointMetadata) => {
       const prepared = observer.prepare(config, checkpoint)
       if (!prepared) return SqlJsSaver.prototype.put.call(saver, config, checkpoint, metadata)
       return SqlJsSaver.prototype.putWithCommitObserver.call(saver, config, checkpoint, metadata,
-        (receipt) => observer.observed(prepared, receipt))
+        (receipt) => observer.observed(prepared, receipt), assertCurrent, onCommitted)
     }
     return new Proxy(saver, { get(target, key) {
       if (key === "put") return put

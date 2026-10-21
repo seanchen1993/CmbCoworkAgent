@@ -7,6 +7,13 @@ import type { ClawProfile } from "../src/shared/mods/claw"
 import type { FlowDefinition, FlowRun, FlowStep, SavedFlow } from "../src/shared/mods/flows/types"
 import { compositionEnvironment } from "./support/mods-composition-fixtures"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
+import {
+  closeModsProgress,
+  openModsAdvancedSettings,
+  openModsFlowHistory,
+  openModsFlowPreset,
+  openModsProgress
+} from "./support/mods-sidebar-navigation"
 import { flowFormsPlugin } from "./support/mods-flow-forms-fixtures"
 import {
   createHostCheckProject,
@@ -322,30 +329,22 @@ async function main() {
     assert.equal(bound.active?.flow?.definition.schemaVersion, 2)
     await page.reload()
     await page.getByText("无插件宿主流程", { exact: true }).first().click()
-    await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-    await page.getByRole("button", { name: "DIY 流程", exact: true }).click()
-    await page.getByRole("button", { name: "host-chain · v1", exact: true }).click()
+    await openModsAdvancedSettings(page, "步骤管理")
+    await page.getByRole("button", { name: "host-chain", exact: true }).click()
     assert.equal(await page.getByLabel("所属插件", { exact: true }).count(), 0)
     await page.screenshot({ path: join(artifacts, "host-no-plugin-editor.png") })
-    await page.getByRole("button", { name: "到聊天启动此流程", exact: true }).click()
-    await page.getByRole("button", { name: "打开 Claw 工作台", exact: true }).click()
-    const workbench = page.getByRole("complementary", { name: "Claw 工作台", exact: true })
-    await workbench.getByRole("button", { name: "运行", exact: true }).click()
-    await workbench.getByText("使用独立流程模板。", { exact: false }).waitFor({ state: "visible" })
-    const flowSelector = workbench.getByLabel("对话使用的 DIY 流程", { exact: true })
+    await page.getByRole("button", { name: "去这段聊天使用", exact: true }).click()
+    const flowSelector = await openModsFlowPreset(page)
+    assert.equal(await flowSelector.inputValue(), `${chain.definition.id}:${chain.revision}`)
     const boundChoice = `claw:${bound.bindingRevision}`
     await flowSelector.selectOption(boundChoice)
     assert.equal(await flowSelector.inputValue(), boundChoice)
-    await page
-      .getByText("使用已应用 Claw 的流程副本。", { exact: false })
-      .waitFor({ state: "visible" })
-    await page.getByRole("button", { name: "选择发送方式", exact: true }).click()
-    await page.getByRole("button", { name: "执行流程", exact: true }).click()
+    await closeModsProgress(page)
     await page
       .locator("textarea.composer-textarea")
       .fill("执行没有所属插件的 Skill、MCP、模型和真实检查")
     const startedAt = performance.now()
-    await page.getByRole("button", { name: "发送并执行流程", exact: true }).click()
+    await page.getByRole("button", { name: "发送消息", exact: true }).click()
     const first = (
       await until(
         () => page.evaluate((id) => window.api.mods.flowRuns(id), threadId),
@@ -354,6 +353,7 @@ async function main() {
       )
     )[0]
     const pending = await waiting(first.id)
+    const taskPanel = await openModsProgress(page)
     durations.chatToApprovalMs = performance.now() - startedAt
     assert.equal(mcpCalls(), 1)
     dialogs.push(
@@ -393,14 +393,14 @@ async function main() {
     assert(readJournal(checkJournal).some((row) => row.kind === "unit" && row.passed))
     assert(readJournal(checkJournal).some((row) => row.kind === "e2e" && row.passed))
     await page.screenshot({ path: join(artifacts, "host-no-plugin-approval.png") })
-    await page.getByRole("button", { name: "同意并继续", exact: true }).click()
+    await taskPanel.getByRole("button", { name: "同意并继续", exact: true }).click()
     const completed = await terminal(pending.id, "complete")
     assert.equal(completed.flow.definition.schemaVersion, 2)
     assert(!("plugin" in completed.flow.definition))
     assert(readJournal(checkJournal).filter((row) => row.kind === "unit").length >= 2)
     assert(readJournal(checkJournal).filter((row) => row.kind === "e2e").length >= 2)
     assert.equal(mcpCalls(), 1)
-    await page.getByText("流程任务 · host-chain · 查看进度与结果", { exact: true }).click()
+    await openModsFlowHistory(page, pending.id)
     await page.screenshot({ path: join(artifacts, "host-no-plugin-complete.png") })
     pass(
       "Real chat runs Skill read/Pre/Post, MCP once, Agent, npm unit/e2e checks, user approval and final rechecks with no plugin owner"

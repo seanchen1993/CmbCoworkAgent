@@ -10,12 +10,17 @@ import AdmZip from "adm-zip"
 import type { ElectronApplication, Page } from "playwright"
 import { compositionEnvironment } from "./support/mods-composition-fixtures"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
+import { waitForAsyncEvidence } from "./support/async-evidence"
+import { openModsAdvancedSettings } from "./support/mods-sidebar-navigation"
 import {
   derivationContentIdentity,
   snapshotDerivationSource
 } from "../src/main/plugins/derivation-source"
 
 const root = resolve(__dirname, "..")
+const sourceDirectory = process.env.CMB_CONVERSATIONAL_SOURCE_DIR?.trim()
+assert(sourceDirectory, "Set CMB_CONVERSATIONAL_SOURCE_DIR to the reviewed original plugin")
+const source = resolve(sourceDirectory)
 assert(process.env.CMB_MODS_PACKAGED_DIR, "Explicit reviewed production package required")
 const packageDir = resolve(process.env.CMB_MODS_PACKAGED_DIR)
 const packageHash = () =>
@@ -225,8 +230,12 @@ async function main() {
         )
       ).enabled
     )
-    const source = "C:/ai/autobiz_kanban"
     const original = await snapshotDerivationSource(source)
+    evidence.source = {
+      name: original.name,
+      digest: original.digest,
+      files: original.files.length
+    }
     const archive = new AdmZip()
     for (const file of original.files) archive.addFile(file.path, file.bytes)
     const installation = await page.evaluate(
@@ -264,11 +273,13 @@ async function main() {
     )
     await page.reload()
     await page.getByText("描述需求制作与节点组合验收", { exact: true }).first().click()
-    await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-    await page.getByRole("button", { name: "添加功能", exact: true }).click()
+    await openModsAdvancedSettings(page, "灵件管理")
     await page
       .getByRole("navigation", { name: "灵件工作区" })
-      .getByRole("button", { name: "自己制作" })
+      .getByRole("button", { name: "对话创作", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "高级：手动组装、源码与历史版本", exact: true })
       .click()
     await page.getByRole("button", { name: "从已有插件创建", exact: true }).click()
     const panel = page.getByRole("region", { name: "从已有插件创建", exact: true })
@@ -438,6 +449,10 @@ async function main() {
     await panel.getByRole("button", { name: "新插件已启用", exact: true }).waitFor()
     await panel.getByRole("button", { name: "新建项目", exact: true }).click()
     await page
+      .getByRole("dialog", { name: "项目模式使用引导", exact: true })
+      .getByRole("button", { name: "知道了，不再提示", exact: true })
+      .click()
+    await page
       .getByRole("region", { name: "为新插件创建项目" })
       .getByRole("button", { name: "填写新项目" })
       .click()
@@ -583,8 +598,7 @@ async function main() {
     })
     await page.reload()
     await page.getByText(directoryThreadTitle, { exact: true }).first().click()
-    await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-    await page.getByRole("button", { name: "常用搭配", exact: true }).click()
+    await openModsAdvancedSettings(page, "搭配管理")
     const nativeDirectory = page.getByRole("region", { name: "已安装的原生插件", exact: true })
     const originalCard = nativeDirectory.getByRole("article", {
       name: originalPlugin.name,
@@ -628,24 +642,36 @@ async function main() {
       )
     await originalCard.getByRole("button", { name: "管理插件", exact: true }).click()
     await page.getByRole("button", { name: "已启用", exact: true }).click()
-    await page.waitForFunction(
-      async (id) =>
-        (await window.api.plugins.list()).find((item) => item.id === id)?.enabled === false,
-      originalPlugin.id
+    const disabledPlugin = await waitForAsyncEvidence(
+      () =>
+        page!.evaluate(
+          async (id) => (await window.api.plugins.list()).find((item) => item.id === id),
+          originalPlugin.id
+        ),
+      (plugin) => plugin?.enabled === false,
+      "original plugin disabled after management",
+      30_000
     )
-    await page.getByRole("button", { name: "常用搭配", exact: true }).click()
+    assert.equal(disabledPlugin?.enabled, false)
+    await openModsAdvancedSettings(page, "搭配管理")
     await originalCard.getByRole("button", { name: "管理并启用插件", exact: true }).waitFor()
     assert(
       await originalCard.getByRole("button", { name: "查看项目流程", exact: true }).isDisabled()
     )
     await originalCard.getByRole("button", { name: "管理并启用插件", exact: true }).click()
     await page.getByRole("button", { name: "已禁用", exact: true }).click()
-    await page.waitForFunction(
-      async (id) =>
-        (await window.api.plugins.list()).find((item) => item.id === id)?.enabled === true,
-      originalPlugin.id
+    const enabledPlugin = await waitForAsyncEvidence(
+      () =>
+        page!.evaluate(
+          async (id) => (await window.api.plugins.list()).find((item) => item.id === id),
+          originalPlugin.id
+        ),
+      (plugin) => plugin?.enabled === true,
+      "original plugin enabled after management",
+      30_000
     )
-    await page.getByRole("button", { name: "常用搭配", exact: true }).click()
+    assert.equal(enabledPlugin?.enabled, true)
+    await openModsAdvancedSettings(page, "搭配管理")
     await originalCard.getByRole("button", { name: "管理插件", exact: true }).waitFor()
     assert(
       await originalCard.getByRole("button", { name: "查看项目流程", exact: true }).isEnabled()
@@ -660,6 +686,8 @@ async function main() {
       derivedProjectIds: options,
       originalHasNoBoundProject: true,
       originalHooksUnchanged: true,
+      originalDisabled: disabledPlugin?.enabled === false,
+      originalEnabled: enabledPlugin?.enabled === true,
       retainedDirectoryRefreshesAfterManagement: true
     }
     assert.equal((await snapshotDerivationSource(source)).digest, original.digest)

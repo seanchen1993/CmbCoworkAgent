@@ -1,6 +1,7 @@
-import { HumanMessage, AIMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages"
+import { HumanMessage, AIMessage, SystemMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
 import type { Checkpoint, CheckpointTuple } from "@langchain/langgraph-checkpoint"
-import { Send } from "@langchain/langgraph"
+import { Send, messagesStateReducer } from "@langchain/langgraph"
+import { createPatchToolCallsMiddleware } from "deepagents"
 import { Worker } from "node:worker_threads"
 import { fileURLToPath } from "node:url"
 import { build, type Metafile } from "esbuild"
@@ -32,6 +33,7 @@ import { captureFunctionConversationNativeInputPresentation,
   registerFunctionConversationNativeHumanProtection } from
   "../agent/function-conversation-native-human-presentation"
 import { SqlJsSaver } from "./sqljs-saver"
+import { readOrdinaryToolDisplayCoverage } from "./function-conversation-ordinary-display"
 import { FunctionConversationDeliveryBridge, FUNCTION_CONVERSATION_CHANNEL } from
   "./function-conversation-delivery"
 import { prepareFunctionConversationCanonicalDisplay, withFunctionConversationCanonicalDisplay,
@@ -216,7 +218,8 @@ async function fixture(options: { enhanced?: boolean; protected?: boolean; fresh
 }
 
 async function checkpointFixture(intent?: "blank" | "plumbing", withOlderRow = false,
-  nativeControls = false, ordinaryAlias = false, completeCanonical = false) {
+  nativeControls = false, ordinaryAlias = false, completeCanonical = false, legacyMetadata = false,
+  ordinaryTool?: ToolMessage) {
   const f = await fixture(intent ? { fresh: true, protected: false, intent } : { enhanced: true })
   if (withOlderRow) appDb.upsertThreadMessages(f.threadId, [{ id: "ordinary-before", role: "assistant",
     content: "ordinary older reply", created_at: new Date(50) }])
@@ -238,11 +241,23 @@ async function checkpointFixture(intent?: "blank" | "plumbing", withOlderRow = f
       id: randomUUID(), ...(ordinaryAlias ? {
         additional_kwargs: { cmb_visible_user_message: "ordinary visible request" }
       } : {}) }),
-      saved.result.message, new AIMessage({ content: "ordinary answer", id: randomUUID() })],
+      saved.result.message, new AIMessage({ content: "ordinary answer", id: randomUUID(),
+        ...(legacyMetadata ? { response_metadata: { system_fingerprint: undefined,
+          service_tier: undefined, nested: { absent: undefined, retained: "metadata" },
+          values: [undefined, { absent: undefined }] } } : {}) })],
       [FUNCTION_CONVERSATION_CHANNEL]: { version: 1, logicalSessionId: target.logicalSessionId,
         conversationId: target.conversationId, branchId: target.branchId, frontier: 0 } },
     channel_versions: { messages: 1, [FUNCTION_CONVERSATION_CHANNEL]: 1 }, versions_seen: {} }
   if (completeCanonical) checkpoint.channel_values.messages = [saved.result.message]
+  if (ordinaryTool) {
+    if (typeof ordinaryTool.content !== "string") throw Error("PLAIN_TOOL_TEXT_REQUIRED")
+    checkpoint.channel_values.messages = [saved.result.message, ordinaryTool]
+    appDb.upsertThreadMessages(f.threadId, [{ id: ordinaryTool.id!, role: "tool",
+      content: ordinaryTool.content, name: ordinaryTool.name, tool_call_id: ordinaryTool.tool_call_id,
+      provider_source_id: ordinaryTool.id, provider_occurrence: 1, content_mode: "snapshot",
+      recovery_integrity: "verified", created_at: new Date(100),
+      start_at: new Date(90), end_at: new Date(110) }])
+  }
   if (nativeControls) {
     checkpoint.channel_values.__pregel_tasks = [[], [new Send("model_request", {
       messages: checkpoint.channel_values.messages, jumpTo: undefined,
@@ -270,6 +285,36 @@ async function checkpointFixture(intent?: "blank" | "plumbing", withOlderRow = f
   const verify = (witnesses: Parameters<typeof verifyCanonicalThreadDisplayWitnesses>[1]) =>
     verifyCanonicalThreadDisplayWitnesses(f.threadId, witnesses, current)
   return { ...f, saved, saver, saverPath, current, incarnation, checkpoint, config, prepare, verify }
+}
+
+async function actualRepairFixture() {
+  const patch = createPatchToolCallsMiddleware(), before = patch.beforeAgent
+  if (typeof before !== "function") throw Error("ACTUAL_NATIVE_REPAIR_HOOK_REQUIRED")
+  const dangling = new AIMessage({ id: randomUUID(), content: "", tool_calls: [{
+    name: "actual_native_task", id: randomUUID(), args: {} }] })
+  const update: unknown = await Reflect.apply(before, patch, [{ messages: [dangling] }, {}])
+  if (!update || typeof update !== "object" || !("messages" in update) ||
+    !Array.isArray(update.messages)) throw Error("ACTUAL_NATIVE_REPAIR_UPDATE_REQUIRED")
+  const messages = messagesStateReducer([], update.messages)
+  const repair = messages.find(ToolMessage.isInstance)
+  if (!repair?.id) throw Error("ACTUAL_NATIVE_REPAIR_MESSAGE_REQUIRED")
+  const f = await checkpointFixture(undefined, false, false, false, false, false, repair)
+  return { ...f, repair }
+}
+
+function readActualRepair(f: Awaited<ReturnType<typeof actualRepairFixture>>,
+  admitted = vi.fn(), guard = f.current, changeResponse?: (value: unknown) => void) {
+  const client = new CheckpointRuntimeProjectionClient(async () => new Worker(runtimeWorkerPath))
+  cleanups.push(() => client.close())
+  return client.readLatestTuple(f.saverPath, f.threadId, "", {
+    messageLimit: 1, messageByteBudget: 64 * 1024,
+    nativeDisplay: { messageDatabasePath: paths.database, threadId: f.threadId,
+      workspace: f.runtime.target.ref.workspace, incarnation: f.incarnation,
+      checkpointId: f.checkpoint.id }, assertSource: f.current,
+    verifyDisplay: value => {
+      changeResponse?.(value)
+      return verifyCanonicalCheckpointWorkerDisplay(value, f.threadId, f.checkpoint.id, guard, admitted)
+    } })
 }
 
 function nativeControlMessages(checkpoint: Checkpoint) {
@@ -660,6 +705,36 @@ describe("canonical Human display from actual Saver and native Worker sources", 
     await expect(f.prepare()).rejects.toThrow()
   })
 
+  it.each(["rewritten", { lc: 2, type: "undefined", extra: true }])(
+    "verifies JsonPlus undefined mixed history and rejects metadata rewrite: %j", async changed => {
+      const f = await checkpointFixture(undefined, false, false, false, false, true)
+      const exact = { configurable: { ...f.config.configurable, checkpoint_id: f.checkpoint.id } }
+      const raw = await f.saver.getTuple(exact)
+      const messages = raw?.checkpoint.channel_values.messages
+      if (!Array.isArray(messages) || !(messages[2] instanceof AIMessage))
+        throw Error("ACTUAL_LEGACY_METADATA_REQUIRED")
+      expect(Object.hasOwn(messages[2].response_metadata, "system_fingerprint")).toBe(true)
+      expect(messages[2].response_metadata.system_fingerprint).toBeUndefined()
+      expect(messages[2].response_metadata.values).toEqual([undefined, { absent: undefined }])
+      const client = new CheckpointRuntimeProjectionClient(async () => new Worker(runtimeWorkerPath))
+      cleanups.push(() => client.close())
+      const read = () => client.readLatestTuple(f.saverPath, f.threadId, "", {
+        messageLimit: 3, messageByteBudget: 64 * 1024,
+        nativeDisplay: { messageDatabasePath: paths.database, threadId: f.threadId,
+          workspace: f.runtime.target.ref.workspace, incarnation: f.incarnation,
+          checkpointId: f.checkpoint.id }, assertSource: f.current,
+        verifyDisplay: value => verifyCanonicalCheckpointWorkerDisplay(value, f.threadId,
+          f.checkpoint.id, f.current) })
+      const displayed = await read()
+      expect(JSON.stringify(displayed)).toContain("visible [REDACTED]")
+      expect(JSON.stringify(displayed)).not.toContain("private engine context")
+      // A same-address rewrite is still compared against the original full membership digest.
+      messages[2].response_metadata.service_tier = changed
+      await f.saver.put(f.config, { ...f.checkpoint, channel_values: {
+        ...f.checkpoint.channel_values, messages } }, { source: "loop", step: 1, parents: {} })
+      await expect(read()).rejects.toThrow("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    })
+
   it("does not borrow a UUID collection when actual checkpoint membership was deleted", async () => {
     const f = await checkpointFixture()
     f.database.run("DELETE FROM function_conversation_checkpoint_members WHERE uuid=?", [f.uuid])
@@ -681,6 +756,97 @@ describe("canonical Human display from actual Saver and native Worker sources", 
     expect(admitted).toHaveBeenCalledTimes(complete ? 1 : 0)
     expect(f.database.exec("SELECT 1 FROM legacy_checkpoint_transcript_migrations WHERE thread_id=?",
       [f.threadId])[0]?.values ?? []).toEqual([])
+  })
+
+  it("bootstraps a durable ordinary native repair beside canonical messages after Saver reopen", async () => {
+    const f = await actualRepairFixture()
+    await f.saver.close()
+    const reopened = new SqlJsSaver(f.saverPath)
+    cleanups.push(() => reopened.close())
+    const tuple = await reopened.getTuple(f.config)
+    const messages = tuple?.checkpoint.channel_values.messages
+    if (!Array.isArray(messages)) throw Error("ACTUAL_REOPENED_REPAIR_REQUIRED")
+    expect(messages).toHaveLength(2)
+    expect(messages[1]).toBeInstanceOf(ToolMessage)
+    const before = JSON.stringify(appDb.getThreadMessages(f.threadId))
+    const admitted = vi.fn()
+    const client = new CheckpointRuntimeProjectionClient(async () => new Worker(runtimeWorkerPath))
+    cleanups.push(() => client.close())
+    await client.readLatestTuple(f.saverPath, f.threadId, "", {
+      messageLimit: 1, messageByteBudget: 64 * 1024,
+      nativeDisplay: { messageDatabasePath: paths.database, threadId: f.threadId,
+        workspace: f.runtime.target.ref.workspace, incarnation: f.incarnation,
+        checkpointId: f.checkpoint.id }, assertSource: f.current,
+      verifyDisplay: value => verifyCanonicalCheckpointWorkerDisplay(value, f.threadId,
+        f.checkpoint.id, f.current, admitted) })
+    expect(admitted).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(appDb.getThreadMessages(f.threadId))).toBe(before)
+    expect(f.database.exec("SELECT 1 FROM legacy_checkpoint_transcript_migrations WHERE thread_id=?",
+      [f.threadId])[0]?.values ?? []).toEqual([])
+    expect(f.store.readRows(f.runtime.target.ref)).toHaveLength(1)
+  })
+
+  it.each(["role", "content_json", "name", "tool_call_id", "status", "recovery_integrity",
+    "missing", "fragment", "native-metadata"])(
+    "does not bootstrap an uncovered ordinary repair: %s", async change => {
+      const f = await actualRepairFixture(), admitted = vi.fn()
+      if (change === "missing") f.database.run(
+        "DELETE FROM thread_messages WHERE thread_id=? AND message_id=?", [f.threadId, f.repair.id!])
+      else if (change === "fragment") f.database.run(
+        "INSERT INTO thread_message_fragments(thread_id,message_id,content_text,created_at) VALUES(?,?,?,?)",
+        [f.threadId, f.repair.id!, "unproven fragment", 123])
+      else if (change === "native-metadata") {
+        const changed = new ToolMessage({ id: f.repair.id, content: f.repair.content,
+          name: f.repair.name, tool_call_id: f.repair.tool_call_id,
+          response_metadata: { unrepresented: "not durable" } })
+        await f.saver.put(f.config, { ...f.checkpoint, channel_values: {
+          ...f.checkpoint.channel_values, messages: [f.saved.result.message, changed] } },
+        { source: "loop", step: 1, parents: {} })
+        await expect(readActualRepair(f, admitted)).rejects.toThrow("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+        expect(admitted).not.toHaveBeenCalled()
+        return
+      } else f.database.run(`UPDATE thread_messages SET ${change}=? WHERE thread_id=? AND message_id=?`,
+        [change === "content_json" ? JSON.stringify("changed") :
+          change === "recovery_integrity" ? 0 : change === "role" ? "assistant" : "changed",
+          f.threadId, f.repair.id!])
+      await readActualRepair(f, admitted)
+      expect(admitted).not.toHaveBeenCalled()
+    })
+
+  it("rejects forged ordinary coverage even when its SQL row matches the forged payload", async () => {
+    const f = await actualRepairFixture(), admitted = vi.fn()
+    await expect(readActualRepair(f, admitted, f.current, value => {
+      if (!value || typeof value !== "object" || !("__cmb_ordinary_display_coverage" in value) ||
+        !Array.isArray(value.__cmb_ordinary_display_coverage)) throw Error("ACTUAL_COVERAGE_REQUIRED")
+      const entry: unknown = value.__cmb_ordinary_display_coverage[0]
+      if (!entry || typeof entry !== "object" || !("payload" in entry) ||
+        typeof entry.payload !== "string" || !("columnsDigest" in entry)) throw Error("ACTUAL_PAYLOAD_REQUIRED")
+      const data: unknown = JSON.parse(entry.payload)
+      if (!data || typeof data !== "object" || !("data" in data) || !data.data ||
+        typeof data.data !== "object" || !("content" in data.data)) throw Error("ACTUAL_DATA_REQUIRED")
+      data.data.content = "forged worker body"
+      const forgedPayload = JSON.stringify(data)
+      entry.payload = forgedPayload
+      f.database.run("UPDATE thread_messages SET content_json=? WHERE thread_id=? AND message_id=?",
+        [JSON.stringify(data.data.content), f.threadId, f.repair.id!])
+      const forged = readOrdinaryToolDisplayCoverage(f.database, f.threadId, forgedPayload)
+      if (!forged) throw Error("ACTUAL_FORGED_COLUMNS_REQUIRED")
+      entry.columnsDigest = forged.columnsDigest
+    })).rejects.toThrow("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+    expect(admitted).not.toHaveBeenCalled()
+  })
+
+  it("rechecks every ordinary SQL column after the last source callback", async () => {
+    const f = await actualRepairFixture(), admitted = vi.fn()
+    let guards = 0
+    await expect(readActualRepair(f, admitted, () => {
+      f.current()
+      if (++guards === 2) f.database.run(
+        "UPDATE thread_messages SET created_at=created_at+1 WHERE thread_id=? AND message_id=?",
+        [f.threadId, f.repair.id!])
+    })).rejects.toThrow()
+    expect(guards).toBeGreaterThanOrEqual(2)
+    expect(admitted).not.toHaveBeenCalled()
   })
 
   it("verifies the canonical workspace behind an equivalent metadata path", async () => {
@@ -1089,6 +1255,7 @@ describe("canonical Human display from actual Saver and native Worker sources", 
       response_metadata: { provider: "actual", index: 1 } })
     const bytes = [
       '{"first":{"alpha":1,"beta":{"left":true,"right":["one","two"]}},"second":2}',
+      '{"literal":{"lc":2,"type":"undefined"},"array":[{"lc":2,"type":"undefined"}]}',
       JSON.stringify(native.toDict()), serializeFunctionConversationNativeMessage(native)
     ]
     for (const original of bytes) {

@@ -7,6 +7,8 @@ import { getThreadCore } from "../db"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import { captureRuntimePluginSourceAuthorityGuard, currentStageDebugSourcePolicy } from "../plugins/runtime-source-scope"
 import type { FunctionConversationGraphBinding } from "../agent/mods-conversation"
+import { currentFunctionConversationOriginalNativeWork } from
+  "../agent/function-conversation-native-node"
 import type { FunctionSessionAppendTicket } from "./v2/session-append-ticket"
 import type { FunctionSessionAppendResult } from "../../shared/mods/v2/session-append"
 import {
@@ -75,6 +77,7 @@ import type {
   ModWorkspaceStatus
 } from "../../shared/mods/types"
 import { encodeModJson, parseModUi } from "../../shared/mods/validation"
+import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import { readPluginManifest } from "../plugins/manifest"
 import { ModControlStore, type ModGrant } from "./control-store"
 import { compileMod, readModApiVersion, type CompiledMod } from "./loader"
@@ -160,6 +163,82 @@ import {
 const nativePolicyThrowIfAborted = AbortSignal.prototype.throwIfAborted
 const nativePolicyMapGet = Map.prototype.get, nativePolicyWeakGet = WeakMap.prototype.get
 const composerOwnerWeakSet = WeakMap.prototype.set
+const nativePhysicalMapSet = Map.prototype.set, nativePhysicalMapDelete = Map.prototype.delete
+const nativePhysicalMapClear = Map.prototype.clear
+const nativePhysicalMapValues = Map.prototype.values
+const nativePhysicalIteratorNext = Object.getPrototypeOf(new Map().values()).next
+const nativePolicyPublish = ManagedModPolicy.prototype.publish
+interface NativePhysicalOwner {
+  readonly binding: ModThreadBinding
+  withdrawn: boolean
+  assertCurrent(): void
+}
+interface NativeWithdrawal {
+  readonly authority: ModRuntimeAuthority
+  readonly runtime: FunctionNativeConversationRuntime
+  withdrawn: boolean
+}
+interface NativePhysicalManager {
+  readonly bindings: Map<string, NativePhysicalOwner>
+  readonly runtimes: Map<FunctionNativeConversationRuntime, NativeWithdrawal>
+}
+// Independent of the guest binding registry. Neither the writer nor records are class fields.
+const nativePhysicalManagers = new WeakMap<ModsManager, NativePhysicalManager>()
+const nativeWithdrawalSources = new WeakMap<FunctionNativeConversationRuntime, NativeWithdrawal>()
+/** A withdrawal receipt still has to prove the original physical owner before using this. */
+export function isFunctionNativeGuestWithdrawalError(error: unknown): boolean {
+  return (error instanceof ModError || error instanceof ModFunctionError) &&
+    ["MODS_CALL_SCOPE_CHANGED", "MODS_CALL_SCOPE_EXPIRED", "MODS_SCOPE_CHANGED",
+      "MODS_THREAD_CONTEXT_EXPIRED", "MODS_SESSION_CLOSED"].includes(error.code)
+}
+function nativePhysicalManager(manager: ModsManager): NativePhysicalManager {
+  const value = Reflect.apply(nativePolicyWeakGet, nativePhysicalManagers, [manager]) as
+    NativePhysicalManager | undefined
+  if (!value) nativePolicyChanged()
+  return value
+}
+function nativePhysicalOwner(manager: ModsManager, key: string): NativePhysicalOwner | undefined {
+  return Reflect.apply(nativePolicyMapGet, nativePhysicalManager(manager).bindings, [key])
+}
+/** Only a genuine registered main runtime can certify its original protected native tail. */
+export function readFunctionConversationNativeWithdrawal(runtime: object): Readonly<{
+  readonly authority: ModRuntimeAuthority
+  isWithdrawn(): boolean
+  publish<T>(value: T, callId?: string, signal?: AbortSignal): Promise<T>
+}> | undefined {
+  const source = Reflect.apply(nativePolicyWeakGet, nativeWithdrawalSources, [runtime]) as
+    NativeWithdrawal | undefined
+  if (!source || source.runtime !== runtime) return undefined
+  return Object.freeze({ authority: source.authority,
+    isWithdrawn() {
+      const admission = source.runtime.capturePolicy()
+      admission.assertCurrent()
+      return source.withdrawn
+    },
+    async publish<T>(value: T, callId?: string, signal?: AbortSignal): Promise<T> {
+      const admission = source.runtime.capturePolicy()
+      const policy = admission.value.identity as ManagedModPolicy
+      admission.assertCurrent()
+      signal?.throwIfAborted()
+      const result: T = admission.value.protected
+        ? await Reflect.apply(nativePolicyPublish, policy, [value, callId, signal]) : value
+      admission.assertCurrent()
+      signal?.throwIfAborted()
+      return result
+    }
+  })
+}
+function currentWithdrawnNativeWork(manager: ModsManager, workspace: string,
+  authority?: ModRuntimeAuthority) {
+  const work = currentFunctionConversationOriginalNativeWork()
+  if (!work) return undefined
+  const source = Reflect.apply(nativePolicyMapGet, nativePhysicalManager(manager).runtimes,
+    [work.runtime]) as NativeWithdrawal | undefined
+  if (!source || !source.withdrawn || source.authority.workspace !== workspace ||
+    (authority && source.authority !== authority)) return undefined
+  work.assertCurrent()
+  return Object.freeze({ ...work, authority: source.authority })
+}
 interface NativePolicySettings { enabled: boolean; policy: boolean; epoch: number }
 interface NativePolicyManagerData {
   readonly registry: ModRuntimeAuthorities
@@ -395,6 +474,7 @@ export class ModsManager {
 
   functionModelHookSource(authority?: ModRuntimeAuthority) {
     if (!authority) return undefined
+    if (currentWithdrawnNativeWork(this, authority.workspace, authority)) return undefined
     this.captureFunctionRuntimeGuard(authority)()
     return this.functionCreators.get(authority)
   }
@@ -845,6 +925,7 @@ export class ModsManager {
   functionPeerEndpoint(
     authority: ModRuntimeAuthority | undefined
   ): FunctionPeerConsumer | undefined {
+    if (authority && currentWithdrawnNativeWork(this, authority.workspace, authority)) return undefined
     return authority && this.peerConsumers.get(authority)
   }
 
@@ -935,6 +1016,10 @@ export class ModsManager {
     const epoch = this.runtimeEpochs.get(authority)
     const assertCurrent = (): void => {
       authority.assertLive()
+      const native = nativePolicyManager(this).readRuntime(authority)
+      const withdrawn = native && nativeBindingApply(nativePolicyWeakGet,
+        nativeWithdrawalSources, [native]) as NativeWithdrawal | undefined
+      if (withdrawn?.withdrawn) throw new ModError("MODS_CALL_SCOPE_CHANGED")
       if (this.runtimeAuthorities.get(authority) !== authority ||
         (epoch !== undefined && this.config(authority.workspace).epoch !== epoch) ||
         (shared && (this.sharedAgentOwners.get(authority) !== shared ||
@@ -1072,18 +1157,20 @@ export class ModsManager {
       this.functionNativeConversationRuntimes.has(authority))
       throw new ModError("MODS_CONVERSATION_REGISTRATION_CONFLICT")
     this.preparingFunctionConversations.add(authority)
-    const physicalBinding = this.bindings.get(`${authority.threadId}:${authority.agentId}`)
+    const physicalKey = `${authority.threadId}:${authority.agentId}`
+    const physical = nativePhysicalOwner(this, physicalKey)
+    const physicalBinding = physical?.binding
     let native: ReturnType<typeof captureFunctionConversationNativeRun> | undefined
     let adopted = false
     try {
       const assertBinding = () => {
-        if (!physicalBinding || physicalBinding.commandOnly ||
+        if (!physical || !physicalBinding || physicalBinding.commandOnly ||
           physicalBinding.runtimeAuthority !== authority ||
-          this.bindings.get(`${authority.threadId}:${authority.agentId}`) !== physicalBinding)
+          nativePhysicalOwner(this, physicalKey) !== physical)
           throw new ModError("MODS_CALL_SCOPE_CHANGED")
         this.assertRuntimeBinding(physicalBinding)
         physicalBinding.signal?.throwIfAborted()
-        physicalBinding.assertLive?.()
+        physical.assertCurrent()
       }
       const bindingData = physicalBinding && nativeBindingApply(nativePolicyWeakGet,
         nativePhysicalBindings, [physicalBinding]) as NativePhysicalBindingData | undefined
@@ -1150,7 +1237,8 @@ export class ModsManager {
     assertRecord()
     const binding = captured.binding
     const physicalKey = `${authority.threadId}:${authority.agentId}`
-    const physicalBinding = original.readBinding(physicalKey)
+    const physical = nativePhysicalOwner(this, physicalKey)
+    const physicalBinding = physical?.binding
     const assertCaptured = () => {
       original.assertFields()
       assertRecord()
@@ -1173,6 +1261,7 @@ export class ModsManager {
       signal: actual.signal, assertCurrent: guard })
     let closed = false
     let detach = () => {}
+    let registeredRuntime: FunctionNativeConversationRuntime | undefined = undefined
     const assertCurrent = () => {
       if (closed) throw new ModError("MODS_CALL_SCOPE_CHANGED")
       // This private target checks the exact backend guard above, then Store and authority.
@@ -1182,6 +1271,8 @@ export class ModsManager {
     const close = () => {
       if (closed) return
       closed = true
+      if (registeredRuntime)
+        nativeBindingApply(nativePhysicalMapDelete, nativePhysicalManager(this).runtimes, [registeredRuntime])
       detach()
       try {
         coordinator.registry.closeOwner(owner)
@@ -1194,6 +1285,11 @@ export class ModsManager {
     const lifecycle = this.functionLifecycle
     const append = lifecycle?.appendConversation?.bind(lifecycle)
     const creationEpoch = this.runtimeEpochs.get(authority)
+    let baselineProtected: boolean | undefined
+    let baselineSettings: NativePolicySettings | undefined
+    let baselineEpoch: ReturnType<typeof captureNativePolicyEpoch> | undefined
+    const withdrawal: NativeWithdrawal = { authority,
+      get runtime() { return runtime }, withdrawn: false }
     const destination = Object.freeze({ conversation: target.ref,
       threadId: authority.threadId, incarnation: actual.incarnation, assertCurrent })
     const runtime: FunctionNativeConversationRuntime = Object.freeze({
@@ -1206,12 +1302,19 @@ export class ModsManager {
       capturePolicy: () => {
         assertCurrent()
         original.assertFields()
+        if (withdrawal.withdrawn && baselineProtected === undefined) nativePolicyChanged()
         const policy = original.policy
         // Inspect the actual deployment before config/protects can read its required flag.
         const initial = captureFunctionConversationNativePolicyData(policy)
         const settings = this.config(authority.workspace)
+        if (baselineSettings && baselineSettings !== settings) nativePolicyChanged()
+        baselineEpoch?.assertCurrent()
         const settingEpoch = captureNativePolicyEpoch(settings), epoch = settingEpoch.epoch
-        const protectedOutput = this.protects(authority.workspace)
+        const protectedOutput = withdrawal.withdrawn && baselineProtected !== undefined
+          ? baselineProtected : this.protects(authority.workspace)
+        baselineProtected ??= protectedOutput
+        baselineSettings ??= settings
+        baselineEpoch ??= settingEpoch
         const value: FunctionNativeProtectionPolicy = Object.freeze({ identity: policy,
           protected: protectedOutput, digest: initial.digest, epoch, deployment: initial.deployment })
         const assertTail = () => {
@@ -1220,7 +1323,8 @@ export class ModsManager {
           Reflect.apply(nativePolicyThrowIfAborted, target.signal, [])
           assertCaptured()
           if (original.readRuntime(authority) !== runtime ||
-            original.readBinding(physicalKey) !== physicalBinding || !physicalBinding ||
+            nativePhysicalOwner(this, physicalKey) !== physical || !physicalBinding ||
+            (!withdrawal.withdrawn && original.readBinding(physicalKey) !== physicalBinding) ||
             !isModRuntimeAuthorityDataCurrentForRegistry(original.registry, authority) ||
             original.policy !== policy || original.readSettings(authority.workspace) !== settings)
             throw new ModError("MODS_CALL_SCOPE_CHANGED")
@@ -1233,7 +1337,7 @@ export class ModsManager {
           assertCurrent()
           // No original policy data enters JSON.stringify or a capability callback.
           assertTail()
-          if (this.protects(authority.workspace) !== protectedOutput)
+          if (!withdrawal.withdrawn && this.protects(authority.workspace) !== protectedOutput)
             throw new ModError("MODS_CALL_SCOPE_CHANGED")
           // The configured global switch can synchronously retire the original owner.
           assertTail()
@@ -1247,7 +1351,7 @@ export class ModsManager {
       dispatch: async (ticket: FunctionSessionAppendTicket): Promise<FunctionSessionAppendResult> => {
         assertCurrent()
         ticket.assertCurrent()
-        const eligible = creationEpoch === this.config(authority.workspace).epoch &&
+        const eligible = !withdrawal.withdrawn && creationEpoch === this.config(authority.workspace).epoch &&
           this.isEnabled(authority.workspace) && append !== undefined
         let result: FunctionSessionAppendResult
         if (eligible) {
@@ -1264,6 +1368,10 @@ export class ModsManager {
       }
     })
     this.functionNativeConversationRuntimes.set(authority, runtime)
+    registeredRuntime = runtime
+    nativeBindingApply(nativePhysicalMapSet, nativePhysicalManager(this).runtimes,
+      [runtime, withdrawal])
+    nativeBindingApply(composerOwnerWeakSet, nativeWithdrawalSources, [runtime, withdrawal])
     return runtime
   }
 
@@ -1840,6 +1948,18 @@ export class ModsManager {
     this.functionTurns.invalidate(undefined, threadId)
     this.invalidateFunctionReads(threadId)
     this.runtimeAuthorities.closeThread(threadId)
+    const physicals = nativePhysicalManager(this).bindings
+    const owners = nativeBindingApply(nativePhysicalMapValues, physicals, []) as
+      IterableIterator<NativePhysicalOwner>
+    while (true) {
+      const item = nativeBindingApply(nativePhysicalIteratorNext, owners, []) as
+        IteratorResult<NativePhysicalOwner>
+      if (item.done) break
+      const binding = item.value.binding
+      if (binding.threadId === threadId)
+        nativeBindingApply(nativePhysicalMapDelete, physicals,
+          [`${binding.threadId}:${binding.agentId ?? "main"}`])
+    }
     for (const [key, binding] of this.bindings)
       if (binding.threadId === threadId) this.bindings.delete(key)
     for (const [key, entry] of this.mcpBindings)
@@ -2001,6 +2121,9 @@ export class ModsManager {
   /** Pin a model's tool catalogue across search, description hooks and provider awaits. */
   captureFunctionToolCatalogGuard(workspace: string, threadId: string): () => void {
     workspace = this.workspaceKey(workspace)
+    const native = currentWithdrawnNativeWork(this, workspace)
+    if (native?.node === "model_request" && native.authority.threadId === threadId)
+      return native.assertCurrent
     const enabled = this.isEnabled(workspace)
     const agentId = functionCallAgent(workspace, threadId)
     const key = `${threadId}:${agentId}`
@@ -2044,14 +2167,16 @@ export class ModsManager {
     core: FunctionStreamOptions["core"],
     signal: AbortSignal
   ): Promise<ModHookStream> {
-    const assertRuntime = this.captureFunctionRuntimeGuard(authority)
-    if (!this.isActive(authority.workspace))
+    const native = currentWithdrawnNativeWork(this, authority.workspace, authority)
+    const nativeModel = native?.node === "model_request" ? native : undefined
+    const assertRuntime = nativeModel?.assertCurrent ?? this.captureFunctionRuntimeGuard(authority)
+    if (!nativeModel && !this.isActive(authority.workspace))
       throw new ModError("MODS_MODEL_OPERATION_UNSUPPORTED")
     const epoch = this.config(authority.workspace).epoch
     const assertCurrent = (): void => {
       assertRuntime()
       if (
-        !this.isActive(authority.workspace) ||
+        (!nativeModel && !this.isActive(authority.workspace)) ||
         this.config(authority.workspace).epoch !== epoch ||
         this.runtimeAuthorities.get(authority) !== authority
       )
@@ -2130,7 +2255,8 @@ export class ModsManager {
       cleanup: cleanupInOwnerScope
     }
     try {
-      const lifecycle = this.isEnabled(authority.workspace) ? this.functionLifecycle?.turnStep : undefined
+      const lifecycle = !nativeModel && this.isEnabled(authority.workspace)
+        ? this.functionLifecycle?.turnStep : undefined
       const safeInput = lifecycle ? input : await inOwnerScope(async () => {
         assertCurrent()
         const value = await this.publish(authority.workspace, input, undefined, activeSignal)
@@ -2214,9 +2340,11 @@ export class ModsManager {
     signal: AbortSignal
   ): Promise<ModObject> {
     workspace = this.workspaceKey(workspace)
+    const native = currentWithdrawnNativeWork(this, workspace)
     const authority = functionCallAuthority(workspace, threadId)
     const epoch = this.config(workspace).epoch
-    const assertRuntime = authority ? this.captureFunctionRuntimeGuard(authority) : () => {}
+    const assertRuntime = native?.node === "model_request" && native.authority.threadId === threadId
+      ? native.assertCurrent : authority ? this.captureFunctionRuntimeGuard(authority) : () => {}
     const guard = () => {
       signal.throwIfAborted()
       assertRuntime()
@@ -2246,7 +2374,43 @@ export class ModsManager {
     getModCallContext()?.assertLive?.()
     if (!this.isEnabled(workspace) || !this.functionLifecycle?.classicEvent)
       return core(input, signal)
-    return this.functionLifecycle.classicEvent(workspace, threadId, event, input, signal, core)
+    const work = currentFunctionConversationOriginalNativeWork()
+    const source = work?.node === "tools" && !getModCallContext()
+      ? readFunctionConversationNativeWithdrawal(work.runtime) : undefined
+    if (!source || source.authority.workspace !== workspace || source.authority.threadId !== threadId)
+      return this.functionLifecycle.classicEvent(workspace, threadId, event, input, signal, core)
+    // The original native hook is a once-only lower layer. Retiring its optional guest fold
+    // cannot replay it or suppress the mandatory native hook checks that follow this fold.
+    let lower: Promise<ModObject> | undefined
+    const once = (received: ModObject): Promise<ModObject> => {
+      if (lower) return lower
+      let resolve!: (value: ModObject) => void, reject!: (error: unknown) => void
+      lower = new Promise<ModObject>((yes, no) => { resolve = yes; reject = no })
+      void lower.catch(() => undefined)
+      const actual = async () => {
+        work!.assertCurrent()
+        signal.throwIfAborted()
+        const result = await core(received, signal)
+        work!.assertCurrent()
+        signal.throwIfAborted()
+        return result
+      }
+      void actual().then(resolve, reject)
+      return lower
+    }
+    try {
+      const result = await this.functionLifecycle.classicEvent(workspace, threadId, event,
+        input, signal, once)
+      work!.assertCurrent()
+      if (source.isWithdrawn()) return lower ?? once(input)
+      return result
+    } catch (error) {
+      if (!isFunctionNativeGuestWithdrawalError(error)) throw error
+      work!.assertCurrent()
+      signal.throwIfAborted()
+      if (!source.isWithdrawn()) throw error
+      return lower ?? once(input)
+    }
   }
 
   async promptComposition(
@@ -2258,8 +2422,10 @@ export class ModsManager {
     core: import("../../shared/mods/v2/prompt-composition").FunctionPromptCore
   ): Promise<ModObject> {
     const key = this.workspaceKey(workspace)
+    const native = currentWithdrawnNativeWork(this, key)
     const authority = functionCallAuthority(key, threadId)
-    const originalGuard = authority ? this.captureFunctionRuntimeGuard(authority) : () => {}
+    const originalGuard = native?.node === "model_request" && native.authority.threadId === threadId
+      ? native.assertCurrent : authority ? this.captureFunctionRuntimeGuard(authority) : () => {}
     const epoch = this.config(key).epoch
     const assertRuntime = () => {
       signal.throwIfAborted()
@@ -2586,6 +2752,7 @@ export class ModsManager {
   }
 
   isEnabled(workspace: string): boolean {
+    if (currentWithdrawnNativeWork(this, this.canonical.get(workspace) ?? workspace)) return false
     const cached = this.settings.get(this.canonical.get(workspace) ?? workspace)
     if (cached?.enabled === false) return false
     const enabled = this.globalEnabled() && this.config(this.workspaceKey(workspace)).enabled
@@ -2646,6 +2813,22 @@ export class ModsManager {
 
   /** Abort and discard all legacy Mod runtime state after the application switch changes. */
   invalidateAll(): void {
+    // Only this host transaction certifies withdrawal. Merely changing the global callback
+    // remains a policy/source mismatch. A later enable never revives this guest generation.
+    nativePolicyManager(this).assertFields()
+    if (!this.globalEnabled()) {
+      const records = nativeBindingApply(nativePhysicalMapValues,
+        nativePhysicalManager(this).runtimes, []) as IterableIterator<NativeWithdrawal>
+      while (true) {
+        const item = nativeBindingApply(nativePhysicalIteratorNext, records, []) as
+          IteratorResult<NativeWithdrawal>
+        if (item.done) break
+        item.value.withdrawn = true
+        const authority = item.value.authority
+        const physical = nativePhysicalOwner(this, `${authority.threadId}:${authority.agentId}`)
+        if (physical?.binding.runtimeAuthority === authority) physical.withdrawn = true
+      }
+    }
     this.peerInbox.close()
     this.agentInstances.clear()
     this.functionTurns.invalidate()
@@ -2776,7 +2959,7 @@ export class ModsManager {
       this.store.close()
       throw error
     }
-    const assertFields = captureNativePolicyFields(this, ["runtimeAuthorities", "bindings",
+    const assertFields = captureNativePolicyFields(this, ["runtimeAuthorities", "bindings", "globalEnabled",
       "settings", "functionNativeConversationRuntimes", "functionConversationNativeRuns",
       "functionConversationRuntimes", "functionConversationSharedScopes",
       "functionConversationSharedProducers", "policy"])
@@ -2786,6 +2969,8 @@ export class ModsManager {
     const bindingRuntimes = this.functionConversationRuntimes
     const sharedScopes = this.functionConversationSharedScopes
     const sharedProducers = this.functionConversationSharedProducers
+    nativeBindingApply(composerOwnerWeakSet, nativePhysicalManagers,
+      [this, { bindings: new Map(), runtimes: new Map() } satisfies NativePhysicalManager])
     nativePolicyManagers.set(this, Object.freeze({ registry, policy: this.policy, assertFields,
       readBinding: (key: string) => Reflect.apply(nativePolicyMapGet, bindings, [key]),
       readSettings: (key: string) => Reflect.apply(nativePolicyMapGet, settings, [key]),
@@ -2853,6 +3038,7 @@ export class ModsManager {
   }
 
   isActive(workspace: string): boolean {
+    if (currentWithdrawnNativeWork(this, this.canonical.get(workspace) ?? workspace)) return false
     if (this.policy.required) {
       if (currentStageDebugSourcePolicy()) throw Error("PROJECT_STAGE_DEBUG_MODS_UNSUPPORTED")
       return true
@@ -2867,6 +3053,8 @@ export class ModsManager {
   }
 
   protects(workspace: string): boolean {
+    const native = currentWithdrawnNativeWork(this, this.canonical.get(workspace) ?? workspace)
+    if (native) return native.runtime.capturePolicy().value.protected
     if (this.policy.required) {
       if (currentStageDebugSourcePolicy()) throw Error("PROJECT_STAGE_DEBUG_MODS_UNSUPPORTED")
       return true
@@ -2880,6 +3068,12 @@ export class ModsManager {
   }
 
   async publish<T>(workspace: string, value: T, callId?: string, signal?: AbortSignal): Promise<T> {
+    const native = currentWithdrawnNativeWork(this, this.canonical.get(workspace) ?? workspace)
+    if (native) {
+      const policy = readFunctionConversationNativeWithdrawal(native.runtime)
+      if (!policy) nativePolicyChanged()
+      return policy.publish(value, callId, signal)
+    }
     return this.protects(workspace) ? this.policy.publish(value, callId, signal) : value
   }
 
@@ -3095,6 +3289,17 @@ export class ModsManager {
       }
     }
     this.bindings.set(key, entry)
+    const physicals = nativePhysicalManager(this).bindings
+    const physical: NativePhysicalOwner = { binding: entry, withdrawn: false, assertCurrent: () => {
+      if (nativePhysicalOwner(this, key) !== physical ||
+        (!physical.withdrawn && this.bindings.get(key) !== entry)) nativePolicyChanged()
+      this.assertRuntimeBinding(binding)
+      binding.signal?.throwIfAborted()
+      binding.assertLive?.()
+      if (nativePhysicalOwner(this, key) !== physical ||
+        (!physical.withdrawn && this.bindings.get(key) !== entry)) nativePolicyChanged()
+    } }
+    nativeBindingApply(nativePhysicalMapSet, physicals, [key, physical])
     // The ordinary LocalSandbox owner has no host callback. Certify only that actual factory
     // input; an arbitrary supplied assertLive (including an empty function) keeps both fences.
     const authority = binding.runtimeAuthority
@@ -3135,7 +3340,8 @@ export class ModsManager {
       const record: NativePhysicalBindingData = Object.freeze({ manager: this, registry: original.registry,
         authority, eligible, assertDataCurrent: () => {
           original.assertFields()
-          if (!eligible() || original.readBinding(key) !== entry || entry.commandOnly ||
+          if (!eligible() || nativePhysicalOwner(this, key) !== physical ||
+            (!physical.withdrawn && original.readBinding(key) !== entry) || entry.commandOnly ||
             entry.runtimeAuthority !== authority || entry.workspace !== authority.workspace ||
             binding.threadId !== authority.threadId || binding.turnId !== authority.turnId ||
             (binding.agentId ?? "main") !== authority.agentId ||
@@ -3147,6 +3353,8 @@ export class ModsManager {
     }
     return () => {
       if (this.bindings.get(key) === entry) this.bindings.delete(key)
+      if (nativePhysicalOwner(this, key) === physical)
+        nativeBindingApply(nativePhysicalMapDelete, physicals, [key])
     }
   }
 
@@ -5418,6 +5626,9 @@ export class ModsManager {
     this.functionTurns.close()
     this.invalidateFunctionReads()
     this.runtimeAuthorities.close()
+    const physical = nativePhysicalManager(this)
+    nativeBindingApply(nativePhysicalMapClear, physical.bindings, [])
+    nativeBindingApply(nativePhysicalMapClear, physical.runtimes, [])
     this.functionLifecycle?.close()
     this.functionToolCatalogs.clear()
     this.mcpBindings.clear()

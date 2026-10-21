@@ -6,6 +6,8 @@ import { join, resolve } from "node:path"
 import { createRequire } from "node:module"
 import { _electron, type ElectronApplication, type Page } from "playwright"
 import AdmZip from "adm-zip"
+import { openModsSettings } from "./support/mods-sidebar-navigation"
+import { waitForAsyncEvidence } from "./support/async-evidence"
 import { verifyApplicationCompletionSettings } from "./support/mods-application-policy-e2e"
 import { verifyPolicyUsability } from "./support/mods-policy-usability-e2e"
 import { MODS_STARTER_FILES } from "../src/shared/mods/v2/starter-template"
@@ -96,15 +98,7 @@ async function boot() {
   })
   page = app.windows()[0]
   await page.waitForFunction(() => Boolean(window.api?.mods))
-  await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-  const advanced = page.getByRole("button", { name: "高级自定义", exact: true })
-  if ((await advanced.getAttribute("aria-expanded")) === "false") await advanced.click()
-  await page.getByRole("button", { name: "灵件管理", exact: true }).click()
-  await page
-    .getByRole("navigation", { name: "灵件工作区" })
-    .getByRole("button", { name: "我已添加", exact: true })
-    .click()
-  await page.locator("[data-mods-settings]").waitFor()
+  await openModsSettings(page)
 }
 async function main() {
   const watchdog = setTimeout(() => {
@@ -356,16 +350,19 @@ async function main() {
       ({ id, command }) => window.api.mods.enqueue(id, command, { text: "" }),
       { id: threadId, command: ownCommand }
     )
-    await page!.waitForFunction(
-      async ({ id, jobId }) =>
-        (await window.api.mods.jobs(id)).some(
-          (item) => item.id === jobId && item.state === "succeeded"
-        ),
-      { id: threadId, jobId: job.id }
+    // Keep the terminal response that satisfied the wait as the acceptance evidence.
+    const completed = await waitForAsyncEvidence(
+      () => page!.evaluate(async ({ id, jobId }) =>
+        (await window.api.mods.jobs(id)).find(item => item.id === jobId),
+      { id: threadId, jobId: job.id }),
+      current => {
+        if (current && ["failed", "cancelled"].includes(current.state))
+          throw Error(`Starter command ended in ${current.state}`)
+        return current?.state === "succeeded"
+      },
+      "downloaded starter command terminal success"
     )
-    const completed = (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).find(
-      (item) => item.id === job.id
-    )!
+    assert(completed?.state === "succeeded")
     const resultDiagnostic = {
       enqueued: job,
       completed,

@@ -1,0 +1,13 @@
+{
+  "name": "unit-knowledge-collector",
+  "version": "1.0.0",
+  "description": "Deterministic business knowledge collector integration fixture",
+  "userConfig": {
+    "knowledgeRoot": {
+      "type": "directory",
+      "title": "Business knowledge directory",
+      "description": "Explicit read-only business facts used by the collector",
+      "required": true
+    }
+  }
+}

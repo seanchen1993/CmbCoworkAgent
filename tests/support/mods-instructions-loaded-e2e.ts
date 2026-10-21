@@ -145,11 +145,31 @@ export async function verifyInstructionsLoaded(
   for (const action of ["cancel", "revoke"] as const) {
     const start = requests.length,
       closed = closedStalls()
+    const beforeAudit = new Set(
+      (await page.evaluate((id) => window.api.mods.audit(id), threadId)).map(row => row.callId)
+    )
     await send("[stall] original main task")
     await until(
       async () => requests.length >= start + 2,
       "instruction check reaches real review transport"
     )
+    type ProtocolRequest = {
+      messages: Array<{ role: string; content: unknown }>
+      tools?: unknown[]
+      max_tokens?: number
+    }
+    const phase = requests.slice(start) as ProtocolRequest[]
+    assert.equal(phase.length, 2, "one original main model and one instruction observer")
+    const native = phase.filter(request => Array.isArray(request.tools))
+    const observer = phase.filter(request => !Array.isArray(request.tools))
+    assert.equal(native.length, 1)
+    assert.equal(observer.length, 1)
+    assert.equal(native[0].messages.at(-1)?.role, "user")
+    assert.equal(native[0].messages.at(-1)?.content, "[stall] original main task")
+    assert(JSON.stringify(native[0].messages).includes("INSTRUCTION_SOURCE_ACTUAL"))
+    assert.equal(observer[0].messages.at(-1)?.role, "user")
+    assert.equal(observer[0].messages.at(-1)?.content, "[stall] instructions review")
+    assert.equal(observer[0].max_tokens, 64)
     if (action === "cancel")
       await page.getByRole("button", { name: "停止生成", exact: true }).click()
     else
@@ -159,14 +179,53 @@ export async function verifyInstructionsLoaded(
       )
     await until(
       async () =>
-        closedStalls() >= closed + 2 &&
-        (await page.getByRole("button", { name: "停止生成", exact: true }).count()) === 0,
-      "instruction review cancels transport"
+        closedStalls() === closed + (action === "cancel" ? 2 : 1) &&
+        (await page.getByRole("button", { name: "停止生成", exact: true }).count()) ===
+          (action === "cancel" ? 0 : 1),
+      action === "cancel"
+        ? "main cancellation closes both original and observer transports"
+        : "revocation closes the instruction observer while original native chat remains running"
     )
     assert.equal(requests.length, start + 2)
+    await until(async () => (await page.evaluate((id) => window.api.mods.audit(id), threadId))
+      .some(row => !beforeAudit.has(row.callId) && row.toolId === "model.complete" &&
+        row.status !== "running" && row.status !== "not_started"),
+    "the closed instruction observer publishes its actual execution settlement")
+    const receipts = (await page.evaluate((id) => window.api.mods.audit(id), threadId))
+      .filter(row => !beforeAudit.has(row.callId) && row.toolId === "model.complete")
+    assert.equal(receipts.length, 1, "the observer makes one real model call without retries")
+    assert.equal(receipts[0].status, "unknown", "an interrupted observer cannot report model success")
+    assert.deepEqual(receipts[0].modelUsage, {
+      modelRef: "custom:mods-model-fixture", outputTokenLimit: 64
+    }, "the stalled observer retains its real limit without inventing final token usage")
+    const closedAtAction = closedStalls() - closed
+    assert.equal(closedAtAction, action === "cancel" ? 2 : 1)
     assert(!(await logs()).some((row) => row.text === "LATE_INSTRUCTIONS_FINISH"))
+    if (action === "revoke") {
+      assert.equal((await page.evaluate((id) => window.api.mods.status(id), threadId))
+        .functionMods?.find(row => row.name === "instructions-loaded")?.state, "needs-approval")
+      assert(!(await page.evaluate((id) => window.api.mods.commands(id), threadId))
+        .some(row => row.command === "instructions-loaded"))
+      // Revoking an observer never cancels its native parent. Stop that deliberately stalled
+      // native transport explicitly, after proving the observer was already closed on its own.
+      await page.getByRole("button", { name: "停止生成", exact: true }).click()
+      await until(async () => closedStalls() === closed + 2 &&
+        (await page.getByRole("button", { name: "停止生成", exact: true }).count()) === 0,
+      "explicit native stop closes only the remaining main transport after observer revocation")
+      assert.equal(requests.length, start + 2)
+    }
+    writeFileSync(join(artifacts, `instructions-loaded-${action}-evidence.json`), JSON.stringify({
+      requestPhases: ["native-stall", "instruction-observer-stall"],
+      observerStatus: receipts[0].status,
+      modelUsage: receipts[0].modelUsage,
+      closedAtAction,
+      explicitNativeStopAfterRevoke: action === "revoke",
+      closedAfterCleanup: closedStalls() - closed
+    }, null, 2))
     pass(
-      `${action} during actual instruction review closes both observation and main transports without a late observation`
+      action === "cancel"
+        ? "cancel during actual instruction review closes both observation and main transports without a late observation"
+        : "revoke closes the instruction observer without cancelling native chat; explicit native stop cleans up its transport"
     )
   }
 }

@@ -59,7 +59,8 @@ async function main() {
     await page.goto("http://tour.local/")
     await page.addStyleTag({ content: css })
     await page.addScriptTag({ content: script.outputFiles[0].text })
-    const tour = page.getByRole("region", { name: "新功能导览", exact: true })
+    const tour = page.getByRole("region", { name: "任务示例演练", exact: true })
+    await page.getByRole("button", { name: "任务示例演练", exact: true }).click()
     await tour.waitFor()
     for (let i = 0; i < 12; i++) {
       await page.keyboard.press("Tab")
@@ -106,7 +107,7 @@ async function main() {
     ])
     assert.equal(await page.getByLabel("原草稿").inputValue(), "保留原内容")
     assert.equal(await page.evaluate(() => localStorage.getItem("devclaw.sparks-tour.v1")), "seen")
-    await page.getByRole("button", { name: "新功能导览", exact: true }).click()
+    await page.getByRole("button", { name: "任务示例演练", exact: true }).click()
     await page.keyboard.press("Escape")
     await tour.waitFor({ state: "detached" })
     assert.deepEqual(
@@ -117,15 +118,15 @@ async function main() {
     assert.equal(await page.getByLabel("原草稿").inputValue(), "保留原内容")
     assert.equal(
       await page
-        .getByRole("button", { name: "看看这页怎么用" })
+        .getByRole("button", { name: "本页任务示例" })
         .evaluate((node) => node === document.activeElement),
       true
     )
     await page.reload()
     await page.addStyleTag({ content: css })
     await page.addScriptTag({ content: script.outputFiles[0].text })
-    await page.getByRole("button", { name: "新功能导览", exact: true }).waitFor()
-    assert.equal(await tour.count(), 0, "Existing seen state must prevent upgrade popup")
+    await page.getByRole("button", { name: "任务示例演练", exact: true }).waitFor()
+    assert.equal(await tour.count(), 0, "Task examples must stay opt-in after reload")
     assert.deepEqual(errors, [])
     console.log(
       "PASS three real task previews, keyboard handoff, 375px, original draft and seen state"

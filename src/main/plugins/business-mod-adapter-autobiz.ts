@@ -15,6 +15,7 @@ import {
   EXTENSION_BOARD_API_VERSION
 } from "../../shared/project-runtime"
 import { AUTOBIZ_CONTEXT_OUTPUT } from "../../shared/project-runtime/autobiz-handoff"
+import { isDeepStrictEqual } from "node:util"
 
 /** Compatibility projection for admitted legacy board kernels. It does not execute their code. */
 export const autobizBusinessModAdapter: BusinessModAssemblyAdapter = {
@@ -27,6 +28,68 @@ export const autobizBusinessModAdapter: BusinessModAssemblyAdapter = {
   },
   ownsKernelIdentity: isReviewedAutobizKernelIdentity,
   reservedPaths: (kernel) => [kernel.boardConfigPath!, "devclaw.stage-checks.json"],
+  assertModularizationSource({ kernel, snapshot, modules }) {
+    const boardPath = kernel.boardConfigPath!
+    const file = snapshot.files.find((file) => file.path === boardPath)
+    if (!file) throw Error("PLUGIN_MODULARIZATION_RESOURCE_LOSS")
+    const board = businessModObject(JSON.parse(file.bytes.toString("utf8")))
+    assertPortableBusinessBoard(board)
+    const workflow = businessModObject(board.workflow)
+    const rows = (value: unknown) => {
+      if (!Array.isArray(value) || value.length > 64)
+        throw Error("PLUGIN_MODULARIZATION_WORKFLOW_MAPPING_REQUIRED")
+      return value.map(businessModObject)
+    }
+    const sequences = [
+      rows(workflow.nodes),
+      ...rows(workflow.dynamicStages ?? []).map((stage) => rows(stage.nodes))
+    ]
+    const original = sequences.flat()
+    const dynamicIds = new Set(
+      sequences
+        .slice(1)
+        .flat()
+        .map((node) => node.id)
+    )
+    // Initial migration retains each original route's order. Later explicit composition uses
+    // project(), without this migration-only assertion, and may select a different valid order.
+    for (const sequence of sequences) {
+      const ids = sequence.map((node) => node.id)
+      const selected = modules.filter((mod) => ids.includes(mod.id)).map((mod) => mod.id)
+      if (!isDeepStrictEqual(ids, selected)) throw Error("PLUGIN_MODULARIZATION_RUNTIME_CHANGED")
+    }
+    // Preserve the complete node, rather than its original field subset: adding a new Hook,
+    // runtime policy or routing field can also change behavior. Dynamic nodes alone require the
+    // reviewed executor's phase/checkpoint normalization; no other author-added fields are allowed.
+    if (
+      original.length !== modules.length ||
+      new Set(original.map((node) => node.id)).size !== original.length ||
+      original.some((node) => {
+        const matches = modules.filter((mod) => mod.id === node.id)
+        if (matches.length !== 1) return true
+        const proposed = { ...matches[0].node }
+        if (dynamicIds.has(node.id)) {
+          if (node.group === undefined && proposed.group === node.phase) delete proposed.group
+          const checkpoints = [
+            `${node.checkpointPrefix}_in_progress`,
+            `${node.checkpointPrefix}_done`
+          ]
+          if (
+            node.checkpoints === undefined &&
+            isDeepStrictEqual(proposed.checkpoints, checkpoints)
+          )
+            delete proposed.checkpoints
+        }
+        return !isDeepStrictEqual(node, proposed)
+      })
+    )
+      throw Error("PLUGIN_MODULARIZATION_RUNTIME_CHANGED")
+    if (projectBusinessModWorkflow(modules, workflow).requiresFixedWorkflowAcknowledgement)
+      throw Error("PLUGIN_MODULARIZATION_WORKFLOW_MAPPING_REQUIRED")
+    // project() spreads the original board and workflow, and only replaces reviewed derived routing.
+    // The retained candidate still contains the exact original config bytes.
+    return [boardPath]
+  },
   project(context) {
     const { kernel, modules, verifiedArtifactIds } = context
     if (modules.some((mod) => mod.host !== undefined))

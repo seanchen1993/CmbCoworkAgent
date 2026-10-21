@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type RefObject } from "react"
 import { BookOpen, X } from "lucide-react"
+import { Arrow as PopoverArrow } from "@radix-ui/react-popover"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import type { UiGuideConfig } from "../../../../shared/ui-guides"
 
@@ -19,16 +20,33 @@ interface AnchoredGuideProps {
   rootRef: RefObject<HTMLElement | null>
   steps: readonly AnchoredGuideStep[]
   request?: number
+  autoStart?: boolean
+  hideTrigger?: boolean
+  dialogLabel?: string
+  returnFocusRef?: RefObject<HTMLElement | null>
+  onStepChange?(step: AnchoredGuideStep): void
 }
 
 export function AnchoredGuide(props: AnchoredGuideProps) {
   return <ScopedAnchoredGuide key={`${props.config.guideId}:${props.config.revision}`} {...props} />
 }
 
-function ScopedAnchoredGuide({ active, config, rootRef, steps, request = 0 }: AnchoredGuideProps) {
+function ScopedAnchoredGuide({
+  active,
+  config,
+  rootRef,
+  steps,
+  request = 0,
+  autoStart = true,
+  hideTrigger = false,
+  dialogLabel = "插件创作使用指引",
+  returnFocusRef,
+  onStepChange
+}: AnchoredGuideProps) {
   const [open, setOpen] = useState(false)
   const [index, setIndex] = useState(0)
   const [target, setTarget] = useState<HTMLElement | null>(null)
+  const [missing, setMissing] = useState(false)
   const [available, setAvailable] = useState(false)
   const trigger = useRef<HTMLButtonElement>(null)
   const manual = useRef(false),
@@ -88,7 +106,7 @@ function ScopedAnchoredGuide({ active, config, rootRef, steps, request = 0 }: An
       setOpen(false)
       return
     }
-    if (!api || dismissed.has(key)) return
+    if (!autoStart || !api || dismissed.has(key)) return
     let cancelled = false
     void api
       .getState(config)
@@ -102,7 +120,7 @@ function ScopedAnchoredGuide({ active, config, rootRef, steps, request = 0 }: An
     return () => {
       cancelled = true
     }
-  }, [active, available, api, key, config])
+  }, [active, available, api, key, config, autoStart])
 
   useEffect(() => {
     if (!active || !available || !request || request === handledRequest.current) return
@@ -132,14 +150,33 @@ function ScopedAnchoredGuide({ active, config, rootRef, steps, request = 0 }: An
     if (!open || !active || !available || !step) return
     const root = rootRef.current
     if (!root) return
+    onStepChange?.(step)
     let frame = 0,
       previous: HTMLElement | null = null
     const locate = () => {
       frame = 0
-      const next =
-        step.selectors
-          .map((selector) => root.querySelector<HTMLElement>(selector))
-          .find((element) => element?.isConnected) ?? root
+      const located = step.selectors
+        .flatMap((selector) => Array.from(root.querySelectorAll<HTMLElement>(selector)))
+        .find((element) => {
+          if (!element.isConnected || element.closest('[inert], [hidden], [aria-hidden="true"]'))
+            return false
+          for (
+            let parent: HTMLElement | null = element;
+            parent && root.contains(parent);
+            parent = parent.parentElement
+          ) {
+            if (parent instanceof HTMLDetailsElement && !parent.open) {
+              openedDetails.current.add(parent)
+              parent.open = true
+            }
+          }
+          return (
+            element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden"
+          )
+        })
+      const fallback = returnFocusRef?.current ?? trigger.current
+      const next = located ?? (fallback?.isConnected ? fallback : root)
+      setMissing(!located)
       for (
         let parent: HTMLElement | null = next;
         parent && root.contains(parent);
@@ -164,13 +201,20 @@ function ScopedAnchoredGuide({ active, config, rootRef, steps, request = 0 }: An
     locate()
     // A lazily mounted stage panel may replace the initial, real advanced-settings anchor.
     const observer = new MutationObserver(schedule)
-    observer.observe(root, { childList: true, subtree: true })
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["class", "style", "hidden", "inert", "aria-hidden", "open"]
+    })
+    window.addEventListener("resize", schedule)
     return () => {
       observer.disconnect()
+      window.removeEventListener("resize", schedule)
       cancelAnimationFrame(frame)
       previous?.removeAttribute("data-ui-guide-current")
     }
-  }, [active, available, open, step, rootRef])
+  }, [active, available, open, step, rootRef, returnFocusRef, onStepChange])
 
   useEffect(() => {
     if (open) return
@@ -199,16 +243,18 @@ function ScopedAnchoredGuide({ active, config, rootRef, steps, request = 0 }: An
   if (!active) return null
   return (
     <>
-      <button
-        ref={trigger}
-        type="button"
-        onClick={start}
-        title="查看制作、试用、验收、阶段调试与保存的分步说明"
-        className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        <BookOpen className="size-3.5" aria-hidden="true" />
-        使用指引
-      </button>
+      {!hideTrigger && (
+        <button
+          ref={trigger}
+          type="button"
+          onClick={start}
+          title="查看制作、试用、验收、阶段调试与保存的分步说明"
+          className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <BookOpen className="size-3.5" aria-hidden="true" />
+          使用指引
+        </button>
+      )}
       <Popover
         open={open && available && !!target}
         onOpenChange={(value) => {
@@ -218,7 +264,7 @@ function ScopedAnchoredGuide({ active, config, rootRef, steps, request = 0 }: An
         <PopoverAnchor virtualRef={anchor} />
         <PopoverContent
           role="dialog"
-          aria-label="插件创作使用指引"
+          aria-label={dialogLabel}
           aria-labelledby={titleId}
           aria-describedby={descriptionId}
           side="bottom"
@@ -239,8 +285,8 @@ function ScopedAnchoredGuide({ active, config, rootRef, steps, request = 0 }: An
           }}
           onCloseAutoFocus={(event) => {
             event.preventDefault()
-            if (active && trigger.current?.isConnected)
-              trigger.current.focus({ preventScroll: true })
+            const element = returnFocusRef?.current ?? trigger.current
+            if (active && element?.isConnected) element.focus({ preventScroll: true })
           }}
         >
           <div className="flex items-start justify-between gap-3">
@@ -264,6 +310,11 @@ function ScopedAnchoredGuide({ active, config, rootRef, steps, request = 0 }: An
           <p id={descriptionId} className="mt-3 text-sm leading-6 text-muted-foreground">
             {step?.description}
           </p>
+          {missing && (
+            <p role="status" className="mt-2 text-xs text-muted-foreground">
+              当前界面暂未显示这个控件。可继续下一步，稍后再看。
+            </p>
+          )}
           <p className="mt-2 text-xs text-muted-foreground">可随时关闭，再从“使用指引”重新打开。</p>
           <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
             <button
@@ -293,6 +344,7 @@ function ScopedAnchoredGuide({ active, config, rootRef, steps, request = 0 }: An
               </button>
             </div>
           </div>
+          <PopoverArrow className="fill-popover" width={12} height={6} />
         </PopoverContent>
       </Popover>
       {open && (

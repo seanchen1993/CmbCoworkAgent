@@ -1,0 +1,12 @@
+{
+  "systems": [
+    {
+      "systemId": "UNIT",
+      "agentsPath": "UNIT/AGENTS.md",
+      "deployUnits": [
+        { "deployUnitId": "UNIT.ONE", "factsPath": "UNIT/one.md" },
+        { "deployUnitId": "UNIT.TWO", "factsPath": "UNIT/two.md" }
+      ]
+    }
+  ]
+}

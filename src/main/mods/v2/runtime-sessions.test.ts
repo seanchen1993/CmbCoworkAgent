@@ -381,9 +381,8 @@ it("persists native stop intent across manager restart and source invalidation",
     loads = f.state.loads
   next.invalidate(f.root)
   expect(await next.commands(f.root, "one")).toEqual([])
-  await expect(next.siteMount(f.root, "one", "AbovePrompt")).rejects.toMatchObject({
-    code: "MODS_CONFIG_RELOAD_STOPPED"
-  })
+  // A durable stop forbids guest replay; it does not hide the original native application.
+  await expect(next.siteMount(f.root, "one", "AbovePrompt")).resolves.toBeNull()
   expect(f.state.loads).toBe(loads)
   const stopped = next.runtimeSessions().sessions[0]
   expect(stopped).toMatchObject({ state: "stopped", canResume: true })

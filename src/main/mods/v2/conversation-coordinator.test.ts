@@ -22,7 +22,8 @@ import type { FunctionPlugin } from "./dispatcher"
 import { readFunctionConversationTranscriptStamp } from
   "../../../shared/mods/v2/conversation-transcript"
 import { captureThreadIncarnation } from "../../services/thread-incarnation"
-import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../../agent/thread-run-lease"
+import { captureLocalThreadRunLease, claimLocalThreadRunLease,
+  releaseLocalThreadRunLease } from "../../agent/thread-run-lease"
 import { projectFunctionSessionApiMessages } from "./session-api-transcript"
 import { functionConversationNoteMessage } from "../../agent/mods-conversation"
 import { SqlJsSaver } from "../../checkpointer/sqljs-saver"
@@ -90,6 +91,49 @@ function fixture(candidate = false) {
 }
 
 describe("actual owner conversation coordinator", () => {
+  it.each([false, true])(
+    "admits a fresh child parent across turns when preparing inside the first lease is %s",
+    async (prepareInsideLease) => {
+      const f = fixture()
+      const firstRun = randomUUID(), secondRun = randomUUID()
+      if (prepareInsideLease)
+        expect(claimLocalThreadRunLease({ threadId: f.threadId, runId: firstRun, owner: "desktop" })
+          .acquired).toBe(true)
+      const prepared = await f.coordinator.prepareRuntime(f.context.workspace, f.threadId)
+      const capture = (runId: string, target = prepared.target.ref) => {
+        expect(claimLocalThreadRunLease({ threadId: f.threadId, runId, owner: "desktop" }).acquired)
+          .toBe(true)
+        const lease = captureLocalThreadRunLease(f.threadId)!
+        const current = () => { if (!lease()) throw Error("ACTUAL_PHYSICAL_TURN_ENDED") }
+        return f.coordinator.captureChildParent(f.context.workspace, f.threadId, {
+          target, checkpointThreadId: f.threadId,
+          runtimeCheckpointNamespace: "", signal: f.context.signal,
+          initialState: prepared.state, assertCurrent: current
+        }, current)
+      }
+      try {
+        const first = capture(firstRun)!
+        const families = Reflect.get(f.coordinator, "families") as {
+          readParent(proof: typeof first): { assertFactory(): void }
+        }
+        const firstParent = families.readParent(first)
+        releaseLocalThreadRunLease(f.threadId, "desktop", firstRun)
+        const second = capture(secondRun)!
+        expect(second).not.toBe(first)
+        expect(() => firstParent.assertFactory()).toThrow("ACTUAL_PHYSICAL_TURN_ENDED")
+        expect(() => families.readParent(second).assertFactory()).not.toThrow()
+        expect(() => capture(secondRun, { ...prepared.target.ref, conversationId: randomUUID() }))
+          .toThrow("MODS_CONVERSATION_TARGET_CHANGED")
+        f.retire()
+        expect(() => capture(secondRun)).toThrow("ORIGINAL_SOURCE_RETIRED")
+      } finally {
+        releaseLocalThreadRunLease(f.threadId, "desktop", firstRun)
+        releaseLocalThreadRunLease(f.threadId, "desktop", secondRun)
+        f.close()
+      }
+    }
+  )
+
   it("uses the real shared graph admission with an independent UI bucket and fixed native reader", async () => {
     const f = fixture(), prepared = await f.coordinator.prepareRuntime(f.context.workspace, f.threadId)
     const runId = randomUUID()

@@ -189,11 +189,23 @@ export async function startModsModelServer() {
       return
     }
     if (Array.isArray(body.tools) && lifecyclePrompt.includes("[model-lifecycle]")) {
-      if (body.messages?.at(-1)?.role === "tool") {
+      const probe = "mcp__model-lifecycle__probe"
+      const names = body.tools.map((tool: { function?: { name?: string } }) => tool.function?.name)
+      const previous = body.messages?.at(-1)
+      if (previous?.role === "tool" && previous.name === probe) {
+        assert(String(previous.content).includes("LIFECYCLE_FORK"), "Lifecycle tool must finish its real fork")
+        assert(String(previous.content).includes("ready"), "Lifecycle tool must finish its real classification")
         event([
           { index: 0, delta: { role: "assistant", content: "LIFECYCLE_RAW" }, finish_reason: "stop" }
         ])
       } else {
+        const loaded = names.includes(probe)
+        if (!loaded) assert(names.includes("mods_tool_search"), "Deferred lifecycle search must be published")
+        if (previous?.role === "tool") {
+          assert.equal(previous.name, "mods_tool_search")
+          assert.deepEqual(JSON.parse(previous.content).loaded, [probe])
+          assert(loaded, "Discovery must publish the exact callable probe schema on the next step")
+        }
         event([
           {
             index: 0,
@@ -202,9 +214,11 @@ export async function startModsModelServer() {
               tool_calls: [
                 {
                   index: 0,
-                  id: "model-lifecycle-probe",
+                  id: loaded ? "model-lifecycle-probe" : "model-lifecycle-search",
                   type: "function",
-                  function: { name: "mcp__model-lifecycle__probe", arguments: "{}" }
+                  function: loaded
+                    ? { name: probe, arguments: "{}" }
+                    : { name: "mods_tool_search", arguments: JSON.stringify({ query: probe }) }
                 }
               ]
             },
@@ -242,150 +256,264 @@ export async function startModsModelServer() {
     }
     if (
       Array.isArray(body.tools) &&
-      (userPrompt?.includes("[mods-child]") || userPrompt?.includes("[mods-child-worker]"))
+      (userPrompt.includes("[mods-child]") ||
+        userPrompt.includes("[mods-child-worker]") ||
+        userPrompt.includes("[mods-foundation]") ||
+        userPrompt.includes("[mods-registered"))
     ) {
-      const child = userPrompt.includes("[mods-child-worker]")
-      const agentList = userPrompt.includes("[mods-agent-list]")
-      const agentListProbe = body.tools.some(
-        (entry: { function?: { name?: string } }) =>
-          entry.function?.name === "mcp__agent-instances__probe"
-      )
-      const completed = body.messages?.at(-1)?.role === "tool"
-      if (child && completed && userPrompt.includes("[child-refusal]")) {
-        event([
-          {
-            index: 0,
-            delta: { role: "assistant", refusal: "MODS_CHILD_REFUSED" },
-            finish_reason: "stop"
-          }
-        ])
-        event([], { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 })
-        response.end("data: [DONE]\n\n")
-        return
+      const names = body.tools.map((entry: { function?: { name?: string } }) => entry.function?.name)
+      const previous = body.messages?.at(-1)
+      type FixtureCall = { id: string; name: string; arguments: string }
+      const replyText = () => {
+        assert.equal(previous?.role, "tool")
+        return typeof previous.content === "string"
+          ? previous.content
+          : JSON.stringify(previous.content)
       }
-      if (child && completed && userPrompt.includes("[stall]")) {
-        event([
-          {
-            index: 0,
-            delta: { role: "assistant", content: "MODS_CHILD_PARTIAL" },
-            finish_reason: null
+      const successfulReply = () => {
+        const text = replyText()
+        assert.notEqual(previous.status, "error", "A failed tool is not completion evidence")
+        assert.doesNotMatch(
+          text,
+          /^\s*(?:ToolError\b|Error\b|MODS_(?:REGISTERED_TOOL_|TOOL_|RUNTIME_|PLUGIN_CHANGED|CANCELLED))/
+        )
+        let value
+        try {
+          value = JSON.parse(text)
+        } catch {
+          value = text
+        }
+        if (value && typeof value === "object") {
+          assert.notEqual(value.isError, true)
+          assert(!value.error && !value.deny)
+        }
+        return value
+      }
+      const deferredCall = (
+        name: string,
+        id: string,
+        args: Record<string, unknown>,
+        searchId: string
+      ): FixtureCall => {
+        if (previous?.role === "tool") {
+          assert.equal(previous.tool_call_id, searchId, "Only the exact search may precede invocation")
+          const result = successfulReply()
+          assert.deepEqual(result.loaded, [name])
+          assert.equal(result.nextStep, true)
+          assert(names.includes(name), "Discovery must publish the callable schema on the next step")
+        }
+        if (!names.includes(name)) {
+          assert(names.includes("mods_tool_search"), "Deferred registration requires native discovery")
+          const search = body.tools.find(
+            (entry: { function?: { name?: string } }) => entry.function?.name === "mods_tool_search"
+          )
+          assert.equal(search.function.parameters.properties.query.type, "string")
+          assert(search.function.parameters.required.includes("query"))
+          return { id: searchId, name: "mods_tool_search", arguments: JSON.stringify({ query: name }) }
+        }
+        return { id, name, arguments: JSON.stringify(args) }
+      }
+      let call: FixtureCall | undefined
+      let answer: string | undefined
+      try {
+        if (userPrompt.includes("[mods-registered")) {
+          const tool = "mcp__function-commands__project_brief"
+          const removed = userPrompt.includes("[mods-registered-removed]")
+          const invalid = userPrompt.includes("[mods-registered-invalid]")
+          const denied = userPrompt.includes("[mods-registered-denied]")
+          const id = invalid ? "registered-invalid" : denied ? "registered-denied" : "registered-model"
+          if (removed) {
+            assert(!names.includes(tool), "Revoked registration must not remain callable")
+            if (previous?.role === "tool") {
+              assert.equal(previous.tool_call_id, "registered-removed-search")
+              const result = successfulReply()
+              assert.deepEqual(result.loaded, [])
+              assert.equal(result.nextStep, true)
+              answer = "REGISTERED_TOOL_REMOVED_OK"
+            } else if (names.includes("mods_tool_search")) {
+              call = {
+                id: "registered-removed-search",
+                name: "mods_tool_search",
+                arguments: JSON.stringify({ query: tool })
+              }
+            } else answer = "REGISTERED_TOOL_REMOVED_OK"
+          } else if (previous?.role === "tool" && previous.tool_call_id === id) {
+            if (invalid) {
+              assert.match(replyText(), /MODS_REGISTERED_TOOL_INPUT/)
+              answer = "REGISTERED_TOOL_INVALID_OK"
+            } else if (denied) {
+              assert.match(replyText(), /Permission fixture rejected registered tool/)
+              assert.doesNotMatch(replyText(), /sk-permission-fixture/)
+              answer = "REGISTERED_PERMISSION_DENIED_OK"
+            } else {
+              const result = successfulReply()
+              assert(
+                Array.isArray(result.files),
+                "The registered handler must return real project files"
+              )
+              assert(result.files.length <= 5)
+              assert.equal(typeof result.note, "string")
+              answer = "REGISTERED_TOOL_OK"
+            }
+          } else {
+            call = deferredCall(tool, id, { limit: invalid ? "bad" : denied ? 13 : 5 }, `${id}-search`)
+            if (call.name === tool) {
+              const advertised = body.tools.find(
+                (entry: { function?: { name?: string } }) => entry.function?.name === tool
+              )
+              assert.deepEqual(advertised.function.parameters, {
+                type: "object",
+                properties: { limit: { type: "integer", minimum: 1, maximum: 20 } },
+                additionalProperties: false
+              })
+            }
           }
-        ])
-        response.on("close", () => {
-          closedStalls++
-        })
-        return
+        } else if (userPrompt.includes("[mods-foundation]")) {
+          if (previous?.role === "tool" && previous.tool_call_id === "foundation-model") {
+            const result = successfulReply()
+            assert.equal(typeof result, "string")
+            assert(
+              result.startsWith("SDK_MODEL_OK"),
+              "The registered tool must finish its nested model call"
+            )
+            answer = "HOST_FOUNDATION_OK"
+          } else {
+            call = deferredCall(
+              "mcp__host-foundation__probe",
+              "foundation-model",
+              {},
+              "foundation-search"
+            )
+          }
+        } else {
+          const child = userPrompt.includes("[mods-child-worker]")
+          const agentList = userPrompt.includes("[mods-agent-list]")
+          const nativeFallback = userPrompt.includes("[mods-agent-list-off]")
+          if (nativeFallback) {
+            assert(agentList, "Native off scenario must retain its agent-list identity")
+            assert(
+              !names.includes("mcp__agent-instances__probe"),
+              "Mods off must not publish the revoked registered probe"
+            )
+          }
+          if (!child) {
+            if (previous?.role === "tool") {
+              assert.equal(previous.tool_call_id, "mods-child-task")
+              if (userPrompt.includes("[child-refusal]")) {
+                // This scenario deliberately catches a real child refusal in an otherwise normal parent.
+                assert.match(replyText(), /MODS_CHILD_REFUSED|ModelRefusalError|拒绝了本次请求/)
+              } else {
+                successfulReply()
+                assert.match(replyText(), /MODS_CHILD_WORKER_OK/)
+              }
+              answer = "MODS_CHILD_OK"
+            } else {
+              assert(names.includes("task"), "Use the actual published native task tool")
+              call = {
+                id: "mods-child-task",
+                name: "task",
+                arguments: JSON.stringify({
+                  subagent_type: "Explore",
+                  description: `[mods-child-worker] ${agentList ? "[mods-agent-list] " : ""}${nativeFallback ? "[mods-agent-list-off] " : ""}${userPrompt.includes("[child-stall]") ? "[stall]" : ""} ${userPrompt.includes("[child-refusal]") ? "[child-refusal]" : ""} ${nativeFallback ? "Read claw-notes using the native read tool" : "Inspect using the registered probe"}`
+                })
+              }
+            }
+          } else {
+            const tool = agentList ? "mcp__agent-instances__probe" : "mcp__host-foundation__probe"
+            if (previous?.role === "tool" && previous.tool_call_id === "mods-child-inspect") {
+              const result = successfulReply()
+              if (nativeFallback) {
+                assert.equal(typeof result, "string", "The native reader must return actual file text")
+                assert.match(result, /AGENT_LIST_ORIGINAL_OFF_READ/)
+              }
+              else if (agentList) assert(Array.isArray(result.agents), "Read actual task instances")
+              else {
+                assert.match(result.agentId, /^mod-task:[0-9a-f-]{36}$/)
+                assert.equal(typeof result.cwd, "string")
+                assert.equal(result.readPermission?.decision, "allow")
+                assert.equal(result.writePermission?.decision, "deny")
+              }
+              if (userPrompt.includes("[child-refusal]")) {
+                event([
+                  {
+                    index: 0,
+                    delta: { role: "assistant", refusal: "MODS_CHILD_REFUSED" },
+                    finish_reason: "stop"
+                  }
+                ])
+                event([], { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 })
+                response.end("data: [DONE]\n\n")
+                return
+              }
+              if (userPrompt.includes("[stall]")) {
+                event([
+                  {
+                    index: 0,
+                    delta: { role: "assistant", content: "MODS_CHILD_PARTIAL" },
+                    finish_reason: null
+                  }
+                ])
+                response.on("close", () => {
+                  closedStalls++
+                })
+                return
+              }
+              answer = "MODS_CHILD_WORKER_OK"
+            } else if (nativeFallback) {
+              const read = ["Read", "read_file"].find((name) => names.includes(name))
+              assert(read, "Mods off must retain the actual published native read tool")
+              const advertised = body.tools.find(
+                (entry: { function?: { name?: string } }) => entry.function?.name === read
+              )
+              assert.equal(advertised.function.parameters.type, "object")
+              assert.equal(advertised.function.parameters.properties.file_path.type, "string")
+              assert(advertised.function.parameters.required.includes("file_path"))
+              call = {
+                id: "mods-child-inspect",
+                name: read,
+                arguments: JSON.stringify({ file_path: "claw-notes" })
+              }
+            } else {
+              call = deferredCall(
+                tool,
+                "mods-child-inspect",
+                agentList ? {} : { mode: "child" },
+                "mods-child-search"
+              )
+            }
+          }
+        }
+      } catch (error) {
+        // A mismatched search, schema or actual result fails the fixture instead of minting success.
+        console.error("[mods-model-fixture] protocol failure", JSON.stringify({
+          scenario: userPrompt.includes("[mods-child-worker]") ? "child" : "parent-or-tool",
+          nativeOff: userPrompt.includes("[mods-agent-list-off]"),
+          previousCallId: String(previous?.tool_call_id ?? "").slice(0, 96),
+          tools: names.slice(0, 32).map((name: unknown) => String(name).slice(0, 120)),
+          error: (error instanceof Error ? error.message : String(error)).split("\n")[0].slice(0, 240)
+        }))
+        answer = "MODS_REGISTERED_FIXTURE_PROTOCOL_ERROR"
+        call = undefined
       }
       event([
         {
           index: 0,
-          delta: completed
-            ? { role: "assistant", content: child ? "MODS_CHILD_WORKER_OK" : "MODS_CHILD_OK" }
-            : {
+          delta: call
+            ? {
                 role: "assistant",
                 tool_calls: [
                   {
                     index: 0,
-                    id: child ? "mods-child-inspect" : "mods-child-task",
+                    id: call.id,
                     type: "function",
-                    function: child
-                      ? agentList
-                        ? agentListProbe
-                          ? { name: "mcp__agent-instances__probe", arguments: "{}" }
-                          : {
-                              name: "read_file",
-                              arguments: JSON.stringify({ file_path: "claw-notes" })
-                            }
-                        : { name: "mcp__host-foundation__probe", arguments: '{"mode":"child"}' }
-                      : {
-                          name: "task",
-                          arguments: JSON.stringify({
-                            subagent_type: "Explore",
-                            description: `[mods-child-worker] ${agentList ? "[mods-agent-list] " : ""}${userPrompt.includes("[child-stall]") ? "[stall]" : ""} ${userPrompt.includes("[child-refusal]") ? "[child-refusal]" : ""} Inspect using the registered probe`
-                          })
-                        }
+                    function: { name: call.name, arguments: call.arguments }
                   }
                 ]
-              },
-          finish_reason: completed ? "stop" : "tool_calls"
+              }
+            : { role: "assistant", content: answer },
+          finish_reason: call ? "tool_calls" : "stop"
         }
       ])
-      event([], { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 })
-      response.end("data: [DONE]\n\n")
-      return
-    }
-    if (Array.isArray(body.tools) && userPrompt?.includes("[mods-foundation]")) {
-      const completed = body.messages?.at(-1)?.role === "tool"
-      event([
-        {
-          index: 0,
-          delta: completed
-            ? { role: "assistant", content: "HOST_FOUNDATION_OK" }
-            : {
-                role: "assistant",
-                tool_calls: [
-                  {
-                    index: 0,
-                    id: "foundation-model",
-                    type: "function",
-                    function: { name: "mcp__host-foundation__probe", arguments: "{}" }
-                  }
-                ]
-              },
-          finish_reason: completed ? "stop" : "tool_calls"
-        }
-      ])
-      event([], { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 })
-      response.end("data: [DONE]\n\n")
-      return
-    }
-    if (Array.isArray(body.tools) && userPrompt?.includes("[mods-registered")) {
-      const removed = userPrompt.includes("[mods-registered-removed]")
-      const invalid = userPrompt.includes("[mods-registered-invalid]")
-      const denied = userPrompt.includes("[mods-registered-denied]")
-      if (removed || body.messages?.at(-1)?.role === "tool") {
-        event([
-          {
-            index: 0,
-            delta: {
-              role: "assistant",
-              content: removed
-                ? "REGISTERED_TOOL_REMOVED_OK"
-                : invalid
-                  ? "REGISTERED_TOOL_INVALID_OK"
-                  : denied
-                    ? "REGISTERED_PERMISSION_DENIED_OK"
-                    : "REGISTERED_TOOL_OK"
-            },
-            finish_reason: "stop"
-          }
-        ])
-      } else {
-        event([
-          {
-            index: 0,
-            delta: {
-              role: "assistant",
-              tool_calls: [
-                {
-                  index: 0,
-                  id: invalid
-                    ? "registered-invalid"
-                    : denied
-                      ? "registered-denied"
-                      : "registered-model",
-                  type: "function",
-                  function: {
-                    name: "mcp__function-commands__project_brief",
-                    arguments: JSON.stringify({ limit: invalid ? "bad" : denied ? 13 : 5 })
-                  }
-                }
-              ]
-            },
-            finish_reason: "tool_calls"
-          }
-        ])
-      }
       event([], { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 })
       response.end("data: [DONE]\n\n")
       return

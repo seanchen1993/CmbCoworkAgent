@@ -17,6 +17,7 @@ import { captureCompletionBinding } from "./completion-evidence"
 import { FakeStreamingChatModel } from "@langchain/core/utils/testing"
 import { AIMessageChunk, HumanMessage } from "@langchain/core/messages"
 import { createModModelBoundary } from "../../agent/mods-model-boundary"
+import { FunctionTurnLifecycle, type FunctionTurnLifecycleHost } from "./turn-lifecycle"
 
 const cleanups: Array<() => Promise<void>> = []
 
@@ -1465,6 +1466,191 @@ it("protects session repository data before observer hooks and after their chang
     observed: "/protected"
   })
 })
+
+it.each(["resident", "revoked", "replaced", "cold", "cold-then-loaded", "replaced-during-publication"] as const)(
+  "binds an idle-dispatched native main terminal to its original %s session without inherited admission",
+  async (state) => {
+    const f = await fixture()
+    await writeFile(join(f.plugin, "hooks", "hooks.json"),
+      JSON.stringify({ modules: ["./terminal.ts"] }))
+    await writeFile(join(f.plugin, "hooks", "terminal.ts"), `export function register(on){
+      on("turn.complete",async($,e)=>{
+        $.ui.log("ACTUAL_MAIN_TERMINAL");return {text:"completed:"+e.answer}
+      })
+    }`)
+    await f.approve()
+    if (state === "cold" || state === "cold-then-loaded") f.setPluginEnabled(false)
+    else await f.manager.commands(f.root, "thread")
+    let busy = true
+    let idle!: (threadId: string) => void
+    const errors = vi.fn()
+    const complete = vi.fn<FunctionTurnLifecycleHost["complete"]>(async (binding, input, signal) => {
+      await f.manager.turnComplete(binding.workspace, binding.threadId, input, signal)
+    })
+    const lifecycle = new FunctionTurnLifecycle({
+      start: (binding, input, signal) =>
+        f.manager.turnStart(binding.workspace, binding.threadId, input, signal),
+      complete, error: errors, isBusy: () => busy,
+      onIdle: (listener) => { idle = listener; return () => {} }
+    })
+    const controller = new AbortController()
+    const publicationEntered = Promise.withResolvers<void>()
+    const publicationRelease = Promise.withResolvers<void>()
+    f.setPublication(async (value) => {
+      if (state === "replaced-during-publication" && value && typeof value === "object" &&
+        !Array.isArray(value) && value.turnId === "native-main" && "answer" in value) {
+        publicationEntered.resolve()
+        await publicationRelease.promise
+      }
+      return value
+    })
+    try {
+      await lifecycle.start({
+        workspace: f.root, threadId: "thread", runId: "native-run", turnId: "native-main",
+        text: "native prompt", signal: controller.signal, cancel: vi.fn(), assertCurrent: () => {}
+      })
+      lifecycle.observeStream("thread", "native-run", [
+        new AIMessageChunk({ id: "native-answer", content: "actual native answer" })
+      ], "delta")
+      const settlement = lifecycle.captureSettlement("thread", "native-run")!
+      lifecycle.finish("thread", "native-run", { reason: "answer" })
+      lifecycle.finish("thread", "native-run", { reason: "answer" })
+      expect(complete).not.toHaveBeenCalled()
+      if (state === "revoked") f.manager.revoke(f.root, "function-commands")
+      if (state === "replaced") f.manager.pluginsChanged(f.root, ["source"])
+      if (state === "cold-then-loaded") f.setPluginEnabled(true)
+      if (state === "replaced" || state === "cold-then-loaded")
+        await f.manager.commands(f.root, "thread")
+      const loads = f.loads()
+      // This actual idle notification runs outside turnStart's completed operation scope.
+      busy = false
+      idle("thread")
+      if (state === "replaced-during-publication") {
+        await publicationEntered.promise
+        f.manager.pluginsChanged(f.root, ["source"])
+        publicationRelease.resolve()
+      }
+      if (state === "resident") {
+        await settlement
+        expect(errors).not.toHaveBeenCalled()
+        expect((await f.manager.logs(f.root, "thread"))
+          .filter((entry) => entry.text === "ACTUAL_MAIN_TERMINAL")).toHaveLength(1)
+        expect(await f.manager.turnNotices(f.root, "thread")).toMatchObject([
+          { turnId: "native-main", text: "completed:actual native answer" }
+        ])
+      } else if (state === "cold") {
+        await settlement
+        expect(errors).not.toHaveBeenCalled()
+        expect(await f.manager.logs(f.root, "thread")).toEqual([])
+      } else {
+        await expect(settlement).rejects.toThrow("MODS_SCOPE_CHANGED")
+        expect(await f.manager.logs(f.root, "thread")).toEqual([])
+      }
+      expect(controller.signal.aborted).toBe(false)
+      expect(complete).toHaveBeenCalledTimes(1)
+      expect(complete.mock.calls[0][1]).toMatchObject({
+        turnId: "native-main", reason: "answer", answer: "actual native answer", isAborted: false
+      })
+      expect(f.loads()).toBe(loads)
+      expect(lifecycle.hasUnsettled("thread")).toBe(false)
+      await expect(f.manager.turnComplete(f.root, "thread",
+        complete.mock.calls[0][1], complete.mock.calls[0][2])).rejects.toThrow("MODS_SCOPE_CHANGED")
+      expect(f.loads()).toBe(loads)
+    } finally {
+      publicationRelease.resolve()
+      lifecycle.close()
+    }
+  }
+)
+
+it.each(["resident", "revoked", "replaced", "replaced-during-publication"] as const)(
+  "settles an actual cancelled child from an expired operation against only its %s session",
+  async (state) => {
+    const f = await fixture()
+    await writeFile(join(f.plugin, "hooks", "hooks.json"),
+      JSON.stringify({ modules: ["./terminal.ts"] }))
+    await writeFile(join(f.plugin, "hooks", "terminal.ts"), `export function register(on){
+      on("turn.complete",async($,e)=>{
+        $.ui.log("ACTUAL_CHILD_TERMINAL");return {text:"completed:"+e.answer}
+      })
+    }`)
+    await f.approve()
+    await f.manager.commands(f.root, "thread")
+    const errors = vi.fn()
+    const complete = vi.fn<FunctionTurnLifecycleHost["complete"]>(async (_binding, input, signal) => {
+      await f.manager.turnComplete(f.root, "thread", input, signal)
+    })
+    const lifecycle = new FunctionTurnLifecycle({
+      start: async () => {}, complete, error: errors, isBusy: () => false,
+      onIdle: () => () => {}
+    })
+    const controller = new AbortController()
+    const child = lifecycle.startChild({
+      workspace: f.root, threadId: "thread", runId: "actual-child-run", turnId: "actual-child",
+      agentId: "mod-task:actual-child", signal: controller.signal, assertCurrent: () => {}
+    })
+    child.observeStream([new AIMessageChunk({ id: "actual-child-answer", content: "partial" })], "delta")
+    const settlement = lifecycle.captureSettlement("thread", "actual-child-run")!
+    const resume = Promise.withResolvers<void>()
+    const publicationEntered = Promise.withResolvers<void>()
+    const publicationRelease = Promise.withResolvers<void>()
+    let continuation!: Promise<void>
+    f.setPublication(async (value) => {
+      if (value && typeof value === "object" && !Array.isArray(value) &&
+        value.turnId === "parent" && value.text === "capture-operation") {
+        continuation = resume.promise.then(async () => {
+          await expect(f.manager.commands(f.root, "thread")).rejects.toThrow("MODS_ENTRY_EXPIRED")
+          controller.abort()
+          child.finish("error")
+          child.finish("error")
+        })
+      }
+      if (state === "replaced-during-publication" && value && typeof value === "object" &&
+        !Array.isArray(value) && value.turnId === "actual-child") {
+        publicationEntered.resolve()
+        await publicationRelease.promise
+      }
+      return value
+    })
+    try {
+      await f.manager.turnStart(f.root, "thread", {
+        turnId: "parent", text: "capture-operation"
+      }, new AbortController().signal)
+      if (state === "revoked") f.manager.revoke(f.root, "function-commands")
+      if (state === "replaced") {
+        f.manager.invalidate(f.root)
+        await f.manager.commands(f.root, "thread")
+      }
+      const loads = f.loads()
+      resume.resolve()
+      await continuation
+      if (state === "replaced-during-publication") {
+        await publicationEntered.promise
+        f.manager.invalidate(f.root)
+        publicationRelease.resolve()
+      }
+      if (state === "resident") {
+        await settlement
+        expect(errors).not.toHaveBeenCalled()
+        expect((await f.manager.logs(f.root, "thread"))
+          .filter((entry) => entry.text === "ACTUAL_CHILD_TERMINAL")).toHaveLength(1)
+      } else {
+        await expect(settlement).rejects.toThrow("MODS_SCOPE_CHANGED")
+        expect(await f.manager.logs(f.root, "thread")).toEqual([])
+      }
+      expect(complete).toHaveBeenCalledTimes(1)
+      expect(complete.mock.calls[0][1]).toMatchObject({
+        agentId: "mod-task:actual-child", turnId: "actual-child", reason: "aborted", answer: "partial"
+      })
+      expect(f.loads()).toBe(loads)
+      expect(lifecycle.hasUnsettled("thread")).toBe(false)
+    } finally {
+      resume.resolve()
+      publicationRelease.resolve()
+      lifecycle.close()
+    }
+  }
+)
 
 it("protects real turn facts before observers and notices after hooks, including revocation during publication", async () => {
   const f = await fixture()

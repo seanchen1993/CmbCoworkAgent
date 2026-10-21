@@ -4,7 +4,8 @@ import {
   type FunctionConversationRef,
   type FunctionConversationStore
 } from "../../db/function-conversation-store"
-import { readFunctionConversationNativeOwnerCurrentExecution } from "./conversation-coordinator"
+import { readFunctionConversationNativeOwnerCurrentExecution,
+  readFunctionConversationResidentOwnerExecution } from "./conversation-coordinator"
 import { isModRuntimeAuthorityDataCurrent, type ModRuntimeAuthority,
   type ModRuntimeAuthorities } from "../runtime-instance"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
@@ -98,6 +99,7 @@ interface ParentTargetExecution {
   readonly store: FunctionConversationStore
   readonly registryFields: PureFields
   readonly backend: ParentBackendExecution
+  readonly physicalOwner: ParentBackendExecution["owner"]
   readonly entry: RecordEntry
   readonly target: FunctionConversationTarget
   readonly resident: Resident
@@ -107,7 +109,8 @@ interface ParentTargetExecution {
   failed: boolean
 }
 const parentBackendExecutions = new WeakMap<FunctionConversationBackend, ParentBackendExecution>()
-const parentTargetExecutions = new WeakMap<FunctionConversationTarget, ParentTargetExecution>()
+const parentTargetExecutions = new WeakMap<FunctionConversationTarget,
+  WeakMap<() => void, ParentTargetExecution>>()
 export interface FunctionConversationNativeParentTargetExecution {
   assertCurrent(): void
   assertDataCurrent(): void
@@ -119,7 +122,8 @@ function captureParentBackendExecution(backend: FunctionConversationBackend,
   if (!backend || typeof backend !== "object" || types.isProxy(backend)) return undefined
   const field = Object.getOwnPropertyDescriptor(backend, "assertCurrent")
   if (!field || !("value" in field)) return undefined
-  const owner = readFunctionConversationNativeOwnerCurrentExecution(field.value)
+  const owner = readFunctionConversationResidentOwnerExecution(field.value) ??
+    readFunctionConversationNativeOwnerCurrentExecution(field.value)
   if (!owner || owner.store !== store) return undefined
   const names = ["identity", "ref", "checkpointThreadId", "signal", "assertCurrent"]
   const fields = capturePureFields(backend, names)
@@ -198,7 +202,10 @@ function assertEntryFull(entry: RecordEntry, archived: boolean, dispatch: EntryF
 }
 
 function assertParentTargetData(record: ParentTargetExecution, independent = false): void {
-  if ((!independent && record.failed) || Reflect.apply(weakGet, parentTargetExecutions, [record.target]) !== record)
+  const pairs = Reflect.apply(weakGet, parentTargetExecutions, [record.target]) as
+    WeakMap<() => void, ParentTargetExecution> | undefined
+  if ((!independent && record.failed) || !pairs ||
+    Reflect.apply(weakGet, pairs, [record.physicalOwner.current]) !== record)
     fail("MODS_CONVERSATION_TARGET_CHANGED")
   const original = Reflect.apply(weakGet, actualRegistryInstances, [record.registry]) as
     ReturnType<typeof actualRegistryInstances.get>
@@ -233,8 +240,9 @@ function assertParentTargetData(record: ParentTargetExecution, independent = fal
     Reflect.apply(weakGet, original.records, [entry.backend.identity]) !== record.entry ||
     Reflect.apply(weakGet, parentBackendExecutions, [entry.backend]) !== record.backend)
     fail("MODS_CONVERSATION_TARGET_CHANGED")
-  if (independent) record.backend.owner.assertIndependentDataCurrent()
-  else record.backend.owner.assertDataCurrent()
+  if (independent) record.physicalOwner.assertIndependentDataCurrent()
+  else record.physicalOwner.assertDataCurrent()
+  record.backend.owner.assertIndependentDataCurrent()
   record.storeExecution.assertDataCurrent()
   Reflect.apply(signalThrowIfAborted, entry.backend.signal, [])
   Reflect.apply(signalThrowIfAborted, entry.controllerSignal, [])
@@ -251,15 +259,28 @@ export function readFunctionConversationNativeParentTargetExecution(registry: Fu
   const actual = entry && Reflect.apply(weakGet, entryFacts, [entry]) as ReturnType<typeof entryFacts.get>
   const backend = actual && Reflect.apply(weakGet, parentBackendExecutions, [actual.backend]) as
     ParentBackendExecution | undefined
-  if (!entry || !backend || backend.owner.current !== originalCurrent ||
-    !actual || actual.backend.ref.kind !== "main" || actual.backend.authority) return undefined
+  if (!entry || !backend || !actual || actual.backend.ref.kind !== "main" || actual.backend.authority)
+    return undefined
+  // The resident backend certifies its immutable owner identity, never the current physical
+  // lease. Only an independently registered current closure selects this handoff's frame.
+  const physicalOwner = readFunctionConversationNativeOwnerCurrentExecution(originalCurrent)
+  if (!physicalOwner || physicalOwner.owner !== backend.owner.owner ||
+    physicalOwner.coordinator !== backend.owner.coordinator ||
+    physicalOwner.store !== backend.owner.store || physicalOwner.database !== backend.owner.database)
+    return undefined
   if (!original) return undefined
   assertPureFields(registry, original.fields)
   assertPureFields(entry, actual.fields)
   const store = Object.getOwnPropertyDescriptor(registry, "store")
   if (!store || !("value" in store) || store.value !== backend.owner.store)
     fail("MODS_CONVERSATION_TARGET_CHANGED")
-  const prior = Reflect.apply(weakGet, parentTargetExecutions, [target]) as ParentTargetExecution | undefined
+  let pairs = Reflect.apply(weakGet, parentTargetExecutions, [target]) as
+    WeakMap<() => void, ParentTargetExecution> | undefined
+  if (!pairs) {
+    pairs = new WeakMap()
+    Reflect.apply(mutationWeakSet, parentTargetExecutions, [target, pairs])
+  }
+  const prior = Reflect.apply(weakGet, pairs, [physicalOwner.current]) as ParentTargetExecution | undefined
   if (prior) { prior.view.assertDataCurrent(); return prior.view }
   const storeExecution = readFunctionConversationStoreCurrentExecution(backend.owner.store,
     backend.owner.database)
@@ -281,7 +302,7 @@ export function readFunctionConversationNativeParentTargetExecution(registry: Fu
         reading = true
         try {
           assertParentTargetData(record, true)
-          backend.owner.independentCurrent()
+          physicalOwner.independentCurrent()
           storeExecution.assertCurrent(actualBackend.ref)
           assertParentTargetData(record, true)
         } catch (error) { failed = true; throw error }
@@ -305,7 +326,7 @@ export function readFunctionConversationNativeParentTargetExecution(registry: Fu
             RecordEntry | undefined,
           backend: () => assertBackendFull(actualBackend, {
             signal: () => { Reflect.apply(signalThrowIfAborted, actualBackend.signal, []) },
-            source: () => { Reflect.apply(backend.current, backend.original, []); assertDataCurrent() },
+            source: () => { physicalOwner.current(); assertDataCurrent() },
             store: () => storeExecution.assertCurrent(actualBackend.ref),
             authority: () => { fail("MODS_CONVERSATION_AUTHORITY_CHANGED") } }),
           authority: () => actualBackend.authority,
@@ -316,9 +337,9 @@ export function readFunctionConversationNativeParentTargetExecution(registry: Fu
       finally { record.reading = false }
     } })
   const record: ParentTargetExecution = { registry, store: backend.owner.store,
-    registryFields: capturePureFields(registry, ["store"]), backend, entry,
+    registryFields: capturePureFields(registry, ["store"]), backend, physicalOwner, entry,
     target, resident: actualResident, storeExecution, view, reading: false, failed: false }
-  Reflect.apply(mutationWeakSet, parentTargetExecutions, [target, record])
+  Reflect.apply(mutationWeakSet, pairs, [physicalOwner.current, record])
   assertDataCurrent()
   return view
 }

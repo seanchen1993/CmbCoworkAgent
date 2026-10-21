@@ -135,6 +135,7 @@ const nodeWeakGet = WeakMap.prototype.get, nodeWeakSet = WeakMap.prototype.set
 const nodeMapGet = Map.prototype.get
 const originalWorks = new WeakMap<FunctionConversationNativeNodeWork, OriginalWork>()
 const originalScope = new AsyncLocalStorage<OriginalWork>()
+const originalScopeGetStore = AsyncLocalStorage.prototype.getStore
 const installed = new WeakMap<object, Set<FunctionConversationNativeNodeName>>()
 const installations = new WeakMap<object, { readonly graph: object; assertStructure(): void }>()
 const modelNames = new WeakMap<FunctionConversationNativeNodeModelName,
@@ -143,6 +144,28 @@ const modelNamesBySlot = new WeakMap<FunctionConversationNativeNodeSlot,
   FunctionConversationNativeNodeModelName>()
 const workModelNames = new WeakMap<FunctionConversationNativeNodeWorkModelName,
   FunctionConversationNativeNodeWorkModelNameData>()
+
+/** Read-only, live original-node scope. Saving this view grants no later execution authority. */
+export function currentFunctionConversationOriginalNativeWork(): Readonly<{
+  runtime: FunctionNativeConversationRuntime
+  node: FunctionConversationNativeNodeName
+  assertCurrent(): void
+}> | undefined {
+  const original = Reflect.apply(originalScopeGetStore, originalScope, []) as OriginalWork | undefined
+  if (!original || !original.running || !original.runtime || original.domain) return undefined
+  const runtime = original.runtime
+  const assertData = () => {
+    if (Reflect.apply(originalScopeGetStore, originalScope, []) !== original || !original.running ||
+      Reflect.apply(nodeWeakGet, originalWorks, [original.token]) !== original ||
+      original.runtime !== runtime) fail("MODS_CONVERSATION_NATIVE_NODE_WORK_INVALID")
+    original.assertStructure()
+    if (Reflect.apply(originalScopeGetStore, originalScope, []) !== original || !original.running)
+      fail("MODS_CONVERSATION_NATIVE_NODE_WORK_INVALID")
+  }
+  const assertCurrent = () => { assertData(); runtime.assertCurrent(); assertData() }
+  assertData()
+  return Object.freeze({ runtime, node: original.view.node, assertCurrent })
+}
 
 /** Pure original installation facts; an arbitrary public control callback cannot certify a graph. */
 export function assertFunctionConversationNativeNodeInstallation(control: object, graph: object): void {

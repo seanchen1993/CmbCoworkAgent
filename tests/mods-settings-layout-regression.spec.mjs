@@ -10,7 +10,7 @@ const renderer = resolve("src/renderer/src")
 const script = `
 import React from 'react';import {createRoot} from 'react-dom/client';
 import {CustomizeView} from ${JSON.stringify(join(renderer, "components/customize/CustomizeView.tsx"))};
-window.api={mods:{
+window.api={plugins:{list:async()=>[]},skills:{listPlugins:async()=>[]},mods:{
 clawView:async()=>({workspace:'C:/isolated/project',revision:0,bindingRevision:0,profiles:[],active:null,enabled:true,applicable:true,issues:[],capabilities:[]}),
 flowCatalog:async()=>({available:true,hostAvailable:true,workspace:'C:/isolated/project',plugins:[],actions:[],agents:[],models:[],features:[]}),
 flowList:async()=>[],clawSources:async()=>({skills:[],mcp:[]}),onConfigurationChanged:()=>()=>{},
@@ -36,10 +36,11 @@ const bundle = await build({
           path: "store",
           namespace: "fixture"
         }))
-        b.onResolve({ filter: /^\.\// }, (a) => {
+        // Stub unrelated PascalCase panels; real lower-case utilities keep their host contracts.
+        b.onResolve({ filter: /^\.\/(?:[A-Z][A-Za-z0-9]*Panel|AssistantWorkbench)$/ }, (a) => {
           if (
             a.importer.endsWith("CustomizeView.tsx") &&
-            !["./ClawPanel", "./EvaluationPanel", "./customize-mode", "./settings-return-focus"].includes(a.path)
+            !["./ClawPanel", "./EvaluationPanel"].includes(a.path)
           )
             return { path: a.path, namespace: "empty-panel" }
         })
@@ -52,7 +53,7 @@ const bundle = await build({
           loader: "js"
         }))
         b.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
-          contents: `window.fixtureState={currentThreadId:'t',threads:[{thread_id:'t',metadata:{workspacePath:'C:/isolated/project'}}],setShowCustomizeView:()=>{}};export const useAppStore=(select)=>select?select(window.fixtureState):window.fixtureState;useAppStore.getState=()=>window.fixtureState;`,
+          contents: `window.fixtureState={accountRevision:0,currentThreadId:'t',threads:[{thread_id:'t',metadata:{workspacePath:'C:/isolated/project',agentMode:'normal'}}],setShowCustomizeView:()=>{}};export const useAppStore=(select)=>select?select(window.fixtureState):window.fixtureState;useAppStore.getState=()=>window.fixtureState;useAppStore.subscribe=()=>()=>{};export const isThreadDeletionPending=()=>false;export const isThreadRetired=()=>false;`,
           loader: "js"
         }))
       }
@@ -77,19 +78,33 @@ try {
         })
       )
       await page.goto("http://127.0.0.1/layout#" + tab)
-      await page.evaluate(() =>
-        localStorage.setItem("cmbdevclaw.customize.presentation-mode.v1", "creator")
-      )
       const assets = resolve("out/renderer/assets"),
         css = readdirSync(assets).find((n) => /^index-.*\.css$/.test(n))
       if (!css) throw Error("No built stylesheet")
       await page.addStyleTag({ path: join(assets, css) })
       await page.addScriptTag({ content: bundle.outputFiles[0].text })
+      const draft = `保留布局草稿-${width}`
+      if (tab === "claw") {
+        await page.getByRole("region", { name: "简单组合", exact: true })
+          .getByLabel("组合名称", { exact: true }).fill(draft)
+        await page.getByText("高级编辑与已保存组合", { exact: true }).click()
+        await page.getByText("更多设置：技能、工具、模型与步骤", { exact: true }).click()
+      }
       const button = page.getByRole("button", {
-        name: tab === "claw" ? "保存能力组合" : "打开候选流程（使用或编辑）",
+        name: tab === "claw" ? "保存组合" : "打开候选流程（使用或编辑）",
         exact: true
       })
-      await button.waitFor({ state: "attached" })
+      await button.waitFor({ state: "visible" })
+      const region = page.getByLabel(tab === "claw" ? "助手组合设置" : "评测设置", { exact: true })
+      // Opening folded controls may scroll them into view. Start the wheel probe from the top.
+      await region.focus()
+      await page.keyboard.press("Home")
+      await page.keyboard.press("Control+Home")
+      await page.waitForFunction(
+        (label) => document.querySelector(`[aria-label="${label}"]`)?.scrollTop === 0,
+        tab === "claw" ? "助手组合设置" : "评测设置",
+        { timeout: 1800 }
+      )
       const geometry = () =>
         button.evaluate((el) => {
           const ancestors = []
@@ -117,11 +132,15 @@ try {
       await page.mouse.wheel(0, 3000)
       await page.waitForTimeout(250)
       const afterWheel = await geometry()
+      writeFileSync(
+        join(output, `${tab}-${width}-scroll-observation.json`),
+        JSON.stringify({ before, afterWheel }, null, 2)
+      )
+      await page.screenshot({ path: join(output, `${tab}-${width}-after-wheel.png`) })
       assert(
         afterWheel.ancestors[0].bottom <= 650 && afterWheel.ancestors[0].top >= 0,
         "Wheel must reveal bottom action " + tab + " " + width
       )
-      const region = page.getByLabel(tab === "claw" ? "Claw 组合设置" : "评测设置", { exact: true })
       await region.focus()
       await page.keyboard.press("Home")
       await page.keyboard.press("Control+Home")
@@ -134,26 +153,25 @@ try {
         "Keyboard must reveal action " + tab + " " + width
       )
       await page.screenshot({ path: join(output, tab + "-" + width + "-layout.png") })
-      let clickResult = "not attempted"
-      if (tab === "claw") {
-        try {
-          await button.click({ trial: true, timeout: 1800 })
-          clickResult = "trial click succeeded (may programmatically scroll overflow:hidden)"
-        } catch (e) {
-          clickResult = e.message
-        }
-      }
+      await button.click({ trial: true, timeout: 1800 })
       result[tab + "-" + width] = {
         css,
         before,
         afterWheel,
         afterKeyboard,
-        clickResult,
+        clickResult: "trial click succeeded without invoking the action",
         afterTrial: await geometry()
       }
-      await page.getByRole("button", { name: "灵件", exact: true }).click()
+      const advanced = page.getByRole("button", { name: "高级自定义", exact: true })
+      if ((await advanced.getAttribute("aria-expanded")) === "false") await advanced.click()
+      await page.getByRole("button", { name: "灵件管理", exact: true }).click()
       await page.getByText("installed-management", { exact: true }).waitFor()
-      assert.equal(await page.getByRole("button", { name: "创作者模式", exact: true }).count(), 0)
+      assert.equal(await page.getByText("creator-tools", { exact: true }).count(), 0)
+      if (tab === "claw") {
+        await page.getByRole("button", { name: "搭配管理", exact: true }).click()
+        assert.equal(await page.getByLabel("助手组合名称", { exact: true }).inputValue(), draft,
+          "Switching settings tabs must retain the unsaved combination draft")
+      }
       await page.close()
     }
   assert.deepEqual(errors, [])

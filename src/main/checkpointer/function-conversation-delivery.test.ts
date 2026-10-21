@@ -14,6 +14,8 @@ import {
 } from "../db/function-conversation-store"
 import { SqlJsSaver, type SqlJsSaverOptions, type SqlJsSaverCommittedCheckpointReceipt } from "./sqljs-saver"
 import { productionMainCheckpointOptions } from "./function-conversation-runtime.test-fixture"
+import { createFunctionConversationIdleEditor } from "./function-conversation-idle-editor"
+import { wrapNativeLegacyHistory } from "./native-legacy-history"
 import { serializeFunctionConversationNativeMessage } from "../agent/function-conversation-native-message"
 import { functionConversationNoteMessage } from "../agent/mods-conversation"
 import {
@@ -105,6 +107,117 @@ function fixture(namespace = "", options: SqlJsSaverOptions = {}) {
 }
 
 describe("FunctionConversationDeliveryBridge actual SqlJsSaver receipts", () => {
+  it("idle editor reads and commits with a fresh host admission without reviving the completed run", async () => {
+    const f = fixture(), row = f.note(), checkpoint = f.checkpoint(1, row)
+    await f.bridge.wrap(f.saver).put(f.config(), checkpoint, metadata)
+    const completedRun = wrapNativeLegacyHistory(f.saver, f.saver, {
+      threadId: "thread", namespace: "",
+      assertCurrent: () => { throw Error("MODS_CONVERSATION_NATIVE_RUN_CHANGED") }
+    })
+    await expect(completedRun.getTuple(f.config())).rejects.toThrow("NATIVE_RUN_CHANGED")
+    const editor = createFunctionConversationIdleEditor(f.saver, f.store, f.binding)
+    expect((await editor.getTuple(f.config()))?.checkpoint.id).toBe(checkpoint.id)
+    const next = f.checkpoint(1, row)
+    next.channel_values.messages = [new HumanMessage({ id: "summary", content: "host summary" }),
+      functionConversationNoteMessage(row, f.target)]
+    const saved = await editor.put(f.config(checkpoint.id), next, metadata)
+    await f.saver.flushStrict()
+    expect((await editor.getTuple(saved))?.checkpoint.channel_values.messages).toHaveLength(2)
+    await expect(completedRun.getTuple(f.config())).rejects.toThrow("NATIVE_RUN_CHANGED")
+  })
+
+  it("idle editor rejects canonical content or metadata replacement instead of trusting the native checkpoint", async () => {
+    const f = fixture(), row = f.note(), checkpoint = f.checkpoint(1, row)
+    const message = functionConversationNoteMessage(row, f.target)
+    message.response_metadata = { forged: true }
+    checkpoint.channel_values.messages = [message]
+    await f.saver.put(f.config(), checkpoint, metadata)
+    const editor = createFunctionConversationIdleEditor(f.saver, f.store, f.binding)
+    await expect(editor.getTuple(f.config())).rejects.toThrow("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+  })
+
+  it("idle editor cannot downgrade stamped canonical history to unverified legacy history", async () => {
+    const f = fixture(), checkpoint = f.checkpoint(1, f.note())
+    delete checkpoint.channel_values[FUNCTION_CONVERSATION_CHANNEL]
+    await f.saver.put(f.config(), checkpoint, metadata)
+    const editor = createFunctionConversationIdleEditor(f.saver, f.store, f.binding)
+    await expect(editor.getTuple(f.config())).rejects.toThrow("MODS_CONVERSATION_CHECKPOINT_CHANGED")
+  })
+
+  it("idle editor rejects a retired host admission on reads and writes and never accepts another namespace", async () => {
+    const f = fixture(), checkpoint = f.checkpoint(1, f.note())
+    await f.bridge.wrap(f.saver).put(f.config(), checkpoint, metadata)
+    let current = true
+    const editor = createFunctionConversationIdleEditor(f.saver, f.store, { ...f.binding,
+      assertCurrent: () => { if (!current) throw Error("IDLE_SESSION_RETIRED") } })
+    await expect(editor.getTuple({ configurable: { thread_id: "thread", checkpoint_ns: "child" } }))
+      .rejects.toThrow("MODS_CONVERSATION_CHECKPOINT_SCOPE")
+    const pending = editor.getTuple(f.config())
+    current = false
+    await expect(pending).rejects.toThrow("IDLE_SESSION_RETIRED")
+    await expect(editor.put(f.config(), f.checkpoint(1), metadata)).rejects.toThrow("IDLE_SESSION_RETIRED")
+    expect((await f.saver.getTuple(f.config()))?.checkpoint.id).toBe(checkpoint.id)
+  })
+
+  it.each(["checkpoint", "pending writes"])("idle %s queued behind a native namespace gate cannot write after retirement", async kind => {
+    const f = fixture(), checkpoint = f.checkpoint(1, f.note()), next = f.checkpoint(1)
+    await f.bridge.wrap(f.saver).put(f.config(), checkpoint, metadata)
+    let current = true
+    const editor = createFunctionConversationIdleEditor(f.saver, f.store, { ...f.binding,
+      assertCurrent: () => { if (!current) throw Error("IDLE_SESSION_RETIRED") } })
+    const entered = deferred<void>(), release = deferred<void>()
+    const holding = f.saver.putWithCommitObserver(f.config(), checkpoint, metadata, async () => {
+      entered.resolve()
+      await release.promise
+    })
+    await entered.promise
+    const writing = kind === "checkpoint" ? editor.put(f.config(checkpoint.id), next, metadata)
+      : editor.putWrites(f.config(checkpoint.id), [["messages", "must not persist"]], "idle-task")
+    const outcome = writing.then(() => undefined, (error: unknown) => error)
+    current = false
+    release.resolve()
+    await holding
+    expect(await outcome).toMatchObject({ message: "IDLE_SESSION_RETIRED" })
+    expect((await f.saver.getTuple(f.config()))?.checkpoint.id).toBe(checkpoint.id)
+    expect((await f.saver.getTuple(f.config(checkpoint.id)))?.pendingWrites).toEqual([])
+  })
+
+  it.each(["checkpoint", "pending writes"])("idle %s suspended in real serialization rechecks its source before BEGIN", async kind => {
+    const f = fixture(), checkpoint = f.checkpoint(1, f.note()), next = f.checkpoint(1)
+    await f.bridge.wrap(f.saver).put(f.config(), checkpoint, metadata)
+    let current = true
+    const editor = createFunctionConversationIdleEditor(f.saver, f.store, { ...f.binding,
+      assertCurrent: () => { if (!current) throw Error("IDLE_SOURCE_CHANGED") } })
+    const entered = deferred<void>(), release = deferred<void>()
+    const dump = f.saver.serde.dumpsTyped.bind(f.saver.serde)
+    vi.spyOn(f.saver.serde, "dumpsTyped").mockImplementationOnce(async value => {
+      entered.resolve()
+      await release.promise
+      return dump(value)
+    })
+    const writing = kind === "checkpoint" ? editor.put(f.config(checkpoint.id), next, metadata)
+      : editor.putWrites(f.config(checkpoint.id), [["messages", "must not persist"]], "idle-task")
+    const outcome = writing.then(() => undefined, (error: unknown) => error)
+    await entered.promise
+    current = false
+    release.resolve()
+    expect(await outcome).toMatchObject({ message: "IDLE_SOURCE_CHANGED" })
+    expect((await f.saver.getTuple(f.config()))?.checkpoint.id).toBe(checkpoint.id)
+    expect((await f.saver.getTuple(f.config(checkpoint.id)))?.pendingWrites).toEqual([])
+  })
+
+  it("idle editor reports an actual COMMIT even when its subsequent ownership check fails", async () => {
+    const f = fixture(), checkpoint = f.checkpoint(1, f.note()), next = f.checkpoint(1)
+    await f.bridge.wrap(f.saver).put(f.config(), checkpoint, metadata)
+    let current = true, durable = false
+    const editor = createFunctionConversationIdleEditor(f.saver, f.store, { ...f.binding,
+      assertCurrent: () => { if (!current) throw Error("IDLE_SESSION_RETIRED") }
+    }, () => { durable = true; current = false })
+    await expect(editor.put(f.config(checkpoint.id), next, metadata)).rejects.toThrow("IDLE_SESSION_RETIRED")
+    expect(durable).toBe(true)
+    expect((await f.saver.getTuple(f.config()))?.checkpoint.id).toBe(next.id)
+  })
+
   it("records delivery only after actual checkpoint commit while retaining the canonical row", async () => {
     const f = fixture(), row = f.note(), checkpoint = f.checkpoint(1, row)
     const prepared = f.observer.prepare(f.config(), checkpoint)

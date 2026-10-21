@@ -12,6 +12,7 @@ import { createAuthoringSourceBundle } from "../mods/devtools/authoring-bundle"
 import { parseSkillFrontmatter } from "../skills/frontmatter"
 import { assembleBusinessMods } from "./business-mod-assembler"
 import { parseBusinessModCatalog } from "./business-mod-manifest"
+import { BusinessModCatalogValidationError } from "./business-mod-catalog-schema"
 import {
   createPluginModularizationCandidate,
   inspectPluginModularization
@@ -147,7 +148,377 @@ function addFile(source: DerivationSnapshot, path: string, text: string) {
   source.digest = derivationDigest(source.files, source.excluded)
 }
 
+function legacyFixture() {
+  const source = fixture({ runtime: false, hooks: true })
+  const modules = ["prepare", "approve"].map((id, index) => ({
+    id,
+    title: id,
+    node: {
+      id,
+      label: id,
+      group: "Business",
+      skill: id,
+      order: (index + 1) * 10,
+      checkpoints: [id + "_in_progress", id + "_done"],
+      validators: [],
+      guards: [],
+      artifacts: { inputs: [], outputs: [] }
+    },
+    skill: { entry: `skills/${id}/SKILL.md`, resources: [`skills/${id}`] },
+    resources: [],
+    dependencies: { required: index ? ["prepare"] : [], advisory: [] },
+    checks: { validators: [], guards: [] }
+  }))
+  addFile(
+    source,
+    "board/config.json",
+    JSON.stringify({
+      apiVersion: 1,
+      environment: { source: "${WORKSPACE_ROOT}" },
+      knowledge: { reference: "knowledge/policy.md" },
+      workflow: { nodes: modules.map((mod) => mod.node) }
+    })
+  )
+  const catalog = parseBusinessModCatalog({
+    apiVersion: "devclaw.business-mods/v1",
+    kind: "catalog",
+    kernel: {
+      id: "original.board-kernel",
+      version: "1.0.0",
+      runtime: { adapter: "autobiz-v1" },
+      boardConfigPath: "board/config.json",
+      pluginFields: { hooks: "hooks/hooks.json", skills: "skills" },
+      resources: ["hooks", "knowledge", "scripts"]
+    },
+    modules
+  })
+  return { source, catalog }
+}
+
 describe("original plugin first modularization", () => {
+  it("accepts the reviewed adapter's derived config while retaining original source bytes and rules", () => {
+    const { source, catalog } = legacyFixture()
+    const original = source.files.find((file) => file.path === "board/config.json")!
+    const candidate = createPluginModularizationCandidate(source, {
+      confirmed: true,
+      sourceDigest: source.digest,
+      catalog
+    })
+    expect(candidate.files.find((file) => file.path === original.path)!.bytes).toEqual(
+      original.bytes
+    )
+    const projection = assembleBusinessMods(
+      [{ snapshot: source, catalog: candidate.catalog, modIds: ["prepare", "approve"] }],
+      { sources: [], name: "independent-board", version: "1.0.0" }
+    )
+    const projected = JSON.parse(
+      projection.files.find((file) => file.path === original.path)!.bytes.toString()
+    )
+    expect(projected.apiVersion).toBe(2)
+    expect(projected.environment).toEqual({ source: "${WORKSPACE_ROOT}" })
+    expect(projected.knowledge).toEqual({ reference: "knowledge/policy.md" })
+    expect(projected.workflow.nodes.map((node: { id: string }) => node.id)).toEqual([
+      "prepare",
+      "approve"
+    ])
+    expect(projection.files.find((file) => file.path === "hooks/hooks.json")!.digest).toBe(
+      source.files.find((file) => file.path === "hooks/hooks.json")!.digest
+    )
+  })
+
+  it("rejects dropped legacy node rules and flattened routing before exempting derived config", () => {
+    const { source, catalog } = legacyFixture()
+    edit(source, "board/config.json", (board) => {
+      const workflow = board.workflow as { nodes: Array<Record<string, unknown>> }
+      workflow.nodes[0].runtimePolicy = { originalConstraint: true }
+      return board
+    })
+    expect(() =>
+      createPluginModularizationCandidate(source, {
+        confirmed: true,
+        sourceDigest: source.digest,
+        catalog
+      })
+    ).toThrow("PLUGIN_MODULARIZATION_RUNTIME_CHANGED")
+    const second = legacyFixture()
+    edit(second.source, "board/config.json", (board) => {
+      const workflow = board.workflow as Record<string, unknown>
+      workflow.transitions = [
+        {
+          from: { nodeId: "approve", state: "done" },
+          to: { nodeId: "prepare", state: "in_progress" }
+        }
+      ]
+      return board
+    })
+    expect(() =>
+      createPluginModularizationCandidate(second.source, {
+        confirmed: true,
+        sourceDigest: second.source.digest,
+        catalog: second.catalog
+      })
+    ).toThrow("PLUGIN_MODULARIZATION_WORKFLOW_MAPPING_REQUIRED")
+  })
+
+  it.each(["catalog", "dependencies", "insertAfter"] as const)(
+    "rejects first-migration main-chain reversal through %s",
+    (cause) => {
+      const { source, catalog } = legacyFixture()
+      for (const mod of catalog.modules) mod.dependencies.required = []
+      if (cause === "catalog") catalog.modules.reverse()
+      if (cause === "dependencies") catalog.modules[0].dependencies.required = ["approve"]
+      if (cause === "insertAfter") catalog.modules[0].insertAfter = "approve"
+      expect(() =>
+        createPluginModularizationCandidate(source, {
+          confirmed: true,
+          sourceDigest: source.digest,
+          catalog
+        })
+      ).toThrow(
+        cause === "catalog"
+          ? "PLUGIN_MODULARIZATION_RUNTIME_CHANGED"
+          : BusinessModCatalogValidationError
+      )
+      // Explicit later assembly keeps the original assembler's ability to choose another route.
+      const composed = assembleBusinessMods(
+        [{ snapshot: source, catalog, modIds: ["approve", "prepare"] }],
+        {
+          sources: [],
+          name: "explicit-reordering",
+          version: "1.0.0",
+          order: ["approve", "prepare"]
+        }
+      )
+      expect(composed.steps.map((step) => step.id)).toEqual(["approve", "prepare"])
+    }
+  )
+
+  it.each(["hookDefinitions", "runtimePolicy", "routing", "rollback"])(
+    "rejects newly injected node behavior in first migration: %s",
+    (field) => {
+      const { source, catalog } = legacyFixture()
+      catalog.modules[0].node[field] = { newlyInjectedBehavior: true }
+      expect(() =>
+        createPluginModularizationCandidate(source, {
+          confirmed: true,
+          sourceDigest: source.digest,
+          catalog
+        })
+      ).toThrow("PLUGIN_MODULARIZATION_RUNTIME_CHANGED")
+    }
+  )
+
+  it("retains dynamic branch order and rejects catalog or dependency reversal", () => {
+    const { source, catalog } = legacyFixture()
+    const branch = ["detail-first", "detail-second"].map((id) => ({
+      id,
+      phase: "Dev",
+      label: id,
+      skill: id,
+      checkpointPrefix: id,
+      artifacts: { inputs: [], outputs: [] },
+      validators: []
+    }))
+    edit(source, "board/config.json", (board) => ({
+      ...board,
+      workflow: {
+        ...(board.workflow as Record<string, unknown>),
+        dynamicStages: [
+          {
+            id: "optional-detail",
+            phase: "Dev",
+            insertBefore: "approve",
+            choiceCheckpoint: "prepare_done",
+            skipTargetCheckpoint: "approve_in_progress",
+            enableTargetCheckpoint: "detail-first_in_progress",
+            nodes: branch
+          }
+        ]
+      }
+    }))
+    for (const node of branch) {
+      const entry = `skills/${node.skill}/SKILL.md`
+      addFile(
+        source,
+        entry,
+        `---\nname: ${node.skill}\ndescription: Original detail step\n---\nRead original policy.\n`
+      )
+      catalog.modules.push({
+        id: node.id,
+        title: node.label,
+        node: {
+          ...node,
+          group: node.phase,
+          checkpoints: [node.id + "_in_progress", node.id + "_done"]
+        },
+        skill: { entry, resources: [`skills/${node.skill}`] },
+        resources: [],
+        dependencies: { required: [], advisory: [] },
+        checks: { validators: [], guards: [] }
+      })
+    }
+    expect(
+      createPluginModularizationCandidate(source, {
+        confirmed: true,
+        sourceDigest: source.digest,
+        catalog
+      }).status
+    ).toBe("needs-native-validation")
+    const reversed = structuredClone(catalog)
+    reversed.modules.splice(2, 2, ...reversed.modules.slice(2).reverse())
+    const dependencyReversal = structuredClone(catalog)
+    dependencyReversal.modules[2].dependencies.required = ["detail-second"]
+    for (const invalid of [reversed, dependencyReversal])
+      expect(() =>
+        createPluginModularizationCandidate(source, {
+          confirmed: true,
+          sourceDigest: source.digest,
+          catalog: invalid
+        })
+      ).toThrow(BusinessModCatalogValidationError)
+    const injected = structuredClone(catalog)
+    injected.modules[2].node.runtimePolicy = { newlyInjectedBehavior: true }
+    expect(() =>
+      createPluginModularizationCandidate(source, {
+        confirmed: true,
+        sourceDigest: source.digest,
+        catalog: injected
+      })
+    ).toThrow("PLUGIN_MODULARIZATION_RUNTIME_CHANGED")
+  })
+
+  it("reports configuration credential blockers without echoing values or discarding configuration", () => {
+    const { source, catalog } = legacyFixture()
+    edit(source, "board/config.json", (board) => ({ ...board, apiToken: "PRIVATE_CONFIG_CANARY" }))
+    const original = source.files.find((file) => file.path === "board/config.json")!.bytes
+    try {
+      createPluginModularizationCandidate(source, {
+        confirmed: true,
+        sourceDigest: source.digest,
+        catalog
+      })
+      throw Error("Expected configuration rejection")
+    } catch (error) {
+      expect(error).toBeInstanceOf(BusinessModCatalogValidationError)
+      const diagnostics = (error as BusinessModCatalogValidationError).diagnostics
+      expect(diagnostics[0].code).toBe("PLUGIN_MODULARIZATION_CREDENTIAL_CONFIGURATION_REQUIRED")
+      expect(JSON.stringify(diagnostics)).not.toContain("PRIVATE_CONFIG_CANARY")
+    }
+    expect(source.files.find((file) => file.path === "board/config.json")!.bytes).toEqual(original)
+  })
+
+  it("requires the original knowledge provider and accepts an explicit additive implementation", () => {
+    const { source, catalog } = legacyFixture()
+    edit(source, "board/config.json", (board) => ({
+      ...board,
+      knowledge_config: { nextAction: { slashSkill: "policy-context" } }
+    }))
+    const digest = source.digest
+    expect(() =>
+      createPluginModularizationCandidate(source, {
+        confirmed: true,
+        sourceDigest: digest,
+        catalog
+      })
+    ).toThrow("PLUGIN_MODULARIZATION_PROVIDER_MISSING")
+    catalog.kernel!.resources.push("skills/policy-context")
+    const candidate = createPluginModularizationCandidate(source, {
+      confirmed: true,
+      sourceDigest: digest,
+      catalog,
+      modularizationFiles: [
+        {
+          path: "skills/policy-context/SKILL.md",
+          text: "---\nname: policy-context\ndescription: Read the original local policy\n---\nRead knowledge/policy.md and present its original policy content.\n"
+        }
+      ]
+    })
+    expect(candidate.addedFiles.map((file) => file.path)).toEqual([
+      "skills/policy-context/SKILL.md"
+    ])
+    expect(source.digest).toBe(digest)
+    for (const file of source.files)
+      expect(candidate.files.find((item) => item.path === file.path)?.digest).toBe(file.digest)
+  })
+
+  it("retains native keyword and scenario metadata through candidate and assembly", () => {
+    const source = fixture({ hooks: true })
+    edit(source, "plugin.json", (manifest) => ({
+      ...manifest,
+      keywords: ["workflow", "business"],
+      useScenario: "Original workflow context"
+    }))
+    const original = source.files.find((file) => file.path === "plugin.json")!.bytes
+    const candidate = createPluginModularizationCandidate(source, {
+      confirmed: true,
+      sourceDigest: source.digest
+    })
+    expect(candidate.catalog.kernel?.pluginFields).toMatchObject({
+      keywords: ["workflow", "business"],
+      useScenario: "Original workflow context"
+    })
+    expect(candidate.files.find((file) => file.path === "plugin.json")!.bytes).toEqual(original)
+    const projection = assembleBusinessMods(
+      [{ snapshot: source, catalog: candidate.catalog, modIds: ["prepare", "approve"] }],
+      { sources: [], name: "metadata-copy", version: "1.0.0" }
+    )
+    expect(
+      JSON.parse(projection.files.find((file) => file.path === "plugin.json")!.bytes.toString())
+    ).toMatchObject({
+      keywords: ["workflow", "business"],
+      useScenario: "Original workflow context"
+    })
+  })
+
+  it("returns schema field locations without echoing unknown field names or source values", () => {
+    const source = fixture()
+    const catalog = structuredClone(inspectPluginModularization(source).catalog!)
+    const malformed = catalog as unknown as { modules: Array<Record<string, unknown>> }
+    delete malformed.modules[0].dependencies
+    malformed.modules[0].PRIVATE_FIELD_CANARY = "PRIVATE_VALUE_CANARY"
+    let failure: unknown
+    try {
+      createPluginModularizationCandidate(source, {
+        confirmed: true,
+        sourceDigest: source.digest,
+        catalog
+      })
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBeInstanceOf(BusinessModCatalogValidationError)
+    const diagnostics = (failure as BusinessModCatalogValidationError).diagnostics
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({ path: "catalog.modules.0.dependencies" })
+    )
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({ path: "catalog.modules.0", code: "unrecognized_keys" })
+    )
+    expect(JSON.stringify(diagnostics)).not.toContain("PRIVATE_FIELD_CANARY")
+    expect(JSON.stringify(diagnostics)).not.toContain("PRIVATE_VALUE_CANARY")
+    expect(source.files.some((file) => file.path === BUSINESS_MOD_MANIFEST)).toBe(false)
+  })
+
+  it("explains semantic skill mapping errors after structural validation", () => {
+    const source = fixture()
+    const catalog = structuredClone(inspectPluginModularization(source).catalog!)
+    catalog.modules[0].skill.entry = "skills/unmatched/SKILL.md"
+    try {
+      createPluginModularizationCandidate(source, {
+        confirmed: true,
+        sourceDigest: source.digest,
+        catalog
+      })
+      throw Error("Expected a rejected migration")
+    } catch (error) {
+      expect(error).toBeInstanceOf(BusinessModCatalogValidationError)
+      expect((error as BusinessModCatalogValidationError).diagnostics[0]).toMatchObject({
+        path: "catalog.modules",
+        message: expect.stringContaining("node.skill")
+      })
+    }
+  })
+
   it("splits explicit Host stages without losing original files, schema, approval, knowledge or environment", () => {
     const source = fixture({ hooks: true })
     const original = source.files.map((file) => [file.path, file.bytes.toString("hex")])

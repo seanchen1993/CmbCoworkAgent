@@ -11,6 +11,7 @@ import {
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../thread-run-lease"
 import { createFilesystemMiddleware } from "deepagents"
 import { ToolMessage } from "@langchain/core/messages"
+import { BusinessModCatalogValidationError } from "../../plugins/business-mod-catalog-schema"
 import {
   BusinessModDuplicateIdError,
   BUSINESS_MOD_DUPLICATE_ID_RECOVERY
@@ -32,10 +33,12 @@ function fixture() {
     inspectionPage: vi.fn(),
     readMod: vi.fn(),
     readAsset: vi.fn(async () => ({ text: "Python source" })),
+    readRawAsset: vi.fn(),
     read: vi.fn(() => ({ revision: 2 })),
     save: vi.fn(() => ({ revision: 2 })),
     preview: vi.fn(async () => ({ valid: true })),
     previewDetails: vi.fn(),
+    requestModularization: vi.fn(),
     requestReview: vi.fn(async () => ({ phase: "needs-approval" })),
     requestTrialPreview: vi.fn(async () => ({
       trial: {
@@ -59,6 +62,93 @@ afterEach(() => {
   releaseLocalThreadRunLease(threadId, "desktop", "turn")
 })
 describe("native business authoring tool", () => {
+  it("exposes the native migration schema as exact bounded document pages", async () => {
+    const f = fixture()
+    let response = JSON.parse(await f.tool.invoke({ action: "modularization_schema" }))
+    let result = response.result
+    if (result.format === "json-pages") {
+      let json = result.jsonChunk
+      while (result.nextCursor !== undefined) {
+        response = JSON.parse(
+          await f.tool.invoke({ action: "modularization_schema", cursor: result.nextCursor })
+        )
+        result = response.result
+        json += result.jsonChunk
+      }
+      result = JSON.parse(json)
+    }
+    expect(result.schema.properties.modules.items.required).toEqual(
+      expect.arrayContaining([
+        "id",
+        "title",
+        "node",
+        "skill",
+        "resources",
+        "dependencies",
+        "checks"
+      ])
+    )
+    expect(result.schema.properties.kernel.properties.pluginFields.properties).toHaveProperty(
+      "keywords"
+    )
+    expect(result.rules.join(" ")).toContain("boardConfigPath")
+    expect(f.service.requestModularization).not.toHaveBeenCalled()
+  })
+
+  it("returns trusted field diagnostics for rejected migration plans", async () => {
+    const f = fixture()
+    const diagnostics = [
+      {
+        path: "catalog.modules.0.skill",
+        code: "invalid_type",
+        message: "Expected skill entry and resources"
+      }
+    ]
+    f.service.requestModularization.mockRejectedValueOnce(
+      new BusinessModCatalogValidationError(diagnostics)
+    )
+    const result = JSON.parse(
+      await f.tool.invoke({
+        action: "request_modularization",
+        rawInspectionId: "11111111-1111-4111-8111-111111111111",
+        sourceDigest: "a".repeat(64),
+        modularizationCatalog: {}
+      })
+    )
+    expect(result).toMatchObject({ ok: false, error: "BUSINESS_MOD_CATALOG_INVALID", diagnostics })
+    expect(result.recovery).toContain("modularization_schema")
+    expect(result).not.toHaveProperty("result")
+    expect(f.service.requestReview).not.toHaveBeenCalled()
+  })
+
+  it("reconstructs larger redacted raw sources through exact identity-bound pages", async () => {
+    const f = fixture()
+    const rawInspectionId = "11111111-1111-4111-8111-111111111111"
+    const path = "hooks/original-checker.py"
+    const document = {
+      path,
+      text: '# Original reviewed checker\napi_key = "[redacted]"\n' + "# rule\n".repeat(30_000),
+      redacted: true,
+      sourceDigest: "a".repeat(64),
+      originalPreserved: true
+    }
+    f.service.readRawAsset.mockResolvedValue(document)
+    let cursor: number | undefined = 0
+    let json = ""
+    while (cursor !== undefined) {
+      const raw = await f.tool.invoke({ action: "read_raw_asset", rawInspectionId, path, cursor })
+      expect(raw.length).toBeLessThan(16_000)
+      const response = JSON.parse(raw)
+      expect(response.ok).toBe(true)
+      json += response.result.jsonChunk
+      cursor = response.result.nextCursor
+    }
+    expect(JSON.parse(json)).toEqual(document)
+    for (const call of f.service.readRawAsset.mock.calls)
+      expect(call).toEqual([threadId, rawInspectionId, path])
+    expect(f.service.requestReview).not.toHaveBeenCalled()
+  })
+
   it("returns only host-typed duplicate diagnostics without preparing review or changing source", async () => {
     const f = fixture()
     f.service.preview.mockRejectedValueOnce(new BusinessModDuplicateIdError("User.Knowledge"))

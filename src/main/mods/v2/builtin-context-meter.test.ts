@@ -131,6 +131,8 @@ it("refreshes actual context, omits absent usage and preserves fatal host read e
     {}
   )
   f.readSession.mockResolvedValue({ context: { window: 2000, tokens: 700 }, rateLimits: [] })
+  const signal = new AbortController().signal
+  await f.manager.turnStart(f.root, "thread", { turnId: "turn", text: "refresh usage" }, signal)
   await f.manager.turnComplete(
     f.root,
     "thread",
@@ -141,20 +143,24 @@ it("refreshes actual context, omits absent usage and preserves fatal host read e
       turnId: "turn",
       reason: "answer"
     },
-    new AbortController().signal
+    signal
   )
   await expect.poll(() => f.changed.mock.calls.length, { timeout: 5000 }).toBeGreaterThan(0)
   const updated = await f.manager.siteRender(f.root, "thread", owner!, props)
   expect(drawnText(updated!.tree)).toBe("上下文：700 / 2000 tokens · 35%")
   f.readSession.mockResolvedValue({ context: { window: 2000 }, rateLimits: [] })
+  const missingSignal = new AbortController().signal
+  await f.manager.turnStart(f.root, "thread", { turnId: "missing", text: "absent usage" }, missingSignal)
   await f.manager.turnComplete(f.root, "thread", {
     answer: "Done", durationMs: 1, isAborted: false, turnId: "missing", reason: "answer"
-  }, new AbortController().signal)
+  }, missingSignal)
   expect(drawnText((await f.manager.siteRender(f.root, "thread", owner!, props))!.tree)).toBe("")
   f.readSession.mockRejectedValue(Error("No current model"))
+  const failedSignal = new AbortController().signal
+  await f.manager.turnStart(f.root, "thread", { turnId: "failed", text: "failed read" }, failedSignal)
   await f.manager.turnComplete(f.root, "thread", {
     answer: "Done", durationMs: 1, isAborted: false, turnId: "failed", reason: "answer"
-  }, new AbortController().signal)
+  }, failedSignal)
   await expect(f.manager.siteRender(f.root, "thread", owner!, props)).rejects.toThrow("No current model")
 })
 

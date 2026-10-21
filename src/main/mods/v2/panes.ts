@@ -46,6 +46,10 @@ interface Pane extends FunctionPaneSnapshot {
   dirty: boolean
   actionsInvalidated?: boolean
   focused: boolean
+  /** Root focus survives ordinary redraws, but never a revoked drawing lifecycle. */
+  focusEpoch: object
+  /** Constant-space identity for lifecycle state sampled by an asynchronous drawing. */
+  stateEpoch: object
   visibleTree?: FunctionUiElement
   visibleEpoch?: object
   callbackTree?: FunctionUiElement
@@ -324,6 +328,8 @@ export class FunctionPanes {
       dirty: true,
       faultEpoch: {},
       focused: prior?.focused ?? false,
+      focusEpoch: {},
+      stateEpoch: {},
       ...(input.focus === true ? { focusRequest: { id: randomUUID(), pending: true } } : {})
     })
     this.paneDataChanged()
@@ -356,7 +362,10 @@ export class FunctionPanes {
       this.focus.cancel(pane.key)
       this.scroll.cancel(pane.key)
       pane.dirty = true
-      if (revokeActions) pane.actionsInvalidated = true
+      if (revokeActions) {
+        pane.actionsInvalidated = true
+        pane.focusEpoch = {}
+      }
       pane.constructorDrawing?.close()
       pane.pendingConstructorDrawing?.close()
       pane.faultEpoch = {}
@@ -369,6 +378,7 @@ export class FunctionPanes {
     let changed = false
     for (const pane of this.panes.values()) {
       if (pane.generation !== generation && pane.pendingGeneration !== generation) continue
+      pane.focusEpoch = {}
       this.host.markdownLinks?.retire(pane)
       this.cancelClientFaults(pane)
       pane.dirty = true
@@ -465,6 +475,7 @@ export class FunctionPanes {
       type Candidate = {
         pane: Pane
         epoch: object
+        stateEpoch: object
         generation: string
         previousGeneration: string
         drawing: FunctionNativeDrawing
@@ -510,7 +521,7 @@ export class FunctionPanes {
         for (const pane of selected) {
           const fresh = pane.dirty || pane.retryDrawing === true || !pane.nativeDrawing
           const candidate = {
-            pane, epoch: pane.faultEpoch,
+            pane, epoch: pane.faultEpoch, stateEpoch: pane.stateEpoch,
             generation: fresh ? randomUUID() : pane.generation,
             previousGeneration: pane.generation,
             tree: pane.tree, faultRedraw: pane.faultRedrawQueued === true, fresh
@@ -673,6 +684,8 @@ export class FunctionPanes {
           pane.nativeContent = candidate.visible!.nativeContent
           pane.faultGeneration = candidate.faultRedraw ? candidate.generation : undefined
           pane.faultRedrawQueued = false
+          // Client adoption needs the committed drawing to be clean. The finally fence below
+          // restores any newer state update after adoption, even if reconciliation rejects.
           pane.dirty = false
           pane.retryDrawing = false
           pane.actionsInvalidated = false
@@ -703,7 +716,7 @@ export class FunctionPanes {
               candidate.pane.faultEpoch === candidate.epoch) {
               const healthy = candidate.pane.visibleTree !== undefined &&
                 candidate.pane.visibleEpoch === candidate.epoch
-              candidate.pane.dirty = !healthy
+              candidate.pane.dirty = !healthy || candidate.pane.stateEpoch !== candidate.stateEpoch
               candidate.pane.retryDrawing = true
             }
             await this.release(candidate.generation)
@@ -712,6 +725,16 @@ export class FunctionPanes {
             candidate.pane.pendingGeneration = undefined
           if (candidate.pane.pendingConstructorDrawing === candidate.constructorDrawing)
             candidate.pane.pendingConstructorDrawing = undefined
+          if (
+            committed &&
+            this.panes.get(candidate.pane.key) === candidate.pane &&
+            candidate.pane.stateEpoch !== candidate.stateEpoch
+          ) {
+            // A completed lifecycle event cannot be erased by a drawing that sampled older state.
+            // Request one normal redraw; the next candidate captures the current constant-space epoch.
+            candidate.pane.dirty = true
+            this.paneDataChanged()
+          }
         }
       }
     })
@@ -777,7 +800,11 @@ export class FunctionPanes {
     const perform = async (): Promise<void | FunctionFocusResult> => {
       this.host.assertLive()
       const pane = this.panes.get(action.pane)
-      if (!pane || pane.generation !== action.generation || pane.actionsInvalidated)
+      // Reopening the same id can retain its generation until redraw, but replaces its owner object.
+      if (
+        !pane || pane !== admissionPane ||
+        pane.generation !== action.generation || pane.actionsInvalidated
+      )
         throw new ModFunctionError("MODS_UI_STALE_ACTION")
       if (action.kind === "close") {
         validateFunctionUiActionLink(action, false)
@@ -835,6 +862,21 @@ export class FunctionPanes {
         let focusResult: FunctionFocusResult = { focused: false }
         let focusApplied = false
         const controller = new AbortController()
+        const focusEpoch = pane.focusEpoch
+        const assertLifecycleCurrent = () => {
+          this.host.assertLive()
+          controller.signal.throwIfAborted()
+          // The already admitted root focus event records Pane state, not an old control action.
+          // Control/Client focus and scroll remain pinned to their exact drawing generation.
+          const rootFocus = action.kind === "focus" && !target && !focusResult.target
+          if (
+            this.panes.get(pane.key) !== pane ||
+            pane.focusEpoch !== focusEpoch ||
+            pane.actionsInvalidated ||
+            (!rootFocus && pane.generation !== action.generation)
+          )
+            throw new ModFunctionError("MODS_UI_STALE_ACTION")
+        }
         this.active.set(controller, pane.key)
         this.retained.set(action.generation, (this.retained.get(action.generation) ?? 0) + 1)
         try {
@@ -861,8 +903,7 @@ export class FunctionPanes {
               signal: controller.signal,
               generation: action.generation,
               core: async (input): Promise<ModJson> => {
-                if (this.panes.get(pane.key) !== pane)
-                  throw new ModFunctionError("MODS_UI_STALE_ACTION")
+                assertLifecycleCurrent()
                 if (action.kind === "focus") {
                   const selected = targets.find(
                     (row) =>
@@ -886,10 +927,7 @@ export class FunctionPanes {
               }
             }
           )
-          this.host.assertLive()
-          controller.signal.throwIfAborted()
-          if (this.panes.get(pane.key) !== pane || pane.generation !== action.generation)
-            throw new ModFunctionError("MODS_UI_STALE_ACTION")
+          assertLifecycleCurrent()
           if (action.kind === "focus") {
             if (isModObject(outcome) && typeof outcome.deny === "string") {
               focusResult = { focused: false }
@@ -902,13 +940,11 @@ export class FunctionPanes {
                 focusResult.target.element,
                 true
               )
-            this.host.assertLive()
-            controller.signal.throwIfAborted()
-            if (this.panes.get(pane.key) !== pane || pane.generation !== action.generation)
-              throw new ModFunctionError("MODS_UI_STALE_ACTION")
+            assertLifecycleCurrent()
             if (focusApplied) pane.focused = focusResult.focused
           }
           this.cancelClientFaults(pane)
+          pane.stateEpoch = {}
           pane.dirty = true
           this.paneDataChanged()
         } finally {

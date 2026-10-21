@@ -421,7 +421,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
         },
         request,
         skipToolNames,
-        async (request) => {
+        async (request, nativePublish, nativeTail) => {
           const agentId =
             getHookAgentIdFromRequest(request) ?? execution?.agentId ?? options.agentId
           return runWithHookAgentId(agentId, async () => {
@@ -473,55 +473,59 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
                     : request.state
               })
             const executionResult = stringifyToolResult(nativeResult)
-            const result = await publishCurrentModResult(nativeResult)
+            const result = await (nativePublish
+              ? nativePublish(nativeResult) : publishCurrentModResult(nativeResult))
 
-            const signal = detectToolFailure(toolName, getFailureDetectionInput(result))
-            const alreadyRecordedThrowFailure = Boolean(
-              signal && toolCall?.id && hasFailureFired(toolCall.id)
-            )
-            const failureFuseDecision =
-              signal && !alreadyRecordedThrowFailure
-                ? (options.onToolFailureDecision?.({
-                    toolName,
-                    toolCallId: toolCall?.id,
-                    toolArgs,
-                    signal
-                  }) ?? null)
-                : null
-            if (shouldSendFailureFuseNotice(failureFuseDecision)) {
-              options.onFailureFuseNotice?.(failureFuseDecision)
-            }
-            if (!signal) options.onToolSuccess?.({ toolName, toolArgs })
-
-            const postContext: HookContext = {
-              ...hookContext,
-              toolArgs,
-              toolResult: stringifyToolResult(result)
-            }
-            bindHookExecutionResult(postContext, executionResult)
-            const postResult = await runHooksEnriched(
-              options.resolveHooksForContext("PostToolUse", postContext),
-              "PostToolUse",
-              postContext,
-              options.onHookResult
-            )
-            if (postResult) {
-              options.hookScope.activatePersistentHooks(
-                options.resolveHooksForContext("PostToolUse", postContext)
+            const finishNative = async () => {
+              const signal = detectToolFailure(toolName, getFailureDetectionInput(result))
+              const alreadyRecordedThrowFailure = Boolean(
+                signal && toolCall?.id && hasFailureFired(toolCall.id)
               )
-            }
-            throwIfHookHalt(
-              "PostToolUse",
-              postResult,
-              `${toolName} was stopped by a PostToolUse hook`
-            )
-            if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
+              const failureFuseDecision =
+                signal && !alreadyRecordedThrowFailure
+                  ? (options.onToolFailureDecision?.({
+                      toolName,
+                      toolCallId: toolCall?.id,
+                      toolArgs,
+                      signal
+                    }) ?? null)
+                  : null
+              if (shouldSendFailureFuseNotice(failureFuseDecision)) {
+                options.onFailureFuseNotice?.(failureFuseDecision)
+              }
+              if (!signal) options.onToolSuccess?.({ toolName, toolArgs })
 
-            const feedback = buildPostHookFeedback(
-              mergeFailureFuseWarning(postResult, failureFuseDecision)
-            )
-            const presented = applyClassicToolOutput(result, postResult, { toolCallId: toolCall?.id })
-            return feedback ? appendFeedbackToResult(presented, feedback, toolCall?.id) : presented
+              const postContext: HookContext = {
+                ...hookContext,
+                toolArgs,
+                toolResult: stringifyToolResult(result)
+              }
+              bindHookExecutionResult(postContext, executionResult)
+              const postResult = await runHooksEnriched(
+                options.resolveHooksForContext("PostToolUse", postContext),
+                "PostToolUse",
+                postContext,
+                options.onHookResult
+              )
+              if (postResult) {
+                options.hookScope.activatePersistentHooks(
+                  options.resolveHooksForContext("PostToolUse", postContext)
+                )
+              }
+              throwIfHookHalt(
+                "PostToolUse",
+                postResult,
+                `${toolName} was stopped by a PostToolUse hook`
+              )
+              if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
+
+              const feedback = buildPostHookFeedback(
+                mergeFailureFuseWarning(postResult, failureFuseDecision)
+              )
+              const presented = applyClassicToolOutput(result, postResult, { toolCallId: toolCall?.id })
+              return feedback ? appendFeedbackToResult(presented, feedback, toolCall?.id) : presented
+            }
+            return nativeTail ? nativeTail(finishNative) : finishNative()
           })
         }
       )

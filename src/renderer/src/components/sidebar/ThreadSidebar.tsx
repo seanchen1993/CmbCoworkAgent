@@ -1252,6 +1252,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
           variant="ghost"
           size="sm"
           className="w-full justify-start gap-2 text-sm font-semibold"
+          data-app-guide="customize"
           onClick={() => useAppStore.getState().setShowCustomizeView(true, "assistant")}
         >
           <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">

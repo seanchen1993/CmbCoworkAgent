@@ -343,8 +343,11 @@ export function CustomizeView(): React.JSX.Element {
         ? "请在上方选择普通本地聊天，再进入创造者模式。"
         : undefined
   const startCreator = async () => {
-    if (creatorPending.current || creatorUnavailable || !currentThreadId || !currentWorkspacePath)
+    if (creatorPending.current) return
+    if (creatorUnavailable || !currentThreadId || !currentWorkspacePath) {
+      setCreatorError(creatorUnavailable ?? "请先在上方选择一段具有本地项目目录的聊天。")
       return
+    }
     const scope = { threadId: currentThreadId, workspace: currentWorkspacePath }
     const current = captureConfigurationScope(scope)
     const assertCurrent = () => {
@@ -515,7 +518,7 @@ export function CustomizeView(): React.JSX.Element {
           visible={["mods", "claw", "flows"].includes(activeTab)}
           onPractice={(task) => {
             if (!currentThreadId) {
-              setActiveTab("assistant")
+              setCreatorError(creatorUnavailable ?? "请先在上方选择一段具有本地项目目录的聊天。")
               return
             }
             if (task === "inspect") {
@@ -537,6 +540,11 @@ export function CustomizeView(): React.JSX.Element {
             }
           }}
         />
+        {creatorError && activeTab !== "assistant" && activeTab !== "mods" && (
+          <p role="alert" className="shrink-0 border-b px-4 py-3 text-sm text-destructive">
+            {creatorError}
+          </p>
+        )}
         <div
           className="flex min-w-0 min-h-0 flex-1"
           inert={

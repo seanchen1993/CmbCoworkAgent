@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import type { Page } from "playwright"
+import { waitForAsyncEvidence } from "./async-evidence"
 
 interface ContinuitySample {
   frames: number
@@ -78,19 +79,25 @@ export async function runCompositionLongSession(
     await page.waitForFunction(
       () => !document.querySelector<HTMLTextAreaElement>("textarea.composer-textarea")?.disabled
     )
-    await page.waitForFunction(
-      async ({ threadId, turn }) => {
-        const messages = await window.api.threads.getMessages(threadId)
-        return messages.some(
-          (message) =>
-            message.role === "assistant" &&
-            JSON.stringify(message.content).includes(`LONG_DONE_${turn}\\n`) &&
-            JSON.stringify(message.content).includes("段落 64：")
-        )
-      },
-      { threadId, turn },
-      { polling: 100 }
+    const persisted = await waitForAsyncEvidence(
+      () =>
+        page.evaluate(
+          async ({ threadId, turn }) => {
+            const messages = await window.api.threads.getMessages(threadId)
+            return messages.find(
+              (message) =>
+                message.role === "assistant" &&
+                JSON.stringify(message.content).includes(`LONG_DONE_${turn}\\n`) &&
+                JSON.stringify(message.content).includes("段落 64：")
+            )
+          },
+          { threadId, turn }
+        ),
+      (message) => Boolean(message),
+      `long session turn ${turn} complete persisted answer`,
+      30_000
     )
+    assert.equal(persisted?.role, "assistant")
     await page.getByRole("button", { name: "发送消息", exact: true }).waitFor()
     const continuity = await page.evaluate(() =>
       (window as MonitoredWindow).stopCompositionContinuity()

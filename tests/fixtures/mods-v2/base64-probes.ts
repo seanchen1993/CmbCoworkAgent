@@ -10,7 +10,7 @@ function base64Probe() {
     decoded:[atob(" Z\tg\n==\r\f "),atob("YR"),atob("Zm8"),atob("Zm9v")],
     invalid:[name(()=>atob("AA-_")),name(()=>atob("Zg=")),name(()=>btoa("你好"))],
     roundTrip:atob(btoa(bytes))===bytes,
-    hiddenHost:[typeof globalThis.process,typeof globalThis.require,typeof globalThis.__functionHost]
+    hiddenHost:[typeof globalThis.process,typeof globalThis["require"],typeof globalThis.__functionHost]
   };
 }
 `

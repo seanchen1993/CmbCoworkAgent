@@ -210,8 +210,8 @@ async function fixture(options: {
   const ticket = (text = "original native prompt", admission?: {
     assertCurrent(): void
     afterProtection?(): Promise<void>
-  }) => {
-    const native = options.nativePhysical ? captureNative() : undefined
+  }, nativeRuntime?: ReturnType<typeof captureNative>) => {
+    const native = nativeRuntime ?? (options.nativePhysical ? captureNative() : undefined)
     const target = native?.target ?? prepared.target
     const assertCurrent = () => {
       if (native) native.assertCurrent()
@@ -262,6 +262,25 @@ async function fixture(options: {
     })
     return value
   }
+  const nextNativeRuntime = async () => {
+    const previous = getLocalThreadRunLease(threadId)
+    if (!previous || !releaseLocalThreadRunLease(threadId, previous.owner, previous.runId))
+      throw Error("ACTUAL_NATIVE_LEASE_REQUIRED")
+    const runId = `physical-${randomUUID()}`
+    if (!claimLocalThreadRunLease({ threadId, runId, owner: "desktop" }).acquired)
+      throw Error("ACTUAL_NATIVE_LEASE_REQUIRED")
+    const signal = new AbortController().signal
+    const nextPhysical: ModThreadBinding = { workspace, threadId, turnId: randomUUID(),
+      signal, assertLive: assertThread }
+    const next = manager.createRuntimeAuthority(nextPhysical)
+    const unbindNext = manager.bindThread({ ...nextPhysical, runtimeAuthority: next.authority })
+    cleanups.push(() => { unbindNext(); next.release() })
+    await manager.prepareFunctionConversationRuntime(next.authority, signal, runId)
+    const runtime = manager.captureFunctionNativeConversationRuntime(next.authority)
+    if (!runtime) throw Error("ACTUAL_NATIVE_RUNTIME_REQUIRED")
+    expect(runtime.target.ref).toEqual(prepared.target.ref)
+    return runtime
+  }
   const loadHook = async () => {
     const plugin = join(root, "actual-plugin")
     mkdirSync(join(plugin, ".claude-plugin"), { recursive: true })
@@ -304,7 +323,7 @@ async function fixture(options: {
         released: Promise.withResolvers<void>() }
       return checkpointGate
     },
-    functions, loadHook, closeOwner,
+    functions, loadHook, closeOwner, nextNativeRuntime,
     rows: () => appDb.getThreadMessages(threadId) }
 }
 
@@ -472,7 +491,7 @@ describe("actual native conversation runtime dispatch", () => {
     expect(f.writer).toHaveBeenCalledTimes(1)
   })
 
-  it("uses future native core after Guest configuration epochs change without renewing old Guards",
+  it("requires a fresh physical run after policy configuration without renewing old Guards",
     async () => {
       const f = await fixture({ nativePhysical: true, requiredPolicy: true })
       await f.loadHook()
@@ -488,27 +507,32 @@ describe("actual native conversation runtime dispatch", () => {
       runtime.assertCurrent()
       f.instance.authority.assertLive()
       f.binding.assertLive?.()
-      const currentPolicy = runtime.capturePolicy()
+      expect(() => runtime.capturePolicy()).toThrow("MODS_CALL_SCOPE_CHANGED")
+      const currentRuntime = await f.nextNativeRuntime()
+      const currentPolicy = currentRuntime.capturePolicy()
       currentPolicy.assertCurrent()
       expect(currentPolicy.value.epoch).not.toBe(oldPolicy.value.epoch)
-      const first = f.ticket("native-secret-canary", currentPolicy)
-      const firstResult = await runtime.dispatch(first)
+      const first = f.ticket("native-secret-canary", currentPolicy, currentRuntime)
+      const firstResult = await currentRuntime.dispatch(first)
       expect(acceptedText(first.acceptResult(firstResult)))
         .toEqual([{ type: "text", text: "[REDACTED]" }])
       f.manager.configure(f.workspace, true, true)
-      const nextPolicy = runtime.capturePolicy()
-      const second = f.ticket("original physical core after reenable", nextPolicy)
-      expect(acceptedText(second.acceptResult(await runtime.dispatch(second))))
-        .toEqual([{ type: "text", text: "original physical core after reenable" }])
-      expect(f.captureNative()).toBe(runtime)
-      expect(append).not.toHaveBeenCalled()
+      expect(() => currentPolicy.assertCurrent()).toThrow("MODS_CALL_SCOPE_CHANGED")
+      expect(() => currentRuntime.capturePolicy()).toThrow("MODS_CALL_SCOPE_CHANGED")
+      const nextRuntime = await f.nextNativeRuntime()
+      const nextPolicy = nextRuntime.capturePolicy()
+      const second = f.ticket("new physical core after reenable", nextPolicy, nextRuntime)
+      expect(acceptedText(second.acceptResult(await nextRuntime.dispatch(second))))
+        .toEqual([{ type: "text", text: "new physical core after reenable" }])
+      expect(nextRuntime).not.toBe(currentRuntime)
+      expect(append).toHaveBeenCalledTimes(1)
       expect(f.writer).toHaveBeenCalledTimes(2)
       expect(f.guestLoads).toHaveBeenCalledTimes(loads)
       expect(f.sources).toHaveBeenCalledTimes(sources)
       expect(f.discovery).not.toHaveBeenCalled()
     })
 
-  it("rejects a pending old-policy publication and allows only a newly admitted current policy", async () => {
+  it("rejects a pending old-policy publication and admits the current policy only on a new physical run", async () => {
     const f = await fixture({ nativePhysical: true, requiredPolicy: true })
     const runtime = f.captureNative(), policy = runtime.capturePolicy()
     const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>()
@@ -526,8 +550,10 @@ describe("actual native conversation runtime dispatch", () => {
     expect(f.writer).not.toHaveBeenCalled()
     expect(f.rows()).toEqual([])
     expect(f.store.readReceipt(runtime.target.ref, old.input.uuid)).toBeUndefined()
-    const current = f.ticket("native-secret-canary", runtime.capturePolicy())
-    expect(acceptedText(current.acceptResult(await runtime.dispatch(current))))
+    expect(() => runtime.capturePolicy()).toThrow("MODS_CALL_SCOPE_CHANGED")
+    const currentRuntime = await f.nextNativeRuntime()
+    const current = f.ticket("native-secret-canary", currentRuntime.capturePolicy(), currentRuntime)
+    expect(acceptedText(current.acceptResult(await currentRuntime.dispatch(current))))
       .toEqual([{ type: "text", text: "[REDACTED]" }])
     expect(f.writer).toHaveBeenCalledTimes(1)
     expect(f.rows()).toHaveLength(1)

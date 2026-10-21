@@ -172,6 +172,8 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
         "description",
         "author",
         "license",
+        "keywords",
+        "useScenario",
         "userConfig"
       ])
     if (pluginFields?.userConfig !== undefined)

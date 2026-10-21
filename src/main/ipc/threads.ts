@@ -4458,7 +4458,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       } catch (error) {
         if (isCheckpointRuntimeProjectionCancelled(error)) return null
         console.warn("Failed to bootstrap legacy checkpoint transcript:", error)
-        return null
+        // Only a retired read is cancellation. Keep proof, migration and worker
+        // failures visible to bounded hydration recovery and its diagnostics.
+        throw error
       } finally { read.dispose() }
     }
   )

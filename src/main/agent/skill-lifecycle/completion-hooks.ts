@@ -12,6 +12,54 @@ import { parseCompletionGateDecision, type CompletionGate } from "./completion-g
 import { completionGateBudget, withCompletionBudget } from "../../mods/v2/completion-budget"
 import type { HookAccountingBinder } from "../../hooks/model-accounting"
 import { isCreatorBudgetError } from "../../mods/devtools/creator-model-accounting"
+import { HumanMessage } from "@langchain/core/messages"
+import { randomUUID } from "node:crypto"
+import { realpathSync } from "node:fs"
+import { captureLocalThreadRunLease, getLocalThreadRunLease } from "../thread-run-lease"
+import { captureNativeMessage } from "../native-message-capture"
+import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { isSameWorkspacePath } from "../../../shared/workspace-path"
+
+export interface CompletionRevisionInput { readonly messages: [HumanMessage] }
+interface RevisionInputSource {
+  readonly message: HumanMessage
+  readonly threadId: string
+  readonly runId: string
+  readonly workspace: string
+  readonly signal: AbortSignal
+  used: boolean
+  violated: boolean
+  assertCurrent(): void
+}
+// Only the budgeted completion loop below can mint an input. Prefixes, metadata,
+// copies and arbitrary calls to the native agent never acquire this provenance.
+const revisionInputs = new WeakMap<object, RevisionInputSource>()
+const revisionHas = WeakMap.prototype.has, revisionGet = WeakMap.prototype.get
+const revisionSet = WeakMap.prototype.set, nativeApply = Reflect.apply
+
+export function isCompletionRevisionInput(value: unknown): value is CompletionRevisionInput {
+  return Boolean(value && typeof value === "object" &&
+    nativeApply(revisionHas, revisionInputs, [value]))
+}
+
+export function consumeCompletionRevisionInput(value: unknown, expected: {
+  readonly threadId: string; readonly runId: string; readonly workspace: string
+}): Readonly<{ message: HumanMessage; signal: AbortSignal; assertCurrent(): void }> | undefined {
+  if (!value || typeof value !== "object") return undefined
+  const source = nativeApply(revisionGet, revisionInputs, [value]) as RevisionInputSource | undefined
+  if (!source) return undefined
+  if (source.used) {
+    source.violated = true
+    throw new ModFunctionError("MODS_COMPLETION_REVISION_INPUT_INVALID")
+  }
+  source.used = true
+  source.assertCurrent()
+  if (source.threadId !== expected.threadId || source.runId !== expected.runId ||
+    !isSameWorkspacePath(realpathSync.native(source.workspace), realpathSync.native(expected.workspace)))
+    throw new ModFunctionError("MODS_COMPLETION_REVISION_INPUT_INVALID")
+  return Object.freeze({ message: source.message, signal: source.signal,
+    assertCurrent: source.assertCurrent })
+}
 
 export type StopHookContext = NonNullable<HookContext["stopContext"]>
 
@@ -318,7 +366,7 @@ export async function runCompletionHooksWithRevision({
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
   skillUseTracker?: SkillUseTracker
-  runRevision: (prompt: string, signal?: AbortSignal) => Promise<void>
+  runRevision: (prompt: string, signal?: AbortSignal, input?: CompletionRevisionInput) => Promise<void>
   sendNotice: (message: string) => void
   sendError: (message: string) => void
   onHookResult?: HookResultCallback
@@ -333,6 +381,7 @@ export async function runCompletionHooksWithRevision({
   hasTerminalModelRefusal?: () => boolean
   bindHookAccounting?: HookAccountingBinder
 }): Promise<CompletionHookOutcome> {
+  const lease = getLocalThreadRunLease(threadId), ownsLease = captureLocalThreadRunLease(threadId)
   let postSkillRevisionCount = 0
   let stopRevisionCount = 0
   let stopHookActive = false
@@ -361,7 +410,30 @@ export async function runCompletionHooksWithRevision({
   }
   const modelBudget = completionGate ? completionGateBudget(completionGate) : undefined
   const originalSignal = abortSignal
-  const revise = (prompt: string): Promise<void> => runRevision(prompt, abortSignal)
+  const revise = async (prompt: string): Promise<void> => {
+    const message = new HumanMessage({ id: randomUUID(), content: prompt })
+    const input: CompletionRevisionInput = Object.freeze({
+      messages: Object.freeze([message]) as unknown as [HumanMessage]
+    })
+    let active = true
+    const digest = captureNativeMessage(message, () => abortSignal.throwIfAborted()).digest
+    // Legacy/worker callers without a physical native run keep their ordinary path.
+    // A real main conversation can consume only its original, still-owned lease.
+    if (lease && ownsLease && runId === lease.runId && workspacePath) {
+      const signal = abortSignal
+      const source: RevisionInputSource = { message, threadId, runId, workspace: workspacePath, signal,
+        used: false, violated: false,
+        assertCurrent() {
+          signal.throwIfAborted()
+          if (!active || source.violated || !ownsLease() ||
+            captureNativeMessage(message, () => signal.throwIfAborted()).digest !== digest)
+            throw new ModFunctionError("MODS_COMPLETION_REVISION_INPUT_INVALID")
+        } }
+      nativeApply(revisionSet, revisionInputs, [input, source])
+    }
+    try { await runRevision(prompt, abortSignal, input) }
+    finally { active = false }
+  }
   const execute = async (): Promise<CompletionHookOutcome> => {
     const budgetExhausted = (count: number): boolean =>
       (completionGate ? usedBudget() : count) >= maxRevisionAttempts

@@ -201,7 +201,7 @@ export function installChatFrameObserver(options: { maxSamples?: number } = {}) 
       scroll: select("[data-chat-message-scroll-area] [data-radix-scroll-area-viewport]").map(
         (node) => ({ node: nodeId(node), top: node.scrollTop, height: node.scrollHeight })
       ),
-      guideVisible: select('[aria-label="新功能导览"]').length > 0
+      guideVisible: select('[aria-label="任务示例演练"], [aria-label="应用使用指引"]').length > 0
     }
   }
   type Sample = ReturnType<typeof read> & {

@@ -160,7 +160,9 @@ async function main() {
     )
     await workspace.getByRole("button", { name: "Close", exact: true }).click()
     await workspace.waitFor({ state: "hidden" })
-    await page.getByRole("button", { name: "使用指引", exact: true }).click()
+    // Chat help now opens the application controls walkthrough, not this workspace.
+    await page.locator('[data-app-guide="workspace"]').click()
+    await workspace.getByRole("button", { name: "使用指引", exact: true }).click()
     await guide.getByText("第 1 / 7 步", { exact: true }).waitFor()
     await guide.getByRole("button", { name: "关闭使用指引", exact: true }).click()
     await page.setViewportSize({ width: 390, height: 740 })

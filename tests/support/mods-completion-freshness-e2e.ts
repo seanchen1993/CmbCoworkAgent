@@ -5,6 +5,10 @@ import { join } from "node:path"
 import AdmZip from "adm-zip"
 import type { ElectronApplication, Page } from "playwright"
 import { verifyAutobizStage } from "./mods-autobiz-stage-e2e"
+import {
+  collectRegisteredRevocationDiagnostics,
+  installRegisteredRevocationDiagnostics
+} from "./mods-registered-revocation-e2e"
 
 /** Physical file edit -> existing watcher -> host evidence ledger -> real React UI. */
 export async function verifyCompletionFreshness(
@@ -65,13 +69,141 @@ export async function verifyCompletionFreshness(
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Evidence freshness E2E", { exact: true }).first().click()
   const rail = page.locator("[data-completion-evidence]")
+  const summary = rail.locator(":scope > summary")
+  const staleOverview = "检查后文件或规则有变化，需要重新检查。"
+  const staleVisible = async () =>
+    (await summary.innerText()).includes("需要重新检查") &&
+    (await rail.locator("[data-completion-overview]").innerText()) === staleOverview &&
+    (await summary.isVisible())
+  const openEvidence = async () => {
+    if (!(await rail.evaluate((element) => (element as HTMLDetailsElement).open)))
+      await summary.click()
+  }
   const composer = page.locator("textarea.composer-textarea")
   const submit = page.locator("form").filter({ has: composer }).locator('button[type="submit"]')
   const records = () => page.evaluate((id) => window.api.mods.completionEvidence(id), threadId)
+  const diagnosticSessions: unknown[] = []
+  const startDiagnostics = async () => {
+    await installRegisteredRevocationDiagnostics(page).catch((error) =>
+      console.error("Unable to start freshness DOM diagnostics", error)
+    )
+    try {
+      await page.evaluate(() => {
+        const events: Array<Record<string, unknown>> = []
+        const restores: Array<() => void> = []
+        const log = (event: Record<string, unknown>) => {
+          try {
+            if (events.length < 160) events.push({ at: performance.now(), ...event })
+          } catch {
+            /* Diagnostics cannot alter an actual API call. */
+          }
+        }
+        for (const name of ["promptAttach", "promptEditSupport", "promptEdit"] as const) {
+          try {
+            const descriptor = Object.getOwnPropertyDescriptor(window.api.mods, name)
+            const original: unknown = descriptor?.value
+            if (
+              !descriptor ||
+              typeof original !== "function" ||
+              (!descriptor.writable && !descriptor.configurable)
+            ) {
+              log({
+                name,
+                phase: "unavailable",
+                reason: "preload method is not safely replaceable",
+                writable: descriptor?.writable,
+                configurable: descriptor?.configurable
+              })
+              continue
+            }
+            let sequence = 0
+            const wrapped = function (...args: unknown[]) {
+              const call = ++sequence
+              log({ name, call, phase: "started" })
+              try {
+                const result: unknown = Reflect.apply(original, window.api.mods, args)
+                if (result instanceof Promise) {
+                  void result
+                    .then(
+                      () => log({ name, call, phase: "fulfilled" }),
+                      (error) => log({ name, call, phase: "rejected", error: String(error) })
+                    )
+                    .catch(() => undefined)
+                } else log({ name, call, phase: "returned" })
+                return result
+              } catch (error) {
+                log({ name, call, phase: "threw", error: String(error) })
+                throw error
+              }
+            }
+            Object.defineProperty(window.api.mods, name, { ...descriptor, value: wrapped })
+            restores.push(() => {
+              if (Object.getOwnPropertyDescriptor(window.api.mods, name)?.value === wrapped)
+                Object.defineProperty(window.api.mods, name, descriptor)
+            })
+            log({ name, phase: "observing" })
+          } catch (error) {
+            log({ name, phase: "unavailable", error: String(error) })
+          }
+        }
+        Object.assign(globalThis, { __modsFreshnessPromptDiagnostics: { events, restores } })
+      })
+    } catch (error) {
+      console.error("Unable to observe actual freshness prompt APIs", error)
+    }
+  }
+  const collectDiagnostics = async (label: string) => {
+    try {
+      const prompt = await page
+        .evaluate(() => {
+          const global = globalThis as typeof globalThis & {
+            __modsFreshnessPromptDiagnostics?: {
+              events: Array<Record<string, unknown>>
+              restores: Array<() => void>
+            }
+          }
+          const state = global.__modsFreshnessPromptDiagnostics
+          try {
+            return { missing: !state, events: state?.events ?? [] }
+          } finally {
+            for (const restore of state?.restores ?? []) {
+              try {
+                restore()
+              } catch {
+                /* A readonly bridge remains untouched. */
+              }
+            }
+            delete global.__modsFreshnessPromptDiagnostics
+          }
+        })
+        .catch((error) => ({ error: String(error) }))
+      const dom = await collectRegisteredRevocationDiagnostics(page)
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let currentRecords: unknown
+      try {
+        currentRecords = await Promise.race([
+          records().catch((error) => ({ error: String(error) })),
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve({ diagnosticReadTimedOut: true }), 2000)
+          })
+        ])
+      } finally {
+        clearTimeout(timer)
+      }
+      diagnosticSessions.push({ label, requestCount: requests.length, currentRecords, prompt, dom })
+      writeFileSync(
+        join(artifacts, "completion-freshness-submit-diagnostics.json"),
+        JSON.stringify({ threadId, sessions: diagnosticSessions }, null, 2)
+      )
+    } catch (error) {
+      console.error("Unable to preserve freshness submission diagnostics", error)
+    }
+  }
   const run = async (text: string) => {
     await composer.fill(text)
     await submit.click()
   }
+  await startDiagnostics()
   try {
     await page.evaluate(() => window.api.mods.configureGlobal(false))
     const before = requests.length
@@ -120,10 +252,7 @@ export async function verifyCompletionFreshness(
         (await records()).some((row) => row.phase === "invalidated" && row.status === "stale"),
       "physical workspace watcher invalidates the old PASS"
     )
-    await until(
-      async () => (await rail.locator(":scope > summary").innerText()).includes("证据已失效"),
-      "stale state reaches UI without a reload"
-    )
+    await until(staleVisible, "stale state reaches UI without a reload")
     const latencyMs = Date.now() - started
     assert.equal(requests.length, modelCalls, "freshness must not invoke the model")
     assert.equal(
@@ -131,9 +260,14 @@ export async function verifyCompletionFreshness(
       1,
       "freshness must not re-run checks"
     )
-    await rail.locator(":scope > summary").click()
-    assert((await rail.innerText()).includes("input-changed"))
-    assert((await rail.innerText()).includes("请对当前版本重新检查"))
+    const invalidated = (await records()).find(
+      (row) => row.phase === "invalidated" && row.status === "stale"
+    )!
+    await openEvidence()
+    const staleRow = rail.locator(`[data-completion-record="${invalidated.id}"]`)
+    assert(await staleRow.isVisible())
+    assert((await staleRow.innerText()).includes("input-changed"))
+    assert((await staleRow.innerText()).includes("请对当前版本重新检查"))
     await page.screenshot({ path: join(artifacts, "completion-freshness-stale.png") })
     writeFileSync(
       join(artifacts, "completion-freshness.json"),
@@ -142,13 +276,13 @@ export async function verifyCompletionFreshness(
     pass(
       "physical file modification invalidates host proof and UI without model/check replay; unchanged content stays valid"
     )
+    await collectDiagnostics("before-stale-evidence-reload")
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("Evidence freshness E2E", { exact: true }).first().click()
+    await startDiagnostics()
     await openModsResults(page)
-    await until(
-      async () => (await rail.locator(":scope > summary").innerText()).includes("证据已失效"),
-      "stale evidence survives renderer restart"
-    )
+    await until(staleVisible, "stale evidence survives renderer restart")
+    assert((await records()).some((row) => row.id === invalidated.id && row.status === "stale"))
     await page.evaluate(() => window.api.mods.configureGlobal(false))
     await until(async () => (await rail.count()) === 0, "off removes evidence UI")
     assert.deepEqual(await records(), [])
@@ -305,19 +439,24 @@ export async function verifyCompletionFreshness(
       async () => (await rail.locator(":scope > summary").innerText()).includes("检查错误"),
       "capture error reaches the actual evidence UI"
     )
-    await rail.locator(":scope > summary").click()
-    assert((await rail.innerText()).includes("未取得文件证据"))
     const failed = (await records()).find((row) => row.phase === "capture.failed")!
+    await openEvidence()
+    const failedRow = rail.locator(`[data-completion-record="${failed.id}"]`)
+    assert(await failedRow.isVisible())
+    assert((await failedRow.innerText()).includes("尚未取得文件和需求证据"))
     assert.equal(failed.binding, null)
     assert.equal(failed.status, "error")
     await page.screenshot({ path: join(artifacts, "completion-capture-error.png") })
+    await collectDiagnostics("before-capture-error-reload")
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("Evidence freshness E2E", { exact: true }).first().click()
+    await startDiagnostics()
     assert((await records()).some((row) => row.id === failed.id && row.binding === null))
     pass(
       "report-only capture failure persists as unavailable evidence, explains the next action and survives renderer restart"
     )
   } finally {
+    await collectDiagnostics("finally")
     await page.evaluate(() => window.api.mods.configureGlobal(true))
   }
 }

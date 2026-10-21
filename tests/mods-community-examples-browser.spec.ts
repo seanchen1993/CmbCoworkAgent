@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { build } from "esbuild"
 import { chromium } from "playwright"
-import { PLATFORM_EXAMPLES } from "../src/main/mods/community-examples"
+import { COMMUNITY_EXAMPLES, PLATFORM_EXAMPLES } from "../src/main/mods/community-examples"
 
 interface CommunityExamplesFixtureWindow extends Window {
   fixture: {
@@ -32,7 +32,7 @@ import{OfficialSparksExamples}from${JSON.stringify(entry)};
 import{parseClawProfile}from"./src/shared/mods/claw";
 const root=createRoot(document.getElementById("root"));let active=true,key=0,calls=[],claw,status,globalOn,failGrant=false,hold=false,release,holdList=false,releaseList,thread="thread",workspace="c:/owned";
 const cap=name=>({pluginId:name+"-uuid",name,digest:"a".repeat(64)});
-const examples=[...${JSON.stringify(PLATFORM_EXAMPLES)},...([['token-weather','用量天气'],['replay-theater','修改回放'],['blast-radius','危险命令确认']].map(([id,title])=>({id,title,pluginName:id,description:title+'的中文说明',usage:'在当前聊天中使用'+title,commit:'a'.repeat(40),upstreamUrl:'https://example.invalid/'+id,...(id==='blast-radius'?{}:{conflictNote:'天气与回放占用同一区域，请分开应用。'})})))];
+const examples=[...${JSON.stringify(PLATFORM_EXAMPLES)},...${JSON.stringify(COMMUNITY_EXAMPLES)}.map(example=>({...example,upstreamUrl:'https://example.invalid/'+example.id}))];
 const mount=(replace=true)=>root.render(<div data-active={active}><OfficialSparksExamples active={active} key={replace?++key:key} threadId={thread} workspaceHint={workspace} onReturnToChat={()=>calls.push(['return'])}/></div>);
 const reset=(mode='normal')=>{active=true;holdList=mode==='held-list';releaseList=undefined;calls=[];failGrant=false;hold=false;thread='thread';workspace='c:/owned';globalOn=mode!=='disabled';
 status={workspace,enabled:globalOn,outputPolicy:true,mods:[],diagnostics:[],functionMods:[{...cap('other'),state:'ready',capabilities:[]},{...cap('token-weather'),state:'ready',capabilities:['ui.resolve']}]};
@@ -107,6 +107,15 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
     await page.getByRole("heading", { name: "挑一个小帮手" }).waitFor()
     assert.equal(await page.getByRole("article").count(), PLATFORM_EXAMPLES.length + 3)
     assert.deepEqual((await get()).calls, [])
+    for (const example of [...PLATFORM_EXAMPLES, ...COMMUNITY_EXAMPLES]) {
+      assert(await card(example.title).getByText("怎样触发与核对效果", { exact: true }).isVisible())
+      assert(await card(example.title).getByText(example.usage, { exact: true }).isVisible())
+    }
+    assert(
+      await card("用量天气")
+        .getByText(/不是累计输入\/输出 Token/)
+        .isVisible()
+    )
     await card("用量天气").locator("summary").click()
     await card("用量天气").getByRole("button", { name: "查看官方源码", exact: true }).click()
     assert.equal(
@@ -200,16 +209,23 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
     )
 
     await card("阶段调试工作台").locator("summary").click()
-    assert(await card("阶段调试工作台").getByText(/准备方案不会执行/).isVisible())
-    assert.equal(await card("阶段调试工作台").getByRole("button", { name: "查看官方源码" }).count(), 0)
+    assert(
+      await card("阶段调试工作台")
+        .getByText(/准备方案不会执行/)
+        .isVisible()
+    )
+    assert.equal(
+      await card("阶段调试工作台").getByRole("button", { name: "查看官方源码" }).count(),
+      0
+    )
     await start("阶段调试工作台")
     assert(await page.getByRole("button", { name: "确认并使用" }).isDisabled())
-    assert.equal((await get()).calls.filter(row => row[0] === "grant").length, 2)
-    assert((await get()).calls.some(row => row[0] === "install" && row[1] === "stage-debugger"))
+    assert.equal((await get()).calls.filter((row) => row[0] === "grant").length, 2)
+    assert((await get()).calls.some((row) => row[0] === "install" && row[1] === "stage-debugger"))
     await confirm()
     await card("阶段调试工作台").getByRole("button", { name: "正在使用" }).waitFor()
     state = await get()
-    assert(state.claw.active.capabilities.some(row => row.name === "stage-debugger"))
+    assert(state.claw.active.capabilities.some((row) => row.name === "stage-debugger"))
     assert.deepEqual(state.claw.active.models, { default: "chosen", roles: { Explore: "fast" } })
 
     await call("disabled")
@@ -334,7 +350,7 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
         {
           passed: true,
           checks: [
-            "eight Chinese cards with honest upstream and local provenance; no initial writes",
+            "nine Chinese cards with visible triggers, expected effects and honest provenance; no initial writes",
             "provider and consumer need separate explicit consent and preserve current profile",
             "behavior preview and repeatable file demo guidance",
             "exact consent and conflict cancellation",

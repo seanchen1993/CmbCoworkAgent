@@ -132,7 +132,7 @@ try {
   await page.addStyleTag({ content: css })
   await page.addScriptTag({ content: bundle.outputFiles[0].text })
   await page.getByRole("button", { name: "返回应用", exact: true }).waitFor()
-  const tour = page.getByRole("region", { name: "新功能导览", exact: true })
+  const tour = page.getByRole("region", { name: "任务示例演练", exact: true })
   assert.equal(await tour.count(), 0, "Creator landing must not be blocked by a tour")
   await page.getByRole("button", { name: "进入创造者模式", exact: true }).waitFor()
   assert.equal(
@@ -146,7 +146,9 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
   await page.screenshot({ path: join(output, "creator-first-375.png") })
   await page.getByRole("button", { name: "浏览灵件示例", exact: true }).click()
-  await tour.getByRole("heading", { name: "先选一件想做的事，跟着示例看一遍" }).waitFor()
+  assert.equal(await tour.count(), 0, "Browsing examples must leave the real page visible")
+  await page.getByRole("button", { name: "任务示例演练", exact: true }).click()
+  await tour.getByRole("heading", { name: "选择业务示例，先演练再操作" }).waitFor()
   for (const task of ["0", "1", "2"]) {
     await tour.getByLabel("选择任务", { exact: true }).selectOption(task)
     await tour.locator("button.bg-primary").click()
@@ -158,7 +160,7 @@ try {
     )
   }
   assert.deepEqual(await page.evaluate(() => window.calls), [])
-  await tour.getByRole("button", { name: "关闭导览，自己操作", exact: true }).click()
+  await tour.getByRole("button", { name: "关闭示例，自己操作", exact: true }).click()
   assert.equal(await tour.count(), 0)
   assert.equal(await page.evaluate(() => localStorage.getItem("devclaw.sparks-tour.v1")), "seen")
   await page.reload()
@@ -217,9 +219,9 @@ try {
   await page.getByText("创建试用区域", { exact: true }).waitFor()
   await advanced()
   await page.getByLabel("未保存源码").fill("preserve my unsaved source")
-  await page.getByRole("button", { name: "新功能导览", exact: true }).click()
+  await page.getByRole("button", { name: "任务示例演练", exact: true }).click()
   await tour.getByLabel("选择任务", { exact: true }).selectOption("0")
-  await tour.getByRole("button", { name: "关闭导览，自己操作", exact: true }).click()
+  await tour.getByRole("button", { name: "关闭示例，自己操作", exact: true }).click()
   await advanced()
   assert.equal(
     await page.getByLabel("未保存源码").inputValue(),
@@ -309,7 +311,7 @@ try {
         button.textContent === "对话创作" && button.getAttribute("aria-pressed") === "true"
     )
   )
-  assert.equal(await createPage.getByRole("region", { name: "新功能导览", exact: true }).count(), 0)
+  assert.equal(await createPage.getByRole("region", { name: "任务示例演练", exact: true }).count(), 0)
   await createPage.getByRole("button", { name: "挑选使用", exact: true }).click()
   await createPage.evaluate(() => window.changeScope())
   assert.equal(
@@ -340,7 +342,7 @@ try {
     await creatorPage.addScriptTag({ content: bundle.outputFiles[0].text })
     const entry = creatorPage.getByRole("button", { name: "进入创造者模式", exact: true })
     await entry.waitFor()
-    assert.equal(await creatorPage.getByRole("region", { name: "新功能导览" }).count(), 0)
+    assert.equal(await creatorPage.getByRole("region", { name: "任务示例演练" }).count(), 0)
     if (scenario === "no-workspace") {
       assert.equal(await entry.isDisabled(), true)
       await creatorPage

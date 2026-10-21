@@ -8,6 +8,12 @@ import type { FlowDefinition, FlowRun } from "../src/shared/mods/flows/types"
 import { compositionEnvironment, compositionPlugin } from "./support/mods-composition-fixtures"
 import { startFlowModel } from "./support/mods-flow-model"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
+import {
+  openModsProgress,
+  closeModsProgress,
+  openModsClawEditor,
+  openModsClawMoreSettings
+} from "./support/mods-sidebar-navigation"
 
 const root = resolve(__dirname, "..")
 const artifacts = process.env.CMB_MODS_CORE_E2E_ARTIFACTS
@@ -346,12 +352,12 @@ async function main() {
     )
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("Composition A+B", { exact: true }).first().click()
-    await page.getByRole("button", { name: "Claw 工作台", exact: true }).click()
-    await page.getByRole("region", { name: "人工成果确认" }).waitFor({ timeout: 30_000 })
-    await page.getByRole("button", { name: "收起 Claw 工作台", exact: true }).click()
+    const taskPanel = await openModsProgress(page)
+    await taskPanel.getByRole("region", { name: "人工成果确认" }).waitFor({ timeout: 30_000 })
+    await closeModsProgress(page)
     assert.equal((await readRun())?.status, "waiting")
-    await page.getByRole("button", { name: "打开 Claw 工作台", exact: true }).click()
-    await page.getByRole("region", { name: "人工成果确认" }).waitFor()
+    await openModsProgress(page)
+    await taskPanel.getByRole("region", { name: "人工成果确认" }).waitFor()
     assert.equal((await readRun())?.pendingApproval?.nonce, current!.pendingApproval!.nonce)
     for (const width of [1366, 1024, 800]) {
       await app.evaluate(({ BrowserWindow }, width) => {
@@ -370,15 +376,24 @@ async function main() {
     await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()[0].setContentSize(1366, 900)
     )
-    await page.getByRole("button", { name: "配置", exact: true }).click()
+    const settings = await openModsProgress(page, "高级设置")
     await page.screenshot({ path: join(artifacts, "configuration-sidebar.png") })
-    await page.getByRole("button", { name: "编辑我的 Claw", exact: true }).click()
-    await page.getByLabel("Claw 默认模型").waitFor()
+    await settings.getByText("高级：手动管理组合", { exact: true }).click()
+    await settings.getByRole("button", { name: "管理助手组合", exact: true }).click()
+    await openModsClawEditor(page)
     await page.getByRole("button", { name: profileA.name, exact: true }).click()
-    assert.equal(await page.getByLabel("Claw 默认模型").inputValue(), "custom:composition-a")
-    assert.equal(await page.getByLabel("Claw 角色模型 review").inputValue(), "custom:composition-b")
+    await openModsClawMoreSettings(page)
+    await page.getByLabel("聊天默认模型", { exact: true }).waitFor()
+    assert.equal(
+      await page.getByLabel("聊天默认模型", { exact: true }).inputValue(),
+      "custom:composition-a"
+    )
+    assert.equal(
+      await page.getByLabel("步骤模型 review", { exact: true }).inputValue(),
+      "custom:composition-b"
+    )
     await page.screenshot({ path: join(artifacts, "claw-binding-editor.png") })
-    await page.getByRole("button", { name: "回到聊天使用", exact: true }).click()
+    await page.getByRole("button", { name: "返回应用", exact: true }).click()
     pass(
       "Actual Electron approval sidebar and Claw configuration render at 1366, 1024 and 800 widths"
     )
@@ -454,11 +469,9 @@ async function main() {
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("Composition A+B", { exact: true }).first().click()
     assert.equal(await page.locator("textarea.composer-textarea").count(), 1)
-    await page.getByRole("button", { name: "打开 Claw 工作台", exact: true }).click()
-    await page.locator("[data-claw-sidebar-shell]").waitFor()
-    await page
-      .getByText(`可启动流程：${saved.definition.name} · v${saved.revision}`, { exact: true })
-      .waitFor({ timeout: 30_000 })
+    const configuration = await openModsProgress(page, "高级设置")
+    await configuration.getByText("查看这套组合的设置", { exact: true }).click()
+    await configuration.locator("dd").filter({ hasText: saved.definition.name }).waitFor()
     await page.screenshot({ path: join(artifacts, "composition-sidebar.png") })
     pass("Production chat has one composer and a separate Claw sidebar")
     await page.getByText("Composition B only", { exact: true }).first().click()
@@ -474,8 +487,9 @@ async function main() {
       )
     )
     pass("The ordinary production chat adapter uses the current conversation's bound default model")
-    await page.getByLabel("当前助手指定的聊天模型").waitFor()
-    assert.match(await page.getByLabel("当前助手指定的聊天模型").innerText(), /composition-b/)
+    const boundModel = page.getByRole("button", { name: /当前组合模型：.*composition-b/ })
+    await boundModel.waitFor()
+    assert.match(await boundModel.innerText(), /composition-b/)
     await page.screenshot({ path: join(artifacts, "bound-default-model-chat.png") })
     const readCounts = async () => {
       const counts: number[] = []

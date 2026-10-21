@@ -160,3 +160,64 @@ it("restores a visible history row ahead of overscan without starving either que
     "overscan-5"
   ])
 })
+
+it("keeps a visible message responsive while optional decoration reads are stalled", async () => {
+  const queue = createFunctionSiteQueue()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let decorations = 0
+  const pending = Array.from({ length: 4 }, () =>
+    queue.run(
+      () => true,
+      async () => {
+        decorations++
+        await gate
+      },
+      "interactive"
+    )
+  )
+  expect(decorations).toBe(3)
+  const message = queue.run(
+    () => true,
+    async () => "protected message",
+    "visible"
+  )
+  expect(await message).toBe("protected message")
+  expect(decorations).toBe(3)
+  release()
+  await Promise.all(pending)
+  expect(decorations).toBe(4)
+})
+
+it("reclaims cancelled queued rows before rejecting a fresh visible message at capacity", async () => {
+  const queue = createFunctionSiteQueue()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const active = Array.from({ length: 4 }, () =>
+    queue.run(
+      () => true,
+      () => gate
+    )
+  )
+  let current = true
+  const stale = Array.from({ length: 256 }, () =>
+    queue.run(
+      () => current,
+      async () => "obsolete"
+    )
+  )
+  current = false
+  const next = queue.run(
+    () => true,
+    async () => "current",
+    "visible"
+  )
+  expect(await Promise.all(stale)).toEqual(Array(256).fill(null))
+  release()
+  await Promise.all(active)
+  expect(await next).toBe("current")
+})

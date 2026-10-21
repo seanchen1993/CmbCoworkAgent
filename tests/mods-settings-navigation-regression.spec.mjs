@@ -2,9 +2,9 @@ import assert from "node:assert/strict"
 import { build } from "esbuild"
 import { chromium } from "playwright"
 import { resolve, join } from "node:path"
-import { existsSync, writeFileSync, mkdirSync } from "node:fs"
+import { existsSync, writeFileSync, mkdirSync, readdirSync } from "node:fs"
 const root = process.cwd(),
-  output = resolve("output/sparks-ux-redesign-20261010/navigation-test"),
+  output = resolve("output/mods-settings-navigation", String(Date.now())),
   renderer = resolve("src/renderer/src")
 mkdirSync(output, { recursive: true })
 const bundle = await build({
@@ -26,7 +26,11 @@ createRoot(document.getElementById('root')).render(<CustomizeView/>);`
   jsx: "automatic",
   alias: { "@": renderer },
   loader: { ".md": "text", ".png": "dataurl" },
-  define: { "process.env.NODE_ENV": '"production"' },
+  define: {
+    "process.env.NODE_ENV": '"production"',
+    "import.meta.env": "{}",
+    "import.meta.hot": "undefined"
+  },
   plugins: [
     {
       name: "fixture",
@@ -38,14 +42,23 @@ createRoot(document.getElementById('root')).render(<CustomizeView/>);`
         b.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
           resolveDir: root,
           loader: "js",
-          contents: `import{useSyncExternalStore}from'react';let state={currentThreadId:'t',customizeInitialTab:location.hash.slice(1),threads:[{thread_id:'t',metadata:{workspacePath:'C:/isolated/A'}}],setShowCustomizeView:(_open,tab)=>{state={...state,customizeInitialTab:tab};subscribers.forEach(fn=>fn())}};window.moveWorkspace=workspace=>{state={...state,threads:[{thread_id:'t',metadata:{workspacePath:workspace}}]};subscribers.forEach(fn=>fn())};const subscribers=new Set();export const useAppStore=(select)=>{const value=useSyncExternalStore(fn=>{subscribers.add(fn);return()=>subscribers.delete(fn)},()=>state);return select?select(value):value};useAppStore.getState=()=>state;`
+          contents: `import{useSyncExternalStore}from'react';let state={currentThreadId:'t',showCustomizeView:true,customizeInitialTab:location.hash.slice(1),threads:[{thread_id:'t',title:'Workspace A',metadata:{workspacePath:'C:/isolated/A'}},{thread_id:'b',title:'Workspace B',metadata:{workspacePath:'C:/isolated/B'}}],setShowCustomizeView:(_open,tab)=>{state={...state,customizeInitialTab:tab};subscribers.forEach(fn=>fn())}};window.moveWorkspace=workspace=>{state={...state,threads:[{thread_id:'t',metadata:{workspacePath:workspace}}]};subscribers.forEach(fn=>fn())};const subscribers=new Set();export const useAppStore=(select)=>{const value=useSyncExternalStore(fn=>{subscribers.add(fn);return()=>subscribers.delete(fn)},()=>state);return select?select(value):value};useAppStore.getState=()=>state;useAppStore.subscribe=fn=>{subscribers.add(fn);return()=>subscribers.delete(fn)};export const isThreadDeletionPending=()=>false;export const isThreadRetired=()=>false;`
+        }))
+        b.onResolve({ filter: /\?worker$/ }, () => ({ path: "worker", namespace: "worker" }))
+        b.onLoad({ filter: /.*/, namespace: "worker" }, () => ({
+          contents: "export default class Worker {}"
         }))
         b.onResolve({ filter: /^\.\// }, (a) => {
           if (
             a.importer.endsWith("CustomizeView.tsx") &&
-            !["./ClawPanel", "./ModsPanel", "./EvaluationPanel", "./customize-mode", "./settings-return-focus"].includes(
-              a.path
-            )
+            /^\.\/[A-Z]/.test(a.path) &&
+            ![
+              "./ClawPanel",
+              "./ModsPanel",
+              "./EvaluationPanel",
+              "./SparksTour",
+              "./ConfigurationTargetPicker"
+            ].includes(a.path)
           )
             return { path: a.path, namespace: "empty" }
         })
@@ -63,7 +76,7 @@ const browser = await chromium.launch({
   }),
   result = {}
 
-async function open(tab = "claw", presentation = "creator") {
+async function open(tab = "claw") {
   const page = await browser.newPage({ viewport: { width: 900, height: 650 } }),
     errors = []
   page.on("pageerror", (e) => errors.push(e.message))
@@ -71,15 +84,45 @@ async function open(tab = "claw", presentation = "creator") {
     r.fulfill({ contentType: "text/html", body: '<div id="root" style="height:100vh"></div>' })
   )
   await page.goto("http://127.0.0.1/probe#" + tab)
-  await page.evaluate(
-    (mode) => localStorage.setItem("cmbdevclaw.customize.presentation-mode.v1", mode),
-    presentation
-  )
-  await page.addStyleTag({
-    path: resolve("output/sparks-remediation-20261010/review-product-round2/current.css")
-  })
+  const assets = resolve("out/renderer/assets")
+  const css = readdirSync(assets).find((name) => /^index-.*\.css$/.test(name))
+  assert(css, "Build current production CSS before navigation checks")
+  await page.addStyleTag({ path: join(assets, css) })
   await page.addScriptTag({ content: bundle.outputFiles[0].text })
+  await dismissTour(page)
   return { page, errors }
+}
+async function dismissTour(page) {
+  const tour = page.getByRole("region", { name: "任务示例演练", exact: true })
+  if (await tour.isVisible())
+    await tour.getByRole("button", { name: "关闭示例演练", exact: true }).click()
+}
+async function navigate(page, name) {
+  const advanced = page.getByRole("button", { name: "高级自定义", exact: true })
+  if (
+    ["搭配管理", "步骤管理", "灵件管理"].includes(name) &&
+    (await advanced.getAttribute("aria-expanded")) === "false"
+  )
+    await advanced.click()
+  await page
+    .locator("nav")
+    .filter({ has: page.getByRole("button", { name: "高级自定义", exact: true }) })
+    .getByRole("button", { name, exact: true })
+    .click()
+  await dismissTour(page)
+}
+async function editor(page) {
+  const summary = page.getByText("高级编辑与已保存组合", { exact: true })
+  await summary.waitFor()
+  if (!(await summary.evaluate((el) => el.parentElement.open))) await summary.click()
+  return page.getByLabel("助手组合名称", { exact: true })
+}
+async function chooseB(page) {
+  page.once("dialog", (dialog) => dialog.accept())
+  await page.evaluate(() => window.fixture.change())
+  await page.getByRole("combobox", { name: "配置目标聊天", exact: true }).click()
+  await page.getByRole("combobox", { name: "搜索配置聊天", exact: true }).fill("Workspace B")
+  await page.getByRole("option", { name: "Workspace B · C:/isolated/B", exact: true }).click()
 }
 async function assertInert(page, locator) {
   assert.equal(await locator.isVisible(), false)
@@ -92,22 +135,19 @@ async function assertInert(page, locator) {
 try {
   for (const mode of ["internal-flow-button", "sidebar-tab", "overview"]) {
     const { page, errors } = await open()
-    const name = page.getByLabel("Claw 组合名称")
+    const name = await editor(page)
     await name.waitFor()
     await name.fill("Unsaved reviewer configuration")
     if (mode === "internal-flow-button") {
-      await page.getByLabel("Claw 组合设置", { exact: true }).focus()
-      await page.keyboard.press("Control+End")
-      await page.waitForTimeout(250)
-      const control = page.getByRole("button", { name: "编辑跨插件执行步骤", exact: true }),
-        box = await control.boundingBox()
+      const control = page.getByRole("button", { name: "管理执行步骤", exact: true })
+      await control.scrollIntoViewIfNeeded()
+      const box = await control.boundingBox()
       assert(box.y >= 0 && box.y + box.height <= 650)
       await control.click()
-    } else if (mode === "overview")
-      await page.getByRole("button", { name: "总览", exact: true }).click()
-    else await page.getByRole("button", { name: "自动流程", exact: true }).click()
+    } else if (mode === "overview") await navigate(page, "对话创作")
+    else await navigate(page, "步骤管理")
     await assertInert(page, name)
-    await page.getByRole("button", { name: "我的助手", exact: true }).click()
+    await navigate(page, "搭配管理")
     await name.waitFor()
     assert.equal(await name.inputValue(), "Unsaved reviewer configuration")
     assert.deepEqual(errors, [])
@@ -118,20 +158,18 @@ try {
   }
   {
     const { page, errors } = await open("general")
-    await page.getByRole("button", { name: "我的助手", exact: true }).waitFor()
+    await page.getByRole("button", { name: "高级自定义", exact: true }).waitFor()
     assert.equal(await page.evaluate(() => window.clawReads ?? 0), 0)
-    assert.equal(await page.getByLabel("Claw 组合名称").count(), 0)
-    await page.getByRole("button", { name: "我的助手", exact: true }).click()
-    const name = page.getByLabel("Claw 组合名称")
+    assert.equal(await page.getByLabel("助手组合名称", { exact: true }).count(), 0)
+    await navigate(page, "搭配管理")
+    const name = await editor(page)
     await name.waitFor()
     await name.fill("A draft must not enter B")
-    await page.getByRole("button", { name: "自动流程", exact: true }).click()
-    await page.evaluate(() => {
-      window.fixture.change()
-      window.moveWorkspace("C:/isolated/B")
-    })
-    assert.equal(await name.count(), 0)
-    await page.getByRole("button", { name: "我的助手", exact: true }).click()
+    await navigate(page, "步骤管理")
+    await chooseB(page)
+    await name.waitFor({ state: "detached" })
+    await navigate(page, "搭配管理")
+    await editor(page)
     await name.waitFor()
     assert.equal(await name.inputValue(), "B private draft")
     assert.deepEqual(errors, [])
@@ -139,37 +177,36 @@ try {
     await page.close()
   }
   {
-    const { page, errors } = await open("claw", "ordinary")
-    await page.getByLabel("Claw 组合名称").waitFor()
+    const { page, errors } = await open("claw")
+    await editor(page)
     assert((await page.evaluate(() => window.clawReads ?? 0)) > 0)
-    assert.equal(await page.getByRole("button", { name: "创作者模式", exact: true }).count(), 0)
+    assert.equal(await page.getByRole("button", { name: "创造者模式", exact: true }).count(), 1)
     await page.close()
     result.initialOrdinary = { errors }
   }
   {
     const { page, errors } = await open("mods")
-    await page.getByRole("button", { name: "自己制作", exact: true }).click()
-    if (await page.getByRole("button", { name: "高级：编辑源码与历史版本", exact: true }).count()) await page.getByRole("button", { name: "高级：编辑源码与历史版本", exact: true }).click()
+    await page.getByRole("button", { name: "高级：手动组装、源码与历史版本", exact: true }).click()
+    if (await page.getByRole("button", { name: "高级：编辑源码与历史版本", exact: true }).count())
+      await page.getByRole("button", { name: "高级：编辑源码与历史版本", exact: true }).click()
     await page.getByRole("button", { name: "打开草稿库", exact: true }).click()
     await page.getByRole("button", { name: "新建草稿", exact: true }).click()
     const name = page.getByLabel("草稿名称")
     await name.fill("Unsaved authoring title")
-    await page.getByRole("button", { name: "自动流程", exact: true }).click()
+    await navigate(page, "步骤管理")
     await assertInert(page, name)
-    await page.getByRole("button", { name: "灵件", exact: true }).click()
+    await navigate(page, "灵件管理")
     assert.equal(await name.inputValue(), "Unsaved authoring title")
-    await page.getByRole("button", { name: "总览", exact: true }).click()
+    await navigate(page, "对话创作")
     await assertInert(page, name)
-    await page.getByRole("button", { name: "灵件", exact: true }).click()
+    await navigate(page, "灵件管理")
     assert.equal(await name.inputValue(), "Unsaved authoring title")
-    await page.getByRole("button", { name: "自动流程", exact: true }).click()
-    await page.evaluate(() => {
-      window.fixture.change()
-      window.moveWorkspace("C:/isolated/B")
-    })
-    await page.getByRole("button", { name: "灵件", exact: true }).click()
-    await page.getByRole("button", { name: "自己制作", exact: true }).click()
-    if (await page.getByRole("button", { name: "高级：编辑源码与历史版本", exact: true }).count()) await page.getByRole("button", { name: "高级：编辑源码与历史版本", exact: true }).click()
+    await navigate(page, "步骤管理")
+    await chooseB(page)
+    await navigate(page, "灵件管理")
+    await page.getByRole("button", { name: "高级：手动组装、源码与历史版本", exact: true }).click()
+    if (await page.getByRole("button", { name: "高级：编辑源码与历史版本", exact: true }).count())
+      await page.getByRole("button", { name: "高级：编辑源码与历史版本", exact: true }).click()
     await page.getByRole("button", { name: "打开草稿库", exact: true }).waitFor()
     assert.equal(await name.count(), 0)
     assert.deepEqual(errors, [])

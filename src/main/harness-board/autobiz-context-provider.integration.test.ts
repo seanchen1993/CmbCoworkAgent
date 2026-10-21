@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, beforeAll, describe, expect, it } from "vitest"
 import { snapshotDerivationSource, writeDerivationFiles } from "../plugins/derivation-source"
 import { createProjectTemplate } from "../mods/devtools/project-template"
 import { parseProjectRuntimeManifest, wrapProjectRuntimeManifest,
@@ -15,7 +15,7 @@ import { extractErrorDetail } from "../agent/failover"
 
 const execute = promisify(execFile)
 const realSource = process.env.AUTOBIZ_CONTEXT_TEST_SOURCE ?? "C:/ai/autobiz_kanban"
-const dependencies = resolve("output/creator-context-fixture-deps/node_modules")
+const dependencies = resolve(process.env.AUTOBIZ_CONTEXT_TEST_DEPENDENCIES ?? "output/creator-context-fixture-deps/node_modules")
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
   await closeRequiredPromptFixtures()
@@ -103,7 +103,13 @@ async function fixture() {
   return { root, source, sourceBefore, upstream, repository, workspace, plugin, board, prepare, run }
 }
 
-describe.skipIf(!existsSync(join(realSource, "hooks/sync_agents.py")))("real AutoBiz context provider", () => {
+describe.runIf(process.env.RUN_AUTOBIZ_COLLECTOR_INTEGRATION === "1")("real AutoBiz context provider", () => {
+  beforeAll(() => {
+    if (!existsSync(join(realSource, "hooks/sync_agents.py")))
+      throw Error("AUTOBIZ_CONTEXT_TEST_SOURCE_REQUIRED")
+    if (!existsSync(join(dependencies, "gray-matter/index.js")))
+      throw Error("AUTOBIZ_CONTEXT_TEST_DEPENDENCIES_REQUIRED")
+  })
   it("syncs a local Git repository and executes original collector/render without changing package bytes", async () => {
     const f = await fixture()
     const sync = (await f.prepare("sync-knowledge", "sync_agents.py",

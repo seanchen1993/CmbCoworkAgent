@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import AdmZip from "adm-zip"
 import type { Page } from "playwright"
+import { openModsAdvancedSettings, openModsClawEditor } from "./mods-sidebar-navigation"
 
 /** Real Claw UI/IPC, zero uploaded modules and the production builtin guest pipeline. */
 export async function verifyBuiltinContextMeter(
@@ -37,23 +38,27 @@ export async function verifyBuiltinContextMeter(
   const above = page.locator('[data-function-site="AbovePrompt"]')
   const meter = () => above.innerText()
   const edit = async () => {
-    await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-    await page.getByRole("button", { name: "我的 Claw", exact: true }).click()
-    await page.getByLabel("Claw 组合名称").waitFor()
+    await openModsAdvancedSettings(page, "搭配管理")
+    await openModsClawEditor(page)
+    await page.getByLabel("助手组合名称", { exact: true }).waitFor()
   }
   const saveAndApply = async () => {
-    await page.getByRole("button", { name: "保存能力组合", exact: true }).click()
-    await page.getByRole("button", { name: "应用到当前对话", exact: true }).click()
+    await page.getByRole("button", { name: "保存组合", exact: true }).click()
+    await page
+      .getByRole("button", { name: "只有内置计量", exact: true })
+      .locator("..")
+      .getByRole("button", { name: "应用到所选聊天", exact: true })
+      .click()
     await page.getByRole("button", { name: "确认应用", exact: true }).click()
   }
-  const chat = () => page.getByRole("button", { name: "回到聊天使用", exact: true }).click()
+  const chat = () => page.getByRole("button", { name: "返回应用", exact: true }).click()
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText(title, { exact: true }).first().click()
   assert.deepEqual((await view()).capabilities, [])
   assert.equal((await view()).active?.builtins?.contextMeter === true, false)
   await edit()
   assert.equal(await page.getByLabel("启用聊天容量提示").isChecked(), false)
-  await page.getByLabel("Claw 组合名称").fill("只有内置计量")
+  await page.getByLabel("助手组合名称", { exact: true }).fill("只有内置计量")
   await page.getByLabel("启用聊天容量提示").check()
   await saveAndApply()
   assert.deepEqual((await view()).active?.capabilities, [])
@@ -79,10 +84,14 @@ export async function verifyBuiltinContextMeter(
 
   await edit()
   await page.getByLabel("启用聊天容量提示").uncheck()
-  await page.getByRole("button", { name: "保存能力组合", exact: true }).click()
+  await page.getByRole("button", { name: "保存组合", exact: true }).click()
   assert.equal((await view()).active?.builtins?.contextMeter, true)
-  await page.getByRole("button", { name: "应用到当前对话", exact: true }).click()
-  await page.getByText("关闭内置上下文计量", { exact: true }).waitFor()
+  await page
+    .getByRole("button", { name: "只有内置计量", exact: true })
+    .locator("..")
+    .getByRole("button", { name: "应用到所选聊天", exact: true })
+    .click()
+  await page.getByText("关闭聊天容量提示", { exact: true }).waitFor()
   await page.getByRole("button", { name: "确认应用", exact: true }).click()
   await chat()
   await until(async () => !(await meter()).includes("tokens"), "disabled builtin clears drawing")
@@ -141,10 +150,13 @@ export async function verifyBuiltinContextMeter(
   // Reload/apply invalidates the prior runtime request. Bind a new actual model request;
   // a retained historical count must not be promoted to current-window evidence.
   const wrappedRequest = requests.length
-  await composer.fill("[mods-builtin-context-meter] Refresh actual context for the applied wrapper.")
+  await composer.fill(
+    "[mods-builtin-context-meter] Refresh actual context for the applied wrapper."
+  )
   await composer.press("Enter")
   await until(
-    async () => requests.length > wrappedRequest &&
+    async () =>
+      requests.length > wrappedRequest &&
       (await page.getByRole("button", { name: "停止生成", exact: true }).count()) === 0 &&
       /^BUILTIN_WRAP:上下文/.test((await meter()).replace(/\s+/g, "")),
     "user wraps builtin through next"
@@ -160,8 +172,12 @@ export async function verifyBuiltinContextMeter(
   )
   await edit()
   await page.getByLabel("上移能力 builtin-ui-replace", { exact: true }).click()
-  await page.getByRole("button", { name: "保存能力组合", exact: true }).click()
-  await page.getByRole("button", { name: "应用到当前对话", exact: true }).click()
+  await page.getByRole("button", { name: "保存组合", exact: true }).click()
+  await page
+    .getByRole("button", { name: "只有内置计量", exact: true })
+    .locator("..")
+    .getByRole("button", { name: "应用到所选聊天", exact: true })
+    .click()
   await page
     .getByText("调整插件顺序：builtin-ui-replace → builtin-ui-wrap", { exact: true })
     .waitFor()

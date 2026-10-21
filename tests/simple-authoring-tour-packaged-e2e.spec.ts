@@ -6,7 +6,10 @@ import { join, resolve } from "node:path"
 import type { ElectronApplication, Page } from "playwright"
 import { compositionEnvironment } from "./support/mods-composition-fixtures"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
+import { waitForAsyncEvidence } from "./support/async-evidence"
+import { openModsAdvancedSettings, openModsSettings } from "./support/mods-sidebar-navigation"
 import { simpleTourTasks } from "../src/renderer/src/components/customize/simple-tour-tasks"
+import { normalizeWorkspacePathKey } from "../src/shared/workspace-path"
 
 const root = resolve(__dirname, "..")
 assert(process.env.CMB_MODS_PACKAGED_DIR, "Explicit newly built package required")
@@ -26,6 +29,7 @@ const previews: unknown[] = []
 let app: ElectronApplication | undefined
 let page: Page | undefined
 let completed = false
+let failureState
 const draft = "保留这条未发送的原始草稿"
 const profileDraft = "保留我的组合草稿"
 async function shot(name: string) {
@@ -40,6 +44,10 @@ async function main() {
     app = await launch(60_000)
     page = await app.firstWindow()
     page.setDefaultTimeout(20_000)
+    await page.addLocatorHandler(
+      page.locator('[aria-label="插件创作使用指引"], [aria-label="应用使用指引"]').first(),
+      async (guide) => guide.getByRole("button", { name: "跳过指引", exact: true }).click()
+    )
     page.on("pageerror", (error) => errors.push(error.message))
     page.on("dialog", async (dialog) => {
       errors.push(`Unexpected dialog: ${dialog.message()}`)
@@ -60,22 +68,31 @@ async function main() {
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("三任务导览同包验收", { exact: true }).first().click()
     await page.locator("textarea.composer-textarea").fill(draft)
-    await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-    await page.getByRole("button", { name: "添加功能", exact: true }).click()
-    const tour = page.getByRole("region", { name: "新功能导览", exact: true })
-    await page.getByRole("button", { name: "新功能导览", exact: true }).click()
+    await openModsAdvancedSettings(page, "灵件管理")
+    const tour = page.getByRole("region", { name: "任务示例演练", exact: true })
+    await page.getByRole("button", { name: "任务示例演练", exact: true }).click()
     await tour.waitFor()
     await page.keyboard.press("Escape")
     // Enable editing through the real settings UI before creating the retained local draft.
-    await page.getByRole("button", { name: "我已添加", exact: true }).click()
+    await openModsSettings(page)
     await page.getByRole("checkbox", { name: "允许使用灵件", exact: true }).click()
-    await page.waitForFunction(() => window.api.mods.globalEnabled())
+    await waitForAsyncEvidence(
+      () => page!.evaluate(() => window.api.mods.globalEnabled()),
+      (enabled) => enabled,
+      "global Mods opt-in persisted",
+      20_000
+    )
     await page.getByRole("checkbox", { name: "在此项目使用灵件", exact: true }).click()
-    await page.waitForFunction(async (id) => (await window.api.mods.status(id)).enabled, threadId)
-    await page.getByRole("button", { name: "常用搭配", exact: true }).click()
+    await waitForAsyncEvidence(
+      () => page!.evaluate((id) => window.api.mods.status(id), threadId),
+      (status) => status.enabled,
+      "project Mods opt-in persisted",
+      20_000
+    )
+    await openModsAdvancedSettings(page, "搭配管理")
     const simple = page.getByRole("region", { name: "简单组合", exact: true })
     await simple.getByLabel("组合名称", { exact: true }).fill(profileDraft)
-    await page.getByRole("button", { name: "新功能导览", exact: true }).click()
+    await page.getByRole("button", { name: "任务示例演练", exact: true }).click()
     for (const width of [1366, 375]) {
       await app.evaluate(({ BrowserWindow }, width) => {
         const window = BrowserWindow.getAllWindows()[0]
@@ -127,54 +144,97 @@ async function main() {
     assert.equal(await simple.getByLabel("组合名称", { exact: true }).inputValue(), profileDraft)
     assert(
       await page
-        .getByRole("button", { name: "看看这页怎么用", exact: true })
+        .getByRole("button", { name: "本页任务示例", exact: true })
         .evaluate((node) => node === document.activeElement)
     )
     checks.push(
       "Three tasks × three real rendered previews at desktop and 375px; keyboard progression and Escape preserve combination draft"
     )
+    await openModsAdvancedSettings(page, "灵件管理")
+    await openModsAdvancedSettings(page, "搭配管理")
+    assert.equal(await simple.getByLabel("组合名称", { exact: true }).inputValue(), profileDraft)
     await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()[0].setContentSize(1366, 900)
     )
     for (const [task, item] of simpleTourTasks.entries()) {
-      if (task === 2) await page.getByRole("button", { name: "常用搭配", exact: true }).click()
-      await page.getByRole("button", { name: "新功能导览", exact: true }).click()
+      await page.getByRole("button", { name: "任务示例演练", exact: true }).click()
       await tour.getByLabel("选择任务", { exact: true }).selectOption(String(task))
       for (const [step, screen] of item.steps.entries()) {
         if (task === 0 && step === 1) await tour.getByLabel("新插件名称").fill("我的导览副本")
         await tour.getByRole("button", { name: screen.action, exact: true }).click()
       }
-      if (task === 0) {
-        await page.getByRole("heading", { name: "说说你想让助手做什么", exact: true }).waitFor()
-        const create = page.getByRole("region", { name: "灵件对话创作", exact: true })
-        await create.getByRole("heading", { name: "在所选聊天使用创造者模式", exact: true }).waitFor()
-        await create.getByRole("button", { name: "进入创造者模式", exact: true }).waitFor()
-        assert.equal(
-          await page.getByRole("region", { name: "从已有插件创建", exact: true }).isVisible(),
-          false
+      if (task < 2) {
+        await page
+          .getByRole("button", { name: "返回应用", exact: true })
+          .waitFor({ state: "detached" })
+        const status = await waitForAsyncEvidence(
+          () =>
+            page!.evaluate(
+              (threadId) => window.api.mods.development.status({ threadId }),
+              threadId
+            ),
+          (status) => status.mode === "creator",
+          `${item.task} enters creator mode in the original chat`,
+          20_000
         )
-      } else if (task === 1) {
-        await simple.getByRole("button", { name: "另建演练中的组合", exact: true }).waitFor()
+        assert.equal(status.threadId, threadId)
         assert.equal(
-          await simple.getByLabel("组合名称", { exact: true }).inputValue(),
-          profileDraft
+          normalizeWorkspacePathKey(status.workspace),
+          normalizeWorkspacePathKey(workspace)
         )
+        assert.equal(status.enabled, true)
+        await page
+          .locator(
+            `[data-chat-thread-id="${threadId}"] [data-app-guide="creator"][aria-pressed="true"]`
+          )
+          .waitFor({ state: "visible" })
       } else {
         await page.getByRole("dialog", { name: "查看改动", exact: true }).waitFor()
       }
       await shot(`handoff-${item.task}`)
+      if (task === 2) await page.keyboard.press("Escape")
+      const chat = page.locator(`[data-chat-thread-id="${threadId}"]`)
+      await chat.waitFor({ state: "visible" })
+      assert.equal(await chat.locator("textarea.composer-textarea").inputValue(), draft)
+      assert.deepEqual(
+        await page.evaluate((id) => window.api.threads.getMessages(id), threadId),
+        []
+      )
+      assert.equal((await page.evaluate((id) => window.api.mods.flowRuns(id), threadId)).length, 0)
+      // The icon guide has separate coverage; close its real UI if it auto-opens here.
+      const guideClose = page.getByRole("button", { name: "关闭使用指引", exact: true })
+      if (await guideClose.isVisible()) await guideClose.click()
+      await openModsAdvancedSettings(page, "搭配管理")
+      assert.equal(
+        await simple.getByLabel("组合名称", { exact: true }).inputValue(),
+        profileDraft,
+        `${item.task} handoff must preserve the existing unsaved combination on return`
+      )
     }
-    await page.keyboard.press("Escape")
+    await page.getByRole("button", { name: "返回应用", exact: true }).click()
     assert.equal(await page.locator("textarea.composer-textarea").inputValue(), draft)
     assert.equal((await page.evaluate((id) => window.api.mods.flowRuns(id), threadId)).length, 0)
     assert.equal(await page.evaluate(() => localStorage.getItem("devclaw.sparks-tour.v1")), "seen")
     checks.push(
-      "Standalone requirement-based create, combine and diff destinations reached; existing combination and chat drafts intact; no runs"
+      "Create and combine return to the original creator chat; diff opens the real dialog; every handoff preserves combination and chat drafts without messages or runs"
     )
     assert.deepEqual(errors, [])
     completed = true
   } catch (error) {
     errors.push(error instanceof Error ? (error.stack ?? error.message) : String(error))
+    failureState = await page?.evaluate(async () => {
+      const thread = (await window.api.threads.list()).find(
+        (row) => row.title === "三任务导览同包验收"
+      )
+      const status = thread
+        ? await window.api.mods.development.status({ threadId: thread.thread_id })
+        : null
+      return {
+        thread,
+        status: status && { enabled: status.enabled, mode: status.mode, workspace: status.workspace },
+        text: document.body.innerText
+      }
+    }).catch((error) => ({ observationError: String(error) }))
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => undefined)
     throw error
   } finally {
@@ -183,7 +243,7 @@ async function main() {
     writeFileSync(
       join(artifacts, "report.json"),
       JSON.stringify(
-        { completed, checks, errors, previews, packageHash, packageDir, isolated },
+        { completed, checks, errors, previews, packageHash, packageDir, isolated, failureState },
         null,
         2
       )

@@ -5,6 +5,7 @@ import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import type { Page } from "playwright"
 import type { LocalProjectView } from "../../src/shared/project-runtime/platform-api"
+import { waitForAsyncEvidence } from "./async-evidence"
 
 export const KNOWLEDGE_MARKER = "PROJECT_LIBRARY_REFERENCE_REQUIRES_NEW_VALIDATION"
 
@@ -66,14 +67,27 @@ export async function exerciseProjectLibrary(page: Page, view: LocalProjectView,
     failCatalog = false
     await panel.getByRole("checkbox").check()
     await panel.getByRole("button", { name: "确认发送未确认部分", exact: true }).click()
-    await page.waitForFunction(async (id) =>
-      (await window.api.harnessBoard.localProjects.library.list(id)).some((entry) => entry.kind === "delivery" && entry.status === "sent"), view.project.projectId)
+    const source = await waitForAsyncEvidence(
+      () =>
+        page.evaluate(
+          (id) => window.api.harnessBoard.localProjects.library.list(id),
+          view.project.projectId
+        ),
+      (entries) => entries.some((entry) => entry.kind === "delivery" && entry.status === "sent"),
+      "project library delivery sent",
+      15_000
+    )
     assert.equal(requests.length, priorCount + 1, "Only catalog retried; confirmed files not repeated")
-    const result = await page.evaluate(async ({ sourceId, targetId }) => ({
-      source: await window.api.harnessBoard.localProjects.library.list(sourceId),
-      target: await window.api.harnessBoard.localProjects.library.list(targetId),
-      project: await window.api.harnessBoard.localProjects.get(sourceId)
-    }), { sourceId: view.project.projectId, targetId: target.project.projectId })
+    const result = {
+      source,
+      ...(await page.evaluate(
+        async ({ sourceId, targetId }) => ({
+          target: await window.api.harnessBoard.localProjects.library.list(targetId),
+          project: await window.api.harnessBoard.localProjects.get(sourceId)
+        }),
+        { sourceId: view.project.projectId, targetId: target.project.projectId }
+      ))
+    }
     assert.deepEqual(result.project, view, "Library does not advance or rewrite project")
     assert.equal(result.target.length, 1)
     assert.equal(result.target[0].source?.projectId, view.project.projectId)

@@ -46,6 +46,7 @@ export function developmentCatalog() {
       "真实试用另按源码中的 literal 事件逐项申请已接通的事件（见 events 目录），不授予完整目录、动态或通配范围。",
     examples: { toolCounter: DEVELOPMENT_COUNTER_EXAMPLE },
     deliveryGuidance: [
+      CREATOR_S1_SUPPORT.authoringConstraints.usageMetrics,
       "创造者模式按自然语言需求选择复用、组合或编写；不要让用户先配置添加功能、常用搭配或执行步骤。连续修改先 list/read 更新当前开发组件，保留已有功能。",
       "使用闭合的 SDK 路径和 literal 事件；SDK 对象或方法不能传给辅助函数、动态索引或外部代码。纯辅助函数只接收普通数据；SDK 调用直接写在有明确 $ 参数的事件处理器中，否则检查会报告 MODS_SDK_UNVERIFIED，保留草稿后按诊断修复。",
       "组合用 mod_composition list 搜索摘要，details 按需读取配置 schema；stage 同轮累积并深合并配置，可引用真实模型、技能、MCP 和已保存步骤。save/apply_saved 保存套用命名组合，undo/cancel 撤销选择或取消排队。提交后结束本轮，再核对真实回执。",
@@ -100,8 +101,14 @@ export function developmentCatalogPage(
   if (section === "overview")
     return {
       contract: catalog.contract,
-      supportProfile: { id: catalog.support.id, section: "support",
-        scope: "首批承诺的接点/动作/配置/复用与限制；不是任意功能保证，也不代替原授权" },
+      supportProfile: {
+        id: catalog.support.id,
+        section: "support",
+        scope: catalog.support.scope,
+        conditionalCapabilities: catalog.support.conditionalCapabilities.map(
+          ({ id, availability, nextDiscovery }) => ({ id, availability, nextDiscovery })
+        )
+      },
       trialCapabilities: catalog.trialCapabilities,
       authorizedTrialCapabilities: catalog.authorizedTrialCapabilities,
       trialEventEnvelope: catalog.trialEventEnvelope,

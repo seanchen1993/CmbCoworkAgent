@@ -12,6 +12,7 @@ import {
   lazy,
   Suspense
 } from "react"
+import { ApplicationUsageGuide } from "@/components/guides/ApplicationUsageGuide"
 import { PageEntryGuide } from "@/components/guides/PageEntryGuide"
 import projectModeGuideImage from "@/assets/guides/feature-create-guide-v5.png"
 import {
@@ -1119,6 +1120,7 @@ function App(): React.JSX.Element {
                 onClick={toggleSidebar}
                 title={sidebarToggleText}
                 aria-label={sidebarToggleText}
+                data-app-guide="navigation"
                 aria-pressed={!sidebarCollapsed}
               >
                 {sidebarCollapsed ? (
@@ -1163,6 +1165,7 @@ function App(): React.JSX.Element {
                       type="button"
                       onClick={() => openClawSidebar("configuration")}
                       aria-label="任务进展"
+                      data-app-guide="progress"
                       aria-pressed={rightModule === "claw"}
                       className={`${panelToggleBaseClass} ${
                         rightModule === "claw" ? moduleActiveClass : moduleInactiveClass
@@ -1634,6 +1637,7 @@ function App(): React.JSX.Element {
           )}
         </div>
       </div>
+      <ApplicationUsageGuide active={!showCustomizeView && !isAgentFocusActive} />
       <PetStateBridge />
       <Toaster position="top-center" richColors duration={2200} theme={toastTheme} />
     </ThreadProvider>

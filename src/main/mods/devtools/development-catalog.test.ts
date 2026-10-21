@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { developmentCatalog, developmentCatalogPage } from "./development-catalog"
+import { CREATOR_S1_SUPPORT } from "./creator-support"
 import { analyzeAuthoringPreview } from "./authoring-preflight"
 import { authoringCompileDiagnostics } from "./authoring-compile-diagnostics"
 import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/sites"
@@ -26,6 +27,27 @@ it("freezes a discoverable S1 promise using real supported sites, events and SDK
   expect(support.unsupported).toContain("自动启动任意已保存 Flow")
   expect(JSON.stringify(page).length).toBeLessThan(8000)
 })
+it("reuses the support source in full catalog and bounded discovery instead of divergent prose", () => {
+  const full = developmentCatalog()
+  const support = developmentCatalogPage("support")
+  const overview = developmentCatalogPage()
+  expect(full.support).toBe(CREATOR_S1_SUPPORT)
+  if (!("content" in support) || !overview.supportProfile)
+    throw Error("expected discovery pages")
+  expect(support.content).toBe(full.support)
+  expect(full.deliveryGuidance).toContain(full.support.authoringConstraints.usageMetrics)
+  expect(overview.supportProfile.scope).toBe(full.support.scope)
+  expect(overview.supportProfile.conditionalCapabilities).toEqual(
+    full.support.conditionalCapabilities.map(({ id, availability, nextDiscovery }) => ({
+      id,
+      availability,
+      nextDiscovery
+    }))
+  )
+  expect(JSON.stringify(support).length).toBeLessThan(8000)
+  expect(JSON.stringify(overview).length).toBeLessThan(8000)
+})
+
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
 })

@@ -16,6 +16,7 @@ import type { ProjectDevelopmentView } from "../src/main/mods/devtools/project-d
 import { readRuntimeScopedFile } from "../src/main/harness-board/project-runtime/safe-files"
 import { compositionEnvironment } from "./support/mods-composition-fixtures"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
+import { waitForAsyncEvidence } from "./support/async-evidence"
 import {
   HARNESS_PACKAGE_ID,
   HARNESS_DRAFT,
@@ -58,6 +59,15 @@ async function main() {
       .stderr?.on("data", (chunk) => appendFileSync(join(artifacts, "runtime.log"), chunk))
     page = await app.firstWindow()
     page.setDefaultTimeout(15000)
+    await page.addLocatorHandler(
+      page.locator('[aria-label="插件创作使用指引"], [aria-label="应用使用指引"]').first(),
+      async (guide) => guide.getByRole("button", { name: "跳过指引", exact: true }).click()
+    )
+    await page.addLocatorHandler(
+      page.getByRole("dialog", { name: "项目模式使用引导", exact: true }),
+      async (guide) =>
+        guide.getByRole("button", { name: "知道了，不再提示", exact: true }).click()
+    )
     page.on("pageerror", (error) => errors.push(error.message))
     await page.waitForFunction(() => Boolean(window.api?.harnessBoard?.localProjects))
     await page.evaluate(() => {
@@ -162,12 +172,20 @@ async function main() {
       "PASS actual model scaffold harness-lite → Skill/node-only save → stale doctor → compile → doctor/test/dev"
     )
 
-    await page.getByRole("button", { name: "创作已开启", exact: true }).click()
+    const workspaceDialog = page.getByRole("dialog", { name: "插件创作工作区", exact: true })
+    const creatorTrigger = page
+      .getByLabel("聊天模式与 Mod 状态", { exact: true })
+      .locator('button[aria-haspopup="dialog"]')
+    if ((await creatorTrigger.getAttribute("aria-expanded")) === "false")
+      await creatorTrigger.click()
+    await workspaceDialog.waitFor()
     const panel = page.getByRole("region", { name: "项目模板隔离试用", exact: true })
+    if (!(await panel.isVisible()))
+      await workspaceDialog.getByText("高级：独立项目试用", { exact: true }).click()
     await panel.waitFor()
-    await panel.getByRole("button", { name: "更新项目草稿", exact: true }).click()
+    await panel.getByRole("button", { name: "刷新项目草稿", exact: true }).click()
     await panel.getByLabel("这次试用希望完成什么").fill("保留原稿，生成独立复核版本和真实检查记录")
-    const create = panel.getByRole("button", { name: "创建隔离试用（不开始）", exact: true })
+    const create = panel.getByRole("button", { name: "创建试用项目（稍后开始任务）", exact: true })
     assert(await create.isDisabled())
     await panel.getByRole("checkbox").check()
     const beforeCreate = model.requests.length
@@ -190,7 +208,8 @@ async function main() {
     assert.equal(model.requests.length, beforeCreate, "Preview creation never starts inference")
     assert.deepEqual(await page.evaluate(() => window.api.plugins.list()), installed)
     await page.screenshot({ path: join(artifacts, "harness-preview-created.png") })
-    await page.keyboard.press("Escape")
+    await workspaceDialog.getByRole("button", { name: "Close", exact: true }).click()
+    await workspaceDialog.waitFor({ state: "hidden" })
     const read = () =>
       page.evaluate((id) => window.api.harnessBoard.localProjects.get(id), projectId!)
     let view = await read()
@@ -296,16 +315,15 @@ async function main() {
           exact: true
         })
         .click()
-      await page.waitForFunction(
-        async ({ id, stage }) => {
-          const state = await window.api.harnessBoard.localProjects.get(id)
-          return stage === "draft"
+      view = await waitForAsyncEvidence(
+        read,
+        (state) =>
+          stage === "draft"
             ? state.project.stageIndex === 1
-            : state.project.status === "completed"
-        },
-        { id: projectId, stage }
+            : state.project.status === "completed",
+        `harness ${stage} native transition`,
+        15_000
       )
-      view = await read()
     }
     assert.equal(view.project.status, "completed")
     assert.equal(approvals.length, 3)

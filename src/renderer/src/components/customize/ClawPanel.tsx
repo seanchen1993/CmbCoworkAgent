@@ -1,9 +1,10 @@
 import type { FlowCatalog, SavedFlow } from "../../../../shared/mods/flows/types"
 import { flowDraftId } from "@/lib/flow-draft-id"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { Check, Plus, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { useAppStore } from "@/lib/store"
+import { isThreadDeletionPending, isThreadRetired, useAppStore } from "@/lib/store"
+import { ClawEditorDrafts, type ClawEditorScope } from "@/lib/claw-editor-drafts"
 import type {
   ClawMutation,
   ClawProfile,
@@ -35,6 +36,33 @@ const empty = (): ClawProfile => ({
   capabilities: []
 })
 
+const editorDrafts = new ClawEditorDrafts()
+function synchronizeEditorDrafts() {
+  const state = useAppStore.getState()
+  let workspaces: Map<string, string | null> | undefined
+  editorDrafts.synchronize(state.accountRevision, (threadId) => {
+    if (isThreadRetired(threadId)) return null
+    workspaces ??= new Map(state.threads.map((thread) => [thread.thread_id,
+      (thread.metadata as { workspacePath?: string } | undefined)?.workspacePath ?? null]))
+    return workspaces.get(threadId)
+  })
+}
+// This owner outlives SettingsOverlay; account changes and committed deletions retire drafts.
+useAppStore.subscribe((state, previous) => {
+  if (state.accountRevision !== previous.accountRevision || state.threads !== previous.threads)
+    synchronizeEditorDrafts()
+})
+synchronizeEditorDrafts()
+
+function isEditorScopeCurrent(scope: ClawEditorScope) {
+  const state = useAppStore.getState()
+  const thread = state.threads.find((item) => item.thread_id === scope.threadId)
+  const workspace = (thread?.metadata as { workspacePath?: string } | undefined)?.workspacePath
+  return state.accountRevision === scope.accountRevision &&
+    !isThreadDeletionPending(scope.threadId) && !!workspace &&
+    normalizeWorkspacePathKey(workspace) === normalizeWorkspacePathKey(scope.workspace)
+}
+
 export function ClawPanel({
   threadId,
   workspaceHint,
@@ -44,9 +72,11 @@ export function ClawPanel({
   workspaceHint?: string | null
   practiceIntent?: SimpleAuthoringPracticeIntent
 }) {
+  const accountRevision = useAppStore((state) => state.accountRevision)
   return threadId ? (
     <ClawSettings
-      key={JSON.stringify([threadId, normalizeWorkspacePathKey(workspaceHint)])}
+      key={JSON.stringify([accountRevision, threadId, normalizeWorkspacePathKey(workspaceHint)])}
+      accountRevision={accountRevision}
       threadId={threadId}
       workspaceHint={workspaceHint}
       practiceIntent={practiceIntent}
@@ -59,10 +89,12 @@ export function ClawPanel({
 }
 
 function ClawSettings({
+  accountRevision,
   threadId,
   workspaceHint,
   practiceIntent
 }: {
+  accountRevision: number
   threadId: string
   workspaceHint?: string | null
   practiceIntent?: SimpleAuthoringPracticeIntent
@@ -84,6 +116,7 @@ function ClawSettings({
   const setDraftState = (next: ClawProfile) =>
     setEditingState((old) => updateSimpleClawProfile(old, next))
   const [draftEdited, setDraftEdited] = useState(false)
+  const [retentionLimited, setRetentionLimited] = useState(false)
   const [editorSession, setEditorSession] = useState(0)
   const [componentDirty, setComponentDirty] = useState<Record<string, boolean>>({})
   const onComponentDirty = useCallback(
@@ -136,6 +169,14 @@ function ClawSettings({
     usageContext: "chat" | "project"
   } | null>(null)
   const [upgradeIssues, setUpgradeIssues] = useState<string[]>([])
+  useLayoutEffect(() => {
+    if (!draftInitialized.current) return
+    const scope = { accountRevision, threadId, workspace: workspaceHint ?? view?.workspace }
+    if (!isEditorScopeCurrent(scope)) return
+    const dirty = draftEdited || Object.values(componentDirty).some(Boolean)
+    const retained = editorDrafts.write(scope, editing, dirty)
+    setRetentionLimited(dirty && !retained)
+  }, [accountRevision, threadId, workspaceHint, view?.workspace, editing, draftEdited, componentDirty])
   const previewApply = (profile: ClawProfile | null) => {
     if (view)
       setPreview({
@@ -243,14 +284,20 @@ function ClawSettings({
       setSourcesError(nextSources.error)
       if (!draftInitialized.current) {
         draftInitialized.current = true
-        if (next.active) setDraftState(next.active)
+        // Restore values only after current host scope/catalog reads, never an old permission view.
+        const scope = { accountRevision, threadId, workspace: next.workspace }
+        const retained = isEditorScopeCurrent(scope) ? editorDrafts.read(scope) : undefined
+        if (retained) {
+          setEditingState(retained)
+          setDraftEdited(true)
+        } else if (next.active) setDraftState(next.active)
       }
       setError("")
     } catch (cause) {
       if (lifetime.current === generation && request === reading.current)
         setError(cause instanceof Error ? cause.message : String(cause))
     }
-  }, [threadId, assertViewScope])
+  }, [accountRevision, threadId, assertViewScope])
   useEffect(() => {
     const generation = ++lifetime.current
     void refresh()
@@ -422,6 +469,9 @@ function ClawSettings({
           initialPluginId={assemblySource} active={assemblyOpen} />
       </div>}
       <div hidden={assemblyOpen} inert={assemblyOpen} className="space-y-6" aria-label="聊天搭配配置">
+      {retentionLimited && <p role="status" className="text-sm text-amber-600">
+        草稿超出临时保留范围。请先保存搭配，再离开配置页；临时草稿仅在本次应用打开期间保留。
+      </p>}
       {error && (
         <p
           role="alert"

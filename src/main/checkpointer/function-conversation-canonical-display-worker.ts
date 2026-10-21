@@ -21,6 +21,9 @@ import { matchesThreadIncarnation, type ThreadIncarnation } from "../services/th
 import type { FunctionConversationCheckpointMembershipSnapshot } from
   "./function-conversation-checkpoint-membership"
 
+import { readOrdinaryToolDisplayCoverage, ORDINARY_CHECKPOINT_COVERAGE_BYTE_LIMIT,
+  type OrdinaryCheckpointDisplayCoverage } from "./function-conversation-ordinary-display"
+
 /** Both reads belong to this original full-seal scope; the Worker owns its readonly transaction. */
 export function readCanonicalDisplayProjection(db: NativeSqliteAdapter,
   input: FunctionConversationProjectionSealInput) {
@@ -215,6 +218,11 @@ function query(db: NativeSqliteAdapter, sql: string, values: readonly unknown[] 
 
 /** Reject executable structure before inspecting a stored constructor envelope. */
 export function copyCanonicalCheckpointDisplayJson(raw: unknown, guard: () => void): unknown {
+  return copyCheckpointDisplayJson(raw, guard, false)
+}
+
+function copyCheckpointDisplayJson(raw: unknown, guard: () => void,
+  reviveUndefined: boolean): unknown {
   const box: { value?: unknown } = {}
   const tasks: Array<{ value: unknown; assign(value: unknown): void }> = [
     { value: raw, assign: value => { box.value = value } }
@@ -250,6 +258,15 @@ export function copyCanonicalCheckpointDisplayJson(raw: unknown, guard: () => vo
     const count = arrayValue ? arrayValue.length : fields.length
     if (expanded + count > 1_000_000 || array && fields.length !== count) fail()
     expanded += count
+    // SqlJsSaver's JsonPlus codec restores this exact wire value before Main computes the
+    // native membership digest. Decode data only, after descriptor checks, and retain own
+    // undefined fields/array slots just like the codec. No constructor or loader is invoked.
+    if (reviveUndefined && !array && fields.length === 2 &&
+      fields.some(field => field.key === "lc" && field.value === 2) &&
+      fields.some(field => field.key === "type" && field.value === "undefined")) {
+      task.assign(undefined)
+      continue
+    }
     const output: Record<string, unknown> | unknown[] = array ? new Array(count) : Object.create(null)
     task.assign(output)
     // Preserve the native serializer's original object-key order. LIFO traversal must only
@@ -267,7 +284,7 @@ export function copyCanonicalCheckpointDisplayJson(raw: unknown, guard: () => vo
 
 /** Only descriptor-safe JSON read by the native SQLite iterator reaches a native constructor. */
 function nativeCopy(raw: unknown, guard: () => void): BaseMessage {
-  const record = object(copyCanonicalCheckpointDisplayJson(raw, guard))
+  const record = object(copyCheckpointDisplayJson(raw, guard, true))
   let type: unknown = record.type, data: Record<string, unknown>
   if (type === "constructor") {
     if (record.lc !== 1 || !Array.isArray(record.id) || record.id.length !== 3 ||
@@ -305,7 +322,8 @@ export function createCanonicalCheckpointDisplayVerifier(db: NativeSqliteAdapter
   assertCancelled: () => void): {
     project(raw: unknown, ordinal: number): FunctionConversationProjectionColumns | null | undefined
     finish(messageCount: number): CanonicalCheckpointDisplayMembershipWitness | undefined
-    omissions(): CanonicalCheckpointDisplayOmissions
+    ordinaryCoverage(): readonly OrdinaryCheckpointDisplayCoverage[] | null
+  omissions(): CanonicalCheckpointDisplayOmissions
     membership(): { readonly target: FunctionConversationRef;
       readonly snapshot: FunctionConversationCheckpointMembershipSnapshot } | undefined
   } {
@@ -389,7 +407,9 @@ export function createCanonicalCheckpointDisplayVerifier(db: NativeSqliteAdapter
   const nativeDigest = createHash("sha256").update("[")
   const omissionDigest = createCanonicalCheckpointDisplayOmissionDigest()
   let finished = false, omitted: CanonicalCheckpointDisplayOmissions | undefined
-  let visited = 0, visitedMembers = 0
+  let visited = 0, visitedMembers = 0, ordinaryBytes = 0, ordinaryComplete = true
+  const ordinary: OrdinaryCheckpointDisplayCoverage[] = [], ordinaryIds = new Set<string>()
+  const canonicalIds = new Set(snapshot?.members.map(member => member.uuid))
   return {
     project(raw, ordinal) {
       if (finished) fail()
@@ -409,7 +429,23 @@ export function createCanonicalCheckpointDisplayVerifier(db: NativeSqliteAdapter
       const payload = stamp ? serializeFunctionConversationNativeMessage(native) : JSON.stringify(native.toDict())
       if (ordinal) nativeDigest.update(",")
       nativeDigest.update(JSON.stringify(payload))
-      if (!stamp) { if (member) fail(); return undefined }
+      if (!stamp) {
+        if (member) fail()
+        if (ordinaryComplete) {
+          ordinaryBytes += Buffer.byteLength(payload, "utf8") + 128
+          const covered = ordinaryBytes <= ORDINARY_CHECKPOINT_COVERAGE_BYTE_LIMIT
+            ? readOrdinaryToolDisplayCoverage(db, selection.threadId, payload) : undefined
+          if (!covered || ordinaryIds.has(covered.messageId) ||
+            canonicalIds.has(covered.messageId)) {
+            ordinaryComplete = false
+            ordinary.length = 0
+          } else {
+            ordinaryIds.add(covered.messageId)
+            ordinary.push({ ordinal, payload, columnsDigest: covered.columnsDigest })
+          }
+        }
+        return undefined
+      }
       if (!member || !target || !snapshot || native.id !== member.uuid) fail()
       visitedMembers++
       const kept = readCanonicalCheckpointDisplayMemberRow(db, target, snapshot, member)
@@ -439,6 +475,10 @@ export function createCanonicalCheckpointDisplayVerifier(db: NativeSqliteAdapter
         namespace: context.namespace, checkpointId: context.checkpointId }
       return { ...evidence, stateJson: JSON.stringify(state),
         fingerprint: canonicalCheckpointDisplayMembershipFingerprint(db, evidence) }
+    },
+    ordinaryCoverage() {
+      if (!finished) fail()
+      return snapshot && ordinaryComplete ? ordinary : null
     },
     omissions() {
       if (!finished || !omitted) fail()

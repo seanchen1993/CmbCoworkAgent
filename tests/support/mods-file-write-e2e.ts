@@ -48,7 +48,7 @@ export async function verifyFileWrite(
       return next(e)
     });
     on("tool.call",async($,e,next)=>{
-      if(e.tool==="read_file"&&String(e.file_path).endsWith("claw-notes")){
+      if(e.tool==="Read"&&String(e.file_path).endsWith("claw-notes")){
         try{await $.fs.write("automatic.md","unexpected");$.ui.log("AUTOMATIC_WRITE_UNEXPECTED")}
         catch(error){$.ui.log("AUTOMATIC_WRITE_ERROR:"+(error.code||error.message))}
       }

@@ -262,6 +262,32 @@ describe("desktop function panes through the production session", () => {
     expect(state.get("pane-scroll")).toEqual({ deltaX: 0, deltaY: 12, top: 12, left: 0 })
   })
 
+  it.each(["focus", "press"] as const)(
+    "rejects a queued %s before a same-id Pane reopen can receive the old intent",
+    async (kind) => {
+      const { session, state } = await fixture(`
+        on("ui.focus",async($,e,next)=>{
+          await $.store.set("queued-focus-entered",true);return next(e)
+        });
+      `)
+      const [original] = await session.panes.snapshot()
+      const queued = session.panes.act(
+        kind === "focus"
+          ? { ...action(original, "count", "focus", { focused: true }), handle: 0 }
+          : action(original, "count")
+      )
+      // Reopen replaces the Pane object before the serial action's first microtask.
+      // Deliberately do not snapshot: until its redraw, it still carries the old generation.
+      session.panes.open(original.plugin, { id: original.id, title: "Reopened Pane" })
+      await expect(queued).rejects.toThrow("MODS_UI_STALE_ACTION")
+      expect(state.has("queued-focus-entered")).toBe(false)
+      expect(state.has("board-count")).toBe(false)
+      const [reopened] = await session.panes.snapshot()
+      expect(reopened.openRequestId).not.toBe(original.openRequestId)
+      expect(reopened.title).toBe("Reopened Pane")
+    }
+  )
+
   it("cancels a pending Pane focus hook when the pane closes", async () => {
     const { session, state } = await fixture(`
       on("ui.focus", async ($)=>{

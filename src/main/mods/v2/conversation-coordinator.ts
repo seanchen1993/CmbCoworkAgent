@@ -40,7 +40,7 @@ import type {
   FunctionSessionAppendSource
 } from "./session-conversation-host"
 import type { ModRuntimeAuthorities } from "../runtime-instance"
-import type { ModRuntimeAuthority } from "../runtime-instance"
+import { isModRuntimeAuthorityDataCurrent, type ModRuntimeAuthority } from "../runtime-instance"
 import type { FunctionConversationGraphBinding } from "../../agent/mods-conversation"
 import { FunctionConversationChildFamilies, captureFunctionConversationSharedFamilyDataChecker,
   bindFunctionConversationSharedFamilySourcePlan,
@@ -189,6 +189,7 @@ interface OwnerCurrentExecution {
   readonly database: ReturnType<typeof getDb>
   readonly current: () => void
   readonly independentCurrent: () => void
+  readonly leaseCurrent: () => boolean
   assertDataCurrent(): void
   assertIndependentDataCurrent(): void
 }
@@ -222,10 +223,12 @@ const ownerGuardCoordinators = new WeakMap<FunctionConversationCoordinator, {
   readonly scopeFields?: PureFields
 }>()
 const ownerExecutions = new WeakMap<Owner, OwnerCurrentExecution>()
+const residentOwnerExecutions = new WeakMap<() => void, OwnerCurrentExecution>()
 interface ParentCurrentExecution {
   readonly input: FunctionConversationChildParentCapture<Owner>
   readonly inputFields: PureFields
   readonly owner: OwnerCurrentExecution
+  readonly authority?: ModRuntimeAuthority
   readonly target: FunctionConversationTarget
   readonly ownerFields: PureFields
   readonly targetFields: PureFields
@@ -252,6 +255,8 @@ function assertParentCurrentData(record: ParentCurrentExecution): void {
   assertPureFields(record.target.ref, record.refFields)
   assertPureFields(record.target.ref.incarnation, record.incarnationFields)
   record.owner.assertDataCurrent()
+  if (record.authority && !isModRuntimeAuthorityDataCurrent(record.authority))
+    throw new ModFunctionError("MODS_CONVERSATION_AUTHORITY_CHANGED")
   record.targetExecution.assertDataCurrent()
 }
 
@@ -278,6 +283,17 @@ export function readFunctionConversationNativeOwnerCurrentExecution(current: unk
     OwnerCurrentExecution | undefined
   if (!record) return undefined
   record.assertDataCurrent()
+  return record
+}
+
+/** Resident identity only. This cannot qualify a physical parent or renew its captured lease. */
+export function readFunctionConversationResidentOwnerExecution(current: unknown):
+  OwnerCurrentExecution | undefined {
+  if (typeof current !== "function" || types.isProxy(current)) return undefined
+  const record = Reflect.apply(weakGet, residentOwnerExecutions, [current]) as
+    OwnerCurrentExecution | undefined
+  if (!record) return undefined
+  record.assertIndependentDataCurrent()
   return record
 }
 
@@ -482,7 +498,17 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
 
   private captureOwnerCurrentExecution(owner: Owner, beforeActivation = false): OwnerCurrentExecution | undefined {
     const previous = Reflect.apply(weakGet, ownerExecutions, [owner]) as OwnerCurrentExecution | undefined
-    if (previous) { previous.assertDataCurrent(); return previous }
+    if (previous) {
+      // A resident SDK owner outlives physical turns. An expired physical receipt is never
+      // refreshed; a later admission must independently capture its actual new lease.
+      if (previous.leaseCurrent()) {
+        previous.assertDataCurrent()
+        return previous
+      }
+      // A later actual lease gets another record. Never update the old closure or rescue a
+      // failed current receipt. Existing independent child guards retain their original record.
+      previous.assertIndependentDataCurrent()
+    }
     const base = Reflect.apply(weakGet, ownerGuardCoordinators, [this]) as
       ReturnType<typeof ownerGuardCoordinators.get>
     const coordinator = Reflect.apply(weakGet, originalCoordinatorData, [this]) as
@@ -510,7 +536,7 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
       try {
         if ((independent ? independentFailed : failed || !leaseCurrent()) || getDb() !== database ||
           Reflect.apply(weakGet, ownerCurrentExecutions, [current]) !== execution ||
-          Reflect.apply(weakGet, ownerExecutions, [owner]) !== execution ||
+          (!independent && Reflect.apply(weakGet, ownerExecutions, [owner]) !== execution) ||
           Reflect.apply(weakGet, originalCoordinatorData, [this]) !== coordinator ||
           Reflect.apply(weakGet, originalOwnerData, [owner]) !== original ||
           Reflect.apply(weakGet, ownerGuardCoordinators, [this]) !== base)
@@ -570,8 +596,10 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
     const current = () => runCurrent(false)
     const independentCurrent = () => runCurrent(true)
     const execution: OwnerCurrentExecution = Object.freeze({ coordinator: this, owner,
-      database, store, current, assertDataCurrent, independentCurrent, assertIndependentDataCurrent })
+      database, store, current, assertDataCurrent, independentCurrent, assertIndependentDataCurrent,
+      leaseCurrent })
     Reflect.apply(weakSet, ownerCurrentExecutions, [current, execution])
+    Reflect.apply(weakSet, residentOwnerExecutions, [independentCurrent, execution])
     Reflect.apply(weakSet, ownerExecutions, [owner, execution])
     if (!beforeActivation) assertDataCurrent()
     return execution
@@ -598,7 +626,10 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
     if (!owner.preparing) {
       const context = owner.context
       owner.preparing = (async () => {
-        const guard = this.captureOwnerCurrentExecution(owner)?.current ?? (() => this.assertOwner(owner))
+        // This target belongs to the resident session, not whichever physical turn first
+        // prepared it. The independent guard retains every owner/source identity check.
+        const guard = this.captureOwnerCurrentExecution(owner)?.independentCurrent ??
+          (() => this.assertOwner(owner))
         const signal = AbortSignal.any([context.signal, owner.controller.signal])
         const checkpoint = await this.host.readCurrentCheckpoint(context.threadId, signal, guard)
         guard()
@@ -657,12 +688,13 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
       owner.target = this.registry.registerMain(owner.context.owner, { identity: owner,
         ref, checkpointThreadId: ref.threadId,
         signal: AbortSignal.any([owner.context.signal, owner.controller.signal]),
-        assertCurrent: this.captureOwnerCurrentExecution(owner)?.current ?? (() => this.assertOwner(owner)) })
+        assertCurrent: this.captureOwnerCurrentExecution(owner)?.independentCurrent ??
+          (() => this.assertOwner(owner)) })
       owner.preparing = Promise.resolve(owner.target)
     }
     const target = owner.target
     if (!this.sameRef(target.ref, ref)) throw new ModFunctionError("MODS_CONVERSATION_TARGET_CHANGED")
-    const parent = this.captureParentCurrent(owner, target, threadId, assertFactory) ??
+    const parent = this.captureParentCurrent(owner, target, threadId, assertFactory, authority) ??
       { owner, target: target.ref,
       physicalParentThreadId: threadId, signal: target.signal,
       assertCurrent: () => { this.assertOwner(owner); target.assertCurrent() }, assertFactory }
@@ -680,10 +712,14 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
   }
 
   private captureParentCurrent(owner: Owner, target: FunctionConversationTarget,
-    physicalParentThreadId: string, assertFactory: () => void):
+    physicalParentThreadId: string, assertFactory: () => void, authority?: ModRuntimeAuthority):
     FunctionConversationChildParentCapture<Owner> | undefined {
     const ownerExecution = this.captureOwnerCurrentExecution(owner)
     if (!ownerExecution) return undefined
+    if (authority && (!isModRuntimeAuthorityDataCurrent(authority) ||
+      authority.workspace !== owner.context.workspace || authority.threadId !== physicalParentThreadId ||
+      this.host.authorities.get(authority) !== authority))
+      throw new ModFunctionError("MODS_CONVERSATION_AUTHORITY_CHANGED")
     const targetExecution = readFunctionConversationNativeParentTargetExecution(
       this.registry, target, ownerExecution.current)
     if (!targetExecution) return undefined
@@ -745,7 +781,7 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
     const record: ParentCurrentExecution = { input,
       inputFields: capturePureFields(input,
         ["owner", "target", "physicalParentThreadId", "signal", "assertCurrent", "assertFactory"]),
-      owner: ownerExecution, target, ownerFields: capturePureFields(owner, ["target"]),
+      owner: ownerExecution, ...(authority ? { authority } : {}), target, ownerFields: capturePureFields(owner, ["target"]),
       targetFields: capturePureFields(target, ["ref", "checkpointThreadId", "signal", "assertCurrent"]),
       refFields: capturePureFields(target.ref, ["logicalSessionId", "conversationId", "branchId",
         "threadId", "workspace", "incarnation", "checkpointNamespace", "kind"]),

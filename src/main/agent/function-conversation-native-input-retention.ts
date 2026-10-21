@@ -15,7 +15,8 @@ import { readFunctionConversationNativePolicySource,
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import { MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY, MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY }
   from "../../shared/message-role-collision"
-import { bindFunctionConversationNativeInput, readFunctionConversationNativeInput,
+import { bindFunctionConversationNativeInput, captureFunctionConversationNativeInput,
+  readFunctionConversationNativeInput,
   type FunctionConversationNativeInputReceipt, type FunctionConversationNativeInputBinding }
   from "./function-conversation-native-input"
 import { captureFunctionConversationNativeInputPresentation,
@@ -27,6 +28,8 @@ import { FunctionNativeMessageProtector, type FunctionNativeProtectionPolicy } f
 import { captureNativeMessage, constructCapturedNativeMessage } from "./native-message-capture"
 import { deserializeFunctionConversationNativeMessage,
   serializeFunctionConversationNativeMessage } from "./function-conversation-native-message"
+import { consumeCompletionRevisionInput, isCompletionRevisionInput } from "./skill-lifecycle/completion-hooks"
+import { getLocalThreadRunLease } from "./thread-run-lease"
 
 interface Saved {
   readonly policy: FunctionNativeProtectionPolicy
@@ -44,6 +47,11 @@ interface Once {
   phase: "processing" | "saved" | "failed"
   violated: boolean
   saved?: Saved
+}
+interface NativeInputRetention {
+  retainInput(actualInput: unknown, config: RunnableConfig): Promise<unknown>
+  close(): void
+  whenDrained(): Promise<void>
 }
 const occurrences = new WeakMap<FunctionConversationNativeInputReceipt, Once>()
 // Only retainInput creates these closures. A wrapper or another occurrence has no provenance.
@@ -159,18 +167,19 @@ function replaceInput(input: unknown, original: HumanMessage, safe: HumanMessage
 
 /** Actual entry once state. A new candidate reads an acknowledged result without replaying it. */
 export function createFunctionConversationNativeInputRetention(input: {
-  readonly source: FunctionConversationNativeInputReceipt
+  readonly source?: FunctionConversationNativeInputReceipt
   readonly runtime: FunctionNativeConversationRuntime
   readonly store: FunctionConversationStore
   readonly agentId: string
   flush(uuid: string): void | Promise<void>
   register(message: BaseMessage, row: FunctionConversationRow): void
-}) {
+}): NativeInputRetention {
   const { source: receipt, runtime, store } = input
   const attempt = Object.freeze({}), producer = Object.freeze({}), occurrence = Object.freeze({})
   const flush = input.flush.bind(input), register = input.register.bind(input)
   const active = new Set<Promise<unknown>>()
   const keepers = new Set<FunctionConversationNativeKeeper>()
+  const continuations = new Set<NativeInputRetention>()
   let closed = false
 
   const pureTail = (binding: FunctionConversationNativeInputBinding, signal: AbortSignal,
@@ -203,6 +212,71 @@ export function createFunctionConversationNativeInputRetention(input: {
     if (actualInput === null) return actualInput
     if (actualInput && typeof actualInput === "object" && !types.isProxy(actualInput) &&
       Object.getPrototypeOf(actualInput) === Command.prototype) return actualInput
+    if (isCompletionRevisionInput(actualInput)) {
+      const pending = Promise.withResolvers<unknown>()
+      // Drain must observe this occurrence before any original authority callback.
+      active.add(pending.promise)
+      const work = async () => {
+        // Consume before invoking any original source guard: synchronous re-entry
+        // must fail this occurrence instead of starting a second protection operation.
+        const lease = getLocalThreadRunLease(runtime.target.ref.threadId)
+        const revision = consumeCompletionRevisionInput(actualInput, {
+          threadId: runtime.target.ref.threadId, runId: lease?.runId ?? "",
+          workspace: runtime.target.ref.workspace
+        })
+        if (!revision) fail()
+        const source = receipt ? readFunctionConversationNativeInput(receipt) : undefined
+        // A host repair is a new checkpoint-only occurrence, never another submission
+        // of the user's address. Keep the original Once intact and reuse the complete
+        // protection/keeper/ACK chain with a separate, non-visible transcript intent.
+        const assertOriginal = () => {
+          const original = receipt ? occurrences.get(receipt) : undefined
+          if (receipt && (original?.phase !== "saved" || original.violated)) fail()
+        }
+        const assertCurrent = () => {
+          if (closed) fail()
+          assertOriginal()
+          runtime.assertCurrent()
+          source?.assertCurrent()
+          revision.assertCurrent()
+          assertOriginal()
+        }
+        assertCurrent()
+        const message = revision.message
+        const continuation = createFunctionConversationNativeInputRetention({ ...input,
+          source: captureFunctionConversationNativeInput({ message,
+            threadId: source?.threadId ?? runtime.target.ref.threadId,
+            physicalRunId: source?.physicalRunId ?? lease!.runId,
+            workspace: source?.workspace ?? runtime.target.ref.workspace, signal: revision.signal,
+            origin: { kind: "hook", event: "completion-revision" },
+            transcript: { disposition: "plumbing", write: { id: message.id!, role: "user",
+              content: String(message.content), created_at: new Date() } },
+            assertCurrent }) })
+        continuations.add(continuation)
+        try {
+          // The private certificate was consumed above. Only this exact original
+          // HumanMessage enters the new occurrence's ordinary address validator.
+          const retained = await continuation.retainInput({ messages: [message] }, config)
+          assertCurrent()
+          return retained
+        } finally {
+          await continuation.whenDrained()
+          continuation.close()
+          continuations.delete(continuation)
+        }
+      }
+      void work().then(value => {
+        active.delete(pending.promise)
+        pending.resolve(value)
+      }, error => {
+        active.delete(pending.promise)
+        pending.reject(error)
+      })
+      return pending.promise
+    }
+    // Resume/control-only runtimes have no external input receipt. Their ordinary
+    // input path is unchanged; only the certified completion occurrence above is new.
+    if (!receipt) return actualInput
     const previous = occurrences.get(receipt)
     if (previous?.phase === "failed" || previous?.attempt === attempt) {
       if (previous) previous.violated = true
@@ -381,7 +455,10 @@ export function createFunctionConversationNativeInputRetention(input: {
       if (closed) return
       closed = true
       for (const keeper of keepers) keeper.close()
+      for (const continuation of continuations) continuation.close()
     },
-    async whenDrained() { await Promise.allSettled([...active]) }
+    async whenDrained() {
+      await Promise.allSettled([...active, ...[...continuations].map(value => value.whenDrained())])
+    }
   })
 }

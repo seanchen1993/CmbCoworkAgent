@@ -469,7 +469,10 @@ export class ModDevelopmentService {
   }
   async setEnabled(threadId: string, expectedWorkspace: string, enabled: boolean) {
     const { scope, assertCurrent } = this.current(threadId, false)
-    if (scope.workspace !== expectedWorkspace) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+    if (
+      scope.workspace !== (this.deps.normalizeWorkspace?.(expectedWorkspace) ?? expectedWorkspace)
+    )
+      throw Error("DEVELOPMENT_SCOPE_CHANGED")
     if (enabled) {
       this.pruneUnreferenced()
       if (this.deps.canRun && !this.deps.canRun(scope)) throw Error("DEVELOPMENT_MODS_DISABLED")
@@ -489,7 +492,10 @@ export class ModDevelopmentService {
   }
   async setMode(threadId: string, expectedWorkspace: string, mode: DevelopmentMode) {
     const { scope } = this.current(threadId, false)
-    if (scope.workspace !== expectedWorkspace) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+    if (
+      scope.workspace !== (this.deps.normalizeWorkspace?.(expectedWorkspace) ?? expectedWorkspace)
+    )
+      throw Error("DEVELOPMENT_SCOPE_CHANGED")
     if (mode !== "normal" && mode !== "creator") throw Error("DEVELOPMENT_INPUT")
     if (mode === "creator") {
       if (!this.enabled.has(identity(scope)))
@@ -865,7 +871,11 @@ export class ModDevelopmentService {
   async approveReuse(threadId: string, expectedWorkspace: string, input: CreatorReuseApproval) {
     if (!this.reuse) throw Error("DEVELOPMENT_REUSE_UNAVAILABLE")
     const context = this.current(threadId, false)
-    if (context.scope.workspace !== expectedWorkspace) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+    if (
+      context.scope.workspace !==
+      (this.deps.normalizeWorkspace?.(expectedWorkspace) ?? expectedWorkspace)
+    )
+      throw Error("DEVELOPMENT_SCOPE_CHANGED")
     await this.reuse.approve(context, input)
     return this.status(threadId)
   }
@@ -886,7 +896,10 @@ export class ModDevelopmentService {
     sourceDigest?: string
   ) {
     const { scope, assertCurrent } = this.current(threadId)
-    if (scope.workspace !== expectedWorkspace) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+    if (
+      scope.workspace !== (this.deps.normalizeWorkspace?.(expectedWorkspace) ?? expectedWorkspace)
+    )
+      throw Error("DEVELOPMENT_SCOPE_CHANGED")
     const trial = this.deps.runtime.developmentStatus(scope).find((item) => item.componentId === id)
     if (!trial || trial.revision !== revision || trial.compiledDigest !== compiledDigest)
       throw Error("DEVELOPMENT_APPROVAL_STALE")
@@ -904,14 +917,20 @@ export class ModDevelopmentService {
   }
   async stop(threadId: string, expectedWorkspace: string, id: string) {
     const { scope, assertCurrent } = this.current(threadId)
-    if (scope.workspace !== expectedWorkspace) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+    if (
+      scope.workspace !== (this.deps.normalizeWorkspace?.(expectedWorkspace) ?? expectedWorkspace)
+    )
+      throw Error("DEVELOPMENT_SCOPE_CHANGED")
     await this.deps.runtime.stopDevelopment(scope, id, assertCurrent)
     this.deps.changed(threadId)
     return this.status(threadId)
   }
   promote(threadId: string, expectedWorkspace: string, id: string, revision: number) {
     const { scope, assertCurrent } = this.current(threadId)
-    if (scope.workspace !== expectedWorkspace) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+    if (
+      scope.workspace !== (this.deps.normalizeWorkspace?.(expectedWorkspace) ?? expectedWorkspace)
+    )
+      throw Error("DEVELOPMENT_SCOPE_CHANGED")
     const draft = this.read(threadId, id)
     if (draft.revision !== revision) throw Error("AUTHORING_VERSION_CHANGED")
     const savedId = `creator-${digest(JSON.stringify([identity(scope), id, revision])).slice(0, 48)}`

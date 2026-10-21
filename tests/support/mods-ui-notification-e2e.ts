@@ -1,6 +1,6 @@
 import { openModsResults } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
-import { mkdirSync } from "node:fs"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import AdmZip from "adm-zip"
 import type { Page } from "playwright"
@@ -133,11 +133,34 @@ export async function verifyUiNotification(
     "explicit invalidation refreshes hint"
   )
   await page.getByText("SCOPED_OUTPUT_1", { exact: true }).first().waitFor()
-  assert((await changes()).some((event) => event.scope === undefined))
+  // This guest has unambiguous render registrations: invalidation targets its
+  // CommandOutput cache and mounted owners, rather than clearing every component.
+  // Pane notifications are independently coalesced.
+  let broadcast: ModUiChangeEvent[] = []
+  try {
+    await until(async () => {
+      broadcast = await changes()
+      const redraws = new Set(
+        broadcast.map((event) => event.scope).filter((scope) => scope?.startsWith("site-redraw:"))
+      )
+      return (
+        broadcast.some((event) => event.scope === "site-presentations:CommandOutput") &&
+        broadcast.some((event) => event.scope === "panes") &&
+        redraws.size >= 2
+      )
+    }, "SDK invalidation revokes its cached output, redraws affected sites and notifies panes")
+  } finally {
+    writeFileSync(join(artifacts, "notification-broadcast.json"), JSON.stringify(broadcast, null, 2))
+  }
+  assert(
+    broadcast.every((event) => event.threadId === id),
+    JSON.stringify(broadcast)
+  )
+  assert(broadcast.every((event) => event.scope !== undefined && event.scope !== "site-presentations:*"))
   await pane().getByText("LOCAL_COUNT_3", { exact: true }).waitFor()
   await page.screenshot({ path: join(artifacts, "scoped-notification-visible.png") })
   pass(
-    "explicit SDK invalidation still broadcasts globally and updates actual cached sites without resetting Client state"
+    "explicit SDK invalidation refreshes affected sites and cached output without resetting Client state"
   )
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("UI notifications", { exact: true }).first().click()

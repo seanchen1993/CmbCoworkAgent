@@ -73,6 +73,7 @@ it("requires Windows packaged validation before upload/release and keeps diagnos
     "output/mods-v2-validation/actions-packaged/packaged-validation.json",
     "output/mods-v2-validation/actions-packaged/result.json",
     "output/mods-v2-validation/actions-packaged/packaged-runtime-evidence.json",
+    "output/mods-v2-validation/actions-packaged/packaged-community-examples.json",
     "output/mods-v2-validation/actions-packaged/*.png"
   ])
 })

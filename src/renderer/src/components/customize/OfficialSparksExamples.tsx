@@ -22,8 +22,10 @@ function friendlyError(cause: unknown): string {
   const message = cause instanceof Error ? cause.message : String(cause)
   if (message.includes("MODS_COMMUNITY_EXISTING_CONFLICT"))
     return "已安装同名但内容不同的插件。为保护你的版本，本次没有覆盖，请先到已安装列表核对。"
-  if (message.includes("MODS_COMMUNITY_INTEGRITY"))
-    return "内置示例完整性检查未通过，未安装。请修复或更新应用后重试。"
+  if (message.includes("MODS_COMMUNITY_INTEGRITY")) {
+    const detail = message.split("MODS_COMMUNITY_INTEGRITY:")[1]?.trim()
+    return `内置示例完整性检查未通过，未安装。${detail ? `核对结果：${detail}。` : ""}请修复或更新应用后重试；无需关闭权限保护。`
+  }
   if (/BUSY|busy|空闲/.test(message))
     return "当前任务仍在运行，请等待任务结束后重新核对使用；已经安装的示例会保留。"
   return message
@@ -204,6 +206,9 @@ export function OfficialSparksExamples({
           本工程与 Anthropic 官方示例均已内置。选择后核对权限，再应用到当前聊天。
         </p>
         <p className="mt-2 text-sm text-muted-foreground">
+          添加仅安装文件；确认用于当前聊天后，按卡片中的操作触发并核对效果。部分示例需要打开扩展页面或选择行为实现。
+        </p>
+        <p className="mt-2 text-sm text-muted-foreground">
           体验跨插件组合：先使用“任务能力提供方”，再使用“个人任务工作台”。两项都要在同一聊天核对并确认。
         </p>
       </div>
@@ -219,6 +224,10 @@ export function OfficialSparksExamples({
               <h3 className="font-medium">{example.title}</h3>
             </div>
             <p className="text-sm leading-relaxed">{example.description}</p>
+            <div className="rounded-md bg-muted/50 p-2 text-xs leading-relaxed">
+              <p className="font-medium">怎样触发与核对效果</p>
+              <p className="mt-1">{example.usage}</p>
+            </div>
             {example.conflictNote && (
               <p className="rounded-md bg-muted p-2 text-xs leading-relaxed">
                 {example.conflictNote}
@@ -226,7 +235,6 @@ export function OfficialSparksExamples({
             )}
             <details className="text-xs text-muted-foreground">
               <summary className="cursor-pointer">使用方法与来源</summary>
-              <p className="mt-2 leading-relaxed">{example.usage}</p>
               {example.origin === "devclaw" ? (
                 <>
                   <p className="mt-2">来源：CMBDevClaw 本工程示例 · {example.version}</p>

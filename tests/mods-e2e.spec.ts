@@ -1,5 +1,8 @@
 import { verifyDesktopLatencyDiagnostics } from "./support/mods-desktop-latency-e2e"
-import { openModsResults, openModsSettings } from "./support/mods-sidebar-navigation"
+import { verifyRegisteredRevocation, installRegisteredRevocationDiagnostics,
+  collectRegisteredRevocationDiagnostics } from "./support/mods-registered-revocation-e2e"
+import { waitForChildProbe } from "./support/mods-child-protocol-evidence"
+import { openModsProgress, openModsResults, openModsSettings } from "./support/mods-sidebar-navigation"
 import { verifyClientBusy } from "./support/mods-client-busy-e2e"
 import { verifyBase64 } from "./support/mods-base64-e2e"
 import { verifyEncoding } from "./support/mods-encoding-e2e"
@@ -80,6 +83,7 @@ import { _electron, type ElectronApplication, type Page } from "playwright"
 import { startModsModelServer } from "./support/mods-model-server"
 import { verifyPackagedFunctions } from "./support/mods-packaged-functions"
 import { verifyPackagedRuntime } from "./support/mods-packaged-runtime"
+import { verifyPackagedCommunityExamples } from "./support/mods-community-examples-e2e"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
 import { verifyFunctionSites } from "./support/mods-function-sites-e2e"
 import { verifyCompactionHooks } from "./support/mods-compaction-e2e"
@@ -88,6 +92,7 @@ import { verifyMessageSites } from "./support/mods-message-sites-e2e"
 import { verifySvg } from "./support/mods-svg-e2e"
 import { verifyCommandOutput } from "./support/mods-command-output-e2e"
 import { verifyCompletionFreshness } from "./support/mods-completion-freshness-e2e"
+import { verifyCompletionGate } from "./support/mods-completion-gate-e2e"
 import { verifyClassicOutput } from "./support/mods-classic-output-e2e"
 import { verifyToolBatch } from "./support/mods-tool-batch-e2e"
 import { verifyUiNotice } from "./support/mods-ui-notice-e2e"
@@ -127,6 +132,8 @@ const focus = [
   "continuity",
   "task-model-288",
   "builtin-context-meter",
+  "compaction-hooks",
+  "registered-revocation",
   "presentation",
   "model-http-284",
   "client-busy",
@@ -181,9 +188,13 @@ const focus = [
   "compatibility",
   "named-state",
   "completion-freshness",
+  "completion-gate",
+  "integrated-tail",
+  "integrated-tail-end",
   "ui-log",
   "ui-ask",
   "question-site",
+  "question-site-uninstall",
   "ui-notice",
   "tool-batch",
   "instructions-loaded",
@@ -280,9 +291,54 @@ async function until(check: () => Promise<boolean>, label: string): Promise<void
   }
   throw Error(`Timeout: ${label}`)
 }
+/** Original final checks shared unchanged with the integrated suite. */
+async function verifyIntegratedTailEnd(): Promise<void> {
+  if (!modelServer || !app || !page) throw Error("MODS_E2E_TAIL_NOT_STARTED")
+  await verifyBase64(page!, workspace, artifacts, until, pass)
+  await verifyImperativeFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
+  await verifyPaneFocusLifecycle(page!, until, pass)
+  await verifyAgentList(page!, workspace, artifacts, modelServer.requests, until, pass)
+  await verifyFileWrite(app!, page!, workspace, artifacts, modelServer.requests, until, pass)
+  await verifyFileMetadata(page!, workspace, artifacts, modelServer.requests, until, pass)
+  await verifyFileReadOptions(page!, workspace, artifacts, modelServer.requests, until, pass)
+  await verifyBackgroundTimeout(
+    app!,
+    page!,
+    workspace,
+    artifacts,
+    modelServer.requests,
+    until,
+    pass
+  )
+  await verifyImperativeScroll(page!, workspace, artifacts, modelServer.requests, until, pass)
+  await verifyToolBatch(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
+  await verifyInstructionsLoaded(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
+  await verifyPromptExpansion(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
+  await verifySessionTitle(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
+  await verifyStopFeedback(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
+  await verifyStopFailure(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
+}
+/** Identical ordered tail for the full suite and fast independent failure diagnosis. */
+async function verifyIntegratedTail(): Promise<void> {
+  if (!modelServer || !app || !page) throw Error("MODS_E2E_TAIL_NOT_STARTED")
+  await verifyCompletionFreshness(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
+  await verifyUiLog(page!, workspace, artifacts, join(isolated, "data/logs/main.log"), modelServer.requests, until, pass)
+  await verifyUiAsk(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
+  await verifyQuestionSite(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
+  await verifyQuestionSite(page!, workspace, artifacts, modelServer.requests, until, pass, app!, "uninstall")
+  await verifyUiNotice(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
+  await verifyUiInvalidate(page!, workspace, artifacts, until, pass)
+  await verifyGuestCodegen(page!, workspace, artifacts, until, pass)
+  await verifyPublicJsx(page!, workspace, artifacts, until, pass)
+  await verifyUiNotification(page!, workspace, artifacts, until, pass)
+  await verifyClientFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
+  await verifyClientBusy(page!, workspace, artifacts, until, pass)
+  await verifyIntegratedTailEnd()
+}
 async function runMain(failures: unknown[]): Promise<void> {
-  const functionalDeadline = !focus && !packagedDir ? 1_200_000 : 900_000
-  // The full suite combines dozens of installed projects and lifecycle scenarios.
+  const functionalDeadline = !focus && !packagedDir ? 1_500_000 : 900_000
+  // The expanded full suite includes both uninstall/disable paths and intentional held streams.
+  // Its aggregate watchdog is separate from every unchanged per-operation wait and package gate.
   // Individual waits, packaged checks and formal performance/soak deadlines remain independent.
   const watchdog = setTimeout(
     () => {
@@ -317,6 +373,9 @@ async function runMain(failures: unknown[]): Promise<void> {
     // isolated offline test profile. Mods IPC and runtime remain production code.
     // Production registers its IPC handlers before creating the main window.
     await app.firstWindow()
+    // tsx keeps callback names with this helper. It belongs to the isolated harness,
+    // just like the renderer init script below, and must exist before serialized callbacks.
+    await app.evaluate("globalThis.__name = value => value")
     await app.evaluate(({ ipcMain }) => {
       ipcMain.removeHandler("open-login-page")
       ipcMain.handle("open-login-page", () => undefined)
@@ -338,6 +397,25 @@ async function runMain(failures: unknown[]): Promise<void> {
     await page!.evaluate(() => window.api.mods.configureGlobal(true))
     assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), true)
     pass("Mods application switch defaults to off and requires explicit opt-in")
+    if (process.env.CMB_MODS_CHILD_PROFILE === "1") {
+      await app.evaluate(async () => {
+        const { Session } = process.getBuiltinModule("node:inspector")
+        const session = new Session()
+        session.connect()
+        const post = (method: string) => new Promise<unknown>((resolve, reject) => {
+          session.post(method, (error, result) => error ? reject(error) : resolve(result))
+        })
+        await post("Profiler.enable")
+        await post("Profiler.start")
+        Object.assign(globalThis, { modsChildProfile: async () => {
+          try {
+            return { cpu: await post("Profiler.stop") }
+          } finally {
+            session.disconnect()
+          }
+        } })
+      })
+    }
     const threadId = await page!.evaluate(async (workspace) => {
       const thread = await window.api.threads.create({
         title: "Mods E2E",
@@ -451,6 +529,58 @@ async function runMain(failures: unknown[]): Promise<void> {
         await verifyBuiltinContextMeter(page!, workspace, artifacts, modelServer.requests, until, pass)
         return
       }
+      if (focus === "compaction-hooks") {
+        await verifyCompactionHooks(page!, root, workspace, artifacts, modelServer, until, pass)
+        return
+      }
+      if (focus === "registered-revocation") {
+        await verifyRegisteredRevocation({ app: app!, page: page!, root, workspace,
+          controlThreadId: threadId, artifacts, requests: modelServer.requests, until, pass,
+          restart: async () => {
+            await app!.close()
+            page = undefined
+            app = await _electron.launch({
+              executablePath: join(root, "tests/support/electron-launcher.cmd"),
+              args: [process.env.CMB_MODS_E2E_APP_DIR ?? join(root, "out/main/index.js"),
+                `--user-data-dir=${join(isolated, "electron")}`], cwd: root, env, timeout: 60_000
+            })
+            await app.firstWindow()
+            await app.evaluate("globalThis.__name = value => value")
+            await app.evaluate(({ ipcMain }) => {
+              ipcMain.removeHandler("open-login-page")
+              ipcMain.handle("open-login-page", () => undefined)
+            })
+            await until(async () => {
+              for (const candidate of app!.windows())
+                if (await candidate.evaluate(() => Boolean(window.api?.mods)).catch(() => false)) {
+                  page = candidate
+                  return true
+                }
+              return false
+            }, "focused production preload after complete process restart")
+            await page!.addInitScript("window.__name = value => value")
+            await page!.evaluate("window.__name = value => value")
+            page!.setDefaultTimeout(15_000)
+            return { app, page: page! }
+          } })
+        return
+      }
+      if (focus === "integrated-tail-end") {
+        await verifyIntegratedTailEnd()
+        return
+      }
+      if (focus === "integrated-tail") {
+        await verifyIntegratedTail()
+        return
+      }
+      if (focus === "completion-gate") {
+        await verifyCompletionGate(page!, workspace, artifacts, modelServer.requests, until, pass)
+        return
+      }
+      if (focus === "status-sites") {
+        await verifyStatusSites(page!, root, workspace, artifacts, until, pass)
+        return
+      }
       if (focus === "model-http-284") {
         await verifyModelHttp284(app!, page!, workspace, artifacts, until, pass)
         return
@@ -562,6 +692,8 @@ async function runMain(failures: unknown[]): Promise<void> {
         await verifyUiNotice(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
       else if (focus === "question-site")
         await verifyQuestionSite(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
+      else if (focus === "question-site-uninstall")
+        await verifyQuestionSite(page!, workspace, artifacts, modelServer.requests, until, pass, app!, "uninstall")
       else if (focus === "ui-ask")
         await verifyUiAsk(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
       else if (focus === "ui-log")
@@ -722,6 +854,9 @@ async function runMain(failures: unknown[]): Promise<void> {
       }
       await openModsSettings(page!)
       await page!.screenshot({ path: join(artifacts, "settings.png") })
+      await verifyPackagedCommunityExamples(
+        page!, workspace, join(isolated, "data"), artifacts, until, pass
+      )
       pass("packaged preload and React settings retain project grants after reload")
       return
     }
@@ -1082,11 +1217,14 @@ async function runMain(failures: unknown[]): Promise<void> {
     )
     assert(!JSON.stringify(revokedCards).includes("actionId"))
     pass("revocation invalidates existing cards")
+    const auditPanel = await openModsProgress(page!, "结果")
+    await auditPanel.getByText("排查详情：技术日志", { exact: true }).click()
+    const audit = auditPanel.locator("[data-mods-audit]")
+    await audit.locator(":scope > summary").click()
+    await audit.getByText("host:write_file", { exact: true }).first().waitFor()
+    await page!.screenshot({ path: join(artifacts, "audit.png") })
+    pass("production results panel renders durable project call records")
     await openModsSettings(page!)
-    await page!.locator("[data-mods-audit] > summary").click()
-    await page!.getByText("审计摘要", { exact: true }).first().waitFor()
-    await page!.screenshot({ path: join(artifacts, "settings.png") })
-    pass("production settings panel renders project grants")
     const functionSettings = page!.locator('[data-function-mod-id="function-commands"]')
     await functionSettings.waitFor()
     await functionSettings.getByRole("button", { name: "授权以上能力", exact: true }).click()
@@ -1479,24 +1617,28 @@ async function runMain(failures: unknown[]): Promise<void> {
     await lifecycleComposer.press("Enter")
     await page!.getByText("LIFECYCLE_TRANSFORMED", { exact: true }).first().waitFor({ timeout: 30000 })
     const lifecycleRequests = modelServer.requests.slice(lifecycleBefore)
+    assert.ok(lifecycleRequests.some((request) => request.messages.some(
+      (message) => message.role === "tool" &&
+        String(message.content).includes('"loaded"') &&
+        String(message.content).includes("mcp__model-lifecycle__probe")
+    )), "Deferred lifecycle tool must be discovered before it is called")
     assert.ok(lifecycleRequests.some((request) => JSON.stringify(request.messages).includes("[lifecycle-fork]")))
     assert.ok(lifecycleRequests.some((request) => JSON.stringify(request.messages).includes("[lifecycle-classify]")))
     const lifecycleMessages = await page!.evaluate((id) => window.api.threads.getMessages(id), threadId)
     assert.match(JSON.stringify(lifecycleMessages), /LIFECYCLE_TRANSFORMED/)
     assert.doesNotMatch(JSON.stringify(lifecycleMessages), /LIFECYCLE_RAW/)
     pass("production main-agent stream transforms before transcript publication and runs host-backed fork/classify")
+    await until(async () => (await page!.getByRole("button", { name: "停止生成", exact: true }).count()) === 0,
+      "lifecycle native turn settled before the next command")
     const lifecycleRequestCount = modelServer.requests.length
     await lifecycleComposer.fill("/")
     await page!.getByText("lifecycle-pane", { exact: true }).first().waitFor({ timeout: 30_000 })
-    await lifecycleComposer.fill("/lifecycle-pane")
-    // The first Enter accepts the slash suggestion and inserts the command's
-    // trailing space; the second submits the now closed slash popover.
-    await lifecycleComposer.press("Enter")
-    await until(
-      async () => (await lifecycleComposer.inputValue()) === "/lifecycle-pane ",
-      "lifecycle command accepted"
-    )
-    await lifecycleComposer.press("Enter")
+    await lifecycleComposer.fill("/lifecycle-pane ")
+    await page!.getByRole("button", { name: "发送消息", exact: true }).click()
+    await until(async () => (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).some(
+      (job) => job.command === "lifecycle-pane" && job.state === "succeeded"
+    ), "lifecycle command opens its real pane")
+    await page!.getByRole("button", { name: "1 个插件面板 · 查看", exact: true }).click()
     const lifecyclePane = page!.locator('[data-function-pane="lifecycle"]')
     await lifecyclePane.waitFor({ state: "visible" })
     const paneRequestCount = modelServer.requests.length
@@ -2299,7 +2441,7 @@ async function runMain(failures: unknown[]): Promise<void> {
           (job) =>
             job.command === "claw-tools" &&
             job.state === "succeeded" &&
-            job.result?.text.includes("read_file")
+            job.result?.text.includes("\nRead：")
         ),
       "cold SDK lists real tools before the first model request"
     )
@@ -2310,7 +2452,7 @@ async function runMain(failures: unknown[]): Promise<void> {
       .map((match) => match[1])
       .sort()
     for (const name of [
-      "read_file",
+      "Read",
       "task_output",
       "write_todos",
       "request_user_input",
@@ -2336,7 +2478,7 @@ async function runMain(failures: unknown[]): Promise<void> {
     const beforeToolDetail = new Set(
       (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).map((job) => job.id)
     )
-    await functionComposer.fill("/claw-tools read_file")
+    await functionComposer.fill("/claw-tools Read")
     await functionComposer.press("Enter")
     await until(
       async () =>
@@ -2345,7 +2487,7 @@ async function runMain(failures: unknown[]): Promise<void> {
             !beforeToolDetail.has(job.id) &&
             job.command === "claw-tools" &&
             job.state === "succeeded" &&
-            job.result?.text.startsWith("read_file\n") &&
+            job.result?.text.startsWith("Read\n") &&
             job.result.text.length > 130
         ),
       "tool name opens the complete description without a model"
@@ -2366,24 +2508,56 @@ async function runMain(failures: unknown[]): Promise<void> {
     const registryRequests = modelServer.requests.filter((request) =>
       JSON.stringify(request.messages).includes("[mods-registered]")
     )
-    assert.deepEqual(
-      (registryRequests[0].tools as Array<{ function: { name: string } }>)
-        .map((tool) => tool.function.name)
-        .sort(),
-      coldCatalogNames,
-      "cold catalog names match the first real provider request"
+    assert.equal(registryRequests.length, 3, "one discovery, one tool call and one final response")
+    const deferredNames = [
+      "mcp__function-commands__project_brief",
+      "mcp__model-lifecycle__probe",
+      "mcp__host-foundation__probe"
+    ]
+    assert(deferredNames.every((name) => coldCatalogNames.includes(name)))
+    const firstPublished = (registryRequests[0].tools as Array<{ function: { name: string } }>)
+      .map((tool) => tool.function.name)
+      .sort()
+    const providerNames: Record<string, string> = {
+      Read: "read_file",
+      Write: "write_file",
+      Edit: "edit_file",
+      Bash: "execute"
+    }
+    const expectedFirstPublished = [
+      ...coldCatalogNames
+        .filter((name) => !deferredNames.includes(name))
+        .map((name) => providerNames[name] ?? name),
+      "mods_tool_search"
+    ].sort()
+    writeFileSync(
+      join(artifacts, "function-registered-tool-catalog.json"),
+      JSON.stringify({ coldCatalogNames, firstPublished, expectedFirstPublished }, null, 2)
     )
+    assert.deepEqual(
+      firstPublished,
+      expectedFirstPublished,
+      "first model step publishes the exact native provider names and deferred discovery; SDK display aliases are not wire names"
+    )
+    const loadedRequest = registryRequests.find((request) =>
+      (request.tools as Array<{ function: { name: string } }>).some(
+        (tool) => tool.function.name === "mcp__function-commands__project_brief"
+      )
+    )
+    assert(loadedRequest, "discovery publishes the registered schema on a subsequent real model step")
     const advertised = (
-      registryRequests[0].tools as Array<{ function: { name: string; parameters: unknown } }>
+      loadedRequest.tools as Array<{ function: { name: string; parameters: unknown } }>
     ).find((tool) => tool.function.name === "mcp__function-commands__project_brief")
-    assert.ok(advertised, "registered tool is in the first real provider request")
+    assert.ok(advertised, "registered tool becomes callable only after discovery")
     assert.deepEqual(advertised.function.parameters, {
       type: "object",
       properties: { limit: { type: "integer", minimum: 1, maximum: 20 } },
       additionalProperties: false
     })
     const registryResult = registryRequests.find(
-      (request) => request.messages.at(-1)?.role === "tool"
+      (request) =>
+        request.messages.at(-1)?.role === "tool" &&
+        String(request.messages.at(-1)?.content).includes("files")
     )
     assert.ok(registryResult)
     assert.match(JSON.stringify(registryResult.messages.at(-1)?.content), /files/)
@@ -2412,8 +2586,18 @@ async function runMain(failures: unknown[]): Promise<void> {
     )
     await page!.screenshot({ path: join(artifacts, "function-registered-tool.png") })
     pass(
-      "cold model prompt advertises custom schema, executes the registered tool and records protected publication"
+      "cold model discovers the deferred custom schema, executes it and records protected publication"
     )
+    // Protected answer publication precedes native turn settlement. These SDK queries
+    // assert the completed transcript, so wait for the actual completion and idle UI.
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.turnNotices(id), registryThread)).some(
+          (notice) => notice.text.startsWith("本轮完成")
+        ),
+      "real turn completion arrives before completed-session SDK queries"
+    )
+    await page!.getByRole("button", { name: "停止生成", exact: true }).waitFor({ state: "hidden" })
     const priorSessionJobs = new Set(
       (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).map((job) => job.id)
     )
@@ -2467,14 +2651,7 @@ async function runMain(failures: unknown[]): Promise<void> {
         JSON.stringify(fullBreakdown).includes('"estimated":true')
     )
     pass("session usage exposes distinct summary and full context breakdowns")
-    await until(
-      async () =>
-        (await page!.evaluate((id) => window.api.mods.turnNotices(id), registryThread)).some(
-          (notice) => notice.text.startsWith("本轮完成")
-        ),
-      "real turn completion arrives after settlement"
-    )
-    const inspectTurn = async () => {
+    const inspectTurnFromUi = async () => {
       const before = new Set(
         (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).map(
           (job) => job.id
@@ -2485,15 +2662,16 @@ async function runMain(failures: unknown[]): Promise<void> {
       let result: Record<string, unknown> | undefined
       await until(async () => {
         const job = (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).find(
-          (job) => !before.has(job.id) && job.command === "claw-turn" && job.state === "succeeded"
+          (job) => !before.has(job.id) && job.command === "claw-turn"
         )
-        if (!job?.result?.text) return false
+        if (job?.state === "failed") throw new Error(job.error)
+        if (job?.state !== "succeeded" || !job.result?.text) return false
         result = JSON.parse(job.result.text)
         return true
       }, "turn status comes from the public SDK example")
       return result!
     }
-    const completedTurn = await inspectTurn()
+    const completedTurn = await inspectTurnFromUi()
     assert.equal(completedTurn.active, null)
     assert.equal(completedTurn.starts, 1)
     assert.equal(completedTurn.completions, 1)
@@ -2513,8 +2691,8 @@ async function runMain(failures: unknown[]): Promise<void> {
     )
     assert.deepEqual(completedFacts.usage, {
       model: "mods-model-fixture",
-      input_tokens: 24,
-      output_tokens: 6,
+      input_tokens: 36,
+      output_tokens: 9,
       cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0
     })
@@ -2584,6 +2762,10 @@ async function runMain(failures: unknown[]): Promise<void> {
         completions: number
         last: { turnId: string; answer: string; reason: string; usage?: unknown; refusal?: unknown }
       }
+    // The real composer command was verified above. Repeated state observations use the
+    // same public SDK command through IPC; they must not submit drafts during a turn transition.
+    const inspectTurn = async () =>
+      JSON.parse(await backgroundCommand(registryThread)) as Record<string, unknown>
     for (const outcome of ["answer", "aborted", "refusal"]) {
       const cancel = outcome === "aborted"
       const refusal = outcome === "refusal"
@@ -2635,7 +2817,12 @@ async function runMain(failures: unknown[]): Promise<void> {
       assert.equal(facts.starts, 1)
       assert.equal(facts.completions, 1)
       assert.equal(facts.last.reason, outcome)
-      assert.match(facts.last.answer, refusal ? /MODS_PROVIDER_REFUSED/ : /SDK_MODEL_OK/)
+      // A background stop may precede the first byte. This checks actual completion
+      // identity; it must not require publication of an unfinished protected response.
+      assert.match(
+        facts.last.answer,
+        refusal ? /MODS_PROVIDER_REFUSED/ : cancel ? /^(?:SDK_MODEL_OK\s*)?$/ : /SDK_MODEL_OK/
+      )
       if (refusal) {
         assert.deepEqual(facts.last.refusal, {
           category: null,
@@ -2721,7 +2908,10 @@ async function runMain(failures: unknown[]): Promise<void> {
         assert.equal(facts.starts, index + 1)
         assert.equal(facts.completions, index + 1)
         assert.equal(facts.last.reason, outcome)
-        assert.match(facts.last.answer, refusal ? /MODS_PROVIDER_REFUSED/ : /SDK_MODEL_OK/)
+        assert.match(
+          facts.last.answer,
+          refusal ? /MODS_PROVIDER_REFUSED/ : cancel ? /^(?:SDK_MODEL_OK\s*)?$/ : /SDK_MODEL_OK/
+        )
         if (refusal) {
           assert.deepEqual(facts.last.refusal, {
             category: null,
@@ -2757,6 +2947,9 @@ async function runMain(failures: unknown[]): Promise<void> {
 
     const beforeTurnCancel = modelServer.requests.length
     const beforeClosedStalls = modelServer.closedStalls()
+    const beforeCancelRows = await page!.locator("[data-chat-message-id]").evaluateAll((rows) =>
+      rows.map((row) => row.getAttribute("data-chat-message-id"))
+    )
     await functionComposer.fill("[mods-turn-cancel] [stall] 请等待停止。")
     await functionComposer.press("Enter")
     await until(
@@ -2798,12 +2991,24 @@ async function runMain(failures: unknown[]): Promise<void> {
     assert.equal(abortedTurn.completions, 2)
     assert.equal((abortedTurn.last as { turnId: string }).turnId, runningTurn.active)
     assert.equal((abortedTurn.last as { reason: string }).reason, "aborted")
-    assert.match((abortedTurn.last as { answer: string }).answer, /SDK_MODEL_OK/)
+    assert.equal((abortedTurn.last as { answer: string }).answer, "")
+    assert.equal(
+      await page!.evaluate((previous) => {
+        const seen = new Set(previous)
+        return Array.from(document.querySelectorAll<HTMLElement>("[data-chat-message-id]")).some(
+          (row) =>
+            !seen.has(row.getAttribute("data-chat-message-id")) &&
+            row.innerText.includes("SDK_MODEL_OK")
+        )
+      }, beforeCancelRows),
+      false,
+      "an unfinished protected model response must not bypass canonical publication"
+    )
     assert.equal(modelServer.requests.length, beforeTurnCancel + 1)
     await page!.getByRole("button", { name: "停止生成", exact: true }).waitFor({ state: "hidden" })
     await page!.screenshot({ path: join(artifacts, "function-turn-abort.png") })
     pass(
-      "immediate turn abort cancels the actual stream once and retains its visible partial answer"
+      "protected turn abort closes the actual stream once and settles without an unfinished answer"
     )
     const postAbortJobs = new Set(
       (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).map((job) => job.id)
@@ -2818,7 +3023,7 @@ async function runMain(failures: unknown[]): Promise<void> {
             job.command === "claw-tools" &&
             job.state === "succeeded" &&
             job.result?.text.includes("mcp__function-commands__project_brief") &&
-            job.result.text.includes("read_file")
+            job.result.text.includes("\nRead：")
         ),
       "SDK lists actual model tools and custom tools"
     )
@@ -2847,7 +3052,9 @@ async function runMain(failures: unknown[]): Promise<void> {
     const invalidRegistry = modelServer.requests.find(
       (request) =>
         JSON.stringify(request.messages).includes("[mods-registered-invalid]") &&
-        request.messages.at(-1)?.role === "tool"
+        request.messages.at(-1)?.role === "tool" &&
+        (request.messages.at(-1) as { tool_call_id?: string })?.tool_call_id ===
+          "registered-invalid"
     )
     assert.match(
       JSON.stringify(invalidRegistry?.messages.at(-1)?.content),
@@ -2869,7 +3076,9 @@ async function runMain(failures: unknown[]): Promise<void> {
     const deniedRegistered = modelServer.requests.find(
       (request) =>
         JSON.stringify(request.messages).includes("[mods-registered-denied]") &&
-        request.messages.at(-1)?.role === "tool"
+        request.messages.at(-1)?.role === "tool" &&
+        (request.messages.at(-1) as { tool_call_id?: string })?.tool_call_id ===
+          "registered-denied"
     )
     assert(deniedRegistered)
     assert.match(
@@ -2942,6 +3151,9 @@ async function runMain(failures: unknown[]): Promise<void> {
     const beforeChild = modelServer.requests.length
     await functionComposer.fill("[mods-child] 请通过 Explore 子代理调用注册工具。")
     await functionComposer.press("Enter")
+    // Deferred discovery, the child tool, and the parent's final answer are distinct phases.
+    // Keep a bounded wait for actual tool completion before waiting for the final UI result.
+    await waitForChildProbe(modelServer.requests, beforeChild, until)
     await page!.getByText("MODS_CHILD_OK", { exact: true }).first().waitFor({ timeout: 30000 })
     const childRequests = modelServer.requests.slice(beforeChild)
     writeFileSync(
@@ -2964,7 +3176,7 @@ async function runMain(failures: unknown[]): Promise<void> {
     assert.equal(childValue.writePermission.decision, "deny")
     assert(
       !childValue.tools.some((tool: { name: string }) =>
-        ["write_file", "edit_file"].includes(tool.name)
+        ["write_file", "edit_file", "Write", "Edit"].includes(tool.name)
       )
     )
     assert(
@@ -3017,8 +3229,8 @@ async function runMain(failures: unknown[]): Promise<void> {
       reason: "answer",
       usage: {
         model: "mods-model-fixture",
-        input_tokens: 24,
-        output_tokens: 6,
+        input_tokens: 36,
+        output_tokens: 9,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0
       }
@@ -3038,17 +3250,7 @@ async function runMain(failures: unknown[]): Promise<void> {
     const beforeChildAbortClosed = modelServer.closedStalls()
     await functionComposer.fill("[mods-child] [child-stall] 请等待子代理完成，稍后停止。")
     await functionComposer.press("Enter")
-    await until(
-      async () =>
-        modelServer!.requests
-          .slice(beforeChildAbortRequests)
-          .some(
-            (request) =>
-              request.messages.at(-1)?.role === "tool" &&
-              JSON.stringify(request.messages).includes("[mods-child-worker] [stall]")
-          ),
-      "child is streaming through its actual provider connection"
-    )
+    await waitForChildProbe(modelServer.requests, beforeChildAbortRequests, until)
     await until(
       async () => page!.evaluate(async (id) => {
         const transcripts = await window.api.threads.getSubagentTranscripts(id)
@@ -3089,8 +3291,8 @@ async function runMain(failures: unknown[]): Promise<void> {
     assert.equal((abortedChildFacts!.last as { reason: string }).reason, "aborted")
     assert.deepEqual(abortedChild.usage, {
       model: "mods-model-fixture",
-      input_tokens: 12,
-      output_tokens: 3,
+      input_tokens: 24,
+      output_tokens: 6,
       cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0
     })
@@ -3100,8 +3302,10 @@ async function runMain(failures: unknown[]): Promise<void> {
     pass(
       "shared child cancellation retains its real partial answer without borrowing the main turn identity"
     )
+    const beforeChildRefusalRequests = modelServer.requests.length
     await functionComposer.fill("[mods-child] [child-refusal] 请记录子代理结果。")
     await functionComposer.press("Enter")
+    await waitForChildProbe(modelServer.requests, beforeChildRefusalRequests, until)
     let refusedChildFacts: Record<string, unknown>
     await until(async () => {
       refusedChildFacts = await inspectTurn()
@@ -3142,16 +3346,31 @@ async function runMain(failures: unknown[]): Promise<void> {
     ] as const) {
       const before = await inspectTurn()
       const requestCount = modelServer.requests.length
+      const previousNotices = new Set(
+        (await page!.evaluate((id) => window.api.mods.turnNotices(id), registryThread)).map(
+          (notice) => notice.id
+        )
+      )
       await functionComposer.fill(`[mods-refusal] ${marker} 验证明确的提供商终态。`)
       await functionComposer.press("Enter")
-      let refused: Record<string, unknown>
+      // Starting a native turn replaces its resident command authority. Read native
+      // settlement facts first; do not enqueue guest observations across that transition.
       await until(async () => {
-        refused = await inspectTurn()
+        const notices = await page!.evaluate(
+          (id) => window.api.mods.turnNotices(id),
+          registryThread
+        )
         return (
-          refused.active === null && Number(refused.completions) === Number(before.completions) + 1
+          modelServer.requests.length === requestCount + 1 &&
+          notices.filter((notice) => !previousNotices.has(notice.id)).length === 1 &&
+          (await page!.getByRole("button", { name: "停止生成", exact: true }).count()) === 0
         )
       }, "provider refusal completes without synthetic recovery")
-      const facts = refused!.last as {
+      const refused = await inspectTurn()
+      assert.equal(refused.active, null)
+      assert.equal(Number(refused.starts), Number(before.starts) + 1)
+      assert.equal(Number(refused.completions), Number(before.completions) + 1)
+      const facts = refused.last as {
         reason: string
         refusal: unknown
         answer: string
@@ -3261,8 +3480,18 @@ async function runMain(failures: unknown[]): Promise<void> {
     await clientRegion.getByText(/本地计数：0/).waitFor()
     await clientRegion.getByRole("button", { name: "本地加一", exact: true }).click()
     await clientRegion.getByText(/宿主已收到点击.*本地计数：1/).waitFor()
+    const clientPaneGeneration = await clientPane.getAttribute("data-function-pane-generation")
+    const clientInstance = await clientRegion.getAttribute("data-function-client-instance")
+    assert.ok(clientPaneGeneration)
+    assert.ok(clientInstance)
     await clientRegion.getByRole("button", { name: "重绘面板", exact: true }).click()
-    await clientRegion.getByText(/交互组件.*本地计数：1/).waitFor()
+    await until(async () => {
+      const generation = await clientPane.getAttribute("data-function-pane-generation")
+      return Boolean(generation && generation !== clientPaneGeneration)
+    }, "actual parent redraw retains the same Client instance")
+    assert.equal(await clientRegion.getAttribute("data-function-client-instance"), clientInstance)
+    // Unchanged source props preserve accepted message props across parent redraw.
+    await clientRegion.getByText(/宿主已收到点击.*本地计数：1/).waitFor()
     await clientRegion
       .getByRole("textbox", { name: "组件备注", exact: true })
       .fill("Client 本地状态")
@@ -3372,6 +3601,7 @@ async function runMain(failures: unknown[]): Promise<void> {
         }
       return false
     }, "production preload after process restart")
+    await app.evaluate("globalThis.__name = value => value")
     await page!.addInitScript("window.__name = value => value")
     page!.setDefaultTimeout(15_000)
     await page!.getByText("Mods E2E", { exact: true }).first().click()
@@ -3449,11 +3679,13 @@ async function runMain(failures: unknown[]): Promise<void> {
       async () => (await page!.locator("[data-function-turn-notices]").count()) === 0,
       "revocation clears old turn notices from the message list"
     )
+    // Shared passive diagnostics match the independent focused reproduction.
+    await installRegisteredRevocationDiagnostics(page!)
+    try {
     await page!
       .locator("textarea.composer-textarea")
       .fill("[mods-registered-removed] 请确认撤权后的工具列表。")
-    // Switching a restored thread hydrates history asynchronously. A raw Enter can
-    // reach the submit guard before it is ready; click waits for the real control.
+      // Wait for the current real send control; do not retry a failed submission.
     await page!
       .locator("form")
       .filter({ has: page!.locator("textarea.composer-textarea") })
@@ -3463,6 +3695,14 @@ async function runMain(failures: unknown[]): Promise<void> {
       .getByText("REGISTERED_TOOL_REMOVED_OK", { exact: true })
       .first()
       .waitFor({ timeout: 30000 })
+    } finally {
+      try {
+        const evidence = await collectRegisteredRevocationDiagnostics(page!)
+        writeFileSync(join(artifacts, "registered-revocation-prompt.json"), JSON.stringify(evidence, null, 2))
+      } catch (diagnosticError) {
+        console.error("Unable to preserve prompt rejection evidence", diagnosticError)
+      }
+    }
     const removedRegistry = modelServer.requests.find((request) =>
       JSON.stringify(request.messages).includes("[mods-registered-removed]")
     )
@@ -3490,52 +3730,7 @@ async function runMain(failures: unknown[]): Promise<void> {
       "renderer reload preserves function state; revoking a digest removes commands and rejects stale execution"
     )
     assert.deepEqual(await page!.evaluate((id) => window.api.mods.panes(id), threadId), [])
-    const gateZip = new AdmZip()
-    gateZip.addFile("plugin.json", Buffer.from(JSON.stringify({ name: "completion-gate-e2e", version: "1.0.0" })))
-    gateZip.addFile("hooks/hooks.json", Buffer.from(JSON.stringify({ modules: ["./gate.ts"] })))
-    gateZip.addFile("hooks/gate.ts", Buffer.from(`export function register(on) {
-      let checks = 0
-      on("completion.check", ($, e) => {
-        checks++
-        return e.revisionAttempts === 0
-          ? { decision: "revise", reason: "COMPLETION_GATE_E2E_REPAIR: recheck the answer" }
-          : { decision: "pass" }
-      })
-      on("turn.complete", async ($, e, next) => {
-        const result = await next(e)
-        return { ...result, text: "COMPLETION_GATE_E2E:" + checks }
-      })
-    }`))
-    const gateInstall = await page!.evaluate(bytes =>
-      window.api.plugins.install(new Uint8Array(bytes).buffer, "completion-gate-e2e.zip", "local"),
-      [...gateZip.toBuffer()])
-    assert.equal(gateInstall.success, true, gateInstall.error)
-    const gateStatus = (await page!.evaluate(id => window.api.mods.status(id), registryThread))
-      .functionMods!.find(mod => mod.name === "completion-gate-e2e")!
-    assert.ok(gateStatus?.digest)
-    await page!.evaluate(({ id, pluginId, digest }) =>
-      window.api.mods.approveFunction(id, pluginId, digest),
-      { id: registryThread, pluginId: gateStatus.pluginId, digest: gateStatus.digest! })
-    const beforeGate = modelServer.requests.length
-    await page!.locator("textarea.composer-textarea").fill("请再次确认当前结果。[completion-gate-e2e]")
-    await page!.locator("form").filter({ has: page!.locator("textarea.composer-textarea") })
-      .locator('button[type="submit"]').click()
-    await until(async () => (await page!.evaluate(id => window.api.mods.turnNotices(id), registryThread))
-      .some(notice => notice.text === "COMPLETION_GATE_E2E:2"), "mandatory gate revises and checks again before completion")
-    const gateRequests = modelServer.requests.slice(beforeGate)
-    assert.ok(gateRequests.length >= 2)
-    assert.ok(gateRequests.some(request => JSON.stringify(request.messages).includes("COMPLETION_GATE_E2E_REPAIR")))
-    const completionEvidence = page!.locator("[data-completion-evidence]")
-    await until(async () => await completionEvidence.count() === 1,
-      "host completion evidence reaches the real task UI")
-    await completionEvidence.locator(":scope > summary").click()
-    assert.ok((await completionEvidence.innerText()).includes("插件评审意见不代表测试通过或业务验收"))
-    assert.ok((await completionEvidence.innerText()).includes("插件评审意见"))
-    assert.ok((await completionEvidence.innerText()).includes("完成门禁"))
-    assert.ok(await completionEvidence.locator("[data-completion-record]").count() >= 3)
-    await page!.screenshot({ path: join(artifacts, "completion-gate-repair.png") })
-    pass("installed Function Mod requests a real agent revision and rechecks before completion")
-    pass("real host evidence explains completion checks without presenting guest opinion as business acceptance")
+    await verifyCompletionGate(page!, workspace, artifacts, modelServer.requests, until, pass, registryThread)
     await verifyCompactionHooks(page!, root, workspace, artifacts, modelServer, until, pass)
     await verifyStatusSites(page!, root, workspace, artifacts, until, pass)
     await verifyMessageSites(page!, root, workspace, artifacts, modelServer.requests, until, pass)
@@ -3544,48 +3739,32 @@ async function runMain(failures: unknown[]): Promise<void> {
     await verifyToolSites(page!, root, workspace, artifacts, modelServer.requests, until, pass)
     await verifyUiFeedback(page!, root, workspace, artifacts, until, pass)
     await verifyClassicOutput(page!, root, workspace, artifacts, modelServer.requests, until, pass, app!, modelServer.closedStalls)
-    await verifyCompletionFreshness(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
-    await verifyUiLog(page!, workspace, artifacts, join(isolated, "data/logs/main.log"), modelServer.requests, until, pass)
-    await verifyUiAsk(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
-    await verifyQuestionSite(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
-    await verifyUiNotice(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
-    await verifyUiInvalidate(page!, workspace, artifacts, until, pass)
-    await verifyGuestCodegen(page!, workspace, artifacts, until, pass)
-    await verifyPublicJsx(page!, workspace, artifacts, until, pass)
-    await verifyUiNotification(page!, workspace, artifacts, until, pass)
-    await verifyClientFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
-    await verifyClientBusy(page!, workspace, artifacts, until, pass)
-    await verifyBase64(page!, workspace, artifacts, until, pass)
-    await verifyImperativeFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
-    await verifyPaneFocusLifecycle(page!, until, pass)
-    await verifyAgentList(page!, workspace, artifacts, modelServer.requests, until, pass)
-    await verifyFileWrite(app!, page!, workspace, artifacts, modelServer.requests, until, pass)
-    await verifyFileMetadata(page!, workspace, artifacts, modelServer.requests, until, pass)
-    await verifyFileReadOptions(page!, workspace, artifacts, modelServer.requests, until, pass)
-    await verifyBackgroundTimeout(
-      app!,
-      page!,
-      workspace,
-      artifacts,
-      modelServer.requests,
-      until,
-      pass
-    )
-    await verifyImperativeScroll(page!, workspace, artifacts, modelServer.requests, until, pass)
-    await verifyToolBatch(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
-    await verifyInstructionsLoaded(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
-    await verifyPromptExpansion(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
-    await verifySessionTitle(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
-    await verifyStopFeedback(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
-    await verifyStopFailure(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
+    await verifyIntegratedTail()
     console.log(JSON.stringify({ checks, timings, isolated }, null, 2))
   } catch (error) {
     failures.push(error)
+    if (modelServer) {
+      await attemptModsE2eCleanup(failures, () =>
+        writeFileSync(join(artifacts, "model-request-failure.json"), JSON.stringify({
+          count: modelServer!.requests.length,
+          requests: modelServer!.requests.slice(-12)
+        }, null, 2))
+      )
+    }
     await attemptModsE2eCleanup(failures, () =>
       page?.screenshot({ path: join(artifacts, "failure.png") })
     )
   } finally {
     clearTimeout(watchdog)
+    if (process.env.CMB_MODS_CHILD_PROFILE === "1" && app) {
+      await attemptModsE2eCleanup(failures, async () => {
+        const profile = await app!.evaluate(async () => {
+          const state = globalThis as unknown as { modsChildProfile?: () => Promise<unknown> }
+          return state.modsChildProfile?.()
+        })
+        if (profile) writeFileSync(join(artifacts, "child-runtime-profile.json"), JSON.stringify(profile))
+      })
+    }
     await attemptModsE2eCleanup(failures, () =>
       writeFileSync(
         join(artifacts, "result.json"),

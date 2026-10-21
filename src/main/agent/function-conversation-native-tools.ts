@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto"
 import { types } from "node:util"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { AIMessage, BaseMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage } from
   "@langchain/core/messages"
 import { Runnable, type RunnableConfig } from "@langchain/core/runnables"
 import { Command, CompiledStateGraph } from "@langchain/langgraph"
-import type { FunctionNativeConversationRuntime } from "../mods/manager"
+import { readFunctionConversationNativeWithdrawal, isFunctionNativeGuestWithdrawalError,
+  type FunctionNativeConversationRuntime } from "../mods/manager"
+import type { ModRuntimeAuthority } from "../mods/runtime-instance"
+import { withFunctionTransportExecution } from "../mods/v2/host-call"
 import {
   readFunctionConversationNativePolicySource,
   readFunctionConversationNativeSharedPolicySource
@@ -105,7 +109,88 @@ interface ToolRequest {
   returned: boolean
   failed: boolean
   sealed: boolean
+  completionClaimed?: boolean
   assertCurrent(): void
+}
+const nativeToolScope = new AsyncLocalStorage<ToolRequest>()
+const nativeToolGetStore = AsyncLocalStorage.prototype.getStore
+const nativeToolExit = AsyncLocalStorage.prototype.exit
+const nativeToolRequests = new WeakSet<ToolRequest>()
+const nativeToolHas = WeakSet.prototype.has, nativeToolAdd = WeakSet.prototype.add
+export interface FunctionNativeToolCompletion {
+  isWithdrawn(): boolean
+  publish<T>(value: T): Promise<T>
+  runTail<T>(handler: () => Promise<T>): Promise<T>
+  run<T>(handler: () => Promise<T>): Promise<T>
+  /** Undefined means no certified, fulfilled native result is available. */
+  recover(error: unknown): Readonly<{ value: unknown }> | undefined
+}
+/** Only the exact original ToolNode call can claim its once-only native completion. */
+export function captureCurrentFunctionNativeToolCompletion(
+  authority: ModRuntimeAuthority, call: { name?: string; id?: string; args?: unknown }
+): FunctionNativeToolCompletion | undefined {
+  const request = Reflect.apply(nativeToolGetStore, nativeToolScope, []) as ToolRequest | undefined
+  if (!request) return undefined
+  if (!Reflect.apply(nativeToolHas, nativeToolRequests, [request])) fail()
+  const source = readFunctionConversationNativeWithdrawal(request.runtime)
+  if (!source) return undefined
+  if (types.isProxy(call) || source.authority !== authority || request.name !== own(call, "name") ||
+    request.callId !== own(call, "id") || request.args !== own(call, "args") ||
+    request.completionClaimed) fail()
+  request.completionClaimed = true
+  let phase: "not-started" | "running" | "fulfilled" | "rejected" = "not-started"
+  let tailClaimed = false
+  let value: unknown
+  const assertCurrent = () => {
+    if (Reflect.apply(nativeToolGetStore, nativeToolScope, []) !== request ||
+      request.returned || request.failed) fail()
+    request.assertCurrent()
+  }
+  assertCurrent()
+  return Object.freeze({
+    isWithdrawn() { assertCurrent(); return source.isWithdrawn() },
+    async publish<T>(value: T): Promise<T> {
+      assertCurrent()
+      const result = await source.publish(value, request.callId)
+      assertCurrent()
+      return result
+    },
+    async runTail<T>(handler: () => Promise<T>): Promise<T> {
+      if (phase !== "running" || tailClaimed) fail()
+      tailClaimed = true
+      assertCurrent()
+      const owner = source.authority
+      return withFunctionTransportExecution({ workspace: owner.workspace, threadId: owner.threadId,
+        agentId: owner.agentId, turnId: owner.turnId, runtimeAuthority: owner,
+        userInitiated: false, leased: true, immediate: false }, async () => {
+        assertCurrent()
+        const result = await handler()
+        assertCurrent()
+        return result
+      })
+    },
+    async run<T>(handler: () => Promise<T>): Promise<T> {
+      if (phase !== "not-started") fail()
+      phase = "running"
+      try {
+        assertCurrent()
+        const result = await handler()
+        assertCurrent()
+        const published = await source.publish(result, request.callId)
+        assertCurrent()
+        value = published
+        phase = "fulfilled"
+        return published
+      } catch (error) { phase = "rejected"; throw error }
+    },
+    recover(error) {
+      if (phase !== "fulfilled" || !isFunctionNativeGuestWithdrawalError(error)) return undefined
+      assertCurrent()
+      if (!source.isWithdrawn()) return undefined
+      assertCurrent()
+      return Object.freeze({ value })
+    }
+  })
 }
 interface Returned {
   readonly owner: ToolRequest
@@ -303,8 +388,13 @@ export function installFunctionConversationNativeTools(options: FunctionConversa
     structure()
     const requestRuntime = sharedFactory
       ? currentFunctionConversationNativeNodeWorkRuntime(bound, sharedFactory) : originalRuntime
-    // A known shared graph can also run ordinary unowned work. It acquires no native receipt.
-    if (!requestRuntime) return Reflect.apply(original, bound, [rawCall, config, state])
+    // A known shared graph can also run ordinary unowned work. It acquires no native receipt,
+    // including an ancestor task's completion receipt inherited across the child invocation.
+    // The installed factory/Work check above selects this entry; identity mismatches in an
+    // owned request still fail closed. exit restores the parent's scope after this call.
+    if (!requestRuntime) return Reflect.apply(nativeToolExit, nativeToolScope, [
+      () => Reflect.apply(original, bound, [rawCall, config, state])
+    ])
     const runtime = originalMethods ?? Object.freeze({
       assertCurrent: requestRuntime.assertCurrent.bind(requestRuntime),
       capturePolicy: requestRuntime.capturePolicy.bind(requestRuntime)
@@ -362,6 +452,7 @@ export function installFunctionConversationNativeTools(options: FunctionConversa
       }
     }
     requests.set(token, request); calls.set(call, request); pending.add(result)
+    Reflect.apply(nativeToolAdd, nativeToolRequests, [request])
     let ownPending = runtimePending.get(requestRuntime)
     if (!ownPending) { ownPending = new Set(); runtimePending.set(requestRuntime, ownPending) }
     const actualPending = ownPending
@@ -370,7 +461,8 @@ export function installFunctionConversationNativeTools(options: FunctionConversa
       request.assertCurrent()
       request.policy = runtime.capturePolicy()
       request.assertCurrent()
-      const output: unknown = await Reflect.apply(original, bound, [rawCall, config, state])
+      const output: unknown = await nativeToolScope.run(request, () =>
+        Reflect.apply(original, bound, [rawCall, config, state]))
       request.returned = true
       try {
         request.assertCurrent()

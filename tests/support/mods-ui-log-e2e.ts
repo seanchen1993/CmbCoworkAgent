@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import AdmZip from "adm-zip"
 import type { Page } from "playwright"
+import { openModsResults } from "./mods-sidebar-navigation"
 
 export async function verifyUiLog(
   page: Page,
@@ -84,6 +85,14 @@ export async function verifyUiLog(
   const composer = page.locator("textarea.composer-textarea")
   const submit = page.locator("form").filter({ has: composer }).locator('button[type="submit"]')
   const rail = page.locator("[data-function-logs]")
+  const openLogs = async () => {
+    await openModsResults(page)
+    const summary = page
+      .getByRole("complementary", { name: "任务进展", exact: true })
+      .getByText("灵件日志 · 查看补充说明", { exact: true })
+    if (!(await summary.evaluate((element) => (element.parentElement as HTMLDetailsElement).open)))
+      await summary.click()
+  }
   const run = async (text: string) => {
     await composer.fill(text)
     await submit.click()
@@ -99,6 +108,7 @@ export async function verifyUiLog(
     let before = requests.length
     await run("请确认当前任务。[ui-log-initial]")
     await settle(before)
+    await openLogs()
     const messages = await page.evaluate((id) => window.api.threads.getMessages(id), threadId)
     before = requests.length
     await run("/ui-log-show now")
@@ -108,7 +118,7 @@ export async function verifyUiLog(
     )
     await until(
       async () => (await rail.count()) === 1 && (await rail.innerText()).includes("UI_LOG_VISIBLE"),
-      "log appears in conversation footer"
+      "log appears in the expanded task results"
     )
     assert(!(await rail.innerText()).includes("UI_LOG_DEBUG"))
     assert(!(await rail.innerText()).includes("UI_LOG_REDIRECT"))
@@ -133,6 +143,7 @@ export async function verifyUiLog(
     )
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("UI log E2E", { exact: true }).first().click()
+    await openLogs()
     await until(async () => (await rail.count()) === 1, "renderer reload restores live session log")
     await run("/ui-log-nested now")
     await until(

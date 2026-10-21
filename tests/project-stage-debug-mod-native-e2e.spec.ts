@@ -76,7 +76,7 @@ async function open() {
     )
   page = await app.firstWindow({ timeout: 60000 })
   page.setDefaultTimeout(20000)
-  await page.addLocatorHandler(page.locator('[aria-label="插件创作使用指引"]'), async guide => {
+  await page.addLocatorHandler(page.locator('[aria-label="插件创作使用指引"], [aria-label="应用使用指引"]').first(), async guide => {
     await guide.getByRole("button", { name: "跳过指引", exact: true }).click()
     evidence.creatorGuideDismissedThroughUi = true
   })

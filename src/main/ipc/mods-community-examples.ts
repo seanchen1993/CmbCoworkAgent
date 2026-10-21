@@ -4,7 +4,8 @@ import type { IpcMain, IpcMainInvokeEvent } from "electron"
 import {
   BUNDLED_EXAMPLES,
   communityExampleId,
-  verifyCommunityExample
+  verifyCommunityExample,
+  withMaterializedCommunityExample
 } from "../mods/community-examples"
 import { installBundledCommunityPlugin } from "./plugins"
 
@@ -40,13 +41,14 @@ export function registerCommunityExampleHandlers(
       trusted(event)
       if (event.sender.mainFrame !== frame) throw Error("MODS_IPC_SENDER")
     }
-    const directory = await verifyCommunityExample(root, id)
-    assertCurrent()
-    return installBundledCommunityPlugin(
-      directory,
-      example.pluginName,
-      (target) => verifyCommunityExample(root, id, target),
-      assertCurrent
-    )
+    return withMaterializedCommunityExample(root, id, async (directory) => {
+      assertCurrent()
+      return installBundledCommunityPlugin(
+        directory,
+        example.pluginName,
+        (target) => verifyCommunityExample(root, id, target),
+        assertCurrent
+      )
+    })
   })
 }
