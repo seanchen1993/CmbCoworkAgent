@@ -91,13 +91,14 @@ function fixture(name: string, withMods: boolean) {
     }`
     )
   }
+  const installedPlugins = [plugin]
   const store = new ModControlStore(join(owned, "control.sqlite"))
   const guests = new Set<FunctionGuestRuntime>()
   let loads = 0
   const manager = new FunctionModsManager(
     store,
     {
-      plugins: () => [plugin],
+      plugins: () => installedPlugins,
       enabled: () => true,
       publish: async (_workspace, value) => value,
       changed: () => {}
@@ -115,7 +116,7 @@ function fixture(name: string, withMods: boolean) {
     })
   )
   const service = new PluginStartUseService({
-    plugins: () => [plugin],
+    plugins: () => installedPlugins,
     chatEntries: async (current, input, guard) => {
       const skills = await listPluginSkills([
         {
@@ -150,6 +151,7 @@ function fixture(name: string, withMods: boolean) {
     manager,
     service,
     loads: () => loads,
+    uninstall: () => installedPlugins.splice(0),
     input: {
       threadId: "chat",
       expectedWorkspace: root,
@@ -185,7 +187,24 @@ it.each(["document-review", "warehouse-quality"])(
       name: `Actual ${name} check`
     })
     f.plugin.enabled = false
-    await expect(f.service.prepare(pinned, () => {})).rejects.toThrow("PLUGIN_UNAVAILABLE")
+    const approved = vi.spyOn(f.manager, "approve")
+    const loadsBeforeDisabled = f.loads()
+    const disabled = await f.service.prepare(pinned, () => {})
+    expect(disabled).toEqual({
+      identity: after.identity,
+      kind: "chat",
+      canOpen: false,
+      activationRequired: true,
+      issues: []
+    })
+    expect(disabled.chat).toBeUndefined()
+    expect(approved).not.toHaveBeenCalled()
+    expect(f.loads()).toBe(loadsBeforeDisabled)
+    expect(f.plugin.enabled).toBe(false)
+    f.uninstall()
+    await expect(f.service.prepare(pinned, () => {})).rejects.toThrow(
+      "PLUGIN_START_USE_PLUGIN_UNAVAILABLE"
+    )
   }
 )
 

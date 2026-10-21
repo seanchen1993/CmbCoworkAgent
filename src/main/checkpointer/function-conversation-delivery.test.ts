@@ -83,8 +83,10 @@ function fixture(namespace = "", options: SqlJsSaverOptions = {}) {
   const config = (id?: string): RunnableConfig => ({ configurable: {
     thread_id: "thread", checkpoint_ns: namespace, ...(id ? { checkpoint_id: id } : {})
   } })
+  // Retention must follow fixture creation order even when two checkpoints share a wall-clock tick.
+  let checkpointTimestamp = Date.now()
   const checkpoint = (frontier: number, row?: FunctionConversationRow): Checkpoint => ({
-    v: 1, id: randomUUID(), ts: new Date().toISOString(),
+    v: 1, id: randomUUID(), ts: new Date(checkpointTimestamp++).toISOString(),
     channel_values: { messages: row ? [functionConversationNoteMessage(row, target)] : [],
       [FUNCTION_CONVERSATION_CHANNEL]: { version: 1, logicalSessionId: target.logicalSessionId,
         conversationId: target.conversationId, branchId: target.branchId, frontier } },

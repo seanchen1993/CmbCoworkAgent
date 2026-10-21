@@ -2,6 +2,14 @@ import assert from "node:assert/strict"
 import { join } from "node:path"
 import AdmZip from "adm-zip"
 import type { Page } from "playwright"
+import { closeModsProgress } from "./mods-sidebar-navigation"
+
+/** ui.open already reveals results. A badge behind the narrow sidebar is not a second action. */
+export async function waitForPackagedPaneResults(page: Page): Promise<void> {
+  const panel = page.getByRole("complementary", { name: "任务进展", exact: true })
+  await panel.waitFor({ state: "visible" })
+  await panel.getByRole("tab", { name: "结果", exact: true, selected: true }).waitFor()
+}
 
 /** Uses public preload/UI only; the packaged app must not contain the test bridge. */
 export async function verifyPackagedFunctions(
@@ -67,7 +75,7 @@ export async function verifyPackagedFunctions(
   pass("packaged Function Mods compile two isolated guests and compose a live engine noun")
 
   await run("code-pane")
-  await page.getByRole("button", { name: "1 个插件面板 · 查看", exact: true }).click()
+  await waitForPackagedPaneResults(page)
   const code = page.locator("section").filter({ hasText: "Code E2E" }).last()
   await code.locator(".shiki").waitFor()
   assert.deepEqual(await code.locator('[data-code-kind="remove"] > span').allTextContents(), [
@@ -88,6 +96,7 @@ export async function verifyPackagedFunctions(
   await page.screenshot({ path: join(artifacts, "packaged-function-code.png") })
   pass("packaged renderer loads the real syntax worker and displays validated Code diffs")
 
+  await closeModsProgress(page)
   await composer.fill("")
   await run("focus-board")
   const firstInput = page.getByRole("textbox", { name: "First focus field" })
@@ -123,4 +132,7 @@ export async function verifyPackagedFunctions(
     `ENGINE_NOUN:restored!?:${threadId}:1`
   )
   pass("packaged global off prevents execution and restore rebuilds independent guest state")
+  // Leave the next ordinary-chat runtime check reachable at overlay widths too.
+  if (await page.getByRole("complementary", { name: "任务进展", exact: true }).isVisible())
+    await closeModsProgress(page)
 }
