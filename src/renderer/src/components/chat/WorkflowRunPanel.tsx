@@ -389,16 +389,26 @@ function WorkflowRunPanelImpl({ threadId, run }: WorkflowRunPanelProps): JSX.Ele
         </div>
       )}
 
+      {run.worktreeReadError && (
+        <div
+          role="alert"
+          className="border-b border-amber-200/60 bg-amber-50/60 px-3 py-1.5 text-[11px] text-amber-800 dark:bg-amber-500/10 dark:text-amber-200"
+        >
+          {run.worktreeReadError}
+        </div>
+      )}
+
       {run.worktrees.length > 0 && (
         <div className="space-y-1 border-b border-violet-200/60 p-2 dark:border-violet-500/20">
           <div className="px-0.5 text-[10px] font-medium text-muted-foreground">
             Worktree 交付物 ({run.worktrees.length})
           </div>
           <WorkflowWorktreeList
+            key={`${threadId}:${run.runId}`}
             threadId={threadId}
             runId={run.runId}
             worktrees={run.worktrees}
-            manageAllowed={run.status !== "running"}
+            manageAllowed={run.status !== "running" && !run.worktreeReadError}
           />
         </div>
       )}
