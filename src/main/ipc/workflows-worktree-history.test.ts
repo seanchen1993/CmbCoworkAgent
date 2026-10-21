@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { execFileSync } from "node:child_process"
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { IpcMain, IpcMainInvokeEvent } from "electron"
@@ -7,9 +8,12 @@ import { registerWorkflowHandlers } from "./workflows"
 import { getWorkflowRunsDir, loadWorkflowRunAsync } from "../agent/workflow/run-store"
 import {
   persistWorkflowWorktreeRecord,
+  listWorkflowWorktreeRecords,
+  getWorkflowWorktreeRecordScanLimitsForTest,
   setLegacyWorktreeAppDataRootForTest
 } from "../services/git-worktree"
 import type { PersistedWorkflowRun, WorkflowWorktreeRecord } from "../agent/workflow/types"
+import { WorkflowWorktreeLedger } from "../agent/workflow/worktree-lease"
 
 const state = vi.hoisted(() => ({ workspace: "", active: null as string | null }))
 vi.mock("electron", () => ({ ipcMain: {} }))
@@ -23,7 +27,13 @@ vi.mock("../agent/workflow/run-manager", () => ({
     activeRunId: () => state.active,
     getFlushFailedRun: () => undefined,
     listFlushFailedRuns: () => [],
-    waitForRunLifecycle: async () => undefined
+    waitForRunLifecycle: async () => undefined,
+    withWorkspaceIntegrationLease: async (
+      _workspace: string,
+      _owner: string,
+      action: () => Promise<unknown>
+    ) => action(),
+    broadcastWorktreeRecord: vi.fn()
   }
 }))
 
@@ -112,6 +122,97 @@ function writeRun(worktrees: unknown[] = [], status: "running" | "completed" = "
 }
 
 describe("workflow history with real worktree metadata", () => {
+  it.each(["merge driver diagnostics\n", "合并诊断😀\n"])(
+    "keeps failed-merge metadata readable with large real merge-driver diagnostics (%j)",
+    async (diagnostic) => {
+      const git = (cwd: string, ...args: string[]): string =>
+        execFileSync("git", ["-C", cwd, ...args], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"]
+        }).trim()
+      git(state.workspace, "init", "--initial-branch=main")
+      git(state.workspace, "config", "user.name", "Workflow Regression")
+      git(state.workspace, "config", "user.email", "workflow@example.invalid")
+      git(state.workspace, "config", "core.autocrlf", "false")
+      const driver = join(root, "merge-driver.cjs")
+      writeFileSync(
+        driver,
+        `process.stderr.write(${JSON.stringify(diagnostic)}.repeat(20000)+"diagnostic end");process.exitCode=1`
+      )
+      const quote = (value: string): string =>
+        `'${value.replaceAll("\\", "/").replaceAll("'", "'\\''")}'`
+      git(
+        state.workspace,
+        "config",
+        "merge.pressure.driver",
+        `${quote(process.execPath)} ${quote(driver)}`
+      )
+      writeFileSync(join(state.workspace, ".gitattributes"), "*.txt merge=pressure\n")
+      writeFileSync(join(state.workspace, "conflict.txt"), "base\n")
+      git(state.workspace, "add", ".")
+      git(state.workspace, "commit", "-m", "base")
+      let record: WorkflowWorktreeRecord | undefined
+      const ledger = new WorkflowWorktreeLedger({
+        workspacePath: state.workspace,
+        runId,
+        threadId,
+        onRecordChange: (next) => {
+          record = next
+        }
+      })
+      const info = await ledger.acquire("merge-diagnostics")
+      writeFileSync(join(info.directory, "conflict.txt"), "deliverable\n")
+      git(info.directory, "add", ".")
+      git(info.directory, "commit", "-m", "deliverable")
+      await ledger.settle(info, { succeeded: true })
+      expect(record?.status).toBe("ready")
+      writeRun([record])
+      writeFileSync(join(state.workspace, "conflict.txt"), "source\n")
+      git(state.workspace, "add", ".")
+      git(state.workspace, "commit", "-m", "source")
+      const sourceHead = git(state.workspace, "rev-parse", "HEAD")
+      const deliverableHead = git(info.directory, "rev-parse", "HEAD")
+      await expect(
+        invoke("workflow:worktree-action", { worktreeId: info.name, action: "merge" })
+      ).rejects.toMatchObject({
+        code: "merge-conflict",
+        message: expect.stringContaining("diagnostic truncated")
+      })
+      const [manifest] = await listWorkflowWorktreeRecords(info.commonDir)
+      expect(manifest).toMatchObject({
+        ...record,
+        status: "recoverable",
+        updatedAt: expect.any(String),
+        error: expect.stringContaining("diagnostic truncated")
+      })
+      expect(manifest.error!.length).toBeLessThanOrEqual(8 * 1024)
+      expect(manifest.error).toContain("diagnostic end")
+      expect(manifest.error).not.toMatch(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+      )
+      const recordsDir = join(
+        dataRoot,
+        "worktrees",
+        readdirSync(join(dataRoot, "worktrees"))[0],
+        ".records"
+      )
+      const manifestBytes = readFileSync(join(recordsDir, readdirSync(recordsDir)[0]))
+      expect(manifestBytes.byteLength).toBeLessThan(
+        getWorkflowWorktreeRecordScanLimitsForTest().maxRecordBytes
+      )
+      const detail = await invoke("workflow:get-run")
+      expect(detail).toMatchObject({
+        runId,
+        result: { text: "saved result" },
+        worktrees: [{ id: info.name, status: "recoverable", commonDir: info.commonDir }]
+      })
+      expect(detail).not.toHaveProperty("worktreeReadError")
+      expect(git(state.workspace, "rev-parse", "HEAD")).toBe(sourceHead)
+      expect(git(info.directory, "rev-parse", "HEAD")).toBe(deliverableHead)
+    },
+    60_000
+  )
+
   it.each([false, true])("opens healthy completed runs (worktree: %s)", async (withWorktree) => {
     writeRun(withWorktree ? [worktree()] : [])
     await expect(invoke("workflow:get-run")).resolves.toMatchObject({
@@ -173,8 +274,15 @@ describe("workflow history with real worktree metadata", () => {
       invoke("workflow:worktree-action", { worktreeId: record.id, action: "discard" })
     ).rejects.toThrow()
     expect(readFileSync(runPath)).toEqual(before)
-    // Only the fixture repairs the conflict. Reading never rewrites ownership.
-    await persistWorkflowWorktreeRecord(record, legacyRoot)
+    // Resolve the deliberately corrupted fixture externally. Application writes
+    // now refuse to overwrite another owner's proof, and reads never repair it.
+    const legacyRecordsDir = join(
+      legacyRoot,
+      "worktrees",
+      readdirSync(join(legacyRoot, "worktrees"))[0],
+      ".records"
+    )
+    writeFileSync(join(legacyRecordsDir, readdirSync(legacyRecordsDir)[0]), JSON.stringify(record))
     expect(await invoke("workflow:get-run")).not.toHaveProperty("worktreeReadError")
     expect(readFileSync(runPath)).toEqual(before)
   })
