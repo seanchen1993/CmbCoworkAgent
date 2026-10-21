@@ -309,6 +309,24 @@ function ensureSelectionContextsSupportRemoteTargets(database: SqlJsDatabase): v
 }
 
 export function ensureImServiceSchema(database: SqlJsDatabase): void {
+  database.run(`CREATE TABLE IF NOT EXISTS im_session_links (
+    code TEXT PRIMARY KEY, principal_id TEXT NOT NULL, conversation_key TEXT NOT NULL,
+    thread_id TEXT NOT NULL, target_kind TEXT NOT NULL, target_label TEXT NOT NULL,
+    created_at INTEGER NOT NULL, UNIQUE(principal_id, conversation_key, thread_id)
+  )`)
+  database.run(`CREATE TABLE IF NOT EXISTS im_session_switch_cards (
+    delivery_id TEXT PRIMARY KEY, code TEXT NOT NULL, interaction_id TEXT NOT NULL UNIQUE,
+    tag TEXT NOT NULL UNIQUE, state TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0,
+    response TEXT, receipt_id TEXT, update_pending INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
+  )`)
+  ensureColumn(database, "im_session_switch_cards", "receipt_id", "TEXT")
+  database.run(
+    "CREATE INDEX IF NOT EXISTS idx_im_session_cards_due ON im_session_switch_cards(state, next_attempt_at)"
+  )
+  database.run(
+    "CREATE INDEX IF NOT EXISTS idx_im_session_cards_update ON im_session_switch_cards(update_pending, next_attempt_at)"
+  )
   createConversationsTable(database)
   rebuildWithoutLegacyColumn({
     database,

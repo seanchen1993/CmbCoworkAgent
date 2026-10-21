@@ -1680,7 +1680,7 @@ export function ChatContainer({
     (remoteThreadInfo?.historical
       ? "设备接管前的远程历史 Thread 仅可查看"
       : remoteThreadInfo?.kind === "inbox"
-        ? "远程收件箱在桌面仅可查看；请从招乎继续发送消息"
+        ? "招乎默认聊天在桌面仅可查看；请从招乎继续发送消息"
         : null)
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
   const [threadProjectionRuntime] = useState(() => getChatThreadProjectionRuntime(threadId))
@@ -7575,7 +7575,7 @@ export function ChatContainer({
   const interruptionNotice = hookInterruption
     ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
     : null
-  const remoteThreadTipLabel = remoteThreadInfo?.kind === "inbox" ? "远程收件箱" : "远程会话"
+  const remoteThreadTipLabel = remoteThreadInfo?.kind === "inbox" ? "招乎默认聊天" : "远程会话"
   const handleDismissRemoteThreadTip = useCallback(() => {
     setDismissedRemoteTipThreadIds((current) => {
       const next = new Set(current)
@@ -7689,7 +7689,7 @@ export function ChatContainer({
           <div className="min-w-0 flex-1 space-y-0.5">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="rounded bg-status-info/15 px-1.5 py-0.5 font-medium text-status-info-foreground">
-                {remoteThreadInfo.kind === "inbox" ? "远程收件箱" : "远程会话"}
+                {remoteThreadInfo.kind === "inbox" ? "招乎默认聊天" : "远程会话"}
               </span>
               {remoteThreadInfo.kind === "feature" && remoteThreadInfo.featureLabel ? (
                 <span className="font-medium">{remoteThreadInfo.featureLabel}</span>
@@ -7700,7 +7700,7 @@ export function ChatContainer({
               {remoteThreadInfo.kind === "inbox"
                 ? remoteThreadInfo.historical
                   ? "此 Thread 已停用，仅保留历史，不会接收新消息。"
-                  : "桌面仅用于查看历史和运行状态；请从招乎继续聊天。"
+                  : "这是招乎的默认聊天，桌面仅用于查看。要在招乎继续其他会话，请先在“接入招乎”中开启，再发送 /会话 切换。"
                 : remoteThreadInfo.historical
                   ? "此远程会话已停用，仅保留历史；请重新绑定。"
                   : isLoading

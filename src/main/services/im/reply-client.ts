@@ -63,7 +63,8 @@ export class ImReplyClient {
     private readonly eventStore: ImEventStore = imEventStore,
     private readonly now: () => number = Date.now,
     private readonly usesTextReplies: (conversationKey: string) => boolean = (conversationKey) =>
-      conversationSwitchedToText(conversationKey, warnReplyMode)
+      conversationSwitchedToText(conversationKey, warnReplyMode),
+    private readonly afterDrain?: () => void
   ) {}
 
   async sendPending(): Promise<ImReplyDrainResult> {
@@ -113,6 +114,12 @@ export class ImReplyClient {
               ? "failed"
               : "pending"
       )
+    }
+    // Schedule App-owned card delivery only after all ready reply segments have settled.
+    try {
+      this.afterDrain?.()
+    } catch (error) {
+      console.warn("[IM] Auxiliary switch cards deferred:", error)
     }
     return result
   }

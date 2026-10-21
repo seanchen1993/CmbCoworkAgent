@@ -1,6 +1,9 @@
 import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
 import { getLocalThreadRunLease } from "../../agent/thread-run-lease"
-import { getThread } from "../../db"
+import { getThreadHydrationCore } from "../../db"
+import { IM_DEFAULT_CHAT_LABEL } from "../../../shared/im-display"
+import { readImThreadActivity } from "./thread-activity"
+import { IM_SESSION_CODE_PATTERN } from "./session-link-store"
 import {
   buildBoundCard,
   buildTargetBindCard,
@@ -10,8 +13,6 @@ import {
 } from "./card-builder"
 import { imCardPublisher, type ImCardPublisher } from "./card-publisher"
 import type { ImFeatureSessionMode } from "./feature-binding-service"
-import { hasPendingApprovalForRuntimeThread } from "../../agent/runtime"
-import { hasPendingUserInputForThread } from "../user-input"
 import {
   imConversationStateStore,
   type ImConversationStateStore,
@@ -72,6 +73,7 @@ const COMMANDS = new Map<string, ImCommandName>([
   ["项目", "retired"],
   ["功能", "retired"],
   ["绑定", "bind"],
+  ["默认", "inbox"],
   ["收件箱", "inbox"],
   ["当前", "current"],
   ["停止", "stop"],
@@ -109,7 +111,8 @@ interface ImCommandRouterDependencies {
   selections: ImSelectionContextStore
   abortCurrent: (conversationKey: string, threadId?: string) => boolean
   getCurrentEventId: (conversationKey: string, threadId?: string) => string | null
-  getThread: typeof getThread
+  getThread: typeof getThreadHydrationCore
+  readThreadActivity: typeof readImThreadActivity
   cards: ImCardPublisher
   /**
    * Sends as text every open gate in this conversation whose card went out in
@@ -178,7 +181,7 @@ function normalizeTargetName(value: string): string {
 }
 
 function targetLabel(target: ImTargetSnapshot): string {
-  if (target.kind === "inbox") return "收件箱"
+  if (target.kind === "inbox") return IM_DEFAULT_CHAT_LABEL
   if (target.kind === "thread") return target.title
   return `${target.projectName ?? target.projectId} / ${target.featureTitle ?? target.featureSlug}`
 }
@@ -199,7 +202,8 @@ export class ImCommandRouter {
       selections: dependencies.selections ?? imSelectionContextStore,
       abortCurrent: dependencies.abortCurrent ?? (() => false),
       getCurrentEventId: dependencies.getCurrentEventId ?? (() => null),
-      getThread: dependencies.getThread ?? getThread,
+      getThread: dependencies.getThread ?? getThreadHydrationCore,
+      readThreadActivity: dependencies.readThreadActivity ?? readImThreadActivity,
       cards: dependencies.cards ?? imCardPublisher,
       resendPendingAsText:
         dependencies.resendPendingAsText ??
@@ -218,8 +222,7 @@ export class ImCommandRouter {
             { resent: 0, failed: 0 }
           )
         }),
-      warn:
-        dependencies.warn ?? ((message, error) => console.warn(`[IM] ${message}`, error ?? ""))
+      warn: dependencies.warn ?? ((message, error) => console.warn(`[IM] ${message}`, error ?? ""))
     }
   }
 
@@ -239,7 +242,7 @@ export class ImCommandRouter {
         case "inbox":
           return await this.switchToInbox(input)
         case "current":
-          return this.currentStatus(input.conversationKey)
+          return await this.currentStatus(input)
         case "stop":
           return this.stopCurrent(input.conversationKey)
         case "retry":
@@ -303,18 +306,25 @@ export class ImCommandRouter {
 
   private helpText(): string {
     return [
-      "可用指令：",
-      "/会话 — 查看已在桌面授权的会话与特性",
+      "直接发送消息即可继续当前会话；首次使用会进入默认聊天。",
+      "常用指令：",
+      "/会话 — 查看已接入招乎的会话与特性",
       `/绑定 <编号> [${BIND_SESSION_MODE_CHOICES}] — 切换到已有会话，或在特性下创建会话（模式仅用于新建，省略则跟随特性配置）`,
       "/切换 <会话名称> — 按名称切回某个会话，名称就是回复开头【】里的那个",
-      "/收件箱 — 切回默认聊天",
+      "/切换 @会话码 — 精确切回推送对应的会话，同名或改名也不受影响",
+      "/默认 — 返回默认聊天，不影响其他会话的任务",
+      "/收件箱 — /默认 的兼容指令",
+      "/当前 — 查看消息接收目标、正在运行的会话和排队情况",
+      "/停止 — 停止当前招乎主任务，不清空排队消息；后台子任务请在桌面停止",
+      "/文字模式 开 — 卡片显示不全时改用文字；/文字模式 关 恢复卡片",
+      "",
+      "技能与长期任务：",
       "/技能 — 查看当前会话可用技能",
       "/<技能名> <任务> 或 /技能 <技能名或短码> <任务> — 指定技能执行",
       "/goal <目标> — 启动长期任务",
       "/goal 或 /goal status|pause|resume|clear — 查看或控制当前 Goal",
-      "/当前 — 查看目标、运行和队列状态",
-      "/文字模式 — 回答、审批、提问等都改用文字发送（审批类带短码），再发一次切回卡片；也可用 /文字模式 开|关 直接指定",
-      "/停止 — 只停止当前由 IM 发起的任务",
+      "",
+      "回答与审批（也可直接操作收到的卡片）：",
       "/批准 <审批短码> — 一次性批准工具调用（需在桌面设置中开启）",
       "/拒绝 <审批短码> — 拒绝工具调用（需在桌面设置中开启）",
       "/回答 <输入短码> <编号> — 回答 Agent 的补充问题；自定义回答使用“其他 <内容>”",
@@ -337,7 +347,7 @@ export class ImCommandRouter {
       conversationKey: input.conversationKey
     })
     if (targets.length === 0) {
-      return "当前没有已授权的会话或 Feature。请先在桌面打开“接入招乎”。"
+      return "当前没有已接入招乎的会话或特性，你仍可在默认聊天中直接提问。\n要继续已有工作，请在桌面“内置统一机器人 → 接入招乎”开启对应会话或特性，再发送 /会话。"
     }
     const selection = await this.dependencies.selections.create(
       input.conversationKey,
@@ -362,7 +372,7 @@ export class ImCommandRouter {
     // It takes two steps: /文字模式 re-sends what waits on a decision, and a
     // list is not that, so the reader asks for it again once text is on.
     if (card) {
-      return "可切换的目标见上方卡片，选好点「切换」即可。显示不全时先发 /文字模式，再发 /会话 查看文字列表。"
+      return "可切换的目标见上方卡片，选好点「切换」即可。显示不全时先发 /文字模式 开，再发 /会话 查看文字列表。"
     }
 
     return [
@@ -480,23 +490,13 @@ export class ImCommandRouter {
     ].join("\n")
   }
 
-  /**
-   * Switches back to a session by the name the reply prefix already shows.
-   *
-   * Deliberately not by number: /会话 numbering lives in a 5-minute selection
-   * context that every /会话 rebuilds, so a number printed in a background
-   * reply is stale or meaningless by the time anyone reads it. The name in
-   * 【会话：X】 is on screen, does not expire, and cannot drift onto a
-   * different target.
-   *
-   * Only existing sessions are matched. A Feature entry would CREATE a session
-   * rather than return to one, and "switch" must never mean "start something
-   * new" — /绑定 stays the command that creates.
-   */
+  /** Codes resolve an exact thread; legacy name matching still offers a picker for duplicates. */
   private async switchToNamedTarget(
     input: Parameters<ImCommandRouter["handle"]>[0],
     argument: string
   ): Promise<string> {
+    if (argument.trim().startsWith("@"))
+      return this.switchToSessionCode({ ...input, code: argument })
     const query = normalizeTargetName(argument)
     if (!query) return "用法：/切换 <会话名称>。名称就是回复开头【】里的那个。"
     const route = { principalId: input.principalId, conversationKey: input.conversationKey }
@@ -573,6 +573,65 @@ export class ImCommandRouter {
     ].join("\n")
   }
 
+  /** A code only locates a session. Live route and grant checks still own access. */
+  async switchToSessionCode(input: {
+    principalId: string
+    conversationKey: string
+    code: string
+  }): Promise<string> {
+    const code = input.code.trim().replace(/^@/u, "").toUpperCase()
+    if (!IM_SESSION_CODE_PATTERN.test(code))
+      return "会话码格式不正确，请完整复制消息中的 /切换 @会话码。"
+    this.dependencies.conversations.assertConversationOwner(
+      input.conversationKey,
+      input.principalId
+    )
+    const link = this.dependencies.events.sessionLinks.get(code)
+    if (
+      !link ||
+      link.principal_id !== input.principalId ||
+      link.conversation_key !== input.conversationKey
+    ) {
+      return "未找到此聊天可用的会话码，请发送 /会话 重新选择。"
+    }
+    if (!this.dependencies.getThread(link.thread_id))
+      return "该会话已删除，无法切换。请发送 /会话 选择其他会话。"
+    let label = link.target_label
+    if (link.target_kind === "inbox") {
+      const target = this.dependencies.conversations
+        .listTargets(input.conversationKey)
+        .find(
+          (entry) =>
+            entry.state === "active" &&
+            entry.snapshot.kind === "inbox" &&
+            entry.snapshot.threadId === link.thread_id
+        )
+      if (!target) return "该默认聊天已停用，无法切回原会话。可发送 /默认 进入当前默认聊天。"
+      await this.dependencies.conversations.setActiveTarget(
+        input.conversationKey,
+        target.snapshot.targetId
+      )
+    } else {
+      const grant = this.dependencies.access.getThreadGrant(link.thread_id)
+      if (
+        !grant ||
+        grant.state !== "active" ||
+        grant.principalId !== input.principalId ||
+        grant.conversationKey !== input.conversationKey
+      ) {
+        return "该会话当前未接入此招乎聊天，或授权已失效。请在桌面重新开启“接入招乎”。"
+      }
+      const target = await this.dependencies.access.bindThreadGrant({
+        route: input,
+        grantId: grant.grantId,
+        grantVersion: grant.grantVersion,
+        direct: true
+      })
+      label = target.title
+    }
+    return `已切换到【${label}】（会话码 @${code}）。\n后续消息将发送到此会话，其他会话中的任务会继续执行。`
+  }
+
   private async switchToInbox(input: {
     conversationKey: string
     principalId: string
@@ -586,33 +645,102 @@ export class ImCommandRouter {
     )
     const switchedDuringRemoteRun = Boolean(currentEventId && previous?.kind !== "inbox")
     return switchedDuringRemoteRun
-      ? `已切换到【收件箱】。\n上一会话任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。\n新消息将发送到收件箱。`
-      : "已切换到【收件箱】。后续普通消息将进入默认聊天。"
+      ? `已切换到【${IM_DEFAULT_CHAT_LABEL}】。\n上一会话任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。\n新消息将发送到默认聊天。`
+      : `已切换到【${IM_DEFAULT_CHAT_LABEL}】。直接发送消息即可聊天；发送 /会话 可切换到已接入的其他会话。`
   }
 
-  private currentStatus(conversationKey: string): string {
+  private async currentStatus(input: {
+    conversationKey: string
+    principalId: string
+  }): Promise<string> {
+    const { conversationKey, principalId } = input
     const conversation = this.dependencies.conversations.getConversation(conversationKey)
     const selected = this.dependencies.conversations.getSelectedTarget(conversationKey)
     const target = selected?.snapshot ?? null
-    if (!conversation || !target) return "当前会话尚未初始化。"
-    const queued = this.dependencies.events
-      .listConversationEvents(conversationKey)
-      .filter((event) => event.state === "queued").length
-    const runningEventId = this.dependencies.getCurrentEventId(conversationKey, target.threadId)
-    const runningEvent = runningEventId ? this.dependencies.events.getEvent(runningEventId) : null
-    const runtimeTarget = runningEvent?.targetSnapshot ?? target
-    const lease = getLocalThreadRunLease(runtimeTarget.threadId)
-    const interaction = hasPendingApprovalForRuntimeThread(runtimeTarget.threadId)
-      ? "等待桌面审批"
-      : hasPendingUserInputForThread(runtimeTarget.threadId)
-        ? "等待招乎或桌面补充输入"
-        : "无"
+    if (!conversation || !target) return "当前会话尚未初始化，请直接发送消息开始聊天。"
+    const queued = this.dependencies.events.countQueuedConversationEvents(conversationKey)
+    // Route-scoped grants avoid discovering unrelated desktop sessions or
+    // scanning feature catalogs/workspaces just to answer a status command.
+    const candidates = new Map<string, string>()
+    const threads = new Map<string, ReturnType<typeof getThreadHydrationCore>>()
+    const readThread = (id: string) => {
+      if (!threads.has(id)) threads.set(id, this.dependencies.getThread(id))
+      return threads.get(id) ?? null
+    }
+    if (selected?.state === "active") candidates.set(target.threadId, targetLabel(target))
+    const knownTargets = this.dependencies.conversations.listTargets(conversationKey)
+    const targetsByThread = new Map(
+      knownTargets
+        .filter((known) => known.state === "active")
+        .map((known) => [known.snapshot.threadId, known.snapshot])
+    )
+    for (const known of knownTargets) {
+      if (known.state === "active" && known.snapshot.kind === "inbox") {
+        candidates.set(known.snapshot.threadId, IM_DEFAULT_CHAT_LABEL)
+      }
+    }
+    for (const grant of this.dependencies.access.listThreadGrants(conversationKey)) {
+      if (
+        grant.state !== "active" ||
+        grant.principalId !== principalId ||
+        grant.conversationKey !== conversationKey
+      )
+        continue
+      const snapshot = targetsByThread.get(grant.threadId)
+      const thread = readThread(grant.threadId)
+      if (!candidates.has(grant.threadId) && thread) {
+        candidates.set(
+          grant.threadId,
+          snapshot ? targetLabel(snapshot) : thread.title?.trim() || grant.titleSnapshot
+        )
+      }
+    }
+    const statuses = new Map<string, Awaited<ReturnType<typeof readImThreadActivity>>>()
+    // Bound local I/O concurrency; no full message history or ES requests.
+    const entries = [...candidates]
+    for (let offset = 0; offset < entries.length; offset += 4) {
+      await Promise.all(
+        entries.slice(offset, offset + 4).map(async ([id]) => {
+          const thread = readThread(id)
+          if (!thread) return
+          try {
+            statuses.set(
+              id,
+              await this.dependencies.readThreadActivity(
+                thread,
+                Boolean(this.dependencies.getCurrentEventId(conversationKey, id))
+              )
+            )
+          } catch (error) {
+            this.dependencies.warn("Could not read remote session activity.", error)
+            statuses.set(id, { busy: false, label: "状态暂时无法读取", interaction: null })
+          }
+        })
+      )
+    }
+    const current = statuses.get(target.threadId)
+    const running = entries.filter(([id]) => statuses.get(id)?.busy)
+    const unknown = entries.filter(([id]) => statuses.get(id)?.label === "状态暂时无法读取")
     return [
-      `当前目标：【${targetLabel(target)}】${selected?.state === "active" ? "" : "（授权不可用，请重新绑定或切回收件箱）"}`,
-      `运行状态：${runningEventId ? "IM 任务执行中" : lease?.owner === "desktop" ? "桌面任务执行中" : lease?.owner === "scheduler" ? "定时任务执行中" : lease?.owner === "mods" ? "Mods 命令执行中" : "空闲"}`,
-      `排队消息：${queued}`,
-      `桌面交互：${interaction}`,
-      `展示方式：${this.dependencies.conversations.getReplyMode(conversationKey) === "text" ? "文字" : "卡片"}`
+      `当前目标：【${targetLabel(target)}】${selected?.state === "active" ? "" : "（授权不可用，请发送 /会话 重新选择或 /默认 返回默认聊天）"}`,
+      `运行状态：${current?.label ?? "目标不可用"}`,
+      `排队消息：${queued}${queued ? "（按发送时的目标依次执行，切换会话不会转移已排队消息）" : ""}`,
+      `待处理交互：${current?.interaction ?? "无"}`,
+      `展示方式：${this.dependencies.conversations.getReplyMode(conversationKey) === "text" ? "文字" : "卡片"}`,
+      "",
+      "正在运行的会话（已接入此招乎聊天）：",
+      ...(running.length
+        ? running.map(
+            ([id, label], index) =>
+              `${index + 1}. 【${label}】${id === target.threadId ? "（当前目标）" : ""}：${statuses.get(id)!.label}`
+          )
+        : [unknown.length ? "暂无已确认正在运行的会话。" : "暂无正在运行的会话。"]),
+      ...(unknown.length
+        ? [
+            `状态暂时无法读取：${unknown.map(([, label]) => `【${label}】`).join("、")}，可稍后再发 /当前。`
+          ]
+        : []),
+      "新消息会发送到当前目标；发送 /会话 切换，/默认 返回默认聊天。"
     ].join("\n")
   }
 
@@ -680,13 +808,13 @@ export class ImCommandRouter {
   private stopCurrent(conversationKey: string): string {
     const target = this.selectedTarget(conversationKey)
     if (target && this.dependencies.abortCurrent(conversationKey, target.threadId)) {
-      return "已请求停止当前会话的 IM 任务。"
+      return "已请求停止当前会话的招乎任务。"
     }
     const lease = target ? getLocalThreadRunLease(target.threadId) : undefined
     if (lease?.owner === "desktop") return "当前是桌面任务，请在桌面停止。"
     if (lease?.owner === "mods") return "当前是 Mods 命令，请在桌面的命令面板停止。"
     if (lease?.owner === "scheduler") return "当前是定时任务，不能通过 IM 跨来源停止。"
-    return "当前没有正在执行的 IM 任务。"
+    return "当前没有可由 /停止 停止的招乎主任务。发送 /当前 查看运行情况；子任务请在桌面查看或停止。"
   }
 
   private retryUnknown(conversationKey: string, shortCode: string): string {
@@ -779,10 +907,10 @@ export class ImCommandRouter {
         conversationKey: input.conversationKey,
         // One live list per conversation, so the conversation identifies it.
         requestRef: targetBindRequestRef(input.conversationKey),
-        targetLabel: current ? targetLabel(current) : "收件箱",
+        targetLabel: current ? targetLabel(current) : IM_DEFAULT_CHAT_LABEL,
         build: (tag) =>
           buildTargetBindCard({
-            currentLabel: current ? targetLabel(current) : "收件箱",
+            currentLabel: current ? targetLabel(current) : IM_DEFAULT_CHAT_LABEL,
             targets: targets.map((target, index) => ({
               index: index + 1,
               label: target.label,
@@ -821,7 +949,7 @@ export class ImCommandRouter {
       await this.dependencies.cards.resolve(
         interaction.interactionId,
         buildBoundCard({
-          targetLabel: current ? targetLabel(current) : "收件箱",
+          targetLabel: current ? targetLabel(current) : IM_DEFAULT_CHAT_LABEL,
           outcome,
           detail: "这张列表已经用过，如需再切换请重新发送 /会话。"
         })

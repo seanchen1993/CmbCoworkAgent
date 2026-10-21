@@ -1,5 +1,8 @@
 import assert from "node:assert/strict"
-import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../src/main/agent/thread-run-lease"
+import {
+  claimLocalThreadRunLease,
+  releaseLocalThreadRunLease
+} from "../src/main/agent/thread-run-lease"
 import { mkdtemp, realpath, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -21,6 +24,7 @@ import { ImInboxService } from "../src/main/services/im/inbox-service"
 import { ImIngressSequencer } from "../src/main/services/im/ingress-sequencer"
 import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
 import { ImReplyClient } from "../src/main/services/im/reply-client"
+import { ImSessionSwitchCards } from "../src/main/services/im/session-switch-cards"
 import { ImRemoteAccessService } from "../src/main/services/im/remote-access-service"
 import { ImRemoteGrantStore } from "../src/main/services/im/remote-grant-store"
 import { eventShortCode } from "../src/main/services/im/reply-segmentation"
@@ -733,7 +737,7 @@ async function testFeatureCreateGrantCreatesIndependentThreadGrants(): Promise<v
       ...commandInput,
       command: parseImCommand("/收件箱")!
     })
-    assert(switched.includes("已切换到【收件箱】"))
+    assert(switched.includes("已切换到【默认聊天】"))
     assert.equal(context.conversations.getActiveTarget("conversation-1")?.kind, "inbox")
   } finally {
     context.database.close()
@@ -930,7 +934,8 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
     events: context.events,
     inbox: context.inbox,
     access: context.access,
-    selections: context.selections
+    selections: context.selections,
+    getThread: (id) => context.threads.get(id) ?? null
   })
   const route = {
     conversationKey: "conversation-1",
@@ -956,12 +961,26 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
     assert.equal(target?.threadId, "desktop-thread")
     if (target?.kind !== "thread") throw new Error("thread target expected")
     assert.equal(target.title, "支付排障会话（已更新）")
-    const commandLease = claimLocalThreadRunLease({ threadId: target.threadId, owner: "mods", runId: "mod-command" })
+    const commandLease = claimLocalThreadRunLease({
+      threadId: target.threadId,
+      owner: "mods",
+      runId: "mod-command"
+    })
     assert(commandLease.acquired)
     try {
-      assert((await router.handle({ ...route, command: parseImCommand("/当前")! })).includes("Mods 命令执行中"))
-      assert((await router.handle({ ...route, command: parseImCommand("/停止")! })).includes("桌面的命令面板停止"))
-    } finally { releaseLocalThreadRunLease(target.threadId, "mods", "mod-command") }
+      assert(
+        (await router.handle({ ...route, command: parseImCommand("/当前")! })).includes(
+          "Mods 命令执行中"
+        )
+      )
+      assert(
+        (await router.handle({ ...route, command: parseImCommand("/停止")! })).includes(
+          "桌面的命令面板停止"
+        )
+      )
+    } finally {
+      releaseLocalThreadRunLease(target.threadId, "mods", "mod-command")
+    }
     assert.deepEqual(
       JSON.parse(context.threads.get("desktop-thread")!.metadata!),
       originalMetadata,
@@ -1143,7 +1162,7 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
       "without an existing inbox, revocation clears the invalid active pointer"
     )
     const recovered = await router.handle({ ...route, command: parseImCommand("/收件箱")! })
-    assert(recovered.includes("已切换到【收件箱】"))
+    assert(recovered.includes("已切换到【默认聊天】"))
   } finally {
     context.database.close()
     await rm(context.root, { recursive: true, force: true })
@@ -1388,18 +1407,30 @@ async function testTheTextModeCommandIsASwitch(): Promise<void> {
   const context = await createContext()
   const { router, resendCalls } = textModeRouter(context)
   try {
-    assert.equal(context.conversations.getReplyMode("conversation-1"), "card", "cards are the default")
+    assert.equal(
+      context.conversations.getReplyMode("conversation-1"),
+      "card",
+      "cards are the default"
+    )
 
     const on = await sendCommand(router, "/文字模式")
     assert.equal(context.conversations.getReplyMode("conversation-1"), "text")
     assert(on.includes("已切换为文字模式"), on)
     assert(on.includes("再发一次 /文字模式 可切回卡片"), on)
-    assert.deepEqual(resendCalls, ["conversation-1"], "switching to text sends what the cards held back")
+    assert.deepEqual(
+      resendCalls,
+      ["conversation-1"],
+      "switching to text sends what the cards held back"
+    )
 
     const off = await sendCommand(router, "/文字模式")
     assert.equal(context.conversations.getReplyMode("conversation-1"), "card")
     assert(off.includes("已切回卡片模式"), off)
-    assert.equal(resendCalls.length, 1, "switching back sends nothing: the text is already in the chat")
+    assert.equal(
+      resendCalls.length,
+      1,
+      "switching back sends nothing: the text is already in the chat"
+    )
   } finally {
     context.database.close()
     await rm(context.root, { recursive: true, force: true })
@@ -1420,7 +1451,11 @@ async function testExplicitOnAndOffNeverFlipBack(): Promise<void> {
 
     await sendCommand(router, "/文字模式 开")
     const again = await sendCommand(router, "/文字模式 开")
-    assert.equal(context.conversations.getReplyMode("conversation-1"), "text", "a second 开 is not a toggle")
+    assert.equal(
+      context.conversations.getReplyMode("conversation-1"),
+      "text",
+      "a second 开 is not a toggle"
+    )
     assert(again.startsWith("当前已经是文字模式。"), again)
     assert.equal(resendCalls.length, 2, "开 while already in text mode retries the resend")
 
@@ -1429,7 +1464,11 @@ async function testExplicitOnAndOffNeverFlipBack(): Promise<void> {
 
     const usage = await sendCommand(router, "/文字模式 卡片")
     assert(usage.startsWith("用法："), usage)
-    assert.equal(context.conversations.getReplyMode("conversation-1"), "card", "a bad argument changes nothing")
+    assert.equal(
+      context.conversations.getReplyMode("conversation-1"),
+      "card",
+      "a bad argument changes nothing"
+    )
   } finally {
     context.database.close()
     await rm(context.root, { recursive: true, force: true })
@@ -1516,7 +1555,7 @@ async function testTextModeSendsTheTargetListAsText(): Promise<void> {
     await sendCommand(router, "/文字模式")
     const underTheCard = await sendCommand(router, "/会话")
     assert.equal(sentCards.length, 1, "back in card mode the list is a card again")
-    assert(underTheCard.includes("先发 /文字模式，再发 /会话"), underTheCard)
+    assert(underTheCard.includes("先发 /文字模式 开，再发 /会话"), underTheCard)
   } finally {
     context.database.close()
     await rm(context.root, { recursive: true, force: true })
@@ -1545,7 +1584,7 @@ async function testFeatureDeletionFiltersTextAndCardSelections(): Promise<void> 
     assert(stale.includes("Feature 不存在或已归档"), stale)
     assert.equal(context.createdThreadMetadata.length, 0)
     const noTargets = await sendCommand(router, "/会话")
-    assert(noTargets.includes("当前没有已授权"), noTargets)
+    assert(noTargets.includes("当前没有已接入招乎"), noTargets)
     assert.equal(sentCards.length, 1, "no empty/stale card is published")
     assert.equal(context.grants.getFeatureGrantById(grant.grantId)?.state, "active")
 
@@ -1647,7 +1686,246 @@ async function testFeatureCatalogEligibilityAndRecovery(): Promise<void> {
   }
 }
 
+async function testCurrentListsOnlyRouteAuthorizedRunningSessions(): Promise<void> {
+  const context = await createContext()
+  const inspected: string[] = []
+  let concurrent = 0
+  let peak = 0
+  const route = TEXT_MODE_ROUTE
+  try {
+    await context.inbox.ensureInbox(route)
+    for (let index = 0; index < 9; index++) {
+      context.makeThread(`running-${index}`, {
+        title: `运行会话 ${index}`,
+        workspacePath: context.root
+      })
+      await context.access.enableThread({ route, threadId: `running-${index}` })
+    }
+    await context.conversations.ensureConversation({
+      conversationKey: "other-route",
+      principalId: route.principalId
+    })
+    context.makeThread("private-thread", {
+      title: "其他招乎聊天的会话",
+      workspacePath: context.root
+    })
+    await context.access.enableThread({
+      route: { ...route, conversationKey: "other-route" },
+      threadId: "private-thread"
+    })
+    const router = new ImCommandRouter({
+      conversations: context.conversations,
+      events: context.events,
+      inbox: context.inbox,
+      access: context.access,
+      getThread: (id) => context.threads.get(id) ?? null,
+      readThreadActivity: async (thread) => {
+        inspected.push(thread.thread_id)
+        peak = Math.max(peak, ++concurrent)
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        concurrent--
+        const busy = thread.thread_id.startsWith("running-")
+        return { busy, label: busy ? "Team 子代理执行中" : "空闲", interaction: null }
+      }
+    })
+    const reads = context.featureCatalog.projectReads
+    const status = await sendCommand(router, "/当前")
+    assert(status.includes("当前目标：【默认聊天】"), status)
+    assert(status.includes("运行状态：空闲"), status)
+    assert(status.includes("【运行会话 8】：Team 子代理执行中"), status)
+    assert(!status.includes("其他招乎聊天的会话"), status)
+    assert(!inspected.includes("private-thread"))
+    assert.equal(inspected.length, 10, "one probe per visible thread, including the default chat")
+    assert.equal(peak, 4, "status probes have bounded concurrency")
+    assert.equal(context.featureCatalog.projectReads, reads, "status never scans feature catalogs")
+    assert.equal(parseImCommand("/默认")?.name, "inbox")
+    assert.equal(parseImCommand("/收件箱")?.name, "inbox", "old command remains compatible")
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testDefaultChatGuideSurvivesDuplicatesAndRestart(): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  const replyClient = new ImReplyClient(gateway, context.events, () => context.clock.now)
+  try {
+    const inbox = await context.inbox.ensureInbox(TEXT_MODE_ROUTE)
+    const makeIngress = (events: ImEventStore) =>
+      new ImIngressSequencer({
+        conversationState: context.conversations,
+        eventStore: events,
+        resolveTarget: async () => inbox,
+        replyClient
+      })
+    const ingress = makeIngress(context.events)
+    await ingress.receiveControlEvent(eventFixture(1, "/帮助"), async () => "帮助")
+    assert.equal(context.events.listOutbox().filter((row) => !row.eventId).length, 0)
+    const first = await ingress.receiveOrdinaryEvent(eventFixture(2, "你好"))
+    assert.equal(first.event.state, "queued", "guide does not consume the user's task")
+    const guides = () =>
+      context.events
+        .listOutbox()
+        .filter((row) => row.deliveryId.startsWith("im:default-chat-guide:"))
+    assert.equal(guides().length, 1)
+    assert(guides()[0].content.includes("不会自动连接到桌面已有的会话"))
+    assert(guides()[0].content.includes("/会话"))
+    await replyClient.sendPending()
+    assert.equal(
+      gateway.replies.filter((reply) => !reply.eventId).length,
+      1,
+      "the regular outbox delivers the guide"
+    )
+    await ingress.receiveOrdinaryEvent(eventFixture(2, "你好"))
+    await ingress.receiveOrdinaryEvent(eventFixture(3, "继续"))
+    // Recreate both services over persisted data, as on app restart.
+    const SQL = await initSqlJs()
+    const reopened = new SQL.Database(context.database.export())
+    try {
+      const events = new ImEventStore({ ...context.persistence, getDatabase: () => reopened })
+      await makeIngress(events).receiveOrdinaryEvent(eventFixture(4, "重启后继续"))
+      assert.equal(
+        events.listOutbox().filter((row) => row.deliveryId.startsWith("im:default-chat-guide:"))
+          .length,
+        1
+      )
+      assert.equal(events.countQueuedConversationEvents(TEXT_MODE_ROUTE.conversationKey), 3)
+    } finally {
+      reopened.close()
+    }
+    assert.equal(
+      guides().length,
+      1,
+      "ordinary messages and duplicate delivery never repeat onboarding"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testSessionCodesSelectExactThreadsAndRecheckLiveGrants(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    getThread: (id) => context.threads.get(id) ?? null
+  })
+  const route = TEXT_MODE_ROUTE
+  try {
+    const inbox = await context.inbox.ensureInbox(route)
+    for (const id of ["same-a", "same-b", "race"]) {
+      context.makeThread(id, { title: "接口排障", workspacePath: context.root })
+      await context.access.enableThread({ route, threadId: id })
+    }
+    const codeFor = (threadId: string, kind = "thread") =>
+      context.events.sessionLinks.prepare({
+        ...route,
+        threadId,
+        kind: kind as "thread" | "inbox",
+        label: "接口排障",
+        deliveryId: `result-${threadId}`
+      })
+    const a = codeFor("same-a"),
+      b = codeFor("same-b"),
+      race = codeFor("race")
+    const inboxCode = codeFor(inbox.threadId, "inbox")
+    assert.notEqual(a, b)
+    // ID switches must not scan every authorized session or the Feature catalog.
+    context.access.listAuthorizedTargets = async () => {
+      throw new Error("Unexpected full target scan")
+    }
+    const created = context.threads.size
+    assert((await sendCommand(router, `/切换 @${a.toLowerCase()}`)).includes("已切换到"))
+    assert.equal(context.conversations.getActiveTarget(route.conversationKey)?.threadId, "same-a")
+    assert((await sendCommand(router, `/切换 @${b}`)).includes("已切换到"))
+    assert.equal(context.conversations.getActiveTarget(route.conversationKey)?.threadId, "same-b")
+    const buttons = new ImSessionSwitchCards({
+      links: context.events.sessionLinks,
+      conversations: context.conversations,
+      switchSession: (input) =>
+        router.handle({ ...input, command: { name: "switch_target", argument: `@${input.code}` } })
+    })
+    try {
+      const card = context.events.sessionLinks.getCard("result-same-a")!
+      const click = {
+        schemaVersion: 1 as const,
+        receiptId: "exact-switch-click",
+        ...route,
+        interactionId: card.interaction_id,
+        tag: card.tag,
+        kind: "target_bind" as const,
+        feedback: [],
+        occurredAt: new Date(context.clock.now).toISOString()
+      }
+      assert((await buttons.handleReceipt(click))?.includes("已切换到"))
+      assert.equal(context.conversations.getActiveTarget(route.conversationKey)?.threadId, "same-a")
+      await sendCommand(router, `/切换 @${b}`)
+      assert(
+        (await buttons.handleReceipt({ ...click, receiptId: "old-card-again" }))?.includes("已处理")
+      )
+      assert.equal(
+        context.conversations.getActiveTarget(route.conversationKey)?.threadId,
+        "same-b",
+        "an old consumed card cannot switch the target again"
+      )
+    } finally {
+      await buttons.stop()
+    }
+    context.updateLocalThread("same-a", { title: "已经改名" })
+    assert((await sendCommand(router, `/切换 @${a}`)).includes("已经改名"))
+    assert.equal(context.conversations.getActiveTarget(route.conversationKey)?.threadId, "same-a")
+    assert((await sendCommand(router, `/切换 @${inboxCode}`)).includes("已切换到"))
+    assert.equal(
+      context.conversations.getActiveTarget(route.conversationKey)?.threadId,
+      inbox.threadId
+    )
+    assert.equal(context.threads.size, created, "switching a code never creates a new session")
+
+    await context.conversations.ensureConversation({ ...route, conversationKey: "another-chat" })
+    const outside = await router.handle({
+      ...route,
+      conversationKey: "another-chat",
+      command: parseImCommand(`/切换 @${a}`)!
+    })
+    assert(outside.includes("未找到"), outside)
+    assert((await sendCommand(router, "/切换 @INVALID")).includes("格式不正确"))
+    await context.access.disableThread("same-b")
+    assert((await sendCommand(router, `/切换 @${b}`)).includes("授权已失效"))
+    context.threads.delete("same-a")
+    assert((await sendCommand(router, `/切换 @${a}`)).includes("已删除"))
+
+    const switching = sendCommand(router, `/切换 @${race}`)
+    await context.access.disableThread("race")
+    assert((await switching).includes("授权已变化"))
+    assert.equal(
+      context.conversations.getActiveTarget(route.conversationKey)?.threadId,
+      inbox.threadId,
+      "revocation during a switch must win"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 const tests: Array<[string, () => Promise<void>]> = [
+  [
+    "testSessionCodesSelectExactThreadsAndRecheckLiveGrants",
+    testSessionCodesSelectExactThreadsAndRecheckLiveGrants
+  ],
+  [
+    "testCurrentListsOnlyRouteAuthorizedRunningSessions",
+    testCurrentListsOnlyRouteAuthorizedRunningSessions
+  ],
+  [
+    "testDefaultChatGuideSurvivesDuplicatesAndRestart",
+    testDefaultChatGuideSurvivesDuplicatesAndRestart
+  ],
   [
     "testFeatureDeletionFiltersTextAndCardSelections",
     testFeatureDeletionFiltersTextAndCardSelections
@@ -1660,7 +1938,10 @@ const tests: Array<[string, () => Promise<void>]> = [
   ["testTextModeSendsTheTargetListAsText", testTextModeSendsTheTargetListAsText],
   ["testSwitchBackByTheNameTheReplyAlreadyShows", testSwitchBackByTheNameTheReplyAlreadyShows],
   ["testBindModeOnlyAppliesWhereASessionIsCreated", testBindModeOnlyAppliesWhereASessionIsCreated],
-  ["testACardSubmitBindsExactlyWhatTypingWouldBind", testACardSubmitBindsExactlyWhatTypingWouldBind],
+  [
+    "testACardSubmitBindsExactlyWhatTypingWouldBind",
+    testACardSubmitBindsExactlyWhatTypingWouldBind
+  ],
   ["testADeliveredTargetCardSendsNoNoticeAtAll", testADeliveredTargetCardSendsNoNoticeAtAll],
   [
     "testFeatureCreateGrantCreatesIndependentThreadGrants",

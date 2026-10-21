@@ -101,7 +101,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
     void window.api.builtinRobot
       .listGrantableFeatures()
       .then(setGrantableFeatures)
-      .catch((error) => toast.error(`读取可接入 Feature 失败：${errorMessage(error)}`))
+      .catch((error) => toast.error(`读取可接入特性失败：${errorMessage(error)}`))
       .finally(() => setGrantableFeaturesLoading(false))
 
     void window.api.threads
@@ -209,7 +209,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
           <Card>
             <CardHeader>
               <CardTitle>接入招乎</CardTitle>
-              <CardDescription>会话与 Feature 配置正在后台加载。</CardDescription>
+              <CardDescription>会话与特性配置正在后台加载。</CardDescription>
             </CardHeader>
           </Card>
         </div>
@@ -500,10 +500,16 @@ export function BuiltinRobotPanel(): React.JSX.Element {
           <CardHeader>
             <CardTitle>接入招乎</CardTitle>
             <CardDescription>
-              已有桌面会话可逐条接入；Feature 开关只控制能否从招乎在该 Feature 下创建远程会话。
+              直接在招乎发消息会进入默认聊天。要继续桌面已有的工作，请在下方开启对应会话，再到招乎发送
+              /会话 选择。
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
+            <div className="rounded-md border bg-muted/20 p-3 text-sm leading-6 text-muted-foreground">
+              <p>1. 开启下方已有会话，或允许在特性下新建会话。</p>
+              <p>2. 在招乎发送 /会话，选择目标并点击“切换”。</p>
+              <p>3. 直接发送任务即可；/当前 查看运行情况，/默认 返回默认聊天。</p>
+            </div>
             <section className="space-y-2">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <MessageSquareText className="size-4" /> 已有桌面会话
@@ -519,8 +525,8 @@ export function BuiltinRobotPanel(): React.JSX.Element {
                 </p>
               ) : grantableThreads.length === 0 ? (
                 <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-                  暂无带有效工作区的可接入会话。普通会话和 Project Mode 会话均支持；
-                  Coordinator、Workflow 和远程收件箱会话暂不开放。
+                  暂无带有效工作区的可接入会话。普通会话、项目模式以及 Team / Workflow 均支持；
+                  默认聊天无需单独接入。
                 </p>
               ) : (
                 <div className="max-h-64 space-y-2 overflow-auto pr-1">
@@ -570,7 +576,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
 
             <section className="space-y-2">
               <div className="flex items-center gap-2 text-sm font-medium">
-                <FolderKanban className="size-4" /> Feature 远程新建会话
+                <FolderKanban className="size-4" /> 特性下新建会话
               </div>
               {!remoteAccessLoading && !remoteAccess?.principalAvailable && (
                 <div className="rounded-md border border-status-warning/30 bg-status-warning/5 px-3 py-2 text-sm text-muted-foreground">
@@ -579,11 +585,11 @@ export function BuiltinRobotPanel(): React.JSX.Element {
               )}
               {grantableFeaturesLoading || remoteAccessLoading ? (
                 <p className="flex items-center gap-2 rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-                  <Loader2 className="size-4 animate-spin" /> 正在读取 Feature…
+                  <Loader2 className="size-4 animate-spin" /> 正在读取特性…
                 </p>
               ) : grantableFeatures.length === 0 ? (
                 <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-                  暂无可开放远程新建会话的 Feature。
+                  暂无可开放远程新建会话的特性。
                 </p>
               ) : (
                 <div className="max-h-64 space-y-2 overflow-auto pr-1">
@@ -622,8 +628,8 @@ export function BuiltinRobotPanel(): React.JSX.Element {
                                   checked
                                 ),
                               checked
-                                ? "已允许从招乎在此 Feature 下新建会话"
-                                : "已关闭此 Feature 的远程新建会话权限"
+                                ? "已允许从招乎在此特性下新建会话"
+                                : "已关闭此特性的远程新建会话权限"
                             )
                           }
                         />
@@ -635,12 +641,13 @@ export function BuiltinRobotPanel(): React.JSX.Element {
             </section>
 
             <p className="text-xs leading-5 text-muted-foreground">
-              会话开关只开放这一条已有会话；Feature 开关只开放远程新建会话，两者互不继承。
-              招乎只展示会话、项目与 Feature 名称；本地绝对路径、插件路径和工作区配置不会上传。
+              会话开关只开放这一条已有会话；特性开关允许从招乎在该特性下新建会话，不会切换已有会话。
+              招乎只展示会话、项目与特性名称；本地绝对路径、插件路径和工作区配置不会上传。
             </p>
 
             <p className="text-xs leading-5 text-muted-foreground">
-              在招乎发送 /帮助 查看全部指令；卡片显示不全时，发送 /文字模式 改用文字。
+              在招乎发送 /帮助 查看全部指令；卡片显示不全时，发送 /文字模式 开 改用文字，/文字模式
+              关 恢复卡片。切换会话列表需再发一次 /会话。
             </p>
 
             <div className="flex items-start justify-between gap-4 rounded-md border border-status-warning/30 bg-status-warning/5 p-3">

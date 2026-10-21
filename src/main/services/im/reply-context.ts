@@ -1,4 +1,5 @@
 import type { ImTargetSnapshot } from "./conversation-state"
+import { IM_DEFAULT_CHAT_LABEL } from "../../../shared/im-display"
 
 const MAX_CONTEXT_LABEL_CHARACTERS = 120
 
@@ -22,19 +23,53 @@ function readableLabel(value: string | null | undefined, fallback: string): stri
  */
 export const SWITCHED_TARGET_MARK = "（非当前绑定会话）"
 
-function withSwitchNotice(prefix: string, switched: boolean): string {
-  return `${prefix}${switched ? SWITCHED_TARGET_MARK : ""}`
+/** No numbered selections here: their context can expire before a push is read. */
+export function buildImReplyContinuationHint(input: {
+  switched: boolean
+  kind: ImTargetSnapshot["kind"]
+  threadTitle?: string | null
+  requiresSelection?: boolean
+  sessionCode?: string
+}): string | undefined {
+  if (!input.switched) return undefined
+  const title = input.threadTitle?.replace(/\s+/gu, " ").trim()
+  const command = input.sessionCode
+    ? `/切换 @${input.sessionCode}`
+    : input.kind === "inbox"
+      ? "/默认"
+      : input.kind === "thread" &&
+          title &&
+          Array.from(title).length <= MAX_CONTEXT_LABEL_CHARACTERS &&
+          !input.requiresSelection
+        ? `/切换 ${title}`
+        : "/会话"
+  return [
+    "直接回复会发到当前绑定的会话，不会自动切换到此会话。",
+    command === "/会话"
+      ? "要继续此会话，请发送 /会话，选择对应会话并点击“切换”。"
+      : `要继续此会话，请先单独发送：${command}`,
+    "切换成功后再发送你的问题；/当前 可确认消息接收会话。"
+  ].join("\n")
 }
 
-export function imInboxReplyPrefix(switched = false): string {
-  return withSwitchNotice("【远程收件箱】", switched)
+function withSwitchNotice(prefix: string, switched: boolean, continuationHint?: string): string {
+  return `${prefix}${switched ? SWITCHED_TARGET_MARK : ""}${switched && continuationHint ? `\n${continuationHint}` : ""}`
+}
+
+export function imInboxReplyPrefix(switched = false, continuationHint?: string): string {
+  return withSwitchNotice(`【${IM_DEFAULT_CHAT_LABEL}】`, switched, continuationHint)
 }
 
 export function imThreadReplyPrefix(
   threadTitle: string | null | undefined,
-  switched = false
+  switched = false,
+  continuationHint?: string
 ): string {
-  return withSwitchNotice(`【会话：${readableLabel(threadTitle, "未命名会话")}】`, switched)
+  return withSwitchNotice(
+    `【会话：${readableLabel(threadTitle, "未命名会话")}】`,
+    switched,
+    continuationHint
+  )
 }
 
 export function imFeatureReplyPrefix(input: {
@@ -44,6 +79,7 @@ export function imFeatureReplyPrefix(input: {
   featureSlug: string
   threadTitle?: string | null
   switched?: boolean
+  continuationHint?: string
 }): string {
   const feature = `${readableLabel(input.projectName, input.projectId)} / ${readableLabel(
     input.featureTitle,
@@ -52,7 +88,11 @@ export function imFeatureReplyPrefix(input: {
   const thread = input.threadTitle?.trim()
     ? `｜会话：${readableLabel(input.threadTitle, "未命名会话")}`
     : ""
-  return withSwitchNotice(`【Feature：${feature}${thread}】`, input.switched === true)
+  return withSwitchNotice(
+    `【Feature：${feature}${thread}】`,
+    input.switched === true,
+    input.continuationHint
+  )
 }
 
 export function imProjectModeReplyPrefix(input: {
@@ -61,6 +101,7 @@ export function imProjectModeReplyPrefix(input: {
   nodeName?: string | null
   nodeStatus?: string | null
   switched?: boolean
+  continuationHint?: string
 }): string {
   return [
     withSwitchNotice("【项目模式会话返回】", input.switched === true),
@@ -68,6 +109,7 @@ export function imProjectModeReplyPrefix(input: {
     `特性：【${readableLabel(input.featureName, "未知")}】`,
     `当前阶段：${readableLabel(input.nodeName, "未知")}`,
     `阶段状态：${readableLabel(input.nodeStatus, "未知")}`,
+    ...(input.switched && input.continuationHint ? [input.continuationHint] : []),
     `模型返回：`,
     ""
   ].join("\n")
@@ -75,12 +117,16 @@ export function imProjectModeReplyPrefix(input: {
 
 export function imTargetReplyPrefix(
   target: ImTargetSnapshot,
-  options: { switched?: boolean; threadTitle?: string | null } = {}
+  options: { switched?: boolean; threadTitle?: string | null; continuationHint?: string } = {}
 ): string {
   const switched = options.switched === true
-  if (target.kind === "inbox") return imInboxReplyPrefix(switched)
+  if (target.kind === "inbox") return imInboxReplyPrefix(switched, options.continuationHint)
   if (target.kind === "thread") {
-    return imThreadReplyPrefix(options.threadTitle ?? target.title, switched)
+    return imThreadReplyPrefix(
+      options.threadTitle ?? target.title,
+      switched,
+      options.continuationHint
+    )
   }
   return imFeatureReplyPrefix({
     projectName: target.projectName,
@@ -88,6 +134,7 @@ export function imTargetReplyPrefix(
     featureTitle: target.featureTitle,
     featureSlug: target.featureSlug,
     threadTitle: options.threadTitle,
-    switched
+    switched,
+    continuationHint: options.continuationHint
   })
 }

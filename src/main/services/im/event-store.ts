@@ -10,6 +10,7 @@ import type { ImTargetSnapshot } from "./conversation-state"
 import { ImConversationStateError } from "./conversation-state"
 import type { ImPersistenceDependencies } from "./persistence"
 import { readAll, readOne, withImTransaction } from "./persistence"
+import { ImSessionLinkStore } from "./session-link-store"
 
 export type ImEventState =
   | "received"
@@ -322,7 +323,10 @@ function normalizeProactiveReplies(replies: readonly RemoteImReplyV1[]): RemoteI
 }
 
 export class ImEventStore {
-  constructor(private readonly dependencies: ImPersistenceDependencies) {}
+  readonly sessionLinks: ImSessionLinkStore
+  constructor(private readonly dependencies: ImPersistenceDependencies) {
+    this.sessionLinks = new ImSessionLinkStore(dependencies)
+  }
 
   getEvent(eventId: string): ImEventRecord | null {
     const row = readOne<ImEventRow>(
@@ -339,6 +343,26 @@ export class ImEventStore {
       "SELECT * FROM im_events WHERE conversation_key = ? ORDER BY conversation_seq ASC",
       [conversationKey]
     ).map(hydrateEvent)
+  }
+
+  countQueuedConversationEvents(conversationKey: string): number {
+    return Number(
+      readOne<{ count: number }>(
+        this.dependencies.getDatabase(),
+        "SELECT COUNT(*) AS count FROM im_events WHERE conversation_key = ? AND state = 'queued'",
+        [conversationKey]
+      )?.count ?? 0
+    )
+  }
+
+  hasReplyDelivery(deliveryId: string): boolean {
+    return Boolean(
+      readOne<{ found: number }>(
+        this.dependencies.getDatabase(),
+        "SELECT 1 AS found FROM im_reply_outbox WHERE delivery_id = ? LIMIT 1",
+        [deliveryId]
+      )
+    )
   }
 
   getNextQueuedEvent(conversationKey: string): ImEventRecord | null {

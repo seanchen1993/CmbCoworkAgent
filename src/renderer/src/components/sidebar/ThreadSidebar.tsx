@@ -155,6 +155,7 @@ function formatCompactTime(date: Date | string): string {
 }
 
 function getDisplayThreadTitle(thread: Thread): string {
+  if (isRemoteInboxThread(thread)) return REMOTE_INBOX_WORKSPACE_NAME
   const title = thread.title?.trim()
 
   if (!title || title === "..." || title === "…") {
@@ -346,7 +347,7 @@ function ThreadListItemImpl({
                       {remoteThreadHistorical
                         ? "远程历史"
                         : remoteThreadKind === "inbox"
-                          ? "远程收件箱"
+                          ? "默认聊天"
                           : "远程会话"}
                     </span>
                     <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
@@ -1494,7 +1495,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                                       canRenameProject
                                         ? "修改工作区名称"
                                         : project.isManagedInbox
-                                          ? "远程收件箱名称由应用管理"
+                                          ? "招乎默认聊天名称由应用管理"
                                           : "未关联工作区无法重命名"
                                     }
                                     disabled={!canRenameProject}
@@ -1510,7 +1511,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                                     popoverContent={
                                       canCreateProjectThread
                                         ? "新增任务"
-                                        : "远程收件箱不支持新增任务"
+                                        : "请从招乎默认聊天发送消息"
                                     }
                                     disabled={!canCreateProjectThread}
                                     stopPropagation

@@ -223,6 +223,8 @@ async function testSchemaAndTargetLifecycle(): Promise<void> {
       "im_remote_approval_audit",
       "im_reply_outbox",
       "im_selection_contexts",
+      "im_session_links",
+      "im_session_switch_cards",
       "im_targets",
       "im_thread_grants"
     ])

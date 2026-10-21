@@ -184,7 +184,7 @@ function testReplySegmentationAndStableEnvelope(): void {
   assert.equal(eventShortCode("event-stable-id"), eventShortCode("event-stable-id"))
   assert.match(eventShortCode("event-stable-id"), /^[A-F0-9]{8}$/)
 
-  assert.equal(imInboxReplyPrefix(), "【远程收件箱】")
+  assert.equal(imInboxReplyPrefix(), "【默认聊天】")
   assert.equal(imThreadReplyPrefix("  接口   排障  "), "【会话：接口 排障】")
   assert.equal(
     imFeatureReplyPrefix({
@@ -229,8 +229,8 @@ function fenceLines(segment: string): number {
  * may rely on it being rendered.
  */
 function testMarkdownSegmentsRenderOnTheirOwn(): void {
-  assert.deepEqual(segmentImMarkdownText("# 标题\n\n正文", { prefix: "【远程收件箱】" }), [
-    "【远程收件箱】\n\n# 标题\n\n正文"
+  assert.deepEqual(segmentImMarkdownText("# 标题\n\n正文", { prefix: "【默认聊天】" }), [
+    "【默认聊天】\n\n# 标题\n\n正文"
   ])
   const projectPrefix = imProjectModeReplyPrefix({
     projectName: "支付平台",

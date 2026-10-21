@@ -599,6 +599,7 @@ export function buildTargetBindCard(input: TargetBindCardInput): CardComponent[]
   const components: CardComponent[] = [
     titleComponent(CARD_TITLE.target_bind),
     statusComponent("待选择", STATUS_STYLE.orange),
+    contentComponent(["显示不全？发送 /文字模式 开，再发送 /会话 查看完整文字列表。"], 1),
     kvComponent([{ title: "当前", value: input.currentLabel }])
   ]
 
@@ -622,10 +623,20 @@ export function buildTargetBindCard(input: TargetBindCardInput): CardComponent[]
   // session a mode word is refused by the typed path, and offering a control
   // whose every use is an error is worse than not offering it.
   if (input.modeChoices.length > 0) {
+    components.push(
+      contentComponent(
+        [
+          "选择已有会话会直接切换；选择特性会在其下新建会话。",
+          "新建会话模式仅在特性下新建时生效，已有会话请忽略；不选则跟随特性配置。",
+          "Solo：单代理；Multi：可调用子代理；Team：团队协作；Workflow：工作流。"
+        ],
+        1
+      )
+    )
     controls.push({
       subType: "listSelector",
       title: "新建会话模式",
-      promptText: "仅在特性下新建会话时生效，已有会话请忽略",
+      promptText: "请选择",
       feedbackKey: TARGET_BIND_MODE_KEY,
       required: false,
       selectModel: LIST_SELECT_CUSTOM_OPTIONS,
@@ -657,6 +668,36 @@ export interface BoundCardInput {
   targetLabel: string
   outcome: string
   detail?: string
+}
+
+/** Uses the existing target_bind kind and the already-supported approval button shape. */
+export function buildSessionSwitchCard(input: {
+  label: string
+  code: string
+  tag: string
+}): CardComponent[] {
+  return [
+    titleComponent("继续此会话"),
+    kvComponent([{ title: "来源会话", value: input.label }]),
+    contentComponent(
+      [`文字切换：/切换 @${input.code}`, "点击后，新消息将发到此会话；其他任务会继续执行。"],
+      1
+    ),
+    {
+      type: "exclusionOperate",
+      style: EXCLUSION_STYLE_ACCEPT_REJECT,
+      list: [
+        {
+          content: "切换到此会话",
+          action: BUTTON_ACTION_FEEDBACK,
+          tag: input.tag,
+          style: 1,
+          status: BUTTON_STATUS_NORMAL,
+          disable: 0
+        }
+      ]
+    }
+  ]
 }
 
 /** The terminal card that replaces a live target list once something bound. */
