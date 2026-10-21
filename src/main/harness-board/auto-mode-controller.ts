@@ -7,6 +7,7 @@ import { getAllThreadSummaries, getThread } from "../db"
 import type { AgentRunDelivery } from "../agent/agent-run-service"
 import type { AppDecisionResult } from "../../shared/app-notifications"
 import { hasActiveTopLevelAgentRun } from "../agent/agent-run-service"
+import { coordinatorWorkerManager } from "../agent/coordinator-worker-manager"
 import { workflowRunManager } from "../agent/workflow/run-manager"
 import { emitAppAttention } from "../app-attention-events"
 import { AsyncKeyedLock } from "../ipc/async-keyed-lock"
@@ -577,6 +578,14 @@ async function markTerminal(
   publishManagedRunChanged(lastRunSummary(persisted))
 }
 
+function hasPendingCoordinatorWork(threadId: string): boolean {
+  return (
+    coordinatorWorkerManager.hasRunningWorkersForThread(threadId) ||
+    coordinatorWorkerManager.hasTerminalWorkerAwaitingNotificationForThread(threadId) ||
+    coordinatorWorkerManager.hasAutoRunnableNotifications(threadId)
+  )
+}
+
 async function inspectAndLaunch(
   run: ManagedRunSnapshot,
   delivery: AgentRunDelivery,
@@ -590,10 +599,14 @@ async function inspectAndLaunch(
   if (
     sourceEvent.type === "managed_agent_turn_ended" &&
     run.currentSession &&
-    (await workflowRunManager.isBusyForThreadAsync(run.currentSession.threadId, run.workspacePath))
+    ((await workflowRunManager.isBusyForThreadAsync(
+      run.currentSession.threadId,
+      run.workspacePath
+    )) ||
+      hasPendingCoordinatorWork(run.currentSession.threadId))
   ) {
     console.info(
-      "[ManagedRun] Workflow became busy during feature inspection; deferring evaluation:",
+      "[ManagedRun] Background work became busy during feature inspection; deferring evaluation:",
       {
         threadId: run.currentSession.threadId,
         runId: run.runId
@@ -1345,10 +1358,14 @@ export async function handleAutoModeAgentTurnEnd(input: AutoModeAgentTurnEndInpu
       return
     }
     if (
-      await workflowRunManager.isBusyForThreadAsync(input.threadId, record.snapshot.workspacePath)
+      (await workflowRunManager.isBusyForThreadAsync(
+        input.threadId,
+        record.snapshot.workspacePath
+      )) ||
+      hasPendingCoordinatorWork(input.threadId)
     ) {
       console.info(
-        "[ManagedRun] Workflow is running or awaiting result delivery; deferring evaluation:",
+        "[ManagedRun] Background work is running or awaiting result delivery; deferring evaluation:",
         {
           threadId: input.threadId,
           runId
@@ -1417,25 +1434,34 @@ export async function handleAutoModeAgentTurnEnd(input: AutoModeAgentTurnEndInpu
   })
 }
 
-export function handleAutoModeAgentCancelled(threadId: string): void {
+export function handleAutoModeAgentCancelled(
+  threadId: string,
+  source: "agent" | "background" = "agent"
+): void {
   if (hasPendingHumanGateForThread(threadId)) return
   const feature = readHarnessFeatureContext(threadId)
   if (!feature?.runId) return
   void featureLocks
     .withKey(featureKey(feature.projectId, feature.featureId), async () => {
+      if (source === "background" && hasActiveTopLevelAgentRun(threadId)) return
       const record = managedRunStore.getRun({
         projectId: feature.projectId,
         featureId: feature.featureId,
         runId: feature.runId!
       })
       if (!record.snapshot || record.corrupt || record.snapshot.status !== "running") return
+      if (record.snapshot.currentSession?.threadId !== threadId) return
       const sourceEvent = managedRunStore.appendEvent(record.snapshot, {
         type: "session_run_aborted",
         scope: "stage",
         nodeId: record.snapshot.decisionBaseline?.nodeId,
         threadId,
-        reasonCode: "user_aborted_agent_run",
-        summary: "用户终止当前托管会话的 Agent Run"
+        reasonCode:
+          source === "background" ? "user_aborted_background_work" : "user_aborted_agent_run",
+        summary:
+          source === "background"
+            ? "用户终止当前托管会话的后台任务"
+            : "用户终止当前托管会话的 Agent Run"
       })
       const decision = recordManagedRunDecision({
         run: record.snapshot,

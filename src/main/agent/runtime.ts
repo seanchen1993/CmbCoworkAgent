@@ -26,6 +26,7 @@ import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import { isModJson } from "../../shared/mods/v2/contracts"
 import { projectFunctionSessionMessages } from "../mods/v2/session-transcript"
 import { recordSuccessfulToolExample } from "../mcp/tool-example-store"
+import { AsyncRWLock, AsyncSemaphore } from "./async-lock"
 /* eslint-disable @typescript-eslint/no-unused-vars */
 // Runtime: agent lifecycle and middleware orchestration
 import {
@@ -632,120 +633,6 @@ function shouldFastRejectActiveWorkflow(
   return toolCall?.name === "workflow" && workflowRunManager.isActive(queueId)
 }
 
-/**
- * Writer-preferring async read-write lock.
- *
- * - `read()`: multiple holders allowed. Blocks if a writer is active or waiting.
- * - `write()`: exclusive. Blocks until all readers drain and no other writer held.
- *
- * Writer preference prevents writer starvation when reads are frequent.
- */
-class AsyncRWLock {
-  private readers = 0
-  private writerHeld = false
-  private writerQueue: Array<() => void> = []
-  private readerQueue: Array<() => void> = []
-
-  async read<T>(task: () => Promise<T>): Promise<T> {
-    await this.acquireRead()
-    try {
-      return await task()
-    } finally {
-      this.releaseRead()
-    }
-  }
-
-  async write<T>(task: () => Promise<T>): Promise<T> {
-    await this.acquireWrite()
-    try {
-      return await task()
-    } finally {
-      this.releaseWrite()
-    }
-  }
-
-  private acquireRead(): Promise<void> {
-    if (!this.writerHeld && this.writerQueue.length === 0) {
-      this.readers++
-      return Promise.resolve()
-    }
-    return new Promise<void>((resolve) => {
-      this.readerQueue.push(() => {
-        this.readers++
-        resolve()
-      })
-    })
-  }
-
-  private acquireWrite(): Promise<void> {
-    if (!this.writerHeld && this.readers === 0) {
-      this.writerHeld = true
-      return Promise.resolve()
-    }
-    return new Promise<void>((resolve) => {
-      this.writerQueue.push(() => {
-        this.writerHeld = true
-        resolve()
-      })
-    })
-  }
-
-  private releaseRead(): void {
-    this.readers--
-    if (this.readers === 0 && this.writerQueue.length > 0) {
-      const next = this.writerQueue.shift()!
-      next()
-    }
-  }
-
-  private releaseWrite(): void {
-    this.writerHeld = false
-    if (this.writerQueue.length > 0) {
-      const next = this.writerQueue.shift()!
-      next()
-    } else if (this.readerQueue.length > 0) {
-      const pending = this.readerQueue.splice(0)
-      for (const wake of pending) wake()
-    }
-  }
-}
-
-class AsyncSemaphore {
-  private active = 0
-  private queue: Array<() => void> = []
-
-  constructor(private readonly limit: number) {}
-
-  async run<T>(task: () => Promise<T>): Promise<T> {
-    await this.acquire()
-    try {
-      return await task()
-    } finally {
-      this.release()
-    }
-  }
-
-  private acquire(): Promise<void> {
-    if (this.active < this.limit) {
-      this.active++
-      return Promise.resolve()
-    }
-
-    return new Promise<void>((resolve) => {
-      this.queue.push(() => {
-        this.active++
-        resolve()
-      })
-    })
-  }
-
-  private release(): void {
-    this.active = Math.max(0, this.active - 1)
-    const next = this.queue.shift()
-    if (next) next()
-  }
-}
-
 const toolConcurrencyLocks = new Map<string, AsyncRWLock>()
 const taskConcurrencyLimiters = new Map<string, AsyncSemaphore>()
 
@@ -790,6 +677,8 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
   return createMiddleware({
     name: "gradedToolConcurrency",
     wrapToolCall: async (request, handler) => {
+      const signal = request.runtime?.signal
+      signal?.throwIfAborted()
       const toolCall = request.toolCall as
         | { id?: string; name?: string; args?: unknown }
         | undefined
@@ -808,11 +697,12 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
             const waited = Date.now() - waitStart
             if (waited > 50)
               console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
+            signal?.throwIfAborted()
             return handler(request)
-          })
+          }, signal)
 
         if (toolCall?.name === "task") {
-          return taskLimiter.run(runSharedTool)
+          return taskLimiter.run(runSharedTool, signal)
         }
 
         return runSharedTool()
@@ -820,8 +710,9 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
       return lock.write(async () => {
         const waited = Date.now() - waitStart
         if (waited > 50) console.log(`[Runtime] exclusive-lock acquired ${label} after ${waited}ms`)
+        signal?.throwIfAborted()
         return handler(request)
-      })
+      }, signal)
     }
   })
 }
@@ -6380,6 +6271,18 @@ The workspace root is: ${fileRoot}`
   }
 
   const coordinatorWorkerRunner: CoordinatorWorkerRunner = async (workerInput) => {
+    return withSubagentSessionCapture(
+      {
+        kind: "worker",
+        threadId: workerInput.parentThreadId,
+        workerThreadId: workerInput.workerThreadId
+      },
+      workerInput.description,
+      () => runCoordinatorWorkerTurn(workerInput)
+    )
+  }
+
+  const runCoordinatorWorkerTurn: CoordinatorWorkerRunner = async (workerInput) => {
     const syncWorkerCodeSkills = createSubagentSkillAttribution({
       threadId: workerInput.workerThreadId,
       parentThreadId: workerInput.parentThreadId
@@ -6600,7 +6503,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         : undefined
       const streamConfig = {
         configurable: { thread_id: workerInput.workerThreadId },
-        callbacks: [],
+        callbacks: subagentSessionCallbacks([]),
         signal: workerInput.abortSignal,
         streamMode: ["messages", "values"] as ("messages" | "values")[],
         recursionLimit: getAgentGraphRecursionLimit()

@@ -9,11 +9,7 @@ import {
   MODS_V2_API
 } from "../../../shared/mods/v2/contracts"
 import { parseModJson } from "../../../shared/mods/validation"
-import {
-  openStableFileHandle,
-  readStableFileHandleBounded
-} from "../../services/stable-file-handle"
-import { modCompiler, resolveModFile } from "../loader"
+import { modCompiler, readModSnapshot, resolveModFile } from "../loader"
 import { normalizePluginRelativePath, readPluginManifest } from "../../plugins/manifest"
 import { resolveClientModules } from "./client-loader"
 
@@ -28,15 +24,6 @@ export interface CompiledFunctionPlugin {
   clients: Record<string, string>
 }
 
-async function read(root: string, path: string, limit: number): Promise<Buffer> {
-  const file = await openStableFileHandle(root, path)
-  try {
-    return await readStableFileHandleBounded(file, limit)
-  } finally {
-    await file.handle.close()
-  }
-}
-
 /** Inspect and build an immutable snapshot; never executes the plugin or an install script. */
 export async function compileFunctionPlugin(directory: string): Promise<CompiledFunctionPlugin> {
   const root = realpathSync(directory)
@@ -45,7 +32,7 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
     const clean = normalizePluginRelativePath(path)
     if (!clean) throw Error("MODS_PATH_INVALID")
     const file = resolveModFile(root, clean)
-    const text = (await read(root, file, 32768)).toString("utf8")
+    const text = (await readModSnapshot(root, file, 32768)).toString("utf8")
     captured.set(clean, text)
     const result = parseModJson(text)
     if (!isModObject(result)) throw Error("MODS_MANIFEST_INVALID")
@@ -151,7 +138,7 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
                 const size = statSync(file).size
                 bytes += size
                 if (++files > 128 || bytes > 2 * 1024 * 1024) throw Error("MODS_SOURCE_LIMIT")
-                content = (await read(root, file, size)).toString("utf8")
+                content = (await readModSnapshot(root, file, size)).toString("utf8")
                 captured.set(key, content)
               }
               const loader =

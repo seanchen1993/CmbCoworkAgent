@@ -1,3 +1,11 @@
+import {
+  readContentFile,
+  assertOriginalContent,
+  assertOriginalUpload,
+  findProtectedMarketRoot,
+  protectMarketDirectory,
+  MARKET_CONTENT_DENIED
+} from "../services/market-content"
 import AdmZip from "adm-zip"
 import { BrowserWindow, IpcMain, shell } from "electron"
 import { randomUUID } from "node:crypto"
@@ -8,6 +16,7 @@ import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import {
   getCustomSkillsDir,
+  getPlugins,
   getEnabledPluginSkillSourceMetadata,
   getOpenworkDir,
   getSkillsDir,
@@ -122,6 +131,19 @@ function isPathUnderAllowedDirs(filePath: string): boolean {
   return isPathUnderDir(filePath, getSkillsDir()) || isPathUnderDir(filePath, getCustomSkillsDir())
 }
 
+async function assertUserOriginalContent(filePath: string): Promise<void> {
+  assertOriginalContent(filePath)
+  const real = await fs.realpath(filePath)
+  const custom = await fs.realpath(getCustomSkillsDir()).catch(() => null)
+  if (custom && isPathUnderDir(real, custom)) return
+  for (const plugin of getPlugins()) {
+    if (plugin.origin !== "local") continue
+    const root = await fs.realpath(plugin.path).catch(() => null)
+    if (root && isPathUnderDir(real, root)) return
+  }
+  throw new Error(MARKET_CONTENT_DENIED)
+}
+
 function getCloudEvolutionSkillBackupsDir(): string {
   const dir = path.join(getOpenworkDir(), "skill-backups", "cloud-evolution")
   mkdirSync(dir, { recursive: true })
@@ -146,6 +168,8 @@ async function writeSkillBundleInPlace(
   fileName: string,
   skillDir: string
 ): Promise<{ success: boolean; error?: string }> {
+  assertOriginalContent(skillDir)
+  assertOriginalUpload(buffer, fileName)
   const ext = path.extname(fileName).toLowerCase()
 
   if (ext === ".md") {
@@ -166,6 +190,9 @@ async function writeSkillBundleInPlace(
     entry,
     decodedName: decodeZipEntryName(entry)
   }))
+  for (const item of decodedEntries) {
+    if (!item.entry.isDirectory) assertOriginalUpload(item.entry.getData(), item.decodedName)
+  }
   const skillMdEntry = selectRootSkillMarkdownEntry<(typeof decodedEntries)[number]>(
     decodedEntries,
     (item) => item.entry.isDirectory
@@ -450,6 +477,7 @@ interface MarketplaceSkillMetadata {
 }
 
 interface SkillUploadOptions {
+  origin?: "market" | "local"
   allowNestedNameDuplicates?: boolean
 }
 
@@ -610,7 +638,7 @@ async function buildNestedSkillMetadata(
   for (const relativePath of nestedRoots) {
     const skillMdPath = path.join(skillDir, relativePath, "SKILL.md")
     try {
-      const content = await fs.readFile(skillMdPath, "utf-8")
+      const content = await readContentFile(skillMdPath, "utf-8")
       const frontmatter = parseYamlFrontmatter(content)
       nested.push({ relativePath, name: frontmatter.name?.trim() || undefined })
     } catch {
@@ -648,7 +676,7 @@ async function loadSkills(
   try {
     for (const skill of await discoverSkills(dirPath, options.maxDepth)) {
       try {
-        const content = await fs.readFile(skill.skillMdPath, "utf-8")
+        const content = await readContentFile(skill.skillMdPath, "utf-8")
         const frontmatter = parseYamlFrontmatter(content)
         const id = getDiscoveredSkillId(skill)
 
@@ -659,6 +687,13 @@ async function loadSkills(
           description: frontmatter.description || "",
           path: skill.skillMdPath,
           source,
+          contentOrigin: findProtectedMarketRoot(skill.skillMdPath)
+            ? "market"
+            : options.pluginId
+              ? (getPlugins().find((plugin) => plugin.id === options.pluginId)?.origin ?? "builtin")
+              : source === "user"
+                ? "local"
+                : "builtin",
           version: frontmatter.version || "v1.0.0",
           license: frontmatter.license || null,
           compatibility: frontmatter.compatibility || null,
@@ -689,6 +724,7 @@ async function listSkillFiles(skillDirPath: string): Promise<string[]> {
   async function walk(dirPath: string): Promise<void> {
     const entries = await fs.readdir(dirPath, { withFileTypes: true })
     for (const entry of entries) {
+      if (entry.name === ".cmb-original-upload.json") continue
       const fullPath = path.join(dirPath, entry.name)
       if (entry.isDirectory()) {
         await walk(fullPath)
@@ -832,6 +868,11 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       if (!matched) return { success: false, error: "未找到可信技能文件" }
 
       const filePath = path.resolve(matched.filePath)
+      try {
+        await assertUserOriginalContent(filePath)
+      } catch {
+        return { success: false, error: MARKET_CONTENT_DENIED }
+      }
       const issued = issueExternalFileReadGrant(
         path.dirname(filePath),
         event.sender.id,
@@ -964,6 +1005,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
 
       try {
         const resolvedSkillPath = path.resolve(skillPath)
+        await assertUserOriginalContent(resolvedSkillPath)
         const skillDir = path.dirname(resolvedSkillPath)
         if (!isPathUnderAllowedDirs(skillDir)) {
           return { success: false, error: "Access denied: skill path outside skills directory" }
@@ -1015,11 +1057,18 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "备份不存在" }
         }
 
-        const metadata = JSON.parse(await fs.readFile(metadataPath, "utf-8")) as SkillCloudBackupMetadata
+        const metadata = JSON.parse(
+          await readContentFile(metadataPath, "utf-8")
+        ) as SkillCloudBackupMetadata
+        assertOriginalContent(metadata.originalSkillPath)
+        assertOriginalContent(backupSkillDir)
         const backupSkillMdPath = path.join(backupSkillDir, "SKILL.md")
-        const backupFrontmatter = parseYamlFrontmatter(await fs.readFile(backupSkillMdPath, "utf-8"))
+        const backupFrontmatter = parseYamlFrontmatter(
+          await readContentFile(backupSkillMdPath, "utf-8")
+        )
         const skillName = backupFrontmatter.name?.trim() || metadata.skillName
         const installed = (await listAllSkills()).find((skill) => skill.name === skillName)
+        if (installed) await assertUserOriginalContent(installed.path)
         if (installed && installed.source !== "user") {
           return { success: false, error: "只能回滚自定义技能，当前同名技能不是用户安装技能" }
         }
@@ -1078,6 +1127,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       }
 
       try {
+        await assertUserOriginalContent(skillPath)
         const skillDir = path.dirname(path.resolve(skillPath))
         // Gate: only ENABLED plugin skill dirs are writable in place. Standalone
         // skills go through the custom-dir upload path; plugin-owned files must
@@ -1155,7 +1205,11 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
         if (!existsSync(backupSkillDir) || !existsSync(metadataPath)) {
           return { success: false, error: "备份不存在" }
         }
-        const metadata = JSON.parse(await fs.readFile(metadataPath, "utf-8")) as SkillCloudBackupMetadata
+        const metadata = JSON.parse(
+          await readContentFile(metadataPath, "utf-8")
+        ) as SkillCloudBackupMetadata
+        assertOriginalContent(metadata.originalSkillPath)
+        assertOriginalContent(backupSkillDir)
         const targetDir = metadata.inPlacePluginSkillDir
         if (!targetDir) {
           return { success: false, error: "该备份不是插件原地进化备份" }
@@ -1167,6 +1221,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "对应插件已禁用或卸载，无法回滚" }
         }
 
+        await assertUserOriginalContent(path.join(targetDir, "SKILL.md"))
         await fs.rm(targetDir, { recursive: true, force: true })
         await fs.cp(backupSkillDir, targetDir, { recursive: true })
         invalidateEnabledSkillsCache()
@@ -1207,7 +1262,11 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "备份不存在" }
         }
 
-        const metadata = JSON.parse(await fs.readFile(metadataPath, "utf-8")) as SkillCloudBackupMetadata
+        const metadata = JSON.parse(
+          await readContentFile(metadataPath, "utf-8")
+        ) as SkillCloudBackupMetadata
+        assertOriginalContent(metadata.originalSkillPath)
+        assertOriginalContent(backupSkillDir)
         const resolvedTargetDir = path.resolve(targetDir)
         await fs.mkdir(resolvedTargetDir, { recursive: true })
         const versionPart = metadata.sourceVersion ? `-${sanitizeBackupIdPart(metadata.sourceVersion)}` : ""
@@ -1229,10 +1288,11 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("skills:read", async (_event, skillPath: string) => {
     try {
       const resolvedPath = path.resolve(skillPath)
+      await assertUserOriginalContent(resolvedPath)
       if (!isPathUnderAllowedDirs(resolvedPath)) {
         return { success: false, error: "Access denied: skill path outside skills directory" }
       }
-      const raw = await fs.readFile(resolvedPath)
+      const raw = await readContentFile(resolvedPath)
       const content = decodeSkillTextFile(raw, resolvedPath)
       return { success: true, content: content.replace(/^\uFEFF/, "") }
     } catch (e) {
@@ -1243,10 +1303,11 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("skills:readBinary", async (_event, skillPath: string) => {
     try {
       const resolvedPath = path.resolve(skillPath)
+      await assertUserOriginalContent(resolvedPath)
       if (!isPathUnderAllowedDirs(resolvedPath)) {
         return { success: false, error: "Access denied: skill path outside skills directory" }
       }
-      const content = await fs.readFile(resolvedPath)
+      const content = await readContentFile(resolvedPath)
       return {
         success: true,
         content: content.toString("base64"),
@@ -1273,6 +1334,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
 
       try {
         const resolvedPath = path.resolve(skillPath)
+        await assertUserOriginalContent(resolvedPath)
         const customDir = getCustomSkillsDir()
         // 使用 realpath 防止“自定义目录内软链接指向目录外”的绕过场景。
         const [realFilePath, realCustomDir] = await Promise.all([
@@ -1310,6 +1372,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("skills:listFiles", async (_event, skillPath: string) => {
     try {
       const resolvedSkillFilePath = path.resolve(skillPath)
+      await assertUserOriginalContent(resolvedSkillFilePath)
       const skillDirPath = path.dirname(resolvedSkillFilePath)
       if (!isPathUnderAllowedDirs(skillDirPath)) {
         return { success: false, error: "Access denied: skill path outside skills directory" }
@@ -1334,6 +1397,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("skills:readTextBundle", async (_event, skillPath: string) => {
     try {
       const resolvedSkillFilePath = path.resolve(skillPath)
+      await assertUserOriginalContent(resolvedSkillFilePath)
       const skillDirPath = path.dirname(resolvedSkillFilePath)
       if (!isPathUnderAllowedDirs(skillDirPath)) {
         return { success: false, error: "Access denied: skill path outside skills directory" }
@@ -1366,7 +1430,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           continue
         }
 
-        const content = await fs.readFile(filePath, "utf-8")
+        assertOriginalContent(filePath)
+        const content = await readContentFile(filePath, "utf-8")
         if (content.includes("\u0000")) {
           skipped.push({ path: relativePath, reason: "binary_like" })
           continue
@@ -1468,6 +1533,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       }
 
       try {
+        assertOriginalUpload(Buffer.from(buffer), fileName)
         if (ext === ".md") {
           const content = Buffer.from(buffer).toString("utf-8")
           const frontmatter = parseYamlFrontmatter(content)
@@ -1490,6 +1556,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
             createdSkillDir = true
             await fs.writeFile(path.join(skillDir, "SKILL.md"), content, "utf-8")
             clearDisabledSkillsForSkillDir(skillDir)
+            if (options.origin === "market") protectMarketDirectory(skillDir)
+            else await fs.writeFile(path.join(skillDir, ".cmb-original-upload.json"), "{}")
             invalidateEnabledSkillsCache()
             notifyHooksChanged("skill-uploaded")
             return { success: true, skillName }
@@ -1506,6 +1574,9 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
         if (ext === ".zip") {
           const zip = new AdmZip(Buffer.from(buffer))
           const entries = zip.getEntries()
+          for (const entry of entries) {
+            if (!entry.isDirectory) assertOriginalUpload(entry.getData(), decodeZipEntryName(entry))
+          }
           const decodedEntries: DecodedZipEntry[] = entries.map((entry) => ({
             entry,
             decodedName: decodeZipEntryName(entry)
@@ -1585,6 +1656,8 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
               await fs.writeFile(destPath, entry.getData())
             }
             clearDisabledSkillsForSkillDir(skillDir)
+            if (options.origin === "market") protectMarketDirectory(skillDir)
+            else await fs.writeFile(path.join(skillDir, ".cmb-original-upload.json"), "{}")
             invalidateEnabledSkillsCache()
             notifyHooksChanged("skill-uploaded")
             return { success: true, skillName }
@@ -1618,6 +1691,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
 
       try {
         const resolvedSkillPath = path.resolve(skillPath)
+        await assertUserOriginalContent(resolvedSkillPath)
         if (!isPathUnderAllowedDirs(resolvedSkillPath)) {
           return { success: false, error: "Access denied: skill path outside skills directory" }
         }
@@ -1644,17 +1718,21 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           if (!relativePath || relativePath.startsWith("..")) {
             continue
           }
-          if (isMarketplaceSkillMetadataPath(relativePath)) {
+          if (
+            isMarketplaceSkillMetadataPath(relativePath) ||
+            relativePath === ".cmb-original-upload.json"
+          ) {
             continue
           }
           if (!includeNestedSkills && isUnderAnyRelativeDir(relativePath, nestedSkillRoots)) {
             continue
           }
-          const fileBuffer = await fs.readFile(filePath)
+          assertOriginalContent(filePath)
+          const fileBuffer = await readContentFile(filePath)
           zip.addFile(relativePath, fileBuffer)
         }
 
-        const skillContent = await fs.readFile(resolvedSkillPath, "utf-8")
+        const skillContent = await readContentFile(resolvedSkillPath, "utf-8")
         const frontmatter = parseYamlFrontmatter(skillContent)
         const skillName = frontmatter.name?.trim() || path.basename(skillDir)
         const skillRelativePath = getExportSkillRelativePath(skillDir)

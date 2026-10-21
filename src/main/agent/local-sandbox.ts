@@ -3,6 +3,14 @@ import { authorizeCurrentModInput } from "../mods/manager"
 import { getModCallContext } from "../mods/context"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import { currentFunctionExecution } from "../mods/v2/execution-context"
+import {
+  decodeMarketContent,
+  findProtectedMarketRoot,
+  prepareMarketCommand,
+  resolveMarketRuntimePath,
+  MARKET_CONTENT_DENIED
+} from "../services/market-content"
+import { getCustomSkillsDir, getPlugins } from "../storage"
 /**
  * LocalSandbox: Execute shell commands locally on the host machine.
  *
@@ -37,6 +45,7 @@ import {
   type GrepMatch,
   type FileInfo,
   type FileUploadResponse,
+  type FileDownloadResponse,
   type FileOperationError
 } from "deepagents"
 import fg from "fast-glob"
@@ -2015,7 +2024,7 @@ export class LocalSandbox
     if (systemId) baseEnv.SYSTEM_ID = systemId
     const agentId = options.agentId?.trim()
     const pluginRoot = options.pluginRoot?.trim()
-    if (pluginRoot) baseEnv.PLUGIN_ROOT = pluginRoot
+    if (pluginRoot) baseEnv.PLUGIN_ROOT = resolveMarketRuntimePath(pluginRoot)
     const pluginId = options.pluginId?.trim()
     if (pluginId) baseEnv.PLUGIN_ID = pluginId
     const pluginName = options.pluginName?.trim()
@@ -3367,7 +3376,7 @@ export class LocalSandbox
 
     const t0 = Date.now()
     let rgResult: Record<string, Array<[number, string]>> | null | undefined
-    if (typeof ripgrepSearch === "function") {
+    if (typeof ripgrepSearch === "function" && !findProtectedMarketRoot(baseFull)) {
       try {
         rgResult = await ripgrepSearch.call(this, effectivePattern, baseFull, effectiveGlob ?? null)
       } catch (error) {
@@ -4156,10 +4165,13 @@ export class LocalSandbox
       throw new Error(`Cannot read binary file type: ${ext}`)
     }
 
-    if (stat.size < LocalSandbox.READ_FAST_PATH_MAX_SIZE) {
+    const protectedContent = Boolean(findProtectedMarketRoot(resolvedPath))
+    if (protectedContent || stat.size < LocalSandbox.READ_FAST_PATH_MAX_SIZE) {
       const { buffer, resolvedPath: fastPathResolved } = await this.readFileBuffer(
         filePath,
-        LocalSandbox.READ_FAST_PATH_MAX_SIZE
+        protectedContent
+          ? Math.ceil((this._maxFileSizeBytes * 4) / 3) + 64
+          : LocalSandbox.READ_FAST_PATH_MAX_SIZE
       )
       const encoding = this.detectEncoding(buffer, path.extname(fastPathResolved).toLowerCase())
       const content = iconv.decode(buffer, encoding)
@@ -4486,7 +4498,7 @@ export class LocalSandbox
       }
     }
 
-    return { buffer, resolvedPath }
+    return { buffer: decodeMarketContent(buffer), resolvedPath }
   }
 
   private static async readFileHandleBuffer(
@@ -4661,6 +4673,7 @@ export class LocalSandbox
    * case-insensitive path comparison.
    */
   private async isWriteBlocked(filePath: string): Promise<boolean> {
+    if (findProtectedMarketRoot(this._resolvePath(filePath))) return true
     if (this.windowsSandbox !== "readonly") return false
     if (!(await LocalSandbox.getElevationState())) return true
     if (await this.resolveEditableWorkflowScriptPath(filePath)) return false
@@ -4754,6 +4767,7 @@ export class LocalSandbox
 
   /** Build a readonly-sandbox block error message for the given file and action verb. */
   private async readonlyBlockedError(filePath: string, action: string): Promise<string> {
+    if (findProtectedMarketRoot(this._resolvePath(filePath))) return MARKET_CONTENT_DENIED
     return (await LocalSandbox.getElevationState())
       ? `只读沙箱模式下仅允许${action}工作目录内的文件。'${filePath}' 不在工作目录 '${this.workingDir}' 内。`
       : `只读沙箱模式下禁止${action}文件 '${filePath}'。如需${action}请以管理员身份运行或切换沙箱模式。`
@@ -4885,6 +4899,8 @@ export class LocalSandbox
    * Override write to enforce readonly sandbox restrictions.
    */
   async write(filePath: string, content: string): Promise<WriteResult> {
+    if (findProtectedMarketRoot(this._resolvePath(filePath)))
+      return { error: MARKET_CONTENT_DENIED }
     // DeepAgents' automatic result eviction writes to this reserved logical
     // path after the public tool call completes. A model-issued write_file is
     // marked by the runtime and continues through the regular approval flow.
@@ -5025,8 +5041,21 @@ export class LocalSandbox
   }
 
   /**
-   * Override uploadFiles to enforce readonly sandbox restrictions on each file.
+   * Decode SDK skill discovery downloads without exposing a renderer file-read endpoint.
    */
+  async downloadFiles(paths: string[]): Promise<FileDownloadResponse[]> {
+    const files = await super.downloadFiles(paths)
+    return files.map((file) => {
+      if (!file.content || file.error) return file
+      try {
+        return { ...file, content: decodeMarketContent(Buffer.from(file.content)) }
+      } catch {
+        return { path: file.path, content: null, error: "invalid_path" }
+      }
+    })
+  }
+
+  /** Enforce readonly restrictions on every batch-upload target. */
   async uploadFiles(files: [string, Uint8Array][]): Promise<FileUploadResponse[]> {
     const denied: FileOperationError = "permission_denied"
     if (!this.worktreeIsolation) {
@@ -7613,7 +7642,7 @@ export class LocalSandbox
     if (!this.pluginRoot) return false
 
     const hooksRoot = path.win32
-      .normalize(path.win32.join(this.pluginRoot, "hooks"))
+      .normalize(path.win32.join(resolveMarketRuntimePath(this.pluginRoot), "hooks"))
       .replace(/\\+$/, "")
       .replace(/\\+/g, "\\")
       .toLowerCase()
@@ -7632,7 +7661,22 @@ export class LocalSandbox
     getModCallContext()?.assertLive?.()
     const effectiveSandboxMode = (sandboxModeOverride ?? this.windowsSandbox) as WindowsSandboxMode
     const effectiveTimeout = timeoutMs ?? this.timeout
-    const effectiveCwd = this.resolveExecutionCwd(cwd)
+    let effectiveCwd = this.resolveExecutionCwd(cwd)
+    const marketRoots = [getCustomSkillsDir(), ...getPlugins().map((plugin) => plugin.path)]
+    const customEntries = await fs
+      .readdir(getCustomSkillsDir(), { withFileTypes: true })
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return []
+        throw error
+      })
+    marketRoots.push(
+      ...customEntries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => path.join(getCustomSkillsDir(), entry.name))
+    )
+    const prepared = prepareMarketCommand(command, effectiveCwd, marketRoots)
+    command = prepared.command
+    effectiveCwd = prepared.cwd
     console.log(
       `[LocalSandbox] executeRaw: command="${command}" cwd="${effectiveCwd}" effectiveMode=${effectiveSandboxMode} override=${sandboxModeOverride} timeout=${effectiveTimeout}ms overrideAbort=${!!overrideAbortSignal}`
     )

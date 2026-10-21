@@ -2417,7 +2417,7 @@ const api = {
     upload: (
       buffer: ArrayBuffer,
       fileName: string,
-      options?: { allowNestedNameDuplicates?: boolean }
+      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local" }
     ): Promise<{
       success: boolean
       skillName?: string

@@ -519,6 +519,69 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(requestApproval).not.toHaveBeenCalled()
   })
 
+  it.each([false, true])("preserves Git safety decisions when YOLO is %s", async (yolo) => {
+    const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
+      output: "rewrite completed",
+      exitCode: 0,
+      truncated: false
+    })
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "reject",
+      tool_call_id: "test"
+    } satisfies ApprovalDecision)
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      () => yolo
+    )
+    const cwd = process.cwd()
+    const rewrite = "node <<'EOF'\nconst seenKeys = new Set()\nseenKeys.add('input')\nEOF"
+
+    const ordinary = await orchestrator.execute(rewrite, cwd, "none", "posix")
+    expect(ordinary.exitCode).toBe(yolo ? 0 : 1)
+    expect(rawExecute).toHaveBeenCalledTimes(yolo ? 1 : 0)
+    expect(requestApproval).toHaveBeenCalledTimes(yolo ? 0 : 1)
+    rawExecute.mockClear()
+    requestApproval.mockClear()
+    for (const command of [
+      "git add -f .env",
+      "$BIN add = -f .env",
+      "$BIN add.foo -f .env",
+      "$BIN foo.add -f .env",
+      "$BIN .add -f .env",
+      "$BIN seenKeys.add -f .env",
+      "$BIN const add -f .env",
+      "$BIN var commit",
+      "/cmd/g?t.exe foo.add -f .env",
+      "sudo /cmd/g?t.exe foo.add -f .env",
+      "( /cmd/g?t.exe foo.add -f .env )"
+    ]) {
+      const blocked = await orchestrator.execute(command, cwd, "none", "posix")
+      expect(blocked.exitCode).toBe(1)
+      expect(blocked.output).toContain("Command forbidden:")
+    }
+    for (const { command, shellSyntax } of [
+      { command: "%BIN% commit.foo", shellSyntax: "cmd" as const },
+      { command: "%BIN% const add -f .env", shellSyntax: "cmd" as const },
+      {
+        command: "Write-Output $(& $exe const add -f .env)",
+        shellSyntax: "powershell" as const
+      },
+      { command: "& $exe foo.add -f .env", shellSyntax: "powershell" as const }
+    ]) {
+      const blocked = await orchestrator.execute(command, cwd, "none", shellSyntax)
+      expect(blocked.exitCode).toBe(1)
+      expect(blocked.output).toContain("Command forbidden:")
+    }
+    const denied = await orchestrator.execute("$BIN add = -f .env", cwd, "none", "posix")
+    expect(denied.exitCode).toBe(1)
+    expect(denied.output).toContain("cannot verify Git operations safely")
+    expect(denied.output).not.toContain("forced git add")
+    expect(rawExecute).not.toHaveBeenCalled()
+    expect(requestApproval).not.toHaveBeenCalled()
+  })
+
   it("uses the actual POSIX shell syntax before the YOLO raw-execute shortcut", async () => {
     const rawExecute = vi.fn<RawExecuteFn>()
     const requestApproval = vi.fn<RequestApprovalFn>()

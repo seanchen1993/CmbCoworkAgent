@@ -9946,9 +9946,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     isWorkflowNotificationInvoke &&
                     workflowNotificationTerminalEligibleForManaged &&
                     isActiveManagedRunSession(threadId)
+                  const shouldReportCoordinatorNotificationTerminal =
+                    isTrustedCoordinatorNotificationInvoke &&
+                    isCoordinatorNotificationTurn &&
+                    Boolean(autoModeTerminal) &&
+                    isActiveManagedRunSession(threadId)
                   if (
                     abortController.signal.aborted ||
-                    isTrustedCoordinatorNotificationInvoke ||
+                    (isTrustedCoordinatorNotificationInvoke &&
+                      !shouldReportCoordinatorNotificationTerminal) ||
                     (isWorkflowNotificationInvoke && !shouldReportWorkflowNotificationTerminal) ||
                     (managedExecution !== true && !isActiveManagedRunSession(threadId))
                   ) {
@@ -12696,6 +12702,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         const cancelled = Boolean(controller && !cancelWorkers)
         if (cancelled) handleAutoModeAgentCancelled(threadId)
+        else if (workers.length > 0) handleAutoModeAgentCancelled(threadId, "background")
         return cancelled
       })
     }

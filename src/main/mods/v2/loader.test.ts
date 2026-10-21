@@ -4,6 +4,7 @@ import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { compileFunctionPlugin } from "./loader"
 import { checkFunctionPlugin } from "../devtools/check"
+import { protectMarketDirectory } from "../../services/market-content"
 
 const roots: string[] = []
 async function plugin(source: string, modules = ["./register.ts"]): Promise<string> {
@@ -24,6 +25,23 @@ afterEach(async () => {
 })
 
 describe("function plugin snapshot loader", () => {
+  it("compiles protected hooks and Client modules with the same approval digest", async () => {
+    const root = await plugin(`export function register(on){on("ui.render",($,e)=>{
+      const {Client: Panel}=$.ui.resolve(e);return Panel({key:"board",module:"./board.tsx"})
+    })}`)
+    await writeFile(
+      join(root, "hooks/hooks.json"),
+      JSON.stringify({ modules: ["./register.ts"] }) + " ".repeat(26_000)
+    )
+    await writeFile(
+      join(root, "hooks/board.tsx"),
+      `export default function Board(_,s){const {Text}=s.elements;return <Text>Protected</Text>}`
+    )
+    const original = await compileFunctionPlugin(root)
+    protectMarketDirectory(root)
+    expect(await compileFunctionPlugin(root)).toEqual(original)
+  })
+
   it("captures Client modules in the grant digest and rejects dynamic or escaping paths", async () => {
     const source = `export function register(on){on("ui.render",($,e)=>{
       const {Client: Panel}=$.ui.resolve(e);return Panel({key:"board",module:"./board.tsx"})

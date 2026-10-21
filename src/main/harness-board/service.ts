@@ -1,3 +1,4 @@
+import { prepareMarketCommand } from "../services/market-content"
 import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
 import {
   assertHarnessConfigAvailable,
@@ -1247,8 +1248,11 @@ async function runHarnessInvocationAsync(
     const { cwd, invocation } = configured
     if (logOptions) logHarnessInvocationStart(configured, logOptions)
     const stdoutBuffer = await new Promise<Buffer>((resolvePromise, rejectPromise) => {
-      const child = spawn(invocation.executable, invocation.args, {
-        cwd,
+      const roots = [cwd]
+      const executable = prepareMarketCommand(invocation.executable, cwd, roots)
+      const args = invocation.args.map((arg) => prepareMarketCommand(arg, cwd, roots).command)
+      const child = spawn(executable.command, args, {
+        cwd: executable.cwd,
         env: {
           ...process.env,
           PYTHONIOENCODING: "utf-8",
@@ -2568,6 +2572,28 @@ function resolveSystemConstraintUpdateConfig(
     })
     return undefined
   }
+}
+
+function resolveArtifactAccumulationConfig(
+  project: HarnessProjectMetadata,
+  context: HarnessProjectConfigContext,
+  feature: string,
+  sessionWorkspacePath?: string
+): HarnessRunDetailViewModel["artifactAccumulation"] {
+  if (!context.plugin || context.configSnapshot?.error) return undefined
+  const config = context.configSnapshot?.value?.artifact_sync
+  if (!isObject(config) || normalizeText(config.sync_type).trim() !== "invoke_session") {
+    return undefined
+  }
+  const nextAction = resolveHarnessNextActionTemplate(
+    config.nextAction,
+    project,
+    "run",
+    context.plugin.path,
+    { feature, sessionWorkspacePath, leanToken: context.leanToken },
+    { replaceUserMessagePlaceholders: true }
+  )
+  return nextAction ? { syncType: "invoke_session", nextAction } : undefined
 }
 
 function makeProjectDetailViewModel(
@@ -3992,7 +4018,14 @@ async function loadHarnessRunDetail(
   const selectedDeployUnits = workerContext.selectedDeployUnits ?? []
   const featureBinding = await findFeatureDeployUnitBinding(project.projectId, slug)
   const managedRun = managedRunStore.getLatestRun(projectId, slug)
+  const artifactAccumulation = resolveArtifactAccumulationConfig(
+    project,
+    context,
+    slug,
+    resolveFeatureWorkspace(featureBinding?.sessionWorkspace, selectedDeployUnits)
+  )
   const detail: HarnessRunDetailViewModel = {
+    ...(artifactAccumulation ? { artifactAccumulation } : {}),
     project: {
       projectId: project.projectId,
       name: project.name,

@@ -516,6 +516,7 @@ export interface GrepMatch {
 }
 
 export interface SkillMetadata {
+  contentOrigin?: "local" | "market" | "builtin"
   id?: string
   name: string
   description: string

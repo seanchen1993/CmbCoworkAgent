@@ -1,8 +1,9 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { compileMod, resolveModFile } from "./loader"
+import { compileMod, readModApiVersion, resolveModFile } from "./loader"
+import { encodeMarketContent, protectMarketDirectory } from "../services/market-content"
 
 const folders: string[] = []
 afterEach(() => {
@@ -35,6 +36,36 @@ function fixture() {
   return root
 }
 describe("Mod source isolation", () => {
+  it("loads protected manifests and transitive sources without changing the approval digest", async () => {
+    const root = fixture()
+    const manifest = join(root, "manifest.json")
+    writeFileSync(manifest, readFileSync(manifest, "utf8") + " ".repeat(26_000))
+    writeFileSync(
+      join(root, "index.ts"),
+      'import { value } from "./value"; export default { register() { return value } }'
+    )
+    writeFileSync(join(root, "value.ts"), "export const value = 1")
+    const original = await compileMod("a", root, "manifest.json")
+    protectMarketDirectory(root)
+    expect(await readModApiVersion(root, "manifest.json")).toBe("cmb.mods/v1")
+    expect(await compileMod("a", root, "manifest.json")).toEqual(original)
+    writeFileSync(
+      join(root, "value.ts"),
+      encodeMarketContent(Buffer.from("export const value = 2"))
+    )
+    expect((await compileMod("a", root, "manifest.json")).digest).not.toBe(original.digest)
+  })
+
+  it("keeps the decoded manifest size limit for protected content", async () => {
+    const root = fixture()
+    const manifest = join(root, "manifest.json")
+    const content = readFileSync(manifest, "utf8")
+    writeFileSync(manifest, content + " ".repeat(32_769 - Buffer.byteLength(content)))
+    protectMarketDirectory(root)
+    await expect(readModApiVersion(root, "manifest.json")).rejects.toThrow("MODS_SOURCE_LIMIT")
+    await expect(compileMod("a", root, "manifest.json")).rejects.toThrow("MODS_SOURCE_LIMIT")
+  })
+
   it("captures code and changes digest with transitive source or plugin ownership", async () => {
     const root = fixture()
     writeFileSync(

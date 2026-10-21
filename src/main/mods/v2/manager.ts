@@ -6,7 +6,8 @@ import type {
 } from "../../../shared/mods/v2/turn"
 import { FunctionTurnNotices } from "./turn-notices"
 import type { FunctionTurnNotice } from "../../../shared/mods/v2/turn"
-import { existsSync, readFileSync, statSync } from "node:fs"
+import { existsSync, statSync } from "node:fs"
+import { getMarketContentStoredLimit, readContentFileSync } from "../../services/market-content"
 import { join } from "node:path"
 import { randomInt } from "node:crypto"
 import { ProjectFunctionFiles, type FunctionFileScope } from "./file-access"
@@ -43,6 +44,16 @@ import type { ModOrigin } from "../../../shared/mods/v2/contracts"
 interface Snapshot {
   compiled: CompiledFunctionPlugin
   grant: ModGrant
+}
+
+function readFunctionConfig(file: string): Record<string, unknown> | null {
+  if (statSync(file).size > getMarketContentStoredLimit(file, 32768)) return null
+  const content = readContentFileSync(file)
+  if (content.byteLength > 32768) return null
+  const parsed: unknown = JSON.parse(content.toString("utf8"))
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : null
 }
 interface FunctionConnection {
   load(code: string, options: CompiledFunctionPlugin["options"]): Promise<FunctionGuest>
@@ -167,11 +178,7 @@ export class FunctionModsManager {
               plugin.path,
               normalizePluginRelativePath(nativePath) ?? nativePath
             )
-            if (
-              statSync(file).size <= 32768 &&
-              JSON.parse(readFileSync(file, "utf8")).apiVersion === "cmb.mods/v2"
-            )
-              return true
+            if (readFunctionConfig(file)?.apiVersion === "cmb.mods/v2") return true
           } catch {
             return true
           }
@@ -183,11 +190,8 @@ export class FunctionModsManager {
             plugin.path,
             normalizePluginRelativePath(hooksPath) ?? hooksPath
           )
-          return (
-            existsSync(hooks) &&
-            statSync(hooks).size <= 32768 &&
-            Object.hasOwn(JSON.parse(readFileSync(hooks, "utf8")), "modules")
-          )
+          const config = readFunctionConfig(hooks)
+          return config !== null && Object.hasOwn(config, "modules")
         } catch {
           return false
         }

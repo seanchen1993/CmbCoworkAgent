@@ -1,4 +1,4 @@
-import { readFileSync } from "fs"
+import { readContentFileSync } from "../../services/market-content"
 import { posix as pathPosix } from "path"
 import {
   getEnabledPluginSkillSourceMetadata,
@@ -59,7 +59,7 @@ function getSkillPathAliases(skillPath: string): string[] {
 
 function readSkillFrontmatter(skillDocPath: string): Record<string, string> | null {
   try {
-    return parseYamlFrontmatter(readFileSync(skillDocPath, "utf8"))
+    return parseYamlFrontmatter(readContentFileSync(skillDocPath, "utf8"))
   } catch {
     return null
   }

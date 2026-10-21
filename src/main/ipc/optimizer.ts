@@ -1,3 +1,4 @@
+import { assertOriginalContent } from "../services/market-content"
 /**
  * IPC handlers for the Skill Optimizer (offline evolution loop).
  *
@@ -175,6 +176,7 @@ function applyCandidate(
 ): { success: boolean; error?: string } {
   try {
     const skillDir = join(getCustomSkillsDir(), skillId)
+    assertOriginalContent(skillDir)
     if (action === "create") {
       const existingSkill = findExistingSkillById(skillId)
       if (existingSkill) {

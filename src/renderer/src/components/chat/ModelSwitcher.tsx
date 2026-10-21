@@ -1,4 +1,4 @@
-import { useState, useEffect, memo, useMemo, useSyncExternalStore } from "react"
+import { useState, useEffect, memo, useMemo, useRef, useSyncExternalStore } from "react"
 import { useShallow } from "zustand/react/shallow"
 import { ChevronDown, Check, Key, Zap, Info } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -96,37 +96,59 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
         : { modelId: null },
     [routingMode, routingModeLoaded, threadSummary]
   )
-  const effectiveCurrentModel = currentModel || hydratedModel.modelId || ""
+  const restoredSelectionRef = useRef<{
+    threadId: string
+    routingMode: ModelRoutingMode
+    modelId: string | null
+  } | null>(null)
 
   useEffect(() => {
-    if (hydratedModel.modelId && hydratedModel.modelId !== currentModel) {
-      // Hydration only restores the model used by the current view. Persisting here
-      // would turn a read-only session open into an updated_at change.
-      restoreCurrentModel?.(hydratedModel.modelId)
-    }
-  }, [currentModel, hydratedModel.modelId, restoreCurrentModel])
+    if (!routingModeLoaded || !restoreCurrentModel || !setCurrentModel) return
 
-  useEffect(() => {
-    if (!routingModeLoaded || models.length === 0) return
+    const previous = restoredSelectionRef.current
+    const selectionChanged =
+      previous?.threadId !== threadId ||
+      previous.routingMode !== routingMode ||
+      previous.modelId !== hydratedModel.modelId
+    restoredSelectionRef.current = { threadId, routingMode, modelId: hydratedModel.modelId }
 
-    const hasValidSelection =
-      effectiveCurrentModel && models.some((m) => m.id === effectiveCurrentModel)
-    if (!hasValidSelection && effectiveCurrentModel.startsWith("custom:")) {
-      const legacyModelName = effectiveCurrentModel.slice("custom:".length)
-      const migrated = models.find((m) => m.model === legacyModelName)
-      if (migrated) {
-        setCurrentModel?.(migrated.id)
-        return
-      }
+    // Restore each persisted selection once. A fallback or manual choice updates
+    // local state before its metadata IPC completes; restoring the stale ID on
+    // every local change would fight that choice and can trigger React #185.
+    const candidate = selectionChanged
+      ? hydratedModel.modelId || currentModel
+      : currentModel || hydratedModel.modelId || ""
+    let resolvedModel = candidate
+
+    const hasValidSelection = candidate && models.some((model) => model.id === candidate)
+    if (!hasValidSelection && models.length > 0) {
+      const migrated = candidate.startsWith("custom:")
+        ? models.find((model) => model.model === candidate.slice("custom:".length))
+        : undefined
+      resolvedModel =
+        migrated?.id ??
+        models.find((model) => model.id === defaultModelId && model.available)?.id ??
+        models.find((model) => model.available)?.id ??
+        candidate
     }
 
-    if (!hasValidSelection) {
-      const preferred =
-        models.find((model) => model.id === defaultModelId && model.available) ??
-        models.find((model) => model.available)
-      if (preferred) setCurrentModel?.(preferred.id)
+    if (resolvedModel !== candidate) {
+      setCurrentModel(resolvedModel)
+    } else if (resolvedModel && resolvedModel !== currentModel) {
+      // Restoring an existing selection must not refresh the thread's updated_at.
+      restoreCurrentModel(resolvedModel)
     }
-  }, [defaultModelId, effectiveCurrentModel, models, routingModeLoaded, setCurrentModel])
+  }, [
+    currentModel,
+    defaultModelId,
+    hydratedModel.modelId,
+    models,
+    restoreCurrentModel,
+    routingMode,
+    routingModeLoaded,
+    setCurrentModel,
+    threadId
+  ])
 
   function handleModelSelect(modelId: string): void {
     setCurrentModel?.(modelId)

@@ -8,6 +8,7 @@ import { FunctionModsManager } from "./manager"
 import type { ModJson } from "../../../shared/mods/types"
 import { randomUUID } from "node:crypto"
 import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
+import { protectMarketDirectory } from "../../services/market-content"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -86,6 +87,24 @@ async function fixture(
     }
   }
 }
+
+it("discovers and runs protected market plugins while preserving their approval digest", async () => {
+  const f = await fixture()
+  const original = await f.manager.status(f.root)
+  protectMarketDirectory(f.plugin)
+  expect(await f.manager.status(f.root)).toEqual(original)
+  await f.approve()
+  const [command] = await f.manager.commands(f.root, "thread")
+  expect(command.command).toBe("claw-info")
+  const result = await f.manager.runCommand(
+    f.root,
+    "thread",
+    command,
+    "market probe",
+    new AbortController().signal
+  )
+  expect(result.text).toContain("market probe")
+})
 
 it("registers tools before the first model prompt and drops them on revocation and disable", async () => {
   const f = await fixture()

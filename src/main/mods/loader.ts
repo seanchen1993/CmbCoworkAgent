@@ -6,6 +6,7 @@ import { parseModManifest } from "../../shared/mods/validation"
 import type { ModManifest } from "../../shared/mods/types"
 import { ModError } from "./errors"
 import { openStableFileHandle, readStableFileHandleBounded } from "../services/stable-file-handle"
+import { decodeMarketContent, getMarketContentStoredLimit } from "../services/market-content"
 
 let compiler: typeof import("esbuild") | undefined
 export function modCompiler(): typeof import("esbuild") {
@@ -19,10 +20,14 @@ export function modCompiler(): typeof import("esbuild") {
   return compiler
 }
 
-async function snapshot(root: string, file: string, limit: number): Promise<Buffer> {
+export async function readModSnapshot(root: string, file: string, limit: number): Promise<Buffer> {
   const opened = await openStableFileHandle(root, file)
   try {
-    return await readStableFileHandleBounded(opened, limit)
+    const content = decodeMarketContent(
+      await readStableFileHandleBounded(opened, getMarketContentStoredLimit(file, limit))
+    )
+    if (content.byteLength > limit) throw new ModError("MODS_SOURCE_LIMIT")
+    return content
   } finally {
     await opened.handle.close()
   }
@@ -38,7 +43,7 @@ export interface CompiledMod {
 /** Reads only bounded data; shared by version routing and both loaders. */
 export async function readModApiVersion(root: string, path: string): Promise<unknown> {
   const file = resolveModFile(root, path)
-  const input = JSON.parse((await snapshot(root, file, 32768)).toString("utf8"))
+  const input = JSON.parse((await readModSnapshot(root, file, 32768)).toString("utf8"))
   return input && typeof input === "object" ? input.apiVersion : undefined
 }
 
@@ -71,9 +76,11 @@ export async function compileMod(
   const { build, version: compilerVersion } = modCompiler()
   const root = realpathSync(pluginRoot)
   const manifestFile = resolveModFile(root, manifestPath)
-  if (statSync(manifestFile).size > 32_768) throw new ModError("MODS_MANIFEST_SIZE")
+  if (statSync(manifestFile).size > getMarketContentStoredLimit(manifestFile, 32_768)) {
+    throw new ModError("MODS_MANIFEST_SIZE")
+  }
   const manifest = parseModManifest(
-    JSON.parse((await snapshot(root, manifestFile, 32_768)).toString("utf8"))
+    JSON.parse((await readModSnapshot(root, manifestFile, 32_768)).toString("utf8"))
   )
   const entryRel = relative(root, resolve(dirname(manifestFile), manifest.entry))
   const entry = resolveModFile(root, entryRel)
@@ -124,7 +131,7 @@ export async function compileMod(
             if (++sourceCount > 64 || totalBytes > 2 * 1024 * 1024) {
               throw new ModError("MODS_SOURCE_LIMIT")
             }
-            const bytes = await snapshot(root, file, reservedBytes)
+            const bytes = await readModSnapshot(root, file, reservedBytes)
             // Compilation uses these captured bytes. No later reread of mutable source is executed.
             sources.set(relative(root, file).replace(/\\/g, "/"), bytes.toString("utf8"))
             return { contents: bytes, loader: extension.endsWith("ts") ? "ts" : "js" }
