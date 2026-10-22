@@ -4,6 +4,7 @@ import {
   assertOriginalUpload,
   assertOriginalDirectory,
   protectMarketDirectory,
+  upgradeMarkedMarketDirectories,
   MARKET_CONTENT_DENIED
 } from "../services/market-content"
 import AdmZip from "adm-zip"
@@ -679,6 +680,9 @@ export async function exportPluginForMarketZip(
 }
 
 export function registerPluginHandlers(ipcMain: IpcMain): void {
+  if (upgradeMarkedMarketDirectories(getPlugins().map((plugin) => plugin.path))) {
+    invalidateEnabledSkillsCache()
+  }
   console.log("[Plugins] Registering plugin handlers...")
   const pluginMutex = createAsyncMutex()
 
