@@ -19,8 +19,70 @@ import {
 import { getSelectedRequirementSystem, useRequirementStore } from "./requirement-store"
 import type { DesignSystemInfo } from "../design/types"
 import { useAppStore } from "@/lib/store"
+import {
+  leanstarRequirementsApi,
+  type NamespaceTreeNode,
+  type ProductRequirement
+} from "@/api/leanstar-requirements"
 
 type EntryScreen = "history" | "system" | "conversation"
+
+type CurrentRequirementUser = { id: string; name: string }
+
+function collectRequirementSpaceLeaves(nodes: NamespaceTreeNode[]): NamespaceTreeNode[] {
+  return nodes.flatMap((node) =>
+    node.children?.length
+      ? collectRequirementSpaceLeaves(node.children)
+      : node.accessible === false
+        ? []
+        : [node]
+  )
+}
+
+function fromRequirementSpaceItem(
+  item: ProductRequirement,
+  namespace: NamespaceTreeNode
+): RequirementRecord {
+  const owner = typeof item.owner === "string" ? { id: item.owner, name: item.owner } : item.owner
+  return {
+    id: `space:${namespace.devopsOrgId}:${item.code}`,
+    threadIds: [],
+    systemId: `space:${namespace.devopsOrgId}`,
+    title: item.title,
+    requirementPath: "",
+    workspaceMissing: false,
+    coreFilesMissing: false,
+    coreFilesMissingReason: null,
+    updatedAt: "需求空间3.0",
+    updatedAtTimestamp: 0,
+    system: namespace.pathName.split("/").filter(Boolean).at(-1) || namespace.pathName,
+    status: item.status || "已发布",
+    fileName: "",
+    link: "",
+    sourceType: "link",
+    sourceName: item.code,
+    initialDescription: `需求编号 ${item.code}${item.priority ? ` · 优先级 ${item.priority}` : ""}`,
+    needDesign: "",
+    prdManifest: {
+      prd: {
+        name: item.title,
+        status: "published",
+        description: "",
+        file: "",
+        currentStep: 5,
+        needDesign: ""
+      },
+      functions: []
+    },
+    prd: "是",
+    origin: "space",
+    owner:
+      owner?.name || owner?.id
+        ? { id: owner.id || owner.name || item.code, name: owner.name || owner.id || "需求负责人" }
+        : undefined,
+    readOnly: true
+  }
+}
 
 export function RequirementEntryView(): React.JSX.Element {
   const [screen, setScreen] = useState<EntryScreen>("history")
@@ -32,6 +94,7 @@ export function RequirementEntryView(): React.JSX.Element {
   const [autoGeneratePrd, setAutoGeneratePrd] = useState(false)
   const [requirements, setRequirements] = useState<RequirementRecord[]>([])
   const [requirementsLoaded, setRequirementsLoaded] = useState(false)
+  const [currentUser, setCurrentUser] = useState<CurrentRequirementUser | null>(null)
   const [systemDialogOpen, setSystemDialogOpen] = useState(false)
   const [requirementDialogOpen, setRequirementDialogOpen] = useState(false)
   const selectedSystemId = useRequirementStore((state) => state.selectedSystemId)
@@ -61,9 +124,36 @@ export function RequirementEntryView(): React.JSX.Element {
         return [] as DesignSystemInfo[]
       })
 
-    const [persistedRequirements, systems] = await Promise.all([
+    const requirementSpacePromise = leanstarRequirementsApi
+      .getNamespaceTree()
+      .then(async ({ namespaceTreeList = [] }) => {
+        const leaves = collectRequirementSpaceLeaves(namespaceTreeList)
+        const pages = await Promise.allSettled(
+          leaves.map(async (leaf) => ({
+            leaf,
+            page: await leanstarRequirementsApi.listProductRequirements(
+              leaf.devopsOrgId,
+              leaf.namespaceType ?? ""
+            )
+          }))
+        )
+        return pages.flatMap((result) =>
+          result.status === "fulfilled"
+            ? (result.value.page.content ?? []).map((item) =>
+                fromRequirementSpaceItem(item, result.value.leaf)
+              )
+            : []
+        )
+      })
+      .catch((error: unknown) => {
+        console.warn("加载需求空间3.0列表失败", error)
+        return [] as RequirementRecord[]
+      })
+
+    const [persistedRequirements, systems, requirementSpaceRequirements] = await Promise.all([
       window.api.requirements.list(),
-      systemsPromise
+      systemsPromise,
+      requirementSpacePromise
     ])
     const systemNames = new Map(systems.map((system) => [system.id, system.name]))
     // 逐项容错：某条数据异常时跳过，避免整列加载失败
@@ -77,8 +167,18 @@ export function RequirementEntryView(): React.JSX.Element {
           }
         })
       : []
-    return sortRequirementsByUpdatedAt(validRequirements)
+    return [...sortRequirementsByUpdatedAt(validRequirements), ...requirementSpaceRequirements]
   }, [setSystemList])
+
+  useEffect(() => {
+    void window.api.models.getUserInfo().then((userInfo) => {
+      if (!userInfo) return
+      setCurrentUser({
+        id: userInfo.sapId?.trim() || userInfo.ystId?.trim() || "current-user",
+        name: userInfo.userName?.trim() || userInfo.sapId?.trim() || "当前用户"
+      })
+    })
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -86,8 +186,10 @@ export function RequirementEntryView(): React.JSX.Element {
       .then((nextRequirements) => {
         if (cancelled) return
         setRequirements(nextRequirements)
-        setSelectedRequirement((current) => current ?? nextRequirements[0] ?? null)
-        if (nextRequirements.length > 0) setScreen("conversation")
+        const firstLocalRequirement =
+          nextRequirements.find((item) => item.origin !== "space") ?? null
+        setSelectedRequirement((current) => current ?? firstLocalRequirement)
+        if (firstLocalRequirement) setScreen("conversation")
         setRequirementsLoaded(true)
       })
       .catch((error: unknown) => {
@@ -168,6 +270,10 @@ export function RequirementEntryView(): React.JSX.Element {
     requirement: RequirementRecord,
     threadId?: string
   ): Promise<void> => {
+    if (requirement.readOnly) {
+      toast.info("需求空间3.0详情跳转暂未接入")
+      return
+    }
     const requestId = ++openRequirementRequestRef.current
     try {
       const ensured = threadId
@@ -272,6 +378,7 @@ export function RequirementEntryView(): React.JSX.Element {
       {screen === "history" && (
         <RequirementHistoryView
           requirements={requirements}
+          currentUser={currentUser}
           onNew={startNewRequirement}
           onOpenRequirement={openRequirement}
           onDeleteRequirement={deleteRequirement}

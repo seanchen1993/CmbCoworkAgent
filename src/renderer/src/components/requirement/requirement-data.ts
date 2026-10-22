@@ -50,6 +50,17 @@ export type RequirementRecord = {
   needDesign: NeedDesignChoice
   prdManifest: RequirementPrdManifest
   prd: "是" | "否"
+  origin?: "local" | "remote" | "space"
+  owner?: RequirementUser
+  collaborators?: RequirementUser[]
+  readOnly?: boolean
+  mock?: boolean
+}
+
+export type RequirementUser = {
+  id: string
+  name: string
+  avatarUrl?: string
 }
 
 export function getRequirementThreadIds(
@@ -96,7 +107,8 @@ export function fromPersistedRequirement(
     initialDescription: item.source.initialDescription ?? "",
     needDesign: item.needDesign === "1" || item.needDesign === "0" ? item.needDesign : "",
     prdManifest: item.prdManifest,
-    prd: generated ? "是" : "否"
+    origin: "local",
+    prd: generated || item.prdManifest.prd.status.trim().toLowerCase() === "published" ? "是" : "否"
   }
 }
 
@@ -115,7 +127,20 @@ export function isRequirementPublished(requirement: RequirementRecord): boolean 
 }
 
 export function isRequirementGenerated(requirement: RequirementRecord): boolean {
-  return requirement.prdManifest.prd.status.trim().toLowerCase() === "generated"
+  const status = requirement.prdManifest.prd.status.trim().toLowerCase()
+  return (
+    status === "generated" || status === "published" || requirement.prdManifest.prd.currentStep >= 3
+  )
+}
+
+export function getRequirementCompletedSteps(requirement: RequirementRecord): number {
+  const currentStep = requirement.prdManifest.prd.currentStep
+  const status = requirement.prdManifest.prd.status.trim().toLowerCase()
+  if (Number.isFinite(currentStep)) {
+    const maximumStep = status === "published" ? 5 : 4
+    return Math.max(1, Math.min(maximumStep, Math.trunc(currentStep)))
+  }
+  return status === "published" ? 5 : status === "generated" ? 3 : status === "draft" ? 2 : 1
 }
 
 function getRequirementUpdatedAtTimestamp(requirement: RequirementRecord): number {
