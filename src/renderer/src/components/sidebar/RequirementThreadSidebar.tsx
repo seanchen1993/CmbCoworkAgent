@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dialog"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { useAppStore } from "@/lib/store"
+import type { Thread } from "@/types"
 import { useAllStreamLoadingStates, useAllThreadStates } from "@/lib/thread-context"
 import {
   getRequirementThreadIds,
@@ -203,7 +204,8 @@ export function RequirementThreadSidebar({
     const requirementById = new Map(
       mode.requirements.map((requirement) => [requirement.id, requirement])
     )
-    const byRequirement = new Map<string, typeof threads>()
+    const byRequirement = new Map<string, Thread[]>()
+    const threadById = new Map(threads.map((thread) => [thread.thread_id, thread]))
     for (const thread of threads) {
       const metadataId =
         typeof thread.metadata?.requirementId === "string" ? thread.metadata.requirementId : ""
@@ -221,7 +223,32 @@ export function RequirementThreadSidebar({
           `${item.title} ${item.system} ${item.id}`.toLocaleLowerCase().includes(normalized)
         )
       })
-      .map((requirement) => ({ requirement, threads: byRequirement.get(requirement.id) ?? [] }))
+      .map((requirement) => {
+        const indexedIds = getRequirementThreadIds(requirement)
+        const indexedIdSet = new Set(indexedIds)
+        const indexedConversations = indexedIds.map<Thread>((threadId, index) => {
+          const existing = threadById.get(threadId)
+          if (existing) return existing
+          const timestamp = new Date(requirement.updatedAt)
+          const fallbackTime = Number.isNaN(timestamp.getTime()) ? new Date(0) : timestamp
+          return {
+            thread_id: threadId,
+            created_at: fallbackTime,
+            updated_at: fallbackTime,
+            metadata: { requirementId: requirement.id },
+            status: "idle",
+            thread_values: {},
+            title: `${String(index + 1).padStart(3, "0")}-PRD-${requirement.title}`
+          }
+        })
+        const metadataConversations = (byRequirement.get(requirement.id) ?? []).filter(
+          (thread) => !indexedIdSet.has(thread.thread_id)
+        )
+        return {
+          requirement,
+          threads: [...indexedConversations, ...metadataConversations]
+        }
+      })
   }, [mode.requirements, query, requirementIdByThreadId, threads])
 
   const toggle = (id: string): void => {

@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils"
 import { RequirementHistoryList, type RequirementSourceFilter } from "./RequirementHistoryList"
 import type { RequirementRecord, RequirementUser } from "./requirement-data"
 import { useRequirementStore } from "./requirement-store"
+import { isRequirementMine } from "./requirement-history-filter"
 
 const sourceFilters: Array<{ value: RequirementSourceFilter; label: string }> = [
   { value: "all", label: "全部" },
@@ -52,7 +53,7 @@ export function RequirementHistoryView({
       if (selectedSystemId && item.origin === "local" && item.systemId !== selectedSystemId)
         return false
       if (sourceFilter !== "all" && item.origin !== sourceFilter) return false
-      if (mineOnly && item.origin !== "local") return false
+      if (mineOnly && !isRequirementMine(item, currentUser)) return false
       const normalized = query.trim().toLocaleLowerCase()
       return (
         !normalized ||

@@ -1,4 +1,4 @@
-import { Eye, FileText } from "lucide-react"
+import { Eye, FileText, FolderOpen } from "lucide-react"
 import type { ReactNode } from "react"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import type { RequirementPrdManifest } from "./requirement-data"
@@ -7,14 +7,17 @@ export function RequirementPrdSummaryCard({
   prd,
   fallbackName,
   onOpenFile,
+  onRevealFile,
   children
 }: {
   prd: RequirementPrdManifest["prd"]
   fallbackName: string
   onOpenFile?: () => void
+  onRevealFile?: () => void
   children?: ReactNode
 }): React.JSX.Element {
   const canOpenFile = Boolean(prd.file && onOpenFile)
+  const canRevealFile = Boolean(prd.file && onRevealFile)
 
   return (
     <section className="rounded-xl border border-border/80 bg-white p-4">
@@ -25,13 +28,22 @@ export function RequirementPrdSummaryCard({
               {prd.name || fallbackName}
             </h3>
             {prd.file ? (
-              <IconPopoverButton
-                aria-label={canOpenFile ? "查看 PRD 总览详情" : "暂无关联 PRD 文件"}
-                icon={<Eye className="size-3.5" />}
-                disabled={!canOpenFile}
-                popoverContent={canOpenFile ? "在右侧面板预览文件" : "暂无关联 PRD 文件"}
-                onClick={onOpenFile}
-              />
+              <div className="flex items-center gap-0.5">
+                <IconPopoverButton
+                  aria-label={canOpenFile ? "查看 PRD 总览详情" : "暂无关联 PRD 文件"}
+                  icon={<Eye className="size-3.5" />}
+                  disabled={!canOpenFile}
+                  popoverContent={canOpenFile ? "在右侧面板预览文件" : "暂无关联 PRD 文件"}
+                  onClick={onOpenFile}
+                />
+                <IconPopoverButton
+                  aria-label={canRevealFile ? "打开 PRD 文件所在文件夹" : "暂无关联 PRD 文件"}
+                  icon={<FolderOpen className="size-3.5" />}
+                  disabled={!canRevealFile}
+                  popoverContent={canRevealFile ? "打开文件所在文件夹" : "暂无关联 PRD 文件"}
+                  onClick={onRevealFile}
+                />
+              </div>
             ) : null}
           </div>
         </div>

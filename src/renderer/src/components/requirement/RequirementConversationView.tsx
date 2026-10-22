@@ -254,7 +254,6 @@ function RequirementConversationSession({
   const autoQueuedPrdGenerationRef = useRef(false)
   const continuationMessageThreadIdsRef = useRef(new Set<string>())
   const conversationLoadingObservedRef = useRef(false)
-  const prototypeCompletionObservedRef = useRef(false)
   const restoredManifestThreadRef = useRef<string | null>(null)
   const manifestRequestRef = useRef(0)
   // The selected conversation renders its own validated manifest snapshot, so
@@ -458,12 +457,7 @@ function RequirementConversationSession({
   const updatePrototypeFunctionDesign = useCallback(
     (functionInfo: { fr: string; file: string }, needDesign: NeedDesignChoice): void => {
       const functionKey = getPrototypeFunctionKey(functionInfo)
-      const allCompletedAfterChange = prototypeStatuses.every((status) =>
-        getPrototypeFunctionKey(status.functionInfo) === functionKey
-          ? needDesign === "0" || status.generated
-          : status.complete
-      )
-      void persistPrototypeState("design", allCompletedAfterChange ? 5 : 4, {
+      void persistPrototypeState("design", 4, {
         functionKey,
         needDesign
       }).catch((error) => {
@@ -471,8 +465,12 @@ function RequirementConversationSession({
         toast.error("保存原型设计选择失败")
       })
     },
-    [persistPrototypeState, prototypeStatuses]
+    [persistPrototypeState]
   )
+  const completePrototypeDesign = useCallback(async (): Promise<void> => {
+    await persistPrototypeState("design", 5)
+    setPreviewTab("requirement-space")
+  }, [persistPrototypeState])
   const requestPrototypeDesign = useCallback(
     (functionInfo: { fr: string; name: string; file: string }): void => {
       if (!threadState || conversationLoading) return
@@ -528,7 +526,6 @@ function RequirementConversationSession({
     setPrototypeRoute(null)
     setPreviewTab("source")
     restoredManifestThreadRef.current = null
-    prototypeCompletionObservedRef.current = false
     publishRequestQueuedRef.current = false
     setPublishRequestQueued(false)
     observedSubagentStatesRef.current.clear()
@@ -562,14 +559,6 @@ function RequirementConversationSession({
       setPreviewTab("prd")
     }
   }, [manifestBelongsToCurrentThread, previewTab, prototypeRoute, requirementSpaceManifest])
-
-  useEffect(() => {
-    const wasCompleted = prototypeCompletionObservedRef.current
-    prototypeCompletionObservedRef.current = allPrototypeFunctionsCompleted
-    if (prototypeRoute === "design" && allPrototypeFunctionsCompleted && !wasCompleted) {
-      setPreviewTab("requirement-space")
-    }
-  }, [allPrototypeFunctionsCompleted, prototypeRoute])
 
   useEffect(() => {
     setSelectedThreadId(
@@ -679,7 +668,7 @@ function RequirementConversationSession({
 
   const requirementSidebarMode = useMemo<RequirementSidebarMode>(
     () => ({
-      requirements,
+      requirements: requirements.filter((item) => item.origin === "local"),
       onSelectRequirement: async (item, nextThreadId) => {
         if (nextThreadId && item.id === requirement.id) {
           setSelectedThreadId(nextThreadId)
@@ -1090,15 +1079,6 @@ function RequirementConversationSession({
   ])
 
   useEffect(() => {
-    if (
-      (previewTab !== "prd" && previewTab !== "prototype" && previewTab !== "requirement-space") ||
-      !prdGenerationCompleted
-    )
-      return
-    void loadRequirementSpaceManifest()
-  }, [loadRequirementSpaceManifest, prdGenerationCompleted, previewTab])
-
-  useEffect(() => {
     if (!prdGenerationCompleted && (previewTab === "prd" || previewTab === "requirement-space")) {
       setPreviewTab("source")
     }
@@ -1220,6 +1200,7 @@ function RequirementConversationSession({
             onRevealRequirementFile={revealRequirementFile}
             onRequestPrototypeDesign={requestPrototypeDesign}
             onUpdatePrototypeFunctionDesign={updatePrototypeFunctionDesign}
+            onCompletePrototypeDesign={completePrototypeDesign}
             onPublishToRequirementSpace={handlePublishToRequirementSpace}
             onSendLeanstarToken={handleSendLeanstarToken}
           />

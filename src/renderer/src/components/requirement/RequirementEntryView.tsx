@@ -29,14 +29,16 @@ type EntryScreen = "history" | "system" | "conversation"
 
 type CurrentRequirementUser = { id: string; name: string }
 
-function collectRequirementSpaceLeaves(nodes: NamespaceTreeNode[]): NamespaceTreeNode[] {
-  return nodes.flatMap((node) =>
-    node.children?.length
-      ? collectRequirementSpaceLeaves(node.children)
-      : node.accessible === false
-        ? []
-        : [node]
-  )
+function findRequirementSpaceNamespace(
+  nodes: NamespaceTreeNode[],
+  pathName: string
+): NamespaceTreeNode | null {
+  for (const node of nodes) {
+    if (node.pathName.trim() === pathName && node.accessible !== false) return node
+    const match = findRequirementSpaceNamespace(node.children ?? [], pathName)
+    if (match) return match
+  }
+  return null
 }
 
 function fromRequirementSpaceItem(
@@ -53,10 +55,10 @@ function fromRequirementSpaceItem(
     workspaceMissing: false,
     coreFilesMissing: false,
     coreFilesMissingReason: null,
-    updatedAt: "需求空间3.0",
-    updatedAtTimestamp: 0,
+    updatedAt: item.createTime ?? "",
+    updatedAtTimestamp: item.createTime ? new Date(item.createTime).getTime() || 0 : 0,
     system: namespace.pathName.split("/").filter(Boolean).at(-1) || namespace.pathName,
-    status: item.status || "已发布",
+    status: "",
     fileName: "",
     link: "",
     sourceType: "link",
@@ -95,6 +97,8 @@ export function RequirementEntryView(): React.JSX.Element {
   const [requirements, setRequirements] = useState<RequirementRecord[]>([])
   const [requirementsLoaded, setRequirementsLoaded] = useState(false)
   const [currentUser, setCurrentUser] = useState<CurrentRequirementUser | null>(null)
+  const [currentUserPathName, setCurrentUserPathName] = useState("")
+  const requirementSpaceLoadedRef = useRef(false)
   const [systemDialogOpen, setSystemDialogOpen] = useState(false)
   const [requirementDialogOpen, setRequirementDialogOpen] = useState(false)
   const selectedSystemId = useRequirementStore((state) => state.selectedSystemId)
@@ -124,36 +128,9 @@ export function RequirementEntryView(): React.JSX.Element {
         return [] as DesignSystemInfo[]
       })
 
-    const requirementSpacePromise = leanstarRequirementsApi
-      .getNamespaceTree()
-      .then(async ({ namespaceTreeList = [] }) => {
-        const leaves = collectRequirementSpaceLeaves(namespaceTreeList)
-        const pages = await Promise.allSettled(
-          leaves.map(async (leaf) => ({
-            leaf,
-            page: await leanstarRequirementsApi.listProductRequirements(
-              leaf.devopsOrgId,
-              leaf.namespaceType ?? ""
-            )
-          }))
-        )
-        return pages.flatMap((result) =>
-          result.status === "fulfilled"
-            ? (result.value.page.content ?? []).map((item) =>
-                fromRequirementSpaceItem(item, result.value.leaf)
-              )
-            : []
-        )
-      })
-      .catch((error: unknown) => {
-        console.warn("加载需求空间3.0列表失败", error)
-        return [] as RequirementRecord[]
-      })
-
-    const [persistedRequirements, systems, requirementSpaceRequirements] = await Promise.all([
+    const [persistedRequirements, systems] = await Promise.all([
       window.api.requirements.list(),
-      systemsPromise,
-      requirementSpacePromise
+      systemsPromise
     ])
     const systemNames = new Map(systems.map((system) => [system.id, system.name]))
     // 逐项容错：某条数据异常时跳过，避免整列加载失败
@@ -167,7 +144,7 @@ export function RequirementEntryView(): React.JSX.Element {
           }
         })
       : []
-    return [...sortRequirementsByUpdatedAt(validRequirements), ...requirementSpaceRequirements]
+    return sortRequirementsByUpdatedAt(validRequirements)
   }, [setSystemList])
 
   useEffect(() => {
@@ -177,6 +154,7 @@ export function RequirementEntryView(): React.JSX.Element {
         id: userInfo.sapId?.trim() || userInfo.ystId?.trim() || "current-user",
         name: userInfo.userName?.trim() || userInfo.sapId?.trim() || "当前用户"
       })
+      setCurrentUserPathName(userInfo.pathName?.trim() || "")
     })
   }, [])
 
@@ -202,6 +180,38 @@ export function RequirementEntryView(): React.JSX.Element {
       cancelled = true
     }
   }, [loadRequirements])
+
+  useEffect(() => {
+    if (
+      screen !== "history" ||
+      !requirementsLoaded ||
+      !currentUserPathName ||
+      requirementSpaceLoadedRef.current
+    )
+      return
+    requirementSpaceLoadedRef.current = true
+    void leanstarRequirementsApi
+      .getNamespaceTree()
+      .then(async ({ namespaceTreeList = [] }) => {
+        const namespace = findRequirementSpaceNamespace(namespaceTreeList, currentUserPathName)
+        if (!namespace) return []
+        const page = await leanstarRequirementsApi.listProductRequirements(
+          namespace.devopsOrgId,
+          namespace.namespaceType ?? ""
+        )
+        return (page.content ?? []).map((item) => fromRequirementSpaceItem(item, namespace))
+      })
+      .then((spaceRequirements) => {
+        setRequirements((current) => [
+          ...current.filter((item) => item.origin !== "space"),
+          ...spaceRequirements
+        ])
+      })
+      .catch((error: unknown) => {
+        requirementSpaceLoadedRef.current = false
+        console.warn("加载需求空间3.0列表失败", error)
+      })
+  }, [currentUserPathName, requirementsLoaded, screen])
 
   const startNewRequirement = (): void => {
     if (!selectedSystem) {
@@ -229,12 +239,7 @@ export function RequirementEntryView(): React.JSX.Element {
     capabilities: RequirementSessionCapabilities = getRequirementSessionCapabilities()
   ): Promise<{ requirement: RequirementRecord; threadId: string }> => {
     const threadIds = getRequirementThreadIds(requirement)
-    for (const threadId of threadIds) {
-      const existingThread = await window.api.threads.get(threadId)
-      if (existingThread) {
-        return { requirement, threadId }
-      }
-    }
+    if (threadIds[0]) return { requirement, threadId: threadIds[0] }
 
     await enableRequirementSessionExperts(capabilities.allowedExperts)
     const thread = await createThread(
@@ -309,10 +314,7 @@ export function RequirementEntryView(): React.JSX.Element {
       screen === "conversation" && selectedRequirement?.id === requirement.id
 
     const threadIds = getRequirementThreadIds(requirement)
-    for (const threadId of threadIds) {
-      const thread = await window.api.threads.get(threadId)
-      if (thread) await deleteThread(threadId)
-    }
+    for (const threadId of threadIds) await deleteThread(threadId)
 
     const result = await window.api.requirements.delete(requirement.id)
     if (!result.success) {

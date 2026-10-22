@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { toast } from "sonner"
 import {
   AlertTriangle,
   Brain,
@@ -101,6 +102,7 @@ type RequirementStepsPanelProps = {
     functionInfo: RequirementPrdManifest["functions"][number],
     needDesign: NeedDesignChoice
   ) => void
+  onCompletePrototypeDesign: () => Promise<void>
   onPublishToRequirementSpace: () => void
   onSendLeanstarToken: () => void | Promise<void>
 }
@@ -317,6 +319,7 @@ export function RequirementStepsPanel({
   onRevealRequirementFile: revealRequirementFile,
   onRequestPrototypeDesign: requestPrototypeDesign,
   onUpdatePrototypeFunctionDesign: updatePrototypeFunctionDesign,
+  onCompletePrototypeDesign: completePrototypeDesign,
   onPublishToRequirementSpace: handlePublishToRequirementSpace,
   onSendLeanstarToken: handleSendLeanstarToken
 }: RequirementStepsPanelProps): React.JSX.Element {
@@ -712,6 +715,7 @@ export function RequirementStepsPanel({
                 onOpenFile={() =>
                   openWorkspaceFilePreview(normalizePrdFilePath(requirementSpaceManifest.prd.file))
                 }
+                onRevealFile={() => revealRequirementFile(requirementSpaceManifest.prd.file)}
               />
             ) : null}
 
@@ -816,6 +820,7 @@ export function RequirementStepsPanel({
                 onOpenFile={() =>
                   openWorkspaceFilePreview(normalizePrdFilePath(requirementSpaceManifest.prd.file))
                 }
+                onRevealFile={() => revealRequirementFile(requirementSpaceManifest.prd.file)}
               />
             ) : null}
             <section className="rounded-xl border border-border/80 bg-white p-4">
@@ -851,7 +856,24 @@ export function RequirementStepsPanel({
                   >
                     继续设计原型
                   </Button>
-                ) : null}
+                ) : (
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={conversationLoading}
+                    onClick={() => {
+                      void completePrototypeDesign().catch((error) => {
+                        console.error(
+                          "[RequirementConversation] Failed to complete prototype step:",
+                          error
+                        )
+                        toast.error("保存原型设计完成状态失败")
+                      })
+                    }}
+                  >
+                    已完成原型设计
+                  </Button>
+                )}
               </div>
             </section>
             <section>
@@ -946,6 +968,7 @@ export function RequirementStepsPanel({
                 onOpenFile={() =>
                   openWorkspaceFilePreview(normalizePrdFilePath(requirementSpaceManifest.prd.file))
                 }
+                onRevealFile={() => revealRequirementFile(requirementSpaceManifest.prd.file)}
               >
                 <div className={"flex justify-between items-center"}>
                   <div className="mt-4 flex flex-wrap items-center gap-2">

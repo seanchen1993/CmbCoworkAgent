@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
-  Check,
   ChevronLeft,
   ChevronRight,
   EllipsisVertical,
@@ -38,6 +37,7 @@ import {
   type RequirementRecord,
   type RequirementUser
 } from "./requirement-data"
+import { isRequirementMine } from "./requirement-history-filter"
 
 const PAGE_SIZE = 10
 const STEPS = ["提供需求", "Agent分析", "规范PRD", "原型设计", "发布3.0"]
@@ -301,7 +301,7 @@ export function RequirementHistoryList({
     return items
       .filter((item) => item.origin !== "local" || !systemId || item.systemId === systemId)
       .filter((item) => sourceFilter === "all" || item.origin === sourceFilter)
-      .filter((item) => !mineOnly || item.origin === "local")
+      .filter((item) => !mineOnly || isRequirementMine(item, currentUser))
       .filter(
         (item) =>
           !normalized ||
@@ -320,7 +320,7 @@ export function RequirementHistoryList({
             .toLocaleLowerCase()
             .includes(normalized)
       )
-  }, [mineOnly, query, requirements, sourceFilter, systemId])
+  }, [currentUser, mineOnly, query, requirements, sourceFilter, systemId])
   const totalPages = Math.max(1, Math.ceil(visibleItems.length / PAGE_SIZE))
   const currentPage = Math.min(page, totalPages)
   const pageItems = visibleItems.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
@@ -466,12 +466,6 @@ export function RequirementHistoryList({
                       ) : null}
                       {collaborators.length ? <RequirementAvatars users={collaborators} /> : null}
                       <div className="ml-auto flex shrink-0 items-center gap-1.5">
-                        {isRequirementPublished(item) ? (
-                          <span className="inline-flex h-7 items-center gap-1 rounded-full bg-status-nominal/10 px-2.5 text-[11px] font-semibold text-status-nominal">
-                            <Check className="size-3" />
-                            已上线
-                          </span>
-                        ) : null}
                         {!item.readOnly ? (
                           <button
                             type="button"
@@ -538,7 +532,7 @@ export function RequirementHistoryList({
                         </span>
                         <span className="text-border-emphasis">·</span>
                         <span className="whitespace-nowrap tabular-nums">
-                          更新 {item.updatedAt}
+                          {item.origin === "space" ? item.updatedAt : `更新 ${item.updatedAt}`}
                         </span>
                         {item.workspaceMissing ? (
                           <AlertTriangle
