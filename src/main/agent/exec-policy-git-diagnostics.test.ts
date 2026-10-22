@@ -50,6 +50,12 @@ describe("Git safety diagnostics", () => {
       shellSyntax: "posix"
     },
     {
+      name: "literal JavaScript heredoc with a for loop",
+      command:
+        "node <<'EOF'\nconst seen = new Set()\nfor (const item of ['x']) seen.add(item)\nEOF",
+      shellSyntax: "posix"
+    },
+    {
       name: "literal JavaScript heredoc with a git object",
       command: "node <<'EOF'\nconst git = { status: () => 'ok' }\nconsole.log(git.status())\nEOF",
       shellSyntax: "posix"

@@ -11,6 +11,7 @@ import path from "node:path"
 import type { ExecSafetyLevel } from "../types"
 import { isGitRepositoryOverrideEnvironmentVariable } from "../services/git-environment"
 import type { WorkflowWorktreeIsolationBoundary } from "./workflow/types"
+import { isReadOnlyPosixForLoop } from "./posix-read-only-loop"
 import {
   isKnownSafeWindowsCommand,
   isReadOnlyWindowsCommand,
@@ -477,9 +478,11 @@ export function assessCommandSafety(
   if (!trimmed) {
     return { level: "safe" }
   }
+  const readOnlyLoop = shellSyntax === "posix" && isReadOnlyPosixForLoop(trimmed)
+  const inspectGit = !options?.nativeGitWorktree && !readOnlyLoop
 
   if (
-    !options?.nativeGitWorktree &&
+    inspectGit &&
     options?.enforceGitWorkflowCommitOnly &&
     containsDirectGitSubmitCommand(trimmed, shellSyntax)
   ) {
@@ -490,18 +493,15 @@ export function assessCommandSafety(
     }
   }
 
-  if (!options?.nativeGitWorktree && containsEnvSplitStringOption(trimmed, shellSyntax)) {
+  if (inspectGit && containsEnvSplitStringOption(trimmed, shellSyntax)) {
     return {
       level: "forbidden",
       reason: "env split-string execution is not supported because it can hide a git commit"
     }
   }
 
-  const gitScanState: GitCommandScanState = { unverifiable: false }
-  if (
-    !options?.nativeGitWorktree &&
-    containsForceGitAddCommand(trimmed, 0, shellSyntax, gitScanState)
-  ) {
+  const gitScanState: GitCommandScanState = { unverifiable: false, requiresApproval: readOnlyLoop }
+  if (inspectGit && containsForceGitAddCommand(trimmed, 0, shellSyntax, gitScanState)) {
     return {
       level: "forbidden",
       reason:
@@ -509,10 +509,7 @@ export function assessCommandSafety(
     }
   }
 
-  if (
-    !options?.nativeGitWorktree &&
-    containsDirectGitIndexPlumbing(trimmed, shellSyntax, 0, gitScanState)
-  ) {
+  if (inspectGit && containsDirectGitIndexPlumbing(trimmed, shellSyntax, 0, gitScanState)) {
     return {
       level: "forbidden",
       reason:
@@ -520,10 +517,7 @@ export function assessCommandSafety(
     }
   }
 
-  if (
-    !options?.nativeGitWorktree &&
-    containsPotentialGitAliasInvocation(trimmed, shellSyntax, 0, gitScanState)
-  ) {
+  if (inspectGit && containsPotentialGitAliasInvocation(trimmed, shellSyntax, 0, gitScanState)) {
     return {
       level: "forbidden",
       reason:
@@ -531,10 +525,7 @@ export function assessCommandSafety(
     }
   }
 
-  if (
-    !options?.nativeGitWorktree &&
-    containsWrappedGitCommitCommand(trimmed, 0, shellSyntax, gitScanState)
-  ) {
+  if (inspectGit && containsWrappedGitCommitCommand(trimmed, 0, shellSyntax, gitScanState)) {
     return {
       level: "forbidden",
       reason:
@@ -566,7 +557,12 @@ export function assessCommandSafety(
   }
 
   if (gitScanState.requiresApproval) {
-    return { level: "needs_approval", reason: "shell argument expansion — requires review" }
+    return {
+      level: "needs_approval",
+      reason: readOnlyLoop
+        ? "read-only POSIX loop — requires review"
+        : "shell argument expansion — requires review"
+    }
   }
 
   const windowsSafe =
@@ -1575,7 +1571,22 @@ function containsForceGitAddCommand(
     scanState.unverifiable = true
     return false
   }
-  for (const segment of splitGitPolicyCommandSegments(command, shellSyntax, scanState)) {
+  const segments = splitGitPolicyCommandSegments(command, shellSyntax, scanState)
+  if (
+    shellSyntax === "posix" &&
+    segments.some((segment) =>
+      /(?:^|[({])\s*(?:(?:do|then|else)\s+)*for(?:\s|\(|$)/.test(
+        stripQuotedSpans(segment, shellSyntax)
+      )
+    ) &&
+    mentionsShellGitOperation(segments.join(" "), shellSyntax) &&
+    !isReadOnlyPosixForLoop(command)
+  ) {
+    // `do bash -c 'git add -f ...'` is not a direct shell wrapper invocation.
+    // Keep unverified Git loops forbidden even when a control word hides it.
+    scanState.unverifiable = true
+  }
+  for (const segment of segments) {
     if (hasOpaqueGitMutationSyntax(segment, shellSyntax, scanState)) {
       scanState.unverifiable = true
       continue
@@ -1773,6 +1784,15 @@ function commandHasGitSubcommand(
   subcommands: Set<string>,
   shellSyntax: CommandShellSyntax = hostShellSyntax()
 ): boolean {
+  // These callers route mutations. Printed Git text inside a verified query
+  // loop must not trigger the commit dialog or the push workflow.
+  if (
+    shellSyntax === "posix" &&
+    [...subcommands].every((subcommand) => GIT_SUBMIT_SUBCOMMANDS.has(subcommand)) &&
+    isReadOnlyPosixForLoop(command)
+  ) {
+    return false
+  }
   for (const segment of splitGitPolicyCommandSegments(command, shellSyntax)) {
     const tokens = tokenizeCommand(segment, shellSyntax)
     if (!tokens) continue

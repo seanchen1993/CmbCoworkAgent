@@ -546,6 +546,12 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     requestApproval.mockClear()
     for (const command of [
       "git add -f .env",
+      "for c in HEAD; do git add -f .env; done",
+      'for c in HEAD; do echo "$(git add -f .env)"; done',
+      'for c in HEAD; do bash -c "git add -f .env"; done',
+      "sh -c 'for c in HEAD; do bash -c \"git add -f .env\"; done'",
+      "for c in HEAD; do git show --ext-diff $c; done",
+      "for c in add; do git $c -f .env; done",
       'rg $options "git add -f" src',
       "git diff $options -- src/*",
       "cat > /tmp/force.sh <<'EOF'\ngit add -f .env\nEOF\nsh /tmp/force.sh",
@@ -636,6 +642,20 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         command: "git status --short $path",
         shellSyntax: "powershell" as const,
         needsReview: true
+      },
+      {
+        command:
+          "cd /Users/chenqiang/Desktop/projects/CmbCoworkAgent && " +
+          'for c in HEAD main; do echo "##### $c $(git log -1 --format=%s $c)"; ' +
+          'git show --stat --format="  author=%an date=%ad" $c | head -60; ' +
+          "echo; done 2>&1 | head -400",
+        shellSyntax: "posix" as const,
+        needsReview: true
+      },
+      {
+        command: 'for c in HEAD; do echo "git commit -m example; git add -f .env"; done',
+        shellSyntax: "posix" as const,
+        needsReview: true
       }
     ]) {
       rawExecute.mockClear()
@@ -648,6 +668,30 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         expect(requestApproval.mock.calls[0][0].operation).toBe("execute")
       }
     }
+  })
+
+  it("lets the user reject a read-only POSIX loop without executing it", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "reject",
+      tool_call_id: "test"
+    } satisfies ApprovalDecision)
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      () => false
+    )
+    const result = await orchestrator.execute(
+      'for c in HEAD; do echo "$(git log -1 --format=%s $c)"; done',
+      process.cwd(),
+      "none",
+      "posix"
+    )
+    expect(result.output).toContain("Command rejected")
+    expect(result.output).not.toContain("Command forbidden")
+    expect(requestApproval).toHaveBeenCalledOnce()
+    expect(rawExecute).not.toHaveBeenCalled()
   })
 
   it("uses the actual POSIX shell syntax before the YOLO raw-execute shortcut", async () => {
