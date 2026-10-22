@@ -205,6 +205,21 @@ describe("App-owned switch cards on the unchanged gateway contract", () => {
     expect(JSON.stringify(context.gateway.sendCard.mock.calls[0][0].content)).toContain(
       `/切换 @${code}`
     )
+    const buttons = context.gateway.sendCard.mock.calls[0][0].content.find(
+      (component) => component.type === "operate"
+    )
+    expect(buttons).toEqual({
+      type: "operate",
+      arrange: 0,
+      list: [
+        { content: "切换到此会话", action: 2, tag: context.receipt().tag, style: 1, disable: 0 }
+      ]
+    })
+    expect(
+      context.gateway.sendCard.mock.calls[0][0].content.some(
+        (component) => component.type === "exclusionOperate"
+      )
+    ).toBe(false)
     expect(context.switchSession).not.toHaveBeenCalled()
     await context.cards.stop()
     await context.makeCards().flush()
@@ -370,6 +385,13 @@ describe("App-owned switch cards on the unchanged gateway contract", () => {
   it("dispatches a target_bind receipt through the existing router without a new gateway kind", async () => {
     const context = await fixture()
     context.prepare()
+    await context.enqueue()
+    await context.client.sendPending()
+    await context.cards.flush()
+    const controls = context.gateway.sendCard.mock.calls[0][0].content.find(
+      (component) => component.type === "operate"
+    )!
+    const button = (controls.list as Array<{ tag: string }>)[0]
     const oldResolver = vi.fn()
     const acknowledgeReceipt = vi.fn(async () => undefined)
     const router = new ImCardReceiptRouter({
@@ -380,7 +402,7 @@ describe("App-owned switch cards on the unchanged gateway contract", () => {
       } as never
     })
     router.registerSessionSwitchCards(context.cards)
-    await router.handle(context.receipt())
+    await router.handle(context.receipt("reply-1", { tag: button.tag }))
     expect(context.switchSession).toHaveBeenCalledTimes(1)
     expect(oldResolver).not.toHaveBeenCalled()
     expect(acknowledgeReceipt).toHaveBeenCalledWith("click-1")

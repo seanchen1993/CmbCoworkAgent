@@ -670,7 +670,7 @@ export interface BoundCardInput {
   detail?: string
 }
 
-/** Uses the existing target_bind kind and the already-supported approval button shape. */
+/** One action uses a normal button, not the paired accept/reject component. */
 export function buildSessionSwitchCard(input: {
   label: string
   code: string
@@ -679,20 +679,17 @@ export function buildSessionSwitchCard(input: {
   return [
     titleComponent("继续此会话"),
     kvComponent([{ title: "来源会话", value: input.label }]),
-    contentComponent(
-      [`文字切换：/切换 @${input.code}`, "点击后，新消息将发到此会话；其他任务会继续执行。"],
-      1
-    ),
+    contentComponent(["点击下方按钮后，新消息将发到此会话；其他任务会继续执行。"], 1),
+    contentComponent([`也可发送：/切换 @${input.code}`], 1),
     {
-      type: "exclusionOperate",
-      style: EXCLUSION_STYLE_ACCEPT_REJECT,
+      type: "operate",
+      arrange: 0,
       list: [
         {
           content: "切换到此会话",
           action: BUTTON_ACTION_FEEDBACK,
           tag: input.tag,
           style: 1,
-          status: BUTTON_STATUS_NORMAL,
           disable: 0
         }
       ]

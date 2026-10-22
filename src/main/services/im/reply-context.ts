@@ -53,7 +53,11 @@ export function buildImReplyContinuationHint(input: {
 }
 
 function withSwitchNotice(prefix: string, switched: boolean, continuationHint?: string): string {
-  return `${prefix}${switched ? SWITCHED_TARGET_MARK : ""}${switched && continuationHint ? `\n${continuationHint}` : ""}`
+  const header = `${prefix}${switched ? SWITCHED_TARGET_MARK : ""}`
+  if (!switched || !continuationHint) return header
+  return [header, "系统提示：", continuationHint, "", "──────────", "以下是该会话的回复："].join(
+    "\n"
+  )
 }
 
 export function imInboxReplyPrefix(switched = false, continuationHint?: string): string {

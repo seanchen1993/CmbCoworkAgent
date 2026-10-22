@@ -4,8 +4,27 @@ import {
   imProjectModeReplyPrefix,
   imThreadReplyPrefix
 } from "./reply-context"
+import { segmentImMarkdownText, segmentImReplyText } from "./reply-segmentation"
 
 describe("instructions for a push from another session", () => {
+  it.each([segmentImReplyText, segmentImMarkdownText])(
+    "separates system instructions from the Agent answer in %s",
+    (segment) => {
+      const hint = buildImReplyContinuationHint({
+        switched: true,
+        kind: "thread",
+        sessionCode: "ABCDEFGH"
+      })!
+      const prefix = imThreadReplyPrefix("测试", true, hint)
+      const [message] = segment("你好！有什么可以帮你的吗？", { prefix })
+      expect(message).toContain("系统提示：")
+      expect(message).toMatch(
+        /切换成功后再发送你的问题[\s\S]*──────────\s+以下是该会话的回复：\s+你好！/
+      )
+      expect(message.indexOf("系统提示：")).toBeLessThan(message.indexOf("──────────"))
+    }
+  )
+
   it("prefers an exact session code over names and project selection", () => {
     const hint = buildImReplyContinuationHint({
       switched: true,
