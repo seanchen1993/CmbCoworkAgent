@@ -127,7 +127,9 @@ function normalizeRequirementSpaceManifest(value: unknown): RequirementPrdManife
     },
     functions: functions.map((item) => {
       const functionInfo = asRecord(item) ?? {}
+      const id = asText(functionInfo.id)
       return {
+        ...(id ? { id } : {}),
         fr: asText(functionInfo.fr),
         name: asText(functionInfo.name),
         description: asText(functionInfo.description),

@@ -19,6 +19,7 @@ export type RequirementPrdManifest = {
     needDesign: NeedDesignChoice
   }
   functions: Array<{
+    id?: string
     fr: string
     name: string
     description: string
@@ -114,7 +115,7 @@ export function fromPersistedRequirement(
 
 export function getRequirementModules(requirement: RequirementRecord): RequirementModule[] {
   return requirement.prdManifest.functions.map((functionInfo) => ({
-    moduleId: functionInfo.fr,
+    moduleId: functionInfo.fr || functionInfo.id || "",
     name: functionInfo.name,
     filePath: functionInfo.file,
     description: functionInfo.description,

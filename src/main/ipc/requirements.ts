@@ -40,6 +40,7 @@ export type IndexedPrdManifest = {
     needDesign: NeedDesignChoice
   }
   functions: Array<{
+    id?: string
     fr: string
     name: string
     description: string
@@ -475,12 +476,14 @@ function normalizePrdManifest(value: unknown): IndexedPrdManifest {
   if (Array.isArray(source.functions)) {
     for (const entry of source.functions) {
       const functionInfo = isRecord(entry) ? entry : {}
+      const id = readManifestString(functionInfo, "id")
       const keywords =
         Array.isArray(functionInfo.keywords) &&
         functionInfo.keywords.every((keyword) => typeof keyword === "string")
           ? [...functionInfo.keywords]
           : []
       normalized.functions.push({
+        ...(id ? { id } : {}),
         fr: readManifestString(functionInfo, "fr"),
         name: readManifestString(functionInfo, "name"),
         description: readManifestString(functionInfo, "description"),
