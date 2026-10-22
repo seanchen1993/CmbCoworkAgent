@@ -1,29 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import {
-  AlertTriangle,
-  Bot,
-  Brain,
-  CheckCircle2,
-  ExternalLink,
-  Eye,
-  KeyRound,
-  Loader2,
-  PanelRightClose,
-  PanelRightOpen,
-  RotateCcw,
-  Send
-} from "lucide-react"
+import { Bot, ExternalLink, Loader2, PanelRightOpen } from "lucide-react"
 import { toast } from "sonner"
 import { ChatContainer } from "@/components/chat/ChatContainer"
-import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
 import {
   RequirementThreadSidebar,
   type RequirementSidebarMode
 } from "@/components/sidebar/RequirementThreadSidebar"
-import { FileTree, ResourcePreview } from "@/components/panels/RightPanel"
-import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { Button } from "@/components/ui/button"
-import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import {
   Dialog,
   DialogContent,
@@ -33,15 +16,19 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAppStore } from "@/lib/store"
 import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
 import { useThreadState, useThreadStream } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
+import {
+  beginOpenResourcePreviewIntent,
+  emitOpenResourcePreview
+} from "@/lib/resource-preview-events"
 import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import {
   fromPersistedRequirement,
+  type NeedDesignChoice,
   isRequirementGenerated,
   isRequirementPublished,
   type RequirementPrdManifest,
@@ -51,17 +38,30 @@ import {
   enableRequirementSessionExperts,
   getRequirementSessionCapabilities
 } from "./requirement-session-capabilities"
+import { RequirementStepsPanel } from "./RequirementStepsPanel"
 
 const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
 const REQUIREMENT_CONTINUATION_MESSAGE = "基于该需求已有资料和历史结论继续沟通。"
 
-type PreviewTab = "expert-process" | "source" | "prd" | "requirement-space"
+type PreviewTab = "expert-process" | "source" | "prd" | "prototype" | "requirement-space"
+type PrototypeRoute = "design" | "skip" | null
 
-function getSourceTabLabel(sourceType: RequirementRecord["sourceType"]): string {
-  if (sourceType === "file") return "旧需求（文件）"
-  if (sourceType === "link") return "旧需求（链接）"
-  return "旧需求（描述）"
+function getPreviewTabForStep(currentStep: number): PreviewTab {
+  if (currentStep >= 5) return "requirement-space"
+  if (currentStep >= 4) return "prototype"
+  if (currentStep >= 3) return "prd"
+  if (currentStep >= 2) return "expert-process"
+  return "source"
+}
+
+function getPrototypeFunctionKey(functionInfo: { fr: string; file: string }): string {
+  return `${functionInfo.fr}:${functionInfo.file}`
+}
+
+function getPrototypeFilePath(prdFilePath: string): string {
+  const fileName = getDisplayFileName(prdFilePath).replace(/\.md$/i, "").replace(/-doc$/i, "")
+  return `/prd/原型设计/${fileName}.html`
 }
 
 function normalizePrdFilePath(filePath: string): string {
@@ -73,10 +73,19 @@ function normalizePrdFilePath(filePath: string): string {
     : `/prd/${normalized}`
 }
 
+function getDisplayFileName(filePath: string): string {
+  return filePath.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? filePath
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null
+}
+
+function normalizeNeedDesign(value: unknown): NeedDesignChoice {
+  if (value === "1" || value === "0") return value
+  return ""
 }
 
 function asText(value: unknown): string {
@@ -94,12 +103,26 @@ function normalizeRequirementSpaceManifest(value: unknown): RequirementPrdManife
   const parsed = asRecord(value) ?? {}
   const prd = asRecord(parsed.prd) ?? {}
   const functions = Array.isArray(parsed.functions) ? parsed.functions : []
+  const status = normalizePrdStatus(prd.status)
+  const fallbackStep =
+    status === "published"
+      ? 5
+      : status === "generated"
+        ? 3
+        : status === "init" || status === "draft"
+          ? 2
+          : 1
   return {
     prd: {
       name: asText(prd.name),
-      status: normalizePrdStatus(prd.status),
+      status,
       description: asText(prd.description),
       file: asText(prd.file),
+      currentStep:
+        typeof prd.currentStep === "number" && Number.isFinite(prd.currentStep)
+          ? Math.max(1, Math.min(5, Math.trunc(prd.currentStep)))
+          : fallbackStep,
+      needDesign: normalizeNeedDesign(prd.needDesign),
       ...(asText(prd.prDetailUrl) ? { prDetailUrl: asText(prd.prDetailUrl) } : {})
     },
     functions: functions.map((item) => {
@@ -109,6 +132,8 @@ function normalizeRequirementSpaceManifest(value: unknown): RequirementPrdManife
         name: asText(functionInfo.name),
         description: asText(functionInfo.description),
         file: asText(functionInfo.file),
+        htmlFile: asText(functionInfo.htmlFile),
+        needDesign: normalizeNeedDesign(functionInfo.needDesign),
         keywords:
           Array.isArray(functionInfo.keywords) &&
           functionInfo.keywords.every((keyword) => typeof keyword === "string")
@@ -171,15 +196,6 @@ async function readRequirementWorkspaceTextFile(
   return { success: true, content: assembled.content }
 }
 
-function buildRequirementMarkdown(requirement: RequirementRecord, sourcePreview: string): string {
-  const preview = sourcePreview.trim()
-  return `# ${requirement.title}
-> 原始需求草稿 · ${requirement.id} · ${requirement.updatedAt}${requirement.sourceName ? ` · ${requirement.sourceName}` : ""}
-
-${preview || "> 暂无可预览的原始需求内容。"}
-`
-}
-
 function buildRequirementInitializationMessage(requirement: RequirementRecord): string {
   const sourceInstruction =
     requirement.sourceType === "text"
@@ -238,6 +254,8 @@ function RequirementConversationSession({
   const autoQueuedPrdGenerationRef = useRef(false)
   const continuationMessageThreadIdsRef = useRef(new Set<string>())
   const conversationLoadingObservedRef = useRef(false)
+  const prototypeCompletionObservedRef = useRef(false)
+  const restoredManifestThreadRef = useRef<string | null>(null)
   const manifestRequestRef = useRef(0)
   // The selected conversation renders its own validated manifest snapshot, so
   // "刷新状态" (which syncs the requirement record) must also re-read that file to
@@ -247,8 +265,8 @@ function RequirementConversationSession({
   // A requirement can own multiple conversations. Do not render a requirement-level PRD
   // cache before the selected conversation's manifest has been read and validated.
   const [previewTab, setPreviewTab] = useState<PreviewTab>("source")
-  const [selectedPrdPath, setSelectedPrdPath] = useState<string | null>(null)
-  const [prdPreviewReloadToken, setPrdPreviewReloadToken] = useState(0)
+  const [prototypeRoute, setPrototypeRoute] = useState<PrototypeRoute>(null)
+  const prdPreviewReloadToken = 0
   const [sourcePreview, setSourcePreview] = useState("")
   const [sourcePreviewLoading, setSourcePreviewLoading] = useState(false)
   const [sourcePreviewError, setSourcePreviewError] = useState<string | null>(null)
@@ -263,7 +281,12 @@ function RequirementConversationSession({
   const [tokenSaving, setTokenSaving] = useState(false)
   const [hasStoredToken, setHasStoredToken] = useState(false)
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
+  const [functionWorkspaceOpen, setFunctionWorkspaceOpen] = useState(false)
   const [statusRefreshing, setStatusRefreshing] = useState(false)
+  const handleFunctionWorkspaceChange = useCallback((open: boolean) => {
+    setFunctionWorkspaceOpen(open)
+    if (open) setRightPanelCollapsed(false)
+  }, [])
   const focusExpertProcess = useCallback((): boolean => {
     if (!threadId || subagents.length === 0) return false
     const isAnalyst = (item: (typeof subagents)[number]): boolean => {
@@ -314,16 +337,16 @@ function RequirementConversationSession({
       ),
     [threadState?.workspaceFiles]
   )
-  const defaultPrdPath = useMemo(
-    () => prdFiles.find((file) => !file.is_dir)?.path ?? null,
-    [prdFiles]
+  const sourceFiles = useMemo(
+    () =>
+      (threadState?.workspaceFiles ?? []).filter(
+        (file) => file.path === "/source" || file.path.startsWith("/source/")
+      ),
+    [threadState?.workspaceFiles]
   )
-  const effectiveSelectedPrdPath =
-    selectedPrdPath && prdFiles.some((file) => !file.is_dir && file.path === selectedPrdPath)
-      ? selectedPrdPath
-      : defaultPrdPath
-  const selectedPrdFile = prdFiles.find(
-    (file) => !file.is_dir && file.path === effectiveSelectedPrdPath
+  const sourceDocumentFiles = useMemo(
+    () => sourceFiles.filter((file) => !file.is_dir),
+    [sourceFiles]
   )
   const prdFileCount = prdFiles.filter((file) => !file.is_dir).length
   const manifestBelongsToCurrentThread = manifestThreadId === threadId
@@ -331,15 +354,169 @@ function RequirementConversationSession({
     manifestBelongsToCurrentThread && isRequirementPrdGenerationCompleted(requirementSpaceManifest)
   const requirementSpacePublished =
     manifestBelongsToCurrentThread && isRequirementSpacePublished(requirementSpaceManifest)
+  const prototypeFunctions = useMemo(
+    () => requirementSpaceManifest?.functions ?? [],
+    [requirementSpaceManifest?.functions]
+  )
+  const prototypeStatuses = useMemo(
+    () =>
+      prototypeFunctions.map((functionInfo) => {
+        const prototypePath = functionInfo.htmlFile
+          ? normalizePrdFilePath(functionInfo.htmlFile)
+          : getPrototypeFilePath(functionInfo.file)
+        const generated = functionInfo.htmlFile.trim() !== ""
+        const choiceMade = generated || functionInfo.needDesign !== ""
+        const skipped = prototypeRoute === "skip" || functionInfo.needDesign === "0"
+        return {
+          functionInfo,
+          prototypePath,
+          generated,
+          skipped,
+          complete: generated || skipped,
+          choiceMade
+        }
+      }),
+    [prototypeFunctions, prototypeRoute]
+  )
+  const completedPrototypeCount = prototypeStatuses.filter((item) => item.complete).length
+  const generatedPrototypeCount = prototypeStatuses.filter((item) => item.generated).length
+  const skippedPrototypeCount = prototypeStatuses.filter((item) => item.skipped).length
+  const allPrototypeFunctionsCompleted =
+    prototypeStatuses.length > 0 && completedPrototypeCount === prototypeStatuses.length
+  const expertAnalysisStarted = subagents.length > 0 || prdGenerationCompleted
+  const expertAnalysisCompleted =
+    prdGenerationCompleted || (subagents.length > 0 && !expertProcessRunning)
+  const prototypeStepCompleted =
+    prototypeRoute === "skip" || allPrototypeFunctionsCompleted || requirementSpacePublished
+  const prototypeStepEnabled =
+    prdGenerationCompleted && (prototypeRoute !== null || requirementSpacePublished)
+  const requirementSpaceStepEnabled =
+    prdGenerationCompleted && (prototypeStepCompleted || requirementSpacePublished)
   const conversationLoading = streamLoading || threadState?.scheduledTaskLoading === true
+  const persistPrototypeState = useCallback(
+    async (
+      route: PrototypeRoute,
+      reachedStep: number,
+      changedChoice?: { functionKey: string; needDesign: NeedDesignChoice }
+    ): Promise<void> => {
+      const result = await window.api.requirements.saveStepState({
+        reqId: requirement.id,
+        needDesign: route === null ? "" : route === "design" ? "1" : "0",
+        currentStep: Math.max(requirementSpaceManifest?.prd.currentStep ?? 1, reachedStep),
+        functions: prototypeFunctions.flatMap((functionInfo) => {
+          if (
+            changedChoice &&
+            changedChoice.functionKey !== getPrototypeFunctionKey(functionInfo)
+          ) {
+            return []
+          }
+          return {
+            fr: functionInfo.fr,
+            file: functionInfo.file,
+            htmlFile: functionInfo.htmlFile,
+            needDesign:
+              route === "skip"
+                ? "0"
+                : changedChoice?.functionKey === getPrototypeFunctionKey(functionInfo)
+                  ? changedChoice.needDesign
+                  : functionInfo.needDesign
+          }
+        })
+      })
+      if (!result.success || !result.requirement) {
+        throw new Error(result.error || "保存原型流程状态失败")
+      }
+      if (result.manifestStatus === "missing") {
+        toast.warning("未找到 prd/prd-manifest.json，步骤状态仅保存到需求索引")
+      } else if (result.manifestStatus === "invalid") {
+        toast.warning("prd-manifest.json 格式异常，已保留原文件且仅更新需求索引")
+      }
+      if (result.manifest) {
+        setRequirementSpaceManifest(normalizeRequirementSpaceManifest(result.manifest))
+      }
+      onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
+    },
+    [
+      onRequirementUpdated,
+      prototypeFunctions,
+      requirement.id,
+      requirement.system,
+      requirementSpaceManifest?.prd.currentStep
+    ]
+  )
+  const choosePrototypeRoute = useCallback(
+    (route: Exclude<PrototypeRoute, null>): void => {
+      setPrototypeRoute(route)
+      setPreviewTab(route === "design" ? "prototype" : "requirement-space")
+      void persistPrototypeState(route, route === "design" ? 4 : 5).catch((error) => {
+        console.error("[RequirementConversation] Failed to save prototype route:", error)
+        toast.error("保存原型选择失败")
+      })
+    },
+    [persistPrototypeState]
+  )
+  const updatePrototypeFunctionDesign = useCallback(
+    (functionInfo: { fr: string; file: string }, needDesign: NeedDesignChoice): void => {
+      const functionKey = getPrototypeFunctionKey(functionInfo)
+      const allCompletedAfterChange = prototypeStatuses.every((status) =>
+        getPrototypeFunctionKey(status.functionInfo) === functionKey
+          ? needDesign === "0" || status.generated
+          : status.complete
+      )
+      void persistPrototypeState("design", allCompletedAfterChange ? 5 : 4, {
+        functionKey,
+        needDesign
+      }).catch((error) => {
+        console.error("[RequirementConversation] Failed to update prototype choice:", error)
+        toast.error("保存原型设计选择失败")
+      })
+    },
+    [persistPrototypeState, prototypeStatuses]
+  )
+  const requestPrototypeDesign = useCallback(
+    (functionInfo: { fr: string; name: string; file: string }): void => {
+      if (!threadState || conversationLoading) return
+      const prototypePath = getPrototypeFilePath(functionInfo.file)
+      threadState.addQueuedMessage({
+        id: crypto.randomUUID(),
+        text: `请为功能「${functionInfo.fr} ${functionInfo.name}」设计原型。以 ${functionInfo.file} 为需求依据，在 prd 下创建“原型设计”文件夹（若已存在则复用），并将原型保存为 ${prototypePath.replace(/^\/prd\//, "")}。`,
+        created_at: new Date(),
+        updated_at: new Date()
+      })
+      toast.success(`已提交「${functionInfo.name || functionInfo.fr}」原型设计请求`)
+    },
+    [conversationLoading, threadState]
+  )
+  const revealRequirementFile = useCallback(
+    (filePath: string): void => {
+      const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
+      const normalizedWorkspace = workspacePath.replace(/[\\/]+$/, "")
+      const normalizedFile = normalizePrdFilePath(filePath).replace(/^\/+/, "")
+      const absolutePath = `${normalizedWorkspace}/${normalizedFile}`
+      void window.electron.ipcRenderer
+        .invoke("show-item-in-folder", absolutePath)
+        .then((result) => {
+          if (result && typeof result === "object" && "success" in result && !result.success) {
+            toast.error("无法在文件夹中显示该文件")
+          }
+        })
+        .catch(() => toast.error("无法在文件夹中显示该文件"))
+    },
+    [requirement.requirementPath, threadState?.workspacePath]
+  )
+  const openWorkspaceFilePreview = useCallback(
+    (filePath: string): void => {
+      if (!threadId) return
+      emitOpenResourcePreview({
+        threadId,
+        filePath,
+        workspacePathKind: "relative",
+        intentId: beginOpenResourcePreviewIntent(threadId)
+      })
+    },
+    [threadId]
+  )
   const hasThreadState = threadState !== null
-
-  // Keep the preview aligned with the current requirement after PRD generation completes,
-  // including cases where the component mounts after the loading transition already ended.
-  useEffect(() => {
-    if (conversationLoading || !prdGenerationCompleted) return
-    setPreviewTab("requirement-space")
-  }, [conversationLoading, prdGenerationCompleted])
 
   useEffect(() => {
     conversationLoadingObservedRef.current = false
@@ -348,12 +525,51 @@ function RequirementConversationSession({
     setManifestError(null)
     setRequirementSpaceManifest(null)
     setManifestThreadId(null)
-    setSelectedPrdPath(null)
+    setPrototypeRoute(null)
     setPreviewTab("source")
+    restoredManifestThreadRef.current = null
+    prototypeCompletionObservedRef.current = false
     publishRequestQueuedRef.current = false
     setPublishRequestQueued(false)
     observedSubagentStatesRef.current.clear()
-  }, [threadId])
+  }, [requirement.id, threadId])
+
+  useEffect(() => {
+    if (!manifestBelongsToCurrentThread || !requirementSpaceManifest) return
+    if (restoredManifestThreadRef.current === manifestThreadId) return
+    restoredManifestThreadRef.current = manifestThreadId
+    const currentStep = requirementSpaceManifest.prd.currentStep
+    const route: PrototypeRoute =
+      currentStep >= 4
+        ? requirementSpaceManifest.prd.needDesign === "1"
+          ? "design"
+          : requirementSpaceManifest.prd.needDesign === "0"
+            ? "skip"
+            : null
+        : null
+    setPrototypeRoute(route)
+    setPreviewTab(getPreviewTabForStep(currentStep))
+  }, [manifestBelongsToCurrentThread, manifestThreadId, requirementSpaceManifest])
+
+  useEffect(() => {
+    if (!manifestBelongsToCurrentThread || !requirementSpaceManifest) return
+    if (
+      requirementSpaceManifest.prd.status === "generated" &&
+      requirementSpaceManifest.prd.currentStep === 3 &&
+      prototypeRoute === null &&
+      (previewTab === "prototype" || previewTab === "requirement-space")
+    ) {
+      setPreviewTab("prd")
+    }
+  }, [manifestBelongsToCurrentThread, previewTab, prototypeRoute, requirementSpaceManifest])
+
+  useEffect(() => {
+    const wasCompleted = prototypeCompletionObservedRef.current
+    prototypeCompletionObservedRef.current = allPrototypeFunctionsCompleted
+    if (prototypeRoute === "design" && allPrototypeFunctionsCompleted && !wasCompleted) {
+      setPreviewTab("requirement-space")
+    }
+  }, [allPrototypeFunctionsCompleted, prototypeRoute])
 
   useEffect(() => {
     setSelectedThreadId(
@@ -616,7 +832,6 @@ function RequirementConversationSession({
         }
         // Do not let a read from a previous session overwrite the active UI state.
         if (!isCurrentRequest()) return null
-        const manifest = normalizeRequirementSpaceManifest(rawManifest)
         if (manifestCanSync) {
           const syncResult = await window.api.requirements.syncManifest({
             reqId: requirement.id,
@@ -632,14 +847,16 @@ function RequirementConversationSession({
               fromPersistedRequirement(syncResult.requirement, requirement.system)
             )
           }
+          if (syncResult.manifest) rawManifest = syncResult.manifest
         }
-        setRequirementSpaceManifest(manifest)
+        const syncedManifest = normalizeRequirementSpaceManifest(rawManifest)
+        setRequirementSpaceManifest(syncedManifest)
         setManifestThreadId(requestThreadId)
-        if (isRequirementSpacePublished(manifest)) {
+        if (isRequirementSpacePublished(syncedManifest)) {
           publishRequestQueuedRef.current = false
           setPublishRequestQueued(false)
         }
-        return manifest
+        return syncedManifest
       } catch (error) {
         if (!isCurrentRequest()) return null
         setRequirementSpaceManifest(null)
@@ -752,70 +969,12 @@ function RequirementConversationSession({
     void window.electron.openExternal(url).catch(() => toast.error("打开 Token 获取页面失败"))
   }, [])
 
-  const handleFunctionFilePreview = useCallback(
-    (filePath: string): void => {
-      const targetPath = normalizePrdFilePath(filePath)
-      const normalizedTarget = targetPath.toLowerCase()
-      const targetSuffix = normalizedTarget.replace(/^\/prd\//, "")
-      const targetName = targetSuffix.split("/").pop() ?? targetSuffix
-      const matchingFile =
-        prdFiles.find(
-          (file) => !file.is_dir && file.path.replace(/\\/g, "/").toLowerCase() === normalizedTarget
-        ) ??
-        prdFiles.find(
-          (file) =>
-            !file.is_dir && file.path.replace(/\\/g, "/").toLowerCase().endsWith(`/${targetSuffix}`)
-        ) ??
-        prdFiles.find(
-          (file) => !file.is_dir && file.path.split(/[\\/]/).pop()?.toLowerCase() === targetName
-        )
-
-      setPreviewTab("prd")
-      setSelectedPrdPath(matchingFile?.path ?? null)
-    },
-    [prdFiles]
-  )
-
-  const handlePrdOverviewFilePreview = useCallback(
-    async (filePath: string): Promise<void> => {
-      if (!threadId) return
-
-      const manifestPath = "/prd/prd-manifest.json"
-      const targetPath = normalizePrdFilePath(filePath)
-      let previewPath = manifestPath
-      try {
-        const probeToken = globalThis.crypto.randomUUID()
-        const result = await window.api.workspace.readFilePreview({
-          source: { threadId, filePath: targetPath },
-          offset: 0,
-          lane: `requirement-prd-file:${threadId}:${probeToken}`,
-          requestToken: probeToken
-        })
-        if (result.success) previewPath = targetPath
-      } catch {
-        // Fall back to the manifest, which was successfully read for this tab.
-      }
-
-      const diskResult = await window.api.workspace.loadFromDisk(threadId)
-      if (diskResult.success) setWorkspaceFiles?.(diskResult.files)
-      const files = diskResult.success ? diskResult.files : prdFiles
-      const previewFile = files.find(
-        (file) =>
-          !file.is_dir && file.path.replace(/\\/g, "/").toLowerCase() === previewPath.toLowerCase()
-      )
-      if (!previewFile) {
-        toast.error("无法读取 PRD 文件或 prd-manifest.json")
-        return
-      }
-
-      setPreviewTab("prd")
-      setSelectedPrdPath(previewFile.path)
-    },
-    [prdFiles, setWorkspaceFiles, threadId]
-  )
-
   useEffect(() => {
-    if (previewTab !== "prd" || !threadId) return
+    if (
+      (previewTab !== "prd" && previewTab !== "source" && previewTab !== "prototype") ||
+      !threadId
+    )
+      return
     void window.api.workspace.loadFromDisk(threadId).then((result) => {
       if (result.success) setWorkspaceFiles?.(result.files)
     })
@@ -904,7 +1063,7 @@ function RequirementConversationSession({
         threadState.setWorkspaceFiles(workspaceResult.files)
       }
       if (isRequirementPrdGenerationCompleted(manifest)) {
-        setPreviewTab("requirement-space")
+        setPreviewTab(isRequirementSpacePublished(manifest) ? "requirement-space" : "prd")
       }
       // Reset publish queue when the conversation ended without a successful publish
       if (!isRequirementSpacePublished(manifest)) {
@@ -931,7 +1090,11 @@ function RequirementConversationSession({
   ])
 
   useEffect(() => {
-    if (previewTab !== "requirement-space" || !prdGenerationCompleted) return
+    if (
+      (previewTab !== "prd" && previewTab !== "prototype" && previewTab !== "requirement-space") ||
+      !prdGenerationCompleted
+    )
+      return
     void loadRequirementSpaceManifest()
   }, [loadRequirementSpaceManifest, prdGenerationCompleted, previewTab])
 
@@ -949,16 +1112,23 @@ function RequirementConversationSession({
             "grid h-full min-h-0 gap-x-[0.5px]",
             // The requirement list column is a fixed width so collapsing the right
             // panel keeps the list (and chat) from being stretched.
-            rightPanelCollapsed
-              ? "min-w-[620px] grid-cols-[240px_minmax(380px,1fr)]"
-              : "min-w-[1242px] grid-cols-[240px_minmax(380px,1fr)_minmax(560px,1.3fr)]"
+            functionWorkspaceOpen
+              ? "min-w-[900px] grid-cols-[240px_minmax(660px,1fr)]"
+              : rightPanelCollapsed
+                ? "min-w-[620px] grid-cols-[240px_minmax(380px,1fr)]"
+                : "min-w-[1242px] grid-cols-[240px_minmax(380px,1fr)_minmax(560px,1.3fr)]"
           )}
         >
           <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden">
             <RequirementThreadSidebar mode={requirementSidebarMode} />
           </aside>
 
-          <main className="flex min-h-0 min-w-0 flex-col border-x border-border/60 bg-background">
+          <main
+            className={cn(
+              "min-h-0 min-w-0 flex-col border-x border-border/60 bg-background",
+              functionWorkspaceOpen ? "hidden" : "flex"
+            )}
+          >
             <div className="flex h-[37px] shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-[#fffdf9] px-4">
               <div className="flex min-w-0 items-center gap-2.5 text-sm font-semibold text-foreground">
                 <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
@@ -1001,527 +1171,58 @@ function RequirementConversationSession({
             )}
           </main>
 
-          <aside
-            className={cn(
-              "flex min-h-0 min-w-0 flex-col overflow-hidden bg-white",
-              rightPanelCollapsed && "hidden"
-            )}
-          >
-            {requirement.workspaceMissing ? (
-              <div
-                role="alert"
-                className="flex shrink-0 items-center gap-2 border-b border-[#ead3a1] bg-[#fff9e9] px-4 py-2 text-sm leading-5 text-[#8f6a2a]"
-              >
-                <AlertTriangle className="size-3.5 shrink-0" />
-                <span>该需求的工作目录已被删除，当前内容可能不可用。</span>
-              </div>
-            ) : null}
-            {requirement.coreFilesMissing && !requirement.workspaceMissing ? (
-              <div
-                role="alert"
-                className="flex shrink-0 items-center gap-2 border-b border-status-critical/20 bg-status-critical/5 px-4 py-2 text-sm leading-5 text-status-critical"
-              >
-                <AlertTriangle className="size-3.5 shrink-0" />
-                <span>
-                  {requirement.coreFilesMissingReason || "需求核心文件缺失，当前内容可能不可用。"}
-                </span>
-              </div>
-            ) : null}
-            <Tabs
-              value={previewTab}
-              onValueChange={(value) => {
-                const nextTab: PreviewTab =
-                  value === "expert-process"
-                    ? "expert-process"
-                    : value === "prd"
-                      ? "prd"
-                      : value === "requirement-space"
-                        ? "requirement-space"
-                        : "source"
-                setPreviewTab(nextTab)
-                if (nextTab === "expert-process") {
-                  focusExpertProcess()
-                }
-              }}
-              className="flex min-h-0 flex-1 flex-col"
-            >
-              <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/80 bg-[#fffdf9] px-3">
-                <TabsList className="h-9 rounded-none bg-transparent p-0">
-                  <TabsTrigger
-                    value="expert-process"
-                    className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
-                  >
-                    专家过程
-                    {subagents.length > 0 ? (
-                      <Brain
-                        className={cn(
-                          "size-3 text-status-info",
-                          expertProcessRunning ? "animate-pulse" : undefined
-                        )}
-                      />
-                    ) : null}
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="source"
-                    className="h-9 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
-                  >
-                    {getSourceTabLabel(requirement.sourceType)}
-                  </TabsTrigger>
-                  <TooltipProvider delayDuration={180}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span className="inline-flex">
-                          <TabsTrigger
-                            value="prd"
-                            disabled={!prdGenerationCompleted}
-                            className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none disabled:cursor-not-allowed disabled:opacity-45"
-                          >
-                            新PRD文件
-                            <span
-                              className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-none ${
-                                requirement.coreFilesMissing || requirement.workspaceMissing
-                                  ? "border-status-critical/30 bg-status-critical/10 text-status-critical"
-                                  : prdGenerationCompleted
-                                    ? "border-status-nominal/30 bg-status-nominal/15 text-status-nominal"
-                                    : "border-status-info/30 bg-status-info/15 text-status-info"
-                              }`}
-                            >
-                              {requirement.coreFilesMissing || requirement.workspaceMissing ? (
-                                <AlertTriangle className="size-2.5" />
-                              ) : prdGenerationCompleted ? (
-                                <CheckCircle2 className="size-2.5" />
-                              ) : (
-                                <Loader2 className="size-2.5 animate-spin" />
-                              )}
-                              {requirement.coreFilesMissing || requirement.workspaceMissing
-                                ? "异常"
-                                : prdGenerationCompleted
-                                  ? "生成完成"
-                                  : "生成中"}
-                            </span>
-                          </TabsTrigger>
-                        </span>
-                      </TooltipTrigger>
-                      {!prdGenerationCompleted ? (
-                        <TooltipContent side="bottom" className="max-w-64 text-xs leading-relaxed">
-                          需求文档还在生成中，请完成需求梳理后再试。
-                        </TooltipContent>
-                      ) : null}
-                    </Tooltip>
-                  </TooltipProvider>
-                  <TooltipProvider delayDuration={180}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span className="inline-flex">
-                          <TabsTrigger
-                            value="requirement-space"
-                            disabled={!prdGenerationCompleted}
-                            className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none disabled:cursor-not-allowed disabled:opacity-45"
-                          >
-                            需求空间3.0
-                            <span
-                              className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-none ${
-                                requirementSpacePublished
-                                  ? "border-status-nominal/30 bg-status-nominal/15 text-status-nominal"
-                                  : "border-status-info/30 bg-status-info/15 text-status-info"
-                              }`}
-                            >
-                              {requirementSpacePublished ? (
-                                <CheckCircle2 className="size-2.5" />
-                              ) : (
-                                <Loader2 className="size-2.5" />
-                              )}
-                              {requirementSpacePublished ? "已发布" : "未发布"}
-                            </span>
-                          </TabsTrigger>
-                        </span>
-                      </TooltipTrigger>
-                      {!prdGenerationCompleted ? (
-                        <TooltipContent side="bottom" className="max-w-64 text-xs leading-relaxed">
-                          需求文档还在生成中，请完成需求梳理后再试。
-                        </TooltipContent>
-                      ) : null}
-                    </Tooltip>
-                  </TooltipProvider>
-                </TabsList>
-                <div className="flex shrink-0 items-center gap-0.5">
-                  <TooltipProvider delayDuration={180}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          onClick={() => void handleRefreshStatus()}
-                          disabled={statusRefreshing}
-                          className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors enabled:hover:bg-background-interactive enabled:hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                          aria-label="刷新状态"
-                        >
-                          <RotateCcw
-                            className={cn("size-3.5", statusRefreshing && "animate-spin")}
-                          />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom" className="text-xs">
-                        刷新状态
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                  <TooltipProvider delayDuration={180}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          onClick={() => setRightPanelCollapsed(true)}
-                          className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background-interactive hover:text-foreground"
-                          aria-label="收起右侧面板"
-                        >
-                          <PanelRightClose className="size-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom" className="text-xs">
-                        收起右侧面板
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-              </div>
-
-              <TabsContent value="expert-process" className="m-0 min-h-0 flex-1 overflow-hidden">
-                {subagentFocusView?.threadId === threadId ? (
-                  <SubagentStreamPanel showCloseButton={false} />
-                ) : (
-                  <div className="flex h-full min-h-[260px] items-center justify-center px-6 py-10 text-center">
-                    <div className="flex max-w-xs flex-col items-center">
-                      <div className="mb-4 flex size-14 items-center justify-center rounded-full border border-status-info/25 bg-status-info/10 text-status-info">
-                        <Brain className="size-7" strokeWidth={1.7} />
-                      </div>
-                      <div className="text-sm font-semibold text-foreground">暂无专家执行记录</div>
-                      <div className="mt-1.5 text-xs leading-5 text-muted-foreground">
-                        专家分析启动后，执行过程会显示在这里
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </TabsContent>
-
-              <TabsContent value="source" className="m-0 min-h-0 flex-1 overflow-y-auto">
-                {sourcePreviewLoading ? (
-                  <div className="flex h-full min-h-[260px] items-center justify-center gap-2 text-sm text-muted-foreground">
-                    <Loader2 className="size-4 animate-spin text-primary" />
-                    正在读取原始需求
-                  </div>
-                ) : sourcePreviewError ? (
-                  <div className="flex h-full min-h-[260px] items-center justify-center px-6 text-center">
-                    <div className="flex max-w-[340px] flex-col items-center gap-3">
-                      <AlertTriangle className="size-5 text-status-critical" />
-                      <p className="text-sm leading-5 text-status-critical">{sourcePreviewError}</p>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-8 text-sm"
-                        onClick={() => void loadSourcePreview()}
-                      >
-                        重新读取
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <MarkdownPreview
-                    content={buildRequirementMarkdown(requirement, sourcePreview)}
-                    showHeader={false}
-                    showModeToggle={false}
-                    whiteBackground
-                    className="min-h-full -mt-7"
-                  />
-                )}
-              </TabsContent>
-
-              <TabsContent value="prd" className="m-0 flex min-h-0 flex-1 flex-col">
-                <div className="grid min-h-0 flex-1 grid-cols-[minmax(168px,25%)_minmax(0,1fr)] overflow-hidden">
-                  <aside className="flex min-w-0 flex-col overflow-hidden border-r border-border/80 bg-white">
-                    <div className="min-h-0 flex-1 overflow-y-auto py-1">
-                      <FileTree
-                        files={prdFiles}
-                        threadId={threadId}
-                        selectedPath={effectiveSelectedPrdPath}
-                        onFileSelect={setSelectedPrdPath}
-                        initialExpandedPaths={prdFiles
-                          .filter((file) => file.is_dir)
-                          .map((file) => file.path)}
-                      />
-                    </div>
-                  </aside>
-                  <section className="flex min-w-0 flex-col overflow-hidden bg-white">
-                    <div className="min-h-0 flex-1 p-2">
-                      {selectedPrdFile && threadId ? (
-                        <ResourcePreview
-                          filePath={selectedPrdFile.path.replace(/^\/+/, "")}
-                          workspacePathKind="relative"
-                          workspacePath={threadState?.workspacePath ?? requirement.requirementPath}
-                          threadId={threadId}
-                          reloadToken={prdPreviewReloadToken}
-                          onReload={() => setPrdPreviewReloadToken((value) => value + 1)}
-                        />
-                      ) : (
-                        <div className="flex h-full items-center justify-center px-6 text-center text-sm leading-5 text-muted-foreground">
-                          {prdFileCount > 0 ? "请选择文件预览" : "PRD 文件夹中暂无可预览文件"}
-                        </div>
-                      )}
-                    </div>
-                  </section>
-                </div>
-              </TabsContent>
-
-              <TabsContent value="requirement-space" className="m-0 min-h-0 flex-1 overflow-y-auto">
-                {manifestLoading ? (
-                  <div className="flex h-full min-h-[260px] items-center justify-center gap-2 text-sm text-muted-foreground">
-                    <Loader2 className="size-4 animate-spin text-primary" />
-                    正在读取需求空间数据
-                  </div>
-                ) : manifestError ? (
-                  <div className="flex h-full min-h-[260px] items-center justify-center px-6 text-center">
-                    <div className="flex max-w-[340px] flex-col items-center gap-3">
-                      <AlertTriangle className="size-5 text-status-critical" />
-                      <p className="text-sm leading-5 text-status-critical">{manifestError}</p>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-8 text-sm"
-                        onClick={() => void loadRequirementSpaceManifest()}
-                      >
-                        重新读取
-                      </Button>
-                    </div>
-                  </div>
-                ) : requirementSpaceManifest ? (
-                  <div className="space-y-4 p-4">
-                    <section className="border-b border-border/70 pb-4">
-                      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="mb-1 text-[11px] font-semibold uppercase text-muted-foreground">
-                            PRD
-                          </p>
-                          <div className="flex items-center gap-1.5">
-                            <h3 className="text-base font-semibold leading-6 text-foreground">
-                              {requirementSpaceManifest.prd.name || requirement.title}
-                            </h3>
-                            <IconPopoverButton
-                              aria-label={
-                                requirementSpaceManifest.prd.file
-                                  ? "查看 PRD 总览详情"
-                                  : "暂无关联 PRD 文件"
-                              }
-                              icon={<Eye className="size-3.5" />}
-                              disabled={!requirementSpaceManifest.prd.file}
-                              popoverContent={
-                                requirementSpaceManifest.prd.file
-                                  ? "点击查看详情"
-                                  : "暂无关联 PRD 文件"
-                              }
-                              onClick={() =>
-                                handlePrdOverviewFilePreview(requirementSpaceManifest.prd.file)
-                              }
-                            />
-                          </div>
-                        </div>
-                        <span
-                          className={cn(
-                            "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] font-semibold",
-                            isRequirementSpacePublished(requirementSpaceManifest)
-                              ? "border-status-nominal/30 bg-status-nominal/10 text-status-nominal"
-                              : "border-status-info/30 bg-status-info/10 text-status-info"
-                          )}
-                        >
-                          {isRequirementSpacePublished(requirementSpaceManifest) ? (
-                            <CheckCircle2 className="size-3" />
-                          ) : (
-                            <Loader2 className="size-3" />
-                          )}
-                          {isRequirementSpacePublished(requirementSpaceManifest)
-                            ? "已发布到需求空间3.0"
-                            : requirementSpaceManifest.prd.status || "未发布"}
-                        </span>
-                      </div>
-                      <p className="text-sm leading-5 text-muted-foreground">
-                        {requirementSpaceManifest.prd.description || "暂无 PRD 描述"}
-                      </p>
-                      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] text-muted-foreground">
-                        {requirementSpaceManifest.prd.file ? (
-                          <span>
-                            文档文件{" "}
-                            <strong className="font-medium text-foreground">
-                              {requirementSpaceManifest.prd.file}
-                            </strong>
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className={"flex justify-between items-center"}>
-                        <div className="mt-4 flex flex-wrap items-center gap-2">
-                          {!isRequirementSpacePublished(requirementSpaceManifest) ? (
-                            <TooltipProvider delayDuration={180}>
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <span className="inline-flex">
-                                    <Button
-                                      type="button"
-                                      size="sm"
-                                      disabled={publishRequestQueued || conversationLoading}
-                                      className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
-                                      onClick={handlePublishToRequirementSpace}
-                                    >
-                                      {publishRequestQueued ? (
-                                        <Loader2 className="size-3.5 animate-spin" />
-                                      ) : (
-                                        <Send className="size-3.5" />
-                                      )}
-                                      {publishRequestQueued
-                                        ? "发布请求已发送"
-                                        : "发布到需求空间3.0"}
-                                    </Button>
-                                  </span>
-                                </TooltipTrigger>
-                                {publishRequestQueued || conversationLoading ? (
-                                  <TooltipContent
-                                    side="top"
-                                    className="max-w-56 text-xs leading-relaxed"
-                                  >
-                                    {publishRequestQueued
-                                      ? "发布请求已提交，请稍候。"
-                                      : "当前正在处理需求，请稍候再发布。"}
-                                  </TooltipContent>
-                                ) : null}
-                              </Tooltip>
-                            </TooltipProvider>
-                          ) : null}
-                          {requirementSpaceManifest.prd.prDetailUrl ? (
-                            <button
-                              type="button"
-                              className="mt-3 inline-flex max-w-full items-center gap-1.5 truncate text-sm font-medium text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-                              title={requirementSpaceManifest.prd.prDetailUrl}
-                              onClick={() => {
-                                const url = requirementSpaceManifest.prd.prDetailUrl
-                                if (url) void window.electron.openExternal(url)
-                              }}
-                            >
-                              <Eye className="size-3.5 shrink-0" />
-                              <span className="truncate">去需求空间3.0查看本需求详情</span>
-                            </button>
-                          ) : null}
-                        </div>
-                        {!isRequirementSpacePublished(requirementSpaceManifest) ? (
-                          <TooltipProvider delayDuration={180}>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <span className="inline-flex">
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="outline"
-                                    disabled={conversationLoading || tokenSaving}
-                                    className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
-                                    onClick={() => void handleSendLeanstarToken()}
-                                  >
-                                    {tokenSaving ? (
-                                      <Loader2 className="size-3.5 animate-spin" />
-                                    ) : (
-                                      <KeyRound className="size-3.5" />
-                                    )}
-                                    {hasStoredToken ? "发送Token身份令牌" : "获取Token身份令牌"}
-                                  </Button>
-                                </span>
-                              </TooltipTrigger>
-                              {conversationLoading || tokenSaving ? (
-                                <TooltipContent
-                                  side="top"
-                                  className="max-w-56 text-xs leading-relaxed"
-                                >
-                                  {tokenSaving
-                                    ? "身份验证正在处理中，请稍候。"
-                                    : "当前正在处理需求，请稍候再进行身份验证。"}
-                                </TooltipContent>
-                              ) : null}
-                            </Tooltip>
-                          </TooltipProvider>
-                        ) : null}
-                      </div>
-                    </section>
-
-                    <section>
-                      <div className="mb-2 flex items-center justify-between gap-3">
-                        <h4 className="text-sm font-semibold text-foreground">功能清单</h4>
-                        <span className="text-[11px] tabular-nums text-muted-foreground">
-                          {requirementSpaceManifest.functions.length} 项
-                        </span>
-                      </div>
-                      {requirementSpaceManifest.functions.length > 0 ? (
-                        <div className="divide-y divide-border/70 border-y border-border/70">
-                          {requirementSpaceManifest.functions.map((functionInfo) => (
-                            <article
-                              key={`${functionInfo.fr}-${functionInfo.file}`}
-                              className="py-3"
-                            >
-                              <div className="flex items-start gap-2">
-                                <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-semibold text-primary">
-                                  {functionInfo.fr}
-                                </span>
-                                <div className="min-w-0 flex-1">
-                                  <div className="flex items-center gap-1.5">
-                                    <h5 className="min-w-0 flex-1 text-sm font-semibold text-foreground">
-                                      {functionInfo.name || "未命名功能"}
-                                    </h5>
-                                    <IconPopoverButton
-                                      aria-label={
-                                        functionInfo.file
-                                          ? `查看${functionInfo.name || functionInfo.fr}详情`
-                                          : "暂无关联 PRD 文件"
-                                      }
-                                      icon={<Eye className="size-3.5" />}
-                                      disabled={!functionInfo.file}
-                                      popoverContent={
-                                        functionInfo.file ? "点击查看详情" : "暂无关联 PRD 文件"
-                                      }
-                                      onClick={() => handleFunctionFilePreview(functionInfo.file)}
-                                    />
-                                  </div>
-                                  <p className="mt-1 text-sm leading-5 text-muted-foreground">
-                                    {functionInfo.description || "暂无功能描述"}
-                                  </p>
-                                  <div className="mt-2 flex flex-wrap gap-1.5">
-                                    {functionInfo.keywords.map((keyword, keywordIndex) => (
-                                      <span
-                                        key={`${functionInfo.fr}-${keyword}-${keywordIndex}`}
-                                        className="rounded border border-border/70 bg-muted/30 px-1.5 py-0.5 text-[11px] text-muted-foreground"
-                                      >
-                                        {keyword}
-                                      </span>
-                                    ))}
-                                  </div>
-                                  {functionInfo.file ? (
-                                    <p className="mt-2 text-[11px] text-muted-foreground">
-                                      文档文件 {functionInfo.file}
-                                    </p>
-                                  ) : null}
-                                </div>
-                              </div>
-                            </article>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="border-y border-border/70 py-4 text-sm text-muted-foreground">
-                          暂无功能数据
-                        </p>
-                      )}
-                    </section>
-                  </div>
-                ) : (
-                  <div className="flex h-full min-h-[260px] items-center justify-center text-sm text-muted-foreground">
-                    暂无需求空间数据
-                  </div>
-                )}
-              </TabsContent>
-            </Tabs>
-          </aside>
+          <RequirementStepsPanel
+            requirement={requirement}
+            manifest={requirementSpaceManifest}
+            prototypeStatuses={prototypeStatuses}
+            previewTab={previewTab}
+            prototypeRoute={prototypeRoute}
+            collapsed={rightPanelCollapsed}
+            threadId={threadId}
+            workspacePath={threadState?.workspacePath ?? requirement.requirementPath}
+            sourcePreview={sourcePreview}
+            sourcePreviewLoading={sourcePreviewLoading}
+            sourcePreviewError={sourcePreviewError}
+            sourceDocumentFiles={sourceDocumentFiles}
+            manifestLoading={manifestLoading}
+            manifestError={manifestError}
+            statusRefreshing={statusRefreshing}
+            conversationLoading={conversationLoading}
+            tokenSaving={tokenSaving}
+            hasStoredToken={hasStoredToken}
+            publishRequestQueued={publishRequestQueued}
+            expertAnalysisStarted={expertAnalysisStarted}
+            expertAnalysisCompleted={expertAnalysisCompleted}
+            expertProcessRunning={expertProcessRunning}
+            prdGenerationCompleted={prdGenerationCompleted}
+            prototypeStepEnabled={prototypeStepEnabled}
+            prototypeStepCompleted={prototypeStepCompleted}
+            requirementSpaceStepEnabled={requirementSpaceStepEnabled}
+            requirementSpacePublished={requirementSpacePublished}
+            allPrototypeFunctionsCompleted={allPrototypeFunctionsCompleted}
+            completedPrototypeCount={completedPrototypeCount}
+            generatedPrototypeCount={generatedPrototypeCount}
+            skippedPrototypeCount={skippedPrototypeCount}
+            prdFileCount={prdFileCount}
+            prdPreviewReloadToken={prdPreviewReloadToken}
+            showExpertProcess={subagentFocusView?.threadId === threadId}
+            onPreviewTabChange={setPreviewTab}
+            onFunctionWorkspaceChange={handleFunctionWorkspaceChange}
+            onFocusExpertProcess={() => {
+              focusExpertProcess()
+            }}
+            onRefreshStatus={handleRefreshStatus}
+            onCollapse={() => setRightPanelCollapsed(true)}
+            onReloadSource={loadSourcePreview}
+            onReloadManifest={loadRequirementSpaceManifest}
+            onOpenWorkspaceFilePreview={openWorkspaceFilePreview}
+            onChoosePrototypeRoute={choosePrototypeRoute}
+            onRevealRequirementFile={revealRequirementFile}
+            onRequestPrototypeDesign={requestPrototypeDesign}
+            onUpdatePrototypeFunctionDesign={updatePrototypeFunctionDesign}
+            onPublishToRequirementSpace={handlePublishToRequirementSpace}
+            onSendLeanstarToken={handleSendLeanstarToken}
+          />
         </div>
       </div>
       <Dialog open={tokenDialogOpen} onOpenChange={setTokenDialogOpen}>
@@ -1601,7 +1302,7 @@ export function RequirementConversationView({
 }): React.JSX.Element {
   return (
     <RequirementConversationSession
-      key={requirement.id}
+      key={`${requirement.id}:${selectedThreadId ?? requirement.threadIds[0] ?? ""}`}
       requirement={requirement}
       selectedThreadId={selectedThreadId}
       requirements={requirements}

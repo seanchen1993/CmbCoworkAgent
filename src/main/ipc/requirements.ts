@@ -6,10 +6,12 @@ import mammoth from "mammoth"
 import { getOpenworkDir } from "../storage"
 
 type RequirementSourceType = "file" | "text" | "link"
+type NeedDesignChoice = "" | "0" | "1"
 
 export type RequirementSource = {
   type: RequirementSourceType
   fileName: string
+  attachmentNames?: string[]
   url?: string | null
   initialDescription?: string
 }
@@ -24,6 +26,7 @@ export type RequirementIndexItem = {
   createdAt: string
   updatedAt: string
   prdManifest?: IndexedPrdManifest
+  needDesign?: NeedDesignChoice
 }
 
 export type IndexedPrdManifest = {
@@ -33,6 +36,8 @@ export type IndexedPrdManifest = {
     description: string
     file: string
     prDetailUrl?: string
+    currentStep: number
+    needDesign: NeedDesignChoice
   }
   functions: Array<{
     fr: string
@@ -40,6 +45,8 @@ export type IndexedPrdManifest = {
     description: string
     file: string
     keywords: string[]
+    htmlFile: string
+    needDesign: NeedDesignChoice
   }>
 }
 
@@ -81,6 +88,7 @@ type CreateRequirementPayload = {
     content?: string
     bytes?: ArrayBuffer
     initialDescription?: string
+    attachments?: Array<{ fileName: string; bytes: ArrayBuffer }>
   }
 }
 
@@ -133,10 +141,7 @@ type RequirementsIndexFile = {
   lastWorkDir?: string
 }
 
-function getRequirementThreadIds(item: {
-  threadIds?: unknown
-  threadId?: unknown
-}): string[] {
+function getRequirementThreadIds(item: { threadIds?: unknown; threadId?: unknown }): string[] {
   const persistedThreadIds = Array.isArray(item.threadIds) ? item.threadIds : []
   const legacyThreadId = typeof item.threadId === "string" ? [item.threadId] : []
   return [
@@ -211,6 +216,17 @@ async function writeJson(filePath: string, value: unknown): Promise<void> {
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf-8")
 }
 
+async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+  const temporaryPath = `${filePath}.${randomUUID()}.tmp`
+  try {
+    await fs.writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, "utf-8")
+    await fs.rename(temporaryPath, filePath)
+  } finally {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined)
+  }
+}
+
 async function migrateLegacyRequirementData(): Promise<void> {
   const requirementsRoot = getRequirementsRoot()
   const legacyRoot = path.join(getOpenworkDir(), "designworkbench", REQUIREMENTS_DIRNAME)
@@ -270,6 +286,7 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
   const normalized = list.map((rawItem) => {
     const { threadId: _legacyThreadId, ...item } = rawItem as typeof rawItem & {
       threadId?: unknown
+      crrentStep?: unknown
       status?: unknown
       prdGenerated?: unknown
     }
@@ -283,6 +300,7 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
     delete item.prdManifestSynced
     delete item.status
     delete item.prdGenerated
+    delete item.crrentStep
     const rawSourceType = (item.source as { type?: unknown } | undefined)?.type
     const sourceType: RequirementSourceType =
       rawSourceType === "file" || rawSourceType === "link" || rawSourceType === "text"
@@ -290,14 +308,16 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
         : rawSourceType === "blank"
           ? "text"
           : "text"
+    const normalizedManifest = normalizePrdManifest(item.prdManifest)
     return {
       ...item,
       threadIds: normalizedThreadIds,
+      needDesign: normalizeNeedDesign(item.needDesign),
       source: {
         ...item.source,
         type: sourceType
       },
-      prdManifest: normalizePrdManifest(item.prdManifest)
+      prdManifest: normalizedManifest
     }
   })
   if (normalized.some((item, index) => JSON.stringify(item) !== JSON.stringify(list[index]))) {
@@ -404,7 +424,9 @@ function createEmptyPrdManifest(): IndexedPrdManifest {
       name: "",
       status: "",
       description: "",
-      file: ""
+      file: "",
+      currentStep: 1,
+      needDesign: ""
     },
     functions: []
   }
@@ -414,20 +436,39 @@ function readManifestString(value: Record<string, unknown>, key: string): string
   return typeof value[key] === "string" ? value[key] : ""
 }
 
+function normalizeNeedDesign(value: unknown): NeedDesignChoice {
+  if (value === "1" || value === "0") return value
+  return ""
+}
+
 function normalizePrdManifest(value: unknown): IndexedPrdManifest {
   const source = isRecord(value) ? value : {}
   const prd = isRecord(source.prd) ? source.prd : {}
   const normalized = createEmptyPrdManifest()
   const status = readManifestString(prd, "status").trim().toLowerCase()
   const prDetailUrl = readManifestString(prd, "prDetailUrl")
+  const normalizedStatus =
+    status === "init" || status === "draft" || status === "generated" || status === "published"
+      ? status
+      : ""
+  const fallbackStep =
+    normalizedStatus === "published"
+      ? 5
+      : normalizedStatus === "generated"
+        ? 3
+        : normalizedStatus === "init" || normalizedStatus === "draft"
+          ? 2
+          : 1
   normalized.prd = {
     name: readManifestString(prd, "name"),
-    status:
-      status === "init" || status === "draft" || status === "generated" || status === "published"
-        ? status
-        : "",
+    status: normalizedStatus,
     description: readManifestString(prd, "description"),
     file: readManifestString(prd, "file"),
+    currentStep:
+      typeof prd.currentStep === "number" && Number.isFinite(prd.currentStep)
+        ? Math.max(1, Math.min(5, Math.trunc(prd.currentStep)))
+        : fallbackStep,
+    needDesign: normalizeNeedDesign(prd.needDesign),
     ...(prDetailUrl ? { prDetailUrl } : {})
   }
 
@@ -444,12 +485,74 @@ function normalizePrdManifest(value: unknown): IndexedPrdManifest {
         name: readManifestString(functionInfo, "name"),
         description: readManifestString(functionInfo, "description"),
         file: readManifestString(functionInfo, "file"),
-        keywords
+        keywords,
+        htmlFile: readManifestString(functionInfo, "htmlFile"),
+        needDesign: normalizeNeedDesign(functionInfo.needDesign)
       })
     }
   }
 
   return normalized
+}
+
+type WorkspaceManifestReadResult =
+  | { status: "ok"; raw: Record<string, unknown>; manifest: IndexedPrdManifest }
+  | { status: "missing" }
+  | { status: "invalid"; error: string }
+
+async function readWorkspaceManifest(
+  item: RequirementIndexItem
+): Promise<WorkspaceManifestReadResult> {
+  const manifestPath = getRequirementPrdPath(item)
+  let content: string
+  try {
+    content = await fs.readFile(manifestPath, "utf-8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { status: "missing" }
+    return {
+      status: "invalid",
+      error: error instanceof Error ? error.message : "读取 Manifest 失败"
+    }
+  }
+  try {
+    const raw: unknown = JSON.parse(content)
+    if (!isRecord(raw) || !isRecord(raw.prd) || !Array.isArray(raw.functions)) {
+      return { status: "invalid", error: "Manifest 的 prd 或 functions 字段格式不正确" }
+    }
+    return { status: "ok", raw, manifest: normalizePrdManifest(raw) }
+  } catch (error) {
+    return {
+      status: "invalid",
+      error: error instanceof Error ? error.message : "Manifest JSON 无效"
+    }
+  }
+}
+
+function mergeManifestState(
+  raw: Record<string, unknown>,
+  state: {
+    needDesign: NeedDesignChoice
+    currentStep: number
+    functions: Array<{ fr: string; file: string; htmlFile: string; needDesign: NeedDesignChoice }>
+  }
+): Record<string, unknown> {
+  const rawPrd = isRecord(raw.prd) ? raw.prd : {}
+  const rawFunctions = Array.isArray(raw.functions) ? raw.functions : []
+  return {
+    ...raw,
+    prd: { ...rawPrd, currentStep: state.currentStep, needDesign: state.needDesign },
+    functions: rawFunctions.map((entry) => {
+      const functionInfo = isRecord(entry) ? entry : {}
+      const saved = state.functions.find(
+        (item) =>
+          item.fr === readManifestString(functionInfo, "fr") &&
+          item.file === readManifestString(functionInfo, "file")
+      )
+      return saved
+        ? { ...functionInfo, htmlFile: saved.htmlFile, needDesign: saved.needDesign }
+        : functionInfo
+    })
+  }
 }
 
 async function convertRequirementSourceToMarkdown(sourcePath: string): Promise<string> {
@@ -546,6 +649,21 @@ async function createRequirement(
     throw new Error("需求标题和需求来源不能为空")
   }
   const workDir = await resolveRequirementWorkDir(payload?.workDir)
+  const primarySourceFileName = source.type === "text" ? "" : safeSegment(source.fileName, "source")
+  const usedSourceFileNames = new Set(primarySourceFileName ? [primarySourceFileName] : [])
+  const attachmentNames = (source.attachments ?? []).map((attachment, index) => {
+    const safeName = safeSegment(attachment.fileName, `attachment-${index + 1}`)
+    const extension = path.extname(safeName)
+    const stem = extension ? safeName.slice(0, -extension.length) : safeName
+    let uniqueName = safeName
+    let suffix = 2
+    while (usedSourceFileNames.has(uniqueName)) {
+      uniqueName = `${stem}-${suffix}${extension}`
+      suffix += 1
+    }
+    usedSourceFileNames.add(uniqueName)
+    return uniqueName
+  })
 
   const now = new Date().toISOString()
   const reqId = `req-${Date.now()}-${randomUUID().slice(0, 8)}`
@@ -557,7 +675,8 @@ async function createRequirement(
     requirementPath: getRequirementWorkspacePath(workDir, reqId, title),
     source: {
       type: source.type,
-      fileName: source.type === "text" ? "" : safeSegment(source.fileName, "source"),
+      fileName: primarySourceFileName,
+      ...(attachmentNames.length ? { attachmentNames } : {}),
       ...(source.type === "link" ? { url: source.url?.trim() || null } : {}),
       ...(source.type === "text"
         ? { initialDescription: source.initialDescription?.trim() || "" }
@@ -588,6 +707,18 @@ async function createRequirement(
 
     const sourcePreview = await convertRequirementSourceToMarkdown(sourcePath)
     await fs.writeFile(getRequirementSourcePreviewPath(item), `${sourcePreview}\n`, "utf-8")
+  }
+  if (source.attachments?.length) {
+    const sourceDirectory = path.join(getRequirementRoot(item), "source")
+    await fs.mkdir(sourceDirectory, { recursive: true })
+    for (const [index, attachment] of source.attachments.entries()) {
+      const buffer = Buffer.from(attachment.bytes)
+      if (buffer.byteLength === 0) throw new Error(`补充文件 ${index + 1} 内容为空`)
+      if (buffer.byteLength > MAX_TEXT_BYTES)
+        throw new Error(`补充文件 ${attachment.fileName} 超过 5MB 限制`)
+      const fileName = attachmentNames[index]
+      await fs.writeFile(path.join(sourceDirectory, fileName), buffer)
+    }
   }
   await fs.mkdir(getRequirementPrdDir(item), { recursive: true })
   await saveLastRequirementWorkDir(workDir)
@@ -648,6 +779,93 @@ async function renameRequirement(reqId: string, title: string): Promise<Requirem
   return toRuntimeRequirement(next)
 }
 
+async function saveRequirementStepState(
+  reqId: string,
+  state: {
+    needDesign: NeedDesignChoice
+    currentStep: number
+    functions: Array<{ fr: string; file: string; htmlFile: string; needDesign: NeedDesignChoice }>
+  }
+): Promise<{
+  requirement: RequirementRuntimeItem
+  manifestStatus: "updated" | "missing" | "invalid"
+  manifest?: IndexedPrdManifest
+  manifestError?: string
+}> {
+  const normalizedReqId = reqId?.trim()
+  if (!normalizedReqId || !state) throw new Error("需求编号和步骤状态不能为空")
+  if (!Number.isFinite(state.currentStep) || !Array.isArray(state.functions)) {
+    throw new Error("步骤状态格式无效")
+  }
+  const list = await readRequirementIndex()
+  const index = list.findIndex((item) => item.reqId === normalizedReqId)
+  if (index < 0) throw new Error(`需求不存在：${normalizedReqId}`)
+  const requestedStep = Math.max(1, Math.min(5, Math.trunc(state.currentStep)))
+  const workspaceManifest = await readWorkspaceManifest(list[index])
+  const reachedStep = Math.max(
+    requestedStep,
+    normalizePrdManifest(list[index].prdManifest).prd.currentStep,
+    workspaceManifest.status === "ok" ? workspaceManifest.manifest.prd.currentStep : 1
+  )
+  let indexedManifest = normalizePrdManifest(list[index].prdManifest)
+  let manifestStatus: "updated" | "missing" | "invalid" =
+    workspaceManifest.status === "ok" ? "updated" : workspaceManifest.status
+  let manifestError: string | undefined
+  if (workspaceManifest.status === "ok") {
+    const mergedRaw = mergeManifestState(workspaceManifest.raw, {
+      ...state,
+      currentStep: reachedStep
+    })
+    await writeJsonAtomic(getRequirementPrdPath(list[index]), mergedRaw)
+    indexedManifest = normalizePrdManifest(mergedRaw)
+    manifestStatus = "updated"
+  } else if (workspaceManifest.status === "invalid") {
+    manifestError = workspaceManifest.error
+    indexedManifest = {
+      ...indexedManifest,
+      prd: { ...indexedManifest.prd, currentStep: reachedStep, needDesign: state.needDesign },
+      functions: indexedManifest.functions.map((functionInfo) => {
+        const saved = state.functions.find(
+          (item) => item.fr === functionInfo.fr && item.file === functionInfo.file
+        )
+        return saved
+          ? { ...functionInfo, htmlFile: saved.htmlFile, needDesign: saved.needDesign }
+          : functionInfo
+      })
+    }
+  } else {
+    indexedManifest = {
+      ...indexedManifest,
+      prd: { ...indexedManifest.prd, currentStep: reachedStep, needDesign: state.needDesign },
+      functions: indexedManifest.functions.map((functionInfo) => {
+        const saved = state.functions.find(
+          (item) => item.fr === functionInfo.fr && item.file === functionInfo.file
+        )
+        return saved
+          ? { ...functionInfo, htmlFile: saved.htmlFile, needDesign: saved.needDesign }
+          : functionInfo
+      })
+    }
+  }
+  if (state.needDesign === "1" && reachedStep >= 4) {
+    await fs.mkdir(path.join(getRequirementPrdDir(list[index]), "原型设计"), { recursive: true })
+  }
+  const next: RequirementIndexItem = {
+    ...list[index],
+    updatedAt: new Date().toISOString(),
+    needDesign: state.needDesign,
+    prdManifest: indexedManifest
+  }
+  list[index] = next
+  await writeRequirementIndex(list)
+  return {
+    requirement: await toRuntimeRequirement(next),
+    manifestStatus,
+    ...(manifestStatus === "updated" ? { manifest: indexedManifest } : {}),
+    ...(manifestError ? { manifestError } : {})
+  }
+}
+
 async function saveRequirementPrd(payload: SavePrdPayload): Promise<RequirementRuntimeItem> {
   const list = await readRequirementIndex()
   const index = list.findIndex((item) => item.reqId === payload?.reqId)
@@ -681,14 +899,18 @@ async function saveRequirementPrd(payload: SavePrdPayload): Promise<RequirementR
       name: item.title,
       status: "generated",
       description: "",
-      file: modules[0]?.filePath ?? ""
+      file: modules[0]?.filePath ?? "",
+      currentStep: 3,
+      needDesign: ""
     },
     functions: modules.map((module) => ({
       fr: module.moduleId,
       name: module.name,
       description: module.description,
       file: module.filePath,
-      keywords: module.keywords
+      keywords: module.keywords,
+      htmlFile: "",
+      needDesign: ""
     }))
   }
   await writeJson(getRequirementPrdPath(item), prdManifest)
@@ -729,20 +951,13 @@ const manifestOperationQueues = new Map<string, Promise<void>>()
 function enqueueManifestOperation<T>(reqId: string, operation: () => Promise<T>): Promise<T> {
   const previous = manifestOperationQueues.get(reqId) ?? Promise.resolve()
   const next = previous.then(operation, operation)
-  let queued: Promise<void>
-  const tracked = next.then(
-    (value) => {
+  const queued = next.then(
+    () => {
       if (manifestOperationQueues.get(reqId) === queued) manifestOperationQueues.delete(reqId)
-      return value
     },
-    (error: unknown) => {
+    () => {
       if (manifestOperationQueues.get(reqId) === queued) manifestOperationQueues.delete(reqId)
-      throw error
     }
-  )
-  queued = tracked.then(
-    () => undefined,
-    () => undefined
   )
   manifestOperationQueues.set(reqId, queued)
   return next
@@ -793,13 +1008,20 @@ async function syncRequirementManifest(
       }
     }
 
+    // Loading a conversation is a read-only operation for the workspace manifest.
+    // Normalize the file contents for the UI/index mirror, but never merge stale index
+    // values back into the file or write the file from this query path.
     const manifest = normalizePrdManifest(payload.manifest)
-    list[index] = {
+    const next = {
       ...list[index],
+      needDesign: manifest.prd.needDesign,
       prdManifest: manifest
     }
-    await writeRequirementIndex(list)
-    return toRuntimeRequirement(list[index])
+    if (JSON.stringify(next) !== JSON.stringify(list[index])) {
+      list[index] = next
+      await writeRequirementIndex(list)
+    }
+    return toRuntimeRequirement(next)
   })
 }
 
@@ -966,6 +1188,38 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
       }
     }
   )
+  ipcMain.handle(
+    "requirements:save-step-state",
+    async (
+      _event,
+      payload: {
+        reqId: string
+        needDesign: NeedDesignChoice
+        currentStep: number
+        functions: Array<{
+          fr: string
+          file: string
+          htmlFile: string
+          needDesign: NeedDesignChoice
+        }>
+      }
+    ) => {
+      try {
+        const saved = await enqueueManifestOperation(payload.reqId, () =>
+          saveRequirementStepState(payload.reqId, payload)
+        )
+        return {
+          success: true,
+          ...saved
+        }
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "保存原型流程状态失败"
+        }
+      }
+    }
+  )
   ipcMain.handle("requirements:save-prd", async (_event, payload: SavePrdPayload) => {
     try {
       return { success: true, requirement: await saveRequirementPrd(payload) }
@@ -973,6 +1227,39 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
       return { success: false, error: error instanceof Error ? error.message : "保存 PRD 失败" }
     }
   })
+  ipcMain.handle(
+    "requirements:save-prd-file",
+    async (_event, payload: { reqId: string; filePath: string; content: string }) => {
+      try {
+        const reqId = payload?.reqId?.trim()
+        const filePath = payload?.filePath?.trim().replace(/\\/g, "/")
+        if (!reqId || !filePath || typeof payload.content !== "string") {
+          return { success: false, error: "需求编号、文件路径和内容不能为空" }
+        }
+        if (!filePath.toLowerCase().endsWith(".md")) {
+          return { success: false, error: "仅支持编辑 Markdown 文件" }
+        }
+        validateTextContent(payload.content, "PRD 内容")
+        const item = (await readRequirementIndex()).find((entry) => entry.reqId === reqId)
+        if (!item) return { success: false, error: `需求不存在：${reqId}` }
+
+        const prdRoot = await fs.realpath(getRequirementPrdDir(item))
+        const relativePath = filePath.replace(/^\/+/, "").replace(/^prd\//i, "")
+        const requestedPath = path.resolve(prdRoot, relativePath)
+        const targetPath = await fs.realpath(requestedPath)
+        if (targetPath !== prdRoot && !targetPath.startsWith(`${prdRoot}${path.sep}`)) {
+          return { success: false, error: "文件路径超出当前需求的 PRD 目录" }
+        }
+        await fs.writeFile(targetPath, payload.content, "utf-8")
+        return { success: true }
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "保存 PRD 文件失败"
+        }
+      }
+    }
+  )
   ipcMain.handle(
     "requirements:begin-manifest-sync",
     async (_event, payload: BeginRequirementManifestSyncPayload) => {
@@ -991,9 +1278,11 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
     "requirements:sync-manifest",
     async (_event, payload: SyncRequirementManifestPayload) => {
       try {
+        const requirement = await syncRequirementManifest(payload)
         return {
           success: true,
-          requirement: await syncRequirementManifest(payload)
+          requirement,
+          manifest: normalizePrdManifest(payload.manifest)
         }
       } catch (error) {
         return {

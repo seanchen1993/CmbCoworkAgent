@@ -6,6 +6,8 @@ export type RequirementModule = {
   keywords: string[]
 }
 
+export type NeedDesignChoice = "" | "0" | "1"
+
 export type RequirementPrdManifest = {
   prd: {
     name: string
@@ -13,6 +15,8 @@ export type RequirementPrdManifest = {
     description: string
     file: string
     prDetailUrl?: string
+    currentStep: number
+    needDesign: NeedDesignChoice
   }
   functions: Array<{
     fr: string
@@ -20,6 +24,8 @@ export type RequirementPrdManifest = {
     description: string
     file: string
     keywords: string[]
+    htmlFile: string
+    needDesign: NeedDesignChoice
   }>
 }
 
@@ -41,6 +47,7 @@ export type RequirementRecord = {
   sourceType: "file" | "text" | "link"
   sourceName: string
   initialDescription: string
+  needDesign: NeedDesignChoice
   prdManifest: RequirementPrdManifest
   prd: "是" | "否"
 }
@@ -48,13 +55,7 @@ export type RequirementRecord = {
 export function getRequirementThreadIds(
   requirement: Pick<RequirementRecord, "threadIds">
 ): string[] {
-  return [
-    ...new Set(
-      requirement.threadIds
-        .map((value) => value.trim())
-        .filter(Boolean)
-    )
-  ]
+  return [...new Set(requirement.threadIds.map((value) => value.trim()).filter(Boolean))]
 }
 
 function formatRequirementTime(value: string): string {
@@ -93,6 +94,7 @@ export function fromPersistedRequirement(
     sourceType: item.source.type,
     sourceName: item.source.fileName,
     initialDescription: item.source.initialDescription ?? "",
+    needDesign: item.needDesign === "1" || item.needDesign === "0" ? item.needDesign : "",
     prdManifest: item.prdManifest,
     prd: generated ? "是" : "否"
   }

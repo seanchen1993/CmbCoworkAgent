@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  promises as fsPromises,
   readFileSync,
   readdirSync,
   rmSync,
@@ -85,7 +86,13 @@ describe("requirement source preview", () => {
       source: {
         type: "file",
         fileName: "requirement.docx",
-        sourcePath
+        sourcePath,
+        attachments: [
+          {
+            fileName: "reference.txt",
+            bytes: new TextEncoder().encode("supporting material").buffer
+          }
+        ]
       }
     })) as {
       success: boolean
@@ -118,6 +125,12 @@ describe("requirement source preview", () => {
       "source",
       "requirement.docx"
     )
+    const archivedAttachmentPath = join(
+      created.requirement!.requirementPath,
+      "source",
+      "reference.txt"
+    )
+    expect(readFileSync(archivedAttachmentPath, "utf-8")).toBe("supporting material")
     const cachedPreviewPath = join(created.requirement!.requirementPath, "source-preview.md")
     expect(readFileSync(cachedPreviewPath, "utf-8")).toContain("- Apple")
     const prdDir = join(created.requirement!.requirementPath, "prd")
@@ -193,7 +206,9 @@ describe("requirement source preview", () => {
         status: "published",
         description: "提供基础待办管理与提醒能力",
         file: "pr-doc.md",
-        prDetailUrl: "https://www.baidu.com"
+        prDetailUrl: "https://www.baidu.com",
+        currentStep: 5,
+        needDesign: ""
       },
       functions: [
         {
@@ -201,14 +216,18 @@ describe("requirement source preview", () => {
           name: "模块中文",
           description: "模块解释",
           file: "fr-1-doc.md",
-          keywords: ["记事本", "文件"]
+          keywords: ["记事本", "文件"],
+          htmlFile: "",
+          needDesign: ""
         },
         {
           fr: "FR2",
           name: "第二模块",
           description: "第二个模块",
           file: "fr-2-doc.md",
-          keywords: []
+          keywords: [],
+          htmlFile: "",
+          needDesign: ""
         }
       ]
     })
@@ -435,6 +454,169 @@ describe("requirement source preview", () => {
     await remove!(null, created.requirement.reqId)
   })
 
+  it("merges prototype state updates and protects missing or invalid manifests", async () => {
+    const workDir = join(tempHome, "step-state-workspace")
+    mkdirSync(workDir)
+    const create = handlers.get("requirements:create")!
+    const saveStepState = handlers.get("requirements:save-step-state")!
+    const syncManifest = handlers.get("requirements:sync-manifest")!
+    const remove = handlers.get("requirements:delete")!
+    const created = (await create(null, {
+      systemId: "system-step",
+      title: "步骤状态",
+      workDir,
+      source: { type: "text", fileName: "" }
+    })) as { success: boolean; requirement: { reqId: string; requirementPath: string } }
+    const manifestPath = join(created.requirement.requirementPath, "prd", "prd-manifest.json")
+    mkdirSync(join(created.requirement.requirementPath, "prd"), { recursive: true })
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        prd: {
+          name: "步骤状态",
+          status: "generated",
+          currentStep: 3,
+          needDesign: "",
+          custom: "preserved"
+        },
+        functions: [
+          { fr: "FR1", file: "需求3.0文件/fr-1-doc.md", custom: 1 },
+          { fr: "FR2", file: "需求3.0文件/fr-2-doc.md", custom: 2 }
+        ]
+      }),
+      "utf-8"
+    )
+
+    const updated = (await saveStepState(null, {
+      reqId: created.requirement.reqId,
+      needDesign: "1",
+      currentStep: 4,
+      functions: [
+        {
+          fr: "FR1",
+          file: "需求3.0文件/fr-1-doc.md",
+          htmlFile: "原型设计/fr-1.html",
+          needDesign: "1"
+        }
+      ]
+    })) as {
+      success: boolean
+      manifestStatus: string
+      manifest: { prd: { currentStep: number } }
+    }
+    expect(updated).toMatchObject({ success: true, manifestStatus: "updated" })
+    expect(updated.manifest.prd.currentStep).toBe(4)
+    expect(existsSync(join(created.requirement.requirementPath, "prd", "原型设计"))).toBe(true)
+    expect(JSON.parse(readFileSync(manifestPath, "utf-8"))).toMatchObject({
+      prd: { currentStep: 4, needDesign: "1", custom: "preserved" },
+      functions: [
+        {
+          fr: "FR1",
+          htmlFile: "原型设计/fr-1.html",
+          needDesign: "1",
+          custom: 1
+        },
+        { fr: "FR2", custom: 2 }
+      ]
+    })
+
+    await saveStepState(null, {
+      reqId: created.requirement.reqId,
+      needDesign: "1",
+      currentStep: 4,
+      functions: [
+        {
+          fr: "FR2",
+          file: "需求3.0文件/fr-2-doc.md",
+          htmlFile: "",
+          needDesign: "0"
+        }
+      ]
+    })
+    expect(JSON.parse(readFileSync(manifestPath, "utf-8")).functions).toMatchObject([
+      { fr: "FR1", htmlFile: "原型设计/fr-1.html", needDesign: "1" },
+      { fr: "FR2", htmlFile: "", needDesign: "0" }
+    ])
+
+    const manifestBeforeQuery = readFileSync(manifestPath, "utf-8")
+    const queriedManifest = JSON.parse(manifestBeforeQuery)
+    const resynced = (await syncManifest(null, {
+      reqId: created.requirement.reqId,
+      manifest: queriedManifest
+    })) as {
+      success: boolean
+      manifest: { prd: { currentStep: number; needDesign: "" | "0" | "1" } }
+    }
+    expect(resynced.success).toBe(true)
+    expect(resynced.manifest.prd).toMatchObject({ currentStep: 4, needDesign: "1" })
+    expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBeforeQuery)
+
+    const writeFileSpy = vi.spyOn(fsPromises, "writeFile")
+    await syncManifest(null, {
+      reqId: created.requirement.reqId,
+      manifest: queriedManifest
+    })
+    expect(writeFileSpy).not.toHaveBeenCalled()
+    writeFileSpy.mockRestore()
+
+    await saveStepState(null, {
+      reqId: created.requirement.reqId,
+      needDesign: "1",
+      currentStep: 4,
+      functions: [
+        {
+          fr: "FR1",
+          file: "需求3.0文件/fr-1-doc.md",
+          htmlFile: "",
+          needDesign: "0"
+        }
+      ]
+    })
+    const manuallyEditedManifest = JSON.parse(readFileSync(manifestPath, "utf-8"))
+    manuallyEditedManifest.functions[0].htmlFile = "原型设计/fr-1.html"
+    manuallyEditedManifest.functions[0].needDesign = "1"
+    writeFileSync(manifestPath, JSON.stringify(manuallyEditedManifest), "utf-8")
+    const manuallyEditedBytes = readFileSync(manifestPath, "utf-8")
+    const manualSync = (await syncManifest(null, {
+      reqId: created.requirement.reqId,
+      manifest: manuallyEditedManifest
+    })) as {
+      success: boolean
+      manifest: { functions: Array<{ htmlFile: string; needDesign: "" | "0" | "1" }> }
+    }
+    expect(manualSync.success).toBe(true)
+    expect(manualSync.manifest.functions[0]).toMatchObject({
+      htmlFile: "原型设计/fr-1.html",
+      needDesign: "1"
+    })
+    expect(readFileSync(manifestPath, "utf-8")).toBe(manuallyEditedBytes)
+    expect(JSON.parse(readFileSync(manifestPath, "utf-8")).functions[0]).toMatchObject({
+      htmlFile: "原型设计/fr-1.html",
+      needDesign: "1"
+    })
+
+    writeFileSync(manifestPath, "{ invalid", "utf-8")
+    const invalid = (await saveStepState(null, {
+      reqId: created.requirement.reqId,
+      needDesign: "0",
+      currentStep: 5,
+      functions: []
+    })) as { success: boolean; manifestStatus: string }
+    expect(invalid).toMatchObject({ success: true, manifestStatus: "invalid" })
+    expect(readFileSync(manifestPath, "utf-8")).toBe("{ invalid")
+
+    rmSync(manifestPath)
+    const missing = (await saveStepState(null, {
+      reqId: created.requirement.reqId,
+      needDesign: "0",
+      currentStep: 5,
+      functions: []
+    })) as { success: boolean; manifestStatus: string }
+    expect(missing).toMatchObject({ success: true, manifestStatus: "missing" })
+    expect(existsSync(manifestPath)).toBe(false)
+    await remove(null, created.requirement.reqId)
+  })
+
   it("rejects stale manifest syncs after a newer conversation request", async () => {
     const workDir = join(tempHome, "manifest-request-workspace")
     mkdirSync(workDir)
@@ -514,6 +696,8 @@ describe("requirement source preview", () => {
             systemId: "system-legacy",
             title: "旧格式需求",
             source: { type: "text", fileName: "" },
+            prdManifest: { prd: { status: "generated" }, functions: [] },
+            crrentStep: 5,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
           },
@@ -534,17 +718,23 @@ describe("requirement source preview", () => {
     const current = (await list!(null)) as Array<{
       reqId: string
       threadIds: string[]
+      prdManifest: { prd: { currentStep: number } }
     }>
-    expect(current.find((item) => item.reqId === legacyReqId)?.threadIds).toEqual([
-      "legacy-thread"
-    ])
+    expect(current.find((item) => item.reqId === legacyReqId)?.threadIds).toEqual(["legacy-thread"])
     expect(current.find((item) => item.reqId === "req-missing-thread-ids")?.threadIds).toEqual([])
+    expect(current.find((item) => item.reqId === legacyReqId)?.prdManifest.prd.currentStep).toBe(3)
 
     const persisted = JSON.parse(readFileSync(indexPath, "utf-8")) as {
-      list: Array<{ reqId: string; threadIds: string[]; threadId?: unknown }>
+      list: Array<{
+        reqId: string
+        threadIds: string[]
+        threadId?: unknown
+        crrentStep?: unknown
+      }>
     }
     expect(persisted.list[0]).toMatchObject({ reqId: legacyReqId, threadIds: ["legacy-thread"] })
     expect(persisted.list[0]).not.toHaveProperty("threadId")
+    expect(persisted.list[0]).not.toHaveProperty("crrentStep")
     expect(persisted.list[1].threadIds).toEqual([])
 
     await remove!(null, legacyReqId)

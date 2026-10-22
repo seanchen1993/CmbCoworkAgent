@@ -6,8 +6,10 @@ import {
   FolderOpen,
   Link,
   Loader2,
+  Plus,
   Sparkles,
-  Upload
+  Upload,
+  X
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -137,6 +139,7 @@ export function NewRequirementDialog({
 }): React.JSX.Element {
   const [source, setSource] = useState<UploadSource>("file")
   const [file, setFile] = useState<File | null>(null)
+  const [attachments, setAttachments] = useState<File[]>([])
   const [title, setTitle] = useState("")
   const [url, setUrl] = useState("")
   const [initialDescription, setInitialDescription] = useState("")
@@ -183,6 +186,23 @@ export function NewRequirementDialog({
     lastAutoFilledTitleRef.current = nextAutoFilledTitle
   }
 
+  const addAttachments = (nextFiles: File[]): void => {
+    const oversized = nextFiles.find((item) => item.size > MAX_ATTACHMENT_FILE_BYTES)
+    if (oversized) {
+      toast.error(`补充文件「${oversized.name}」超过 5MB 限制`)
+      return
+    }
+    setAttachments((current) => {
+      const byIdentity = new Map(
+        current.map((item) => [`${item.name}:${item.size}:${item.lastModified}`, item])
+      )
+      nextFiles.forEach((item) =>
+        byIdentity.set(`${item.name}:${item.size}:${item.lastModified}`, item)
+      )
+      return [...byIdentity.values()]
+    })
+  }
+
   const handleConfirm = async (): Promise<void> => {
     if (source === "file" && !file) {
       toast.error("请先选择需求草稿文件")
@@ -224,11 +244,18 @@ export function NewRequirementDialog({
         setPreparingSkill(false)
       }
       const sourceBytes = source === "file" && file ? await file.arrayBuffer() : undefined
+      const attachmentPayload = await Promise.all(
+        attachments.map(async (attachment) => ({
+          fileName: attachment.name,
+          bytes: await attachment.arrayBuffer()
+        }))
+      )
       const sourcePayload =
         source === "file"
           ? {
               fileName: sourceName || "新需求草稿.docx",
-              bytes: sourceBytes
+              bytes: sourceBytes,
+              attachments: attachmentPayload
             }
           : source === "link"
             ? {
@@ -238,7 +265,8 @@ export function NewRequirementDialog({
               }
             : {
                 fileName: "",
-                initialDescription: initialDescription.trim()
+                initialDescription: initialDescription.trim(),
+                attachments: attachmentPayload
               }
       const result = await window.api.requirements.create({
         systemId: system.id,
@@ -370,49 +398,51 @@ export function NewRequirementDialog({
           </TooltipProvider>
 
           {source === "file" ? (
-            <button
-              type="button"
-              onClick={() => inputRef.current?.click()}
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => {
-                event.preventDefault()
-                updateFile(event.dataTransfer.files.item(0))
-              }}
-              className="flex min-h-44 w-full flex-col items-center justify-center rounded-xl border-[1.5px] border-dashed border-[#d8cbbb] bg-[#fdfbf7] px-6 text-center transition-colors hover:border-primary/60 hover:bg-primary/5 focus-visible:border-primary focus-visible:outline-none"
-            >
-              <Upload className="mb-3 size-7 text-primary" />
-              <span className="text-sm font-semibold text-foreground">
-                {file ? file.name : "拖拽文件到此处，或点击上传"}
-              </span>
-              <span className="mt-1 text-sm text-muted-foreground">
-                仅支持 .docx 格式 · 请将旧版 .doc 文件另存为 .docx 后上传
-              </span>
-              {file ? (
-                <span className="mt-3 flex w-full items-center gap-2 rounded-lg border border-border bg-[#fbf8f4] px-3 py-2 text-left">
-                  <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-[#f8f0df] text-[#8f6a2a]">
-                    <FileText className="size-3.5" />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[12px] font-semibold text-foreground">
-                      {file.name}
-                    </span>
-                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                      {Math.ceil(file.size / 1024)} KB · 草稿已就绪
-                    </span>
-                  </span>
-                </span>
-              ) : null}
-              <input
-                ref={inputRef}
-                type="file"
-                accept=".docx"
-                className="hidden"
-                onChange={(event) => {
-                  updateFile(event.target.files?.item(0) ?? null)
-                  event.target.value = ""
+            <div className="space-y-3">
+              <button
+                type="button"
+                onClick={() => inputRef.current?.click()}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  updateFile(event.dataTransfer.files.item(0))
                 }}
-              />
-            </button>
+                className="flex min-h-44 w-full flex-col items-center justify-center rounded-xl border-[1.5px] border-dashed border-[#d8cbbb] bg-[#fdfbf7] px-6 text-center transition-colors hover:border-primary/60 hover:bg-primary/5 focus-visible:border-primary focus-visible:outline-none"
+              >
+                <Upload className="mb-3 size-7 text-primary" />
+                <span className="text-sm font-semibold text-foreground">
+                  {file ? file.name : "拖拽文件到此处，或点击上传"}
+                </span>
+                <span className="mt-1 text-sm text-muted-foreground">
+                  仅支持 .docx 格式 · 请将旧版 .doc 文件另存为 .docx 后上传
+                </span>
+                {file ? (
+                  <span className="mt-3 flex w-full items-center gap-2 rounded-lg border border-border bg-[#fbf8f4] px-3 py-2 text-left">
+                    <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-[#f8f0df] text-[#8f6a2a]">
+                      <FileText className="size-3.5" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[12px] font-semibold text-foreground">
+                        {file.name}
+                      </span>
+                      <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                        {Math.ceil(file.size / 1024)} KB · 草稿已就绪
+                      </span>
+                    </span>
+                  </span>
+                ) : null}
+                <input
+                  ref={inputRef}
+                  type="file"
+                  accept=".docx"
+                  className="hidden"
+                  onChange={(event) => {
+                    updateFile(event.target.files?.item(0) ?? null)
+                    event.target.value = ""
+                  }}
+                />
+              </button>
+            </div>
           ) : source === "link" ? (
             <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-5">
               <label
@@ -456,6 +486,64 @@ export function NewRequirementDialog({
               </p>
             </div>
           )}
+          <div className="rounded-xl border border-border bg-white p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-foreground">补充文件</div>
+                <div className="mt-0.5 text-xs text-muted-foreground">
+                  可上传多个文件，单个文件不超过 5MB
+                </div>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={saving}
+                onClick={() => document.getElementById("requirement-attachments")?.click()}
+              >
+                <Plus className="size-3.5" />
+                添加文件
+              </Button>
+              <input
+                id="requirement-attachments"
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(event) => {
+                  addAttachments(Array.from(event.target.files ?? []))
+                  event.target.value = ""
+                }}
+              />
+            </div>
+            {attachments.length > 0 ? (
+              <div className="mt-3 space-y-2">
+                {attachments.map((attachment) => (
+                  <div
+                    key={`${attachment.name}:${attachment.size}:${attachment.lastModified}`}
+                    className="flex items-center gap-2 rounded-lg bg-muted/45 px-3 py-2"
+                  >
+                    <FileText className="size-3.5 shrink-0 text-primary" />
+                    <span className="min-w-0 flex-1 truncate text-xs text-foreground">
+                      {attachment.name}
+                    </span>
+                    <span className="shrink-0 text-[11px] text-muted-foreground">
+                      {Math.ceil(attachment.size / 1024)} KB
+                    </span>
+                    <button
+                      type="button"
+                      className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                      aria-label={`移除 ${attachment.name}`}
+                      onClick={() =>
+                        setAttachments((current) => current.filter((item) => item !== attachment))
+                      }
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-5">
             <label
               className="mb-2 block text-sm font-semibold text-foreground"

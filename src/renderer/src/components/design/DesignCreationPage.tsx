@@ -3,7 +3,6 @@ import {
   Archive,
   ArrowLeft,
   ArrowRight,
-  Eye,
   ExternalLink,
   FileCode2,
   FileText,
@@ -14,8 +13,8 @@ import {
   X
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { HtmlThumbnailPreview } from "@/components/ui/html-thumbnail-preview"
 import { cn } from "@/lib/utils"
-import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import type {
   DesignCreationRequest,
   DesignCreationSelection,
@@ -528,8 +527,7 @@ export function DesignCreationPage({
           mode: requirementMode,
           namespaceId:
             requirementMode === "select" ? (requirementSelection?.namespaceId ?? null) : null,
-          pathName:
-            requirementMode === "select" ? (requirementSelection?.pathName ?? null) : null,
+          pathName: requirementMode === "select" ? (requirementSelection?.pathName ?? null) : null,
           requirement:
             requirementMode === "select" && requirementSelection
               ? {
@@ -777,51 +775,37 @@ export function DesignCreationPage({
                         {visibleTemplates.map((template) => {
                           const active = template.id === selectedTemplateId
                           return (
-                            <div key={template.id} className="relative">
+                            <div
+                              key={template.id}
+                              className={cn(
+                                "overflow-hidden rounded-lg border text-left transition-colors",
+                                active
+                                  ? "border-primary bg-primary/5 shadow-[0_0_0_2px_rgba(196,149,106,0.12)]"
+                                  : "border-border bg-background hover:border-border-emphasis"
+                              )}
+                            >
+                              <HtmlThumbnailPreview
+                                html={template.html}
+                                title={`${template.name}模板预览`}
+                                className="h-50"
+                                onSelect={() => setSelectedTemplateId(template.id)}
+                                browserUrl={template.previewPath}
+                              />
                               <button
                                 type="button"
                                 aria-pressed={active}
                                 onClick={() => setSelectedTemplateId(template.id)}
-                                className={cn(
-                                  "cursor-pointer overflow-hidden rounded-lg border text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                                  active
-                                    ? "border-primary bg-primary/5 shadow-[0_0_0_2px_rgba(196,149,106,0.12)]"
-                                    : "border-border bg-background hover:border-border-emphasis"
-                                )}
+                                className="flex w-full cursor-pointer gap-2 border-t border-border px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                               >
-                                <span className="block h-50 overflow-hidden bg-white">
-                                  <iframe
-                                    title={`${template.name}模板预览`}
-                                    srcDoc={template.html}
-                                    sandbox=""
-                                    tabIndex={-1}
-                                    className="pointer-events-none block h-[62.5rem] w-[500%] origin-top-left scale-[0.2] border-0 bg-white"
-                                  />
-                                </span>
-                                <span className="flex gap-2 border-t border-border px-3 py-2.5">
-                                  <FileText className="mt-0.5 size-3.5 shrink-0 text-primary" />
-                                  <span className="min-w-0">
-                                    <span className="block text-xs font-semibold text-foreground">
-                                      {template.name}
-                                    </span>
-                                    <span className="mt-0.5 block h-8 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
-                                      {template.description}
-                                    </span>
+                                <FileText className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                                <span className="min-w-0">
+                                  <span className="block text-xs font-semibold text-foreground">
+                                    {template.name}
+                                  </span>
+                                  <span className="mt-0.5 block h-8 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+                                    {template.description}
                                   </span>
                                 </span>
-                              </button>
-                              <button
-                                type="button"
-                                aria-label={`预览 ${template.name} 模板`}
-                                title="在内置浏览器中预览模板"
-                                onClick={() =>
-                                  openResourcePanelOverlay("browser", {
-                                    browserUrl: template.previewPath
-                                  })
-                                }
-                                className="absolute right-2 top-2 inline-flex size-7 items-center justify-center rounded-md border border-border bg-background/95 text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                              >
-                                <Eye className="size-3.5" />
                               </button>
                             </div>
                           )

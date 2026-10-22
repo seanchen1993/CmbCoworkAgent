@@ -28,7 +28,6 @@ import {
   type ResolvedDrawStroke
 } from "./DesignDraw"
 import { DesignGallery } from "./DesignGallery"
-import { DesignCreationPage } from "./DesignCreationPage"
 import { CreateDesignModal, ExportDesignModal, LinkModal } from "./DesignModals"
 import { ElementPropsPanel } from "./ElementPropsPanel"
 import { getDrawElementLabel, pickStrokeIdForNotePoint } from "./drawUtils"
@@ -226,10 +225,10 @@ function shouldSkipDesignQuestions(prompt: string): boolean {
 const MULTI_VARIATION_INSTRUCTION =
   "Generate 2 distinct variations (A / B) within one HTML file for exploration. " +
   "Variation A should be conventional and safe; Variation B should be more distinctive. " +
-  "Use direct body children with id=\"variation-a\" and id=\"variation-b\" plus concise Chinese data-label values."
+  'Use direct body children with id="variation-a" and id="variation-b" plus concise Chinese data-label values.'
 
 const CANONICAL_ARTIFACT_INSTRUCTION =
-  "Generate exactly ONE canonical design artifact. Do NOT generate A/B variations, do NOT create elements with id=\"variation-a\" or id=\"variation-b\", and do NOT present alternative versions."
+  'Generate exactly ONE canonical design artifact. Do NOT generate A/B variations, do NOT create elements with id="variation-a" or id="variation-b", and do NOT present alternative versions.'
 
 function buildNewDesignPrompt(
   basePrompt: string,
@@ -4803,36 +4802,17 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
   if (currentSessionId === null) {
     return (
       <>
-        {createModalOpen ? (
-          <DesignCreationPage
-            onBack={() => setCreateModalOpen(false)}
-            onEnterDesign={(selection) => {
-              // TODO(design-entry): the design session does NOT yet consume
-              // this payload — wiring up consumption is intentionally
-              // deferred. For now we only log it.
-              console.log("[DesignCreationPage] enter design selection:", selection)
-            }}
-            onSessionCreated={(id) => {
-              setCreateModalOpen(false)
-              openSession(id)
-            }}
-          />
-        ) : (
-          <DesignGallery
-            sessionIndex={sessionIndex}
-            onOpen={openSession}
-            onNew={() => setCreateModalOpen(true)}
-            onDelete={deleteSession}
-            workspacePath={workspacePath}
-            workspaceLoading={workspaceLoading}
-            onSelectWorkspace={() => {
-              void handleSelectWorkspace()
-            }}
-          />
-        )}
-        {/*
-          TODO(design-entry): the standalone DesignCreationPage replaces this
-          gallery modal. Keep the legacy block in source for an easy rollback.
+        <DesignGallery
+          sessionIndex={sessionIndex}
+          onOpen={openSession}
+          onNew={() => setCreateModalOpen(true)}
+          onDelete={deleteSession}
+          workspacePath={workspacePath}
+          workspaceLoading={workspaceLoading}
+          onSelectWorkspace={() => {
+            void handleSelectWorkspace()
+          }}
+        />
         <CreateDesignModal
           open={createModalOpen}
           loadingKind={importingSource}
@@ -4858,7 +4838,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             void handleImportPrototypeZip("gallery")
           }}
           onClose={() => setCreateModalOpen(false)}
-        /> */}
+        />
         <LinkModal
           open={linkModalOpen}
           mode={linkModalMode}

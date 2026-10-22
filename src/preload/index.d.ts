@@ -2367,6 +2367,7 @@ interface CustomAPI {
         content?: string
         bytes?: ArrayBuffer
         initialDescription?: string
+        attachments?: Array<{ fileName: string; bytes: ArrayBuffer }>
       }
     }) => Promise<{
       success: boolean
@@ -2405,6 +2406,26 @@ interface CustomAPI {
       requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
       error?: string
     }>
+    saveStepState: (payload: {
+      reqId: string
+      needDesign: "" | "0" | "1"
+      currentStep: number
+      functions: Array<{
+        fr: string
+        file: string
+        htmlFile: string
+        needDesign: "" | "0" | "1"
+      }>
+    }) => Promise<{
+      success: boolean
+      requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      manifestStatus?: "updated" | "missing" | "invalid"
+      manifest?: Awaited<
+        ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>
+      >[number]["prdManifest"]
+      manifestError?: string
+      error?: string
+    }>
     savePrd: (payload: {
       reqId: string
       version: string
@@ -2420,6 +2441,10 @@ interface CustomAPI {
       requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
       error?: string
     }>
+    savePrdFile: (payload: { reqId: string; filePath: string; content: string }) => Promise<{
+      success: boolean
+      error?: string
+    }>
     syncManifest: (payload: {
       reqId: string
       manifest: unknown
@@ -2428,6 +2453,9 @@ interface CustomAPI {
     }) => Promise<{
       success: boolean
       requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      manifest?: Awaited<
+        ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>
+      >[number]["prdManifest"]
       error?: string
     }>
     saveFiles: (payload: {

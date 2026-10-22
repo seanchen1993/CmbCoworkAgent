@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
-import type { RequirementRuntimeItem } from "../main/ipc/requirements"
+import { requirementsApi } from "./requirements-api"
 import {
   isWindowCloseBehavior,
   type CloseToTrayPromptAction,
@@ -4829,114 +4829,7 @@ const api = {
     saveVariant: (variantId: string, html: string): Promise<{ filePath: string }> =>
       ipcRenderer.invoke("design:save-variant", variantId, html)
   },
-  requirements: {
-    list: (): Promise<RequirementRuntimeItem[]> => ipcRenderer.invoke("requirements:list"),
-    getToken: () =>
-      ipcRenderer.invoke("requirements:get-token") as Promise<{
-        success: boolean
-        token: string
-        error?: string
-      }>,
-    saveToken: (token: string) =>
-      ipcRenderer.invoke("requirements:save-token", token) as Promise<{
-        success: boolean
-        error?: string
-      }>,
-    create: (payload: {
-      systemId: string
-      title: string
-      workDir: string
-      source: {
-        type: "file" | "text" | "link"
-        fileName: string
-        sourcePath?: string
-        url?: string
-        content?: string
-        bytes?: ArrayBuffer
-        initialDescription?: string
-      }
-    }) =>
-      ipcRenderer.invoke("requirements:create", payload) as Promise<{
-        success: boolean
-        requirement?: RequirementRuntimeItem
-        error?: string
-      }>,
-    getWorkDir: (): Promise<string | null> => ipcRenderer.invoke("requirements:get-work-dir"),
-    selectWorkDir: (): Promise<{ success: boolean; workDir?: string | null; error?: string }> =>
-      ipcRenderer.invoke("requirements:select-work-dir"),
-    delete: (reqId: string): Promise<{ success: boolean; error?: string }> =>
-      ipcRenderer.invoke("requirements:delete", reqId),
-    openWorkDir: (reqId: string): Promise<{ success: boolean; error?: string }> =>
-      ipcRenderer.invoke("requirements:open-work-dir", reqId),
-    getSourcePreview: (reqId: string) =>
-      ipcRenderer.invoke("requirements:get-source-preview", reqId) as Promise<{
-        success: boolean
-        content?: string
-        error?: string
-      }>,
-    attachThread: (payload: { reqId: string; threadId: string }) =>
-      ipcRenderer.invoke("requirements:attach-thread", payload) as Promise<{
-        success: boolean
-        requirement?: RequirementRuntimeItem
-        error?: string
-      }>,
-    detachThread: (payload: { reqId: string; threadId: string }) =>
-      ipcRenderer.invoke("requirements:detach-thread", payload) as Promise<{
-        success: boolean
-        requirement?: RequirementRuntimeItem
-        error?: string
-      }>,
-    beginManifestSync: (payload: { reqId: string; threadId: string; requestId: string }) =>
-      ipcRenderer.invoke("requirements:begin-manifest-sync", payload) as Promise<{
-        success: boolean
-        error?: string
-      }>,
-    rename: (payload: { reqId: string; title: string }) =>
-      ipcRenderer.invoke("requirements:rename", payload) as Promise<{
-        success: boolean
-        requirement?: RequirementRuntimeItem
-        error?: string
-      }>,
-    savePrd: (payload: {
-      reqId: string
-      version: string
-      modules: Array<{
-        moduleId: string
-        name: string
-        content: string
-        description?: string
-        keywords?: string[]
-      }>
-    }) =>
-      ipcRenderer.invoke("requirements:save-prd", payload) as Promise<{
-        success: boolean
-        requirement?: RequirementRuntimeItem
-        error?: string
-      }>,
-    syncManifest: (payload: {
-      reqId: string
-      manifest: unknown
-      threadId?: string
-      requestId?: string
-    }) =>
-      ipcRenderer.invoke("requirements:sync-manifest", payload) as Promise<{
-        success: boolean
-        requirement?: RequirementRuntimeItem
-        error?: string
-      }>,
-    saveFiles: (payload: {
-      workspacePath: string
-      requirementId: string
-      source?: { filename: string; sourcePath?: string; content?: string }
-      prd?: { filename: string; content: string }
-    }): Promise<{ success: boolean; sourcePath?: string; prdPath?: string; error?: string }> =>
-      ipcRenderer.invoke("requirements:save-files", payload) as Promise<{
-        success: boolean
-        sourcePath?: string
-        prdPath?: string
-        error?: string
-      }>
-  },
+  requirements: requirementsApi,
   app: {
     restart: (): Promise<void> => ipcRenderer.invoke("app:restart") as Promise<void>
   },

@@ -1359,12 +1359,12 @@ export function RightPanel({
       latestPreviewIntentIdRef.current = intentId
       const shouldUseExternalAuthorization = Boolean(
         authorization &&
-          !resolveResourcePreviewPaths(
-            path,
-            workspacePathRef.current ?? null,
-            window.electron.process.platform,
-            workspacePathKind
-          ).inWorkspace
+        !resolveResourcePreviewPaths(
+          path,
+          workspacePathRef.current ?? null,
+          window.electron.process.platform,
+          workspacePathKind
+        ).inWorkspace
       )
       previewThreadIdRef.current = currentThreadId
       setPreviewPath(path)
@@ -1386,11 +1386,7 @@ export function RightPanel({
       if (moduleModeRef.current === "git" || moduleModeRef.current === "browser") return
       onRequestPreviewMode?.()
     },
-    [
-      currentThreadId,
-      onRequestPreviewMode,
-      replacePreviewExternalAuthorization
-    ]
+    [currentThreadId, onRequestPreviewMode, replacePreviewExternalAuthorization]
   )
 
   useEffect(() => {
@@ -1427,25 +1423,19 @@ export function RightPanel({
       toolCallId,
       intentId
     } = request
-    if (
-      !isCurrentOpenResourcePreviewIntent(
-        threadId,
-        intentId,
-        latestPreviewIntentIdRef.current
-      )
-    ) {
+    if (!isCurrentOpenResourcePreviewIntent(threadId, intentId, latestPreviewIntentIdRef.current)) {
       handleResourcePreviewRequestHandled()
       return
     }
     latestPreviewIntentIdRef.current = intentId
     const shouldUseExternalAuthorization = Boolean(
       externalPreviewGrant &&
-        !resolveResourcePreviewPaths(
-          filePath,
-          workspacePath ?? null,
-          window.electron.process.platform,
-          workspacePathKind
-        ).inWorkspace
+      !resolveResourcePreviewPaths(
+        filePath,
+        workspacePath ?? null,
+        window.electron.process.platform,
+        workspacePathKind
+      ).inWorkspace
     )
     previewThreadIdRef.current = threadId
     setPreviewPath(filePath)
@@ -3347,9 +3337,7 @@ export function ResourcePreview({
             disabled={!canRevealInFolder}
             className="inline-flex items-center justify-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground enabled:hover:text-foreground enabled:hover:bg-background-interactive transition-colors disabled:cursor-not-allowed disabled:opacity-40"
             title={canRevealInFolder ? "打开文件所在文件夹" : "外部文件未获得可信来源授权"}
-            aria-label={
-              canRevealInFolder ? "打开文件所在文件夹" : "外部文件未获得可信来源授权"
-            }
+            aria-label={canRevealInFolder ? "打开文件所在文件夹" : "外部文件未获得可信来源授权"}
           >
             <FolderOpen className="size-3.5" />
           </button>
