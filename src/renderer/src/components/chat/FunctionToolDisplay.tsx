@@ -3,6 +3,7 @@ import type { ToolCall, ToolCallStatus } from "@/types"
 import type { ModObject } from "../../../../shared/mods/types"
 import { functionSiteProps } from "../../../../shared/mods/v2/sites"
 import { FunctionSite } from "./FunctionSite"
+import { functionSiteRowIdentity } from "../../lib/function-site-identity"
 
 /** Only non-approval detail presentation; execution, headers and raw evidence remain host-owned. */
 export function FunctionToolDisplay({
@@ -54,6 +55,7 @@ export function FunctionToolDisplay({
       key={`${threadId}:${toolCall.id}:${component}`}
       threadId={threadId}
       component={component}
+      presentationId={functionSiteRowIdentity(component, [toolCall.id])}
       facts={facts}
       className="contents"
       fallback={fallback}

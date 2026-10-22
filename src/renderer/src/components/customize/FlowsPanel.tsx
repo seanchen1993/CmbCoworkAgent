@@ -8,7 +8,8 @@ import { flowDraftId } from "@/lib/flow-draft-id"
 import {
   CHAT_TASK_TEMPLATES,
   createChatTaskTemplate,
-  chatTaskTemplateIssue
+  chatTaskTemplateIssue,
+  findSavedChatTaskTemplate
 } from "../../../../shared/mods/flows/chat-task-templates"
 import { parseFlowDefinition, flowRunnableInCatalog } from "../../../../shared/mods/flows/schema"
 import { AUTOBIZ_PRESETS, createAutobizPreset } from "../../../../shared/mods/flows/autobiz-presets"
@@ -423,25 +424,40 @@ function ScopedFlowsPanel({
         throw Error(
           "本项目已有正在运行或等待确认的聊天任务，请先在高级执行记录中处理，再选用模板。"
         )
-      const definition = createChatTaskTemplate(preset, flowDraftId("flow"))
-      const saved = await api.flowSave(threadId, definition, 0, available.workspace)
+      const definitions = await api.flowList(threadId)
+      if (!current()) return
+      await verifyWorkspace()
+      if (!current()) return
+      const existing = findSavedChatTaskTemplate(preset, definitions)
+      const definition = createChatTaskTemplate(
+        preset,
+        existing?.definition.id ?? flowDraftId("flow")
+      )
+      const saved = existing ?? (await api.flowSave(threadId, definition, 0, available.workspace))
+      if (!current()) return
+      const currentDefinitions = await api.flowList(threadId)
       if (!current()) return
       const refreshed = await api.flowCatalog(threadId)
       if (!current()) return
       acceptWorkspace(refreshed.workspace)
       setCatalog(refreshed)
       const changed = chatTaskTemplateIssue(preset, refreshed)
-      if (changed) throw Error(`模板已保存，尚未选用：${changed}`)
+      if (changed) throw Error(`模板尚未选用：${changed}`)
+      const confirmed = currentDefinitions.find(
+        (item) =>
+          item.definition.id === saved.definition.id &&
+          item.revision === saved.revision &&
+          item.digest === saved.digest
+      )
       if (
         saved.definition.id !== definition.id ||
         !Number.isInteger(saved.revision) ||
-        saved.revision < 1
+        saved.revision < 1 ||
+        !confirmed ||
+        !findSavedChatTaskTemplate(preset, [confirmed])
       )
-        throw Error("保存结果与本次模板不一致，请刷新核对；尚未选用。")
-      setFlows((old) => [
-        saved,
-        ...old.filter((item) => item.definition.id !== saved.definition.id)
-      ])
+        throw Error("已保存模板的版本或内容已变化，请刷新核对；尚未选用。")
+      setFlows(currentDefinitions)
       if (!current()) return
       goToConfigurationThread(scope, () =>
         requestChatFlowUse({
@@ -466,6 +482,10 @@ function ScopedFlowsPanel({
             <h2 className="text-lg font-semibold">聊天任务模板</h2>
             <HelpHint label="聊天任务模板说明">
               <p>
+                模板保存本次任务的执行安排，可以调用已授权插件的技能或动作。插件则是可安装、
+                可分发的能力与资源包，两者可以组合使用。
+              </p>
+              <p>
                 点击“选用并返回聊天”会保存并选择模板。随后在原聊天输入目标并发送，才会按模板执行。
               </p>
               <p>
@@ -475,7 +495,7 @@ function ScopedFlowsPanel({
             </HelpHint>
           </div>
           <p className="text-sm text-muted-foreground">
-            为下一条聊天选一个执行顺序，返回聊天后输入目标并发送。
+            为下一条任务选择执行安排，例如先检视修改、再运行项目测试。
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -498,8 +518,8 @@ function ScopedFlowsPanel({
       </div>
       <section aria-label="常用聊天任务模板" className="space-y-3">
         <p className="text-sm leading-relaxed text-muted-foreground">
-          不需要手工搭建步骤或选择插件。AutoBiz 等项目的阶段流程由项目插件与 Mods
-          管理，无需在这里再配一遍。
+          内置模板无需安装新插件；手工方案也可以使用已安装插件的技能或动作。 AutoBiz
+          等项目已有自己的业务流程，无需在这里重复配置。
           选用只保存并选择模板；发送下一条消息后才执行，工具操作仍按原规则审批。
         </p>
         <div className="grid gap-3 lg:grid-cols-3">

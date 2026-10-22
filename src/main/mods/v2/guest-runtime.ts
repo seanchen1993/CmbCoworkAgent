@@ -1,3 +1,4 @@
+import { registerFunctionDirectDisplaySource } from "./display-preparation"
 import { installFunctionBase64Host } from "./guest-base64"
 import { wireError } from "./wire"
 import { platformDescriptor } from "./platform-capabilities-validation"
@@ -383,6 +384,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       } finally {
         registration.dispose()
       }
+      registerFunctionDirectDisplaySource(guest, code)
       return guest
     } catch (error) {
       guest.dispose()

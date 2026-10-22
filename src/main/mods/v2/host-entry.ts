@@ -1,3 +1,4 @@
+import { prepareFunctionDisplayEnvelope } from "./display-preparation"
 import { randomUUID } from "node:crypto"
 import type { ModJson } from "../../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
@@ -186,7 +187,8 @@ async function handle(request: FunctionRequest): Promise<ModJson> {
       )
       runtimes.set(request.runtimeId, guest)
       return { registrations: guest.registrations,
-        registrationQuiescent: guest.registrationQuiescent } as unknown as ModJson
+        registrationQuiescent: guest.registrationQuiescent,
+        displayPreparation: prepareFunctionDisplayEnvelope(guest, request.code, request.runtimeId) } as unknown as ModJson
     } finally {
       loading.delete(request.runtimeId)
     }

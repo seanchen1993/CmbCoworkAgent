@@ -1,5 +1,7 @@
 import type { ReactNode } from "react"
 import { FunctionSite } from "./FunctionSite"
+import { functionMessageTextMode } from "../../../../shared/mods/v2/host-message"
+import { useModsChatScope } from "../../lib/mods-chat-scope"
 
 /** Presentation only: the caller retains the stored text, copy action and model transcript. */
 export function FunctionMessageText({
@@ -23,10 +25,19 @@ export function FunctionMessageText({
   fallback: ReactNode
   renderText(text: string): ReactNode
 }): ReactNode {
-  // Keep oversized messages on the original renderer without copying their whole contents to IPC.
-  if (text.length > 10000 || !text.trim()) return fallback
+  const enabled = useModsChatScope(threadId)
+  const mode = functionMessageTextMode(text)
+  // An old peer cannot publish a host-only message. Never make a failed or
+  // unsupported protected read an instruction to display the unprotected body.
+  if (
+    enabled &&
+    mode === "host-message" &&
+    (typeof window === "undefined" || typeof window.api.mods.siteRead !== "function")
+  )
+    return <p role="alert">当前版本无法安全显示此消息，请更新应用后重试。</p>
   return (
     <FunctionSite
+      key={mode}
       threadId={threadId}
       component={role === "user" ? "UserMessage" : "AssistantMessage"}
       presentationId={presentationId}

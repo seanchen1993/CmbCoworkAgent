@@ -3359,6 +3359,13 @@ const api = {
       ipcRenderer.invoke("mods:function-site-mount-outcome", { threadId, component, messageId, expectedRequestId }),
     siteRender: (threadId: string, owner: string, props: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot | null> =>
       ipcRenderer.invoke("mods:function-site-render", { threadId, owner, props }),
+    siteRead: (threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite,
+      props: import("../shared/mods/types").ModObject, presentationId?: string, messageId?: string,
+      expectedRequestId?: string, ownerRequired?: boolean): Promise<import("../shared/mods/v2/sites").FunctionSiteReadOutcome> =>
+      ipcRenderer.invoke("mods:function-site-read", {
+        threadId, component, props, presentationId, messageId, expectedRequestId, ownerRequired,
+        protocol: "mods.display/v1"
+      }),
     siteUnmount: (threadId: string, owner: string): Promise<void> =>
       ipcRenderer.invoke("mods:function-site-unmount", { threadId, owner }),
     siteAct: (threadId: string, owner: string, action: import("../shared/mods/v2/ui").FunctionUiAction): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult> =>

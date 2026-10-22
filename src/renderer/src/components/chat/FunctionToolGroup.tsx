@@ -2,6 +2,7 @@ import type { ReactNode } from "react"
 import type { ModObject } from "../../../../shared/mods/types"
 import { functionSiteProps } from "../../../../shared/mods/v2/sites"
 import { FunctionSite } from "./FunctionSite"
+import { functionSiteRowIdentity } from "../../lib/function-site-identity"
 
 /** Native rows are rendered only at the protected engine position; approvals stay host-owned. */
 export function FunctionToolGroup({
@@ -28,6 +29,10 @@ export function FunctionToolGroup({
     <FunctionSite
       threadId={threadId}
       component="ToolGroup"
+      presentationId={functionSiteRowIdentity(
+        "ToolGroup",
+        (facts.calls as ModObject[]).map((call) => call.tool_use_id as string)
+      )}
       facts={facts}
       fallback={children(false)}
       renderNative={(safe) => {

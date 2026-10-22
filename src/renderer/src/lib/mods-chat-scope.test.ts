@@ -52,7 +52,8 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
   return { promise, resolve, reject }
 }
-function setup() {
+function setup(withCards = false) {
+  const cards = new Set<(event: { threadId: string; scope?: string }) => void>()
   const requests: ReturnType<typeof deferred<boolean>>[] = []
   const notifications = new Set<() => void>()
   const read = vi.fn(() => {
@@ -62,6 +63,10 @@ function setup() {
   })
   vi.stubGlobal("window", Object.assign(new EventTarget(), { api: { mods: {
     chatDisplayCapability: read,
+    ...(withCards ? { onCardsChanged: (notify: (event: { threadId: string; scope?: string }) => void) => {
+      cards.add(notify)
+      return () => { cards.delete(notify) }
+    } } : {}),
     onConfigurationChanged: (notify: () => void) => {
       notifications.add(notify)
       return () => notifications.delete(notify)
@@ -83,7 +88,10 @@ function setup() {
     }
     return state
   }
-  return { requests, read, render, notify: () => { for (const notify of notifications) notify() } }
+  return { requests, read, render, notify: () => { for (const notify of notifications) notify() },
+    notifyCards: (scope: string, threadId = "thread") => {
+      for (const notify of cards) notify({ threadId, scope })
+    } }
 }
 async function settle() { for (let i = 0; i < 5; i++) await Promise.resolve() }
 afterEach(() => {
@@ -277,4 +285,30 @@ it("re-reads an in-flight decision revoked by an abandoned scope render", async 
   f.requests[1].resolve(true)
   await settle()
   expect(f.render()).toMatchObject({ ready: true, enabled: true })
+})
+
+
+it("routes projection invalidation to the exact cached row without resetting the scoped decision", async () => {
+  const f = setup(true)
+  f.render()
+  f.requests[0].resolve(true)
+  await settle()
+  const admitted = f.render()
+  const cache = admitted.presentationCache!
+  const data = { component: "AssistantMessage" as const,
+    tree: { type: "Text" as const, props: {}, children: ["protected"] } }
+  cache.saveData("first", data, 10, cache.capture("AssistantMessage"), 0, "host-first")
+  cache.saveData("second", data, 10, cache.capture("AssistantMessage"), 0, "host-second")
+  const first = cache.read("first")!, second = cache.read("second")!
+  f.notifyCards("site-projection:host-first", "other-thread")
+  expect(first.current()).toBe(true)
+  f.notifyCards("site-projection:host-first")
+  expect(first.current()).toBe(false)
+  expect(second.current()).toBe(true)
+  expect(f.render()).toBe(admitted)
+  expect(f.read).toHaveBeenCalledTimes(1)
+  f.notifyCards("site:some-owner")
+  expect(second.current()).toBe(true)
+  f.notifyCards("source-retiring:1")
+  expect(second.current()).toBe(false)
 })

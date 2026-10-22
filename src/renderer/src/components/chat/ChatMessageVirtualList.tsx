@@ -29,6 +29,7 @@ import {
 } from "./user-message-expansion-context"
 import { subscribeToMessageDiscard, type MessageAttempts } from "@/lib/message-discard-events"
 import { projectChatVirtualWindow } from "./chat-virtual-window"
+import { ChatVirtualPrependLayout, type ChatVirtualPrependLayoutContext } from "./chat-virtual-prepend-layout"
 import type { ChatSearchLocation, ChatSearchReveal } from "../../../../shared/chat-search-types"
 import type {
   ChatScrollVirtualRangeRef,
@@ -317,10 +318,10 @@ const ChatMessageRow = React.memo(ChatMessageRowImpl, areChatMessageRowPropsEqua
 // flow-root 同时阻止系统通知等子元素的顶部 margin 穿透 item，确保混合消息也能完整测量。
 const VirtuosoMessageListWrapper = React.forwardRef<
   HTMLDivElement,
-  React.ComponentPropsWithoutRef<"div">
+  React.ComponentPropsWithoutRef<"div"> & { context?: ChatVirtualListContext }
 >(({ className, style, children, ...props }, ref) => (
-  <div
-    ref={ref}
+  <ChatVirtualPrependLayout
+    forwardedRef={ref}
     className={["[&>[data-item-index]]:flow-root [&>[data-item-index]]:pb-4", className]
       .filter(Boolean)
       .join(" ")}
@@ -328,11 +329,11 @@ const VirtuosoMessageListWrapper = React.forwardRef<
     {...props}
   >
     {children}
-  </div>
+  </ChatVirtualPrependLayout>
 ))
 VirtuosoMessageListWrapper.displayName = "VirtuosoMessageListWrapper"
 
-interface ChatVirtualListContext {
+interface ChatVirtualListContext extends ChatVirtualPrependLayoutContext {
   header: React.ReactNode
   footer: React.ReactNode
 }
@@ -772,7 +773,9 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         itemsRendered={handleItemsRendered}
         rangeChanged={handleVirtualRangeChanged}
         totalListHeightChanged={onContentHeightChanged}
-        context={{ header: historyHeader, footer: footerContent }}
+        context={{ header: historyHeader, footer: footerContent,
+          windowKey: virtualWindow.key, firstItemIndex: virtualWindow.firstItemIndex,
+          scrollParent: customScrollParent }}
         components={chatVirtualListComponents}
         itemContent={(_absoluteIndex, row) => {
           // Virtuoso can expose its previous measured row during the prepend transaction.

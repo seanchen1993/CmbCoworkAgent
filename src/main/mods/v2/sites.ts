@@ -271,8 +271,13 @@ export class FunctionUiSites {
 
   invalidateGeneration(generation: string): boolean {
     let changed = false
-    for (const site of this.slots.values())
-      changed = site.drawings.invalidateGeneration(generation) || changed
+    for (const site of this.slots.values()) {
+      if (!site.drawings.invalidateGeneration(generation)) continue
+      changed = true
+      // Native sites suppress unscoped pane notifications. A dependency change
+      // must still reach its actual owner after a passive view resumes this path.
+      this.host.changed(`site-invalidated:${site.owner}`)
+    }
     return changed
   }
   close(): void {

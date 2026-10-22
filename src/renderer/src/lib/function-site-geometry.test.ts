@@ -100,3 +100,23 @@ it("ignores detached drawings and invalid geometry without publishing measuremen
   expect(saved).not.toHaveBeenCalled()
   dispose()
 })
+
+it("finishes all same-frame reads before callbacks can write layout or cancel a subscriber", () => {
+  const f = fixture()
+  const order: string[] = []
+  f.measured.mockImplementation(() => {
+    order.push("read")
+    return { width: 720, height: 360 }
+  })
+  let stopSecond = () => {}
+  const first = observeFunctionSiteGeometry(f.node(), () => {
+    order.push("write")
+    stopSecond()
+  })
+  const second = vi.fn(() => order.push("unexpected stale publish"))
+  stopSecond = observeFunctionSiteGeometry(f.node(), second)
+  f.paint()
+  expect(order).toEqual(["read", "read", "write"])
+  expect(second).not.toHaveBeenCalled()
+  first()
+})

@@ -8,13 +8,17 @@ import { chromium } from "playwright"
 interface LayoutSnapshot {
   frames: number
   emptyFrames: number
+  visibleEmptyFrames: number
   maxMountedRows: number
   mounts: number
   unmounts: number
+  anomalies: unknown[]
 }
 
 async function main() {
-  const output = resolve("output/chat-virtual-history-layout")
+  const output = resolve(
+    process.env.CHAT_VIRTUAL_LAYOUT_OUTPUT_DIR ?? "output/chat-virtual-history-layout"
+  )
   mkdirSync(output, { recursive: true })
   const bundle = await build({
     stdin: {
@@ -26,19 +30,38 @@ async function main() {
       import{ChatMessageVirtualList}from'./src/renderer/src/components/chat/ChatMessageVirtualList';
       import{ScrollArea}from'./src/renderer/src/components/ui/scroll-area';
       const noop=()=>{},refs={current:new Map()},virtual={current:null},range={current:null},maps=new Map();
-      const counters={mounts:0,unmounts:0,frames:0,emptyFrames:0,maxMountedRows:0};window.layoutCounters=counters;
+      let phase='initial';
+      const counters={mounts:0,unmounts:0,frames:0,emptyFrames:0,visibleEmptyFrames:0,maxMountedRows:0,anomalies:[],trace:[]};window.layoutCounters=counters;
       const make=(start,count,tall=false)=>Array.from({length:count},(_,i)=>({id:'row-'+(start+i),
         role:i%2?'assistant':'user',content:String(tall?820:[90,950,160,620,55][i%5])}));
       function Fixture(){
         const[messages,setMessages]=useState(()=>make(0,400)),[thread,setThread]=useState('one'),[parent,setParent]=useState(null),root=useRef(null);
+        window.layoutMessageCount=messages.length;
         useLayoutEffect(()=>setParent(root.current.querySelector('[data-radix-scroll-area-viewport]')),[]);
-        useEffect(()=>{let frame;const sample=()=>{counters.frames++;
+        useEffect(()=>{let frame;const sample=time=>{counters.frames++;
           const viewport=root.current.querySelector('[data-radix-scroll-area-viewport]'),box=viewport.getBoundingClientRect();
           const rows=[...viewport.querySelectorAll('[data-chat-message-id]')];
+          const rects=rows.map(row=>{const rect=row.getBoundingClientRect();return{
+            id:row.dataset.chatMessageId,top:rect.top,bottom:rect.bottom,height:rect.height,
+            index:row.closest('[data-item-index]')?.getAttribute('data-item-index')}});
           counters.maxMountedRows=Math.max(counters.maxMountedRows,rows.length);
-          if(rows.length&&!rows.some(row=>{const rect=row.getBoundingClientRect();return rect.bottom>box.top&&rect.top<box.bottom}))counters.emptyFrames++;
+          const intersects=rects.some(rect=>rect.bottom>box.top&&rect.top<box.bottom);
+          const presentation=viewport.querySelector('[data-chat-initial-presentation]');
+          const list=viewport.querySelector('[data-testid="virtuoso-item-list"]');
+          counters.trace.push({phase,time,scrollTop:viewport.scrollTop,scrollHeight:viewport.scrollHeight,listStyle:list?.getAttribute('style'),rows:rects});
+          if(counters.trace.length>18)counters.trace.shift();
+          if(rows.length&&!intersects)counters.emptyFrames++;
+          const visible=document.visibilityState==='visible'&&box.width>0&&box.height>0&&
+            presentation?.getAttribute('data-chat-initial-presentation')==='ready'&&
+            getComputedStyle(viewport).visibility!=='hidden';
+          if(visible&&window.layoutMessageCount>0&&!intersects)counters.visibleEmptyFrames++;
+          if(window.layoutMessageCount>0&&!intersects&&counters.anomalies.length<80)counters.anomalies.push({
+            phase,time,frame:counters.frames,visible,scrollTop:viewport.scrollTop,scrollHeight:viewport.scrollHeight,
+            viewport:{top:box.top,bottom:box.bottom,height:box.height},presentation:presentation?.outerHTML.slice(0,450),
+            listStyle:list?.getAttribute('style'),rows:rects});
           frame=requestAnimationFrame(sample)};frame=requestAnimationFrame(sample);return()=>cancelAnimationFrame(frame)},[]);
         window.layoutFixture={
+          phase:value=>{phase=value},
           jump:index=>virtual.current.scrollToIndex({index,align:'start',behavior:'auto'}),
           position:index=>new Promise(done=>virtual.current.scrollIntoView({index,align:'start',behavior:'auto',
             calculateViewLocation:()=>({index,align:'start',behavior:'auto'}),done})),
@@ -110,6 +133,14 @@ async function main() {
       { operation, index }
     )
   const snapshot = () => call("snapshot") as Promise<LayoutSnapshot>
+  const phase = (value: string) =>
+    page.evaluate(
+      (value) =>
+        (
+          window as unknown as { layoutFixture: { phase(value: string): void } }
+        ).layoutFixture.phase(value),
+      value
+    )
   const settle = () =>
     page.evaluate(
       () =>
@@ -141,6 +172,7 @@ async function main() {
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
     await page.waitForSelector('[data-chat-initial-presentation="ready"]')
     await settle()
+    await phase("drag")
     const beforeDrag = await snapshot()
     const bar = page.locator('[data-scroll-area-scrollbar][data-orientation="vertical"]')
     const thumb = bar.locator("[data-state]")
@@ -175,6 +207,7 @@ async function main() {
       }
     })
     const beforePrepend = await snapshot()
+    await phase("prepend")
     await call("prepend")
     await settle()
     assert.equal(
@@ -187,6 +220,28 @@ async function main() {
     )
     assert(Math.abs((await rowOffset(anchor.id)) - anchor.offset) <= 2)
     const afterPrepend = await snapshot()
+    writeFileSync(
+      resolve(output, "prepend-diagnostic.json"),
+      JSON.stringify({ beforePrepend, afterPrepend }, null, 2) + "\n"
+    )
+    assert.equal(
+      afterPrepend.visibleEmptyFrames,
+      beforePrepend.visibleEmptyFrames,
+      "Prepending never paints a visible viewport without a current message row"
+    )
+    assert.equal(
+      afterPrepend.emptyFrames,
+      beforePrepend.emptyFrames,
+      "Prepending does not move every mounted message outside the viewport for a frame"
+    )
+    assert.equal(
+      await page
+        .locator('[data-testid="virtuoso-item-list"]')
+        .evaluate((element) => (element as HTMLElement).style.translate),
+      "",
+      "Native prepend compensation releases the paint correction"
+    )
+    await phase("release")
     await call("release")
     await settle()
     assert(Math.abs((await rowOffset(anchor.id)) - anchor.offset) <= 2)
@@ -231,9 +286,19 @@ async function main() {
         "Real Radix thumb, Virtuoso and list; fixed-height visual bubbles, no authorization claim"
     }
     writeFileSync(resolve(output, "evidence.json"), JSON.stringify(evidence, null, 2) + "\n")
+    const summary = Object.fromEntries(
+      Object.entries(evidence).map(([key, value]) => [
+        key,
+        value && typeof value === "object" && "trace" in value
+          ? Object.fromEntries(
+              Object.entries(value).filter(([field]) => !["trace", "anomalies"].includes(field))
+            )
+          : value
+      ])
+    )
     console.log(
       "PASS real Radix drag across 400 mixed-height messages, prepend identity/release geometry, relative search/end, unrelated window/thread/empty reset " +
-        JSON.stringify(evidence)
+        JSON.stringify(summary)
     )
   } finally {
     await browser.close()

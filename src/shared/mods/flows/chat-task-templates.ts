@@ -1,5 +1,6 @@
 import { createAutobizPreset, type AutobizPreset } from "./autobiz-presets"
-import type { FlowCatalog } from "./types"
+import { parseFlowDefinition } from "./schema"
+import type { FlowCatalog, SavedFlow } from "./types"
 
 /** Product-facing names over the existing, validated Host presets; no second execution engine. */
 export const CHAT_TASK_TEMPLATES = [
@@ -36,6 +37,21 @@ export function createChatTaskTemplate(preset: AutobizPreset, id: string) {
     name: description.name,
     goal: description.description
   }
+}
+
+/** Reuse only a native-listed, unchanged template; names alone never identify its contents. */
+export function findSavedChatTaskTemplate(preset: AutobizPreset, saved: readonly SavedFlow[]) {
+  const expected = JSON.stringify(parseFlowDefinition(createChatTaskTemplate(preset, "template")))
+  return saved.find((item) => {
+    if (!Number.isSafeInteger(item.revision) || item.revision < 1 || !item.digest) return false
+    try {
+      return (
+        JSON.stringify({ ...parseFlowDefinition(item.definition), id: "template" }) === expected
+      )
+    } catch {
+      return false
+    }
+  })
 }
 
 /** UI preflight only. Native execution still rechecks configuration, model and approvals. */

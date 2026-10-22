@@ -77,7 +77,7 @@ export async function openModsAdvancedSettings(
   section: "灵件与使用设置" | "搭配管理" | "聊天任务模板"
 ): Promise<void> {
   const group = page.getByRole("button", {
-    name: section === "灵件与使用设置" ? "基础功能" : "高级自定义",
+    name: section === "灵件与使用设置" ? "基础功能" : "高级特性",
     exact: true
   })
   if (!(await group.isVisible()))

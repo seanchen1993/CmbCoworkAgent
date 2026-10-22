@@ -172,6 +172,11 @@ import { FunctionConfiguration } from "./configuration"
 import type { FunctionConfigValue, FunctionConfigOrigin } from "../../../shared/mods/v2/config"
 import { ordinaryFunctionUserConfig, writableFunctionUserConfig, validateFunctionUserConfigValue } from "../../../shared/mods/v2/user-config"
 import { FunctionConfigurationSourceCache, assertConfigurationSourcePath, assertConfigurationSourcesCurrent } from "./configuration-source-cache"
+import { FunctionNativeDisplayProjection, type FunctionNativeDisplayAdmission } from "./display-native-projection"
+import { FUNCTION_DISPLAY_PROTOCOL, HostDisplayRollout } from "./display-rollout"
+import { functionMessageTextMode } from "../../../shared/mods/v2/host-message"
+import { FUNCTION_PASSIVE_DISPLAY_SITES } from "../../../shared/mods/v2/sites"
+import { FunctionDisplayRouting } from "./display-routing"
 import type { FunctionUserConfigView } from "../../../shared/mods/v2/user-config-view"
 import { onWorkspaceFilesChanged } from "../../services/workspace-change-events"
 import { isSameWorkspacePath } from "../../../shared/workspace-path"
@@ -304,6 +309,8 @@ interface FunctionManagerHost extends FunctionConversationManagerHost {
   debugLog?: FunctionSessionHost["debugLog"]
   protects?(workspace: string): boolean
   captureSiteGuard?(workspace: string, threadId: string): () => void
+  captureDisplayScope?(workspace: string, threadId: string):
+    import("./display-scopes").FunctionDisplayScopeInput | undefined
   pendingQuestion?(threadId: string): Readonly<import("../../types").UserInputRequest> | null
   userMessageOrigin?(threadId: string, messageId: string):
     import("../../../shared/mods/v2/plugin-prompt").FunctionPluginPromptOrigin | undefined
@@ -558,6 +565,10 @@ export class FunctionModsManager {
   private readonly probeRetirements = new Map<string, Promise<void>>()
   private capacityReclaim?: Promise<void>
   private readonly hostOnlySites: FunctionHostOnlySites
+  private readonly displayProjection: FunctionNativeDisplayProjection
+  private readonly displayRollout: HostDisplayRollout
+  private readonly displayRuntimeIds = new WeakMap<SessionEntry, string>()
+  private readonly displayRouting = new FunctionDisplayRouting()
   private readonly siteOwners = new Map<string, {
     workspace: string
     threadId: string
@@ -859,6 +870,19 @@ export class FunctionModsManager {
     }
     this.userConfigValues = new FunctionUserConfigValues(store, host.secretProtector)
     this.applicationPolicies = new ApplicationCompletionPolicies(store)
+    this.displayProjection = new FunctionNativeDisplayProjection({
+      capture: (workspace, threadId) => {
+        const scope = this.host.captureDisplayScope?.(workspace, threadId)
+        if (!scope) throw new ModFunctionError("MODS_UI_SITE_BINDING_REQUIRED")
+        return scope
+      },
+      publish: (workspace, value, signal) => this.host.publish(workspace, value, signal),
+      userMessageOrigin: (threadId, messageId) => this.host.userMessageOrigin?.(threadId, messageId),
+      changed: (threadId, scope) => this.host.changed(threadId, scope)
+    })
+    this.displayRollout = new HostDisplayRollout({
+      invalidateProjection: () => this.displayProjection.invalidate(undefined, undefined, true)
+    })
     this.hostOnlySites = new FunctionHostOnlySites({
       capture: (workspace, threadId) => {
         this.host.assertThread?.(workspace, threadId)
@@ -928,6 +952,7 @@ export class FunctionModsManager {
       "act",
       "siteMount",
       "siteMountOutcome",
+      "siteRead",
       "siteRender",
       "siteUnmount",
       "siteAct",
@@ -1027,7 +1052,7 @@ export class FunctionModsManager {
       ...applyBefore, "configList", "configSet", "userConfig", "saveUserConfig", "saveSensitiveUserConfig", "migrateUserConfig", "runtimeReady",
       "effectiveStatus", "inspectCheckpointRecovery", "advanceAutobizCheckpoint", "completionGate",
       "measure", "turnComplete", "turnNotices", "interceptToolCheck", "hasEventHandler", "logs",
-      "feedback", "feedbackPresentation", "panes", "focusAck", "scrollAck", "act", "siteMount", "siteMountOutcome", "siteRender", "siteUnmount",
+      "feedback", "feedbackPresentation", "panes", "focusAck", "scrollAck", "act", "siteMount", "siteMountOutcome", "siteRead", "siteRender", "siteUnmount",
       "siteAct", "clientAct", "actionCatalog", "markdownLink", "appendConversation"
     ]
     for (const name of native) {
@@ -3464,6 +3489,7 @@ export class FunctionModsManager {
   }
 
   private invalidateCatalog(workspace: string): void {
+    this.displayProjection.invalidate(workspace)
     this.installedPluginInventory = undefined
     this.configurationSourceCache.clear()
     this.statusSourceCache.clear()
@@ -3502,6 +3528,7 @@ export class FunctionModsManager {
       ...[...this.namedStates.values()].map((entry) => entry.workspace),
       ...[...this.sessions.values()].map((entry) => entry.workspace),
       ...[...this.pendingSiteMounts].map((request) => request.workspace),
+      ...this.displayProjection.workspaces(),
       ...this.hostOnlySites.workspaces()
     ])
     for (const workspace of workspaces) this.invalidate(workspace)
@@ -3822,6 +3849,7 @@ export class FunctionModsManager {
   }
 
   private closeThreadEntries(threadId: string, strictCleanup: boolean): void {
+    this.displayProjection.invalidate(undefined, threadId)
     // This entry point also closes a configuration on a still-existing thread. Retired physical
     // children keep sharing its pool with a later reopen until their true exit and host finally.
     this.reloadControl.cancel(undefined, threadId)
@@ -6849,6 +6877,209 @@ export class FunctionModsManager {
     return result.state === "mounted" ? result.owner : null
   }
 
+  /** One host read returns either passive protected data or a real current drawing lease.
+   * Existing mount/render APIs remain supported, including dynamic and effectful guests.
+   */
+  async siteRead(workspace: string, threadId: string, component: FunctionUiSite,
+    props: ModObject, presentationId?: string, messageId?: string,
+    expectedRequestId?: string, ...peerProtocol: [unknown?, boolean?]):
+    Promise<import("../../../shared/mods/v2/sites").FunctionSiteReadOutcome> {
+    const lease = this.displayRollout.admit(...peerProtocol.slice(0, 1) as [unknown?])
+    const supportsPassiveData = !peerProtocol.length || peerProtocol[0] === FUNCTION_DISPLAY_PROTOCOL
+    const read = () => this.readSiteWithinLease(workspace, threadId, component, props,
+      presentationId, messageId, expectedRequestId,
+      lease.path === "projection-v1" && peerProtocol[1] !== true, supportsPassiveData)
+    try {
+      const resident = this.sessions.get(JSON.stringify([workspace, threadId]))
+      const token = resident?.loaded && resident.session?.plugins.length ? resident.runtimeSourceToken : undefined
+      if (!token) return await read()
+      const ambient = captureRuntimePluginSourceToken()
+      if (ambient && ambient !== token) throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+      // As for the existing site mount, retain only the real admitted source token.
+      // Cache data cannot mint one or reconstruct project authority from display IDs.
+      return await withRuntimePluginSource(token, read)
+    }
+    finally { lease.completePhysical() }
+  }
+
+  /** Main-only operational rollback; a Mod or renderer never receives this switch. */
+  setDisplayProjectionEnabled(enabled: boolean): void {
+    if (this.displayRollout.snapshot().physicalPending)
+      throw new ModFunctionError("MODS_DISPLAY_DRAINING")
+    this.displayRollout.switchPath(enabled ? "projection-v1" : "legacy")
+  }
+
+  private async readSiteWithinLease(workspace: string, threadId: string, component: FunctionUiSite,
+    props: ModObject, presentationId: string | undefined, messageId: string | undefined,
+    expectedRequestId: string | undefined, projectionEnabled: boolean, supportsPassiveData: boolean):
+    Promise<import("../../../shared/mods/v2/sites").FunctionSiteReadOutcome> {
+    functionUiSite(component)
+    if (messageId !== undefined && (component !== "UserMessage" || typeof messageId !== "string" ||
+      !messageId || messageId.length > 512)) throw new ModFunctionError("MODS_UI_SITE_PROPS")
+    const passive = FUNCTION_PASSIVE_DISPLAY_SITES.includes(component)
+    const hostMessage = ["UserMessage", "AssistantMessage"].includes(component) &&
+      typeof props.text === "string" && functionMessageTextMode(props.text) === "host-message"
+    if (!projectionEnabled && supportsPassiveData && presentationId && !hostMessage)
+      this.displayProjection.discard(workspace, threadId, component, presentationId, messageId)
+    const prepared = (projectionEnabled || (hostMessage && supportsPassiveData)) && passive &&
+      presentationId && !expectedRequestId &&
+      this.host.captureDisplayScope?.(workspace, threadId)
+      ? this.displayProjection.prepareRead(workspace, threadId, component, props, presentationId, messageId)
+      : undefined
+    if (hostMessage && supportsPassiveData && !expectedRequestId && !prepared) {
+      const admission = this.captureNativeDisplayAdmission(workspace, threadId, component, true, false)
+      if (admission) return { state: "projected", snapshot:
+        await this.displayProjection.readUnretainedMessage(workspace, threadId, component, props,
+          admission, presentationId, messageId) }
+    }
+    let reusableAdmission: FunctionNativeDisplayAdmission | undefined
+    if (prepared) {
+      const admission = this.captureNativeDisplayAdmission(workspace, threadId, component, hostMessage)
+      if (admission?.native) {
+        try {
+          return { state: "projected", snapshot: await this.displayProjection.readPrepared(
+            workspace, component, prepared, admission, projectionEnabled) }
+        } catch (error) {
+          // Tool payloads can legitimately contain fields named action/handle. A passive
+          // cache refusal keeps their real protected drawing, never an unprotected fallback.
+          if (!(error instanceof ModFunctionError) ||
+            !["ToolUse", "ToolResult", "ToolGroup"].includes(component) ||
+            !["MODS_DISPLAY_DATA_ACTIVE", "MODS_DISPLAY_DATA_INVALID"].includes(error.code)) throw error
+        }
+      }
+      const cached = admission && this.displayProjection.lookup(prepared, admission)
+      if (cached) return { state: "projected", snapshot: cached }
+      if (admission && !admission.native) reusableAdmission = admission
+    }
+    const readOwned = async ():
+      Promise<import("../../../shared/mods/v2/sites").FunctionSiteReadOutcome> => {
+      const outcome = await this.siteMountOutcome(workspace, threadId, component, messageId,
+        expectedRequestId)
+      if (outcome.state !== "mounted") return outcome
+      try {
+        const snapshot = await this.siteRender(workspace, threadId, outcome.owner, props)
+        if (snapshot) {
+          if (prepared) {
+            const admission = this.captureNativeDisplayAdmission(workspace, threadId, component)
+            // This is a new microtask after siteRender. Keep a full caller fence even
+            // when dependency capture refuses caching and the real owner is retained.
+            admission?.assertCurrent()
+            const dependencies = admission?.native ? { current: () => true, release: () => {} }
+              : admission?.entry?.session?.captureDisplayDependencies(snapshot.generation,
+                admission.expectedRefs, () => this.displayProjection.reclaimDependencies(prepared, admission))
+            if (admission && dependencies) {
+              let cached: import("../../../shared/mods/v2/display-snapshot").FunctionDisplaySnapshot | undefined
+              try {
+                cached = this.displayProjection.remember(prepared, threadId, admission, {
+                  component, tree: snapshot.tree,
+                  ...(snapshot.nativeContent ? { nativeContent: snapshot.nativeContent } : {})
+                }, dependencies)
+              } catch (error) {
+                if (!(error instanceof ModFunctionError) ||
+                  !["MODS_DISPLAY_DATA_ACTIVE", "MODS_DISPLAY_DATA_INVALID"].includes(error.code)) throw error
+              }
+              if (cached) {
+                // Dependency handoff and protected cache commit precede actual generation release.
+                await this.siteUnmount(workspace, threadId, outcome.owner)
+                admission.assertCurrent()
+                const current = this.displayProjection.lookup(prepared, admission)
+                return current ? { state: "projected", snapshot: current } : { state: "retired" }
+              }
+            }
+          }
+          return { state: "mounted", owner: outcome.owner, snapshot }
+        }
+        await this.siteUnmount(workspace, threadId, outcome.owner)
+        return { state: "retired" }
+      } catch (error) {
+        await this.siteUnmount(workspace, threadId, outcome.owner).catch(() => {})
+        throw error
+      }
+    }
+    return prepared && reusableAdmission
+      ? this.displayProjection.reuseOrRun(prepared, reusableAdmission, readOwned,
+          snapshot => ({ state: "projected", snapshot }))
+      : readOwned()
+  }
+
+  private captureNativeDisplayAdmission(workspace: string, threadId: string, component: FunctionUiSite,
+    hostMessage = false, requireDisplayScope = true):
+    (FunctionNativeDisplayAdmission & { native: boolean; entry?: SessionEntry;
+      expectedRefs: ModObject[] }) | undefined {
+    const rollout = this.displayRollout.snapshot()
+    if ((!hostMessage && rollout.path !== "projection-v1") || rollout.phase !== "active") return undefined
+    const epoch = this.epoch(workspace), enabled = this.host.enabled(workspace)
+    const protects = this.host.protects?.(workspace)
+    // Missing peers retain the original fail-closed mount protocol.
+    if (typeof protects !== "boolean" || (!enabled && !protects) ||
+      !this.host.captureSiteGuard ||
+      (requireDisplayScope && !this.host.captureDisplayScope?.(workspace, threadId)))
+      return undefined
+    const captured = this.host.captureSiteGuard(workspace, threadId)
+    const key = JSON.stringify([workspace, threadId])
+    const stopped = Boolean(this.reloadControl.error(workspace, threadId))
+    const entry = this.sessions.get(key)
+    let native = true
+    const expectedRefs: ModObject[] = []
+    if (!hostMessage && enabled && !stopped &&
+      (entry?.session?.plugins.length || this.hasSources(workspace, threadId))) {
+      // Discovery and startup retain their original admission. Only a current loaded graph
+      // can prove the absence of display handlers without evaluating an unknown matcher.
+      if (!entry?.loaded || !entry.session || entry.developmentPlugins.size) return undefined
+      const route = this.displayRouting.qualify(
+        entry.session.plugins.map((plugin) => ({
+          guest: plugin.guest,
+          code: entry.snapshots.get(plugin.name)?.projection.code
+        })),
+        component
+      )
+      if (!route) return undefined
+      native = route.native
+      expectedRefs.push(...route.expectedRefs)
+    }
+    let runtime = entry && this.displayRuntimeIds.get(entry)
+    if (entry && !runtime) { runtime = randomUUID(); this.displayRuntimeIds.set(entry, runtime) }
+    const assertIdentity = () => {
+      this.displayRollout.assertVersion(rollout.epoch, rollout.path)
+      captured()
+      this.host.assertThread?.(workspace, threadId)
+      this.assertEndAdmission(workspace, threadId)
+      if (this.closed || this.epoch(workspace) !== epoch ||
+        this.host.enabled(workspace) !== enabled || this.host.protects?.(workspace) !== protects ||
+        Boolean(this.reloadControl.error(workspace, threadId)) !== stopped ||
+        this.sessions.get(key) !== entry)
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      if (entry?.loaded && enabled && !stopped) {
+        if (this.entryDrains.has(entry) || this.endingEntries.has(key))
+          throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+        entry.session!.assertTransportLive()
+        for (const snapshot of entry.snapshots.values()) {
+          this.store.assertGrant(snapshot.grant)
+          this.assertSnapshotSource(snapshot)
+          this.assertConfiguredOptions(workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
+        }
+      }
+    }
+    const assertCurrent = () => {
+      assertIdentity()
+      if (entry?.loaded && enabled && !stopped) {
+        entry.assertRuntimeSourceContent?.()
+        for (const snapshot of entry.snapshots.values()) {
+          this.assertSnapshotContent(snapshot)
+          // Retained snapshots already run this exact synchronous content check above.
+          if (!snapshot.assertRuntimeSourceContent)
+            assertConfigurationSourcesCurrent(snapshot.sourcePath ?? snapshot.compiled.root, snapshot.compiled)
+        }
+      }
+      assertIdentity()
+    }
+    // No await or publication follows route qualification before the public display
+    // operation's full entry fence. Do not scan the same source twice in that region.
+    assertIdentity()
+    return { version: JSON.stringify([rollout.epoch, epoch, enabled, protects, stopped, runtime ?? null]),
+      assertCurrent, assertIdentity, native, entry, expectedRefs }
+  }
+
   async siteMountOutcome(
     workspace: string,
     threadId: string,
@@ -7341,6 +7572,7 @@ export class FunctionModsManager {
     for (const quota of this.uiResolveQuotas.values()) quota.close()
     this.uiResolveQuotas.clear()
     this.closed = true
+    this.displayProjection.close()
     this.hostOnlySites.close()
     this.siteOwners.clear()
     this.host.closePluginPrompts?.()

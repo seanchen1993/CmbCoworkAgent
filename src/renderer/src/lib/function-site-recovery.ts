@@ -4,7 +4,8 @@ const transientCodes = new Set([
   "MODS_RUNTIME_INSTANCE_EXPIRED",
   "MODS_UI_DRAWING_STALE",
   "MODS_UI_SITE_CLOSED",
-  "MODS_SESSION_CLOSED"
+  "MODS_SESSION_CLOSED",
+  "MODS_DISPLAY_ROW_CHANGED"
 ])
 
 /** Electron invoke errors include an envelope; match whole codes, never message substrings. */

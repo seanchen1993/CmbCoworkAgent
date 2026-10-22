@@ -19,6 +19,7 @@ import {
 } from "../../lib/protected-function-preview"
 import { StaticMarkdownFormatting } from "./StreamingMarkdown"
 import { flowDraftId } from "../../lib/flow-draft-id"
+import { remarkCompletedMarkdownParseCache } from "../../lib/markdown-parse-cache"
 
 export interface FunctionMarkdownContext {
   threadId: string
@@ -28,7 +29,9 @@ export interface FunctionMarkdownContext {
   isCurrent?(): boolean
 }
 
-const REMARK_PLUGINS = [remarkGfm, functionMarkdownRemark]
+// Cache only the shared GFM parser. Limits and protected-HTML/link transforms
+// still run for every publication, with fresh frame-bound native link handlers.
+const REMARK_PLUGINS = [remarkGfm, remarkCompletedMarkdownParseCache, functionMarkdownRemark]
 const REHYPE_PLUGINS = [rehypeHighlight, functionMarkdownRehype]
 
 /** Format safe data; the native publication decides which links can cause an action. */

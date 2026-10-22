@@ -1,3 +1,4 @@
+import { FunctionDisplayPreparationChannel } from "./display-preparation"
 import { randomUUID } from "node:crypto"
 import { AsyncResource } from "node:async_hooks"
 import { utilityProcess, type UtilityProcess } from "electron"
@@ -439,6 +440,14 @@ export class FunctionRuntimeClient {
   }
 
   async load(code: string, options: ModObject = {}): Promise<FunctionGuest> {
+    await this.start()
+    const physical = this.captureUiResolvePhysicalLifetime()
+    const loadGeneration = this.generation
+    const preparation = new FunctionDisplayPreparationChannel({ client: this, physical }, () => {
+      physical.assertCurrent()
+      if (this.generation !== loadGeneration || physical.owner !== this.child)
+        throw new ModFunctionError("MODS_UNLOADED")
+    })
     const runtimeId = randomUUID()
     const loaded = await this.request({
       type: "load",
@@ -446,6 +455,9 @@ export class FunctionRuntimeClient {
       code,
       options
     })
+    physical.assertCurrent()
+    if (this.generation !== loadGeneration || physical.owner !== this.child)
+      throw new ModFunctionError("MODS_UNLOADED")
     const registrations = (Array.isArray(loaded) ? loaded :
       isModObject(loaded) ? loaded.registrations : undefined) as unknown as FunctionRegistration[]
     if (!Array.isArray(registrations)) throw new ModFunctionError("MODS_REGISTRATION_INVALID")
@@ -529,7 +541,8 @@ export class FunctionRuntimeClient {
         await request({ type: "dispose", runtimeId })
       }
     }
-    bindFunctionUiResolveRuntime(guest, this, runtimeId, this.captureUiResolvePhysicalLifetime(), assertLive)
+    bindFunctionUiResolveRuntime(guest, this, runtimeId, physical, assertLive)
+    preparation.bind(guest, code, runtimeId, isModObject(loaded) ? loaded.displayPreparation : undefined, assertLive)
     return guest
   }
 

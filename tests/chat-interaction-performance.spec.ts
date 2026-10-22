@@ -7,6 +7,17 @@ import { resolve, join, dirname } from "node:path"
 import { chromium, type CDPSession, type Page } from "playwright"
 import { mount } from "./mods-flow-browser.spec"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
+import { historyScale, nearestRank } from "./support/performance-acceptance"
+
+const messageCount = historyScale(process.env.PERF_HISTORY_MESSAGES)
+const profiling = process.env.PERF_PROFILE === "1"
+type FixtureBridge = "legacy-owned" | "site-read-projected" | "site-read-mounted"
+const concurrentNativeTestLoad =
+  process.env.PERF_CONCURRENT_TEST_LOAD === "1"
+    ? true
+    : process.env.PERF_CONCURRENT_TEST_LOAD === "0"
+      ? false
+      : null
 
 const sourcePaths = [
   "src/renderer/src/components/chat/ChatMessageVirtualList.tsx",
@@ -85,7 +96,15 @@ async function traceStop(client: CDPSession, output: string) {
   })
 }
 
-async function fixture(page: Page, enabled: boolean, delay: number, stableScope: boolean) {
+async function fixture(
+  page: Page,
+  enabled: boolean,
+  delay: number,
+  stableScope: boolean,
+  bridge: FixtureBridge
+) {
+  const servedSources = new Map<string, { path: string; sha256: string; origin: string }>()
+  let metafileInputs: string[] = []
   await mount(
     page,
     `
@@ -95,6 +114,7 @@ async function fixture(page: Page, enabled: boolean, delay: number, stableScope:
     import {ChatMessageScrollArea} from ${JSON.stringify(resolve("src/renderer/src/components/chat/ChatMessageScrollArea.tsx"))};
     import {ModsChatScope,useModsChatState} from ${JSON.stringify(resolve("src/renderer/src/lib/mods-chat-scope.tsx"))};
     import {completedMarkdownParseCache} from ${JSON.stringify(resolve("src/renderer/src/lib/markdown-parse-cache.ts"))};
+    import {validateFunctionDisplaySnapshot} from ${JSON.stringify(resolve("src/shared/mods/v2/display-snapshot.ts"))};
     {
     const calls=[],commits=[],owners=new Map(),virtual={current:null},range={current:null},refs={current:new Map()},detached=[],initialLocation={index:'LAST',align:'end'};let sequence=0;
     window.api.mods.chatDisplayCapability=async()=>${enabled};
@@ -102,18 +122,61 @@ async function fixture(page: Page, enabled: boolean, delay: number, stableScope:
     window.api.mods.siteMountOutcome=async(thread,component)=>{const owner='perf-'+(++sequence);owners.set(owner,component);calls.push(['mount',performance.now()]);return {state:'mounted',owner}};
     window.api.mods.siteRender=async(thread,owner,props)=>{calls.push(['render',performance.now()]);if(${delay})await new Promise(done=>setTimeout(done,${delay}));return {key:owner,id:owner,plugin:'perf',generation:owner,title:owners.get(owner),rows:12,closeOnEscape:false,tree:{type:'engine',ref:0},nativeContent:{component:owners.get(owner),entries:[{ref:0,props}],nativeUnchanged:false}}};
     window.api.mods.siteUnmount=async(thread,owner)=>{owners.delete(owner);calls.push(['unmount',performance.now()])};
-    const messages=Array.from({length:400},(_,index)=>({id:'perf-'+index,role:index%5===0?'user':'assistant',created_at:new Date(1700000000000+index).toISOString(),content:'PERF_MESSAGE_'+index+'\\n\\n'+Array.from({length:16},(_,section)=>'### Section '+section+'\\n\\nA **deterministic** paragraph with [a reference](https://example.test/reference) and inline \\x60value\\x60.\\n\\n- first item\\n- second item\\n\\n').join('')}));
+    const bridge=${JSON.stringify(bridge)},wholeSamples=[],rawTextExposures=[],nl=String.fromCharCode(10);
+    const sentinel='PERF_UNVERIFIED_SECRET';
+    const protectedProps=props=>({...props,text:props.text.replaceAll(sentinel,'[mock redacted]')});
+    const pane=(owner,component,props)=>({key:owner,id:owner,plugin:'perf',generation:owner,title:component,
+      rows:12,closeOnEscape:false,tree:{type:'engine',ref:0},nativeContent:{component,entries:[{ref:0,props}],nativeUnchanged:false}});
+    if(bridge!=='legacy-owned'){
+      window.api.mods.siteRead=async(thread,component,props,presentationId)=>{
+        const safe=protectedProps(props),hostMessage=props.text.length>10000||!props.text.trim();
+        if(${delay})await new Promise(done=>setTimeout(done,${delay}));
+        if(bridge==='site-read-projected'){
+          const snapshot={scopeId:'mock-main-fixture-scope',key:component+':'+presentationId,
+            version:'mock-protected-v1',expiresAt:Date.now()+120000,
+            data:hostMessage?{component,hostMessage:safe}:{component,tree:{type:'engine',ref:0},
+              nativeContent:{component,entries:[{ref:0,props:safe}],nativeUnchanged:false}}};
+          validateFunctionDisplaySnapshot(snapshot,component);
+          calls.push(['read',performance.now(),{outcome:'projected',hostMessage,textLength:props.text.length}]);
+          return {state:'projected',snapshot};
+        }
+        // Whole-message host data has no owned-drawing equivalent under the old guest ceiling.
+        // The mounted fixture exercises ordinary messages; long samples are projected above.
+        if(hostMessage)throw Error('MOUNTED_FIXTURE_MUST_NOT_EXPAND_GUEST_INPUT');
+        const owner='read-owner-'+(++sequence);owners.set(owner,component);
+        calls.push(['read',performance.now(),{outcome:'mounted',hostMessage:false,textLength:props.text.length}]);
+        return {state:'mounted',owner,snapshot:pane(owner,component,safe)};
+      };
+      window.api.mods.siteRender=async(thread,owner,props)=>{calls.push(['render',performance.now()]);
+        return pane(owner,owners.get(owner),protectedProps(props))};
+      new MutationObserver(records=>{for(const record of records){const values=[record.target.textContent,
+        ...[...record.addedNodes].map(node=>node.textContent)];if(values.some(value=>value?.includes(sentinel)))rawTextExposures.push(true)}})
+        .observe(document.getElementById('root'),{subtree:true,childList:true,characterData:true});
+    }
+    const messages=Array.from({length:${messageCount}},(_,index)=>({id:'perf-'+index,role:index%5===0?'user':'assistant',created_at:new Date(1700000000000+index).toISOString(),content:'PERF_MESSAGE_'+index+'\\n\\n'+Array.from({length:16},(_,section)=>'### Section '+section+'\\n\\nA **deterministic** paragraph with [a reference](https://example.test/reference) and inline \\x60value\\x60.\\n\\n- first item\\n- second item\\n\\n').join('')}));
+    if(bridge!=='legacy-owned')for(const message of messages)message.content+='\\n\\n'+sentinel;
+    if(bridge==='site-read-projected'){
+      const indexes=[1,Math.floor(messages.length/4)+1,Math.floor(messages.length/2)+1,messages.length-1];
+      [10000,10001,30720,65536].forEach((length,position)=>{
+        const index=indexes[position],end='WHOLE_HOST_END_'+index,
+          prefix='PERF_MESSAGE_'+index+nl+nl+sentinel+nl+nl+'[distal reference][whole]'+nl+nl,
+          suffix=[nl,'| Whole body | Outcome |','| --- | --- |','| End | '+end+' |',
+            nl,'[whole]: https://example.test/'+end].join(nl),fill='A complete deterministic paragraph.'+nl+nl;
+        messages[index].content=prefix+fill.repeat(Math.ceil(length/fill.length)).slice(0,length-prefix.length-suffix.length)+suffix;
+        wholeSamples.push({index,id:messages[index].id,length,end});
+      });
+    }
     const indexes=messages.map((_,index)=>index),noop=()=>{},setRef=()=>noop,emptySet=new Set(),
       maps={tools:new Map(),states:new Map(),hooks:new Map(),durations:new Map(),labels:new Map()};
     function Fixture(){const[parent,setParent]=useState(null),viewport=useRef(null),state=useModsChatState('perf-thread','C:/synthetic-perf'),[tick,setTick]=useState(0);
       useLayoutEffect(()=>{const target=viewport.current.querySelector('[data-radix-scroll-area-viewport]');target.setAttribute('data-perf-viewport','');setParent(target)},[]);
       const stable=useMemo(()=>({threadId:'perf-thread',...state}),[state.enabled,state.ready,state.error,state.retry,state.presentationCache]);
       const production=useMemo(()=>({threadId:'perf-thread',...state}),[state]);
-      window.perfFixture={calls,commits,cacheStats:()=>completedMarkdownParseCache.stats(),bump:()=>setTick(value=>value+1),jump:index=>virtual.current.scrollToIndex({index,align:'start',behavior:'auto'})};
+      window.perfFixture={calls,commits,wholeSamples,rawTextExposures,cacheStats:()=>completedMarkdownParseCache.stats(),bump:()=>setTick(value=>value+1),jump:index=>virtual.current.scrollToIndex({index,align:'start',behavior:'auto'})};
       return <ModsChatScope.Provider value={${stableScope ? "stable" : "production"}}>
         <output style={{display:'none'}}>{tick}</output><Profiler id='history' onRender={(id,phase,actualDuration,baseDuration,startTime,commitTime)=>commits.push({phase,actualDuration,baseDuration,startTime,commitTime})}>
         <div style={{height:760,display:'flex',flexDirection:'column'}}><ChatMessageScrollArea scrollRef={viewport} showScrollToBottom={false} hasUnread={false} unreadCount={0} onScrollToBottom={noop}>
-        <ChatMessageVirtualList messages={messages} visibleMessageIndexes={indexes} lastUserMessageIndex={395} contentVersion={1}
+        <ChatMessageVirtualList messages={messages} visibleMessageIndexes={indexes} lastUserMessageIndex={${messageCount - 5}} contentVersion={1}
           historyHasMore={false} historyPageLoading={false} historyRemainingCount={0} onLoadEarlierHistoryPage={noop} historyGapBeforeMessageId={null}
           canLoadReleasedHistory={false} onLoadReleasedHistoryWindow={noop} onRestoreLatestHistoryWindow={noop} hookLoggingEnabled={false}
           hookLogBucketByTurnId={maps.hooks} detachedHookLogBuckets={detached} contentMessageRefs={refs} setMessageRef={setRef} isLoading={false}
@@ -129,10 +192,31 @@ async function fixture(page: Page, enabled: boolean, delay: number, stableScope:
       {
         name: "performance-production-profiler",
         setup(builder) {
-          builder.onLoad({ filter: /\.tsx$/ }, (args) => {
+          builder.initialOptions.metafile = true
+          builder.onEnd((result) => {
+            metafileInputs = Object.keys(result.metafile?.inputs ?? {}).sort()
+          })
+          builder.onLoad({ filter: /\.(?:tsx?|jsx?|mjs|cjs)$/, namespace: "file" }, (args) => {
             const source = frozenSources.get(resolve(args.path))
-            if (source)
-              return { contents: source.contents, loader: "tsx", resolveDir: dirname(args.path) }
+            const local = args.path
+              .replaceAll("\\", "/")
+              .startsWith(resolve("src").replaceAll("\\", "/") + "/")
+            if (!source && !local) return
+            const contents = source?.contents ?? readFileSync(args.path, "utf8")
+            const file = args.path
+              .replaceAll("\\", "/")
+              .slice(resolve(".").replaceAll("\\", "/").length + 1)
+            servedSources.set(resolve(args.path), {
+              path: file,
+              sha256: createHash("sha256").update(contents).digest("hex"),
+              origin: source?.origin ?? "working-tree"
+            })
+            const loader = args.path.endsWith(".tsx")
+              ? "tsx"
+              : args.path.endsWith(".ts")
+                ? "ts"
+                : "jsx"
+            return { contents, loader, resolveDir: dirname(args.path) }
           })
           builder.onResolve({ filter: /^@\/lib\/thread-context$/ }, (args) => ({
             path: args.path,
@@ -160,17 +244,74 @@ async function fixture(page: Page, enabled: boolean, delay: number, stableScope:
   )
   await page.waitForSelector('[data-chat-initial-presentation="ready"]')
   await page.waitForTimeout(delay + 200)
+  const sources = [...servedSources.values()].sort((a, b) => a.path.localeCompare(b.path))
+  assert(
+    sources.length > 0 && metafileInputs.length > 0,
+    "Actual bundled project dependencies must be fingerprinted"
+  )
+  for (const source of sources)
+    if (source.origin === "working-tree")
+      assert.equal(
+        createHash("sha256").update(readFileSync(source.path)).digest("hex"),
+        source.sha256,
+        "Working-tree sources changed during fixture compilation"
+      )
+  return {
+    sources,
+    sourceHash: createHash("sha256").update(JSON.stringify(sources)).digest("hex"),
+    metafileInputs
+  }
+}
+
+async function verifyWholeMessages(page: Page) {
+  const samples = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          perfFixture: {
+            wholeSamples: Array<{ index: number; id: string; length: number; end: string }>
+          }
+        }
+      ).perfFixture.wholeSamples
+  )
+  for (const sample of samples) {
+    await page.evaluate(
+      (index) =>
+        (window as unknown as { perfFixture: { jump(index: number): void } }).perfFixture.jump(
+          index
+        ),
+      sample.index
+    )
+    await page.waitForFunction(
+      ({ id, end }) => {
+        const row = document.querySelector(`[data-chat-message-id="${id}"]`)
+        return (
+          row &&
+          !row.querySelector("[data-function-site-pending]") &&
+          row.textContent?.includes(end) &&
+          row.querySelector(`a[href="https://example.test/${end}"]`) &&
+          row.querySelector("table")
+        )
+      },
+      sample,
+      { polling: "raf" }
+    )
+  }
+  return samples
 }
 
 async function observe(page: Page, client: CDPSession, scenario: string, output: string) {
   await client.send("Performance.enable")
-  await client.send("Profiler.enable")
-  await client.send("Profiler.start")
+  if (profiling) {
+    await client.send("Profiler.enable")
+    await client.send("Profiler.start")
+  }
   const before = await client.send("Performance.getMetrics")
-  await client.send("Tracing.start", {
-    categories: "devtools.timeline,v8.execute,blink.user_timing",
-    transferMode: "ReturnAsStream"
-  })
+  if (profiling)
+    await client.send("Tracing.start", {
+      categories: "devtools.timeline,v8.execute,blink.user_timing",
+      transferMode: "ReturnAsStream"
+    })
   await page.evaluate(
     (options) => {
       let capturedOversize = false
@@ -178,7 +319,7 @@ async function observe(page: Page, client: CDPSession, scenario: string, output:
         frames: [] as number[],
         samples: [] as {
           at: number
-          gap: number
+          gap: number | null
           pending: boolean
           empty: boolean
           rows: number
@@ -195,7 +336,7 @@ async function observe(page: Page, client: CDPSession, scenario: string, output:
         running: true
       }
       ;(window as unknown as { interactionMetrics: typeof values }).interactionMetrics = values
-      let previous = performance.now()
+      let previous: number | undefined
       const observer = new PerformanceObserver((list) =>
         values.longTasks.push(...list.getEntries().map((entry) => entry.duration))
       )
@@ -205,8 +346,10 @@ async function observe(page: Page, client: CDPSession, scenario: string, output:
           observer.disconnect()
           return
         }
-        const gap = now - previous
-        values.frames.push(gap)
+        // The first RAF may carry an earlier frame timestamp than performance.now()
+        // at registration. Only successive RAF timestamps define frame intervals.
+        const gap = previous === undefined ? null : now - previous
+        if (gap !== null) values.frames.push(gap)
         previous = now
         const viewport = document.querySelector<HTMLElement>("[data-perf-viewport]")!
         const rows = [...viewport.querySelectorAll<HTMLElement>("[data-chat-message-id]")]
@@ -316,7 +459,9 @@ async function observe(page: Page, client: CDPSession, scenario: string, output:
     await page.mouse.wheel(0, -480)
     await page.waitForTimeout(24)
   }
-  for (const index of [40, 180, 80, 310, 120, 399]) {
+  for (const index of [0.1, 0.45, 0.2, 0.78, 0.3, 1].map((fraction) =>
+    Math.round((messageCount - 1) * fraction)
+  )) {
     await phase("jump:" + index)
     await page.evaluate(
       (index) =>
@@ -355,12 +500,12 @@ async function observe(page: Page, client: CDPSession, scenario: string, output:
     }
   })
   const after = await client.send("Performance.getMetrics")
-  const timings = await traceStop(client, join(output, scenario + ".trace.json"))
-  const { profile } = await client.send("Profiler.stop")
-  writeFileSync(join(output, scenario + ".cpuprofile"), JSON.stringify(profile))
+  const timings = profiling ? await traceStop(client, join(output, scenario + ".trace.json")) : []
+  const profile = profiling ? (await client.send("Profiler.stop")).profile : undefined
+  if (profile) writeFileSync(join(output, scenario + ".cpuprofile"), JSON.stringify(profile))
   const samples = new Map<number, number>()
-  for (const id of profile.samples ?? []) samples.set(id, (samples.get(id) ?? 0) + 1)
-  const hotFunctions = profile.nodes
+  for (const id of profile?.samples ?? []) samples.set(id, (samples.get(id) ?? 0) + 1)
+  const hotFunctions = (profile?.nodes ?? [])
     .map((node) => ({
       name: node.callFrame.functionName,
       url: node.callFrame.url,
@@ -414,12 +559,52 @@ async function main() {
   })
   const rows = []
   try {
-    for (const scenario of [
-      { name: "mods-off", enabled: false, delay: 0, stable: false },
-      { name: "mods-on", enabled: true, delay: 0, stable: false },
-      { name: "mods-on-stable-scope", enabled: true, delay: 0, stable: true },
-      { name: "mods-delayed", enabled: true, delay: 120, stable: false }
-    ].filter((value) => !process.env.PERF_SCENARIO || value.name === process.env.PERF_SCENARIO)) {
+    const scenarios: Array<{
+      name: string
+      enabled: boolean
+      delay: number
+      stable: boolean
+      bridge: FixtureBridge
+    }> = [
+      {
+        name: "mods-off",
+        enabled: false,
+        delay: 0,
+        stable: false,
+        bridge: "legacy-owned" as const
+      },
+      { name: "mods-on", enabled: true, delay: 0, stable: false, bridge: "legacy-owned" as const },
+      {
+        name: "mods-on-stable-scope",
+        enabled: true,
+        delay: 0,
+        stable: true,
+        bridge: "legacy-owned" as const
+      },
+      {
+        name: "mods-delayed",
+        enabled: true,
+        delay: 120,
+        stable: false,
+        bridge: "legacy-owned" as const
+      },
+      {
+        name: "mods-site-read-projected",
+        enabled: true,
+        delay: 0,
+        stable: false,
+        bridge: "site-read-projected" as const
+      },
+      {
+        name: "mods-site-read-mounted",
+        enabled: true,
+        delay: 0,
+        stable: false,
+        bridge: "site-read-mounted" as const
+      }
+    ].filter((value) => !process.env.PERF_SCENARIO || value.name === process.env.PERF_SCENARIO)
+    assert(scenarios.length > 0, "Unknown PERF_SCENARIO must not produce an empty passing report")
+    for (const scenario of scenarios) {
       const page = await browser.newPage({ viewport: { width: 1180, height: 900 } }),
         errors: string[] = []
       await page.addInitScript("globalThis.__name=(value)=>value")
@@ -427,22 +612,105 @@ async function main() {
         if (!errors.length) console.error(error.stack)
         errors.push(error.message)
       })
-      await fixture(page, scenario.enabled, scenario.delay, scenario.stable)
+      const bundle = await fixture(
+        page,
+        scenario.enabled,
+        scenario.delay,
+        scenario.stable,
+        scenario.bridge
+      )
+      const wholeMessages = await verifyWholeMessages(page)
       writeFileSync(
         join(output, scenario.name + ".fixture.js"),
         (await page.locator("script").last().textContent()) ?? ""
       )
       const client = await page.context().newCDPSession(page)
       const row = await observe(page, client, scenario.name, output)
+      const counts = (name: string) =>
+        row.calls.filter((call) => (call as unknown[])[0] === name).length
+      const outcomes = { projected: 0, mounted: 0, hostMessage: 0 }
+      for (const call of row.calls as unknown[][])
+        if (call[0] === "read") {
+          const detail = call[2] as { outcome: "projected" | "mounted"; hostMessage: boolean }
+          outcomes[detail.outcome]++
+          if (detail.hostMessage) outcomes.hostMessage++
+        }
+      const transportCounters = {
+        siteRead: counts("read"),
+        outcomes,
+        siteMountOutcome: counts("mount"),
+        siteRender: counts("render"),
+        siteUnmount: counts("unmount"),
+        guestEvaluations: null,
+        sourceGuardChecks: null,
+        mainPolicyInvocations: null
+      }
+      if (scenario.bridge !== "legacy-owned") {
+        assert(transportCounters.siteRead > 0, "The new bridge must actually execute siteRead")
+        assert.equal(
+          transportCounters.siteMountOutcome,
+          0,
+          "New bridge must not silently use legacy admission"
+        )
+        assert.equal(
+          await page.evaluate(
+            () =>
+              (
+                window as unknown as {
+                  perfFixture: { rawTextExposures: unknown[] }
+                }
+              ).perfFixture.rawTextExposures.length
+          ),
+          0,
+          "Mock-protected source text must never enter rendered DOM"
+        )
+        if (scenario.bridge === "site-read-projected") {
+          assert.equal(outcomes.mounted, 0)
+          assert.equal(transportCounters.siteRender, 0)
+          assert.equal(transportCounters.siteUnmount, 0)
+          assert(wholeMessages.length === 4 && outcomes.hostMessage > 0)
+        } else assert.equal(outcomes.projected, 0)
+      }
       assert.deepEqual(errors, [])
-      rows.push({ ...row, errors })
+      rows.push({
+        ...row,
+        fixtureBridge: scenario.bridge,
+        transportCounters,
+        wholeMessages,
+        compiledDependencies: bundle,
+        errors
+      })
       writeFileSync(
         join(output, "observations.json"),
         JSON.stringify(
           {
             synthetic: true,
             productionProfilingBuild: process.env.PERF_REACT_PROFILE === "1",
+            diagnosticCpuProfile: profiling,
+            normalInstrumentation:
+              !profiling &&
+              process.env.PERF_REACT_PROFILE !== "1" &&
+              process.env.PERF_DIAGNOSTIC !== "1",
+            dataset: { messageCount, synthetic: true },
+            releaseAcceptance: "not-assessed-synthetic-fixture",
+            concurrentNativeTestLoad,
+            mockMainProtection: {
+              implementation:
+                "New siteRead fixtures redact a deterministic sentinel before returning data; legacy mocks do not run protection",
+              isRealMainAuthority: false,
+              guestEvaluations: "not-measured",
+              sourceGuard: "not-exercised"
+            },
             sourceSnapshots: sources,
+            baselineFreezeScope: process.env.PERF_BASELINE_COMMIT
+              ? "partial8"
+              : "working-tree-components",
+            sourceMixed: Boolean(process.env.PERF_BASELINE_COMMIT),
+            sourceGraphScope:
+              "Per-case esbuild metafile inputs and exact served project-source hashes; package-lock is recorded separately, not all runtime library bytes",
+            packageLockSha256: createHash("sha256")
+              .update(readFileSync("package-lock.json"))
+              .digest("hex"),
             cssBeforeReact: true,
             cssSnapshot: {
               files: fixtureCssFiles,
@@ -451,13 +719,16 @@ async function main() {
             baselineCommit: process.env.PERF_BASELINE_COMMIT ?? null,
             diagnosticGeometry: process.env.PERF_DIAGNOSTIC === "1",
             limits:
-              "Actual virtual list/message/Markdown/site components with mocked transport; excludes full ChatContainer, Electron IPC, real Sidebar DnD and remote model. Tracing/profiling overhead is included consistently.",
+              "Actual virtual list/message/Markdown/site components with mocked transport; excludes full ChatContainer, Electron IPC, real Sidebar DnD and remote model. CDP tracing/CPU profiling is opt-in (PERF_PROFILE=1); diagnostic captures cannot satisfy timing gates.",
             measurementNotes: [
               "Trace categories contain nested events; their totalMs values must not be summed as CPU time.",
-              "Performance TaskDuration/ScriptDuration/LayoutDuration/RecalcStyleDuration are cumulative seconds; compare after-before.",
+              "Performance TaskDuration/ScriptDuration/LayoutDuration/RecalcStyleDuration are renderer-main cumulative seconds; compare after-before. They exclude Electron main/guest-worker attribution and cannot establish total application CPU cost.",
               "CDP Nodes is a page-wide counter, not the live virtual row count; use sampled rows/maxMountedRows for the virtual window.",
               "RAF observation queries mounted rows each frame and reads pending geometry only when pending nodes exist; diagnosticGeometry adds one-off measurements and is not a timing baseline.",
+              "The first RAF establishes the clock origin; frame intervals use successive RAF timestamps, never an initial mixed performance.now()/RAF difference.",
               "The explicit delay scenario injects mock transport latency; it is not measured native IPC latency.",
+              "Legacy fixtures deliberately omit siteRead; their mount/render counts do not measure the new projection bridge. New fixtures count siteRead outcomes independently. No mocked count proves actual Main/QuickJS work.",
+              "PERF_BASELINE_COMMIT freezes only eight selected modules; transitive imports remain working-tree sources and sourceMixed=true cannot pass formal before/after acceptance.",
               "Markdown cache counters observe the new parser cache only; an old source that does not use it reports zero, not zero legacy parser invocations."
             ],
             rows
@@ -477,8 +748,13 @@ async function main() {
       console.log(
         JSON.stringify({
           scenario: row.scenario,
+          fixtureBridge: scenario.bridge,
+          transportCounters,
+          wholeMessageLengths: wholeMessages.map((sample) => sample.length),
+          servedProjectSourceCount: bundle.sources.length,
+          servedProjectSourceHash: bundle.sourceHash,
           frames: frames.length,
-          frameP95: frames[Math.floor(frames.length * 0.95)],
+          frameP95: nearestRank(frames, 0.95),
           frameMax: Math.max(...frames),
           longTaskCount: metrics.longTasks.length,
           longTaskTotalMs: metrics.longTasks.reduce((sum, value) => sum + value, 0),

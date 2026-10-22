@@ -1,28 +1,55 @@
+import {
+  validateFunctionDisplaySnapshotData,
+  type FunctionDisplaySnapshotData
+} from "../../../shared/mods/v2/display-snapshot"
 import type { FunctionNativeContent } from "../../../shared/mods/v2/engine"
-import type { FunctionUiSite } from "../../../shared/mods/v2/sites"
+import type { ModObject } from "../../../shared/mods/types"
+import {
+  FUNCTION_PASSIVE_DISPLAY_SITES,
+  FUNCTION_UI_SITES,
+  type FunctionUiSite
+} from "../../../shared/mods/v2/sites"
 import type { FunctionPaneSnapshot, FunctionUiElement } from "../../../shared/mods/v2/ui"
+import {
+  functionSitePresentationBudget as budget,
+  type PresentationBudgetRecord
+} from "./function-site-presentation-budget"
+import { presentationInputDigest } from "./presentation-input-digest"
 
 const MAX_ENTRIES = 96
-const MAX_BYTES = 2 * 1024 * 1024
 const MAX_ENTRY_BYTES = 128 * 1024
 const MAX_AGE_MS = 120000
+const RECORD_BYTES = 256
+const SCOPE_BYTES = 4096
 
 export interface FunctionSitePresentation {
-  tree: FunctionUiElement
+  tree?: FunctionUiElement
   nativeContent?: FunctionNativeContent
+  hostMessage?: ModObject
   height: number
   width: number
 }
 
-interface Entry {
+interface Entry extends PresentationBudgetRecord {
   component: FunctionUiSite
+  hostKey?: string
   presentation: FunctionSitePresentation
   bytes: number
   expires: number
   valid: boolean
 }
 
+interface Admission extends PresentationBudgetRecord {
+  component: FunctionUiSite
+  valid: boolean
+}
+
+interface ProjectionChange extends PresentationBudgetRecord {
+  revision: number
+}
+
 export interface CachedFunctionSitePresentation {
+  hostKey?: string
   presentation: FunctionSitePresentation
   expiresAt: number
   current(): boolean
@@ -58,52 +85,136 @@ export function functionSitePresentationKey(
   inputKey: string,
   viewportWidth: number
 ): string | null {
-  if (!presentationId || !["UserMessage", "AssistantMessage", "CommandOutput"].includes(component))
+  if (
+    !presentationId ||
+    presentationId.length > 2048 ||
+    !FUNCTION_PASSIVE_DISPLAY_SITES.includes(component)
+  )
     return null
-  return JSON.stringify([threadId, component, presentationId, inputKey, viewportWidth])
+  return JSON.stringify([
+    threadId,
+    component,
+    presentationId,
+    // Preserve exact UTF-16 identity even if a caller supplies an unpaired surrogate.
+    "sha256:" + presentationInputDigest(JSON.stringify(inputKey)),
+    viewportWidth
+  ])
 }
 
 /** Bound to one host capability decision, never an installation name or a restored owner token. */
 export class FunctionSitePresentationCache {
   private entries = new Map<string, Entry>()
   private bytes = 0
+  private metadata: PresentationBudgetRecord | undefined
   private revision = 0
   private admissionRevision = 0
-  private admissions = new Map<string, { component: FunctionUiSite; valid: boolean }>()
+  private admissions = new Map<string, Admission>()
   private components = new Map<string, number>()
-  private listeners = new Set<() => void>()
+  private listeners = new Set<{ notify(): void; key?: string | null }>()
+  private notifying: Set<object> | undefined
+  private projectionRevision = 0
+  private projectionFloor = 0
+  private projectionChanges = new Map<string, ProjectionChange>()
 
   constructor(private readonly authorized: () => boolean) {}
 
-  subscribe(listener: () => void): () => void {
-    this.listeners.add(listener)
+  subscribe(listener: () => void, key?: string | null): () => void {
+    const subscription = { notify: listener, key }
+    this.listeners.add(subscription)
     return () => {
-      this.listeners.delete(listener)
+      this.listeners.delete(subscription)
     }
+  }
+
+  /** Close the first-read/event race without retaining an unbounded per-row event history. */
+  captureProjectionRead(): (hostKey: string) => boolean {
+    const revision = this.revision
+    const start = this.projectionRevision
+    return (hostKey) =>
+      this.authorized() &&
+      this.revision === revision &&
+      start >= this.projectionFloor &&
+      (this.projectionChanges.get(hostKey)?.revision ?? 0) <= start
+  }
+
+  matchesProjection(key: string | null, hostKey: string): boolean {
+    const entry = key ? this.entries.get(key) : undefined
+    return Boolean(this.authorized() && entry?.valid && entry.hostKey === hostKey)
+  }
+
+  invalidateProjection(hostKey: string): void {
+    // Production host keys are SHA-256 row identities, never message text or callback handles.
+    if (!hostKey || hostKey.length > 256) return
+    const revision = ++this.projectionRevision
+    const previous = this.projectionChanges.get(hostKey)
+    if (previous) this.removeProjectionChange(hostKey, previous, false)
+    while (this.projectionChanges.size >= MAX_ENTRIES) {
+      const oldest = this.projectionChanges.entries().next().value!
+      this.removeProjectionChange(oldest[0], oldest[1])
+    }
+    const change: ProjectionChange = {
+      token: {},
+      bytes: RECORD_BYTES + hostKey.length * 2,
+      revision,
+      evict: () => {
+        this.removeProjectionChange(hostKey, change)
+        this.releaseEmptyMetadata()
+      }
+    }
+    this.projectionChanges.set(hostKey, change)
+    if (!this.retain(change) || this.projectionChanges.get(hostKey) !== change) {
+      // A refused log record loses coverage, never the invalidation it represents.
+      this.projectionFloor = Math.max(this.projectionFloor, revision)
+      this.removeProjectionChange(hostKey, change)
+      this.releaseEmptyMetadata()
+    }
+    const changed = new Set<string>()
+    for (const [key, entry] of this.entries)
+      if (entry.hostKey === hostKey) {
+        changed.add(key)
+        this.remove(key, entry)
+      }
+    if (changed.size) this.notify(changed)
   }
 
   capture(component: FunctionUiSite, _key?: string | null, rowIdentity?: string): () => boolean {
     // Facts keys may contain whole messages. Retain only bounded stable row identities.
     void _key
+    if (!budget.canRetain()) return () => false
     const revision = this.revision
     const admissionRevision = this.admissionRevision
     const generation = this.components.get(component)
     if (rowIdentity !== undefined && (!rowIdentity || rowIdentity.length > 2048)) return () => false
-    let admission: { component: FunctionUiSite; valid: boolean } | undefined
+    let admission: Admission | undefined
     if (rowIdentity !== undefined) {
       admission = this.admissions.get(rowIdentity)
       if (admission && admission.component !== component) {
-        admission.valid = false
+        this.removeAdmission(rowIdentity, admission)
         admission = undefined
       }
       this.admissions.delete(rowIdentity)
-      if (!admission) admission = { component, valid: true }
+      if (!admission) {
+        const created: Admission = {
+          token: {},
+          bytes: RECORD_BYTES + rowIdentity.length * 2,
+          component,
+          valid: true,
+          evict: () => {
+            this.removeAdmission(rowIdentity, created)
+            this.releaseEmptyMetadata()
+          }
+        }
+        admission = created
+      }
       while (this.admissions.size >= MAX_ENTRIES) {
         const oldest = this.admissions.entries().next().value!
-        oldest[1].valid = false
-        this.admissions.delete(oldest[0])
+        this.removeAdmission(oldest[0], oldest[1])
       }
       this.admissions.set(rowIdentity, admission)
+      if (!this.retain(admission) || this.admissions.get(rowIdentity) !== admission) {
+        this.removeAdmission(rowIdentity, admission)
+        this.releaseEmptyMetadata()
+      }
     }
     return () =>
       this.authorized() &&
@@ -118,11 +229,15 @@ export class FunctionSitePresentationCache {
     if (!entry) return null
     if (!entry.valid || entry.expires <= Date.now()) {
       this.remove(key, entry)
+      this.releaseEmptyMetadata()
       return null
     }
     this.entries.delete(key)
     this.entries.set(key, entry)
+    budget.touch(entry)
+    if (this.metadata) budget.touch(this.metadata)
     return {
+      ...(entry.hostKey ? { hostKey: entry.hostKey } : {}),
       presentation: entry.presentation,
       expiresAt: entry.expires,
       current: () => this.authorized() && entry.valid && entry.expires > Date.now()
@@ -137,46 +252,119 @@ export class FunctionSitePresentationCache {
     current: () => boolean,
     width = 0
   ): void {
-    if (!key || !current() || !this.authorized()) return
+    if (!budget.canRetain() || !key || !current() || !this.authorized()) return
     const tree = staticTree(snapshot.tree)
     if (!tree) return
+    this.store(key, component, tree, snapshot.nativeContent, height, current, width)
+  }
+
+  /** Protected passive data may outlive its DOM row, never its host capability decision. */
+  saveData(
+    key: string | null,
+    data: FunctionDisplaySnapshotData,
+    height: number,
+    current: () => boolean,
+    width = 0,
+    hostKey?: string
+  ): void {
+    if (
+      !budget.canRetain() ||
+      !key ||
+      !current() ||
+      !this.authorized() ||
+      (hostKey !== undefined && (!hostKey || hostKey.length > 256))
+    )
+      return
+    validateFunctionDisplaySnapshotData(data)
+    this.store(
+      key,
+      data.component,
+      data.hostMessage ? undefined : (data.tree ?? { type: "engine", ref: 0 }),
+      data.nativeContent,
+      height,
+      current,
+      width,
+      hostKey,
+      data.hostMessage
+    )
+  }
+
+  private store(
+    key: string,
+    component: FunctionUiSite,
+    tree: FunctionUiElement | undefined,
+    nativeContent: FunctionNativeContent | undefined,
+    height: number,
+    current: () => boolean,
+    width: number,
+    hostKey?: string,
+    hostMessage?: ModObject
+  ): void {
+    if (!budget.canRetain() || !current() || !this.authorized()) return
     const presentation: FunctionSitePresentation = {
-      tree,
-      ...(snapshot.nativeContent ? { nativeContent: structuredClone(snapshot.nativeContent) } : {}),
+      ...(tree ? { tree: structuredClone(tree) } : {}),
+      ...(nativeContent ? { nativeContent: structuredClone(nativeContent) } : {}),
+      ...(hostMessage ? { hostMessage: structuredClone(hostMessage) } : {}),
       height: Number.isFinite(height) ? Math.max(0, Math.min(100000, height)) : 0,
       width: Number.isFinite(width) ? Math.max(0, Math.min(100000, width)) : 0
     }
-    const bytes = (key.length + JSON.stringify(presentation).length) * 2
+    const bytes =
+      RECORD_BYTES + (key.length + (hostKey?.length ?? 0) + JSON.stringify(presentation).length) * 2
     if (bytes > MAX_ENTRY_BYTES) return
     const previous = this.entries.get(key)
     if (previous) this.remove(key, previous)
-    while (this.entries.size >= MAX_ENTRIES || this.bytes + bytes > MAX_BYTES) {
+    while (this.entries.size >= MAX_ENTRIES) {
       const oldest = this.entries.entries().next().value
       if (!oldest) break
       this.remove(oldest[0], oldest[1])
+      this.notify(new Set([oldest[0]]))
     }
-    this.entries.set(key, {
+    const entry: Entry = {
+      token: {},
       component,
+      ...(hostKey ? { hostKey } : {}),
       presentation,
       bytes,
       expires: Date.now() + MAX_AGE_MS,
-      valid: true
-    })
+      valid: true,
+      evict: () => {
+        this.remove(key, entry)
+        this.releaseEmptyMetadata()
+        this.notify(new Set([key]))
+      }
+    }
+    this.entries.set(key, entry)
     this.bytes += bytes
+    const retained = this.retain(entry)
+    // Admission metadata may itself have been evicted while making room for the data.
+    if (!retained || this.entries.get(key) !== entry || !current() || !this.authorized()) {
+      this.remove(key, entry)
+      this.releaseEmptyMetadata()
+    }
   }
 
   invalidate(component?: string, notify = true): void {
-    if (!component || component === "*") this.revision++
-    else this.components.set(component, (this.components.get(component) ?? 0) + 1)
+    if (!component || component === "*") {
+      this.revision++
+      for (const [key, change] of this.projectionChanges) this.removeProjectionChange(key, change)
+      this.projectionFloor = this.projectionRevision
+      this.components.clear()
+    } else if (FUNCTION_UI_SITES.some((site) => site === component)) {
+      this.components.set(component, (this.components.get(component) ?? 0) + 1)
+      if (!this.retainMetadata()) {
+        this.revision++
+        this.components.clear()
+      }
+    }
     for (const [key, entry] of this.entries)
       if (!component || component === "*" || entry.component === component) this.remove(key, entry)
     for (const [identity, admission] of this.admissions) {
       if (!component || component === "*" || admission.component === component) {
-        admission.valid = false
-        this.admissions.delete(identity)
+        this.removeAdmission(identity, admission)
       }
     }
-    if (notify) for (const listener of this.listeners) listener()
+    this.releaseEmptyMetadata()
+    if (notify) this.notify()
   }
 
   invalidateKey(key: string | null, notify = true, rowIdentity?: string): void {
@@ -186,20 +374,96 @@ export class FunctionSitePresentationCache {
     this.admissionRevision++
     if (rowIdentity !== undefined) {
       const admission = this.admissions.get(rowIdentity)
-      if (admission) admission.valid = false
-      this.admissions.delete(rowIdentity)
+      if (admission) this.removeAdmission(rowIdentity, admission)
     } else {
-      for (const admission of this.admissions.values()) admission.valid = false
-      this.admissions.clear()
+      for (const [identity, admission] of this.admissions) this.removeAdmission(identity, admission)
     }
     const entry = this.entries.get(key)
     if (entry) this.remove(key, entry)
-    if (notify) for (const listener of this.listeners) listener()
+    this.releaseEmptyMetadata()
+    if (notify) this.notify()
   }
 
   private remove(key: string, entry: Entry): void {
     entry.valid = false
-    this.entries.delete(key)
-    this.bytes -= entry.bytes
+    if (this.entries.get(key) === entry) {
+      this.entries.delete(key)
+      this.bytes -= entry.bytes
+    }
+    budget.release(entry.token)
+  }
+
+  private removeAdmission(identity: string, admission: Admission): void {
+    admission.valid = false
+    if (this.admissions.get(identity) === admission) this.admissions.delete(identity)
+    budget.release(admission.token)
+  }
+
+  private removeProjectionChange(key: string, change: ProjectionChange, lostCoverage = true): void {
+    if (this.projectionChanges.get(key) === change) {
+      if (lostCoverage) this.projectionFloor = Math.max(this.projectionFloor, change.revision)
+      this.projectionChanges.delete(key)
+    }
+    budget.release(change.token)
+  }
+
+  private retainMetadata(): boolean {
+    if (!this.metadata) {
+      const metadata: PresentationBudgetRecord = {
+        token: {},
+        bytes: SCOPE_BYTES,
+        evict: () => {
+          this.metadata = undefined
+          this.invalidate()
+        }
+      }
+      this.metadata = metadata
+      if (!budget.retain(metadata) || this.metadata !== metadata) {
+        budget.release(metadata.token)
+        if (this.metadata === metadata) this.metadata = undefined
+        return false
+      }
+    } else budget.touch(this.metadata)
+    return true
+  }
+
+  private retain(record: PresentationBudgetRecord): boolean {
+    if (!this.retainMetadata()) return false
+    const retained = budget.retain(record)
+    if (this.metadata) budget.touch(this.metadata)
+    return retained
+  }
+
+  private releaseEmptyMetadata(): void {
+    if (
+      this.entries.size ||
+      this.admissions.size ||
+      this.projectionChanges.size ||
+      this.components.size
+    )
+      return
+    if (this.metadata) budget.release(this.metadata.token)
+    this.metadata = undefined
+  }
+
+  private notify(keys?: ReadonlySet<string>): void {
+    const outer = !this.notifying
+    const notified = this.notifying ?? new Set<object>()
+    this.notifying = notified
+    try {
+      budget.observe(() => {
+        for (const listener of this.listeners)
+          if (!notified.has(listener) && (!keys || !listener.key || keys.has(listener.key))) {
+            notified.add(listener)
+            try {
+              listener.notify()
+            } catch {
+              /* A subscriber cannot retain evicted passive data. */
+            }
+          }
+      })
+    } finally {
+      if (outer) this.notifying = undefined
+    }
   }
 }

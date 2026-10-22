@@ -1,3 +1,4 @@
+import { aliasFunctionDisplayPreparation } from "./display-preparation"
 import type { FunctionGuest, FunctionHostCall } from "../../../shared/mods/v2/contracts"
 import type { FunctionSessionActivity } from "./session-activity"
 import type { FunctionSessionInitializer } from "./session-initializer"
@@ -50,5 +51,6 @@ export function trackFunctionGuest(
     }
   })
   aliasFunctionUiResolveRuntime(guest, tracked)
+  aliasFunctionDisplayPreparation(guest, tracked)
   return tracked
 }

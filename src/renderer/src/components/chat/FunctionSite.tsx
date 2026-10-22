@@ -1,3 +1,5 @@
+import { validateFunctionDisplaySnapshot, type FunctionDisplaySnapshot } from "../../../../shared/mods/v2/display-snapshot"
+import { FunctionDisplayContent } from "./FunctionDisplayContent"
 import { useModsChatScope, useModsChatReady, useModsChatLoadError, useModsChatCurrent,
   useModsChatPresentationCache } from "../../lib/mods-chat-scope"
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from "react"
@@ -36,10 +38,12 @@ const DEFAULT_SITE_CLASS_NAME =
   "mx-auto w-full max-w-3xl overflow-auto text-xs text-muted-foreground"
 
 /** Neutral geometry only: never render or measure the unverified native fallback. */
-function FunctionSitePending({ component, slow = false }: {
+function FunctionSitePending({ component, slow = false, quiet = false }: {
   component: FunctionUiSite
   slow?: boolean
+  quiet?: boolean
 }): React.JSX.Element | null {
+  if (quiet) return null
   const message = ["UserMessage", "AssistantMessage", "CommandOutput"].includes(component)
   // Optional decorations should not introduce bars or layout rows while they are unknown.
   if (!message && !slow) return null
@@ -140,7 +144,9 @@ export function FunctionSite(props: Parameters<typeof FunctionSiteSurface>[0]): 
         {loadError.error}
         {loadError.retry && <button type="button" className="ml-2 underline"
           onClick={loadError.retry}>重试读取</button>}
-      </p> : <FunctionSitePending component={props.component} />}
+      </p> : <FunctionSitePending component={props.component} quiet={
+        ["UserMessage", "AssistantMessage"].includes(props.component) &&
+        typeof props.facts.text === "string" && !props.facts.text.trim()} />}
     </section> : enabled ? (
     <FunctionSiteSurface key={JSON.stringify([props.threadId, props.component,
       props.messageId, props.expectedRequestId, props.presentationId])} {...props} />
@@ -198,6 +204,17 @@ function FunctionSiteSurface({
     owner: string
     presentationCurrent?: () => boolean
   } | null>(null)
+  const [projection, setProjection] = useState<{
+    snapshot: FunctionDisplaySnapshot
+    ticket: FunctionSiteTicket
+    inputKey: string
+    inputRevision: number
+    prefixEpoch: number
+    presentationCurrent?: () => boolean
+  } | null>(null)
+  const projectionRef = useRef(projection)
+  projectionRef.current = projection
+  const scopeCurrent = useModsChatCurrent(threadId)
   const [inactive, setInactive] = useState<{ ticket: FunctionSiteTicket; inputKey: string; inputRevision: number } | null>(null)
   const [error, setError] = useState("")
   const [failureCode, setFailureCode] = useState("")
@@ -213,9 +230,13 @@ function FunctionSiteSurface({
   } | null>(null)
   const input = component === "AbovePrompt" ? { ...facts, ...geometry } : facts
   const inputKey = JSON.stringify(input)
-  const presentationKey = functionSitePresentationKey(threadId, component,
-    presentationId ?? messageId, inputKey, typeof window === "undefined" ? 0 : window.innerWidth)
   const presentationIdentity = presentationId ?? messageId
+  const viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth
+  const presentationKey = useMemo(
+    () =>
+      functionSitePresentationKey(threadId, component, presentationIdentity, inputKey, viewportWidth),
+    [threadId, component, presentationIdentity, inputKey, viewportWidth]
+  )
   const presentationRow = presentationIdentity
     ? JSON.stringify([component, presentationIdentity]) : undefined
   const presentationKeyRef = useRef(presentationKey)
@@ -230,6 +251,8 @@ function FunctionSiteSurface({
   const [presentationRevision, setPresentationRevision] = useState(0)
   const cachedPresentation = useMemo(() => presentationCache?.read(presentationKey) ?? null,
     [presentationCache, presentationKey, presentationRevision])
+  const cachedPresentationRef = useRef(cachedPresentation)
+  cachedPresentationRef.current = cachedPresentation
   const cachedSection = useRef<HTMLDivElement>(null)
   const [cachedGeometry, setCachedGeometry] = useState<{ presentation: object; width: number } | null>(null)
   const measuredPresentation = useRef<{
@@ -264,6 +287,10 @@ function FunctionSiteSurface({
     frame: NonNullable<typeof frame>
     renderNative: typeof renderNative
   } | null>(null)
+  const projectionPresentation = useRef<{
+    projection: NonNullable<typeof projection>
+    renderNative: typeof renderNative
+  } | null>(null)
   // A nativeUnchanged delegate without renderNative would otherwise use the caller's
   // latest raw fallback. Retained presentations may only render captured protected props.
   const canRetain = Boolean(renderNative || fallback === undefined)
@@ -276,12 +303,46 @@ function FunctionSiteSurface({
         ? redrawPresentation.current.revision === inputRevision && redrawPresentation.current.inputKey === inputKey
         : retainsFunctionSitePresentation(component, frame.inputKey, input))))
     ? frame.snapshot : null
+  // Cache admission is optional retention, not the authority of an already committed view.
+  // Only an uninterrupted append lineage may retain protected data for an older input.
+  const projected = projection?.ticket.current() && scopeCurrent() && (
+    (projection.inputRevision === inputRevision && projection.inputKey === inputKey) ||
+    (canRetain && projection.prefixEpoch === prefixLineage.current.epoch &&
+      (!renderNative || projectionPresentation.current?.projection === projection) &&
+      retainsFunctionSitePresentation(component, projection.inputKey, input))) ? projection : null
+  const projectedGeometry = useRef<{ projection: NonNullable<typeof projection>; geometry: FunctionSiteGeometry } | null>(null)
+  useLayoutEffect(() => {
+    const node = section.current
+    if (!presentationCache || !node || !projected || !presentationKey) return
+    return observeFunctionSiteGeometry(node, geometry => {
+      if (projectionRef.current === projected && projected.ticket.current() &&
+        projected.inputRevision === inputVersion.current.revision)
+        projectedGeometry.current = { projection: projected, geometry }
+    })
+  }, [presentationCache, projected, presentationKey])
+  useLayoutEffect(() => () => {
+    const current = projectionRef.current
+    if (!presentationCache || !current?.ticket.current() || !current.presentationCurrent ||
+      current.snapshot.expiresAt <= Date.now() ||
+      current.inputRevision !== inputVersion.current.revision || !canRetainRef.current) return
+    const measured = projectedGeometry.current
+    const bounds = measured?.projection === current ? measured.geometry : { height: 0, width: 0 }
+    presentationCache.saveData(presentationKeyRef.current, current.snapshot.data,
+      bounds.height, current.presentationCurrent, bounds.width, current.snapshot.key)
+  }, [presentationCache])
   // Keep the renderer actually committed with this protected frame, including local expansion
   // state. During a progress read, a new caller closure can contain unprotected input/results.
   useLayoutEffect(() => {
     if (snapshot && frame && frame.ticket.current() && frame.inputRevision === inputRevision)
       nativePresentation.current = { frame, renderNative }
   }, [snapshot, frame, inputRevision, renderNative])
+  useLayoutEffect(() => {
+    if (projected && projected.inputRevision === inputRevision)
+      projectionPresentation.current = { projection: projected, renderNative }
+  }, [projected, inputRevision, renderNative])
+  const projectedRenderer = projected?.inputRevision === inputRevision ? renderNative :
+    projectionPresentation.current?.projection === projected
+      ? projectionPresentation.current.renderNative : undefined
   const presentationRenderer = frame?.inputRevision === inputRevision ? renderNative :
     nativePresentation.current?.frame === frame ? nativePresentation.current.renderNative : undefined
   const snapshotRef = useRef(snapshot)
@@ -300,11 +361,11 @@ function FunctionSiteSurface({
     const changed = () => {
       if (!cachedPresentation.current()) setPresentationRevision((revision) => revision + 1)
     }
-    const stop = presentationCache.subscribe(changed)
+    const stop = presentationCache.subscribe(changed, presentationKey)
     const expiry = setTimeout(changed, Math.max(0, cachedPresentation.expiresAt - Date.now()) + 1)
     if (!cachedPresentation.current()) changed()
     return () => { stop(); clearTimeout(expiry) }
-  }, [snapshot, presentationCache, cachedPresentation])
+  }, [snapshot, presentationCache, cachedPresentation, presentationKey])
   useLayoutEffect(() => {
     const node = cachedSection.current
     const presentation = cachedPresentation?.presentation
@@ -440,6 +501,9 @@ function FunctionSiteSurface({
     lifetimeRef.current = lifetime
     let stopped = false
     let owner: string | null = null
+    // A live view whose dependency proof was released resumes the original owned
+    // subscription path instead of repeatedly fighting other visible rows for cache slots.
+    let ownerRequired = false
     let queued = false
     let running: object | null = null
     let sourceRetiring = false
@@ -463,6 +527,8 @@ function FunctionSiteSurface({
       lifetime.invalidate()
       redrawPresentation.current = null
       setFrame(null)
+      projectionRef.current = null
+      setProjection(null)
       setInactive(null)
     }
     const schedule = (delay = 0): void => {
@@ -525,8 +591,12 @@ function FunctionSiteSurface({
         // Both IPC calls retain their original host checks; stale mounts are still released.
         const drawing = await functionSiteQueue.run(current, async () => {
           if (!owner) {
-            const outcome = await window.api.mods.siteMountOutcome(
-              threadId, component, messageId, expectedRequestId)
+            const projectionReadCurrent = presentationCache?.captureProjectionRead()
+            const outcome = typeof window.api.mods.siteRead === "function"
+              ? await window.api.mods.siteRead(threadId, component, capturedInput,
+                  presentationId, messageId, expectedRequestId, ownerRequired || undefined)
+              : await window.api.mods.siteMountOutcome(threadId, component, messageId, expectedRequestId)
+                .then(outcome => outcome.state === "mounted" ? { ...outcome, snapshot: null } : outcome)
             if (!current()) {
               if (outcome.state === "mounted")
                 void window.api.mods.siteUnmount(threadId, outcome.owner).catch(() => {})
@@ -536,6 +606,8 @@ function FunctionSiteSurface({
               recovery.reset()
               setInactive({ ticket, inputKey: capturedInputKey, inputRevision: capturedInputRevision })
               setFrame(null)
+              projectionRef.current = null
+              setProjection(null)
               setError("")
               return
             }
@@ -543,8 +615,33 @@ function FunctionSiteSurface({
               remount()
               return
             }
+            if (outcome.state === "projected") {
+              validateFunctionDisplaySnapshot(outcome.snapshot, component, expectedRequestId)
+              // A passive frame is exact-input data. It cannot borrow an append-only
+              // allowance to publish an earlier prefix or regain a drawing callback.
+              if (capturedInputRevision !== inputVersion.current.revision ||
+                capturedInputKey !== JSON.stringify(inputRef.current)) return
+              if (projectionReadCurrent?.(outcome.snapshot.key) === false) {
+                // A dependency changed before this row knew its host key. Obtain a new
+                // read; do not publish the queued response or retire unrelated rows.
+                ownerRequired = true
+                queued = true
+                return
+              }
+              recovery.reset()
+              const nextProjection = { snapshot: outcome.snapshot, ticket, inputKey: capturedInputKey,
+                inputRevision: capturedInputRevision, prefixEpoch: capturedEpoch, presentationCurrent }
+              projectionPresentation.current = { projection: nextProjection, renderNative: capturedRenderer }
+              projectionRef.current = nextProjection
+              setProjection(nextProjection)
+              setFrame(null)
+              setInactive(null)
+              setError("")
+              return
+            }
             owner = outcome.owner
             ownerRef.current = owner
+            if (outcome.snapshot) return { capturedOwner: owner, result: outcome.snapshot }
           }
           const capturedOwner = owner
           const result = await window.api.mods.siteRender(threadId, capturedOwner, capturedInput)
@@ -562,6 +659,8 @@ function FunctionSiteSurface({
           // Capture the delegate paired with this read, never a later raw-input closure.
           nativePresentation.current = { frame: nextFrame, renderNative: capturedRenderer }
           setFrame(nextFrame)
+          projectionRef.current = null
+          setProjection(null)
           setInactive(null)
           setError("")
         } else {
@@ -569,6 +668,10 @@ function FunctionSiteSurface({
         }
       } catch (cause) {
         if (current()) {
+          if (projectionRef.current) {
+            presentationCache?.invalidateKey(presentationKeyRef.current, true, presentationRow)
+            invalidate()
+          }
           const code = functionSiteErrorCode(cause)
           setFailureCode(code ?? "")
           if (code === "MODS_UI_QUESTION_STALE" || code === "MODS_SCOPE_CHANGED" ||
@@ -627,6 +730,7 @@ function FunctionSiteSurface({
     const update = (): void => schedule(recovery.notificationDelay(Date.now()))
     const reset = (): void => {
       sourceRetiring = false
+      ownerRequired = false
       invalidate()
       releaseOwner()
       recovery.reset()
@@ -638,20 +742,41 @@ function FunctionSiteSurface({
       // Progress may keep only the prior protected presentation, with all old-input
       // actions blocked. Replacements revoke it immediately. Both reuse the slot owner.
       const previous = frameRef.current
+      const previousProjection = projectionRef.current
+      const retainedProjection = previousProjection?.ticket.current() && canRetainRef.current &&
+        previousProjection.prefixEpoch === prefixLineage.current.epoch &&
+        retainsFunctionSitePresentation(component, previousProjection.inputKey, inputRef.current)
       const pending = pendingPrefix.current
       const firstPrefix = !previous && component === "AssistantMessage" && canRetainRef.current &&
         pending && pending.epoch === prefixLineage.current.epoch &&
         retainsFunctionSitePresentation(component, pending.key, inputRef.current)
-      if (!firstPrefix && (!canRetainRef.current || !previous?.ticket.current() || previous.owner !== owner ||
+      if (!retainedProjection && !firstPrefix && (!canRetainRef.current || !previous?.ticket.current() || previous.owner !== owner ||
         !retainsFunctionSitePresentation(component, previous.inputKey, inputRef.current))) invalidate()
       setError("")
       update()
     }
     retryRef.current = reset
     const stop = window.api.mods.onCardsChanged((event) => {
+      if (event.threadId === threadId && event.scope?.startsWith("site-projection:")) {
+        const hostKey = event.scope.slice("site-projection:".length)
+        if (projectionRef.current?.snapshot.key === hostKey ||
+          cachedPresentationRef.current?.hostKey === hostKey ||
+          presentationCache?.matchesProjection(presentationKeyRef.current, hostKey)) {
+          ownerRequired = true
+          presentationCache?.invalidateKey(presentationKeyRef.current, false, presentationRow)
+          invalidate()
+          update()
+        }
+        return
+      }
       if (event.threadId === threadId && event.scope?.startsWith("site-presentations:")) {
-        // The scope cache is synchronously revoked even when no drawing owner exists.
-        // Existing live drawings receive their original owner-specific notification.
+        // Owner-free projections receive component invalidations directly. Existing
+        // live drawings retain their original owner-specific notification path.
+        const changed = event.scope.slice("site-presentations:".length)
+        if (!owner && (changed === component || changed === "*")) {
+          invalidate()
+          update()
+        }
         return
       }
       if (event.threadId === threadId && isModSiteChangeScope(event.scope)) {
@@ -752,7 +877,7 @@ function FunctionSiteSurface({
       window.removeEventListener("mods:configuration-changed", reset)
       if (typeof document !== "undefined") document.removeEventListener("visibilitychange", visibility)
     }
-  }, [threadId, component, messageId, expectedRequestId, presentationCache, presentationRow])
+  }, [threadId, component, messageId, presentationId, expectedRequestId, presentationCache, presentationRow])
   useEffect(() => {
     if (lastInputRevision.current === inputRevision) return
     lastInputRevision.current = inputRevision
@@ -822,7 +947,10 @@ function FunctionSiteSurface({
       inactive.inputRevision === inputVersion.current.revision
     const currentFrame = frame?.ticket.current() &&
       frame.inputRevision === inputVersion.current.revision
-    if (document.hidden || (!currentInactive && !currentFrame)) {
+    const currentProjection = projection?.ticket.current() && scopeCurrent() &&
+      projection.inputRevision === inputVersion.current.revision &&
+      projection.inputKey === JSON.stringify(inputRef.current)
+    if (document.hidden || (!currentInactive && !currentFrame && !currentProjection)) {
       event.preventDefault()
       event.stopPropagation()
     }
@@ -839,7 +967,7 @@ function FunctionSiteSurface({
       data-function-plugin={snapshot?.plugin}
       onKeyDown={component === "AbovePrompt" ? event => { pressFunctionHotkey(event) } : undefined}
       data-function-site={component}
-      aria-busy={reading || (!snapshot && !isInactive && !error) || undefined}
+      aria-busy={reading || (!snapshot && !projected && !isInactive && !error) || undefined}
       data-function-request-id={
         component === "AskUserQuestion"
           ? expectedRequestId
@@ -904,7 +1032,14 @@ function FunctionSiteSurface({
         frame.inputKey === JSON.stringify(inputRef.current))} />
         </div>
       )}
-      {!snapshot && !isInactive && !error && (cachedPresentation?.current() ?
+      {projected && <div data-function-site-projected className="contents"
+        inert={projected.inputRevision !== inputRevision}
+        aria-disabled={projected.inputRevision !== inputRevision || undefined}
+        onClickCapture={blockStaleInteraction} onKeyDownCapture={blockStaleInteraction}
+        onSubmitCapture={blockStaleInteraction}>
+        <FunctionDisplayContent data={projected.snapshot.data} renderNative={projectedRenderer} />
+      </div>}
+      {!snapshot && !projected && !isInactive && !error && (cachedPresentation?.current() ?
         <div ref={cachedSection} data-function-site-cached inert aria-disabled="true"
           style={cachedGeometry?.presentation === cachedPresentation.presentation &&
             Math.abs(cachedGeometry.width - cachedPresentation.presentation.width) < 1
@@ -912,7 +1047,9 @@ function FunctionSiteSurface({
           onClickCapture={blockCachedInteraction} onKeyDownCapture={blockCachedInteraction}
           onSubmitCapture={blockCachedInteraction} onInputCapture={blockCachedInteraction}
           onChangeCapture={blockCachedInteraction}>
-          <Element node={cachedPresentation.presentation.tree} busy act={async () => {}}
+          {cachedPresentation.presentation.hostMessage ? <FunctionDisplayContent
+            data={{ component, hostMessage: cachedPresentation.presentation.hostMessage }}
+            renderNative={renderNative} /> : <Element node={cachedPresentation.presentation.tree!} busy act={async () => {}}
             renderEngine={(ref) => {
               const native = cachedPresentation.presentation.nativeContent
               const props = functionNativeProps(native, ref)
@@ -920,8 +1057,10 @@ function FunctionSiteSurface({
               if (renderNative) return renderNative(props)
               return native?.nativeUnchanged ? null :
                 <Element node={functionSiteDefault(component, props)} busy act={async () => {}} />
-            }} />
-        </div> : <FunctionSitePending component={component} slow={reading && showReading} />)}
+            }} />}
+        </div> : <FunctionSitePending component={component} slow={reading && showReading} quiet={
+          ["UserMessage", "AssistantMessage"].includes(component) &&
+          typeof facts.text === "string" && !facts.text.trim()} />)}
       {error && (
         <div role="alert" className="text-destructive">
           <span>{error}</span>

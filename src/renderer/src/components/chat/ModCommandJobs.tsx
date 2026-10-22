@@ -125,6 +125,8 @@ export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.El
             {job.result && (
               <FunctionCommandOutput
                 threadId={threadId}
+                jobId={job.id}
+                channel="output"
                 command={job.command}
                 text={job.result.text}
                 isErrored={job.state !== "succeeded"}
@@ -137,6 +139,8 @@ export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.El
             {job.error && (
               <FunctionCommandOutput
                 threadId={threadId}
+                jobId={job.id}
+                channel="error"
                 command={job.command}
                 text={errorMessages[job.error] ?? job.error}
                 isErrored

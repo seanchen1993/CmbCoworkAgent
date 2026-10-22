@@ -7,6 +7,7 @@ import type { ModJson } from "../../../shared/mods/types"
 import { ModControlStore } from "../control-store"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionModsManager } from "./manager"
+import { analyzeStaticUiRenderSummary } from "./static-ui-render-summary"
 import {
   issueRuntimePluginSourceToken,
   withRuntimePluginSource
@@ -21,7 +22,7 @@ afterEach(async () => {
 })
 const props = { isWorking: true, bodyColumns: 80, maxRows: 8 }
 
-async function fixture(resourceCount = 0) {
+async function fixture(resourceCount = 0, literalDisplay = false) {
   const root = mkdtempSync(join(tmpdir(), "mods-source-sites-"))
   const workspace = join(root, "workspace"),
     path = join(root, "retained")
@@ -45,12 +46,16 @@ async function fixture(resourceCount = 0) {
   }).join("\n")
   const code = `${imports}
 export function register(on) {
-    on("session.start",async($,e,next)=>{
+    ${
+      literalDisplay
+        ? `on("ui.render",{component:"AbovePrompt"},()=>({type:"Text",props:{text:"ACTUAL_RETAINED_LABEL"}}))`
+        : `on("session.start",async($,e,next)=>{
       await $.command.register({name:"label",description:"Actual retained label"});return next(e)
     });
     on("ui.render",{component:"AbovePrompt"},($,e)=>{
       const {Text}=$.ui.resolve(e);return Text({children:"ACTUAL_RETAINED_LABEL"})
-    })
+    })`
+    }
   }`
   writeFileSync(join(path, "mods/main.ts"), code)
   const plugin = {
@@ -68,9 +73,11 @@ export function register(on) {
     updatedAt: "2026-10-18"
   }
   const store = new ModControlStore(join(root, "control.sqlite"))
+  const database = {}
   let active = true,
     incarnation = "original",
     enabled = true
+  let compiledCode: string | undefined
   let publish = async (value: ModJson) => value
   const changed = vi.fn(),
     guests: FunctionGuestRuntime[] = []
@@ -87,6 +94,18 @@ export function register(on) {
           if (captured !== incarnation) throw Error("THREAD_REPLACED")
         }
       },
+      captureDisplayScope: () => {
+        const token = incarnation
+        return {
+          database,
+          workspace,
+          threadId: "stage",
+          incarnation: { token, legacyCreatedAt: 1 },
+          assertCurrent: () => {
+            if (token !== incarnation) throw Error("THREAD_REPLACED")
+          }
+        }
+      },
       changed,
       publish: async (_workspace, value) => publish(value)
     },
@@ -94,6 +113,7 @@ export function register(on) {
       const owned: FunctionGuestRuntime[] = []
       return {
         async load(code, options) {
+          compiledCode = code
           const guest = await FunctionGuestRuntime.create(code, options)
           guests.push(guest)
           owned.push(guest)
@@ -164,6 +184,7 @@ export function register(on) {
     mount,
     render,
     activeGuests: () => guests.filter((guest) => !guest.stats.disposed),
+    compiledCode: () => compiledCode,
     revoke: () => {
       active = false
     },
@@ -278,4 +299,55 @@ it("measures the actual protected host-only fallback without allocating a guest"
   mkdirSync(output, { recursive: true })
   writeFileSync(join(output, "native-only.json"), JSON.stringify(result, null, 2))
   console.log("SITE_NATIVE_COST", JSON.stringify(result))
+})
+
+it("keeps retained project source proof while a native projection avoids guest drawing", async () => {
+  const f = await fixture(24, true)
+  await f.admit()
+  const invokes = vi.spyOn(f.activeGuests()[0], "invoke")
+  const mounts = vi.spyOn(f.manager, "siteMountOutcome")
+  const body = { text: "NATIVE_ASSISTANT_MESSAGE", isFirstOfReply: true }
+  const read = () =>
+    f.manager.siteRead(f.workspace, "stage", "AssistantMessage", body, "message:block")
+  const first = await read()
+  expect(first.state).toBe("projected")
+  mounts.mockClear()
+  invokes.mockClear()
+  const before = performance.now()
+  const cached = await read()
+  expect(cached).toEqual(first)
+  expect(mounts).not.toHaveBeenCalled()
+  expect(invokes).not.toHaveBeenCalled()
+  console.log(
+    "SITE_PROJECTED_COST",
+    JSON.stringify({
+      resources: 24,
+      ms: performance.now() - before,
+      guestInvokes: invokes.mock.calls.length,
+      mounts: mounts.mock.calls.length
+    })
+  )
+  f.revoke()
+  await expect(read()).rejects.toThrow("SOURCE_REVOKED")
+})
+
+it("keeps the original dynamic retained AbovePrompt source on its actual owner path", async () => {
+  const f = await fixture(24)
+  await f.admit()
+  const compiled = f.compiledCode()
+  expect(compiled).toBeTypeOf("string")
+  const summary = analyzeStaticUiRenderSummary(compiled!)
+  expect(summary.kind).toBe("unknown")
+  const result = await f.manager.siteRead(
+    f.workspace,
+    "stage",
+    "AssistantMessage",
+    { text: "NATIVE_ASSISTANT_MESSAGE", isFirstOfReply: true },
+    "message:block"
+  )
+  expect(result.state).toBe("mounted")
+  if (result.state !== "mounted")
+    throw Error("Original retained source must keep its actual native owner")
+  await f.manager.siteUnmount(f.workspace, "stage", result.owner)
+  console.log("SITE_UNPROVED_ROUTING", JSON.stringify(summary))
 })

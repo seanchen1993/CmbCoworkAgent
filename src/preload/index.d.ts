@@ -1102,6 +1102,9 @@ interface CustomAPI {
     ): () => void
     siteMount(threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite, messageId?: string): Promise<string | null>
     siteMountOutcome(threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite, messageId?: string, expectedRequestId?: string): Promise<import("../shared/mods/v2/sites").FunctionSiteMountOutcome>
+    siteRead(threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite,
+      props: import("../shared/mods/types").ModObject, presentationId?: string, messageId?: string,
+      expectedRequestId?: string, ownerRequired?: boolean): Promise<import("../shared/mods/v2/sites").FunctionSiteReadOutcome>
     siteRender(threadId: string, owner: string, props: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot | null>
     siteUnmount(threadId: string, owner: string): Promise<void>
     siteAct(threadId: string, owner: string, action: import("../shared/mods/v2/ui").FunctionUiAction): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult>

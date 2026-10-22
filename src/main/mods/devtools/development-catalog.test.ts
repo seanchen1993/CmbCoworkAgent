@@ -1,3 +1,4 @@
+import { describeFunctionDisplayRouting } from "../v2/display-routing"
 import { afterEach, expect, it } from "vitest"
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -167,4 +168,15 @@ it("discovers the exact SDK in bounded pages without losing declarations", () =>
   }
   expect(types).toBe(developmentCatalog().types)
   expect(() => developmentCatalogPage("types", -1)).toThrow("DEVELOPMENT_CATALOG_CURSOR")
+})
+
+
+it("discovers the bounded native display contract through the existing catalog overview", () => {
+  const full = developmentCatalog(), overview = developmentCatalogPage()
+  expect(full.hostDisplay).toEqual(describeFunctionDisplayRouting())
+  if (!("hostDisplay" in overview)) throw Error("Native display contract must be discoverable")
+  expect(overview.hostDisplay).toEqual(full.hostDisplay)
+  expect(full.hostDisplay.grantsAuthority).toBe(false)
+  expect(full.hostDisplay.claimsCompleteSdkCompatibility).toBe(false)
+  expect(full.sdkMethods.some(method => /^(display|rollout|snapshot)\./.test(method))).toBe(false)
 })

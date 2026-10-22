@@ -441,13 +441,13 @@ async function send(page: Page, text: string) {
 }
 async function openClaw(page: Page) {
   await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-  const advanced = page.getByRole("button", { name: "高级自定义", exact: true })
+  const advanced = page.getByRole("button", { name: "高级特性", exact: true })
   await advanced.waitFor({ state: "visible" })
   const expanded = await advanced.getAttribute("aria-expanded")
   assert(expanded === "true" || expanded === "false", "Original menu must expose expansion state")
   if (expanded === "false") await advanced.click()
   await page
-    .getByRole("button", { name: "高级自定义", exact: true, expanded: true })
+    .getByRole("button", { name: "高级特性", exact: true, expanded: true })
     .waitFor({ state: "visible" })
   await page.getByRole("button", { name: "搭配管理", exact: true }).click()
   await page.getByLabel("助手组合设置", { exact: true }).waitFor()

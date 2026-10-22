@@ -23,6 +23,8 @@ export class MarkdownParseCache {
   private parses = 0
   private hits = 0
   private evictions = 0
+  private parsedCharacters = 0
+  private reusedCharacters = 0
 
   constructor(limits: Partial<MarkdownParseCacheLimits> = {}) {
     this.limits = { ...DEFAULT_LIMITS }
@@ -43,11 +45,13 @@ export class MarkdownParseCache {
       this.entries.delete(key)
       this.entries.set(key, cached)
       this.hits++
+      this.reusedCharacters += source.length
       // runSync and downstream plugins can mutate their input. Never share a live AST.
       return JSON.parse(cached.serialized) as Root
     }
 
     this.parses++
+    this.parsedCharacters += source.length
     const tree = parse()
     if (!cacheable) return tree
     const serialized = JSON.stringify(tree)
@@ -76,13 +80,16 @@ export class MarkdownParseCache {
       bytes: this.bytes,
       parses: this.parses,
       hits: this.hits,
-      evictions: this.evictions
+      evictions: this.evictions,
+      parsedCharacters: this.parsedCharacters,
+      reusedCharacters: this.reusedCharacters
     }
   }
 
   clear(): void {
     this.entries.clear()
     this.bytes = this.parses = this.hits = this.evictions = 0
+    this.parsedCharacters = this.reusedCharacters = 0
   }
 }
 
@@ -99,3 +106,13 @@ export function createRemarkParseCache(cache: MarkdownParseCache): Plugin<[], Ro
 // Never use this instance with custom grammar plugins, settings, or streaming fragments.
 export const completedMarkdownParseCache = new MarkdownParseCache()
 export const remarkCompletedMarkdownParseCache = createRemarkParseCache(completedMarkdownParseCache)
+
+// Same grammar, but live suffixes are counted without retaining every token's AST.
+export const streamingMarkdownParseMetrics = new MarkdownParseCache({ maxEntries: 0 })
+export const remarkStreamingMarkdownParse = createRemarkParseCache(streamingMarkdownParseMetrics)
+// The caller proves that these fenced-code prefixes cannot change when text appends.
+export const stableMarkdownPrefixCache = new MarkdownParseCache({
+  maxEntries: 64,
+  maxBytes: 4 * 1024 * 1024
+})
+export const remarkStableMarkdownPrefixCache = createRemarkParseCache(stableMarkdownPrefixCache)

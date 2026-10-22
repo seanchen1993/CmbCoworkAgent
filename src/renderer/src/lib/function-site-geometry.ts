@@ -5,7 +5,10 @@ export interface FunctionSiteGeometry {
 
 interface GeometryBatch {
   frame: number | null
-  reads: Set<() => void>
+  reads: Set<{
+    read(): FunctionSiteGeometry | undefined
+    publish(value: FunctionSiteGeometry): void
+  }>
 }
 
 const batches = new WeakMap<Document, GeometryBatch>()
@@ -25,7 +28,7 @@ export function observeFunctionSiteGeometry(
   }
   const queue = batch
   let live = true
-  const read = (): void => {
+  const read = (): FunctionSiteGeometry | undefined => {
     if (!live || !node.isConnected) return
     // Message sites use display:contents. Their section's own box has no usable geometry.
     const range = document.createRange()
@@ -33,17 +36,27 @@ export function observeFunctionSiteGeometry(
     const bounds = range.getBoundingClientRect()
     range.detach()
     if (Number.isFinite(bounds.height) && Number.isFinite(bounds.width))
-      measured({ height: bounds.height, width: bounds.width })
+      return { height: bounds.height, width: bounds.width }
+    return undefined
+  }
+  const sample = {
+    read,
+    publish: (value: FunctionSiteGeometry) => {
+      if (live && node.isConnected) measured(value)
+    }
   }
   const schedule = (): void => {
     if (!live) return
-    queue.reads.add(read)
+    queue.reads.add(sample)
     if (queue.frame !== null) return
     queue.frame = view.requestAnimationFrame(() => {
       queue.frame = null
       const pending = [...queue.reads]
       queue.reads.clear()
-      for (const sample of pending) sample()
+      // A subscriber may set React state or write styles. Finish every layout
+      // read before publishing any value, instead of read/write/read interleaving.
+      const values = pending.map((sample) => ({ sample, value: sample.read() }))
+      for (const { sample, value } of values) if (value) sample.publish(value)
     })
   }
   const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule)
@@ -57,7 +70,7 @@ export function observeFunctionSiteGeometry(
     live = false
     resize?.disconnect()
     mutations?.disconnect()
-    queue.reads.delete(read)
+    queue.reads.delete(sample)
     if (queue.frame !== null && queue.reads.size === 0) {
       view.cancelAnimationFrame(queue.frame)
       queue.frame = null

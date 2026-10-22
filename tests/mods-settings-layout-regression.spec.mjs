@@ -162,7 +162,7 @@ try {
         clickResult: "trial click succeeded without invoking the action",
         afterTrial: await geometry()
       }
-      const advanced = page.getByRole("button", { name: "高级自定义", exact: true })
+      const advanced = page.getByRole("button", { name: "基础功能", exact: true })
       if ((await advanced.getAttribute("aria-expanded")) === "false") await advanced.click()
       await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
       await page.getByText("installed-management", { exact: true }).waitFor()

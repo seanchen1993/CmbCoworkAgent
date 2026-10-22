@@ -80,7 +80,9 @@ export function useModsChatState(
     })
     const stopPresentations = window.api.mods.onCardsChanged?.((event) => {
       if (event.threadId !== threadId) return
-      if (event.scope?.startsWith("site-presentations:"))
+      if (event.scope?.startsWith("site-projection:"))
+        presentationCache.current?.invalidateProjection(event.scope.slice("site-projection:".length))
+      else if (event.scope?.startsWith("site-presentations:"))
         presentationCache.current?.invalidate(event.scope.slice("site-presentations:".length))
       else if (!isModSiteChangeScope(event.scope) &&
         !["panes", "records", "cards", "feedback"].includes(event.scope ?? ""))

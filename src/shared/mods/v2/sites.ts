@@ -21,10 +21,19 @@ export const FUNCTION_UI_SITES = [
   "AskUserQuestion"
 ] as const
 export type FunctionUiSite = (typeof FUNCTION_UI_SITES)[number]
+/** Passive presentation eligibility still requires a host source/purity/dependency proof. */
+export const FUNCTION_PASSIVE_DISPLAY_SITES: readonly FunctionUiSite[] = [
+  "UserMessage", "AssistantMessage", "CommandOutput", "ToolUse", "ToolResult", "ToolGroup"
+]
 export type FunctionSiteMountOutcome =
   | { state: "mounted"; owner: string }
   | { state: "inactive"; reason: "mods-disabled" | "no-protection-or-functions" }
   | { state: "retired" }
+/** A passive projection is deliberately distinct from a current interaction lease. */
+export type FunctionSiteReadOutcome =
+  | { state: "projected"; snapshot: import("./display-snapshot").FunctionDisplaySnapshot }
+  | { state: "mounted"; owner: string; snapshot: import("./ui").FunctionPaneSnapshot }
+  | Exclude<FunctionSiteMountOutcome, { state: "mounted" }>
 export const FUNCTION_DURATION_SITE_LIMIT = 32
 // Each retained job can show a result and an error block; other transcript sites stay at 32.
 export const FUNCTION_COMMAND_OUTPUT_SITE_LIMIT = MOD_COMMAND_HISTORY_LIMIT * 2

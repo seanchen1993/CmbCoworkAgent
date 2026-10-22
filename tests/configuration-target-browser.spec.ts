@@ -6,6 +6,7 @@ import { build } from "esbuild"
 import { chromium } from "playwright"
 
 interface ConfigurationFixtureState {
+  customizeInitialTab?: string
   currentThreadId: string
   showCustomizeView: boolean
   threads: Array<{
@@ -115,6 +116,32 @@ async function main() {
     await page.setContent('<div id="root"></div>')
     await page.addScriptTag({content:bundle.outputFiles[0].text})
     await page.getByRole("region",{name:"ClawPanel",exact:true}).getByText("目标 a C:/alpha").waitFor()
+    const advancedGroup = page.getByRole("button", {name:"高级特性",exact:true})
+    assert.equal(await advancedGroup.count(), 1)
+    assert.equal(await page.getByRole("button", {name:"高级自定义",exact:true}).count(), 0)
+    assert.equal(await advancedGroup.getAttribute("aria-expanded"), "true", "claw deep link expands its merged group")
+    for (const [label, panel] of [
+      ["搭配管理", "ClawPanel"], ["聊天任务模板", "FlowsPanel"],
+      ["专家团", "ExpertTeamPanel"], ["效果测试", "EvaluationPanel"],
+      ["心跳监控", "HeartbeatPanel"], ["记忆管理", "MemoryPanel"],
+      ["任务画布", "TaskMmdPanel"], ["Java 代码诊断", "LspPanel"],
+      ["自优化", "EvolutionPanel"], ["机器人管理", "BuiltinRobotPanel"],
+      ["自动触发规则", "HooksPanel"], ["编程式工具调用", "CodeExecToolsPanel"]
+    ]) {
+      const entry = page.getByRole("button", {name:label,exact:true})
+      assert.equal(await entry.count(), 1, `${label} has one navigation entry`)
+      await entry.click()
+      await page.getByRole("region", {name:panel,exact:true}).waitFor()
+      assert.equal(await entry.getAttribute("aria-current"), "page")
+    }
+    for (const tab of ["flows", "claw"]) {
+      await advancedGroup.click()
+      assert.equal(await advancedGroup.getAttribute("aria-expanded"), "false")
+      await page.evaluate(tab => (window as unknown as ConfigurationWindow).patch({customizeInitialTab:tab}), tab)
+      await page.getByRole("region", {name:tab === "flows" ? "FlowsPanel" : "ClawPanel",exact:true}).waitFor()
+      await page.waitForFunction(() => [...document.querySelectorAll("button")].some(button =>
+        button.textContent?.trim() === "高级特性" && button.getAttribute("aria-expanded") === "true"))
+    }
     await page.getByRole("combobox",{name:"配置目标聊天",exact:true}).click()
     assert.equal(await page.getByRole("option").count(),2)
     await page.keyboard.press("Escape")
@@ -157,7 +184,7 @@ async function main() {
     await choose("C:/new-beta")
     await claw.getByText("目标 b C:/new-beta").waitFor()
     // Basic settings continue to describe open chat A, not configuration target B.
-    await page.getByRole("button",{name:"高级特性",exact:true}).click()
+    if (await advancedGroup.getAttribute("aria-expanded") !== "true") await advancedGroup.click()
     await page.getByRole("button",{name:"任务画布",exact:true}).click()
     await page.getByRole("region",{name:"TaskMmdPanel",exact:true}).getByText("目标 a -").waitFor()
     await page.getByRole("navigation").filter({has:page.getByRole("button",{name:"基础功能",exact:true})}).getByRole("button",{name:"灵件与使用设置",exact:true}).click()

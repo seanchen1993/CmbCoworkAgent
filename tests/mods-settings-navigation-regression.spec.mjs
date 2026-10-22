@@ -124,7 +124,7 @@ async function dismissTour(page) {
 }
 async function navigate(page, name) {
   const group = page.getByRole("button", {
-    name: name === "灵件与使用设置" ? "基础功能" : "高级自定义",
+    name: name === "灵件与使用设置" ? "基础功能" : "高级特性",
     exact: true
   })
   if (
@@ -134,7 +134,7 @@ async function navigate(page, name) {
     await group.click()
   await page
     .locator("nav")
-    .filter({ has: page.getByRole("button", { name: "高级自定义", exact: true }) })
+    .filter({ has: page.getByRole("button", { name: "高级特性", exact: true }) })
     .getByRole("button", { name, exact: true })
     .click()
   await dismissTour(page)
@@ -238,7 +238,7 @@ try {
   }
   {
     const { page, errors } = await open("general")
-    await page.getByRole("button", { name: "高级自定义", exact: true }).waitFor()
+    await page.getByRole("button", { name: "高级特性", exact: true }).waitFor()
     assert.equal(await page.evaluate(() => window.clawReads ?? 0), 0)
     assert.equal(await page.getByLabel("助手组合名称", { exact: true }).count(), 0)
     await navigate(page, "搭配管理")

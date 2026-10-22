@@ -284,3 +284,30 @@ describe("versioned session state", () => {
     expect(state.read(ref, {})).toEqual({ version: 0 })
   })
 })
+
+
+it("hands off only actual declared native reads through the real guest/session drawing", async () => {
+  const state = new FunctionNamedState()
+  const f = await fixture(`
+    on("command.run",async($)=>{await $.ui.open({id:"counter",title:"Counter"});return {text:"opened"}});
+    on("ui.render",{component:"Pane"},async($,e)=>{
+      const {Text}=$.ui.resolve(e);
+      const a=await $.state.get({plugin:"counter",key:"count"});
+      await $.state.get({plugin:"counter",key:"extra"});
+      return h(Text,null,String(a.value??0));
+    });`, "", state)
+  await f.session.run("increment", "")
+  const [pane] = await f.session.panes.snapshot()
+  const before = state.dependencyStats()
+  expect(f.session.captureDisplayDependencies(pane.generation, [ref, { ...ref, key: "missing" }]))
+    .toBeUndefined()
+  expect(state.dependencyStats()).toEqual(before)
+  const dependencies = f.session.captureDisplayDependencies(pane.generation, [ref])!
+  expect(dependencies.current()).toBe(true)
+  expect(state.dependencyStats().proofs).toBe(before.proofs + 1)
+  state.write({ ...ref, key: "extra", value: "changed" }, {})
+  expect(dependencies.current()).toBe(false)
+  dependencies.release()
+  dependencies.release()
+  expect(state.dependencyStats()).toEqual(before)
+})

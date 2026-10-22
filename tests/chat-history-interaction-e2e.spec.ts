@@ -17,6 +17,32 @@ import {
   projectCompositionEnvironment
 } from "./support/project-composition-e2e-fixtures"
 
+import {
+  historyScale,
+  processObservation,
+  readableDuration
+} from "./support/performance-acceptance"
+
+const messageCount = historyScale(process.env.CHAT_HISTORY_MESSAGES)
+const lastMessageId = `history-thumb-${messageCount - 1}`
+const repetitions = Number(process.env.CHAT_HISTORY_REPETITIONS ?? "1")
+assert(
+  Number.isSafeInteger(repetitions) && repetitions >= 1 && repetitions <= 30,
+  "Repetitions must be 1..30"
+)
+
+async function processSample(app: ElectronApplication) {
+  return app.evaluate(({ app }) =>
+    app.getAppMetrics().map((metric) => ({
+      pid: metric.pid,
+      creationTime: metric.creationTime,
+      type: metric.type,
+      cumulativeCpuSeconds: metric.cpu.cumulativeCPUUsage,
+      workingSetKiB: metric.memory.workingSetSize
+    }))
+  )
+}
+
 interface Observation {
   elapsedMs: number
   frames: number[]
@@ -101,9 +127,30 @@ const source = Object.fromEntries(
       .digest("hex")
   ])
 )
-const requested = process.env.CHAT_HISTORY_CASE
+type HistoryCase = "ordinary" | "protected" | "unrelated-approved-guest"
+// Preserve old runner arguments while making the recorded scope explicit.
+const requested =
+  process.env.CHAT_HISTORY_CASE === "guest"
+    ? "unrelated-approved-guest"
+    : process.env.CHAT_HISTORY_CASE
 const diagnostic = process.env.CHAT_HISTORY_DIAGNOSTIC === "1"
-assert(!requested || ["ordinary", "protected", "guest"].includes(requested), "Unknown case")
+assert(
+  !requested || ["ordinary", "protected", "unrelated-approved-guest"].includes(requested),
+  "Unknown case"
+)
+const displayObservability = {
+  productionBridgeInstrumented: false,
+  siteRead: null,
+  siteMountOutcome: null,
+  siteRender: null,
+  siteUnmount: null,
+  guestEvaluations: null,
+  sourceGuardChecks: null,
+  policyInvocations: null,
+  measured: "Actual visible DOM, input/presentation ping and Electron process intervals",
+  limitation:
+    "Unmeasured calls are null, never zero. Explicit legacy admission probe is outside history observation; an approved Pane source does not prove an AssistantMessage handler ran. No model is invoked or stubbed."
+}
 
 async function beginObservation(page: Page, threadId: string) {
   await page.evaluate(
@@ -374,7 +421,7 @@ async function dragThumb(
   return { before, start, released }
 }
 
-async function runCase(mode: "ordinary" | "protected" | "guest") {
+async function runCase(mode: HistoryCase) {
   const fixture = projectCompositionEnvironment(root)
   const protectedOutput = mode !== "ordinary"
   const events: unknown[] = [],
@@ -440,7 +487,7 @@ async function runCase(mode: "ordinary" | "protected" | "guest") {
     await page.waitForFunction(() => !!window.api?.threads)
     const title = `History thumb acceptance ${mode}`
     const threadId = await page.evaluate(
-      async ({ workspace, title, protectedOutput }) => {
+      async ({ workspace, title, protectedOutput, messageCount }) => {
         const thread = await window.api.threads.create({
           title,
           workspacePath: workspace,
@@ -451,7 +498,7 @@ async function runCase(mode: "ordinary" | "protected" | "guest") {
         await window.api.mods.configureGlobal(protectedOutput)
         const config = await window.api.mods.status(id)
         await window.api.mods.configure(id, protectedOutput, protectedOutput, config.workspace)
-        for (let offset = 0; offset < 400; offset += 50) {
+        for (let offset = 0; offset < messageCount; offset += 50) {
           const messages = Array.from({ length: 50 }, (_, position) => {
             const ordinal = offset + position
             const kind = ordinal % 4
@@ -485,28 +532,35 @@ async function runCase(mode: "ordinary" | "protected" | "guest") {
           limit: 500,
           byteBudget: 4 * 1024 * 1024
         })
-        if (persisted.total !== 400 || persisted.messages.length !== 400)
-          throw Error("400 durable messages required")
+        if (
+          persisted.total !== messageCount ||
+          persisted.messages.at(-1)?.id !== `history-thumb-${messageCount - 1}` ||
+          persisted.messages.length !== Math.min(messageCount, 500)
+        )
+          throw Error("Durable history total and real persisted tail required")
         return id
       },
-      { workspace: fixture.workspace, title, protectedOutput }
+      { workspace: fixture.workspace, title, protectedOutput, messageCount }
     )
     record({
       kind: "fixture",
       threadId,
-      messageCount: 400,
+      messageCount,
       candidate,
       source,
       sourceProvenance:
         "Current worktree hashes; renderer artifact hash identifies actual executed code. WIP may not be rebuilt.",
+      displayObservability,
+      currentSourceMatchesExecutedArtifact: null,
+      wholeHostMessageSamples: false,
       protection:
-        mode === "guest"
-          ? "native output policy plus exact approved builtin FunctionGuest"
+        mode === "unrelated-approved-guest"
+          ? "native output policy plus exact approved builtin FunctionGuest; matching AssistantMessage execution is not established"
           : protectedOutput
             ? "native output policy; no guest installed or approved"
             : "Mods disabled"
     })
-    if (mode === "guest") {
+    if (mode === "unrelated-approved-guest") {
       const guest = await page.evaluate(async (threadId) => {
         // Fixture-only consent in this new isolated profile; no user's existing plugin is approved.
         const started = performance.now()
@@ -579,20 +633,59 @@ async function runCase(mode: "ordinary" | "protected" | "guest") {
           }))
         }
       }, threadId)
-      record({ kind: "real-guest-admission-before-history-observation", ...guest })
+      record({
+        kind: "real-guest-admission-before-history-observation",
+        ...guest,
+        scope:
+          "Exact native source admission and explicit legacy display probe; not an AssistantMessage match or siteRead/guest evaluation count"
+      })
     }
+    const processBefore = await processSample(app)
+    const intervalStarted = performance.now()
+    const coldRequestedAt = performance.now()
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText(title, { exact: true }).first().click()
     const chat = page.locator(`[data-chat-thread-id="${threadId}"]`)
     const scroll = chat.locator("[data-chat-message-scroll-area]")
     const viewport = scroll.locator("[data-radix-scroll-area-viewport]")
-    await chat.locator('[data-chat-message-id="history-thumb-399"]').waitFor({ state: "visible" })
+    await chat.locator(`[data-chat-message-id="${lastMessageId}"]`).waitFor({ state: "visible" })
     await chat.locator('[data-chat-initial-presentation="ready"]').waitFor()
+    await page.waitForFunction(
+      (id) => {
+        const row = document.querySelector(`[data-chat-message-id="${id}"]`)
+        const viewport = row?.closest("[data-radix-scroll-area-viewport]")
+        if (
+          !row ||
+          !viewport ||
+          row.querySelector("[data-function-site-pending]") ||
+          !row.textContent?.includes("HISTORY_CASE_")
+        )
+          return false
+        const box = row.getBoundingClientRect(),
+          area = viewport.getBoundingClientRect()
+        return box.height > 0 && box.bottom > area.top && box.top < area.bottom
+      },
+      lastMessageId,
+      { polling: "raf" }
+    )
+    record({
+      kind: "cold-native-first-page",
+      fixtureId: fixture.isolated,
+      durationMs: readableDuration({
+        requestedAtMs: coldRequestedAt,
+        readableAtMs: performance.now()
+      }),
+      includesSourceGuard: true,
+      scope: "reload-and-select-through-visible-body-dom-after-explicit-admission",
+      guestStartupCold: false,
+      pixelsMeasured: false
+    })
     // Load any actual history-page boundary through the existing UI before testing the full range.
     let pageLoads = 0
     for (
       let attempt = 0;
-      attempt < 4 && (await chat.locator('[data-chat-history-boundary="older"]').count());
+      attempt < Math.ceil(messageCount / 50) + 4 &&
+      (await chat.locator('[data-chat-history-boundary="older"]').count());
       attempt++
     ) {
       const detached = await dragThumb(page, scroll, viewport, 0)
@@ -605,28 +698,31 @@ async function runCase(mode: "ordinary" | "protected" | "guest") {
       await earlier.waitFor({ state: "visible" })
       // Wait for the real old-page head instead of guessing its ID from a count
       // or reading stale tail DOM immediately after assigning scrollTop.
-      await page.waitForFunction((id) => {
-        const scope = document.querySelector(`[data-chat-thread-id="${id}"]`)
-        const viewport = scope?.querySelector(
-          "[data-chat-message-scroll-area] [data-radix-scroll-area-viewport]"
-        )
-        if (!viewport) return false
-        const area = viewport.getBoundingClientRect()
-        const boundary = scope
-          ?.querySelector('[data-chat-history-boundary="older"]')
-          ?.getBoundingClientRect()
-        if (!boundary || boundary.bottom <= area.top || boundary.top >= area.bottom) return false
-        return [...(scope?.querySelectorAll<HTMLElement>("[data-chat-message-row]") ?? [])].some(
-          (row) => {
-            const box = row.getBoundingClientRect()
-            return (
-              box.bottom > area.top &&
-              box.top < area.bottom &&
-              row.dataset.chatMessageId !== "history-thumb-399"
-            )
-          }
-        )
-      }, threadId)
+      await page.waitForFunction(
+        ({ id, lastMessageId }) => {
+          const scope = document.querySelector(`[data-chat-thread-id="${id}"]`)
+          const viewport = scope?.querySelector(
+            "[data-chat-message-scroll-area] [data-radix-scroll-area-viewport]"
+          )
+          if (!viewport) return false
+          const area = viewport.getBoundingClientRect()
+          const boundary = scope
+            ?.querySelector('[data-chat-history-boundary="older"]')
+            ?.getBoundingClientRect()
+          if (!boundary || boundary.bottom <= area.top || boundary.top >= area.bottom) return false
+          return [...(scope?.querySelectorAll<HTMLElement>("[data-chat-message-row]") ?? [])].some(
+            (row) => {
+              const box = row.getBoundingClientRect()
+              return (
+                box.bottom > area.top &&
+                box.top < area.bottom &&
+                row.dataset.chatMessageId !== lastMessageId
+              )
+            }
+          )
+        },
+        { id: threadId, lastMessageId }
+      )
       const before = await viewport.evaluate((node) => {
         const area = node.getBoundingClientRect(),
           top = area.top
@@ -814,7 +910,7 @@ async function runCase(mode: "ordinary" | "protected" | "guest") {
       oldestReachMs: performance.now() - oldestStarted
     })
     await dragThumb(page, scroll, viewport, 1)
-    await chat.locator('[data-chat-message-id="history-thumb-399"]').waitFor({ state: "visible" })
+    await chat.locator(`[data-chat-message-id="${lastMessageId}"]`).waitFor({ state: "visible" })
     await beginObservation(page, threadId)
     const readable = () =>
       page!.waitForFunction(
@@ -900,15 +996,20 @@ async function runCase(mode: "ordinary" | "protected" | "guest") {
     const observation = await page.evaluate(() =>
       (window as HistoryWindow).historyInteraction.stop()
     )
-    assert(
-      observation.peakMountedRows < 100,
-      "400 persisted messages must keep a bounded DOM window"
-    )
+    assert(observation.peakMountedRows < 100, "persisted history must keep a bounded DOM window")
     assert(observation.seenMessages.length > 8, "real drags must expose distinct history regions")
     assert(observation.maxBlankMs < 1500, "history must not remain an empty visible window")
     assert(observation.maxPendingMs < 5000, "protected messages must not remain pending after drag")
     assert(observation.pings.length > 0 && observation.frames.length > 10)
     assert.deepEqual(errors, [])
+    record({
+      kind: "electron-process-interval",
+      ...processObservation(
+        processBefore,
+        await processSample(app),
+        performance.now() - intervalStarted
+      )
+    })
     record({ kind: "interaction-results", inputMs, releaseToReadableMs, observation })
     await Promise.all(captures)
     await page.screenshot({ path: join(fixture.isolated, "history-thumb.png") })
@@ -929,7 +1030,24 @@ async function runCase(mode: "ordinary" | "protected" | "guest") {
     writeFileSync(
       join(fixture.isolated, "acceptance.json"),
       JSON.stringify(
-        { passed, mode, diagnostic, candidate, source, errors, events, profile: fixture.isolated },
+        {
+          passed,
+          mode,
+          diagnostic,
+          messageCount,
+          candidate,
+          source,
+          displayObservability,
+          currentSourceMatchesExecutedArtifact: null,
+          requestedCaseAlias: process.env.CHAT_HISTORY_CASE === "guest" ? "guest" : null,
+          errors,
+          events,
+          profile: fixture.isolated,
+          acceptanceLane: "native-functional-smoke",
+          fixedMachineTimingPassed: false,
+          soakPassed: false,
+          wholeApplicationCpuMeasured: false
+        },
         null,
         2
       )
@@ -940,9 +1058,12 @@ async function runCase(mode: "ordinary" | "protected" | "guest") {
 }
 
 async function main() {
-  if (!requested || requested === "ordinary") await runCase("ordinary")
-  if (!requested || requested === "protected") await runCase("protected")
-  if (!requested || requested === "guest") await runCase("guest")
+  for (let run = 0; run < repetitions; run++) {
+    if (!requested || requested === "ordinary") await runCase("ordinary")
+    if (!requested || requested === "protected") await runCase("protected")
+    if (!requested || requested === "unrelated-approved-guest")
+      await runCase("unrelated-approved-guest")
+  }
 }
 void main().catch((error) => {
   console.error(error)

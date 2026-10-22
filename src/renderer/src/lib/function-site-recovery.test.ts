@@ -8,7 +8,8 @@ it("matches exact lifecycle codes including Electron envelopes without broad fal
     "MODS_DEVELOPMENT_APPLYING",
     "MODS_UI_DRAWING_STALE",
     "MODS_UI_SITE_CLOSED",
-    "MODS_SESSION_CLOSED"
+    "MODS_SESSION_CLOSED",
+    "MODS_DISPLAY_ROW_CHANGED"
   ])
     expect(
       isTransientFunctionSiteError(new Error("Error invoking remote method: Error: " + code))
@@ -17,7 +18,9 @@ it("matches exact lifecycle codes including Electron envelopes without broad fal
     "MODS_SCOPE_CHANGED",
     "MODS_UI_QUESTION_STALE",
     "MODS_UI_SITE_CLOSED_PERMANENT",
-    "MODS_RUNTIME_LOST"
+    "MODS_RUNTIME_LOST",
+    "MODS_RUNTIME_SOURCE_CHANGED",
+    "MODS_DISPLAY_SCOPE_CHANGED"
   ])
     expect(isTransientFunctionSiteError({ code })).toBe(false)
 })

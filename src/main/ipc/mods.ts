@@ -796,6 +796,20 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
             throw new ModError("MODS_CALL_SCOPE_CHANGED")
         }
       },
+      captureDisplayScope: (workspace, threadId) => {
+        // Native child execution keeps its separate host identity protocol.
+        if (readNativeChildModsContext(threadId)) return undefined
+        const database = getDb(), row = getThreadCore(threadId)
+        if (!row || writableThreadScope(threadId) !== workspace)
+          throw new ModError("MODS_CALL_SCOPE_CHANGED")
+        const incarnation = captureThreadIncarnation(row)
+        return { database, workspace, threadId, incarnation, assertCurrent: () => {
+          if (getDb() !== database ||
+            !matchesThreadIncarnation(getThreadCore(threadId), incarnation) ||
+            writableThreadScope(threadId) !== workspace)
+            throw new ModError("MODS_CALL_SCOPE_CHANGED")
+        } }
+      },
       creatorHook: (workspace, threadId) =>
         manager.functionModelHookSource(functionCallAuthority(workspace, threadId)),
       clawApplicable: (threadId) => functionClawScope(threadId) !== null,
@@ -2256,6 +2270,19 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       )
     )
   )
+  ipcMain.handle("mods:function-site-read", (event, input: {
+    threadId: string
+    component: import("../../shared/mods/v2/sites").FunctionUiSite
+    props: ModObject
+    presentationId?: string
+    messageId?: string
+    expectedRequestId?: string
+    protocol?: unknown
+    ownerRequired?: boolean
+  }) => withDisplayExecution(event, input?.threadId, workspace =>
+    functions.siteRead(workspace, input.threadId, input.component,
+      parseModJson(encodeModJson(input.props)) as ModObject, input.presentationId,
+      input.messageId, input.expectedRequestId, input.protocol, input.ownerRequired === true)))
   ipcMain.handle(
     "mods:function-site-unmount",
     (event, input: { threadId: string; owner: string }) =>

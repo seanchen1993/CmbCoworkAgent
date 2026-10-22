@@ -19,6 +19,22 @@ afterEach(async () => {
   await Promise.all(sessions.splice(0).map((session) => session.close()))
 })
 
+it("notifies only the current native site when its drawing dependency is invalidated", async () => {
+  const changes: unknown[] = []
+  const { session } = await fixture("", undefined, async value => value,
+    (...args) => { changes.push(...args) })
+  const owner = await session.sites.mount("AssistantMessage")
+  const other = await session.sites.mount("CommandOutput")
+  const snapshot = await session.sites.render(owner, { text: "protected", isFirstOfReply: true })
+  await session.sites.render(other, { command: "job", args: "***", text: "protected", isErrored: false })
+  changes.length = 0
+  expect(session.sites.invalidateGeneration(snapshot.generation)).toBe(true)
+  expect(changes).toEqual([`site-invalidated:${owner}`])
+  changes.length = 0
+  expect(session.sites.invalidateGeneration("retired-generation")).toBe(false)
+  expect(changes).toEqual([])
+})
+
 it.each(["UserMessage", "AssistantMessage", "CommandOutput"])(
   "invalidates retained %s presentations even while virtual rows have no mounted owner",
   async (component) => {

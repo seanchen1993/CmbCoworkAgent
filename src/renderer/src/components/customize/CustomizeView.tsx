@@ -112,7 +112,7 @@ type CustomizeTab =
   | "expertTeam"
   | "evaluation"
 
-type MenuGroupId = "basic" | "advanced" | "profile" | "creator" | "creatorAdvanced"
+type MenuGroupId = "basic" | "advanced" | "profile" | "creator"
 
 type MenuItem = {
   tab: CustomizeTab
@@ -134,14 +134,6 @@ const MENU_GROUPS: MenuGroup[] = [
     items: [{ tab: "assistant", label: "对话创作", icon: Sparkles }]
   },
   {
-    id: "creatorAdvanced",
-    label: "高级自定义",
-    items: [
-      { tab: "claw", label: "搭配管理", icon: Sparkles },
-      { tab: "flows", label: "聊天任务模板", icon: GitBranch }
-    ]
-  },
-  {
     id: "basic",
     label: "基础功能",
     items: [
@@ -158,6 +150,8 @@ const MENU_GROUPS: MenuGroup[] = [
     id: "advanced",
     label: "高级特性",
     items: [
+      { tab: "claw", label: "搭配管理", icon: Sparkles },
+      { tab: "flows", label: "聊天任务模板", icon: GitBranch },
       { tab: "expertTeam", label: "专家团", icon: Users },
       { tab: "evaluation", label: "效果测试", icon: Code2 },
       { tab: "heartbeat", label: "心跳监控", icon: HeartPulse },

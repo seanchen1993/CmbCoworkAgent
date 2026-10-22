@@ -68,6 +68,7 @@ export interface PaneHost {
   component?: import("../../../shared/mods/v2/sites").FunctionUiSite
   localNotificationsOnly?: boolean
   releaseState?(generation: string): void
+  beginState?(generation: string): void
   clients?: import("./clients").FunctionClients
   markdownLinks?: FunctionMarkdownLinkRegistry
   markdownSiteOwner?: string
@@ -529,6 +530,7 @@ export class FunctionPanes {
           candidates.push(candidate)
           if (fresh) {
             pane.pendingGeneration = candidate.generation
+            this.host.beginState?.(candidate.generation)
             // The last healthy drawing remains authoritative until the synchronous commit.
             pane.dirty = false
             const site = this.host.site?.(pane)

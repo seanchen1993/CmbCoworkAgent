@@ -136,19 +136,22 @@ try {
   assert.equal(await tour.count(), 0, "Creator landing must not be blocked by a tour")
   await page.getByRole("button", { name: "进入创造者模式", exact: true }).waitFor()
   assert.equal(
-    await page
-      .getByRole("button", { name: "高级自定义", exact: true })
-      .getAttribute("aria-expanded"),
+    await page.getByRole("button", { name: "高级特性", exact: true }).getAttribute("aria-expanded"),
     "false"
   )
+  assert.equal(await page.getByRole("button", { name: "高级自定义", exact: true }).count(), 0)
+  assert.equal(await page.getByRole("button", { name: "高级特性", exact: true }).count(), 1)
   assert.equal(await page.getByRole("button", { name: "管理常用搭配", exact: true }).count(), 0)
   await page.setViewportSize({ width: 375, height: 740 })
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
   await page.screenshot({ path: join(output, "creator-first-375.png") })
   await page.getByRole("button", { name: "浏览灵件示例", exact: true }).click()
   assert.equal(await tour.count(), 0, "Browsing examples must leave the real page visible")
-  assert.equal(await page.getByRole("button", { name: "任务示例演练", exact: true }).count(), 0,
-    "Browsing installed examples in ordinary mode must not expose creator guidance")
+  assert.equal(
+    await page.getByRole("button", { name: "任务示例演练", exact: true }).count(),
+    0,
+    "Browsing installed examples in ordinary mode must not expose creator guidance"
+  )
   assert.deepEqual(await page.evaluate(() => window.calls), [])
   assert.equal(await tour.count(), 0)
   assert.equal(await page.evaluate(() => localStorage.getItem("devclaw.sparks-tour.v1")), null)
@@ -167,7 +170,10 @@ try {
       "false"
     )
   }
-  assert.equal(await page.getByRole("button", { name: "基础功能", exact: true }).getAttribute("aria-expanded"), "true")
+  assert.equal(
+    await page.getByRole("button", { name: "基础功能", exact: true }).getAttribute("aria-expanded"),
+    "true"
+  )
   await page.getByRole("button", { name: "通用", exact: true }).click()
   await page.getByText("GeneralPanel", { exact: true }).waitFor()
   await page.getByRole("button", { name: "对话创作", exact: true }).first().click()
@@ -229,7 +235,11 @@ try {
     else await page.getByRole("button", { name: "我已添加", exact: true }).click()
     await page.getByRole("button", { name: "对话创作", exact: true }).first().click()
     await page.evaluate(() => window.saveReuse())
-    await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
+    await page
+      .getByRole("navigation")
+      .filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) })
+      .getByRole("button", { name: "灵件与使用设置", exact: true })
+      .click()
     await page.getByText("聊天保存的灵件", { exact: true }).waitFor()
     assert.equal(
       await page
@@ -264,26 +274,43 @@ try {
   await page.waitForFunction(() => window.calls.length === 1)
   assert.deepEqual(await page.evaluate(() => window.calls), [["select", "new-reuse-thread"]])
   assert.deepEqual(errors, [])
-  const linkedPage = await browser.newPage()
-  await linkedPage.route("http://127.0.0.1/fixture", (route) =>
-    route.fulfill({
-      contentType: "text/html",
-      body: '<div id="root" style="height:100vh"></div>'
-    })
-  )
-  await linkedPage.goto("http://127.0.0.1/fixture")
-  await linkedPage.evaluate(() => {
-    window.initialTab = "lsp"
-  })
-  await linkedPage.addScriptTag({ content: bundle.outputFiles[0].text })
-  await linkedPage.getByRole("button", { name: "Java 代码诊断", exact: true }).waitFor()
-  assert.equal(
-    await linkedPage
-      .getByRole("button", { name: "高级特性", exact: true })
-      .getAttribute("aria-expanded"),
-    "true"
-  )
-  await linkedPage.close()
+  for (const [tab, label, panel] of [
+    ["lsp", "Java 代码诊断", "LspPanel"],
+    ["claw", "搭配管理", "ClawPanel"],
+    ["flows", "聊天任务模板", "FlowsPanel"]
+  ]) {
+    const linkedPage = await browser.newPage()
+    await linkedPage.route("http://127.0.0.1/fixture", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<div id="root" style="height:100vh"></div>'
+      })
+    )
+    await linkedPage.goto("http://127.0.0.1/fixture")
+    await linkedPage.evaluate((tab) => {
+      window.initialTab = tab
+    }, tab)
+    await linkedPage.addScriptTag({ content: bundle.outputFiles[0].text })
+    await linkedPage.getByRole("button", { name: label, exact: true }).waitFor()
+    await linkedPage.getByText(panel, { exact: true }).waitFor()
+    assert.equal(
+      await linkedPage
+        .getByRole("button", { name: label, exact: true })
+        .getAttribute("aria-current"),
+      "page"
+    )
+    assert.equal(
+      await linkedPage.getByRole("button", { name: "高级自定义", exact: true }).count(),
+      0
+    )
+    assert.equal(
+      await linkedPage
+        .getByRole("button", { name: "高级特性", exact: true })
+        .getAttribute("aria-expanded"),
+      "true"
+    )
+    await linkedPage.close()
+  }
   const createPage = await browser.newPage()
   await createPage.route("http://127.0.0.1/fixture", (route) =>
     route.fulfill({ contentType: "text/html", body: '<div id="root" style="height:100vh"></div>' })
@@ -300,7 +327,10 @@ try {
         button.textContent === "对话创作" && button.getAttribute("aria-pressed") === "true"
     )
   )
-  assert.equal(await createPage.getByRole("region", { name: "任务示例演练", exact: true }).count(), 0)
+  assert.equal(
+    await createPage.getByRole("region", { name: "任务示例演练", exact: true }).count(),
+    0
+  )
   await createPage.getByRole("button", { name: "挑选使用", exact: true }).click()
   await createPage.evaluate(() => window.changeScope())
   assert.equal(

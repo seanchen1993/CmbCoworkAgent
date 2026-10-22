@@ -1,3 +1,4 @@
+import { describeFunctionDisplayRouting } from "../v2/display-routing"
 import {
   FUNCTION_COMPATIBILITY_EVENT_NAMES,
   getFunctionEventSupport
@@ -32,6 +33,7 @@ export function developmentCatalog() {
   return {
     contract: "cmb-desktop-authoring-v2",
     support: CREATOR_S1_SUPPORT,
+    hostDisplay: describeFunctionDisplayRouting(),
     authoringTemplates: [...AUTHORING_TEMPLATE_KINDS],
     types: functionAuthoringDeclarations("result-v1"),
     events: FUNCTION_COMPATIBILITY_EVENT_NAMES.map((name) => ({
@@ -119,6 +121,7 @@ export function developmentCatalogPage(
   if (section === "overview")
     return {
       contract: catalog.contract,
+      hostDisplay: catalog.hostDisplay,
       supportProfile: {
         id: catalog.support.id,
         section: "support",

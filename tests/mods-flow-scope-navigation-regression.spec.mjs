@@ -15,7 +15,7 @@ const bundle = await build({
 import React from 'react';import{createRoot}from'react-dom/client';import{CustomizeView}from${JSON.stringify(join(renderer, "components/customize/CustomizeView.tsx"))};
 window.electron={process:{platform:'win32'}};let workspace=window.startForeign?'C:/isolated/B':'C:/isolated/A',listeners=[],race=false;const calls=[];
 const view=()=>({workspace,revision:workspace.endsWith('A')?1:2,bindingRevision:0,profiles:[],active:{id:'claw-a',name:workspace.endsWith('A')?'A private draft':'B private draft',capabilities:[]},enabled:true,applicable:true,issues:[],capabilities:[]});
-window.api={plugins:{list:async()=>[]},mods:{authoring:{list:async()=>({workspace,drafts:[]})},globalEnabled:async()=>false,status:async()=>({workspace,mods:[],functionMods:[],diagnostics:[]}),clawView:async()=>{window.clawReads=(window.clawReads??0)+1;return view()},clawChange:async(t,m)=>{calls.push(['clawChange',m]);return view()},flowCatalog:async()=>{const value={available:true,hostAvailable:true,workspace,plugins:[],actions:[],agents:[],models:[],features:[]};if(race){race=false;workspace='C:/isolated/B'}return value},flowSave:async(...args)=>{calls.push(['flowSave',args,workspace]);if(args[3]!==workspace)throw Error('FLOW_SCOPE_CHANGED');return{definition:args[1],revision:1,digest:'a'.repeat(64)}},flowStart:async(...args)=>{calls.push(['flowStart',args,workspace]);if(args[4]!==workspace)throw Error('FLOW_SCOPE_CHANGED');throw Error('test never starts a real flow')},flowActive:async()=>null,flowRuns:async()=>[],flowList:async()=>[{revision:1,digest:'f'.repeat(64),definition:{id:'fixture',name:'B fixture',schemaVersion:2,maxExecutions:1,execution:{profile:'prompt-only-v1'},steps:[{id:'agent',name:'Agent',kind:'agent',enabled:true}]}}],clawSources:async()=>({skills:[],mcp:[]}),onConfigurationChanged:cb=>{listeners.push(cb);return()=>{}},evaluation:{list:async()=>({ok:true,value:{workspace,evaluations:[]}})},skillEvaluation:{list:async()=>({ok:true,value:{workspace,candidates:[{candidateId:'candidate-b',name:'B candidate',skillId:'skill-b'}],records:[]}}),prepare:async input=>{calls.push(['skillPrepare',input]);return{ok:false,code:'INVALID'}}}}};
+window.api={featureGates:{isEnabled:async()=>({enabled:false})},plugins:{list:async()=>[]},mods:{authoring:{list:async()=>({workspace,drafts:[]})},globalEnabled:async()=>false,status:async()=>({workspace,mods:[],functionMods:[],diagnostics:[]}),clawView:async()=>{window.clawReads=(window.clawReads??0)+1;return view()},clawChange:async(t,m)=>{calls.push(['clawChange',m]);return view()},flowCatalog:async()=>{const value={available:true,hostAvailable:true,workspace,plugins:[],actions:[],agents:[],models:[],features:[]};if(race){race=false;workspace='C:/isolated/B'}return value},flowSave:async(...args)=>{calls.push(['flowSave',args,workspace]);if(args[3]!==workspace)throw Error('FLOW_SCOPE_CHANGED');return{definition:args[1],revision:1,digest:'a'.repeat(64)}},flowStart:async(...args)=>{calls.push(['flowStart',args,workspace]);if(args[4]!==workspace)throw Error('FLOW_SCOPE_CHANGED');throw Error('test never starts a real flow')},flowActive:async()=>null,flowRuns:async()=>[],flowList:async()=>[{revision:1,digest:'f'.repeat(64),definition:{id:'fixture',name:'B fixture',schemaVersion:2,maxExecutions:1,execution:{profile:'prompt-only-v1'},steps:[{id:'agent',name:'Agent',kind:'agent',enabled:true}]}}],clawSources:async()=>({skills:[],mcp:[]}),onConfigurationChanged:cb=>{listeners.push(cb);return()=>{}},evaluation:{list:async()=>({ok:true,value:{workspace,evaluations:[]}})},skillEvaluation:{list:async()=>({ok:true,value:{workspace,candidates:[{candidateId:'candidate-b',name:'B candidate',skillId:'skill-b'}],records:[]}}),prepare:async input=>{calls.push(['skillPrepare',input]);return{ok:false,code:'INVALID'}}}}};
 window.fixture={calls,race:()=>race=true,restore:()=>{workspace='C:/isolated/A';listeners.forEach(fn=>fn())},change:()=>{workspace='C:/isolated/B';listeners.forEach(fn=>fn())},readB:()=>{workspace='C:/isolated/B'}};
 createRoot(document.getElementById('root')).render(<CustomizeView/>);`
   },
@@ -91,7 +91,10 @@ const browser = await chromium.launch({
 async function open(tab = "claw", presentation = "creator", foreign = false, native = false) {
   const page = await browser.newPage({ viewport: { width: 900, height: 650 } }),
     errors = []
-  page.on("pageerror", (e) => errors.push(e.message))
+  page.on("pageerror", (e) => {
+    errors.push(e.message)
+    console.error("Flow navigation fixture error", e.stack ?? e.message)
+  })
   await page.route("**/*", (r) =>
     r.fulfill({ contentType: "text/html", body: '<div id="root" style="height:100vh"></div>' })
   )
@@ -110,7 +113,7 @@ async function open(tab = "claw", presentation = "creator", foreign = false, nat
       () => (window.nativeHint = ["c:", "isolated", "a", ""].join(String.fromCharCode(92)))
     )
   await page.addScriptTag({ content: bundle.outputFiles[0].text })
-  const advancedNav=page.getByRole("button", {name:"高级自定义",exact:true});
+  const advancedNav=page.getByRole("button", {name:"高级特性",exact:true});
   if(await advancedNav.getAttribute("aria-expanded")==="false") await advancedNav.click()
   return { page, errors }
 }
@@ -245,6 +248,24 @@ try {
   }
   writeFileSync(join(output, "flow-scope-navigation-result.json"), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result, null, 2))
+} catch (error) {
+  for (const [index, page] of browser.contexts().flatMap(context => context.pages()).entries()) {
+    if(page.isClosed()) continue
+    const state = await page.evaluate(() => ({
+      navigation: [...document.querySelectorAll('button[aria-current="page"]')].map(node => node.textContent),
+      flowFields: [...document.querySelectorAll('input')].map(node => ({
+        label: node.getAttribute('aria-label'), value: node.value,
+        hidden: !!node.closest('[hidden], [inert]')
+      })),
+      details: [...document.querySelectorAll('details')].map(node => ({
+        open: node.open, summary: node.querySelector('summary')?.textContent,
+        hidden: !!node.closest('[hidden], [inert]')
+      }))
+    }))
+    writeFileSync(join(output, `flow-navigation-failure-${index}.json`), JSON.stringify(state,null,2))
+    await page.screenshot({path:join(output, `flow-navigation-failure-${index}.png`)})
+  }
+  throw error
 } finally {
   await browser.close()
 }

@@ -3,10 +3,11 @@ import { createAutobizPreset } from "./autobiz-presets"
 import {
   CHAT_TASK_TEMPLATES,
   chatTaskTemplateIssue,
-  createChatTaskTemplate
+  createChatTaskTemplate,
+  findSavedChatTaskTemplate
 } from "./chat-task-templates"
 import { parseFlowDefinition } from "./schema"
-import type { FlowCatalog } from "./types"
+import type { FlowCatalog, FlowDefinition, SavedFlow } from "./types"
 
 const catalog: FlowCatalog = {
   available: true,
@@ -42,4 +43,96 @@ it("blocks missing model, authority and actual tests without hiding the read-onl
   expect(chatTaskTemplateIssue("repair-retest", { ...catalog, unitTest: undefined })).toContain(
     "未核对"
   )
+})
+
+const savedTemplate = (definition: FlowDefinition): SavedFlow => ({
+  definition,
+  revision: 3,
+  digest: "a".repeat(64),
+  updatedAt: 1
+})
+
+it.each(CHAT_TASK_TEMPLATES)(
+  "reuses the exact persisted $id definition without changing its id or revision",
+  ({ id }) => {
+    const saved = savedTemplate(createChatTaskTemplate(id, "user-stored-id"))
+    const original = structuredClone(saved)
+    expect(findSavedChatTaskTemplate(id, [saved])).toBe(saved)
+    expect(saved).toEqual(original)
+    expect(findSavedChatTaskTemplate(id, [])).toBeUndefined()
+  }
+)
+
+it.each([
+  [
+    "model",
+    (flow: FlowDefinition) => {
+      Object.assign(flow.steps[0], { modelId: "different" })
+    }
+  ],
+  [
+    "model role",
+    (flow: FlowDefinition) => {
+      Object.assign(flow.steps[0], { modelRole: "reviewer" })
+    }
+  ],
+  [
+    "check",
+    (flow: FlowDefinition) => {
+      Object.assign(flow.steps[1], { check: "e2e" })
+    }
+  ],
+  [
+    "step",
+    (flow: FlowDefinition) => {
+      flow.steps[0].enabled = false
+    }
+  ],
+  [
+    "prompt",
+    (flow: FlowDefinition) => {
+      Object.assign(flow.steps[0], { prompt: "User-edited review" })
+    }
+  ],
+  [
+    "goal",
+    (flow: FlowDefinition) => {
+      flow.goal = "User-edited goal"
+    }
+  ],
+  [
+    "timeout",
+    (flow: FlowDefinition) => {
+      flow.timeoutMs = 60000
+    }
+  ],
+  [
+    "execution budget",
+    (flow: FlowDefinition) => {
+      flow.maxExecutions++
+    }
+  ],
+  [
+    "name",
+    (flow: FlowDefinition) => {
+      flow.name = "My template"
+    }
+  ]
+] as const)("does not mistake an edited %s for the built-in template", (_label, edit) => {
+  const saved = savedTemplate(createChatTaskTemplate("review-test", "user-stored-id"))
+  edit(saved.definition)
+  const original = structuredClone(saved)
+  expect(findSavedChatTaskTemplate("review-test", [saved])).toBeUndefined()
+  expect(saved).toEqual(original)
+})
+
+it("ignores malformed identities and other presets, without falling back to a same-name match", () => {
+  const saved = savedTemplate(createChatTaskTemplate("review", "bad id"))
+  expect(findSavedChatTaskTemplate("review", [saved])).toBeUndefined()
+  saved.definition.id = "valid-id"
+  saved.revision = 0
+  expect(findSavedChatTaskTemplate("review", [saved])).toBeUndefined()
+  saved.revision = 1
+  saved.definition = { ...createChatTaskTemplate("repair-retest", "valid-id"), name: "只读检视" }
+  expect(findSavedChatTaskTemplate("review", [saved])).toBeUndefined()
 })

@@ -38,8 +38,21 @@ it("admits the real creator tool and its built-in guidance without personal skil
   expect(overview.result.package["mods/manifest.json"]).toMatchObject({ apiVersion: "cmb.mods/v2" })
   const types = JSON.parse(await tools[0].invoke({ action: "catalog", catalogSection: "types" }))
   expect(types).toMatchObject({ ok: true, result: { section: "types", cursor: 0 } })
-  expect(types.result.content).toContain('declare module "claude-code"')
+  expect(types.result.content).toContain("declare namespace DevClawMods")
   expect(types.result.nextCursor).toBeGreaterThan(0)
+  let declarations = types.result.content
+  let cursor: number | null = types.result.nextCursor
+  for (let page = 0; cursor !== null && page < 32; page++) {
+    const result = JSON.parse(await tools[0].invoke({
+      action: "catalog", catalogSection: "types", cursor
+    }))
+    expect(result).toMatchObject({ ok: true, result: { section: "types", cursor } })
+    declarations += result.result.content
+    cursor = result.result.nextCursor ?? null
+  }
+  expect(cursor).toBeNull()
+  expect(declarations).toContain('declare module "devclaw-mods" { export = DevClawMods }')
+  expect(declarations).toContain('declare module "claude-code" { export = DevClawMods }')
 })
 
 it("explains original-plugin modularization, native journey evidence and explicit independent delivery", () => {

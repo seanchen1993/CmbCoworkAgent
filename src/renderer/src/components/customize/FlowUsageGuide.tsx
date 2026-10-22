@@ -9,6 +9,10 @@ export function FlowUsageGuide({ onOpenMods }: { onOpenMods?: () => void } = {})
         聊天任务模板怎么用？
       </summary>
       <div className="space-y-3 border-t p-4 leading-relaxed text-muted-foreground">
+        <p>
+          本次只想先检视修改、再运行项目测试时，可以选用任务模板，无需制作或安装新插件。
+          模板也可以调用已授权插件的技能或动作。
+        </p>
         <ol className="list-decimal space-y-2 pl-5">
           <li>打开带项目目录的普通聊天，选择“只读检视”“检视并测试”或“失败修复复测”。</li>
           <li>点击“选用并返回聊天”。系统保存模板并选为下一条消息使用的步骤，不会立即执行。</li>
@@ -20,8 +24,9 @@ export function FlowUsageGuide({ onOpenMods }: { onOpenMods?: () => void } = {})
           </li>
         </ol>
         <p>
-          普通聊天仍可直接发送，无需先配置任务方案。AutoBiz 等项目的业务阶段由项目插件与 Mods
-          管理，不需要在这里重复配置。
+          插件用于安装和分发完整能力，可以包含技能、脚本、配置、知识和项目流程。
+          模板与项目流程共用执行底座；AutoBiz 等项目另有长期阶段状态与产物检查，
+          不需要在这里重复配置。普通聊天仍可直接发送。
         </p>
         <p>
           测试模板调用项目已有测试入口。缺少入口时系统会提示具体配置文件；助手检视意见不能代替真实测试通过。

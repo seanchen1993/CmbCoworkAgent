@@ -6,25 +6,22 @@ import { ChatSearchContext } from "./ChatSearchContext"
 import { Check, Copy } from "lucide-react"
 import {
   memo,
-  startTransition,
-  useEffect,
   useMemo,
-  useRef,
   useState,
   type ComponentProps,
   type ReactNode
 } from "react"
-import {
-  buildStreamingMarkdownRenderPlan,
-  getStreamingMarkdownDelayMs
-} from "../../lib/streaming-markdown-schedule"
+import { buildStreamingMarkdownRenderPlan } from "../../lib/streaming-markdown-schedule"
+import { useStreamingMarkdownText } from "../../lib/use-streaming-markdown-text"
+import { stableMarkdownPrefixLength } from "../../lib/stable-markdown-prefix"
 import {
   getMarkdownLanguageLabel,
   getMarkdownNodeText,
   useMarkdownFilePreviewComponents
 } from "./markdown-file-preview-components"
 import { isLocalFileLikeHref } from "@/lib/markdown-file-preview-links"
-import { remarkCompletedMarkdownParseCache } from "@/lib/markdown-parse-cache"
+import { remarkCompletedMarkdownParseCache, remarkStreamingMarkdownParse,
+  remarkStableMarkdownPrefixCache } from "@/lib/markdown-parse-cache"
 
 interface StreamingMarkdownProps {
   children: string
@@ -82,8 +79,9 @@ function MarkdownCodeBlock({
 
 // Hoisted to module scope so the prop identities stay stable across renders
 // (recreating these every render makes react-markdown redo work and churns GC).
-const REMARK_PLUGINS = [remarkGfm]
+const REMARK_PLUGINS = [remarkGfm, remarkStreamingMarkdownParse]
 const COMPLETED_REMARK_PLUGINS = [remarkGfm, remarkCompletedMarkdownParseCache]
+const STABLE_PREFIX_REMARK_PLUGINS = [remarkGfm, remarkStableMarkdownPrefixCache]
 const REHYPE_PLUGINS = [rehypeHighlight]
 // While streaming we skip syntax highlighting (the expensive rehype pass) and
 // reuse a single empty array identity so react-markdown doesn't see a new prop.
@@ -97,54 +95,6 @@ const NO_REHYPE_PLUGINS: typeof REHYPE_PLUGINS = []
 function transformStreamingMarkdownUrl(value: string, key: string): string {
   if (key === "href" && isLocalFileLikeHref(value)) return value
   return defaultUrlTransform(value)
-}
-
-// During streaming the parent re-renders on every token. Re-parsing the full
-// Markdown each time is ~O(n²) over a long answer, so the refresh interval grows
-// with the accumulated text. That keeps parse work near a fixed CPU budget while
-// preserving the existing 50 ms cadence for short answers. Completion still
-// flushes immediately below and restores syntax highlighting.
-
-function useThrottledStreamingText(text: string, isStreaming: boolean): string {
-  const [throttled, setThrottled] = useState(text)
-  const textRef = useRef(text)
-  const flushedRef = useRef(text)
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  useEffect(() => {
-    textRef.current = text
-
-    // Not streaming: the final text is returned directly below, so just drop any
-    // pending flush — no state update needed.
-    if (!isStreaming) {
-      if (timerRef.current) {
-        clearTimeout(timerRef.current)
-        timerRef.current = null
-      }
-      return
-    }
-    // Streaming: trailing-edge throttle. If a flush is already scheduled, let it
-    // pick up the latest text via textRef when it fires.
-    if (timerRef.current) return
-    timerRef.current = setTimeout(() => {
-      timerRef.current = null
-      if (flushedRef.current !== textRef.current) {
-        flushedRef.current = textRef.current
-        startTransition(() => setThrottled(textRef.current))
-      }
-    }, getStreamingMarkdownDelayMs(text.length))
-  }, [text, isStreaming])
-
-  useEffect(
-    () => () => {
-      if (timerRef.current) clearTimeout(timerRef.current)
-    },
-    []
-  )
-
-  // While streaming, render the throttled snapshot. Completion exposes the latest
-  // full text to the bounded render planner below without another state update.
-  return isStreaming ? throttled : text
 }
 
 const MARKDOWN_COMPONENTS: Components = {
@@ -202,12 +152,14 @@ const MarkdownFragment = memo(function MarkdownFragment({
   text,
   isStreaming,
   threadId,
-  start = 0
+  start = 0,
+  stablePrefix = false
 }: {
   text: string
   isStreaming: boolean
   threadId?: string
   start?: number
+  stablePrefix?: boolean
 }): React.JSX.Element {
   const renderCodeBlock = useMemo(
     () =>
@@ -248,7 +200,8 @@ const MarkdownFragment = memo(function MarkdownFragment({
       data-chat-search-source-end={start + text.length}
     >
       <ReactMarkdown
-        remarkPlugins={isStreaming ? REMARK_PLUGINS : COMPLETED_REMARK_PLUGINS}
+        remarkPlugins={isStreaming ? stablePrefix ? STABLE_PREFIX_REMARK_PLUGINS : REMARK_PLUGINS
+          : COMPLETED_REMARK_PLUGINS}
         rehypePlugins={isStreaming ? NO_REHYPE_PLUGINS : REHYPE_PLUGINS}
         components={components}
         urlTransform={threadId ? transformStreamingMarkdownUrl : undefined}
@@ -266,7 +219,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   searchBlockIndex = 0,
   searchLocation
 }: StreamingMarkdownProps): React.JSX.Element {
-  const text = useThrottledStreamingText(children, isStreaming)
+  const text = useStreamingMarkdownText(children, isStreaming)
   const [expandedText, setExpandedText] = useState<string | null>(null)
   const isExpanded = !isStreaming && expandedText === text
 
@@ -277,6 +230,17 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   const rendered = useMemo(
     () => {
       const plan = buildStreamingMarkdownRenderPlan(text, isStreaming, isExpanded)
+      // Only this proven leading code block is split. Everything else stays on
+      // the existing full-fragment path. Completion parses the entire current
+      // suffix (including reference definitions) and restores highlighting; the
+      // proven independent code prefix keeps its element identity and selection.
+      const prefixLength = stableMarkdownPrefixLength(plan.head)
+      const head = <>
+        <MarkdownFragment key="head" text={prefixLength ? plan.head.slice(0, prefixLength) : plan.head}
+          isStreaming={isStreaming} stablePrefix={prefixLength > 0} threadId={threadId} />
+        {prefixLength > 0 && <MarkdownFragment key="suffix" text={plan.head.slice(prefixLength)}
+          isStreaming={isStreaming} start={prefixLength} threadId={threadId} />}
+      </>
       if (plan.renderFullDocument) {
         return (
           <>
@@ -291,14 +255,14 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
                 收起长内容
               </button>
             )}
-            <MarkdownFragment text={plan.head} isStreaming={isStreaming} threadId={threadId} />
+            {head}
           </>
         )
       }
 
       return (
         <>
-          <MarkdownFragment text={plan.head} isStreaming={isStreaming} threadId={threadId} />
+          {head}
           <div
             data-chat-search-ignore
             className="my-3 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground"

@@ -805,6 +805,7 @@ export class FunctionSession {
       markdownLinks: this.markdownLinks,
       ...(this.uiResolve ? { withUiResolveDrawing: withFunctionUiResolveDrawing } : {}),
       withNativeIntent: (assertCurrent, run) => this.nativeMarkdownCallback(assertCurrent, run),
+      beginState: generation => { this.namedState.beginDrawingDependencies(generation) },
       releaseState: (generation) => {
         this.namedState.release(generation)
         for (const generations of this.callbackSources.values()) generations.delete(generation)
@@ -1535,6 +1536,33 @@ export class FunctionSession {
   assertTransportLive(): void {
     // Startup proofs call this base transport fence; do not recursively re-enter the proof.
     this.assertLive(undefined, false, false)
+  }
+
+  /** Host-only handoff before an owned drawing is retired. Values and actions never escape. */
+  captureDisplayDependencies(generation: string, expectedRefs?: readonly ModObject[],
+    reclaim?: () => boolean) {
+    this.assertTransportLive()
+    const proof = this.namedState.captureDrawingDependencies(generation, reclaim)
+    if (!proof) return undefined
+    if (expectedRefs && !this.namedState.coversDisplayDependencies(proof, expectedRefs)) {
+      this.namedState.releaseDrawingDependencies(proof)
+      return undefined
+    }
+    let live = true
+    let stop: (() => void) | undefined
+    return {
+      current: () => live && this.namedState.drawingDependenciesCurrent(proof),
+      listen: (listener: () => void) => {
+        if (!live || stop) throw new ModFunctionError("MODS_DISPLAY_PROOF_INVALID")
+        stop = this.namedState.listenDrawingDependencies(proof, listener)
+      },
+      release: () => {
+        if (!live) return
+        live = false
+        stop?.()
+        this.namedState.releaseDrawingDependencies(proof)
+      }
+    }
   }
 
   /** Native shutdown fence also covers module IPC, which does not inherit invocation ALS. */
