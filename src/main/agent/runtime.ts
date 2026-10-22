@@ -1,4 +1,5 @@
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
+import { createRuntimeToolAllowlistMiddleware } from "./runtime-tool-allowlist"
 import { randomUUID } from "crypto"
 import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 import { foregroundToolPolicy } from "./foreground-tool-policy"
@@ -38,6 +39,7 @@ import {
 } from "deepagents"
 import { withModelResponseDiagnostics } from "./model-response-diagnostics"
 import { withModelStreamCancellation } from "./model-stream-cancellation"
+import { buildPersonalIdentityPrompt, isPersonalMemoryEnabled } from "./personal-context"
 import {
   getThreadCheckpointPath,
   deleteThreadCheckpoint,
@@ -342,6 +344,10 @@ import {
   type CoordinatorSelectedSkill,
   type CoordinatorWorkerTurnPlanningState
 } from "./coordinator-mode"
+import {
+  createAllowedSkillsBackend,
+  resolveAllowedSkillRootDirs
+} from "./library/runtime-capabilities"
 import {
   coordinatorWorkerManager,
   type CoordinatorWorkerSnapshot,
@@ -2367,6 +2373,7 @@ function assembleDeepAgent(
     name,
     memory,
     skills,
+    allowedSkillRootDirs,
     filesystemSystemPrompt,
     summarizationTrigger,
     summarizationKeep,
@@ -2389,6 +2396,7 @@ function assembleDeepAgent(
     mainSubagentsEnabled = true,
     filesystemAccess,
     mainBlockedToolNames = [],
+    mainAllowedToolNames,
     managedExecution = false,
     notifiedBackgroundCommands = false,
     backgroundCommandShellSyntax = "posix",
@@ -2487,9 +2495,13 @@ function assembleDeepAgent(
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const filesystemBackend = backend ? backend : (config: any) => new StateBackend(config)
+  const skillsBackend =
+    allowedSkillRootDirs !== undefined
+      ? createAllowedSkillsBackend(filesystemBackend, skills ?? [], allowedSkillRootDirs)
+      : filesystemBackend
   const skillsMiddlewareArray =
     skills != null && skills.length > 0
-      ? [createRefreshingSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
+      ? [createRefreshingSkillsMiddleware({ backend: skillsBackend, sources: skills })]
       : []
 
   const memoryMiddlewareArray =
@@ -3393,6 +3405,9 @@ function assembleDeepAgent(
                 : undefined
             )
           ]
+        : []),
+      ...(mainAllowedToolNames !== undefined
+        ? [createRuntimeToolAllowlistMiddleware(mainAllowedToolNames)]
         : [])
     ],
     ...(responseFormat != null && { responseFormat }),
@@ -4915,6 +4930,9 @@ export interface CreateAgentRuntimeOptions {
   /** Effective per-session memory switch. Child runtimes inherit this because
    * worker thread ids may not have persisted thread metadata. */
   memoryEnabled?: boolean
+  /** Trusted shared-task boundary: disables personal memory and employee identity only.
+   * Does not authorize tools, isolate workspace/history, or filter skills/hooks. */
+  sharedTaskContext?: boolean
   /** Turn-scoped internal coordinator context injected only into the main coordinator prompt. */
   coordinatorTurnPrompt?: string
   /** Explicit /skill selection parsed from the current coordinator turn, if any. */
@@ -4937,6 +4955,10 @@ export interface CreateAgentRuntimeOptions {
   soloTaskTraceManager?: SoloTaskTraceManager
   /** Disable the synchronous deepagents task tool for leaf runtimes such as coordinator async workers. */
   disableSubagents?: boolean
+  /** Explicit session skill allowlist. Undefined preserves all available skills; [] hides all. */
+  allowedSkillNames?: string[]
+  /** Explicit session expert allowlist. Undefined preserves all available experts; [] disables all. */
+  allowedExpertNames?: string[]
   /** Optional filesystem access limits for leaf runtimes: coordinator async
    * workers (workload/ownedFiles) or registry agents (disallowedTools/shellAccess). */
   filesystemAccess?: CoordinatorWorkerFilesystemAccess
@@ -4944,6 +4966,8 @@ export interface CreateAgentRuntimeOptions {
   disableMcpTools?: boolean
   /** Exact main-agent tool names hidden and hard-blocked by a transport policy. */
   blockedToolNames?: string[]
+  /** Undefined preserves beta's tool surface; an explicit transport allowlist rejects unknown names. */
+  allowedToolNames?: string[]
   /** AbortSignal — when signalled, any running child process is killed immediately. */
   abortSignal?: AbortSignal
   /** Optional hooks invoked when the model fetch layer retries / resolves. */
@@ -5209,10 +5233,13 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onFinalSystemPrompt,
     disableMemoryInjection = false,
     memoryEnabled: inheritedMemoryEnabled,
+    sharedTaskContext = false,
     agentMode = "normal",
     traceContext,
     soloTaskTraceManager,
     disableSubagents = false,
+    allowedSkillNames,
+    allowedExpertNames,
     disableMcpTools = false,
     blockedToolNames = [],
     onHookResult,
@@ -5300,8 +5327,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     }
   })()
   const managedExecution = options.managedExecution === true
-  const memoryEnabledForThread =
+  const memoryEnabledForThread = isPersonalMemoryEnabled(
+    { sharedTaskContext },
     inheritedMemoryEnabled ?? isThreadMemoryEnabled(runtimeThreadMetadata)
+  )
   const runtimePolicy = createRuntimePromptToolPolicy({
     featureId,
     isHarnessProjectSession,
@@ -5318,6 +5347,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // and every leaf runtime through the existing mainSubagentsEnabled policy.
   const projectModeTaskSubagentConfig =
     runtimePolicy.isProjectMode && mainSubagentsEnabled ? subagentConfig : undefined
+  // Trusted transport policy only; undefined preserves beta's complete expert registry.
+  const sessionAllowedExpertNames = allowedExpertNames
 
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
@@ -5413,18 +5444,21 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       return undefined
     }
   }
-  const registrySubagentSpecs = mainSubagentsEnabled
-    ? (await loadAgentProfilesAsync(workspacePath, projectModeTaskSubagentConfig)).map(
-        (profile) => ({
-          name: profile.name,
-          description: profile.description,
-          systemPrompt: profile.systemPrompt,
-          disallowedTools: profile.disallowedTools,
-          shellAccess: profile.shellAccess,
-          model: resolveRegistryModelInstance(profile.model)
-        })
-      )
+  const allRegistryProfiles = mainSubagentsEnabled
+    ? await loadAgentProfilesAsync(workspacePath, projectModeTaskSubagentConfig)
     : []
+  const registryProfiles =
+    sessionAllowedExpertNames === undefined
+      ? allRegistryProfiles
+      : allRegistryProfiles.filter((profile) => sessionAllowedExpertNames.includes(profile.name))
+  const registrySubagentSpecs = registryProfiles.map((profile) => ({
+    name: profile.name,
+    description: profile.description,
+    systemPrompt: profile.systemPrompt,
+    disallowedTools: profile.disallowedTools,
+    shellAccess: profile.shellAccess,
+    model: resolveRegistryModelInstance(profile.model)
+  }))
 
   const checkpointer = await getCheckpointer(threadId)
   console.log("[Runtime] Checkpointer ready for thread:", threadId)
@@ -5480,7 +5514,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
   )
 
-  const baseHooks = getEnabledHooks(workspacePath)
+  const baseHooks = hookScope.disabled ? [] : getEnabledHooks(workspacePath)
   console.log(`[Runtime] Loaded ${baseHooks.length} base enabled hooks`)
 
   const backend = new LocalSandbox({
@@ -5887,14 +5921,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
   const { name: shell, isBashLike, isPowerShell } = getShellInfo(windowsSandbox)
   const timeContext = getRuntimeTimeContext()
-  const userInfo = getUserInfo()
-  const userInfoPrompt = `## Current user's employee identity information
-- sap编号、员工编号:${userInfo?.sapId}
-- yst编号、一事通编号: ${userInfo?.ystId}
-- userName、员工姓名: ${userInfo?.userName}
-- originOrgId、员工机构号: ${userInfo?.originOrgId}
-- orgName、员机构号名称: ${userInfo?.orgName}
-- ystCode、一事通code: ${userInfo?.ystCode}`
+  const userInfoPrompt = buildPersonalIdentityPrompt({ sharedTaskContext }, getUserInfo)
   const filesystemTimeContextLines = renderRuntimeTimeContextLines(timeContext, {
     includeCurrentTime: runtimePolicy.includeCurrentTime,
     includeTimestampRule: runtimePolicy.includeTimestampRule
@@ -5945,6 +5972,11 @@ The workspace root is: ${fileRoot}`
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
   const allSkillsSources = combineSkillMiddlewareSources(skillsSources, pluginSkillsSources)
+  const sessionAllowedSkillNames = allowedSkillNames
+  const allowedSkillRootDirs =
+    sessionAllowedSkillNames === undefined
+      ? undefined
+      : await resolveAllowedSkillRootDirs(allSkillsSources, sessionAllowedSkillNames)
   const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
   backend.setHiddenSkillDirs(getDisabledSkillDirs())
   backend.setSkillLifecycleRegistry(
@@ -5979,7 +6011,18 @@ The workspace root is: ${fileRoot}`
   }
 
   const capabilityService = createScopedMcpCapabilityService(
-    options.capabilityService ?? getGlobalMcpCapabilityService(),
+    options.capabilityService ??
+      (disableMcpTools
+        ? {
+            listTools: async () => [],
+            getTool: async () => null,
+            invoke: async () => {
+              throw new Error("MCP disabled for this source")
+            },
+            invalidate: async () => {},
+            close: async () => {}
+          }
+        : getGlobalMcpCapabilityService()),
     hookScope,
     resolveHooksForContext,
     onHookResult,
@@ -6209,6 +6252,7 @@ The workspace root is: ${fileRoot}`
               enableAgentsPrompt: !restrictedRole,
               disableMemoryInjection: restrictedRole,
               memoryEnabled: memoryEnabledForThread,
+              sharedTaskContext,
               capabilityService: options.capabilityService,
               agentMode: "normal",
               traceContext: subagentOptions.traceContext,
@@ -6420,7 +6464,11 @@ The workspace root is: ${fileRoot}`
     options.filesystemAccess
   ).filter((tool) => {
     const name = (tool as { name?: string }).name
-    return !name || !runtimeBlockedToolNames.has(name)
+    return (
+      (!name || !runtimeBlockedToolNames.has(name)) &&
+      (options.allowedToolNames === undefined ||
+        (typeof name === "string" && options.allowedToolNames.includes(name)))
+    )
   })
   const hasNamedTool = (name: string): boolean => {
     return finalTools.some((tool) => (tool as { name?: string }).name === name)
@@ -6849,6 +6897,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             toolConcurrencyQueueId: options.toolConcurrencyQueueId,
             traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
+            sharedTaskContext,
             onHookResult: workerOnHookResult,
             onFailureFuseNotice
           })
@@ -6924,6 +6973,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             toolConcurrencyQueueId: options.toolConcurrencyQueueId,
             traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
+            sharedTaskContext,
             onHookResult: workerOnHookResult,
             onFailureFuseNotice
           })
@@ -6983,6 +7033,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             toolConcurrencyQueueId: options.toolConcurrencyQueueId,
             traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
+            sharedTaskContext,
             onHookResult: workerOnHookResult,
             onFailureFuseNotice
           })
@@ -7274,7 +7325,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         : WORKFLOW_MODE_SYSTEM_PROMPT
     }
   }
-  systemPrompt += "\n\n" + userInfoPrompt
+  if (userInfoPrompt) systemPrompt += "\n\n" + userInfoPrompt
   console.log("[Runtime] System prompt summary:", {
     chars: systemPrompt.length,
     hasAgentsPrompt: Boolean(agentsPrompt.prompt),
@@ -7526,11 +7577,19 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     filesystemSystemPrompt,
     subagentExtraSystemPrompt: taskSubagentExtraSystemPrompt,
     subagentExtraSystemPromptForRestrictedRoles: projectModeTaskSubagentsInheritFullContext,
-    mainTodosEnabled: !isCoordinatorMode,
-    mainFilesystemEnabled: !isCoordinatorMode,
+    mainTodosEnabled:
+      !isCoordinatorMode &&
+      (options.allowedToolNames === undefined || options.allowedToolNames.includes("write_todos")),
+    mainFilesystemEnabled:
+      !isCoordinatorMode &&
+      (options.allowedToolNames === undefined ||
+        options.allowedToolNames.some((name) =>
+          ["read_file", "write_file", "edit_file", "ls", "glob", "grep", "execute"].includes(name)
+        )),
     mainSubagentsEnabled,
     filesystemAccess: options.filesystemAccess,
     mainBlockedToolNames: [...runtimeBlockedToolNames],
+    mainAllowedToolNames: options.allowedToolNames,
     managedExecution,
     // Background command ownership is a trusted host capability, not a mode
     // chosen by the model. Never inherit it into the actual workflow executor.
@@ -7550,8 +7609,11 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       process.platform === "win32" && windowsSandbox !== "none" ? "powershell" : "unknown",
     taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent:
-      !isCoordinatorMode && isGeneralPurposeSubagentEnabled(projectModeTaskSubagentConfig),
-    skills: mainSkillSources,
+      sessionAllowedExpertNames === undefined &&
+      !isCoordinatorMode &&
+      isGeneralPurposeSubagentEnabled(projectModeTaskSubagentConfig),
+    skills: sessionAllowedSkillNames?.length === 0 ? [] : mainSkillSources,
+    allowedSkillRootDirs,
     memory: mainMemorySources,
     // The orchestrator handles execute/file approval internally via IPC. In YOLO
     // mode it skips initial approvals but still prompts before sandbox escape.

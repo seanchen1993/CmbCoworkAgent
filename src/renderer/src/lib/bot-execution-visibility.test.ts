@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import type { Message, ToolCallState } from "@/types"
 import { isBotExecutionTool, projectBotExecution } from "./bot-execution-visibility"
+import { botWorkReceipt } from "./bot-work-receipt"
 import { getWorkerToolUiKey } from "./worker-tool-result-key"
 const created_at = new Date(2026, 9, 14)
 
@@ -21,6 +22,22 @@ const result = (id: string, is_error = false, content = "done"): Message => ({
 })
 
 describe("Bot execution presentation", () => {
+  it.each(["bot_work_create", "bot_work_send", "bot_work_complete", "bot_work_continue"])(
+    "keeps a verified %s navigation card visible after beta folds execution details",
+    (name) => {
+      const work = { id: "work-id", workId: "work-id", botId: "owner", title: "Draft", threadId: "work-thread" }
+      const receipt = name === "bot_work_create"
+        ? { work, task: { workId: work.id, threadId: work.threadId } }
+        : work
+      const message = call("work", name)
+      const returned = result("work", false, JSON.stringify({ kind: "bot-work-receipt", operation: name, receipt }))
+      const tool = message.tool_calls![0]
+      expect(projectBotExecution([message, returned], false, new Set()).hiddenMessages.size).toBe(0)
+      expect(botWorkReceipt(tool, { content: returned.content }, "owner")?.id).toBe(work.id)
+      expect(botWorkReceipt(tool, { content: returned.content }, "another-bot")).toBeNull()
+      expect(botWorkReceipt(tool, { content: returned.content, is_error: true }, "owner")).toBeNull()
+    }
+  )
   it.each([
     [
       "bot_deliver_files",

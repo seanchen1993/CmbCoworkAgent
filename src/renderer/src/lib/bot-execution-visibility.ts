@@ -6,6 +6,7 @@ import { botScheduleReceipt } from "./bot-schedule-view"
 import { botProfileEvent } from "./bot-profile-event"
 import { botQuestionHistory } from "./bot-question-history"
 import { delegatedTaskReceipt } from "./bot-exchange-view"
+import { parseBotWorkReceipt } from "./bot-work-receipt"
 import { parseBotFileDelivery } from "../../../shared/bots/file-delivery"
 
 /** Default Bot chat shows product presentations, never a generic tool transcript. */
@@ -26,6 +27,7 @@ export function isBotExecutionTool(
   return !(
     botQuestionHistory(tool, result) ||
     botProfileEvent(tool, result) ||
+    parseBotWorkReceipt(tool, result) ||
     (schedule && schedule.action !== "list") ||
     (tool.name === "bot_deliver_files" && parseBotFileDelivery(result.content)) ||
     delegatedTaskReceipt(tool, result)

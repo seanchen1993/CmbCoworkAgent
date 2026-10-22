@@ -1,3 +1,5 @@
+import type { BotWorkClient } from "./work"
+import type { BotMockClient, BotMockSource } from "./mock-channel"
 import type { WorkspaceFileScanEntry } from "../workspace-file-scan"
 import type { BotDeliveredFile } from "./file-delivery"
 import type { UserInputRequest } from "../../main/types"
@@ -100,6 +102,9 @@ export interface BotTask {
   botId: string
   threadId: string
   requestId: string
+  workId?: string
+  /** Frozen by the host, including when the desktop views/continues an external work. */
+  mockSource?: BotMockSource
   message: string
   state: BotTaskState
   error: string | null
@@ -143,14 +148,20 @@ export function botTaskStateLabel(state: BotTaskState): string {
 }
 
 export type BotTaskOrigin =
+  | { kind: "mock"; bindingId: string; eventId: string }
   | { kind: "user"; replyTo?: Pick<BotMessageReply, "id" | "ordinal" | "role"> }
   | { kind: "introduction" }
+  | { kind: "work"; sourceTaskId: string }
   | {
       kind: "bot"
       fromBotId: string
       /** Captured by the host at delivery, never supplied by the receiving model. */
       fromBotName?: string
       rootTaskId: string
+      /** Host-captured return route; a peer cannot choose another private conversation. */
+      returnWorkId?: string
+      /** Trusted work lineage shared by all async collaborators, separate from the return hop. */
+      rootWorkId?: string
       depth: number
       expectsReply: boolean
       groupId?: string
@@ -162,6 +173,8 @@ export type BotTaskOrigin =
   | {
       kind: "notification"
       notificationKind: "workflow" | "coordinator" | "command"
+      /** Inherits the host-owned collaboration quota; never an owner permission. */
+      rootWorkId?: string
       key: string
       /** Host-recorded command outcome; only a known success can be quiet. Missing means unverified. */
       commandSucceeded?: boolean
@@ -172,6 +185,15 @@ export type BotTaskOrigin =
   | { kind: "schedule"; scheduleId: string }
   | { kind: "discussion"; groupId: string; messageId: string; round: number }
   | { kind: "group"; groupId: string; messageId: string }
+
+export function botTaskWorkFamily(task: Pick<BotTask, "workId" | "origin">): string | undefined {
+  return (
+    task.workId ??
+    (task.origin.kind === "bot" || task.origin.kind === "notification"
+      ? task.origin.rootWorkId
+      : undefined)
+  )
+}
 
 export function botTaskGroupId(task: Pick<BotTask, "origin">): string | undefined {
   return task.origin.kind === "group" ||
@@ -258,6 +280,7 @@ export interface BotSchedule extends BotScheduleInput {
 
 export interface SendBotMessageInput {
   botId: string
+  workId?: string
   /** Client-generated identity retained when retrying an unacknowledged submission. */
   requestId: string
   message: string
@@ -281,13 +304,21 @@ export interface BotSnapshot {
   schedules: BotSchedule[]
   groups: BotGroup[]
   activities: BotConversationActivity[]
+  /** Per-Bot aggregate only; individual work activity is returned with its paginated summary. */
+  workActivity?: Array<{
+    botId: string
+    version: number
+    updatedAt: number
+    preview: string
+    unread: boolean
+  }>
   /** Conversations with accepted native commands, including process-tree cleanup. */
   backgroundThreads?: string[]
 }
 
 /** Bounded list metadata, not a second transcript. Revisions also survive clock changes. */
 export interface BotConversationActivity {
-  kind: "bot" | "group"
+  kind: "bot" | "group" | "work"
   id: string
   version: number
   updatedAt: number
@@ -346,47 +377,73 @@ export interface WriteBotMemoryInput {
 export type BotGroupHistoryCursor = number | { targetMessageId: string }
 
 export interface BotClient {
+  mock?: BotMockClient
   readonly hostId: string
   readonly filePreview: BotFilePreviewTransport
+  readonly works?: BotWorkClient
+  readonly conversations?: import("./conversation").BotConversationClient
   /** Optional group scope resolves to its shared workspace after validating current membership. */
-  listFiles(botId: string, cursor?: string, groupId?: string): Promise<BotFilePage>
+  listFiles(botId: string, cursor?: string, groupId?: string, workId?: string): Promise<BotFilePage>
   cancelFileList(cursor: string): Promise<void>
-  importFiles(botId: string, groupId?: string, maxFiles?: number): Promise<string[]>
+  importFiles(
+    botId: string,
+    groupId?: string,
+    maxFiles?: number,
+    workId?: string
+  ): Promise<string[]>
   attachFiles(
     botId: string,
     maxFiles: number,
     maxChars: number,
-    groupId?: string
+    groupId?: string,
+    workId?: string
   ): Promise<import("../file-attachment").FileAttachment[]>
   /** Dropped file bytes are retained on the owning host; no renderer filesystem path is accepted. */
   attachFileBytes(
     botId: string,
     files: Array<{ fileName: string; bytes: ArrayBuffer }>,
     maxChars: number,
-    groupId?: string
+    groupId?: string,
+    workId?: string
   ): Promise<import("../file-attachment").FileAttachment[]>
   /** Accepts a relative file ID or a preview's host path, always confined to this workspace. */
-  exportFile(botId: string, fileId: string, groupId?: string): Promise<boolean>
-  shareFile(botId: string, fileId: string, targetBotId: string, groupId?: string): Promise<string>
+  exportFile(botId: string, fileId: string, groupId?: string, workId?: string): Promise<boolean>
+  shareFile(
+    botId: string,
+    fileId: string,
+    targetBotId: string,
+    groupId?: string,
+    workId?: string
+  ): Promise<string>
   /** Browser methods accept a Bot ID or a host-validated botGroupBrowserScope. */
   browserPreview(botId: string, pageId?: string): Promise<BotBrowserState>
   takeOverBrowser(botId: string, pageId?: string): Promise<void>
   giveBackBrowser(botId: string, expectedGeneration?: number): Promise<void>
   navigateBrowser(botId: string, pageId: string, url: string): Promise<void>
   snapshot(): Promise<BotSnapshot>
-  exchange(botId: string, taskId: string, groupId?: string): Promise<BotExchange>
-  messageOrigins(botId: string, messageIds: string[], groupId?: string): Promise<BotMessageOrigin[]>
-  messageReply(botId: string, messageId: string): Promise<BotMessageReply>
-  requestReceipts(botId: string, checks: BotRequestCheck[]): Promise<BotRequestReceipt[]>
+  exchange(botId: string, taskId: string, groupId?: string, workId?: string): Promise<BotExchange>
+  messageOrigins(
+    botId: string,
+    messageIds: string[],
+    groupId?: string,
+    workId?: string
+  ): Promise<BotMessageOrigin[]>
+  messageReply(botId: string, messageId: string, workId?: string): Promise<BotMessageReply>
+  requestReceipts(
+    botId: string,
+    checks: BotRequestCheck[],
+    workId?: string
+  ): Promise<BotRequestReceipt[]>
   exchangeHistory(
     botId: string,
     taskId: string,
     groupId?: string,
-    before?: string
+    before?: string,
+    workId?: string
   ): Promise<BotExchangePage>
   markUnread(kind: "bot" | "group", id: string): Promise<void>
-  markRead(kind: "bot" | "group", id: string, throughVersion: number): Promise<void>
-  open(botId: string): Promise<{ threadId: string }>
+  markRead(kind: "bot" | "group" | "work", id: string, throughVersion: number): Promise<void>
+  open(botId: string, workId?: string): Promise<{ threadId: string }>
   listMemory(botId: string): Promise<BotMemory[]>
   writeMemory(botId: string, input: WriteBotMemoryInput): Promise<BotMemory>
   removeMemory(botId: string, id: string, expectedVersion: string): Promise<void>
@@ -411,7 +468,7 @@ export interface BotClient {
   remove(botId: string, expectedVersion: number): Promise<void>
   send(input: SendBotMessageInput): Promise<BotTask>
   /** Stops private conversation work from the inbox authority, including unseen accepted requests. */
-  stopConversation(botId: string, groupId?: string): Promise<void>
+  stopConversation(botId: string, groupId?: string, workId?: string): Promise<void>
   cancel(taskId: string): Promise<void>
   subscribe(listener: (event: BotChangeEvent) => void): () => void
 }

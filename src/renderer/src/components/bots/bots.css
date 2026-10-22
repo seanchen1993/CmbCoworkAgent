@@ -1344,7 +1344,9 @@ button.bot-json-caret:focus-visible {
    table presentation becomes separate runs; plain messages keep their bubble. */
 .bots-workspace
   :is([data-message-body], .bot-group-bubble, .bot-exchange-bubble):has(
-    > .streaming-markdown[data-bot-transcript] > [data-chat-search-text] > .streaming-markdown-table-wrap
+    > .streaming-markdown[data-bot-transcript]
+      > [data-chat-search-text]
+      > .streaming-markdown-table-wrap
   ) {
   padding: 0;
   border-radius: 0;
@@ -1352,8 +1354,12 @@ button.bot-json-caret:focus-visible {
 }
 .bots-workspace
   :is([data-message-body], .bot-group-bubble, .bot-exchange-bubble):has(
-    > .streaming-markdown[data-bot-transcript] > [data-chat-search-text] > .streaming-markdown-table-wrap
-  ) > .streaming-markdown[data-bot-transcript] > [data-chat-search-text]
+    > .streaming-markdown[data-bot-transcript]
+      > [data-chat-search-text]
+      > .streaming-markdown-table-wrap
+  )
+  > .streaming-markdown[data-bot-transcript]
+  > [data-chat-search-text]
   > :is([data-bot-prose], .streaming-markdown-table-wrap) {
   max-width: 100%;
   margin: 0;
@@ -1363,8 +1369,12 @@ button.bot-json-caret:focus-visible {
 }
 .bots-workspace
   :is([data-message-body], .bot-group-bubble, .bot-exchange-bubble):has(
-    > .streaming-markdown[data-bot-transcript] > [data-chat-search-text] > .streaming-markdown-table-wrap
-  ) > .streaming-markdown[data-bot-transcript] > [data-chat-search-text]
+    > .streaming-markdown[data-bot-transcript]
+      > [data-chat-search-text]
+      > .streaming-markdown-table-wrap
+  )
+  > .streaming-markdown[data-bot-transcript]
+  > [data-chat-search-text]
   > :is([data-bot-prose], .streaming-markdown-table-wrap)
   + :is([data-bot-prose], .streaming-markdown-table-wrap) {
   margin-top: 12px;
@@ -1729,6 +1739,14 @@ button.bot-json-caret:focus-visible {
 }
 [data-bot-composer] [data-composer-actions] button {
   pointer-events: auto;
+}
+/* Linked owner conversations retain the standard model/mode controls below the input. */
+[data-bot-owner-composer] .composer-textarea {
+  padding: 14px 16px 8px;
+}
+[data-bot-owner-composer] [data-composer-actions] {
+  position: static;
+  padding: 0 8px 8px;
 }
 .bot-group-avatar {
   position: relative;
@@ -3127,4 +3145,200 @@ button.bot-inline-mention:focus-visible {
 .bot-mention-options small {
   color: var(--bot-muted);
   font-size: 11px;
+}
+
+.bot-works-heading,
+.bot-work-current > div,
+.bot-work-create > div,
+.bot-work-breadcrumb {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.bot-work-current {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--bot-line);
+  color: var(--bot-text);
+}
+.bot-work-current strong,
+.bot-work-row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bot-work-current > span,
+.bot-work-row small {
+  font-size: 11px;
+  color: var(--bot-muted);
+}
+.bot-work-current button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+.bot-work-create {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 0;
+  color: var(--bot-text);
+}
+.bot-work-create label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+.bot-work-create input,
+.bot-work-create textarea,
+.bot-work-search {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--bot-line);
+  border-radius: 10px;
+  background: var(--bot-elevated);
+  color: var(--bot-text);
+  font-size: 13px;
+}
+.bot-work-search {
+  margin: 12px 0 6px;
+}
+.bot-work-create input::placeholder,
+.bot-work-create textarea::placeholder,
+.bot-work-search::placeholder {
+  color: var(--bot-muted);
+  opacity: 1;
+}
+.bot-work-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.bot-work-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  padding: 9px;
+  border-radius: 10px;
+  text-align: left;
+  color: var(--bot-text);
+}
+.bot-work-row > span {
+  max-width: 100%;
+  font-size: 13px;
+}
+.bot-work-row:hover {
+  background: color-mix(in srgb, var(--bot-hover) 55%, transparent);
+}
+.bot-work-row[aria-pressed="true"] {
+  background: var(--bot-hover);
+}
+.bot-work-breadcrumb {
+  padding: 5px 24px;
+  font-size: 12px;
+  color: var(--bot-muted);
+}
+
+.bot-work-source {
+  padding: 8px 20px;
+  color: var(--bot-muted);
+  background: var(--bot-elevated);
+  border-bottom: 1px solid var(--bot-line);
+  font-size: 12px;
+}
+.bot-mock-dialog {
+  width: min(850px, calc(100vw - 32px));
+  max-width: 850px;
+  max-height: 90vh;
+  overflow-y: auto;
+  color: var(--bot-text, var(--foreground));
+  background: var(--bot-elevated, var(--background));
+}
+.bot-mock-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+}
+.bot-mock-dialog button {
+  border: 1px solid var(--bot-line, var(--border));
+  border-radius: 7px;
+  padding: 5px 9px;
+}
+.bot-mock-dialog button:disabled {
+  opacity: 0.45;
+}
+.bot-mock-dialog input:not([type="checkbox"]),
+.bot-mock-dialog select,
+.bot-mock-dialog textarea {
+  border: 1px solid var(--bot-line, var(--border));
+  border-radius: 7px;
+  background: var(--bot-elevated, var(--background));
+  color: var(--bot-text, var(--foreground));
+  padding: 6px 8px;
+  min-width: 0;
+}
+.bot-mock-create {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.bot-mock-create label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.bot-mock-create p {
+  grid-column: 1 / -1;
+  color: var(--bot-muted, var(--muted-foreground));
+  font-size: 12px;
+}
+.bot-mock-history {
+  min-height: 100px;
+  max-height: 38vh;
+  overflow-y: auto;
+  border-block: 1px solid var(--bot-line, var(--border));
+  padding: 10px;
+}
+.bot-mock-history article {
+  margin-block: 10px;
+}
+.bot-mock-history article[data-mock-kind="bot"] {
+  margin-left: 20px;
+}
+.bot-mock-history p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 4px 0;
+  font-size: 13px;
+}
+.bot-mock-history small {
+  color: var(--bot-muted, var(--muted-foreground));
+}
+.bot-mock-compose {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.bot-mock-compose textarea {
+  min-height: 70px;
+  resize: vertical;
+}
+.bot-mock-compose > button {
+  align-self: flex-end;
+}
+@media (max-width: 600px) {
+  .bot-mock-create {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

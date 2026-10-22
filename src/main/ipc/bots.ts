@@ -1,4 +1,5 @@
-import { BrowserWindow, powerMonitor, type IpcMain } from "electron"
+import { BrowserWindow, powerMonitor, type IpcMain, type IpcMainInvokeEvent } from "electron"
+import { parseBotMockBinding, parseBotMockEvent } from "../bots/mock-channel-validation"
 import { BotError, LOCAL_BOT_HOST_ID } from "../../shared/bots/contracts"
 import {
   botIdentifier,
@@ -12,7 +13,9 @@ import {
   parseGroup,
   parseGroupMessage,
   parseGroupHistoryCursor,
-  parseBotRequestChecks
+  parseBotRequestChecks,
+  parseCreateBotWork,
+  parseBotWorkLifecycle
 } from "../../shared/bots/validation"
 import { prepareBotThread } from "../bots/runtime-adapter"
 import {
@@ -24,6 +27,14 @@ import {
 import { getThreadCore } from "../db"
 import type { ThreadDeletionService } from "./threads"
 import { registerBotFileHandlers } from "./bot-files"
+import {
+  exposeWorkConversation,
+  linkExistingConversation,
+  resolveWorkConversation,
+  unlinkWorkConversation,
+  unlinkDeletingWorkConversation
+} from "../bots/conversation-link-service"
+import { localWorkConversationRef } from "../bots/conversation-link-validation"
 
 function localHost(id: unknown) {
   if (id !== LOCAL_BOT_HOST_ID) throw new BotError("UNSUPPORTED_HOST", "此版本仅支持本机 Bot")
@@ -54,6 +65,96 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
   }
 
   registerBotFileHandlers(ipcMain, hostFor)
+  const mockDesktop = (event: IpcMainInvokeEvent, hostId: unknown) => {
+    if (
+      !event.senderFrame ||
+      event.senderFrame !== event.sender.mainFrame ||
+      !BrowserWindow.fromWebContents(event.sender)
+    )
+      throw new BotError("CONFLICT", "模拟绑定只能从本机桌面窗口操作")
+    return hostFor(hostId)
+  }
+  const mockCursor = (value: unknown): string | undefined => {
+    if (value === undefined) return undefined
+    if (typeof value !== "string" || value.length > 1024)
+      throw new BotError("INVALID_INPUT", "模拟游标无效")
+    return value
+  }
+  ipcMain.handle("bots:conversation:resolve", (event, hostId, threadId) =>
+    resolveWorkConversation(mockDesktop(event, hostId), botIdentifier(threadId))
+  )
+  ipcMain.handle("bots:conversation:expose", async (event, hostId, botId, workId) => {
+    const host = mockDesktop(event, hostId),
+      bot = host.getBot(botIdentifier(botId)),
+      work = host.getWork(bot.id, botIdentifier(workId))
+    if (work.source) throw new BotError("CONFLICT", "模拟渠道任务不能转为本机私有对话。")
+    if (!work.conversation) {
+      prepareBotThread(bot, { threadId: work.threadId, origin: { kind: "user" } }, work)
+      host.initializeWorkThread(bot.id, work.id)
+    }
+    return exposeWorkConversation(host, bot.id, work.id)
+  })
+  ipcMain.handle("bots:conversation:link", (event, hostId, input) => {
+    const host = mockDesktop(event, hostId)
+    if (
+      !input ||
+      typeof input !== "object" ||
+      Array.isArray(input) ||
+      Object.keys(input).some(
+        (key) => !["botId", "operationId", "title", "goal", "conversation"].includes(key)
+      ) ||
+      typeof input.title !== "string" ||
+      typeof input.goal !== "string"
+    )
+      throw new BotError("INVALID_INPUT", "关联参数无效")
+    return linkExistingConversation(host, {
+      botId: botIdentifier(input.botId),
+      operationId: botIdentifier(input.operationId),
+      title: input.title,
+      goal: input.goal,
+      conversation: localWorkConversationRef(input.conversation)
+    })
+  })
+  ipcMain.handle("bots:conversation:unlink", (event, hostId, botId, workId, version) => {
+    if (!Number.isSafeInteger(version) || version < 1)
+      throw new BotError("INVALID_INPUT", "任务版本无效")
+    return unlinkWorkConversation(
+      mockDesktop(event, hostId),
+      botIdentifier(botId),
+      botIdentifier(workId),
+      version
+    )
+  })
+  ipcMain.handle("bots:mock:bindings", (event, hostId, botId, before) =>
+    mockDesktop(event, hostId).mockBindings(botIdentifier(botId), mockCursor(before))
+  )
+  ipcMain.handle("bots:mock:binding", (event, hostId, botId, id) =>
+    mockDesktop(event, hostId).mockBinding(botIdentifier(botId), botIdentifier(id))
+  )
+  ipcMain.handle("bots:mock:create", (event, hostId, input) =>
+    mockDesktop(event, hostId).createMockBinding(parseBotMockBinding(input))
+  )
+  ipcMain.handle("bots:mock:inject", (event, hostId, input) =>
+    mockDesktop(event, hostId).injectMockEvent(parseBotMockEvent(input))
+  )
+  ipcMain.handle("bots:mock:revoke", (event, hostId, botId, id, version) => {
+    const host = mockDesktop(event, hostId)
+    if (!Number.isSafeInteger(version) || version < 1)
+      throw new BotError("INVALID_INPUT", "模拟授权版本无效")
+    return host.revokeMockBinding(botIdentifier(botId), botIdentifier(id), version)
+  })
+  ipcMain.handle("bots:mock:online", (event, hostId, botId, id, online) => {
+    const host = mockDesktop(event, hostId)
+    if (typeof online !== "boolean") throw new BotError("INVALID_INPUT", "模拟在线状态无效")
+    return host.setMockOnline(botIdentifier(botId), botIdentifier(id), online)
+  })
+  ipcMain.handle("bots:mock:history", (event, hostId, botId, id, before) =>
+    mockDesktop(event, hostId).mockHistory(
+      botIdentifier(botId),
+      botIdentifier(id),
+      mockCursor(before)
+    )
+  )
   ipcMain.handle(
     "bots:browser:preview",
     (_event, hostId: unknown, id: unknown, pageId: unknown) => {
@@ -121,36 +222,89 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
     hostFor(hostId).sendGroup(parseGroupMessage(input))
   )
   powerMonitor.on("resume", () => subscribedHost?.resume())
-  ipcMain.handle("bots:open", (_event, hostId: unknown, id: unknown) => {
-    const host = hostFor(hostId)
-    const bot = host.getBot(botIdentifier(id))
-    prepareBotThread(bot)
-    host.introduce(bot.id)
-    return { threadId: bot.threadId }
+  ipcMain.handle(
+    "bots:work:list",
+    (_event, hostId: unknown, botId: unknown, cursor: unknown, query: unknown) => {
+      if (cursor !== undefined && (typeof cursor !== "string" || cursor.length > 1024))
+        throw new BotError("INVALID_INPUT", "工作游标无效")
+      if (query !== undefined && typeof query !== "string")
+        throw new BotError("INVALID_INPUT", "工作搜索无效")
+      return hostFor(hostId).listWorks(
+        botIdentifier(botId),
+        cursor as string | undefined,
+        query as string | undefined
+      )
+    }
+  )
+  ipcMain.handle("bots:work:summaries", (_event, hostId: unknown, botId: unknown, ids: unknown) => {
+    if (!Array.isArray(ids) || ids.length > 40 || new Set(ids).size !== ids.length)
+      throw new BotError("INVALID_INPUT", "工作摘要批次无效")
+    return hostFor(hostId).workSummaries(botIdentifier(botId), ids.map(botIdentifier))
+  })
+  ipcMain.handle(
+    "bots:work:mark-all-read",
+    (_event, hostId: unknown, botId: unknown, version: unknown) => {
+      if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1)
+        throw new BotError("INVALID_INPUT", "工作已读位置无效")
+      return hostFor(hostId).markWorksRead(botIdentifier(botId), version)
+    }
+  )
+  ipcMain.handle("bots:work:get", (_event, hostId: unknown, botId: unknown, workId: unknown) =>
+    hostFor(hostId).getWork(botIdentifier(botId), botIdentifier(workId))
+  )
+  ipcMain.handle("bots:work:create", (_event, hostId: unknown, input: unknown) =>
+    hostFor(hostId).createWork(parseCreateBotWork(input))
+  )
+  ipcMain.handle("bots:work:lifecycle", (_event, hostId: unknown, input: unknown) => {
+    const v = parseBotWorkLifecycle(input)
+    return hostFor(hostId).changeWork(v.botId, v.workId, v.expectedVersion, v.operationId, v.action)
+  })
+  ipcMain.handle("bots:open", (_event, hostId: unknown, id: unknown, workId: unknown) => {
+    const host = hostFor(hostId),
+      bot = host.getBot(botIdentifier(id)),
+      work = workId == null ? undefined : host.getWork(bot.id, botIdentifier(workId))
+    prepareBotThread(
+      bot,
+      work ? { threadId: work.threadId, origin: { kind: "user" } } : undefined,
+      work
+    )
+    if (work) host.initializeWorkThread(bot.id, work.id)
+    else host.introduce(bot.id)
+    return { threadId: work?.threadId ?? bot.threadId }
   })
   ipcMain.handle("bots:snapshot", (_event, hostId: unknown) => hostFor(hostId).snapshot())
   ipcMain.handle(
     "bots:exchange",
-    (_event, hostId: unknown, botId: unknown, taskId: unknown, groupId: unknown) =>
+    (_event, hostId: unknown, botId: unknown, taskId: unknown, groupId: unknown, workId: unknown) =>
       hostFor(hostId).exchange(
         botIdentifier(botId),
         botIdentifier(taskId),
-        groupId == null ? undefined : botIdentifier(groupId)
+        groupId == null ? undefined : botIdentifier(groupId),
+        workId == null ? undefined : botIdentifier(workId)
       )
   )
   ipcMain.handle(
     "bots:exchange-history",
-    (_event, hostId: unknown, botId: unknown, taskId: unknown, groupId: unknown, before: unknown) =>
+    (
+      _event,
+      hostId: unknown,
+      botId: unknown,
+      taskId: unknown,
+      groupId: unknown,
+      before: unknown,
+      workId: unknown
+    ) =>
       hostFor(hostId).exchangeHistory(
         botIdentifier(botId),
         botIdentifier(taskId),
         groupId == null ? undefined : botIdentifier(groupId),
-        before == null ? undefined : botIdentifier(before)
+        before == null ? undefined : botIdentifier(before),
+        workId == null ? undefined : botIdentifier(workId)
       )
   )
   ipcMain.handle(
     "bots:message-origins",
-    (_event, hostId: unknown, botId: unknown, ids: unknown, groupId: unknown) => {
+    (_event, hostId: unknown, botId: unknown, ids: unknown, groupId: unknown, workId: unknown) => {
       if (!Array.isArray(ids) || ids.length > 100)
         throw new BotError("INVALID_INPUT", "消息来源查询无效")
       return hostFor(hostId).messageOrigins(
@@ -162,7 +316,8 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
             throw new BotError("INVALID_INPUT", "消息标识格式无效")
           return id
         }),
-        groupId == null ? undefined : botIdentifier(groupId)
+        groupId == null ? undefined : botIdentifier(groupId),
+        workId == null ? undefined : botIdentifier(workId)
       )
     }
   )
@@ -172,22 +327,27 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
   })
   ipcMain.handle(
     "bots:request-receipts",
-    (_event, hostId: unknown, botId: unknown, checks: unknown) =>
-      hostFor(hostId).requestReceipts(botIdentifier(botId), parseBotRequestChecks(checks))
+    (_event, hostId: unknown, botId: unknown, checks: unknown, workId: unknown) =>
+      hostFor(hostId).requestReceipts(
+        botIdentifier(botId),
+        parseBotRequestChecks(checks),
+        workId == null ? undefined : botIdentifier(workId)
+      )
   )
   ipcMain.handle(
     "bots:stop-conversation",
-    (_event, hostId: unknown, botId: unknown, groupId: unknown) =>
+    (_event, hostId: unknown, botId: unknown, groupId: unknown, workId: unknown) =>
       hostFor(hostId).stopConversation(
         botIdentifier(botId),
-        groupId === undefined ? undefined : botIdentifier(groupId)
+        groupId === undefined ? undefined : botIdentifier(groupId),
+        workId == null ? undefined : botIdentifier(workId)
       )
   )
   ipcMain.handle(
     "bots:mark-read",
     (_event, hostId: unknown, kind: unknown, id: unknown, version: unknown) => {
       if (
-        (kind !== "bot" && kind !== "group") ||
+        (kind !== "bot" && kind !== "group" && kind !== "work") ||
         !Number.isSafeInteger(version) ||
         Number(version) < 1
       )
@@ -233,6 +393,10 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
     const target = parseExistingVersion({ id, version })!
     if (!deleteThread) throw new BotError("CONFLICT", "会话清理服务尚未就绪")
     return host.remove(target.id, target.version, async (threadIds) => {
+      for (const work of host.conversationLinks.forBot(target.id)) {
+        if (work.conversation?.origin === "existing" && work.conversation.state !== "detached")
+          await unlinkDeletingWorkConversation(host, target.id, work.id, work.version)
+      }
       for (const threadId of threadIds) {
         const thread = getThreadCore(threadId)
         if (!thread) continue // Retry after an earlier thread was already removed.
@@ -254,8 +418,12 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
   )
   ipcMain.handle(
     "bots:message-reply",
-    (_event, hostId: unknown, botId: unknown, messageId: unknown) =>
-      hostFor(hostId).messageReply(botIdentifier(botId), botIdentifier(messageId))
+    (_event, hostId: unknown, botId: unknown, messageId: unknown, workId: unknown) =>
+      hostFor(hostId).messageReply(
+        botIdentifier(botId),
+        botIdentifier(messageId),
+        workId == null ? undefined : botIdentifier(workId)
+      )
   )
   ipcMain.handle("bots:cancel", (_event, hostId: unknown, taskId: unknown) =>
     hostFor(hostId).cancel(botIdentifier(taskId))

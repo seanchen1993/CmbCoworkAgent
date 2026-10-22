@@ -144,6 +144,7 @@ export function parseSendBotMessage(input: unknown): SendBotMessageInput {
     botId: botIdentifier(item.botId),
     requestId: botIdentifier(item.requestId),
     message: boundedString(item.message, "消息", 64_000),
+    ...(item.workId == null ? {} : { workId: botIdentifier(item.workId) }),
     ...(item.replyToId !== undefined ? { replyToId: botIdentifier(item.replyToId) } : {})
   }
 }
@@ -234,4 +235,46 @@ export function parseExistingVersion(input: unknown): { id: string; version: num
   if (!Number.isSafeInteger(item.version) || Number(item.version) < 1)
     throw new BotError("INVALID_INPUT", "版本无效")
   return { id: botIdentifier(item.id), version: Number(item.version) }
+}
+
+export function parseCreateBotWork(input: unknown): import("./work").CreateBotWorkInput {
+  const item = record(input)
+  if (
+    Object.keys(item).some(
+      (key) => !["botId", "operationId", "title", "goal", "contextMessageIds"].includes(key)
+    )
+  )
+    throw new BotError("INVALID_INPUT", "工作参数包含不支持字段")
+  const ids = item.contextMessageIds
+  if (
+    ids !== undefined &&
+    (!Array.isArray(ids) || ids.length > 12 || new Set(ids).size !== ids.length)
+  )
+    throw new BotError("INVALID_INPUT", "工作上下文引用无效")
+  return {
+    botId: botIdentifier(item.botId),
+    operationId: botIdentifier(item.operationId),
+    title: boundedString(item.title, "工作标题", 160),
+    goal: boundedString(item.goal, "工作目标", 30000),
+    ...(Array.isArray(ids) ? { contextMessageIds: ids.map(botIdentifier) } : {})
+  }
+}
+export function parseBotWorkLifecycle(input: unknown) {
+  const item = record(input)
+  if (
+    Object.keys(item).some(
+      (key) => !["botId", "workId", "expectedVersion", "operationId", "action"].includes(key)
+    ) ||
+    !["complete", "continue"].includes(String(item.action)) ||
+    !Number.isSafeInteger(item.expectedVersion) ||
+    Number(item.expectedVersion) < 1
+  )
+    throw new BotError("INVALID_INPUT", "工作状态操作无效")
+  return {
+    botId: botIdentifier(item.botId),
+    workId: botIdentifier(item.workId),
+    operationId: botIdentifier(item.operationId),
+    expectedVersion: Number(item.expectedVersion),
+    action: item.action as "complete" | "continue"
+  }
 }

@@ -60,6 +60,7 @@ it("mixes groups and Bots by actual activity without moving a chat just because 
 
 const sidebarView = (): BotViewState => ({
   selectedId: "current-private-chat",
+  activeWorkIdByBot: {},
   groupId: null,
   detailOpen: true,
   detailTab: "files",

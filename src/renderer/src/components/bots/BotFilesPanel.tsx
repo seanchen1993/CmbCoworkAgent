@@ -29,15 +29,17 @@ export function BotFilesPanel({
   peers,
   client,
   group,
+  conversationThreadId,
   refreshKey = ""
 }: {
   bot: BotDefinition
   peers: BotDefinition[]
   client: BotClient
   group?: { id: string; name: string }
+  conversationThreadId?: string
   refreshKey?: string
 }) {
-  const threadId = group ? `group-${group.id}-${bot.id}` : bot.threadId
+  const threadId = conversationThreadId ?? (group ? `group-${group.id}-${bot.id}` : bot.threadId)
   const [page, setPage] = useState<BotFilePage | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)

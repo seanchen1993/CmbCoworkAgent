@@ -187,3 +187,18 @@ describe("getHarnessAgentContext", () => {
     })
   })
 })
+
+describe("opt-in mock runtime policy",()=>{
+  it("only omits prompt extensions for the new explicit flag, preserving existing IM and beta options",()=>{
+    const base={threadId:"thread",workspacePath:"/fixture",harnessAgentsPrompt:"private agents",pluginPromptInject:"private plugin",additionalAgentsWorkspacePaths:["/private"],additionalAgentsWorkspaceMappings:[] } as Omit<CreateAgentRuntimeOptions,"modelId">
+    const options=(remotePolicy?:import("./standard-thread-turn").RemoteTurnPolicy)=>prepareStandardThreadRuntimeFactory({source:"bot",runLease:{owner:"desktop",runId:"run"},baseOptions:base,harnessContext:{},remotePolicy}).optionsForModel()
+    expect(options().harnessAgentsPrompt).toBe("private agents")
+    expect(options({disableAgentsPrompt:true}).pluginPromptInject).toBe("private plugin")
+    const mock=options({omitPromptExtensions:true,allowedToolNames:["bot_work_list"],allowedSkillNames:[],allowedExpertNames:[]})
+    expect(mock.harnessAgentsPrompt).toBeUndefined()
+    expect(mock.pluginPromptInject).toBeUndefined()
+    expect(mock.additionalAgentsWorkspacePaths).toEqual([])
+    expect(mock.allowedToolNames).toEqual(["bot_work_list"])
+    expect(mock.allowedSkillNames).toEqual([])
+  })
+})

@@ -20,24 +20,26 @@ const schema = botDraftContentSchema.extend({
     .nullable()
     .optional()
 })
-const key = (hostId: string, botId: string) => prefix + JSON.stringify([hostId, botId])
+const key = (hostId: string, botId: string, workId?: string) =>
+  prefix + JSON.stringify(workId ? [hostId, botId, workId] : [hostId, botId])
 
-export function loadBotConversationDraft(hostId: string, botId: string) {
-  return loadBotDraftRecord(key(hostId, botId), schema)
+export function loadBotConversationDraft(hostId: string, botId: string, workId?: string) {
+  return loadBotDraftRecord(key(hostId, botId, workId), schema)
 }
 
 export function restoreBotConversationDraft(
   context: DraftContext,
   hostId: string,
   botId: string,
-  threadId: string
+  threadId: string,
+  workId?: string
 ): string | null {
   // The original initializer restores its persisted queue only before a state
   // exists. Restore that queue before draft actions create a default state.
   context.initializeThread(threadId)
   const current = context.getThreadState(threadId)
   if (current.draftInput || current.draftAttachments.length || current.draftBotReplyTo) return null
-  const saved = loadBotConversationDraft(hostId, botId)
+  const saved = loadBotConversationDraft(hostId, botId, workId)
   if (saved.error) return saved.error
   if (saved.draft) {
     const actions = context.getThreadActions(threadId)
@@ -52,11 +54,12 @@ export function saveBotConversationDraft(
   context: DraftContext,
   hostId: string,
   botId: string,
-  threadId: string
+  threadId: string,
+  workId?: string
 ): string | null {
   const current = context.getThreadState(threadId)
   return saveBotDraftRecord(
-    key(hostId, botId),
+    key(hostId, botId, workId),
     {
       version: 1 as const,
       text: current.draftInput,
@@ -74,15 +77,16 @@ export function bindBotConversationDraft(
   hostId: string,
   botId: string,
   threadId: string,
-  onError: (error: string | null) => void
+  onError: (error: string | null) => void,
+  workId?: string
 ): () => void {
-  const restoreError = restoreBotConversationDraft(context, hostId, botId, threadId)
+  const restoreError = restoreBotConversationDraft(context, hostId, botId, threadId, workId)
   let {
     draftInput: previousText,
     draftAttachments: previousAttachments,
     draftBotReplyTo: previousReply
   } = context.getThreadState(threadId)
-  const save = () => onError(saveBotConversationDraft(context, hostId, botId, threadId))
+  const save = () => onError(saveBotConversationDraft(context, hostId, botId, threadId, workId))
   if (restoreError) onError(restoreError)
   else save()
   return context.subscribeToThreadState(threadId, () => {

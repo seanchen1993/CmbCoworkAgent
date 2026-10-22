@@ -1,3 +1,4 @@
+import { verifyWorkConversationThread } from "../bots/conversation-link-authority"
 import { getCapturedSubagentSession, subagentExportKey } from "../services/subagent-session-capture"
 import type { SubagentExportTarget as ExportScope } from "../../shared/subagent-session-export"
 import { formatHookDateTime } from "../../shared/hook-time"
@@ -3914,6 +3915,31 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         metadata = parsed as Record<string, unknown>
       } catch {
         throw new Error("会话元数据异常，无法确认删除条件，请修复后重试。")
+      }
+      if (metadata.botLocalConversation === true) {
+        // remove() owns a main-process deletion fence. Do not detach a created
+        // conversation first: a failed cleanup must retain ownership for retry.
+        let deletingCreated = false
+        try {
+          const { getLocalBotHost } = await import("../bots/local-service")
+          const work = getLocalBotHost().getWorkForDeletion(
+            String(metadata.botId),
+            String(metadata.botWorkId)
+          )
+          verifyWorkConversationThread(work, threadRow, metadata)
+          deletingCreated =
+            work.threadId === threadId &&
+            work.conversation?.origin === "created" &&
+            work.conversation.state === "bound"
+        } catch {
+          /* General renderer delete has no remove() fence. */
+        }
+        if (!deletingCreated)
+          throw new Error(
+            "此会话已关联 Bot 任务，请先在会话顶部解除任务关联，再删除普通会话；历史会保留到你明确删除。"
+          )
+        if (!matchesThreadIncarnation(getThreadCore(threadId), lease.incarnation))
+          throw new Error("会话在删除检查期间已变化。")
       }
       // Check before teardown: without a workspace the durable worktree guards
       // below cannot prove that deleting a cold workflow/coordinator is safe.

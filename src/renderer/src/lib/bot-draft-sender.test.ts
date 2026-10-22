@@ -140,6 +140,43 @@ function fixture() {
 }
 
 describe("Bot sends through the original durable draft queue", () => {
+  it("never retargets a retained Bot handoff after unlink/delete/reassociation, including after its receipt retention", async () => {
+    const f = fixture(),
+      old = { botId: "original-bot", workId: "original-work" }
+    f.patch({ botHandoffTarget: old, handoffRequestedAt: new Date(1000) })
+    f.reload()
+    const sender = new BotDraftSender(
+      f.client,
+      "new-bot",
+      f.queue,
+      f.report,
+      f.changed,
+      () => 1000 + BOT_REQUEST_RECEIPT_RETENTION_MS + 1,
+      { botId: "new-bot", workId: "new-work" }
+    )
+    await sender.send(f.draft())
+    expect(f.client.send).not.toHaveBeenCalled()
+    expect(f.client.requestReceipts).not.toHaveBeenCalled()
+    expect(f.draft().botHandoffTarget).toEqual(old)
+    expect(f.report.mock.calls.some(([message]) => String(message).includes("此前的 Bot"))).toBe(
+      true
+    )
+    const original = new BotDraftSender(
+      f.client,
+      "original-bot",
+      f.queue,
+      f.report,
+      f.changed,
+      () => 1000 + BOT_REQUEST_RECEIPT_RETENTION_MS + 1,
+      old
+    )
+    await original.send(f.draft())
+    expect(f.client.requestReceipts).toHaveBeenCalledTimes(1)
+    expect(f.client.send).not.toHaveBeenCalled()
+    expect(f.draft().handoffRequestedAt).toEqual(new Date(1000))
+    expect(f.report.mock.calls.some(([message]) => String(message).includes("保留期"))).toBe(true)
+  })
+
   it("retains the exact quote and payload across response loss and reload", async () => {
     const f = fixture()
     const reply = { id: "original", ordinal: 7, role: "assistant" as const, text: "合计 41" }

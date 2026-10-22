@@ -1,6 +1,7 @@
+import { botWorkBrowserScope, type BotWorkItem } from "../../shared/bots/work"
 import { notifyIfBackground } from "../services/notify"
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { realpathSync } from "node:fs"
 import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { createThread, getThreadCore, updateThread } from "../db"
@@ -52,6 +53,9 @@ import { workflowRunManager } from "../agent/workflow/run-manager"
 import { LocalSandbox } from "../agent/local-sandbox"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import { getGlobalMcpCapabilityService } from "../mcp/capability-service"
+import { createBotWorkTools } from "./work-tools"
+import type { BotMockExecution } from "../../shared/bots/mock-channel"
+import { botMockMetadataSafe, botMockRemotePolicy } from "./mock-runtime-policy"
 import { buildBotPrompt, buildBotStoppedTaskPrompt } from "./prompt"
 import { hasBotWorkflowCapability } from "../agent/workflow/bot-capability"
 import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry"
@@ -61,6 +65,7 @@ import { withCheckpointer } from "../agent/runtime"
 import { botContinuationMessageId, canDeferBotTask, canSteerBotTask } from "./continuation"
 import { parseBotFileDelivery, type BotDeliveredFile } from "../../shared/bots/file-delivery"
 import { createBotGroupDeliveryCheck, createBotGroupMessageTool } from "./group-delivery"
+import { verifyWorkConversationThread } from "./conversation-link-authority"
 
 function isBackgroundCommitSkip(event: SchedulerRendererEvent): boolean {
   if (event.type !== "custom" || event.data.type !== "auto_commit_result") return false
@@ -77,6 +82,20 @@ function isBackgroundCommitSkip(event: SchedulerRendererEvent): boolean {
     value.reasons[0] ===
       "后台任务运行中（动态工作流 / 协作 worker），已跳过本回合自动提交（改动留待其完成后审阅）"
   )
+}
+
+function canonicalWorkspace(path: string): string {
+  try {
+    return realpathSync.native(path)
+  } catch {
+    return resolve(path)
+  }
+}
+function localWorkFileQueue(bot: BotDefinition, workspace: string, work?: BotWorkItem): string {
+  if (work?.conversation?.origin !== "existing") return bot.id
+  const original = botDirectory(join(getCmbCoworkAgentDataRoot(), "bots"), "workspaces", bot.id)
+  const canonical = canonicalWorkspace(workspace)
+  return canonical === canonicalWorkspace(original) ? bot.id : `workspace:${canonical}`
 }
 
 function botModelId(bot: BotDefinition): string | undefined {
@@ -100,14 +119,26 @@ function memoryUserText(task: Pick<BotTask, "message" | "origin">): string {
 
 export function prepareBotThread(
   bot: BotDefinition,
-  task?: Pick<BotTask, "threadId" | "origin">
+  task?: Pick<BotTask, "threadId" | "origin">,
+  work?: BotWorkItem,
+  mock?: BotMockExecution
 ): string {
   const groupId = task ? (botTaskGroupId(task) ?? null) : null
   const threadId = task?.threadId ?? bot.threadId
+  const source = mock?.source ?? work?.source
+  if (work?.conversation) {
+    const row = getThreadCore(threadId)
+    if (!row || work.conversation.state !== "bound")
+      throw new Error("任务会话尚未完成关联，请重新打开原任务。")
+    const metadata = JSON.parse(row.metadata || "{}")
+    verifyWorkConversationThread(work, row, metadata)
+    // Both entrances edit this very Thread. Preserve its settings and original directory.
+    return metadata.workspacePath
+  }
   const workspacePath = botDirectory(
     join(getCmbCoworkAgentDataRoot(), "bots"),
     "workspaces",
-    groupId ? `group-${groupId}` : bot.id
+    source ? `mock-${source.bindingId}` : groupId ? `group-${groupId}` : bot.id
   )
   // Model selection must also work without mounting the workbench ModelSwitcher.
   // Keep the Bot binding null: a default-following Bot follows later configuration changes.
@@ -118,7 +149,26 @@ export function prepareBotThread(
     if (
       metadata.botId !== bot.id ||
       metadata.botHostId !== "local" ||
-      (metadata.botGroupId ?? null) !== groupId
+      (metadata.botGroupId ?? null) !== groupId ||
+      (metadata.botWorkId ?? null) !== (work?.id ?? null) ||
+      (metadata.botMockBindingId ?? null) !== (source?.bindingId ?? null) ||
+      (source &&
+        (!botMockMetadataSafe(metadata) ||
+          metadata.botMockGrantVersion !== source.grantVersion ||
+          metadata.botMockConversationId !== source.conversationId ||
+          metadata.botAudienceKey !== source.audienceKey ||
+          metadata.workspacePath !== workspacePath ||
+          metadata.agentMode !== "normal" ||
+          metadata.disableAgentsPrompt !== true ||
+          !Array.isArray(metadata.allowedSkills) ||
+          metadata.allowedSkills.length !== 0 ||
+          !Array.isArray(metadata.allowedExperts) ||
+          metadata.allowedExperts.length !== 0)) ||
+      (work &&
+        (work.threadId !== threadId ||
+          work.botId !== bot.id ||
+          metadata.botAudienceKey !== work.audienceKey ||
+          metadata.workspacePath !== workspacePath))
     )
       throw new Error("Bot 会话身份不一致，已停止执行")
     if (typeof metadata.workspacePath === "string" && metadata.workspacePath !== workspacePath) {
@@ -133,14 +183,29 @@ export function prepareBotThread(
     updateThread(threadId, {
       metadata: JSON.stringify({
         ...metadata,
-        title: bot.name,
+        title: work?.title ?? bot.name,
         memoryEnabled: false,
         model
       })
     })
   } else {
+    if (work?.threadInitialized || mock?.threadInitialized)
+      throw new Error("工作会话记录缺失，已停止以避免丢失历史")
     createThread(threadId, {
-      title: bot.name,
+      title: work?.title ?? bot.name,
+      ...(work ? { botWorkId: work.id, botAudienceKey: work.audienceKey } : {}),
+      ...(source
+        ? {
+            botMockBindingId: source.bindingId,
+            botMockGrantVersion: source.grantVersion,
+            botMockConversationId: source.conversationId,
+            botAudienceKey: source.audienceKey,
+            disableAgentsPrompt: true,
+            allowedSkills: [],
+            allowedExperts: [],
+            agentMode: "normal"
+          }
+        : {}),
       botId: bot.id,
       botHostId: "local",
       botGroupId: groupId,
@@ -164,6 +229,9 @@ export function createLocalBotRunPort(
     cancelCommands(threadId, ids) {
       return LocalSandbox.cancelBackgroundTasksAndWait(threadId, ids)
     },
+    cancelBackgroundCommands(commandIds) {
+      return LocalSandbox.cancelBackgroundCommandIdsAndWait(commandIds)
+    },
     cancelBackground(threadId) {
       workflowRunManager.cancel(threadId)
       const workers = coordinatorWorkerManager.cancelWorkersForThread(
@@ -183,6 +251,29 @@ export function createLocalBotRunPort(
           )
       }
       return Promise.all([commandCleanup, workerCleanup]).then(() => undefined)
+    },
+    async hasPendingWork(threadIds) {
+      for (const threadId of threadIds) {
+        if (
+          workflowRunManager.isActive(threadId) ||
+          coordinatorWorkerManager.hasRunningWorkersForThread(threadId) ||
+          coordinatorWorkerManager.hasTerminalWorkerAwaitingNotificationForThread(threadId) ||
+          coordinatorWorkerManager.hasAutoRunnableNotifications(threadId, { owner: "desktop" })
+        )
+          return true
+        const thread = getThreadCore(threadId)
+        if (!thread) continue
+        const metadata = JSON.parse(thread.metadata || "{}") as Record<string, unknown>
+        if (
+          typeof metadata.workspacePath === "string" &&
+          (await workflowRunManager.hasDeliverablePendingNotificationAsync(
+            metadata.workspacePath,
+            threadId
+          ))
+        )
+          return true
+      }
+      return false
     },
     async recover(threadIds, signal) {
       for (const threadId of threadIds) {
@@ -223,7 +314,7 @@ export function createLocalBotRunPort(
     onAvailable(listener) {
       return onLocalThreadRunLeaseReleased(listener)
     },
-    acquire(bot, task) {
+    acquire(bot, task, work) {
       const claim = claimLocalThreadRunLease({
         threadId: task.threadId,
         owner: "bot",
@@ -347,7 +438,12 @@ export function createLocalBotRunPort(
             onWaiting(active)
           }
           signal.throwIfAborted()
-          const workspacePath = prepareBotThread(bot, task)
+          if ((work?.source || task.origin.kind === "mock") && !task.mockSource)
+            throw new Error("模拟来源证明缺失")
+          const mock = task.mockSource ? getHost().mockExecution(task) : undefined
+          const workspacePath = prepareBotThread(bot, task, work, mock)
+          if (work) getHost().initializeWorkThread(bot.id, work.id)
+          else if (mock) getHost().initializeMockThread(task)
           const checkpointId = canDeferBotTask(task) ? getHost().taskCheckpoint(task.id) : undefined
           // A delegated group task can yield to a new turn in the same physical thread.
           const resumeGroupBranch = Boolean(botTaskGroupId(task)) && task.origin.kind !== "bot"
@@ -357,9 +453,8 @@ export function createLocalBotRunPort(
           const keepCommandSource =
             task.origin.kind === "schedule" ||
             (task.origin.kind === "bot" && task.origin.expectsReply)
-          const foregroundLifecycle = keepCommandSource
-            ? getHost().commandLifecycle(task.id, true)
-            : undefined
+          const foregroundLifecycle =
+            !mock && keepCommandSource ? getHost().commandLifecycle(task.id, true) : undefined
           const peerReplyFiles =
             task.origin.kind === "bot" && !task.origin.expectsReply
               ? parseBotFileDelivery(
@@ -397,14 +492,16 @@ export function createLocalBotRunPort(
             })
           )
             return { state: "completed" }
-          const memoryEditVersion = memory.editVersion(bot.id)
+          const memoryEditVersion = mock ? 0 : memory.editVersion(bot.id)
           const groupId = botTaskGroupId(task)
           if (groupId)
             stopQuestionCapture = subscribePendingUserInput((request) => {
               if (request.threadId === task.threadId)
                 getHost().recordGroupQuestion(task.id, request)
             })
-          const toolConcurrencyQueueId = groupId ? `bot-group-${groupId}` : bot.id
+          const toolConcurrencyQueueId = groupId
+            ? `bot-group-${groupId}`
+            : localWorkFileQueue(bot, workspacePath, work)
           const profileContinuationRequest =
             task.origin.kind === "notification" && task.origin.notificationKind === "command"
               ? getHost().profileContinuationRequest(task.id)
@@ -491,26 +588,28 @@ export function createLocalBotRunPort(
                 )
               : ""
           const sourcedMessage =
-            (task.origin.kind === "bot"
-              ? [
-                  `来自 ${task.origin.fromBotName ?? "其他 Bot"} 的${task.origin.expectsReply ? "协作消息" : "协作结果"}：\n\n${task.message}`,
-                  ...(task.origin.expectsReply
-                    ? checkpointId
-                      ? []
+            (mock
+              ? task.message
+              : task.origin.kind === "bot"
+                ? [
+                    `来自 ${task.origin.fromBotName ?? "其他 Bot"} 的${task.origin.expectsReply ? "协作消息" : "协作结果"}：\n\n${task.message}`,
+                    ...(task.origin.expectsReply
+                      ? checkpointId
+                        ? []
+                        : [
+                            "本条是新到达的协作任务，只执行本条明确交办且在原用户授权范围内的工作。本条明确要求的检查或文件交付，须取得本轮实际工具回执后再报告完成，不能用其他任务的旧回执代替。保留已有成果，不重复此前已完成的外部操作；不恢复会话中的其他旧任务或选择卡。"
+                          ]
                       : [
-                          "本条是新到达的协作任务，只执行本条明确交办且在原用户授权范围内的工作。本条明确要求的检查或文件交付，须取得本轮实际工具回执后再报告完成，不能用其他任务的旧回执代替。保留已有成果，不重复此前已完成的外部操作；不恢复会话中的其他旧任务或选择卡。"
-                        ]
-                    : [
-                        "本轮只处理这条协作回执及其原协作事项。请报告实际结果或阻碍；只有该协作事项尚需完成且已获授权的步骤才可继续。会话中其他私聊、例行和选择卡属于独立任务；已取消或中断的问题保持停止，不能因收到本条回执而重新询问或恢复。继续其他中断任务须由用户重新明确交办。本条是后台回执，不是用户作答或新增授权。"
-                      ])
-                ].join("\n\n")
-              : task.origin.kind === "schedule"
-                ? `例行任务：\n\n${task.message}`
-                : task.origin.kind === "discussion"
-                  ? `群聊后续讨论（非新用户指令）：\n\nHost-selected participant for this group continuation (current identity):\n${JSON.stringify({ id: bot.id, name: bot.name })}\n\n${task.message}`
-                  : task.origin.kind === "group"
-                    ? `${task.message}\n\nCurrent direct user request, not an optional group continuation. You are the host-selected recipient ${JSON.stringify({ id: bot.id, name: bot.name })}. Respond to this current request; do not use the optional discussion pass protocol to skip it because an earlier task was answered. Follow the user's actual requested role and scope.`
-                    : task.message) + roomReference
+                          "本轮只处理这条协作回执及其原协作事项。请报告实际结果或阻碍；只有该协作事项尚需完成且已获授权的步骤才可继续。会话中其他私聊、例行和选择卡属于独立任务；已取消或中断的问题保持停止，不能因收到本条回执而重新询问或恢复。继续其他中断任务须由用户重新明确交办。本条是后台回执，不是用户作答或新增授权。"
+                        ])
+                  ].join("\n\n")
+                : task.origin.kind === "schedule"
+                  ? `例行任务：\n\n${task.message}`
+                  : task.origin.kind === "discussion"
+                    ? `群聊后续讨论（非新用户指令）：\n\nHost-selected participant for this group continuation (current identity):\n${JSON.stringify({ id: bot.id, name: bot.name })}\n\n${task.message}`
+                    : task.origin.kind === "group"
+                      ? `${task.message}\n\nCurrent direct user request, not an optional group continuation. You are the host-selected recipient ${JSON.stringify({ id: bot.id, name: bot.name })}. Respond to this current request; do not use the optional discussion pass protocol to skip it because an earlier task was answered. Follow the user's actual requested role and scope.`
+                      : task.message) + roomReference
           const originalMessage = profileContinuationRequest
             ? [
                 sourcedMessage,
@@ -544,9 +643,13 @@ export function createLocalBotRunPort(
                 userMessageId: continueBotTaskCheckpointId
                   ? botContinuationMessageId(task.id, continueBotTaskCheckpointId)
                   : task.requestId,
-                modelId: botModelId(bot),
-                agentMode:
-                  task.origin.kind === "notification" && task.origin.notificationKind !== "command"
+                modelId: work?.conversation
+                  ? (JSON.parse(getThreadCore(task.threadId)?.metadata || "{}").model ?? undefined)
+                  : botModelId(bot),
+                agentMode: mock
+                  ? "normal"
+                  : task.origin.kind === "notification" &&
+                      task.origin.notificationKind !== "command"
                     ? task.origin.notificationKind === "workflow"
                       ? "workflow"
                       : "coordinator"
@@ -600,9 +703,8 @@ export function createLocalBotRunPort(
                 // Reply-producing delegation and routines keep their original managed task owner
                 // until the result/silence decision is available. Do not settle them with "started"
                 // and lose the original reply outbox or routine notification policy.
-                backgroundCommandLifecycle: keepCommandSource
-                  ? undefined
-                  : getHost().commandLifecycle(task.id),
+                backgroundCommandLifecycle:
+                  mock || keepCommandSource ? undefined : getHost().commandLifecycle(task.id),
                 // Opt in only to foreground wait transfer; explicit background semantics stay unchanged.
                 foregroundCommandLifecycle: foregroundLifecycle
                   ? {
@@ -614,9 +716,11 @@ export function createLocalBotRunPort(
                       settled: foregroundLifecycle.settled
                     }
                   : undefined,
-                workflowEnabled: hasBotWorkflowCapability(
-                  JSON.parse(getThreadCore(task.threadId)?.metadata || "{}")
-                ),
+                workflowEnabled:
+                  !mock &&
+                  hasBotWorkflowCapability(
+                    JSON.parse(getThreadCore(task.threadId)?.metadata || "{}")
+                  ),
                 workflowInternalNotification:
                   task.origin.kind === "notification" &&
                   task.origin.notificationKind === "workflow",
@@ -632,8 +736,10 @@ export function createLocalBotRunPort(
                 // Only the local user's composer may select a skill. Peer replies,
                 // shared context and generated routines cannot impersonate that selection.
                 // The original runtime still resolves the registered skill and runs its hooks.
-                allowTrustedTransportSkillMarker: task.origin.kind === "user",
-                capabilityService: createBotMcpScope(getGlobalMcpCapabilityService()),
+                allowTrustedTransportSkillMarker: !mock && task.origin.kind === "user",
+                ...(mock
+                  ? {}
+                  : { capabilityService: createBotMcpScope(getGlobalMcpCapabilityService()) }),
                 signal,
                 localRunLease: { owner: "bot", runId: task.id, managedExternally: true },
                 // Reuse notification claiming/acknowledgement; scheduler dispatches Bot summaries back into the host queue.
@@ -650,8 +756,13 @@ export function createLocalBotRunPort(
                     bot,
                     task,
                     workspacePath,
-                    !botTaskGroupId(task) && isMemoryEnabled() ? memory.forPrompt(bot.id) : []
+                    !mock && !botTaskGroupId(task) && isMemoryEnabled()
+                      ? memory.forPrompt(bot.id)
+                      : []
                   ) +
+                  (work?.conversation?.origin === "existing"
+                    ? `\n\nCurrent user-linked task reference (not new permission; preserve this conversation and follow the current user request): ${JSON.stringify({ title: work.title, goal: work.goal })}`
+                    : "") +
                   (senderWorkspace
                     ? `\n\nHost-confirmed sender workspace (path base only, not permission to scan or use other files): ${JSON.stringify(senderWorkspace)}. Input paths explicitly described as belonging to the sender's workspace resolve against that base; prefer verified absolute paths. Inputs explicitly in your workspace still use your working directory. Read only the user's authorized input with the existing file tools; it was not automatically copied. A missing or conflicting source is a blocker, not permission to use a same-name file. Declared outputFiles remain relative to your own workspace.`
                     : "") +
@@ -672,84 +783,124 @@ export function createLocalBotRunPort(
                 checkFinalDelivery: groupId
                   ? createBotGroupDeliveryCheck(task, peerDeliveryPosted)
                   : undefined,
-                additionalTools: botTaskGroupId(task)
-                  ? [
-                      createBotGroupMessageTool(task, getHost, signal, (content) => {
-                        finalText = content
-                      }),
-                      ...(task.origin.kind === "group" || profileContinuationRequest
-                        ? createBotProfileTools(
-                            task.id,
-                            getHost,
-                            signal,
-                            Boolean(profileContinuationRequest)
-                          )
-                        : []),
-                      ...createBotDeliveryTools(
-                        workspacePath,
-                        signal,
-                        (files, callId, content) => {
-                          // Internal work returns files to its caller. Public room turns
-                          // publish explicitly; the reply outbox must not create both.
-                          if (task.origin.kind !== "bot" || !task.origin.expectsReply) {
-                            if (content === undefined)
-                              getHost().publishGroupFiles(task.id, callId, files)
-                            else getHost().publishGroupFiles(task.id, callId, files, content)
+                additionalTools: mock
+                  ? createBotWorkTools(task.id, getHost, signal)
+                  : botTaskGroupId(task)
+                    ? [
+                        createBotGroupMessageTool(task, getHost, signal, (content) => {
+                          finalText = content
+                        }),
+                        ...(task.origin.kind === "group" || profileContinuationRequest
+                          ? createBotProfileTools(
+                              task.id,
+                              getHost,
+                              signal,
+                              Boolean(profileContinuationRequest)
+                            )
+                          : []),
+                        ...createBotDeliveryTools(
+                          workspacePath,
+                          signal,
+                          (files, callId, content) => {
+                            // Internal work returns files to its caller. Public room turns
+                            // publish explicitly; the reply outbox must not create both.
+                            if (task.origin.kind !== "bot" || !task.origin.expectsReply) {
+                              if (content === undefined)
+                                getHost().publishGroupFiles(task.id, callId, files)
+                              else getHost().publishGroupFiles(task.id, callId, files, content)
+                            }
+                            captureReplyFiles(files)
+                          },
+                          undefined,
+                          task.origin.kind !== "bot" || !task.origin.expectsReply
+                        ),
+                        ...createBotBrowserTools(
+                          bot,
+                          browser,
+                          signal,
+                          waiting,
+                          botGroupBrowserScope(botTaskGroupId(task)!, bot.id),
+                          async (upload) => {
+                            const { withToolFileWriteLock } = await import("../agent/runtime")
+                            return withToolFileWriteLock(toolConcurrencyQueueId, upload)
                           }
-                          captureReplyFiles(files)
-                        },
-                        undefined,
-                        task.origin.kind !== "bot" || !task.origin.expectsReply
-                      ),
-                      ...createBotBrowserTools(
-                        bot,
-                        browser,
-                        signal,
-                        waiting,
-                        botGroupBrowserScope(botTaskGroupId(task)!, bot.id),
-                        async (upload) => {
-                          const { withToolFileWriteLock } = await import("../agent/runtime")
-                          return withToolFileWriteLock(toolConcurrencyQueueId, upload)
-                        }
-                      ),
-                      ...(task.origin.kind === "discussion"
-                        ? []
-                        : createBotCollaborationTools(task.id, getHost, signal, true))
-                    ]
-                  : [
-                      ...createBotDeliveryTools(
-                        workspacePath,
-                        signal,
-                        captureReplyFiles,
-                        peerDelivery
-                      ),
-                      ...(task.origin.kind === "user" ||
-                      task.origin.kind === "introduction" ||
-                      profileContinuationRequest
-                        ? createBotProfileTools(
-                            task.id,
-                            getHost,
-                            signal,
-                            Boolean(profileContinuationRequest)
-                          )
-                        : []),
-                      ...createBotMemoryTools(bot, memory, signal, task.origin.kind === "user"),
-                      ...createBotBrowserTools(bot, browser, signal, waiting),
-                      ...createBotCollaborationTools(task.id, getHost, signal),
-                      ...createBotScheduleTools(bot, task, getHost, signal)
-                    ],
+                        ),
+                        ...(task.origin.kind === "discussion"
+                          ? []
+                          : createBotCollaborationTools(task.id, getHost, signal, true))
+                      ]
+                    : [
+                        ...createBotWorkTools(task.id, getHost, signal),
+                        ...createBotDeliveryTools(
+                          workspacePath,
+                          signal,
+                          captureReplyFiles,
+                          peerDelivery
+                        ),
+                        ...(task.origin.kind === "user" ||
+                        task.origin.kind === "introduction" ||
+                        profileContinuationRequest
+                          ? createBotProfileTools(
+                              task.id,
+                              getHost,
+                              signal,
+                              Boolean(profileContinuationRequest)
+                            )
+                          : []),
+                        ...createBotMemoryTools(bot, memory, signal, task.origin.kind === "user"),
+                        ...createBotBrowserTools(
+                          bot,
+                          browser,
+                          signal,
+                          waiting,
+                          work ? botWorkBrowserScope(work.id, bot.id) : bot.id,
+                          async (upload) => {
+                            const { withToolFileWriteLock } = await import("../agent/runtime")
+                            return withToolFileWriteLock(toolConcurrencyQueueId, upload)
+                          }
+                        ),
+                        ...createBotCollaborationTools(task.id, getHost, signal),
+                        ...createBotScheduleTools(bot, task, getHost, signal)
+                      ],
                 toolConcurrencyQueueId,
                 // Waiting for a human does not touch shared files; peers must keep working.
-                userInputWithoutToolLock: Boolean(botTaskGroupId(task)),
-                botBrowserToolsOwnFileLock: Boolean(groupId),
-                remotePolicy: { disableScheduler: true },
-                verifyResolvedThread: (resolved) =>
-                  resolved.metadata.botId === bot.id &&
-                  resolved.metadata.botHostId === "local" &&
-                  (resolved.metadata.botGroupId ?? null) === (botTaskGroupId(task) ?? null) &&
-                  resolved.workspacePath === workspacePath
+                userInputWithoutToolLock: true,
+                botBrowserToolsOwnFileLock: true,
+                remotePolicy: mock ? botMockRemotePolicy() : { disableScheduler: true },
+                verifyResolvedThread: (resolved) => {
+                  if (work?.conversation) {
+                    const latest = getHost().getWork(bot.id, work.id),
+                      row = getThreadCore(task.threadId)
+                    try {
+                      if (!row || latest.conversation?.state !== "bound")
+                        return "任务会话关联已变化，请重新打开。"
+                      verifyWorkConversationThread(latest, row, resolved.metadata)
+                    } catch {
+                      return "任务会话身份已变化，请重新打开。"
+                    }
+                  }
+                  if (mock) {
+                    try {
+                      getHost().mockExecution(task)
+                    } catch {
+                      return "模拟绑定授权已变化，已停止执行"
+                    }
+                  }
+                  return resolved.metadata.botId === bot.id &&
+                    resolved.metadata.botHostId === "local" &&
+                    (resolved.metadata.botGroupId ?? null) === (botTaskGroupId(task) ?? null) &&
+                    (resolved.metadata.botWorkId ?? null) === (work?.id ?? null) &&
+                    (resolved.metadata.botMockBindingId ?? null) ===
+                      (mock?.source.bindingId ?? null) &&
+                    (!mock ||
+                      (botMockMetadataSafe(resolved.metadata) &&
+                        resolved.metadata.botMockGrantVersion === mock.source.grantVersion &&
+                        resolved.metadata.botMockConversationId === mock.source.conversationId)) &&
+                    (!work || resolved.metadata.botAudienceKey === work.audienceKey) &&
+                    resolved.workspacePath === workspacePath
                     ? null
-                    : "Bot 工作目录或会话已改变，请重新打开后重试。",
+                    : "Bot 工作目录或会话已改变，请重新打开后重试。"
+                },
                 onRunTerminated: (outcome) => {
                   terminal = outcome
                 },
@@ -814,6 +965,7 @@ export function createLocalBotRunPort(
               captureReplyFiles(files)
             }
             if (
+              !mock &&
               (task.origin.kind === "user" ||
                 (task.origin.kind === "introduction" && supplementalMessages.size > 0)) &&
               !signal.aborted

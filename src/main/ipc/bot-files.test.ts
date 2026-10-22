@@ -287,10 +287,14 @@ describe("Bot file IPC group scope", () => {
     const call = register()
     await call("list", "a", undefined, "team")
     expect(fixture.getGroupMember).toHaveBeenCalledWith("team", "a")
-    expect(fixture.prepare).toHaveBeenCalledWith(expect.objectContaining({ id: "a" }), {
-      threadId: "group-team-a",
-      origin: { kind: "group", groupId: "team", messageId: "files" }
-    })
+    expect(fixture.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      {
+        threadId: "group-team-a",
+        origin: { kind: "group", groupId: "team", messageId: "files" }
+      },
+      undefined
+    )
     expect(fixture.scan).toHaveBeenCalledWith(1, "/group")
     await call("import", "a", "team")
     expect(fixture.copy).toHaveBeenCalledWith(

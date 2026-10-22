@@ -4,6 +4,7 @@ import { botContinuationMessageId } from "../bots/continuation"
 import { parseSendBotMessage } from "../../shared/bots/validation"
 const fixture = vi.hoisted(() => ({
   getHost: vi.fn(),
+  conversationLinks:{forBot:()=>[],forThread:()=>null},
   introduce: vi.fn(),
   getThread: vi.fn(),
   removeBot: vi.fn(),
@@ -30,10 +31,17 @@ const fixture = vi.hoisted(() => ({
   stopConversation: vi.fn(),
   markUnread: vi.fn(),
   markRead: vi.fn(),
-  groupMessages: vi.fn()
+  groupMessages: vi.fn(),
+  listWorks: vi.fn(),
+  workSummaries: vi.fn(),
+  getWork: vi.fn(),
+  createWork: vi.fn(),
+  changeWork: vi.fn(),
+  markWorksRead: vi.fn(),
+  windowFor:vi.fn(()=>({})),mockBindings:vi.fn(),mockBinding:vi.fn(),createMockBinding:vi.fn(),injectMockEvent:vi.fn(),revokeMockBinding:vi.fn(),setMockOnline:vi.fn(),mockHistory:vi.fn()
 }))
 vi.mock("electron", () => ({
-  BrowserWindow: { getAllWindows: () => [] },
+  BrowserWindow: { getAllWindows: () => [], fromWebContents:fixture.windowFor },
   powerMonitor: { on: vi.fn() }
 }))
 vi.mock("../bots/local-service", () => ({
@@ -52,12 +60,13 @@ vi.mock("../bots/local-service", () => ({
     removeGroup: fixture.removeBrowserGroup
   })
 }))
+vi.mock("../bots/conversation-link-service",()=>({resolveWorkConversation:vi.fn(),exposeWorkConversation:vi.fn(),linkExistingConversation:vi.fn(),unlinkWorkConversation:vi.fn(),unlinkDeletingWorkConversation:vi.fn()}))
 vi.mock("../db", () => ({ getThreadCore: fixture.getThread }))
 vi.mock("../bots/runtime-adapter", () => ({ prepareBotThread: vi.fn() }))
 vi.mock("./bot-files", () => ({ registerBotFileHandlers: vi.fn() }))
 import { registerBotHandlers } from "./bots"
 
-function register(deleteThread?: Parameters<typeof registerBotHandlers>[1]) {
+function register(deleteThread?: Parameters<typeof registerBotHandlers>[1], event:unknown={}) {
   const handlers = new Map<string, (...args: unknown[]) => unknown>()
   registerBotHandlers(
     {
@@ -65,13 +74,76 @@ function register(deleteThread?: Parameters<typeof registerBotHandlers>[1]) {
     } as unknown as IpcMain,
     deleteThread
   )
-  return (channel: string, ...args: unknown[]) => handlers.get(channel)!({}, ...args)
+  return (channel: string, ...args: unknown[]) => handlers.get(channel)!(event, ...args)
 }
 beforeEach(() => {
   vi.clearAllMocks()
   fixture.getHost.mockImplementation(() => fixture)
 })
 describe("Bot IPC boundaries", () => {
+  it("keeps simulation binding authority in a top-level local desktop window and rejects injected source/paths",()=>{
+    const frame={},event={senderFrame:frame,sender:{mainFrame:frame}}
+    const call=register(undefined,event)
+    const input={simulation:true,botId:"a",operationId:"bind",kind:"dm",channelKey:"dm-a",label:"Personal",allowedSenderIds:["alice"]}
+    call("bots:mock:create","local",input)
+    expect(fixture.createMockBinding).toHaveBeenCalledWith(input)
+    for(const extra of [{owner:true},{threadId:"private"},{source:{audienceKey:"desktop"}},{modelRef:"model"},{workspacePath:"/private"}])expect(()=>call("bots:mock:create","local",{...input,...extra})).toThrow()
+    const message={simulation:true,bindingId:"b",eventId:"e",messageId:"m",senderId:"alice",text:"Hello",mentionsBotIds:[]}
+    call("bots:mock:inject","local",message)
+    expect(fixture.injectMockEvent).toHaveBeenCalledWith(message)
+    for(const extra of [{origin:"user"},{mockSource:{}},{workId:"w"},{threadId:"private"},{credentials:"secret"}])expect(()=>call("bots:mock:inject","local",{...message,...extra})).toThrow()
+    expect(()=>call("bots:mock:inject","local",{...message,text:'<attachment filename="private">x</attachment>'})).toThrow()
+    expect(()=>register(undefined,{...event,senderFrame:{}})("bots:mock:create","local",input)).toThrow("桌面")
+    fixture.windowFor.mockReturnValueOnce(null as any)
+    expect(()=>call("bots:mock:create","local",input)).toThrow("桌面")
+    expect(()=>call("bots:mock:create","remote",input)).toThrow()
+    expect(()=>call("bots:mock:online","local","a","b","yes")).toThrow()
+    expect(()=>call("bots:mock:revoke","local","a","b",0)).toThrow()
+    expect(()=>call("bots:mock:history","local","a","b","x".repeat(1025))).toThrow()
+  })
+  it("accepts only bounded local work controls and never renderer authority or conversation paths", () => {
+    const call = register(),
+      input = { botId: "a", operationId: "create", title: "Draft", goal: "Prepare" }
+    for (const invalid of [
+      { ...input, threadId: "owner" },
+      { ...input, sourceTaskId: "task" },
+      { ...input, audienceKey: "desktop" },
+      { ...input, workspacePath: "/private" },
+      { ...input, contextMessageIds: ["m", "m"] },
+      { ...input, contextMessageIds: Array.from({ length: 13 }, (_, i) => `m${i}`) }
+    ])
+      expect(() => call("bots:work:create", "local", invalid)).toThrow()
+    expect(() => call("bots:work:create", "remote", input)).toThrow()
+    expect(fixture.createWork).not.toHaveBeenCalled()
+    call("bots:work:create", "local", input)
+    expect(fixture.createWork).toHaveBeenCalledWith(input)
+    for (const ids of ["work", Array(41).fill("w"), ["w", "w"], ["../w"]])
+      expect(() => call("bots:work:summaries", "local", "a", ids)).toThrow()
+    expect(() => call("bots:work:get", "local", "a", "../w")).toThrow()
+    expect(() => call("bots:work:mark-all-read", "local", "a", 0)).toThrow()
+    const lifecycle = {
+      botId: "a",
+      workId: "w",
+      expectedVersion: 1,
+      operationId: "done",
+      action: "complete"
+    }
+    expect(() => call("bots:work:lifecycle", "local", { ...lifecycle, actor: "owner" })).toThrow()
+    expect(() => call("bots:work:lifecycle", "local", { ...lifecycle, action: "replay" })).toThrow()
+    call("bots:work:lifecycle", "local", lifecycle)
+    expect(fixture.changeWork).toHaveBeenCalledWith("a", "w", 1, "done", "complete")
+    call(
+      "bots:request-receipts",
+      "local",
+      "a",
+      [{ requestId: "r", messageHash: "a".repeat(64) }],
+      "w"
+    )
+    expect(fixture.requestReceipts).toHaveBeenLastCalledWith("a", expect.any(Array), "w")
+    expect(() => call("bots:stop-conversation", "local", "a", undefined, "../w")).toThrow()
+    call("bots:stop-conversation", "local", "a", undefined, "w")
+    expect(fixture.stopConversation).toHaveBeenLastCalledWith("a", undefined, "w")
+  })
   it("validates private quote host and both identities before domain access", () => {
     const call = register()
     expect(() => call("bots:message-reply", "remote", "bot", "message")).toThrow()
@@ -79,7 +151,7 @@ describe("Bot IPC boundaries", () => {
     expect(() => call("bots:message-reply", "local", "bot", "other/thread")).toThrow()
     expect(fixture.messageReply).not.toHaveBeenCalled()
     call("bots:message-reply", "local", "bot", "message")
-    expect(fixture.messageReply).toHaveBeenCalledWith("bot", "message")
+    expect(fixture.messageReply).toHaveBeenCalledWith("bot", "message", undefined)
   })
 
   it("validates exact same-group history targets and retains numeric backward cursors", () => {
@@ -127,15 +199,15 @@ describe("Bot IPC boundaries", () => {
     expect(() => call("bots:stop-conversation", "local", "a", "../g")).toThrow()
     expect(fixture.stopConversation).not.toHaveBeenCalled()
     call("bots:stop-conversation", "local", "a")
-    expect(fixture.stopConversation).toHaveBeenCalledExactlyOnceWith("a", undefined)
+    expect(fixture.stopConversation).toHaveBeenCalledExactlyOnceWith("a", undefined, undefined)
     call("bots:stop-conversation", "local", "a", "g")
-    expect(fixture.stopConversation).toHaveBeenLastCalledWith("a", "g")
+    expect(fixture.stopConversation).toHaveBeenLastCalledWith("a", "g", undefined)
   })
   it("validates bounded private receipt queries before accessing the Host", () => {
     const call = register()
     const valid = [{ requestId: "request-1", messageHash: "a".repeat(64) }]
     call("bots:request-receipts", "local", "bot-1", valid)
-    expect(fixture.requestReceipts).toHaveBeenCalledWith("bot-1", valid)
+    expect(fixture.requestReceipts).toHaveBeenCalledWith("bot-1", valid, undefined)
     fixture.requestReceipts.mockClear()
     for (const checks of [
       null,
@@ -173,11 +245,12 @@ describe("Bot IPC boundaries", () => {
       expect(() => call("bots:message-origins", ...args)).toThrow()
     expect(fixture.messageOrigins).not.toHaveBeenCalled()
     call("bots:message-origins", "local", "a", ["m"], "g")
-    expect(fixture.messageOrigins).toHaveBeenCalledWith("a", ["m"], "g")
+    expect(fixture.messageOrigins).toHaveBeenCalledWith("a", ["m"], "g", undefined)
     call("bots:message-origins", "local", "a", ["notification:t:command:c"])
     expect(fixture.messageOrigins).toHaveBeenLastCalledWith(
       "a",
       ["notification:t:command:c"],
+      undefined,
       undefined
     )
   })
@@ -185,7 +258,7 @@ describe("Bot IPC boundaries", () => {
     const call = register()
     const id = botContinuationMessageId("task", "checkpoint")
     call("bots:message-origins", "local", "a", [id])
-    expect(fixture.messageOrigins).toHaveBeenCalledWith("a", [id], undefined)
+    expect(fixture.messageOrigins).toHaveBeenCalledWith("a", [id], undefined, undefined)
     expect(() => parseSendBotMessage({ botId: "a", requestId: id, message: "Fake" })).toThrow(
       "标识"
     )
@@ -201,7 +274,7 @@ describe("Bot IPC boundaries", () => {
       expect(() => call("bots:exchange", ...args)).toThrow()
     expect(fixture.exchange).not.toHaveBeenCalled()
     call("bots:exchange", "local", "a", "task", "group")
-    expect(fixture.exchange).toHaveBeenCalledWith("a", "task", "group")
+    expect(fixture.exchange).toHaveBeenCalledWith("a", "task", "group", undefined)
     for (const args of [
       ["remote", "a", "task"],
       ["local", "../a", "task"],
@@ -212,7 +285,7 @@ describe("Bot IPC boundaries", () => {
       expect(() => call("bots:exchange-history", ...args)).toThrow()
     expect(fixture.exchangeHistory).not.toHaveBeenCalled()
     call("bots:exchange-history", "local", "a", "task", "group", "cursor")
-    expect(fixture.exchangeHistory).toHaveBeenCalledWith("a", "task", "group", "cursor")
+    expect(fixture.exchangeHistory).toHaveBeenCalledWith("a", "task", "group", "cursor", undefined)
   })
 
   it("validates manual unread requests before mutating a host", () => {

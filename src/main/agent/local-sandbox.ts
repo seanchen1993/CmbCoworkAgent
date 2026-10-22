@@ -7348,6 +7348,12 @@ export class LocalSandbox
     await Promise.allSettled(completions)
   }
 
+  /** Trusted host receipts can stop exact detached commands without cancelling a peer's other work. */
+  static async cancelBackgroundCommandIdsAndWait(commandIds: readonly string[]): Promise<void> {
+    const completions = LocalSandbox.cancelBackgroundTasksForThread(undefined, new Set(commandIds))
+    await Promise.allSettled(completions)
+  }
+
   // Keyed by the actual Runtime signal, so a stale run cannot move a newer run's command.
   private static readonly foregroundHandoffs = new WeakMap<AbortSignal, Set<() => boolean>>()
   private static readonly foregroundYieldRequests = new WeakMap<AbortSignal, () => boolean>()

@@ -7,6 +7,7 @@ import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { openNativeSqliteDatabase, type NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { LocalBotHost } from "./host"
+import { verifyWorkConversationThread } from "./conversation-link-authority"
 import { createLocalBotRunPort } from "./runtime-adapter"
 import { BotMemoryService } from "./memory"
 import { computeNextRunAt } from "../storage"
@@ -16,6 +17,7 @@ import { botDirectory } from "./paths"
 import { createBotMemoryMaintainer } from "./memory-summary-adapter"
 import type { BotMemoryMaintainer } from "./memory-maintainer"
 import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
+import { setWorkConversationLookup } from "./conversation-link-authority"
 
 let host: LocalBotHost | undefined
 let database: NativeSqliteAdapter | undefined
@@ -27,12 +29,29 @@ let shutdown: Promise<void> | undefined
 export function getBotBrowserService(): BotBrowserService {
   return (browser ??= new BotBrowserService(
     () => startElectronBotBrowser(join(getCmbCoworkAgentDataRoot(), "bots", "browser-profile")),
-    (scope) =>
-      botDirectory(
+    (scope) => {
+      if (scope.startsWith("work-")) {
+        const [workId, botId] = scope.slice(5).split("--")
+        const work = getLocalBotHost().getWork(botId, workId),
+          row = getThreadCore(work.threadId)
+        if (work.conversation) {
+          if (!row || work.conversation.state !== "bound")
+            throw new BotError("CONFLICT", "原任务会话关联不可用")
+          const metadata = JSON.parse(row.metadata || "{}")
+          verifyWorkConversationThread(work, row, metadata)
+          return metadata.workspacePath
+        }
+      }
+      return botDirectory(
         join(getCmbCoworkAgentDataRoot(), "bots"),
         "workspaces",
-        scope.startsWith("group-") ? scope.split("--")[0] : scope
+        scope.startsWith("group-")
+          ? scope.split("--")[0]
+          : scope.startsWith("work-")
+            ? scope.split("--")[1]
+            : scope
       )
+    }
   ))
 }
 
@@ -114,7 +133,30 @@ export function getLocalBotHost(): LocalBotHost {
             /* A malformed receipt cannot supply an answer. */
           }
           return undefined
-        }
+        },
+        (threadId, ids) =>
+          getThreadMessagesByIds(threadId, ids).flatMap((message) => {
+            if (
+              (message.role !== "user" && message.role !== "assistant") ||
+              !Number.isSafeInteger(message.ordinal)
+            )
+              return []
+            const text =
+              typeof message.content === "string"
+                ? message.content
+                : message.content
+                    .filter((b) => b.type === "text")
+                    .map((b) => b.text ?? "")
+                    .join("\n")
+            return [
+              {
+                id: message.id,
+                ordinal: message.ordinal!,
+                role: message.role,
+                text: message.role === "assistant" ? splitBotInlineReasoning(text).body : text
+              }
+            ]
+          })
       ),
       createLocalBotRunPort(
         getBotMemoryService(),
@@ -134,6 +176,7 @@ export function getLocalBotHost(): LocalBotHost {
           input.intervalMinutes
         )
     )
+    setWorkConversationLookup((threadId) => host?.conversationLinks.forThread(threadId) ?? null)
     return host
   } catch (error) {
     database.close()
@@ -158,6 +201,7 @@ export function stopLocalBotHost(): Promise<void> {
       database?.close()
     } finally {
       database = undefined
+      setWorkConversationLookup(undefined)
     }
     const errors = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : []
