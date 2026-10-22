@@ -33,8 +33,17 @@ describe("collapsed tool-call search summary", () => {
   })
 
   it("preserves the localized in-app browser titles", () => {
+    expect(getCollapsedToolCallSummary({ name: "inAppBrowser_list_recordings" })).toBe(
+      "内置浏览器-检索可复用操作"
+    )
+    expect(getCollapsedToolCallSummary({ name: "inAppBrowser_execute_recording" })).toBe(
+      "内置浏览器-执行可复用操作"
+    )
+    expect(getCollapsedToolCallSummary({ name: "mcp__inAppBrowser__browser_navigate" })).toBe(
+      "内置浏览器-导航"
+    )
     expect(
-      getCollapsedToolCallSummary({ name: "mcp__inAppBrowser__browser_navigate" })
-    ).toBe("内置浏览器-导航")
+      getCollapsedToolCallSummary({ name: "mcp__inAppBrowser__browser_run_code_unsafe" })
+    ).toBe("内置浏览器-运行 Playwright 代码（非安全模式）")
   })
 })

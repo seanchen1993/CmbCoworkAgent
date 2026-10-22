@@ -524,15 +524,42 @@ function buildVariableDescriptorMap(
 
     usedIdentifiers.add(identifier)
     const promptName = `变量-${displayNameBase}`
-    const isArrayVariable = action.kind === "fileUpload" && action.paths.length > 1
+    const isArrayVariable =
+      (action.kind === "fileUpload" && action.paths.length > 1) ||
+      (action.kind === "selectOption" && action.values.length > 1)
+    const defaultValue: ScriptRecordingVariableValue = (() => {
+      switch (action.kind) {
+        case "navigate":
+          return action.url
+        case "click":
+          return (
+            action.locator?.textContent ??
+            action.locator?.accessibleName ??
+            action.locator?.label ??
+            action.locator?.placeholder ??
+            action.locator?.target ??
+            action.target ??
+            ""
+          )
+        case "fill":
+          return action.value
+        case "selectOption":
+          return action.values.length <= 1 ? (action.values[0] ?? "") : action.values
+        case "fileUpload":
+          return action.paths.length <= 1 ? (action.paths[0] ?? "") : action.paths
+      }
+    })()
     const descriptor: VariableDescriptor = {
       displayName: promptName,
       identifier,
-      declaration: buildScriptVariableDeclaration({
-        displayName: displayNameBase,
-        identifier,
-        isArray: isArrayVariable
-      })
+      declaration: buildScriptVariableDeclaration(
+        {
+          displayName: displayNameBase,
+          identifier,
+          isArray: isArrayVariable
+        },
+        defaultValue
+      )
     }
     descriptorsByDisplayName.set(displayNameBase, descriptor)
     variableDescriptors.set(action.id, descriptor)
@@ -608,24 +635,32 @@ function parseScriptLiteralExpression(value: string): ParsedScriptLiteral {
   return { kind: "unknown" }
 }
 
-function parseVariableDeclarationLine(line: string): ScriptRecordingVariable | null {
-  const match =
-    /^const\s+(变量_[\p{L}\p{N}_]+)\s*(?::\s*(string\[\]))?\s*=\s*(.+?)(?:\s*;)?(?:\s*\/\/\s*(.+))?\s*$/u.exec(
-      line
-    )
+type ParsedScriptRecordingVariable = ScriptRecordingVariable & {
+  defaultValue: ScriptRecordingVariableValue
+}
+
+function parseVariableDeclarationLine(line: string): ParsedScriptRecordingVariable | null {
+  const match = /^const\s+(变量_[\p{L}\p{N}_]+)\s*(?::\s*(string\[\]))?\s*=\s*(.+)$/u.exec(line)
   if (!match) return null
 
-  const valueExpression = parseScriptLiteralExpression(match[3]!)
+  const commentMatch = /\s+\/\/\s*(变量[-_].*)\s*$/u.exec(match[3]!)
+  const expression = (commentMatch ? match[3]!.slice(0, commentMatch.index) : match[3]!)
+    .trim()
+    .replace(/;$/u, "")
+    .trim()
+  const valueExpression = parseScriptLiteralExpression(expression)
   if (valueExpression.kind !== "string" && valueExpression.kind !== "stringArray") {
     return null
   }
 
-  const displayName = deriveVariableDisplayName(match[1]!, match[4])
+  const displayName = deriveVariableDisplayName(match[1]!, commentMatch?.[1])
   if (!displayName) return null
   return {
     identifier: match[1]!,
     displayName,
-    isArray: Boolean(match[2])
+    isArray: valueExpression.kind === "stringArray" || Boolean(match[2]),
+    defaultValue:
+      valueExpression.kind === "stringArray" ? valueExpression.values : valueExpression.value
   }
 }
 
@@ -849,7 +884,7 @@ function parseRecordedScriptActions(
   variableActionIds: string[]
   variableActionNames: Record<string, string>
 } {
-  const variableDeclarations = new Map<string, ScriptRecordingVariable>()
+  const variableDeclarations = new Map<string, ParsedScriptRecordingVariable>()
   const lines = script.split(/\r?\n/u).map((line) => line.trim())
 
   for (const line of lines) {
@@ -918,7 +953,12 @@ function parseRecordedScriptActions(
       const url =
         value.value ??
         (value.identifier
-          ? (variableDeclarations.get(value.identifier)?.displayName ?? value.identifier)
+          ? (() => {
+              const defaultValue = variableDeclarations.get(value.identifier!)?.defaultValue
+              return typeof defaultValue === "string" && defaultValue
+                ? defaultValue
+                : (variableDeclarations.get(value.identifier!)?.displayName ?? value.identifier)
+            })()
           : undefined)
       if (url) {
         pushAction(
@@ -946,7 +986,18 @@ function parseRecordedScriptActions(
     const fileChooserSetFilesMatch = /^await\s+fileChooser\d+\.setFiles\(\s*(.+)\s*\);$/u.exec(line)
     if (fileChooserSetFilesMatch) {
       const value = parseScriptActionValue(fileChooserSetFilesMatch[1]!)
-      const paths = value.values ?? (value.value ? [value.value] : [])
+      const declaredDefault = value.identifier
+        ? variableDeclarations.get(value.identifier)?.defaultValue
+        : undefined
+      const paths =
+        value.values ??
+        (value.value
+          ? [value.value]
+          : Array.isArray(declaredDefault)
+            ? declaredDefault
+            : declaredDefault
+              ? [declaredDefault]
+              : [])
       if (paths.length > 0 || value.identifier) {
         pushAction(
           {
@@ -967,7 +1018,18 @@ function parseRecordedScriptActions(
         locator.tagName = "input"
       }
       const value = parseScriptActionValue(setInputFilesMatch[2]!)
-      const paths = value.values ?? (value.value ? [value.value] : [])
+      const declaredDefault = value.identifier
+        ? variableDeclarations.get(value.identifier)?.defaultValue
+        : undefined
+      const paths =
+        value.values ??
+        (value.value
+          ? [value.value]
+          : Array.isArray(declaredDefault)
+            ? declaredDefault
+            : declaredDefault
+              ? [declaredDefault]
+              : [])
       if (paths.length > 0 || value.identifier) {
         pushAction(
           {
@@ -993,8 +1055,27 @@ function parseRecordedScriptActions(
       (method === "fill" || method === "selectOption" || method === "press"
         ? extractVariableIdentifierFromExpression(actionMatch[3]!)
         : undefined)
+    const variableDefault = variableIdentifier
+      ? variableDeclarations.get(variableIdentifier)?.defaultValue
+      : undefined
+    if (variableIdentifier && typeof variableDefault === "string") {
+      for (const key of [
+        "accessibleName",
+        "label",
+        "placeholder",
+        "target",
+        "textContent"
+      ] as const) {
+        if (locator[key] === variableIdentifier) locator[key] = variableDefault
+      }
+    }
     const actionTarget = variableIdentifier
-      ? (variableDeclarations.get(variableIdentifier)?.displayName ?? variableIdentifier)
+      ? (() => {
+          const declaration = variableDeclarations.get(variableIdentifier)
+          return typeof declaration?.defaultValue === "string"
+            ? declaration.defaultValue
+            : (declaration?.displayName ?? variableIdentifier)
+        })()
       : (locator.accessibleName ??
         locator.label ??
         locator.placeholder ??
@@ -1016,6 +1097,9 @@ function parseRecordedScriptActions(
         break
       case "fill": {
         const value = parseScriptActionValue(actionMatch[3]!)
+        const declaredDefault = value.identifier
+          ? variableDeclarations.get(value.identifier)?.defaultValue
+          : undefined
         if (shouldTreatFillAsLegacyFileUpload(locator, actionTarget, value.value)) {
           pushAction({
             kind: "fileUpload",
@@ -1028,7 +1112,7 @@ function parseRecordedScriptActions(
           {
             kind: "fill",
             target: actionTarget,
-            value: value.value ?? "",
+            value: value.value ?? (typeof declaredDefault === "string" ? declaredDefault : ""),
             sensitive:
               value.isPassword === true ||
               (actionTarget
@@ -1042,11 +1126,22 @@ function parseRecordedScriptActions(
       }
       case "selectOption": {
         const value = parseScriptActionValue(actionMatch[3]!)
+        const declaredDefault = value.identifier
+          ? variableDeclarations.get(value.identifier)?.defaultValue
+          : undefined
         pushAction(
           {
             kind: "selectOption",
             target: actionTarget,
-            values: value.values ?? (value.value ? [value.value] : []),
+            values:
+              value.values ??
+              (value.value
+                ? [value.value]
+                : Array.isArray(declaredDefault)
+                  ? declaredDefault
+                  : declaredDefault
+                    ? [declaredDefault]
+                    : []),
             locator
           },
           value.identifier ?? variableIdentifier
@@ -1260,7 +1355,11 @@ export function extractScriptRecordingVariables(script: string): ScriptRecording
     const variable = parseVariableDeclarationLine(line.trim())
     if (!variable || seenIdentifiers.has(variable.identifier)) continue
     seenIdentifiers.add(variable.identifier)
-    variables.push(variable)
+    variables.push({
+      identifier: variable.identifier,
+      displayName: variable.displayName,
+      isArray: variable.isArray
+    })
   }
 
   return variables
@@ -1346,8 +1445,18 @@ ${body}
 `
 }
 
+export function stabilizeDynamicElementUiOverlayLocators(script: string): string {
+  return script.replace(
+    /\.locator\(\s*(["'])#((?:[a-z][\w-]*-)?(?:popover|tooltip|dropdown|popper)-)\d+\1\s*\)/giu,
+    (_match, quoteCharacter: string, idPrefix: string) => {
+      const attributeQuote = quoteCharacter === '"' ? "'" : '"'
+      return `.locator(${quoteCharacter}[id^=${attributeQuote}${idPrefix}${attributeQuote}]:visible${quoteCharacter})`
+    }
+  )
+}
+
 export function buildScriptExecutableScript(script: string): string {
-  const normalizedScript = script.replace(
+  const normalizedScript = stabilizeDynamicElementUiOverlayLocators(script).replace(
     /^(\s*const\s+变量_[\p{L}\p{N}_]+)\s*:\s*string\[\](\s*=\s*.+;\s*\/\/\s*变量[-_].*)$/gmu,
     "$1$2"
   )

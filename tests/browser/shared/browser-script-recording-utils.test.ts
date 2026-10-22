@@ -4,7 +4,8 @@ import {
   buildScriptExecutableScript,
   extractScriptRecordingVariables,
   generateScriptRecording,
-  parseScriptRecordingScript
+  parseScriptRecordingScript,
+  stabilizeDynamicElementUiOverlayLocators
 } from "../../../src/shared/browser-script-recording"
 
 describe("browser script recording", () => {
@@ -111,6 +112,35 @@ test("recorded script flow", async ({ page }) => {
 
   await page.goto("https://example.com");
   await page.getByRole("button", { name: "Save" }).click();`
+    )
+  })
+
+  it("stabilizes saved Element UI overlay locators before playback", () => {
+    const script = `import { test } from "@playwright/test";
+
+test("recorded script flow", async ({ page }) => {
+  await page.locator('#el-popover-3396').getByText('Merge（推荐）').click();
+  await page.locator("#el-tooltip-4366").getByText("帮助").click();
+  await page.locator('#at-popover-2048').getByText('Confirm').click();
+  await page.locator('#custom-menu-popover-9001').getByText('Deploy').click();
+  await page.locator('#merge-popover').getByText('保持不变').click();
+});
+`
+
+    expect(buildScriptExecutableScript(script)).toContain(
+      `page.locator('[id^="el-popover-"]:visible').getByText('Merge（推荐）').click()`
+    )
+    expect(buildScriptExecutableScript(script)).toContain(
+      `page.locator("[id^='el-tooltip-']:visible").getByText("帮助").click()`
+    )
+    expect(buildScriptExecutableScript(script)).toContain(
+      `page.locator('[id^="at-popover-"]:visible').getByText('Confirm').click()`
+    )
+    expect(buildScriptExecutableScript(script)).toContain(
+      `page.locator('[id^="custom-menu-popover-"]:visible').getByText('Deploy').click()`
+    )
+    expect(stabilizeDynamicElementUiOverlayLocators(script)).toContain(
+      `page.locator('#merge-popover').getByText('保持不变').click()`
     )
   })
 
@@ -355,14 +385,16 @@ test("recorded script flow", async ({ page }) => {
       }
     )
 
-    expect(script).toContain('const 变量_目标地址 = ""; // 变量-目标地址')
+    expect(script).toContain(
+      'const 变量_目标地址 = "https://example.com/dashboard"; // 变量-目标地址'
+    )
     expect(script).toContain("await page.goto(变量_目标地址);")
   })
 
   it("round-trips variableized navigation steps and applies execution values", () => {
     const script = `import { test } from "@playwright/test";
 
-const 变量_目标地址 = ""; // 变量-目标地址
+const 变量_目标地址 = "https://example.com/original"; // 变量-目标地址
 
 test("recorded script flow", async ({ page }) => {
   await page.goto(变量_目标地址);
@@ -373,7 +405,7 @@ test("recorded script flow", async ({ page }) => {
     expect(parsed.actions).toEqual([
       expect.objectContaining({
         kind: "navigate",
-        url: "目标地址"
+        url: "https://example.com/original"
       })
     ])
     expect(parsed.variableActionNames).toEqual({

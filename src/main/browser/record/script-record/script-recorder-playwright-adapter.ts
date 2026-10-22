@@ -363,6 +363,12 @@ export function preferExactRecordedTextSelector<T>(
   }
 }
 
+export function isDynamicOverlaySelector(selector: string): boolean {
+  return /(?:#|\bid\s*=\s*["']?)(?:(?:[a-z][\w-]*-)?(?:popover|tooltip|dropdown|popper)-)\d+\b/iu.test(
+    selector
+  )
+}
+
 export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""): string {
   const { injectedScriptSource, pollingRecorderSource } = getPlaywrightRecorderSourceBundle()
   const injectedScriptConstructor = buildPlaywrightModuleConstructorExpression(
@@ -670,6 +676,25 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
       return /(?:^|[.#\s>+~:[\]'"])(?:ant-(?:tooltip|popover|dropdown)-open|[\w-]*(?:hover|active|focus|focused|open|opened|expanded)[\w-]*)(?:$|[.#\s>+~:[\]'"])/i.test(selector);
     }
 
+    function stableExactTextSelectorForElement(element) {
+      if (!(element instanceof Element)) return "";
+      const visibleText = safeText(element.innerText || element.textContent, 80);
+      if (!visibleText) return "";
+      const candidate = "internal:text=" + JSON.stringify(visibleText) + "s";
+      try {
+        const matches = injectedScript.querySelectorAll(
+          injectedScript.parseSelector(candidate),
+          injectedScript.document
+        );
+        return matches.length === 1 &&
+          (matches[0] === element || matches[0].contains(element) || element.contains(matches[0]))
+          ? candidate
+          : "";
+      } catch {
+        return "";
+      }
+    }
+
     function fallbackFileUploadLocator(locator) {
       return {
         ...(locator ?? {}),
@@ -747,6 +772,7 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
 
     const injectedScript = new InjectedScriptConstructor(globalThis, RECORDER_OPTIONS);
     const preferExactRecordedTextSelector = ${preferExactRecordedTextSelector.toString()};
+    const isDynamicOverlaySelector = ${isDynamicOverlaySelector.toString()};
 
     function normalizeRecordedSelector(selector) {
       return preferExactRecordedTextSelector(selector, (candidate) =>
@@ -786,6 +812,20 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
       } catch {}
       const hoveredElementMatchesAction =
         hoveredElement && selectorMatches.includes(hoveredElement);
+      const hoveredElementBelongsToAction =
+        hoveredElement &&
+        selectorMatches.some((match) =>
+          match === hoveredElement || match.contains(hoveredElement) || hoveredElement.contains(match)
+        );
+      if (
+        (actionName === "click" || actionName === "check" || actionName === "uncheck") &&
+        selector &&
+        hoveredElementBelongsToAction &&
+        isDynamicOverlaySelector(selector)
+      ) {
+        const stableTextSelector = stableExactTextSelectorForElement(hoveredElement);
+        if (stableTextSelector) return stableTextSelector;
+      }
       if (
         (actionName === "click" || actionName === "check" || actionName === "uncheck") &&
         selector &&

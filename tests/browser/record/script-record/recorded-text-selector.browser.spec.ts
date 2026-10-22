@@ -9,6 +9,7 @@ import { formatPlaywrightSelector } from "../../../../src/main/browser/record/co
 interface RecorderTestWindow extends Window {
   __pw_recorderRecordAction: (action: { name: string; selector: string }) => Promise<void>
   editClicks?: number
+  mergeClicks?: number
 }
 
 async function main(): Promise<void> {
@@ -30,6 +31,12 @@ async function main(): Promise<void> {
           <span><input name="leaveBankType" type="radio" value="LB_01_01"><span></span></span>
           <span class="ant-radio-button-label">首面进企</span>
         </label>
+      </div>
+      <div id="el-popover-3396" role="tooltip" class="el-popover el-popper merge-popver">
+        <div class="merge_list">
+          <h4><span onclick="window.mergeClicks = (window.mergeClicks || 0) + 1">Merge（推荐）</span></h4>
+          <p>总是创建一个合并节点，记录合并信息</p>
+        </div>
       </div>
       <iframe srcdoc="<span>编辑</span>"></iframe>
     `)
@@ -90,6 +97,16 @@ async function main(): Promise<void> {
       formatPlaywrightSelector(duplicateButton),
       'getByLabel("缺少主题").getByRole("button", { name: "发送" })'
     )
+    await page.getByText("Merge（推荐）", { exact: true }).evaluate((node) => {
+      node.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, composed: true }))
+    })
+    const dynamicPopoverTarget = await record('#el-popover-3396 >> internal:text="Merge（推荐）"s')
+    assert.equal(dynamicPopoverTarget, 'internal:text="Merge（推荐）"s')
+    await page.locator("#el-popover-3396").evaluate((node) => {
+      node.id = "el-popover-7965"
+    })
+    await page.locator(dynamicPopoverTarget).click()
+    assert.equal(await page.evaluate(() => (window as RecorderTestWindow).mergeClicks), 1)
     const radioLabel = await record('internal:text="首面进企"s >> nth=1')
     assert.equal(
       radioLabel,
@@ -100,7 +117,9 @@ async function main(): Promise<void> {
     await page
       .locator(".ant-tooltip-open")
       .evaluate((node) => node.classList.remove("ant-tooltip-open"))
-    await page.getByRole("tooltip").evaluate((node) => node.remove())
+    await page
+      .getByRole("tooltip", { name: "您不是系统LQ13.11的CI_OWNER，无法编辑" })
+      .evaluate((node) => node.remove())
     await page.locator(hoverFallback).click()
     assert.equal(await page.evaluate(() => (window as RecorderTestWindow).editClicks), 2)
     const frame = page.frames()[1]
