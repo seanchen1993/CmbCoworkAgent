@@ -535,12 +535,12 @@ export function RequirementHistoryList({
                       </DropdownMenuContent>
                     </DropdownMenu>
                     <p
-                      className="mt-2 truncate text-xs leading-5 text-muted-foreground"
+                      className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground"
                       title={description}
                     >
                       {description}
                     </p>
-                    <div className="mt-4 flex flex-wrap items-end justify-between gap-4">
+                    <div className="mt-6 flex flex-wrap items-end justify-between gap-4">
                       <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
                         <Avatar className="size-6">
                           <AvatarFallback className="bg-primary/12 text-[10px] text-primary">
