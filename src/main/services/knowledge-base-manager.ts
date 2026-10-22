@@ -10,6 +10,7 @@ import type {
   KnowledgeWorkspaceSyncResult
 } from "../../shared/knowledge-base-types"
 import { resolve } from "node:path"
+import { rm } from "node:fs/promises"
 import { stripVTControlCharacters } from "node:util"
 import { formatKnowledgeSyncError } from "./knowledge-sync-error"
 import { formatGmt8Timestamp } from "../../shared/gmt8-time"
@@ -40,6 +41,7 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null
 let refreshing = false
 let syncingId: string | null = null
 let syncingRole: KnowledgeWorkspaceRole | null = null
+let deletingId: string | null = null
 let queryError: string | null = null
 const previewRevisions = new Map<string, number>()
 
@@ -70,11 +72,12 @@ function isKnowledgeDirectoryInUse(path: string): boolean {
   return false
 }
 
-export function isKnowledgeDirectorySyncing(path: string): boolean {
+function isKnowledgeDirectoryBusy(path: string): boolean {
   return (
-    syncingId !== null &&
-    syncingRole === "write" &&
-    pathKey(path) === pathKey(knowledgeDirectory(syncingId, "write"))
+    (syncingId !== null &&
+      syncingRole === "write" &&
+      pathKey(path) === pathKey(knowledgeDirectory(syncingId, "write"))) ||
+    (deletingId !== null && pathKey(path) === pathKey(knowledgeDirectory(deletingId, "write")))
   )
 }
 
@@ -86,7 +89,7 @@ export function isKnowledgeDepositionBlocked(
     isRecord(metadata.harnessProjectSession) &&
     metadata.harnessProjectSession.kind === "system-constraints-update" &&
     typeof workspacePath === "string" &&
-    isKnowledgeDirectorySyncing(workspacePath)
+    isKnowledgeDirectoryBusy(workspacePath)
   )
 }
 
@@ -324,6 +327,7 @@ async function listFromState(state: KnowledgeBaseState | null): Promise<Knowledg
     refreshing,
     syncingIds: syncingId ? [syncingId] : [],
     writeSyncingIds: syncingId && syncingRole === "write" ? [syncingId] : [],
+    deletingId,
     queryError
   }
 }
@@ -333,7 +337,7 @@ export async function listKnowledgeBases(): Promise<KnowledgeBaseListResult> {
 }
 
 export async function refreshKnowledgeBases(): Promise<KnowledgeBaseListResult> {
-  if (refreshing || syncingId) return listKnowledgeBases()
+  if (refreshing || syncingId || deletingId) return listKnowledgeBases()
   refreshing = true
   try {
     let state = await readKnowledgeState()
@@ -364,6 +368,7 @@ export async function refreshKnowledgeBases(): Promise<KnowledgeBaseListResult> 
 export async function syncKnowledgeBase(idKey: string): Promise<KnowledgeBaseSyncResult> {
   const normalizedId = typeof idKey === "string" ? idKey.trim() : ""
   if (!normalizedId) throw new Error("知识库 idKey 不能为空")
+  if (deletingId) throw new Error("正在删除知识库，请稍后重试")
   if (refreshing || syncingId) throw new Error("知识库同步正在进行，请稍后重试")
   syncingId = normalizedId
   try {
@@ -374,6 +379,30 @@ export async function syncKnowledgeBase(idKey: string): Promise<KnowledgeBaseSyn
     return await syncStateItem(item)
   } finally {
     syncingId = null
+  }
+}
+
+export async function deleteKnowledgeBase(idKey: string): Promise<void> {
+  const readPath = knowledgeDirectory(idKey, "read")
+  const writePath = knowledgeDirectory(idKey, "write")
+  if (refreshing || syncingId) throw new Error("知识库同步或刷新正在进行，请稍后删除")
+  if (deletingId) throw new Error("正在删除知识库，请稍后重试")
+  deletingId = idKey
+  try {
+    const state = await readKnowledgeState()
+    if (!state?.knowledgeBases.some((item) => item.idKey === idKey)) {
+      throw new Error("知识库配置不存在")
+    }
+    if (isKnowledgeDirectoryInUse(writePath)) {
+      throw new Error("该知识库正在用于系统约束沉淀，请停止任务后再删除")
+    }
+    await rm(readPath, { recursive: true, force: true })
+    await rm(writePath, { recursive: true, force: true })
+    state.knowledgeBases = state.knowledgeBases.filter((item) => item.idKey !== idKey)
+    await writeKnowledgeState(state)
+    previewRevisions.delete(idKey)
+  } finally {
+    deletingId = null
   }
 }
 
@@ -408,7 +437,7 @@ export async function resolveKnowledgeDepositionPath(
     throw new Error("知识沉淀工作区不可用，请前往公共系统约束 Tab 下载或处理")
   }
   const path = knowledgeDirectory(id, "write")
-  if (isKnowledgeDirectorySyncing(path)) throw new Error("知识库正在同步，请稍后再发起沉淀会话")
+  if (isKnowledgeDirectoryBusy(path)) throw new Error("知识库正在同步或删除，请稍后再发起沉淀会话")
   return path
 }
 

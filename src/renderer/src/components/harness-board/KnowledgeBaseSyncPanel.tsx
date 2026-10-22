@@ -1,4 +1,14 @@
-import { ChevronDown, ChevronRight, FolderOpen, Info, Loader2, RefreshCw } from "lucide-react"
+import { useState } from "react"
+import {
+  ChevronDown,
+  ChevronRight,
+  FolderOpen,
+  Info,
+  Loader2,
+  RefreshCw,
+  Trash2
+} from "lucide-react"
+import { toast } from "sonner"
 import type { HarnessKnowledgePreviewResult } from "../../../../shared/harness-board-types"
 import type {
   KnowledgeBaseListItem,
@@ -8,6 +18,7 @@ import { Button } from "@/components/ui/button"
 import { Badge, badgeVariants, type BadgeProps } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { KnowledgePreviewPanel } from "./KnowledgePreviewPanel"
+import { KnowledgeBaseDeleteDialog } from "./KnowledgeBaseDeleteDialog"
 
 function knowledgeStatus(
   item: KnowledgeBaseListItem,
@@ -41,6 +52,8 @@ export function KnowledgeBaseSyncPanel({
   selectedPreviewPaths,
   onRefreshAll,
   onSync,
+  onDeleted,
+  formatError,
   onTogglePreview,
   onSelectPreviewPath,
   onOpenPath
@@ -54,11 +67,39 @@ export function KnowledgeBaseSyncPanel({
   selectedPreviewPaths: Record<string, string | null>
   onRefreshAll: () => void | Promise<void>
   onSync: (idKey: string) => void | Promise<void>
+  onDeleted: (idKey: string) => void | Promise<void>
+  formatError: (error: unknown) => string
   onTogglePreview: (idKey: string) => void
   onSelectPreviewPath: (idKey: string, path: string | null) => void
   onOpenPath: (path: string) => void
 }): React.JSX.Element {
   const items = result?.knowledgeBases ?? []
+  const [pendingDelete, setPendingDelete] = useState<KnowledgeBaseListItem | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const operationBusy =
+    loading ||
+    deleting ||
+    Boolean(result?.refreshing || result?.deletingId) ||
+    syncingIds.size > 0 ||
+    (result?.syncingIds.length ?? 0) > 0
+  const currentDelete = items.find((item) => item.idKey === pendingDelete?.idKey) ?? pendingDelete
+  const deleteBlocked =
+    operationBusy || currentDelete?.workspaces.some((entry) => entry.inUse) === true
+
+  const confirmDelete = async (): Promise<void> => {
+    if (!pendingDelete || deleteBlocked) return
+    setDeleting(true)
+    try {
+      await window.api.harnessBoard.deleteKnowledgeBase(pendingDelete.idKey)
+      toast.success("本地知识库已删除")
+      setPendingDelete(null)
+      await onDeleted(pendingDelete.idKey)
+    } catch (error) {
+      toast.error(formatError(error))
+    } finally {
+      setDeleting(false)
+    }
+  }
   return (
     <section className="rounded-md border border-border bg-background shadow-sm">
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
@@ -81,12 +122,7 @@ export function KnowledgeBaseSyncPanel({
             </Tooltip>
           </TooltipProvider>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={loading || result?.refreshing}
-          onClick={onRefreshAll}
-        >
+        <Button variant="outline" size="sm" disabled={operationBusy} onClick={onRefreshAll}>
           {loading || result?.refreshing ? (
             <Loader2 className="mr-2 size-4 animate-spin" />
           ) : (
@@ -233,7 +269,7 @@ export function KnowledgeBaseSyncPanel({
                     </Button>
                     <Button
                       size="sm"
-                      disabled={historical || syncing || result?.refreshing}
+                      disabled={historical || operationBusy}
                       onClick={() => onSync(item.idKey)}
                     >
                       {syncing ? (
@@ -242,6 +278,22 @@ export function KnowledgeBaseSyncPanel({
                         <RefreshCw className="mr-2 size-4" />
                       )}
                       拉取更新
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={`删除本地知识库：${item.name}`}
+                      title={
+                        item.workspaces.some((entry) => entry.inUse)
+                          ? "系统约束沉淀任务正在使用，请停止任务后再删除"
+                          : operationBusy
+                            ? "请等待当前知识库操作完成"
+                            : "删除本地知识库"
+                      }
+                      disabled={operationBusy || item.workspaces.some((entry) => entry.inUse)}
+                      onClick={() => setPendingDelete(item)}
+                    >
+                      <Trash2 className="size-3.5" />
                     </Button>
                   </div>
                 </div>
@@ -258,6 +310,13 @@ export function KnowledgeBaseSyncPanel({
           })
         )}
       </div>
+      <KnowledgeBaseDeleteDialog
+        name={pendingDelete?.name ?? null}
+        busy={deleting}
+        blocked={deleteBlocked}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => void confirmDelete()}
+      />
     </section>
   )
 }

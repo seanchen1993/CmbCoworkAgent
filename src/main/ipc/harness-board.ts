@@ -63,6 +63,7 @@ import { assertHarnessProjectCanBeDeleted } from "../harness-board/project-delet
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import {
+  deleteKnowledgeBase,
   listKnowledgeBases,
   refreshKnowledgeBases,
   syncKnowledgeBase
@@ -346,6 +347,10 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("harnessBoard:refreshKnowledgeBases", (): Promise<KnowledgeBaseListResult> => {
     return refreshKnowledgeBases()
+  })
+
+  ipcMain.handle("harnessBoard:deleteKnowledgeBase", (_event, idKey: string): Promise<void> => {
+    return deleteKnowledgeBase(idKey)
   })
 
   ipcMain.handle(

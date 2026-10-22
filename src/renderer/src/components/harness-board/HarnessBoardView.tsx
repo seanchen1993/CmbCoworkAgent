@@ -8582,7 +8582,8 @@ export function HarnessBoardView({
     previews: knowledgePreviewsByAdapterId,
     selectedPaths: selectedKnowledgePreviewPaths,
     setSelectedPaths: setSelectedKnowledgePreviewPaths,
-    toggle: handleToggleKnowledgeBasePreview
+    toggle: handleToggleKnowledgeBasePreview,
+    forget: forgetKnowledgePreview
   } = useKnowledgePreviews(projectModeTab === "constraint-sync", knowledgeBaseResult, cleanIpcError)
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
   const [updatingFeatureDeployUnits, setUpdatingFeatureDeployUnits] = useState(false)
@@ -12066,6 +12067,11 @@ export function HarnessBoardView({
                 selectedPreviewPaths={selectedKnowledgePreviewPaths}
                 onRefreshAll={() => loadKnowledgeBases(true)}
                 onSync={handleSyncKnowledgeBase}
+                onDeleted={async (idKey) => {
+                  forgetKnowledgePreview(idKey)
+                  await loadKnowledgeBases()
+                }}
+                formatError={cleanIpcError}
                 onTogglePreview={handleToggleKnowledgeBasePreview}
                 onSelectPreviewPath={(idKey, path) =>
                   setSelectedKnowledgePreviewPaths((current) => ({ ...current, [idKey]: path }))

@@ -244,7 +244,7 @@ export async function getHarnessAgentContext(
       : featureIdentity
   }
   if (isKnowledgeDepositionBlocked(metadata, options.workspacePath ?? metadata.workspacePath)) {
-    throw new HarnessAgentContextUnavailableError("知识库正在同步，请稍后再运行沉淀任务。", {
+    throw new HarnessAgentContextUnavailableError("知识库正在同步或删除，请稍后再运行沉淀任务。", {
       harnessProjectId: projectSessionProjectId
     })
   }

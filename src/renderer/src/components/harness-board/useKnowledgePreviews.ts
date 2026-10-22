@@ -77,5 +77,24 @@ export function useKnowledgePreviews(
     }
   }, [active, result, expandedIds, loadingIds, load])
 
-  return { expandedIds, loadingIds, previews, selectedPaths, setSelectedPaths, toggle }
+  const forget = useCallback((idKey: string): void => {
+    attemptedRevisions.current.delete(idKey)
+    setExpandedIds((current) => {
+      const next = new Set(current)
+      next.delete(idKey)
+      return next
+    })
+    setPreviews((current) => {
+      const next = { ...current }
+      delete next[idKey]
+      return next
+    })
+    setSelectedPaths((current) => {
+      const next = { ...current }
+      delete next[idKey]
+      return next
+    })
+  }, [])
+
+  return { expandedIds, loadingIds, previews, selectedPaths, setSelectedPaths, toggle, forget }
 }

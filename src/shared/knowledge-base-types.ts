@@ -50,6 +50,7 @@ export interface KnowledgeBaseListResult {
   refreshing: boolean
   syncingIds: string[]
   writeSyncingIds: string[]
+  deletingId: string | null
   queryError: string | null
 }
 

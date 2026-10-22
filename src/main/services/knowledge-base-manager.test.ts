@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
@@ -10,6 +10,10 @@ const mocks = vi.hoisted(() => ({
   syncKnowledgeRepository: vi.fn(),
   knowledgeWorkspaceHasChanges: vi.fn()
 }))
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>()
+  return { ...actual, rm: vi.fn(actual.rm) }
+})
 vi.mock("../storage", () => ({ getUserInfo: mocks.getUserInfo }))
 vi.mock("../db", () => ({ getThreadCore: mocks.getThreadCore }))
 vi.mock("./knowledge-repository", async (importOriginal) => ({
@@ -19,6 +23,7 @@ vi.mock("./knowledge-repository", async (importOriginal) => ({
 }))
 import {
   assertSelectableKnowledgeBaseIds,
+  deleteKnowledgeBase,
   isKnowledgeDepositionBlocked,
   listKnowledgeBases,
   prepareKnowledgeDeposition,
@@ -51,6 +56,8 @@ const item = {
 }
 
 beforeEach(async () => {
+  const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")
+  vi.mocked(rm).mockReset().mockImplementation(actualFs.rm)
   root = await mkdtemp(join(tmpdir(), "knowledge-manager-"))
   vi.stubEnv("DEV", false)
   vi.stubEnv("CMB_COWORK_AGENT_HOME", root)
@@ -77,7 +84,8 @@ afterEach(async () => {
   vi.useRealTimers()
   vi.restoreAllMocks()
   vi.unstubAllEnvs()
-  await rm(root, { recursive: true, force: true })
+  const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")
+  await actualFs.rm(root, { recursive: true, force: true })
 })
 function cloud(items: unknown[]) {
   return vi
@@ -524,4 +532,144 @@ it("requires an explicit bound target for multi-library deposition", async () =>
     path: knowledgeDirectory(other.idKey, "write")
   })
   await expect(assertSelectableKnowledgeBaseIds([])).resolves.toEqual([])
+})
+
+it("deletes both local workspaces and only the selected state record, including uncommitted content", async () => {
+  const other = { ...item, idKey: "other", name: "Other" }
+  cloud([item, other])
+  await refreshKnowledgeBases()
+  for (const role of ["read", "write"] as const) {
+    await writeFile(join(knowledgeDirectory(item.idKey, role), "uncommitted.md"), "local changes")
+  }
+  const projectPath = join(root, "project-binding.json")
+  const project = JSON.stringify({ knowledgeBaseIds: [item.idKey] })
+  await writeFile(projectPath, project)
+  await deleteKnowledgeBase(item.idKey)
+  expect((await readKnowledgeState())?.knowledgeBases.map((entry) => entry.idKey)).toEqual([
+    other.idKey
+  ])
+  for (const role of ["read", "write"] as const) {
+    await expect(
+      readFile(join(knowledgeDirectory(item.idKey, role), "uncommitted.md"))
+    ).rejects.toThrow()
+    await expect(readFile(knowledgeDirectory(item.idKey, role))).rejects.toMatchObject({
+      code: "ENOENT"
+    })
+  }
+  expect(await readFile(projectPath, "utf8")).toBe(project)
+  await expect(resolveProjectKnowledgeBases([item.idKey])).resolves.toEqual([])
+  await expect(resolveProjectKnowledgeBases([other.idKey])).resolves.toHaveLength(1)
+  expect((await listKnowledgeBases()).deletingId).toBeNull()
+})
+
+it("removes an unavailable library with missing directories and rejects invalid or missing ids", async () => {
+  const saved = await seed()
+  saved.knowledgeBases[0].visibility = "unavailable"
+  await writeKnowledgeState(saved)
+  await expect(deleteKnowledgeBase("../outside")).rejects.toThrow("安全映射")
+  await expect(deleteKnowledgeBase("missing")).rejects.toThrow("配置不存在")
+  await deleteKnowledgeBase(item.idKey)
+  expect(await readKnowledgeState()).toEqual({ schemaVersion: 1, knowledgeBases: [] })
+})
+
+it("prevents deletion during sync or refresh", async () => {
+  await seed(true)
+  const syncing = syncKnowledgeBase(item.idKey)
+  await expect(deleteKnowledgeBase(item.idKey)).rejects.toThrow("同步或刷新正在进行")
+  await syncing
+  const refreshing = refreshKnowledgeBases()
+  await expect(deleteKnowledgeBase(item.idKey)).rejects.toThrow("同步或刷新正在进行")
+  await refreshing
+  expect((await readKnowledgeState())?.knowledgeBases).toHaveLength(1)
+})
+
+it.each([
+  { kind: "system-constraints-update", role: "write", blocked: true },
+  { kind: "system-constraints-update", role: "read", blocked: false },
+  { kind: "feature", role: "write", blocked: false }
+] as const)(
+  "blocks deletion only for a running deposition in its write directory: %j",
+  async ({ kind, role, blocked }) => {
+    await seed(true)
+    mocks.getThreadCore.mockReturnValue({
+      metadata: JSON.stringify({
+        workspacePath: knowledgeDirectory(item.idKey, role),
+        harnessProjectSession: { projectId: "p", kind }
+      })
+    })
+    claimLocalThreadRunLease({ threadId: "delete-test", owner: "desktop", runId: "run" })
+    try {
+      if (blocked) {
+        await expect(deleteKnowledgeBase(item.idKey)).rejects.toThrow("正在用于系统约束沉淀")
+        expect((await readKnowledgeState())?.knowledgeBases).toHaveLength(1)
+      } else {
+        await deleteKnowledgeBase(item.idKey)
+        expect((await readKnowledgeState())?.knowledgeBases).toHaveLength(0)
+      }
+    } finally {
+      releaseLocalThreadRunLease("delete-test", "desktop", "run")
+    }
+    if (blocked) {
+      await deleteKnowledgeBase(item.idKey)
+      expect((await readKnowledgeState())?.knowledgeBases).toHaveLength(0)
+    }
+  }
+)
+
+it.each(["read", "write"] as const)(
+  "retains state when %s directory removal fails and permits a later retry",
+  async (role) => {
+    await seed(true)
+    const before = await readKnowledgeState()
+    if (role === "write")
+      vi.mocked(rm).mockImplementationOnce(vi.mocked(rm).getMockImplementation()!)
+    vi.mocked(rm).mockRejectedValueOnce(new Error("directory removal failed"))
+    await expect(deleteKnowledgeBase(item.idKey)).rejects.toThrow("directory removal failed")
+    expect(await readKnowledgeState()).toEqual(before)
+    expect((await listKnowledgeBases()).deletingId).toBeNull()
+    await deleteKnowledgeBase(item.idKey)
+    expect((await readKnowledgeState())?.knowledgeBases).toHaveLength(0)
+  }
+)
+
+it("reserves deletion before file operations and pauses new updates and deposition until finished", async () => {
+  await seed(true)
+  const originalRemove = vi.mocked(rm).getMockImplementation()!
+  let finish!: () => void
+  const hold = new Promise<void>((resolve) => {
+    finish = resolve
+  })
+  vi.mocked(rm).mockImplementationOnce(async (...args) => {
+    await hold
+    return originalRemove(...args)
+  })
+  const deleting = deleteKnowledgeBase(item.idKey)
+  try {
+    await vi.waitFor(async () => expect((await listKnowledgeBases()).deletingId).toBe(item.idKey))
+    await expect(deleteKnowledgeBase(item.idKey)).rejects.toThrow("正在删除")
+    await expect(syncKnowledgeBase(item.idKey)).rejects.toThrow("正在删除")
+    await expect(prepareKnowledgeDeposition([item.idKey])).rejects.toThrow("正在同步")
+    expect(
+      isKnowledgeDepositionBlocked({
+        workspacePath: knowledgeDirectory(item.idKey, "write"),
+        harnessProjectSession: { projectId: "p", kind: "system-constraints-update" }
+      })
+    ).toBe(true)
+    await expect(refreshKnowledgeBases()).resolves.toMatchObject({ deletingId: item.idKey })
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  } finally {
+    finish()
+    await deleting
+  }
+  expect((await listKnowledgeBases()).deletingId).toBeNull()
+})
+
+it("restores a deleted library on the next refresh when still returned by the server", async () => {
+  await seed(true)
+  await deleteKnowledgeBase(item.idKey)
+  await refreshKnowledgeBases()
+  expect((await listKnowledgeBases()).knowledgeBases).toMatchObject([
+    { idKey: item.idKey, localValid: true }
+  ])
+  expect(mocks.syncKnowledgeRepository).toHaveBeenCalledTimes(2)
 })
