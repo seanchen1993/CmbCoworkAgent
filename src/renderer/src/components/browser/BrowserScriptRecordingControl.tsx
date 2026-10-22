@@ -145,7 +145,7 @@ export function BrowserScriptRecordingControl({
                     className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
                   >
                     <MousePointerClick className="size-3.5" strokeWidth={1.8} />
-                    录制脚本
+                    录制操作
                   </Button>
                 </span>
               ) : (
@@ -157,7 +157,7 @@ export function BrowserScriptRecordingControl({
                   onClick={onStartScriptRecording}
                 >
                   <MousePointerClick className="size-3.5" strokeWidth={1.8} />
-                  录制脚本
+                  录制操作
                 </Button>
               )}
             </TooltipTrigger>

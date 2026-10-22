@@ -67,8 +67,8 @@ export function createBrowserPlaybackHistoryEntry(
 
   return {
     id: [runAt, state.fileName ?? "", state.label ?? ""].join("::"),
-    scriptName: state.label?.trim() || state.fileName?.trim() || "当前脚本",
-    fileName: state.fileName?.trim() || state.label?.trim() || "当前脚本",
+    scriptName: state.label?.trim() || state.fileName?.trim() || "当前操作",
+    fileName: state.fileName?.trim() || state.label?.trim() || "当前操作",
     runAt,
     status: state.status,
     progressPercent,

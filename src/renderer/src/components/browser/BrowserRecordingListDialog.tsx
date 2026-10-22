@@ -419,14 +419,14 @@ export function BrowserRecordingListDialog({
         <DialogHeader className="shrink-0 border-b border-border/70 bg-[linear-gradient(180deg,color-mix(in_srgb,var(--primary)_7%,transparent),transparent)] px-5 pt-2 pb-1">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="flex min-w-0 flex-col gap-2">
-              <DialogTitle className="text-base">录制列表</DialogTitle>
+              <DialogTitle className="text-base">可复用操作</DialogTitle>
               <Tabs
                 value={activeTab}
                 onValueChange={(value) => setActiveTab(value as "recordings" | "history")}
               >
                 <TabsList className="h-8 w-fit">
                   <TabsTrigger value="recordings" className="h-6 px-3 text-xs">
-                    录制脚本
+                    操作库
                   </TabsTrigger>
                   <TabsTrigger value="history" className="h-6 px-3 text-xs">
                     回放历史
@@ -435,7 +435,7 @@ export function BrowserRecordingListDialog({
               </Tabs>
               <p className="text-[11px] text-muted-foreground">
                 {activeTab === "recordings"
-                  ? `已保存 ${entries.length}/${MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES} 个录制文件`
+                  ? `已保存 ${entries.length}/${MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES} 个可复用操作`
                   : `共 ${playbackHistory.length} 条回放记录`}
               </p>
             </div>
@@ -482,7 +482,7 @@ export function BrowserRecordingListDialog({
                 ) : isLoading ? (
                   <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
                     <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
-                    正在读取脚本文件...
+                    正在读取可复用操作...
                   </div>
                 ) : (
                   <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -492,7 +492,7 @@ export function BrowserRecordingListDialog({
                         setDisplayNameFilter(event.target.value)
                         setCurrentPage(1)
                       }}
-                      placeholder="输入文件中文名筛选"
+                      placeholder="输入操作名称筛选"
                       className="h-9 rounded-lg border-border/80 bg-background text-sm shadow-none"
                     />
                     {isLibraryFull && (
@@ -501,12 +501,12 @@ export function BrowserRecordingListDialog({
                         role="status"
                       >
                         已达到 {MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES}{" "}
-                        个录制文件上限。请删除不需要的文件后再新增。
+                        个可复用操作上限。请删除不需要的操作后再新增。
                       </div>
                     )}
                     {filteredEntries.length === 0 ? (
                       <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
-                        没有匹配当前中文名筛选的脚本。
+                        没有匹配当前中文名筛选的可复用操作。
                       </div>
                     ) : (
                       <>
@@ -521,7 +521,7 @@ export function BrowserRecordingListDialog({
                             </colgroup>
                             <thead className="sticky top-0 z-10 bg-muted/95 text-[11px] font-medium text-muted-foreground backdrop-blur supports-[backdrop-filter]:bg-muted/85">
                               <tr>
-                                <th className="border-b border-border/70 px-2 py-2.5">中文名称</th>
+                                <th className="border-b border-border/70 px-2 py-2.5">操作名称</th>
                                 <th className="border-b border-border/70 px-2 py-2.5 text-center">
                                   存在变量
                                 </th>
@@ -563,7 +563,7 @@ export function BrowserRecordingListDialog({
                                       className="px-2 py-3 text-center align-middle text-[11px]"
                                       title={
                                         entry.hasVariables === undefined
-                                          ? "无法读取脚本内容"
+                                          ? "无法读取自动化内容"
                                           : entry.hasVariables
                                             ? "存在变量"
                                             : "不存在变量"
@@ -579,7 +579,7 @@ export function BrowserRecordingListDialog({
                                     </td>
                                     <td
                                       className="px-2 py-3 text-center align-middle text-[11px]"
-                                      title={isEdited ? "用户编辑过脚本或设置过变量" : "未编辑"}
+                                      title={isEdited ? "用户编辑过操作或设置过变量" : "未编辑"}
                                     >
                                       {isEdited ? (
                                         <span className="text-emerald-500">是</span>
@@ -635,7 +635,7 @@ export function BrowserRecordingListDialog({
                                               <Trash2 className="size-3.5" strokeWidth={1.8} />
                                             )
                                           }
-                                          popoverContent="删除脚本"
+                                          popoverContent="删除操作"
                                           disabled={isEntryLoading}
                                           stopPropagation
                                           className="size-7 rounded-md"
@@ -692,11 +692,11 @@ export function BrowserRecordingListDialog({
               <div className="border-b border-border/70 px-5 py-4">
                 <div className="flex flex-col gap-3">
                   <div className="flex-1 min-w-0">
-                    <DialogTitle className="text-base">编辑录制脚本</DialogTitle>
+                    <DialogTitle className="text-base">编辑可复用操作</DialogTitle>
                     <DialogDescription className="mt-1 text-[12px] leading-5">
                       {selectedEntry
-                        ? "可编辑脚本内容和文件中文名；保存修改会更新当前文件，另存为会创建新的脚本文件。"
-                        : "请选择一条录制查看脚本。"}
+                        ? "可编辑自动化脚本和操作名称；保存修改会更新当前操作，另存为会创建新的可复用操作。"
+                        : "请选择一项可复用操作查看详情。"}
                     </DialogDescription>
                   </div>
                   {selectedEntry ? (
@@ -705,7 +705,7 @@ export function BrowserRecordingListDialog({
                         htmlFor="browser-script-library-display-name"
                         className="shrink-0 text-xs font-medium text-foreground"
                       >
-                        文件中文名
+                        操作名称
                       </label>
                       <Input
                         id="browser-script-library-display-name"
@@ -728,7 +728,7 @@ export function BrowserRecordingListDialog({
                             detailInitialDisplayName
                           )
                         }}
-                        placeholder="请输入文件中文名"
+                        placeholder="请输入操作名称"
                         className="h-8 w-[240px] rounded-lg border-border/80 bg-background text-xs shadow-none"
                       />
                       <Button
@@ -857,7 +857,7 @@ export function BrowserRecordingListDialog({
                       )
                     }
                   }}
-                  ariaLabel="录制脚本编辑器"
+                  ariaLabel="可复用操作脚本编辑器"
                   placeholder={detailLoading ? "正在读取脚本内容..." : "// Script content"}
                 />
               </div>
@@ -867,7 +867,7 @@ export function BrowserRecordingListDialog({
           <div className="min-h-0 flex-1 overflow-auto p-5">
             {playbackHistory.length === 0 ? (
               <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-4 py-12 text-center text-sm text-muted-foreground">
-                暂无回放历史。执行录制脚本后，运行结果会保存在这里。
+                暂无回放历史。执行可复用操作后，运行结果会保存在这里。
               </div>
             ) : (
               <div className="flex min-h-0 flex-col gap-3">
@@ -883,7 +883,7 @@ export function BrowserRecordingListDialog({
                     </colgroup>
                     <thead className="sticky top-0 z-10 bg-muted/95 text-[11px] font-medium text-muted-foreground backdrop-blur">
                       <tr>
-                        <th className="border-b border-border/70 px-4 py-3">脚本名称</th>
+                        <th className="border-b border-border/70 px-4 py-3">操作名称</th>
                         <th className="border-b border-border/70 px-4 py-3">运行时间</th>
                         <th className="border-b border-border/70 px-4 py-3 text-right">运行进度</th>
                         <th className="border-b border-border/70 px-4 py-3 text-right">执行步骤</th>
@@ -907,8 +907,8 @@ export function BrowserRecordingListDialog({
                                 onClick={() => openHistoryScript(entry)}
                                 title={
                                   libraryEntry
-                                    ? `打开录制脚本：${entry.scriptName}`
-                                    : `录制脚本已不存在：${entry.scriptName}`
+                                    ? `打开可复用操作：${entry.scriptName}`
+                                    : `可复用操作已不存在：${entry.scriptName}`
                                 }
                               >
                                 {entry.scriptName}

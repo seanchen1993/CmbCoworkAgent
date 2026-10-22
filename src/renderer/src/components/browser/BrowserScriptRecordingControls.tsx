@@ -46,7 +46,7 @@ const EMPTY_SCRIPT_RECORDING: BrowserRecordingSession = {
   actions: [],
   script: ""
 }
-const DEFAULT_PLAYBACK_LABEL = "当前脚本"
+const DEFAULT_PLAYBACK_LABEL = "当前操作"
 
 interface PendingScriptExecution {
   script: string
@@ -61,6 +61,7 @@ interface PlaybackModeState {
   active: boolean
   key: number
   label: string
+  detailSource?: "recording" | "library"
 }
 
 const EMPTY_PLAYBACK_MODE_STATE: PlaybackModeState = {
@@ -185,7 +186,8 @@ export function BrowserScriptRecordingControls({
     setPlaybackMode((current) => ({
       active: true,
       key: current.key + 1,
-      label
+      label,
+      detailSource: undefined
     }))
   }, [])
 
@@ -335,12 +337,12 @@ export function BrowserScriptRecordingControls({
       setScriptRecording(nextSession)
       setIsRecordingEdited(false)
       setHasPendingUnsaved(false)
-      toast.success("录制脚本已开始。请直接在内置浏览器里直接操作页面。")
+      toast.success("操作录制已开始。请直接在内置浏览器里操作页面。")
     } catch (error) {
       console.error(
         `[BrowserScriptRecordingControls] Failed to start script recording: ${formatError(error)}`
       )
-      toast.error(formatError(error) || "启动录制脚本失败")
+      toast.error(formatError(error) || "启动操作录制失败")
     } finally {
       setIsBusy(false)
     }
@@ -352,12 +354,12 @@ export function BrowserScriptRecordingControls({
       const nextSession = await window.api.browser.pauseScriptRecording()
       setScriptRecording(nextSession)
       setRecordingDialogOpen(true)
-      toast.success("录制脚本已暂停")
+      toast.success("操作录制已暂停")
     } catch (error) {
       console.error(
         `[BrowserScriptRecordingControls] Failed to pause script recording: ${formatError(error)}`
       )
-      toast.error(formatError(error) || "暂停录制脚本失败")
+      toast.error(formatError(error) || "暂停操作录制失败")
     } finally {
       setIsBusy(false)
     }
@@ -369,12 +371,12 @@ export function BrowserScriptRecordingControls({
       if (!(await persistActiveDraftIfNeeded())) return
       const nextSession = await window.api.browser.resumeScriptRecording()
       setScriptRecording(nextSession)
-      toast.success("录制脚本已继续")
+      toast.success("操作录制已继续")
     } catch (error) {
       console.error(
         `[BrowserScriptRecordingControls] Failed to resume script recording: ${formatError(error)}`
       )
-      toast.error(formatError(error) || "继续录制脚本失败")
+      toast.error(formatError(error) || "继续操作录制失败")
     } finally {
       setIsBusy(false)
     }
@@ -389,15 +391,15 @@ export function BrowserScriptRecordingControls({
       setHasPendingUnsaved(true)
       setRecordingDialogOpen(true)
       if (nextSession.actions.length > 0) {
-        toast.success(`录制脚本已停止，已生成 ${nextSession.actions.length} 个步骤。`)
+        toast.success(`操作录制已停止，已生成 ${nextSession.actions.length} 个步骤。`)
       } else {
-        toast.warning("录制脚本已停止，但还没有采集到可生成脚本的页面操作。")
+        toast.warning("操作录制已停止，但还没有采集到可生成自动化脚本的页面操作。")
       }
     } catch (error) {
       console.error(
         `[BrowserScriptRecordingControls] Failed to stop script recording: ${formatError(error)}`
       )
-      toast.error("停止录制脚本失败")
+      toast.error("停止操作录制失败")
     } finally {
       setIsBusy(false)
     }
@@ -413,7 +415,7 @@ export function BrowserScriptRecordingControls({
       console.error(
         `[BrowserScriptRecordingControls] Failed to load browser script library: ${formatError(error)}`
       )
-      setScriptLibraryError(formatError(error) || "读取脚本库失败")
+      setScriptLibraryError(formatError(error) || "读取可复用操作失败")
     } finally {
       setIsScriptLibraryLoading(false)
     }
@@ -423,6 +425,14 @@ export function BrowserScriptRecordingControls({
     setScriptLibraryOpen(true)
     void loadScriptLibraryEntries()
   }, [loadScriptLibraryEntries])
+
+  const openActivePlaybackScriptDetail = useCallback(() => {
+    if (playbackMode.detailSource === "library") {
+      openScriptLibrary()
+      return
+    }
+    setRecordingDialogOpen(true)
+  }, [openScriptLibrary, playbackMode.detailSource])
 
   const cancelPlayback = useCallback(() => {
     setIsCancellingPlayback(true)
@@ -478,7 +488,7 @@ export function BrowserScriptRecordingControls({
     const trimmedWorkspacePath = workspacePath?.trim() ?? ""
     if (!currentRecordingLibraryTarget) {
       if (!displayName) {
-        toast.error("请输入文件中文名")
+        toast.error("请输入操作名称")
         return
       }
       if (!trimmedWorkspacePath) {
@@ -505,7 +515,7 @@ export function BrowserScriptRecordingControls({
           threadId,
           workspacePath: trimmedWorkspacePath
         })
-        toast.success("脚本已保存")
+        toast.success("已保存为可复用操作")
       }
       setHasPendingUnsaved(false)
       setRecordingDialogOpen(false)
@@ -520,7 +530,7 @@ export function BrowserScriptRecordingControls({
       console.error(
         `[BrowserScriptRecordingControls] Failed to save browser script library entry: ${formatError(error)}`
       )
-      toast.error(formatError(error) || "保存脚本失败")
+      toast.error(formatError(error) || "保存可复用操作失败")
     } finally {
       setIsSaveSubmitting(false)
     }
@@ -547,7 +557,7 @@ export function BrowserScriptRecordingControls({
       console.error(
         `[BrowserScriptRecordingControls] Failed to read library script ${entry.fileName}: ${formatError(error)}`
       )
-      toast.error(formatError(error) || "读取脚本失败")
+      toast.error(formatError(error) || "读取可复用操作失败")
       throw error
     } finally {
       setLoadingLibraryFileName(null)
@@ -570,7 +580,7 @@ export function BrowserScriptRecordingControls({
         label: string
         fileName?: string
         workspacePath?: string | null
-      } = { label: "当前脚本" },
+      } = { label: "当前操作" },
       variableValues?: Record<string, string | string[]>
     ): Promise<void> => {
       if (!script.trim()) {
@@ -615,7 +625,8 @@ export function BrowserScriptRecordingControls({
         label: string
         fileName?: string
         workspacePath?: string | null
-      } = { label: "当前脚本" }
+      } = { label: "当前操作" },
+      detailSource?: PlaybackModeState["detailSource"]
     ): Promise<void> => {
       if (!script.trim()) {
         toast.error("当前没有可执行的脚本内容")
@@ -627,6 +638,9 @@ export function BrowserScriptRecordingControls({
       }
 
       openPlaybackMode(options)
+      if (detailSource) {
+        setPlaybackMode((current) => ({ ...current, detailSource }))
+      }
       const variables = extractScriptRecordingVariables(script)
       if (variables.length === 0) {
         await executeScriptInBuiltinBrowser(script, options)
@@ -645,6 +659,20 @@ export function BrowserScriptRecordingControls({
     },
     [executeScriptInBuiltinBrowser, openPlaybackMode, playbackState.status]
   )
+
+  const testCurrentRecordingScript = useCallback(async (): Promise<void> => {
+    if (hasUnnamedVariableActions) {
+      toast.error("请先为已标记为变量的步骤填写变量名")
+      return
+    }
+    setPlaybackMode((current) => ({
+      active: true,
+      key: current.key + 1,
+      label: "测试回放",
+      detailSource: "recording"
+    }))
+    await executeScriptInBuiltinBrowser(draftScript, { label: "测试回放" })
+  }, [draftScript, executeScriptInBuiltinBrowser, hasUnnamedVariableActions])
 
   const submitScriptVariableExecution = useCallback(async () => {
     if (!pendingScriptExecution) return
@@ -697,11 +725,15 @@ export function BrowserScriptRecordingControls({
       setLoadingLibraryFileName(entry.fileName)
       setLoadingLibraryAction("execution")
       try {
-        await requestScriptExecution(script, {
-          label: entry.displayName || entry.fileName,
-          fileName: entry.fileName,
-          workspacePath: entry.workspacePath
-        })
+        await requestScriptExecution(
+          script,
+          {
+            label: entry.displayName || entry.fileName,
+            fileName: entry.fileName,
+            workspacePath: entry.workspacePath
+          },
+          "library"
+        )
       } finally {
         setLoadingLibraryFileName(null)
         setLoadingLibraryAction(null)
@@ -718,12 +750,12 @@ export function BrowserScriptRecordingControls({
       setScriptLibraryEntries((current) =>
         current.filter((item) => item.fileName !== entry.fileName)
       )
-      toast.success("脚本文件及映射已删除")
+      toast.success("可复用操作已删除")
     } catch (error) {
       console.error(
         `[BrowserScriptRecordingControls] Failed to delete library script ${entry.fileName}: ${formatError(error)}`
       )
-      toast.error(formatError(error) || "删除脚本失败")
+      toast.error(formatError(error) || "删除可复用操作失败")
     } finally {
       setLoadingLibraryFileName(null)
       setLoadingLibraryAction(null)
@@ -758,7 +790,7 @@ export function BrowserScriptRecordingControls({
         console.error(
           `[BrowserScriptRecordingControls] Failed to update library script ${entry.fileName}: ${formatError(error)}`
         )
-        toast.error(formatError(error) || "保存脚本失败")
+        toast.error(formatError(error) || "保存可复用操作失败")
         throw error
       } finally {
         setLoadingLibraryFileName(null)
@@ -811,7 +843,7 @@ export function BrowserScriptRecordingControls({
   const continueRecordingFromLibrary = useCallback(
     async (entry: BrowserScriptLibraryEntry, script: string) => {
       if (!script.trim()) {
-        toast.error("当前脚本内容为空，请先编辑脚本后再继续录制")
+        toast.error("当前自动化内容为空，请先编辑后再继续录制")
         return
       }
       if (scriptSessionIsActive) {
@@ -834,7 +866,7 @@ export function BrowserScriptRecordingControls({
         setHasPendingUnsaved(false)
         setScriptLibraryOpen(false)
         setRecordingDialogOpen(false)
-        toast.success(`${getRecordingLabel("script")}已从当前脚本继续`)
+        toast.success(`${getRecordingLabel("script")}已从当前操作继续`)
       } catch (error) {
         console.error(
           `[BrowserScriptRecordingControls] Failed to continue library script ${entry.fileName}: ${formatError(error)}`
@@ -981,6 +1013,7 @@ export function BrowserScriptRecordingControls({
           isCancellingPlayback={isCancellingPlayback}
           onCancelPlayback={cancelPlayback}
           onExitPlaybackMode={closePlaybackMode}
+          onOpenScriptDetail={playbackModeActive ? openActivePlaybackScriptDetail : undefined}
         />
 
         {showRecordingControls ? (
@@ -1030,6 +1063,8 @@ export function BrowserScriptRecordingControls({
         isSaveSubmitting={isSaveSubmitting}
         hasWorkspace={hasWorkspace}
         hasUnnamedVariableActions={hasUnnamedVariableActions}
+        isTestPlaybackRunning={isPlaybackBusy}
+        onTestPlayback={() => void testCurrentRecordingScript()}
         onConfirmSave={() => void confirmSaveToLibrary()}
       />
 

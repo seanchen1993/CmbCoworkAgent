@@ -5,6 +5,7 @@ import {
   WORKFLOW_NOTIFICATION_TURN_PROMPT
 } from "../../../../shared/internal-notification-turn"
 import { SKILL_USE_TAG_NAME, skillUseDisplayLabel } from "../../../../shared/skill-use-block"
+import { formatBuiltinBrowserPrompt } from "../../features/builtin-browser/builtin-browser"
 import {
   buildThreadConversation,
   buildTraceConversation,
@@ -30,6 +31,33 @@ function traceWithResponse(
     ...overrides
   }
 }
+
+describe("内置浏览器会话还原", () => {
+  it("保留 slash 选择标记并只展示用户可见文本", () => {
+    const conversation = buildTraceConversation(
+      traceWithResponse({ userMessage: formatBuiltinBrowserPrompt("检查登录页") })
+    )
+
+    expect(conversation.userText).toBe("检查登录页")
+    expect(conversation.messages[0]).toMatchObject({
+      role: "user",
+      content: "检查登录页",
+      builtinBrowserSelected: true
+    })
+  })
+
+  it("内置浏览器-only 消息仍保留用户消息和标签", () => {
+    const conversation = buildTraceConversation(
+      traceWithResponse({ userMessage: formatBuiltinBrowserPrompt("") })
+    )
+
+    expect(conversation.messages[0]).toMatchObject({
+      role: "user",
+      content: "",
+      builtinBrowserSelected: true
+    })
+  })
+})
 
 describe("Thread project node summary", () => {
   it("deduplicates visited project nodes regardless of node status", () => {

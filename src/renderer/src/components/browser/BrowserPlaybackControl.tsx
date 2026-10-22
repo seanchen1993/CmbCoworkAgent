@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { AlertTriangle, ArrowLeft, Check, Copy, Loader2, Square, X } from "lucide-react"
+import { AlertTriangle, ArrowLeft, Check, Copy, FileCode2, Loader2, Square, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type { BrowserScriptExecutionState } from "../../../../shared/browser-types"
@@ -15,6 +15,7 @@ interface BrowserPlaybackControlProps {
   isCancellingPlayback: boolean
   onCancelPlayback: () => void
   onExitPlaybackMode?: () => void
+  onOpenScriptDetail?: () => void
 }
 
 function getPlaybackStatusText(state: BrowserScriptExecutionState): string {
@@ -52,7 +53,7 @@ export function getPlaybackStatusDetail(state: BrowserScriptExecutionState): str
     const percent = Math.max(0, Math.min(100, Math.round(state.progressPercent)))
     return `${percent}%`
   }
-  return state.label || state.fileName || "当前脚本"
+  return state.label || state.fileName || "当前操作"
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -74,7 +75,8 @@ export function BrowserPlaybackControl({
   preferFallbackStatusWhenPlaybackInactive = false,
   isCancellingPlayback,
   onCancelPlayback,
-  onExitPlaybackMode
+  onExitPlaybackMode,
+  onOpenScriptDetail
 }: BrowserPlaybackControlProps): React.JSX.Element {
   const [elapsedNow, setElapsedNow] = useState(() => Date.now())
   const [dismissedErrorKey, setDismissedErrorKey] = useState<string | null>(null)
@@ -211,32 +213,60 @@ export function BrowserPlaybackControl({
         </div>
 
         {playbackModeActive && playbackStatusActive ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="h-8 rounded-md px-2.5 text-[11px] text-muted-foreground hover:text-foreground"
-            disabled={isCancellingPlayback}
-            onClick={onCancelPlayback}
-          >
-            {isCancellingPlayback ? (
-              <Loader2 className="size-3 animate-spin" strokeWidth={1.8} />
-            ) : (
-              <Square className="size-3 text-red-500" strokeWidth={1.8} />
-            )}
-            {isCancellingPlayback ? "终止中..." : "终止回放"}
-          </Button>
+          <div className="flex shrink-0 items-center">
+            {onOpenScriptDetail ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-8 rounded-md px-2.5 text-[11px] text-muted-foreground hover:text-foreground"
+                onClick={onOpenScriptDetail}
+              >
+                <FileCode2 className="size-3" strokeWidth={1.8} />
+                查看详情
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-8 rounded-md px-2.5 text-[11px] text-muted-foreground hover:text-foreground"
+              disabled={isCancellingPlayback}
+              onClick={onCancelPlayback}
+            >
+              {isCancellingPlayback ? (
+                <Loader2 className="size-3 animate-spin" strokeWidth={1.8} />
+              ) : (
+                <Square className="size-3 text-red-500" strokeWidth={1.8} />
+              )}
+              {isCancellingPlayback ? "终止中..." : "终止回放"}
+            </Button>
+          </div>
         ) : playbackModeActive ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="h-8 rounded-md px-2.5 text-[11px] text-muted-foreground hover:text-foreground"
-            onClick={onExitPlaybackMode}
-          >
-            <ArrowLeft className="size-3" strokeWidth={1.8} />
-            返回
-          </Button>
+          <div className="flex shrink-0 items-center">
+            {onOpenScriptDetail ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-8 rounded-md px-2.5 text-[11px] text-muted-foreground hover:text-foreground"
+                onClick={onOpenScriptDetail}
+              >
+                <FileCode2 className="size-3" strokeWidth={1.8} />
+                查看详情
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-8 rounded-md px-2.5 text-[11px] text-muted-foreground hover:text-foreground"
+              onClick={onExitPlaybackMode}
+            >
+              <ArrowLeft className="size-3" strokeWidth={1.8} />
+              返回
+            </Button>
+          </div>
         ) : null}
       </div>
     </div>

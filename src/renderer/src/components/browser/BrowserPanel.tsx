@@ -358,7 +358,9 @@ export function BrowserPanel({
         `${BROWSER_PANEL_LOG_PREFIX} Automatic Cookie import attempt ${attempt + 1} failed: ${message}`
       )
       if (retryDelay === undefined || !isAutomaticCookieImportRetryable(result.errorCode)) {
-        reportBrowserError(`未能自动导入 Cookie：${message}。请重启 Chrome 后点击钥匙按钮手动重试。`)
+        reportBrowserError(
+          `未能自动导入 Cookie：${message}。请重启 Chrome 后点击钥匙按钮手动重试。`
+        )
         markBrowserProfileImportFeedback(false)
         return
       }
@@ -773,7 +775,9 @@ export function BrowserPanel({
     try {
       await window.electron.openExternal(target)
     } catch (error) {
-      console.error(`${BROWSER_PANEL_LOG_PREFIX} External browser open failed: ${formatError(error)}`)
+      console.error(
+        `${BROWSER_PANEL_LOG_PREFIX} External browser open failed: ${formatError(error)}`
+      )
       reportBrowserError(formatError(error) || "在浏览器打开失败")
     }
   }, [reportBrowserError, state.url, urlInput])
@@ -809,7 +813,8 @@ export function BrowserPanel({
         ? "内置浏览器尚未就绪"
         : "导入浏览器数据"
   const externalBrowserUrl = normalizeExternalBrowserUrl(urlInput || state.url)
-  const externalBrowserOpenDisabled = !externalBrowserUrl || isInitialBrowserPage(externalBrowserUrl)
+  const externalBrowserOpenDisabled =
+    !externalBrowserUrl || isInitialBrowserPage(externalBrowserUrl)
   const toggleFullscreen = (): void => {
     setIsFullscreen((prev) => !prev)
   }
@@ -1042,8 +1047,8 @@ export function BrowserPanel({
             className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
             side="left"
             icon={<Video className="size-4" strokeWidth={1.8} />}
-            popoverContent="录制脚本"
-            aria-label="录制脚本"
+            popoverContent="自动化操作"
+            aria-label="自动化操作"
             aria-pressed={recordingBoxOpen}
             onClick={() => setRecordingBoxOpen((open) => !open)}
           />

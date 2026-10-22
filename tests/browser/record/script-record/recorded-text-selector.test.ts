@@ -2,6 +2,7 @@ import { runInNewContext } from "node:vm"
 import { describe, expect, it } from "vitest"
 import {
   buildPlaywrightScriptRecorderInjectionScript,
+  isDynamicOverlaySelector,
   preferExactRecordedTextSelector
 } from "../../../../src/main/browser/record/script-record/script-recorder-playwright-adapter"
 import { formatPlaywrightSelector } from "../../../../src/main/browser/record/common/playwright-codegen/projectLocatorAdapter"
@@ -63,6 +64,29 @@ describe("recorded text selector precision", () => {
         value === selector ? [target, other] : [target]
       )
     ).toBe(exact)
+  })
+})
+
+describe("dynamic Element UI overlay selectors", () => {
+  it.each([
+    '#el-popover-3396 >> internal:text="Merge（推荐）"s',
+    'css=[id="el-tooltip-4366"] >> internal:text="帮助"s',
+    "#el-dropdown-1024",
+    "#el-popper-88",
+    '#at-popover-2048 >> internal:text="Merge（推荐）"s',
+    "#custom-menu-popover-9001",
+    "#popover-42"
+  ])("recognizes transient generated ids: %s", (selector) => {
+    expect(isDynamicOverlaySelector(selector)).toBe(true)
+  })
+
+  it.each([
+    "#merge-popover",
+    "#el-popover-stable",
+    "#custom-menu-popover-final",
+    'internal:text="Merge（推荐）"s'
+  ])("leaves stable selectors alone: %s", (selector) => {
+    expect(isDynamicOverlaySelector(selector)).toBe(false)
   })
 })
 
