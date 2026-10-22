@@ -1,5 +1,5 @@
 import { BookOpen } from "lucide-react"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 
 export function ThreadSkillUsageMetric({
   skills,
@@ -28,20 +28,22 @@ export function ThreadSkillUsageMetric({
         ) : loading ? (
           <p className="text-xs text-muted-foreground">加载中…</p>
         ) : skills.length ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span tabIndex={0} className="block max-w-56 truncate text-[12px] font-semibold">
-                {skills.join("、")}
-              </span>
-            </TooltipTrigger>
-            <TooltipContent className="max-h-48 max-w-sm overflow-y-auto">
-              {skills.map((skill) => (
-                <p key={skill} className="break-all">
-                  {skill}
-                </p>
-              ))}
-            </TooltipContent>
-          </Tooltip>
+          <TooltipProvider delayDuration={150}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span tabIndex={0} className="block max-w-56 truncate text-[12px] font-semibold">
+                  {skills.join("、")}
+                </span>
+              </TooltipTrigger>
+              <TooltipContent className="max-h-48 max-w-sm overflow-y-auto">
+                {skills.map((skill) => (
+                  <p key={skill} className="break-all">
+                    {skill}
+                  </p>
+                ))}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         ) : (
           <p className="text-xs text-muted-foreground">未记录</p>
         )}
