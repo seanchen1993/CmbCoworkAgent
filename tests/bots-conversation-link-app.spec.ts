@@ -34,31 +34,40 @@ async function main() {
           typeof last?.content === "string" ? last.content : JSON.stringify(last?.content ?? "")
       const all = JSON.stringify(messages)
       calls.push({ path: req.url ?? "", user, all })
+      const reporting = messages.some(
+        (m: any) =>
+          m.role === "system" &&
+          JSON.stringify(m.content).includes("An independent task returned a host-recorded result")
+      )
       let reply = "本机对话可用。"
-      if (user.includes("LINK_INITIAL"))
-        reply = "LINK_INITIAL_REPLY：已保留既有讨论，可以继续修改。"
-      if (user.includes("LINK_MODIFY_FROM_BOT")) {
-        assert.ok(all.includes("LINK_INITIAL_REPLY"))
-        reply = "LINK_BOT_REPLY：已从 Bot 入口继续同一段讨论。"
-      }
-      if (user.includes("LINK_MODIFY_FROM_CHAT")) {
-        assert.ok(all.includes("LINK_BOT_REPLY"))
-        reply = "LINK_CHAT_REPLY：两个入口使用同一会话。"
-      }
-      if (user.includes("LINK_NEW_WORK")) reply = "LINK_NEW_REPLY：新任务也有同一个本机会话入口。"
-      if (user.includes("LINK_UNLINKED")) reply = "LINK_UNLINKED_REPLY：普通会话继续保留。"
-      if (user.includes("memory") && !user.includes("LINK_")) reply = "[]"
-      if (
-        messages.some(
-          (m: any) =>
-            m.role === "system" &&
-            JSON.stringify(m.content).includes(
-              "An independent task returned a host-recorded result"
-            )
-        )
-      ) {
+      if (reporting) {
         assert.equal((body.tools ?? []).length, 0)
-        reply = "LINK_RETURN：" + JSON.parse(user).result
+        const result = JSON.parse(user)
+        const request = result.requestContext.messages.map((entry: any) => entry.text).join("\n")
+        const expected = result.result.includes("LINK_CHAT_REPLY")
+          ? "LINK_MODIFY_FROM_CHAT"
+          : result.result.includes("LINK_BOT_REPLY")
+            ? "LINK_MODIFY_FROM_BOT"
+            : "LINK_NEW_WORK"
+        assert.ok(
+          request.includes(expected),
+          "the report must carry the request from its actual source conversation"
+        )
+        reply = "LINK_RETURN：" + result.result
+      } else {
+        if (user.includes("LINK_INITIAL"))
+          reply = "LINK_INITIAL_REPLY：已保留既有讨论，可以继续修改。"
+        if (user.includes("LINK_MODIFY_FROM_BOT")) {
+          assert.ok(all.includes("LINK_INITIAL_REPLY"))
+          reply = "LINK_BOT_REPLY：已从 Bot 入口继续同一段讨论。"
+        }
+        if (user.includes("LINK_MODIFY_FROM_CHAT")) {
+          assert.ok(all.includes("LINK_BOT_REPLY"))
+          reply = "LINK_CHAT_REPLY：两个入口使用同一会话。"
+        }
+        if (user.includes("LINK_NEW_WORK")) reply = "LINK_NEW_REPLY：新任务也有同一个本机会话入口。"
+        if (user.includes("LINK_UNLINKED")) reply = "LINK_UNLINKED_REPLY：普通会话继续保留。"
+        if (user.includes("memory") && !user.includes("LINK_")) reply = "[]"
       }
       if (body.stream) {
         res.writeHead(200, { "content-type": "text/event-stream" })
@@ -84,6 +93,7 @@ async function main() {
         )
     } catch (error) {
       errors.push(String(error))
+      console.error("Local link model fixture failed:", error)
       res.writeHead(500).end("fixture failure")
     }
   })

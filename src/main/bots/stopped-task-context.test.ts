@@ -52,6 +52,45 @@ describe("Bot stopped task context", () => {
     expect(store.stoppedTaskContext(interrupted.id)).toEqual([])
     expect(() => store.stoppedTaskContext("missing")).toThrow()
   })
+  it("carries only the original work's stopped receipts when main forwards a request to resume", () => {
+    const { store, bot } = fixture()
+    const { work, task } = store.createWork({
+      botId: bot.id,
+      operationId: "first",
+      title: "Plan",
+      goal: "Run once"
+    })
+    store.transition(task.id, "running")
+    store.transition(task.id, "interrupted")
+    const other = store.createWork({
+      botId: bot.id,
+      operationId: "other",
+      title: "Other",
+      goal: "Do not import"
+    })
+    store.transition(other.task.id, "cancelled")
+    const main = store.enqueue({
+      botId: bot.id,
+      requestId: "main-stopped",
+      message: "Private stopped work"
+    })
+    store.transition(main.id, "cancelled")
+    const source = store.enqueue({
+      botId: bot.id,
+      requestId: "resume",
+      message: "Continue the original plan"
+    })
+    store.transition(source.id, "running")
+    const resumed = store.sendWork(
+      { taskId: source.id, callId: "forward", key: "forward" },
+      work.id,
+      "Continue"
+    )
+    expect(store.stoppedTaskContext(resumed.id)).toEqual([
+      { taskId: task.id, state: "interrupted", source: "user", messagePreview: "Run once" }
+    ])
+    expect(store.getTask(task.id).state).toBe("interrupted")
+  })
   it("bounds receipt count and previews, including tied timestamps, without changing control state", () => {
     const { store, bot } = fixture()
     const ids: string[] = []

@@ -534,6 +534,111 @@ describe("Bot Runtime integration", () => {
       expect(request.message).toContain(peerTask.message)
     }
   )
+  it.each(["directory", "linked"] as const)(
+    "resolves the delegating task's %s workspace without mutating its thread",
+    async (kind) => {
+      const work: BotWorkItem = {
+        id: "sender-work",
+        botId: "b",
+        threadId: "sender-thread",
+        parentThreadId: "sender-main",
+        title: "Plan",
+        goal: "Plan",
+        audienceKey: "desktop",
+        state: "active",
+        version: 1,
+        threadInitialized: true,
+        createdAt: 1,
+        updatedAt: 1,
+        executionState: "running",
+        pendingPeers: 1,
+        backgroundBusy: false,
+        ...(kind === "directory"
+          ? { workspace: { kind: "directory" as const, path: "/original/project" } }
+          : {
+              conversation: {
+                origin: "existing" as const,
+                state: "bound" as const,
+                ref: {
+                  kind: "local_thread" as const,
+                  threadId: "sender-thread",
+                  incarnation: { token: "token", legacyCreatedAt: 1 }
+                }
+              }
+            })
+      }
+      fixture.thread.mockImplementation((id: string) =>
+        id === work.threadId
+          ? {
+              created_at: 1,
+              metadata: JSON.stringify({
+                ...metadata(),
+                botId: "b",
+                botWorkId: work.id,
+                botAudienceKey: "desktop",
+                botLocalConversation: true,
+                botWorkOrigin: "existing",
+                cmb_thread_incarnation: "token",
+                workspacePath: "/original/project"
+              })
+            }
+          : { metadata: JSON.stringify(metadata()) }
+      )
+      const peerTask: BotTask = {
+        ...task,
+        origin: {
+          kind: "bot",
+          fromBotId: "b",
+          rootTaskId: "root",
+          depth: 1,
+          expectsReply: true,
+          returnWorkId: work.id,
+          rootWorkId: work.id
+        }
+      }
+      await port(work).acquire(bot, peerTask)!.execute(new AbortController().signal, vi.fn())
+      expect(fixture.start.mock.calls[0][2].extraSystemPrompt).toContain(
+        'Host-confirmed sender workspace (path base only, not permission to scan or use other files): "/original/project"'
+      )
+      expect(fixture.update.mock.calls.every(([id]) => id !== work.threadId)).toBe(true)
+      expect(fixture.create.mock.calls.every(([id]) => id !== work.threadId)).toBe(true)
+      if (kind === "linked") {
+        fixture.start.mockClear()
+        fixture.thread.mockImplementation((id: string) =>
+          id === work.threadId
+            ? {
+                created_at: 1,
+                metadata: JSON.stringify({ ...metadata(), cmb_thread_incarnation: "replaced" })
+              }
+            : { metadata: JSON.stringify(metadata()) }
+        )
+        await expect(
+          port(work).acquire(bot, peerTask)!.execute(new AbortController().signal, vi.fn())
+        ).rejects.toThrow("身份不一致")
+        expect(fixture.start).not.toHaveBeenCalled()
+      }
+    }
+  )
+  it.each([true, false])(
+    "keeps a nested delegate or reply on the actual peer's workspace (reply: %s)",
+    async (reply) => {
+      const origin: BotTask["origin"] = {
+        kind: "bot",
+        fromBotId: "b",
+        rootTaskId: "root",
+        depth: 2,
+        expectsReply: !reply,
+        rootWorkId: "original-work",
+        ...(reply ? { returnWorkId: "original-work" } : {})
+      }
+      await port()
+        .acquire(bot, { ...task, origin })!
+        .execute(new AbortController().signal, vi.fn())
+      expect(fixture.start.mock.calls[0][2].extraSystemPrompt).toContain(
+        'Host-confirmed sender workspace (path base only, not permission to scan or use other files): "/synthetic/workspaces/b"'
+      )
+    }
+  )
   it("preserves a delegated task's explicitly recipient-local inputs and current directory", async () => {
     const peerTask: BotTask = {
       ...task,
@@ -1622,6 +1727,7 @@ describe("Bot Runtime integration", () => {
   it.each<[BotTask["origin"], string]>([
     [{ kind: "introduction" }, "first conversation after the user created you"],
     [{ kind: "user" }, "direct user request in your private conversation"],
+    [{ kind: "work", sourceTaskId: "source" }, "work transferred by this Bot"],
     [{ kind: "group", groupId: "g", messageId: "m" }, "direct user request in a group"],
     [{ kind: "discussion", groupId: "g", messageId: "m", round: 1 }, "optional continuation"],
     [{ kind: "schedule", scheduleId: "s" }, "previously configured work"],
@@ -1655,10 +1761,10 @@ describe("Bot Runtime integration", () => {
       metadata: JSON.stringify(metadata(inGroup ? "g" : undefined))
     })
     await port()
-      .acquire(bot, { ...task, origin })!
+      .acquire(bot, { ...task, origin, ...(origin.kind === "work" ? { workId: "work" } : {}) })!
       .execute(new AbortController().signal, vi.fn())
     const prompt = fixture.start.mock.calls[0][2].extraSystemPrompt as string
-    if (origin.kind === "user" || origin.kind === "group") {
+    if (["user", "group", "work"].includes(origin.kind)) {
       expect(fixture.stoppedTasks).toHaveBeenCalledWith(task.id)
       expect(prompt).toContain(stoppedContext)
       expect(prompt).toContain("STOPPED_COMMAND_CONTEXT")
@@ -2069,7 +2175,7 @@ describe("Bot steering uses the original runtime", () => {
     createdAt: "2026-10-18T00:00:00.000Z"
   }
   const addition = { ...task, id: "addition", requestId: "new-message", message: "New direction" }
-  it.each(["user", "introduction"] as const)(
+  it.each(["user", "introduction", "work"] as const)(
     "ignores an old %s question only after the new direct message is accepted",
     async (kind) => {
       fixture.pendingQuestion.mockReturnValue(question)
@@ -2077,8 +2183,11 @@ describe("Bot steering uses the original runtime", () => {
         expect(fixture.answerQuestion).not.toHaveBeenCalled()
         return { queued: true }
       })
-      const lease = port().acquire(bot, { ...task, origin: { kind } })!
-      expect(await lease.steer!(addition, () => true)).toBe(true)
+      const workId = kind === "work" ? "work" : undefined
+      const origin: BotTask["origin"] =
+        kind === "work" ? { kind, sourceTaskId: "source" } : { kind }
+      const lease = port().acquire(bot, { ...task, workId, origin })!
+      expect(await lease.steer!({ ...addition, workId }, () => true)).toBe(true)
       expect(fixture.pendingQuestion).toHaveBeenCalledWith(task.threadId)
       expect(fixture.answerQuestion).toHaveBeenCalledExactlyOnceWith(
         { requestId: question.requestId, answers: {}, ignored: true },
@@ -2343,45 +2452,52 @@ describe("Bot steering uses the original runtime", () => {
     finish()
     expect((await pending).state).toBe("superseded")
   })
-  it("leaves a new direct message queued while interrupting only its own active model round", async () => {
-    let context!: AgentRunExecutionContext
-    let finish!: () => void
-    fixture.start.mockImplementation(async (_request, _delivery, incoming) => {
-      context = incoming
-      return {
-        completion: new Promise<void>((resolve) => {
-          finish = resolve
-        })
-      }
-    })
-    const lease = port().acquire(bot, task)!
-    const pending = lease.execute(new AbortController().signal, vi.fn())
-    await vi.waitFor(() => expect(context).toBeDefined())
-    const interrupt = vi.fn(() => true)
-    context.onModelRequestState!(interrupt)
-    const inject = vi.fn(() => true)
-    for (const foreign of [
-      { ...task, botId: "other" },
-      { ...task, threadId: "other" }
-    ])
-      expect(await lease.steer!(foreign, inject)).toBe(false)
-    expect(interrupt).not.toHaveBeenCalled()
-    expect(
-      await lease.steer!({ ...task, id: "new", requestId: "new", message: "Correction" }, inject)
-    ).toBe(false)
-    expect(interrupt).toHaveBeenCalledOnce()
-    expect(inject).not.toHaveBeenCalled()
-    expect(fixture.steer).not.toHaveBeenCalled()
-    // A second arrival remains queued too, rather than entering the dying graph.
-    expect(await lease.steer!({ ...task, id: "next", requestId: "next" }, inject)).toBe(false)
-    expect(interrupt).toHaveBeenCalledOnce()
-    context.onRunTerminated?.({ outcome: "error", code: "cancelled" })
-    finish()
-    expect(await pending).toEqual({ state: "superseded" })
-    expect(fixture.summary).not.toHaveBeenCalled()
-    expect(fixture.cancelCommands).not.toHaveBeenCalled()
-    expect(fixture.cancelWorkers).not.toHaveBeenCalled()
-  })
+  it.each(["user", "work"] as const)(
+    "leaves a new message queued while interrupting only its own %s model round",
+    async (kind) => {
+      const source =
+        kind === "work" ? { ...task, workId: "work", origin: { kind, sourceTaskId: "main" } } : task
+      const input = { ...task, workId: source.workId }
+      let context!: AgentRunExecutionContext
+      let finish!: () => void
+      fixture.start.mockImplementation(async (_request, _delivery, incoming) => {
+        context = incoming
+        return {
+          completion: new Promise<void>((resolve) => {
+            finish = resolve
+          })
+        }
+      })
+      const lease = port().acquire(bot, source)!
+      const pending = lease.execute(new AbortController().signal, vi.fn())
+      await vi.waitFor(() => expect(context).toBeDefined())
+      const interrupt = vi.fn(() => true)
+      context.onModelRequestState!(interrupt)
+      const inject = vi.fn(() => true)
+      for (const foreign of [
+        { ...input, botId: "other" },
+        { ...input, threadId: "other" },
+        { ...input, workId: "other" }
+      ])
+        expect(await lease.steer!(foreign, inject)).toBe(false)
+      expect(interrupt).not.toHaveBeenCalled()
+      expect(
+        await lease.steer!({ ...input, id: "new", requestId: "new", message: "Correction" }, inject)
+      ).toBe(false)
+      expect(interrupt).toHaveBeenCalledOnce()
+      expect(inject).not.toHaveBeenCalled()
+      expect(fixture.steer).not.toHaveBeenCalled()
+      // A second arrival remains queued too, rather than entering the dying graph.
+      expect(await lease.steer!({ ...input, id: "next", requestId: "next" }, inject)).toBe(false)
+      expect(interrupt).toHaveBeenCalledOnce()
+      context.onRunTerminated?.({ outcome: "error", code: "cancelled" })
+      finish()
+      expect(await pending).toEqual({ state: "superseded" })
+      expect(fixture.summary).not.toHaveBeenCalled()
+      expect(fixture.cancelCommands).not.toHaveBeenCalled()
+      expect(fixture.cancelWorkers).not.toHaveBeenCalled()
+    }
+  )
   it("keeps the original injection path after model completion or stale cancellation refusal", async () => {
     let context!: AgentRunExecutionContext
     let finish!: () => void

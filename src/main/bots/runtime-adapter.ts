@@ -26,6 +26,7 @@ import {
 import {
   BotError,
   botTaskGroupId,
+  botTaskAcceptsUserInput,
   botGroupBrowserScope,
   type BotDefinition,
   type BotTask
@@ -123,6 +124,32 @@ function memoryUserText(task: Pick<BotTask, "message" | "origin">): string {
     : task.message
 }
 
+function linkedWorkWorkspace(work: BotWorkItem): string {
+  const row = getThreadCore(work.threadId)
+  if (!row || work.conversation?.state !== "bound")
+    throw new Error("任务会话尚未完成关联，请重新打开原任务。")
+  const metadata = JSON.parse(row.metadata || "{}")
+  verifyWorkConversationThread(work, row, metadata)
+  return metadata.workspacePath
+}
+
+function peerSenderWorkspace(sender: BotDefinition, task: BotTask, host: LocalBotHost): string {
+  if (task.origin.kind === "bot" && task.origin.expectsReply && task.origin.returnWorkId) {
+    const work = host.getWork(sender.id, task.origin.returnWorkId)
+    if (
+      work.botId !== sender.id ||
+      work.id !== task.origin.returnWorkId ||
+      work.source ||
+      work.audienceKey !== "desktop"
+    )
+      throw new BotError("CONFLICT", "协作来源与任务不一致，无法确定原工作目录。")
+    if (work.conversation) return linkedWorkWorkspace(work)
+    if (work.workspace) return work.workspace.path
+  }
+  // A nested delegation or reply originates in the peer's own workspace.
+  return botDirectory(join(getCmbCoworkAgentDataRoot(), "bots"), "workspaces", sender.id)
+}
+
 export function prepareBotThread(
   bot: BotDefinition,
   task?: Pick<BotTask, "threadId" | "origin">,
@@ -133,13 +160,10 @@ export function prepareBotThread(
   const threadId = task?.threadId ?? bot.threadId
   const source = mock?.source ?? work?.source
   if (work?.conversation) {
-    const row = getThreadCore(threadId)
-    if (!row || work.conversation.state !== "bound")
-      throw new Error("任务会话尚未完成关联，请重新打开原任务。")
-    const metadata = JSON.parse(row.metadata || "{}")
-    verifyWorkConversationThread(work, row, metadata)
+    if (work.threadId !== threadId || work.botId !== bot.id)
+      throw new BotError("CONFLICT", "Bot 会话身份不一致，已停止执行")
     // Both entrances edit this very Thread. Preserve its settings and original directory.
-    return metadata.workspacePath
+    return linkedWorkWorkspace(work)
   }
   if (source && work?.workspace) throw new Error("模拟渠道不能绑定本机工作目录")
   const workspacePath =
@@ -496,9 +520,7 @@ export function createLocalBotRunPort(
                 throw error
             }
           }
-          const senderWorkspace = sender
-            ? botDirectory(join(getCmbCoworkAgentDataRoot(), "bots"), "workspaces", sender.id)
-            : undefined
+          const senderWorkspace = sender ? peerSenderWorkspace(sender, task, getHost()) : undefined
           const peerDelivery =
             peerReplyFiles && senderWorkspace
               ? { workspacePath: senderWorkspace, files: peerReplyFiles }
@@ -799,7 +821,9 @@ export function createLocalBotRunPort(
                     ? "\n\nCurrent group participants (host facts; these IDs and names supersede historical member names, not the user's task or permissions):\n" +
                       JSON.stringify(getHost().peers(task.id))
                     : "") +
-                  (task.origin.kind === "user" || task.origin.kind === "group"
+                  (task.origin.kind === "user" ||
+                  task.origin.kind === "group" ||
+                  (task.origin.kind === "work" && task.workId)
                     ? "\n\n" + buildBotStoppedTaskPrompt(getHost().stoppedTaskContext(task.id))
                     : "") +
                   (resumeCheckpointId
@@ -945,7 +969,7 @@ export function createLocalBotRunPort(
                   getHost().onSteeringReady(task.id)
                 },
                 onModelRequestState:
-                  canDeferBotTask(task) || ["user", "introduction"].includes(task.origin.kind)
+                  canDeferBotTask(task) || botTaskAcceptsUserInput(task)
                     ? (interrupt) => {
                         interruptModel = interrupt
                         // The original ignored ToolMessage commits before the next model request.

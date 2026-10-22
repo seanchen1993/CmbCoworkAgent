@@ -15,6 +15,7 @@ import {
   LOCAL_BOT_HOST_ID,
   BotError,
   botTaskGroupId,
+  botTaskAcceptsUserInput,
   botTaskWorkFamily,
   type BotChangeEvent,
   type BotDefinition,
@@ -295,6 +296,7 @@ export class LocalBotHost {
       throw new BotError("CONFLICT", "只有当前用户明确指令可以转达工作消息")
     const result = this.store.sendWork(source, workId, message)
     this.changed()
+    this.steerUserMessage(result)
     this.wake()
     return result
   }
@@ -846,7 +848,12 @@ export class LocalBotHost {
   }
 
   private steerUserMessage(task: BotTask): void {
-    if (task.state !== "queued" || !["user", "group"].includes(task.origin.kind)) return
+    if (
+      task.state !== "queued" ||
+      (!["user", "group"].includes(task.origin.kind) &&
+        !(task.origin.kind === "work" && botTaskAcceptsUserInput(task)))
+    )
+      return
     const groupId = task.origin.kind === "group" ? task.origin.groupId : undefined
     const backgroundRun = [...this.active.values()].find(
       (candidate) =>
@@ -854,7 +861,7 @@ export class LocalBotHost {
         canDeferBotTask(candidate.task) &&
         (!task.workId || candidate.task.threadId === task.threadId) &&
         (!candidate.task.workId || candidate.task.threadId === task.threadId) &&
-        (task.origin.kind === "user" ||
+        (task.origin.kind !== "group" ||
           (candidate.task.origin.kind === "bot" &&
             candidate.task.origin.groupId === groupId &&
             candidate.task.threadId === task.threadId &&
@@ -912,7 +919,7 @@ export class LocalBotHost {
     const run = this.active.get(taskId)
     if (
       !run ||
-      (!canDeferBotTask(run.task) && !["user", "introduction"].includes(run.task.origin.kind)) ||
+      (!canDeferBotTask(run.task) && !botTaskAcceptsUserInput(run.task)) ||
       run.controller.signal.aborted
     )
       return

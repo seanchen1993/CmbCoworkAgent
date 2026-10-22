@@ -34,7 +34,8 @@ async function main() {
       const user = text(messages[lastUser]?.content ?? ""),
         turn = messages.slice(lastUser + 1)
       const all = JSON.stringify(messages)
-      if (user.includes("M05_EDIT_WORK")) {
+      const inWork = all.includes("You are ALREADY inside independent task")
+      if (inWork && user.includes("M05_EDIT_WORK")) {
         assert.ok(
           all.includes("已写好**第一版安排**"),
           "edit must carry this work's previous assistant result"
@@ -48,7 +49,6 @@ async function main() {
       calls.push({ tools: used, lastUser: user.slice(0, 200) })
       let reply = "本机专家可以持续讨论并修改文字或文件。",
         call: { name: string; args: Record<string, unknown> } | undefined
-      const inWork = all.includes("You are ALREADY inside independent task")
       const reporting = messages.some(
         (m: any) =>
           m.role === "system" &&
@@ -58,6 +58,15 @@ async function main() {
         assert.equal((body.tools ?? []).length, 0, "a result report may not execute the task again")
         const result = JSON.parse(user)
         assert.equal(result.files[0].name, "report.md")
+        const requests = result.requestContext.messages.map((entry: any) => entry.text).join("\n")
+        assert.ok(
+          requests.includes(result.result.includes("第二版") ? "M05_EDIT_WORK" : "M05_CREATE_WORK"),
+          "a report must carry this execution's actual request, including task-local edits"
+        )
+        assert.ok(
+          !requests.includes("M05_PRIVATE_MAIN"),
+          "the result envelope must not import unrelated main context"
+        )
         reply = result.result.includes("第二版")
           ? "M05_WORK_RETURN：季度安排已按意见更新为第二版，文件在原任务中。"
           : "M05_WORK_RETURN：季度安排第一版已写好，report.md 在原任务中，可继续修改。"
@@ -153,6 +162,7 @@ async function main() {
       }
     } catch (error) {
       errors.push(String(error))
+      console.error("Local model fixture failed:", error)
       res.writeHead(500).end("fixture-error")
     }
   })

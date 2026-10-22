@@ -10,6 +10,7 @@ import { bindBotConversationDraft } from "@/lib/bot-conversation-draft"
 import { BotDraftSender, validateBotDraft } from "@/lib/bot-draft-sender"
 import {
   BOT_REQUEST_RECEIPT_LIMIT,
+  botTaskAcceptsUserInput,
   type BotDefinition,
   type BotClient,
   type BotSchedule,
@@ -146,8 +147,7 @@ export function BotConversation({
       ...(work?.conversation?.state === "bound" ? {} : { configureModel: onConfigureModel }),
       busy: Boolean(running) || backgroundBusy,
       busySubmitLabel: "发送消息",
-      canReplyToQuestionsInComposer:
-        running?.origin.kind === "user" || running?.origin.kind === "introduction",
+      canReplyToQuestionsInComposer: Boolean(running && botTaskAcceptsUserInput(running)),
       placeholder: `给 ${bot.name} 发消息…`
     }),
     [

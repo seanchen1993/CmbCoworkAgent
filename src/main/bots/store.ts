@@ -1564,7 +1564,12 @@ export class BotStore {
   /** Bounded control facts for a new direct user turn; no transcript scan or extra storage. */
   stoppedTaskContext(taskId: string): BotStoppedTaskContext[] {
     const current = this.getTask(taskId)
-    if (current.origin.kind !== "user" && current.origin.kind !== "group") return []
+    if (
+      current.origin.kind !== "user" &&
+      current.origin.kind !== "group" &&
+      !(current.origin.kind === "work" && current.workId)
+    )
+      return []
     const tasks = this.rows(
       `SELECT id,state,origin_json,substr(message,1,240) AS preview FROM bot_tasks
        WHERE bot_id=? AND thread_id=? AND id<>? AND state IN ('cancelled','interrupted')
@@ -2709,7 +2714,7 @@ export class BotStore {
     const supplements = this.rows(
       `SELECT substr(message,1,2000) AS text,length(message)>2000 AS truncated
        FROM bot_tasks WHERE work_id=? AND bot_id=? AND thread_id=? AND injected_into=?
-       AND json_extract(origin_json,'$.kind')='user'
+       AND json_extract(origin_json,'$.kind') IN ('user','work')
        ORDER BY created_at DESC,rowid DESC LIMIT 9`,
       [work.id, task.botId, task.threadId, task.id]
     )

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import type { BotTask } from "../../shared/bots/contracts"
+import { botTaskAcceptsUserInput, type BotTask } from "../../shared/bots/contracts"
 
 export type BotStoppedTaskContext =
   | {
@@ -17,11 +17,16 @@ export type BotStoppedTaskContext =
       commandPreview: string
     }
 
-/** Only direct user input in the same conversation may join its active Runtime. */
+/** Direct or host-forwarded user input may join only its own conversation Runtime. */
 export function canSteerBotTask(source: BotTask, incoming: BotTask): boolean {
-  if (source.botId !== incoming.botId || source.threadId !== incoming.threadId) return false
-  if (incoming.origin.kind === "user")
-    return source.origin.kind === "user" || source.origin.kind === "introduction"
+  if (
+    source.botId !== incoming.botId ||
+    source.threadId !== incoming.threadId ||
+    source.workId !== incoming.workId
+  )
+    return false
+  if (incoming.origin.kind === "user" || (incoming.origin.kind === "work" && incoming.workId))
+    return botTaskAcceptsUserInput(source)
   return (
     source.origin.kind === "group" &&
     incoming.origin.kind === "group" &&

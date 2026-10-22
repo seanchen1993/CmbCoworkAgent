@@ -113,6 +113,15 @@ export interface BotTask {
   origin: BotTaskOrigin
 }
 
+/** Interactive turn capability only; this does not grant profile or memory-write authority. */
+export function botTaskAcceptsUserInput(task: Pick<BotTask, "origin" | "workId">): boolean {
+  return (
+    task.origin.kind === "user" ||
+    task.origin.kind === "introduction" ||
+    (task.origin.kind === "work" && Boolean(task.workId))
+  )
+}
+
 /** One actual dispatch and its receipt, not either participant's private transcript. */
 export interface BotExchange {
   taskId: string
