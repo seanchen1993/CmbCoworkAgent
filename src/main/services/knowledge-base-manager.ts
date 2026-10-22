@@ -139,6 +139,14 @@ async function queryCloudKnowledgeBases(): Promise<ReturnType<typeof parseCloudK
               repoUrl: "https://github.com/octocat/Hello-World.git",
               sshUrl: null,
               gitRef: "master"
+            },
+            {
+              idKey: "test-agents-main-2",
+              name: "测试知识库 2",
+              description: "外网多知识库注入调试",
+              repoUrl: "https://github.com/seikou00/testAgents.git",
+              sshUrl: null,
+              gitRef: "main"
             }
           ]
         }
@@ -371,22 +379,30 @@ export async function syncKnowledgeBase(idKey: string): Promise<KnowledgeBaseSyn
 
 export async function resolveProjectKnowledgeBases(
   ids: readonly string[]
-): Promise<Array<{ name: string; path: string }>> {
-  const id = ids[0]?.trim()
-  if (!id) return []
+): Promise<Array<{ id: string; name: string; path: string }>> {
+  if (ids.length === 0) return []
   const state = await readKnowledgeState()
-  const item = state?.knowledgeBases.find((entry) => entry.idKey === id)
-  if (
-    item?.workspaces.find((entry) => entry.role === "read")?.status !== "success" ||
-    !(await isValidKnowledgeDirectory(id, "read"))
-  )
-    return []
-  return [{ name: item.name, path: knowledgeDirectory(id, "read") }]
+  const result: Array<{ id: string; name: string; path: string }> = []
+  for (const id of new Set(ids.map((id) => id.trim()).filter(Boolean))) {
+    const item = state?.knowledgeBases.find((entry) => entry.idKey === id)
+    if (
+      item?.workspaces.find((entry) => entry.role === "read")?.status === "success" &&
+      (await isValidKnowledgeDirectory(id, "read"))
+    ) {
+      result.push({ id: item.idKey, name: item.name, path: knowledgeDirectory(id, "read") })
+    }
+  }
+  return result
 }
 
-export async function resolveKnowledgeDepositionPath(ids: readonly string[]): Promise<string> {
-  const id = ids[0]?.trim()
-  if (!id) throw new Error("请先在项目设置中配置知识库")
+export async function resolveKnowledgeDepositionPath(
+  ids: readonly string[],
+  targetId?: string
+): Promise<string> {
+  if (ids.length === 0) throw new Error("请先在项目设置中配置知识库")
+  if (!targetId && ids.length > 1) throw new Error("请选择要沉淀的知识库")
+  const id = targetId ?? ids[0]
+  if (!ids.includes(id)) throw new Error("所选知识库未绑定到当前项目")
   const item = (await readKnowledgeState())?.knowledgeBases.find((entry) => entry.idKey === id)
   if (!item || !(await isValidKnowledgeDirectory(id, "write"))) {
     throw new Error("知识沉淀工作区不可用，请前往公共系统约束 Tab 下载或处理")
@@ -397,9 +413,10 @@ export async function resolveKnowledgeDepositionPath(ids: readonly string[]): Pr
 }
 
 export async function prepareKnowledgeDeposition(
-  ids: readonly string[]
+  ids: readonly string[],
+  targetId?: string
 ): Promise<KnowledgeDepositionWorkspace> {
-  const path = await resolveKnowledgeDepositionPath(ids)
+  const path = await resolveKnowledgeDepositionPath(ids, targetId)
   const dirty = await knowledgeWorkspaceHasChanges(path)
   return {
     path,
@@ -412,21 +429,23 @@ export async function assertSelectableKnowledgeBaseIds(
   preservedIds: readonly string[] = []
 ): Promise<string[]> {
   if (ids === undefined) return []
-  if (!Array.isArray(ids) || ids.length > 1 || ids.some((id) => typeof id !== "string"))
-    throw new Error("一期项目最多选择一个知识库")
+  if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string"))
+    throw new Error("知识库选择必须是编号数组")
   const normalized = [...new Set(ids.map((id) => id.trim()).filter(Boolean))]
   if (normalized.length === 0 || normalized.every((id) => preservedIds.includes(id)))
     return normalized
-  const selected = (await readKnowledgeState())?.knowledgeBases.find(
-    (item) => item.idKey === normalized[0]
-  )
-  if (
-    !selected ||
-    selected.visibility !== "visible" ||
-    selected.workspaces.find((entry) => entry.role === "read")?.status !== "success" ||
-    !(await isValidKnowledgeDirectory(selected.idKey, "read"))
-  ) {
-    throw new Error("所选知识库当前不可用，请刷新知识库列表后重试")
+  const state = await readKnowledgeState()
+  for (const id of normalized) {
+    if (preservedIds.includes(id)) continue
+    const selected = state?.knowledgeBases.find((item) => item.idKey === id)
+    if (
+      !selected ||
+      selected.visibility !== "visible" ||
+      selected.workspaces.find((entry) => entry.role === "read")?.status !== "success" ||
+      !(await isValidKnowledgeDirectory(id, "read"))
+    ) {
+      throw new Error("所选知识库当前不可用，请刷新知识库列表后重试")
+    }
   }
   return normalized
 }

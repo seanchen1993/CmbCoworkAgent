@@ -348,9 +348,12 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     return refreshKnowledgeBases()
   })
 
-  ipcMain.handle("harnessBoard:prepareKnowledgeDeposition", (_event, projectId: string) => {
-    return prepareHarnessKnowledgeDeposition(projectId)
-  })
+  ipcMain.handle(
+    "harnessBoard:prepareKnowledgeDeposition",
+    (_event, projectId: string, targetId?: string) => {
+      return prepareHarnessKnowledgeDeposition(projectId, targetId)
+    }
+  )
 
   ipcMain.handle(
     "harnessBoard:syncKnowledgeBase",

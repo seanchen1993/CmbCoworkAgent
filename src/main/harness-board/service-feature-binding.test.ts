@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process"
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest"
@@ -9,6 +10,7 @@ const state = vi.hoisted(() => ({
   projectExists: true,
   artifactConfig: undefined as unknown,
   sessionContextCommand: "",
+  knowledgeBaseIds: ["bound-knowledge"],
   inspect: vi.fn()
 }))
 vi.mock("../storage", () => ({ getOpenworkDir: () => state.root }))
@@ -26,7 +28,7 @@ vi.mock("./catalog-client", () => ({
               projectCode: "project",
               projectDir: "project",
               workspacePath: state.root,
-              knowledgeBaseIds: ["bound-knowledge"],
+              knowledgeBaseIds: state.knowledgeBaseIds,
               lifecycle: { status: "active" },
               "harness-adapter": { id: "plugin", name: "plugin", type: "plugin" }
             },
@@ -82,8 +84,14 @@ import {
   updateHarnessFeatureDeployUnits,
   buildHarnessFeatureAgentContext,
   archiveHarnessProject,
+  prepareHarnessKnowledgeDeposition,
   getHarnessRunDetail
 } from "./service"
+import {
+  mergeCloudKnowledgeState,
+  writeKnowledgeState,
+  knowledgeDirectory
+} from "../services/knowledge-base-state"
 import { FEATURE_V2_FILE, DEPLOY_UNIT_V2_FILE, initializeHarnessConfigV2 } from "./config-v2"
 
 const binding = {
@@ -106,6 +114,7 @@ beforeEach(async () => {
   state.projectExists = true
   state.artifactConfig = undefined
   state.sessionContextCommand = ""
+  state.knowledgeBaseIds = ["bound-knowledge"]
   state.inspect.mockClear()
 })
 afterAll(() => rm(state.root, { recursive: true, force: true }))
@@ -216,6 +225,74 @@ describe("plugin workspace placeholder", () => {
       expect(context?.sessionContextInjectWarning).toBe(
         "项目绑定的知识库当前不可用，本次会话未加载知识库"
       )
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it("passes all available libraries including ids as one JSON argument and warns on partial availability", async () => {
+    vi.stubEnv("CMB_COWORK_AGENT_HOME", state.root)
+    state.knowledgeBaseIds = ["second", "missing", "first"]
+    const libraries = ["first", "second"].map((idKey) => ({
+      idKey,
+      name: `知识库 ${idKey}`,
+      description: "",
+      ownerId: "",
+      ownerName: "",
+      repoUrl: "https://example.test/repo.git",
+      sshUrl: null,
+      gitRef: "main"
+    }))
+    const saved = mergeCloudKnowledgeState(null, libraries)
+    for (const item of saved.knowledgeBases) {
+      item.workspaces[0].status = "success"
+      await mkdir(join(knowledgeDirectory(item.idKey, "read"), ".git"), { recursive: true })
+      execFileSync("git", ["init", "--quiet", knowledgeDirectory(item.idKey, "write")])
+    }
+    await writeKnowledgeState(saved)
+    const script = join(state.root, "multiple-knowledge.cjs")
+    const argsPath = join(state.root, "multiple-knowledge-args.json")
+    await writeFile(
+      script,
+      `require("node:fs").writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2))); console.log(JSON.stringify({ok:true,sessionContext:"complete"}));`
+    )
+    state.sessionContextCommand = `"${process.execPath}" "${script}" --knowledge-path \${knowledgePath}`
+    try {
+      const context = await buildHarnessFeatureAgentContext({
+        harnessFeature: { projectId: "p", slug: "f" }
+      })
+      const args = JSON.parse(await readFile(argsPath, "utf8"))
+      expect(args).toHaveLength(2)
+      expect(JSON.parse(args[1])).toEqual(
+        ["second", "first"].map((id) => ({
+          id,
+          name: `知识库 ${id}`,
+          path: knowledgeDirectory(id, "read")
+        }))
+      )
+      expect(context?.sessionContextInjectWarning).toBe(
+        "部分项目知识库当前不可用，本次会话仅加载可用知识库"
+      )
+      await writeFile(
+        join(state.root, "harness-board-projects.json"),
+        JSON.stringify({
+          version: 1,
+          projects: [
+            {
+              projectId: "p",
+              name: "project",
+              projectCode: "project",
+              projectDir: "project",
+              workspacePath: state.root,
+              knowledgeBaseIds: ["first", "second"],
+              "harness-adapter": { id: "plugin", name: "plugin", type: "plugin" }
+            }
+          ]
+        })
+      )
+      await expect(prepareHarnessKnowledgeDeposition("p", "second")).resolves.toEqual({
+        path: knowledgeDirectory("second", "write")
+      })
     } finally {
       vi.unstubAllEnvs()
     }

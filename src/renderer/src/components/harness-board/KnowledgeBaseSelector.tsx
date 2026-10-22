@@ -26,7 +26,6 @@ export function KnowledgeBaseSelector({
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const optionsRef = useRef<HTMLDivElement>(null)
-  const selectedId = selectedIds[0] ?? ""
   const selectable = items.filter(
     (item) =>
       item.visibility === "visible" &&
@@ -34,7 +33,13 @@ export function KnowledgeBaseSelector({
         (entry) => entry.role === "read" && entry.status === "success" && entry.localValid
       )
   )
-  const selected = selectable.find((item) => item.idKey === selectedId)
+  const selected = selectedIds.flatMap((id) => selectable.filter((item) => item.idKey === id))
+  const selectedLabel =
+    selected.length > 0
+      ? selected.map(formatKnowledgeBaseLabel).join("、")
+      : selectedIds.length > 0
+        ? `已选择 ${selectedIds.length} 个知识库`
+        : ""
 
   return (
     <div className="mt-3 grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -45,15 +50,11 @@ export function KnowledgeBaseSelector({
             type="button"
             variant="outline"
             disabled={disabled}
-            aria-label={
-              selected
-                ? `选择系统约束，当前：${formatKnowledgeBaseLabel(selected)}`
-                : "选择系统约束"
-            }
+            aria-label={selectedLabel ? `选择系统约束，当前：${selectedLabel}` : "选择系统约束"}
             className="h-9 w-full min-w-0 justify-between gap-2 bg-background px-3 font-normal text-foreground"
           >
-            <span className={cn("min-w-0 truncate", !selected && "text-muted-foreground/45")}>
-              {selected ? formatKnowledgeBaseLabel(selected) : "请选择要使用的公共系统约束"}
+            <span className={cn("min-w-0 truncate", !selectedLabel && "text-muted-foreground/45")}>
+              {selectedLabel || "请选择要使用的公共系统约束"}
             </span>
             <ChevronDown className="size-4 shrink-0 opacity-50" />
           </Button>
@@ -106,7 +107,7 @@ export function KnowledgeBaseSelector({
                 key={item.idKey}
                 type="button"
                 role="option"
-                aria-selected={selectedId === item.idKey}
+                aria-selected={selectedIds.includes(item.idKey)}
                 onClick={() => {
                   onChange([item.idKey])
                   setOpen(false)
@@ -116,7 +117,9 @@ export function KnowledgeBaseSelector({
                 }}
                 className="relative flex w-full min-w-0 rounded-sm py-2 pl-4 pr-10 text-left text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
               >
-                {selectedId === item.idKey && <Check className="absolute right-3 top-3 size-4" />}
+                {selectedIds.includes(item.idKey) && (
+                  <Check className="absolute right-3 top-3 size-4" />
+                )}
                 <span className="min-w-0 truncate">{formatKnowledgeBaseLabel(item)}</span>
               </button>
             ))}
@@ -126,9 +129,21 @@ export function KnowledgeBaseSelector({
               </div>
             )}
           </div>
+          <div className="border-t p-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="w-full"
+              disabled={selectedIds.length === 0}
+              onClick={() => onChange([])}
+            >
+              清空选择
+            </Button>
+          </div>
         </PopoverContent>
       </Popover>
-      {selectedId && !supportsKnowledgeBaseContext && (
+      {selectedIds.length > 0 && !supportsKnowledgeBaseContext && (
         <span className="text-status-warning">
           插件尚未兼容系统约束读取，所选系统约束不会传给这个插件。
         </span>

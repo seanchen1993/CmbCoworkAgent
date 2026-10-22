@@ -90,7 +90,7 @@
 1. 项目仍保存 knowledgeBaseIds，一期最多一个；无绑定旧项目按 []，不自动补绑。
 2. 新选择仅接受 visible、read.status=success、read 有效。未修改字段时保留已有 ID，未配置时保持 []，下拉框不提供清空入口。
 3. 普通会话路径解析要求对应记录存在、read.status=success、read 目录有效；已有绑定不额外要求 visibility=visible。已绑定但不可用时，支持新版注入的插件传入 [] 并显示 toast，不阻断会话；未绑定时不提示。普通会话运行期间允许 read 自动更新。
-4. 模板有 ${knowledgePath} 时传入 [{name,path}]，path 仅指向 read，整个 JSON 为一个命令参数；无占位符不追加参数。
+4. 模板有 ${knowledgePath} 时传入 [{id,name,path}]，path 仅指向 read，整个 JSON 为一个命令参数；无占位符不追加参数。
 5. 读取失败返回 []，不回退插件旧目录、不返回 write 内容。
 
 定向测试：成功目录、失败状态但残留目录、不可见库的已有绑定、丢失目录、无绑定、模板无占位符、名称带空格或特殊字符时仍为一个 JSON 参数、无关项目编辑不清空绑定。

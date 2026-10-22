@@ -135,7 +135,7 @@ it("uses empty strings for missing identity values", async () => {
   )
 })
 
-it("syncs both external development repositories without a cloud request", async () => {
+it("syncs three development libraries without a cloud request and resolves independent selections", async () => {
   vi.stubEnv("DEV", true)
   const result = await refreshKnowledgeBases()
   expect(globalThis.fetch).not.toHaveBeenCalled()
@@ -159,9 +159,26 @@ it("syncs both external development repositories without a cloud request", async
         { role: "read", status: "success" },
         { role: "write", status: "success" }
       ]
+    },
+    {
+      idKey: "test-agents-main-2",
+      name: "测试知识库 2",
+      repoUrl: "https://github.com/seikou00/testAgents.git",
+      gitRef: "main",
+      type: "public",
+      workspaces: [
+        { role: "read", status: "success" },
+        { role: "write", status: "success" }
+      ]
     }
   ])
-  expect(mocks.syncKnowledgeRepository).toHaveBeenCalledTimes(4)
+  expect(mocks.syncKnowledgeRepository).toHaveBeenCalledTimes(6)
+  const ids = ["test-agents-main", "test-agents-main-2"]
+  await expect(assertSelectableKnowledgeBaseIds(ids)).resolves.toEqual(ids)
+  await expect(resolveProjectKnowledgeBases(ids)).resolves.toEqual([
+    { id: ids[0], name: "测试知识库", path: knowledgeDirectory(ids[0], "read") },
+    { id: ids[1], name: "测试知识库 2", path: knowledgeDirectory(ids[1], "read") }
+  ])
 })
 
 it("marks an absent library unavailable, stops updates, and still resolves a successful existing binding", async () => {
@@ -172,7 +189,7 @@ it("marks an absent library unavailable, stops updates, and still resolves a suc
   expect(mocks.syncKnowledgeRepository).not.toHaveBeenCalled()
   await expect(syncKnowledgeBase(item.idKey)).rejects.toThrow("当前不可见")
   await expect(resolveProjectKnowledgeBases([item.idKey])).resolves.toEqual([
-    { name: item.name, path: knowledgeDirectory(item.idKey, "read") }
+    { id: item.idKey, name: item.name, path: knowledgeDirectory(item.idKey, "read") }
   ])
 })
 
@@ -471,4 +488,40 @@ it("signals preview refresh after read updates even when write fails, without re
   expect(
     JSON.parse(await readFile(knowledgeStatePath(), "utf8")).knowledgeBases[0]
   ).not.toHaveProperty("previewRevision")
+})
+
+it("resolves multiple bindings in selection order with stable ids, skipping unavailable content", async () => {
+  const other = { ...item, idKey: "kb-other", name: "Other" }
+  cloud([item, other])
+  await refreshKnowledgeBases()
+  await expect(
+    assertSelectableKnowledgeBaseIds([other.idKey, item.idKey, other.idKey])
+  ).resolves.toEqual([other.idKey, item.idKey])
+  await expect(
+    resolveProjectKnowledgeBases([other.idKey, "missing", item.idKey, other.idKey])
+  ).resolves.toEqual([
+    { id: other.idKey, name: other.name, path: knowledgeDirectory(other.idKey, "read") },
+    { id: item.idKey, name: item.name, path: knowledgeDirectory(item.idKey, "read") }
+  ])
+  await expect(assertSelectableKnowledgeBaseIds([item.idKey, "missing"])).rejects.toThrow(
+    "当前不可用"
+  )
+  await expect(assertSelectableKnowledgeBaseIds(["old", other.idKey], ["old"])).resolves.toEqual([
+    "old",
+    other.idKey
+  ])
+  await expect(resolveProjectKnowledgeBases([])).resolves.toEqual([])
+})
+
+it("requires an explicit bound target for multi-library deposition", async () => {
+  const other = { ...item, idKey: "kb-other", name: "Other" }
+  cloud([item, other])
+  await refreshKnowledgeBases()
+  const ids = [item.idKey, other.idKey]
+  await expect(prepareKnowledgeDeposition(ids)).rejects.toThrow("请选择要沉淀的知识库")
+  await expect(prepareKnowledgeDeposition(ids, "unbound")).rejects.toThrow("未绑定")
+  await expect(prepareKnowledgeDeposition(ids, other.idKey)).resolves.toEqual({
+    path: knowledgeDirectory(other.idKey, "write")
+  })
+  await expect(assertSelectableKnowledgeBaseIds([])).resolves.toEqual([])
 })

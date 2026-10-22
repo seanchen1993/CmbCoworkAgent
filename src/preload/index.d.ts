@@ -3041,7 +3041,10 @@ interface CustomAPI {
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig) => Promise<HarnessLeanTokenConfig>
     listKnowledgeBases: () => Promise<KnowledgeBaseListResult>
     refreshKnowledgeBases: () => Promise<KnowledgeBaseListResult>
-    prepareKnowledgeDeposition: (projectId: string) => Promise<KnowledgeDepositionWorkspace>
+    prepareKnowledgeDeposition: (
+      projectId: string,
+      targetId?: string
+    ) => Promise<KnowledgeDepositionWorkspace>
     syncKnowledgeBase: (idKey: string) => Promise<KnowledgeBaseSyncResult>
     getKnowledgePreview: (idKey: string) => Promise<HarnessKnowledgePreviewResult>
     cancelKnowledgePreviewRequests: () => Promise<void>

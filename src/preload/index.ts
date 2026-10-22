@@ -4453,8 +4453,11 @@ const api = {
       ipcRenderer.invoke("harnessBoard:listKnowledgeBases") as Promise<KnowledgeBaseListResult>,
     refreshKnowledgeBases: (): Promise<KnowledgeBaseListResult> =>
       ipcRenderer.invoke("harnessBoard:refreshKnowledgeBases") as Promise<KnowledgeBaseListResult>,
-    prepareKnowledgeDeposition: (projectId: string): Promise<KnowledgeDepositionWorkspace> =>
-      ipcRenderer.invoke("harnessBoard:prepareKnowledgeDeposition", projectId),
+    prepareKnowledgeDeposition: (
+      projectId: string,
+      targetId?: string
+    ): Promise<KnowledgeDepositionWorkspace> =>
+      ipcRenderer.invoke("harnessBoard:prepareKnowledgeDeposition", projectId, targetId),
     syncKnowledgeBase: (idKey: string): Promise<KnowledgeBaseSyncResult> =>
       ipcRenderer.invoke(
         "harnessBoard:syncKnowledgeBase",

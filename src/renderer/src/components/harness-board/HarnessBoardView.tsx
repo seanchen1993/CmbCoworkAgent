@@ -5938,7 +5938,7 @@ function ProjectDetailPage({
                         ) : (
                           <RefreshCcw className="size-4" />
                         )}
-                        知识库沉淀
+                        系统约束沉淀
                       </Button>
                     </span>
                   </TooltipTrigger>
@@ -10928,13 +10928,14 @@ export function HarnessBoardView({
   )
 
   const handleKnowledgeDialogSubmit = useCallback(
-    async (content: string): Promise<void> => {
+    async (content: string, targetId?: string): Promise<void> => {
       if (!knowledgeDialogProject || !knowledgeDialogConfig || creatingProjectSessionProjectId)
         return
       setCreatingProjectSessionProjectId(knowledgeDialogProject.projectId)
       try {
         const workspace = await window.api.harnessBoard.prepareKnowledgeDeposition(
-          knowledgeDialogProject.projectId
+          knowledgeDialogProject.projectId,
+          targetId
         )
         if (workspace.warning) toast.warning(workspace.warning)
         const thread = await createThread(
@@ -11714,14 +11715,17 @@ export function HarnessBoardView({
                   (item) =>
                     selectedProject.knowledgeBaseIds.includes(item.idKey) &&
                     item.workspaces.some(
-                      (workspace) => workspace.role === "write" && workspace.localValid
+                      (workspace) =>
+                        workspace.role === "write" && workspace.localValid && !workspace.syncing
                     )
                 )
               : undefined
           }
           knowledgeSyncing={
-            knowledgeBaseResult?.writeSyncingIds.some((id) =>
-              selectedProject.knowledgeBaseIds.includes(id)
+            knowledgeBaseResult?.writeSyncingIds.some(
+              (id) =>
+                selectedProject.knowledgeBaseIds.length === 1 &&
+                selectedProject.knowledgeBaseIds.includes(id)
             ) === true
           }
           leanToken={leanTokenConfig.leanToken}
@@ -11784,6 +11788,8 @@ export function HarnessBoardView({
           open={knowledgeDialogOpen}
           onOpenChange={setKnowledgeDialogOpen}
           onSubmit={handleKnowledgeDialogSubmit}
+          knowledgeBases={knowledgeBaseResult?.knowledgeBases ?? []}
+          knowledgeBaseIds={knowledgeDialogProject?.knowledgeBaseIds ?? []}
           projectNumber={knowledgeDialogProject?.projectCode ?? ""}
           leanToken={leanTokenConfig.leanToken}
         />
@@ -12141,6 +12147,8 @@ export function HarnessBoardView({
         open={knowledgeDialogOpen}
         onOpenChange={setKnowledgeDialogOpen}
         onSubmit={handleKnowledgeDialogSubmit}
+        knowledgeBases={knowledgeBaseResult?.knowledgeBases ?? []}
+        knowledgeBaseIds={knowledgeDialogProject?.knowledgeBaseIds ?? []}
         projectNumber={knowledgeDialogProject?.projectCode ?? ""}
         leanToken={leanTokenConfig.leanToken}
       />

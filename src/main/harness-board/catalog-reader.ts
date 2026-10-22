@@ -588,7 +588,6 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
     knowledgeBaseIds: Array.isArray(value.knowledgeBaseIds)
       ? value.knowledgeBaseIds
           .filter((id): id is string => typeof id === "string" && Boolean(id.trim()))
-          .slice(0, 1)
           .map((id) => id.trim())
       : [],
     ...(systemConstraintFirstLoadedAt ? { systemConstraintFirstLoadedAt } : {}),

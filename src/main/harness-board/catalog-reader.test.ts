@@ -147,6 +147,17 @@ describe("Harness catalog reader", () => {
     }
   )
 
+  it("preserves every bound knowledge library in catalog and project context", async () => {
+    const paths = await makeCatalog(1)
+    const store = JSON.parse(readFileSync(paths.projects, "utf8"))
+    store.projects[0].knowledgeBaseIds = ["second", "first"]
+    writeFileSync(paths.projects, JSON.stringify(store))
+    const page = readHarnessCatalogPage(paths.projects, paths.plugins, {})
+    expect(page.projects[0].knowledgeBaseIds).toEqual(["second", "first"])
+    const context = readHarnessProjectContexts(paths.projects, paths.plugins, ["project-0"])
+    expect(context.projects["project-0"]?.project.knowledgeBaseIds).toEqual(["second", "first"])
+  })
+
   it("keeps a near-limit project/plugin response paged and below the IPC byte cap", async () => {
     const paths = await makeCatalog(1_000)
     const first = readHarnessCatalogPage(paths.projects, paths.plugins, {
