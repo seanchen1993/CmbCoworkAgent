@@ -140,10 +140,10 @@ export function RequirementHistoryView({
               <button
                 type="button"
                 className="flex h-9 items-center gap-2 rounded-lg bg-background-interactive px-3 text-xs font-medium text-muted-foreground"
-                aria-label="按创建时间倒序排列"
+                aria-label="按更新时间倒序排列"
               >
                 <ArrowDownWideNarrow className="size-4" />
-                创建时间
+                更新时间
               </button>
               <form
                 className="relative min-w-[240px] flex-1 xl:max-w-[420px]"

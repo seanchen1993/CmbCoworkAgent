@@ -40,7 +40,7 @@ import {
 } from "./requirement-data"
 
 const PAGE_SIZE = 10
-const STEPS = ["提供需求", "专家分析", "规范PRD", "原型设计", "发布3.0"]
+const STEPS = ["提供需求", "Agent分析", "规范PRD", "原型设计", "发布3.0"]
 export type RequirementSourceFilter = "all" | "local" | "remote" | "space"
 
 const REMOTE_MOCK_REQUIREMENT: RequirementRecord = {
@@ -538,7 +538,7 @@ export function RequirementHistoryList({
                         </span>
                         <span className="text-border-emphasis">·</span>
                         <span className="whitespace-nowrap tabular-nums">
-                          创建 {item.updatedAt}
+                          更新 {item.updatedAt}
                         </span>
                         {item.workspaceMissing ? (
                           <AlertTriangle
