@@ -16,7 +16,6 @@ export function BotGroupQuestion({
   bot: BotDefinition
   onOpenBot(bot: BotDefinition): void
 }) {
-  const context = useThreadContext()
   return (
     <article className="bot-group-message" aria-label={`${bot.name}的问题`}>
       <button
@@ -33,22 +32,35 @@ export function BotGroupQuestion({
       >
         <BotAvatar color={bot.color} shape={bot.shape} size={20} animated={false} />
       </button>
-      <UserInputRequestDialog
-        key={request.requestId}
-        request={request}
-        presentation="bot"
-        useComposerForSingleAnswer
-        onSubmit={(response) => {
-          // A late click must never answer a replacement request or clear its card.
-          if (
-            response.requestId !== request.requestId ||
-            context.getThreadState(task.threadId).pendingUserInput?.requestId !== request.requestId
-          )
-            return
-          window.api.userInput.sendResponse(response)
-          context.getThreadActions(task.threadId).setPendingUserInput(null)
-        }}
-      />
+      <BotGroupQuestionBody task={task} request={request} />
     </article>
+  )
+}
+
+export function BotGroupQuestionBody({
+  task,
+  request
+}: {
+  task: BotTask
+  request: UserInputRequest
+}) {
+  const context = useThreadContext()
+  return (
+    <UserInputRequestDialog
+      key={request.requestId}
+      request={request}
+      presentation="bot"
+      useComposerForSingleAnswer
+      onSubmit={(response) => {
+        // A late click must never answer a replacement request or clear its card.
+        if (
+          response.requestId !== request.requestId ||
+          context.getThreadState(task.threadId).pendingUserInput?.requestId !== request.requestId
+        )
+          return
+        window.api.userInput.sendResponse(response)
+        context.getThreadActions(task.threadId).setPendingUserInput(null)
+      }}
+    />
   )
 }

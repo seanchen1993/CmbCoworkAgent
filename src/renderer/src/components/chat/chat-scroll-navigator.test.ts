@@ -1,12 +1,95 @@
-import { describe, expect, it } from "vitest"
+import React from "react"
+import { renderToStaticMarkup } from "react-dom/server"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { Message } from "@/types"
 import { resolveChatScrollVirtualRangeSnapshot } from "./ChatMessageVirtualList"
 import {
   areChatScrollMarkerRailPropsEqual,
+  ChatScrollNavigator,
   createChatScrollQuestionProjector,
   createChatScrollQuestionRevisionProjector,
   findChatScrollQuestionIndexForMessageIndex
 } from "./ChatScrollNavigator"
+
+const hoverProbe = vi.hoisted(() => ({
+  questionId: null as string | null,
+  seededQuestion: false,
+  seededOpen: false
+}))
+
+vi.mock("react", async (importOriginal) => {
+  const original = await importOriginal<typeof import("react")>()
+  return {
+    ...original,
+    useState: ((initial: unknown) => {
+      if (initial === null && !hoverProbe.seededQuestion) {
+        hoverProbe.seededQuestion = true
+        return original.useState(hoverProbe.questionId)
+      }
+      if (initial === false && hoverProbe.seededQuestion && !hoverProbe.seededOpen) {
+        hoverProbe.seededOpen = true
+        return original.useState(hoverProbe.questionId !== null)
+      }
+      return original.useState(initial)
+    }) as typeof original.useState
+  }
+})
+
+vi.mock("@/components/ui/popover", () => ({
+  Popover: ({ children, open }: { children: React.ReactNode; open: boolean }) =>
+    React.createElement("section", { "data-preview-open": String(open) }, children),
+  PopoverAnchor: ({ children }: { children: React.ReactNode }) => children,
+  PopoverContent: ({ children }: { children: React.ReactNode }) => children
+}))
+
+describe("chat scroll hover across history windows", () => {
+  beforeEach(() => {
+    hoverProbe.questionId = "old-question"
+    hoverProbe.seededQuestion = false
+    hoverProbe.seededOpen = false
+  })
+
+  function renderWindow(messages: Message[]): string {
+    const props: React.ComponentProps<typeof ChatScrollNavigator> = {
+      messages,
+      questionStructureRevision: 1,
+      historyGapBeforeMessageId: null,
+      canLoadReleasedHistory: false,
+      onLoadReleasedHistoryWindow: () => undefined,
+      onRevealMessage: () => undefined,
+      scrollContainerRef: { current: null },
+      rightPanelCollapsed: false,
+      children: () => null
+    }
+    return renderToStaticMarkup(React.createElement(ChatScrollNavigator, props))
+  }
+
+  it("closes a removed hover when an old history window becomes the short latest page", () => {
+    const html = renderWindow([message("latest-question", "user", "LATEST_PAGE_PREVIEW")])
+    expect(html).toContain('data-preview-open="false"')
+    expect(html).not.toContain("LATEST_PAGE_PREVIEW")
+  })
+
+  it("does not show another question after an equally sized window replaces the hover", () => {
+    const html = renderWindow([
+      message("first-question", "user", "FIRST_PREVIEW"),
+      message("replacement-question", "user", "REPLACEMENT_PREVIEW")
+    ])
+    expect(html).toContain('data-preview-open="false"')
+    expect(html).not.toContain("REPLACEMENT_PREVIEW")
+  })
+
+  it("keeps the same question after older questions move its numeric position", () => {
+    const html = renderWindow([
+      message("prepended-question", "user", "OTHER_PREVIEW"),
+      message("old-question", "user", "CORRECT_HOVER_PREVIEW")
+    ])
+    expect(html).toContain('data-preview-open="true"')
+    expect(html).toContain("CORRECT_HOVER_PREVIEW")
+    expect(html).not.toContain("OTHER_PREVIEW")
+    expect(html).toContain("第 2 次")
+  })
+})
 
 function message(
   id: string,
@@ -20,7 +103,11 @@ function message(
 describe("chat scroll navigator virtualization bridge", () => {
   it("does not publish navigation markers for quiet turns and refreshes visibility without new tokens", () => {
     const project = createChatScrollQuestionProjector()
-    const messages = [message("routine", "user"), message("quiet", "assistant"), message("u-next", "user")]
+    const messages = [
+      message("routine", "user"),
+      message("quiet", "assistant"),
+      message("u-next", "user")
+    ]
     expect(project(messages, 1).userMessageIds).toEqual(["routine", "u-next"])
     const hidden = new Set(["routine", "quiet"])
     const projected = project(messages, 1, null, hidden)

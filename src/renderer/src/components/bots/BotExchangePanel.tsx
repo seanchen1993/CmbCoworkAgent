@@ -111,7 +111,9 @@ export function BotExchangePanel({
                           className="bot-exchange-bubble"
                           title={new Date(item.at).toLocaleString()}
                         >
-                          <StreamingMarkdown isStreaming={false}>{item.message}</StreamingMarkdown>
+                          <StreamingMarkdown isStreaming={false} botTranscript>
+                            {item.message}
+                          </StreamingMarkdown>
                         </div>
                       </div>
                     </article>

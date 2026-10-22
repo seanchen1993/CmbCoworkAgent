@@ -48,6 +48,16 @@ export const CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD = 100
 const DETACHED_HOOK_LOG_WINDOW_SIZE = 80
 const EMPTY_FUNCTION_NOTICES: readonly FunctionTurnNotice[] = []
 
+// eslint-disable-next-line react-refresh/only-export-components
+export function getChatHistoryAnchorTop(row: HTMLElement): number {
+  // A prepended Bot page can remove the row's date separator. Anchor its bubble,
+  // not the display:contents entrance wrapper; workbench rows keep their original top.
+  const bubble = row.querySelector<HTMLElement>(
+    ":scope > .bot-message-entrance > [data-message-bubble]"
+  )
+  return (bubble ?? row).getBoundingClientRect().top
+}
+
 export type ChatMessageVirtualInitialLocation = FlatIndexLocationWithAlign | number
 
 // eslint-disable-next-line react-refresh/only-export-components

@@ -14,13 +14,13 @@ afterEach(async () => {
   await Promise.all(hosts.splice(0).map((host) => host.stop()))
   databases.splice(0).forEach((db) => db.close())
 })
-function fixture(count = 2) {
+function fixture(count = 2, duplicateNames = false) {
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
   databases.push(db)
   const store = new BotStore(db, () => 1000)
   const members = Array.from({ length: count }, (_, i) =>
     store.create({
-      name: i < 2 ? "Same name" : `Member ${i}`,
+      name: duplicateNames && i < 2 ? "Same name" : `Member ${i}`,
       instructions: "",
       modelRef: null,
       color: "#ff0000"
@@ -47,6 +47,371 @@ function fixture(count = 2) {
 }
 
 describe("bounded group discussion on the existing Bot queue", () => {
+  it.each(["handoff", "direct"])("retains the complete long peer message for a %s turn", (kind) => {
+    const f = fixture(),
+      root = f.send()[0]
+    const content =
+      `@${f.members[1].name} Please review these project records:\n` +
+      Array.from({ length: 51 }, (_, i) => `project-${i}: ${"description ".repeat(4)}`).join("\n") +
+      "\nFINAL_PROJECT_MUST_NOT_BE_LOST"
+    f.store.transition(root.id, "running")
+    f.store.publishGroupMessage(root.id, "long-handoff", content)
+    f.store.settle(root.id, "completed", null, "Private scratch", undefined, true)
+    let task: BotTask
+    if (kind === "handoff") {
+      f.store.advanceGroupDiscussions()
+      task = f.reviews()[0]
+    } else {
+      f.store.sendGroup({
+        groupId: f.group.id,
+        requestId: "follow-up",
+        text: "Review the exact prior project records",
+        targetBotIds: [f.members[1].id]
+      })
+      task = f.store
+        .recentTasks()
+        .find((t) => t.origin.kind === "group" && t.origin.messageId === "follow-up")!
+    }
+    expect(task.botId).toBe(f.members[1].id)
+    expect(task.message).toContain(JSON.stringify(content))
+  })
+
+  it("bounds direct shared history by whole messages and marks omitted records", () => {
+    const f = fixture(),
+      root = f.send()[0]
+    f.store.transition(root.id, "running")
+    for (let i = 0; i < 8; i++) {
+      f.store.publishGroupMessage(
+        root.id,
+        `report-${i}`,
+        `report-${i}:` + "x".repeat(5000) + `:END-${i}`
+      )
+    }
+    f.store.settle(root.id, "completed", null, "Private scratch", undefined, true)
+    f.store.sendGroup({
+      groupId: f.group.id,
+      requestId: "review",
+      text: "Review the previous reports",
+      targetBotIds: [f.members[1].id]
+    })
+    const task = f.store
+      .recentTasks()
+      .find((t) => t.origin.kind === "group" && t.origin.messageId === "review")!
+    const references = JSON.parse(task.message.split("\n")[1])
+    expect(task.message).toContain("Earlier shared references were omitted")
+    expect(JSON.stringify(references).length).toBeLessThanOrEqual(24_002)
+    expect(references.at(-1).text).toBe("report-7:" + "x".repeat(5000) + ":END-7")
+    expect(references.some((r: { text: string }) => r.text.startsWith("report-0:"))).toBe(false)
+  })
+
+  it("retains all eight file references in a public peer handoff", () => {
+    const f = fixture(),
+      root = f.send()[0]
+    const files = Array.from({ length: 8 }, (_, i) => ({
+      filePath: `/group/${"shared-subdirectory/".repeat(12)}result-${i}.csv`,
+      name: `result-${i}.csv`,
+      size: 10
+    }))
+    f.store.transition(root.id, "running")
+    f.store.publishGroupFiles(root.id, "files", files)
+    f.store.publishGroupMessage(root.id, "review", `@${f.members[1].name} Review all eight files.`)
+    f.store.settle(root.id, "completed", null, "Private scratch", undefined, true)
+    f.store.advanceGroupDiscussions()
+    const review = f.reviews()[0]
+    for (const file of files) expect(review.message).toContain(file.filePath)
+  })
+
+  it.each(["handoff", "direct"])(
+    "preserves combined public file text and references in a %s turn",
+    (kind) => {
+      const f = fixture(),
+        root = f.send()[0]
+      const text = `@${f.members[1].name} Review this file; use the corrected total 74.13.`
+      const file = { filePath: "/group/report.json", name: "report.json", size: 64 }
+      f.store.transition(root.id, "running")
+      f.store.publishGroupFiles(root.id, "combined", [file], text)
+      f.store.settle(root.id, "completed", null, "Private scratch", undefined, true)
+      let task: BotTask
+      if (kind === "handoff") {
+        f.store.advanceGroupDiscussions()
+        task = f.reviews()[0]
+      } else {
+        f.store.sendGroup({
+          groupId: f.group.id,
+          requestId: "file-follow-up",
+          text: "Review the previous file and its conclusion",
+          targetBotIds: [f.members[1].id]
+        })
+        task = f.store
+          .recentTasks()
+          .find((t) => t.origin.kind === "group" && t.origin.messageId === "file-follow-up")!
+      }
+      expect(task.botId).toBe(f.members[1].id)
+      expect(task.message).toContain(text)
+      expect(task.message).toContain(file.filePath)
+    }
+  )
+
+  it("places historical room references before the exact current user request", () => {
+    const f = fixture(),
+      earlier = f.send("earlier")[0]
+    f.finish(earlier, "OLDER_RESULT_13_13")
+    f.store.sendGroup({
+      groupId: f.group.id,
+      requestId: "new-request",
+      text: "CURRENT_EXACT_REQUEST",
+      targetBotIds: [f.members[0].id]
+    })
+    const next = f.store
+      .recentTasks()
+      .find((t) => t.origin.kind === "group" && t.origin.messageId === "new-request")!
+    expect(next.message).toContain("OLDER_RESULT_13_13")
+    expect(next.message.indexOf("OLDER_RESULT_13_13")).toBeLessThan(
+      next.message.indexOf("CURRENT_EXACT_REQUEST")
+    )
+    expect(next.message).toContain("Host routing for this turn:")
+    expect(next.message).toContain("quoted reference data")
+    expect(next.message).toMatch(/User request for group[^\n]+:\nCURRENT_EXACT_REQUEST$/)
+  })
+
+  it("publishes explicit room messages once with real membership and persisted mention IDs", () => {
+    const f = fixture(),
+      root = f.send()[0]
+    f.store.transition(root.id, "running")
+    const text = `@${f.members[1].name} Check the shared file.`
+    const receipt = f.store.publishGroupMessage(root.id, "call-1", text)
+    expect(f.store.publishGroupMessage(root.id, "call-1", text)).toEqual(receipt)
+    expect(() => f.store.publishGroupMessage(root.id, "call-1", "Changed")).toThrow("已改变")
+    expect(() => f.store.publishGroupMessage(root.id, "", text)).toThrow("无效")
+    expect(f.store.groupMessages(f.group.id)).toHaveLength(2)
+    expect(f.store.groupMessages(f.group.id).at(-1)).toMatchObject({
+      id: receipt.messageId,
+      authorBotId: root.botId,
+      text,
+      mentions: [expect.objectContaining({ botId: f.members[1].id })]
+    })
+    f.store.settleRun(root.id, [], "completed", null, "Private scratch", undefined, true)
+    expect(f.store.groupMessages(f.group.id)).toHaveLength(2)
+    expect(() => f.store.publishGroupMessage(root.id, "late", "Late")).toThrow("活动群任务")
+    f.store.advanceGroupDiscussions()
+    f.store.advanceGroupDiscussions()
+    expect(f.reviews().map((t) => t.botId)).toEqual([f.members[1].id])
+  })
+
+  it("keeps internal handoffs and callbacks private while preserving the real peer result", () => {
+    const f = fixture(),
+      root = f.send()[0]
+    f.store.transition(root.id, "running")
+    const peer = f.store.delegate(root.id, f.members[1].id, "Internal check", "private-check")
+    expect(f.store.groupMessages(f.group.id)).toHaveLength(1)
+    expect(f.store.exchange(root.botId, peer.id, f.group.id).message).toBe("Internal check")
+    f.store.publishGroupMessage(root.id, "handoff", "The check is in progress.")
+    f.store.settle(root.id, "completed", null, "Private scratch", undefined, true)
+    f.store.transition(peer.id, "running")
+    f.store.publishGroupMessage(peer.id, "result", "Verified 47.")
+    f.store.settle(peer.id, "completed", null, "Verified 47.", undefined, true)
+    f.store.flushReplies()
+    f.store.flushReplies()
+    const callbacks = f.store.recentTasks().filter((t) => t.requestId === `reply-${peer.id}`)
+    expect(callbacks).toHaveLength(1)
+    expect(callbacks[0].message).toContain("Verified 47.")
+    f.store.transition(callbacks[0].id, "running")
+    f.store.settle(callbacks[0].id, "completed", null, "(pass)", undefined, true)
+    expect(f.store.groupMessages(f.group.id).map((m) => m.text)).toEqual([
+      "Check assignment",
+      "The check is in progress.",
+      "Verified 47."
+    ])
+  })
+
+  it.each(["all", "everyone", "所有人"])(
+    "routes an explicit @%s handoff to the remaining room members only",
+    (handle) => {
+      const f = fixture(3),
+        root = f.send()[0]
+      f.store.create({ name: "Outside", instructions: "", modelRef: null, color: "#ff0000" })
+      f.store.transition(root.id, "running")
+      f.store.publishGroupMessage(root.id, "handoff-all", `@${handle} Please each review.`)
+      f.store.settle(root.id, "completed", null, "", undefined, true)
+      f.store.advanceGroupDiscussions()
+      const first = f.reviews()[0]
+      expect(first?.botId).toBe(f.members[1].id)
+      f.finish(first)
+      f.store.advanceGroupDiscussions()
+      expect(new Set(f.reviews().map((t) => t.botId))).toEqual(
+        new Set([f.members[1].id, f.members[2].id])
+      )
+    }
+  )
+
+  it("does not hide failures or permit a private or removed member task to speak into a room", () => {
+    const f = fixture(),
+      root = f.send()[0]
+    const privateTask = f.store.enqueue({
+      botId: root.botId,
+      requestId: "private",
+      message: "Work"
+    })
+    f.store.transition(privateTask.id, "running")
+    expect(() => f.store.publishGroupMessage(privateTask.id, "private", "Private")).toThrow(
+      "活动群任务"
+    )
+    f.store.settle(privateTask.id, "completed", null, "Private result")
+    f.store.transition(root.id, "running")
+    f.store.settle(root.id, "failed", "Actual tool failure", "", undefined, true)
+    expect(f.store.groupMessages(f.group.id).at(-1)?.text).toBe("Actual tool failure")
+    const removed = f.send("removed")[0]
+    f.store.transition(removed.id, "running")
+    f.store.saveGroup(
+      { name: f.group.name, memberIds: [f.members[1].id] },
+      { id: f.group.id, version: f.group.version }
+    )
+    const count = f.store.groupMessages(f.group.id).length
+    expect(() =>
+      f.store.publishGroupMessage(removed.id, "removed", "Late private output")
+    ).toThrow()
+    expect(f.store.groupMessages(f.group.id)).toHaveLength(count)
+  })
+
+  it("does not dispatch an unaddressed member after a selected member completes solo work", () => {
+    const f = fixture()
+    const recipient = f.members[0]
+    const mention = `@${recipient.name}`
+    f.store.sendGroup({
+      groupId: f.group.id,
+      requestId: "solo",
+      text: `${mention} Complete this alone; other members must not review or modify the files.`,
+      targetBotIds: [recipient.id],
+      mentions: [{ start: 0, end: mention.length, botId: recipient.id, label: recipient.name }]
+    })
+    const root = f.store.recentTasks().find((task) => task.origin.kind === "group")!
+    f.finish(root, "Requested files delivered and verified.")
+
+    f.store.advanceGroupDiscussions()
+
+    expect(f.reviews()).toEqual([])
+    expect(f.db.exec("SELECT * FROM bot_group_discussions")[0].values).toEqual([])
+  })
+
+  it("does not select pasted user handles, plain names, unknown handles or an earlier assignment", () => {
+    const f = fixture()
+    f.finish(f.send("older")[0], "@Member 1 please review the old request.")
+    f.store.sendGroup({
+      groupId: f.group.id,
+      requestId: "current",
+      text: "@Member 1 is pasted text; the selected recipient is Member 0.",
+      targetBotIds: [f.members[0].id]
+    })
+    f.finish(
+      f.store
+        .recentTasks()
+        .find((task) => task.origin.kind === "group" && task.origin.messageId === "current")!,
+      "Member 1 and @Outside are not recipients."
+    )
+    f.store.advanceGroupDiscussions()
+    expect(f.reviews()).toEqual([])
+  })
+
+  it("does not guess a handoff between members with the same display name", () => {
+    const f = fixture(2, true)
+    f.finish(f.send()[0], "@Same name please review.")
+    f.store.advanceGroupDiscussions()
+    expect(f.reviews()).toEqual([])
+  })
+
+  it("keeps a persisted handoff bound to its ID after a rename and beyond the visible history page", () => {
+    const f = fixture(3)
+    f.finish(f.send()[0], "@Member 1 please review this result.")
+    const peer = f.members[1]
+    f.store.update({ ...peer, name: "Renamed", expectedVersion: peer.version })
+    // The existing view shows only fifty messages; routing must retain this assignment's @.
+    for (let i = 0; i < 60; i++) {
+      f.db.run(
+        "INSERT INTO bot_group_messages (id,group_id,author_bot_id,text,targets_json,created_at) VALUES (?,?,?,?,?,?)",
+        [`extra-${i}`, f.group.id, f.members[0].id, `Evidence ${i}`, "[]", 1000]
+      )
+    }
+    f.store.advanceGroupDiscussions()
+    expect(f.reviews().map((task) => task.botId)).toEqual([peer.id])
+    const plan = f.db
+      .exec(
+        "EXPLAIN QUERY PLAN SELECT mentions_json FROM bot_group_messages WHERE group_id=? AND ordinal>? AND author_bot_id IS NOT NULL AND mentions_json IS NOT NULL",
+        [f.group.id, 1]
+      )[0]
+      .values.flat()
+      .join(" ")
+    expect(plan).toContain("USING INDEX bot_group_history")
+    expect(plan).not.toContain("SCAN bot_group_messages")
+  })
+
+  it.each(["queued", "running", "waiting_user"] as const)(
+    "rechecks a legacy %s cursor without bypassing active task cleanup",
+    (status) => {
+      const f = fixture()
+      f.finish(f.send()[0], "Solo result, no peer requested.")
+      // Simulate a cursor written by the previous version which selected every member.
+      const legacy = f.store.enqueue(
+        { botId: f.members[1].id, requestId: "legacy-review", message: "Old review" },
+        { kind: "discussion", groupId: f.group.id, messageId: "assignment", round: 1 }
+      )
+      const state = JSON.parse(
+        String(f.db.exec("SELECT payload FROM bot_group_discussions")[0].values[0][0])
+      )
+      state.pendingTaskId = legacy.id
+      f.db.run("UPDATE bot_group_discussions SET payload=?", [JSON.stringify(state)])
+      if (status !== "queued") f.store.transition(legacy.id, "running")
+      if (status === "waiting_user") f.store.transition(legacy.id, status)
+      const reopened = new BotStore(f.db)
+      reopened.advanceGroupDiscussions()
+      expect(reopened.getTask(legacy.id).state).toBe(status === "queued" ? "cancelled" : status)
+      if (status !== "queued") {
+        // Normal runtime/Host settlement still owns a task that already started.
+        reopened.settle(legacy.id, "completed", null, BOT_GROUP_PASS)
+        reopened.advanceGroupDiscussions()
+      }
+      expect(f.reviews()).toHaveLength(1)
+      expect(f.db.exec("SELECT * FROM bot_group_discussions")[0].values).toEqual([])
+    }
+  )
+
+  it("does not cancel a newer discussion when an older group request is retried", () => {
+    const f = fixture()
+    f.finish(f.send("older")[0], "Old result")
+    f.finish(f.send("current")[0], "Current result @Member 1")
+    f.store.advanceGroupDiscussions()
+    const review = f.reviews()[0]
+    const messages = f.store.groupMessages(f.group.id)
+    const host = new LocalBotHost(f.store, {
+      onAvailable: () => () => {},
+      acquire: () => null
+    })
+    hosts.push(host)
+    host.sendGroup({
+      groupId: f.group.id,
+      requestId: "older",
+      text: "Check older",
+      targetBotIds: [f.members[0].id]
+    })
+    expect(f.store.getTask(review.id).state).toBe("queued")
+    expect(f.store.groupDiscussionTask(f.group.id)).toBe(review.id)
+    expect(f.store.groupMessages(f.group.id)).toEqual(messages)
+  })
+
+  it("keeps the review participation rule after peer data without changing direct replies", () => {
+    const f = fixture()
+    const reference = { source: "Bot peer", text: "你好！有什么可以帮忙的吗？" }
+    const message = buildGroupDiscussionMessage("你们好", [reference])
+    expect(message).toContain("offers to help and requests for a new assignment")
+    expect(message).toContain("selected by the user or an explicit @handoff in this assignment")
+    expect(message).not.toContain("@ targets select the initial speakers")
+    expect(message.lastIndexOf("reply exactly (pass)")).toBeGreaterThan(
+      message.indexOf(JSON.stringify(reference))
+    )
+    const direct = buildBotPrompt(f.members[0], f.send()[0], "/group")
+    expect(direct).toContain("direct user request in a group")
+    expect(direct).not.toContain("offers to help and requests for a new assignment")
+  })
+
   it("keeps the full current request and whole newest peer records within the message budget", () => {
     const assignment = "\n".repeat(29_999) + "X"
     const refs = Array.from({ length: 50 }, (_, i) => ({
@@ -66,7 +431,7 @@ describe("bounded group discussion on the existing Bot queue", () => {
   it("does not relabel an older room task as newly delivered context for a fresh request", () => {
     const f = fixture()
     f.finish(f.send("older-task")[0], "OLD_RESULT_NOT_CURRENT_PROOF")
-    f.finish(f.send("current-task")[0], "NEW_RESULT_CURRENT_PROOF")
+    f.finish(f.send("current-task")[0], "NEW_RESULT_CURRENT_PROOF @Member 1")
     f.store.advanceGroupDiscussions()
     const review = f.reviews()[0]
     expect(review.message).toContain("Check current-task")
@@ -74,40 +439,43 @@ describe("bounded group discussion on the existing Bot queue", () => {
     expect(review.message).not.toContain("OLD_RESULT_NOT_CURRENT_PROOF")
     expect(review.message).toContain("an earlier peer reply does not prove")
   })
-  it("waits for initial recipients, queues one exact peer, and settles a silent round without bubbles or unread", () => {
-    const f = fixture()
-    const root = f.send()[0]
-    f.store.advanceGroupDiscussions()
-    expect(f.reviews()).toEqual([])
-    f.finish(root, "Original result")
-    const activity = f.store.activities().find((item) => item.id === f.group.id)
-    f.store.advanceGroupDiscussions()
-    const review = f.reviews()[0]
-    expect(review).toMatchObject({
-      botId: f.members[1].id,
-      threadId: `group-${f.group.id}-${f.members[1].id}`,
-      origin: { kind: "discussion", messageId: "assignment", round: 1 }
-    })
-    f.store.advanceGroupDiscussions()
-    expect(f.reviews()).toHaveLength(1)
-    expect(f.store.hasDirectUserRequest(review.id)).toBe(false)
-    expect(f.store.groupMessages(f.group.id).map((item) => item.text)).toEqual([
-      "Check assignment",
-      "Original result"
-    ])
-    f.finish(review, "<think>No missing work</think>(pass)")
-    f.store.advanceGroupDiscussions()
-    expect(f.reviews()).toHaveLength(1)
-    expect(f.store.activities().find((item) => item.id === f.group.id)).toEqual(activity)
-    expect(
-      f.store.groupMessages(f.group.id).some((item) => /pass|没有可确认/.test(item.text))
-    ).toBe(false)
-    expect(f.db.exec("SELECT * FROM bot_group_discussions")[0].values).toEqual([])
-  })
+  it.each(["(pass)", "pass", "PASS."])(
+    "settles a %s review without bubbles, unread or another round",
+    (pass) => {
+      const f = fixture()
+      const root = f.send()[0]
+      f.store.advanceGroupDiscussions()
+      expect(f.reviews()).toEqual([])
+      f.finish(root, "Original result @Member 1")
+      const activity = f.store.activities().find((item) => item.id === f.group.id)
+      f.store.advanceGroupDiscussions()
+      const review = f.reviews()[0]
+      expect(review).toMatchObject({
+        botId: f.members[1].id,
+        threadId: `group-${f.group.id}-${f.members[1].id}`,
+        origin: { kind: "discussion", messageId: "assignment", round: 1 }
+      })
+      f.store.advanceGroupDiscussions()
+      expect(f.reviews()).toHaveLength(1)
+      expect(f.store.hasDirectUserRequest(review.id)).toBe(false)
+      expect(f.store.groupMessages(f.group.id).map((item) => item.text)).toEqual([
+        "Check assignment",
+        "Original result @Member 1"
+      ])
+      f.finish(review, `<think>No missing work</think>${pass}`)
+      f.store.advanceGroupDiscussions()
+      expect(f.reviews()).toHaveLength(1)
+      expect(f.store.activities().find((item) => item.id === f.group.id)).toEqual(activity)
+      expect(
+        f.store.groupMessages(f.group.id).some((item) => /pass|没有可确认/.test(item.text))
+      ).toBe(false)
+      expect(f.db.exec("SELECT * FROM bot_group_discussions")[0].values).toEqual([])
+    }
+  )
 
   it("feeds new shared evidence to the original author and stops after a pass, without private turns", () => {
     const f = fixture()
-    f.finish(f.send()[0], "Draft 17+8=24")
+    f.finish(f.send()[0], "Draft 17+8=24 @Member 1")
     f.store.advanceGroupDiscussions()
     f.finish(f.reviews()[0], "Correction 17+8=25")
     f.store.advanceGroupDiscussions()
@@ -129,7 +497,7 @@ describe("bounded group discussion on the existing Bot queue", () => {
     ).toBe(true)
     expect(f.store.groupMessages(f.group.id).map((item) => item.text)).toEqual([
       "Check assignment",
-      "Draft 17+8=24",
+      "Draft 17+8=24 @Member 1",
       "Correction 17+8=25"
     ])
   })
@@ -172,7 +540,7 @@ describe("bounded group discussion on the existing Bot queue", () => {
 
   it("reuses a queued review across Store restart and never replays an interrupted review", () => {
     const f = fixture()
-    f.finish(f.send()[0], "Ready")
+    f.finish(f.send()[0], "Ready @Member 1")
     f.store.advanceGroupDiscussions()
     const review = f.reviews()[0]
     const reopened = new BotStore(f.db)
@@ -190,7 +558,7 @@ describe("bounded group discussion on the existing Bot queue", () => {
     (state) => {
       const f = fixture()
       const root = f.send()[0]
-      f.finish(root, "Draft ready")
+      f.finish(root, "Draft ready @Member 1")
       f.store.advanceGroupDiscussions()
       const review = f.reviews()[0]
       f.store.transition(review.id, "running")
@@ -254,7 +622,7 @@ describe("bounded group discussion on the existing Bot queue", () => {
   })
 
   it("uses stable member IDs despite duplicate names, caps all selected/review calls at ten, and bounds rounds", () => {
-    const f = fixture(8)
+    const f = fixture(8, true)
     f.send(
       "budget",
       f.members.map((bot) => bot.id)
@@ -273,11 +641,13 @@ describe("bounded group discussion on the existing Bot queue", () => {
     expect(f.db.exec("SELECT * FROM bot_group_discussions")[0].values).toEqual([])
   })
 
-  it("keeps literal pass replies from actual users or delegated work visible", () => {
+  it.each(["(pass)", "pass", "PASS."])("keeps a direct reply %s visible", (pass) => {
     const f = fixture()
-    f.finish(f.send()[0], BOT_GROUP_PASS)
-    expect(f.store.groupMessages(f.group.id).at(-1)?.text).toBe(BOT_GROUP_PASS)
+    f.finish(f.send()[0], pass)
+    expect(f.store.groupMessages(f.group.id).at(-1)?.text).toBe(pass)
     expect(isBotGroupPass("(pass) plus real content")).toBe(false)
+    expect(isBotGroupPass("pass\nActual result")).toBe(false)
+    expect(isBotGroupPass("compass")).toBe(false)
     expect(isBotGroupPass("<think>reason</think>(pass)")).toBe(true)
   })
 
@@ -297,7 +667,7 @@ describe("bounded group discussion on the existing Bot queue", () => {
 
   it("keeps optional discussion in its bounded room turns without starting a second relay chain", () => {
     const f = fixture()
-    f.finish(f.send()[0], "Result")
+    f.finish(f.send()[0], "Result @Member 1")
     f.store.advanceGroupDiscussions()
     const review = f.reviews()[0]
     f.store.transition(review.id, "running")
@@ -308,7 +678,7 @@ describe("bounded group discussion on the existing Bot queue", () => {
 
   it("does not consume a review cursor while the ordinary queue is full", () => {
     const f = fixture()
-    f.finish(f.send()[0], "Ready")
+    f.finish(f.send()[0], "Ready @Member 1")
     for (let i = 0; i < 500; i++)
       f.store.enqueue({ botId: f.members[0].id, requestId: `private-${i}`, message: "Private" })
     const prior = f.db.exec("SELECT payload FROM bot_group_discussions")[0].values
@@ -326,7 +696,7 @@ describe("bounded group discussion on the existing Bot queue", () => {
 
   it("cancels queued reviews on membership change and does not revive them after a new user message", () => {
     const f = fixture()
-    f.finish(f.send()[0], "Ready")
+    f.finish(f.send()[0], "Ready @Member 1")
     f.store.advanceGroupDiscussions()
     f.store.saveGroup(
       { name: f.group.name, memberIds: [f.members[1].id] },
@@ -352,7 +722,8 @@ describe("bounded group discussion on the existing Bot queue", () => {
       onAvailable: () => () => {},
       acquire: (_bot, task) => ({
         execute: async (abort) => {
-          if (task.origin.kind !== "discussion") return { state: "completed", result: "Result" }
+          if (task.origin.kind !== "discussion")
+            return { state: "completed", result: "Result @Member 1" }
           signal = abort
           if (!abort.aborted)
             await new Promise<void>((resolve) =>

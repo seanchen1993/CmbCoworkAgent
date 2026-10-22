@@ -44,7 +44,7 @@ describe("durable group drafts", () => {
       .edit(key, { text: "Check this", attachments: [file], targets: ["b"], replyTo })
     await sendGroupDraft(client, group)
     const sent = sendGroup.mock.calls[0][0]
-    expect(sent).toMatchObject({ replyToId: replyTo.id, targetBotIds: ["a", "b"] })
+    expect(sent).toMatchObject({ replyToId: replyTo.id, targetBotIds: ["b"] })
     expect(sent.text).not.toContain(replyTo.text)
     useBotGroupDrafts.setState({ drafts: {} })
     useBotGroupDrafts.getState().restore(key)
@@ -57,6 +57,28 @@ describe("durable group drafts", () => {
       replyTo: null,
       request: null
     })
+  })
+  it("restores an explicit recipient with another member's quote and attachment without adding the author", async () => {
+    const sendGroup = vi.fn().mockResolvedValue(undefined)
+    const client = { hostId: "local", sendGroup } as unknown as BotClient
+    const replyTo = { id: "b-result", ordinal: 12, text: "B's result", authorBotId: "b" }
+    const selected = insertGroupMention("@", { start: 0, end: 1 }, [], "a", "甲")
+    useBotGroupDrafts.getState().edit(key, {
+      text: selected.text + "核对原件",
+      mentions: selected.mentions,
+      attachments: [file],
+      replyTo
+    })
+    useBotGroupDrafts.setState({ drafts: {} })
+    useBotGroupDrafts.getState().restore(key)
+    await sendGroupDraft(client, group)
+    expect(sendGroup).toHaveBeenCalledOnce()
+    expect(sendGroup.mock.calls[0][0]).toMatchObject({
+      targetBotIds: ["a"],
+      mentions: selected.mentions,
+      replyToId: replyTo.id
+    })
+    expect(sendGroup.mock.calls[0][0].text).toContain(file.content)
   })
   it("cancels only the reply target and preserves a newer draft after an in-flight send", async () => {
     let settle!: () => void

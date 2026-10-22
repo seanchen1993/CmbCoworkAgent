@@ -446,9 +446,9 @@ import {
 } from "../agent/agent-run-service"
 import {
   assertBotModelCheckpoint,
-  assertBotPrivateContinuationCheckpoint,
+  assertBotTaskContinuationCheckpoint,
   botGroupResumeCheckpoint,
-  botPrivateContinuationCheckpoint,
+  botTaskContinuationCheckpoint,
   botWorkflowNotificationClaim
 } from "../agent/bot-checkpoint-resume"
 import { isManagedTransportWindow } from "../agent/managed-transport-delivery"
@@ -5847,7 +5847,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const isTrustedCoordinatorNotificationInvoke =
         coordinatorInternalNotification === true && hasCoordinatorNotificationPrefixAtInvoke
       const resumeCheckpointId = botGroupResumeCheckpoint(runExecutionContext, initialInvokeMetadata)
-      const continueBotTaskCheckpointId = botPrivateContinuationCheckpoint(
+      const continueBotTaskCheckpointId = botTaskContinuationCheckpoint(
         runExecutionContext,
         initialInvokeMetadata
       )
@@ -5864,6 +5864,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           continueBotTaskCheckpointId !== undefined) &&
         initialInvokeMetadata.botHostId === "local" &&
         typeof initialInvokeMetadata.botId === "string"
+      const isBotCommandNotificationInvoke =
+        isBotInternalTurnInvoke && runExecutionContext.commandInternalNotification === true
       // A completed background workflow delivers its result via an INTERNAL
       // notification turn whose message is exactly WORKFLOW_NOTIFICATION_TURN_PROMPT
       // (recognized at ~5100). Like the coordinator notification above, that turn
@@ -6526,13 +6528,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         if (
           !isTrustedCoordinatorNotificationInvoke &&
-          !isBotInternalTurnInvoke &&
+          (!isBotInternalTurnInvoke || isBotCommandNotificationInvoke) &&
           !shouldDeferUserTranscriptPersistence &&
           !shouldDeferUserTranscriptForModeCommit
         ) {
           userTranscriptMessagePersisted = persistVisibleUserTranscriptMessage(
             threadId,
-            message,
+            isBotCommandNotificationInvoke ? "后台命令结果" : message,
             userMessageId,
             goalTranscriptBoundary
           )
@@ -7970,7 +7972,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           const userHumanMessage = isCoordinatorNotificationTurn || isBotCheckpointResumeInvoke
             ? undefined
-            : continueBotTaskCheckpointId
+            : continueBotTaskCheckpointId || isBotCommandNotificationInvoke
               ? new HumanMessage({
                   id: userMessageId,
                   content: effectiveMessage,
@@ -7979,7 +7981,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   // Reuse the original visible-text projection; Bots hides this Host-only ID.
                   additional_kwargs: {
                     [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
-                    [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: "续办后台任务"
+                    [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: continueBotTaskCheckpointId
+                      ? "续办后台任务"
+                      : "后台命令结果"
                   }
                 })
             : isBotInternalTurnInvoke
@@ -8086,6 +8090,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               toolConcurrencyQueueId: runExecutionContext.toolConcurrencyQueueId,
               userInputWithoutToolLock:
                 runExecutionContext.source === "bot" && runExecutionContext.userInputWithoutToolLock,
+              enableBotQuestionOptions: runExecutionContext.source === "bot",
               botBrowserToolsOwnFileLock:
                 runExecutionContext.source === "bot" && runExecutionContext.botBrowserToolsOwnFileLock,
               capabilityService: runExecutionContext.capabilityService,
@@ -8116,7 +8121,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onCoordinatorNotificationAction,
               onWorkflowLaunched,
               backgroundNotificationOwner,
-              onTurnCompletionRecovery: sendTurnCompletionNotice
+              onTurnCompletionRecovery: sendTurnCompletionNotice,
+              checkFinalDelivery:
+                runExecutionContext.source === "bot"
+                  ? runExecutionContext.checkFinalDelivery
+                  : undefined
             }),
             harnessContext: harnessAgentContext,
             remotePolicy: runExecutionContext.remotePolicy
@@ -8135,7 +8144,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 assertBotModelCheckpoint(resumeCheckpointId, await agent.getState(streamConfig))
               if (continueBotTaskCheckpointId) {
                 if (!userMessageId) throw new Error("Bot 续办消息标识缺失，已停止自动续办。")
-                assertBotPrivateContinuationCheckpoint(
+                assertBotTaskContinuationCheckpoint(
                   continueBotTaskCheckpointId,
                   await agent.getState(streamConfig)
                 )

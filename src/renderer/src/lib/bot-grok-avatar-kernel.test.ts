@@ -16,7 +16,10 @@ import {
 it("maps the original palette without changing custom colours or persisted shape identities", () => {
   expect(grokAvatarBody("circle")).toBe("sphere")
   expect(grokAvatarBody("squircle")).toBe("square")
-  expect(botAppearanceColor("#ED2040")).toBe("#ff263c")
+  expect(botAppearanceColor("#ED2040")).toBe("#fb2b3e")
+  expect(botAppearanceColor("#ff263c")).toBe("#fb2b3e")
+  expect(botAppearanceColor("#855c35")).toBe("#a06b39")
+  expect(botAppearanceColor("#936439")).toBe("#a06b39")
   expect(botChatAccent("#ed2040")).toEqual({
     "--bot-user-bubble-light": "#c82532",
     "--bot-user-bubble-dark": "#cf2b35",

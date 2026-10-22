@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import type { Message } from "@/types"
 import {
+  getChatHistoryAnchorTop,
   resolveChatMessageVirtualInitialLocation,
   shouldVirtualizeChatMessageList,
   type ChatMessageVirtualInitialLocation
@@ -67,6 +68,34 @@ function detachedSession(threadId: string, unreadCount = 0): ChatScrollSession {
 }
 
 describe("chat scroll regression scenarios", () => {
+  it("keeps a Bot bubble fixed when prepending history removes its date separator", () => {
+    let scrollTop = 100
+    let dateHeight = 32.5
+    const bubble = {
+      getBoundingClientRect: () => ({ top: 200 + dateHeight - scrollTop })
+    } as HTMLElement
+    const row = {
+      getBoundingClientRect: () => ({ top: 200 - scrollTop }),
+      querySelector: () => bubble
+    } as unknown as HTMLElement
+    const capturedTop = getChatHistoryAnchorTop(row)
+
+    dateHeight = 0
+    scrollTop += getChatHistoryAnchorTop(row) - capturedTop
+
+    expect(getChatHistoryAnchorTop(row)).toBe(132.5)
+    expect(scrollTop).toBe(67.5)
+  })
+
+  it("preserves the original outer-row anchor without a Bot entrance wrapper", () => {
+    const row = {
+      getBoundingClientRect: () => ({ top: 145 }),
+      querySelector: () => null
+    } as unknown as HTMLElement
+
+    expect(getChatHistoryAnchorTop(row)).toBe(145)
+  })
+
   it("keeps a streaming scrollbar drag detached until the pointer is released", () => {
     let state = dispatch(attachedState(), {
       type: "USER_DETACH",

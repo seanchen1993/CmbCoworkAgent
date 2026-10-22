@@ -32,6 +32,32 @@ function fixture() {
 }
 
 describe("Bot native command receipts", () => {
+  it.each([
+    [0, false, true],
+    [7, false, false],
+    [null, false, false],
+    [0, true, false]
+  ] as const)(
+    "binds quiet eligibility to the actual exit receipt (%s, unknown %s)",
+    (exitCode, unknown, commandSucceeded) => {
+      const { store, task, command, result } = fixture()
+      store.acceptCommand(task.id, command)
+      store.transition(task.id, "completed")
+      const before = store.activities()
+      store.settleCommand({ ...result, exitCode }, unknown)
+      const notice = store.nextQueued([])!
+      expect(notice.origin).toMatchObject({
+        kind: "notification",
+        notificationKind: "command",
+        commandSucceeded
+      })
+      expect(notice.message.includes("reply exactly BOT_ROUTINE_SILENT")).toBe(commandSucceeded)
+      store.transition(notice.id, "running")
+      store.settle(notice.id, "completed", null, "BOT_ROUTINE_SILENT")
+      if (commandSucceeded) expect(store.activities()).toEqual(before)
+      else expect(store.activities()).not.toEqual(before)
+    }
+  )
   it.each(["completed", "cancelled", "restart"] as const)(
     "retains a yielded command receipt without re-enqueueing the command after %s",
     (outcome) => {
@@ -293,7 +319,8 @@ describe("Bot native command receipts", () => {
     expect(notice.origin).toEqual({
       kind: "notification",
       notificationKind: "command",
-      key: command.id
+      key: command.id,
+      commandSucceeded: true
     })
     expect(notice.message).toContain("Report ready")
     store.transition(notice.id, "cancelled")

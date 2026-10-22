@@ -65,6 +65,7 @@ export function BotGroupMentionInput({
   placeholder = "发消息，或 @ 提及 Bot…",
   inputRef,
   onEdit,
+  onLayout,
   onCancelReply,
   onPasteFiles
 }: {
@@ -74,6 +75,7 @@ export function BotGroupMentionInput({
   placeholder?: string
   inputRef: RefObject<BotGroupInputControl | null>
   onEdit(patch: { text: string; mentions: BotGroupMention[] }): void
+  onLayout(multiline: boolean, hasText: boolean): void
   onCancelReply(): boolean
   onPasteFiles(files: File[]): void
 }) {
@@ -84,8 +86,9 @@ export function BotGroupMentionInput({
   const [dismissed, setDismissed] = useState<string | null>(null)
   const [selected, setSelected] = useState(0)
   const selectedRef = useRef<HTMLButtonElement | null>(null)
-  const current = useRef({ onEdit, onCancelReply, onPasteFiles })
-  current.current = { onEdit, onCancelReply, onPasteFiles }
+  const current = useRef({ onEdit, onLayout, onCancelReply, onPasteFiles })
+  current.current = { onEdit, onLayout, onCancelReply, onPasteFiles }
+  const measureLayout = useRef<() => void>(() => {})
   const actions = useRef<{ key(view: EditorView, event: KeyboardEvent): boolean }>({
     key: () => false
   })
@@ -223,6 +226,33 @@ export function BotGroupMentionInput({
       if (inputRef.current === control) inputRef.current = null
     }
   }, [editor, inputRef])
+  useLayoutEffect(() => {
+    if (!editor) return
+    const dom = editor.view.dom
+    let previous: { multiline: boolean; hasText: boolean } | undefined
+    const measure = () => {
+      if (editor.isDestroyed) return
+      const style = getComputedStyle(dom)
+      const lineHeight = parseFloat(style.lineHeight)
+      const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
+      // Measure rendered lines, including soft wraps and atomic mentions.
+      const multiline = dom.scrollHeight - padding > lineHeight * 1.5
+      const hasText = editor.getText().length > 0
+      if (previous?.multiline === multiline && previous.hasText === hasText) return
+      previous = { multiline, hasText }
+      current.current.onLayout(multiline, hasText)
+    }
+    measureLayout.current = measure
+    const observer = new ResizeObserver(measure)
+    observer.observe(dom)
+    editor.on("update", measure)
+    measure()
+    return () => {
+      observer.disconnect()
+      editor.off("update", measure)
+      measureLayout.current = () => {}
+    }
+  }, [editor])
   const draftIdentity = useMemo(() => JSON.stringify({ text, mentions }), [text, mentions])
   useLayoutEffect(() => {
     if (
@@ -234,6 +264,7 @@ export function BotGroupMentionInput({
     // Restored drafts/accepted sends are authoritative; do not echo them as user edits.
     editor.commands.setContent(groupEditorContent(text, mentions), { emitUpdate: false })
     setCaret(groupEditorOffset(editor.state.doc, editor.state.selection.from))
+    measureLayout.current()
   }, [editor, draftIdentity])
   useEffect(() => {
     if (!editor) return

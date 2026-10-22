@@ -164,6 +164,8 @@ export interface AgentRunExecutionContext {
   extraSystemPrompt?: string
   /** Trusted host adapters can add identity-bound tools; never populated from renderer input. */
   additionalTools?: CreateAgentRuntimeOptions["additionalTools"]
+  /** Trusted Bot delivery check; renderer input cannot supply this callback. */
+  checkFinalDelivery?: CreateAgentRuntimeOptions["checkFinalDelivery"]
   toolConcurrencyQueueId?: string
   userInputWithoutToolLock?: CreateAgentRuntimeOptions["userInputWithoutToolLock"]
   botBrowserToolsOwnFileLock?: CreateAgentRuntimeOptions["botBrowserToolsOwnFileLock"]
@@ -178,7 +180,7 @@ export interface AgentRunExecutionContext {
   onModelRequestState?: (interrupt: (() => boolean) | undefined) => void
   /** Trusted local Bot only. Resume its exact yielded model checkpoint without adding a message. */
   resumeCheckpointId?: string
-  /** Trusted private Bot task continuation. Keep newer completed private history instead of restoring its old branch. */
+  /** Trusted local Bot continuation. Keep newer completed conversation history instead of restoring its old branch. */
   continueBotTaskCheckpointId?: string
   /**
    * Fires exactly once per run, before its completion promise settles.

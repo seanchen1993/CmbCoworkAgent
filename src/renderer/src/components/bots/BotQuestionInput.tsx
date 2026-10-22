@@ -1,6 +1,6 @@
 import { ArrowUp, ChevronLeft, ChevronRight, PencilLine, X } from "lucide-react"
 import type { UserInputRequest } from "@/types"
-import type { UserInputDraftAnswer } from "@/lib/user-input-answer"
+import { userInputAnswers, type UserInputDraftAnswer } from "@/lib/user-input-answer"
 
 /** Grok's inline question layout, using the original request dialog's state and response path. */
 export function BotQuestionInput({
@@ -34,13 +34,17 @@ export function BotQuestionInput({
 }) {
   const question = request.questions[activeIndex]
   const titleId = `${request.requestId}-question`
-  const answered = draft?.type === "other" ? Boolean(draft.text.trim().length) : draft !== undefined
+  const answered =
+    userInputAnswers([question], draft ? { [question.id]: draft } : {}, true) !== null
   const showCustomInput =
     request.questions.length > 1 || !useComposerForSingleAnswer || draft?.type === "other"
+  const singleMultiple = question.allowMultiple === true && request.questions.length === 1
+  const submitLabel = singleMultiple ? "完成" : complete ? "提交回答" : "继续回答下一题"
   return (
     <div className="bot-question-history">
       <section
         className="bot-question-card bot-question-input"
+        data-multiple={question.allowMultiple || undefined}
         aria-labelledby={titleId}
         onKeyDown={(event) => {
           if (
@@ -75,12 +79,20 @@ export function BotQuestionInput({
           </button>
         </header>
         {remainingLabel && <p>{remainingLabel}</p>}
+        {question.allowMultiple && <p>选择所有适用项</p>}
         <div className="bot-question-options">
           {question.options.map((option, index) => {
-            const selected = draft?.type === "option" && draft.optionIndex === index
+            const selected =
+              draft?.type === "options"
+                ? draft.optionIndices.includes(index)
+                : draft?.type === "option" && draft.optionIndex === index
             return (
               <div className="bot-question-option" data-selected={selected} key={index}>
-                <button type="button" onClick={() => onChoose(index)}>
+                <button
+                  type="button"
+                  aria-pressed={question.allowMultiple ? selected : undefined}
+                  onClick={() => onChoose(index)}
+                >
                   <span className="bot-question-key" aria-hidden="true">
                     {String.fromCharCode(65 + index)}
                   </span>
@@ -89,16 +101,18 @@ export function BotQuestionInput({
                     {option.description && <small>{option.description}</small>}
                   </span>
                 </button>
-                <button
-                  type="button"
-                  className="bot-question-additional"
-                  aria-label={`为${option.label}添加补充说明`}
-                  title="补充说明"
-                  onClick={() => onAdditional(index)}
-                >
-                  <PencilLine size={14} aria-hidden="true" />
-                </button>
-                {selected && draft.additionalTextOpen && (
+                {!question.allowMultiple && (
+                  <button
+                    type="button"
+                    className="bot-question-additional"
+                    aria-label={`为${option.label}添加补充说明`}
+                    title="补充说明"
+                    onClick={() => onAdditional(index)}
+                  >
+                    <PencilLine size={14} aria-hidden="true" />
+                  </button>
+                )}
+                {selected && draft?.type === "option" && draft.additionalTextOpen && (
                   <textarea
                     autoFocus
                     rows={1}
@@ -138,7 +152,7 @@ export function BotQuestionInput({
             />
           </div>
         )}
-        {(request.questions.length > 1 || answered) && (
+        {(request.questions.length > 1 || answered || question.allowMultiple) && (
           <footer>
             {request.questions.length > 1 ? (
               <nav aria-label="问题导航">
@@ -168,12 +182,18 @@ export function BotQuestionInput({
             <button
               type="button"
               className="bot-question-submit"
-              aria-label={complete ? "提交回答" : "继续回答下一题"}
-              title={complete ? "提交回答" : "继续回答下一题"}
-              disabled={!answered}
-              onClick={onContinue}
+              aria-label={submitLabel}
+              title={submitLabel}
+              disabled={!answered && !singleMultiple}
+              onClick={singleMultiple && !answered ? onIgnore : onContinue}
             >
-              {complete ? (
+              {question.allowMultiple ? (
+                complete || request.questions.length === 1 ? (
+                  "完成"
+                ) : (
+                  "继续"
+                )
+              ) : complete ? (
                 <ArrowUp size={16} aria-hidden="true" />
               ) : (
                 <ChevronRight size={16} aria-hidden="true" />

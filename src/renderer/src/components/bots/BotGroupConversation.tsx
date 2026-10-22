@@ -9,11 +9,15 @@ import { botErrorMessage } from "@/lib/bot-error-message"
 import { botGroupMessageView } from "@/lib/bot-group-message-view"
 import { BotGroupAvatar } from "./BotGroupAvatar"
 import { BotGroupMessageActions } from "./BotGroupMessageActions"
-import { BotGroupQuestion } from "./BotGroupQuestion"
+import { BotGroupQuestion, BotGroupQuestionBody } from "./BotGroupQuestion"
+import { BotQuestionHistory } from "./BotQuestionHistory"
+import { BotGroupQuestionAnswer } from "./BotGroupQuestionAnswer"
+import { BotGroupSearch } from "./BotGroupSearch"
+import { botGroupQuestionHistory, botGroupQuestionReplies } from "@/lib/bot-question-history"
 import { botGroupActiveTasks } from "@/lib/bot-group-question"
 import { useGroupQuestions, type BotGroupPendingQuestion } from "./use-group-questions"
 import { BotMentionLabel } from "./BotMentionLabel"
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react"
 import { useBotMessageEntrances } from "@/lib/use-bot-message-entrances"
 import { BotMessageEntrance } from "./BotMessageEntrance"
 import {
@@ -32,6 +36,9 @@ import {
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
 import { StreamingMarkdown } from "@/components/chat/StreamingMarkdown"
 import { ChatContainer } from "@/components/chat/ChatContainer"
+import { ChatSearchContext } from "@/components/chat/ChatSearchContext"
+import type { DurableChatSearchMatch } from "@/components/chat/ChatSearchOverlay"
+import type { ChatSearchReveal } from "../../../../shared/chat-search-types"
 import { ChatPresentationContext } from "@/components/chat/chat-presentation-context"
 import type {
   BotClient,
@@ -67,6 +74,7 @@ type GroupTimelineItem =
 export function BotGroupConversation({
   group,
   bots,
+  userInitials,
   tasks,
   backgroundThreads = [],
   revision,
@@ -81,6 +89,7 @@ export function BotGroupConversation({
 }: {
   group: BotGroup
   bots: BotDefinition[]
+  userInitials: string
   tasks: BotTask[]
   backgroundThreads?: string[]
   revision: number
@@ -95,15 +104,27 @@ export function BotGroupConversation({
 }) {
   const [history, setHistory] = useState(EMPTY_GROUP_HISTORY)
   const { messages } = history
+  const answerReplies = useMemo(() => botGroupQuestionReplies(messages), [messages])
   const questions = useGroupQuestions(client.hostId, group.id, tasks)
   const timeline = useMemo<GroupTimelineItem[]>(
     () => [
       ...messages.map((message) => ({ kind: "message" as const, message })),
-      ...questions.map((question) => ({ kind: "question" as const, ...question }))
+      ...questions
+        .filter(
+          (question) =>
+            !messages.some(
+              (message) => message.question?.request.requestId === question.request.requestId
+            )
+        )
+        .map((question) => ({ kind: "question" as const, ...question }))
     ],
     [messages, questions]
   )
   const listRef = useRef<VirtuosoHandle>(null)
+  const viewportRef = useRef<HTMLElement | null>(null)
+  const getViewport = useCallback(() => viewportRef.current, [])
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchReveal, setSearchReveal] = useState<ChatSearchReveal | null>(null)
   const [atBottom, setAtBottom] = useState(true)
   const [anchorId, setAnchorId] = useState<string | null>(null)
   const entranceIds = useMemo(() => messages.map((item) => item.id), [messages])
@@ -116,6 +137,7 @@ export function BotGroupConversation({
   const historyGeneration = useRef(0)
   const scrollAfterOrdinal = useRef<number | null>(null)
   const olderPending = useRef(false)
+  const searchRevealOwner = useRef<number | null>(null)
   const mounted = useRef(true)
   useEffect(() => {
     mounted.current = true
@@ -128,6 +150,7 @@ export function BotGroupConversation({
   const draft = useBotGroupDrafts((state) => state.drafts[draftKey] ?? EMPTY_GROUP_DRAFT)
   const input = draft.text
   const inputRef = useRef<BotGroupInputControl>(null)
+  const [expandedInput, setExpandedInput] = useState(false)
   const mentioned = groupMessageRecipients(draft.mentions, group.memberIds, {
     targets: draft.targets,
     replyAuthorId: draft.replyTo?.authorBotId
@@ -258,42 +281,90 @@ export function BotGroupConversation({
   }, [revision])
   const returnToLatest = () => {
     historyGeneration.current++
+    searchRevealOwner.current = null
+    olderPending.current = false
+    setBusy(false)
     anchorRef.current = null
     setAnchorId(null)
     setOlder(true)
     setHistory(EMPTY_GROUP_HISTORY)
     refreshRef.current()
   }
-  const jumpToReply = async (reply: { id: string; ordinal: number }) => {
-    const index = messages.findIndex((item) => item.id === reply.id)
-    if (index >= 0) {
-      listRef.current?.scrollToIndex({
-        index,
-        align: "center",
-        behavior: "smooth"
-      })
-      return
-    }
-    if (olderPending.current) return
-    olderPending.current = true
-    const generation = ++historyGeneration.current
-    setBusy(true)
-    try {
-      // Resolve the exact same-group message and its context without walking old pages.
-      const page = await client.groupMessages(group.id, { targetMessageId: reply.id })
-      if (!mounted.current || historyGeneration.current !== generation) return
-      if (!page.some((item) => item.id === reply.id)) throw new Error("被回复的消息已不可用")
-      anchorRef.current = reply.id
-      setAnchorId(reply.id)
-      setOlder(page.length === 50)
-      setHistory(mergeGroupHistory(EMPTY_GROUP_HISTORY, page))
-    } catch (cause) {
-      if (mounted.current) setError(botErrorMessage(cause))
-    } finally {
+  const cancelSearchReveal = useCallback(() => {
+    if (
+      searchRevealOwner.current !== null &&
+      searchRevealOwner.current === historyGeneration.current
+    ) {
+      historyGeneration.current++
       olderPending.current = false
       if (mounted.current) setBusy(false)
     }
-  }
+    searchRevealOwner.current = null
+  }, [])
+  useEffect(() => {
+    if (inspecting || exchange) {
+      cancelSearchReveal()
+      setSearchOpen(false)
+      setSearchReveal(null)
+    }
+  }, [inspecting, exchange, cancelSearchReveal])
+  const jumpToReply = useCallback(
+    async (reply: { id: string; ordinal: number }, search = false) => {
+      const index = messages.findIndex((item) => item.id === reply.id)
+      if (index >= 0) {
+        cancelSearchReveal()
+        listRef.current?.scrollToIndex({
+          index,
+          align: "center",
+          behavior: search ? "auto" : "smooth"
+        })
+        return
+      }
+      if (olderPending.current && !search) return
+      olderPending.current = true
+      const generation = ++historyGeneration.current
+      searchRevealOwner.current = search ? generation : null
+      setBusy(true)
+      try {
+        // Resolve the exact same-group message and its context without walking old pages.
+        const page = await client.groupMessages(group.id, { targetMessageId: reply.id })
+        if (!mounted.current || historyGeneration.current !== generation) return
+        if (!page.some((item) => item.id === reply.id)) throw new Error("被回复的消息已不可用")
+        anchorRef.current = reply.id
+        setAnchorId(reply.id)
+        setOlder(page.length === 50)
+        setHistory(mergeGroupHistory(EMPTY_GROUP_HISTORY, page))
+        if (search) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+      } catch (cause) {
+        if (mounted.current && historyGeneration.current === generation)
+          setError(botErrorMessage(cause))
+      } finally {
+        if (historyGeneration.current === generation) {
+          olderPending.current = false
+          if (mounted.current) setBusy(false)
+        }
+        if (searchRevealOwner.current === generation) searchRevealOwner.current = null
+      }
+    },
+    [messages, client, group.id, cancelSearchReveal]
+  )
+  const revealSearchMessage = useCallback(
+    (messageId: string) => {
+      cancelSearchReveal()
+      const index = timeline.findIndex((item) =>
+        item.kind === "message"
+          ? item.message.id === messageId
+          : `question-${item.request.requestId}` === messageId
+      )
+      if (index >= 0) listRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
+    },
+    [timeline, cancelSearchReveal]
+  )
+  const revealSearchHistory = useCallback(
+    (match: DurableChatSearchMatch) =>
+      jumpToReply({ id: match.messageId, ordinal: match.ordinal }, true),
+    [jumpToReply]
+  )
   const send = async (event: React.FormEvent) => {
     event.preventDefault()
     setError(null)
@@ -306,6 +377,7 @@ export function BotGroupConversation({
       attachmentLock.current
     )
       return
+    cancelSearchReveal()
     scrollAfterOrdinal.current = messages.at(-1)?.ordinal ?? 0
     if (anchorRef.current) returnToLatest()
     await sendGroupDraft(client, group)
@@ -324,10 +396,13 @@ export function BotGroupConversation({
       setOlder(page.length === 50)
       setHistory((current) => mergeGroupHistory(current, page))
     } catch (cause) {
-      if (mounted.current) setError(botErrorMessage(cause))
+      if (mounted.current && historyGeneration.current === generation)
+        setError(botErrorMessage(cause))
     } finally {
-      olderPending.current = false
-      if (mounted.current) setBusy(false)
+      if (historyGeneration.current === generation) {
+        olderPending.current = false
+        if (mounted.current) setBusy(false)
+      }
     }
   }
   return (
@@ -350,7 +425,12 @@ export function BotGroupConversation({
           aria-expanded={detailOpen}
           onClick={onDetails}
         >
-          <BotGroupAvatar memberIds={group.memberIds} bots={bots} size={26} />
+          <BotGroupAvatar
+            memberIds={group.memberIds}
+            bots={bots}
+            userInitials={userInitials}
+            size={26}
+          />
           <span>{group.name}</span>
         </button>
         <div className="bot-group-header-actions">
@@ -410,6 +490,20 @@ export function BotGroupConversation({
         ) : (
           <>
             <div className="bot-group-timeline">
+              <BotGroupSearch
+                client={client}
+                groupId={group.id}
+                messages={messages}
+                questions={questions}
+                enabled={!inspecting && !exchange}
+                open={searchOpen}
+                onOpenChange={setSearchOpen}
+                getViewport={getViewport}
+                onRevealMessage={revealSearchMessage}
+                onRevealDurableMessage={revealSearchHistory}
+                onCancelDurableReveal={cancelSearchReveal}
+                onRevealSearchContext={setSearchReveal}
+              />
               {!history.loaded ? (
                 <div className="bot-empty">
                   <Loader2 className="size-5 animate-spin" aria-label="正在读取群聊" />
@@ -418,13 +512,16 @@ export function BotGroupConversation({
                 <Virtuoso
                   key={anchorId ?? "latest"}
                   ref={listRef}
+                  scrollerRef={(element) => {
+                    viewportRef.current = element instanceof HTMLElement ? element : null
+                  }}
                   className="flex-1 min-h-0"
                   data={timeline}
                   firstItemIndex={history.firstIndex}
                   computeItemKey={(_, item) =>
                     item.kind === "message" ? item.message.id : `question-${item.request.requestId}`
                   }
-                  followOutput={!anchorId}
+                  followOutput={!anchorId && !searchOpen}
                   scrollIntoViewOnChange={() => {
                     if (
                       anchorRef.current ||
@@ -449,6 +546,11 @@ export function BotGroupConversation({
                     align: anchorId ? "center" : "end"
                   }}
                   components={{
+                    EmptyPlaceholder: () => (
+                      <div className="py-8 text-center text-sm text-muted-foreground">
+                        还没有消息
+                      </div>
+                    ),
                     Header: () =>
                       older && messages.length >= 50 ? (
                         <button
@@ -464,10 +566,22 @@ export function BotGroupConversation({
                     if (row.kind === "question") {
                       const bot = members.find((member) => member.id === row.task.botId)
                       return bot && !bot.deleting ? (
-                        <BotGroupQuestion {...row} bot={bot} onOpenBot={onOpenBot} />
+                        <div data-chat-message-id={`question-${row.request.requestId}`}>
+                          <BotGroupQuestion {...row} bot={bot} onOpenBot={onOpenBot} />
+                          {searchReveal?.messageId === `question-${row.request.requestId}` && (
+                            <ChatSearchContext location={searchReveal.location} />
+                          )}
+                        </div>
                       ) : null
                     }
                     const item = row.message
+                    const pendingQuestion =
+                      item.question &&
+                      questions.find(
+                        (question) =>
+                          question.request.requestId === item.question?.request.requestId
+                      )
+                    const questionHistory = item.question && botGroupQuestionHistory(item.question)
                     const displayText = item.authorBotId
                       ? splitBotInlineReasoning(item.text).body
                       : cleanUserAttachmentContentForDisplay(item.text)
@@ -480,9 +594,13 @@ export function BotGroupConversation({
                       ? bots.find((bot) => bot.id === item.authorBotId)
                       : null
                     const position = index - history.firstIndex
+                    const previous = messages[position - 1]
+                    const previousAnswer = previous && answerReplies.get(previous.id)?.at(-1)
                     const presentation = botGroupMessageView(
                       item,
-                      messages[position - 1],
+                      previous && previousAnswer
+                        ? { ...previous, authorBotId: null, createdAt: previousAnswer.createdAt }
+                        : previous,
                       messages[position + 1]
                     )
                     return (
@@ -498,6 +616,7 @@ export function BotGroupConversation({
                         >
                           <article
                             className="bot-group-message"
+                            data-chat-message-id={item.id}
                             data-user={!item.authorBotId}
                             data-continued={presentation.continued}
                             aria-label={`${author?.name ?? (item.authorBotId ? "已移除的 Bot" : "你")} · ${new Date(item.createdAt).toLocaleString()}`}
@@ -519,15 +638,17 @@ export function BotGroupConversation({
                                 )}
                               </div>
                             )}
-                            {presentation.showAvatar && author && !author.deleting && (
-                              <button
-                                className="bot-group-avatar-link"
-                                aria-label={`查看 ${author.name}`}
-                                onClick={() => onOpenBot(author)}
-                              >
-                                <BotAvatar color={author.color} shape={author.shape} size={23} />
-                              </button>
-                            )}
+                            {(presentation.showAvatar || answerReplies.has(item.id)) &&
+                              author &&
+                              !author.deleting && (
+                                <button
+                                  className="bot-group-avatar-link"
+                                  aria-label={`查看 ${author.name}`}
+                                  onClick={() => onOpenBot(author)}
+                                >
+                                  <BotAvatar color={author.color} shape={author.shape} size={23} />
+                                </button>
+                              )}
                             <time
                               className="bot-group-message-time"
                               dateTime={new Date(item.createdAt).toISOString()}
@@ -537,6 +658,27 @@ export function BotGroupConversation({
                                 minute: "2-digit"
                               })}
                             </time>
+                            {item.question &&
+                              (pendingQuestion ? (
+                                <BotGroupQuestionBody {...pendingQuestion} />
+                              ) : questionHistory ? (
+                                <BotQuestionHistory history={questionHistory} group />
+                              ) : (
+                                <div className="bot-question-history">
+                                  {item.question.request.questions.map((question) => (
+                                    <section className="bot-question-card" key={question.id}>
+                                      <header>
+                                        <span>{question.question}</span>
+                                        <span className="bot-question-status">
+                                          {item.question!.state === "waiting_user"
+                                            ? "等待作答"
+                                            : "作答回执暂不可用"}
+                                        </span>
+                                      </header>
+                                    </section>
+                                  ))}
+                                </div>
+                              ))}
                             {item.text && (
                               <div className="bot-group-bubble">
                                 <BotGroupMessageActions
@@ -606,6 +748,7 @@ export function BotGroupConversation({
                                 >
                                   <StreamingMarkdown
                                     isStreaming={false}
+                                    botTranscript={Boolean(item.authorBotId)}
                                     threadId={author ? `group-${group.id}-${author.id}` : undefined}
                                   >
                                     {displayText}
@@ -640,8 +783,19 @@ export function BotGroupConversation({
                                 <ChevronRight size={14} />
                               </button>
                             )}
+                            {searchReveal?.messageId === item.id && (
+                              <ChatSearchContext location={searchReveal.location} />
+                            )}
                           </article>
                         </BotMessageEntrance>
+                        {answerReplies.get(item.id)?.map((reply, replyIndex, replies) => (
+                          <BotGroupQuestionAnswer
+                            key={reply.source.id}
+                            history={reply.history}
+                            previousAt={replies[replyIndex - 1]?.createdAt ?? item.createdAt}
+                            onQuote={() => void jumpToReply(reply.source)}
+                          />
+                        ))}
                       </>
                     )
                   }}
@@ -652,6 +806,7 @@ export function BotGroupConversation({
                   className="bot-group-latest bot-icon-button"
                   aria-label="回到最新群消息"
                   onClick={() => {
+                    cancelSearchReveal()
                     if (anchorRef.current) returnToLatest()
                     else
                       listRef.current?.scrollToIndex({
@@ -790,7 +945,10 @@ export function BotGroupConversation({
                   ))}
                 </div>
               )}
-              <div className="flex items-end gap-3">
+              <div
+                className="bot-group-composer-fields"
+                data-expanded={expandedInput || draft.attachments.length > 0}
+              >
                 <button
                   type="button"
                   className="bot-icon-button"
@@ -811,6 +969,9 @@ export function BotGroupConversation({
                   placeholder={questions.length ? "输入你的回答，或聊点别的" : undefined}
                   inputRef={inputRef}
                   onEdit={editDraft}
+                  onLayout={(multiline, hasText) =>
+                    setExpandedInput((expanded) => hasText && (expanded || multiline))
+                  }
                   onCancelReply={() => {
                     if (!draft.replyTo) return false
                     editDraft({ replyTo: null })
@@ -818,23 +979,25 @@ export function BotGroupConversation({
                   }}
                   onPasteFiles={(files) => void attach(files)}
                 />
-                <button
-                  type="submit"
-                  className="bot-group-send"
-                  disabled={
-                    draft.sending ||
-                    attaching ||
-                    (!input.trim() && !draft.attachments.length) ||
-                    !targets.length
-                  }
-                  aria-label="发送群聊消息"
-                >
-                  {draft.sending ? (
-                    <Loader2 size={18} className="animate-spin" />
-                  ) : (
-                    <ArrowUp size={20} />
-                  )}
-                </button>
+                {(input.trim().length > 0 || draft.attachments.length > 0 || draft.sending) && (
+                  <button
+                    type="submit"
+                    className="bot-group-send"
+                    disabled={
+                      draft.sending ||
+                      attaching ||
+                      (!input.trim() && !draft.attachments.length) ||
+                      !targets.length
+                    }
+                    aria-label="发送群聊消息"
+                  >
+                    {draft.sending ? (
+                      <Loader2 size={18} className="animate-spin" />
+                    ) : (
+                      <ArrowUp size={20} />
+                    )}
+                  </button>
+                )}
               </div>
               {mentioned.error && (
                 <p role="alert" className="text-xs text-destructive">

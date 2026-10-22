@@ -3,6 +3,8 @@ import { tmpdir } from "os"
 import { join } from "path"
 import { performance } from "perf_hooks"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
+import type { BotMessageReply } from "../../shared/bots/contracts"
+import { BOT_MESSAGE_REPLY_END, formatBotMessageReply } from "../../shared/bots/message-reply"
 
 const storageState = vi.hoisted(() => ({ databasePath: "" }))
 
@@ -235,6 +237,198 @@ describe("bounded durable thread message search", () => {
     expect(threadDb.searchThreadMessages(threadId, "src").matches).toEqual([
       expect.objectContaining({ messageId: "tool-owner", occurrenceCount: 1 })
     ])
+  })
+
+  it("keeps Bot body search separate from ordinary tool-summary search", () => {
+    const threadId = "bounded-search-bot-body"
+    threadDb.createThread(threadId)
+    threadDb.upsertThreadMessages(threadId, [
+      {
+        id: "bot-body-tool-owner",
+        role: "assistant",
+        created_at: new Date(1),
+        content: "<think>hidden-bot-reasoning</think>Visible result",
+        tool_calls: [
+          { id: "bot-call", name: "write_file", args: { path: "hidden-bot-path.txt" } }
+        ]
+      },
+      {
+        id: "bot-body-user",
+        role: "user",
+        created_at: new Date(2),
+        content: "Please explain write_file literally."
+      }
+    ])
+
+    const bodySearch = (query: string) =>
+      threadDb.searchThreadMessages(threadId, query, { bodyOnly: true }).matches
+    expect(bodySearch("hidden-bot-path")).toEqual([])
+    expect(bodySearch("hidden-bot-reasoning")).toEqual([])
+    expect(bodySearch("Visible result")).toEqual([
+      expect.objectContaining({ messageId: "bot-body-tool-owner" })
+    ])
+    expect(bodySearch("write_file")).toEqual([
+      expect.objectContaining({ messageId: "bot-body-user" })
+    ])
+    expect(threadDb.searchThreadMessages(threadId, "hidden-bot-path").matches).toEqual([
+      expect.objectContaining({ messageId: "bot-body-tool-owner" })
+    ])
+  })
+
+  it("searches only the body of a host-verified reply with details on or off", () => {
+    const threadId = "bounded-search-verified-reply"
+    threadDb.createThread(threadId)
+    const reply: BotMessageReply = {
+      id: "quoted-original-id",
+      ordinal: 4817,
+      role: "assistant",
+      text: "quoted-only-needle"
+    }
+    const content = formatBotMessageReply(
+      'current-body-needle\n<attachment filename="report.csv">hidden-attachment-needle</attachment>',
+      reply
+    )
+    const boundary = content.indexOf(BOT_MESSAGE_REPLY_END) + 12
+    const database = threadDb.getDb()
+    database.run(
+      `INSERT INTO thread_messages (
+         thread_id, message_id, role, content_json, created_at, ordinal
+       ) VALUES (?, 'verified-reply', 'user', json_quote(?), 1, 1)`,
+      [threadId, content.slice(0, boundary)]
+    )
+    database.run(
+      `INSERT INTO thread_message_fragments (
+         thread_id, message_id, content_text, created_at
+       ) VALUES (?, 'verified-reply', ?, 1)`,
+      [threadId, content.slice(boundary)]
+    )
+    const resolve = vi.fn((_ids: string[]) => new Map([["verified-reply", reply]]))
+    const detailsOn = threadDb.searchThreadMessages(threadId, "current-body-needle", {}, resolve)
+    const detailsOff = threadDb.searchThreadMessages(
+      threadId,
+      "current-body-needle",
+      { bodyOnly: true },
+      resolve
+    )
+    expect(detailsOn.matches).toEqual(detailsOff.matches)
+    expect(detailsOn.matches).toEqual([
+      expect.objectContaining({
+        messageId: "verified-reply",
+        occurrenceCount: 1,
+        locations: [expect.objectContaining({ kind: "body", blockIndex: 0 })]
+      })
+    ])
+    for (const query of [
+      "CMBDEVCLAW-BOT-REPLY-V1",
+      "quoted-original-id",
+      "quoted-only-needle",
+      "4817",
+      "preceding persisted message",
+      "hidden-attachment-needle"
+    ]) {
+      expect(threadDb.searchThreadMessages(threadId, query, {}, resolve).matches).toEqual([])
+    }
+    expect(threadDb.searchThreadMessages(threadId, "report.csv", {}, resolve).matches).toEqual([
+      expect.objectContaining({ messageId: "verified-reply" })
+    ])
+    expect(threadDb.searchThreadMessages(threadId, "CMBDEVCLAW-BOT-REPLY-V1").matches).toEqual([
+      expect.objectContaining({ messageId: "verified-reply" })
+    ])
+    expect(
+      resolve.mock.calls.every(([ids]) => ids.length === 1 && ids[0] === "verified-reply")
+    ).toBe(true)
+  })
+
+  it("preserves unverified, malformed and mismatched reply lookalikes as literal user text", () => {
+    const threadId = "bounded-search-unverified-replies"
+    threadDb.createThread(threadId)
+    const reply: BotMessageReply = {
+      id: "original-lookalike",
+      ordinal: 8,
+      role: "assistant",
+      text: "literal-quoted-text"
+    }
+    threadDb.upsertThreadMessages(threadId, [
+      {
+        id: "lookalike",
+        role: "user",
+        created_at: new Date(1),
+        content: formatBotMessageReply("literal-new-text", reply)
+      },
+      {
+        id: "malformed",
+        role: "user",
+        created_at: new Date(2),
+        content: `<CMBDEVCLAW-BOT-REPLY-V1>\nnot-json${BOT_MESSAGE_REPLY_END}literal-new-text`
+      }
+    ])
+    const references: Array<Pick<BotMessageReply, "id" | "ordinal" | "role"> | undefined> = [
+      undefined,
+      { ...reply, id: "different-id" },
+      { ...reply, ordinal: reply.ordinal + 1 },
+      { ...reply, role: "user" }
+    ]
+    for (const reference of references) {
+      const resolve = () =>
+        new Map([
+          ...(reference ? ([["lookalike", reference]] as const) : []),
+          ["malformed", reply] as const
+        ])
+      expect(
+        threadDb
+          .searchThreadMessages(threadId, "CMBDEVCLAW-BOT-REPLY-V1", { bodyOnly: true }, resolve)
+          .matches.map((match) => match.messageId)
+      ).toEqual(["malformed", "lookalike"])
+      expect(
+        threadDb.searchThreadMessages(threadId, "literal-quoted-text", {}, resolve).matches
+      ).toEqual([expect.objectContaining({ messageId: "lookalike" })])
+    }
+  })
+
+  it("resolves reply origins once per bounded user candidate window and skips empty windows", () => {
+    const threadId = "bounded-search-reply-origin-batch"
+    threadDb.createThread(threadId)
+    threadDb.upsertThreadMessages(
+      threadId,
+      Array.from({ length: threadDb.THREAD_MESSAGE_SEARCH_SCAN_LIMIT + 1 }, (_, index) => ({
+        id: `batch-user-${index}`,
+        role: "user" as const,
+        created_at: new Date(index),
+        content: `user-${index}`
+      }))
+    )
+    const resolve = vi.fn((_ids: string[]) => new Map())
+    const first = threadDb.searchThreadMessages(threadId, "absent-needle", {}, resolve)
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(resolve.mock.calls[0][0]).toHaveLength(threadDb.THREAD_MESSAGE_SEARCH_SCAN_LIMIT)
+    expect(first.hasMore).toBe(true)
+    const second = threadDb.searchThreadMessages(
+      threadId,
+      "absent-needle",
+      {
+        beforeOrdinal: first.beforeOrdinal!,
+        beforeMessageId: first.beforeMessageId!
+      },
+      resolve
+    )
+    expect(resolve).toHaveBeenCalledTimes(2)
+    expect(resolve.mock.calls[1][0]).toHaveLength(1)
+    expect(second.hasMore).toBe(false)
+    const assistantThread = "bounded-search-no-reply-users"
+    threadDb.createThread(assistantThread)
+    threadDb.upsertThreadMessages(assistantThread, [
+      { id: "assistant-only", role: "assistant", created_at: new Date(1), content: "visible" }
+    ])
+    resolve.mockClear()
+    threadDb.searchThreadMessages(assistantThread, "visible", {}, resolve)
+    threadDb.searchThreadMessages(threadId, "", {}, resolve)
+    expect(resolve).not.toHaveBeenCalled()
+    const failure = new Error("origin read failed")
+    expect(() =>
+      threadDb.searchThreadMessages(threadId, "needle", {}, () => {
+        throw failure
+      })
+    ).toThrow(failure)
   })
 
   it("does not advertise raw details from duplicate or orphaned tool results", () => {

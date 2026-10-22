@@ -41,6 +41,8 @@ import {
 } from "../../shared/checkpoint-transcript"
 import { projectCoordinatorTranscriptNoise } from "../../shared/internal-notification-turn"
 import { cleanUserAttachmentContentForDisplay } from "../../shared/user-attachment-display"
+import { parseBotMessageReply } from "../../shared/bots/message-reply"
+import type { BotMessageReply } from "../../shared/bots/contracts"
 import { createChatSearchPlan, appendChatSearchToolSummaries } from "../../shared/chat-search-plan"
 import { iterateChatSearchLocations, projectChatSearchPlan } from "../../shared/chat-search-index"
 import type { ChatSearchLocation } from "../../shared/chat-search-types"
@@ -1866,7 +1868,10 @@ function parseThreadMessageSearchJson(raw: string | null): {
 export function searchThreadMessages(
   threadId: string,
   rawQuery: string,
-  options: ThreadMessageSearchOptions = {}
+  options: ThreadMessageSearchOptions = {},
+  resolveVerifiedReplies?: (
+    messageIds: string[]
+  ) => ReadonlyMap<string, Pick<BotMessageReply, "id" | "ordinal" | "role">>
 ): ThreadMessageSearchPage {
   const normalizedThreadId = typeof threadId === "string" ? threadId.trim() : ""
   const query = typeof rawQuery === "string" ? rawQuery.trim().toLowerCase() : ""
@@ -2077,6 +2082,16 @@ export function searchThreadMessages(
     candidateRowsStatement.free()
   }
 
+  // Only the host-owned caller can supply reply origins; one bounded batch also
+  // covers older messages without reading their referenced history one by one.
+  const replyMessageIds = resolveVerifiedReplies
+    ? candidates
+        .filter((candidate) => candidate.role === "user")
+        .map((candidate) => candidate.messageId)
+    : []
+  const verifiedReplies = replyMessageIds.length
+    ? resolveVerifiedReplies?.(replyMessageIds)
+    : undefined
   const headersById = new Map(
     selectedCandidates.map((candidate, index) => [candidate.messageId, { candidate, index }])
   )
@@ -2173,13 +2188,29 @@ export function searchThreadMessages(
       if (inspectedBytes + candidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) break
       inspectedBytes += candidateBytes
 
+      const replyTo = verifiedReplies?.get(candidate.messageId)
+      const parsedReply =
+        candidate.role === "user" && replyTo && typeof displayCandidateContent === "string"
+          ? parseBotMessageReply(displayCandidateContent)
+          : null
+      const verifiedReply =
+        parsedReply &&
+        parsedReply.reply.id === replyTo?.id &&
+        parsedReply.reply.ordinal === replyTo.ordinal &&
+        parsedReply.reply.role === replyTo.role
+          ? parsedReply
+          : null
       const searchPlan = createChatSearchPlan(
         candidate.role,
-        coordinatorProjection.contentChanged
-          ? coordinatorProjection.contentText
-          : displayCandidateContent
+        verifiedReply
+          ? verifiedReply.message
+          : coordinatorProjection.contentChanged
+            ? coordinatorProjection.contentText
+            : displayCandidateContent,
+        { stripThink: options.bodyOnly === true && candidate.role === "assistant" }
       )
-      appendChatSearchToolSummaries(searchPlan, coordinatorProjection.visibleToolCalls ?? [])
+      if (options.bodyOnly !== true)
+        appendChatSearchToolSummaries(searchPlan, coordinatorProjection.visibleToolCalls ?? [])
       const projectedSegments = projectChatSearchPlan(searchPlan)
       if (searchPlan.truncated) truncatedRows = true
       const found = iterateChatSearchLocations(projectedSegments, query, 1001)

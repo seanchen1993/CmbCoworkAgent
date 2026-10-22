@@ -1,7 +1,11 @@
 import { splitBotInlineReasoning } from "./inline-reasoning"
 
-/** Only an optional group continuation may use this exact Grok/Hermes silence marker. */
+/** Only optional discussion interprets this marker; direct replies remain visible. */
 export const BOT_GROUP_PASS = "(pass)"
 export function isBotGroupPass(value: string | undefined): boolean {
-  return typeof value === "string" && splitBotInlineReasoning(value).body.trim() === BOT_GROUP_PASS
+  // Grok's isPassContent also accepts bare pass, case variants and a final period.
+  return (
+    typeof value === "string" &&
+    /^(?:\(pass\)|pass)\.?$/i.test(splitBotInlineReasoning(value).body.trim())
+  )
 }

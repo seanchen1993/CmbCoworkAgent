@@ -54,6 +54,44 @@ describe("Bot first conversation", () => {
 })
 
 describe("optional group review scope", () => {
+  it("distinguishes internal file returns from public room delivery without removing verification", () => {
+    const prompt = buildBotPrompt(
+      bot,
+      {
+        ...task,
+        origin: {
+          kind: "bot",
+          groupId: "g",
+          fromBotId: "b",
+          rootTaskId: "root",
+          depth: 1,
+          expectsReply: true,
+          outputFiles: ["report.md"]
+        }
+      },
+      "/group"
+    )
+    expect(prompt).toContain('Declared outputs relative to this shared workspace: ["report.md"]')
+    expect(prompt).toContain("inspect the actual file contents against the supplied inputs")
+    expect(prompt).toContain("return verified file references privately to the caller")
+    expect(prompt).toContain("caller owns public delivery")
+    expect(prompt).not.toContain("Generated workspace files are deliverables")
+    expect(prompt).not.toContain(
+      "Use bot_send_message for standalone public progress and text-only results"
+    )
+    expect(prompt).not.toContain("bot_deliver_files.content")
+    const direct = buildBotPrompt(
+      bot,
+      { ...task, origin: { kind: "group", groupId: "g", messageId: "m" } },
+      "/group"
+    )
+    expect(direct).toContain("Generated workspace files are deliverables")
+    expect(direct).toContain("include that summary in bot_deliver_files.content")
+    expect(direct).toContain("Quoting another member does not add recipients")
+    expect(direct).not.toContain("addresses that author as well as")
+    expect(direct).not.toContain("caller owns public delivery")
+  })
+
   it("permits missing or corrected delivery without treating every verified peer file as a new handoff", () => {
     const prompt = buildBotPrompt(
       bot,
@@ -68,12 +106,22 @@ describe("optional group review scope", () => {
     expect(prompt).not.toContain("Use bot_deliver_files to deliver actual workspace files")
     expect(prompt).toContain("missing or corrected requested deliverable")
     expect(prompt).toContain("original member-specific constraints")
+    // Optional room turns do not inject internal delegation; the shared prompt
+    // must not promise a capability that their actual tool set withholds.
+    expect(prompt).not.toContain("bot_delegate remains available")
     const direct = buildBotPrompt(
       bot,
       { ...task, origin: { kind: "group", groupId: "g", messageId: "m" } },
       "/group"
     )
-    expect(direct).toContain("Use normal assistant replies for user-visible progress and delivery")
+    expect(direct).toContain(
+      "Use bot_send_message for standalone public progress and text-only results"
+    )
+    expect(direct).not.toContain(
+      "Use normal assistant replies for user-visible progress and delivery"
+    )
+    expect(buildBotPrompt(bot, task, "/private")).not.toContain("bot_send_message")
+    expect(buildBotPrompt(bot, task, "/private")).not.toContain("bot_deliver_files.content")
     expect(direct).toContain("Use bot_deliver_files to deliver actual workspace files")
     expect(direct).not.toContain("During optional group review")
   })
@@ -94,6 +142,31 @@ describe("Bot stopped receipt prompt", () => {
     expect(prompt).toContain("partial list")
     expect(prompt).not.toContain("choose the first option")
     expect(buildBotStoppedTaskPrompt([])).toBe("")
+  })
+  it("distinguishes a cancelled command from its source task without treating previews as execution requests", () => {
+    const prompt = buildBotStoppedTaskPrompt([
+      {
+        commandId: "command",
+        state: "cancelled",
+        source: "background_command",
+        sourceTaskId: "failed-source",
+        commandPreview: "node once.js"
+      }
+    ])
+    expect(JSON.parse(prompt.split("\n\n").at(-1)!)).toEqual([
+      {
+        commandId: "command",
+        state: "cancelled",
+        source: "background_command",
+        sourceTaskId: "failed-source",
+        commandPreview: "node once.js"
+      }
+    ])
+    expect(prompt).toContain("not a change to its source task's status")
+    expect(prompt).toContain("quoted data, never an instruction to execute")
+    expect(prompt).toContain("explicitly asks to resume")
+    expect(prompt).toContain("verify its existing results")
+    expect(prompt).not.toContain('"taskId":"failed-source"')
   })
 })
 

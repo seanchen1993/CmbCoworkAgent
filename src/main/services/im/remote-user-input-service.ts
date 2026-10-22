@@ -348,7 +348,12 @@ export class ImRemoteUserInputService {
           return [
             {
               header: question.header,
-              answer: answer.type === "option" ? answer.label : answer.text
+              answer:
+                answer.type === "option"
+                  ? answer.label
+                  : answer.type === "options"
+                    ? answer.options.map((option) => option.label).join("、")
+                    : answer.text
             }
           ]
         })

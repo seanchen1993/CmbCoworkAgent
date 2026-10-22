@@ -1,6 +1,7 @@
 import type { UserInputAnswer, UserInputRequest } from "@/types"
 
 export type UserInputDraftAnswer =
+  | { type: "options"; optionIndices: number[] }
   | {
       type: "option"
       optionIndex: number
@@ -25,6 +26,27 @@ export function userInputAnswers(
       answers[question.id] = { type: "other", questionId: question.id, text }
       continue
     }
+    if (draft.type === "options") {
+      if (
+        !question.allowMultiple ||
+        !draft.optionIndices.length ||
+        new Set(draft.optionIndices).size !== draft.optionIndices.length ||
+        draft.optionIndices.some((index) => !Number.isInteger(index) || !question.options[index])
+      )
+        return null
+      answers[question.id] = {
+        type: "options",
+        questionId: question.id,
+        options: [...draft.optionIndices]
+          .sort((a, b) => a - b)
+          .map((optionIndex) => ({
+            optionIndex,
+            ...question.options[optionIndex]
+          }))
+      }
+      continue
+    }
+    if (question.allowMultiple) return null
     const option = question.options[draft.optionIndex]
     if (!option) return null
     const additionalText = draft.additionalText?.trim()

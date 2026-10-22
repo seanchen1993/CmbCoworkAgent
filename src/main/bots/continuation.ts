@@ -1,13 +1,21 @@
 import { createHash } from "node:crypto"
 import type { BotTask } from "../../shared/bots/contracts"
 
-export interface BotStoppedTaskContext {
-  taskId: string
-  state: "cancelled" | "interrupted"
-  source: BotTask["origin"]["kind"]
-  reference?: { kind: string; key: string; runStartedAt?: string }
-  messagePreview: string
-}
+export type BotStoppedTaskContext =
+  | {
+      taskId: string
+      state: "cancelled" | "interrupted"
+      source: BotTask["origin"]["kind"]
+      reference?: { kind: string; key: string; runStartedAt?: string }
+      messagePreview: string
+    }
+  | {
+      commandId: string
+      state: "cancelled"
+      source: "background_command"
+      sourceTaskId: string | null
+      commandPreview: string
+    }
 
 /** Only direct user input in the same conversation may join its active Runtime. */
 export function canSteerBotTask(source: BotTask, incoming: BotTask): boolean {

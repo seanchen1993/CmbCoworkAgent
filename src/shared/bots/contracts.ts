@@ -1,5 +1,6 @@
 import type { WorkspaceFileScanEntry } from "../workspace-file-scan"
 import type { BotDeliveredFile } from "./file-delivery"
+import type { UserInputRequest } from "../../main/types"
 import type {
   WorkspaceFilePreviewReadRequest,
   WorkspaceFilePreviewReadResult,
@@ -155,13 +156,15 @@ export type BotTaskOrigin =
       groupId?: string
       /** Declared by the dispatch tool; verified by the host before a successful file reply. */
       outputFiles?: string[]
-      /** Host-verified outputs of this exact private handoff, not model-supplied grants. */
+      /** Host-verified outputs of this exact internal handoff, not model-supplied grants. */
       replyFiles?: BotDeliveredFile[]
     }
   | {
       kind: "notification"
       notificationKind: "workflow" | "coordinator" | "command"
       key: string
+      /** Host-recorded command outcome; only a known success can be quiet. Missing means unverified. */
+      commandSucceeded?: boolean
       /** Workflow run IDs survive retry; the original instance timestamp fences its receipt. */
       runStartedAt?: string
       groupId?: string
@@ -208,6 +211,14 @@ export interface BotGroupMessage {
   createdAt: number
   exchange?: { taskId: string; botId: string }
   files?: BotDeliveredFile[]
+  /** A group transcript entry; answers are read from the exact original Runtime receipt. */
+  question?: {
+    taskId: string
+    request: UserInputRequest
+    resultId?: string
+    result?: { content: string; is_error?: boolean }
+    state?: BotTaskState
+  }
 }
 /** UTF-16 ranges in the persisted message; identity never depends on the display label. */
 export interface BotGroupMention {

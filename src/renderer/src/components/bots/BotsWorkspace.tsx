@@ -2,7 +2,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { botErrorMessage } from "@/lib/bot-error-message"
 import { botCreateShortcut } from "@/lib/bot-create-shortcut"
 import { BotGroupAvatar } from "./BotGroupAvatar"
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type DragEvent } from "react"
 import {
   Archive,
   CircleAlert,
@@ -17,6 +17,7 @@ import {
   Search,
   Settings2,
   Trash2,
+  UsersRound,
   X
 } from "lucide-react"
 import { toast } from "sonner"
@@ -48,7 +49,14 @@ import {
   botConversationState,
   botFileRefreshKey
 } from "@/lib/bot-task-view"
-import { orderBotConversations } from "@/lib/bot-sidebar-view"
+import {
+  botPinnedConversationIds,
+  botPinDropTarget,
+  botSidebarDropPatch,
+  orderBotConversations,
+  type BotSidebarDrag,
+  type BotSidebarDrop
+} from "@/lib/bot-sidebar-view"
 import { groupDraftKey, sendGroupDraft, useBotGroupDrafts } from "@/lib/bot-group-drafts"
 import {
   bindBotConversationDraft,
@@ -216,7 +224,12 @@ function BotEditor({
                     creating ? "bot-create-avatar" : "flex flex-col items-center gap-4 py-2"
                   }
                 >
-                  <BotAvatar color={input.color} shape={input.shape} size={90} />
+                  <BotAvatar
+                    color={input.color}
+                    shape={input.shape}
+                    size={creating ? 96 : 90}
+                    idleAnimation={creating}
+                  />
                   {!creating && (
                     <BotAppearancePicker
                       value={input}
@@ -608,6 +621,39 @@ function GroupFiles({
 
 export function BotsWorkspace({ client = localBotClient() }: { client?: BotClient }) {
   const { snapshot, error, retry } = useBots(client)
+  const [profileName, setProfileName] = useState("")
+  useEffect(() => {
+    let disposed = false
+    let generation = 0
+    const refresh = () => {
+      const current = ++generation
+      void window.api.models
+        .getUserInfo()
+        .then((user) => {
+          if (!disposed && current === generation)
+            setProfileName(
+              user?.sapId && typeof user.userName === "string" ? user.userName.trim() : ""
+            )
+        })
+        .catch(() => {
+          if (!disposed && current === generation) setProfileName("")
+        })
+    }
+    const unsubscribe = window.electron.onNotifyMsg(refresh)
+    refresh()
+    return () => {
+      disposed = true
+      unsubscribe()
+    }
+  }, [])
+  const words = profileName.split(/\s+/u)
+  const userInitials = (
+    words.length > 1
+      ? words.slice(0, 2).map((word) => Array.from(word)[0])
+      : Array.from(profileName).slice(0, 2)
+  )
+    .join("")
+    .toUpperCase()
   useEffect(() => {
     if (snapshot) {
       useBotGroupDrafts.getState().prune(
@@ -648,11 +694,32 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     botId?: string
     name?: string
   } | null>(null)
+  const [sidebarDrag, setSidebarDrag] = useState<{
+    hostId: string
+    item: BotSidebarDrag
+  } | null>(null)
+  const sidebarDragging = sidebarDrag?.item
+  const [sidebarDrop, setSidebarDrop] = useState<BotSidebarDrop | null>(null)
+  const clearSidebarDrag = () => {
+    setSidebarDrag(null)
+    setSidebarDrop(null)
+  }
+  useEffect(() => {
+    clearSidebarDrag()
+  }, [client.hostId])
   const hiddenIds = view.hiddenBotIds ?? []
   const hiddenGroupIds = view.hiddenGroupIds ?? []
   const pinnedGroupIds = view.pinnedGroupIds ?? []
   const sections = view.sections ?? []
   const [searchOpen, setSearchOpen] = useState(false)
+  const groupActionQuery = query.trim().toLocaleLowerCase()
+  const showCreateGroupAction =
+    searchOpen &&
+    !showArchived &&
+    Boolean(groupActionQuery) &&
+    ["创建群聊", "新建群聊", "new group chat", "group", "chat", "room", "bots", "people"].some(
+      (keyword) => keyword.includes(groupActionQuery)
+    )
   const searchInputRef = useRef<HTMLInputElement>(null)
   const [newChat, setNewChat] = useState(false)
   const [newChatRecipients, setNewChatRecipients] = useState<BotChatRecipient[]>([])
@@ -767,7 +834,9 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
         (bot) =>
           bot.archived === showArchived &&
           (showArchived || query.trim() || hiddenIds.includes(bot.id) === showHidden) &&
-          `${bot.name} ${bot.label ?? ""}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())
+          `${bot.name} ${bot.label ?? ""}`
+            .toLocaleLowerCase()
+            .includes(query.trim().toLocaleLowerCase())
       ),
     [snapshot?.bots, showArchived, query, view.hiddenBotIds, showHidden]
   )
@@ -1052,14 +1121,18 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     }
   }
   const togglePin = (id: string, kind: "bot" | "group" = "bot") => {
-    const prefs = useBotViewStore.getState().hosts[client.hostId]
+    const prefs = useBotViewStore.getState().hosts[client.hostId] ?? DEFAULT_BOT_VIEW
     const pinKey = kind === "bot" ? "pinnedBotIds" : "pinnedGroupIds"
     const hiddenKey = kind === "bot" ? "hiddenBotIds" : "hiddenGroupIds"
-    const current = prefs?.[pinKey] ?? []
-    updateView({
-      [hiddenKey]: (prefs?.[hiddenKey] ?? []).filter((item) => item !== id),
-      [pinKey]: current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
-    })
+    const pinned = (prefs[pinKey] ?? []).includes(id)
+    const patch = botSidebarDropPatch(
+      prefs,
+      { kind, id, pinned },
+      pinned ? { kind: "agent-list" } : { kind: "pin-grid" },
+      snapshot?.groups.map((group) => group.id)
+    )
+    if (patch)
+      updateView({ ...patch, [hiddenKey]: (prefs[hiddenKey] ?? []).filter((item) => item !== id) })
   }
   const copyConversationId = async (bot: BotDefinition) => {
     try {
@@ -1074,17 +1147,13 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     sectionId: string | null,
     kind: "bot" | "group" = "bot"
   ) => {
-    const field = kind === "bot" ? "botIds" : "groupIds"
-    const current = useBotViewStore.getState().hosts[client.hostId]?.sections ?? []
-    updateView({
-      sections: current.map((section) => ({
-        ...section,
-        [field]: [
-          ...(section[field] ?? []).filter((id) => id !== botId),
-          ...(section.id === sectionId ? [botId] : [])
-        ]
-      }))
-    })
+    const prefs = useBotViewStore.getState().hosts[client.hostId] ?? DEFAULT_BOT_VIEW
+    const patch = botSidebarDropPatch(
+      prefs,
+      { kind, id: botId, pinned: false },
+      { kind: "section-body", id: sectionId }
+    )
+    if (patch) updateView(patch)
   }
   const setVisibility = (bot: BotDefinition) => {
     const current = useBotViewStore.getState().hosts[client.hostId]
@@ -1218,8 +1287,129 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     : (snapshot?.groups ?? []).filter(
         (group) =>
           (query.trim() || hiddenGroupIds.includes(group.id) === showHidden) &&
-          group.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())
+          group.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
       )
+  const pinOrder = botPinnedConversationIds(
+    view,
+    snapshot?.groups.map((group) => group.id)
+  )
+  const ungroupedDropTarget: BotSidebarDrop =
+    !showArchived && !showHidden && !query.trim() && sections.length
+      ? { kind: "section-body", id: null }
+      : { kind: "agent-list" }
+  const pinnedConversations = pinOrder.flatMap<
+    { kind: "bot"; value: BotDefinition } | { kind: "group"; value: BotGroup }
+  >((key) => {
+    const bot = pinnedBots.find((item) => `bot:${item.id}` === key)
+    if (bot) return [{ kind: "bot" as const, value: bot }]
+    const group = visibleGroups.find((item) => `group:${item.id}` === key)
+    return group ? [{ kind: "group" as const, value: group }] : []
+  })
+  const startSidebarDrag = (event: DragEvent, item: BotSidebarDrag) => {
+    event.stopPropagation()
+    setSidebarDrag({ hostId: client.hostId, item })
+    event.dataTransfer.effectAllowed = "move"
+    event.dataTransfer.setData("application/x-cmb-bot-sidebar", `${item.kind}:${item.id}`)
+  }
+  const sidebarDropAllowed = (event: DragEvent, target: BotSidebarDrop) => {
+    const source = sidebarDrag
+    if (
+      !source ||
+      source.hostId !== client.hostId ||
+      !event.dataTransfer.types.includes("application/x-cmb-bot-sidebar")
+    )
+      return false
+    if (source.item.kind === "section") return target.kind === "section"
+    return (
+      target.kind === "pin-grid" ||
+      target.kind === "section-body" ||
+      (source.item.pinned && target.kind === "agent-list")
+    )
+  }
+  const overSidebar = (event: DragEvent, target: BotSidebarDrop) => {
+    if (!sidebarDropAllowed(event, target)) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = "move"
+    setSidebarDrop((previous) =>
+      JSON.stringify(previous) === JSON.stringify(target) ? previous : target
+    )
+  }
+  const dropSidebar = (event: DragEvent, target: BotSidebarDrop) => {
+    if (!sidebarDropAllowed(event, target)) return
+    event.preventDefault()
+    event.stopPropagation()
+    const source = sidebarDrag!.item
+    if (
+      event.dataTransfer.getData("application/x-cmb-bot-sidebar") !== `${source.kind}:${source.id}`
+    ) {
+      clearSidebarDrag()
+      return
+    }
+    const exists =
+      source.kind === "section"
+        ? true
+        : source.kind === "bot"
+          ? snapshot?.bots.some((bot) => bot.id === source.id && !bot.deleting && !bot.archived)
+          : snapshot?.groups.some((group) => group.id === source.id && !group.deleting)
+    const prefs = useBotViewStore.getState().hosts[client.hostId] ?? DEFAULT_BOT_VIEW
+    if (exists) {
+      const patch = botSidebarDropPatch(
+        prefs,
+        source,
+        target,
+        snapshot?.groups.map((group) => group.id)
+      )
+      if (patch) updateView(patch)
+    }
+    clearSidebarDrag()
+  }
+  const pinDropTarget = (event: DragEvent) =>
+    botPinDropTarget(
+      Array.from(event.currentTarget.querySelectorAll<HTMLElement>("[data-bot-pin-key]")).map(
+        (node) => {
+          const { left, right, top, bottom } = node.getBoundingClientRect()
+          return { key: node.dataset.botPinKey!, left, right, top, bottom }
+        }
+      ),
+      { x: event.clientX, y: event.clientY },
+      getComputedStyle(event.currentTarget).direction === "rtl"
+    )
+  const sectionDropTarget = (event: DragEvent, id: string): BotSidebarDrop => {
+    const rect = (
+      event.currentTarget.querySelector(".bot-section-heading") ?? event.currentTarget
+    ).getBoundingClientRect()
+    return sidebarDragging?.kind === "section"
+      ? {
+          kind: "section",
+          id,
+          position: event.clientY > rect.top + rect.height / 2 ? "after" : "before"
+        }
+      : { kind: "section-body", id }
+  }
+  const rowDragProps = (kind: "bot" | "group", id: string, pinned: boolean, enabled = true) => ({
+    draggable: enabled && !showArchived,
+    onDragStart: (event: DragEvent) => startSidebarDrag(event, { kind, id, pinned }),
+    onDragEnd: clearSidebarDrag,
+    onClickCapture: (event: React.MouseEvent) => {
+      if (sidebarDrag) {
+        event.preventDefault()
+        event.stopPropagation()
+      }
+    },
+    "data-bot-pin-key": pinned ? `${kind}:${id}` : undefined,
+    "data-bot-drop-position":
+      pinned && sidebarDrop?.kind === "pin-grid" && sidebarDrop.anchor === `${kind}:${id}`
+        ? sidebarDrop.position
+        : undefined
+  })
+  const sidebarListDropTarget = (event: DragEvent): BotSidebarDrop | null => {
+    const target = event.target instanceof Element ? event.target : null
+    if (!target?.closest(".bots-list") || target.closest(".bot-pinned-list")) return null
+    return target.closest("[data-bot-row-key], [data-bot-default-section]")
+      ? ungroupedDropTarget
+      : { kind: "agent-list" }
+  }
   const renderGroupRow = (group: BotGroup, pinned = false) => {
     const memberStates = group.memberIds.map((id) => {
       const threadId = `group-${group.id}-${id}`
@@ -1238,7 +1428,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
           : null
     return (
       <BotRowMenu
-        key={group.id}
+        key={`group:${group.id}`}
         compact={view.sidebarWidth < 180}
         {...groupActions(group)}
         waiting={state === "waiting_user"}
@@ -1249,10 +1439,16 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               `${group.memberIds.length} 位 Bot`)
         }
         avatar={
-          <BotGroupAvatar memberIds={group.memberIds} bots={snapshot?.bots ?? []} size={18} />
+          <BotGroupAvatar
+            memberIds={group.memberIds}
+            bots={snapshot?.bots ?? []}
+            userInitials={userInitials}
+            size={18}
+          />
         }
       >
         <button
+          {...rowDragProps("group", group.id, pinned, !group.deleting)}
           className={pinned ? "bot-pinned-card" : "bot-list-item"}
           data-bot-row-key={`group:${group.id}`}
           data-bot-unread-count={
@@ -1266,7 +1462,11 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             setGroupId(group.id)
           }}
         >
-          <BotGroupAvatar memberIds={group.memberIds} bots={snapshot?.bots ?? []} />
+          <BotGroupAvatar
+            memberIds={group.memberIds}
+            bots={snapshot?.bots ?? []}
+            userInitials={userInitials}
+          />
           <span className={pinned ? "bot-pinned-name" : "min-w-0 flex-1"}>
             <span className={pinned ? undefined : "bot-list-name"}>{group.name}</span>
             {!pinned && (
@@ -1308,6 +1508,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
         avatar={<BotAvatar color={bot.color} shape={bot.shape} size={16} />}
       >
         <button
+          {...rowDragProps("bot", bot.id, false, !bot.deleting && !bot.archived)}
           className="bot-list-item"
           data-bot-row-key={`bot:${bot.id}`}
           data-bot-unread-count={activity?.unread ? 1 : undefined}
@@ -1325,6 +1526,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             settlement={last}
             color={bot.color}
             shape={bot.shape}
+            size={36}
             busy={current === "running"}
             waiting={current === "waiting_user"}
           />
@@ -1360,6 +1562,8 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const footerActions = [
     <BotWorkspaceMenu
       key="account"
+      profileName={profileName}
+      initials={userInitials}
       accentMode={view.accentMode ?? "neutral"}
       onAccentChange={(accentMode) => updateView({ accentMode })}
       showArchived={showArchived}
@@ -1435,7 +1639,18 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             }}
           />
         )}
-        <aside className="bots-sidebar" aria-label="Bots">
+        <aside
+          className="bots-sidebar"
+          aria-label="Bots"
+          onDragOver={(event) => {
+            const target = sidebarListDropTarget(event)
+            if (target) overSidebar(event, target)
+          }}
+          onDrop={(event) => {
+            const target = sidebarListDropTarget(event)
+            if (target) dropSidebar(event, target)
+          }}
+        >
           <div className="bot-sidebar-safe-area" aria-hidden="true" />
           <div className="bots-sidebar-toolbar">
             <button
@@ -1516,11 +1731,37 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               />
             </label>
           )}
+          {showCreateGroupAction && (
+            <button
+              type="button"
+              className="bot-list-item bot-search-create-group"
+              disabled={newChatBusy}
+              onClick={() => {
+                if (creatingChat.current) return
+                setQuery("")
+                setSearchOpen(false)
+                openNewChat()
+              }}
+            >
+              <UsersRound size={18} aria-hidden="true" />
+              <span>创建群聊</span>
+              <span>操作</span>
+            </button>
+          )}
           <BotConversationList label={showArchived ? "已归档 Bot" : "Bot 会话"}>
-            {(pinnedBots.length > 0 ||
-              visibleGroups.some((group) => pinnedGroupIds.includes(group.id))) && (
-              <div className="bot-pinned-list" aria-label="已置顶的 Bot">
-                {pinnedBots.map((bot) => {
+            {(pinnedConversations.length > 0 ||
+              (sidebarDragging && sidebarDragging.kind !== "section")) && (
+              <div
+                className="bot-pinned-list"
+                aria-label="已置顶的 Bot"
+                data-drop-empty={!pinnedConversations.length || undefined}
+                data-bot-drop-target={sidebarDrop?.kind === "pin-grid" || undefined}
+                onDragOver={(event) => overSidebar(event, pinDropTarget(event))}
+                onDrop={(event) => dropSidebar(event, pinDropTarget(event))}
+              >
+                {pinnedConversations.map((conversation) => {
+                  if (conversation.kind === "group") return renderGroupRow(conversation.value, true)
+                  const bot = conversation.value
                   const current = botConversationState(
                     tasksByBot.get(bot.id) ?? [],
                     threadSummaries[bot.threadId],
@@ -1528,7 +1769,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   )
                   return (
                     <BotRowMenu
-                      key={bot.id}
+                      key={`bot:${bot.id}`}
                       compact={view.sidebarWidth < 180}
                       {...rowActions(bot)}
                       waiting={current === "waiting_user"}
@@ -1541,6 +1782,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                       avatar={<BotAvatar color={bot.color} shape={bot.shape} size={16} />}
                     >
                       <button
+                        {...rowDragProps("bot", bot.id, true, !bot.deleting)}
                         className="bot-pinned-card"
                         data-bot-row-key={`bot:${bot.id}`}
                         data-bot-unread-count={
@@ -1560,7 +1802,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                           settlement={tasksByBot.get(bot.id)?.at(-1)}
                           color={bot.color}
                           shape={bot.shape}
-                          size={64}
+                          size={60}
                           busy={current === "running"}
                           waiting={current === "waiting_user"}
                         />
@@ -1572,16 +1814,29 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                     </BotRowMenu>
                   )
                 })}
-                {visibleGroups
-                  .filter((group) => pinnedGroupIds.includes(group.id))
-                  .map((group) => renderGroupRow(group, true))}
               </div>
             )}
             {!showArchived &&
               !showHidden &&
               !query.trim() &&
               sections.map((section) => (
-                <section key={section.id} className="bot-sidebar-section" aria-label={section.name}>
+                <section
+                  key={section.id}
+                  className="bot-sidebar-section"
+                  aria-label={section.name}
+                  data-bot-drop-target={
+                    sidebarDrop?.kind === "section-body" && sidebarDrop.id === section.id
+                      ? true
+                      : undefined
+                  }
+                  data-bot-drop-position={
+                    sidebarDrop?.kind === "section" && sidebarDrop.id === section.id
+                      ? sidebarDrop.position
+                      : undefined
+                  }
+                  onDragOver={(event) => overSidebar(event, sectionDropTarget(event, section.id))}
+                  onDrop={(event) => dropSidebar(event, sectionDropTarget(event, section.id))}
+                >
                   {sectionEditor?.id === section.id ? (
                     <BotSectionEditor
                       name={section.name}
@@ -1601,6 +1856,11 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                     <ContextMenu>
                       <ContextMenuTrigger asChild>
                         <button
+                          draggable
+                          onDragStart={(event) =>
+                            startSidebarDrag(event, { kind: "section", id: section.id })
+                          }
+                          onDragEnd={clearSidebarDrag}
                           className="bot-section-heading"
                           data-bot-row-key={`section:${section.id}`}
                           data-bot-expand-unread={section.collapsed ? "true" : undefined}
@@ -1624,6 +1884,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                           title={section.name}
                           aria-expanded={!section.collapsed}
                           onClick={() => {
+                            if (sidebarDrag) return
                             const current =
                               useBotViewStore.getState().hosts[client.hostId]?.sections ?? []
                             updateView({
@@ -1688,7 +1949,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                 </section>
               ))}
             {!showArchived && !showHidden && !query.trim() && sections.length > 0 && (
-              <div className="bot-section-heading">
+              <div className="bot-section-heading" data-bot-default-section>
                 <span>未分组</span>
               </div>
             )}
@@ -1710,9 +1971,9 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               )
             )}
             {!snapshot && !error && <Loader2 className="mx-auto mt-12 size-5 animate-spin" />}
-            {snapshot && !visible.length && !visibleGroups.length && (
+            {snapshot && !visible.length && !visibleGroups.length && !showCreateGroupAction && (
               <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-                {query
+                {query.trim()
                   ? "没有匹配的会话"
                   : showArchived
                     ? "没有已归档的 Bot"
@@ -1797,6 +2058,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               key={`${client.hostId}:${selectedGroup.id}`}
               group={selectedGroup}
               bots={snapshot?.bots ?? []}
+              userInitials={userInitials}
               tasks={snapshot?.tasks ?? []}
               backgroundThreads={snapshot?.backgroundThreads ?? []}
               revision={snapshot?.revision ?? 0}
@@ -1907,6 +2169,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                 <BotGroupAvatar
                   memberIds={selectedGroup.memberIds}
                   bots={snapshot?.bots ?? []}
+                  userInitials={userInitials}
                   size={64}
                 />
                 <BotNameInput

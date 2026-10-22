@@ -29,6 +29,7 @@ import { remarkBotFileLinks } from "@/lib/bot-file-link-remark"
 import { ChatPresentationContext } from "./chat-presentation-context"
 import { BotInlineMentionsContext } from "../bots/BotInlineMentionsContext"
 import { remarkBotMentions } from "@/lib/bot-mention-remark"
+import { rehypeBotTranscript } from "@/lib/bot-transcript-rehype"
 
 interface StreamingMarkdownProps {
   children: string
@@ -36,6 +37,7 @@ interface StreamingMarkdownProps {
   threadId?: string
   searchBlockIndex?: number
   searchLocation?: ChatSearchLocation
+  botTranscript?: boolean
 }
 
 function MarkdownCodeBlock({
@@ -92,6 +94,8 @@ const REHYPE_PLUGINS = [rehypeHighlight]
 // While streaming we skip syntax highlighting (the expensive rehype pass) and
 // reuse a single empty array identity so react-markdown doesn't see a new prop.
 const NO_REHYPE_PLUGINS: typeof REHYPE_PLUGINS = []
+const BOT_TRANSCRIPT_REHYPE_PLUGINS = [rehypeHighlight, rehypeBotTranscript]
+const BOT_STREAM_REHYPE_PLUGINS = [rehypeBotTranscript]
 
 // react-markdown's default URL sanitizer treats a Windows drive letter and
 // custom local schemes as unsafe protocols (for example, `C:/repo/a.ts` and
@@ -194,11 +198,13 @@ const MarkdownFragment = memo(function MarkdownFragment({
   text,
   isStreaming,
   threadId,
+  botTranscript = false,
   start = 0
 }: {
   text: string
   isStreaming: boolean
   threadId?: string
+  botTranscript?: boolean
   start?: number
 }): React.JSX.Element {
   const botPresentation = useContext(ChatPresentationContext) === "bot"
@@ -274,7 +280,15 @@ const MarkdownFragment = memo(function MarkdownFragment({
     >
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
-        rehypePlugins={isStreaming ? NO_REHYPE_PLUGINS : REHYPE_PLUGINS}
+        rehypePlugins={
+          botTranscript
+            ? isStreaming
+              ? BOT_STREAM_REHYPE_PLUGINS
+              : BOT_TRANSCRIPT_REHYPE_PLUGINS
+            : isStreaming
+              ? NO_REHYPE_PLUGINS
+              : REHYPE_PLUGINS
+        }
         components={mentionComponents}
         urlTransform={threadId ? transformStreamingMarkdownUrl : undefined}
       >
@@ -289,7 +303,8 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   isStreaming = false,
   threadId,
   searchBlockIndex = 0,
-  searchLocation
+  searchLocation,
+  botTranscript = false
 }: StreamingMarkdownProps): React.JSX.Element {
   const text = useThrottledStreamingText(children, isStreaming)
   const [expandedText, setExpandedText] = useState<string | null>(null)
@@ -315,14 +330,24 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
               收起长内容
             </button>
           )}
-          <MarkdownFragment text={plan.head} isStreaming={isStreaming} threadId={threadId} />
+          <MarkdownFragment
+            text={plan.head}
+            isStreaming={isStreaming}
+            threadId={threadId}
+            botTranscript={botTranscript}
+          />
         </>
       )
     }
 
     return (
       <>
-        <MarkdownFragment text={plan.head} isStreaming={isStreaming} threadId={threadId} />
+        <MarkdownFragment
+          text={plan.head}
+          isStreaming={isStreaming}
+          threadId={threadId}
+          botTranscript={botTranscript}
+        />
         <div
           data-chat-search-ignore
           className="my-3 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
@@ -348,13 +373,18 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
           start={text.length - plan.tail.length}
           isStreaming={isStreaming}
           threadId={threadId}
+          botTranscript={botTranscript}
         />
       </>
     )
-  }, [text, isStreaming, isExpanded, threadId, searchLocation])
+  }, [text, isStreaming, isExpanded, threadId, searchLocation, botTranscript])
 
   return (
-    <div className="streaming-markdown" data-chat-search-block-index={searchBlockIndex}>
+    <div
+      className="streaming-markdown"
+      data-chat-search-block-index={searchBlockIndex}
+      data-bot-transcript={botTranscript || undefined}
+    >
       {rendered}
     </div>
   )

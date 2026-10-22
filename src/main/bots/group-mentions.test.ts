@@ -17,14 +17,23 @@ it("binds full current names with original UTF-16 offsets, including emoji and C
   ])
 })
 
-it("does not bind ambiguous names, fall back to shorter Chinese names, or infer everyone", () => {
+it("does not bind ambiguous names or fall back to shorter Chinese names", () => {
   expect(
-    bindBotGroupMentions("@同事 @同 @everyone @Outside", [
+    bindBotGroupMentions("@同事 @同 @Outside", [
       { id: "a", name: "同事" },
       { id: "b", name: "同事" },
       { id: "c", name: "同" }
     ])
   ).toEqual([{ start: 4, end: 6, botId: "c", label: "同" }])
+})
+
+it("binds explicit everyone handles with exact offsets, but not email or longer handles", () => {
+  const text = "😀 @all @EVERYONE @所有人 user@all @alliance @everyone_else"
+  expect(bindBotGroupMentions(text, [])).toEqual([
+    { start: 3, end: 7, botId: null, label: "all" },
+    { start: 8, end: 17, botId: null, label: "EVERYONE" },
+    { start: 18, end: 22, botId: null, label: "所有人" }
+  ])
 })
 
 it("preserves full handle boundaries and never binds an email or a longer unknown handle", () => {

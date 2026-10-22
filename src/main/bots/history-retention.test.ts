@@ -1,8 +1,12 @@
 import { DatabaseSync } from "node:sqlite"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { botContinuationMessageId } from "./continuation"
+import { resolveBotWorkspaceFile } from "./workspace-file"
 
 const DAY = 86400000
 const databases: NativeSqliteAdapter[] = []
@@ -51,6 +55,40 @@ function fixture() {
 }
 
 describe("Bot control history retention", () => {
+  it("retains command provenance after pruning without copying its internal payload or crossing owners", () => {
+    const f = fixture()
+    const requestId = `notification:${f.bot.threadId}:command:command-1`
+    const origin = {
+      kind: "notification",
+      notificationKind: "command",
+      key: "command-1",
+      commandSucceeded: true
+    } as const
+    const task = f.store.enqueue(
+      { botId: f.bot.id, requestId, message: "Internal raw receipt" },
+      origin
+    )
+    f.store.transition(task.id, "running")
+    f.store.settle(task.id, "completed", null, "BOT_ROUTINE_SILENT")
+    expect(f.store.messageOrigins(f.bot.id, [requestId])).toEqual([
+      { id: task.id, requestId, origin, state: "completed" }
+    ])
+    expect(f.store.messageOrigins(f.peer.id, [requestId])).toEqual([])
+    const group = f.store.saveGroup({
+      name: "Other conversation",
+      memberIds: [f.bot.id, f.peer.id]
+    })
+    expect(f.store.messageOrigins(f.bot.id, [requestId], group.id)).toEqual([])
+    f.fillTail()
+    expect(f.store.pruneTaskHistory()).toBe(1)
+    expect(
+      f.native.prepare("SELECT message FROM bot_exchange_archive WHERE id=?").get(task.id)
+    ).toEqual({ message: null })
+    expect(f.reopen().messageOrigins(f.bot.id, [requestId])).toEqual([
+      { id: task.id, requestId, origin, state: "completed" }
+    ])
+    expect(f.reopen().messageOrigins(f.peer.id, [requestId])).toEqual([])
+  })
   it("keeps a command's original request while its bounded receipt is retained", () => {
     const f = fixture()
     const source = f.store.enqueue({
@@ -202,6 +240,53 @@ describe("Bot control history retention", () => {
     f.advance(60 * DAY)
     f.store.pruneTaskHistory()
     expect(f.native.prepare("SELECT COUNT(*) AS n FROM bot_task_receipts").get()?.n).toBe(0)
+  })
+
+  it("preserves recent delivered file references and original bytes across history pruning and reopening", async () => {
+    const f = fixture()
+    const workspace = await mkdtemp(join(tmpdir(), "bot-retention-files-"))
+    try {
+      const expired = f.complete("old-0")
+      for (let i = 1; i < 110; i++) f.complete(`old-${i}`)
+      f.fillTail()
+      const group = f.store.saveGroup({ name: "Files", memberIds: [f.bot.id, f.peer.id] })
+      f.store.sendGroup({
+        groupId: group.id,
+        requestId: "recent-file",
+        text: "Deliver the original CSV",
+        targetBotIds: [f.bot.id]
+      })
+      const task = f.store
+        .recentTasks()
+        .find((item) => item.origin.kind === "group" && item.origin.messageId === "recent-file")!
+      const bytes = Buffer.from("\uFEFFid,amount\r\nrecent,74.13\r\n")
+      await writeFile(join(workspace, "report.csv"), bytes)
+      const filePath = await resolveBotWorkspaceFile(workspace, "report.csv")
+      const files = [{ filePath, name: "report.csv", size: bytes.length }]
+      f.store.transition(task.id, "running")
+      f.store.publishGroupFiles(task.id, "file-call", files, "Original CSV")
+      f.store.settle(task.id, "completed", null, "Delivered")
+      const messages = f.store.groupMessages(group.id)
+      expect(messages.filter((message) => message.files)).toHaveLength(1)
+
+      expect(f.store.pruneTaskHistory()).toBe(100)
+      expect(f.store.pruneTaskHistory()).toBe(11)
+      expect(f.store.pruneTaskHistory()).toBe(0)
+      expect(() => f.store.getTask(expired.id)).toThrow("不存在")
+      const reopened = f.reopen()
+      expect(reopened.getTask(task.id).state).toBe("completed")
+      expect(reopened.groupMessages(group.id)).toEqual(messages)
+      const delivered = reopened.groupMessages(group.id).find((message) => message.files)!
+      expect(delivered).toMatchObject({ authorBotId: f.bot.id, text: "Original CSV", files })
+      expect(
+        await resolveBotWorkspaceFile(workspace, delivered.files![0].filePath, {
+          allowAbsolute: true
+        })
+      ).toBe(filePath)
+      expect(await readFile(filePath)).toEqual(bytes)
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+    }
   })
 
   it("keeps a completed root while a peer is queued and while its reply awaits delivery", () => {

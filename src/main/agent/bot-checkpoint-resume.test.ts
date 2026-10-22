@@ -6,9 +6,9 @@ import { z } from "zod"
 import { describe, expect, it } from "vitest"
 import {
   assertBotModelCheckpoint,
-  assertBotPrivateContinuationCheckpoint,
+  assertBotTaskContinuationCheckpoint,
   botGroupResumeCheckpoint,
-  botPrivateContinuationCheckpoint,
+  botTaskContinuationCheckpoint,
   botWorkflowNotificationClaim
 } from "./bot-checkpoint-resume"
 import { createCurrentRunMessageQueueMiddleware } from "./current-run-message-queue"
@@ -92,8 +92,8 @@ describe("Bot-owned model checkpoint continuation", () => {
       continueBotTaskCheckpointId: "saved"
     }
     const privateMetadata = { botHostId: "local", botId: "a" }
-    expect(botPrivateContinuationCheckpoint(privateContext, privateMetadata)).toBe("saved")
-    expect(botPrivateContinuationCheckpoint({ source: "desktop" }, {})).toBeUndefined()
+    expect(botTaskContinuationCheckpoint(privateContext, privateMetadata)).toBe("saved")
+    expect(botTaskContinuationCheckpoint({ source: "desktop" }, {})).toBeUndefined()
     for (const denied of [
       { ...privateContext, source: "desktop" as const },
       { ...privateContext, localRunLease: undefined },
@@ -102,12 +102,26 @@ describe("Bot-owned model checkpoint continuation", () => {
       { ...privateContext, continueBotTaskCheckpointId: " " },
       { ...privateContext, continueBotTaskCheckpointId: "x".repeat(201) }
     ])
-      expect(() => botPrivateContinuationCheckpoint(denied, privateMetadata)).toThrow("无权")
+      expect(() => botTaskContinuationCheckpoint(denied, privateMetadata)).toThrow("无权")
     expect(() =>
-      botPrivateContinuationCheckpoint(privateContext, { ...privateMetadata, botHostId: "remote" })
+      botTaskContinuationCheckpoint(privateContext, { ...privateMetadata, botHostId: "remote" })
     ).toThrow("无权")
     expect(() =>
-      botPrivateContinuationCheckpoint(privateContext, { ...privateMetadata, botGroupId: "g" })
+      botTaskContinuationCheckpoint(privateContext, { ...privateMetadata, botGroupId: "g" })
+    ).toThrow("无权")
+    const groupContext = { ...privateContext, verifyResolvedThread: () => null }
+    expect(
+      botTaskContinuationCheckpoint(groupContext, { ...privateMetadata, botGroupId: "g" })
+    ).toBe("saved")
+    for (const botGroupId of ["", " ", 1, {}, []])
+      expect(() =>
+        botTaskContinuationCheckpoint(groupContext, { ...privateMetadata, botGroupId })
+      ).toThrow("无权")
+    expect(() =>
+      botTaskContinuationCheckpoint(
+        { ...groupContext, source: "desktop" },
+        { ...privateMetadata, botGroupId: "g" }
+      )
     ).toThrow("无权")
   })
 
@@ -116,9 +130,9 @@ describe("Bot-owned model checkpoint continuation", () => {
       config: { configurable: { checkpoint_id: "newer-private" } },
       next: [] as string[]
     }
-    expect(() => assertBotPrivateContinuationCheckpoint("saved", state)).not.toThrow()
+    expect(() => assertBotTaskContinuationCheckpoint("saved", state)).not.toThrow()
     expect(() =>
-      assertBotPrivateContinuationCheckpoint("saved", {
+      assertBotTaskContinuationCheckpoint("saved", {
         config: { configurable: { checkpoint_id: "saved" } },
         next: ["model_request"]
       })
@@ -130,8 +144,8 @@ describe("Bot-owned model checkpoint continuation", () => {
       { ...state, tasks: [{ interrupts: [{ value: "approval" }] }] },
       { ...state, config: { configurable: { checkpoint_id: "" } } }
     ])
-      expect(() => assertBotPrivateContinuationCheckpoint("saved", denied)).toThrow("检查点")
-    expect(() => assertBotPrivateContinuationCheckpoint("", state)).toThrow("检查点")
+      expect(() => assertBotTaskContinuationCheckpoint("saved", denied)).toThrow("检查点")
+    expect(() => assertBotTaskContinuationCheckpoint("", state)).toThrow("检查点")
   })
 
   it("resumes the original graph after an interrupted model step without replaying a tool or user message", async () => {
@@ -239,7 +253,7 @@ describe("Bot-owned model checkpoint continuation", () => {
       typeof assertBotModelCheckpoint
     >[1]
     expect(() => assertBotModelCheckpoint(checkpointId, resultState)).toThrow("检查点")
-    expect(() => assertBotPrivateContinuationCheckpoint(checkpointId, resultState)).not.toThrow()
+    expect(() => assertBotTaskContinuationCheckpoint(checkpointId, resultState)).not.toThrow()
     expect(resultState.next).toEqual([])
   })
   it("continues private background work on newer history without replaying its completed tool", async () => {
@@ -302,7 +316,7 @@ describe("Bot-owned model checkpoint continuation", () => {
       { messages: [new HumanMessage({ id: "private", content: "Private correction: cedar" })] },
       config
     )
-    assertBotPrivateContinuationCheckpoint(checkpoint, await active.getState(config))
+    assertBotTaskContinuationCheckpoint(checkpoint, await active.getState(config))
     const resumed = await active.invoke(
       {
         messages: [

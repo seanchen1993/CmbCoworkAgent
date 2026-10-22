@@ -260,10 +260,14 @@ export function registerWorkspaceFilePreviewHandlers(ipcMain: IpcMain): void {
         }
       }
       const offset = request.offset ?? 0
-      if (!Number.isSafeInteger(offset) || offset < 0) {
+      if (
+        !Number.isSafeInteger(offset) ||
+        offset < 0 ||
+        (request.officePreview !== undefined && request.officePreview !== true)
+      ) {
         return {
           success: false,
-          error: "Invalid workspace file preview offset",
+          error: "Invalid workspace file preview request: offset or Office option",
           errorCode: "invalid-request"
         }
       }
@@ -280,7 +284,8 @@ export function registerWorkspaceFilePreviewHandlers(ipcMain: IpcMain): void {
           prepared.source,
           prepared.workspacePath,
           offset,
-          active.latestKey
+          active.latestKey,
+          request.officePreview
         )
         if (!isCurrent(active))
           throw Object.assign(new Error("Preview superseded"), {

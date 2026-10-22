@@ -1,4 +1,5 @@
 import type { BotMessageReply } from "../../../../shared/bots/contracts"
+import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useModCommands } from "../../features/slash-commands/useModCommands"
 import { ModCommandJobs } from "./ModCommandJobs"
@@ -154,6 +155,7 @@ import type {
 import {
   CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD,
   ChatMessageVirtualList,
+  getChatHistoryAnchorTop,
   shouldVirtualizeChatMessageList,
   type ChatApprovalDecision
 } from "./ChatMessageVirtualList"
@@ -3520,6 +3522,9 @@ export function ChatContainer({
   const hiddenMessageIds = useContext(ChatMessageVisibilityContext)
   const executionCardCallIds = useContext(ChatExecutionCardCallIdsContext)
   const showExecutionDetails = useContext(ChatExecutionDetailsContext)
+  const searchExpandsExecutionDetails = searchOpen && surface !== "bot"
+  const searchBodyOnly = surface === "bot" && !showExecutionDetails
+  const replySource = useContext(ChatReplySourceContext)
   const activityPresentation = useContext(ChatActivityPresentationContext)
   const parentToolPresentation = useContext(ChatToolPresentationContext)
   const hasPresentedMessageRow = useCallback(
@@ -3527,11 +3532,11 @@ export function ChatContainer({
       messageHasVisibleRow(message, hasHookLogChip) &&
       (surface !== "bot" ||
         showExecutionDetails ||
-        searchOpen ||
+        searchExpandsExecutionDetails ||
         message.role !== "assistant" ||
         Boolean(message.tool_calls?.length) ||
         botMessageHasEntranceBody(message)),
-    [surface, showExecutionDetails, searchOpen]
+    [surface, showExecutionDetails, searchExpandsExecutionDetails]
   )
   const dynamicVisibilityProjection = threadProjectionRuntime.projectDynamicLiveVisibility({
     live: liveDisplayProjection,
@@ -3558,8 +3563,21 @@ export function ChatContainer({
   // scalar version, so search can refresh live text without re-joining block-array content here.
   const searchRecomputeKey = useMemo(() => {
     if (!searchOpen) return "closed"
-    return `${displayMessagesContentVersion}:${displayMessages.length}:${isLoading}`
-  }, [displayMessages.length, displayMessagesContentVersion, isLoading, searchOpen])
+    return [
+      searchBodyOnly,
+      displayMessagesContentVersion,
+      displayMessages.length,
+      isLoading,
+      replySource
+    ]
+  }, [
+    displayMessages.length,
+    displayMessagesContentVersion,
+    isLoading,
+    searchOpen,
+    searchBodyOnly,
+    replySource
+  ])
 
   const detachedHookLogBuckets = threadProjectionRuntime.projectDetachedHookLogBuckets({
     displayMessages,
@@ -3598,10 +3616,13 @@ export function ChatContainer({
     inlineQuestion?.isMain === true
   const presentInlineQuestion = useCallback(
     (tool: ToolCall, result?: Pick<ToolResult, "content" | "is_error">) =>
-      !showExecutionDetails && !searchOpen && !result && tool.id === inlineQuestionCallId
+      !showExecutionDetails &&
+      !searchExpandsExecutionDetails &&
+      !result &&
+      tool.id === inlineQuestionCallId
         ? <></>
         : parentToolPresentation?.(tool, result),
-    [showExecutionDetails, searchOpen, inlineQuestionCallId, parentToolPresentation]
+    [showExecutionDetails, searchExpandsExecutionDetails, inlineQuestionCallId, parentToolPresentation]
   )
   // Ordinary assistant tokens update only the changed display slot. Keep the
   // tool projection stable and replace a slot only when that changed row is
@@ -3739,18 +3760,18 @@ export function ChatContainer({
   })
   const visibleMessageIndexes = useMemo(
     () =>
-      hiddenMessageIds.size || (!searchOpen && foldedMessageIds.size)
+      hiddenMessageIds.size || (!searchExpandsExecutionDetails && foldedMessageIds.size)
         ? unfilteredVisibleMessageIndexes.filter(
             (index) =>
               !hiddenMessageIds.has(displayMessages[index].id) &&
-              (searchOpen || !foldedMessageIds.has(displayMessages[index].id))
+              (searchExpandsExecutionDetails || !foldedMessageIds.has(displayMessages[index].id))
           )
         : unfilteredVisibleMessageIndexes,
     [
       unfilteredVisibleMessageIndexes,
       hiddenMessageIds,
       foldedMessageIds,
-      searchOpen,
+      searchExpandsExecutionDetails,
       displayMessages,
       displayMessagesStructureVersion
     ]
@@ -3789,10 +3810,20 @@ export function ChatContainer({
       // think/attachment wrapper before stripping it could expose hidden transport content.
       const hasVisibleReasoning =
         message.role === "assistant" && Boolean(normalizeVisibleReasoningText(message.reasoning))
-      const plan = createChatSearchPlan(message.role, message.content, {
-        stripThink: hasVisibleReasoning
+      const quote = surface === "bot" ? replySource?.quoteFor(message) : undefined
+      const parsedReply =
+        quote && typeof message.content === "string" ? parseBotMessageReply(message.content) : null
+      const verifiedReply =
+        quote &&
+        parsedReply?.reply.id === quote.id &&
+        parsedReply.reply.ordinal === quote.ordinal &&
+        parsedReply.reply.role === quote.role
+          ? parsedReply
+          : null
+      const plan = createChatSearchPlan(message.role, verifiedReply?.message ?? message.content, {
+        stripThink: hasVisibleReasoning || (searchBodyOnly && message.role === "assistant")
       })
-      appendChatSearchToolSummaries(plan, message.tool_calls ?? [])
+      if (!searchBodyOnly) appendChatSearchToolSummaries(plan, message.tool_calls ?? [])
       // Keep the source slices only; joining them would allocate a second corpus on the UI thread.
       const textUnits = plan.segments.reduce((sum, segment) => sum + segment.raw.length + 1, 0)
       return {
@@ -3806,7 +3837,7 @@ export function ChatContainer({
         sortIndex
       }
     },
-    [hookLogBucketByTurnId, hookLogConfig.enabled]
+    [hookLogBucketByTurnId, hookLogConfig.enabled, searchBodyOnly, surface, replySource]
   )
   const stableSearchDocumentsRef = useRef<{
     baseline: readonly Message[]
@@ -4481,9 +4512,12 @@ export function ChatContainer({
   }, [getViewport, threadId])
   const searchDurableMessages = useCallback(
     (query: string, options: DurableChatSearchOptions): Promise<DurableChatSearchPage> => {
-      return window.api.threads.searchMessages(threadId, query, options)
+      return window.api.threads.searchMessages(threadId, query, {
+        ...options,
+        bodyOnly: searchBodyOnly
+      })
     },
-    [threadId]
+    [threadId, searchBodyOnly]
   )
   const revealDurableMessage = useCallback(
     async (match: Pick<DurableChatSearchMatch, "messageId" | "ordinal">): Promise<void> => {
@@ -4722,7 +4756,6 @@ export function ChatContainer({
     },
     [dispatchChatScrollEvent, invalidateDurableMessageReveal, visibleMessageIndexById]
   )
-  const replySource = useContext(ChatReplySourceContext)
   const replySelection = useRef(0)
   const cancelBotReply = useCallback(() => {
     replySelection.current++
@@ -4990,7 +5023,7 @@ export function ChatContainer({
             threadId,
             generation: generation ?? 0,
             messageId: anchorId,
-            viewportTop: anchor.getBoundingClientRect().top,
+            viewportTop: getChatHistoryAnchorTop(anchor),
             previousMessageCount: displayMessages.length,
             previousLoadedMessageCount: historyLoadedMessageCount,
             attempt: 0,
@@ -5088,7 +5121,7 @@ export function ChatContainer({
           (candidate) => candidate.dataset.chatMessageId === anchor.messageId
         )
       if (viewport && target) {
-        const delta = target.getBoundingClientRect().top - anchor.viewportTop
+        const delta = getChatHistoryAnchorTop(target) - anchor.viewportTop
         if (Math.abs(delta) > 1) viewport.scrollTop += delta
         anchor.stableFrames = Math.abs(delta) <= 1 ? anchor.stableFrames + 1 : 0
         if (anchor.stableFrames >= CHAT_HISTORY_ANCHOR_STABLE_FRAMES) {
@@ -8397,7 +8430,9 @@ export function ChatContainer({
                       onOpenMarketBySkill={handleOpenMarketBySkill}
                     />
                   )}
-                  <ChatExecutionDetailsContext.Provider value={showExecutionDetails || searchOpen}>
+                  <ChatExecutionDetailsContext.Provider
+                    value={showExecutionDetails || searchExpandsExecutionDetails}
+                  >
                     <ChatToolPresentationContext.Provider value={presentInlineQuestion}>
                       <ChatMessageVirtualList
                         historyReady={!historyLoading && !historyPageLoading}
@@ -9611,6 +9646,7 @@ export function ChatContainer({
                               )}
                               <button
                                 type="submit"
+                                aria-label="发送消息"
                                 disabled={
                                   effectiveInputDisabled ||
                                   (!input.trim() &&

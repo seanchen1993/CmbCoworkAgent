@@ -21,6 +21,7 @@ export interface WorkspaceFilePreviewReadWorkerRequest extends WorkspaceFilePrev
   source: WorkspaceFilePreviewWorkerSource
   workspacePath?: string
   offset: number
+  officePreview?: true
 }
 
 export interface WorkspaceFilePreviewInspectWorkerRequest extends WorkspaceFilePreviewWorkerRequestBase {

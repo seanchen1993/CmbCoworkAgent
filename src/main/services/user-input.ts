@@ -193,40 +193,47 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
           )
         }, USER_INPUT_ACK_TIMEOUT_MS)
 
-    const autoResolutionTimeout = autoResolutionMs === undefined
-      ? undefined
-      : setTimeout(() => {
-          const pending = cleanupPending(request.requestId)
-          if (!pending) return
-          const selectedFirstOption = autoResolution?.type === "select_first"
-          sendToThread(threadId, "cancel", {
-            requestId: request.requestId,
-            reason: "The user input request was automatically resolved."
-          })
-          const answers: UserInputResponse["answers"] = {}
-          if (selectedFirstOption) {
-            for (const question of questions) {
-              const firstOption = question.options[0]
-              if (!firstOption) continue
-              answers[question.id] = {
-                type: "option",
-                questionId: question.id,
-                optionIndex: 0,
-                label: firstOption.label,
-                description: firstOption.description
+    const autoResolutionTimeout =
+      autoResolutionMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            const pending = cleanupPending(request.requestId)
+            if (!pending) return
+            const selectedFirstOption = autoResolution?.type === "select_first"
+            sendToThread(threadId, "cancel", {
+              requestId: request.requestId,
+              reason: "The user input request was automatically resolved."
+            })
+            const answers: UserInputResponse["answers"] = {}
+            if (selectedFirstOption) {
+              for (const question of questions) {
+                const firstOption = question.options[0]
+                if (!firstOption) continue
+                answers[question.id] = question.allowMultiple
+                  ? {
+                      type: "options",
+                      questionId: question.id,
+                      options: [{ optionIndex: 0, ...firstOption }]
+                    }
+                  : {
+                      type: "option",
+                      questionId: question.id,
+                      optionIndex: 0,
+                      label: firstOption.label,
+                      description: firstOption.description
+                    }
               }
             }
-          }
-          const response: AutoResolvedUserInputResponse = {
-            requestId: request.requestId,
-            autoResolved: true,
-            answers
-          }
-          if (autoResolution?.type === "user_message" && autoResolution.message) {
-            response.message = autoResolution.message
-          }
-          pending.resolve(response)
-        }, autoResolutionMs)
+            const response: AutoResolvedUserInputResponse = {
+              requestId: request.requestId,
+              autoResolved: true,
+              answers
+            }
+            if (autoResolution?.type === "user_message" && autoResolution.message) {
+              response.message = autoResolution.message
+            }
+            pending.resolve(response)
+          }, autoResolutionMs)
 
     pendingUserInputs.set(request.requestId, {
       request,
@@ -270,6 +277,8 @@ export function submitUserInputResponse(
   response: UserInputResponse,
   options: { notifyRenderer?: boolean; reason?: string } = {}
 ): boolean {
+  const request = pendingUserInputs.get(response.requestId)?.request
+  if (request && !validMultipleChoiceResponse(request, response)) return false
   const pending = cleanupPending(response.requestId)
   if (!pending) return false
   if (options.notifyRenderer) {
@@ -283,6 +292,50 @@ export function submitUserInputResponse(
     submittedAt: response.submittedAt ?? new Date().toISOString()
   })
   return true
+}
+
+/** Only the additive Bot protocol is checked here; legacy single-choice callers retain their contract. */
+function validMultipleChoiceResponse(
+  request: UserInputRequest,
+  response: UserInputResponse
+): boolean {
+  const answers = response.answers as Record<string, unknown>
+  const record = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value)
+  if (!record(answers)) return false
+  if (
+    !request.questions.some((q) => q.allowMultiple) &&
+    !Object.values(answers).some((answer) => record(answer) && answer.type === "options")
+  )
+    return true
+  if (response.ignored) return Object.keys(answers).length === 0
+  if (Object.keys(answers).length !== request.questions.length) return false
+  return request.questions.every((question) => {
+    const answer = answers[question.id]
+    if (!record(answer) || answer.questionId !== question.id) return false
+    if (answer.type === "other") return typeof answer.text === "string" && !!answer.text.trim()
+    const matches = (option: unknown): boolean => {
+      if (!record(option) || !Number.isInteger(option.optionIndex)) return false
+      const expected = question.options[Number(option.optionIndex)]
+      return (
+        !!expected && expected.label === option.label && expected.description === option.description
+      )
+    }
+    if (question.allowMultiple) {
+      if (
+        answer.type !== "options" ||
+        !Array.isArray(answer.options) ||
+        !answer.options.length ||
+        answer.options.length > question.options.length ||
+        !answer.options.every(matches)
+      )
+        return false
+      return (
+        new Set(answer.options.map((option) => option.optionIndex)).size === answer.options.length
+      )
+    }
+    return answer.type === "option" && matches(answer)
+  })
 }
 
 export function cancelUserInputsForThread(threadId: string, reason: string): number {

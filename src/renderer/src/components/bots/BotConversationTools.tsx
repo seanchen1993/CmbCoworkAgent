@@ -32,6 +32,8 @@ import {
 import { delegatedTaskReceipt } from "@/lib/bot-exchange-view"
 import { BotExchangePanel } from "./BotExchangePanel"
 import { mergeBotMessageOrigins, hiddenBotTaskMessageIds } from "@/lib/bot-routine-visibility"
+import { BOT_ROUTINE_SILENT } from "../../../../shared/bots/routine-silence"
+import { splitBotInlineReasoning } from "../../../../shared/bots/inline-reasoning"
 import { BotBrowserHelpCard } from "./BotBrowserHelpCard"
 import { BotDeliveredFile } from "./BotDeliveredFile"
 import { parseBotFileDelivery } from "../../../../shared/bots/file-delivery"
@@ -91,6 +93,13 @@ export function BotConversationTools({
     threadId,
     (state) => `${state.messages.length}:${state.messages[0]?.id}:${state.messages.at(-1)?.id}`
   )
+  // Observe only transitions into/out of a control token, without refetching origins per token.
+  const streamingQuietMessage = useThreadStateSelector(threadId, (state) => {
+    const last = state.messages.at(-1)
+    if (last?.role !== "assistant" || typeof last.content !== "string") return ""
+    const body = splitBotInlineReasoning(last.content).body.trim()
+    return body && BOT_ROUTINE_SILENT.startsWith(body) ? last.id : ""
+  })
   const [origins, setOrigins] = useState<BotMessageOrigin[]>([])
   useEffect(() => {
     let disposed = false
@@ -166,7 +175,16 @@ export function BotConversationTools({
         ? new Map<string, QuestionHistory>()
         : stoppedBotQuestionHistory(messages, taskByMessage)
     }
-  }, [threadId, context, taskByMessage, windowKey, showExecutionDetails, tasks, cardCallIds])
+  }, [
+    threadId,
+    context,
+    taskByMessage,
+    windowKey,
+    streamingQuietMessage,
+    showExecutionDetails,
+    tasks,
+    cardCallIds
+  ])
   useEffect(() => {
     if (!exchangeId && exchangeTrigger.current?.isConnected) exchangeTrigger.current.focus()
   }, [exchangeId])

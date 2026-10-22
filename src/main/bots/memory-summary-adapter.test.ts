@@ -36,14 +36,21 @@ const turn = {
   threadId: "thread-a",
   modelRef: null,
   editVersion: 1,
-  conversation: "USER: Prefer TypeScript"
+  conversation: "USER: Prefer TypeScript",
+  userText: "Prefer TypeScript"
 }
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve))
+const approval = (count = 1, quote = turn.userText): string =>
+  JSON.stringify({
+    userFacts: [{ quote, kind: "preference", fact: "Prefer TypeScript" }],
+    reviews: Array.from({ length: count }, (_, index) => ({ index, factIndexes: [0] })),
+    approved: true
+  })
 beforeEach(() => {
   vi.clearAllMocks()
   fixture.enabled = true
   fixture.route.mockResolvedValue(null)
-  fixture.verify.mockResolvedValue({ content: '{"approved":true}' })
+  fixture.verify.mockResolvedValue({ content: approval() })
 })
 
 const preference = {
@@ -70,7 +77,7 @@ describe("Bot automatic memory verification", () => {
         })
         .mockImplementationOnce(async () => {
           expect(memory.list("a")).toEqual([])
-          return { content: JSON.stringify({ approved }) }
+          return { content: approved ? approval() : JSON.stringify({ approved }) }
         })
       const maintainer = createBotMemoryMaintainer(memory, () => true)
       try {
@@ -92,6 +99,17 @@ describe("Bot automatic memory verification", () => {
 
   it.each([
     '{"approved":false}',
+    '{"approved":true}',
+    approval(0),
+    approval(2),
+    approval(1, "Assistant-only task ID"),
+    approval().replace('"preference"', '"task_event"'),
+    approval().replace('"kind":"preference"', '"kind":["preference"]'),
+    approval().replace('"factIndexes":[0]', '"factIndexes":[1]'),
+    approval().replace('"factIndexes":[0]', '"factIndexes":[]'),
+    approval().replace('"quote":"Prefer TypeScript"', '"quote":" "'),
+    approval().replace('"index":0', '"index":-1'),
+    approval().replace('"index":0', '"index":0.5'),
     '{"approved":"true"}',
     '{"approved":true,"unexpected":"override"}',
     '[{"approved":true}]',
@@ -143,11 +161,12 @@ describe("Bot automatic memory verification", () => {
       expect(messages[0].getType()).toBe("system")
       const evidence = JSON.parse(messages[1].content)
       expect(evidence.conversation).toBe(turn.conversation)
+      expect(evidence.userStatements).toEqual([turn.userText])
       expect(evidence.proposedChanges).toEqual([update, preference])
       expect(evidence.currentMemories).toEqual([existing])
       expect(JSON.stringify(evidence)).not.toContain("Private other-Bot information")
       expect(options.signal).toBeInstanceOf(AbortSignal)
-      return { content: '<think>internal</think>\n```json\n{"approved":true}\n```' }
+      return { content: "<think>internal</think>\n```json\n" + approval(2) + "\n```" }
     })
     const maintainer = createBotMemoryMaintainer(memory, () => true)
     try {
@@ -268,7 +287,7 @@ describe("Bot automatic memory verification", () => {
             finish = () =>
               change === "failure"
                 ? reject(new Error("Synthetic verification failure"))
-                : resolve({ content: '{"approved":true}' })
+                : resolve({ content: approval() })
             expect(options.signal).toBeInstanceOf(AbortSignal)
             started()
           })

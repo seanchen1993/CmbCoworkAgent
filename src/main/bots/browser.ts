@@ -29,6 +29,7 @@ export interface BotBrowserAction {
     | "dialog"
     | "request_help"
   pageId?: string
+  newTab?: boolean
   url?: string
   role?: BotBrowserRole
   name?: string
@@ -235,7 +236,7 @@ export class BotBrowserService {
     }
   }
 
-  private async page(botId: string, pageId?: string): Promise<OwnedPage> {
+  private async page(botId: string, pageId?: string, newTab = false): Promise<OwnedPage> {
     if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
     if (pageId) {
       const entry = this.pages.get(pageId)
@@ -246,11 +247,11 @@ export class BotBrowserService {
         )
       return entry
     }
-    const existing = [...this.pages.values()].find(
+    const owned = [...this.pages.values()].filter(
       (entry) => entry.botId === botId && !entry.page.isClosed()
     )
-    if (existing) return existing
-    if (this.pages.size >= 24)
+    if (!newTab && owned.length) return owned[0]
+    if (this.pages.size >= 24 || owned.length >= 6)
       throw new BotError("CONFLICT", "浏览器页面已达上限，请先关闭不用的页面")
     await this.start()
     const creating = this.engine!.createPage().then((page) => this.register(botId, page))
@@ -302,6 +303,8 @@ export class BotBrowserService {
     withUploadFileLock?: BotBrowserUploadLock
   ): Promise<string> {
     signal.throwIfAborted()
+    if (action.newTab && (action.action !== "navigate" || action.pageId !== undefined))
+      throw new BotError("INVALID_INPUT", "newTab=true 仅支持 navigate，且必须省略 pageId")
     if (action.action === "request_help") {
       const instruction = action.instruction?.trim()
       if (!instruction || instruction.length > 500)
@@ -387,7 +390,10 @@ export class BotBrowserService {
     }
     return this.lock.withKey("browser", async () => {
       this.check(signal, generation, botId)
-      const entry = await this.page(botId, action.pageId),
+      const url = action.action === "navigate" ? new URL(action.url ?? "") : undefined
+      if (url && (!["http:", "https:"].includes(url.protocol) || url.username || url.password))
+        throw new BotError("INVALID_INPUT", "仅支持无内嵌凭据的 HTTP／HTTPS 地址")
+      const entry = await this.page(botId, action.pageId, action.newTab),
         page = entry.page
       this.check(signal, generation, botId)
       const abort = () => {
@@ -444,10 +450,7 @@ export class BotBrowserService {
           await this.input(entry, () => target.setInputFiles(file))
           upload = { filename: basename(file), state: "attached" }
         } else if (action.action === "navigate") {
-          const url = new URL(action.url ?? "")
-          if (!["http:", "https:"].includes(url.protocol) || url.username || url.password)
-            throw new BotError("INVALID_INPUT", "仅支持无内嵌凭据的 HTTP／HTTPS 地址")
-          await this.input(entry, () => page.goto(url.href, { waitUntil: "domcontentloaded" }))
+          await this.input(entry, () => page.goto(url!.href, { waitUntil: "domcontentloaded" }))
         } else if (["click", "fill", "press"].includes(action.action)) {
           if (!action.role || !action.name)
             throw new BotError("INVALID_INPUT", "请使用页面观察中的角色和名称定位")

@@ -177,6 +177,47 @@
   outline: 2px solid var(--bot-muted);
   outline-offset: 2px;
 }
+.bot-pinned-list[data-drop-empty] {
+  min-height: 80px;
+  border-radius: 14px;
+  outline: 1px dashed var(--bot-line);
+  outline-offset: -4px;
+}
+.bot-pinned-list[data-bot-drop-target="true"],
+.bot-sidebar-section[data-bot-drop-target="true"] {
+  border-radius: 14px;
+  outline: 2px solid var(--bot-muted);
+  outline-offset: -2px;
+}
+.bot-sidebar-section {
+  position: relative;
+}
+.bot-sidebar-section[data-bot-drop-position]::before,
+.bot-pinned-card[data-bot-drop-position]::before {
+  content: "";
+  position: absolute;
+  border-radius: 2px;
+  background: var(--bot-muted);
+  pointer-events: none;
+}
+.bot-sidebar-section[data-bot-drop-position]::before {
+  height: 2px;
+  inset-inline: 8px;
+  top: -2px;
+}
+.bot-sidebar-section[data-bot-drop-position="after"]::before {
+  top: auto;
+  bottom: -2px;
+}
+.bot-pinned-card[data-bot-drop-position]::before {
+  width: 2px;
+  inset-block: 6px;
+  inset-inline-start: -4px;
+}
+.bot-pinned-card[data-bot-drop-position="after"]::before {
+  inset-inline-start: auto;
+  inset-inline-end: -4px;
+}
 .bot-pinned-name {
   max-width: 100%;
   overflow: hidden;
@@ -272,6 +313,19 @@
 }
 .bot-search-expand {
   display: none;
+}
+.bot-list-item.bot-search-create-group {
+  width: calc(100% - 28px);
+  margin: 0 14px 12px;
+  padding: 10px 12px;
+  gap: 10px;
+  color: var(--bot-text);
+  font-size: 13px;
+}
+.bot-search-create-group span:last-child {
+  margin-left: auto;
+  color: var(--bot-muted);
+  font-size: 12px;
 }
 .bot-list-viewport {
   position: relative;
@@ -1279,11 +1333,45 @@ button.bot-json-caret:focus-visible {
 }
 [data-chat-surface="bot"] [data-message-bubble="user"] [data-user-message-text] {
   color: inherit;
+  line-height: inherit;
 }
 [data-chat-surface="bot"] [data-message-bubble="assistant"] [data-message-body] {
   width: fit-content;
   max-width: min(80%, 560px, calc(100% - 82px));
   background: var(--bot-agent-bubble);
+}
+/* One assistant message still owns copy/reply/search. Only its parsed top-level
+   table presentation becomes separate runs; plain messages keep their bubble. */
+.bots-workspace
+  :is([data-message-body], .bot-group-bubble, .bot-exchange-bubble):has(
+    > .streaming-markdown[data-bot-transcript] > [data-chat-search-text] > .streaming-markdown-table-wrap
+  ) {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.bots-workspace
+  :is([data-message-body], .bot-group-bubble, .bot-exchange-bubble):has(
+    > .streaming-markdown[data-bot-transcript] > [data-chat-search-text] > .streaming-markdown-table-wrap
+  ) > .streaming-markdown[data-bot-transcript] > [data-chat-search-text]
+  > :is([data-bot-prose], .streaming-markdown-table-wrap) {
+  max-width: 100%;
+  margin: 0;
+  padding: 7px 12px;
+  border-radius: 18px;
+  background: var(--bot-agent-bubble);
+}
+.bots-workspace
+  :is([data-message-body], .bot-group-bubble, .bot-exchange-bubble):has(
+    > .streaming-markdown[data-bot-transcript] > [data-chat-search-text] > .streaming-markdown-table-wrap
+  ) > .streaming-markdown[data-bot-transcript] > [data-chat-search-text]
+  > :is([data-bot-prose], .streaming-markdown-table-wrap)
+  + :is([data-bot-prose], .streaming-markdown-table-wrap) {
+  margin-top: 12px;
+}
+.bots-workspace .streaming-markdown[data-bot-transcript] [data-bot-numeric] {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
 }
 [data-chat-surface="bot"] [data-message-meta] {
   display: none;
@@ -1349,6 +1437,18 @@ button.bot-json-caret:focus-visible {
 .bot-question-answer > div {
   min-width: 0;
   flex: 1;
+  white-space: pre-wrap;
+}
+.bot-question-history[data-group="true"][data-state="submitted"] header {
+  color: var(--bot-muted);
+}
+.bot-question-selected-key {
+  background: color-mix(in srgb, var(--bot-text) 18%, var(--bot-agent-bubble));
+}
+.bot-group-answer-line + .bot-group-answer-line {
+  margin-top: 12px;
+}
+.bot-group-answer-text {
   white-space: pre-wrap;
 }
 .bot-question-card p {
@@ -1516,6 +1616,20 @@ button.bot-json-caret:focus-visible {
   background: var(--bot-text);
   color: var(--bot-canvas);
 }
+.bot-question-input[data-multiple] .bot-question-option {
+  grid-template-columns: minmax(0, 1fr);
+}
+.bot-question-input[data-multiple] .bot-question-option[data-selected="true"] .bot-question-key {
+  background: var(--bot-user-bubble);
+  border-color: transparent;
+  color: var(--bot-user-text);
+}
+.bot-question-input[data-multiple] .bot-question-submit {
+  width: auto;
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: 999px;
+}
 .bot-message-entrance {
   display: contents;
 }
@@ -1622,39 +1736,64 @@ button.bot-json-caret:focus-visible {
   height: 42px;
   flex-shrink: 0;
 }
-.bot-group-avatar > svg {
+.bot-group-avatar > :is(svg, .bot-group-avatar-person) {
   position: absolute;
   width: 66.6667%;
   height: 66.6667%;
   top: 0;
   left: 0;
 }
-.bot-group-avatar[data-count="1"] > svg {
+.bot-group-avatar[data-count="1"] > :is(svg, .bot-group-avatar-person) {
   width: 100%;
   height: 100%;
 }
-.bot-group-avatar > svg:nth-child(2) {
+.bot-group-avatar > :nth-child(2) {
   top: auto;
   left: auto;
   right: 0;
   bottom: 0;
 }
-.bot-group-avatar[data-count="3"] > svg {
+.bot-group-avatar:is([data-count="3"], [data-count="4"]) > :is(svg, .bot-group-avatar-person) {
   width: 55.5556%;
   height: 55.5556%;
 }
-.bot-group-avatar[data-count="3"] > svg:first-child {
+.bot-group-avatar[data-count="3"] > :first-child {
   left: 22.2222%;
 }
-.bot-group-avatar[data-count="3"] > svg:nth-child(2) {
+.bot-group-avatar[data-count="3"] > :nth-child(2) {
   left: 0;
   right: auto;
 }
-.bot-group-avatar[data-count="3"] > svg:nth-child(3) {
+.bot-group-avatar[data-count="3"] > :nth-child(3) {
   top: auto;
   left: auto;
   right: 0;
   bottom: 0;
+}
+.bot-group-avatar[data-count="4"] > :nth-child(2) {
+  top: 0;
+  bottom: auto;
+}
+.bot-group-avatar[data-count="4"] > :nth-child(3) {
+  top: auto;
+  bottom: 0;
+}
+.bot-group-avatar[data-count="4"] > :nth-child(4) {
+  top: auto;
+  left: auto;
+  right: 0;
+  bottom: 0;
+}
+.bot-group-avatar-person {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--bot-muted);
+}
+.bot-group-avatar-person > svg {
+  width: 70%;
+  height: 70%;
 }
 .bot-group-message {
   position: relative;
@@ -1869,6 +2008,28 @@ button.bot-json-caret:focus-visible {
 }
 .bot-group-send:disabled {
   opacity: 0.3;
+}
+.bot-group-composer-fields {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  grid-template-areas: "attach input send";
+  align-items: end;
+  column-gap: 12px;
+}
+.bot-group-composer-fields > .bot-icon-button {
+  grid-area: attach;
+}
+.bot-group-composer-fields > .bot-group-input {
+  grid-area: input;
+}
+.bot-group-composer-fields > .bot-group-send {
+  grid-area: send;
+}
+.bot-group-composer-fields[data-expanded="true"] {
+  grid-template-areas:
+    "input input input"
+    "attach . send";
+  row-gap: 8px;
 }
 .bot-browser-panel {
   padding: 20px;

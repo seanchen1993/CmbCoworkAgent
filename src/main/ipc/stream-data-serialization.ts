@@ -5,6 +5,7 @@ import {
   readStreamMessageWireMode,
   type StreamMessageWireMode
 } from "../../shared/stream-message-wire-mode"
+import { isWorkflowPlumbingTranscriptContent } from "../../shared/checkpoint-transcript"
 
 const WORKER_SNAPSHOT_INDEX_MESSAGE_KEY = "cmb_worker_snapshot_index"
 
@@ -227,6 +228,13 @@ function messageRecord(message: unknown): Record<string, unknown> | undefined {
   return asRecord(record.kwargs) ?? record
 }
 
+/** Runtime continuation prompts have no durable user row and do not start a new turn. */
+export function isStreamUserTurnBoundary(message: unknown): boolean {
+  return (
+    isHumanMessage(message) && !isWorkflowPlumbingTranscriptContent(messageRecord(message)?.content)
+  )
+}
+
 function messageRole(message: unknown): string {
   if (isHumanMessage(message)) return "user"
   const record = asRecord(message)
@@ -356,7 +364,7 @@ function canSerializeAppendedSuffix(
     return false
   }
   for (let index = previous.messageCount; index < messages.length; index += 1) {
-    if (isHumanMessage(messages[index]) || hasUnsafeIncrementalBoundary(messages[index]))
+    if (isStreamUserTurnBoundary(messages[index]) || hasUnsafeIncrementalBoundary(messages[index]))
       return false
   }
   return true
@@ -384,7 +392,7 @@ function projectStreamDataForSerialization(
 
   let currentTurnBoundary = 0
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (isHumanMessage(messages[index])) {
+    if (isStreamUserTurnBoundary(messages[index])) {
       currentTurnBoundary = index
       break
     }
@@ -744,7 +752,7 @@ function sanitizeValuesMessagesForRenderer(
 
   let currentTurnStart = 0
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (isHumanMessage(messages[index])) {
+    if (isStreamUserTurnBoundary(messages[index])) {
       currentTurnStart = index + 1
       break
     }

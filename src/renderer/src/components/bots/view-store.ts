@@ -21,6 +21,8 @@ export interface BotViewState {
   sidebarWidth: number
   detailWidth: number
   pinnedBotIds: string[]
+  /** Optional mixed Bot/group order; older preferences retain their existing layout. */
+  pinnedConversationIds?: string[]
   hiddenBotIds: string[]
   pinnedGroupIds: string[]
   hiddenGroupIds: string[]

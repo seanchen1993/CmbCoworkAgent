@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react"
+import { useRef, useState, useSyncExternalStore } from "react"
 import { Archive, ArrowLeft, ChevronRight, CircleUserRound, EyeOff } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import {
@@ -16,6 +16,8 @@ import {
 } from "@/lib/theme-preference"
 
 export function BotWorkspaceMenu({
+  profileName,
+  initials,
   accentMode,
   onAccentChange,
   showArchived,
@@ -25,6 +27,8 @@ export function BotWorkspaceMenu({
   onProfile,
   onWorkbench
 }: {
+  profileName: string
+  initials: string
   accentMode: "neutral" | "bot"
   onAccentChange(mode: "neutral" | "bot"): void
   showArchived: boolean
@@ -35,41 +39,8 @@ export function BotWorkspaceMenu({
   onWorkbench(): void
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
-  const [profileName, setProfileName] = useState("")
   const menuTrigger = useRef<HTMLButtonElement>(null)
   const mode = useSyncExternalStore(subscribeThemePreference, getThemeModePreference)
-  useEffect(() => {
-    let disposed = false
-    let generation = 0
-    const refresh = () => {
-      const current = ++generation
-      void window.api.models
-        .getUserInfo()
-        .then((user) => {
-          if (!disposed && current === generation)
-            setProfileName(
-              user?.sapId && typeof user.userName === "string" ? user.userName.trim() : ""
-            )
-        })
-        .catch(() => {
-          if (!disposed && current === generation) setProfileName("")
-        })
-    }
-    const unsubscribe = window.electron.onNotifyMsg(refresh)
-    refresh()
-    return () => {
-      disposed = true
-      unsubscribe()
-    }
-  }, [])
-  const words = profileName.split(/\s+/u)
-  const initials = (
-    words.length > 1
-      ? words.slice(0, 2).map((word) => Array.from(word)[0])
-      : Array.from(profileName).slice(0, 2)
-  )
-    .join("")
-    .toUpperCase()
   const actionClass =
     "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
   return (

@@ -33,6 +33,7 @@ interface AvatarTarget {
   shape: BotAvatarShape
   size: number
   animated: boolean
+  idleAnimation: boolean
   visible: boolean
   emphasized: boolean
   dirty: boolean
@@ -90,7 +91,9 @@ function paint(now: number): void {
   for (const target of targets.values()) {
     if (!target.visible) continue
     const instant = !target.animated || Boolean(reduced?.matches)
-    const resting = instant || (target.mood === "idle" && !target.emphasized && !target.ending)
+    const resting =
+      instant ||
+      (target.mood === "idle" && !target.idleAnimation && !target.emphasized && !target.ending)
     if (target.resting !== resting) {
       target.resting = resting
       target.driver.setResting(resting)
@@ -199,6 +202,7 @@ export const BotAvatar = memo(function BotAvatar({
   mood,
   settlement,
   animated = true,
+  idleAnimation = false,
   className
 }: {
   color: string
@@ -208,6 +212,7 @@ export const BotAvatar = memo(function BotAvatar({
   mood?: BotAvatarMood
   settlement?: Pick<BotTask, "id" | "state">
   animated?: boolean
+  idleAnimation?: boolean
   className?: string
 }) {
   const ref = useRef<SVGSVGElement>(null)
@@ -220,7 +225,7 @@ export const BotAvatar = memo(function BotAvatar({
     const driver = createStateDriver(motion, "idle", {
       seed: avatarSeed(id),
       isCompact: size < 48,
-      isResting: true
+      isResting: !idleAnimation
     })
     return observe(ref.current, host.current, {
       id,
@@ -232,10 +237,11 @@ export const BotAvatar = memo(function BotAvatar({
       shape,
       size,
       animated,
+      idleAnimation,
       visible: false,
       emphasized: false,
       dirty: true,
-      resting: true,
+      resting: !idleAnimation,
       ending: false
     })
     // The registered target survives profile and activity updates; changes below settle in place.
@@ -251,6 +257,7 @@ export const BotAvatar = memo(function BotAvatar({
     target.color = color
     target.size = size
     target.animated = animated
+    target.idleAnimation = idleAnimation
     const receipt = settlement && `${settlement.id}:${settlement.state}`
     if (target.mood !== next) {
       const terminal =
@@ -269,7 +276,7 @@ export const BotAvatar = memo(function BotAvatar({
     target.driver.setCompact(size < 48)
     target.dirty = true
     wake()
-  }, [busy, mood, animated, shape, color, size, settlement?.id, settlement?.state])
+  }, [busy, mood, animated, idleAnimation, shape, color, size, settlement?.id, settlement?.state])
   return (
     <svg
       ref={ref}

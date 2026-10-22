@@ -1,14 +1,23 @@
-// Grok's zf palette. Preserve persisted identities while displaying the matching palette tone.
+// Grok 0.75 bright tokens. Preserve persisted palette identities and legacy aliases.
 const paletteAliases: Record<string, string> = {
-  "#855c35": "#936439",
-  "#ed2040": "#ff263c",
-  "#ff7600": "#ff6700",
-  "#ffb800": "#ff9800",
-  "#009b62": "#00c972",
-  "#00aa9b": "#00bca6",
-  "#168bea": "#1084fe",
-  "#9a65ee": "#9159fe",
-  "#e32791": "#ff309b",
+  "#855c35": "#a06b39",
+  "#936439": "#a06b39",
+  "#ed2040": "#fb2b3e",
+  "#ff263c": "#fb2b3e",
+  "#ff7600": "#fd690f",
+  "#ff6700": "#fd690f",
+  "#ffb800": "#f59312",
+  "#ff9800": "#f59312",
+  "#009b62": "#14c16f",
+  "#00c972": "#14c16f",
+  "#00aa9b": "#13b7a2",
+  "#00bca6": "#13b7a2",
+  "#168bea": "#1e86fc",
+  "#1084fe": "#1e86fc",
+  "#9a65ee": "#8f59f9",
+  "#9159fe": "#8f59f9",
+  "#e32791": "#f93498",
+  "#ff309b": "#f93498",
   "#808080": "#777777"
 }
 export const botAppearanceColor = (color: string): string =>
@@ -17,15 +26,15 @@ export const botAppearanceColor = (color: string): string =>
 // Grok 0.71.2's resolved fill/{hue}-bubble-user tokens (light, dark).
 // The avatar's bright ink and a conversation bubble deliberately use different tones.
 const bubbleColors: Record<string, readonly [string, string]> = {
-  "#ff263c": ["#c82532", "#cf2b35"],
-  "#ff6700": ["#d2550a", "#cd5309"],
-  "#ff9800": ["#c2730b", "#c8770c"],
-  "#00c972": ["#0d9655", "#0e9f5a"],
-  "#00bca6": ["#0d9381", "#0e9886"],
-  "#1084fe": ["#126fd4", "#116dd2"],
-  "#9159fe": ["#7442d1", "#7845d7"],
-  "#ff309b": ["#c82779", "#cf297e"],
-  "#936439": ["#86592e", "#8c5d31"]
+  "#fb2b3e": ["#c82532", "#cf2b35"],
+  "#fd690f": ["#d2550a", "#cd5309"],
+  "#f59312": ["#c2730b", "#c8770c"],
+  "#14c16f": ["#0d9655", "#0e9f5a"],
+  "#13b7a2": ["#0d9381", "#0e9886"],
+  "#1e86fc": ["#126fd4", "#116dd2"],
+  "#8f59f9": ["#7442d1", "#7845d7"],
+  "#f93498": ["#c82779", "#cf297e"],
+  "#a06b39": ["#86592e", "#8c5d31"]
 }
 
 /** Reuse the official palette without changing persisted identities or adding a theme engine. */

@@ -1,7 +1,13 @@
-import { readFileSync } from "node:fs"
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { runInNewContext } from "node:vm"
 import ts from "typescript"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
+import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { LocalBotHost, type BotRunPort } from "../bots/host"
+import { BotStore } from "../bots/store"
 
 type Request = { toolCall: { name: string; id: string; args?: unknown } }
 type Middleware = {
@@ -105,6 +111,126 @@ const humanWaits = [
 ]
 
 describe("shared-workspace user input", () => {
+  it("releases a contested room file after member removal without losing the survivor's update", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "cmb-bot-room-lock-"))
+    const file = join(directory, "result.txt"),
+      protectedFile = join(directory, "existing.txt")
+    writeFileSync(protectedFile, "EXISTING\n")
+    const sqlite = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    const db = new BotStore(sqlite, () => 1000),
+      gate = createGate(true),
+      entered = deferred()
+    const input = { name: "Writer", instructions: "", color: "#ea2845", modelRef: null }
+    const a = db.create(input),
+      b = db.create({ ...input, name: "Survivor" })
+    const original = db.update({ ...a, label: "Preserve", expectedVersion: a.version })
+    const group = db.saveGroup({ name: "Legal shared room", memberIds: [a.id, b.id] })
+    let survivorWrites = 0
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      acquire: (bot, task) => ({
+        release() {},
+        execute: async (signal) => {
+          await gate.wrapToolCall(request("write_file", task.id), async () => {
+            if (bot.id === a.id) {
+              writeFileSync(file, "A_STARTED\n")
+              entered.resolve()
+              await new Promise<void>((resolve) =>
+                signal.addEventListener("abort", () => resolve(), { once: true })
+              )
+              if (!signal.aborted) appendFileSync(file, "A_LATE\n")
+            } else {
+              expect(readFileSync(file, "utf8")).toBe("A_STARTED\n")
+              appendFileSync(file, "B_DONE\n")
+              survivorWrites++
+            }
+          })
+          if (!signal.aborted) host.publishGroupMessage(task.id, "survivor-result", "B_DONE")
+          return { state: "completed", explicitGroupMessages: true }
+        }
+      })
+    }
+    const host = new LocalBotHost(db, runtime)
+    try {
+      host.sendGroup({
+        groupId: group.id,
+        requestId: "contested-room-file",
+        text: "Write only this room's result",
+        targetBotIds: [a.id]
+      })
+      await entered.promise
+      host.sendGroup({
+        groupId: group.id,
+        requestId: "contested-room-survivor",
+        text: "Preserve the room's current record and append your result",
+        targetBotIds: [b.id]
+      })
+      const roots = db.recentTasks(),
+        removed = roots.find((task) => task.botId === a.id)!,
+        survivor = roots.find((task) => task.botId === b.id)!
+      await vi.waitFor(() => expect(db.getTask(survivor.id).state).toBe("running"))
+      expect(db.getTask(removed.id).state).toBe("running")
+      expect(survivorWrites).toBe(0)
+      expect(() => host.update({ ...original, name: "Stale", expectedVersion: a.version })).toThrow(
+        "刷新"
+      )
+      expect(() =>
+        host.update({ ...original, name: "Busy", expectedVersion: original.version })
+      ).toThrow("停止")
+      expect(db.getBot(a.id)).toEqual(original)
+      const changed = host.saveGroup(
+        { name: group.name, memberIds: [b.id] },
+        { id: group.id, version: group.version }
+      )
+      expect(() => host.saveGroup({ name: "Stale", memberIds: [a.id, b.id] }, group)).toThrow()
+      await vi.waitFor(() => expect(host.hasActiveRuns()).toBe(false))
+      expect(db.getTask(removed.id).state).toBe("cancelled")
+      expect(db.getTask(survivor.id)).toMatchObject({ state: "completed", error: null })
+      expect(db.getGroup(group.id)).toEqual(changed)
+      expect(db.getBot(a.id)).toEqual(original)
+      expect(db.getBot(b.id)).toEqual(b)
+      expect(survivorWrites).toBe(1)
+      expect(readFileSync(file, "utf8")).toBe("A_STARTED\nB_DONE\n")
+      expect(readFileSync(protectedFile, "utf8")).toBe("EXISTING\n")
+      expect(db.recentTasks()).toHaveLength(2)
+      expect(db.groupMessages(group.id).filter((message) => message.authorBotId)).toMatchObject([
+        { authorBotId: b.id, text: "B_DONE" }
+      ])
+      expect(() => host.publishGroupMessage(removed.id, "late", "A_LATE")).toThrow()
+    } finally {
+      await host.stop()
+      sqlite.close()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it.each([false, true])(
+    "only lets explicit Bot room communication bypass a held writer with opt-in (%s)",
+    async (enabled) => {
+      const gate = createGate(enabled),
+        finish = deferred()
+      let sent = false,
+        secondWrite = false
+      const first = gate.wrapToolCall(request("write_file", "first"), () => finish.promise)
+      const message = gate.wrapToolCall(request("bot_send_message"), async () => {
+        sent = true
+      })
+      const second = gate.wrapToolCall(request("write_file", "second"), async () => {
+        secondWrite = true
+      })
+      try {
+        await turn()
+        expect(sent).toBe(enabled)
+        expect(secondWrite).toBe(false)
+      } finally {
+        finish.resolve()
+        await Promise.all([first, message, second])
+      }
+      expect(sent).toBe(true)
+      expect(secondWrite).toBe(true)
+    }
+  )
+
   it("lets an upload wait outside the file lock and serializes only its actual file phase", async () => {
     const gate = createGate(false, true)
     const returned = deferred(),

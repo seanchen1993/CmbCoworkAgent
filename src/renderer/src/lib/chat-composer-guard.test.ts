@@ -31,6 +31,8 @@ function renderComposer(overrides: Record<string, unknown> = {}): string {
     useHarnessNotifications: () => [],
     threadId: "thread",
     managedTurn: undefined,
+    botReplyActions: undefined,
+    draftBotReplyTo: null,
     historyLoading: false,
     inputDisabled: false,
     composerControlsDisabled: false,

@@ -2,6 +2,9 @@ import { mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { dirname, join, posix } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, describe, expect, it } from "vitest"
+import AdmZip from "adm-zip"
+import * as XLSX from "xlsx"
+import { MAX_ATTACHMENT_FILE_BYTES } from "../../shared/file-attachment"
 import {
   WORKSPACE_FILE_PREVIEW_CANCELLED,
   WORKSPACE_FILE_PREVIEW_MAX_TEXT_BYTES,
@@ -40,6 +43,65 @@ afterEach(async () => {
 })
 
 describe("workspace file preview reader", () => {
+  it("requires explicit Office opt-in while preserving the original raw text path", async () => {
+    const book = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([["金额", 74.13]]), "合成")
+    const sourceBytes = XLSX.write(book, { type: "buffer", bookType: "xlsx" }) as Buffer
+    const filePath = await tempFile("report.xlsx", sourceBytes)
+    const raw = await readPreviewTextPage(externalSource(filePath), undefined, 0, cancellation())
+    expect(raw.result.office).toBeUndefined()
+    expect(raw.result.content).toBe(sourceBytes.toString("utf8"))
+    const office = await readPreviewTextPage(
+      externalSource(filePath),
+      undefined,
+      0,
+      cancellation(),
+      true
+    )
+    expect(office.result.office).toMatchObject({
+      kind: "spreadsheet",
+      sheets: [{ name: "合成", rows: [["金额", "74.13"]] }]
+    })
+    expect(office.result.content).toBe("")
+    expect(office.result.nextOffset).toBeNull()
+  })
+
+  it("keeps Office reads behind the original workspace boundary and offset validation", async () => {
+    const filePath = await tempFile("outside.xlsx", Buffer.from("not read"))
+    await expect(
+      readPreviewTextPage(
+        workspaceSource(filePath, "absolute"),
+        join(dirname(filePath), "other"),
+        0,
+        cancellation(),
+        true
+      )
+    ).rejects.toThrow(/outside workspace/)
+    await expect(
+      readPreviewTextPage(externalSource(filePath), undefined, 1, cancellation(), true)
+    ).rejects.toThrow(/文件起始/)
+    const textPath = await tempFile("ordinary.txt", "unchanged")
+    await expect(
+      readPreviewTextPage(externalSource(textPath), undefined, 0, cancellation(), true)
+    ).rejects.toThrow(/DOCX、XLSX/)
+  })
+
+  it("enforces the existing raw and declared ZIP budgets before Office parsing", async () => {
+    const tooBig = await tempFile("large.xlsx", Buffer.alloc(MAX_ATTACHMENT_FILE_BYTES + 1))
+    await expect(
+      readPreviewTextPage(externalSource(tooBig), undefined, 0, cancellation(), true)
+    ).rejects.toMatchObject({ failure: "initial-too-large" })
+    const zip = new AdmZip()
+    zip.addFile("word/document.xml", Buffer.from("x"))
+    const data = zip.toBuffer()
+    const centralHeader = data.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]))
+    data.writeUInt32LE(32 * 1024 * 1024 + 1, centralHeader + 24)
+    const expanded = await tempFile("large-entry.docx", data)
+    await expect(
+      readPreviewTextPage(externalSource(expanded), undefined, 0, cancellation(), true)
+    ).rejects.toThrow(/32MB/)
+  })
+
   it("pages a large log by both byte and line budgets without reading it whole", async () => {
     const filePath = await tempFile("large.log", "line\n".repeat(20_000))
     const first = await readPreviewTextPage(externalSource(filePath), undefined, 0, cancellation())

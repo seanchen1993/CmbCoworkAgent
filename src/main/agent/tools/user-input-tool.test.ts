@@ -19,6 +19,53 @@ beforeEach(() => {
 })
 
 describe("Original user-input option normalization", () => {
+  it("offers native multi and one-to-six choices only for trusted Bot callers", async () => {
+    const question = {
+      id: "formats",
+      header: "格式",
+      question: "需要哪些格式？",
+      allowMultiple: true,
+      options: ["CSV", "Markdown", "JSON"].map((label) => ({ label, description: "说明" }))
+    }
+    await createRequestUserInputTool({ threadId: "bot", enableBotQuestionOptions: true }).invoke({
+      questions: [question]
+    })
+    expect(fixture.request.mock.lastCall?.[0].questions).toEqual([question])
+    await createRequestUserInputTool({ threadId: "ordinary" }).invoke({ questions: [question] })
+    expect(fixture.request.mock.lastCall?.[0].questions[0]).not.toHaveProperty("allowMultiple")
+    const one = { ...question, options: question.options.slice(0, 1) }
+    await createRequestUserInputTool({ threadId: "bot", enableBotQuestionOptions: true }).invoke({
+      questions: [one]
+    })
+    await expect(
+      createRequestUserInputTool({ threadId: "ordinary" }).invoke({ questions: [one] })
+    ).rejects.toThrow()
+    const six = {
+      ...question,
+      options: Array.from({ length: 6 }, (_, i) => ({ label: String(i), description: "说明" }))
+    }
+    await createRequestUserInputTool({ threadId: "bot", enableBotQuestionOptions: true }).invoke({
+      questions: [six]
+    })
+    await expect(
+      createRequestUserInputTool({ threadId: "ordinary" }).invoke({ questions: [six] })
+    ).rejects.toThrow()
+    const labelsOnly = { ...one, options: [{ label: "不填备注" }] }
+    await createRequestUserInputTool({ threadId: "bot", enableBotQuestionOptions: true }).invoke({
+      questions: [labelsOnly]
+    })
+    expect(fixture.request.mock.lastCall?.[0].questions[0].options).toEqual([
+      { label: "不填备注", description: "" }
+    ])
+    await expect(
+      createRequestUserInputTool({ threadId: "ordinary" }).invoke({ questions: [labelsOnly] })
+    ).rejects.toThrow()
+    await expect(
+      createRequestUserInputTool({ threadId: "ordinary" }).invoke({
+        questions: [{ ...question, options: [{ label: "CSV" }, { label: "JSON" }] }]
+      })
+    ).rejects.toThrow()
+  })
   it.each([true, false])(
     "keeps filtering and ignored receipts with auto resolution %s",
     async (allowAutoResolution) => {

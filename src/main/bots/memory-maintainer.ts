@@ -6,6 +6,8 @@ export interface BotMemoryBatch {
   modelRef: string | null
   editVersion: number
   conversation: string
+  /** Host-owned user text, kept separate from assistant context for evidence checks. */
+  userText: string
 }
 
 const MAX_CONVERSATION = 12_000
@@ -34,7 +36,12 @@ export class BotMemoryMaintainer {
     if (this.abort.signal.aborted || !batch.conversation.trim()) return
     this.batches.enqueue(
       "memory",
-      new Map([[batch.botId, { ...batch, conversation: compact(batch.conversation) }]]),
+      new Map([
+        [
+          batch.botId,
+          { ...batch, conversation: compact(batch.conversation), userText: compact(batch.userText) }
+        ]
+      ]),
       (pending, incoming) => {
         for (const [id, next] of incoming) {
           const prior = pending.get(id)
@@ -42,7 +49,11 @@ export class BotMemoryMaintainer {
           pending.set(
             id,
             prior?.editVersion === next.editVersion
-              ? { ...next, conversation: compact(`${prior.conversation}\n\n${next.conversation}`) }
+              ? {
+                  ...next,
+                  conversation: compact(`${prior.conversation}\n\n${next.conversation}`),
+                  userText: compact(`${prior.userText}\n\n${next.userText}`)
+                }
               : next
           )
         }

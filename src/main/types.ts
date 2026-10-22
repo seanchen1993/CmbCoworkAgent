@@ -396,6 +396,8 @@ export interface ThreadLegacyCheckpointBootstrapResult {
 }
 
 export interface ThreadMessageSearchOptions {
+  /** Bot's normal view excludes tool summaries and inline assistant reasoning. */
+  bodyOnly?: boolean
   /**
    * Cursor returned by the previous search page. Both fields must be supplied
    * together so duplicate legacy ordinals cannot skip or repeat messages.
@@ -1187,6 +1189,8 @@ export interface UserInputQuestion {
   id: string
   question: string
   options: UserInputOption[]
+  /** Enabled by the trusted Bot question tool; absent in ordinary threads. */
+  allowMultiple?: boolean
 }
 
 export interface UserInputRequest {
@@ -1198,6 +1202,11 @@ export interface UserInputRequest {
 }
 
 export type UserInputAnswer =
+  | {
+      type: "options"
+      questionId: string
+      options: Array<UserInputOption & { optionIndex: number }>
+    }
   | {
       type: "option"
       questionId: string

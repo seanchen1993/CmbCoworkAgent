@@ -734,6 +734,7 @@ function MessageBubbleImpl({
       return (
         <StreamingMarkdown
           isStreaming={isStreaming}
+          botTranscript={presentation === "bot"}
           threadId={threadId}
           searchLocation={searchLocation?.blockIndex === 0 ? searchLocation : undefined}
         >
@@ -777,6 +778,7 @@ function MessageBubbleImpl({
             <StreamingMarkdown
               key={index}
               isStreaming={isStreaming}
+              botTranscript={presentation === "bot"}
               threadId={threadId}
               searchBlockIndex={index}
               searchLocation={searchLocation?.blockIndex === index ? searchLocation : undefined}

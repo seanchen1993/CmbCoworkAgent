@@ -1,6 +1,6 @@
 import { splitBotInlineReasoning } from "./inline-reasoning"
 
-/** Exact durable marker for a scheduled Bot run that found no user-visible change. */
+/** Exact durable marker for an internal Bot turn that found no user-visible change. */
 export const BOT_ROUTINE_SILENT = "BOT_ROUTINE_SILENT"
 
 /** Keep matching deliberately strict: ordinary user-facing results must never be suppressed. */

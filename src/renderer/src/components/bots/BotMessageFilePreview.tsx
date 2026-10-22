@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { lazy, Suspense, useRef, useState } from "react"
 import { Download, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import {
@@ -8,14 +8,31 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
-import { FileViewer, type TextFilePreviewAdapter } from "@/components/tabs/FileViewer"
+import {
+  FileViewer,
+  type OfficeFilePreviewAdapter,
+  type TextFilePreviewAdapter
+} from "@/components/tabs/FileViewer"
 import { useResourcePreviewRequest } from "@/lib/use-resource-preview-request"
 import type { BotClient } from "../../../../shared/bots/contracts"
 import { BotJsonFilePreview } from "./BotJsonFilePreview"
 
 const botJsonFilePreview: TextFilePreviewAdapter = {
   extensions: ["json"],
-  component: BotJsonFilePreview
+  component: BotJsonFilePreview,
+  readBudget: { maxBytes: 1024 * 1024, maxPages: 32 }
+}
+
+const OfficePreview = lazy(() =>
+  import("./BotOfficeFilePreview").then((module) => ({ default: module.BotOfficeFilePreview }))
+)
+const botOfficeFilePreview: OfficeFilePreviewAdapter = {
+  extensions: ["docx", "xlsx"],
+  component: (props) => (
+    <Suspense fallback={<div className="p-6 text-muted-foreground">正在加载文档…</div>}>
+      <OfficePreview {...props} />
+    </Suspense>
+  )
 }
 
 /** Reuse the workbench's ordered preview requests, bound to the message's owning thread. */
@@ -103,6 +120,7 @@ export function BotMessageFilePreview({
             requestLane={`bot-message:${client.hostId}:${threadId}`}
             htmlPreviewPolicy="workspace-scripted"
             textPreview={botJsonFilePreview}
+            officePreview={botOfficeFilePreview}
           />
         </div>
       </DialogContent>

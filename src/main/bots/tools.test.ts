@@ -25,6 +25,101 @@ import {
 import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
 import { BotBrowserActionError, type BotBrowserService } from "./browser"
 import { ToolMessage } from "@langchain/core/messages"
+import { convertToOpenAITool } from "@langchain/core/utils/function_calling"
+import { filterTaskSubagentTools } from "../agent/runtime-tool-catalog"
+
+it("keeps persistent Bot identity and coordination with the parent, including direct child calls", async () => {
+  const updateOwnProfile = vi.fn(() => ({ name: "Changed", changes: {} }))
+  const createTeammate = vi.fn(() => ({ id: "new-bot", name: "Created" }))
+  const updateTeammate = vi.fn(() => ({ id: "peer", name: "Changed", changes: {} }))
+  const delegate = vi.fn(() => ({ id: "new-task", state: "queued" }))
+  const saveSchedule = vi.fn(() => ({ id: "new-routine" }))
+  const host = {
+    updateOwnProfile,
+    createTeammate,
+    updateTeammate,
+    delegate,
+    saveSchedule,
+    peers: () => [{ id: "peer", name: "Peer" }],
+    snapshot: () => ({ schedules: [] })
+  } as unknown as LocalBotHost
+  const signal = new AbortController().signal
+  const all = [
+    ...createBotProfileTools("parent-task", () => host, signal),
+    ...createBotCollaborationTools("parent-task", () => host, signal),
+    ...createBotScheduleTools(
+      { id: "parent-bot" } as BotDefinition,
+      { id: "parent-task", origin: { kind: "user" } } as BotTask,
+      () => host,
+      signal
+    )
+  ]
+  const args: Record<string, Record<string, unknown>> = {
+    bot_update_profile: { name: "Changed" },
+    bot_create_teammate: { requestKey: "new-bot", name: "Created", instructions: "Review" },
+    bot_update_teammate: { botId: "peer", name: "Changed" },
+    bot_delegate: { botId: "peer", message: "Review", requestKey: "review", outputFiles: [] },
+    bot_schedule: {
+      action: "save",
+      name: "Routine",
+      message: "Check",
+      frequency: "interval",
+      intervalMinutes: 60
+    }
+  }
+  for (const entry of all.filter((entry) => entry.name !== "bot_list_peers")) {
+    const result = await entry.invoke(
+      { type: "tool_call", id: entry.name, name: entry.name, args: args[entry.name] },
+      { configurable: { cmb_subagent_owner_tool_call_id: "temporary-task" } }
+    )
+    expect(result.status, entry.name).toBe("error")
+    expect(result.content, entry.name).toContain("parent Bot")
+  }
+  for (const effect of [updateOwnProfile, createTeammate, updateTeammate, delegate, saveSchedule])
+    expect(effect).not.toHaveBeenCalled()
+  expect(filterTaskSubagentTools(all).map((entry) => entry.name)).toEqual(["bot_list_peers"])
+})
+
+it("keeps temporary subagent file results private until the parent delivers them", async () => {
+  const publish = vi.fn()
+  const [deliver] = createBotDeliveryTools("/unused", new AbortController().signal, publish)
+  const result = await deliver.invoke(
+    { type: "tool_call", id: "child-files", name: deliver.name, args: { files: ["result.md"] } },
+    { configurable: { cmb_subagent_owner_tool_call_id: "task-call" } }
+  )
+  expect(result.status).toBe("error")
+  expect(JSON.parse(result.content).error).toContain("parent")
+  expect(publish).not.toHaveBeenCalled()
+})
+
+it.each([false, true])(
+  "keeps collaboration tools while describing only the actual delivery channel (group=%s)",
+  (group) => {
+    const tools = createBotCollaborationTools(
+      "task",
+      () => ({}) as LocalBotHost,
+      new AbortController().signal,
+      group
+    )
+    expect(tools.map((tool) => tool.name)).toEqual(["bot_list_peers", "bot_delegate"])
+    const description = tools[1].description
+    if (group) {
+      expect(description).toContain("request and returned text are not automatically public")
+      expect(description).toContain("bot_send_message")
+      expect(description).not.toContain("Private Bots have different working directories")
+    } else {
+      expect(description).not.toContain("bot_send_message")
+      expect(description).toContain("Private Bots have different working directories")
+      expect(description).toContain("verified absolute paths for authorized input files")
+      expect(description).toContain("does not copy input files")
+      expect(description).toContain("not a same-name substitute")
+    }
+    expect(tools[1].schema).toHaveProperty(
+      "shape.outputFiles.description",
+      expect.stringContaining("relative to the recipient's workspace")
+    )
+  }
+)
 
 it("keeps teammate creation unavailable to command continuations", () => {
   const host = {} as LocalBotHost
@@ -310,6 +405,129 @@ it("delivers verified current-workspace files and rejects missing, private, link
   }
 })
 
+it("exposes an explicit group content choice in the model schema while preserving private schemas", () => {
+  for (const publicGroup of [true, false, undefined]) {
+    const [deliver] = createBotDeliveryTools(
+      "/unused",
+      new AbortController().signal,
+      undefined,
+      undefined,
+      publicGroup
+    )
+    const parameters = convertToOpenAITool(deliver).function.parameters as {
+      type: string
+      required: string[]
+      properties: Record<string, unknown>
+    }
+    expect(parameters.type).toBe("object")
+    expect(parameters.required).toEqual(publicGroup ? ["files", "content"] : ["files"])
+    expect(Object.keys(parameters.properties)).toEqual(
+      publicGroup ? ["files", "content"] : ["files"]
+    )
+    expect(parameters.properties.files).toMatchObject({ type: "array", minItems: 1, maxItems: 8 })
+    if (publicGroup) {
+      expect(parameters.properties.content).toMatchObject({ type: "string", maxLength: 60_000 })
+      expect(parameters.properties.content).not.toHaveProperty("minLength")
+      expect(deliver.description).not.toContain("optional content")
+      expect(deliver.description).toContain("empty string for a file-only delivery")
+    }
+  }
+})
+
+it("publishes a group summary or empty content only after every attachment is verified", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "bot-group-content-"))
+  const controller = new AbortController(),
+    publish = vi.fn()
+  try {
+    await writeFile(join(workspace, "report.md"), "合计74.13")
+    const [deliver] = createBotDeliveryTools(workspace, controller.signal, publish, undefined, true)
+    const call = (files: string[], content?: string) =>
+      deliver.invoke({
+        type: "tool_call",
+        id: "group-content",
+        name: deliver.name,
+        args: content === undefined ? { files } : { files, content }
+      })
+    const result = await call(["report.md"], "合计74.13，差额+0.03。")
+    const files = parseBotFileDelivery(result.content)!
+    expect(files).toHaveLength(1)
+    expect(publish).toHaveBeenCalledExactlyOnceWith(
+      files,
+      "group-content",
+      "合计74.13，差额+0.03。"
+    )
+    expect((await call(["report.md", "missing.md"], "Do not publish partial text")).status).toBe(
+      "error"
+    )
+    const child = await deliver.invoke(
+      {
+        type: "tool_call",
+        id: "child",
+        name: deliver.name,
+        args: { files: ["report.md"], content: "Do not publish child text" }
+      },
+      { configurable: { cmb_subagent_owner_tool_call_id: "temporary-task" } }
+    )
+    expect(child.status).toBe("error")
+    expect(publish).toHaveBeenCalledTimes(1)
+    await expect(call(["report.md"], "x".repeat(60_001))).rejects.toThrow()
+    for (const content of [null, 74.13, false, [], {}, undefined]) {
+      await expect(
+        deliver.invoke({
+          type: "tool_call",
+          id: "invalid-content",
+          name: deliver.name,
+          args: { files: ["report.md"], content }
+        })
+      ).rejects.toThrow()
+    }
+    expect(publish).toHaveBeenCalledTimes(1)
+    await expect(call(["report.md"])).rejects.toThrow()
+    expect(publish).toHaveBeenCalledTimes(1)
+    expect(parseBotFileDelivery((await call(["report.md"], "")).content)).toEqual(files)
+    expect(publish).toHaveBeenLastCalledWith(files, "group-content", "")
+    controller.abort(new Error("cancelled"))
+    await expect(call(["report.md"], "Do not publish after cancellation")).rejects.toThrow(
+      "cancelled"
+    )
+    expect(publish).toHaveBeenCalledTimes(2)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+it("keeps private and internal file tools on their original files-only schema", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "bot-private-content-"))
+  try {
+    await writeFile(join(workspace, "report.md"), "Private file")
+    for (const publicGroup of [undefined, false]) {
+      const publish = vi.fn()
+      const [deliver] = createBotDeliveryTools(
+        workspace,
+        new AbortController().signal,
+        publish,
+        undefined,
+        publicGroup
+      )
+      const schema = deliver.schema as { shape: Record<string, unknown> }
+      expect(Object.keys(schema.shape)).toEqual(["files"])
+      expect(deliver.description).not.toContain("optional content")
+      const result = await deliver.invoke({
+        type: "tool_call",
+        id: "private-file",
+        name: deliver.name,
+        args: { files: ["report.md"], content: "Must not become a public summary" }
+      })
+      expect(publish).toHaveBeenCalledExactlyOnceWith(
+        parseBotFileDelivery(result.content),
+        "private-file"
+      )
+    }
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
 it("imports only host-verified files from this exact peer handoff, preserving originals and cancellation", async () => {
   const root = await mkdtemp(join(tmpdir(), "bot-peer-delivery-"))
   const workspace = join(root, "mine"),
@@ -395,6 +613,22 @@ it("exposes human browser help as a dedicated scope-bound tool with original err
   await expect(help.invoke({ instruction: "缺少目标" })).rejects.toThrow()
   controller.abort(new Error("cancelled"))
   await expect(help.invoke(call)).rejects.toThrow("cancelled")
+})
+
+it("passes an explicit browser new-tab request through the original conversation scope", async () => {
+  const act = vi.fn().mockResolvedValue("new owned page evidence")
+  const controller = new AbortController(),
+    waiting = vi.fn()
+  const [browser] = createBotBrowserTools(
+    { id: "private" } as BotDefinition,
+    { act } as unknown as BotBrowserService,
+    controller.signal,
+    waiting,
+    "group-g--member"
+  )
+  const args = { action: "navigate", newTab: true, url: "https://example.test/preview" }
+  expect(await browser.invoke(args)).toBe("new owned page evidence")
+  expect(act).toHaveBeenCalledWith("group-g--member", args, controller.signal, waiting, undefined)
 })
 
 it("returns the owned target for authorized cleanup while keeping a failed action an error", async () => {

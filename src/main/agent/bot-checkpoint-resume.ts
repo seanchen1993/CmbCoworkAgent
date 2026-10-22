@@ -62,11 +62,15 @@ export function botGroupResumeCheckpoint(
   return id
 }
 
-/** A private background task shares the user's conversation and cannot restore an old branch. */
-export function botPrivateContinuationCheckpoint(
+/** A background task shares its conversation with new user turns; retain their completed history. */
+export function botTaskContinuationCheckpoint(
   context: Pick<
     AgentRunExecutionContext,
-    "source" | "localRunLease" | "resumeCheckpointId" | "continueBotTaskCheckpointId"
+    | "source"
+    | "localRunLease"
+    | "resumeCheckpointId"
+    | "continueBotTaskCheckpointId"
+    | "verifyResolvedThread"
   >,
   metadata: Record<string, unknown>
 ): string | undefined {
@@ -75,11 +79,14 @@ export function botPrivateContinuationCheckpoint(
   if (
     !isLocalBotContinuation(context, metadata) ||
     context.resumeCheckpointId !== undefined ||
-    metadata.botGroupId != null ||
+    (metadata.botGroupId != null &&
+      (typeof metadata.botGroupId !== "string" ||
+        !metadata.botGroupId.trim() ||
+        typeof context.verifyResolvedThread !== "function")) ||
     !id.trim() ||
     id.length > 200
   )
-    throw new Error("该执行入口无权续办 Bot 私聊任务。")
+    throw new Error("该执行入口无权续办 Bot 任务。")
   return id
 }
 
@@ -96,11 +103,8 @@ export function assertBotModelCheckpoint(id: string, snapshot: ModelCheckpoint):
     throw new Error("Bot 续跑检查点已改变或不是模型边界，请检查原任务后继续。")
 }
 
-/** Keep newer completed private history. A pending model may only be the exact yielded step. */
-export function assertBotPrivateContinuationCheckpoint(
-  id: string,
-  snapshot: ModelCheckpoint
-): void {
+/** Keep newer completed history. A pending model may only be the exact yielded step. */
+export function assertBotTaskContinuationCheckpoint(id: string, snapshot: ModelCheckpoint): void {
   const latest = snapshot.config?.configurable?.checkpoint_id
   if (
     id.trim() &&

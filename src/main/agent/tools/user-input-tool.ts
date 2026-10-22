@@ -62,20 +62,41 @@ function validateQuestionIds(
   })
 }
 
-const requestUserInputSchema = questionsSchema.superRefine(validateQuestionIds)
-const requestUserInputWithAutoResolutionSchema = questionsSchema
-  .extend({
-    autoResolutionMs: z
-      .number()
-      .int()
-      .min(30_000)
-      .max(240_000)
-      .optional()
-      .describe(
-        "Automatically resolve after 30,000-240,000 milliseconds when the question is useful but non-blocking. Omit this when explicit user input is required."
-      )
-  })
-  .superRefine(validateQuestionIds)
+const botQuestionsSchema = questionsSchema.extend({
+  questions: z
+    .array(
+      questionSchema.extend({
+        options: z
+          .array(optionSchema.extend({ description: z.string().max(240).optional().default("") }))
+          .min(1)
+          .max(6)
+          .describe(
+            "Provide 1-6 choices. Choices are mutually exclusive unless allowMultiple is true. The client provides custom text entry; do not add a fake free-form option."
+          ),
+        allowMultiple: z
+          .boolean()
+          .optional()
+          .describe(
+            "Allow the user to toggle multiple choices and explicitly submit them together. Omit for a single choice."
+          )
+      })
+    )
+    .min(1)
+    .max(10)
+    .describe("Questions to show the user. Prefer 1 and do not exceed 10.")
+})
+
+const autoResolutionSchema = {
+  autoResolutionMs: z
+    .number()
+    .int()
+    .min(30_000)
+    .max(240_000)
+    .optional()
+    .describe(
+      "Automatically resolve after 30,000-240,000 milliseconds when the question is useful but non-blocking. Omit this when explicit user input is required."
+    )
+}
 
 const additionalTextDescription =
   "A submitted option answer may include additionalText, an optional user-entered clarification that supplements rather than replaces the selected option; the client provides this capability automatically, so do not add it to the question options."
@@ -93,13 +114,15 @@ interface RequestUserInputToolContext {
   allowDeferredRenderer?: boolean
   interactionWaitHooks?: RuntimeInteractionWaitHooks
   requestUserInputConfig?: HarnessRequestUserInputConfig
+  enableBotQuestionOptions?: boolean
 }
 
 export function createRequestUserInputTool(context: RequestUserInputToolContext) {
   const allowAutoResolution = context.requestUserInputConfig?.allowAutoResolution !== false
-  const schema = allowAutoResolution
-    ? requestUserInputWithAutoResolutionSchema
-    : requestUserInputSchema
+  const baseSchema = context.enableBotQuestionOptions ? botQuestionsSchema : questionsSchema
+  const schema = (
+    allowAutoResolution ? baseSchema.extend(autoResolutionSchema) : baseSchema
+  ).superRefine(validateQuestionIds)
 
   return tool(
     async (input) => {

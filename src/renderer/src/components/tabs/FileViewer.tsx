@@ -5,6 +5,7 @@ import {
   type WorkspaceFilePreviewMediaResult,
   type WorkspaceFilePreviewSource,
   type WorkspaceFilePreviewTextResult,
+  type WorkspaceOfficePreviewData,
   type WorkspaceFilePreviewWorkspacePathKind
 } from "../../../../shared/workspace-file-preview"
 import { getFileType, isBinaryFile } from "@/lib/file-types"
@@ -37,10 +38,16 @@ import {
   type HtmlPreviewPolicy
 } from "@/lib/file-preview-mode"
 
-/** Optional presentation only; FileViewer retains ownership of bounded reads and cancellation. */
+/** Optional presentation and read budget; FileViewer owns bounded reads and cancellation. */
 export interface TextFilePreviewAdapter {
   extensions: readonly string[]
   component: React.ComponentType<{ content: string; filePath: string }>
+  readBudget?: { maxBytes: number; maxPages: number }
+}
+
+export interface OfficeFilePreviewAdapter {
+  extensions: readonly string[]
+  component: React.ComponentType<{ preview: WorkspaceOfficePreviewData; filePath: string }>
 }
 
 interface FileViewerProps {
@@ -62,6 +69,7 @@ interface FileViewerProps {
   /** Stable per surface so a persisted file tab cancels the prior task's preview. */
   requestLane?: string
   textPreview?: TextFilePreviewAdapter
+  officePreview?: OfficeFilePreviewAdapter
 }
 
 const MAX_HTML_DEPENDENCY_REQUESTS = 16
@@ -99,6 +107,7 @@ export function FileViewer({
   htmlPreviewPolicy,
   requestLane,
   textPreview,
+  officePreview,
   transport = window.api.workspace,
   cacheNamespace = ""
 }: FileViewerProps): React.JSX.Element | null {
@@ -125,6 +134,10 @@ export function FileViewer({
     previewMode !== "source" && textPreview?.extensions.includes(ext)
       ? textPreview.component
       : undefined
+  const textPreviewReadBudget = TextPreview ? textPreview?.readBudget : undefined
+  const OfficePreview = officePreview?.extensions.includes(ext)
+    ? officePreview.component
+    : undefined
   const fileTypeInfo = useMemo(() => getFileType(fileName), [fileName])
   const isBinary = useMemo(() => isBinaryFile(fileName), [fileName])
 
@@ -221,15 +234,15 @@ export function FileViewer({
               first,
               (nextOffset) => loadTextPage(nextOffset, generation, requestToken, allowCache),
               {
-                maxBytes: WEB_SOURCE_PREVIEW_MAX_BYTES,
-                maxPages: WEB_SOURCE_PREVIEW_MAX_PAGES
+                maxBytes: textPreviewReadBudget?.maxBytes ?? WEB_SOURCE_PREVIEW_MAX_BYTES,
+                maxPages: textPreviewReadBudget?.maxPages ?? WEB_SOURCE_PREVIEW_MAX_PAGES
               }
             )
           : first
       if (generation === generationRef.current) setTextPage(result)
       return generation === generationRef.current ? result : null
     },
-    [loadTextPage, webSourceLike, TextPreview]
+    [loadTextPage, webSourceLike, TextPreview, textPreviewReadBudget]
   )
 
   useEffect(() => {
@@ -260,7 +273,27 @@ export function FileViewer({
           setError({ message: "Missing thread id for workspace file preview" })
           return
         }
-        if (isBinary) {
+        if (OfficePreview) {
+          const previewSource = await previewSourceForPath(displayPath)
+          if (generation !== generationRef.current) return
+          // Keep structured payloads out of the ordinary text-only preview cache.
+          const result = await transport.readFilePreview({
+            source: previewSource,
+            lane,
+            requestToken,
+            officePreview: true
+          })
+          if (generation !== generationRef.current) return
+          if (!result.success) {
+            if (!result.cancelled) setError({ message: result.error, code: result.errorCode })
+            return
+          }
+          if (!result.office) {
+            setError({ message: "当前应用进程尚不支持 Office 预览，请保存原文件查看" })
+            return
+          }
+          setTextPage(result)
+        } else if (isBinary) {
           const previewSource = await previewSourceForPath(displayPath)
           if (generation !== generationRef.current) return
           const result = await transport.openMediaPreview({
@@ -312,6 +345,7 @@ export function FileViewer({
     isBinary,
     lane,
     loadTextPreview,
+    OfficePreview,
     displayPath,
     previewSourceForPath,
     reloadToken,
@@ -530,6 +564,10 @@ export function FileViewer({
       return <PDFViewer filePath={displayPath} sourceUrl={mediaPreviewUrl} />
     }
     return <BinaryFileViewer filePath={displayPath} size={media.size} />
+  }
+
+  if (textPage?.office && OfficePreview) {
+    return <OfficePreview preview={textPage.office} filePath={displayPath} />
   }
 
   const content = textPage?.content ?? ""

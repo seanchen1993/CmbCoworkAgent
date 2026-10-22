@@ -184,7 +184,7 @@ async function parseAttachmentBuffer(
   }
 }
 
-function assertBoundedOfficeArchive(buffer: Buffer): void {
+export function assertBoundedOfficeArchive(buffer: Buffer): void {
   let entries: ReturnType<AdmZip["getEntries"]>
   try {
     entries = new AdmZip(buffer).getEntries()

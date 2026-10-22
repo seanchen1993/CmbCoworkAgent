@@ -142,10 +142,7 @@ export function UserInputRequestDialog({
 
   const activeDraft = draftAnswers[activeQuestion.id]
   const answeredCount = request.questions.filter((question) => {
-    const answer = draftAnswers[question.id]
-    if (!answer) return false
-    if (answer.type === "other") return answer.text.length > 0
-    return question.options[answer.optionIndex] !== undefined
+    return userInputAnswers([question], draftAnswers, presentation === "bot") !== null
   }).length
 
   const updateDraft = (questionId: string, answer: DraftAnswer): void => {
@@ -154,6 +151,19 @@ export function UserInputRequestDialog({
 
   const selectOption = (questionId: string, optionIndex: number): void => {
     const current = draftAnswers[questionId]
+    if (
+      presentation === "bot" &&
+      request.questions.find((q) => q.id === questionId)?.allowMultiple
+    ) {
+      const selected = current?.type === "options" ? current.optionIndices : []
+      updateDraft(questionId, {
+        type: "options",
+        optionIndices: selected.includes(optionIndex)
+          ? selected.filter((index) => index !== optionIndex)
+          : [...selected, optionIndex]
+      })
+      return
+    }
     const answer: Extract<DraftAnswer, { type: "option" }> =
       current?.type === "option" && current.optionIndex === optionIndex
         ? current

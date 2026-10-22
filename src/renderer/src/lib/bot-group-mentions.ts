@@ -105,7 +105,7 @@ export function groupMentionRecipients(
   }
 }
 
-/** Grok sends replies to the quoted author as well as explicitly selected members. */
+/** Quotes provide context; explicit selections or the default audience determine recipients. */
 export function groupMessageRecipients(
   mentions: readonly BotGroupMention[],
   memberIds: readonly string[],
@@ -122,11 +122,9 @@ export function groupMessageRecipients(
     ? mentioned.ids
     : targets !== null
       ? targets.filter((id) => memberIds.includes(id))
-      : replyAuthorId
-        ? []
-        : memberIds
+      : memberIds
   return {
-    ids: [...new Set([...selected, ...(replyAuthorId ? [replyAuthorId] : [])])],
+    ids: [...new Set(selected)],
     error: null
   }
 }

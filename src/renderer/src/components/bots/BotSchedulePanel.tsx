@@ -321,9 +321,13 @@ export function BotSchedulePanel({
                     type="button"
                     className="mr-auto text-destructive"
                     disabled={busy}
-                    onClick={() =>
+                    onClick={() => {
+                      if (
+                        !window.confirm(`确定要删除例行任务「${editing.name}」吗？此操作不可撤销。`)
+                      )
+                        return
                       void mutate(() => client.removeSchedule(editing.id, editing.version), true)
-                    }
+                    }}
                   >
                     <Trash2 size={15} className="mr-2" />
                     删除

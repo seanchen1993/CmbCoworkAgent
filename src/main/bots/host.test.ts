@@ -6,6 +6,8 @@ import { LocalBotHost, type BotRunPort } from "./host"
 import { parseCreateBot, parseSendBotMessage, parseUpdateBot } from "../../shared/bots/validation"
 import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
 import { botContinuationMessageId } from "./continuation"
+import { functionExecutionAgent, withFunctionExecution } from "../mods/v2/execution-context"
+import { groupMessageRecipients } from "../../renderer/src/lib/bot-group-mentions"
 
 const databases: NativeSqliteAdapter[] = []
 const hosts: LocalBotHost[] = []
@@ -26,6 +28,43 @@ afterEach(async () => {
 })
 
 describe("Bot control state", () => {
+  it("starts an independent Bot run in the host context after the waking tool's scope expires", async () => {
+    const db = store(),
+      bot = db.create(input)
+    const identities: string[] = []
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      acquire: () => ({
+        release: vi.fn(),
+        execute: async () => {
+          await new Promise<void>((resolve) => setImmediate(resolve))
+          identities.push(functionExecutionAgent())
+          return { state: "completed", result: "Independent result" }
+        }
+      })
+    }
+    const host = new LocalBotHost(db, runtime)
+    hosts.push(host)
+    // Let the initial empty tick end, so this new wake really originates in a tool.
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    await withFunctionExecution(
+      {
+        workspace: "/waking-tool",
+        threadId: "other-thread",
+        agentId: "temporary-worker",
+        userInitiated: false,
+        leased: true,
+        immediate: false
+      },
+      async () => {
+        expect(functionExecutionAgent()).toBe("temporary-worker")
+        host.send({ botId: bot.id, requestId: "fresh-independent-run", message: "Check" })
+      }
+    )
+    await vi.waitFor(() => expect(db.recentTasks()[0].state).toBe("completed"))
+    expect(identities).toEqual(["main"])
+  })
+
   it("retains verified peer outputs across a private turn and sends one original reply", () => {
     const db = store(),
       a = db.create(input),
@@ -624,6 +663,31 @@ describe("Bot control state", () => {
       expect(replies[0].origin).toMatchObject({ fromBotId: b.id, expectsReply: false })
     }
   )
+  it("returns verified internal group files to the caller without publishing or importing them", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input),
+      group = db.saveGroup({ name: "Internal files", memberIds: [a.id, b.id] })
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "internal-files",
+      text: "Prepare report",
+      targetBotIds: [a.id]
+    })
+    const root = db.recentTasks().find((t) => t.origin.kind === "group")!
+    db.transition(root.id, "running")
+    const child = db.delegate(root.id, b.id, "Prepare an internal file", "files", ["report.md"])
+    db.transition(child.id, "running")
+    const files = [{ filePath: "/group/report.md", name: "report.md", size: 12 }]
+    db.settle(child.id, "completed", null, "Prepared", files, true)
+    db.flushReplies()
+    const callback = db.recentTasks().find((t) => t.requestId === `reply-${child.id}`)!
+    expect(callback.origin).toMatchObject({ groupId: group.id, replyFiles: files })
+    expect(callback.message).toContain(files[0].filePath)
+    expect(callback.message).not.toContain("尚未复制")
+    expect(db.groupMessages(group.id).filter((m) => m.files)).toHaveLength(0)
+  })
+
   it("persists idempotent group file delivery and rejects private, terminal or removed-member publication", () => {
     const db = store(),
       a = db.create(input),
@@ -672,7 +736,55 @@ describe("Bot control state", () => {
     )
     expect(next.message).toContain("quoted reference data")
     db.saveGroup({ name: group.name, memberIds: [b.id] }, { id: group.id, version: group.version })
-    expect(() => db.publishGroupFiles(next.id, "removed", files)).toThrow("群成员")
+    expect(() => db.publishGroupFiles(next.id, "removed", files, "Do not publish")).toThrow(
+      "群成员"
+    )
+  })
+
+  it("persists a group summary and files atomically under the original idempotent delivery ID", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create({ ...input, name: "Reviewer" })
+    const group = db.saveGroup({ name: "Summary", memberIds: [a.id, b.id] })
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "group-summary",
+      text: "Deliver files and a short conclusion",
+      targetBotIds: [a.id]
+    })
+    const task = db.recentTasks().find((entry) => entry.origin.kind === "group")!
+    db.transition(task.id, "running")
+    const files = [{ filePath: "/group/report.md", name: "report.md", size: 12 }]
+    const text = "合计74.13，差额+0.03。@Reviewer"
+    db.publishGroupFiles(task.id, "summary-call", files, text)
+    const revision = db.revision()
+    db.publishGroupFiles(task.id, "summary-call", files, text)
+    expect(db.revision()).toBe(revision)
+    const messages = db.groupMessages(group.id).filter((message) => message.files)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
+      id: expect.stringContaining(`files-${task.id}-`),
+      authorBotId: a.id,
+      text,
+      files,
+      mentions: expect.arrayContaining([expect.objectContaining({ botId: b.id })])
+    })
+    for (const changed of ["Changed summary", ""]) {
+      expect(() => db.publishGroupFiles(task.id, "summary-call", files, changed)).toThrow(
+        "其他文件或正文"
+      )
+    }
+    expect(() =>
+      db.publishGroupFiles(task.id, "summary-call", [{ ...files[0], size: 13 }], text)
+    ).toThrow("其他文件或正文")
+    expect(() =>
+      db.publishGroupFiles(task.id, "invalid-content", files, "x".repeat(60_001))
+    ).toThrow("正文无效")
+    const reopened = new BotStore(databases.at(-1)!, () => 1000)
+    expect(reopened.groupMessages(group.id).filter((message) => message.files)).toEqual(messages)
+    db.settle(task.id, "cancelled", null)
+    expect(() => db.publishGroupFiles(task.id, "late-summary", files, text)).toThrow("活动群任务")
+    expect(db.groupMessages(group.id).filter((message) => message.files)).toEqual(messages)
   })
   it("records a no-change routine completion without making the Bot unread", () => {
     const db = store(),
@@ -690,6 +802,104 @@ describe("Bot control state", () => {
     db.transition(ordinary.id, "running")
     db.settle(ordinary.id, "completed", null, BOT_ROUTINE_SILENT)
     expect(db.activities()).toMatchObject([{ kind: "bot", id: bot.id, unread: true }])
+  })
+
+  it.each([false, true])(
+    "keeps a no-news command receipt quiet (group: %s), but retains news and files",
+    (inGroup) => {
+      const db = store(),
+        bot = db.create(input),
+        peer = db.create(input)
+      const groupId = inGroup
+        ? db.saveGroup({ name: "Receipts", memberIds: [bot.id, peer.id] }).id
+        : undefined
+      const origin = {
+        kind: "notification" as const,
+        notificationKind: "command" as const,
+        key: "command",
+        commandSucceeded: true,
+        ...(groupId ? { groupId } : {})
+      }
+      const before = db.activities()
+      const beforeMessages = groupId ? db.groupMessages(groupId) : []
+      const quiet = db.enqueue(
+        {
+          botId: bot.id,
+          requestId: "cleanup-notice",
+          message: "Already delivered; cleanup settled"
+        },
+        origin
+      )
+      db.transition(quiet.id, "running")
+      db.settle(quiet.id, "completed", null, BOT_ROUTINE_SILENT)
+      expect(db.getTask(quiet.id).state).toBe("completed")
+      expect(db.activities()).toEqual(before)
+      if (groupId) expect(db.groupMessages(groupId)).toEqual(beforeMessages)
+
+      for (const commandSucceeded of [false, undefined]) {
+        const invalid = db.enqueue(
+          {
+            botId: bot.id,
+            requestId: `unverified-${commandSucceeded}`,
+            message: "Unverified result"
+          },
+          { ...origin, commandSucceeded }
+        )
+        db.transition(invalid.id, "running")
+        db.settle(invalid.id, "completed", null, BOT_ROUTINE_SILENT)
+        expect(db.activities()).not.toEqual(before)
+        if (groupId) expect(db.groupMessages(groupId).at(-1)?.id).toBe(`result-${invalid.id}`)
+      }
+
+      for (const [requestId, state, result, files] of [
+        ["new-result", "completed", "New verified result", undefined],
+        ["exception", "failed", BOT_ROUTINE_SILENT, undefined],
+        ["mixed-marker", "completed", `${BOT_ROUTINE_SILENT}\nNew error`, undefined],
+        [
+          "file-result",
+          "completed",
+          BOT_ROUTINE_SILENT,
+          [{ filePath: "/synthetic/new.md", name: "new.md", size: 12 }]
+        ]
+      ] as const) {
+        const task = db.enqueue({ botId: bot.id, requestId, message: "Result" }, origin)
+        db.transition(task.id, "running")
+        db.settle(
+          task.id,
+          state,
+          state === "failed" ? "Command failed" : null,
+          result,
+          files ? [...files] : undefined
+        )
+        expect(db.activities()).toMatchObject([
+          { kind: inGroup ? "group" : "bot", id: groupId ?? bot.id, unread: true }
+        ])
+        if (groupId) expect(db.groupMessages(groupId).at(-1)?.id).toBe(`result-${task.id}`)
+      }
+    }
+  )
+
+  it("still alerts for a command notification that actually needs user confirmation", () => {
+    const db = store(),
+      bot = db.create(input)
+    const task = db.enqueue(
+      { botId: bot.id, requestId: "confirm-notice", message: "Verify result" },
+      {
+        kind: "notification",
+        notificationKind: "command",
+        key: "result",
+        commandSucceeded: true
+      }
+    )
+    db.transition(task.id, "running")
+    expect(db.activities()).toEqual([])
+    db.transition(task.id, "waiting_user")
+    expect(db.activities()).toMatchObject([
+      { kind: "bot", id: bot.id, unread: true, preview: "等待你确认" }
+    ])
+    const once = db.activities()
+    db.transition(task.id, "waiting_user")
+    expect(db.activities()).toEqual(once)
   })
 
   it("pages bidirectional exchange history at equal timestamps without leaking another pair or group", () => {
@@ -788,18 +998,14 @@ describe("Bot control state", () => {
     const groupRoot = db.recentTasks().find((task) => task.origin.kind === "group")!
     db.transition(groupRoot.id, "running")
     const groupDispatch = db.delegate(groupRoot.id, b.id, "Group only", "exchange-group")
-    expect(db.groupMessages(group.id).map((item) => item.exchange)).toEqual([
-      undefined,
-      { taskId: groupDispatch.id, botId: a.id }
-    ])
+    // Internal dispatch remains inspectable through its exchange, not as public prose.
+    expect(db.groupMessages(group.id).map((item) => item.exchange)).toEqual([undefined])
     expect(() => db.exchange(a.id, groupDispatch.id)).toThrow("当前会话")
     expect(db.exchange(a.id, groupDispatch.id, group.id).message).toBe("Group only")
     db.saveGroup({ name: "Team", memberIds: [b.id] }, { id: group.id, version: group.version })
     expect(() => db.exchange(a.id, groupDispatch.id, group.id)).toThrow("当前会话")
-    expect(db.groupMessages(group.id).at(-1)?.exchange).toEqual({
-      taskId: groupDispatch.id,
-      botId: b.id
-    })
+    expect(db.groupMessages(group.id)).toHaveLength(1)
+    expect(db.exchange(b.id, groupDispatch.id, group.id).message).toBe("Group only")
   })
 
   it("keeps a manual unread boundary ahead of stale read acknowledgements without replacing activity", () => {
@@ -972,6 +1178,81 @@ describe("Bot control state", () => {
     db.beginGroupDeletion(group.id, group.version)
     db.finishGroupDeletion(group.id)
     expect(db.activities()).toEqual([])
+  })
+
+  it("keeps a new empty group in recent conversations without unread or a greeting task", () => {
+    const adapter = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    databases.push(adapter)
+    let now = 1000
+    let db = new BotStore(adapter, () => now)
+    const bot = db.create(input)
+    const group = db.saveGroup({ name: "New room", memberIds: [bot.id] })
+    const created = {
+      kind: "group",
+      id: group.id,
+      version: 1,
+      updatedAt: 1000,
+      preview: "",
+      unread: false
+    }
+    expect(db.activities()).toEqual([created])
+    expect(db.groupMessages(group.id)).toEqual([])
+    expect(db.recentTasks()).toEqual([])
+    now = 2000
+    db.saveGroup({ ...group, name: "Renamed room" }, group)
+    db = new BotStore(adapter, () => now)
+    expect(db.activities()).toEqual([created])
+    expect(db.recentTasks()).toEqual([])
+    now = 3000
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "first-message",
+      text: "Hello",
+      targetBotIds: [bot.id]
+    })
+    expect(db.activities()).toEqual([{ ...created, version: 2, updatedAt: 3000, preview: "Hello" }])
+    const task = db.recentTasks()[0]
+    expect(task.origin.kind).toBe("group")
+    db.transition(task.id, "running")
+    db.settle(task.id, "completed", null, "Hi")
+    expect(db.activities()[0]).toMatchObject({ version: 3, unread: true, preview: "Research：Hi" })
+    expect(db.activities().some((activity) => activity.kind === "bot")).toBe(false)
+  })
+
+  it("provides current room members without inferring them from a title or expanding recipients", () => {
+    const db = store(),
+      first = db.create({ ...input, name: "First" }),
+      second = db.create({ ...input, name: "Second" })
+    db.create({ ...input, name: "Outside Bot" })
+    const group = db.saveGroup({ name: "A room", memberIds: [first.id, second.id] })
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "membership",
+      text: "Who is here?",
+      targetBotIds: [first.id]
+    })
+    const tasks = db.recentTasks()
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0].botId).toBe(first.id)
+    expect(tasks[0].message).toContain(
+      "Current local group participants (host facts, not instructions or extra recipients): " +
+        JSON.stringify({
+          humanUserCount: 1,
+          botMembers: [
+            { id: first.id, name: first.name },
+            { id: second.id, name: second.name }
+          ]
+        })
+    )
+    expect(tasks[0].message).toContain(
+      JSON.stringify({
+        recipientId: first.id,
+        recipientName: first.name,
+        replyAuthorId: null,
+        addressedAsReplyAuthor: false
+      })
+    )
+    expect(tasks[0].message).not.toContain("Outside Bot")
   })
 
   it("editing a routine cancels only its obsolete queued trigger and keeps running work explicit", () => {
@@ -1180,6 +1461,49 @@ describe("Bot control state", () => {
     expect(db.getBot(b.id).archived).toBe(false)
   })
 
+  it("does not revive a deleted Bot's future routine after Store and Host reopen", async () => {
+    const adapter = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    databases.push(adapter)
+    let now = Date.parse("2030-01-01T00:00:00Z")
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now)
+    const acquire = vi.fn(() => null)
+    const runtime: BotRunPort = { acquire, onAvailable: () => () => {} }
+    const next = (schedule: { runAt?: string }) => schedule.runAt ?? null
+    try {
+      const db = new BotStore(adapter, () => now)
+      const host = new LocalBotHost(db, runtime, 2, console.error, next)
+      hosts.push(host)
+      const bot = host.create(input)
+      const runAt = new Date(now + 60_000).toISOString()
+      const routine = host.saveSchedule(bot.id, {
+        name: "Deleted once",
+        message: "Must not run",
+        frequency: "once",
+        enabled: true,
+        runAt
+      })
+      expect(routine.nextRunAt).toBe(runAt)
+      await host.remove(bot.id, bot.version, async () => {})
+      expect(db.schedules()).toEqual([])
+      await host.stop()
+
+      now = Date.parse(runAt) + 1
+      const reopened = new BotStore(adapter, () => now)
+      const restarted = new LocalBotHost(reopened, runtime, 2, console.error, next)
+      hosts.push(restarted)
+      const replacement = restarted.create(input)
+      expect(replacement.id).not.toBe(bot.id)
+      restarted.resume()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(() => reopened.getBot(bot.id)).toThrow("不存在")
+      expect(reopened.schedules()).toEqual([])
+      expect(reopened.recentTasks()).toEqual([])
+      expect(acquire).not.toHaveBeenCalled()
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
   it("does not resurrect a deleted sender when a collaborator finishes later", () => {
     const db = store(),
       a = db.create(input),
@@ -1217,6 +1541,102 @@ describe("Bot control state", () => {
     host.cancel(task.id)
     host.enqueueNotification(bot.id, thread, "workflow", "run-1", "Internal", group.id)
     expect(db.nextQueued([])).toBeNull()
+  })
+
+  it("isolates simultaneous private, group and routine background receipts in one host", async () => {
+    const db = store(),
+      owner = db.create(input),
+      routineOwner = db.create({ ...input, name: "Routine" })
+    const group = db.saveGroup({ name: "Results", memberIds: [owner.id] })
+    const pending = new Map<string, ReturnType<LocalBotHost["commandLifecycle"]>>()
+    const completed = vi.fn()
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      onSettled: completed,
+      acquire: (_bot, task) => ({
+        release: vi.fn(),
+        execute: async () => {
+          if (task.origin.kind === "notification") {
+            const source = db.getTask(task.origin.key)
+            const nonce = `${source.origin.kind.toUpperCase()}_BACKGROUND_ONLY`
+            expect(task.botId).toBe(source.botId)
+            expect(task.threadId).toBe(source.threadId)
+            expect(task.origin).toEqual({
+              kind: "notification",
+              notificationKind: "command",
+              key: source.id,
+              commandSucceeded: true,
+              ...(source.origin.kind === "group" ? { groupId: group.id } : {})
+            })
+            expect(task.message.match(/(?:USER|GROUP|SCHEDULE)_BACKGROUND_ONLY/g)).toEqual([nonce])
+            expect(db.profileContinuationRequest(task.id)).toBe(
+              source.origin.kind === "schedule" ? null : source.message
+            )
+            if (task.origin.groupId) {
+              host.publishGroupMessage(task.id, "result", nonce)
+            }
+            return { state: "completed", result: nonce, explicitGroupMessages: true }
+          }
+          const lifecycle = host.commandLifecycle(task.id)
+          pending.set(task.id, lifecycle)
+          lifecycle.accepted({
+            id: task.id,
+            threadId: task.threadId,
+            command: "synthetic background",
+            cwd: "/synthetic",
+            startedAt: 1000
+          })
+          if (task.origin.kind === "group")
+            host.publishGroupMessage(task.id, "started", "Group command accepted")
+          return { state: "completed", result: BOT_ROUTINE_SILENT, explicitGroupMessages: true }
+        }
+      })
+    }
+    const host = new LocalBotHost(db, runtime)
+    hosts.push(host)
+    host.send({ botId: owner.id, requestId: "private-source", message: "PRIVATE_REQUEST_ONLY" })
+    host.sendGroup({
+      groupId: group.id,
+      requestId: "group-source",
+      text: "GROUP_REQUEST_ONLY",
+      targetBotIds: [owner.id]
+    })
+    db.enqueue(
+      { botId: routineOwner.id, requestId: "routine-source", message: "ROUTINE_REQUEST_ONLY" },
+      { kind: "schedule", scheduleId: "routine" }
+    )
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledTimes(3))
+    expect(pending.size).toBe(3)
+    expect(db.activeCommandThreads()).toHaveLength(3)
+    const callbacks = [...pending].reverse().map(
+      ([id, lifecycle]) =>
+        () =>
+          lifecycle.settled({
+            id,
+            threadId: db.getTask(id).threadId,
+            output: `${db.getTask(id).origin.kind.toUpperCase()}_BACKGROUND_ONLY`,
+            exitCode: 0,
+            truncated: false,
+            cancelled: false
+          })
+    )
+    callbacks.forEach((settle) => {
+      settle()
+      settle()
+    })
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledTimes(6))
+    callbacks.forEach((settle) => settle())
+    expect(db.recentTasks().filter((task) => task.origin.kind === "notification")).toHaveLength(3)
+    expect(db.recentTasks().every((task) => task.state === "completed")).toBe(true)
+    expect(db.recentTasks()).toHaveLength(6)
+    expect(db.activeCommandThreads()).toEqual([])
+    const publicMessages = db.groupMessages(group.id)
+    expect(
+      publicMessages.filter((message) => message.text === "GROUP_BACKGROUND_ONLY")
+    ).toHaveLength(1)
+    expect(JSON.stringify(publicMessages)).not.toMatch(
+      /USER_BACKGROUND_ONLY|PRIVATE_REQUEST_ONLY|SCHEDULE_BACKGROUND_ONLY|ROUTINE_REQUEST_ONLY/
+    )
   })
 
   it("deduplicates a workflow instance but accepts a resumed instance with the same run id", async () => {
@@ -1326,6 +1746,121 @@ describe("Bot control state", () => {
     expect(reported).toHaveBeenCalledTimes(2)
     expect(db.recentTasks().every((task) => task.state === "completed")).toBe(true)
   })
+
+  it("fails after the original six fetch watchdog attempts and recovers on the same Bot host", async () => {
+    const { getModelInstance } = await import("../agent/runtime")
+    const retryNotices: Array<{ attempt: number; maxRetries: number; delayMs: number }> = []
+    const attemptSignals: AbortSignal[] = []
+    const parentSignals: AbortSignal[] = []
+    const requestedModels: string[] = []
+    let fault = true
+    const fetchModel = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { model: string }
+      requestedModels.push(body.model)
+      if (fault) {
+        const signal = init?.signal
+        if (!signal) throw new Error("The original watchdog must provide an attempt signal")
+        attemptSignals.push(signal)
+        return new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(signal.reason)
+          if (signal.aborted) abort()
+          else signal.addEventListener("abort", abort, { once: true })
+        })
+      }
+      return new Response(
+        JSON.stringify({
+          id: "o07-recovered",
+          object: "chat.completion",
+          created: 1,
+          model: "o07-test-model",
+          choices: [
+            { index: 0, message: { role: "assistant", content: "43" }, finish_reason: "stop" }
+          ],
+          usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 }
+        }),
+        { headers: { "content-type": "application/json" } }
+      )
+    })
+    vi.stubGlobal("fetch", fetchModel)
+    vi.spyOn(Math, "random").mockReturnValue(0)
+    vi.useFakeTimers()
+    const model = getModelInstance(
+      {
+        id: "o07",
+        model: "o07-test-model",
+        baseUrl: "https://o07.invalid/v1",
+        apiKey: "synthetic-only"
+      },
+      { onRetry: (info) => retryNotices.push(info) }
+    )
+    const db = store()
+    const host = new LocalBotHost(db, {
+      onAvailable: () => () => {},
+      acquire: (_bot, task) => ({
+        release: vi.fn(),
+        async execute(signal) {
+          parentSignals.push(signal)
+          const reply = await model.invoke(task.message, { signal })
+          return { state: "completed", result: String(reply.content) }
+        }
+      })
+    })
+    hosts.push(host)
+    try {
+      const bot = host.create(input)
+      const failed = host.send({
+        botId: bot.id,
+        requestId: "watchdog-fail",
+        message: "Timeout probe"
+      })
+      await vi.waitFor(() => expect(fetchModel).toHaveBeenCalledTimes(1))
+      for (let attempt = 1; attempt <= 6; attempt++) {
+        expect(db.getTask(failed.id).state).toBe("running")
+        await vi.advanceTimersByTimeAsync(60_000)
+        if (attempt < 6) {
+          expect(retryNotices).toHaveLength(attempt)
+          await vi.advanceTimersByTimeAsync(1_000 * 2 ** (attempt - 1))
+          expect(fetchModel).toHaveBeenCalledTimes(attempt + 1)
+        }
+      }
+      await vi.waitFor(() => expect(db.getTask(failed.id).state).toBe("failed"))
+      expect(db.getTask(failed.id).error).toBeTruthy()
+      expect(fetchModel).toHaveBeenCalledTimes(6)
+      expect(new Set(attemptSignals).size).toBe(6)
+      expect(
+        attemptSignals.every(
+          (signal) =>
+            signal.aborted &&
+            signal.reason instanceof DOMException &&
+            signal.reason.name === "TimeoutError"
+        )
+      ).toBe(true)
+      expect(parentSignals[0].aborted).toBe(false)
+      expect(retryNotices).toEqual(
+        [1, 2, 3, 4, 5].map((attempt) =>
+          expect.objectContaining({ attempt, maxRetries: 5, delayMs: 1_000 * 2 ** (attempt - 1) })
+        )
+      )
+
+      fault = false
+      const recovered = host.send({
+        botId: bot.id,
+        requestId: "watchdog-recover",
+        message: "14+29?"
+      })
+      await vi.waitFor(() => expect(db.getTask(recovered.id).state).toBe("completed"))
+      expect(db.activities().find((activity) => activity.id === bot.id)?.preview).toBe("43")
+      expect(db.getTask(failed.id).state).toBe("failed")
+      expect(db.recentTasks()).toHaveLength(2)
+      expect(fetchModel).toHaveBeenCalledTimes(7)
+      expect(requestedModels).toEqual(Array(7).fill("o07-test-model"))
+      expect(parentSignals).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+      vi.unstubAllGlobals()
+    }
+  }, 30_000)
 
   it("deletes group execution history without deleting members' private conversations", async () => {
     const db = store(),
@@ -1937,7 +2472,7 @@ describe("Bot host scheduling", () => {
     expect(db.delegate(root.id, b.id, "Review shared file", "review").id).toBe(delegated.id)
     expect(delegated.threadId).toBe(`group-${group.id}-${b.id}`)
     expect(delegated.origin).toMatchObject({ kind: "bot", groupId: group.id, fromBotId: a.id })
-    expect(db.groupMessages(group.id)).toHaveLength(2)
+    expect(db.groupMessages(group.id)).toHaveLength(1)
     db.settle(root.id, "completed", null, "Delegated")
     db.transition(delegated.id, "running")
     db.settle(delegated.id, "completed", null, "Reviewed")
@@ -2094,7 +2629,42 @@ describe("Bot host scheduling", () => {
     expect(() => db.sendGroup({ ...request, replyToId: "source" })).toThrow("消息标识")
     expect(() => db.sendGroup({ ...request, replyToId: undefined })).toThrow("消息标识")
   })
-  it("validates the union of persisted reply author and selected mentions before dispatch", () => {
+  it("sends only the explicitly mentioned member through the Host while retaining the other author's quote", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input)
+    const group = db.saveGroup({ name: "Explicit recipient", memberIds: [a.id, b.id] })
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "source-b",
+      text: "Original",
+      targetBotIds: [b.id]
+    })
+    const source = db.recentTasks()[0]
+    db.transition(source.id, "running")
+    db.settle(source.id, "completed", null, "QUOTED_B_RESULT")
+    const host = new LocalBotHost(db, { acquire: () => null, onAvailable: () => () => {} })
+    hosts.push(host)
+    const mentions = [{ start: 0, end: 6, botId: a.id, label: "Alice" }]
+    host.sendGroup({
+      groupId: group.id,
+      requestId: "mention-a-quote-b",
+      text: "@Alice verify",
+      mentions,
+      targetBotIds: groupMessageRecipients(mentions, group.memberIds, { replyAuthorId: b.id }).ids,
+      replyToId: `result-${source.id}`
+    })
+    const addressed = db
+      .recentTasks()
+      .filter(
+        (task) => task.origin.kind === "group" && task.origin.messageId === "mention-a-quote-b"
+      )
+    expect(addressed.map((task) => task.botId)).toEqual([a.id])
+    expect(addressed[0].message).toContain("QUOTED_B_RESULT")
+    expect(addressed[0].message).toContain("quoting another member does not add recipients")
+    expect(db.groupMessages(group.id).at(-1)?.replyTo?.authorBotId).toBe(b.id)
+  })
+  it("validates selected mentions without adding the persisted reply author before dispatch", () => {
     const db = store(),
       a = db.create(input),
       b = db.create(input),
@@ -2108,11 +2678,11 @@ describe("Bot host scheduling", () => {
       groupId: group.id,
       requestId: "reply-mention",
       text: "@Bob verify",
-      targetBotIds: [a.id, b.id],
+      targetBotIds: [b.id],
       replyToId: `result-${source.id}`,
       mentions: [{ start: 0, end: 4, botId: b.id, label: "Bob" }]
     }
-    expect(() => db.sendGroup({ ...request, targetBotIds: [b.id] })).toThrow("被回复的 Bot")
+    expect(() => db.sendGroup({ ...request, targetBotIds: [a.id, b.id] })).toThrow("收件人")
     expect(() => db.sendGroup({ ...request, targetBotIds: [a.id, b.id, c.id] })).toThrow("收件人")
     expect(db.groupMessages(group.id)).toHaveLength(2)
     expect(db.recentTasks()).toHaveLength(1)
@@ -2121,7 +2691,7 @@ describe("Bot host scheduling", () => {
     const addressed = db
       .recentTasks()
       .filter((task) => task.origin.kind === "group" && task.origin.messageId === request.requestId)
-    expect(addressed.map((task) => task.botId).sort()).toEqual([a.id, b.id].sort())
+    expect(addressed.map((task) => task.botId)).toEqual([b.id])
     for (const task of addressed) {
       expect(task.message).toContain(
         JSON.stringify({
@@ -2139,7 +2709,7 @@ describe("Bot host scheduling", () => {
       targetBotIds: [a.id],
       mentions: [{ start: 0, end: 6, botId: a.id, label: "Alice" }]
     })
-    expect(db.recentTasks()).toHaveLength(4)
+    expect(db.recentTasks()).toHaveLength(3)
     db.saveGroup(
       { name: group.name, memberIds: [b.id, c.id] },
       { id: group.id, version: group.version }
@@ -2147,7 +2717,7 @@ describe("Bot host scheduling", () => {
     expect(() =>
       db.sendGroup({ ...request, requestId: "reply-removed", targetBotIds: [b.id] })
     ).toThrow("不在本群")
-    expect(db.recentTasks()).toHaveLength(4)
+    expect(db.recentTasks()).toHaveLength(3)
   })
   it("sends each member new group references without repeating the current request or other conversation data", () => {
     const db = store(),
@@ -2390,6 +2960,64 @@ describe("Bot host scheduling", () => {
     const current = db.schedules()[0]
     host.removeSchedule(current.id, current.version)
     expect(db.recentTasks()[0].state).toBe("cancelled")
+  })
+
+  it("coalesces repeated resume after Store and Host reopen around an overdue pending routine", async () => {
+    const db = store(),
+      bot = db.create(input)
+    const schedule = db.saveSchedule(
+      bot.id,
+      {
+        name: "Pending interval",
+        message: "Only once",
+        frequency: "interval",
+        intervalMinutes: 10,
+        enabled: true
+      },
+      "2020-01-01T00:00:00.000Z"
+    )
+    db.fireSchedule(schedule, "2020-01-01T00:10:00.000Z")
+    const pending = db.recentTasks()[0],
+      prior = db.schedules()[0]
+    let available = false
+    const execute = vi.fn(async () => ({ state: "completed" as const, result: "Original only" }))
+    const runtime: BotRunPort = {
+      acquire: (_bot, task) => {
+        if (!available) return null
+        expect(task.id).toBe(pending.id)
+        return { execute, release: () => {} }
+      },
+      onAvailable: () => () => {}
+    }
+    const next = vi.fn((_input: unknown, from: Date) =>
+      new Date(from.getTime() + 600_000).toISOString()
+    )
+    const host = new LocalBotHost(db, runtime, 2, console.error, next)
+    hosts.push(host)
+    await host.stop()
+    const reopened = new BotStore(databases.at(-1)!, () => 1000)
+    expect(reopened.getTask(pending.id)).toEqual(pending)
+    expect(reopened.schedules()).toEqual([prior])
+    const restarted = new LocalBotHost(reopened, runtime, 2, console.error, next)
+    hosts.push(restarted)
+    const beforeResume = Date.now()
+    restarted.resume()
+    restarted.resume()
+    restarted.resume()
+    expect(next).toHaveBeenCalledTimes(1)
+    const from = next.mock.calls[0][1].getTime()
+    expect(from).toBeGreaterThanOrEqual(beforeResume + 1)
+    expect(reopened.schedules()).toEqual([
+      { ...prior, version: prior.version + 1, nextRunAt: new Date(from + 600_000).toISOString() }
+    ])
+    expect(reopened.recentTasks()).toEqual([pending])
+    expect(execute).not.toHaveBeenCalled()
+    available = true
+    restarted.resume()
+    await vi.waitFor(() => expect(reopened.getTask(pending.id).state).toBe("completed"))
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(reopened.recentTasks().map((task) => task.id)).toEqual([pending.id])
+    expect(next).toHaveBeenCalledTimes(1)
   })
 
   it("runs independent bots concurrently, serializes a bot, and releases after cancellation cleanup", async () => {

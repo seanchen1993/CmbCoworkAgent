@@ -557,6 +557,126 @@ describe("Bot browser ownership and control", () => {
     expect(launch).toHaveBeenCalledTimes(1)
   })
 
+  it("opens an additional owned page without replacing the form or sharing a group member's pages", async () => {
+    const owner = "group-g--a"
+    const form = JSON.parse(
+      await service.act(owner, { action: "navigate", url: "https://example.test/form" }, signal())
+    )
+    const preview = JSON.parse(
+      await service.act(
+        owner,
+        { action: "navigate", newTab: true, url: "https://example.test/preview" },
+        signal()
+      )
+    )
+    expect(preview.pageId).not.toBe(form.pageId)
+    expect(preview.pages).toEqual([
+      { id: form.pageId, url: "https://example.test/form", title: "Test page" },
+      { id: preview.pageId, url: "https://example.test/preview", title: "Test page" }
+    ])
+    const original = JSON.parse(
+      await service.act(owner, { action: "observe", pageId: form.pageId }, signal())
+    )
+    expect(original.url).toBe("https://example.test/form")
+    expect(context.entries[0].goto).toHaveBeenCalledTimes(1)
+    await expect(
+      service.act("group-g--b", { action: "observe", pageId: preview.pageId }, signal())
+    ).rejects.toThrow("不属于")
+    expect(context.entries).toHaveLength(2)
+    await service.removeGroup("g")
+    await expect(
+      service.act(
+        owner,
+        { action: "navigate", newTab: true, url: "https://example.test" },
+        signal()
+      )
+    ).rejects.toThrow("已删除")
+    expect(context.entries).toHaveLength(2)
+  })
+
+  it.each([undefined, false])(
+    "keeps navigate newTab=%s reusing the existing page",
+    async (newTab) => {
+      const form = JSON.parse(
+        await service.act("a", { action: "navigate", url: "https://example.test/form" }, signal())
+      )
+      const reused = JSON.parse(
+        await service.act(
+          "a",
+          { action: "navigate", newTab, url: "https://example.test/next" },
+          signal()
+        )
+      )
+      expect(reused.pageId).toBe(form.pageId)
+      expect(reused.url).toBe("https://example.test/next")
+      expect(context.entries).toHaveLength(1)
+    }
+  )
+
+  it("rejects ambiguous new-tab actions and invalid addresses before creating any page", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    for (const action of [
+      { action: "observe" as const, newTab: true },
+      { action: "navigate" as const, newTab: true, pageId, url: "https://example.test" },
+      { action: "navigate" as const, newTab: true, pageId: "", url: "https://example.test" },
+      { action: "navigate" as const, newTab: true, pageId: "foreign", url: "https://example.test" },
+      { action: "navigate" as const, newTab: true, url: "file:///private" },
+      { action: "navigate" as const, newTab: true, url: "https://user:password@example.test" }
+    ]) {
+      await expect(service.act("a", action, signal())).rejects.toMatchObject({
+        code: "INVALID_INPUT"
+      })
+    }
+    expect(context.entries).toHaveLength(1)
+    expect(context.entries[0].goto).not.toHaveBeenCalled()
+  })
+
+  it.each([1, 4])(
+    "keeps page capacity bounded for %s owner(s) opening new tabs",
+    async (owners) => {
+      for (let owner = 0; owner < owners; owner++) {
+        for (let page = 0; page < 6; page++) {
+          await service.act(
+            `bot-${owner}`,
+            { action: "navigate", newTab: true, url: `https://example.test/${page}` },
+            signal()
+          )
+        }
+      }
+      await expect(
+        service.act(
+          owners === 1 ? "bot-0" : "bot-extra",
+          { action: "navigate", newTab: true, url: "https://example.test/overflow" },
+          signal()
+        )
+      ).rejects.toThrow("上限")
+      expect(context.entries).toHaveLength(owners * 6)
+    }
+  )
+
+  it("does not open or replay a requested new tab across human control", async () => {
+    const form = JSON.parse(
+      await service.act("a", { action: "navigate", url: "https://example.test/form" }, signal())
+    )
+    await service.takeOver("a", form.pageId)
+    const waiting = vi.fn()
+    const pending = service.act(
+      "a",
+      { action: "navigate", newTab: true, url: "https://example.test/must-not-open" },
+      signal(),
+      waiting
+    )
+    expect(waiting).toHaveBeenCalledWith(true)
+    expect(context.entries).toHaveLength(1)
+    await service.giveBack("a")
+    const returned = JSON.parse(await pending)
+    expect(returned.pageId).toBe(form.pageId)
+    expect(returned.url).toBe("https://example.test/form")
+    expect(returned.control).toBe("bot")
+    expect(context.entries).toHaveLength(1)
+    expect(context.entries[0].goto).toHaveBeenCalledTimes(1)
+  })
+
   it("waits for the current input boundary before granting human control", async () => {
     await service.act("a", { action: "observe" }, signal())
     let finish!: () => void

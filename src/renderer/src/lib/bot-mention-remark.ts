@@ -1,4 +1,5 @@
 import type { Root, RootContent, Text } from "mdast"
+import type { VFile } from "vfile"
 import type { BotGroupMention } from "../../../shared/bots/contracts"
 
 /** Annotate only bound source ranges. Never turn arbitrary @names or URLs into identities. */
@@ -6,7 +7,8 @@ export function remarkBotMentions(options: {
   mentions: readonly BotGroupMention[]
   start: number
 }) {
-  return (tree: Root) => {
+  return (tree: Root, file: VFile) => {
+    const source = file.toString()
     const visit = (parent: Root | RootContent): void => {
       if (!("children" in parent) || parent.type === "link" || parent.type === "linkReference")
         return
@@ -18,13 +20,16 @@ export function remarkBotMentions(options: {
         }
         const sourceStart = child.position?.start.offset
         const sourceEnd = child.position?.end.offset
-        // Escapes/entities change parsed offsets; leave those as text instead of binding the wrong word.
-        if (
-          sourceStart == null ||
-          sourceEnd == null ||
-          sourceEnd - sourceStart !== child.value.length
+        if (sourceStart == null || sourceEnd == null) continue
+        // Normalization later in a paragraph cannot invalidate an earlier bound name.
+        // Compare the prefix once; offsets after an escape/entity still remain untrusted.
+        let unchanged = 0
+        while (
+          unchanged < child.value.length &&
+          sourceStart + unchanged < sourceEnd &&
+          source[sourceStart + unchanged] === child.value[unchanged]
         )
-          continue
+          unchanged++
         const parts: Text[] = []
         let cursor = 0
         options.mentions.forEach((mention, mentionIndex) => {
@@ -32,7 +37,7 @@ export function remarkBotMentions(options: {
           const to = mention.end - options.start - sourceStart
           if (
             from < cursor ||
-            to > child.value.length ||
+            to > unchanged ||
             to <= from ||
             child.value.slice(from, to) !== `@${mention.label}`
           )

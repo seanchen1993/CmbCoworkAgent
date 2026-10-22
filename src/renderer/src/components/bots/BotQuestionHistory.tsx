@@ -10,9 +10,15 @@ const statusLabels = {
 }
 
 /** Receipts and proven stopped-turn states are display projections; pending input stays separate. */
-export function BotQuestionHistory({ history }: { history: QuestionHistory }) {
+export function BotQuestionHistory({
+  history,
+  group = false
+}: {
+  history: QuestionHistory
+  group?: boolean
+}) {
   return (
-    <div className="bot-question-history" data-state={history.status}>
+    <div className="bot-question-history" data-state={history.status} data-group={group}>
       {history.questions.map((question) => (
         <section
           key={question.id}
@@ -24,7 +30,8 @@ export function BotQuestionHistory({ history }: { history: QuestionHistory }) {
             <span>{question.question}</span>
             <span
               className={
-                history.status === "ignored" && question.options?.length
+                (history.status === "ignored" && question.options?.length) ||
+                (group && history.status === "submitted")
                   ? "sr-only"
                   : "bot-question-status"
               }
@@ -49,11 +56,19 @@ export function BotQuestionHistory({ history }: { history: QuestionHistory }) {
           )}
           {question.answer && (
             <div className="bot-question-answer">
+              {group && question.answer.optionIndex !== undefined && (
+                <span
+                  className="bot-question-ignored-key bot-question-selected-key"
+                  aria-hidden="true"
+                >
+                  {String.fromCharCode(65 + question.answer.optionIndex)}
+                </span>
+              )}
               <div>
                 <span>{question.answer.text}</span>
                 {question.answer.additionalText && <p>{question.answer.additionalText}</p>}
               </div>
-              {history.status === "submitted" && <Check size={16} aria-hidden="true" />}
+              {history.status === "submitted" && !group && <Check size={16} aria-hidden="true" />}
             </div>
           )}
         </section>

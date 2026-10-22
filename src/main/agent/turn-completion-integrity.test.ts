@@ -92,6 +92,109 @@ beforeEach(() => {
   resetObservedFinishSignalsForTest()
 })
 
+describe("opt-in transport delivery check", () => {
+  it("keeps the ordinary empty-response contract when no delivery check is supplied", async () => {
+    const result = await runGate({ messages: [aiMessage("", { finish_reason: "stop" })] })
+    expect(injectedHumanText(result)).toContain("empty_response")
+  })
+
+  it("reuses the bounded recovery and failure report for a missing formal delivery", async () => {
+    const state = { messages: [aiMessage("Done", { finish_reason: "stop" })] }
+    const options = {
+      checkFinalDelivery: () => "Send the actual result through the provided tool."
+    }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await runGate(state, options)
+      expect(jumpedToModel(result)).toBe(true)
+      const reminder = injectedHumanText(result)
+      expect(reminder).toContain("missing_delivery")
+      expect(reminder).toContain("Send the actual result")
+      expect(isWorkflowPlumbingTranscriptContent(reminder)).toBe(true)
+    }
+    expect(await runGate(state, options)).toBeUndefined()
+    expect(readTurnCompletionGateReport(THREAD, RUN)).toMatchObject({
+      retriesUsed: 2,
+      unresolved: { defect: "missing_delivery" }
+    })
+  })
+
+  it("accepts an empty private final only after the transport confirms a real delivery", async () => {
+    const messages = toolResultThen(aiMessage("", { finish_reason: "stop" }))
+    let inspected: readonly BaseMessage[] | undefined
+    const result = await runGate(
+      { messages },
+      {
+        checkFinalDelivery: (current) => {
+          inspected = current
+          return undefined
+        }
+      }
+    )
+    expect(inspected).toBe(messages)
+    expect(result).toBeUndefined()
+    expect(readTurnCompletionGateReport(THREAD, RUN)?.unresolved).toBeNull()
+  })
+
+  it("still enforces unfinished todos after a confirmed explicit delivery", async () => {
+    const result = await runGate(
+      {
+        messages: [aiMessage("", { finish_reason: "stop" })],
+        todos: [{ content: "Verify the delivered file", status: "in_progress" }]
+      },
+      { checkFinalDelivery: () => undefined }
+    )
+    expect(injectedHumanText(result)).toContain("Verify the delivered file")
+    expect(readTurnCompletionGateReport(THREAD, RUN)?.todoNudgesUsed).toBe(1)
+  })
+
+  it.each(["length", "tool_calls"])("does not waive the %s protocol defect", async (finish) => {
+    let calls = 0
+    const result = await runGate(
+      { messages: [aiMessage("Result", { finish_reason: finish })] },
+      {
+        checkFinalDelivery: () => {
+          calls++
+          return undefined
+        }
+      }
+    )
+    expect(jumpedToModel(result)).toBe(true)
+    expect(calls).toBe(0)
+  })
+
+  it("does not check while tools are pending or when the graph has no foreground owner", async () => {
+    let calls = 0
+    const checkFinalDelivery = () => {
+      calls++
+      return "Missing delivery"
+    }
+    expect(
+      await runGate(
+        {
+          messages: [
+            new AIMessage({
+              content: "",
+              tool_calls: [{ id: "send", name: "send", args: {} }]
+            })
+          ]
+        },
+        { checkFinalDelivery }
+      )
+    ).toBeUndefined()
+    expect(
+      await runGate(
+        { messages: [aiMessage("Done", { finish_reason: "stop" })] },
+        {
+          ownerRunToken: undefined,
+          observationRunToken: RUN,
+          checkFinalDelivery
+        }
+      )
+    ).toBeUndefined()
+    expect(calls).toBe(0)
+  })
+})
+
 describe("final message inspection", () => {
   it("accepts a genuine final answer, however short", () => {
     // A terse reply is NOT a defect. The gate judges protocol, never prose

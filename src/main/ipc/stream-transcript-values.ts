@@ -18,6 +18,7 @@ import {
   type RoleCollisionMessage
 } from "../../shared/message-role-collision"
 import type { Message } from "../types"
+import { isStreamUserTurnBoundary } from "./stream-data-serialization"
 
 type ValuesSnapshotKind = "full" | "append" | "tail"
 type TranscriptValueSnapshot = [Record<string, unknown>, Record<string, unknown>]
@@ -101,7 +102,7 @@ export function selectStreamTranscriptValueSnapshots(
   // Append/tail envelopes already contain changed messages, but an appended
   // batch can cross a user boundary too. In every kind keep only the last turn.
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (getSerializedMessageRole(messages[index]) === "user") {
+    if (isStreamUserTurnBoundary(messages[index])) {
       start = index + 1
       break
     }

@@ -8,6 +8,7 @@ import { BotMemoryService } from "./memory"
 const flags = vi.hoisted(() => ({ enabled: true }))
 vi.mock("../storage", () => ({ isMemoryEnabled: () => flags.enabled }))
 import { createBotMemoryTools } from "./tools"
+import { filterTaskSubagentTools } from "../agent/runtime-tool-catalog"
 
 let root: string, memory: BotMemoryService
 beforeEach(async () => {
@@ -23,6 +24,45 @@ const bot = { id: "a" } as BotDefinition
 function tools(signal = new AbortController().signal, allowDelete = true) {
   return createBotMemoryTools(bot, memory, signal, allowDelete)
 }
+
+it("lets a temporary worker read references but leaves persistent memory changes to its parent", async () => {
+  const entry = memory.write("a", { name: "Preference", content: "Keep this fact" })
+  const before = memory.editVersion("a")
+  const all = tools()
+  const child = { configurable: { cmb_subagent_owner_tool_call_id: "temporary-task" } }
+  for (const [name, args] of [
+    ["bot_remember", { name: "Child state", content: "Must not persist" }],
+    ["bot_forget", { id: entry.id, expectedVersion: entry.version }]
+  ] as const) {
+    const result = await all
+      .find((entry) => entry.name === name)!
+      .invoke({ type: "tool_call", id: name, name, args }, child)
+    expect(result.status, name).toBe("error")
+    expect(result.content, name).toContain("parent Bot")
+  }
+  expect(memory.editVersion("a")).toBe(before)
+  expect(memory.list("a").map((entry) => entry.content.trim())).toEqual(["Keep this fact"])
+  const readers = filterTaskSubagentTools(all)
+  expect(readers.map((entry) => entry.name)).toEqual([
+    "bot_memory_search",
+    "bot_memory_list",
+    "bot_memory_get"
+  ])
+  const read = await readers
+    .find((entry) => entry.name === "bot_memory_get")!
+    .invoke(
+      { type: "tool_call", id: "read", name: "bot_memory_get", args: { id: entry.id } },
+      child
+    )
+  expect(JSON.parse(read.content).content.trim()).toBe("Keep this fact")
+  const saved = await all
+    .find((entry) => entry.name === "bot_remember")!
+    .invoke({
+      name: "Parent state",
+      content: "Verified parent fact"
+    })
+  expect(JSON.parse(saved).content.trim()).toBe("Verified parent fact")
+})
 
 it("deletes only the versioned private entry and invalidates a pending summary", async () => {
   const entry = memory.write("a", { name: "Synthetic preference", content: "HERON_472" })

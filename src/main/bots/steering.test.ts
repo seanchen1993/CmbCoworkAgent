@@ -29,6 +29,7 @@ function fixture() {
   let first = true
   let waiting!: (value: boolean) => void
   const yieldToUser = vi.fn()
+  const dismissQuestion = vi.fn()
   const acquire = vi.fn<BotRunPort["acquire"]>(() => {
     if (!first) return null
     first = false
@@ -39,6 +40,7 @@ function fixture() {
       },
       steer,
       yieldToUser,
+      dismissQuestion,
       release: vi.fn()
     }
   })
@@ -58,6 +60,7 @@ function fixture() {
     finish,
     acquire,
     yieldToUser,
+    dismissQuestion,
     wait: (value: boolean) => waiting(value)
   }
 }
@@ -212,6 +215,184 @@ describe("Bot messages during a user run", () => {
 })
 
 describe("group input during an existing question", () => {
+  async function delegatedQuestion() {
+    const f = fixture()
+    const parentBot = f.store.create({
+      name: "Parent",
+      instructions: "",
+      color: "#ea2845",
+      modelRef: null
+    })
+    const group = f.store.saveGroup({ name: "Room", memberIds: [f.bot.id, parentBot.id] })
+    const parent = f.store.enqueue(
+      { botId: parentBot.id, requestId: "parent", message: "Ask the member" },
+      { kind: "group", groupId: group.id, messageId: "parent" }
+    )
+    f.store.transition(parent.id, "running")
+    const root = f.store.delegate(parent.id, f.bot.id, "Wait for the user's choice", "delegate")
+    f.store.settle(parent.id, "completed", null, "Delegated")
+    f.host.resume()
+    await vi.waitFor(() => expect(f.store.getTask(root.id).state).toBe("running"))
+    f.host.onSteeringReady(root.id)
+    return { ...f, root, group }
+  }
+  it("yields a waiting same-room delegation, preserving its owner and the new user's separate authority", async () => {
+    const f = await delegatedQuestion()
+    f.wait(true)
+    const foreign = f.store.saveGroup({ name: "Other room", memberIds: [f.bot.id] })
+    f.host.sendGroup({
+      groupId: foreign.id,
+      requestId: "foreign",
+      text: "Other",
+      targetBotIds: [f.bot.id]
+    })
+    expect(f.yieldToUser).not.toHaveBeenCalled()
+    f.host.sendGroup({
+      groupId: f.group.id,
+      requestId: "new-topic",
+      text: "New work",
+      targetBotIds: [f.bot.id]
+    })
+    expect(f.yieldToUser).toHaveBeenCalledOnce()
+    const pending = f.yieldToUser.mock.calls[0][0]
+    expect(pending()).toBe(true)
+    expect(f.steer).not.toHaveBeenCalled()
+    expect(f.dismissQuestion).not.toHaveBeenCalled()
+    expect(f.store.getTask(f.root.id)).toMatchObject({
+      state: "waiting_user",
+      origin: { kind: "bot", expectsReply: true }
+    })
+    const incoming = f.store
+      .recentTasks()
+      .find((t) => t.origin.kind === "group" && t.origin.messageId === "new-topic")!
+    expect(incoming.state).toBe("queued")
+    expect(() => f.store.injectIntoRun(incoming.id, f.root.id)).toThrow("当前执行轮次")
+    f.host.cancel(incoming.id)
+    expect(pending()).toBe(false)
+    expect(f.store.getTask(f.root.id).state).toBe("waiting_user")
+  })
+  it("rechecks early group input only after the owned delegated question actually registers", async () => {
+    const f = await delegatedQuestion()
+    f.host.sendGroup({
+      groupId: f.group.id,
+      requestId: "early",
+      text: "New work",
+      targetBotIds: [f.bot.id]
+    })
+    expect(f.yieldToUser).not.toHaveBeenCalled()
+    f.wait(true)
+    const request = {
+      requestId: "question",
+      threadId: f.root.threadId,
+      createdAt: "now",
+      questions: []
+    }
+    f.host.recordGroupQuestion(f.root.id, { ...request, threadId: "foreign" })
+    expect(f.yieldToUser).not.toHaveBeenCalled()
+    f.host.recordGroupQuestion(f.root.id, request)
+    expect(f.yieldToUser).toHaveBeenCalledOnce()
+    expect(f.yieldToUser.mock.calls[0][0]()).toBe(true)
+    f.host.recordGroupQuestion(f.root.id, request)
+    expect(f.yieldToUser).toHaveBeenCalledOnce()
+    expect(f.steer).not.toHaveBeenCalled()
+  })
+  it.each([true, false])(
+    "dismisses an owned command-notification question without injecting new authority (addressed=%s)",
+    async (addressed) => {
+      const f = fixture()
+      const other = f.store.create({
+        name: "Other",
+        instructions: "",
+        color: "#ea2845",
+        modelRef: null
+      })
+      const group = f.store.saveGroup({ name: "Room", memberIds: [f.bot.id, other.id] })
+      const root = f.store.enqueue(
+        { botId: f.bot.id, requestId: "command-result", message: "Background command completed" },
+        { kind: "notification", notificationKind: "command", key: "command", groupId: group.id }
+      )
+      f.host.resume()
+      await vi.waitFor(() => expect(f.store.getTask(root.id).state).toBe("running"))
+      f.wait(true)
+      f.host.onSteeringReady(root.id)
+      const foreign = f.store.saveGroup({ name: "Elsewhere", memberIds: [other.id] })
+      f.host.sendGroup({
+        groupId: foreign.id,
+        requestId: "foreign",
+        text: "Other",
+        targetBotIds: [other.id]
+      })
+      expect(f.dismissQuestion).not.toHaveBeenCalled()
+      const message = {
+        groupId: group.id,
+        requestId: "new-topic",
+        text: "New work",
+        targetBotIds: [addressed ? f.bot.id : other.id]
+      }
+      f.host.sendGroup(message)
+      expect(f.dismissQuestion).toHaveBeenCalledOnce()
+      f.host.sendGroup(message)
+      expect(f.dismissQuestion).toHaveBeenCalledOnce()
+      expect(f.steer).not.toHaveBeenCalled()
+      expect(f.injections.size).toBe(0)
+      const incoming = f.store
+        .recentTasks()
+        .find((t) => t.origin.kind === "group" && t.origin.messageId === message.requestId)!
+      expect(incoming).toMatchObject({ state: "queued", origin: { kind: "group" } })
+      expect(() => f.store.injectIntoRun(incoming.id, root.id)).toThrow("当前执行轮次")
+      f.wait(false)
+      f.finish({ state: "superseded", result: "" })
+      await vi.waitFor(() => expect(f.store.getTask(root.id).state).toBe("superseded"))
+      expect(f.store.groupMessages(group.id).some((m) => m.id === `result-${root.id}`)).toBe(false)
+      expect(f.store.getTask(incoming.id).state).toBe("queued")
+    }
+  )
+  it("moves past only an unaddressed question in the same room, never on an exact retry", async () => {
+    const f = fixture()
+    const other = f.store.create({
+      name: "Other",
+      instructions: "",
+      color: "#ea2845",
+      modelRef: null
+    })
+    const group = f.store.saveGroup({ name: "Room", memberIds: [f.bot.id, other.id] })
+    f.host.sendGroup({
+      groupId: group.id,
+      requestId: "root",
+      text: "Ask",
+      targetBotIds: [f.bot.id]
+    })
+    const root = f.store.recentTasks()[0]
+    await vi.waitFor(() => expect(f.store.getTask(root.id).state).toBe("running"))
+    f.wait(true)
+    f.host.onSteeringReady(root.id)
+    const message = {
+      groupId: group.id,
+      requestId: "new-topic",
+      text: "Another topic",
+      targetBotIds: [other.id]
+    }
+    f.host.sendGroup(message)
+    expect(f.dismissQuestion).toHaveBeenCalledOnce()
+    f.host.sendGroup(message)
+    expect(f.dismissQuestion).toHaveBeenCalledOnce()
+    expect(() => f.host.sendGroup({ ...message, text: "Changed retry" })).toThrow()
+    expect(f.dismissQuestion).toHaveBeenCalledOnce()
+    const foreign = f.store.saveGroup({ name: "Other room", memberIds: [other.id] })
+    f.host.sendGroup({ ...message, groupId: foreign.id, requestId: "foreign" })
+    expect(f.dismissQuestion).toHaveBeenCalledOnce()
+    expect(f.steer).not.toHaveBeenCalled()
+    // The original input tool reports wait-end before the next model boundary.
+    f.wait(false)
+    f.finish({ state: "superseded", result: "" })
+    await vi.waitFor(() => expect(f.store.getTask(root.id).state).toBe("superseded"))
+    expect(f.store.groupMessages(group.id).some((m) => m.id === `result-${root.id}`)).toBe(false)
+    const addressed = f.store
+      .recentTasks()
+      .filter((t) => t.origin.kind === "group" && t.origin.messageId === message.requestId)
+    expect(addressed).toHaveLength(1)
+    expect(addressed[0]).toMatchObject({ botId: other.id, state: "queued" })
+  })
   async function groupQuestion(ready = true) {
     const f = fixture()
     const group = f.store.saveGroup({ name: "Room", memberIds: [f.bot.id] })

@@ -13,7 +13,7 @@ import { validateWorkspaceDirectory } from "../services/workspace-validation"
 import { getModCallContext } from "../mods/context"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import { ModError } from "../mods/errors"
-import { collectRuntimeToolCatalog } from "./runtime-tool-catalog"
+import { collectRuntimeToolCatalog, filterTaskSubagentTools } from "./runtime-tool-catalog"
 import type { FunctionToolInfo } from "../../shared/mods/v2/tools"
 import { currentFunctionExecution } from "../mods/v2/execution-context"
 import { getLocalThreadRunLease } from "./thread-run-lease"
@@ -67,6 +67,7 @@ import {
 } from "./context-summarization-middleware"
 import {
   createTurnCompletionGateMiddleware,
+  type TurnFinalDeliveryCheck,
   type TurnCompletionRecoveryCallback
 } from "./turn-completion-integrity"
 import { getProjectThreadDataDirectory } from "./context-history-path"
@@ -819,7 +820,8 @@ function createGradedToolConcurrencyMiddleware(
         | undefined
       if (
         (userInputWithoutToolLock &&
-          (toolCall?.name === "request_user_input" ||
+          (toolCall?.name === "bot_send_message" ||
+            toolCall?.name === "request_user_input" ||
             toolCall?.name === "bot_request_browser_help" ||
             (toolCall?.name === "bot_browser" &&
               isRecord(toolCall.args) &&
@@ -2419,6 +2421,7 @@ function assembleDeepAgent(
     onFinalSystemPrompt,
     onFailureFuseNotice,
     onTurnCompletionRecovery,
+    checkFinalDelivery,
     turnCompletionTodoGateEnabled = true,
     outputStyle,
     toolStrategy = "standard",
@@ -2434,6 +2437,7 @@ function assembleDeepAgent(
     }) => FailureFuseDecision | void
     onFailureFuseNotice?: FailureFuseNoticeCallback
     onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
+    checkFinalDelivery?: TurnFinalDeliveryCheck
     turnCompletionTodoGateEnabled?: boolean
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     [k: string]: any
@@ -3149,6 +3153,7 @@ function assembleDeepAgent(
   // common exit so general-purpose, registry, and custom string-prompt agents
   // receive the same guidance exactly once. Opaque Runnable agents own their
   // prompt assembly and cannot be safely rewritten here.
+  const taskDefaultTools = filterTaskSubagentTools(subagentDefaultTools ?? tools)
   const availableSubagents = unresolvedSubagents.map((subagent) => {
     if (
       Runnable.isRunnable(subagent) ||
@@ -3160,6 +3165,9 @@ function assembleDeepAgent(
     }
     return {
       ...subagent,
+      ...(Array.isArray(subagent.tools)
+        ? { tools: filterTaskSubagentTools(subagent.tools) }
+        : {}),
       systemPrompt: appendTaskCompletionAndRepetitionPrompt(subagent.systemPrompt),
       ...(toolStrategy !== "standard" && !("runnable" in subagent)
         ? {
@@ -3184,7 +3192,7 @@ function assembleDeepAgent(
   for (const subagent of availableSubagents) {
     const access = modAgentAccess.get(subagent?.name)
     if (!access) continue
-    access.tools = collectRuntimeToolCatalog(subagent.tools ?? subagentDefaultTools ?? tools, [
+    access.tools = collectRuntimeToolCatalog(subagent.tools ?? taskDefaultTools, [
       ...subagentMiddleware,
       ...(subagent.middleware ?? [])
     ])
@@ -3300,7 +3308,7 @@ function assembleDeepAgent(
             stampSubagentOwnerMetadata(
               createSubAgentMiddleware({
                 defaultModel: model,
-                defaultTools: subagentDefaultTools ?? tools,
+                defaultTools: taskDefaultTools,
                 defaultMiddleware: subagentMiddleware,
                 defaultInterruptOn: null,
                 subagents: metadataOnly
@@ -3332,7 +3340,8 @@ function assembleDeepAgent(
         ownerRunToken: currentRunMessageQueueOwnerToken,
         observationRunToken: modTurnRunId,
         todoGateEnabled: mainTodosEnabled && turnCompletionTodoGateEnabled,
-        onRecovery: onTurnCompletionRecovery
+        onRecovery: onTurnCompletionRecovery,
+        checkFinalDelivery
       }),
       // Inject user messages steered into the running turn. Placed BEFORE
       // summarization (injected turns should participate in context management)
@@ -4806,6 +4815,8 @@ export interface CreateAgentRuntimeOptions {
   modTurnRunId?: string
   /** Notice sink for turn-completion-gate recoveries (empty reply retried, …). */
   onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
+  /** Trusted main-turn delivery only; not forwarded to leaf agents. */
+  checkFinalDelivery?: TurnFinalDeliveryCheck
   /** Ordinary-path todo completion gate. Defaults to enabled. */
   turnCompletionTodoGateEnabled?: boolean
   /** Optional UI thread ID for approval prompts. Async worker runtimes keep their own checkpoint thread but surface approvals on the parent thread UI. */
@@ -4868,6 +4879,8 @@ export interface CreateAgentRuntimeOptions {
   noSkillEvolutionTool?: boolean
   /** Enable the interactive user-input tool. Only foreground, user-invoked runs should set this. */
   enableRequestUserInput?: boolean
+  /** Trusted Bot presentation only; ordinary callers retain the original question schema. */
+  enableBotQuestionOptions?: boolean
   /** Keep request_user_input pending when a renderer is temporarily absent. */
   allowDeferredUserInputRenderer?: boolean
   /**
@@ -5039,6 +5052,7 @@ function createRuntimeBaseTools(
         threadId: options.threadId,
         abortSignal: options.abortSignal,
         allowDeferredRenderer: options.allowDeferredUserInputRenderer,
+        enableBotQuestionOptions: options.enableBotQuestionOptions,
         interactionWaitHooks: options.interactionWaitHooks,
         requestUserInputConfig: options.requestUserInputConfig
       })
@@ -7565,6 +7579,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     currentRunMessageQueueOwnerToken: options.currentRunMessageQueueOwnerToken,
     onPrimaryModelRequestState: options.onPrimaryModelRequestState,
     onTurnCompletionRecovery: options.onTurnCompletionRecovery,
+    checkFinalDelivery: options.checkFinalDelivery,
     turnCompletionTodoGateEnabled: options.turnCompletionTodoGateEnabled,
     soloTaskTraceManager,
     actionStationarityTurnId,

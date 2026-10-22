@@ -18,7 +18,9 @@ import {
 import { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import type { ChatResult } from "@langchain/core/outputs"
 import { convertToOpenAITool } from "@langchain/core/utils/function_calling"
-import { createMiddleware } from "langchain"
+import { createMiddleware, tool as lcTool } from "langchain"
+import { z } from "zod"
+import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../src/main/agent/runtime-tool-catalog.ts"
 import { convertMessagesToCompletionsMessageParams } from "@langchain/openai"
 
 import { loadAgentsPromptForWorkspace } from "../src/main/agent/agents-md.ts"
@@ -1090,6 +1092,75 @@ const requestText = (messages: BaseMessage[]): string =>
     .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
     .join("\n")
 
+async function testMainTurnOnlyToolInheritance(): Promise<void> {
+  for (const explicitChildTools of [false, true]) {
+    const calls: ToolStrategyRequest[] = []
+    const send = lcTool(() => "posted", {
+      name: "fixture_public_delivery",
+      description: "Parent turn transport",
+      metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
+      schema: z.object({})
+    })
+    const read = lcTool(() => "read", {
+      name: "fixture_read",
+      description: "Ordinary work",
+      schema: z.object({})
+    })
+    const tools = [send, read]
+    const model = new ToolStrategyContractModel(calls, (messages) => {
+      if (
+        requestText(messages).includes("ROLE_DELIVERY_CHILD") ||
+        messages.at(-1)?._getType() === "tool"
+      )
+        return finishedStrategyMessage()
+      return new AIMessage({
+        content: "",
+        tool_calls: [
+          {
+            id: "child",
+            name: "task",
+            type: "tool_call",
+            args: { description: "Inspect the fixture", subagent_type: "worker" }
+          }
+        ]
+      })
+    })
+    const agent = createDeepAgent({
+      model,
+      tools,
+      systemPrompt: "ROLE_PARENT",
+      backend: { id: "delivery-inheritance", execute: async () => ({ output: "", exitCode: 0 }) },
+      mainFilesystemEnabled: false,
+      mainTodosEnabled: false,
+      includeGeneralPurposeSubagent: false,
+      subagents: [
+        {
+          name: "worker",
+          description: "Inspect fixture",
+          systemPrompt: "ROLE_DELIVERY_CHILD",
+          ...(explicitChildTools ? { tools } : {})
+        }
+      ]
+    })
+    await agent.invoke({ messages: [new HumanMessage("Delegate inspection")] })
+    const parent = calls.find((call) => !requestText(call.messages).includes("ROLE_DELIVERY_CHILD"))
+    const child = calls.find((call) => requestText(call.messages).includes("ROLE_DELIVERY_CHILD"))
+    assert(parent && child, "both actual model scopes must execute")
+    assert(
+      parent.tools.some((t) => t.name === send.name),
+      "parent keeps its transport tool"
+    )
+    assert(
+      !child.tools.some((t) => t.name === send.name),
+      "task agent cannot publish as its parent"
+    )
+    assert(
+      child.tools.some((t) => t.name === read.name),
+      "ordinary task work tools remain available"
+    )
+  }
+}
+
 async function testManagedForegroundCommands(workspacePath: string): Promise<void> {
   for (const managedExecution of [false, true]) {
     let foreground = 0,
@@ -1646,6 +1717,8 @@ async function run(): Promise<void> {
     console.log("PASS tool strategy final requests, tool schemas, and output-style matrix")
     await testManagedForegroundCommands(workspacePath)
     console.log("PASS managed foreground and ordinary background command routing")
+    await testMainTurnOnlyToolInheritance()
+    console.log("PASS main-turn transport exclusion from default and explicit task subagent tools")
     await testBotBackgroundCommandHandoff(workspacePath)
     console.log("PASS Bot background handoff before spawn and shell-syntax boundaries")
     await testWorkflowToolStrategyRequests(workspacePath)

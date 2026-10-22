@@ -4,6 +4,7 @@ import { BotMemoryMaintainer, type BotMemoryBatch } from "./memory-maintainer"
 const batch = (botId: string, conversation: string, editVersion = 1): BotMemoryBatch => ({
   botId,
   conversation,
+  userText: conversation,
   editVersion,
   threadId: `thread-${botId}`,
   modelRef: null
@@ -35,6 +36,11 @@ describe("Bot background memory batches", () => {
       "second\n\nthird",
       "after deletion"
     ])
+    expect(received.map((item) => item.userText)).toEqual([
+      "first",
+      "second\n\nthird",
+      "after deletion"
+    ])
     await maintainer.close()
   })
   it("bounds conversation size and aborts the active request without starting pending work", async () => {
@@ -55,6 +61,7 @@ describe("Bot background memory batches", () => {
     await tick()
     expect(received).toHaveLength(1)
     expect(received[0].conversation.length).toBeLessThanOrEqual(12_000)
+    expect(received[0].userText.length).toBeLessThanOrEqual(12_000)
     expect(signals[0].aborted).toBe(true)
   })
   it("continues other Bots after an extraction failure", async () => {

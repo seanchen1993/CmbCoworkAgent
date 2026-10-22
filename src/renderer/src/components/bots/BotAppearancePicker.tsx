@@ -69,10 +69,15 @@ export function BotAppearancePicker({
             type="button"
             title={label}
             aria-label={`${label}头像`}
-            aria-pressed={botAppearanceColor(value.color).toLowerCase() === color}
+            aria-pressed={
+              botAppearanceColor(value.color).toLowerCase() === botAppearanceColor(color)
+            }
             className="bot-color"
             style={{
-              backgroundColor: color === "#242424" ? "var(--bot-avatar-monochrome, #242424)" : color
+              backgroundColor:
+                color === "#242424"
+                  ? "var(--bot-avatar-monochrome, #242424)"
+                  : botAppearanceColor(color)
             }}
             onClick={() => onChange({ ...value, color })}
           />

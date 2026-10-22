@@ -1,3 +1,4 @@
+import { AsyncResource } from "node:async_hooks"
 import {
   BOT_PROTOCOL_VERSION,
   LOCAL_BOT_HOST_ID,
@@ -24,10 +25,13 @@ import type { BotStore } from "./store"
 import { canDeferBotTask, canSteerBotTask } from "./continuation"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
 import type { BackgroundCommandLifecycle } from "../agent/background-command-lifecycle"
+import type { UserInputRequest } from "../types"
 
 export interface BotRunLease {
   /** Reuse the active runtime's user-prompt pipeline; inbox remains queued until injection. */
   steer?(task: BotTask, beforeInject: () => boolean): Promise<boolean>
+  /** Move past an obsolete group question without answering it or cancelling detached work. */
+  dismissQuestion?(): void
   /** Yield at a model boundary; keep background-task ownership separate from private input. */
   yieldToUser?(stillPending: () => boolean): void
   execute(
@@ -39,6 +43,8 @@ export interface BotRunLease {
         error?: string
         result?: string
         files?: BotDeliveredFile[]
+        /** Successful group text was delivered explicitly, not through the final scratch reply. */
+        explicitGroupMessages?: boolean
       }
     | {
         state: "deferred"
@@ -93,6 +99,17 @@ export class LocalBotHost {
   private scheduled = false
   private scheduleTimer: ReturnType<typeof setTimeout> | undefined
   private lastHistoryMaintenance = -Infinity
+  // A tool may wake this queue, but its expiring call scope must not own a new Bot run.
+  private readonly pumpInHostContext = AsyncResource.bind(() => {
+    this.scheduled = false
+    if (this.stopping || this.faulted) return
+    try {
+      this.pump()
+    } catch (error) {
+      this.faulted = true
+      this.reportError(error)
+    }
+  })
 
   constructor(
     private readonly store: BotStore,
@@ -264,29 +281,63 @@ export class LocalBotHost {
     this.requireRunning()
     return this.store.groupMessages(id, cursor)
   }
-  publishGroupFiles(taskId: string, callId: string, files: BotDeliveredFile[]): void {
+  groupTaskRequest(taskId: string): Pick<BotGroupMessage, "id" | "text" | "createdAt"> | null {
+    this.requireRunning()
+    return this.store.groupTaskRequest(taskId)
+  }
+  recordGroupQuestion(taskId: string, request: UserInputRequest): void {
+    const run = this.active.get(taskId)
+    if (!run) return
+    if (this.store.recordGroupQuestion(taskId, request)) {
+      this.changed()
+      // A group message can arrive before the delegated tool registers its question.
+      if (run.task.origin.kind === "bot" && run.steeringReady) this.onSteeringReady(taskId)
+    }
+  }
+  recordGroupQuestionResult(taskId: string, requestId: string, resultId: string): void {
+    if (!this.active.has(taskId)) return
+    if (this.store.recordGroupQuestionResult(taskId, requestId, resultId)) this.changed()
+  }
+  publishGroupMessage(taskId: string, callId: string, text: string) {
+    this.requireRunning()
+    const run = this.active.get(taskId)
+    if (!run || run.controller.signal.aborted) throw new BotError("CONFLICT", "当前群任务已结束")
+    const receipt = this.store.publishGroupMessage(taskId, callId, text)
+    this.changed()
+    return receipt
+  }
+  publishGroupFiles(taskId: string, callId: string, files: BotDeliveredFile[], content = ""): void {
     this.requireRunning()
     const run = this.active.get(taskId)
     if (!run || run.controller.signal.aborted)
       throw new BotError("CONFLICT", "任务已停止，无法继续交付附件")
-    this.store.publishGroupFiles(taskId, callId, files)
+    this.store.publishGroupFiles(taskId, callId, files, content)
     this.changed()
   }
   sendGroup(input: SendBotGroupMessageInput): void {
     this.requireRunning()
     const obsolete = this.store.groupDiscussionTask(input.groupId, input.requestId)
-    this.store.sendGroup(input)
-    if (obsolete) this.cancel(obsolete)
+    const fresh = this.store.sendGroup(input)
+    if (fresh && obsolete) this.cancel(obsolete)
     this.changed()
-    for (const run of this.active.values())
+    for (const run of this.active.values()) {
+      if (botTaskGroupId(run.task) !== input.groupId || run.controller.signal.aborted) continue
       if (
-        run.task.origin.kind === "group" &&
-        run.task.origin.groupId === input.groupId &&
-        input.targetBotIds.includes(run.botId)
-      )
+        run.task.origin.kind === "notification" &&
+        run.task.origin.notificationKind === "command"
+      ) {
+        // A new user request gets its own prompt/tools, never the notification's authority.
+        if (fresh) run.lease.dismissQuestion?.()
+        continue
+      }
+      if (run.task.origin.kind !== "group" && run.task.origin.kind !== "bot") continue
+      if (!input.targetBotIds.includes(run.botId)) {
+        if (fresh && run.task.origin.kind === "group") run.lease.dismissQuestion?.()
+      } else
         for (const task of this.store.pendingConversationTasks(run.botId, input.groupId))
           if (task.origin.kind === "group" && task.origin.messageId === input.requestId)
             this.steerUserMessage(task)
+    }
     this.wake()
   }
 
@@ -534,12 +585,17 @@ export class LocalBotHost {
 
   private steerUserMessage(task: BotTask): void {
     if (task.state !== "queued" || !["user", "group"].includes(task.origin.kind)) return
-    const backgroundRun =
-      task.origin.kind === "user"
-        ? [...this.active.values()].find(
-            (candidate) => candidate.botId === task.botId && canDeferBotTask(candidate.task)
-          )
-        : undefined
+    const groupId = task.origin.kind === "group" ? task.origin.groupId : undefined
+    const backgroundRun = [...this.active.values()].find(
+      (candidate) =>
+        candidate.botId === task.botId &&
+        canDeferBotTask(candidate.task) &&
+        (task.origin.kind === "user" ||
+          (candidate.task.origin.kind === "bot" &&
+            candidate.task.origin.groupId === groupId &&
+            candidate.task.threadId === task.threadId &&
+            this.store.getTask(candidate.task.id).state === "waiting_user"))
+    )
     if (backgroundRun?.steeringReady && !backgroundRun.controller.signal.aborted) {
       backgroundRun.lease.yieldToUser?.(
         () =>
@@ -548,8 +604,10 @@ export class LocalBotHost {
           !backgroundRun.controller.signal.aborted &&
           this.active.get(backgroundRun.task.id) === backgroundRun &&
           this.store
-            .pendingConversationTasks(task.botId)
-            .some((pending) => pending.state === "queued" && pending.origin.kind === "user")
+            .pendingConversationTasks(task.botId, groupId)
+            .some(
+              (pending) => pending.state === "queued" && pending.origin.kind === task.origin.kind
+            )
       )
       return
     }
@@ -598,8 +656,9 @@ export class LocalBotHost {
     // Preserve the original private-inbox priority while a background/group
     // runtime is starting. Its own room is an additional, separate inbox.
     for (const task of this.store.pendingConversationTasks(run.botId)) this.steerUserMessage(task)
-    if (run.task.origin.kind === "group")
-      for (const task of this.store.pendingConversationTasks(run.botId, run.task.origin.groupId))
+    const groupId = botTaskGroupId(run.task)
+    if (groupId && (run.task.origin.kind === "group" || run.task.origin.kind === "bot"))
+      for (const task of this.store.pendingConversationTasks(run.botId, groupId))
         this.steerUserMessage(task)
   }
 
@@ -737,16 +796,7 @@ export class LocalBotHost {
   private wake(): void {
     if (this.stopping || this.faulted || this.scheduled) return
     this.scheduled = true
-    queueMicrotask(() => {
-      this.scheduled = false
-      if (this.stopping || this.faulted) return
-      try {
-        this.pump()
-      } catch (error) {
-        this.faulted = true
-        this.reportError(error)
-      }
-    })
+    queueMicrotask(this.pumpInHostContext)
   }
 
   private pump(): void {
@@ -803,6 +853,7 @@ export class LocalBotHost {
     let reason: string | null = null
     let finalText: string | undefined
     let files: BotDeliveredFile[] | undefined
+    let explicitGroupMessages = false
     let waitingCount = 0
     let deferredCheckpoint: string | undefined
     let deferredFiles: BotDeliveredFile[] | undefined
@@ -821,6 +872,7 @@ export class LocalBotHost {
         reason = result.error ?? null
         finalText = result.result
         files = result.files
+        explicitGroupMessages = result.explicitGroupMessages === true
       }
     } catch (error) {
       state = "failed"
@@ -853,7 +905,8 @@ export class LocalBotHost {
             state,
             reason,
             finalText,
-            files
+            files,
+            explicitGroupMessages
           )
         this.changed()
         try {

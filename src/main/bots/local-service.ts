@@ -98,6 +98,22 @@ export function getLocalBotHost(): LocalBotHost {
             role: message.role,
             text: message.role === "assistant" ? splitBotInlineReasoning(text).body : text
           }
+        },
+        (request, messageId) => {
+          const message = getThreadMessagesByIds(request.threadId, [messageId])[0]
+          if (
+            message?.role !== "tool" ||
+            message.name !== "request_user_input" ||
+            typeof message.content !== "string"
+          )
+            return undefined
+          try {
+            if (JSON.parse(message.content).requestId === request.requestId)
+              return { content: message.content, is_error: message.is_error }
+          } catch {
+            /* A malformed receipt cannot supply an answer. */
+          }
+          return undefined
         }
       ),
       createLocalBotRunPort(

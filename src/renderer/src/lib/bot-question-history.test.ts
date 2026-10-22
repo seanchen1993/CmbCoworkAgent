@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest"
 import {
   botQuestionHistory,
+  botGroupQuestionHistory,
+  botGroupQuestionReplies,
   isMainBotQuestionCall,
   pendingBotQuestionCallId,
   stoppedBotQuestionHistory
 } from "./bot-question-history"
 import type { Message, ToolCall, UserInputRequest } from "@/types"
-import type { BotMessageOrigin } from "../../../shared/bots/contracts"
+import type { BotGroupMessage, BotMessageOrigin } from "../../../shared/bots/contracts"
 
 const question = {
   id: "delivery",
@@ -28,6 +30,60 @@ const receipt = (status: string, answers: Record<string, unknown> = {}) => ({
 })
 
 describe("Bot stopped question history", () => {
+  it("projects true multi receipts in private and group history without inventing choices", () => {
+    const options = question.options.slice(1)
+    const multiQuestion = { ...question, options, allowMultiple: true }
+    const multiTool = { ...tool, args: { questions: [multiQuestion] } }
+    const answer = {
+      type: "options",
+      questionId: question.id,
+      options: options.map((option, optionIndex) => ({ optionIndex, ...option }))
+    }
+    const result = receipt("submitted", { [question.id]: answer })
+    expect(botQuestionHistory(multiTool, result)?.questions[0].answer?.text).toBe("报告、源码")
+    expect(
+      botGroupQuestionHistory({
+        taskId: "task",
+        state: "completed",
+        request: {
+          requestId: "r",
+          threadId: "g",
+          createdAt: "now",
+          questions: [multiQuestion]
+        },
+        result
+      })?.questions[0].answer?.text
+    ).toBe("报告、源码")
+    for (const selected of [
+      [],
+      [answer.options[0], answer.options[0]],
+      [{ ...answer.options[0], label: "伪造" }],
+      [{ ...answer.options[0], optionIndex: 9 }]
+    ]) {
+      expect(
+        botQuestionHistory(
+          multiTool,
+          receipt("submitted", { [question.id]: { ...answer, options: selected } })
+        )
+      ).toBeNull()
+    }
+    expect(botQuestionHistory(tool, result)).toBeNull()
+  })
+  it("uses actual group receipts before task state and never guesses missing answers", () => {
+    const request: UserInputRequest = {
+      requestId: "request",
+      threadId: "group-room-bot",
+      questions: [question],
+      createdAt: new Date().toISOString()
+    }
+    const entry = { taskId: "task", request, state: "cancelled" as const }
+    expect(botGroupQuestionHistory(entry)?.status).toBe("cancelled")
+    expect(botGroupQuestionHistory({ ...entry, result: receipt("ignored") })).toMatchObject({
+      status: "ignored"
+    })
+    expect(botGroupQuestionHistory({ ...entry, state: "completed" })).toBeNull()
+    expect(botGroupQuestionHistory({ ...entry, result: { content: "not a receipt" } })).toBeNull()
+  })
   const user: Message = { id: "user", role: "user", content: "ask", created_at: new Date() }
   const call: Message = {
     id: "assistant",
@@ -191,7 +247,7 @@ describe("Bot settled question history", () => {
       undefined,
       "unknown",
       [{ label: "Broken", description: 42 }],
-      Array(6).fill({ label: "Too many", description: "" })
+      Array(7).fill({ label: "Too many", description: "" })
     ]) {
       const history = botQuestionHistory(
         { ...tool, args: { questions: [{ ...question, options }] } },
@@ -199,6 +255,32 @@ describe("Bot settled question history", () => {
       )
       expect(history?.questions[0]).toEqual({ id: question.id, question: question.question })
     }
+  })
+
+  it("retains all six choices supported by the Bot protocol", () => {
+    const options = Array.from({ length: 6 }, (_, index) => ({
+      label: `Choice ${index}`,
+      description: ""
+    }))
+    expect(
+      botQuestionHistory(
+        { ...tool, args: { questions: [{ ...question, options }] } },
+        receipt("ignored")
+      )?.questions[0].options
+    ).toEqual(options)
+  })
+
+  it("reads optional Bot descriptions from the submitted receipt without losing the question", () => {
+    const options = [{ label: "CSV" }, { label: "JSON" }]
+    const call = { ...tool, args: { questions: [{ ...question, allowMultiple: true, options }] } }
+    const result = receipt("submitted", {
+      [question.id]: {
+        type: "options",
+        questionId: question.id,
+        options: options.map((option, optionIndex) => ({ ...option, optionIndex, description: "" }))
+      }
+    })
+    expect(botQuestionHistory(call, result)?.questions[0].answer?.text).toBe("CSV、JSON")
   })
 
   it("reuses the original exact cancellation receipt without treating it as an answer", () => {
@@ -230,6 +312,7 @@ describe("Bot settled question history", () => {
     )
     expect(history?.questions[0].answer).toEqual({
       text: "源码",
+      optionIndex: 1,
       additionalText: "包括测试\n保留 README"
     })
   })
@@ -313,5 +396,86 @@ describe("Bot settled question history", () => {
     expect(botQuestionHistory(tool, { content: blocks })?.status).toBe("ignored")
     expect(JSON.stringify(tool)).toBe(original)
     expect(blocks.map((block) => block.text).join("")).toBe(content)
+  })
+})
+
+describe("group answer receipt placement", () => {
+  const message = (id: string, createdAt: number): BotGroupMessage => ({
+    id,
+    groupId: "room",
+    ordinal: createdAt,
+    authorBotId: "bot",
+    text: id,
+    createdAt
+  })
+  const answered = (id: string, createdAt: number, submittedAt: unknown): BotGroupMessage => ({
+    ...message(id, createdAt),
+    text: "",
+    question: {
+      taskId: `task-${id}`,
+      state: "completed",
+      request: {
+        requestId: id,
+        threadId: "group-room-bot",
+        createdAt: new Date(createdAt).toISOString(),
+        questions: [question]
+      },
+      result: {
+        content: JSON.stringify({
+          status: "submitted",
+          submittedAt,
+          answers: { delivery: { type: "other", questionId: "delivery", text: "真实自填\n不改写" } }
+        })
+      }
+    }
+  })
+
+  it("places actual answers after interleaved messages while preserving real row IDs and ordinals", () => {
+    const first = answered("first", 10, new Date(35).toISOString())
+    const second = answered("second", 30, new Date(45).toISOString())
+    const messages = [first, message("new-topic", 20), second, message("result", 40)]
+    const original = JSON.stringify(messages)
+    const replies = botGroupQuestionReplies(messages)
+    expect([...replies.keys()]).toEqual(["second", "result"])
+    expect(replies.get("second")?.[0].source).toBe(first)
+    expect(replies.get("result")?.[0].source).toBe(second)
+    expect(replies.get("second")?.[0].history.questions[0].answer?.text).toBe("真实自填\n不改写")
+    expect(JSON.stringify(messages)).toBe(original)
+  })
+
+  it("never echoes ignored, automatic, cancelled, missing or invalid receipts as user answers", () => {
+    const original = answered("q", 10, new Date(20).toISOString())
+    for (const result of [
+      receipt("ignored"),
+      receipt("auto_resolved"),
+      undefined,
+      { content: "broken" }
+    ]) {
+      const question = { ...original.question!, result, state: "cancelled" as const }
+      expect(botGroupQuestionReplies([{ ...original, question }]).size).toBe(0)
+    }
+    for (const timestamp of [undefined, 42, "invalid date"])
+      expect(botGroupQuestionReplies([answered("q", 10, timestamp)]).size).toBe(0)
+  })
+
+  it("keeps equal-time answers stable and never moves an answer before its own question", () => {
+    const first = answered("first", 20, new Date(20).toISOString())
+    const second = answered("second", 30, new Date(20).toISOString())
+    const replies = botGroupQuestionReplies([message("earlier", 10), first, second])
+    expect(replies.get("first")?.map((r) => r.source.id)).toEqual(["first"])
+    expect(replies.get("second")?.map((r) => r.source.id)).toEqual(["second"])
+    const sameTime = botGroupQuestionReplies([first, { ...second, createdAt: 20 }])
+    expect(sameTime.get("second")?.map((r) => r.source.id)).toEqual(["first", "second"])
+  })
+
+  it("does not derive a letter key from a mismatched index or custom answer", () => {
+    const answer = { questionId: "delivery", type: "option", optionIndex: 0, label: "源码" }
+    expect(
+      botQuestionHistory(tool, receipt("submitted", { delivery: answer }))?.questions[0].answer
+    ).toEqual({ text: "源码" })
+    expect(
+      botQuestionHistory(tool, receipt("submitted", { delivery: { ...answer, optionIndex: 99 } }))
+        ?.questions[0].answer
+    ).toEqual({ text: "源码" })
   })
 })

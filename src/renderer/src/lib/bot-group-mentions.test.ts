@@ -54,17 +54,28 @@ it("rejects removed members instead of silently dispatching to everyone else", (
   expect(groupMentionRecipients(all.mentions, ["a", "b"]).ids).toEqual(["a", "b"])
   expect(groupMentionRecipients([...all.mentions, ...mentions], ["a", "b"]).ids).toEqual([])
 })
-it("includes the reply author alongside explicit mentions without duplicate recipients", () => {
-  expect(groupMessageRecipients([], ["a", "b"], { replyAuthorId: "a" }).ids).toEqual(["a"])
+it("keeps quotes as context without expanding explicit or default recipients", () => {
+  expect(groupMessageRecipients([], ["a", "b"], { replyAuthorId: "a" }).ids).toEqual(["a", "b"])
   expect(groupMessageRecipients([], ["a", "b"], { replyAuthorId: null }).ids).toEqual(["a", "b"])
   expect(groupMessageRecipients([], ["a", "b"], { replyAuthorId: "gone" }).error).toContain(
     "不在本群"
   )
   const other = insertGroupMention("@", { start: 0, end: 1 }, [], "b", "乙")
   expect(groupMessageRecipients(other.mentions, ["a", "b"], { replyAuthorId: "a" }).ids).toEqual([
-    "b",
+    "b"
+  ])
+  const first = insertGroupMention("@", { start: 0, end: 1 }, [], "a", "甲")
+  expect(groupMessageRecipients(first.mentions, ["a", "b"], { replyAuthorId: "b" }).ids).toEqual([
     "a"
   ])
+  expect(
+    groupMessageRecipients([], ["a", "b"], { targets: ["b"], replyAuthorId: "a" }).ids
+  ).toEqual(["b"])
+  expect(
+    groupMessageRecipients([...first.mentions, ...other.mentions], ["a", "b", "c"], {
+      replyAuthorId: "b"
+    }).ids
+  ).toEqual(["a", "b"])
   expect(groupMessageRecipients(other.mentions, ["a", "b"], { replyAuthorId: "b" }).ids).toEqual([
     "b"
   ])

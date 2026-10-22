@@ -1,6 +1,7 @@
 import { getCapturedSubagentSession, subagentExportKey } from "../services/subagent-session-capture"
 import type { SubagentExportTarget as ExportScope } from "../../shared/subagent-session-export"
 import { formatHookDateTime } from "../../shared/hook-time"
+import { BotError } from "../../shared/bots/contracts"
 import { extractVisibleReasoning } from "../../shared/model-reasoning"
 import { IpcMain, BrowserWindow, dialog, type IpcMainInvokeEvent } from "electron"
 import { constants as fsConstants } from "fs"
@@ -2973,6 +2974,36 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         options
       }: { threadId: string; query: string; options?: ThreadMessageSearchOptions }
     ) => {
+      const normalizedThreadId = typeof threadId === "string" ? threadId.trim() : ""
+      const metadata = normalizedThreadId
+        ? parseJsonObject(getThreadCore(normalizedThreadId)?.metadata)
+        : undefined
+      if (
+        metadata?.botHostId === "local" &&
+        typeof metadata.botId === "string" &&
+        metadata.botGroupId == null
+      ) {
+        const { getLocalBotHost } = await import("../bots/local-service")
+        const host = getLocalBotHost()
+        let bot: ReturnType<typeof host.getBot> | undefined
+        try {
+          bot = host.getBot(metadata.botId)
+        } catch (error) {
+          if (!(error instanceof BotError) || error.code !== "NOT_FOUND") throw error
+        }
+        if (bot?.threadId === normalizedThreadId) {
+          const botId = bot.id
+          return searchThreadMessages(threadId, query, options, (messageIds) => {
+            return new Map(
+              host
+                .messageOrigins(botId, messageIds)
+                .flatMap(({ requestId, origin }) =>
+                  origin.kind === "user" && origin.replyTo ? [[requestId, origin.replyTo]] : []
+                )
+            )
+          })
+        }
+      }
       return searchThreadMessages(threadId, query, options)
     }
   )

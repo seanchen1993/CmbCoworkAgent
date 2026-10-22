@@ -42,11 +42,15 @@ describe("quiet Bot routine visibility", () => {
     const internal: Message = { id, role: "user", content: "续办后台任务", created_at: new Date(0) }
     const messages: Message[] = [
       internal,
+      { ...internal, id: "notification:thread:command:command-1", content: "后台命令结果" },
       { ...internal, id: "ordinary", content: id },
       { ...internal, id: "bot-continuation:malformed" },
       { ...internal, id: "answer", role: "assistant", content: "Result" }
     ]
-    expect([...hiddenBotTaskMessageIds(messages, new Map())]).toEqual([id])
+    expect([...hiddenBotTaskMessageIds(messages, new Map())]).toEqual([
+      id,
+      "notification:thread:command:command-1"
+    ])
     const continuation = { ...source, requestId: id }
     const scheduled = [
       turn[0],
@@ -144,5 +148,95 @@ describe("quiet Bot routine visibility", () => {
     expect(quietBotTurnMessageIds(turn.slice(1), new Map([[source.requestId, source]])).size).toBe(
       0
     )
+  })
+  it("quietly projects only verified no-news command notifications, never other notifications or delivered files", () => {
+    const command = {
+      ...source,
+      origin: {
+        kind: "notification" as const,
+        notificationKind: "command" as const,
+        key: "done",
+        commandSucceeded: true
+      }
+    }
+    const origins = new Map([[command.requestId, command]])
+    expect(quietBotTurnMessageIds(turn, origins)).toEqual(
+      new Set(turn.map((message) => message.id))
+    )
+    for (const commandSucceeded of [false, undefined])
+      expect(
+        quietBotTurnMessageIds(
+          turn,
+          new Map([
+            [
+              source.requestId,
+              {
+                ...command,
+                origin: { ...command.origin, commandSucceeded }
+              }
+            ]
+          ])
+        ).size
+      ).toBe(0)
+    for (const notificationKind of ["workflow", "coordinator"] as const)
+      expect(
+        quietBotTurnMessageIds(
+          turn,
+          new Map([
+            [source.requestId, { ...command, origin: { ...command.origin, notificationKind } }]
+          ])
+        ).size
+      ).toBe(0)
+    for (const state of ["failed", "cancelled", "outcome_unknown"] as const)
+      expect(
+        quietBotTurnMessageIds(turn, new Map([[source.requestId, { ...command, state }]])).size
+      ).toBe(0)
+    for (const state of ["queued", "running", "waiting_user"] as const) {
+      for (const content of ["B", "BOT_ROUTINE_", "<think>Checked</think>BOT_ROUTINE_SILENT"]) {
+        const streaming = turn.map((m) => (m.id === "final" ? { ...m, content } : m))
+        expect([
+          ...quietBotTurnMessageIds(
+            streaming,
+            new Map([[command.requestId, { ...command, state }]])
+          )
+        ]).toEqual(["final"])
+        expect(
+          quietBotTurnMessageIds(
+            streaming,
+            new Map([[command.requestId, { ...command, state, origin: { kind: "user" } }]])
+          )
+        ).toEqual(new Set())
+      }
+      const news = turn.map((m) =>
+        m.id === "final" ? { ...m, content: "BOT_ROUTINE_SILENT\nNew file" } : m
+      )
+      expect(
+        quietBotTurnMessageIds(news, new Map([[command.requestId, { ...command, state }]])).size
+      ).toBe(0)
+    }
+    const withFiles = turn.map((message) =>
+      message.id === "check"
+        ? {
+            ...message,
+            tool_calls: [{ id: "deliver", name: "bot_deliver_files", args: { files: ["new.md"] } }]
+          }
+        : message
+    )
+    expect([...quietBotTurnMessageIds(withFiles, origins)]).toEqual(["final"])
+    for (const name of ["request_user_input", "bot_request_browser_help"]) {
+      const withQuestion = turn.map((message) =>
+        message.id === "check"
+          ? {
+              ...message,
+              tool_calls: [{ id: "question", name, args: {} }]
+            }
+          : message
+      )
+      expect([...quietBotTurnMessageIds(withQuestion, origins)]).toEqual(["final"])
+    }
+    const news = turn.map((message) =>
+      message.id === "final" ? { ...message, content: "BOT_ROUTINE_SILENT\nNew result" } : message
+    )
+    expect(quietBotTurnMessageIds(news, origins).size).toBe(0)
   })
 })

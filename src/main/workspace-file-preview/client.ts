@@ -132,7 +132,8 @@ export class WorkspaceFilePreviewClient {
     source: WorkspaceFilePreviewWorkerSource,
     workspacePath: string | undefined,
     latestKey: string,
-    offset = 0
+    offset = 0,
+    officePreview?: true
   ): Promise<
     | { result: WorkspaceFilePreviewTextResult; resolvedPath: string }
     | WorkspaceFilePreviewInspection
@@ -185,6 +186,7 @@ export class WorkspaceFilePreviewClient {
             source,
             workspacePath,
             offset,
+            officePreview,
             cancellationBuffer
           })
         } else {
@@ -210,14 +212,16 @@ export class WorkspaceFilePreviewClient {
     source: WorkspaceFilePreviewWorkerSource,
     workspacePath: string | undefined,
     offset: number,
-    latestKey: string
+    latestKey: string,
+    officePreview?: true
   ): Promise<{ result: WorkspaceFilePreviewTextResult; resolvedPath: string }> {
     return (await this.request(
       "read-text",
       source,
       workspacePath,
       latestKey,
-      offset
+      offset,
+      officePreview
     )) as { result: WorkspaceFilePreviewTextResult; resolvedPath: string }
   }
 
