@@ -1,3 +1,4 @@
+import type { DesignSessionApi } from "../shared/managed-design-session"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type { RequirementRuntimeItem } from "../main/ipc/requirements"
 import type {
@@ -2181,6 +2182,7 @@ interface CustomAPI {
     cancelByThread: (threadId: string) => Promise<boolean>
   }
   design: {
+    sessions: DesignSessionApi
     generate: (
       sessionId: string,
       prompt: string,

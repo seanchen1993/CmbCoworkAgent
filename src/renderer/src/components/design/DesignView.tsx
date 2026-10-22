@@ -35,18 +35,21 @@ import { PulsingDot } from "./common"
 import { MessageBubble } from "./MessageBubble"
 import { QuestionsPanel } from "./QuestionsPanel"
 import { S } from "./styles"
+import { getDesignSessionClient } from "./session-client"
+import {
+  buildNewDesignPrompt,
+  shouldSkipDesignQuestions,
+  type DesignRunRequest
+} from "../../../../shared/managed-design-session"
 import { TweaksFloatingPanel } from "./TweaksFloatingPanel"
 import type {
   AnswerValue,
   ChatTab,
   CommentItem,
   DesignApprovalDecision,
-  DesignApprovalRequest,
   DesignContextSyncResult,
   DesignElementAnchor,
-  DesignExecutionEvent,
   DesignArtifactMetadata,
-  DesignModelRetryState,
   DesignSessionKind,
   DesignSkillReference,
   DesignSystemInfo,
@@ -63,7 +66,6 @@ import type {
   Message,
   MessageAttachment,
   ModelOption,
-  QuestionDef,
   RightPanelTab,
   SessionMeta,
   SkillInfo,
@@ -204,114 +206,6 @@ function makeFileHref(filePath: string): string {
   return `file://${encodeURI(normalized)}`
 }
 
-const MAX_DESIGN_PROGRESS_TEXT_CHARS = 1200
-const DESIGN_HTML_PROGRESS_TEXT = "正在生成 HTML 设计稿..."
-const DESIGN_HTML_PROGRESS_PATTERN =
-  /```html|<!doctype|<html[\s>]|<head[\s>]|<body[\s>]|<style[\s>]|<script[\s>]/i
-const DESIGN_TOOL_MARKUP_PROGRESS_PATTERN =
-  /(?:[<＜]\s*[|｜]?DSML[|｜]?\s*[>＞]|tool Calls|invoke name=|parameter name=|<\/\s*[|｜]?DSML[|｜]?\s*>)/i
-const DESIGN_TOOL_PROGRESS_LINE_PATTERN = /^\s*(?:读取文件|写入文件|修改文件|编辑文件):/i
-const THINK_OPEN_PATTERN = /<think\b[^>]*>?/i
-const THINK_CLOSE_PATTERN = /<\/think>/i
-const THINK_PARTIAL_OPEN_PATTERN = /<t(?:h(?:i(?:n(?:k(?:\b[^>]*)?)?)?)?)?$/i
-const THINK_PARTIAL_CLOSE_PATTERN = /<\/t(?:h(?:i(?:n(?:k)?)?)?)?$/i
-const DIRECT_DESIGN_REQUEST_PATTERN =
-  /\b(skip questions|no questions|just build|build directly|directly generate)\b|(?:直接|马上|立刻)(?:生成|开始|做|出图|出页面)|(?:不要|不用|无需|别)(?:问|提问|问题|澄清|确认)|跳过(?:问题|问答|提问|澄清)/i
-
-function shouldSkipDesignQuestions(prompt: string): boolean {
-  return DIRECT_DESIGN_REQUEST_PATTERN.test(prompt)
-}
-
-const MULTI_VARIATION_INSTRUCTION =
-  "Generate 2 distinct variations (A / B) within one HTML file for exploration. " +
-  "Variation A should be conventional and safe; Variation B should be more distinctive. " +
-  'Use direct body children with id="variation-a" and id="variation-b" plus concise Chinese data-label values.'
-
-const CANONICAL_ARTIFACT_INSTRUCTION =
-  'Generate exactly ONE canonical design artifact. Do NOT generate A/B variations, do NOT create elements with id="variation-a" or id="variation-b", and do NOT present alternative versions.'
-
-function buildNewDesignPrompt(
-  basePrompt: string,
-  options: { designSystemId?: string | null; forceVariations?: boolean } = {}
-): string {
-  const instruction = options.designSystemId
-    ? CANONICAL_ARTIFACT_INSTRUCTION
-    : MULTI_VARIATION_INSTRUCTION
-  return `${basePrompt}\n\n---\n${instruction}\n\n始终使用中文回答。`
-}
-
-function clampDesignProgressText(content: string): string {
-  if (content.length <= MAX_DESIGN_PROGRESS_TEXT_CHARS) return content
-  return `...${content.slice(-MAX_DESIGN_PROGRESS_TEXT_CHARS)}`
-}
-
-function createDesignProgressNormalizer(): (token: string) => string {
-  let insideThinkBlock = false
-  let insideHtmlArtifact = false
-  let htmlProgressEmitted = false
-  let pendingThinkTagFragment = ""
-
-  return (token: string): string => {
-    if (!token || insideHtmlArtifact) return ""
-
-    let visible = ""
-    let remaining = `${pendingThinkTagFragment}${token}`
-    pendingThinkTagFragment = ""
-
-    while (remaining) {
-      if (insideThinkBlock) {
-        const close = remaining.match(THINK_CLOSE_PATTERN)
-        if (!close || close.index === undefined) {
-          const partialClose = remaining.match(THINK_PARTIAL_CLOSE_PATTERN)
-          if (partialClose?.index !== undefined) {
-            pendingThinkTagFragment = partialClose[0]
-          }
-          return visible
-        }
-        remaining = remaining.slice(close.index + close[0].length)
-        insideThinkBlock = false
-        continue
-      }
-
-      const open = remaining.match(THINK_OPEN_PATTERN)
-      if (!open || open.index === undefined) {
-        const partialOpen = remaining.match(THINK_PARTIAL_OPEN_PATTERN)
-        if (partialOpen?.index !== undefined) {
-          visible += remaining.slice(0, partialOpen.index)
-          pendingThinkTagFragment = partialOpen[0]
-          break
-        }
-        visible += remaining
-        break
-      }
-
-      visible += remaining.slice(0, open.index)
-      remaining = remaining.slice(open.index + open[0].length)
-
-      const close = remaining.match(THINK_CLOSE_PATTERN)
-      if (!close || close.index === undefined) {
-        insideThinkBlock = true
-        break
-      }
-      remaining = remaining.slice(close.index + close[0].length)
-    }
-
-    visible = visible.replace(THINK_CLOSE_PATTERN, "")
-    if (!visible.trim()) return ""
-    if (DESIGN_TOOL_MARKUP_PROGRESS_PATTERN.test(visible)) return ""
-    if (DESIGN_TOOL_PROGRESS_LINE_PATTERN.test(visible) || /^OK$/i.test(visible.trim())) return ""
-
-    if (DESIGN_HTML_PROGRESS_PATTERN.test(visible)) {
-      insideHtmlArtifact = true
-      if (htmlProgressEmitted) return ""
-      htmlProgressEmitted = true
-      return DESIGN_HTML_PROGRESS_TEXT
-    }
-
-    return visible
-  }
-}
-
 function makeTabState(): TabState {
   return {
     messages: [],
@@ -360,18 +254,6 @@ function makeTabState(): TabState {
     apiHistory: [],
     pendingApproval: null
   }
-}
-
-function makeDesignAgentThreadId(designSessionId: string | null, tabId: string): string {
-  const safeSessionId =
-    String(designSessionId || "session")
-      .replace(/[^a-zA-Z0-9_-]/g, "_")
-      .replace(/^_+|_+$/g, "") || "session"
-  const safeTabId =
-    String(tabId || "tab")
-      .replace(/[^a-zA-Z0-9_-]/g, "_")
-      .replace(/^_+|_+$/g, "") || "tab"
-  return `design_${safeSessionId}_${safeTabId}`.slice(0, 120)
 }
 
 function getCurrentDesignHtml(state: TabState | undefined): string {
@@ -425,28 +307,6 @@ function makeIterationRollbackSnapshot(
   }
 }
 
-function restoreIterationRollbackSnapshot(
-  snapshot: DesignIterationRollbackSnapshot,
-  prev: TabState
-): Partial<TabState> {
-  return {
-    html: snapshot.html,
-    variations: snapshot.variations,
-    activeVariationId: snapshot.activeVariationId,
-    comments: snapshot.comments,
-    draftComment: snapshot.draftComment,
-    activeCommentId: snapshot.activeCommentId,
-    drawStrokes: snapshot.drawStrokes,
-    drawElementHints: snapshot.drawElementHints,
-    drawNotes: snapshot.drawNotes,
-    draftDrawNote: snapshot.draftDrawNote,
-    inputValue: snapshot.inputValue,
-    artifactMetadata: snapshot.artifactMetadata,
-    apiHistory: snapshot.apiHistory,
-    reloadKey: prev.reloadKey + 1
-  }
-}
-
 function hydrateTabStateHtml(state: TabState, html: string): TabState {
   const baseHtml = ensureEditMode(html)
   const hasDesignSystem = Boolean(state.selectedDesignSystemId)
@@ -462,23 +322,6 @@ function hydrateTabStateHtml(state: TabState, html: string): TabState {
         : (variations[0]?.id ?? null),
     reloadKey: state.reloadKey + 1
   }
-}
-
-function makeHydrationGuardFingerprint(state: TabState | undefined): string {
-  if (!state) return ""
-  return JSON.stringify({
-    html: state.html,
-    messages: state.messages.map((msg) => [msg.role, msg.content, msg.isStreaming ?? false]),
-    variations: state.variations.map((variation) => [
-      variation.id,
-      variation.label,
-      variation.html
-    ]),
-    activeVariationId: state.activeVariationId,
-    artifactPath: state.artifactPath ?? null,
-    artifactMetadata: state.artifactMetadata ?? null,
-    generationState: state.generationState
-  })
 }
 
 function promptLooksLikeFileOperation(prompt: string): boolean {
@@ -520,64 +363,6 @@ function getWorkspaceRequirementReason(options: {
   return null
 }
 
-function normalizeQuestionDef(raw: unknown): QuestionDef | null {
-  if (!raw || typeof raw !== "object") return null
-  const item = raw as Record<string, unknown>
-  const id = typeof item.id === "string" && item.id.trim() ? item.id.trim() : ""
-  if (!id) return null
-  const rawType = typeof item.type === "string" ? item.type.trim().toLowerCase() : "text"
-  let type: QuestionDef["type"]
-  switch (rawType) {
-    case "radio":
-    case "select":
-    case "checkbox":
-    case "chips":
-      type = "chips"
-      break
-    case "direction-cards":
-      type = "direction-cards"
-      break
-    case "textarea":
-      type = "textarea"
-      break
-    default:
-      type = "text"
-  }
-  const options = Array.isArray(item.options)
-    ? item.options
-        .map((option) => {
-          if (typeof option === "string") return { value: option, label: option }
-          if (option && typeof option === "object") {
-            const obj = option as Record<string, unknown>
-            const label = typeof obj.label === "string" ? obj.label : ""
-            const value = typeof obj.value === "string" ? obj.value : label
-            return value ? { value, label: label || value } : null
-          }
-          return null
-        })
-        .filter((option): option is { value: string; label: string } => Boolean(option))
-    : []
-  const optionLabels = Object.fromEntries(options.map((option) => [option.value, option.label]))
-  return {
-    id,
-    type,
-    label: typeof item.label === "string" ? item.label : id,
-    hint:
-      typeof item.hint === "string"
-        ? item.hint
-        : typeof item.help === "string"
-          ? item.help
-          : undefined,
-    options: options.map((option) => option.value),
-    optionLabels,
-    cards: Array.isArray(item.cards) ? (item.cards as QuestionDef["cards"]) : undefined,
-    multi: item.multi === true || rawType === "checkbox",
-    required: item.required === true,
-    maxSelections: typeof item.maxSelections === "number" ? item.maxSelections : undefined,
-    placeholder: typeof item.placeholder === "string" ? item.placeholder : undefined
-  }
-}
-
 function saveDesignArtifactForTab(
   artifactId: string,
   html: string,
@@ -592,6 +377,13 @@ function saveDesignArtifactForTab(
 ): void {
   if (!html.trim()) return
   if (!workspacePath) return
+  const onSaved = async (filePath: string): Promise<void> => {
+    const id = artifactId.endsWith("_design-main")
+      ? artifactId.slice(0, -"_design-main".length)
+      : null
+    if (id) await getDesignSessionClient().patch(id, { artifactPath: filePath })
+    else updateTs(tabId, { artifactPath: filePath })
+  }
   const savePromise = existingArtifactPath
     ? window.api.design.saveArtifactFile(
         existingArtifactPath,
@@ -619,7 +411,7 @@ function saveDesignArtifactForTab(
         window.api.design.storeHtml(artifactId, html).catch((err) => {
           console.warn("[Design] storeHtml failed", err)
         })
-        updateTs(tabId, { artifactPath: result.filePath })
+        await onSaved(result.filePath)
       }
     })
     .catch((err) => {
@@ -632,12 +424,12 @@ function saveDesignArtifactForTab(
             workspacePath ?? undefined,
             metadata as Record<string, unknown>
           )
-          .then((result) => {
+          .then(async (result) => {
             if (result.success && result.filePath) {
               window.api.design.storeHtml(artifactId, html).catch((storeErr) => {
                 console.warn("[Design] storeHtml failed", storeErr)
               })
-              updateTs(tabId, { artifactPath: result.filePath })
+              await onSaved(result.filePath)
             }
           })
           .catch((fallbackErr) => {
@@ -714,185 +506,8 @@ function buildDesignArtifactMetadata(input: {
   }
 }
 
-function asDesignArtifactMetadata(raw: unknown): DesignArtifactMetadata | null {
-  if (!raw || typeof raw !== "object") return null
-  const data = raw as DesignArtifactMetadata
-  if (typeof data.artifactId !== "string" || typeof data.updatedAt !== "string") return null
-  return data
-}
-
 function makeDesignArtifactId(sessionId: string | null, tabId: string): string {
   return `${sessionId ?? "session"}_${tabId}`
-}
-
-function asDesignApprovalRequest(request: unknown): DesignApprovalRequest {
-  if (!request || typeof request !== "object") return {}
-  const req = request as Record<string, unknown>
-  return {
-    ...req,
-    _orchestratorRequestId: typeof req.id === "string" ? req.id : undefined,
-    _retryReason: typeof req.retry_reason === "string" ? req.retry_reason : undefined,
-    _approvalTypes: Array.isArray(req.allowed_approval_types)
-      ? (req.allowed_approval_types as DesignApprovalDecision[])
-      : undefined
-  } as DesignApprovalRequest
-}
-
-function asDesignExecutionEvent(event: unknown): DesignExecutionEvent | null {
-  if (!event || typeof event !== "object") return null
-  const raw = event as Partial<DesignExecutionEvent>
-  if (
-    raw.kind !== "tool_call" &&
-    raw.kind !== "tool_result" &&
-    raw.kind !== "used_skill" &&
-    raw.kind !== "assistant_text" &&
-    raw.kind !== "validation"
-  )
-    return null
-  return {
-    kind: raw.kind,
-    id: typeof raw.id === "string" ? raw.id : undefined,
-    toolCallId: typeof raw.toolCallId === "string" ? raw.toolCallId : undefined,
-    name: typeof raw.name === "string" ? raw.name : undefined,
-    args:
-      raw.args && typeof raw.args === "object" && !Array.isArray(raw.args) ? raw.args : undefined,
-    content: typeof raw.content === "string" ? raw.content : undefined,
-    isError: raw.isError === true,
-    status:
-      raw.status === "success" || raw.status === "error" || raw.status === "running"
-        ? raw.status
-        : raw.kind === "tool_result"
-          ? raw.isError
-            ? "error"
-            : "success"
-          : "running",
-    timestamp: typeof raw.timestamp === "number" ? raw.timestamp : Date.now()
-  }
-}
-
-function asDesignModelRetryState(event: unknown): DesignModelRetryState | null {
-  if (!event || typeof event !== "object") return null
-  const raw = event as Partial<DesignModelRetryState>
-  if (typeof raw.attempt !== "number" || typeof raw.maxRetries !== "number") return null
-  return {
-    attempt: raw.attempt,
-    maxRetries: raw.maxRetries,
-    reason: typeof raw.reason === "string" ? raw.reason : "模型暂时不可用",
-    delayMs: typeof raw.delayMs === "number" ? raw.delayMs : 0
-  }
-}
-
-function patchLastAssistantMessage(messages: Message[], patch: Partial<Message>): Message[] {
-  const next = [...messages]
-  const last = next.length - 1
-  if (next[last]?.role !== "assistant") return messages
-  next[last] = { ...next[last], ...patch }
-  return next
-}
-
-function appendDesignExecutionEvent(
-  events: DesignExecutionEvent[],
-  event: DesignExecutionEvent
-): DesignExecutionEvent[] {
-  if (event.kind === "assistant_text") {
-    if (!event.content?.trim()) return events
-    const content = clampDesignProgressText(event.content)
-    const eventId = event.id
-    if (eventId && eventId !== "assistant-progress") {
-      const index = events.findIndex(
-        (item) => item.kind === "assistant_text" && item.id === eventId
-      )
-      if (index >= 0) {
-        const next = [...events]
-        const current = next[index]
-        next[index] = {
-          ...current,
-          ...event,
-          content: clampDesignProgressText(
-            eventId === "assistant-progress" ? `${current.content ?? ""}${content}` : content
-          ),
-          timestamp: current.timestamp
-        }
-        return next
-      }
-    }
-    const last = events[events.length - 1]
-    if (last?.kind === "assistant_text" && (!eventId || last.id === eventId)) {
-      const next = [...events]
-      next[next.length - 1] = {
-        ...last,
-        content: clampDesignProgressText(`${last.content ?? ""}${content}`),
-        timestamp: event.timestamp
-      }
-      return next
-    }
-    return [...events, { ...event, content }]
-  }
-
-  if (event.kind === "used_skill") {
-    if (!event.name) {
-      return events
-    }
-    const index = events.findIndex((item) => item.kind === "used_skill" && item.name === event.name)
-    if (index < 0) return [...events, event]
-    const next = [...events]
-    const current = next[index]
-    const shouldKeepCompletedStatus =
-      (current.status === "success" || current.status === "error") && event.status === "running"
-    next[index] = {
-      ...current,
-      ...event,
-      status: shouldKeepCompletedStatus ? current.status : event.status,
-      isError: shouldKeepCompletedStatus ? current.isError : event.isError
-    }
-    return next
-  }
-
-  if (event.kind === "tool_call") {
-    const toolCallId = event.toolCallId || event.id
-    const index = toolCallId
-      ? events.findIndex(
-          (item) => item.kind === "tool_call" && (item.toolCallId || item.id) === toolCallId
-        )
-      : -1
-    if (index >= 0) {
-      const next = [...events]
-      const current = next[index]
-      next[index] = {
-        ...current,
-        ...event,
-        args: event.args && Object.keys(event.args).length > 0 ? event.args : current.args,
-        name: event.name || current.name,
-        timestamp: current.timestamp
-      }
-      return next
-    }
-    return [...events, event]
-  }
-
-  if (event.kind === "validation") {
-    const index = events.findLastIndex((item) => item.kind === "validation")
-    if (index >= 0) {
-      const next = [...events]
-      next[index] = { ...next[index], ...event }
-      return next
-    }
-    return [...events, event]
-  }
-
-  const resultKey = event.id || event.toolCallId
-  if (
-    resultKey &&
-    events.some((item) => item.kind === "tool_result" && (item.id || item.toolCallId) === resultKey)
-  ) {
-    return events
-  }
-  const next = events.map((item) => {
-    if (item.kind !== "tool_call") return item
-    if (!event.toolCallId || (item.toolCallId || item.id) !== event.toolCallId) return item
-    return { ...item, status: event.status, isError: event.isError }
-  })
-  return [...next, event]
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1196,7 +811,6 @@ function getLastModelId(): string | null {
 // Session persistence — localStorage
 // ─────────────────────────────────────────────────────────
 const DESIGN_STORAGE_KEY = "design_session_v2"
-const MAX_HTML_BYTES = 200_000 // 200 KB cap per HTML blob to keep storage reasonable
 
 type PersistedTabState = {
   messages: Message[]
@@ -1231,7 +845,12 @@ interface PersistedSession {
 function sanitizePersistedMessages(messages: Message[]): Message[] {
   return messages
     .filter((message) => {
-      return !(message.role === "assistant" && message.isStreaming && !message.content.trim())
+      return !(
+        message.role === "assistant" &&
+        message.isStreaming &&
+        !message.content.trim() &&
+        !message.executionEvents?.length
+      )
     })
     .map((message) => {
       if (message.role !== "assistant") return message
@@ -1241,36 +860,6 @@ function sanitizePersistedMessages(messages: Message[]): Message[] {
         modelRetry: null
       }
     })
-}
-
-function serializeTs(ts: TabState): PersistedTabState {
-  return {
-    messages: sanitizePersistedMessages(ts.messages),
-    html: ts.html.slice(0, MAX_HTML_BYTES),
-    sourceInfo: ts.sourceInfo,
-    variations: ts.variations.map((v) => ({
-      id: v.id,
-      label: v.label,
-      html: v.html.slice(0, MAX_HTML_BYTES)
-    })),
-    activeVariationId: ts.activeVariationId,
-    selectedModelId: ts.selectedModelId,
-    tweaksOn: ts.tweaksOn,
-    zoom: ts.zoom,
-    comments: ts.comments,
-    drawStrokes: ts.drawStrokes,
-    drawElementHints: ts.drawElementHints,
-    drawNotes: ts.drawNotes,
-    drawToolMode: ts.drawToolMode,
-    codeContext: ts.codeContext,
-    designLink: ts.designLink,
-    selectedDesignSystemId: ts.selectedDesignSystemId,
-    rightTab: ts.rightTab,
-    apiHistory: ts.apiHistory,
-    artifactPath: ts.artifactPath,
-    artifactMetadata: ts.artifactMetadata,
-    variationPanelPosition: ts.variationPanelPosition
-  }
 }
 
 function deserializeTs(p: PersistedTabState): TabState {
@@ -1366,57 +955,14 @@ function parsePersistedSession(raw: string): ReturnType<typeof defaultSession> {
   })
 }
 
-async function hydrateSessionArtifacts(
-  sessionId: string,
-  session: ReturnType<typeof defaultSession>,
-  workspacePath: string | null
-): Promise<ReturnType<typeof defaultSession>> {
-  const entries = await Promise.all(
-    Object.entries(session.tabStates).map(async ([tabId, state]) => {
-      const artifactId = makeDesignArtifactId(sessionId, tabId)
-      let result: {
-        success: boolean
-        filePath?: string
-        html?: string
-        metadata?: unknown
-        error?: string
-      }
-      if (state.artifactPath) {
-        result = await window.api.design.readArtifactFile(
-          state.artifactPath,
-          workspacePath ?? undefined
-        )
-      } else {
-        result = await window.api.design.readArtifact(artifactId, workspacePath ?? undefined)
-      }
-      if (!result.success || !result.html?.trim()) return [tabId, state] as const
-
-      const previewHtml = await prepareHtmlForSrcDoc(
-        result.html,
-        result.filePath ?? state.artifactPath
-      )
-      window.api.design.storeHtml(artifactId, previewHtml).catch((err) => {
-        console.warn("[Design] storeHtml failed", err)
-      })
-      return [
-        tabId,
-        {
-          ...hydrateTabStateHtml(state, previewHtml),
-          artifactPath: result.filePath ?? state.artifactPath,
-          artifactMetadata: asDesignArtifactMetadata(result.metadata) ?? state.artifactMetadata
-        }
-      ] as const
-    })
-  )
-
-  return {
-    ...session,
-    tabStates: Object.fromEntries(entries)
-  }
-}
-
 function loadSessionById(id: string): ReturnType<typeof defaultSession> {
   try {
+    const managed = getDesignSessionClient().get(id)
+    if (managed)
+      return {
+        ...defaultSession(),
+        tabStates: { [SINGLE_DESIGN_TAB_ID]: structuredClone(managed.state) }
+      }
     const raw = localStorage.getItem(sessionDataKey(id))
     if (!raw) return defaultSession()
     return parsePersistedSession(raw)
@@ -1447,27 +993,6 @@ function loadIndex(): SessionMeta[] {
     return [meta]
   } catch {
     return []
-  }
-}
-
-function saveIndex(index: SessionMeta[]) {
-  try {
-    localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify(index))
-  } catch {
-    // Ignore storage write failures for the gallery index.
-  }
-}
-
-function updateIndexMeta(id: string, patch: Partial<SessionMeta>) {
-  try {
-    const index = loadIndex()
-    const i = index.findIndex((m) => m.id === id)
-    if (i >= 0) {
-      index[i] = { ...index[i], ...patch }
-      saveIndex(index)
-    }
-  } catch {
-    // Ignore metadata update failures and keep the current index.
   }
 }
 
@@ -1853,6 +1378,9 @@ export function DesignView(): React.JSX.Element {
   })
 
   const [tabStates, setTabStates] = useState<Record<string, TabState>>(_init.tabStates)
+  const [sessionReady, setSessionReady] = useState(false)
+  const [sessionOpening, setSessionOpening] = useState(Boolean(currentSessionId))
+  const [sessionLoadError, setSessionLoadError] = useState<string | null>(null)
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
   const [modelDialogSelectedId, setModelDialogSelectedId] = useState<string | undefined>(undefined)
@@ -1892,10 +1420,6 @@ export function DesignView(): React.JSX.Element {
     }, 3000)
     toastTimeoutsRef.current.push(timeout)
   }, [])
-  // Per-tab session tracking: tabId → { cleanup, sessionId }
-  // Stored in a ref so it never triggers re-renders and isn't stale across tabs
-  const tabSessionsRef = useRef<Map<string, { cleanup: () => void; sessionId: string }>>(new Map())
-
   // Canvas refs
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const canvasContainerRef = useRef<HTMLDivElement>(null)
@@ -1904,6 +1428,7 @@ export function DesignView(): React.JSX.Element {
   const activeTabId = SINGLE_DESIGN_TAB_ID
   const activeTabIdRef = useRef(activeTabId)
   const tabStatesRef = useRef(tabStates)
+  const currentSessionIdRef = useRef<string | null>(currentSessionId)
   const fileInputRef = useRef<HTMLInputElement>(null) // images only (screenshot / 📷)
   const messageListRef = useRef<HTMLDivElement>(null)
   const skillOptionRefs = useRef<Array<HTMLDivElement | null>>([])
@@ -1959,13 +1484,20 @@ export function DesignView(): React.JSX.Element {
 
   const updateTs = useCallback(
     (tabId: string, patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>)) => {
-      setTabStates((prev) => {
-        const current = prev[tabId] ?? makeTabState()
-        const updates = typeof patch === "function" ? patch(current) : patch
-        return { ...prev, [tabId]: { ...current, ...updates } }
-      })
+      const current = tabStatesRef.current[tabId] ?? makeTabState()
+      const updates = typeof patch === "function" ? patch(current) : patch
+      const next = { ...tabStatesRef.current, [tabId]: { ...current, ...updates } }
+      tabStatesRef.current = next
+      setTabStates(next)
+      const id = currentSessionIdRef.current
+      if (id)
+        void getDesignSessionClient()
+          .patch(id, updates)
+          .catch((error) => {
+            showToast(`保存设计失败：${error instanceof Error ? error.message : String(error)}`)
+          })
     },
-    []
+    [showToast]
   )
 
   const scheduleArtifactSave = useCallback(
@@ -2140,6 +1672,8 @@ export function DesignView(): React.JSX.Element {
     try {
       const selectedPath = await window.api.workspace.select()
       if (selectedPath) {
+        if (currentSessionIdRef.current)
+          await getDesignSessionClient().setWorkspace(currentSessionIdRef.current, selectedPath)
         setWorkspacePath(selectedPath)
         showToast(`工作目录已切换：${getPathName(selectedPath)}`)
       }
@@ -2167,61 +1701,131 @@ export function DesignView(): React.JSX.Element {
   }, [ts.messages, ts.generationState])
   // currentSessionId ref — needed inside startGeneration (which is a stable useCallback)
   // to produce a stable artifact ID without capturing a stale closure value.
-  const currentSessionIdRef = useRef<string | null>(currentSessionId)
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId
   }, [currentSessionId])
 
-  const cancelDesignRunForTab = useCallback((tabId: string) => {
-    const entry = tabSessionsRef.current.get(tabId)
-    if (!entry) return
-    entry.cleanup()
-    window.api.design.cancel(entry.sessionId).catch((err) => {
-      console.warn("[Design] cancel failed", err)
+  useEffect(() => {
+    let disposed = false
+    const client = getDesignSessionClient()
+    const unsubscribe = client.subscribe(() => setSessionIndex(client.list()))
+    void (async () => {
+      const migrationWorkspace = await window.api.workspace.get()
+      const legacy = loadIndex().filter(
+        (meta) => !localStorage.getItem(`design_migrated_v1_${meta.id}`)
+      )
+      const seeds = legacy.map((meta) => ({
+        id: meta.id,
+        meta,
+        state: loadSessionById(meta.id).tabStates[SINGLE_DESIGN_TAB_ID],
+        workspacePath: migrationWorkspace
+      }))
+      await client.initialize(seeds)
+      for (const seed of seeds) {
+        try {
+          localStorage.setItem(`design_migrated_v1_${seed.id}`, "1")
+        } catch {
+          /* DB migration is authoritative. */
+        }
+      }
+      if (!disposed) {
+        setSessionIndex(client.list())
+        setSessionReady(true)
+      }
+    })().catch((error) => {
+      if (!disposed) setSessionLoadError(error instanceof Error ? error.message : String(error))
     })
-    tabSessionsRef.current.delete(tabId)
+    return () => {
+      disposed = true
+      unsubscribe()
+    }
   }, [])
 
-  const isCurrentDesignRun = useCallback(
-    (tabId: string, runSessionId: string, designSessionId: string | null): boolean => {
-      const entry = tabSessionsRef.current.get(tabId)
-      return currentSessionIdRef.current === designSessionId && entry?.sessionId === runSessionId
-    },
-    []
-  )
-
   useEffect(() => {
-    return () => {
-      cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
+    if (!sessionReady || !currentSessionId) return
+    const id = currentSessionId
+    setSessionOpening(true)
+    setSessionLoadError(null)
+    const client = getDesignSessionClient()
+    let disposed = false
+    let appliedSeq = -1
+    let sourceHtml: string | undefined
+    let initial = true
+    const applySnapshot = () => {
+      const snapshot = client.get(id)
+      if (disposed || currentSessionIdRef.current !== id || !snapshot || snapshot.seq <= appliedSeq)
+        return
+      appliedSeq = snapshot.seq
+      const previous = tabStatesRef.current[SINGLE_DESIGN_TAB_ID] ?? makeTabState()
+      let state = { ...makeTabState(), ...snapshot.state }
+      const htmlChanged = sourceHtml !== snapshot.state.html
+      if (htmlChanged && state.html) {
+        state = hydrateTabStateHtml(state, state.html)
+        if (snapshot.state.variations.length) state.variations = snapshot.state.variations
+      } else if (!initial) {
+        state.html = previous.html
+        state.variations = previous.variations
+        state.reloadKey = previous.reloadKey
+      }
+      if (previous.inputValue) state.inputValue = previous.inputValue
+      if (!initial) {
+        if (!["error", "cancelled", "interrupted"].includes(state.generationState))
+          state.inputValue = previous.inputValue
+        state.zoom = previous.zoom
+        state.activeMode = previous.activeMode
+        state.selectedElement = previous.selectedElement
+        state.iframeScrollX = previous.iframeScrollX
+        state.iframeScrollY = previous.iframeScrollY
+      }
+      sourceHtml = snapshot.state.html
+      if (initial && snapshot.workspacePath) setWorkspacePath(snapshot.workspacePath)
+      initial = false
+      tabStatesRef.current = { [SINGLE_DESIGN_TAB_ID]: state }
+      setTabStates(tabStatesRef.current)
+      client.markRead(id, snapshot.seq)
+      if (htmlChanged && state.html) {
+        const raw = snapshot.state.html
+        void prepareHtmlForSrcDoc(raw, state.artifactPath)
+          .then((html) => {
+            if (
+              disposed ||
+              currentSessionIdRef.current !== id ||
+              client.get(id)?.state.html !== raw
+            )
+              return
+            const latest = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
+            const hydrated = hydrateTabStateHtml(latest, html)
+            const savedVariations = client.get(id)?.state.variations
+            if (savedVariations?.length) hydrated.variations = savedVariations
+            tabStatesRef.current = { [SINGLE_DESIGN_TAB_ID]: hydrated }
+            setTabStates(tabStatesRef.current)
+          })
+          .catch((error) => console.warn("[Design] Preview hydration failed", error))
+      }
     }
-  }, [cancelDesignRunForTab])
+    const unsubscribe = client.subscribe(applySnapshot)
+    void client
+      .open(id)
+      .then(() => {
+        applySnapshot()
+        if (!disposed) setSessionOpening(false)
+      })
+      .catch((error) => {
+        if (!disposed) setSessionLoadError(error instanceof Error ? error.message : String(error))
+      })
+    return () => {
+      disposed = true
+      unsubscribe()
+      client.close(id)
+    }
+  }, [currentSessionId, sessionReady, showToast])
 
-  useEffect(() => {
-    if (!currentSessionId) return
-    const session = normalizeSingleTabSession({
-      chatTabs: [{ id: SINGLE_DESIGN_TAB_ID, label: SINGLE_DESIGN_TAB_LABEL }],
-      activeTabId,
-      tabStates
-    })
-    hydrateSessionArtifacts(currentSessionId, session, workspacePath)
-      .then((hydrated) => {
-        if (currentSessionIdRef.current !== currentSessionId) return
-        const hydratedState = hydrated.tabStates[SINGLE_DESIGN_TAB_ID]
-        const currentState = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
-        const snapshotState = session.tabStates[SINGLE_DESIGN_TAB_ID]
-        if (!hydratedState || !currentState) return
-        const snapshotFingerprint = makeHydrationGuardFingerprint(snapshotState)
-        const currentFingerprint = makeHydrationGuardFingerprint(currentState)
-        if (snapshotFingerprint && currentFingerprint !== snapshotFingerprint) return
-        if (makeHydrationGuardFingerprint(hydratedState) === currentFingerprint) return
-        setTabStates(hydrated.tabStates)
-      })
-      .catch((err) => {
-        console.warn("[Design] hydrateSessionArtifacts failed", err)
-      })
-    // Hydrate once per session/workspace; tabStates is only the initial snapshot.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentSessionId, workspacePath])
+  const flushArtifactEdits = useCallback(() => {
+    if (artifactSaveTimerRef.current) clearTimeout(artifactSaveTimerRef.current)
+    artifactSaveTimerRef.current = null
+    flushPendingArtifactSave(pendingArtifactSaveRef.current, updateTs)
+    pendingArtifactSaveRef.current = null
+  }, [updateTs])
 
   const createSession = useCallback(
     (
@@ -2230,7 +1834,7 @@ export function DesignView(): React.JSX.Element {
         designSystemId?: string | null
       }
     ): string => {
-      cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
+      flushArtifactEdits()
       const id = `ds_${uuid().slice(0, 8)}`
       const session = defaultSession()
       const designSystemId = options?.designSystemId ?? null
@@ -2241,8 +1845,10 @@ export function DesignView(): React.JSX.Element {
         ...session.tabStates[SINGLE_DESIGN_TAB_ID],
         selectedDesignSystemId: selectedForSession?.id ?? null
       }
+      tabStatesRef.current = session.tabStates
       setTabStates(session.tabStates)
       setCurrentSessionId(id)
+      setSessionOpening(true)
       currentSessionIdRef.current = id
       localStorage.setItem(SESSION_LAST_KEY, id)
       const meta: SessionMeta = {
@@ -2256,14 +1862,13 @@ export function DesignView(): React.JSX.Element {
         designSystemName: selectedForSession?.name ?? null,
         designSystemCategory: selectedForSession?.category ?? null
       }
-      setSessionIndex((prev) => {
-        const next = [meta, ...prev]
-        saveIndex(next)
-        return next
-      })
+      setSessionIndex((prev) => [meta, ...prev])
+      void getDesignSessionClient()
+        .create({ id, meta, state: session.tabStates[SINGLE_DESIGN_TAB_ID], workspacePath })
+        .catch((error) => showToast(`创建设计失败：${String(error)}`))
       return id
     },
-    [cancelDesignRunForTab, designSystems]
+    [designSystems, workspacePath, showToast, flushArtifactEdits]
   )
 
   const newSession = useCallback(
@@ -2449,18 +2054,24 @@ export function DesignView(): React.JSX.Element {
         pendingApproval: null
       }))
 
-      updateIndexMeta(options.sessionId, {
-        title: options.sourceInfo.label,
-        kind: options.sourceInfo.kind,
-        sourceLabel: options.sourceInfo.label,
-        updatedAt: Date.now(),
-        designSystemId: importedDesignSystem?.id ?? null,
-        designSystemName: importedDesignSystem?.name ?? null,
-        designSystemCategory: importedDesignSystem?.category ?? null
-      })
-      setSessionIndex(loadIndex())
+      void getDesignSessionClient()
+        .patch(
+          options.sessionId,
+          {},
+          {
+            title: options.sourceInfo.label,
+            kind: options.sourceInfo.kind,
+            sourceLabel: options.sourceInfo.label,
+            updatedAt: Date.now(),
+            designSystemId: importedDesignSystem?.id ?? null,
+            designSystemName: importedDesignSystem?.name ?? null,
+            designSystemCategory: importedDesignSystem?.category ?? null
+          }
+        )
+        .catch((error) => showToast(`保存导入信息失败：${String(error)}`))
+      setSessionIndex(getDesignSessionClient().list())
     },
-    [designSystems, workspacePath, updateTs]
+    [designSystems, workspacePath, updateTs, showToast]
   )
 
   const loadImportedHtmlFromFile = useCallback(
@@ -2743,117 +2354,43 @@ export function DesignView(): React.JSX.Element {
     ]
   )
 
-  // ── Persist session to localStorage (debounced 1.5s, skip during streaming) ──
-  const _persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => {
-    if (!currentSessionId) return // don't save while in gallery
-    if (_persistTimerRef.current) clearTimeout(_persistTimerRef.current)
-    _persistTimerRef.current = setTimeout(() => {
-      const isStreaming = Object.values(tabStates).some(
-        (s) => s.generationState === "generating" || s.generationState === "asking"
-      )
-      if (isStreaming) return
-      try {
-        const payload: PersistedSession = {
-          chatTabs: [{ id: SINGLE_DESIGN_TAB_ID, label: SINGLE_DESIGN_TAB_LABEL }],
-          activeTabId,
-          tabStates: Object.fromEntries(
-            Object.entries(tabStates).map(([id, s]) => [id, serializeTs(s)])
-          )
-        }
-        localStorage.setItem(sessionDataKey(currentSessionId), JSON.stringify(payload))
-        // Update index metadata (title from first message, updatedAt)
-        const firstState = tabStates[SINGLE_DESIGN_TAB_ID]
-        const firstUserMsg = firstState?.messages?.find((m) => m.role === "user")
-        const autoTitle =
-          firstState?.sourceInfo?.label ||
-          (firstUserMsg ? (firstUserMsg.content as string).slice(0, 24) : "新设计")
-        const selectedMetaDesignSystem = firstState?.selectedDesignSystemId
-          ? designSystems.find((system) => system.id === firstState.selectedDesignSystemId)
-          : null
-        updateIndexMeta(currentSessionId, {
-          updatedAt: Date.now(),
-          title: autoTitle,
-          kind: firstState?.sourceInfo?.kind ?? "prompt",
-          sourceLabel: firstState?.sourceInfo?.label,
-          thumbnailText: firstState?.artifactMetadata?.preview?.thumbnailText,
-          designSystemId:
-            firstState?.selectedDesignSystemId ??
-            firstState?.artifactMetadata?.designSystemId ??
-            null,
-          designSystemName:
-            selectedMetaDesignSystem?.name ??
-            firstState?.artifactMetadata?.designSystemName ??
-            undefined,
-          designSystemCategory:
-            selectedMetaDesignSystem?.category ??
-            firstState?.artifactMetadata?.designSystemCategory ??
-            undefined,
-          artifactPath: firstState?.artifactPath ?? undefined
-        })
-        setSessionIndex(loadIndex())
-      } catch {
-        // Ignore persistence errors and keep the current in-memory session.
-      }
-    }, 1500)
-    return () => {
-      if (_persistTimerRef.current) clearTimeout(_persistTimerRef.current)
-    }
-  }, [activeTabId, tabStates, currentSessionId, designSystems])
-
-  // ── Session navigation ─────────────────────────────────────
+  // Navigation detaches the view; only the explicit Stop action cancels a run.
   const openSession = useCallback(
     (id: string) => {
-      cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
-      const session = normalizeSingleTabSession(loadSessionById(id))
-      setTabStates(session.tabStates)
+      flushArtifactEdits()
+      setSessionOpening(true)
+      const session = loadSessionById(id)
       tabStatesRef.current = session.tabStates
-      setCurrentSessionId(id)
+      setTabStates(session.tabStates)
       currentSessionIdRef.current = id
+      setCurrentSessionId(id)
       localStorage.setItem(SESSION_LAST_KEY, id)
-      hydrateSessionArtifacts(id, session, workspacePath)
-        .then((hydrated) => {
-          if (currentSessionIdRef.current !== id) return
-          const currentState = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
-          const snapshotState = session.tabStates[SINGLE_DESIGN_TAB_ID]
-          const snapshotFingerprint = makeHydrationGuardFingerprint(snapshotState)
-          const currentFingerprint = makeHydrationGuardFingerprint(currentState)
-          if (snapshotFingerprint && currentFingerprint !== snapshotFingerprint) return
-          if (
-            makeHydrationGuardFingerprint(hydrated.tabStates[SINGLE_DESIGN_TAB_ID]) ===
-            currentFingerprint
-          )
-            return
-          setTabStates(hydrated.tabStates)
-        })
-        .catch((err) => {
-          console.warn("[Design] hydrateSessionArtifacts failed", err)
-        })
     },
-    [cancelDesignRunForTab, workspacePath]
+    [flushArtifactEdits]
   )
 
   const backToGallery = useCallback(() => {
-    cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
-    setCurrentSessionId(null)
+    flushArtifactEdits()
     currentSessionIdRef.current = null
+    setCurrentSessionId(null)
+    setSessionOpening(false)
     localStorage.removeItem(SESSION_LAST_KEY)
-    setSessionIndex(loadIndex())
-  }, [cancelDesignRunForTab])
+    setSessionIndex(getDesignSessionClient().list())
+  }, [flushArtifactEdits])
 
   const deleteSession = useCallback(
     (id: string) => {
-      if (currentSessionIdRef.current === id) {
-        cancelDesignRunForTab(SINGLE_DESIGN_TAB_ID)
-      }
-      localStorage.removeItem(sessionDataKey(id))
-      setSessionIndex((prev) => {
-        const next = prev.filter((m) => m.id !== id)
-        saveIndex(next)
-        return next
-      })
+      void getDesignSessionClient()
+        .remove(id)
+        .then(() => {
+          localStorage.removeItem(sessionDataKey(id))
+          localStorage.setItem(`design_migrated_v1_${id}`, "1")
+          if (currentSessionIdRef.current === id) backToGallery()
+          setSessionIndex(getDesignSessionClient().list())
+        })
+        .catch((error) => showToast(`删除设计失败：${String(error)}`))
     },
-    [cancelDesignRunForTab]
+    [backToGallery, showToast]
   )
 
   // ── Inject / remove mode scripts when activeMode changes ─
@@ -2971,22 +2508,17 @@ export function DesignView(): React.JSX.Element {
           tabId,
           existingArtifactPath: state?.artifactPath ?? null
         })
-        setTabStates((prev) => {
-          const state = prev[tabId]
-          if (!state) return prev
-          if (state.activeVariationId) {
-            return {
-              ...prev,
-              [tabId]: {
-                ...state,
-                variations: state.variations.map((v) =>
-                  v.id === state.activeVariationId ? { ...v, html: patchedHtml } : v
+        updateTs(tabId, (latest) =>
+          latest.activeVariationId
+            ? {
+                variations: latest.variations.map((variation) =>
+                  variation.id === latest.activeVariationId
+                    ? { ...variation, html: patchedHtml }
+                    : variation
                 )
               }
-            }
-          }
-          return { ...prev, [tabId]: { ...state, html: patchedHtml } }
-        })
+            : { html: patchedHtml }
+        )
         return
       }
 
@@ -3007,24 +2539,17 @@ export function DesignView(): React.JSX.Element {
           tabId,
           existingArtifactPath: state.artifactPath
         })
-        setTabStates((prev) => {
-          const latest = prev[tabId]
-          if (!latest) return prev
-          // Merge edits into the EDITMODE-BEGIN block of the active HTML
-          if (latest.activeVariationId) {
-            // Update the specific variation's html
-            return {
-              ...prev,
-              [tabId]: {
-                ...latest,
-                variations: latest.variations.map((v) =>
-                  v.id === latest.activeVariationId ? { ...v, html: updated } : v
+        updateTs(tabId, (latest) =>
+          latest.activeVariationId
+            ? {
+                variations: latest.variations.map((variation) =>
+                  variation.id === latest.activeVariationId
+                    ? { ...variation, html: updated }
+                    : variation
                 )
               }
-            }
-          }
-          return { ...prev, [tabId]: { ...latest, html: updated } }
-        })
+            : { html: updated }
+        )
         return
       }
     }
@@ -3040,13 +2565,40 @@ export function DesignView(): React.JSX.Element {
 
   // ── Generate Design ───────────────────────────────────────
 
+  const startManagedRun = useCallback(
+    (request: Omit<DesignRunRequest, "requestId" | "designSessionId">) => {
+      const id = currentSessionIdRef.current
+      if (!id) return
+      const state = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
+      tabStatesRef.current = {
+        [SINGLE_DESIGN_TAB_ID]: {
+          ...state,
+          generationState: request.kind === "questions" ? "asking" : "generating"
+        }
+      }
+      setTabStates(tabStatesRef.current)
+      void getDesignSessionClient()
+        .start({ ...request, requestId: uuid(), designSessionId: id })
+        .catch((error) => {
+          showToast(`启动设计失败：${error instanceof Error ? error.message : String(error)}`)
+          if (currentSessionIdRef.current === id) {
+            const latest = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
+            tabStatesRef.current = {
+              [SINGLE_DESIGN_TAB_ID]: { ...latest, generationState: "error" }
+            }
+            setTabStates(tabStatesRef.current)
+          }
+        })
+    },
+    [showToast]
+  )
+
   const startGeneration = useCallback(
     (
       prompt: string,
-      tabId: string,
+      _tabId: string,
       isIteration = false,
       modelId?: string,
-      /** Clean user message to append to apiHistory after success (no HTML/suffix) */
       cleanUserMsg?: string,
       image?: { base64: string; mimeType: string },
       skill?: DesignSkillReference | null,
@@ -3054,550 +2606,54 @@ export function DesignView(): React.JSX.Element {
       freshAgentThread = false,
       rollbackSnapshot?: DesignIterationRollbackSnapshot | null
     ) => {
-      const sessionId = uuid()
-      updateTs(tabId, (prev) => ({
-        generationState: "generating",
-        rightTab: "design",
-        pendingApproval: null,
-        retryPrompt: prompt,
-        retryIsIteration: isIteration,
-        retryCleanMsg: cleanUserMsg ?? null,
-        retrySkill: skill ?? null,
-        messages: [
-          ...prev.messages,
-          {
-            role: "assistant" as const,
-            content: "",
-            isStreaming: true,
-            isIteration,
-            executionEvents: []
-          }
-        ]
-      }))
-
-      // Cancel any existing session for this tab before starting a new one.
-      cancelDesignRunForTab(tabId)
-      tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
-
-      // Route through the full Agent Runtime: Skills, MCP tools, Hooks, Approvals,
-      // context summarisation. Each design session gets an isolated thread.
-      const designSessionId = currentSessionIdRef.current
-      const agentRuntimeSessionId = freshAgentThread
-        ? `retry_${sessionId}_${designSessionId ?? "session"}`
-        : designSessionId
-      const agentThreadId = makeDesignAgentThreadId(agentRuntimeSessionId, tabId)
-      const cleanupApprovalRequest = window.api.sandbox.onApprovalRequest(
-        agentThreadId,
-        (request) => {
-          if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
-          updateTs(tabId, { pendingApproval: asDesignApprovalRequest(request) })
-        }
-      )
-      const cleanupApprovalTimeout = window.api.sandbox.onApprovalTimeout(agentThreadId, (data) => {
-        if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
-        updateTs(tabId, (prev) => {
-          if (prev.pendingApproval?._orchestratorRequestId !== data.requestId) return {}
-          return { pendingApproval: null }
-        })
-      })
-
-      let cleanupStream: (() => void) | null = null
-      let cleanedUp = false
-      const cleanup = () => {
-        if (cleanedUp) return
-        cleanedUp = true
-        cleanupStream?.()
-        cleanupApprovalRequest()
-        cleanupApprovalTimeout()
-      }
-
-      // Stable artifact ID: based on the design session + tab, NOT the streaming session UUID.
-      // Using the streaming sessionId (which changes per-call) would create a new artifact
-      // directory every generation, making the filesystem-based context chain useless.
-      const stableArtifactId = makeDesignArtifactId(currentSessionIdRef.current, tabId)
-      const normalizeProgressToken = createDesignProgressNormalizer()
-      const runStartState = tabStatesRef.current[tabId]
-
-      const onEvent = async (event: {
-        type: string
-        token?: string
-        html?: string
-        error?: string
-        event?: unknown
-        attempt?: number
-        maxRetries?: number
-        reason?: string
-        delayMs?: number
-        artifactPath?: string
-        metadata?: unknown
-      }) => {
-        if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
-
-        if (event.type === "model_retry") {
-          const retry = asDesignModelRetryState(event)
-          if (!retry) return
-          updateTs(tabId, (prev) => {
-            const msgs = [...prev.messages]
-            const last = msgs.length - 1
-            if (msgs[last]?.role !== "assistant") return {}
-            msgs[last] = { ...msgs[last], modelRetry: retry }
-            return { messages: msgs }
-          })
-          return
-        }
-
-        if (event.type === "model_retry_clear") {
-          updateTs(tabId, (prev) => {
-            const msgs = [...prev.messages]
-            const last = msgs.length - 1
-            if (msgs[last]?.role !== "assistant" || !msgs[last].modelRetry) return {}
-            msgs[last] = { ...msgs[last], modelRetry: null }
-            return { messages: msgs }
-          })
-          return
-        }
-
-        if (event.type === "execution") {
-          const executionEvent = asDesignExecutionEvent(event.event)
-          if (!executionEvent) return
-          updateTs(tabId, (prev) => {
-            const msgs = [...prev.messages]
-            const last = msgs.length - 1
-            if (msgs[last]?.role !== "assistant") return {}
-            msgs[last] = {
-              ...msgs[last],
-              executionEvents: appendDesignExecutionEvent(
-                msgs[last].executionEvents ?? [],
-                executionEvent
-              )
-            }
-            return { messages: msgs }
-          })
-          return
-        }
-
-        if (event.type === "token" && event.token) {
-          const progressText = normalizeProgressToken(event.token)
-          if (!progressText) return
-          updateTs(tabId, (prev) => {
-            const msgs = [...prev.messages]
-            const last = msgs.length - 1
-            if (msgs[last]?.role !== "assistant") return {}
-            msgs[last] = {
-              ...msgs[last],
-              executionEvents: appendDesignExecutionEvent(msgs[last].executionEvents ?? [], {
-                kind: "assistant_text",
-                id: "assistant-progress",
-                content: progressText,
-                status: "running",
-                timestamp: Date.now()
-              })
-            }
-            return { messages: msgs }
-          })
-          return
-        }
-
-        if (event.type === "done" && event.html) {
-          // Guarantee every generated design has a working EDITMODE block
-          const runState = tabStatesRef.current[tabId]
-          const basePatchedHtml = await prepareHtmlForSrcDoc(event.html, event.artifactPath ?? null)
-          const hasDesignSystem = Boolean(runState?.selectedDesignSystemId)
-          const patchedHtml = hasDesignSystem
-            ? collapseVariationsToSingleArtifact(basePatchedHtml)
-            : basePatchedHtml
-          const variations = hasDesignSystem ? [] : parseVariations(patchedHtml)
-          const selectedDesignSystemForRun =
-            designSystems.find((system) => system.id === runState?.selectedDesignSystemId) ?? null
-          const artifactMetadata =
-            asDesignArtifactMetadata(event.metadata) ??
-            buildDesignArtifactMetadata({
-              artifactId: stableArtifactId,
-              title: cleanUserMsg?.slice(0, 32) || runState?.sourceInfo?.label,
-              prompt: cleanUserMsg ?? prompt,
-              modelId: modelId ?? null,
-              skill: skill ?? null,
-              designSystem: selectedDesignSystemForRun,
-              sourceInfo: runState?.sourceInfo ?? null,
-              html: patchedHtml,
-              variations
-            })
-
-          // Keep htmlStore in sync (used as fallback / reference)
-          window.api.design.storeHtml(stableArtifactId, patchedHtml).catch((err) => {
-            console.warn("[Design] storeHtml failed", err)
-          })
-          if (event.artifactPath) {
-            updateTs(tabId, { artifactPath: event.artifactPath, artifactMetadata })
-          } else {
-            saveDesignArtifactForTab(
-              stableArtifactId,
-              patchedHtml,
-              workspacePath,
-              tabId,
-              updateTs,
-              undefined,
-              artifactMetadata
-            )
-          }
-
-          updateTs(tabId, (prev) => {
-            const msgs = [...prev.messages]
-            const last = msgs.length - 1
-            const doneLabel =
-              variations.length > 0
-                ? `✓ ${isIteration ? "设计已更新" : "设计已生成"} - ${variations.length} 个方案`
-                : isIteration
-                  ? "✓ 设计已更新"
-                  : "✓ 设计已生成"
-            if (msgs[last]?.role === "assistant") {
-              msgs[last] = {
-                ...msgs[last],
-                content: doneLabel,
-                isStreaming: false,
-                modelRetry: null
-              }
-            }
-
-            // Keep apiHistory in sync for display / session backup
-            const prevHistory = prev.apiHistory ?? []
-            const newHistory: Array<{ role: "user" | "assistant"; content: string }> = cleanUserMsg
-              ? [
-                  ...prevHistory,
-                  { role: "user" as const, content: cleanUserMsg },
-                  { role: "assistant" as const, content: doneLabel }
-                ]
-              : prevHistory
-
-            return {
-              generationState: "done",
-              html: patchedHtml,
-              messages: msgs,
-              variations,
-              activeVariationId: variations[0]?.id ?? null,
-              artifactMetadata,
-              apiHistory: newHistory,
-              pendingApproval: null
-            }
-          })
-
-          if (variations.length > 0) {
-            variations.forEach((v) => {
-              window.api.design.saveVariant(v.id, v.html).catch((err) => {
-                console.warn("[Design] saveVariant failed", err)
-              })
-            })
-          }
-          cleanup()
-          tabSessionsRef.current.delete(tabId)
-        } else if (event.type === "error") {
-          updateTs(tabId, (prev) => {
-            const msgs = [...prev.messages]
-            const last = msgs.length - 1
-            if (msgs[last]?.role === "assistant") {
-              const prefix = rollbackSnapshot ? "❌ 修改失败，已回滚到修改前版本。" : "❌"
-              msgs[last] = {
-                ...msgs[last],
-                content: `${prefix} ${event.error ?? "Unknown error"}`,
-                isStreaming: false,
-                modelRetry: null
-              }
-            }
-            return {
-              ...(rollbackSnapshot ? restoreIterationRollbackSnapshot(rollbackSnapshot, prev) : {}),
-              generationState: "error",
-              messages: msgs,
-              pendingApproval: null
-            }
-          })
-          cleanup()
-          tabSessionsRef.current.delete(tabId)
-        } else if (event.type === "cancelled") {
-          updateTs(tabId, (prev) => {
-            const msgs = [...prev.messages]
-            const last = msgs.length - 1
-            if (msgs[last]?.isStreaming)
-              msgs[last] = { ...msgs[last], isStreaming: false, modelRetry: null }
-            return {
-              ...(rollbackSnapshot ? restoreIterationRollbackSnapshot(rollbackSnapshot, prev) : {}),
-              generationState: "idle",
-              messages: msgs,
-              pendingApproval: null
-            }
-          })
-          cleanup()
-          tabSessionsRef.current.delete(tabId)
-        }
-      }
-
-      cleanupStream = window.api.design.agentGenerate(
-        sessionId,
+      startManagedRun({
+        kind: "agent",
         prompt,
-        onEvent,
-        tabId,
+        isIteration,
         modelId,
-        image?.base64,
-        image?.mimeType,
-        isIteration ? getCurrentDesignHtml(runStartState) : undefined,
-        skill ?? undefined,
-        workspacePath ?? undefined,
-        stableArtifactId,
-        sourceArtifactPath ?? undefined,
-        agentRuntimeSessionId ?? undefined,
-        runStartState?.selectedDesignSystemId ?? undefined
-      )
-      tabSessionsRef.current.set(tabId, { cleanup, sessionId })
+        cleanUserMsg,
+        currentHtml: isIteration
+          ? getCurrentDesignHtml(tabStatesRef.current[SINGLE_DESIGN_TAB_ID])
+          : undefined,
+        imageData: image?.base64,
+        mimeType: image?.mimeType,
+        skill,
+        sourceArtifactPath,
+        freshAgentThread,
+        rollback: rollbackSnapshot
+      })
     },
-    [cancelDesignRunForTab, designSystems, isCurrentDesignRun, updateTs, workspacePath]
+    [startManagedRun]
   )
-
-  // ── Ask Questions ─────────────────────────────────────────
 
   const startAskQuestions = useCallback(
-    (prompt: string, tabId: string, modelId?: string, designSystemId?: string | null) => {
-      const sessionId = uuid()
-      const designSessionId = currentSessionIdRef.current
-      updateTs(tabId, {
-        generationState: "asking",
-        originalPrompt: prompt,
-        rightTab: "questions",
-        questions: []
-      })
-
-      // Cancel any existing session for this tab before starting a new one
-      cancelDesignRunForTab(tabId)
-      tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
-
-      const cleanup = window.api.design.askQuestions(
-        sessionId,
-        prompt,
-        (event) => {
-          if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
-
-          if (event.type === "model_retry") {
-            const retry = asDesignModelRetryState(event)
-            if (!retry) return
-            updateTs(tabId, (prev) => {
-              const msgs = [...prev.messages]
-              const last = msgs.length - 1
-              const lastMessage = msgs[last]
-              if (
-                lastMessage?.role === "assistant" &&
-                lastMessage.isStreaming &&
-                lastMessage.modelRetry
-              ) {
-                msgs[last] = { ...lastMessage, modelRetry: retry }
-                return { messages: msgs }
-              }
-              return {
-                messages: [
-                  ...prev.messages,
-                  { role: "assistant" as const, content: "", isStreaming: true, modelRetry: retry }
-                ]
-              }
-            })
-            return
-          }
-
-          if (event.type === "model_retry_clear") {
-            updateTs(tabId, (prev) => ({
-              messages: patchLastAssistantMessage(prev.messages, { modelRetry: null })
-            }))
-            return
-          }
-
-          if (event.type === "done") {
-            const qs = Array.isArray(event.questions)
-              ? event.questions
-                  .map(normalizeQuestionDef)
-                  .filter((question): question is QuestionDef => Boolean(question))
-              : []
-            if (designSystemId && qs.length <= 1) {
-              updateTs(tabId, (prev) => ({
-                messages: prev.messages.filter(
-                  (msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)
-                ),
-                questions: [],
-                answers: {},
-                rightTab: "design"
-              }))
-              tabSessionsRef.current.delete(tabId)
-              startGeneration(
-                buildNewDesignPrompt(
-                  `${prompt}\n\n---\nNo clarifying answers were collected because the active design system already fixes visual direction.`,
-                  { designSystemId }
-                ),
-                tabId,
-                false,
-                modelId,
-                prompt
-              )
-              return
-            }
-            updateTs(tabId, (prev) => ({
-              generationState: "questions_ready",
-              questions: qs,
-              rightTab: "questions", // re-assert — guards against any interleaved update
-              messages: [
-                ...prev.messages.filter(
-                  (msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)
-                ),
-                { role: "questions-prompt" as const, content: "请补充相关问题 →" }
-              ]
-            }))
-            tabSessionsRef.current.delete(tabId)
-          } else if (event.type === "error") {
-            updateTs(tabId, (prev) => ({
-              generationState: "error",
-              messages: [
-                ...prev.messages.filter(
-                  (msg) => !(msg.role === "assistant" && msg.isStreaming && msg.modelRetry)
-                ),
-                {
-                  role: "assistant" as const,
-                  content: `❌ ${event.error ?? "Failed to generate questions"}`
-                }
-              ]
-            }))
-            tabSessionsRef.current.delete(tabId)
-          }
-        },
-        modelId,
-        designSystemId ?? undefined
-      )
-      tabSessionsRef.current.set(tabId, { cleanup, sessionId })
+    (prompt: string, _tabId: string, modelId?: string, _designSystemId?: string | null) => {
+      void _designSystemId
+      startManagedRun({ kind: "questions", prompt, modelId })
     },
-    [cancelDesignRunForTab, isCurrentDesignRun, startGeneration, updateTs]
+    [startManagedRun]
   )
-
-  // ── Generate Design from Screenshot ──────────────────────
 
   const startGenerationFromImage = useCallback(
     (
       prompt: string,
-      imageBase64: string,
+      imageData: string,
       mimeType: string,
-      tabId: string,
+      _tabId: string,
       modelId?: string,
-      designSystemId?: string | null
+      _designSystemId?: string | null
     ) => {
-      const sessionId = uuid()
-      const designSessionId = currentSessionIdRef.current
-      console.log(
-        `[Design:Image] startGenerationFromImage — sessionId=${sessionId} mimeType=${mimeType} base64Len=${imageBase64.length} prompt="${prompt.slice(0, 80)}"`
-      )
-      updateTs(tabId, (prev) => ({
-        generationState: "generating",
-        rightTab: "design",
-        attachedImage: null, // clear preview once generation starts
-        messages: [
-          ...prev.messages,
-          { role: "assistant" as const, content: "", isStreaming: true, isIteration: false }
-        ]
-      }))
-
-      cancelDesignRunForTab(tabId)
-      tabSessionsRef.current.set(tabId, { cleanup: () => {}, sessionId })
-
-      console.log("[Design:Image] Calling window.api.design.generateFromImage…")
-      const cleanup = window.api.design.generateFromImage(
-        sessionId,
+      void _designSystemId
+      startManagedRun({
+        kind: "image",
         prompt,
-        imageBase64,
+        imageData,
         mimeType,
-        (event) => {
-          if (!isCurrentDesignRun(tabId, sessionId, designSessionId)) return
-
-          console.log(
-            `[Design:Image] Renderer received event: type=${event.type}${event.error ? " error=" + event.error : ""}`
-          )
-          if (event.type === "model_retry") {
-            const retry = asDesignModelRetryState(event)
-            if (!retry) return
-            updateTs(tabId, (prev) => ({
-              messages: patchLastAssistantMessage(prev.messages, { modelRetry: retry })
-            }))
-            return
-          }
-
-          if (event.type === "model_retry_clear") {
-            updateTs(tabId, (prev) => ({
-              messages: patchLastAssistantMessage(prev.messages, { modelRetry: null })
-            }))
-            return
-          }
-
-          if (event.type === "done" && event.html) {
-            const basePatchedHtml = ensureEditMode(event.html)
-            const patchedHtml = designSystemId
-              ? collapseVariationsToSingleArtifact(basePatchedHtml)
-              : basePatchedHtml
-            // Store full HTML in main process so subsequent text iterations can reference it
-            const storeKey = makeDesignArtifactId(currentSessionIdRef.current, tabId)
-            window.api.design.storeHtml(storeKey, patchedHtml).catch((err) => {
-              console.warn("[Design] storeHtml failed", err)
-            })
-            saveDesignArtifactForTab(storeKey, patchedHtml, workspacePath, tabId, updateTs)
-            updateTs(tabId, (prev) => {
-              const msgs = [...prev.messages]
-              const last = msgs.length - 1
-              if (msgs[last]?.role === "assistant") {
-                msgs[last] = {
-                  ...msgs[last],
-                  content: "✓ 设计已生成",
-                  isStreaming: false,
-                  modelRetry: null
-                }
-              }
-              return {
-                generationState: "done",
-                html: patchedHtml,
-                messages: msgs,
-                variations: [],
-                activeVariationId: null,
-                // Seed history so subsequent text iterations have context
-                apiHistory: [
-                  { role: "user" as const, content: (prompt || "截图设计").slice(0, 200) },
-                  { role: "assistant" as const, content: "✓ 设计已生成" }
-                ]
-              }
-            })
-            window.api.design.saveVariant("image", patchedHtml).catch((err) => {
-              console.warn("[Design] saveVariant failed", err)
-            })
-            tabSessionsRef.current.delete(tabId)
-          } else if (event.type === "error") {
-            updateTs(tabId, (prev) => {
-              const msgs = [...prev.messages]
-              const last = msgs.length - 1
-              if (msgs[last]?.role === "assistant") {
-                msgs[last] = {
-                  ...msgs[last],
-                  content: `❌ ${event.error ?? "Unknown error"}`,
-                  isStreaming: false,
-                  modelRetry: null
-                }
-              }
-              return { generationState: "error", messages: msgs }
-            })
-            tabSessionsRef.current.delete(tabId)
-          } else if (event.type === "cancelled") {
-            updateTs(tabId, (prev) => {
-              const msgs = [...prev.messages]
-              const last = msgs.length - 1
-              if (msgs[last]?.isStreaming)
-                msgs[last] = { ...msgs[last], isStreaming: false, modelRetry: null }
-              return { generationState: "idle", messages: msgs }
-            })
-            tabSessionsRef.current.delete(tabId)
-          }
-        },
         modelId,
-        designSystemId ?? undefined
-      )
-      tabSessionsRef.current.set(tabId, { cleanup, sessionId })
+        cleanUserMsg: prompt || "截图设计"
+      })
     },
-    [cancelDesignRunForTab, isCurrentDesignRun, updateTs, workspacePath]
+    [startManagedRun]
   )
 
   // ── Handle file input selection (screenshot upload) ───────
@@ -3689,27 +2745,12 @@ export function DesignView(): React.JSX.Element {
 
   // ── Retry last failed generation ─────────────────────────
   const handleRetry = useCallback(() => {
-    const state = tabStates[activeTabId]
-    if (!state?.retryPrompt) return
-    // Remove the last assistant error message before retrying
-    updateTs(activeTabId, (prev) => {
-      const msgs = [...prev.messages]
-      if (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") msgs.pop()
-      return { messages: msgs, generationState: "idle" }
-    })
-    startGeneration(
-      state.retryPrompt,
-      activeTabId,
-      state.retryIsIteration,
-      state.selectedModelId ?? undefined,
-      state.retryCleanMsg ?? undefined,
-      undefined,
-      state.retrySkill ?? undefined,
-      state.artifactPath,
-      true,
-      state.retryIsIteration ? makeIterationRollbackSnapshot(state) : null
-    )
-  }, [activeTabId, tabStates, updateTs, startGeneration])
+    const id = currentSessionIdRef.current
+    if (id)
+      void getDesignSessionClient()
+        .retry(id, uuid())
+        .catch((error) => showToast(`重试失败：${String(error)}`))
+  }, [showToast])
 
   // ── Build comment prompt helper ───────────────────────────
   // Returns both the instruction prompt (no HTML — main process injects via htmlStore)
@@ -4576,9 +3617,12 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
   }, [activeTabId, tabStates, updateTs, startGeneration])
 
   const handleCancel = useCallback(() => {
-    cancelDesignRunForTab(activeTabId)
-    updateTs(activeTabId, { generationState: "idle", pendingApproval: null })
-  }, [activeTabId, cancelDesignRunForTab, updateTs])
+    const id = currentSessionIdRef.current
+    if (id)
+      void getDesignSessionClient()
+        .stop(id)
+        .catch((error) => showToast(`停止失败：${String(error)}`))
+  }, [showToast])
 
   const handleDesignApprovalDecision = useCallback(
     (decision: DesignApprovalDecision) => {
@@ -4642,13 +3686,12 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     async (skill: SkillInfo) => {
       setInputValue("") // clear "/" from input
       // Optimistically set skill without content first
-      updateTs(activeTabId, (prev) => ({ ...prev, selectedSkill: { ...skill } }))
+      updateTs(activeTabId, { selectedSkill: { ...skill } })
       // Try to load the SKILL.md content
       try {
         const result = await window.api.skills.read(skill.path)
         if (result.success && result.content) {
           updateTs(activeTabId, (prev) => ({
-            ...prev,
             selectedSkill:
               prev.selectedSkill?.name === skill.name && prev.selectedSkill?.path === skill.path
                 ? { ...prev.selectedSkill, content: result.content }
@@ -4799,6 +3842,14 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
   // ── Render ─────────────────────────────────────────────────
 
   // Show gallery when no session is active
+  if (!sessionReady || sessionOpening)
+    return (
+      <div style={{ padding: 32, color: "#666" }}>
+        {sessionLoadError ? `设计记录加载失败：${sessionLoadError}` : "正在恢复设计记录…"}
+        {sessionLoadError && sessionReady && <button onClick={backToGallery}>返回我的设计</button>}
+      </div>
+    )
+
   if (currentSessionId === null) {
     return (
       <>
@@ -5498,11 +4549,12 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                     }}
                   />
                 </div>
-                {isGenerating ? (
+                {isGenerating || isAsking ? (
                   <button onClick={handleCancel} style={S.cancelBtn}>
                     ■ 停止
                   </button>
-                ) : ts.generationState === "error" && ts.retryPrompt ? (
+                ) : (ts.generationState === "error" || ts.generationState === "interrupted") &&
+                  ts.retryPrompt ? (
                   <div style={{ display: "flex", gap: 6 }}>
                     <button
                       onClick={handleRetry}

@@ -17,6 +17,7 @@ export interface MessageAttachment {
 }
 
 export interface Message {
+  id?: string
   role: "user" | "assistant" | "questions-prompt"
   content: string
   tags?: string[]
@@ -51,6 +52,8 @@ export type GenerationState =
   | "generating"
   | "done"
   | "error"
+  | "cancelled"
+  | "interrupted"
 export type DesignSessionKind = "prompt" | "import_url" | "import_html" | "prototype_zip"
 export type AnswerValue = string | string[]
 
@@ -375,6 +378,9 @@ export interface TabState {
 }
 
 export interface SessionMeta {
+  generationState?: GenerationState | "waiting_approval"
+  unread?: boolean
+  lastActivitySeq?: number
   id: string
   title: string
   createdAt: number

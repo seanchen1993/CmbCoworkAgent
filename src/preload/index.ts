@@ -1,3 +1,4 @@
+import type { DesignSessionApi, DesignSessionChange } from "../shared/managed-design-session"
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
@@ -4484,6 +4485,25 @@ const api = {
     }
   },
   design: {
+    sessions: {
+      migrate: (seeds) => ipcRenderer.invoke("design:sessions-migrate", seeds),
+      list: () => ipcRenderer.invoke("design:sessions-list"),
+      create: (seed) => ipcRenderer.invoke("design:session-create", seed),
+      open: (id) => ipcRenderer.invoke("design:session-open", id),
+      close: (id) => ipcRenderer.invoke("design:session-close", id),
+      patch: (id, patch, meta) => ipcRenderer.invoke("design:session-patch", { id, patch, meta }),
+      start: (request) => ipcRenderer.invoke("design:session-start", request),
+      stop: (id) => ipcRenderer.invoke("design:session-stop", id),
+      setWorkspace: (id, path) => ipcRenderer.invoke("design:session-workspace", { id, path }),
+      retry: (id, requestId) => ipcRenderer.invoke("design:session-retry", { id, requestId }),
+      delete: (id) => ipcRenderer.invoke("design:session-delete", id),
+      markRead: (id, seq) => ipcRenderer.invoke("design:session-read", { id, seq }),
+      onChange: (listener) => {
+        const handler = (_event: unknown, change: DesignSessionChange) => listener(change)
+        ipcRenderer.on("design:sessions-changed", handler)
+        return () => ipcRenderer.removeListener("design:sessions-changed", handler)
+      }
+    } satisfies DesignSessionApi,
     generate: (
       sessionId: string,
       prompt: string,

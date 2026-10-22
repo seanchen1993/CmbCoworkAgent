@@ -111,17 +111,17 @@ function getEventKey(event: DesignExecutionEvent, index: number): string {
   return event.toolCallId || event.id || `${event.kind}:${event.name ?? "event"}:${event.timestamp}:${index}`
 }
 
-function getVisibleTimelineEvents(events: DesignExecutionEvent[]): {
+function getVisibleTimelineEvents(events: DesignExecutionEvent[], pages = 1): {
   visibleEvents: DesignExecutionEvent[]
   hiddenEventCount: number
 } {
   const toolCalls = events.filter((event) => event.kind === "tool_call")
-  const keepAllTools = toolCalls.length <= MAX_VISIBLE_TOOL_CALLS
+  const keepAllTools = toolCalls.length <= MAX_VISIBLE_TOOL_CALLS * pages
   const visibleToolIds = new Set(
     keepAllTools
       ? toolCalls.map((event) => event.toolCallId || event.id).filter(Boolean)
       : toolCalls
-          .slice(-MAX_VISIBLE_TOOL_CALLS)
+          .slice(-MAX_VISIBLE_TOOL_CALLS * pages)
           .map((event) => event.toolCallId || event.id)
           .filter(Boolean)
   )
@@ -143,7 +143,7 @@ function getVisibleTimelineEvents(events: DesignExecutionEvent[]): {
       continue
     }
 
-    if (event.kind === "assistant_text" && assistantTextCount < MAX_VISIBLE_ASSISTANT_TEXT_EVENTS) {
+    if (event.kind === "assistant_text" && assistantTextCount < MAX_VISIBLE_ASSISTANT_TEXT_EVENTS * pages) {
       assistantTextCount += 1
       reversedVisible.push(event)
     }
@@ -164,6 +164,7 @@ function DesignExecutionPanel({
   isStreaming?: boolean
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [historyPages, setHistoryPages] = useState(1)
   if (!events || events.length === 0) return null
 
   const selectedSkills = events.filter((event) => event.kind === "used_skill" && event.name)
@@ -208,7 +209,7 @@ function DesignExecutionPanel({
   const calls = timelineEvents.filter((event) => event.kind === "tool_call")
   if (selectedSkills.length === 0 && timelineEvents.length === 0) return null
 
-  const { visibleEvents, hiddenEventCount } = getVisibleTimelineEvents(timelineEvents)
+  const { visibleEvents, hiddenEventCount } = getVisibleTimelineEvents(timelineEvents, historyPages)
   const hasRunningWork = timelineEvents.some((event) => {
     if (event.kind === "validation") return event.status === "running"
     if (event.kind !== "tool_call") return false
@@ -257,7 +258,8 @@ function DesignExecutionPanel({
       {timelineEvents.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {hiddenEventCount > 0 && (
-            <div style={{
+            <button type="button" onClick={() => setHistoryPages((pages) => pages + 1)} style={{
+              border: "none", cursor: "pointer",
               padding: "5px 10px",
               borderRadius: 8,
               background: "#f4f3ef",
@@ -266,8 +268,8 @@ function DesignExecutionPanel({
               fontWeight: 600,
               textAlign: "center",
             }}>
-              已折叠前 {hiddenEventCount} 步，显示最近 {visibleEvents.length} 步
-            </div>
+              展开更早的执行记录（还有 {hiddenEventCount} 步）
+            </button>
           )}
 
           {visibleEvents.map((event, index) => {
