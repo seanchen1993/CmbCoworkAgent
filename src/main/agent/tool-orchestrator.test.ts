@@ -546,6 +546,12 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     requestApproval.mockClear()
     for (const command of [
       "git add -f .env",
+      'rg $options "git add -f" src',
+      "git diff $options -- src/*",
+      "cat > /tmp/force.sh <<'EOF'\ngit add -f .env\nEOF\nsh /tmp/force.sh",
+      "cat > /tmp/force.sh <<'EOF'\ngit add -f .env\nEOF\n$RUN /tmp/force.sh",
+      "node <<'EOF'\nrequire('node:child_process').execSync('git add -f .env')\nEOF",
+      "python3 <<'PY'\nimport subprocess\nsubprocess.run(['git', 'add', '-f', '.env'])\nPY",
       "$BIN add = -f .env",
       "$BIN add.foo -f .env",
       "$BIN foo.add -f .env",
@@ -562,6 +568,8 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       expect(blocked.output).toContain("Command forbidden:")
     }
     for (const { command, shellSyntax } of [
+      { command: 'rg @options "git add -f" src', shellSyntax: "powershell" as const },
+      { command: "git diff @options -- src/*", shellSyntax: "powershell" as const },
       { command: "%BIN% commit.foo", shellSyntax: "cmd" as const },
       { command: "%BIN% const add -f .env", shellSyntax: "cmd" as const },
       {
@@ -580,6 +588,66 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(denied.output).not.toContain("forced git add")
     expect(rawExecute).not.toHaveBeenCalled()
     expect(requestApproval).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])("executes ordinary Git-text commands when YOLO is %s", async (yolo) => {
+    const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
+      output: "ordinary command completed",
+      exitCode: 0,
+      truncated: false
+    })
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "approve",
+      tool_call_id: "test"
+    } satisfies ApprovalDecision)
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      () => yolo
+    )
+    for (const { command, shellSyntax, needsReview } of [
+      {
+        command: "node <<'EOF'\nconst $seen = new Set()\n$seen.add('input')\nEOF",
+        shellSyntax: "posix" as const,
+        needsReview: true
+      },
+      {
+        command: "cat <<'EOF'\ngit add -f .env\ngit commit -m example\nEOF",
+        shellSyntax: "posix" as const,
+        needsReview: true
+      },
+      {
+        command: 'echo "git add -f $file"',
+        shellSyntax: "posix" as const,
+        needsReview: true
+      },
+      {
+        command: 'Write-Output "git add -f $file"',
+        shellSyntax: "powershell" as const,
+        needsReview: true
+      },
+      {
+        command: "git diff -- src/*",
+        shellSyntax: "posix" as const,
+        needsReview: false
+      },
+      {
+        command: "git status --short $path",
+        shellSyntax: "powershell" as const,
+        needsReview: true
+      }
+    ]) {
+      rawExecute.mockClear()
+      requestApproval.mockClear()
+      const result = await orchestrator.execute(command, process.cwd(), "none", shellSyntax)
+      expect(result.exitCode).toBe(0)
+      expect(rawExecute).toHaveBeenCalledTimes(1)
+      expect(requestApproval).toHaveBeenCalledTimes(!yolo && needsReview ? 1 : 0)
+      if (!yolo && needsReview) {
+        expect(requestApproval.mock.calls[0][0].operation).toBe("execute")
+      }
+    }
   })
 
   it("uses the actual POSIX shell syntax before the YOLO raw-execute shortcut", async () => {
