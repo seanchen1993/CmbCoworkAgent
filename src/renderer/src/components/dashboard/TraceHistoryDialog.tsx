@@ -403,7 +403,7 @@ function outcomeLabel(outcome: string): string {
   if (outcome === "success") return "成功"
   if (outcome === "error") return "错误"
   if (outcome === "cancelled") return "取消"
-  if (outcome === "unknown") return "未定"
+  if (outcome === "unknown") return "未确认完成"
   return outcome || "未知"
 }
 
