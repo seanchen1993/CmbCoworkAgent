@@ -12,7 +12,7 @@ import {
   writeFileSync
 } from "node:fs"
 import { readFile } from "node:fs/promises"
-import { dirname, isAbsolute, join, relative, resolve } from "node:path"
+import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { randomUUID } from "node:crypto"
 
@@ -23,6 +23,12 @@ export const MARKET_CONTENT_MARKER = ".cmb-market-content.json"
 export const MARKET_CONTENT_DENIED =
   "市场下载的技能和插件受保护，仅自己上传的原始内容可查看、编辑或导出"
 const prefix = Buffer.from(MARKET_CONTENT_PREFIX)
+// Version 1 encoded every asset; version 2 encodes Markdown only.
+const protectionVersion = 2
+
+export function isMarketMarkdownFile(filePath: string): boolean {
+  return extname(filePath).toLowerCase() === ".md"
+}
 
 export function encodeMarketContent(content: Buffer): Buffer {
   return Buffer.from(MARKET_CONTENT_PREFIX + content.toString("base64"))
@@ -84,7 +90,10 @@ export function assertOriginalContent(filePath: string): void {
 }
 
 export function getMarketContentStoredLimit(filePath: string, maxBytes: number): number {
-  return findProtectedMarketRoot(filePath) ? Math.ceil(maxBytes / 3) * 4 + prefix.length : maxBytes
+  const root = findProtectedMarketRoot(filePath)
+  return root && (isMarketMarkdownFile(filePath) || !isMarketProtectionComplete(root))
+    ? Math.ceil(maxBytes / 3) * 4 + prefix.length
+    : maxBytes
 }
 
 function walkFiles(
@@ -110,17 +119,19 @@ export function protectMarketDirectory(root: string): void {
   // The marker also covers nested skills and prevents exporting a parent bundle.
   writeFileSync(
     join(root, MARKET_CONTENT_MARKER),
-    JSON.stringify({ version: 1, origin: "market", complete: false })
+    JSON.stringify({ version: protectionVersion, origin: "market", complete: false })
   )
   walkFiles(root, (filePath) => {
     const content = readFileSync(filePath)
-    if (content.subarray(0, prefix.length).equals(prefix)) {
-      decodeMarketContent(content)
-      return
-    }
+    const encoded = content.subarray(0, prefix.length).equals(prefix)
+    const markdown = isMarketMarkdownFile(filePath)
+    // Validate existing envelopes and restore assets encoded by the old policy.
+    const plain = encoded ? decodeMarketContent(content) : content
+    if (markdown === encoded) return
+    const updated = markdown ? encodeMarketContent(plain) : plain
     const temporary = `${filePath}.cmb-encoding-${randomUUID()}`
     try {
-      writeFileSync(temporary, encodeMarketContent(content), {
+      writeFileSync(temporary, updated, {
         mode: statSync(filePath).mode,
         flag: "wx"
       })
@@ -131,17 +142,37 @@ export function protectMarketDirectory(root: string): void {
   })
   writeFileSync(
     join(root, MARKET_CONTENT_MARKER),
-    JSON.stringify({ version: 1, origin: "market", complete: true })
+    JSON.stringify({ version: protectionVersion, origin: "market", complete: true })
   )
   clearRuntimeProjection(root)
 }
 
 export function isMarketProtectionComplete(root: string): boolean {
   try {
-    return JSON.parse(readFileSync(join(root, MARKET_CONTENT_MARKER), "utf8")).complete === true
+    const marker = JSON.parse(readFileSync(join(root, MARKET_CONTENT_MARKER), "utf8"))
+    return (
+      marker.version === protectionVersion && marker.origin === "market" && marker.complete === true
+    )
   } catch {
     return false
   }
+}
+
+/** Upgrade only explicitly marked installs; never infer origin for legacy plain bundles. */
+export function upgradeMarkedMarketDirectories(roots: Iterable<string>): boolean {
+  let changed = false
+  for (const root of new Set(roots)) {
+    if (!existsSync(join(root, MARKET_CONTENT_MARKER)) || isMarketProtectionComplete(root)) continue
+    try {
+      const marker = JSON.parse(readFileSync(join(root, MARKET_CONTENT_MARKER), "utf8"))
+      if (marker.origin !== "market" || ![1, protectionVersion].includes(marker.version)) continue
+      protectMarketDirectory(root)
+      changed = true
+    } catch (error) {
+      console.warn("[MarketContent] Failed to upgrade protected install", root, error)
+    }
+  }
+  return changed
 }
 
 /** Refuse importing an encoded installed copy through the original-upload path. */
@@ -166,7 +197,7 @@ function clearRuntimeProjection(root: string): void {
   projections.delete(realpathSync(root))
 }
 
-/** External interpreters need real files. These copies live only for this app session. */
+/** Legacy all-file installs and explicit Markdown consumers need decoded files. */
 export function materializeMarketRuntimeRoot(root: string): string {
   root = realpathSync(root)
   if (
@@ -216,6 +247,11 @@ export function resolveMarketRuntimePath(filePath: string): string {
   const real = realpathSync(filePath)
   const rel = relative(realpathSync(root), real)
   if (rel.startsWith("..") || isAbsolute(rel)) throw new Error(MARKET_CONTENT_DENIED)
+  if (
+    isMarketProtectionComplete(root) &&
+    (!isMarketMarkdownFile(filePath) || statSync(real).isDirectory())
+  )
+    return filePath
   return join(materializeMarketRuntimeRoot(root), rel)
 }
 
@@ -228,6 +264,9 @@ export function prepareMarketCommand(
   for (const candidate of new Set(roots)) {
     const root = findProtectedMarketRoot(candidate)
     if (!root) continue
+    // Scripts/configuration are plain under the Markdown-only policy. Execute
+    // them in place so relative paths, generated files and embedded repos work.
+    if (isMarketProtectionComplete(root)) continue
     const variants = [root, root.replace(/\\/g, "/"), root.replace(/\\/g, "\\\\")]
     if (!variants.some((value) => command.includes(value)) && !cwd.startsWith(root)) continue
     const runtime = materializeMarketRuntimeRoot(root)

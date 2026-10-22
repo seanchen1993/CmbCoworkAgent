@@ -13,6 +13,8 @@ import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import {
   cleanupMarketRuntimeContent,
+  encodeMarketContent,
+  MARKET_CONTENT_MARKER,
   MARKET_CONTENT_PREFIX,
   protectMarketDirectory,
   readContentFileSync
@@ -92,6 +94,12 @@ describe("market content IPC regression", () => {
       (await skills.listAllSkills()).find((item) => item.name === "nested-market")?.contentOrigin
     ).toBe("market")
     expect(readFileSync(skill.path, "utf8")).toContain(MARKET_CONTENT_PREFIX)
+    expect(
+      readFileSync(join(storage.getCustomSkillsDir(), "market-analysis", "notes.txt"), "utf8")
+    ).toBe("private reference")
+    expect(
+      readFileSync(join(storage.getCustomSkillsDir(), "market-analysis", "asset.bin"))
+    ).toEqual(Buffer.from([0, 255]))
     expect(readContentFileSync(skill.path, "utf8")).toContain("企业内部知识步骤")
     for (const channel of [
       "skills:read",
@@ -144,7 +152,7 @@ describe("market content IPC regression", () => {
     expect(handlers.has("skills:protectMarketInstalls")).toBe(false)
   })
 
-  it("protects the complete plugin while preserving runtime components and local plugin editing", async () => {
+  it("encodes plugin Markdown while keeping executable assets and configuration plain", async () => {
     const zip = new AdmZip()
     zip.addFile(
       "plugin.json",
@@ -175,8 +183,17 @@ describe("market content IPC regression", () => {
     })
     expect(installed.success, installed.error).toBe(true)
     let plugin = storage.getPlugins().find((item) => item.name === "market-plugin")!
-    expect(readFileSync(join(plugin.path, "plugin.json"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
-    expect(readFileSync(join(plugin.path, "run.cjs"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
+    expect(JSON.parse(readFileSync(join(plugin.path, "plugin.json"), "utf8"))).toMatchObject({
+      name: "market-plugin"
+    })
+    expect(readFileSync(join(plugin.path, "skills/action/SKILL.md"), "utf8")).toContain(
+      MARKET_CONTENT_PREFIX
+    )
+    expect(readFileSync(join(plugin.path, "run.cjs"), "utf8")).toBe("console.log('working')")
+    expect(JSON.parse(readFileSync(join(plugin.path, ".mcp.json"), "utf8"))).toHaveProperty(
+      "mcpServers.local.command",
+      "node"
+    )
     expect(readFileSync(join(plugin.path, ".git", "config"), "utf8")).toBe(
       "[core]\nrepositoryformatversion = 0\n"
     )
@@ -192,7 +209,7 @@ describe("market content IPC regression", () => {
       storage.getEnabledPluginHookMetadata().some((hook) => hook.command === "echo private-hook")
     ).toBe(true)
     const mcp = storage.getEnabledPluginMcpConfigs()[`plugin:${plugin.id}/local`]
-    expect(mcp.args?.[0]).not.toContain(plugin.path)
+    expect(mcp.args?.[0]).toBe(join(plugin.path, "run.cjs"))
     expect(readFileSync(mcp.args![0], "utf8")).toBe("console.log('working')")
     for (const [channel, payload] of [
       ["plugins:listFiles", plugin.id],
@@ -310,7 +327,7 @@ describe("market content IPC regression", () => {
     expect(execution.output).toContain("private reference")
   }, 60_000)
 
-  it("preserves market hook enablement without writing plaintext to disk", async () => {
+  it("preserves market hook enablement in plain JSON configuration", async () => {
     const zip = new AdmZip()
     zip.addFile("plugin.json", Buffer.from('{"name":"hook-protected"}'))
     zip.addFile(
@@ -340,12 +357,12 @@ describe("market content IPC regression", () => {
     const hook = storage.getPluginHooks(plugin.id)[0]
     storage.setPluginHookEnabled(plugin.id, hook.id, false)
     expect(storage.getPluginHooks(plugin.id)[0].enabled).toBe(false)
-    expect(readFileSync(join(plugin.path, "hooks", "hooks.json"), "utf8")).toContain(
-      MARKET_CONTENT_PREFIX
-    )
+    expect(
+      JSON.parse(readFileSync(join(plugin.path, "hooks", "hooks.json"), "utf8"))[0].enabled
+    ).toBe(false)
   })
 
-  it("executes an encoded hook with decoded environment and stdin resource paths", async () => {
+  it("executes hooks from the installed directory with their original resource paths", async () => {
     const { runHooks } = await import("../hooks/runner")
     const root = mkdtempSync(join(home, "hook-runtime-"))
     writeFileSync(join(root, "notes.txt"), "hook-runtime-secret")
@@ -376,8 +393,41 @@ describe("market content IPC regression", () => {
     )
     expect(result?.exitCode, result?.stderr).toBe(0)
     expect(hookOutput.match(/hook-runtime-secret/g)).toHaveLength(2)
-    expect(readFileSync(join(root, "hook.cjs"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
+    expect(readFileSync(join(root, "hook.cjs"), "utf8")).not.toContain(MARKET_CONTENT_PREFIX)
   })
+
+  it.each(["hooks.json", "hooks.md"])(
+    "keeps the correct encoding when toggling CC hooks in %s",
+    async (hookFile) => {
+      const zip = new AdmZip()
+      const name = "cc-" + hookFile.replace(".", "-")
+      zip.addFile("plugin.json", Buffer.from(JSON.stringify({ name, hooks: hookFile })))
+      zip.addFile(
+        hookFile,
+        Buffer.from(
+          JSON.stringify({
+            hooks: { PreToolUse: [{ hooks: [{ type: "command", command: "echo cc-hook" }] }] }
+          })
+        )
+      )
+      const installed = await invoke("plugins:install", {
+        buffer: bytes(zip.toBuffer()),
+        fileName: "cc.zip",
+        origin: "market"
+      })
+      expect(installed.success, installed.error).toBe(true)
+      const plugin = storage.getPlugins().find((item) => item.name === name)!
+      const hook = storage.getPluginHooks(plugin.id)[0]
+      storage.setPluginHookEnabled(plugin.id, hook.id, false)
+      expect(storage.getPluginHooks(plugin.id)[0].enabled).toBe(false)
+      const stored = readFileSync(join(plugin.path, hookFile), "utf8")
+      expect(stored.startsWith(MARKET_CONTENT_PREFIX)).toBe(hookFile.endsWith(".md"))
+      expect(
+        JSON.parse(readContentFileSync(join(plugin.path, hookFile), "utf8")).hooks.PreToolUse[0]
+          .hooks[0].enabled
+      ).toBe(false)
+    }
+  )
 
   it.skipIf(process.platform !== "win32")(
     "preserves project hook execution after runtime path mapping",
@@ -419,6 +469,58 @@ describe("market content IPC regression", () => {
     } finally {
       renameSync(backup, custom)
     }
+  })
+
+  it("restores old encoded assets at registration without protecting unmarked legacy installs", async () => {
+    const skillRoot = join(storage.getCustomSkillsDir(), "encoded-old-skill")
+    mkdirSync(skillRoot)
+    writeFileSync(
+      join(skillRoot, MARKET_CONTENT_MARKER),
+      '{"version":1,"origin":"market","complete":true}'
+    )
+    writeFileSync(
+      join(skillRoot, "SKILL.md"),
+      encodeMarketContent(Buffer.from(original("encoded-old-skill")))
+    )
+    writeFileSync(join(skillRoot, "script.py"), encodeMarketContent(Buffer.from("print('works')")))
+    const pluginRoot = join(storage.getPluginsDir(), "encoded-old-plugin")
+    mkdirSync(pluginRoot)
+    writeFileSync(
+      join(pluginRoot, MARKET_CONTENT_MARKER),
+      '{"version":1,"origin":"market","complete":true}'
+    )
+    writeFileSync(
+      join(pluginRoot, "plugin.json"),
+      encodeMarketContent(Buffer.from('{"name":"encoded-old-plugin"}'))
+    )
+    writeFileSync(
+      join(pluginRoot, "SKILL.md"),
+      encodeMarketContent(Buffer.from(original("encoded-old-plugin")))
+    )
+    storage.upsertPlugin({
+      id: "encoded-old-plugin",
+      name: "encoded-old-plugin",
+      path: pluginRoot,
+      origin: "market",
+      version: "1.0.0",
+      description: "",
+      author: "",
+      enabled: true,
+      skillCount: 1,
+      mcpServerCount: 0,
+      createdAt: "",
+      updatedAt: ""
+    })
+    const ipc = { handle: (channel: string, handler: Handler) => handlers.set(channel, handler) }
+    const { registerPluginHandlers } = await import("./plugins")
+    skills.registerSkillsHandlers(ipc as never)
+    registerPluginHandlers(ipc as never)
+    expect(readFileSync(join(skillRoot, "script.py"), "utf8")).toBe("print('works')")
+    expect(JSON.parse(readFileSync(join(pluginRoot, "plugin.json"), "utf8"))).toMatchObject({
+      name: "encoded-old-plugin"
+    })
+    expect(readFileSync(join(pluginRoot, "SKILL.md"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
+    expect((await invoke("skills:read", join(skillRoot, "SKILL.md"))).success).toBe(false)
   })
 
   it("registers downstream IPC without migrating legacy or partially protected plugins", async () => {
