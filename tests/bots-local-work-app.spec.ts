@@ -1,8 +1,9 @@
+import { waitForBotAppState } from "./support/bot-app-state"
 /** Real beta App/preload/IPC/Store/Thread/Runtime/ChatContainer with an isolated profile and localhost-only model. */
 import assert from "node:assert/strict"
 import { botTestAppOutput } from "./support/bot-test-app"
 import { createServer } from "node:http"
-import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, writeFile, readFile, realpath, rm } from "node:fs/promises"
 import { createRequire } from "node:module"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
@@ -14,6 +15,9 @@ async function main() {
     dir = await mkdtemp(join(tmpdir(), "m05-local-work-app-")),
     binary = createRequire(import.meta.url)("electron") as string
   let app: Awaited<ReturnType<typeof _electron.launch>> | undefined
+  const explicitWorkspace = process.env.BOT_TEST_EXPLICIT_WORKSPACE === "1"
+  const chosenDirectory = join(dir, "指定工作目录")
+  await mkdir(chosenDirectory)
   const calls: Array<{ tools: string[]; lastUser: string }> = [],
     errors: string[] = []
   const server = createServer(async (req, res) => {
@@ -44,7 +48,8 @@ async function main() {
       calls.push({ tools: used, lastUser: user.slice(0, 200) })
       let reply = "本机专家可以持续讨论并修改文字或文件。",
         call: { name: string; args: Record<string, unknown> } | undefined
-      if (user.includes("M05_CREATE_WORK")) {
+      const inWork = all.includes("You are ALREADY inside independent task")
+      if (!inWork && user.includes("M05_CREATE_WORK")) {
         if (!used.includes("bot_work_create"))
           call = {
             name: "bot_work_create",
@@ -52,11 +57,14 @@ async function main() {
               requestKey: "draft-work",
               title: "季度安排草稿",
               goal: "M05_WORK_GOAL：请写一份季度安排到 report.md 并交付文件。",
-              contextMessageIds: []
+              contextMessageIds: [],
+              ...(explicitWorkspace
+                ? { workspace: { kind: "directory", path: chosenDirectory } }
+                : {})
             }
           }
         else reply = "已交办「季度安排草稿」，可从工作入口打开。"
-      } else if (user.includes("M05_WORK_GOAL") || user.includes("M05_EDIT_WORK")) {
+      } else if ((inWork && all.includes("M05_WORK_GOAL")) || user.includes("M05_EDIT_WORK")) {
         const edit = user.includes("M05_EDIT_WORK")
         if (!used.includes(edit ? "edit_file" : "write_file"))
           call = {
@@ -227,6 +235,17 @@ async function main() {
       })
     }, `http://127.0.0.1:${address.port}/v1`)
     console.log("stage: profile-model-bot-created")
+    // This journey tests ordinary main-chat delegation. Let onboarding settle
+    // before typing, rather than racing its separate beta steering lifecycle.
+    await waitForBotAppState(
+      page,
+      async () =>
+        !(await (window as any).api.bots.snapshot()).tasks.some((t: any) =>
+          ["queued", "running", "waiting_user"].includes(t.state)
+        ),
+      undefined,
+      { timeout: 90000 }
+    )
     await page.getByText("Bots", { exact: true }).first().click()
     await page.getByText("本机协作专家", { exact: true }).first().click()
     const composer = () => page.locator(".bots-conversation [data-bot-composer] textarea").first()
@@ -247,7 +266,8 @@ async function main() {
     await composer().waitFor()
     await composer().fill("M05_PRIVATE_MAIN：先讨论其他话题，不要建工作。")
     await composer().press("Enter")
-    await page.waitForFunction(
+    await waitForBotAppState(
+      page,
       async () => {
         const rows = (await (window as any).api.bots.snapshot()).tasks
         return (
@@ -271,6 +291,8 @@ async function main() {
       bot.id
     )
     assert.ok(work?.threadId && work.threadId !== bot.threadId)
+    assert.equal(work.workspace.kind, explicitWorkspace ? "directory" : "default")
+    if (explicitWorkspace) assert.equal(work.workspace.path, await realpath(chosenDirectory))
     await page.locator(`[data-chat-thread-id="${bot.threadId}"]`).waitFor()
     console.log("stage: main-created-work-without-switch")
     await page
@@ -308,7 +330,8 @@ async function main() {
     await page.locator(`[data-chat-thread-id="${work.threadId}"]`).waitFor()
     await approve()
     const waitSettled = async (count: number) =>
-      page.waitForFunction(
+      waitForBotAppState(
+        page,
         async ({ workId, count }) => {
           const rows = (await (window as any).api.bots.snapshot()).tasks.filter(
             (t: any) => t.workId === workId
@@ -349,6 +372,7 @@ async function main() {
     const firstReport = await readReport()
     assert.equal(firstReport.success, true)
     assert.match(firstReport.content, /第一版安排/)
+    assert.match(await readFile(join(work.workspace.path, "report.md"), "utf8"), /第一版安排/)
     await page.getByRole("button", { name: "打开 report.md", exact: true }).last().click()
     await page
       .getByRole("dialog")
@@ -381,6 +405,13 @@ async function main() {
     )
     assert.equal(reopened.threadId, work.threadId)
     assert.equal(reopened.state, "active")
+    assert.deepEqual(reopened.workspace, work.workspace)
+    const thread = await page.evaluate(
+      async (id) => (window as any).api.threads.get(id),
+      work.threadId
+    )
+    assert.equal(thread.metadata.workspacePath, work.workspace.path)
+    assert.match(await readFile(join(work.workspace.path, "report.md"), "utf8"), /第二版安排/)
     await composer().fill("这个工作的未发送草稿")
     await page
       .locator(".bots-conversation")
@@ -506,7 +537,10 @@ async function main() {
       "PASS: real beta App, ChatContainer and Runtime: main delegation → right Work → file delivery → edit → complete/continue same thread → separate drafts/main reply",
       {
         calls: calls.length,
-        screenshots: [join(out, "artifacts", "m05-local-work-app.png"), join(out, "artifacts", "m05-local-work-app-dark.png")]
+        screenshots: [
+          join(out, "artifacts", "m05-local-work-app.png"),
+          join(out, "artifacts", "m05-local-work-app-dark.png")
+        ]
       }
     )
     assert.deepEqual(errors, [])
@@ -520,7 +554,9 @@ async function main() {
     if (app) {
       const page = await app.firstWindow().catch(() => null)
       if (page)
-        await page.screenshot({ path: join(out, "artifacts", "m05-local-work-app-failure.png") }).catch(() => {})
+        await page
+          .screenshot({ path: join(out, "artifacts", "m05-local-work-app-failure.png") })
+          .catch(() => {})
     }
     throw error
   } finally {

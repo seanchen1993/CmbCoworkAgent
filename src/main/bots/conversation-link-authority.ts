@@ -30,7 +30,8 @@ export function verifyWorkConversationThread(
     metadata.botGroupId != null ||
     metadata.botMockBindingId != null ||
     typeof metadata.workspacePath !== "string" ||
-    !metadata.workspacePath.trim()
+    !metadata.workspacePath.trim() ||
+    (work.workspace && metadata.workspacePath !== work.workspace.path)
   )
     throw new BotError("CONFLICT", "任务与原会话身份不一致，已停止以保护会话。")
 }

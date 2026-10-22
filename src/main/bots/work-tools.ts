@@ -42,6 +42,21 @@ export function createBotWorkTools(
   }
   return [
     tool(
+      async ({ query, cursor }, config) =>
+        invoke("bot_work_projects", config.toolCall?.id, (host) =>
+          host.workProjects(taskId, query, cursor)
+        ),
+      {
+        name: "bot_work_projects",
+        description:
+          'Find existing local projects by the name mentioned by the desktop user, with bounded metadata and pagination. For a named project, create with workspace={kind:"project",projectId:<returned ID>}. The returned path is display-only: do not convert this into a directory target. If multiple projects match, ask which one; never infer a filesystem path from a project name. This only selects a local directory, not a project-mode pipeline or cloud session. Unavailable to external/mock channels.',
+        schema: z.object({
+          query: z.string().trim().min(1).max(160),
+          cursor: z.number().int().nonnegative().optional()
+        })
+      }
+    ),
+    tool(
       async ({ cursor, query }, config) =>
         invoke("bot_work_list", config.toolCall?.id, (host) => {
           const task = host.workToolSource(taskId)
@@ -58,7 +73,7 @@ export function createBotWorkTools(
       }
     ),
     tool(
-      async ({ requestKey, title, goal, contextMessageIds }, config) =>
+      async ({ requestKey, title, goal, contextMessageIds, workspace }, config) =>
         invoke("bot_work_create", config.toolCall?.id, (host) => {
           const task = host.workToolSource(taskId)
           return host.createWork(
@@ -67,7 +82,8 @@ export function createBotWorkTools(
               operationId: config.toolCall!.id!,
               title,
               goal,
-              contextMessageIds
+              contextMessageIds,
+              workspace
             },
             { taskId, callId: config.toolCall!.id!, key: requestKey }
           )
@@ -75,12 +91,39 @@ export function createBotWorkTools(
       {
         name: "bot_work_create",
         description:
-          "Create one independent continuing work only when the current user explicitly delegates a concrete work in the main conversation. Ordinary discussion, greetings and routine executions do not create works. Cannot create visible works recursively inside a work. Select only relevant existing message IDs (user and assistant, at most 12, 24KB); empty means no history is carried. The host creates one real thread and initial execution and returns their IDs. Reuse requestKey for the same operation after a lost reply, never create another key to hide uncertainty.",
+          "Create a separate task conversation for the current user's work when useful. The host starts its initial execution automatically; do not also send the same instruction. Available from main chat, not recursively inside a task. Preserve the user's goal and constraints. Use a designated directory or a project ID from bot_work_projects; omit workspace for the Bot default. That workspace is retained for later revisions. Invalid targets fail without fallback. Reuse requestKey after a lost reply.",
         schema: z.object({
           requestKey: key,
           title: z.string().trim().min(1).max(160),
           goal: z.string().trim().min(1).max(30000),
-          contextMessageIds: z.array(id).max(12).default([])
+          contextMessageIds: z
+            .array(id)
+            .max(12)
+            .default([])
+            .describe("Relevant verified message IDs to carry as context, at most 24KB total."),
+          workspace: z
+            .discriminatedUnion("kind", [
+              z
+                .object({
+                  kind: z.literal("directory"),
+                  path: z
+                    .string()
+                    .trim()
+                    .min(1)
+                    .max(4096)
+                    .describe(
+                      "Existing absolute or ~/ working directory, not an input attachment path."
+                    )
+                })
+                .strict(),
+              z
+                .object({
+                  kind: z.literal("project"),
+                  projectId: z.string().trim().min(1).max(512)
+                })
+                .strict()
+            ])
+            .optional()
         })
       }
     ),
@@ -92,7 +135,7 @@ export function createBotWorkTools(
       {
         name: "bot_work_send",
         description:
-          "Forward the user's explicit supplementary instruction to the exact same-audience work ID from a real work receipt/list. It is durably queued for that work. Completed work must first be explicitly continued. Never choose an ambiguous target or claim execution has already succeeded.",
+          "Forward a user's follow-up to the exact same-audience task ID from a receipt or list, preserving its history and workspace. Clarify an ambiguous target. To revise completed work, continue it first, then send. Inside that task, execute directly. A queued receipt does not mean execution succeeded.",
         schema: z.object({
           requestKey: key,
           workId: id,

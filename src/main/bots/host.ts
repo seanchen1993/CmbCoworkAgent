@@ -1,6 +1,7 @@
 import { AsyncResource } from "node:async_hooks"
 import {
   botWorkBrowserScope,
+  type BotWorkWorkspacePort,
   type BotWorkItem,
   type CreateBotWorkInput
 } from "../../shared/bots/work"
@@ -37,6 +38,7 @@ import { canDeferBotTask, canSteerBotTask } from "./continuation"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
 import type { BackgroundCommandLifecycle } from "../agent/background-command-lifecycle"
 import type { UserInputRequest } from "../types"
+import { parseCreateBotWork } from "../../shared/bots/validation"
 
 export interface BotRunLease {
   /** Reuse the active runtime's user-prompt pipeline; inbox remains queued until injection. */
@@ -70,6 +72,7 @@ export interface BotRunLease {
 
 export interface BotRunPort {
   browser?: boolean
+  workspaces?: BotWorkWorkspacePort
   /** Existing workflow/coordinator managers remain authoritative, including durable pending results. */
   hasPendingWork?(threadIds: readonly string[]): Promise<boolean>
   /** Cancel only this conversation's detached work through the existing managers. */
@@ -373,13 +376,39 @@ export class LocalBotHost {
   initializeMockThread(task: BotTask) {
     if (task.mockSource) this.store.mock.initialize(task.mockSource)
   }
-  createWork(input: CreateBotWorkInput, source?: { taskId: string; callId: string; key: string }) {
+  async createWork(
+    input: CreateBotWorkInput,
+    source?: { taskId: string; callId: string; key: string }
+  ) {
+    this.requireRunning()
+    input = parseCreateBotWork(input)
+    const task = source ? this.workToolSource(source.taskId) : undefined
+    // Replay before IO: moving a project or deleting a directory must not create a second work.
+    const existing = this.store.workCreationReceipt(input, source)
+    if (existing) return existing
+    if (input.workspace && !this.runtime.workspaces)
+      throw new BotError("CONFLICT", "当前主机不支持选择任务工作目录")
+    const workspace = task?.mockSource
+      ? undefined
+      : await this.runtime.workspaces?.resolve(input.botId, input.workspace)
     this.requireRunning()
     if (source) this.workToolSource(source.taskId)
-    const receipt = this.store.createWork(input, source)
+    const receipt = this.store.createWork(input, source, workspace)
     this.changed()
     this.wake()
     return receipt
+  }
+  async workProjects(taskId: string, query: string, cursor?: number) {
+    const validate = () => {
+      const task = this.workToolSource(taskId)
+      if (task.mockSource || task.workId || !this.store.hasWorkUserRequest(task.id))
+        throw new BotError("CONFLICT", "只能在本机主对话的当前用户交办中查找项目")
+    }
+    validate()
+    if (!this.runtime.workspaces) throw new BotError("CONFLICT", "当前主机不支持查询项目")
+    const page = await this.runtime.workspaces.projects(query, cursor)
+    validate()
+    return page
   }
   private async pendingWork(botId: string, workId: string): Promise<boolean> {
     await this.recovery

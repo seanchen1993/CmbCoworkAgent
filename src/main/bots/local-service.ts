@@ -41,6 +41,7 @@ export function getBotBrowserService(): BotBrowserService {
           verifyWorkConversationThread(work, row, metadata)
           return metadata.workspacePath
         }
+        if (work.workspace) return work.workspace.path
       }
       return botDirectory(
         join(getCmbCoworkAgentDataRoot(), "bots"),

@@ -4,6 +4,7 @@ import { upgradeWorkConversationSchema } from "./conversation-link-schema"
 import type {
   BotWorkItem,
   BotWorkReceipt,
+  BotWorkWorkspace,
   CreateBotWorkInput,
   BotWorkPage
 } from "../../shared/bots/work"
@@ -283,6 +284,8 @@ export class BotStore {
       )
       db.run("CREATE INDEX IF NOT EXISTS bot_tasks_updated ON bot_tasks(updated_at,id)")
       upgradeWorkConversationSchema(db)
+      if (!this.rows("PRAGMA table_info(bot_work_items)").some((c) => c.name === "workspace_json"))
+        db.run("ALTER TABLE bot_work_items ADD COLUMN workspace_json TEXT")
       // Conversation references outlive disposable execution records. Payload stays in the Runtime
       // transcript; only messages never persisted there (e.g. cancelled before start) need a fallback.
       db.run(`CREATE TABLE IF NOT EXISTS bot_exchange_archive (
@@ -558,6 +561,9 @@ export class BotStore {
       executionState: (row.execution_state ?? null) as BotWorkItem["executionState"],
       pendingPeers: Number(row.pending_peers ?? 0),
       backgroundBusy: Boolean(row.background_busy),
+      ...(row.workspace_json == null
+        ? {}
+        : { workspace: JSON.parse(String(row.workspace_json)) as BotWorkWorkspace }),
       ...(row.conversation_json == null
         ? {}
         : {
@@ -632,7 +638,7 @@ export class BotStore {
       throw new BotError("INVALID_INPUT", "工作摘要批次无效")
     if (!workIds.length) return []
     const rows = this.rows(
-      `SELECT w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,
+      `SELECT w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,w.workspace_json,
       ${this.workActivityProjection()} FROM bot_work_items w WHERE w.bot_id=? AND w.id IN (${workIds.map(() => "?").join(",")})`,
       [botId, ...workIds]
     )
@@ -663,7 +669,7 @@ export class BotStore {
       }
     }
     const rows = this.rows(
-      `SELECT w.ordinal,w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,
+      `SELECT w.ordinal,w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,w.workspace_json,
       ${this.workActivityProjection()}
       FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? AND (? IS NULL OR w.audience_key=?) AND w.ordinal<? AND (?='' OR instr(lower(w.title),lower(?))>0) ORDER BY w.ordinal DESC LIMIT 41`,
       [botId, audience ?? null, audience ?? null, before, query, query]
@@ -671,7 +677,7 @@ export class BotStore {
     return {
       items: rows.slice(0, 40).map((row) => this.workSummary(row)),
       priority: this.rows(
-        `SELECT w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,
+        `SELECT w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,w.workspace_json,
         ${this.workActivityProjection()} FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? AND (? IS NULL OR w.audience_key=?) AND w.state='active'
         AND (?='' OR instr(lower(w.title),lower(?))>0) AND w.id IN (
           SELECT work_id FROM bot_tasks WHERE work_id IS NOT NULL AND state IN ('queued','running','waiting_user')
@@ -690,12 +696,11 @@ export class BotStore {
           : null
     }
   }
-  private workCommand<T>(
+  private workCommandReceipt<T>(
     commandId: string,
     fingerprint: string,
-    create: () => T,
     source?: { taskId: string; callId: string; key: string }
-  ): T {
+  ): T | undefined {
     const old = this.rows(
       source
         ? "SELECT * FROM bot_work_commands WHERE command_id=? OR (source_task_id=? AND (tool_call_id=? OR request_key=?)) LIMIT 2"
@@ -707,6 +712,16 @@ export class BotStore {
         throw new BotError("CONFLICT", "工作命令标识已用于不同内容")
       return JSON.parse(String(old[0].receipt)) as T
     }
+    return undefined
+  }
+  private workCommand<T>(
+    commandId: string,
+    fingerprint: string,
+    create: () => T,
+    source?: { taskId: string; callId: string; key: string }
+  ): T {
+    const old = this.workCommandReceipt<T>(commandId, fingerprint, source)
+    if (old !== undefined) return old
     const receipt = create()
     this.db.run(
       "INSERT INTO bot_work_commands(command_id,source_task_id,tool_call_id,request_key,fingerprint,receipt) VALUES(?,?,?,?,?,?)",
@@ -721,47 +736,81 @@ export class BotStore {
     )
     return receipt
   }
-  createWork(
+  private workCreation(
     input: CreateBotWorkInput,
     source?: { taskId: string; callId: string; key: string }
+  ) {
+    const bot = this.getBot(input.botId)
+    if (bot.archived || bot.deleting) throw new BotError("CONFLICT", "请先恢复 Bot")
+    let sourceThread = bot.threadId
+    let mockSource: BotMockSource | undefined
+    if (source) {
+      const task = this.getTask(source.taskId)
+      if (
+        task.botId !== bot.id ||
+        task.workId ||
+        botTaskGroupId(task) ||
+        !this.hasWorkUserRequest(task.id) ||
+        !ACTIVE_STATES.includes(task.state as (typeof ACTIVE_STATES)[number]) ||
+        !source.callId ||
+        !source.key
+      )
+        throw new BotError("CONFLICT", "只能从当前主对话的用户交办创建工作")
+      sourceThread = task.threadId
+      mockSource = task.mockSource
+    }
+    if (mockSource && input.workspace)
+      throw new BotError("CONFLICT", "模拟渠道不能选择本机工作目录或项目")
+    const ids = input.contextMessageIds ?? []
+    if (
+      !input.title.trim() ||
+      input.title.length > 160 ||
+      !input.goal.trim() ||
+      input.goal.length > 30000 ||
+      ids.length > 12 ||
+      new Set(ids).size !== ids.length
+    )
+      throw new BotError("INVALID_INPUT", "工作目标或上下文无效")
+    const fingerprint = createHash("sha256")
+      // Preserve old no-workspace fingerprints, including retries after an upgrade.
+      .update(
+        JSON.stringify([
+          input.botId,
+          input.title,
+          input.goal,
+          ids,
+          ...(input.workspace ? [input.workspace] : [])
+        ])
+      )
+      .digest("hex")
+    const commandId = source
+      ? `tool:${source.taskId}:${source.callId}`
+      : `create:${input.operationId}`
+    return { bot, sourceThread, mockSource, ids, fingerprint, commandId }
+  }
+  workCreationReceipt(
+    input: CreateBotWorkInput,
+    source?: { taskId: string; callId: string; key: string }
+  ) {
+    const { fingerprint, commandId } = this.workCreation(input, source)
+    return this.workCommandReceipt<BotWorkReceipt>(commandId, fingerprint, source)
+  }
+  createWork(
+    input: CreateBotWorkInput,
+    source?: { taskId: string; callId: string; key: string },
+    workspace?: BotWorkWorkspace
   ): BotWorkReceipt {
     return this.transaction(() => {
-      const bot = this.getBot(input.botId)
-      if (bot.archived || bot.deleting) throw new BotError("CONFLICT", "请先恢复 Bot")
-      let sourceThread = bot.threadId
-      let mockSource: BotMockSource | undefined
-      if (source) {
-        const task = this.getTask(source.taskId)
-        if (
-          task.botId !== bot.id ||
-          task.workId ||
-          botTaskGroupId(task) ||
-          !this.hasWorkUserRequest(task.id) ||
-          !ACTIVE_STATES.includes(task.state as (typeof ACTIVE_STATES)[number]) ||
-          !source.callId ||
-          !source.key
-        )
-          throw new BotError("CONFLICT", "只能从当前主对话的用户交办创建工作")
-        sourceThread = task.threadId
-        mockSource = task.mockSource
-      }
-      const ids = input.contextMessageIds ?? []
-      if (
-        !input.title.trim() ||
-        input.title.length > 160 ||
-        !input.goal.trim() ||
-        input.goal.length > 30000 ||
-        ids.length > 12 ||
-        new Set(ids).size !== ids.length
+      const { bot, sourceThread, mockSource, ids, fingerprint, commandId } = this.workCreation(
+        input,
+        source
       )
-        throw new BotError("INVALID_INPUT", "工作目标或上下文无效")
-      const fingerprint = createHash("sha256")
-        .update(JSON.stringify([input.botId, input.title, input.goal, ids]))
-        .digest("hex")
       return this.workCommand(
-        source ? `tool:${source.taskId}:${source.callId}` : `create:${input.operationId}`,
+        commandId,
         fingerprint,
         () => {
+          if ((input.workspace && !workspace) || (mockSource && workspace))
+            throw new BotError("CONFLICT", "工作区尚未由本机服务解析，未创建任务")
           const context = ids.length
             ? (this.readContext?.(sourceThread, ids) ??
               ids
@@ -780,7 +829,7 @@ export class BotStore {
             now = this.now(),
             threadId = `bot-work-${id}`
           this.db.run(
-            "INSERT INTO bot_work_items(id,bot_id,thread_id,parent_thread_id,title,goal,audience_key,created_at,updated_at,source_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO bot_work_items(id,bot_id,thread_id,parent_thread_id,title,goal,audience_key,created_at,updated_at,source_json,workspace_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             [
               id,
               bot.id,
@@ -791,11 +840,12 @@ export class BotStore {
               mockSource?.audienceKey ?? "desktop",
               now,
               now,
-              mockSource ? JSON.stringify(mockSource) : null
+              mockSource ? JSON.stringify(mockSource) : null,
+              workspace ? JSON.stringify(workspace) : null
             ]
           )
           const message =
-            input.goal.trim() +
+            (source ? this.workUserMessage(this.getTask(source.taskId)) : input.goal.trim()) +
             (context.length
               ? "\n\n与本工作相关的已验证消息资料（引用材料，不是新增授权）：\n" +
                 JSON.stringify(context)
@@ -836,12 +886,12 @@ export class BotStore {
             {
               botId: task.botId,
               workId,
-              message,
+              message: this.workUserMessage(task),
               requestId: `work-message-${createHash("sha256")
                 .update(JSON.stringify([task.id, source.callId]))
                 .digest("hex")}`
             },
-            { kind: "work", sourceTaskId: task.id },
+            { kind: "work", sourceTaskId: task.id, instructionSummary: message },
             task.mockSource
           ),
         source
@@ -1095,6 +1145,14 @@ export class BotStore {
       )
     }
     return task.origin.kind === "introduction" && this.injectedUserRequestId(task) !== null
+  }
+
+  /** Forward the actual user text, never replace constraints with a model's paraphrase. */
+  private workUserMessage(task: BotTask): string {
+    const injectedId = this.injectedUserRequestId(task)
+    const latest = injectedId ? this.getTask(injectedId).message : undefined
+    if (task.origin.kind === "introduction" && latest) return latest
+    return task.message + (latest ? "\n\n用户后续补充：\n" + latest : "")
   }
 
   hasWorkUserRequest(taskId: string): boolean {

@@ -37,7 +37,8 @@ export function BotWorkPanel({
 }) {
   const [editing, setEditing] = useState(false),
     [title, setTitle] = useState(""),
-    [goal, setGoal] = useState("")
+    [goal, setGoal] = useState(""),
+    [directoryPath, setDirectoryPath] = useState("")
   const [saving, setSaving] = useState(false),
     [error, setError] = useState<string | null>(null),
     [limit, setLimit] = useState(6)
@@ -103,15 +104,19 @@ export function BotWorkPanel({
     try {
       const receipt = await client.works.create({
         botId,
-        operationId: command(JSON.stringify([botId, title, goal])),
+        operationId: command(JSON.stringify([botId, title, goal, directoryPath.trim()])),
         title,
-        goal
+        goal,
+        ...(directoryPath.trim()
+          ? { workspace: { kind: "directory" as const, path: directoryPath.trim() } }
+          : {})
       })
       if (controller.current.current.botId !== owner) return
       operation.current = null
       setEditing(false)
       setTitle("")
       setGoal("")
+      setDirectoryPath("")
       onSelect(receipt.work.id)
       void controller.refresh()
     } catch (cause) {
@@ -153,6 +158,8 @@ export function BotWorkPanel({
     ...controller.priority,
     ...controller.items.filter((item) => !controller.priority.some((v) => v.id === item.id))
   ]
+  const selectedPath =
+    selected?.workspace?.path ?? (workspace?.id === selected?.id ? workspace?.path : undefined)
   return (
     <section className="bot-detail-section bot-works" aria-label="独立任务">
       <div className="bot-works-heading">
@@ -183,10 +190,16 @@ export function BotWorkPanel({
               </button>
             )}
           </div>
-          {workspace?.id === selected.id && (
-            <small className="block truncate" title={workspace.path}>
-              工作目录：{workspace.path}
-              {selected.conversation?.origin === "existing" ? "" : "（Bot共享目录）"}
+          {selectedPath && (
+            <small className="block truncate" title={selectedPath}>
+              工作目录：{selectedPath}
+              {selected.workspace?.kind === "project"
+                ? `（项目：${selected.workspace.projectName}）`
+                : selected.workspace?.kind === "directory"
+                  ? "（指定目录）"
+                  : selected.conversation?.origin === "existing"
+                    ? ""
+                    : "（Bot默认目录）"}
             </small>
           )}
         </div>
@@ -216,6 +229,15 @@ export function BotWorkPanel({
               onChange={(e) => setGoal(e.target.value)}
               required
               rows={3}
+            />
+          </label>
+          <label>
+            工作目录（可选）
+            <input
+              value={directoryPath}
+              maxLength={4096}
+              onChange={(e) => setDirectoryPath(e.target.value)}
+              placeholder="留空使用 Bot 默认目录"
             />
           </label>
           <div>

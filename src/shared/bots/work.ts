@@ -2,6 +2,22 @@ import type { BotWorkConversationLink } from "./conversation"
 import type { BotTask, BotTaskState, BotConversationActivity } from "./contracts"
 import type { BotMockSource } from "./mock-channel"
 
+/** The model/user selects a target; only the host resolves and pins its real directory. */
+export type BotWorkWorkspaceRequest =
+  | { kind: "directory"; path: string }
+  | { kind: "project"; projectId: string }
+export type BotWorkWorkspace =
+  | { kind: "default" | "directory"; path: string }
+  | { kind: "project"; path: string; projectId: string; projectName: string }
+export interface BotWorkProjectPage {
+  items: { projectId: string; name: string; path: string; archived: boolean }[]
+  nextCursor: number | null
+}
+export interface BotWorkWorkspacePort {
+  resolve(botId: string, request?: BotWorkWorkspaceRequest): Promise<BotWorkWorkspace>
+  projects(query: string, cursor?: number): Promise<BotWorkProjectPage>
+}
+
 /** A durable conversation for a continuing piece of work; not an execution. */
 export interface BotWorkSummary {
   id: string
@@ -19,6 +35,8 @@ export interface BotWorkSummary {
   activity?: BotConversationActivity
   source?: BotMockSource
   conversation?: BotWorkConversationLink
+  /** Fixed on creation. Absent on legacy work and externally linked conversations. */
+  workspace?: BotWorkWorkspace
 }
 export interface BotWorkItem extends BotWorkSummary {
   goal: string
@@ -32,6 +50,7 @@ export interface CreateBotWorkInput {
   goal: string
   /** Only host-resolved messages from the source conversation may be carried. */
   contextMessageIds?: string[]
+  workspace?: BotWorkWorkspaceRequest
 }
 export interface BotWorkReceipt {
   work: BotWorkItem

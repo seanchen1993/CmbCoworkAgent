@@ -38,6 +38,24 @@ const payload = (prompt: string): Array<{ id: string; content: string }> =>
   JSON.parse(prompt.split("\n").find((line) => line.startsWith("["))!)
 
 describe("Bot first conversation", () => {
+  it("treats the transferred brief as reference, subordinate to the original user constraints", () => {
+    const prompt = buildBotPrompt(
+      bot,
+      {
+        ...task,
+        workId: "work",
+        message: "只要文字，不要创建文件",
+        origin: { kind: "work", sourceTaskId: "main", instructionSummary: "Create a file" }
+      },
+      "/selected",
+      [],
+      "Original goal"
+    )
+    expect(prompt).toContain("ALREADY inside independent task")
+    expect(prompt).toContain("original user's constraints and later corrections take precedence")
+    expect(prompt).toContain("Do not turn text-only requests into file creation")
+    expect(prompt).toContain('"Create a file"')
+  })
   it("greets before an actual choice, adapts to the answer, and yields to concrete user work", () => {
     const prompt = buildBotPrompt(bot, { ...task, origin: { kind: "introduction" } }, "/private")
     expect(prompt).toContain("first conversation after the user created you")

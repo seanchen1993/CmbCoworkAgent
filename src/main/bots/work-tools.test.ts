@@ -45,7 +45,7 @@ describe("work Runtime tools", () => {
   it("forwards a live main user's instruction once, including a lost tool reply replay", async () => {
     const f = fixture()
     await tick()
-    const work = f.host.createWork({
+    const work = await f.host.createWork({
       botId: f.bot.id,
       operationId: "target",
       title: "Draft",
@@ -94,7 +94,7 @@ describe("work Runtime tools", () => {
       await tick()
       f.host.cancel(f.source.id)
       await tick()
-      const work = f.host.createWork({
+      const work = await f.host.createWork({
         botId: f.bot.id,
         operationId: "target",
         title: "Draft",
@@ -159,7 +159,12 @@ describe("work Runtime tools", () => {
     await tick()
     f.host.cancel(f.source.id)
     await tick()
-    const work = f.host.createWork({ botId: f.bot.id, operationId: "new", title: "A", goal: "A" })
+    const work = await f.host.createWork({
+      botId: f.bot.id,
+      operationId: "new",
+      title: "A",
+      goal: "A"
+    })
     await tick()
     const tools = createBotWorkTools(work.task.id, () => f.host, new AbortController().signal)
     const create = tools.find((t) => t.name === "bot_work_create")!

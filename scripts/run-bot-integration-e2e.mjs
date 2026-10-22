@@ -65,6 +65,10 @@ export default Object.fromEntries(["main","preload","renderer"].map((name) => [
       "bots-mock-channel-app.spec.ts"
     ])
       await run(["--import", "tsx", `tests/${test}`], testEnv)
+    await run(["--import", "tsx", "tests/bots-local-work-app.spec.ts"], {
+      ...testEnv,
+      BOT_TEST_EXPLICIT_WORKSPACE: "1"
+    })
     await run(["--import", "tsx", "tests/bots-mock-channel-app.spec.ts"], {
       ...testEnv,
       M05_MOCK_MESSAGE_CONTROLS_ONLY: "1"

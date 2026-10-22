@@ -1,3 +1,4 @@
+import { waitForBotAppState } from "./support/bot-app-state"
 /** M05-06 only: real App/Host/Thread/Runtime, independent output/profile and localhost model. */
 import assert from "node:assert/strict"
 import { botTestAppOutput } from "./support/bot-test-app"
@@ -237,7 +238,8 @@ async function main() {
       .getByText(/LINK_INITIAL_REPLY/)
       .last()
       .waitFor({ timeout: 90000 })
-    await page.waitForFunction(
+    await waitForBotAppState(
+      page,
       async (id) => (await (window as any).api.threads.get(id)).status === "idle",
       threadId
     )
@@ -287,7 +289,8 @@ async function main() {
       .getByText(/LINK_BOT_REPLY/)
       .last()
       .waitFor({ timeout: 90000 })
-    await page.waitForFunction(
+    await waitForBotAppState(
+      page,
       async () =>
         !(await (window as any).api.bots.snapshot()).tasks.some((t) =>
           ["queued", "running", "waiting_user"].includes(t.state)
@@ -308,7 +311,8 @@ async function main() {
       .getByText(/LINK_CHAT_REPLY/)
       .last()
       .waitFor({ timeout: 90000 })
-    await page.waitForFunction(
+    await waitForBotAppState(
+      page,
       async () =>
         !(await (window as any).api.bots.snapshot()).tasks.some((t) =>
           ["queued", "running", "waiting_user"].includes(t.state)
@@ -317,7 +321,8 @@ async function main() {
     // Both entrances edit the actual Thread model, never the Bot default.
     await chat().getByRole("button", { name: "Original fixture", exact: true }).click()
     await page.getByText("Bot default fixture", { exact: true }).last().click()
-    await page.waitForFunction(
+    await waitForBotAppState(
+      page,
       async (id) =>
         (await (window as any).api.threads.get(id)).metadata.model === "custom:link-default",
       threadId
@@ -326,7 +331,8 @@ async function main() {
     await chat().getByRole("button", { name: "Bot default fixture", exact: true }).waitFor()
     await chat().getByRole("button", { name: "Bot default fixture", exact: true }).click()
     await page.getByText("Original fixture", { exact: true }).last().click()
-    await page.waitForFunction(
+    await waitForBotAppState(
+      page,
       async (id) =>
         (await (window as any).api.threads.get(id)).metadata.model === "custom:link-original",
       threadId
@@ -363,9 +369,15 @@ async function main() {
     assert.ok(!calls.some((c) => c.user.includes("LINK_RAW_BYPASS")))
     await page.getByRole("button", { name: "继续处理", exact: true }).click()
     await page.getByRole("button", { name: "完成任务", exact: true }).waitFor()
-    await chat().getByText(/LINK_CHAT_REPLY/).last().waitFor()
+    await chat()
+      .getByText(/LINK_CHAT_REPLY/)
+      .last()
+      .waitFor()
     await assertComposerLayout()
-    await page.screenshot({ path: join(out, "artifacts", "m05-06-linked-conversation.png"), fullPage: true })
+    await page.screenshot({
+      path: join(out, "artifacts", "m05-06-linked-conversation.png"),
+      fullPage: true
+    })
     page.once("dialog", (dialog) => void dialog.accept())
     await page.getByRole("button", { name: "解除任务关联", exact: true }).click()
     await page.getByRole("button", { name: "关联为 Bot 任务", exact: true }).waitFor()
@@ -403,7 +415,8 @@ async function main() {
         }),
       setup.bot.id
     )
-    await page.waitForFunction(
+    await waitForBotAppState(
+      page,
       async (id) =>
         (await (window as any).api.bots.snapshot()).tasks.some(
           (t) => t.workId === id && t.state === "completed"
@@ -427,7 +440,10 @@ async function main() {
       "a new task must not import another conversation history"
     )
     await assertComposerLayout()
-    await page.screenshot({ path: join(out, "artifacts", "m05-06-created-conversation.png"), fullPage: true })
+    await page.screenshot({
+      path: join(out, "artifacts", "m05-06-created-conversation.png"),
+      fullPage: true
+    })
     console.log(
       "stage: both-entrances-complete-continue-unlink",
       JSON.stringify({

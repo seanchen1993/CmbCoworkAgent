@@ -33,6 +33,36 @@ function finish(store: BotStore, id: string) {
 }
 
 describe("durable local independent works", () => {
+  it("preserves the user's exact constraints through autonomous creation and later forwarded revisions", () => {
+    const f = fixture()
+    const original = "在指定目录设计读书会计划，只要文字，不创建文件。"
+    const source = f.store.enqueue({ botId: f.bot.id, requestId: "original", message: original })
+    f.store.transition(source.id, "running")
+    const created = f.store.createWork(
+      {
+        botId: f.bot.id,
+        operationId: "create",
+        title: "读书会",
+        goal: "错误改写：生成 Markdown 文件"
+      },
+      { taskId: source.id, callId: "create", key: "create" }
+    )
+    expect(created.task.message).toBe(original)
+    expect(created.work.goal).toBe("错误改写：生成 Markdown 文件")
+    f.store.settle(source.id, "completed", null, "已交办")
+    finish(f.store, created.task.id)
+    const revision = "改到四点，仍然只要文字，不写文件。"
+    const next = f.store.enqueue({ botId: f.bot.id, requestId: "revision", message: revision })
+    f.store.transition(next.id, "running")
+    const sent = f.store.sendWork(
+      { taskId: next.id, callId: "send", key: "send" },
+      created.work.id,
+      "错误改写：更新文件"
+    )
+    expect(sent.message).toBe(revision)
+    expect(sent.origin).toMatchObject({ kind: "work", instructionSummary: "错误改写：更新文件" })
+    expect(sent.threadId).toBe(created.work.threadId)
+  })
   it("keeps beta question receipts and batched work context as separate constructor ports", () => {
     const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
     databases.push(db)
@@ -525,8 +555,8 @@ describe("durable local independent works", () => {
     }
     const host = new LocalBotHost(f.store, runtime)
     hosts.push(host)
-    const a = host.createWork({ botId: f.bot.id, operationId: "a", title: "A", goal: "A" })
-    const b = host.createWork({ botId: f.bot.id, operationId: "b", title: "B", goal: "B" })
+    const a = await host.createWork({ botId: f.bot.id, operationId: "a", title: "A", goal: "A" })
+    const b = await host.createWork({ botId: f.bot.id, operationId: "b", title: "B", goal: "B" })
     await new Promise((r) => setTimeout(r, 20))
     const peer = host.delegate(a.task.id, f.peer.id, "Review", "peer")
     host.send({ botId: f.bot.id, requestId: "main", message: "Still there?" })

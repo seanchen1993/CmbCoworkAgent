@@ -151,7 +151,7 @@ export type BotTaskOrigin =
   | { kind: "mock"; bindingId: string; eventId: string }
   | { kind: "user"; replyTo?: Pick<BotMessageReply, "id" | "ordinal" | "role"> }
   | { kind: "introduction" }
-  | { kind: "work"; sourceTaskId: string }
+  | { kind: "work"; sourceTaskId: string; instructionSummary?: string }
   | {
       kind: "bot"
       fromBotId: string

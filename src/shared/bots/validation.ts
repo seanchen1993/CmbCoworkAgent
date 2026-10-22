@@ -241,7 +241,8 @@ export function parseCreateBotWork(input: unknown): import("./work").CreateBotWo
   const item = record(input)
   if (
     Object.keys(item).some(
-      (key) => !["botId", "operationId", "title", "goal", "contextMessageIds"].includes(key)
+      (key) =>
+        !["botId", "operationId", "title", "goal", "contextMessageIds", "workspace"].includes(key)
     )
   )
     throw new BotError("INVALID_INPUT", "工作参数包含不支持字段")
@@ -256,8 +257,20 @@ export function parseCreateBotWork(input: unknown): import("./work").CreateBotWo
     operationId: botIdentifier(item.operationId),
     title: boundedString(item.title, "工作标题", 160),
     goal: boundedString(item.goal, "工作目标", 30000),
-    ...(Array.isArray(ids) ? { contextMessageIds: ids.map(botIdentifier) } : {})
+    ...(Array.isArray(ids) ? { contextMessageIds: ids.map(botIdentifier) } : {}),
+    ...(item.workspace === undefined ? {} : { workspace: parseBotWorkWorkspace(item.workspace) })
   }
+}
+export function parseBotWorkWorkspace(input: unknown): import("./work").BotWorkWorkspaceRequest {
+  const item = record(input)
+  if (item.kind === "directory" && Object.keys(item).every((k) => ["kind", "path"].includes(k))) {
+    const path = boundedString(item.path, "工作目录", 4096)
+    if (/[\u0000-\u001f]/u.test(path)) throw new BotError("INVALID_INPUT", "工作目录包含无效字符")
+    return { kind: "directory", path }
+  }
+  if (item.kind === "project" && Object.keys(item).every((k) => ["kind", "projectId"].includes(k)))
+    return { kind: "project", projectId: boundedString(item.projectId, "项目标识", 512) }
+  throw new BotError("INVALID_INPUT", "请选择目录或已有项目作为工作区")
 }
 export function parseBotWorkLifecycle(input: unknown) {
   const item = record(input)

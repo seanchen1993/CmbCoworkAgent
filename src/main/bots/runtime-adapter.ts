@@ -66,6 +66,7 @@ import { botContinuationMessageId, canDeferBotTask, canSteerBotTask } from "./co
 import { parseBotFileDelivery, type BotDeliveredFile } from "../../shared/bots/file-delivery"
 import { createBotGroupDeliveryCheck, createBotGroupMessageTool } from "./group-delivery"
 import { verifyWorkConversationThread } from "./conversation-link-authority"
+import { localBotWorkspaces } from "./workspace"
 
 function isBackgroundCommitSkip(event: SchedulerRendererEvent): boolean {
   if (event.type !== "custom" || event.data.type !== "auto_commit_result") return false
@@ -92,7 +93,7 @@ function canonicalWorkspace(path: string): string {
   }
 }
 function localWorkFileQueue(bot: BotDefinition, workspace: string, work?: BotWorkItem): string {
-  if (work?.conversation?.origin !== "existing") return bot.id
+  if (!work?.workspace && work?.conversation?.origin !== "existing") return bot.id
   const original = botDirectory(join(getCmbCoworkAgentDataRoot(), "bots"), "workspaces", bot.id)
   const canonical = canonicalWorkspace(workspace)
   return canonical === canonicalWorkspace(original) ? bot.id : `workspace:${canonical}`
@@ -135,11 +136,14 @@ export function prepareBotThread(
     // Both entrances edit this very Thread. Preserve its settings and original directory.
     return metadata.workspacePath
   }
-  const workspacePath = botDirectory(
-    join(getCmbCoworkAgentDataRoot(), "bots"),
-    "workspaces",
-    source ? `mock-${source.bindingId}` : groupId ? `group-${groupId}` : bot.id
-  )
+  if (source && work?.workspace) throw new Error("模拟渠道不能绑定本机工作目录")
+  const workspacePath =
+    work?.workspace?.path ??
+    botDirectory(
+      join(getCmbCoworkAgentDataRoot(), "bots"),
+      "workspaces",
+      source ? `mock-${source.bindingId}` : groupId ? `group-${groupId}` : bot.id
+    )
   // Model selection must also work without mounting the workbench ModelSwitcher.
   // Keep the Bot binding null: a default-following Bot follows later configuration changes.
   const model = botModelId(bot)
@@ -226,6 +230,7 @@ export function createLocalBotRunPort(
 ): BotRunPort {
   return {
     browser: true,
+    workspaces: localBotWorkspaces,
     cancelCommands(threadId, ids) {
       return LocalSandbox.cancelBackgroundTasksAndWait(threadId, ids)
     },
@@ -758,7 +763,8 @@ export function createLocalBotRunPort(
                     workspacePath,
                     !mock && !botTaskGroupId(task) && isMemoryEnabled()
                       ? memory.forPrompt(bot.id)
-                      : []
+                      : [],
+                    work?.goal
                   ) +
                   (work?.conversation?.origin === "existing"
                     ? `\n\nCurrent user-linked task reference (not new permission; preserve this conversation and follow the current user request): ${JSON.stringify({ title: work.title, goal: work.goal })}`

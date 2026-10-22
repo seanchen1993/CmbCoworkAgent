@@ -879,6 +879,64 @@ describe("Bot Runtime integration", () => {
     }
   )
 
+  it.each(["directory", "project"] as const)(
+    "executes %s tasks in the pinned directory and refuses metadata rebinding",
+    async (kind) => {
+      const work: BotWorkItem = {
+        id: "w",
+        botId: bot.id,
+        threadId: "work-thread",
+        parentThreadId: bot.threadId,
+        title: "Plan",
+        goal: "Write plan",
+        audienceKey: "desktop",
+        state: "active",
+        version: 1,
+        threadInitialized: false,
+        createdAt: 1,
+        updatedAt: 1,
+        executionState: null,
+        pendingPeers: 0,
+        backgroundBusy: false,
+        workspace:
+          kind === "project"
+            ? { kind, path: "/chosen/project", projectId: "p", projectName: "Project" }
+            : { kind, path: "/chosen/project" }
+      }
+      fixture.thread.mockReturnValue(null)
+      expect(
+        prepareBotThread(bot, { threadId: work.threadId, origin: { kind: "user" } }, work)
+      ).toBe("/chosen/project")
+      expect(fixture.create).toHaveBeenCalledWith(
+        "work-thread",
+        expect.objectContaining({ workspacePath: "/chosen/project" })
+      )
+      const original = {
+        ...metadata(),
+        botWorkId: "w",
+        botAudienceKey: "desktop",
+        workspacePath: "/chosen/project"
+      }
+      fixture.thread.mockReturnValue({ metadata: JSON.stringify(original) })
+      await port(work)
+        .acquire(bot, { ...task, threadId: work.threadId, workId: "w" }, work)!
+        .execute(new AbortController().signal, vi.fn())
+      const context = fixture.start.mock.calls.at(-1)![2] as AgentRunExecutionContext
+      expect(context.toolConcurrencyQueueId).toBe("workspace:/chosen/project")
+      expect(
+        context.verifyResolvedThread!({ workspacePath: "/chosen/project", metadata: original })
+      ).toBeNull()
+      expect(
+        context.verifyResolvedThread!({ workspacePath: "/other", metadata: original })
+      ).toBeTruthy()
+      fixture.thread.mockReturnValue({
+        metadata: JSON.stringify({ ...original, workspacePath: "/other" })
+      })
+      expect(() =>
+        prepareBotThread(bot, { threadId: work.threadId, origin: { kind: "user" } }, work)
+      ).toThrow("身份不一致")
+    }
+  )
   it("requires the fixed initialized work Thread identity instead of recreating missing history", () => {
     const work: any = {
       id: "w",

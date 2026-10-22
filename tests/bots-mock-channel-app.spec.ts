@@ -66,7 +66,8 @@ async function main() {
       calls.push({ tools: used, lastUser: user.slice(0, 200), external })
       let reply = "模拟渠道普通问答已回复。",
         call: { name: string; args: Record<string, unknown> } | undefined
-      if (user.includes("MOCK_CREATE")) {
+      const inWork = all.includes("You are ALREADY inside independent task")
+      if (!inWork && user.includes("MOCK_CREATE")) {
         if (!used.includes("bot_work_create"))
           call = {
             name: "bot_work_create",
@@ -78,7 +79,7 @@ async function main() {
             }
           }
         else reply = "渠道工作已交办，可继续修改。"
-      } else if (user.includes("MOCK_WORK_GOAL")) reply = "渠道工作第一版：周六讨论。"
+      } else if (inWork && user.includes("MOCK_CREATE")) reply = "渠道工作第一版：周六讨论。"
       else if (user.includes("MOCK_EDIT")) {
         assert.ok(
           all.includes("渠道工作第一版"),
@@ -737,7 +738,9 @@ async function main() {
     if (app) {
       const page = await app.firstWindow().catch(() => null)
       if (page)
-        await page.screenshot({ path: join(out, "artifacts", "m05-mock-channel-app-failure.png") }).catch(() => {})
+        await page
+          .screenshot({ path: join(out, "artifacts", "m05-mock-channel-app-failure.png") })
+          .catch(() => {})
     }
     throw error
   } finally {
