@@ -13,6 +13,16 @@ export const localBotsApi: BotClient = {
     unlink: (botId, workId, version) =>
       ipcRenderer.invoke("bots:conversation:unlink", LOCAL_BOT_HOST_ID, botId, workId, version)
   },
+  im: {
+    history: (botId, id, before) =>
+      ipcRenderer.invoke("bots:im:history", LOCAL_BOT_HOST_ID, botId, id, before),
+    status: () => ipcRenderer.invoke("bots:im:status", LOCAL_BOT_HOST_ID),
+    list: (botId, before) => ipcRenderer.invoke("bots:im:list", LOCAL_BOT_HOST_ID, botId, before),
+    create: (botId, kind, operationId) =>
+      ipcRenderer.invoke("bots:im:create", LOCAL_BOT_HOST_ID, botId, kind, operationId),
+    revoke: (botId, bindingId, version) =>
+      ipcRenderer.invoke("bots:im:revoke", LOCAL_BOT_HOST_ID, botId, bindingId, version)
+  },
   mock: {
     binding: (botId, id) => ipcRenderer.invoke("bots:mock:binding", LOCAL_BOT_HOST_ID, botId, id),
     bindings: (botId, before) =>

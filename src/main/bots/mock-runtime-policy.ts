@@ -56,7 +56,7 @@ export function assertBotMockThreadEntry(
     policy.allowedToolNames?.length !== BOT_MOCK_TOOL_NAMES.length ||
     policy.allowedToolNames.some((name) => !BOT_MOCK_TOOL_NAMES.includes(name))
   )
-    throw new Error("模拟渠道会话只能经本地 Bot 绑定执行；请返回该工作或模拟接入入口继续。")
+    throw new Error("外部渠道会话只能经已授权的 Bot 绑定执行；请返回原任务或接入渠道继续。")
 }
 export function botMockMetadataSafe(metadata: Record<string, unknown>): boolean {
   return Object.keys(metadata).every(

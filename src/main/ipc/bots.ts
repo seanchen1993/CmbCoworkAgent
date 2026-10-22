@@ -1,3 +1,4 @@
+import type { BuiltinRobotManager } from "../services/im/manager"
 import { BrowserWindow, powerMonitor, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { parseBotMockBinding, parseBotMockEvent } from "../bots/mock-channel-validation"
 import { BotError, LOCAL_BOT_HOST_ID } from "../../shared/bots/contracts"
@@ -41,8 +42,17 @@ function localHost(id: unknown) {
   return getLocalBotHost()
 }
 
-export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDeletionService): void {
+export function registerBotHandlers(
+  ipcMain: IpcMain,
+  deleteThread?: ThreadDeletionService,
+  im?: Pick<BuiltinRobotManager, "setBotHostResolver" | "botChannelStatus" | "requireBotChannel">
+): void {
   initializeBotNotificationDispatch()
+  im?.setBotHostResolver(getLocalBotHost)
+  const imChannel = () => {
+    if (!im) throw new BotError("CONFLICT", "IM 接入尚未初始化")
+    return im.requireBotChannel()
+  }
   let subscribedHost: ReturnType<typeof getLocalBotHost> | undefined
   const hostFor = (id: unknown) => {
     const host = localHost(id)
@@ -124,6 +134,31 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
       botIdentifier(workId),
       version
     )
+  })
+  ipcMain.handle("bots:im:status", (event, hostId) => {
+    mockDesktop(event, hostId)
+    return im?.botChannelStatus() ?? { connected: false, available: false }
+  })
+  ipcMain.handle("bots:im:list", (event, hostId, botId, before) => {
+    mockDesktop(event, hostId).getBot(botIdentifier(botId))
+    if (before !== undefined && (typeof before !== "string" || !/^[1-9]\d{0,18}$/.test(before)))
+      throw new BotError("INVALID_INPUT", "IM 绑定游标无效")
+    return imChannel().list(botId, before)
+  })
+  ipcMain.handle("bots:im:history", (event, hostId, botId, id, before) => {
+    mockDesktop(event, hostId).getBot(botIdentifier(botId))
+    return imChannel().history(botId, botIdentifier(id), mockCursor(before))
+  })
+  ipcMain.handle("bots:im:create", (event, hostId, botId, kind, operationId) => {
+    mockDesktop(event, hostId).getBot(botIdentifier(botId))
+    if (kind !== "dm" && kind !== "group") throw new BotError("INVALID_INPUT", "IM 受众无效")
+    return imChannel().create(botId, kind, botIdentifier(operationId))
+  })
+  ipcMain.handle("bots:im:revoke", (event, hostId, botId, id, version) => {
+    mockDesktop(event, hostId).getBot(botIdentifier(botId))
+    if (!Number.isSafeInteger(version) || version < 1)
+      throw new BotError("INVALID_INPUT", "IM 绑定版本无效")
+    return imChannel().revoke(botId, botIdentifier(id), version)
   })
   ipcMain.handle("bots:mock:bindings", (event, hostId, botId, before) =>
     mockDesktop(event, hostId).mockBindings(botIdentifier(botId), mockCursor(before))

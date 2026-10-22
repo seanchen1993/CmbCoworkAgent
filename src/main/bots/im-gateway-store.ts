@@ -1,0 +1,206 @@
+import { createHash } from "node:crypto"
+import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import type { BotImBinding, BotImEvent } from "../../shared/bots/im-channel"
+import { BotError } from "../../shared/bots/contracts"
+
+export interface StoredBotImEvent {
+  id: string
+  bindingId: string
+  payload: BotImEvent
+  state: "received" | "active" | "completed" | "failed" | "unknown"
+  leaseId: string
+  expiresAt: number
+  taskId: string | null
+}
+export interface StoredBotImBinding {
+  id: string
+  realm: string
+  principal: string
+  binding: BotImBinding
+}
+export const botImScopeId = (...parts: string[]): string =>
+  `im-${createHash("sha256").update(JSON.stringify(parts)).digest("hex")}`
+
+/** Routing receipts only. Bot content and tasks still belong to the existing BotStore. */
+export class BotImGatewayStore {
+  constructor(private readonly db: NativeSqliteAdapter) {
+    db.run(`CREATE TABLE IF NOT EXISTS bot_im_routes (
+      id TEXT PRIMARY KEY,realm TEXT NOT NULL,principal TEXT NOT NULL,bot_id TEXT NOT NULL,binding_json TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS bot_im_routes_owner ON bot_im_routes(realm,principal,bot_id);
+      CREATE TABLE IF NOT EXISTS bot_im_ingress (
+      id TEXT PRIMARY KEY,binding_id TEXT NOT NULL,payload_json TEXT NOT NULL,fingerprint TEXT NOT NULL,
+      state TEXT NOT NULL,lease_id TEXT NOT NULL,expires_at INTEGER NOT NULL,task_id TEXT);
+      CREATE INDEX IF NOT EXISTS bot_im_ingress_state ON bot_im_ingress(state,id);
+      CREATE INDEX IF NOT EXISTS bot_im_ingress_binding ON bot_im_ingress(binding_id,id);
+      CREATE TABLE IF NOT EXISTS bot_im_local_execution(task_id TEXT PRIMARY KEY);
+      CREATE INDEX IF NOT EXISTS bot_im_task_event ON bot_tasks(json_extract(mock_source_json,'$.eventId'),state)
+        WHERE json_extract(mock_source_json,'$.transport')='im';`)
+    if (!this.rows("PRAGMA table_info(bot_im_ingress)").some((row) => row.name === "needs_ack"))
+      db.run("ALTER TABLE bot_im_ingress ADD COLUMN needs_ack INTEGER NOT NULL DEFAULT 0")
+    // The host independently interrupts old tasks. A process restart is never a new execution grant.
+    db.run(
+      "UPDATE bot_im_ingress SET state='unknown',expires_at=0,needs_ack=1 WHERE state IN ('received','active')"
+    )
+  }
+  private rows(sql: string, args: readonly unknown[] = []): Record<string, unknown>[] {
+    const query = this.db.prepare(sql, args),
+      rows: Record<string, unknown>[] = []
+    try {
+      while (query.step()) rows.push(query.getAsObject())
+      return rows
+    } finally {
+      query.free()
+    }
+  }
+  register(realm: string, principal: string, binding: BotImBinding): StoredBotImBinding {
+    const id = botImScopeId(realm, principal, binding.id)
+    const old = this.binding(id)
+    // A delayed create/list response must not downgrade a consumed proof or a revocation.
+    if (
+      old &&
+      (old.binding.version > binding.version ||
+        (old.binding.version === binding.version &&
+          old.binding.state !== "pending" &&
+          binding.state === "pending"))
+    )
+      return old
+    if (
+      old &&
+      (old.binding.botId !== binding.botId ||
+        old.binding.kind !== binding.kind ||
+        (old.binding.conversationKey && old.binding.conversationKey !== binding.conversationKey) ||
+        (old.binding.state === "revoked" && binding.state !== "revoked"))
+    )
+      throw new BotError("CONFLICT", "IM 绑定与本地记录不一致")
+    this.db.run(
+      "INSERT INTO bot_im_routes VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET binding_json=excluded.binding_json",
+      [id, realm, principal, binding.botId, JSON.stringify(binding)]
+    )
+    return { id, realm, principal, binding }
+  }
+  binding(id: string): StoredBotImBinding | null {
+    const row = this.rows("SELECT * FROM bot_im_routes WHERE id=?", [id])[0]
+    return row
+      ? {
+          id,
+          realm: String(row.realm),
+          principal: String(row.principal),
+          binding: JSON.parse(String(row.binding_json))
+        }
+      : null
+  }
+  botIds(realm: string, principal: string): string[] {
+    return this.rows(
+      "SELECT DISTINCT bot_id FROM bot_im_routes WHERE realm=? AND principal=? ORDER BY bot_id",
+      [realm, principal]
+    ).map((row) => String(row.bot_id))
+  }
+  hasRoute(realm: string, principal: string, conversation: string): boolean {
+    return (
+      this.rows(
+        "SELECT id FROM bot_im_routes WHERE realm=? AND principal=? AND json_extract(binding_json,'$.state')='active' AND json_extract(binding_json,'$.conversationKey')=? LIMIT 1",
+        [realm, principal, conversation]
+      ).length > 0
+    )
+  }
+  receive(realm: string, principal: string, payload: BotImEvent): StoredBotImEvent {
+    const bindingId = botImScopeId(realm, principal, payload.route.bindingId),
+      route = this.binding(bindingId)
+    if (
+      !route ||
+      payload.event.principalId !== principal ||
+      route.binding.botId !== payload.route.botId ||
+      route.binding.kind !== payload.route.kind ||
+      route.binding.version !== payload.route.version ||
+      !["pending", "active"].includes(route.binding.state) ||
+      (route.binding.conversationKey &&
+        route.binding.conversationKey !== payload.event.conversationKey)
+    )
+      throw new BotError("CONFLICT", "此 IM 绑定未在本机授权，或授权已变化")
+    const id = botImScopeId(realm, principal, payload.event.eventId)
+    const { lease: _lease, redelivered: _redelivered, ...event } = payload.event
+    const fingerprint = botImScopeId(JSON.stringify({ event, route: payload.route }))
+    const old = this.rows("SELECT * FROM bot_im_ingress WHERE id=?", [id])[0]
+    if (old && old.fingerprint !== fingerprint)
+      throw new BotError("CONFLICT", "IM 事件标识对应不同内容")
+    this.db.run(
+      "INSERT OR IGNORE INTO bot_im_ingress(id,binding_id,payload_json,fingerprint,state,lease_id,expires_at,task_id) VALUES(?,?,?,?,'received',?,0,NULL)",
+      [id, bindingId, JSON.stringify(payload), fingerprint, payload.event.lease.id]
+    )
+    this.db.run("UPDATE bot_im_ingress SET lease_id=? WHERE id=?", [payload.event.lease.id, id])
+    return this.event(id)!
+  }
+  event(id: string): StoredBotImEvent | null {
+    const row = this.rows("SELECT * FROM bot_im_ingress WHERE id=?", [id])[0]
+    return row
+      ? {
+          id,
+          bindingId: String(row.binding_id),
+          payload: JSON.parse(String(row.payload_json)),
+          state: row.state as StoredBotImEvent["state"],
+          leaseId: String(row.lease_id),
+          expiresAt: Number(row.expires_at),
+          taskId: row.task_id == null ? null : String(row.task_id)
+        }
+      : null
+  }
+  active(): StoredBotImEvent[] {
+    return this.rows("SELECT id FROM bot_im_ingress WHERE state='active' ORDER BY id LIMIT 40").map(
+      (row) => this.event(String(row.id))!
+    )
+  }
+  settle(id: string, state: StoredBotImEvent["state"], taskId?: string, expiresAt?: number): void {
+    this.db.run(
+      "UPDATE bot_im_ingress SET state=?,task_id=COALESCE(?,task_id),expires_at=COALESCE(?,expires_at),needs_ack=? WHERE id=?",
+      [
+        state,
+        taskId ?? null,
+        expiresAt ?? null,
+        ["completed", "failed", "unknown"].includes(state) ? 1 : 0,
+        id
+      ]
+    )
+  }
+  pendingAcknowledgements(realm: string, principal: string): StoredBotImEvent[] {
+    return this.rows(
+      "SELECT e.id FROM bot_im_ingress e JOIN bot_im_routes r ON r.id=e.binding_id WHERE e.needs_ack=1 AND r.realm=? AND r.principal=? ORDER BY e.id LIMIT 40",
+      [realm, principal]
+    ).map((row) => this.event(String(row.id))!)
+  }
+  acknowledged(id: string): void {
+    this.db.run("UPDATE bot_im_ingress SET needs_ack=0 WHERE id=?", [id])
+  }
+  pendingTasks(eventId: string): string[] {
+    return this.rows(
+      "SELECT id FROM bot_tasks WHERE json_extract(mock_source_json,'$.transport')='im' AND json_extract(mock_source_json,'$.eventId')=? AND state IN ('queued','running','waiting_user') AND NOT EXISTS(SELECT 1 FROM bot_im_local_execution l WHERE l.task_id=bot_tasks.id) ORDER BY created_at LIMIT 40",
+      [eventId]
+    ).map((row) => String(row.id))
+  }
+  hasFailedTask(eventId: string): boolean {
+    return (
+      this.rows(
+        "SELECT 1 FROM bot_tasks WHERE json_extract(mock_source_json,'$.transport')='im' AND json_extract(mock_source_json,'$.eventId')=? AND state IN ('failed','cancelled','interrupted') AND NOT EXISTS(SELECT 1 FROM bot_im_local_execution l WHERE l.task_id=bot_tasks.id) LIMIT 1",
+        [eventId]
+      ).length > 0
+    )
+  }
+  hasLiveBindings(botId: string): boolean {
+    return (
+      this.rows(
+        "SELECT 1 FROM bot_im_routes WHERE bot_id=? AND (json_extract(binding_json,'$.state')='active' OR (json_extract(binding_json,'$.state')='pending' AND julianday(json_extract(binding_json,'$.expiresAt'))>julianday(?))) LIMIT 1",
+        [botId, new Date().toISOString()]
+      ).length > 0
+    )
+  }
+  removeBot(botId: string): void {
+    this.db.run(
+      "DELETE FROM bot_im_local_execution WHERE task_id IN (SELECT id FROM bot_tasks WHERE bot_id=?)",
+      [botId]
+    )
+    this.db.run(
+      "DELETE FROM bot_im_ingress WHERE binding_id IN (SELECT id FROM bot_im_routes WHERE bot_id=?)",
+      [botId]
+    )
+    this.db.run("DELETE FROM bot_im_routes WHERE bot_id=?", [botId])
+  }
+}

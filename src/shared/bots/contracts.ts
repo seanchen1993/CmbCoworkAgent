@@ -1,3 +1,4 @@
+import type { BotImClient } from "./im-channel"
 import type { BotWorkClient } from "./work"
 import type { BotMockClient, BotMockSource } from "./mock-channel"
 import type { WorkspaceFileScanEntry } from "../workspace-file-scan"
@@ -395,6 +396,7 @@ export interface WriteBotMemoryInput {
 export type BotGroupHistoryCursor = number | { targetMessageId: string }
 
 export interface BotClient {
+  im?: BotImClient
   mock?: BotMockClient
   readonly hostId: string
   readonly filePreview: BotFilePreviewTransport

@@ -81,11 +81,17 @@ export function parseBotMockEvent(input: unknown): BotMockEvent {
   }
 }
 export function parseBotMockSource(input: unknown): BotMockSource {
+  const source = parseBotChannelSource(input)
+  if (source.transport) throw new BotError("INVALID_INPUT", "真实 IM 来源不能用于模拟入口")
+  return source
+}
+export function parseBotChannelSource(input: unknown): BotMockSource {
   const v = object(input, [
     "bindingId",
     "grantVersion",
     "conversationId",
     "audienceKey",
+    "transport",
     "eventId",
     "messageId",
     "senderId"
@@ -93,8 +99,12 @@ export function parseBotMockSource(input: unknown): BotMockSource {
   if (!Number.isSafeInteger(v.grantVersion) || Number(v.grantVersion) < 1)
     throw new BotError("CONFLICT", "模拟来源版本无效")
   const bindingId = botIdentifier(v.bindingId)
-  if (v.audienceKey !== `mock:${bindingId}`) throw new BotError("CONFLICT", "模拟来源受众不一致")
+  if (v.transport !== undefined && v.transport !== "im")
+    throw new BotError("CONFLICT", "渠道来源无效")
+  if (v.audienceKey !== `${v.transport ?? "mock"}:${bindingId}`)
+    throw new BotError("CONFLICT", "模拟来源受众不一致")
   return {
+    ...(v.transport === "im" ? { transport: "im" as const } : {}),
     bindingId,
     grantVersion: Number(v.grantVersion),
     conversationId: botIdentifier(v.conversationId),

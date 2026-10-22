@@ -1,3 +1,6 @@
+import { BotImChannelService } from "./bot-channel-service"
+import type { LocalBotHost } from "../../bots/host"
+import { botImScopeId } from "../../bots/im-gateway-store"
 import type { AgentRunDelivery } from "../../agent/agent-run-service"
 import {
   deleteLegacyChatXRobotCredentials,
@@ -77,6 +80,22 @@ function currentIdentity(): { token: string | null; error: string | null } {
  */
 export class BuiltinRobotManager {
   private client: ImGatewayWsClient | null = null
+  private botChannel: BotImChannelService | null = null
+  private getBotHost: (() => LocalBotHost) | null = null
+  setBotHostResolver(resolver: () => LocalBotHost): void {
+    this.getBotHost = resolver
+  }
+  botChannelStatus() {
+    return {
+      connected: this.client?.isAuthenticated() ?? false,
+      available: this.client?.supportsBotChannel() ?? false
+    }
+  }
+  requireBotChannel(): BotImChannelService {
+    if (!this.botChannel || !this.client?.supportsBotChannel())
+      throw new Error("请在内置机器人设置中连接支持 Bot 接入的网关")
+    return this.botChannel
+  }
   private service: ImUnifiedBotService | null = null
   private appVersion = "unknown"
   private listeners = new Set<StatusListener>()
@@ -377,6 +396,13 @@ export class BuiltinRobotManager {
         this.activeIdentityToken = refreshedToken
         return true
       },
+      ...(this.getBotHost
+        ? {
+            onBotEvent: async (event: import("../../../shared/bots/im-channel").BotImEvent) => {
+              if (this.botChannel) await this.botChannel.receive(event)
+            }
+          }
+        : {}),
       onRemoteEvent: async (event) => {
         const service = this.service
         if (!service) return
@@ -399,7 +425,8 @@ export class BuiltinRobotManager {
           typeof payload.reasonCode === "string" && payload.reasonCode.trim()
             ? payload.reasonCode.trim()
             : "LEASE_REVOKED"
-        if (eventId && this.service) await this.service.handleLeaseRevoked(eventId, reasonCode)
+        if (eventId && !(await this.botChannel?.leaseRevoked(eventId)) && this.service)
+          await this.service.handleLeaseRevoked(eventId, reasonCode)
         this.emitStatus()
       },
       onCardReceipt: async (receipt) => {
@@ -441,9 +468,12 @@ export class BuiltinRobotManager {
         }
       },
       isProactiveRouteConfirmed: (conversationKey, principalId) =>
-        this.confirmedRoute?.principalId === principalId &&
-        this.confirmedRoute.conversationKey === conversationKey,
+        (this.confirmedRoute?.principalId === principalId &&
+          this.confirmedRoute.conversationKey === conversationKey) ||
+        (this.botChannel?.isRouteConfirmed(conversationKey, principalId) ?? false),
       onStatusChange: (status) => {
+        if (this.gatewayStatus.connectionState === "online" && status.connectionState !== "online")
+          this.botChannel?.disconnected()
         this.gatewayStatus = status
         this.emitStatus()
         if (status.connectionState === "online") {
@@ -472,6 +502,14 @@ export class BuiltinRobotManager {
     imCardPublisher.setGateway(client)
     this.client = client
     this.service = service
+    if (this.getBotHost) {
+      this.botChannel = new BotImChannelService(
+        client,
+        botImScopeId(configuredGatewayUrl() ?? ""),
+        this.getBotHost
+      )
+      this.botChannel.start()
+    }
     this.activeIdentityToken = identity.token
     try {
       await service.recoverAndStart()
@@ -480,6 +518,8 @@ export class BuiltinRobotManager {
       console.error("[IM] Builtin robot local state recovery failed:", error)
       await service.stop().catch(() => undefined)
       client.stop()
+      this.botChannel?.stop()
+      this.botChannel = null
       this.client = null
       this.service = null
       this.activeIdentityToken = null
@@ -490,6 +530,8 @@ export class BuiltinRobotManager {
   }
 
   private async stopNow(): Promise<void> {
+    this.botChannel?.stop()
+    this.botChannel = null
     const service = this.service
     const client = this.client
     this.service = null

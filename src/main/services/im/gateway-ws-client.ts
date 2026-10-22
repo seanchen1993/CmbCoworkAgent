@@ -1,3 +1,12 @@
+import {
+  BOT_IM_EXTENSION,
+  assertBotImEvent,
+  assertBotImBindingResult,
+  type BotImEvent,
+  type BotImCommand,
+  type BotImBinding,
+  type BotImBindingPage
+} from "../../../shared/bots/im-channel"
 import { randomUUID } from "node:crypto"
 import WebSocket from "ws"
 import {
@@ -69,6 +78,7 @@ export interface ImGatewayWsClientOptions {
   appVersion: string
   capabilities?: string[]
   onRemoteEvent: (event: RemoteImEventV1) => void | Promise<void>
+  onBotEvent?: (event: BotImEvent) => void | Promise<void>
   onLeaseRevoked?: (payload: Record<string, unknown>) => void | Promise<void>
   onCardReceipt?: (receipt: RemoteImCardReceiptV1) => void | Promise<void>
   onAuthenticationRequired?: (rejectedToken: string) => boolean | Promise<boolean>
@@ -178,6 +188,11 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private syncCommandId: string | null = null
   /** Set by this connection's WELCOME only; every new connection starts at text. */
   private markdownReplies = false
+  private botChannel = false
+  private readonly botCommands = new Map<
+    string,
+    PendingCommand<BotImBinding | BotImBindingPage> & { request: BotImCommand }
+  >()
   private readonly permitCommands = new Map<string, PendingCommand<ImExecutionPermitResult>>()
   private readonly permitCommandByEvent = new Map<string, string>()
   private readonly replyCommands = new Map<string, PendingCommand<ImReplySubmissionResult>>()
@@ -218,6 +233,54 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     return this.markdownReplies
   }
 
+  supportsBotChannel(): boolean {
+    return this.isAuthenticated() && this.botChannel
+  }
+
+  botBindingCommand(
+    request: BotImCommand,
+    commandId: string = randomUUID()
+  ): Promise<BotImBinding | BotImBindingPage> {
+    if (!this.supportsBotChannel())
+      return Promise.reject(
+        new ImGatewayCommandError("网关尚未启用 Bot 接入", {
+          reasonCode: "BOT_CHANNEL_UNAVAILABLE"
+        })
+      )
+    if (this.botCommands.has(commandId)) return Promise.reject(new Error("该绑定操作正在处理中"))
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.botCommands.delete(commandId)
+        reject(
+          new ImGatewayCommandError("绑定操作结果尚未确认，请刷新后重试", { resultUnknown: true })
+        )
+      }, COMMAND_TIMEOUT_MS)
+      this.botCommands.set(commandId, { resolve, reject, timer, request })
+      try {
+        this.sendCommand(
+          "BOT_BINDING_COMMAND",
+          request as unknown as Record<string, unknown>,
+          commandId
+        )
+      } catch (error) {
+        clearTimeout(timer)
+        this.botCommands.delete(commandId)
+        reject(error instanceof Error ? error : new Error("绑定操作发送失败"))
+      }
+    })
+  }
+
+  acquireBotPermit(
+    event: Pick<ImEventRecord, "eventId" | "leaseId">
+  ): Promise<ImExecutionPermitResult> {
+    return this.requestPermit("EXECUTION_PERMIT_ACQUIRE", event)
+  }
+  renewBotPermit(
+    event: Pick<ImEventRecord, "eventId" | "leaseId">
+  ): Promise<ImExecutionPermitResult> {
+    return this.requestPermit("EXECUTION_PERMIT_RENEW", event)
+  }
+
   start(): void {
     if (!this.stopped) return
     this.stopped = false
@@ -233,6 +296,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.helloCommandId = null
     this.syncCommandId = null
     this.markdownReplies = false
+    this.botChannel = false
     this.clearTimers()
     this.rejectPending(
       new ImGatewayCommandError("统一机器人连接已断开", { reasonCode: "DESKTOP_OFFLINE" })
@@ -471,7 +535,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
 
   private requestPermit(
     type: "EXECUTION_PERMIT_ACQUIRE" | "EXECUTION_PERMIT_RENEW",
-    event: ImEventRecord
+    event: Pick<ImEventRecord, "eventId" | "leaseId">
   ): Promise<ImExecutionPermitResult> {
     if (this.permitCommandByEvent.has(event.eventId)) {
       return Promise.resolve({ status: "denied", reasonCode: "PERMIT_DENIED" })
@@ -509,6 +573,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.helloCommandId = null
     this.syncCommandId = null
     this.markdownReplies = false
+    this.botChannel = false
     const url = this.options.url()?.trim()
     const token = this.options.token()?.trim()
     if (!url || !token) {
@@ -583,7 +648,11 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         capabilities: this.options.capabilities ?? ["inbox", "feature", "scheduler", "hitl"],
         // Asking is safe on every gateway: released ones ignore extensions they
         // do not know, and only a gateway that knows this one answers it.
-        protocolExtensions: [DEFAULT_ROUTE_SYNC_EXTENSION, IM_MARKDOWN_REPLY_EXTENSION]
+        protocolExtensions: [
+          DEFAULT_ROUTE_SYNC_EXTENSION,
+          IM_MARKDOWN_REPLY_EXTENSION,
+          ...(this.options.onBotEvent ? [BOT_IM_EXTENSION] : [])
+        ]
       })
     })
     socket.on("message", (data) => {
@@ -736,6 +805,11 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         ) {
           throw new ImGatewayProtocolError("WELCOME payload is invalid")
         }
+        this.botChannel = Boolean(
+          this.options.onBotEvent &&
+          Array.isArray(extensions) &&
+          extensions.includes(BOT_IM_EXTENSION)
+        )
         this.markdownReplies =
           Array.isArray(extensions) && extensions.includes(IM_MARKDOWN_REPLY_EXTENSION)
         console.log(
@@ -761,6 +835,35 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         this.startHeartbeat(heartbeatIntervalSeconds)
         this.scheduleAuthenticationRefresh()
         this.syncCommandId = this.sendEnvelope("SYNC_REQUEST", {})
+        return
+      }
+      case "BOT_BINDING_RESULT": {
+        const pending = commandId ? this.botCommands.get(commandId) : undefined
+        if (!pending || !commandId) return
+        assertBotImBindingResult(payload)
+        const request = pending.request
+        if (
+          request.action === "list"
+            ? !("items" in payload) ||
+              (payload.items as BotImBinding[]).some((binding) => binding.botId !== request.botId)
+            : "items" in payload ||
+              (request.action === "create"
+                ? payload.botId !== request.botId || payload.kind !== request.kind
+                : payload.id !== request.bindingId)
+        )
+          throw new ImGatewayProtocolError("Bot binding result correlation does not match")
+        clearTimeout(pending.timer)
+        this.botCommands.delete(commandId)
+        pending.resolve(payload)
+        return
+      }
+      case "BOT_EVENT": {
+        if (!this.botChannel || !messageId || !this.options.onBotEvent)
+          throw new ImGatewayProtocolError("Bot channel was not negotiated")
+        assertBotImEvent(payload)
+        if (payload.event.principalId !== this.status.principalId)
+          throw new ImGatewayProtocolError("Bot event principal does not match WELCOME")
+        await this.options.onBotEvent(payload)
         return
       }
       case "REMOTE_EVENT": {
@@ -1042,6 +1145,26 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       this.socket?.close(4002, "robot OpenID is not configured")
       return
     }
+    const botPending = commandId ? this.botCommands.get(commandId) : undefined
+    if (botPending && commandId) {
+      clearTimeout(botPending.timer)
+      this.botCommands.delete(commandId)
+      const messages: Record<string, string> = {
+        BINDING_LIMIT: "有效绑定已达上限，请先撤销不再使用的绑定。",
+        BINDING_VERSION_CONFLICT: "绑定状态已变化，请刷新后重试。",
+        BINDING_NOT_FOUND: "当前账号没有此绑定，请检查登录账号。",
+        BOT_CHANNEL_DISABLED: "网关尚未开启 Bot 接入。",
+        BOT_CHANNEL_UNAVAILABLE: "当前网关未提供 Bot 接入，请升级后重试。",
+        SESSION_SUPERSEDED: "当前连接已失效，请重新连接 IM 网关。",
+        BINDING_CONFLICT: "绑定状态发生冲突，请刷新后重试。"
+      }
+      botPending.reject(
+        new ImGatewayCommandError(messages[reasonCode] ?? `IM 绑定操作失败：${reasonCode}`, {
+          reasonCode
+        })
+      )
+      return
+    }
     const eventId = nonEmptyString(payload.eventId)
     const permitPending = commandId ? this.permitCommands.get(commandId) : undefined
     if (permitPending) {
@@ -1095,7 +1218,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private sendCommand(
     type: string,
     payload: Record<string, unknown>,
-    commandId = randomUUID()
+    commandId: string = randomUUID()
   ): string {
     if (!this.status.sessionId || !this.status.principalId) {
       throw new ImGatewayCommandError("统一机器人当前未连接")
@@ -1106,7 +1229,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private sendEnvelope(
     type: string,
     payload: Record<string, unknown>,
-    commandId = randomUUID()
+    commandId: string = randomUUID()
   ): string {
     const socket = this.socket
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -1345,7 +1468,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     for (const pending of [
       ...this.permitCommands.values(),
       ...this.replyCommands.values(),
-      ...this.cardCommands.values()
+      ...this.cardCommands.values(),
+      ...this.botCommands.values()
     ]) {
       clearTimeout(pending.timer)
       pending.reject(error)
@@ -1354,6 +1478,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.permitCommandByEvent.clear()
     this.replyCommands.clear()
     this.replyCommandByIdempotencyKey.clear()
+    this.botCommands.clear()
     this.cardCommands.clear()
     this.cardCommandByInteraction.clear()
     this.cardChains.clear()

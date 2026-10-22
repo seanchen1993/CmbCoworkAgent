@@ -14,7 +14,9 @@ export interface BotMockBinding {
   online: boolean
   createdAt: number
 }
+/** Persisted external source; omitted transport identifies existing local simulations. */
 export interface BotMockSource {
+  transport?: "im"
   bindingId: string
   grantVersion: number
   conversationId: string
@@ -57,7 +59,7 @@ export interface BotMockOutbox {
   sourceTaskId: string
   workId?: string
   text: string
-  state: "pending" | "sending" | "sent" | "unknown" | "blocked"
+  state: "pending" | "sending" | "sent" | "accepted" | "unknown" | "blocked"
   createdAt: number
 }
 export interface BotMockFeedEntry {

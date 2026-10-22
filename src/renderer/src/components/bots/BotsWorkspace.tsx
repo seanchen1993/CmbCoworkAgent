@@ -110,6 +110,7 @@ import { localBotClient } from "./client"
 import { botWorkClient } from "@/lib/bot-work-client"
 import { useBotWorks } from "./use-bot-works"
 import { BotWorkPanel } from "./BotWorkPanel"
+import { BotImChannelDialog } from "./BotImChannelDialog"
 import { BotMockChannelDialog } from "./BotMockChannelDialog"
 import { botChatAccent } from "@/lib/bot-chat-accent"
 import { BotWorkspaceMenu } from "./BotWorkspaceMenu"
@@ -588,6 +589,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const [renaming, setRenaming] = useState<BotDefinition | null>(null)
   const [editor, setEditor] = useState<BotDefinition | "new" | null>(null)
   const [newBotName, setNewBotName] = useState("")
+  const [imBot, setImBot] = useState<BotDefinition | null>(null)
   const [mockBot, setMockBot] = useState<BotDefinition | null>(null)
   const editorTrigger = useRef<HTMLElement | null>(null)
   const profileMenuTrigger = useRef<HTMLButtonElement | null>(null)
@@ -1988,8 +1990,8 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               )}
               {selectedWork?.source && (
                 <div className="bot-work-source" role="note">
-                  模拟渠道任务 ·
-                  此处文字与结果将回到原模拟渠道。仅支持文字和同受众工作，不提供本机文件、电脑或私人记忆。
+                  {selectedWork.source.transport === "im" ? "IM 任务" : "模拟渠道任务"} ·
+                  此处文字与结果将回到原接入会话。仅支持文字和同受众工作，不提供本机文件、电脑或私人记忆。
                 </div>
               )}
               {activeWorkId && !selectedWork ? (
@@ -2201,6 +2203,14 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                       <Settings2 className="mr-2 size-4" />
                       编辑 Bot
                     </button>
+                    {client.im && (
+                      <button
+                        className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
+                        onClick={() => setImBot(selected)}
+                      >
+                        IM 接入
+                      </button>
+                    )}
                     {client.mock && (
                       <button
                         className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
@@ -2315,7 +2325,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   ) : selectedWork?.source &&
                     (detailTab === "files" || detailTab === "computer") ? (
                     <div className="bot-detail-section" role="note">
-                      模拟渠道仅支持文字；此工作无法访问本机资料库和电脑。
+                      外部接入仅支持文字；此工作无法访问本机资料库和电脑。
                     </div>
                   ) : detailTab === "files" ? (
                     <BotFilesPanel
@@ -2455,6 +2465,26 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             returnFocusTo={editorTrigger.current}
             onClose={() => setRenaming(null)}
             onSaved={() => setRenaming(null)}
+          />
+        )}
+        {imBot && client.im && (
+          <BotImChannelDialog
+            key={`${client.hostId}:${imBot.id}`}
+            client={client}
+            bot={imBot}
+            onClose={() => setImBot(null)}
+            onOpenWork={(id) =>
+              updateView({
+                selectedId: imBot.id,
+                groupId: null,
+                detailOpen: true,
+                detailTab: "details",
+                activeWorkIdByBot: {
+                  ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
+                  [imBot.id]: id
+                }
+              })
+            }
           />
         )}
         {mockBot && client.mock && (

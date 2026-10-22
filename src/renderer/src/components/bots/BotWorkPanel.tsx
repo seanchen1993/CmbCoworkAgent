@@ -280,7 +280,7 @@ export function BotWorkPanel({
               {work.title}
             </span>
             <small>
-              {work.source ? "模拟渠道 · " : ""}
+              {work.source ? (work.source.transport === "im" ? "IM · " : "模拟渠道 · ") : ""}
               {status(work)}
             </small>
           </button>

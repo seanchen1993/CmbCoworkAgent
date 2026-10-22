@@ -165,7 +165,7 @@ export function prepareBotThread(
     // Both entrances edit this very Thread. Preserve its settings and original directory.
     return linkedWorkWorkspace(work)
   }
-  if (source && work?.workspace) throw new Error("模拟渠道不能绑定本机工作目录")
+  if (source && work?.workspace) throw new Error("外部渠道不能绑定本机工作目录")
   const workspacePath =
     work?.workspace?.path ??
     botDirectory(
@@ -473,7 +473,7 @@ export function createLocalBotRunPort(
           }
           signal.throwIfAborted()
           if ((work?.source || task.origin.kind === "mock") && !task.mockSource)
-            throw new Error("模拟来源证明缺失")
+            throw new Error("外部渠道来源证明缺失")
           const mock = task.mockSource ? getHost().mockExecution(task) : undefined
           const reporting = task.origin.kind === "work_result"
           const resultStillLinked = () => {
@@ -943,7 +943,7 @@ export function createLocalBotRunPort(
                     try {
                       getHost().mockExecution(task)
                     } catch {
-                      return "模拟绑定授权已变化，已停止执行"
+                      return "渠道授权或执行许可已变化，已停止执行"
                     }
                   }
                   return resolved.metadata.botId === bot.id &&

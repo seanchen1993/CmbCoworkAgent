@@ -15,20 +15,23 @@ import type {
 import {
   parseBotMockBinding,
   parseBotMockEvent,
-  parseBotMockSource
+  parseBotChannelSource as parseBotMockSource
 } from "./mock-channel-validation"
 
-/** Only simulated ingress/delivery lives here. All executions remain original BotTasks. */
+/** Shared external-audience execution store. The mock and authenticated IM transports use
+ * separate tables and source proofs; renderer simulation APIs can only reach the mock instance.
+ * Historical DTO/column names are retained to read existing beta data without migration. */
 export class BotMockChannelStore {
   constructor(
     private db: NativeSqliteAdapter,
     private owner: BotStore,
     private transaction: <T>(body: () => T) => T,
     private changed: () => void,
-    private now: () => number
+    private now: () => number,
+    readonly transport: "mock" | "im" = "mock"
   ) {
     transaction(() => {
-      db.run(`CREATE TABLE IF NOT EXISTS bot_mock_bindings (
+      this.run(`CREATE TABLE IF NOT EXISTS bot_mock_bindings (
         ordinal INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,bot_id TEXT NOT NULL,
         operation_id TEXT UNIQUE NOT NULL,fingerprint TEXT NOT NULL,kind TEXT NOT NULL,channel_key TEXT NOT NULL,
         label TEXT NOT NULL,senders_json TEXT NOT NULL,grant_version INTEGER NOT NULL,revoked INTEGER NOT NULL,
@@ -54,14 +57,24 @@ export class BotMockChannelStore {
         ["bot_work_items", "source_json"]
       ])
         if (!this.rows(`PRAGMA table_info(${table})`).some((r) => r.name === column))
-          db.run(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`)
-      db.run(
-        "CREATE INDEX IF NOT EXISTS bot_mock_interrupted ON bot_tasks(state,id) WHERE mock_source_json IS NOT NULL"
-      )
+          this.run(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`)
+      if (this.transport === "mock")
+        this.run(
+          "CREATE INDEX IF NOT EXISTS bot_mock_interrupted ON bot_tasks(state,id) WHERE mock_source_json IS NOT NULL"
+        )
     })
   }
+  private sql(sql: string): string {
+    return this.transport === "im" ? sql.replaceAll("bot_mock_", "bot_im_") : sql
+  }
+  private run(sql: string, args?: readonly unknown[]): void {
+    this.db.run(this.sql(sql), args)
+  }
+  private belongs(source: BotMockSource): boolean {
+    return (source.transport ?? "mock") === this.transport
+  }
   private rows(sql: string, args: readonly unknown[] = []): Record<string, unknown>[] {
-    const q = this.db.prepare(sql, args),
+    const q = this.db.prepare(this.sql(sql), args),
       rows: Record<string, unknown>[] = []
     try {
       while (q.step()) rows.push(q.getAsObject())
@@ -136,7 +149,7 @@ export class BotMockChannelStore {
     } catch {}
     throw new BotError("INVALID_INPUT", "模拟渠道游标无效")
   }
-  create(raw: CreateBotMockBinding): BotMockBinding {
+  create(raw: CreateBotMockBinding, trustedId?: string): BotMockBinding {
     const input = parseBotMockBinding(raw),
       fingerprint = createHash("sha256").update(JSON.stringify(input)).digest("hex")
     return this.transaction(() => {
@@ -157,9 +170,9 @@ export class BotMockChannelStore {
         ).length
       )
         throw new BotError("CONFLICT", "此模拟会话已有有效绑定，请使用或先撤销原绑定")
-      const id = randomUUID(),
+      const id = this.transport === "im" && trustedId ? trustedId : randomUUID(),
         conversationId = randomUUID()
-      this.db.run(
+      this.run(
         "INSERT INTO bot_mock_bindings(id,bot_id,operation_id,fingerprint,kind,channel_key,label,senders_json,grant_version,revoked,online,created_at) VALUES(?,?,?,?,?,?,?,?,1,0,1,?)",
         [
           id,
@@ -173,21 +186,65 @@ export class BotMockChannelStore {
           this.now()
         ]
       )
-      this.db.run("INSERT INTO bot_mock_conversations VALUES(?,?,?,?,0)", [
+      this.run("INSERT INTO bot_mock_conversations VALUES(?,?,?,?,0)", [
         conversationId,
         id,
         bot.id,
-        `bot-mock-${conversationId}`
+        `bot-${this.transport}-${conversationId}`
       ])
       this.changed()
       return this.get(bot.id, id)
     })
   }
+  importImBinding(input: {
+    id: string
+    botId: string
+    kind: "dm" | "group"
+    label: string
+    channelKey: string
+    version: number
+  }): BotMockBinding {
+    if (this.transport !== "im" || input.version !== 1)
+      throw new BotError("CONFLICT", "真实绑定版本不匹配")
+    const binding = this.create(
+      {
+        simulation: true,
+        botId: input.botId,
+        operationId: input.id,
+        kind: input.kind,
+        channelKey: input.channelKey,
+        label: input.label,
+        allowedSenderIds: ["gateway"]
+      },
+      input.id
+    )
+    if (binding.id !== input.id || binding.revoked) throw new BotError("CONFLICT", "真实绑定已撤销")
+    return binding
+  }
+  setAllOffline(): void {
+    this.run("UPDATE bot_mock_bindings SET online=0 WHERE online=1")
+    this.changed()
+  }
+  /** Only BotStore's admitted local-user command (or its tool-created child) grants this. */
+  authorizeLocalContinuation(task: BotTask): void {
+    if (this.transport !== "im" || task.mockSource?.transport !== "im") return
+    if (
+      task.origin.kind === "user" ||
+      (task.origin.kind === "work" &&
+        this.rows("SELECT 1 FROM bot_im_local_execution WHERE task_id=?", [
+          task.origin.sourceTaskId
+        ]).length)
+    )
+      this.run("INSERT OR IGNORE INTO bot_im_local_execution VALUES(?)", [task.id])
+  }
+  private permitSql(taskAlias: string): string {
+    return `(EXISTS(SELECT 1 FROM bot_im_local_execution l WHERE l.task_id=${taskAlias}.id) OR EXISTS(SELECT 1 FROM bot_im_ingress ie WHERE ie.id=json_extract(${taskAlias}.mock_source_json,'$.eventId') AND ie.state='active' AND ie.expires_at>${this.now()}))`
+  }
   setOnline(botId: string, id: string, online: boolean): BotMockBinding {
     return this.transaction(() => {
       const binding = this.get(botId, id)
       if (binding.revoked) throw new BotError("CONFLICT", "模拟绑定已撤销")
-      this.db.run("UPDATE bot_mock_bindings SET online=? WHERE id=?", [online, id])
+      this.run("UPDATE bot_mock_bindings SET online=? WHERE id=?", [online, id])
       this.changed()
       return this.get(botId, id)
     })
@@ -197,19 +254,18 @@ export class BotMockChannelStore {
       const binding = this.get(botId, id)
       if (binding.revoked && binding.grantVersion === expected + 1) return binding
       if (binding.grantVersion !== expected) throw new BotError("CONFLICT", "模拟授权已变化")
-      this.db.run(
-        "UPDATE bot_mock_bindings SET revoked=1,grant_version=grant_version+1 WHERE id=?",
-        [id]
-      )
-      this.db.run(
+      this.run("UPDATE bot_mock_bindings SET revoked=1,grant_version=grant_version+1 WHERE id=?", [
+        id
+      ])
+      this.run(
         "UPDATE bot_tasks SET state='cancelled',error='模拟绑定已撤销',updated_at=? WHERE state='queued' AND json_extract(mock_source_json,'$.bindingId')=?",
         [this.now(), id]
       )
-      this.db.run(
+      this.run(
         "UPDATE bot_mock_events SET execution_state='cancelled' WHERE binding_id=? AND task_id IN (SELECT id FROM bot_tasks WHERE state='cancelled')",
         [id]
       )
-      this.db.run(
+      this.run(
         "UPDATE bot_mock_outbox SET state='blocked' WHERE binding_id=? AND state='pending'",
         [id]
       )
@@ -227,8 +283,11 @@ export class BotMockChannelStore {
     return binding
   }
   validateSource(raw: BotMockSource, botId: string, requireActive = true): BotMockSource {
-    const source = parseBotMockSource(raw),
-      binding = requireActive ? this.active(source.bindingId) : this.get(botId, source.bindingId)
+    const source = parseBotMockSource(raw)
+    if (!this.belongs(source)) throw new BotError("CONFLICT", "渠道来源不匹配")
+    const binding = requireActive
+      ? this.active(source.bindingId)
+      : this.get(botId, source.bindingId)
     const convo = this.rows(
       "SELECT * FROM bot_mock_conversations WHERE id=? AND binding_id=? AND bot_id=?",
       [source.conversationId, source.bindingId, botId]
@@ -244,7 +303,7 @@ export class BotMockChannelStore {
       !payload ||
       binding.botId !== botId ||
       (requireActive && binding.grantVersion !== source.grantVersion) ||
-      !binding.allowedSenderIds.includes(source.senderId) ||
+      (this.transport === "mock" && !binding.allowedSenderIds.includes(source.senderId)) ||
       event.message_id !== source.messageId ||
       payload.senderId !== source.senderId ||
       payload.bindingId !== source.bindingId ||
@@ -266,6 +325,14 @@ export class BotMockChannelStore {
     }
     const source = this.validateSource(task.mockSource, task.botId, requireActive),
       binding = this.get(task.botId, source.bindingId)
+    if (
+      requireActive &&
+      this.transport === "im" &&
+      (!binding.online ||
+        !this.rows(`SELECT 1 FROM bot_tasks t WHERE t.id=? AND ${this.permitSql("t")}`, [task.id])
+          .length)
+    )
+      throw new BotError("CONFLICT", "IM 执行许可已失效，已停止处理")
     if (task.workId) {
       const work = this.owner.getWork(task.botId, task.workId)
       if (
@@ -339,7 +406,7 @@ export class BotMockChannelStore {
   }
   initialize(source: BotMockSource): void {
     this.validateSource(source, this.active(source.bindingId).botId)
-    this.db.run("UPDATE bot_mock_conversations SET initialized=1 WHERE id=? AND binding_id=?", [
+    this.run("UPDATE bot_mock_conversations SET initialized=1 WHERE id=? AND binding_id=?", [
       source.conversationId,
       source.bindingId
     ])
@@ -388,7 +455,7 @@ export class BotMockChannelStore {
         return receipt
       }
       this.active(input.bindingId)
-      if (!binding.allowedSenderIds.includes(input.senderId))
+      if (this.transport === "mock" && !binding.allowedSenderIds.includes(input.senderId))
         throw new BotError("CONFLICT", "此模拟身份未获该会话授权")
       const quoted = input.replyToMessageId
         ? this.rows(
@@ -406,7 +473,7 @@ export class BotMockChannelStore {
         taskId: null,
         reason: triggered ? null : "群消息未提及本 Bot，也未回复其本渠道消息"
       }
-      this.db.run("INSERT INTO bot_mock_events VALUES(?,?,?,?,?,?,NULL,?,?)", [
+      this.run("INSERT INTO bot_mock_events VALUES(?,?,?,?,?,?,NULL,?,?)", [
         binding.id,
         input.eventId,
         input.messageId,
@@ -424,7 +491,8 @@ export class BotMockChannelStore {
           bindingId: binding.id,
           grantVersion: binding.grantVersion,
           conversationId: String(convo.id),
-          audienceKey: `mock:${binding.id}`,
+          ...(this.transport === "im" ? { transport: "im" as const } : {}),
+          audienceKey: `${this.transport}:${binding.id}`,
           eventId: input.eventId,
           messageId: input.messageId,
           senderId: input.senderId
@@ -458,7 +526,7 @@ export class BotMockChannelStore {
           source
         )
         receipt.taskId = task.id
-        this.db.run(
+        this.run(
           "UPDATE bot_mock_events SET task_id=?,receipt_json=? WHERE binding_id=? AND event_id=?",
           [task.id, JSON.stringify(receipt), binding.id, input.eventId]
         )
@@ -470,10 +538,10 @@ export class BotMockChannelStore {
   settle(task: BotTask, state: BotTaskState, text: string): void {
     if (!task.mockSource) return
     const source = this.validateSource(task.mockSource, task.botId, false)
-    this.db.run("UPDATE bot_mock_events SET execution_state=? WHERE task_id=?", [state, task.id])
+    this.run("UPDATE bot_mock_events SET execution_state=? WHERE task_id=?", [state, task.id])
     const binding = this.get(task.botId, source.bindingId)
     const output = text.trim() || "本轮没有可确认的文字结果，请查看执行状态。"
-    this.db.run("INSERT OR IGNORE INTO bot_mock_outbox VALUES(?,?,?,?,?,?,?,?,?,?,?)", [
+    this.run("INSERT OR IGNORE INTO bot_mock_outbox VALUES(?,?,?,?,?,?,?,?,?,?,?)", [
       `mock-reply-${task.id}`,
       task.botId,
       source.bindingId,
@@ -508,7 +576,7 @@ export class BotMockChannelStore {
         `SELECT o.* FROM bot_mock_outbox o JOIN bot_mock_bindings b ON b.id=o.binding_id JOIN bots bot ON bot.id=o.bot_id WHERE o.state='pending' AND b.revoked=0 AND b.online=1 AND b.grant_version=o.grant_version AND bot.archived=0 AND bot.deleting=0 ORDER BY o.created_at,o.id LIMIT 1`
       )[0]
       if (!row) return null
-      this.db.run("UPDATE bot_mock_outbox SET state='sending' WHERE id=? AND state='pending'", [
+      this.run("UPDATE bot_mock_outbox SET state='sending' WHERE id=? AND state='pending'", [
         row.id
       ])
       this.changed()
@@ -524,7 +592,7 @@ export class BotMockChannelStore {
       row && !row.revoked && !row.archived && !row.deleting && row.grant_version === row.frozen
     if (row?.state === "sending" && valid && row.online) return true
     if (row?.state === "sending") {
-      this.db.run("UPDATE bot_mock_outbox SET state=? WHERE id=?", [
+      this.run("UPDATE bot_mock_outbox SET state=? WHERE id=?", [
         valid && !row.online ? "pending" : "blocked",
         id
       ])
@@ -532,8 +600,8 @@ export class BotMockChannelStore {
     }
     return false
   }
-  delivered(id: string, state: "sent" | "unknown"): void {
-    this.db.run("UPDATE bot_mock_outbox SET state=? WHERE id=? AND state='sending'", [state, id])
+  delivered(id: string, state: "sent" | "unknown" | "accepted" | "pending" | "blocked"): void {
+    this.run("UPDATE bot_mock_outbox SET state=? WHERE id=? AND state='sending'", [state, id])
     this.changed()
   }
   private recoveryAfterId = ""
@@ -542,10 +610,13 @@ export class BotMockChannelStore {
     this.recoveryAfterId = ""
     this.recoveryHighId = String(
       this.rows(
-        "SELECT COALESCE(MAX(id),'') AS id FROM bot_tasks WHERE mock_source_json IS NOT NULL AND state='interrupted'"
+        "SELECT COALESCE(MAX(id),'') AS id FROM bot_tasks WHERE mock_source_json IS NOT NULL AND COALESCE(json_extract(mock_source_json,'$.transport'),'mock')=? AND state='interrupted'",
+        [this.transport]
       )[0].id
     )
-    this.db.run("UPDATE bot_mock_outbox SET state='unknown' WHERE state='sending'")
+    this.run("UPDATE bot_mock_outbox SET state=? WHERE state='sending'", [
+      this.transport === "im" ? "pending" : "unknown"
+    ])
     if (this.db.getRowsModified()) this.changed()
   }
   /** At most 40 metadata rows per pump; never resume a model or an external effect. */
@@ -553,8 +624,8 @@ export class BotMockChannelStore {
     if (!this.recoveryHighId) return false
     const outcome = this.transaction(() => {
       const batch = this.rows(
-        "SELECT t.id,o.source_task_id AS recorded FROM bot_tasks t LEFT JOIN bot_mock_outbox o ON o.source_task_id=t.id WHERE t.mock_source_json IS NOT NULL AND t.state='interrupted' AND t.id>? AND t.id<=? ORDER BY t.id LIMIT 40",
-        [this.recoveryAfterId, this.recoveryHighId]
+        "SELECT t.id,o.source_task_id AS recorded FROM bot_tasks t LEFT JOIN bot_mock_outbox o ON o.source_task_id=t.id WHERE t.mock_source_json IS NOT NULL AND COALESCE(json_extract(t.mock_source_json,'$.transport'),'mock')=? AND t.state='interrupted' AND t.id>? AND t.id<=? ORDER BY t.id LIMIT 40",
+        [this.transport, this.recoveryAfterId, this.recoveryHighId]
       )
       for (const row of batch) {
         if (row.recorded != null) continue
@@ -572,7 +643,10 @@ export class BotMockChannelStore {
     return outcome.more
   }
   runnableSql(taskAlias: string): string {
-    return `(${taskAlias}.mock_source_json IS NULL OR EXISTS(SELECT 1 FROM bot_mock_bindings mb WHERE mb.id=json_extract(${taskAlias}.mock_source_json,'$.bindingId') AND mb.revoked=0 AND mb.online=1 AND mb.grant_version=json_extract(${taskAlias}.mock_source_json,'$.grantVersion')))`
+    const permit = this.transport === "im" ? ` AND ${this.permitSql(taskAlias)}` : ""
+    return this.sql(
+      `(${taskAlias}.mock_source_json IS NULL OR COALESCE(json_extract(${taskAlias}.mock_source_json,'$.transport'),'mock')<>'${this.transport}' OR EXISTS(SELECT 1 FROM bot_mock_bindings mb WHERE mb.id=json_extract(${taskAlias}.mock_source_json,'$.bindingId') AND mb.revoked=0 AND mb.online=1 AND mb.grant_version=json_extract(${taskAlias}.mock_source_json,'$.grantVersion')${permit}))`
+    )
   }
   threads(botId?: string): string[] {
     return this.rows(
@@ -587,7 +661,7 @@ export class BotMockChannelStore {
       "bot_mock_conversations",
       "bot_mock_bindings"
     ])
-      this.db.run(
+      this.run(
         `DELETE FROM ${table} WHERE ${table === "bot_mock_events" ? "binding_id IN (SELECT id FROM bot_mock_bindings WHERE bot_id=?)" : "bot_id=?"}`,
         [botId]
       )

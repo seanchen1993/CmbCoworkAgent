@@ -251,7 +251,7 @@ export class LocalBotHost {
     const run = this.active.get(taskId)
     if (!run || run.controller.signal.aborted) throw new BotError("CONFLICT", "当前执行已停止")
     const task = this.store.getTask(taskId)
-    if (task.mockSource) this.store.mock.execution(task)
+    if (task.mockSource) this.store.external(task.mockSource).execution(task)
     else if (
       task.origin.kind === "mock" ||
       (task.workId && this.store.getWork(task.botId, task.workId).source)
@@ -333,6 +333,19 @@ export class LocalBotHost {
       task.mockSource?.audienceKey ?? "desktop"
     )
   }
+  /** Main-process authenticated IM adapter only; not exposed as a renderer injection API. */
+  get imChannel() {
+    return this.store.im
+  }
+  get imGateway() {
+    return this.store.imGateway
+  }
+  acceptImEvent(input: Omit<BotMockEvent, "simulation">) {
+    this.requireRunning()
+    const result = this.store.im.inject({ ...input, simulation: true })
+    this.wake()
+    return result
+  }
   mockBindings(botId: string, before?: string) {
     this.requireRunning()
     return this.store.mock.bindings(botId, before)
@@ -373,10 +386,10 @@ export class LocalBotHost {
   }
   mockExecution(task: BotTask) {
     this.requireRunning()
-    return this.store.mock.execution(task)
+    return this.store.external(task.mockSource).execution(task)
   }
   initializeMockThread(task: BotTask) {
-    if (task.mockSource) this.store.mock.initialize(task.mockSource)
+    if (task.mockSource) this.store.external(task.mockSource).initialize(task.mockSource)
   }
   async createWork(
     input: CreateBotWorkInput,
@@ -1083,7 +1096,9 @@ export class LocalBotHost {
   private mockRecoveryTimer: ReturnType<typeof setTimeout> | undefined
   private pumpMockRecovery(): void {
     if (this.mockRecoveryComplete || this.mockRecoveryTimer) return
-    if (!this.store.mock.recoverInterruptedBatch()) {
+    const mockMore = this.store.mock.recoverInterruptedBatch()
+    const imMore = this.store.im.recoverInterruptedBatch()
+    if (!mockMore && !imMore) {
       this.mockRecoveryComplete = true
       return
     }

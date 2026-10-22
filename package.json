@@ -73,6 +73,7 @@
     "dev:bot-preview": "electron-vite dev",
     "test:bot-integration:core": "vitest run src/main/bots src/shared/bots src/main/ipc/bots.test.ts src/main/ipc/bot-files.test.ts src/main/agent/standard-thread-turn.test.ts src/main/agent/pinned-model-routing.test.ts src/main/agent/runtime-tool-allowlist.test.ts src/main/agent/local-sandbox-background-settlement.test.ts src/main/agent/bot-checkpoint-resume.test.ts src/main/agent/turn-completion-integrity.test.ts src/main/agent/library/runtime-capabilities.test.ts src/main/hooks/mock-scope.test.ts src/main/routing/model-registry-integration.test.ts src/renderer/src/lib/bot src/renderer/src/lib/thread-classification.test.ts --maxWorkers=2",
     "test:bot-integration:e2e": "node --import tsx scripts/run-bot-integration-e2e.mjs",
+    "test:bot-im": "vitest run src/main/bots/im-channel.test.ts src/main/bots/im-wire.test.ts --maxWorkers=2 && tsx tests/bots-im-dialog-browser.spec.ts",
     "test:bot-integration:boundaries": "tsx tests/bots-legacy-disconnection.spec.ts",
     "dev:mock-task-cards": "node -e \"const { spawnSync } = require('child_process'); process.env.CMB_TASK_CARDS_MOCK = '1'; const result = spawnSync('electron-vite', ['dev'], { stdio: 'inherit', shell: true, env: process.env }); process.exit(result.status ?? 1)\"",
     "build": "electron-vite build",
