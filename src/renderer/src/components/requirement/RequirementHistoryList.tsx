@@ -420,7 +420,27 @@ export function RequirementHistoryList({
                 return (
                   <article
                     key={item.id}
-                    className="group relative min-h-[150px] rounded-xl border border-border bg-background-elevated p-4 ring-primary/20 transition-[border-color,box-shadow] duration-200 hover:border-primary/70 hover:ring-1"
+                    role={item.origin === "space" ? "button" : undefined}
+                    tabIndex={item.origin === "space" ? 0 : undefined}
+                    className={cn(
+                      "group relative min-h-[150px] rounded-xl border border-border bg-background-elevated p-4 ring-primary/20 transition-[border-color,box-shadow] duration-200 hover:border-primary/70 hover:ring-1",
+                      item.origin === "space" && "cursor-pointer"
+                    )}
+                    onClick={(event) => {
+                      if (item.origin !== "space") return
+                      if ((event.target as HTMLElement).closest("button, a, input")) return
+                      onOpen(item)
+                    }}
+                    onKeyDown={(event) => {
+                      if (
+                        item.origin !== "space" ||
+                        event.target !== event.currentTarget ||
+                        (event.key !== "Enter" && event.key !== " ")
+                      )
+                        return
+                      event.preventDefault()
+                      onOpen(item)
+                    }}
                   >
                     {selectionMode && !item.readOnly ? (
                       <span className="absolute left-2 top-2">

@@ -19,6 +19,7 @@ import {
 import { getSelectedRequirementSystem, useRequirementStore } from "./requirement-store"
 import type { DesignSystemInfo } from "../design/types"
 import { useAppStore } from "@/lib/store"
+import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import {
   leanstarRequirementsApi,
   type NamespaceTreeNode,
@@ -275,11 +276,33 @@ export function RequirementEntryView(): React.JSX.Element {
     requirement: RequirementRecord,
     threadId?: string
   ): Promise<void> => {
+    const requestId = ++openRequirementRequestRef.current
     if (requirement.readOnly) {
-      toast.info("需求空间3.0详情跳转暂未接入")
+      const requirementCode = requirement.sourceName.trim()
+      if (!requirementCode) {
+        toast.error("该需求缺少需求编号，无法读取需求文档")
+        return
+      }
+      const toastId = toast.loading("正在加载需求文档")
+      try {
+        const document =
+          await leanstarRequirementsApi.getRequirementDocumentContent(requirementCode)
+        if (requestId !== openRequirementRequestRef.current) return
+        openResourcePanelOverlay("preview", {
+          inlinePreview: {
+            title: document?.title?.trim() || requirement.title,
+            content: document?.documentTextContent ?? ""
+          }
+        })
+      } catch (error) {
+        if (requestId === openRequirementRequestRef.current) {
+          toast.error(error instanceof Error ? error.message : "加载需求文档失败")
+        }
+      } finally {
+        toast.dismiss(toastId)
+      }
       return
     }
-    const requestId = ++openRequirementRequestRef.current
     try {
       const ensured = threadId
         ? { requirement, threadId }
