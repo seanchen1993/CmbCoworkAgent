@@ -232,6 +232,17 @@ export function DesignGallery({
                   borderTop: "1px solid #f0eee8",
                   background: "#ffffff",
                 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, marginBottom: 5, color: "#8b5e3c" }}>
+                    {meta.generationState === "generating" ? "● 生成中" :
+                     meta.generationState === "asking" ? "● 正在整理问题" :
+                     meta.generationState === "waiting_approval" ? "● 等待授权" :
+                     meta.generationState === "questions_ready" ? "等待回答" :
+                     meta.generationState === "done" ? "已完成" :
+                     meta.generationState === "error" ? "生成失败" :
+                     meta.generationState === "interrupted" ? "已中断" :
+                     meta.generationState === "cancelled" ? "已停止" : ""}
+                    {meta.unread && <span style={{ color: "#cc785c" }}>有新动态</span>}
+                  </div>
                   {meta.kind && meta.kind !== "prompt" && (
                     <div style={{ marginBottom: 6 }}>
                       <span style={{

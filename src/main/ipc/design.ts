@@ -9,8 +9,22 @@
 
 import fs from "fs"
 import path from "path"
-import { ipcMain, BrowserWindow, app, net } from "electron"
+import { ipcMain, BrowserWindow, app, net, type WebContents } from "electron"
 import Store from "electron-store"
+import { getDb } from "../db"
+import { DesignSessionStore } from "../services/design/session-store"
+import { DesignRunManager } from "../services/design/run-manager"
+import { approvalDecisionBroker } from "../agent/approval-decision-broker"
+import { asDesignApprovalRequest, type DesignRunEvent, type DesignSessionChange, type DesignSessionSeed, type DesignRunRequest, type TabState, type SessionMeta } from "../../shared/managed-design-session"
+
+const designExecutors = new Map<string, (params: Record<string, unknown>) => Promise<void>>()
+const managedDesignSinks = new Map<string, (event: DesignRunEvent) => void>()
+function registerDesignExecutor<P extends { sessionId: string }>(channel: string,
+  execute: (event: { sender?: WebContents }, params: P) => Promise<void>): void {
+  designExecutors.set(channel, (params) => execute({}, params as P))
+  ipcMain.on(channel, execute)
+}
+
 import AdmZip from "adm-zip"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages"
@@ -656,7 +670,7 @@ interface DesignArtifactMetadata {
   designSystemId?: string | null
   designSystemName?: string | null
   designSystemCategory?: string | null
-  sourceKind?: string
+  sourceKind?: import("../../shared/managed-design-session").SessionMeta["kind"]
   sourceLabel?: string
   htmlPath?: string
   createdAt: string
@@ -2772,6 +2786,166 @@ function sleepDesignRetryDelay(ms: number, signal: AbortSignal): Promise<void> {
 // ─────────────────────────────────────────────────────────
 
 export function registerDesignHandlers(): void {
+  const subscribers = new Map<number, Set<string>>()
+  const publish = (change: DesignSessionChange) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) continue
+      const subscribed = subscribers.get(window.webContents.id)?.has(change.id)
+      window.webContents.send(
+        "design:sessions-changed",
+        subscribed ? change : { ...change, snapshot: undefined },
+      )
+    }
+  }
+  const manager = new DesignRunManager(new DesignSessionStore(getDb()), {
+    publish,
+    abort: (runId) => {
+      activeSessions.get(runId)?.abort()
+      activeDesignAgents.get(runId)?.abort()
+    },
+    execute: async (request, runId, emit, snapshot) => {
+      const channel =
+        request.kind === "questions"
+          ? "design:ask-questions"
+          : request.kind === "image"
+            ? "design:generate-from-image"
+            : "design:agent-generate"
+      const execute = designExecutors.get(channel)
+      if (!execute) throw new Error("设计生成入口不可用")
+      managedDesignSinks.set(runId, emit)
+      try {
+        const runtimeSession = request.freshAgentThread
+          ? `retry_${runId}_${request.designSessionId}`
+          : request.designSessionId
+        await execute({
+          ...request,
+          sessionId: runId,
+          designSessionId: runtimeSession,
+          tabId: "design-main",
+          workspacePath: snapshot.workspacePath ?? undefined,
+          artifactId: `${request.designSessionId}_design-main`,
+          currentHtml: request.isIteration
+            ? request.currentHtml || snapshot.state.html
+            : undefined,
+          designSystemId: snapshot.state.selectedDesignSystemId ?? undefined,
+        })
+      } finally {
+        managedDesignSinks.delete(runId)
+        activeSessions.delete(runId)
+        activeDesignAgents.delete(runId)
+      }
+    },
+    finalize: (event, request, snapshot) => {
+      if (!event.html?.trim()) throw new Error("生成未返回有效 HTML")
+      const artifactId = `${request.designSessionId}_design-main`
+      // Agent runs already validate and save artifacts. Image runs use the same durable sink here.
+      if (event.artifactPath) return event
+      const result = saveDesignArtifact(
+        artifactId,
+        event.html,
+        snapshot.workspacePath ?? undefined,
+      )
+      if (!result.success || !result.filePath)
+        throw new Error(result.error ?? "设计产物保存失败")
+      const metadata = writeDesignArtifactMetadata(result.filePath, {
+        artifactId,
+        prompt: request.prompt,
+        modelId: request.modelId ?? null,
+        designSystemId: snapshot.state.selectedDesignSystemId,
+        preview: { thumbnailText: makeDesignThumbnailText(event.html) },
+        variations: extractDesignVariationMetadata(event.html),
+      })
+      storeDesignHtml(artifactId, event.html)
+      return {
+        ...event,
+        artifactPath: result.filePath,
+        metadata: metadata ?? undefined,
+      }
+    },
+  })
+  app.on("will-quit", () => manager.interruptAll())
+  approvalDecisionBroker.subscribePending((registration) => {
+    manager.approval(
+      registration.threadId,
+      asDesignApprovalRequest(registration.request),
+    )
+  })
+  approvalDecisionBroker.subscribeRemoved((requestId) =>
+    manager.approvalRemoved(requestId),
+  )
+  ipcMain.handle(
+    "design:sessions-migrate",
+    (_event, seeds: DesignSessionSeed[]) =>
+      manager.migrate(seeds.map(prepareSeed)),
+  )
+  ipcMain.handle("design:sessions-list", () => manager.list())
+  const prepareSeed = (seed: DesignSessionSeed): DesignSessionSeed => {
+    const storedWorkspace = designAgentStore.get("workspacePath", null)
+    const workspacePath =
+      seed.workspacePath ||
+      (typeof storedWorkspace === "string" ? storedWorkspace : null) ||
+      app.getPath("userData")
+    const artifact = seed.state.artifactPath
+      ? readSavedDesignArtifactFile(seed.state.artifactPath, workspacePath)
+      : readDesignArtifact(`${seed.id}_design-main`, workspacePath)
+    if (artifact.success && artifact.html) {
+      seed.state.html = artifact.html
+      seed.state.artifactPath = artifact.filePath ?? seed.state.artifactPath
+    }
+    return { ...seed, workspacePath }
+  }
+  ipcMain.handle("design:session-create", (_event, seed: DesignSessionSeed) =>
+    manager.create(prepareSeed(seed)),
+  )
+  ipcMain.handle("design:session-open", (event, id: string) => {
+    let ids = subscribers.get(event.sender.id)
+    if (!ids) {
+      subscribers.set(event.sender.id, (ids = new Set()))
+      event.sender.once("destroyed", () => subscribers.delete(event.sender.id))
+    }
+    ids.add(id)
+    // Attaching the subscriber and taking the snapshot have no await between them.
+    return manager.get(id)
+  })
+  ipcMain.handle("design:session-close", (event, id: string) => {
+    subscribers.get(event.sender.id)?.delete(id)
+  })
+  ipcMain.handle(
+    "design:session-patch",
+    (
+      _event,
+      {
+        id,
+        patch,
+        meta,
+      }: { id: string; patch: Partial<TabState>; meta?: Partial<SessionMeta> },
+    ) => manager.patch(id, patch, meta),
+  )
+  ipcMain.handle("design:session-start", (_event, request: DesignRunRequest) =>
+    manager.start(request),
+  )
+  ipcMain.handle("design:session-stop", (_event, id: string) =>
+    manager.stop(id),
+  )
+  ipcMain.handle(
+    "design:session-workspace",
+    (_event, { id, path }: { id: string; path: string }) =>
+      manager.setWorkspace(id, path),
+  )
+  ipcMain.handle(
+    "design:session-retry",
+    (_event, { id, requestId }: { id: string; requestId: string }) =>
+      manager.retry(id, requestId),
+  )
+  ipcMain.handle("design:session-delete", (_event, id: string) =>
+    manager.remove(id),
+  )
+  ipcMain.handle(
+    "design:session-read",
+    (_event, { id, seq }: { id: string; seq: number }) =>
+      manager.markRead(id, seq),
+  )
+
   ipcMain.handle(
     "design:import-url",
     async (_event, { url }: DesignImportUrlParams): Promise<{
@@ -2872,7 +3046,7 @@ export function registerDesignHandlers(): void {
   )
 
   // design:ask-questions — stream questions JSON from model
-  ipcMain.on(
+  registerDesignExecutor(
     "design:ask-questions",
     async (
       event,
@@ -2884,11 +3058,13 @@ export function registerDesignHandlers(): void {
       }
     ) => {
       const channel = `design:questions:${sessionId}`
-      const window = BrowserWindow.fromWebContents(event.sender)
+      const window = event.sender ? BrowserWindow.fromWebContents(event.sender) : null
 
       const send = (data: object) => {
+        const sink = managedDesignSinks.get(sessionId)
+        if (sink) { sink(data as DesignRunEvent); return }
         if (window && !window.isDestroyed()) {
-          event.sender.send(channel, data)
+          event.sender?.send(channel, data)
         }
       }
 
@@ -2938,7 +3114,7 @@ export function registerDesignHandlers(): void {
   )
 
   // design:generate — streaming, same pattern as agent:invoke
-  ipcMain.on(
+  registerDesignExecutor(
     "design:generate",
     async (event, {
       sessionId, prompt, modelId, history, tabId,
@@ -2952,11 +3128,13 @@ export function registerDesignHandlers(): void {
       tabId?: string
     }) => {
       const channel = `design:stream:${sessionId}`
-      const window = BrowserWindow.fromWebContents(event.sender)
+      const window = event.sender ? BrowserWindow.fromWebContents(event.sender) : null
 
       const send = (data: object) => {
+        const sink = managedDesignSinks.get(sessionId)
+        if (sink) { sink(data as DesignRunEvent); return }
         if (window && !window.isDestroyed()) {
-          event.sender.send(channel, data)
+          event.sender?.send(channel, data)
         }
       }
 
@@ -3041,7 +3219,7 @@ export function registerDesignHandlers(): void {
   )
 
   // design:generate-from-image — multimodal: image + optional prompt → single HTML (no variations)
-  ipcMain.on(
+  registerDesignExecutor(
     "design:generate-from-image",
     async (
       event,
@@ -3055,11 +3233,13 @@ export function registerDesignHandlers(): void {
       }
     ) => {
       const channel = `design:image-stream:${sessionId}`
-      const window = BrowserWindow.fromWebContents(event.sender)
+      const window = event.sender ? BrowserWindow.fromWebContents(event.sender) : null
 
       const send = (data: object) => {
+        const sink = managedDesignSinks.get(sessionId)
+        if (sink) { sink(data as DesignRunEvent); return }
         if (window && !window.isDestroyed()) {
-          event.sender.send(channel, data)
+          event.sender?.send(channel, data)
         }
       }
 
@@ -3262,7 +3442,7 @@ export function registerDesignHandlers(): void {
   // naturally inherits Skills, MCP tools, Hooks, Approvals and context
   // summarization. Uses tabId as the LangGraph thread ID for native multi-turn.
   // ─────────────────────────────────────────────────────────
-  ipcMain.on(
+  registerDesignExecutor(
     "design:agent-generate",
     async (event, {
       sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath, designSessionId, designSystemId,
@@ -3282,9 +3462,11 @@ export function registerDesignHandlers(): void {
       designSystemId?: string
     }) => {
       const channel = `design:stream:${sessionId}`
-      const win = BrowserWindow.fromWebContents(event.sender)
+      const win = event.sender ? BrowserWindow.fromWebContents(event.sender) : null
       const send = (data: object) => {
-        if (win && !win.isDestroyed()) event.sender.send(channel, data)
+        const sink = managedDesignSinks.get(sessionId)
+        if (sink) { sink(data as DesignRunEvent); return }
+        if (win && !win.isDestroyed()) event.sender?.send(channel, data)
       }
 
       // Cancel any existing agent session for this sessionId
@@ -3959,6 +4141,7 @@ export function registerDesignHandlers(): void {
           }
 
           sendValidationEvent("success", browserValidationMessage, false)
+          if (controller.signal.aborted) throw createDesignAbortError()
           storeDesignHtml(htmlStoreKey, artifactHtml)
           const saved = tabId ? saveDesignArtifact(resolvedArtifactId, artifactHtml, workspacePath) : null
           let metadata: DesignArtifactMetadata | null = null
