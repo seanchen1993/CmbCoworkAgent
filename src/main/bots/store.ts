@@ -189,6 +189,7 @@ export class BotStore {
         db.run(`CREATE UNIQUE INDEX bot_tasks_single_run ON bot_tasks(bot_id)
           WHERE state IN ('running','waiting_user') AND injected_into IS NULL`)
       }
+      db.run("CREATE INDEX IF NOT EXISTS bot_tasks_injected ON bot_tasks(injected_into,created_at)")
       if (
         !this.rows("PRAGMA table_info(bot_group_messages)").some(
           (column) => column.name === "files_json"
@@ -2703,10 +2704,35 @@ export class BotStore {
         ? parseBotFileDelivery(JSON.stringify({ kind: "bot-file-delivery", files }))
         : null
     const text = result || task.error || "本轮没有返回可确认的结果，请查看原任务。"
+    // Only this physical run's inputs: edits made in Chat/task view are absent from main history.
+    // Bound by the recorded execution, never by whichever message happens to be newest now.
+    const supplements = this.rows(
+      `SELECT substr(message,1,2000) AS text,length(message)>2000 AS truncated
+       FROM bot_tasks WHERE work_id=? AND bot_id=? AND thread_id=? AND injected_into=?
+       AND json_extract(origin_json,'$.kind')='user'
+       ORDER BY created_at DESC,rowid DESC LIMIT 9`,
+      [work.id, task.botId, task.threadId, task.id]
+    )
+    const requestContext = {
+      messages: [
+        ...(task.origin.kind === "user" || task.origin.kind === "work"
+          ? [{ text: task.message.slice(0, 4000), truncated: task.message.length > 4000 }]
+          : []),
+        ...supplements
+          .slice(0, 8)
+          .reverse()
+          .map((row) => ({
+            text: String(row.text),
+            truncated: Boolean(row.truncated)
+          }))
+      ],
+      messagesOmitted: supplements.length > 8
+    }
     const message = JSON.stringify({
       workId: work.id,
       title: work.title,
       executionState: task.state,
+      requestContext,
       result: text.slice(0, 16000),
       truncated: text.length > 16000,
       files: verified?.map(({ name, size }) => ({ name, size })) ?? [],

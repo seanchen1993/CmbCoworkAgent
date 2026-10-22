@@ -112,6 +112,9 @@ describe("independent work result return", () => {
       new Set(notices(f.store).map((t) => t.origin.kind === "work_result" && t.origin.workId))
     ).toEqual(new Set([f.work.id]))
     expect(new Set(notices(f.store).map((t) => t.requestId)).size).toBe(2)
+    expect(JSON.parse(notices(f.store)[1].message).requestContext.messages).toEqual([
+      { text: "改到四点", truncated: false }
+    ])
   })
 
   it("returns only the physical run result when multiple user messages were consumed together", () => {
@@ -131,6 +134,62 @@ describe("independent work result return", () => {
     f.store.flushReplies()
     expect(notices(f.store)).toHaveLength(1)
     expect(JSON.parse(notices(f.store)[0].message).result).toBe("四点的完整结果")
+    expect(
+      JSON.parse(notices(f.store)[0].message).requestContext.messages.map(
+        (m: { text: string }) => m.text
+      )
+    ).toEqual(["安排活动", "改到四点"])
+  })
+
+  it("binds report context to the completed execution, excluding later queued edits and unrelated conversations", () => {
+    const f = fixture()
+    f.store.enqueue({ botId: f.bot.id, requestId: "main-private", message: "主对话的其他讨论" })
+    const edit = f.store.enqueue({
+      botId: f.bot.id,
+      workId: f.work.id,
+      requestId: "edit-four",
+      message: "周日下午四点"
+    })
+    f.store.enqueue({
+      botId: f.bot.id,
+      workId: f.work.id,
+      requestId: "later-five",
+      message: "改到五点"
+    })
+    settle(f.store, edit, "completed", "四点的通知")
+    f.store.flushReplies()
+    const context = JSON.parse(notices(f.store)[0].message).requestContext
+    expect(context).toEqual({
+      messages: [{ text: "周日下午四点", truncated: false }],
+      messagesOmitted: false
+    })
+  })
+
+  it("bounds request context and marks omitted supplements explicitly", () => {
+    const f = fixture()
+    f.store.transition(f.task.id, "running")
+    const consumed: string[] = []
+    for (let n = 0; n < 10; n++) {
+      const child = f.store.enqueue({
+        botId: f.bot.id,
+        workId: f.work.id,
+        requestId: `s-${n}`,
+        message: `${n}:` + "A".repeat(5000)
+      })
+      f.store.injectIntoRun(child.id, f.task.id)
+      consumed.push(child.id)
+    }
+    f.store.settleRun(f.task.id, consumed, "completed", null, "结果")
+    f.store.flushReplies()
+    const context = JSON.parse(notices(f.store)[0].message).requestContext
+    expect(context.messagesOmitted).toBe(true)
+    expect(context.messages).toHaveLength(9)
+    expect(context.messages.at(-1).text).toMatch(/^9:/)
+    expect(
+      context.messages
+        .slice(1)
+        .every((m: { text: string; truncated: boolean }) => m.text.length === 2000 && m.truncated)
+    ).toBe(true)
   })
 
   it("does not return superseded turns or known quiet internal completion receipts", () => {
