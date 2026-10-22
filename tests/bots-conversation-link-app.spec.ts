@@ -48,6 +48,18 @@ async function main() {
       if (user.includes("LINK_NEW_WORK")) reply = "LINK_NEW_REPLY：新任务也有同一个本机会话入口。"
       if (user.includes("LINK_UNLINKED")) reply = "LINK_UNLINKED_REPLY：普通会话继续保留。"
       if (user.includes("memory") && !user.includes("LINK_")) reply = "[]"
+      if (
+        messages.some(
+          (m: any) =>
+            m.role === "system" &&
+            JSON.stringify(m.content).includes(
+              "An independent task returned a host-recorded result"
+            )
+        )
+      ) {
+        assert.equal((body.tools ?? []).length, 0)
+        reply = "LINK_RETURN：" + JSON.parse(user).result
+      }
       if (body.stream) {
         res.writeHead(200, { "content-type": "text/event-stream" })
         for (const [delta, finish_reason] of [
@@ -318,6 +330,46 @@ async function main() {
           ["queued", "running", "waiting_user"].includes(t.state)
         )
     )
+    await waitForBotAppState(
+      page,
+      async (workId) => {
+        const rows = (await (window as any).api.bots.snapshot()).tasks.filter(
+          (t: any) => t.origin.kind === "work_result" && t.origin.workId === workId
+        )
+        return rows.length === 2 && rows.every((t: any) => t.state === "completed")
+      },
+      linked.work.id,
+      { timeout: 90000 }
+    )
+    const returned = await page.evaluate(
+      async ({ botId, workId, mainThread }) => {
+        const api = (window as any).api
+        return {
+          rows: (await api.bots.snapshot()).tasks.filter(
+            (t: any) =>
+              t.botId === botId && t.origin.kind === "work_result" && t.origin.workId === workId
+          ),
+          messages: await api.threads.getMessages(mainThread)
+        }
+      },
+      { botId: setup.bot.id, workId: linked.work.id, mainThread: setup.bot.threadId }
+    )
+    assert.equal(
+      returned.rows.length,
+      2,
+      "both Bot and Chat entrances must return each result once"
+    )
+    assert.ok(
+      returned.rows.every((t: any) => t.state === "completed" && t.threadId === setup.bot.threadId)
+    )
+    assert.ok(
+      returned.messages.some(
+        (m: any) =>
+          m.role === "assistant" &&
+          JSON.stringify(m.content).includes("LINK_RETURN：LINK_CHAT_REPLY")
+      )
+    )
+    console.log("stage: both conversation entrances return results to the owning Bot")
     // Both entrances edit the actual Thread model, never the Bot default.
     await chat().getByRole("button", { name: "Original fixture", exact: true }).click()
     await page.getByText("Bot default fixture", { exact: true }).last().click()

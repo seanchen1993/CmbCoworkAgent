@@ -153,6 +153,15 @@ export type BotTaskOrigin =
   | { kind: "introduction" }
   | { kind: "work"; sourceTaskId: string; instructionSummary?: string }
   | {
+      /** Host-recorded result of one independent task turn, delivered to this Bot's main chat. */
+      kind: "work_result"
+      workId: string
+      workTitle: string
+      workThreadId: string
+      executionTaskId: string
+      executionState: BotTaskState
+    }
+  | {
       kind: "bot"
       fromBotId: string
       /** Captured by the host at delivery, never supplied by the receiving model. */

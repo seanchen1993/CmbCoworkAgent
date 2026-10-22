@@ -49,7 +49,19 @@ async function main() {
       let reply = "本机专家可以持续讨论并修改文字或文件。",
         call: { name: string; args: Record<string, unknown> } | undefined
       const inWork = all.includes("You are ALREADY inside independent task")
-      if (!inWork && user.includes("M05_CREATE_WORK")) {
+      const reporting = messages.some(
+        (m: any) =>
+          m.role === "system" &&
+          text(m.content).includes("An independent task returned a host-recorded result")
+      )
+      if (reporting) {
+        assert.equal((body.tools ?? []).length, 0, "a result report may not execute the task again")
+        const result = JSON.parse(user)
+        assert.equal(result.files[0].name, "report.md")
+        reply = result.result.includes("第二版")
+          ? "M05_WORK_RETURN：季度安排已按意见更新为第二版，文件在原任务中。"
+          : "M05_WORK_RETURN：季度安排第一版已写好，report.md 在原任务中，可继续修改。"
+      } else if (!inWork && user.includes("M05_CREATE_WORK")) {
         if (!used.includes("bot_work_create"))
           call = {
             name: "bot_work_create",
@@ -382,6 +394,63 @@ async function main() {
     await page.screenshot({ path: join(out, "artifacts", "m05-local-work-file-preview.png") })
     await page.keyboard.press("Escape")
     console.log("stage: real-work-runtime-file-delivery")
+    const checkReturned = async (count: number) => {
+      await waitForBotAppState(
+        page,
+        async ({ botId, workId, count }) => {
+          const rows = (await (window as any).api.bots.snapshot()).tasks.filter(
+            (t: any) =>
+              t.botId === botId && t.origin.kind === "work_result" && t.origin.workId === workId
+          )
+          return rows.length === count && rows.every((t: any) => t.state === "completed")
+        },
+        { botId: bot.id, workId: work.id, count },
+        { timeout: 90000 }
+      )
+      await page
+        .locator(".bots-conversation")
+        .getByRole("button", { name: /主对话$/ })
+        .first()
+        .click()
+      await page.locator(`[data-chat-thread-id="${bot.threadId}"]`).waitFor()
+      const report = await page.evaluate(
+        async (threadId) =>
+          (await (window as any).api.threads.getMessages(threadId)).findLast(
+            (m: any) =>
+              m.role === "assistant" &&
+              typeof m.content === "string" &&
+              m.content.startsWith("M05_WORK_RETURN")
+          ),
+        bot.threadId
+      )
+      assert.ok(report, "the completed report must be persisted in main history")
+      const summary = page.locator(
+        `[data-chat-thread-id="${bot.threadId}"] [data-chat-message-id="${report.id}"]`
+      )
+      await summary.waitFor()
+      await summary.scrollIntoViewIfNeeded()
+      assert.ok((await summary.innerText()).includes(count === 1 ? "第一版" : "第二版"))
+      const card = page
+        .getByRole("button", { name: "任务有新结果：季度安排草稿", exact: true })
+        .last()
+      await card.waitFor()
+      await page.screenshot({
+        path: join(out, "artifacts", `bot-work-result-${count}.png`),
+        animations: "disabled"
+      })
+      await card.click()
+      await page.locator(`[data-chat-thread-id="${work.threadId}"]`).waitFor()
+      assert.equal(
+        (
+          await page.evaluate(
+            async ({ botId, workId }) => (window as any).api.bots.works.get(botId, workId),
+            { botId: bot.id, workId: work.id }
+          )
+        ).state,
+        "active"
+      )
+    }
+    await checkReturned(1)
     await composer().fill("M05_EDIT_WORK：把第一版改为第二版。")
     await send()
     await approve()
@@ -391,6 +460,7 @@ async function main() {
     assert.match(secondReport.content, /第二版安排/)
     assert.ok(!secondReport.content.includes("第一版安排"))
     await page.getByText("第二版安排", { exact: false }).last().waitFor({ timeout: 90000 })
+    await checkReturned(2)
     await page.getByRole("button", { name: "完成任务", exact: true }).click()
     await page.getByRole("button", { name: "继续处理", exact: true }).waitFor()
     assert.equal(

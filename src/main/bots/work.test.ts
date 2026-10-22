@@ -464,7 +464,8 @@ describe("durable local independent works", () => {
     expect(() =>
       host.enqueueNotification(f.bot.id, r.work.threadId, "coordinator", "late", "Late result")
     ).not.toThrow()
-    expect(f.store.recentTasks()).toHaveLength(1)
+    expect(f.store.recentTasks().filter((task) => task.workId === r.work.id)).toHaveLength(1)
+    expect(f.store.recentTasks().some((task) => task.origin.kind === "notification")).toBe(false)
   })
   it("does not claim a historical peer's later background work, and stops only source-bound peer commands", async () => {
     const f = fixture(),

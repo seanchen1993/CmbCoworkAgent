@@ -8,8 +8,12 @@ export const BOT_MOCK_TOOL_NAMES = [
   "bot_work_continue"
 ]
 export function botMockRemotePolicy(): RemoteTurnPolicy {
+  return botTextOnlyRemotePolicy(BOT_MOCK_TOOL_NAMES)
+}
+/** Text-only receipts and external text scopes cannot execute local actions. */
+export function botTextOnlyRemotePolicy(allowedToolNames: string[]): RemoteTurnPolicy {
   return {
-    allowedToolNames: [...BOT_MOCK_TOOL_NAMES],
+    allowedToolNames: [...allowedToolNames],
     allowedSkillNames: [],
     allowedExpertNames: [],
     disableHooks: true,

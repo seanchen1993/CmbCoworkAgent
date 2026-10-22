@@ -30,6 +30,7 @@ import {
   ChatToolPresentationContext
 } from "../chat/chat-presentation-context"
 import { botWorkReceipt } from "@/lib/bot-work-receipt"
+import { botWorkResultLabel } from "../../../../shared/bots/work-result"
 import { delegatedTaskReceipt } from "@/lib/bot-exchange-view"
 import { BotExchangePanel } from "./BotExchangePanel"
 import { mergeBotMessageOrigins, hiddenBotTaskMessageIds } from "@/lib/bot-routine-visibility"
@@ -339,6 +340,23 @@ export function BotConversationTools({
     (message: Message) => {
       if (message.role !== "user") return null
       const task = taskByMessage.get(message.id)
+      if (task?.origin.kind === "work_result") {
+        const origin = task.origin
+        return (
+          <button
+            type="button"
+            className="bot-exchange-link"
+            onClick={() => onOpenWork?.(origin.workId)}
+            disabled={!onOpenWork}
+            aria-label={botWorkResultLabel(origin.executionState) + "：" + origin.workTitle}
+          >
+            <span>
+              {botWorkResultLabel(origin.executionState)} · {origin.workTitle}
+            </span>
+            <ChevronRight size={14} />
+          </button>
+        )
+      }
       if (task?.origin.kind === "schedule") {
         return (
           <details className="bot-routine-event">
@@ -384,7 +402,7 @@ export function BotConversationTools({
         </button>
       )
     },
-    [taskByMessage]
+    [taskByMessage, onOpenWork]
   )
   const presentFile = useCallback(
     (file: { filePath: string; threadId: string; label: ReactNode; messageId?: string }) => {

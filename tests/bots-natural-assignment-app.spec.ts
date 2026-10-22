@@ -81,6 +81,7 @@ async function main() {
           const tasks = (await api.bots.snapshot()).tasks.filter((t: any) => t.botId === botId)
           return (
             tasks.filter((t: any) => t.workId).length >= minimum &&
+            tasks.filter((t: any) => t.origin.kind === "work_result").length >= minimum &&
             !tasks.some((t: any) => ["queued", "running", "waiting_user"].includes(t.state))
           )
         },
@@ -99,12 +100,40 @@ async function main() {
     const first = await list()
     assert.equal(first.length, 1, "explicit independent-task request must create exactly one work")
     const work = first[0]
+    const checkReturned = async (count: number, time: RegExp) => {
+      const data = await page.evaluate(
+        async ({ botId, workId, threadId }) => {
+          const api = (window as any).api
+          return {
+            rows: (await api.bots.snapshot()).tasks.filter(
+              (t: any) =>
+                t.botId === botId && t.origin.kind === "work_result" && t.origin.workId === workId
+            ),
+            messages: await api.threads.getMessages(threadId)
+          }
+        },
+        { botId: bot.id, workId: work.id, threadId: bot.threadId }
+      )
+      assert.equal(data.rows.length, count)
+      assert.ok(data.rows.every((t: any) => t.state === "completed"))
+      const response = data.messages.findLast(
+        (m: any) => m.role === "assistant" && typeof m.content === "string" && m.content.trim()
+      )
+      assert.ok(
+        response && time.test(response.content),
+        "the owning Bot must report the actual updated task result"
+      )
+      assert.ok(!response.tool_calls?.length, "result reporting must not repeat work")
+      return response
+    }
+    await checkReturned(1, /三点|3[:：]00|15[:：]00|下午\s*3/)
     assert.equal(work.workspace.kind, "directory")
     assert.equal(work.workspace.path, await realpath(workspace))
     assert.equal(work.state, "active", "agent reply must not mark business completion")
     console.log("PASS App: requested independent task created in the selected directory")
     await send("把刚才的计划改到下午四点，增加十分钟的签到，只回复简短计划。")
     await idle(2)
+    await checkReturned(2, /四点|4[:：]00|16[:：]00|下午\s*4/)
     assert.deepEqual(
       (await list()).map((w: any) => w.id),
       [work.id]
@@ -130,6 +159,16 @@ async function main() {
       .click()
     await send("刚才已完成的读书会计划再改一下：改成下午五点，其他安排保持不变。")
     await idle(3)
+    const report = await checkReturned(3, /五点|5[:：]00|17[:：]00|下午\s*5/)
+    const mainReport = page.locator(
+      `[data-chat-thread-id="${bot.threadId}"] [data-chat-message-id="${report.id}"]`
+    )
+    await mainReport.waitFor()
+    await mainReport.scrollIntoViewIfNeeded()
+    await page.screenshot({
+      path: join(out, "artifacts", "bot-real-work-result.png"),
+      animations: "disabled"
+    })
     const final = await list()
     assert.equal(final.length, 1)
     assert.equal(final[0].id, work.id)

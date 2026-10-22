@@ -291,6 +291,129 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
+  it("reports a linked task result in the main conversation without running tools or importing its workspace", async () => {
+    const linked: BotWorkItem = {
+      id: "linked",
+      botId: bot.id,
+      threadId: "existing",
+      parentThreadId: bot.threadId,
+      title: "读书会",
+      goal: "安排活动",
+      audienceKey: "desktop",
+      state: "active",
+      version: 1,
+      threadInitialized: true,
+      createdAt: 1,
+      updatedAt: 1,
+      executionState: "completed",
+      pendingPeers: 0,
+      backgroundBusy: false,
+      conversation: {
+        origin: "existing",
+        state: "bound",
+        ref: {
+          kind: "local_thread",
+          threadId: "existing",
+          incarnation: { token: "token", legacyCreatedAt: 1 }
+        }
+      }
+    }
+    const returned: BotTask = {
+      ...task,
+      message: JSON.stringify({ result: "周日下午四点", files: [{ name: "plan.md", size: 40 }] }),
+      origin: {
+        kind: "work_result",
+        workId: linked.id,
+        workTitle: linked.title,
+        workThreadId: linked.threadId,
+        executionTaskId: "source-run",
+        executionState: "completed"
+      }
+    }
+    await expect(
+      port(linked).acquire(bot, returned)!.execute(new AbortController().signal, vi.fn())
+    ).resolves.toMatchObject({ state: "completed" })
+    const [request, , context] = fixture.start.mock.calls[0]
+    expect(request).toMatchObject({
+      threadId: bot.threadId,
+      agentMode: "normal",
+      message: returned.message
+    })
+    expect(context.additionalTools).toEqual([])
+    expect(context.remotePolicy).toMatchObject({
+      allowedToolNames: [],
+      allowedSkillNames: [],
+      disableHooks: true,
+      disableSubagents: true,
+      disableMcpTools: true
+    })
+    expect(context.extraSystemPrompt).toContain(
+      "An independent task returned a host-recorded result"
+    )
+    expect(context.extraSystemPrompt).toContain("not the user's confirmation")
+    expect(fixture.memorySnapshot).not.toHaveBeenCalled()
+    expect(fixture.deliveryTools).not.toHaveBeenCalled()
+    expect(fixture.workTools).not.toHaveBeenCalled()
+    expect(fixture.announce).toHaveBeenCalledWith(bot.threadId, {
+      id: task.requestId,
+      content: "任务有新结果 · 读书会"
+    })
+    expect(
+      context.verifyResolvedThread({
+        workspacePath: metadata().workspacePath,
+        metadata: metadata()
+      })
+    ).toBeNull()
+    linked.conversation!.state = "detached"
+    expect(
+      context.verifyResolvedThread({
+        workspacePath: metadata().workspacePath,
+        metadata: metadata()
+      })
+    ).toContain("关联已解除")
+    await expect(
+      port(linked).acquire(bot, returned)!.execute(new AbortController().signal, vi.fn())
+    ).resolves.toMatchObject({ state: "failed" })
+    expect(fixture.start).toHaveBeenCalledTimes(1)
+  })
+
+  it("captures verified files from an independent task for its result receipt", async () => {
+    const work: BotWorkItem = {
+      id: "w",
+      botId: bot.id,
+      threadId: "work-thread",
+      parentThreadId: bot.threadId,
+      title: "Plan",
+      goal: "Write plan",
+      audienceKey: "desktop",
+      state: "active",
+      version: 1,
+      threadInitialized: true,
+      createdAt: 1,
+      updatedAt: 1,
+      executionState: null,
+      pendingPeers: 0,
+      backgroundBusy: false
+    }
+    fixture.thread.mockReturnValue({
+      metadata: JSON.stringify({ ...metadata(), botWorkId: work.id, botAudienceKey: "desktop" })
+    })
+    const file = { filePath: "/synthetic/workspaces/a/plan.md", name: "plan.md", size: 40 }
+    fixture.start.mockImplementation(
+      async (_request, _delivery, context: AgentRunExecutionContext) => {
+        fixture.deliveryTools.mock.calls.at(-1)![2]!([file], "delivered")
+        context.onFinalAssistant?.({ messageId: "reply", finalText: "Plan ready" })
+        context.onRunTerminated?.({ outcome: "success", code: "done" })
+        return { completion: Promise.resolve() }
+      }
+    )
+    await expect(
+      port(work)
+        .acquire(bot, { ...task, threadId: work.threadId, workId: work.id }, work)!
+        .execute(new AbortController().signal, vi.fn())
+    ).resolves.toMatchObject({ state: "completed", result: "Plan ready", files: [file] })
+  })
+
   it.each(["NOT_FOUND", "CONFLICT"] as const)(
     "omits optional sender facts without failing a text turn when the sender is unavailable (%s)",
     async (code) => {

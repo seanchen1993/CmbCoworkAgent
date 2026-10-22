@@ -6,6 +6,7 @@ import { projectMarkdownVisibleText } from "../../../shared/markdown-visible-tex
 import type { ThreadStateSummary } from "./thread-context"
 import { BOT_REPLY_FILES_PREFIX } from "../../../shared/bots/file-delivery"
 import { stripSkillUseBlockForDisplay } from "../../../shared/skill-use-block"
+import { botWorkResultLabel } from "../../../shared/bots/work-result"
 
 /** Background work outlives the launching Bot turn; reuse the Runtime's sidebar summary. */
 export function botConversationState(
@@ -41,6 +42,8 @@ export function botFileRefreshKey(tasks: readonly BotTask[]): string {
 }
 
 export function botTaskPreview(task: BotTask): string {
+  if (task.origin.kind === "work_result")
+    return botWorkResultLabel(task.origin.executionState) + " · " + task.origin.workTitle
   let text = task.message
   if (task.origin.kind === "user" && task.origin.replyTo)
     text = parseBotMessageReply(text)?.message ?? text
