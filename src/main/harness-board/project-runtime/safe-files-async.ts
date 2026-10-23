@@ -1,8 +1,13 @@
-import { constants, type BigIntStats } from "node:fs"
-import { lstat, open, realpath } from "node:fs/promises"
+import { constants, realpath as callbackRealpath, type BigIntStats } from "node:fs"
+import { lstat, open } from "node:fs/promises"
 import { isAbsolute, join, resolve } from "node:path"
+import { promisify } from "node:util"
 import { hostStateError } from "./host-state-protocol"
 import { runtimeDigest, runtimeRelativePath, type ScopedFileObservation } from "./safe-files"
+
+// fs/promises.realpath uses native Windows spelling; the commit reader uses the
+// JS realpath algorithm. Keep both readers' exact path/link fences equivalent.
+const realpath = promisify(callbackRealpath)
 
 export async function runtimeDirectoryAsync(root: string): Promise<string> {
   if (!isAbsolute(root)) hostStateError("DIRECTORY_INVALID")

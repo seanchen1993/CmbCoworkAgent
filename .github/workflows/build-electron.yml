@@ -388,6 +388,7 @@ jobs:
         run: >-
           npx vitest run --maxWorkers=2
           src/main/agent/skill-lifecycle/retained-explicit-skill.test.ts
+          src/main/harness-board/project-runtime/safe-files-async.test.ts
           src/main/agent/tools/user-input-cancellation.integration.test.ts
           src/main/mods/v2/native-user-input-lifecycle.integration.test.ts
           src/main/harness-board/autobiz-context-provider-offline.test.ts
