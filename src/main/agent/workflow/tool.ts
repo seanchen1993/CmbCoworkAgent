@@ -100,10 +100,9 @@ export interface CreateWorkflowToolOptions {
   /** Surfaces the approval card on the parent thread's UI. */
   requestApproval?: (req: ApprovalRequest) => Promise<ApprovalDecision>
   subagentDeps: Omit<WorkflowSubagentDeps, "parentThreadId" | "defaultModelId">
-  /** Run-level exclusive file-write lock, shared with subagent tool writes (both
-   * keyed on the parent threadId) so script writeFile() and agent() writes serialize
-   * together. Threaded to the engine via the launch request. (#2) */
-  runExclusiveFileWrite?: <T>(fn: () => Promise<T>) => Promise<T>
+  /** File-operation admission shared with agent tools. The engine supplies
+   * per-file exclusivity. Threaded to the engine via the launch request. */
+  runExclusiveFileWrite?: <T>(fn: () => Promise<T>, signal?: AbortSignal) => Promise<T>
   /** Async-loaded registry snapshot supplied by production runtime creation so
    * building the tool never scans home/workspace directories synchronously. */
   agentProfiles?: AgentProfile[]

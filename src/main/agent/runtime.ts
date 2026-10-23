@@ -491,13 +491,12 @@ coordinatorWorkerManager.setWorkerApprovalProbe(hasPendingApprovalForRuntimeThre
 // ─── Tool concurrency: AsyncRWLock (writer-preferring) ──────────────────────
 //
 // Mirrors Codex's `ToolCallRuntime` model (codex-rs/core/src/tools/parallel.rs):
-//   - shared (read lock): tools that are safe to run concurrently (reads)
+//   - shared (read lock): reads and file tools with backend resource locking
 //   - exclusive (write lock): side-effecting tools that must run alone
-//   - bypass: tools we have no classification for — pass through without locking
+//   - bypass: task orchestration, bounded separately from resource access
 //
-// Approval events are NOT serialized by this lock — they fire immediately from
-// each tool task. The renderer's pendingApprovals[] queue owns UI ordering.
-// Execution is what this lock gates.
+// This gate covers the handler, including its hooks/approvals. File tools share
+// it and acquire their per-file resource lock only AFTER approval in the backend.
 
 type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
 
@@ -505,8 +504,8 @@ type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
  * Tools that mutate cross-tool shared state (tool registry, scheduler, skill
  * files). These must run one-at-a-time across the entire thread — write lock.
  *
- * Note: mutating shell / file I/O tools are also exclusive. Only commands that
- * are provably read-only are allowed to overlap with other read-only work.
+ * Unknown shell commands remain exclusive. File mutations instead use the
+ * backend's shared workspace gate and canonical per-file lock.
  */
 const EXCLUSIVE_TOOL_NAMES = new Set([
   "code_exec",
@@ -514,9 +513,7 @@ const EXCLUSIVE_TOOL_NAMES = new Set([
   "manage_scheduler",
   "manage_skill",
   "workflow",
-  "invoke_deferred_tool",
-  "write_file",
-  "edit_file"
+  "invoke_deferred_tool"
 ])
 
 /**
@@ -535,9 +532,9 @@ const SHARED_TOOL_NAMES = new Set([
   "inspect_tool",
   "task_output",
   "view_image",
-  // Subagent task calls may run concurrently. Subagent-internal tools use the
-  // separate subagent concurrency gate below, so file writes remain exclusive.
-  "task"
+  // Different files can progress independently, including while awaiting approval.
+  "write_file",
+  "edit_file"
 ])
 
 const MAX_PARALLEL_TASK_SUBAGENTS = 3
@@ -598,6 +595,7 @@ function classifyToolConcurrency(
 ): ToolConcurrencyTier {
   const toolName = toolCall?.name
   if (!toolName) return "exclusive" // safety default: unknown → write lock
+  if (toolName === "task") return "bypass"
 
   if (EXCLUSIVE_TOOL_NAMES.has(toolName)) return "exclusive"
   if (toolName === "execute") {
@@ -679,7 +677,9 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
       }
       const tier = classifyToolConcurrency(toolCall)
       if (tier === "bypass") {
-        return handler(request)
+        // A task waits for its entire child run. Holding a resource lock here
+        // would block parent tools and deadlock children sharing this queue.
+        return taskLimiter.run(async () => handler(request), signal)
       }
       const label = `${toolCall?.name ?? "unknown"}:${toolCall?.id ?? "no-id"}`
       const waitStart = Date.now()
@@ -692,10 +692,6 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
             signal?.throwIfAborted()
             return handler(request)
           }, signal)
-
-        if (toolCall?.name === "task") {
-          return taskLimiter.run(runSharedTool, signal)
-        }
 
         return runSharedTool()
       }
@@ -2667,9 +2663,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
 
   const gradedToolConcurrencyMiddleware =
     createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
-  const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
-    `${toolConcurrencyQueueId}:subagent`
-  )
+  const subagentToolConcurrencyMiddleware =
+    createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
@@ -4556,11 +4551,10 @@ export interface CreateAgentRuntimeOptions {
   additionalTools?: DynamicStructuredTool[]
   /**
    * Overrides the tool-concurrency queue id. Tools sharing a queue serialize
-   * their EXCLUSIVE operations (write_file/edit_file/writing execute) via a
-   * module-level lock. Workflow subagents pass the parent thread id so their
-   * file writes serialize across the whole run — parallel agents can't clobber
-   * the same file — while reads still run concurrently. Defaults to the
-   * runtime's own thread id (per-runtime isolation, the original behavior).
+   * unknown tool/shell mutations via a module-level lock. File tools share
+   * admission and rely on backend per-file resource locks across instances.
+   * Workflow subagents pass the parent thread id; isolated worktrees use their
+   * own root. Defaults to the runtime's own thread id.
    */
   toolConcurrencyQueueId?: string
   /**
@@ -5579,12 +5573,10 @@ The workspace root is: ${fileRoot}`
         readYoloMode: getYoloMode,
         approvalStore,
         requestApproval,
-        // Run-level exclusive file-write lock keyed on this (parent) threadId — the
-        // SAME lock the run's subagent tool writes use (toolConcurrencyQueueId =
-        // threadId). Injected so a script writeFile() and a concurrent agent()'s
-        // tool write serialize TOGETHER, not each in its own silo. (#2)
-        runExclusiveFileWrite: <T>(fn: () => Promise<T>): Promise<T> =>
-          getToolConcurrencyLock(threadId).write(fn),
+        // Share admission with file tools; the engine and backend acquire the
+        // same per-file lock. Unknown tools/shell still exclude both paths.
+        runExclusiveFileWrite: <T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> =>
+          getToolConcurrencyLock(threadId).read(fn, signal),
         agentProfiles: workflowAgentProfiles,
         subagentDeps: {
           traceContext,
@@ -5672,18 +5664,9 @@ The workspace root is: ${fileRoot}`
               projectDir,
               pluginOutputDir,
               additionalTools: subagentOptions.additionalTools,
-              // Subagents SHARING the workspace share the parent thread's tool-
-              // concurrency queue so their file writes serialize across the run (no
-              // two parallel agents clobber the same file); reads still run
-              // concurrently. Also serializes with any foreground edit the user
-              // makes on this thread while the run is in flight.
-              //
-              // An ISOLATED agent gets its own queue, keyed on its worktree. Its
-              // writes cannot collide with anything outside that directory, so
-              // holding the shared lock would serialize a fan-out that is safe to
-              // run in parallel — which is the entire point of asking for a
-              // worktree. Writes WITHIN one worktree stay serialized, because the
-              // key is the worktree and one worktree hosts exactly one agent.
+              // Shared workspace agents coordinate unknown tools with the parent;
+              // different files proceed concurrently under backend resource locks.
+              // Isolated worktrees have independent tool and workspace gates.
               toolConcurrencyQueueId: worktreeIsolation?.workspaceRoot ?? threadId,
               // acceptEdits: the user approved the whole workflow at launch, so
               // its background subagents must not re-prompt per file edit
