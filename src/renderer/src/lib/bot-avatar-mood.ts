@@ -1,5 +1,5 @@
-import type { ToolCallState } from "@/types"
 import type { LiveStreamMessage } from "./live-stream-messages"
+import type { BotTask } from "../../../shared/bots/contracts"
 import { splitBotInlineReasoning } from "./bot-inline-reasoning"
 
 export type BotAvatarMood =
@@ -15,22 +15,35 @@ export type BotAvatarMood =
   | "stream"
   | "blocked"
 
+type ActivityMessage = LiveStreamMessage & { role?: string; created_at?: Date }
+
+export function botActiveTaskCreatedAt(
+  tasks: readonly Pick<BotTask, "threadId" | "state" | "createdAt">[],
+  threadId: string
+): number | undefined {
+  return tasks.findLast(
+    (task) =>
+      task.threadId === threadId && (task.state === "running" || task.state === "waiting_user")
+  )?.createdAt
+}
+
 /** Inspect only the live tail, never old transcript text or hidden reasoning. */
 export function botIsSpeaking(
   loading: boolean,
-  messages: readonly LiveStreamMessage[],
+  messages: readonly ActivityMessage[],
   turnStart: number | null
 ): boolean {
   const tail = messages.at(-1)
+  const started = tail?.start_at ?? tail?.created_at
   if (
     !loading ||
     turnStart == null ||
     !tail ||
-    !["ai", "assistant"].includes(tail.type ?? "") ||
+    !["ai", "assistant"].includes(tail.role ?? tail.type ?? "") ||
     tail.end_at ||
     tail.tool_calls?.length ||
-    !tail.start_at ||
-    new Date(tail.start_at).getTime() < turnStart
+    !started ||
+    !(new Date(started).getTime() >= turnStart)
   )
     return false
   if (typeof tail.content === "string") return /\S/.test(splitBotInlineReasoning(tail.content).body)
@@ -47,28 +60,42 @@ export function botIsSpeaking(
   )
 }
 
-/** Original Runtime activity is authoritative; queued and approval-waiting work is not execution. */
+/** Grok-style pending request posture, not proof of lock acquisition or execution. */
 export function botAvatarMood(
   busy: boolean,
   waiting: boolean,
-  tools: Record<string, ToolCallState>,
-  turnStart: number | null,
-  speaking = false
+  messages: readonly ActivityMessage[],
+  turnStart: number | null
 ): BotAvatarMood {
   if (waiting) return "blocked"
   if (!busy) return "idle"
-  let latest: ToolCallState | undefined
-  for (const tool of Object.values(tools)) {
-    if (
-      tool.status === "running" &&
-      (turnStart == null || new Date(tool.updatedAt).getTime() >= turnStart) &&
-      (!latest || new Date(tool.updatedAt).getTime() > new Date(latest.updatedAt).getTime())
-    )
-      latest = tool
+  if (turnStart == null) return "work"
+  const returned = new Set<string>()
+  // Only the current trailing result batch and adjacent assistant; never scan older turns.
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    const started = message.start_at ?? message.created_at
+    if (!started || !(new Date(started).getTime() >= turnStart)) return "work"
+    const role = message.role ?? message.type
+    if (role === "tool" && message.tool_call_id) {
+      returned.add(message.tool_call_id)
+      continue
+    }
+    if (role === "assistant" || role === "ai") {
+      const pending = message.tool_calls?.find((call) => call.id && !returned.has(call.id))
+      if (pending) return toolRequestMood(pending.name)
+      return index === messages.length - 1 && botIsSpeaking(true, [message], turnStart)
+        ? "stream"
+        : "think"
+    }
+    return role === "user" || role === "human" ? "think" : "work"
   }
-  if (!latest) return speaking ? "stream" : "think"
+  return "work"
+}
+
+function toolRequestMood(toolName: string): BotAvatarMood {
   // Grok's activity dispatcher, mapped to the tools actually injected by CMB's Runtime.
-  const name = latest.name?.toLowerCase() ?? ""
+  const name = toolName.toLowerCase()
   if (name === "read_file") return "read"
   if (name === "write_file" || name === "edit_file") return "write"
   if (name === "execute") return "run"

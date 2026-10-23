@@ -10,12 +10,26 @@ import {
 } from "@/components/ui/select"
 import type { BotBrowserState, BotClient } from "../../../../shared/bots/contracts"
 
+function navigationErrorMessage(message: string): string {
+  if (/ERR_CONNECTION_REFUSED/.test(message)) return "无法连接到此地址，请检查地址或稍后重试。"
+  if (/ERR_NAME_NOT_RESOLVED|ERR_NAME_RESOLUTION_FAILED/.test(message))
+    return "无法找到此网站，请检查地址或网络连接。"
+  if (/ERR_INTERNET_DISCONNECTED/.test(message)) return "网络连接已断开，请联网后重试。"
+  if (/Timeout \d+ms exceeded|ERR_\w*TIMED_OUT/.test(message)) return "网页加载超时，请稍后重试。"
+  return "无法打开此网页，请检查地址或稍后重试。"
+}
+
 /** Mounted only for the visible computer tab. A slow capture never accumulates frames. */
 export function BotBrowserPanel({ botId, client }: { botId: string; client: BotClient }) {
   const [state, setState] = useState<BotBrowserState | null>(null)
   const [pageId, setPageId] = useState<string>()
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [navigationFailure, setNavigationFailure] = useState<{
+    pageId: string
+    address: string
+    message: string
+  } | null>(null)
   const [busy, setBusy] = useState(false)
   const [refresh, setRefresh] = useState(0)
   const [address, setAddress] = useState("")
@@ -88,19 +102,44 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
     }
   }
   const selected = state?.pages.find((page) => page.id === state.pageId)
-  const human = state?.control === "human"
+  const selectedId = selected?.id,
+    selectedUrl = selected?.url
   useEffect(() => {
-    setAddress(selected?.url === "about:blank" ? "" : (selected?.url ?? ""))
-  }, [selected?.id, selected?.url])
+    // A failed navigation can briefly report the former document again. Only a
+    // changed document, or a successful navigation below, clears its failure.
+    if (selectedId && selectedUrl && /^https?:\/\//i.test(selectedUrl))
+      setNavigationFailure((failure) => (failure?.pageId === selectedId ? null : failure))
+  }, [selectedId, selectedUrl])
+  const human = state?.control === "human"
+  const errorPage = Boolean(selected?.url.startsWith("chrome-error://"))
+  const failure = navigationFailure?.pageId === selected?.id ? navigationFailure : null
+  const selectedAddress = errorPage
+    ? (failure?.address ?? "")
+    : selected?.url === "about:blank"
+      ? ""
+      : (selected?.url ?? "")
+  useEffect(() => {
+    setAddress(selectedAddress)
+  }, [selected?.id, selectedAddress])
   const navigate = async () => {
     if (actionLock.current || !state?.pageId || !human) return
+    const targetPageId = state.pageId,
+      targetAddress = address.trim()
     actionLock.current = true
     setBusy(true)
     setActionError(null)
     try {
-      await client.navigateBrowser(botId, state.pageId, address.trim())
+      await client.navigateBrowser(botId, targetPageId, targetAddress)
+      setNavigationFailure((failure) => (failure?.pageId === targetPageId ? null : failure))
     } catch (cause) {
-      setActionError(botErrorMessage(cause, "打开网页失败"))
+      const message = botErrorMessage(cause, "打开网页失败")
+      if (/page\.goto:|net::ERR_/.test(message))
+        setNavigationFailure({
+          pageId: targetPageId,
+          address: targetAddress,
+          message: navigationErrorMessage(message)
+        })
+      else setActionError(message)
     } finally {
       actionLock.current = false
       setBusy(false)
@@ -124,7 +163,19 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
         </Select>
       )}
       <div className="bot-browser-preview">
-        {state?.image ? (
+        {errorPage ? (
+          <div className="bot-browser-empty" role="alert">
+            <p>
+              <strong className="block">无法打开网页</strong>
+              {failure?.message ?? "请检查地址或网络连接后重试。"}
+            </p>
+            {human && address.trim() && (
+              <button className="underline" disabled={busy} onClick={() => void navigate()}>
+                重试打开
+              </button>
+            )}
+          </div>
+        ) : state?.image ? (
           <img
             src={state.image}
             alt={selected?.title ? `${selected.title}的实时预览` : "Bot 浏览器实时预览"}
@@ -143,8 +194,8 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
         )}
       </div>
       {selected && (
-        <p className="bot-browser-location" title={selected.url}>
-          {selected.title || selected.url}
+        <p className="bot-browser-location" title={selectedAddress}>
+          {errorPage ? selectedAddress || "网页无法打开" : selected.title || selectedAddress}
         </p>
       )}
       {human && (
@@ -216,6 +267,11 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
             ? "你正在操作另一 Bot 的浏览器。请先归还，再接管此页面。"
             : "在独立窗口中登录或接手操作，登录状态会保留。"}
       </p>
+      {failure && !errorPage && (
+        <p role="alert" className="text-xs text-destructive">
+          {failure.message}
+        </p>
+      )}
       {actionError && (
         <p role="alert" className="text-xs text-destructive">
           {actionError}

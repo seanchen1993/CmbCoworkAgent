@@ -81,6 +81,7 @@ import type {
 } from "../../../../shared/bots/contracts"
 import { BotAvatar } from "./BotAvatar"
 import { BotRuntimeAvatar } from "./BotRuntimeAvatar"
+import { botActiveTaskCreatedAt } from "@/lib/bot-avatar-mood"
 import { BotAppearancePicker, BotAvatarEditor } from "./BotAppearancePicker"
 import { createBotAppearance } from "../../../../shared/bots/appearance"
 import { BotDeleteDialog } from "./BotDeleteDialog"
@@ -1389,6 +1390,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
         >
           <BotRuntimeAvatar
             threadId={bot.threadId}
+            taskCreatedAt={botActiveTaskCreatedAt(botTasks, bot.threadId)}
             settlement={last}
             color={bot.color}
             shape={bot.shape}
@@ -1665,6 +1667,10 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                       >
                         <BotRuntimeAvatar
                           threadId={bot.threadId}
+                          taskCreatedAt={botActiveTaskCreatedAt(
+                            tasksByBot.get(bot.id) ?? [],
+                            bot.threadId
+                          )}
                           settlement={tasksByBot.get(bot.id)?.at(-1)}
                           color={bot.color}
                           shape={bot.shape}
@@ -1964,6 +1970,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                 >
                   <BotRuntimeAvatar
                     threadId={selectedThreadId}
+                    taskCreatedAt={botActiveTaskCreatedAt(tasks, selectedThreadId)}
                     settlement={tasksByBot.get(selected.id)?.at(-1)}
                     color={selected.color}
                     shape={selected.shape}

@@ -1,6 +1,5 @@
-import { botErrorMessage } from "@/lib/bot-error-message"
 import { useEffect, useRef, useState } from "react"
-import type { BotClient, BotSnapshot } from "../../../../shared/bots/contracts"
+import { BotError, type BotClient, type BotSnapshot } from "../../../../shared/bots/contracts"
 
 /** Revision-coalesced invalidation: at most one snapshot request at a time. */
 export function useBots(client: BotClient) {
@@ -31,7 +30,8 @@ export function useBots(client: BotClient) {
           }
         }
       } catch (cause) {
-        if (!disposed) setError(botErrorMessage(cause, "无法读取 Bot 状态"))
+        if (!disposed)
+          setError(cause instanceof BotError ? cause.message : "暂时无法读取 Bot 数据，请重试。")
       } finally {
         pending = false
       }

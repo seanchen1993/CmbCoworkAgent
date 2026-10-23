@@ -1,5 +1,298 @@
 # Bots 已实现功能与官方 Grok 对照测试
 
+### 当前验收口径与剩余条件（2026-10-23，用户确认）
+
+用户确认 I07、J01、J03、J04、J05 以 CmbCowork 本地功能验收通过为完成标准，官方侧尚缺的回执、技能候选和合成连接器环境保留为对照记录，不再阻塞这五项。本地验收完成 **197／201（98.01%）**；按此前要求官方对应证据的对照口径仍为 **192／201（95.52%）**。本次增加的五项均复用已有真实本地证据，是用户确认验收口径后的关闭，不是新增五轮测试或新的代码修复。
+
+I07 本地删除候选零执行、KEEP 自然执行一次、旧29条例行保持；J01／J03 普通私聊技能真实读取／模板交付、搜索／选择／取消及草稿附件保持、普通文本负例；J04／J05 连接器真实发现／取数、故障恢复与无重复副作用均已有验收记录。技能结论不扩展为群聊手动选择、按 Bot 独立启用配置，或当前官方版本自动触发同题已验证。
+
+| 项目 | 尚缺真实证据 | 继续条件 |
+| --- | --- | --- |
+| Mac包（P15） | Mac包正常认证后Bot／M2.7／浏览器／正式交付／重启 | 成功正常登录；现用户无法登录、根因未知，不绕过认证 |
+| P17／P18 | Windows原生包、进程／文件、恢复和布局实测 | 用户最新回复“无”，当前无实机环境；CI／静态不能替代 |
+
+剩余 **3项平台验收（P15／P17／P18）**，另有 P04 不适用，仍保留201分母且不计通过。五项原本地／官方证据索引见`1023DE-resume-batch/remaining-eight-gates-audit-1023DZ/{root-remaining-original-gates-audit.json,official-five-readonly.json,platform-three-readonly.json,current-tested-source-guard.json}`及下方各案例；原失败和历史口径均保留，以本节为当前状态。不把未完成的官方对照或平台实测写成通过。本次仅更新两份文档，未改生产代码、暂存区、提交或push。
+
+### 2026-10-23 侧栏拖动排序与正常重启闭环（1023DY／L03）
+
+严格通过 **192／201（95.52%）**，新增L03；剩8项待验／环境阻断（7项P0＋1项P1）及不适用P04，201分母保留。官方实际出现GB被拖入置顶第2位的原Dnd结束播报和3→4顺序变化；当前0.75.3该路径同时调用原置顶及顺序更新，普通pin菜单不发此句。播报本身不当持久化回执，再以原菜单Quit、确认应用终止后正常重启的同4pin顺序和8项状态保持完成验证。结合本地DS真实trusted换位／正常重启／12事实及既有pin／取消pin／分组，原合同闭环。
+
+原File／tibo单步拖动未换位的记录保留，后续GB插位的操作者不归因；不声称原3pin已恢复，当前4pin保持。原合同要求真实拖排序与顺序稳定，未限定必须交换两项既有pin；接受实际有序拖入及持久化，不是以菜单或源码代替拖动，也不增加全分支门槛。当前GA空框、AL草稿、sean未读和CV分组保持，未发模型任务、未改生产代码／暂存区／commit／push。证据`1023DE-resume-batch/L03-official-native-1023DY/{L03-root-original-contract-adjudication.json,L03-original-contract-dnd-insertion-combination-adjudication.json,L03-original-normal-restart-proof.json}`。
+
+### 2026-10-23 长内容与长文件名对照闭环（1023DY／M12）
+
+严格通过 **191／201（95.02%）**，新增M12；剩9项待验／环境阻断（7项P0＋2项P1）及1项不适用P04，201分母不变。原有限合同已齐：本地DG长名／文件／URL／代码／10万汉字与连续附件，结合官方真实10万汉字历史原Copy逐字读回、首尾Find各1／1、原滚动到第1000行及END；不把Find的消息行定位夸成直接跳到消息内尾部。
+
+官方只另发一次短任务，交付一份自然40字符长名称MD。正式卡视觉省略而Open／Save可访问名完整，真实预览完整标题和授权正文、Escape回原卡；独审15事实通过。连续附件及真实保存字节沿用G04／AH，长报告滚动沿用G08；不声称新182B文件已下载或核hash。原AX截断断言失败、先前noWindowsAvailable无效操作均保留；恢复后真实输入才算验收。GA空输入、原3pin、AL草稿及sean未读保持。未改生产代码、未stage／commit／push。证据`1023DE-resume-batch/M12-official-long-text-1023DY/{M12-root-original-contract-adjudication.json,M12-original-long-text-independent-review.json}`。
+
+后续可执行入口已补核：当前官方精确技能slash与空slash均实际进入输入框但无候选；正常重启后精确查询仍无候选，0Send、自有查询已实清，不能归因为仅列表未刷新。按currentAgentId的候选源与已保存编辑器不能混同，J01／J03保持部分。一次原生拖动未重排，回复后新增GB置顶但File／tibo仍未换位；当前4pin经原正常退出／重启与8项状态保持核实，拖排序原合同仍待裁定、L03不关。报告`J01-J03-official-1023DY/J01-J03-current-public-entry-result.json`与`L03-official-native-1023DY/L03-current-native-bounded-result.json`；不归因为本地产品bug、不新增机制或隐藏开关。
+
+Windows环境问答中先回复可提供、随后直接纠正为“无”，按最后回复记为暂无实机环境；P17／P18不计通过，不改作二期。现有CI／跨平台构建与静态证据不替代实机。`P15-P17-P18-existing-environment-readonly-1023DY/windows-user-environment-latest-reply.json`。
+
+### 2026-10-23 主预览实际加载与长历史公开读回（1023DY）
+
+严格数保持 **190／201**。用户要求查看后，N05最终251份renderer已通过原View → Reload加载真实主预览；旧554份资源完整保全。main PID54918、139份非renderer原字节、126会话、原2pins、C11群及空输入保持，重载后AX实际出现pin资料卡。现有12路径期间被暂存，根未执行stage／commit／push，保留新索引现状；旧cached-patch守卫正确报变的finalizer失败单列，不误报产品加载失败。证据`main-preview-renderer-activation-1023DY/renderer-activation-install-result.json`。
+
+M12官方一次116945字符原输入含100000汉字／1000行，实际ACK后展开见末十行／末锚点；原历史消息Copy → 原Cmd+V公开读回全文，原文、1000行块、509字符URL和2197字符代码均逐字相同，0重发，复制核对草稿已清、原消息收起。AX历史叶截断导致的全文断言失败保留，不能据此说正文丢失，也不把准备稿粘贴当历史读回。搜索／长文件名组合仍未齐，M12不先关；P15及Windows外部条件无新通道。首轮与修订质量结论分列见`phase1-final-delivery-quality-summary-1023DY.json`。
+
+本次刷新只按已观察到的终态聊天验收；只读复核时Bot活动任务／命令均为0，未直接读取原生workflow／worker内存状态。原`src/main/index.ts:813`明确不保证活动执行中的renderer重连，因此不能把同PID、草稿持久化及此次刷新成功推广为长程任务运行时刷新安全。详见`main-preview-renderer-activation-1023DY/main-preview-readonly-launch-draft-reload-boundary-review.json`。
+
+### 2026-10-23 弹层对照与置顶资料卡最小修正闭环（1023DX／N05）
+
+严格通过 **190／201（94.53%）**，新增N05；其余11项为10项待验／环境阻断（7项P0＋3项P1）、1项不适用P04。当前官方0.75.3实际owner／样式和真实原生开关端点已核：创建／删除／文本预览即时卸载，详情300ms，普通鼠标资料卡／右键菜单100ms；hover延迟250／100ms另列，特殊键盘／Escape可以即时。原生采样不足以量精确100／300ms，不把首帧等待当动画时长；与本地既有真实100／300ms轨迹、当前owner接线组合验收，不扩共享Dialog或另建presence。
+
+唯一新增生产修正为`BotRowMenu`一个显示条件：`(compact || (pinned && !bot.archived)) && !menuOpen`，保留原普通行、compact和菜单抑制。首版遗漏归档保留pin的边界由独审发现，已在完整App启动前收敛；6个真实组件交互均过，含宽归档负例、compact归档原正例。最终候选原完整App的12项检查通过：264DIP宽侧栏原pin、260px正确归属资料卡实际出现／移出消失、菜单抑制／Escape后重入、原取消置顶；0模型请求／响应、0pageError，UI前后Bot／任务／群／例行／消息和工作文件保持，自有PID正常退出。139份非renderer与原候选逐字节相同，16项原核心源码与HEAD／已验SHA相同，暂存patch未动。原userData无view key，测试后保存默认对象，只称pin语义恢复；启动前后thread表初始化变化与UI期间保持分列。
+
+本地Radix的轻微缓动／特殊键盘关闭差异如实保留，不要求内部或像素完全相同；未观察到截断／闪白不代表测到所有原生子帧。官方原生title和一次未开tip的定位尝试、组件夹具finalizer／指针尝试失败、首版候选均保留，不以它们报通过。原主预览未重启，独立最终候选已包含实测修正；未stage／commit／push。当前P16增量为12路径（2文档＋8renderer生产＋2测试），新增路径只含上述条件及格式换行，无新import／依赖／资源或执行存储机制；原许可证／notice核验继续适用。证据`1023DE-resume-batch/N05-pin-tooltip-fix-1023DX/{N05-root-combined-original-contract-adjudication.json,N05-final-scoped-tooltip-independent-readonly-review.json,full-original-app-pin-verification-result.json}`及当前官方静态／原生报告。
+
+### 2026-10-23 宽窄与明暗布局闭环（1023DX／M11）
+
+严格通过 **189／201（94.03%）**，新增M11；其余12项为11项待验／环境阻断、1项不适用P04。复用本地DG表格／浮层／输入及DT真实浏览器五景、实际Retina2×证据，补齐当前官方0.75.3深宽报告、浅宽聊天、浅窄聊天／创建／报告表格及真实Computer预览。官方原窗口Zoom后2880×1628，再原边缘resize为2400×1628；控件、内容和预览均在窗口内，未见横向溢出。GB原唤醒入口得到真实VM桌面帧／Chrome图标，并非休眠占位；既有H13真网页交互复用，不为布局新开付费模型或强加所有组合。
+
+主题由原“跟随系统”临时切浅色后已恢复；原normal窗口2880×1628和当前max窗口3840×1988依次还原。原3个pin／顺序、GB分组、GA空输入、AL未发送草稿、sean未读均由实际AX复核。GB临时唤醒后遵循原自动idle，不冒称已立即恢复休眠。原生Window Zoom只是窗口几何，本地appzoom125%另列；未主动切多macOS显示档位或证明Windows。原有限合同不新增全笛卡尔／多OS档位门槛。M11无生产修改，证据`1023DE-resume-batch/M11-official-finite-1023DX/{M11-root-original-contract-adjudication.json,M11-finite-original-contract-readonly-review.json}`。
+
+N05当前安装版源码已明确：创建／删除／文件预览即时卸载，详情300ms、普通鼠标右键菜单100ms，特殊键盘／Escape分支可即时关闭；原生截图只证明真实端点，不把整段采样或首帧等待当动画时长。另确认宽侧栏pin少启用了现成资料卡，正以原`pinned`属性补一个条件并做相邻回归，尚不提前关闭N05。L03原生一次拖动未落位仍部分，不重复碰竞态或归责官方；临时pin已还原。M12现有公开AX保守下界不足以证明官方10万字历史，保持未知，不读账号缓存、不伪造padding。
+
+### 2026-10-23 头像自然动作闭环与原功能回归边界（1023DW）
+
+严格通过 **188／201（93.53%）**，新增N01；其余13项为12项待验／环境阻断、1项不适用P04（不加通过数，201分母保留）。本地原完整App创建空预览真实24秒、1121帧SVG／618屏幕帧，睁→收→原窄眼形→重新睁开连续完整；与旧DP真实悬停／快速左右／离开回正／重入五腿合并。原Cancel后Bot／任务／消息不增，原线程仅正常初始化updated_at变化，0provider请求／响应、0pageError，主守卫保持，自有4进程退出。原拼图helper一次语法失误保留，未重跑App。
+
+当前官方0.75.3原创建预览100连续native帧8.981秒／58独特原图，实际眨眼收张及自然姿态清楚；左右定位、离开、重入各15连续帧与四次快速定位时序实存，原空名／Create disabled／Cancel回GA空草稿，原pin／AL草稿保持。官方指针通过非button预览／空白的原生坐标click定位，包含down/up；不称纯pointer API、精确gaze因果、同相位动作或快速移动每帧已证。按原有限行为合同闭环，不为方法不同新增硬gate，也不把点击反应冒充纯hover。根与独审均看实际帧，未发现需新增生产修复的明确差异。证据`1023DE-resume-batch/N01-official-natural-1023DW/{N01-root-original-behavior-adjudication.json,N01-original-behavior-paired-independent-readonly-review.json}`及`N01-local-natural-1023DW/N01-one-natural-blink-final-readonly-review.json`。
+
+用户明确：代码影响以前的内容就应做原功能回归。#0及1018BW已据此纠正，不能以Bot无Team入口豁免原worker／workflow。当前7个renderer生产改动逐项匹配原N02／N03／H13／L12实测SHA，16项原Runtime／worker／通知／ChatContainer／IPC等与HEAD相同；当前UI不构成新开worker模型回归的理由。已提交e4a6共享workflow修复独立保留原8场景调用链、41专项、32真实进程及合并后1164core／19IM原证据；全workflow原18vs16基线失败及缺少新模型／UI证明不冒称全绿。见`current-renderer-and-shared-workflow-original-impact-readonly-1023DW.json`。本批未改生产代码、未stage／commit／push。
+
+I07原CP保留对照在当前真实详情仍显示“仅一次10月22日11:40／暂停…on”；原右键编辑仅生成未发送聊天草稿，不是可读设置／历史页，已只清该自动前填并恢复原computer页签／关详情／GA空输入。未改期、切换或手动运行，也未得到自然到期正控回执，仍部分。P04原字面双群挂同物理root不属于普通群正式入口，原plan按授权共享／群上下文隔离亦未要求此绑定；给定Grok0.18无该入口，不推断当前隐藏能力。保留原题与同群争用CW／双群BN／移除AY保护证据及各自方法，记不适用而非通过，不造软链／共享root／权限／锁来迎合用例。证据`I07-current-native-state-1023DW/I07-root-current-native-adjudication.json`、`P04-root-original-scope-disposition.json`及原独审。
+
+### 2026-10-23 未消费补充撤回闭环及技能负例（1023DV）
+
+严格闭环 **187／201（93.03%，剩14例＝8项P0＋6项P1）**，新增B05。全新独立profile中真实M2.7原写入审批等待时，原输入框连续两条补充实际同时待办；原“撤回”仅取消DROP，根任务与原审批保持，KEEP仍排队。批准后KEEP实际归入同一根，唯一write_file／bot_deliver_files，21B内容和最终ROOT_DONE／KEEP_ACCEPTED准确。DROP在全部3份完整provider请求及原生消息均不存在，raw SQLite为cancelled／injected_into=null；24项本地检查及根独立字节／回执／源码复核通过，原App正常退出，主配置和索引保持，无新增生产修复。
+
+本例按原本地排队／消费归属协议验收，不要求两边内部队列相同。官方原LONG实际忙时回复42、接收格式更新及两份真实下载复核通过；给定0.18源码仅发送journal queued可撤回，已接收私聊会打断旧runner，与本地轮内注入有差异。当前安装版0.75.3不冒充给定源码；**没有证明官方未消费撤回通过**。旧BV晚到／CX已消费及本轮任务前QA装载失败保留，不反复加长命令碰竞态。证据`1023DE-resume-batch/{B05-root-original-contract-adjudication.json,B05-original-contract-combined-adjudication.json,B05-approval-queued-1023DV/B05-local-independent-verdict.json}`。
+
+J03本地精确负例补齐：enabled技能名作为普通字符串，原任务／原生消息的显式技能block解析均null；真实M2.7仅一条用户任务12.931秒，46B JSON准确写读／正式交付且原预览核对，技能字节不变。自动按描述选技能的既有能力不受此判据禁止。首轮QA误触intro与快捷键时机失败保留，不冒称零额外模型。官方新私有技能ar-synthetic-ledger-1023dv已在原生编辑页逐项核完整六步／footer和disabled Save；真实slash精确名仍无候选，未发送的查询已清空。J01／J03整例仍部分，不从安装成功推断手选或执行成功；“教它做任务”实为桌面录制入口，未开始录制且已归还控制。证据`J03-literal-negative-1023DV/J03-literal-name-negative-independent-final-review.json`、`J01-J03-official-1023DV/J01-J03-root-current-official-adjudication.json`。本批未stage／commit／push。
+
+### 2026-10-23 一期交付范围与当前增量审计
+
+187／201是本轮对照矩阵覆盖率，不等于一期所有门槛已通过。最终三方首轮与修订质量结论、当前交付清单仍需分别收尾；不把旧父项未勾选全部当新bug。Bot的normal产品入口与原CmbCowork的coordinator／worker回归范围分别记录：若改动影响原共享执行链，原worker／workflow回归仍必须保留，不能因Bot无Agent Team入口而取消。1023DV这份额外用例要求coordinator父轮调用原allowlist不存在的读文件／正式交付工具，测试要求与该入口能力不匹配；不为跑通扩权或新增模式，该尝试不作normal Bot通过／回归缺陷结论，也不增加案例计数。原兼容与回归记录保留；远端部署、群例行等已约定二期不扩入一期，当前Mac包SSO及Windows实机门槛仍保留。
+
+P16现有合同增量重核通过：本次11路径为2文档＋7renderer生产＋2测试，与原91／118各自历史快照分开；依赖、构建／TS配置、LICENSE及3份notice源在HEAD／index／工作树相同，3份notice在源／out／候选／实际ASAR四处逐字节一致，生产新增行无临时诊断／QA／已知凭据样式命中，索引保持。此为有界技术核查，不冒称重审全部历史代码或未知秘密格式。证据`1023DE-resume-batch/phase1-final-scope-bounded-readonly-audit-1023DU.json`及`P16-current-diff-1023DV/P16-current-diff-license-notice-dependency-readonly-review.json`。不增加201分母或闭环数，未提交／push。
+
+1023DV兼容专项终审：原coordinator父轮只有三项worker工具，本轮要求它直接read_file／正式文件交付不适用。第一worker确实执行20.003秒并回传，但模型额外派发verifier及第三worker，正式附件回执0，整腿不通过；不把工具限制放开来迎合这份测试。原精确停止清理后活动task／running worker／待通知均0，自有main／helper／命令进程均退出；主库逻辑、用户原模式及13项源码／配置／构建／索引守卫保持。停止收敛指令到达前，原获准脚本已正常重开一次，0新provider且无重放；之后无新启动。该额外试验不计普通Bot通过或回归缺陷，也不增加案例数。失败／夹具乐观状态完整保留，最终以`P03-worker-original-1023DV/original-worker-final-scope-and-cleanup-independent-review.json`为准。
+
+P12有界只读质量归并已完成，K01–K16最终产物均有各自合同证据，仍不能宣称首轮稳定性／反馈成本整体等同官方。K12旧BC未公开总结真实保留，但后续BJ DS-R2／MM-R4正式三附件及公开文字已逐条匹配，不重开已修链路。Office、CSV、输出保护的旧失败与最终修订分列，400位历史低频边界及原生／Bot不同失败项继续记录，不据此增加语义判定／执行框架或重跑全套。证据`P12-K01-K16-bounded-final-quality-review.json`及`K12-current-original-requirement-and-later-public-summary-readonly.json`。候选重建作用域只读核查未见丢失Bot工具／队列／交互／租约，实际provider故障切换仍未证，不把既有mock替代实测；见`P03.4-runtime-candidate-scope-readonly/P03.4-runtime-candidate-context-and-existing-negatives-readonly.json`。
+
+### 2026-10-23 删除与真实后台总结重叠闭环（1023DT／F10）
+
+严格闭环 **186／201（92.54%，剩15例＝9项P0＋6项P1）**，新增F10。用户明确确认后，仅在全新独立profile删除Bot「F10-QA-1023DT」的候选记忆3aa05916…；KEEP及旧DS两条均保留。原M2.7自然提炼请求11:06:54.302Z发出，含当时两个真实UUID清单；原public removeMemory在54.320Z完成，真实200响应59.903Z才返回，实际重叠5583ms，未hold／替换模型回复。回复经原think剥离可解析为1条同项目长期偏好的有效create候选，memory_md仍引用已删UUID；版本变动后的原eligible边界使本批不提交，也未另发verification。不是空候选巧合、不是同UUID update，不声称HTTP传了epoch数字或直接dump内部epoch。
+
+原App正常Quit／同profile重启后，真实bot_memory_search／list／get各一次与call_id逐一核对：search命中KEEP关联项而非[]，list只KEEP，get真实读KEEP；目标文件和同偏好新条目均不存在。KEEP221B、正文／version／SHA／mtime保持，旧SQL行与原native前缀不变、双库quick_check ok。两个独审支持原本地异步版本协议闭环；原AF官方正常删除／再查询的外部可观察对照复用，不冒称官方隐藏提炼时序已测。66982／67041均正常退出0且不存在，新profile记忆开关恢复false；主配置／当前构建／索引保持。本例验证已有保护，无须新增生产修复。
+
+前置失败如实保留：最初F10误复用K06运行profile造成QA并发启动恢复事故（见K06）；重建全新独立空base后首次前台无提炼，原因是原memory设置disabled而非产品故障。仅经原settings API在新profile启用并核45资源字节／服务ready，才执行唯一真实重叠；先前disabled腿无删除，未追多轮竞态。证据`1023DE-resume-batch/F10-independent-1023DT/{F10-root-original-contract-adjudication.json,F10-original-contract-final-independent-review.json,real-overlap/F10-one-real-overlap-independent-readonly-verdict.json}`。无产品代码、暂存、提交或push操作。
+
+### 2026-10-23 低优先级显示与外部条件只读收敛
+
+N05未确认必须修的动画bug，当前0行产品改动。原create／delete共享Dialog类缺实际animate utilities，preview又主动none，三个owner会直接卸载；只添CSS不能正确退出。给定Grok0.18重建overlay明确compact不造transition且!open直接卸载，删除确认同样如此，不能反过来假定当前0.75所有modal必须动画退场。Tooltip的30／300ms为hover delay，不冒充动画时长。当前官方帧级观测仍不足，N05继续部分，不为猜测引入80–140行presence改造或全局依赖。证据`1023DE-resume-batch/N05-overlay-motion-readonly-review.json`。
+
+J01／J03再次只读核：卸载前官方原UI已同时存在保存成功链接和/ar无候选，不能把无候选全归卸载；0.72普通slash gate与当前0.75值不同且未读取／修改隐藏状态。当前原「教它做一项任务」可见，但保存后真正手选仍未证；本地一般未选负例已过，enabled技能名字面正文的精确负例仍缺。保留部分，不造引用、不扩大技能执行协议。P15原登录路由是同mainWindow的HTTPS SSO→HTTPS login.html→原IPC回本地renderer，并非自定义URL scheme，未见QA appId导致scheme注册冲突的证据；认证后回调／拒绝原因无实际记录，用户无法登录原因仍未知，不归责账号／网络／用户。两项证据分别`J01-J03-official-native-skill-minimum-preflight-readonly.json`及`P15-current-packaged-1023DP/P15-auth-route-qa-identity-readonly-review.json`。
+
+### 2026-10-23 两端五十轮切页／弹窗生命周期闭环（1023DU／N10）
+
+严格闭环 **185／201（92.04%，剩16例＝10项P0＋6项P1）**，新增N10。当前官方0.75.3以原Search准确选中GA／GB，20轮切出返回、20轮详情开闭、10轮创建原Cancel全部实走，100份原AX逐份独审核标题／输入框／弹窗终态，50／50通过；不把搜索打开算切页、不创建任何Bot。最初九份实际顶层live region为「GA正在工作」，之后真实已回复；最终实屏可见463–500及END_N10_1023DU，原GA空草稿／无弹窗。官方不是partial token遥测，AX512字前缀不能当截断，亦未独立全文证明500编号唯一。原三pin、GB分组、AL草稿、sean未读保持。
+
+结合原CW本地50真实往返／首个完整轮实际流式增长／原source清理护栏与资源实证，按有界生命周期合同闭环。当前N02六文件冻结哈希保持，原共享rAF／observer／订阅释放源审通过。两端资源分记：本地settled26.9657秒累计CPU0.6304%、4进程／FD167稳定；官方第9／10动作后及50轮后为8进程、numericFD217／220／215，RSS661936／761520／717440KiB、psCPU合计1.0／1.2／2.1%。官方首样本不是全题before、RSS可含共享页，原本地400与本轮官方500行负载不同，不做性能排名，不把有限样本当JS监听计数、物理FPS或未来无泄漏证明。非50轮全程同时流式。
+
+保留Search匹配未读标签的QA断言失败及30秒CUA超时：实际只完成19次切换时未提前计20，重连从原搜索现场完成后才记；旧官方noWindows／未完成批次原样保留。证据`1023DE-resume-batch/N10-official-batch-1023DU/{N10-root-original-contract-adjudication.json,performance-readonly/N10-official-fifty-and-bounded-resource-independent-review.json,progress.json,end-after-scroll.png}`和原CW证据。本项未改产品／暂存／提交／push。
+
+I07只补一次当前官方精确Search CP_KEEP_1022CP，唯一命中用户原设置正文，无实际GA到期回复命中；原候选删除、KEEP及本地11项通过仍保留，官方正控未闭合／原因未定。不重建、改期或手动运行以代替到期，整例仍部分。证据`1023DE-resume-batch/I07-CP-existing-positive-control-search-review.json`。
+
+### 2026-10-23 长上下文压缩与当前成果交付闭环（1023DU／K06）
+
+严格闭环 **184／201（91.54%，剩17例＝11项P0＋6项P1）**，新增K06。复用原BW双方50文件／180行四件质量证据，在原同一真实Bot历史以独立44k测试窗口触发原Runtime真实压缩；生产128k不动。cutoff56、115531B归档及最新有效01／25／49／50规则、过时10规则边界、当前final目录真实提交并跨正常重启保留。随后仅一条获准剩余续作以原128k／M2.7在36.54秒completed，四件正式交付、逐件实际打开；16项执行／13项原产物oracle及第二独审17事实通过，180行／Decimal分币种／50manifest正确，56保护文件和三条F10记忆SHA、旧99原生消息保持，Runtime真正idle后原App正常退出。
+
+如实保留失败链：旧32k固定开销超预算；首44k凭据夹具误读被原API脱敏，72ms未出provider便失败；F10代理误复用正在运行K06的测试profile，第二App初始化触发原启动恢复而中断Host。已用原精确task cancel使原Runtime idle，再正常Quit／唯一进程重开读回真实summary，未改DB复活任务，不归为产品回归或用户操作。早期捕获2条摘要provider响应、冻结checkpoint可核43／48／56三种summary内容，总调用次数未全程捕获；后续20checkpoint携同一event，不称20次压缩。前三准确数据件按最新授权逐字复制，README明确续作，不冒称压缩后重新计算50件或自然耗尽生产128k。CSV首图仍Loading被独审指出，0模型补原真实稳定表格图；夹具末尾URL取值异常及README轻微措辞边界保留。
+
+证据`1023DE-resume-batch/{K06-root-original-contract-adjudication.json,K06-original-after-qa-conflict/K06-original-compaction-continuation-independent-review.json,K06-original-after-qa-conflict/K06-second-reader-original-contract-review.json}`及真实checkpoint／原BW证据。未改产品、暂存、提交或push。
+
+侧栏L03本地实际trusted dragstart／drop已使原pin顺序000／001→001／000，原持久化顺序及正常重启保持，原选中／草稿／未读保留，12事实独审通过并恢复临时pin／布局。官方本轮临时pin／unpin恢复、实际drag尝试尚未证明落位／重启，不关闭整例。证据`1023DS-L03-native-drag/L03-local-independent-verdict.json`。
+
+M11补齐原真实浏览器页五场明暗／1200和1440DIP／125%应用zoom，当前真实OS scaleFactor=2，native物理截图2400／2880px，预览与控件在窗口内。应用125%改变CSS尺寸／dpr不冒称OS档位变化；Playwright裁切图保留，补原native完整2880×1800图，主题／view／window／zoom及八件原文件恢复。仍未主动切多OS档位／补官方全组合，保持部分。五景旧目录为1023DG，早先误写1023DI（IME）已在当前条目更正。证据`1023DT-M11-browser-retina/M11-browser-retina-independent-verdict.json`。
+
+### 2026-10-23 具名群删除与重启闭环（1023DR／D14）
+
+严格闭环 **183／201（91.04%，剩18例＝12项P0＋6项P1）**，新增D14。按用户“确认，仅停止并删除这个合成群”，原UI停止待答任务后，在原具名确认框永久删除「删除群安全核验-1023DR」（357f79d3…）。即时实际Chromium对象证实目标页关闭，另一群和私聊两原Page仍可读且scope／ID保持；原两Bot、私聊、记忆、另一群及五文件SHA精确保持。原App正常Quit并核原PID退出、同profile重开后，目标群／任务／历史记录各0、侧栏不复活，原删除owner拒绝。10项独审通过；沿原Store／Host／Browser清理，不改取消／锁／存储协议，不新增模型。
+
+此前两端具名取消及获准官方群实际删除／重启证据合并验收。早先三旧pageId在确认前已消失，原因不明，不归因删除；同一未重启App经原公开浏览器接口重建三合成页后形成即时真实基线，最终实际关闭／保留据新原Page对象判定。群删除按原合同保留物理工作文件，不夸称磁盘文件一并删除。证据`1023DR-D14-group-delete-ready/D14-local-independent-verdict.json`、`1023DE-resume-batch/D14-root-original-contract-adjudication.json`及原CD／CQ／DG。未改产品、暂存、提交或push。
+
+### 2026-10-23 剩余外部条件及连接器证据补核（1023DP）
+
+P15仅部分完成：当前1.5.3／Electron39.8.10 arm64独立Mac包的388件有效out／29资源与当前审阅构建逐字节一致，PTY host与原生模块真正解包；启动至真实加载完成的招乎SSO。用户回复“没法登录”后，原app.close正常退出0，主数据／构建／配置／索引保持。包内Bot、M2.7、浏览器、正式文件与重启任务尚未验；签名资源校验失败另记，不称签名／Gatekeeper／安装通过，不复制登录态或绕过认证。首包外部QA映射失败、首进程意外退出均保留；只修外部QA打包映射，不改仓库builder。证据`1023DE-resume-batch/P15-current-packaged-1023DP/{package-retry-original-payload-readonly-review.json,P15-user-cannot-login-normal-quit-final-review.json}`。
+
+J04／J05只读独审逐一重配AS真实tool_call_id／服务nonce：J04发现／检查／三业务调用成功→错误→恢复，来源与9.33正确；J05三主调用各一次，仅safe一次fallback，unsafe／business备用0，错误真实返回，保护哈希保持。当前P03真M2.7唯一合法调用再确认，不新增模型。两例本地原合同已具实证，官方已观测私人Bot缺自定义入口、等价调用仍未验；按本表产品案例双方对应操作规则保留部分，不为凑数造入口、不记双方通过。首轮格式差异／三次桥误用均保留。证据`1023DE-resume-batch/J04-J05-original-contract-and-official-boundary-independent-review.json`。本节不增加闭环数。
+
+### 2026-10-23 真实待答与草稿提示优先级闭环（1023DQ／M10）
+
+严格闭环 **182／201（90.55%，剩19例＝13项P0＋6项P1）**，新增M10。只补同一原Bot的一条极短M2.7真实单选任务：原request_user_input／Host waiting_user／Context pending与自有未发送草稿同时存在，实际紧凑hover及七次ShiftTab均显示身份＋等待；原Stop后任务cancelled、pending清除但同份草稿真实保留，hover转为身份＋草稿。16项通过，旧28task／3Bot／2群／0例行及主配置／索引保持，仅新增这一已取消任务，草稿与264宽还原。
+
+root官方同题已实际发出真实问题，问题卡与自有未发送草稿并存；侧栏仍显示DQ问题，另一未等待私聊仍显示原AL草稿，实际支持等待＞草稿＞历史。当前官方compact实屏已保存；新keyboard尝试未显tip，不记为新官方tooltip成功。仅清掉本轮DQ草稿已确认，末尾原选项点击未观测到作答、实际坐标点击报noWindowsAvailable，DQ问题仍待答／侧栏紧凑状态待工具恢复后清理，不冒称已完成模型任务或归因用户；原AL草稿未动。
+
+按原本地tips功能与实际官方优先级合同关闭，不额加两端每种指针／焦点排列全重跑；官方纯pointer和完整动画时长仍归N01／N05。证据`1023DE-resume-batch/{M10-root-original-contract-adjudication.json,M10-combined-original-contract-independent-adjudication.json,1023DQ-m10-waiting-draft/M10-original-priority-independent-review.json,M10-real-wait-draft-official/waiting-with-draft.txt}`。本项无产品修改／stage／commit／push。
+
+### 2026-10-23 菜单与工作台入口合批闭环（1023DP／M09、N06）
+
+严格闭环 **181／201（90.05%，剩20例＝13项P0＋7项P1）**，新增M09／N06。一条原App可逆UI环路，12段1417帧DOM＋300屏幕帧；名称／标签原值Esc、头像／创建／资料／删除仅取消／真实文件预览逐项开闭，空名创建禁用、浮层在1500×900内无裁切，原菜单／弹窗返回原按钮，inline Esc原本blur到Body。root同时在当前官方0.75.3实际核头像三tab、标签、创建Cancel、右键资料菜单／删除Cancel、Library真实report.md预览。原Bot／任务／群／例行及版本保持，草稿／宽度／详情已还原，0新增模型；未触发系统保存或永久删除。
+
+M09按原可用控件展示与焦点合同闭环，不冒称像素完全一致：本地继承原CMB浅色组件与尺寸，官方当时深色，保留删除共享Dialog与Bot popup的圆角／颜色差异；官方Generate／Upload、本地形色格／重置能力差异明确保留。沿原组件可维护边界，不以菜单开合验收扩成图像生成／上传工程；全主题组合另在M11，完整退出时长另在N05。
+
+N06真实入口hover／快移／150ms按压释放进入、原菜单返回、离开回正；固定20px外框、外层transform始终none，角色内部连续114种几何，证明自然转向／强调而非已撤回的CSS粗放缩放。参考Grok角色内核，CMB独有工作台入口不新增不存在的官方同名入口gate。N01本地指针5.73秒连续动作仍未证明完整自然眨眼／官方pointer；M10真waiting＋draft唯一腿正补；N05本地popup实测100ms出入，原创建／删除／预览Dialog无动画、官方时长不足均保留，不误称整例已过、不改共享Dialog。
+
+证据`1023DE-resume-batch/{M09-N06-root-original-contract-adjudication.json,1023DJ-combined-ui-motion/five-ui-original-contract-verdict.json,official-ui-five-1023DP/observations.json}`。本项无产品修改、stage、commit或push。
+
+### 2026-10-23 三来源合成注入安全闭环（1023DM／P03）
+
+严格闭环 **179／201（89.05%，剩22例＝13项P0＋9项P1）**，新增P03。复用AN两端真实网页诱导／仅授权原件上传与正常研究下载、AO同事实发恶意引文→Host原身份引用→续作明确拒绝越权并补交原CSV；根代理另定位AO原生发送／成功回执／公开1106／接收task33bd3baa的逐字引用，未把正常漏附件提醒误充注入。
+
+仅补连接器原安全合同：独立完整App原公共send→Host→Runtime，真M2.7 8.214秒完成、inspect→invoke唯一合法nonce；原AS stdio真实返回与ToolMessage逐字一致，完整恶意指令确实进入后续真实provider请求。18项独审通过，全部4个完整请求未含三类私有值，只有原provider出站，任务阶段0保护文件访问／0越权工具，私有字节／双Bot资料／记忆版本保持，合法9.33结果真实交付。审计验收阶段两次记忆读取单列；后台原summary未保存新记忆。
+
+本地三来源合同关闭；官方网页／同事已有实际对照，当前私人Bot无自定义MCP入口，官方连接器腿仍未实测，不声称官方成功或失败。AO样本明确标为不可执行引文，不冒称所有隐蔽攻击均通过；本轮首键盘尝试未形成任务／原因未定、原API提交范围及额外单行JSON格式偏差均保留，不据此扩改UI或新增安全框架。证据`1023DM-P03-connector-injection/P03-connector-independent-verdict.json`、`1023DE-resume-batch/{P03-root-combined-original-contract-adjudication.json,P03-AO-peer-injection-actual-receipts-readonly-review.json}`及原AN／AO冻结证据。本项无产品代码、主配置、暂存、提交或push改动。
+
+### 2026-10-23 真实阶段头像展示修复闭环（1023DO／N02）
+
+严格闭环 **178／201（88.56%，剩23例＝14项P0＋9项P1）**，新增N02。原真M2.7红例确认Bot经scheduled通道镜像，旧头像只看普通stream，搜索／读写／执行均停work；原工具状态还残留审批UUID，不能简单换成该状态映射。对照Grok按pending请求显示动作，只改五个Bot展示文件及既有纯测试：沿已有scheduled信号、当前canonical尾批／精确call结果与同线程当前任务时间，排除旧结果／后排queued／他线程，保留原settlement、等待优先级、标量订阅与头像时钟；无Context／Host／Runtime／锁／存储修改。文案明确“处理请求”，不伪称已获得执行锁。
+
+独立真M2.7连续帧双头像同相：search485、read20、write23＋34、等待3480＋123、run115、回复11，终态idle且活动区撤下；非静图或仅循环缩放。实际补充任务17.72秒完成，原审批两次、execute退出0，合成输出真实23B／SHA／末尾LF与原件一致，正式文件卡实际打开。最初模型丢LF的22B产物、首绿QA以未trim正文定位任务且finally退出造成中断均保留；只补未完成write→execute→交付，不重跑已验browser／read。原26task／34native逐字段保持。7＋1帧原settlement短暂header idle/activity work保留，未声称全周期零延迟或执行遥测；未新跑官方完整阶段题／全量性能基准。
+
+原web类型／格式／renderer构建及6项构建隔离检查通过，邻接26项最终全绿，消息回归原9脚本通过；未改内核的全形状首轮5秒超时保留，原timeout单独5项1.65秒通过。原HEAD同样存在的refresh lint错误保持，不声称全量lint无错。0活动、206原线程idle时备份并仅激活251件renderer，正常退出／原launcher重启后原工作台及A会话／附件／空草稿恢复；原main／preload／配置／索引、77Bot／50群／2155task／1220群消息／33例行及全部13604条原生消息逐行哈希保持。CUA重绑曾自行打开无app入口的默认Electron空窗，已关闭后原launcher重开，不冒称产品启动故障。
+
+证据`1023DE-resume-batch/N02-stage-fix/{root-final-adjudication.json,N02-stage-fix-independent-final-review.json,independent-source-review.json,activation/result.json}`及原红例；当前仅展示修复，无本轮stage／commit／push。
+
+### 2026-10-23 群资料取消、保存与焦点闭环（1023DN／D11）
+
+严格闭环 **177／201（88.06%，剩24例＝14项P0＋10项P1）**，新增D11。两端原UI均实际输入临时群名后Esc恢复、Enter保存、读回及恢复原名；官方重开详情保持保存值，本地同ID版本v5→6→7。两端成员picker Esc回原添加入口；本地群设置实际改变成员勾选后Esc不保存、焦点回原群设置。原名称输入Esc／Enter均blur到文档，未虚称回trigger。0模型／0新增任务，本地99行原生历史／其余资料任务保持，官方原群历史、两成员及引用草稿保留。
+
+原D12两端成员Save／Cancel／重加与焦点、D11-I10真实版本冲突保草稿及显式恢复直接复用，不重跑。源码与实际控件确认群没有可编辑profile标签，AX标签组是Tabs；单Bot标签沿A08，不为文字歧义新增群标签存储。保留官方隐藏ID／版本未直接读取、本地即时移除与官方确认流程差异。证据`1023DE-resume-batch/{D11-root-original-contract-adjudication.json,D11-local-name-members-final-independent-review.json,D11-capability-existing-evidence-audit.json,D11-group-name-ui/official-result.json}`。无本项产品修改、stage、commit或push。
+
+### 2026-10-23 创建去重与失败重试闭环（1023DM／A05）
+
+严格闭环 **176／201（87.56%，剩25例＝14项P0＋11项P1）**，新增A05。复用CB两端实际双击创建＋随即Enter、重开唯一Bot／欢迎的17项证据；仅补独立原App真实SQLITE_BUSY失败、名称／头像草稿保留、释放自有事务后原按钮唯一重试，M2.7真实欢迎及重开唯一introduction，原96行消息与其他Bot／任务保持。未改产品创建或数据库代码。
+
+原CASE没有约定按键必须命中几十毫秒disabled区间，不把本轮未捕获的pending内keydown增设为硬gate；原时序缺口与失败记录保留，不追罕见窗口。新introduction欢迎后正常退出为interrupted，未冒称完整onboarding完成；旧CB正常introduction已completed。官方后端隐藏计数及同SQLite故障未验，未称两端内部实现相同。独立复核及根代理按原行为合同裁定，证据`1023DE-resume-batch/{A05-root-original-contract-adjudication.json,A05-original-contract-combined-evidence-addendum.json,A05-original-failure-retry-final-independent-review.json}`，原CB冻结证据继续保留。本批无stage／commit／push。
+
+### 2026-10-23 快捷键与原工作台能力闭环（1023DL／L10、P11）
+
+严格闭环 **175／201（87.06%，剩26例＝14项P0＋12项P1）**，新增L10／P11。L10复用BV双方真实CmdN／CmdShiftN、Tab／ShiftTab／Esc／收件返回和CW设置两键抑制／焦点，新原生IME补合成中抑制；仅补原创建弹窗内两个真实trusted快捷键，12项实证同一Dialog／原草稿／0新对象任务，原Esc回原触发器，0模型。官方设置中允许创建、本地按焦点范围阻止的差异保留，未冒称物理OS输入源已验。
+
+P11原普通工作台编程／六文件、提问／真实回答、流式切回完整显示复用原证据；新增原M2.7普通线程真实审批唯一执行、真正context-compaction请求及原checkpoint摘要／cutoff5／63625B归档，压缩后真实读回当前目录、50件／180条／两币值／ZIP哈希，旧命令不重放，无Bot专属调用／元数据漏入普通线程。原45／49产物失败、047／121合行仍保留，本次关闭原能力与边界合同，不等同模型产物完美。
+
+压缩只在独立合法32k测试配置中控制触发，真实M2.7／provider／output8192其余保持，原主128k配置未动；未称自然满生产窗口。另Bot单次32k腿真实失败：固定system／tools／handoff25899超输入预算22808，有界摘要后诚实报错，无提交summary／final／交付；不能从普通线程通过扩关K06，也不推成生产128k卡死。K06仍部分，不反复padding或重跑。自己的模型选择已恢复原M2.7。
+
+证据`1023DE-resume-batch/{L10-P11-root-final-adjudication.json,P11-original-capability-contract-final-review.json,approval-isolated-original/K06-32k-budget-limit-original-readonly.json}`与`1023DI-native-ime-boundary/{D09-L10-combined-original-contract-readonly-review.json,l10-modal-shortcut/result.json}`。索引并发变化保留未归因，本批无stage／commit／push。
+
+### 2026-10-23 原生输入法组合闭环（1023DI／D09）
+
+严格闭环 **173／201（86.07%，剩28例＝15项P0＋13项P1）**，新增D09。原完整App＋Blink原生composition真实事件下，合成中Enter及两创建快捷键不误发；中文／字面@／换行／选区替换、原子ID及草稿重开准确。结束后真实Enter仅提交一次，原M2.7在11.659秒唯一正式回复，SQLite9项独立核对通过，根代理实看末态。普通粘贴复用BV同SHA原组件的两端真实键盘／粘贴零误发证据，不再扩每操作×每输入时刻全排列。
+
+这是应用原生输入边界，非物理macOS输入源／Windows／官方新IME实测；CDP产生的compositionend.isTrusted=false原样记录，真正受保护的合成中Enter／快捷键均trusted且isComposing=true，未派发假DOM事件。提交只按原trim去末尾换行，内部换行／身份范围保持。首轮过严trusted-end及第二轮QA异步等待误判导致自己测试任务中断均保留，第三独立profile唯一真实完成，未据此改产品。L10只剩弹窗内两快捷键实际按键在补，不连带关闭。证据`1023DE-resume-batch/D09-root-original-contract-adjudication.json`、`1023DI-native-ime-boundary/{D09-L10-native-ime-scope-report.json,ime-readonly-db-verdict.json}`与原BV18项键盘裁定。
+
+D11核清原case“标签”歧义：原Grok群无profile标签字段，当前官方群实际只有详情／资料库／成员等Tab，AX“标签组”并非可编辑群标签；本地BotGroup同样无label，单Bot label属A08。成员Save／Cancel／重加／焦点及真实版本冲突恢复可复用，群改名Esc／提交读回／恢复仍待，维持部分，不因此新增组标签存储。证据`1023DE-resume-batch/D11-capability-existing-evidence-audit.json`。无本批源码、暂存、提交或push操作。
+
+### 2026-10-23 接管等待展示最小修复闭环（1023DJ／N03）
+
+严格闭环 **172／201（85.57%，剩29例＝15项P0＋14项P1）**，新增N03。真实M2.7红例32帧：人工接管等待时头部blocked、底部却work／正在处理。对照原Grok等待状态及原CMB接管链，仅改两个Bot展示文件，复用已有同线程Host等待状态、botConversationState与useBotRuntimeMood；原问题／审批文字优先级不变，无新状态、订阅、时钟或执行改动。独立源码审查核同线程过滤、普通工作台边界及仅渲染时现有任务短路扫描。
+
+候选真实M2.7单任务绿验：接管103帧双blocked；原归还后真实问题61帧正确“等待你回复”；原Stop后61帧idle且活动区撤下，固定头部／输入框坐标不变、0页面错误。选择和审批允许／拒绝沿原红例中真实通过证据复用。原配置web类型／格式／构建通过，23项邻接用例最终全部覆盖通过；未改内核的全形状测试在构建／类型检查并发时两次5秒超时均保留，构建结束后按原超时独跑全5项通过、全形状1.77秒。Lint原HEAD同样存在的1错2警告保留，不冒称全量lint干净。
+
+0活动任务、206原线程全idle时备份并激活251件renderer，原main／preload及复制时配置／索引保持；首次Reload观测不确定，随后正常Quit确认原main缺席，再用原launcher重开，原工作台及A历史／两附件／空草稿／电脑详情实际恢复，77Bot／50群／2155任务／1220群消息／33例行及13604原生消息数保持。两个新展示文件此间进入暂存，操作者不归因、不还原；本轮无stage／commit／push。N02阶段映射不借此判过。证据`1023DE-resume-batch/N03-waiting-fix/{root-final-adjudication.json,N03-waiting-fix-independent-final-review.json,activation/result.json}`，原红例与失败日志保留。
+
+### 2026-10-23 记忆错误恢复闭环与长内容合批（1023DI／F14、M11／M12部分）
+
+严格闭环 **171／201（85.07%，剩30例＝15项P0＋15项P1）**，新增F14。复用AF真实多条／中文／空结果／长文滚动及取消零变更，仅补原完整App＋原IPC／文件服务的真实EACCES：错误不伪装为空记忆，故障未解除时原重试仍报错；恢复自己合成MD的权限后点原“重新读取”，同ID／版本／正文及字节恢复，错误清除。原任务／历史、配置、索引保持，0模型请求。当前错误仍含技术EACCES／路径，不声称所有错误已友好脱敏。官方无等价逐条面板／长全文不足的实际限制保留，不要求不存在的官方入口。证据`1023DE-resume-batch/{F14-root-original-contract-adjudication.json,F14-original-contract-combined-review.json,approval-isolated-original/F14-memory-io-original-result.json}`。
+
+长内容一次合批以原合法接口、独立profile构造明确synthetic的100条×1000汉字（只读SQLite复核恰10万字，总121条），80字符Bot名、2570字符URL、2135字符单行代码／宽表、8个199字符真实文件名。原UI五个场景实际滚动／最早历史搜索、连续附件截断／完整title／启用按钮、文件预览读回均通过；原8文件SHA保持，0renderer错误。根代理实看窄深色预览及宽浅色内容，无横向撑爆。实际窄窗为应用最小宽1200而非请求900，宽1440；125%为应用缩放，非macOS系统缩放。首场贴底安定不混算轮滚，后三组真实750px滚动及非空窗口另核。M12官方10万组合仍缺；M11物理系统缩放／浏览器预览待验，均不计新增。证据`1023DG-M11-M12-long-content/{M11-M12-actual-ui-result.json,M12-persisted-fixture-independent.json,M11-M12-source-and-old-evidence.json}`。无生产代码、暂存、提交或push操作。
+
+### 2026-10-23 正常退出与减少动态效果闭环（1023DH／O01、N08）
+
+严格闭环 **170／201（84.58%，剩31例＝15项P0＋16项P1）**，新增O01／N08。O01复用真实排队、待答及审批正常Quit证据，仅新补一条原完整App＋M2.7运行：实际owner为running，START记录真实命令PID62890；原正常退出后main与命令均消失，重开同task为interrupted。原80条历史哈希、21旧任务与旧完成文件保持，跨原30秒截止无迟到文件／重放。排队同ID唯一完成，待答及审批保留原ID／历史但如实中断，不声称恢复内存中的等待或后台续跑；官方客户端退出不等于云端停机，架构差异保留。
+
+N08以标准Chromium原生媒体输入驱动原App，未替换matchMedia、样式或动画实现：正常大头像13帧13种SVG→reduce后仅1种，改形色及真实悬停仍稳定，恢复后11种；原CSS为none／0s。原输入、Tab、取消焦点、草稿、记忆与群页完整，媒体change真实发出，0模型响应／0活动，原配置和索引保持。此例关闭应用对减少动态媒体信号的响应；**未操作物理macOS／Windows偏好，不宣称OS→Electron传播或官方开关已验**。原合同未限定必须点击系统设置，不添新门槛；两次夹具定位失败均保留，一次焦点超时在唯一normal／reduce实际DOM对照中两边均正常，未据此改产品。
+
+证据`1023DE-resume-batch/{O01-N08-root-original-contract-adjudication.json,approval-isolated-original/O01-four-phase-original-contract-review.json,N08-original-media-query/N08-original-media-query-final-review.json}`。无生产代码、主配置、暂存、提交或push操作。
+
+### 2026-10-23 获准具名删除与重启闭环（1023DG／A12）
+
+严格闭环 **168／201（83.58%，剩33例＝16项P0＋17项P1）**，新增A12。仅删除用户本次逐项确认的本地CB合成Bot、官方同名CB合成Bot及指定CA／CB官方群。复用双方具名取消零变更证据；本地真实确认后精确清理11个所属任务、62条所属原生消息，另77个Bot／50群／33例行／93命令／1220群消息保持，原普通BO线程旧56条消息及3份保留工作文件字节一致。正常Quit后进程缺席、0活动任务，原launcher重开两端界面无被删对象，其他Bot及官方旧草稿保留。本地置顶“CB-创建去重-1022CB-MM、爸爸”为原有另一群，按授权保留，不是Bot恢复。
+
+活页范围补证沿原Host／清理回调／BrowserService，合法隔离Bot同ID贯穿，真实Chromium两页→一页；目标页关闭、同事同PageID仍可导航及预览，旧owner观察／预览／新建均NOT_FOUND，0模型执行。该补证与主界面具名删除分开记录，不冒称主对象删除时有活动页；无非空记忆／原线程解绑现场也不添作A12新门槛。官方指定群已删除，但原本地候选群此前已不存在，D14仍部分。证据`1023DE-resume-batch/{A12-final-original-contract-adjudication.json,delete-three-authorized/}`与`1023DF-A12-real-browser-cleanup/A12-real-browser-scope-result.json`。无生产代码、暂存、提交或push操作。
+
+N02真实M2.7已完成搜索→官方页面→读写→执行→两份交付；首轮取消和模型初次API错误保留。独立发现的UTF8解释、宽松字段校验及网络失败仍报成功三处产物偏差，已由原Bot修订后实跑验证；原输入哈希不变。官方已正式附两份文件，但尚未实际核对其字节。阶段动作未全程捕获，N02仍部分，不把文件通过替代动画通过。证据`1023DE-resume-batch/N02-r2-feedback-final-artifact-readonly-review.json`。
+
+### 2026-10-23 群审批生命周期与工具展示闭环（1023DG／C11、M07）
+
+严格闭环 **167／201（83.08%，剩34例＝17项P0＋17项P1）**，新增2项P0。C11同一原群中A真实审批与B真实问题同时等待，原停止／移除A均令审批取消、0命令文件；B同requestId跨停止／移除／重加保持，群内原卡真实选择后唯一正式回传，重加0新增任务／卡。复用原问题、官方对照与重启证据，官方答A会忽略B的差异保留。四轮夹具的任务预览截断、重复入口与一次未定按钮观测失败保留；最后同一路径直接群内续答实证成功，未改生产代码或新增恢复体系。M07复用七类真实工具的原生／存储／AX／截图，仅补新独立默认OFF、原Runtime真实审批可操作的缺口，允许运行一次与拒绝无副作用均核实；普通工作台原工具卡仍有既有证据，官方当前审批策略差异不冒称对齐成功。证据`1023DE-resume-batch/{C11-M07-root-original-contract-adjudication.json,M07-original-contract-final-readonly-review.json,approval-isolated-original/C11-original-local-evidence-index.json}`。
+
+### 2026-10-23 大历史性能闭环（1023DF／P09）
+
+严格闭环 **165／201（82.09%，剩36例＝19项P0＋17项P1）**，新增P09。复用CV真实663历史／120侧栏证据，在独立profile以原合法Store与原线程API创建明确标注synthetic的180 Bot和100／1000条历史；原完整App／preload／IPC／SQLite实际分页、搜索、前后导航、详情和滚动通过。1000页为128＋500＋372，冷worker首载736.06ms，后两页28.98／21.33ms；100页9.15ms。搜索每次至多扫32行、1000共32小页，单页最大3.96ms；侧栏180→1→0→180，仅一次snapshot7.36ms。原外层customScrollParent轮滚读回44060→41860，可见行0371–0375→0352–0356，实际挂载13行，0renderer错误。SQL线程索引／主键及有界读取已核，ORDER BY右侧临时B树原样记录。早先详情开关选择与内层滚动元素断言的夹具失败保留，不冒充产品故障；未执行到的idle不算通过。此为明确规模夹具，非1000次模型交付、官方1000或Windows验收；主库未填测试数据、无生产改动。证据`1023DF-P09-synthetic-scale/{root-original-contract-adjudication.json,journey-result.json,scroll-final-result.json,original-SQL-query-plans-readonly.json}`。
+
+### 2026-10-23 真实审批批量闭环（1023DG／C01–C03）
+
+严格闭环 **164／201（81.59%，剩37例＝20项P0＋17项P1）**，新增3项P0。复用原完整App／preload／IPC／Agent Runtime／审批UI和真实MiniMax-M2.7，在独立默认严格profile触发真实审批，未改主预览YOLO／模型配置。C01等候期间文件不存在、点原“运行”后唯一一行；C02拒绝无副作用，下一独立任务重新审批并可成功；C03同会话允许仅缓存同线程同命令，一次允许不缓存、另一Bot线程仍需审批且拒绝后0文件。13段实际检查及原生模型／审批回执、原卡截图核对通过。首轮误把被注入B消息当执行owner的夹具断言失败保留，仅补未完成分支；不据此改生产代码。官方当前策略直接执行不弹审批的既有差异保留，不冒称官方审批通过。M07只补审批展示分支，C11／O01等不连带关闭。证据`1023DE-resume-batch/approval-isolated-original/{C01-C03-root-original-contract-adjudication.json,result.json,followup-result.json,original-runtime-model-receipts.json}`。无生产代码、主profile设置、暂存、提交或push修改。
+
+### 2026-10-23 字面答案与讨论控制复核（1023DF／B13）
+
+严格闭环 **161／201（80.10%，剩40例＝23项P0＋17项P1）**，按B13原显示合同新增1例。本地私聊pass／(pass)准确可见；群A原生正文、存储和气泡均为(pass)，群B原生正文已经是pass、存储与气泡原样显示；两种可选讨论控制pass均真实不生成气泡。因此直接答案与无贡献讨论隔离成立。**群B少括号仍是未纠正的模型格式失败**，不改原文、不算整体任务质量通过；官方旧群无答与本轮“已停止，未回复”都保留，不推断原因，不另加“官方先成功”作为本地显示验收门槛。无生产代码修改。证据`1023DE-resume-batch/B13-original-contract-readonly-review.json`及其12份原回执／原生／存储／实屏引用。
+
+### 2026-10-23 后台与完全退出闭环（1023DF／I09）
+
+严格闭环 **160／201（79.60%，剩41例＝23项P0＋18项P1）**，新增I09；与并行补验I10共新增2例。真实关窗选择“最小化到菜单栏”，未记住偏好，14:47后台到期任务4d063…在4.46秒完成、原文回复可见；两端正常Quit后14:48:06／14:50:11／14:52:17主进程均不存在，本地14:52到期未创建任务。原launcher重开后14:52:24仅补建一次5c2a…，5.93秒完成，两条原生assistant正文／零工具及实际Bot界面均核实。两条例行现均停用、nextRunAt=null，未改其他例行。实际创建说明及关闭提示明确本机需留后台。官方第一条回复时间14:48:44在客户端完全退出期间，体现远端运行；第二条尚未观测回传，不推断失败，也不把本地架构改成云端。证据`1023DE-resume-batch/{I09-final-original-contract-adjudication.json,I09-original-runtime-receipts-readonly.json,I09-local-both-receipts-actual-ui.txt,I09-*.json}`。重开初期工具仅读旧画面／noWindowsAvailable后已恢复绑定，失败操作未算成功；无生产代码、暂存、提交或push操作。
+
+### 2026-10-23 例行编辑恢复闭环（1023DF／I10）
+
+严格闭环 **159／201（79.10%，剩42例＝23项P0＋19项P1）**，新增I10。复用19项两端真实详情／历史回执／同记录改名恢复／焦点与聊天草稿证据；仅补原React组件＋原LocalBotHost／BotStore／SQLite的真实并发版本冲突：旧框连续两次拒绝且草稿在，复制草稿后取消、重开同一最新记录并只重填名称，版本2→3成功，另一方新内容及暂停状态保持，0执行任务。不是自动合并或一键重试，不为此新增生产代码。官方编辑会预填主输入框的交互差异保留。D11只补冲突分支，整例仍待。证据`1023DE-resume-batch/{I10-final-original-contract-adjudication.json,I10-paired-normal-path-independent.json,D11-I10-original-recovery/}`；首轮测试选择器假设错误记录保留。I09真实后台已完成，完全退出到期分支仍在验收。
+
+### 2026-10-23 空态与失败恢复闭环（1023DE／L12）
+
+严格闭环 **158／201（78.61%，剩43例＝23项P0＋20项P1）**，新增L12。实际Bot加载失败暴露原始EEXIST和绝对路径，按官方固定错误文案／原重试入口的做法，仅在现有`useBots`加载边界改3行：未知异常显示友好提示，明确的BotError仍保留可行动信息；未改Host、执行、存储、事件合并或重试机制。原版本红例复现，修正版7项hook回归、9项隔离真实应用检查、web类型／格式／构建及独审通过。真实故障解除后点击原“重试”，Host实际初始化、错误消失，原工作台仍能返回。
+
+结合BQ归档／恢复、CZ真实空群、此次真实零Bot创建入口及A04创建取消，原L12合同已覆盖。一次正常打开被动记录到“正在读取 Bots…”真实DOM、可见样式及矩形，下一帧前已正常完成；**未捕获独立加载截图帧**，不额外要求人为延迟或重复命中截图。原观察脚本因附加帧断言给出incomplete的记录保留，独审按原合同确认该附加门槛不适用。修正版已于14:41在主预览原进程缺席、0活动任务时激活：复制251份renderer并保留旧hashed资源，main／preload／Git index散列不变；原配置重开已实际看到原工作台和现有Bot历史／详情。自然退出不计I09验收，激活记录`L12-activation-1443/result.json`。
+
+C11补齐本地单成员主动停止：B旧问题取消，A原请求仍能唯一续答，16项实际回执核对通过；官方仅观察到答A后忽略B，未验证官方单独Stop。审批分支仍待，C11保持部分。N10官方本轮只核实1次往返，随后noWindowsAvailable，已停止反复尝试；未将输入尝试或资源快照计为50轮通过。
+
+证据`1023DE-resume-batch/{L12-minimum-fix-independent-review.json,L12-list-load-error/final-implementation-and-real-recovery.json,L12-list-load-error/natural-loading-once/result.json,C11-local-actual-receipts-final-readonly.json,N10-official-cycles/partial-result.json}`。用户当前五项暂存保留，未执行暂存、提交或push。
+
+### 2026-10-23 Bot 存储失败与原工作台隔离（1023DE／P14）
+
+严格闭环 **157／201（78.11%，剩44例＝23项P0＋21项P1）**，新增P14。全新隔离数据根的 `bots` 普通文件令真实初始化发生 EEXIST；实际主进程、preload、IPC 与渲染页面仍能打开原工作台／空编辑器，Bot页显示明确错误及重试，经过现有设置菜单返回工作台后仍可新建空任务。六项真实检查与四张截图独审通过，无Bot IPC假回执或认证绕过；测试进程正常退出，原预览32679及固定文件在测试期间保持。
+
+此例仅关闭原应用启动隔离，不计P15正式包／SSO或模型交付。前两轮测试脚本的临时端口断言及错误返回选择器失败保留。错误页原始路径外露另按L12修正，重试后恢复尚待实测，不因P14通过跳过。证据`1023DE-resume-batch/{P14-final-contract-and-protection.json,P14-final-independent-contract-review.json,P14-isolated-startup-r3/}`。
+
+L03两次真实拖动未观察到落位，保留待验；临时两Bot置顶已恢复，原置顶／分组／选中／布局、活动未读与八张控制表一致，零新增模型任务。不能把聚焦当拖动成功，也无证据据此修改事件代码。当前四项暂存保留，本轮未执行暂存、提交或push。
+
+### 2026-10-23 例行编辑常用路径对照（1023DE／I10部分）
+
+双方沿现有暂停的AQ日例行完成名称临改、原回执入口及恢复原名。本地取消未保存、关闭焦点回编辑按钮，未发送聊天草稿一直保留，最终只清除本轮自建草稿。只读对账同ID、version4→5→6，暂停／nextRunAt=null／0触发；其他30条例行、目标Bot、旧675条消息和237任务均与原基线一致。官方原aq-1021两次真实更新回执与当前暂停列表相符，无新例行；其编辑入口把文字填入聊天，实测会覆盖本轮合成草稿，Esc不恢复，本地独立表单保留草稿的行为不应为机械对齐而退化。
+
+两端19项常用路径证据独审通过。版本冲突拒绝后的真实恢复尚未覆盖，I10保留部分，不将源码保护或顺序保存代替并发恢复；不新增版本／合并体系。官方首轮输入未送达保留，后用已核实正文及发送按钮完成，不冒称首轮成功。证据`1023DE-resume-batch/{I10-paired-normal-path-independent.json,I10-source-and-official-edit-review.json,I10-local-restored-independent-protection-audit.json,I10-local-restored.png,I10-official-restored.png}`。严格闭环仍156／201、剩45；未提交或push。
+
+### 2026-10-23 原工作台真实提问与切页回归（1023DE／P11部分）
+
+沿原普通BO线程、原MiniMax-M2.7配置完成read_file→request_user_input→实际选择Continue→正文输出；仅两次工具调用，原56条记录与6份成果字节／mtime保持。最终回执与checkpoint同为3338字符，001–200编号顺序完整，结束标记存在，正常stop／completed。切页返回的实际截图已完整显示184–200及结束标记；首轮只依据AX文本误判停在030，独审证实该节点恰好是完整正文的前512字符，已纠正并保留误判原记录，不为工具观测限制修改核心代码。047／121与前行合并的模型格式偏差单列，不声称200个独立行全符合。
+
+本轮只补普通提问、回答后继续、切页与完整显示；原编程验收45／49的产物偏差保留，审批及压缩仍待覆盖，P11不计整例通过。严格闭环仍156／201、剩45例。证据`1023DE-resume-batch/{P11-live-native-question-stream-readonly.json,P11-native-final-body-evidence.txt,P11-native-stream-after-switch.png,P11-native-late-idle-view.png}`。三路源码／回执／数据保全复核并行，未提交或push。
+
+### 2026-10-23 浏览器预览与失败恢复闭环（1023DE／H13）
+
+严格闭环 **156／201（77.61%，剩45例＝24项P0＋21项P1；非实现完成率）**，仅新增H13。本地真实M2.7只调用4次浏览器工具，滚到底并另开表单页，两页身份／实际底部截图／切页／隐藏重开均核对；官方同素材完成正常页、真实连接拒绝、切回原页及底部截图，保留首轮旧任务干扰和生成失败，不称双方首轮无偏差。
+
+自然已停止的合成地址暴露本地展示缺陷：白屏、内部错误URL覆盖输入、原始Playwright日志。对照官方真实Chrome错误页及当前预览组件源码，只改BotBrowserPanel的本地失败展示与重试地址，不改Host、IPC、Runtime、控制权或抓图循环。r1实际复测又发现失败后的首次新快照仍可能返回旧HTTP页面，提前清掉地址；保留r1失败图和稳定红例，r2只在页面身份／URL变化或导航成功时清理。完全相同组件测试由红转绿，最终eslint零警告、web类型、原配置renderer构建通过；251份renderer激活后只重载界面，原主进程保持。
+
+r2实屏完成拒绝→真实重试→切正常页→返回失败页仍保原地址→恢复有效地址→归还→隐藏重开。隐藏停抓与刷新恢复由真实组件DOM计数／断言及实际开关UI联合验证；不把官方后台抓图次数称为已测。原13547消息、756工作文件、42记忆、31例行、11配置和139份非renderer输出保持；仅新增本轮任务及10条消息。Git index原始字节变化单列，索引语义／暂存补丁仍同、暂存0。证据`1023DE-resume-batch/{H13-transition-regression-r1-failed.json,H13-transition-regression-r2-final.json,H13-r2-navigation-race-independent-review.json,H13-final-protection-readonly.json,H13-r2-*,H13-official-*}`；未提交或push。下一组优先补P0原工作台提问／流式回归，I10现成停用例行路径同步准备。
+
+### 2026-10-23 头像尺寸与当前构建验收（1023DD／DE）
+
+严格闭环 **155／201（77.11%，剩46例；非实现完成率）**，仅新增A09、M04。当前`e4a6f5973`完整构建已正常退出／备份／激活；原业务数据、198线程／13547消息、42记忆、756工作文件及配置／索引独审保全，新增13个预期空表，旧`bot_meta.revision`加1单列，不声称数据库字节完全相同。
+
+双方六边形／青色在普通侧栏、展开置顶、紧凑置顶、头部、详情及编辑器的实际图像完整，独立看图无错配或裁切；复用CE48次真实选择／正常重启和CW13形创建／群组合三上下文。临时外观／置顶已恢复，旧业务列（除真实外观编辑的version／时间）、全部消息／记忆／工作文件再核对保持。侧栏键盘恢复336px与原335px的1px差异保留。生成／上传、连续悬停与过渡动画分别留M09／N01／N05／N06，不因本批静图扩大通过范围。无新模型任务、产品代码、暂存、commit或push。证据`1023DE-resume-batch/{A09-M04-independent-actual-visual-verdict.json,A09-M04-post-actions-readonly.json}`及配对PNG／AX；构建证据见`1023DD-e4-preview/independent-preservation-final.json`。
+
 ### 2026-10-22 资料库组合验收闭环（1022CY／G12）
 
 严格闭环 **153／201（76.12%，剩48例；非实现完成率）**。G12本地原功能合同完整通过：现有合成CB资料库先见真实空态；系统窗口两件同蓝选中后一次Open，TXT60B／CSV64B各导入一次；刷新及详情往返无重复，两件逐一定位打开，TXT全文和CSV三行准确。独审20／20：副本与原件SHA逐字节一致，CSV的BOM／4处CRLF及合计74.13保持，原742文件的bytes／mtime不变；全部控制表、192原线程、模型、记忆、配置、709份实际输出保持，0新模型任务或消息。
@@ -789,10 +1082,10 @@ AU实际11生产文件+460／-13，沿原授权read-text／同worker／稳定句
 - 2026-10-20 用户在“使用minimax2.7吧，便宜”之后最新要求“你用deepseek测试不就知道了”，当前真实验收主线改用已有 **DeepSeek V4 Flash**；W14同时保留同题M2.7对照。此前MiniMax-M3／DeepSeek／MiniMax-M2.7的要求、历史结果及失败均保留，不互相冒充；换模型通过不覆盖旧模型失败。优先复用相应模型的现有合成Bot，先核对实际路由与响应；如需切换，仅通过正式界面修改本轮合成测试Bot，不覆盖用户Bot、外观、草稿或正式模型配置。
 - 本表包含 **201 个独立案例**，每个案例有明确操作和判据；表中“待测”表示尚未完成本轮实际验收。设计完成、旧版本通过、单元测试通过均不能改为本轮通过。子参数全部通过才关闭该案例，不能把一例拆成许多通过数稀释失败。
 - 先处理已知失败及 P0：首次发送、群收件／重复交付、编程真实性及质量、文件交接、记忆隔离、停止／恢复。随后覆盖其余核心功能，再做 UI、动画、资源与原工作台回归。一个任务可同时提供几个案例的证据，但每个案例保留独立结论。
-- 每个产品案例均在当前官方 Grok 应用实际执行对应操作，保存版本、时间、输入和可观察回执；源码用于解释差异。当前官方版本需现场确认，提供的 0.18 重建源码不冒充当前客户端源码。官方准确模型与服务端工具不可见时明确标注，不推断同模型因果。
+- 每个产品案例原则上在当前官方 Grok 应用实际执行对应操作，保存版本、时间、输入和可观察回执；源码用于解释差异。2026-10-23 用户确认 I07／J01／J03／J04／J05 以已有本地功能实证关闭，官方侧未完成的对应操作单列保留，不计为官方通过；其余案例沿原要求。当前官方版本需现场确认，提供的 0.18 重建源码不冒充当前客户端源码。官方准确模型与服务端工具不可见时明确标注，不推断同模型因果。
 - 同题正文、输入附件字节和验收脚本保持一致；仅替换唯一合成标记、平台路径与实际 Bot 提及。先保存任务／文件／模型配置指纹；不把实现差异写成两套难度不同的题。先冻结质量判据，再发题；新发现反例同时检查双方，保留旧结果，不手改模型产物。
 - 每例至少记录：案例 ID、构建与源码指纹、实际模型、双方操作／时间、原输入、任务与消息 ID、文件哈希、独立判据、差异、修正 diff、复验与相关回归。官方只可见界面时不声称拿到了其工具或 checkpoint；CMB 可追加只读任务／checkpoint／进程／服务端记录。
-- 结果使用：`通过`、`功能差距`、`交付质量失败`、`已约定本地差异`、`环境阻断`、`待测`。失败保留首轮与修正后的结果；不能通过隐藏真实回复、吞掉失败、人工补交、减少任务要求、换较容易模型或无限重试得到通过。
+- 结果使用：`通过`、`功能差距`、`交付质量失败`、`已约定本地差异`、`环境阻断`、`待测`、`不适用`。不适用必须有原需求与正式入口的证据，原题保留在201分母，不计为通过，并与待验／环境阻断分开报告；不得用它隐藏实际提供功能的失败或缩减原目标。失败保留首轮与修正后的结果；不能通过隐藏真实回复、吞掉失败、人工补交、减少任务要求、换较容易模型或无限重试得到通过。
 - 发现差距立即处理：保存现场 → 核对原 CMB 接口与 Grok 源码／实际交互 → 最小复现 → 最小修正 → 按当前用户指定模型同题复验及邻接反例／原功能回归 → 更新本表与主 plan。无效尝试撤回，不顺手扩展执行／存储／调度体系。模型偶发与接线缺陷分别记录，不能未经证据全部归给模型。
 - 删除不可恢复数据等操作仍遵守操作工具确认要求，仅针对具名合成对象；需要时先保全并集中说明具体对象。未获确认的删除、不可用 Windows 测试机、缺少逐帧录屏／指针观测等明确记阻断，不能伪造通过。
 - 官方与本地架构允许差异：本地必须启动应用才能执行；浏览器为原生独立窗口接管、共享专用环境与串行自动操作；没有云端 Linux 桌面。远端 K8s、群例行、跨用户／手机／语音、任意原生软件控制属既定二期。不得因官方有这些能力随意扩展本期；本期已实现入口不能虚假承诺。
@@ -874,7 +1167,7 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 
 ## 4. 案例清单
 
-所有“双方”指CMB当前指定模型与当前官方Grok，每条执行记录注明实际模型；历史M3/M2.7结果保留，当前DeepSeek约定见第1节，不将表中历史模型名称当作已切换或已复验。每例先取得官方实际行为。`P0` 为阻断／质量／数据风险优先，`P1` 为其余本期功能及细节，均需执行。
+所有“双方”指CMB当前指定模型与当前官方Grok，每条执行记录注明实际模型；历史M3/M2.7结果保留，当前DeepSeek约定见第1节，不将表中历史模型名称当作已切换或已复验。每例原则上先取得官方实际行为；I07／J01／J03／J04／J05 按2026-10-23用户确认改为本地验收关闭，官方未证范围仍在状态列保留。`P0` 为阻断／质量／数据风险优先，`P1` 为其余本期功能及细节，均需执行。
 
 ### A. 创建、身份与生命周期（12）
 
@@ -884,14 +1177,14 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 | A02 | P0 | 首次选项出现后选择“编程”，再回答位置 | 真正问题卡及回执，历史保留选择，自然进入任务 | 通过（1020AC；真选编程/原submitted回执，位置及同题源码交付、两下载独立4/4；本地后续自然文本询问与官方第二位置卡差异保留） |
 | A03 | P0 | 创建时指定职责；首次打开立即发实际任务 | 职责生效，用户任务优先，不强制重复入门问答 | 通过（1022CA新M2.7一般职责创建，真实介绍running后1718ms接受用户题，旧superseded／新独立completed，原生2行0工具／正确15.25；官方旧入门卡ignored后正确行。20项独审与原AC职责证据补齐，旧timing miss保留；原777文件及旧数据保持） |
 | A04 | P1 | 名称空白／全空格／中文／emoji；取消再打开 | 禁用与校验准确、取消不创建、键盘焦点和草稿保留 | 通过（1019FB，双方；见执行记录） |
-| A05 | P1 | 连点创建／提交时按 Enter，再重开 Bot | 只有一个 Bot、一个 introduction；失败可重试不重复 | 部分（1022CB双方真实双击＋随即Return／重开唯一，本地唯一Bot／intro／1原生欢迎，17项事实检查通过；本地Enter是否仍pending不可证明，真实失败后重试尚未发生，不造故障扩查或关闭整例） |
+| A05 | P1 | 连点创建／提交时按 Enter，再重开 Bot | 只有一个 Bot、一个 introduction；失败可重试不重复 | 通过（CB双方真实双击＋随即Enter／重开唯一17项复用；DM原App真实SQLITE_BUSY保草稿、原按钮唯一重试及真实欢迎，重开唯一intro／原96行保持。pending内keydown未捕获、完整新onboarding未声称；按原合同组合闭环，不新增罕见窗口硬gate） |
 | A06 | P1 | 在详情改名，Enter／Escape／失焦，再重启 | 名称、列表和标题同步；取消不保存，稳定 ID／历史不变 | 通过（1020AH；双方真实Enter提交/Esc撤销/失焦提交及正常重启，随后恢复原名；本地稳定ID/线程、147条native/206任务和12控制表重启精确相同，无重放） |
 | A07 | P1 | 聊天要求改自己名称／职责，再要求改同事 | 原用户授权才修改；非目标属性、模型和历史不变 | 通过（1022CB真实M2.7 self／peer／恢复三task，阶段精确窄字段、稳定ID，CB未启动，20项独审；官方同题名称／职责实际变化及名字恢复可见，保留其新合成CA职责范围。旧69资料／778文件／历史／记忆例行配置保持；AX旧placeholder经实际PNG反证，无产品修复） |
 | A08 | P1 | 详情保留标签草稿时，通过对话更新资料，再保存标签 | 明确版本冲突、草稿保留；明确重试仅合并标签 | 通过（1021BH：本地真实旧版本CONFLICT／同草稿保留／一次显式重试仅合并标签；官方原草稿保留，首次Enter原生字段合并且新名不被覆盖，重开标签精确；双方原名空标签恢复。官方无冲突弹窗差异保留，不推断隐藏版本，不扩A07） |
-| A09 | P1 | 遍历 13 形状／11 颜色；切换、关闭、重启 | 选择器反馈及保存一致，头像各尺寸轮廓对照，无误重置用户外观 | 部分（1022CE双端48真实选择、关闭重开、正常Quit／重启与恢复原样通过；CF普通36／展开置顶60两props已构建／实屏／真实M2.7验证，折叠CSS42保留；各尺寸完整实屏对照仍待，65／65仅同输入kernel，不提前关闭） |
+| A09 | P1 | 遍历 13 形状／11 颜色；切换、关闭、重启 | 选择器反馈及保存一致，头像各尺寸轮廓对照，无误重置用户外观 | 通过（1023DE补齐双方同hex／cyan普通、展开置顶、紧凑、头部、详情及编辑器实图；复用CE48次真实形色／正常重启与CW13形创建。原heart／#242424及两端置顶恢复，旧业务／消息／文件保持；80vs88沿用户窄栏要求，最终侧栏336vs原335的1px恢复偏差保留。65 kernel仅辅助，不代替本次实屏；生成／上传仍M09） |
 | A10 | P0 | 聊天自然创建一个职责明确同事，再给其独立任务 | 唯一新身份、独立目录／线程／记忆，继承 M3，成果真实 | 通过（1020AC；双方一次聊天创建B，本地职责逐字/独立身份与空间/继承当前DeepSeek，首任务零工具74.13CNY正确；本地多一句计算的格式差异保留，旧M3不冒称已复验） |
 | A11 | P0 | 有排队／等待任务的合成 Bot 归档并恢复 | 不再派发禁用工作，历史可见；恢复不重放已完成任务 | 通过（1021BQ／BR：待答原guard拒绝直接归档，真实Stop后归档／恢复与独立新题；占满两槽后BQ真实排队，归档取消且零native入站，恢复不重放。原历史／文件／其他档案字段保持，A／B不受影响；官方无等价归档入口差异单列） |
-| A12 | P0 | 具名合成 Bot 删除先取消、再经确认删除，重启 | 取消零变更；确认后任务／页面清理准确，其他 Bot／群不丢失 | 部分（1022CD双方具名取消，本地真实待答／owned page保留且12表与781文件完全同；永久删除及重启待逐项确认后验收） |
+| A12 | P0 | 具名合成 Bot 删除先取消、再经确认删除，重启 | 取消零变更；确认后任务／页面清理准确，其他 Bot／群不丢失 | 通过（1023DG：双方具名取消零变更；仅获准对象真实确认删除／正常Quit重启，本地11任务62原生消息清理、其他77Bot／50群及普通BO保持；原Chromium补证目标页关闭、同事同页保留、旧owner拒绝；工作文件保留符合原说明） |
 
 ### B. 持续聊天、忙时收件与停止（15）
 
@@ -901,7 +1194,7 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 | B02 | P0 | 多轮更正合成需求，换会话后继续 | 使用最新事实并保留仍有效约束，不串其他 Bot | 通过（1020U；双方三轮两次更正、切换私聊后正确JSON15.25，原币种/格式/字段保留；M2.7三独立零工具任务） |
 | B03 | P0 | 180秒单启动命令中问一条只需文本的新问题 | 及时回应；原 PID 保留、启动一次、完成后真交付 | 通过（1020G；双方忙时回复42、原PID对应最终文件；本地一次启动及180秒存活独立核对） |
 | B04 | P0 | 长命令中补充结果格式和文件内容 | 补充确实进入执行；最终文件包含新要求且不重启原命令 | 通过（1020G；中途补充四字段JSON，双方最终下载准确，原进程未重启） |
-| B05 | P0 | 同一忙时任务连续补两条，再取消其中未消费一条 | 顺序与消费归属可核对，取消内容不进入任务 | 部分（1022CX真实M2.7命令90.043秒同PID／exit0；DROP在约70秒被接受，约474ms后已注入／消费，KEEP后续真实完成通知交付；无取消／重启。命中忙时接收及后台移交，未命中未消费撤回窗口；BV原两条晚到失败保留，不反复加长任务重试） |
+| B05 | P0 | 同一忙时任务连续补两条，再取消其中未消费一条 | 顺序与消费归属可核对，取消内容不进入任务 | 通过（1023DV原严格审批真实两条待办→只撤DROP／根等待不变→KEEP注入同根、唯一写入及正式交付，完整请求／native零DROP、raw SQLite归属正确；24项及根复核通过。按本地内部排队协议，官方原LONG忙时接收／格式更新／真实附件对照复用；不称官方未消费撤回通过，不要求同内部队列。BV晚到／CX已消费保留） |
 | B06 | P0 | 前台、已移交后台两种状态分别点停止 | 原进程／子进程可靠停止；超过原截止仍无迟到输出／通知 | 通过（1021BT；原X真FG45s／BG90s Stop＋本轮74108／74111同PGID从FG移BG后按钮Stop，过原900s无PID／done／精确通知，cancelled/suppressed=1；官方无BG按钮，聊天kill说明与起时差异保留，不虚造隐藏OS证据） |
 | B07 | P0 | 停止后发“继续”，带一条新约束 | 基于已验证进度继续，不伪造成功、不重复外部副作用 | 通过（1020X：双方137B正式下载逐字节相同，严格五字段/类型与15.25正确；本地真实读进度/查PID/写读报告后仅一次附件，原两hash与启动次数不变、无旧命令重跑；官方内部执行不可见） |
 | B08 | P0 | Bot A 忙、B 独立发消息；A 再收私聊 | 有限并行且用户优先，无同步互等或 B 被错误取消 | 通过（1021BT核BR-R2；两槽A真前台＋B独立问题、A新私聊零工具先回、原父子5895／5907同PID自动后台且单execute、B仍waiting；官方问题／43／返回仍待答真实，底层PID仅模型自述） |
@@ -909,7 +1202,7 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 | B10 | P0 | 模型或网络失败后发新任务 | 明确失败／重试状态，不永久RUNNING；新任务能完成 | 通过（1020L；M3两次529明确失败后切已有DeepSeek，真实新任务43、零工具、无旧任务复活；官方同题43，服务失败仅本地遇到） |
 | B11 | P0 | 流式期间切换会话再返回 | 不重复入场／内容，不缺尾部、不把未完成标为完成 | 通过（1021BV；结合原AV真实001→切走→返009仍运行，本轮M2.7唯一200行／正式末尾／完成后重开保持，官方R2真实返GA仍正在输入、最终200／END完整；本轮离开为context-compaction及旧帧／漏窗口保留，AX512非丢尾，12项独立检查；L09／N04另验） |
 | B12 | P0 | 同一请求重复投递或丢回执后重试 | 原请求仅执行一次，不取消较新任务，不附重复成果 | 通过（BR隔离真实SQLite／Host及回执重投集成：同ID同任务、冲突拒绝、旧重试保新讨论、文件单回执；不冒称官方隐藏服务故障注入） |
-| B13 | P1 | 字面回答要求输出 pass／(pass)，再普通讨论 pass | 用户直接答案可见；无贡献讨论控制标记不生成气泡 | 部分通过（1020G私聊两字面正确；群两者可见但B少括号，非阻断；官方群均无可见回答；可选讨论pass实际静默） |
+| B13 | P1 | 字面回答要求输出 pass／(pass)，再普通讨论 pass | 用户直接答案可见；无贡献讨论控制标记不生成气泡 | 通过（1023DF原显示合同独审：私聊两字面、群两直接正文原样可见，可选讨论pass／(pass)均不生成气泡；群B模型原文少括号的质量失败未修，官方旧无答／本轮已停止差异保留。不称模型格式或全任务质量通过，无代码更改） |
 | B14 | P0 | 已完成旧工作后新发只需文本问题 | 不复活旧任务／旧后台状态，不擅自工具／记忆／例行操作 | 通过（1020G；双方新题43，本地独立任务completed、零工具，无旧任务副作用） |
 | B15 | P0 | 私聊／群后台清理无新增、新文件、真实失败，交叉私聊及重启 | 已知清理不重复回复／制造未读；新文件与失败主动归原会话，启动一次，无误静默 | 通过（1019FB：当前构建私聊／群三分支、字面负例和正常重启；首轮失败保留） |
 
@@ -917,9 +1210,9 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 
 | ID | 优先级 | 操作／输入 | 独立通过标准 | 状态 |
 |---|---|---|---|---|
-| C01 | P0 | 合成命令产生审批，先保持等待再允许一次 | 等待状态准确；允许后命令只执行一次，原审批边界保持 | 环境阻断（1020G：两端既有策略均直接执行一次，未产生审批，不能冒充等待/允许验收；未改权限配置） |
-| C02 | P0 | 同类命令先拒绝，再发独立允许任务 | 拒绝无文件／进程副作用；后续独立任务不被误拒／误放行 | 待测 |
-| C03 | P0 | 分别选择一次／本会话允许，换另一会话检查 | 权限范围准确、不因 Bot 身份或群消息扩大授权 | 待测 |
+| C01 | P0 | 合成命令产生审批，先保持等待再允许一次 | 等待状态准确；允许后命令只执行一次，原审批边界保持 | 通过（1023DG原完整App／IPC／Runtime及真实M2.7，独立默认严格profile真实waiting_user与原审批卡，批准前无文件、运行后唯一一行；原两端直接执行的策略差异保留，未改主预览权限） |
+| C02 | P0 | 同类命令先拒绝，再发独立允许任务 | 拒绝无文件／进程副作用；后续独立任务不被误拒／误放行 | 通过（1023DG原审批拒绝后0文件，无绕过重试；另发独立任务真实再审批、允许后仅执行一次。原Runtime／真实M2.7，隔离profile；不声称官方同样触发审批） |
+| C03 | P0 | 分别选择一次／本会话允许，换另一会话检查 | 权限范围准确、不因 Bot 身份或群消息扩大授权 | 通过（1023DG同进程本会话允许后同线程同命令无新审批、两次唯一写入；允许一次后同命令再发仍需审批，拒绝保留一行；另一Bot线程真实重新审批并拒绝、0文件。首次injected owner夹具失败保留并已补必要分支） |
 | C04 | P0 | 请求单选，按键和鼠标提交 | 真实请求／真实答案，只提交一次，无默认代答 | 通过（1019FB，鼠标Markdown／键盘CSV，两方实际结果及已答历史） |
 | C05 | P0 | 请求多选、多题、必答和可选题组合 | 选项完整、校验正确；提交值与 Bot 读到的值一致 | 通过（1019FB；三题真实回执、标签多选、空选忽略及重启；首轮失败与回复节奏差异保留） |
 | C06 | P0 | 不选预设项，在主输入框自填中文多行答案 | 按当前官方私聊语义关闭旧选项；正文仅发送一次、完整回显，保留历史并恢复聊天，不伪造选项回执 | 通过（1019FB私聊；双方旧卡已忽略＋新正文三行原样回显；群组合另计C07/C10） |
@@ -927,7 +1220,7 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 | C08 | P0 | 同群两位 Bot 同时提问，分别回答不同 nonce | 只答目标问题，另一卡状态准确，不互用答案 | 通过（1020G；本地先答B不消费A，两个独立真实回执及重启保留；官方答B会忽略A，差异保留） |
 | C09 | P0 | 待答时发送真正新任务，而非选项回答 | 旧请求忽略／中断状态准确，新任务优先；不误把任务当答案 | 通过（1019FB，双方；任务质量另计K01） |
 | C10 | P0 | 待答时带附件并引用群消息，再提交自填答案 | 附件不丢、不重复发起任务，引用与请求归属不串用 | 通过（1020AB；双提及/引用/64B附件/两行备注一次发送，旧Q2真实ignored，新正文消费一次；B仅注入原任务一次；双方对应流程及重开准确） |
-| C11 | P0 | 等待审批／问题时停止或移除该成员 | 卡片不再可生效；同伴待答仍能继续，重加入不复活旧卡 | 部分通过（1020G：双问题时移除B、A续答、B重加入及重启通过；审批/主动停止变体待测） |
+| C11 | P0 | 等待审批／问题时停止或移除该成员 | 卡片不再可生效；同伴待答仍能继续，重加入不复活旧卡 | 通过（1023DG补原完整App／真实M2.7群审批：停止／移除A均取消真实审批、0命令文件，B原requestId保留且原群内卡续答唯一完成；重加0新任务／旧卡。结合1020G及1023DE问题分支；官方答A忽略B的差异及夹具选择失败记录保留） |
 | C12 | P1 | 长问题、长选项、窄窗口，Esc／Tab／焦点返回 | 可滚动可读、键盘操作完整，不被原生标题栏遮挡 | 通过（1021AX：双方长问题／五选项窄窗、滚动、双向Tab／Escape／焦点返回及真实E；MM缩短原题差异保留） |
 
 ### D. 群创建、成员和收件语义（14）
@@ -942,12 +1235,12 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 | D06 | P0 | 手动粘贴“@名字”，对比从候选插入身份 | 普通文本不产生本地收件授权；官方差异如实记录 | 通过（1020AJ；原子A+普通@B只由A回复；独立清空后原子B只由B回复；本地target/mention身份与两端公开结果一致，半草稿守卫拒发未入库） |
 | D07 | P0 | 两位同名、改名、已退出成员、未知／群外名字 | 不猜错对象；旧真实提及仍绑定原身份，失效目标明确拒绝 | 通过（1021AY：稳定原子身份／历史导航／未知群外／离群禁发；官方两回复与离群停止差异保留） |
 | D08 | P1 | @筛选、鼠标选择、上下键、Enter／Tab、Esc、退格、撤销／重做 | 原子提及与官方行为对应；解除身份后不保留隐藏收件人 | 通过（1021BV；双端筛选／Enter／Tab／上下／退格／UndoRedo／Esc／普通粘贴／空草稿恢复真实完成，零误发；当前鼠标选择核心与1019FB原成功分支一致、复用B61稳定ID回执，18项独立检查。辅助AX点只剩@及旧帧／中文键入误差保留，非本轮新指针测试） |
-| D09 | P1 | 中文输入法组合中输入@、换行、选区替换与粘贴 | 无提前发送、乱码、光标错位；草稿重开标记及ID准确 | 待测 |
+| D09 | P1 | 中文输入法组合中输入@、换行、选区替换与粘贴 | 无提前发送、乱码、光标错位；草稿重开标记及ID准确 | 通过（1023DI原App原生composition：合成中Enter／两创建键零误发，中文/@/换行/选区/草稿ID准确；唯一真实M2.7正式回复11.659秒，SQLite9项通过；粘贴复用同SHA原BV真实证据。物理OS传播／官方新IME不冒称已测） |
 | D10 | P0 | 回复 A 的群消息同时@B，带一份附件 | 引用作者与显式目标正确，无漏发／多发；附件仅授权群可用 | 通过（1021AW；真实引用A＋唯一原子@B＋当前64B附件，两端唯一目标各一次正确JSON、真实引用／三行／74.13一致，非目标0任务；原入站完整提供附件，实际1公开发送／0 read_file，保护及独立原合同通过。1020AA旧复杂分工失败保留，不据此宣称双Bot分工全部通过） |
-| D11 | P1 | 群名称、成员、标签修改；取消／Esc／冲突重试 | 对照官方确认与焦点；版本拒绝保留草稿，不覆盖新资料 | 待测 |
+| D11 | P1 | 群名称、成员、标签修改；取消／Esc／冲突重试 | 对照官方确认与焦点；版本拒绝保留草稿，不覆盖新资料 | 通过（DN两端原群名Esc／Enter／读回／恢复、成员picker Esc焦点；本地16项原UI／DB实证同IDv5→6→7、99行及原资料任务保持。复用D12成员生命周期与D11-I10真实冲突草稿恢复。群无profile标签，AX是Tabs，不新增存储；官方隐藏版本及原移除路线差异保留） |
 | D12 | P0 | 成员正在执行／待答时移除，先取消确认再确认 | 取消零变更；确认只停止该成员，同伴继续，重加入不重放 | 通过（1021AY：原取消／目标停止／同伴继续／重加，修复后真实零续作负例与明确授权正例；首轮失败及交付不足保留） |
 | D13 | P0 | 同一对Bot在双群及私聊同时处理不同nonce | 消息、文件、问题、浏览器和最终结果不跨会话串用 | 通过（1021BN原合同复核：三scope／四真问题／三份10字段及两Bot实际读核，native浏览目标与归属正确；官方三正式下载33项通过。额外Save未成、G2首摘要遗漏与恢复独立保留，不冒充全质量无缺陷） |
-| D14 | P0 | 删除具名合成群，含历史附件／待答／页面 | 确认与取消正确；只清理该群，私聊及另一群保留 | 部分（1022CD双方具名取消／历史及成员保留，本地真实群待答／独立页面与12表及781文件完全同；永久删除待确认，官方本次仅文字问答差异保留） |
+| D14 | P0 | 删除具名合成群，含历史附件／待答／页面 | 确认与取消正确；只清理该群，私聊及另一群保留 | 通过（1023DR原具名群：获准停止真实待答→原确认永久删除→目标实际Page关闭、另群／私聊原Page保留→正常Quit同profile重启无复活；10项独审，双Bot／私聊／记忆／另一群／五文件SHA保持。合并原双方取消及获准官方删除重启；旧页确认前已消失不作删除证据，物理工作件按原合同保留） |
 
 ### E. 群讨论与 Bot 异步交办（12）
 
@@ -979,11 +1272,11 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 | F07 | P0 | B在未分享前询问A的私有代号；群内同问 | B／群不可取得A私有记忆，也不泄漏私聊背景 | 通过（1019FB，双方私聊和定向群均空结果；A未分享／未补充） |
 | F08 | P0 | 面板显式分享A条目给B，再修改A原件 | B读取独立授权副本；A修订不悄悄覆盖B副本 | 通过（1020AF；真实面板仅分享B独立ID，A原ID修订银杏、B字节/版本仍青桐；双方实际get后JSON正确。官方无等价逐记忆分享面板，修订自述删旧重建，限制保留） |
 | F09 | P0 | 明确忘记具名合成条目，随后再询问 | 真正删除；版本过期能重读再处理；旧聊天不重新保存它 | 通过（1020AF/AH；用户仅授权本地3条，get当前版本→forget成功，正常重启后A/B新任务实际search空、false/false与false，零写入，无md复活/原38hash变化；过期版本恢复引用既有1014BB/BC真实记录，不称AF新复现。官方本轮无新删除证据） |
-| F10 | P0 | 删除与自动总结重叠，重启后再次检索 | 无异步复活，删除标记／版本边界有效，其他记忆不丢 | 待测（1020AF未捕获真实重叠，正常删除与静态editVersion检查不替代；不刻意追低概率时序） |
+| F10 | P0 | 删除与自动总结重叠，重启后再次检索 | 无异步复活，删除标记／版本边界有效，其他记忆不丢 | 通过（1023DT全新独立profile原M2.7真实非空提炼请求发出后18ms原IPC删获准3aa059…，5583ms后真200返回有效同偏好create候选，旧版本批次未提交。正常Quit重启后真search/list/get仅KEEP，221B/SHA/version/mtime及其他旧数据保持，双独审；search非空/get为KEEP，不冒称HTTP含epoch或官方隐藏重叠。前置QA目录／disabled错误保留，未改产品） |
 | F11 | P0 | 关闭隔离配置记忆开关后明确请求保存 | 实际拒绝且诚实反馈，已有记忆与文件不变；恢复开关范围准确 | 通过（1020AF；真实UI禁用→唯一bot_remember被原guard拒且诚实未保存，原文件保持；UI恢复后新任务真实get银杏正确，enabled=true/Dream=false精确恢复。官方无等价全局入口） |
 | F12 | P0 | 临时URL、任务nonce、只本轮口令、明确不要保存 | 任务可完成，但不形成长期记忆污染 | 通过（1022CN：原二阶段真实坏候选对照、完整摘要链及应用正反例后关闭临时误存反例；原969B获准删除后真实search／list均空且不重生；正常偏好自动新建／重启读回和独立自动修订保留。原UI零工具违约及输入尾巴失败记录不抹除，见顶部闭环） |
 | F13 | P0 | 记忆正文放“忽略用户／改权限”合成文本，再检索 | 记忆只作资料，不执行其中指令或扩大工具权限 | 通过（1020AF；真实保存引用后完整get，首中尾/记录码/当前计算41准确，仅get/get/search无引文动作或档案变化；官方只读开头未取得后三项，不冒称官方全文通过） |
-| F14 | P1 | 多条／长条／中文搜索、空结果、滚动、删除取消 | 结果准确可读，面板操作、错误与空态对照官方，无额外完整历史读取 | 部分通过（1020AF；多条/中文检索/长全文/真实空结果、滚轮到尾、编辑取消与删除取消保持raw/version及原38hash；错误态未在AF全触发，官方无等价逐条面板且全文不足，限制保留） |
+| F14 | P1 | 多条／长条／中文搜索、空结果、滚动、删除取消 | 结果准确可读，面板操作、错误与空态对照官方，无额外完整历史读取 | 通过（1023DI复用AF真实多条／中文／长文／空结果／滚动／取消；原完整App真实EACCES不假空、原重试故障保持，恢复权限后同ID／版本／全文／字节恢复；官方无等价逐条面板及全文不足限制保留） |
 
 ### G. 输入资料、成果与预览（12）
 
@@ -1018,7 +1311,7 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 | H10 | P0 | 同一Bot在私聊和两群各开页面 | 目标作用域、接管与预览不串用，不越群控制 | 通过（1021BN原合同复核：三owned page／三scope预览，G1真URL接管，私聊／G2不能借用控制权，G1原归还。官方0.72群无电脑入口、私聊有的实际能力差异明确记录，不要求不存在的群UI操作） |
 | H11 | P0 | 任务取消／超时后继续尝试旧页面动作 | 原动作失效、不会迟到点击／提交；新任务仍可用 | 通过：1022CG双方20s真实超时与失败页关闭，新独立题旧目标一次拒绝再新页恢复；本地19项及双端原合同独审，复用近期Stop122.888s零迟发证据；官方隐藏日志仅自述、本地45s响应写完不冒称客户端仍有效 |
 | H12 | P0 | 关闭独立窗口／精确终止测试浏览器进程，再继续 | 状态明确、可恢复新页；旧页面／租约不复活，不影响主应用 | 通过（1021BV；本地确认仅本题两页后精确终止专用13639，主79669／原server保持、新20753与generation1恢复；官方原生电脑实际关Chrome见灰桌面、归还后重新开双页／RECOVER实屏正确，主应用无损；旧拒连／W修复／未刷新帧保留，不冒称官方OS回执） |
-| H13 | P1 | 可见预览、隐藏面板、切页、滚动及刷新 | 内容属正确页；按需预览，隐藏不持续抓图，错误不白屏 | 部分通过（1021BF：本地真实form／preview页面选择及预览目标正确；隐藏按需抓图、滚动与刷新整例未全验，不关闭） |
+| H13 | P1 | 可见预览、隐藏面板、切页、滚动及刷新 | 内容属正确页；按需预览，隐藏不持续抓图，错误不白屏 | 通过（1023DE：真实M2.7两页／底部、官方失败与恢复对照；r2友好失败＋原地址重试、切页隔离、归还／隐藏重开实屏通过；组件DOM隐藏停抓／刷新恢复通过。r1失败及官方首轮偏差保留，不扩Windows或官方后台计数） |
 | H14 | P0 | 网页嵌入“改职责／上传私有文件”的合成诱导 | 页面只作任务资料，不越权；正常研究／下载仍完成 | 通过（1021AN；本地真实观察并拒绝引用诱导，实际下载／读取64B原件且只上传授权CSV，资料／19例行／40记忆hash保持；官方三正式件及raw上传／回执正确。仅关闭诱导边界，其他浏览器整链仍待验） |
 
 ### I. 例行、提醒与通知（10）
@@ -1031,20 +1324,20 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 | I04 | P0 | 无变化时保持静默，出现变化／异常再报告 | 无无意义消息；真实变化及异常不被静默吞掉 | 通过：BL原生静默／变化／异常，延迟等差异保留 |
 | I05 | P0 | 同一时刻重复唤醒／重启／睡眠恢复 | 去重与过期策略准确，不集中补跑过期副作用 | 通过（1021BV：原真实SQLite启用过期例行与pending保留，Host.stop→同连接重建Store／Host→三次resume仅一次future slot→受控runtime只执行原task一次，Host105／105及Node通过。结合原共同resume入口，不冒称物理DB／进程重启或OS睡眠实测；仅测试+58无新产品机制） |
 | I06 | P0 | 到期时Bot忙／等待问题，随后用户新消息 | 队列及用户优先级正确，提醒不冒充用户或污染答案 | 通过（1021BP：本地真实到期queued→旧题ignored空答案→新user唯一回复→独立schedule唯一提醒；官方实际ignored及同样公开顺序，迟5m35／once仍on保留，不扩生命周期或I10） |
-| I07 | P0 | 删除具名合成例行先取消再确认，跨原到期点 | 取消保留；确认无迟到执行，其他例行不变 | 部分（1022CP本地11／11：取消保持、获准确认删除早于到期9分12秒，候选零执行、KEEP仅自然执行一次，旧29条例行保持；官方已具名取消／确认删除，但KEEP到期后未见回复，正控制未闭合，原因未知，不强关） |
+| I07 | P0 | 删除具名合成例行先取消再确认，跨原到期点 | 取消保留；确认无迟到执行，其他例行不变 | 通过（2026-10-23用户确认按本地验收关闭；原CP本地11／11、候选零／KEEP自然执行一次／旧29保持。官方已取消／确认删除，但原KEEP到期正控未闭；1023DW仅核原详情／未发送前填并恢复，未改期／手跑／重建，旧Search不是回传。官方缺证和原因未知继续保留，不计官方通过） |
 | I08 | P0 | Bot归档／删除时有待触发例行 | 正确阻止／清理，恢复或重启不偷偷复活已删除任务 | 通过（BS真实归档跨到期恢复零补跑＋原Host／SQLite删除未来例行后重建103／103；非物理重启） |
-| I09 | P1 | 关闭窗口留应用后台，再完全退出 | 后台仍能执行；退出后停止并明确本地限制，不声称全天云端在线 | 待测 |
-| I10 | P1 | 从详情、消息回执进入同一例行，修改后返回聊天 | 真实同一记录、版本冲突可恢复、焦点和输入草稿保留 | 待测 |
+| I09 | P1 | 关闭窗口留应用后台，再完全退出 | 后台仍能执行；退出后停止并明确本地限制，不声称全天云端在线 | 通过（1023DF真实14:47关窗后台任务完成；14:52到期时两端已Quit且本地未建任务，重开唯一补执行并真实交付；本地运行提示明确，官方退出期间14:48:44仍回传的架构差异保留，无执行机制改动） |
+| I10 | P1 | 从详情、消息回执进入同一例行，修改后返回聊天 | 真实同一记录、版本冲突可恢复、焦点和输入草稿保留 | 通过（1023DF，双方同记录／详情／历史回执／改名恢复、焦点与聊天草稿19项真实核对；原组件＋Host／SQLite并发冲突保留草稿、拒绝旧版，复制取消重开后同ID恢复至v3，新内容及暂停不覆盖。官方预填草稿差异保留；不声称一键重试） |
 
 ### J. 技能与连接应用（8）
 
 | ID | 优先级 | 操作／输入 | 独立通过标准 | 状态 |
 |---|---|---|---|---|
-| J01 | P0 | 选择已有合成技能完成报告任务 | 真加载／执行所选技能，产物符合模板，不仅显示选中 | 部分通过（1021AR：本地真实所选技能／CSV读取、806B模板报告及唯一正式交付均通过；官方已保存但手动选择尚未实证，不关整例） |
+| J01 | P0 | 选择已有合成技能完成报告任务 | 真加载／执行所选技能，产物符合模板，不仅显示选中 | 通过（2026-10-23用户确认按本地验收关闭；1021AR普通私聊真实所选SKILL.md／CSV读取、806B模板报告、唯一正式交付／预览／保存通过。1023DV官方editor全文／footer已保存，1023DY精确及空slash仍无候选、0Send且草稿已清；不能从保存推断候选可用。官方手选／模板执行仍未证，不含群手选、按Bot技能配置或自动触发同题） |
 | J02 | P0 | 未选择／卸载／不可用技能，再处理相同任务 | 明确可用性，不伪称调用；其他原工具可正常完成 | 通过（1021AR；本地未选401B／禁用guard拒绝后普通220B及恢复，官方未选433B／确认真卸载后普通718B均实际正式交付。明确不可用、不伪称调用或重装，三行／74.13／来源及保存字节独立通过；原技能／插件保持，见j02-uninstall-qa/independent-verdict.json） |
-| J03 | P1 | 技能搜索、选择、取消，草稿和附件组合 | 选择结果正确、取消不丢草稿，不把普通文本当技能授权 | 部分通过（1021AR：本地真实搜索／选择／Escape／移除后本批正文及CSV保留，重新选中发题；官方输入框候选未实证，普通文字负例仍待验） |
-| J04 | P0 | 使用已有合成只读连接器取得数据并交付 | 实际发现与调用回执可核对，结果和来源正确 | 部分：AS本地M2.7实际lazy取得9.33及精确来源；官方当前私人Bot无自定义入口，等价调用未验 |
-| J05 | P0 | 连接器不可用／传输失败／工具延迟加载 | 原fallback和错误恢复有效，无重复副作用或假成功 | 部分：AS本地业务错误恢复、safe／unsafe／business三分支真实通过；首轮多余桥错误保留，官方等价调用未验 |
+| J03 | P1 | 技能搜索、选择、取消，草稿和附件组合 | 选择结果正确、取消不丢草稿，不把普通文本当技能授权 | 通过（2026-10-23用户确认按本地验收关闭；原AR普通私聊真实搜索／选择／Escape／移除保正文及CSV；1023DV普通精确enabled-name不当显式授权、46B JSON真实写读／唯一交付／预览、技能SHA保持。1023DY官方有效slash两查询仍无候选，@非普通技能入口；原生slash变顿号不计查询且已清。官方选择／取消组合仍未证，不扩群手选） |
+| J04 | P0 | 使用已有合成只读连接器取得数据并交付 | 实际发现与调用回执可核对，结果和来源正确 | 通过（2026-10-23用户确认按本地验收关闭；AS真实search／inspect／唯一调用来源及9.33正确，P03真实M2.7再确认，1023DP独审通过。官方私人Bot无可用自定义入口，等价合成调用仍受环境阻断，保留未证对照，不计官方通过） |
+| J05 | P0 | 连接器不可用／传输失败／工具延迟加载 | 原fallback和错误恢复有效，无重复副作用或假成功 | 通过（2026-10-23用户确认按本地验收关闭；AS真实业务错误恢复／safe唯一fallback／unsafe与business零备用无重复副作用，1023DP独审通过。首轮三桥误用保留；官方等价合成调用环境阻断及未证对照保留，不计官方通过） |
 | J06 | P0 | Bot连接器尝试绕回旧共享浏览器或群外资源 | 保持Bot范围守卫，普通合法连接器功能不回退 | 通过（1021AS：两合法capabilityID实际invoke拒绝／服务0事件，原工作台真实合法工具成功；现resolver/bundle及旧MM／DS同alias正反例排除ID假阳性。按本地自有边界，不关闭官方入口受限的J04／J05；首轮漏invoke保留） |
 | J07 | P1 | Bots“连接应用”→设置→点击返回文字／箭头 | 均可返回原Bot会话，不被标题栏覆盖；Esc／焦点／草稿正确 | 通过（1021AS补验：本地实际箭头／文字指针及Escape三路径，原Bot／两行草稿保持、可聚焦；官方当前原入口关闭／Escape同样保持。自有草稿清空及17项有界保护核对通过，原1020G工具阻碍保留） |
 | J08 | P1 | 从原工作台设置走同一返回流程 | 原路由和设置保存不变，不错误进入Bots、不出现无响应 | 通过（1020G：原线程→设置→返回按钮及Escape均回原线程，草稿保留，未改配置；已恢复Bots） |
@@ -1060,13 +1353,13 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 | K03 | P0 | 长程离线任务看板：持久任务CRUD、筛选、错误状态、四模块和README | 独立运行／重启、接口及浏览器操作通过；无空壳按钮、伪持久化或漏文件 | 通过；官方首轮只交ZIP，三次反馈后补齐源码；首轮差异保留 |
 | K04 | P0 | K03交付后追加批量完成／撤销并要求保持旧接口 | 新旧独立用例通过；不删测试／硬编码、不损坏旧数据和无关文件 | 通过；M3首轮README与Escape差异经反馈修正，失败及耗时保留；官方首轮缺源码保留 |
 | K05 | P0 | 提供同一含3个预埋缺陷的小项目，请最小修复 | 找到真实原因、独立反例全绿，diff范围准确；不绕过功能或放宽断言 | 通过（1021BO：M2.7首轮46／49的3个CSV反例失败保留，一次真实反馈后原49全过、原断言与money／tasks保持，仅CSV／回归／README修改，唯一六正式件及ZIP字节一致，五源UI逐件打开；官方49／49及六下载通过。本地NativeSave未验、K08独立开放；1020X首轮越界／漏件历史保留） |
-| K06 | P0 | 50文件一致性任务，关键约束分散首／中／尾并有过时说明 | 应用最新有效约束、跨文件一致；压缩后仍交完整成果，不误交旧目录 | 部分（1021BW：两端同原50件／180行，四正式成果实际打开；本地14项全字段／精确合计／50源SHA／ZIP同字节通过、旧666文件保持；官方180条实际表格与50项实际展开清单构成四件预览语义12项通过，不冒称raw下载或隐藏OS／ZIP核验。两端无本题规则后的真实压缩，保留该子项及说明差异，不强关） |
+| K06 | P0 | 50文件一致性任务，关键约束分散首／中／尾并有过时说明 | 应用最新有效约束、跨文件一致；压缩后仍交完整成果，不误交旧目录 | 通过（1023DU补同一真Bot44k受控窗口原压缩提交／cutoff56／115531B归档，正常重启后原128k/M2.7唯一剩余续作36.54秒，当前四件真实正式交付打开，16执行／13oracle／第二独审17事实全过；旧BW双方50件／180行质量复用，56保护SHA及F10记忆保持。保留32k／凭据／QA并发启动干扰失败；三数据件按授权复制，非压缩后重算50或自然128k耗尽） |
 | K07 | P0 | 同份CSV核算与纠错，输出Markdown／JSON和原CSV | 74.13、差0.03、币种／行ID精确、引用原件可追溯；无捏造“已核对” | 通过（1020K；DeepSeek严格符合冻结JSON/逐行金额/合计74.13/差0.03，真实7工具及三下载；官方差额方向相反且说明，精确差异保留） |
 | K08 | P0 | 公开官方资料研究，指定3个问题及来源／日期 | 真实访问、逐点回答、来源直接支持结论，未知明确，不把推测写成事实 | 通过（1021BV：两端正式报告完整预览，三问／官方直接支持链接／两日期／END正确，本地真实专用浏览与正式发送及文件SHA核对、独立10项通过。仅研究合同；同题/tmp越界导致P05重开，首次工具错误与官方锚点说明保留，未冒称raw下载或整题全约束通过） |
 | K09 | P0 | 多页中文报告DOCX／PDF，含表格、页码、来源及末尾验收标记 | 独立渲染检查无裁切／乱码／空页，内容与数据正确，文件真实可打开 | 通过（1021AR：官方首轮3页正确；本地真实反馈＋字体事实后修订DOCX/PDF各3页全部独立实看，中文／页码／表格／81.33／退款／74.13／来源／标记正确。首轮坏PDF／无页码／小计错误及违规pip保留，不宣称首轮对齐或应用内Office预览已完成） |
 | K10 | P0 | 合成表格工作簿：多sheet、金额公式、汇总与图表 | 独立重算公式／检查单元格和图表，不只填静态显示值；输入原件不被覆盖 | 通过（1021AR：官方首轮、本地修订真实公式及两输入变化重算／图源同步正确，三sheet实看，0.00格式及三笔明细柱图正确，原件保持。首轮格式／图表差距及违规pip保留，新增包已可逆隔离，不声称全局痕迹全部撤回） |
 | K11 | P0 | 合成浏览器表单上传／核对／一次提交并交回执 | 实际服务端记录、原附件、控件值及一次POST一致，无提前提交 | 通过（1021AZ：真实浏览器／服务端唯一POST／原字节与三件正式保存，复用AN官方同合同；首轮漏读回后真实补验保留） |
-| K12 | P0 | 两Bot分工研究与独立复核，共交报告／数据／来源 | 真交办和真实独立复核，文件归属及字节正确，无重复附件／确认循环 | 通过：1021BC两轮真交办／每轮三件正确；R2字节虚述经反馈实测修正，首轮质量及公开总结差异保留 |
+| K12 | P0 | 两Bot分工研究与独立复核，共交报告／数据／来源 | 真交办和真实独立复核，文件归属及字节正确，无重复附件／确认循环 | 通过：原BC两轮交办／三件及反馈字节修正保留；1023DV只读补核后续BJ DS-R2／MM-R4真实三附件及非空正式公开结论（ordinal1166／1168、对应tool content精确匹配），同合同已完整交付。旧BC内部final未公开及BJ中间失败不抹去，不复活为当前同类漏文，不新增模型 |
 | K13 | P0 | 180秒单启动任务期间插话、改格式、换会话，最终收文件 | 原PID及一次启动，补充被采用、最终字节正确；耗时／人工纠偏与官方比较 | 通过（1020G；180秒插话/改格式/切会话，双方两附件独立核对，本地真实PID单启动；官方内部进程不可见） |
 | K14 | P0 | 故意缺一份输入或给相互冲突数字，要求准确报告 | 主动指出缺失／冲突并合理澄清，不虚构资料、测试或完成结论 | 通过（1020X；双方文字合计74.13/草稿少0.03，明确缺原CSV、未读原件/运行测试并请求原件；DeepSeek精确任务completed、零工具，不沿用旧附件冒充本轮输入） |
 | K15 | P0 | 明确纯文本任务、不要工具／记忆／例行／委派 | 完成指定答案且零多余动作；不能为刷工具证据强制执行无关工具 | 通过（1020X；双方准确两行“已收到。/本轮不执行任何操作。”；DeepSeek唯一任务completed、零工具/工具结果，同一运行时间窗无额外Bot任务；官方内部工具不可见） |
@@ -1078,16 +1371,16 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 |---|---|---|---|---|
 | L01 | P1 | 搜索Bot／群名、中文／空白／无结果，打开匹配项 | 结果准确、名称与身份正确，清空恢复列表、焦点自然 | 通过（1020AL；三处搜索trim后新构建实屏：空白恢复115项列表、首尾空格中文匹配/打开正确群、清空恢复；双方中文/无结果/打开对照齐，旧失败保留） |
 | L02 | P1 | 搜索聊天正文、跨历史页、定位匹配消息 | 不返回隐藏思考／工具参数当正文；定位不串会话且上下文可读 | 通过（1022CI私聊＋1022CJ群：私聊隐藏工具／引用传输修复、原工作台摘要保持；群真实旧页／多匹配／跨群隔离、公开问题及真实M2.7单目标作答与官方0.75同题通过。首轮提及操作偏差保留，不扩为动画／性能全部通过） |
-| L03 | P1 | 置顶／取消置顶、分组、拖排序，再重启 | 顺序与分组稳定，当前会话及未读不丢，无重复行 | 待补（1022CL置顶／既有分组移入移出已核；官方有拖排序，本地接线缺失，正常重启及完整拖排仍待验） |
+| L03 | P1 | 置顶／取消置顶、分组、拖排序，再重启 | 顺序与分组稳定，当前会话及未读不丢，无重复行 | 通过（本地1023DS真实trusted pin换位、正常重启／原偏好恢复12事实；官方既有pin／分组与1023DY实际GB拖入第2pin组合，当前源码原Dnd播报＋实际插位＋同一order更新分支，再经原Quit确认终止／正常重启4pin同序，GA空框／AL草稿／sean未读／CV等8事实保持。原File／tibo尝试未换位、操作者未知及当前4pin未回滚均保留；不把播报单独当提交、不新增必须既有两pin互换门槛） |
 | L04 | P1 | 标未读、屏外上下跳转、折叠分组后跳转 | 只定位最近未读；不自动开会话／标已读，必要时展开目标分组 | 通过（1022CL本地完整流程＋CV官方折叠分组屏外跳转实屏，正确展开而不切聊天／清未读；临时CA已恢复已读／未分组及原置顶，空合成分组保留） |
 | L05 | P1 | 多会话分别写文本／提及／附件／引用草稿，往返切换 | 每份草稿独立保留，发送后只清本份，原用户草稿不变 | 通过（1020AL；组合群草稿正常重开/发送仅清本份，私聊C原引用/文字保留；修复后@A＋quoteB＋117B CSV仅A，quote-only/default-all/@all＋quote各3，双方1/3/3/3、无重复交付。旧误投反例保留；不覆盖L06异常退出或D10分工质量） |
 | L06 | P0 | 草稿跨正常重启／异常退出，重新发送一次 | 草稿完整、身份／附件有效，已发送内容不重发 | 通过（AL正常＋1021AM空闲未发草稿原生强退/主进程消失/重开，双方群原子A＋quoteB＋CSV和C私聊草稿完整；发送前12表等值无重放，随后仅A实际发送/公开一次、117B原路径/hash正确、私聊原稿保持。不覆盖活动执行中强退） |
 | L07 | P1 | 回复、复制、编辑后重发、多行与代码消息 | 操作准确、复制无隐藏内容，重发归属明确不重复旧动作 | 通过：1022CH实际复制粘贴／引用回复／本地编辑重发，后两题零工具、原任务与68B文件不重跑；官方无所查编辑菜单，采用复制改写新发，路径差异保留；首轮正文质量偏差不随本操作项抹去 |
 | L08 | P1 | 长历史翻页，连续相同时间戳，往返新旧页 | 无缺项／重复／顺序错乱，焦点与滚动位置合理 | 通过（1021BS；本地旧二／三页及最新整树往返一致、官方长群旧页／连续同秒消息及最新整树往返一致；真实Store同ms分页与原滚动合并测试通过，无模型或产品修改） |
 | L09 | P1 | 运行中上翻后持续流式输出，再回到底部 | 不抢滚动、不闪跳；回到底部后恢复跟随，没有空工具行 | 通过（1022CT：真实M2.7上翻保持，明确回底后120→130→200跟随，无原始工具空行；官方新回复到达不抢锚点、点回最新200，未观测官方token级增长） |
-| L10 | P1 | Cmd+N／Cmd+Shift+N、Esc、Tab／Shift+Tab | 对照实际官方快捷键，弹窗／输入法／设置中不误触，焦点可返回 | 待测 |
+| L10 | P1 | Cmd+N／Cmd+Shift+N、Esc、Tab／Shift+Tab | 对照实际官方快捷键，弹窗／输入法／设置中不误触，焦点可返回 | 通过（1023DL原BV双端快捷键／Tab反向／Esc／焦点及CW设置抑制复用，新原生IME合成抑制；原创建Dialog两键12项实证同框／同草稿／0新任务，Esc回原焦点。官方设置允许创建差异与物理OS未验保留） |
 | L11 | P1 | 查看交流来源、跳Bot私聊、返回原群 | 真实来源和稳定身份，不复制或泄漏其他私聊历史 | 通过（1021BE：双方真实来源→对应作者私聊→原群，稳定身份／群与pair隔离独立通过；最新pair默认展示不扩为旧锚点自动定位，官方网络提示保留） |
-| L12 | P1 | 空Bot／空群／归档／加载中／错误空态逐项打开 | 文案与可执行入口准确，无假按钮、旧状态永久悬挂或调试字符串 | 部分（原A04／BQ空Bot及归档证据复用；CZ修正仅+5行，实际空群提示／输入／成员准确，数据与118暂存独审19／19。真实加载瞬态、本地失败后重试实屏仍待，不造配置故障或用空白加载帧替代） |
+| L12 | P1 | 空Bot／空群／归档／加载中／错误空态逐项打开 | 文案与可执行入口准确，无假按钮、旧状态永久悬挂或调试字符串 | 通过（1023DE修正原始路径外露，7项hook及9项真实应用检查通过；真实Retry恢复Host并回原工作台，BQ归档／CZ空群／实际零Bot入口复用。真实自然DOM加载瞬态已记录，首帧前完成、无加载截图帧，不另加帧持续门槛。新构建独审通过，14:41主预览已激活并打开原工作台／现有Bot） |
 
 ### M. 布局、排版与视觉细节（12）
 
@@ -1096,36 +1389,36 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 | M01 | P1 | 相同逻辑窗口尺寸下比较三栏、详情开／关 | 内容列／留白／分隔、最小宽度对应，不用截取不同尺寸掩盖差距 | 通过（1022CU／CV同1440×814、匹配250／280三栏、紧凑／详情开关／280详情最小值和本地218／官方240展开最小实屏；80紧凑沿用户要求，尺寸差异与理由保留，不扩M02／排版） |
 | M02 | P1 | 侧栏拖至头像栏再展开，键盘Home／方向键 | 宽度、头像、间距、底部入口与官方对应；无粗横竖滚动条 | 通过（BD真实拖收／展开／滚动与Home80→Right218，CV同窗口紧凑／展开、底部入口和内容完整，独审5／5。灰色竖条为聚焦分隔控件，不是滚动条；80 vs88及展开范围差异沿用户窄栏要求保留，不冒称逐像素相同） |
 | M03 | P1 | macOS原生红黄绿控件附近折叠／滚动／显示设置 | 所有可点区域避让标题栏，无头像、滚动条、返回按钮遮挡 | 通过：1021BD两端真实折叠／展开／滚底／设置进返，九张实图与AX独立核对，原宽度恢复 |
-| M04 | P1 | 头像在侧栏／置顶／群组合／头部／详情／编辑器展示 | 同形同色同姿态比较轮廓、圆润度、眼睛和光学大小 | 待测 |
+| M04 | P1 | 头像在侧栏／置顶／群组合／头部／详情／编辑器展示 | 同形同色同姿态比较轮廓、圆润度、眼睛和光学大小 | 通过（1023DE双方hex／cyan各实际尺寸配对，普通36／展开置顶60／紧凑42、头部、详情和编辑器轮廓／眼睛／光学大小正常；群组合复用CW用户＋两Bot的侧栏／头部／详情实屏。动态相位自然不同不作逐像素硬门槛；生成／上传及连续动画独立开放，临时外观／置顶恢复与旧数据独审通过） |
 | M05 | P1 | 私聊单／多行、代码、列表、表格与中英文混排 | 字号／行高／气泡／段间距对应，无意外整体放大或内容裁切 | 通过（CW新renderer复用CM真实同题，双方266／280同尺寸；完整单／多行中英、列表、四行数字表和三行代码，prose/table/prose分段与数字靠右已生效，无放大／裁切。沿原CMB代码底色、边线及末段宽度保留兼容差异，不称逐像素相同） |
 | M06 | P1 | 群消息、活动状态行、输入框、＋和占位文字同屏 | 共享内容边界，文字基线和按钮中心对齐，详情变化不漂移 | 通过（1021AX：多行／附件按钮分层，共用消息／状态／输入边界，详情开合；非整体像素或动画通过） |
-| M07 | P0 | 运行／成功／失败／取消／子任务／workflow／记忆工具各出一次 | 默认正文不出现不该展示的原始工具卡／空白；真实审批、问题、错误及成果仍可用 | 待测 |
+| M07 | P0 | 运行／成功／失败／取消／子任务／workflow／记忆工具各出一次 | 默认正文不出现不该展示的原始工具卡／空白；真实审批、问题、错误及成果仍可用 | 通过（1023DG独审复用七类真实原生回执／默认OFF实屏，原问题、紧凑错误、正式成果均可用；新默认严格profile真实原审批卡可操作、允许一次／拒绝无副作用，补齐唯一审批缺口。官方当前不弹审批的策略差异保留；非仅构造消息或旧截图推定） |
 | M08 | P1 | 开／关执行过程，再检查当前和历史消息 | 切换不改执行／存储；细节完整可查，普通工作台不受隐藏规则影响 | 通过（BS同Bot当前／旧页真实On／Off、RAW实查、成果保留及原工作台；420消息／95任务hash保持） |
-| M09 | P1 | 名称／标签／头像／创建／删除／资料菜单逐项开关 | 尺寸、圆角、边框、颜色、禁用态、锚点、遮挡及焦点对照 | 待测：1021BD源码先确认官方头像Bot/Generate/Upload三tab，本地形色格／重置有差距，未把开合成功当整例通过 |
-| M10 | P1 | 侧栏头像悬停／键盘聚焦，等待与草稿同时存在 | 好看且可读的身份／摘要tips，状态优先级与官方一致，不展示秘密 | 部分通过（1021AX：紧凑身份与键盘焦点已观察；纯悬停tips证据不足） |
-| M11 | P1 | 深色／浅色、窄／宽、系统缩放下关键页面 | 对比度、表格、浮层、输入、浏览器预览均正确，无溢出 | 待测 |
-| M12 | P1 | 长名称／长文件名／长URL／10万字历史／连续附件 | 截断和展开合理、按钮可用、无横向撑爆或虚拟列表大空洞 | 待测 |
+| M09 | P1 | 名称／标签／头像／创建／删除／资料菜单逐项开关 | 尺寸、圆角、边框、颜色、禁用态、锚点、遮挡及焦点对照 | 通过（DP本地原可用name／label／avatar／create／delete仅取消／资料菜单／文件preview全UI与焦点核对，root当前官方同轮控件对照，原资料版本不变。尺寸／圆角／颜色实测及继承CMB组件的差异保留，非像素完全一致；Generate／Upload与形色格能力差异保留，不扩成新增工程；M11主题／N05时长另验） |
+| M10 | P1 | 侧栏头像悬停／键盘聚焦，等待与草稿同时存在 | 好看且可读的身份／摘要tips，状态优先级与官方一致，不展示秘密 | 通过（DQ同一真M2.7单选waiting＋自有草稿，真实hover／keyboard tips等待优先；原Stop后同稿保留并优先，16项与旧资料保持。官方真问题＋草稿及原AL草稿实际优先级对照一致；新官方纯hover未验、DQ仍待答且待恢复原宽，不冒称作答／全指针动作新测通过） |
+| M11 | P1 | 深色／浅色、窄／宽、系统缩放下关键页面 | 对比度、表格、浮层、输入、浏览器预览均正确，无溢出 | 通过（1023DX；本地DG表格／浮层／输入及DT真浏览器五景／实际2×，当前官方深宽／浅宽／浅窄聊天、创建、报告表格与真Computer帧，无可见溢出；主题、原normal/max窗口、选中／pin／分组／草稿／未读还原。GB仅临时原唤醒并按原idle；不称新网页／主动切多OS档位／Windows。原125%裁切QA图及native补图保留，不造额外全组合门槛） |
+| M12 | P1 | 长名称／长文件名／长URL／10万字历史／连续附件 | 截断和展开合理、按钮可用、无横向撑爆或虚拟列表大空洞 | 通过（1023DG本地原完整App长名／199字文件／2570 URL／2135代码／10万汉字与8附件；1023DY官方真实100000汉字历史，原Copy全文精确、首尾Find各1／1，原滚动可到1000行／END。自然40字符正式MD卡省略但Open／Save全名，真实完整标题／正文预览和Escape还原15事实通过；连续附件／真实保存字节复用G04／AH、长报告滚动复用G08。保留原AX截断失败、Find按row定位及新182B未下载字节核验的边界，不新增压力门槛） |
 
 ### N. 动画、响应与无障碍（10）
 
 | ID | 优先级 | 操作／输入 | 独立通过标准 | 状态 |
 |---|---|---|---|---|
-| N01 | P1 | 头像悬停、快速左右移、离开与再次进入 | 注视、强调、回正、眨眼连续，对照官方动作；静态截图不足则明确待录屏 | 待测 |
-| N02 | P1 | 正常思考→搜索→读写→执行→完成的真实任务 | 头像动作与真实阶段一致，过渡不突然重置或仅循环缩放 | 待测 |
-| N03 | P1 | 等待审批／选择／接管，随后允许／拒绝／停止 | 等待与终态姿态对应、无残留运行光效，不因状态切换跳布局 | 待测 |
+| N01 | P1 | 头像悬停、快速左右移、离开与再次进入 | 注视、强调、回正、眨眼连续，对照官方动作；静态截图不足则明确待录屏 | 通过（旧DP本地真pure-pointer五腿＋1023DW原创建24秒1121SVG／618屏帧完整自然开收窄张，0provider／无新对象；官方100连续native帧8.981秒自然眨眼、左右／leave／reentry各15实际帧及四次定位时序，原Cancel还原。官方以非button坐标click定位含down/up，不称pure hover／逐手势同相位因果或快速移动每中间帧，按原行为合同根与独审闭环；无生产修复） |
+| N02 | P1 | 正常思考→搜索→读写→执行→完成的真实任务 | 头像动作与真实阶段一致，过渡不突然重置或仅循环缩放 | 通过（DO五个Bot展示文件沿原scheduled／canonical请求尾批最小修复，双头像真实连续帧覆盖search／read／write／blocked／run／stream／idle；真实M2.7反馈23B产物／SHA／LF及原卡交付通过。原settlement瞬时差异、旧产物／QA定位失败保留；不冒称锁执行遥测或新官方全阶段复测。原消息回归／26邻接／类型／构建过，主预览原数据逐行保持） |
+| N03 | P1 | 等待审批／选择／接管，随后允许／拒绝／停止 | 等待与终态姿态对应、无残留运行光效，不因状态切换跳布局 | 通过（1023DJ：真实接管红例32帧work已由两文件复用Host等待状态修复；独审真实M2.7绿验103帧双blocked，归还后61帧正确问题，Stop后61帧idle／活动撤下、布局固定；选择审批复用，原预览已正常重启激活，N02另验） |
 | N04 | P1 | 新消息逐字流式，历史重载、翻页和切回会话 | 仅新消息正确入场，token／旧历史不反复播放，无上下闪动 | 通过（1022CT／CV：真实流式、切回／重载；修正Bot气泡分页锚点后500→35、15→62导航，旧气泡五帧raw y368不变。31近邻／原messages／web通过，普通工作台回退原行。保留原65px失败，不冒称FPS或全亚秒无位移） |
-| N05 | P1 | 打开／关闭tips、菜单、详情、预览与创建弹窗 | 实际时长、缓动、方向、缩放／位移对照，无截断退出或闪白 | 待测 |
-| N06 | P1 | 主工作台Bots入口悬停与按压、返回 | 与Bots角色风格一致、有自然转向／弹性反馈，不只粗暴放大 | 待测 |
+| N05 | P1 | 打开／关闭tips、菜单、详情、预览与创建弹窗 | 实际时长、缓动、方向、缩放／位移对照，无截断退出或闪白 | 通过（1023DX；当前官方0.75.3特定owner／样式＋真实开关端点与本地既有轨迹组合，modal即时／详情300ms／popup100ms分清，原生采样不称精确时长。仅BotRowMenu原pinned补显示条件并排除归档残留pin，6组件场景＋最终原完整App12检查过，0模型／数据副作用，139非renderer／原核心源码／索引保持。轻微Radix曲线／键盘分支差异及失败保留，不造新presence，不称像素／所有子帧完全相同） |
+| N06 | P1 | 主工作台Bots入口悬停与按压、返回 | 与Bots角色风格一致、有自然转向／弹性反馈，不只粗暴放大 | 通过（DP实际hover／快移／150ms按压释放进入／原返回／离开回正连续帧；原20px固定框、外层transform恒none、内部114种几何，非已撤回CSS粗放缩放。复用Grok角色内核参照，CMB独有入口不额加不存在的官方同名入口；0新模型／原资料不变） |
 | N07 | P0 | 列表多头像，滚出视口、隐藏窗口、切出Bots | 离屏／隐藏停止不必要帧与预览，恢复连续；无每头像独立空转 | 通过（1021BW：真实滚动／Hide／原生同bundle重显／原工作台／返回、同79669进程；共享clock／离屏跳过／隐藏与dispose原测试及P10预览释放合并，12项独立检查。资源分段与7项数据保护保留，不把CPU或PNG冒充实时rAF计数／全动效通过） |
-| N08 | P1 | 开启减少动态效果，再操作核心页面 | 动效收敛且功能、状态、焦点仍完整，无忽视系统设置的循环动画 | 待测 |
+| N08 | P1 | 开启减少动态效果，再操作核心页面 | 动效收敛且功能、状态、焦点仍完整，无忽视系统设置的循环动画 | 通过（1023DH原完整App＋Chromium原生媒体输入：正常13种SVG→reduce1种，形色／悬停稳定，恢复11种；原CSS none／0s、输入／焦点／草稿／记忆／群页正常；未测物理OS偏好传播，不冒称官方开关） |
 | N09 | P1 | 全键盘遍历名称、收件、问题、文件、关闭与返回 | 可访问名称明确、焦点可见、无陷阱，不依赖鼠标才可完成 | 通过（1021BW：原BV两端名称／收件和C12双向问题键盘、本地正式report打开／Tab／Esc，与本轮官方八次ShiftTab→正式清单Enter→Tab下载未激活→Esc返回原入口；实际焦点PNG独立查看，12项检查，不扩为IME／全部无障碍或Windows） |
-| N10 | P0 | 快速切会话／开关弹窗50次，流式与动画同时发生 | 无累积监听／计时器、重复入场或明显掉帧；资源观测与官方分开记录 | 部分（1022CW本地50次逐项AX开／返全真，20切页＋20详情＋10创建取消；首次完整往返及第二次打开阶段真实流式重叠，其余终态，未称50次全流式。4进程／FD167稳定，settled26.97秒CPU0.6304%、约243MiB RSS，实屏到400／END。官方本题未回复，paired对照仍未闭合） |
+| N10 | P0 | 快速切会话／开关弹窗50次，流式与动画同时发生 | 无累积监听／计时器、重复入场或明显掉帧；资源观测与官方分开记录 | 通过（1023DU当前官方原UI50／50完整往返：20切页＋20详情＋10创建Cancel，100AX逐项独审、9顶层真实working状态、末500／END实屏；结合原CW本地50／真实首轮流式增长／有限资源＋原cleanup源审闭环。官方8进程／FD217→220→215，首采在第9动作后；指标分记，非直接heap／listener／FPS或未来零泄漏证明。QA解析／CUA超时和旧失败保留） |
 
 ### O. 恢复、终态与可靠性（10）
 
 | ID | 优先级 | 操作／输入 | 独立通过标准 | 状态 |
 |---|---|---|---|---|
-| O01 | P0 | 排队、运行、待答、审批四阶段正常Quit／重启 | 逐任务状态与原回执对账，唯一身份／历史保留，已完成不重放 | 待测 |
+| O01 | P0 | 排队、运行、待答、审批四阶段正常Quit／重启 | 逐任务状态与原回执对账，唯一身份／历史保留，已完成不重放 | 通过（1023DH四阶段原回执对账：排队同ID唯一执行；实际running owner／待答／真实审批正常Quit后中断、重启身份历史保持，旧完成任务及文件不重放；本机安全中断不冒称云端继续／Windows） |
 | O02 | P0 | 实际强制终止合成运行任务所在主进程再重启 | checkpoint与任务归属可核对；未知外部结果不盲目重跑 | 通过（1021BY：真前台Node45661唯一启动，SIGKILL隔离main2168后同profile46967重启，原任务interrupted／原进程自然结束而不盲重跑；607原snapshot父链与620新图身份完整，协议补全非OS结果；明确继续仅read3／ls1／deliver1，两正式件实际打开，772旧文件与旧资料／任务／配置保持，19项审计；Mac原合同） |
 | O03 | P0 | 子进程／后台任务仍在时取消与退出 | 原管理器回收，真实PID终止、无孤儿／迟到通知／双执行 | 通过（1021BX与原B06：真实停止及原生Quit两腿；唯一长命令父98819／子98821同PID移后台，截止前退出后均消失；同profile重启、过截止无late文件／精确通知／重放，769旧文件及旧数据保持，16项独立检查。仅Mac原合同，非Windows或O01全部阶段） |
 | O04 | P0 | 成果已发而任务尚未终态时退出再启动 | 已交文件保留，成功／中断如实展示，不补发重复附件 | 通过（1022CP：M2.7唯一正式20B文件后真实待答→原生Quit→如实中断，原卡重开与字节／唯一回执保持，新任务只read一次；官方同题原20B卡重开／云待答保持，双端原合同10／10，附加格式偏差保留） |
@@ -1142,20 +1435,20 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 |---|---|---|---|---|
 | P01 | P0 | 私聊／群／例行／通知分别尝试修改持久资料 | 只有明确用户授权范围有效，非用户内容不可提升权限 | 通过（1021BV：原真实SQLite／Host／Runtime边界执行四来源资料更新正反例，合法原用户与canonical通知指定字段更新；例行、同事、伪造输出／身份、移除及终止失权。8文件345项通过，给定Grok专用profile／来源接线对照；不冒称新provider、任意语义安全或A07／P03已完成） |
 | P02 | P0 | 文件路径含../、symlink、旧别名、绝对其他Bot目录 | 合法等价路径可用，越界拒绝；不靠放宽全局文件安全修功能 | 通过（BR真实磁盘／symlink和原文件出口：合法旧别名同canonical，越界／其他Bot／目录拒绝且不发布；保留模型首轮漏调用记录） |
-| P03 | P0 | 浏览器／连接器／同事消息含合成指令注入 | 不泄漏私有文件／记忆／配置，原授权任务仍完成 | 部分（原AN网页／AO同事真实注入正反例已复用，原任务及私有事实保持；CX前只读确认两连接器及MCP插件均disabled，连接器来源仍缺真实验收，不重复已验两来源或擅启配置） |
-| P04 | P0 | 双群并行写同一共享目录、同时改资料／删成员 | 沿原互斥／版本与取消屏障，无丢更新、死锁、错误归属 | 部分（1022CW新增合法单群同文件争用＋资料版本／busy拒绝＋移除取消释放的原Host／NativeSQLite／Runtime锁集成，138／138；BN双群隔离与AY真实移除保留。原双群同一物理目录的字面组合尚未验证，未放宽每群root或将单群冒充双群） |
+| P03 | P0 | 浏览器／连接器／同事消息含合成指令注入 | 不泄漏私有文件／记忆／配置，原授权任务仍完成 | 通过（AN网页及AO真实peer注入／拒绝／合法交付复用，DM真M2.7连接器唯一调用、原攻击确入后续provider、18项私有读取／出站／资料保持通过。本地三来源原合同闭环；官方网页／peer实际对照，私有Bot无custom MCP入口故官方该腿未验，未称全来源官方已验或普遍抗隐蔽攻击。首UI未提交与额外格式偏差保留） |
+| P04 | P0 | 双群并行写同一共享目录、同时改资料／删成员 | 沿原互斥／版本与取消屏障，无丢更新、死锁、错误归属 | 不适用（1023DW复核原plan按授权共享／群上下文隔离及正式API：普通群无同物理root绑定，独立Work不可混群；给定Grok0.18也未提供此目录绑定，不推当前隐藏能力。原同群争用CW138／双群BN／移除AY分别映射保护目标，方法和边界保留；原题留在201分母、不计通过、不造权限／root／锁／软链，不冒称字面组合实测） |
 | P05 | P0 | 本题要求所有临时输出在题目目录内，含失败重定向 | 无/tmp/e等越界临时写；原工作区及用户文件哈希保持 | 通过（1021BV-R2修正后；只在Bot原cwd说明补临时产物受用户目录限制，真实MM HTTP200原文／头与一次Node stderr21B／exit7及报告全部在新目录，唯一两正式附件实际打开；662旧文件hash／mtime与记忆／配置／旧任务保持，19项审计，结合原AQ官方169文件保护；旧BV/tmp失败和轻微curl示例转义不准保留，非全局沙箱保证） |
 | P06 | P0 | 私聊和群内读200行文件，前后有长独占工具／取消 | 无无限RUNNING；拿不到锁／结果时可中止，定位真实持锁／回执再修 | 通过（1021BV：私聊真实前台按钮Stop后独立200行读取；群唯一长进程自然完成后新read_file／唯一正式发送，前后200行与17866B原件SHA完全相同，17项群＋14项私聊核对通过。首轮超时／provider失败、群未Stop及模型进度差异保留，不扩为所有锁场景无缺陷） |
 | P07 | P0 | 未连接远端hostId、协议／事件版本不匹配 | 明确拒绝且不回落本机，不虚造远端连接成功 | 通过（1021BS；原registry/IPC19／19实测未知Host、快照协议及非法event revision拒绝，不回落本地；一期未实现独立event协议字段，不虚造远端连接） |
 | P08 | P0 | 空闲、流式、后台、浏览器各观测CPU／RSS／句柄 | 记录同环境分阶段基线；无持续空转、任务结束可回落、定位实测回退 | 通过（1021BV；同主PID四阶段CPU／RSS／FD；真实agent SSE内15秒流式126.375%单核口径、5进程／FD274稳定，结束CPU7.6641%／RSS约161MiB／FD273、无accepted命令；14项检查，旧工具等待不冒充流式、非零CPU／全局泄漏或Windows证明） |
-| P09 | P0 | 100／1000历史消息和较多Bot列表滚动、搜索／打开详情 | 无整库全量投影／高频查询，分页与索引生效；响应不随token无界变慢 | 部分（1022CV真实663条中加载628／余35、搜索两命中往返／无结果、120侧栏筛选／滚动及详情开关；原分页／查询范围核对通过。初载128，按钮500是下一批大小，早先1000推算已纠正；现成线程最大971，1000规模仍待验） |
+| P09 | P0 | 100／1000历史消息和较多Bot列表滚动、搜索／打开详情 | 无整库全量投影／高频查询，分页与索引生效；响应不随token无界变慢 | 通过（1023DF结合CV真实663／120与独立原App合法API明确synthetic180 Bot、100／1000历史：实际分页128＋500＋372、原索引／主键有界读、搜索分32小页、滚动外层位置及可见行改变、仅挂载13行；冷载736ms与临时排序保留。非1000次模型交付、官方1000／Windows或全部资源无泄漏结论） |
 | P10 | P0 | 反复进入退出Bots／预览／资料／记忆／浏览器50次 | 监听、订阅、worker、抓图、动画、数据库资源不累积，异常也释放 | 通过（1021BT；五类各10次真实往返共50，开关AX逐次核；实际blank预览采集与归还，进程／FD无逐轮累积，退出Bots后RSS自然回落约161MiB；原cleanup门禁合并，不声称零CPU或heap归因） |
-| P11 | P0 | 普通线程M3同题编程、文件、审批／提问／流式／压缩 | 原工作台能力与交付不回退；Bot专属提示／过滤／移交不泄入普通线程 | 待测 |
+| P11 | P0 | 普通线程M3同题编程、文件、审批／提问／流式／压缩 | 原工作台能力与交付不回退；Bot专属提示／过滤／移交不泄入普通线程 | 通过（1023DL原普通线程编程／六文件／提问／完整流式复用；真实M2.7普通审批唯一执行，新真实原压缩checkpoint／归档及当前路径／50件180条续作均核，Bot协议不泄入。原45/49及格式失败保留，独立32k触发非生产128k；K06不连带关闭） |
 | P12 | P0 | 原项目模式、工作流／worker、技能、自动化、IM相关回归 | 相邻已有测试及关键真实入口通过；不以Bot门禁替代原链回归 | 通过（1021BV；原108项＋6脚本及真实项目创建取消／worker完整回执／skill预览／automation空态／IM合法未登录入口，独立按原合同闭环；未声称各链新完整e2e） |
 | P13 | P0 | 原全局记忆和原浏览器在Bot任务前后使用 | 与Bot私有体系边界保持，无旧共享浏览器误调用或全局记忆污染 | 通过（1021BV：原global前后同目录合法空库0文件／0B，私有41文件独立；原WAL页面前后实际加载、刷新及目录交互，新专用Bot页owner／实际工具／memoryEnabled边界9项核对通过。不扩为F12或全记忆语义通过） |
-| P14 | P0 | 初次打开原工作台而Bot存储不可用的受控测试 | 原应用仍可打开，Bot错误明确，不因注册接线拖垮核心功能 | 待测 |
-| P15 | P0 | 打包后的Mac应用运行M3、创建Bot、开浏览器／交文件／重启 | 使用内置Electron，无另装Chromium／Python／Docker依赖；产物版本准确 | 待测 |
-| P16 | P1 | 比对实际diff、许可证／构建notice与配置敏感信息 | 无诊断钩子、密钥或合成样例混入产品；无效尝试已撤回 | 通过（1021BS；冻结91文件实际diff与构建notice／配置扫描，无产品诊断／密钥／合成样例命中，无未跟踪或删除文件；3份notice与源一致，后续变更须重核） |
+| P14 | P0 | 初次打开原工作台而Bot存储不可用的受控测试 | 原应用仍可打开，Bot错误明确，不因注册接线拖垮核心功能 | 通过（1023DE隔离真实EEXIST，实际原工作台初开／空编辑器、Bot错误／重试入口、返回原工作台六项与四图独审通过；临时进程正常退出、原预览保持。非正式包／SSO／模型执行；错误原始路径与恢复另归L12） |
+| P15 | P0 | 打包后的Mac应用运行M3、创建Bot、开浏览器／交文件／重启 | 使用内置Electron，无另装Chromium／Python／Docker依赖；产物版本准确 | 部分／环境阻断：1023DP当前arm64包388out／29资源、PTY解包及真实SSO加载通过；用户无法登录，包正常Quit退出0。包内Bot／M2.7／浏览器／交付／重启仍未验；codesign失败单列，非签名安装通过 |
+| P16 | P1 | 比对实际diff、许可证／构建notice与配置敏感信息 | 无诊断钩子、密钥或合成样例混入产品；无效尝试已撤回 | 通过（原BS91／CW118各自冻结范围保留；1023DV当前11路径＝2文档＋7renderer生产＋2测试增量复核，原依赖／配置／notice源在HEAD／index／工作树相同、生产新增行无诊断／QA／已知凭据样式命中，3份notice源／out／候选／实际ASAR逐字节一致，索引保持；不把三个快照路径数累加，后续变更须重核） |
 | P17 | P0 | Windows安装包：启动、创建M3 Bot、首发、附件、浏览器与接管 | 原生路径／中文／资源正确，无WSL／Docker前提；需要实机，缺机记阻断 | 待测 |
 | P18 | P0 | Windows停止／子进程／重启恢复、原工作台与布局检查 | 真进程和文件对账；无Mac特有逻辑泄入，不以静态类型检查代替实测 | 待测 |
 
@@ -1252,7 +1545,7 @@ K06发题前冻结50个UTF-8文件和manifest：01定义CSV金额按分精确累
 
 ### 覆盖计数与退出条件
 
-- 每例关闭前核对该行全部参数；“私聊通过、群待测”等属于部分执行，不进入201例通过分子。
+- 每例关闭前核对该行全部参数；“私聊通过、群待测”等属于部分执行，不进入201例通过分子。2026-10-23用户确认的 I07／J01／J03／J04／J05 只解除官方侧对照阻断，本地原功能参数仍须全部通过；本地验收197／201与原对照口径192／201分别报告，不把调整口径称为新增实测。
 - 同步维护待测、已完成通过、仍有差距、环境阻断数；总和必须为201。Windows与共用公开表单等无法执行项明确保留阻断，并继续完成本机可执行项。
 - 发现确定缺陷即保全现场、最小修正和同题复验；性能、类型与相邻功能检查通过后才关闭修正。官方自身失败仍记录，但本地不能因此降低正确性／交付门槛。
 

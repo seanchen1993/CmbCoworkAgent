@@ -8,9 +8,9 @@ const labels: Record<BotAvatarMood, string> = {
   idle: "正在准备",
   think: "正在思考",
   work: "正在处理",
-  read: "正在阅读",
-  write: "正在编写",
-  run: "正在运行命令",
+  read: "处理阅读请求",
+  write: "处理写入请求",
+  run: "处理命令请求",
   search: "正在查看资料",
   send: "正在更新",
   orbit: "正在协作",
@@ -21,13 +21,17 @@ const labels: Record<BotAvatarMood, string> = {
 /** Mounted only for a live turn. Reuses the avatar clock and original Runtime state. */
 export function BotActivity({
   bot,
-  threadId
+  threadId,
+  taskCreatedAt,
+  waiting = false
 }: {
   bot: Pick<BotDefinition, "color" | "shape">
   threadId: string
+  taskCreatedAt?: number
+  waiting?: boolean
 }) {
-  const mood = useBotRuntimeMood(threadId, true)
-  const waiting = useThreadStateSelector(threadId, (state) =>
+  const mood = useBotRuntimeMood(threadId, true, waiting, taskCreatedAt)
+  const pendingLabel = useThreadStateSelector(threadId, (state) =>
     state.pendingApproval || state.pendingApprovals.length
       ? "等待你确认"
       : state.pendingUserInput
@@ -37,7 +41,7 @@ export function BotActivity({
   return (
     <div className="bot-activity" role="status" aria-live="polite" aria-atomic="true">
       <BotAvatar color={bot.color} shape={bot.shape} mood={mood} size={28} />
-      <span>{waiting ?? labels[mood]}</span>
+      <span>{pendingLabel ?? labels[mood]}</span>
     </div>
   )
 }

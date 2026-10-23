@@ -1,17 +1,16 @@
-import { useCallback, useRef, useSyncExternalStore, type ComponentProps } from "react"
+import { useCallback, useSyncExternalStore, type ComponentProps } from "react"
 import { useThreadContext } from "@/lib/thread-context"
-import { botAvatarMood, botIsSpeaking, type BotAvatarMood } from "@/lib/bot-avatar-mood"
+import { botAvatarMood, type BotAvatarMood } from "@/lib/bot-avatar-mood"
 import { BotAvatar } from "./BotAvatar"
 
 /** A scalar selector avoids rerendering avatars on every streamed token. No extra Runtime owner. */
-export function useBotRuntimeMood(threadId: string, busy: boolean, waiting = false): BotAvatarMood {
+export function useBotRuntimeMood(
+  threadId: string,
+  busy: boolean,
+  waiting = false,
+  taskCreatedAt?: number
+): BotAvatarMood {
   const context = useThreadContext()
-  const cache = useRef<{
-    tools: object
-    start: number | null
-    speaking: boolean
-    mood: BotAvatarMood
-  } | null>(null)
   const subscribe = useCallback(
     (listener: () => void) => {
       if (!busy && !waiting) return () => {}
@@ -37,22 +36,14 @@ export function useBotRuntimeMood(threadId: string, busy: boolean, waiting = fal
       return "orbit"
     const stream = context.getStreamData(threadId)
     // Host admission precedes Runtime startup; retained tool state belongs to the previous turn.
-    if (!stream.isLoading) return "work"
-    const speaking = botIsSpeaking(stream.isLoading, stream.liveMessages, state.activeTurnStartTime)
-    if (
-      cache.current?.tools !== state.toolCallStates ||
-      cache.current.start !== state.activeTurnStartTime ||
-      cache.current.speaking !== speaking
-    ) {
-      cache.current = {
-        tools: state.toolCallStates,
-        start: state.activeTurnStartTime,
-        speaking,
-        mood: botAvatarMood(true, false, state.toolCallStates, state.activeTurnStartTime, speaking)
-      }
-    }
-    return cache.current.mood
-  }, [busy, waiting, context, threadId])
+    if (!stream.isLoading && !state.scheduledTaskLoading) return "work"
+    return botAvatarMood(
+      true,
+      false,
+      state.scheduledTaskLoading ? state.messages : stream.liveMessages,
+      Math.max(state.activeTurnStartTime ?? 0, taskCreatedAt ?? 0) || null
+    )
+  }, [busy, waiting, context, threadId, taskCreatedAt])
   return useSyncExternalStore<BotAvatarMood>(subscribe, snapshot, () => "idle")
 }
 
@@ -60,8 +51,13 @@ export function BotRuntimeAvatar({
   threadId,
   busy = false,
   waiting = false,
+  taskCreatedAt,
   ...props
-}: ComponentProps<typeof BotAvatar> & { threadId: string; waiting?: boolean }) {
-  const mood = useBotRuntimeMood(threadId, busy, waiting)
+}: ComponentProps<typeof BotAvatar> & {
+  threadId: string
+  waiting?: boolean
+  taskCreatedAt?: number
+}) {
+  const mood = useBotRuntimeMood(threadId, busy, waiting, taskCreatedAt)
   return <BotAvatar {...props} mood={mood} />
 }

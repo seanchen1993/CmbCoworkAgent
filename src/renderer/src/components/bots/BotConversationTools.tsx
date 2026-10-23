@@ -54,6 +54,8 @@ import { botDeliveredFileReferences } from "@/lib/bot-delivered-file-references"
 import { getModCards, subscribeModCards } from "@/lib/mod-cards-store"
 import { useBotViewStore } from "./view-store"
 import { BotActivity } from "./BotActivity"
+import { botConversationState } from "@/lib/bot-task-view"
+import { botActiveTaskCreatedAt } from "@/lib/bot-avatar-mood"
 
 export function BotConversationTools({
   client,
@@ -425,7 +427,12 @@ export function BotConversationTools({
                         <ChatActivityPresentationContext.Provider
                           value={
                             !showExecutionDetails && bot && threadId ? (
-                              <BotActivity bot={bot} threadId={threadId} />
+                              <BotActivity
+                                bot={bot}
+                                threadId={threadId}
+                                taskCreatedAt={botActiveTaskCreatedAt(tasks, threadId)}
+                                waiting={botConversationState(tasks) === "waiting_user"}
+                              />
                             ) : null
                           }
                         >

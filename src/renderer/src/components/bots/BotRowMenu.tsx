@@ -77,7 +77,10 @@ export function BotRowMenu({
   const trigger = useRef<HTMLSpanElement>(null)
   const [menuOpen, setMenuOpen] = useState(false)
   return (
-    <Tooltip delayDuration={250} open={compact && !menuOpen ? undefined : false}>
+    <Tooltip
+      delayDuration={250}
+      open={(compact || (pinned && !bot.archived)) && !menuOpen ? undefined : false}
+    >
       <ContextMenu onOpenChange={setMenuOpen}>
         <ContextMenuTrigger asChild ref={trigger}>
           <TooltipTrigger asChild>{children}</TooltipTrigger>
