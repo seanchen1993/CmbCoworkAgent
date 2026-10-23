@@ -125,7 +125,7 @@ export function RequirementFunctionCard({
           </div>
         </div>
         {actions ? (
-          <div className="relative flex min-h-[156px] w-[208px] shrink-0 self-stretch items-center justify-center overflow-hidden border-l border-border/70 bg-slate-50/70">
+          <div className="relative flex w-[208px] shrink-0 self-stretch items-center justify-center overflow-hidden border-l border-border/70 bg-slate-50/70 shadow-[-8px_0_16px_-12px_rgba(15,23,42,0.45)]">
             {actions}
           </div>
         ) : null}
