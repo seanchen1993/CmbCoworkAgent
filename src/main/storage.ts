@@ -1,3 +1,10 @@
+import {
+  readContentFileSync,
+  encodeMarketContent,
+  findProtectedMarketRoot,
+  isMarketMarkdownFile,
+  resolveMarketRuntimePath
+} from "./services/market-content"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
@@ -3329,7 +3336,7 @@ export function setPluginOriginsBatch(
   let changed = false
   const next = items.map((item) => {
     const desired = byId.get(item.id)
-    if (!desired || item.origin === desired) return item
+    if (!desired || item.origin === desired || item.origin === "market") return item
     changed = true
     return { ...item, origin: desired }
   })
@@ -3443,7 +3450,34 @@ export function getEnabledPluginMcpConfigs(): Record<string, PluginMcpServerConf
     if (!servers) continue
     for (const [name, cfg] of Object.entries(servers)) {
       if (runtimeCapabilityAllowsMcp(plugin.id, name) === false) continue
-      configs[`plugin:${plugin.id}/${name}`] = cfg
+      const runtimeRoot = cfg.command ? resolveMarketRuntimePath(plugin.path) : plugin.path
+      if (!cfg.command || (runtimeRoot === plugin.path && !findProtectedMarketRoot(plugin.path))) {
+        configs[`plugin:${plugin.id}/${name}`] = cfg
+        continue
+      }
+      const replaceRoot = (value: string): string =>
+        value
+          .replaceAll("${CLAUDE_PLUGIN_ROOT}", runtimeRoot)
+          .replaceAll("${PLUGIN_ROOT}", runtimeRoot)
+          .replaceAll(plugin.path, runtimeRoot)
+      configs[`plugin:${plugin.id}/${name}`] = {
+        ...cfg,
+        ...(cfg.command ? { command: replaceRoot(cfg.command) } : {}),
+        ...(cfg.args
+          ? {
+              args: cfg.args.map((arg) =>
+                replaceRoot(arg.startsWith("./") ? join(runtimeRoot, arg) : arg)
+              )
+            }
+          : {}),
+        ...(cfg.env
+          ? {
+              env: Object.fromEntries(
+                Object.entries(cfg.env).map(([key, value]) => [key, replaceRoot(value)])
+              )
+            }
+          : {})
+      }
     }
   }
   if (!scoped) _pluginMcpCache = configs
@@ -3453,7 +3487,7 @@ export function getEnabledPluginMcpConfigs(): Record<string, PluginMcpServerConf
 export function parseMcpJsonFile(filePath: string): Record<string, PluginMcpServerConfig> | null {
   if (!existsSync(filePath)) return null
   try {
-    const content = readFileSync(filePath, "utf-8")
+    const content = readContentFileSync(filePath, "utf-8")
     const parsed = JSON.parse(content) as unknown
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null
     const obj = parsed as Record<string, unknown>
@@ -4335,7 +4369,7 @@ export function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
     })) as PluginHookMetadata[]
 
   try {
-    const parsed = JSON.parse(readFileSync(hooksFilePath, "utf-8"))
+    const parsed = JSON.parse(readContentFileSync(hooksFilePath, "utf-8"))
     const meta = {
       enabled: plugin.enabled,
       ...getHookFileDates(hooksFilePath)
@@ -4453,7 +4487,7 @@ function buildSkillHookId(
 function readSkillFrontmatterHooksSettings(skillMdPath: string): Record<string, unknown> | null {
   if (!existsSync(skillMdPath)) return null
   try {
-    const { frontmatter } = parseSkillFrontmatter(readFileSync(skillMdPath, "utf-8"))
+    const { frontmatter } = parseSkillFrontmatter(readContentFileSync(skillMdPath, "utf-8"))
     const hooksRaw = frontmatter.hooks
     if (!hooksRaw || typeof hooksRaw !== "object" || Array.isArray(hooksRaw)) return null
 
@@ -4567,7 +4601,7 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
   if (!existsSync(hooksFilePath)) return []
 
   try {
-    const parsed = JSON.parse(readFileSync(hooksFilePath, "utf-8"))
+    const parsed = JSON.parse(readContentFileSync(hooksFilePath, "utf-8"))
     const dates = getHookFileDates(hooksFilePath)
     const meta = { enabled: true, ...dates }
     const idPrefix =
@@ -4714,7 +4748,7 @@ export function setPluginHookEnabled(pluginId: string, hookId: string, enabled: 
     throw new Error("插件 hooks 配置文件不存在")
   }
 
-  const parsed = JSON.parse(readFileSync(hooksFilePath, "utf-8"))
+  const parsed = JSON.parse(readContentFileSync(hooksFilePath, "utf-8"))
   const fmt = detectHooksFileFormat(parsed)
 
   if (fmt === "flat") {
@@ -4729,7 +4763,13 @@ export function setPluginHookEnabled(pluginId: string, hookId: string, enabled: 
       return { ...record, enabled }
     })
     if (!found) throw new Error("插件 Hook 不存在")
-    writeFileSync(hooksFilePath, JSON.stringify(next, null, 2), "utf-8")
+    const content = Buffer.from(JSON.stringify(next, null, 2))
+    writeFileSync(
+      hooksFilePath,
+      isMarketMarkdownFile(hooksFilePath) && findProtectedMarketRoot(hooksFilePath)
+        ? encodeMarketContent(content)
+        : content
+    )
   } else if (fmt === "cc_plugin" || fmt === "cc_settings") {
     // ── CC format: ID = plugin:pluginId/EventName:matcherIdx:hookIdx ──
     // We inject `enabled` into the individual hook object (extension field, non-destructive).
@@ -4760,7 +4800,13 @@ export function setPluginHookEnabled(pluginId: string, hookId: string, enabled: 
     settingsObj[eventName] = matchers
     if (fmt === "cc_plugin") root.hooks = settingsObj
 
-    writeFileSync(hooksFilePath, JSON.stringify(root, null, 2), "utf-8")
+    const content = Buffer.from(JSON.stringify(root, null, 2))
+    writeFileSync(
+      hooksFilePath,
+      isMarketMarkdownFile(hooksFilePath) && findProtectedMarketRoot(hooksFilePath)
+        ? encodeMarketContent(content)
+        : content
+    )
   } else {
     throw new Error("插件 hooks 配置格式无效")
   }

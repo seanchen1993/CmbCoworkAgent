@@ -1,3 +1,4 @@
+import { prepareMarketCommand, resolveMarketRuntimePath } from "../services/market-content"
 import { prepareStageCheckReceipts } from "./stage-check-receipts"
 import { hookExecutionResult } from "./execution-result"
 import {
@@ -44,6 +45,7 @@ import { HookHaltError } from "./halt"
 import { assertStageRecoveryHookSupported } from "../harness-board/project-runtime/stage-recovery-policy"
 import { prepareStageRecoveryCommand } from "./stage-recovery-command"
 import { beginStageRecoveryHook, type StageRecoveryHookSettlement } from "./stage-recovery-journal"
+import { withWorkspaceExecution } from "../agent/file-operation-lock"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -146,6 +148,8 @@ export interface HookContext {
   toolArgs?: Record<string, unknown>
   toolResult?: string
   workspacePath?: string
+  /** Internal cancellation for queued synchronous command hooks; never sent to the hook process. */
+  abortSignal?: AbortSignal
   /** Session / thread identifier — exposed to hooks as SESSION_ID and session_id in stdin JSON */
   sessionId?: string
   /** Optional system identifier exposed to hook commands as SYSTEM_ID. */
@@ -784,7 +788,17 @@ async function executeCommandHook(
   signal?: AbortSignal
 ): Promise<HookResult> {
   signal?.throwIfAborted()
-  const command = hook.command ?? ""
+  const originalRoots = [env.PLUGIN_ROOT, env.SKILL_ROOT].filter(
+    (value): value is string => Boolean(value)
+  )
+  const prepared = prepareMarketCommand(hook.command ?? "", cwd, originalRoots)
+  env = Object.fromEntries(Object.entries(env).map(([key, value]) => [
+    key, ["PLUGIN_ROOT", "SKILL_ROOT", "SKILL_PATH"].includes(key)
+      ? resolveMarketRuntimePath(value) : value
+  ]))
+  stdinPayload = prepareMarketCommand(stdinPayload, cwd, originalRoots).command
+  const command = prepared.command
+  cwd = prepared.cwd
   if (!command.trim())
     return { exitCode: 0, stdout: "", stderr: "Hook command is empty", blocked: false }
   const timeout = getEffectiveTimeout(hook)
@@ -1457,11 +1471,31 @@ async function executeSyncHook(
     if (pluginRoot && (await suppressCompositionPythonCache(pluginRoot)))
       env = { ...env, PYTHONDONTWRITEBYTECODE: "1" }
     assertCurrentRuntimePluginSourceContent()
-    const signals = [context.signal, getModCallContext()?.signal].filter(
+    const signals = [context.signal, context.abortSignal, getModCallContext()?.signal].filter(
       (signal): signal is AbortSignal => signal !== undefined
     )
-    result = await executeCommandHook(hook, env, builtPayload, getCommandCwd(context),
-      signals.length ? AbortSignal.any(signals) : undefined)
+    const commandSignal = signals.length ? AbortSignal.any(signals) : undefined
+    const runCommand = () => {
+      assertCurrentRuntimePluginSourceContent()
+      return executeCommandHook(hook, env, builtPayload, getCommandCwd(context),
+      commandSignal)
+    }
+    // Synchronous formatters and other command hooks may read/modify any file.
+    // Coordinate their actual process lifetime with tool IO, without acquiring
+    // the runtime gate again. Detached hooks retain their existing async policy.
+    const synchronous =
+      hook.async !== true ||
+      event === "Setup" ||
+      (context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
+    result =
+      context.workspacePath && synchronous
+        ? await withWorkspaceExecution(
+            context.workspacePath,
+            "write",
+            runCommand,
+            commandSignal
+          )
+        : await runCommand()
   }
   // Required callbacks already fence the original checked result. Ordinary Hook results
   // need the same source fence after their real async IO, before parsing/publishing/once.

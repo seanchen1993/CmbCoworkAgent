@@ -508,7 +508,8 @@ export interface AgentTrace extends Partial<TraceStageUsageSnapshot> {
   /** The user message that triggered this run */
   userMessage: string
   /**
-   * Whether the full user input contains at least ten ASCII English letters.
+   * Whether actual user text contains at least ten ASCII English letters,
+   * excluding the initial Skill-started turn of a project conversation.
    * Missing on traces produced before this forward-only heuristic was introduced.
    */
   suspectedTechnicalDetailSupplement?: boolean

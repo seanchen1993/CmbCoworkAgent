@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "fs"
+import { readContentFileSync } from "../services/market-content"
+import { existsSync } from "fs"
 import { isAbsolute, join, relative, resolve } from "path"
 import type { PluginManifest } from "../types"
 
@@ -59,7 +60,9 @@ export function readPluginManifest(dirPath: string): ReadPluginManifestResult | 
     const manifestPath = join(dirPath, relPath)
     if (!existsSync(manifestPath)) continue
     try {
-      const manifest = validatePluginManifest(JSON.parse(readFileSync(manifestPath, "utf-8")))
+      const manifest = validatePluginManifest(
+        JSON.parse(readContentFileSync(manifestPath, "utf-8"))
+      )
       if (manifest) return { manifest, path: manifestPath, relPath }
     } catch {
       console.warn("[Plugins] Failed to parse plugin.json at", manifestPath)

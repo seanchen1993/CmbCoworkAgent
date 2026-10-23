@@ -6,6 +6,7 @@ import { assertHostRuntimeSupported } from "./host-validators"
 import { readProjectActionLock } from "./action-input"
 import { assertProjectPackageExtensions } from "../../mods/devtools/project-package-extensions"
 import { assertAutobizPackageAgentResourcesFromRoot } from "../../plugins/business-adapters/autobiz-package-admission"
+import { readHostPackageSkill } from "./package-skill-content"
 
 /** Mirrors shared Mods discovery, including implicit native and hooks.modules declarations. */
 export function packageUsesSharedMods(
@@ -62,8 +63,6 @@ export function assertHostPackageSupported(root: string, runtime: ProjectRuntime
     return file.bytes ? new TextDecoder("utf-8", { fatal: true }).decode(file.bytes) : undefined
   })
   if (metadata.hooks) runtimeRelativePath(metadata.hooks)
-  for (const stage of runtime.stages)
-    if (!readRuntimeScopedFile(root, stage.skill!, 256 * 1024).present)
-      hostStateError("SKILL_MISSING")
+  for (const stage of runtime.stages) readHostPackageSkill(root, stage.skill!)
   return metadata
 }

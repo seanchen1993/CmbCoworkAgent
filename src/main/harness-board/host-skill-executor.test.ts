@@ -52,6 +52,7 @@ import { hostProjectFixture } from "./project-runtime/host-fixtures.test-helper"
 import { withProjectActionScope } from "./project-action-scope"
 import { resolveClawThread } from "../mods/claw-scope"
 import { configureStageRecoveryHookJournal } from "../hooks/stage-recovery-journal"
+import { MARKET_CONTENT_PREFIX, protectMarketDirectory } from "../services/market-content"
 
 const cleanup: Array<() => void> = []
 const owner = {
@@ -63,7 +64,8 @@ async function fixture(
   sharedSkill = false,
   internal = false,
   mcp = false,
-  dependencies: Pick<HostProjectServiceDependencies, "inputIdentity"> = {}
+  dependencies: Pick<HostProjectServiceDependencies, "inputIdentity"> = {},
+  configurePlugin?: (root: string) => void
 ) {
   const root = mkdtempSync(join(tmpdir(), "host-skill-executor-"))
   const workspace = join(root, "workspace"),
@@ -106,6 +108,7 @@ async function fixture(
     store.close()
     rmSync(root, { recursive: true, force: true })
   })
+  configurePlugin?.(pluginRoot)
   const service = new HostProjectService(store, new HostPackageSnapshots(join(root, "snapshots")), {
     resolveInstalledPlugin: async () => ({
       installedPluginId: "installation-id",
@@ -138,6 +141,48 @@ afterEach(() => {
 })
 
 describe("original agent run bridge", () => {
+  it("reads a protected Skill name and the full plaintext limit without changing retained bytes", async () => {
+    const header = "---\nname: protected-document-author\n---\n"
+    const plain = header + "x".repeat(256 * 1024 - Buffer.byteLength(header))
+    const f = await fixture(false, false, false, {}, (root) => {
+      writeFileSync(join(root, "skills/draft/SKILL.md"), plain)
+      protectMarketDirectory(root)
+    })
+    let observed = false
+    registerAgentRunImplementation(async (_request, _delivery, context) => {
+      observed = true
+      expect(context.trustedExplicitSkill!.name).toBe("protected-document-author")
+      const retainedPath = context.trustedExplicitSkill!.path
+      expect(retainedPath).not.toBe(join(f.pluginRoot, "skills/draft/SKILL.md"))
+      expect(readFileSync(retainedPath, "utf8").startsWith(MARKET_CONTENT_PREFIX)).toBe(true)
+      expect(readFileSync(retainedPath)).toEqual(
+        readFileSync(join(f.pluginRoot, "skills/draft/SKILL.md"))
+      )
+      assertCurrentRuntimePluginSourceContent()
+      writeFileSync(join(f.workspace, "document.md"), "Protected source output")
+      context.onRunTerminated?.({ outcome: "success", code: "protected-skill" })
+    })
+    const operation = f.service.prepare({
+      projectId: "local-docs", expectedVersion: 1, idempotencyKey: "protected-skill"
+    })
+    expect((await f.service.start(operation.operationId)).status).toBe("succeeded")
+    expect(observed).toBe(true)
+  })
+
+  it.each([false, true])("rejects Skills above the plaintext limit (protected=%s)", async (protectedSkill) => {
+    await expect(fixture(false, false, false, {}, (root) => {
+      writeFileSync(join(root, "skills/draft/SKILL.md"), "x".repeat(256 * 1024 + 1))
+      if (protectedSkill) protectMarketDirectory(root)
+    })).rejects.toThrow("FILE_LIMIT")
+  })
+
+  it("rejects a corrupt protected Skill before launching the original agent", async () => {
+    await expect(fixture(false, false, false, {}, (root) => {
+      protectMarketDirectory(root)
+      writeFileSync(join(root, "skills/draft/SKILL.md"), MARKET_CONTENT_PREFIX + "invalid!")
+    })).rejects.toThrow("市场资源编码损坏")
+  })
+
   it("retains a genuine agent terminal while an unresolved recovery Hook keeps the overall operation unknown", async () => {
     const f = await fixture()
     configureStageRecoveryHookJournal({

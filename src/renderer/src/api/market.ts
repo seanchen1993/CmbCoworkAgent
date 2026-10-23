@@ -650,6 +650,9 @@ export const marketApi = {
     options?: { signal?: AbortSignal; maxBytes?: number }
   ): Promise<DownloadResponse> {
     void _isFeatured
+    if (downloadToLocal && ["skill", "orgSkill", "plugin"].includes(type)) {
+      return { success: false, error: "受保护资源仅支持安装到平台使用" }
+    }
     console.log(`Downloading ${type} item: ${name}`)
     const orgSkillFile =
       type === "orgSkill" && item ? await this.fetchOrgSkillInstallFile(item) : null
@@ -674,7 +677,9 @@ export const marketApi = {
       try {
         const arrayBuffer = await getBuffer()
         if (typeof window.api?.skills?.upload === "function") {
-          const uploadResult = await window.api.skills.upload(arrayBuffer, filename)
+          const uploadResult = await window.api.skills.upload(arrayBuffer, filename, {
+            origin: "market"
+          })
           return {
             success: uploadResult.success,
             error: uploadResult.error

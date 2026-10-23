@@ -28,7 +28,7 @@ import {
   type TraceCollector
 } from "../trace/collector"
 import type { TraceContext, TraceNodeStatus, TraceOutcome } from "../trace/types"
-import { syncSubagentSkillAttribution } from "../turn-attribution"
+import { createSubagentSkillAttribution } from "../turn-attribution"
 import { assertSupportedJsonSchema, validateJsonSchemaValue } from "./json-schema"
 import {
   WORKFLOW_STRUCTURED_OUTPUT_MAX_ATTEMPTS,
@@ -381,6 +381,10 @@ async function runOnce(
   const attemptSuffix = attempt > 1 ? `_r${attempt}` : ""
   const threadId = `${deps.parentThreadId}__wf_${runShort}_a${request.agentIndex}${attemptSuffix}`
   const agentId = `${request.runId}:agent:${request.agentIndex}`
+  const syncCodeSkills = createSubagentSkillAttribution({
+    threadId,
+    parentThreadId: deps.parentThreadId
+  })
 
   // Subagent lifetime signal: parent abort, plus optional per-agent timeout when
   // CMB_WORKFLOW_AGENT_TIMEOUT_MS is configured.
@@ -404,22 +408,12 @@ async function runOnce(
     deriveWorkerState: false
   })
   const syncSkillAttribution = (): void => {
-    if (!tracer) return
     const usedSkills = skillUsageDetector.getUsedSkillNames()
     const skillSource = skillUsageDetector.getUsedSkillSourceRefs()
-    tracer.setUsedSkills(usedSkills)
-    tracer.setSkillSource(skillSource)
-    tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
-    // This agent owns its own thread, so recordGen reads *this* thread's
-    // adoption context. Resolve the fallback chain rather than publishing the
-    // bare detector result: an agent that never re-reads a SKILL.md would
-    // otherwise drop the attribution its parent had already established.
-    syncSubagentSkillAttribution({
-      threadId,
-      parentThreadId: deps.parentThreadId,
-      currentRunSkills: usedSkills,
-      currentRunSkillSource: skillSource
-    })
+    tracer?.setUsedSkills(usedSkills)
+    tracer?.setSkillSource(skillSource)
+    tracer?.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
+    syncCodeSkills({ usedSkills, skillSource })
   }
   const recordValuesSnapshot = (snapshot: unknown): void => {
     latestSnapshot = snapshot
@@ -440,6 +434,9 @@ async function runOnce(
     // Purge any stale per-thread state before creating the runtime.
     await cleanupWorkflowRuntime(deps, threadId, !!(request.flowPromptOnly || deps.strictRuntimeCleanup), false)
     tracer = createWorkflowSubagentTrace(deps, request, threadId)
+    // Trace creation resets adoption context. Restore inherited Skills before
+    // the first tool can generate code, even if this agent never reads a Skill.
+    runTraceSideEffect("Workflow Skill initialization", syncSkillAttribution)
     if (tracer)
       traceRecorder = new TurnTraceRecorder({
         tracer,

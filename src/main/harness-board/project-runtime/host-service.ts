@@ -18,6 +18,7 @@ import {
 } from "../../plugins/derivation-source"
 import type { PluginStartUseIdentity } from "../../../shared/plugin-start-use"
 import { assertStageBranchSourceCompatible } from "./stage-branch-compatibility"
+import { readHostPackageSkill } from "./package-skill-content"
 import { HostProjectStore } from "./host-store"
 import { hostGoal, hostRecord, hostStateError, hostText } from "./host-state-protocol"
 import {
@@ -25,7 +26,7 @@ import {
   fingerprintHostStageInput,
   validateHostStage
 } from "./host-validators"
-import { readRuntimeScopedFile, runtimeDigest, runtimeDirectory } from "./safe-files"
+import { runtimeDigest, runtimeDirectory } from "./safe-files"
 import { normalizeWorkspacePathKey } from "../../../shared/workspace-path"
 import { assertHostPackageSupported } from "./package-preflight"
 import { withSnapshotRetention } from "./snapshot-retention"
@@ -559,10 +560,6 @@ export class HostProjectService {
       assertSourceCurrent()
       assertRetainedCurrent()
       assertHostPackageSupported(snapshot.root, snapshot.manifest)
-      for (const stage of snapshot.manifest.stages) {
-        if (!readRuntimeScopedFile(snapshot.root, stage.skill!, 256 * 1024).present)
-          hostStateError("SKILL_MISSING")
-      }
       // Recheck the host catalog after capture: update/disable cannot race project binding silently.
       const current = await this.deps.resolveInstalledPlugin(input.installedPluginId)
       assertCreatorCurrent()
@@ -850,8 +847,8 @@ export class HostProjectService {
   ) {
     const snapshot = this.snapshot(project)
     const skillPath = project.manifest.stages[project.stageIndex]?.skill
-    if (!skillPath || !readRuntimeScopedFile(snapshot.root, skillPath, 256 * 1024).present)
-      hostStateError("SKILL_MISSING")
+    if (!skillPath) hostStateError("SKILL_MISSING")
+    readHostPackageSkill(snapshot.root, skillPath)
     return {
       project: structuredClone(project),
       operation: structuredClone(operation),

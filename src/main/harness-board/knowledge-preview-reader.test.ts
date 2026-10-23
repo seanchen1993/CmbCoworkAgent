@@ -7,6 +7,7 @@ import { readHarnessKnowledgePreview } from "./knowledge-preview-reader"
 import { HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES } from "./knowledge-preview-protocol"
 import { createProjectTemplate } from "../mods/devtools/project-template"
 import { CONTEXT_HANDOFF_PROTOCOL, parseProjectRuntimeManifest, wrapProjectRuntimeManifest } from "../../shared/project-runtime"
+import { protectMarketDirectory } from "../services/market-content"
 
 const roots: string[] = []
 
@@ -69,57 +70,63 @@ describe("Harness knowledge preview reader", () => {
     }
   })
 
-  it("resolves plugin placeholders and returns a bounded file projection", async () => {
-    const openworkDir = await mkdtemp(join(tmpdir(), "harness-knowledge-preview-"))
-    roots.push(openworkDir)
-    const pluginPath = join(openworkDir, "plugin-a")
-    const knowledgePath = join(pluginPath, "knowledge")
-    await mkdir(join(pluginPath, "board_core"), { recursive: true })
-    await mkdir(join(knowledgePath, "nested"), { recursive: true })
-    await writeFile(
-      join(openworkDir, "plugins.json"),
-      JSON.stringify([{ id: "adapter-a", name: "Adapter A", path: pluginPath }]),
-      "utf8"
-    )
-    await writeFile(join(openworkDir, "leanstar-config.json"), JSON.stringify({ leanToken: "" }))
-    await writeFile(
-      join(pluginPath, "board_core", "board_config.json"),
-      JSON.stringify({
-        apiVersion: 1,
-        inspectCommands: {
-          [process.platform]: { knowledge_path: "${pluginPath}/knowledge" }
-        }
-      }),
-      "utf8"
-    )
-    await Promise.all(
-      Array.from({ length: 40 }, (_, index) =>
-        writeFile(join(knowledgePath, "nested", `file-${index}.md`), `body ${index}`, "utf8")
+  it.each([false, true])(
+    "returns bounded knowledge files for protected config: %s",
+    async (protectedContent) => {
+      const openworkDir = await mkdtemp(join(tmpdir(), "harness-knowledge-preview-"))
+      roots.push(openworkDir)
+      const pluginPath = join(openworkDir, "plugin-a")
+      const knowledgePath = join(pluginPath, "knowledge")
+      await mkdir(join(pluginPath, "board_core"), { recursive: true })
+      await mkdir(join(knowledgePath, "nested"), { recursive: true })
+      await writeFile(
+        join(openworkDir, "plugins.json"),
+        JSON.stringify([{ id: "adapter-a", name: "Adapter A", path: pluginPath }]),
+        "utf8"
       )
-    )
+      await writeFile(join(openworkDir, "leanstar-config.json"), JSON.stringify({ leanToken: "" }))
+      await writeFile(
+        join(pluginPath, "board_core", "board_config.json"),
+        JSON.stringify({
+          apiVersion: 1,
+          ...(protectedContent ? { padding: "x".repeat(800_000) } : {}),
+          inspectCommands: {
+            [process.platform]: { knowledge_path: "${pluginPath}/knowledge" }
+          }
+        }),
+        "utf8"
+      )
+      await Promise.all(
+        Array.from({ length: 40 }, (_, index) =>
+          writeFile(join(knowledgePath, "nested", `file-${index}.md`), `body ${index}`, "utf8")
+        )
+      )
 
-    const result = readHarnessKnowledgePreview(
-      "adapter-a",
-      {
-        openworkDir,
-        pluginStorePath: join(openworkDir, "plugins.json"),
-        leanTokenStorePath: join(openworkDir, "leanstar-config.json")
-      },
-      HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES
-    )
+      if (protectedContent) protectMarketDirectory(pluginPath)
 
-    expect(result).toMatchObject({
-      adapterId: "adapter-a",
-      adapterName: "Adapter A",
-      configured: true,
-      exists: true,
-      path: knowledgePath
-    })
-    expect(result.files.some((file) => file.path === "/nested/file-39.md")).toBe(true)
-    expect(serialize(result).byteLength).toBeLessThanOrEqual(
-      HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES
-    )
-  })
+      const result = readHarnessKnowledgePreview(
+        "adapter-a",
+        {
+          openworkDir,
+          pluginStorePath: join(openworkDir, "plugins.json"),
+          leanTokenStorePath: join(openworkDir, "leanstar-config.json")
+        },
+        HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES
+      )
+
+      expect(result).toMatchObject({
+        adapterId: "adapter-a",
+        adapterName: "Adapter A",
+        configured: true,
+        exists: true,
+        path: knowledgePath
+      })
+      expect(result.files.some((file) => file.path === "/nested/file-39.md")).toBe(true)
+      expect(serialize(result).byteLength).toBeLessThanOrEqual(
+        HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES
+      )
+    }
+  )
 
   it("honors cancellation before filesystem traversal", async () => {
     const openworkDir = await mkdtemp(join(tmpdir(), "harness-knowledge-cancel-"))

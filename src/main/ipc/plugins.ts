@@ -1,6 +1,15 @@
 import { isCreatorVersionSource } from "../plugins/creator-path"
 import { isLegacyProjectModePluginRoot } from "../harness-board/plugin-mode"
 import { isPluginInstallMode, type PluginInstallMode, type PluginInstallResult } from "../../shared/plugin-install"
+import {
+  readContentFile,
+  assertOriginalContent,
+  assertOriginalUpload,
+  assertOriginalDirectory,
+  protectMarketDirectory,
+  upgradeMarkedMarketDirectories,
+  MARKET_CONTENT_DENIED
+} from "../services/market-content"
 import AdmZip from "adm-zip"
 import { IpcMain, dialog } from "electron"
 import * as fs from "fs/promises"
@@ -73,7 +82,7 @@ export { normalizePluginVersion, resolvePluginInstallVersion } from "../../share
 
 async function readJsonObjectFile(filePath: string): Promise<Record<string, unknown> | null> {
   try {
-    const raw = JSON.parse(await fs.readFile(filePath, "utf-8"))
+    const raw = JSON.parse(await readContentFile(filePath, "utf-8"))
     return raw && typeof raw === "object" && !Array.isArray(raw)
       ? (raw as Record<string, unknown>)
       : null
@@ -179,7 +188,8 @@ async function addDirToZip(zip: AdmZip, dirPath: string, rootDir: string): Promi
 
     const relativePath = path.relative(rootDir, fullPath).replace(/\\/g, "/")
     if (!relativePath || relativePath.startsWith("..")) continue
-    zip.addFile(relativePath, await fs.readFile(fullPath))
+    assertOriginalContent(fullPath)
+    zip.addFile(relativePath, await readContentFile(fullPath))
   }
 }
 
@@ -236,7 +246,7 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
   const hooksFilePath = path.join(dirPath, hookPath)
   if (existsSync(hooksFilePath)) {
     try {
-      const raw = JSON.parse(await fs.readFile(hooksFilePath, "utf-8"))
+      const raw = JSON.parse(await readContentFile(hooksFilePath, "utf-8"))
       if (Array.isArray(raw)) {
         hookCount = raw.length
       } else if (raw && typeof raw === "object") {
@@ -428,6 +438,7 @@ async function installPluginFromDirLocked(
   }
 ): Promise<PluginInstallResult> {
   try {
+    assertOriginalDirectory(dirPath)
     if (!isPluginInstallMode(requireMods))
       return { success: false, error: "无效的插件安装方式" }
     let parsed = await parsePluginDir(dirPath, fallbackName)
@@ -487,7 +498,11 @@ async function installPluginFromDirLocked(
     let resolvedVersion = resolvePluginInstallVersion(parsed.manifest?.version, versionOverride)
     const shouldSyncManifestVersion = Boolean(normalizePluginVersion(versionOverride))
     const syncCopiedManifestVersion = async (): Promise<void> => {
-      if (!shouldSyncManifestVersion) return
+      if (!shouldSyncManifestVersion) {
+        if (origin === "market" || (origin === undefined && existing?.origin === "market"))
+          protectMarketDirectory(destDir)
+        return
+      }
       await writeVersionedPluginManifest(destDir, parsed.manifestRelPath, {
         name: parsed.name,
         version: resolvedVersion,
@@ -495,6 +510,8 @@ async function installPluginFromDirLocked(
         useScenario: parsed.manifest?.useScenario,
         author: parsed.manifest?.author
       })
+      if (origin === "market" || (origin === undefined && existing?.origin === "market"))
+        protectMarketDirectory(destDir)
     }
 
     if (existing) {
@@ -742,6 +759,7 @@ async function extractZipToTemp(
       if (!normalDest.startsWith(normalBase + path.sep) && normalDest !== normalBase) {
         throw new Error(`ZIP 包含路径穿越条目: ${decodedName || entry.entryName}`)
       }
+      assertOriginalUpload(entry.getData(), decodedName)
       const destDirPath = path.dirname(destPath)
       mkdirSync(destDirPath, { recursive: true })
       await fs.writeFile(destPath, entry.getData())
@@ -850,6 +868,8 @@ export async function exportPluginForMarketZip(
   plugin: PluginMetadata,
   options?: { version?: string | null }
 ): Promise<{ fileName: string; buffer: ArrayBuffer }> {
+  assertOriginalContent(plugin.path)
+  if (plugin.origin !== "local") throw new Error(MARKET_CONTENT_DENIED)
   const zip = new AdmZip()
   await addDirToZip(zip, plugin.path, plugin.path)
   await upsertVersionedPluginManifestInZip(zip, plugin, options?.version)
@@ -864,6 +884,9 @@ export async function exportPluginForMarketZip(
 }
 
 export function registerPluginHandlers(ipcMain: IpcMain): void {
+  if (upgradeMarkedMarketDirectories(getPlugins().map((plugin) => plugin.path))) {
+    invalidateEnabledSkillsCache()
+  }
   console.log("[Plugins] Registering plugin handlers...")
 
   ipcMain.handle("plugins:list", async (): Promise<PluginMetadata[]> => {
@@ -1078,12 +1101,12 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       return {
         skills: parsed.skillNames,
         mcpServers: Object.keys(parsed.mcpConfigs),
-        mcpServerDetails: parsed.mcpServerDetails,
+        mcpServerDetails: plugin.origin === "local" ? parsed.mcpServerDetails : [],
         hookCount: parsed.hookCount,
         modCount: parsed.modCount,
         businessModCount: parsed.businessModCount,
         businessExtensionCount: parsed.businessExtensionCount,
-        hooks: getPluginHooks(plugin.id),
+        hooks: plugin.origin === "local" ? getPluginHooks(plugin.id) : [],
         manifest: parsed.manifest
       }
     }
@@ -1106,7 +1129,12 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle("plugins:listHooks", async (): Promise<PluginHookMetadata[]> => {
-    return getEnabledPluginHookMetadata()
+    const localIds = new Set(
+      getPlugins()
+        .filter((plugin) => plugin.origin === "local")
+        .map((plugin) => plugin.id)
+    )
+    return getEnabledPluginHookMetadata().filter((hook) => localIds.has(hook.pluginId))
   })
 
   ipcMain.handle(

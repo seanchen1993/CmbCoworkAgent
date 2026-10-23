@@ -105,6 +105,7 @@ import {
   flushStrict,
   getDb,
   getThreadCore,
+  isFirstThreadUserMessage,
   getThreadMessageIdentityContext,
   getThreadMessageProviderOccurrencesBeforeUser,
   getThreadMessagesByIds,
@@ -6969,6 +6970,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           rawMessage: rootUserPrompt,
           requestedModelId: modelId,
           options: {
+            // The visible user message is already persisted at this point.
+            // Read only indexed message IDs, not the full conversation body.
+            isFirstProjectTurn: Boolean(
+              harnessFeatureBinding && isFirstThreadUserMessage(threadId, userMessageId)
+            ),
+            hasExplicitSkill: Boolean(runExecutionContext.trustedExplicitSkill),
             triggerSource: isInternalNotificationTrace
               ? INTERNAL_NOTIFICATION_TRIGGER_SOURCE
               : "chat",
@@ -10459,9 +10466,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     isWorkflowNotificationInvoke &&
                     workflowNotificationTerminalEligibleForManaged &&
                     isActiveManagedRunSession(threadId)
+                  const shouldReportCoordinatorNotificationTerminal =
+                    isTrustedCoordinatorNotificationInvoke &&
+                    isCoordinatorNotificationTurn &&
+                    Boolean(autoModeTerminal) &&
+                    isActiveManagedRunSession(threadId)
                   if (
                     abortController.signal.aborted ||
-                    isTrustedCoordinatorNotificationInvoke ||
+                    (isTrustedCoordinatorNotificationInvoke &&
+                      !shouldReportCoordinatorNotificationTerminal) ||
                     (isWorkflowNotificationInvoke && !shouldReportWorkflowNotificationTerminal) ||
                     (managedExecution !== true && !isActiveManagedRunSession(threadId))
                   ) {
@@ -13283,6 +13296,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         const cancelled = Boolean(controller && !cancelWorkers) || cancelledBackground
         if (cancelled) handleAutoModeAgentCancelled(threadId)
+        else if (workers.length > 0) handleAutoModeAgentCancelled(threadId, "background")
         return cancelled
       })
     }

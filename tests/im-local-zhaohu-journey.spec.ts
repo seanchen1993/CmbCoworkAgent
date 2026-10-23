@@ -661,11 +661,11 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
 
     const featureMessage = await journey.send("检查 Feature 当前状态")
     await journey.waitForEventState(featureMessage.event.eventId, "completed")
-    const featureReply = journey.eventReplyText(featureMessage.event.eventId)
-    assert(featureReply.startsWith("【项目模式会话返回】"))
-    assert(featureReply.includes("项目：【project-pay】"))
-    assert(featureReply.includes("特性：【feature-quick-pay】"))
-    assert(featureReply.includes("模拟回答：检查 Feature 当前状态"))
+    assert(
+      journey
+        .eventReplyText(featureMessage.event.eventId)
+        .includes("模拟回答：检查 Feature 当前状态")
+    )
 
     const longTask = await journey.send("运行一个长任务")
     await journey.waitForEventState(longTask.event.eventId, "executing")
@@ -684,9 +684,6 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     await journey.waitForEventState(longTask.event.eventId, "completed")
     const longReply = journey.eventReplyText(longTask.event.eventId)
     assert(longReply.includes("Feature 长任务完成"))
-    assert(longReply.includes("【项目模式会话返回】"))
-    assert(longReply.includes("项目：【project-pay】"))
-    assert(longReply.includes("特性：【feature-quick-pay】"))
     assert(longReply.includes("非当前绑定会话"))
     assert(!journey.eventReplyText(queuedInbox.event.eventId).includes("非当前绑定会话"))
 

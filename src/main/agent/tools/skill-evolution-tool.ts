@@ -1,3 +1,4 @@
+import { assertOriginalContent } from "../../services/market-content"
 /**
  * Skill Evolution Tool
  *
@@ -348,6 +349,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
           const resolved = resolveCustomSkillDir(input.skillId)
           if (!resolved) return `Error: invalid skillId: ${input.skillId}`
           const skillDir = resolved.dir
+          assertOriginalContent(skillDir)
           if (!existsSync(skillDir)) return `Error: skill not found: ${input.skillId}`
           const skillMdPath = join(skillDir, "SKILL.md")
           if (!existsSync(skillMdPath)) return `Error: SKILL.md not found for: ${input.skillId}`
@@ -372,6 +374,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
           if (!resolved) return `Error: invalid skillId: ${rawSkillId}`
 
           const skillDir = resolved.dir
+          assertOriginalContent(skillDir)
 
           if (existsSync(skillDir)) {
             return `Error: skill already exists: ${skillId}. Use action='patch' to update it.`
@@ -430,6 +433,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
           const resolved = resolveCustomSkillDir(input.skillId)
           if (!resolved) return `Error: invalid skillId: ${input.skillId}`
           const skillDir = resolved.dir
+          assertOriginalContent(skillDir)
           if (!existsSync(skillDir)) return `Error: skill not found: ${input.skillId}`
           const skillMdPath = join(skillDir, "SKILL.md")
 
@@ -478,6 +482,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
           const resolved = resolveCustomSkillDir(input.skillId)
           if (!resolved) return `Error: invalid skillId: ${input.skillId}`
           const skillDir = resolved.dir
+          assertOriginalContent(skillDir)
           if (!existsSync(skillDir)) return `Error: skill not found: ${input.skillId}`
           const cleanupDisabledSkills = prepareDisabledSkillsCleanupForSkillDir(skillDir)
           const endTopologyMutation = beginSkillCatalogTopologyMutation()

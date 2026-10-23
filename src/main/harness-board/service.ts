@@ -1,3 +1,4 @@
+import { prepareMarketCommand } from "../services/market-content"
 import { makeAutobizWatchRefs as makeWatchRefs } from "./adapters/autobiz-watch-refs"
 import {
   hasAutobizBoardContext,
@@ -1323,6 +1324,18 @@ async function runHarnessInvocationAsync(
       deadline.signal.throwIfAborted()
       const { cwd } = configured
       const invocation = extensionContext?.invocation ?? configured.invocation
+      const roots = [cwd]
+      const executable = prepareMarketCommand(invocation.executable, cwd, roots)
+      const args = invocation.args.map((arg) => prepareMarketCommand(arg, cwd, roots).command)
+      // A retained or extension-scoped command must keep its original admitted source.
+      // Current Markdown-only market packages execute in place; old full projections
+      // require an explicit upgrade before they can participate in this stronger scope.
+      if ((configured.readonlyPackage || extensionContext) &&
+          (executable.cwd !== cwd || executable.command !== invocation.executable ||
+            args.some((arg, index) => arg !== invocation.args[index])))
+        throw Error("HARNESS_MARKET_RETAINED_SOURCE_PROJECTION_UNSUPPORTED")
+      extensionContext?.assertCurrent?.()
+      deadline.signal.throwIfAborted()
       if (logOptions) logHarnessInvocationStart(configured, logOptions)
       const owner: { current?: ReturnType<typeof startOwnedHookCommand> } = {}
       const appendChunk = (chunks: Buffer[], chunk: Buffer, currentLength: number): number => {
@@ -1345,9 +1358,9 @@ async function runHarnessInvocationAsync(
         }).filter((entry): entry is [string, string] => typeof entry[1] === "string")
       )
       const owned = startOwnedHookCommand({
-        executable: invocation.executable,
-        args: invocation.args,
-        cwd,
+        executable: executable.command,
+        args,
+        cwd: executable.cwd,
         env,
         stdin: "",
         signal: deadline.signal,
@@ -2681,6 +2694,28 @@ function resolveSystemConstraintUpdateConfig(
   }
 }
 
+function resolveArtifactAccumulationConfig(
+  project: HarnessProjectMetadata,
+  context: HarnessProjectConfigContext,
+  feature: string,
+  sessionWorkspacePath?: string
+): HarnessRunDetailViewModel["artifactAccumulation"] {
+  if (!context.plugin || context.configSnapshot?.error) return undefined
+  const config = context.configSnapshot?.value?.artifact_sync
+  if (!isObject(config) || normalizeText(config.sync_type).trim() !== "invoke_session") {
+    return undefined
+  }
+  const nextAction = resolveHarnessNextActionTemplate(
+    config.nextAction,
+    project,
+    "run",
+    context.plugin.path,
+    { feature, sessionWorkspacePath, leanToken: context.leanToken },
+    { replaceUserMessagePlaceholders: true }
+  )
+  return nextAction ? { syncType: "invoke_session", nextAction } : undefined
+}
+
 function makeProjectDetailViewModel(
   project: HarnessProjectMetadata,
   data: {
@@ -3212,7 +3247,8 @@ async function buildHarnessFeatureAgentContextWithinDeadline(
  */
 export async function resolveHarnessFeatureCurrentStage(
   projectId: string,
-  slug: string
+  slug: string,
+  options: { labelOnly?: boolean } = {}
 ): Promise<{ name: string; status: string | null } | null> {
   try {
     const normalizedProjectId = normalizeText(projectId).trim()
@@ -3225,7 +3261,7 @@ export async function resolveHarnessFeatureCurrentStage(
       "run",
       normalizedSlug
     )
-    return resolveCurrentStageFromSnapshot(snapshot)
+    return resolveCurrentStageFromSnapshot(snapshot, options.labelOnly)
   } catch {
     return null
   }
@@ -3280,7 +3316,8 @@ export async function inspectHarnessManagedFeatureStatus(
 }
 
 function resolveCurrentStageFromSnapshot(
-  snapshot: Record<string, unknown>
+  snapshot: Record<string, unknown>,
+  labelOnly = false
 ): { name: string; status: string | null } | null {
   const run = isObject(snapshot.run) ? snapshot.run : {}
   const currentNodeId = normalizeText(run.currentNodeId).trim()
@@ -3295,20 +3332,22 @@ function resolveCurrentStageFromSnapshot(
   return resolveCurrentStageFromWorkflow(
     workflow,
     currentNodeId,
-    runNode?.nodeStatus ?? run.currentNodeStatus
+    runNode?.nodeStatus ?? run.currentNodeStatus,
+    labelOnly
   )
 }
 
 function resolveCurrentStageFromWorkflow(
   workflow: HarnessWorkflow,
   currentNodeId: string,
-  rawStatus: unknown
+  rawStatus: unknown,
+  labelOnly = false
 ): { name: string; status: string | null } | null {
   const node = workflow.nodes.find((item) => item.id === currentNodeId)
   const label = normalizeText(node?.label).trim()
   if (!label) return null
   const group = normalizeText(node?.group).trim()
-  const name = group ? `${group}-${label}` : label
+  const name = group && !labelOnly ? `${group}-${label}` : label
   const nodeStatus = normalizeNodeStatus(rawStatus)
   const status = nodeStatus === UNKNOWN_NODE_STATUS ? null : DEFAULT_NODE_STATUS_LABELS[nodeStatus]
 
@@ -4357,7 +4396,14 @@ async function loadHarnessRunDetail(
   const selectedDeployUnits = workerContext.selectedDeployUnits ?? []
   const featureBinding = await findFeatureDeployUnitBinding(project.projectId, slug)
   const managedRun = managedRunStore.getLatestRun(projectId, slug)
+  const artifactAccumulation = resolveArtifactAccumulationConfig(
+    project,
+    context,
+    slug,
+    resolveFeatureWorkspace(featureBinding?.sessionWorkspace, selectedDeployUnits)
+  )
   const detail: HarnessRunDetailViewModel = {
+    ...(artifactAccumulation ? { artifactAccumulation } : {}),
     project: {
       projectId: project.projectId,
       name: project.name,

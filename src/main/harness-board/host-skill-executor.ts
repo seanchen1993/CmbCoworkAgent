@@ -28,7 +28,8 @@ import {
 import { discoverSkillsSync, getSkillNameFromContent } from "../skills/discovery"
 import type { HostSkillExecutionContext } from "./project-runtime/host-service"
 import { HostPackageSnapshots } from "./project-runtime/package-snapshots"
-import { readRuntimeScopedFile, runtimeRelativePath } from "./project-runtime/safe-files"
+import { runtimeRelativePath } from "./project-runtime/safe-files"
+import { readHostPackageSkill } from "./project-runtime/package-skill-content"
 import { hostStateError } from "./project-runtime/host-state-protocol"
 import {
   assertHostPackageSupported,
@@ -66,8 +67,7 @@ export async function executeHostProjectSkill(
   if (packageUsesSharedMods(snapshot.root, metadata))
     await assertProjectRuntimeSourceApproved(project, snapshot.root)
   const hookPath = runtimeRelativePath(metadata.hooks ?? DEFAULT_PLUGIN_HOOKS_PATH)
-  const skill = readRuntimeScopedFile(snapshot.root, context.skillPath, 256 * 1024)
-  if (!skill.bytes) hostStateError("SKILL_MISSING")
+  const skill = readHostPackageSkill(snapshot.root, context.skillPath)
   const skillPath = join(snapshot.root, context.skillPath)
   if (
     !getPluginSkillSearchSources(snapshot.root, metadata).some((source) =>
@@ -78,7 +78,7 @@ export async function executeHostProjectSkill(
   )
     hostStateError("SKILL_NOT_DISCOVERABLE")
   const name = getSkillNameFromContent(
-    new TextDecoder("utf-8", { fatal: true }).decode(skill.bytes),
+    new TextDecoder("utf-8", { fatal: true }).decode(skill),
     basename(dirname(skillPath))
   )
   const threadId = randomUUID()

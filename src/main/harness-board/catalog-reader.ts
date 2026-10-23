@@ -1,4 +1,5 @@
-import { existsSync, lstatSync, opendirSync, readFileSync, statSync } from "node:fs"
+import { getMarketContentStoredLimit, readContentFileSync } from "../services/market-content"
+import { existsSync, lstatSync, opendirSync, statSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { serialize } from "node:v8"
 import type { PluginMetadata } from "../types"
@@ -127,14 +128,18 @@ function fileSignature(path: string): string {
 function assertFileWithin(path: string, maxBytes: number, label: string): void {
   if (!existsSync(path)) return
   const size = statSync(path).size
-  if (size > maxBytes) throw new Error(`${label} exceeded ${maxBytes} bytes`)
+  if (
+    size > getMarketContentStoredLimit(path, maxBytes) ||
+    (size > maxBytes && readContentFileSync(path).byteLength > maxBytes)
+  )
+    throw new Error(`${label} exceeded ${maxBytes} bytes`)
 }
 
 function readJsonArray(path: string, maxBytes: number, label: string): unknown[] {
   if (!existsSync(path)) return []
   assertFileWithin(path, maxBytes, label)
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+    const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
     return Array.isArray(parsed) ? parsed : []
   } catch {
     return []
@@ -148,7 +153,7 @@ function readProjects(path: string): unknown[] {
   let rows: unknown[] = []
   if (existsSync(path)) {
     try {
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+      const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
       rows = isRecord(parsed) && Array.isArray(parsed.projects) ? parsed.projects : []
     } catch {
       rows = []
@@ -281,6 +286,8 @@ function projectBoardConfigForDetails(
   }
   const knowledgeConfig = isRecord(config.knowledge_config) ? config.knowledge_config : null
   const nextAction = projectNextAction(knowledgeConfig?.nextAction)
+  const artifactConfig = isRecord(config.artifact_sync) ? config.artifact_sync : null
+  const artifactNextAction = projectNextAction(artifactConfig?.nextAction)
   const apiVersion =
     typeof config.apiVersion === "number" || typeof config.apiVersion === "string"
       ? config.apiVersion
@@ -294,6 +301,14 @@ function projectBoardConfigForDetails(
           knowledge_config: {
             sync_type: text(knowledgeConfig.sync_type, 256),
             ...(nextAction ? { nextAction } : {})
+          }
+        }
+      : {}),
+    ...(artifactConfig
+      ? {
+          artifact_sync: {
+            sync_type: text(artifactConfig.sync_type, 256),
+            ...(artifactNextAction ? { nextAction: artifactNextAction } : {})
           }
         }
       : {})
@@ -439,7 +454,7 @@ function readBoardConfig(
     return snapshot
   }
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+    const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
     const value = isRecord(parsed) ? parsed : null
     const snapshot = { value, error: null, exists: true }
     setConfigCache(path, signature, snapshot)
@@ -723,7 +738,7 @@ function readLeanToken(path: string): string {
   if (signature !== "missing") {
     assertFileWithin(path, MAX_LEAN_TOKEN_STORE_BYTES, "Harness Lean token store")
     try {
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+      const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
       leanToken = isRecord(parsed) ? text(parsed.leanToken, MAX_LEAN_TOKEN_CHARS).trim() : ""
     } catch {
       leanToken = ""
@@ -765,7 +780,7 @@ function readFeatureBindingRows(path: string): unknown[] {
   }
   if (featureBindingCache?.signature === signature) return featureBindingCache.value
   assertFileWithin(path, HARNESS_CONFIG_V2_STORE_MAX_BYTES, "Harness feature binding store")
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+  const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
   if (!isRecord(parsed) || parsed.version !== 2 || !Array.isArray(parsed.bindings)) {
     throw new Error("Harness feature binding store has an invalid bindings field")
   }

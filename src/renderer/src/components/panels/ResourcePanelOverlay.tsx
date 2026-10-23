@@ -75,6 +75,12 @@ export function ResourcePanelOverlay({
     clearPreviewRequest()
   }, [clearPreviewRequest, standardRightPanelMounted])
 
+  useEffect(() => {
+    if (!standardRightPanelMounted) return
+    setOpen(false)
+    clearPreviewRequest()
+  }, [clearPreviewRequest, standardRightPanelMounted])
+
   const selectMode = useCallback(
     (nextMode: ResourcePanelOverlayMode) => {
       setProtectedOnlyOpen(false)

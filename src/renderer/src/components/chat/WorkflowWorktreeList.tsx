@@ -1,7 +1,11 @@
 import { useEffect, useState, type JSX } from "react"
 import { Check, Copy, Eye, GitBranch, GitMerge, Loader2, Trash2 } from "lucide-react"
 import { toast } from "sonner"
-import { newerWorkflowWorktree, type WorkflowWorktreeView } from "@/lib/workflow-run-view"
+import {
+  newerWorkflowWorktree,
+  toWorktreeView,
+  type WorkflowWorktreeView
+} from "@/lib/workflow-run-view"
 import { cn } from "@/lib/utils"
 
 const STATUS_LABELS: Record<WorkflowWorktreeView["status"], string> = {
@@ -42,6 +46,7 @@ export function WorkflowWorktreeList({
   const [confirmDiscard, setConfirmDiscard] = useState<string | null>(null)
   const [summaries, setSummaries] = useState<Record<string, string>>({})
   const [visibleCount, setVisibleCount] = useState(WORKTREE_PAGE_SIZE)
+  const [readError, setReadError] = useState<string | null>(null)
 
   useEffect(() => {
     setRecords((current) => {
@@ -91,8 +96,12 @@ export function WorkflowWorktreeList({
       try {
         const refreshed = (await window.api.workflows.getRun(threadId, runId)) as {
           worktrees?: WorkflowWorktreeView[]
+          worktreeReadError?: string
         } | null
-        const latest = refreshed?.worktrees?.find((candidate) => candidate.id === record.id)
+        if (refreshed?.worktreeReadError) setReadError(refreshed.worktreeReadError)
+        const latest = toWorktreeView(
+          refreshed?.worktrees?.find((candidate) => candidate.id === record.id)
+        )
         if (latest) {
           setRecords((current) =>
             current.map((candidate) =>
@@ -103,6 +112,7 @@ export function WorkflowWorktreeList({
         }
       } catch {
         // The original action error is the useful one; refresh is best-effort.
+        setReadError("Worktree 状态加载失败，交付物暂为只读，请刷新后重试。")
       }
     } finally {
       setBusy(null)
@@ -112,8 +122,16 @@ export function WorkflowWorktreeList({
 
   return (
     <div className="space-y-1.5">
+      {readError && (
+        <div
+          role="alert"
+          className="rounded-md bg-amber-50 p-2 text-[11px] text-amber-800 dark:bg-amber-500/10 dark:text-amber-200"
+        >
+          {readError}
+        </div>
+      )}
       {records.slice(0, visibleCount).map((record) => {
-        const manageable = manageAllowed && canManage(record)
+        const manageable = manageAllowed && !readError && canManage(record)
         const isBusy = busy?.startsWith(`${record.id}:`) === true
         const summary = summaries[record.id]
         return (

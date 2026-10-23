@@ -9,6 +9,8 @@
  * escape characters, etc.), reducing edit failures and token waste.
  */
 
+import { createEditMatchView } from "./edit-line-endings"
+
 export type Replacer = (content: string, find: string) => Generator<string>
 
 // --- Replacer implementations ---
@@ -20,6 +22,7 @@ export const SimpleReplacer: Replacer = function* (_content, find) {
 export const LineTrimmedReplacer: Replacer = function* (content, find) {
   const originalLines = content.split("\n")
   const searchLines = find.split("\n")
+  const trailingNewline = find.endsWith("\n")
   if (searchLines[searchLines.length - 1] === "") searchLines.pop()
 
   for (let i = 0; i <= originalLines.length - searchLines.length; i++) {
@@ -31,6 +34,7 @@ export const LineTrimmedReplacer: Replacer = function* (content, find) {
       }
     }
     if (matches) {
+      if (trailingNewline && i + searchLines.length >= originalLines.length) continue
       let start = 0
       for (let k = 0; k < i; k++) start += originalLines[k].length + 1
       let end = start
@@ -38,6 +42,7 @@ export const LineTrimmedReplacer: Replacer = function* (content, find) {
         end += originalLines[i + k].length
         if (k < searchLines.length - 1) end += 1
       }
+      if (trailingNewline) end += 1
       yield content.substring(start, end)
     }
   }
@@ -134,16 +139,19 @@ export const BlockAnchorReplacer: Replacer = function* (content, find) {
   }
 }
 
+function normalizeWhitespace(text: string): string {
+  return text.replace(/[\t \r\n]+/g, " ").replace(/^ | $/g, "")
+}
+
 export const WhitespaceNormalizedReplacer: Replacer = function* (content, find) {
-  const normalize = (t: string) => t.replace(/\s+/g, " ").trim()
-  const normalizedFind = normalize(find)
+  const normalizedFind = normalizeWhitespace(find)
   const lines = content.split("\n")
 
   for (const line of lines) {
-    if (normalize(line) === normalizedFind) {
+    if (normalizeWhitespace(line) === normalizedFind) {
       yield line
     } else {
-      const normalizedLine = normalize(line)
+      const normalizedLine = normalizeWhitespace(line)
       if (normalizedLine.includes(normalizedFind)) {
         const words = find.trim().split(/\s+/)
         if (words.length > 0) {
@@ -161,7 +169,7 @@ export const WhitespaceNormalizedReplacer: Replacer = function* (content, find) 
   if (findLines.length > 1) {
     for (let i = 0; i <= lines.length - findLines.length; i++) {
       const block = lines.slice(i, i + findLines.length)
-      if (normalize(block.join("\n")) === normalizedFind) yield block.join("\n")
+      if (normalizeWhitespace(block.join("\n")) === normalizedFind) yield block.join("\n")
     }
   }
 }
@@ -184,22 +192,35 @@ export const IndentationFlexibleReplacer: Replacer = function* (content, find) {
   }
 }
 
+function unescape(str: string): string {
+  const unescaped = str.replace(/\\(n|t|r|'|"|`|\\|\n|\$)/g, (match, ch) => {
+    switch (ch) {
+      case "n":
+        return "\n"
+      case "t":
+        return "\t"
+      case "r":
+        return "\r"
+      case "'":
+        return "'"
+      case '"':
+        return '"'
+      case "`":
+        return "`"
+      case "\\":
+        return "\\"
+      case "\n":
+        return "\n"
+      case "$":
+        return "$"
+      default:
+        return match
+    }
+  })
+  return unescaped.replaceAll("\r\n", "\n")
+}
+
 export const EscapeNormalizedReplacer: Replacer = function* (content, find) {
-  const unescape = (str: string): string =>
-    str.replace(/\\(n|t|r|'|"|`|\\|\n|\$)/g, (match, ch) => {
-      switch (ch) {
-        case "n": return "\n"
-        case "t": return "\t"
-        case "r": return "\r"
-        case "'": return "'"
-        case '"': return '"'
-        case "`": return "`"
-        case "\\": return "\\"
-        case "\n": return "\n"
-        case "$": return "$"
-        default: return match
-      }
-    })
   const unescaped = unescape(find)
   if (content.includes(unescaped)) yield unescaped
 
@@ -282,6 +303,34 @@ const REPLACERS: Replacer[] = [
   MultiOccurrenceReplacer
 ]
 
+const INDENTATION_ERROR =
+  "Cannot safely apply edit: oldString does not preserve the matched file's line indentation. Read the target lines and surrounding code again, then reconstruct both oldString and newString before retrying. Copy oldString with the exact original leading spaces and tabs on every line. Review newString's indentation separately: preserve the surrounding code's base indentation and the appropriate nesting for blocks and continuation lines. Do not only fix oldString and resubmit an unchecked newString; it may have lost indentation too."
+const AMBIGUOUS_MATCH_ERROR =
+  "Found multiple matches for oldString. Provide more surrounding context to make the match unique."
+
+function hasMatchingIndentation(
+  content: string,
+  index: number,
+  search: string,
+  oldString: string
+): boolean {
+  const matchedLines = search.split("\n")
+  const oldLines = oldString.split("\n")
+  if (matchedLines.at(-1) === "") matchedLines.pop()
+  if (oldLines.at(-1) === "") oldLines.pop()
+  if (matchedLines.length !== oldLines.length) return false
+
+  const lineStart = content.lastIndexOf("\n", index - 1) + 1
+  const prefix = content.substring(lineStart, index)
+  if (/^[\t ]*$/.test(prefix)) matchedLines[0] = prefix + matchedLines[0]
+
+  return matchedLines.every(
+    (line, lineIndex) =>
+      (/^[\t ]*$/.test(line) && /^[\t ]*$/.test(oldLines[lineIndex])) ||
+      line.match(/^[\t ]*/)?.[0] === oldLines[lineIndex].match(/^[\t ]*/)?.[0]
+  )
+}
+
 /**
  * Progressive string replacement: tries 9 matching strategies in order,
  * from exact match to fuzzy/contextual match.
@@ -302,32 +351,92 @@ export function replace(
     throw new Error("No changes to apply: oldString and newString are identical.")
   }
 
-  let notFound = true
+  const view = createEditMatchView(content, oldString, newString)
+  let indentationMismatch = false
 
-  for (const replacer of REPLACERS) {
-    for (const search of replacer(content, oldString)) {
-      const index = content.indexOf(search)
+  for (const replacer of view.endingsOnly ? [SimpleReplacer] : REPLACERS) {
+    const matches = new Map<number, string>()
+    const seenSearches = new Set<string>()
+    const indentationReference =
+      replacer === EscapeNormalizedReplacer ? unescape(view.oldString) : view.oldString
+    const referenceText = normalizeWhitespace(indentationReference)
+    for (const search of replacer(view.content, view.oldString)) {
+      if (search === "" || seenSearches.has(search)) continue
+      seenSearches.add(search)
+      const index = view.content.indexOf(search)
       if (index === -1) continue
-      notFound = false
-      if (replaceAll) {
-        const occurrences = content.split(search).length - 1
-        return { newContent: content.replaceAll(search, newString), occurrences }
+      const textMatches =
+        normalizeWhitespace(search) === referenceText ||
+        (replacer === EscapeNormalizedReplacer &&
+          normalizeWhitespace(unescape(search)) === referenceText)
+      const boundaryMatches = search.endsWith("\n") === indentationReference.endsWith("\n")
+      let matchIndex = index
+      do {
+        // Trimming ASCII boundary spaces must not substitute a different Unicode space.
+        const unicodeBoundaryMismatch =
+          (/[\t ]$/.test(indentationReference) &&
+            !/[\t ]$/.test(search) &&
+            /[^\S\t \r\n]/.test(view.content[matchIndex + search.length] ?? "")) ||
+          (/^[\t ]/.test(indentationReference) &&
+            !/^[\t ]/.test(search) &&
+            /[^\S\t \r\n]/.test(view.content[matchIndex - 1] ?? ""))
+        if (textMatches && boundaryMatches && !unicodeBoundaryMismatch) {
+          if (
+            search !== view.oldString &&
+            !hasMatchingIndentation(view.content, matchIndex, search, indentationReference)
+          ) {
+            if (replaceAll) throw new Error(INDENTATION_ERROR)
+            indentationMismatch = true
+          } else {
+            let start = matchIndex
+            let matched = search
+            if (search !== view.oldString) {
+              const lineStart = view.content.lastIndexOf("\n", matchIndex - 1) + 1
+              const prefix = view.content.substring(lineStart, matchIndex)
+              // Consume the same leading whitespace accepted by the indentation check.
+              if (/^[\t ]+$/.test(prefix)) {
+                start = lineStart
+                matched = prefix + search
+              }
+            }
+            const previous = matches.get(start)
+            if (previous === undefined || matched.length > previous.length) {
+              matches.set(start, matched)
+            }
+          }
+        }
+        matchIndex = view.content.indexOf(search, matchIndex + (replaceAll ? search.length : 1))
+      } while (matchIndex !== -1)
+    }
+    if (!replaceAll && matches.size > 1) throw new Error(AMBIGUOUS_MATCH_ERROR)
+    if (matches.size > 0) {
+      let end = -1
+      const selected = [...matches]
+        .sort((a, b) => a[0] - b[0])
+        .filter(([index, search]) => {
+          if (index < end) return false
+          end = index + search.length
+          return true
+        })
+      const parts: string[] = []
+      let cursor = 0
+      for (const [index, search] of selected) {
+        const start = view.sourceOffset(index)
+        const end = view.sourceOffset(index + search.length)
+        parts.push(content.substring(cursor, start), view.replacementFor(start, end))
+        cursor = end
       }
-      const lastIndex = content.lastIndexOf(search)
-      if (index !== lastIndex) continue
-      return {
-        newContent: content.substring(0, index) + newString + content.substring(index + search.length),
-        occurrences: 1
+      parts.push(content.substring(cursor))
+      const newContent = parts.join("")
+      if (newContent === content) {
+        throw new Error("No changes to apply: the edit leaves the file unchanged.")
       }
+      return { newContent, occurrences: selected.length }
     }
   }
 
-  if (notFound) {
-    throw new Error(
-      "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings."
-    )
-  }
+  if (indentationMismatch) throw new Error(INDENTATION_ERROR)
   throw new Error(
-    "Found multiple matches for oldString. Provide more surrounding context to make the match unique."
+    "Could not find oldString in the file. It must match exactly, including whitespace and indentation."
   )
 }

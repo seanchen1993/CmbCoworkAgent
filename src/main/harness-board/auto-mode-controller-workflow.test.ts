@@ -6,7 +6,11 @@ import type {
 } from "../../shared/harness-board-types"
 
 const dependencies = vi.hoisted(() => ({
+  hasActiveAgentRun: vi.fn(),
   isWorkflowBusy: vi.fn(),
+  hasRunningWorkers: vi.fn(),
+  hasFinalizingWorkers: vi.fn(),
+  hasWorkerNotifications: vi.fn(),
   inspectFeature: vi.fn(),
   requestBizRetry: vi.fn(),
   createSession: vi.fn(),
@@ -28,13 +32,20 @@ vi.mock("../db", () => ({
   getThreadCore: dependencies.threadCurrent,
   getAllThreadSummaries: () => []
 }))
-vi.mock("../agent/agent-run-service", () => ({ hasActiveTopLevelAgentRun: () => false,
+vi.mock("../agent/agent-run-service", () => ({ hasActiveTopLevelAgentRun: dependencies.hasActiveAgentRun,
   isAgentRunBusy: dependencies.isAgentBusy }))
 vi.mock("../mods/manager", () => ({ getModsManager: () => ({
   captureFunctionThreadRetirement: dependencies.captureRetirement
 }) }))
 vi.mock("../agent/workflow/run-manager", () => ({
   workflowRunManager: { isBusyForThreadAsync: dependencies.isWorkflowBusy }
+}))
+vi.mock("../agent/coordinator-worker-manager", () => ({
+  coordinatorWorkerManager: {
+    hasRunningWorkersForThread: dependencies.hasRunningWorkers,
+    hasTerminalWorkerAwaitingNotificationForThread: dependencies.hasFinalizingWorkers,
+    hasAutoRunnableNotifications: dependencies.hasWorkerNotifications
+  }
 }))
 vi.mock("../app-attention-events", () => ({ emitAppAttention: dependencies.emitAttention }))
 vi.mock("./service", () => ({
@@ -72,6 +83,7 @@ vi.mock("./managed-run-store", () => ({
 vi.mock("./managed-run-telemetry", () => ({ reportManagedRunEnded: vi.fn() }))
 
 import {
+  handleAutoModeAgentCancelled,
   handleAutoModeAgentTurnEnd,
   stopManagedRun,
   type AutoModeAgentTurnEndInput
@@ -142,8 +154,138 @@ beforeEach(() => {
   dependencies.captureRetirement.mockReturnValue({ resident: false, retire: vi.fn(async () => {}) })
   dependencies.threadCurrent.mockImplementation(() => ({ created_at: 123456,
     metadata: JSON.stringify({ workspacePath: run.workspacePath }) }))
+  dependencies.hasActiveAgentRun.mockReturnValue(false)
+  dependencies.hasRunningWorkers.mockReturnValue(false)
+  dependencies.hasFinalizingWorkers.mockReturnValue(false)
+  dependencies.hasWorkerNotifications.mockReturnValue(false)
   dependencies.inspectFeature.mockResolvedValue(feature)
   dependencies.requestBizRetry.mockReturnValue(true)
+})
+
+const workerBusyStates = [
+  { state: "running", query: dependencies.hasRunningWorkers },
+  { state: "saving its result", query: dependencies.hasFinalizingWorkers },
+  { state: "awaiting result delivery", query: dependencies.hasWorkerNotifications }
+]
+
+describe("managed turn-end decisions with background workers", () => {
+  describe.each(workerBusyStates)("worker $state", ({ query }) => {
+    it.each([
+      turnEnd(),
+      turnEnd({ outcome: "error", endReason: { code: "provider_error" } }),
+      turnEnd({ outcome: "error", endReason: { code: "unknown" } })
+    ])("defers $outcome/$endReason.code without requesting a decision or retry", async (input) => {
+      query.mockReturnValue(true)
+
+      await handleAutoModeAgentTurnEnd(input)
+
+      expect(query).toHaveBeenCalledWith("thread")
+      expect(dependencies.inspectFeature).not.toHaveBeenCalled()
+      expect(dependencies.requestBizRetry).not.toHaveBeenCalled()
+      expect(dependencies.createSession).not.toHaveBeenCalled()
+      expect(dependencies.emitAttention).not.toHaveBeenCalled()
+      expect(dependencies.appendEvent).not.toHaveBeenCalled()
+      expect(dependencies.updateSnapshot).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+      expect(run.status).toBe("running")
+    })
+
+    it.each([
+      { action: "Biz Retry", snapshot: feature },
+      {
+        action: "completion",
+        snapshot: {
+          ...feature,
+          featureStatus: "done" as const,
+          currentNodeStatus: "done" as const,
+          isFinalNode: true
+        }
+      },
+      { action: "failure", snapshot: { ...feature, featureStatus: "error" as const } }
+    ])("defers $action if worker work appears during feature inspection", async ({ snapshot }) => {
+      dependencies.inspectFeature.mockImplementation(async () => {
+        query.mockReturnValue(true)
+        return snapshot
+      })
+
+      await handleAutoModeAgentTurnEnd(turnEnd())
+
+      expect(dependencies.inspectFeature).toHaveBeenCalledOnce()
+      expect(dependencies.requestBizRetry).not.toHaveBeenCalled()
+      expect(dependencies.createSession).not.toHaveBeenCalled()
+      expect(dependencies.updateSnapshot).not.toHaveBeenCalled()
+      expect(dependencies.appendEvent.mock.calls.map(([, event]) => event.type)).toEqual([
+        "managed_agent_turn_ended"
+      ])
+      expect(run.status).toBe("running")
+    })
+  })
+
+  it("waits through worker completion until the main agent has processed the result", async () => {
+    dependencies.hasRunningWorkers.mockReturnValue(true)
+    await handleAutoModeAgentTurnEnd(turnEnd())
+
+    dependencies.hasRunningWorkers.mockReturnValue(false)
+    dependencies.hasFinalizingWorkers.mockReturnValue(true)
+    await handleAutoModeAgentTurnEnd(turnEnd())
+
+    dependencies.hasFinalizingWorkers.mockReturnValue(false)
+    dependencies.hasWorkerNotifications.mockReturnValue(true)
+    await handleAutoModeAgentTurnEnd(turnEnd())
+    expect(dependencies.requestBizRetry).not.toHaveBeenCalled()
+
+    dependencies.hasWorkerNotifications.mockReturnValue(false)
+    await handleAutoModeAgentTurnEnd(turnEnd())
+
+    expect(dependencies.inspectFeature).toHaveBeenCalledOnce()
+    expect(dependencies.requestBizRetry).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        run,
+        policyResult: expect.objectContaining({ reasonCode: "biz_retry_no_progress" })
+      })
+    )
+  })
+
+  it("completes the feature after the last worker result has been processed", async () => {
+    dependencies.inspectFeature.mockResolvedValue({
+      ...feature,
+      featureStatus: "done",
+      currentNodeStatus: "done",
+      isFinalNode: true
+    })
+    dependencies.hasWorkerNotifications.mockReturnValue(true)
+    await handleAutoModeAgentTurnEnd(turnEnd())
+    expect(run.status).toBe("running")
+
+    dependencies.hasWorkerNotifications.mockReturnValue(false)
+    await handleAutoModeAgentTurnEnd(turnEnd())
+
+    expect(run.status).toBe("completed")
+    expect(dependencies.requestBizRetry).not.toHaveBeenCalled()
+  })
+
+  it("does not defer for workers belonging to another thread", async () => {
+    for (const { query } of workerBusyStates) {
+      query.mockImplementation((threadId) => threadId === "other-thread")
+    }
+
+    await handleAutoModeAgentTurnEnd(turnEnd())
+
+    expect(dependencies.requestBizRetry).toHaveBeenCalledOnce()
+    for (const { query } of workerBusyStates) {
+      expect(query).toHaveBeenCalledWith("thread")
+    }
+  })
+
+  it("does not inspect worker state for an old managed session", async () => {
+    run.currentSession = { threadId: "new-thread" }
+
+    await handleAutoModeAgentTurnEnd(turnEnd())
+
+    for (const { query } of workerBusyStates) {
+      expect(query).not.toHaveBeenCalled()
+    }
+  })
 })
 
 afterEach(() => {
@@ -336,5 +478,93 @@ describe("managed turn-end decisions with background workflows", () => {
 
     expect(dependencies.isWorkflowBusy).not.toHaveBeenCalled()
     expect(dependencies.inspectFeature).not.toHaveBeenCalled()
+  })
+})
+
+describe("managed run after a user cancels background work", () => {
+  it.each(["worker", "workflow"])(
+    "stops an idle managed session after cancelling its %s",
+    async (kind) => {
+      if (kind === "worker") dependencies.hasRunningWorkers.mockReturnValue(true)
+      else dependencies.isWorkflowBusy.mockResolvedValue(true)
+      await handleAutoModeAgentTurnEnd(turnEnd())
+      expect(dependencies.requestBizRetry).not.toHaveBeenCalled()
+
+      dependencies.hasRunningWorkers.mockReturnValue(false)
+      dependencies.isWorkflowBusy.mockResolvedValue(false)
+      handleAutoModeAgentCancelled("thread", "background")
+      await vi.runAllTimersAsync()
+
+      expect(run.status).toBe("cancelled")
+      expect(dependencies.appendEvent.mock.calls.map(([, event]) => event.type)).toEqual([
+        "session_run_aborted",
+        "managed_run_decision",
+        "run_cancelled"
+      ])
+      expect(dependencies.appendEvent.mock.calls[0][1]).toMatchObject({
+        threadId: "thread",
+        reasonCode: "user_aborted_background_work"
+      })
+      expect(dependencies.requestBizRetry).not.toHaveBeenCalled()
+      expect(dependencies.createSession).not.toHaveBeenCalled()
+    }
+  )
+
+  it("leaves a foreground agent running after cancelling background work", async () => {
+    dependencies.hasActiveAgentRun.mockReturnValue(true)
+
+    handleAutoModeAgentCancelled("thread", "background")
+    await vi.runAllTimersAsync()
+
+    expect(run.status).toBe("running")
+    expect(dependencies.appendEvent).not.toHaveBeenCalled()
+    expect(dependencies.updateSnapshot).not.toHaveBeenCalled()
+  })
+
+  it("rechecks foreground activity after waiting for an existing managed operation", async () => {
+    let releaseBusy!: (busy: boolean) => void
+    let signalEntered!: () => void
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve
+    })
+    dependencies.isWorkflowBusy.mockImplementationOnce(() => {
+      signalEntered()
+      return new Promise<boolean>((resolve) => {
+        releaseBusy = resolve
+      })
+    })
+    const ending = handleAutoModeAgentTurnEnd(turnEnd())
+    await entered
+
+    handleAutoModeAgentCancelled("thread", "background")
+    dependencies.hasActiveAgentRun.mockReturnValue(true)
+    releaseBusy(true)
+    await ending
+    await vi.runAllTimersAsync()
+
+    expect(run.status).toBe("running")
+    expect(dependencies.appendEvent).not.toHaveBeenCalled()
+  })
+
+  it("does not stop a newer managed session when an old session's work is cancelled", async () => {
+    run.currentSession = { threadId: "new-thread" }
+
+    handleAutoModeAgentCancelled("thread", "background")
+    await vi.runAllTimersAsync()
+
+    expect(run.status).toBe("running")
+    expect(dependencies.appendEvent).not.toHaveBeenCalled()
+  })
+
+  it("still stops the managed run when the user cancels the foreground agent", async () => {
+    dependencies.hasActiveAgentRun.mockReturnValue(true)
+
+    handleAutoModeAgentCancelled("thread")
+    await vi.runAllTimersAsync()
+
+    expect(run.status).toBe("cancelled")
+    expect(dependencies.appendEvent.mock.calls[0][1]).toMatchObject({
+      reasonCode: "user_aborted_agent_run"
+    })
   })
 })

@@ -1,3 +1,4 @@
+import { readContentFile } from "../services/market-content"
 import { mkdir, open, readFile, readdir, rename, rm, writeFile } from "fs/promises"
 import { realpathSync, statSync } from "fs"
 import { AsyncLocalStorage } from "node:async_hooks"
@@ -1913,7 +1914,7 @@ export class CoordinatorWorkerManager {
       if (!isCoordinatorPathWithin(target, workspaceRoot)) {
         throw new Error(`Worker output path escapes workspace: ${relativePath}`)
       }
-      return truncateReadText(await readFile(target, "utf8"), maxChars)
+      return truncateReadText(await readContentFile(target, "utf8"), maxChars)
     }
 
     const result = await readRelativeFile(record.resultPath)

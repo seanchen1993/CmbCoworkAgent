@@ -1,11 +1,5 @@
-import {
-  existsSync,
-  opendirSync,
-  readFileSync,
-  realpathSync,
-  statSync,
-  type Dirent
-} from "node:fs"
+import { getMarketContentStoredLimit, readContentFileSync } from "../services/market-content"
+import { existsSync, opendirSync, realpathSync, statSync, type Dirent } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { serialize } from "node:v8"
 import { EXTENSION_BOARD_API_VERSION } from "../../shared/project-runtime"
@@ -62,8 +56,11 @@ function readBoundedJson(path: string, maxBytes: number, label: string): unknown
   if (!existsSync(path)) return null
   const stats = statSync(path)
   if (!stats.isFile()) return null
-  if (stats.size > maxBytes) throw new Error(`${label} exceeded ${maxBytes} bytes`)
-  return JSON.parse(readFileSync(path, "utf8")) as unknown
+  if (stats.size > getMarketContentStoredLimit(path, maxBytes))
+    throw new Error(`${label} exceeded ${maxBytes} bytes`)
+  const content = readContentFileSync(path)
+  if (content.byteLength > maxBytes) throw new Error(`${label} exceeded ${maxBytes} bytes`)
+  return JSON.parse(content.toString("utf8")) as unknown
 }
 
 function readPlugins(path: string): PluginMetadata[] {

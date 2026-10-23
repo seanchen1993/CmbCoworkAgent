@@ -11,6 +11,7 @@ import path from "node:path"
 import type { ExecSafetyLevel } from "../types"
 import { isGitRepositoryOverrideEnvironmentVariable } from "../services/git-environment"
 import type { WorkflowWorktreeIsolationBoundary } from "./workflow/types"
+import { isReadOnlyPosixForLoop } from "./posix-read-only-loop"
 import {
   isKnownSafeWindowsCommand,
   isReadOnlyWindowsCommand,
@@ -28,6 +29,12 @@ export interface SafetyAssessment {
 }
 
 export type CommandConcurrencyClassification = "parallel_safe" | "exclusive"
+
+interface GitCommandScanState {
+  // Conservative parse failures must not masquerade as a confirmed operation.
+  unverifiable: boolean
+  requiresApproval?: boolean
+}
 
 const APPROVAL_PREFIX_RULE_PREFIX = "prefix:"
 const WORKTREE_NESTED_REPOSITORY_READ_ONLY = "nested repositories are read-only"
@@ -471,9 +478,11 @@ export function assessCommandSafety(
   if (!trimmed) {
     return { level: "safe" }
   }
+  const readOnlyLoop = shellSyntax === "posix" && isReadOnlyPosixForLoop(trimmed)
+  const inspectGit = !options?.nativeGitWorktree && !readOnlyLoop
 
   if (
-    !options?.nativeGitWorktree &&
+    inspectGit &&
     options?.enforceGitWorkflowCommitOnly &&
     containsDirectGitSubmitCommand(trimmed, shellSyntax)
   ) {
@@ -484,14 +493,15 @@ export function assessCommandSafety(
     }
   }
 
-  if (!options?.nativeGitWorktree && containsEnvSplitStringOption(trimmed, shellSyntax)) {
+  if (inspectGit && containsEnvSplitStringOption(trimmed, shellSyntax)) {
     return {
       level: "forbidden",
       reason: "env split-string execution is not supported because it can hide a git commit"
     }
   }
 
-  if (!options?.nativeGitWorktree && containsForceGitAddCommand(trimmed, 0, shellSyntax)) {
+  const gitScanState: GitCommandScanState = { unverifiable: false, requiresApproval: readOnlyLoop }
+  if (inspectGit && containsForceGitAddCommand(trimmed, 0, shellSyntax, gitScanState)) {
     return {
       level: "forbidden",
       reason:
@@ -499,7 +509,7 @@ export function assessCommandSafety(
     }
   }
 
-  if (!options?.nativeGitWorktree && containsDirectGitIndexPlumbing(trimmed, shellSyntax)) {
+  if (inspectGit && containsDirectGitIndexPlumbing(trimmed, shellSyntax, 0, gitScanState)) {
     return {
       level: "forbidden",
       reason:
@@ -507,7 +517,7 @@ export function assessCommandSafety(
     }
   }
 
-  if (!options?.nativeGitWorktree && containsPotentialGitAliasInvocation(trimmed, shellSyntax)) {
+  if (inspectGit && containsPotentialGitAliasInvocation(trimmed, shellSyntax, 0, gitScanState)) {
     return {
       level: "forbidden",
       reason:
@@ -515,11 +525,19 @@ export function assessCommandSafety(
     }
   }
 
-  if (!options?.nativeGitWorktree && containsWrappedGitCommitCommand(trimmed, 0, shellSyntax)) {
+  if (inspectGit && containsWrappedGitCommitCommand(trimmed, 0, shellSyntax, gitScanState)) {
     return {
       level: "forbidden",
       reason:
         "wrapped git commit commands are not supported — run git commit directly so the task-card dialog can enforce CMB formatting"
+    }
+  }
+
+  if (gitScanState.unverifiable) {
+    return {
+      level: "forbidden",
+      reason:
+        "unsupported or dynamic shell syntax — cannot verify Git operations safely; use explicit commands"
     }
   }
 
@@ -535,6 +553,15 @@ export function assessCommandSafety(
   for (const { pattern, reason } of DANGEROUS_INDICATORS) {
     if (pattern.test(trimmed)) {
       return { level: "needs_approval", reason }
+    }
+  }
+
+  if (gitScanState.requiresApproval) {
+    return {
+      level: "needs_approval",
+      reason: readOnlyLoop
+        ? "read-only POSIX loop — requires review"
+        : "shell argument expansion — requires review"
     }
   }
 
@@ -773,6 +800,77 @@ function splitShellCommandSegments(
   return segments
 }
 
+/** Literal stdin for a data consumer is not shell source. Only recognize a
+ * standalone header with one quoted delimiter; leave shell consumers, pipelines,
+ * substitutions and unsupported heredoc forms visible to the conservative scan. */
+function splitGitPolicyCommandSegments(
+  command: string,
+  shellSyntax: CommandShellSyntax,
+  scanState?: GitCommandScanState
+): string[] {
+  if (shellSyntax === "posix" && command.includes("<<")) {
+    const lines = command.split(/\r?\n/)
+    const header = lines[0]
+    const match = header.match(/<<(-?)\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\2\s*$/)
+    const tokens = tokenizeCommand(header, shellSyntax)
+    if (
+      match &&
+      header.match(/<</g)?.length === 1 &&
+      tokens &&
+      ["cat", "node", "nodejs", "python", "python2", "python3"].includes(
+        normalizeExecutable(tokens[0] || "")
+      ) &&
+      !/[;&|`$(){}]/.test(stripQuotedSpans(header, shellSyntax))
+    ) {
+      const end = lines.findIndex(
+        (line, index) => index > 0 && (match[1] ? line.replace(/^\t+/, "") : line) === match[3]
+      )
+      if (end > 0) {
+        const body = lines.slice(1, end).join("\n")
+        const trailingCommands = lines
+          .slice(end + 1)
+          .filter((line) => line.trim() && !line.trim().startsWith("#"))
+          .join("\n")
+        if (
+          scanState &&
+          normalizeExecutable(tokens[0]) === "cat" &&
+          trailingCommands &&
+          /\bgit(?:\.exe)?\b/i.test(body) &&
+          /\b(?:add|stage|commit|commit-tree|read-tree|update-index|update-ref|write-tree)\b/.test(
+            body
+          )
+        ) {
+          // A later command could execute the generated script, including through
+          // a variable or another file. Its contents cannot be dismissed as output.
+          scanState.unverifiable = true
+        }
+        // An interpreter can launch Git itself. Keep visible process/eval calls
+        // involving Git mutations unverifiable. Retain that source for the
+        // conservative scan even if its execution mechanism is unrecognized.
+        if (
+          normalizeExecutable(tokens[0]) !== "cat" &&
+          /\bgit(?:\.exe)?\b/i.test(body) &&
+          /\b(?:add|stage|commit|commit-tree|read-tree|update-index|update-ref|write-tree)\b/.test(
+            body
+          )
+        ) {
+          if (
+            scanState &&
+            /\b(?:exec(?:File)?(?:Sync)?|spawn(?:Sync)?|eval|system|popen|Popen|run|call|check_call|check_output)\s*\(/.test(
+              body
+            )
+          ) {
+            scanState.unverifiable = true
+          }
+          return splitShellCommandSegments(command, shellSyntax)
+        }
+        command = [header, ...lines.slice(end + 1)].join("\n")
+      }
+    }
+  }
+  return splitShellCommandSegments(command, shellSyntax)
+}
+
 function isShellEnvAssignment(token: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(token)
 }
@@ -915,7 +1013,7 @@ function containsEnvSplitStringOption(
   command: string,
   shellSyntax: CommandShellSyntax = hostShellSyntax()
 ): boolean {
-  for (const segment of splitShellCommandSegments(command, shellSyntax)) {
+  for (const segment of splitGitPolicyCommandSegments(command, shellSyntax)) {
     const tokens = tokenizeCommand(segment, shellSyntax)
     if (!tokens) continue
     for (let envIndex = 0; envIndex < tokens.length; envIndex++) {
@@ -1069,14 +1167,90 @@ function interpolatingShellText(command: string, shellSyntax: CommandShellSyntax
   return result
 }
 
-function hasOpaqueGitMutationSyntax(command: string, shellSyntax: CommandShellSyntax): boolean {
-  const visible = interpolatingShellText(command, shellSyntax)
+function mentionsShellGitOperation(command: string, shellSyntax: CommandShellSyntax): boolean {
   if (
     !/\bgit\b|\b(?:commit|add|stage|commit-tree|read-tree|update-index|update-ref|write-tree)\b/i.test(
-      visible
+      command
     )
   ) {
     return false
+  }
+  // A method such as seenKeys.add('input') or a declaration such as `const add =`
+  // is not evidence of a Git invocation. Keep standalone subcommands, including
+  // ones with no args or PowerShell expression args, so dynamic/nested
+  // executables (`$BIN commit`, `& $exe add ('-f')`) still fail closed.
+  const dynamic =
+    shellSyntax === "powershell"
+      ? /\$|@\(|@[A-Za-z_]|&|^\s*\(/.test(command)
+      : shellSyntax === "cmd"
+        ? /%[^%]+%|![^!]+!/.test(command)
+        : /\$|`/.test(command)
+  // Dynamic executables can resolve to Git with aliases such as `foo.add` or
+  // `const`. Apply the original conservative match before script-data exclusions.
+  if (dynamic) return true
+  const operations =
+    /\b(git(?:\.exe)?|commit|add|stage|commit-tree|read-tree|update-index|update-ref|write-tree)\b/gi
+  for (const match of command.matchAll(operations)) {
+    const nameStart = match.index! + match[0].length - match[1].length
+    const before = command.slice(0, nameStart)
+    const after = command.slice(nameStart + match[1].length)
+    if (/^\s*(?:const|let|var)\s+$/.test(before)) continue
+    if (before.endsWith(".") && /^\s*\(/.test(after)) continue
+    if (/^[=:]/.test(after)) continue
+    if (before.trim() === "" && /^\s+=/.test(after)) continue
+    if (/[{,]\s*$/.test(before) && /^\s*:/.test(after)) continue
+    if (/^\(/.test(after) && !/^\(\s*\)/.test(after)) {
+      // PowerShell permits native expression arguments without a separating
+      // space: `& $exe add('-f') .env`. Retain the conservative Git check in
+      // dynamic shell contexts, including nested command substitutions.
+      if (shellSyntax !== "powershell" || !/\$|&|^\s*\(/.test(command)) continue
+    }
+    return true
+  }
+  return false
+}
+
+function hasOpaqueGitMutationSyntax(
+  command: string,
+  shellSyntax: CommandShellSyntax,
+  scanState: GitCommandScanState
+): boolean {
+  const visible = interpolatingShellText(command, shellSyntax)
+  if (!mentionsShellGitOperation(visible, shellSyntax)) return false
+  // Plain argument expansion cannot turn a fixed output command or Git query
+  // into `git add`. Executable substitutions still run in any argument position.
+  const substitutesCommands =
+    shellSyntax === "powershell" ? /[(){}]/.test(visible) : /\$\(|`|[(){}]/.test(visible)
+  const tokens = tokenizeCommand(command, shellSyntax)
+  if (shellSyntax !== "cmd" && !substitutesCommands && tokens) {
+    const dynamicArgument = shellSyntax === "powershell" ? /[$`*?[\]{}]|@[A-Za-z_]/ : /[$`*?[\]{}]/
+    const executable = normalizeExecutable(tokens[0] || "")
+    const fixedOutputCommand =
+      NON_EXECUTING_GIT_TEXT_COMMANDS.has(executable) &&
+      (executable !== "rg" || (isSafeRipgrep(tokens) && !dynamicArgument.test(visible)))
+    // Global options may precede a literal query, but that whole prefix must be
+    // static: expansion there could select a different Git operation.
+    const subcommand = findGitSubcommand(tokens)
+    const argumentSeparator = subcommand ? tokens.indexOf("--", subcommand.index + 1) : -1
+    const fixedGitQuery =
+      executable === "git" &&
+      subcommand &&
+      ["status", "diff", "log", "show", "cat-file"].includes(subcommand.subcommand) &&
+      tokens[subcommand.index] === subcommand.subcommand &&
+      !dynamicArgument.test(tokens.slice(0, subcommand.index + 1).join(" ")) &&
+      (subcommand.subcommand === "status" ||
+        !dynamicArgument.test(visible) ||
+        (argumentSeparator !== -1 &&
+          !dynamicArgument.test(tokens.slice(0, argumentSeparator + 1).join(" "))))
+    if (fixedOutputCommand || fixedGitQuery) {
+      if (
+        /\$[A-Za-z_{(@*?#0-9!-]/.test(visible) ||
+        (shellSyntax === "powershell" && /@[A-Za-z_]/.test(visible))
+      ) {
+        scanState.requiresApproval = true
+      }
+      return false
+    }
   }
   if (shellSyntax === "powershell") {
     return /\$\(|@\(|\$[A-Za-z_({]|@[A-Za-z_]|[(){}]/.test(visible)
@@ -1102,11 +1276,7 @@ function hasOpaqueShellExecution(tokens: string[], shellSyntax: CommandShellSynt
     if (encoded) return true
   }
 
-  const mentionsGitMutation =
-    /\bgit\b|\b(?:commit|add|stage|commit-tree|read-tree|update-index|update-ref|write-tree)\b/i.test(
-      tokens.join(" ")
-    )
-  if (!mentionsGitMutation) return false
+  if (!mentionsShellGitOperation(tokens.join(" "), shellSyntax)) return false
   if (
     executable === "rg" &&
     !isSafeRipgrep(invocation) &&
@@ -1318,14 +1488,24 @@ function getExecutionWrapperSuffixTokens(tokens: string[]): string[][] {
 function containsDirectGitIndexPlumbing(
   command: string,
   shellSyntax: CommandShellSyntax = hostShellSyntax(),
-  depth = 0
+  depth = 0,
+  scanState: GitCommandScanState = { unverifiable: false }
 ): boolean {
-  if (depth > 3) return true
-  for (const segment of splitShellCommandSegments(command, shellSyntax)) {
-    if (hasOpaqueGitMutationSyntax(segment, shellSyntax)) return true
+  if (depth > 3) {
+    scanState.unverifiable = true
+    return false
+  }
+  for (const segment of splitGitPolicyCommandSegments(command, shellSyntax, scanState)) {
+    if (hasOpaqueGitMutationSyntax(segment, shellSyntax, scanState)) {
+      scanState.unverifiable = true
+      continue
+    }
     const tokens = tokenizeCommand(segment, shellSyntax)
     if (!tokens) continue
-    if (hasOpaqueShellExecution(tokens, shellSyntax)) return true
+    if (hasOpaqueShellExecution(tokens, shellSyntax)) {
+      scanState.unverifiable = true
+      continue
+    }
     for (const invocation of collectPotentialGitInvocations(tokens)) {
       const subcommand = findGitSubcommand(invocation)
       if (subcommand && GIT_INDEX_OR_REF_PLUMBING_SUBCOMMANDS.has(subcommand.subcommand)) {
@@ -1351,14 +1531,21 @@ function containsDirectGitIndexPlumbing(
     }
     const script = getWrappedShellScript(tokens)
     const childSyntax = getWrappedShellSyntax(tokens) ?? shellSyntax
-    if (script && containsDirectGitIndexPlumbing(script, childSyntax, depth + 1)) return true
+    if (script && containsDirectGitIndexPlumbing(script, childSyntax, depth + 1, scanState)) {
+      return true
+    }
     for (const nestedTokens of getExecutionWrapperSuffixTokens(tokens)) {
       const nestedScript = getWrappedShellScript(nestedTokens)
       const nestedSyntax = getWrappedShellSyntax(nestedTokens) ?? shellSyntax
-      if (nestedScript && containsDirectGitIndexPlumbing(nestedScript, nestedSyntax, depth + 1)) {
+      if (
+        nestedScript &&
+        containsDirectGitIndexPlumbing(nestedScript, nestedSyntax, depth + 1, scanState)
+      ) {
         return true
       }
-      if (containsDirectGitIndexPlumbing(nestedTokens.join(" "), nestedSyntax, depth + 1)) {
+      if (
+        containsDirectGitIndexPlumbing(nestedTokens.join(" "), nestedSyntax, depth + 1, scanState)
+      ) {
         return true
       }
     }
@@ -1369,21 +1556,47 @@ function containsDirectGitIndexPlumbing(
 function containsForceGitAddCommand(
   command: string,
   depth = 0,
-  shellSyntax: CommandShellSyntax = hostShellSyntax()
+  shellSyntax: CommandShellSyntax = hostShellSyntax(),
+  scanState: GitCommandScanState = { unverifiable: false }
 ): boolean {
-  if (depth > 3) return true
+  if (depth > 3) {
+    scanState.unverifiable = true
+    return false
+  }
   if (
     shellSyntax === "powershell" &&
     /^\s*&\s*(?:\(|\$)/.test(command) &&
     /\b(?:add|stage)\b[^\r\n]*(?:-[^-\s]*f|--for(?:ce)?\b)/i.test(command)
   ) {
-    return true
+    scanState.unverifiable = true
+    return false
   }
-  for (const segment of splitShellCommandSegments(command, shellSyntax)) {
-    if (hasOpaqueGitMutationSyntax(segment, shellSyntax)) return true
+  const segments = splitGitPolicyCommandSegments(command, shellSyntax, scanState)
+  if (
+    shellSyntax === "posix" &&
+    segments.some((segment) =>
+      /(?:^|[({])\s*(?:(?:do|then|else)\s+)*for(?:\s|\(|$)/.test(
+        stripQuotedSpans(segment, shellSyntax)
+      )
+    ) &&
+    mentionsShellGitOperation(segments.join(" "), shellSyntax) &&
+    !isReadOnlyPosixForLoop(command)
+  ) {
+    // `do bash -c 'git add -f ...'` is not a direct shell wrapper invocation.
+    // Keep unverified Git loops forbidden even when a control word hides it.
+    scanState.unverifiable = true
+  }
+  for (const segment of segments) {
+    if (hasOpaqueGitMutationSyntax(segment, shellSyntax, scanState)) {
+      scanState.unverifiable = true
+      continue
+    }
     const tokens = tokenizeCommand(segment, shellSyntax)
     if (!tokens) continue
-    if (hasOpaqueShellExecution(tokens, shellSyntax)) return true
+    if (hasOpaqueShellExecution(tokens, shellSyntax)) {
+      scanState.unverifiable = true
+      continue
+    }
     for (const invocation of collectPotentialGitInvocations(tokens)) {
       const subcommand = findGitSubcommand(invocation)
       if (!subcommand || (subcommand.subcommand !== "add" && subcommand.subcommand !== "stage")) {
@@ -1400,14 +1613,19 @@ function containsForceGitAddCommand(
     }
     const script = getWrappedShellScript(tokens)
     const childSyntax = getWrappedShellSyntax(tokens) ?? shellSyntax
-    if (script && containsForceGitAddCommand(script, depth + 1, childSyntax)) return true
+    if (script && containsForceGitAddCommand(script, depth + 1, childSyntax, scanState)) return true
     for (const nestedTokens of getExecutionWrapperSuffixTokens(tokens)) {
       const nestedScript = getWrappedShellScript(nestedTokens)
       const nestedSyntax = getWrappedShellSyntax(nestedTokens) ?? shellSyntax
-      if (nestedScript && containsForceGitAddCommand(nestedScript, depth + 1, nestedSyntax)) {
+      if (
+        nestedScript &&
+        containsForceGitAddCommand(nestedScript, depth + 1, nestedSyntax, scanState)
+      ) {
         return true
       }
-      if (containsForceGitAddCommand(nestedTokens.join(" "), depth + 1, nestedSyntax)) return true
+      if (containsForceGitAddCommand(nestedTokens.join(" "), depth + 1, nestedSyntax, scanState)) {
+        return true
+      }
     }
   }
   return false
@@ -1416,11 +1634,18 @@ function containsForceGitAddCommand(
 function containsPotentialGitAliasInvocation(
   command: string,
   shellSyntax: CommandShellSyntax = hostShellSyntax(),
-  depth = 0
+  depth = 0,
+  scanState: GitCommandScanState = { unverifiable: false }
 ): boolean {
-  if (depth > 3) return true
-  for (const segment of splitShellCommandSegments(command, shellSyntax)) {
-    if (hasOpaqueGitMutationSyntax(segment, shellSyntax)) return true
+  if (depth > 3) {
+    scanState.unverifiable = true
+    return false
+  }
+  for (const segment of splitGitPolicyCommandSegments(command, shellSyntax, scanState)) {
+    if (hasOpaqueGitMutationSyntax(segment, shellSyntax, scanState)) {
+      scanState.unverifiable = true
+      continue
+    }
     const tokens = tokenizeCommand(segment, shellSyntax)
     if (!tokens) continue
     for (const invocation of collectPotentialGitInvocations(tokens)) {
@@ -1435,17 +1660,26 @@ function containsPotentialGitAliasInvocation(
     }
     const script = getWrappedShellScript(tokens)
     const childSyntax = getWrappedShellSyntax(tokens) ?? shellSyntax
-    if (script && containsPotentialGitAliasInvocation(script, childSyntax, depth + 1)) return true
+    if (script && containsPotentialGitAliasInvocation(script, childSyntax, depth + 1, scanState)) {
+      return true
+    }
     for (const nestedTokens of getExecutionWrapperSuffixTokens(tokens)) {
       const nestedScript = getWrappedShellScript(nestedTokens)
       const nestedSyntax = getWrappedShellSyntax(nestedTokens) ?? shellSyntax
       if (
         nestedScript &&
-        containsPotentialGitAliasInvocation(nestedScript, nestedSyntax, depth + 1)
+        containsPotentialGitAliasInvocation(nestedScript, nestedSyntax, depth + 1, scanState)
       ) {
         return true
       }
-      if (containsPotentialGitAliasInvocation(nestedTokens.join(" "), nestedSyntax, depth + 1)) {
+      if (
+        containsPotentialGitAliasInvocation(
+          nestedTokens.join(" "),
+          nestedSyntax,
+          depth + 1,
+          scanState
+        )
+      ) {
         return true
       }
     }
@@ -1479,21 +1713,32 @@ function containsPotentialWrapperGitCommit(tokens: string[]): boolean {
 function containsWrappedGitCommitCommand(
   command: string,
   depth = 0,
-  shellSyntax: CommandShellSyntax = hostShellSyntax()
+  shellSyntax: CommandShellSyntax = hostShellSyntax(),
+  scanState: GitCommandScanState = { unverifiable: false }
 ): boolean {
-  if (depth > 3) return true
+  if (depth > 3) {
+    scanState.unverifiable = true
+    return false
+  }
   if (
     shellSyntax === "powershell" &&
     /^\s*&\s*(?:\(|\$)/.test(command) &&
     /\bcommit\b/i.test(command)
   ) {
-    return true
+    scanState.unverifiable = true
+    return false
   }
-  for (const segment of splitShellCommandSegments(command, shellSyntax)) {
-    if (hasOpaqueGitMutationSyntax(segment, shellSyntax)) return true
+  for (const segment of splitGitPolicyCommandSegments(command, shellSyntax, scanState)) {
+    if (hasOpaqueGitMutationSyntax(segment, shellSyntax, scanState)) {
+      scanState.unverifiable = true
+      continue
+    }
     const tokens = tokenizeCommand(segment, shellSyntax)
     if (!tokens) continue
-    if (hasOpaqueShellExecution(tokens, shellSyntax)) return true
+    if (hasOpaqueShellExecution(tokens, shellSyntax)) {
+      scanState.unverifiable = true
+      continue
+    }
     if (
       !getGitInvocationTokens(tokens) &&
       collectPotentialGitInvocations(tokens).some((invocation) => {
@@ -1508,9 +1753,9 @@ function containsWrappedGitCommitCommand(
     const childSyntax = getWrappedShellSyntax(tokens) ?? shellSyntax
     if (
       script &&
-      (containsPotentialGitAliasInvocation(script, childSyntax) ||
+      (containsPotentialGitAliasInvocation(script, childSyntax, 0, scanState) ||
         commandHasGitSubcommand(script, new Set(["commit"]), childSyntax) ||
-        containsWrappedGitCommitCommand(script, depth + 1, childSyntax))
+        containsWrappedGitCommitCommand(script, depth + 1, childSyntax, scanState))
     ) {
       return true
     }
@@ -1520,11 +1765,13 @@ function containsWrappedGitCommitCommand(
       if (
         nestedScript &&
         (commandHasGitSubcommand(nestedScript, new Set(["commit"]), nestedSyntax) ||
-          containsWrappedGitCommitCommand(nestedScript, depth + 1, nestedSyntax))
+          containsWrappedGitCommitCommand(nestedScript, depth + 1, nestedSyntax, scanState))
       ) {
         return true
       }
-      if (containsWrappedGitCommitCommand(nestedTokens.join(" "), depth + 1, nestedSyntax)) {
+      if (
+        containsWrappedGitCommitCommand(nestedTokens.join(" "), depth + 1, nestedSyntax, scanState)
+      ) {
         return true
       }
     }
@@ -1537,7 +1784,16 @@ function commandHasGitSubcommand(
   subcommands: Set<string>,
   shellSyntax: CommandShellSyntax = hostShellSyntax()
 ): boolean {
-  for (const segment of splitShellCommandSegments(command, shellSyntax)) {
+  // These callers route mutations. Printed Git text inside a verified query
+  // loop must not trigger the commit dialog or the push workflow.
+  if (
+    shellSyntax === "posix" &&
+    [...subcommands].every((subcommand) => GIT_SUBMIT_SUBCOMMANDS.has(subcommand)) &&
+    isReadOnlyPosixForLoop(command)
+  ) {
+    return false
+  }
+  for (const segment of splitGitPolicyCommandSegments(command, shellSyntax)) {
     const tokens = tokenizeCommand(segment, shellSyntax)
     if (!tokens) continue
     for (const gitTokens of collectPotentialGitInvocations(tokens)) {

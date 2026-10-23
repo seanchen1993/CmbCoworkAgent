@@ -86,9 +86,9 @@ export interface WorkflowLaunchRequest {
   /** Registry snapshot whose fingerprint was approved for this exact launch. */
   agentProfiles?: readonly AgentProfile[]
   subagentDeps: WorkflowSubagentDeps
-  /** Run-level exclusive file-write lock, shared with subagent tool writes (see
-   * WorkflowEngineOptions.runExclusiveFileWrite). Threaded straight to the engine. (#2) */
-  runExclusiveFileWrite?: <T>(fn: () => Promise<T>) => Promise<T>
+  /** File-operation admission shared with agent tools (see
+   * WorkflowEngineOptions.runExclusiveFileWrite). Threaded straight to the engine. */
+  runExclusiveFileWrite?: <T>(fn: () => Promise<T>, signal?: AbortSignal) => Promise<T>
 }
 
 export interface WorkflowLaunchResult {

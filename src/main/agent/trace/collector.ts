@@ -437,6 +437,9 @@ export interface TraceCollectorOptions extends Partial<TraceObservabilityContext
   triggerSource?: TraceTriggerSource
   harnessFeature?: TraceHarnessFeatureContext
   includeSkillEval?: boolean
+  /** Supplied by the turn entry point; not persisted as another analytics field. */
+  isFirstProjectTurn?: boolean
+  hasExplicitSkill?: boolean
 }
 
 function compactUndefined<T extends Record<string, unknown>>(record: T): T {
@@ -773,7 +776,10 @@ export class TraceCollector {
   ) {
     this.traceId = clampText(options.traceId ?? uuid(), 256)
     this.threadId = clampText(threadId, 256)
-    this.suspectedTechnicalDetailSupplement = hasSuspectedTechnicalDetailSupplement(userMessage)
+    this.suspectedTechnicalDetailSupplement = hasSuspectedTechnicalDetailSupplement(userMessage, {
+      isFirstProjectTurn: Boolean(options.harnessFeature && options.isFirstProjectTurn),
+      hasExplicitSkill: options.hasExplicitSkill
+    })
     this.userMessage = clampText(userMessage, 64 * 1024)
     this.modelId = clampText(modelId, 1024)
     this.triggerSource = options.triggerSource ?? "chat"

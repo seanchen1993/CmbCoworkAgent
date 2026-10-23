@@ -12,8 +12,7 @@ const {
   TurnAttributionRecorder,
   observeExplicitSkillActivation,
   observeToolCallForAttribution,
-  resolveSubagentAttributionSkills,
-  syncSubagentSkillAttribution,
+  createSubagentSkillAttribution,
   syncTaskSubagentSkillAttribution,
   syncTurnSkillAttribution
 } = await import("./turn-attribution")
@@ -397,30 +396,26 @@ describe("sub-agent attribution", () => {
     setThreadActiveSkills(parentThreadId, ["parent-skill"], ["plugin:p/parent-skill"])
     setThreadActiveSkills(threadId, ["own-sticky"], ["plugin:p/own-sticky"])
 
-    expect(
-      resolveSubagentAttributionSkills({
-        threadId,
-        parentThreadId,
-        currentRunSkills: ["this-run"],
-        currentRunSkillSource: ["plugin:p/this-run"]
-      })
-    ).toEqual({ usedSkills: ["this-run"], skillSource: ["plugin:p/this-run"] })
+    const sync = createSubagentSkillAttribution({ threadId, parentThreadId })
+    sync({ usedSkills: ["this-run"], skillSource: ["plugin:p/this-run"] })
+    expect(setAdoptionContext).toHaveBeenLastCalledWith(threadId, {
+      usedSkills: ["this-run"],
+      skillSource: ["plugin:p/this-run"]
+    })
   })
 
-  it("falls back to the sub-agent's own sticky set before the parent's", () => {
+  it("captures the latest parent skills when a worker starts a new task", () => {
     const parentThreadId = freshThreadId()
     const threadId = freshThreadId()
     setThreadActiveSkills(parentThreadId, ["parent-skill"], ["plugin:p/parent-skill"])
     setThreadActiveSkills(threadId, ["own-sticky"], ["plugin:p/own-sticky"])
 
-    expect(
-      resolveSubagentAttributionSkills({
-        threadId,
-        parentThreadId,
-        currentRunSkills: [],
-        currentRunSkillSource: []
-      })
-    ).toEqual({ usedSkills: ["own-sticky"], skillSource: ["plugin:p/own-sticky"] })
+    const sync = createSubagentSkillAttribution({ threadId, parentThreadId })
+    sync({ usedSkills: [], skillSource: [] })
+    expect(setAdoptionContext).toHaveBeenLastCalledWith(threadId, {
+      usedSkills: ["parent-skill"],
+      skillSource: ["plugin:p/parent-skill"]
+    })
   })
 
   it("inherits the parent's skills when the sub-agent has none of its own", () => {
@@ -428,11 +423,9 @@ describe("sub-agent attribution", () => {
     const threadId = freshThreadId()
     setThreadActiveSkills(parentThreadId, ["parent-skill"], ["plugin:p/parent-skill"])
 
-    syncSubagentSkillAttribution({
-      threadId,
-      parentThreadId,
-      currentRunSkills: [],
-      currentRunSkillSource: []
+    createSubagentSkillAttribution({ threadId, parentThreadId })({
+      usedSkills: [],
+      skillSource: []
     })
 
     expect(setAdoptionContext).toHaveBeenCalledWith(threadId, {
@@ -443,14 +436,14 @@ describe("sub-agent attribution", () => {
 
   it("reports nothing when neither the sub-agent nor its parent used a skill", () => {
     const threadId = freshThreadId()
-    expect(
-      resolveSubagentAttributionSkills({
-        threadId,
-        parentThreadId: freshThreadId(),
-        currentRunSkills: [],
-        currentRunSkillSource: []
-      })
-    ).toEqual({ usedSkills: [], skillSource: [] })
+    createSubagentSkillAttribution({ threadId, parentThreadId: freshThreadId() })({
+      usedSkills: [],
+      skillSource: []
+    })
+    expect(setAdoptionContext).toHaveBeenLastCalledWith(threadId, {
+      usedSkills: [],
+      skillSource: []
+    })
   })
 })
 

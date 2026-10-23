@@ -566,6 +566,10 @@ function projectUserDirectory(
   raw: unknown,
   checkCancelled: CheckCancelled
 ): Record<string, unknown> {
+  const response = asRecord(raw)
+  if (response.timed_out || asNumber(asRecord(response._shards).failed) > 0) {
+    throw new Error("用户资料查询未完整返回，请重试")
+  }
   const aggs = asRecord(asRecord(raw).aggregations)
   const bySap = asRecord(aggs.by_sap)
   const items = buckets(bySap).flatMap((entry, index) => {

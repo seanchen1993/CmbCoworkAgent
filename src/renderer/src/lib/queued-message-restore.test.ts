@@ -90,6 +90,15 @@ function restore(message: QueuedMessage): QueuedMessage {
 }
 
 describe("unread composer mention queue restore", () => {
+  it("retains the selected skill name alongside a validated structured draft", () => {
+    const original = { ...draft({ skill: "selected skill instructions" }), skillName: "review" }
+    const actual = restore(original)
+    expect(actual.skillName).toBe("review")
+    expect(actual.skillBlock).toBe("selected skill instructions")
+    expect(actual.pendingMentions).toEqual(original.pendingMentions)
+    expect(normalizeQueuedMessage({ ...roundTrip(original), skillName: 12 })?.skillName).toBeUndefined()
+  })
+
   it("retains actual collected line references, parts, id, model and versions through JSON", () => {
     const original = draft(),
       actual = restore(original)

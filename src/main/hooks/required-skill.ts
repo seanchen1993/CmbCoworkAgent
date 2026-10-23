@@ -1,6 +1,6 @@
+import { readContentFile } from "../services/market-content"
 import { assertCurrentRuntimePluginSourceContent } from "../plugins/runtime-source-scope"
 import { existsSync } from "node:fs"
-import { readFile } from "node:fs/promises"
 import {
   getDisabledSkillRuntimePolicy,
   getEnabledPluginSkillSourceMetadata,
@@ -121,7 +121,7 @@ async function resolveSkillGuidanceFromSource({
       continue
     }
     try {
-      const content = await readFile(skill.skillMdPath, "utf-8")
+      const content = await readContentFile(skill.skillMdPath, "utf-8")
       const frontmatter = parseYamlFrontmatter(content)
       const skillName = (frontmatter.name || skill.name).trim()
       const candidates = new Set([...getDiscoveredSkillAliases(skill), normalizeSkillId(skillName)])

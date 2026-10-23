@@ -4,11 +4,14 @@ import type { ProjectRuntimeManifest } from "../../../shared/project-runtime"
 import { parseSkillFrontmatter } from "../../skills/frontmatter"
 import { readPackageProtocolFiles } from "./package-snapshots"
 import { hostStateError } from "./host-state-protocol"
+import { decodeHostPackageSkill } from "./package-skill-content"
 
 /** The runtime parser tolerates malformed YAML. Debug admission must never reuse that fallback. */
 function skillDeclaration(bytes: Buffer): string {
   try {
-    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes)
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      decodeHostPackageSkill(bytes)
+    )
     const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n)?/.exec(text)
     const parsed = parseSkillFrontmatter(text)
     if (!header) {

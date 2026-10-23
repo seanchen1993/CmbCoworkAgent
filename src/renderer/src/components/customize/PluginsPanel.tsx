@@ -461,12 +461,9 @@ export function PluginsPanel(): React.JSX.Element {
     return () => detailOwner.current.unmount()
   }, [])
 
-  // 市场下载的 Plugin 不再隐藏 Skill/Hook/MCP 详情，统一展示组件详情。
-  // 历史上这里会对 origin === "market" 的插件隐藏详情；现按需求恒为可见。
-  // 保留入参以兼容调用点签名（恒返回 false）。
+  // Source access follows the origin persisted by the main process.
   const shouldHidePluginDetails = useCallback((plugin: PluginMetadata | null): boolean => {
-    void plugin
-    return false
+    return !!plugin && plugin.origin !== "local"
   }, [])
 
   const loadDetail = useCallback(async (plugin: PluginMetadata) => {
@@ -984,7 +981,7 @@ export function PluginsPanel(): React.JSX.Element {
         onToggleHookEnabled={handleToggleHookEnabled}
         onDelete={handleDeleteRequest}
         onPublish={
-          selectedPlugin && !shouldHideSelectedPluginDetails
+          selectedPlugin?.origin === "local" && !shouldHideSelectedPluginDetails
             ? () => openPublishDialog(selectedPlugin)
             : undefined
         }
@@ -1000,7 +997,7 @@ export function PluginsPanel(): React.JSX.Element {
         }
         hideComponentDetails={shouldHideSelectedPluginDetails}
         onEditFiles={
-          selectedPlugin && !shouldHideSelectedPluginDetails
+          selectedPlugin?.origin === "local" && !shouldHideSelectedPluginDetails
             ? () => setFileEditorOpen(true)
             : undefined
         }
@@ -1084,10 +1081,11 @@ export function PluginDetailPanel(props: {
     onPublish,
     publishLabel = "发布到市场",
     hideActions = false,
-    hideComponentDetails = false,
+    hideComponentDetails: requestedHideComponentDetails = false,
     isMarketPlugin = false,
     onEditFiles
   } = props
+  const hideComponentDetails = requestedHideComponentDetails || plugin?.origin !== "local"
 
   if (!plugin) {
     return (

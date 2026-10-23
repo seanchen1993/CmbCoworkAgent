@@ -1046,6 +1046,10 @@ export interface HarnessRunDetailViewModel {
     snapshot?: import("./project-runtime").ProjectRuntimeSnapshot
     diagnostic?: string
   }
+  artifactAccumulation?: {
+    syncType: "invoke_session"
+    nextAction: HarnessWorkflowNextAction
+  }
   /** Main-issued, sender-bound capability for generated run artifacts. */
   artifactPreviewGrant?: string
   /** Absolute epoch milliseconds; the renderer renews lazily near this boundary. */

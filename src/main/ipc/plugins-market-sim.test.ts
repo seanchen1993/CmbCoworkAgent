@@ -1,3 +1,4 @@
+import { readContentFileSync, MARKET_CONTENT_PREFIX } from "../services/market-content"
 /**
  * End-to-end simulation of the "download a plugin from the market" flow.
  *
@@ -150,7 +151,12 @@ describe("market download → install → detail (e2e)", () => {
     expect(installed!.hookCount).toBe(2)
     // Files actually copied into the (temp) plugins dir
     expect(existsSync(installed!.path)).toBe(true)
-    const manifest = JSON.parse(readFileSync(join(installed!.path, "plugin.json"), "utf-8")) as {
+    expect(readFileSync(join(installed!.path, "plugin.json"), "utf-8")).not.toMatch(
+      new RegExp(`^${MARKET_CONTENT_PREFIX}`)
+    )
+    const manifest = JSON.parse(
+      readContentFileSync(join(installed!.path, "plugin.json"), "utf-8")
+    ) as {
       version?: string
     }
     expect(manifest.version).toBe(NORMALIZED_MARKET_VERSION)

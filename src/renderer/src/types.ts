@@ -379,6 +379,7 @@ export interface QueuedMessage {
   pendingMentions?: import("../../shared/mods/v2/composer-mentions").ComposerPendingMention[]
   existingUploads?: import("../../shared/mods/v2/composer-mentions").ComposerFileAttachment[]
   fileOnly?: boolean
+  skillName?: string
   builtinBrowser?: boolean
   modelId?: string
   handoffRequestedAt?: Date
@@ -524,6 +525,7 @@ export interface GrepMatch {
 }
 
 export interface SkillMetadata {
+  contentOrigin?: "local" | "market" | "builtin"
   id?: string
   name: string
   description: string

@@ -6169,6 +6169,7 @@ export function ChatContainer({
         attachmentModelBlocks,
         attachmentDisplayPrefix,
         skillBlock,
+        skillName: skill?.name,
         builtinBrowser: browser,
         modelId: submitModelId,
         ...(pending?.pendingMentions.length ? {
@@ -6283,7 +6284,7 @@ export function ChatContainer({
             titleSource = getBuiltinBrowserTitleSource(browser)
           }
           if (titleSource) {
-            generateTitleForFirstMessage(threadId, titleSource)
+            generateTitleForFirstMessage(threadId, titleSource, skill?.name)
           }
         }
       }
@@ -6776,7 +6777,7 @@ export function ChatContainer({
         const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
         const titleSource = queued.text.trim() || (queued.skillBlock ? "使用技能" : "")
         if (hasDefaultTitle && titleSource) {
-          generateTitleForFirstMessage(threadId, titleSource)
+          generateTitleForFirstMessage(threadId, titleSource, queued.skillName)
         }
       }
       const startTime = Date.now()

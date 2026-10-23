@@ -283,8 +283,18 @@ const OTHER_INPUT_FIX_LINE = 3
  */
 export const QUESTION_OTHER_SUFFIX = "__other"
 
+function questionTitle(header: string, index: number): string {
+  return `${index + 1}. ${header}`
+}
+
 export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
-  const unanswered = input.questions.filter((question) => !question.answered)
+  // Number before filtering: answering question 1 by text must not renumber
+  // question 2 or change the feedback key that identifies its answer.
+  const numbered = input.questions.map((question, index) => ({
+    question,
+    title: questionTitle(question.header, index)
+  }))
+  const unanswered = numbered.filter(({ question }) => !question.answered)
   const components: CardComponent[] = [
     titleComponent("需要你的选择"),
     statusComponent("待回答", STATUS_STYLE.orange),
@@ -292,12 +302,12 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
     textModeHintComponent()
   ]
 
-  const answered = input.questions.filter((question) => question.answered)
+  const answered = numbered.filter(({ question }) => question.answered)
   if (answered.length > 0) {
     components.push(
       kvComponent(
-        answered.map((question) => ({
-          title: question.header,
+        answered.map(({ question, title }) => ({
+          title,
           value: question.answeredLabel ?? "已回答"
         }))
       )
@@ -305,11 +315,18 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
   }
 
   const controls: CardComponent[] = []
-  for (const question of unanswered) {
+  for (const { question, title } of unanswered) {
+    // Native form controls have no body-text slot. Keep questions in supported
+    // content components, with matching numbered labels on the single form.
+    // Do not hide the only copy in promptText, which is replaced on selection.
+    components.push(
+      { type: "content", model: 0, list: [{ type: [1], content: title }] },
+      contentComponent([question.question])
+    )
     controls.push({
       subType: "listSelector",
-      title: question.header,
-      promptText: question.question,
+      title,
+      promptText: "请选择",
       feedbackKey: question.key,
       required: false,
       selectModel: LIST_SELECT_CUSTOM_OPTIONS,
@@ -324,7 +341,7 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
     // belongs in a message, and the short code under the card still takes it.
     controls.push({
       subType: "inputBox",
-      title: `${question.header} · 其他`,
+      title: `${title} · 其他`,
       promptText: "以上选项都不合适时填写",
       feedbackKey: `${question.key}${QUESTION_OTHER_SUFFIX}`,
       required: false,
@@ -365,7 +382,12 @@ export function buildAnsweredCard(input: AnsweredCardInput): CardComponent[] {
   ]
   if (input.answers.length > 0) {
     components.push(
-      kvComponent(input.answers.map((entry) => ({ title: entry.header, value: entry.answer })))
+      kvComponent(
+        input.answers.map((entry, index) => ({
+          title: questionTitle(entry.header, index),
+          value: entry.answer
+        }))
+      )
     )
   }
   return components

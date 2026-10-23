@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 import { hostProjectFixture } from "./host-fixtures.test-helper"
 import { assertStageBranchSourceCompatible } from "./stage-branch-compatibility"
+import { MARKET_CONTENT_PREFIX, protectMarketDirectory } from "../../services/market-content"
 
 const roots: string[] = []
 afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })))
@@ -49,6 +50,27 @@ function fixture(shared = false, skill = `${declaration}Original body\n`) {
 }
 
 describe("stage branch Skill declaration compatibility", () => {
+  it("allows protected body edits while rejecting changed protected declarations", () => {
+    const setup = fixture()
+    protectMarketDirectory(setup.original)
+    setup.edit(`${declaration}Improved protected instructions\n`)
+    protectMarketDirectory(setup.candidate)
+    expect(setup.check).not.toThrow()
+    setup.edit(`${declaration.replace("  - read_file", "  - write_file")}Changed permissions\n`)
+    protectMarketDirectory(setup.candidate)
+    expect(setup.check).toThrow("PROJECT_HOST_BRANCH_INPUT_SOURCE_CHANGED")
+  })
+
+  it("rejects malformed protected declarations and corrupt envelopes", () => {
+    const setup = fixture()
+    protectMarketDirectory(setup.original)
+    setup.edit("---\nname: review\nname: duplicate\n---\nBody\n")
+    protectMarketDirectory(setup.candidate)
+    expect(setup.check).toThrow("PROJECT_HOST_BRANCH_SKILL_DECLARATION_INVALID")
+    setup.edit(MARKET_CONTENT_PREFIX + "invalid!")
+    expect(setup.check).toThrow("PROJECT_HOST_BRANCH_SKILL_DECLARATION_INVALID")
+  })
+
   it("allows only a revised body with the exact original declaration", () => {
     const setup = fixture()
     setup.edit(`${declaration}Improved review instructions\n\n---\nA body separator\n`)

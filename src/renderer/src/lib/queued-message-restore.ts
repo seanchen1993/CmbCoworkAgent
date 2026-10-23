@@ -22,6 +22,7 @@ const queuedFields = new Set([
   "attachmentModelBlocks",
   "attachmentDisplayPrefix",
   "skillBlock",
+  "skillName",
   "builtinBrowser",
   "modelId",
   "handoffRequestedAt",
@@ -255,6 +256,7 @@ export function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
     const blocks = own(item, "attachmentModelBlocks"),
       display = own(item, "attachmentDisplayPrefix")
     const skill = own(item, "skillBlock"),
+      skillName = own(item, "skillName"),
       model = own(item, "modelId")
     const message: QueuedMessage = {
       id,
@@ -262,6 +264,7 @@ export function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
       attachmentModelBlocks: typeof blocks === "string" ? blocks : undefined,
       attachmentDisplayPrefix: typeof display === "string" ? display : undefined,
       skillBlock: typeof skill === "string" ? skill : undefined,
+      skillName: typeof skillName === "string" ? skillName : undefined,
       builtinBrowser: own(item, "builtinBrowser") === true,
       modelId: typeof model === "string" ? model : undefined,
       handoffRequestedAt:
