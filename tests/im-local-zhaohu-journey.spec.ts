@@ -592,7 +592,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     await journey.waitForEventState(first.event.eventId, "completed")
     const inbox = journey.conversations.getActiveTarget(CONVERSATION_KEY)
     assert.equal(inbox?.kind, "inbox")
-    assert.equal(journey.threads.get(inbox!.threadId)?.title, "远程收件箱")
+    assert.equal(journey.threads.get(inbox!.threadId)?.title, "招乎默认聊天")
     assert(journey.eventReplyText(first.event.eventId).includes("模拟回答：你好，介绍一下你自己"))
 
     const help = await journey.send("/帮助", "zhaohu-help-stable-id")
@@ -608,7 +608,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     assert.equal(helpText.trimEnd().split("\n").at(-1)?.startsWith("/重试 "), true)
 
     const current = await journey.send("/当前")
-    assert(journey.eventReplyText(current.event.eventId).includes("当前目标：【收件箱】"))
+    assert(journey.eventReplyText(current.event.eventId).includes("当前目标：【默认聊天】"))
 
     journey.makeThread("desktop-debug-thread", {
       title: "桌面排障会话",
@@ -729,7 +729,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
       () => journey.gateway.replies.find((reply) => reply.message.content.includes("E5F6A7")),
       "inbox Thread remote user-input prompt"
     )
-    assert(inboxInputRequest.message.content.includes("【远程收件箱】"))
+    assert(inboxInputRequest.message.content.includes("【默认聊天】"))
 
     const answerInboxFirst = await journey.send("/回答 E5F6A7 2")
     assert(journey.eventReplyText(answerInboxFirst.event.eventId).includes("任务将继续执行"))

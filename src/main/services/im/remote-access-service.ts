@@ -288,6 +288,8 @@ export class ImRemoteAccessService {
     route: ImGrantRouteIdentity
     grantId: string
     grantVersion: number
+    /** Exact-ID switches only need this thread's title, not the whole target catalog. */
+    direct?: boolean
   }): Promise<Extract<ImTargetSnapshot, { kind: "thread" }>> {
     const grant = this.dependencies.grants.getThreadGrantById(input.grantId)
     if (!grant || grant.grantVersion !== input.grantVersion || grant.state !== "active") {
@@ -300,10 +302,26 @@ export class ImRemoteAccessService {
       threadId: grant.threadId
     })
     const validation = this.validateGrantableThread(grant.threadId)
-    const title =
-      (await this.listAuthorizedTargets(input.route)).find(
-        (target) => target.kind === "thread_grant" && target.grantId === grant.grantId
-      )?.label ?? (await this.threadLabel(validation.thread, grant.titleSnapshot))
+    const title = input.direct
+      ? await this.threadLabel(validation.thread, grant.titleSnapshot)
+      : ((await this.listAuthorizedTargets(input.route)).find(
+          (target) => target.kind === "thread_grant" && target.grantId === grant.grantId
+        )?.label ?? (await this.threadLabel(validation.thread, grant.titleSnapshot)))
+    // Title resolution may await project data. Revocation during that wait must win.
+    try {
+      this.dependencies.grants.assertActiveThreadGrant({
+        grantId: input.grantId,
+        grantVersion: input.grantVersion,
+        route: input.route,
+        threadId: grant.threadId
+      })
+    } catch {
+      throw new ImRemoteAccessError(
+        "REMOTE_GRANT_STALE",
+        "会话授权已变化，切换没有生效。请在桌面重新确认接入权限。"
+      )
+    }
+    this.validateGrantableThread(grant.threadId)
     const reusable = this.dependencies.conversations
       .listTargets(input.route.conversationKey)
       .find(
@@ -415,8 +433,8 @@ export class ImRemoteAccessService {
     return this.dependencies.grants.getFeatureGrant(projectId, featureSlug)
   }
 
-  listThreadGrants(): ImThreadGrantRecord[] {
-    return this.dependencies.grants.listThreadGrants()
+  listThreadGrants(conversationKey?: string): ImThreadGrantRecord[] {
+    return this.dependencies.grants.listThreadGrants(conversationKey)
   }
 
   listFeatureGrants(principalId?: string): ImFeatureGrantRecord[] {
@@ -468,7 +486,7 @@ export class ImRemoteAccessService {
       parsed.metadata.targetKind === "inbox" ||
       (parsed.metadata.remoteThread === true && parsed.metadata.targetKind !== "feature")
     ) {
-      throw new ImRemoteAccessError("REMOTE_THREAD_UNSUPPORTED", "远程收件箱不能作为会话授权目标。")
+      throw new ImRemoteAccessError("REMOTE_THREAD_UNSUPPORTED", "默认聊天无需单独接入招乎。")
     }
     return { thread, workspacePath, parsed }
   }

@@ -1,10 +1,16 @@
 import { imConversationStateStore, type ImConversationStateStore } from "./conversation-state"
 import { imEventStore, type ImEventStore } from "./event-store"
 import { imRemoteAccessService, type ImRemoteAccessService } from "./remote-access-service"
-import { imProjectModeReplyPrefix, imThreadReplyPrefix } from "./reply-context"
+import {
+  buildImReplyContinuationHint,
+  imProjectModeReplyPrefix,
+  imThreadReplyPrefix
+} from "./reply-context"
 import { buildImProactiveReplies } from "./reply-segmentation"
 import type { ImReplyClient } from "./reply-client"
 import { resolveImProjectModeReplyContext } from "./project-reply-context"
+import { projectThreadAliasParts } from "./thread-alias"
+import { prepareImSessionLink } from "./session-link-store"
 
 export interface DesktopTurnCompletion {
   source: "desktop"
@@ -23,7 +29,7 @@ type ReplyDrainer = Pick<ImReplyClient, "sendPending">
 interface DesktopCompletionDependencies {
   conversations: ImConversationStateStore
   access: Pick<ImRemoteAccessService, "getThreadGrant" | "validateThreadForCompletionDelivery">
-  events: Pick<ImEventStore, "enqueueProactiveReplies">
+  events: Pick<ImEventStore, "enqueueProactiveReplies" | "sessionLinks">
   getReplyDrainer: () => ReplyDrainer | null
   warn: (message: string, error?: unknown) => void
 }
@@ -97,9 +103,11 @@ export class ImDesktopCompletionObserver {
 
     let threadTitle = grant.titleSnapshot
     let threadMetadata: Record<string, unknown> = {}
+    let requiresSelection = false
     try {
       const validated = this.dependencies.access.validateThreadForCompletionDelivery(threadId)
       threadTitle = validated.thread.title?.trim() || threadTitle
+      requiresSelection = Boolean(projectThreadAliasParts(validated.thread))
       try {
         threadMetadata = validated.thread.metadata
           ? (JSON.parse(validated.thread.metadata) as Record<string, unknown>)
@@ -135,11 +143,28 @@ export class ImDesktopCompletionObserver {
       // 只兜数据库读失败。这行提示是附加信息，不该因为它把一条真实的结果拦在外面。
       this.dependencies.warn("Desktop completion could not read the bound target.", error)
     }
-    const prefix = projectContext
-      ? imProjectModeReplyPrefix({ ...projectContext, switched })
-      : imThreadReplyPrefix(threadTitle, switched)
-
     const deliveryId = `desktop-turn:${threadId}:${finalAssistantMessageId}`
+    const sessionCode = switched
+      ? prepareImSessionLink(this.dependencies.events.sessionLinks, {
+          principalId: grant.principalId,
+          conversationKey: grant.conversationKey,
+          threadId,
+          kind: "thread",
+          label: threadTitle,
+          deliveryId
+        })
+      : undefined
+    const continuationHint = buildImReplyContinuationHint({
+      switched,
+      kind: "thread",
+      threadTitle,
+      requiresSelection: requiresSelection || !sessionCode,
+      sessionCode
+    })
+    const prefix = projectContext
+      ? imProjectModeReplyPrefix({ ...projectContext, switched, continuationHint })
+      : imThreadReplyPrefix(threadTitle, switched, continuationHint)
+
     await this.dependencies.events.enqueueProactiveReplies(
       buildImProactiveReplies({
         deliveryId,

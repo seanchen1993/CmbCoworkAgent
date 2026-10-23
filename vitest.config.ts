@@ -25,6 +25,7 @@ export default defineConfig({
       "src/renderer/src/components/dashboard/panels/project-mode-table-columns.test.ts",
       "src/renderer/src/components/dashboard/project-stage-analysis-view.test.ts",
       "src/renderer/src/components/dashboard/thread-traces-response.test.ts",
+      "src/renderer/src/components/dashboard/thread-skill-usage-metric.test.ts",
       "src/renderer/src/components/dashboard/trace-export-scope.test.ts",
       "src/renderer/src/components/update/release-notes.test.ts",
       "src/renderer/src/components/trace/TraceConversation.test.ts",

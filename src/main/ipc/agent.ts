@@ -1117,7 +1117,7 @@ function rejectDesktopRunForRemoteReadOnlyThread(
     error: "REMOTE_INBOX_DESKTOP_READ_ONLY",
     message: historical
       ? "设备接管前的远程历史 Thread 仅可查看。"
-      : "远程收件箱在桌面仅可查看，请从招乎继续发送消息。"
+      : "招乎默认聊天在桌面仅可查看，请从招乎继续发送消息。"
   })
   safeSendToWindow(window, channel, { type: "done" })
   return true

@@ -7,7 +7,8 @@ import type { ImTargetSnapshot } from "./conversation-state"
 import { imConversationStateStore, type ImConversationStateStore } from "./conversation-state"
 import { imEventStore, type ImEventRecord, type ImEventStore } from "./event-store"
 import { imInboxService, type ImInboxService } from "./inbox-service"
-import { buildImEventReplies, eventShortCode } from "./reply-segmentation"
+import { createHash } from "node:crypto"
+import { buildImEventReplies, buildImProactiveReplies, eventShortCode } from "./reply-segmentation"
 import { ImReplyClient } from "./reply-client"
 
 export interface ImIngressResult {
@@ -165,12 +166,38 @@ export class ImIngressSequencer {
         leaseId: queued.leaseId
       }
       await this.emit(acceptedAck)
+      if (snapshot.kind === "inbox") await this.ensureDefaultChatGuide(event.conversationKey)
       return {
         duplicate: received.duplicate,
         event: queued,
         acknowledgements: [receivedAck, acceptedAck]
       }
     })
+  }
+
+  private async ensureDefaultChatGuide(conversationKey: string): Promise<void> {
+    const key = createHash("sha256").update(conversationKey).digest("hex")
+    const deliveryId = `im:default-chat-guide:v1:${key}`
+    try {
+      // The durable outbox is also the one-time marker: reconnects, duplicate
+      // ingress and restarts reuse the same delivery, with no schema change.
+      if (this.eventStore.hasReplyDelivery(deliveryId)) return
+      await this.eventStore.enqueueProactiveReplies(
+        buildImProactiveReplies({
+          deliveryId,
+          conversationKey,
+          text: [
+            "你正在【默认聊天】中，可以直接发消息；这不会自动连接到桌面已有的会话。",
+            "想继续已有工作？在桌面“内置统一机器人 → 接入招乎”开启对应会话或特性，再发送 /会话 选择。",
+            "发送 /当前 查看接收目标和运行情况，/默认 返回这里，/帮助 查看常用指令。"
+          ].join("\n")
+        })
+      )
+      // The service's regular outbox loop delivers this promptly. Do not start
+      // an unowned async sender here or delay an accepted task on gateway I/O.
+    } catch (error) {
+      console.warn("[IM] Default chat guide could not be queued:", error)
+    }
   }
 
   receiveControlEvent(

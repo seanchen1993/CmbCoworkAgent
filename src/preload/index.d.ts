@@ -2624,6 +2624,7 @@ interface CustomAPI {
     cancelRequests: (families?: string[]) => Promise<{ cancelled: number }>
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
+    orgFilterDefaults: () => Promise<string[]>
     isAnalysisAgentAllowed: () => Promise<boolean>
     isTraceEvolverReviewAdmin: () => Promise<boolean>
     isUncommittedAnalysisAllowed: () => Promise<boolean>

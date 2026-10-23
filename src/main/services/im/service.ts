@@ -24,6 +24,7 @@ import { ImGoalRunBridge } from "./goal-runner"
 import { imRemoteCapabilityGuard } from "./capability-guard"
 import { imHumanGateAdapter } from "./human-gate-adapter"
 import { imBizRetryAdapter } from "./biz-retry-adapter"
+import { ImSessionSwitchCards } from "./session-switch-cards"
 
 /**
  * Headless orchestration boundary used by the production WSS adapter and the
@@ -40,6 +41,7 @@ export class ImUnifiedBotService {
   readonly replyClient: ImReplyClient
   readonly modeNotificationPump: ImRemoteModeNotificationPump
   readonly goalRuns: ImGoalRunBridge
+  readonly sessionSwitchCards: ImSessionSwitchCards
   private readonly unregisterSchedulerGateway: () => void
   private readonly unregisterDesktopCompletionReplyDrainer: () => void
   private readonly unregisterRemoteApprovalReplyDrainer: () => void
@@ -48,6 +50,7 @@ export class ImUnifiedBotService {
   private readonly unregisterManagedBizRetryReplyDrainer: () => void
   private readonly unregisterCardReceiptReplyDrainer: () => void
   private readonly unregisterCardReceiptCommandRouter: () => void
+  private readonly unregisterSessionSwitchCards: () => void
   private outboxRetryTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(
@@ -58,7 +61,20 @@ export class ImUnifiedBotService {
       goalRuns?: ImGoalRunBridge
     } = {}
   ) {
-    this.replyClient = new ImReplyClient(gateway)
+    this.sessionSwitchCards = new ImSessionSwitchCards({
+      gateway,
+      switchSession: (input) =>
+        this.commandRouter.handle({
+          ...input,
+          command: { name: "switch_target", argument: `@${input.code}` }
+        })
+    })
+    this.replyClient = new ImReplyClient(gateway, undefined, undefined, () =>
+      this.sessionSwitchCards.schedule()
+    )
+    this.unregisterSessionSwitchCards = imCardReceiptRouter.registerSessionSwitchCards(
+      this.sessionSwitchCards
+    )
     this.unregisterSchedulerGateway = registerImInboxSchedulerGateway(gateway, this.replyClient)
     this.unregisterDesktopCompletionReplyDrainer = registerImDesktopCompletionReplyDrainer(
       this.replyClient
@@ -215,6 +231,7 @@ export class ImUnifiedBotService {
     })
     await this.modeNotificationPump.recoverAndStart()
     this.startOutboxRetryLoop()
+    this.sessionSwitchCards.schedule()
     return recovered
   }
 
@@ -264,8 +281,11 @@ export class ImUnifiedBotService {
     this.unregisterManagedBizRetryReplyDrainer()
     this.unregisterCardReceiptReplyDrainer()
     this.unregisterCardReceiptCommandRouter()
+    this.unregisterSessionSwitchCards()
     this.modeNotificationPump.stop()
-    return this.turnQueue.stop()
+    return Promise.all([this.turnQueue.stop(), this.sessionSwitchCards.stop()]).then(
+      () => undefined
+    )
   }
 
   private startOutboxRetryLoop(): void {

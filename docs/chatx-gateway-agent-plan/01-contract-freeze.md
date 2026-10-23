@@ -116,8 +116,9 @@ JWT 的 issuer、JWKS URI、audience、主体 claim、允许算法等是部署�
 - `segment.index` 从 0 开始，`count` 为 1～8，且 `index < count`；
 - Desktop 单段最多 2,800 Unicode code points；平台发送上限仍是 3,000 个字符。
 - `message.type` 为 `text`，或本连接已协商 `markdown-reply-v1` 时为 `markdown`。只有 Agent 的
-  回答标成 Markdown；系统提示和指令回复始终是 `text`。会话处于 `/文字模式` 时 Markdown 回复也按
-  `text` 发，内容原样不转换。`markdown` 与 `text` 长度上限相同，卡片被平台拒绝时网关用同一段内容
+  回答标成 Markdown；独立的系统提示和指令回复始终是 `text`。`/文字模式` 仅将审批、提问等表单
+  改成文字，回答仍保留 Markdown 排版，非当前会话的回复后仍发送切换按钮卡片。未协商 Markdown
+  时回答按 `text` 发送。`markdown` 与 `text` 长度上限相同，卡片被平台拒绝时网关用同一段内容
   改走文本接口。
 - 幂等只看内容不看类型：同一段先以 `markdown`、后以 `text` 重发是同一条回复。
 

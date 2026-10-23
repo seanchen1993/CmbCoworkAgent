@@ -262,12 +262,15 @@ function tableAfter(
 }
 
 /**
- * Prefix lines and the [i/n] marker each stand in their own paragraph. Joined
- * to the body by a single newline, a renderer that folds soft breaks runs them
- * into the first line, and a marker in front of "# 标题" stops it being one.
+ * Keep metadata and instructions compact with Markdown hard breaks, preserving
+ * only intentional paragraph gaps. The body and [i/n] marker stand apart so
+ * a leading heading, list or fence still renders on its own.
  */
 function markdownSegmentHeader(prefix: string, index: number, count: number): string {
-  const parts = index === 0 ? prefix.split("\n").filter((line) => line.trim()) : []
+  const parts =
+    index === 0 && prefix
+      ? prefix.split(/\n\s*\n/u).map((group) => group.split("\n").join("  \n"))
+      : []
   if (count > 1) parts.push(`[${index + 1}/${count}]`)
   return parts.length > 0 ? `${parts.join("\n\n")}\n\n` : ""
 }

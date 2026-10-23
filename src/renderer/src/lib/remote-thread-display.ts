@@ -1,6 +1,7 @@
 import type { Thread } from "@/types"
+import { IM_DEFAULT_CHAT_TITLE } from "../../../shared/im-display"
 
-export const REMOTE_INBOX_WORKSPACE_NAME = "远程收件箱"
+export const REMOTE_INBOX_WORKSPACE_NAME = IM_DEFAULT_CHAT_TITLE
 
 export function isRemoteInboxThread(thread: Thread | null | undefined): boolean {
   const metadata = thread?.metadata
