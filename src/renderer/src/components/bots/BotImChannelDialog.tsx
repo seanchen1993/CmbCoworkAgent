@@ -173,7 +173,8 @@ export function BotImChannelDialog({
         <DialogHeader>
           <DialogTitle>IM 接入 · {bot.name}</DialogTitle>
           <DialogDescription>
-            从招乎私聊或群聊交办文字任务，回复回到原会话。独立任务也会出现在 Bot 右侧列表。
+            通过招乎的 CMBDevCaw Bot 私聊或群聊交办文字任务，回复回到原会话。独立任务也会出现在 Bot
+            右侧列表。
           </DialogDescription>
         </DialogHeader>
         <div className="flex items-center justify-between gap-3 text-sm">
@@ -220,7 +221,7 @@ export function BotImChannelDialog({
         )}
         {bindings.length === 0 && status?.available && (
           <p className="py-6 text-center text-sm text-muted-foreground">
-            尚未接入 IM。生成指令后，在招乎发送一次即可完成绑定。
+            尚未接入 IM。生成指令后，发给 CMBDevCaw Bot 即可完成绑定。
           </p>
         )}
         <div className="space-y-2">
@@ -261,8 +262,8 @@ export function BotImChannelDialog({
                 <div className="mt-3 space-y-2 text-sm">
                   <p>
                     {binding.kind === "group"
-                      ? "用当前登录账号在目标群 @招乎机器人，发送以下指令。"
-                      : "用当前登录账号私聊招乎机器人，发送以下指令。"}
+                      ? "用当前登录账号在目标群 @CMBDevCaw Bot，发送以下指令。"
+                      : "用当前登录账号私聊 CMBDevCaw Bot，发送以下指令。"}
                   </p>
                   <div className="flex items-center gap-2">
                     <code className="min-w-0 flex-1 select-all break-all rounded-lg bg-muted p-2">
@@ -281,7 +282,7 @@ export function BotImChannelDialog({
                     {new Date(binding.expiresAt).toLocaleTimeString()}{" "}
                     前有效。每个私聊或群聊只能绑定一个 Bot；变更时先撤销原绑定。
                     {binding.kind === "dm" &&
-                      "绑定后，这个机器人的私聊文字将交给该 Bot；撤销后恢复原 IM 对话入口。"}
+                      "绑定后，CMBDevCaw Bot 的私聊文字将交给此 Bot；原 CMBDevClaw 的项目和对话入口保持独立。"}
                   </p>
                 </div>
               )}

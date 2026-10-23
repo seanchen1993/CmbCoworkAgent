@@ -1,10 +1,10 @@
 # Bot 接入 IM 网关：设计与实施清单
 
-日期：2026-10-22。客户端继续在 `devclaw-bot-beta` 开发；网关代码位于 `LF39_devclaw_im_gateway_0821`，以本机现有 `e744c6d` 为起点。网关原有未提交的 Dockerfile、README.md、pom.xml 不属于本次修改。
+更新：2026-10-23。客户端继续在 `devclaw-bot-beta` 开发；网关代码位于 `LF39_devclaw_im_gateway_0821`，以本机现有 `e744c6d` 为起点。网关原有未提交的 Dockerfile、README.md、pom.xml 不属于本次修改。
 
 ## 目标与职责
 
-招乎个人消息或群内 @机器人，经现有 Java IM 网关送达本机 Bot；Bot 可自主直接回复或创建独立任务，后续修改、完成、继续与结果回传沿用已有闭环。
+新招乎机器人 CMBDevCaw Bot 的个人消息或群内 @，经现有 Java IM 网关送达本机 Bot；原 CMBDevClaw 保留项目/对话入口，两者共用网关与桌面连接。Bot 可自主直接回复或创建独立任务，后续修改、完成、继续与结果回传沿用已有闭环。
 
 | 对象 | 保存位置与职责 |
 | --- | --- |
@@ -30,7 +30,7 @@ flowchart LR
 ## 使用流程
 
 1. 在 beta Bot 菜单进入“IM 接入”，选择个人或群并生成一次性绑定指令。
-2. 本人从招乎私聊或目标群 @机器人发送绑定指令。网关用已验证的 IM 回调与已登录桌面身份核对绑定人；不接受客户端填入的群 ID 作为已获授权的依据。
+2. 本人私聊 CMBDevCaw Bot 或在目标群 @CMBDevCaw Bot 发送绑定指令。网关用已验证的 IM 回调与已登录桌面身份核对绑定人；不接受客户端填入的群 ID 作为已获授权的依据。
 3. 私聊绑定后消息进入指定 Bot；群绑定后，只接收平台回调的群 @机器人消息。群内同一绑定共享一个受众会话，发送人保留可区分标识。
 4. Bot 直接回复，或按模型判断调用现有任务工具。创建的任务出现在右侧；不同绑定的任务、消息和结果不能互相引用。
 5. 回复回到原私聊/群。独立任务后续结果也经同一绑定回传。用户完成业务任务与模型本轮执行结束仍分别记录。
@@ -38,7 +38,7 @@ flowchart LR
 
 第一阶段每个外部会话/平台机器人只绑定一个本地 Bot，避免多个桌面重复回复。个人绑定先支持已验证桌面使用者本人；群绑定人需要从目标群发送匹配指令，绑定授予该群成员文字交办权限。更复杂的群管理员审批和跨用户 Bot 发布另行扩展。
 
-**个人绑定会接管该机器人的私聊文字入口**，此时原来通过该入口触发的项目/普通对话文字命令交给 Bot；撤销后恢复原 IM 路由。beta 本地项目、普通对话、多 Bot 群、例行任务及其他入口保留。群绑定不会创建本地多 Bot 群。
+**个人绑定仅作用于新 CMBDevCaw Bot**；未绑定/撤销后提示绑定，不进入原项目/对话路由。原 CMBDevClaw 始终保留项目/普通对话及卡片能力。beta 本地项目、普通对话、多 Bot 群、例行任务及其他入口保留。群绑定不会创建本地多 Bot 群。
 
 ## 协议与兼容
 
@@ -68,7 +68,7 @@ flowchart LR
 - [x] S2：Bot 事件协议、群路由、旧路由隔离、执行许可和群文本回传。
 - [x] S3：beta 真实渠道适配，接入现有 Bot Host、任务工具与右侧列表；模拟渠道继续独立可用。
 - [x] S4：beta Bot 菜单的真实绑定入口、连接状态、接入记录及撤销交互。
-- [x] S5：临时 MySQL 5.7 + 真实 Java 网关 + beta WSS/Host 进程联调：本人/群绑定、拒绝其他人消费绑定码、去重、独立任务创建/修改/完成/继续、个人/群回传、撤销后恢复旧路由。
+- [x] S5：临时 MySQL 5.7 + 真实 Java 网关 + beta WSS/Host 进程联调：本人/群绑定、拒绝其他人消费绑定码、去重、独立任务创建/修改/完成/继续、个人/群回传、双机器人独立回复及撤销不影响旧入口。
 - [x] S6：旧 beta IM/Bot 回归、变更与部署说明。
 - [ ] S7：内网 BEE 工程构建、环境配置、招乎真实个人/群测试及平台送达核对。
 
@@ -84,10 +84,10 @@ flowchart LR
 | `npm run typecheck`、隔离构建 | Node/web 类型检查与隔离 app 构建通过。 |
 | `bots-local-work-app.spec.ts` | 隔离 Electron 真界面、假模型，委派、文件、任务修改/完成/继续通过。 |
 | `bots-mock-channel-app.spec.ts` | 隔离 Electron 模拟渠道主流程、受众隔离及受限运行时通过。 |
-| Java 公共依赖验证工程 | 17 项通过，编译同一份生产业务源码；内部启动类和企业认证 Filter 不在本机替代验证范围内。详情与运行命令见网关 `BOT_IM_INTEGRATION.md`。 |
-| Java/MySQL/客户端进程联调 | 实际 MySQL 5.7.24 执行 V2/V3，真实 Java WSS/HTTP/调度与 beta Host/SQLite 互通；6 个事件 `COMPLETED`、9 条回传 `SENT`。平台与模型为本地测试桩，不等于真实招乎或模型质量验收。 |
+| Java 公共依赖验证工程 | 29 项通过（含原 17 项），编译同一份生产业务源码；内部启动类和企业认证 Filter 不在本机替代验证范围内。详情与运行命令见网关 `BOT_IM_INTEGRATION.md`。 |
+| Java/MySQL/客户端进程联调 | 实际 MySQL 5.7.24 执行 V2/V3/V4，真实 Java WSS/HTTP/调度与 beta Host/SQLite 互通；8 个事件 `COMPLETED`、15 条回传 `SENT`。两套虚拟凭据由假平台核对发送身份，并验证同一用户/相同消息 ID 的双入口并存。平台与模型为本地测试桩，不等于真实招乎或模型质量验收。 |
 
-首期仅接个人文本和带 `groupOpenId` 的群 `at` 回调，不支持附件、语音、引用消息，也不把只有数字群 ID 的消息降级成私聊。群绑定证明绑定人在群里，不等于群管理员审批。绑定失败不会进入模型；目前失败原因未回到招乎，桌面仍显示待绑定/过期。
+首期仅接个人文本和带 `groupOpenId` 的群 `at` 回调，不支持附件、语音、引用消息，也不把只有数字群 ID 的消息降级成私聊。群绑定证明绑定人在群里，不等于群管理员审批。绑定失败不会进入模型，会提示重新生成指令和核对登录账号；未绑定或撤销后只提示绑定。
 
 仍沿用网关“一个身份一个在线桌面”的规则。Bot 定义不在设备间自动同步，另一台没有该 Bot 的设备不会接管执行。接入记录保存在本地，在“IM 接入”内查看；外部任务在右侧展示，外部消息不会混入本人私有主对话。
 
@@ -95,8 +95,25 @@ flowchart LR
 
 ## 部署与下一步
 
-网关分支：`codex/bot-im-integration`。先在现有数据库执行 `V3__bot_channel_binding.sql`，再部署 Java，即使 Bot 开关关闭也必须先有新表/列。开启 `im.gateway.bot-channel.enabled=true` 时必须配置 `trusted-callback-ips`；同时升级 beta 客户端。原 Java 服务无需并行运行。
+网关分支：`codex/bot-im-integration`。先在现有数据库依次执行 `V3__bot_channel_binding.sql`、`V4__bot_robot_reply_identity.sql`（V2 已有），再部署 Java，即使 Bot 开关关闭也必须先有新表/列。新机器人凭据申请前保持 `im.gateway.bot-channel.enabled=false`。开启时必须配置独立的 `im.gateway.bot-channel.robot.open-id/client-id/client-secret-ref` 与 `trusted-callback-ips`；同时升级 beta 客户端。原 Java 服务无需并行运行。
 
 本机原工程的离线构建被未缓存的内部 `ZA21:bee-starter-parent:6.0.5` 阻断，不能将公共依赖验证当成内网构建成功。现有 `LocalCryptoService` 是 Base64 开发适配器；正式环境需要已有的内部 Crypto/Secret 实现、身份认证及平台回调网络边界，不能按本地假身份服务器部署。没有修改模型 key、用户现有绑定或向真实群发消息。
 
-下一步在内网完成 S7，优先测试：本人私聊绑定/恢复旧入口、群内绑定与不同成员交办、离线排队/重连、任务修改/完成/继续、撤销，以及平台实际送达。不确定发送应人工核对，不能为消除未知状态直接重放。
+下一步在内网完成 S7，优先测试：两个机器人各自私聊、Bot 绑定/撤销不影响旧入口、群内绑定与不同成员交办、离线排队/重连、任务修改/完成/继续、撤销，以及平台实际送达。不确定发送应人工核对，不能为消除未知状态直接重放。
+
+## 双机器人配置与路由
+
+| 项目 | 原 CMBDevClaw | 新 CMBDevCaw Bot |
+| --- | --- | --- |
+| 功能 | 原项目/普通对话、审批与卡片 | Bot 文字交办及独立任务 |
+| 回调 | `/api/v1/platform/zhaohu/callback` | `/api/v1/platform/zhaohu/bot/callback` |
+| 身份 | 原 `zhaohu.message.robot-open-id` | `im.gateway.bot-channel.robot.open-id` |
+| client-id | 原 `zhaohu.token.client-id` | `im.gateway.bot-channel.robot.client-id` |
+| SecretPort 引用 | 原 `zhaohu.client-secret` | 默认 `zhaohu.bot.client-secret` |
+| 未绑定 | 原有项目/对话流程 | 提示在 App 生成绑定指令 |
+
+凭据只在服务端配置，不下发桌面，不进入 Git。平台 API 地址/超时可共用，令牌缓存与刷新锁按机器人独立。新 Bot 回调显式 toId 与端点不符时拒绝；缺失时只用该端点对应身份。Bot 消息 ID 按机器人隔离，旧消息去重键不变。
+
+回复按绑定/会话持久化的机器人指纹选择身份；未绑定提示也持久化身份与个人/群目标。关闭、撤销、配置变化和失败重试不能转用旧机器人。之前同机器人试验的绑定不自动迁移，使用新身份重新绑定。
+
+部署前须执行 V4，即使 Bot 开关关闭。具体环境变量、SecretPort 注入和回滚要求见网关仓库 `BOT_IM_INTEGRATION.md`。本次不更改用户现有配置，真实凭据和平台注册留待申请后完成。

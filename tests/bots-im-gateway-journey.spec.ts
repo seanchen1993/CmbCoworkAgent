@@ -26,26 +26,40 @@ async function main() {
     kind: "dm" | "group",
     text: string,
     id = randomUUID(),
-    sender = "local-owner-open"
+    sender = "local-owner-open",
+    robot: "bot" | "legacy" = "bot"
   ) => {
-    const response = await fetch(base + "/api/v1/platform/zhaohu/callback", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        msgId: id,
-        msgType: kind === "group" ? "at" : "text",
-        timestamp: 1780000000000,
-        fromId: sender,
-        toId: "local-robot-open",
-        msgContent: text,
-        netWorkStatus: 1,
-        ...(kind === "group" ? { groupOpenId: "local-group-open", groupName: "本地验收群" } : {})
-      })
-    })
+    const response = await fetch(
+      base +
+        (robot === "bot"
+          ? "/api/v1/platform/zhaohu/bot/callback"
+          : "/api/v1/platform/zhaohu/callback"),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          msgId: id,
+          msgType: kind === "group" ? "at" : "text",
+          timestamp: 1780000000000,
+          fromId: sender,
+          toId: robot === "bot" ? "local-bot-robot-open" : "local-robot-open",
+          msgContent: text,
+          netWorkStatus: 1,
+          ...(kind === "group" ? { groupOpenId: "local-group-open", groupName: "本地验收群" } : {})
+        })
+      }
+    )
     assert.equal(response.status, 200, await response.text())
   }
   const messages = async (): Promise<
-    { content: string; path: string; groupOpenId?: string; toId?: string; requestId: string }[]
+    {
+      fromId: string
+      content: string
+      path: string
+      groupOpenId?: string
+      toId?: string
+      requestId: string
+    }[]
   > => (await fetch(base + "/local-bot-platform/messages")).json()
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:")),
     store = new BotStore(db)
@@ -108,6 +122,15 @@ async function main() {
       await client.sendAcknowledgement({ ...ack, type: "received" })
       assert.equal((await client.acquireBotPermit(ack)).status, "granted")
       await client.sendAcknowledgement({ ...ack, type: "accepted" })
+      await client.submitReply({
+        schemaVersion: 1,
+        eventId: event.eventId,
+        deliveryId: event.eventId,
+        conversationKey: event.conversationKey,
+        idempotencyKey: event.eventId + ":reply:0",
+        segment: { index: 0, count: 1 },
+        message: { type: "text", content: "原机器人回复：" + event.message.text }
+      })
       await client.sendAcknowledgement({ ...ack, type: "completed" })
     },
     isProactiveRouteConfirmed: (key, principal) => service.isRouteConfirmed(key, principal)
@@ -185,7 +208,10 @@ async function main() {
     assert(
       groupMessages.every(
         (m) =>
-          m.path.endsWith("/group-message/text") && m.groupOpenId === "local-group-open" && !m.toId
+          m.fromId === "local-bot-robot-open" &&
+          m.path.endsWith("/group-message/text") &&
+          m.groupOpenId === "local-group-open" &&
+          !m.toId
       )
     )
     await service.revoke(bot.id, group.id, group.version)
@@ -196,19 +222,58 @@ async function main() {
     await wait(
       async () =>
         (await messages()).some(
-          (m) => m.content === "已处理：personal text" && m.toId === "local-owner-open"
+          (m) =>
+            m.fromId === "local-bot-robot-open" &&
+            m.content === "已处理：personal text" &&
+            m.toId === "local-owner-open"
         ),
       "DM reply"
     )
     assert.equal(runs.length, previousRuns + 1)
     assert.equal(legacy.length, 0)
+    // Both robots remain live on the same desktop connection, including identical platform IDs.
+    const sharedId = randomUUID()
+    await post("dm", "separate bot work", sharedId)
+    await post("dm", "original project work", sharedId, "local-owner-open", "legacy")
+    await wait(async () => {
+      const replies = await messages()
+      return (
+        replies.some(
+          (m) => m.fromId === "local-bot-robot-open" && m.content === "已处理：separate bot work"
+        ) &&
+        replies.some(
+          (m) =>
+            m.fromId === "local-robot-open" && m.content === "原机器人回复：original project work"
+        )
+      )
+    }, "both robot identities reply independently")
+    assert.deepEqual(legacy, ["original project work"])
     await service.revoke(bot.id, dm.id, dm.version)
-    await post("dm", "ordinary legacy IM after revoke")
-    await wait(() => legacy.length === 1, "legacy route restored")
-    assert.equal(legacy[0], "ordinary legacy IM after revoke")
+    const runCount = runs.length
+    await post("dm", "revoked bot must prompt binding")
+    await wait(
+      async () =>
+        (await messages()).some(
+          (m) =>
+            m.fromId === "local-bot-robot-open" &&
+            m.toId === "local-owner-open" &&
+            m.content.includes("尚未连接 Bot")
+        ),
+      "revoked DM binding hint"
+    )
+    assert.equal(runs.length, runCount)
+    assert.equal(legacy.length, 1)
+    await post("dm", "legacy still works", randomUUID(), "local-owner-open", "legacy")
+    await wait(
+      async () =>
+        (await messages()).some(
+          (m) => m.fromId === "local-robot-open" && m.content === "原机器人回复：legacy still works"
+        ),
+      "legacy survives Bot revocation"
+    )
     assert.deepEqual(errors, [])
     console.log(
-      "PASS: real Java/MySQL/WSS + beta Host: pairing identity, DM/group delivery, duplicate suppression, task create/revise/complete/continue, revoke and legacy fallback"
+      "PASS: real Java/MySQL/WSS + beta Host: pairing identity, DM/group delivery, duplicate suppression, task create/revise/complete/continue, two robot identities/credentials, same-ID separation, revoke without legacy fallback"
     )
   } catch (error) {
     console.error("Local fixture diagnostics", {
