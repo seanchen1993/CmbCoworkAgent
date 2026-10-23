@@ -45,5 +45,8 @@ describe("collapsed tool-call search summary", () => {
     expect(
       getCollapsedToolCallSummary({ name: "mcp__inAppBrowser__browser_run_code_unsafe" })
     ).toBe("内置浏览器-运行 Playwright 代码（非安全模式）")
+    expect(getCollapsedToolCallSummary({ name: "mcp__inAppBrowser__browser_find" })).toBe(
+      "内置浏览器-查找页面内容"
+    )
   })
 })

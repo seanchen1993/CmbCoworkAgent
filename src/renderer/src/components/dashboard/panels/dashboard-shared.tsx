@@ -8,6 +8,7 @@ import { useState } from "react"
 import { Search, X, Info } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { formatRankingMatchStatus, sumRankingCounts } from "@/lib/dashboard-ranking-status"
 import { hasMarketSkill } from "../skill-market"
 import {
   DEFAULT_SKILL_ADOPTION_SORT,
@@ -281,10 +282,6 @@ export function highlightRankingName(name: string, query: string): React.ReactNo
   )
 }
 
-export function sumRankingCounts(items: RankingItem[]): number {
-  return items.reduce((total, item) => total + item.count, 0)
-}
-
 export function SearchableRankingPanel({
   title,
   totalKinds,
@@ -300,6 +297,7 @@ export function SearchableRankingPanel({
   headerActions,
   titleTooltipContent,
   renderNameAddon,
+  showMatchedTotalCalls = false,
   className
 }: {
   title: string
@@ -316,6 +314,7 @@ export function SearchableRankingPanel({
   headerActions?: React.ReactNode
   titleTooltipContent?: React.ReactNode
   renderNameAddon?: (item: RankingItem) => React.ReactNode
+  showMatchedTotalCalls?: boolean
   className?: string
 }): React.JSX.Element {
   const [query, setQuery] = useState("")
@@ -325,7 +324,7 @@ export function SearchableRankingPanel({
     : defaultItems
   const maxCount = searchItems[0]?.count ?? defaultItems[0]?.count ?? 0
   const statusLabel = trimmedQuery
-    ? `匹配 ${visibleItems.length} 项`
+    ? formatRankingMatchStatus(visibleItems, showMatchedTotalCalls)
     : defaultItems.length > 0
       ? `Top ${defaultItems.length}`
       : "暂无排行"
@@ -828,7 +827,8 @@ function SkillAdoptionRankingPanel({
   const statusLabel = trimmedQuery
     ? `匹配 ${visibleItems.length} 项`
     : `按 ${SKILL_ADOPTION_SORT_LABELS[sortKey]}`
-  const getItemKey = (item: SkillAdoptionRankingItem): string => item.id ?? item.sourceRef ?? item.skill
+  const getItemKey = (item: SkillAdoptionRankingItem): string =>
+    item.id ?? item.sourceRef ?? item.skill
 
   return (
     <div className="flex h-[340px] flex-col rounded-xl border border-border bg-card p-4">
@@ -1115,6 +1115,7 @@ export function ToolRankingPanel({
       emptySearchLabel="未找到匹配的 Tool"
       barColorClassName="bg-violet-500"
       labelClassName="font-mono"
+      showMatchedTotalCalls
       headerActions={
         <div className="flex items-center rounded-md border border-border overflow-hidden">
           <button

@@ -27,6 +27,7 @@ const COLLAPSED_TOOL_LABELS: Record<string, string> = {
   mcp__inAppBrowser__browser_evaluate: "内置浏览器-执行 JavaScript",
   mcp__inAppBrowser__browser_file_upload: "内置浏览器-上传文件",
   mcp__inAppBrowser__browser_fill_form: "内置浏览器-填写表单",
+  mcp__inAppBrowser__browser_find: "内置浏览器-查找页面内容",
   mcp__inAppBrowser__browser_install: "内置浏览器-安装浏览器",
   mcp__inAppBrowser__browser_press_key: "内置浏览器-按键",
   mcp__inAppBrowser__browser_press_sequentially: "内置浏览器-逐字输入",
