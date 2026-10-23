@@ -66,6 +66,59 @@ function createHarness() {
 }
 
 describe("graded tool concurrency cancellation", () => {
+  it("lets a task child acquire its parent's queue without holding a parent read lock", async () => {
+    const { create } = createHarness()
+    const parent = create("shared-thread")
+    const child = create("shared-thread")
+    await expect(
+      parent.wrapToolCall(request("task"), () =>
+        child.wrapToolCall(request("execute"), async () => "child finished")
+      )
+    ).resolves.toBe("child finished")
+  })
+
+  it("allows file handlers to progress while a sibling awaits approval", async () => {
+    const { create } = createHarness()
+    const middleware = create("files")
+    const started = deferred()
+    const approval = deferred()
+    const first = middleware.wrapToolCall(request("edit_file"), async () => {
+      started.resolve()
+      await approval.promise
+      return "approved"
+    })
+    await started.promise
+    try {
+      await expect(
+        create("files").wrapToolCall(request("write_file"), async () => "written")
+      ).resolves.toBe("written")
+    } finally {
+      approval.resolve()
+      await first
+    }
+  })
+
+  it("keeps unknown shell mutations exclusive against shared file tools", async () => {
+    const { create } = createHarness()
+    const started = deferred()
+    const release = deferred()
+    let executing = false
+    const command = create("shell").wrapToolCall(request("execute"), async () => {
+      executing = true
+      started.resolve()
+      await release.promise
+      executing = false
+      return "done"
+    })
+    await started.promise
+    const file = create("shell").wrapToolCall(request("edit_file"), async () => {
+      expect(executing).toBe(false)
+      return "edited"
+    })
+    release.resolve()
+    await Promise.all([command, file])
+  })
+
   it("cancels a queued execute immediately and lets a new turn read the same thread", async () => {
     const { create } = createHarness()
     const turn = create("thread")
