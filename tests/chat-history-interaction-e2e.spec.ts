@@ -342,7 +342,7 @@ async function beginObservation(page: Page, threadId: string) {
           if (!stopped) await new Promise<void>((done) => setTimeout(done, 40))
         }
       })()
-      ;(window as HistoryWindow).historyInteraction = {
+      ;(window as unknown as HistoryWindow).historyInteraction = {
         snapshot,
         phase: (label) => {
           phase = label
@@ -418,7 +418,7 @@ async function dragThumb(
   await page.mouse.up()
   const released = performance.now()
   if (diagnostic) await phase("released")
-  return { before, start, released }
+  return { before, start, released, track, handle }
 }
 
 async function runCase(mode: HistoryCase) {
@@ -909,13 +909,153 @@ async function runCase(mode: HistoryCase) {
       oldestVisibleMessageId: "history-thumb-0",
       oldestReachMs: performance.now() - oldestStarted
     })
-    await dragThumb(page, scroll, viewport, 1)
-    await chat.locator(`[data-chat-message-id="${lastMessageId}"]`).waitFor({ state: "visible" })
+    const returnDrag = await dragThumb(page, scroll, viewport, 1)
+    const tailSetupDeadline = returnDrag.released + 15000
+    const tailRemaining = () => Math.max(1, tailSetupDeadline - performance.now())
+    const tailState = () =>
+      page!.evaluate(
+        ({ threadId, lastMessageId }) => {
+          const scope = document.querySelector(`[data-chat-thread-id="${threadId}"]`)
+          const viewport = scope?.querySelector<HTMLElement>(
+            "[data-chat-message-scroll-area] [data-radix-scroll-area-viewport]"
+          )
+          const tail = scope?.querySelector<HTMLElement>(
+            `[data-chat-message-id="${lastMessageId}"]`
+          )
+          const area = viewport?.getBoundingClientRect(),
+            box = tail?.getBoundingClientRect()
+          const pending =
+            tail?.querySelectorAll(
+              '[data-function-site-pending], [data-function-site][aria-busy="true"]'
+            ).length ?? 0
+          return {
+            ready: Boolean(
+              area &&
+              box &&
+              box.height > 0 &&
+              box.bottom > area.top &&
+              box.top < area.bottom &&
+              pending === 0 &&
+              tail?.textContent?.includes(`HISTORY_CASE_${lastMessageId.split("-").at(-1)}`)
+            ),
+            tail: tail
+              ? {
+                  id: tail.dataset.chatMessageId,
+                  top: box!.top - area!.top,
+                  height: box!.height,
+                  pending
+                }
+              : null,
+            scrollTop: viewport?.scrollTop,
+            scrollHeight: viewport?.scrollHeight,
+            clientHeight: viewport?.clientHeight,
+            distanceToBottom: viewport
+              ? viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+              : null,
+            rows: [
+              ...(viewport?.querySelectorAll<HTMLElement>("[data-chat-message-row]") ?? [])
+            ].map((row) => ({
+              id: row.dataset.chatMessageId,
+              top: row.getBoundingClientRect().top - area!.top,
+              height: row.getBoundingClientRect().height,
+              pending: row.querySelectorAll("[data-function-site-pending]").length
+            }))
+          }
+        },
+        { threadId, lastMessageId }
+      )
+    const afterReturnDrag = await tailState()
+    record({
+      kind: "native-tail-drag-endpoint",
+      gesture: returnDrag,
+      viewport: afterReturnDrag
+    })
+    let tailMethod = "thumb-drag"
+    try {
+      if (!afterReturnDrag.ready) {
+        // A cold virtual row may change the content height after the final pointer move.
+        // This is setup for the measured gestures, not proof that one drag reached the tail.
+        // Use only the actual native return action, sharing the original 15-second deadline.
+        const latest = chat.getByRole("button", { name: "回到会话底部", exact: true })
+        await page.waitForFunction(
+          ({ threadId, lastMessageId }) => {
+            const scope = document.querySelector(`[data-chat-thread-id="${threadId}"]`)
+            const viewport = scope?.querySelector(
+              "[data-chat-message-scroll-area] [data-radix-scroll-area-viewport]"
+            )
+            const tail = scope?.querySelector(`[data-chat-message-id="${lastMessageId}"]`)
+            const button = scope?.querySelector('button[aria-label="回到会话底部"]')
+            const buttonBox = button?.getBoundingClientRect()
+            if (buttonBox && buttonBox.width > 0 && buttonBox.height > 0) return true
+            if (
+              !viewport ||
+              !tail ||
+              tail.querySelector(
+                '[data-function-site-pending], [data-function-site][aria-busy="true"]'
+              ) ||
+              !tail.textContent?.includes(`HISTORY_CASE_${lastMessageId.split("-").at(-1)}`)
+            )
+              return false
+            const area = viewport.getBoundingClientRect(),
+              box = tail.getBoundingClientRect()
+            return box.height > 0 && box.bottom > area.top && box.top < area.bottom
+          },
+          { threadId, lastMessageId },
+          { timeout: tailRemaining() }
+        )
+        if (await latest.isVisible()) {
+          tailMethod = "thumb-drag-then-native-return-button"
+          await latest.click({ timeout: tailRemaining() })
+        }
+      }
+      await page.waitForFunction(
+        ({ threadId, lastMessageId }) => {
+          const scope = document.querySelector(`[data-chat-thread-id="${threadId}"]`)
+          const viewport = scope?.querySelector(
+            "[data-chat-message-scroll-area] [data-radix-scroll-area-viewport]"
+          )
+          const tail = scope?.querySelector(`[data-chat-message-id="${lastMessageId}"]`)
+          if (
+            !viewport ||
+            !tail ||
+            tail.querySelector(
+              '[data-function-site-pending], [data-function-site][aria-busy="true"]'
+            ) ||
+            !tail.textContent?.includes(`HISTORY_CASE_${lastMessageId.split("-").at(-1)}`)
+          )
+            return false
+          const area = viewport.getBoundingClientRect(),
+            box = tail.getBoundingClientRect()
+          return box.height > 0 && box.bottom > area.top && box.top < area.bottom
+        },
+        { threadId, lastMessageId },
+        { timeout: tailRemaining() }
+      )
+      const settled = await tailState()
+      record({
+        kind: "native-tail-setup",
+        method: tailMethod,
+        elapsedMs: performance.now() - returnDrag.released,
+        viewport: settled
+      })
+      assert(
+        settled.ready,
+        "native return must expose the actual readable tail inside the viewport"
+      )
+    } catch (error) {
+      record({
+        kind: "native-tail-setup-failure",
+        method: tailMethod,
+        elapsedMs: performance.now() - returnDrag.released,
+        viewport: await tailState()
+      })
+      throw error
+    }
     await beginObservation(page, threadId)
     const readable = () =>
       page!.waitForFunction(
         () => {
-          const status = (window as HistoryWindow).historyInteraction.snapshot()
+          const status = (window as unknown as HistoryWindow).historyInteraction.snapshot()
           return status.readable > 0 && status.pending === 0
         },
         undefined,
@@ -968,7 +1108,7 @@ async function runCase(mode: HistoryCase) {
       await readable()
       if (diagnostic)
         await page.evaluate(() =>
-          (window as HistoryWindow).historyInteraction.phase("readable-settled")
+          (window as unknown as HistoryWindow).historyInteraction.phase("readable-settled")
         )
       const after = await viewport.evaluate((node) => node.scrollTop)
       assert(
@@ -994,7 +1134,7 @@ async function runCase(mode: HistoryCase) {
     const inputMs = performance.now() - inputStart
     assert(inputMs < 1500, "typing after release must not remain blocked")
     const observation = await page.evaluate(() =>
-      (window as HistoryWindow).historyInteraction.stop()
+      (window as unknown as HistoryWindow).historyInteraction.stop()
     )
     assert(observation.peakMountedRows < 100, "persisted history must keep a bounded DOM window")
     assert(observation.seenMessages.length > 8, "real drags must expose distinct history regions")
