@@ -264,7 +264,6 @@ function SandboxModeSwitcherContent({ onOpenSettings }: SandboxModeSwitcherProps
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
-          data-sandbox-mode-switcher
           type="button"
           variant="ghost"
           size="sm"
