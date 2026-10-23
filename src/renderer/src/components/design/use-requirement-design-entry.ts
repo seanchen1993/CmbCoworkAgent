@@ -1,4 +1,4 @@
-import { useEffect, useRef, type MutableRefObject } from "react"
+import { useEffect } from "react"
 
 import {
   REQUIREMENT_DESIGN_ENTRY_KEY,
@@ -19,25 +19,19 @@ type CreateRequirementSession = (
 
 export function useRequirementDesignEntry({
   sessionReady,
-  entryRef,
-  artifactPath,
-  generationState,
   createSession,
   openSession,
   setWorkspacePath,
+  onEntryChange,
   showToast
 }: {
   sessionReady: boolean
-  entryRef: MutableRefObject<ActiveRequirementDesignEntry | null>
-  artifactPath: string | null | undefined
-  generationState: string
   createSession: CreateRequirementSession
   openSession: (id: string, preserveRequirementEntry?: boolean) => void
   setWorkspacePath: (path: string) => void
+  onEntryChange: (entry: ActiveRequirementDesignEntry | null) => void
   showToast: (message: string) => void
 }): void {
-  const writeKeyRef = useRef<string | null>(null)
-
   // Consume the cross-mode entry once, then restore in descending fidelity:
   // managed session, saved HTML, or a blank session with the prompt prefilled.
   useEffect(() => {
@@ -50,7 +44,7 @@ export function useRequirementDesignEntry({
         const entry = JSON.parse(raw) as RequirementDesignEntry
         if (!entry.requirementId || !entry.workspacePath || !entry.requirementFilePath)
           throw new Error("需求设计入口无效")
-        entryRef.current = { ...entry, bindingReady: false }
+        onEntryChange({ ...entry, bindingReady: false })
         setWorkspacePath(entry.workspacePath)
         const client = getDesignSessionClient()
         if (entry.htmlId && client.list().some((session) => session.id === entry.htmlId)) {
@@ -58,7 +52,7 @@ export function useRequirementDesignEntry({
             await client.setWorkspace(entry.htmlId, entry.workspacePath)
           }
           openSession(entry.htmlId, true)
-          entryRef.current = { ...entry, bindingReady: true }
+          onEntryChange({ ...entry, bindingReady: true })
           return
         }
 
@@ -86,7 +80,7 @@ export function useRequirementDesignEntry({
             generationState: "done",
             inputValue: ""
           })
-          entryRef.current = { ...entry, htmlId: sessionId, htmlFile, bindingReady: true }
+          onEntryChange({ ...entry, htmlId: sessionId, htmlFile, bindingReady: true })
           const updated = await window.api.requirements.updateFunctionHtml({
             reqId: entry.requirementId,
             workspacePath: entry.workspacePath,
@@ -102,40 +96,18 @@ export function useRequirementDesignEntry({
           { title: entry.requirementFilePath.split(/[\\/]/).pop() || "需求原型" },
           { initialInputValue: entry.prompt, workspacePath: entry.workspacePath }
         )
-        entryRef.current = { ...entry, htmlId: sessionId, bindingReady: true }
+        onEntryChange({ ...entry, htmlId: sessionId, bindingReady: true })
       } catch (error) {
-        entryRef.current = null
+        onEntryChange(null)
         showToast(error instanceof Error ? error.message : "打开需求设计失败")
       }
     })()
-  }, [createSession, entryRef, openSession, sessionReady, setWorkspacePath, showToast])
-
-  // Bind only a completed, durably saved artifact. The key suppresses StrictMode
-  // effect replay and repeated snapshots for the same session/path pair.
-  useEffect(() => {
-    const entry = entryRef.current
-    const htmlFile = artifactPath?.trim()
-    if (!entry?.bindingReady || !htmlFile || generationState !== "done") return
-    const htmlId = entry.htmlId.trim()
-    if (!htmlId || (entry.htmlFile === htmlFile && entry.htmlId === htmlId)) return
-    const writeKey = `${htmlId}\n${htmlFile}`
-    if (writeKeyRef.current === writeKey) return
-    writeKeyRef.current = writeKey
-    void window.api.requirements
-      .updateFunctionHtml({
-        reqId: entry.requirementId,
-        workspacePath: entry.workspacePath,
-        requirementFilePath: entry.requirementFilePath,
-        htmlFile,
-        htmlId
-      })
-      .then((result) => {
-        if (!result.success) throw new Error(result.error || "更新需求原型绑定失败")
-        if (entryRef.current === entry) entryRef.current = { ...entry, htmlFile }
-      })
-      .catch((error) => {
-        if (writeKeyRef.current === writeKey) writeKeyRef.current = null
-        showToast(error instanceof Error ? error.message : String(error))
-      })
-  }, [artifactPath, entryRef, generationState, showToast])
+  }, [
+    createSession,
+    onEntryChange,
+    openSession,
+    sessionReady,
+    setWorkspacePath,
+    showToast
+  ])
 }

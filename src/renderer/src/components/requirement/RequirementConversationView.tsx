@@ -474,13 +474,21 @@ function RequirementConversationSession({
       const requirementFilePath = `${workspacePath.replace(/[\\/]+$/, "")}${separator}${relativeFile.replace(/\//g, separator)}`
       openRequirementDesign({
         requirementId: requirement.id,
+        requirementName: requirement.title,
+        functionName: `${functionInfo.fr} ${functionInfo.name}`.trim(),
         workspacePath,
         requirementFilePath,
         prompt: `请为功能「${functionInfo.fr} ${functionInfo.name}」设计原型。请以 ${relativeFile} 中的需求为依据，生成完整、可交互的单页 HTML 原型。`,
         htmlId: functionInfo.htmlId?.trim() ?? ""
       })
     },
-    [conversationLoading, requirement.requirementPath, threadState?.workspacePath]
+    [
+      conversationLoading,
+      requirement.id,
+      requirement.requirementPath,
+      requirement.title,
+      threadState?.workspacePath
+    ]
   )
   const revealRequirementFile = useCallback(
     (filePath: string): void => {

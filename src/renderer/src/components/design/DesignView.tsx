@@ -33,6 +33,7 @@ import {
   type ResolvedDrawStroke
 } from "./DesignDraw"
 import { DesignGallery } from "./DesignGallery"
+import { RequirementDesignContextBar } from "./RequirementDesignContextBar"
 import { CreateDesignModal, ExportDesignModal, LinkModal } from "./DesignModals"
 import { ElementPropsPanel } from "./ElementPropsPanel"
 import { getDrawElementLabel, pickStrokeIdForNotePoint } from "./drawUtils"
@@ -1399,8 +1400,8 @@ export function DesignView(): React.JSX.Element {
   const [createDesignSystemId, setCreateDesignSystemId] = useState<string | null>(null)
   const [activeSkillIndex, setActiveSkillIndex] = useState(0)
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
-  // 记录当前需求入口，供设计产物生成后回写需求 Manifest。
-  const requirementEntryRef = useRef<ActiveRequirementDesignEntry | null>(null)
+  // 记录当前需求入口，供需求模式顶部栏展示并手动回写 Manifest。
+  const [requirementEntry, setRequirementEntry] = useState<ActiveRequirementDesignEntry | null>(null)
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
   // Code & link modal state
   const [createModalOpen, setCreateModalOpen] = useState(false)
@@ -1912,7 +1913,7 @@ export function DesignView(): React.JSX.Element {
   const newSession = useCallback(
     (designSystemId?: string | null) => {
       // 用户主动新建设计后，不再把产物回写到此前打开的需求。
-      requirementEntryRef.current = null
+      setRequirementEntry(null)
       createSession(undefined, { designSystemId: designSystemId ?? null })
     },
     [createSession]
@@ -2398,7 +2399,9 @@ export function DesignView(): React.JSX.Element {
   const openSession = useCallback(
     (id: string, preserveRequirementEntry = false) => {
       // 从普通会话入口切换时解除需求绑定；需求跳转会显式要求保留。
-      if (!preserveRequirementEntry) requirementEntryRef.current = null
+      if (!preserveRequirementEntry) {
+        setRequirementEntry(null)
+      }
       // 重选当前会话不会触发加载 Effect，因此直接复用已打开状态，避免恢复页卡死。
       if (currentSessionIdRef.current === id) {
         localStorage.setItem(SESSION_LAST_KEY, id)
@@ -2419,18 +2422,16 @@ export function DesignView(): React.JSX.Element {
   // 消费需求详情页传入的数据，并负责恢复会话及回写生成后的 HTML 绑定。
   useRequirementDesignEntry({
     sessionReady,
-    entryRef: requirementEntryRef,
-    artifactPath: ts.artifactPath,
-    generationState: ts.generationState,
     createSession,
     openSession,
     setWorkspacePath,
+    onEntryChange: setRequirementEntry,
     showToast
   })
 
   const backToGallery = useCallback(() => {
     // 返回设计列表即结束本次需求关联，防止后续产物误写到旧需求。
-    requirementEntryRef.current = null
+    setRequirementEntry(null)
     flushArtifactEdits()
     currentSessionIdRef.current = null
     setCurrentSessionId(null)
@@ -4232,6 +4233,20 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           </button>
         </div>
       </div>
+
+      {requirementEntry ? (
+        <RequirementDesignContextBar
+          entry={requirementEntry}
+          html={getCurrentDesignHtml(ts)}
+          htmlId={currentSessionId}
+          artifactPath={ts.artifactPath}
+          artifactMetadata={ts.artifactMetadata as Record<string, unknown> | null}
+          disabled={!getCurrentDesignHtml(ts).trim() || isGenerating}
+          onArtifactPathChange={(filePath) => updateTs(activeTabId, { artifactPath: filePath })}
+          onEntryChange={setRequirementEntry}
+          showToast={showToast}
+        />
+      ) : null}
 
       <div style={S.mainContent}>
         {/* ── Left Chat Panel ── */}
