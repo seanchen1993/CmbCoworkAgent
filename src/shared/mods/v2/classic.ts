@@ -1,5 +1,37 @@
 import { isModObject, ModFunctionError } from "./contracts"
-import { isClaudeEventName } from "./event-catalog"
+import { isFunctionClassicEventName } from "./event-catalog"
+
+/** Native facts for this application's skill lifecycle extensions. */
+export interface ClassicSkillUseInput {
+  hook_event_name: "PreSkillUse" | "PostSkillUse"
+  session_id: string
+  transcript_path: string
+  cwd: string
+  skill_name: string
+  skill_path: string
+  skill_root: string
+  skill_trigger_tool_name: string
+  permission_mode?: string
+  agent_id?: string
+  tool_name?: string
+  tool_input?: unknown
+  tool_response?: unknown
+  plugin_id?: string
+  plugin_name?: string
+  plugin_root?: string
+  stop_context?: {
+    userMessage?: string
+    assistantResponse?: string
+    toolCalls?: string[]
+    usedSkills?: string[]
+  }
+}
+export interface ClassicSkillUseResult {
+  block?: string
+  preventContinuation?: true
+  stopReason?: string
+  additionalContext?: string[]
+}
 
 export interface ClassicToolBatchCall {
   tool_name: string
@@ -109,6 +141,8 @@ const additionalContext = { additionalContext: strings }
 const eventFields: Record<string, Record<string, Validator>> = {
   UserPromptSubmit: { ...additionalContext, sessionTitle: text, suppressOriginalPrompt: flag },
   UserPromptExpansion: { ...additionalContext, suppressOriginalPrompt: flag },
+  PreSkillUse: additionalContext,
+  PostSkillUse: additionalContext,
   SessionStart: {
     ...additionalContext,
     initialUserMessage: text,
@@ -136,7 +170,7 @@ const eventFields: Record<string, Record<string, Validator>> = {
 }
 
 function classicName(event: string): string {
-  if (!event.startsWith("classic.") || !isClaudeEventName(event))
+  if (!isFunctionClassicEventName(event))
     throw new ModFunctionError("MODS_CLASSIC_EVENT_INVALID")
   return event.slice("classic.".length)
 }
@@ -164,6 +198,19 @@ export function validateClassicInput(event: string, value: unknown): void {
     for (const key of ["error", "error_details", "last_assistant_message"])
       if (value[key] !== undefined && typeof value[key] !== "string")
         throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  }
+  if (name === "PreSkillUse" || name === "PostSkillUse") {
+    if (
+      ["skill_name", "skill_path", "skill_root", "skill_trigger_tool_name"].some(
+        (key) => !text(value[key]) || !(value[key] as string).trim()
+      ) ||
+      ["tool_name", "plugin_id", "plugin_name", "plugin_root"].some(
+        (key) => value[key] !== undefined && !text(value[key])
+      ) ||
+      (value.stop_context !== undefined && !shape(value.stop_context, {
+        userMessage: text, assistantResponse: text, toolCalls: strings, usedSkills: strings
+      }))
+    ) throw new ModFunctionError("MODS_CLASSIC_INPUT")
   }
   if (name === "Stop" || name === "SubagentStop") {
     if (

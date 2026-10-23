@@ -1508,6 +1508,8 @@ export type HookResultCallback = (event: HookEvent, hook: HookConfig, result: Ho
 
 const CLASSIC_HOOK_EVENTS = new Set<string>([
   "PreToolUse",
+  "PreSkillUse",
+  "PostSkillUse",
   "PostToolUse",
   "PostToolUseFailure",
   "PostToolBatch",
@@ -1573,6 +1575,27 @@ function toClassicInput(event: HookEvent, context: HookContext): ModObject {
           if (typeof failure.is_interrupt === "boolean") payload.is_interrupt = failure.is_interrupt
         } else payload.tool_response = output
       }
+    }
+    if (event === "PreSkillUse" || event === "PostSkillUse") {
+      payload.skill_name = context.skillName
+      payload.skill_path = context.skillPath
+      payload.skill_root = context.skillRoot
+      payload.skill_trigger_tool_name = context.skillTriggerToolName
+      if (context.pluginId) payload.plugin_id = context.pluginId
+      if (context.pluginName) payload.plugin_name = context.pluginName
+      if (context.pluginRoot) payload.plugin_root = context.pluginRoot
+      if (context.toolName) payload.tool_name = context.toolName
+      if (context.toolArgs) payload.tool_input = context.toolArgs
+      if (context.toolResult !== undefined) {
+        let response: unknown = context.toolResult
+        try {
+          response = JSON.parse(context.toolResult)
+        } catch {
+          // Keep native plain text.
+        }
+        payload.tool_response = response
+      }
+      if (event === "PostSkillUse" && context.stopContext) payload.stop_context = context.stopContext
     }
     if (event === "UserPromptExpansion") Object.assign(payload, context.promptExpansion, { prompt: context.userPrompt ?? "" })
     if (event === "PostToolBatch") payload.tool_calls = context.toolBatch ?? []

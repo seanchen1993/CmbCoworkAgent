@@ -1,8 +1,9 @@
 /** Original five-stage warehouse -> host-verified bundle -> independent Guest JSON consumer.
  * Models are loopback-controlled; native configuration, grants, tools, checks and stores are real. */
 import assert from "node:assert/strict"
+import { prepareAutobizCollectorFixture } from "./support/autobiz-collector-dependency-fixture"
 import { createHash } from "node:crypto"
-import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import AdmZip from "adm-zip"
 import type { ElectronApplication } from "playwright"
@@ -155,10 +156,7 @@ async function main() {
         const storageKey = extensionContextStorageKey(metadata, zip.readFile("board_core/board_config.json")!,
           envelope.extensionContract.context, realpathSync(knowledge))
         const collector = join(fixture.env.CMB_COWORK_AGENT_HOME, "plugin-data", storageKey, "collector")
-        mkdirSync(collector, { recursive: true })
-        const dependencies = resolve("output/creator-context-fixture-deps/node_modules")
-        assert(existsSync(join(dependencies, "gray-matter/index.js")))
-        cpSync(dependencies, join(collector, "node_modules"), { recursive: true })
+        prepareAutobizCollectorFixture(collector)
         evidence.nativeKnowledgeConfiguration = saved
       }
       const approved = await page.evaluate(({ key, review }) => window.api.projectComposition.unitMods.approve({

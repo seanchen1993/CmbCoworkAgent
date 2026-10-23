@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
@@ -157,4 +157,30 @@ it("blocks missing injection commands and empty successful payloads for selected
   await expect(
     context({ ok: true, sessionContext: "", agentmdLoadStatus: [report("required-unit", true)] })
   ).rejects.toBeInstanceOf(HarnessRequiredContextError)
+})
+
+it("cancels a real context process and confirms its native process has exited", async () => {
+  const marker = join(state.root, "started.pid")
+  await writeFile(join(state.root, "context.cjs"), `
+    require('node:fs').writeFileSync(${JSON.stringify(marker)},String(process.pid))
+    setInterval(()=>{},1000)
+    setTimeout(()=>process.exit(0),3000)
+  `)
+  const controller = new AbortController()
+  const pending = buildHarnessFeatureAgentContext(
+    { harnessFeature: { projectId: "p", slug: "f" } }, { signal: controller.signal }
+  )
+  const outcome = pending.then(value => ({ value }), error => ({ error }))
+  let pid = 0
+  await vi.waitFor(async () => {
+    pid = Number(await readFile(marker, "utf8"))
+    expect(pid).toBeGreaterThan(0)
+  }, { timeout: 2000 })
+  controller.abort(new DOMException("real context cancelled", "AbortError"))
+  expect(await outcome).toMatchObject({ error: { name: "AbortError" } })
+  await vi.waitFor(() => {
+    let alive = false
+    try { process.kill(pid, 0); alive = true } catch { /* Exited. */ }
+    expect(alive).toBe(false)
+  }, { timeout: 1000 })
 })

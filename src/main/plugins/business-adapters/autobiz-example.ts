@@ -17,6 +17,8 @@ export async function readAutobizKnowledgeExample(mainDirectory: string) {
   const assets = [
     ["autobiz-knowledge/register.ts", `${namespace}/register.ts`],
     ["autobiz-context-provider.py", `${namespace}/provider.py`],
+    ["autobiz-knowledge/collector-gray-matter.cjs", `${namespace}/collector-gray-matter.cjs`],
+    ["autobiz-knowledge/collector-THIRD-PARTY-NOTICES.md", `${namespace}/collector-THIRD-PARTY-NOTICES.md`],
     ["autobiz-knowledge/validate-knowledge-draft.py", `${namespace}/validate-knowledge-draft.py`],
     [
       "autobiz-knowledge/skills/knowledge-sync/SKILL.md",

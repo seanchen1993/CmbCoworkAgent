@@ -66,6 +66,14 @@ const classicIdentity = [
 ] as const
 
 const classicFacts: Record<string, readonly string[]> = {
+  "classic.PreSkillUse": [
+    "skill_name", "skill_path", "skill_root", "skill_trigger_tool_name",
+    "tool_name", "tool_input", "tool_response", "plugin_id", "plugin_name", "plugin_root", "stop_context"
+  ],
+  "classic.PostSkillUse": [
+    "skill_name", "skill_path", "skill_root", "skill_trigger_tool_name",
+    "tool_name", "tool_input", "tool_response", "plugin_id", "plugin_name", "plugin_root", "stop_context"
+  ],
   "classic.StopFailure": ["error", "error_details", "last_assistant_message"],
   "classic.Stop": ["stop_hook_active", "last_assistant_message", "background_tasks", "session_crons"],
   "classic.SubagentStop": [

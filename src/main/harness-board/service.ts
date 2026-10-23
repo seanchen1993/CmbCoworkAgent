@@ -43,7 +43,13 @@ import {
 } from "../../shared/harness-feature-workspace"
 import { formatGmt8Timestamp } from "../../shared/gmt8-time"
 import { harnessNotifications } from "./notifications"
-import { spawn, type ChildProcess } from "child_process"
+import { startOwnedHookCommand } from "../hooks/owned-command"
+import { findHookProcessCleanupError } from "../hooks/owned-process-error"
+import {
+  HarnessInvocationSemaphore,
+  createHarnessInvocationDeadline,
+  waitForHarnessInvocation
+} from "./invocation-lifecycle"
 import { createHash } from "crypto"
 import { access, mkdir, stat } from "node:fs/promises"
 import { basename, isAbsolute, join, relative, resolve } from "path"
@@ -258,35 +264,6 @@ interface HarnessInvocationLogOptions {
   configKey: HarnessInspectCommandConfigKey
   detail?: string
   successResult?: HarnessInvocationSuccessLogMode
-}
-
-class HarnessInvocationSemaphore {
-  private active = 0
-  private readonly waiting: Array<() => void> = []
-
-  constructor(private readonly limit: number) {}
-
-  async acquire(): Promise<() => void> {
-    if (this.active < this.limit) {
-      this.active += 1
-    } else {
-      await new Promise<void>((resolvePromise) => {
-        this.waiting.push(resolvePromise)
-      })
-    }
-
-    let released = false
-    return () => {
-      if (released) return
-      released = true
-      const next = this.waiting.shift()
-      if (next) {
-        next()
-      } else {
-        this.active -= 1
-      }
-    }
-  }
 }
 
 interface HarnessCommandParseOptions {
@@ -1289,20 +1266,6 @@ function createHarnessInvocationError(
   return error
 }
 
-function killHarnessInvocationProcess(child: ChildProcess): void {
-  if (process.platform === "win32" && child.pid) {
-    const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-      stdio: "ignore",
-      windowsHide: true
-    })
-    killer.once("error", () => {
-      child.kill()
-    })
-    return
-  }
-  child.kill("SIGTERM")
-}
-
 function harnessDetailCancelledError(): Error {
   const error = new Error("Harness detail request was superseded")
   error.name = "AbortError"
@@ -1316,153 +1279,143 @@ async function runHarnessInvocationAsync(
   signal?: AbortSignal,
   beforeSpawn?: () => void | Promise<void>
 ): Promise<Buffer> {
-  const release = await harnessInvocationSemaphore.acquire()
-  let extensionContext: Awaited<ReturnType<typeof prepareExtensionContext>>
-
-  try {
-    if (signal?.aborted) throw harnessDetailCancelledError()
-    const suppressPythonCache = configured.readonlyPackage ||
-      await suppressCompositionPythonCache(configured.cwd)
-    const operation = logOptions?.configKey === "session_context_inject" ? "session-context" :
-      logOptions?.configKey === "pull_knowledge" ? "sync-knowledge" : undefined
-    if (operation) extensionContext = await prepareExtensionContext({
-      sourceRoot: configured.cwd, workspace: configured.workspace ?? configured.cwd,
-      dataRoot: join(getOpenworkDir(), "plugin-data"), operation,
-      invocation: configured.invocation,
-      projectId: configured.projectId
-    })
-    if (suppressPythonCache && logOptions?.configKey === "pull_knowledge" && !extensionContext)
-      throw Object.assign(new Error(
-        "此插件的知识同步尚未提供独立可变数据目录，已停止同步以保留受保护源码。请绑定已同步知识，或使用支持独立数据目录的适配版本。"
-      ), { code: "HARNESS_KNOWLEDGE_SYNC_SOURCE_IMMUTABLE" })
-    if (beforeSpawn) await beforeSpawn()
-    if (extensionContext?.recoveryBound)
-      throw Error("PROJECT_STAGE_DEBUG_CONTEXT_PROVIDER_NATIVE_EXECUTION_REQUIRED")
-    extensionContext?.assertCurrent?.()
-    if (signal?.aborted) throw harnessDetailCancelledError()
-    const { cwd } = configured
-    const invocation = extensionContext?.invocation ?? configured.invocation
-    if (logOptions) logHarnessInvocationStart(configured, logOptions)
-    const stdoutBuffer = await new Promise<Buffer>((resolvePromise, rejectPromise) => {
-      const child = spawn(invocation.executable, invocation.args, {
-        cwd,
-        env: {
+  const deadline = createHarnessInvocationDeadline(timeoutMs, signal)
+  const stdoutChunks: Buffer[] = [],
+    stderrChunks: Buffer[] = []
+  let stdoutLength = 0,
+    stderrLength = 0,
+    exceededMaxBuffer = false
+  const completion = (async () => {
+    const release = await harnessInvocationSemaphore.acquire(deadline.signal)
+    let extensionContext: Awaited<ReturnType<typeof prepareExtensionContext>>
+    let cleanupUnconfirmed = false
+    try {
+      deadline.signal.throwIfAborted()
+      const suppressPythonCache =
+        configured.readonlyPackage || (await suppressCompositionPythonCache(configured.cwd))
+      const operation =
+        logOptions?.configKey === "session_context_inject"
+          ? "session-context"
+          : logOptions?.configKey === "pull_knowledge"
+            ? "sync-knowledge"
+            : undefined
+      if (operation)
+        extensionContext = await prepareExtensionContext({
+          sourceRoot: configured.cwd,
+          workspace: configured.workspace ?? configured.cwd,
+          dataRoot: join(getOpenworkDir(), "plugin-data"),
+          operation,
+          invocation: configured.invocation,
+          projectId: configured.projectId,
+          signal: deadline.signal
+        })
+      if (suppressPythonCache && logOptions?.configKey === "pull_knowledge" && !extensionContext)
+        throw Object.assign(
+          new Error(
+            "此插件的知识同步尚未提供独立可变数据目录，已停止同步以保留受保护源码。请绑定已同步知识，或使用支持独立数据目录的适配版本。"
+          ),
+          { code: "HARNESS_KNOWLEDGE_SYNC_SOURCE_IMMUTABLE" }
+        )
+      if (beforeSpawn) await beforeSpawn()
+      if (extensionContext?.recoveryBound)
+        throw Error("PROJECT_STAGE_DEBUG_CONTEXT_PROVIDER_NATIVE_EXECUTION_REQUIRED")
+      extensionContext?.assertCurrent?.()
+      deadline.signal.throwIfAborted()
+      const { cwd } = configured
+      const invocation = extensionContext?.invocation ?? configured.invocation
+      if (logOptions) logHarnessInvocationStart(configured, logOptions)
+      const owner: { current?: ReturnType<typeof startOwnedHookCommand> } = {}
+      const appendChunk = (chunks: Buffer[], chunk: Buffer, currentLength: number): number => {
+        if (exceededMaxBuffer) return currentLength
+        if (currentLength + chunk.length > HARNESS_ADAPTER_MAX_BUFFER) {
+          exceededMaxBuffer = true
+          owner.current?.stop()
+          return currentLength
+        }
+        chunks.push(chunk)
+        return currentLength + chunk.length
+      }
+      const env = Object.fromEntries(
+        Object.entries({
           ...process.env,
           PYTHONIOENCODING: "utf-8",
           PYTHONUTF8: "1",
           ...extensionContext?.env,
           ...(suppressPythonCache ? { PYTHONDONTWRITEBYTECODE: "1" } : {})
+        }).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+      )
+      const owned = startOwnedHookCommand({
+        executable: invocation.executable,
+        args: invocation.args,
+        cwd,
+        env,
+        stdin: "",
+        signal: deadline.signal,
+        stdout: (chunk: Buffer) => {
+          stdoutLength = appendChunk(stdoutChunks, chunk, stdoutLength)
         },
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true
-      })
-
-      const stdoutChunks: Buffer[] = []
-      const stderrChunks: Buffer[] = []
-      let stdoutLength = 0
-      let stderrLength = 0
-      let settled = false
-      let timedOut = false
-      let exceededMaxBuffer = false
-      let aborted = false
-
-      const timer = setTimeout(() => {
-        timedOut = true
-        killHarnessInvocationProcess(child)
-      }, timeoutMs)
-
-      const settle = (callback: () => void): void => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        signal?.removeEventListener("abort", handleAbort)
-        callback()
-      }
-
-      const handleAbort = (): void => {
-        if (settled || aborted) return
-        aborted = true
-        killHarnessInvocationProcess(child)
-      }
-      signal?.addEventListener("abort", handleAbort, { once: true })
-      if (signal?.aborted) handleAbort()
-
-      const appendChunk = (chunks: Buffer[], chunk: Buffer, currentLength: number): number => {
-        const nextLength = currentLength + chunk.length
-        chunks.push(chunk)
-        if (nextLength > HARNESS_ADAPTER_MAX_BUFFER && !exceededMaxBuffer) {
-          exceededMaxBuffer = true
-          killHarnessInvocationProcess(child)
+        stderr: (chunk: Buffer) => {
+          stderrLength = appendChunk(stderrChunks, chunk, stderrLength)
         }
-        return nextLength
+      })
+      owner.current = owned
+      if (exceededMaxBuffer) owned.stop()
+      const result = await owned.completion
+      deadline.signal.throwIfAborted()
+      const stdoutBuffer = Buffer.concat(stdoutChunks, stdoutLength)
+      if (exceededMaxBuffer || result.error || result.code !== 0)
+        throw createHarnessInvocationError(
+          exceededMaxBuffer
+            ? "Harness adapter stdout/stderr exceeded maxBuffer"
+            : (result.error?.message ??
+                `Harness adapter exited with code ${result.code ?? "unknown"}`),
+          {
+            ...(typeof result.code === "number" ? { status: result.code } : {}),
+            stdout: stdoutBuffer,
+            stderr: Buffer.concat(stderrChunks, stderrLength)
+          }
+        )
+      extensionContext?.assertCurrent?.()
+      if (logOptions) logHarnessInvocationSuccess(stdoutBuffer, logOptions)
+      return stdoutBuffer
+    } catch (error) {
+      cleanupUnconfirmed = !!findHookProcessCleanupError(error)
+      if (cleanupUnconfirmed)
+        console.error(
+          "[HarnessBoard] Adapter cleanup unconfirmed; invocation/data leases quarantined",
+          error
+        )
+      throw error
+    } finally {
+      // Never allow a second writer into this data root when physical cleanup is unknown.
+      // The failed operation stays quarantined in this process; queued requests still cancel.
+      if (!cleanupUnconfirmed) {
+        extensionContext?.release()
+        release()
       }
-
-      child.stdout.on("data", (chunk: Buffer) => {
-        stdoutLength = appendChunk(stdoutChunks, chunk, stdoutLength)
-      })
-      child.stderr.on("data", (chunk: Buffer) => {
-        stderrLength = appendChunk(stderrChunks, chunk, stderrLength)
-      })
-      child.once("error", (error) => {
-        const stdout = Buffer.concat(stdoutChunks, stdoutLength)
-        const stderr = Buffer.concat(stderrChunks, stderrLength)
-        settle(() => {
-          rejectPromise(createHarnessInvocationError(error.message, { stdout, stderr }))
-        })
-      })
-      child.once("close", (code, signal) => {
-        const stdout = Buffer.concat(stdoutChunks, stdoutLength)
-        const stderr = Buffer.concat(stderrChunks, stderrLength)
-        settle(() => {
-          if (aborted) {
-            rejectPromise(harnessDetailCancelledError())
-            return
-          }
-          if (timedOut) {
-            rejectPromise(
-              createHarnessInvocationError(
-                `Harness adapter timed out after ${Math.round(timeoutMs / 1000)}s`,
-                { signal: "timeout", stdout, stderr }
-              )
-            )
-            return
-          }
-          if (exceededMaxBuffer) {
-            rejectPromise(
-              createHarnessInvocationError("Harness adapter stdout/stderr exceeded maxBuffer", {
-                signal: "maxBuffer",
-                stdout,
-                stderr
-              })
-            )
-            return
-          }
-          if (code === 0) {
-            resolvePromise(stdout)
-            return
-          }
-          rejectPromise(
-            createHarnessInvocationError(`Harness adapter exited with code ${code ?? "unknown"}`, {
-              ...(typeof code === "number" ? { status: code } : {}),
-              ...(signal ? { signal } : {}),
-              stdout,
-              stderr
-            })
-          )
-        })
-      })
-    })
-    extensionContext?.assertCurrent?.()
-    if (logOptions) logHarnessInvocationSuccess(stdoutBuffer, logOptions)
-    return stdoutBuffer
+    }
+  })()
+  try {
+    return await waitForHarnessInvocation(completion, deadline.signal)
   } catch (error) {
-    if (logOptions) logHarnessInvocationFailure(configured, logOptions, error)
-    if (error instanceof Error && "code" in error &&
-      error.code === "HARNESS_KNOWLEDGE_SYNC_SOURCE_IMMUTABLE") throw error
-    throw new Error(formatAdapterError(error))
+    const failure = deadline.signal.aborted
+      ? createHarnessInvocationError(error instanceof Error ? error.message : String(error), {
+          signal: signal?.aborted ? "abort" : "timeout",
+          stdout: Buffer.concat(stdoutChunks, stdoutLength),
+          stderr: Buffer.concat(stderrChunks, stderrLength)
+        })
+      : error
+    if (logOptions) logHarnessInvocationFailure(configured, logOptions, failure)
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "HARNESS_KNOWLEDGE_SYNC_SOURCE_IMMUTABLE"
+    )
+      throw error
+    if (signal?.aborted) signal.throwIfAborted()
+    throw new Error(formatAdapterError(failure), { cause: error })
   } finally {
-    extensionContext?.release()
-    release()
+    deadline.dispose()
   }
 }
 
@@ -1522,13 +1475,15 @@ function parseInspectAdapterOutput(
 
 async function runHarnessJsonInvocation(
   configured: ConfiguredHarnessInvocation,
-  mode: HarnessInspectCommandName
+  mode: HarnessInspectCommandName,
+  signal?: AbortSignal
 ): Promise<Record<string, unknown>> {
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
   const stdoutBuffer = await runHarnessInvocationAsync(
     configured,
     harnessCommandLogOptions(mode),
-    HARNESS_ADAPTER_TIMEOUT_MS
+    HARNESS_ADAPTER_TIMEOUT_MS,
+    signal
   )
   return parseInspectAdapterOutput(configured, configKey, stdoutBuffer)
 }
@@ -2847,6 +2802,7 @@ export interface HarnessFeatureAgentContext {
 
 export interface HarnessFeatureAgentContextOptions {
   workspacePath?: string
+  signal?: AbortSignal
   /** Resolve tool policy from the plugin while a project feature session is created. */
   requestUserInputConfigSource?: "plugin" | "session_snapshot"
 }
@@ -2979,8 +2935,10 @@ async function readHarnessFeatureSessionContextAgentPrompt(
   options: {
     sessionWorkspacePath?: string
     selectedDeployUnits?: HarnessDeployUnitMapping[]
+    signal?: AbortSignal
   } = {}
 ): Promise<HarnessSessionContextInjectResult> {
+  options.signal?.throwIfAborted()
   if (!hasConfiguredHarnessInvocationInContext(context, "sessionContext")) {
     if (options.selectedDeployUnits?.length)
       throw new HarnessRequiredContextError(options.selectedDeployUnits.map(item => item.deployUnitId))
@@ -3012,7 +2970,7 @@ async function readHarnessFeatureSessionContextAgentPrompt(
         sessionWorkspacePath: options.sessionWorkspacePath
       }
     )
-    const result = await runHarnessJsonInvocation(configured, "sessionContext")
+    const result = await runHarnessJsonInvocation(configured, "sessionContext", options.signal)
     const message = normalizeText(result.message).trim()
     const agentmdLoadStatus = normalizeHarnessAgentmdLoadStatus(result.agentmdLoadStatus)
     if (result.agentmdLoadStatus != null &&
@@ -3057,6 +3015,8 @@ async function readHarnessFeatureSessionContextAgentPrompt(
       ...(agentConfig ? { agentConfig } : {})
     }
   } catch (error) {
+    options.signal?.throwIfAborted()
+    if (findHookProcessCleanupError(error)) throw error
     if (error instanceof HarnessSessionContextLimitError || error instanceof HarnessRequiredContextError)
       throw error
     if (options.selectedDeployUnits?.length)
@@ -3099,15 +3059,40 @@ export async function buildHarnessFeatureAgentContext(
   metadata: unknown,
   options: HarnessFeatureAgentContextOptions = {}
 ): Promise<HarnessFeatureAgentContext | null> {
+  const deadline = createHarnessInvocationDeadline(HARNESS_ADAPTER_TIMEOUT_MS, options.signal)
+  try {
+    return await waitForHarnessInvocation(
+      buildHarnessFeatureAgentContextWithinDeadline(metadata, {
+        ...options,
+        signal: deadline.signal
+      }),
+      deadline.signal
+    )
+  } finally {
+    deadline.dispose()
+  }
+}
+
+async function buildHarnessFeatureAgentContextWithinDeadline(
+  metadata: unknown,
+  options: HarnessFeatureAgentContextOptions
+): Promise<HarnessFeatureAgentContext | null> {
+  options.signal?.throwIfAborted()
   const feature = readHarnessFeatureMetadata(metadata)
   if (!feature) return null
 
   const scope = makeHarnessDetailScope("harness-feature-agent-context")
-  const contexts = await readHarnessProjectContextsInWorker(
-    [feature.projectId],
-    `${scope}:context`,
-    { featureSlug: feature.slug }
-  )
+  const cancel = () => cancelHarnessCatalogScope(`${scope}:context`)
+  options.signal?.addEventListener("abort", cancel, { once: true })
+  let contexts: Awaited<ReturnType<typeof readHarnessProjectContextsInWorker>>
+  try {
+    contexts = await waitForHarnessInvocation(readHarnessProjectContextsInWorker(
+      [feature.projectId], `${scope}:context`, { featureSlug: feature.slug }
+    ), options.signal)
+    options.signal?.throwIfAborted()
+  } finally {
+    options.signal?.removeEventListener("abort", cancel)
+  }
   const workerContext = contexts.projects[feature.projectId]
   if (!workerContext) throw new Error("Project not found")
   const project = workerContext.project
@@ -3149,7 +3134,8 @@ export async function buildHarnessFeatureAgentContext(
   const sessionContextInjectResult = usePluginAgentsPrompt
     ? await readHarnessFeatureSessionContextAgentPrompt(project, feature.slug, context, {
         sessionWorkspacePath,
-        selectedDeployUnits: workerContext.selectedDeployUnits
+        selectedDeployUnits: workerContext.selectedDeployUnits,
+        signal: options.signal
       })
     : undefined
   const pluginAgentConfig = sessionContextInjectResult?.agentConfig

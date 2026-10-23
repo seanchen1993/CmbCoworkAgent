@@ -10,6 +10,8 @@ export async function prepareAutobizKnowledgeMod(output: string, kernelVersion =
   const assets = [
     ["resources/mods/autobiz-knowledge/register.ts", `${namespace}/register.ts`],
     ["resources/mods/autobiz-context-provider.py", `${namespace}/provider.py`],
+    ["resources/mods/autobiz-knowledge/collector-gray-matter.cjs", `${namespace}/collector-gray-matter.cjs`],
+    ["resources/mods/autobiz-knowledge/collector-THIRD-PARTY-NOTICES.md", `${namespace}/collector-THIRD-PARTY-NOTICES.md`],
     [
       "resources/mods/autobiz-knowledge/validate-knowledge-draft.py",
       `${namespace}/validate-knowledge-draft.py`

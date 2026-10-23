@@ -1,38 +1,40 @@
 /** AutoBiz Python board compatibility. Host context providers use the Host action contract. */
 import type { ExtensionContextContract } from "../../../shared/project-runtime"
 import { createHash, randomUUID } from "node:crypto"
-import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises"
+import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises"
 import { dirname, isAbsolute, join, relative } from "node:path"
 import { readPackageExtensionContract } from "../../plugins/extension-contract"
 import { readRuntimeScopedFile, runtimeRelativePath } from "../project-runtime/safe-files"
-import { createAsyncMutex } from "../../utils/fs"
+import { HarnessInvocationSemaphore, waitForHarnessInvocation } from "../invocation-lifecycle"
 import { isInternalHarnessProjectId } from "../internal-project-context"
 import { readProjectRecoveryContext } from "../project-runtime/recovery-context"
 import type { ProjectRecoveryContext } from "../project-runtime/recovery-context"
 
 type Operation = "session-context" | "sync-knowledge"
 type Invocation = { executable: string; args: string[] }
-const locks = new Map<string, { mutex: ReturnType<typeof createAsyncMutex>; users: number }>()
+const locks = new Map<string, { mutex: HarnessInvocationSemaphore; users: number }>()
 const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value)
 
 /** Only a workspace's saved non-sensitive directory binding is accepted, never a model path. */
 export interface ExtensionContextConfig {
-  directoryBinding(name: string, key: string): Promise<string | undefined>
+  directoryBinding(name: string, key: string, signal?: AbortSignal): Promise<string | undefined>
 }
 type DirectoryResolver = (
   sourceRoot: string,
   workspace: string,
   name: string,
   key: string,
-  projectId?: string
+  projectId?: string,
+  signal?: AbortSignal
 ) => Promise<string | undefined>
 let directoryResolver: DirectoryResolver | undefined
 type SourceAdmission = (
   sourceRoot: string,
   workspace: string,
-  projectId: string
+  projectId: string,
+  signal?: AbortSignal
 ) => Promise<() => void>
 let sourceAdmission: SourceAdmission | undefined
 export function configureExtensionContextDirectoryBinding(
@@ -73,7 +75,9 @@ export async function prepareExtensionContext(input: {
   projectId?: string
   /** Main-only per-run writable scratch; never accepted from model/renderer JSON. */
   recoveryContext?: ProjectRecoveryContext
+  signal?: AbortSignal
 }) {
+  input.signal?.throwIfAborted()
   const contract = readPackageExtensionContract(input.sourceRoot)
   const context = contract?.context
   const provider = context?.provider
@@ -84,7 +88,9 @@ export async function prepareExtensionContext(input: {
       ? input.projectId
       : undefined
   const assertCurrent = internalProject
-    ? await sourceAdmission?.(input.sourceRoot, input.workspace, internalProject)
+    ? await waitForHarnessInvocation(Promise.resolve(
+        sourceAdmission?.(input.sourceRoot, input.workspace, internalProject, input.signal)
+      ), input.signal)
     : undefined
   if (internalProject && !assertCurrent)
     throw Error("COMPOSITION_CONTEXT_SOURCE_ADMISSION_REQUIRED")
@@ -103,15 +109,18 @@ export async function prepareExtensionContext(input: {
   const binding = context.knowledge.binding
   const recovery = input.recoveryContext ?? readProjectRecoveryContext(input.workspace, { name: plugin.name, version: plugin.version })
   let boundKnowledge = binding
-    ? await (input.configuration?.directoryBinding(plugin.name, binding) ??
+    ? await waitForHarnessInvocation(Promise.resolve(
+        input.configuration?.directoryBinding(plugin.name, binding, input.signal) ??
         directoryResolver?.(
           input.sourceRoot,
           input.workspace,
           plugin.name,
           binding,
-          input.projectId
-        ))
+          input.projectId,
+          input.signal
+        )), input.signal)
     : undefined
+  input.signal?.throwIfAborted()
   // Directory bindings are read-only knowledge sources. With no binding value, the original
   // plugin-wide cache semantics remain; required knowledge is checked during actual loading.
   if (recovery?.knowledgeRoot) boundKnowledge = recovery.knowledgeRoot
@@ -140,30 +149,39 @@ export async function prepareExtensionContext(input: {
     context,
     boundKnowledge
   )
+  input.signal?.throwIfAborted()
   await mkdir(input.dataRoot, { recursive: true })
   const root = await realpath(input.dataRoot)
   const data = recovery?.directory ?? join(root, identity)
   await mkdir(data, { recursive: true })
   const actual = await realpath(data)
+  input.signal?.throwIfAborted()
   if ((!recovery && relative(root, actual) !== identity) || !(await lstat(data)).isDirectory())
     throw Error("EXTENSION_CONTEXT_DATA_SCOPE_CHANGED")
   recovery?.assertCurrent()
   let lock = locks.get(actual)
   if (!lock) {
     if (locks.size >= 128) throw Error("EXTENSION_CONTEXT_BUSY")
-    lock = { mutex: createAsyncMutex(), users: 0 }
+    lock = { mutex: new HarnessInvocationSemaphore(1), users: 0 }
     locks.set(actual, lock)
   }
   lock.users++
-  await lock.mutex.acquire()
+  let releaseLock: () => void
+  try {
+    releaseLock = await lock.mutex.acquire(input.signal)
+  } catch (error) {
+    if (--lock.users === 0) locks.delete(actual)
+    throw error
+  }
   let released = false
   const release = () => {
     if (released) return
     released = true
-    lock!.mutex.release()
+    releaseLock()
     if (--lock!.users === 0) locks.delete(actual)
   }
   try {
+    input.signal?.throwIfAborted()
     const configPath = join(actual, "board_config.json")
     assertCurrent?.()
     let existing: Record<string, unknown> | undefined
@@ -171,7 +189,9 @@ export async function prepareExtensionContext(input: {
       const info = await lstat(configPath)
       if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > 262_144)
         throw Error("EXTENSION_CONTEXT_DATA_INVALID")
-      const parsed: unknown = JSON.parse(await readFile(configPath, "utf8"))
+      const parsed: unknown = JSON.parse(await readFile(configPath, {
+        encoding: "utf8", signal: input.signal
+      }))
       if (!record(parsed)) throw Error("EXTENSION_CONTEXT_DATA_INVALID")
       existing = parsed
     } catch (error) {
@@ -192,11 +212,19 @@ export async function prepareExtensionContext(input: {
     for (const config of Object.values(commands))
       if (record(config)) config.knowledge_path = knowledgeRoot
     const temporary = join(dirname(configPath), `config-${randomUUID()}.tmp`)
-    await writeFile(temporary, `${JSON.stringify(effective, null, 2)}\n`, {
-      encoding: "utf8",
-      flag: "wx"
-    })
-    await rename(temporary, configPath)
+    input.signal?.throwIfAborted()
+    try {
+      await writeFile(temporary, `${JSON.stringify(effective, null, 2)}\n`, {
+        encoding: "utf8", flag: "wx", signal: input.signal
+      })
+      input.signal?.throwIfAborted()
+      await rename(temporary, configPath)
+    } finally {
+      await unlink(temporary).catch(error => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+      })
+    }
+    input.signal?.throwIfAborted()
     const scriptIndex = input.invocation.args.findIndex((arg) => /\.py$/i.test(arg))
     if (
       scriptIndex < 0 ||
@@ -206,7 +234,8 @@ export async function prepareExtensionContext(input: {
     assertCurrent?.()
     return {
       ...(recovery ? { recoveryBound: true as const } : {}),
-      ...((assertCurrent || recovery) ? { assertCurrent: () => {
+      ...((assertCurrent || recovery || input.signal) ? { assertCurrent: () => {
+        input.signal?.throwIfAborted()
         assertCurrent?.(); recovery?.assertCurrent()
       } } : {}),
       invocation: {

@@ -130,6 +130,39 @@ async function guest(body: string, event = "PreToolUse") {
 }
 
 describe("host-owned required business checks", () => {
+  it.each(["PreSkillUse", "PostSkillUse"] as const)(
+    "keeps the original mandatory %s check authoritative despite real guest takeover",
+    async (event) => {
+      const f = fixture()
+      f.hook.event = event
+      f.hook.matcher = "review"
+      Object.assign(f.context, {
+        toolName: "read_file",
+        skillName: "review",
+        skillPath: join(f.root, "skills/review/SKILL.md"),
+        skillRoot: join(f.root, "skills/review"),
+        skillTriggerToolName: "read_file",
+        pluginId: f.plugin.id,
+        pluginName: f.plugin.name,
+        pluginRoot: f.root
+      })
+      await guest("return {}", event)
+      mock.execute.mockResolvedValue({
+        exitCode: 2,
+        stdout: "original required Skill artifact is invalid",
+        stderr: "",
+        blocked: true
+      })
+      expect(await f.run()).toMatchObject({ blocked: true, decision: "block" })
+      expect(mock.execute).toHaveBeenCalledOnce()
+      expect(JSON.parse(mock.execute.mock.calls[0][1])).toMatchObject({
+        skill_name: "review",
+        skill_path: f.context.skillPath,
+        plugin_id: f.plugin.id
+      })
+    }
+  )
+
   it("preserves a mandatory native human approval gate despite guest takeover", async () => {
     const f = fixture()
     f.hook.matcher = "execute"

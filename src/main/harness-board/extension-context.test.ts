@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises"
+import { mkdtemp, mkdir, writeFile, readFile, rm, access } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it } from "vitest"
@@ -127,6 +127,56 @@ it("does not redirect legacy packages without the new inline contract", async ()
   const wrapped = JSON.parse(await readFile(join(f.source, "devclaw.project-runtime.json"), "utf8"))
   await writeFile(join(f.source, "devclaw.project-runtime.json"), JSON.stringify(wrapped.runtime))
   expect(await prepareExtensionContext(f.input)).toBeUndefined()
+})
+
+it("rejects cancellation before creating mutable context data", async () => {
+  const f = await fixture()
+  const controller = new AbortController()
+  controller.abort(new DOMException("Context request cancelled", "AbortError"))
+  const request = { ...f.input, signal: controller.signal }
+  await expect(prepareExtensionContext(request)).rejects.toMatchObject({ name: "AbortError" })
+  await expect(access(f.input.dataRoot)).rejects.toMatchObject({ code: "ENOENT" })
+})
+
+it("removes a cancelled knowledge-lock waiter without stealing the current lease", async () => {
+  const f = await fixture()
+  const held = (await prepareExtensionContext(f.input))!
+  const controller = new AbortController()
+  const pending = prepareExtensionContext({ ...f.input, signal: controller.signal })
+  const outcome = pending.then(value => ({ value }), error => ({ error }))
+  let next: Awaited<ReturnType<typeof prepareExtensionContext>>
+  try {
+    await new Promise(resolve => setTimeout(resolve, 30))
+    controller.abort(new DOMException("Queued context cancelled", "AbortError"))
+    const result = await Promise.race([
+      outcome,
+      new Promise<"still-waiting">(resolve => setTimeout(() => resolve("still-waiting"), 100))
+    ])
+    expect(result).toMatchObject({ error: { name: "AbortError" } })
+  } finally {
+    held.release()
+    const result = await outcome
+    if ("value" in result) result.value?.release()
+    next = await prepareExtensionContext(f.input)
+    next?.release()
+  }
+})
+
+it("cancels a stalled native directory lookup without creating a mutable binding", async () => {
+  const f = await fixture("knowledgeRoot")
+  const controller = new AbortController()
+  let finish!: (value: undefined) => void
+  const lookup = new Promise<undefined>(resolve => { finish = resolve })
+  const pending = prepareExtensionContext({ ...f.input, operation: "session-context",
+    signal: controller.signal, configuration: { directoryBinding: async (_name, _key, signal) => {
+      expect(signal).toBe(controller.signal)
+      controller.abort(new DOMException("native lookup cancelled", "AbortError"))
+      return lookup
+    } } })
+  try {
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" })
+    await expect(access(f.input.dataRoot)).rejects.toMatchObject({ code: "ENOENT" })
+  } finally { finish(undefined) }
 })
 
 it("shares default knowledge across worktrees and isolates actual read-only sources instead of chat paths", async () => {

@@ -24,6 +24,7 @@ import { writeDerivationFiles } from "../../plugins/derivation-source"
 import { readNativeCapabilityCatalog } from "../../plugins/capability-catalog"
 import { readPackageExtensionContract } from "../../plugins/extension-contract"
 import { extensionContextStorageKey } from "../extension-context"
+import { prepareAutobizCollectorFixture } from "../../../../tests/support/autobiz-collector-dependency-fixture"
 import {
   readCompositionUnitContext,
   assertCompositionUnitContextSelection
@@ -42,17 +43,9 @@ describe.runIf(process.env.RUN_AUTOBIZ_COLLECTOR_INTEGRATION === "1")(
         process.env.AUTOBIZ_COMPOSITION_CONTEXT_ARCHIVE ??
           "output/deliveries/mods-verified-artifacts-20261017-v5/12-数仓可验证产物导出版.zip"
       )
-      const dependencies = resolve(
-        process.env.AUTOBIZ_CONTEXT_TEST_DEPENDENCIES ??
-          "output/creator-context-fixture-deps/node_modules"
-      )
       if (!existsSync(archive))
         throw Error(
           "AUTOBIZ_COLLECTOR_INTEGRATION_ARCHIVE_MISSING: set AUTOBIZ_COMPOSITION_CONTEXT_ARCHIVE to the reviewed warehouse ZIP"
-        )
-      if (!existsSync(join(dependencies, "gray-matter/index.js")))
-        throw Error(
-          "AUTOBIZ_COLLECTOR_INTEGRATION_DEPENDENCIES_MISSING: set AUTOBIZ_CONTEXT_TEST_DEPENDENCIES to prepared gray-matter@4.0.3 node_modules"
         )
       const archiveBytes = await readFile(archive),
         archiveHash = createHash("sha256").update(archiveBytes).digest("hex")
@@ -195,8 +188,7 @@ describe.runIf(process.env.RUN_AUTOBIZ_COLLECTOR_INTEGRATION === "1")(
           realpathSync(knowledge)
         )
       )
-      await mkdir(join(data, "collector"), { recursive: true })
-      await cp(dependencies, join(data, "collector/node_modules"), { recursive: true })
+      prepareAutobizCollectorFixture(join(data, "collector"))
       const inputs = createHostProjectInputIdentity(manager, {
         rules: () => [],
         contextDataRoot: join(root, "plugin-data")

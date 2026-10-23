@@ -6329,6 +6329,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     modUserInput: options.enableRequestUserInput
       ? functionUserInputInvoker({
           threadId: options.threadId,
+          abortSignal: options.abortSignal,
           interactionWaitHooks: options.interactionWaitHooks,
           requestUserInputConfig: options.requestUserInputConfig,
           onRejected: options.onToolRejected

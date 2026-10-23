@@ -1,12 +1,18 @@
 import { readFileSync, mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { spawn } from "node:child_process"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import ts from "typescript"
 import { suppressCompositionPythonCache } from "./composition-python-cache"
 import { prepareExtensionContext } from "./extension-context"
 import { isDerivedPlugin, setDerivationFamilies } from "../plugins/derivation-scope"
+import { startOwnedHookCommand } from "../hooks/owned-command"
+import { findHookProcessCleanupError } from "../hooks/owned-process-error"
+import {
+  createHarnessInvocationDeadline,
+  HarnessInvocationSemaphore,
+  waitForHarnessInvocation
+} from "./invocation-lifecycle"
 
 afterEach(() => setDerivationFamilies([]))
 
@@ -19,9 +25,14 @@ function syncEntry(deps: Record<string, unknown>) {
     true,
     ts.ScriptKind.TS
   )
-  const declarations = ["resolveHarnessKnowledgeWorkspace", "createKnowledgeCommandProject",
-    "syncHarnessProjectConstraints"].map(name => {
-    const node = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
+  const declarations = [
+    "resolveHarnessKnowledgeWorkspace",
+    "createKnowledgeCommandProject",
+    "syncHarnessProjectConstraints"
+  ].map((name) => {
+    const node = source.statements.find(
+      (node) => ts.isFunctionDeclaration(node) && node.name?.text === name
+    )
     if (!node) throw Error(`Missing production sync helper: ${name}`)
     return node.getText(source).replace(/^export /, "")
   })
@@ -33,10 +44,26 @@ function syncEntry(deps: Record<string, unknown>) {
   ) as (id: string) => Promise<unknown>
 }
 
-/** Execute the production private runner with a controlled queue; avoid importing app singletons. */
+/** Execute the actual runner and owned process lifecycle without app singleton startup. */
 function runner(deps: Record<string, unknown>) {
-  deps = { suppressCompositionPythonCache, prepareExtensionContext, join,
-    getOpenworkDir: () => tmpdir(), ...deps }
+  deps = {
+    suppressCompositionPythonCache,
+    prepareExtensionContext,
+    createHarnessInvocationDeadline,
+    waitForHarnessInvocation,
+    findHookProcessCleanupError,
+    startOwnedHookCommand,
+    harnessInvocationSemaphore: new HarnessInvocationSemaphore(1),
+    HARNESS_ADAPTER_MAX_BUFFER: 1024 * 1024,
+    formatAdapterError: (error: Error) => error.message,
+    createHarnessInvocationError: (message: string) => Error(message),
+    logHarnessInvocationFailure: () => {},
+    logHarnessInvocationStart: () => {},
+    logHarnessInvocationSuccess: () => {},
+    join,
+    getOpenworkDir: () => tmpdir(),
+    ...deps
+  }
   const source = readFileSync(new URL("./service.ts", import.meta.url), "utf8")
   const start = source.indexOf("async function runHarnessInvocationAsync(")
   const end = source.indexOf("\nasync function runInspectAdapter(", start)
@@ -56,9 +83,25 @@ function runner(deps: Record<string, unknown>) {
     },
     log: { configKey: string } | undefined,
     timeout: number,
-    signal: undefined,
+    signal: AbortSignal | undefined,
     guard: () => Promise<void>
   ) => Promise<Buffer>
+}
+
+function queueFixture() {
+  const semaphore = new HarnessInvocationSemaphore(1)
+  const released = vi.fn()
+  return {
+    occupy: () => semaphore.acquire(),
+    released,
+    acquire: vi.fn(async (signal?: AbortSignal) => {
+      const release = await semaphore.acquire(signal)
+      return () => {
+        released()
+        release()
+      }
+    })
+  }
 }
 
 describe("native create verification at the process queue boundary", () => {
@@ -69,17 +112,11 @@ describe("native create verification at the process queue boundary", () => {
       try {
         const board = join(root, "board_config.json")
         writeFileSync(board, '{"source":"retained"}')
-        const release = vi.fn()
-        const launch = vi.fn(spawn)
+        const queue = queueFixture()
+        const launch = vi.fn(startOwnedHookCommand)
         const invoke = runner({
-          harnessInvocationSemaphore: { acquire: async () => release },
-          spawn: launch,
-          HARNESS_ADAPTER_MAX_BUFFER: 1024 * 1024,
-          formatAdapterError: (error: Error) => error.message,
-          createHarnessInvocationError: (message: string) => Error(message),
-          logHarnessInvocationFailure: () => {},
-          logHarnessInvocationStart: () => {},
-          logHarnessInvocationSuccess: () => {}
+          harnessInvocationSemaphore: queue,
+          startOwnedHookCommand: launch
         })
         setDerivationFamilies([
           {
@@ -97,8 +134,11 @@ describe("native create verification at the process queue boundary", () => {
           }),
           readBoardConfigPlatformTextFromValue: () => "fixture sync",
           getOpenworkDir: () => root,
-          pluginToHarnessAdapterSnapshot: (plugin: { id: string }) => ({ id: plugin.id,
-            name: "Fixture", type: "plugin" }),
+          pluginToHarnessAdapterSnapshot: (plugin: { id: string }) => ({
+            id: plugin.id,
+            name: "Fixture",
+            type: "plugin"
+          }),
           parseInspectCommand: () => ({
             executable: "python",
             args: ["-c", 'import json; print(json.dumps({"ok":True,"message":"synced"}))']
@@ -121,7 +161,7 @@ describe("native create verification at the process queue boundary", () => {
           expect(launch).toHaveBeenCalledOnce()
         }
         expect(readFileSync(board, "utf8")).toBe('{"source":"retained"}')
-        expect(release).toHaveBeenCalledOnce()
+        expect(queue.released).toHaveBeenCalledOnce()
       } finally {
         rmSync(root, { recursive: true, force: true })
       }
@@ -130,13 +170,11 @@ describe("native create verification at the process queue boundary", () => {
 
   it("rejects a protected package knowledge sync before it can start or mutate package bytes", async () => {
     const root = mkdtempSync(join(tmpdir(), "protected-legacy-sync-"))
-    const spawn = vi.fn(),
-      release = vi.fn()
+    const launch = vi.fn(startOwnedHookCommand),
+      queue = queueFixture()
     const invoke = runner({
-      harnessInvocationSemaphore: { acquire: async () => release },
-      spawn,
-      logHarnessInvocationFailure: () => {},
-      formatAdapterError: (error: Error) => error.message
+      harnessInvocationSemaphore: queue,
+      startOwnedHookCommand: launch
     })
     try {
       await expect(
@@ -155,28 +193,24 @@ describe("native create verification at the process queue boundary", () => {
           async () => {}
         )
       ).rejects.toMatchObject({ code: "HARNESS_KNOWLEDGE_SYNC_SOURCE_IMMUTABLE" })
-      expect(spawn).not.toHaveBeenCalled()
-      expect(release).toHaveBeenCalledOnce()
-    } finally { rmSync(root, { recursive: true, force: true }) }
+      expect(launch).not.toHaveBeenCalled()
+      expect(queue.released).toHaveBeenCalledOnce()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it("waits for the semaphore then rejects changed identity before any process starts", async () => {
-    let releaseQueue!: (release: () => void) => void
+    const queue = queueFixture()
+    const releaseQueue = await queue.occupy()
     let identity = "reviewed"
-    const release = vi.fn()
-    const spawn = vi.fn()
+    const launch = vi.fn(startOwnedHookCommand)
     const guard = vi.fn(async () => {
       if (identity !== "reviewed") throw Error("source changed while queued")
     })
     const invoke = runner({
-      harnessInvocationSemaphore: {
-        acquire: () =>
-          new Promise((resolve) => {
-            releaseQueue = resolve
-          })
-      },
-      spawn,
-      formatAdapterError: (error: Error) => error.message
+      harnessInvocationSemaphore: queue,
+      startOwnedHookCommand: launch
     })
     const pending = invoke(
       { cwd: "fixture", invocation: { executable: "python", args: [] } },
@@ -186,13 +220,14 @@ describe("native create verification at the process queue boundary", () => {
       guard
     )
     const rejected = expect(pending).rejects.toThrow("source changed while queued")
+    expect(queue.acquire).toHaveBeenCalledOnce()
     expect(guard).not.toHaveBeenCalled()
     identity = "replaced"
-    releaseQueue(release)
+    releaseQueue()
     await rejected
     expect(guard).toHaveBeenCalledTimes(1)
-    expect(spawn).not.toHaveBeenCalled()
-    expect(release).toHaveBeenCalledTimes(1)
+    expect(launch).not.toHaveBeenCalled()
+    expect(queue.released).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -200,13 +235,7 @@ it("original internal Python imports preserve retained package bytes and entries
   const root = mkdtempSync(join(tmpdir(), "retained-python-"))
   try {
     writeFileSync(join(root, "fixture_module.py"), "VALUE = 42\n")
-    const invoke = runner({
-      harnessInvocationSemaphore: { acquire: async () => () => undefined },
-      spawn,
-      HARNESS_ADAPTER_MAX_BUFFER: 1024 * 1024,
-      formatAdapterError: (error: Error) => error.message,
-      createHarnessInvocationError: (message: string) => Error(message)
-    })
+    const invoke = runner({})
     const configured = {
       cwd: root,
       invocation: {
@@ -232,51 +261,53 @@ it("original internal Python imports preserve retained package bytes and entries
   }
 })
 
-it.each([1, 2])("public declared AutoBiz v%s initialization also preserves package bytes", async version => {
-  const root = mkdtempSync(join(tmpdir(), "public-composition-python-"))
-  try {
-    writeFileSync(
-      join(root, "devclaw.stage-checks.json"),
-      JSON.stringify({
-        apiVersion: "devclaw.stage-check-adapter/v1",
-        adapter: "autobiz-v1"
-      })
-    )
-    const runtime = {
+it.each([1, 2])(
+  "public declared AutoBiz v%s initialization also preserves package bytes",
+  async (version) => {
+    const root = mkdtempSync(join(tmpdir(), "public-composition-python-"))
+    try {
+      writeFileSync(
+        join(root, "devclaw.stage-checks.json"),
+        JSON.stringify({
+          apiVersion: "devclaw.stage-check-adapter/v1",
+          adapter: "autobiz-v1"
+        })
+      )
+      const runtime = {
         apiVersion: "devclaw.project-runtime/v1",
         mode: "legacy",
         stateOwner: "plugin"
+      }
+      const declaration = JSON.stringify(
+        version === 1
+          ? runtime
+          : {
+              apiVersion: "devclaw.project-runtime/v2",
+              runtime
+            }
+      )
+      writeFileSync(join(root, "devclaw.project-runtime.json"), declaration)
+      writeFileSync(join(root, "fixture_module.py"), "VALUE = 42\n")
+      const invoke = runner({})
+      const result = await invoke(
+        {
+          cwd: root,
+          invocation: {
+            executable: "python",
+            args: ["-c", "import fixture_module; print(fixture_module.VALUE)"]
+          }
+        },
+        undefined,
+        5000,
+        undefined,
+        async () => {}
+      )
+      expect(result.toString().trim()).toBe("42")
+      expect(existsSync(join(root, "__pycache__"))).toBe(false)
+      expect(readFileSync(join(root, "devclaw.project-runtime.json"), "utf8")).toBe(declaration)
+      expect(readFileSync(join(root, "fixture_module.py"), "utf8")).toBe("VALUE = 42\n")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
     }
-    const declaration = JSON.stringify(version === 1 ? runtime : {
-      apiVersion: "devclaw.project-runtime/v2", runtime
-    })
-    writeFileSync(join(root, "devclaw.project-runtime.json"), declaration)
-    writeFileSync(join(root, "fixture_module.py"), "VALUE = 42\n")
-    const invoke = runner({
-      harnessInvocationSemaphore: { acquire: async () => () => undefined },
-      spawn,
-      HARNESS_ADAPTER_MAX_BUFFER: 1024 * 1024,
-      formatAdapterError: (error: Error) => error.message,
-      createHarnessInvocationError: (message: string) => Error(message)
-    })
-    const result = await invoke(
-      {
-        cwd: root,
-        invocation: {
-          executable: "python",
-          args: ["-c", "import fixture_module; print(fixture_module.VALUE)"]
-        }
-      },
-      undefined,
-      5000,
-      undefined,
-      async () => {}
-    )
-    expect(result.toString().trim()).toBe("42")
-    expect(existsSync(join(root, "__pycache__"))).toBe(false)
-    expect(readFileSync(join(root, "devclaw.project-runtime.json"), "utf8")).toBe(declaration)
-    expect(readFileSync(join(root, "fixture_module.py"), "utf8")).toBe("VALUE = 42\n")
-  } finally {
-    rmSync(root, { recursive: true, force: true })
   }
-})
+)

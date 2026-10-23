@@ -1,6 +1,23 @@
 {
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
+  "evidenceScope": "Executable source tests describe the checked compatibility boundary. Dated documentation records its original implementation scope and is not proof of a current regression run. Local output reports are transient and are not required compatibility evidence.",
+  "applicationExtensions": [
+    {
+      "name": "classic.PreSkillUse",
+      "implementationStatus": "adapted",
+      "scope": "DevClaw application extension, excluded from pinned upstream event counts",
+      "note": "Actual native skill activation before the prompt is admitted. Host-pinned skill, tool and plugin facts; block prevents activation, preventContinuation halts. Optional Mod failure recovery does not skip required native business Hooks. A new source/event consent is required for an authorized trial.",
+      "evidence": ["src/main/hooks/runner.ts", "src/shared/mods/v2/classic.test.ts", "src/main/mods/devtools/development-catalog.test.ts"]
+    },
+    {
+      "name": "classic.PostSkillUse",
+      "implementationStatus": "adapted",
+      "scope": "DevClaw application extension, excluded from pinned upstream event counts",
+      "note": "Actual native activated-skill completion checks. block requests revision; preventContinuation halts. Non-blocking additionalContext remains observational. This is not automatic migration of original scripts or a receipt proving business success; required original Hooks and checks still run.",
+      "evidence": ["src/main/hooks/runner.ts", "src/shared/mods/v2/pinned-input.test.ts", "src/main/mods/devtools/development-catalog.test.ts"]
+    }
+  ],
   "date": "2026-10-05",
   "latest284Reference": {
     "version": "2.1.284",
@@ -1871,7 +1888,7 @@
         "src/main/mods/v2/ui-feedback-session.test.ts",
         "src/main/mods/v2/manager.test.ts",
         "tests/support/mods-ui-feedback-e2e.ts",
-        "output/mods-v2-validation/2026-09-23-ui-feedback.md",
+        "docs/mods-v2-ui-feedback-2026-09-23.md",
         "docs/mods-hold-toasts-stage-2026-10-04.md",
         "src/main/mods/v2/hold-toasts.integration.test.ts",
         "src/main/mods/v2/presentation-broker.test.ts",
@@ -1897,7 +1914,7 @@
         "src/main/mods/v2/ui-feedback-session.test.ts",
         "src/main/mods/v2/manager.test.ts",
         "tests/support/mods-ui-feedback-e2e.ts",
-        "output/mods-v2-validation/2026-09-23-ui-feedback.md",
+        "docs/mods-v2-ui-feedback-2026-09-23.md",
         "docs/mods-hold-toasts-stage-2026-10-04.md",
         "src/main/mods/v2/hold-toasts.integration.test.ts",
         "src/main/mods/v2/presentation-broker.test.ts",
@@ -1942,7 +1959,7 @@
         "src/main/mods/v2/native-dialog-access.test.ts",
         "src/main/mods/v2/ui-notice-session.test.ts",
         "tests/support/mods-ui-notice-e2e.ts",
-        "output/mods-v2-validation/2026-09-23-ui-notice.md"
+        "docs/mods-v2-ui-notice-2026-09-23.md"
       ]
     },
     {
@@ -2683,7 +2700,7 @@
         "src/main/hooks/classic-mods.integration.test.ts",
         "src/main/hooks/halt.test.ts",
         "tests/support/mods-tool-batch-e2e.ts",
-        "output/mods-v2-validation/2026-09-23-tool-batch.md"
+        "docs/mods-v2-tool-batch-2026-09-23.md"
       ]
     },
     {
@@ -3211,7 +3228,7 @@
         "src/main/hooks/classic-mods.integration.test.ts",
         "tests/support/mods-instructions-loaded-e2e.ts",
         "https://code.claude.com/docs/en/hooks#instructionsloaded",
-        "output/mods-v2-validation/2026-09-23-instructions-loaded.md"
+        "docs/mods-v2-instructions-loaded-2026-09-23.md"
       ]
     },
     {
@@ -3429,7 +3446,7 @@
             "src/main/mods/v2/native-dialog-access.test.ts",
             "src/main/mods/v2/ui-notice-session.test.ts",
             "tests/support/mods-ui-notice-e2e.ts",
-            "output/mods-v2-validation/2026-09-23-ui-notice.md"
+            "docs/mods-v2-ui-notice-2026-09-23.md"
           ]
         },
         {
@@ -3537,7 +3554,7 @@
             "src/main/mods/v2/ui-ask-session.test.ts",
             "src/main/mods/v2/native-user-input.test.ts",
             "tests/support/mods-ui-ask-e2e.ts",
-            "output/mods-v2-validation/2026-09-23-ui-ask.md"
+            "docs/mods-v2-ui-ask-2026-09-23.md"
           ],
           "notes": "Original native single-selection dialog via tool.call, ModsManager authority, lease and approval. Rejects multiSelect, dismissal, automatic answers and deferred headless requests. Desktop native limits 500-character question / 80-character label. AskUserQuestion presentation is a separately tested native adaptation; ui.notice is a separately tested native question adaptation."
         },
@@ -3558,7 +3575,7 @@
             "src/main/mods/v2/ui-feedback-session.test.ts",
             "src/main/mods/v2/manager.test.ts",
             "tests/support/mods-ui-feedback-e2e.ts",
-            "output/mods-v2-validation/2026-09-23-ui-feedback.md"
+            "docs/mods-v2-ui-feedback-2026-09-23.md"
           ]
         },
         {
@@ -3578,7 +3595,7 @@
             "src/main/mods/v2/ui-feedback-session.test.ts",
             "src/main/mods/v2/manager.test.ts",
             "tests/support/mods-ui-feedback-e2e.ts",
-            "output/mods-v2-validation/2026-09-23-ui-feedback.md"
+            "docs/mods-v2-ui-feedback-2026-09-23.md"
           ]
         },
         {
@@ -4355,7 +4372,7 @@
             "src/main/mods/manager-child-model-stream.test.ts",
             "src/main/agent/mods-prompt-attachment.test.ts",
             "tests/support/mods-prompt-context-e2e.ts",
-            "output/mods-prompt-cache-electron-verified.log"
+            "docs/mods-prompt-cache-stage-2026-10-04.md"
           ]
         },
         {
@@ -4373,7 +4390,7 @@
             "src/main/mods/manager-child-model-stream.test.ts",
             "src/main/agent/mods-prompt-attachment.test.ts",
             "tests/support/mods-prompt-context-e2e.ts",
-            "output/mods-prompt-cache-electron-verified.log"
+            "docs/mods-prompt-cache-stage-2026-10-04.md"
           ]
         }
       ]
@@ -5181,7 +5198,7 @@
         "src/main/mods/v2/sites.test.ts",
         "src/renderer/src/lib/function-question-site.test.ts",
         "tests/support/mods-question-site-e2e.ts",
-        "output/mods-v2-validation/2026-09-23-question-site.md",
+        "docs/mods-v2-question-site-2026-09-23.md",
         "src/main/mods/v2/site-clients.integration.test.ts",
         "src/main/ipc/mods-site-notification.test.ts",
         "src/renderer/src/lib/function-site-notification.test.ts",
@@ -5310,7 +5327,7 @@
         "src/main/mods/v2/sites.test.ts",
         "src/renderer/src/lib/function-tool-group.test.ts",
         "tests/support/mods-tool-sites-e2e.ts",
-        "output/mods-v2-validation/2026-09-23-tool-group.md",
+        "docs/mods-v2-tool-group-2026-09-23.md",
         "src/main/mods/v2/site-clients.integration.test.ts",
         "src/main/ipc/mods-site-notification.test.ts",
         "src/renderer/src/lib/function-site-notification.test.ts",

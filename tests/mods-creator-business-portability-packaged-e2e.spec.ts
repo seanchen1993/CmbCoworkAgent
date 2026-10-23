@@ -1,11 +1,11 @@
 /** A04 supplemental proof: exact 09 export, fresh home, original PRD/checks, native cancel.
  * Does not complete the eight-module/seven-node producer or replace original 09/B/Full10. */
 import assert from "node:assert/strict"
+import { prepareAutobizCollectorFixture } from "./support/autobiz-collector-dependency-fixture"
 import { createHash } from "node:crypto"
 import { DatabaseSync } from "node:sqlite"
 import {
   appendFileSync,
-  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -445,10 +445,7 @@ async function main() {
       storageKey,
       "collector"
     )
-    mkdirSync(collector, { recursive: true })
-    const dependencies = resolve(root, "output/creator-context-fixture-deps/node_modules")
-    assert(existsSync(join(dependencies, "gray-matter/index.js")))
-    cpSync(dependencies, join(collector, "node_modules"), { recursive: true })
+    prepareAutobizCollectorFixture(collector)
     const approved = await page.evaluate(
       ({ key, review }) =>
         window.api.projectComposition.unitMods.approve({

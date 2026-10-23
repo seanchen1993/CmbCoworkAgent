@@ -1,12 +1,31 @@
 import { expect, it } from "vitest"
 import { normalizeFunctionInput } from "./pinned-input"
 
+it.each(["classic.PreSkillUse", "classic.PostSkillUse"])("preserves every native skill identity and evidence field through %s middleware", event => {
+  const original = {
+    hook_event_name: event.slice("classic.".length), session_id: "thread", cwd: "/workspace",
+    transcript_path: "", skill_name: "review", skill_path: "/plugin/skills/review/SKILL.md",
+    skill_root: "/plugin/skills/review", skill_trigger_tool_name: "read_file",
+    tool_name: "read_file", tool_input: { path: "SKILL.md" }, tool_response: { content: "review" },
+    plugin_id: "id", plugin_name: "plugin", plugin_root: "/plugin",
+    stop_context: { assistantResponse: "checked", usedSkills: ["review"] }
+  }
+  expect(normalizeFunctionInput(event, {}, original)).toEqual(original)
+  for (const key of Object.keys(original)) {
+    expect(() => normalizeFunctionInput(event, { ...original, [key]: "forged" }, original))
+      .toThrow("MODS_PINNED_INPUT")
+  }
+  const minimal = { hook_event_name: original.hook_event_name, session_id: "thread", cwd: "/workspace", transcript_path: "" }
+  expect(() => normalizeFunctionInput(event, { ...minimal, plugin_id: "injected" }, minimal))
+    .toThrow("MODS_PINNED_INPUT")
+})
+
 it("pins Markdown link presence before admitting next while allowing href business rewrites", () => {
   const original = { plugin: "Q", element: "report", component: "Pane", requestId: "report",
     surface: "desktop", link: { href: "https://example.test/original" } }
   const changed = { ...original, link: { href: "business-data" } }
   expect(normalizeFunctionInput("ui.press", changed, original)).toEqual(changed)
-  const { link: _link, ...button } = original
+  const button = Object.fromEntries(Object.entries(original).filter(([key]) => key !== "link"))
   expect(() => normalizeFunctionInput("ui.press", button, original)).toThrow("MODS_PINNED_INPUT")
   expect(() => normalizeFunctionInput("ui.press", original, button)).toThrow("MODS_PINNED_INPUT")
   expect(() => normalizeFunctionInput("ui.press", { ...original, link: { href: "x", authority: true } },

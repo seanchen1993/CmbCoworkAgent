@@ -31,6 +31,25 @@ import {
 } from "../harness-board/context-integrity"
 
 describe("getHarnessAgentContext", () => {
+  it("does not start context preparation for an already cancelled physical run", async () => {
+    const controller = new AbortController()
+    controller.abort(new DOMException("cancelled before context", "AbortError"))
+    await expect(getHarnessAgentContext({}, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: "AbortError" })
+    expect(harnessServiceMocks.buildHarnessFeatureAgentContext).not.toHaveBeenCalled()
+  })
+
+  it("forwards physical cancellation and preserves its error instead of context fallback", async () => {
+    const controller = new AbortController()
+    harnessServiceMocks.buildHarnessFeatureAgentContext.mockImplementationOnce((_metadata, options) => {
+      expect(options.signal).toBe(controller.signal)
+      controller.abort(new DOMException("cancelled while loading context", "AbortError"))
+      return Promise.reject(controller.signal.reason)
+    })
+    await expect(getHarnessAgentContext({}, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: "AbortError" })
+  })
+
   it("rejects ordinary continuation of a pinned host project thread before legacy resolution", async () => {
     await expect(getHarnessAgentContext({ hostProjectRuntime: { projectId: "local" } }))
       .rejects.toThrow("PROJECT_HOST_RUN_ENTRY_REQUIRED")

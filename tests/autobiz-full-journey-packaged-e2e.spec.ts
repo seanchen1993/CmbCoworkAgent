@@ -6,9 +6,10 @@
  * its outer cleanup bound derives from native max-runtime plus the original15min allowance.
  */
 import assert from "node:assert/strict"
+import { prepareAutobizCollectorFixture } from "./support/autobiz-collector-dependency-fixture"
 import { createHash } from "node:crypto"
 import { createServer } from "node:http"
-import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync,
+import { appendFileSync, existsSync, mkdirSync, readFileSync,
   realpathSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import AdmZip from "adm-zip"
@@ -365,10 +366,7 @@ async function configureKnowledge(threadId: string, pluginId: string) {
   const key = extensionContextStorageKey(metadata, boardBytes,
     envelope.extensionContract.context, realpathSync(knowledge))
   const collector = join(fixture.env.CMB_COWORK_AGENT_HOME, "plugin-data", key, "collector")
-  const dependencies = resolve("output/creator-context-fixture-deps/node_modules")
-  assert(existsSync(join(dependencies, "gray-matter/index.js")))
-  mkdirSync(collector, { recursive: true })
-  cpSync(dependencies, join(collector, "node_modules"), { recursive: true })
+  prepareAutobizCollectorFixture(collector)
 }
 
 async function main() {

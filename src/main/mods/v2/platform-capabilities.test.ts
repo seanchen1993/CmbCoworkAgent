@@ -322,7 +322,7 @@ it("strictly validates semantic version, permission declarations and object sche
       actions: [{ ...descriptor.actions[0], requiredPermissions: ["arbitrary.ipc"] }]
     })
   ).toThrow()
-  expect(FUNCTION_HOST_REVISION).toBe("claude-295-tools-v91")
+  expect(FUNCTION_HOST_REVISION).toBe("claude-295-tools-v92")
 })
 
 it("native cleanup frame denies new effects while still awaiting real timer cleanup ACK", async () => {

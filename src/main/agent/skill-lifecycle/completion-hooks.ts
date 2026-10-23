@@ -19,6 +19,7 @@ import { captureLocalThreadRunLease, getLocalThreadRunLease } from "../thread-ru
 import { captureNativeMessage } from "../native-message-capture"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { isSameWorkspacePath } from "../../../shared/workspace-path"
+import { throwIfSkillHookHostFailure } from "./host-failure"
 
 export interface CompletionRevisionInput { readonly messages: [HumanMessage] }
 interface RevisionInputSource {
@@ -288,6 +289,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
     })
 
     try {
+      signal?.throwIfAborted()
       const hooks = resolveHooks
         ? resolveHooks("PostSkillUse", context)
         : resolveEnabledHooksForRun(
@@ -298,13 +300,19 @@ export async function runPostSkillUseHooksForActivatedSkills({
             onHookSkippedFactory?.("PostSkillUse")
           )
       const result = await executeHooks(hooks, "PostSkillUse", context, onHookResult)
-      if (result) results.push(result)
+      signal?.throwIfAborted()
+      if (result) {
+        results.push(result)
+        // A revision is not a completed check. Revalidate this Skill after the
+        // repair; successful observations and explicit halts still fire once.
+        if (shouldRequestRevision(result)) continue
+      }
     } catch (e) {
+      throwIfSkillHookHostFailure(e, signal)
       if (isCreatorBudgetError(e)) throw e
       console.warn(`[Hooks] PostSkillUse hook error for skill "${skill.name}":`, e)
-    } finally {
-      skillUseTracker?.markPostSkillUseFired(skill.key)
     }
+    skillUseTracker?.markPostSkillUseFired(skill.key)
   }
 
   return mergePostSkillUseResults(results)

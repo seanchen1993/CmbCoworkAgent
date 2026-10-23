@@ -4,6 +4,9 @@ tests/fixtures/mods-upstream/** -text
 tests/fixtures/autobiz-reviewed-hooks.json -text
 # Patch, manifest and template checksums require the exact committed bytes on every OS.
 patches/** -text
+# Generated collector bytes are pinned by fixtures and must survive Windows checkout unchanged.
+resources/mods/autobiz-knowledge/collector-gray-matter.cjs -text
+resources/mods/autobiz-knowledge/collector-THIRD-PARTY-NOTICES.md -text
 # Built-in platform examples are verified byte-for-byte on every supported checkout.
 examples/sparks-task-workbench/** text eol=lf
 examples/sparks-edit-reminder/** text eol=lf

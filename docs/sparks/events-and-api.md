@@ -58,6 +58,55 @@
 正式安装的事件范围更广，包括部分提示、模型和工具等接点。具体支持等级和参数必须查当前
 能力目录；“已有适配”不表示所有参数、重载和执行场景均已支持。
 
+## 技能使用前后扩展
+
+`classic.PreSkillUse` 与 `classic.PostSkillUse` 是本应用提供的技能生命周期扩展。
+它们分别接入真实技能激活前、已激活技能完成后的检查，不是普通消息发送事件，也不表示
+注册任意技能名称就会执行该技能。它们不属于上游固定事件清单，未改变其兼容数量。
+
+```ts
+import type { Register } from "devclaw-mods"
+
+export const register: Register = (on) => {
+  on("classic.PreSkillUse", { skill_name: "review" }, ($, event, next) => {
+    $.ui.log("准备使用技能：" + event.skill_name)
+    return next(event)
+  })
+  on("classic.PostSkillUse", { skill_name: "review" }, ($, event, next) => {
+    $.ui.log("技能完成检查：" + event.skill_name)
+    return next(event)
+  })
+}
+```
+
+将 `review` 换成当前实际加载的技能名称。省略 matcher 可观察所有实际技能激活；匹配字段
+使用 `skill_name`。这是观察示例，不会自动批准操作、判定产物合格或推进业务状态。
+
+| 数据或结果 | 约定 |
+| --- | --- |
+| 技能身份 | `skill_name`、`skill_path`、`skill_root`、`skill_trigger_tool_name` 来自真实激活记录，均不可由 `next` 改写 |
+| 运行身份 | `hook_event_name`、`session_id`、`cwd`、`transcript_path` 及可选的权限、Agent 信息由宿主提供 |
+| 原调用事实 | 可选 `tool_name`、`tool_input`、`tool_response`、`plugin_id/name/root`、`stop_context` 保留真实来源；不能当作可任意填写的执行参数 |
+| `block: "原因"` | Pre 阻止技能激活；Post 进入原修订流程，不伪装为技能成功 |
+| `preventContinuation: true` | 请求原执行链终止，可配合 `stopReason`；不能构造批准或成功回执 |
+| `additionalContext: ["说明"]` | Pre 按原上下文规则处理；Post 非阻断输出仅用于观察，不单独触发修订 |
+
+技能身份、工具结果和完成上下文均由宿主固定。正常观察使用 `return next(event)`；拒绝时返回
+符合该事件契约的结果。普通 Mod 的异常仍遵循前述可恢复规则，不能将抛错当作强制校验。
+原插件必需的 Hooks、产物检查及权限检查仍在宿主执行链中必经，Mod 省略 `next` 也不能跳过。
+后置检查请求修订时保留该技能的待验状态，修订后重新执行检查；只有通过或明确停止后才消费
+该记录。重复不合格会耗尽原修订预算并失败，不将“模型已修改”直接视为验收通过。
+因此后置事件可能因修订再次执行，不能作为天然的一次性提交通知。有写入或外部副作用的
+处理器需要保证幂等，并复用业务已有的操作标识与对账；接口本身不提供跨系统原子提交。
+
+这些事件接通现有技能激活与标准完成链。独立协调器 worker 使用自己的 Stop 完成链，当前
+未统一接入技能后置检查，不能将普通子会话覆盖理解为所有 worker 类型都已支持。
+
+创造者通过 `mod_authoring` 的 `catalogSection="events"` 与 `"types"` 读取精确声明；
+真实试用需要对当前源码及这些新增事件重新确认。旧的基础本地试用范围不会自动扩大。
+接通事件不代表原 Python/Shell Hooks 已自动转换为 Mod；迁移时仍须保留原知识、配置、
+唯一状态写入器及校验语义，并通过实际业务运行验证。
+
 ## 当前会话试用的宿主接口
 
 | 类别 | 允许的方法 |

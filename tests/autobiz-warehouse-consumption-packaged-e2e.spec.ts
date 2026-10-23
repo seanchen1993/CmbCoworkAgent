@@ -1,8 +1,9 @@
 /** Original frozen warehouse plugin, native ManagedRun/tools/Hooks/SQLite. Controlled model only. */
 import assert from "node:assert/strict"
+import { prepareAutobizCollectorFixture } from "./support/autobiz-collector-dependency-fixture"
 import { createHash } from "node:crypto"
 import { createServer } from "node:http"
-import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import AdmZip from "adm-zip"
 import type { ElectronApplication, Page } from "playwright"
@@ -165,10 +166,7 @@ async function configureKnowledge(threadId: string, pluginId: string) {
   }, { threadId, pluginId, workspace })
   const key = extensionContextStorageKey(metadata, zip.readFile("board_core/board_config.json")!, envelope.extensionContract.context, realpathSync(knowledge))
   const collector = join(fixture.env.CMB_COWORK_AGENT_HOME, "plugin-data", key, "collector")
-  mkdirSync(collector, { recursive: true })
-  const dependencies = resolve("output/creator-context-fixture-deps/node_modules")
-  assert(existsSync(join(dependencies, "gray-matter/index.js")))
-  cpSync(dependencies, join(collector, "node_modules"), { recursive: true })
+  prepareAutobizCollectorFixture(collector)
 }
 
 async function managed(feature: string): Promise<ManagedRunSummary> {

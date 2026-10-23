@@ -4,7 +4,7 @@ import {
   FUNCTION_COMPATIBILITY_EVENT_NAMES,
   getFunctionEventSupport
 } from "./compatibility-catalog"
-import { CLAUDE_EVENT_NAMES } from "./event-catalog"
+import { CLAUDE_EVENT_NAMES, FUNCTION_CLASSIC_EXTENSION_EVENT_NAMES } from "./event-catalog"
 
 function assess(...patterns: string[]) {
   return assessFunctionCompatibility(
@@ -17,6 +17,15 @@ function assess(...patterns: string[]) {
 }
 
 describe("production event compatibility", () => {
+  it("discovers native skill lifecycle extensions without inflating the pinned upstream inventory", () => {
+    for (const name of FUNCTION_CLASSIC_EXTENSION_EVENT_NAMES) {
+      expect(CLAUDE_EVENT_NAMES).not.toContain(name)
+      expect(assess(name)).toMatchObject({ status: "bounded", strictCompatible: true })
+      const support = getFunctionEventSupport(name)!
+      for (const boundary of ["本应用扩展", "必需业务 Hooks", "新确认", "不代表自动迁移"])
+        expect(support.note).toContain(boundary)
+    }
+  })
   it("recognizes declared platform actions without treating discovery as execution", () => {
     const report = assess("platform.action")
     expect(report).toMatchObject({ status: "bounded", strictCompatible: true, diagnostics: [] })

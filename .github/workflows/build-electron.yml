@@ -326,7 +326,7 @@ jobs:
 
       # No npm dependencies required; verify Windows checkout preserves checksum-verified patch bytes.
       - name: Verify native patch checkout integrity
-        run: node --test tests/langchain-patch-checkout.spec.mjs
+        run: node --test tests/langchain-patch-checkout.spec.mjs tests/autobiz-collector-checkout.spec.mjs
 
       - name: Decrypt .env for build
         run: node scripts/env-crypt.mjs decrypt-file .env
@@ -381,6 +381,18 @@ jobs:
 
       - name: Verify native JavaScript foundations
         run: node scripts/apply-langchain-native-foundations.mjs --check
+
+      - name: Verify AutoBiz startup and question continuation regressions (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: >-
+          npx vitest run --maxWorkers=2
+          src/main/agent/skill-lifecycle/retained-explicit-skill.test.ts
+          src/main/agent/tools/user-input-cancellation.integration.test.ts
+          src/main/mods/v2/native-user-input-lifecycle.integration.test.ts
+          src/main/harness-board/autobiz-context-provider-offline.test.ts
+          src/main/hooks/classic-skill-lifecycle.integration.test.ts
+          tests/browser/autobiz-collector-dependency-fixture.test.ts
 
       # Windows 侧仅校验 prebuild 已存在,不重新编译。
       # node-pty 自带 prebuilds/win32-x64/pty.node 可直接用,rebuild 反而需要

@@ -32,6 +32,17 @@ declare namespace DevClawMods {
     reason:"answer"|"aborted"|"error"|"refusal";
     refusal?:{category:string|null;explanation:string|null}
   }
+  /** DevClaw extension; native skill facts are immutable through next(). */
+  export interface ClassicSkillUseEvent {
+    hook_event_name:"PreSkillUse"|"PostSkillUse";session_id:string;transcript_path:string;cwd:string;
+    skill_name:string;skill_path:string;skill_root:string;skill_trigger_tool_name:string;
+    permission_mode?:string;agent_id?:string;tool_name?:string;tool_input?:Json;tool_response?:Json;
+    plugin_id?:string;plugin_name?:string;plugin_root?:string;
+    stop_context?:{userMessage?:string;assistantResponse?:string;toolCalls?:string[];usedSkills?:string[]}
+  }
+  export interface ClassicSkillUseResult {
+    block?:string;preventContinuation?:true;stopReason?:string;additionalContext?:string[]
+  }
   export type ModelUsage = {input_tokens:number;output_tokens:number;cache_read_input_tokens:number;cache_creation_input_tokens:number}
   export type ModelResult = {isAnswered:true;text:string;usage:ModelUsage} |
     {isAnswered:false;reason:"empty-reply"|"aborted";usage:ModelUsage} |
@@ -116,6 +127,8 @@ declare namespace DevClawMods {
   export interface CommandResult {text?:string;kind?:"complete"|"turn"}
   export interface ProcessEvent {argv:string[];cwd?:string;env?:Record<string,string>;input?:string}
   export interface On<Owner extends string=string> {
+    (event:"classic.PreSkillUse"|"classic.PostSkillUse",handler:($:SDK<Owner>,event:ClassicSkillUseEvent,next:Next<ClassicSkillUseEvent,ClassicSkillUseResult>)=>ClassicSkillUseResult|Promise<ClassicSkillUseResult>):void
+    (event:"classic.PreSkillUse"|"classic.PostSkillUse",filter:{skill_name:string},handler:($:SDK<Owner>,event:ClassicSkillUseEvent,next:Next<ClassicSkillUseEvent,ClassicSkillUseResult>)=>ClassicSkillUseResult|Promise<ClassicSkillUseResult>):void
     capability(descriptor:PlatformDescriptor,handlers:{act:($:SDK<Owner>,event:{action:string;input:JsonObject;
       target:{kind:"current"};requestKey:string;capability:PlatformRef},next:Next<JsonObject,Json>)=>JsonObject|Promise<JsonObject>}):void
     (event:"ui.render",filter:{component:string;requestId?:string},handler:($:SDK<Owner>,event:UiEvent,next:Next<UiEvent,UiTree>)=>UiTree|Promise<UiTree>):void

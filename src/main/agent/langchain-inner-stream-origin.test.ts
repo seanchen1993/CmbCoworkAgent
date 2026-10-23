@@ -39,7 +39,7 @@ class Observer extends BaseCallbackHandler {
 type Options = RunnableConfig & { streamMode: "values" }
 type Stream = (input: unknown, config?: Options) => Promise<AsyncIterable<unknown>>
 type Iterator = (input: unknown, config?: object) => AsyncGenerator<unknown>
-function originalMethod(value: object, key: string): Function {
+function originalMethod(value: object, key: string): (...args: unknown[]) => unknown {
   let current: object | null = value
   while (current) {
     const field = Object.getOwnPropertyDescriptor(current, key)
@@ -313,6 +313,7 @@ describe("real Pregel Partial Runnable lexical stream foundation", () => {
     expect(finished).toBe(true)
   })
 
+  // Includes a cold independent CJS dependency graph; this is a functional isolation budget.
   it("keeps CJS module origins independent while executing the same genuine CJS graph", async () => {
     const require = createRequire(import.meta.url)
     const core = require("@langchain/core/native-stream-origin") as typeof import("@langchain/core/native-stream-origin")
@@ -332,5 +333,5 @@ describe("real Pregel Partial Runnable lexical stream foundation", () => {
     expect(settlement?.status).toBe("fulfilled")
     expect(settlement?.coreOperation && core.readNativeRunnableStreamSettlement(settlement.coreOperation)?.status).toBe("fulfilled")
     expect(readNativePregelStreamSettlement(operation)).toBeUndefined()
-  })
+  }, 10_000)
 })

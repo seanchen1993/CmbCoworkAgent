@@ -276,6 +276,7 @@ describe("genuine SDK lexical stream operation foundation", () => {
     f.boundaries.forEach((view) => view.assertDataCurrent())
   })
 
+  // Includes a cold independent CJS dependency graph; this is a functional isolation budget.
   it("rejects unknown, cloned, Proxy and foreign module handles without invoking their getters", () => {
     const f = fixture(),
       getter = vi.fn()
@@ -290,7 +291,7 @@ describe("genuine SDK lexical stream operation foundation", () => {
     ) as typeof import("langchain/native-stream-origin")
     expect(() => cjs.executeNativeStreamOperation(operation)).toThrow(invalid)
     expect(getter).not.toHaveBeenCalled()
-  })
+  }, 10_000)
 
   it("uses the module's original method even if a true constructor callback changes its prototype", async () => {
     const f = fixture(),

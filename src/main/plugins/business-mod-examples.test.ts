@@ -31,7 +31,7 @@ it("reads shipped knowledge SDK source from the real unpacked ASAR layout and co
     installed: false,
     kernelRef: { id: "autobiz.python-kernel", version: "1.0.0" }
   })
-  expect(example.draft.files).toHaveLength(4)
+  expect(example.draft.files).toHaveLength(6)
   expect(example.draft.files.find((file) => file.path.endsWith("/provider.py"))?.text).toBe(
     await readFile(resolve("resources/mods/autobiz-context-provider.py"), "utf8")
   )

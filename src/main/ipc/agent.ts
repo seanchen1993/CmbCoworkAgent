@@ -144,6 +144,8 @@ import {
   isDreamEnabled,
   isThreadMemoryEnabled,
   getCustomSkillsDir,
+  getPlugins,
+  getDisabledSkillDirs,
   invalidateEnabledSkillsCache,
   isOnlineSkillEvolutionEnabled,
   isSkillAutoProposeEnabled,
@@ -348,7 +350,8 @@ import {
   getActionStationarityHaltError,
   type ActionStationarityHaltError
 } from "../agent/action-stationarity"
-import { formatSkillUseBlock, parseSkillUseBlock } from "../agent/skill-lifecycle/marker"
+import { parseSkillUseBlock } from "../agent/skill-lifecycle/marker"
+import { appendRetainedExplicitSkillContext } from "../agent/skill-lifecycle/retained-explicit-skill"
 import type { SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
 import { createSkillUseTracker, type SkillUseTracker } from "../agent/skill-lifecycle/tracker"
 import { runCompletionHooksWithRevision } from "../agent/skill-lifecycle/completion-hooks"
@@ -1457,15 +1460,19 @@ function appendGoalStartTurnContext(prompt: string, payload: string): string {
   ].join("\n")
 }
 
-function appendGoalExplicitSkillContext(prompt: string, goal: { context?: unknown }): string {
+async function appendGoalExplicitSkillContext(prompt: string, goal: { context?: unknown },
+  scope: { threadId: string; workspacePath: string; signal?: AbortSignal }): Promise<string> {
   const explicitSkill = (
     goal.context as { explicitSkill?: { name?: unknown; path?: unknown } } | undefined
   )?.explicitSkill
   const name = typeof explicitSkill?.name === "string" ? explicitSkill.name.trim() : ""
   const path = typeof explicitSkill?.path === "string" ? explicitSkill.path.trim() : ""
   if (!name || !path) return prompt
-  const block = formatSkillUseBlock({ name, path })
-  return parseSkillUseBlock(prompt) ? prompt : [prompt.trimEnd(), block].join("\n\n")
+  return appendRetainedExplicitSkillContext(prompt, { name, path }, {
+    ...scope,
+    readInstalledPlugins: getPlugins,
+    readDisabledSkillDirs: getDisabledSkillDirs
+  })
 }
 
 function buildGoalRoutingMessage(goal: {
@@ -2567,12 +2574,14 @@ function registerCurrentRunMessagePreparer({
 
 async function validateExplicitGoalSkillContext(
   context: GoalContext | undefined,
-  threadId: string
+  threadId: string,
+  signal?: AbortSignal
 ): Promise<string | null> {
   const explicitSkill = context?.explicitSkill
   if (!explicitSkill) return null
   return validateExplicitSkillReference(explicitSkill, {
     threadId,
+    signal,
     workspacePath: getThreadWorkspacePath(threadId) ?? ""
   })
 }
@@ -6247,7 +6256,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const resumeGoalSignature = readGoalMutationSignature(threadId)
               const explicitSkillValidationError = await validateExplicitGoalSkillContext(
                 currentGoal.context,
-                threadId
+                threadId,
+                runExecutionContext.signal
               )
               if (explicitSkillValidationError) {
                 safeSendToWindow(window, channel, {
@@ -6336,12 +6346,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               )
               rootUserPrompt = goal.objective
               routingMessage = buildGoalRoutingMessage(goal)
-              modelInputMessage = appendGoalExplicitSkillContext(
+              modelInputMessage = await appendGoalExplicitSkillContext(
                 buildGoalContinuationPrompt(goal, {
                   verdict: "continue",
                   reason: resumeReason
                 }),
-                goal
+                goal,
+                { threadId, workspacePath: getThreadWorkspacePath(threadId) ?? "", signal: runExecutionContext.signal }
               )
             }
 
@@ -6371,7 +6382,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const setGoalSignature = readGoalMutationSignature(threadId)
               const explicitSkillValidationError = await validateExplicitGoalSkillContext(
                 goalCommand.context,
-                threadId
+                threadId,
+                runExecutionContext.signal
               )
               if (explicitSkillValidationError) {
                 safeSendToWindow(window, channel, {
@@ -6423,9 +6435,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               )
               rootUserPrompt = goal.objective
               routingMessage = buildGoalRoutingMessage(goal)
-              modelInputMessage = appendGoalExplicitSkillContext(
+              modelInputMessage = await appendGoalExplicitSkillContext(
                 appendGoalStartTurnContext(buildGoalStartPrompt(goal), transportPayload),
-                goal
+                goal,
+                { threadId, workspacePath: getThreadWorkspacePath(threadId) ?? "", signal: runExecutionContext.signal }
               )
             }
           } catch (error) {
@@ -7428,7 +7441,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           sessionWorkspacePath = workspacePath ?? undefined
           harnessAgentContext = await getHarnessAgentContext(metadata, {
             workspacePath,
-            featureBinding: harnessFeatureBinding
+            featureBinding: harnessFeatureBinding,
+            signal: abortController.signal
           })
           harnessAgentContext.managedExecution =
             managedExecution === true || isActiveManagedRunSession(threadId)
@@ -9670,9 +9684,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const latestGoal = getCurrentGoalForContinuation(outcome.goal)
               if (!latestGoal) break
 
-              const goalContinuationInput = appendGoalExplicitSkillContext(
+              const goalContinuationInput = await appendGoalExplicitSkillContext(
                 continuationPrompt,
-                latestGoal
+                latestGoal,
+                { threadId, workspacePath: sessionWorkspacePath ?? getThreadWorkspacePath(threadId) ?? "", signal: abortController.signal }
               )
               modelInputMessage = goalContinuationInput
               currentTurnUserMessageForEvidence = goalContinuationInput

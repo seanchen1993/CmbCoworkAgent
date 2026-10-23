@@ -388,8 +388,10 @@ it.each(["legacy-v1", "result-v1"])("requires fresh approval for an unchanged ex
     name: "loader-probe", cmbCompatibility: { modelProtocol }
   }))
   const current = await compileFunctionPlugin(root, { captureSources: true })
-  expect(FUNCTION_HOST_REVISION).toBe("claude-295-tools-v91")
-  for (const hostRevision of ["module-resources-v89", "claude-295-tools-v90"]) {
+  expect(FUNCTION_HOST_REVISION).toBe("claude-295-tools-v92")
+  for (const hostRevision of [
+    "module-resources-v89", "claude-295-tools-v90", "claude-295-tools-v91"
+  ]) {
     const oldHostDigest = createHash("sha256").update(JSON.stringify({
       name: current.name, profile: current.profile,
       ...(modelProtocol === "result-v1" ? { modelProtocol } : {}),

@@ -8,6 +8,7 @@ import { requestUserInput, UserInputRequestRejectedError } from "../../services/
 import type { RuntimeInteractionWaitHooks } from "../runtime"
 import type { UserInputQuestion } from "../../types"
 import type { HarnessRequestUserInputConfig } from "../../../shared/harness-board-types"
+import { getModCallContext } from "../../mods/context"
 
 const additionalTextDescription =
   "A submitted option answer may include additionalText, an optional user-entered clarification that supplements rather than replaces the selected option; the client provides this capability automatically, so do not add it to the question options."
@@ -48,10 +49,28 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
     : requestUserInputSchema
 
   return tool(
-    async (input) => {
+    async (input, config) => {
+      // The Runnable can be cancelled by a Mod/operation deadline before the
+      // enclosing native run ends. Its real dialog must share that lifetime.
+      const operation = getModCallContext()
+      const operationSignal =
+        operation?.toolId === "host:request_user_input" &&
+        operation.identity.threadId === context.threadId
+          ? operation.signal
+          : undefined
+      const signals = [
+        ...new Set(
+          [context.abortSignal, config?.signal, operationSignal].filter(
+            (signal): signal is AbortSignal => signal !== undefined
+          )
+        )
+      ]
+      const abortSignal =
+        signals.length === 1 ? signals[0] : signals.length ? AbortSignal.any(signals) : undefined
       const waitId = randomUUID()
       let waitStarted = false
       try {
+        abortSignal?.throwIfAborted()
         const modelTimeout =
           "autoResolutionMs" in input && typeof input.autoResolutionMs === "number"
             ? input.autoResolutionMs
@@ -79,10 +98,10 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
             type: autoResolutionType,
             message: userMessage
           },
-          abortSignal: context.abortSignal,
+          abortSignal,
           allowDeferredRenderer: context.allowDeferredRenderer
         })
-        if (!context.abortSignal?.aborted) {
+        if (!abortSignal?.aborted) {
           await context.interactionWaitHooks?.onWaitEnd({
             id: waitId,
             kind: "user_input",
@@ -127,6 +146,8 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
           2
         )
       } catch (error) {
+        const cancellation =
+          abortSignal?.aborted && abortSignal.reason instanceof Error ? abortSignal.reason : error
         context.onRejected?.(
           error instanceof UserInputRequestRejectedError
             ? "user-input-rejected"
@@ -146,16 +167,20 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
         return JSON.stringify(
           {
             status: "cancelled",
-            error: error instanceof Error ? error.message : String(error)
+            error: cancellation instanceof Error ? cancellation.message : String(cancellation),
+            ...(cancellation instanceof Error &&
+            "code" in cancellation &&
+            typeof cancellation.code === "string"
+              ? { code: cancellation.code }
+              : {})
           },
           null,
           2
         )
       } finally {
-        // A normal response ends the wait before returning to the model. Abort
-        // cleanup deliberately does not call onWaitEnd: the owning transport is
-        // already terminalizing the event and must not transition it back to
-        // executing.
+        // The wait belongs to the enclosing run. An operation deadline must
+        // release its wait when that run is still live; a cancelled run must
+        // never be transitioned back to executing by late cleanup.
         if (waitStarted && !context.abortSignal?.aborted) {
           await context.interactionWaitHooks?.onWaitEnd({
             id: waitId,

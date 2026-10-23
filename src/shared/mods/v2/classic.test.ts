@@ -1,6 +1,29 @@
 import { describe, expect, it } from "vitest"
 import { validateClassicInput, validateClassicResult } from "./classic"
 
+it.each(["PreSkillUse", "PostSkillUse"])("validates native %s facts without accepting fabricated completion receipts", name => {
+  const event = `classic.${name}`
+  const input = {
+    hook_event_name: name, session_id: "thread", cwd: "/workspace", transcript_path: "",
+    skill_name: "review", skill_path: "/plugin/skills/review/SKILL.md", skill_root: "/plugin/skills/review",
+    skill_trigger_tool_name: "read_file", tool_name: "read_file", tool_input: { path: "SKILL.md" },
+    tool_response: { content: "review" }, plugin_id: "plugin-id", plugin_name: "plugin",
+    plugin_root: "/plugin", stop_context: { assistantResponse: "reviewed", toolCalls: ["read_file"], usedSkills: ["review"] }
+  }
+  expect(() => validateClassicInput(event, input)).not.toThrow()
+  for (const key of ["skill_name", "skill_path", "skill_root", "skill_trigger_tool_name"]) {
+    for (const invalid of [undefined, "", " ", false, "x".repeat(32001)])
+      expect(() => validateClassicInput(event, { ...input, [key]: invalid })).toThrow("MODS_CLASSIC_INPUT")
+  }
+  for (const invalid of [{ toolCalls: "read_file" }, { usedSkills: [false] }, { passed: true }])
+    expect(() => validateClassicInput(event, { ...input, stop_context: invalid })).toThrow("MODS_CLASSIC_INPUT")
+  expect(() => validateClassicInput(event, { ...input, tool_input: { bad: Number.NaN } })).toThrow("MODS_CLASSIC_INPUT")
+  for (const result of [{}, { block: "revise" }, { preventContinuation: true, stopReason: "stop" }, { additionalContext: ["observed"] }])
+    expect(() => validateClassicResult(event, result)).not.toThrow()
+  for (const result of [{ passed: true }, { allow: true }, { updatedInput: {} }, { preventContinuation: false }, { additionalContext: "forged" }])
+    expect(() => validateClassicResult(event, result)).toThrow("MODS_CLASSIC_RESULT")
+})
+
 describe("Claude v2.1.278 classic event contracts", () => {
   it("requires actual compaction trigger and event-specific evidence", () => {
     const base = { session_id: "thread", cwd: "/workspace", transcript_path: "" }

@@ -399,14 +399,35 @@ describe("classic Function Mods bridge", () => {
     expect(result?.additionalContext).toBe("legacy")
   })
 
-  it("does not call a classic bridge for HookEvent names without an upstream classic event", async () => {
-    const result = await runHooks([], "PreSkillUse", {
-      sessionId: "thread",
-      workspacePath: "/workspace"
-    })
-    expect(classicEvent).not.toHaveBeenCalled()
-    expect(result).toBeNull()
-  })
+  it.each(["PreSkillUse", "PostSkillUse"] as const)(
+    "bridges the application-owned %s lifecycle event",
+    async (event) => {
+      classicEvent.mockResolvedValue({})
+      const result = await runHooks([], event, {
+        sessionId: "thread",
+        workspacePath: "/workspace",
+        skillName: "review",
+        skillPath: "/skills/review/SKILL.md",
+        skillRoot: "/skills/review",
+        skillTriggerToolName: "read_file"
+      })
+      expect(classicEvent).toHaveBeenCalledWith(
+        "/workspace",
+        "thread",
+        `classic.${event}`,
+        expect.objectContaining({
+          hook_event_name: event,
+          skill_name: "review",
+          skill_path: "/skills/review/SKILL.md",
+          skill_root: "/skills/review",
+          skill_trigger_tool_name: "read_file"
+        }),
+        expect.any(AbortSignal),
+        expect.any(Function)
+      )
+      expect(result).toBeNull()
+    }
+  )
 })
 
 

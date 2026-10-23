@@ -7,6 +7,18 @@ const matrix = JSON.parse(
 ) as Record<string, unknown>
 const allowed = new Set(["full", "adapted", "partial", "unsupported"])
 
+it("separates the two application skill lifecycle extensions from upstream compatibility counts", () => {
+  const extensions = matrix.applicationExtensions as Array<Record<string, unknown>>
+  expect(extensions.map(row => row.name)).toEqual(["classic.PreSkillUse", "classic.PostSkillUse"])
+  const upstream = matrix.classicEvents as Array<Record<string, unknown>>
+  for (const row of extensions) {
+    expect(upstream.some(original => original.name === row.name)).toBe(false)
+    expect(row.implementationStatus).toBe("adapted")
+    expect(row.scope).toContain("excluded from pinned upstream event counts")
+    expect(row.note).toContain("required")
+  }
+})
+
 function collect(value: unknown, output: Array<Record<string, unknown>>): void {
   if (Array.isArray(value)) return value.forEach((item) => collect(item, output))
   if (!value || typeof value !== "object") return

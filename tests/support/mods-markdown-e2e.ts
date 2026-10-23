@@ -17,7 +17,7 @@ export async function verifyMarkdown(
   until: (check: () => Promise<boolean>, label: string) => Promise<void>,
   pass: (label: string) => void
 ): Promise<void> {
-  assert.equal(FUNCTION_HOST_REVISION, "claude-295-tools-v90")
+  assert.equal(FUNCTION_HOST_REVISION, "claude-295-tools-v92")
   const project = join(workspace, "markdown-project")
   mkdirSync(project, { recursive: true })
   const guide = join(project, "guide.md")

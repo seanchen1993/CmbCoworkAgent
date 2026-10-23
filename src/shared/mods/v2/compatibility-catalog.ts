@@ -115,6 +115,8 @@ const bounded = new Set([
   "clock.sleep",
   "completion.check",
   "classic.PreToolUse",
+  "classic.PreSkillUse",
+  "classic.PostSkillUse",
   "classic.PostToolUse",
   "classic.PostToolUseFailure",
   "classic.PostToolBatch",
@@ -171,6 +173,11 @@ export const FUNCTION_COMPATIBILITY_EVENT_NAMES = [...bounded, ...metadata, ...u
 export function getFunctionEventSupport(
   name: string
 ): { availability: "bounded" | "metadata" | "unavailable"; note: string } | undefined {
+  if (name === "classic.PreSkillUse" || name === "classic.PostSkillUse")
+    return {
+      availability: "bounded",
+      note: "本应用扩展：真实技能激活前/完成后事件，skill_name 等身份由宿主固定。Pre 的 block 阻止激活；Post 的 block 请求修订，preventContinuation 才终止；Post 非阻断上下文仅观察。普通 Mod 出错可恢复，不能吞掉原必需业务 Hooks、伪造完成或绕过来源与权限检查。需精确事件与源码的新确认，不代表自动迁移原脚本。"
+    }
   if (name === "platform.action")
     return {
       availability: "bounded",

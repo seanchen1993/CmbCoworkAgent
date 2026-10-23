@@ -3,7 +3,7 @@ import { afterEach, expect, it } from "vitest"
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { developmentCatalog, developmentCatalogPage } from "./development-catalog"
+import { developmentCatalog, developmentCatalogPage, DEVELOPMENT_SKILL_LIFECYCLE_EXAMPLE } from "./development-catalog"
 import { CREATOR_S1_SUPPORT } from "./creator-support"
 import { analyzeAuthoringPreview } from "./authoring-preflight"
 import { authoringCompileDiagnostics } from "./authoring-compile-diagnostics"
@@ -83,6 +83,36 @@ it("discovers every conditional capability through bounded support pages without
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
 })
+
+it("exposes and compiles a real typed skill lifecycle example with source-bound trial discovery", async () => {
+  const root = await source()
+  await writeFile(join(root, "mods/main.ts"), DEVELOPMENT_SKILL_LIFECYCLE_EXAMPLE)
+  const preview = await analyzeAuthoringPreview(root)
+  expect(preview.typecheck.diagnostics).toEqual([])
+  expect(preview.sdk.strictCompatible).toBe(true)
+  expect(preview.sdk.registrationEvents).toEqual(["classic.PostSkillUse", "classic.PreSkillUse"])
+  expect(developmentCatalog().examples.skillLifecycle).toBe(DEVELOPMENT_SKILL_LIFECYCLE_EXAMPLE)
+  const overview = developmentCatalogPage()
+  if (!("examples" in overview) || !overview.examples) throw Error("Expected discoverable examples")
+  expect(overview.examples.skillLifecycle).toBe(DEVELOPMENT_SKILL_LIFECYCLE_EXAMPLE)
+  const events: unknown[] = []
+  let cursor: number | undefined = 0
+  while (cursor !== undefined) {
+    const page = developmentCatalogPage("events", cursor)
+    if (!("content" in page) || !Array.isArray(page.content)) throw Error("Expected events page")
+    events.push(...page.content)
+    cursor = "nextCursor" in page ? page.nextCursor : undefined
+  }
+  for (const name of ["classic.PreSkillUse", "classic.PostSkillUse"])
+    expect(events).toContainEqual(expect.objectContaining({ name, availability: "bounded" }))
+  for (const invalid of [
+    DEVELOPMENT_SKILL_LIFECYCLE_EXAMPLE.replace('skill_name: "review"', 'skillName: "review"'),
+    DEVELOPMENT_SKILL_LIFECYCLE_EXAMPLE.replace("return next(event)", "return { passed: true }")
+  ]) {
+    await writeFile(join(root, "mods/main.ts"), invalid)
+    expect((await analyzeAuthoringPreview(root)).typecheck.diagnostics.length).toBeGreaterThan(0)
+  }
+}, 15_000)
 async function source(invalid = false) {
   const root = await mkdtemp(join(tmpdir(), "cmb-development-catalog-test-"))
   roots.push(root)

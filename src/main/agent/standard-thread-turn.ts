@@ -47,6 +47,7 @@ import { buildOrderedChain } from "./failover"
 import { activateSkillLifecycle, formatSkillHookContext } from "./skill-lifecycle/activation"
 import { parseSkillUseBlock, type ParsedSkillUseBlock } from "./skill-lifecycle/marker"
 import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "./skill-lifecycle/registry"
+import { relocateRetainedExplicitSkill } from "./skill-lifecycle/retained-explicit-skill"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import { resolveModel, type RoutingContext, type RoutingResult } from "../routing"
 import { getAgentModeFromMetadata, type AgentMode } from "./coordinator-mode"
@@ -216,8 +217,10 @@ export async function getHarnessAgentContext(
     workspacePath?: string
     featureBinding?: HarnessFeatureBindingContext
     purpose?: "execution" | "plugin-identity"
+    signal?: AbortSignal
   } = {}
 ): Promise<HarnessAgentContext> {
+  options.signal?.throwIfAborted()
   const source = currentRuntimePluginSource()
   if (source?.mode === "capabilities") {
     const session = metadata.harnessProjectSession as Record<string, unknown> | undefined
@@ -297,9 +300,11 @@ export async function getHarnessAgentContext(
   let featureContext: Awaited<ReturnType<typeof buildHarnessFeatureAgentContext>>
   try {
     featureContext = await buildHarnessFeatureAgentContext(metadata, {
-      workspacePath: options.workspacePath
+      workspacePath: options.workspacePath,
+      signal: options.signal
     })
   } catch (error) {
+    options.signal?.throwIfAborted()
     const unavailable = new HarnessAgentContextUnavailableError(
       "Harness 上下文加载失败，请重试后再运行任务。",
       {
@@ -338,6 +343,7 @@ export async function getHarnessAgentContext(
         featureContext.featureId
       )
     } catch (error) {
+      options.signal?.throwIfAborted()
       console.warn("[HarnessBoard] Failed to resolve optional current stage:", error)
       currentStage = {}
     }
@@ -442,8 +448,22 @@ async function buildSkillLifecycleRegistryForHooks(
 
 export async function validateExplicitSkillReference(
   input: { name: string; path: string },
-  scope?: Partial<ProjectModeSkillScope> & { workspacePath?: string; threadId?: string }
+  scope?: Partial<ProjectModeSkillScope> & { workspacePath?: string; threadId?: string; signal?: AbortSignal }
 ): Promise<string | null> {
+  if (scope?.workspacePath && scope.threadId) {
+    try {
+      input = await relocateRetainedExplicitSkill(input, {
+        workspacePath: scope.workspacePath,
+        threadId: scope.threadId,
+        signal: scope.signal,
+        readInstalledPlugins: getPlugins,
+        readDisabledSkillDirs: getDisabledSkillDirs
+      })
+    } catch (error) {
+      scope.signal?.throwIfAborted()
+      return error instanceof Error ? error.message : String(error)
+    }
+  }
   const visibilityScope = scope?.projectMode === undefined ? undefined : {
     projectMode: scope.projectMode,
     boundPluginId: scope.boundPluginId,
@@ -528,8 +548,32 @@ async function activateExplicitSkillFromMessage({
   onHookSkippedFactory?: (event: HookEvent) => ScopeSkipCallback | undefined
   skillVisibility?: ProjectModeSkillScope
 }): Promise<ExplicitSkillActivation | null> {
-  const parsed = parseSkillUseBlock(message)
+  let parsed = parseSkillUseBlock(message)
   if (!parsed) return null
+
+  try {
+    const selected = await relocateRetainedExplicitSkill({
+      name: parsed.skillName,
+      path: parsed.skillPath
+    }, {
+      workspacePath,
+      threadId: sessionId,
+      signal,
+      readInstalledPlugins: getPlugins,
+      readDisabledSkillDirs: getDisabledSkillDirs,
+      assertCurrent: () => {
+        if (isPreparationCurrent && !isPreparationCurrent()) throw Error("当前运行已结束或被替换")
+      }
+    })
+    if (selected.path !== parsed.skillPath) parsed = {
+      ...parsed,
+      skillPath: selected.path,
+      block: formatTrustedSkillUseBlock(selected)
+    }
+  } catch (error) {
+    signal?.throwIfAborted()
+    return { parsed, blocked: true, reason: error instanceof Error ? error.message : String(error) }
+  }
 
   const registry = await buildSkillLifecycleRegistryForHooks(skillVisibility)
   const skill = registry?.resolveExplicit({
@@ -787,6 +831,12 @@ export async function prepareStandardUserPrompt({
       reason: explicitSkillActivation.reason || "显式选择的技能被 Hook 拦截"
     }
   }
+  const originalModelSkill = parseSkillUseBlock(initialModelInput)
+  const canonicalModelInput = originalModelSkill && explicitSkillActivation?.parsed &&
+    originalModelSkill.skillPath !== explicitSkillActivation.parsed.skillPath
+    ? [originalModelSkill.rest.trimEnd(), explicitSkillActivation.parsed.block].join("\n\n")
+    : initialModelInput
+  preparedMessage = canonicalModelInput
   const isInternalGoalModelInput =
     initialModelInput.startsWith("[Starting active goal]") ||
     initialModelInput.startsWith("[Continuing active goal]")
@@ -841,7 +891,7 @@ export async function prepareStandardUserPrompt({
     promptSubmitResult?.updatedInput?.prompt ??
     promptSubmitResult?.updatedInput?.userPrompt
   if (isInternalGoalModelInput) {
-    preparedMessage = buildInternalGoalPromptFromHookResult(initialModelInput, {
+    preparedMessage = buildInternalGoalPromptFromHookResult(canonicalModelInput, {
       updatedInput: promptSubmitResult?.updatedInput,
       additionalContexts: [
         explicitSkillActivation?.hookContext,
@@ -854,10 +904,11 @@ export async function prepareStandardUserPrompt({
   if (
     !isInternalGoalModelInput &&
     explicitSkillActivation?.parsed &&
-    (trustedExplicitSkillBlock || !parseSkillUseBlock(preparedMessage))
+    (trustedExplicitSkillBlock || !parseSkillUseBlock(preparedMessage) ||
+      parseSkillUseBlock(preparedMessage)?.skillPath !== explicitSkillActivation.parsed.skillPath)
   ) {
     // A saved task or Hook rewrite cannot replace the host-resolved Skill identity.
-    if (trustedExplicitSkillBlock)
+    if (trustedExplicitSkillBlock || parseSkillUseBlock(preparedMessage))
       preparedMessage = parseSkillUseBlock(preparedMessage)?.rest ?? preparedMessage
     preparedMessage = [preparedMessage.trimEnd(), explicitSkillActivation.parsed.block]
       .filter(Boolean)

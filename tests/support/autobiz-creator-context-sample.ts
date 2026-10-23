@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process"
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises"
-import { join, resolve } from "node:path"
+import { join } from "node:path"
 import { promisify } from "node:util"
 import { prepareExtensionContext } from "../../src/main/harness-board/extension-context"
+import { prepareAutobizCollectorFixture } from "./autobiz-collector-dependency-fixture"
 
 const execute = promisify(execFile)
 
@@ -77,12 +78,7 @@ const request=new EventEmitter();request.end=()=>queueMicrotask(()=>callback(Rea
   const collector = prepared
     ? join(prepared.env.DEVCLAW_PLUGIN_DATA_ROOT, "collector")
     : join(root, "collector")
-  await mkdir(collector, { recursive: true })
-  await cp(
-    resolve("output/creator-context-fixture-deps/node_modules"),
-    join(collector, "node_modules"),
-    { recursive: true }
-  )
+  prepareAutobizCollectorFixture(collector)
   let selected = prepared?.invocation ?? invocation
   if (!prepared) {
     await cp(originalCollector, join(collector, "collect-knowledge.js"))

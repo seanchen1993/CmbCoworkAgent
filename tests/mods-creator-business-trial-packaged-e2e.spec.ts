@@ -3,10 +3,11 @@
  * No substitute runner, direct business-state write, synthetic receipt or installed candidate.
  */
 import assert from "node:assert/strict"
+import { prepareAutobizCollectorFixture } from "./support/autobiz-collector-dependency-fixture"
 import { createHash } from "node:crypto"
 import { execFileSync } from "node:child_process"
 import { once } from "node:events"
-import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import AdmZip from "adm-zip"
 import type { ElectronApplication, Locator, Page } from "playwright"
@@ -202,13 +203,7 @@ function prepareCollectorDependencies(record: DevelopmentBusinessTrialStatus) {
     knowledge
   )
   const collector = join(fixture.env.CMB_COWORK_AGENT_HOME, "plugin-data", key, "collector")
-  const dependencies = resolve("output/creator-context-fixture-deps/node_modules")
-  assert(
-    existsSync(join(dependencies, "gray-matter/index.js")),
-    "Prepare fixed fixture dependencies separately; do not install into the package"
-  )
-  mkdirSync(collector, { recursive: true })
-  cpSync(dependencies, join(collector, "node_modules"), { recursive: true })
+  prepareAutobizCollectorFixture(collector)
 }
 async function configureCurrentTrial(expectedId: string) {
   const dialog = page.getByRole("dialog", { name: "插件试用与整轮验收" })

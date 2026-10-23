@@ -39,7 +39,7 @@ it("reuses native validation, wait hooks and host thread while refusing deferred
   await expect(invoke({ questions: [] }, signal)).rejects.toThrow()
   expect(request).toHaveBeenCalledTimes(1)
 })
-it("rejects late native replies after cancellation and does not resume a terminal wait", async () => {
+it("rejects late native replies after operation cancellation and releases the still-live run wait", async () => {
   const controller = new AbortController()
   const hooks = { onWaitStart: vi.fn(), onWaitEnd: vi.fn() }
   request.mockImplementation(async () => {
@@ -53,6 +53,27 @@ it("rejects late native replies after cancellation and does not resume a termina
       controller.signal
     )
   ).rejects.toThrow()
+  expect(hooks.onWaitStart).toHaveBeenCalledTimes(1)
+  expect(hooks.onWaitEnd).toHaveBeenCalledTimes(1)
+})
+
+it("does not resume an aborted native run when its independent operation is still live", async () => {
+  const run = new AbortController()
+  const operation = new AbortController()
+  const hooks = { onWaitStart: vi.fn(), onWaitEnd: vi.fn() }
+  request.mockImplementation(async () => {
+    run.abort(Error("Native run stopped"))
+    return { requestId: "r", answers: {} }
+  })
+  const { questions } = functionAskInput(["Continue?"])
+  await expect(
+    functionUserInputInvoker({
+      threadId: "thread",
+      abortSignal: run.signal,
+      interactionWaitHooks: hooks
+    })({ questions }, operation.signal)
+  ).rejects.toThrow("Native run stopped")
+  expect(operation.signal.aborted).toBe(false)
   expect(hooks.onWaitStart).toHaveBeenCalledTimes(1)
   expect(hooks.onWaitEnd).not.toHaveBeenCalled()
 })

@@ -93,6 +93,7 @@ import { runHooksEnriched } from "../hooks/required-skill"
 import { bindHookExecutionResult } from "../hooks/execution-result"
 import { detectToolFailure, hasFailureFired, markFailureFired } from "../hooks/tool-failure"
 import { HookHaltError, isHookHaltError, throwIfHookHalt } from "../hooks/halt"
+import { throwIfSkillHookHostFailure } from "./skill-lifecycle/host-failure"
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   formatFailureFuseWarning,
@@ -4454,6 +4455,7 @@ export class LocalSandbox
         if (skillMatch && !this._skillHooksFired.has(skillHookKey)) {
           fireSkillHooks = true
           const preContext: HookContext = {
+            signal: this.abortSignal,
             toolName: "read_file",
             toolArgs: LocalSandbox.readFileHookArgs(
               effectiveFilePath,
@@ -4495,6 +4497,7 @@ export class LocalSandbox
           this._skillHooksFired.add(skillHookKey)
         }
       } catch (hookError) {
+        throwIfSkillHookHostFailure(hookError, this.abortSignal)
         if (isHookHaltError(hookError) || isFailureFuseHaltError(hookError) || isStageDebugPolicyError(hookError)) throw hookError
         console.warn("[Hooks] PreSkillUse error:", hookError)
       }
@@ -4611,6 +4614,7 @@ export class LocalSandbox
       }
       return finalResult
     } catch (e: unknown) {
+      if (skillMatch) throwIfSkillHookHostFailure(e, this.abortSignal)
       if (isHookHaltError(e) || isFailureFuseHaltError(e) || isStageDebugPolicyError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return await this.applyPostToolUseHookToText(

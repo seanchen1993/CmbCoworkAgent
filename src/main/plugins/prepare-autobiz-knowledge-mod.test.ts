@@ -28,9 +28,9 @@ async function write(root: string, path: string, value: unknown) {
   await writeFile(join(root, path), typeof value === "string" ? value : JSON.stringify(value))
 }
 
-it("generates a closed six-file source and compiles its actual named register after original assembly", async () => {
+it("generates a closed eight-file offline source and compiles its actual named register after original assembly", async () => {
   const f = await fixture()
-  expect(f.generated).toMatchObject({ directory: f.source, files: 6 })
+  expect(f.generated).toMatchObject({ directory: f.source, files: 8 })
   const snapshot = await snapshotDerivationSource(f.source)
   const catalog = businessModCatalog(snapshot)
   expect(catalog.extensions).toHaveLength(1)
@@ -39,7 +39,9 @@ it("generates a closed six-file source and compiles its actual named register af
     userConfig: { knowledgeRoot: { type: "directory", required: false } } })
   expect(portableBusinessModFiles(snapshot).map(file => file.path).sort())
     .toEqual(snapshot.files.map(file => file.path).sort())
-  expect(snapshot.files).toHaveLength(6)
+  expect(snapshot.files).toHaveLength(8)
+  expect(catalog.extensions![0].resources).toContain("mods/business/autobiz.knowledge/collector-gray-matter.cjs")
+  expect(catalog.extensions![0].resources).toContain("mods/business/autobiz.knowledge/collector-THIRD-PARTY-NOTICES.md")
 
   // A local minimal shared-kernel fixture exercises the original assembler and compiler.
   // This verifies canonical packaging, not the separate reviewed AutoBiz source admission.

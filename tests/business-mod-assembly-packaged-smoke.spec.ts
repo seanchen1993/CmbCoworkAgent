@@ -2,10 +2,10 @@
  * COMPOSITION_E2E_PACKAGED_DIR=<win-unpacked> npx tsx tests/business-mod-assembly-packaged-smoke.spec.ts --packages <plugins>
  */
 import assert from "node:assert/strict"
+import { prepareAutobizCollectorFixture } from "./support/autobiz-collector-dependency-fixture"
 import { createHash } from "node:crypto"
 import {
   appendFileSync,
-  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -170,13 +170,7 @@ async function main() {
         assert(before.configured && before.exists && before.path)
         assert.deepEqual(before.files, [], "A new host cache has no loaded knowledge files")
         const data = dirname(before.path)
-        const dependencies = resolve("output/creator-context-fixture-deps/node_modules")
-        assert(
-          existsSync(join(dependencies, "gray-matter/index.js")),
-          "Prepare real gray-matter fixture dependencies first"
-        )
-        mkdirSync(join(data, "collector"), { recursive: true })
-        cpSync(dependencies, join(data, "collector/node_modules"), { recursive: true })
+        prepareAutobizCollectorFixture(join(data, "collector"))
         const provider = manifest.extensions.find(
           (extension: { id: string }) => extension.id === "autobiz.knowledge"
         ).contextProvider.entry

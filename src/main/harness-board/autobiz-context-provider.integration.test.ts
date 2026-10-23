@@ -15,7 +15,6 @@ import { extractErrorDetail } from "../agent/failover"
 
 const execute = promisify(execFile)
 const realSource = process.env.AUTOBIZ_CONTEXT_TEST_SOURCE ?? "C:/ai/autobiz_kanban"
-const dependencies = resolve(process.env.AUTOBIZ_CONTEXT_TEST_DEPENDENCIES ?? "output/creator-context-fixture-deps/node_modules")
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
   await closeRequiredPromptFixtures()
@@ -35,6 +34,8 @@ async function fixture() {
   const providerEntry = "mods/business/context/provider.py"
   await mkdir(dirname(join(source, providerEntry)), { recursive: true })
   await cp(resolve("resources/mods/autobiz-context-provider.py"), join(source, providerEntry))
+  for (const name of ["collector-gray-matter.cjs", "collector-THIRD-PARTY-NOTICES.md"])
+    await cp(resolve("resources/mods/autobiz-knowledge", name), join(source, dirname(providerEntry), name))
   const plugin = JSON.parse(await readFile(join(source, "plugin.json"), "utf8"))
   const template = createProjectTemplate({ packageId: "context-fixture", name: "Context fixture" })
   const originalRuntime = parseProjectRuntimeManifest(JSON.parse(template.files.find(file =>
@@ -82,16 +83,8 @@ async function fixture() {
     sourceRoot: source, workspace: scope, dataRoot: join(root, "data"), operation,
     invocation: invocation(script, args), configuration: { directoryBinding: async () => binding }
   })
-  const run = async (prepared: NonNullable<Awaited<ReturnType<typeof prepareExtensionContext>>>,
-    copyDependencies = false) => {
+  const run = async (prepared: NonNullable<Awaited<ReturnType<typeof prepareExtensionContext>>>) => {
     try {
-      if (copyDependencies) {
-        if (!existsSync(join(dependencies, "gray-matter/index.js")))
-          throw Error("Prepare fixture deps: npm --prefix output/creator-context-fixture-deps --ignore-scripts install gray-matter@4.0.3")
-        await mkdir(join(prepared.env.DEVCLAW_PLUGIN_DATA_ROOT, "collector"), { recursive: true })
-        await cp(dependencies, join(prepared.env.DEVCLAW_PLUGIN_DATA_ROOT, "collector/node_modules"),
-          { recursive: true })
-      }
       const result = await execute(prepared.invocation.executable, prepared.invocation.args, {
         cwd: source, windowsHide: true, timeout: 45000, maxBuffer: 4 * 1024 * 1024,
         env: { ...process.env, ...prepared.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1",
@@ -100,23 +93,22 @@ async function fixture() {
       return { parsed: JSON.parse(result.stdout), stderr: result.stderr }
     } finally { prepared.release() }
   }
-  return { root, source, sourceBefore, upstream, repository, workspace, plugin, board, prepare, run }
+  return { root, source, sourceBefore, upstream, repository, workspace, plugin, board, prepare, run,
+    networkFixture }
 }
 
 describe.runIf(process.env.RUN_AUTOBIZ_COLLECTOR_INTEGRATION === "1")("real AutoBiz context provider", () => {
   beforeAll(() => {
     if (!existsSync(join(realSource, "hooks/sync_agents.py")))
       throw Error("AUTOBIZ_CONTEXT_TEST_SOURCE_REQUIRED")
-    if (!existsSync(join(dependencies, "gray-matter/index.js")))
-      throw Error("AUTOBIZ_CONTEXT_TEST_DEPENDENCIES_REQUIRED")
   })
-  it("syncs a local Git repository and executes original collector/render without changing package bytes", async () => {
+  it("cold-starts offline without node_modules and preserves original collector/render and package bytes", async () => {
     const f = await fixture()
     const sync = (await f.prepare("sync-knowledge", "sync_agents.py",
       ["--prefer-manifest", "--write-board-config"]))!
     const root = sync.env.DEVCLAW_KNOWLEDGE_ROOT
     const data = sync.env.DEVCLAW_PLUGIN_DATA_ROOT
-    const pulled = await f.run(sync, true)
+    const pulled = await f.run(sync)
     expect(pulled.parsed).toMatchObject({ ok: true, runtimeConfigWritten: true,
       boardConfigWritten: false, supported_deploy_units: ["DW.ORDER"],
       repo: { ref: "fixture-knowledge", url: f.repository } })
@@ -157,6 +149,8 @@ describe.runIf(process.env.RUN_AUTOBIZ_COLLECTOR_INTEGRATION === "1")("real Auto
     expect(config.supported_deploy_units).toEqual(["DW.ORDER"])
     expect(config.inspectCommands.win32.pull_knowledge).toBe(f.board.inspectCommands.win32.pull_knowledge)
     expect(existsSync(join(f.source, "hooks/node_modules"))).toBe(false)
+    expect(existsSync(join(data, "collector/node_modules"))).toBe(false)
+    expect(existsSync(join(data, "collector/collector-gray-matter.cjs"))).toBe(true)
     expect(existsSync(join(f.source, "hooks/__pycache__"))).toBe(false)
     expect((await snapshotDerivationSource(f.source)).digest).toBe(f.sourceBefore.digest)
     expect((await snapshotDerivationSource(realSource)).digest).toBe(f.upstream.digest)
@@ -172,11 +166,13 @@ describe.runIf(process.env.RUN_AUTOBIZ_COLLECTOR_INTEGRATION === "1")("real Auto
     expect(await readFile(join(external, "keep.md"), "utf8")).toBe("MUST_NOT_DELETE")
     const sync = (await f.prepare("sync-knowledge", "sync_agents.py", ["--prefer-manifest"]))!
     const data = sync.env.DEVCLAW_PLUGIN_DATA_ROOT
-    await f.run(sync, true)
+    await f.run(sync)
     const render = (await f.prepare("session-context", "render_collected_session_context.py",
       ["--selected-deployUnit", JSON.stringify([{ deployUnitId: "DOES.NOT.EXIST" }]),
         "--node-command", process.execPath]))!
     const rendered = await f.run(render)
+    expect(rendered.parsed.ok).toBe(false)
+    expect(rendered.parsed.sessionContext).toBe("")
     expect(rendered.parsed.agentmdLoadStatus).toContainEqual(expect.objectContaining({
       deployUnitId: "DOES.NOT.EXIST", loaded: false }))
     expect(rendered.parsed.sessionContext).not.toContain("MODEL_KNOWLEDGE_MUST_SURVIVE")
@@ -188,5 +184,41 @@ describe.runIf(process.env.RUN_AUTOBIZ_COLLECTOR_INTEGRATION === "1")("real Auto
       stdout: expect.stringContaining("AUTOBIZ_CONTEXT_COLLECTOR_SCOPE_CHANGED") })
     expect(await readFile(join(external, "keep.md"), "utf8")).toBe("MUST_NOT_DELETE")
     expect((await snapshotDerivationSource(f.source)).digest).toBe(f.sourceBefore.digest)
+  }, 60000)
+
+  it("keeps explicit local fallback visible and blocks incomplete selected knowledge when metadata is offline", async () => {
+    const f = await fixture()
+    await f.run((await f.prepare("sync-knowledge", "sync_agents.py", ["--prefer-manifest"]))!)
+    await writeFile(f.networkFixture, `const http=require("node:http"),{EventEmitter}=require("node:events");
+      http.request=()=>{const request=new EventEmitter();request.end=()=>{};
+      request.destroy=error=>{queueMicrotask(()=>{request.emit("error",error);request.emit("close")})};return request};`)
+    const run = async (localRepoPath?: string) => f.run((await f.prepare("session-context",
+      "render_collected_session_context.py", ["--selected-deployUnit",
+        JSON.stringify([{ deployUnitId: "DW.ORDER", ...(localRepoPath ? { localRepoPath } : {}) }]),
+        "--node-command", process.execPath]))!)
+    const local = await run(f.workspace)
+    expect(local.parsed.ok).toBe(true)
+    expect(local.parsed.agentmdLoadStatus).toContainEqual(expect.objectContaining({
+      deployUnitId: "DW.ORDER", loaded: true, source: "local", message: expect.stringContaining("回退本地")
+    }))
+    expect(local.parsed.sessionContext).toContain("WORKSPACE_RULE_MUST_SURVIVE")
+    const missing = await run()
+    expect(missing.parsed.ok).toBe(false)
+    expect(missing.parsed.sessionContext).toBe("")
+    expect(missing.parsed.agentmdLoadStatus).toContainEqual(expect.objectContaining({
+      deployUnitId: "DW.ORDER", loaded: false
+    }))
+  }, 60000)
+
+  it("does not substitute manifest-only knowledge after Node is unavailable", async () => {
+    const f = await fixture()
+    await f.run((await f.prepare("sync-knowledge", "sync_agents.py", ["--prefer-manifest"]))!)
+    const render = (await f.prepare("session-context", "render_collected_session_context.py",
+      ["--selected-deployUnit", JSON.stringify([{ deployUnitId: "DW.ORDER" }]),
+        "--node-command", join(f.root, "node-missing")]))!
+    await expect(f.run(render)).rejects.toMatchObject({
+      stdout: expect.stringContaining("AUTOBIZ_CONTEXT_SELECTED_KNOWLEDGE_UNAVAILABLE")
+    })
+    expect(existsSync(join(render.env.DEVCLAW_PLUGIN_DATA_ROOT, "collector/node_modules"))).toBe(false)
   }, 60000)
 })

@@ -151,6 +151,11 @@ export function readPackageProtocolFilesAsync(
     (await readTreeAsync(root, signal)).files.map(file => ({ path: file.path, bytes: file.data })))
 }
 
+/** Fresh bounded package identity for native readers; does not retain or approve a package. */
+export function readPackageProtocolDigestAsync(root: string, signal?: AbortSignal): Promise<string> {
+  return withSnapshotPathRetention([root], async () => (await readTreeAsync(root, signal)).digest)
+}
+
 async function readTreeAsync(root: string, signal?: AbortSignal): Promise<PackageTree> {
   const canonical = await runtimeDirectoryAsync(root)
   const directories: string[] = []

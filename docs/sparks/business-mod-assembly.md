@@ -110,6 +110,8 @@ Host 内核不声明 `boardConfigPath`，不需要 AutoBiz checkpoint，也不�
 等引用的父目录和深度；只替换真实 YAML frontmatter 中的 `name`，正文与资源保持原字节。
 如原插件包含 `PreSkillUse`、`PostSkillUse`（含通配 matcher）、无法识别的 Hook 声明，
 自动别名明确阻断，须先由作者完成 Hook 映射；不会静默改写原 matcher 或跳过原 Hook。
+这是转换完整性的保守边界；[技能前后事件已向 Mod 开放](events-and-api.md#技能使用前后扩展)，
+不等于转换器能够无损拆分任意原 Hooks、重写 matcher 或自动迁移原校验脚本。
 别名冲突、缺失检查、未知上下文或无法保持原契约时明确阻断，不能删除阶段或校验来通过。
 确认后的 `inspectionId` 进入既有组合、试用、检查与独立插件安装/导出流程。
 

@@ -28,6 +28,19 @@ export const register: Register = (on) => {
 }
 `
 
+export const DEVELOPMENT_SKILL_LIFECYCLE_EXAMPLE = `import type { Register } from "devclaw-mods"
+export const register: Register = (on) => {
+  on("classic.PreSkillUse", { skill_name: "review" }, ($, event, next) => {
+    $.ui.log("准备使用技能：" + event.skill_name)
+    return next(event)
+  })
+  on("classic.PostSkillUse", { skill_name: "review" }, ($, event, next) => {
+    $.ui.log("技能完成检查：" + event.skill_name)
+    return next(event)
+  })
+}
+`
+
 /** The same declarations go to the model and the actual isolated type checker. */
 export function developmentCatalog() {
   return {
@@ -50,9 +63,13 @@ export function developmentCatalog() {
       "这组固定事件范围随 SDK 一起由用户确认；加载后逐项校验实际注册，拒绝通配符和范围外事件。",
     authorizedTrialEventConsent:
       "真实试用另按源码中的 literal 事件逐项申请已接通的事件（见 events 目录），不授予完整目录、动态或通配范围。",
-    examples: { toolCounter: DEVELOPMENT_COUNTER_EXAMPLE },
+    examples: {
+      toolCounter: DEVELOPMENT_COUNTER_EXAMPLE,
+      skillLifecycle: DEVELOPMENT_SKILL_LIFECYCLE_EXAMPLE
+    },
     deliveryGuidance: [
       CREATOR_S1_SUPPORT.authoringConstraints.usageMetrics,
+      "技能生命周期用 classic.PreSkillUse/PostSkillUse（本应用扩展），matcher 用 skill_name；从 events/types 读取宿主固定身份与结果。Pre block 阻止激活，Post block 请求修订、preventContinuation 才终止。普通 Mod 不能吞掉必需业务 Hooks，原脚本不自动迁移；真实试用须新确认。",
       "状态扩展用 scaffold(kind:state-extension) 生成真实 Function Mod、迁移计划与未执行测试入口，再 save/check/request_trial。默认只 hold；未确认原图、绑定原 writer 并实际验证前必须显示‘可执行决策骨架，未迁移状态’。inspect_raw.stateControl 保留原状态工具、Hooks、配置及知识来源；已有 Host authority 无需强制迁移。",
       "创造者模式按自然语言需求选择复用、组合或编写；不要让用户先配置添加功能、常用搭配或执行步骤。连续修改先 list/read 更新当前开发组件，保留已有功能。",
       "使用闭合的 SDK 路径和 literal 事件；SDK 对象或方法不能传给辅助函数、动态索引或外部代码。纯辅助函数只接收普通数据；SDK 调用直接写在有明确 $ 参数的事件处理器中，否则检查会报告 MODS_SDK_UNVERIFIED，保留草稿后按诊断修复。",
@@ -136,6 +153,7 @@ export function developmentCatalogPage(
       trialEventConsent: catalog.trialEventConsent,
       authorizedTrialEventConsent: catalog.authorizedTrialEventConsent,
       package: catalog.package,
+      examples: { skillLifecycle: catalog.examples.skillLifecycle },
       authoringTemplates: catalog.authoringTemplates,
       deliveryGuidance: catalog.deliveryGuidance,
       limitations: catalog.limitations,

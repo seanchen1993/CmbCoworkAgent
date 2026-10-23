@@ -2,7 +2,7 @@ import AdmZip from "adm-zip"
 import { execFile } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { promisify } from "node:util"
@@ -36,12 +36,12 @@ import { LegacyProjectRuntimeService } from "./legacy-runtime-service"
 import { LegacyOperationStore } from "./legacy-operation-store"
 import { HostPackageSnapshots } from "./package-snapshots"
 import { createLegacyModsRuntime, registerLegacyModsRuntime } from "./legacy-mods-runtime"
+import { prepareAutobizCollectorFixture } from "../../../../tests/support/autobiz-collector-dependency-fixture"
 
 const execute = promisify(execFile)
 const library = resolve(
   process.env.AUTOBIZ_CREATOR_DEMO_LIBRARY ?? "output/deliveries/mods-creator-accepted-20261017"
 )
-const dependencies = resolve("output/creator-context-fixture-deps/node_modules")
 const packages = [
   {
     title: "original full AutoBiz 1.0.1",
@@ -344,10 +344,7 @@ const request=new EventEmitter();request.end=()=>queueMicrotask(()=>callback(Rea
   })
   // The first render must materialize its own original scripts, outside knowledge/source.
   await rm(join(data, "collector"), { recursive: true })
-  if (!existsSync(join(dependencies, "gray-matter/index.js")))
-    throw Error("REAL_COLLECTOR_DEPENDENCIES_MISSING")
-  await mkdir(join(data, "collector"))
-  await cp(dependencies, join(data, "collector/node_modules"), { recursive: true })
+  prepareAutobizCollectorFixture(join(data, "collector"))
   expect(existsSync(join(data, "collector/collect-knowledge.js"))).toBe(false)
   const beforeRender = input.inputIdentity(projectInput, retained.root)
   const render = async () =>

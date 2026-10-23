@@ -146,6 +146,15 @@ const known = new Set<string>(CLAUDE_EVENT_NAMES)
 export function isClaudeEventName(value: string): value is ClaudeEventName {
   return known.has(value)
 }
+/** Application-owned lifecycle extensions; not part of the pinned upstream inventory. */
+export const FUNCTION_CLASSIC_EXTENSION_EVENT_NAMES = [
+  "classic.PreSkillUse",
+  "classic.PostSkillUse"
+] as const
+export function isFunctionClassicEventName(value: string): boolean {
+  return (value.startsWith("classic.") && isClaudeEventName(value)) ||
+    FUNCTION_CLASSIC_EXTENSION_EVENT_NAMES.some((name) => name === value)
+}
 export const CLAUDE_CORE_MEMBERS = [
   "prompt.compose",
   "prompt.read",
