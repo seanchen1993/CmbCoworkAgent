@@ -2,6 +2,8 @@
 
 Design 模式使用交互预览。工作目录文件标签仍使用静态预览，两者分别构建文档。
 
+生成期间使用宿主控制的草稿预览，按区块更新同一 iframe，页面自身脚本在定稿时再执行。新协议的 Tweaks 参数由宿主面板编辑并独立保存，详情见 [渐进生成与 Tweaks](design-progressive-generation.md)。
+
 ## 已验证的交互
 
 - 普通与委托事件、Tab、页面 dialog、alert/confirm/prompt，以及编辑或注释模式退出后恢复交互。

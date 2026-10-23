@@ -1,4 +1,6 @@
 import type { FileAttachment as BaseFileAttachment } from "@/types"
+import type { DesignDraftPreview, DesignGenerationMetrics } from "../../../../shared/design-progressive"
+import type { DesignTweaksState } from "../../../../shared/design-tweaks"
 
 export type FileAttachment = BaseFileAttachment
 
@@ -263,6 +265,7 @@ export interface DirectionCard {
 }
 
 export interface DesignArtifactMetadata {
+  tweaks?: DesignTweaksState | null
   artifactId: string
   title?: string
   prompt?: string
@@ -327,6 +330,10 @@ export interface DesignApprovalRequest {
 export interface TabState {
   messages: Message[]
   html: string
+  draftPreview?: DesignDraftPreview | null
+  tweaks?: DesignTweaksState | null
+  generationMetrics?: DesignGenerationMetrics
+  lastCompletedRunId?: string | null
   sourceInfo: DesignSourceInfo | null
   generationState: GenerationState
   questions: QuestionDef[]

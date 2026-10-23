@@ -14,11 +14,16 @@ import Store from "electron-store"
 import { getDb } from "../db"
 import { DesignSessionStore } from "../services/design/session-store"
 import { DesignRunManager } from "../services/design/run-manager"
+import { DesignDraftPublisher } from "../services/design/draft-preview"
+import { DESIGN_PROGRESSIVE_PROMPT, DESIGN_DECLARATIVE_TWEAKS_PROMPT } from "../services/design/generation-prompt"
+import { isFinalizableDesignDraft } from "../../shared/design-progressive"
+import { materializeTweaks, readTweakDeclaration, reconcileTweaks, tweakSourceIssues, type DesignTweakCommand, type DesignTweaksState } from "../../shared/design-tweaks"
 import { approvalDecisionBroker } from "../agent/approval-decision-broker"
 import { asDesignApprovalRequest, type DesignRunEvent, type DesignSessionChange, type DesignSessionSeed, type DesignRunRequest, type TabState, type SessionMeta } from "../../shared/managed-design-session"
 
 const designExecutors = new Map<string, (params: Record<string, unknown>) => Promise<void>>()
 const managedDesignSinks = new Map<string, (event: DesignRunEvent) => void>()
+const managedDesignStateReaders = new Map<string, () => TabState>()
 function registerDesignExecutor<P extends { sessionId: string }>(channel: string,
   execute: (event: { sender?: WebContents }, params: P) => Promise<void>): void {
   designExecutors.set(channel, (params) => execute({}, params as P))
@@ -196,63 +201,9 @@ Before writing a single line of HTML, decide what format best serves the content
 - ❌ Overused font families (Inter, Roboto, Arial, Fraunces)
 - ❌ Unnecessary icons, stats, or filler numbers that add no meaning
 
-## Tweaks (Edit mode) — REQUIRED in every output
+${DESIGN_DECLARATIVE_TWEAKS_PROMPT}
 
-Every HTML file you produce **must** include a self-contained Tweaks system. Follow this protocol exactly.
-
-### 1 — Define tweakable defaults with EDITMODE markers
-
-Inside your inline \`<script>\`, declare a \`TWEAK_DEFAULTS\` object wrapped in special comment markers. The block between the markers must be **valid JSON** (double-quoted keys and string values). Choose 4–8 meaningful, design-relevant keys for the specific design — colors, font sizes, spacing, copy variants, feature flags, layout options, etc.
-
-\`\`\`js
-const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{"primaryColor":"#D97757","headingSize":48,"bodySize":16,"dark":false,"ctaText":"Get Started","radius":12}/*EDITMODE-END*/;
-\`\`\`
-
-There must be **exactly one** such block in the entire file, inside an inline \`<script>\` tag (not an external file).
-
-### 2 — Register the postMessage listener BEFORE announcing availability
-
-This order is mandatory — if you post \`__edit_mode_available\` before the listener is registered, the host's activation message can arrive before your handler exists.
-
-\`\`\`js
-// FIRST: register handler
-window.addEventListener('message', function(e) {
-  if (e.data && e.data.type === '__activate_edit_mode')   showTweaksPanel();
-  if (e.data && e.data.type === '__deactivate_edit_mode') hideTweaksPanel();
-  if (e.data && e.data.type === '__set_tweak_keys') applyTweaks(e.data.edits);
-});
-
-// SECOND: announce readiness
-window.parent.postMessage({ type: '__edit_mode_available' }, '*');
-\`\`\`
-
-### 3 — Build the Tweaks panel UI
-
-The panel lives **inside the iframe**. Make it a floating card in the bottom-right corner, hidden by default, shown only when \`__activate_edit_mode\` is received.
-
-- For color keys: render a color swatch/picker
-- For numeric keys: render a slider or stepper
-- For boolean keys: render a toggle
-- For string/copy keys: render a text input or chip group
-
-When a value changes:
-1. Apply it **live to the DOM** immediately (e.g. update a CSS variable, swap a class, rewrite a text node)
-2. Persist by calling \`window.parent.postMessage({ type: '__edit_mode_set_keys', edits: { key: newValue } }, '*')\`
-
-### 4 — Apply defaults via CSS variables
-
-Wire every TWEAK_DEFAULT into a CSS variable on \`:root\` at startup, then reference those variables throughout your styles. This makes live updates a single line: \`document.documentElement.style.setProperty('--primary', newColor)\`.
-
-\`\`\`js
-function applyTweaks(edits) {
-  const t = Object.assign({}, TWEAK_DEFAULTS, edits);
-  const r = document.documentElement;
-  r.style.setProperty('--primary', t.primaryColor);
-  r.style.setProperty('--heading-size', t.headingSize + 'px');
-  // ... etc
-}
-applyTweaks({}); // apply defaults on load
-\`\`\`
+${DESIGN_PROGRESSIVE_PROMPT}
 
 ## Reading and writing design files
 
@@ -278,8 +229,8 @@ When writing:
 - Keep the artifact compact and maintainable: avoid unnecessary generated bulk, duplicated CSS, huge embedded data, and copied assets that are not used.
 - Use \`write_file\` for a new output artifact. If updating an existing artifact, use \`edit_file\` only when the replacement is small and reliable; otherwise write the complete final HTML artifact.
 - Do not assume \`write_file\` has a content-size limit, and do not claim the file is being truncated unless the \`write_file\` tool result explicitly reports that exact error.
-- Prefer writing the complete artifact in one \`write_file\` call when practical. If the artifact is too large to produce safely in one tool call, use a chunked file-writing strategy: first write a complete HTML skeleton containing unique insertion markers, then call \`edit_file\` repeatedly to replace one marker with an HTML chunk plus the next marker, then remove every temporary marker before finishing.
-- After writing, verify the artifact with \`read_file({ file_path, offset: 0, limit: ${READ_FILE_DEFAULT_LIMIT} })\` and continue with later offsets if needed. Confirm the file contains one complete HTML document, required EditMode markers, and no leftover temporary insertion markers.
+- Follow the progressive generation protocol: write a small complete scaffold first, then fill logical sections using edit_file. Small self-contained pages may be finished in one call. Remove all pending/building markers before finishing.
+- After writing, verify the artifact with \`read_file({ file_path, offset: 0, limit: ${READ_FILE_DEFAULT_LIMIT} })\` and continue with later offsets if needed. Confirm the file contains one complete HTML document, the required v2 Tweaks declaration (or preserved legacy EDITMODE markers), and no pending/building or temporary insertion markers.
 - After writing the file, respond only with a brief summary.
 
 ## Context from user's session
@@ -661,6 +612,7 @@ interface DesignTemplateInfo {
 }
 
 interface DesignArtifactMetadata {
+  tweaks?: DesignTweaksState | null
   artifactId: string
   title?: string
   prompt?: string
@@ -1256,7 +1208,8 @@ function getDesignArtifactPackageInfo(
 
 function exportDesignArtifactPackage(
   filePath: string | undefined,
-  workspacePath?: string
+  workspacePath?: string,
+  tweaks?: DesignTweaksState | null
 ): { success: boolean; fileName?: string; buffer?: ArrayBuffer; relatedFileCount?: number; error?: string } {
   const info = getDesignArtifactPackageInfo(filePath, workspacePath)
   if (!info.success || !info.filePath || !info.dirPath) {
@@ -1269,7 +1222,8 @@ function exportDesignArtifactPackage(
     const zip = new AdmZip()
     for (const file of files) {
       const zipDir = path.dirname(file.relativePath)
-      zip.addLocalFile(file.filePath, zipDir === "." ? "" : zipDir, path.basename(file.relativePath))
+      if (tweaks && sameResolvedFilePath(file.filePath, info.filePath)) zip.addFile(file.relativePath, Buffer.from(materializeTweaks(fs.readFileSync(file.filePath, "utf8"), tweaks)))
+      else zip.addLocalFile(file.filePath, zipDir === "." ? "" : zipDir, path.basename(file.relativePath))
     }
     const zipBuffer = zip.toBuffer()
     const baseName = path.basename(info.dirPath).replace(/[^a-zA-Z0-9._-]/g, "_") || "design"
@@ -1323,7 +1277,7 @@ function countDesignVariationOpenTags(html: string, id: "a" | "b"): number {
 }
 
 function validateDesignArtifactSourceStructure(html: string): DesignBrowserValidationIssue[] {
-  const issues: DesignBrowserValidationIssue[] = []
+  const issues: DesignBrowserValidationIssue[] = tweakSourceIssues(html).map((message) => ({ type: "structure", message }))
   const tokens = Array.from(html.matchAll(DESIGN_CONTROL_TOKEN_RE))
     .map((match) => match[0])
     .slice(0, 5)
@@ -1483,6 +1437,8 @@ async function validateDesignArtifactInHiddenBrowser(
         DESIGN_VARIATION_STRUCTURE_CHECK_JS,
         true
       )
+      const tweakMessages = await validationWindow.webContents.executeJavaScript(readTweakDeclaration(sourceHtml) ? "typeof window.__designValidateTweaks === 'function' ? window.__designValidateTweaks() : ['Tweaks runtime 未成功初始化']" : "[]", true)
+      for (const message of normalizeDesignValidationMessages(tweakMessages)) issues.push({ type: "structure", message })
       for (const message of normalizeDesignValidationMessages(structureMessages)) {
         issues.push({ type: "structure", message })
       }
@@ -2474,7 +2430,7 @@ function buildDesignArtifactInstruction(filePath: string, exists: boolean, sourc
     `Do not assume write_file has a content-size limit, and do not claim the file is being truncated unless the write_file tool result explicitly reports that exact error. ` +
     `A read_file result like "[Lines 1-145 of 300. Use offset=145 to read more.]" or "[More content is available after line 145; use offset=145 to read more.]" means pagination, not truncation. Continue with the instructed offset when more context is needed; do not delete or rebuild a file just because read_file returned a page of lines. If the result says output was truncated within a long line, use a targeted read/search or analysis-only formatting command instead of rewriting the file. ` +
     `Use write_file only for the first creation of a non-existent output artifact. After any successful write_file to the output path, all later changes to that same path must use edit_file. If write_file reports that the file already exists, do not retry write_file and do not claim the file was deleted; read_file the existing output path, then use edit_file to replace the current content or temporary markers. ` +
-    `Prefer writing the complete artifact in one write_file call when practical. If the artifact is too large to produce safely in one tool call, use a chunked file-writing strategy: first call write_file with BOTH required fields exactly as write_file({ file_path: "${filePath}", content: "<!DOCTYPE html>...unique insertion markers...</html>" }), then call edit_file repeatedly with ALL required fields exactly as edit_file({ file_path: "${filePath}", old_string: "UNIQUE_MARKER", new_string: "HTML chunk plus next marker", replace_all: false }), then remove every temporary marker before finishing. ` +
+    `Follow the progressive HTML protocol. For substantial pages, write a small closed scaffold first with data-design-build="building" and stable data-design-section IDs plus data-design-pending placeholders. Then fill logical sections, first-screen first, with edit_file. Remove every pending/building marker before finishing. For example: first call write_file with BOTH required fields exactly as write_file({ file_path: "${filePath}", content: "<!DOCTYPE html>...unique insertion markers...</html>" }), then call edit_file repeatedly with ALL required fields exactly as edit_file({ file_path: "${filePath}", old_string: "UNIQUE_MARKER", new_string: "HTML chunk plus next marker", replace_all: false }), then remove every temporary marker before finishing. ` +
     `Every write_file call MUST include a non-empty string file_path and content. Every edit_file call MUST include non-empty string file_path, old_string, and new_string. ` +
     `To verify the artifact after writing, use read_file({ file_path: "${filePath}", offset: 0, limit: ${READ_FILE_DEFAULT_LIMIT} }) and continue with later offsets if needed; do not use shell commands for verification. ` +
     `If a tool call fails with "Invalid tool arguments", retry the same filesystem operation using the exact schema above; do not switch to execute/bash/shell/Python. ` +
@@ -2813,6 +2769,7 @@ export function registerDesignHandlers(): void {
       const execute = designExecutors.get(channel)
       if (!execute) throw new Error("设计生成入口不可用")
       managedDesignSinks.set(runId, emit)
+      managedDesignStateReaders.set(runId, () => manager.get(request.designSessionId).state)
       try {
         const runtimeSession = request.freshAgentThread
           ? `retry_${runId}_${request.designSessionId}`
@@ -2831,6 +2788,7 @@ export function registerDesignHandlers(): void {
         })
       } finally {
         managedDesignSinks.delete(runId)
+        managedDesignStateReaders.delete(runId)
         activeSessions.delete(runId)
         activeDesignAgents.delete(runId)
       }
@@ -2921,6 +2879,14 @@ export function registerDesignHandlers(): void {
       }: { id: string; patch: Partial<TabState>; meta?: Partial<SessionMeta> },
     ) => manager.patch(id, patch, meta),
   )
+  ipcMain.handle("design:session-tweak", (_event, { id, command }: { id: string; command: DesignTweakCommand }) => {
+    const snapshot = manager.tweak(id, command)
+    if ((command.scope === "artifact" || !snapshot.state.draftPreview) && snapshot.state.artifactPath) {
+      try { writeDesignArtifactMetadata(snapshot.state.artifactPath, { tweaks: snapshot.state.tweaks }) } catch (error) { console.warn("[Design] Tweaks metadata projection failed; database state retained", error) }
+    }
+    return snapshot
+  })
+  ipcMain.handle("design:preview-visible", (_event, { id, runId, revision }: { id: string; runId: string; revision: number }) => manager.previewVisible(id, runId, revision))
   ipcMain.handle("design:session-start", (_event, request: DesignRunRequest) =>
     manager.start(request),
   )
@@ -3429,8 +3395,11 @@ export function registerDesignHandlers(): void {
 
   ipcMain.handle(
     "design:export-artifact-package",
-    (_event, { filePath, workspacePath }: DesignArtifactPackageParams) =>
-      exportDesignArtifactPackage(filePath, workspacePath)
+    (_event, { filePath, workspacePath }: DesignArtifactPackageParams) => {
+      const session = manager.list().find((meta) => sameResolvedFilePath(meta.artifactPath ?? undefined, filePath))
+      const tweaks = session ? manager.get(session.id).state.tweaks : readDesignArtifactMetadata(filePath)?.tweaks
+      return exportDesignArtifactPackage(filePath, workspacePath, tweaks)
+    }
   )
 
   ipcMain.handle("design:list-systems", async (): Promise<DesignSystemInfo[]> => listDesignSystems())
@@ -3513,6 +3482,7 @@ export function registerDesignHandlers(): void {
       // Checkpoint paths only allow [a-zA-Z0-9_-], so keep this in sync with renderer approval listeners.
       const threadId = makeDesignAgentThreadId(designSessionId, tabId)
 
+      let draftPublisher: DesignDraftPublisher | undefined
       try {
         send({ type: "start" })
 
@@ -3661,6 +3631,12 @@ export function registerDesignHandlers(): void {
 
         let candidateDraftPath = draftArtifactPath
         let wroteCandidateDraft = false
+        let recordedFirstWrite = false
+        draftPublisher = new DesignDraftPublisher({
+          runId: sessionId, workspacePath, draftPath: candidateDraftPath, signal: controller.signal,
+          publish: (preview) => send({ type: "preview", preview }),
+        })
+        const isFinalizableCandidate = (candidate: string) => isCompleteHtmlDocument(candidate) && isFinalizableDesignDraft(candidate, draftPublisher?.expectedSections)
         const shouldResetInitialCheckpoint = !hasExistingArtifactHtml && !htmlForIteration
 
         const makeHumanMessage = (messageText: string) =>
@@ -3688,8 +3664,10 @@ export function registerDesignHandlers(): void {
           retryHooks: buildDesignModelRetryHooks(send),
           maxRetryAttempts: DESIGN_MODEL_MAX_RETRY_ATTEMPTS,
           onFileMutation: (filePath) => {
-            if (sameResolvedFilePath(filePath, candidateDraftPath)) {
+            if (sameResolvedFilePath(path.resolve(workspacePath, filePath), candidateDraftPath)) {
               wroteCandidateDraft = true
+              if (!recordedFirstWrite) { recordedFirstWrite = true; send({ type: "metrics", metrics: { firstWriteAt: Date.now() } }) }
+              draftPublisher?.notify(filePath)
             }
           },
         })
@@ -4067,9 +4045,10 @@ export function registerDesignHandlers(): void {
           // Prefer the complete AIMessage captured from LangGraph values. During
           // mid-stream resume, streamedText may contain partial tokens from a
           // failed attempt plus tokens from the resumed attempt.
+          await draftPublisher?.flush()
           const fullText = finalMessageText || streamedText
           const html = extractHtml(fullText)
-          return { html: html && isCompleteHtmlDocument(html) ? html : undefined, fullText }
+          return { html: html && isFinalizableCandidate(html) ? html : undefined, fullText }
         }
 
         if (shouldResetInitialCheckpoint) {
@@ -4114,6 +4093,13 @@ export function registerDesignHandlers(): void {
             return { ok: false, repairable: true, message }
           }
 
+          await draftPublisher?.flush()
+          draftPublisher?.validating()
+          const liveState = managedDesignStateReaders.get(sessionId)?.()
+          const tweaks = reconcileTweaks(readTweakDeclaration(artifactHtml), liveState?.draftPreview?.tweaks ?? liveState?.tweaks, true)
+          artifactHtml = materializeTweaks(artifactHtml, tweaks)
+          const validationStartedAt = Date.now()
+          send({ type: "metrics", metrics: { validationStartedAt } })
           const validationDraftPath = makeDesignArtifactDraftPath(outputArtifactPath)
           const draftSave = saveDesignArtifactFile(
             validationDraftPath,
@@ -4132,6 +4118,7 @@ export function registerDesignHandlers(): void {
 
           sendValidationEvent("running", "浏览器校验中...")
           const browserValidation = await validateDesignArtifactInHiddenBrowser(draftSave.filePath, controller.signal)
+          send({ type: "metrics", metrics: { validationFinishedAt: Date.now() } })
           const browserValidationMessage = formatDesignBrowserValidation(browserValidation)
           lastValidationFailureMessage = browserValidationMessage
           if (!browserValidation.ok) {
@@ -4157,18 +4144,20 @@ export function registerDesignHandlers(): void {
               designSystemCategory: designSystemId ? getDesignSystemById(designSystemId).info?.category ?? null : null,
               preview: { thumbnailText: makeDesignThumbnailText(artifactHtml) },
               variations: extractDesignVariationMetadata(artifactHtml),
+              tweaks,
             })
           }
           send({
             type: "done",
             html: artifactHtml,
+            tweaks,
             ...(saved?.filePath ? { artifactPath: saved.filePath } : {}),
             ...(metadata ? { metadata } : {}),
           })
           return { ok: true }
         }
 
-        if (!html || !isCompleteHtmlDocument(html)) {
+        if (!html || !isFinalizableCandidate(html)) {
           const draftArtifact = readFreshDesignArtifactDraftFile(
             candidateDraftPath,
             workspacePath,
@@ -4176,7 +4165,7 @@ export function registerDesignHandlers(): void {
             wroteCandidateDraft,
             requiresFreshEditArtifact
           )
-          if (draftArtifact.success && draftArtifact.html && isCompleteHtmlDocument(draftArtifact.html)) {
+          if (draftArtifact.success && draftArtifact.html && isFinalizableCandidate(draftArtifact.html)) {
             html = draftArtifact.html
           }
         }
@@ -4184,24 +4173,21 @@ export function registerDesignHandlers(): void {
         let continuationAttempt = 0
         let stalledContinuationAttempts = 0
         while (
-          (!html || !isCompleteHtmlDocument(html)) &&
+          (!html || !isFinalizableCandidate(html)) &&
           continuationAttempt < DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS &&
           stalledContinuationAttempts < DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS
         ) {
           continuationAttempt++
           wroteCandidateDraft = false
           const continuationArtifactPath = candidateDraftPath
-          const beforeToolCallCount = emittedToolCallIds.size
-          const beforeToolResultCount = emittedToolResultIds.size
-          const beforeAssistantTextCount = emittedAssistantTextIds.size
-          const beforeFullText = fullText.trim()
+          const beforePreviewRevision = draftPublisher?.latest?.revision ?? 0
           const continuationInstruction = buildDesignArtifactInstruction(
             continuationArtifactPath,
             fs.existsSync(continuationArtifactPath),
             sourceFilePathForPrompt
           )
           const continuationPrompt =
-            `继续上一轮 Design 生成流程。上一轮还停留在读取、分析或计划阶段，尚未写出完整 HTML artifact；不要把这当成失败，也不要从头重做已完成的读取和分析。\n\n` +
+            `继续上一轮 Design 生成流程。已有骨架或区块可能仍未完成；请保留已完成部分，补齐剩余 data-design-pending 区块，移除 data-design-build 后再结束。不要从头重做读取、分析或已完成的区块。当前已完成 ${draftPublisher?.latest?.completedSections.length ?? 0}/${draftPublisher?.latest?.totalSections ?? 0} 区块。\n\n` +
             `你现在必须基于当前线程里已经读取/提取到的 PRD、技能和上下文继续执行。若还缺少必要信息，可以继续调用 read_file 等工具；但如果没有明确的绝对路径，跳过该读取，绝不能调用 file_path 为空或 undefined 的 read_file。\n\n` +
             `本轮结束前必须把完整、可独立运行的 HTML artifact 写入指定文件。不要只说明下一步计划。\n\n` +
             continuationInstruction
@@ -4211,7 +4197,7 @@ export function registerDesignHandlers(): void {
           if (continuationResult.fullText && !isLikelyDesignProgressOnlyText(continuationResult.fullText)) {
             fullText = continuationResult.fullText
           }
-          if (!html || !isCompleteHtmlDocument(html) || wroteCandidateDraft) {
+          if (!html || !isFinalizableCandidate(html) || wroteCandidateDraft) {
             const continuationDraftArtifact = readFreshDesignArtifactDraftFile(
               continuationArtifactPath,
               workspacePath,
@@ -4219,24 +4205,19 @@ export function registerDesignHandlers(): void {
               wroteCandidateDraft,
               requiresFreshEditArtifact
             )
-            if (continuationDraftArtifact.success && continuationDraftArtifact.html && isCompleteHtmlDocument(continuationDraftArtifact.html)) {
+            if (continuationDraftArtifact.success && continuationDraftArtifact.html && isFinalizableCandidate(continuationDraftArtifact.html)) {
               html = continuationDraftArtifact.html
             }
           }
-          const hasCompleteArtifact = Boolean(html && isCompleteHtmlDocument(html))
-          const madeProgress =
-            hasCompleteArtifact ||
-            wroteCandidateDraft ||
-            emittedToolCallIds.size > beforeToolCallCount ||
-            emittedToolResultIds.size > beforeToolResultCount ||
-            emittedAssistantTextIds.size > beforeAssistantTextCount ||
-            Boolean(continuationResult.fullText.trim() && continuationResult.fullText.trim() !== beforeFullText)
+          const hasCompleteArtifact = Boolean(html && isFinalizableCandidate(html))
+          const madeProgress = hasCompleteArtifact || (draftPublisher?.latest?.revision ?? 0) > beforePreviewRevision
           stalledContinuationAttempts = madeProgress ? 0 : stalledContinuationAttempts + 1
         }
 
-        for (let recoveryAttempt = 1; (!html || !isCompleteHtmlDocument(html)) && recoveryAttempt <= DESIGN_ARTIFACT_WRITE_RECOVERY_ATTEMPTS; recoveryAttempt++) {
+        for (let recoveryAttempt = 1; (!html || !isFinalizableCandidate(html)) && recoveryAttempt <= DESIGN_ARTIFACT_WRITE_RECOVERY_ATTEMPTS && !draftPublisher?.latest; recoveryAttempt++) {
           const recoveryArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
           candidateDraftPath = recoveryArtifactPath
+          draftPublisher?.setCandidate(candidateDraftPath)
           wroteCandidateDraft = false
           const recoveryThreadId = makeDesignAgentArtifactRecoveryThreadId(threadId, recoveryAttempt)
           await closeCheckpointer(recoveryThreadId)
@@ -4264,7 +4245,7 @@ export function registerDesignHandlers(): void {
           if (recoveryResult.fullText && !isLikelyDesignProgressOnlyText(recoveryResult.fullText)) {
             fullText = recoveryResult.fullText
           }
-          if (!html || !isCompleteHtmlDocument(html) || wroteCandidateDraft) {
+          if (!html || !isFinalizableCandidate(html) || wroteCandidateDraft) {
             const recoveryDraftArtifact = readFreshDesignArtifactDraftFile(
               recoveryArtifactPath,
               workspacePath,
@@ -4272,14 +4253,14 @@ export function registerDesignHandlers(): void {
               wroteCandidateDraft,
               requiresFreshEditArtifact
             )
-            if (recoveryDraftArtifact.success && recoveryDraftArtifact.html && isCompleteHtmlDocument(recoveryDraftArtifact.html)) {
+            if (recoveryDraftArtifact.success && recoveryDraftArtifact.html && isFinalizableCandidate(recoveryDraftArtifact.html)) {
               html = recoveryDraftArtifact.html
             }
           }
         }
 
         for (let repairAttempt = 0; repairAttempt <= DESIGN_BROWSER_AUTO_FIX_ATTEMPTS; repairAttempt++) {
-          if (html && isCompleteHtmlDocument(html)) {
+          if (html && isFinalizableCandidate(html)) {
             const isFinalValidationAttempt = repairAttempt >= DESIGN_BROWSER_AUTO_FIX_ATTEMPTS
             const validationOutcome = await sendValidatedArtifact(html, isFinalValidationAttempt)
             if (validationOutcome.ok) return
@@ -4295,6 +4276,7 @@ export function registerDesignHandlers(): void {
             const repairThreadId = makeDesignAgentRepairThreadId(threadId, repairAttempt + 1)
             const repairArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
             candidateDraftPath = repairArtifactPath
+            draftPublisher?.setCandidate(candidateDraftPath)
             wroteCandidateDraft = false
             await closeCheckpointer(repairThreadId)
             deleteThreadCheckpoint(repairThreadId)
@@ -4324,7 +4306,7 @@ export function registerDesignHandlers(): void {
             if (repairResult.fullText && !isLikelyDesignProgressOnlyText(repairResult.fullText)) {
               fullText = repairResult.fullText
             }
-            if (!html || !isCompleteHtmlDocument(html)) {
+            if (!html || !isFinalizableCandidate(html)) {
               const repairDraftArtifact = readFreshDesignArtifactDraftFile(
                 repairArtifactPath,
                 workspacePath,
@@ -4332,7 +4314,7 @@ export function registerDesignHandlers(): void {
                 wroteCandidateDraft,
                 requiresFreshEditArtifact
               )
-              if (repairDraftArtifact.success && repairDraftArtifact.html && isCompleteHtmlDocument(repairDraftArtifact.html)) {
+              if (repairDraftArtifact.success && repairDraftArtifact.html && isFinalizableCandidate(repairDraftArtifact.html)) {
                 html = repairDraftArtifact.html
               }
             }
@@ -4340,7 +4322,7 @@ export function registerDesignHandlers(): void {
           }
 
           const artifact = tabId ? readDesignArtifact(resolvedArtifactId, workspacePath) : null
-          if (artifact?.success && artifact.html && isCompleteHtmlDocument(artifact.html)) {
+          if (artifact?.success && artifact.html && isFinalizableCandidate(artifact.html)) {
             storeDesignHtml(htmlStoreKey, artifact.html)
             send({
               type: "error",
@@ -4372,6 +4354,7 @@ export function registerDesignHandlers(): void {
           send({ type: "error", error: msg })
         }
       } finally {
+        draftPublisher?.dispose()
         activeDesignAgents.delete(sessionId)
       }
     }

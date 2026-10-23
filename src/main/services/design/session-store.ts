@@ -28,6 +28,9 @@ export class DesignSessionStore {
         PRIMARY KEY(session_id, seq)
       );
       CREATE TABLE IF NOT EXISTS design_session_tombstones (id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS design_draft_previews (
+        session_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, revision INTEGER NOT NULL, html TEXT NOT NULL
+      );
     `)
   }
 
@@ -63,11 +66,19 @@ export class DesignSessionStore {
       "SELECT payload FROM design_messages WHERE session_id = ? ORDER BY ordinal",
       [row.id]
     ).map((message) => JSON.parse(String(message.payload)) as Message)
+    const state = { ...JSON.parse(String(row.state)), messages }
+    if (state.draftPreview) {
+      const draft = this.rows(
+        "SELECT html FROM design_draft_previews WHERE session_id = ? AND run_id = ?",
+        [row.id, state.draftPreview.runId]
+      )[0]
+      if (draft) state.draftPreview.html = String(draft.html)
+    }
     return {
       id: String(row.id),
       seq: Number(row.seq),
       meta: JSON.parse(String(row.meta)),
-      state: { ...JSON.parse(String(row.state)), messages },
+      state,
       workspacePath: row.workspace_path == null ? null : String(row.workspace_path),
       activeRunId: row.active_run_id == null ? null : String(row.active_run_id),
       lastSeenSeq: Number(row.last_seen_seq)
@@ -84,6 +95,15 @@ export class DesignSessionStore {
     const { messages, ...state } = snapshot.state
     this.db.run("BEGIN IMMEDIATE")
     try {
+      const draft = state.draftPreview
+      if (draft)
+        this.db.run(
+          `INSERT INTO design_draft_previews VALUES (?, ?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET run_id=excluded.run_id, revision=excluded.revision, html=excluded.html
+         WHERE run_id != excluded.run_id OR revision != excluded.revision`,
+          [snapshot.id, draft.runId, draft.revision, draft.html]
+        )
+      else this.db.run("DELETE FROM design_draft_previews WHERE session_id = ?", [snapshot.id])
       this.db.run(
         `INSERT INTO design_sessions VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET seq=excluded.seq, meta=excluded.meta,
@@ -93,7 +113,7 @@ export class DesignSessionStore {
           snapshot.id,
           snapshot.seq,
           JSON.stringify(snapshot.meta),
-          JSON.stringify(state),
+          JSON.stringify(draft ? { ...state, draftPreview: { ...draft, html: "" } } : state),
           snapshot.workspacePath,
           snapshot.activeRunId,
           snapshot.lastSeenSeq
@@ -120,7 +140,13 @@ export class DesignSessionStore {
         this.db.run("INSERT INTO design_session_events VALUES (?, ?, ?)", [
           snapshot.id,
           snapshot.seq,
-          JSON.stringify(events)
+          JSON.stringify(
+            events.map((event) => {
+              if ((event as { type?: string }).type !== "preview") return event
+              const preview = (event as { preview: { html?: string } }).preview
+              return { ...(event as object), preview: { ...preview, html: undefined } }
+            })
+          )
         ])
       if (request && snapshot.activeRunId) {
         this.db.run("INSERT INTO design_runs VALUES (?, ?, ?, ?, ?)", [
@@ -161,7 +187,12 @@ export class DesignSessionStore {
   remove(id: string): void {
     this.db.run("BEGIN IMMEDIATE")
     try {
-      for (const table of ["design_messages", "design_runs", "design_session_events"]) {
+      for (const table of [
+        "design_messages",
+        "design_runs",
+        "design_session_events",
+        "design_draft_previews"
+      ]) {
         this.db.run(`DELETE FROM ${table} WHERE session_id = ?`, [id])
       }
       this.db.run("DELETE FROM design_sessions WHERE id = ?", [id])

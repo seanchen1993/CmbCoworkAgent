@@ -10,6 +10,8 @@ import type {
   DesignSkillReference,
   DesignArtifactMetadata
 } from "../renderer/src/components/design/types"
+import type { DesignDraftPreview, DesignGenerationMetrics } from "./design-progressive"
+import type { DesignTweakCommand, DesignTweaksState } from "./design-tweaks"
 
 export type { TabState, Message, SessionMeta }
 export type DesignRunKind = "questions" | "agent" | "image"
@@ -31,6 +33,9 @@ export interface DesignRunRequest {
 }
 export interface DesignRunEvent {
   type: string
+  preview?: DesignDraftPreview
+  tweaks?: DesignTweaksState | null
+  metrics?: DesignGenerationMetrics
   token?: string
   html?: string
   questions?: unknown[]
@@ -58,6 +63,7 @@ export interface DesignSessionChange {
   meta: SessionMeta
   snapshot?: DesignSessionSnapshot
   deleted?: boolean
+  draftHtmlOmitted?: boolean
 }
 export interface DesignSessionSeed {
   id: string
@@ -66,6 +72,8 @@ export interface DesignSessionSeed {
   workspacePath: string | null
 }
 export interface DesignSessionApi {
+  tweak?: (id: string, command: DesignTweakCommand) => Promise<DesignSessionSnapshot>
+  previewVisible?: (id: string, runId: string, revision: number) => Promise<void>
   migrate: (seeds: DesignSessionSeed[]) => Promise<SessionMeta[]>
   list: () => Promise<SessionMeta[]>
   create: (seed: DesignSessionSeed) => Promise<DesignSessionSnapshot>
@@ -466,6 +474,9 @@ export function createDesignState(): TabState {
   return {
     messages: [],
     html: "",
+    draftPreview: null,
+    tweaks: null,
+    generationMetrics: {},
     sourceInfo: null,
     generationState: "idle",
     questions: [],

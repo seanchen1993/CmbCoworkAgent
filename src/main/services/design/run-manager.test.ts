@@ -9,6 +9,8 @@ import {
 } from "../../../shared/managed-design-session"
 import { DesignSessionStore } from "./session-store"
 import { DesignRunManager, type DesignRunDependencies } from "./run-manager"
+import { inspectDesignDocument, type DesignDraftPreview } from "../../../shared/design-progressive"
+import { readTweakDeclaration, materializeTweaks } from "../../../shared/design-tweaks"
 
 const databases: NativeSqliteAdapter[] = []
 beforeEach(() => vi.useFakeTimers())
@@ -61,6 +63,154 @@ function harness(options: Partial<DesignRunDependencies> = {}) {
 }
 
 describe("background design conversations", () => {
+  const html = (pending = false) =>
+    `<!doctype html><html><head><style>section{color:var(--primary)}</style><script type="application/design-tweaks+json">{"defaults":{"primary":"#123456"},"schema":{"primary":{"type":"color","label":"主色"}},"bindings":{"primary":[{"type":"css-var","name":"--primary"}]}}</script></head><body ${pending ? 'data-design-build="building"' : ""}><section data-design-section="main" ${pending ? "data-design-pending" : ""}>页面</section></body></html>`
+  const preview = (runId: string, revision: number, pending = false): DesignDraftPreview => ({
+    runId,
+    revision,
+    html: html(pending),
+    draftPath: "/workspace/draft.html",
+    phase: "sections",
+    status: "building",
+    ...inspectDesignDocument(html(pending)),
+    tweaks: null,
+    createdAt: 1,
+    updatedAt: 1
+  })
+
+  it("persists previews separately, rejects stale/foreign revisions and preserves drafts on stop", async () => {
+    const h = harness()
+    h.create()
+    h.manager.patch("ds_a", { html: html() })
+    const emit = await h.start(),
+      runId = h.manager.get("ds_a").activeRunId!
+    emit({ type: "preview", preview: preview(runId, 2, true) })
+    emit({ type: "preview", preview: preview("other-run", 100) })
+    emit({ type: "preview", preview: preview(runId, 1) })
+    expect(h.store.get("ds_a")!.state.draftPreview!.revision).toBe(2)
+    expect(h.store.get("ds_a")!.state.html).toBe(html())
+    expect(h.store.get("ds_a")!.state.generationState).toBe("generating")
+    h.manager.stop("ds_a")
+    emit({ type: "preview", preview: preview(runId, 3) })
+    expect(h.store.get("ds_a")!.state.draftPreview).toMatchObject({
+      revision: 2,
+      status: "incomplete"
+    })
+  })
+
+  it("never finalizes a pending scaffold and keeps the last preview through rollback/recovery", async () => {
+    const finalize = vi.fn((event) => event)
+    const h = harness({ finalize })
+    h.create()
+    h.manager.patch("ds_a", { html: "旧版本" })
+    h.manager.start({
+      designSessionId: "ds_a",
+      requestId: "rollback",
+      kind: "agent",
+      prompt: "修改",
+      rollback: { html: "旧版本", draftPreview: null }
+    })
+    await Promise.resolve()
+    const emit = h.emitters.get("rollback")!,
+      runId = h.manager.get("ds_a").activeRunId!
+    emit({ type: "preview", preview: preview(runId, 1, true) })
+    emit({ type: "done", html: html(true) })
+    expect(finalize).not.toHaveBeenCalled()
+    expect(h.store.get("ds_a")!.state.html).toBe("旧版本")
+    expect(h.store.get("ds_a")!.state.draftPreview!.status).toBe("incomplete")
+    const recovered = new DesignRunManager(h.store, h.deps)
+    expect(recovered.get("ds_a").state.draftPreview!.html).toBe(html(true))
+  })
+
+  it("keeps draft tweaks during section updates, completion and a debounced final edit", async () => {
+    const h = harness()
+    h.create()
+    const emit = await h.start(),
+      runId = h.manager.get("ds_a").activeRunId!
+    emit({ type: "preview", preview: preview(runId, 1, true) })
+    let draft = h.manager.get("ds_a").state.draftPreview!
+    h.manager.tweak("ds_a", {
+      scope: "draft",
+      runId,
+      baseRevision: draft.tweaks!.revision,
+      operation: "set",
+      key: "primary",
+      value: "#00aa00"
+    })
+    emit({ type: "preview", preview: preview(runId, 2) })
+    draft = h.manager.get("ds_a").state.draftPreview!
+    expect(draft.tweaks!.overrides.primary).toBe("#00aa00")
+    emit({ type: "done", html: html() })
+    let state = h.manager.get("ds_a").state
+    expect(state.draftPreview).toBeNull()
+    expect(state.tweaks!.overrides.primary).toBe("#00aa00")
+    expect(
+      readTweakDeclaration(materializeTweaks(state.html, state.tweaks))!.defaults.primary
+    ).toBe("#00aa00")
+    h.manager.tweak("ds_a", {
+      scope: "draft",
+      runId,
+      baseRevision: state.tweaks!.revision,
+      operation: "set",
+      key: "primary",
+      value: "#aa0000"
+    })
+    state = h.manager.get("ds_a").state
+    expect(state.tweaks!.overrides.primary).toBe("#aa0000")
+    expect(() =>
+      h.manager.tweak("ds_a", {
+        scope: "draft",
+        runId: "stale-run",
+        baseRevision: state.tweaks!.revision,
+        operation: "set",
+        key: "primary",
+        value: "#aaaaaa"
+      })
+    ).toThrow()
+    const reloadKey = state.reloadKey
+    h.manager.tweak("ds_a", {
+      scope: "artifact",
+      baseRevision: state.tweaks!.revision,
+      operation: "undo"
+    })
+    expect(h.manager.get("ds_a").state.reloadKey).toBe(reloadKey)
+  })
+
+  it("restores an interrupted run with its last persisted draft and user values", async () => {
+    const h = harness()
+    h.create()
+    const emit = await h.start(),
+      runId = h.manager.get("ds_a").activeRunId!
+    emit({ type: "preview", preview: preview(runId, 1, true) })
+    const draft = h.manager.get("ds_a").state.draftPreview!
+    h.manager.tweak("ds_a", {
+      scope: "draft",
+      runId,
+      baseRevision: draft.tweaks!.revision,
+      operation: "set",
+      key: "primary",
+      value: "#00aa00"
+    })
+    emit({ type: "preview", preview: { ...preview(runId, 2, true), phase: "validating" } })
+    const recoveryManager = new DesignRunManager(h.store, h.deps)
+    const recovered = recoveryManager.get("ds_a")
+    expect(recovered.state.generationState).toBe("interrupted")
+    expect(recovered.state.draftPreview!.status).toBe("incomplete")
+    expect(recovered.state.draftPreview!.phase).toBe("sections")
+    expect(recovered.state.draftPreview!.tweaks!.overrides.primary).toBe("#00aa00")
+    recoveryManager.tweak("ds_a", {
+      scope: "draft",
+      runId,
+      baseRevision: recovered.state.draftPreview!.tweaks!.revision,
+      operation: "set",
+      key: "primary",
+      value: "#aa0000"
+    })
+    expect(recoveryManager.get("ds_a").state.draftPreview!.tweaks!.overrides.primary).toBe(
+      "#aa0000"
+    )
+  })
+
   it("persists user messages immediately and collects progress with no UI subscribers", async () => {
     vi.useFakeTimers()
     const h = harness()
