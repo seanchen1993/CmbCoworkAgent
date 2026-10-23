@@ -16,6 +16,7 @@ import type { BotMemoryMaintainer } from "./memory-maintainer"
 import type { BotBrowserService } from "./browser"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
 import type { BotWorkItem } from "../../shared/bots/work"
+import type { BotMockExecution } from "../../shared/bots/mock-channel"
 import type { BotPeerDeliveryFiles } from "./tools"
 import type { UserInputRequest } from "../types"
 import type { LocalThreadRunLease } from "../agent/thread-run-lease"
@@ -205,13 +206,15 @@ const task: BotTask = {
   updatedAt: 1,
   origin: { kind: "user" }
 }
-function port(linked?: BotWorkItem) {
+function port(linked?: BotWorkItem, mock?: BotMockExecution) {
   return createLocalBotRunPort(
     { editVersion: () => 7, forPrompt: fixture.memorySnapshot } as unknown as BotMemoryService,
     () =>
       ({
         getBot: fixture.getBot,
         getWork: () => linked,
+        mockExecution: () => mock,
+        initializeMockThread: () => {},
         initializeWorkThread: () => {},
         onSteeringReady: fixture.steeringReady,
         commandLifecycle: fixture.commandLifecycle,
@@ -291,6 +294,74 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
+  it("runs owner IM on the native main thread with text-only capabilities, then preserves desktop capabilities", async () => {
+    const source = {
+      transport: "im" as const,
+      personal: true as const,
+      bindingId: "dm",
+      grantVersion: 1,
+      conversationId: "dm-channel",
+      audienceKey: "desktop",
+      eventId: "im-event",
+      messageId: "im-message",
+      senderId: "owner"
+    }
+    const incoming: BotTask = {
+      ...task,
+      mockSource: source,
+      origin: { kind: "mock", bindingId: source.bindingId, eventId: source.eventId }
+    }
+    const im = port(undefined, {
+      source,
+      threadId: bot.threadId,
+      threadInitialized: false,
+      label: "本人"
+    })
+    const lease = im.acquire(bot, incoming)!
+    await expect(lease.execute(new AbortController().signal, vi.fn())).resolves.toMatchObject({
+      state: "completed"
+    })
+    lease.release()
+    const [request, , context] = fixture.start.mock.calls[0]
+    expect(request).toMatchObject({ threadId: bot.threadId, agentMode: "normal" })
+    expect(context.remotePolicy).toMatchObject({
+      allowedToolNames: [
+        "bot_work_list",
+        "bot_work_create",
+        "bot_work_send",
+        "bot_work_complete",
+        "bot_work_continue"
+      ],
+      allowedSkillNames: [],
+      disableHooks: true,
+      disableSubagents: true,
+      disableMcpTools: true,
+      disableMemoryInjection: true,
+      filesystemAccess: { shellAccess: "none" }
+    })
+    expect(context.additionalTools).toEqual(["works"])
+    expect(
+      context.verifyResolvedThread({
+        metadata: metadata(),
+        workspacePath: metadata().workspacePath
+      })
+    ).toBeNull()
+    expect(fixture.memorySnapshot).not.toHaveBeenCalled()
+    expect(fixture.browserTools).not.toHaveBeenCalled()
+    expect(fixture.create).not.toHaveBeenCalled()
+    expect(JSON.parse(fixture.update.mock.calls[0][1].metadata)).toMatchObject(metadata())
+    expect(JSON.parse(fixture.update.mock.calls[0][1].metadata).botMockBindingId).toBeUndefined()
+    await expect(
+      port()
+        .acquire(bot, { ...task, id: "desktop" })!
+        .execute(new AbortController().signal, vi.fn())
+    ).resolves.toMatchObject({ state: "completed" })
+    const desktop = fixture.start.mock.calls[1][2]
+    expect(desktop.remotePolicy).toEqual({ disableScheduler: true })
+    expect(fixture.memorySnapshot).toHaveBeenCalled()
+    expect(fixture.browserTools).toHaveBeenCalled()
+  })
+
   it("reports a linked task result in the main conversation without running tools or importing its workspace", async () => {
     const linked: BotWorkItem = {
       id: "linked",

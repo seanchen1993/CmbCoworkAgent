@@ -158,7 +158,9 @@ export function prepareBotThread(
 ): string {
   const groupId = task ? (botTaskGroupId(task) ?? null) : null
   const threadId = task?.threadId ?? bot.threadId
-  const source = mock?.source ?? work?.source
+  // Personal IM uses the same native thread; its capability limits belong to this run,
+  // never to persistent thread metadata (which would disable the desktop entrance).
+  const source = mock?.source.personal ? undefined : (mock?.source ?? work?.source)
   if (work?.conversation) {
     if (work.threadId !== threadId || work.botId !== bot.id)
       throw new BotError("CONFLICT", "Bot 会话身份不一致，已停止执行")
@@ -951,8 +953,9 @@ export function createLocalBotRunPort(
                     (resolved.metadata.botGroupId ?? null) === (botTaskGroupId(task) ?? null) &&
                     (resolved.metadata.botWorkId ?? null) === (work?.id ?? null) &&
                     (resolved.metadata.botMockBindingId ?? null) ===
-                      (mock?.source.bindingId ?? null) &&
+                      (mock?.source.personal ? null : (mock?.source.bindingId ?? null)) &&
                     (!mock ||
+                      mock.source.personal ||
                       (botMockMetadataSafe(resolved.metadata) &&
                         resolved.metadata.botMockGrantVersion === mock.source.grantVersion &&
                         resolved.metadata.botMockConversationId === mock.source.conversationId)) &&

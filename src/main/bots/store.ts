@@ -858,7 +858,7 @@ export class BotStore {
               mockSource?.audienceKey ?? "desktop",
               now,
               now,
-              mockSource ? JSON.stringify(mockSource) : null,
+              mockSource && !mockSource.personal ? JSON.stringify(mockSource) : null,
               workspace ? JSON.stringify(workspace) : null
             ]
           )
@@ -2653,6 +2653,12 @@ export class BotStore {
           true
         )
       if (!alreadySettled && !silentCompletion) this.recordWorkResult(task, visibleResult, files)
+      if (
+        !alreadySettled &&
+        !silentCompletion &&
+        ["completed", "failed", "cancelled", "interrupted", "outcome_unknown"].includes(state)
+      )
+        this.im.mirrorPersonal(task, visibleResult || error || botTaskStateLabel(state))
       if (task.origin.kind !== "bot" || !task.origin.expectsReply) return
       const sender = this.rows("SELECT * FROM bots WHERE id=?", [task.origin.fromBotId])[0]
       if (!sender || sender.archived) return
@@ -2713,7 +2719,7 @@ export class BotStore {
   private recordWorkResult(task: BotTask, result?: string, files?: BotDeliveredFile[]): void {
     if (
       !task.workId ||
-      task.mockSource ||
+      (task.mockSource && !task.mockSource.personal) ||
       !["completed", "failed", "cancelled", "interrupted", "outcome_unknown"].includes(
         task.state
       ) ||
@@ -2752,7 +2758,7 @@ export class BotStore {
     )
     const requestContext = {
       messages: [
-        ...(task.origin.kind === "user" || task.origin.kind === "work"
+        ...(task.origin.kind === "user" || task.origin.kind === "work" || task.mockSource?.personal
           ? [{ text: task.message.slice(0, 4000), truncated: task.message.length > 4000 }]
           : []),
         ...supplements

@@ -333,6 +333,8 @@ export interface BotSnapshot {
   }>
   /** Conversations with accepted native commands, including process-tree cleanup. */
   backgroundThreads?: string[]
+  /** Verified owner DMs linked to the personal main conversation; no account identifiers. */
+  personalIm?: Array<{ botId: string; connected: boolean }>
 }
 
 /** Bounded list metadata, not a second transcript. Revisions also survive clock changes. */

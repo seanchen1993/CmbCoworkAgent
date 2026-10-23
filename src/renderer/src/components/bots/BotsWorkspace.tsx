@@ -1982,6 +1982,14 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   <PanelRight size={19} />
                 </button>
               </header>
+              {!activeWorkId &&
+                snapshot?.personalIm?.some((entry) => entry.botId === selected.id) && (
+                  <div className="bot-work-source" role="note">
+                    本人招乎私聊已关联 · 主对话回复和任务结果会同步到招乎
+                    {!snapshot.personalIm.find((entry) => entry.botId === selected.id)?.connected &&
+                      " · 当前离线，待重新连接后同步"}
+                  </div>
+                )}
               {activeWorkId && (
                 <div className="bot-work-breadcrumb">
                   <button onClick={() => selectWork(null)}>← {selected.name} 主对话</button>
@@ -2473,6 +2481,16 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             client={client}
             bot={imBot}
             onClose={() => setImBot(null)}
+            onOpenMain={() =>
+              updateView({
+                selectedId: imBot.id,
+                groupId: null,
+                activeWorkIdByBot: {
+                  ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
+                  [imBot.id]: null
+                }
+              })
+            }
             onOpenWork={(id) =>
               updateView({
                 selectedId: imBot.id,

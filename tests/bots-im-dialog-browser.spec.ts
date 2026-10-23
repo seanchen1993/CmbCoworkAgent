@@ -17,12 +17,12 @@ async function main() {
         loader: "tsx",
         contents: `
 import React from 'react';import {createRoot} from 'react-dom/client';import {BotImChannelDialog} from './src/renderer/src/components/bots/BotImChannelDialog';
-const state=window.fixture={available:false,attempts:[],bindings:[],opened:[],close:0,lost:true};
+const state=window.fixture={available:false,attempts:[],bindings:[],opened:[],mainOpened:0,close:0,lost:true};
 const api={status:async()=>({connected:true,available:state.available}),list:async()=>({items:state.bindings,before:null}),
 create:async(botId,kind,operationId)=>{state.attempts.push(operationId);if(state.lost){state.lost=false;throw new Error('回包丢失，请重试')}const b={id:'binding-one',botId,kind,label:'测试 Bot',state:'pending',version:1,conversationKey:null,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+600000).toISOString(),instruction:'/绑定Bot abcdefghijklmnopqrstuvwx'};state.bindings=[b];return b},
 revoke:async()=>{state.bindings=[{...state.bindings[0],state:'revoked',version:2,instruction:undefined}];return state.bindings[0]},
 history:async()=>({items:state.bindings[0]?.state==='active'?[{id:'reply',kind:'bot',text:'这是群内通知的回复',senderId:'Bot',state:'accepted',replyToMessageId:null,createdAt:1,workId:'work-one'}]:[],before:null})};
-createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{hostId:'local',im:api}} bot={{id:'bot',name:'测试 Bot',archived:false}} onClose={()=>state.close++} onOpenWork={id=>state.opened.push(id)}/>);`
+createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{hostId:'local',im:api}} bot={{id:'bot',name:'测试 Bot',archived:false}} onClose={()=>state.close++} onOpenWork={id=>state.opened.push(id)} onOpenMain={()=>state.mainOpened++}/>);`
       },
       bundle: true,
       format: "iife",
@@ -97,9 +97,34 @@ createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{
     await page.getByRole("button", { name: "撤销", exact: true }).click()
     await page.getByText("群聊 · 已撤销", { exact: true }).waitFor()
     assert.equal(await page.getByRole("button", { name: "撤销", exact: true }).count(), 0)
+    await page.evaluate(() => {
+      ;(window as any).fixture.bindings = [
+        {
+          id: "owner-dm",
+          botId: "bot",
+          kind: "dm",
+          label: "本人",
+          state: "active",
+          version: 1,
+          conversationKey: "dm",
+          createdAt: new Date().toISOString()
+        }
+      ]
+    })
+    await page.getByRole("button", { name: "刷新", exact: true }).click()
+    await page.getByText("已关联个人主对话 · 回复同步到招乎", { exact: true }).waitFor()
+    if (process.env.BOT_TEST_APP_OUT)
+      await page.screenshot({
+        path: join(process.env.BOT_TEST_APP_OUT, "artifacts/bot-personal-im-dialog.png"),
+        fullPage: true
+      })
+    const closedBeforeMain = await page.evaluate(() => (window as any).fixture.close)
+    await page.getByRole("button", { name: "打开主对话", exact: true }).click()
+    assert.equal(await page.evaluate(() => (window as any).fixture.mainOpened), 1)
+    assert.equal(await page.evaluate(() => (window as any).fixture.close), closedBeforeMain + 1)
     assert.deepEqual(errors, [])
     console.log(
-      "PASS: IM dialog capability fallback, stable create retry, group proof, reply status, task navigation and revoke"
+      "PASS: IM dialog capability fallback, stable create retry, group proof, reply status, task navigation, revoke and owner main conversation navigation"
     )
   } finally {
     await app?.close()

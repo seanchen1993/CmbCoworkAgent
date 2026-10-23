@@ -208,6 +208,7 @@ export class LocalBotHost {
       groups: this.store.groups(),
       activities: this.store.activities(),
       workActivity: this.store.workActivities(),
+      personalIm: this.store.imGateway.personalStatuses(),
       backgroundThreads: this.store.activeCommandThreads()
     }
   }
