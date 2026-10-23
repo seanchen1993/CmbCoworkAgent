@@ -33,6 +33,11 @@ export class BotImGatewayStore {
       CREATE INDEX IF NOT EXISTS bot_im_ingress_state ON bot_im_ingress(state,id);
       CREATE INDEX IF NOT EXISTS bot_im_ingress_binding ON bot_im_ingress(binding_id,id);
       CREATE TABLE IF NOT EXISTS bot_im_local_execution(task_id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS bot_im_personal_owners (
+        bot_id TEXT PRIMARY KEY,realm TEXT NOT NULL,principal TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS bot_im_personal_links (
+        binding_id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,activated_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS bot_im_personal_links_bot ON bot_im_personal_links(bot_id,activated_at);
       CREATE INDEX IF NOT EXISTS bot_im_task_event ON bot_tasks(json_extract(mock_source_json,'$.eventId'),state)
         WHERE json_extract(mock_source_json,'$.transport')='im';`)
     if (!this.rows("PRAGMA table_info(bot_im_ingress)").some((row) => row.name === "needs_ack"))
@@ -72,11 +77,61 @@ export class BotImGatewayStore {
         (old.binding.state === "revoked" && binding.state !== "revoked"))
     )
       throw new BotError("CONFLICT", "IM 绑定与本地记录不一致")
+    if (binding.kind === "dm" && binding.state === "active") {
+      const owner = this.rows("SELECT realm,principal FROM bot_im_personal_owners WHERE bot_id=?", [
+        binding.botId
+      ])[0]
+      if (owner && (owner.realm !== realm || owner.principal !== principal))
+        throw new BotError("CONFLICT", "此 Bot 的个人主会话已关联另一登录身份，请使用该身份连接。")
+      this.db.run("INSERT OR IGNORE INTO bot_im_personal_owners VALUES(?,?,?)", [
+        binding.botId,
+        realm,
+        principal
+      ])
+      this.db.run("INSERT OR IGNORE INTO bot_im_personal_links VALUES(?,?,?)", [
+        id,
+        binding.botId,
+        Date.now()
+      ])
+    }
     this.db.run(
       "INSERT INTO bot_im_routes VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET binding_json=excluded.binding_json",
       [id, realm, principal, binding.botId, JSON.stringify(binding)]
     )
     return { id, realm, principal, binding }
+  }
+  isPersonalBinding(id: string): boolean {
+    return (
+      this.rows(
+        `SELECT 1 FROM bot_im_personal_links l JOIN bot_im_routes r ON r.id=l.binding_id
+      JOIN bot_im_personal_owners o ON o.bot_id=r.bot_id AND o.realm=r.realm AND o.principal=r.principal
+      WHERE l.binding_id=? AND json_extract(r.binding_json,'$.kind')='dm'`,
+        [id]
+      ).length > 0
+    )
+  }
+  /** Capture only a binding already linked when this local turn was accepted. No history backfill. */
+  personalBinding(botId: string, acceptedAt: number): StoredBotImBinding | null {
+    const rows = this.rows(
+      `SELECT r.id FROM bot_im_personal_links l JOIN bot_im_routes r ON r.id=l.binding_id
+      JOIN bot_im_bindings b ON b.id=r.id AND b.revoked=0
+      JOIN bot_im_personal_owners o ON o.bot_id=r.bot_id AND o.realm=r.realm AND o.principal=r.principal
+      WHERE l.bot_id=? AND l.activated_at<=? AND json_extract(r.binding_json,'$.kind')='dm'
+      AND json_extract(r.binding_json,'$.state')='active'
+      AND b.grant_version=json_extract(r.binding_json,'$.version') LIMIT 2`,
+      [botId, acceptedAt]
+    )
+    // A transient conflicting route must never fan private messages out to multiple destinations.
+    return rows.length === 1 ? this.binding(String(rows[0].id)) : null
+  }
+  personalStatuses(): Array<{ botId: string; connected: boolean }> {
+    return this.rows(
+      `SELECT r.bot_id,MIN(b.online) AS online FROM bot_im_personal_links l
+      JOIN bot_im_routes r ON r.id=l.binding_id JOIN bot_im_bindings b ON b.id=r.id
+      JOIN bot_im_personal_owners o ON o.bot_id=r.bot_id AND o.realm=r.realm AND o.principal=r.principal
+      WHERE b.revoked=0 AND json_extract(r.binding_json,'$.state')='active'
+      GROUP BY r.bot_id HAVING COUNT(*)=1`
+    ).map((row) => ({ botId: String(row.bot_id), connected: Boolean(row.online) }))
   }
   binding(id: string): StoredBotImBinding | null {
     const row = this.rows("SELECT * FROM bot_im_routes WHERE id=?", [id])[0]
@@ -193,6 +248,8 @@ export class BotImGatewayStore {
     )
   }
   removeBot(botId: string): void {
+    this.db.run("DELETE FROM bot_im_personal_links WHERE bot_id=?", [botId])
+    this.db.run("DELETE FROM bot_im_personal_owners WHERE bot_id=?", [botId])
     this.db.run(
       "DELETE FROM bot_im_local_execution WHERE task_id IN (SELECT id FROM bot_tasks WHERE bot_id=?)",
       [botId]

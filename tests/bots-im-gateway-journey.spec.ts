@@ -82,6 +82,8 @@ async function main() {
         execute: async () => {
           runs.push(task)
           host.mockExecution(task)
+          if (task.origin.kind === "work_result")
+            return { state: "completed", result: "已回报：" + JSON.parse(task.message).result }
           if (task.workId) return { state: "completed", result: "任务结果：" + task.message }
           const source = { taskId: task.id, callId: task.id, key: task.id }
           if (task.message === "create")
@@ -231,6 +233,72 @@ async function main() {
     )
     assert.equal(runs.length, previousRuns + 1)
     assert.equal(legacy.length, 0)
+    assert.equal(runs.at(-1)!.threadId, bot.threadId)
+    assert.equal(runs.at(-1)!.mockSource?.personal, true)
+    host.send({ botId: bot.id, requestId: randomUUID(), message: "App 主对话回复" })
+    await wait(
+      async () =>
+        (await messages()).some(
+          (m) =>
+            m.content === "已处理：App 主对话回复" &&
+            m.toId === "local-owner-open" &&
+            m.fromId === "local-bot-robot-open"
+        ),
+      "desktop reply mirrored to owner DM"
+    )
+    await post("dm", "create")
+    await wait(
+      async () =>
+        (await messages()).some(
+          (m) => m.content === "已回报：任务结果：create" && m.toId === "local-owner-open"
+        ),
+      "personal task result through shared main conversation"
+    )
+    const personalWorkId = workId
+    assert.equal(host.getWork(bot.id, personalWorkId).source, undefined)
+    assert.equal(host.getWork(bot.id, personalWorkId).parentThreadId, bot.threadId)
+    host.send({ botId: bot.id, requestId: randomUUID(), message: "revise" })
+    await wait(
+      async () =>
+        (await messages()).filter(
+          (m) => m.content === "已回报：任务结果：revise" && m.toId === "local-owner-open"
+        ).length === 1,
+      "desktop revises personal task"
+    )
+    await post("dm", "revise")
+    await wait(
+      async () =>
+        (await messages()).filter(
+          (m) => m.content === "已回报：任务结果：revise" && m.toId === "local-owner-open"
+        ).length === 2,
+      "IM revises the same personal task"
+    )
+    assert.equal(workId, personalWorkId)
+    const personalRuns = runs.filter((t) => t.workId === personalWorkId)
+    assert.equal(personalRuns.length, 3)
+    assert.equal(new Set(personalRuns.map((t) => t.threadId)).size, 1)
+    assert.deepEqual(
+      personalRuns.map((t) => Boolean(t.mockSource?.personal)),
+      [true, false, true]
+    )
+    assert.equal(
+      (await messages()).filter((m) => m.toId && m.content.startsWith("任务结果：")).length,
+      0
+    )
+    await post("dm", "complete")
+    await wait(
+      () => host.getWork(bot.id, personalWorkId).state === "completed",
+      "DM completes shared task"
+    )
+    await post("dm", "continue")
+    await wait(
+      () => host.getWork(bot.id, personalWorkId).state === "active",
+      "DM continues shared task"
+    )
+    await wait(
+      () => store.recentTasks().every((t) => t.state === "completed"),
+      "personal tasks settled"
+    )
     // Both robots remain live on the same desktop connection, including identical platform IDs.
     const sharedId = randomUUID()
     await post("dm", "separate bot work", sharedId)
@@ -273,7 +341,7 @@ async function main() {
     )
     assert.deepEqual(errors, [])
     console.log(
-      "PASS: real Java/MySQL/WSS + beta Host: pairing identity, DM/group delivery, duplicate suppression, task create/revise/complete/continue, two robot identities/credentials, same-ID separation, revoke without legacy fallback"
+      "PASS: real Java/MySQL/WSS + beta Host: owner DM/main-thread sharing, desktop reply mirroring, shared task create/revise/complete/continue with one result report, group isolation, duplicate suppression, two robot identities/credentials, same-ID separation, revoke without legacy fallback"
     )
   } catch (error) {
     console.error("Local fixture diagnostics", {

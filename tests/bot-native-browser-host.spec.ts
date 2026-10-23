@@ -1,10 +1,11 @@
-/** Run after CMB_BOTS_E2E=1 npm run build. Uses only isolated test profiles and local fixture pages. */
+/** Run with node scripts/run-bot-integration-e2e.mjs --browser; uses isolated profiles and local fixture pages. */
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createRequire } from "node:module"
+import { pathToFileURL } from "node:url"
 
 async function main() {
   const require = createRequire(__filename)
@@ -22,7 +23,7 @@ const { app } = require('electron');
 app.setPath('userData', ${JSON.stringify(join(root, "parent-profile"))});
 app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
-  const { startElectronBotBrowser, BotBrowserService } = require(${JSON.stringify(resolve("out/main/bots-browser-e2e.js"))});
+  const { startElectronBotBrowser, BotBrowserService } = require(${JSON.stringify(resolve(process.env.BOT_TEST_APP_OUT ?? "out", "main/bots-browser-e2e.js"))});
   let engine;
   const workspace = bot => path.join(${JSON.stringify(root)}, 'workspaces', bot);
   await fs.mkdir(workspace('a'), { recursive: true });
@@ -118,6 +119,7 @@ app.whenReady().then(async () => {
     await service.navigateAsHuman('a', a.pageId, fixtureUrl + '/help-confirmed');
     await service.giveBack('a', helpState.generation);
     assert.equal(JSON.parse(await help).url, fixtureUrl + '/help-confirmed');
+    await (await import(${JSON.stringify(pathToFileURL(resolve("tests/support/bot-browser-automation-journey.mjs")).href)})).default(service, engine, fixtureUrl, workspace);
     // Do not wait for Chromium's periodic cookie flush before closing the host.
     await service.act('a', { action: 'navigate', url: fixtureUrl + '/login' }, new AbortController().signal);
     await service.close();
@@ -148,7 +150,7 @@ app.whenReady().then(async () => {
     child.stderr.on("data", (chunk) => {
       output = (output + chunk.toString()).slice(-16_000)
     })
-    const timer = setTimeout(() => child.kill(), 60_000)
+    const timer = setTimeout(() => child.kill(), 90_000)
     try {
       const code = await new Promise<number | null>((done, reject) => {
         child.once("close", done)
@@ -156,8 +158,9 @@ app.whenReady().then(async () => {
       })
       assert.equal(code, 0, output)
       assert.ok(output.includes("BOT_NATIVE_HOST_PASS"), output)
+      assert.ok(output.includes("BOT_OWNED_AUTOMATION_PASS"), output)
       console.log(
-        "PASS: production Bot browser adapter starts the bundled Electron host, binds exact pages, captures previews, shows/hides takeover, and preserves a newly set persistent cookie across an immediate host restart."
+        "PASS: production Bot browser adapter resolves duplicate labels and iframe refs, isolates task/group pages and popups, runs forms/hover/drag/wait/evaluate, preserves scoped uploads/downloads, paginates long snapshots, and resumes human takeover without replaying input. Persistent cookies survive a host restart."
       )
     } finally {
       clearTimeout(timer)

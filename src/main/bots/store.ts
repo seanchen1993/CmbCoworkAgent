@@ -858,7 +858,7 @@ export class BotStore {
               mockSource?.audienceKey ?? "desktop",
               now,
               now,
-              mockSource ? JSON.stringify(mockSource) : null,
+              mockSource && !mockSource.personal ? JSON.stringify(mockSource) : null,
               workspace ? JSON.stringify(workspace) : null
             ]
           )
@@ -2195,7 +2195,9 @@ export class BotStore {
         `SELECT id FROM bot_tasks
          WHERE (state IN (?, ?) OR (state='queued' AND continuation_checkpoint_id IS NOT NULL))
          AND ((json_extract(origin_json,'$.kind')='bot' AND json_extract(origin_json,'$.expectsReply')=1)
-           OR json_extract(origin_json,'$.groupId') IS NOT NULL OR work_id IS NOT NULL)`,
+           OR json_extract(origin_json,'$.groupId') IS NOT NULL OR work_id IS NOT NULL
+           OR (mock_source_json IS NULL AND EXISTS(
+             SELECT 1 FROM bot_im_personal_links l WHERE l.bot_id=bot_tasks.bot_id)))`,
         [...ACTIVE_STATES]
       )
       const reason = "应用已重启。请检查已有结果，再决定是否继续，避免重复执行外部操作。"
@@ -2209,6 +2211,10 @@ export class BotStore {
       // never replaying the interrupted work.
       for (const row of awaitingOutcomes) {
         const task = this.getTask(String(row.id))
+        // Recovery fences the state in bulk, so normal settle() would consider
+        // this already settled. Persist the main-thread IM outcome in this same
+        // transaction; the mirror still checks the original binding time/scope.
+        this.im.mirrorPersonal(task, reason)
         if (task.workId) {
           this.recordWorkResult(task)
           this.noteWorkActivity(task.workId, reason, true)
@@ -2653,6 +2659,12 @@ export class BotStore {
           true
         )
       if (!alreadySettled && !silentCompletion) this.recordWorkResult(task, visibleResult, files)
+      if (
+        !alreadySettled &&
+        !silentCompletion &&
+        ["completed", "failed", "cancelled", "interrupted", "outcome_unknown"].includes(state)
+      )
+        this.im.mirrorPersonal(task, visibleResult || error || botTaskStateLabel(state))
       if (task.origin.kind !== "bot" || !task.origin.expectsReply) return
       const sender = this.rows("SELECT * FROM bots WHERE id=?", [task.origin.fromBotId])[0]
       if (!sender || sender.archived) return
@@ -2713,7 +2725,7 @@ export class BotStore {
   private recordWorkResult(task: BotTask, result?: string, files?: BotDeliveredFile[]): void {
     if (
       !task.workId ||
-      task.mockSource ||
+      (task.mockSource && !task.mockSource.personal) ||
       !["completed", "failed", "cancelled", "interrupted", "outcome_unknown"].includes(
         task.state
       ) ||
@@ -2752,7 +2764,7 @@ export class BotStore {
     )
     const requestContext = {
       messages: [
-        ...(task.origin.kind === "user" || task.origin.kind === "work"
+        ...(task.origin.kind === "user" || task.origin.kind === "work" || task.mockSource?.personal
           ? [{ text: task.message.slice(0, 4000), truncated: task.message.length > 4000 }]
           : []),
         ...supplements

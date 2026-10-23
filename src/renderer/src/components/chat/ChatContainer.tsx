@@ -9594,7 +9594,7 @@ export function ChatContainer({
                             className="size-7 rounded-md p-0 text-muted-foreground hover:bg-muted/50 disabled:opacity-40 disabled:cursor-not-allowed"
                             onClick={handleAttachClick}
                           />
-                          {!managedTurn?.textOnlyReason && (
+                          {surface !== "bot" && !managedTurn?.textOnlyReason && (
                             <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                           )}
                           {(!managedTurn || managedTurn.ownerConversation) && (

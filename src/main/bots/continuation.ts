@@ -21,6 +21,10 @@ export type BotStoppedTaskContext =
 export function canSteerBotTask(source: BotTask, incoming: BotTask): boolean {
   if (
     source.botId !== incoming.botId ||
+    // Sharing a transcript does not let remote input join a locally privileged run.
+    Boolean(source.mockSource) !== Boolean(incoming.mockSource) ||
+    (source.mockSource &&
+      JSON.stringify(source.mockSource) !== JSON.stringify(incoming.mockSource)) ||
     source.threadId !== incoming.threadId ||
     source.workId !== incoming.workId
   )

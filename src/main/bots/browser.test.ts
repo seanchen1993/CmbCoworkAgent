@@ -30,6 +30,7 @@ class TestPage extends EventEmitter {
   setInputFiles = vi.fn<(file: string) => Promise<void>>(async () => {})
   getByLabel = vi.fn(() => ({ count: async () => 1, setInputFiles: this.setInputFiles }))
   snapshot = vi.fn(async () => '- textbox "Name"')
+  _snapshotForAI = async () => ({ full: await this.snapshot() })
   fileInputs = vi.fn(
     async (): Promise<{
       controls: { label: string | null; multiple: boolean; accept: string; disabled: boolean }[]

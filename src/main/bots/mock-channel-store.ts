@@ -257,6 +257,17 @@ export class BotMockChannelStore {
       this.run("UPDATE bot_mock_bindings SET revoked=1,grant_version=grant_version+1 WHERE id=?", [
         id
       ])
+      // Personal works also belong to the desktop. Settle before the generic
+      // queue fence so their cancellation reaches the existing main-thread
+      // result outbox, while the revoked IM route remains unable to deliver.
+      if (this.transport === "im")
+        for (const task of this.rows(
+          `SELECT id FROM bot_tasks WHERE state='queued' AND work_id IS NOT NULL
+           AND json_extract(mock_source_json,'$.bindingId')=?
+           AND json_extract(mock_source_json,'$.personal')=1`,
+          [id]
+        ))
+          this.owner.settle(String(task.id), "cancelled", "IM 绑定已撤销，未执行此任务。")
       this.run(
         "UPDATE bot_tasks SET state='cancelled',error='模拟绑定已撤销',updated_at=? WHERE state='queued' AND json_extract(mock_source_json,'$.bindingId')=?",
         [this.now(), id]
@@ -288,6 +299,13 @@ export class BotMockChannelStore {
     const binding = requireActive
       ? this.active(source.bindingId)
       : this.get(botId, source.bindingId)
+    if (
+      source.personal &&
+      (this.transport !== "im" ||
+        binding.kind !== "dm" ||
+        !this.owner.imGateway.isPersonalBinding(binding.id))
+    )
+      throw new BotError("CONFLICT", "个人主会话关联未经身份验证")
     const convo = this.rows(
       "SELECT * FROM bot_mock_conversations WHERE id=? AND binding_id=? AND bot_id=?",
       [source.conversationId, source.bindingId, botId]
@@ -340,11 +358,13 @@ export class BotMockChannelStore {
         (task.origin.kind !== "user" &&
           task.origin.kind !== "mock" &&
           task.origin.kind !== "work") ||
-        !work.source ||
-        work.source.bindingId !== source.bindingId ||
-        work.source.grantVersion !== source.grantVersion ||
         work.audienceKey !== source.audienceKey ||
-        work.source.conversationId !== source.conversationId
+        (source.personal
+          ? Boolean(work.source)
+          : !work.source ||
+            work.source.bindingId !== source.bindingId ||
+            work.source.grantVersion !== source.grantVersion ||
+            work.source.conversationId !== source.conversationId)
       )
         throw new BotError("CONFLICT", "工作与模拟受众不一致")
       if (task.origin.kind === "mock") {
@@ -394,18 +414,20 @@ export class BotMockChannelStore {
       task.origin.bindingId !== source.bindingId ||
       task.origin.eventId !== source.eventId ||
       event?.task_id !== task.id ||
-      convo.thread_id !== task.threadId
+      this.thread(source) !== task.threadId
     )
       throw new BotError("CONFLICT", "模拟执行与来源事件不一致")
     return {
       source,
       threadId: task.threadId,
-      threadInitialized: Boolean(convo.initialized),
+      // This flag belongs to the old channel transcript, not the native main thread.
+      threadInitialized: !source.personal && Boolean(convo.initialized),
       label: binding.label
     }
   }
   initialize(source: BotMockSource): void {
     this.validateSource(source, this.active(source.bindingId).botId)
+    if (source.personal) return
     this.run("UPDATE bot_mock_conversations SET initialized=1 WHERE id=? AND binding_id=?", [
       source.conversationId,
       source.bindingId
@@ -417,6 +439,12 @@ export class BotMockChannelStore {
       [source.conversationId, source.bindingId]
     )[0]
     if (!row) throw new BotError("CONFLICT", "模拟渠道会话缺失")
+    if (source.personal) {
+      const binding = this.active(source.bindingId)
+      if (!this.owner.imGateway.isPersonalBinding(binding.id))
+        throw new BotError("CONFLICT", "个人主会话关联不可用")
+      return this.owner.getBot(binding.botId).threadId
+    }
     return String(row.thread_id)
   }
   inject(raw: BotMockEvent): BotMockEventReceipt {
@@ -487,12 +515,17 @@ export class BotMockChannelStore {
         const convo = this.rows("SELECT id FROM bot_mock_conversations WHERE binding_id=?", [
           binding.id
         ])[0]
+        const personal =
+          this.transport === "im" &&
+          binding.kind === "dm" &&
+          this.owner.imGateway.isPersonalBinding(binding.id)
         const source: BotMockSource = {
           bindingId: binding.id,
           grantVersion: binding.grantVersion,
           conversationId: String(convo.id),
           ...(this.transport === "im" ? { transport: "im" as const } : {}),
-          audienceKey: `${this.transport}:${binding.id}`,
+          ...(personal ? { personal: true as const } : {}),
+          audienceKey: personal ? "desktop" : `${this.transport}:${binding.id}`,
           eventId: input.eventId,
           messageId: input.messageId,
           senderId: input.senderId
@@ -539,6 +572,8 @@ export class BotMockChannelStore {
     if (!task.mockSource) return
     const source = this.validateSource(task.mockSource, task.botId, false)
     this.run("UPDATE bot_mock_events SET execution_state=? WHERE task_id=?", [state, task.id])
+    // Personal work reports once through the existing main-conversation result notification.
+    if (source.personal && task.workId) return
     const binding = this.get(task.botId, source.bindingId)
     const output = text.trim() || "本轮没有可确认的文字结果，请查看执行状态。"
     this.run("INSERT OR IGNORE INTO bot_mock_outbox VALUES(?,?,?,?,?,?,?,?,?,?,?)", [
@@ -552,6 +587,40 @@ export class BotMockChannelStore {
       task.workId ?? null,
       output.slice(0, 60000),
       binding.revoked || binding.grantVersion !== source.grantVersion ? "blocked" : "pending",
+      this.now()
+    ])
+    this.changed()
+  }
+  /** Mirror new personal main-conversation responses; never copy group/external transcripts. */
+  mirrorPersonal(task: BotTask, text: string): void {
+    if (
+      this.transport !== "im" ||
+      task.mockSource ||
+      task.workId ||
+      task.threadId !== this.owner.getBot(task.botId).threadId ||
+      this.rows("SELECT injected_into FROM bot_tasks WHERE id=?", [task.id])[0]?.injected_into ||
+      !text.trim()
+    )
+      return
+    const route = this.owner.imGateway.personalBinding(task.botId, task.createdAt)
+    if (!route) return
+    const binding = this.get(task.botId, route.id)
+    if (binding.revoked || binding.kind !== "dm") return
+    const convo = this.rows("SELECT id FROM bot_mock_conversations WHERE binding_id=?", [
+      binding.id
+    ])[0]
+    if (!convo) return
+    this.run("INSERT OR IGNORE INTO bot_mock_outbox VALUES(?,?,?,?,?,?,?,?,?,?,?)", [
+      `im-personal-${task.id}`,
+      task.botId,
+      binding.id,
+      binding.grantVersion,
+      String(convo.id),
+      `app-${task.id}`,
+      task.id,
+      task.origin.kind === "work_result" ? task.origin.workId : null,
+      text.trim().slice(0, 60000),
+      "pending",
       this.now()
     ])
     this.changed()
