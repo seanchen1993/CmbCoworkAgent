@@ -41,7 +41,7 @@ for metadata in [types.SimpleNamespace(st_mode=0, st_file_attributes=0x400),
     checks += 1
 
 with tempfile.TemporaryDirectory(prefix="ab-contract-") as temporary:
-    root = Path(temporary)
+    root = Path(temporary).resolve()
     path = root / "mods/business/user.convert/check.py"
     path.parent.mkdir(parents=True)
     path.write_text("def validate(context):\n    return 0\n", encoding="utf-8")
@@ -71,7 +71,7 @@ with tempfile.TemporaryDirectory(prefix="ab-contract-") as temporary:
     rejected(lambda: validate_output_schemas(root, "alpha", output), "OUTPUT_PATH_INVALID")
 
 with tempfile.TemporaryDirectory(prefix="ab-protocol-") as temporary:
-    root = Path(temporary)
+    root = Path(temporary).resolve()
     own = root / "plugin/mods/business/autobiz.state-machine"
     # Execute the shipped adapter entry unchanged. Only its original business-check
     # dependency is replaced; no local AutoBiz archive or optional integration flag.

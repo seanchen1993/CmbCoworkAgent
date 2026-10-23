@@ -25,7 +25,7 @@ def rejected(name, callback, code):
 
 
 with tempfile.TemporaryDirectory(prefix="autobiz-verified-contract-") as temporary:
-    root = Path(temporary)
+    root = Path(temporary).resolve()
     source, workspace = root / "source", root / "workspace"
     hooks = source / "hooks"
     feature = workspace / ".autobizdevops/features/alpha"

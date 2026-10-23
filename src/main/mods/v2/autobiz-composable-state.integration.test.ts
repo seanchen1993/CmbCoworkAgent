@@ -3,7 +3,6 @@ import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
-import { tmpdir } from "node:os"
 import { promisify } from "node:util"
 import { afterEach, expect, it } from "vitest"
 import AdmZip from "adm-zip"
@@ -11,6 +10,7 @@ import { snapshotDerivationSource } from "../../plugins/derivation-source"
 import { createAutobizFunctionStateGuest } from "../../../../tests/support/autobiz-function-state-guest"
 import { createAutobizComposableFixture } from "../../../../tests/support/autobiz-composable-fixture"
 import { createAutobizSampleContext } from "../../../../tests/support/autobiz-creator-context-sample"
+import { canonicalTmpdir } from "../../../../tests/support/canonical-temp-dir"
 
 const source = resolve(
   process.env.AUTOBIZ_FUNCTION_STATE_PLUGIN ??
@@ -29,7 +29,7 @@ it.runIf(optedIn).each([1, 2])(
     const retained = process.env.AUTOBIZ_COMPOSABLE_OUTPUT
     const parent = retained
       ? join(resolve(retained), `revision-${minimumRevision}`)
-      : await mkdtemp(join(tmpdir(), "autobiz-composable-"))
+      : await mkdtemp(join(canonicalTmpdir(), "autobiz-composable-"))
     if (retained) await mkdir(parent, { recursive: true })
     else cleanup.push(() => rm(parent, { recursive: true, force: true }))
     const fixture = await createAutobizComposableFixture(source, parent, { minimumRevision })

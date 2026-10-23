@@ -2,9 +2,9 @@ import { execFile } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
-import { tmpdir } from "node:os"
 import { promisify } from "node:util"
 import { afterEach, describe, expect, it } from "vitest"
+import { canonicalTmpdir } from "../../../tests/support/canonical-temp-dir"
 import type { BusinessModAssemblyRequest, BusinessModDefinition } from "../../shared/business-mods"
 import { parseProjectRuntimeManifest } from "../../shared/project-runtime"
 import { HostProjectService } from "../harness-board/project-runtime/host-service"
@@ -28,7 +28,7 @@ const sourcePath = resolve("examples/vendor-onboarding-mods")
 const conversionPath = resolve("examples/vendor-requirement-conversion-mod")
 
 async function fixture() {
-  const directory = await mkdtemp(join(tmpdir(), "workflow-independent-"))
+  const directory = await mkdtemp(join(canonicalTmpdir(), "workflow-independent-"))
   cleanup.push(() => rm(directory, { recursive: true, force: true }))
   const baseSnapshot = await snapshotDerivationSource(sourcePath)
   const base = businessModCatalog(baseSnapshot)

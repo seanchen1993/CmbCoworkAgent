@@ -1,6 +1,6 @@
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
-import { tmpdir } from "node:os"
+import { canonicalTmpdir } from "../../../../tests/support/canonical-temp-dir"
 import { expect, it } from "vitest"
 import { CreatorBusinessService } from "./creator-business"
 import { businessCreatorScopeKey } from "./creator-business-draft"
@@ -11,7 +11,7 @@ import { assertHostPackageSupported } from "../../harness-board/project-runtime/
 import type { PluginMetadata } from "../../types"
 
 it("edits a Skill while retaining large original knowledge and validator resources outside the author document budget", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "creator-large-retained-"))
+  const directory = await mkdtemp(join(canonicalTmpdir(), "creator-large-retained-"))
   let service: CreatorBusinessService | undefined
   try {
     const original = join(directory, "original")
@@ -151,7 +151,7 @@ it("edits a Skill while retaining large original knowledge and validator resourc
 }, 15000)
 
 it("retains declared subagent files when a legacy module's Skill is changed", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "creator-retained-agent-"))
+  const directory = await mkdtemp(join(canonicalTmpdir(), "creator-retained-agent-"))
   let service: CreatorBusinessService | undefined
   try {
     const original = join(directory, "original")

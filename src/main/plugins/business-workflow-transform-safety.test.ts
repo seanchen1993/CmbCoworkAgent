@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { tmpdir } from "node:os"
 import { expect, it } from "vitest"
+import { canonicalTmpdir } from "../../../tests/support/canonical-temp-dir"
 import { parseBusinessModCatalog } from "./business-mod-manifest"
 import { assembleBusinessMods } from "./business-mod-assembler"
 import { snapshotDerivationSource } from "./derivation-source"
@@ -85,7 +85,7 @@ it.each(["pluginId", "plugin", "actionId", "digest"] as const)(
 it.each(["knowledge", "executable"])(
   "cannot silently rewrite an original %s resource inside its own namespace",
   async (kind) => {
-    const directory = await mkdtemp(join(tmpdir(), "workflow-protected-resource-"))
+    const directory = await mkdtemp(join(canonicalTmpdir(), "workflow-protected-resource-"))
     try {
       const source = checkedNativeStage()
       source.resources = ["mods/business/delivery.review/policy.md"]

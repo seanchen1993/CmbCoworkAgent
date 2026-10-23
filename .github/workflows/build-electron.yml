@@ -401,6 +401,7 @@ jobs:
           src/main/mods/v2/autobiz-composable-contract.test.ts
           src/main/mods/v2/autobiz-verified-candidate-contract.test.ts
           src/main/mods/v2/autobiz-upstream-contract.test.ts
+          tests/browser/canonical-temp-root.test.ts
 
       - name: Verify AutoBiz startup and question continuation regressions (Windows)
         if: runner.os == 'Windows'

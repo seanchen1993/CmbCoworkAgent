@@ -84,7 +84,7 @@ def rejected(root, message="AUTOBIZ_UPSTREAM_ARTIFACT_CHANGED"):
 
 
 with tempfile.TemporaryDirectory(prefix="autobiz-upstream-") as temporary:
-    root = Path(temporary)
+    root = Path(temporary).resolve()
     artifact = root / ".autobizdevops/features/F1/NORMALIZED.json"
     artifact.parent.mkdir(parents=True)
     artifact.write_text('{"requirements":["one"]}', encoding="utf-8")

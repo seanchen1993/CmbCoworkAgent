@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto"
 import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { expect, it } from "vitest"
+import { canonicalTmpdir } from "../../../tests/support/canonical-temp-dir"
 import {
   compareDerivationPaths,
   derivationDigest,
@@ -11,7 +11,7 @@ import {
 } from "./derivation-source"
 
 it("materializes old and renamed Skill resource trees with the exact retained snapshot digest", async () => {
-  const root = await mkdtemp(join(tmpdir(), "derivation-order-"))
+  const root = await mkdtemp(join(canonicalTmpdir(), "derivation-order-"))
   try {
     const files = [
       ["plugin.json", '{"name":"order-regression","version":"1.0.0","skills":"skills"}'],

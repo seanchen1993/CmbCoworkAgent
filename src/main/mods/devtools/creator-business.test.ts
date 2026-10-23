@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { canonicalTmpdir } from "../../../../tests/support/canonical-temp-dir"
 import { dirname, join } from "node:path"
 import AdmZip from "adm-zip"
 import { CreatorBusinessService, setCreatorBusinessService } from "./creator-business"
@@ -151,7 +151,7 @@ function mod(id: string, skill: string, input?: string): BusinessModDefinition {
   }
 }
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "creator-business-"))
+  const root = await mkdtemp(join(canonicalTmpdir(), "creator-business-"))
   roots.push(root)
   const directory = join(root, "original"),
     base = mod("source", "source")

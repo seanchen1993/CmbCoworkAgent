@@ -2,12 +2,12 @@ import { execFile, spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
-import { tmpdir } from "node:os"
 import { createInterface } from "node:readline"
 import { promisify } from "node:util"
 import { expect, it } from "vitest"
 import { prepareAutobizFunctionStatePlugin } from "../../../../scripts/prepare-autobiz-function-state-plugin"
 import { createAutobizFunctionStateGuest } from "../../../../tests/support/autobiz-function-state-guest"
+import { canonicalTmpdir } from "../../../../tests/support/canonical-temp-dir"
 
 const source = process.env.AUTOBIZ_FUNCTION_STATE_PLUGIN
 const optedIn = process.env.RUN_AUTOBIZ_FUNCTION_STATE_INTEGRATION === "1" && !!source
@@ -16,7 +16,7 @@ const execute = promisify(execFile)
 it.runIf(optedIn)(
   "uses the real state Mod to reject stale verified candidates and rechecks actual bytes after the prepared commit ACK",
   async () => {
-    const parent = await mkdtemp(join(tmpdir(), "ab-verified-state-"))
+    const parent = await mkdtemp(join(canonicalTmpdir(), "ab-verified-state-"))
     const runtimes: Array<{ close(): Promise<void> }> = []
     try {
       const generated = await prepareAutobizFunctionStatePlugin({

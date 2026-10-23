@@ -2,7 +2,6 @@ import { execFile } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { promisify } from "node:util"
 import { afterEach, expect, it, vi } from "vitest"
@@ -19,6 +18,7 @@ import type { CompositionInternalProject } from "./composition-internal-projects
 import { runOriginalAutobizFixedWorkflow } from "../../../../tests/support/autobiz-original-fixed-workflow"
 
 import { createAutobizFunctionStateGuest } from "../../../../tests/support/autobiz-function-state-guest"
+import { canonicalTmpdir } from "../../../../tests/support/canonical-temp-dir"
 
 const activeStateGuests: Array<Awaited<ReturnType<typeof createAutobizFunctionStateGuest>>> = []
 const local = vi.hoisted(() => ({ data: "" }))
@@ -61,7 +61,7 @@ it.runIf(
     const root = resolve("output/autobiz-function-state-journey", randomUUID())
     await mkdir(root, { recursive: true })
     // Keep real Git/Python paths short; preserve evidence instead of deleting the accepted run.
-    local.data = await mkdtemp(join(tmpdir(), "abo-"))
+    local.data = await mkdtemp(join(canonicalTmpdir(), "abo-"))
     vi.stubEnv("CMB_COWORK_AGENT_HOME", local.data)
     vi.stubEnv("PYTHONDONTWRITEBYTECODE", "1")
     const parent = join(local.data, "projects"),

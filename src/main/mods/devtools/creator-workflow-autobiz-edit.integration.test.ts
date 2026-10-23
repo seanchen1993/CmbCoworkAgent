@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { join, resolve } from "node:path"
-import { tmpdir } from "node:os"
+import { canonicalTmpdir } from "../../../../tests/support/canonical-temp-dir"
 import { expect, it } from "vitest"
 import { CreatorBusinessService } from "./creator-business"
 import { businessCreatorScopeKey } from "./creator-business-draft"
@@ -14,7 +14,7 @@ import type { PluginMetadata } from "../../types"
 it.runIf(!!process.env.AUTOBIZ_WORKFLOW_EDIT_SOURCE)(
   "edits the actual AutoBiz Code Skill through creator services and retains its large source closure through native admission",
   async () => {
-    const directory = await mkdtemp(join(tmpdir(), "creator-real-autobiz-edit-"))
+    const directory = await mkdtemp(join(canonicalTmpdir(), "creator-real-autobiz-edit-"))
     let service: CreatorBusinessService | undefined
     try {
       const original = resolve(process.env.AUTOBIZ_WORKFLOW_EDIT_SOURCE!)
