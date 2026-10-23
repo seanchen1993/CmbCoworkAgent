@@ -687,6 +687,29 @@ it("preserves browser failure status through the standard Runtime tool-result fo
   )
 })
 
+it("keeps ambiguous-target recovery refs in an error result so the model can retry precisely", async () => {
+  const evidence = JSON.stringify({
+    ok: false,
+    pageId: "owned-page",
+    error: "页面目标不唯一；操作未执行",
+    content: '- button "查看详情" [ref=page:e1]\n- button "查看详情" [ref=page:e2]'
+  })
+  const [browser] = createBotBrowserTools(
+    { id: "private" } as BotDefinition,
+    { act: vi.fn().mockResolvedValue(evidence) } as unknown as BotBrowserService,
+    new AbortController().signal,
+    vi.fn()
+  )
+  const result = await browser.invoke({
+    type: "tool_call",
+    id: "ambiguous-click",
+    name: "bot_browser",
+    args: { action: "click", role: "button", name: "查看详情" }
+  })
+  expect(result.status).toBe("error")
+  expect(result.content).toBe(evidence)
+})
+
 function fixture(origin: BotTask["origin"] = { kind: "user" }, schedules: BotSchedule[] = []) {
   const controller = new AbortController()
   const save = vi.fn((botId, input, existing) => ({ botId, ...input, ...existing }))
