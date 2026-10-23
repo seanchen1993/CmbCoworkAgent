@@ -321,7 +321,9 @@ export function ManagedRunPanel({
   )
 }
 
-interface ManagedRunTimelineProps {
+export interface ManagedRunTimelineProps {
+  embedded?: boolean
+  refreshRevision?: number
   run?: ManagedRunSummary
   projectId: string
   featureId: string
@@ -478,6 +480,8 @@ function EventRow({
 }
 
 export function ManagedRunTimeline({
+  embedded = false,
+  refreshRevision = 0,
   run,
   projectId,
   featureId,
@@ -550,7 +554,7 @@ export function ManagedRunTimeline({
     return () => {
       requestVersion.current += 1
     }
-  }, [loadEvents, run, notificationRevision])
+  }, [loadEvents, run, notificationRevision, refreshRevision])
 
   useEffect(() => {
     setExpandedGroups(new Set(["global"]))
@@ -715,33 +719,41 @@ export function ManagedRunTimeline({
 
   return (
     <TooltipProvider>
-      <section className="rounded-xl border border-border/80 bg-background-elevated/80 p-3 shadow-xs">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-              Managed Run
+      <section
+        className={
+          embedded
+            ? "p-3"
+            : "rounded-xl border border-border/80 bg-background-elevated/80 p-3 shadow-xs"
+        }
+      >
+        {!embedded && (
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                Managed Run
+              </div>
+              <div className="mt-1 text-sm font-semibold">托管执行记录</div>
+              <div className="mt-1 font-mono text-[10px] text-muted-foreground">
+                {run.startedAt || "-"} — {run.updatedAt || "-"}
+              </div>
             </div>
-            <div className="mt-1 text-sm font-semibold">托管执行记录</div>
-            <div className="mt-1 font-mono text-[10px] text-muted-foreground">
-              {run.startedAt || "-"} — {run.updatedAt || "-"}
-            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="size-7"
+              onClick={() => void loadEvents()}
+              disabled={loading}
+              title="刷新托管执行记录"
+            >
+              {loading ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="size-3.5" />
+              )}
+            </Button>
           </div>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            className="size-7"
-            onClick={() => void loadEvents()}
-            disabled={loading}
-            title="刷新托管执行记录"
-          >
-            {loading ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="size-3.5" />
-            )}
-          </Button>
-        </div>
+        )}
 
         {loading && events.length === 0 ? (
           <div className="flex items-center justify-center py-8 text-xs text-muted-foreground">
@@ -753,7 +765,7 @@ export function ManagedRunTimeline({
             托管时间线读取失败：{loadError}
           </div>
         ) : (
-          <div className="mt-3 space-y-2">
+          <div className={cn("space-y-2", !embedded && "mt-3")}>
             {renderGroup("global", "全局生命周期", globalEvents, true)}
             {stageGroups.map((group) =>
               renderGroup(group.nodeId, stageLabels.get(group.nodeId) || group.nodeId, group.events)

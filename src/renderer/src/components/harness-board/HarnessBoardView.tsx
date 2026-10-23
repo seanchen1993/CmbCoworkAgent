@@ -88,7 +88,7 @@ import { ThreadGroupDeleteDialog } from "@/components/sidebar/ThreadGroupDeleteD
 import { KnowledgePreviewPanel } from "@/components/harness-board/KnowledgePreviewPanel"
 import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
 import { ArtifactAccumulationButton } from "./ArtifactAccumulationButton"
-import { ManagedRunTimeline } from "@/components/harness-board/ManagedRunPanel"
+import { ManagedRunHistory } from "@/components/harness-board/ManagedRunHistory"
 import {
   createBoundedLatestTaskQueue,
   type BoundedTaskContext
@@ -7641,8 +7641,8 @@ function FeatureDetailPage({
                     暂无阶段数据。
                   </section>
                 )}
-                <ManagedRunTimeline
-                  key={detail.run.managedRun?.runId ?? "no-managed-run"}
+                <ManagedRunHistory
+                  key={`${detail.project.projectId}:${detail.run.slug}`}
                   run={detail.run.managedRun}
                   projectId={detail.project.projectId}
                   featureId={detail.run.managedRun?.featureId ?? detail.run.slug}

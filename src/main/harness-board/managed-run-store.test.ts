@@ -35,6 +35,49 @@ function runPath(store: ManagedRunStore, runId: string): string {
 }
 
 describe("ManagedRunStore", () => {
+  it("lists only the requested feature runs by start time rather than modification time", () => {
+    const store = makeStore()
+    const older = store.createRun("project-1", "feature-1")
+    const newer = store.createRun("project-1", "feature-1")
+    store.createRun("project-1", "feature-2")
+    store.writeSnapshot({
+      ...newer,
+      startedAt: "2026-10-23 10:00:00",
+      updatedAt: "2026-10-23 10:00:00"
+    })
+    store.writeSnapshot({
+      ...older,
+      status: "completed",
+      startedAt: "2026-10-23 09:00:00",
+      updatedAt: "2026-10-23 11:00:00"
+    })
+
+    expect(store.listFeatureRunSummaries("project-1", "feature-1").map((run) => run.runId)).toEqual(
+      [newer.runId, older.runId]
+    )
+    expect(store.listFeatureRunSummaries("project-1", "missing-feature")).toEqual([])
+  })
+
+  it("keeps corrupt snapshots visible in the feature history", () => {
+    const store = makeStore()
+    const run = store.createRun("project-1", "feature-1")
+    writeFileSync(runPath(store, run.runId), "invalid snapshot", "utf8")
+
+    expect(store.listFeatureRunSummaries("project-1", "feature-1")).toEqual([
+      expect.objectContaining({ runId: run.runId, status: "corrupt", corrupt: true })
+    ])
+  })
+
+  it("does not read or repair event journals when listing summaries", () => {
+    const store = makeStore()
+    const run = store.createRun("project-1", "feature-1")
+    const journal = eventPath(store, run.runId)
+    writeFileSync(journal, "partial event", "utf8")
+
+    expect(store.listFeatureRunSummaries("project-1", "feature-1")[0].runId).toBe(run.runId)
+    expect(readFileSync(journal, "utf8")).toBe("partial event")
+  })
+
   it("places project-scoped runs under .cmbdevclaw/managed-runs", () => {
     expect(resolveManagedRunProjectRoot(join("workspace", "project"))).toBe(
       join("workspace", "project", ".cmbdevclaw", "managed-runs")

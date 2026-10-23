@@ -928,6 +928,25 @@ export class ManagedRunStore {
     }
   }
 
+  listFeatureRunSummaries(projectId: string, featureId: string): ManagedRunSummary[] {
+    return this.listFeatureRuns(projectId, featureId)
+      .map((record): ManagedRunSummary => {
+        if (record.snapshot && !record.corrupt) return record.snapshot
+        return {
+          version: 2.5,
+          runId: record.runId,
+          projectId: record.projectId,
+          featureId: record.featureId,
+          status: "corrupt",
+          corrupt: true,
+          providerRetryCount: 0,
+          startedAt: "",
+          updatedAt: ""
+        }
+      })
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
+  }
+
   validateRunEvents(identity: ManagedRunIdentity): { repaired: boolean } {
     return this.ensureHealthyJournal(identity)
   }
