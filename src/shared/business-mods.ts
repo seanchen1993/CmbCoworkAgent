@@ -108,6 +108,8 @@ export interface BusinessModAssemblyRequest {
   acceptFixedWorkflow?: boolean
   /** Opt-in checked output IDs; export uses the original fixed verified-context bundle. */
   verifiedArtifactIds?: string[]
+  /** Explicit replacement of one reviewed module; both complete sources are digest-bound. */
+  replacements?: Array<{ id: string; sourceDigest: string; replacementSourceDigest: string }>
 }
 export interface BusinessModPreview {
   previewId: string
@@ -156,5 +158,12 @@ export interface BusinessModAssemblyLock {
   sources: Array<{ name: string; digest: string; mods: string[] }>
   mods: Array<{ id: string; nodeId: string; sourceDigest: string }>
   extensions?: Array<{ id: string; sourceDigest: string }>
+  replacements?: Array<{
+    id: string
+    sourceDigest: string
+    replacementSourceDigest: string
+    originalDefinition: BusinessModDefinition
+    originalFiles: Array<{ path: string; digest: string }>
+  }>
   files: Array<{ path: string; digest: string }>
 }

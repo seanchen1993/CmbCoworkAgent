@@ -364,6 +364,28 @@ export const CREATOR_S1_SUPPORT = Object.freeze({
   },
   conditionalCapabilities: CREATOR_CONDITIONAL_CAPABILITIES,
   authoringConstraints: {
+    workflowComposition: {
+      discovery: { tool: "mod_business", action: "read_workflow" },
+      transformation: { tool: "mod_business", action: "transform_workflow" },
+      operations: ["insert", "replace_skill", "replace_step"],
+      requires: [
+        "inspected-source-digest",
+        "current-workflow-digest",
+        "complete-module-contract",
+        "real-implementation-files"
+      ],
+      preserves: [
+        "required-checks",
+        "hooks",
+        "knowledge-resources",
+        "configuration",
+        "required-input-output",
+        "native-approval"
+      ],
+      execution: "unverified-until-fresh-native-trial",
+      limits:
+        "Only declared, executor-supported module contracts can be transformed. The linear composition view does not infer missing business semantics or replace native state authority."
+    },
     stateExtensions: {
       scaffold: { tool: "mod_authoring", action: "scaffold", kind: "state-extension" },
       artifact: "executable-decision-scaffold",

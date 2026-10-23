@@ -105,6 +105,56 @@ function value(files: DerivationFile[], path: string): unknown {
 }
 
 describe("business assembly reviewed runtime adapters", () => {
+  it.each([
+    { hooks: true, rename: true, blocked: true },
+    { hooks: false, rename: true, blocked: false },
+    { hooks: true, rename: false, blocked: false }
+  ])(
+    "preserves original Skill identity when executable Hooks are declared: %j",
+    ({ hooks, rename, blocked }) => {
+      const raw = catalog()
+      if (hooks) {
+        Object.assign(raw.kernel, { pluginFields: { hooks: "hooks/hooks.json" } })
+        raw.kernel.resources.push("hooks/hooks.json")
+      }
+      const base = snapshot(raw, hooks ? { "hooks/hooks.json": "{}" } : {})
+      const changed = structuredClone(raw.modules[0])
+      if (rename) {
+        changed.node.skill = "intake-improved"
+        changed.skill.entry = "skills/intake-improved/SKILL.md"
+      }
+      const next = snapshot(
+        { ...raw, modules: [changed] },
+        {
+          [changed.skill.entry]:
+            `---\nname: ${changed.node.skill}\ndescription: Revised prompt\n---\nUse the original validators and produce the original artifact.`
+        }
+      )
+      const draft = parseBusinessModCatalog({
+        apiVersion: "devclaw.business-mods/v1",
+        kind: "catalog",
+        kernelRef: { id: raw.kernel.id, version: raw.kernel.version },
+        modules: [changed]
+      })
+      const run = () =>
+        assembleBusinessMods(
+          [
+            { snapshot: base, catalog: parseBusinessModCatalog(raw), modIds: ["intake"] },
+            { snapshot: next, catalog: draft, modIds: ["intake"] }
+          ],
+          {
+            name: "updated-independent-source",
+            version: "1.0.0",
+            sources: [],
+            replacements: [
+              { id: "intake", sourceDigest: base.digest, replacementSourceDigest: next.digest }
+            ]
+          }
+        )
+      if (blocked) expect(run).toThrow("BUSINESS_WORKFLOW_SKILL_RENAME_REQUIRES_HOOK_MAPPING")
+      else expect(run().steps.map((step) => step.id)).toEqual(["intake"])
+    }
+  )
   it("assembles Host stages and required checks through native contracts without board checkpoints", () => {
     const result = assemble()
     const runtime = parseProjectRuntimeManifest(value(result.files, "devclaw.project-runtime.json"))

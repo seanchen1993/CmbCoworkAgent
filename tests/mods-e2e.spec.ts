@@ -757,6 +757,7 @@ async function runMain(failures: unknown[]): Promise<void> {
         "journal.py",
         "stage_checks.py",
         "hook_checks.py",
+        "compiled_contract.py",
         "SKILL.md"
       ]) {
         const resource = `out/resources/mods/autobiz-state-machine/${name}`

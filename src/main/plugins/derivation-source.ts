@@ -39,6 +39,16 @@ const excludedName = (name: string) =>
     name
   ) || /\.(?:log|pyc|pem|key|p12|pfx)$/i.test(name)
 const hash = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex")
+/** Match the existing directory DFS snapshot order without changing its digest domain. */
+export function compareDerivationPaths(left: string, right: string): number {
+  const a = left.split("/"),
+    b = right.split("/")
+  for (let index = 0; index < Math.min(a.length, b.length); index++) {
+    const order = a[index].localeCompare(b[index], "en")
+    if (order) return order
+  }
+  return a.length - b.length
+}
 export function derivationDigest(files: DerivationFile[], excluded: string[]): string {
   return hash(
     JSON.stringify({ files: files.map((f) => [f.path, f.digest, f.mode & 0o777]), excluded })
@@ -257,8 +267,13 @@ export function renameDerivation(
     let bytes = file.bytes
     if (snapshot.manifests.includes(file.path)) {
       const manifest = packageJson(bytes)
-      bytes = Buffer.from(JSON.stringify({ ...manifest, name,
-        ...(version === undefined ? {} : { version }) }, null, 2) + "\n")
+      bytes = Buffer.from(
+        JSON.stringify(
+          { ...manifest, name, ...(version === undefined ? {} : { version }) },
+          null,
+          2
+        ) + "\n"
+      )
     } else if (file.path === "devclaw.project-runtime.json") {
       const manifest = packageJson(bytes)
       const v2 = manifest.apiVersion === "devclaw.project-runtime/v2"
@@ -267,14 +282,18 @@ export function renameDerivation(
       if (!plugin || plugin.id !== snapshot.name) throw Error("项目清单身份约束不支持")
       const renamed = {
         ...runtime,
-        plugin: { ...plugin, id: name,
+        plugin: {
+          ...plugin,
+          id: name,
           ...(plugin.name === snapshot.name ? { name } : {}),
-          ...(version === undefined ? {} : { version }) }
+          ...(version === undefined ? {} : { version })
+        }
       }
       bytes = Buffer.from(
         JSON.stringify(
-          v2 ? preserveProjectRuntimeEnvelope(manifest,
-            parseProjectRuntimeManifest(renamed)) : renamed,
+          v2
+            ? preserveProjectRuntimeEnvelope(manifest, parseProjectRuntimeManifest(renamed))
+            : renamed,
           null,
           2
         ) + "\n"

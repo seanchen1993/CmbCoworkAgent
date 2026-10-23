@@ -36,6 +36,7 @@ const delivery = resolve(
   process.env.AUTOBIZ_FUNCTION_STATE_DELIVERY ??
     "output/deliveries/autobiz-function-state-20261021-root-r7"
 )
+const withRequirementConversion = process.env.AUTOBIZ_JOURNEY_REQUIREMENT_CONVERSION === "1"
 afterEach(async () => {
   for (const guest of activeStateGuests.splice(0)) await guest.close()
   await closeRequiredPromptFixtures()
@@ -288,6 +289,14 @@ it.runIf(
       return result
     }
     const prepare = async (action: string) => {
+      if (action === "prd" && withRequirementConversion) {
+        const result = await python(
+          [resolve("tests/support/autobiz-composable-prd-sample.py"), source, workspace, "alpha"],
+          true
+        )
+        expect(JSON.parse(result.stdout)).toMatchObject({ read: "NORMALIZED_REQUIREMENTS.json" })
+        return
+      }
       const result = await python(
         [
           resolve("tests/support/autobiz-creator-lifecycle-sample.py"),
@@ -302,6 +311,37 @@ it.runIf(
         true
       )
       expect(result.stdout).toContain('"checksApproved": false')
+    }
+    if (withRequirementConversion) {
+      const initial = await adapter({ operation: "read" })
+      expect(initial.record).toMatchObject({ checkpoint: "convert_in_progress" })
+      const before = await readFile(state)
+      expect(await advance("convert_done")).toMatchObject({ status: "not-applied" })
+      expect(await readFile(state)).toEqual(before)
+      const upstream = join(workspace, ".autobizdevops/features/alpha/NORMALIZED_REQUIREMENTS.json")
+      const effective = initial.workflow as {
+        stages: Array<{
+          id: string
+          outputs: Array<{ schema?: { properties?: { revision?: { minimum?: number } } } }>
+        }>
+      }
+      const schema = effective.stages.find((stage) => stage.id === "biz.convert")!.outputs[0]
+        .schema!
+      const revision = schema.properties!.revision!.minimum!
+      expect(Number.isSafeInteger(revision) && revision > 0).toBe(true)
+      await writeFile(
+        upstream,
+        JSON.stringify({
+          feature: "alpha",
+          revision,
+          requirements: ["实现两个整数运算函数，保留原知识约束、编译、审查与测试门禁。"]
+        })
+      )
+      expect(await advance("convert_done")).toMatchObject({ status: "committed" })
+      expect(await advance("prd_in_progress")).toMatchObject({ status: "committed" })
+      observations.push({
+        upstreamRequirementConversion: { path: upstream, actualReadRequired: true }
+      })
     }
     for (const stage of ["prd", "specs", "design"]) {
       const checkpoint = JSON.parse(await readFile(state, "utf8")).features.alpha.checkpoint

@@ -18,7 +18,10 @@ import { compileFunctionPlugin } from "../mods/v2/loader"
 import { portableBusinessModFiles } from "./business-mod-portable-source"
 import { projectBusinessModNodes, projectBusinessModWorkflowRouting } from "./business-mod-workflow"
 import { getPluginSkillSearchSources, readPluginManifest } from "./manifest"
-import { projectRuntimeExtensionContract, EXTENSION_BOARD_API_VERSION } from "../../shared/project-runtime"
+import {
+  projectRuntimeExtensionContract,
+  EXTENSION_BOARD_API_VERSION
+} from "../../shared/project-runtime"
 import { assertPackageExtensionCompatibility } from "./extension-contract"
 
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex")
@@ -172,6 +175,46 @@ it("accepts reviewed portable assembly, then rejects source identity, inventory 
   expect(verifyReviewedBusinessAssembly(partial.snapshot(false), partial.kernel)).toBe(false)
 })
 
+it("admits an additional namespaced validator only with a proven original step replacement", () => {
+  const f = fixture()
+  const catalog = JSON.parse(f.files.get("mods/business/manifest.json")!.toString("utf8"))
+  const next = catalog.modules[0]
+  const validator = `business:${next.id}`
+  const path = `mods/business/${next.id}/handoff-check.py`
+  next.checks.validators.push(validator)
+  next.node.validators = [...next.checks.validators]
+  next.node.validatorBindings = { [validator]: { path, function: "validate" } }
+  next.resources.push(path)
+  f.files.set(path, Buffer.from("def validate(context):\n    return 0\n"))
+  f.files.set("mods/business/manifest.json", json(catalog))
+  const board = JSON.parse(f.files.get("board_core/board_config.json")!.toString("utf8"))
+  board.workflow = {
+    nodes: projectBusinessModNodes([next]),
+    ...projectBusinessModWorkflowRouting([next]),
+    skipPolicy: { lockedNodes: [] }
+  }
+  f.files.set("board_core/board_config.json", json(board))
+  f.lock.mods[0].sourceDigest = "b".repeat(64)
+  f.lock.sources.push({ name: "step-replacement", digest: "b".repeat(64), mods: [next.id] })
+  const replacement = {
+    id: next.id,
+    sourceDigest: "a".repeat(64),
+    replacementSourceDigest: "b".repeat(64),
+    originalDefinition: f.module,
+    originalFiles: Object.entries(f.kernel.modules[next.id].files).map(([path, digest]) => ({
+      path,
+      digest
+    }))
+  }
+  Object.assign(f.lock, { replacements: [replacement] })
+  expect(verifyReviewedBusinessAssembly(f.snapshot(), f.kernel)).toBe(true)
+  Object.assign(f.lock, { replacements: [] })
+  expect(verifyReviewedBusinessAssembly(f.snapshot(), f.kernel)).toBe(false)
+  Object.assign(f.lock, { replacements: [replacement] })
+  f.files.set("mods/business/another-stage/escape.py", Buffer.from("# Unselected namespace"))
+  expect(verifyReviewedBusinessAssembly(f.snapshot(), f.kernel)).toBe(false)
+})
+
 it("retains exact admission for old fixed-flow assemblies without admitting arbitrary custom policy", () => {
   const f = fixture()
   const board = JSON.parse(f.files.get("board_core/board_config.json")!.toString("utf8"))
@@ -311,32 +354,60 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
 })
 it.skipIf(!process.env.AUTOBIZ_BUSINESS_WAREHOUSE_SOURCE)(
-  "publishes selected real warehouse outputs with complete reviewed admission and rejects invented IDs", async () => {
+  "publishes selected real warehouse outputs with complete reviewed admission and rejects invented IDs",
+  async () => {
     const original = await snapshotDerivationSource(process.env.AUTOBIZ_BUSINESS_SOURCE!)
     const warehouse = await snapshotDerivationSource(process.env.AUTOBIZ_BUSINESS_WAREHOUSE_SOURCE!)
     const sources = [
-      { snapshot: original, catalog: businessModCatalog(original), modIds: ["biz.prd", "dev.specs"] },
-      { snapshot: warehouse, catalog: businessModCatalog(warehouse),
-        modIds: businessModCatalog(warehouse).modules.map(mod => mod.id) }
+      {
+        snapshot: original,
+        catalog: businessModCatalog(original),
+        modIds: ["biz.prd", "dev.specs"]
+      },
+      {
+        snapshot: warehouse,
+        catalog: businessModCatalog(warehouse),
+        modIds: businessModCatalog(warehouse).modules.map((mod) => mod.id)
+      }
     ]
-    const request = { name: "warehouse-checked-export", version: "1.0.0", sources: [],
-      verifiedArtifactIds: ["warehouse_sql_results", "warehouse_quality"] }
+    const request = {
+      name: "warehouse-checked-export",
+      version: "1.0.0",
+      sources: [],
+      verifiedArtifactIds: ["warehouse_sql_results", "warehouse_quality"]
+    }
     const assembled = assembleBusinessMods(sources, request)
     expect(verifyReviewedBusinessAssembly(assembled, reviewed)).toBe(true)
     const root = await mkdtemp(join(tmpdir(), "warehouse-checked-export-"))
     roots.push(root)
     await writeDerivationFiles(root, assembled.files)
     expect(() => assertPackageExtensionCompatibility(root)).not.toThrow()
-    const native = await readNativeCapabilityCatalog({ id: "new-export-source", name: request.name,
-      version: request.version, path: root, enabled: true } as PluginMetadata, "project")
+    const native = await readNativeCapabilityCatalog(
+      {
+        id: "new-export-source",
+        name: request.name,
+        version: request.version,
+        path: root,
+        enabled: true
+      } as PluginMetadata,
+      "project"
+    )
     expect(native.legacyAdapter).toBe("autobiz-v1")
     expect(native.capabilities[0].runtimeMode).toBe("legacy")
-    for (const verifiedArtifactIds of [["unknown"], ["warehouse_sql_results", "warehouse_sql_results"], []])
-      expect(() => assembleBusinessMods(sources, { ...request, verifiedArtifactIds })).toThrow(/VERIFIED_ARTIFACTS/)
+    for (const verifiedArtifactIds of [
+      ["unknown"],
+      ["warehouse_sql_results", "warehouse_sql_results"],
+      []
+    ])
+      expect(() => assembleBusinessMods(sources, { ...request, verifiedArtifactIds })).toThrow(
+        /VERIFIED_ARTIFACTS/
+      )
     const changed = structuredClone(assembled)
-    changed.files.find(file => file.path === "board_core/contracts.py")!.bytes = Buffer.from("# changed source")
+    changed.files.find((file) => file.path === "board_core/contracts.py")!.bytes =
+      Buffer.from("# changed source")
     expect(verifyReviewedBusinessAssembly(changed, reviewed)).toBe(false)
-  }, 60_000
+  },
+  60_000
 )
 it.skipIf(!process.env.AUTOBIZ_BUSINESS_CONTEXT_SOURCE)(
   "preserves full AutoBiz and warehouse behavior with actual worktree, context and native knowledge Skill providers",
@@ -345,54 +416,117 @@ it.skipIf(!process.env.AUTOBIZ_BUSINESS_CONTEXT_SOURCE)(
     const warehouse = await snapshotDerivationSource(process.env.AUTOBIZ_BUSINESS_WAREHOUSE_SOURCE!)
     const observer = await snapshotDerivationSource(process.env.AUTOBIZ_BUSINESS_OBSERVER_SOURCE!)
     const context = await snapshotDerivationSource(process.env.AUTOBIZ_BUSINESS_CONTEXT_SOURCE!)
-    const originalCatalog = businessModCatalog(original), warehouseCatalog = businessModCatalog(warehouse)
-    const observerCatalog = businessModCatalog(observer), contextCatalog = businessModCatalog(context)
+    const originalCatalog = businessModCatalog(original),
+      warehouseCatalog = businessModCatalog(warehouse)
+    const observerCatalog = businessModCatalog(observer),
+      contextCatalog = businessModCatalog(context)
     for (const warehouseMode of [false, true]) {
-      const chosen = warehouseMode ? ["biz.prd", "dev.specs"] : originalCatalog.modules.map(mod => mod.id)
-      const assembled = assembleBusinessMods([
-        { snapshot: original, catalog: originalCatalog, modIds: chosen },
-        ...(warehouseMode ? [{ snapshot: warehouse, catalog: warehouseCatalog,
-          modIds: warehouseCatalog.modules.map(mod => mod.id) }] : []),
-        { snapshot: observer, catalog: observerCatalog, modIds: ["autobiz.worktree-progress"] },
-        { snapshot: context, catalog: contextCatalog, modIds: ["autobiz.knowledge"] }
-      ], { name: warehouseMode ? "complete-warehouse-with-context" : "complete-autobiz-with-context",
-        version: "1.0.0", sources: [] })
+      const chosen = warehouseMode
+        ? ["biz.prd", "dev.specs"]
+        : originalCatalog.modules.map((mod) => mod.id)
+      const assembled = assembleBusinessMods(
+        [
+          { snapshot: original, catalog: originalCatalog, modIds: chosen },
+          ...(warehouseMode
+            ? [
+                {
+                  snapshot: warehouse,
+                  catalog: warehouseCatalog,
+                  modIds: warehouseCatalog.modules.map((mod) => mod.id)
+                }
+              ]
+            : []),
+          { snapshot: observer, catalog: observerCatalog, modIds: ["autobiz.worktree-progress"] },
+          { snapshot: context, catalog: contextCatalog, modIds: ["autobiz.knowledge"] }
+        ],
+        {
+          name: warehouseMode ? "complete-warehouse-with-context" : "complete-autobiz-with-context",
+          version: "1.0.0",
+          sources: []
+        }
+      )
       expect(assembled.missingProviders).toEqual([])
       expect(assembled.requiresFixedWorkflowAcknowledgement).toBe(false)
       expect(verifyReviewedBusinessAssembly(assembled, reviewed)).toBe(true)
-      const board = JSON.parse(assembled.files.find(file => file.path === "board_core/board_config.json")!.bytes.toString())
-      const oldBoard = JSON.parse(original.files.find(file => file.path === "board_core/board_config.json")!.bytes.toString())
+      const board = JSON.parse(
+        assembled.files
+          .find((file) => file.path === "board_core/board_config.json")!
+          .bytes.toString()
+      )
+      const oldBoard = JSON.parse(
+        original.files
+          .find((file) => file.path === "board_core/board_config.json")!
+          .bytes.toString()
+      )
       expect(board.knowledge_config).toEqual(oldBoard.knowledge_config)
       expect(board.inspectCommands).toEqual(oldBoard.inspectCommands)
       expect(board.apiVersion).toBe(EXTENSION_BOARD_API_VERSION)
-      const runtime = JSON.parse(assembled.files.find(file => file.path === "devclaw.project-runtime.json")!.bytes.toString())
+      const runtime = JSON.parse(
+        assembled.files
+          .find((file) => file.path === "devclaw.project-runtime.json")!
+          .bytes.toString()
+      )
       expect(projectRuntimeExtensionContract(runtime)).toMatchObject({
         requires: ["devclaw.required-business-checks/v1", "devclaw.context-handoff/v1"],
-        context: { knowledge: { required: true, binding: "knowledgeRoot" },
-          provider: { entry: "mods/business/autobiz.knowledge/provider.py" } }
+        context: {
+          knowledge: { required: true, binding: "knowledgeRoot" },
+          provider: { entry: "mods/business/autobiz.knowledge/provider.py" }
+        }
       })
-      const declarations = JSON.parse(assembled.files.find(file => file.path === "devclaw.capabilities.json")!.bytes.toString())
+      const declarations = JSON.parse(
+        assembled.files.find((file) => file.path === "devclaw.capabilities.json")!.bytes.toString()
+      )
       expect(declarations.capabilities[0].requiredHooks).toHaveLength(12)
       const root = await mkdtemp(join(tmpdir(), "complete-autobiz-context-"))
       roots.push(root)
       await writeDerivationFiles(root, assembled.files)
       const compiled = await compileFunctionPlugin(root)
-      expect(compiled.components?.map(component => component.id).sort()).toEqual(["autobiz.knowledge", "autobiz.worktree-progress"])
+      expect(compiled.components?.map((component) => component.id).sort()).toEqual([
+        "autobiz.knowledge",
+        "autobiz.worktree-progress"
+      ])
       const nativeSkills = getPluginSkillSearchSources(root, readPluginManifest(root)?.manifest)
-      expect(nativeSkills.some(source => source.relPath === "mods/business/autobiz.knowledge/skills/knowledge-sync")).toBe(true)
-      const catalog = await readNativeCapabilityCatalog({ id: "fresh-installed", name: runtime.runtime.plugin.id,
-        version: "1.0.0", path: root, enabled: true } as PluginMetadata, "project")
+      expect(
+        nativeSkills.some(
+          (source) => source.relPath === "mods/business/autobiz.knowledge/skills/knowledge-sync"
+        )
+      ).toBe(true)
+      const catalog = await readNativeCapabilityCatalog(
+        {
+          id: "fresh-installed",
+          name: runtime.runtime.plugin.id,
+          version: "1.0.0",
+          path: root,
+          enabled: true
+        } as PluginMetadata,
+        "project"
+      )
       expect(catalog.status, catalog.reasons.join(";")).toBe("declared")
       expect(catalog.legacyAdapter).toBe("autobiz-v1")
       const imported = await snapshotDerivationSource(root)
-      const second = assembleBusinessMods([{ snapshot: imported, catalog: businessModCatalog(imported),
-        modIds: [...assembled.steps.map(step => step.id), "autobiz.worktree-progress", "autobiz.knowledge"] }], {
-        name: `${runtime.runtime.plugin.id}-second`, version: "1.0.0", sources: []
-      })
+      const second = assembleBusinessMods(
+        [
+          {
+            snapshot: imported,
+            catalog: businessModCatalog(imported),
+            modIds: [
+              ...assembled.steps.map((step) => step.id),
+              "autobiz.worktree-progress",
+              "autobiz.knowledge"
+            ]
+          }
+        ],
+        {
+          name: `${runtime.runtime.plugin.id}-second`,
+          version: "1.0.0",
+          sources: []
+        }
+      )
       expect(second.missingProviders).toEqual([])
       expect(verifyReviewedBusinessAssembly(second, reviewed)).toBe(true)
     }
-  }, 60_000
+  },
+  60_000
 )
 it.skipIf(!process.env.AUTOBIZ_BUSINESS_SOURCE)(
   "recognizes two newly materialized real source assemblies without the original plugin UUID",
@@ -494,15 +628,17 @@ it.skipIf(
           .bytes.toString("utf8")
       )
       expect(board.workflow.nodes.map((node: { id: string }) => node.id)).toEqual(
-        expected.filter(id => id !== "dev.detail_design")
+        expected.filter((id) => id !== "dev.detail_design")
       )
       expect(assembled.extensions?.map((extension) => extension.id)).toEqual([
         "autobiz.worktree-progress"
       ])
       if (!withWarehouse) {
         for (const mod of originalCatalog.modules) {
-          const allNodes = [...board.workflow.nodes,
-            ...board.workflow.dynamicStages.flatMap((stage: { nodes: unknown[] }) => stage.nodes)]
+          const allNodes = [
+            ...board.workflow.nodes,
+            ...board.workflow.dynamicStages.flatMap((stage: { nodes: unknown[] }) => stage.nodes)
+          ]
           const node = allNodes.find((node: { id: string }) => node.id === mod.id)
           expect(node.validators).toEqual(mod.node.validators)
           expect(node.guards ?? []).toEqual(mod.node.guards ?? [])

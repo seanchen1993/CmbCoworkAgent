@@ -382,6 +382,26 @@ jobs:
       - name: Verify native JavaScript foundations
         run: node scripts/apply-langchain-native-foundations.mjs --check
 
+      - name: Verify generic workflow creation and composition contracts
+        timeout-minutes: 5
+        run: >-
+          npx vitest run --maxWorkers=2
+          src/main/plugins/business-workflow-transform.test.ts
+          src/main/plugins/business-workflow-transform-safety.test.ts
+          src/main/plugins/business-workflow-replacement-proof.test.ts
+          src/main/plugins/business-workflow-transform-independent.integration.test.ts
+          src/main/plugins/business-mod-assembly-adapter.test.ts
+          src/main/plugins/business-mod-examples.test.ts
+          src/main/plugins/business-mod-workflow-projection.test.ts
+          src/main/plugins/autobiz-function-state-graph.test.ts
+          src/main/plugins/derivation-assembly-order.test.ts
+          src/main/mods/devtools/creator-business.test.ts
+          src/main/mods/devtools/creator-workflow-retained-resources.integration.test.ts
+          src/main/agent/tools/mod-business-tool.test.ts
+          src/main/mods/v2/autobiz-composable-contract.test.ts
+          src/main/mods/v2/autobiz-verified-candidate-contract.test.ts
+          src/main/mods/v2/autobiz-upstream-contract.test.ts
+
       - name: Verify AutoBiz startup and question continuation regressions (Windows)
         if: runner.os == 'Windows'
         timeout-minutes: 5

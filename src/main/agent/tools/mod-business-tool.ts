@@ -18,6 +18,11 @@ import {
   BUSINESS_MOD_DUPLICATE_ID_CODE,
   BUSINESS_MOD_DUPLICATE_ID_RECOVERY
 } from "../../plugins/business-mod-diagnostics"
+import {
+  BusinessWorkflowLinkError,
+  BusinessWorkflowSkillRenameError,
+  type BusinessWorkflowChange
+} from "../../plugins/business-workflow-transform"
 
 const RESULT_PAGE_CHARS = 14_000
 function pageRows<T>(rows: T[], cursor = 0, budget = RESULT_PAGE_CHARS) {
@@ -244,6 +249,57 @@ export function createModBusinessTool(input: {
               args.cursor
             )
             break
+          case "read_workflow":
+            if (!args.inspectionId) throw Error("BUSINESS_CREATOR_INSPECT_FIRST")
+            result = documentResult(
+              await service.readWorkflow(input.threadId, args.inspectionId, args.id, args.modIds),
+              args.cursor
+            )
+            break
+          case "transform_workflow":
+            if (
+              !args.inspectionId ||
+              !args.id ||
+              !args.name ||
+              args.revision === undefined ||
+              !args.sourceDigest ||
+              !args.expectedWorkflowDigest ||
+              !args.changes ||
+              !args.files
+            )
+              throw Error("BUSINESS_WORKFLOW_TRANSFORM_INPUT_REQUIRED")
+            development!.claimAuthoringBudget(input.threadId, lease!.runId, "candidate")
+            {
+              const transformed = await service.transformWorkflow(
+                input.threadId,
+                {
+                  inspectionId: args.inspectionId,
+                  id: args.id,
+                  name: args.name,
+                  revision: args.revision,
+                  sourceDigest: args.sourceDigest,
+                  expectedWorkflowDigest: args.expectedWorkflowDigest,
+                  modIds: args.modIds,
+                  changes: args.changes as BusinessWorkflowChange[],
+                  files: args.files
+                },
+                assertTurn
+              )
+              result = {
+                draft: transformed.draft,
+                sourceDigest: transformed.sourceDigest,
+                workflowDigest: transformed.workflow.digest,
+                order: transformed.order,
+                changedIds: transformed.changedIds,
+                replacements: transformed.replacements,
+                evidence: transformed.evidence,
+                execution: transformed.execution,
+                sourceAction: "read(id,cursor)",
+                workflowAction: "read_workflow(inspectionId,id,cursor)",
+                next: transformed.next
+              }
+            }
+            break
           case "read_preview":
             if (!args.previewId) throw Error("BUSINESS_CREATOR_PREVIEW_REQUIRED")
             result = documentResult(
@@ -460,6 +516,20 @@ export function createModBusinessTool(input: {
                   "读取 modularization_schema，按 diagnostics.path 修复同一迁移计划并重新请求；保留原插件、Hooks、配置、知识、检查与产物。未准备确认卡。"
               }
             : {}),
+          ...(error instanceof BusinessWorkflowLinkError
+            ? {
+                diagnostics: error.diagnostics.slice(0, 12),
+                diagnosticCount: error.diagnostics.length,
+                recovery:
+                  "保留原草稿和校验。read_workflow 核对真实产物path/schemaVersion、上游生产者和常驻依赖；补齐实现后使用当前digest重做同一事务。未保存失败变更，未执行状态推进。"
+              }
+            : {}),
+          ...(error instanceof BusinessWorkflowSkillRenameError
+            ? {
+                recovery:
+                  "原插件声明了 Hooks，技能名称可能参与 matcher 或脚本查找。保留原 Skill 名称修改正文；需要改名时先由插件作者明确迁移 Hooks 和所有名称引用并重新验证。本工具不会自动重写 Hook 映射，失败变更未保存。新加入的草稿步骤和无 Hooks 的 Host 技能不受此项限制。"
+              }
+            : {}),
           ...(error instanceof BusinessModDuplicateIdError
             ? { modId: error.modId, recovery: BUSINESS_MOD_DUPLICATE_ID_RECOVERY }
             : {}),
@@ -473,6 +543,10 @@ export function createModBusinessTool(input: {
     {
       name: "mod_business",
       description:
+        "Dialogue revisions use the native inspected source as the protection baseline, not the first unpublished draft: author-created new steps and author-added constraints may be refined in later revisions. Original source requirements, Hooks and resources remain protected. protectedModules is native-only and is not a tool argument. A changed schemaVersion still requires compatible upstream/downstream versions, and every successful change invalidates old preview/trial evidence. " +
+        "Hook-bound Skill identities: when the original kernel declares hooks, transform_workflow and preview reject renaming an original Skill with BUSINESS_WORKFLOW_SKILL_RENAME_REQUIRES_HOOK_MAPPING. Keep its original name and edit its prompt, or first provide an explicitly reviewed plugin-side migration of every Hook matcher and script name reference. Do not claim Hook mappings are automatically rewritten. Newly authored draft steps may be renamed; original Host Skills without declared Hooks may also be renamed. " +
+        "Workflow source preservation: transform_workflow retains large original resources as exact base digest references while keeping the author code budget unchanged. Follow its next.requiredSourceModIds and next.requiredDraftModIds. A transformed preview automatically retains every original and saved Function Mod, including knowledge and state extensions; do not drop these to pass admission. Editing declarations does not automatically rewrite an old hard-coded state Mod: use a compatible dynamic state implementation, or author and execute a freshly approved update before claiming support. " +
+        "For workflow changes first read_workflow(inspectionId,modIds?,id?) to get sourceDigest, workflow digest, exact selected ordered stages, inputs/outputs/checks and declared transitions. transform_workflow(id,name,revision,inspectionId,sourceDigest,expectedWorkflowDigest,modIds?,changes,files) applies a bounded atomic authoring transaction. changes supports insert(before,module), replace_step(id,module), and replace_skill(id,skillName,skill:{entry,resources}); supply complete real declarations and namespaced implementation files. For the first change pass revision:0 and the selected original modIds; for later edits read_workflow(id,inspectionId) and use its exact revision/digest. It preserves original required checks, outputs, inputs, knowledge resource closure, configuration and native approvals; unknown producer/version, removed guard or stale digest blocks save. It creates an independent persistent draft, never edits installed source or running state. preview with the returned draft and original kernel performs explicit source-bound replacements; read review, obtain fresh native trial approval and execute positive/negative business cases before requesting installation/export. Every changed revision invalidates earlier execution evidence. Contract compilation is unverified business execution; native Host remains the state owner in Host mode, while declared legacy writers retain state authority. The view shows the selected linear assembly route, not an inferred arbitrary business graph. " +
         "example(exampleId:autobiz-state-machine,cursor?) returns the shipped executable AutoBiz Function Mod, graph, real Python adapter/commit/journal/stage checks and auxiliary Skill for the compatible inspected original-234 kernel. Save its full draft.extensions/files, preview with the actual kernel, then request_trial; no author-machine output directory is required. Source discovery/compile is not business migration success and grants no permissions. " +
         "inspect_raw includes machine-readable stateControl with original writer candidates, Hooks/configuration/knowledge source paths and explicit unverified migration status. Already-modular only means business assembly metadata exists, never that state control has migrated to an executable Mod. Keep Host authority unchanged; for original plugin state use mod_authoring scaffold(kind:state-extension), preserve and bind its unique writer and original checks, then perform real approved tests. Unknown business graphs require author confirmation; do not guess edges, emit fake passed/committed receipts or delete old Hooks. " +
         "request_modularization also accepts modularizationFiles:[{path,text}] for a classic Skill-only plugin needing a first Host contract, extra Skills or knowledge. These are additive-only bounded text files (32 files, 64 KiB each, 256 KiB total) under skills/, mods/business/, tests/, knowledge/, references/, scripts/, agents/ or workflows/. Include real tests/project-contract.json and all new resources in the explicit catalog closure. No original file, identity, runtime or credential path can be overwritten; case and parent/file collisions fail. Original sourceDigest remains the approval anchor. The native card lists every added file digest; changed additions require a new request and confirmation. Added code is not executed by source materialization, and Host trial and source permissions remain separate native confirmation. " +
@@ -492,6 +566,8 @@ export function createModBusinessTool(input: {
             "read_raw_asset",
             "request_modularization",
             "read_mod",
+            "read_workflow",
+            "transform_workflow",
             "read_preview",
             "assets",
             "read_asset",
@@ -529,6 +605,45 @@ export function createModBusinessTool(input: {
           previewId: z.string().uuid().optional(),
           goal: z.string().min(1).max(8000).optional(),
           modules: z.array(z.record(z.string(), z.unknown())).max(32).optional(),
+          modIds: z.array(z.string().max(80)).max(32).optional(),
+          expectedWorkflowDigest: z
+            .string()
+            .regex(/^[a-f0-9]{64}$/)
+            .optional(),
+          changes: z
+            .array(
+              z.discriminatedUnion("kind", [
+                z
+                  .object({
+                    kind: z.literal("insert"),
+                    before: z.string().max(80),
+                    module: z.record(z.string(), z.unknown())
+                  })
+                  .strict(),
+                z
+                  .object({
+                    kind: z.literal("replace_step"),
+                    id: z.string().max(80),
+                    module: z.record(z.string(), z.unknown())
+                  })
+                  .strict(),
+                z
+                  .object({
+                    kind: z.literal("replace_skill"),
+                    id: z.string().max(80),
+                    skillName: z.string().max(80),
+                    skill: z
+                      .object({
+                        entry: z.string().max(512),
+                        resources: z.array(z.string().max(512)).max(512)
+                      })
+                      .strict()
+                  })
+                  .strict()
+              ])
+            )
+            .max(16)
+            .optional(),
           extensions: z.array(z.record(z.string(), z.unknown())).max(32).optional(),
           files: z
             .array(z.object({ path: z.string().max(160), text: z.string().max(65536) }).strict())

@@ -23,6 +23,7 @@ import {
 import { AUTOBIZ_CONTEXT_OUTPUT } from "../../shared/project-runtime/autobiz-handoff"
 import { assertProjectNodeAgentResources } from "./project-agent-resources"
 import { assertBusinessModStageRecoveryProjection } from "./business-mod-stage-recovery"
+import { verifyWorkflowReplacementProof } from "./business-workflow-replacement-proof"
 
 interface Snapshot {
   files: readonly { path: string; bytes: Buffer }[]
@@ -116,6 +117,7 @@ export function verifyReviewedBusinessAssembly(
       "sources",
       "mods",
       "extensions",
+      "replacements",
       "files"
     ])
     if (lock.apiVersion !== "devclaw.business-assembly/v1") return false
@@ -159,6 +161,32 @@ export function verifyReviewedBusinessAssembly(
       return false
     const sources = lock.sources
     if (!Array.isArray(sources) || !sources.length || sources.length > 8) return false
+    const replacements = lock.replacements ?? []
+    if (!Array.isArray(replacements) || replacements.length > mods.length) return false
+    const replacementIds = new Set<string>()
+    for (const raw of replacements) {
+      const replacement = object(raw)
+      fields(replacement, [
+        "id",
+        "sourceDigest",
+        "replacementSourceDigest",
+        "originalDefinition",
+        "originalFiles"
+      ])
+      if (
+        typeof replacement.id !== "string" ||
+        replacementIds.has(replacement.id) ||
+        !catalog.modules.some((mod) => mod.id === replacement.id) ||
+        !sources.some((source) => object(source).digest === replacement.sourceDigest) ||
+        !mods.some(
+          (mod) =>
+            object(mod).id === replacement.id &&
+            object(mod).sourceDigest === replacement.replacementSourceDigest
+        )
+      )
+        return false
+      replacementIds.add(replacement.id)
+    }
     const selected = new Set<string>(),
       allowedPython = new Set(
         expected.filter((row) => row.path.endsWith(".py")).map((row) => row.path)
@@ -197,7 +225,23 @@ export function verifyReviewedBusinessAssembly(
         files.get(path)
       )
       if (original) {
-        if (digest(JSON.stringify(canonical(definition))) !== original.definitionDigest)
+        const replacement = replacements.find((raw) => object(raw).id === definition.id)
+        if (replacement) {
+          if (
+            !verifyWorkflowReplacementProof({
+              proof: replacement,
+              next: definition,
+              sourceDigest: mod.sourceDigest,
+              sources,
+              files,
+              reviewed: original,
+              // Every admitted compatibility profile retains its original required Hooks;
+              // author-supplied replacement metadata cannot opt out of that invariant.
+              hasDeclaredHooks: true
+            })
+          )
+            return false
+        } else if (digest(JSON.stringify(canonical(definition))) !== original.definitionDigest)
           return false
         for (const path of agentResources) {
           const pins = [
@@ -210,9 +254,13 @@ export function verifyReviewedBusinessAssembly(
         }
         for (const [path, expectedDigest] of Object.entries(original.files)) {
           const bytes = files.get(path)
-          if (!bytes || digest(bytes) !== expectedDigest) return false
+          const originalSkill = replacement && object(object(replacement).originalDefinition).skill
+          const replacedPrompt =
+            originalSkill && object(originalSkill).entry === path && path.endsWith("/SKILL.md")
+          if (!replacedPrompt && (!bytes || digest(bytes) !== expectedDigest)) return false
           if (path.endsWith(".py")) allowedPython.add(path)
         }
+        if (replacement) userSkills.push(definition.skill.entry.slice(0, -"SKILL.md".length))
       } else {
         if (definition.skill.entry !== `skills/${String(definition.node.skill)}/SKILL.md`)
           return false
@@ -322,7 +370,9 @@ export function verifyReviewedBusinessAssembly(
       if (!path.endsWith(".py") || allowedPython.has(path)) continue
       if (
         ![...selected].some(
-          (id) => !kernel.modules[id] && path.startsWith(`mods/business/${id}/`)
+          (id) =>
+            (!kernel.modules[id] || replacementIds.has(id)) &&
+            path.startsWith(`mods/business/${id}/`)
         ) &&
         !userSkills.some((prefix) => path.startsWith(prefix))
       )

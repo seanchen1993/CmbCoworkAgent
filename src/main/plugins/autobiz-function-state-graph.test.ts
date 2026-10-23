@@ -1,5 +1,6 @@
 import { expect, it } from "vitest"
-import { decide, transitions } from "../../../resources/mods/autobiz-state-machine/graph"
+import { decide } from "../../../resources/mods/autobiz-state-machine/graph"
+import reviewedWorkflow from "./autobiz-business-routing-reviewed.json"
 
 const workflowNodes = [
   "biz.prd",
@@ -11,15 +12,31 @@ const workflowNodes = [
   "ops.archive"
 ]
 
-it("decides every declared fixed business edge in plugin JavaScript", () => {
+const workflow = {
+  apiVersion: "devclaw.compiled-workflow/v1",
+  nodes: workflowNodes,
+  digest: "a".repeat(64),
+  allowedNext: reviewedWorkflow.checkpoints.transitions as Record<string, string[]>
+}
+
+it("decides every edge declared by the original compiler contract in plugin JavaScript", () => {
   let checked = 0
-  for (const [checkpoint, targets] of Object.entries(transitions)) {
+  for (const [checkpoint, targets] of Object.entries(workflow.allowedNext)) {
     for (const to of targets) {
-      expect(decide({ checkpoint, workflowNodes }, to)).toEqual({ from: checkpoint, to })
+      expect(decide({ checkpoint, workflowNodes }, to, workflow)).toEqual({
+        from: checkpoint,
+        to,
+        expectedWorkflowDigest: workflow.digest
+      })
       checked++
     }
   }
-  expect(checked).toBe(15)
+  expect(checked).toBeGreaterThan(14)
+  const branch = {
+    ...workflow,
+    nodes: [...workflowNodes.slice(0, 4), "dev.detail_design", ...workflowNodes.slice(4)],
+    allowedNext: { ...workflow.allowedNext, plan_done: ["detail_design_in_progress"] }
+  }
   expect(
     decide(
       {
@@ -30,32 +47,52 @@ it("decides every declared fixed business edge in plugin JavaScript", () => {
           ...workflowNodes.slice(4)
         ]
       },
-      "detail_design_in_progress"
+      "detail_design_in_progress",
+      branch
     )
-  ).toEqual({ from: "plan_done", to: "detail_design_in_progress" })
+  ).toEqual({
+    from: "plan_done",
+    to: "detail_design_in_progress",
+    expectedWorkflowDigest: workflow.digest
+  })
 })
 
 it("rejects every undeclared edge, including skipped gates and terminal replay", () => {
-  const states = Object.keys(transitions)
+  const states = Object.keys(workflow.allowedNext)
   let rejected = 0
   for (const checkpoint of states) {
     for (const to of states) {
-      if (transitions[checkpoint].includes(to)) continue
-      expect(() => decide({ checkpoint, workflowNodes }, to)).toThrow(
+      if (workflow.allowedNext[checkpoint].includes(to)) continue
+      expect(() => decide({ checkpoint, workflowNodes }, to, workflow)).toThrow(
         "AUTOBIZ_MOD_TRANSITION_REJECTED"
       )
       rejected++
     }
   }
-  expect(rejected).toBeGreaterThan(200)
+  const legalPairs = states.reduce(
+    (count, state) =>
+      count + workflow.allowedNext[state].filter((to) => states.includes(to)).length,
+    0
+  )
+  expect(rejected).toBe(states.length ** 2 - legalPairs)
 })
 
-it("rejects an unknown state and an unsupported custom workflow without inferring success", () => {
-  expect(() => decide({ checkpoint: "model_says_done", workflowNodes }, "archived")).toThrow()
+it("rejects unknown state and missing contracts while accepting a declared custom workflow", () => {
+  expect(() =>
+    decide({ checkpoint: "model_says_done", workflowNodes }, "archived", workflow)
+  ).toThrow()
   expect(() =>
     decide(
       { checkpoint: "prd_done", workflowNodes: ["biz.prd", "ops.archive"] },
-      "specs_in_progress"
+      "specs_in_progress",
+      { ...workflow, digest: "" }
     )
-  ).toThrow("AUTOBIZ_MOD_FIXED_WORKFLOW_REQUIRED")
+  ).toThrow("AUTOBIZ_MOD_WORKFLOW_CONTRACT_REQUIRED")
+  expect(
+    decide({ checkpoint: "convert_done" }, "prd_in_progress", {
+      ...workflow,
+      nodes: ["requirements.convert", ...workflowNodes],
+      allowedNext: { convert_done: ["prd_in_progress"] }
+    })
+  ).toMatchObject({ from: "convert_done", to: "prd_in_progress" })
 })

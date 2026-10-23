@@ -16,6 +16,10 @@ import {
   BusinessModDuplicateIdError,
   BUSINESS_MOD_DUPLICATE_ID_RECOVERY
 } from "../../plugins/business-mod-diagnostics"
+import {
+  BusinessWorkflowLinkError,
+  BusinessWorkflowSkillRenameError
+} from "../../plugins/business-workflow-transform"
 
 const threadId = "business-tool-test",
   workspace = "workspace"
@@ -32,6 +36,8 @@ function fixture() {
     inspect: vi.fn(async () => ({ id: "inspection" })),
     inspectionPage: vi.fn(),
     readMod: vi.fn(),
+    readWorkflow: vi.fn(),
+    transformWorkflow: vi.fn(),
     readAsset: vi.fn(async () => ({ text: "Python source" })),
     readRawAsset: vi.fn(),
     read: vi.fn(() => ({ revision: 2 })),
@@ -62,6 +68,112 @@ afterEach(() => {
   releaseLocalThreadRunLease(threadId, "desktop", "turn")
 })
 describe("native business authoring tool", () => {
+  it("returns a safe recovery route for Hook-bound original Skill names without rewriting or preparing review", async () => {
+    const f = fixture()
+    f.service.transformWorkflow.mockRejectedValue(new BusinessWorkflowSkillRenameError())
+    const result = JSON.parse(
+      await f.tool.invoke({
+        action: "transform_workflow",
+        inspectionId: "11111111-1111-4111-8111-111111111111",
+        id: "derivative",
+        name: "Derivative",
+        revision: 0,
+        sourceDigest: "b".repeat(64),
+        expectedWorkflowDigest: "c".repeat(64),
+        changes: [],
+        files: []
+      })
+    )
+    expect(result).toMatchObject({
+      ok: false,
+      error: "BUSINESS_WORKFLOW_SKILL_RENAME_REQUIRES_HOOK_MAPPING"
+    })
+    expect(result.recovery).toContain("保留原 Skill 名称修改正文")
+    expect(result.recovery).toContain("不会自动重写")
+    expect(f.service.requestReview).not.toHaveBeenCalled()
+  })
+  it("exposes source/digest-bound workflow authoring and keeps a large mutation result bounded without replay", async () => {
+    const f = fixture(),
+      inspectionId = "11111111-1111-4111-8111-111111111111"
+    f.service.transformWorkflow.mockResolvedValue({
+      draft: { id: "derivative", revision: 1, digest: "a".repeat(64) },
+      sourceDigest: "b".repeat(64),
+      previousWorkflowDigest: "c".repeat(64),
+      workflow: { digest: "d".repeat(64), stages: [{ source: "x".repeat(50_000) }] },
+      modules: [{ source: "x".repeat(50_000) }],
+      changedIds: ["normalize"],
+      replacements: [],
+      order: ["normalize", "build"],
+      execution: "unverified",
+      evidence: "invalidated",
+      next: "read source"
+    })
+    const changes = [
+      {
+        kind: "replace_skill" as const,
+        id: "build",
+        skillName: "build-v2",
+        skill: { entry: "skills/build-v2/SKILL.md", resources: [] }
+      }
+    ]
+    const args = {
+      action: "transform_workflow" as const,
+      inspectionId,
+      id: "derivative",
+      name: "Derivative",
+      revision: 0,
+      sourceDigest: "b".repeat(64),
+      expectedWorkflowDigest: "c".repeat(64),
+      changes,
+      files: []
+    }
+    const raw = await f.tool.invoke(args)
+    expect(raw.length).toBeLessThan(2000)
+    expect(JSON.parse(raw)).toMatchObject({
+      ok: true,
+      result: {
+        draft: { revision: 1 },
+        evidence: "invalidated",
+        execution: "unverified",
+        workflowAction: expect.stringContaining("read_workflow")
+      }
+    })
+    expect(f.service.transformWorkflow).toHaveBeenCalledOnce()
+    expect(f.service.requestReview).not.toHaveBeenCalled()
+    expect(f.tool.schema.safeParse({ action: "read_workflow", inspectionId }).success).toBe(true)
+    expect(f.tool.schema.safeParse({ ...args, protectedModules: [] }).success).toBe(false)
+    expect(f.tool.schema.safeParse({ ...args, changes: [{ kind: "erase_checks" }] }).success).toBe(
+      false
+    )
+  })
+  it("returns actionable native link diagnostics without saving or claiming business success", async () => {
+    const f = fixture()
+    f.service.transformWorkflow.mockRejectedValue(
+      new BusinessWorkflowLinkError([
+        { code: "INPUT_PRODUCER_MISSING", stageId: "build", artifactId: "normalized" }
+      ])
+    )
+    const result = JSON.parse(
+      await f.tool.invoke({
+        action: "transform_workflow",
+        inspectionId: "11111111-1111-4111-8111-111111111111",
+        id: "derivative",
+        name: "Derivative",
+        revision: 0,
+        sourceDigest: "b".repeat(64),
+        expectedWorkflowDigest: "c".repeat(64),
+        changes: [],
+        files: []
+      })
+    )
+    expect(result).toMatchObject({
+      ok: false,
+      error: "BUSINESS_WORKFLOW_LINKS_INVALID",
+      diagnostics: [{ code: "INPUT_PRODUCER_MISSING" }]
+    })
+    expect(result.recovery).toContain("read_workflow")
+    expect(f.service.requestReview).not.toHaveBeenCalled()
+  })
   it("exposes the executable state example through the closed schema and existing source-only reader", async () => {
     const f = fixture()
     f.service.example.mockResolvedValue({

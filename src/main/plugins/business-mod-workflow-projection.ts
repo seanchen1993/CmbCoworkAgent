@@ -177,7 +177,23 @@ export function projectBusinessModWorkflow(
     const retainedInitial = originalInitial.filter((checkpoint) =>
       baseStates.some((state) => state.start === checkpoint)
     )
-    if (retainedInitial.length) routing.checkpoints.initial = retainedInitial
+    if (retainedInitial.length) {
+      // Old alternate entry points must not bypass a newly inserted mandatory predecessor.
+      // Keep original starts when no new predecessor exists; otherwise enter the new chain.
+      routing.checkpoints.initial = [
+        ...new Set(
+          retainedInitial.map((checkpoint) => {
+            const entryIndex = baseStates.findIndex((state) => state.start === checkpoint)
+            const insertedIndex = nodes.findIndex(
+              (node, index) => index < entryIndex && !sourceIds.has(String(node.id))
+            )
+            return insertedIndex < 0 ? checkpoint : baseStates[insertedIndex].start
+          })
+        )
+      ]
+      if (!equivalent(retainedInitial, routing.checkpoints.initial))
+        diagnostics.push("已将原快捷入口衔接到新增的必经前置步骤，避免跳过新增步骤。")
+    }
     if (sourceTransitions.needs_fix !== undefined) {
       const repair = strings(sourceTransitions.needs_fix)
       if (repair.some((checkpoint) => !sourceStates.some((state) => state.start === checkpoint)))

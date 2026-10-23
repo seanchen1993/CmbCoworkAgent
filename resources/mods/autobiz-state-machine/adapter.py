@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import importlib.util
 import json
 import os
@@ -15,10 +16,12 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from journal import (assert_no_pending, linked, operation_id, policy_digest, read_record,
                      request_binding, write_record)
+from compiled_contract import assert_contract, effective_contract, assert_verified_inputs
 
 API = "autobiz.function-state/v1"
 ROOT = Path(__file__).resolve().parents[3]
 LIMIT = 262144
+PROTOCOL_STDOUT = sys.stdout
 
 
 def digest(value):
@@ -26,7 +29,7 @@ def digest(value):
 
 
 def emit(value):
-    print(json.dumps(value, ensure_ascii=False), flush=True)
+    print(json.dumps(value, ensure_ascii=False), file=PROTOCOL_STDOUT, flush=True)
 
 
 def load(path, name):
@@ -65,8 +68,16 @@ def prepare(workspace, request):
     old = current.records[feature]["checkpoint"]
     if request.get("from") != old or request.get("expectedStateDigest") != digest(before[0]):
         raise ValueError("AUTOBIZ_STATE_CHANGED")
+    contract = assert_contract(ROOT, workspace, current.records[feature], request.get("expectedWorkflowDigest"))
+    if request["to"] not in contract["allowedNext"].get(old, []):
+        raise ValueError("AUTOBIZ_MOD_TRANSITION_REJECTED")
+    assert_verified_inputs(ROOT, workspace, feature, current.records[feature], request["to"])
+    hook_rules = load(Path(__file__).with_name("hook_checks.py"), "function_transition_hooks")
+    verified_candidate = hook_rules.validate_verified_candidate(
+        ROOT, workspace, feature, old, request["to"])
     bridge = load(Path(__file__).with_name("stage_checks.py"), "function_stage_checks")
-    _observer, checks = bridge.install_original_postcheck(ROOT)
+    observer, checks = bridge.install_original_postcheck(ROOT)
+    bridge.validate_added_completion(ROOT, workspace, feature, current.records[feature], request["to"], observer)
     update = load(ROOT / "hooks" / "update_checkpoint.py", "function_checkpoint")
     sync = update.check_or_fix_state_sync
     update.check_or_fix_state_sync = lambda root, **kwargs: sync(root, fix=False)
@@ -74,7 +85,6 @@ def prepare(workspace, request):
         ROOT, workspace, feature, current.records[feature], checks,
         target_checkpoint=request["to"],
     )
-    hook_rules = load(Path(__file__).with_name("hook_checks.py"), "function_transition_hooks")
     transition_hooks = hook_rules.validate_transition_hooks(ROOT, workspace, feature, request["to"])
     if transition_hooks["errors"]:
         return {"ok": False, "status": "not-applied", "errors": transition_hooks["errors"],
@@ -88,11 +98,16 @@ def prepare(workspace, request):
         raise ValueError("AUTOBIZ_STAGE_EVIDENCE_UNAVAILABLE")
     if before != snapshot(workspace, feature)[1]:
         raise ValueError("AUTOBIZ_STATE_CHANGED")
+    assert_contract(ROOT, workspace, current.records[feature], request.get("expectedWorkflowDigest"))
+    assert_verified_inputs(ROOT, workspace, feature, current.records[feature], request["to"])
+    hook_rules.validate_verified_candidate(ROOT, workspace, feature, old, request["to"],
+                                          expected=verified_candidate)
     return {"ok": True, "status": "prepared", "from": old, "to": request["to"],
             "stateDigest": digest(before[0]), "stageChecks": checks,
             "stageChecksDigest": digest(json.dumps(checks, ensure_ascii=False, sort_keys=True,
                                                    separators=(",", ":")).encode("utf-8")),
-            "transitionHooks": transition_hooks["receipts"]}
+            "verifiedCandidate": verified_candidate,
+            "transitionHooks": [*transition_hooks["receipts"], verified_candidate]}
 
 
 def operation_path(workspace, request, *, create=False):
@@ -179,8 +194,12 @@ def advance(workspace, request):
         process = subprocess.Popen(
             [sys.executable, "-I", "-B", "-X", "utf8", str(Path(__file__).with_name("commit.py")),
              str(ROOT), str(workspace), request["feature"], request["from"], request["to"],
-             request["expectedStateDigest"], operation, "null", str(journal_root), binding["policyDigest"], approved_checks],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+             request["expectedStateDigest"], operation, "null", str(journal_root), binding["policyDigest"], approved_checks,
+             request["expectedWorkflowDigest"],
+             json.dumps(checked["verifiedCandidate"], ensure_ascii=False, sort_keys=True)],
+            # The host drains the adapter's stderr concurrently. Do not create
+            # an unread child stderr pipe that can deadlock on verbose Hooks.
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
             text=True, encoding="utf-8",
         )
         evidence = None
@@ -194,6 +213,9 @@ def advance(workspace, request):
                     raise ValueError("AUTOBIZ_COMMIT_PROTOCOL_INVALID")
                 evidence = message["evidence"]
                 record.update(phase="prepared", evidence=evidence,
+                              stageChecks=message.get("stageChecks", []),
+                              stageChecksDigest=message.get("stageChecksDigest"),
+                              verifiedCandidate=message.get("verifiedCandidate"),
                               transitionHooks=message.get("transitionHooks", []))
                 write_record(path, record)
                 process.stdin.write("commit:" + operation + "\n")
@@ -245,11 +267,12 @@ def main():
         current, before = snapshot(workspace, feature)
         result = {"ok": True, "status": "read", "feature": feature,
                   "record": current.records[feature], "state": json.loads(before[0]),
-                  "stateDigest": digest(before[0]), "markdownDigest": digest(before[1])}
+                  "stateDigest": digest(before[0]), "markdownDigest": digest(before[1]),
+                  "workflow": effective_contract(ROOT, workspace, current.records[feature])}
     elif request["operation"] == "reconcile":
         result = reconcile(workspace, request)
     else:
-        if not re.fullmatch(r"[a-z_]{1,80}", request.get("to", "")):
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,79}", request.get("to", "")):
             raise ValueError("AUTOBIZ_CHECKPOINT_INVALID")
         if not isinstance(request.get("expectedStateDigest"), str) or not re.fullmatch(r"[0-9a-f]{64}", request["expectedStateDigest"]):
             raise ValueError("AUTOBIZ_STATE_DIGEST_REQUIRED")
@@ -259,7 +282,10 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        # Original validators may print diagnostics. They cannot corrupt the one
+        # JSON response consumed by the guest; no original decision is replaced.
+        with contextlib.redirect_stdout(sys.stderr):
+            main()
     except Exception as error:
         emit({"apiVersion": API, "ok": False, "status": "not-applied", "errors": [str(error)[:1000]]})
         sys.exit(1)

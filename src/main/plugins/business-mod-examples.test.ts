@@ -84,7 +84,7 @@ it("reads shipped knowledge SDK source from the real unpacked ASAR layout and co
   )
 })
 
-it("discovers shipped executable state source, preserves all eight resources and registers normalized tools in a renamed plugin", async () => {
+it("discovers shipped executable state source, preserves its complete resource closure and registers normalized tools in a renamed plugin", async () => {
   const root = await mkdtemp(join(tmpdir(), "business-bundled-state-example-"))
   roots.push(root)
   const main = join(root, "resources/app.asar/out/main")
@@ -102,7 +102,7 @@ it("discovers shipped executable state source, preserves all eight resources and
     kernelRef: { id: "autobiz.original-234-kernel", version: "1.0.3" },
     execution: "requires-native-approved-business-trial"
   })
-  expect(example.draft.files).toHaveLength(8)
+  expect(example.draft.files).toHaveLength(9)
   const extension = example.draft.extensions![0]
   expect(extension.skills).toEqual([
     "mods/business/autobiz.state-machine/skills/autobiz-mod-state-control/SKILL.md"
@@ -111,6 +111,7 @@ it("discovers shipped executable state source, preserves all eight resources and
     expect.arrayContaining([
       "mods/business/autobiz.state-machine/journal.py",
       "mods/business/autobiz.state-machine/hook_checks.py",
+      "mods/business/autobiz.state-machine/compiled_contract.py",
       ...extension.skills!
     ])
   )

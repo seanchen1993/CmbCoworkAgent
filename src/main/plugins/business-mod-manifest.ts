@@ -248,11 +248,7 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
       }
     }
     const entry = businessModPath(skill.entry)
-    if (
-      !(kernel
-        ? entry.startsWith("skills/") && entry.endsWith(`/${node.skill}/SKILL.md`)
-        : entry === `skills/${node.skill}/SKILL.md`)
-    )
+    if (!(entry.startsWith("skills/") && entry.endsWith(`/${node.skill}/SKILL.md`)))
       throw Error("业务 Mod 技能入口与节点不一致")
     return {
       id,

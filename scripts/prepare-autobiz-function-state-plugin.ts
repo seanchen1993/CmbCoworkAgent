@@ -39,6 +39,7 @@ export async function prepareAutobizFunctionStatePlugin(input: {
     [
       "register.ts",
       "graph.ts",
+      "compiled_contract.py",
       "adapter.py",
       "commit.py",
       "journal.py",
@@ -50,7 +51,9 @@ export async function prepareAutobizFunctionStatePlugin(input: {
       return row(namespace + (name === "SKILL.md" ? "skills/state-control/SKILL.md" : name), bytes)
     })
   )
-  catalog.extensions ??= []
+  catalog.extensions = (catalog.extensions ?? []).filter(
+    (item) => item.id !== "autobiz.state-machine"
+  )
   catalog.extensions.push({
     id: "autobiz.state-machine",
     title: "AutoBiz 可执行状态规则与显式推进",
@@ -65,11 +68,13 @@ export async function prepareAutobizFunctionStatePlugin(input: {
   })
   const catalogFile = original.files.find((file) => file.path === "mods/business/manifest.json")
   assert(catalogFile, "Native business source catalog required")
-  const sourceFiles = original.files.map((file) =>
-    file.path === catalogFile.path
-      ? row(file.path, Buffer.from(JSON.stringify(catalog, null, 2) + "\n"))
-      : file
-  )
+  const sourceFiles = original.files
+    .filter((file) => !file.path.startsWith(namespace))
+    .map((file) =>
+      file.path === catalogFile.path
+        ? row(file.path, Buffer.from(JSON.stringify(catalog, null, 2) + "\n"))
+        : file
+    )
   const source = join(output, "Mods-source")
   await writeDerivationFiles(source, [...sourceFiles, ...additions])
   const snapshot = await snapshotDerivationSource(source)
@@ -132,7 +137,7 @@ export async function prepareAutobizFunctionStatePlugin(input: {
     extensions: selected.extensions?.map((mod) => mod.id),
     executionVerified: false,
     boundary:
-      "Explicit Function Mod actions; legacy Skills and CLI remain compatible. No host authority or arbitrary graph insertion."
+      "Composable graph compiled by the original plugin kernel. PreSkillUse guides normal Skills to controlled state tools and rejects identifiable direct calls to its own legacy writers. This does not intercept arbitrary scripts or direct file writes; original host permissions and Hooks still apply. Initialization and rollback migration remain explicit. No host authority is claimed."
   }
   await writeFile(
     join(output, "function-state-conversion.json"),
@@ -151,7 +156,7 @@ if (
     source: process.argv[2],
     output: process.argv[3],
     name: process.argv[4] ?? "autobiz-function-state-mods-20261021",
-    version: process.argv[5] ?? "1.0.4"
+    version: process.argv[5] ?? "1.1.0"
   })
     .then((report) => console.log(JSON.stringify(report, null, 2)))
     .catch((error) => {

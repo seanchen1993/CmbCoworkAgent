@@ -322,6 +322,531 @@ async function fixture() {
 }
 
 describe("native current-chat business Mod authoring", () => {
+  it("iterates an unpublished step contract and Skill against the immutable source baseline and expires old previews", async () => {
+    const f = await fixture(),
+      initial = await f.service.readWorkflow("creator", f.inspected.id)
+    const normalize = mod("user.normalize", "normalize")
+    const output = (normalize.node.artifacts as { outputs: Array<Record<string, unknown>> })
+      .outputs[0]
+    output.schemaVersion = "1.0.0"
+    output.schema = {
+      type: "object",
+      required: ["revision"],
+      properties: { revision: { type: "integer", minimum: 1 } }
+    }
+    const source = mod("source", "source")
+    source.node.artifacts = {
+      ...(source.node.artifacts as object),
+      inputs: [
+        { id: "normalized", path: "user.normalize.json", required: true, schemaVersion: "1.0.0" }
+      ]
+    }
+    const common = {
+      id: "iterated-contract",
+      name: "Iterated contract",
+      inspectionId: f.inspected.id,
+      sourceDigest: initial.sourceDigest
+    }
+    const first = await f.service.transformWorkflow("creator", {
+      ...common,
+      revision: 0,
+      expectedWorkflowDigest: initial.digest,
+      changes: [
+        { kind: "insert", before: "source", module: normalize },
+        { kind: "replace_step", id: "source", module: source }
+      ],
+      files: [
+        {
+          path: normalize.skill.entry,
+          text: "Write actual normalized requirements with revision at least one."
+        }
+      ]
+    })
+    const previewInput = {
+      name: "iterated-contract-project",
+      version: "1.0.0",
+      sources: [{ inspectionId: f.inspected.id, modIds: ["source"] }],
+      drafts: [
+        { id: first.draft.id, revision: first.draft.revision, modIds: [normalize.id, "source"] }
+      ]
+    }
+    const oldPreview = await f.service.preview("creator", previewInput)
+    const current = await f.service.readWorkflow("creator", f.inspected.id, first.draft.id)
+    const weakenedSource = structuredClone(source)
+    const weakenedArtifacts = weakenedSource.node.artifacts as { outputs: unknown[] }
+    weakenedArtifacts.outputs = []
+    const forgedPolicy = {
+      ...common,
+      revision: first.draft.revision,
+      expectedWorkflowDigest: current.digest,
+      protectedModules: [],
+      changes: [{ kind: "replace_step" as const, id: "source", module: weakenedSource }],
+      files: []
+    }
+    // Native service derives the baseline from the verified source and ignores extra caller policy.
+    await expect(f.service.transformWorkflow("creator", forgedPolicy)).rejects.toThrow(
+      "BUSINESS_WORKFLOW_REQUIRED_OUTPUT_REMOVED"
+    )
+    const incompatible = structuredClone(normalize)
+    const incompatibleOutput = (
+      incompatible.node.artifacts as { outputs: Array<Record<string, unknown>> }
+    ).outputs[0]
+    incompatibleOutput.schemaVersion = "2.0.0"
+    await expect(
+      f.service.transformWorkflow("creator", {
+        ...common,
+        revision: first.draft.revision,
+        expectedWorkflowDigest: current.digest,
+        changes: [{ kind: "replace_step", id: normalize.id, module: incompatible }],
+        files: []
+      })
+    ).rejects.toThrow("BUSINESS_WORKFLOW_LINKS_INVALID")
+    expect(f.service.read("creator", first.draft.id).revision).toBe(first.draft.revision)
+    const improved = structuredClone(normalize)
+    const improvedOutput = (improved.node.artifacts as { outputs: Array<Record<string, unknown>> })
+      .outputs[0]
+    improvedOutput.schema = {
+      type: "object",
+      required: ["revision"],
+      properties: { revision: { type: "integer", minimum: 2 } }
+    }
+    const improvedSource = structuredClone(source)
+    const improvedInputs = (
+      improvedSource.node.artifacts as { inputs: Array<Record<string, unknown>> }
+    ).inputs
+    improvedInputs[0].schema = improvedOutput.schema
+    const second = await f.service.transformWorkflow("creator", {
+      ...common,
+      revision: first.draft.revision,
+      expectedWorkflowDigest: current.digest,
+      changes: [
+        { kind: "replace_step", id: normalize.id, module: improved },
+        { kind: "replace_step", id: "source", module: improvedSource }
+      ],
+      files: [
+        {
+          path: normalize.skill.entry,
+          text: "Write actual normalized requirements with revision at least two."
+        }
+      ]
+    })
+    expect(second.evidence).toBe("invalidated")
+    const trial = vi.spyOn(f.service, "requestTrial")
+    await expect(
+      f.service.requestTrialPreview(
+        "creator",
+        oldPreview.previewId,
+        "Test the old candidate",
+        "stale-turn",
+        () => {}
+      )
+    ).rejects.toThrow("BUSINESS_DRAFT_REVISION_CHANGED")
+    expect(trial).not.toHaveBeenCalled()
+    const next = await f.service.readWorkflow("creator", f.inspected.id, second.draft.id)
+    const third = await f.service.transformWorkflow("creator", {
+      ...common,
+      revision: second.draft.revision,
+      expectedWorkflowDigest: next.digest,
+      changes: [
+        {
+          kind: "replace_skill",
+          id: normalize.id,
+          skillName: "normalize-improved",
+          skill: { entry: "skills/normalize-improved/SKILL.md", resources: [] }
+        }
+      ],
+      files: [
+        {
+          path: "skills/normalize-improved/SKILL.md",
+          text: "Use the revised requirement schema and produce actual checked output."
+        }
+      ]
+    })
+    const revised = f.service.read("creator", third.draft.id)
+    const newOutput = (
+      revised.catalog.modules.find((mod) => mod.id === normalize.id)!.node.artifacts as {
+        outputs: Array<Record<string, unknown>>
+      }
+    ).outputs[0]
+    expect(newOutput.schema).toEqual(improvedOutput.schema)
+    const finalPreview = await f.service.preview("creator", {
+      ...previewInput,
+      drafts: [
+        { id: third.draft.id, revision: third.draft.revision, modIds: [normalize.id, "source"] }
+      ]
+    })
+    expect(finalPreview.valid).toBe(true)
+    const review = await f.service.requestReview(
+      "creator",
+      finalPreview.previewId,
+      "current-turn",
+      () => {}
+    )
+    expect(review.review?.phase).toBe("needs-approval")
+    expect(f.install).not.toHaveBeenCalled()
+    await writeFile(
+      join(f.directory, "skills/source/SKILL.md"),
+      "Original source changed after preparation."
+    )
+    await expect(
+      f.service.requestTrialPreview(
+        "creator",
+        finalPreview.previewId,
+        "Test current source",
+        "changed-source",
+        () => {}
+      )
+    ).rejects.toThrow("BUSINESS_CREATOR_SOURCE_CHANGED")
+    expect(trial).not.toHaveBeenCalled()
+  })
+  it("blocks original Hook-bound Skill renames before saving while allowing same-name prompt edits and new-stage renames", async () => {
+    const f = await fixture()
+    const path = join(f.directory, BUSINESS_MOD_MANIFEST)
+    const catalog = JSON.parse(await readFile(path, "utf8"))
+    catalog.kernel.pluginFields = { hooks: "hooks/hooks.json" }
+    catalog.kernel.resources.push("hooks/hooks.json")
+    await writeFile(path, JSON.stringify(catalog))
+    await write(f.directory, "hooks/hooks.json", { PreSkillUse: [] })
+    const inspected = await f.service.inspect("creator", "original")
+    const initial = await f.service.readWorkflow("creator", inspected.id)
+    const common = {
+      id: "hook-bound-update",
+      name: "Hook bound update",
+      revision: 0,
+      inspectionId: inspected.id,
+      sourceDigest: initial.sourceDigest,
+      expectedWorkflowDigest: initial.digest
+    }
+    await expect(
+      f.service.transformWorkflow("creator", {
+        ...common,
+        changes: [
+          {
+            kind: "replace_skill",
+            id: "source",
+            skillName: "source-renamed",
+            skill: { entry: "skills/source-renamed/SKILL.md", resources: [] }
+          }
+        ],
+        files: [{ path: "skills/source-renamed/SKILL.md", text: "Renamed prompt." }]
+      })
+    ).rejects.toThrow("BUSINESS_WORKFLOW_SKILL_RENAME_REQUIRES_HOOK_MAPPING")
+    expect(() => f.service.read("creator", common.id)).toThrow("BUSINESS_DRAFT_MISSING")
+    const normalize = mod("user.normalize", "normalize")
+    const saved = await f.service.transformWorkflow("creator", {
+      ...common,
+      changes: [
+        {
+          kind: "replace_skill",
+          id: "source",
+          skillName: "source",
+          skill: { entry: "skills/source/SKILL.md", resources: [] }
+        },
+        { kind: "insert", before: "source", module: normalize }
+      ],
+      files: [
+        {
+          path: "skills/source/SKILL.md",
+          text: "Improved prompt; original Skill name and Hooks stay effective."
+        },
+        { path: normalize.skill.entry, text: "Produce normalized requirements." }
+      ]
+    })
+    const current = await f.service.readWorkflow("creator", inspected.id, saved.draft.id)
+    const changed = await f.service.transformWorkflow("creator", {
+      ...common,
+      revision: saved.draft.revision,
+      expectedWorkflowDigest: current.digest,
+      changes: [
+        {
+          kind: "replace_skill",
+          id: normalize.id,
+          skillName: "normalize-v2",
+          skill: { entry: "skills/normalize-v2/SKILL.md", resources: [] }
+        }
+      ],
+      files: [
+        {
+          path: "skills/normalize-v2/SKILL.md",
+          text: "Improve normalization with the declared original output."
+        }
+      ]
+    })
+    expect(changed.draft.revision).toBe(2)
+  })
+  it.each([2, 3])(
+    "does not save a workflow after its creator turn is cancelled at guard %s",
+    async (rejectAt) => {
+      const f = await fixture(),
+        initial = await f.service.readWorkflow("creator", f.inspected.id)
+      const normalize = mod("user.normalize", "normalize")
+      let calls = 0
+      await expect(
+        f.service.transformWorkflow(
+          "creator",
+          {
+            id: "cancelled-workflow",
+            name: "Cancelled",
+            revision: 0,
+            inspectionId: f.inspected.id,
+            sourceDigest: initial.sourceDigest,
+            expectedWorkflowDigest: initial.digest,
+            changes: [{ kind: "insert", before: "source", module: normalize }],
+            files: [
+              { path: normalize.skill.entry, text: "Generate actual normalized requirements." }
+            ]
+          },
+          () => {
+            if (++calls === rejectAt) throw Error("DEVELOPMENT_TURN_CHANGED")
+          }
+        )
+      ).rejects.toThrow("DEVELOPMENT_TURN_CHANGED")
+      expect(() => f.service.read("creator", "cancelled-workflow")).toThrow(
+        "BUSINESS_DRAFT_MISSING"
+      )
+      expect(f.install).not.toHaveBeenCalled()
+    }
+  )
+  it("automatically retains every original Function Mod when a transformed workflow is previewed", async () => {
+    const f = await fixture()
+    const catalogPath = join(f.directory, BUSINESS_MOD_MANIFEST)
+    const catalog = JSON.parse(await readFile(catalogPath, "utf8"))
+    const extension = {
+      id: "source.observer",
+      title: "Original observer",
+      kind: "function",
+      entry: "mods/business/source.observer/main.ts",
+      resources: [],
+      dependencies: { required: [], advisory: [] }
+    }
+    catalog.extensions = [extension]
+    await writeFile(catalogPath, JSON.stringify(catalog))
+    await write(f.directory, extension.entry, "export const register = () => {}")
+    const inspected = await f.service.inspect("creator", "original")
+    const view = await f.service.readWorkflow("creator", inspected.id)
+    expect(view.retainedExtensions).toEqual([{ id: extension.id, source: "original" }])
+    const normalize = mod("user.normalize", "normalize")
+    const result = await f.service.transformWorkflow("creator", {
+      id: "retained-source-functions",
+      name: "Retained functions",
+      revision: 0,
+      inspectionId: inspected.id,
+      sourceDigest: view.sourceDigest,
+      expectedWorkflowDigest: view.digest,
+      changes: [{ kind: "insert", before: "source", module: normalize }],
+      files: [{ path: normalize.skill.entry, text: "Normalize actual user requirements." }]
+    })
+    expect(result.next.requiredSourceModIds).toContain(extension.id)
+    const preview = await f.service.preview("creator", {
+      name: "source-functions-preserved",
+      version: "1.0.0",
+      sources: [{ inspectionId: inspected.id, modIds: ["source"] }],
+      drafts: [{ id: result.draft.id, revision: result.draft.revision, modIds: [normalize.id] }]
+    })
+    expect(preview.valid).toBe(true)
+    expect(preview.extensions?.map((mod) => mod.id)).toEqual([extension.id])
+    expect(preview.files.some((file) => file.path === extension.entry)).toBe(true)
+  })
+  it("retains Function Mod source, configuration and knowledge across iterative workflow transforms", async () => {
+    const f = await fixture()
+    const extension = {
+      id: "user.observer",
+      title: "Observer",
+      kind: "function",
+      entry: "mods/business/user.observer/main.ts",
+      resources: ["mods/business/user.observer/knowledge.md"],
+      dependencies: { required: [], advisory: [] },
+      userConfig: {
+        observerName: {
+          type: "string",
+          title: "Observer name",
+          description: "Name used by the observer.",
+          required: true
+        }
+      }
+    }
+    const originalFiles = [
+      { path: extension.entry, text: "export const register = (on) => { /* observer source */ }" },
+      { path: extension.resources[0], text: "Keep exact business knowledge." }
+    ]
+    const draft = f.service.save("creator", {
+      id: "retained-observer",
+      name: "Observer workflow",
+      revision: 0,
+      baseInspectionId: f.inspected.id,
+      modules: [],
+      extensions: [extension],
+      files: originalFiles
+    })
+    const initial = await f.service.readWorkflow("creator", f.inspected.id, draft.id)
+    const normalize = mod("user.normalize", "normalize")
+    const inserted = await f.service.transformWorkflow("creator", {
+      id: draft.id,
+      name: draft.name,
+      revision: draft.revision,
+      inspectionId: f.inspected.id,
+      sourceDigest: initial.sourceDigest,
+      expectedWorkflowDigest: initial.digest,
+      changes: [{ kind: "insert", before: "source", module: normalize }],
+      files: [{ path: normalize.skill.entry, text: "Create actual normalized requirements." }]
+    })
+    const current = await f.service.readWorkflow("creator", f.inspected.id, draft.id)
+    const next = await f.service.transformWorkflow("creator", {
+      id: draft.id,
+      name: draft.name,
+      revision: inserted.draft.revision,
+      inspectionId: f.inspected.id,
+      sourceDigest: current.sourceDigest,
+      expectedWorkflowDigest: current.digest,
+      changes: [
+        {
+          kind: "replace_skill",
+          id: normalize.id,
+          skillName: "normalize-v2",
+          skill: { entry: "skills/normalize-v2/SKILL.md", resources: [] }
+        }
+      ],
+      files: [
+        {
+          path: "skills/normalize-v2/SKILL.md",
+          text: "Improve normalization and retain actual output checks."
+        }
+      ]
+    })
+    const retained = f.service.read("creator", draft.id)
+    expect(retained.catalog.extensions).toEqual(draft.catalog.extensions)
+    for (const file of originalFiles) expect(retained.files).toContainEqual(file)
+    expect(next.evidence).toBe("invalidated")
+    const preview = await f.service.preview("creator", {
+      name: "workflow-with-extension",
+      version: "1.0.0",
+      sources: [{ inspectionId: f.inspected.id, modIds: ["source"] }],
+      drafts: [{ id: draft.id, revision: next.draft.revision, modIds: [normalize.id] }]
+    })
+    expect(preview.valid).toBe(true)
+    expect(preview.extensions?.map((mod) => mod.id)).toEqual([extension.id])
+    expect(preview.files.some((file) => file.path === extension.resources[0])).toBe(true)
+  })
+  it("rejects a concurrent workflow save without overwriting the winning revision", async () => {
+    const f = await fixture(),
+      initial = await f.service.readWorkflow("creator", f.inspected.id)
+    const normalize = mod("user.normalize", "normalize")
+    const input = {
+      id: "concurrent-workflow",
+      name: "Concurrent",
+      revision: 0,
+      inspectionId: f.inspected.id,
+      sourceDigest: initial.sourceDigest,
+      expectedWorkflowDigest: initial.digest,
+      changes: [{ kind: "insert" as const, before: "source", module: normalize }],
+      files: [{ path: normalize.skill.entry, text: "Create actual requirements." }]
+    }
+    const results = await Promise.allSettled([
+      f.service.transformWorkflow("creator", input),
+      f.service.transformWorkflow("creator", input)
+    ])
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1)
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1)
+    expect(f.service.read("creator", input.id).revision).toBe(1)
+    expect(await readFile(join(f.directory, "board_core/runtime.py"), "utf8")).toContain(
+      "reviewed original"
+    )
+  })
+  it("persists an inserted workflow and iterates Skill/step changes through explicit source-bound assembly", async () => {
+    const f = await fixture()
+    const initial = await f.service.readWorkflow("creator", f.inspected.id)
+    const normalize = mod("user.normalize", "normalize")
+    const inserted = await f.service.transformWorkflow("creator", {
+      id: "workflow-change",
+      name: "Workflow change",
+      revision: 0,
+      inspectionId: f.inspected.id,
+      sourceDigest: initial.sourceDigest,
+      expectedWorkflowDigest: initial.digest,
+      changes: [{ kind: "insert", before: "source", module: normalize }],
+      files: [
+        {
+          path: normalize.skill.entry,
+          text: "Normalize actual requirements into user.normalize.json."
+        }
+      ]
+    })
+    expect(inserted.order).toEqual(["user.normalize", "source"])
+    const originalSkill = await readFile(join(f.directory, "skills/source/SKILL.md"), "utf8")
+    const current = await f.service.readWorkflow("creator", f.inspected.id, inserted.draft.id)
+    const source = mod("source", "source")
+    source.node.artifacts = {
+      ...(source.node.artifacts as object),
+      inputs: [{ id: "normalized", path: "user.normalize.json", required: true }]
+    }
+    const changed = await f.service.transformWorkflow("creator", {
+      id: inserted.draft.id,
+      name: "Workflow change",
+      revision: inserted.draft.revision,
+      inspectionId: f.inspected.id,
+      sourceDigest: current.sourceDigest,
+      expectedWorkflowDigest: current.digest,
+      changes: [{ kind: "replace_step", id: "source", module: source }],
+      files: []
+    })
+    const next = await f.service.readWorkflow("creator", f.inspected.id, changed.draft.id)
+    const last = await f.service.transformWorkflow("creator", {
+      id: changed.draft.id,
+      name: "Workflow change",
+      revision: changed.draft.revision,
+      inspectionId: f.inspected.id,
+      sourceDigest: next.sourceDigest,
+      expectedWorkflowDigest: next.digest,
+      changes: [
+        {
+          kind: "replace_skill",
+          id: "source",
+          skillName: "source-v2",
+          skill: { entry: "skills/source-v2/SKILL.md", resources: [] }
+        }
+      ],
+      files: [
+        {
+          path: "skills/source-v2/SKILL.md",
+          text: "Read user.normalize.json and produce source.json using original checks."
+        }
+      ]
+    })
+    const preview = await f.service.preview("creator", {
+      name: "Transformed project",
+      version: "1.0.0",
+      sources: [{ inspectionId: f.inspected.id, modIds: ["source"] }],
+      drafts: [
+        { id: last.draft.id, revision: last.draft.revision, modIds: ["user.normalize", "source"] }
+      ]
+    })
+    expect(preview.valid).toBe(true)
+    expect(preview.steps.map((step) => step.id)).toEqual(["user.normalize", "source"])
+    expect(preview.files.some((file) => file.path === "skills/source-v2/SKILL.md")).toBe(true)
+    expect(preview.files.some((file) => file.path === "board_core/runtime.py")).toBe(true)
+    expect(await readFile(join(f.directory, "skills/source/SKILL.md"), "utf8")).toBe(originalSkill)
+    expect(f.install).not.toHaveBeenCalled()
+    await expect(
+      f.service.transformWorkflow("creator", {
+        id: last.draft.id,
+        name: "Stale",
+        revision: last.draft.revision,
+        inspectionId: f.inspected.id,
+        sourceDigest: next.sourceDigest,
+        expectedWorkflowDigest: current.digest,
+        changes: [
+          {
+            kind: "replace_skill",
+            id: "source",
+            skillName: "bad",
+            skill: { entry: "skills/bad/SKILL.md", resources: [] }
+          }
+        ],
+        files: []
+      })
+    ).rejects.toThrow("BUSINESS_WORKFLOW_CHANGED")
+    expect(f.service.read("creator", last.draft.id).revision).toBe(last.draft.revision)
+  })
   it("binds installation handoff to content identity and upgrades old installed receipts by exact readback", async () => {
     const f = await fixture()
     const ready = await f.review()

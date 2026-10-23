@@ -47,8 +47,43 @@ function actionValue(receipt) {
   }
 }
 
+function ownLegacyWriterCall(event, root) {
+  if (!/^(?:execute|shell|bash|command)$/i.test(event.tool) || typeof event.command !== "string")
+    return false
+  // Only unambiguous direct calls. Reading a script or another plugin's same-named
+  // program is unrelated; compound shell expressions remain subject to original policy.
+  if (/[;|&`\r\n]/.test(event.command)) return false
+  const tokens = event.command.match(/"[^"]*"|'[^']*'|[^\s]+/g) || []
+  const normalized = (value) =>
+    value
+      .replace(/^["']|["']$/g, "")
+      .replace(/\\/g, "/")
+      .toLowerCase()
+  const first = normalized(tokens[0] || "")
+  const prefix = normalized(root).replace(/\/$/, "") + "/hooks/"
+  const writers = ["update_checkpoint.py", "skip_node.py", "rollback_stage.py"].map(
+    (name) => prefix + name
+  )
+  if (writers.includes(first)) return true
+  if (!/(?:^|\/)(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?$/.test(first)) return false
+  if (tokens.includes("-c") || tokens.includes("-m")) return false
+  return tokens.slice(1, 8).some((token) => writers.includes(normalized(token)))
+}
+
 export function register(on) {
   let sequence = 0
+  let sessionPolicyDigest = ""
+  on("classic.PreSkillUse", async ($, event, next) => {
+    const result = await next(event)
+    if (event.plugin_name !== $.plugin.name) return result
+    return {
+      ...(result || {}),
+      additionalContext: [
+        ...((result && result.additionalContext) || []),
+        "当前插件使用可组合状态 Mod。保留本 Skill 的知识、配置和业务产物要求；先调用当前插件注册的 state_read，按 workflow.stages 中匹配本技能的 inputs 读取上游文件，在本步骤产物中继承其实际需求与来源，不能只核对文件存在。状态推进调用 state_preflight、state_advance、state_reconcile。读取真实 feature 和有效 workflow.allowedNext 后选择明确下一状态；生成产物不等于推进成功。不要执行 Skill 旧正文中的 update_checkpoint.py、skip_node.py、rollback_stage.py，也不要直接修改 state.json 或 STATE.md。只有 committed 并再次读取一致才算推进成功；unknown 只读对账；源码或步骤契约变化时停止并重新创建受审候选。"
+      ]
+    }
+  })
   on("session.start", async ($, event, next) => {
     await $.command.register({
       name: "autobiz-state-read",
@@ -56,7 +91,7 @@ export function register(on) {
     })
     await $.command.register({
       name: "autobiz-state-check",
-      description: "检查 Mod 固定图和原 Hooks；不推进"
+      description: "检查有效组合图、产物契约和原 Hooks；不推进"
     })
     await $.command.register({
       name: "autobiz-state-advance",
@@ -166,6 +201,14 @@ export function register(on) {
           // Only the selected feature crosses the bounded transport, never all projects.
           if (operation === "read") {
             if (!value.ok) return value
+            const sourcePolicy = value.workflow && value.workflow.policyDigest
+            const overlayPolicy = value.workflow && value.workflow.overlayDigest
+            if (!/^[0-9a-f]{64}$/.test(sourcePolicy) || !/^[0-9a-f]{64}$/.test(overlayPolicy))
+              throw Error("AUTOBIZ_MOD_POLICY_REQUIRED")
+            const policy = sourcePolicy + ":" + overlayPolicy
+            if (sessionPolicyDigest && sessionPolicyDigest !== policy)
+              throw Error("AUTOBIZ_MOD_SOURCE_CHANGED_REOPEN_SESSION")
+            sessionPolicyDigest = policy
             return {
               apiVersion,
               ok: value.ok,
@@ -173,7 +216,8 @@ export function register(on) {
               feature: value.feature,
               record: value.record,
               stateDigest: value.stateDigest,
-              markdownDigest: value.markdownDigest
+              markdownDigest: value.markdownDigest,
+              workflow: value.workflow
             }
           }
           if (value.stageChecks !== undefined) {
@@ -198,9 +242,10 @@ export function register(on) {
             feature: input.feature,
             to: input.to,
             expectedStateDigest: input.expectedStateDigest,
-            requestKey: input.requestKey
+            requestKey: input.requestKey,
+            expectedWorkflowDigest: state.workflow.digest
           })
-        const intent = decide(state.record, input.to)
+        const intent = decide(state.record, input.to, state.workflow)
         const prepared = await invoke("prepare", {
           feature: input.feature,
           ...intent,
@@ -255,7 +300,19 @@ export function register(on) {
             : event.tool === stateTool($.plugin.name, "reconcile")
               ? "reconcile"
               : undefined
-    if (!operation) return next(event)
+    if (!operation) {
+      if (ownLegacyWriterCall(event, $.plugin.root))
+        return {
+          isError: true,
+          result: {
+            ok: false,
+            error: "AUTOBIZ_MOD_LEGACY_WRITER_BLOCKED",
+            nextAction:
+              "使用当前插件 state_read → state_preflight → state_advance。状态 Mod 调用原产物、Hooks 与 writer 校验，不要直接运行旧状态写入脚本。"
+          }
+        }
+      return next(event)
+    }
     const input = { ...event }
     delete input.tool
     delete input.tool_use_id

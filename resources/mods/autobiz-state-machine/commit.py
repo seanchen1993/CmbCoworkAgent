@@ -3,15 +3,20 @@ import base64, ctypes, hashlib, importlib.util, json, os, shutil, sys, tempfile
 from pathlib import Path
 from ctypes import wintypes as w
 sys.path.insert(0, str(Path(__file__).parent))
-from journal import write_record
+from journal import write_record, policy_digest, linked
+from compiled_contract import assert_contract, assert_verified_inputs
 
 MAX_BYTES = 262144
-source, workspace, feature, old, new, expected, operation, receipt_json, journal_root, policy, approved_checks = sys.argv[1:]
+PROTOCOL_STDOUT = sys.stdout
+# This isolated child reserves stdout for prepared/commit protocol messages.
+# Original validators and serializers retain their diagnostics on stderr.
+sys.stdout = sys.stderr
+source, workspace, feature, old, new, expected, operation, receipt_json, journal_root, policy, approved_checks, workflow_digest, verified_candidate_json = sys.argv[1:]
 handles = []
 acknowledged = False
 def sha(data): return hashlib.sha256(data).hexdigest()
 def fail(message): raise RuntimeError(message)
-def emit(value): print(json.dumps(value, ensure_ascii=False), flush=True)
+def emit(value): print(json.dumps(value, ensure_ascii=False), file=PROTOCOL_STDOUT, flush=True)
 def load(path, name):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec); sys.modules[name] = mod; spec.loader.exec_module(mod); return mod
@@ -106,16 +111,28 @@ try:
         if before_hashes[0] != expected: fail('AUTOBIZ_STATE_CHANGED')
         if actual == new: fail('AUTOBIZ_CHECKPOINT_UNATTRIBUTED')
         if actual != old: fail('AUTOBIZ_CHECKPOINT_CHANGED:'+str(actual))
+        assert_contract(Path(source),workspace,current.records[feature],workflow_digest)
+        if policy_digest(Path(source)) != policy: fail('AUTOBIZ_OPERATION_SOURCE_CHANGED')
+        assert_verified_inputs(Path(source),workspace,feature,current.records[feature],new)
+        bridge.validate_added_completion(Path(source),workspace,feature,current.records[feature],new,observer)
         bridge.validate_completed_biz(Path(source),workspace,feature,current.records[feature],stage_checks,target_checkpoint=new)
         hook_rules = load(Path(__file__).with_name('hook_checks.py'),'mod_transition_hooks')
+        verified_candidate = json.loads(verified_candidate_json)
+        if not isinstance(verified_candidate,dict): fail('AUTOBIZ_VERIFIED_CANDIDATE_RECEIPT_REQUIRED')
+        hook_rules.validate_verified_candidate(Path(source),workspace,feature,old,new,expected=verified_candidate)
         transition_hooks = hook_rules.validate_transition_hooks(Path(source),workspace,feature,new)
         if transition_hooks['errors']: fail('; '.join(transition_hooks['errors']))
         result = update.prepare_checkpoint_update(workspace=workspace,feature=feature,checkpoint=new)
         if not result.ok: fail('; '.join(result.errors))
         if stage_checks.evidence_errors: fail('AUTOBIZ_STAGE_EVIDENCE_UNAVAILABLE')
         checks_digest = sha(json.dumps(stage_checks,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode('utf-8'))
+        strict_nodes = bridge.strict_handoff_nodes(
+            bridge.compiled(Path(source),workspace,current.records[feature]),stage_checks)
+        strict_digest = sha(bridge.canonical({'stageChecks':stage_checks,
+            'strictHandoffNodes':strict_nodes}).encode('utf-8'))
         if new == 'design_done' and (not approved_checks or approved_checks != checks_digest):
             fail('AUTOBIZ_DESIGN_APPROVED_INPUT_CHANGED')
+        hook_rules.validate_verified_candidate(Path(source),workspace,feature,old,new,expected=verified_candidate)
         # Run the real writer only in a private host snapshot. This preserves
         # upstream serialization without replacing either locked live path.
         with tempfile.TemporaryDirectory(prefix='prepared-',dir=journal_root) as temporary:
@@ -125,7 +142,7 @@ try:
             if overlay.exists():
                 count = 0; size = 0
                 for path in [overlay,*overlay.rglob('*')]:
-                    if path.is_symlink() or path.is_junction(): fail('AUTOBIZ_WORKFLOW_LINK_UNSUPPORTED')
+                    if linked(path): fail('AUTOBIZ_WORKFLOW_LINK_UNSUPPORTED')
                     if path.is_file():
                         count += 1; size += path.stat().st_size
                     if count > 512 or size > 8*1024*1024: fail('AUTOBIZ_WORKFLOW_LIMIT')
@@ -140,8 +157,13 @@ try:
             'beforeContent':[base64.b64encode(data).decode('ascii') for data in before],
             'afterContent':[base64.b64encode(data).decode('ascii') for data in after]}
         emit({'ready':True,'operationId':operation,'evidence':evidence,'stageChecks':stage_checks,
-              'stageChecksDigest':checks_digest,'transitionHooks':transition_hooks['receipts']})
+              'stageChecksDigest':checks_digest,'verifiedCandidate':verified_candidate,
+              'transitionHooks':[*transition_hooks['receipts'],verified_candidate]})
         if sys.stdin.readline().strip() != 'commit:'+operation: fail('AUTOBIZ_COMMIT_NOT_AUTHORIZED')
+        assert_contract(Path(source),workspace,current.records[feature],workflow_digest)
+        if policy_digest(Path(source)) != policy: fail('AUTOBIZ_OPERATION_SOURCE_CHANGED')
+        assert_verified_inputs(Path(source),workspace,feature,current.records[feature],new)
+        hook_rules.validate_verified_candidate(Path(source),workspace,feature,old,new,expected=verified_candidate)
         acknowledged = True
         if [read_handle(handle) for handle in state_handles] != before: fail('AUTOBIZ_STATE_CHANGED')
         for handle,data in zip(state_handles,after):
@@ -156,7 +178,9 @@ try:
         # This is a plugin-owned receipt, not a native human approval or a platform grant.
         write_record(Path(journal_root) / (operation + '.physical.json'),
             {'operationId':operation,'policyDigest':policy,'after':evidence['after'],
-             'identities':identities}, exclusive=True)
+             'identities':identities,'stageChecksDigest':checks_digest,
+             'strictHandoffNodes':strict_nodes,'strictHandoffDigest':strict_digest,
+             'verifiedCandidate':verified_candidate}, exclusive=True)
         emit({'written':True,'operationId':operation,'stateFingerprint':evidence['after'][0],'markdownFingerprint':evidence['after'][1]})
         if sys.stdin.readline().strip() != 'release:'+operation: fail('AUTOBIZ_COMMIT_UNKNOWN')
         emit({'applied':True,'duplicate':False,'status':'committed','operationId':operation,'feature':feature,'from':old,'to':new,'stateFingerprint':evidence['after'][0],'markdownFingerprint':evidence['after'][1]})

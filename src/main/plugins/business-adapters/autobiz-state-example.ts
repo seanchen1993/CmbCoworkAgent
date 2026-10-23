@@ -7,7 +7,7 @@ export const autobizStateExample = {
   exampleId: "autobiz-state-machine",
   title: "AutoBiz 可执行状态决策",
   description:
-    "普通 Function Mod 固定图决策、原产物与 Hooks 预检、原 writer 兼容提交和只读对账；不表示已接管全部旧入口。",
+    "普通 Function Mod 读取原内核的有效组合图，校验前插步骤与原产物 Hooks，通过原 writer 受控提交和只读对账。",
   kernelRef: { id: "autobiz.original-234-kernel", version: "1.0.3" }
 } as const
 
@@ -17,6 +17,7 @@ export async function readAutobizStateExample(mainDirectory: string) {
   const names = [
     "register.ts",
     "graph.ts",
+    "compiled_contract.py",
     "adapter.py",
     "commit.py",
     "journal.py",
@@ -60,7 +61,7 @@ export async function readAutobizStateExample(mainDirectory: string) {
     installed: false,
     execution: "requires-native-approved-business-trial",
     boundaries: [
-      "The graph and original checks apply only to the declared fixed stages.",
+      "The original record-specific compiler owns routing; added stages require actual artifact contracts and executable validators.",
       "Original initialization, feature creation, rollback and legacy direct-writer paths are not all intercepted.",
       "Windows NTFS compatibility commit is plugin-owned; it is not a platform-wide atomic file transaction or a native approval receipt.",
       "Preserve the exact original kernel, Hooks, configuration, knowledge and writer; do not weaken checks to make a trial pass."
@@ -73,6 +74,6 @@ export async function readAutobizStateExample(mainDirectory: string) {
       files
     },
     instruction:
-      "Inspect the actual installed compatible kernel first and verify its exact id/version/resources. Read all source pages, save this draft with that native inspectionId and revision:0, preserving all eight files and the auxiliary Skill. Preview with the original kernel plus this extension, then request_trial and await fresh native approval. Follow state_read, state_preflight, state_advance and state_reconcile with exact original state digest/requestKey. Source material is executable, but discovery, compilation or installation is not business success. Do not report committed without the real writer outcome and a fresh read; unknown is never replayed. This template grants no permissions and adds no platform state-machine API."
+      "Inspect the actual installed compatible kernel first and verify its exact id/version/resources. Read all source pages, save this draft with that native inspectionId and revision:0, preserving the complete source closure and auxiliary Skill. Preview with the original kernel plus this extension, then request_trial and await fresh native approval. Follow state_read, state_preflight, state_advance and state_reconcile with exact state digest/requestKey. Added and replaced stages use the same original compiler, inputs, outputs and validators. PreSkillUse directs ordinary Skills to controlled state tools. Source edits invalidate the active policy and require reopening a reviewed candidate; discovery, compilation or installation is not business success. Do not report committed without the real writer outcome and a fresh read; unknown is never replayed. This template grants no permissions and adds no platform state-machine API."
   }
 }

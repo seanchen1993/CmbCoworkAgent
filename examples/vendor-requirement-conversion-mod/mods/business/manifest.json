@@ -1,0 +1,53 @@
+{
+  "apiVersion": "devclaw.business-mods/v1",
+  "kind": "catalog",
+  "kernelRef": { "id": "vendor.onboarding", "version": "1.0.0" },
+  "modules": [
+    {
+      "id": "vendor.requirement-convert",
+      "title": "需求转换",
+      "node": {
+        "id": "vendor.requirement-convert",
+        "skill": "vendor-requirement-convert",
+        "order": 1
+      },
+      "skill": { "entry": "skills/vendor-requirement-convert/SKILL.md", "resources": [] },
+      "resources": ["mods/business/vendor.requirement-convert/run.mjs"],
+      "dependencies": { "required": ["vendor.settings"], "advisory": [] },
+      "checks": { "validators": [], "guards": [] },
+      "host": {
+        "stage": {
+          "actionIds": [],
+          "artifactIds": ["normalized-request"],
+          "checkIds": ["vendor.requirement.schema"],
+          "approval": "none"
+        },
+        "actions": [],
+        "artifacts": [
+          { "id": "normalized-request", "path": "normalized-request.json", "required": true }
+        ],
+        "checks": [
+          {
+            "id": "vendor.requirement.schema",
+            "kind": "json-schema",
+            "artifactId": "normalized-request",
+            "sideEffect": "read",
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schemaVersion": { "const": 1 },
+                "vendorName": { "type": "string", "minLength": 1 },
+                "registrationId": { "type": "string", "minLength": 1 },
+                "source": { "type": "string", "minLength": 1 },
+                "policyTier": { "type": "string", "enum": ["standard", "enhanced"] }
+              },
+              "required": ["schemaVersion", "vendorName", "registrationId", "source", "policyTier"]
+            }
+          }
+        ],
+        "environment": []
+      }
+    }
+  ]
+}

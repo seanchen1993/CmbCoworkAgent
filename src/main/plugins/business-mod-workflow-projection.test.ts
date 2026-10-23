@@ -126,6 +126,43 @@ it("does not use an optional dynamic artifact as the sole producer for required 
   expect(result.diagnostics.join(";")).toContain("依赖可跳过动态阶段")
 })
 
+it("routes every original entry through a newly inserted mandatory prelude", () => {
+  const { workflow, modules } = fixture()
+  const before = structuredClone(workflow)
+  modules.unshift({
+    title: "需求转换",
+    node: {
+      id: "user.normalize",
+      skill: "normalize-requirements",
+      checkpoints: ["normalize_in_progress", "normalize_done"]
+    }
+  })
+  const result = projectBusinessModWorkflow(modules, workflow)
+  expect(result.requiresFixedWorkflowAcknowledgement, result.diagnostics.join(";")).toBe(false)
+  expect(result.routing.checkpoints.initial).toEqual(["normalize_in_progress"])
+  expect(result.routing.checkpoints.transitions.normalize_done).toEqual(["prd_in_progress"])
+  expect(result.routing.dynamicStages).toEqual(reviewedWorkflow.dynamicStages)
+  expect(result.routing.templates.lean).toBeUndefined()
+  expect(workflow).toEqual(before)
+})
+
+it("keeps the main entry and redirects an alternate entry past a newly inserted middle step", () => {
+  const { workflow, modules } = fixture()
+  modules.splice(1, 0, {
+    title: "核对",
+    node: {
+      id: "user.review",
+      skill: "review-requirements",
+      checkpoints: ["review_in_progress", "review_done"]
+    }
+  })
+  const result = projectBusinessModWorkflow(modules, workflow)
+  expect(result.requiresFixedWorkflowAcknowledgement, result.diagnostics.join(";")).toBe(false)
+  expect(result.routing.checkpoints.initial).toEqual(["prd_in_progress", "review_in_progress"])
+  expect(result.routing.checkpoints.transitions.prd_done).toEqual(["review_in_progress"])
+  expect(result.routing.checkpoints.transitions.review_done).toEqual(["specs_in_progress"])
+})
+
 it("keeps a restricted repair route and the original skip default without adding an unreviewed state edge", () => {
   const { workflow, modules } = fixture()
   const checkpoints = workflow.checkpoints as typeof reviewedWorkflow.checkpoints

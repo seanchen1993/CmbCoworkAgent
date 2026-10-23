@@ -52,7 +52,15 @@ def compiled(source, workspace, record=None, profile="fullstack", decisions=None
     return by_profile(source, workspace=workspace, profile=profile, workflow_decisions=decisions)
 
 
-def contract_value(contract, feature, check_id="postcheck"):
+def contract_node(workflow, contract):
+    nodes = [node for node in workflow.nodes if node.get("id") == contract.node_id
+             and node.get("skill") == contract.skill]
+    if len(nodes) != 1:
+        raise ValueError("Effective stage contract is ambiguous or absent")
+    return nodes[0]
+
+
+def contract_value(contract, feature, check_id="postcheck", *, node):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", feature):
         raise ValueError("Invalid feature")
     extra = set().union(*(VALIDATED_INPUTS.get(key, set()) for key in contract.validators))
@@ -69,8 +77,14 @@ def contract_value(contract, feature, check_id="postcheck"):
         paths.append({"id": item.id, "path": path, **({"pattern": True} if "*" in path else {})})
     # Include every effective field, not just output names. Changing a validator or
     # workflow contract must invalidate previously frozen evidence.
-    value = {"protocol": PROTOCOL, "coverageVersion": 2, "checkId": check_id,
+    if node.get("id") != contract.node_id or node.get("skill") != contract.skill:
+        raise ValueError("Effective stage contract identity changed")
+    # Original SkillContract/ArtifactSpec dataclasses omit extension fields such as
+    # output schemas and validatorBindings. Bind their complete effective raw node
+    # as well, so a workspace overlay cannot reuse evidence from an older contract.
+    value = {"protocol": PROTOCOL, "coverageVersion": 3, "checkId": check_id,
              "contract": dataclasses.asdict(contract),
+             "effectiveNode": node,
              "artifacts": paths}
     return {"nodeId": contract.node_id, "checkId": check_id, "contractDigest": digest(value),
             "artifacts": paths, **({"checkOnly": True} if not paths and contract.validators else {})}
@@ -79,16 +93,17 @@ def contract_value(contract, feature, check_id="postcheck"):
 def contract_values(workflow, feature):
     values = []
     for contract in workflow.skill_contracts.values():
+        node = contract_node(workflow, contract)
         if contract.outputs or contract.validators:
-            values.append(contract_value(contract, feature))
+            values.append(contract_value(contract, feature, node=node))
         if contract.node_id in ("biz.discuss", "biz.prd"):
             check_id = "biz-discuss-validate" if contract.node_id == "biz.discuss" else "biz-prd-validate"
-            values.append(contract_value(contract, feature, check_id))
+            values.append(contract_value(contract, feature, check_id, node=node))
     return values
 
 
-def collect_receipt(contract, feature, workspace, check_id="postcheck"):
-    value = contract_value(contract, feature, check_id)
+def collect_receipt(contract, feature, workspace, check_id="postcheck", *, node):
+    value = contract_value(contract, feature, check_id, node=node)
     artifacts = []
     size = 0
     for item in value["artifacts"]:
@@ -126,6 +141,15 @@ def collect_receipt(contract, feature, workspace, check_id="postcheck"):
             "contractDigest": value["contractDigest"], "outcome": "passed", "artifacts": artifacts}
 
 
+def strict_handoff_nodes(workflow, receipts):
+    """Private commit metadata; never extend the public stage-check/v1 receipt."""
+    covered = {receipt["nodeId"] for receipt in receipts
+               if receipt.get("checkId") == "postcheck" and receipt.get("outcome") == "passed"}
+    return sorted(node["id"] for node in workflow.nodes if node["id"] in covered and (
+        node.get("validatorBindings") or any(
+            "schema" in item for item in node.get("artifacts", {}).get("outputs", []))))
+
+
 def validate_completed_biz(source, workspace, feature, record, receipts, target_checkpoint=None):
     """Original Biz validation runs at its original done checkpoint, before leaving that stage.
 
@@ -161,12 +185,13 @@ def validate_biz_stage(source, workspace, feature, workflow, receipts, node_id, 
     spec.loader.exec_module(module)
     sync = module.check_or_fix_state_sync
     module.check_or_fix_state_sync = lambda path, **kwargs: sync(path, fix=False)
-    before = collect_receipt(contract, feature, workspace, check_id)
+    node = contract_node(workflow, contract)
+    before = collect_receipt(contract, feature, workspace, check_id, node=node)
     result = getattr(module, "validate_" + method)(feature, workspace)
     if result.get("ok") is not True or result.get("skipped"):
         raise ValueError("; ".join([result.get("message", "Original Biz validation failed"),
                                    *result.get("errors", [])]))
-    after = collect_receipt(contract, feature, workspace, check_id)
+    after = collect_receipt(contract, feature, workspace, check_id, node=node)
     if canonical(before) != canonical(after):
         raise ValueError("Biz artifacts changed during the original validation")
     receipts.append(after)
@@ -184,25 +209,36 @@ def install_original_postcheck(source):
     receipts = Receipts()
 
     def checked(repo_root, workspace_root, skill, slug, **kwargs):
+        from compiled_contract import install_bound_validators, validate_output_schemas
+        effective = compiled(repo_root, workspace_root, kwargs.get("workflow_record"),
+                             kwargs.get("workflow_profile", module.BASE_WORKFLOW_PROFILE),
+                             kwargs.get("workflow_decisions"))
+        install_bound_validators(repo_root, effective)
         before = None
         try:
             workflow = compiled(repo_root, workspace_root, kwargs.get("workflow_record"),
                                 kwargs.get("workflow_profile", module.BASE_WORKFLOW_PROFILE),
                                 kwargs.get("workflow_decisions"))
-            before = collect_receipt(workflow.contract_for_skill(skill), slug, workspace_root)
+            contract = workflow.contract_for_skill(skill)
+            before = collect_receipt(contract, slug, workspace_root,
+                                     node=contract_node(workflow, contract))
         except Exception:
             # Still run the original check with exactly its original arguments.
             pass
         # No preflight rewrite, changed arguments, validator override or terminal replay.
         result = original(repo_root, workspace_root, skill, slug, **kwargs)
         if result[0] == 0:
+            node = next(item for item in effective.nodes if item.get("skill") == skill)
+            validate_output_schemas(workspace_root, slug, node)
             try:
                 if kwargs.get("validators_override") is not None or kwargs.get("required_outputs_override") is not None:
                     raise ValueError("Overridden contract is not eligible")
                 workflow = compiled(repo_root, workspace_root, kwargs.get("workflow_record"),
                                     kwargs.get("workflow_profile", module.BASE_WORKFLOW_PROFILE),
                                     kwargs.get("workflow_decisions"))
-                receipt = collect_receipt(workflow.contract_for_skill(skill), slug, workspace_root)
+                contract = workflow.contract_for_skill(skill)
+                receipt = collect_receipt(contract, slug, workspace_root,
+                                          node=contract_node(workflow, contract))
                 if before is None or canonical(before) != canonical(receipt):
                     raise ValueError("Checked artifacts changed while the original validator ran")
                 encoded = base64.b64encode(canonical(receipt).encode("utf-8")).decode("ascii")
@@ -218,6 +254,20 @@ def install_original_postcheck(source):
 
     module.run_postcheck = checked
     return module, receipts
+
+
+def validate_added_completion(source, workspace, feature, record, target, observer):
+    """Added module contracts are checked before marking done, also when terminal."""
+    workflow = compiled(source, workspace, record)
+    for node in workflow.nodes:
+        outputs = node.get("artifacts", {}).get("outputs", [])
+        if (node.get("checkpoints", [None])[-1] != target
+                or not (node.get("validatorBindings") or any("schema" in item for item in outputs))):
+            continue
+        code, message = observer.run_postcheck(source, workspace, node["skill"], feature,
+                                               workflow_record=record, target_checkpoint=target)
+        if code:
+            raise ValueError(message)
 
 
 def run_hook(source, argv):

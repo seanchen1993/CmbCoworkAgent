@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 import tempfile
 
@@ -11,7 +12,15 @@ MAX_RECORDS = 512
 
 
 def linked(path):
-    return path.is_symlink() or getattr(path, "is_junction", lambda: False)()
+    try:
+        value = path.lstat()
+    except FileNotFoundError:
+        return False
+    # Python 3.11 has no Path.is_junction. Native lstat metadata still exposes
+    # Windows reparse points, so older supported interpreters cannot miss one.
+    return (stat.S_ISLNK(value.st_mode)
+            or bool(getattr(value, "st_file_attributes", 0) & 0x400)
+            or bool(getattr(value, "st_reparse_tag", 0)))
 
 
 def read_record(path):
@@ -86,7 +95,9 @@ def policy_digest(root):
 def request_binding(root, request):
     return {"feature": request["feature"], "requestKey": request["requestKey"],
             "to": request["to"], "expectedStateDigest": request["expectedStateDigest"],
-            "policyDigest": policy_digest(root)}
+            "policyDigest": policy_digest(root),
+            **({"workflowDigest": request["expectedWorkflowDigest"]}
+               if "expectedWorkflowDigest" in request else {})}
 
 
 def assert_no_pending(directory, feature, own_operation):

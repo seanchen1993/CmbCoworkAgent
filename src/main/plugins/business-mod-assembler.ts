@@ -8,7 +8,12 @@ import type {
 } from "../../shared/business-mods"
 import { BUSINESS_MOD_ASSEMBLY, BUSINESS_MOD_MANIFEST } from "../../shared/business-mods"
 import { businessModId, businessModResources } from "./business-mod-manifest"
-import { derivationDigest, type DerivationFile, type DerivationSnapshot } from "./derivation-source"
+import {
+  derivationDigest,
+  compareDerivationPaths,
+  type DerivationFile,
+  type DerivationSnapshot
+} from "./derivation-source"
 import { parseClawComponentExports } from "../../shared/mods/claw-components"
 import { parseClawActionExports } from "../../shared/mods/claw-actions"
 import { mergeBusinessModUserConfig } from "./business-mod-user-config"
@@ -17,6 +22,10 @@ import { assertProjectNodeAgentResources } from "./project-agent-resources"
 import { BusinessModDuplicateIdError } from "./business-mod-diagnostics"
 import { projectRuntimeExtensionContract } from "../../shared/project-runtime"
 import { assertBusinessModStageRecoveryProjection } from "./business-mod-stage-recovery"
+import {
+  assertWorkflowReplacementPreservesChecks,
+  assertWorkflowSkillHookIdentity
+} from "./business-workflow-transform"
 import {
   describeBusinessModAssemblyRuntime,
   resolveBusinessModAssemblyAdapter
@@ -77,6 +86,37 @@ export function assembleBusinessMods(
     if (identity.id !== kernel.id || identity.version !== kernel.version)
       throw Error("业务 Mods 共享内核版本冲突")
   }
+  const replacements = request.replacements ?? []
+  if (
+    !Array.isArray(replacements) ||
+    replacements.length > 32 ||
+    replacements.some((item) => !item || typeof item !== "object" || typeof item.id !== "string") ||
+    new Set(replacements.map((item) => item.id.toLowerCase())).size !== replacements.length
+  )
+    throw Error("BUSINESS_WORKFLOW_REPLACEMENT_INVALID")
+  for (const item of replacements) {
+    businessModId(item.id)
+    if (
+      !/^[a-f0-9]{64}$/.test(item.sourceDigest) ||
+      !/^[a-f0-9]{64}$/.test(item.replacementSourceDigest) ||
+      item.sourceDigest === item.replacementSourceDigest
+    )
+      throw Error("BUSINESS_WORKFLOW_REPLACEMENT_INVALID")
+    const original = sources.find((source) => source.snapshot.digest === item.sourceDigest)
+    const replacement = sources.find(
+      (source) => source.snapshot.digest === item.replacementSourceDigest
+    )
+    const previous = original?.catalog.modules.find((mod) => mod.id === item.id)
+    const next = replacement?.catalog.modules.find((mod) => mod.id === item.id)
+    if (!original?.catalog.kernel || !replacement?.catalog.kernelRef || !previous || !next)
+      throw Error("BUSINESS_WORKFLOW_REPLACEMENT_INVALID")
+    assertWorkflowReplacementPreservesChecks(previous, next)
+    assertWorkflowSkillHookIdentity(
+      previous,
+      next,
+      original.catalog.kernel!.pluginFields?.hooks !== undefined
+    )
+  }
   const known = new Map<string, BusinessSelection | FunctionSelection>()
   for (const source of sources) {
     const items: Array<BusinessSelection | FunctionSelection> = [
@@ -89,8 +129,24 @@ export function assembleBusinessMods(
     ]
     for (const item of items) {
       const { mod } = item
-      if ([...known.keys()].some((id) => id.toLowerCase() === mod.id.toLowerCase()))
-        throw new BusinessModDuplicateIdError(mod.id)
+      const previous = [...known.values()].find(
+        (item) => item.mod.id.toLowerCase() === mod.id.toLowerCase()
+      )
+      if (previous) {
+        const replacement = replacements.find((item) => item.id === mod.id)
+        if (!replacement || previous.kind !== "business" || item.kind !== "business")
+          throw new BusinessModDuplicateIdError(mod.id)
+        if (
+          source.snapshot.digest === replacement.sourceDigest &&
+          previous.source.snapshot.digest === replacement.replacementSourceDigest
+        )
+          continue
+        if (
+          source.snapshot.digest !== replacement.replacementSourceDigest ||
+          previous.source.snapshot.digest !== replacement.sourceDigest
+        )
+          throw new BusinessModDuplicateIdError(mod.id)
+      }
       known.set(mod.id, item)
     }
   }
@@ -116,7 +172,16 @@ export function assembleBusinessMods(
     )
       throw Error("业务 Mod 选择无效")
     for (const id of source.modIds) {
-      if (known.get(id)?.source !== source) throw Error("业务 Mod 不属于所选来源")
+      if (
+        known.get(id)?.source !== source &&
+        !replacements.some(
+          (item) =>
+            item.id === id &&
+            item.sourceDigest === source.snapshot.digest &&
+            item.replacementSourceDigest === known.get(id)?.source.snapshot.digest
+        )
+      )
+        throw Error("业务 Mod 不属于所选来源")
       explicit.add(id)
       include(id)
     }
@@ -233,6 +298,9 @@ export function assembleBusinessMods(
     const skillName = String(mod.node.skill)
     if (
       !source.catalog.kernel &&
+      !replacements.some(
+        (item) => item.id === mod.id && item.replacementSourceDigest === source.snapshot.digest
+      ) &&
       main.catalog.modules.some(
         (entry) => String(entry.node.skill).toLowerCase() === skillName.toLowerCase()
       )
@@ -260,9 +328,22 @@ export function assembleBusinessMods(
         ["skills/", "agents/", "workflows/", "references/"].some((prefix) =>
           file.path.startsWith(prefix)
         )
+      const replacement = replacements.find(
+        (item) => item.id === mod.id && item.replacementSourceDigest === source.snapshot.digest
+      )
+      const originalModule = replacement && main.catalog.modules.find((item) => item.id === mod.id)
+      const retainedSkillResource =
+        originalModule &&
+        originalModule.skill.resources.some(
+          (path) => file.path === path || file.path.startsWith(`${path}/`)
+        ) &&
+        main.snapshot.files.some(
+          (original) => original.path === file.path && original.digest === file.digest
+        )
       if (
         !shared &&
         !kernelAuxiliary &&
+        !retainedSkillResource &&
         !file.path.startsWith(skillRoot + "/") &&
         !file.path.startsWith(`mods/business/${mod.id}/`)
       )
@@ -272,6 +353,23 @@ export function assembleBusinessMods(
     for (const id of mod.dependencies.advisory)
       if (!chosen.has(id))
         diagnostics.push(`${mod.title}：未选择建议搭配 ${id}，请核对输入与原检查要求`)
+  }
+  // A new prompt may be reviewed, but replacing a stage must not silently replace its
+  // retained validators, knowledge, helpers or other original resource implementations.
+  for (const replacement of replacements) {
+    const source = sources.find((item) => item.snapshot.digest === replacement.sourceDigest)!
+    const original = source.catalog.modules.find((mod) => mod.id === replacement.id)!
+    for (const file of businessModResources(source.snapshot, [
+      ...original.skill.resources,
+      ...original.resources,
+      ...assertProjectNodeAgentResources(
+        original.node,
+        (path) => source.snapshot.files.find((file) => file.path === path)?.bytes
+      )
+    ])) {
+      if (file.path !== original.skill.entry && files.get(file.path)?.digest !== file.digest)
+        throw Error("BUSINESS_WORKFLOW_RETAINED_RESOURCE_CHANGED")
+    }
   }
   const auxiliarySkillRoots: string[] = []
   for (const { mod } of extensions) {
@@ -420,10 +518,28 @@ export function assembleBusinessMods(
           }))
         }
       : {}),
+    ...(replacements.length
+      ? {
+          replacements: replacements.map((item) => {
+            const source = sources.find((entry) => entry.snapshot.digest === item.sourceDigest)!
+            const original = source.catalog.modules.find((mod) => mod.id === item.id)!
+            const originalFiles = businessModResources(source.snapshot, [
+              original.skill.entry,
+              ...original.skill.resources,
+              ...original.resources
+            ])
+            return {
+              ...item,
+              originalDefinition: original,
+              originalFiles: originalFiles.map(({ path, digest }) => ({ path, digest }))
+            }
+          })
+        }
+      : {}),
     files: [...files.values()].map(({ path, digest }) => ({ path, digest }))
   }
   add(generated(BUSINESS_MOD_ASSEMBLY, lock))
-  const result = [...files.values()].sort((a, b) => a.path.localeCompare(b.path, "en"))
+  const result = [...files.values()].sort((a, b) => compareDerivationPaths(a.path, b.path))
   return {
     files: result,
     digest: derivationDigest(result, []),

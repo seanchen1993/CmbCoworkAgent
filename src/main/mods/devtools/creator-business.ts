@@ -25,8 +25,13 @@ import { BUSINESS_MOD_MANIFEST } from "../../../shared/business-mods"
 import {
   snapshotDerivationSource,
   writeDerivationFiles,
-  derivationContentIdentity
+  derivationContentIdentity,
+  type DerivationFile
 } from "../../plugins/derivation-source"
+import {
+  assertProjectNodeAgentResources,
+  projectNodeAgentResources
+} from "../../plugins/project-agent-resources"
 import {
   CreatorBusinessDrafts,
   businessCreatorScopeKey,
@@ -42,6 +47,12 @@ import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 import { readRuntimeScopedFile } from "../../harness-board/project-runtime/safe-files"
 import { requestCreatorHostBusinessTrial } from "./creator-host-business-trial"
 import { CreatorPluginModularization } from "./creator-plugin-modularization"
+import {
+  inspectBusinessWorkflow,
+  transformBusinessWorkflow,
+  assertWorkflowSkillHookIdentity,
+  type BusinessWorkflowChange
+} from "../../plugins/business-workflow-transform"
 
 type Review = NonNullable<DevelopmentBusinessStatus["review"]>
 type Source = { pluginId: string; directory: string; identity: string; digest: string }
@@ -688,6 +699,217 @@ export class CreatorBusinessService {
     const context = this.context(threadId)
     return this.drafts.read(context.scope, id)
   }
+  private workflowModules(base: Inspection, draft?: CreatorBusinessDraft, modIds?: string[]) {
+    if (
+      draft &&
+      (draft.baseSource.digest !== base.source.digest ||
+        draft.baseSource.pluginId !== base.source.pluginId)
+    )
+      throw Error("BUSINESS_DRAFT_BASE_CHANGED")
+    if (draft?.workflowOrder && modIds && !same(draft.workflowOrder, modIds))
+      throw Error("BUSINESS_WORKFLOW_CHANGED")
+    const modules = new Map(base.catalog.modules.map((mod) => [mod.id, mod]))
+    for (const mod of draft?.catalog.modules ?? []) modules.set(mod.id, mod)
+    const order = draft?.workflowOrder ??
+      modIds ?? [
+        ...base.catalog.modules.map((mod) => mod.id),
+        ...(draft?.catalog.modules
+          .filter((mod) => !base.catalog.modules.some((original) => original.id === mod.id))
+          .map((mod) => mod.id) ?? [])
+      ]
+    if (new Set(order).size !== order.length || order.some((id) => !modules.has(id)))
+      throw Error("BUSINESS_WORKFLOW_CONTRACT_INVALID")
+    return order.map((id) => structuredClone(modules.get(id)!))
+  }
+  async readWorkflow(threadId: string, inspectionId: string, draftId?: string, modIds?: string[]) {
+    const context = this.context(threadId),
+      base = this.inspection(context.scope, inspectionId)
+    await this.snapshotSource(base.source, context.assertCurrent)
+    const draft = draftId ? this.drafts.read(context.scope, draftId) : undefined
+    return {
+      inspectionId,
+      sourceDigest: base.source.digest,
+      ...(draft ? { draftId: draft.id, revision: draft.revision } : {}),
+      retainedExtensions: [
+        ...(base.catalog.extensions ?? []).map((mod) => ({ id: mod.id, source: "original" })),
+        ...(draft?.catalog.extensions ?? []).map((mod) => ({ id: mod.id, source: "draft" }))
+      ],
+      ...inspectBusinessWorkflow(
+        this.workflowModules(base, draft, modIds),
+        [...(base.catalog.extensions ?? []), ...(draft?.catalog.extensions ?? [])].map(
+          (mod) => mod.id
+        )
+      )
+    }
+  }
+  async transformWorkflow(
+    threadId: string,
+    input: {
+      id: string
+      name: string
+      revision: number
+      inspectionId: string
+      sourceDigest: string
+      expectedWorkflowDigest: string
+      modIds?: string[]
+      changes: BusinessWorkflowChange[]
+      files: CreatorBusinessDraft["files"]
+    },
+    assertTurn?: () => void
+  ) {
+    assertTurn?.()
+    const context = this.context(threadId),
+      base = this.inspection(context.scope, input.inspectionId)
+    if (!base.catalog.kernel || input.sourceDigest !== base.source.digest)
+      throw Error("BUSINESS_CREATOR_SOURCE_CHANGED")
+    const snapshot = await this.snapshotSource(base.source, context.assertCurrent)
+    assertTurn?.()
+    const previous = input.revision ? this.drafts.read(context.scope, input.id) : undefined
+    if (previous && previous.revision !== input.revision)
+      throw Error("BUSINESS_DRAFT_REVISION_CHANGED")
+    const result = transformBusinessWorkflow({
+      modules: this.workflowModules(base, previous, input.modIds),
+      sourceDigest: input.sourceDigest,
+      expectedWorkflowDigest: input.expectedWorkflowDigest,
+      changes: input.changes,
+      protectedModules: base.catalog.modules,
+      extensionIds: [
+        ...(base.catalog.extensions ?? []),
+        ...(previous?.catalog.extensions ?? [])
+      ].map((mod) => mod.id)
+    })
+    for (const replacement of result.modules) {
+      const original = base.catalog.modules.find((mod) => mod.id === replacement.id)
+      if (original)
+        assertWorkflowSkillHookIdentity(
+          original,
+          replacement,
+          base.catalog.kernel.pluginFields?.hooks !== undefined
+        )
+    }
+    const changed = new Set([
+      ...(previous?.catalog.modules.map((mod) => mod.id) ?? []),
+      ...result.changedIds
+    ])
+    const modules = [
+      ...result.modules.filter((mod) => changed.has(mod.id)),
+      ...(previous?.catalog.modules.filter(
+        (mod) => !result.modules.some((current) => current.id === mod.id)
+      ) ?? [])
+    ]
+    const catalog = parseBusinessModCatalog({
+      apiVersion: "devclaw.business-mods/v1",
+      kind: "catalog",
+      kernelRef: { id: base.catalog.kernel.id, version: base.catalog.kernel.version },
+      modules,
+      ...(previous?.catalog.extensions ? { extensions: previous.catalog.extensions } : {})
+    })
+    const resourceRoots = catalog.modules.flatMap((mod) => [
+      mod.skill.entry.slice(0, -"SKILL.md".length),
+      `mods/business/${mod.id}/`,
+      ...mod.skill.resources,
+      ...mod.resources,
+      ...projectNodeAgentResources(mod.node)
+    ])
+    resourceRoots.push(
+      ...(catalog.extensions ?? []).flatMap((mod) => [
+        `mods/business/${mod.id}/`,
+        mod.entry,
+        ...mod.resources,
+        ...(mod.skills ?? [])
+      ])
+    )
+    const files = new Map(
+      (previous?.files ?? [])
+        .filter((file) =>
+          resourceRoots.some(
+            (root) =>
+              file.path === root || file.path.startsWith(root.endsWith("/") ? root : `${root}/`)
+          )
+        )
+        .map((file) => [file.path, file])
+    )
+    const retainedResources = new Map(
+      (previous?.retainedResources ?? [])
+        .filter((file) =>
+          resourceRoots.some(
+            (root) =>
+              file.path === root || file.path.startsWith(root.endsWith("/") ? root : `${root}/`)
+          )
+        )
+        .map((file) => [file.path, file])
+    )
+    for (const file of input.files) files.set(file.path, file)
+    for (const path of files.keys()) retainedResources.delete(path)
+    const required = [
+      ...catalog.modules.flatMap((mod) => [
+        mod.skill.entry,
+        ...mod.skill.resources,
+        ...mod.resources,
+        ...assertProjectNodeAgentResources(mod.node, (path) =>
+          files.has(path)
+            ? Buffer.from(files.get(path)!.text)
+            : snapshot.files.find((file) => file.path === path)?.bytes
+        )
+      ]),
+      ...(catalog.extensions ?? []).flatMap((mod) => [
+        mod.entry,
+        ...mod.resources,
+        ...(mod.skills ?? [])
+      ])
+    ]
+    for (const path of required) {
+      const retained = snapshot.files.filter(
+        (file) => file.path === path || file.path.startsWith(`${path}/`)
+      )
+      for (const file of retained)
+        if (!files.has(file.path))
+          retainedResources.set(file.path, { path: file.path, digest: file.digest })
+    }
+    // Parse and validate every addition before the single revision CAS. Failures leave the old draft intact.
+    context.assertCurrent()
+    await this.snapshotSource(base.source, context.assertCurrent)
+    assertTurn?.()
+    const draft = this.drafts.save(
+      context.scope,
+      {
+        id: input.id,
+        name: input.name,
+        revision: input.revision + 1,
+        baseSource: { pluginId: base.source.pluginId, digest: base.source.digest },
+        catalog,
+        files: [...files.values()],
+        retainedResources: [...retainedResources.values()],
+        replaces: modules
+          .filter((mod) => base.catalog.modules.some((original) => original.id === mod.id))
+          .map((mod) => mod.id),
+        workflowOrder: result.order
+      },
+      input.revision,
+      () => {
+        context.assertCurrent()
+        assertTurn?.()
+      }
+    )
+    this.deps.changed(threadId)
+    return {
+      ...result,
+      draft: { id: draft.id, revision: draft.revision, digest: draft.digest },
+      next: {
+        action: "preview",
+        requiredSourceModIds: [
+          ...result.order.filter((id) => base.catalog.modules.some((mod) => mod.id === id)),
+          ...(base.catalog.extensions ?? []).map((mod) => mod.id)
+        ],
+        requiredDraftModIds: [
+          ...modules.filter((mod) => result.order.includes(mod.id)).map((mod) => mod.id),
+          ...(catalog.extensions ?? []).map((mod) => mod.id)
+        ],
+        validation:
+          "request_trial with fresh native confirmation. Prior execution evidence is invalidated. Preserve every original extension; incompatible old state Mods require authoring an updated dynamic implementation and a real trial."
+      }
+    }
+  }
   async preview(
     threadId: string,
     input: Omit<BusinessModAssemblyRequest, "sources"> & {
@@ -702,7 +924,7 @@ export class CreatorBusinessService {
     )
     for (const source of sources)
       await this.modularization.verifyOriginal(source, context.assertCurrent)
-    const request = { ...input, sources: [...input.sources] }
+    const request = structuredClone(input)
     const draftRefs: Preview["drafts"] = []
     if ((input.drafts?.length ?? 0) > 4) throw Error("BUSINESS_DRAFT_LIMIT")
     for (const ref of input.drafts ?? []) {
@@ -718,6 +940,22 @@ export class CreatorBusinessService {
         throw Error("BUSINESS_DRAFT_BASE_CHANGED")
       await mkdir(this.deps.root, { recursive: true })
       const directory = await mkdtemp(join(this.deps.root, "draft-"))
+      const retainedFiles: DerivationFile[] = []
+      if (draft.retainedResources?.length) {
+        const originalSource = sources.find(
+          (source) =>
+            source.pluginId === draft.baseSource.pluginId &&
+            source.digest === draft.baseSource.digest
+        )
+        if (!originalSource) throw Error("BUSINESS_DRAFT_BASE_CHANGED")
+        const original = await this.snapshotSource(originalSource, context.assertCurrent)
+        for (const retained of draft.retainedResources) {
+          const file = original.files.find((file) => file.path === retained.path)
+          if (!file || file.digest !== retained.digest)
+            throw Error("BUSINESS_DRAFT_RETAINED_RESOURCE_CHANGED")
+          retainedFiles.push(file)
+        }
+      }
       const files = [
         {
           path: "plugin.json",
@@ -725,16 +963,60 @@ export class CreatorBusinessService {
         },
         { path: BUSINESS_MOD_MANIFEST, text: JSON.stringify(draft.catalog) },
         ...draft.files
-      ].map((file) => ({
-        path: file.path,
-        bytes: Buffer.from(file.text),
-        mode: process.platform === "win32" ? 0o666 : 0o644,
-        digest: createHash("sha256").update(file.text).digest("hex")
-      }))
+      ]
+        .map<DerivationFile>((file) => ({
+          path: file.path,
+          bytes: Buffer.from(file.text),
+          mode: process.platform === "win32" ? 0o666 : 0o644,
+          digest: createHash("sha256").update(file.text).digest("hex")
+        }))
+        .concat(retainedFiles)
       await writeDerivationFiles(directory, files)
       context.assertCurrent()
       const inspected = await this.deps.assembly.inspect(directory, owner, context.assertCurrent)
       request.sources.push({ inspectionId: inspected.id, modIds: ref.modIds })
+      if (draft.replaces?.length) {
+        const baseIndex = sources.findIndex(
+          (source) =>
+            source.pluginId === draft.baseSource.pluginId &&
+            source.digest === draft.baseSource.digest
+        )
+        if (baseIndex < 0) throw Error("BUSINESS_DRAFT_BASE_CHANGED")
+        request.replacements = [
+          ...(request.replacements ?? []),
+          ...draft.replaces.map((id) => ({
+            id,
+            sourceDigest: draft.baseSource.digest,
+            replacementSourceDigest: inspected.sourceDigest
+          }))
+        ]
+      }
+      if (draft.workflowOrder) {
+        if (request.order && !same(request.order, draft.workflowOrder))
+          throw Error("BUSINESS_WORKFLOW_CHANGED")
+        request.order = [...draft.workflowOrder]
+        const baseRef = request.sources.find(
+          (item) =>
+            input.sources.some((original) => original.inspectionId === item.inspectionId) &&
+            this.inspection(context.scope, item.inspectionId).source.digest ===
+              draft.baseSource.digest
+        )
+        if (!baseRef) throw Error("BUSINESS_DRAFT_BASE_CHANGED")
+        const original = this.inspection(context.scope, baseRef.inspectionId)
+        baseRef.modIds = [
+          ...new Set([
+            ...baseRef.modIds,
+            ...draft.workflowOrder.filter((id) =>
+              original.catalog.modules.some((mod) => mod.id === id)
+            ),
+            ...(original.catalog.extensions ?? []).map((mod) => mod.id)
+          ])
+        ]
+        const draftRef = request.sources.at(-1)!
+        draftRef.modIds = [
+          ...new Set([...draftRef.modIds, ...(draft.catalog.extensions ?? []).map((mod) => mod.id)])
+        ]
+      }
       draftRefs.push({ id: ref.id, revision: ref.revision, digest: draft.digest })
     }
     const view = await this.deps.assembly.preview(owner, request, context.assertCurrent)

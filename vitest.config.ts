@@ -68,6 +68,7 @@ export const VITEST_TEST_INCLUDE = [
 
 export const NATIVE_INTEGRATION_TESTS = [
   "src/main/agent/function-conversation-native-host.test.ts",
+  "src/main/agent/function-conversation-native-keeper.test.ts",
   "src/main/mods/v2/conversation-shared-native-host.test.ts"
 ]
 
@@ -79,7 +80,7 @@ export default defineConfig({
     }
   },
   test: {
-    // Preserve the Node-only suite and command-line file/name filters. These two
+    // Preserve the Node-only suite and command-line file/name filters. These
     // native graph suites need exclusive CPU while retaining their real 5s limits.
     environment: "node",
     projects: [

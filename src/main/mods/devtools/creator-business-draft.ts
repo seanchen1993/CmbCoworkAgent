@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import type { BusinessModCatalog } from "../../../shared/business-mods"
 import type { DevelopmentScope } from "../v2/development-session"
 import { businessModPath, parseBusinessModCatalog } from "../../plugins/business-mod-manifest"
+import { projectNodeAgentResources } from "../../plugins/project-agent-resources"
 
 export interface BusinessDraftSettings {
   getSetting(key: string, fallback?: string): string
@@ -15,6 +16,11 @@ export interface CreatorBusinessDraft {
   baseSource: { pluginId: string; digest: string }
   catalog: BusinessModCatalog
   files: Array<{ path: string; text: string }>
+  /** Only modules transformed against this immutable base, never kernel resources. */
+  replaces?: string[]
+  workflowOrder?: string[]
+  /** Immutable original bytes resolved again from the inspected base at preview, not author code. */
+  retainedResources?: Array<{ path: string; digest: string }>
 }
 interface State {
   version: 1
@@ -77,7 +83,7 @@ export class CreatorBusinessDrafts {
       !Number.isSafeInteger(input.revision) ||
       input.revision < 1 ||
       !Array.isArray(input.files) ||
-      !input.files.length ||
+      (!input.files.length && !input.retainedResources?.length) ||
       input.files.length > 32
     )
       throw Error("BUSINESS_DRAFT_INVALID")
@@ -91,6 +97,24 @@ export class CreatorBusinessDrafts {
       throw Error("BUSINESS_DRAFT_SOURCE_INVALID")
     const catalog = parseBusinessModCatalog(input.catalog)
     if (catalog.kernel || !catalog.kernelRef) throw Error("BUSINESS_DRAFT_KERNEL_REPLACEMENT")
+    if (
+      input.replaces &&
+      (!Array.isArray(input.replaces) ||
+        input.replaces.length > 32 ||
+        new Set(input.replaces).size !== input.replaces.length ||
+        input.replaces.some((id) => !catalog.modules.some((mod) => mod.id === id)))
+    )
+      throw Error("BUSINESS_DRAFT_REPLACEMENT_INVALID")
+    if (
+      input.workflowOrder &&
+      (!Array.isArray(input.workflowOrder) ||
+        input.workflowOrder.length > 32 ||
+        new Set(input.workflowOrder).size !== input.workflowOrder.length ||
+        input.workflowOrder.some(
+          (id) => typeof id !== "string" || !/^[a-zA-Z0-9][\w.-]{0,79}$/.test(id)
+        ))
+    )
+      throw Error("BUSINESS_DRAFT_REPLACEMENT_INVALID")
     const ids = [...catalog.modules, ...(catalog.extensions ?? [])].map((item) => item.id)
     const skillRoots = catalog.modules.map((mod) => mod.skill.entry.slice(0, -"SKILL.md".length))
     let total = 0
@@ -99,7 +123,15 @@ export class CreatorBusinessDrafts {
         const path = businessModPath(file.path)
         if (
           !skillRoots.some((root) => path.startsWith(root)) &&
-          !ids.some((id) => path.startsWith(`mods/business/${id}/`))
+          !ids.some((id) => path.startsWith(`mods/business/${id}/`)) &&
+          !catalog.modules.some(
+            (mod) =>
+              input.replaces?.includes(mod.id) &&
+              path.startsWith("skills/") &&
+              mod.skill.resources.some(
+                (resource) => path === resource || path.startsWith(`${resource}/`)
+              )
+          )
         )
           throw Error("BUSINESS_DRAFT_NAMESPACE")
         if (
@@ -119,12 +151,13 @@ export class CreatorBusinessDrafts {
       new Set(files.map((file) => file.path.toLowerCase())).size !== files.length
     )
       throw Error("BUSINESS_DRAFT_SOURCE_LIMIT")
-    // Every claimed resource must be materialized from this author document, never a host path.
+    // Every resource is author text or a digest-bound base reference, never an arbitrary host path.
     const required = [
       ...catalog.modules.flatMap((mod) => [
         mod.skill.entry,
         ...mod.skill.resources,
-        ...mod.resources
+        ...mod.resources,
+        ...projectNodeAgentResources(mod.node)
       ]),
       ...(catalog.extensions ?? []).flatMap((mod) => [
         mod.entry,
@@ -132,9 +165,29 @@ export class CreatorBusinessDrafts {
         ...(mod.skills ?? [])
       ])
     ]
+    const retainedResources = input.retainedResources?.map((file) => {
+      const path = businessModPath(file.path)
+      if (
+        !/^[a-f0-9]{64}$/.test(file.digest) ||
+        !required.some((root) => path === root || path.startsWith(`${root}/`)) ||
+        files.some((authored) => authored.path.toLowerCase() === path.toLowerCase())
+      )
+        throw Error("BUSINESS_DRAFT_RETAINED_RESOURCE_INVALID")
+      return { path, digest: file.digest }
+    })
+    if (
+      retainedResources &&
+      (retainedResources.length > 4096 ||
+        new Set(retainedResources.map((file) => file.path.toLowerCase())).size !==
+          retainedResources.length)
+    )
+      throw Error("BUSINESS_DRAFT_RETAINED_RESOURCE_INVALID")
     if (
       required.some(
-        (path) => !files.some((file) => file.path === path || file.path.startsWith(`${path}/`))
+        (path) =>
+          ![...files, ...(retainedResources ?? [])].some(
+            (file) => file.path === path || file.path.startsWith(`${path}/`)
+          )
       )
     )
       throw Error("BUSINESS_DRAFT_RESOURCE_MISSING")
@@ -144,7 +197,10 @@ export class CreatorBusinessDrafts {
       revision: input.revision,
       baseSource: { ...input.baseSource },
       catalog,
-      files
+      files,
+      ...(input.replaces?.length ? { replaces: [...input.replaces] } : {}),
+      ...(input.workflowOrder ? { workflowOrder: [...input.workflowOrder] } : {}),
+      ...(retainedResources?.length ? { retainedResources } : {})
     }
     return { ...data, digest: hash(data) }
   }

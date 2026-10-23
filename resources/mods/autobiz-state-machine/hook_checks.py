@@ -10,6 +10,8 @@ import re
 import subprocess
 import sys
 
+from journal import linked
+
 
 def _load(path, name):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -33,6 +35,58 @@ def _git(root, *args):
     if result.returncode != 0 or len(result.stdout) > 4 * 1024 * 1024:
         raise ValueError("AUTOBIZ_PERFORMANCE_GIT_SCOPE_UNRESOLVED")
     return result.stdout
+
+
+def validate_verified_candidate(source, workspace, feature, current_checkpoint, target_checkpoint,
+                                expected=None):
+    """Read-only equivalent of the original conditional verified-candidate Hook.
+
+    The original PostToolUse Hook can roll the live state back. A prepared Mod commit
+    must not run that side effect under its state locks: bind the decision bytes and
+    actual candidate digest, and reject a stale or changed candidate before writing.
+    """
+    source, workspace = Path(source).resolve(), Path(workspace).resolve()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", feature):
+        raise ValueError("AUTOBIZ_VERIFIED_CANDIDATE_FEATURE_INVALID")
+    sys.path.insert(0, str(source))
+    rules = _load(source / "hooks" / "verified_digest_guard.py", "mod_original_verified_digest")
+    receipt = {"id": "original-verified-candidate", "validatorVersion": "original-234/v1",
+               "currentCheckpoint": current_checkpoint, "targetCheckpoint": target_checkpoint,
+               "result": "not-applicable", "decisionDigest": None}
+    if (current_checkpoint not in rules.VERIFIED_CHECKPOINTS
+            and target_checkpoint not in rules.VERIFIED_CHECKPOINTS):
+        receipt["reason"] = "outside-verified-checkpoints"
+    else:
+        decision = workspace / ".autobizdevops" / "features" / feature / "VERIFY_DECISION.json"
+        if any(linked(path) for path in [decision, *decision.parents]):
+            raise ValueError("AUTOBIZ_VERIFIED_CANDIDATE_INPUT_INVALID")
+        if not decision.exists():
+            receipt["reason"] = "decision-absent"
+        else:
+            if not decision.is_file() or decision.stat().st_size > 4 * 1024 * 1024:
+                raise ValueError("AUTOBIZ_VERIFIED_CANDIDATE_INPUT_INVALID")
+            before = decision.read_bytes()
+            receipt["decisionDigest"] = hashlib.sha256(before).hexdigest()
+            try:
+                value = json.loads(before)
+            except (ValueError, UnicodeError):
+                value = None
+            declared = value.get("diffDigest") if isinstance(value, dict) else None
+            if not isinstance(declared, str) or not declared:
+                receipt["reason"] = "decision-without-original-digest"
+            else:
+                actual = rules.compute(workspace, feature)
+                if not isinstance(actual, str) or not actual:
+                    raise ValueError("AUTOBIZ_VERIFIED_CANDIDATE_DIGEST_INVALID")
+                receipt.update(result="passed" if actual == declared else "failed",
+                               expectedDigest=declared, actualDigest=actual)
+            if linked(decision) or decision.read_bytes() != before:
+                raise ValueError("AUTOBIZ_VERIFIED_CANDIDATE_CHANGED")
+    if expected is not None and receipt != expected:
+        raise ValueError("AUTOBIZ_VERIFIED_CANDIDATE_CHANGED")
+    if receipt["result"] == "failed":
+        raise ValueError("AUTOBIZ_VERIFIED_CANDIDATE_STALE")
+    return receipt
 
 
 def validate_transition_hooks(source, workspace, feature, target):

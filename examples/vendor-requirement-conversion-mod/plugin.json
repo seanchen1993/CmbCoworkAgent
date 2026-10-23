@@ -1,0 +1,5 @@
+{
+  "name": "vendor-requirement-conversion-mod",
+  "version": "1.0.0",
+  "description": "独立供应商场景：把原始需求转换成结构化资料，再交给资料整理步骤。"
+}
