@@ -88,6 +88,7 @@ import { ThreadGroupDeleteDialog } from "@/components/sidebar/ThreadGroupDeleteD
 import { KnowledgePreviewPanel } from "@/components/harness-board/KnowledgePreviewPanel"
 import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
 import { ArtifactAccumulationButton } from "./ArtifactAccumulationButton"
+import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
 import { ManagedRunHistory } from "@/components/harness-board/ManagedRunHistory"
 import {
   createBoundedLatestTaskQueue,
@@ -463,6 +464,7 @@ interface ProjectFeatureSessionGroup {
   slug: string
   title: string
   sessions: HarnessSessionBinding[]
+  managedRunThreadId?: string
   section: ProjectFeatureSessionGroupSection
   deleted?: boolean
 }
@@ -7339,8 +7341,10 @@ function FeatureDetailPage({
                       updatingManagedRun
                     }
                   >
-                    {(openingManagedRunDialog || updatingManagedRun) && (
+                    {openingManagedRunDialog || updatingManagedRun ? (
                       <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <ManagedRunIcon />
                     )}
                     {managedRunIsRunning ? "停止托管运行" : "托管运行当前特性"}
                   </Button>
@@ -7988,7 +7992,8 @@ function ProjectFeatureSidebar({
   const renderThreadItem = (
     thread: Thread,
     hoverTitle: string,
-    onSelect: () => void
+    onSelect: () => void,
+    isManagedRunning = false
   ): React.JSX.Element => {
     const threadState = allThreadStates[thread.thread_id]
     const isLoading =
@@ -8011,6 +8016,7 @@ function ProjectFeatureSidebar({
         isSelected={highlightThreadId === thread.thread_id}
         isEditing={editingThreadId === thread.thread_id}
         isUnread={unreadIds.has(thread.thread_id)}
+        isManagedRunning={isManagedRunning}
         hasPendingUserInput={hasPendingUserInput}
         editingTitle={editingTitle}
         hoverTitle={hoverTitle}
@@ -8459,7 +8465,8 @@ function ProjectFeatureSidebar({
                                           session.slug,
                                           thread.thread_id,
                                           projectDeleted
-                                        )
+                                        ),
+                                      featureGroup.managedRunThreadId === thread.thread_id
                                     )
                                   })}
                                   {renderSessionVisibilityControls(
@@ -9913,12 +9920,19 @@ export function HarnessBoardView({
 
   useEffect(() => {
     return window.api.harnessBoard.onManagedRunChanged((event) => {
-      if (event.run.status === "running") {
-        patchCachedProjectRuns(event.projectId, (run) => {
-          if (run.slug !== event.featureId || run.managedRunStatus === event.run.status) return run
-          return { ...run, managedRunStatus: event.run.status }
-        })
-      } else {
+      const managedRunThreadId =
+        event.run.status === "running" ? event.run.currentSession?.threadId : undefined
+      patchCachedProjectRuns(event.projectId, (run) => {
+        if (
+          run.slug !== event.featureId ||
+          (run.managedRunStatus === event.run.status &&
+            run.managedRunThreadId === managedRunThreadId)
+        ) {
+          return run
+        }
+        return { ...run, managedRunStatus: event.run.status, managedRunThreadId }
+      })
+      if (event.run.status !== "running") {
         void loadProjectDetail(event.projectId, { showLoading: false, reportError: false })
       }
 
@@ -11234,6 +11248,10 @@ export function HarnessBoardView({
           slug,
           title: slug,
           sessions,
+          managedRunThreadId: deleted
+            ? undefined
+            : detailsByProjectId[project.projectId]?.runs.find((run) => run.slug === slug)
+                ?.managedRunThreadId,
           section,
           ...(deleted ? { deleted: true } : {})
         }))

@@ -809,6 +809,7 @@ export interface HarnessFeatureSummary {
   featureStatus: HarnessFeatureStatus
   featureStatusLabel?: string
   managedRunStatus?: ManagedRunViewStatus
+  managedRunThreadId?: string
   /**
    * Feature-level status for summary cards. Plugins can provide it explicitly;
    * otherwise the framework derives it from the current node and workflow.
