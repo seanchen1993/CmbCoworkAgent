@@ -313,6 +313,63 @@ describe("authenticated IM on the existing Bot host", () => {
     expect(f.service.history(f.bot.id, dm.id).items).toEqual([])
   })
 
+  it("notifies the owner once when a desktop main turn is interrupted by restart", async () => {
+    const f = fixture(),
+      dm = await f.binding("dm")
+    f.service.disconnected()
+    const task = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "restart-main",
+      message: "App work"
+    })
+    f.store.transition(task.id, "running")
+    const reopened = new BotStore(f.db)
+    reopened.recover()
+    const replies = reopened.im.history(f.bot.id, botImScopeId("realm", "owner", dm.id)).items
+    expect(replies).toHaveLength(1)
+    expect(replies[0]).toMatchObject({ kind: "bot", state: "pending" })
+    expect(replies[0].text).toContain("应用已重启")
+    reopened.recover()
+    expect(reopened.im.history(f.bot.id, botImScopeId("realm", "owner", dm.id)).items).toHaveLength(
+      1
+    )
+    expect(f.calls).toHaveLength(0)
+  })
+
+  it("reports a queued personal work cancellation to the App after its IM binding is revoked", async () => {
+    const f = fixture(),
+      dm = await f.binding("dm"),
+      input = f.event(dm, "revoke-queued-work", "create")
+    const event = f.store.imGateway.receive("realm", "owner", input)
+    f.store.imGateway.settle(event.id, "active", undefined, Date.now() + 90000)
+    const parent = f.store.im.inject({
+      simulation: true,
+      bindingId: event.bindingId,
+      eventId: event.id,
+      messageId: input.event.platformMessageId,
+      senderId: input.route.senderId,
+      text: "create",
+      mentionsBotIds: [f.bot.id]
+    })
+    f.store.imGateway.settle(event.id, "active", parent.taskId!)
+    f.store.transition(parent.taskId!, "running")
+    const work = f.store.createWork(
+      { botId: f.bot.id, operationId: "cancel-work", title: "通知", goal: "notice" },
+      { taskId: parent.taskId!, callId: "create", key: "create" }
+    )
+    await f.service.revoke(f.bot.id, dm.id, dm.version)
+    expect(f.store.getTask(work.task.id).state).toBe("cancelled")
+    f.store.flushReplies()
+    const reports = f.store
+      .recentTasks()
+      .filter(
+        (task) => task.origin.kind === "work_result" && task.origin.executionTaskId === work.task.id
+      )
+    expect(reports).toHaveLength(1)
+    expect(JSON.parse(reports[0].message)).toMatchObject({ executionState: "cancelled" })
+    expect(f.client.submitReply).not.toHaveBeenCalled()
+  })
+
   it("keeps the same outbox identity on recovery and mirrors one physical reply for steered App inputs", async () => {
     const f = fixture(),
       dm = await f.binding("dm")

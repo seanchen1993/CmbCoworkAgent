@@ -257,6 +257,17 @@ export class BotMockChannelStore {
       this.run("UPDATE bot_mock_bindings SET revoked=1,grant_version=grant_version+1 WHERE id=?", [
         id
       ])
+      // Personal works also belong to the desktop. Settle before the generic
+      // queue fence so their cancellation reaches the existing main-thread
+      // result outbox, while the revoked IM route remains unable to deliver.
+      if (this.transport === "im")
+        for (const task of this.rows(
+          `SELECT id FROM bot_tasks WHERE state='queued' AND work_id IS NOT NULL
+           AND json_extract(mock_source_json,'$.bindingId')=?
+           AND json_extract(mock_source_json,'$.personal')=1`,
+          [id]
+        ))
+          this.owner.settle(String(task.id), "cancelled", "IM 绑定已撤销，未执行此任务。")
       this.run(
         "UPDATE bot_tasks SET state='cancelled',error='模拟绑定已撤销',updated_at=? WHERE state='queued' AND json_extract(mock_source_json,'$.bindingId')=?",
         [this.now(), id]

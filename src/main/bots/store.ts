@@ -2195,7 +2195,9 @@ export class BotStore {
         `SELECT id FROM bot_tasks
          WHERE (state IN (?, ?) OR (state='queued' AND continuation_checkpoint_id IS NOT NULL))
          AND ((json_extract(origin_json,'$.kind')='bot' AND json_extract(origin_json,'$.expectsReply')=1)
-           OR json_extract(origin_json,'$.groupId') IS NOT NULL OR work_id IS NOT NULL)`,
+           OR json_extract(origin_json,'$.groupId') IS NOT NULL OR work_id IS NOT NULL
+           OR (mock_source_json IS NULL AND EXISTS(
+             SELECT 1 FROM bot_im_personal_links l WHERE l.bot_id=bot_tasks.bot_id)))`,
         [...ACTIVE_STATES]
       )
       const reason = "应用已重启。请检查已有结果，再决定是否继续，避免重复执行外部操作。"
@@ -2209,6 +2211,10 @@ export class BotStore {
       // never replaying the interrupted work.
       for (const row of awaitingOutcomes) {
         const task = this.getTask(String(row.id))
+        // Recovery fences the state in bulk, so normal settle() would consider
+        // this already settled. Persist the main-thread IM outcome in this same
+        // transaction; the mirror still checks the original binding time/scope.
+        this.im.mirrorPersonal(task, reason)
         if (task.workId) {
           this.recordWorkResult(task)
           this.noteWorkActivity(task.workId, reason, true)

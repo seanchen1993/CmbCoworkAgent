@@ -362,6 +362,84 @@ describe("Bot Runtime integration", () => {
     expect(fixture.browserTools).toHaveBeenCalled()
   })
 
+  it("keeps the personal task workspace and browser scope when switching between IM and desktop", async () => {
+    const work: BotWorkItem = {
+      id: "shared-work",
+      botId: bot.id,
+      threadId: "work-thread",
+      parentThreadId: bot.threadId,
+      title: "Plan",
+      goal: "Write plan",
+      audienceKey: "desktop",
+      state: "active",
+      version: 1,
+      threadInitialized: true,
+      createdAt: 1,
+      updatedAt: 1,
+      executionState: null,
+      pendingPeers: 0,
+      backgroundBusy: false,
+      workspace: { kind: "directory", path: "/synthetic/selected-project" }
+    }
+    const nativeMetadata = {
+      ...metadata(),
+      botWorkId: work.id,
+      botAudienceKey: "desktop",
+      workspacePath: work.workspace!.path
+    }
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(nativeMetadata) })
+    const source: BotMockExecution["source"] = {
+      transport: "im",
+      personal: true,
+      bindingId: "dm",
+      grantVersion: 1,
+      conversationId: "dm-channel",
+      audienceKey: "desktop",
+      eventId: "event",
+      messageId: "message",
+      senderId: "owner"
+    }
+    const incoming: BotTask = {
+      ...task,
+      threadId: work.threadId,
+      workId: work.id,
+      mockSource: source,
+      origin: { kind: "work", sourceTaskId: "im-main" }
+    }
+    const im = port(work, {
+      source,
+      threadId: work.threadId,
+      threadInitialized: true,
+      label: "本人"
+    })
+    const lease = im.acquire(bot, incoming, work)!
+    await expect(lease.execute(new AbortController().signal, vi.fn())).resolves.toMatchObject({
+      state: "completed"
+    })
+    lease.release()
+    const remote = fixture.start.mock.calls[0][2]
+    expect(remote.additionalTools).toEqual(["works"])
+    expect(remote.remotePolicy.disableMcpTools).toBe(true)
+    expect(fixture.browserTools).not.toHaveBeenCalled()
+    expect(
+      remote.verifyResolvedThread({ metadata: nativeMetadata, workspacePath: work.workspace!.path })
+    ).toBeNull()
+    expect(JSON.parse(fixture.update.mock.calls[0][1].metadata).botMockBindingId).toBeUndefined()
+
+    await port(work)
+      .acquire(bot, { ...task, id: "desktop", threadId: work.threadId, workId: work.id }, work)!
+      .execute(new AbortController().signal, vi.fn())
+    expect(fixture.start.mock.calls[1][2].additionalTools).toContain("owned-browser")
+    expect(fixture.browserTools.mock.calls[0][4]).toBe(`work-${work.id}--${bot.id}`)
+    expect(fixture.deliveryTools.mock.calls[0][0]).toBe(work.workspace!.path)
+    expect(
+      fixture.start.mock.calls[1][2].verifyResolvedThread({
+        metadata: nativeMetadata,
+        workspacePath: work.workspace!.path
+      })
+    ).toBeNull()
+  })
+
   it("reports a linked task result in the main conversation without running tools or importing its workspace", async () => {
     const linked: BotWorkItem = {
       id: "linked",
