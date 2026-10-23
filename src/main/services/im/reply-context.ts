@@ -113,9 +113,10 @@ export function imProjectModeReplyPrefix(input: {
     `特性：【${readableLabel(input.featureName, "未知")}】`,
     `当前阶段：${readableLabel(input.nodeName, "未知")}`,
     `阶段状态：${readableLabel(input.nodeStatus, "未知")}`,
-    ...(input.switched && input.continuationHint ? [input.continuationHint] : []),
-    `模型返回：`,
-    ""
+    ...(input.switched && input.continuationHint ? ["", "系统提示：", input.continuationHint] : []),
+    "",
+    "──────────",
+    "以下是该会话的回复："
   ].join("\n")
 }
 

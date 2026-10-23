@@ -6,7 +6,6 @@ import {
   type ImGatewayClientPort,
   type ImReplySubmissionResult
 } from "./gateway-client"
-import { conversationSwitchedToText } from "./withheld-text-notices"
 
 export interface ImReplySendError extends Error {
   /** True when the gateway may already have durably accepted the reply. */
@@ -28,9 +27,6 @@ function toReply(record: ImReplyOutboxRecord, type: RemoteImReplyFormat): Remote
     message: { type, content: record.content }
   }
 }
-
-const warnReplyMode = (message: string, error?: unknown): void =>
-  console.warn(`[IM] Reply delivery: ${message}`, error ?? "")
 
 function errorDetails(error: unknown): {
   reasonCode: string
@@ -62,8 +58,6 @@ export class ImReplyClient {
     private readonly gateway: ImGatewayClientPort = unavailableImGatewayClient,
     private readonly eventStore: ImEventStore = imEventStore,
     private readonly now: () => number = Date.now,
-    private readonly usesTextReplies: (conversationKey: string) => boolean = (conversationKey) =>
-      conversationSwitchedToText(conversationKey, warnReplyMode),
     private readonly afterDrain?: () => void
   ) {}
 
@@ -127,13 +121,13 @@ export class ImReplyClient {
   /**
    * Decided per send, not when the reply was queued: the connection a reply
    * leaves on — and so what the gateway accepts — can differ from the one it
-   * was queued under, and /文字模式 covers everything not yet sent. Checked in
-   * this order so the reply mode is only read when it can make a difference.
+   * was queued under. /文字模式 changes forms and notices, not the Agent's
+   * answer: headings, lists and code should still render in that mode.
    */
   private wireFormat(record: ImReplyOutboxRecord): RemoteImReplyFormat {
     if (record.contentFormat !== "markdown") return "text"
     if (this.gateway.supportsMarkdownReplies?.() !== true) return "text"
-    return this.usesTextReplies(record.conversationKey) ? "text" : "markdown"
+    return "markdown"
   }
 
   /**

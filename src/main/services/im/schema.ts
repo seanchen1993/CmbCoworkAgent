@@ -52,11 +52,9 @@ function rebuildWithoutLegacyColumn(input: {
 }
 
 /**
- * How this conversation is written to: gates as interactive cards and Agent
- * answers as Markdown cards, or everything as the plain text that predates
- * them — gates with their short codes, answers exactly as the Agent wrote them.
- * Cards are the default; the reader chooses text with /文字模式 when the
- * Zhaohu client cannot show a card in full.
+ * How forms and gates are written to this conversation: interactive cards,
+ * or plain text with short codes when /文字模式 is enabled. Agent answers
+ * retain Markdown formatting and session-switch buttons in either mode.
  *
  * ensureColumn below is what guarantees the column: it runs on every start,
  * after the device_epoch rebuild, so it reaches fresh, existing and rebuilt
@@ -70,8 +68,8 @@ const CONVERSATION_REPLY_MODE_DECLARATION =
 /**
  * What a queued reply's content is: plain text, or Markdown the gateway may
  * render as a card. Markdown only permits the card — the drainer still sends it
- * as text unless the connection agreed to markdown-reply-v1 and the
- * conversation is not in /文字模式. Guaranteed the same way as reply_mode, by
+ * as text unless the connection agreed to markdown-reply-v1. Form reply mode
+ * does not change an Agent answer's formatting. Guaranteed like reply_mode, by
  * ensureColumn after the rebuild; rows queued before it existed are text.
  */
 const REPLY_CONTENT_FORMAT_DECLARATION =

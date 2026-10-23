@@ -1416,6 +1416,8 @@ async function testTheTextModeCommandIsASwitch(): Promise<void> {
     const on = await sendCommand(router, "/文字模式")
     assert.equal(context.conversations.getReplyMode("conversation-1"), "text")
     assert(on.includes("已切换为文字模式"), on)
+    assert(on.includes("回复仍保留排版"), on)
+    assert(on.includes("保留切换按钮"), on)
     assert(on.includes("再发一次 /文字模式 可切回卡片"), on)
     assert.deepEqual(
       resendCalls,

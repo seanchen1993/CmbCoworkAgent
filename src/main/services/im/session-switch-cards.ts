@@ -105,7 +105,6 @@ export class ImSessionSwitchCards {
           !conversation ||
           conversation.state !== "active" ||
           conversation.principalId !== link.principal_id ||
-          conversations.getReplyMode(link.conversation_key) === "text" ||
           selected?.snapshot.threadId === link.thread_id
         ) {
           card.state = "skipped"

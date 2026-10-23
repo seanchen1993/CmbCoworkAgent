@@ -316,7 +316,7 @@ export class ImCommandRouter {
       "/收件箱 — /默认 的兼容指令",
       "/当前 — 查看消息接收目标、正在运行的会话和排队情况",
       "/停止 — 停止当前招乎主任务，不清空排队消息；后台子任务请在桌面停止",
-      "/文字模式 开 — 卡片显示不全时改用文字；/文字模式 关 恢复卡片",
+      "/文字模式 开 — 表单显示不全时改用文字，回复保留排版和切换按钮；/文字模式 关 恢复表单卡片",
       "",
       "技能与长期任务：",
       "/技能 — 查看当前会话可用技能",
@@ -776,7 +776,7 @@ export class ImCommandRouter {
     if (requested === "card") {
       if (current === "card") return "当前已经是卡片模式。"
       await this.dependencies.conversations.setReplyMode(conversationKey, "card")
-      return "已切回卡片模式：之后的回答、审批、提问等以卡片发送；已经用文字发出的不会再补发卡片。"
+      return "已切回卡片模式：审批、提问等恢复卡片；回复继续保留排版和会话切换按钮。已经用文字发出的不会再补发卡片。"
     }
     if (current !== "text") {
       await this.dependencies.conversations.setReplyMode(conversationKey, "text")
@@ -794,7 +794,7 @@ export class ImCommandRouter {
     return [
       current === "text"
         ? "当前已经是文字模式。"
-        : "已切换为文字模式：之后的回答原样以文字发送，审批、提问、门禁、托管介入也以文字发送，带短码。",
+        : "已切换为文字模式：审批、提问、门禁、托管介入以文字发送，带短码；回复仍保留排版，其他会话的回复后保留切换按钮。",
       ...(result.resent > 0 ? [`当前有 ${result.resent} 条待处理，已用文字重发。`] : []),
       ...(resendThrew
         ? ["重发待处理时出错，可发送 /文字模式 开 再试一次。"]

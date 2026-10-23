@@ -69,7 +69,7 @@ export class ImUnifiedBotService {
           command: { name: "switch_target", argument: `@${input.code}` }
         })
     })
-    this.replyClient = new ImReplyClient(gateway, undefined, undefined, undefined, () =>
+    this.replyClient = new ImReplyClient(gateway, undefined, undefined, () =>
       this.sessionSwitchCards.schedule()
     )
     this.unregisterSessionSwitchCards = imCardReceiptRouter.registerSessionSwitchCards(

@@ -53,6 +53,7 @@ async function fixture() {
     sendAcknowledgement: vi.fn(async () => undefined),
     acquireExecutionPermit: vi.fn(),
     renewExecutionPermit: vi.fn(),
+    supportsMarkdownReplies: (): boolean => true,
     submitReply: vi.fn<ImGatewayClientPort["submitReply"]>(async () => {
       order.push("reply")
       return { state: "accepted" as const }
@@ -81,13 +82,7 @@ async function fixture() {
     return instance
   }
   const cards = makeCards()
-  const client = new ImReplyClient(
-    gateway,
-    events,
-    persistence.now,
-    () => false,
-    () => cards.schedule()
-  )
+  const client = new ImReplyClient(gateway, events, persistence.now, () => cards.schedule())
   const prepare = (deliveryId = "reply-1", threadId = "source-thread") =>
     events.sessionLinks.prepare({
       principalId: "user",
@@ -308,33 +303,61 @@ describe("App-owned switch cards on the unchanged gateway contract", () => {
     ])
   })
 
-  it.each(["text", "already-current"])(
-    "keeps the code without sending a card for %s",
-    async (mode) => {
+  it.each([true, false])(
+    "sends formatted replies then a usable switch button in text mode (Markdown support: %s)",
+    async (supportsMarkdown) => {
       const context = await fixture()
       const code = context.prepare()
-      await context.enqueue()
-      if (mode === "text") await context.conversations.setReplyMode("chat", "text")
-      else
-        await context.conversations.registerTarget(
-          "chat",
-          {
-            kind: "thread",
-            targetId: "source",
-            threadId: "source-thread",
-            grantId: "grant",
-            grantVersion: 1,
-            title: "同名",
-            workspacePath: "/repo"
-          },
-          { activate: true }
-        )
+      await context.conversations.setReplyMode("chat", "text")
+      context.gateway.supportsMarkdownReplies = () => supportsMarkdown
+      await context.events.enqueueProactiveReplies(
+        buildImProactiveReplies({
+          deliveryId: "reply-1",
+          conversationKey: "chat",
+          text: "# 完成\n\n**结果**\n\n- 第一项\n- 第二项\n\n```ts\nconst done = true\n```",
+          format: "markdown"
+        })
+      )
       await context.client.sendPending()
       await context.cards.flush()
-      expect(context.gateway.sendCard).not.toHaveBeenCalled()
-      expect(context.events.sessionLinks.get(code)?.thread_id).toBe("source-thread")
+      expect(context.gateway.submitReply.mock.calls[0][0].message).toMatchObject({
+        type: supportsMarkdown ? "markdown" : "text",
+        content: expect.stringContaining("# 完成\n\n**结果**")
+      })
+      expect(context.order).toEqual(["reply", "card"])
+      expect(await context.cards.handleReceipt(context.receipt())).toContain("已切换")
+      await context.cards.flush()
+      expect(context.switchSession).toHaveBeenCalledExactlyOnceWith({
+        principalId: "user",
+        conversationKey: "chat",
+        code
+      })
+      expect(context.gateway.updateCard).toHaveBeenCalledTimes(1)
     }
   )
+
+  it("keeps the code without sending a card when the source is already current", async () => {
+    const context = await fixture()
+    const code = context.prepare()
+    await context.enqueue()
+    await context.conversations.registerTarget(
+      "chat",
+      {
+        kind: "thread",
+        targetId: "source",
+        threadId: "source-thread",
+        grantId: "grant",
+        grantVersion: 1,
+        title: "同名",
+        workspacePath: "/repo"
+      },
+      { activate: true }
+    )
+    await context.client.sendPending()
+    await context.cards.flush()
+    expect(context.gateway.sendCard).not.toHaveBeenCalled()
+    expect(context.events.sessionLinks.get(code)?.thread_id).toBe("source-thread")
+  })
 
   it("checks the click's owner, route, tag and interaction ID before switching", async () => {
     const context = await fixture()

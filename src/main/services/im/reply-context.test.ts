@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest"
+import { createElement } from "react"
+import { renderToStaticMarkup } from "react-dom/server"
+import Markdown from "react-markdown"
 import {
   buildImReplyContinuationHint,
   imProjectModeReplyPrefix,
@@ -76,8 +79,37 @@ describe("instructions for a push from another session", () => {
       switched: true,
       continuationHint: hint
     })
-    expect(prefix.indexOf(hint)).toBeLessThan(prefix.indexOf("模型返回："))
+    expect(prefix.indexOf(hint)).toBeLessThan(prefix.indexOf("以下是该会话的回复："))
     expect(prefix).toContain("（非当前绑定会话）")
+  })
+
+  it("keeps project metadata and switch instructions compact while rendering the answer", () => {
+    const hint = buildImReplyContinuationHint({
+      switched: true,
+      kind: "feature",
+      sessionCode: "ABCDEFGH"
+    })!
+    const prefix = imProjectModeReplyPrefix({
+      projectName: "支付",
+      featureName: "对账",
+      nodeName: "Dev-代码实现",
+      nodeStatus: "进行中",
+      switched: true,
+      continuationHint: hint
+    })
+    const answer = "# 一级标题\n\n**加粗文字**\n\n- 列表项\n\n```ts\nconst value = 1\n```"
+    const [message] = segmentImMarkdownText(answer, { prefix })
+    expect(message).toContain("项目：【支付】  \n特性：【对账】")
+    expect(message).toContain("系统提示：  \n直接回复")
+    expect(message).toContain("──────────  \n以下是该会话的回复：\n\n# 一级标题")
+    expect(message.endsWith(answer)).toBe(true)
+    const html = renderToStaticMarkup(createElement(Markdown, null, message))
+    expect(html).toContain("项目：【支付】<br/>\n特性：【对账】")
+    expect(html).toContain("<p>系统提示：<br/>")
+    expect(html).toContain("<h1>一级标题</h1>")
+    expect(html).toContain("<strong>加粗文字</strong>")
+    expect(html).toContain("<li>列表项</li>")
+    expect(html).toContain('<code class="language-ts">const value = 1')
   })
 
   it("adds no switch-back instructions to the bound session or pending gates", () => {
