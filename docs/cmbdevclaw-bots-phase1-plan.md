@@ -3143,3 +3143,53 @@ Bots 工作区（复用消息、文件、审批等组件）
 - 参考：Grok `host/groups/group-chat.ts:15/17`、`host/agents/agent-messaging.ts`明确发信和用户可见交付区别；CMB `store.ts`既有显式@handoff选择。证据`quality-review/1019FB-complete-comparison/group-time-*`。无commit/push。
 
 - 1020V复验失败保留：原群原问法真实M2.7产生message 5d4600ac…，仍bot_delegate、等待确认、同伴报时、再次转述共四条；活动任务/讨论游标均结束，没有重复执行命令，但展示与沟通节奏未对齐。142项通过不代替模型验收。仅提示尝试已原样撤回，与`group-time-prompt-before.ts`逐字节相同；未改Store/Runtime/工具能力、未隐藏回执/自动合并文字，不计修复通过。下一步先收敛群公开接力与内部委派展示的最小方案，保持原任务/文件交付能力；不靠删除功能或泛化语义去重解决。
+
+### 2026-10-23 用户工作流长时间等待排查（1023DB）
+
+- 用户要求先确认实现缺陷，再做最小修复；先前将“确认等锁”直接称为“确认代码 bug”的判断撤回。现场 `wf_2eacea2d5356` 实际于10月22日17:10:28启动、21:08:12中止，首批读取后来完成，不能把截图中的0/6当作永久死锁。
+- 两条 `grep -rn ... . | grep -v node_modules` 各耗尽原1200秒预算：后置过滤不排除遍历，搜索进入隐藏依赖备份；元数据样本中存在大量云端占位文件，但没有当时的文件级系统调用证据，不能把具体阻塞文件归因于iCloud。缩小到src/scripts后已查到结果，随后再次扩大范围且漏掉答案所在的.ts配置。前台`time echo`等锁1,070,415ms，实际执行约40ms；进程超时退出、锁释放后继续，无本案残留进程证据。
+- 系统pmset及powerd记录独立确认：18:18:51合盖睡眠，19:09:20恢复完整唤醒，覆盖模型请求日志约52分钟间隙的绝大部分；19:10:34记忆子任务因`terminated`重试。不能把这一时间间隙判成持续无token、模型流死锁或超时护栏失效，也不为此新增全局网络或长任务硬时限。
+- 脚本启动8个Read与3个Critique；记忆重试后成功，唯一一次8192-token结构化输出截断后缩短即通过，没有schema无限重试。测试评审持续扩展检查、未调用结构化返回，最终达到2000个图执行步骤；步骤不等于工具调用次数。任务规划、搜索范围及收尾质量不合格的记录保留，不把排查结论计为任务交付通过。
+- 真实锁/中间件AST与实际分类器的外部确定性复现通过：普通显式Workflow与Bot自动Workflow在同队列均等待，不同队列可运行，释放后各执行一次；这是源码调度复现，不是原工作台真实模型/UI同题验收。普通normal默认不开放Workflow，Bot normal自动开放为首版既定功能；相关锁/分类/父队列早于Bot及本轮c0a995254。Grok参考源码的Shell等待、首输出保护与当前激活路径分别核对，未把未激活helper或首输出期限说成官方流闲置超时保证。
+- 证据保存在预览外部`quality-review/1020W-source-audit/1023DB-user-workflow-stall/`：`diagnosis-readonly.json`、`shell-scan-diagnosis.json`、`model-and-subagent-readonly-audit.json`、`old-policy-lock-repro.{cjs,json}`及`system-sleep-wake-evidence.log`。本轮只更新此排查记录，未改生产代码、应用状态、权限、并发分类或长任务预算；未commit/push。当前证据不支持核心代码修复，后续须有具体可复现的实现反例才改；原153/201完成数不增加。
+- 用户要求补查本地Claude Code 2.1.88解包分析源码：`src/query.ts:563`每轮新建StreamingToolExecutor；`src/services/tools/StreamingToolExecutor.ts:129–148`只按本实例工具状态判并发；`src/tools/AgentTool/runAgent.ts:700/748`创建子上下文并单独query，父子不共用该执行器。真实类的外部定向验证确认同实例unsafe串行、不同实例可重叠。Bash的`isConcurrencySafe/isReadOnly`（BashTool.tsx:434–440）通过全部子命令只读校验决定并发，并非所有管道均一律独占。因此CMB现场跨前台/Workflow子代理共享队列的范围更大，不能把它说成Claude Code同样采用的必要全局规则。
+- Claude长Bash的前台等待与进程生命周期分离：`utils/timeouts.ts:2–3`默认120秒、标称最大600秒；BashTool.tsx:965–970在允许后台时转后台，:989–1000显式后台返回任务ID，:1077–1099后台化后结束前台工具调用；ShellCommand.ts:349–363保留原进程/输出，LocalShellTask等待结束后清理并通知。命令自身文件/Git锁及资源仍存在。15秒转后台仅受KAIROS开关控制，不能说是默认行为；本地有缺失模块桩，不冒充官方二进制同题实测。此次仍仅对照源码，未据此删锁、移植调度器或修改生产代码。
+
+### 2026-10-23 桌面其他Coding Agent命令调度对照（1023DB续）
+
+本项仅抽查给定本地checkout的核心执行链，不冒充全部项目、全部后端或官方应用实测；不增加153/201案例计数。
+
+| 项目／版本 | 核心调度边界与长命令行为 | 具体源码位置 |
+| --- | --- | --- |
+| Codex `954fa9057bf3` | 每次sampling新建ToolCallRuntime的读写门；exec_command/write_stdin支持并发，默认yield约10秒后可返回process_id，进程继续；子Session自有管理器。同一终端交互另有进程级锁，非工作区全程锁。 | `codex/codex-rs/core/src/tools/parallel.rs:62/173/217`、`session/turn.rs:1559`、`tools/handlers/unified_exec/exec_command.rs:142`、`unified_exec/process_manager.rs:597/882` |
+| OpenCode 1.14.23 `d89bfc32a` | 运行状态按sessionID分开，子任务新建session；内建Bash独立spawn并等待退出/取消/超时，默认120秒，取消或超时终止；该Bash无后台/yield参数。没有把父子工具纳入同一工作区RW锁的接线。 | `opencode/packages/opencode/src/session/run-state.ts:34/48`、`session/prompt.ts:413`、`tool/task.ts:67/120`、`tool/bash.ts:438–517` |
+| oh-my-pi 15.4.1 `774d32c` | Bash标exclusive但工具Promise队列限于当前消息批次；native shell确有单实例全程Mutex。后台用独立`${sessionId}:async:${jobId}`，前台用sessionId，避免后台占住前台同一个shell。显式后台返回jobId；自动后台默认关闭，开启后默认60秒。 | `oh-my-pi/packages/agent/src/agent-loop.ts:917/1192`、`packages/coding-agent/src/tools/bash.ts:231/368/563/816`、`config/settings-schema.ts:2138`、`crates/pi-shell/src/shell.rs:251–284` |
+| Hermes `835c3dd038d9` | Local环境锁仅保护缓存/创建；命令独立spawn/wait。显式后台及新消息yield将同一个进程转交registry，返回session及部分输出，不重跑命令；父子taskID不同，可共享cwd，取消沿任务关系清理。 | `hermes-agent/tools/terminal_tool.py:1185/1236`、`tools/environments/base.py:505/661`、`tools/terminal_tool_background.py:142/251`、`tools/delegate_tool_child_run.py:747` |
+| ForgeCode `b49f0ed12e3e` | 反例保留：同一Infra及其子Agent的Shell共享Mutex，持有至进程和stdout/stderr全部结束，确会让其他Shell等待。但Read走独立file_read_service，不被该Shell锁挡住；此工具无后台/yield参数。 | `forgecode/crates/forge_infra/src/executor.rs:15/100–140`、`forge_infra.rs:47/151`、`crates/forge_app/src/agent_executor.rs:79`、`crates/forge_domain/src/tools/catalog.rs:584` |
+
+- Grok给定重建版的host Shell启用block_until_ms、默认30000ms（`host/runner/turn-agent-composition.ts:454–504`），与进程hardTimeout分离；`packages/agent/tools/core/shell/create-shell-tool.ts:245–263/678–680`的可选文件锁持有到工具返回。不能把某旧入口的per-turn锁或未激活helper推广成所有Grok路径保证。
+- DeepAgents 0.7.5的LocalShellBackend是独立`subprocess.run`（`libs/deepagents/deepagents/backends/local_shell.py:303`）；异步默认经`asyncio.to_thread`（`backends/protocol.py:856–876`），FilesystemMiddleware直接await backend（`middleware/filesystem.py:2958`），这条链未增加工作区执行全程读写锁。其他后端可能另有策略，不泛化整个框架。
+- 原版Pi仍保留证据边界：`pi-dynamic-workflows`只封装独立session/取消/并发数量，其本地缺少Pi核心peer依赖，不能用oh-my-pi fork冒充原版Pi Bash结论。MiMo仅完成初查，不计入本表已核实执行链。
+- 结论：存在批次级、进程级、Shell实例级与Shell全程串行等不同设计；没有“所有Coding Agent都必须让同一工作区的读/命令一起等待长Shell结束”的通用规则。CMB现场共用队列的影响面更大是已确认差异，但差异本身不证明死锁或授权直接取消并发写保护。本轮仍只更新plan，未改生产/应用/预算、未commit/push。
+
+### 2026-10-23 Grok Build调度与两项已复现缺陷的最小修复（1023DB续）
+
+- Grok Build给定checkout为`19d42e3`，`SOURCE_REV=7d67deacbeb1c1093fdb4f9bcbfab2630e18a6aa`。`xai-grok-shell/src/session/acp_session_impl/tool_dispatch.rs:57`只提取`file_path/path/target_file`；`tool_calls.rs:593–610/646–652`只对当前批次中具有明确同路径写冲突的工具加锁，pathless Bash不加入文件锁（`parallel_dispatch_tests.rs:222–232`）。不推广为所有Grok产品或所有资源均无锁。
+- Grok Build父子Agent复用Terminal的同一Arc（`subagent_coordinator.rs:326–329/533`、`spawn.rs:642–643/2561–2562`），但`xai-grok-tools/src/computer/local/terminal.rs:1093–1145`启动进程后存入进程表即返回actor循环，`:899–919`继续接收下一条命令。主机配置`tools/config.rs:67–71`按本地设置、remote、默认true决定自动后台，已追到`agent_ops.rs:4502–4527/4748`→`spawn.rs:931`→`agent_rebuild.rs:325–326`→`agent/builder.rs:865–873`的实际工具绑定。默认约15秒前台等待与进程生命周期分开，显式设置可关闭；不把BashParams的独立默认false误当主机实际默认。
+- 最小借鉴结论：共享工作区/终端不要求整个长命令期间全局互斥，但直接替换CMB调度边界会影响未知命令、写入和长任务，不据架构差异一律删锁。本轮仅修改下列有确定反例的接线，命令分类、队列作用域、审批、写入串行、运行中任务时限及后台移交均保留。
+- 已复现缺陷一：Workflow活动表以threadId索引，分级工具中间件误用queueId查活动状态；Bot私聊、群聊及其他自定义queueId与threadId不同时，重复启动本应快速拒绝，却排在子任务writer后。原保护来自`4a87124c2228`，首版Bot的`bfcc10f71d`接入独立queue后未同步此查询键，非本轮84dded3ad新增。修复仅将现有threadId传到该查询，原queue键不变。回归旧版3失败/2通过，修后5项通过，含普通线程默认键和未活动线程仍等待的反例。
+- 已复现缺陷二：工具排队期间取消后，获取锁仍进入已取消的原生工具；真实ToolNode→DeepAgents文件工具→LocalSandbox链确认后端拒绝写入，但安装的`@langchain/core@1.1.36`工具包装器未结算Promise，导致同队列锁不能释放。缺少排队后取消检查的当前读写锁路径从`a8548386c4`（2026-04-24）已有，c0a995254及其父提交亦存在，并非本轮新增；依赖组合造成永不结算的行为只在当前安装链被真实复现，不由git blame反推全部历史版本。修复仅在取得shared/exclusive锁后的handler入口检查既有signal，借原finally释放锁；不承诺在原持锁任务结束前立即移除等待项。真实取消复现修后后端写入0、调用结算、后续同队列writer执行1次；未取消正例写入1次，原持锁任务及既有文件保留。
+- 验证：旧版owning spec为5失败/36通过；修后`tool-concurrency.test.ts`为41/41，原生read_file/write_file均覆盖排队取消及未取消正例，fresh writer在取消调用结算后启动，避免writer preference造成假通过。外部真实ToolNode修前/修后证据分别保留，`cancel-queued-native-lock-patched-repro.json`未覆盖原失败记录。Node22.22.1下原配置`typecheck:node`通过，后台执行移交/物理终止/唯一归属32/32通过，完整门禁中的workflow-script32项、engine97项、worktree66项、最终prompt及只读hook/权限检查均通过。
+- 完整`test:workflow`并非全绿：首个专家库计数失败将HEAD已有的合法runtime-capabilities helper及其测试计为profile（18文件/16配置）；为覆盖其余项，按原命令顺序补跑失败点后24条，21通过，另3条失败分别为agent-registry子代理声明的精确字符串、coordinator接线调用计数、sandbox通知回执的字符串区段终点。四项失败条件均与HEAD相同，源级证据保留，不修改或删除合法文件、不改旧断言求绿灯，也不据此宣称相关产品逻辑已全面验证。Runtime整文件Prettier现有警告在HEAD/修后规范化diff逐字一致；新增改动无额外格式差异，owning spec格式及`git diff --check`通过。日志及结果在`confirmed-fix-*.log/*-result.json`和`expert-agent-library-baseline-source.json`，本次窄修复与基线门禁问题分开记录。
+- 边界：上述两项不证明原现场所有等待均由bug导致，也不把大范围grep、睡眠期间耗时或模型评审不收尾算作已修复。没有变更普通工作台的权限、执行参数、流程预算、模型、应用数据或用户草稿；未commit/push。153/201案例数不增加，当前是确定性源码回归，非真实模型/UI同题验收。
+
+
+### 2026-10-23 Workflow快拒补修与取消尝试撤回（1023DC）
+
+- 用户指定只修Workflow快拒前仍执行hook/Mod的问题，另一个取消修复回滚；共享锁范围方案继续暂停。两名subagent独立复核后，初版两项修复不再记为完备；上节41/41只代表当时用例，未覆盖真实hook副作用和原生启动回调中的取消窗口，失败证据保留。
+- 实际修复：沿用原threadId活动表、资源queue和原Workflow错误文本。有可配对call id且同线程已有Workflow时，在graded middleware直接返回status=error的ToolMessage，保留原id/name；不进入内层hook、Mod或原生工具。错误文本仅提取为workflow/tool.ts的纯格式函数，本体重复启动检查保留。非活跃、其他线程活跃、缺id及其他工具仍走原有锁和后续流程；快拒分支保留原本体“先取消、后重复错误”的顺序。
+- 回滚范围：删除本轮在shared/exclusive获取锁回调新增的两处signal检查，以及4个排队取消专项用例和专属依赖。该存量取消缺陷仍待后续处理，不能声称已经修好。没有新增SDK包装、等待超时、取消竞速或提前释放锁逻辑。
+- 复用与参考：原CMB malformed-tool-call-recovery.ts:684的直接ToolMessage回执约定及workflow/tool.ts原重复错误；Claude Code给定源码toolExecution.ts:615–684在hook前返回不可执行调用错误，Grok重建源码packages/agent/tools/core/shell/create-shell-tool.ts:611在执行前拒绝不允许的请求。只借鉴前置拒绝边界，不把Shell策略冒充Workflow实现，未移植新调度体系。
+- 反例与正例：原初修复源码由HEAD加本轮开始备份的staged patch精确还原（SHA256 48894fac…），8个真实调用链场景中5个active反例复现hook/Mod在writer持锁时写入，3个inactive对照通过。修后8/8通过：普通线程、Bot私聊、群、workspace override的active调用在持锁期间直接结算，真实命令hook/原生工具/Mod dispatch均为0；inactive对照等writer释放后hook和原生工具各执行1次。Mod使用实际路由加合成dispatch接收端，未声称guest插件E2E通过。
+- 回归：owning spec 41/41（取消专项已撤，替换为快拒零副作用、普通读写/缺id受锁及取消优先用例）；后台移交与物理终止32/32，typecheck:node通过。原test:workflow执行到既有专家库18文件/16注册的基线失败，之前的68项存储/位置测试、workflow-script32、engine97、worktree66及工作树隔离通过；不是全门禁绿。另跑tool-hook-regression、agent-hook-context-integration、local-sandbox-readonly-hook、runtime-final-system-prompt、agent-tool-guard均通过，两名subagent对最终diff复核通过。
+- 本轮为确定性调用链和真实本地进程回归，未使用真实模型或操作应用/用户数据，MiniMax/DeepSeek模型E2E未验；153/201案例计数不增加。证据为quality-review/1020W-source-audit/1023DC-safe-tool-separation/workflow-fast-reject-*，旧记录保留。锁范围、写入保护、运行中进程和长任务预算无改动；未commit/push。

@@ -389,7 +389,7 @@ import { syncSubagentSkillAttribution } from "./turn-attribution"
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool, resolveReadFileTraceContext } from "./read-file-tool"
-import { createWorkflowTool } from "./workflow/tool"
+import { createWorkflowTool, formatActiveWorkflowError } from "./workflow/tool"
 import { workflowRunManager } from "./workflow/run-manager"
 import { WORKFLOW_MODE_SYSTEM_PROMPT, AUTOMATIC_WORKFLOW_SYSTEM_PROMPT } from "./workflow/prompts"
 import {
@@ -644,14 +644,14 @@ function classifyToolConcurrency(
 }
 
 function shouldFastRejectActiveWorkflow(
-  queueId: string,
+  threadId: string,
   toolCall: { name?: string; args?: unknown } | undefined
 ): boolean {
   // A second workflow launch while one is already active should fail fast with the
   // workflow tool's own active-run error. If we wait for the exclusive tool lock
   // first, a long-running workflow subagent command can delay that user-facing
   // rejection until the command finishes.
-  return toolCall?.name === "workflow" && workflowRunManager.isActive(queueId)
+  return toolCall?.name === "workflow" && workflowRunManager.isActive(threadId)
 }
 
 /**
@@ -814,7 +814,8 @@ function getTaskConcurrencyLimiter(queueId: string): AsyncSemaphore {
 function createGradedToolConcurrencyMiddleware(
   queueId: string,
   userInputWithoutToolLock = false,
-  botBrowserToolsOwnFileLock = false
+  botBrowserToolsOwnFileLock = false,
+  workflowThreadId = queueId
 ) {
   const lock = getToolConcurrencyLock(queueId)
   const taskLimiter = getTaskConcurrencyLimiter(queueId)
@@ -824,6 +825,17 @@ function createGradedToolConcurrencyMiddleware(
       const toolCall = request.toolCall as
         | { id?: string; name?: string; args?: unknown }
         | undefined
+      if (toolCall?.id && shouldFastRejectActiveWorkflow(workflowThreadId, toolCall)) {
+        request.runtime?.signal?.throwIfAborted()
+        // Reject before hooks/Mods: calling the inner handler without the lock
+        // lets their side effects run before the workflow tool's duplicate guard.
+        return new ToolMessage({
+          content: `Tool execution failed: ${formatActiveWorkflowError(workflowRunManager.activeRunId(workflowThreadId))}\nPlease adjust your approach and try again if appropriate.`,
+          tool_call_id: toolCall.id,
+          name: toolCall.name,
+          status: "error"
+        })
+      }
       if (
         (userInputWithoutToolLock &&
           (toolCall?.name === "bot_send_message" ||
@@ -836,8 +848,7 @@ function createGradedToolConcurrencyMiddleware(
           toolCall?.name === "bot_browser" &&
           isRecord(toolCall.args) &&
           typeof toolCall.args.action === "string" &&
-          BOT_BROWSER_ACTIONS.has(toolCall.args.action)) ||
-        shouldFastRejectActiveWorkflow(queueId, toolCall)
+          BOT_BROWSER_ACTIONS.has(toolCall.args.action))
       ) {
         return handler(request)
       }
@@ -2991,7 +3002,8 @@ function assembleDeepAgent(
   const gradedToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
     toolConcurrencyQueueId,
     userInputWithoutToolLock,
-    botBrowserToolsOwnFileLock
+    botBrowserToolsOwnFileLock,
+    threadId
   )
   const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
     `${toolConcurrencyQueueId}:subagent`

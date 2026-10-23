@@ -3,17 +3,24 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { runInNewContext } from "node:vm"
+import { ToolMessage } from "@langchain/core/messages"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { LocalBotHost, type BotRunPort } from "../bots/host"
 import { BotStore } from "../bots/store"
 
-type Request = { toolCall: { name: string; id: string; args?: unknown } }
+type Request = {
+  toolCall: { name: string; id?: string; args?: unknown }
+  runtime?: { signal?: AbortSignal }
+}
 type Middleware = {
   wrapToolCall(request: Request, handler: (request: Request) => Promise<unknown>): Promise<unknown>
 }
-type Gate = Middleware & { withFileLock(operation: () => Promise<unknown>): Promise<unknown> }
+type Gate = Middleware & {
+  withFileLock(operation: () => Promise<unknown>): Promise<unknown>
+  forQueue(queueId: string, workflowThreadId?: string): Middleware
+}
 
 // Execute the owning middleware and lock directly without booting the Electron/model runtime.
 const runtime = ts.createSourceFile(
@@ -55,42 +62,62 @@ const source = runtime.statements
   })
   .map((statement) => statement.getText(runtime))
   .join("\n")
+const workflowTool = ts.createSourceFile(
+  "workflow/tool.ts",
+  readFileSync(new URL("./workflow/tool.ts", import.meta.url), "utf8"),
+  ts.ScriptTarget.Latest,
+  true
+)
+const errorFormatter = workflowTool.statements.find(
+  (statement) =>
+    ts.isFunctionDeclaration(statement) && statement.name?.text === "formatActiveWorkflowError"
+)!
 const compiled = ts.transpileModule(
-  `${source}\nglobalThis.createGate = createGradedToolConcurrencyMiddleware; globalThis.withFileLock = withToolFileWriteLock;`,
+  `${errorFormatter.getText(workflowTool)}\n${source}\nglobalThis.createGate = createGradedToolConcurrencyMiddleware; globalThis.withFileLock = withToolFileWriteLock;`,
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }
 ).outputText
 
 function createGate(
   userInputWithoutToolLock?: boolean,
-  botBrowserToolsOwnFileLock?: boolean
+  botBrowserToolsOwnFileLock?: boolean,
+  options: {
+    queueId?: string
+    workflowThreadId?: string
+    activeWorkflowThreadIds?: readonly string[]
+  } = {}
 ): Gate {
+  const queueId = options.queueId ?? "shared-test-workspace"
   const context = {
     console,
     exports: {},
     createMiddleware: (config: Middleware) => config,
-    workflowRunManager: { isActive: () => false },
+    ToolMessage,
+    workflowRunManager: {
+      isActive: (threadId: string) => options.activeWorkflowThreadIds?.includes(threadId) ?? false,
+      activeRunId: () => "wf_existing_run"
+    },
     classifyCommandConcurrency: () => {
       throw new Error("Unexpected command in tool-lock test")
     },
     createGate: undefined as
       | undefined
-      | ((id: string, enabled?: boolean, browser?: boolean) => Middleware),
+      | ((
+          id: string,
+          enabled?: boolean,
+          browser?: boolean,
+          workflowThreadId?: string
+        ) => Middleware),
     withFileLock: undefined as
       | undefined
       | ((id: string, operation: () => Promise<unknown>) => Promise<unknown>)
   }
   runInNewContext(compiled, context)
-  return Object.assign(
-    context.createGate!(
-      "shared-test-workspace",
-      userInputWithoutToolLock,
-      botBrowserToolsOwnFileLock
-    ),
-    {
-      withFileLock: (operation: () => Promise<unknown>) =>
-        context.withFileLock!("shared-test-workspace", operation)
-    }
-  )
+  const forQueue = (id: string, workflowThreadId?: string): Middleware =>
+    context.createGate!(id, userInputWithoutToolLock, botBrowserToolsOwnFileLock, workflowThreadId)
+  return Object.assign(forQueue(queueId, options.workflowThreadId), {
+    withFileLock: (operation: () => Promise<unknown>) => context.withFileLock!(queueId, operation),
+    forQueue
+  })
 }
 
 function deferred() {
@@ -109,6 +136,126 @@ const humanWaits = [
   { name: "bot_request_browser_help", args: undefined },
   { name: "bot_browser", args: { action: "request_help" } }
 ]
+
+describe("active workflow rejection", () => {
+  it.each([
+    { queueId: "bot-private", workflowThreadId: "private-thread" },
+    { queueId: "bot-group-room", workflowThreadId: "group-member-thread" },
+    { queueId: "workspace:/existing-project", workflowThreadId: "work-thread" },
+    { queueId: "ordinary-thread", workflowThreadId: undefined }
+  ])(
+    "rejects before hooks or tools while a shared queue writer is held ($queueId)",
+    async ({ queueId, workflowThreadId }) => {
+      const threadId = workflowThreadId ?? queueId
+      const gate = createGate(false, false, {
+        queueId,
+        workflowThreadId,
+        activeWorkflowThreadIds: [threadId]
+      })
+      const leaf = gate.forQueue(queueId, `${threadId}-leaf`)
+      const entered = deferred(),
+        finish = deferred()
+      const writer = leaf.wrapToolCall(request("write_file"), async () => {
+        entered.resolve()
+        await finish.promise
+      })
+      await entered.promise
+      const downstream = vi.fn(async () => "must not execute hooks, Mods or the tool")
+      const duplicate = gate.wrapToolCall(request("workflow", "duplicate-call"), downstream)
+      try {
+        await turn()
+        expect(downstream).not.toHaveBeenCalled()
+        const result = (await duplicate) as ToolMessage
+        expect(ToolMessage.isInstance(result)).toBe(true)
+        expect(result).toMatchObject({
+          tool_call_id: "duplicate-call",
+          name: "workflow",
+          status: "error",
+          content:
+            "Tool execution failed: A dynamic workflow (wf_existing_run) is already running in this thread. Wait for its task-notification, or the user can cancel it from the workflow panel.\nPlease adjust your approach and try again if appropriate."
+        })
+        const laterWriter = vi.fn(async () => "later write")
+        const later = leaf.wrapToolCall(request("write_file", "later-writer"), laterWriter)
+        await turn()
+        expect(laterWriter).not.toHaveBeenCalled()
+        finish.resolve()
+        await later
+        expect(laterWriter).toHaveBeenCalledOnce()
+      } finally {
+        finish.resolve()
+        await Promise.all([writer, duplicate])
+      }
+    }
+  )
+
+  it("keeps an inactive thread's launch behind the shared queue writer", async () => {
+    const gate = createGate(false, false, {
+      queueId: "bot-group-room",
+      workflowThreadId: "idle-member-thread",
+      activeWorkflowThreadIds: ["bot-group-room", "other-member-thread"]
+    })
+    const leaf = gate.forQueue("bot-group-room", "other-member-thread-leaf")
+    const entered = deferred(),
+      finish = deferred()
+    const writer = leaf.wrapToolCall(request("write_file"), async () => {
+      entered.resolve()
+      await finish.promise
+    })
+    await entered.promise
+    const launch = vi.fn(async () => "launched")
+    const workflow = gate.wrapToolCall(request("workflow"), launch)
+    try {
+      await turn()
+      expect(launch).not.toHaveBeenCalled()
+    } finally {
+      finish.resolve()
+      await Promise.all([writer, workflow])
+    }
+    expect(launch).toHaveBeenCalledOnce()
+  })
+
+  it.each(["read_file", "write_file", "workflow-without-id"])(
+    "keeps %s behind the writer even with an active workflow",
+    async (name) => {
+      const gate = createGate(false, false, {
+        activeWorkflowThreadIds: ["shared-test-workspace"]
+      })
+      const entered = deferred(),
+        finish = deferred()
+      const writer = gate.wrapToolCall(request("write_file", "holder"), async () => {
+        entered.resolve()
+        await finish.promise
+      })
+      await entered.promise
+      const handler = vi.fn(async () => "normal locked path")
+      const call =
+        name === "workflow-without-id" ? { toolCall: { name: "workflow" } } : request(name)
+      const pending = gate.wrapToolCall(call, handler)
+      try {
+        await turn()
+        expect(handler).not.toHaveBeenCalled()
+      } finally {
+        finish.resolve()
+        await Promise.all([writer, pending])
+      }
+      expect(handler).toHaveBeenCalledOnce()
+    }
+  )
+
+  it("preserves cancellation instead of returning a duplicate error for an aborted request", async () => {
+    const gate = createGate(false, false, {
+      activeWorkflowThreadIds: ["shared-test-workspace"]
+    })
+    const controller = new AbortController()
+    const reason = new Error("Stopped before duplicate rejection")
+    controller.abort(reason)
+    const handler = vi.fn(async () => "must not run")
+    await expect(
+      gate.wrapToolCall({ ...request("workflow"), runtime: { signal: controller.signal } }, handler)
+    ).rejects.toBe(reason)
+    expect(handler).not.toHaveBeenCalled()
+  })
+})
 
 describe("shared-workspace user input", () => {
   it("releases a contested room file after member removal without losing the survivor's update", async () => {

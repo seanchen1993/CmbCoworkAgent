@@ -158,6 +158,10 @@ ${lines.join("\n")}
 Add your own roles by dropping <name>.md files under .cmbcoworkagent/agents/ (frontmatter: description, optional model, and EITHER workload: read_only|verify|write OR CC-style tools/disallowedTools lists — CC tool names like Read/Bash/Edit are auto-mapped; the markdown body becomes that role's system prompt).`
 }
 
+export function formatActiveWorkflowError(runId: string | undefined): string {
+  return `A dynamic workflow (${runId}) is already running in this thread. Wait for its task-notification, or the user can cancel it from the workflow panel.`
+}
+
 export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicStructuredTool {
   const { threadId, workspacePath } = options
   const subagentDeps: WorkflowSubagentDeps = {
@@ -170,9 +174,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
     async (input: z.infer<typeof workflowToolSchema>) => {
       options.abortSignal?.throwIfAborted()
       if (workflowRunManager.isActive(threadId)) {
-        throw new Error(
-          `A dynamic workflow (${workflowRunManager.activeRunId(threadId)}) is already running in this thread. Wait for its task-notification, or the user can cancel it from the workflow panel.`
-        )
+        throw new Error(formatActiveWorkflowError(workflowRunManager.activeRunId(threadId)))
       }
       // Deleted-thread gate BEFORE the approval prompt (launch() re-checks, but
       // that guard sits after ensureWorkflowApproved): a foreground turn that
