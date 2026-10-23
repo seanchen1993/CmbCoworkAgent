@@ -1740,11 +1740,13 @@ button.bot-json-caret:focus-visible {
 [data-bot-composer] [data-composer-actions] button {
   pointer-events: auto;
 }
-/* Linked owner conversations retain the standard model/mode controls below the input. */
-[data-bot-owner-composer] .composer-textarea {
+/* Owner and Windows sandbox controls need a separate row, outside the text area. */
+[data-bot-owner-composer] .composer-textarea,
+[data-bot-composer]:has([data-sandbox-mode-switcher]) .composer-textarea {
   padding: 14px 16px 8px;
 }
-[data-bot-owner-composer] [data-composer-actions] {
+[data-bot-owner-composer] [data-composer-actions],
+[data-bot-composer]:has([data-sandbox-mode-switcher]) [data-composer-actions] {
   position: static;
   padding: 0 8px 8px;
 }
