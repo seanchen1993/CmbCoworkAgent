@@ -3,17 +3,7 @@ import { Eye } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
-
-function resolveBrowserUrl(browserUrl: string, workspacePath?: string | null): string {
-  if (!workspacePath || /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(browserUrl)) return browserUrl
-
-  const normalizedWorkspace = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "")
-  const normalizedFile = browserUrl.replace(/\\/g, "/").replace(/^\/+/, "")
-  const absolutePath = `${normalizedWorkspace}/${normalizedFile}`
-  return window.electron.process.platform === "win32"
-    ? `file:///${encodeURI(absolutePath)}`
-    : `file://${encodeURI(absolutePath)}`
-}
+import { resolveHtmlPreviewBrowserUrl } from "@/lib/html-preview-browser-url"
 
 export function HtmlThumbnailPreview({
   html,
@@ -34,7 +24,7 @@ export function HtmlThumbnailPreview({
 }): React.JSX.Element {
   const openInBrowser = (): void => {
     openResourcePanelOverlay("browser", {
-      browserUrl: resolveBrowserUrl(browserUrl, browserWorkspacePath)
+      browserUrl: resolveHtmlPreviewBrowserUrl(browserUrl, browserWorkspacePath)
     })
   }
 

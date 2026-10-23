@@ -2447,6 +2447,24 @@ interface CustomAPI {
       success: boolean
       error?: string
     }>
+    getFunctionHtml: (payload: { workspacePath: string; requirementFilePath: string }) => Promise<{
+      success: boolean
+      htmlFile?: string
+      htmlId?: string
+      error?: string
+    }>
+    updateFunctionHtml: (payload: {
+      reqId: string
+      workspacePath: string
+      requirementFilePath: string
+      htmlFile: string
+      htmlId: string
+    }) => Promise<{
+      success: boolean
+      htmlFile?: string
+      htmlId?: string
+      error?: string
+    }>
     syncManifest: (payload: {
       reqId: string
       manifest: unknown

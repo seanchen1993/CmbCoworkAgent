@@ -5,6 +5,11 @@ import { DESIGN_PREVIEW_NAVIGATION_SCRIPT } from "@/lib/design-preview-navigatio
 import { buildDesignVariationDocument } from "@/lib/design-variation-document"
 import { getDesignPreviewViewport } from "@/lib/design-preview-viewport"
 import { useAppStore } from "@/lib/store"
+// 需求详情进入设计模式的适配逻辑集中在独立 Hook，避免侵入设计器主体流程。
+import {
+  useRequirementDesignEntry,
+  type ActiveRequirementDesignEntry
+} from "./use-requirement-design-entry"
 import { CodeModal } from "./CodeModal"
 import { CustomModelDialog } from "../chat/CustomModelDialog"
 import {
@@ -1394,6 +1399,8 @@ export function DesignView(): React.JSX.Element {
   const [createDesignSystemId, setCreateDesignSystemId] = useState<string | null>(null)
   const [activeSkillIndex, setActiveSkillIndex] = useState(0)
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
+  // 记录当前需求入口，供设计产物生成后回写需求 Manifest。
+  const requirementEntryRef = useRef<ActiveRequirementDesignEntry | null>(null)
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
   // Code & link modal state
   const [createModalOpen, setCreateModalOpen] = useState(false)
@@ -1826,7 +1833,11 @@ export function DesignView(): React.JSX.Element {
         if (!disposed) setSessionOpening(false)
       })
       .catch((error) => {
-        if (!disposed) setSessionLoadError(error instanceof Error ? error.message : String(error))
+        if (!disposed) {
+          setSessionLoadError(error instanceof Error ? error.message : String(error))
+          // 加载失败也必须结束恢复态，否则页面会一直显示“正在恢复设计记录”。
+          setSessionOpening(false)
+        }
       })
     return () => {
       disposed = true
@@ -1847,6 +1858,10 @@ export function DesignView(): React.JSX.Element {
       metaPatch?: Partial<SessionMeta>,
       options?: {
         designSystemId?: string | null
+        /** 从需求入口创建设计时预填需求描述。 */
+        initialInputValue?: string
+        /** 从需求入口创建设计时绑定需求工作区。 */
+        workspacePath?: string
       }
     ): string => {
       flushArtifactEdits()
@@ -1858,7 +1873,9 @@ export function DesignView(): React.JSX.Element {
         : null
       session.tabStates[SINGLE_DESIGN_TAB_ID] = {
         ...session.tabStates[SINGLE_DESIGN_TAB_ID],
-        selectedDesignSystemId: selectedForSession?.id ?? null
+        selectedDesignSystemId: selectedForSession?.id ?? null,
+        // 普通新建设计保持空输入；需求入口可直接带入设计提示词。
+        inputValue: options?.initialInputValue ?? ""
       }
       tabStatesRef.current = session.tabStates
       setTabStates(session.tabStates)
@@ -1879,7 +1896,13 @@ export function DesignView(): React.JSX.Element {
       }
       setSessionIndex((prev) => [meta, ...prev])
       void getDesignSessionClient()
-        .create({ id, meta, state: session.tabStates[SINGLE_DESIGN_TAB_ID], workspacePath })
+        .create({
+          id,
+          meta,
+          state: session.tabStates[SINGLE_DESIGN_TAB_ID],
+          // 需求入口显式指定工作区，普通入口继续沿用当前工作区。
+          workspacePath: options?.workspacePath ?? workspacePath
+        })
         .catch((error) => showToast(`创建设计失败：${String(error)}`))
       return id
     },
@@ -1888,6 +1911,8 @@ export function DesignView(): React.JSX.Element {
 
   const newSession = useCallback(
     (designSystemId?: string | null) => {
+      // 用户主动新建设计后，不再把产物回写到此前打开的需求。
+      requirementEntryRef.current = null
       createSession(undefined, { designSystemId: designSystemId ?? null })
     },
     [createSession]
@@ -2371,7 +2396,14 @@ export function DesignView(): React.JSX.Element {
 
   // Navigation detaches the view; only the explicit Stop action cancels a run.
   const openSession = useCallback(
-    (id: string) => {
+    (id: string, preserveRequirementEntry = false) => {
+      // 从普通会话入口切换时解除需求绑定；需求跳转会显式要求保留。
+      if (!preserveRequirementEntry) requirementEntryRef.current = null
+      // 重选当前会话不会触发加载 Effect，因此直接复用已打开状态，避免恢复页卡死。
+      if (currentSessionIdRef.current === id) {
+        localStorage.setItem(SESSION_LAST_KEY, id)
+        return
+      }
       flushArtifactEdits()
       setSessionOpening(true)
       const session = loadSessionById(id)
@@ -2384,7 +2416,21 @@ export function DesignView(): React.JSX.Element {
     [flushArtifactEdits]
   )
 
+  // 消费需求详情页传入的数据，并负责恢复会话及回写生成后的 HTML 绑定。
+  useRequirementDesignEntry({
+    sessionReady,
+    entryRef: requirementEntryRef,
+    artifactPath: ts.artifactPath,
+    generationState: ts.generationState,
+    createSession,
+    openSession,
+    setWorkspacePath,
+    showToast
+  })
+
   const backToGallery = useCallback(() => {
+    // 返回设计列表即结束本次需求关联，防止后续产物误写到旧需求。
+    requirementEntryRef.current = null
     flushArtifactEdits()
     currentSessionIdRef.current = null
     setCurrentSessionId(null)

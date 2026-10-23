@@ -224,7 +224,17 @@ export function RequirementFunctionWorkspace({
                 动态原型 v1
               </span>
             ) : null}
-            <span className="text-xs text-muted-foreground/70">支持继续设计</span>
+            {prototypeGenerated ? (
+              <Button
+                type="button"
+                size="sm"
+                className="h-7 px-2.5 text-xs"
+                disabled={conversationLoading}
+                onClick={onRequestPrototypeDesign}
+              >
+                继续完善设计
+              </Button>
+            ) : null}
           </header>
           <div className="relative min-h-0 flex-1 bg-slate-50/70">
             {prototypeGenerated && prototypePreview ? (
@@ -265,18 +275,6 @@ export function RequirementFunctionWorkspace({
               </div>
             )}
           </div>
-          {prototypeGenerated ? (
-            <footer className="flex h-14 shrink-0 items-center border-t border-border/70 bg-white px-4">
-              <Button
-                type="button"
-                size="sm"
-                disabled={conversationLoading}
-                onClick={onRequestPrototypeDesign}
-              >
-                继续设计
-              </Button>
-            </footer>
-          ) : null}
         </section>
       </div>
     </div>

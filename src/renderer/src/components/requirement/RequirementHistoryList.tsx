@@ -80,6 +80,7 @@ const REMOTE_MOCK_REQUIREMENT: RequirementRecord = {
         file: "FR-001.md",
         keywords: ["会员", "迁移"],
         htmlFile: "prototype.html",
+        htmlId: "",
         needDesign: "1"
       }
     ]

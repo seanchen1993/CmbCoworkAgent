@@ -218,6 +218,7 @@ describe("requirement source preview", () => {
           file: "fr-1-doc.md",
           keywords: ["记事本", "文件"],
           htmlFile: "",
+          htmlId: "",
           needDesign: ""
         },
         {
@@ -227,6 +228,7 @@ describe("requirement source preview", () => {
           file: "fr-2-doc.md",
           keywords: [],
           htmlFile: "",
+          htmlId: "",
           needDesign: ""
         }
       ]
@@ -614,6 +616,70 @@ describe("requirement source preview", () => {
     })) as { success: boolean; manifestStatus: string }
     expect(missing).toMatchObject({ success: true, manifestStatus: "missing" })
     expect(existsSync(manifestPath)).toBe(false)
+    await remove(null, created.requirement.reqId)
+  })
+
+  it("binds a generated HTML file and session to exactly one requirement function", async () => {
+    const workDir = join(tempHome, "function-html-workspace")
+    mkdirSync(workDir)
+    const create = handlers.get("requirements:create")!
+    const updateFunctionHtml = handlers.get("requirements:update-function-html")!
+    const getFunctionHtml = handlers.get("requirements:get-function-html")!
+    const list = handlers.get("requirements:list")!
+    const remove = handlers.get("requirements:delete")!
+    const created = (await create(null, {
+      systemId: "system-function-html",
+      title: "功能原型绑定",
+      workDir,
+      source: { type: "text", fileName: "" }
+    })) as { success: boolean; requirement: { reqId: string; requirementPath: string } }
+    const workspacePath = created.requirement.requirementPath
+    const manifestPath = join(workspacePath, "prd", "prd-manifest.json")
+    const requirementFilePath = join(workspacePath, "prd", "需求3.0文件", "fr-1-doc.md")
+    const htmlFile = join(workspacePath, ".cmb-design", "design-a", "index.html")
+    mkdirSync(join(workspacePath, "prd", "需求3.0文件"), { recursive: true })
+    mkdirSync(join(workspacePath, ".cmb-design", "design-a"), { recursive: true })
+    writeFileSync(requirementFilePath, "# FR1", "utf-8")
+    writeFileSync(htmlFile, "<!doctype html><title>FR1</title>", "utf-8")
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        prd: { name: "功能原型绑定", status: "generated", currentStep: 4, needDesign: "1" },
+        functions: [
+          { fr: "FR1", file: "prd/需求3.0文件/fr-1-doc.md", htmlFile: "", needDesign: "1" },
+          { fr: "FR2", file: "prd/其他/fr-1-doc.md", htmlFile: "", needDesign: "1" }
+        ]
+      }),
+      "utf-8"
+    )
+
+    const updated = (await updateFunctionHtml(null, {
+      reqId: created.requirement.reqId,
+      workspacePath,
+      requirementFilePath,
+      htmlFile,
+      htmlId: "ds_abcd1234"
+    })) as { success: boolean; error?: string }
+    expect(updated.success, updated.error).toBe(true)
+    expect(JSON.parse(readFileSync(manifestPath, "utf-8")).functions[0]).toMatchObject({
+      htmlFile,
+      htmlId: "ds_abcd1234",
+      needDesign: "1"
+    })
+    const binding = (await getFunctionHtml(null, { workspacePath, requirementFilePath })) as {
+      success: boolean
+      htmlFile: string
+      htmlId: string
+    }
+    expect(binding).toMatchObject({ success: true, htmlFile, htmlId: "ds_abcd1234" })
+    const current = (await list(null)) as Array<{
+      reqId: string
+      prdManifest: { functions: Array<{ htmlId: string }> }
+    }>
+    expect(
+      current.find((item) => item.reqId === created.requirement.reqId)?.prdManifest.functions[0]
+        .htmlId
+    ).toBe("ds_abcd1234")
     await remove(null, created.requirement.reqId)
   })
 

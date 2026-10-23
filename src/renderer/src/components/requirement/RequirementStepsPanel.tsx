@@ -131,17 +131,19 @@ function PrototypeDesignSelect({
   needDesign,
   choiceMade,
   disabled,
-  onChange
+  onChange,
+  onDesign
 }: {
   needDesign: NeedDesignChoice
   choiceMade: boolean
   disabled: boolean
   onChange: (needDesign: NeedDesignChoice) => void
+  onDesign: () => void
 }): React.JSX.Element {
   if (!choiceMade) {
     return (
       <div className="flex items-center gap-2">
-        <Button type="button" size="sm" disabled={disabled} onClick={() => onChange("1")}>
+        <Button type="button" size="sm" disabled={disabled} onClick={onDesign}>
           去设计
         </Button>
         <Button
@@ -162,7 +164,7 @@ function PrototypeDesignSelect({
     <Select
       value={needDesign === "1" ? "design" : "skip"}
       disabled={disabled}
-      onValueChange={(value) => onChange(value === "design" ? "1" : "0")}
+      onValueChange={(value) => (value === "design" ? onDesign() : onChange("0"))}
     >
       <SelectTrigger
         aria-label="选择原型设计状态"
@@ -192,7 +194,13 @@ async function readRequirementWorkspaceTextFile(
   const lane = `requirement-prototype-html:${threadId}:${requestToken}`
   const readPage = (offset: number): Promise<WorkspaceFilePreviewReadResult> =>
     window.api.workspace.readFilePreview({
-      source: { threadId, filePath },
+      source: {
+        threadId,
+        filePath,
+        workspacePathKind: /^(?:[a-zA-Z]:[\\/]|[/\\]{2}|\/)/.test(filePath)
+          ? "absolute"
+          : "relative"
+      },
       offset,
       lane,
       requestToken
@@ -264,7 +272,7 @@ function PrototypeHtmlPreview({
     <HtmlThumbnailPreview
       html={preview.html}
       title={`原型预览 ${filePath}`}
-      browserUrl={filePath.replace(/^\/+/, "")}
+      browserUrl={filePath}
       browserWorkspacePath={workspacePath}
       fit={fit}
       className="h-full w-full"
@@ -335,8 +343,11 @@ export function RequirementStepsPanel({
 
   useEffect(() => {
     onFunctionWorkspaceChange(Boolean(selectedFunction))
-    return () => onFunctionWorkspaceChange(false)
   }, [onFunctionWorkspaceChange, selectedFunction])
+
+  useEffect(() => {
+    return () => onFunctionWorkspaceChange(false)
+  }, [onFunctionWorkspaceChange])
 
   return (
     <aside
@@ -386,154 +397,156 @@ export function RequirementStepsPanel({
         }}
         className="flex min-h-0 flex-1 flex-col"
       >
-        <div className="flex shrink-0 items-start justify-between gap-2 border-b border-border/70 bg-white px-3 shadow-[0_1px_0_rgba(15,23,42,0.02)]">
-          <TabsList
-            aria-label="需求处理步骤"
-            className="grid h-[76px] min-w-0 flex-1 grid-cols-5 rounded-none bg-transparent p-0"
-          >
-            {[
-              {
-                value: "source",
-                number: 1,
-                label: "提供需求",
-                enabled: true,
-                complete: expertAnalysisStarted,
-                connectorComplete: false,
-                active: previewTab === "source",
-                running: false
-              },
-              {
-                value: "expert-process",
-                number: 2,
-                label: "Agent分析",
-                enabled: expertAnalysisStarted,
-                complete: expertAnalysisCompleted,
-                connectorComplete: expertAnalysisStarted,
-                active: previewTab === "expert-process",
-                running: previewTab === "expert-process" && expertProcessRunning
-              },
-              {
-                value: "prd",
-                number: 3,
-                label: "规范PRD",
-                enabled: prdGenerationCompleted,
-                complete: prdGenerationCompleted,
-                connectorComplete: prdGenerationCompleted,
-                active: previewTab === "prd",
-                running: false
-              },
-              {
-                value: "prototype",
-                number: 4,
-                label: "原型设计",
-                enabled: prototypeStepEnabled,
-                complete: prototypeStepCompleted,
-                connectorComplete: prototypeStepEnabled,
-                active: previewTab === "prototype",
-                running: previewTab === "prototype" && !prototypeStepCompleted
-              },
-              {
-                value: "requirement-space",
-                number: 5,
-                label: "发布需求空间3.0",
-                enabled: requirementSpaceStepEnabled,
-                complete: requirementSpacePublished,
-                connectorComplete: requirementSpaceStepEnabled,
-                active: previewTab === "requirement-space",
-                running: previewTab === "requirement-space" && !requirementSpacePublished
-              }
-            ].map((step, index) => (
-              <div key={step.value} className="relative flex min-w-0 items-start justify-center">
-                {index > 0 ? (
-                  <span
-                    className={cn(
-                      "absolute left-0 right-[calc(50%+24px)] top-6 h-[2px] -translate-y-1/2",
-                      step.connectorComplete ? "bg-primary/75" : "bg-slate-200"
-                    )}
-                  />
-                ) : null}
-                {index < 4 ? (
-                  <span
-                    className={cn(
-                      "absolute left-[calc(50%+24px)] right-0 top-6 h-[2px] -translate-y-1/2",
-                      step.complete ? "bg-primary/75" : "bg-slate-200"
-                    )}
-                  />
-                ) : null}
-                <TabsTrigger
-                  value={step.value}
-                  disabled={!step.enabled}
-                  aria-label={`步骤 ${step.number}：${step.label}${!step.enabled ? "，尚未解锁" : ""}`}
-                  className="group relative z-10 flex h-[72px] min-w-0 flex-col justify-start gap-1.5 rounded-none bg-transparent px-1 pt-2.5 text-xs font-semibold text-slate-400 shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <span
-                    className={cn(
-                      "relative flex size-7 items-center justify-center rounded-full border-2 bg-white text-[11px] font-semibold transition-all",
-                      step.complete
-                        ? "border-primary bg-primary text-primary-foreground"
-                        : step.enabled
-                          ? "border-primary bg-white text-primary"
-                          : "border-slate-100 bg-slate-100 text-slate-400"
-                    )}
+        {!selectedFunction ? (
+          <div className="flex shrink-0 items-start justify-between gap-2 border-b border-border/70 bg-white px-3 shadow-[0_1px_0_rgba(15,23,42,0.02)]">
+            <TabsList
+              aria-label="需求处理步骤"
+              className="grid h-[76px] min-w-0 flex-1 grid-cols-5 rounded-none bg-transparent p-0"
+            >
+              {[
+                {
+                  value: "source",
+                  number: 1,
+                  label: "提供需求",
+                  enabled: true,
+                  complete: expertAnalysisStarted,
+                  connectorComplete: false,
+                  active: previewTab === "source",
+                  running: false
+                },
+                {
+                  value: "expert-process",
+                  number: 2,
+                  label: "Agent分析",
+                  enabled: expertAnalysisStarted,
+                  complete: expertAnalysisCompleted,
+                  connectorComplete: expertAnalysisStarted,
+                  active: previewTab === "expert-process",
+                  running: previewTab === "expert-process" && expertProcessRunning
+                },
+                {
+                  value: "prd",
+                  number: 3,
+                  label: "规范PRD",
+                  enabled: prdGenerationCompleted,
+                  complete: prdGenerationCompleted,
+                  connectorComplete: prdGenerationCompleted,
+                  active: previewTab === "prd",
+                  running: false
+                },
+                {
+                  value: "prototype",
+                  number: 4,
+                  label: "原型设计",
+                  enabled: prototypeStepEnabled,
+                  complete: prototypeStepCompleted,
+                  connectorComplete: prototypeStepEnabled,
+                  active: previewTab === "prototype",
+                  running: previewTab === "prototype" && !prototypeStepCompleted
+                },
+                {
+                  value: "requirement-space",
+                  number: 5,
+                  label: "发布需求空间3.0",
+                  enabled: requirementSpaceStepEnabled,
+                  complete: requirementSpacePublished,
+                  connectorComplete: requirementSpaceStepEnabled,
+                  active: previewTab === "requirement-space",
+                  running: previewTab === "requirement-space" && !requirementSpacePublished
+                }
+              ].map((step, index) => (
+                <div key={step.value} className="relative flex min-w-0 items-start justify-center">
+                  {index > 0 ? (
+                    <span
+                      className={cn(
+                        "absolute left-0 right-[calc(50%+24px)] top-6 h-[2px] -translate-y-1/2",
+                        step.connectorComplete ? "bg-primary/75" : "bg-slate-200"
+                      )}
+                    />
+                  ) : null}
+                  {index < 4 ? (
+                    <span
+                      className={cn(
+                        "absolute left-[calc(50%+24px)] right-0 top-6 h-[2px] -translate-y-1/2",
+                        step.complete ? "bg-primary/75" : "bg-slate-200"
+                      )}
+                    />
+                  ) : null}
+                  <TabsTrigger
+                    value={step.value}
+                    disabled={!step.enabled}
+                    aria-label={`步骤 ${step.number}：${step.label}${!step.enabled ? "，尚未解锁" : ""}`}
+                    className="group relative z-10 flex h-[72px] min-w-0 flex-col justify-start gap-1.5 rounded-none bg-transparent px-1 pt-2.5 text-xs font-semibold text-slate-400 shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    {step.running ? (
-                      <span className="absolute -inset-1 rounded-full border-2 border-transparent border-t-primary border-r-primary/40 motion-safe:animate-spin" />
-                    ) : null}
-                    {step.number}
-                  </span>
-                  <span
-                    className={cn(
-                      "max-w-full truncate leading-4",
-                      step.complete && !step.active && "text-foreground"
-                    )}
-                  >
-                    {step.label}
-                  </span>
-                </TabsTrigger>
-              </div>
-            ))}
-          </TabsList>
-          <div className="flex shrink-0 items-center gap-0.5">
-            <TooltipProvider delayDuration={180}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => void handleRefreshStatus()}
-                    disabled={statusRefreshing}
-                    className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors enabled:hover:bg-background-interactive enabled:hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                    aria-label="刷新状态"
-                  >
-                    <RotateCcw className={cn("size-3.5", statusRefreshing && "animate-spin")} />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" className="text-xs">
-                  刷新状态
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-            <TooltipProvider delayDuration={180}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedFunction(null)
-                      onCollapse()
-                    }}
-                    className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background-interactive hover:text-foreground"
-                    aria-label="收起右侧面板"
-                  >
-                    <PanelRightClose className="size-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" className="text-xs">
-                  收起右侧面板
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+                    <span
+                      className={cn(
+                        "relative flex size-7 items-center justify-center rounded-full border-2 bg-white text-[11px] font-semibold transition-all",
+                        step.complete
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : step.enabled
+                            ? "border-primary bg-white text-primary"
+                            : "border-slate-100 bg-slate-100 text-slate-400"
+                      )}
+                    >
+                      {step.running ? (
+                        <span className="absolute -inset-1 rounded-full border-2 border-transparent border-t-primary border-r-primary/40 motion-safe:animate-spin" />
+                      ) : null}
+                      {step.number}
+                    </span>
+                    <span
+                      className={cn(
+                        "max-w-full truncate leading-4",
+                        step.complete && !step.active && "text-foreground"
+                      )}
+                    >
+                      {step.label}
+                    </span>
+                  </TabsTrigger>
+                </div>
+              ))}
+            </TabsList>
+            <div className="flex shrink-0 items-center gap-0.5">
+              <TooltipProvider delayDuration={180}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => void handleRefreshStatus()}
+                      disabled={statusRefreshing}
+                      className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors enabled:hover:bg-background-interactive enabled:hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                      aria-label="刷新状态"
+                    >
+                      <RotateCcw className={cn("size-3.5", statusRefreshing && "animate-spin")} />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="text-xs">
+                    刷新状态
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              <TooltipProvider delayDuration={180}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedFunction(null)
+                        onCollapse()
+                      }}
+                      className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background-interactive hover:text-foreground"
+                      aria-label="收起右侧面板"
+                    >
+                      <PanelRightClose className="size-3.5" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="text-xs">
+                    收起右侧面板
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
           </div>
-        </div>
+        ) : null}
 
         {selectedFunction ? (
           <RequirementFunctionWorkspace
@@ -897,7 +910,7 @@ export function RequirementStepsPanel({
                       functionInfo.file ? () => setSelectedFunction(functionInfo) : undefined
                     }
                     actions={
-                      generated && threadId ? (
+                      generated && threadId && !selectedFunction ? (
                         <div className="absolute inset-0 overflow-hidden bg-white">
                           <PrototypeHtmlPreview
                             filePath={prototypePath}
@@ -914,6 +927,10 @@ export function RequirementStepsPanel({
                           onChange={(needDesign) =>
                             updatePrototypeFunctionDesign(functionInfo, needDesign)
                           }
+                          onDesign={() => {
+                            updatePrototypeFunctionDesign(functionInfo, "1")
+                            requestPrototypeDesign(functionInfo)
+                          }}
                         />
                       )
                     }
@@ -1081,7 +1098,7 @@ export function RequirementStepsPanel({
                             functionInfo.file ? () => setSelectedFunction(functionInfo) : undefined
                           }
                           actions={
-                            prototypeStatus?.generated && threadId ? (
+                            prototypeStatus?.generated && threadId && !selectedFunction ? (
                               <div className="absolute inset-0 overflow-hidden bg-white">
                                 <PrototypeHtmlPreview
                                   filePath={prototypeStatus.prototypePath}
@@ -1098,6 +1115,10 @@ export function RequirementStepsPanel({
                                 onChange={(needDesign) =>
                                   updatePrototypeFunctionDesign(functionInfo, needDesign)
                                 }
+                                onDesign={() => {
+                                  updatePrototypeFunctionDesign(functionInfo, "1")
+                                  requestPrototypeDesign(functionInfo)
+                                }}
                               />
                             )
                           }

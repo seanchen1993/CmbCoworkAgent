@@ -111,6 +111,26 @@ export const requirementsApi = {
       success: boolean
       error?: string
     }>,
+  getFunctionHtml: (payload: { workspacePath: string; requirementFilePath: string }) =>
+    ipcRenderer.invoke("requirements:get-function-html", payload) as Promise<{
+      success: boolean
+      htmlFile?: string
+      htmlId?: string
+      error?: string
+    }>,
+  updateFunctionHtml: (payload: {
+    reqId: string
+    workspacePath: string
+    requirementFilePath: string
+    htmlFile: string
+    htmlId: string
+  }) =>
+    ipcRenderer.invoke("requirements:update-function-html", payload) as Promise<{
+      success: boolean
+      htmlFile?: string
+      htmlId?: string
+      error?: string
+    }>,
   syncManifest: (payload: {
     reqId: string
     manifest: unknown

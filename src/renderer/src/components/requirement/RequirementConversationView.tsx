@@ -28,12 +28,14 @@ import {
 import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import {
   fromPersistedRequirement,
+  normalizeRequirementHtmlFilePath,
   type NeedDesignChoice,
   isRequirementGenerated,
   isRequirementPublished,
   type RequirementPrdManifest,
   type RequirementRecord
 } from "./requirement-data"
+import { openRequirementDesign } from "@/lib/requirement-design-entry"
 import {
   enableRequirementSessionExperts,
   getRequirementSessionCapabilities
@@ -59,11 +61,6 @@ function getPrototypeFunctionKey(functionInfo: { fr: string; file: string }): st
   return `${functionInfo.fr}:${functionInfo.file}`
 }
 
-function getPrototypeFilePath(prdFilePath: string): string {
-  const fileName = getDisplayFileName(prdFilePath).replace(/\.md$/i, "").replace(/-doc$/i, "")
-  return `/prd/原型设计/${fileName}.html`
-}
-
 function normalizePrdFilePath(filePath: string): string {
   const normalized = filePath.trim().replace(/\\/g, "/").replace(/^\/+/, "")
   const prdMarker = normalized.toLowerCase().lastIndexOf("/prd/")
@@ -71,10 +68,6 @@ function normalizePrdFilePath(filePath: string): string {
   return normalized.toLowerCase() === "prd" || normalized.toLowerCase().startsWith("prd/")
     ? `/${normalized}`
     : `/prd/${normalized}`
-}
-
-function getDisplayFileName(filePath: string): string {
-  return filePath.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? filePath
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -135,6 +128,7 @@ function normalizeRequirementSpaceManifest(value: unknown): RequirementPrdManife
         description: asText(functionInfo.description),
         file: asText(functionInfo.file),
         htmlFile: asText(functionInfo.htmlFile),
+        htmlId: asText(functionInfo.htmlId),
         needDesign: normalizeNeedDesign(functionInfo.needDesign),
         keywords:
           Array.isArray(functionInfo.keywords) &&
@@ -362,10 +356,8 @@ function RequirementConversationSession({
   const prototypeStatuses = useMemo(
     () =>
       prototypeFunctions.map((functionInfo) => {
-        const prototypePath = functionInfo.htmlFile
-          ? normalizePrdFilePath(functionInfo.htmlFile)
-          : getPrototypeFilePath(functionInfo.file)
-        const generated = functionInfo.htmlFile.trim() !== ""
+        const prototypePath = normalizeRequirementHtmlFilePath(functionInfo.htmlFile)
+        const generated = prototypePath !== ""
         const choiceMade = generated || functionInfo.needDesign !== ""
         const skipped = prototypeRoute === "skip" || functionInfo.needDesign === "0"
         return {
@@ -474,18 +466,21 @@ function RequirementConversationSession({
     setPreviewTab("requirement-space")
   }, [persistPrototypeState])
   const requestPrototypeDesign = useCallback(
-    (functionInfo: { fr: string; name: string; file: string }): void => {
-      if (!threadState || conversationLoading) return
-      const prototypePath = getPrototypeFilePath(functionInfo.file)
-      threadState.addQueuedMessage({
-        id: crypto.randomUUID(),
-        text: `请为功能「${functionInfo.fr} ${functionInfo.name}」设计原型。以 ${functionInfo.file} 为需求依据，在 prd 下创建“原型设计”文件夹（若已存在则复用），并将原型保存为 ${prototypePath.replace(/^\/prd\//, "")}。`,
-        created_at: new Date(),
-        updated_at: new Date()
+    (functionInfo: { fr: string; name: string; file: string; htmlId?: string }): void => {
+      if (conversationLoading) return
+      const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
+      const relativeFile = normalizePrdFilePath(functionInfo.file).replace(/^\/+/, "")
+      const separator = workspacePath.includes("\\") ? "\\" : "/"
+      const requirementFilePath = `${workspacePath.replace(/[\\/]+$/, "")}${separator}${relativeFile.replace(/\//g, separator)}`
+      openRequirementDesign({
+        requirementId: requirement.id,
+        workspacePath,
+        requirementFilePath,
+        prompt: `请为功能「${functionInfo.fr} ${functionInfo.name}」设计原型。请以 ${relativeFile} 中的需求为依据，生成完整、可交互的单页 HTML 原型。`,
+        htmlId: functionInfo.htmlId?.trim() ?? ""
       })
-      toast.success(`已提交「${functionInfo.name || functionInfo.fr}」原型设计请求`)
     },
-    [conversationLoading, threadState]
+    [conversationLoading, requirement.requirementPath, threadState?.workspacePath]
   )
   const revealRequirementFile = useCallback(
     (filePath: string): void => {
