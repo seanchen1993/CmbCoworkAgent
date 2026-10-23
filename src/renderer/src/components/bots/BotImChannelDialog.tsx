@@ -38,12 +38,14 @@ export function BotImChannelDialog({
   client,
   bot,
   onClose,
-  onOpenWork
+  onOpenWork,
+  onOpenMain
 }: {
   client: BotClient
   bot: BotDefinition
   onClose(): void
   onOpenWork(id: string): void
+  onOpenMain?(): void
 }) {
   const api = client.im!
   const [status, setStatus] = useState<{ connected: boolean; available: boolean } | null>(null)
@@ -173,8 +175,8 @@ export function BotImChannelDialog({
         <DialogHeader>
           <DialogTitle>IM 接入 · {bot.name}</DialogTitle>
           <DialogDescription>
-            通过招乎的 CMBDevCaw Bot 私聊或群聊交办文字任务，回复回到原会话。独立任务也会出现在 Bot
-            右侧列表。
+            本人招乎私聊与 App 主对话共用历史和独立任务，App 的回复和任务结果也会同步到私聊。
+            群聊各自保留独立会话，回复回到原群。
           </DialogDescription>
         </DialogHeader>
         <div className="flex items-center justify-between gap-3 text-sm">
@@ -195,6 +197,11 @@ export function BotImChannelDialog({
           接入后，本人或绑定群的成员可以与此 Bot
           交流、创建和继续文字任务。不会开放本机文件、电脑操作或私人记忆。
         </p>
+        {kind === "dm" && (
+          <p className="text-sm text-muted-foreground">
+            请使用本人账号绑定。关联后开始同步新消息；之前的渠道记录仍可在下方查看，不会重复推送。
+          </p>
+        )}
         <div className="flex flex-wrap gap-2">
           <select
             aria-label="IM 绑定类型"
@@ -258,6 +265,22 @@ export function BotImChannelDialog({
                   </button>
                 )}
               </div>
+              {binding.kind === "dm" && binding.state === "active" && (
+                <div className="mt-2 flex items-center justify-between gap-2 text-sm">
+                  <span className="text-muted-foreground">已关联个人主对话 · 回复同步到招乎</span>
+                  {onOpenMain && (
+                    <button
+                      className={button}
+                      onClick={() => {
+                        onOpenMain()
+                        onClose()
+                      }}
+                    >
+                      打开主对话
+                    </button>
+                  )}
+                </div>
+              )}
               {binding.instruction && (
                 <div className="mt-3 space-y-2 text-sm">
                   <p>

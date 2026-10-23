@@ -92,6 +92,7 @@ export function parseBotChannelSource(input: unknown): BotMockSource {
     "conversationId",
     "audienceKey",
     "transport",
+    "personal",
     "eventId",
     "messageId",
     "senderId"
@@ -101,10 +102,13 @@ export function parseBotChannelSource(input: unknown): BotMockSource {
   const bindingId = botIdentifier(v.bindingId)
   if (v.transport !== undefined && v.transport !== "im")
     throw new BotError("CONFLICT", "渠道来源无效")
-  if (v.audienceKey !== `${v.transport ?? "mock"}:${bindingId}`)
+  if (v.personal !== undefined && (v.personal !== true || v.transport !== "im"))
+    throw new BotError("CONFLICT", "个人会话来源无效")
+  if (v.audienceKey !== (v.personal ? "desktop" : `${v.transport ?? "mock"}:${bindingId}`))
     throw new BotError("CONFLICT", "模拟来源受众不一致")
   return {
     ...(v.transport === "im" ? { transport: "im" as const } : {}),
+    ...(v.personal ? { personal: true as const } : {}),
     bindingId,
     grantVersion: Number(v.grantVersion),
     conversationId: botIdentifier(v.conversationId),

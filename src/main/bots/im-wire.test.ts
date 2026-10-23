@@ -20,7 +20,7 @@ const wait = async (predicate: () => boolean) => {
   }
 }
 
-it("negotiates Bot events separately, receives a real WebSocket event, runs the local Host and returns to its group", async () => {
+it.each(["group", "dm"] as const)("routes %s through WebSocket", async (kind) => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 })
   await new Promise<void>((resolve) => server.once("listening", resolve))
   const address = server.address()
@@ -43,11 +43,11 @@ it("negotiates Bot events separately, receives a real WebSocket event, runs the 
   const binding: BotImBinding = {
     id: "wire-binding",
     botId: bot.id,
-    kind: "group",
+    kind,
     label: bot.name,
     version: 1,
     state: "active",
-    conversationKey: "group-conversation",
+    conversationKey: `${kind}-conversation`,
     expiresAt: new Date(Date.now() + 600000).toISOString(),
     createdAt: new Date().toISOString()
   }
@@ -57,6 +57,7 @@ it("negotiates Bot events separately, receives a real WebSocket event, runs the 
       release() {},
       execute: async () => {
         host.mockExecution(task)
+        expect(task.threadId === bot.threadId).toBe(kind === "dm" || !task.mockSource)
         runs++
         return { state: "completed", result: "已收到群内交办" }
       }
@@ -171,7 +172,7 @@ it("negotiates Bot events separately, receives a real WebSocket event, runs the 
   service.start()
   client.start()
   await wait(() => client.supportsBotChannel())
-  await service.create(bot.id, "group", "create")
+  await service.create(bot.id, kind, "create")
   const event = {
     schemaVersion: 1,
     eventId: "wire-event",
@@ -189,7 +190,7 @@ it("negotiates Bot events separately, receives a real WebSocket event, runs the 
     route: {
       bindingId: binding.id,
       botId: bot.id,
-      kind: "group",
+      kind,
       label: bot.name,
       version: 1,
       senderId: "member"
@@ -206,9 +207,18 @@ it("negotiates Bot events separately, receives a real WebSocket event, runs the 
   await wait(() => replies.length === 1 && acks.some((ack) => ack.type === "completed"))
   expect(runs).toBe(1)
   expect(legacy).toBe(0)
-  expect(replies[0].conversationKey).toBe("group-conversation")
+  expect(replies[0].conversationKey).toBe(`${kind}-conversation`)
   expect(replies[0].message.content).toBe("已收到群内交办")
   expect(errors).toEqual([])
+  if (kind === "dm") {
+    host.send({ botId: bot.id, requestId: "app-input", message: "App 主对话" })
+    await wait(() => replies.length === 2)
+    expect(runs).toBe(2)
+    expect(replies[1].conversationKey).toBe(binding.conversationKey)
+    expect(replies[1].deliveryId).not.toBe(replies[0].deliveryId)
+    expect(legacy).toBe(0)
+    expect(errors).toEqual([])
+  }
   // Downgrading to an old gateway clears the capability; the legacy route still works.
   offerBot = false
   client.reconnect()
