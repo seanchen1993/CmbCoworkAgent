@@ -28,6 +28,8 @@
 
 原包的`.mcp.json`按敏感连接配置处理：本次没有读取其正文或计算单独内容摘要；新旧均存在且大小均为200字节，因此只记录存在性及大小，不推断字节相等。配套CSV不包含连接地址、密码或配置正文。
 
+平台未导出宿主管理的本机用户配置、运行授权或用户会话。原始来源已有的连接配置仍作为来源资源保留；本次未审查敏感配置正文，是否包含真实令牌、密钥或其他敏感值，需由来源作者在分发前核对。导出隔离不能作为原始源码已内嵌内容的脱敏证明。
+
 ### “189个原内核文件不变”的准确含义
 
 `autobiz.original-234-kernel`是目录中沿用的内核标识，名称里的234不是当前锁定内核文件数量。r13组装锁实际钉住 **189个内核文件**。
@@ -55,7 +57,7 @@
 | --- | --- |
 | devclaw.business-assembly.json | 完整组装锁：记录来源摘要、精确替换、步骤顺序、内核与全部资源闭包；安装/运行前核对真实来源，避免依赖丢失或跨版本错配。 |
 | devclaw.capabilities.json | 原生项目能力目录：声明 project-flow、项目用途及必须保留的原 Hook 编号；用于平台准入与入口识别，不是运行结果。 |
-| devclaw.portability.json | 可迁移性说明：声明运行时/Board版本、必需协议与需重新绑定的knowledgeRoot；明确不携带用户值、授权和运行状态。 |
+| devclaw.portability.json | 可迁移性说明：声明运行时/Board版本、必需协议与需重新绑定的knowledgeRoot；声明不携带宿主管理的用户配置值、授权和运行状态，不证明原源码没有内嵌敏感值。 |
 | devclaw.project-runtime.json | 通用项目运行时契约：声明插件状态归属、阶段视图及知识上下文provider协议；当前保留legacy业务内核，原生runtime.actions/checks为空，不等于状态Mod未提供工具。 |
 | devclaw.stage-checks.json | 原生阶段检查适配器声明：选择既有autobiz-v1兼容入口；不实现业务校验，不授予执行权限。 |
 | mods/business/autobiz.knowledge/collector-THIRD-PARTY-NOTICES.md | 离线知识解析依赖的第三方许可及归属声明，随依赖交付，不是运行入口。 |
@@ -102,7 +104,7 @@
 2. 新`devclaw.project-runtime.json.extensionContract.context`通过通用上下文协议声明`provider.py`，不是把所有知识硬编码到state Mod提示词。`autobiz.knowledge/register.ts`没有注册guest Hook，真实知识工作由provider和契约驱动。
 3. 宿主解析本机`knowledgeRoot`、运行配置和插件私有数据根，再给provider传入受控的`DEVCLAW_PLUGIN_DATA_ROOT`、`DEVCLAW_KNOWLEDGE_ROOT`、`DEVCLAW_RUNTIME_CONFIG_PATH`等绑定。provider把原模块统一绑定到同一知识根和运行配置，避免新步骤用一套知识、原步骤用另一套。
 4. 原安装源码保持只读；同步缓存、离线collector工具副本及运行配置写入宿主分配的数据目录。用户选择的已有知识目录按只读约束处理，不因为“同步”而清空外部目录。
-5. 跨电脑安装需重新绑定本机知识目录、凭据和授权。`devclaw.portability.json`明确不导出用户配置值、grants或运行状态；保留变量表达式不代表自动携带另一台电脑的秘密或目录。
+5. 跨电脑安装需重新绑定本机知识目录、凭据和授权。`devclaw.portability.json`声明不导出宿主管理的用户配置值、grants或运行状态；原来源已有连接配置仍按资源保留，其敏感值需由作者在分发前核对。保留变量表达式不代表自动迁移另一台电脑的本机绑定。
 
 ## 5. Skill、Hooks、workflow与状态写入器的职责
 
@@ -157,6 +159,8 @@ r13两候选真实SDK集测2/2通过。需求转换修改版的专项主流程�
 本地验收与应用安装包交付是不同结论。本文定稿时，新的Windows应用包尚未确认构建及包内验证成功；插件候选摘要和ZIP摘要不能作为Windows应用包已发布的证据。相同2.0.0版本号的历史构建也不必然包含本轮改造。
 
 新增严格跨步骤认证当前限不超过256KiB的普通文件/结构化JSON；目录、大产物、任意历史流程迁移不在本轮认证范围。双文件持锁提交实现针对Windows本地NTFS；不据此宣称其他平台具有同等写入保证。
+
+当前r13基础版和需求转换版AutoBiz 1.1.0均未携带`devclaw.stage-recovery-adapter.json`。保留原`hooks/rollback_stage.py`及状态Mod提交适配器，不等于已提供插件阶段恢复。该恢复入口属于平台条件能力，需要作者显式加入恢复协议、重新生成完整资源锁并通过恢复专项测试后另行生成新包；本次文件清单不声明已完整覆盖该能力。
 
 ## 9. 原234文件逐项状态与职责
 

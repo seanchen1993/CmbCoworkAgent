@@ -1,10 +1,12 @@
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { expect, it } from "vitest"
 import { snapshotDerivationSource } from "../../src/main/plugins/derivation-source"
 import { canonicalTmpdir } from "../support/canonical-temp-dir"
 
 it("creates source fixtures under the physical temporary root", async () => {
+  expect(canonicalTmpdir()).toBe(await realpath(tmpdir()))
   const directory = await mkdtemp(join(canonicalTmpdir(), "mods-canonical-temp-"))
   try {
     expect(await realpath(directory)).toBe(directory)

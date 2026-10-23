@@ -72,3 +72,7 @@ AutoBiz 状态提交适配器面向 Windows 本地 NTFS。新增严格产物交�
 - 原 AutoBiz Code Skill 来源编辑用例另行启用真实 r13 基础来源，1/1 通过；可选完整流程的准入条件未放宽，未宣称为此重跑此前全部长流程。
 
 复验报告：`output/ci-canonical-temp-fix-regression.json`。上述是夹具修复的增量验证，不与第二节原回归结果重复累计。新 Windows 包仍须以修复提交对应的 Actions、包内 Mods 测试和聊天测试结果为准。
+
+随后在实际短路径环境确认，Windows 的 `realpathSync` 仍会保留 8.3 别名，夹具改用 `realpathSync.native`，并在原测试中断言它与异步真实路径一致。在 `GetShortPathNameW` 取得的真实短路径 `TEMP/TMP` 下，完整 16 文件、147 项通过，0 跳过；同环境的真实 r13 来源编辑用例 1/1 通过。默认测试没有新增 PowerShell 依赖，生产安全检查未修改。证明见 `output/ci-native-short-temp-proof.json`。
+
+该专项首轮另有一次目录重命名 `EPERM`，来源及目标路径为 149/169 字符；尚不能将其归因为路径长度或系统扫描。失败日志及诊断保留，独立新进程的完整复验通过，不删用例、不放宽超时。
