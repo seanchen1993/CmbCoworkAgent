@@ -7,6 +7,7 @@ import type {
   SessionMeta,
   TabState
 } from "../../../../shared/managed-design-session"
+import type { DesignTweakCommand } from "../../../../shared/design-tweaks"
 
 /** One client per renderer, not per DesignView. Sequenced snapshots make reconnect idempotent. */
 export class DesignSessionClient {
@@ -29,6 +30,25 @@ export class DesignSessionClient {
 
   private accept(change: DesignSessionChange): void {
     if ((this.versions.get(change.id) ?? -1) > change.seq) return
+    if (change.draftHtmlOmitted && change.snapshot?.state.draftPreview) {
+      const cached = this.snapshots.get(change.id)?.state.draftPreview
+      const draft = change.snapshot.state.draftPreview
+      if (!cached || cached.runId !== draft.runId || cached.revision !== draft.revision) {
+        if (this.opened.has(change.id))
+          void this.api
+            .open(change.id)
+            .then((snapshot) => this.apply(snapshot))
+            .catch(console.error)
+        return
+      }
+      change = {
+        ...change,
+        snapshot: {
+          ...change.snapshot,
+          state: { ...change.snapshot.state, draftPreview: { ...draft, html: cached.html } }
+        }
+      }
+    }
     this.versions.set(change.id, change.seq)
     if (change.deleted) {
       this.snapshots.delete(change.id)
@@ -93,6 +113,31 @@ export class DesignSessionClient {
     meta?: Partial<SessionMeta>
   ): Promise<DesignSessionSnapshot> {
     return this.enqueue(id, async () => this.apply(await this.api.patch(id, patch, meta)))
+  }
+  tweak(id: string, command: DesignTweakCommand): Promise<DesignSessionSnapshot> {
+    return this.enqueue(id, async () => {
+      if (!this.api.tweak) throw new Error("当前应用不支持新版微调，请更新应用")
+      const snapshot = this.get(id)
+      const finalized =
+        command.scope === "draft" &&
+        command.runId === snapshot?.state.lastCompletedRunId &&
+        !snapshot?.activeRunId
+      const state =
+        command.scope === "draft" && !finalized
+          ? snapshot?.state.draftPreview?.tweaks
+          : snapshot?.state.tweaks
+      if (
+        !state ||
+        (command.scope === "draft" &&
+          !finalized &&
+          snapshot?.state.draftPreview?.runId !== command.runId)
+      )
+        throw new Error("微调目标已变更")
+      return this.apply(await this.api.tweak(id, { ...command, baseRevision: state.revision }))
+    })
+  }
+  previewVisible(id: string, runId: string, revision: number): void {
+    void this.api.previewVisible?.(id, runId, revision).catch(console.error)
   }
   start(request: DesignRunRequest): Promise<DesignSessionSnapshot> {
     return this.enqueue(request.designSessionId, async () =>

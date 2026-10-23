@@ -35,6 +35,51 @@ function seed(): DesignSessionSnapshot {
 }
 
 describe("durable design storage", () => {
+  it("stores draft content once outside message snapshots and restores it on reopen", () => {
+    const dir = mkdtempSync(join(tmpdir(), "design-draft-durable-"))
+    const path = join(dir, "design.sqlite")
+    try {
+      const db = new NativeSqliteAdapter(new DatabaseSync(path))
+      const store = new DesignSessionStore(db)
+      const snapshot = seed()
+      snapshot.state.draftPreview = {
+        runId: "run",
+        revision: 1,
+        html: "<html>durable-draft</html>",
+        draftPath: "/draft.html",
+        phase: "scaffold",
+        status: "building",
+        sections: [],
+        completedSections: [],
+        totalSections: 0,
+        tweaks: null,
+        createdAt: 1,
+        updatedAt: 1
+      }
+      store.save(snapshot, [{ type: "preview", preview: snapshot.state.draftPreview }])
+      expect(String(db.exec("SELECT state FROM design_sessions")[0].values[0][0])).not.toContain(
+        "durable-draft"
+      )
+      expect(
+        String(db.exec("SELECT payload FROM design_session_events")[0].values[0][0])
+      ).not.toContain("durable-draft")
+      db.close()
+      const reopened = new NativeSqliteAdapter(new DatabaseSync(path))
+      try {
+        const recovered = new DesignSessionStore(reopened)
+        expect(recovered.get("ds_disk")!.state.draftPreview!.html).toBe(
+          "<html>durable-draft</html>"
+        )
+        recovered.remove("ds_disk")
+        expect(reopened.exec("SELECT count(*) FROM design_draft_previews")[0].values[0][0]).toBe(0)
+      } finally {
+        reopened.close()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("reopens the file with execution-only messages, run inputs and the same event cursor", () => {
     const dir = mkdtempSync(join(tmpdir(), "design-session-durable-"))
     const path = join(dir, "design.sqlite")

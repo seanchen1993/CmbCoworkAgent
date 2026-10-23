@@ -4486,6 +4486,8 @@ const api = {
   },
   design: {
     sessions: {
+      tweak: (id, command) => ipcRenderer.invoke("design:session-tweak", { id, command }),
+      previewVisible: (id, runId, revision) => ipcRenderer.invoke("design:preview-visible", { id, runId, revision }),
       migrate: (seeds) => ipcRenderer.invoke("design:sessions-migrate", seeds),
       list: () => ipcRenderer.invoke("design:sessions-list"),
       create: (seed) => ipcRenderer.invoke("design:session-create", seed),

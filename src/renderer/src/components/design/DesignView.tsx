@@ -42,6 +42,10 @@ import {
   type DesignRunRequest
 } from "../../../../shared/managed-design-session"
 import { TweaksFloatingPanel } from "./TweaksFloatingPanel"
+import { DesignPreviewFrame } from "./DesignPreviewFrame"
+import { TweaksParameterPanel } from "./TweaksParameterPanel"
+import { useDesignTweaks } from "./use-design-tweaks"
+import { materializeTweaks, readTweakDeclaration, readyTweakKeys } from "../../../../shared/design-tweaks"
 import type {
   AnswerValue,
   ChatTab,
@@ -260,9 +264,9 @@ function getCurrentDesignHtml(state: TabState | undefined): string {
   if (!state) return ""
   if (state.activeVariationId) {
     const variationHtml = state.variations.find((v) => v.id === state.activeVariationId)?.html
-    if (variationHtml?.trim()) return variationHtml
+    if (variationHtml?.trim()) return materializeTweaks(variationHtml, state.tweaks)
   }
-  return state.html?.trim() ?? ""
+  return materializeTweaks(state.html?.trim() ?? "", state.tweaks)
 }
 
 function hasExistingDesignArtifact(state: TabState | undefined): boolean {
@@ -1150,6 +1154,7 @@ const EDIT_SELECT_CLEANUP = `(function(){if(window.__ed_cleanup)window.__ed_clea
  *               inject a :root block, and add the EDITMODE script. Always succeeds.
  */
 function ensureEditMode(html: string): string {
+  if (readTweakDeclaration(html)) return materializeTweaks(html)
   // 1. Already correct
   if (/\/\*EDITMODE-BEGIN\*\//.test(html)) return html
 
@@ -1436,13 +1441,18 @@ export function DesignView(): React.JSX.Element {
   const artifactSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const ts = tabStates[activeTabId] ?? makeTabState()
+  const [savedVersionSelection, setSavedVersionSelection] = useState<{ sessionId: string | null; runId?: string; show: boolean } | null>(null)
+  const showSavedVersion = savedVersionSelection?.sessionId === currentSessionId && savedVersionSelection?.runId === ts.draftPreview?.runId && savedVersionSelection?.show
+  const visibleDraft = showSavedVersion ? null : ts.draftPreview
+  const visibleHtml = visibleDraft?.html ?? ts.html
+  const tweakEditor = useDesignTweaks(currentSessionId, visibleDraft ? visibleDraft.tweaks : ts.tweaks, visibleDraft?.runId)
 
   // ── Per-tab derived values (all read from ts) ────────────────
   const inputValue = ts.inputValue
   const tweaksOn = ts.tweaksOn
-  const activeMode = ts.activeMode
+  const activeMode = visibleDraft || ts.generationState === "generating" ? null : ts.activeMode
   const zoom = ts.zoom
-  const previewVisible = Boolean(currentSessionId && ts.html && ts.rightTab === "design")
+  const previewVisible = Boolean(currentSessionId && visibleHtml && ts.rightTab === "design")
 
   useEffect(() => {
     const container = canvasContainerRef.current
@@ -1474,7 +1484,7 @@ export function DesignView(): React.JSX.Element {
     }))
   const setActiveMode = (val: "comment" | "edit" | "draw" | null) =>
     updateTs(activeTabId, (prev) => ({
-      activeMode: val,
+      activeMode: visibleDraft || prev.generationState === "generating" ? null : val,
       draftDrawNote: val === "draw" ? prev.draftDrawNote : null
     }))
   const setZoom = (val: number | ((v: number) => number)) =>
@@ -1760,8 +1770,11 @@ export function DesignView(): React.JSX.Element {
       let state = { ...makeTabState(), ...snapshot.state }
       const htmlChanged = sourceHtml !== snapshot.state.html
       if (htmlChanged && state.html) {
-        state = hydrateTabStateHtml(state, state.html)
-        if (snapshot.state.variations.length) state.variations = snapshot.state.variations
+        // Prepare dependencies before mounting the final document: business scripts run once.
+        state.html = initial ? "" : previous.html
+        state.variations = initial ? [] : previous.variations
+        state.reloadKey = previous.reloadKey
+        if (!initial && previous.draftPreview && !snapshot.state.draftPreview) state.draftPreview = previous.draftPreview
       } else if (!initial) {
         state.html = previous.html
         state.variations = previous.variations
@@ -1783,7 +1796,7 @@ export function DesignView(): React.JSX.Element {
       tabStatesRef.current = { [SINGLE_DESIGN_TAB_ID]: state }
       setTabStates(tabStatesRef.current)
       client.markRead(id, snapshot.seq)
-      if (htmlChanged && state.html) {
+      if (htmlChanged && snapshot.state.html) {
         const raw = snapshot.state.html
         void prepareHtmlForSrcDoc(raw, state.artifactPath)
           .then((html) => {
@@ -1795,6 +1808,8 @@ export function DesignView(): React.JSX.Element {
               return
             const latest = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
             const hydrated = hydrateTabStateHtml(latest, html)
+            hydrated.draftPreview = client.get(id)?.state.draftPreview ?? null
+            hydrated.tweaks = client.get(id)?.state.tweaks
             const savedVariations = client.get(id)?.state.variations
             if (savedVariations?.length) hydrated.variations = savedVariations
             tabStatesRef.current = { [SINGLE_DESIGN_TAB_ID]: hydrated }
@@ -2566,9 +2581,10 @@ export function DesignView(): React.JSX.Element {
   // ── Generate Design ───────────────────────────────────────
 
   const startManagedRun = useCallback(
-    (request: Omit<DesignRunRequest, "requestId" | "designSessionId">) => {
+    async (request: Omit<DesignRunRequest, "requestId" | "designSessionId">) => {
       const id = currentSessionIdRef.current
       if (!id) return
+      try { await tweakEditor.flush() } catch (error) { showToast(`微调尚未保存：${error instanceof Error ? error.message : String(error)}`); return }
       const state = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
       tabStatesRef.current = {
         [SINGLE_DESIGN_TAB_ID]: {
@@ -2590,7 +2606,7 @@ export function DesignView(): React.JSX.Element {
           }
         })
     },
-    [showToast]
+    [showToast, tweakEditor.flush]
   )
 
   const startGeneration = useCallback(
@@ -3347,8 +3363,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       `Because this request explicitly uses a skill, output exactly ONE final design page. ` +
       `Do NOT generate A/B variations, do NOT create elements with id="variation-a" or id="variation-b", ` +
       `and do NOT present alternative versions. ` +
-      `The file must include the EDITMODE Tweaks system as required by the system prompt ` +
-      `(TWEAK_DEFAULTS with /*EDITMODE-BEGIN*/…/*EDITMODE-END*/ markers, postMessage listener, applyTweaks with CSS variables). ` +
+      `For new pages include declarative v2 Tweaks JSON (defaults, schema, bindings) as required by the system prompt; the host supplies its panel and runtime. Preserve the existing protocol when iterating legacy pages. ` +
       `Apply the skill's design tokens and patterns inside that HTML file. ` +
       `始终使用中文回答。`
     const skillContext = selectedSkill ? `\n\n---\n${designOutputConstraint}` : ""
@@ -3798,7 +3813,10 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
 
   const handleExportDesign = useCallback(
     async (state: TabState) => {
-      const html = getCurrentDesignHtml(state)
+      try { await tweakEditor.flush() } catch (error) { showToast(`微调尚未保存：${error instanceof Error ? error.message : String(error)}`); return }
+      const id = currentSessionIdRef.current
+      const saved = id ? getDesignSessionClient().get(id)?.state : undefined
+      const html = getCurrentDesignHtml({ ...state, tweaks: saved?.tweaks ?? state.tweaks })
       if (!html.trim()) return
       const defaultName =
         state.artifactMetadata?.title?.trim() || state.sourceInfo?.label?.trim() || "design"
@@ -3836,7 +3854,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
         })
       }
     },
-    [workspacePath]
+    [workspacePath, tweakEditor.flush, showToast]
   )
 
   // ── Render ─────────────────────────────────────────────────
@@ -4655,7 +4673,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             <div style={{ flex: 1 }} />
 
             {/* Top-bar tools — tweaks toggle + mode buttons + zoom + export */}
-            {ts.html && ts.rightTab === "design" && (
+            {visibleHtml && ts.rightTab === "design" && (
               <div style={S.tweaksBar}>
                 <TweaksBtn
                   label="预览"
@@ -4692,7 +4710,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                   </button>
                 </div>
 
-                {tweaksOn && (
+                {tweaksOn && !visibleDraft && !isGenerating && (
                   <>
                     <div style={S.tweaksDivider} />
                     <TweaksBtn
@@ -4750,6 +4768,10 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             )}
           </div>
 
+          {!!ts.draftPreview && <div role="status" data-testid="design-progress" style={{ padding: "8px 16px", fontSize: 12, color: "#666", background: "#fafafa", borderBottom: "1px solid #e5e5e5", display: "flex", gap: 12, alignItems: "center" }}>
+            <span>{ts.draftPreview.status === "incomplete" ? "草稿未完成" : ts.draftPreview.phase === "validating" ? "正在检查页面" : "正在生成页面"}{ts.draftPreview.totalSections > 0 ? ` · ${ts.draftPreview.completedSections.length}/${ts.draftPreview.totalSections} 区块` : ""}</span>
+            {!!ts.html && <button onClick={() => setSavedVersionSelection({ sessionId: currentSessionId, runId: ts.draftPreview?.runId, show: !showSavedVersion })}>{showSavedVersion ? "查看生成草稿" : "查看已定稿版本"}</button>}
+          </div>}
           {/* Canvas Content */}
           <div style={S.canvas}>
             {ts.rightTab === "questions" ? (
@@ -4765,17 +4787,17 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             ) : (
               /* ── Design Preview ── */
               <>
-                {isGenerating && !ts.html ? (
+                {isGenerating && !visibleHtml ? (
                   <div style={S.canvasEmpty}>
                     <div style={S.generatingRow}>
                       <PulsingDot />
                       <span style={{ fontSize: 14, color: "#8a8a8a" }}>正在生成方案…</span>
                     </div>
                   </div>
-                ) : ts.html ? (
+                ) : visibleHtml ? (
                   (() => {
                     // Resolve which HTML to show: active variation or full HTML
-                    const displayHtml = ts.activeVariationId
+                    const displayHtml = visibleDraft ? visibleDraft.html : ts.activeVariationId
                       ? (ts.variations.find((v) => v.id === ts.activeVariationId)?.html ?? ts.html)
                       : ts.html
                     const activeVar = ts.variations.find((v) => v.id === ts.activeVariationId)
@@ -4931,10 +4953,14 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                 minHeight: "100%"
                               }}
                             >
-                              <iframe
-                                ref={iframeRef}
-                                key={`${ts.activeVariationId ?? "all"}-${ts.reloadKey}`}
-                                srcDoc={displayHtml}
+                              <DesignPreviewFrame
+                                frameRef={iframeRef}
+                                scopeId={`${currentSessionId}:${ts.activeVariationId ?? "all"}:${ts.reloadKey}`}
+                                html={displayHtml}
+                                draft={visibleDraft}
+                                tweaks={tweakEditor.state}
+                                initialScroll={{ x: ts.iframeScrollX, y: ts.iframeScrollY }}
+                                onVisible={(runId, revision) => { const id = currentSessionIdRef.current; if (id) getDesignSessionClient().previewVisible(id, runId, revision) }}
                                 style={{
                                   display: "block",
                                   position: "absolute",
@@ -4953,9 +4979,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                       ? "auto"
                                       : "none"
                                 }}
-                                sandbox="allow-scripts allow-same-origin allow-modals allow-forms allow-downloads"
-                                title="Design Preview"
-                                onLoad={() => {
+                                onLoad={(isDraft) => {
                                   // Block link/form navigation so clicks inside the preview
                                   // never navigate the iframe away from the design
                                   injectIntoIframe(
@@ -4964,6 +4988,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                   )
                                   // Always inject scroll tracker so pins stay anchored to content
                                   injectIntoIframe(iframeRef.current, SCROLL_INJECT)
+                                  if (isDraft) return
                                   // Reset scroll state — new iframe always starts at (0, 0)
                                   updateTs(activeTabId, {
                                     iframeScrollX: 0,
@@ -5189,6 +5214,15 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                           )}
                         </div>
 
+                        {tweaksOn && tweakEditor.state && activeMode !== "edit" && (
+                          <TweaksParameterPanel state={tweakEditor.state}
+                            disabled={visibleDraft?.phase === "validating" || (isGenerating && !visibleDraft)}
+                            availableKeys={visibleDraft ? readyTweakKeys(visibleDraft.html, tweakEditor.state.declaration) : undefined}
+                            error={tweakEditor.error} unsaved={tweakEditor.unsaved}
+                            onChange={tweakEditor.change}
+                            onCommit={() => { void tweakEditor.flush().catch(() => undefined) }}
+                            onCommand={(operation, key) => { void tweakEditor.command(operation, key).catch(() => undefined) }} />
+                        )}
                         {/* ── Right Properties Panel (Edit mode) ── */}
                         {activeMode === "edit" && (
                           <ElementPropsPanel

@@ -16,6 +16,15 @@ import {
   type SessionMeta
 } from "../../../shared/managed-design-session"
 import type { DesignSessionStore } from "./session-store"
+import { inspectDesignDocument } from "../../../shared/design-progressive"
+import {
+  readTweakDeclaration,
+  reconcileTweaks,
+  editTweaks,
+  materializeTweaks,
+  readyTweakKeys,
+  type DesignTweakCommand
+} from "../../../shared/design-tweaks"
 
 interface ActiveRun {
   id: string
@@ -59,6 +68,10 @@ export class DesignRunManager {
     private readonly deps: DesignRunDependencies
   ) {
     for (const snapshot of store.list()) {
+      snapshot.state.draftPreview ??= null
+      snapshot.state.tweaks ??=
+        snapshot.state.artifactMetadata?.tweaks ??
+        reconcileTweaks(readTweakDeclaration(snapshot.state.html))
       this.sessions.set(snapshot.id, snapshot)
       if (snapshot.activeRunId || busy(snapshot.state)) {
         const next = clone(snapshot)
@@ -66,6 +79,10 @@ export class DesignRunManager {
         next.activeRunId = null
         next.state.generationState = "interrupted"
         next.state.pendingApproval = null
+        if (next.state.draftPreview) {
+          next.state.draftPreview.status = "incomplete"
+          next.state.draftPreview.phase = "sections"
+        }
         for (const message of next.state.messages) message.isStreaming = false
         next.state.messages.push({
           id: randomUUID(),
@@ -112,6 +129,9 @@ export class DesignRunManager {
     }))
     if (busy(state)) state.generationState = "interrupted"
     state.pendingApproval = null
+    state.draftPreview ??= null
+    state.tweaks ??=
+      state.artifactMetadata?.tweaks ?? reconcileTweaks(readTweakDeclaration(state.html))
     return this.commit({ ...clone(seed), state, seq: 0, activeRunId: null, lastSeenSeq: 0 }, [
       { type: "created" }
     ])
@@ -132,15 +152,71 @@ export class DesignRunManager {
     }
     // Runtime-owned state cannot be manufactured by a UI patch.
     delete updates.pendingApproval
+    delete updates.draftPreview
+    delete updates.tweaks
+    delete updates.generationMetrics
+    delete updates.lastCompletedRunId
     if (updates.generationState === "generating" || updates.generationState === "asking")
       delete updates.generationState
     next.state = { ...next.state, ...updates }
+    if (updates.html !== undefined)
+      next.state.tweaks = reconcileTweaks(readTweakDeclaration(updates.html), next.state.tweaks)
     next.state.messages = next.state.messages.map((message) => ({
       ...message,
       id: message.id || randomUUID()
     }))
     if (meta) next.meta = { ...next.meta, ...meta, id }
     return this.commit(next, [{ type: "edited", fields: Object.keys(updates) }])
+  }
+
+  tweak(id: string, command: DesignTweakCommand): DesignSessionSnapshot {
+    const next = this.get(id)
+    const draft = next.state.draftPreview
+    // A debounced edit submitted just as validation completes still belongs to this result.
+    if (
+      command.scope === "draft" &&
+      !draft &&
+      !next.activeRunId &&
+      command.runId === next.state.lastCompletedRunId
+    )
+      command = { ...command, scope: "artifact" }
+    if (command.scope !== "artifact" && command.scope !== "draft") throw new Error("微调范围无效")
+    if (command.scope === "draft") {
+      if (!draft || command.runId !== draft.runId || draft.phase === "validating")
+        throw new Error("草稿已变更或正在校验")
+      if (!draft.tweaks) throw new Error("草稿没有可调参数")
+      if (
+        command.operation === "set" &&
+        command.key &&
+        !readyTweakKeys(draft.html, draft.tweaks.declaration).has(command.key)
+      )
+        throw new Error("该参数对应区块尚未生成")
+      draft.tweaks = editTweaks(draft.tweaks, command)
+    } else {
+      if (next.activeRunId) throw new Error("请调整当前草稿的参数")
+      if (!next.state.tweaks) throw new Error("设计没有可调参数")
+      next.state.tweaks = editTweaks(next.state.tweaks, command)
+    }
+    return this.commit(next, [
+      {
+        type: "tweaks_changed",
+        scope: command.scope,
+        revision: command.scope === "draft" ? draft!.tweaks!.revision : next.state.tweaks!.revision
+      }
+    ])
+  }
+
+  previewVisible(id: string, runId: string, revision: number): void {
+    const next = this.get(id)
+    const draft = next.state.draftPreview
+    if (!draft || draft.runId !== runId || draft.revision !== revision) return
+    const metrics = next.state.generationMetrics ?? {}
+    metrics.scaffoldVisibleAt ??= Date.now()
+    if (draft.completedSections.length) metrics.firstSectionVisibleAt ??= Date.now()
+    if (draft.totalSections && draft.completedSections.length === draft.totalSections)
+      metrics.lastSectionVisibleAt ??= Date.now()
+    next.state.generationMetrics = metrics
+    this.commit(next, [{ type: "preview_visible", runId, revision }])
   }
 
   start(request: DesignRunRequest): DesignSessionSnapshot {
@@ -159,6 +235,15 @@ export class DesignRunManager {
       pending: []
     }
     next.activeRunId = run.id
+    next.state.lastCompletedRunId = null
+    next.state.draftPreview = null
+    next.state.generationMetrics = { startedAt: Date.now() }
+    if (request.isIteration && next.state.tweaks)
+      run.request.currentHtml = materializeTweaks(
+        request.currentHtml || next.state.html,
+        next.state.tweaks,
+        false
+      )
     next.state.pendingApproval = null
     next.state.generationState = request.kind === "questions" ? "asking" : "generating"
     next.state.rightTab = request.kind === "questions" ? "questions" : "design"
@@ -177,7 +262,7 @@ export class DesignRunManager {
       executionEvents: []
     })
     // Commit the user input and placeholder before any model/tool execution.
-    const result = this.commit(next, [{ type: "run_started", runId: run.id }], request)
+    const result = this.commit(next, [{ type: "run_started", runId: run.id }], run.request)
     run.snapshot = clone(result)
     this.active.set(next.id, run)
     this.queue.push(() => this.execute(run))
@@ -222,9 +307,15 @@ export class DesignRunManager {
     if (this.active.get(run.request.designSessionId) !== run) return
     run.pending.push(clone(event))
     if (
-      ["done", "error", "cancelled", "interrupted", "approval", "approval_resolved"].includes(
-        event.type
-      )
+      [
+        "done",
+        "error",
+        "cancelled",
+        "interrupted",
+        "approval",
+        "approval_resolved",
+        "preview"
+      ].includes(event.type)
     ) {
       try {
         this.flush(run)
@@ -254,6 +345,10 @@ export class DesignRunManager {
     next.activeRunId = null
     next.state.generationState = "error"
     next.state.pendingApproval = null
+    if (next.state.draftPreview) {
+      next.state.draftPreview.status = "incomplete"
+      next.state.draftPreview.phase = "sections"
+    }
     const message = next.state.messages.at(-1)
     if (message?.role === "assistant") {
       message.content = `生成记录保存失败，任务已停止：${error instanceof Error ? error.message : String(error)}`
@@ -277,7 +372,30 @@ export class DesignRunManager {
     let continueGenerating = false
     for (let event of events) {
       if (terminal) break
-      if (event.type === "token" && event.token) {
+      if (event.type === "preview" && event.preview) {
+        const preview = event.preview
+        const previous = state.draftPreview
+        if (preview.runId !== run.id || (previous && preview.revision <= previous.revision))
+          continue
+        const inspection = inspectDesignDocument(preview.html, previous?.sections)
+        if (!inspection.valid) continue
+        preview.tweaks = reconcileTweaks(
+          readTweakDeclaration(preview.html),
+          previous?.tweaks ?? state.tweaks
+        )
+        state.draftPreview = preview
+        state.generationMetrics = {
+          ...state.generationMetrics,
+          firstWriteAt: state.generationMetrics?.firstWriteAt ?? Date.now(),
+          previewCount: (state.generationMetrics?.previewCount ?? 0) + 1,
+          previewBytes:
+            (state.generationMetrics?.previewBytes ?? 0) + Buffer.byteLength(preview.html)
+        }
+      } else if (event.type === "metrics") {
+        state.generationMetrics = { ...state.generationMetrics, ...event.metrics }
+      } else if (event.type === "token" && event.token) {
+        if (!state.generationMetrics?.firstTokenAt)
+          state.generationMetrics = { ...state.generationMetrics, firstTokenAt: Date.now() }
         const text = run.normalize(event.token)
         if (text)
           assistant.executionEvents = appendDesignExecutionEvent(assistant.executionEvents ?? [], {
@@ -317,9 +435,29 @@ export class DesignRunManager {
           }
         } else {
           try {
+            if (
+              state.draftPreview &&
+              !inspectDesignDocument(event.html ?? "", state.draftPreview.sections).finalizable
+            )
+              throw new Error("页面还有未完成区块，已保留草稿")
             event = this.deps.finalize(event, run.request, run.snapshot!)
             if (!event.html?.trim()) throw new Error("生成没有返回有效设计")
+            if (
+              state.draftPreview &&
+              !inspectDesignDocument(event.html, state.draftPreview.sections).finalizable
+            )
+              throw new Error("页面还有未完成区块，已保留草稿")
             state.html = event.html
+            state.lastCompletedRunId = run.id
+            state.tweaks =
+              event.tweaks ??
+              reconcileTweaks(
+                readTweakDeclaration(event.html),
+                state.draftPreview?.tweaks ?? state.tweaks,
+                true
+              )
+            state.draftPreview = null
+            state.generationMetrics = { ...state.generationMetrics, finishedAt: Date.now() }
             state.artifactPath = event.artifactPath ?? state.artifactPath
             state.artifactMetadata = event.metadata ?? state.artifactMetadata
             state.variations = [] // DOM-specific preview documents are derived by the view.
@@ -340,7 +478,9 @@ export class DesignRunManager {
         terminal = true
       }
       if (event.type === "error" || event.type === "cancelled" || event.type === "interrupted") {
+        const draft = state.draftPreview
         if (run.request.rollback) Object.assign(state, clone(run.request.rollback))
+        state.draftPreview = draft ? { ...draft, status: "incomplete", phase: "sections" } : null
         state.generationState =
           event.type === "interrupted"
             ? "interrupted"
@@ -357,6 +497,7 @@ export class DesignRunManager {
       }
     }
     if (terminal) {
+      state.generationMetrics = { ...state.generationMetrics, finishedAt: Date.now() }
       assistant.isStreaming = false
       assistant.modelRetry = null
       state.pendingApproval = null
@@ -467,6 +608,7 @@ export class DesignRunManager {
     request?: DesignRunRequest,
     completedRun?: { id: string; status: string }
   ): DesignSessionSnapshot {
+    const previousDraft = this.sessions.get(next.id)?.state.draftPreview
     next.seq++
     next.meta.updatedAt = Date.now()
     next.meta.title =
@@ -488,7 +630,19 @@ export class DesignRunManager {
     this.store.save(next, events, request, completedRun)
     this.sessions.set(next.id, clone(next))
     const result = clone(next)
-    this.deps.publish({ id: next.id, seq: next.seq, meta: result.meta, snapshot: result })
+    const draft = result.state.draftPreview
+    const draftHtmlOmitted =
+      !!draft && previousDraft?.runId === draft.runId && previousDraft.revision === draft.revision
+    const published = draftHtmlOmitted
+      ? { ...result, state: { ...result.state, draftPreview: { ...draft!, html: "" } } }
+      : result
+    this.deps.publish({
+      id: next.id,
+      seq: next.seq,
+      meta: result.meta,
+      snapshot: published,
+      ...(draftHtmlOmitted ? { draftHtmlOmitted: true } : {})
+    })
     return result
   }
 }

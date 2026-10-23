@@ -45,6 +45,51 @@ function fixture() {
 }
 
 describe("design view reconnect", () => {
+  it("reuses draft HTML for metadata-only updates and fetches a full snapshot after a missing revision", async () => {
+    const h = fixture()
+    await h.client.initialize([])
+    await h.client.open("ds_a")
+    const first = snapshot(2, "骨架")
+    first.state.draftPreview = {
+      runId: "run",
+      revision: 1,
+      html: "<html>large-draft</html>",
+      draftPath: "/draft.html",
+      phase: "scaffold",
+      status: "building",
+      sections: [],
+      completedSections: [],
+      totalSections: 0,
+      tweaks: null,
+      createdAt: 1,
+      updatedAt: 1
+    }
+    h.emit(first)
+    const metadata = structuredClone(first)
+    metadata.seq = 3
+    metadata.state.draftPreview!.html = ""
+    h.change({
+      id: "ds_a",
+      seq: 3,
+      meta: metadata.meta,
+      snapshot: metadata,
+      draftHtmlOmitted: true
+    })
+    expect(h.client.get("ds_a")!.state.draftPreview!.html).toBe("<html>large-draft</html>")
+    const full = structuredClone(first)
+    full.seq = 5
+    full.state.draftPreview!.revision = 2
+    full.state.draftPreview!.html = "<html>updated</html>"
+    vi.mocked(h.api.open).mockResolvedValue(full)
+    const missing = structuredClone(full)
+    missing.seq = 4
+    missing.state.draftPreview!.html = ""
+    h.change({ id: "ds_a", seq: 4, meta: missing.meta, snapshot: missing, draftHtmlOmitted: true })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(h.client.get("ds_a")!.state.draftPreview!.html).toBe("<html>updated</html>")
+  })
+
   it("registers the stream before fetching a snapshot and keeps events newer than the reply", async () => {
     const h = fixture()
     await h.client.initialize([])
