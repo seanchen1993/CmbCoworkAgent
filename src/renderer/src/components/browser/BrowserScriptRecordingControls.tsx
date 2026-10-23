@@ -112,7 +112,13 @@ export function BrowserScriptRecordingControls({
   const [isVariableSubmissionSubmitting, setIsVariableSubmissionSubmitting] = useState(false)
   const [saveDisplayName, setSaveDisplayName] = useState("")
   const [scriptLibraryOpen, setScriptLibraryOpen] = useState(false)
+  const [scriptLibraryInitialFileName, setScriptLibraryInitialFileName] = useState<string | null>(
+    null
+  )
+  const [scriptLibraryTransientEntry, setScriptLibraryTransientEntry] =
+    useState<BrowserScriptLibraryEntry | null>(null)
   const [scriptLibraryEntries, setScriptLibraryEntries] = useState<BrowserScriptLibraryEntry[]>([])
+  const [hasLoadedScriptLibraryEntries, setHasLoadedScriptLibraryEntries] = useState(false)
   const [isScriptLibraryLoading, setIsScriptLibraryLoading] = useState(false)
   const [scriptLibraryError, setScriptLibraryError] = useState<string | null>(null)
   const [loadingLibraryFileName, setLoadingLibraryFileName] = useState<string | null>(null)
@@ -173,7 +179,14 @@ export function BrowserScriptRecordingControls({
   const refreshScriptRecording = useCallback(async () => {
     try {
       const nextSession = await window.api.browser.getScriptRecording()
-      setScriptRecording(nextSession)
+      setScriptRecording((current) =>
+        current.id === nextSession.id &&
+        current.status === nextSession.status &&
+        current.script === nextSession.script &&
+        current.actions.length === nextSession.actions.length
+          ? current
+          : nextSession
+      )
     } catch (error) {
       console.error(
         `[BrowserScriptRecordingControls] Failed to refresh script recording: ${formatError(error)}`
@@ -245,14 +258,14 @@ export function BrowserScriptRecordingControls({
   }, [])
 
   useEffect(() => {
-    if (scriptRecording.status !== "recording") return
+    if (scriptRecording.status !== "recording" || !recordingDialogOpen) return
     const interval = window.setInterval(() => {
       void refreshScriptRecording()
     }, RECORDING_POLL_MS)
     return () => {
       window.clearInterval(interval)
     }
-  }, [scriptRecording.status, refreshScriptRecording])
+  }, [recordingDialogOpen, scriptRecording.status, refreshScriptRecording])
 
   useEffect(() => {
     const nextSelectionSyncKey = [
@@ -284,7 +297,10 @@ export function BrowserScriptRecordingControls({
 
   const openRecordingDialog = useCallback(() => {
     setRecordingDialogOpen(true)
-  }, [])
+    if (scriptRecording.status === "recording") {
+      void refreshScriptRecording()
+    }
+  }, [refreshScriptRecording, scriptRecording.status])
 
   const persistRecordingDraft = useCallback(
     async (options?: { silent?: boolean }): Promise<BrowserRecordingSession> => {
@@ -405,34 +421,77 @@ export function BrowserScriptRecordingControls({
     }
   }, [persistActiveDraftIfNeeded])
 
-  const loadScriptLibraryEntries = useCallback(async () => {
+  const loadScriptLibraryEntries = useCallback(async (): Promise<BrowserScriptLibraryEntry[]> => {
     setIsScriptLibraryLoading(true)
     setScriptLibraryError(null)
     try {
       const entries = await window.api.browser.listScriptLibraryEntries()
       setScriptLibraryEntries(entries)
+      setHasLoadedScriptLibraryEntries(true)
+      return entries
     } catch (error) {
       console.error(
         `[BrowserScriptRecordingControls] Failed to load browser script library: ${formatError(error)}`
       )
       setScriptLibraryError(formatError(error) || "读取可复用操作失败")
+      return []
     } finally {
       setIsScriptLibraryLoading(false)
     }
   }, [])
 
   const openScriptLibrary = useCallback(() => {
+    setScriptLibraryInitialFileName(null)
+    setScriptLibraryTransientEntry(null)
     setScriptLibraryOpen(true)
     void loadScriptLibraryEntries()
   }, [loadScriptLibraryEntries])
 
+  const openScriptLibraryEntry = useCallback(
+    (fileName: string) => {
+      const cachedEntry = scriptLibraryEntries.find((entry) => entry.fileName === fileName)
+      setScriptLibraryTransientEntry(
+        cachedEntry ?? {
+          createdAt: playbackState.startedAt ?? new Date().toISOString(),
+          description: "",
+          displayName: playbackState.label?.trim() || playbackMode.label.trim() || fileName,
+          fileName,
+          recordingSource: "script",
+          threadId: playbackState.threadId?.trim() || threadId?.trim() || "",
+          workspacePath: workspacePath?.trim() || ""
+        }
+      )
+      setScriptLibraryInitialFileName(fileName)
+      setScriptLibraryOpen(true)
+    },
+    [playbackMode.label, playbackState, scriptLibraryEntries, threadId, workspacePath]
+  )
+
+  const visibleScriptLibraryEntries = useMemo(() => {
+    if (!scriptLibraryTransientEntry) return scriptLibraryEntries
+    if (
+      scriptLibraryEntries.some((entry) => entry.fileName === scriptLibraryTransientEntry.fileName)
+    ) {
+      return scriptLibraryEntries
+    }
+    return [scriptLibraryTransientEntry, ...scriptLibraryEntries]
+  }, [scriptLibraryEntries, scriptLibraryTransientEntry])
+
   const openActivePlaybackScriptDetail = useCallback(() => {
-    if (playbackMode.detailSource === "library") {
-      openScriptLibrary()
+    const playbackFileName = playbackState.fileName?.trim()
+    if (playbackMode.detailSource === "library" && playbackFileName) {
+      openScriptLibraryEntry(playbackFileName)
+      return
+    }
+    if (
+      playbackFileName?.startsWith("browser-recording-") &&
+      playbackFileName.endsWith(".spec.ts")
+    ) {
+      openScriptLibraryEntry(playbackFileName)
       return
     }
     setRecordingDialogOpen(true)
-  }, [openScriptLibrary, playbackMode.detailSource])
+  }, [openScriptLibraryEntry, playbackMode.detailSource, playbackState.fileName])
 
   const cancelPlayback = useCallback(() => {
     setIsCancellingPlayback(true)
@@ -500,31 +559,59 @@ export function BrowserScriptRecordingControls({
     setIsSaveSubmitting(true)
     try {
       if (currentRecordingLibraryTarget) {
+        const hasVariables = extractScriptRecordingVariables(draftScript).length > 0
         await window.api.browser.updateScriptLibraryEntry({
           fileName: currentRecordingLibraryTarget.fileName,
           script: draftScript,
-          isEdited: isRecordingEdited || extractScriptRecordingVariables(draftScript).length > 0
+          isEdited: isRecordingEdited || hasVariables
         })
+        setScriptLibraryEntries((current) =>
+          current.map((entry) =>
+            entry.fileName === currentRecordingLibraryTarget.fileName
+              ? {
+                  ...entry,
+                  hasVariables,
+                  isEdited: entry.isEdited || isRecordingEdited || hasVariables
+                }
+              : entry
+          )
+        )
         toast.success(`已保存到原脚本：${currentRecordingLibraryTarget.displayName}`)
       } else {
-        await window.api.browser.saveScriptLibraryEntry({
+        const hasVariables = extractScriptRecordingVariables(draftScript).length > 0
+        const savedEntry = await window.api.browser.saveScriptLibraryEntry({
           displayName,
-          isEdited: isRecordingEdited || extractScriptRecordingVariables(draftScript).length > 0,
+          isEdited: isRecordingEdited || hasVariables,
           recordingSource: "script",
           script: draftScript,
           threadId,
           workspacePath: trimmedWorkspacePath
         })
+        const savedEntryWithVariableState = {
+          ...savedEntry,
+          hasVariables
+        }
+        setScriptRecording((current) => ({
+          ...current,
+          libraryFileName: savedEntry.fileName,
+          libraryDisplayName: savedEntry.displayName
+        }))
+        setScriptLibraryEntries((current) => [
+          savedEntryWithVariableState,
+          ...current.filter((entry) => entry.fileName !== savedEntry.fileName)
+        ])
+        setScriptLibraryTransientEntry(savedEntryWithVariableState)
+        setScriptLibraryInitialFileName(savedEntry.fileName)
         toast.success("已保存为可复用操作")
       }
       setHasPendingUnsaved(false)
       setRecordingDialogOpen(false)
       resetSaveForm()
-      if (trimmedWorkspacePath) {
-        void loadScriptLibraryEntries()
-      }
       if (!currentRecordingLibraryTarget) {
         setScriptLibraryOpen(true)
+        if (!hasLoadedScriptLibraryEntries) {
+          void loadScriptLibraryEntries()
+        }
       }
     } catch (error) {
       console.error(
@@ -538,6 +625,7 @@ export function BrowserScriptRecordingControls({
     currentRecordingLibraryTarget,
     draftScript,
     hasUnnamedVariableActions,
+    hasLoadedScriptLibraryEntries,
     isRecordingEdited,
     loadScriptLibraryEntries,
     resetSaveForm,
@@ -1069,11 +1157,19 @@ export function BrowserScriptRecordingControls({
       />
 
       <BrowserRecordingListDialog
+        key={`browser-script-library-${scriptLibraryInitialFileName ?? "default"}`}
         open={scriptLibraryOpen}
-        onOpenChange={setScriptLibraryOpen}
+        onOpenChange={(open) => {
+          setScriptLibraryOpen(open)
+          if (!open) {
+            setScriptLibraryInitialFileName(null)
+            setScriptLibraryTransientEntry(null)
+          }
+        }}
+        initialSelectedFileName={scriptLibraryInitialFileName}
         isLoading={isScriptLibraryLoading}
         error={scriptLibraryError}
-        entries={scriptLibraryEntries}
+        entries={visibleScriptLibraryEntries}
         playbackHistory={playbackHistory}
         onClearPlaybackHistory={clearPlaybackHistory}
         loadingFileName={loadingLibraryFileName}

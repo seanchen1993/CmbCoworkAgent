@@ -37,6 +37,7 @@ import {
 export interface BrowserRecordingListDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
+  initialSelectedFileName?: string | null
   isPlaybackRunning: boolean
   isLoading: boolean
   error: string | null
@@ -177,6 +178,7 @@ interface DetailDraftState {
 export function BrowserRecordingListDialog({
   open,
   onOpenChange,
+  initialSelectedFileName,
   isPlaybackRunning,
   isLoading,
   error,
@@ -193,14 +195,21 @@ export function BrowserRecordingListDialog({
   onExecuteScript,
   onDelete
 }: BrowserRecordingListDialogProps): React.JSX.Element {
-  const [selectedFileName, setSelectedFileName] = useState<string | null>(null)
+  const initialSelectedEntryIndex = initialSelectedFileName
+    ? entries.findIndex((entry) => entry.fileName === initialSelectedFileName)
+    : -1
+  const [selectedFileName, setSelectedFileName] = useState<string | null>(
+    initialSelectedFileName ?? null
+  )
   const [detailScript, setDetailScript] = useState("")
   const [detailInitialScript, setDetailInitialScript] = useState("")
   const [detailDisplayName, setDetailDisplayName] = useState("")
   const [detailInitialDisplayName, setDetailInitialDisplayName] = useState("")
   const [detailCopied, setDetailCopied] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
-  const [currentPage, setCurrentPage] = useState(1)
+  const [currentPage, setCurrentPage] = useState(
+    initialSelectedEntryIndex >= 0 ? Math.floor(initialSelectedEntryIndex / PAGE_SIZE) + 1 : 1
+  )
   const [historyCurrentPage, setHistoryCurrentPage] = useState(1)
   const [displayNameFilter, setDisplayNameFilter] = useState("")
   const [activeTab, setActiveTab] = useState<"recordings" | "history">("recordings")
@@ -261,13 +270,21 @@ export function BrowserRecordingListDialog({
     setActiveTab("recordings")
   }
 
-  useEffect(() => {
-    // A continued recording can update the same file while this component stays mounted.
-    // Scope drafts to the current list snapshot and open dialog session.
+  const invalidateDetailCache = useCallback(() => {
     detailCacheGenerationRef.current += 1
     detailDraftsRef.current.clear()
     detailReadsRef.current.clear()
-  }, [entries, open])
+  }, [])
+
+  useEffect(() => {
+    // Keep drafts for ordinary metadata updates. A new dialog session starts clean.
+    invalidateDetailCache()
+  }, [invalidateDetailCache, open])
+
+  const handleRefresh = (): void => {
+    invalidateDetailCache()
+    onRefresh()
+  }
 
   useEffect(() => {
     if (!open || activeTab !== "recordings" || !selectedEntry || error || isLoading) return
@@ -446,7 +463,7 @@ export function BrowserRecordingListDialog({
                 variant="outline"
                 className="mr-10 h-8 shrink-0 rounded-lg"
                 disabled={isLoading}
-                onClick={onRefresh}
+                onClick={handleRefresh}
               >
                 {isLoading ? (
                   <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
