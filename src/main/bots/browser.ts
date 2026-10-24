@@ -3,7 +3,11 @@ import { lstat, mkdir, realpath, rename, rm } from "node:fs/promises"
 import { basename, join } from "node:path"
 import type { BrowserContext, Page, Locator, Dialog, Download } from "playwright"
 import { AsyncKeyedLock } from "../ipc/async-keyed-lock"
-import { BotError, type BotBrowserState } from "../../shared/bots/contracts"
+import {
+  BotError,
+  type BotBrowserHumanAction,
+  type BotBrowserState
+} from "../../shared/bots/contracts"
 import { resolveBotWorkspaceFile } from "./workspace-file"
 import type { BotBrowserEngine } from "./browser-engine"
 import { OwnedPageAutomation } from "../browser/automation/owned-page"
@@ -105,9 +109,11 @@ export class BotBrowserService {
   private engine: BotBrowserEngine | undefined
   private human: {
     botId: string
+    pageId?: string
     status: "requesting" | "active"
     instruction?: string
     generation: number
+    helpSkipped?: boolean
   } | null = null
   private generation = 0
   private stopping = false
@@ -131,9 +137,37 @@ export class BotBrowserService {
       }
       this.engine = engine
       this.context = context
+      const stopHidden = engine.onWindowHidden((page, generation) => {
+        if (this.context !== context) return
+        const entry = [...this.pages.values()].find((candidate) => candidate.page === page)
+        const claim = this.human
+        if (
+          !entry ||
+          !claim ||
+          claim.botId !== entry.botId ||
+          claim.generation !== generation ||
+          claim.instruction
+        )
+          return
+        const release = () => {
+          if (
+            this.context === context &&
+            this.pages.get(entry.id) === entry &&
+            this.human === claim &&
+            claim.status === "active" &&
+            claim.pageId === entry.id &&
+            !claim.instruction
+          )
+            void this.giveBack(entry.botId, generation).catch(() => {})
+        }
+        // Native close can precede either the first show or a page switch's reply.
+        // Recheck the exact target after that lock, then return outside the lock.
+        void this.lock.withKey("browser", async () => {}).then(release).catch(() => {})
+      })
       context.setDefaultTimeout(15_000)
       context.setDefaultNavigationTimeout(20_000)
       context.on("close", () => {
+        stopHidden()
         if (this.context !== context) return
         this.context = undefined
         this.engine = undefined
@@ -351,12 +385,28 @@ export class BotBrowserService {
         throw new BotError("CONFLICT", "请先观察此 Bot 的页面，再请求用户接管")
       if (this.human && this.human.botId !== botId)
         throw new BotError("CONFLICT", "请先归还另一 Bot 的浏览器，再继续此任务")
-      // A concurrent duplicate shares the user's current lease and keeps its original instruction.
+      // An existing manual lease becomes help without changing its identity. The
+      // first help instruction wins, including concurrent duplicate requests.
       if (!this.human) await this.takeOver(botId, entry.id, instruction)
+      else {
+        if (this.human.status !== "active")
+          throw new BotError("CONFLICT", "浏览器控制权正在切换，请刷新后重试")
+        if (!this.human.instruction) {
+          const claim = this.human
+          claim.instruction = instruction
+          try {
+            if (claim.pageId !== entry.id) await this.takeOver(botId, entry.id)
+          } catch (error) {
+            if (this.human === claim) claim.instruction = undefined
+            throw error
+          }
+        }
+      }
       // Reuse the existing abortable control wait. After return, observe instead of replaying input.
       return this.act(botId, { action: "observe", pageId: entry.id }, signal, waiting)
     }
     if (this.human?.botId === botId) {
+      const handoff = this.human
       waiting(true)
       try {
         await new Promise<void>((resolve, reject) => {
@@ -379,19 +429,33 @@ export class BotBrowserService {
       } finally {
         waiting(false)
       }
+      const skippedNote = handoff.helpSkipped
+        ? "The user skipped your browser help request without confirming the requested step. Treat that step as declined, do not assume it happened, and do not immediately ask for the same step again. Continue without it when possible; otherwise explain what is blocked and wait for the user."
+        : undefined
       // Old targets are stale after takeover. Return fresh evidence without replaying the requested input.
       const target = action.pageId ? this.pages.get(action.pageId) : undefined
       if (target && target.botId !== botId) throw new BotError("CONFLICT", "页面不属于此 Bot")
+      const helpTargetClosed =
+        handoff.instruction && action.pageId && (!target || target.page.isClosed())
       if (
+        helpTargetClosed ||
         ![...this.pages.values()].some((entry) => entry.botId === botId && !entry.page.isClosed())
       ) {
         this.check(signal, this.generation, botId)
         if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
+        const pages = helpTargetClosed
+          ? await this.lock.withKey("browser", () => this.pageList(botId))
+          : []
+        this.check(signal, this.generation, botId)
         return JSON.stringify({
           closed: action.pageId ?? null,
-          pages: [],
+          pages,
           control: "bot",
-          note: "The browser page was closed during human control. No replacement page was opened and no action was replayed. Do not assume the requested user action was completed. Report what remains unfinished unless you can verify completion. Reopen only if the current user request allows it."
+          ...(handoff.helpSkipped ? { helpSkipped: true } : {}),
+          note: [
+            skippedNote,
+            "The browser page was closed during human control. No replacement page was opened and no action was replayed. Do not assume the requested user action was completed. Report what remains unfinished unless you can verify completion. Reopen only if the current user request allows it."
+          ].filter(Boolean).join(" ")
         })
       }
       const observed = JSON.parse(
@@ -405,8 +469,10 @@ export class BotBrowserService {
       return JSON.stringify({
         ...observed,
         control: "bot",
+        ...(handoff.helpSkipped ? { helpSkipped: true } : {}),
         note: [
           observed.note,
+          skippedNote,
           "Human control ended. You now have control again. The pending action was replaced with this fresh observation; it was not replayed. Verify the result before requesting any further user action."
         ]
           .filter(Boolean)
@@ -670,7 +736,7 @@ export class BotBrowserService {
         .map(async (entry) => ({
           id: entry.id,
           url: entry.page.url(),
-          title: await this.engine!.getTitle(entry.page).catch(() => "页面已关闭")
+          ...(await this.engine!.getPageState(entry.page).catch(() => ({ title: "页面已关闭" })))
         }))
     )
   }
@@ -678,15 +744,20 @@ export class BotBrowserService {
     return this.lock.withKey("browser", async () => {
       if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
       const pages = await this.pageList(botId)
-      const selected = pageId
-        ? this.pages.get(pageId)
+      const targetId = pageId ?? (this.human?.botId === botId ? this.human.pageId : undefined)
+      const selected = targetId
+        ? this.pages.get(targetId)
         : [...this.pages.values()].find((item) => item.botId === botId)
       if (selected && selected.botId !== botId) throw new BotError("CONFLICT", "页面不属于此 Bot")
+      let captureError: string | undefined
       const image =
         selected && !selected.dialog && !selected.page.isClosed()
-          ? await selected.page
-              .screenshot({ type: "jpeg", quality: 60, timeout: 5000 })
-              .catch(() => null)
+          ? await this.engine!
+              .capturePage(selected.page)
+              .catch(() => {
+                captureError = "暂时无法获取浏览器画面，请刷新重试"
+                return null
+              })
           : null
       return {
         pages,
@@ -701,6 +772,7 @@ export class BotBrowserService {
               ? "other-human"
               : "bot",
         image: image ? `data:image/jpeg;base64,${image.toString("base64")}` : null,
+        ...(captureError ? { captureError } : {}),
         dialogPending: Boolean(selected?.dialog),
         helpInstruction: this.human?.botId === botId ? this.human.instruction : undefined
       }
@@ -718,15 +790,19 @@ export class BotBrowserService {
       await this.lock.withKey("browser", async () => {
         if (this.stopping || this.human !== claim || claim.status !== "active")
           throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后重试")
-        const entry = await this.page(botId, pageId)
-        await this.engine!.show(entry.page)
+        const targetId = pageId ?? claim.pageId
+        if (!targetId) throw new BotError("CONFLICT", "当前接管页面已关闭，请明确选择页面")
+        const entry = await this.page(botId, targetId)
+        await this.engine!.show(entry.page, claim.generation)
         if (this.stopping || this.human !== claim || claim.status !== "active")
           throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后重试")
+        claim.pageId = entry.id
       })
       return
     }
     const claim = {
       botId,
+      pageId,
       status: "requesting" as "requesting" | "active",
       instruction,
       generation: ++this.generation
@@ -737,9 +813,10 @@ export class BotBrowserService {
     try {
       await this.lock.withKey("browser", async () => {
         const entry = await this.page(botId, pageId)
-        await this.engine!.show(entry.page)
+        await this.engine!.show(entry.page, claim.generation)
         if (this.stopping || this.human !== claim || entry.page.isClosed())
           throw new BotError("CONFLICT", "浏览器已关闭，请重新打开")
+        claim.pageId = entry.id
         claim.status = "active"
       })
     } catch (error) {
@@ -748,12 +825,18 @@ export class BotBrowserService {
       throw error
     }
   }
-  async giveBack(botId: string, expectedGeneration?: number): Promise<void> {
+  async giveBack(botId: string, expectedGeneration?: number, outcome?: "skipped"): Promise<void> {
+    if (outcome === "skipped" && expectedGeneration === undefined)
+      throw new BotError("INVALID_INPUT", "跳过协助须提供当前浏览器控制版本")
     if (expectedGeneration !== undefined && expectedGeneration !== this.human?.generation)
       throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后再归还")
     if (this.human?.botId !== botId || this.human.status !== "active")
       throw new BotError("CONFLICT", "当前没有可归还的浏览器")
     const claim = this.human
+    if (outcome !== undefined && outcome !== "skipped")
+      throw new BotError("INVALID_INPUT", "浏览器归还方式无效")
+    if (outcome === "skipped" && !claim.instruction)
+      throw new BotError("CONFLICT", "当前没有可跳过的浏览器协助请求")
     claim.status = "requesting"
     try {
       await this.lock.withKey("browser", async () => {
@@ -763,7 +846,10 @@ export class BotBrowserService {
       if (this.human === claim) claim.status = "active"
       throw error
     }
-    if (this.human === claim) this.human = null
+    if (this.human === claim) {
+      if (outcome === "skipped") claim.helpSkipped = true
+      this.human = null
+    }
     for (const entry of this.pages.values())
       if (entry.botId === botId) entry.automation.invalidate()
     this.generation++
@@ -781,7 +867,70 @@ export class BotBrowserService {
         throw new BotError("CONFLICT", "浏览器控制权已改变")
       const entry = await this.page(botId, pageId)
       await entry.page.goto(url.href, { waitUntil: "domcontentloaded" })
-      if (this.human === claim && claim.status === "active") await this.engine!.show(entry.page)
+      if (this.human === claim && claim.status === "active") {
+        await this.engine!.show(entry.page, claim.generation)
+        claim.pageId = entry.id
+      }
+    })
+  }
+  async operateAsHuman(
+    botId: string,
+    action: BotBrowserHumanAction,
+    expectedGeneration: number
+  ): Promise<string | null> {
+    const claim = this.human
+    const check = () => {
+      if (
+        this.stopping ||
+        this.isRetired(botId) ||
+        !claim ||
+        this.human !== claim ||
+        claim.botId !== botId ||
+        claim.status !== "active" ||
+        claim.generation !== expectedGeneration
+      )
+        throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后重试")
+    }
+    check()
+    if (
+      !["back", "forward", "reload", "new", "close"].includes(action.action) ||
+      (action.action === "new" ? action.pageId !== undefined : !action.pageId)
+    )
+      throw new BotError("INVALID_INPUT", "浏览器操作或页面无效")
+    return this.lock.withKey("browser", async () => {
+      check()
+      const entry =
+        action.action === "new"
+          ? await this.page(botId, undefined, true)
+          : this.pages.get(action.pageId!)
+      if (!entry || entry.botId !== botId || entry.page.isClosed())
+        throw new BotError("CONFLICT", "页面已关闭或不属于此 Bot")
+      check()
+      entry.automation.invalidate()
+      if (action.action === "close") {
+        await entry.page.close({ runBeforeUnload: false })
+        const next = [...this.pages.values()].find(
+          (candidate) => candidate.botId === botId && !candidate.page.isClosed()
+        )
+        if (!next) return null
+        check()
+        await this.engine!.show(next.page, expectedGeneration)
+        check()
+        claim!.pageId = next.id
+        return next.id
+      }
+      if (entry.dialog)
+        throw new BotError("CONFLICT", "页面有待处理弹窗，请先处理弹窗")
+      if (action.action === "back") await entry.page.goBack({ waitUntil: "domcontentloaded" })
+      else if (action.action === "forward")
+        await entry.page.goForward({ waitUntil: "domcontentloaded" })
+      else if (action.action === "reload")
+        await entry.page.reload({ waitUntil: "domcontentloaded" })
+      check()
+      await this.engine!.show(entry.page, expectedGeneration)
+      check()
+      claim!.pageId = entry.id
+      return entry.id
     })
   }
   private isRetired(scope: string): boolean {

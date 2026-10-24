@@ -1,7 +1,11 @@
 import type { BuiltinRobotManager } from "../services/im/manager"
 import { BrowserWindow, powerMonitor, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { parseBotMockBinding, parseBotMockEvent } from "../bots/mock-channel-validation"
-import { BotError, LOCAL_BOT_HOST_ID } from "../../shared/bots/contracts"
+import {
+  BotError,
+  LOCAL_BOT_HOST_ID,
+  type BotBrowserHumanAction
+} from "../../shared/bots/contracts"
 import {
   botIdentifier,
   parseCreateBot,
@@ -36,6 +40,14 @@ import {
   unlinkDeletingWorkConversation
 } from "../bots/conversation-link-service"
 import { localWorkConversationRef } from "../bots/conversation-link-validation"
+import { isBotThreadMessageId } from "../../shared/bots/message-reply"
+import {
+  parseBotReactionTarget,
+  parseBotReactionMessageIds,
+  parseBotReactionMessageId,
+  parseBotReactionEmoji,
+  parseBotReactionPresent
+} from "../../shared/bots/message-reactions"
 
 function localHost(id: unknown) {
   if (id !== LOCAL_BOT_HOST_ID) throw new BotError("UNSUPPORTED_HOST", "此版本仅支持本机 Bot")
@@ -212,14 +224,20 @@ export function registerBotHandlers(
   )
   ipcMain.handle(
     "bots:browser:give-back",
-    (_event, hostId: unknown, id: unknown, generation: unknown) => {
+    (_event, hostId: unknown, id: unknown, generation: unknown, outcome: unknown) => {
       const scope = hostFor(hostId).browserScope(botIdentifier(id))
       if (
         generation !== undefined &&
         (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 0)
       )
         throw new BotError("INVALID_INPUT", "浏览器控制版本无效")
-      return getBotBrowserService().giveBack(scope, generation as number | undefined)
+      if (outcome !== undefined && outcome !== "skipped")
+        throw new BotError("INVALID_INPUT", "浏览器归还方式无效")
+      if (outcome === "skipped" && generation === undefined)
+        throw new BotError("INVALID_INPUT", "跳过协助须提供当前浏览器控制版本")
+      return outcome === undefined
+        ? getBotBrowserService().giveBack(scope, generation as number | undefined)
+        : getBotBrowserService().giveBack(scope, generation as number | undefined, outcome)
     }
   )
   ipcMain.handle(
@@ -229,6 +247,37 @@ export function registerBotHandlers(
       if (typeof url !== "string" || url.length > 4096 || url.includes("\0"))
         throw new BotError("INVALID_INPUT", "网页地址无效")
       return getBotBrowserService().navigateAsHuman(scope, botIdentifier(pageId), url)
+    }
+  )
+  ipcMain.handle(
+    "bots:browser:operate",
+    (_event, hostId: unknown, id: unknown, input: unknown, generation: unknown) => {
+      const scope = hostFor(hostId).browserScope(botIdentifier(id))
+      if (
+        typeof generation !== "number" ||
+        !Number.isSafeInteger(generation) ||
+        generation < 0
+      )
+        throw new BotError("INVALID_INPUT", "浏览器控制版本无效")
+      if (
+        !input ||
+        typeof input !== "object" ||
+        Array.isArray(input) ||
+        Object.keys(input).some((key) => key !== "action" && key !== "pageId")
+      )
+        throw new BotError("INVALID_INPUT", "浏览器操作无效")
+      const value = input as Record<string, unknown>
+      if (
+        typeof value.action !== "string" ||
+        !["back", "forward", "reload", "new", "close"].includes(value.action) ||
+        (value.action === "new" && value.pageId !== undefined)
+      )
+        throw new BotError("INVALID_INPUT", "浏览器操作无效")
+      const action: BotBrowserHumanAction = {
+        action: value.action as BotBrowserHumanAction["action"],
+        ...(value.action === "new" ? {} : { pageId: botIdentifier(value.pageId) })
+      }
+      return getBotBrowserService().operateAsHuman(scope, action, generation)
     }
   )
   ipcMain.handle("bots:group:remove", (event, hostId: unknown, id: unknown, version: unknown) => {
@@ -453,15 +502,30 @@ export function registerBotHandlers(
   )
   ipcMain.handle(
     "bots:message-reply",
-    (_event, hostId: unknown, botId: unknown, messageId: unknown, workId: unknown) =>
-      hostFor(hostId).messageReply(
+    (_event, hostId: unknown, botId: unknown, messageId: unknown, workId: unknown) => {
+      if (!isBotThreadMessageId(messageId)) throw new BotError("INVALID_INPUT", "消息标识无效")
+      return hostFor(hostId).messageReply(
         botIdentifier(botId),
-        botIdentifier(messageId),
+        messageId,
         workId == null ? undefined : botIdentifier(workId)
       )
+    }
   )
   ipcMain.handle("bots:cancel", (_event, hostId: unknown, taskId: unknown) =>
     hostFor(hostId).cancel(botIdentifier(taskId))
+  )
+  ipcMain.handle(
+    "bots:message-reactions",
+    (_event, hostId: unknown, target: unknown, messageIds: unknown) =>
+      hostFor(hostId).messageReactions(parseBotReactionTarget(target), parseBotReactionMessageIds(messageIds))
+  )
+  ipcMain.handle(
+    "bots:set-message-reaction",
+    (_event, hostId: unknown, target: unknown, messageId: unknown, emoji: unknown, present: unknown) =>
+      hostFor(hostId).setMessageReaction(
+        parseBotReactionTarget(target), parseBotReactionMessageId(messageId),
+        parseBotReactionEmoji(emoji), parseBotReactionPresent(present)
+      )
   )
   ipcMain.handle(
     "bots:schedule:save",

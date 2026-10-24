@@ -19,8 +19,11 @@ export function createBotGroupMessageTool(
   signal: AbortSignal,
   sent: (content: string) => void
 ) {
+  const currentGroupId = botTaskGroupId(task)
+  const contentSchema = z.string().trim().min(1).max(60_000)
   return tool(
-    async ({ content }, config) => {
+    async (input, config) => {
+      const { content } = input
       signal.throwIfAborted()
       try {
         if (getHookAgentIdFromRequest(config))
@@ -39,8 +42,16 @@ export function createBotGroupMessageTool(
             taskId: task.id,
             groupId: botTaskGroupId(task)
           })
-        const receipt = getHost().publishGroupMessage(task.id, config.toolCall?.id ?? "", content)
-        sent(content)
+        const receipt = currentGroupId
+          ? getHost().publishGroupMessage(task.id, config.toolCall?.id ?? "", content)
+          : getHost().publishGroupMessage(
+              task.id,
+              config.toolCall?.id ?? "",
+              content,
+              "groupId" in input && typeof input.groupId === "string" ? input.groupId : undefined
+            )
+        // A public post from private chat does not replace its private final reply.
+        if (currentGroupId) sent(content)
         return JSON.stringify({ kind: "bot-group-message", taskId: task.id, ...receipt })
       } catch (cause) {
         signal.throwIfAborted()
@@ -59,9 +70,12 @@ export function createBotGroupMessageTool(
     {
       name: "bot_send_message",
       metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
-      description:
-        "Send a real standalone text message to the current shared group. Ordinary assistant text and private collaboration results are not posted. Use this for concise replies, meaningful progress, and text-only results; an acknowledgement is not the result. For public handoffs, address @ followed by a current member's exact name in content; the existing room routes that mention after your turn. Do not also privately delegate that same public handoff. Use bot_deliver_files for real attachments and request_user_input for decisions. Do not relay a peer result already visible in the room unless the user assigned you further analysis or integration. A successful receipt means this message was posted, not that the task's acceptance criteria passed.",
-      schema: z.object({ content: z.string().trim().min(1).max(60_000) })
+      description: currentGroupId
+        ? "Send a real standalone text message to the current shared group. Ordinary assistant text and private collaboration results are not posted. Use this for concise replies, meaningful progress, and text-only results; an acknowledgement is not the result. For public handoffs, address @ followed by a current member's exact name in content; the existing room routes that mention after your turn. Do not also privately delegate that same public handoff. Use bot_deliver_files for real attachments and request_user_input for decisions. Do not relay a peer result already visible in the room unless the user assigned you further analysis or integration. A successful receipt means this message was posted, not that the task's acceptance criteria passed."
+        : "Post one real text message as this Bot to an existing group the user explicitly asked you to contact. Supply its exact host-confirmed groupId, never a name or Bot ID. Group posting can wake members: do not fan out or share private conversation unless the user explicitly requested that audience and content; ask first when this is missing. Only content is published, not the private request or history. For public handoffs use @ followed by a current member's exact name; do not also privately delegate the same work. A receipt confirms posting, not member answers or task completion. Report the actual result privately. This text tool does not attach files or move private question cards into the group.",
+      schema: currentGroupId
+        ? z.object({ content: contentSchema }).strict()
+        : z.object({ content: contentSchema, groupId: z.string().uuid() }).strict()
     }
   )
 }

@@ -4,8 +4,13 @@ import { NativeSqliteAdapter } from "../../../main/db/native-sqlite-adapter"
 import { BotStore } from "../../../main/bots/store"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { BotDraftSender, queueBotChatDraft } from "./bot-draft-sender"
-import { getQueuedModelContent } from "./queued-message-content"
-import { BOT_REQUEST_RECEIPT_RETENTION_MS, type BotTask } from "../../../shared/bots/contracts"
+import { getQueuedBotMessageInput, getQueuedModelContent } from "./queued-message-content"
+import { canonicalBotMessageInput } from "../../../shared/bots/message-mentions"
+import {
+  BOT_REQUEST_RECEIPT_RETENTION_MS,
+  type BotMessageMention,
+  type BotTask
+} from "../../../shared/bots/contracts"
 import type { QueuedMessage } from "../types"
 
 afterEach(() => vi.unstubAllGlobals())
@@ -140,6 +145,74 @@ function fixture() {
 }
 
 describe("Bot sends through the original durable draft queue", () => {
+  it.each([false, true])(
+    "retains selected IDs after restart, hashes metadata and leaves a changed identity draft unacknowledged, groups=%s",
+    async (groups) => {
+      const f = fixture()
+      const mentions: BotMessageMention[] = [
+        { start: 0, end: 2, botId: "selected", label: "A" },
+        ...(groups
+          ? [
+              {
+                start: 9,
+                end: 11,
+                kind: "group" as const,
+                groupId: "same-name-group-a",
+                label: "A"
+              },
+              {
+                start: 12,
+                end: 14,
+                kind: "group" as const,
+                groupId: "same-name-group-b",
+                label: "A"
+              }
+            ]
+          : [])
+      ]
+      const changed = mentions.map((mention) =>
+        groups
+          ? mention.kind === "group" && mention.groupId === "same-name-group-b"
+            ? { ...mention, groupId: "different-group" }
+            : mention
+          : { start: mention.start, end: mention.end, botId: "different", label: mention.label }
+      )
+      f.patch({
+        text: groups ? "@A check @A @A" : "@A check",
+        botMentions: mentions,
+        handoffRequestedAt: new Date(1000)
+      })
+      f.reload()
+      const expected = f.draft(),
+        input = getQueuedBotMessageInput(expected)
+      f.client.send.mockImplementationOnce(async (sent) => {
+        expect(sent.mentions).toEqual(input.mentions)
+        f.patch({ botMentions: changed })
+        return {
+          ...sent,
+          id: "accepted",
+          origin: { kind: "user", mentions: sent.mentions }
+        } as BotTask
+      })
+      await f.sender().send(expected)
+      expect(f.draft().botMentions).toEqual(changed)
+      expect(f.saved()).not.toBe("")
+      const bytes = new TextEncoder().encode(
+        canonicalBotMessageInput(input.message, input.mentions)
+      )
+      const expectedHash = Buffer.from(await webcrypto.subtle.digest("SHA-256", bytes)).toString(
+        "hex"
+      )
+      expect(f.client.requestReceipts).toHaveBeenCalledWith("bot-1", [
+        { requestId: expected.id, messageHash: expectedHash }
+      ])
+      expect(expectedHash).not.toBe(
+        Buffer.from(
+          await webcrypto.subtle.digest("SHA-256", new TextEncoder().encode(input.message))
+        ).toString("hex")
+      )
+    }
+  )
   it("never retargets a retained Bot handoff after unlink/delete/reassociation, including after its receipt retention", async () => {
     const f = fixture(),
       old = { botId: "original-bot", workId: "original-work" }

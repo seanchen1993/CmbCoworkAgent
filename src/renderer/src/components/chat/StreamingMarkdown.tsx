@@ -30,6 +30,7 @@ import { ChatPresentationContext } from "./chat-presentation-context"
 import { BotInlineMentionsContext } from "../bots/BotInlineMentionsContext"
 import { remarkBotMentions } from "@/lib/bot-mention-remark"
 import { rehypeBotTranscript } from "@/lib/bot-transcript-rehype"
+import { remarkBotAutolinks } from "@/lib/bot-autolink-remark"
 
 interface StreamingMarkdownProps {
   children: string
@@ -267,10 +268,11 @@ const MarkdownFragment = memo(function MarkdownFragment({
   )
   const remarkPlugins = useMemo<PluggableList>(() => {
     const base = botPresentation && threadId ? BOT_REMARK_PLUGINS : REMARK_PLUGINS
+    const plugins = botTranscript ? [...base, remarkBotAutolinks] : base
     return inlineMentions
-      ? [...base, [remarkBotMentions, { mentions: inlineMentions.mentions, start }]]
-      : base
-  }, [botPresentation, threadId, inlineMentions, start])
+      ? [...plugins, [remarkBotMentions, { mentions: inlineMentions.mentions, start }]]
+      : plugins
+  }, [botPresentation, botTranscript, threadId, inlineMentions, start])
 
   return (
     <div

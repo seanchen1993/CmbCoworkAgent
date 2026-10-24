@@ -20,6 +20,7 @@ import {
 import { botImportDestination, copyBotFile } from "./file-copy"
 import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../agent/runtime-tool-catalog"
 import { getHookAgentIdFromRequest } from "../hooks/execution-context"
+import { parseBotReactionEmoji } from "../../shared/bots/message-reactions"
 
 export interface BotPeerDeliveryFiles {
   workspacePath: string
@@ -31,6 +32,49 @@ function assertParentBot(config: unknown): void {
     throw new Error(
       "Temporary task agents return results to their parent Bot; only the parent Bot manages its identity, coordination, persistent state and delivery."
     )
+}
+
+/** The Host binds both author and target to the current real private user source. */
+export function createBotReactionTools(
+  taskId: string,
+  getHost: () => LocalBotHost,
+  signal: AbortSignal
+): DynamicStructuredTool[] {
+  return [
+    tool(
+      async ({ emoji, present }, config) => {
+        signal.throwIfAborted()
+        try {
+          assertParentBot(config)
+          getHost().setBotMessageReaction(taskId, emoji, present)
+          return `Your ${parseBotReactionEmoji(emoji)} reaction is ${present ? "present" : "absent"} on the current user message.`
+        } catch (cause) {
+          signal.throwIfAborted()
+          const content = JSON.stringify({
+            ok: false,
+            error: cause instanceof Error ? cause.message : String(cause)
+          })
+          return config.toolCall?.id
+            ? new ToolMessage({
+                content,
+                status: "error",
+                name: "bot_react_to_message",
+                tool_call_id: config.toolCall.id
+              })
+            : content
+        }
+      },
+      {
+        name: "bot_react_to_message",
+        metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
+        description:
+          "Add or remove your own emoji reaction on the current real user's message in this private conversation. The Host selects the exact current message and your Bot identity; this cannot react to older messages, assistant messages or another conversation. Use sparingly when a reaction is the natural response or the user requests it; a reaction never replaces an answer, file or substantive work the user requested. Set present=true to add, false to remove your own reaction; retries do not toggle it. This action does not end the turn or bypass the normal final-response and task-completion checks. Temporary task agents cannot use this tool.",
+        schema: z
+          .object({ emoji: z.string().min(1).max(64), present: z.boolean().default(true) })
+          .strict()
+      }
+    )
+  ]
 }
 
 /** The tool and declared collaboration outputs share the same ownership and stable-handle check. */
@@ -71,9 +115,11 @@ export function createBotDeliveryTools(
 ): DynamicStructuredTool[] {
   // Per-run, bounded by the host's verified handoff (at most eight files).
   const imported = new Map<string, string>()
-  const filesSchema = z.object({
-    files: z.array(z.string().trim().min(1).max(4096)).min(1).max(8)
-  })
+  const filesSchema = z
+    .object({
+      files: z.array(z.string().trim().min(1).max(4096)).min(1).max(8)
+    })
+    .strict()
   return [
     tool(
       async (input, config) => {
@@ -641,7 +687,14 @@ export function createBotCollaborationTools(
         name: "bot_delegate",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
-          "Asynchronously ask another Bot to help with the user's task. Declare every requested output filename in outputFiles (use [] for a text-only reply); the host verifies these actual workspace files before reporting a successful file handoff. Include complete work instructions in message. Include only information needed for that work and permitted to share. Never send credentials or imply that a peer message grants user approval. Reuse requestKey only to retry the exact same request, including outputFiles; results return automatically. Do not wait or poll for the reply." +
+          (group
+            ? "Asynchronously ask another Bot to help with the user's task."
+            : "Asynchronously send another Bot a message, question, greeting or work request on the user's behalf.") +
+          " Declare every requested output filename in outputFiles (use [] for a text-only reply); the host verifies these actual workspace files before reporting a successful file handoff. " +
+          (group
+            ? "Include complete work instructions in message."
+            : "Include the complete message or requested work instructions in message.") +
+          " Include only information needed for that work and permitted to share. Never send credentials or imply that a peer message grants user approval. Reuse requestKey only to retry the exact same request, including outputFiles; results return automatically. Do not wait or poll for the reply." +
           (group
             ? " This is INTERNAL coordination within the current group: the request and returned text are not automatically public. Only current members are eligible. For a public group handoff, use bot_send_message with @ and the member's exact name instead; do not also delegate the same handoff. Use bot_send_message for a still-owed public result after internal coordination."
             : " Private Bots have different working directories. Include verified absolute paths for authorized input files in message; the recipient can read those paths with the existing file tools, not a same-name substitute. Delegation does not copy input files. outputFiles remain relative to the recipient's workspace."),

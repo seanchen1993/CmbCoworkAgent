@@ -182,6 +182,56 @@ describe("durable group drafts", () => {
     await sendGroupDraft(client, group)
     expect(sendGroup.mock.calls[1][0]).toEqual(sent)
   })
+  it.each(["ranges-first", "identity-first"])(
+    "retries an already persisted uncertain mention request with %s fields using its original ID",
+    async (order) => {
+      const sendGroup = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("lost response"))
+        .mockResolvedValue(undefined)
+      const client = { hostId: "local", sendGroup } as unknown as BotClient
+      const chosen = insertGroupMention("  @", { start: 2, end: 3 }, [], "b", "甲")
+      useBotGroupDrafts
+        .getState()
+        .edit(key, { text: chosen.text + "核对", mentions: chosen.mentions, attachments: [file] })
+      await sendGroupDraft(client, group)
+      const sent = sendGroup.mock.calls[0][0]
+      const storageKey = [...values.keys()][0]
+      const saved = JSON.parse(values.get(storageKey)!)
+      saved.request.mentions = JSON.stringify([
+        order === "ranges-first"
+          ? { start: 0, end: 2, botId: "b", label: "甲" }
+          : { botId: "b", label: "甲", start: 0, end: 2 }
+      ])
+      values.set(storageKey, JSON.stringify(saved))
+      useBotGroupDrafts.setState({ drafts: {} })
+      useBotGroupDrafts.getState().restore(key)
+      await sendGroupDraft(client, group)
+      expect(sendGroup).toHaveBeenCalledTimes(2)
+      expect(sendGroup.mock.calls[1][0]).toEqual(sent)
+    }
+  )
+  it("creates a new request when the selected mention range changes within identical text", async () => {
+    const sendGroup = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("lost response"))
+      .mockResolvedValue(undefined)
+    const client = { hostId: "local", sendGroup } as unknown as BotClient
+    useBotGroupDrafts.getState().edit(key, {
+      text: "@甲 @甲 核对",
+      mentions: [{ start: 0, end: 2, botId: "b", label: "甲" }]
+    })
+    await sendGroupDraft(client, group)
+    useBotGroupDrafts.getState().edit(key, {
+      mentions: [{ start: 3, end: 5, botId: "b", label: "甲" }]
+    })
+    await sendGroupDraft(client, group)
+    const [first, second] = sendGroup.mock.calls.map(([input]) => input)
+    expect(second.text).toBe(first.text)
+    expect(second.targetBotIds).toEqual(first.targetBotIds)
+    expect(second.mentions).toEqual([{ start: 3, end: 5, botId: "b", label: "甲" }])
+    expect(second.requestId).not.toBe(first.requestId)
+  })
   it("upgrades existing v1 drafts without losing attachments or retry identity", () => {
     useBotGroupDrafts.getState().edit(key, { text: "旧草稿", attachments: [file] })
     const storageKey = [...values.keys()][0]

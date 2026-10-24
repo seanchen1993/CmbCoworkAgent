@@ -2021,6 +2021,12 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   work={selectedWork}
                   onConfigureModel={() => openBotEditor(selected)}
                   onOpenWork={(id) => selectWork(id)}
+                  onOpenBot={(id) => updateView({
+                    selectedId: id, groupId: null, detailTab: "details",
+                    activeWorkIdByBot: { ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot, [id]: null }
+                  })}
+                  groups={snapshot?.groups ?? []}
+                  onOpenGroup={(id) => updateView({ groupId: id, selectedId: null, groupDetailTab: "details" })}
                   bots={snapshot?.bots ?? []}
                   schedules={snapshot?.schedules ?? []}
                   tasks={tasks}

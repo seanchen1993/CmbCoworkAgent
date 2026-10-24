@@ -41,7 +41,7 @@ export function BotBrowserHelpCard({
     }
   }, [client, scopeId, instruction, refresh])
   if (state && (state.control !== "human" || state.helpInstruction !== instruction)) return null
-  const control = async (returnControl: boolean) => {
+  const control = async (returnControl: boolean, skipped = false) => {
     if (lock.current || !state) return
     const requestGeneration = generation.current
     const current = () => mounted.current && generation.current === requestGeneration
@@ -49,8 +49,10 @@ export function BotBrowserHelpCard({
     setBusy(true)
     setError(null)
     try {
-      if (returnControl) await client.giveBackBrowser(scopeId, state.generation)
-      else await client.takeOverBrowser(scopeId, state.pageId ?? undefined)
+      if (returnControl) {
+        if (skipped) await client.giveBackBrowser(scopeId, state.generation, "skipped")
+        else await client.giveBackBrowser(scopeId, state.generation)
+      } else await client.takeOverBrowser(scopeId, state.pageId ?? undefined)
       if (current() && returnControl) setRefresh((value) => value + 1)
     } catch (cause) {
       if (current()) setError(botErrorMessage(cause, "浏览器操作失败，请重试"))
@@ -98,6 +100,14 @@ export function BotBrowserHelpCard({
           >
             {busy && <Loader2 size={14} className="animate-spin" />}
             归还并继续
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={!state || busy}
+            onClick={() => void control(true, true)}
+          >
+            跳过此步
           </Button>
         </div>
       </div>

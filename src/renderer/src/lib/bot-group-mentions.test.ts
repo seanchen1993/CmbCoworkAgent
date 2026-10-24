@@ -2,6 +2,7 @@ import { expect, it } from "vitest"
 import {
   groupMentionQuery,
   insertGroupMention,
+  insertMention,
   rebaseGroupMentions,
   groupMentionRecipients,
   groupMessageRecipients,
@@ -46,6 +47,29 @@ it("does not treat email addresses or arbitrary pasted names as selected members
   expect(groupMentionQuery("a@example.com", 13, [])).toBeNull()
   expect(groupMentionRecipients([], ["a", "b"]).ids).toEqual([])
   expect(groupMentionQuery("请 @核", 4, [])).toMatchObject({ start: 2, query: "核" })
+})
+it.each(["", "请 ", "\n", "(", "请("])(
+  "opens mention candidates after the supported prefix %j",
+  (prefix) => {
+    const text = `${prefix}@验收`
+    expect(groupMentionQuery(text, text.length, [])).toEqual({
+      start: prefix.length,
+      end: text.length,
+      query: "验收"
+    })
+  }
+)
+it.each(["请", "（", ")", "a"])(
+  "keeps unsupported adjacent prefix %j as ordinary text",
+  (prefix) => {
+    const text = `${prefix}@验收`
+    expect(groupMentionQuery(text, text.length, [])).toBeNull()
+  }
+)
+it("does not reopen candidates inside an already selected parenthesized mention", () => {
+  const selected = insertGroupMention("(@", { start: 1, end: 2 }, [], "a", "甲")
+  expect(groupMentionQuery(selected.text, 2, selected.mentions)).toBeNull()
+  expect(groupMentionQuery(selected.text, selected.text.length, selected.mentions)).toBeNull()
 })
 it("rejects removed members instead of silently dispatching to everyone else", () => {
   const { mentions } = insertGroupMention("@", { start: 0, end: 1 }, [], "gone", "甲")
@@ -92,4 +116,24 @@ it("ignores malformed or stale ranges on restore", () => {
   expect(validGroupMentions("@甲", [{ start: 0, end: 3, botId: "a", label: "甲" }])).toEqual([])
   const mention = { start: 0, end: 2, botId: "a", label: "甲" }
   expect(validGroupMentions("@甲", [mention, mention])).toEqual([mention])
+})
+
+it("preserves explicit private group identity through the shared range editor", () => {
+  const selected = insertMention<import("../../../shared/bots/contracts").BotMessageMention>(
+    "(@核",
+    { start: 1, end: 3 },
+    [],
+    { kind: "group", groupId: "group-a", label: "核算 Bot" }
+  )
+  expect(selected.text).toBe("(@核算 Bot ")
+  expect(selected.mentions).toEqual([
+    { kind: "group", groupId: "group-a", label: "核算 Bot", start: 1, end: 8 }
+  ])
+  expect(groupMentionQuery(selected.text, 3, selected.mentions)).toBeNull()
+  const shifted = rebaseGroupMentions(selected.text, "前缀 " + selected.text, selected.mentions)
+  expect(shifted).toEqual([{ ...selected.mentions[0], start: 4, end: 11 }])
+  expect(validGroupMentions("前缀 " + selected.text, shifted)).toEqual(shifted)
+  expect(
+    rebaseGroupMentions(selected.text, selected.text.replace("核算", "核对"), selected.mentions)
+  ).toEqual([])
 })

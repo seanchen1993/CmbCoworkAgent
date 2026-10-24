@@ -28,6 +28,37 @@ afterEach(async () => {
 })
 
 describe("Bot control state", () => {
+  it("resolves only a current member's private group reference with public Bot-member identities", () => {
+    const raw = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    databases.push(raw)
+    const db = new BotStore(raw, () => 1000),
+      a = db.create(input),
+      b = db.create({ ...input, name: "B" }),
+      outsider = db.create(input)
+    const group = db.saveGroup({ name: "Selected", memberIds: [a.id, b.id] })
+    const runtime: BotRunPort = { onAvailable: () => () => {}, acquire: () => null }
+    const host = new LocalBotHost(db, runtime)
+    hosts.push(host)
+    expect(host.getGroupReference(group.id, a.id)).toEqual({
+      id: group.id,
+      currentName: group.name,
+      botMembers: [
+        { id: a.id, currentName: a.name },
+        { id: b.id, currentName: b.name }
+      ]
+    })
+    expect(() => host.getGroupReference(group.id, outsider.id)).toThrow("不可用")
+    expect(db.groupMessages(group.id)).toEqual([])
+    expect(db.recentTasks()).toEqual([])
+    raw.run("UPDATE bot_groups SET payload=? WHERE id=?", [
+      JSON.stringify({ ...group, id: "different-group" }),
+      group.id
+    ])
+    expect(() => host.getGroupReference(group.id, a.id)).toThrow("不可用")
+    raw.run("UPDATE bot_groups SET payload=? WHERE id=?", [JSON.stringify(group), group.id])
+    db.beginGroupDeletion(group.id, group.version)
+    expect(() => host.getGroupReference(group.id, a.id)).toThrow("不可用")
+  })
   it("starts an independent Bot run in the host context after the waking tool's scope expires", async () => {
     const db = store(),
       bot = db.create(input)

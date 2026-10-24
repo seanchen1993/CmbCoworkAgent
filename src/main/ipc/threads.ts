@@ -3786,6 +3786,15 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
     // attempt: persistRecoveredRun keeps the snapshot on a bare-set hit.)
     workflowRunManager.forgetThread(threadId)
 
+    // Reactions live in the Bot control database. Only clean this exact scope
+    // after native deletion commits; failure must not change the deletion result.
+    try {
+      const { removeLocalBotMessageReactionsForThreads } = await import("../bots/local-service")
+      removeLocalBotMessageReactionsForThreads([threadId])
+    } catch (error) {
+      console.warn("[Threads] Failed to clean deleted thread reactions:", error)
+    }
+
     // Permanently retire every checkpointer of this thread (parent + all
     // __worker__/__wf_ sub-threads): tombstone + poison, BEFORE the disk sweeps
     // below — a writer that outlived its cancellation (hung subagent past

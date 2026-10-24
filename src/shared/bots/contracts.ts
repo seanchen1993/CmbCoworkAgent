@@ -1,4 +1,9 @@
 import type { BotImClient } from "./im-channel"
+import type {
+  BotReactionTarget,
+  BotMessageReactions,
+  BotMessageReactionUpdate
+} from "./message-reactions"
 import type { BotWorkClient } from "./work"
 import type { BotMockClient, BotMockSource } from "./mock-channel"
 import type { WorkspaceFileScanEntry } from "../workspace-file-scan"
@@ -159,7 +164,11 @@ export function botTaskStateLabel(state: BotTaskState): string {
 
 export type BotTaskOrigin =
   | { kind: "mock"; bindingId: string; eventId: string }
-  | { kind: "user"; replyTo?: Pick<BotMessageReply, "id" | "ordinal" | "role"> }
+  | {
+      kind: "user"
+      replyTo?: Pick<BotMessageReply, "id" | "ordinal" | "role">
+      mentions?: BotMessageMention[]
+    }
   | { kind: "introduction" }
   | { kind: "work"; sourceTaskId: string; instructionSummary?: string }
   | {
@@ -268,6 +277,12 @@ export interface BotGroupMention {
   botId: string | null
   label: string
 }
+/** Private identity references never broadcast; legacy Bot identity bytes stay unchanged. */
+export type BotMessageMention = Omit<BotGroupMention, "botId"> &
+  (
+    | { botId: string; kind?: never; groupId?: never }
+    | { kind: "group"; groupId: string; botId?: never }
+  )
 export interface SendBotGroupMessageInput {
   groupId: string
   requestId: string
@@ -304,6 +319,8 @@ export interface SendBotMessageInput {
   requestId: string
   message: string
   replyToId?: string
+  /** UTF-16 ranges in message, including any existing transport decorations. */
+  mentions?: BotMessageMention[]
 }
 
 /** A bounded reference resolved from this Bot's existing durable private transcript. */
@@ -350,6 +367,8 @@ export interface BotConversationActivity {
 export interface BotChangeEvent {
   hostId: string
   revision: number
+  /** Invalidate only this reaction view; no transcript or emoji payload travels in the event. */
+  reactionTarget?: BotReactionTarget
   /** Invalidate this Bot's memory view; never carries private memory content. */
   memoryBotId?: string
 }
@@ -361,12 +380,25 @@ export interface BotMemory {
   version: string
 }
 
+export interface BotBrowserHumanAction {
+  action: "back" | "forward" | "reload" | "new" | "close"
+  pageId?: string
+}
+
 export interface BotBrowserState {
-  pages: Array<{ id: string; title: string; url: string }>
+  pages: Array<{
+    id: string
+    title: string
+    url: string
+    canGoBack?: boolean
+    canGoForward?: boolean
+  }>
   pageId: string | null
   generation: number
   control: "bot" | "requesting" | "human" | "other-human"
   image: string | null
+  /** Capture failed for this live target; control and page metadata remain current. */
+  captureError?: string
   /** A JavaScript dialog on the selected page currently prevents page capture. */
   dialogPending?: boolean
   /** Present only for this target's user-help lease; never exposed to other Bot scopes. */
@@ -440,8 +472,13 @@ export interface BotClient {
   /** Browser methods accept a Bot ID or a host-validated botGroupBrowserScope. */
   browserPreview(botId: string, pageId?: string): Promise<BotBrowserState>
   takeOverBrowser(botId: string, pageId?: string): Promise<void>
-  giveBackBrowser(botId: string, expectedGeneration?: number): Promise<void>
+  giveBackBrowser(botId: string, expectedGeneration?: number, outcome?: "skipped"): Promise<void>
   navigateBrowser(botId: string, pageId: string, url: string): Promise<void>
+  operateBrowser(
+    botId: string,
+    action: BotBrowserHumanAction,
+    expectedGeneration: number
+  ): Promise<string | null>
   snapshot(): Promise<BotSnapshot>
   exchange(botId: string, taskId: string, groupId?: string, workId?: string): Promise<BotExchange>
   messageOrigins(
@@ -451,6 +488,10 @@ export interface BotClient {
     workId?: string
   ): Promise<BotMessageOrigin[]>
   messageReply(botId: string, messageId: string, workId?: string): Promise<BotMessageReply>
+  messageReactions(target: BotReactionTarget, messageIds: string[]): Promise<BotMessageReactions>
+  setMessageReaction(
+    target: BotReactionTarget, messageId: string, emoji: string, present: boolean
+  ): Promise<BotMessageReactionUpdate>
   requestReceipts(
     botId: string,
     checks: BotRequestCheck[],

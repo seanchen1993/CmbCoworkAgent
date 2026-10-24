@@ -5,6 +5,7 @@ import { botToolResultStatus } from "./bot-tool-result-status"
 import { botScheduleReceipt } from "./bot-schedule-view"
 import { botProfileEvent } from "./bot-profile-event"
 import { botQuestionHistory } from "./bot-question-history"
+import { botBrowserHelpHistory } from "./bot-browser-help-history"
 import { delegatedTaskReceipt } from "./bot-exchange-view"
 import { parseBotWorkReceipt } from "./bot-work-receipt"
 import { parseBotFileDelivery } from "../../../shared/bots/file-delivery"
@@ -26,6 +27,7 @@ export function isBotExecutionTool(
   const schedule = botScheduleReceipt(tool, result)
   return !(
     botQuestionHistory(tool, result) ||
+    botBrowserHelpHistory(tool, result) ||
     botProfileEvent(tool, result) ||
     parseBotWorkReceipt(tool, result) ||
     (schedule && schedule.action !== "list") ||

@@ -10,14 +10,27 @@ else {
   app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1")
   if (!app.requestSingleInstanceLock()) app.exit(1)
   else {
-    const targets = new Map<string, BrowserWindow>()
+    const targets = new Map<
+      string,
+      { window: BrowserWindow; generation?: number; capturing?: boolean }
+    >()
     const parents = new Set<BrowserWindow>()
     const safeUrl = (url: string) => url === "about:blank" || /^https?:\/\//i.test(url)
     const bind = async (window: BrowserWindow): Promise<string> => {
       parents.add(window)
+      window.on("close", (event) => {
+        event.preventDefault()
+        window.hide()
+        const target = [...targets].find(([, owned]) => owned.window === window)
+        if (target && target[1].generation !== undefined && process.connected)
+          process.send!(
+            { event: "window-hidden", targetId: target[0], generation: target[1].generation },
+            () => {}
+          )
+      })
       window.once("closed", () => {
         parents.delete(window)
-        for (const [target, owned] of targets) if (owned === window) targets.delete(target)
+        for (const [target, owned] of targets) if (owned.window === window) targets.delete(target)
       })
       const contents = window.webContents
       contents.on("render-process-gone", () => {
@@ -50,7 +63,7 @@ else {
         const { targetInfo } = await contents.debugger.sendCommand("Target.getTargetInfo")
         if (typeof targetInfo?.targetId !== "string")
           throw new Error("Browser target identity unavailable")
-        targets.set(targetInfo.targetId, window)
+        targets.set(targetInfo.targetId, { window })
         return targetInfo.targetId
       } finally {
         if (!contents.isDestroyed() && contents.debugger.isAttached()) contents.debugger.detach()
@@ -73,7 +86,7 @@ else {
         )
         process.on("message", (message: unknown) => {
           if (!message || typeof message !== "object" || Array.isArray(message)) return
-          const { id, action, targetId } = message as Record<string, unknown>
+          const { id, action, targetId, generation } = message as Record<string, unknown>
           if (!Number.isSafeInteger(id) || typeof action !== "string") return
           void (async () => {
             if (action === "quit") {
@@ -108,10 +121,44 @@ else {
               for (const window of parents) if (!window.isDestroyed()) window.hide()
               return
             }
-            if ((action === "show" || action === "get-title") && typeof targetId === "string") {
-              const window = targets.get(targetId)
+            if (
+              (action === "show" ||
+                action === "get-title" ||
+                action === "get-state" ||
+                action === "capture") &&
+              typeof targetId === "string"
+            ) {
+              const target = targets.get(targetId)
+              const window = target?.window
               if (!window || window.isDestroyed()) throw new Error("浏览器页面已关闭")
+              if (action === "capture") {
+                // A parent's RPC timeout cannot cancel Electron's native capture promise.
+                if (target!.capturing) throw new Error("Bot 浏览器正在截图，请稍候")
+                target!.capturing = true
+                try {
+                  const image = await window.webContents.capturePage(undefined, { stayHidden: true })
+                  if (image.isEmpty()) throw new Error("Bot 浏览器截图为空")
+                  const jpeg = image.toJPEG(60)
+                  if (!jpeg.length) throw new Error("Bot 浏览器截图为空")
+                  if (jpeg.length > 18 * 1024 * 1024) throw new Error("Bot 浏览器截图过大")
+                  return jpeg.toString("base64")
+                } finally {
+                  target!.capturing = false
+                }
+              }
               if (action === "get-title") return window.webContents.getTitle()
+              if (action === "get-state")
+                return {
+                  title: window.webContents.getTitle(),
+                  canGoBack: window.webContents.navigationHistory.canGoBack(),
+                  canGoForward: window.webContents.navigationHistory.canGoForward()
+                }
+              if (
+                generation !== undefined &&
+                (!Number.isSafeInteger(generation) || (generation as number) < 0)
+              )
+                throw new Error("浏览器控制版本无效")
+              target!.generation = generation as number | undefined
               if (window.isMinimized()) window.restore()
               window.show()
               window.focus()

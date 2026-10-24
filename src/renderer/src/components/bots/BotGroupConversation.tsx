@@ -9,6 +9,7 @@ import { botErrorMessage } from "@/lib/bot-error-message"
 import { botGroupMessageView } from "@/lib/bot-group-message-view"
 import { BotGroupAvatar } from "./BotGroupAvatar"
 import { BotGroupMessageActions } from "./BotGroupMessageActions"
+import { BotMessageReactionsProvider } from "./BotMessageReactions"
 import { BotGroupQuestion, BotGroupQuestionBody } from "./BotGroupQuestion"
 import { BotQuestionHistory } from "./BotQuestionHistory"
 import { BotGroupQuestionAnswer } from "./BotGroupQuestionAnswer"
@@ -488,7 +489,7 @@ export function BotGroupConversation({
             </BotConversationTools>
           </>
         ) : (
-          <>
+          <BotMessageReactionsProvider client={client} target={{ kind: "group", groupId: group.id }} messageIds={messages.map((message) => message.id)}>
             <div className="bot-group-timeline">
               <BotGroupSearch
                 client={client}
@@ -681,26 +682,6 @@ export function BotGroupConversation({
                               ))}
                             {item.text && (
                               <div className="bot-group-bubble">
-                                <BotGroupMessageActions
-                                  author={
-                                    author?.name ?? (item.authorBotId ? "已移除的 Bot" : "你")
-                                  }
-                                  text={displayText}
-                                  onError={(cause) =>
-                                    setError(botErrorMessage(cause, "复制失败，请重试。"))
-                                  }
-                                  onReply={() => {
-                                    editDraft({
-                                      replyTo: {
-                                        id: item.id,
-                                        ordinal: item.ordinal,
-                                        authorBotId: item.authorBotId,
-                                        text: displayText.slice(0, 1000)
-                                      }
-                                    })
-                                    inputRef.current?.focus()
-                                  }}
-                                />
                                 {item.replyTo && (
                                   <button
                                     type="button"
@@ -754,6 +735,27 @@ export function BotGroupConversation({
                                     {displayText}
                                   </StreamingMarkdown>
                                 </BotInlineMentionsContext.Provider>
+                                <BotGroupMessageActions
+                                  messageId={item.id}
+                                  author={
+                                    author?.name ?? (item.authorBotId ? "已移除的 Bot" : "你")
+                                  }
+                                  text={displayText}
+                                  onError={(cause) =>
+                                    setError(botErrorMessage(cause, "复制失败，请重试。"))
+                                  }
+                                  onReply={() => {
+                                    editDraft({
+                                      replyTo: {
+                                        id: item.id,
+                                        ordinal: item.ordinal,
+                                        authorBotId: item.authorBotId,
+                                        text: displayText.slice(0, 1000)
+                                      }
+                                    })
+                                    inputRef.current?.focus()
+                                  }}
+                                />
                               </div>
                             )}
                             {item.files && author && (
@@ -769,6 +771,14 @@ export function BotGroupConversation({
                                     size={file.size}
                                   />
                                 ))}
+                                {!item.text && (
+                                  <BotGroupMessageActions
+                                    messageId={item.id}
+                                    author={author.name}
+                                    text=""
+                                    onError={(cause) => setError(botErrorMessage(cause))}
+                                  />
+                                )}
                               </div>
                             )}
                             {item.exchange && (
@@ -1015,7 +1025,7 @@ export function BotGroupConversation({
                 </p>
               )}
             </form>
-          </>
+          </BotMessageReactionsProvider>
         )}
       </div>
       {exchange && (

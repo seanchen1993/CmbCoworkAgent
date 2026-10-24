@@ -94,10 +94,14 @@ export const localBotsApi: BotClient = {
     ipcRenderer.invoke("bots:browser:preview", LOCAL_BOT_HOST_ID, botId, pageId),
   takeOverBrowser: (botId, pageId) =>
     ipcRenderer.invoke("bots:browser:takeover", LOCAL_BOT_HOST_ID, botId, pageId),
-  giveBackBrowser: (botId, expectedGeneration) =>
-    ipcRenderer.invoke("bots:browser:give-back", LOCAL_BOT_HOST_ID, botId, expectedGeneration),
+  giveBackBrowser: (botId, expectedGeneration, outcome) =>
+    outcome === undefined
+      ? ipcRenderer.invoke("bots:browser:give-back", LOCAL_BOT_HOST_ID, botId, expectedGeneration)
+      : ipcRenderer.invoke("bots:browser:give-back", LOCAL_BOT_HOST_ID, botId, expectedGeneration, outcome),
   navigateBrowser: (botId, pageId, url) =>
     ipcRenderer.invoke("bots:browser:navigate", LOCAL_BOT_HOST_ID, botId, pageId, url),
+  operateBrowser: (botId, action, expectedGeneration) =>
+    ipcRenderer.invoke("bots:browser:operate", LOCAL_BOT_HOST_ID, botId, action, expectedGeneration),
   saveGroup: (input, existing) =>
     ipcRenderer.invoke("bots:group:save", LOCAL_BOT_HOST_ID, input, existing),
   removeGroup: (id, version) =>
@@ -123,6 +127,10 @@ export const localBotsApi: BotClient = {
     ipcRenderer.invoke("bots:message-origins", LOCAL_BOT_HOST_ID, botId, ids, groupId, workId),
   messageReply: (botId, messageId, workId) =>
     ipcRenderer.invoke("bots:message-reply", LOCAL_BOT_HOST_ID, botId, messageId, workId),
+  messageReactions: (target, messageIds) =>
+    ipcRenderer.invoke("bots:message-reactions", LOCAL_BOT_HOST_ID, target, messageIds),
+  setMessageReaction: (target, messageId, emoji, present) =>
+    ipcRenderer.invoke("bots:set-message-reaction", LOCAL_BOT_HOST_ID, target, messageId, emoji, present),
   requestReceipts: (botId, checks, workId) =>
     ipcRenderer.invoke("bots:request-receipts", LOCAL_BOT_HOST_ID, botId, checks, workId),
   exchangeHistory: (botId, taskId, groupId, before, workId) =>

@@ -3,8 +3,10 @@ import { pendingNotificationScheduler } from "../agent/pending-notification-sche
 import { createBotNotificationDispatcher } from "./notification-dispatch"
 import { BotError } from "../../shared/bots/contracts"
 import { join } from "node:path"
+import { existsSync } from "node:fs"
+import { DatabaseSync } from "node:sqlite"
 import { getCmbCoworkAgentDataRoot } from "../app-data-root"
-import { openNativeSqliteDatabase, type NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { openNativeSqliteDatabase, NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { LocalBotHost } from "./host"
 import { verifyWorkConversationThread } from "./conversation-link-authority"
@@ -157,7 +159,36 @@ export function getLocalBotHost(): LocalBotHost {
                 text: message.role === "assistant" ? splitBotInlineReasoning(text).body : text
               }
             ]
-          })
+          }),
+        (botId, threadId, ids, work) => {
+          const row = getThreadCore(threadId)
+          if (!row) return []
+          let metadata: Record<string, unknown>
+          try {
+            const value: unknown = JSON.parse(row.metadata || "{}")
+            if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error()
+            metadata = value as Record<string, unknown>
+          } catch {
+            throw new BotError("CONFLICT", "原消息会话元数据无效")
+          }
+          if (work?.conversation) verifyWorkConversationThread(work, row, metadata)
+          else if (
+            metadata.botHostId !== "local" ||
+            metadata.botId !== botId ||
+            metadata.botGroupId != null ||
+            (metadata.botWorkId ?? undefined) !== work?.id
+          )
+            throw new BotError("CONFLICT", "原消息会话归属已改变")
+          // Identity only: file-only messages are eligible; no transcript text is
+          // copied into the control database or returned by the reaction protocol.
+          return getThreadMessagesByIds(threadId, ids).flatMap((message) =>
+            (message.role === "user" || message.role === "assistant") &&
+            Number.isSafeInteger(message.ordinal) &&
+            message.ordinal! >= 0
+              ? [{ id: message.id, ordinal: message.ordinal!, role: message.role }]
+              : []
+          )
+        }
       ),
       createLocalBotRunPort(
         getBotMemoryService(),
@@ -189,6 +220,51 @@ export function getLocalBotHost(): LocalBotHost {
 export function hasActiveBotRuns(): boolean {
   // Native window/quit callbacks can run again after Bot cleanup closed the store.
   return database ? (host?.hasActiveRuns() ?? false) : false
+}
+
+/** Post-commit native thread cleanup must never recover storage or start Bot execution. */
+export function removeLocalBotMessageReactionsForThreads(threadIds: readonly string[]): void {
+  const ids = [...new Set(threadIds)]
+  if (!ids.length) return
+  if (shutdown) throw new BotError("STOPPING", "Bot 存储正在退出，未清理消息反应")
+  if (host && database) {
+    host.removeMessageReactionsForThreads(ids)
+    return
+  }
+  const path = join(getCmbCoworkAgentDataRoot(), "bots", "control.sqlite")
+  if (!existsSync(path)) return
+  // The normal opener performs recovery/migrations. Orphan cleanup only opens this existing DB.
+  const cleanup = new NativeSqliteAdapter(new DatabaseSync(path, { timeout: 0 }))
+  try {
+    if (
+      !cleanup.exec(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='bot_message_reactions'"
+      )[0]?.values.length
+    )
+      return
+    cleanup.run("BEGIN IMMEDIATE")
+    try {
+      for (let offset = 0; offset < ids.length; offset += 100) {
+        const batch = ids.slice(offset, offset + 100)
+        cleanup.run(
+          `DELETE FROM bot_message_reactions WHERE scope_kind='thread' AND scope_id IN (${batch.map(() => "?").join(",")})`,
+          batch
+        )
+      }
+      cleanup.run("COMMIT")
+    } catch (error) {
+      try {
+        cleanup.run("ROLLBACK")
+      } catch {
+        /* Preserve the cleanup failure. */
+      }
+      throw error
+    }
+    // No live host/observer exists; already-deleted thread rows cannot be queried as reactions.
+    // Keep the control schema and its revision protocol owned by BotStore.
+  } finally {
+    cleanup.close({ checkpoint: false })
+  }
 }
 
 export function stopLocalBotHost(): Promise<void> {

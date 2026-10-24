@@ -69,6 +69,27 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe("private Bot drafts in the original ThreadContext", () => {
+  it("restores legacy mention drafts as unchanged plain text without input identity bindings", () => {
+    const key = 'cmb-bot-conversation-draft-v1:["local","a","work"]'
+    const text = "@FI-1024-CLEAN-DS"
+    values.set(
+      key,
+      JSON.stringify({
+        version: 1,
+        text,
+        attachments: [],
+        mentions: [
+          { start: 0, end: text.length, botId: "old-selected-peer", label: "FI-1024-CLEAN-DS" }
+        ]
+      })
+    )
+    const f = fixture()
+    expect(restoreBotConversationDraft(f.context, "local", "a", "thread", "work")).toBeNull()
+    expect(f.state().draftInput).toBe(text)
+    expect(f.state()).not.toHaveProperty("draftBotMentions")
+    expect(saveBotConversationDraft(f.context, "local", "a", "thread", "work")).toBeNull()
+    expect(JSON.parse(values.get(key)!)).not.toHaveProperty("mentions")
+  })
   it("retains reply-only drafts, attachments and cancellation through the existing observer", () => {
     const f = fixture()
     const unbind = bindBotConversationDraft(f.context, "local", "a", "t", vi.fn())

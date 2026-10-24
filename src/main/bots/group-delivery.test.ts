@@ -1,6 +1,7 @@
-import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
 import { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import type { ChatResult } from "@langchain/core/outputs"
+import { ToolInputParsingException } from "@langchain/core/tools"
 import { createAgent } from "langchain"
 import { describe, expect, it, vi } from "vitest"
 import type { BotTask } from "../../shared/bots/contracts"
@@ -43,6 +44,206 @@ function receipt(groupId = "g", taskId = task.id, status: "success" | "error" = 
 }
 
 describe("formal group delivery", () => {
+  it.each(["private", "current-group"] as const)(
+    "rejects raw attachment arguments before any text publication in %s mode",
+    async (mode) => {
+      const privateMode = mode === "private"
+      const selectedTask: BotTask = privateMode
+        ? { ...task, threadId: "private-a", origin: { kind: "user" } }
+        : task
+      const publishGroupMessage = vi.fn(() => ({ groupId: "g", messageId: "must-not-post" }))
+      const sent = vi.fn()
+      const send = createBotGroupMessageTool(
+        selectedTask,
+        () => ({ publishGroupMessage }) as unknown as LocalBotHost,
+        new AbortController().signal,
+        sent
+      )
+      const args = {
+        content: "Requested text",
+        ...(privateMode ? { groupId: "28661550-76ec-4b27-928b-21a04de8b087" } : {}),
+        files: ["result.txt"]
+      }
+      const pending = send.invoke({
+        type: "tool_call",
+        id: "raw-attachment-send",
+        name: send.name,
+        args
+      })
+      await expect(pending).rejects.toThrow(ToolInputParsingException)
+      await expect(pending).rejects.toThrow(/files/)
+      expect(publishGroupMessage).not.toHaveBeenCalled()
+      expect(sent).not.toHaveBeenCalled()
+      expect(args.files).toEqual(["result.txt"])
+    }
+  )
+
+  it("returns an actual schema error to the model before one authorized text-only retry", async () => {
+    const groupId = "28661550-76ec-4b27-928b-21a04de8b087"
+    const privateTask: BotTask = {
+      ...task,
+      threadId: "private-schema-retry",
+      origin: { kind: "user" }
+    }
+    const publishGroupMessage = vi.fn(() => ({ groupId, messageId: "posted-once" }))
+    const sent = vi.fn()
+    class RetryModel extends BaseChatModel {
+      calls = 0
+      _llmType() {
+        return "group-argument-recovery-regression"
+      }
+      bindTools() {
+        return this
+      }
+      async _generate(messages: BaseMessage[]): Promise<ChatResult> {
+        this.calls++
+        if (this.calls > 3) throw new Error("A successful text retry must not be repeated")
+        if (this.calls === 2) {
+          const failure = messages.filter(ToolMessage.isInstance).at(-1)!
+          expect(failure).toMatchObject({
+            name: "bot_send_message",
+            tool_call_id: "invalid-attachment"
+          })
+          // Stock ToolNode does not set error status; assert its actual schema-error body.
+          expect(String(failure.content)).toContain("Error invoking tool 'bot_send_message'")
+          expect(String(failure.content)).toContain(
+            "Received tool input did not match expected schema"
+          )
+          expect(String(failure.content)).toContain("files")
+          expect(publishGroupMessage).not.toHaveBeenCalled()
+          expect(sent).not.toHaveBeenCalled()
+        }
+        const message = new AIMessage({
+          content: this.calls === 3 ? "已按要求发送纯文字。" : "",
+          response_metadata: { finish_reason: this.calls === 3 ? "stop" : "tool_calls" },
+          ...(this.calls < 3
+            ? {
+                tool_calls: [
+                  {
+                    id: this.calls === 1 ? "invalid-attachment" : "authorized-text-retry",
+                    name: "bot_send_message",
+                    args: {
+                      groupId,
+                      content: "Approved text only",
+                      ...(this.calls === 1 ? { files: ["result.txt"] } : {})
+                    }
+                  }
+                ]
+              }
+            : {})
+        })
+        return { generations: [{ text: String(message.content), message }] }
+      }
+    }
+    const model = new RetryModel({})
+    const agent = createAgent({
+      model,
+      tools: [
+        createBotGroupMessageTool(
+          privateTask,
+          () => ({ publishGroupMessage }) as unknown as LocalBotHost,
+          new AbortController().signal,
+          sent
+        )
+      ]
+    })
+    const result = await agent.invoke({
+      messages: [new HumanMessage("向已选群只发这条文字 Approved text only，不附文件。")]
+    })
+    expect(model.calls).toBe(3)
+    expect(publishGroupMessage).toHaveBeenCalledExactlyOnceWith(
+      task.id,
+      "authorized-text-retry",
+      "Approved text only",
+      groupId
+    )
+    expect(sent).not.toHaveBeenCalled()
+    const toolResults = result.messages.filter(ToolMessage.isInstance)
+    expect(toolResults).toHaveLength(2)
+    expect(toolResults[1].status).toBe("success")
+    expect(JSON.parse(toolResults[1].content as string)).toEqual({
+      kind: "bot-group-message",
+      taskId: task.id,
+      groupId,
+      messageId: "posted-once"
+    })
+    expect(result.messages.filter(AIMessage.isInstance)[0].tool_calls?.[0].args).toEqual({
+      groupId,
+      content: "Approved text only",
+      files: ["result.txt"]
+    })
+  })
+
+  it("requires an exact group target for private publication and preserves the private reply", async () => {
+    const privateTask: BotTask = { ...task, threadId: "private-a", origin: { kind: "user" } }
+    const groupId = "28661550-76ec-4b27-928b-21a04de8b087"
+    const publishGroupMessage = vi.fn(() => ({ groupId, messageId: "public-post" }))
+    const sent = vi.fn()
+    const send = createBotGroupMessageTool(
+      privateTask,
+      () => ({ publishGroupMessage }) as unknown as LocalBotHost,
+      new AbortController().signal,
+      sent
+    )
+    await expect(send.invoke({ content: "Do not guess a group" })).rejects.toThrow()
+    await expect(
+      send.invoke({ groupId: "A group display name", content: "Do not resolve by name" })
+    ).rejects.toThrow()
+    expect(publishGroupMessage).not.toHaveBeenCalled()
+    const result = await send.invoke({
+      type: "tool_call",
+      id: "private-send",
+      name: send.name,
+      args: { groupId, content: "A public message, not the private final reply" }
+    })
+    expect(publishGroupMessage).toHaveBeenCalledExactlyOnceWith(
+      task.id,
+      "private-send",
+      "A public message, not the private final reply",
+      groupId
+    )
+    expect(JSON.parse(result.content as string)).toEqual({
+      kind: "bot-group-message",
+      taskId: task.id,
+      groupId,
+      messageId: "public-post"
+    })
+    expect(sent).not.toHaveBeenCalled()
+  })
+
+  it("keeps private target publication errors and temporary-agent rejection as real errors", async () => {
+    const privateTask: BotTask = { ...task, threadId: "private-a", origin: { kind: "user" } }
+    const publishGroupMessage = vi.fn(() => {
+      throw new Error("Group membership changed")
+    })
+    const sent = vi.fn()
+    const send = createBotGroupMessageTool(
+      privateTask,
+      () => ({ publishGroupMessage }) as unknown as LocalBotHost,
+      new AbortController().signal,
+      sent
+    )
+    const call = {
+      type: "tool_call" as const,
+      id: "private-denied",
+      name: send.name,
+      args: { groupId: "28661550-76ec-4b27-928b-21a04de8b087", content: "Not delivered" }
+    }
+    const result = await send.invoke(call)
+    expect(result.status).toBe("error")
+    expect(JSON.parse(result.content as string)).toEqual({
+      ok: false,
+      error: "Group membership changed"
+    })
+    publishGroupMessage.mockClear()
+    const child = await send.invoke(call, {
+      configurable: { cmb_subagent_owner_tool_call_id: "temporary-task" }
+    })
+    expect(child.status).toBe("error")
+    expect(publishGroupMessage).not.toHaveBeenCalled()
+    expect(sent).not.toHaveBeenCalled()
+  })
+
   it.each(["你好！有什么可以帮你的吗？", "已回复问候", ""])(
     "ends the actual send→receipt→private-final graph without another model request: %s",
     async (final) => {

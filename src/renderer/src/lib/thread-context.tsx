@@ -980,6 +980,9 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
     id: item.id,
     text: item.text,
     ...(isBotMessageReply(item.botReplyTo) ? { botReplyTo: item.botReplyTo } : {}),
+    // Legacy queued request identity is retained only for exact receipt reconciliation.
+    // The composer no longer creates or edits private mention bindings.
+    ...(item.botMentions !== undefined ? { botMentions: item.botMentions } : {}),
     attachmentModelBlocks:
       typeof item.attachmentModelBlocks === "string" ? item.attachmentModelBlocks : undefined,
     attachmentDisplayPrefix:
@@ -5505,7 +5508,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           updateThreadState(threadId, (state) => {
             const next = state.queuedMessages.map((message) =>
               message.id === messageId
-                ? { ...message, ...updates, id: message.id, updated_at: new Date() }
+                ? {
+                    ...message,
+                    ...updates,
+                    id: message.id,
+                    updated_at: new Date()
+                  }
                 : message
             )
             error = persistQueuedMessages(threadId, next)

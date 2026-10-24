@@ -1,6 +1,7 @@
 import type { QueuedMessage } from "@/types"
 import { formatBotMessageReply } from "../../../shared/bots/message-reply"
 import { BOT_BROWSER_PROMPT_PREFIX } from "../../../shared/user-input-transport"
+import { parseBotMessageMentions } from "../../../shared/bots/message-mentions"
 // Relative (not "@/") so this module stays importable from tsx unit tests, which
 // don't resolve the "@/" path alias for runtime values. skill-marker has no
 // imports of its own, so the chain stays alias-free.
@@ -38,6 +39,25 @@ export function getQueuedDisplayContent(message: QueuedMessage): string {
     : message.text.trim()
   const visible = formatBuiltinBrowserTranscriptMessage(primary, message.builtinBrowser === true)
   return [visible, message.skillBlock].filter((part) => part && part.trim()).join("\n\n")
+}
+
+/** Preserve legacy queued request identity for receipt reconciliation; no composer creates new bindings. */
+export function getQueuedBotMessageInput(draft: QueuedMessage) {
+  const message = getQueuedModelContent(draft, "bot").trim()
+  const selected = parseBotMessageMentions(draft.text, draft.botMentions)
+  if (!selected.length) return { message }
+  const prefix = draft.builtinBrowser ? BOT_BROWSER_PROMPT_PREFIX : ""
+  const primary = prefix + draft.text + (draft.attachmentModelBlocks ?? "")
+  const leading = primary.length - primary.trimStart().length
+  const unquoted = getQueuedModelContent({ ...draft, botReplyTo: undefined }, "bot")
+  const quoted = getQueuedModelContent(draft, "bot")
+  const offset = prefix.length - leading + quoted.length - unquoted.length
+  const mentions = selected.map((mention) => ({
+    ...mention,
+    start: mention.start + offset,
+    end: mention.end + offset
+  }))
+  return { message, mentions: parseBotMessageMentions(message, mentions) }
 }
 
 export function getQueuedPreview(message: QueuedMessage): string {

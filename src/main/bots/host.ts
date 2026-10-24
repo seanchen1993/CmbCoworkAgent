@@ -40,6 +40,7 @@ import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
 import type { BackgroundCommandLifecycle } from "../agent/background-command-lifecycle"
 import type { UserInputRequest } from "../types"
 import { parseCreateBotWork } from "../../shared/bots/validation"
+import { parseBotReactionTarget, type BotReactionTarget } from "../../shared/bots/message-reactions"
 
 export interface BotRunLease {
   /** Reuse the active runtime's user-prompt pipeline; inbox remains queued until injection. */
@@ -187,6 +188,29 @@ export class LocalBotHost {
     return this.getBot(botId)
   }
 
+  /** Selected group identity facts only; never read history or publish a group message. */
+  getGroupReference(groupId: string, botId: string) {
+    const bot = this.getBot(botId),
+      group = this.store.getGroup(groupId)
+    if (
+      group.id !== groupId ||
+      group.deleting ||
+      group.hostId !== bot.hostId ||
+      !group.memberIds.includes(bot.id)
+    )
+      throw new BotError("CONFLICT", "提及的群聊已不可用，请重新选择")
+    return {
+      id: group.id,
+      currentName: group.name,
+      botMembers: group.memberIds.map((id) => {
+        const member = this.getBot(id)
+        if (member.hostId !== group.hostId)
+          throw new BotError("CONFLICT", "提及的群聊成员已不可用，请重新选择")
+        return { id: member.id, currentName: member.name }
+      })
+    }
+  }
+
   snapshot(): BotSnapshot {
     if (this.stopping) throw new BotError("STOPPING", "应用正在退出，请稍后重试")
     return {
@@ -224,10 +248,11 @@ export class LocalBotHost {
     if (!this.stopping) this.changed(botId)
   }
 
-  private changed(memoryBotId?: string): void {
+  private changed(memoryBotId?: string, reactionTarget?: BotReactionTarget): void {
     const event = {
       hostId: LOCAL_BOT_HOST_ID,
       revision: this.store.revision(),
+      ...(reactionTarget ? { reactionTarget } : {}),
       ...(memoryBotId ? { memoryBotId } : {})
     }
     for (const listener of this.listeners) {
@@ -572,12 +597,16 @@ export class LocalBotHost {
     if (!this.active.has(taskId)) return
     if (this.store.recordGroupQuestionResult(taskId, requestId, resultId)) this.changed()
   }
-  publishGroupMessage(taskId: string, callId: string, text: string) {
+  publishGroupMessage(taskId: string, callId: string, text: string, targetGroupId?: string) {
     this.requireRunning()
     const run = this.active.get(taskId)
     if (!run || run.controller.signal.aborted) throw new BotError("CONFLICT", "当前群任务已结束")
-    const receipt = this.store.publishGroupMessage(taskId, callId, text)
+    const receipt =
+      targetGroupId === undefined
+        ? this.store.publishGroupMessage(taskId, callId, text)
+        : this.store.publishGroupMessage(taskId, callId, text, targetGroupId)
     this.changed()
+    if (targetGroupId !== undefined) this.wake()
     return receipt
   }
   publishGroupFiles(taskId: string, callId: string, files: BotDeliveredFile[], content = ""): void {
@@ -725,6 +754,11 @@ export class LocalBotHost {
     return this.store.profileContinuationRequest(taskId)
   }
 
+  commandUserRequest(taskId: string): BotTask | null {
+    this.requireRunning()
+    return this.store.commandUserRequest(taskId)
+  }
+
   update(input: UpdateBotInput): BotDefinition {
     this.requireRunning()
     const bot = this.store.update(input)
@@ -747,7 +781,7 @@ export class LocalBotHost {
     const deletion = Promise.resolve()
       .then(() => cleanup(threads))
       .then(() => {
-        this.store.finishDeletion(id)
+        this.store.finishDeletion(id, threads)
         this.changed()
       })
       .finally(() => this.deletions.delete(id))
@@ -850,6 +884,41 @@ export class LocalBotHost {
   messageReply(botId: string, messageId: string, workId?: string) {
     this.requireRunning()
     return this.store.messageReply(botId, messageId, workId)
+  }
+
+  messageReactions(target: BotReactionTarget, messageIds: string[]) {
+    this.requireRunning()
+    return this.store.messageReactions(target, messageIds)
+  }
+
+  setMessageReaction(
+    target: BotReactionTarget,
+    messageId: string,
+    emoji: string,
+    present: boolean
+  ) {
+    this.requireRunning()
+    const canonicalTarget = parseBotReactionTarget(target)
+    const before = this.store.revision()
+    const result = this.store.setMessageReaction(canonicalTarget, messageId, emoji, present)
+    if (result.revision !== before) this.changed(undefined, canonicalTarget)
+    return result
+  }
+
+  setBotMessageReaction(taskId: string, emoji: string, present: boolean) {
+    this.workToolSource(taskId)
+    const before = this.store.revision()
+    const result = this.store.setBotMessageReaction(taskId, emoji, present)
+    if (result.revision !== before)
+      this.changed(undefined, { kind: "bot", botId: this.store.getTask(taskId).botId })
+    return result
+  }
+
+  removeMessageReactionsForThreads(threadIds: readonly string[]): void {
+    this.requireRunning()
+    const before = this.store.revision()
+    this.store.removeMessageReactionsForThreads(threadIds)
+    if (this.store.revision() !== before) this.changed()
   }
 
   send(input: SendBotMessageInput): BotTask {

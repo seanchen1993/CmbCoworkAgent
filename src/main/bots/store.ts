@@ -32,8 +32,22 @@ import { projectMarkdownVisibleText } from "../../shared/markdown-visible-text"
 import { BOT_ROUTINE_SILENT, isBotRoutineSilent } from "../../shared/bots/routine-silence"
 import { isBotGroupPass } from "../../shared/bots/group-discussion"
 import { bindBotGroupMentions } from "./group-mentions"
+import { canonicalBotMessageInput, parseBotMessageMentions } from "../../shared/bots/message-mentions"
+import {
+  BOT_MESSAGE_REACTION_LIMIT,
+  parseBotReactionTarget,
+  parseBotReactionMessageId,
+  parseBotReactionMessageIds,
+  parseBotReactionEmoji,
+  parseBotReactionPresent,
+  type BotReactionTarget,
+  type BotReactionItem,
+  type BotMessageReactions,
+  type BotMessageReactionUpdate
+} from "../../shared/bots/message-reactions"
 import {
   buildGroupDiscussionMessage,
+  buildBotGroupDiscussionMessage,
   boundGroupReferences,
   groupDiscussionSchema,
   nextGroupDiscussionSpeaker,
@@ -86,6 +100,12 @@ import {
 
 const ACTIVE_STATES = ["running", "waiting_user"] as const
 const DAY = 24 * 60 * 60 * 1000
+interface ReactionScope {
+  kind: "thread" | "group"
+  id: string
+  botId?: string
+  work?: BotWorkItem
+}
 function groupReferenceText(message: BotGroupMessage): string {
   if (!message.files) return message.text
   const files = `Shared workspace files delivered:\n${message.files
@@ -135,7 +155,13 @@ export class BotStore {
       request: UserInputRequest,
       messageId: string
     ) => { content: string; is_error?: boolean } | undefined,
-    private readonly readContext?: (threadId: string, messageIds: string[]) => BotMessageReply[]
+    private readonly readContext?: (threadId: string, messageIds: string[]) => BotMessageReply[],
+    private readonly readReactionMessages?: (
+      botId: string,
+      threadId: string,
+      messageIds: string[],
+      work?: BotWorkItem
+    ) => Pick<BotMessageReply, "id" | "role" | "ordinal">[]
   ) {
     this.transaction(() => {
       db.run(`
@@ -170,6 +196,12 @@ export class BotStore {
       CREATE TABLE IF NOT EXISTS bot_group_messages (ordinal INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
         group_id TEXT NOT NULL, author_bot_id TEXT, text TEXT NOT NULL, targets_json TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS bot_group_history ON bot_group_messages(group_id, ordinal);
+      CREATE TABLE IF NOT EXISTS bot_message_reactions (
+        scope_kind TEXT NOT NULL CHECK(scope_kind IN ('thread','group')),
+        scope_id TEXT NOT NULL, message_id TEXT NOT NULL, emoji TEXT NOT NULL, added_at INTEGER NOT NULL,
+        actor TEXT NOT NULL,
+        PRIMARY KEY(scope_kind,scope_id,message_id,emoji,actor)
+      );
       CREATE INDEX IF NOT EXISTS bot_tasks_queue ON bot_tasks(state, created_at, id);
       CREATE INDEX IF NOT EXISTS bot_tasks_owner ON bot_tasks(bot_id, state);
       CREATE TABLE IF NOT EXISTS bot_commands (
@@ -182,6 +214,29 @@ export class BotStore {
       CREATE UNIQUE INDEX IF NOT EXISTS bot_tasks_single_run ON bot_tasks(bot_id)
         WHERE state IN ('running', 'waiting_user');
     `)
+      const reactionColumns = this.rows("PRAGMA table_info(bot_message_reactions)")
+      const reactionActor = reactionColumns.find((column) => column.name === "actor")
+      const reactionPrimaryKey = reactionColumns
+        .filter((column) => Number(column.pk) > 0)
+        .sort((a, b) => Number(a.pk) - Number(b.pk))
+        .map((column) => column.name)
+      if (
+        !reactionActor ||
+        !Number(reactionActor.notnull) ||
+        reactionPrimaryKey.join(",") !== "scope_kind,scope_id,message_id,emoji,actor"
+      ) {
+        // Existing rows represent only the local user. Keep their identity and time;
+        // adding a column alone would retain the old user/Bot-conflicting primary key.
+        db.run(`CREATE TABLE bot_message_reactions_upgrade (
+          scope_kind TEXT NOT NULL CHECK(scope_kind IN ('thread','group')),
+          scope_id TEXT NOT NULL,message_id TEXT NOT NULL,emoji TEXT NOT NULL,added_at INTEGER NOT NULL,
+          actor TEXT NOT NULL,PRIMARY KEY(scope_kind,scope_id,message_id,emoji,actor));
+          INSERT INTO bot_message_reactions_upgrade(scope_kind,scope_id,message_id,emoji,added_at,actor)
+            SELECT scope_kind,scope_id,message_id,emoji,added_at,${reactionActor ? "actor" : "'user'"}
+            FROM bot_message_reactions;
+          DROP TABLE bot_message_reactions;
+          ALTER TABLE bot_message_reactions_upgrade RENAME TO bot_message_reactions;`)
+      }
       const columns = this.rows("PRAGMA table_info(bot_tasks)")
       if (!columns.some((column) => column.name === "continuation_checkpoint_id"))
         db.run("ALTER TABLE bot_tasks ADD COLUMN continuation_checkpoint_id TEXT")
@@ -1203,6 +1258,10 @@ export class BotStore {
     return this.commandProfileSource(this.getTask(taskId))?.message ?? null
   }
 
+  commandUserRequest(taskId: string): BotTask | null {
+    return this.commandProfileSource(this.getTask(taskId))
+  }
+
   private commandProfileSource(task: BotTask): BotTask | null {
     if (
       task.state !== "running" ||
@@ -1347,9 +1406,24 @@ export class BotStore {
     })
   }
 
-  finishDeletion(id: string): void {
+  finishDeletion(id: string, deletedThreadIds?: readonly string[]): void {
     this.transaction(() => {
       if (!this.getBot(id).deleting) throw new BotError("CONFLICT", "尚未开始删除 Bot")
+      // Production passes only the exact threads whose cleanup completed. Preserve
+      // admitted/detached user conversations even after their Bot is removed.
+      const preserved = new Set(
+        this.rows(
+          `SELECT thread_id FROM bot_work_items WHERE bot_id=? AND
+          (detached=1 OR json_extract(conversation_json,'$.origin')='existing')`,
+          [id]
+        ).map((row) => String(row.thread_id))
+      )
+      const removed = deletedThreadIds ?? [
+        this.getBot(id).threadId,
+        ...this.rows("SELECT thread_id FROM bot_work_items WHERE bot_id=?", [id]).map((row) => String(row.thread_id)),
+        ...this.rows("SELECT DISTINCT thread_id FROM bot_tasks WHERE bot_id=?", [id]).map((row) => String(row.thread_id))
+      ]
+      this.deleteReactionScopes("thread", removed.filter((threadId) => !preserved.has(threadId)))
       this.db.run(
         "DELETE FROM bot_reply_outbox WHERE task_id IN (SELECT id FROM bot_tasks WHERE bot_id=?)",
         [id]
@@ -1405,6 +1479,207 @@ export class BotStore {
     return reply
   }
 
+  private reactionScope(value: BotReactionTarget): ReactionScope {
+    const target = parseBotReactionTarget(value)
+    if (target.kind === "group") {
+      const group = this.getGroup(target.groupId)
+      if (group.deleting) throw new BotError("CONFLICT", "群聊正在删除")
+      return { kind: "group", id: group.id }
+    }
+    const bot = this.getBot(target.botId)
+    if (bot.deleting) throw new BotError("CONFLICT", "Bot 正在删除")
+    const work = target.workId ? this.getWork(bot.id, target.workId) : undefined
+    if (work && (!this.rows("SELECT id FROM bot_work_items WHERE id=? AND bot_id=? AND detached=0", [work.id, bot.id]).length ||
+      work.source || work.audienceKey !== "desktop" ||
+      (work.conversation && work.conversation.state !== "bound")))
+      throw new BotError("CONFLICT", "原任务会话尚未就绪或已解除关联")
+    return { kind: "thread", id: work?.threadId ?? bot.threadId, botId: bot.id, work }
+  }
+
+  private reactionMessageIds(scope: ReactionScope, messageIds: string[]): Set<string> {
+    if (!messageIds.length) return new Set()
+    if (scope.kind === "group")
+      return new Set(
+        this.rows(
+          `SELECT id FROM bot_group_messages WHERE group_id=? AND id IN (${messageIds.map(() => "?").join(",")})`,
+          [scope.id, ...messageIds]
+        ).map((row) => String(row.id))
+      )
+    const messages = this.reactionMessages(scope, messageIds)
+    const requested = new Set(messageIds)
+    return new Set(
+      messages
+        .filter(
+          (message) =>
+            requested.has(message.id) &&
+            Number.isSafeInteger(message.ordinal) &&
+            message.ordinal >= 0 &&
+            (message.role === "user" || message.role === "assistant")
+        )
+        .map((message) => message.id)
+    )
+  }
+
+  private reactionMessages(
+    scope: ReactionScope,
+    messageIds: string[]
+  ): Pick<BotMessageReply, "id" | "role" | "ordinal">[] {
+    return this.readReactionMessages
+      ? this.readReactionMessages(scope.botId!, scope.id, messageIds, scope.work)
+      : (this.readContext?.(scope.id, messageIds) ??
+          messageIds.flatMap((id) => this.readReply?.(scope.id, id) ?? []))
+  }
+
+  /** Model reactions address only the latest real user input of this live private run. */
+  reactionUserMessage(taskId: string): string {
+    const task = this.getTask(taskId),
+      bot = this.getBot(task.botId)
+    if (
+      task.state !== "running" ||
+      task.mockSource ||
+      task.workId ||
+      task.threadId !== bot.threadId ||
+      bot.archived ||
+      bot.deleting ||
+      (task.origin.kind !== "user" && task.origin.kind !== "introduction")
+    )
+      throw new BotError("CONFLICT", "仅当前本机私聊用户消息可以由 Bot 添加反应")
+    const injectedId = this.injectedUserRequestId(task)
+    const source = injectedId ? this.getTask(injectedId) : task
+    if (
+      source.origin.kind !== "user" ||
+      source.mockSource ||
+      source.workId ||
+      source.botId !== bot.id ||
+      source.threadId !== bot.threadId
+    )
+      throw new BotError("CONFLICT", "当前执行没有可回应的本机用户消息")
+    const messageId = parseBotReactionMessageId(source.requestId)
+    const scope = this.reactionScope({ kind: "bot", botId: bot.id })
+    if (
+      !this.reactionMessages(scope, [messageId]).some(
+        (message) =>
+          message.id === messageId &&
+          message.role === "user" &&
+          Number.isSafeInteger(message.ordinal) &&
+          message.ordinal >= 0
+      )
+    )
+      throw new BotError("NOT_FOUND", "原用户消息已不可用，无法添加反应")
+    return messageId
+  }
+
+  messageReactions(target: BotReactionTarget, values: string[]): BotMessageReactions {
+    const messageIds = parseBotReactionMessageIds(values), scope = this.reactionScope(target)
+    const existing = this.reactionMessageIds(scope, messageIds)
+    const rows = existing.size
+      ? this.rows(
+          `SELECT r.message_id,r.emoji,r.actor,b.name AS actor_name FROM bot_message_reactions r
+      LEFT JOIN bots b ON substr(r.actor,1,4)='bot:' AND b.id=substr(r.actor,5) WHERE r.scope_kind=? AND r.scope_id=?
+      AND r.message_id IN (${[...existing].map(() => "?").join(",")}) ORDER BY r.added_at,r.emoji,r.actor`,
+          [scope.kind, scope.id, ...existing]
+        )
+      : []
+    return {
+      revision: this.revision(),
+      items: messageIds.map((messageId) => {
+        const reactions = new Map<string, BotReactionItem>()
+        for (const row of rows.filter((row) => row.message_id === messageId)) {
+          const emoji = String(row.emoji),
+            actor = String(row.actor)
+          const reaction: BotReactionItem = reactions.get(emoji) ?? { emoji, count: 0, mine: false }
+          reaction.count++
+          if (actor === "user") reaction.mine = true
+          else if (actor.startsWith("bot:"))
+            (reaction.actors ??= []).push({
+              botId: actor.slice(4),
+              name: String(row.actor_name ?? "Bot")
+            })
+          reactions.set(emoji, reaction)
+        }
+        return { messageId, canReact: existing.has(messageId), reactions: [...reactions.values()] }
+      })
+    }
+  }
+
+  setMessageReaction(
+    target: BotReactionTarget, value: string, emojiValue: string, presentValue: boolean
+  ): BotMessageReactionUpdate {
+    return this.setActorMessageReaction(target, value, emojiValue, presentValue, "user")
+  }
+
+  setBotMessageReaction(taskId: string, emoji: string, present: boolean): BotMessageReactionUpdate {
+    return this.transaction(() => {
+      const messageId = this.reactionUserMessage(taskId),
+        task = this.getTask(taskId)
+      return this.setActorMessageReaction(
+        { kind: "bot", botId: task.botId },
+        messageId,
+        emoji,
+        present,
+        `bot:${task.botId}`
+      )
+    })
+  }
+
+  private setActorMessageReaction(
+    target: BotReactionTarget,
+    value: string,
+    emojiValue: string,
+    presentValue: boolean,
+    actor: string
+  ): BotMessageReactionUpdate {
+    const messageId = parseBotReactionMessageId(value),
+      emoji = parseBotReactionEmoji(emojiValue),
+      present = parseBotReactionPresent(presentValue)
+    return this.transaction(() => {
+      const scope = this.reactionScope(target)
+      if (!this.reactionMessageIds(scope, [messageId]).has(messageId))
+        throw new BotError("NOT_FOUND", "原消息已不可用，无法添加反应")
+      const key = [scope.kind, scope.id, messageId, emoji, actor]
+      if (present) {
+        const existing = this.rows(
+          "SELECT DISTINCT emoji FROM bot_message_reactions WHERE scope_kind=? AND scope_id=? AND message_id=?",
+          key.slice(0, 3)
+        )
+        if (existing.length >= BOT_MESSAGE_REACTION_LIMIT && !existing.some((row) => row.emoji === emoji))
+          throw new BotError("CONFLICT", "此消息的表情数量已达上限，请先取消已有反应")
+        this.db.run(
+          "INSERT OR IGNORE INTO bot_message_reactions(scope_kind,scope_id,message_id,emoji,actor,added_at) VALUES(?,?,?,?,?,?)",
+          [...key, this.now()]
+        )
+      } else
+        this.db.run(
+          "DELETE FROM bot_message_reactions WHERE scope_kind=? AND scope_id=? AND message_id=? AND emoji=? AND actor=?",
+          key
+        )
+      if (this.db.getRowsModified()) this.changed()
+      const result = this.messageReactions(target, [messageId])
+      return { revision: result.revision, item: result.items[0] }
+    })
+  }
+
+  private deleteReactionScopes(kind: "thread" | "group", ids: readonly string[]): boolean {
+    let changed = false
+    const unique = [...new Set(ids)]
+    for (let offset = 0; offset < unique.length; offset += 100) {
+      const batch = unique.slice(offset, offset + 100)
+      this.db.run(
+        `DELETE FROM bot_message_reactions WHERE scope_kind=? AND scope_id IN (${batch.map(() => "?").join(",")})`,
+        [kind, ...batch]
+      )
+      changed = Boolean(this.db.getRowsModified()) || changed
+    }
+    return changed
+  }
+
+  /** Internal cleanup only, called after an actual native thread deletion commits. */
+  removeMessageReactionsForThreads(threadIds: readonly string[]): void {
+    this.transaction(() => {
+      if (this.deleteReactionScopes("thread", threadIds)) this.changed()
+    })
+  }
+
   enqueue(
     input: SendBotMessageInput,
     origin: BotTaskOrigin = { kind: "user" },
@@ -1415,6 +1690,9 @@ export class BotStore {
       if (targetWork?.conversation && targetWork.conversation.state !== "bound")
         throw new BotError("CONFLICT", "任务会话正在关联或已解除，不能发送；请返回原对话核对。")
       mockSource = mockSource ?? targetWork?.source
+      const mentions = parseBotMessageMentions(input.message, input.mentions)
+      if (mentions.length && (origin.kind !== "user" || mockSource))
+        throw new BotError("INVALID_INPUT", "仅本机用户消息可以提及 Bot")
       if (mockSource) {
         this.external(mockSource).validateSource(mockSource, input.botId)
         assertBotMockText(input.message)
@@ -1434,6 +1712,11 @@ export class BotStore {
           JSON.stringify(this.task(prior).mockSource) !== JSON.stringify(mockSource) ||
           prior.message !== input.message ||
           previousReply !== input.replyToId ||
+          canonicalBotMessageInput(input.message, mentions) !==
+            canonicalBotMessageInput(
+              String(prior.message),
+              previousOrigin.kind === "user" ? previousOrigin.mentions : undefined
+            ) ||
           (prior.work_id ?? null) !== (input.workId ?? null)
         )
           throw new BotError("CONFLICT", "请求标识已用于另一条消息")
@@ -1452,7 +1735,8 @@ export class BotStore {
         if (
           receipt.bot_id !== input.botId ||
           (receipt.work_id ?? null) !== (input.workId ?? null) ||
-          receipt.message_hash !== createHash("sha256").update(input.message).digest("hex")
+          receipt.message_hash !==
+            createHash("sha256").update(canonicalBotMessageInput(input.message, mentions)).digest("hex")
         )
           throw new BotError("CONFLICT", "请求标识已用于另一条消息")
         throw new BotError(
@@ -1466,6 +1750,23 @@ export class BotStore {
       if (work?.state === "completed") throw new BotError("CONFLICT", "工作已完成，请先继续处理")
       if (work && botTaskGroupId({ origin }))
         throw new BotError("INVALID_INPUT", "工作与群会话目标不能混用")
+      for (const mention of mentions) {
+        if (mention.kind === "group") {
+          const group = this.getGroup(mention.groupId)
+          if (
+            group.id !== mention.groupId ||
+            group.deleting ||
+            group.hostId !== bot.hostId ||
+            !group.memberIds.includes(bot.id)
+          )
+            throw new BotError("CONFLICT", "提及的群聊已不可用，请重新选择")
+          continue
+        }
+        const peer = this.getBot(mention.botId)
+        if (peer.id === bot.id || peer.hostId !== bot.hostId || peer.archived || peer.deleting)
+          throw new BotError("CONFLICT", "提及的 Bot 已不可用，请重新选择")
+      }
+      if (origin.kind === "user" && mentions.length) origin = { ...origin, mentions }
       if (input.replyToId !== undefined) {
         if (origin.kind !== "user")
           throw new BotError("INVALID_INPUT", "仅用户消息可以引用私聊历史")
@@ -1481,6 +1782,7 @@ export class BotStore {
           throw new BotError("CONFLICT", "引用与原消息不一致，请重新选择原消息")
         // Keep the quote body only in the original transcript payload, not a second history.
         origin = {
+          ...origin,
           kind: "user",
           replyTo: { id: reply.id, ordinal: reply.ordinal, role: reply.role }
         }
@@ -1695,8 +1997,8 @@ export class BotStore {
     // A single SQLite read sees task pruning and receipt insertion atomically.
     const rows = this.rows(
       `SELECT request_id,bot_id,COALESCE(json_extract(origin_json,'$.groupId'),'') AS group_id,
-        message,NULL AS message_hash,work_id FROM bot_exchange_records WHERE request_id IN (${placeholders})
-       UNION ALL SELECT request_id,bot_id,COALESCE(group_id,''),NULL,message_hash,work_id
+        message,NULL AS message_hash,work_id,origin_json FROM bot_exchange_records WHERE request_id IN (${placeholders})
+       UNION ALL SELECT request_id,bot_id,COALESCE(group_id,''),NULL,message_hash,work_id,NULL
         FROM bot_task_receipts WHERE request_id IN (${placeholders})`,
       [...ids, ...ids]
     )
@@ -1714,12 +2016,17 @@ export class BotStore {
         (row) =>
           row.bot_id === botId && row.group_id === "" && (row.work_id ?? null) === (workId ?? null)
       )
-      const sameMessage = matches.some((row) =>
-        row.message_hash != null
+      const sameMessage = matches.some((row) => {
+        const origin = row.origin_json ? JSON.parse(String(row.origin_json)) as BotTaskOrigin : undefined
+        return row.message_hash != null
           ? row.message_hash === messageHash
           : row.message != null &&
-            createHash("sha256").update(String(row.message)).digest("hex") === messageHash
-      )
+            createHash("sha256")
+              .update(canonicalBotMessageInput(
+                String(row.message), origin?.kind === "user" ? origin.mentions : undefined
+              ))
+              .digest("hex") === messageHash
+      })
       return { requestId, state: ownsAll && sameMessage ? "accepted" : "conflict" }
     })
   }
@@ -1796,7 +2103,7 @@ export class BotStore {
         origin.kind !== "schedule" &&
         origin.kind !== "work_result" &&
         !(origin.kind === "notification" && origin.notificationKind === "command") &&
-        !(origin.kind === "user" && origin.replyTo)
+        !(origin.kind === "user" && (origin.replyTo || origin.mentions?.length))
       )
         return []
       return [{ id: String(row.id), requestId, state: String(row.state) as BotTaskState, origin }]
@@ -2019,7 +2326,7 @@ export class BotStore {
           task.origin.kind === "work_result" ||
           (task.origin.kind === "notification" && task.origin.notificationKind === "command") ||
           botTaskGroupId(task) ||
-          (task.origin.kind === "user" && task.origin.replyTo)
+          (task.origin.kind === "user" && (task.origin.replyTo || task.origin.mentions?.length))
         ) {
           const original = storedMessages.get(task.threadId)?.get(task.requestId)
           const prefix =
@@ -2049,7 +2356,11 @@ export class BotStore {
             row.request_id,
             row.bot_id,
             botTaskGroupId(this.task(row)) ?? null,
-            createHash("sha256").update(String(row.message)).digest("hex"),
+            createHash("sha256")
+              .update(canonicalBotMessageInput(
+                String(row.message), task.origin.kind === "user" ? task.origin.mentions : undefined
+              ))
+              .digest("hex"),
             row.updated_at,
             row.work_id ?? null,
             row.mock_source_json ?? null
@@ -2102,6 +2413,11 @@ export class BotStore {
       AND NOT EXISTS (SELECT 1 FROM bot_commands c WHERE c.source_task_id=t.id
         AND c.bot_id=t.bot_id AND c.thread_id=t.thread_id
         AND c.continuation_result_json IS NOT NULL AND c.state='accepted')
+      AND NOT (json_extract(t.origin_json,'$.kind')='discussion'
+        AND EXISTS (SELECT 1 FROM bot_group_messages m WHERE m.id=json_extract(t.origin_json,'$.messageId')
+          AND m.group_id=json_extract(t.origin_json,'$.groupId') AND m.author_bot_id IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM bot_group_discussions d WHERE d.group_id=json_extract(t.origin_json,'$.groupId')
+          AND json_extract(d.payload,'$.messageId')=json_extract(t.origin_json,'$.messageId')))
       ORDER BY CASE WHEN t.work_id IS NULL AND json_extract(t.origin_json,'$.rootWorkId') IS NULL THEN 0 ELSE 1 END, CASE COALESCE(json_extract(t.origin_json,'$.kind'),'user')
         WHEN 'user' THEN 0 WHEN 'group' THEN 1 WHEN 'bot' THEN 2 ELSE 3 END,
       t.created_at, t.rowid LIMIT 1`,
@@ -3099,6 +3415,7 @@ export class BotStore {
   finishGroupDeletion(id: string): void {
     this.transaction(() => {
       if (!this.getGroup(id).deleting) throw new BotError("CONFLICT", "尚未开始删除群聊")
+      this.deleteReactionScopes("group", [id])
       this.db.run("DELETE FROM bot_tasks WHERE json_extract(origin_json,'$.groupId')=?", [id])
       this.db.run("DELETE FROM bot_commands WHERE group_id=?", [id])
       this.db.run("DELETE FROM bot_task_receipts WHERE group_id=?", [id])
@@ -3117,18 +3434,39 @@ export class BotStore {
   publishGroupMessage(
     taskId: string,
     callId: string,
-    text: string
+    text: string,
+    targetGroupId?: string
   ): { groupId: string; messageId: string } {
     if (!callId || callId.length > 512 || !text.trim() || text.length > 60_000)
       throw new BotError("INVALID_INPUT", "群消息或调用标识无效")
     return this.transaction(() => {
       const task = this.getTask(taskId),
-        groupId = botTaskGroupId(task)
+        originGroupId = botTaskGroupId(task),
+        groupId = originGroupId ?? targetGroupId,
+        privatePost = !originGroupId && targetGroupId !== undefined
+      if (originGroupId && targetGroupId !== undefined && originGroupId !== targetGroupId)
+        throw new BotError("CONFLICT", "群任务不能跨群发送")
       if (!groupId || !ACTIVE_STATES.includes(task.state as (typeof ACTIVE_STATES)[number]))
         throw new BotError("CONFLICT", "只有活动群任务可以发言")
+      if (privatePost) {
+        const continuation = this.commandProfileSource(task)
+        if (
+          task.mockSource ||
+          (task.workId && this.getWork(task.botId, task.workId).source) ||
+          continuation?.mockSource ||
+          (continuation?.workId && this.getWork(continuation.botId, continuation.workId).source) ||
+          (!this.hasDirectUserRequest(taskId) && !continuation)
+        )
+          throw new BotError("CONFLICT", "私聊发群需要当前本机用户明确交办")
+      }
       const group = this.getGroup(groupId),
         bot = this.getBot(task.botId)
-      if (group.deleting || bot.deleting || !group.memberIds.includes(bot.id))
+      if (
+        group.deleting ||
+        bot.deleting ||
+        !group.memberIds.includes(bot.id) ||
+        (privatePost && (bot.archived || group.hostId !== bot.hostId))
+      )
         throw new BotError("CONFLICT", "群成员或会话已改变")
       const messageId = `send-${task.id}-${createHash("sha256").update(callId).digest("hex").slice(0, 24)}`
       const prior = this.rows(
@@ -3140,10 +3478,30 @@ export class BotStore {
           throw new BotError("CONFLICT", "同一调用的群消息内容已改变")
         return { groupId, messageId }
       }
-      const mentions = bindBotGroupMentions(
-        text,
-        group.memberIds.map((id) => this.getBot(id)).filter((member) => !member.deleting)
+      // Deferred room seeds cannot consume the slot needed by the current room's next turn.
+      if (
+        privatePost &&
+        Number(this.rows("SELECT COUNT(*) AS n FROM bot_tasks WHERE state='queued'")[0].n) >= 499
       )
+        throw new BotError("CONFLICT", "群工作队列已满，请等待已有工作推进后重试")
+      const members = group.memberIds
+        .map((id) => this.getBot(id))
+        .filter((member) => !member.deleting)
+      const mentions = bindBotGroupMentions(text, members)
+      if (privatePost) {
+        const uniqueNames = [...new Map(members.map((member) => [member.name, member])).values()]
+        if (
+          bindBotGroupMentions(text, uniqueNames).some(
+            (mention) =>
+              mention.botId && members.filter((member) => member.name === mention.label).length > 1
+          )
+        )
+          throw new BotError("CONFLICT", "提及的群成员存在同名，请明确收件人后重试")
+      }
+      const targets =
+        !mentions.length || mentions.some((m) => m.botId === null)
+          ? group.memberIds
+          : [...new Set(mentions.flatMap((m) => (m.botId ? [m.botId] : [])))]
       this.db.run(
         "INSERT INTO bot_group_messages (id,group_id,author_bot_id,text,targets_json,created_at,mentions_json) VALUES (?,?,?,?,?,?,?)",
         [
@@ -3151,17 +3509,209 @@ export class BotStore {
           groupId,
           bot.id,
           text,
-          "[]",
+          privatePost ? JSON.stringify(targets) : "[]",
           this.now(),
           mentions.length ? JSON.stringify(mentions) : null
         ]
       )
+      if (privatePost) {
+        const { message } = this.groupPostMessage(groupId, messageId)!
+        const prepared = this.prepareGroupPost(group, message, targets),
+          recipient = prepared?.botId ?? bot.id
+        this.enqueue(
+          {
+            botId: recipient,
+            requestId: this.groupPostSeedId(groupId, messageId, recipient),
+            message: buildBotGroupDiscussionMessage(bot.name, text, [])
+          },
+          { kind: "discussion", groupId, messageId, round: 1 }
+        )
+      }
       this.noteActivity("group", groupId, text, true, bot.name)
       this.changed()
       return { groupId, messageId }
     })
   }
+  private groupPostSeedId(groupId: string, messageId: string, botId: string): string {
+    return `group-post-${createHash("sha256")
+      .update(JSON.stringify([groupId, messageId, botId]))
+      .digest("hex")}`
+  }
 
+  private prepareGroupPost(group: BotGroup, message: BotGroupMessage, targets: string[]) {
+    if (group.memberIds.length < 2) return null
+    const state: GroupDiscussion = {
+      messageId: message.id,
+      initialTaskIds: [],
+      memberIds: group.memberIds,
+      round: 1,
+      speakerIndex: 0,
+      turns: 0,
+      roundStartOrdinal: message.ordinal,
+      seen: Object.fromEntries(
+        group.memberIds.map((id) => [id, message.ordinal - (id === message.authorBotId ? 0 : 1)])
+      ),
+      pendingTaskId: null
+    }
+    const eligible = new Set(
+      targets.filter(
+        (id) =>
+          group.memberIds.includes(id) && !this.getBot(id).archived && !this.getBot(id).deleting
+      )
+    )
+    const botId = nextGroupDiscussionSpeaker(state, message, eligible)
+    return botId ? { state, botId } : null
+  }
+
+  private groupPostMessage(groupId: string, messageId: string) {
+    const row = this.rows(
+      "SELECT * FROM bot_group_messages WHERE id=? AND group_id=? AND author_bot_id IS NOT NULL",
+      [messageId, groupId]
+    )[0]
+    if (!row) return null
+    const message: BotGroupMessage = {
+      id: messageId,
+      groupId,
+      ordinal: Number(row.ordinal),
+      authorBotId: String(row.author_bot_id),
+      text: String(row.text),
+      createdAt: Number(row.created_at),
+      ...(row.mentions_json ? { mentions: JSON.parse(String(row.mentions_json)) } : {})
+    }
+    return { message, targets: JSON.parse(String(row.targets_json)) as string[] }
+  }
+
+  private isIndependentGroupPost(
+    message: Pick<BotGroupMessage, "id" | "groupId" | "authorBotId">,
+    memberIds: readonly string[]
+  ): boolean {
+    const sourceId = /^send-([0-9a-f-]{36})-[0-9a-f]{24}$/.exec(message.id)?.[1]
+    if (!sourceId || !message.authorBotId) return false
+    const source =
+      this.rows("SELECT bot_id,origin_json FROM bot_tasks WHERE id=?", [sourceId])[0] ??
+      this.rows("SELECT bot_id,origin_json FROM bot_exchange_archive WHERE id=?", [sourceId])[0]
+    if (
+      !source ||
+      source.bot_id !== message.authorBotId ||
+      botTaskGroupId({ origin: JSON.parse(String(source.origin_json)) })
+    )
+      return false
+    const ids = memberIds.map((id) => this.groupPostSeedId(message.groupId, message.id, id))
+    return this.rows(
+      `SELECT bot_id,origin_json,request_id FROM bot_tasks WHERE request_id IN (${ids.map(() => "?").join(",")})`,
+      ids
+    ).some((row) => {
+      const origin = JSON.parse(String(row.origin_json)) as BotTaskOrigin
+      return (
+        origin.kind === "discussion" &&
+        origin.groupId === message.groupId &&
+        origin.messageId === message.id &&
+        row.request_id === this.groupPostSeedId(message.groupId, message.id, String(row.bot_id))
+      )
+    })
+  }
+
+  private groupPostAssignment(groupId: string, state: GroupDiscussion) {
+    const seed = this.getTask(state.initialTaskIds[0])
+    if (
+      seed.origin.kind !== "discussion" ||
+      seed.origin.groupId !== groupId ||
+      seed.origin.messageId !== state.messageId ||
+      seed.requestId !== this.groupPostSeedId(groupId, state.messageId, seed.botId)
+    )
+      return undefined
+    return this.rows(
+      "SELECT text,ordinal,targets_json,author_bot_id FROM bot_group_messages WHERE id=? AND group_id=? AND author_bot_id IS NOT NULL",
+      [state.messageId, groupId]
+    )[0]
+  }
+
+  private isGroupPostEvidence(
+    message: Pick<BotGroupMessage, "id" | "authorBotId">,
+    groupId: string,
+    messageId: string
+  ): boolean {
+    if (message.id === messageId) return true
+    const match = /^(?:send|files)-([0-9a-f-]{36})-|^result-([0-9a-f-]{36})$/.exec(message.id)
+    if (!match) return false
+    let taskId = match[1] || match[2]
+    const visited = new Set<string>()
+    while (!visited.has(taskId)) {
+      visited.add(taskId)
+      const row = this.rows("SELECT * FROM bot_tasks WHERE id=?", [taskId])[0]
+      if (!row) return false
+      const task = this.task(row)
+      if (task.botId !== message.authorBotId || botTaskGroupId(task) !== groupId) return false
+      if (task.origin.kind === "discussion") return task.origin.messageId === messageId
+      if (task.origin.kind !== "notification" || task.origin.notificationKind !== "command")
+        return false
+      const command = this.rows(
+        "SELECT source_task_id FROM bot_commands WHERE id=? AND bot_id=? AND thread_id=? AND group_id=?",
+        [task.origin.key, task.botId, task.threadId, groupId]
+      )[0]
+      if (!command?.source_task_id) return false
+      taskId = String(command.source_task_id)
+    }
+    return false
+  }
+
+  private pendingGroupPosts() {
+    return this.rows(
+      "SELECT * FROM bot_tasks WHERE state='queued' AND request_id LIKE 'group-post-%'"
+    )
+      .flatMap((row) => {
+        const seed = this.task(row)
+        if (seed.origin.kind !== "discussion") return []
+        const post = this.groupPostMessage(seed.origin.groupId, seed.origin.messageId)
+        return post &&
+          seed.requestId === this.groupPostSeedId(post.message.groupId, post.message.id, seed.botId)
+          ? [{ seed, ...post }]
+          : []
+      })
+      .sort((a, b) => a.message.ordinal - b.message.ordinal)
+  }
+
+  private activateGroupPosts(posts: ReturnType<BotStore["pendingGroupPosts"]>): void {
+    const held = posts.map(({ seed }) => seed.id)
+    for (const { seed, message, targets } of posts) {
+      if (seed.origin.kind !== "discussion" || this.getTask(seed.id).state !== "queued") continue
+      const group = this.getGroup(seed.origin.groupId)
+      const author = this.getBot(message.authorBotId!)
+      if (
+        group.deleting ||
+        author.archived ||
+        author.deleting ||
+        !group.memberIds.includes(author.id)
+      ) {
+        this.transition(seed.id, "cancelled")
+        continue
+      }
+      if (
+        this.rows("SELECT 1 FROM bot_group_discussions WHERE group_id=?", [group.id]).length ||
+        this.rows(
+          `SELECT 1 FROM bot_tasks WHERE json_extract(origin_json,'$.groupId')=?
+          AND state IN ('queued','running','waiting_user') AND id NOT IN (${held.map(() => "?").join(",")}) LIMIT 1`,
+          [group.id, ...held]
+        ).length ||
+        this.rows("SELECT 1 FROM bot_commands WHERE group_id=? AND state='accepted' LIMIT 1", [
+          group.id
+        ]).length
+      )
+        continue
+      const prepared = this.prepareGroupPost(group, message, targets)
+      if (!prepared || prepared.botId !== seed.botId) {
+        this.transition(seed.id, "cancelled")
+        continue
+      }
+      prepared.state.initialTaskIds = [seed.id]
+      prepared.state.pendingTaskId = seed.id
+      this.db.run("INSERT INTO bot_group_discussions VALUES(?,?)", [
+        group.id,
+        JSON.stringify(prepared.state)
+      ])
+      this.changed()
+    }
+  }
   publishGroupFiles(taskId: string, callId: string, files: BotDeliveredFile[], text = ""): void {
     if (typeof text !== "string" || text.length > 60_000)
       throw new BotError("INVALID_INPUT", "群附件正文无效")
@@ -3481,6 +4031,13 @@ export class BotStore {
 
   /** One durable cursor per active room; no duplicate transcript, executor or polling timer. */
   stopGroupDiscussion(groupId: string, messageId?: string): void {
+    if (!messageId) {
+      this.db.run(
+        "UPDATE bot_tasks SET state='cancelled',updated_at=? WHERE state='queued' AND request_id LIKE 'group-post-%' AND json_extract(origin_json,'$.kind')='discussion' AND json_extract(origin_json,'$.groupId')=?",
+        [this.now(), groupId]
+      )
+      if (this.db.getRowsModified()) this.changed()
+    }
     if (messageId) {
       const row = this.rows("SELECT payload FROM bot_group_discussions WHERE group_id=?", [
         groupId
@@ -3493,7 +4050,6 @@ export class BotStore {
     }
     this.db.run("DELETE FROM bot_group_discussions WHERE group_id=?", [groupId])
   }
-
   groupDiscussionTask(groupId: string, exceptMessageId?: string): string | undefined {
     const row = this.rows("SELECT payload FROM bot_group_discussions WHERE group_id=?", [
       groupId
@@ -3504,6 +4060,16 @@ export class BotStore {
   }
 
   advanceGroupDiscussions(): void {
+    const posts = this.pendingGroupPosts()
+    const held = posts
+      .filter(
+        ({ seed, message }) =>
+          !this.rows(
+            "SELECT 1 FROM bot_group_discussions WHERE group_id=? AND json_extract(payload,'$.messageId')=?",
+            [message.groupId, seed.origin.kind === "discussion" ? seed.origin.messageId : ""]
+          ).length
+      )
+      .map(({ seed }) => seed.id)
     for (const row of this.rows("SELECT group_id,payload FROM bot_group_discussions")) {
       this.transaction(() => {
         const groupId = String(row.group_id)
@@ -3536,10 +4102,11 @@ export class BotStore {
           }
         }
         if (initial.some((task) => task.state !== "completed")) return
-        const assignment = this.rows(
-          "SELECT text,ordinal,targets_json FROM bot_group_messages WHERE id=? AND group_id=? AND author_bot_id IS NULL",
-          [state.messageId, groupId]
-        )[0]
+        const assignment =
+          this.rows(
+            "SELECT text,ordinal,targets_json FROM bot_group_messages WHERE id=? AND group_id=? AND author_bot_id IS NULL",
+            [state.messageId, groupId]
+          )[0] ?? this.groupPostAssignment(groupId, state)
         if (!assignment) {
           finish()
           return
@@ -3547,11 +4114,59 @@ export class BotStore {
         // Grok re-resolves participants from the current request and subsequent @handoffs.
         // Reuse validated recipients and persisted IDs, never guess from names or old tasks.
         const addressed = new Set(JSON.parse(String(assignment.targets_json)) as string[])
+        const botPost = typeof assignment.author_bot_id === "string"
+        if (
+          botPost &&
+          (this.getBot(String(assignment.author_bot_id)).archived ||
+            this.getBot(String(assignment.author_bot_id)).deleting)
+        ) {
+          finish()
+          return
+        }
+        const recentMessages = this.groupMessages(groupId, undefined, false)
+        const independentMemo = new Map<string, boolean>()
+        const independentPost = (
+          message: Pick<BotGroupMessage, "id" | "groupId" | "authorBotId">
+        ) => {
+          if (!independentMemo.has(message.id))
+            independentMemo.set(message.id, this.isIndependentGroupPost(message, state.memberIds))
+          return independentMemo.get(message.id)!
+        }
+        const independent = botPost
+          ? new Set<string>()
+          : new Set(recentMessages.filter(independentPost).map((m) => m.id))
+        const postMessages = botPost
+          ? [
+              this.groupPostMessage(groupId, state.messageId)!.message,
+              ...recentMessages.filter(
+                (m) =>
+                  m.id !== state.messageId && this.isGroupPostEvidence(m, groupId, state.messageId)
+              )
+            ]
+          : []
         if (state.memberIds.some((id) => !addressed.has(id))) {
           for (const message of this.rows(
-            "SELECT mentions_json FROM bot_group_messages WHERE group_id=? AND ordinal>? AND author_bot_id IS NOT NULL AND mentions_json IS NOT NULL",
+            "SELECT id,author_bot_id,mentions_json FROM bot_group_messages WHERE group_id=? AND ordinal>? AND author_bot_id IS NOT NULL AND mentions_json IS NOT NULL",
             [groupId, Number(assignment.ordinal)]
           )) {
+            if (
+              botPost &&
+              !this.isGroupPostEvidence(
+                { id: String(message.id), authorBotId: String(message.author_bot_id) },
+                groupId,
+                state.messageId
+              )
+            )
+              continue
+            if (
+              !botPost &&
+              independentPost({
+                id: String(message.id),
+                groupId,
+                authorBotId: String(message.author_bot_id)
+              })
+            )
+              continue
             for (const mention of JSON.parse(String(message.mentions_json)) as NonNullable<
               BotGroupMessage["mentions"]
             >) {
@@ -3577,8 +4192,8 @@ export class BotStore {
         // never races another room writer or consumes an unfinished member result.
         if (
           this.rows(
-            "SELECT id FROM bot_tasks WHERE json_extract(origin_json,'$.groupId')=? AND state IN ('queued','running','waiting_user') LIMIT 1",
-            [groupId]
+            `SELECT id FROM bot_tasks WHERE json_extract(origin_json,'$.groupId')=? AND state IN ('queued','running','waiting_user')${held.length ? ` AND id NOT IN (${held.map(() => "?").join(",")})` : ""} LIMIT 1`,
+            [groupId, ...held]
           ).length
         )
           return
@@ -3592,7 +4207,7 @@ export class BotStore {
           Number(this.rows("SELECT COUNT(*) AS n FROM bot_tasks WHERE state='queued'")[0].n) >= 500
         )
           return
-        const recent = this.groupMessages(groupId, undefined, false)
+        const recent = botPost ? postMessages : recentMessages.filter((m) => !independent.has(m.id))
         const latest = recent.at(-1)
         const previouslySeen = { ...state.seen }
         const botId = latest && nextGroupDiscussionSpeaker(state, latest, eligible)
@@ -3621,11 +4236,19 @@ export class BotStore {
             requestId: `discussion-${createHash("sha256")
               .update(JSON.stringify([groupId, state.messageId, state.round, botId]))
               .digest("hex")}`,
-            message: buildGroupDiscussionMessage(
-              String(assignment.text),
-              references,
-              recent.length === 50 && recent[0].ordinal > (previouslySeen[botId] ?? 0)
-            )
+            message: botPost
+              ? buildBotGroupDiscussionMessage(
+                  String(assignment.author_bot_id),
+                  String(assignment.text),
+                  references,
+                  recentMessages.length === 50 &&
+                    recentMessages[0].ordinal > Number(assignment.ordinal)
+                )
+              : buildGroupDiscussionMessage(
+                  String(assignment.text),
+                  references,
+                  recent.length === 50 && recent[0].ordinal > (previouslySeen[botId] ?? 0)
+                )
           },
           { kind: "discussion", groupId, messageId: state.messageId, round: state.round }
         )
@@ -3636,5 +4259,6 @@ export class BotStore {
         ])
       })
     }
+    this.transaction(() => this.activateGroupPosts(posts))
   }
 }

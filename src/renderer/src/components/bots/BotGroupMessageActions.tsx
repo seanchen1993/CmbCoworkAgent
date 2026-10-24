@@ -1,51 +1,48 @@
 import { useState } from "react"
 import { Check, Copy, Reply } from "lucide-react"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { BotMessageActions } from "./BotMessageActions"
 
-/** Same hover/focus action pattern as Hermes group-chat-view; no transcript state. */
+/** Public group rows share host-bound actions with private Bot messages. */
 export function BotGroupMessageActions({
+  messageId,
   author,
   text,
   onReply,
   onError
 }: {
+  messageId?: string
   author: string
   text: string
-  onReply(): void
+  onReply?(): void
   onError(error: unknown): void
 }) {
   const [copied, setCopied] = useState(false)
   return (
-    <div
+    <BotMessageActions
+      messageId={messageId ?? ""}
+      label={`${author}的消息操作`}
       className="bot-group-message-actions"
-      role="toolbar"
-      aria-label={`${author}的消息操作`}
-      onMouseLeave={() => setCopied(false)}
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) setCopied(false)
-      }}
-    >
-      <Tooltip>
-        <TooltipTrigger asChild>
+      replyAction={
+        text.trim() && onReply ? (
           <button
             type="button"
             className="bot-icon-button"
             aria-label={`回复${author}的消息`}
+            title="回复"
             onClick={onReply}
           >
             <Reply size={16} />
           </button>
-        </TooltipTrigger>
-        <TooltipContent data-bot-popup className="bot-control-tooltip rounded-xl">
-          回复
-        </TooltipContent>
-      </Tooltip>
-      <Tooltip>
-        <TooltipTrigger asChild>
+        ) : null
+      }
+      moreActions={
+        text ? (
           <button
             type="button"
             className="bot-icon-button"
             aria-label={copied ? "已复制消息" : "复制群消息"}
+            title={copied ? "已复制" : "复制群消息"}
+            onFocus={() => setCopied(false)}
             onClick={() => {
               void navigator.clipboard
                 .writeText(text)
@@ -55,11 +52,8 @@ export function BotGroupMessageActions({
           >
             {copied ? <Check size={16} /> : <Copy size={16} />}
           </button>
-        </TooltipTrigger>
-        <TooltipContent data-bot-popup className="bot-control-tooltip rounded-xl">
-          {copied ? "已复制" : "复制"}
-        </TooltipContent>
-      </Tooltip>
-    </div>
+        ) : undefined
+      }
+    />
   )
 }

@@ -19,6 +19,8 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
   let browser: Browser | undefined,
     sequence = 0,
     closed = false
+  const pagesByTarget = new Map<string, Page>()
+  const hiddenListeners = new Set<(page: Page, generation: number) => void>()
   const pending = new Map<
     number,
     {
@@ -30,6 +32,8 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
   const exited = new Promise<void>((resolve) => child.once("close", () => resolve()))
   const fail = (error: Error) => {
     closed = true
+    pagesByTarget.clear()
+    hiddenListeners.clear()
     for (const request of pending.values()) {
       clearTimeout(request.timer)
       request.reject(error)
@@ -40,7 +44,27 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
   child.on("error", fail)
   child.on("message", (message: unknown) => {
     if (!message || typeof message !== "object") return
-    const reply = message as { id?: number; value?: unknown; error?: string }
+    const reply = message as {
+      id?: number
+      value?: unknown
+      error?: string
+      event?: unknown
+      targetId?: unknown
+      generation?: unknown
+    }
+    if (reply.event === "window-hidden") {
+      if (
+        typeof reply.targetId === "string" &&
+        typeof reply.generation === "number" &&
+        Number.isSafeInteger(reply.generation) &&
+        reply.generation >= 0
+      ) {
+        const page = pagesByTarget.get(reply.targetId)
+        if (page && !page.isClosed())
+          for (const listener of hiddenListeners) listener(page, reply.generation)
+      }
+      return
+    }
     if (typeof reply.id !== "number") return
     const request = pending.get(reply.id)
     if (!request) return
@@ -50,8 +74,10 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
     else request.resolve(reply.value)
   })
   const call = (
-    action: "create" | "show" | "hide" | "get-title",
-    targetId?: string
+    action: "create" | "show" | "hide" | "get-title" | "get-state" | "capture",
+    targetId?: string,
+    generation?: number,
+    timeoutMs = 15_000
   ): Promise<unknown> => {
     if (closed || !child.connected) return Promise.reject(new Error("Bot 浏览器未连接"))
     if (pending.size >= 16) return Promise.reject(new Error("浏览器请求过多，请稍候"))
@@ -60,9 +86,9 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
       const timer = setTimeout(() => {
         pending.delete(id)
         reject(new Error("Bot 浏览器响应超时"))
-      }, 15_000)
+      }, timeoutMs)
       pending.set(id, { resolve, reject, timer })
-      child.send({ id, action, targetId }, (error) => {
+      child.send({ id, action, targetId, generation }, (error) => {
         if (error) {
           clearTimeout(timer)
           pending.delete(id)
@@ -146,6 +172,8 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
       try {
         const { targetInfo } = await session.send("Target.getTargetInfo")
         identities.set(page, targetInfo.targetId)
+        pagesByTarget.set(targetInfo.targetId, page)
+        page.once("close", () => pagesByTarget.delete(targetInfo.targetId))
         return targetInfo.targetId
       } finally {
         await session.detach()
@@ -167,8 +195,40 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
       async getTitle(page) {
         return (await call("get-title", await targetOf(page))) as string
       },
-      async show(page) {
-        await call("show", await targetOf(page))
+      async getPageState(page) {
+        return (await call("get-state", await targetOf(page))) as {
+          title: string
+          canGoBack: boolean
+          canGoForward: boolean
+        }
+      },
+      async capturePage(page) {
+        try {
+          const value = await call("capture", await targetOf(page), undefined, 5000)
+          if (typeof value !== "string" || !value || value.length > 24 * 1024 * 1024)
+            throw new Error("Bot 浏览器截图数据无效")
+          const image = Buffer.from(value, "base64")
+          if (!image.length || image.toString("base64") !== value)
+            throw new Error("Bot 浏览器截图数据无效")
+          return image
+        } catch (error) {
+          // Native failures need diagnostics, without logging URLs or page content.
+          const reason =
+            error instanceof Error && error.message === "Bot 浏览器响应超时"
+              ? "timeout"
+              : error instanceof Error && error.message === "Bot 浏览器截图为空"
+                ? "empty"
+                : "unavailable"
+          console.warn("[BotBrowser] Native preview capture failed:", reason)
+          throw error
+        }
+      },
+      async show(page, generation) {
+        await call("show", await targetOf(page), generation)
+      },
+      onWindowHidden(listener) {
+        hiddenListeners.add(listener)
+        return () => hiddenListeners.delete(listener)
       },
       async hide() {
         await call("hide")

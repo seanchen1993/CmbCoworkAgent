@@ -2758,13 +2758,18 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
     notificationClaimHandoff
   )
   const notificationClaimBlockEnd = agentIpcSource.indexOf(
-    "} else if (hasWorkflowNotificationPrefix)",
+    "} else if (messageControlsEnabled && hasWorkflowNotificationPrefix)",
     notificationClaimHandoff
   )
   const notificationClaimTry = agentIpcSource.indexOf("try {", notificationClaimStart)
   const notificationClaimCatch = agentIpcSource.indexOf(
     "} catch (error) {",
     notificationClaimHandoff
+  )
+  assert.ok(notificationClaimStart >= 0, "notification claim start marker exists")
+  assert.ok(
+    notificationClaimBlockEnd > notificationClaimHandoff,
+    "notification claim block ends at the message-control guarded prefix branch"
   )
   assert.ok(
     notificationClaimStart >= 0 &&

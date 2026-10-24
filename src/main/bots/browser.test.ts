@@ -24,6 +24,9 @@ class TestPage extends EventEmitter {
   goto = vi.fn(async (url: string) => {
     this.address = url
   })
+  goBack = vi.fn(async (_options: unknown) => null)
+  goForward = vi.fn(async (_options: unknown) => null)
+  reload = vi.fn(async (_options: unknown) => null)
   fill = vi.fn(async () => {})
   click = vi.fn(async () => {})
   press = vi.fn(async () => {})
@@ -83,6 +86,7 @@ class TestContext extends EventEmitter {
   }
 }
 let context: TestContext, service: BotBrowserService, directory: string
+let hidden: ((page: TestPage, generation: number) => void) | undefined
 const signal = () => new AbortController().signal
 function deferred() {
   let resolve!: () => void
@@ -94,13 +98,22 @@ function deferred() {
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "bot-browser-test-"))
   context = new TestContext()
+  hidden = undefined
   launch.mockReset().mockImplementation(
     async () =>
       ({
         context,
         createPage: () => context.newPage(),
         getTitle: async () => "Test page",
+        getPageState: async () => ({ title: "Test page", canGoBack: false, canGoForward: false }),
+        capturePage: vi.fn(async (_page: TestPage) => Buffer.from("fixture")),
         show: (page: TestPage) => page.bringToFront(),
+        onWindowHidden: (listener: (page: TestPage, generation: number) => void) => {
+          hidden = listener
+          return () => {
+            if (hidden === listener) hidden = undefined
+          }
+        },
         hide: async () => {},
         close: () => context.close()
       }) as unknown as BotBrowserEngine
@@ -222,14 +235,17 @@ describe("Bot browser ownership and control", () => {
         await service.act("a", { action: "click", pageId, role: "button", name: "Open" }, signal())
       )
       expect(opened.dialog.type).toBe("confirm")
-      const capture = vi.spyOn(page, "screenshot")
+      const engine = (await launch.mock.results[0].value) as BotBrowserEngine
+      const capture = vi.spyOn(engine, "capturePage")
       let preview: Awaited<ReturnType<BotBrowserService["preview"]>> | undefined
       const pending = service.preview("a", pageId).then((value) => {
         preview = value
       })
       await vi.waitFor(() => expect(preview).toBeDefined(), { timeout: 300 })
       await pending
-      expect(preview!.pages).toEqual([{ id: pageId, url: "about:blank", title: "Test page" }])
+      expect(preview!.pages).toEqual([
+        { id: pageId, url: "about:blank", title: "Test page", canGoBack: false, canGoForward: false }
+      ])
       expect(preview!.dialogPending).toBe(true)
       expect(page.title).not.toHaveBeenCalled()
       expect(capture).not.toHaveBeenCalled()
@@ -247,6 +263,387 @@ describe("Bot browser ownership and control", () => {
       finishInput?.()
     }
   })
+  it("returns current control and history metadata when capture fails, then recovers on the same page", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const page = context.entries[0]
+    await service.takeOver("a", pageId)
+    const lease = await service.preview("a", pageId)
+    const engine = (await launch.mock.results[0].value) as BotBrowserEngine
+    engine.getPageState = vi.fn(async () => ({
+      title: "Native history",
+      canGoBack: true,
+      canGoForward: false
+    }))
+    const screenshot = vi.spyOn(page, "screenshot").mockRejectedValue(new Error("fonts never ready"))
+    const capture = vi.spyOn(engine, "capturePage").mockRejectedValueOnce(new Error("capture failed"))
+    const failed = await service.preview("a", pageId)
+    expect(failed).toMatchObject({
+      pageId,
+      image: null,
+      captureError: "暂时无法获取浏览器画面，请刷新重试",
+      control: "human",
+      generation: lease.generation,
+      pages: [{ id: pageId, title: "Native history", canGoBack: true, canGoForward: false }]
+    })
+    expect(page.isClosed()).toBe(false)
+    await service.giveBack("a", failed.generation)
+    const recovered = await service.preview("a", pageId)
+    expect(recovered.control).toBe("bot")
+    expect(recovered.pageId).toBe(pageId)
+    expect(recovered.image).toBeTruthy()
+    expect(recovered.captureError).toBeUndefined()
+    page.emit("dialog", { type: () => "confirm", message: () => "Synthetic" })
+    expect(await service.preview("a", pageId)).toMatchObject({
+      image: null,
+      dialogPending: true
+    })
+    expect((await service.preview("a", pageId)).captureError).toBeUndefined()
+    expect(capture).toHaveBeenCalledTimes(2)
+    expect(capture).toHaveBeenLastCalledWith(page)
+    expect(screenshot).not.toHaveBeenCalled()
+    await page.close()
+    expect(await service.preview("a")).toMatchObject({ pages: [], image: null })
+    expect((await service.preview("a")).captureError).toBeUndefined()
+  })
+
+  it("keeps human navigation and tab controls on the leased owner's exact pages", async () => {
+    const a = JSON.parse(
+      await service.act("a", { action: "navigate", url: "https://example.test/form" }, signal())
+    )
+    const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    await expect(service.operateAsHuman("a", { action: "reload", pageId: a.pageId }, 0)).rejects.toThrow(
+      "控制权"
+    )
+    await service.takeOver("a", a.pageId)
+    const lease = await service.preview("a", a.pageId)
+    await expect(
+      service.operateAsHuman("a", { action: "reload", pageId: b.pageId }, lease.generation)
+    ).rejects.toThrow("不属于")
+    await expect(
+      service.operateAsHuman("a", { action: "reload", pageId: "missing" }, lease.generation)
+    ).rejects.toThrow("已关闭")
+    await expect(
+      service.operateAsHuman("b", { action: "close", pageId: b.pageId }, lease.generation)
+    ).rejects.toThrow("控制权")
+    await expect(
+      service.operateAsHuman("a", { action: "new" }, lease.generation - 1)
+    ).rejects.toThrow("控制权")
+    const original = context.entries[0]
+    for (const [action, method] of [
+      ["back", original.goBack],
+      ["forward", original.goForward],
+      ["reload", original.reload]
+    ] as const) {
+      expect(await service.operateAsHuman("a", { action, pageId: a.pageId }, lease.generation)).toBe(
+        a.pageId
+      )
+      expect(method).toHaveBeenCalledExactlyOnceWith({ waitUntil: "domcontentloaded" })
+    }
+    const next = await service.operateAsHuman("a", { action: "new" }, lease.generation)
+    expect(next).toBeTruthy()
+    expect(next).not.toBe(a.pageId)
+    expect(context.entries).toHaveLength(3)
+    expect(context.entries[2].bringToFront).toHaveBeenCalledOnce()
+    expect((await service.preview("a", next!)).generation).toBe(lease.generation)
+    expect((await service.preview("a")).pageId).toBe(next)
+    expect(await service.operateAsHuman("a", { action: "close", pageId: a.pageId }, lease.generation)).toBe(
+      next
+    )
+    expect(original.isClosed()).toBe(true)
+    expect(context.entries[1].isClosed()).toBe(false)
+    expect(context.entries[2].bringToFront).toHaveBeenCalledTimes(2)
+    expect((await service.preview("a")).pageId).toBe(next)
+    expect(await service.operateAsHuman("a", { action: "close", pageId: next! }, lease.generation)).toBeNull()
+    expect((await service.preview("a")).pages).toEqual([])
+    expect((await service.preview("b")).pages.map((page) => page.id)).toEqual([b.pageId])
+    expect((await service.preview("a")).control).toBe("bot")
+    expect(context.entries).toHaveLength(3)
+  })
+
+  it("rechecks the human claim after a queued operation waits for the browser lock", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    await service.takeOver("a", pageId)
+    const lease = await service.preview("a", pageId)
+    const entered = deferred(),
+      finish = deferred()
+    const engine = (await launch.mock.results[0].value) as BotBrowserEngine
+    vi.spyOn(engine, "capturePage").mockImplementationOnce(async () => {
+      entered.resolve()
+      await finish.promise
+      return Buffer.from("fixture")
+    })
+    const preview = service.preview("a", pageId)
+    await entered.promise
+    const pending = service.operateAsHuman("a", { action: "reload", pageId }, lease.generation)
+    const rejected = expect(pending).rejects.toThrow("控制权")
+    const returned = service.giveBack("a", lease.generation)
+    finish.resolve()
+    await Promise.all([preview, rejected, returned])
+    expect(context.entries[0].reload).not.toHaveBeenCalled()
+    expect((await service.preview("a", pageId)).control).toBe("bot")
+  })
+
+  it("applies existing page capacity limits to human-created tabs", async () => {
+    await service.takeOver("a")
+    const lease = await service.preview("a")
+    for (let index = 1; index < 6; index++)
+      await service.operateAsHuman("a", { action: "new" }, lease.generation)
+    await expect(service.operateAsHuman("a", { action: "new" }, lease.generation)).rejects.toThrow(
+      "上限"
+    )
+    expect(context.entries).toHaveLength(6)
+    expect(await service.preview("a")).toMatchObject({
+      control: "human",
+      generation: lease.generation
+    })
+  })
+
+  it("returns ordinary human control on native hide without closing or replaying the page", async () => {
+    const { pageId } = JSON.parse(
+      await service.act("a", { action: "navigate", url: "https://example.test/form" }, signal())
+    )
+    await service.takeOver("a", pageId)
+    const lease = await service.preview("a", pageId)
+    const waiting = vi.fn()
+    const pending = service.act(
+      "a",
+      { action: "fill", pageId, role: "textbox", name: "Name", text: "must not replay" },
+      signal(),
+      waiting
+    )
+    hidden!(context.entries[0], lease.generation)
+    const returned = JSON.parse(await pending)
+    expect(returned).toMatchObject({ pageId, url: "https://example.test/form", control: "bot" })
+    expect(context.entries[0].isClosed()).toBe(false)
+    expect(context.entries[0].fill).not.toHaveBeenCalled()
+    expect(context.entries[0].goto).toHaveBeenCalledOnce()
+    expect(waiting.mock.calls).toEqual([[true], [false]])
+    expect(context.entries).toHaveLength(1)
+  })
+
+  it("handles native hide before show completes without leaving the takeover waiting", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const engine = (await launch.mock.results[0].value) as BotBrowserEngine
+    engine.show = vi.fn(async (page, generation) => {
+      hidden!(page as unknown as TestPage, generation!)
+    })
+    await service.takeOver("a", pageId)
+    await vi.waitFor(async () => expect((await service.preview("a", pageId)).control).toBe("bot"))
+    expect(context.entries[0].isClosed()).toBe(false)
+    expect((await service.preview("a", pageId)).generation).toBe(2)
+    await service.takeOver("a", pageId, "Confirm the form")
+    expect(await service.preview("a", pageId)).toMatchObject({
+      control: "human",
+      helpInstruction: "Confirm the form"
+    })
+  })
+
+  it("does not repeat a return when native hide arrives during an existing giveBack", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    await service.takeOver("a", pageId)
+    const lease = await service.preview("a", pageId)
+    const engine = (await launch.mock.results[0].value) as BotBrowserEngine
+    const entered = deferred(),
+      finish = deferred()
+    engine.hide = vi.fn(async () => {
+      entered.resolve()
+      await finish.promise
+    })
+    const returned = service.giveBack("a", lease.generation)
+    await entered.promise
+    hidden!(context.entries[0], lease.generation)
+    finish.resolve()
+    await returned
+    expect(await service.preview("a", pageId)).toMatchObject({
+      control: "bot",
+      generation: lease.generation + 1
+    })
+    expect(engine.hide).toHaveBeenCalledOnce()
+  })
+
+  it("keeps explicit help waiting and rejects hidden events from a peer or an older lease", async () => {
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    await service.act("b", { action: "observe" }, signal())
+    await service.takeOver("a", a.pageId)
+    const old = await service.preview("a", a.pageId)
+    await service.giveBack("a", old.generation)
+    await service.takeOver("a", a.pageId)
+    const current = await service.preview("a", a.pageId)
+    hidden!(context.entries[0], old.generation)
+    hidden!(context.entries[1], current.generation)
+    expect(await service.preview("a", a.pageId)).toMatchObject({
+      control: "human",
+      generation: current.generation
+    })
+    await service.giveBack("a", current.generation)
+    const waiting = vi.fn()
+    let completed = false
+    const help = service
+      .act("a", { action: "request_help", pageId: a.pageId, instruction: "Confirm this form" }, signal(), waiting)
+      .then((value) => {
+        completed = true
+        return value
+      })
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledWith(true))
+    const requested = await service.preview("a", a.pageId)
+    hidden!(context.entries[0], requested.generation)
+    expect(await service.preview("a", a.pageId)).toMatchObject({
+      control: "human",
+      generation: requested.generation,
+      helpInstruction: "Confirm this form"
+    })
+    expect(completed).toBe(false)
+    await service.giveBack("a", requested.generation)
+    expect(JSON.parse(await help).pageId).toBe(a.pageId)
+    expect(context.entries[0].isClosed()).toBe(false)
+    expect(context.entries).toHaveLength(2)
+  })
+
+  it("ignores a previous page hidden event from the same current human generation", async () => {
+    const first = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const second = JSON.parse(
+      await service.act(
+        "a",
+        { action: "navigate", newTab: true, url: "https://example.test/second" },
+        signal()
+      )
+    )
+    await service.takeOver("a", first.pageId)
+    const generation = (await service.preview("a")).generation
+    await service.takeOver("a", second.pageId)
+    const waiting = vi.fn()
+    let returned = false
+    const pending = service
+      .act("a", { action: "observe", pageId: second.pageId }, signal(), waiting)
+      .then((value) => {
+        returned = true
+        return value
+      })
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledWith(true))
+    try {
+      hidden!(context.entries[0], generation)
+      expect(await service.preview("a")).toMatchObject({
+        control: "human",
+        pageId: second.pageId,
+        generation
+      })
+      expect(returned).toBe(false)
+      hidden!(context.entries[1], generation)
+      expect(JSON.parse(await pending).pageId).toBe(second.pageId)
+      expect((await service.preview("a")).control).toBe("bot")
+    } finally {
+      if ((await service.preview("a")).control === "human") await service.giveBack("a")
+      await pending
+    }
+  })
+  it("returns the newly selected page when native hide arrives before its show reply", async () => {
+    const first = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const second = JSON.parse(
+      await service.act(
+        "a",
+        { action: "navigate", newTab: true, url: "https://example.test/second" },
+        signal()
+      )
+    )
+    await service.takeOver("a", first.pageId)
+    const engine = (await launch.mock.results[0].value) as BotBrowserEngine
+    engine.show = vi.fn(async (page, generation) => {
+      hidden!(page as unknown as TestPage, generation!)
+    })
+    await service.takeOver("a", second.pageId)
+    await vi.waitFor(async () => expect((await service.preview("a")).control).toBe("bot"))
+    expect(context.entries[0].isClosed()).toBe(false)
+    expect(context.entries[1].isClosed()).toBe(false)
+  })
+  it("reports the exact closed help page instead of observing a different remaining page", async () => {
+    const first = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const second = JSON.parse(
+      await service.act(
+        "a",
+        { action: "navigate", newTab: true, url: "https://example.test/help" },
+        signal()
+      )
+    )
+    const waiting = vi.fn()
+    const help = service.act(
+      "a",
+      { action: "request_help", pageId: second.pageId, instruction: "Inspect this second page" },
+      signal(),
+      waiting
+    )
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledWith(true))
+    const generation = (await service.preview("a")).generation
+    await context.entries[1].close()
+    context.entries[0].snapshot.mockClear()
+    await service.giveBack("a", generation)
+    const result = JSON.parse(await help)
+    expect(result.closed).toBe(second.pageId)
+    expect(result.pageId).toBeUndefined()
+    expect(result.content).toBeUndefined()
+    expect(result.pages.map((page: { id: string }) => page.id)).toEqual([first.pageId])
+    expect(result.note).toContain("Do not assume the requested user action was completed")
+    expect(context.entries[0].snapshot).not.toHaveBeenCalled()
+  })
+  it("promotes an existing manual lease to help and keeps its first instruction on native hide", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    await service.takeOver("a", pageId)
+    const lease = await service.preview("a", pageId)
+    const waiting = vi.fn()
+    let completed = 0
+    const help = (instruction: string) =>
+      service.act("a", { action: "request_help", pageId, instruction }, signal(), waiting).then((value) => {
+        completed++
+        return value
+      })
+    const first = help("Confirm this exact form")
+    const duplicate = help("A later instruction must not replace it")
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledTimes(2))
+    expect(await service.preview("a", pageId)).toMatchObject({
+      generation: lease.generation,
+      control: "human",
+      helpInstruction: "Confirm this exact form"
+    })
+    hidden!(context.entries[0], lease.generation)
+    expect(await service.preview("a", pageId)).toMatchObject({
+      generation: lease.generation,
+      control: "human",
+      helpInstruction: "Confirm this exact form"
+    })
+    expect(completed).toBe(0)
+    expect(context.entries[0].isClosed()).toBe(false)
+    await service.giveBack("a", lease.generation)
+    for (const value of await Promise.all([first, duplicate]))
+      expect(JSON.parse(value).pageId).toBe(pageId)
+    expect(completed).toBe(2)
+    expect(context.entries).toHaveLength(1)
+  })
+
+  it("rejects help while a manual lease is being returned without changing that lease", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    await service.takeOver("a", pageId)
+    const lease = await service.preview("a", pageId)
+    const engine = (await launch.mock.results[0].value) as BotBrowserEngine
+    const entered = deferred(),
+      finish = deferred()
+    engine.hide = vi.fn(async () => {
+      entered.resolve()
+      await finish.promise
+    })
+    const returned = service.giveBack("a", lease.generation)
+    await entered.promise
+    const waiting = vi.fn()
+    await expect(
+      service.act("a", { action: "request_help", pageId, instruction: "A new help request" }, signal(), waiting)
+    ).rejects.toThrow("正在切换")
+    expect(waiting).not.toHaveBeenCalled()
+    finish.resolve()
+    await returned
+    expect(await service.preview("a", pageId)).toMatchObject({
+      control: "bot",
+      generation: lease.generation + 1
+    })
+    expect((await service.preview("a", pageId)).helpInstruction).toBeUndefined()
+  })
   it("reports actual file controls even when the ARIA snapshot calls them buttons", async () => {
     const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
     const page = context.entries[0]
@@ -259,6 +656,122 @@ describe("Bot browser ownership and control", () => {
     expect(observed.note).toContain("Native file inputs may have the ARIA role button")
     expect(page.click).not.toHaveBeenCalled()
     expect(page.setInputFiles).not.toHaveBeenCalled()
+  })
+  it("keeps the exact second help page when the help card previews and reopens without a target", async () => {
+    const first = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const second = JSON.parse(
+      await service.act(
+        "a",
+        { action: "navigate", newTab: true, url: "https://example.test/help" },
+        signal()
+      )
+    )
+    const waiting = vi.fn()
+    const help = service.act(
+      "a",
+      { action: "request_help", pageId: second.pageId, instruction: "Inspect the second page" },
+      signal(),
+      waiting
+    )
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledWith(true))
+    try {
+      expect(context.entries[1].bringToFront).toHaveBeenCalledTimes(1)
+      hidden!(context.entries[1], (await service.preview("a", second.pageId)).generation)
+      const cardState = await service.preview("a")
+      expect(cardState.pageId).toBe(second.pageId)
+      expect(cardState.pageId).not.toBe(first.pageId)
+      await service.takeOver("a", cardState.pageId ?? undefined)
+      expect(context.entries[0].bringToFront).not.toHaveBeenCalled()
+      expect(context.entries[1].bringToFront).toHaveBeenCalledTimes(2)
+    } finally {
+      await service.giveBack("a")
+      await help
+    }
+  })
+  it("shows the second requested page when promoting an existing first-page manual lease to help", async () => {
+    const first = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const second = JSON.parse(
+      await service.act(
+        "a",
+        { action: "navigate", newTab: true, url: "https://example.test/help" },
+        signal()
+      )
+    )
+    await service.takeOver("a", first.pageId)
+    const generation = (await service.preview("a")).generation
+    const waiting = vi.fn()
+    const help = service.act(
+      "a",
+      { action: "request_help", pageId: second.pageId, instruction: "Inspect the second page" },
+      signal(),
+      waiting
+    )
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledWith(true))
+    try {
+      expect(context.entries[1].bringToFront).toHaveBeenCalledTimes(1)
+      expect(await service.preview("a")).toMatchObject({
+        pageId: second.pageId,
+        generation,
+        helpInstruction: "Inspect the second page",
+        control: "human"
+      })
+    } finally {
+      await service.giveBack("a", generation)
+      await help
+    }
+  })
+  it("does not reopen the first page when the exact human target has closed", async () => {
+    const first = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const second = JSON.parse(
+      await service.act(
+        "a",
+        { action: "navigate", newTab: true, url: "https://example.test/help" },
+        signal()
+      )
+    )
+    await service.takeOver("a", second.pageId)
+    const lease = await service.preview("a")
+    await context.entries[1].close()
+    expect(await service.preview("a")).toMatchObject({ pageId: null, control: "human" })
+    await expect(service.takeOver("a")).rejects.toThrow("页面已关闭")
+    expect(context.entries[0].bringToFront).not.toHaveBeenCalled()
+    await expect(
+      service.operateAsHuman("a", { action: "reload", pageId: first.pageId }, lease.generation - 1)
+    ).rejects.toThrow("控制权")
+    expect(context.entries[0].reload).not.toHaveBeenCalled()
+    await service.takeOver("a", first.pageId)
+    expect(await service.preview("a")).toMatchObject({
+      pageId: first.pageId,
+      generation: lease.generation
+    })
+    await service.giveBack("a", lease.generation)
+  })
+  it("preserves the original manual target and instruction if promotion cannot show the requested page", async () => {
+    const first = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const second = JSON.parse(
+      await service.act(
+        "a",
+        { action: "navigate", newTab: true, url: "https://example.test/help" },
+        signal()
+      )
+    )
+    await service.takeOver("a", first.pageId)
+    const lease = await service.preview("a")
+    context.entries[1].bringToFront.mockRejectedValueOnce(new Error("native focus failed"))
+    await expect(
+      service.act(
+        "a",
+        { action: "request_help", pageId: second.pageId, instruction: "Inspect the second page" },
+        signal()
+      )
+    ).rejects.toThrow("native focus failed")
+    expect(await service.preview("a")).toMatchObject({
+      pageId: first.pageId,
+      generation: lease.generation,
+      control: "human"
+    })
+    expect((await service.preview("a")).helpInstruction).toBeUndefined()
+    await service.giveBack("a", lease.generation)
   })
   it("reopens human control without replacing its instruction, generation or pending help", async () => {
     const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
@@ -374,6 +887,44 @@ describe("Bot browser ownership and control", () => {
     expect(observed.url).toBe("https://example.test/confirmed")
     expect(waiting).toHaveBeenLastCalledWith(false)
     expect((await service.preview("a")).helpInstruction).toBeUndefined()
+  })
+  it("skips only the current help step, observes the same page and does not replay input or leak that decision", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const waiting = vi.fn()
+    const help = service.act(
+      "a", { action: "request_help", pageId, instruction: "填写合成备注" }, signal(), waiting
+    )
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledWith(true))
+    const lease = await service.preview("a")
+    await expect(service.giveBack("a", undefined, "skipped")).rejects.toThrow("控制版本")
+    await expect(service.giveBack("a", lease.generation - 1, "skipped")).rejects.toThrow("已改变")
+    await expect(service.giveBack("b", lease.generation, "skipped")).rejects.toThrow("没有可归还")
+    await service.giveBack("a", lease.generation, "skipped")
+    const observed = JSON.parse(await help)
+    expect(observed).toMatchObject({ pageId, helpSkipped: true, control: "bot" })
+    expect(observed.note).toContain("declined")
+    expect(context.entries[0].closed).toBe(false)
+    expect(context.entries[0].fill).not.toHaveBeenCalled()
+    expect(context.entries[0].click).not.toHaveBeenCalled()
+    expect(waiting).toHaveBeenLastCalledWith(false)
+    waiting.mockClear()
+    const next = service.act(
+      "a", { action: "request_help", pageId, instruction: "另一项合成协助" }, signal(), waiting
+    )
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledWith(true))
+    await service.giveBack("a", (await service.preview("a")).generation)
+    const completed = JSON.parse(await next)
+    expect(completed.helpSkipped).toBeUndefined()
+    expect(completed.note).not.toContain("declined")
+  })
+  it("does not treat an ordinary manual return as a skipped help request", async () => {
+    await service.act("a", { action: "observe" }, signal())
+    await service.takeOver("a")
+    const lease = await service.preview("a")
+    await expect(service.giveBack("a", lease.generation, "skipped")).rejects.toThrow("没有可跳过")
+    expect((await service.preview("a")).control).toBe("human")
+    await service.giveBack("a", lease.generation)
+    expect((await service.preview("a")).control).toBe("bot")
   })
   it("rejects help on foreign targets and aborts the wait without replaying browser input", async () => {
     await expect(
@@ -571,7 +1122,7 @@ describe("Bot browser ownership and control", () => {
       )
     )
     expect(preview.pageId).not.toBe(form.pageId)
-    expect(preview.pages).toEqual([
+    expect(preview.pages).toMatchObject([
       { id: form.pageId, url: "https://example.test/form", title: "Test page" },
       { id: preview.pageId, url: "https://example.test/preview", title: "Test page" }
     ])
@@ -839,10 +1390,10 @@ describe("Bot browser ownership and control", () => {
     const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
     const entered = deferred()
     const finish = deferred()
-    engine.getTitle = async () => {
+    engine.getPageState = async () => {
       entered.resolve()
       await finish.promise
-      return "Closed target"
+      return { title: "Closed target", canGoBack: false, canGoForward: false }
     }
     const pending = service.act("a", { action: "observe", pageId: a.pageId }, signal())
     const settled = Promise.allSettled([pending])

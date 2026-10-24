@@ -9,6 +9,7 @@ export const ChatReplySourceContext = createContext<{
   quoteFor(message: Message): BotMessageReply | undefined
 } | null>(null)
 export const ChatReplyActionsContext = createContext<{
+  canReply?: boolean
   reply(messageId: string): void
   setDraftReply(reply: BotMessageReply | null): void
   quoteFor(message: Message): BotMessageReply | undefined
@@ -34,6 +35,11 @@ export const ChatToolPresentationContext = createContext<
 
 export const ChatMessagePresentationContext = createContext<
   ((message: Message) => ReactNode) | null
+>(null)
+
+/** Host-verified Bot mention presentation; ordinary user text remains plain. */
+export const ChatUserTextPresentationContext = createContext<
+  ((message: Message, text: string) => ReactNode) | null
 >(null)
 
 /** Optional file card after the existing Markdown workspace-path resolver succeeds. */

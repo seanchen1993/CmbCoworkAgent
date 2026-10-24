@@ -7,8 +7,81 @@ import { BotStore } from "./store"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { formatBotMessageReply, parseBotMessageReply } from "../../shared/bots/message-reply"
 import { BOT_BROWSER_PROMPT_PREFIX } from "../../shared/user-input-transport"
+import { buildMessageSameRoleDuplicateId } from "../../shared/message-role-collision"
 
 describe("private Bot reply references", () => {
+  it("quotes the selected completed segment across restore and work scopes using its durable occurrence", () => {
+    const raw = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    const transcripts = new Map<string, BotMessageReply[]>()
+    const readReply = (threadId: string, id: string) =>
+      transcripts.get(threadId)?.find((message) => message.id === id) ?? null
+    const createStore = () => new BotStore(raw, () => 1000, undefined, readReply)
+    try {
+      const store = createStore()
+      const bot = store.create({ name: "A", instructions: "", color: "#ff2345", modelRef: null })
+      const other = store.create({ name: "B", instructions: "", color: "#ff2345", modelRef: null })
+      const { work } = store.createWork({
+        botId: bot.id,
+        operationId: "create-work",
+        title: "Plan",
+        goal: "Write"
+      })
+      const ids = [
+        "response",
+        buildMessageSameRoleDuplicateId("response", "assistant", 2),
+        buildMessageSameRoleDuplicateId("response", "assistant", 3)
+      ]
+      const main = ids.map((id, index) => ({
+        id,
+        ordinal: index * 2 + 1,
+        role: "assistant" as const,
+        text: ["first", "selected middle", "final"][index]
+      }))
+      const workMessages = main.map((message) => ({ ...message, text: `work ${message.text}` }))
+      transcripts.set(bot.threadId, main)
+      transcripts.set(work.threadId, workMessages)
+      const selected = store.messageReply(bot.id, ids[1])
+      expect(selected).toEqual(main[1])
+      expect(() => store.messageReply(other.id, ids[1])).toThrow("原消息已不可用")
+      const task = store.enqueue({
+        botId: bot.id,
+        requestId: "middle-reply",
+        replyToId: selected.id,
+        message: formatBotMessageReply("check", selected)
+      })
+      expect(parseBotMessageReply(task.message)?.reply).toEqual(main[1])
+      expect(task.origin).toEqual({
+        kind: "user",
+        replyTo: { id: ids[1], ordinal: 3, role: "assistant" }
+      })
+      expect(() =>
+        store.enqueue({
+          botId: bot.id,
+          workId: work.id,
+          requestId: "wrong-scope",
+          replyToId: selected.id,
+          message: formatBotMessageReply("check", selected)
+        })
+      ).toThrow("引用与原消息不一致")
+      const restored = createStore()
+      expect(restored.messageReply(bot.id, ids[1])).toEqual(main[1])
+      expect(restored.getTask(task.id).origin).toEqual(task.origin)
+      const selectedWork = restored.messageReply(bot.id, ids[1], work.id)
+      expect(selectedWork).toEqual(workMessages[1])
+      const workTask = restored.enqueue({
+        botId: bot.id,
+        workId: work.id,
+        requestId: "work-middle-reply",
+        replyToId: selectedWork.id,
+        message: formatBotMessageReply("check work", selectedWork)
+      })
+      expect(parseBotMessageReply(workTask.message)?.reply).toEqual(workMessages[1])
+      expect(workTask.origin).toEqual(task.origin)
+    } finally {
+      raw.close()
+    }
+  })
+
   it("preserves browser, attachments and trailing skill bytes around bounded quoted data", () => {
     const reply = {
       id: "original",

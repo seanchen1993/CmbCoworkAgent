@@ -1,5 +1,6 @@
 import { BotError, type BotClient } from "../../../shared/bots/contracts"
 import { botWorkBrowserScope, type BotWorkItem } from "../../../shared/bots/work"
+import type { BotReactionTarget } from "../../../shared/bots/message-reactions"
 
 /** The original beta client and ChatContainer retain their behavior, bound to one real target. */
 export function botWorkClient(client: BotClient, work: BotWorkItem): BotClient {
@@ -9,6 +10,12 @@ export function botWorkClient(client: BotClient, work: BotWorkItem): BotClient {
   const browser = (botId: string) => {
     owner(botId)
     return botWorkBrowserScope(work.id, work.botId)
+  }
+  const reactionTarget = (target: BotReactionTarget): BotReactionTarget => {
+    if (target.kind !== "bot" || target.botId !== work.botId ||
+      (target.workId !== undefined && target.workId !== work.id))
+      throw new BotError("INVALID_INPUT", "工作会话目标不一致")
+    return { kind: "bot", botId: work.botId, workId: work.id }
   }
   return {
     ...client,
@@ -35,6 +42,10 @@ export function botWorkClient(client: BotClient, work: BotWorkItem): BotClient {
       owner(botId)
       return client.messageReply(botId, messageId, work.id)
     },
+    messageReactions: (target, messageIds) =>
+      client.messageReactions(reactionTarget(target), messageIds),
+    setMessageReaction: (target, messageId, emoji, present) =>
+      client.setMessageReaction(reactionTarget(target), messageId, emoji, present),
     stopConversation: (botId, groupId) => {
       owner(botId, groupId)
       return client.stopConversation(botId, undefined, work.id)
@@ -77,7 +88,12 @@ export function botWorkClient(client: BotClient, work: BotWorkItem): BotClient {
     },
     browserPreview: (botId, pageId) => client.browserPreview(browser(botId), pageId),
     takeOverBrowser: (botId, pageId) => client.takeOverBrowser(browser(botId), pageId),
-    giveBackBrowser: (botId, generation) => client.giveBackBrowser(browser(botId), generation),
-    navigateBrowser: (botId, pageId, url) => client.navigateBrowser(browser(botId), pageId, url)
+    giveBackBrowser: (botId, generation, outcome) =>
+      outcome === undefined
+        ? client.giveBackBrowser(browser(botId), generation)
+        : client.giveBackBrowser(browser(botId), generation, outcome),
+    navigateBrowser: (botId, pageId, url) => client.navigateBrowser(browser(botId), pageId, url),
+    operateBrowser: (botId, action, generation) =>
+      client.operateBrowser(browser(botId), action, generation)
   }
 }

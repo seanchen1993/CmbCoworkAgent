@@ -26,6 +26,8 @@ function fixture() {
     "open",
     "requestReceipts",
     "messageReply",
+    "messageReactions",
+    "setMessageReaction",
     "stopConversation",
     "messageOrigins",
     "exchange",
@@ -39,7 +41,8 @@ function fixture() {
     "browserPreview",
     "takeOverBrowser",
     "giveBackBrowser",
-    "navigateBrowser"
+    "navigateBrowser",
+    "operateBrowser"
   ]
   const client = Object.fromEntries(
     methods.map((name) => [name, vi.fn(async () => undefined)])
@@ -65,6 +68,14 @@ describe("original beta client bound to a work", () => {
     expect(client.requestReceipts).toHaveBeenCalledWith(work.botId, [], work.id)
     await scoped.messageReply(work.botId, "message")
     expect(client.messageReply).toHaveBeenCalledWith(work.botId, "message", work.id)
+    await scoped.messageReactions({ kind: "bot", botId: work.botId }, ["message"])
+    expect(client.messageReactions).toHaveBeenCalledWith(
+      { kind: "bot", botId: work.botId, workId: work.id }, ["message"]
+    )
+    await scoped.setMessageReaction({ kind: "bot", botId: work.botId }, "message", "👍", true)
+    expect(client.setMessageReaction).toHaveBeenCalledWith(
+      { kind: "bot", botId: work.botId, workId: work.id }, "message", "👍", true
+    )
     await scoped.stopConversation(work.botId)
     expect(client.stopConversation).toHaveBeenCalledWith(work.botId, undefined, work.id)
     await scoped.messageOrigins(work.botId, ["m"])
@@ -85,6 +96,11 @@ describe("original beta client bound to a work", () => {
     expect(client.exportFile).toHaveBeenCalledWith(work.botId, "report.md", undefined, work.id)
     await scoped.browserPreview(work.botId)
     expect(client.browserPreview).toHaveBeenCalledWith("work-work-a--bot-a", undefined)
+    await scoped.giveBackBrowser(work.botId, 7, "skipped")
+    expect(client.giveBackBrowser).toHaveBeenCalledWith("work-work-a--bot-a", 7, "skipped")
+    const action = { action: "reload" as const, pageId: "page-a" }
+    await scoped.operateBrowser(work.botId, action, 7)
+    expect(client.operateBrowser).toHaveBeenCalledWith("work-work-a--bot-a", action, 7)
   })
   it("refuses crossed identities and mismatched replies before consuming a draft", async () => {
     const { client, scoped } = fixture()
@@ -93,6 +109,12 @@ describe("original beta client bound to a work", () => {
     )
     expect(() => scoped.listFiles(work.botId, undefined, "group")).toThrow("目标")
     expect(() => scoped.takeOverBrowser("other")).toThrow("目标")
+    expect(() => scoped.operateBrowser("other", { action: "new" }, 7)).toThrow("目标")
+    expect(client.operateBrowser).not.toHaveBeenCalled()
+    expect(() => scoped.messageReactions({ kind: "group", groupId: "g" }, ["m"])).toThrow("目标")
+    expect(() => scoped.setMessageReaction({ kind: "bot", botId: work.botId, workId: "other" }, "m", "👍", true)).toThrow("目标")
+    expect(() => scoped.messageReactions({ kind: "bot", botId: "other" }, ["m"])).toThrow("目标")
+    expect(client.setMessageReaction).not.toHaveBeenCalled()
     vi.mocked(client.send).mockResolvedValue({ threadId: "main-a", workId: work.id } as BotTask)
     await expect(
       scoped.send({ botId: work.botId, requestId: "r", message: "Edit" })

@@ -19,14 +19,112 @@ import {
   createBotScheduleTools,
   createBotBrowserTools,
   createBotDeliveryTools,
+  createBotReactionTools,
   createBotProfileTools,
   createBotCollaborationTools
 } from "./tools"
 import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
 import { BotBrowserActionError, type BotBrowserService } from "./browser"
-import { ToolMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { convertToOpenAITool } from "@langchain/core/utils/function_calling"
 import { filterTaskSubagentTools } from "../agent/runtime-tool-catalog"
+import {
+  createTurnCompletionGateMiddleware,
+  clearTurnCompletionGateState
+} from "../agent/turn-completion-integrity"
+
+it("persists only the parent Bot's current user reaction and returns its real receipt", async () => {
+  const update = { revision: 4, item: { messageId: "actual-user", canReact: true, reactions: [] } }
+  const write = vi.fn(() => update)
+  const host = { setBotMessageReaction: write } as unknown as LocalBotHost
+  const [react] = createBotReactionTools("live-task", () => host, new AbortController().signal)
+  expect(filterTaskSubagentTools([react])).toEqual([])
+  const call = {
+    type: "tool_call" as const,
+    id: "reaction-call",
+    name: react.name,
+    args: { emoji: "👍", present: true }
+  }
+  const child = await react.invoke(call, {
+    configurable: { cmb_subagent_owner_tool_call_id: "child" }
+  })
+  expect(child.status).toBe("error")
+  expect(write).not.toHaveBeenCalled()
+  await expect(react.invoke({ ...call, args: { ...call.args, actor: "user" } })).rejects.toThrow()
+  expect(write).not.toHaveBeenCalled()
+  const result = await react.invoke(call)
+  expect(write).toHaveBeenCalledExactlyOnceWith("live-task", "👍", true)
+  expect(result.content).toBe("Your 👍 reaction is present on the current user message.")
+  expect((await react.invoke(call)).content).toBe(result.content)
+  const removed = await react.invoke({
+    ...call,
+    id: "remove",
+    args: { emoji: "❤", present: false }
+  })
+  expect(removed.content).toBe("Your ❤️ reaction is absent on the current user message.")
+  expect(write).toHaveBeenLastCalledWith("live-task", "❤", false)
+  write.mockImplementationOnce(() => {
+    throw new Error("source is no longer current")
+  })
+  expect((await react.invoke({ ...call, id: "rejected" })).status).toBe("error")
+})
+
+it("retains the ordinary empty-final and unfinished-todo checks after a real reaction", async () => {
+  const [react] = createBotReactionTools(
+    "task",
+    () =>
+      ({
+        setBotMessageReaction: () => ({
+          revision: 1,
+          item: { messageId: "user", canReact: true, reactions: [] }
+        })
+      }) as unknown as LocalBotHost,
+    new AbortController().signal
+  )
+  const receipt = await react.invoke({
+    type: "tool_call",
+    id: "react",
+    name: react.name,
+    args: { emoji: "👍", present: true }
+  })
+  const gate = createTurnCompletionGateMiddleware({ ownerRunToken: "reaction-protection" })
+  const after = gate.afterModel
+  const hook = typeof after === "function" ? after : after?.hook
+  expect(hook).toBeTypeOf("function")
+  const prior = [
+    new HumanMessage({ id: "user", content: "Calculate23+41 and react" }),
+    new AIMessage({
+      content: "",
+      tool_calls: [{ id: "react", name: react.name, args: { emoji: "👍", present: true } }]
+    }),
+    receipt
+  ]
+  try {
+    const empty = await Reflect.apply(hook!, undefined, [
+      {
+        messages: [
+          ...prior,
+          new AIMessage({ content: "", response_metadata: { finish_reason: "stop" } })
+        ]
+      },
+      { configurable: { thread_id: "reaction-protection" } }
+    ])
+    expect(empty).toMatchObject({ jumpTo: "model" })
+    const pending = await Reflect.apply(hook!, undefined, [
+      {
+        messages: [
+          ...prior,
+          new AIMessage({ content: "64", response_metadata: { finish_reason: "stop" } })
+        ],
+        todos: [{ content: "Required work", status: "in_progress" }]
+      },
+      { configurable: { thread_id: "reaction-protection" } }
+    ])
+    expect(pending).toMatchObject({ jumpTo: "model" })
+  } finally {
+    clearTurnCompletionGateState("reaction-protection", "reaction-protection")
+  }
+})
 
 it("keeps persistent Bot identity and coordination with the parent, including direct child calls", async () => {
   const updateOwnProfile = vi.fn(() => ({ name: "Changed", changes: {} }))
@@ -496,11 +594,12 @@ it("publishes a group summary or empty content only after every attachment is ve
   }
 })
 
-it("keeps private and internal file tools on their original files-only schema", async () => {
-  const workspace = await mkdtemp(join(tmpdir(), "bot-private-content-"))
-  try {
-    await writeFile(join(workspace, "report.md"), "Private file")
-    for (const publicGroup of [undefined, false]) {
+it.each([undefined, false])(
+  "keeps private and internal file tools on their files-only schema (publicGroup=%s)",
+  async (publicGroup) => {
+    const workspace = await mkdtemp(join(tmpdir(), "bot-private-content-"))
+    try {
+      await writeFile(join(workspace, "report.md"), "Private file")
       const publish = vi.fn()
       const [deliver] = createBotDeliveryTools(
         workspace,
@@ -512,21 +611,36 @@ it("keeps private and internal file tools on their original files-only schema", 
       const schema = deliver.schema as { shape: Record<string, unknown> }
       expect(Object.keys(schema.shape)).toEqual(["files"])
       expect(deliver.description).not.toContain("optional content")
+      for (const extra of [
+        { groupId: "1a252c54-7b11-4f60-a4a8-b99b4f606602" },
+        { content: "Must not become a public summary" }
+      ]) {
+        await expect(
+          deliver.invoke({
+            type: "tool_call",
+            id: "private-invalid-file",
+            name: deliver.name,
+            args: { files: ["report.md"], ...extra }
+          })
+        ).rejects.toThrow()
+        expect(publish).not.toHaveBeenCalled()
+        expect(await readdir(workspace)).toEqual(["report.md"])
+      }
       const result = await deliver.invoke({
         type: "tool_call",
         id: "private-file",
         name: deliver.name,
-        args: { files: ["report.md"], content: "Must not become a public summary" }
+        args: { files: ["report.md"] }
       })
       expect(publish).toHaveBeenCalledExactlyOnceWith(
         parseBotFileDelivery(result.content),
         "private-file"
       )
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
     }
-  } finally {
-    await rm(workspace, { recursive: true, force: true })
   }
-})
+)
 
 it("imports only host-verified files from this exact peer handoff, preserving originals and cancellation", async () => {
   const root = await mkdtemp(join(tmpdir(), "bot-peer-delivery-"))
@@ -554,6 +668,16 @@ it("imports only host-verified files from this exact peer handoff, preserving or
         name: deliver.name,
         args: { files }
       })
+    await expect(
+      deliver.invoke({
+        type: "tool_call",
+        id: "peer-wrong-destination",
+        name: deliver.name,
+        args: { files: [report], groupId: "1a252c54-7b11-4f60-a4a8-b99b4f606602" }
+      })
+    ).rejects.toThrow()
+    expect(publish).not.toHaveBeenCalled()
+    expect(await readdir(workspace)).toEqual([])
     // Reject the whole selection before importing the eligible first item.
     expect((await call([report, privateFile])).status).toBe("error")
     expect(await readdir(workspace)).toEqual([])

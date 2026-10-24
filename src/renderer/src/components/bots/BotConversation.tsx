@@ -4,7 +4,7 @@ import { CircleAlert, Loader2, X } from "lucide-react"
 import { toast } from "sonner"
 import { ChatContainer, type ManagedChatTurn } from "@/components/chat/ChatContainer"
 import { useAppStore } from "@/lib/store"
-import { useThreadContext } from "@/lib/thread-context"
+import { useThreadContext, useThreadStateSelector } from "@/lib/thread-context"
 import { botErrorMessage } from "@/lib/bot-error-message"
 import { bindBotConversationDraft } from "@/lib/bot-conversation-draft"
 import { BotDraftSender, validateBotDraft } from "@/lib/bot-draft-sender"
@@ -12,6 +12,7 @@ import {
   BOT_REQUEST_RECEIPT_LIMIT,
   botTaskAcceptsUserInput,
   type BotDefinition,
+  type BotGroup,
   type BotClient,
   type BotSchedule,
   type BotTask
@@ -20,30 +21,52 @@ import type { BotWorkItem } from "../../../../shared/bots/work"
 import { botTaskPreview } from "@/lib/bot-task-view"
 import { BotConversationTools } from "./BotConversationTools"
 import { BotMessageFilePreview } from "./BotMessageFilePreview"
+import { BotMessageReactionsProvider } from "./BotMessageReactions"
 const active = (task: BotTask) => task.state === "running" || task.state === "waiting_user"
 
 export function BotConversation({
   bot,
   work,
   bots,
+  groups = [],
   schedules,
   tasks,
   backgroundBusy,
   client,
   onConfigureModel,
-  onOpenWork
+  onOpenWork,
+  onOpenBot,
+  onOpenGroup
 }: {
   bot: BotDefinition
   work?: BotWorkItem | null
   bots: BotDefinition[]
+  groups?: readonly BotGroup[]
   schedules: BotSchedule[]
   tasks: BotTask[]
   backgroundBusy: boolean
   client: BotClient
   onConfigureModel?(): void
   onOpenWork(workId: string): void
+  onOpenBot?(botId: string): void
+  onOpenGroup?(groupId: string): void
 }) {
+  const mentionGroups = useMemo(
+    () => groups.filter(
+      (group) => !group.deleting && group.hostId === bot.hostId && group.memberIds.includes(bot.id)
+    ),
+    [groups, bot.hostId, bot.id]
+  )
   const threadId = work?.threadId ?? bot.threadId
+  const reactionIdsKey = useThreadStateSelector(threadId, (state) =>
+    JSON.stringify(
+      state.messages
+        .filter((message) => message.role === "user" || message.role === "assistant")
+        .map((message) => message.id)
+    )
+  )
+  // The host rejects unpersisted rows; task completion refreshes the same IDs.
+  const reactionIds = useMemo(() => JSON.parse(reactionIdsKey ?? "[]") as string[], [reactionIdsKey])
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [draftStorageError, setDraftStorageError] = useState<string | null>(null)
@@ -203,11 +226,15 @@ export function BotConversation({
           </button>
         </div>
       )}
+      <BotMessageReactionsProvider client={client} target={{ kind: "bot", botId: bot.id, ...(work ? { workId: work.id } : {}) }} messageIds={reactionIds} enabled={!work?.source} refreshKey={`${running?.id ?? ""}:${running?.state ?? "idle"}`}>
       <BotConversationTools
         client={client}
         botId={bot.id}
         conversationThreadId={threadId}
         onOpenWork={onOpenWork}
+        onOpenBot={onOpenBot}
+        onOpenGroup={onOpenGroup}
+        groups={mentionGroups}
         tasks={tasks}
         bots={bots}
         schedules={schedules}
@@ -225,6 +252,7 @@ export function BotConversation({
           }
         />
       </BotConversationTools>
+      </BotMessageReactionsProvider>
       <BotMessageFilePreview botId={bot.id} threadId={threadId} name={bot.name} client={client} />
     </>
   )

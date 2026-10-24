@@ -1,0 +1,12 @@
+Emoji catalog source: emojibase-data 17.0.0 (Unicode Emoji 17.0, CLDR 48).
+Official package: https://registry.npmjs.org/emojibase-data/17.0.0
+Tarball: https://registry.npmjs.org/emojibase-data/-/emojibase-data-17.0.0.tgz
+Verified npm integrity: sha512-Yvgb5AWoHViHV/gq1qr5ZAarcBip+B27/ZLRsUJkbgAEaLlZ/fof9g882LTpmEpyhBNEC0m2SEmItljHsTygjA==
+Official source: https://github.com/milesj/emojibase
+The four JSON files preserve the official package's English compact, messages,
+shortcodes/iamcal and shortcodes/emojibase data (JSON reserialized as UTF-8).
+MIT terms: LICENSE-MIT.txt. Unicode/CLDR terms: LICENSE-UNICODE.txt.
+The shared reaction-emoji-native.json is derived from compact.json: exclude
+unassigned/component groups; expand skin variants; remove redundant FE0F only
+after Emoji_Presentation characters; deduplicate. It contains 3944 native strings.
+No application code, Sentry instrumentation, or assets from Grok are included.

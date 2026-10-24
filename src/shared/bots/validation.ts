@@ -13,6 +13,8 @@ import {
   type BotGroupHistoryCursor,
   type SendBotGroupMessageInput
 } from "./contracts"
+import { isBotThreadMessageId } from "./message-reply"
+import { parseBotMessageMentions } from "./message-mentions"
 
 function record(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -140,12 +142,18 @@ export function parseUpdateBot(input: unknown): UpdateBotInput {
 
 export function parseSendBotMessage(input: unknown): SendBotMessageInput {
   const item = record(input)
+  if (item.replyToId !== undefined && !isBotThreadMessageId(item.replyToId))
+    throw new BotError("INVALID_INPUT", "引用消息标识无效")
+  const message = boundedString(item.message, "消息", 64_000)
+  const leading = (item.message as string).length - (item.message as string).trimStart().length
+  const mentions = parseBotMessageMentions(message, item.mentions, leading)
   return {
     botId: botIdentifier(item.botId),
     requestId: botIdentifier(item.requestId),
-    message: boundedString(item.message, "消息", 64_000),
+    message,
     ...(item.workId == null ? {} : { workId: botIdentifier(item.workId) }),
-    ...(item.replyToId !== undefined ? { replyToId: botIdentifier(item.replyToId) } : {})
+    ...(item.replyToId !== undefined ? { replyToId: item.replyToId as string } : {}),
+    ...(mentions.length ? { mentions } : {})
   }
 }
 

@@ -18,6 +18,7 @@ const fixture = vi.hoisted(() => ({
   create: vi.fn(),
   preview: vi.fn(),
   giveBack: vi.fn(),
+  operateBrowser: vi.fn(),
   browserScope: vi.fn((id: string) => {
     if (id === "group-missing") throw new Error("群聊不存在")
     return id
@@ -27,6 +28,8 @@ const fixture = vi.hoisted(() => ({
   exchangeHistory: vi.fn(),
   messageOrigins: vi.fn(),
   messageReply: vi.fn(),
+  messageReactions: vi.fn(),
+  setMessageReaction: vi.fn(),
   requestReceipts: vi.fn(),
   stopConversation: vi.fn(),
   markUnread: vi.fn(),
@@ -55,6 +58,7 @@ vi.mock("../bots/local-service", () => ({
   }),
   getBotBrowserService: () => ({
     giveBack: fixture.giveBack,
+    operateAsHuman: fixture.operateBrowser,
     preview: fixture.preview,
     removeBot: fixture.removeBot,
     removeGroup: fixture.removeBrowserGroup
@@ -81,6 +85,22 @@ beforeEach(() => {
   fixture.getHost.mockImplementation(() => fixture)
 })
 describe("Bot IPC boundaries", () => {
+  it("validates scoped reaction identity, full catalog emoji and explicit idempotent state", () => {
+    const call = register(), target = { kind: "bot", botId: "a", workId: "work-a" }
+    call("bots:message-reactions", "local", target, ["native:assistant.1"])
+    expect(fixture.messageReactions).toHaveBeenCalledWith(target, ["native:assistant.1"])
+    call("bots:set-message-reaction", "local", target, "native:assistant.1", "❤", false)
+    expect(fixture.setMessageReaction).toHaveBeenCalledWith(target, "native:assistant.1", "❤️", false)
+    fixture.setMessageReaction.mockClear()
+    for (const [scope, id, emoji, present] of [
+      [{ ...target, groupId: "group" }, "m", "👍", true],
+      [{ kind: "group", groupId: "g", threadId: "other" }, "m", "👍", true],
+      [target, "trim ", "👍", true], [target, "m", "👍👍", true], [target, "m", "👍", "false"]
+    ]) expect(() => call("bots:set-message-reaction", "local", scope, id, emoji, present)).toThrow()
+    expect(() => call("bots:message-reactions", "local", target, Array(101).fill("m"))).toThrow()
+    expect(() => call("bots:set-message-reaction", "remote", target, "m", "👍", true)).toThrow("本机")
+    expect(fixture.setMessageReaction).not.toHaveBeenCalled()
+  })
   it("keeps simulation binding authority in a top-level local desktop window and rejects injected source/paths",()=>{
     const frame={},event={senderFrame:frame,sender:{mainFrame:frame}}
     const call=register(undefined,event)
@@ -148,10 +168,15 @@ describe("Bot IPC boundaries", () => {
     const call = register()
     expect(() => call("bots:message-reply", "remote", "bot", "message")).toThrow()
     expect(() => call("bots:message-reply", "local", "../bot", "message")).toThrow()
-    expect(() => call("bots:message-reply", "local", "bot", "other/thread")).toThrow()
+    for (const message of ["", " message", "message\n", "message\u0085", "m".repeat(1025), {}])
+      expect(() => call("bots:message-reply", "local", "bot", message)).toThrow()
+    expect(() => call("bots:message-reply", "local", "bot", "message", "../work")).toThrow()
     expect(fixture.messageReply).not.toHaveBeenCalled()
     call("bots:message-reply", "local", "bot", "message")
     expect(fixture.messageReply).toHaveBeenCalledWith("bot", "message", undefined)
+    const providerId = "provider/response:segment::cmb-same-role-duplicate:assistant:2"
+    call("bots:message-reply", "local", "bot", providerId, "work")
+    expect(fixture.messageReply).toHaveBeenLastCalledWith("bot", providerId, "work")
   })
 
   it("validates exact same-group history targets and retains numeric backward cursors", () => {
@@ -229,6 +254,50 @@ describe("Bot IPC boundaries", () => {
     expect(fixture.giveBack).not.toHaveBeenCalled()
     call("bots:browser:give-back", "local", "a", 3)
     expect(fixture.giveBack).toHaveBeenCalledWith("a", 3)
+    fixture.giveBack.mockClear()
+    for (const outcome of [null, true, "done", "dismissed", {}, []])
+      expect(() => call("bots:browser:give-back", "local", "a", 3, outcome)).toThrow("方式")
+    expect(fixture.giveBack).not.toHaveBeenCalled()
+    expect(() => call("bots:browser:give-back", "local", "a", undefined, "skipped")).toThrow("控制版本")
+    call("bots:browser:give-back", "local", "a", 3, "skipped")
+    expect(fixture.giveBack).toHaveBeenCalledWith("a", 3, "skipped")
+  })
+  it("validates human browser operations and their exact scope, target and lease before forwarding", () => {
+    const call = register()
+    const reload = { action: "reload", pageId: "page-a" }
+    for (const generation of [undefined, null, -1, 1.5, NaN, Infinity, "3", Number.MAX_SAFE_INTEGER + 1])
+      expect(() => call("bots:browser:operate", "local", "a", reload, generation)).toThrow("版本")
+    for (const input of [
+      undefined,
+      null,
+      [],
+      "reload",
+      {},
+      { action: "execute", pageId: "page-a" },
+      { action: "reload" },
+      { action: "reload", pageId: null },
+      { action: "reload", pageId: "../../private" },
+      { action: "new", pageId: "page-a" },
+      { ...reload, url: "https://example.test" },
+      { ...reload, generation: 3 },
+      { ...reload, botId: "other" }
+    ])
+      expect(() => call("bots:browser:operate", "local", "a", input, 3)).toThrow()
+    expect(() => call("bots:browser:operate", "remote", "a", reload, 3)).toThrow("本机")
+    expect(() => call("bots:browser:operate", "local", "../a", reload, 3)).toThrow()
+    expect(() => call("bots:browser:operate", "local", "group-missing", reload, 3)).toThrow("不存在")
+    expect(fixture.operateBrowser).not.toHaveBeenCalled()
+    for (const action of ["back", "forward", "reload", "close"])
+      call("bots:browser:operate", "local", "group-g--a", { action, pageId: "page-a" }, 3)
+    call("bots:browser:operate", "local", "a", { action: "new" }, 3)
+    expect(fixture.operateBrowser.mock.calls).toEqual([
+      ...["back", "forward", "reload", "close"].map((action) => [
+        "group-g--a",
+        { action, pageId: "page-a" },
+        3
+      ]),
+      ["a", { action: "new" }, 3]
+    ])
   })
   it("bounds and validates transcript origin lookups", () => {
     const call = register()

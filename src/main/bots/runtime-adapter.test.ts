@@ -9,6 +9,7 @@ import type {
   BotTask
 } from "../../shared/bots/contracts"
 import { BotError } from "../../shared/bots/contracts"
+import { BOT_BROWSER_PROMPT_PREFIX } from "../../shared/user-input-transport"
 import type { AgentRunExecutionContext } from "../agent/agent-run-service"
 import type { LocalBotHost } from "./host"
 import type { BotMemoryService } from "./memory"
@@ -24,6 +25,22 @@ import { botContinuationMessageId, type BotStoppedTaskContext } from "./continua
 
 const fixture = vi.hoisted(() => ({
   getBot: vi.fn<(id: string) => BotDefinition>(),
+  groupReference: vi.fn<
+    (
+      groupId: string,
+      botId: string
+    ) => {
+      id: string
+      currentName: string
+      botMembers: Array<{ id: string; currentName: string }>
+    }
+  >(),
+  workToolSource: vi.fn<() => BotTask>(),
+  hasDirectUserRequest: vi.fn<() => boolean>(),
+  setBotMessageReaction: vi.fn(() => ({
+    revision: 1,
+    item: { messageId: "request", canReact: true, reactions: [] }
+  })),
   directory: vi.fn((_root: string, _kind: string, id: string) => `/synthetic/workspaces/${id}`),
   thread: vi.fn(),
   realpath: vi.fn(),
@@ -63,6 +80,7 @@ const fixture = vi.hoisted(() => ({
   cancelCommandIds: vi.fn(),
   commandLifecycle: vi.fn(() => ({ accepted: vi.fn(), settled: vi.fn() })),
   profileContinuation: vi.fn<() => string | null>(() => null),
+  commandUserRequest: vi.fn<() => BotTask | null>(() => null),
   groupCheckpoint: vi.fn<() => string | undefined>(() => undefined),
   continuationFiles: vi.fn<() => BotDeliveredFile[]>(() => []),
   commandResults: vi.fn<() => Record<string, unknown>[]>(() => []),
@@ -170,7 +188,8 @@ vi.mock("../agent/workflow/run-manager", () => ({
 vi.mock("../mcp/capability-service", () => ({ getGlobalMcpCapabilityService: () => ({}) }))
 vi.mock("./mcp-scope", () => ({ createBotMcpScope: () => fixture.scope }))
 vi.mock("../services/notify", () => ({ notifyIfBackground: fixture.notify }))
-vi.mock("./tools", () => ({
+vi.mock("./tools", async (importOriginal) => ({
+  createBotReactionTools: (await importOriginal<typeof import("./tools")>()).createBotReactionTools,
   createBotProfileTools: fixture.profileTools,
   createBotMemoryTools: fixture.memoryTools,
   createBotBrowserTools: fixture.browserTools,
@@ -212,6 +231,10 @@ function port(linked?: BotWorkItem, mock?: BotMockExecution) {
     () =>
       ({
         getBot: fixture.getBot,
+        getGroupReference: fixture.groupReference,
+        workToolSource: fixture.workToolSource,
+        hasDirectUserRequest: fixture.hasDirectUserRequest,
+        setBotMessageReaction: fixture.setBotMessageReaction,
         getWork: () => linked,
         mockExecution: () => mock,
         initializeMockThread: () => {},
@@ -219,6 +242,7 @@ function port(linked?: BotWorkItem, mock?: BotMockExecution) {
         onSteeringReady: fixture.steeringReady,
         commandLifecycle: fixture.commandLifecycle,
         profileContinuationRequest: fixture.profileContinuation,
+        commandUserRequest: fixture.commandUserRequest,
         taskCheckpoint: fixture.groupCheckpoint,
         continuationFiles: fixture.continuationFiles,
         continuationCommandResults: fixture.commandResults,
@@ -246,7 +270,16 @@ function metadata(groupId?: string) {
 }
 beforeEach(() => {
   vi.clearAllMocks()
+  fixture.groupReference.mockReset().mockImplementation((id) => ({
+    id,
+    currentName: "Current group",
+    botMembers: [{ id: bot.id, currentName: bot.name }]
+  }))
   fixture.getBot.mockImplementation((id) => ({ ...bot, id }))
+  fixture.workToolSource
+    .mockReset()
+    .mockReturnValue({ ...task, state: "running", origin: { kind: "introduction" } })
+  fixture.hasDirectUserRequest.mockReset().mockReturnValue(false)
   fixture.directory.mockImplementation((_root, _kind, id) => `/synthetic/workspaces/${id}`)
   fixture.realpath.mockReset().mockImplementation(() => {
     throw new Error("Missing synthetic path")
@@ -267,6 +300,7 @@ beforeEach(() => {
   fixture.workerPersisting.mockReturnValue(false)
   fixture.memoryEnabled = true
   fixture.profileContinuation.mockReturnValue(null)
+  fixture.commandUserRequest.mockReset().mockReturnValue(null)
   fixture.groupCheckpoint.mockReset().mockReturnValue(undefined)
   fixture.commandResults.mockReset().mockReturnValue([])
   fixture.continuationFiles.mockReset().mockReturnValue([])
@@ -294,6 +328,241 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
+  it.each(["user", "introduction"] as const)(
+    "offers a parent-only private reaction and preserves original completion for %s",
+    async (kind) => {
+      fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+        const react = context.additionalTools?.find(
+          (entry) => entry.name === "bot_react_to_message"
+        )
+        expect(react).toBeDefined()
+        await react!.invoke({
+          type: "tool_call",
+          id: "react",
+          name: react!.name,
+          args: { emoji: "👍", present: true }
+        })
+        expect(context.checkFinalDelivery).toBeUndefined()
+        context.onFinalAssistant?.({ messageId: "normal-final", finalText: "Reaction added." })
+        context.onRunTerminated?.({ outcome: "success", code: "done" })
+        return { completion: Promise.resolve() }
+      })
+      expect(
+        await port()
+          .acquire(bot, { ...task, origin: { kind } })!
+          .execute(new AbortController().signal, vi.fn())
+      ).toEqual({ state: "completed", result: "Reaction added." })
+      expect(fixture.setBotMessageReaction).toHaveBeenCalledExactlyOnceWith(task.id, "👍", true)
+    }
+  )
+
+  it("publishes an explicitly targeted group message without replacing the private final result", async () => {
+    const groupId = "28661550-76ec-4b27-928b-21a04de8b087"
+    fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+      const send = context.additionalTools?.find((entry) => entry.name === "bot_send_message")
+      expect(send).toBeDefined()
+      await send!.invoke({
+        type: "tool_call",
+        id: "private-publication",
+        name: "bot_send_message",
+        args: { groupId, content: "Public group notice" }
+      })
+      context.onFinalAssistant?.({ messageId: "private-final", finalText: "Posted to the group." })
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    const result = await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
+    expect(fixture.publishMessage).toHaveBeenCalledExactlyOnceWith(
+      task.id,
+      "private-publication",
+      "Public group notice",
+      groupId
+    )
+    expect(result).toEqual({ state: "completed", result: "Posted to the group." })
+    expect(fixture.summary).toHaveBeenCalledWith(
+      expect.objectContaining({ conversation: "USER:\nWork\n\nASSISTANT:\nPosted to the group." })
+    )
+  })
+
+  it.each<BotTask["origin"]>([
+    { kind: "schedule", scheduleId: "routine" },
+    { kind: "bot", fromBotId: "peer", rootTaskId: "root", depth: 1, expectsReply: true },
+    { kind: "notification", notificationKind: "workflow", key: "workflow" },
+    { kind: "notification", notificationKind: "command", key: "unlinked-command" }
+  ])("does not offer private-to-group publication to an unlinked $kind source", async (origin) => {
+    await port()
+      .acquire(bot, { ...task, origin })!
+      .execute(new AbortController().signal, vi.fn())
+    expect(
+      fixture.start.mock.calls[0][2].additionalTools?.some(
+        (entry) => entry.name === "bot_send_message"
+      )
+    ).toBe(false)
+    expect(fixture.publishMessage).not.toHaveBeenCalled()
+  })
+
+  it("retains group publication on an exact user-linked command continuation", async () => {
+    const groupId = "28661550-76ec-4b27-928b-21a04de8b087"
+    const original = "@本群 Wait for the command, then post its result to my selected group."
+    fixture.profileContinuation.mockReturnValue(original)
+    fixture.commandUserRequest.mockReturnValue({
+      ...task,
+      message: original,
+      state: "completed",
+      origin: {
+        kind: "user",
+        mentions: [{ kind: "group", groupId, label: "本群", start: 0, end: 3 }]
+      }
+    })
+    fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+      const send = context.additionalTools?.find((entry) => entry.name === "bot_send_message")
+      expect(send).toBeDefined()
+      expect(context.extraSystemPrompt).toContain(groupId)
+      await send!.invoke({
+        type: "tool_call",
+        id: "linked-group-post",
+        name: "bot_send_message",
+        args: { groupId, content: "Verified command result" }
+      })
+      context.onFinalAssistant?.({ messageId: "receipt", finalText: "Posted verified result." })
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    await port()
+      .acquire(bot, {
+        ...task,
+        origin: { kind: "notification", notificationKind: "command", key: "linked-command" }
+      })!
+      .execute(new AbortController().signal, vi.fn())
+    const [request, , context] = fixture.start.mock.calls[0]
+    expect(context.additionalTools?.some((entry) => entry.name === "bot_send_message")).toBe(true)
+    expect(request.message).toContain("post its result to my selected group")
+    expect(request.message).not.toContain("Continue only profile changes")
+    expect(fixture.groupReference).toHaveBeenCalledExactlyOnceWith(groupId, task.botId)
+    expect(fixture.publishMessage).toHaveBeenCalledExactlyOnceWith(
+      task.id,
+      "linked-group-post",
+      "Verified command result",
+      groupId
+    )
+  })
+
+  it("requires a real choice after the current empty-role introduction greeting", async () => {
+    const emptyRole = { ...bot, instructions: "" }
+    fixture.getBot.mockReturnValue(emptyRole)
+    fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+      expect(context.checkFinalDelivery).toBeTypeOf("function")
+      expect(
+        context.checkFinalDelivery([
+          new HumanMessage({ id: task.requestId, content: "开始聊天" }),
+          new AIMessage("你好！我是 EJ-隔离A，随时可以开始。有什么想让我做的？")
+        ])
+      ).toContain("request_user_input")
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    await port()
+      .acquire(emptyRole, { ...task, message: "开始聊天", origin: { kind: "introduction" } })!
+      .execute(new AbortController().signal, vi.fn())
+  })
+  it.each([
+    "consumed-user",
+    "archived",
+    "deleting",
+    "role-changed",
+    "cancelled-task",
+    "foreign-task",
+    "foreign-lease",
+    "host-stopped",
+    "aborted"
+  ])("stops enforcing the introduction when its authority changes: %s", async (change) => {
+    const emptyRole = { ...bot, instructions: "" }
+    const controller = new AbortController()
+    fixture.getBot.mockReturnValue(emptyRole)
+    fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+      const messages = [
+        new HumanMessage({ id: task.requestId, content: "开始聊天" }),
+        new AIMessage("你好！")
+      ]
+      expect(context.checkFinalDelivery!(messages)).toContain("request_user_input")
+      if (change === "consumed-user") fixture.hasDirectUserRequest.mockReturnValue(true)
+      if (change === "archived") fixture.getBot.mockReturnValue({ ...emptyRole, archived: true })
+      if (change === "deleting") fixture.getBot.mockReturnValue({ ...emptyRole, deleting: true })
+      if (change === "role-changed")
+        fixture.getBot.mockReturnValue({ ...emptyRole, instructions: "立即执行已经交办的任务" })
+      if (change === "cancelled-task")
+        fixture.workToolSource.mockReturnValue({
+          ...task,
+          state: "cancelled",
+          origin: { kind: "introduction" }
+        })
+      if (change === "foreign-task")
+        fixture.workToolSource.mockReturnValue({
+          ...task,
+          state: "running",
+          botId: "foreign",
+          origin: { kind: "introduction" }
+        })
+      if (change === "foreign-lease")
+        fixture.activeLease.mockReturnValue({
+          threadId: task.threadId,
+          owner: "bot",
+          runId: "new-run",
+          acquiredAt: "2026-10-24T00:00:00Z"
+        })
+      if (change === "host-stopped")
+        fixture.workToolSource.mockImplementation(() => {
+          throw new BotError("STOPPING", "stopped")
+        })
+      if (change === "aborted") controller.abort()
+      expect(context.checkFinalDelivery!(messages)).toBeUndefined()
+      if (change === "consumed-user") {
+        const reminder = context.checkFinalDelivery!([...messages, new AIMessage("")])
+        expect(reminder).toContain("current user request")
+        expect(reminder).not.toContain("request_user_input")
+      }
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    await port()
+      .acquire(emptyRole, { ...task, message: "开始聊天", origin: { kind: "introduction" } })!
+      .execute(controller.signal, vi.fn())
+  })
+  it("does not enforce setup after the real user supersedes the introduction", async () => {
+    const emptyRole = { ...bot, instructions: "" }
+    fixture.getBot.mockReturnValue(emptyRole)
+    const lease = port().acquire(emptyRole, { ...task, origin: { kind: "introduction" } })!
+    fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+      context.onModelRequestState?.(() => true)
+      expect(
+        await lease.steer!({ ...task, id: "real-task", requestId: "real-user" }, () => true)
+      ).toBe(false)
+      expect(
+        context.checkFinalDelivery!([
+          new HumanMessage({ id: task.requestId, content: "开始聊天" }),
+          new AIMessage("处理你的实际任务。")
+        ])
+      ).toBeUndefined()
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    expect(await lease.execute(new AbortController().signal, vi.fn())).toEqual({
+      state: "superseded"
+    })
+  })
+  it.each(["user", "configured-introduction"])(
+    "retains the original completion boundary for %s",
+    async (kind) => {
+      const selectedBot = kind === "user" ? { ...bot, instructions: "" } : bot
+      await port()
+        .acquire(selectedBot, {
+          ...task,
+          origin: { kind: kind === "user" ? "user" : "introduction" }
+        })!
+        .execute(new AbortController().signal, vi.fn())
+      expect(fixture.start.mock.calls[0][2].checkFinalDelivery).toBeUndefined()
+    }
+  )
   it("runs owner IM on the native main thread with text-only capabilities, then preserves desktop capabilities", async () => {
     const source = {
       transport: "im" as const,
@@ -2117,6 +2386,8 @@ describe("Bot Runtime integration", () => {
       userInputWithoutToolLock: true,
       botBrowserToolsOwnFileLock: true,
       additionalTools: [
+        expect.objectContaining({ name: "bot_react_to_message" }),
+        expect.objectContaining({ name: "bot_send_message" }),
         "works",
         "delivery",
         "own-profile",
@@ -3046,5 +3317,123 @@ describe("Bot steering uses the original runtime", () => {
     }
     expect(fixture.steer).not.toHaveBeenCalled()
     expect(fixture.answerQuestion).not.toHaveBeenCalled()
+  })
+})
+
+describe("private Bot selected identity context", () => {
+  it("projects private group identity and Bot members in initial and live-steer context without reading or posting group history", async () => {
+    const input: BotTask = {
+      ...task,
+      message: "@Old check",
+      origin: {
+        kind: "user",
+        mentions: [{ start: 0, end: 4, kind: "group", groupId: "stable-group", label: "Old" }]
+      }
+    }
+    const reference = {
+      id: "stable-group",
+      currentName: "Renamed",
+      botMembers: [
+        { id: bot.id, currentName: bot.name },
+        { id: "peer", currentName: "B" }
+      ]
+    }
+    fixture.groupReference.mockReturnValue(reference)
+    await port().acquire(bot, input)!.execute(new AbortController().signal, vi.fn())
+    const [request, , context] = fixture.start.mock.calls[0]
+    expect(request.message).toBe(input.message)
+    expect(context.extraSystemPrompt).toContain(JSON.stringify({ kind: "group", ...reference }))
+    expect(context.extraSystemPrompt).toContain("Bot members only")
+    expect(context.extraSystemPrompt).toContain("does not send a message or authorize delegation")
+    expect(fixture.groupReference).toHaveBeenCalledWith("stable-group", bot.id)
+    fixture.steer.mockResolvedValue({ queued: true })
+    expect(await port().acquire(bot, task)!.steer!(input, () => true)).toBe(true)
+    const injected = fixture.steer.mock.calls[0][0].message
+    expect(injected.displayContent).toBe(input.message)
+    expect(injected.content).toContain(JSON.stringify({ kind: "group", ...reference }))
+    expect(fixture.publishMessage).not.toHaveBeenCalled()
+    expect(fixture.groupMessages).not.toHaveBeenCalled()
+  })
+  it("keeps unavailable private group IDs instead of substituting a same-name group", async () => {
+    fixture.groupReference.mockImplementation(() => {
+      throw new Error("No longer a member")
+    })
+    const input: BotTask = {
+      ...task,
+      message: "@Old",
+      origin: {
+        kind: "user",
+        mentions: [{ start: 0, end: 4, kind: "group", groupId: "stable-group", label: "Old" }]
+      }
+    }
+    await port().acquire(bot, input)!.execute(new AbortController().signal, vi.fn())
+    expect(fixture.start.mock.calls[0][2].extraSystemPrompt).toContain(
+      JSON.stringify({ kind: "group", id: "stable-group", available: false })
+    )
+    expect(fixture.groupMessages).not.toHaveBeenCalled()
+    expect(fixture.publishMessage).not.toHaveBeenCalled()
+  })
+  const selectedTask = (): BotTask => ({
+    ...task,
+    message: "@Old check",
+    origin: { kind: "user", mentions: [{ start: 0, end: 4, botId: "stable-peer", label: "Old" }] }
+  })
+  it("resolves the current public profile by ID without altering the original user transcript", async () => {
+    fixture.getBot.mockImplementation((id) =>
+      id === "stable-peer"
+        ? {
+            ...bot,
+            id,
+            name: "Renamed",
+            label: "Public role",
+            instructions: "PRIVATE_PEER_INSTRUCTIONS"
+          }
+        : { ...bot, id }
+    )
+    const input = selectedTask()
+    await port().acquire(bot, input)!.execute(new AbortController().signal, vi.fn())
+    const [request, , context] = fixture.start.mock.calls[0]
+    expect(request.message).toBe(input.message)
+    expect(fixture.announce).toHaveBeenCalledWith("t", {
+      id: input.requestId,
+      content: input.message
+    })
+    expect(context.extraSystemPrompt).toContain(
+      JSON.stringify({ id: "stable-peer", currentName: "Renamed", description: "Public role" })
+    )
+    expect(context.extraSystemPrompt).not.toContain("PRIVATE_PEER_INSTRUCTIONS")
+    expect(context.extraSystemPrompt).toContain("does not send a message or authorize delegation")
+    expect(context.extraSystemPrompt).toContain(
+      "never replace an unavailable Bot with a same-name Bot"
+    )
+  })
+  it("marks archived or missing selected IDs unavailable rather than resolving another same-name Bot", async () => {
+    fixture.getBot.mockImplementation((id) =>
+      id === "stable-peer"
+        ? { ...bot, id, name: "Old", archived: true }
+        : { ...bot, id, name: "Old" }
+    )
+    await port().acquire(bot, selectedTask())!.execute(new AbortController().signal, vi.fn())
+    expect(fixture.start.mock.calls[0][2].extraSystemPrompt).toContain(
+      JSON.stringify({ id: "stable-peer", available: false })
+    )
+  })
+  it("steers through the existing model/display boundary while preserving browser and trailing skill transport", async () => {
+    fixture.steer.mockResolvedValue({ queued: true })
+    const input = selectedTask()
+    input.message = BOT_BROWSER_PROMPT_PREFIX + input.message + "\n\n<skill>original</skill>"
+    if (input.origin.kind === "user")
+      input.origin.mentions = input.origin.mentions!.map((mention) => ({
+        ...mention,
+        start: mention.start + BOT_BROWSER_PROMPT_PREFIX.length,
+        end: mention.end + BOT_BROWSER_PROMPT_PREFIX.length
+      }))
+    expect(await port().acquire(bot, task)!.steer!(input, () => true)).toBe(true)
+    const injected = fixture.steer.mock.calls[0][0].message
+    expect(injected.displayContent).toBe(input.message)
+    expect(injected.content).toContain('"id":"stable-peer"')
+    expect(injected.content.startsWith(BOT_BROWSER_PROMPT_PREFIX)).toBe(true)
+    expect(injected.content.endsWith("<skill>original</skill>")).toBe(true)
+    expect(fixture.announce).not.toHaveBeenCalled()
   })
 })

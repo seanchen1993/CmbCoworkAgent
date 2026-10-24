@@ -28,8 +28,10 @@ import {
   ChatExecutionCardCallIdsContext,
   ChatFoldedToolCallsContext,
   ChatToolPresentationContext,
-  ChatMessagePresentationContext
+  ChatMessagePresentationContext,
+  ChatUserTextPresentationContext
 } from "./chat-presentation-context"
+import { BotMessageActions } from "@/components/bots/BotMessageActions"
 import { splitBotInlineReasoning } from "@/lib/bot-inline-reasoning"
 import { botToolResultStatus } from "@/lib/bot-tool-result-status"
 import { isBotExecutionTool } from "@/lib/bot-execution-visibility"
@@ -466,6 +468,7 @@ function MessageBubbleImpl({
   const foldedToolCalls = useContext(ChatFoldedToolCallsContext)
   const presentTool = useContext(ChatToolPresentationContext)
   const presentMessage = useContext(ChatMessagePresentationContext)
+  const presentUserText = useContext(ChatUserTextPresentationContext)
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
   const [copySuccess, setCopySuccess] = useState(false)
@@ -726,7 +729,7 @@ function MessageBubbleImpl({
               data-chat-search-source-start={0}
               data-chat-search-source-end={displayContent.length}
             >
-              {browserContent.visibleText}
+              {presentUserText?.(message, browserContent.visibleText) ?? browserContent.visibleText}
             </span>
           </div>
         )
@@ -881,7 +884,10 @@ function MessageBubbleImpl({
   }
 
   const replyButton =
-    replyActions && (isUser || !isStreaming) && plainTextForCopy.trim() ? (
+    replyActions &&
+    replyActions.canReply !== false &&
+    (isUser || presentation === "bot" || !isStreaming) &&
+    plainTextForCopy.trim() ? (
       <button
         type="button"
         className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
@@ -889,23 +895,28 @@ function MessageBubbleImpl({
         title="回复"
         onClick={() => replyActions.reply(message.id)}
       >
-        <Reply className="size-3" />
+        <Reply className={presentation === "bot" ? "size-4" : "size-3"} />
       </button>
     ) : null
+  // Keep Bot stream content mounted when its reply actions become available.
   const withReplyMenu = (bubble: React.ReactElement) =>
-    replyButton ? (
+    replyButton || (presentation === "bot" && !isUser) ? (
       <ContextMenu>
-        <ContextMenuTrigger asChild>{bubble}</ContextMenuTrigger>
-        <ContextMenuContent data-bot-popup>
-          <ContextMenuItem onSelect={() => replyActions!.reply(message.id)}>
-            <Reply size={15} />
-            回复
-          </ContextMenuItem>
-          <ContextMenuItem onSelect={() => void handleCopyMessage()}>
-            <Copy size={15} />
-            复制
-          </ContextMenuItem>
-        </ContextMenuContent>
+        <ContextMenuTrigger asChild disabled={!replyButton}>
+          {bubble}
+        </ContextMenuTrigger>
+        {replyButton && (
+          <ContextMenuContent data-bot-popup>
+            <ContextMenuItem onSelect={() => replyActions!.reply(message.id)}>
+              <Reply size={15} />
+              回复
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => void handleCopyMessage()}>
+              <Copy size={15} />
+              复制
+            </ContextMenuItem>
+          </ContextMenuContent>
+        )}
       </ContextMenu>
     ) : (
       bubble
@@ -987,53 +998,151 @@ function MessageBubbleImpl({
                 {userSendTimeLabel}
               </time>
             )}
-            <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-              {replyButton}
-              <button
-                type="button"
-                onClick={handleCopyMessage}
-                className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-                title="复制消息"
-                aria-label="复制消息"
-              >
-                {copySuccess ? (
-                  <Check className="size-3 text-status-nominal" />
-                ) : (
-                  <Copy className="size-3" />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  replyActions?.setDraftReply(quotedReply ?? null)
-                  onEditUserMessage?.(
-                    replyActions ? { ...message, content: displayMessageContent } : message
-                  )
-                }}
-                className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-                title="编辑后重新发送"
-                aria-label="编辑后重新发送"
-              >
-                <PencilLine className="size-3" />
-              </button>
-              {canSetGoalFromMessage && (
+            {presentation === "bot" ? (
+              <BotMessageActions
+                messageId={message.id}
+                replyAction={replyButton}
+                className="opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+                moreActions={
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleCopyMessage}
+                      aria-label="复制消息"
+                      title="复制消息"
+                      className="rounded p-1 hover:bg-accent"
+                    >
+                      {copySuccess ? <Check className="size-3" /> : <Copy className="size-3" />}
+                    </button>
+                    {onEditUserMessage && (
+                      <button
+                        type="button"
+                        aria-label="编辑后重新发送"
+                        title="编辑后重新发送"
+                        className="rounded p-1 hover:bg-accent"
+                        onClick={() => {
+                          replyActions?.setDraftReply(quotedReply ?? null)
+                          onEditUserMessage(
+                            replyActions ? { ...message, content: displayMessageContent } : message
+                          )
+                        }}
+                      >
+                        <PencilLine className="size-3" />
+                      </button>
+                    )}
+                    {canSetGoalFromMessage && (
+                      <button
+                        type="button"
+                        aria-label="设为 Goal"
+                        className="rounded p-1 hover:bg-accent"
+                        onClick={() => onSetGoalFromMessage?.(plainTextForCopy)}
+                      >
+                        <Flag className="size-3" />
+                      </button>
+                    )}
+                  </>
+                }
+              />
+            ) : (
+              <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                {replyButton}
                 <button
                   type="button"
-                  onClick={() => onSetGoalFromMessage?.(plainTextForCopy)}
-                  className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-                  title="设为 Goal"
-                  aria-label="设为 Goal"
+                  onClick={handleCopyMessage}
+                  className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                  title="复制消息"
+                  aria-label="复制消息"
                 >
-                  <Flag className="size-3" />
-                  <span className="text-[11px]">设为目标</span>
+                  {copySuccess ? (
+                    <Check className="size-3 text-status-nominal" />
+                  ) : (
+                    <Copy className="size-3" />
+                  )}
                 </button>
-              )}
-            </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    replyActions?.setDraftReply(quotedReply ?? null)
+                    onEditUserMessage?.(
+                      replyActions ? { ...message, content: displayMessageContent } : message
+                    )
+                  }}
+                  className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                  title="编辑后重新发送"
+                  aria-label="编辑后重新发送"
+                >
+                  <PencilLine className="size-3" />
+                </button>
+                {canSetGoalFromMessage && (
+                  <button
+                    type="button"
+                    onClick={() => onSetGoalFromMessage?.(plainTextForCopy)}
+                    className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                    title="设为 Goal"
+                    aria-label="设为 Goal"
+                  >
+                    <Flag className="size-3" />
+                    <span className="text-[11px]">设为目标</span>
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
     )
   }
+
+  const assistantBody = content ? (
+    <div
+      data-message-body
+      className="min-w-0 max-w-full overflow-hidden break-words rounded-lg px-3 [overflow-wrap:anywhere]"
+    >
+      <ChatMessageIdentityContext.Provider value={message.id}>
+        {content}
+      </ChatMessageIdentityContext.Provider>
+    </div>
+  ) : null
+  const botAssistantActions =
+    presentation === "bot" ? (
+      <BotMessageActions
+        messageId={message.id}
+        replyAction={replyButton}
+        className={cn(
+          !content && "px-3",
+          "opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+        )}
+        moreActions={
+          <>
+            <button
+              type="button"
+              onClick={handleCopyMessage}
+              aria-label="复制消息"
+              title="复制消息"
+              className="rounded p-1 hover:bg-accent"
+            >
+              {copySuccess ? <Check className="size-3" /> : <Copy className="size-3" />}
+            </button>
+            {canForkFromMessage && (
+              <button
+                type="button"
+                disabled={forkFromMessageDisabled}
+                aria-label="从这里 fork"
+                title="从这里 fork"
+                className="rounded p-1 hover:bg-accent"
+                onClick={() => onForkFromMessage?.(message)}
+              >
+                {isForkingThisMessage ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <GitFork className="size-3" />
+                )}
+              </button>
+            )}
+          </>
+        }
+      />
+    ) : null
 
   return withReplyMenu(
     <div data-message-bubble="assistant" className="group overflow-hidden space-y-1.5">
@@ -1091,15 +1200,13 @@ function MessageBubbleImpl({
               正在思考…
             </div>
           )}
-        {content && (
-          <div
-            data-message-body
-            className="min-w-0 max-w-full overflow-hidden break-words rounded-lg px-3 [overflow-wrap:anywhere]"
-          >
-            <ChatMessageIdentityContext.Provider value={message.id}>
-              {content}
-            </ChatMessageIdentityContext.Provider>
+        {presentation === "bot" && content ? (
+          <div className="bot-assistant-content-row">
+            {assistantBody}
+            {botAssistantActions}
           </div>
+        ) : (
+          assistantBody
         )}
         {hasToolCalls && (
           <div className="space-y-2 overflow-hidden">
@@ -1420,7 +1527,8 @@ function MessageBubbleImpl({
               )}
           </div>
         )}
-        {shouldShowAssistantActions && (
+        {!content && botAssistantActions}
+        {shouldShowAssistantActions && presentation !== "bot" && (
           <div
             data-message-actions
             className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"

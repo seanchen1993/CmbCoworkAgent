@@ -72,7 +72,7 @@ jobs:
         run: npm ci
 
       - name: Bot core regression
-        run: npx vitest run src/main/bots src/main/ipc/bots.test.ts src/renderer/src/lib/bot- src/shared/bots
+        run: npm run test:bot-integration:core
 
       - name: Build isolated Bot browser integration fixture
         run: npm run build

@@ -10,6 +10,7 @@ import type { BotClient, BotGroup } from "../../../shared/bots/contracts"
 import type { FileAttachment } from "../../../shared/file-attachment"
 import { buildAttachmentMessageParts } from "../../../shared/attachment-message-parts"
 import { loadGroupDraft, saveGroupDraft, pruneSavedGroupDrafts } from "./bot-group-draft-storage"
+import { parseGroupMessage } from "../../../shared/bots/validation"
 
 interface GroupDraft {
   text: string
@@ -170,11 +171,30 @@ export async function sendGroupDraft(client: BotClient, group: BotGroup): Promis
     end: mention.end - leading
   }))
   const mentionIdentity = JSON.stringify(sentMentions)
+  let mentionsMatch =
+    draft.request?.mentions === undefined || draft.request.mentions === mentionIdentity
+  if (!mentionsMatch && draft.request?.mentions !== undefined) {
+    try {
+      // Restoring a draft may reorder fields; compare the same validated payload as the Host.
+      const input = {
+        groupId: group.id,
+        requestId: draft.request.id,
+        text,
+        targetBotIds,
+        ...(draft.replyTo ? { replyToId: draft.replyTo.id } : {})
+      }
+      const canonical = (mentions: unknown) =>
+        JSON.stringify(parseGroupMessage({ ...input, mentions }).mentions ?? [])
+      mentionsMatch = canonical(JSON.parse(draft.request.mentions)) === canonical(sentMentions)
+    } catch {
+      // Invalid saved metadata cannot identify the current request.
+    }
+  }
   const request =
     draft.request?.text === text &&
     draft.request.targets === targets &&
     draft.request.replyToId === draft.replyTo?.id &&
-    (draft.request.mentions === undefined || draft.request.mentions === mentionIdentity)
+    mentionsMatch
       ? { ...draft.request, revision: draft.revision }
       : {
           id: crypto.randomUUID(),

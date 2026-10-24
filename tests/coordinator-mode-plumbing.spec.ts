@@ -994,11 +994,30 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "resolveCoordinatorModeRequest",
     "agent IPC imports coordinator resolver"
   )
-  assertOccurrenceCount(
-    agentIpc,
-    "allowForcedRequests: allowsForcedCoordinatorRequests(",
-    4,
-    "invoke, final resolution, resume, and interrupt all enforce the Harness feature gate"
+  const forcedCoordinatorGateCalls = agentIpc.match(
+    /allowForcedRequests:\s*(?:messageControlsEnabled\s*&&\s*)?allowsForcedCoordinatorRequests\(/g
+  ) ?? []
+  assert(
+    forcedCoordinatorGateCalls.length === 4,
+    `invoke, final resolution, resume, and interrupt all enforce the Harness feature gate: expected 4 gated calls, got ${forcedCoordinatorGateCalls.length}`
+  )
+  assertMatches(
+    sliceBetween(
+      agentIpc,
+      "const initialInvokeCoordinatorRequest = resolveCoordinatorModeRequest(",
+      "const initialInvokeWorkspacePath ="
+    ),
+    /allowForcedRequests:\s*messageControlsEnabled\s*&&\s*allowsForcedCoordinatorRequests\(initialInvokeMetadata\)/,
+    "initial invoke also enforces the trusted message-controls policy"
+  )
+  assertMatches(
+    sliceBetween(
+      agentIpc,
+      "const coordinatorRequest = resolveCoordinatorModeRequest(effectiveMessage, metadata, {",
+      "effectiveMessage = coordinatorRequest.message"
+    ),
+    /allowForcedRequests:\s*messageControlsEnabled\s*&&\s*allowsForcedCoordinatorRequests\(metadata\)/,
+    "final invoke resolution also enforces the trusted message-controls policy"
   )
   assertIncludes(agentIpc, "coordinatorWorkerManager", "agent IPC imports worker manager")
   assertIncludes(
@@ -3332,17 +3351,17 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "mainTodosEnabled: !isCoordinatorMode",
+    "mainTodosEnabled:\n      !isCoordinatorMode &&\n      (options.allowedToolNames === undefined || options.allowedToolNames.includes(\"write_todos\")),",
     "runtime disables coordinator todos"
   )
   assertIncludes(
     runtime,
-    "mainFilesystemEnabled: !isCoordinatorMode",
+    "mainFilesystemEnabled:\n      !isCoordinatorMode &&\n      (options.allowedToolNames === undefined ||\n        options.allowedToolNames.some((name) =>\n          [\"read_file\", \"write_file\", \"edit_file\", \"ls\", \"glob\", \"grep\", \"execute\"].includes(name)\n        )),",
     "runtime disables coordinator filesystem"
   )
   assertMatches(
     runtime,
-    /includeGeneralPurposeSubagent:\s*!isCoordinatorMode &&/,
+    /includeGeneralPurposeSubagent:\s*sessionAllowedExpertNames === undefined &&\s*!isCoordinatorMode &&\s*isGeneralPurposeSubagentEnabled\(projectModeTaskSubagentConfig\)/,
     "runtime hides general worker in coordinator"
   )
   assertIncludes(
@@ -3418,9 +3437,11 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "buildCoordinatorTaskPrompt(threadId)",
     "runtime scopes task prompt to threadId"
   )
-  assertIncludes(
-    runtime,
-    "skills: mainSkillSources",
+  assert(
+    runtime.includes(
+      "const mainSkillSources =\n    !isCoordinatorMode && allSkillsSources.length > 0 ? allSkillsSources : undefined"
+    ) &&
+      runtime.includes("skills: sessionAllowedSkillNames?.length === 0 ? [] : mainSkillSources"),
     "runtime avoids injecting full skill middleware into coordinator main thread"
   )
   assertIncludes(

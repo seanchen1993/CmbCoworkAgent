@@ -1,5 +1,9 @@
 import { Users } from "lucide-react"
-import type { BotDefinition, BotGroupMention } from "../../../../shared/bots/contracts"
+import type {
+  BotDefinition,
+  BotGroupMention,
+  BotMessageMention
+} from "../../../../shared/bots/contracts"
 import { botAppearanceColor } from "@/lib/bot-chat-accent"
 import { BotAvatar } from "./BotAvatar"
 
@@ -8,7 +12,7 @@ export function BotMentionLabel({
   mention,
   bot
 }: {
-  mention: BotGroupMention
+  mention: BotGroupMention | BotMessageMention
   bot?: BotDefinition
 }) {
   return (
@@ -18,7 +22,7 @@ export function BotMentionLabel({
     >
       {bot ? (
         <BotAvatar color={bot.color} shape={bot.shape} size={17} animated={false} />
-      ) : mention.botId === null ? (
+      ) : ("kind" in mention && mention.kind === "group") || mention.botId === null ? (
         <Users size={15} aria-hidden="true" />
       ) : null}
       <span>{mention.label}</span>

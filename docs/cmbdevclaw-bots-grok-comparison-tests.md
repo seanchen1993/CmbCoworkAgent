@@ -1,17 +1,305 @@
 # Bots 已实现功能与官方 Grok 对照测试
 
-### 当前验收口径与剩余条件（2026-10-23，用户确认）
+### 当前验收口径与剩余条件（2026-10-24）
 
-用户确认 I07、J01、J03、J04、J05 以 CmbCowork 本地功能验收通过为完成标准，官方侧尚缺的回执、技能候选和合成连接器环境保留为对照记录，不再阻塞这五项。本地验收完成 **197／201（98.01%）**；按此前要求官方对应证据的对照口径仍为 **192／201（95.52%）**。本次增加的五项均复用已有真实本地证据，是用户确认验收口径后的关闭，不是新增五轮测试或新的代码修复。
+原有限案例清单通过 **198／201**（历史清单通过率98.51%）；历史双端对照口径为 **192／201**。这些数字不代表整体功能／使用体验对齐完成度。I07、J01、J03、J04、J05按用户确认接受本地实证，P15包内功能已测；新发现的日常交互差异继续按下表处理，不能被旧通过状态豁免。
 
-I07 本地删除候选零执行、KEEP 自然执行一次、旧29条例行保持；J01／J03 普通私聊技能真实读取／模板交付、搜索／选择／取消及草稿附件保持、普通文本负例；J04／J05 连接器真实发现／取数、故障恢复与无重复副作用均已有验收记录。技能结论不扩展为群聊手动选择、按 Bot 独立启用配置，或当前官方版本自动触发同题已验证。
+I07 本地删除候选零执行、KEEP 自然执行一次、旧29条例行保持；J01／J03 普通私聊技能真实读取／模板交付、搜索／选择／取消及草稿附件保持、普通文本负例；J04／J05 连接器真实发现／取数、故障恢复与无重复副作用均已有验收记录。EY另补当前官方与本地不点名技能的自动使用正反例，见下节；结论不扩展为群聊手动选择、按 Bot 独立启用配置或普遍自动命中。
 
 | 项目 | 尚缺真实证据 | 继续条件 |
 | --- | --- | --- |
-| Mac包（P15） | Mac包正常认证后Bot／M2.7／浏览器／正式交付／重启 | 成功正常登录；现用户无法登录、根因未知，不绕过认证 |
+| 私聊@Bot新入口（FQ，已撤回） | 未达到完整沟通质量，不计交付；历史提及显示／点击保留 | 按用户“修复不了就撤回”移除新增输入与无用接线，原群@／@all及@文件保留，不用身份展示替代真实发送／回传 |
+| 私聊跨群附件（EX，用户决定本期放弃） | 未实现，不计通过；原误组合与派生协作失败保留 | 2026-10-24按用户要求停止本项及相关诊断，全部无效候选与FK临时CSS／构建已撤回，不再追加本项案例；转其他高优先级待办 |
+| 其他消息展示边界（本轮暂缓） | 私聊直接投群问题卡两端同题均不支持；Bot主动回应已补持久显示，零正文等差异未关闭 | 核心路径保留现有实证；细微正文／措辞本轮暂缓，不放宽原完成保护、不追加提示试验 |
+| Mac发布检查（P15之外单列） | App招乎真实SSO登录与发布签名／Gatekeeper | 本轮仅按用户授权在隔离QA包注释自动登录；App认证与发布签名未验，不能由功能通过替代 |
 | P17／P18 | Windows原生包、进程／文件、恢复和布局实测 | 用户最新回复“无”，当前无实机环境；CI／静态不能替代 |
 
-剩余 **3项平台验收（P15／P17／P18）**，另有 P04 不适用，仍保留201分母且不计通过。五项原本地／官方证据索引见`1023DE-resume-batch/remaining-eight-gates-audit-1023DZ/{root-remaining-original-gates-audit.json,official-five-readonly.json,platform-three-readonly.json,current-tested-source-guard.json}`及下方各案例；原失败和历史口径均保留，以本节为当前状态。不把未完成的官方对照或平台实测写成通过。本次仅更新两份文档，未改生产代码、暂存区、提交或push。
+案例矩阵剩余 **2项平台验收（P17／P18）**，另有 P04 不适用，仍保留201分母且不计通过；不包括上表App招乎真实SSO及发布签名条件。五项原证据索引见`1023DE-resume-batch/remaining-eight-gates-audit-1023DZ/`及下方各案例。原失败和历史口径保留，不把旧通过数改写成总体交付完成率。EP／ER已逐项归并25个已验macOS正式父项及最终增量理由／许可／有限敏感模式审阅；ES的Desktop权限经用户真实确认后，同一86447已启动，主预览激活、原资料与微博实屏恢复通过，见下段及phase1当前EP／ER／ES节。未提交或push。
+
+### 原生保存收尾与当前提交范围（2026-10-24，1024FU）
+
+两份成果已由代理自行通过正式卡片右侧保存按钮及 macOS 原生保存窗口导出至 `~/Downloads/CMB-save-1024FU-zrn3lo9s/`；不是让用户代保存，也不是命令复制。MD 576B／JSON 568B 的 SHA-256 均与原件完全相同，8行ID／顺序／字符串金额／ASCII负号、count=8、total=120.00／CNY及独立Decimal求和检查全通过，原件未改。FO独审原11／12中唯一未验的FO09已补齐，限定本题12／12，不改变旧198／201分母或把全部首轮质量风险视为解决。证据 `native-save-1024FU-1p628216/{native-save-real-ui,native-saved-verification}.safe.json`。
+
+保存工具超时记录保留：实际面板属于 Apple Open and Save Panel Service，先读取该面板，再通过所属预览应用确认目录及保存，两个窗口均正常关闭；未据工具超时修改产品导出流程、重启或强退应用。随后恢复用户原奥巴马会话、精确FI字面草稿（未发送）、资料库页签及480px详情宽度。
+
+当前99份暂存变更与工作树一致，两位复核及受支持Node22核心102文件／1403项、相关DOM、Node／Web类型与构建证据有效；无效私聊@新输入候选已撤回。按用户授权提交当前已复核代码，不push。下一步先复核34条质量记录的原合同与后续证据，保留首次失败；只处理确认的高影响缺陷，不重开用户已放弃的EX／私聊@候选。Windows、真实SSO、签名与真实CI runner仍未验。
+
+### 当前可执行工作（2026-10-24，FO对照／FS包内增量）
+
+FQ撤回及质量复核已完成后，恢复此前只准备未发题的FO；不重开EX或私聊@提示变体，不追加低收益极端组合。旧198／201矩阵数字不变，不把这些新对照加进旧分母。
+
+- **FO群内常见文件交接／逐行保真，本题已完成：** 同一132B UTF-8 BOM／CRLF附件、原8行±金额题，本地A／B实际17条AI均MiniMax-M2.7；主`c6b3b7ae…`、同事`f3e2900d…`、回传`2e22bf98…`自然completed。原内部回传后A真实读两份、execute核对，唯一A公开回执附576B MD／568B JSON，8行／顺序／ASCII负号／120.00合计正确。正式MD卡已打开；本地一次真实保存导致电脑工具超时，重绑也失败，已请用户仅Esc取消。用户回复后主预览已恢复；正式JSON卡已逐一展开8行并滚动核实R8、count=8／total=120.00／CNY。FU已通过原生窗口自行保存两份，逐字节校验完成，FO09现通过；此前工具阻碍记录保留。一次2020Y文件名拼写错误经ENOENT自行纠正的首轮记录保留，不为此增宿主模糊路径替换。
+- **FO官方同题：** 仅替换同事名称，原132B附件通过界面上传；GA核对后正式两卡各一次。两份已正式打开／下载，285B MD／512B JSON独立8项语义检查通过。GB的公开进度／路径链接与GA重复说明如实保留，不由客户端推断云端模型或内部工具。证据`functional-quality-current-1024FO/{resumed-case-freeze,current-paired-progress,official-first-result}.json`及原件目录。原独审11／12时FO09保留partial，FU原生保存及字节校验后本题补齐12／12；旧82Bot／2286任务／14291消息／834原件逐SHA保持，新增3任务／37消息／4文件归属明确、0活动。官方已通过普通点击恢复原tibo会话和空草稿；不先关闭旧全部首轮质量失败。
+- **FS当前Mac隔离包，真实增量及重启通过：** `P15-current-fq-1024FS-8x9d0064/`沿原EN链打包，QA-only登录补丁沿用原授权，生产认证未改；394输出、9个main入口／preload、81物理依赖及原生资源保持。实际创建FS-QA Bot，介绍跳过、引用／取消、完整表情目录🚀保存通过。真实任务`7877688d…`七条AI均MiniMax-M2.7，先保留A／B页，再请求精确B协助；实际归还后仅从B读回未写入题目的marker／note，写入、读回并正式交付176B JSON一次，卡片已真实打开。独审20／20；无命令、HTTP代读、同事、记忆或例行工具。此轮普通归还不替代FQ用户未知备注／红X实测，后者仍由`bcfa2a17…`及`FQ-existing-redx-note1-reference.safe.json`独立证明。在0活动时正常退出28683，同profile新68220重启；独审13／13确认原1Bot／2任务／19消息逐行、两份工作文件与🚀精确保持、无重放，原正式JSON卡重开仍是五个正确B字段。只读包更新保持32378个非renderer条目和235个物理解包文件，QA补丁／模型配置不动；真实SSO及发布签名仍未证。
+- **FS实屏发现的320px浏览器按钮竖排，已最小修正：** 原底部单行将按钮挤至三行字、74px高；仅为原footer增加`flex-wrap`，320px完整按钮分两排、各38px／单行字，480／500px仍单排；原5个导航按钮不动。实际组件加载正式Tailwind的修前红例、帮助／普通接管／归还／跳过／放大预览及50次释放回归均通过。Web类型／正常build通过，执行、控制权、接口和Runtime不改；同一QA包仅刷新renderer并重启后，真实小题`bd912ae9…`在默认320px显示完整两排按钮，根据信息仅点侧栏“归还并继续”，实际正常回到Bot并回复FS_LAYOUT_OK，B预览仍在；独审21／21确认3条AI实际MiniMax-M2.7，仅navigate(B)／help两次工具，原数据保持，新增仅1任务／6消息、0活动。验收后正常退出68220并仅停止自有合成HTTP服务；不是用DOM脚本代替包内交互。证据`narrow-browser-actions/{source-freeze,current-final-boundary-review.safe}.json`、`post-footer-gates-root.safe.json`及`layout-real-ui.safe.json`。用户取消原保存窗口后，已通过原View→Reload在同main88175加载已验renderer；原微博实时画面／human控制保持，278／480布局保留，原文字草稿手动恢复、原资料库页签恢复。未发送草稿，不声称草稿自动跨reload保留；不是应用Quit／浏览器重导航。见`FO09-finalize-1024FT/main-renderer-activated-restored.safe.json`。
+
+### Node22门禁与保存窗恢复（2026-10-24，1024FT，历史时点；最终状态见FU）
+
+原`.nvmrc=22`、`engines >=18 <24`，此前本机完整core在Node24运行；本轮仅使用已存在的v22.23.3，为该npm子进程选择Node22，实际运行原`npm run test:bot-integration:core`一次，102文件／1403项全部通过、exit0、32.42秒。2403个源码／测试／配置、394输出无漂移，暂存语义保持，无新增未跟踪文件；未安装依赖、修改配置或重跑其他大套。证据`P15-current-fq-1024FS-8x9d0064/node22-core/run-uxhwno03/gate-verdict.json`及原日志。仅补本地受支持版本门禁，真实CI runner／Windows仍未验，不能扩大为模型首轮质量或整体体验通过。
+
+FO09及主预览新footer激活仍未完成：重新绑定主预览在30秒后超时，当前PID88175仍真实存在，不能据观察超时重启或认定应用死锁。已请用户仅Esc取消合成保存窗口。只读对照FO终末：82Bot／2289任务／14328原生消息／838文件及配置保持、0活动；git索引stat缓存与旧快照不同，但所有暂存路径／mode／blob／stage条目逐字节保持。未强制退出、未计FO09通过；窗口恢复后继续正式JSON打开／导出和原现场恢复。见`FO09-finalize-1024FT/{continuation-before,main-before-ui-verdict}.safe.json`。
+
+FT当时受阻核查（窗口已于用户回复后恢复）：连续第三轮重新绑定主预览仍30秒超时，进程88175在超时后仍存在，暂存语义保持。其余独立QA／Node22工作均已终末；当前两项收尾依赖用户取消原合成保存窗口并恢复电脑工具，Windows／真实SSO／签名／真实CI仍需原外部条件。未把观察超时当作进程终止，未强制重启、未计FO09或整目标完成。证据`FO09-finalize-1024FT/blocked-audit-third-turn.safe.json`。
+
+FT恢复收尾：用户回复后Cua主预览绑定成功，原生保存窗口已不在。正式JSON的8行／字符串金额／ASCII负号／120.00合计已从卡片打开、展开并滚动核对。当前源码2401原字节及2个预期撤回文件缺席、394运行输出均匹配Node22已验冻结；另记录两个非运行`.DS_Store`，不冒称全目录无额外项。暂存条目已由旧4c4变为b23，共28个blob更新、2个已撤回文件删除，均匹配该时点工作树；保留现状、不推断操作人。View Reload已实际加载这份renderer，原Weibo页面／human控制未销毁；原草稿按精确字面值手动恢复、资料库页签恢复。当前只剩本轮原生保存导出未验；不为反复触发电脑工具阻塞重开保存窗，不计FO09或整体完成。见`FO09-finalize-1024FT/formal-json-open-real-ui.safe.json`、`main-renderer-activated-restored.safe.json`及FS的`current-source-out-index-guard.safe.json`；本轮未改生产代码／stage／commit／push。
+
+### 当前变更质量复核（2026-10-24，1024FQ）
+
+用户真实私聊@反例重开后，内联编辑与多轮提示候选仍未稳定：DeepSeek V4 `7a79536e…`零工具追问转发，不能以MiniMax发送成功或编辑器DOM通过当整体对齐。按用户要求撤回新增私聊Bot／群候选、标签、内联替代与新输入／编辑／草稿身份接线；原群@／@all、原textarea／@文件、历史已存提及点击、旧未知回执请求兼容保留。撤回失败的mentionedBotContext候选及V4额外范围句，失败记录不删，不再追加提示试验。**私聊@当前未交付，下面ED／EV等历史身份测试不代表当前可用入口。**
+
+保留确认有效的浏览器精确B页修正、只读回复入口修正及原同事消息／文件协议最小修正。浏览器84项，含5条修前红例；正式`bcfa2a17…`经用户填写B、红X关闭、协助卡重开、归还后实际读回未知备注“1”，不改投A。中间消息引用／👍增删已真实操作；readonly DOM红绿及历史定位保留。MiniMax真实文件任务`ab00f812…`创建、读回、导入并交付17B原件，正式卡片已打开核对；群提示与工具schema、权限、队列、原Runtime不变。这些有限实证不表示全部模型任务无差异。
+
+证据`current-feature-quality-1024FQ/`，撤回后102文件1403核心、原messages／queued-content／queue-plumbing、引用／表情DOM、Node／Web类型及build均通过，五门禁sourceDrift=[]。正式main88175已激活，原草稿／资料库恢复，私聊只剩原@文件入口，原微博视频网址已手动重开并看到实时画面／human控制；旧82Bot、2262任务、14211消息与832原件保持。关闭实际协助网页后缺结束历史措辞为P3暂缓，无死卡／错页／假完成。最终证据final-withdraw-verification.json；原103份变更和用户索引保留，不stage／commit／push，不增加旧201矩阵计数。FQ封存时FO未发送、FP未创建；FO后续恢复见顶部，不恢复EX或其他已放弃候选。
+
+
+FQ最终清理补记：独审确认已无调用者的`protectedRanges`／`textEdits`文件引用支持分支、两条专用候选测试及Popover的`onBackToBots`按钮也已撤，三个文件逐字节回到HEAD，普通@file逻辑与原测试保留。原@file五项通过；最后Web类型与build再次通过且sourceDrift=[]。这些清理不修改已跑core／消息／DOM覆盖链，未重复无变化的大套。最终构建通过标准View→Reload加载，同main88175的原微博网页、实时预览和human控制继续保持；原FI字面草稿、资料库与278／480布局恢复。两位独审完成，私聊候选生产接口引用为零；历史提及与旧未知回执兼容明确保留。最终工作区语义索引与事前一致，未stage／commit／push。
+
+### 前次待办归并（2026-10-24，1024FM，历史时点）
+
+phase1旧空框已全量核对：158处简单匹配含1处规则示例，实际157条，分别为91条后续有限验收覆盖、34条历史失败保留、20条低收益边界本轮暂缓、12条外部条件重复记录。主plan逐条改为明确状态说明，原正文／失败不删、不改写通过；逐项来源与当时证据见`plan-priority-1024FM/classification.json`。该次只读整理不能作为整体功能质量证明；当前私聊@及精确帮助页缺口已由FQ重开，须以新反例与实际修复结果为准。FL门禁沿用102文件／1396项通过记录，不替代真实交互验收；本轮没有新功能通过数。
+
+当前待条件为Windows P17／P18、App招乎真实SSO、Mac发布签名／公证／Gatekeeper和真实CI runner。物理IME、同步环境等边界照实保留；EX本期放弃未实现，零正文／细微措辞／全部动画相位等暂缓，不降低原任务完成保护或交付质量标准。198／201保持，不宣称整体对齐或一期全部完成。本轮仅整理plan，未改源码／构建／应用数据，未执行stage／reset／commit／push，保留现有暂存状态。
+
+### CI 核心回归命令同步（2026-10-24，1024FL）
+
+只将CI的Bot core regression手写筛选换为既有`npm run test:bot-integration:core`，补回11份遗漏的原Runtime／恢复／交付等测试并保留原覆盖及`--maxWorkers=2`。解析YAML确认仅该命令变化，其他任务、触发条件、矩阵、环境和浏览器夹具保持；没有产品行为变更。实际本地Node24.13.0运行102文件／1396项全部通过、退出0、33.30秒；CI Node22和Windows实机未执行，不作平台通过证明。证据`ci-core-command-sync-1024FL/core.log`／`gate-result.json`。396构建产物保持，未重启应用；198／201不变，root未stage／commit／push，用户索引保持当前状态。
+
+### 用户决定停止 EX（2026-10-24，本期放弃、未通过）
+
+按用户要求停止私聊跨群附件及延伸诊断，保留失败历史，不增加198／201。R1／R2／FE／FJ已撤回；FK临时CSS及全部396产物已逐SHA恢复，临时界面未激活、无新模型题、main14173未重启，用户暂存条目保持，未stage／commit／push。详见`effective-prompt-formal-ui-1024FK/withdrawn-at-user-request.json`；后续只推进其他高优先级未完成项，下方EX记录是历史证据。
+
+### EX 提示传播链有界源审（2026-10-24，1024FI，历史未通过）
+
+Bot提示从extraSystemPrompt经原startAgentRun／IPC、Runtime／middleware及SDK到DeepSeek请求组装的当前源码主链，未发现丢弃、覆盖或截断Bot提示；真实工具参数也未被宿主改写。FI仍缺同期最终提示／出站请求正文，不能据静态路径断言模型已看到并忽略指令。原系统提示预览是当前进程最多10个线程的缓存，Bot私聊的唯一环境栏入口被隐藏，旧50562退出后无法补取；未绕过权限、调用私有API或另发模型题。详见FI的`effective-prompt-propagation-review.safe.json`及`effective-prompt-preview-ui-access-review.safe.json`。没有据此修改共享Runtime或恢复无效候选；实际误交付仍FAIL，不增加198／201。
+
+两位独审反向核验仍未找到已存在但漏接的独占目的地／同条附件合同；mentions、内部委派outputFiles、会话audienceKey及事后checkFinalDelivery均不能区分本题和合法双目的地任务。Grok旧重建仍分当前SendMessage／跨群SendToAgent，统一名称不构成确定修复；Hermes部分不支持媒体的路径可仅发正文加warning，没有可直接移植的本题原子门禁。当前0.75.3安装包的有限源码扫描也不能证明云端如何得出拒绝。详见FI的`minimal-existing-contract-countercheck.safe.json`、`sendmessage-sendtoagent-semantic-boundary-review.safe.json`、`hermes-delivery-boundary-countercheck.safe.json`、`current-official-client-delivery-source-bounds.safe.json`。本轮无新模型题或生产改动；保留真实失败，不用误伤合法任务的全局规则伪造通过。
+
+### 自动群续轮来源说明实测（2026-10-24，1024FJ，FAIL并撤回）
+
+FI的精确无@Bot帖／H的discussion证明原提示虚构“用户选择或明确@交办”。FJ只修正该句，真实用户请求／@／调度／工具／权限／原Runtime不改。旧代码先2failed／58passed，原完整core最终1396／1396、Node／正常build通过，396件仅application.js变化；正常激活15项保全。两位独审支持这个事实修正，不把它当EX主误投的唯一原因。
+
+真实FJ原题主`61dfb40d…`仍群文字＋私聊附件，五条主题AI实际均deepseek-flash。四个discussion实际输入均含新句且无旧来源断言，但A/H仍扫描私有工作目录，H还read／cp后以另一作者另条群附件补作，A后续验文件后pass。两项行为均FAIL；不把成功文件或最终pass算通过。实际UI／PNG及raw证据见`host-selected-continuation-scope-1024FJ/file-case-independent.safe.json`。未发送冻结的@H正例，不追加提示变体。
+
+无效两源／测试与application.js精确恢复，全部396产物同事前，原H／A成员顺序恢复；8129正常退出、原构建14173重启15／15保全，82／2261／97／14209、832文件、0活动，新增5task／30native／2file归属与旧数据保持分开核对。未stage／commit／push，不增加198／201，EX及自动续轮越界风险仍开放。
+
+终末独审`final-independent-preservation.safe.json`已确认旧2256／14179逐行、830原件／82Bot／97命令／7回应／例行配置保持，新增精确归属；用户原微博实时画面／登录态／控制权及资料库／空草稿／宽度恢复。raw index56738…→edc6221…另列，完整条目语义6f42…保持，不冒称raw全程相同。保全VERIFIED，两个功能目标仍FAIL。
+
+### 同一 FE 候选的干净普通回合（2026-10-24，1024FI，FAIL并撤回）
+
+FI只补独审确认缺少的一个条件：FE候选逐字节不变，新Bot介绍completed后69.120秒才发送首次普通user，injected_into=null，六条主题AI实际均deepseek-flash。仍创建41B、以cat -A失败后cat -e正确读回，再合法发群文字／交私聊附件；H另一作者补群文件不算同条交付。实际UI／PNG与raw／served证明仍FAIL，见`exact-fe-clean-idle-1024FI-1xq8pwlv/primary-first-idle-user-independent.safe.json`。旧FE失败不重写，FI继续否证干净普通回合充分性，停止此提示／改名试验分支。
+
+首次完整core1394／1396的两处超时保留；无并行编译后原命令、原测试／阈值1396／1396，Node／build0，396件仅main/application.js改变，正常激活15项保全。失败后两份源码／测试及application.js原件精确恢复，396全图相等，50562正常退出、原构建56303重启15／15；终末独审14／14仅是事实／保全通过，旧2250／14142逐行、81Bot／827原件／97命令／7回应／配置保持，增6任务／37消息／3文件、0活动，原H／A复原。原微博视频页及用户控制权经UI恢复，资料库／空草稿／宽度保持。索引raw后有时间差，最终全条目语义SHA6f42…与基线完全相同，另证见final-index-semantic-guard；未stage／commit／push，不增198／201、不关闭EX。
+
+### 新 Bot 介绍结束后的普通 DeepSeek 用户题（2026-10-24，1024FH，FAIL）
+
+原UI另建FH-1024-IDLE-DS，发题前独立确认intro已completed且全局0活动／该Bot0真实user；86.292秒后首次user`d6d009c7…`创建、injected_into=null，六条主AI实际均deepseek-flash。它创建／读回41B后仍以群text-only＋private files-only两次合法成功调用改投，另有👀回应、无私聊delegate；H另作者另条补群附件不算本题通过。普通空闲回合也失败，不能再将旧历史或介绍注入当必要根因。见`fresh-idle-deepseek-group-destination-1024FH-3fejjuzt/primary-first-idle-user-independent.safe.json`、发题前idle冻结及双方实际UI／PNG。派生公开工作自然终结，临时成员移除、原H／A恢复，用户原空草稿／资料库及宽度保持；至此无生产修改、未stage／commit／push，EX不关闭。
+
+FG最终取证／保全14／14另已完成，旧2236任务／14049消息／79Bot／820文件、97命令、例行／回应／配置／index保持，新增8任务／54消息／4文件归属明确、0活动和待回报，详见FG/final-independent-result.safe.json；不能算主题通过。
+
+### 新 DeepSeek Bot 首次用户题复验（2026-10-24，1024FG，FAIL）
+
+原UI新建FG-1024-DS，空职责、真实DeepSeek；发送前独审仅有介绍问答，无旧失败对话或真实用户任务。临时加入原合成群、选择精确群身份后发送冻结自然同题；用户题注入介绍owner，主case两条AI均有deepseek-flash元数据。它未自行创建／读回文件，实际唯一批次为把整段本次要求发群＋分别私聊委派A／H，两次委派均有真实回执；H另作者附件不满足原题，仍FAIL。见`fresh-deepseek-group-destination-1024FG-kj1q_65c/primary-first-task-independent.safe.json`、初态独审与真实群UI／PNG，不能将案例取证当功能通过。
+
+仅停止该case派生执行及撤回重复待办，群恢复原A／H两位，新Bot和失败记录保留，用户奥巴马原资料库／空草稿／278与480宽度恢复，实时微博画面仍可见。未改生产源码、未stage／commit／push。实际checkpoint用户投影保留群引用非广播／不授权委派说明及原题“不私聊委派”，没有发现介绍接线要求它执行这些动作；实际SystemMessage未持久化，不能据此下全量因果结论。FE实际消息另未见hook／待办交付提醒。详见FG的`introduction-steer-user-projection.safe.json`和FE的`exact-task-delivery-nudges-independent.safe.json`。旧198／201不变，EX继续开放，不追加提示／改名候选或新意图解析体系。
+
+### 私聊交付范围候选失败与精确撤回（2026-10-24，1024FE）
+
+按Grok消息类型／目的地与正式回执的合同，只尝试收窄一个private通用交付提示，删除生成文件即必须当前工具交付的无条件命令；群／内部／讨论／命令四种实际提示全字节保持，五种private仅一段改变，声明handoff后缀不变，独审10／10。首次core6条旧字符串断言失败记录保留；现有断言按范围更新后1396／1396、Node／build通过，396件仅application.js改变，正常重启15项保全。
+
+真实DeepSeek原题`24819ccf…`仍群文本＋私聊附件，5／5响应model_name=deepseek-flash，H另附文件不满足原作者同条要求，主题FAIL。取证与原资料保全14／14，见`private-delivery-scope-1024FE-zhhz0og0/real-case-final-independent.safe.json`；群只据真实row／回执，页面焦点／绘制未验到群正文，不将target-group截图文件名当视觉通过。未追加第二题或变体。
+
+prompt.ts／runtime-adapter.test.ts及application.js已按事前原件恢复，396输出精确相同，原其他变更／用户index保持。A恢复MiniMax-M2.7，正常退出88644、启动95135，重启15／15保全，79／2236／97／14049、820文件、0活动，FE事前fc298…索引保持；见rollback-source-and-build与after-rollback-restart。原微博页面恢复尚受电脑工具noWindowsAvailable阻碍，未冒称完成。未stage／commit／push。另有限源审未发现普通private在生成文件后被Runtime强制当前附件交付的隐藏规则，见runtime-file-delivery-obligations-readonly；不能以此归因个别动态hook／待办或宣称找到唯一根因。原题继续按官方如实拒绝且无错误替代交付验收，EX未关闭。
+
+### 双 strict 后原题及 DeepSeek 对照（2026-10-24，1024FC／FD，失败保留）
+
+FC原自然同题仍失败：A实际创建／读回41B，以合法群文本工具发正文，以合法私聊文件工具交附件；H复制后以另一作者另发群文件，不是A的同条附件。CLEAN第二题未发、原A／H成员保持。参数strict正常拒未知字段，不能约束两个分别合法的动作满足原交付范围。见`natural-group-file-after-strict-1024FC-ikTA0B/A-natural-current-strict-independent.safe.json`及实际UI。
+
+FD按用户要求只在同一A原UI临时切DeepSeek v4 Flash，换唯一标记／文件名，其余原题不变。主任务`27fd88e0…`五条AI均有真实响应`model_name=deepseek-flash`，不能只用设置或H的模型充证据；同样发群纯文本、附件改投私聊，H另补群文件。私聊实际41B原件已从正式卡打开，目标群正式历史已核对，仍不算通过。见`deepseek-natural-group-file-1024FD-1ghopdeo/primary-served-model-independent.safe.json`、冻结正文及正式UI／PNG。A恢复MiniMax-M2.7，奥巴马原页签／空草稿／278与480宽度恢复，0活动、102项暂存保持；未改生产源码、未stage／commit／push。不能只归因MiniMax，也不把普通文件工具成功当目的地正确。
+
+FD终末核验／保全独审14／14，主题FAIL不改，见同目录`final-independent-result.safe.json`：恰增3task／24native／两份41B，旧2230任务／14001消息逐行SHA、816原件／97命令／原群定义／例行／4回应／配置／index保持。A切模型的row版本／时间变化单列，现已恢复原模型，其余78Bot不变，九份生产源冻结SHA一致。
+
+FC文件范围源审另确认：group根目录／cwd正确；Mac原Runtime的全host执行与YOLO允许绝对路径read和命令内部find／cp，cwd入参仍有原校验，Bot出口校验无法证明群内副本来源授权。私有文件硬隔离尚未具备，不是更换workspace路径的一行修复；未改共享Runtime／全局审批。具体证据见FC的`group-runtime-private-file-scope-readonly.safe.json`。当前官方同题明确拒绝私聊群附件；0.18重建的typed发送／回执可作参考，不等同当前云端完整实现。
+
+### 附件未知目标参数拒绝与正常交付（2026-10-24，1024FB）
+
+另确认filesSchema默认strip会忽略private／internal／peer调用的groupId，继续交回私聊。原SDK三反例均红，peer还实际复制；仅原filesSchema设strict，生产一处+5／-3，未改名称／文案／回调或Runtime。28／28近邻、10项独审、原core1396／1396、Node／messages／正常build通过，396产物只main/application.js改变，正常重启15项保全通过。
+
+真实M2.7负例唯一files+groupId被精确拒绝，未去参重试、改投、群发或产生成功附件回执；native status=null，不冒称error元数据。正例唯一files-only真实交付41B，正式打开两行与原件SHA一致。两题独审12／12，旧2225任务／13969消息逐行保持、814文件／97命令／4回应／原群／例行／模型与索引不变，新增恰2task／8native、0活动。证据`private-file-args-1024FB-xFsPgr/real-pair-independent.safe.json`及同目录红绿、源审、原gates／激活、重启快照和正式UI。用户原微博经UI恢复并归还，空草稿／外观保持，不称旧DOM跨整应用退出存活。原EX合法工具误组合仍开放；不增198／201、未stage／commit／push。
+
+FB恢复用户预览后的业务保全仍通过；索引终末另更新为102项（原独审冻结100项）。生产与测试仍匹配已验SHA，两份plan新记录未暂存；root／两子agent均未stage，未推断执行者，保留现状。原始失败guard及条目差异见FB目录`final-index-semantic-guard.json`／`final-index-entry-delta.json`，没有回滚或改写旧记录。
+
+### 私聊直接投群问题卡同题范围（2026-10-24，1024FA）
+
+当前官方0.75.3与本地原M2.7均在私聊选择已有群，收到同一冻结A／B可点击问题要求；两端都如实拒绝该私聊入口，没有以普通群文字或私聊卡替代。正式打开各自选中的群，官方尾部仍为原EW，本地仍为原EY附件记录；本地实际completed、零工具，仅新增原用户和助手2条消息。原群Runtime自己的问题卡与精确request回答链仍存在，不能将“私聊卡不能改投群”扩大为“群不能提问”。未新增产品代码或跨群问答协议。
+
+证据`cross-group-question-1024FA-4TmWYM/`冻结正文、两端private-result／target-group-full AX与PNG、before／after，以及EY的`cross-group-question-contract-readonly.safe.json`。原2224任务／13967消息逐行保持，79Bot／97命令／4回应／814文件、原群消息／成员／例行、模型设置与索引不变，最终2225任务／13969消息、0活动；activity／meta／threads摘要变化单列，不谎报全库字节相同。仅消除本项范围疑点，附件误组合与零正文仍开放，历史198／201不变；未stage／commit／push。
+
+FA终末独审12／12，见同目录`same-question-negative-final-independent.safe.json`；初次streaming观测未删除，结论采用后续终末full AX／PNG及真实completed行。
+
+### Bot主动回应与复合交付（2026-10-24，1024EZ，持久显示已实屏验证）
+
+官方真实同题在原用户消息加Bot作者👍且零正文；本地修复前明确无接口。复用原表增加作者并迁移旧用户行、原Host绑定当前真实用户／Bot身份、原事件与UI聚合，不加执行／存储体系。主私聊直接用户及既有intro注入真实用户路径开放；其他来源保持边界。曾有reaction-only空final豁免候选，因不能证明复合请求也完成已整条撤回，原完成保护及失败证据保持。
+
+六生产独审15项、原core1395、Node／Web／messages／正常build通过；真实迁移16项保全。M2.7首题Bot👍，用户同emoji共存2人／独立取消保留Bot1人；复合题3B的`64\n`实际读回、正式附卡并打开，加🎉不替代计算与文件，数据独审23项。V2仅精简无消费者的工具回执metadata，27近邻／Node／build重过，真实❤️正例及普通64零工具／零reaction负例16项独审通过；旧2222任务／13961消息逐行保持，814原件与97命令／模型设置保持，0活动。kind／taskId／messageId／revision不再进入新正文，“回执确认present”及零正文差异保持开放。
+
+实际PNG另发现user reaction的祖先操作栏隐藏了持久chip，AX存在不能证明显示。V3仅补局部CSS保留持久chip及原工具栏／时间hover边界，原六份接线生产文件和MessageBubble保持；真实祖先组件红绿、独审15项、原Web／正常build通过。首次快捷键刷新实屏仍旧，失败保留；经原生View→Force Reload重载主renderer后，空composer获焦的真实画面同时显示🎉1及❤️1，见`v3-forced-main-persistent.png`，未再加代码。主进程4801未重启。详细边界与证据见phase1同EZ节及`model-reaction-1024EZ-ivpngd4n/`；不把该项扩为全体验验收，不增加198／201，本轮未stage／commit／push。
+
+V3独审12／12见EZ目录`v3-final-visual-preservation-independent.safe.json`：实看持久chip，FA之前15项保护检查全通过；2224任务／13967消息／97命令／4回应、814原件与模型／设置／index精确保持。仅threads的UI元数据摘要改变，不误报全库相同，不混入后续FA。
+
+### 当前技能自动使用正反例与附件复验（2026-10-24，1024EY）
+
+原完整附件题在strict修正版上再次失败：A群内只发纯文本、附件改投私聊，H另行附群文件，原请求仍未满足。新增3任务／26原生消息与旧数据分开独审，不回填为通过，见`current-gap-review-1024EY-70b84c7e/original-file-current-strict-independent-result.safe.json`。
+
+官方新Bot只有通用欢迎历史，同题请求没有技能名、模板或隐藏footer，实际自动输出原EB技能的两节与独有footer、EY-43及尚未排查修复状态；独审10／10，仅确认应用效果，不推断云端加载机制。旧EB未命中保留。本地经原设置上传新的563B合成技能，M2.7实际唯一`read_file`成功读取原`SKILL.md`，再输出隐藏EY标记；普通计算反例两端均64，本地零工具。两腿独审17／17，旧2217任务／13935原生消息逐行保持、813原件及97命令不变，新增恰2任务／6消息，0活动。QA技能后经原UI停用、原技能不动。证据同EY目录`official-auto-skill-fresh-independent.safe.json`、`local-auto-skill-pair-independent.safe.json`及actual UI／PNG；源审目录刷新使用原Runtime链，未改产品代码，不扩展为群手选／按Bot启用／任意技能必定命中。
+
+官方另已在原用户消息上实际添加Bot作者👍且无文字回复；当时本地缺模型入口，后续最小复用及持久显示实证见上方EZ节，零正文与其他来源范围仍开放。不将手动用户reaction当Bot能力。历史198／201保持，本轮未stage／commit／push，当前用户100项暂存保留。
+
+### 私聊附件目的地真实偏差（2026-10-24，1024EX，未闭环）
+
+当前官方0.75.3同题明确报告私聊发群不支持附件，没有降级发正文或改发私聊；目标群实屏最新仍为原EW。官方模型自述创建41B文件，但路径按钮未打开实际预览，因此原件字节未独立验；typed合同与12处来源锚点见`private-group-payloads-1024EX-94osz737/current0753-message-payload-contract-readonly.safe.json`，不因工具枚举名字就补模型reaction／跨群question。
+
+本地真实M2.7创建／读回后，却以群文本＋私聊附件分开交付，随后H另发群文件，引起多余协作；不是同条原作者附件成功。独审10／14、4项未满足，原资料保持；`local-file-negative-independent-failure.safe.json`保留3任务／12工具／30消息全链。三处说明候选虽然228近邻／Node／正常build通过并15项正常重启保全，新A/H仍失败，已精确撤回，见`candidate-r1-result.json`。原始AI参数证实没有目标／附件被strip；H确看到候选句，A系统短语未证，见`raw-native-group-delivery-args-three-cases.safe.json`及`candidate-system-phrase-projection-two-tasks.safe.json`。
+
+R2工具明确命名候选虽完整core1391／1391、原messages／Web／build及修正测试类型后的原Node均通过，真实A任务`81d5009a…`仍群文本＋私聊文件分开交付，H另行补群附件。新工具实际被成功调用，不能归为没注册或旧缓存；有限独审9／12、3项未满足。H第二题／私聊附件正例／群文本正例未发送，不计通过。原2200任务／13830原生消息无丢失／改变，97命令保持，新增3任务／26消息且0活动；见同EX目录`r2-a-file-real-independent-failure.safe.json`。14份候选源码及编译产物均精确撤回，恢复原EW393构建，正常重启15项资料保全通过，见`r2-result-and-source-rollback.json`及`r2-after-rollback-restart.json`。问题仍未闭环，先核官方协议，不继续凭提示／改名试错。原技能自动发现已接入，旧0.18的per-Bot配置不能当当前0.75.3缺功能；相关有限源审`private-group-send-1024EW-ixnqiz5l/skills-scope-current0753-readonly.safe.json`。原198／201不变，未stage／commit／push。
+
+**EX参数校验漏洞已最小修复，原目的地误组合仍开放。** 新M2.7空职责／零记忆Bot首条用户题仍错误拆单，并首次实际传入未知files参数，收到成功群回执却没有附件；原六次无extra的结论不改写。详见`clean-first-user-diagnostic-independent.safe.json`。只在两个现有群文本schema增加.strict，生产一文件+2／-2；24近邻、原core1386、Node／正常build通过，393产物仅application.js变，正常重启15项保全通过。真实负例一次含files调用返回精确schema错误，0发布／0私聊附件／0群任务；checkpoint/native没有status:error字段，不冒称已归一。随后合法纯文本正例为新Bot一post＋A唯一回答，正式群历史实屏核对。新增3任务／12消息，当前79／2214／97／13909、811原件、0活动；临时群成员已恢复原A／H2人，新合成Bot和失败证据保留。证据同EX目录`unknown-attachment-args-fix/{independent-source-review.safe,after-restart,after-cases}.json`及原门禁／live-*，详细边界见phase1 EX节。不因本修复关闭合法工具误组合，真实两题独审19／19、原2211任务／13897消息无丢失或改变、811原件及97命令保持，见`unknown-attachment-args-fix/live-two-case-independent.safe.json`；原微博URL经正式UI恢复、登录态和实时缩略图可见，空草稿／红star外观保持；不称正常Quit前旧DOM跨进程保留。原198／201不变，未stage／commit／push。
+
+### 私聊正式发群及真实接力（2026-10-24，1024EW）
+
+官方0.75.3真实私聊选择已有群后，源GB实际在群内发布，被@的A独立作者回复唯一标记；私聊仅确认发布，无额外群内转述。当前云端工具／并发不由UI推断，0.18材料仍注明为发布产物重建。见`private-group-send-1024EW-ixnqiz5l/official-handoff-bounded-verdict.json`。
+
+本地仅扩展原正式发送工具的目标群参数，复用原发布事务／成员校验／幂等回执、discussion队列和单cursor；不取消既有用户／同事工作，新旧anchor隔离，持久@路由不受最后50条展示分页丢失，原500容量内为旧讨论留接续位置。直接私聊用户请求（介绍须已注入直接用户请求）及其精确命令来源才开放，引用群不自动联系。真实原A／H均M2.7：只引用负例0工具／0群变化、独审10项；明确公开接力为A一条公开post＋H唯一结果。后台题仅一次sleep30、实际30146ms自然完成后原通知才发到同一实际选中`1a252c54…`群，H独立回复，无私聊委派／A重复转述。两条群历史及截图从正式界面核对；不外推文件／问题跨群转送。
+
+完整回归首轮1377／1378确实发现EV字段顺序导致草稿重试换requestId；原断言及失败保留，复用原Host parser规范化比较后，两种旧落盘请求保留ID、实际range改变仍换ID。最终原core1383／1383、Node／Web、原messages／原build均自然退出0，393有效产物与激活候选逐SHA相同。EW统一Git口径6份已有生产文件+433／-35；共享Runtime／IPC／工作流／锁及取消主链未改，BotStore仅为新queued seed补原停止清理，无新表／执行器。源审闭合分页@、迟到消息和容量风险；原lint问题未冒称清零。
+
+正常重启15项保全后，三题实际结束0活动任务／命令；原78Bot、801原件／模型／配置／用户索引保持，新增案例行独立核验而不冒称全表不变。原奥巴马微博实时预览／登录态、空草稿及只读大图关闭返回实屏正常。证据同EW目录`local-*`、`original-build-messages-final.json`、`live-cases-after.json`及`user-final-*`；详细接线理由见phase1 EW节。原198／201保持，不宣称所有官方功能或Windows／App真实SSO／发布签名已验，未stage／commit／push。
+
+最终三题独审28／28、二读稳定，恰新增6task／1command／22native，4公开消息均为实际所选群中的A发起及H独立答复；后台通知post晚于命令自然结算9543ms。旧2186task／13740native逐行无丢失／改变，旧96command及旧群消息digest保持，另一同名群不变。两Bot及实际线程原模型alias／配置hash保持，不冒称逐response provider字段已映射。见`live-three-cases-final-independent.safe.json`及`final-six-production-independent-review.safe.json`，不扩大为全官方语义／质量一致。
+
+### 私聊群引用与原工作流当前增量（2026-10-24，1024EU／1024EV）
+
+EU仅同步4份已过时的测试枚举／守卫定位，原完整`npm run test:workflow`自然退出0，Runtime／IPC／工作流／锁／取消生产实现未改。18≠16来自早先Bots集成增加的能力helper及其测试被误算profile；严格注册检查保留，并以未注册profile／缺失注册反例验证仍会失败。另三份同步已有allowlist及messageControlsEnabled条件，不降低原功能计数。原失败与最终全链日志分开保存，见`workflow-gate-1024EU-pqtopdj4/workflow-original-final-result.json`。
+
+EV官方0.75.3实屏核对后，复用原私聊候选／草稿／origin接线补齐所属群的稳定身份引用。真实M2.7初始消息及活跃turn补充分别读回两个精确群ID／名称／2位Bot成员，同一sleep60只运行一次、60145ms自然完成后才交付终止标记；原通知接续不算重执行。22项独审通过，群消息／任务不变，旧2182任务／13725原生消息／95命令、78Bot、801原件及配置保持。已选群未发送草稿正常Quit后恢复，后清除本轮草稿；重启两腿各15项、草稿独审11项通过。后端293项、候选／草稿35项、真实组件、原messages、Node／Web和正常构建通过。证据`private-group-mention-1024EV-HuFI6yup/`中`live-case-final-independent-audit.safe.json`及`draft-restart-independent-review.safe.json`等；仅证明上述范围，不增加198／201。
+
+EV当时明确未通过：官方私聊按指令向已选群发合成通知后，已在该群实际看到Bot作者消息；本地同题`685a17ea…`回复无发送入口，群内没有该通知，不能以completed或身份引用通过替代真实发群。该正式文本路径及公开接力后由上节EW修正并实测，原失败保留，不改写EV首轮结论。微博此次真实认证闭环见ET，不把App招乎SSO或其他网站全部登录方式混为已验／未验。
+
+### 微博真实登录与消息交互当前增量（2026-10-24，1024ET）
+
+ET复核原生工具记录，微博真实网页登录的有界检查11／11通过：实际导航进入认证门禁，用户人工登录后，原help调用收到宿主同page、fresh observation及控制权归还回执；后续独立真实搜索提交、读回46项计数及15条结果。期间一次“页面已改变”错误保留，重新观察后成功，不只依据模型“登录成功”自述。此前笼统“真实第三方登录未验”应按此收窄：已证明微博该次认证→人工协助→归还→继续搜索读取；没有独立按钮点击日志，不能判断用户采用扫码还是验证码，更不能声称两种方式或其他SSO／2FA均通过。App招乎SSO、发布签名／Gatekeeper及Windows仍未关闭。证据`1023DE-resume-batch/message-resume-1024ET-pzkb79/weibo-real-login-bounded-evidence.{json,md}`；未读取或导出Cookie／token／验证码等凭据。
+
+同轮实际双端发现英文左括号前缀`(@验收`在官方0.75.3列出3个Bot候选、本地只显示文本。仅在原mention query helper补入英文左括号前缀，33项近邻通过；正常新构建实屏已列出候选，Enter仅选择B身份而不发送，CJK紧贴负例不列候选。真实M2.7收到宿主确认的精确B UUID并正确读回，未联系／唤醒B；原`引用工作区文件`入口保留。证据同目录`parenthesis-{after-positive,after-negative,selected-keyboard}-ui.txt`、`fixed-task-end-ui.txt`和`parenthesis-helper-final-verdict.json`；不将旧EH证据冒作这次括号边界已验。
+
+另已真实复现正文完成但隐藏工具仍在运行时，旧整轮`isLoading`继续隐藏本条回复／回应操作栏。首版finish元信息透传虽过169项近邻、类型及组件链，新构建真实M2.7仍失败（`fixed-task-live-1-ui.txt`），不能交付；整条无效链和专用helper／测试已外部备份后精确撤回，原失败与组件通过记录保留。重新核官方0.75.3实际`tgt`和普通／SendMessage文字卡父层，确认操作条不以整轮stream／finish作为权限；对应SHA／byte锚点见`official-actions-streaming-gate-readonly.json`。最终只将`MessageBubble`两个Bot展示条件与整轮loading解耦，原工作台、正文StreamingMarkdown、虚拟列表、Runtime完成门禁及执行／审批／取消保持原字节。真实任务中又确认新消息首取回应状态可能早于落库、缓存false到任务结束；仅在`BotMessageActions`让未确认消息打开Smile时调用已有`retry`重新读取，具体emoji写入仍经原canReact／readOnly／pending与Host校验，已确认条不多读。复用原scope单并发、100条分批及卸载fence，无新增轮询、token监听、状态或存储。
+
+当前正常候选生产delta共3文件（上述两个组件＋mention helper），原main93件精确恢复ET前构建，正常App登录初始化保持。真实M2.7最新30秒execute未返回时，原生UI已显示Smile→Reply→More；打开待确认Smile后5快捷项可用，确实保存该中间消息❤️1人，并由Host返回同条精确引用。动作时钟与工具回执单列，临时❤️及未发送引用已清理。另一条正式引用任务零工具准确复述中间消息原文；同题官方也在整轮未结束时实际开放中间消息引用。当前有效近邻为最小reply／reaction浏览器、Host引用／回应10项、Web、原`test:messages`及窄lint，见`minimal-bot-actions-final-result.json`及`emoji-*`真实UI／时间记录；初版169项仅是弃用方案证据。原`test:workflow`一次遇到HEAD既有expert-agent-library目录枚举18≠16，后续串行项未运行；相关文件均未改，未将其记成全通过。
+
+本轮两次正常Quit后保全检查各15项通过；随后只刷新renderer，主进程72167及原微博页面保持。78 Bot、2181任务／13721消息的刷新前后快照、95条旧commands、801工作／记忆原件、模型／设置／奥巴马外观及当时索引保持，无重放；后续唯一新增合成表情任务另据真实回执核对，不混用旧计数。原微博搜索URL经正式UI恢复，真实登录头像／搜索画面、归还后缩略图及只读大图有证，renderer刷新后同页仍在。证据`minimal-restart-{before,after}.json`、`renderer-retry-{before,after}.json`、`minimal-candidate/{activation,renderer-user-retry-activation}.json`及`weibo-restored-before-reload.png`。最终有限源码审阅见`minimal-bot-actions-independent-source-review.json`；本轮ET不增加198／201，不表示全部官方体验／平台已经完全相同，未提交或push。
+
+ET最终有限独审20／20通过，第二读稳定：78 Bot、2182任务、95 commands、13725原生消息，0活动任务。五条合成任务全部completed，四次唯一前景sleep30均自然exit0，正式引用任务零工具且id／ordinal／原文完全匹配；括号选中的B身份精确、没有唤醒B。Smile打开、保存❤️及Host引用的实际观察时间均早于该工具返回；原2178任务／13711消息快照、全部95 commands／旧回应、801原件及设置／模型SHA保持。见`five-task-final-independent-audit.safe.json`，最终Smile浏览器／Web／lint门禁见`reaction-open-retry-final-result.json`。模型范围依据原绑定配置保持及白名单M2.7观察，不冒称逐任务provider checkpoint映射5／5；原包装投影诊断保留。用户原微博面板、空草稿与外观已恢复，当前暂存语义保持，未stage／commit／push。
+
+### 主预览激活与基准索引（2026-10-24，1024EP／ER／ES）
+
+ES主预览独审20／20：78 Bot、2177 tasks、95 commands、13707原生消息／工具记录及801份工作／记忆原件、模型／设置／索引保持，只有revision和两条threads.updated_at变化，无任务／工具重放。实际“奥巴马”红star／空草稿和栏宽保持，使用原正式UI恢复记录的微博搜索URL，原登录有效；归还后缩略图、只读大图与关闭返回均有真实画面、无取图错误。整App Quit后的URL恢复不冒称旧DOM存活，本轮Dialog关闭不冒称新增native红X测试；后两类生命周期／隐藏取图修复仍以同源码EC22／native14及EG／EI为证。主预览已留在原Bot微博面板，未发新模型题或追加产品代码。证据`main-preview-current-1024ES-hpnfrd73/{after-startup-independent-audit,after-ui-runtime-scope}.json`、`after-real-weibo-viewer.png`及`final-weibo-panel.png`。不能据此宣称Windows、企业认证、完整云VNC桌面或全部浏览器体验完全相同。
+
+官方基准索引另归并P00.2，见`remaining-current-audit-1024EP/P00-source-baseline-index.{md,json}`：12类核心流程、37份真实截图／AX等文件均已核存在、大小和SHA，当前官方版本0.75.3；历史未冻结版本保留未知，连续JPEG／派生GIF不冒称完整流程录屏或当前版本全量重测。索引不增加201案例数，也不替代浏览器实际使用验收。
+
+### A01／A02的M2.7创建反例与修正（2026-10-24，1024EJ／1024EL／1024EN）
+
+EJ正确隔离的新Mac包A／B两次空职责介绍均completed、零工具，只有欢迎文字，没有应有3–5选项卡；不是UI漏画或真实用户优先跳过。旧1020AC的DeepSeek通过不覆盖这次失败，原记录保留。EL仅复用原完成协议最多两次续作修正有效空职责intro，4文件／270近邻／Node类型及独审通过，共享门禁／工具／锁／取消未改。当前EN全量包的真实M2.7正反例31项独审通过：A单次欢迎后实际5选项、真正鼠标提交，再自然第二问；真实浏览任务到来立即忽略第二问并同intro接续、只navigate／write／deliver各一次，150B真原件从卡片打开。B具体职责任务零工具直接完成；C真实待答改发任务，ignored空答案、同intro注入并只答新任务，未强迫问卷。A01／A02本次重新开放项已关闭，不增加201总数，不以此宣称完整体验／平台通过。证据`P15-current-full-1024EN-bi1ldgh8/independent-EN-introduction-{verdict,audit}.json`及UI记录。首次工具误启默认实例的失败、两份合成记录待确认清理和后续强制隔离验证仍见phase1及EJ目录，未将无事前基线的默认偏好称为完全未变。
+
+EN另有正常Quit／LS重启15项独审通过：3Bot／5completed／18原生消息及文件无重放、SHA保持，原卡实际再次打开；两次正常退出和夹具停止已确认。原主预览及用户微博现场保持；EL主进程修正本轮只在新隔离全量包激活，未热替换原运行进程。证据同EN目录`independent-EN-restart-audit.json`及`final-root-guard.json`。Windows、真实SSO及发布签名不由QA授权绕过登录或macOS功能测试替代。
+
+正确EJ包已补emoji／引用18项及正常Quit／重启17项独审：真实选中私聊B、浏览新随机校验码、交付并打开452B原件；中间欢迎消息仅持久🚀，正式引用后精确零工具回答。正常退出43440再由LS强隔离启动60810，2Bot／4completed任务、原消息、回应／引用及文件SHA不变，无重放；原卡再次打开成功。整应用Quit结束原生页，不称跨进程DOM恢复。EK另用仍无结果的45秒execute实际完成同一turn的@补充，精确`injected_into`与checkpoint宿主身份、命令仅一次及自然exit0／通知静默19项通过；既有steer移交后台优先新消息，非新执行机制，不将额外括注称为严格单行。证据同批`P15-current-delta-1024EJ-tzv9phg6/`及`busy-mention-1024EK-9h2ir1vf/`，不据此关闭A01／A02或增加201计数。
+
+### 浏览器体验及资源增量对照（2026-10-24，1024EI）
+
+保持浏览器体验硬门槛，不把198／201或原生截图成功等同整体体验对齐。关窗／查看／接管／归还／跳过沿1023EC、1024EF、1024EG真实官方与本地证据；本轮在正常主预览补10次微博只读大图开关，每次有图、不接管，renderer刷新后同main／browser-host及微博实时页保留。唯一新增生产修改为裸链接helper，沿官方0.75.3 HG通用尾标点裁剪，使真实历史`**https://example.com/**，…`的目标回到`https://example.com/`；source-exact坐标、显式链接／Unicode前缀／@范围与工作台保持，原字面`**`不宣称恢复strong，CJK裸URL起始全角路径歧义保留。定向先红21例14失败、修正后30／30，冻结独审通过。
+
+1024EM独立只读收口9项浏览器使用流程，当前11份生产集成源与EI相同，已核合同内无新的已证阻断偏差。逐项真实证据继承、最终Skip／Done与旧native14的覆盖区别，以及官方0.75.3精确SHA／字符与字节锚点均见`browser-final-contract-1024EM/report.json`。不将该源码复核称为新UI测试、Windows／企业认证通过或整应用Quit保留旧DOM，体验硬门槛保持。
+
+原组件夹具补50次预览开关／mount／unmount：捕获最大并发1，observer／visibility listener每轮1→0，迟到回包卸载后2700ms不续采集；原hidden／离屏及查看共用循环腿通过。Reaction1000合成已加载ID精确10批×100、50轮scope／More／mount卸载后无额外ordinary读取／订阅累积／目录重复请求；迟到首批不续发9批。两文件Node22串行首跑通过，fixture counters不冒充真实数据库或native截图性能。
+
+实际同8进程树约30秒CPU累计差：缩略图4.16%、大图3.50%、10次开关后3.17%、资料库卸载预览0.93%、背景任务及renderer刷新后3.86%。RSS和依次1006528／1013296／990256／869280／811152KiB（含共享页），FD和289／289／289／289／294；browser-host始终66FD，末段5FD增加在main，尚未追溯具体初始化，不据此保证长期零增长。M2.7背景命令仅启动一次，补充真正选择B身份并读回结果，只有一次正式EI_BUSY_OK，settled通知静默；B未被唤醒。首轮CUA中断保留，补充的`injected_into`为空，不计同一活跃turn注入通过。
+
+证据`1023DE-resume-batch/browser-resources-1024EI-klqikqf1/`含真实UI、各阶段process样本、`component-resource-regression.json`、独立背景任务审计、renderer构建／激活、source／index守卫。完整说明见phase1同1024EI节；最终Web／原test:messages／diff检查通过，原main／preload／工具／锁未改，未提交或push。平台与新包待验条件保持，不新增201案例计数。
+
+### 消息交互与原功能边界复验（2026-10-24，1024EH，macOS）
+
+用户指出的私聊@、中间消息引用和引用左侧表情回应已实现并在正常主预览激活。参考官方当前私聊候选／已选身份、逐条回复及快捷回应实屏（`message-interactions-1023ED-b5t1ipfx/official-private-mentions-open-ui.txt`、`official-private-mention-selected-ui.txt`、`official-middle-message-reply-ui.txt`、`official-middle-message-menu-ui.txt`）；快捷为👍👎❤️😂🎉＋更多，原生完整目录保留其他emoji。复用原CmbCowork textarea、@文件／草稿／队列、真实native message ID／ordinal及原reply接口。输入区保留原textarea并显示身份chip，没有引入另一个富文本编辑器；发送后的正文显示可点击Bot身份，私聊提及不自动群发／委派或读取同事私有历史。
+
+同一正式预览另补鼠标实际选取Bot候选、身份chip原子移除与空草稿恢复，未发送额外任务（`private-mention-native-mouse-choice.txt`／`private-mention-native-mouse-removed.txt`）。正式MiniMax-M2.7三条任务均完成：首条通过Enter真正选择B身份再发送，回复EH_MENTION_OK＋正确全名；编辑原消息时从宿主origin与原native正文恢复同一身份，修改检验码重发得到EH_EDIT_OK；第三条正式引用第一条中间assistant而不是最后一条，真实回复EH_MENTION_OK。12项首轮、19项三任务独审分别核对了精确Bot UUID、范围、request／native ordinal及replyTo；六条native消息均无工具，B任务／消息／activity与基线相同，无自动唤醒。没有按名字猜测恢复身份，无法验证时清除并提示重选；原工作台及来源工作会话保留原分支。
+
+同一中间assistant在真实界面添加❤️、打开完整目录搜索rocket再添加🚀，两种独立保存；取消❤️后仅🚀。另在已有合成群添加并取消🎉，私聊🚀不变，未新增群消息或模型任务。回应只存原消息目标与本地用户emoji，不复制正文、不引入执行／通知回放；宿主严格验证消息归属，控件按原client／scope隔离旧回包，100条分批读取，关闭的目录不加载。完整目录使用emojibase（MIT）／Unicode数据与系统emoji，不复制Grok产品素材；许可证随资源保留。
+
+操作栏已改为Bot正文右侧Smile→Reply→More，回应留在下方，Bot Reply16px、工作台12px。Bot正文父结构在流式及完成时保持，既有ContextMenu只在Bot assistant保持稳定外壳，防止完成时整泡泡重挂；原工具／审批顺序不变。最近真实组件验证宽960／窄360的短文、长URL与表格无重叠／横溢、回应占下一行、完成DOM保持，以及精确回复ID、IME／文件候选和草稿边界。群复制More再次打开也恢复原复制标签。中间夹具缺selector、注入__name及Tailwind scanner未读取内容的失败／覆盖不足记录保留；布局与尺寸以最后`official-actions-reply-size.log`真实生成utilities的结果为准，不把旧夹具记录当充分通过。
+
+正常Quit确认旧main／browser-host退出后，以同profile正常重启：实际历史仍有两个不同检验码、原正式引用和仅🚀回应，中间消息可再次引用并取消；点击历史@打开正确B。14项独审逐字段确认3条task及origin、6条native与1条🚀回应（含added_at）保持，task2170／command93／native13687均无新增或重放。全表比较仅bot_meta.revision及4条threads.updated_at变化，其他原业务表、消息与回应全行保持，双库quick_check正常；设置／模型配置／用户暂存SHA保持。原工作台实际加载出原复制／fork／点赞／点踩与输入框，未新增模型测试到该线程。
+
+外部源码快照读取当前正式工作树及19项精确批准新增生产资源，排除.env、测试／诊断入口，复用原Vite配置与9个生产main入口，无E2E开关；正常三阶段构建、最终Node／Web类型／原test:messages及最近组件／lint通过。最终纯renderer刷新未重启main／browser-host，用户奥巴马的微博实时图保留；未修改其模型、外观或正文。证据集中在`1023DE-resume-batch/message-interactions-live-1024EH-6uf8ziqc/`：`current-live-messages-reactions-audit.json`、`restart-independent-audit.json`、`root-restart-preservation.json`、`private-after-normal-restart.txt`、`private-inline-actions-after-restart.png`、`middle-reply-after-restart.txt`、`private-mention-history-open-peer.txt`、`original-workbench-after-restart.txt`、`final-official-menu-activation.json`和`user-weibo-after-final-renderer-reload.txt`。不扩计原201案例，不据此宣称Windows或所有Grok功能／像素均已对齐；未提交或push，用户索引保持。
+
+### 浏览器查看、接管与协助结果补齐（2026-10-24，1024EG）
+
+浏览器按实际使用动作继续对齐，不以旧198／201代替体验验收，也不新增案例计数。参照为当前安装的官方Grok Bot 0.75.3实际查看／接管流程、协助卡“跳过／我完成了”及真实Skip回执；0.18材料是发布产物重建，不冒称原upstream。查看缩略图改为只读大图，关闭或Escape不接管、不暂停或唤醒任务；明确接管按钮才沿原human租约打开精确Page。人控期间切页也显示所选原生页，普通只读切页不改变执行目标。大图复用同一截图状态和2.5秒单请求循环，无新增存储、回放、轮询或系统唤醒机制。
+
+复用原request_help／generation／giveBack：卡片、面板和大图都能明确“归还并继续”或“跳过此步”。Skip仅接受当前有效help租约与generation，隐藏失败不标跳过、不唤醒；成功后fresh observe回传helpSkipped，新租约不继承旧结果。历史只依据原持久化call／ToolMessage展示“已跳过／协助已结束”，不复制消息或推断用户完成业务步骤。真实M2.7两轮分别只调用navigate＋help、help＋observe，16／16和18／18独审通过：同页保留、无输入重放／重复请求，正常归还未串入旧Skip，无文件／记忆／例行／委派。官方Skip同样明确目视核对未完成且保留页面。
+
+首版Dialog操作区裁切为真实失败，原截图保留；修为有界flex纵向布局、图片占剩余空间、必要时滚动，1000×800／1000×600真实组件边界及正式界面均通过。portal三枚按钮复用原Button，未加样式或状态体系；最终renderer已通过原生View→Reload激活，main 21548／browser-host 23386保持不变。实际微博只读大图完整显示接管按钮，关闭后仍是Bot控制和实时预览；用户原微博地址重开并归还，未冒称正常整包退出后原DOM／未保存表单仍在。原生红X隐藏与同DOM恢复继续由1023EC／1024EF证据覆盖。
+
+相邻105例、history／visibility 60例、最终Web类型、原test:messages及组件回归通过。终审未发现改动扩散至原工作台浏览器、通用工具执行／取消／队列或文件锁。Bot定义、群、例行、工作项等原业务表逐行保持，设置／模型配置／用户暂存SHA保持；只新增本轮2条合成task和12条native消息，另有正常activity／revision／threads元数据变化，双库quick_check正常。待验私聊@／引用／emoji未夹带激活。
+
+收尾另修Bot裸链接吞入中文括号的问题：只对原文坐标可证的裸链接在CJK标点处分回普通文字，显式链接、代码、email、Unicode域名、localhost及原工作台解析保持；52例相邻通过，正式界面第一条链接已为精确example.com。原GFM在紧邻中文时把strong闭合**吞入URL的另一个解析边界仍保留，不冒称已恢复strong或所有链接均正确，不为此造第二套Markdown解析器；正式界面第二条URL仍含/**，列为后续显示问题。
+
+证据集中在`1023DE-resume-batch/browser-viewing-1024EG-u72_gosd/`：`independent-1024EG-skip-verdict.json`、`independent-1024EG-DONE-verdict.json`、`official-help-final.txt`、首轮`local-help-viewer.png`及修正`local-done-viewer-fitted.png`、`user-weibo-final-viewer.png`、`local-final-history-and-links.txt`、`final-renderer-activation.json`和`final-data-preservation.json`。上述结论关闭本次已复现的生命周期／取图及查看协助差异，不宣称所有浏览器体验、真实第三方SSO或Windows已经完全一致；平台未验条件继续保留。未提交或push。
+
+### 浏览器持续取图修正与真实复验（2026-10-24，1024EF）
+
+用户真实微博搜索页再次出现“正在获取画面／暂时无法获取浏览器画面”。原页面标题仍在；实屏只接管、未导航或刷新后，同URL恢复实时图。该问题先于下列消息交互完成修正与真实复验；浏览器不能按旧198／201或1023EC记录宣称整体体验通过。
+
+隔离原生页已稳定复现Playwright截图等待挂起字体、连续两次5007ms超时；原生`webContents.capturePage()`42ms成功，中文、URL与未保存表单不变。该证据证明截图方式存在确定缺陷，不能直接断言真实微博是哪个字体或资源挂起。最小修正复用原CmbCowork的native capture和现有owned target RPC，不改页面生命周期、控制租约、后台节流、系统唤醒或轮询频率。新owned target原生截图接线保留5秒RPC预算、同target最多一个未结束native capture、空图／大小校验和安全错误分类日志；截图失败仍返回control／generation。相邻70例、Node类型检查与独审通过；新进程14项原生回归覆盖隐藏／pending字体／同id新导航／三轮接管归还／红X重开同DOM与表单／dialog跳过及恢复／双Bot目标隔离／显式清理。
+
+证据`1023DE-resume-batch/browser-font-capture-1024-wzntiyn0/`含原始错误stack及现场`live-before-ui`、`live-takeover-ui`；原现场保持，不通过重置或旧图掩盖问题。旧host没有热加载能力，已正常退出后仅激活验证构建的2件main产物；消息引用待验补丁未夹带激活。原微博URL重开并归还后，隐藏预览持续显示，原登录状态仍可用；这是新实例，不称原DOM／未保存表单恢复。Bot业务表、任务／历史保持；原工作台threads仅updated_at及bot_meta.revision正常变动，模型配置和用户暂存保持。
+
+正式主预览的MiniMax-M2.7任务`7b125e67-4f78-49ee-846b-e9f3d4fa6351`在22.967秒内只用2次bot_browser分别打开甲页、另开乙页，准确读回未在提示中给出的两份随机nonce；无命令、记忆、例行或委派调用。真实字体请求一直挂起时，未show的甲页及乙页往返切换都有新画面，无旧帧标签／captureError；回到原Bot仍为微博图，服务器各页仅1次GET、无导航重放。14项现场断言通过。最新证据`browser-native-build-1024-_gxi9iy2/{live-verdict.json,activation.json,restart-field-diff.json}`、`browser-native-preview-regression-1024-9rzwk_92/`与`browser-live-nonce-fixture-1024-y4z8q62v/`；官方实屏另验证取得控制→退出viewer→重开为仅观看、原Chrome网页保留。此结论仅关闭本次确定取图故障，不代表所有浏览器体验已完全对齐；不增加201清单计数，未提交或push。
+
+### 消息交互补齐范围与后续实证（2026-10-24，1024ED／1024EH）
+
+沿用一期目标与第0节原则，先处理用户指出的两组交互，再继续其他当前可执行对齐工作。工具中旧目标尚未完成，新建覆盖被拒；不把旧目标误标完成，也不将Windows／外部依赖阻断用作暂停本轮可执行工作的理由。未获新指令不提交或push。
+
+| 功能 | 已确认差异 | 当前状态／验收要求 |
+| --- | --- | --- |
+| 单Bot私聊@其他Bot | 官方私聊支持候选、正式联系与回传 | FQ复验不稳定，新增输入功能已撤回／未交付；ED身份编辑记录只作历史，历史提及显示仍保留 |
+| 私聊@所属群 | 官方候选包含已加入群，并可按明确指令正式发群 | FQ随私聊候选一并撤回／未交付，EV身份测试只作历史；EX附件另按用户决定放弃本期 |
+| 每条可见消息引用 | 原中间assistant回复入口及opaque provider ID校验存在缺口 | macOS当前流程已修；真实中间消息引用得到正确旧检验码并跨重启保持，流式完成DOM／工作台边界组件回归通过 |
+| 引用左侧表情回应 | 原反馈按钮不等同消息emoji回应 | macOS当前流程已补齐；快捷／完整目录、多emoji、取消、群私聊隔离及正常重启保存通过，沿原控制库严格绑定真实消息 |
+
+本轮证据集中在`1023DE-resume-batch/message-interactions-1023ED-b5t1ipfx/`。官方私聊@候选及选中chip已从原生界面核对，未发送测试草稿且已清除。每项只有同一用户动作、状态与真实结果验证完成后才能更新为通过；原198／201不据此扩算。浏览器旧H12／H13的关闭动作错位和覆盖遗漏结论继续保留，后续按真实操作复核清单缺项。
+
+### 2026-10-23 浏览器完整流程补核与修正（1023EC）
+
+用户确认曾关闭独立浏览器窗口。原生复现证实红X销毁owned Page，任务已结束且无close工具调用时，电脑面板随后变空；不是模型或任务完成自动关页。现将原生关窗作为隐藏查看窗口，保留同页ID／URL／未提交表单；显式关闭网页、取消、删除Bot、服务退出仍真实清理。已重新打开原「奥巴马」的微博热搜只读页并归还，预览保留；旧版已销毁的页面并不冒称原样恢复。
+
+沿现有owned Page、浏览器锁及generation租约补齐点击预览／Enter打开、后退／前进／刷新、新建／关闭和精确选页。普通查看关窗后归还；request_help保持等待，明确归还才fresh observe、不重放输入。独审发现的普通租约提升help漏instruction已补正并保留首条真实说明，旧hidden事件不能自动续作。没有新增浏览器存储、执行或回放体系，未改原工作台Runtime／工具队列／文件锁。
+
+截图失败仍回传真实control／generation／页列表；仅同scope／client／pageId／URL且页面仍在、无dialog时可保留上一帧，明确标“上次可用画面”。真实关闭、切页或换Bot不复用旧图。原2.5秒单请求可见轮询保持，history元数据替换原每页title RPC，没有增加每页轮询请求。
+
+Node／Web类型、相邻77项、核心90文件1194项、最终help定向2项、host5项、原生22项＋help补充6断言及真实组件测试通过。正式主预览加载原配置外部构建后，MiniMax-M2.7一次任务实际读回未在提示中给出的页面nonce和两页标题，保留双页；实屏完成点击接管、地址导航、back／forward／reload、第三页新建／菜单／关闭、返回原页与归还。重启前原业务表逐行保持，模型配置SHA保持；原HEAD的空IM表初始化与revision递增另列，不计作浏览器新存储。
+
+完整覆盖矩阵、Grok来源和边界见`1023DE-resume-batch/browser-complete-1023EC-aay_ibhi/browser-ux-coverage.json`；主验证含`core.log`、`help-promotion.log`、`final-node.log`、`live-verdict.json`、`activation.json`、`restart-preservation.json`、`minimax-result-ui.txt`、`manual-controls-final-ui.txt`与`user-weibo-restored-ui.txt`。原生证据另见`browser-native-controls-1023EC-eeNv7W/`和`browser-human-help-upgrade-1023EC-ejccdrvd/`。throw整份preview的失败候选已撤回，原生测试抢读异步close／外部按键污染记录保留。
+
+Grok 0.18材料是基于官方发布产物的重建，0.72归档的普通viewer退出只证明renderer hasControl清零，不能直接声称与本地host租约同实现。本地仍按一期约定采用Electron专用profile、截图预览＋独立可操作窗口，官方为云桌面／VNC；不宣称云桌面、Chrome全部界面、真实第三方登录或Windows完全一致。上传／下载／唯一提交、登录态、跨Bot／群隔离与重启清理复用原H01–H13对应实证；Windows继续P17／P18待实机。本次修复不新增201案例计数，当前198／201不变，未提交或push。
+
+### 2026-10-23 官方技能实际调用观察（1023EB）
+
+官方应用原生编辑页确认既有私有技能后，在新Bot「技能调用核验-1023EB」仅文字点名`ar-synthetic-ledger-1023dv`并上传64B新CSV，未给模板／footer。正式587B报告已从卡片实际打开，精确三章、原技能独特footer和本次3行／1525分／15.25均正确，支持“已保存技能指令实际生效”，不推断内部加载工具或上下文注入方式。没有成功操作slash／@选择器，不把本题改称手选对照通过。
+
+自动匹配另测：GA原生保存限定`EB-TRIAGE`场景的新合成技能并实核编辑页，EB只描述任务不点名时未出现该技能的两节／新footer；点名同一技能后两者均出现。记录为“本轮未观察到自动调用模板生效，点名可用”，不外推所有自动调用均失败。原「＋→教它做一项任务」进入电脑示范录制；未开始录制，退出后已归还控制。证据`1023DE-resume-batch/official-skill-execution-1023EB/{skill-execution-observation.json,actual-report-preview-full-ui.txt,auto-skill-editor-ui.txt,auto-result-full-ui.txt,auto-skill-explicit-retry-result-full-ui.txt}`。三轮执行均保留，不新增201分母或通过数，不改CMB生产代码，未提交或push。
+
+### 2026-10-23 Mac包内功能验收（1023EA／P15）
+
+用户授权仅在外部隔离QA包注释自动登录后，正常arm64包实际创建Bot，以MiniMax-M2.7完成浏览器读取、系统命令、613B报告／139B JSON及一次正式交付。来源标记由真实网页读回，三笔合计7413分／74.13；两份原卡实际打开、经系统保存窗口保存，下载字节与工作区相同。浏览器实况预览和接管／归还已实屏核对。正常Quit并确认旧进程退出后，同包同目录重启，原Bot／问题／成果卡／最终回复恢复，原卡报告仍能打开；2任务、11原生消息逐SHA／逐字段保持，无重放，产物和下载件保持。独立产物24项、重启9项检查通过。
+
+388件有效out与实际ASAR逐SHA相同，原PTY与原生模块解包，无E2E入口或额外浏览器依赖。唯一QA源码差异是自动`initUser()`调用，正式仓库与主预览未改；原源码／构建／配置／索引守卫保持。结束后QA正常退出、夹具停止、临时模型凭据移除。首次CUA旧画面与过期索引失败保留，真实重绑后才作通过判断。此项关闭的是包内功能合同，**真实SSO、发布签名／Gatekeeper仍未验**，不称正式发布安装通过。证据`1023DE-resume-batch/P15-auth-skip-1023EA-xyjffynq/{final-package-functional-verdict.json,independent-task-artifact-audit.json,independent-restart-audit.json,restart-report-preview-ui.txt,restart-report-preview.png}`。
 
 ### 2026-10-23 侧栏拖动排序与正常重启闭环（1023DY／L03）
 
@@ -1173,8 +1461,8 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 
 | ID | 优先级 | 操作／输入 | 独立通过标准 | 状态 |
 |---|---|---|---|---|
-| A01 | P0 | 从侧栏＋开始，填写新名称、头像，创建并等首次消息 | 创建完整流程对照；稳定身份、仅一次介绍，无首发报错 | 通过（1020AC；双方真实＋/名称/药片黄色/一次介绍与问题卡，首发交付源码；重开身份与介绍不重放） |
-| A02 | P0 | 首次选项出现后选择“编程”，再回答位置 | 真正问题卡及回执，历史保留选择，自然进入任务 | 通过（1020AC；真选编程/原submitted回执，位置及同题源码交付、两下载独立4/4；本地后续自然文本询问与官方第二位置卡差异保留） |
+| A01 | P0 | 从侧栏＋开始，填写新名称、头像，创建并等首次消息 | 创建完整流程对照；稳定身份、仅一次介绍，无首发报错 | 通过（1024EN M2.7新包真实单次欢迎＋5／4选项；具体职责B直接做任务、C新任务优先，31项独审。EJ缺卡首败保留；旧1020AC双方＋／名称／头像／DeepSeek证据保持） |
+| A02 | P0 | 首次选项出现后选择“编程”，再回答位置 | 真正问题卡及回执，历史保留选择，自然进入任务 | 通过（旧1020AC真实编程／位置与产物证据；1024EN M2.7另实际选择浏览器方向submitted、自然第二问，真实目标替代问卷时ignored并完成浏览及150B原件交付。EJ首败保留；不要求每次问同一位置题） |
 | A03 | P0 | 创建时指定职责；首次打开立即发实际任务 | 职责生效，用户任务优先，不强制重复入门问答 | 通过（1022CA新M2.7一般职责创建，真实介绍running后1718ms接受用户题，旧superseded／新独立completed，原生2行0工具／正确15.25；官方旧入门卡ignored后正确行。20项独审与原AC职责证据补齐，旧timing miss保留；原777文件及旧数据保持） |
 | A04 | P1 | 名称空白／全空格／中文／emoji；取消再打开 | 禁用与校验准确、取消不创建、键盘焦点和草稿保留 | 通过（1019FB，双方；见执行记录） |
 | A05 | P1 | 连点创建／提交时按 Enter，再重开 Bot | 只有一个 Bot、一个 introduction；失败可重试不重复 | 通过（CB双方真实双击＋随即Enter／重开唯一17项复用；DM原App真实SQLITE_BUSY保草稿、原按钮唯一重试及真实欢迎，重开唯一intro／原96行保持。pending内keydown未捕获、完整新onboarding未声称；按原合同组合闭环，不新增罕见窗口硬gate） |
@@ -1447,7 +1735,7 @@ W6B双方真实下载原件均13字节、哈希相同，父Bot已read_file后交
 | P12 | P0 | 原项目模式、工作流／worker、技能、自动化、IM相关回归 | 相邻已有测试及关键真实入口通过；不以Bot门禁替代原链回归 | 通过（1021BV；原108项＋6脚本及真实项目创建取消／worker完整回执／skill预览／automation空态／IM合法未登录入口，独立按原合同闭环；未声称各链新完整e2e） |
 | P13 | P0 | 原全局记忆和原浏览器在Bot任务前后使用 | 与Bot私有体系边界保持，无旧共享浏览器误调用或全局记忆污染 | 通过（1021BV：原global前后同目录合法空库0文件／0B，私有41文件独立；原WAL页面前后实际加载、刷新及目录交互，新专用Bot页owner／实际工具／memoryEnabled边界9项核对通过。不扩为F12或全记忆语义通过） |
 | P14 | P0 | 初次打开原工作台而Bot存储不可用的受控测试 | 原应用仍可打开，Bot错误明确，不因注册接线拖垮核心功能 | 通过（1023DE隔离真实EEXIST，实际原工作台初开／空编辑器、Bot错误／重试入口、返回原工作台六项与四图独审通过；临时进程正常退出、原预览保持。非正式包／SSO／模型执行；错误原始路径与恢复另归L12） |
-| P15 | P0 | 打包后的Mac应用运行M3、创建Bot、开浏览器／交文件／重启 | 使用内置Electron，无另装Chromium／Python／Docker依赖；产物版本准确 | 部分／环境阻断：1023DP当前arm64包388out／29资源、PTY解包及真实SSO加载通过；用户无法登录，包正常Quit退出0。包内Bot／M2.7／浏览器／交付／重启仍未验；codesign失败单列，非签名安装通过 |
+| P15 | P0 | 打包后的Mac应用运行当前选定模型（本轮M2.7）、创建Bot、开浏览器／交文件／重启 | 使用内置Electron，无另装Chromium／Python／Docker依赖；产物版本准确 | 包内功能通过（1023EA）：用户授权隔离QA包注释自动登录；真实Bot／浏览器／命令／两文件正式打开保存及正常Quit重启恢复，2任务11消息原字节保持、无重放，388out／PTY包内核对。正式源码未改；真实SSO及发布签名／Gatekeeper未验，非正式发布安装通过 |
 | P16 | P1 | 比对实际diff、许可证／构建notice与配置敏感信息 | 无诊断钩子、密钥或合成样例混入产品；无效尝试已撤回 | 通过（原BS91／CW118各自冻结范围保留；1023DV当前11路径＝2文档＋7renderer生产＋2测试增量复核，原依赖／配置／notice源在HEAD／index／工作树相同、生产新增行无诊断／QA／已知凭据样式命中，3份notice源／out／候选／实际ASAR逐字节一致，索引保持；不把三个快照路径数累加，后续变更须重核） |
 | P17 | P0 | Windows安装包：启动、创建M3 Bot、首发、附件、浏览器与接管 | 原生路径／中文／资源正确，无WSL／Docker前提；需要实机，缺机记阻断 | 待测 |
 | P18 | P0 | Windows停止／子进程／重启恢复、原工作台与布局检查 | 真进程和文件对账；无Mac特有逻辑泄入，不以静态类型检查代替实测 | 待测 |
@@ -1545,7 +1833,7 @@ K06发题前冻结50个UTF-8文件和manifest：01定义CSV金额按分精确累
 
 ### 覆盖计数与退出条件
 
-- 每例关闭前核对该行全部参数；“私聊通过、群待测”等属于部分执行，不进入201例通过分子。2026-10-23用户确认的 I07／J01／J03／J04／J05 只解除官方侧对照阻断，本地原功能参数仍须全部通过；本地验收197／201与原对照口径192／201分别报告，不把调整口径称为新增实测。
+- 每例关闭前核对该行全部参数；“私聊通过、群待测”等属于部分执行，不进入201例通过分子。2026-10-23用户确认的 I07／J01／J03／J04／J05 只解除官方侧对照阻断，本地原功能参数仍须全部通过；加上本轮真实P15包内功能验收，本地198／201与历史对照192／201分别报告。前五项调整口径不称新增实测；P15临时跳登录的授权边界与真实认证／签名未验始终保留。
 - 同步维护待测、已完成通过、仍有差距、环境阻断数；总和必须为201。Windows与共用公开表单等无法执行项明确保留阻断，并继续完成本机可执行项。
 - 发现确定缺陷即保全现场、最小修正和同题复验；性能、类型与相邻功能检查通过后才关闭修正。官方自身失败仍记录，但本地不能因此降低正确性／交付门槛。
 

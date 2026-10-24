@@ -4808,6 +4808,7 @@ export function ChatContainer({
       surface !== "bot" || !replySource
         ? null
         : {
+            canReply: !readOnly,
             quoteFor: replySource.quoteFor,
             setDraftReply: setDraftBotReplyTo,
             jump: jumpToBotReply,
@@ -6062,7 +6063,7 @@ export function ChatContainer({
       const claimedMentionedFiles = mentionedFiles
       let rawMessage = trimmedInput
       // Bot drafts stay in the composer during preparation. Only the durable
-      // outbox handoff below consumes them; IO or storage failure preserves chips.
+      // outbox handoff below consumes them; IO or storage failure preserves the draft.
       if (!managedTurn?.submitDraft) {
         setInput("")
         setAttachments([])
@@ -7702,11 +7703,18 @@ export function ChatContainer({
       })
       if (missingSkillName) {
         toast.warning(`原消息使用的技能「${missingSkillName}」当前不可用，已从草稿中移除`)
-      } else {
+      }
+      if (!missingSkillName) {
         toast.success("已填充到输入框，编辑后可重新发送")
       }
     },
-    [extractMessageText, setInput, setSelectedBuiltinBrowser, skills, setSelectedSkill]
+    [
+      extractMessageText,
+      setInput,
+      setSelectedBuiltinBrowser,
+      skills,
+      setSelectedSkill
+    ]
   )
 
   const handleSetGoalFromMessage = useCallback(

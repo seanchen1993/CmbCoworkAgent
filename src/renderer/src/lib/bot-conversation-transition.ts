@@ -1,5 +1,6 @@
 import type { useThreadContext } from "./thread-context"
-import { getQueuedModelContent } from "./queued-message-content"
+import { getQueuedBotMessageInput } from "./queued-message-content"
+import { canonicalBotMessageInput } from "../../../shared/bots/message-mentions"
 import type { BotWorkConversationResolution } from "../../../shared/bots/conversation"
 
 type Context = ReturnType<typeof useThreadContext>
@@ -66,10 +67,11 @@ export async function parkLinkedConversationQueue(
         batch
           .filter((d) => d.handoffRequestedAt)
           .map(async (d) => {
+            const input = getQueuedBotMessageInput(d)
             const hash = new Uint8Array(
               await crypto.subtle.digest(
                 "SHA-256",
-                new TextEncoder().encode(getQueuedModelContent(d, "bot").trim())
+                new TextEncoder().encode(canonicalBotMessageInput(input.message, input.mentions))
               )
             )
             return {

@@ -6,7 +6,8 @@ import {
 } from "../../../shared/bots/contracts"
 import type { QueuedMessage } from "../types"
 import type { ThreadActions } from "./thread-context"
-import { getQueuedModelContent } from "./queued-message-content"
+import { getQueuedBotMessageInput, getQueuedModelContent } from "./queued-message-content"
+import { canonicalBotMessageInput } from "../../../shared/bots/message-mentions"
 import { botErrorMessage } from "./bot-error-message"
 import type { FileAttachment } from "../../../shared/file-attachment"
 import { buildAttachmentMessageParts } from "../../../shared/attachment-message-parts"
@@ -15,6 +16,11 @@ type Queue = Pick<ThreadActions, "getQueuedMessage" | "updateQueuedMessage" | "d
 const UNKNOWN = "发送确认未收到，原消息和附件已保留。请重试发送。"
 
 export function validateBotDraft(draft: QueuedMessage): string | null {
+  try {
+    getQueuedBotMessageInput(draft)
+  } catch {
+    return "Bot 提及与原消息不一致，请重新选择。"
+  }
   const message = getQueuedModelContent(draft, "bot").trim()
   return !message || message.length > 64_000 || message.includes("\0")
     ? "消息和附件内容超出发送限制，请调整后重试。"
@@ -49,7 +55,8 @@ export function queueBotChatDraft(
 }
 
 async function checkFor(draft: QueuedMessage): Promise<BotRequestCheck> {
-  const bytes = new TextEncoder().encode(getQueuedModelContent(draft, "bot").trim())
+  const input = getQueuedBotMessageInput(draft)
+  const bytes = new TextEncoder().encode(canonicalBotMessageInput(input.message, input.mentions))
   const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))
   return {
     requestId: draft.id,
@@ -78,8 +85,14 @@ export class BotDraftSender {
 
   private same(draft: QueuedMessage): boolean {
     const current = this.queue.getQueuedMessage(draft.id)
-    return Boolean(
-      current && getQueuedModelContent(current, "bot") === getQueuedModelContent(draft, "bot")
+    if (!current) return false
+    if (getQueuedModelContent(current, "bot") !== getQueuedModelContent(draft, "bot")) return false
+    if (!current.botMentions?.length && !draft.botMentions?.length) return true
+    const actual = getQueuedBotMessageInput(current),
+      expected = getQueuedBotMessageInput(draft)
+    return (
+      canonicalBotMessageInput(actual.message, actual.mentions) ===
+      canonicalBotMessageInput(expected.message, expected.mentions)
     )
   }
   private acknowledge(draft: QueuedMessage): void {
@@ -121,7 +134,7 @@ export class BotDraftSender {
         throw new Error(
           "此草稿属于此前的 Bot 任务，未确认发送不能转成新的任务请求。请先核对原任务记录；确认后可删除旧草稿并明确发送新消息。"
         )
-      const message = getQueuedModelContent(draft, "bot").trim()
+      const { message, mentions } = getQueuedBotMessageInput(draft)
       const validationError = validateBotDraft(draft)
       if (validationError) throw new Error(validationError)
       if (draft.handoffRequestedAt) {
@@ -149,9 +162,19 @@ export class BotDraftSender {
           botId: this.botId,
           requestId: draft.id,
           message,
+          ...(mentions?.length ? { mentions } : {}),
           ...(draft.botReplyTo ? { replyToId: draft.botReplyTo.id } : {})
         })
-        if (task.botId !== this.botId || task.requestId !== draft.id || task.message !== message)
+        if (
+          task.botId !== this.botId ||
+          task.requestId !== draft.id ||
+          task.message !== message ||
+          (mentions?.length &&
+            canonicalBotMessageInput(
+              task.message,
+              task.origin?.kind === "user" ? task.origin.mentions : undefined
+            ) !== canonicalBotMessageInput(message, mentions))
+        )
           throw new Error("收到的发送确认与原消息不一致，请核对回执。")
         this.acknowledge(draft)
       } catch (error) {

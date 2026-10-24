@@ -7,12 +7,13 @@ import {
   useSyncExternalStore,
   type ReactNode
 } from "react"
-import { ChevronRight, Clock } from "lucide-react"
+import { ChevronRight, Clock, Hand } from "lucide-react"
 import type { Message, ToolCall, ToolResult } from "@/types"
 import type {
   BotClient,
   BotTask,
   BotDefinition,
+  BotGroup,
   BotMessageOrigin,
   BotSchedule
 } from "../../../../shared/bots/contracts"
@@ -27,6 +28,7 @@ import {
   ChatFilePresentationContext,
   ChatMessageVisibilityContext,
   ChatMessagePresentationContext,
+  ChatUserTextPresentationContext,
   ChatToolPresentationContext
 } from "../chat/chat-presentation-context"
 import { botWorkReceipt } from "@/lib/bot-work-receipt"
@@ -37,6 +39,7 @@ import { mergeBotMessageOrigins, hiddenBotTaskMessageIds } from "@/lib/bot-routi
 import { BOT_ROUTINE_SILENT } from "../../../../shared/bots/routine-silence"
 import { splitBotInlineReasoning } from "../../../../shared/bots/inline-reasoning"
 import { BotBrowserHelpCard } from "./BotBrowserHelpCard"
+import { botBrowserHelpHistory } from "@/lib/bot-browser-help-history"
 import { BotDeliveredFile } from "./BotDeliveredFile"
 import { parseBotFileDelivery } from "../../../../shared/bots/file-delivery"
 import { botGroupBrowserScope } from "../../../../shared/bots/contracts"
@@ -56,6 +59,8 @@ import { useBotViewStore } from "./view-store"
 import { BotActivity } from "./BotActivity"
 import { botConversationState } from "@/lib/bot-task-view"
 import { botActiveTaskCreatedAt } from "@/lib/bot-avatar-mood"
+import { projectPrivateBotMentions } from "@/lib/bot-private-mentions"
+import { BotMentionLabel } from "./BotMentionLabel"
 
 export function BotConversationTools({
   client,
@@ -63,6 +68,9 @@ export function BotConversationTools({
   groupId,
   conversationThreadId,
   onOpenWork,
+  onOpenBot,
+  onOpenGroup,
+  groups = [],
   tasks,
   bots,
   schedules,
@@ -74,6 +82,9 @@ export function BotConversationTools({
   groupId?: string
   conversationThreadId?: string
   onOpenWork?(workId: string): void
+  onOpenBot?(botId: string): void
+  onOpenGroup?(groupId: string): void
+  groups?: readonly BotGroup[]
   tasks: BotTask[]
   bots: BotDefinition[]
   schedules?: readonly BotSchedule[]
@@ -137,6 +148,8 @@ export function BotConversationTools({
     }
   }, [client, botId, groupId, threadId, windowKey, context])
   const taskByMessage = useMemo(() => mergeBotMessageOrigins(origins, tasks), [tasks, origins])
+  const mentionProjectionWarnings = useRef(new Set<string>())
+  useEffect(() => { mentionProjectionWarnings.current.clear() }, [windowKey, threadId])
   const replySource = useMemo(
     () =>
       groupId
@@ -157,6 +170,34 @@ export function BotConversationTools({
           },
     [client, botId, groupId, taskByMessage]
   )
+  const presentUserText = useCallback((message: Message, text: string) => {
+    if (groupId || typeof message.content !== "string") return text
+    const origin = taskByMessage.get(message.id)?.origin
+    if (origin?.kind !== "user" || !origin.mentions?.length) return text
+    const { mentions, reason } = projectPrivateBotMentions(origin, message.content, text)
+    if (reason && !mentionProjectionWarnings.current.has(message.id)) {
+      mentionProjectionWarnings.current.add(message.id)
+      console.warn("[Bots] Private mention display unavailable:", reason)
+    }
+    if (!mentions.length) return text
+    const nodes: ReactNode[] = []
+    let offset = 0
+    for (const mention of mentions) {
+      nodes.push(text.slice(offset, mention.start))
+      const peer = mention.kind === "group" ? undefined : bots.find((item) => item.id === mention.botId && !item.deleting)
+      const mentionedGroup = mention.kind === "group" ? groups.find((item) => item.id === mention.groupId && !item.deleting) : undefined
+      const label = <BotMentionLabel mention={mention} bot={peer} />
+      const open = mentionedGroup && onOpenGroup ? () => onOpenGroup(mentionedGroup.id)
+        : peer && onOpenBot ? () => onOpenBot(peer.id) : undefined
+      const identity = mention.kind === "group" ? `group:${mention.groupId}` : `bot:${mention.botId}`
+      nodes.push(open
+        ? <button key={`${mention.start}:${identity}`} type="button" className="bot-inline-mention" onClick={open}>{label}</button>
+        : <span key={`${mention.start}:${identity}`} className="bot-inline-mention">{label}</span>)
+      offset = mention.end
+    }
+    nodes.push(text.slice(offset))
+    return <>{nodes}</>
+  }, [groupId, taskByMessage, bots, groups, onOpenBot, onOpenGroup])
   const deliveredReferences = useMemo(
     () => botDeliveredFileReferences(threadId ? context.getThreadState(threadId).messages : []),
     [context, threadId, windowKey]
@@ -222,6 +263,16 @@ export function BotConversationTools({
           />
         )
       }
+      const browserHelpHistory = !showExecutionDetails ? botBrowserHelpHistory(tool, result) : null
+      if (browserHelpHistory)
+        return (
+          <div className="bot-browser-help" role="note" data-bot-browser-help-history>
+            <Hand size={16} aria-hidden="true" />
+            <span>
+              电脑 · {browserHelpHistory.status === "skipped" ? "已跳过" : "协助已结束"} · {browserHelpHistory.instruction}
+            </span>
+          </div>
+        )
       const questionHistory = !showExecutionDetails ? botQuestionHistory(tool, result) : null
       if (questionHistory) return <BotQuestionHistory history={questionHistory} />
       const profileEvent = !showExecutionDetails ? botProfileEvent(tool, result) : null
@@ -437,7 +488,9 @@ export function BotConversationTools({
                           }
                         >
                           <ChatReplySourceContext.Provider value={replySource}>
-                            {children}
+                            <ChatUserTextPresentationContext.Provider value={presentUserText}>
+                              {children}
+                            </ChatUserTextPresentationContext.Provider>
                           </ChatReplySourceContext.Provider>
                         </ChatActivityPresentationContext.Provider>
                       </ChatFilePresentationContext.Provider>

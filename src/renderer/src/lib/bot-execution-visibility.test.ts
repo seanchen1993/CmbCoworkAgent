@@ -22,6 +22,25 @@ const result = (id: string, is_error = false, content = "done"): Message => ({
 })
 
 describe("Bot execution presentation", () => {
+  it.each([
+    ["bot_request_browser_help", {}],
+    ["bot_browser", { action: "request_help" }]
+  ] as const)("keeps an explicit %s ended/skipped product receipt without exposing raw browser results", (name, args) => {
+    const message = call("help-history", name)
+    message.tool_calls![0].args = { ...args, instruction: "请核对合成页面" }
+    for (const payload of [
+      { control: "bot", helpSkipped: true },
+      { control: "bot", note: "Human control ended. You now have control again. The pending action was replaced with this fresh observation; it was not replayed." }
+    ]) {
+      const returned = result("help-history", false, JSON.stringify(payload))
+      expect(isBotExecutionTool(message.tool_calls![0], { content: returned.content })).toBe(false)
+      for (const active of [false, true]) {
+        const view = projectBotExecution([message, returned], active, new Set())
+        expect(view.hiddenMessages.size).toBe(0)
+        expect(view.foldedTools.size).toBe(0)
+      }
+    }
+  })
   it.each(["bot_work_create", "bot_work_send", "bot_work_complete", "bot_work_continue"])(
     "keeps a verified %s navigation card visible after beta folds execution details",
     (name) => {
