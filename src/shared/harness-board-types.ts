@@ -425,6 +425,7 @@ export interface ManagedRunStartInput {
   featureId: string
   workspacePath: string
   initialUserMessage?: string
+  existingThreadId?: string
 }
 
 export interface ManagedRunStartValidationInput {
@@ -637,7 +638,7 @@ export interface ManagedRunDecisionFacts {
 export type ManagedRunPolicyResult =
   | {
       type: "biz_progress"
-      proposedAction: "start_new_thread"
+      proposedAction: "start_new_thread" | "continue_current_thread"
       reasonCode: string
       facts?: ManagedRunDecisionFacts
       rule?: string

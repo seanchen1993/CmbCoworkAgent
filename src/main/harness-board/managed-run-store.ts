@@ -398,7 +398,12 @@ function isManagedRunPolicyResult(value: unknown): value is ManagedRunPolicyResu
   ) {
     return false
   }
-  if (value.type === "biz_progress") return value.proposedAction === "start_new_thread"
+  if (value.type === "biz_progress") {
+    return (
+      value.proposedAction === "start_new_thread" ||
+      value.proposedAction === "continue_current_thread"
+    )
+  }
   if (value.type === "biz_retry") {
     return ["continue_current_thread", "start_new_thread", "fail_managed_run"].includes(
       value.proposedAction as string

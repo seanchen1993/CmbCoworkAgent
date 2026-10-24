@@ -97,7 +97,7 @@ export function ManagedRunHistory({
       {loading && runs.length === 0 && (
         <div className="py-8 text-center text-xs text-muted-foreground">读取托管运行记录</div>
       )}
-      <div className="mt-3 space-y-2">
+      <div className="mt-3 max-h-[320px] space-y-2 overflow-y-auto overscroll-contain">
         {runs.map((item, index) => {
           const isExpanded = expanded[item.runId] ?? index === 0
           const secondaryTime =
