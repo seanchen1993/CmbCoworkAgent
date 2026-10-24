@@ -92,6 +92,12 @@ describe("optional group review scope", () => {
     expect(prompt).toContain('Declared outputs relative to this shared workspace: ["report.md"]')
     expect(prompt).toContain("inspect the actual file contents against the supplied inputs")
     expect(prompt).toContain("return verified file references privately to the caller")
+    expect(prompt).toContain("use bot_return_files")
+    expect(prompt).toContain("bot_deliver_files always publishes real attachments")
+    expect(prompt).toContain("never for an internal draft")
+    expect(prompt).not.toContain(
+      "use bot_deliver_files to return verified file references privately"
+    )
     expect(prompt).toContain("caller owns public delivery")
     expect(prompt).not.toContain("Generated workspace files are deliverables")
     expect(prompt).not.toContain(
@@ -104,6 +110,7 @@ describe("optional group review scope", () => {
       "/group"
     )
     expect(direct).toContain("Generated workspace files are deliverables")
+    expect(direct).not.toContain("bot_return_files")
     expect(direct).toContain("include that summary in bot_deliver_files.content")
     expect(direct).toContain("Quoting another member does not add recipients")
     expect(direct).not.toContain("addresses that author as well as")

@@ -108,6 +108,13 @@ const fixture = vi.hoisted(() => ({
     ) => string[]
   >(() => ["delivery"]),
   verifyFiles: vi.fn(),
+  returnFileTools: vi.fn<
+    (
+      workspace: string,
+      signal: AbortSignal,
+      capture: (files: BotDeliveredFile[]) => void
+    ) => string[]
+  >(() => ["return-files"]),
   publishFiles: vi.fn()
 }))
 vi.mock("./work-tools", () => ({ createBotWorkTools: fixture.workTools }))
@@ -194,6 +201,7 @@ vi.mock("./tools", async (importOriginal) => ({
   createBotMemoryTools: fixture.memoryTools,
   createBotBrowserTools: fixture.browserTools,
   createBotDeliveryTools: fixture.deliveryTools,
+  createBotReturnFileTools: fixture.returnFileTools,
   verifyBotDeliveryFiles: fixture.verifyFiles,
   createBotCollaborationTools: () => ["collaboration"],
   createBotScheduleTools: () => ["routine"]
@@ -1750,7 +1758,7 @@ describe("Bot Runtime integration", () => {
     }
   )
   it.each([false, true])(
-    "returns internal group files privately even when their tool is invoked (%s)",
+    "returns internal group files privately using declared outputs or the private return tool (%s)",
     async (alreadyDelivered) => {
       fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
       const files = [
@@ -1758,8 +1766,7 @@ describe("Bot Runtime integration", () => {
       ]
       fixture.verifyFiles.mockResolvedValue(files)
       fixture.start.mockImplementation(async (_request, _delivery, context) => {
-        if (alreadyDelivered)
-          fixture.deliveryTools.mock.calls.at(-1)![2]!(files, "explicit-delivery", "Private result")
+        if (alreadyDelivered) fixture.returnFileTools.mock.calls.at(-1)![2]!(files)
         context.onRunTerminated?.({ outcome: "success", code: "done" })
         return { completion: Promise.resolve() }
       })
@@ -1785,7 +1792,12 @@ describe("Bot Runtime integration", () => {
         expect.any(AbortSignal)
       )
       expect(fixture.publishFiles).not.toHaveBeenCalled()
-      expect(fixture.deliveryTools.mock.calls.at(-1)![4]).toBe(false)
+      expect(fixture.deliveryTools.mock.calls.at(-1)![4]).toBe(true)
+      expect(fixture.returnFileTools).toHaveBeenCalledWith(
+        "/synthetic/workspaces/group-g",
+        expect.any(AbortSignal),
+        expect.any(Function)
+      )
       expect(result).toMatchObject({ state: "completed", files })
       fixture.verifyFiles.mockRejectedValueOnce(new Error("Required group output missing"))
       await expect(
@@ -1793,6 +1805,39 @@ describe("Bot Runtime integration", () => {
       ).rejects.toThrow("Required group output missing")
     }
   )
+  it("does not downgrade an internal member's explicit public attachment into a private return", async () => {
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+    const files = [
+      { filePath: "/synthetic/workspaces/group-g/report.md", name: "report.md", size: 40 }
+    ]
+    fixture.start.mockImplementation(async (_request, _delivery, context) => {
+      fixture.deliveryTools.mock.calls.at(-1)![2]!(files, "explicit-public", "Reviewed result")
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    const result = await port()
+      .acquire(bot, {
+        ...task,
+        threadId: "group-g-a",
+        origin: {
+          kind: "bot",
+          fromBotId: "b",
+          rootTaskId: "root",
+          depth: 1,
+          expectsReply: true,
+          groupId: "g"
+        }
+      })!
+      .execute(new AbortController().signal, vi.fn())
+    expect(fixture.publishFiles).toHaveBeenCalledExactlyOnceWith(
+      task.id,
+      "explicit-public",
+      files,
+      "Reviewed result"
+    )
+    expect(fixture.deliveryTools.mock.calls.at(-1)![4]).toBe(true)
+    expect(result).toMatchObject({ state: "completed", files })
+  })
   it("verifies declared peer outputs even when the model returns only a written path", async () => {
     const files = [{ filePath: "/synthetic/workspaces/a/report.md", name: "report.md", size: 40 }]
     fixture.verifyFiles.mockResolvedValue(files)

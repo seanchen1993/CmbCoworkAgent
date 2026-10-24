@@ -1,5 +1,112 @@
 # CMBDevClaw Bots 第一期实施方案与验收清单
 
+### GB51 说明空项归因补正（2026-10-24）
+
+用户要求排查15项“未读到描述”。真实B首个execute（`call_function_7n8t7q754x62_1`，原生回执ordinal1025）仅提取精确README.md前20行首个`^#`标题，再回退package.json description/name；完整2206字符回执已含51行与这15处空值，无截断。B自己生成的2538字符bot_delegate正文又要求A只用该表、空项按原样标注，最终占位集合与原始空值完全一致。当前15项目中10个有非空根README：部分用途正文／HTML标题就在前20行但被grep丢弃，另有介绍位于20行后；其余5个没有同名根README/package，不能视为10／15个工具读取失败。
+
+归因是模型自选临时采集方案过浅，并非已证实的内置文件工具／Host／协作传输缺陷。原Human仅要求检查有哪些项目并交同伴整理Markdown，未要求逐项深读用途，因此此前把15项全部列为待修质量缺口过重，应记录为说明丰富度不足，不能计15项原需求违约。给定Grok `source/host/runner/tools/sand-agent-management-tools.ts:120–124`同样原样转交模型组织的message；本地tools→Host→store→adapter原样传入，未发现删减说明的代码。不为此改共享Runtime、补模板特判或重复模型测试；未改生产代码／索引，未提交或push。证据沿用GB的`terminal.safe.json`实际command／delegate参数、原生回执及最终原件。
+
+### 消息行内 Bot 提及基线修正（2026-10-24，1024GD）
+
+用户截图确认 Bot 名称与后续正文偏位：行内 flex 取 SVG 基线并使用固定 -2px 补偿。仅在消息 `.bot-inline-mention` 内改为文字基线、SVG 居中，共7行 CSS；复用现有组件，不改输入框、字号、动画、点击或执行链。参考给定 Grok transcript.tsx:508 的普通文字提及布局原则，未声称直接移植其 SVG 实现。真实组件在14／18px的单行、换行、多提及下基线差均为0，输入框相对位置保持；Web 类型检查、正常构建、独立源码复核通过，已刷新原预览并核对截图中的原消息。证据 `mention-baseline-1024GD-pirgpkps/{layout-verdict.json,preview-after.png}`；未提交或push。
+
+用户反馈仍偏位后补正：上一段首次预览刷新没有实际加载新资源，`preview-after.png`仍是旧效果，不能计作真实界面通过。通过原生View→Force Reload观察实际文档重载，再返回原群，原消息现已同线，证据`force-loaded-group-message-crop.png`。另以实际构建CSS／Inter400／StreamingMarkdown补验14／22px、18／28px及换行，原偏差-1.5／-0.5／-1.5px均归零；未追加CSS。见`mention-real-font-1024GD-5e48tvoo/real-layout-verdict.json`。首次错误结论保留，未提交或push。
+
+### 群文件协议双模型多场景补验（2026-10-24，1024GC）
+
+按用户要求，在同一候选构建／原701d群／原A和B上各用MiniMax-M2.7与DeepSeek执行三个不同合同，正文只换模型标记和新目录；通过正式UI选择模型，61条实际AI回执全部核对实际服务模型。没有在题目中指定工具名、增加系统提示或修改生产代码；每题一次初始请求，无纠正请求或连续重测。当前用户已暂存的全部变更按新基线保护。
+
+| 合同 | MiniMax M2.7 | DeepSeek | 实际验收依据 |
+| --- | --- | --- | --- |
+| P：内部草稿返还→B审核后公开最终文件 | 通过 | 通过 | 两端A均实际bot_return_files一次，44B草稿原文精确且零公开；B收到public:false后核对并仅公开final.md一次，独立Decimal合计10.25 |
+| R：A只读私下校核→B交付新版本 | 通过 | 通过 | A零写入／零公共消息／无附件回传，B只公开final-v2.md一次，合计9.25；原草稿和第一版SHA／mtime／mode保持 |
+| L：实际18秒程序→A明确公开→B不重复 | 通过，18.002秒 | 通过，18.005秒 | 各一次真实Node启动、PID与execute回执对应、完成后实际读回；A正式公开receipt.txt一次，B收到public:true后零附件／零代跑 |
+
+本轮为**6／6合同、18条自然完成任务、61条实际模型回执、99条有界断言**，不是99个独立案例或一期完成率。六份正式附件均已从交付卡打开，根代理另核14项原件／金额／打开证据；最终独审10项保全通过。旧92份文件与全旧消息／任务／原生／子记录保持，仅新10份授权产物，共102份累积文件；82个Bot稳定资料、50群、33例行、97命令、源码／构建／HEAD／用户索引保持。A／B均经UI恢复原custom:minimax-m2-5，版本合法递增至13／20，0活动任务及运行命令；原群空草稿和详情收起恢复。
+
+保留限制：R-MM首个cat选项不兼容macOS后模型自行改准，未抹掉错误；L虽请求run_in_background，实际是18秒完成回执，未建立独立durable后台命令，不能充当后台转移／跨重启恢复或多小时长任务验收。两模型先后使用同群历史，不冒称随机隔离能力实验；本轮是本地双模型分支回归，未计为新增官方逐题对照。历史FY／FZ首败及34条19／9／6、198／201原口径保持，不能称任意协作完美无缺。
+
+后续重点窄审：本轮补齐了GB未选用的真实私有返还分支及明确公开后不重复交付的双模型证据；没有发现协议之外可立即安全修复的确定高影响源码缺陷。EX／私聊新@按用户决定放弃，低收益确认措辞暂缓；Windows实机、真实SSO、发布签名与真实CI runner仍缺条件，不用重复本地测试替代。未改生产代码、未重新跑未变化的大套、未提交或push。证据 `quality-file-protocol-paired-1024GC-5bizu5iz/{GC-six-case-summary.safe.json,GC-final-restoration-guard.safe.json,root-artifact-ui-check.json}`及六题正式打开UI。
+
+### 群内部文件返还与公开交付分离（2026-10-24，1024GB，代码验证及单次改后交付通过）
+
+确认的协议问题：群内部与公开回合使用同名 bot_deliver_files／同类成功回执，但内部回调仅 capture 不发布；FY／FZ 的 B 同时确已收到 public:false，故不能把接口歧义当作全部模型漏件的已证原因。参考给定 Grok `sand-agent-management-tools.ts:99–130`、`send-message-tool.ts:72–130` 的同伴通信／公开发送职责边界，不声称移植了当前官方云端群附件实现。
+
+仅调整 `tools.ts`、`runtime-adapter.ts`、`prompt.ts`：内部 bot_return_files 复用现有验证／capture／outbox，独立 bot-file-return 回执；群 bot_deliver_files 仅显式调用即真实发布到当前绑定群。默认内部返回，原授权明确要求本 Bot 公开时才发布；不自动公开中间稿。私聊、outputFiles 自动验证、真实群回执去重、数据库／队列／共享 Runtime／执行锁不改。公开 content 仍严格必填，旧内部 files-only 参数不得直接变为公开操作；现有检查点只允许模型边界或已完成历史，拒绝重放待执行工具节点。
+
+Node22 定向5文件249项、原 core 102文件1419项及 Node 类型检查通过；独审指出的默认公开归属提示冲突已收敛，最终提示15项通过。新断言覆盖内部返还不公开、显式群附件、旧参数零发布、私有回执不抵充公开交付、取消／路径／临时子代理边界；已有私聊及恢复测试保留。随后正常 build 通过，在0活动任务时正常退出99526，由原配置启动63212加载新构建。仅做一次改后同合同验收，不追加纠正请求、提示或重测。
+
+原701d群／A／B及MiniMax-M2.7配置保持，原题仅替GB标记及新目录。3任务自然完成、15条新AI均实际MiniMax-M2.7。A显式 bot_deliver_files 真正公开3373B原件一份（ordinal1344），B实际收到Host public=true，未再调用文件工具；正式群附件exactly1，卡已从正式UI打开。独立读取原件，51项目名无缺无多、逐项实际条目数正确、合计1615。17／17有界检查通过，旧269群消息／2314任务／1547原生／135子记录／90文件SHA+mtime+mode及全部Bot／群／例行／命令、HEAD和用户索引保持，仅GB目录两新文件，0活动；原奥巴马草稿（含尾空格）及资料库已实屏恢复。
+
+限制：A首次沿用了旧files-only参数，被必填content校验拒绝后自行修正；保留这次工具错误，不冒称零错误执行。bot_return_files本轮未被模型选用，只计自动化覆盖；A／B仍有额外公开确认，交付节奏不算完全精简。此次已证新版本沿内部委派完成本题公开附件交付，不能外推所有模型／任意内部草稿或复杂分工，也不把FY／FZ原首轮失败改判。34条19／9／6及旧198／201保持，不重复扩大验收。用户暂存保持，不提交或push。证据 `quality-delivery-protocol-1024GB-6wwglgbm/{terminal.safe.json,file-open-full-ui.txt,original-scene-restored-ui.txt}`及日志。
+
+### 精确补发既有FZ原件（2026-10-24，GA-SEND，补交通过）
+
+同期日志确认FY／FZ的B回传均fresh normal Runtime且工具名单含bot_deliver_files／bot_send_message；两路构造链复核未证缓存旧schema或MAIN_TURN_ONLY误滤持久Bot。旧provider HTTP tools全文未留存，不冒称已实证其精确定义；源审见GA目录的`B-callback-tool-surface-independent.safe.json`与FZ完成性目录的`b-callback-tools-and-internal-description-second-readonly.safe.json`。Grok pinMemberSessionForGroupTurn复用成员session并新建群runner，所读片段不足以把本地历史复用判为缺陷，未据此改thread／checkpoint或重置历史。
+
+仅向原B明确补发已有3328B的`fz51-internal-1024/ai-projects.md`一次。实际task ea78d55f…约6.006秒自然completed、2条AI均MiniMax-M2.7、4原生记录，唯一工具bot_deliver_files取得成功回执；群files_json1342真实附同一原路径／3328B一次。无execute、read、改写、复制、扫描、委派或新文件。卡已正式打开，完整51行表格／1615及FZ标记可读。
+
+本轮限定检查17／17，90旧文件SHA／mtime／mode、267旧公开／192任务／1543原生及Bot／群／例行／命令／配置保持，0活动。它补齐具体漏件并实证当前direct group公开工具可用，不能证明旧callback的HTTP定义或自动交接质量，也不改判FY／FZ首轮FAIL。未实施说明候选、未修改生产代码／共享Runtime／权限／门禁，34条19／9／6及198／201保持。原FI草稿／资料库已恢复，用户暂存保持，未提交或push。证据`quality-official-internal-1024GA-pf7_rzcc/GA-SEND-terminal-independent-verdict.safe.json`及真实卡片／打开／恢复记录。
+
+### 当前官方内部交接对照（2026-10-24，1024GA，本题公开附件通过）
+
+34条仍19条有限验证／9条未完整闭环／6条证据不足。MiniMax与DeepSeek同题均漏公开附件后，先对照给定Grok的SendToAgent／SendMessage／群transport及当前官方应用。源码能证私有发送、公开发送与发送回执分离，未证当前云端内部群附件路由；本地内部工具的范围说明可更清楚，但B已有public:false，暂不把说明候选当根因修复、不实施或追加本地候选轮次。
+
+已在当前官方原GA／GB群发一次同业务题，仅替官方名称／标记／新路径。用户输入21:28:10，GB于21:28:43公开@GA交接，GA于21:29:18正式附ai-projects.md一张并说明；没有再发纠正或补卡题。卡片已真实打开、内容完整加载，根代理从实际预览提取51条唯一名称，与当前本机51目录逐项一致、无漏重；zip另列，不将1.1kB圆整标签冒充精确字节／SHA。用户可见清单及附件交付合同本轮通过，不能由UI推断GB私有工具、云端模型或底层实现。
+
+与本地FY／FZ相比，当前可证差异是官方公开@后的GA真实发卡，本地内部A仅回私有文件引用、B再公开遗漏；本地两轮B本身也确已收到public:false，不能仅凭结果倒推出某一Host分支就是根因。未禁用内部协作、放开内部附件发布、恢复自动fallback或新增语义完成机制；内部说明候选未实施。原Grok源码4份精确路径／SHA和当前官方UI分别封存，不冒称旧群text-only接线等于当前云端能力。
+
+官方原tibo／详情／空草稿已恢复，其他GA私聊草稿@、另一官方群@everyone保留；本地主预览原会话／草稿未操作，源／用户暂存保持。34条19／9／6及旧198／201不变，本地缺口仍开放，未提交或push。证据`quality-official-internal-1024GA-pf7_rzcc/`的`grok-source-reference.safe.json`、`official-final-verdict.safe.json`、`local-route-vs-model-independent.safe.json`与真实预览／恢复记录。
+
+### 用户指定DeepSeek同题对照（2026-10-24，1024FZ，同类交付失败）
+
+按用户要求，两位原Bot通过正式UI临时选deepseek-v4-flash，同一原群／业务正文逐字仅换标记与新路径`fz51-internal-1024/ai-projects.md`，未补提示、预给51数量／答案／交付步骤或修改Runtime。实际13条AI均deepseek-flash（A7／B6）、3任务自然completed、26原生记录／10次工具均有回执；3328B新MD的51项名称／数量无漏重、条目数合计1615正确，B实际用Node全文读回解析。
+
+**DeepSeek复现FY的漏交付，不能只归为MiniMax单一能力问题。** A成功bot_deliver_files仍是内部文件引用，随后公开文字称已交付；B实际输入明确public delivery:false，却仅发文字，未调用公开文件工具。新增群三条消息files_json全部为空，真实UI无本轮附件卡。因此本轮FAIL，文件存在／内容正确不抵销用户未收到附件。两次为先后同群试验，保留前轮历史，不冒称随机隔离的模型能力因果实验；也不据两模型失败直接推定Runtime缺陷。继续只读对照Grok内部／公开交付边界，未建立确定代码根因前不加自动公开或语义判定机制。
+
+FY原件与全部88旧文件、264群消息／189任务／1517旧原生记录保持；只新增FZ目录中MD与生成脚本。原模型custom:minimax-m2-5均已通过正式UI恢复，其他资料保持，0活动；原奥巴马FI字面草稿／资料库／278和480布局恢复，主进程和浏览器未重启／操作。此前FY-R1仅备好未发送，取消不计执行。34条19／9／6及198／201不变，不计新增源码修复；仅文档更新、用户暂存保持、未提交或push。证据在FY目录的`FZ-terminal-independent-verdict.safe.json`、`FZ-final-restoration-guard.safe.json`及真实UI记录。
+
+FZ源审收尾：给定Grok重建源码未找到内部执行者向原群公开附件的对应通道，不能据旧源码主张本地漏移植了该能力。本地内部工具的通用附件承诺／相同kind与仅回传私有引用存在范围歧义；但B已收到public:false仍漏发，所以尚未证明该歧义就是本案根因。不继续追加说明候选／模型轮次，不改交付权限、自动公开或共享Runtime。有限源审见`quality-completion-current-1024FZ-26385649/internal-public-delivery-source-contract.safe.json`，不外推为当前官方云端实现。
+
+### 原群内部项目清单交接（2026-10-24，1024FY，首轮交付失败）
+
+34条质量记录仍为19条有同合同后续有限验证、9条未完整闭环、6条证据不足；不是整体完成率。原W7／W8明确要求内部协作，此前公开51项与内部8行CSV分别通过，不能替代本题。沿用原题，只换标记与新输出路径`fy51-internal-1024/ai-projects.md`，保留用户要求的目录边界，不预给数量、项目名、回读或等待策略。
+
+真实3任务自然completed、27条AI实际均MiniMax-M2.7、25次工具均有回执、0活动。B先把51误称46；A新查并更正，最终5248B／68行／51唯一项目名称无漏重，逐目录条目数合计1615正确。B实际read_file前40／68行，并用Node全文读取解析名称集合／数量，不能说文件完全没读，也不冒称模型逐行看过全部正文。
+
+**本轮失败在正式附件交付。** A内部bot_deliver_files首次多传content被schema拒绝，纠正后只返回私有文件引用，随后公开文字说“已交付”。B回传输入实际保留`Host-confirmed public delivery for this exact peer result: false.`及“引用不代表附件已公开”的原说明，仍只发文字说A已交付，未调用bot_deliver_files。本轮群三条消息files_json全为空，真实UI没有FY文件卡；文件存在／内容正确不等于已交给用户。不补提示救场，不计通过，不把六条51记录迁移为关闭。
+
+源码已有内部结果与公开交付区分（prompt.ts:123,147；runtime-adapter.ts:679），未发现Host隐去未公开事实、漏传文件引用或伪造公开附件回执。group-delivery.ts的终末检查证明有正式发送，不理解自然语言中应附哪些文件；给定Grok发送回执检查同样不证明任务语义完成。本轮证据主要支持模型忽略交付事实，不据此新增自然语言校验器、自动公开fallback或修改共享Runtime／长任务机制；质量失败继续保留，不声称已根治。
+
+独审与根代理核对旧261群消息／186任务／1462原生记录／86文件SHA及mtime保持，新建仅FY目录下MD与生成脚本，本轮未见目录外写删。主进程未重启、浏览器未操作、模型配置未改；原奥巴马字面FI草稿、资料库与278／480布局恢复。原6份用户暂存保持，仅更新两份文档，不提交或push。证据`quality-internal-51-1024FY-06t2cavs/terminal-independent-verdict.safe.json`、原生回执与真实UI；第二独审完成事前oracle和终末关键事实核对，最终汇总遇模型容量错误，不冒称第二份完整终审已通过。
+
+### 当前跟进目标：临时文件与交付回读（2026-10-24，1024FX）
+
+目标：查明任务明确限制目录时仍写入目录外临时文件、移动旧文件，以及交付前完整回读不足的根因。先对照Grok源码、原CmbCowork及真实回执；只对已证代码缺陷做最小修复，不影响原功能、写入保护和长程任务，不增加新的沙箱、任务状态或通用质量判定体系。不提交或push。
+
+| 阶段 | 当前状态 | 完成依据 |
+| --- | --- | --- |
+| 根因确认 | 本轮已完成三路源码／真实回执复核 | 已证模型执行违约及遗漏，未证Host／Runtime丢约束、丢页或提前结束；不据此新增生产补丁 |
+| 最小处理 | 已一次补做缺失步骤，原程序未改 | 保留已过绿六件／原断言，不重复实现或追加同义系统提示 |
+| 真实验收 | 本轮有限合同通过 | 实际M2.7，5类CLI正反例17断言；补读1003＋16＋143行，六件正式交付一次；原失败保留 |
+| 回归与收尾 | 完成目录／旧数据／源码索引独审 | 原6件字节、16任务／451旧消息／13文件保持，无新增生产改动，未重复无变化大套；不外推整体完成 |
+
+系统目标工具因本线程已有未完成的一期目标而拒绝新建；旧目标未虚标完成，本项在此单列跟进。证据目录`quality-dir-readback-1024FX-s1xf4ytn/`；事前六份已暂存文件与索引已冻结，保留用户暂存，不改其余变更。
+
+### 临时文件与完整回读根因、补验结论（2026-10-24，1024FX）
+
+本轮已完成根因核查与定点补做，**未发现足以支持新增Host／Runtime补丁的代码缺陷，没有新增生产代码**。FW28的4份外部日志来自模型明确的shell重定向与删除，FV51旧QA文件移动也来自模型明确的mv；不是系统TMPDIR自动选址或工作区兼容symlink误判。原私聊正文直接传Runtime，系统提示已要求任务目录涵盖临时文件，FW28最终checkpoint摘要仍保留禁写/tmp及“全量读回六件”的未完成步骤。read_file的分页、总行数和截断提示正常；63次原调用均有回执、最后自然stop，未见Host丢指令、静默丢页或强制提前结束的证据。
+
+参考边界：给定Grok0.18的`source/host/runner/turn-agent-composition.ts:454–508`区分宿主shell与隔离box；`source/packages/agent/actions/user-message-action/abstract-user-message-action-handler.ts:490–515`确认发送回执，不证明完整审阅。Hermes的TMPDIR配置仅路由默认临时目录，防盲写的read tracking也不等于交付语义核验。当前本地`src/main/bots/prompt.ts:116,138`已有目录／实物核验约束，`runtime-adapter.ts:701–723`保留原文，`tools.ts:81–107`验证路径／稳定句柄／元数据。现有证据不支持改全局TMPDIR、解析自然语言建目录沙箱、拦截/tmp或mv文本、给全部附件加全文读取打卡；这些做法不能修本案且可能误伤兼容路径、合法外部文件和长任务。重建源码边界不外推为当前Grok云端不存在其他保障。
+
+仅向原AU Bot发一次真实补做：task `4d0d3583…`自然completed，约124.3秒，21条AI实际均MiniMax-M2.7，20次工具调用全部有回执。原最终六件不复制、不改写，原38／38＋15／15功能证据因六SHA一致而继承，未重跑53项或76项整套。两组重复参数、合法stdin/stdout、正常文件输出及失败保留原输出5类小例，共17条实际断言通过；stdout/stderr用spawnSync内存捕获。第二独审逐条核对7次execute与4次write_file，写删仅在新`ledger-fw-1024/fx-check-1024/`；旧13文件的路径、字节、SHA和mtime保持，新子目录已清理，两次ls/tmp仅只读查询。
+
+实际read_file回执与最终文件逐行匹配：测试文件1003／1003行、package16／16行、README143／143行均完整返回。其余三件字节未变，保留FW实际完整回读证据，不重复读取。随后一次正式交付六件成功，根代理实屏核对本轮六卡并打开package确认内容。回读独审13／13通过，16条旧任务／451条旧原生记录及全部原件保持，0活动。模型已明确更正上轮“/tmp及其余目录零变更”的错误陈述；README stderr前缀示例及其他低收益命名细节暂缓，程序不为此改写。
+
+当前34条汇总为**19条已有同合同后续有限验证、9条仍未完整闭环、6条证据不足**：只将ID28／29追加为同一六文件合同的后续有限验证，不计两个独立Host修复，不改变AU首轮34／38、Grok38／38及历次目录违规的原位失败记录，也不调整198／201旧矩阵。本轮通过仅证明一次明确补做达标，不是任意模型／未来任务目录行为的通用保障；FV51旧文件移动与其他历史失败不被抹去。
+
+证据`quality-dir-readback-1024FX-s1xf4ytn/`：`source-grok-hermes-independent.safe.json`、`temp-boundary-root-cause.safe.json`、`temp-boundary-terminal-independent.safe.json`、`readback_root_cause/{genuine-pre-FX-baseline,final-independent-verdict}.safe.json`及真实UI记录。本次未修改共享Runtime、权限、锁、任务／文件状态或任何生产代码；原6份用户暂存的路径／blob／mode保持。AU恢复原默认模型，用户原FI字面草稿和资料库、278／480布局保留，主进程未重启，浏览器未操作。不stage、commit或push；系统新目标受旧未完成目标限制，本轮目标沿phase1顶部单列跟进，不把一期目标虚标完成。
+
 ### 当前验收口径与剩余条件（2026-10-24）
 
 原有限案例清单通过 **198／201**（历史清单通过率98.51%）；历史双端对照口径为 **192／201**。这些数字不代表整体功能／使用体验对齐完成度。I07、J01、J03、J04、J05按用户确认接受本地实证，P15包内功能已测；新发现的日常交互差异继续按下表处理，不能被旧通过状态豁免。
@@ -22,7 +129,41 @@ I07 本地删除候选零执行、KEEP 自然执行一次、旧29条例行保持
 
 保存工具超时记录保留：实际面板属于 Apple Open and Save Panel Service，先读取该面板，再通过所属预览应用确认目录及保存，两个窗口均正常关闭；未据工具超时修改产品导出流程、重启或强退应用。随后恢复用户原奥巴马会话、精确FI字面草稿（未发送）、资料库页签及480px详情宽度。
 
-当前99份暂存变更与工作树一致，两位复核及受支持Node22核心102文件／1403项、相关DOM、Node／Web类型与构建证据有效；无效私聊@新输入候选已撤回。按用户授权提交当前已复核代码，不push。下一步先复核34条质量记录的原合同与后续证据，保留首次失败；只处理确认的高影响缺陷，不重开用户已放弃的EX／私聊@候选。Windows、真实SSO、签名与真实CI runner仍未验。
+FU提交前99份暂存变更与工作树一致，两位复核及受支持Node22核心102文件／1403项、相关DOM、Node／Web类型与构建证据有效；无效私聊@新输入候选已撤回。按用户授权提交当前已复核代码，不push。下一步先复核34条质量记录的原合同与后续证据，保留首次失败；只处理确认的高影响缺陷，不重开用户已放弃的EX／私聊@候选。Windows、真实SSO、签名与真实CI runner仍未验。
+
+### 高优先级质量修复（2026-10-24，1024FW）
+
+本轮从34条中合并处理影响执行与交付的三组合同，低收益措辞、已放弃的EX／私聊@输入不重开。原失败、FV时点结论和198／201旧矩阵均保留；本节是后续证据，不把模型产物修订说成Host修复。
+
+- **ID16群引用分工已补最小接线，并完成真实正反例。** 现装官方Grok0.75.3从同一旧GA消息建立引用、仅@GB、上传同64B CSV并执行完整原D10，当前两角色仍各答一项。本地仅改`store.ts`与`group-discussion.ts`（生产净增13行）：显式targets／身份校验不变，精确引用作者复用既有discussion任务、上下文及pass，按当前用户分工执行；没有分工时应静默。没有新增表、字段、队列或Runtime机制。Grok给定0.18的`source/host/groups/group-chat.ts:9–17`、`extensions/transcript/group-chat-orchestrator.ts:47–59,97–104`参考了提及、可选参与和pass；`send-thread-stamping.ts:7–33`只证明reply身份／上下文，未证明引用作者通知。额外通知是本地适配，不冒称当前云端源码的直接移植；零工具pass是模型协议，不是新增硬权限隔离。
+- **ID16真实结果：** 正例只@B，A精确公开“1020X-E02-青桐”一次、仅使用一次正式发送；B实际读取本次新shared附件，公开三行原值、74.13、64B及完整SHA一次。负例同引用／同原件、明确只给B分工，A零工具／零公开退出，B实际读本轮新副本并正确回答一次。4任务自然completed、10条AI实际均MiniMax-M2.7，两腿各14／14有界检查通过；旧20任务／30公开消息／152原生前缀／17原件保持，仅新添两个授权64B输入副本。正例B曾将1020N拼成2020N，exit1后自行改准并成功，首误保留，不增加模糊路径补偿。
+- **保留长任务边界：** 只撤销尚未开始的旧引用通知，已运行、等待及带checkpoint的deferred queued继续原生命周期；首轮独审发现deferred queued也可能是已开始任务，实际红例复现后只补原checkpoint为空条件。13个新增定向用例、4近邻文件219／219；原Node22核心102文件1416／1416、Node类型及正常build均exit0，双路源码复核通过。Host、Runtime、schema、共享锁、原工作台及写入保护实现未改。候选在0活动时正常退出88175并由99526加载；上述模型正反例使用此main，非旧进程。
+- **ID28／29六文件程序的确定缺陷已修，完整执行质量仍未闭环。** 原`--input - -i -`／`--output - -o -`混合别名重复被误接受，原Bot在新`ledger-fw-1024/`最小修订；原38／38、15／15独立参数矩阵、自测76／76、导入及README示例通过，原六件／旧数据保持，新六件正式交付并逐卡打开。但本轮仍实际写删`/tmp/.c1.out`等4文件，模型最终六件完整回读证据也不齐，不能记整项通过。测试fixtures已改在项目目录，不以此覆盖实际命令违规。
+- **六条51项目记录继续按一组合并核验。** 本轮明确B只交接后结束，实际B17.359秒完成、A在8ms后入队，无sleep／轮询，A实际读当前README后唯一交付12455B、51项正确的新报告。原串行调度与给定Grok0.18一致，未改共享锁或把任何进度发送当强制终止。仍发现B把两份旧合成QA临时文件移入新目录，原首败保留；代理按已核原SHA及mtime恢复原路径，并保留新目录副本，旧两个正式报告不变。本组不因内容正确或本次不等待而全闭环。
+
+当前34条口径为**17条已有同合同后续有限验证、11条仍缺完整闭环、6条证据不足**；只迁移ID16，34条已复核不等于34个源码bug。11条含同题重复阶段；不据不明原因记录扩大修复。下一步仅继续能定位的目录约束与交付复核缺口，暂无证据支持新增公共沙箱／自动质量判定体系。
+
+证据：`quality-34-priority-1024FW-qrawjtp1/`的官方D10实屏、`D10-author-notification-candidate/{grok-reference-map-and-pass-boundary,candidate-source-independent,root-canonical-gates}.safe.json`及`acceptance_remaining_audit/{positive,negative,paired-final-independent}.safe.json`；六文件见`quality-34-ledger-1024FW/acceptance_remaining_audit/real-case/final-independent-verdict.safe.json`；51项目见`independent-terminal.safe.json`和`root-qa-temp-path-restoration.safe.json`。验收后AU恢复默认模型，A／B恢复原DeepSeek配置；原微博视频页经原UI重开并看到实时预览／human控制，原资料库、278／480布局与字面FI草稿手动恢复。切会话时代理误按Return将原合成字面草稿发为`3d6157bb…`，零工具回复，历史保留、单列操作事故，不归用户或产品、不混入D10通过数；恢复后的草稿未再次发送。当前未stage、commit或push。
+
+### 34条质量记录复核与下一项（2026-10-24，1024FV）
+
+上一批99文件已提交为 `eda78af5fc8fe836fd96092e30795dbf9db8403f`，未push。34条原质量记录已逐项复核34／34（复核覆盖100%，不是质量问题解决率）：15条有后续同合同有限验证；13条原失败尚未获完整修复证据；6条证据不足，不能据旧记录判为当前源码缺陷。原首失败全部保留，13条也不等于13个独立Host bug；其中6条是同一51项目清单合同的不同阶段。FO／FU对W11的ASCII负号、8行及120.00合同提供后续实证，不能外推普遍数据保真。
+
+下一项优先ID25：原群金额CLI在合法400位金额上确实退出2，当前三份原件与失败冻结相同；可定位为交付程序先转Number、得到Infinity再误拒，不能冒称Bot Host已确认有bug。由原MiniMax Bot先真实复现、在新目录保留旧三件后最小修订，继续原43项、完整回读／示例／具体反例及三件正式交付；不改共享Runtime或造自动语义判定。51项目题已并行准备原题、原51目录／131份README SHA和官方原件，后续合并一轮核验，不为六条记录重复跑六轮。ID15公共命令策略误拦仍按原范围暂缓；不重开EX／私聊@无效候选。
+
+证据目录 `quality-34-current-1024FV-v74f37g_/` 中的 `original-34.json`、`current-summary.safe.json`、`audit-01-17.safe.json`、`audit-18-34.safe.json`、`id25-feedback-preparation/` 和 `projects-next-case-reuse.safe.json`。本节是原记录与当前执行优先级，不将准备材料或旧通过冒充本轮模型交付通过。
+
+FV本轮真实后续：
+
+- **ID25反馈后修订的有限合同已通过。** 首次修订确实修好400位，但原43项只有42／43，另写后删`/tmp/err_check.txt`；三件首败原件和真实回执均保留。仅向原MiniMax Bot反馈准确的`1 --`回退及目录违规后，R2自然完成：原43／43、400位精确输入、自测37／37、独立README八例、模型真实示例与三源全量回读、本轮目录边界及一次正式三件回执均核对。最终2543B／7042B／2084B均已通过正式预览打开、原生保存，SHA逐字节等于原件。原ez-mm及首轮快照未改；这不是Host／Runtime修复，不能抹去首轮质量差距。
+- **六条51项目记录的共同内容属性已有当前实证，流程风险仍开放。** 原题仅替换marker／输出名，原群自然一轮4任务／28条AI实际均MiniMax-M2.7；B公开完整51路径，A真实读取README／无说明目录、生成10978B新件并唯一正式附交，B实际读取新件并运行集合／编号复核。正式原件已预览打开及原生保存，51目录名称／绝对路径／总数正确、无漏重、说明分类非空，旧项目与131份README SHA保持。合法加粗总数未被辅助regex识别，不误判产品失败。B起初三次sleep共420秒、`/tmp`及群内临时文件如实保留，不称流程全部通过；仅一条原Human，无停止、反馈或重试。最终‘按你补充’来自同伴B的实际公开补充，不冒称用户额外反馈。
+- **调度未改。** 群原游标确实在B终轮后才给A工作；当前群提示与工具说明已两处写明本轮后路由／禁止轮询，回执没有谎报A已启动；给定Grok0.18同样串行等待成员终轮。没有确定的接线缺失可据此改共享锁、硬截断工具或加同义提示。420秒低效作为本轮体验偏差继续保留，不由正确终件盖过。
+
+当前34条的后续有限验证为16条、未获完整修复证据12条、证据不足6条；复核仍34／34（100%），不是整体质量完成率。新证据 `current-native-ui-exports.safe.json`、`id25-real-revision/r2/final-independent-verdict.safe.json`、`51-current-independent.safe.json`、`group-wait-protocol-independent.safe.json` 均在FV目录。当前只更新两份进度文档，未新增生产补丁或再次提交／push。ID16后续复验范围与未闭环原因见下段；不以其他较简单路由成功代替。
+
+**ID16复验补记（未计双角色通过）：** 已在原群从原1043消息建立准确引用，只显式@原DS并通过原生文件选择上传同64B CSV，仅换本轮marker；当前3条实际AI为DeepSeek Flash，唯一DS任务真实读取本次新shared副本，三行原值、74.13、64B及完整SHA正确，公开一次。旧28消息／19任务／146原生记录／16工作文件保持，仅新增授权的输入副本。当前只创建显式目标DS任务，没有创建引用作者任务，因此不能把它计为旧D10双角色分工通过。
+
+进一步复核确认：引用作者自动并入在2026-10-22的 `c0a9952542` 已删除；该选择函数逐字节等于本次99文件提交之前，不是 `eda78af5f` 新引入。AL／AW的当时官方实测支持‘引用仅资料、只由选中人’；但AW正文明确仅选中人，与旧D10让两角色各做一项不同，不能消除旧复杂题差异。旧官方UI确实是引用GA＋@GB而两角色分别回答，缺少其服务端targets证据，原因未定；现装0.75.3完整同题也未另验。原复用准备漏核后续合同，已纠正；不为复现旧并集改回现有明确收件规则，不增加NLP角色推断。ID16仍保留未闭环，不把本轮单目标成功伪装成双角色修复。证据 `D10-current-before.safe.json`、`D10-current-independent.safe.json` 及 `D10-recipient-contract-independent.safe.json`（均在FV目录）。
 
 ### 当前可执行工作（2026-10-24，FO对照／FS包内增量）
 

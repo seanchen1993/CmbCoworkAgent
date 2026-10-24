@@ -3926,6 +3926,11 @@ export class BotStore {
         if (targets.some((id) => !recipients.has(id)))
           throw new BotError("INVALID_INPUT", "收件人与群提及不一致")
       }
+      const quotedAuthor =
+        replyAuthor && !targets.includes(replyAuthor) ? this.getBot(replyAuthor) : null
+      const notifiedAuthor =
+        quotedAuthor && !quotedAuthor.archived && !quotedAuthor.deleting ? quotedAuthor.id : null
+      const participants = notifiedAuthor ? [...targets, notifiedAuthor] : targets
       const obsoleteDiscussion = this.groupDiscussionTask(group.id, input.requestId)
       if (obsoleteDiscussion && this.getTask(obsoleteDiscussion).state === "queued")
         this.transition(obsoleteDiscussion, "cancelled")
@@ -3960,7 +3965,8 @@ export class BotStore {
           )}`
         : ""
       const initialTaskIds: string[] = []
-      for (const botId of targets) {
+      for (const botId of participants) {
+        const replyNotification = botId === notifiedAuthor
         // Completed turns already live in this member's original Runtime transcript.
         // A cancelled, failed or still-queued turn cannot advance the delivered boundary.
         const delivered = Number(
@@ -4001,9 +4007,11 @@ export class BotStore {
                 replyAuthorId: replyAuthor,
                 addressedAsReplyAuthor: botId === replyAuthor
               }
-            )}. It is your turn to answer the user's request as this recipient; quoting another member does not add recipients.\n\nUser request for group ${JSON.stringify(group.name)}:\n${input.text}`
+            )}. ${replyNotification ? "You are notified as the author of a quoted message, not an explicitly selected recipient. The quote alone assigns no work or tool permission. Only perform the part the current user explicitly assigns to the quoted author. Do not take over another participant's work. If no part is assigned to you, return exactly (pass) without tools or a public acknowledgement." : "It is your turn to answer the user's request as this recipient; quoting another member does not add recipients."}\n\nUser request for group ${JSON.stringify(group.name)}:\n${input.text}`
           },
-          { kind: "group", groupId: group.id, messageId: input.requestId }
+          replyNotification
+            ? { kind: "discussion", groupId: group.id, messageId: input.requestId, round: 1 }
+            : { kind: "group", groupId: group.id, messageId: input.requestId }
         )
         initialTaskIds.push(task.id)
       }
@@ -4014,7 +4022,7 @@ export class BotStore {
           memberIds: group.memberIds,
           round: 1,
           speakerIndex: 0,
-          turns: targets.length,
+          turns: participants.length,
           roundStartOrdinal: currentOrdinal,
           seen: Object.fromEntries(group.memberIds.map((id) => [id, currentOrdinal])),
           pendingTaskId: null
@@ -4038,15 +4046,20 @@ export class BotStore {
       )
       if (this.db.getRowsModified()) this.changed()
     }
-    if (messageId) {
-      const row = this.rows("SELECT payload FROM bot_group_discussions WHERE group_id=?", [
-        groupId
-      ])[0]
-      if (
-        !row ||
-        groupDiscussionSchema.parse(JSON.parse(String(row.payload))).messageId !== messageId
+    const row = this.rows("SELECT payload FROM bot_group_discussions WHERE group_id=?", [
+      groupId
+    ])[0]
+    const state = row ? groupDiscussionSchema.parse(JSON.parse(String(row.payload))) : null
+    if (messageId && state?.messageId !== messageId) return
+    if (state) {
+      // Withdraw only an unstarted quote notification; direct and running work keep their lifecycle.
+      this.db.run(
+        `UPDATE bot_tasks SET state='cancelled',updated_at=? WHERE state='queued' AND continuation_checkpoint_id IS NULL
+         AND id IN (SELECT value FROM json_each(?)) AND json_extract(origin_json,'$.kind')='discussion'
+         AND json_extract(origin_json,'$.groupId')=? AND json_extract(origin_json,'$.messageId')=?`,
+        [this.now(), JSON.stringify(state.initialTaskIds), groupId, state.messageId]
       )
-        return
+      if (this.db.getRowsModified()) this.changed()
     }
     this.db.run("DELETE FROM bot_group_discussions WHERE group_id=?", [groupId])
   }

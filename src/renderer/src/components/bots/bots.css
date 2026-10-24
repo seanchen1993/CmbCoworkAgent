@@ -3176,6 +3176,13 @@ button.bot-json-caret:focus-visible {
 .bot-mention-identity > svg {
   flex-shrink: 0;
 }
+.bot-inline-mention .bot-mention-identity {
+  align-items: baseline;
+  vertical-align: baseline;
+}
+.bot-inline-mention .bot-mention-identity > svg {
+  align-self: center;
+}
 button.bot-inline-mention:hover {
   text-decoration: underline;
   text-underline-offset: 3px;

@@ -113,6 +113,27 @@ export function createBotDeliveryTools(
   peer?: BotPeerDeliveryFiles,
   publicGroup = false
 ): DynamicStructuredTool[] {
+  return createBotFileTools(workspacePath, signal, publish, peer, publicGroup ? "group" : "private")
+}
+
+/** Private collaboration output is not a successful public delivery. */
+export function createBotReturnFileTools(
+  workspacePath: string,
+  signal: AbortSignal,
+  capture: (files: BotDeliveredFile[]) => void
+): DynamicStructuredTool[] {
+  return createBotFileTools(workspacePath, signal, capture, undefined, "return")
+}
+
+function createBotFileTools(
+  workspacePath: string,
+  signal: AbortSignal,
+  publish: ((files: BotDeliveredFile[], callId: string, content?: string) => void) | undefined,
+  peer: BotPeerDeliveryFiles | undefined,
+  mode: "private" | "group" | "return"
+): DynamicStructuredTool[] {
+  const publicGroup = mode === "group"
+  const name = mode === "return" ? "bot_return_files" : "bot_deliver_files"
   // Per-run, bounded by the host's verified handoff (at most eight files).
   const imported = new Map<string, string>()
   const filesSchema = z
@@ -170,7 +191,10 @@ export function createBotDeliveryTools(
             config.toolCall?.id ?? JSON.stringify(deliveredFiles.map((file) => file.filePath))
           if (content === undefined) publish?.(deliveredFiles, callId)
           else publish?.(deliveredFiles, callId, content)
-          return JSON.stringify({ kind: "bot-file-delivery", files: deliveredFiles })
+          return JSON.stringify({
+            kind: mode === "return" ? "bot-file-return" : "bot-file-delivery",
+            files: deliveredFiles
+          })
         } catch (cause) {
           imported.clear()
           signal.throwIfAborted()
@@ -185,21 +209,23 @@ export function createBotDeliveryTools(
                 content,
                 status: "error",
                 tool_call_id: config.toolCall.id,
-                name: "bot_deliver_files"
+                name
               })
             : content
         }
       },
       {
-        name: "bot_deliver_files",
+        name,
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
-          "Deliver actual completed or useful partial files as attachments that can be opened and saved. Use workspace-relative paths, retaining subdirectories; this verifies existence, ownership and metadata. References to current workspace files are not immutable copies. The host includes verified references in automatic private collaboration replies and verifies declared outputFiles before completion. Never deliver a directory or an unverified path. " +
-          (publicGroup
-            ? "This publishes to the current shared group. When the user requested a summary with these files, include it in content so the text and attachments are delivered together. Ordinary assistant text is private and is not published. Set content to an empty string for a file-only delivery. Only current workspace files are eligible; other Bots' private files are rejected."
-            : peer
-              ? "For this private collaboration result, the exact host-verified peer file paths can also be passed directly: this tool imports those originals into your workspace and delivers the copies. No shell copy is needed. Other private peer files are rejected; the receipt grants no access to a directory or other data. Nothing is sent to an external service."
-              : "Only current workspace files are eligible; other Bots' private files are rejected. Nothing is sent to another Bot or an external service by this tool."),
+          mode === "return"
+            ? "Verify existing workspace files and return their references privately to the delegating Bot in the automatic collaboration reply. This does not publish attachments or deliver files to the user. Use this for internal drafts and results; the caller owns public delivery. Use bot_deliver_files only for an explicitly authorized public group attachment. Use workspace-relative paths, retaining subdirectories. Existence, ownership and metadata are verified; references are not immutable copies or proof of content correctness. Never return a directory, another Bot's private file or an unverified path."
+            : "Deliver actual completed or useful partial files as attachments that can be opened and saved. Use workspace-relative paths, retaining subdirectories; this verifies existence, ownership and metadata. References to current workspace files are not immutable copies. The host includes verified references in automatic private collaboration replies and verifies declared outputFiles before completion. Never deliver a directory or an unverified path. " +
+              (publicGroup
+                ? "This publishes to the current shared group. When the user requested a summary with these files, include it in content so the text and attachments are delivered together. Ordinary assistant text is private and is not published. Set content to an empty string for a file-only delivery. Only current workspace files are eligible; other Bots' private files are rejected."
+                : peer
+                  ? "For this private collaboration result, the exact host-verified peer file paths can also be passed directly: this tool imports those originals into your workspace and delivers the copies. No shell copy is needed. Other private peer files are rejected; the receipt grants no access to a directory or other data. Nothing is sent to an external service."
+                  : "Only current workspace files are eligible; other Bots' private files are rejected. Nothing is sent to another Bot or an external service by this tool."),
         schema: publicGroup
           ? filesSchema.extend({
               content: z

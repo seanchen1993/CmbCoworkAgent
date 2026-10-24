@@ -495,6 +495,28 @@ describe("formal group delivery", () => {
     ).toBeUndefined()
   })
 
+  it("never accepts a private file-return receipt as public attachment delivery", () => {
+    for (const name of ["bot_return_files", "bot_deliver_files"]) {
+      const messages = [
+        new HumanMessage("Deliver the requested report to this group"),
+        new AIMessage({
+          content: "",
+          tool_calls: [{ id: "return-1", name, args: { files: ["draft.md"] } }]
+        }),
+        new ToolMessage({
+          tool_call_id: "return-1",
+          name,
+          content: JSON.stringify({
+            kind: "bot-file-return",
+            files: [{ filePath: "/group/draft.md", name: "draft.md", size: 12 }]
+          })
+        }),
+        new AIMessage("")
+      ]
+      expect(createBotGroupDeliveryCheck(task)(messages)).toContain("bot_deliver_files")
+    }
+  })
+
   it("preserves private peer results and only permits pass on internal/optional turns", () => {
     const final = (text: string) => [new HumanMessage("Work"), new AIMessage(text)]
     const peer: BotTask = {

@@ -44,6 +44,7 @@ import {
   createBotScheduleTools,
   createBotBrowserTools,
   createBotDeliveryTools,
+  createBotReturnFileTools,
   createBotReactionTools,
   verifyBotDeliveryFiles
 } from "./tools"
@@ -969,18 +970,17 @@ export function createLocalBotRunPort(
                             workspacePath,
                             signal,
                             (files, callId, content) => {
-                              // Internal work returns files to its caller. Public room turns
-                              // publish explicitly; the reply outbox must not create both.
-                              if (task.origin.kind !== "bot" || !task.origin.expectsReply) {
-                                if (content === undefined)
-                                  getHost().publishGroupFiles(task.id, callId, files)
-                                else getHost().publishGroupFiles(task.id, callId, files, content)
-                              }
+                              if (content === undefined)
+                                getHost().publishGroupFiles(task.id, callId, files)
+                              else getHost().publishGroupFiles(task.id, callId, files, content)
                               captureReplyFiles(files)
                             },
                             undefined,
-                            task.origin.kind !== "bot" || !task.origin.expectsReply
+                            true
                           ),
+                          ...(task.origin.kind === "bot" && task.origin.expectsReply
+                            ? createBotReturnFileTools(workspacePath, signal, captureReplyFiles)
+                            : []),
                           ...createBotBrowserTools(
                             bot,
                             browser,

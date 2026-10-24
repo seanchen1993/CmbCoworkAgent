@@ -2695,7 +2695,7 @@ describe("Bot host scheduling", () => {
     expect(addressed[0].message).toContain("quoting another member does not add recipients")
     expect(db.groupMessages(group.id).at(-1)?.replyTo?.authorBotId).toBe(b.id)
   })
-  it("validates selected mentions without adding the persisted reply author before dispatch", () => {
+  it("validates selected mentions without adding the persisted reply author as a direct recipient", () => {
     const db = store(),
       a = db.create(input),
       b = db.create(input),
@@ -2740,7 +2740,10 @@ describe("Bot host scheduling", () => {
       targetBotIds: [a.id],
       mentions: [{ start: 0, end: 6, botId: a.id, label: "Alice" }]
     })
-    expect(db.recentTasks()).toHaveLength(3)
+    expect(db.recentTasks().filter((task) => task.origin.kind === "group")).toHaveLength(3)
+    expect(db.recentTasks().filter((task) => task.origin.kind === "discussion")).toMatchObject([
+      { botId: a.id, state: "cancelled", origin: { messageId: "reply-mention" } }
+    ])
     db.saveGroup(
       { name: group.name, memberIds: [b.id, c.id] },
       { id: group.id, version: group.version }
@@ -2748,7 +2751,7 @@ describe("Bot host scheduling", () => {
     expect(() =>
       db.sendGroup({ ...request, requestId: "reply-removed", targetBotIds: [b.id] })
     ).toThrow("不在本群")
-    expect(db.recentTasks()).toHaveLength(3)
+    expect(db.recentTasks()).toHaveLength(4)
   })
   it("sends each member new group references without repeating the current request or other conversation data", () => {
     const db = store(),

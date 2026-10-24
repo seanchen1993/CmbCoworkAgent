@@ -19,6 +19,7 @@ import {
   createBotScheduleTools,
   createBotBrowserTools,
   createBotDeliveryTools,
+  createBotReturnFileTools,
   createBotReactionTools,
   createBotProfileTools,
   createBotCollaborationTools
@@ -500,6 +501,56 @@ it("delivers verified current-workspace files and rejects missing, private, link
     await expect(call(["核验 报告.md"])).rejects.toThrow("cancelled")
   } finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+it("keeps internal file return distinct from an explicit public group delivery", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "bot-file-return-"))
+  const controller = new AbortController(),
+    capture = vi.fn(),
+    publish = vi.fn()
+  try {
+    await writeFile(join(workspace, "draft.md"), "Private review draft")
+    const [returned] = createBotReturnFileTools(workspace, controller.signal, capture)
+    const [delivered] = createBotDeliveryTools(
+      workspace,
+      controller.signal,
+      publish,
+      undefined,
+      true
+    )
+    const call = (selected: typeof returned, args: Record<string, unknown>, child = false) =>
+      selected.invoke(
+        { type: "tool_call", id: "file-scope", name: selected.name, args },
+        child ? { configurable: { cmb_subagent_owner_tool_call_id: "temporary-task" } } : undefined
+      )
+    const result = await call(returned, { files: ["draft.md"] })
+    expect(returned.name).toBe("bot_return_files")
+    expect(result.name).toBe("bot_return_files")
+    const receipt = JSON.parse(String(result.content))
+    expect(receipt).toMatchObject({ kind: "bot-file-return", files: [{ name: "draft.md" }] })
+    expect(parseBotFileDelivery(result.content)).toBeNull()
+    expect(capture).toHaveBeenCalledExactlyOnceWith(receipt.files, "file-scope")
+    expect(publish).not.toHaveBeenCalled()
+    // Old internal calls had only files. They must not silently become public on resume.
+    await expect(call(delivered, { files: ["draft.md"] })).rejects.toThrow()
+    await expect(
+      call(returned, { files: ["draft.md"], content: "Publish the draft" })
+    ).rejects.toThrow()
+    const child = await call(returned, { files: ["draft.md"] }, true)
+    expect(child).toMatchObject({ name: "bot_return_files", status: "error" })
+    expect((await call(returned, { files: ["draft.md", "missing.md"] })).status).toBe("error")
+    expect((await call(returned, { files: ["../outside.md"] })).status).toBe("error")
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(publish).not.toHaveBeenCalled()
+    const publicResult = await call(delivered, { files: ["draft.md"], content: "Reviewed result" })
+    expect(parseBotFileDelivery(publicResult.content)).toEqual(receipt.files)
+    expect(publish).toHaveBeenCalledExactlyOnceWith(receipt.files, "file-scope", "Reviewed result")
+    controller.abort(new Error("cancelled"))
+    await expect(call(returned, { files: ["draft.md"] })).rejects.toThrow("cancelled")
+    expect(capture).toHaveBeenCalledTimes(1)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
   }
 })
 
