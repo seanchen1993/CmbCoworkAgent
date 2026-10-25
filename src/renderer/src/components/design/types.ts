@@ -77,6 +77,7 @@ export interface DesignCreationSelection {
     requirement: { code: string; title: string } | null
     implementationDetails: Array<{ title: string; code: string }>
     path: string | null
+    attachment?: FileAttachment | null
   }
   designSystemId: string | null
 }
@@ -332,6 +333,7 @@ export interface DesignApprovalRequest {
 }
 
 export interface TabState {
+  creationSelection?: DesignCreationSelection | null
   artifactRevision?: number
   appliedPatch?: DesignAppliedPatch | null
   patchStatus?: DesignPatchStatus | null

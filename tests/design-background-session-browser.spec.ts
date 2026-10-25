@@ -43,7 +43,10 @@ const bundle = await build({
   platform: "browser",
   jsx: "automatic",
   alias: { "@": resolve("src/renderer/src") },
-  define: { "import.meta.env": "{}", "process.env.NODE_ENV": '"test"' },
+  define: {
+    "import.meta.env": '{"VITE_LEANSTAR_REQUIREMENTS_MOCK":"true"}',
+    "process.env.NODE_ENV": '"test"'
+  },
   plugins: [
     {
       name: "fixture-app-store",
@@ -143,7 +146,12 @@ try {
       .catch(() => undefined)
   }
   await page.addInitScript(() => {
-    localStorage.setItem("design_last_session", "ds_browser")
+    // Electron's preload belongs to the host, not sandboxed template thumbnails.
+    if (window !== window.top) return
+    if (!localStorage.getItem("design_browser_seeded")) {
+      localStorage.setItem("design_last_session", "ds_browser")
+      localStorage.setItem("design_browser_seeded", "1")
+    }
     ;(window as unknown as { businessRuns: number }).businessRuns = 0
     window.addEventListener("message", (event) => {
       if (event.data?.type === "test-business-run")
@@ -184,17 +192,83 @@ try {
     ;(window as unknown as { api: unknown }).api = {
       design: {
         sessions,
-        listSystems: async () => [],
-        listTemplates: async () => [],
-        storeHtml: async () => ({ ok: true })
+        listSystems: async () => [
+          {
+            id: "neutral-modern",
+            name: "Neutral Modern",
+            path: "/systems/neutral",
+            category: "Core"
+          },
+          { id: "wealth", name: "财富管理", path: "/systems/wealth", category: "Core" }
+        ],
+        listTemplates: async () =>
+          Array.from({ length: 5 }, (_, i) => ({
+            name: `模板 ${i + 1}`,
+            description: `模板说明 ${i + 1}`,
+            path: `/templates/${i + 1}`,
+            previewPath: `/templates/${i + 1}.html`,
+            previewHtml: `<h1>模板内容 ${i + 1}</h1>`
+          })),
+        storeHtml: async () => ({ ok: true }),
+        saveArtifact: async (id: string) => ({ success: true, filePath: `/workspace/${id}.html` }),
+        importFromUrl: async () => ({
+          success: true,
+          title: "链接导入",
+          html: "<h1>链接页面</h1>"
+        }),
+        importPrototypeZip: async () => ({
+          success: true,
+          title: "原型导入",
+          html: "<h1>原型页面</h1>",
+          imageCount: 2
+        }),
+        syncContextFiles: async () => ({ success: true })
       },
       skills: { list: async () => [], listPlugins: async () => [], getDisabled: async () => [] },
       models: {
         list: async () => [{ id: "custom:test", name: "Test", model: "test", available: true }]
       },
-      workspace: { get: async () => "/workspace" },
+      workspace: { get: async () => "/workspace", select: async () => "/workspace/selected" },
       file: {
-        readText: async () => ({ success: false }),
+        parseSelected: async () => ({
+          success: true,
+          attachment: {
+            filename: "requirement.md",
+            filePath: "/workspace/requirement.md",
+            content: "需求附件内容",
+            mimeType: "text/markdown",
+            size: 20,
+            truncated: false
+          }
+        }),
+        selectCode: async () => ({ canceled: false, filePaths: ["/workspace/import.html"] }),
+        selectPrototypeZip: async () => ({
+          canceled: false,
+          filePaths: ["/workspace/prototype.zip"]
+        }),
+        select: async () => ({
+          canceled: false,
+          files: [
+            {
+              filename: "requirement.md",
+              filePath: "/workspace/requirement.md",
+              grant: "test-grant",
+              content: "需求附件内容",
+              mimeType: "text/markdown",
+              size: 20,
+              truncated: false
+            }
+          ]
+        }),
+        readText: async (path: string) =>
+          path.endsWith(".css")
+            ? { success: true, content: "h1{color:rgb(12,34,56)}" }
+            : {
+                success: true,
+                filename: "import.html",
+                content:
+                  '<html><head><link rel="stylesheet" href="./import.css"></head><body><h1>HTML 导入页面</h1></body></html>'
+              },
         readDataUrl: async () => ({ success: false })
       }
     }
@@ -592,7 +666,7 @@ try {
   await page.getByTitle("撤销局部修改").click()
   await page.waitForFunction(
     (instance) =>
-      document.querySelector("iframe")?.contentDocument?.documentElement.dataset
+      document.querySelector("iframe")?.contentDocument?.documentElement?.dataset
         .designPreviewInstance !== instance,
     finalIdentity
   )
@@ -602,9 +676,125 @@ try {
     3,
     "a lost local ACK recovers from the committed snapshot without invoking the model"
   )
+  // The creation screen must use the same durable sessions and import pipeline as the editor.
+  await page.getByTitle("返回历史记录").click()
+  const originalCount = manager.list().length
+  await page.getByRole("button", { name: "新建设计" }).first().click()
+  await page.getByRole("heading", { name: "新建设计", exact: true }).waitFor()
+  assert.equal(await page.getByText("选择新建设计方式").count(), 0, "new designs use a full page")
+  await page.getByLabel("设计系统", { exact: true }).selectOption("wealth")
+  await page.getByRole("button", { name: "切换目录", exact: true }).click()
+  await page.getByText("/workspace/selected", { exact: true }).waitFor()
+  await page.getByRole("button", { name: "下一页模板" }).click()
+  await page.getByRole("button", { name: "选择模板 5模板预览", exact: true }).click()
+  await page.getByRole("button", { name: "上一页模板" }).click()
+  await page.getByRole("button", { name: "通过链接还原", exact: false }).click()
+  await page.getByPlaceholder("https://example.com/page").fill("invalid-url")
+  assert.equal(await page.getByRole("button", { name: "开始还原", exact: true }).isDisabled(), true)
+  await page.getByRole("button", { name: "×", exact: true }).click()
+  assert.equal(
+    await page.getByText("模板：模板 5", { exact: false }).count(),
+    1,
+    "cancelled imports retain selections"
+  )
+  await page.getByRole("button", { name: "上传需求文件", exact: true }).click()
+  await page.getByRole("button", { name: "选择文件", exact: true }).click()
+  await page.getByRole("button", { name: "进入设计", exact: false }).click()
+  await page.locator("textarea").first().waitFor()
+  const createdId = await page.evaluate(() => localStorage.getItem("design_last_session"))
+  assert.ok(createdId)
+  assert.equal(manager.list().length, originalCount + 1)
+  assert.equal(manager.get(createdId).workspacePath, "/workspace/selected")
+  assert.equal(manager.get(createdId).state.selectedDesignSystemId, "wealth")
+  assert.equal(manager.get(createdId).state.creationSelection?.template.name, "模板 5")
+  assert.equal(manager.get(createdId).state.attachedFiles?.[0].content, "需求附件内容")
+  await page.reload()
+  await page.locator("textarea").first().fill("直接生成一个模板测试页面")
+  await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  const creationRequest = requests.at(-1)!
+  assert.match(creationRequest.prompt, /模板内容 5/)
+  assert.match(creationRequest.prompt, /需求附件内容/)
+  assert.equal(
+    creationRequest.cleanUserMsg,
+    "直接生成一个模板测试页面",
+    "reference HTML stays out of chat"
+  )
+  emitters.at(-1)!({ type: "error", error: "测试结束" })
+  completions.at(-1)!()
+  await page.getByText(/测试结束/).waitFor()
+
+  for (const entry of [
+    { button: "导入 HTML", heading: "HTML 导入页面", kind: "import_html" },
+    { button: "原型压缩包", heading: "原型页面", kind: "prototype_zip" },
+    { button: "通过链接还原", heading: "链接页面", kind: "import_url" }
+  ]) {
+    await page.getByTitle("返回历史记录").click()
+    await page.getByRole("button", { name: "新建设计" }).first().click()
+    await page.getByLabel("设计系统", { exact: true }).selectOption("wealth")
+    await page.getByRole("button", { name: entry.button, exact: false }).click()
+    if (entry.kind === "import_url") {
+      await page.getByPlaceholder("https://example.com/page").fill("https://example.com/design")
+      await page.getByRole("button", { name: "开始还原", exact: true }).click()
+    }
+    await page.frameLocator("iframe").getByText(entry.heading, { exact: true }).waitFor()
+    const id = (await page.evaluate(() => localStorage.getItem("design_last_session")))!
+    await page.waitForFunction(async (sessionId) => {
+      const snapshot = await (
+        window as unknown as { designRpc: (...args: unknown[]) => Promise<any> }
+      ).designRpc("open", sessionId)
+      return Boolean(snapshot.state.artifactPath)
+    }, id)
+    assert.equal(manager.get(id).meta.kind, entry.kind)
+    assert.equal(manager.get(id).state.tweaksOn, true)
+    assert.equal(manager.get(id).state.selectedDesignSystemId, "wealth")
+    if (entry.kind === "import_html") {
+      assert.equal(
+        await page
+          .frameLocator("iframe")
+          .locator("h1")
+          .evaluate((element) => getComputedStyle(element).color),
+        "rgb(12, 34, 56)",
+        "local CSS survives imports"
+      )
+    }
+  }
+  await page.getByTitle("返回历史记录").click()
+  await page.getByRole("button", { name: "新建设计" }).first().click()
+  await page.getByRole("button", { name: "返回设计历史", exact: true }).click()
+  await page.getByText("My Designs", { exact: true }).waitFor()
+  await page.reload()
+  await page.getByRole("heading", { name: "新建设计", exact: true }).waitFor()
+  await page.getByRole("button", { name: "上传模板", exact: true }).click()
+  await page.getByRole("button", { name: "选择文件", exact: true }).click()
+  await page.getByRole("combobox").nth(1).click()
+  await page
+    .getByRole("option", { name: /Mock 开发组 A/ })
+    .first()
+    .click()
+  await page.getByRole("combobox").nth(2).click()
+  await page.getByRole("option", { name: /Mock 需求 A-1/ }).click()
+  await page.getByRole("button", { name: "进入设计", exact: false }).click()
+  await page.locator("textarea").first().waitFor()
+  const uploadId = (await page.evaluate(() => localStorage.getItem("design_last_session")))!
+  const uploadSelection = manager.get(uploadId).state.creationSelection!
+  assert.equal(uploadSelection.template.mode, "upload")
+  assert.match(uploadSelection.template.html!, /HTML 导入页面/)
+  assert.equal(uploadSelection.requirement.namespaceId, "ns-wplus")
+  assert.equal(uploadSelection.requirement.requirement?.code, "P2603-2406")
+  await page.getByTitle("返回历史记录").click()
+  await page.getByRole("button", { name: "新建设计" }).first().click()
+  await page.getByRole("button", { name: "不选模板", exact: true }).click()
+  await page.getByRole("button", { name: "不绑定需求", exact: true }).click()
+  await page.getByRole("button", { name: "进入设计", exact: false }).click()
+  await page.locator("textarea").first().waitFor()
+  const blankId = (await page.evaluate(() => localStorage.getItem("design_last_session")))!
+  assert.equal(manager.get(blankId).state.creationSelection?.template.html, null)
+  assert.equal(manager.get(blankId).state.creationSelection?.requirement.requirement, null)
+  assert.equal(manager.get(blankId).state.attachedFiles, null)
   assert.deepEqual(errors, [])
   console.log(
-    "PASS: progressive previews, bounded chat/comment patches, live node/listener preservation, durable undo/redo and background recovery"
+    "PASS: progressive previews, bounded chat/comment patches, live node/listener preservation, durable undo/redo, background recovery, full-page creation, template/requirement persistence and URL/HTML/ZIP imports"
   )
 } finally {
   await browser.close()

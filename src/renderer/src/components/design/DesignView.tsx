@@ -28,7 +28,9 @@ import {
   type ResolvedDrawStroke
 } from "./DesignDraw"
 import { DesignGallery } from "./DesignGallery"
-import { CreateDesignModal, ExportDesignModal, LinkModal } from "./DesignModals"
+import { ExportDesignModal, LinkModal } from "./DesignModals"
+import { DesignCreationPage } from "./DesignCreationPage"
+import { buildDesignCreationContext } from "./creation-context"
 import { ElementPropsPanel } from "./ElementPropsPanel"
 import { getDrawElementLabel, pickStrokeIdForNotePoint } from "./drawUtils"
 import { PulsingDot } from "./common"
@@ -54,6 +56,7 @@ import type {
   CommentItem,
   DesignApprovalDecision,
   DesignContextSyncResult,
+  DesignCreationSelection,
   DesignElementAnchor,
   DesignArtifactMetadata,
   DesignSessionKind,
@@ -1406,8 +1409,10 @@ export function DesignView(): React.JSX.Element {
   const [activeSkillIndex, setActiveSkillIndex] = useState(0)
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
-  // Code & link modal state
-  const [createModalOpen, setCreateModalOpen] = useState(false)
+  // Open the creation workspace when there is no editor session to restore.
+  const [creationPageOpen, setCreationPageOpen] = useState(
+    () => !localStorage.getItem(SESSION_LAST_KEY)
+  )
   const [codeModalOpen, setCodeModalOpen] = useState(false)
   const [linkModalOpen, setLinkModalOpen] = useState(false)
   const [linkModalMode, setLinkModalMode] = useState<"reference" | "import">("reference")
@@ -1866,6 +1871,7 @@ export function DesignView(): React.JSX.Element {
       metaPatch?: Partial<SessionMeta>,
       options?: {
         designSystemId?: string | null
+        creationSelection?: DesignCreationSelection
       }
     ): string => {
       flushArtifactEdits()
@@ -1877,7 +1883,11 @@ export function DesignView(): React.JSX.Element {
         : null
       session.tabStates[SINGLE_DESIGN_TAB_ID] = {
         ...session.tabStates[SINGLE_DESIGN_TAB_ID],
-        selectedDesignSystemId: selectedForSession?.id ?? null
+        selectedDesignSystemId: selectedForSession?.id ?? null,
+        creationSelection: options?.creationSelection ?? null,
+        attachedFiles: options?.creationSelection?.requirement.attachment
+          ? [options.creationSelection.requirement.attachment]
+          : null
       }
       tabStatesRef.current = session.tabStates
       setTabStates(session.tabStates)
@@ -1903,13 +1913,6 @@ export function DesignView(): React.JSX.Element {
       return id
     },
     [designSystems, workspacePath, showToast, flushArtifactEdits]
-  )
-
-  const newSession = useCallback(
-    (designSystemId?: string | null) => {
-      createSession(undefined, { designSystemId: designSystemId ?? null })
-    },
-    [createSession]
   )
 
   const ensureWorkspaceSelected = useCallback(
@@ -2179,7 +2182,6 @@ export function DesignView(): React.JSX.Element {
   const openImportUrlModal = useCallback(async () => {
     const ready = await ensureWorkspaceSelected("导入链接页面")
     if (!ready) return
-    setCreateModalOpen(false)
     setLinkModalMode("import")
     setLinkModalText("")
     setLinkModalOpen(true)
@@ -2232,7 +2234,7 @@ export function DesignView(): React.JSX.Element {
               ? createDesignSystemId
               : tabStatesRef.current[SINGLE_DESIGN_TAB_ID]?.selectedDesignSystemId
         })
-        setCreateModalOpen(false)
+        setCreationPageOpen(false)
       } catch (err) {
         showToast(err instanceof Error ? err.message : "导入 HTML 页面失败")
       } finally {
@@ -2306,7 +2308,7 @@ export function DesignView(): React.JSX.Element {
               ? createDesignSystemId
               : tabStatesRef.current[SINGLE_DESIGN_TAB_ID]?.selectedDesignSystemId
         })
-        setCreateModalOpen(false)
+        setCreationPageOpen(false)
         showToast(`已生成原型 HTML：${imported.imageCount ?? 0} 张图片`)
       } catch (err) {
         showToast(err instanceof Error ? err.message : "导入原型图压缩包失败")
@@ -2368,7 +2370,7 @@ export function DesignView(): React.JSX.Element {
               ? createDesignSystemId
               : tabStatesRef.current[SINGLE_DESIGN_TAB_ID]?.selectedDesignSystemId
         })
-        setCreateModalOpen(false)
+        setCreationPageOpen(false)
         return true
       } catch (err) {
         showToast(err instanceof Error ? err.message : "导入链接页面失败")
@@ -3493,7 +3495,11 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             .map((f) => `### ${f.filename}${f.truncated ? " (truncated)" : ""}\n${f.content}`)
             .join("\n\n")
         : ""
+    const creationContext = !hasExistingDesign
+      ? buildDesignCreationContext(stateBeforeSend?.creationSelection)
+      : ""
     const contextSuffix =
+      creationContext +
       skillContext +
       linkSuffix +
       workspaceFilesSuffix +
@@ -3820,13 +3826,21 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
 
     const imported = await handleImportUrl(
       linkModalText,
-      currentSessionId === null ? "gallery" : "session"
+      creationPageOpen || currentSessionId === null ? "gallery" : "session"
     )
     if (imported) {
       setLinkModalOpen(false)
       setLinkModalText("")
     }
-  }, [linkModalMode, updateTs, activeTabId, linkModalText, handleImportUrl, currentSessionId])
+  }, [
+    linkModalMode,
+    updateTs,
+    activeTabId,
+    linkModalText,
+    handleImportUrl,
+    currentSessionId,
+    creationPageOpen
+  ])
 
   const downloadCurrentDesignHtml = useCallback(
     (html: string, metadata?: DesignArtifactMetadata | null, fileName?: string) => {
@@ -3918,45 +3932,63 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       </div>
     )
 
+  if (creationPageOpen) {
+    return (
+      <>
+        <DesignCreationPage
+          onBack={() => setCreationPageOpen(false)}
+          workspacePath={workspacePath}
+          workspaceLoading={workspaceLoading}
+          onSelectWorkspace={() => void handleSelectWorkspace()}
+          designSystemGroups={designSystemGroups}
+          selectedDesignSystemId={createDesignSystemId}
+          onDesignSystemChange={setCreateDesignSystemId}
+          importingSource={importingSource}
+          onEnterDesign={(selection) => {
+            createSession(undefined, {
+              designSystemId: selection.designSystemId,
+              creationSelection: selection
+            })
+            setCreationPageOpen(false)
+          }}
+          onImportUrl={() => void openImportUrlModal()}
+          onImportHtml={() => void handleImportHtmlFile("gallery")}
+          onImportPrototypeZip={() => void handleImportPrototypeZip("gallery")}
+        />
+        <LinkModal
+          open={linkModalOpen}
+          mode={linkModalMode}
+          url={linkModalText}
+          loading={importingSource === "url"}
+          onUrlChange={setLinkModalText}
+          onConfirm={() => void handleLinkModalConfirm()}
+          onClose={() => setLinkModalOpen(false)}
+        />
+        {toast && (
+          <div
+            role="status"
+            className="fixed bottom-20 left-1/2 z-50 max-w-[90vw] -translate-x-1/2 rounded-lg bg-foreground px-4 py-2 text-sm text-background shadow-lg"
+          >
+            {toast.msg}
+          </div>
+        )}
+      </>
+    )
+  }
+
   if (currentSessionId === null) {
     return (
       <>
         <DesignGallery
           sessionIndex={sessionIndex}
           onOpen={openSession}
-          onNew={() => setCreateModalOpen(true)}
+          onNew={() => setCreationPageOpen(true)}
           onDelete={deleteSession}
           workspacePath={workspacePath}
           workspaceLoading={workspaceLoading}
           onSelectWorkspace={() => {
             void handleSelectWorkspace()
           }}
-        />
-        <CreateDesignModal
-          open={createModalOpen}
-          loadingKind={importingSource}
-          workspacePath={workspacePath}
-          workspaceLoading={workspaceLoading}
-          designSystemGroups={designSystemGroups}
-          selectedDesignSystemId={createDesignSystemId}
-          onSelectWorkspace={() => {
-            void handleSelectWorkspace()
-          }}
-          onDesignSystemChange={setCreateDesignSystemId}
-          onCreateBlank={() => {
-            createSession(undefined, { designSystemId: createDesignSystemId })
-            setCreateModalOpen(false)
-          }}
-          onImportUrl={() => {
-            void openImportUrlModal()
-          }}
-          onImportHtml={() => {
-            void handleImportHtmlFile("gallery")
-          }}
-          onImportPrototypeZip={() => {
-            void handleImportPrototypeZip("gallery")
-          }}
-          onClose={() => setCreateModalOpen(false)}
         />
         <LinkModal
           open={linkModalOpen}
@@ -3998,32 +4030,6 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
 
   return (
     <div style={S.root}>
-      <CreateDesignModal
-        open={createModalOpen}
-        loadingKind={importingSource}
-        workspacePath={workspacePath}
-        workspaceLoading={workspaceLoading}
-        designSystemGroups={designSystemGroups}
-        selectedDesignSystemId={createDesignSystemId}
-        onSelectWorkspace={() => {
-          void handleSelectWorkspace()
-        }}
-        onDesignSystemChange={setCreateDesignSystemId}
-        onCreateBlank={() => {
-          newSession(createDesignSystemId)
-          setCreateModalOpen(false)
-        }}
-        onImportUrl={() => {
-          void openImportUrlModal()
-        }}
-        onImportHtml={() => {
-          void handleImportHtmlFile("session")
-        }}
-        onImportPrototypeZip={() => {
-          void handleImportPrototypeZip("session")
-        }}
-        onClose={() => setCreateModalOpen(false)}
-      />
       {/* Code & Link modals — rendered at root so they overlay everything */}
       {codeModalOpen && (
         <CodeModal

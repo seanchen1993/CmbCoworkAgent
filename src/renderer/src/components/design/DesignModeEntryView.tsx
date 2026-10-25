@@ -1,6 +1,6 @@
 import { DesignView } from "./DesignView"
 
-/** DesignView reuses createModalOpen to switch between the gallery and new page. */
+/** DesignView owns navigation between design history, creation, and the editor. */
 export function DesignModeEntryView(): React.JSX.Element {
   return <DesignView />
 }
