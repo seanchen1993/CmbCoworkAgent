@@ -15,7 +15,8 @@ import {
   type TabState,
   type SessionMeta
 } from "../../../shared/managed-design-session"
-import type { DesignSessionStore } from "./session-store"
+import type { DesignSessionStore, DesignPatchJournal } from "./session-store"
+import { sourceHash, verifyDesignPatchDependencies } from "./document-index"
 import { inspectDesignDocument } from "../../../shared/design-progressive"
 import {
   readTweakDeclaration,
@@ -23,6 +24,7 @@ import {
   editTweaks,
   materializeTweaks,
   readyTweakKeys,
+  effectiveTweaks,
   type DesignTweakCommand
 } from "../../../shared/design-tweaks"
 
@@ -36,6 +38,7 @@ interface ActiveRun {
 }
 
 export interface DesignRunDependencies {
+  project?: (snapshot: DesignSessionSnapshot) => void
   execute: (
     request: DesignRunRequest,
     runId: string,
@@ -68,6 +71,8 @@ export class DesignRunManager {
     private readonly deps: DesignRunDependencies
   ) {
     for (const snapshot of store.list()) {
+      snapshot.state.artifactRevision ??= 0
+      snapshot.state.patchStatus = null
       snapshot.state.draftPreview ??= null
       snapshot.state.tweaks ??=
         snapshot.state.artifactMetadata?.tweaks ??
@@ -97,6 +102,7 @@ export class DesignRunManager {
         )
       }
     }
+    this.replayProjections()
   }
 
   list(): SessionMeta[] {
@@ -156,8 +162,24 @@ export class DesignRunManager {
     delete updates.tweaks
     delete updates.generationMetrics
     delete updates.lastCompletedRunId
+    for (const key of [
+      "artifactRevision",
+      "appliedPatch",
+      "patchStatus",
+      "patchMetrics",
+      "canUndoPatch",
+      "canRedoPatch"
+    ] as const)
+      delete updates[key]
     if (updates.generationState === "generating" || updates.generationState === "asking")
       delete updates.generationState
+    if (updates.html !== undefined && updates.html !== next.state.html) {
+      next.state.artifactRevision = (next.state.artifactRevision ?? 0) + 1
+      next.state.appliedPatch = null
+      next.state.patchStatus = null
+      next.state.canUndoPatch = false
+      next.state.canRedoPatch = false
+    }
     next.state = { ...next.state, ...updates }
     if (updates.html !== undefined)
       next.state.tweaks = reconcileTweaks(readTweakDeclaration(updates.html), next.state.tweaks)
@@ -193,7 +215,8 @@ export class DesignRunManager {
         throw new Error("该参数对应区块尚未生成")
       draft.tweaks = editTweaks(draft.tweaks, command)
     } else {
-      if (next.activeRunId) throw new Error("请调整当前草稿的参数")
+      if (next.activeRunId && this.active.get(id)?.request.kind !== "patch")
+        throw new Error("请调整当前草稿的参数")
       if (!next.state.tweaks) throw new Error("设计没有可调参数")
       next.state.tweaks = editTweaks(next.state.tweaks, command)
     }
@@ -209,6 +232,20 @@ export class DesignRunManager {
   previewVisible(id: string, runId: string, revision: number): void {
     const next = this.get(id)
     const draft = next.state.draftPreview
+    if (
+      !draft &&
+      !next.activeRunId &&
+      next.state.appliedPatch?.id === runId &&
+      next.state.appliedPatch.revision === revision
+    ) {
+      if (next.state.generationMetrics?.patchVisibleAt !== undefined) return
+      next.state.generationMetrics = {
+        ...next.state.generationMetrics,
+        patchVisibleAt: next.state.generationMetrics?.patchVisibleAt ?? Date.now()
+      }
+      this.commit(next, [{ type: "patch_visible", patchId: runId, revision }])
+      return
+    }
     if (!draft || draft.runId !== runId || draft.revision !== revision) return
     const metrics = next.state.generationMetrics ?? {}
     metrics.scaffoldVisibleAt ??= Date.now()
@@ -228,6 +265,11 @@ export class DesignRunManager {
     }
     const next = this.get(request.designSessionId)
     if (next.activeRunId) throw new Error("当前设计仍在运行，请先停止或等待完成")
+    if (
+      request.kind === "patch" &&
+      (!request.patch || request.patch.artifactRevision !== (next.state.artifactRevision ?? 0))
+    )
+      throw new Error("设计版本已更新，请重新提交局部修改")
     const run: ActiveRun = {
       id: randomUUID(),
       request: clone(request),
@@ -238,7 +280,28 @@ export class DesignRunManager {
     next.state.lastCompletedRunId = null
     next.state.draftPreview = null
     next.state.generationMetrics = { startedAt: Date.now() }
-    if (request.isIteration && next.state.tweaks)
+    next.state.patchMetrics = undefined
+    next.state.patchStatus =
+      request.kind === "patch" ? { phase: "locating", message: "正在定位修改目标" } : null
+    if (request.kind === "patch") {
+      // Local runs are sourced exclusively from durable state; never persist renderer HTML/history.
+      delete run.request.currentHtml
+      run.request.rollback = request.rollback
+        ? Object.fromEntries(
+            [
+              "comments",
+              "draftComment",
+              "activeCommentId",
+              "drawStrokes",
+              "drawElementHints",
+              "drawNotes",
+              "draftDrawNote"
+            ]
+              .filter((k) => k in request.rollback!)
+              .map((k) => [k, request.rollback![k as keyof TabState]])
+          )
+        : null
+    } else if (request.isIteration && next.state.tweaks)
       run.request.currentHtml = materializeTweaks(
         request.currentHtml || next.state.html,
         next.state.tweaks,
@@ -314,7 +377,8 @@ export class DesignRunManager {
         "interrupted",
         "approval",
         "approval_resolved",
-        "preview"
+        "preview",
+        "patch_status"
       ].includes(event.type)
     ) {
       try {
@@ -370,6 +434,7 @@ export class DesignRunManager {
     const assistant = state.messages[state.messages.length - 1]
     let terminal = false
     let continueGenerating = false
+    let patchJournal: DesignPatchJournal | undefined
     for (let event of events) {
       if (terminal) break
       if (event.type === "preview" && event.preview) {
@@ -391,6 +456,10 @@ export class DesignRunManager {
           previewBytes:
             (state.generationMetrics?.previewBytes ?? 0) + Buffer.byteLength(preview.html)
         }
+      } else if (event.type === "patch_status" && event.patchStatus) {
+        state.patchStatus = event.patchStatus
+      } else if (event.type === "patch_metrics" && event.patchMetrics) {
+        state.patchMetrics = event.patchMetrics
       } else if (event.type === "metrics") {
         state.generationMetrics = { ...state.generationMetrics, ...event.metrics }
       } else if (event.type === "token" && event.token) {
@@ -435,6 +504,49 @@ export class DesignRunManager {
           }
         } else {
           try {
+            if (event.patchResult) {
+              const result = event.patchResult
+              verifyDesignPatchDependencies(result.externalFiles ?? {})
+              if (
+                result.baseSourceHash !== sourceHash(state.html) ||
+                result.patch.revision !== (state.artifactRevision ?? 0) + 1
+              )
+                throw new Error("设计版本已变化，局部补丁未应用，请重试")
+              const values = state.tweaks ? effectiveTweaks(state.tweaks) : {}
+              if (Object.entries(result.tweakReads).some(([key, value]) => values[key] !== value))
+                throw new Error("相关参数已变化，局部补丁未应用，请重试")
+              let updated = state.tweaks ? clone(state.tweaks) : null
+              for (const [key, value] of Object.entries(result.tweakUpdates)) {
+                if (!updated) throw new Error("参数状态已失效")
+                updated = editTweaks(updated, {
+                  scope: "artifact",
+                  baseRevision: updated.revision,
+                  operation: "set",
+                  key,
+                  value
+                })
+              }
+              event.tweaks = updated
+              patchJournal = {
+                id: result.patch.id,
+                action: "apply",
+                beforeHtml: state.html,
+                afterHtml: event.html!,
+                beforeTweaks: Object.fromEntries(
+                  Object.keys(result.tweakUpdates).map((key) => [key, values[key]])
+                ),
+                beforeOverrides: Object.fromEntries(
+                  Object.keys(result.tweakUpdates).map((key) => [
+                    key,
+                    Object.hasOwn(state.tweaks?.overrides ?? {}, key)
+                      ? state.tweaks!.overrides[key]
+                      : null
+                  ])
+                ),
+                afterTweaks: result.tweakUpdates,
+                patch: result.patch
+              }
+            }
             if (
               state.draftPreview &&
               !inspectDesignDocument(event.html ?? "", state.draftPreview.sections).finalizable
@@ -448,6 +560,13 @@ export class DesignRunManager {
             )
               throw new Error("页面还有未完成区块，已保留草稿")
             state.html = event.html
+            state.artifactRevision = (state.artifactRevision ?? 0) + 1
+            state.appliedPatch = event.patchResult?.patch ?? null
+            state.patchStatus = event.patchResult
+              ? { phase: "applied", message: event.patchResult.patch.summary }
+              : null
+            state.canUndoPatch = !!event.patchResult
+            state.canRedoPatch = false
             state.lastCompletedRunId = run.id
             state.tweaks =
               event.tweaks ??
@@ -461,10 +580,14 @@ export class DesignRunManager {
             state.artifactPath = event.artifactPath ?? state.artifactPath
             state.artifactMetadata = event.metadata ?? state.artifactMetadata
             state.variations = [] // DOM-specific preview documents are derived by the view.
-            state.activeVariationId = null
-            state.reloadKey++
+            if (!event.patchResult) state.activeVariationId = null
+            if (event.patchResult?.patch.mode !== "live") state.reloadKey++
             state.generationState = "done"
-            assistant.content = run.request.isIteration ? "✓ 设计已更新" : "✓ 设计已生成"
+            assistant.content = event.patchResult
+              ? `✓ ${event.patchResult.patch.summary}`
+              : run.request.isIteration
+                ? "✓ 设计已更新"
+                : "✓ 设计已生成"
             if (run.request.cleanUserMsg)
               state.apiHistory = [
                 ...(state.apiHistory ?? []),
@@ -472,12 +595,14 @@ export class DesignRunManager {
                 { role: "assistant", content: assistant.content }
               ]
           } catch (error) {
+            patchJournal = undefined
             event = { type: "error", error: error instanceof Error ? error.message : String(error) }
           }
         }
         terminal = true
       }
       if (event.type === "error" || event.type === "cancelled" || event.type === "interrupted") {
+        state.patchStatus = null
         const draft = state.draftPreview
         if (run.request.rollback) Object.assign(state, clone(run.request.rollback))
         state.draftPreview = draft ? { ...draft, status: "incomplete", phase: "sections" } : null
@@ -507,7 +632,8 @@ export class DesignRunManager {
       next,
       events,
       undefined,
-      terminal ? { id: run.id, status: state.generationState } : undefined
+      terminal ? { id: run.id, status: state.generationState } : undefined,
+      patchJournal
     )
     run.pending.splice(0, events.length)
     if (terminal) {
@@ -525,6 +651,67 @@ export class DesignRunManager {
         })
       }
     }
+  }
+
+  patchHistory(id: string, operation: "undo" | "redo", revision: number): DesignSessionSnapshot {
+    if (operation !== "undo" && operation !== "redo") throw new Error("撤销操作无效")
+    const next = this.get(id)
+    if (next.activeRunId || (next.state.artifactRevision ?? 0) !== revision)
+      throw new Error("页面正在修改或版本已变化")
+    const journal = this.store.lastPatch(id, operation)
+    if (!journal) throw new Error("没有可撤销或重做的局部修改")
+    const undo = operation === "undo"
+    if (sourceHash(next.state.html) !== sourceHash(undo ? journal.afterHtml : journal.beforeHtml))
+      throw new Error("后续源码已变化，不能覆盖后续修改")
+    const expected = undo ? journal.afterTweaks : journal.beforeTweaks
+    const desired = undo ? journal.beforeTweaks : journal.afterTweaks
+    const values = next.state.tweaks ? effectiveTweaks(next.state.tweaks) : {}
+    if (Object.entries(expected).some(([key, value]) => values[key] !== value))
+      throw new Error("补丁参数之后已被调整，不能覆盖后续设置")
+    for (const [key, value] of Object.entries(desired)) {
+      if (!next.state.tweaks) throw new Error("参数状态已变化")
+      next.state.tweaks = editTweaks(next.state.tweaks, {
+        scope: "artifact",
+        baseRevision: next.state.tweaks.revision,
+        operation: undo && journal.beforeOverrides?.[key] === null ? "reset" : "set",
+        key,
+        value
+      })
+    }
+    next.state.html = undo ? journal.beforeHtml : journal.afterHtml
+    next.state.artifactRevision = revision + 1
+    next.state.appliedPatch = {
+      ...journal.patch,
+      id: randomUUID(),
+      revision: revision + 1,
+      summary: `${undo ? "撤销" : "重做"}：${journal.patch.summary}`
+    }
+    next.state.patchStatus = { phase: "applied", message: next.state.appliedPatch.summary }
+    next.state.variations = []
+    if (journal.patch.mode === "reload") next.state.reloadKey++
+    next.state.canUndoPatch = !undo || this.store.hasOtherPatch(id, "undo", journal.id)
+    next.state.canRedoPatch = undo || this.store.hasOtherPatch(id, "redo", journal.id)
+    return this.commit(next, [{ type: "patch_history", operation }], undefined, undefined, {
+      ...journal,
+      action: operation
+    })
+  }
+
+  private replayProjections(): void {
+    if (!this.deps.project) return
+    for (const entry of this.store.pendingProjections()) {
+      const snapshot = this.sessions.get(entry.id)
+      if (!snapshot) continue
+      try {
+        this.deps.project(clone(snapshot))
+        this.store.projectionSaved(entry.id, entry.revision)
+      } catch (error) {
+        console.warn("[Design] Artifact projection pending; durable version retained", error)
+      }
+    }
+  }
+  syncArtifacts(): void {
+    this.replayProjections()
   }
 
   stop(id: string): DesignSessionSnapshot {
@@ -606,7 +793,8 @@ export class DesignRunManager {
     next: DesignSessionSnapshot,
     events: unknown[],
     request?: DesignRunRequest,
-    completedRun?: { id: string; status: string }
+    completedRun?: { id: string; status: string },
+    patchJournal?: DesignPatchJournal
   ): DesignSessionSnapshot {
     const previousDraft = this.sessions.get(next.id)?.state.draftPreview
     next.seq++
@@ -627,8 +815,9 @@ export class DesignRunManager {
     )
       next.meta.lastActivitySeq = next.seq
     next.meta.unread = next.lastSeenSeq < (next.meta.lastActivitySeq ?? 0)
-    this.store.save(next, events, request, completedRun)
+    this.store.save(next, events, request, completedRun, patchJournal)
     this.sessions.set(next.id, clone(next))
+    if (patchJournal) this.replayProjections()
     const result = clone(next)
     const draft = result.state.draftPreview
     const draftHtmlOmitted =

@@ -139,6 +139,13 @@ export class DesignSessionClient {
   previewVisible(id: string, runId: string, revision: number): void {
     void this.api.previewVisible?.(id, runId, revision).catch(console.error)
   }
+  patchHistory(id: string, operation: "undo" | "redo"): Promise<DesignSessionSnapshot> {
+    return this.enqueue(id, async () => {
+      if (!this.api.patchHistory) throw new Error("当前应用不支持局部修改撤销，请重启应用")
+      const revision = this.get(id)?.state.artifactRevision ?? 0
+      return this.apply(await this.api.patchHistory(id, operation, revision))
+    })
+  }
   start(request: DesignRunRequest): Promise<DesignSessionSnapshot> {
     return this.enqueue(request.designSessionId, async () =>
       this.apply(await this.api.start(request))

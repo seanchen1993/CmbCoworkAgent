@@ -4,6 +4,19 @@ import type {
   DesignRunRequest,
   Message
 } from "../../../shared/managed-design-session"
+import type { DesignAppliedPatch } from "../../../shared/design-patch"
+import type { TweakValues } from "../../../shared/design-tweaks"
+
+export interface DesignPatchJournal {
+  id: string
+  action: "apply" | "undo" | "redo"
+  beforeHtml: string
+  afterHtml: string
+  beforeTweaks: TweakValues
+  beforeOverrides?: Record<string, TweakValues[string] | null>
+  afterTweaks: TweakValues
+  patch: DesignAppliedPatch
+}
 
 /** Separate from model checkpoints: this is the durable, user-visible transcript. */
 export class DesignSessionStore {
@@ -30,6 +43,12 @@ export class DesignSessionStore {
       CREATE TABLE IF NOT EXISTS design_session_tombstones (id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS design_draft_previews (
         session_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, revision INTEGER NOT NULL, html TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS design_patch_journal (
+        session_id TEXT NOT NULL, id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS design_artifact_outbox (
+        session_id TEXT PRIMARY KEY, revision INTEGER NOT NULL
       );
     `)
   }
@@ -90,11 +109,48 @@ export class DesignSessionStore {
     snapshot: DesignSessionSnapshot,
     events: unknown[],
     request?: DesignRunRequest,
-    completedRun?: { id: string; status: string }
+    completedRun?: { id: string; status: string },
+    patchJournal?: DesignPatchJournal
   ): void {
     const { messages, ...state } = snapshot.state
     this.db.run("BEGIN IMMEDIATE")
     try {
+      const previous = this.rows(
+        "SELECT json_extract(state, '$.html') AS html FROM design_sessions WHERE id=?",
+        [snapshot.id]
+      )[0]
+      if (!patchJournal && previous && previous.html !== snapshot.state.html) {
+        this.db.run("UPDATE design_patch_journal SET status='discarded' WHERE session_id=?", [
+          snapshot.id
+        ])
+        this.db.run("DELETE FROM design_artifact_outbox WHERE session_id=?", [snapshot.id])
+      }
+      if (patchJournal) {
+        if (patchJournal.action === "apply") {
+          this.db.run(
+            "UPDATE design_patch_journal SET status='discarded' WHERE session_id=? AND status='undone'",
+            [snapshot.id]
+          )
+          this.db.run("INSERT INTO design_patch_journal VALUES (?, ?, 'applied', ?)", [
+            snapshot.id,
+            patchJournal.id,
+            JSON.stringify(patchJournal)
+          ])
+          this.db.run(
+            "DELETE FROM design_patch_journal WHERE session_id=? AND rowid NOT IN (SELECT rowid FROM design_patch_journal WHERE session_id=? ORDER BY rowid DESC LIMIT 20)",
+            [snapshot.id, snapshot.id]
+          )
+        } else
+          this.db.run("UPDATE design_patch_journal SET status=? WHERE session_id=? AND id=?", [
+            patchJournal.action === "undo" ? "undone" : "applied",
+            snapshot.id,
+            patchJournal.id
+          ])
+        this.db.run(
+          "INSERT INTO design_artifact_outbox VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET revision=excluded.revision",
+          [snapshot.id, snapshot.state.artifactRevision ?? 0]
+        )
+      }
       const draft = state.draftPreview
       if (draft)
         this.db.run(
@@ -142,6 +198,8 @@ export class DesignSessionStore {
           snapshot.seq,
           JSON.stringify(
             events.map((event) => {
+              if ((event as { type?: string; patchResult?: unknown }).patchResult)
+                return { ...(event as object), html: undefined, tweaks: undefined }
               if ((event as { type?: string }).type !== "preview") return event
               const preview = (event as { preview: { html?: string } }).preview
               return { ...(event as object), preview: { ...preview, html: undefined } }
@@ -169,6 +227,35 @@ export class DesignSessionStore {
     }
   }
 
+  lastPatch(id: string, operation: "undo" | "redo"): DesignPatchJournal | null {
+    const row = this.rows(
+      `SELECT payload FROM design_patch_journal WHERE session_id=? AND status=? ORDER BY rowid ${operation === "undo" ? "DESC" : "ASC"} LIMIT 1`,
+      [id, operation === "undo" ? "applied" : "undone"]
+    )[0]
+    return row ? JSON.parse(String(row.payload)) : null
+  }
+  hasOtherPatch(id: string, operation: "undo" | "redo", exclude: string): boolean {
+    return (
+      this.rows(
+        "SELECT id FROM design_patch_journal WHERE session_id=? AND status=? AND id != ? LIMIT 1",
+        [id, operation === "undo" ? "applied" : "undone", exclude]
+      ).length > 0
+    )
+  }
+
+  pendingProjections(): Array<{ id: string; revision: number }> {
+    return this.rows("SELECT * FROM design_artifact_outbox").map((r) => ({
+      id: String(r.session_id),
+      revision: Number(r.revision)
+    }))
+  }
+  projectionSaved(id: string, revision: number): void {
+    this.db.run("DELETE FROM design_artifact_outbox WHERE session_id=? AND revision=?", [
+      id,
+      revision
+    ])
+  }
+
   latestRequest(id: string): DesignRunRequest | null {
     const row = this.rows(
       "SELECT request FROM design_runs WHERE session_id = ? ORDER BY rowid DESC LIMIT 1",
@@ -191,7 +278,9 @@ export class DesignSessionStore {
         "design_messages",
         "design_runs",
         "design_session_events",
-        "design_draft_previews"
+        "design_draft_previews",
+        "design_patch_journal",
+        "design_artifact_outbox"
       ]) {
         this.db.run(`DELETE FROM ${table} WHERE session_id = ?`, [id])
       }

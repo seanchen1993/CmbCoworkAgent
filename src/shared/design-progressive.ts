@@ -25,6 +25,7 @@ export interface DesignGenerationMetrics {
   validationStartedAt?: number
   validationFinishedAt?: number
   finishedAt?: number
+  patchVisibleAt?: number
   previewBytes?: number
   previewCount?: number
 }

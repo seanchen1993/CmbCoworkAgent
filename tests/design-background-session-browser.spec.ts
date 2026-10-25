@@ -9,9 +9,15 @@ import { NativeSqliteAdapter } from "../src/main/db/native-sqlite-adapter"
 import { DesignSessionStore } from "../src/main/services/design/session-store"
 import { DesignRunManager } from "../src/main/services/design/run-manager"
 import { inspectDesignDocument } from "../src/shared/design-progressive"
+import { executeDesignPatch } from "../src/main/services/design/patch-executor"
+import {
+  designPatchStyleProbe,
+  inspectDesignPatchStyles
+} from "../src/main/services/design/artifact-validator"
 import {
   createDesignState,
   type DesignRunEvent,
+  type DesignRunRequest,
   type DesignSessionChange
 } from "../src/shared/managed-design-session"
 
@@ -70,11 +76,13 @@ const browser = await chromium.launch({
 const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
 const emitters: Array<(event: DesignRunEvent) => void> = []
 const completions: Array<() => void> = []
+const requests: DesignRunRequest[] = []
 let aborted = 0
 let deliver: (change: DesignSessionChange) => void = () => undefined
 const subscriptions = new Set<string>()
 const manager = new DesignRunManager(new DesignSessionStore(db), {
   execute: (_request, _id, emit) => {
+    requests.push(_request)
     emitters.push(emit)
     return new Promise<void>((done) => completions.push(done))
   },
@@ -113,6 +121,8 @@ try {
     }
     if (method === "patch") return manager.patch(id, args[1] as never, args[2] as never)
     if (method === "tweak") return manager.tweak(id, args[1] as never)
+    if (method === "patchHistory")
+      return manager.patchHistory(id, args[1] as "undo" | "redo", Number(args[2]))
     if (method === "previewVisible")
       return manager.previewVisible(id, String(args[1]), Number(args[2]))
     if (method === "start") return manager.start(args[0] as never)
@@ -152,6 +162,7 @@ try {
       [
         "list",
         "tweak",
+        "patchHistory",
         "previewVisible",
         "migrate",
         "open",
@@ -370,9 +381,230 @@ try {
   )
   assert.equal(aborted, 0)
   assert.equal(emitters.length, 1, "reopening must not rerun the model")
+  await page.locator("iframe").evaluate((frame) => {
+    const win = (frame as HTMLIFrameElement).contentWindow as Window & {
+      savedHeading?: Element
+      clicks?: number
+    }
+    win.savedHeading = win.document.querySelector("h1")!
+    win.document.querySelector("button")!.addEventListener("click", () => {
+      win.clicks = (win.clicks || 0) + 1
+    })
+  })
+  await input.fill("把主标题文案改成局部更新成功")
+  await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  assert.equal(requests[1].kind, "patch", "chat edits route to the bounded executor")
+  assert.equal(
+    requests[1].currentHtml,
+    undefined,
+    "the renderer does not send the full page for patches"
+  )
+  const beforePatch = manager.get("ds_browser")
+  const result = await executeDesignPatch({
+    html: beforePatch.state.html,
+    artifactRevision: beforePatch.state.artifactRevision ?? 0,
+    instruction: requests[1].prompt,
+    request: requests[1].patch!,
+    tweaks: beforePatch.state.tweaks ?? null,
+    signal: new AbortController().signal,
+    status: (patchStatus) => emitters[1]({ type: "patch_status", patchStatus }),
+    validate: async () => [],
+    complete: async (messages) => {
+      const context = JSON.parse(messages[1].content)
+      assert.ok(
+        !messages[1].content.includes("test-business-run"),
+        "source scripts stay out of model context"
+      )
+      if (!context.targets.length)
+        return {
+          content: JSON.stringify({ action: "target", targetIds: [context.directory[0].targetId] })
+        }
+      const heading = context.directory.find((n: { tag: string }) => n.tag === "h1")
+      return {
+        content: JSON.stringify({
+          protocol: "design-patch/1",
+          contextId: context.contextId,
+          baseArtifactRevision: context.baseArtifactRevision,
+          summary: "主标题已局部更新",
+          operations: [
+            {
+              op: "set_text",
+              targetId: heading.targetId,
+              expectedHash: heading.hash,
+              text: "局部更新成功"
+            }
+          ]
+        })
+      }
+    }
+  })
+  const candidate = result.candidate
+  emitters[1]({
+    type: "done",
+    html: candidate.html,
+    tweaks: candidate.tweaks,
+    artifactPath: "/workspace/design.html",
+    patchResult: {
+      patch: candidate.patch,
+      baseSourceHash: candidate.baseSourceHash,
+      baseTweakRevision: candidate.baseTweakRevision,
+      tweakReads: candidate.tweakReads,
+      tweakUpdates: candidate.tweakUpdates
+    }
+  })
+  completions[1]()
+  await page.frameLocator("iframe").getByText("局部更新成功", { exact: true }).waitFor()
+  assert.equal(
+    await page.locator("iframe").evaluate((frame) => {
+      const win = (frame as HTMLIFrameElement).contentWindow as Window & { savedHeading?: Element }
+      return win.savedHeading === win.document.querySelector("h1")
+    }),
+    true,
+    "live patches preserve node identity"
+  )
+  assert.equal(
+    await page
+      .locator("iframe")
+      .evaluate(
+        (frame) =>
+          (frame as HTMLIFrameElement).contentDocument!.documentElement.dataset
+            .designPreviewInstance
+      ),
+    finalIdentity
+  )
+  await page.frameLocator("iframe").locator("button").click()
+  assert.equal(
+    await page
+      .locator("iframe")
+      .evaluate(
+        (frame) =>
+          ((frame as HTMLIFrameElement).contentWindow as Window & { clicks: number }).clicks
+      ),
+    1,
+    "direct event listeners survive live patches"
+  )
+  await page.getByTitle("撤销局部修改").click()
+  await page.frameLocator("iframe").getByText("后台完成的设计", { exact: true }).waitFor()
+  await page.getByTitle("重做局部修改").click()
+  await page.frameLocator("iframe").getByText("局部更新成功", { exact: true }).waitFor()
+  assert.equal(
+    await page.evaluate(() => (window as unknown as { businessRuns: number }).businessRuns),
+    1,
+    "patch, undo and redo do not reexecute business scripts"
+  )
+  await page.getByRole("button", { name: "注释", exact: true }).click()
+  await page.frameLocator("iframe").getByText("局部更新成功", { exact: true }).click()
+  await page.getByPlaceholder("输入批注内容… (Shift+Enter 换行)").fill("只修改这个标题的颜色")
+  await page.getByRole("button", { name: "发送 →", exact: true }).click()
+  await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+  assert.equal(requests[2].kind, "patch")
+  assert.ok(requests[2].patch!.targets[0].nodeId, "comments carry a stable source identity")
+  assert.equal(
+    requests[2].patch!.targets[0].artifactRevision,
+    manager.get("ds_browser").state.artifactRevision
+  )
+  emitters[2]({ type: "error", error: "模拟模型失败" })
+  completions[2]()
+  await page.getByText(/模拟模型失败/).waitFor()
+  assert.equal(
+    manager.get("ds_browser").state.html,
+    candidate.html,
+    "failed local edits retain the committed page"
+  )
+  const styleIssues = await page.locator("iframe").evaluate((frame, probeSource) => {
+    const win = (frame as HTMLIFrameElement).contentWindow!
+    const heading = win.document.querySelector<HTMLElement>("h1")!
+    const probe = win.eval(`(${probeSource})`)
+    const check = { targetId: heading.dataset.designNode, property: "color", value: "#aa0000" }
+    const initial = probe([check])
+    const style = win.document.createElement("style")
+    style.textContent = "h1{color:blue!important}"
+    win.document.head.appendChild(style)
+    const overridden = probe([check])
+    style.remove()
+    return { initial, overridden }
+  }, designPatchStyleProbe.toString())
+  assert.deepEqual(
+    styleIssues.initial,
+    [],
+    "computed style validation accepts the effective parameter color"
+  )
+  assert.equal(
+    styleIssues.overridden.length,
+    1,
+    "computed style validation catches !important overriding the requested value"
+  )
+  const statePage = await browser.newPage()
+  try {
+    await statePage.setContent(
+      '<style>button{color:black}button:hover{color:red}[data-design-node="n_state"]:hover{color:blue}</style><button id="state" data-design-node="n_state">state</button>'
+    )
+    const cdp = await statePage.context().newCDPSession(statePage)
+    let attached = false
+    const driver = {
+      executeJavaScript: (code: string) => statePage.evaluate(code),
+      debugger: {
+        isAttached: () => attached,
+        attach: () => {
+          attached = true
+        },
+        detach: () => {
+          attached = false
+        },
+        sendCommand: (method: string, params?: object) => cdp.send(method as never, params as never)
+      }
+    }
+    const checks = [{ targetId: "n_state", property: "color", value: "blue", state: "hover" }]
+    assert.deepEqual(
+      await inspectDesignPatchStyles(driver, checks, 1440),
+      [],
+      "hover state is validated in Chromium"
+    )
+    await statePage.addStyleTag({ content: "#state:hover{color:red!important}" })
+    assert.equal(
+      (await inspectDesignPatchStyles(driver, checks, 1440)).length,
+      1,
+      "hover specificity conflicts are detected"
+    )
+    await cdp.detach()
+  } finally {
+    await statePage.close()
+  }
+  const recoveryRevision = (manager.get("ds_browser").state.artifactRevision ?? 0) + 1
+  await page.evaluate((revision) => {
+    let dropped = false
+    window.addEventListener(
+      "message",
+      (event) => {
+        if (
+          !dropped &&
+          event.data?.type === "__design_live_applied" &&
+          event.data.revision === revision
+        ) {
+          dropped = true
+          event.stopImmediatePropagation()
+        }
+      },
+      true
+    )
+  }, recoveryRevision)
+  await page.getByTitle("撤销局部修改").click()
+  await page.waitForFunction(
+    (instance) =>
+      document.querySelector("iframe")?.contentDocument?.documentElement.dataset
+        .designPreviewInstance !== instance,
+    finalIdentity
+  )
+  await page.frameLocator("iframe").getByText("后台完成的设计", { exact: true }).waitFor()
+  assert.equal(
+    emitters.length,
+    3,
+    "a lost local ACK recovers from the committed snapshot without invoking the model"
+  )
   assert.deepEqual(errors, [])
   console.log(
-    "PASS: progressive sections, preserved iframe/DOM, draft/final Tweaks, background recovery and one-time business scripts"
+    "PASS: progressive previews, bounded chat/comment patches, live node/listener preservation, durable undo/redo and background recovery"
   )
 } finally {
   await browser.close()

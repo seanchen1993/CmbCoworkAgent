@@ -14,8 +14,12 @@ import {
 import { effectiveTweaks, type DesignTweaksState } from "../../../../shared/design-tweaks"
 import type { DesignDraftPreview } from "../../../../shared/design-progressive"
 import { buildDesignHtmlPreviewDocument } from "@/lib/design-html-srcdoc"
+import { createDesignLiveDelta } from "@/lib/design-live-patch"
+import type { DesignAppliedPatch } from "../../../../shared/design-patch"
 
 interface Props {
+  appliedPatch?: DesignAppliedPatch | null
+  artifactRevision?: number
   html: string
   draft?: DesignDraftPreview | null
   tweaks?: DesignTweaksState | null
@@ -27,17 +31,17 @@ interface Props {
   onVisible: (runId: string, revision: number) => void
 }
 
-function createFrameLoad(html: string, draft?: DesignDraftPreview | null) {
+function createFrameLoad(html: string, draft?: DesignDraftPreview | null, artifactRevision = 0) {
   const instance = crypto.randomUUID()
   return {
     instance,
     initialHtml: html,
-    document: buildDesignFrameDocument(html, instance, draft ?? undefined),
-    revision: draft?.revision ?? 0
+    document: buildDesignFrameDocument(html, instance, draft ?? undefined, artifactRevision),
+    revision: draft?.revision ?? artifactRevision
   }
 }
 
-/** A draft keeps one browsing context. A new source/run creates a new context. */
+/** Drafts and local edits retain their browsing context; structural revisions reload explicitly. */
 export function DesignPreviewFrame(props: Props) {
   const draftPath = props.draft?.draftPath
   const sourceHtml = props.html
@@ -69,7 +73,7 @@ export function DesignPreviewFrame(props: Props) {
   }, [sourceHtml, draftPath])
   const contextKey = props.draft
     ? `${props.scopeId}:draft:${props.draft.runId}`
-    : `${props.scopeId}:final:${props.html}`
+    : `${props.scopeId}:final`
   const html =
     props.draft && prepared?.source === sourceHtml && prepared.path === draftPath
       ? prepared.html
@@ -85,10 +89,93 @@ function DesignPreviewContext({
   style,
   onLoad,
   onVisible,
-  initialScroll
+  initialScroll,
+  appliedPatch,
+  artifactRevision = 0
 }: Props) {
   const [tick, setTick] = useState(0)
-  const [load, setLoad] = useState(() => createFrameLoad(html, draft))
+  const [load, setLoad] = useState(() => createFrameLoad(html, draft, artifactRevision))
+  const live = useRef({ html, revision: artifactRevision, ready: false })
+  const [liveTick, setLiveTick] = useState(0)
+  const livePending = useRef<{
+    html: string
+    revision: number
+    timer: ReturnType<typeof setTimeout>
+  } | null>(null)
+
+  useEffect(() => {
+    if (draft) return
+    const listener = (event: MessageEvent) => {
+      if (
+        event.source !== frameRef.current?.contentWindow ||
+        event.data?.previewInstanceId !== load.instance
+      )
+        return
+      if (
+        event.data.type === "__design_live_applied" &&
+        livePending.current &&
+        event.data.revision === livePending.current.revision
+      ) {
+        clearTimeout(livePending.current.timer)
+        live.current = {
+          html: livePending.current.html,
+          revision: livePending.current.revision,
+          ready: true
+        }
+        livePending.current = null
+        onVisible(String(event.data.patchId), event.data.revision)
+        setLiveTick((v) => v + 1)
+      } else if (event.data.type === "__design_live_resync") {
+        if (livePending.current) clearTimeout(livePending.current.timer)
+        livePending.current = null
+        setLoad(createFrameLoad(html, null, artifactRevision))
+      }
+    }
+    window.addEventListener("message", listener)
+    return () => window.removeEventListener("message", listener)
+  }, [draft, load.instance, frameRef, html, artifactRevision, onVisible])
+  useEffect(
+    () => () => {
+      if (livePending.current) clearTimeout(livePending.current.timer)
+    },
+    []
+  )
+  useEffect(() => {
+    if (
+      draft ||
+      !live.current.ready ||
+      livePending.current ||
+      (html === live.current.html && artifactRevision === live.current.revision)
+    )
+      return
+    const delta =
+      appliedPatch?.mode === "live" && artifactRevision !== live.current.revision
+        ? createDesignLiveDelta(live.current.html, html)
+        : null
+    if (!delta) {
+      const frame = requestAnimationFrame(() =>
+        setLoad(createFrameLoad(html, null, artifactRevision))
+      )
+      return () => cancelAnimationFrame(frame)
+    }
+    const timer = setTimeout(() => {
+      livePending.current = null
+      setLoad(createFrameLoad(html, null, artifactRevision))
+    }, 1200)
+    livePending.current = { html, revision: artifactRevision, timer }
+    frameRef.current?.contentWindow?.postMessage(
+      {
+        type: "__design_live_patch",
+        previewInstanceId: load.instance,
+        baseRevision: live.current.revision,
+        revision: artifactRevision,
+        patchId: appliedPatch?.id,
+        delta
+      },
+      "*"
+    )
+    return undefined
+  }, [html, draft, artifactRevision, appliedPatch, liveTick, load.instance, frameRef])
   const [failed, setFailed] = useState(false)
   const recoveries = useRef(0)
   const latest = useRef({ draft, tweaks, onVisible, html })
@@ -110,6 +197,7 @@ function DesignPreviewContext({
   const resync = useRef(false)
 
   useLayoutEffect(() => {
+    live.current = { html: load.initialHtml, revision: load.revision, ready: false }
     applied.current = { instance: load.instance, revision: load.revision, ready: false }
     appliedHtml.current = load.initialHtml
     resync.current = false
@@ -216,6 +304,11 @@ function DesignPreviewContext({
         sandbox="allow-scripts allow-same-origin allow-modals allow-forms allow-downloads"
         title="Design Preview"
         onLoad={() => {
+          if (!draft) {
+            live.current = { html: load.initialHtml, revision: load.revision, ready: true }
+            if (appliedPatch) onVisible(appliedPatch.id, load.revision)
+            setLiveTick((v) => v + 1)
+          }
           onLoad(!!draft)
           if (initialScroll)
             requestAnimationFrame(() => {

@@ -15,6 +15,11 @@ import { getDb } from "../db"
 import { DesignSessionStore } from "../services/design/session-store"
 import { DesignRunManager } from "../services/design/run-manager"
 import { DesignDraftPublisher } from "../services/design/draft-preview"
+import { executeDesignPatch, DESIGN_PATCH_TOOLS, normalizeDesignPatchReply, readDesignPatchStream } from "../services/design/patch-executor"
+import { DesignPatchScopeError } from "../services/design/patch-context"
+import { decorateDesignNodes } from "../../shared/design-node-ids"
+import type { DesignPatchMetrics } from "../../shared/design-patch"
+import { designPatchLayoutProbe, inspectDesignPatchStyles, compareDesignPatchLayouts, withDesignValidationDeadline, type DesignLayoutProbe } from "../services/design/artifact-validator"
 import { DESIGN_PROGRESSIVE_PROMPT, DESIGN_DECLARATIVE_TWEAKS_PROMPT } from "../services/design/generation-prompt"
 import { isFinalizableDesignDraft } from "../../shared/design-progressive"
 import { materializeTweaks, readTweakDeclaration, reconcileTweaks, tweakSourceIssues, type DesignTweakCommand, type DesignTweaksState } from "../../shared/design-tweaks"
@@ -38,6 +43,7 @@ import {
   closeCheckpointer,
   createAgentRuntime,
   createRetryingFetch,
+  getModelInstance,
   type ModelRetryHooks
 } from "../agent/runtime"
 import { READ_FILE_DEFAULT_LIMIT } from "../agent/read-file-output"
@@ -1209,7 +1215,8 @@ function getDesignArtifactPackageInfo(
 function exportDesignArtifactPackage(
   filePath: string | undefined,
   workspacePath?: string,
-  tweaks?: DesignTweaksState | null
+  tweaks?: DesignTweaksState | null,
+  htmlOverride?: string
 ): { success: boolean; fileName?: string; buffer?: ArrayBuffer; relatedFileCount?: number; error?: string } {
   const info = getDesignArtifactPackageInfo(filePath, workspacePath)
   if (!info.success || !info.filePath || !info.dirPath) {
@@ -1222,7 +1229,7 @@ function exportDesignArtifactPackage(
     const zip = new AdmZip()
     for (const file of files) {
       const zipDir = path.dirname(file.relativePath)
-      if (tweaks && sameResolvedFilePath(file.filePath, info.filePath)) zip.addFile(file.relativePath, Buffer.from(materializeTweaks(fs.readFileSync(file.filePath, "utf8"), tweaks)))
+      if ((tweaks || htmlOverride) && sameResolvedFilePath(file.filePath, info.filePath)) zip.addFile(file.relativePath, Buffer.from(materializeTweaks(htmlOverride ?? fs.readFileSync(file.filePath, "utf8"), tweaks)))
       else zip.addLocalFile(file.filePath, zipDir === "." ? "" : zipDir, path.basename(file.relativePath))
     }
     const zipBuffer = zip.toBuffer()
@@ -2755,11 +2762,117 @@ export function registerDesignHandlers(): void {
   }
   const manager = new DesignRunManager(new DesignSessionStore(getDb()), {
     publish,
+    project: (snapshot) => {
+      if (!snapshot.state.artifactPath) return
+      const resolved = resolveDesignArtifactPath(`${snapshot.id}_design-main`, snapshot.workspacePath ?? undefined)
+      if (!resolved.filePath || path.resolve(resolved.filePath) !== path.resolve(snapshot.state.artifactPath))
+        throw new Error("局部修改投影路径不属于当前产物")
+      const file = resolved.filePath
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      const temporary = `${file}.projection-${snapshot.state.artifactRevision}.tmp`
+      fs.writeFileSync(temporary, materializeTweaks(snapshot.state.html, snapshot.state.tweaks), "utf8")
+      fs.renameSync(temporary, file)
+      writeDesignArtifactMetadata(file, { tweaks: snapshot.state.tweaks })
+    },
     abort: (runId) => {
       activeSessions.get(runId)?.abort()
       activeDesignAgents.get(runId)?.abort()
     },
     execute: async (request, runId, emit, snapshot) => {
+      if (request.kind === "patch") {
+        const controller = new AbortController()
+        const configs = getCustomModelConfigs()
+        const selectedId = request.modelId?.replace(/^custom:/, "")
+        const selected = configs.find((c) => c.id === selectedId) ?? configs[0]
+        const model = selected?.apiKey ? getModelInstance({ ...selected, maxOutputTokens: Math.min(selected.maxOutputTokens ?? 8192, 8192) },
+          buildDesignModelRetryHooks((data) => emit(data as DesignRunEvent)), 3) : null
+        let localMetrics: DesignPatchMetrics | undefined
+        if (!model || !request.patch) { activeSessions.delete(runId); throw new Error("未配置模型或局部修改目标无效") }
+        const resolved = resolveDesignArtifactPath(`${snapshot.id}_design-main`, snapshot.workspacePath ?? undefined)
+        if (!resolved.filePath) throw new Error(resolved.error)
+        const artifactPath = resolved.filePath
+        const candidateFile = path.join(path.dirname(artifactPath), `.patch-${runId}.html`)
+        activeSessions.set(runId, controller)
+        let nativeTools = true
+        try {
+          if (process.env.DESIGN_LOCAL_PATCH === "0") throw new DesignPatchScopeError("局部补丁通道已通过配置关闭")
+          const { candidate } = await executeDesignPatch({
+            html: snapshot.state.html,
+            artifactPath: snapshot.state.artifactPath,
+            workspacePath: snapshot.workspacePath,
+            artifactRevision: snapshot.state.artifactRevision ?? 0,
+            request: request.patch,
+            instruction: request.prompt,
+            tweaks: snapshot.state.tweaks ?? null,
+            signal: controller.signal,
+            complete: async (messages, signal) => {
+              const input = messages.map((m) => m.role === "system" ? new SystemMessage(m.content) : new HumanMessage(m.content))
+              const read = async (withTools: boolean) => {
+                const stream = await (withTools ? model.bindTools(DESIGN_PATCH_TOOLS, { parallel_tool_calls: false }) : model).stream(input, { signal })
+                return await readDesignPatchStream(stream)
+              }
+              let reply
+              try { reply = await read(nativeTools) }
+              catch (error) {
+                if (!nativeTools || !/tool|function/i.test(error instanceof Error ? error.message : String(error)) || ![400, 422].includes(getModelHttpStatusCode(error) ?? 0)) throw error
+                nativeTools = false
+                reply = await read(false)
+              }
+              return normalizeDesignPatchReply(reply)
+            },
+            validate: async (candidate) => {
+              if (controller.signal.aborted) throw createDesignAbortError()
+              fs.mkdirSync(path.dirname(candidateFile), { recursive: true })
+              fs.writeFileSync(candidateFile, decorateDesignNodes(materializeTweaks(candidate.html, candidate.tweaks)), "utf8")
+              if (candidate.validationLevel === "interaction") {
+                const validation = await validateDesignArtifactInHiddenBrowser(candidateFile, controller.signal)
+                if (!validation.ok) return validation.issues.map((i) => i.message)
+              }
+              const beforeFile = `${candidateFile}.before.html`
+              const issues: string[] = []
+              fs.writeFileSync(beforeFile, decorateDesignNodes(materializeTweaks(snapshot.state.html, snapshot.state.tweaks)), "utf8")
+              let probe: BrowserWindow | null = null
+              try {
+                probe = new BrowserWindow({ width: 1440, height: 1000, show: false, webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } })
+                const currentWidth = Math.min(1920, Math.max(320, Math.round(request.patch!.viewport?.width || 1440)))
+                for (const width of [...new Set(candidate.validationLevel === "source" ? [currentWidth] : [currentWidth, 390])]) {
+                  if (controller.signal.aborted) throw createDesignAbortError()
+                  probe.setContentSize(width, 900)
+                  const measure = (file: string): Promise<DesignLayoutProbe> => withDesignValidationDeadline((async () => {
+                    await probe!.loadFile(file)
+                    await probe!.webContents.executeJavaScript(`(()=>{const s=document.createElement('style');s.textContent='*{transition:none!important;animation:none!important}';document.head.appendChild(s)})()`)
+                    const measured = await probe!.webContents.executeJavaScript(`document.fonts.ready.then(()=>new Promise(r=>requestAnimationFrame(()=>r((${designPatchLayoutProbe.toString()})()))))`, true) as DesignLayoutProbe
+                    if (file === candidateFile) measured.expectations = await inspectDesignPatchStyles(probe!.webContents, candidate.styleChecks, width)
+                    return measured
+                  })(), controller.signal, DESIGN_BROWSER_VALIDATION_TIMEOUT_MS)
+                  if (candidate.validationLevel === "source") issues.push(...(await measure(candidateFile)).expectations)
+                  else issues.push(...compareDesignPatchLayouts(await measure(beforeFile), await measure(candidateFile), new Set(candidate.allowedIds)))
+                }
+              } finally {
+                probe?.destroy()
+                try { fs.unlinkSync(beforeFile) } catch { /* Candidate cleanup. */ }
+              }
+              return issues
+            },
+            status: (patchStatus) => emit({ type: "patch_status", patchStatus }),
+            metrics: (patchMetrics) => { localMetrics = patchMetrics; emit({ type: "patch_metrics", patchMetrics }) }
+          })
+          if (controller.signal.aborted) return
+          emit({ type: "done", html: candidate.html, tweaks: candidate.tweaks, artifactPath,
+            patchResult: { patch: candidate.patch, baseSourceHash: candidate.baseSourceHash, baseTweakRevision: candidate.baseTweakRevision,
+              tweakReads: candidate.tweakReads, tweakUpdates: candidate.tweakUpdates, externalFiles: candidate.externalFiles } })
+          return
+        } catch (error) {
+          if (controller.signal.aborted) { emit({ type: "cancelled" }); return }
+          if (!(error instanceof DesignPatchScopeError) || /目标|版本|标记/.test(error.message)) throw error
+          emit({ type: "patch_status", patchStatus: { phase: "expanding", message: `扩大为完整改稿：${error.message}` } })
+          emit({ type: "patch_metrics", patchMetrics: { modelCalls: 0, inputTokens: 0, outputTokens: 0, contextBytes: 0, expansions: 0, repairs: 0, validationMs: 0, ...localMetrics, fallback: error.message } })
+          request = { ...request, kind: "agent", currentHtml: materializeTweaks(manager.get(snapshot.id).state.html, manager.get(snapshot.id).state.tweaks, false), isIteration: true }
+        } finally {
+          activeSessions.delete(runId)
+          try { fs.unlinkSync(candidateFile) } catch { /* No candidate was persisted. */ }
+        }
+      }
       const channel =
         request.kind === "questions"
           ? "design:ask-questions"
@@ -2795,6 +2908,7 @@ export function registerDesignHandlers(): void {
     },
     finalize: (event, request, snapshot) => {
       if (!event.html?.trim()) throw new Error("生成未返回有效 HTML")
+      if (event.patchResult) return event // SQLite commits first; the outbox projects the durable version.
       const artifactId = `${request.designSessionId}_design-main`
       // Agent runs already validate and save artifacts. Image runs use the same durable sink here.
       if (event.artifactPath) return event
@@ -2856,6 +2970,7 @@ export function registerDesignHandlers(): void {
     manager.create(prepareSeed(seed)),
   )
   ipcMain.handle("design:session-open", (event, id: string) => {
+    manager.syncArtifacts()
     let ids = subscribers.get(event.sender.id)
     if (!ids) {
       subscribers.set(event.sender.id, (ids = new Set()))
@@ -2887,6 +3002,7 @@ export function registerDesignHandlers(): void {
     return snapshot
   })
   ipcMain.handle("design:preview-visible", (_event, { id, runId, revision }: { id: string; runId: string; revision: number }) => manager.previewVisible(id, runId, revision))
+  ipcMain.handle("design:patch-history", (_event, { id, operation, revision }: { id: string; operation: "undo" | "redo"; revision: number }) => manager.patchHistory(id, operation, revision))
   ipcMain.handle("design:session-start", (_event, request: DesignRunRequest) =>
     manager.start(request),
   )
@@ -3396,9 +3512,10 @@ export function registerDesignHandlers(): void {
   ipcMain.handle(
     "design:export-artifact-package",
     (_event, { filePath, workspacePath }: DesignArtifactPackageParams) => {
+      manager.syncArtifacts()
       const session = manager.list().find((meta) => sameResolvedFilePath(meta.artifactPath ?? undefined, filePath))
       const tweaks = session ? manager.get(session.id).state.tweaks : readDesignArtifactMetadata(filePath)?.tweaks
-      return exportDesignArtifactPackage(filePath, workspacePath, tweaks)
+      return exportDesignArtifactPackage(filePath, workspacePath, tweaks, session ? manager.get(session.id).state.html : undefined)
     }
   )
 

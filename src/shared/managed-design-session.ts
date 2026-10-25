@@ -12,9 +12,16 @@ import type {
 } from "../renderer/src/components/design/types"
 import type { DesignDraftPreview, DesignGenerationMetrics } from "./design-progressive"
 import type { DesignTweakCommand, DesignTweaksState } from "./design-tweaks"
+import type {
+  DesignAppliedPatch,
+  DesignPatchMetrics,
+  DesignPatchRequest,
+  DesignPatchStatus
+} from "./design-patch"
+import type { DesignTweakValue } from "./design-protocol"
 
 export type { TabState, Message, SessionMeta }
-export type DesignRunKind = "questions" | "agent" | "image"
+export type DesignRunKind = "questions" | "agent" | "image" | "patch"
 export interface DesignRunRequest {
   requestId: string
   designSessionId: string
@@ -30,6 +37,7 @@ export interface DesignRunRequest {
   freshAgentThread?: boolean
   rollback?: Partial<TabState> | null
   currentHtml?: string
+  patch?: DesignPatchRequest
 }
 export interface DesignRunEvent {
   type: string
@@ -47,6 +55,16 @@ export interface DesignRunEvent {
   delayMs?: number
   artifactPath?: string
   metadata?: DesignArtifactMetadata
+  patchStatus?: DesignPatchStatus
+  patchMetrics?: DesignPatchMetrics
+  patchResult?: {
+    patch: DesignAppliedPatch
+    baseSourceHash: string
+    baseTweakRevision: number
+    tweakReads: Record<string, DesignTweakValue>
+    tweakUpdates: Record<string, DesignTweakValue>
+    externalFiles?: Record<string, string>
+  }
 }
 export interface DesignSessionSnapshot {
   id: string
@@ -72,6 +90,11 @@ export interface DesignSessionSeed {
   workspacePath: string | null
 }
 export interface DesignSessionApi {
+  patchHistory?: (
+    id: string,
+    operation: "undo" | "redo",
+    revision: number
+  ) => Promise<DesignSessionSnapshot>
   tweak?: (id: string, command: DesignTweakCommand) => Promise<DesignSessionSnapshot>
   previewVisible?: (id: string, runId: string, revision: number) => Promise<void>
   migrate: (seeds: DesignSessionSeed[]) => Promise<SessionMeta[]>

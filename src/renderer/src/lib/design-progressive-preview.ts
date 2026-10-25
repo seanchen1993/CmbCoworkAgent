@@ -1,4 +1,5 @@
 import { DESIGN_TWEAKS_RUNTIME } from "../../../shared/design-tweaks"
+import { designLivePatchRuntime } from "./design-live-patch"
 
 export interface DesignSectionPatch {
   sections: Array<{ id: string; html: string }>
@@ -230,16 +231,23 @@ export function sanitizeDesignDraft(html: string): string {
 export function buildDesignFrameDocument(
   html: string,
   instance: string,
-  draft?: { runId: string; revision: number }
+  draft?: { runId: string; revision: number },
+  artifactRevision = 0
 ): string {
   const doc = new DOMParser().parseFromString(draft ? sanitizeDesignDraft(html) : html, "text/html")
   doc.documentElement.dataset.designPreviewInstance = instance
+  doc.documentElement.dataset.designArtifactRevision = String(artifactRevision)
   if (draft) {
     doc.documentElement.dataset.designPreviewRun = draft.runId
     doc.documentElement.dataset.designPreviewRevision = String(draft.revision)
     const script = doc.createElement("script")
     script.setAttribute("data-design-host-runtime", "")
     script.textContent = DESIGN_TWEAKS_RUNTIME + ";(" + draftRuntime.toString() + ")();"
+    doc.body.appendChild(script)
+  } else {
+    const script = doc.createElement("script")
+    script.setAttribute("data-design-host-runtime", "")
+    script.textContent = ";(" + designLivePatchRuntime.toString() + ")();"
     doc.body.appendChild(script)
   }
   return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML

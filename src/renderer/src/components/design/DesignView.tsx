@@ -46,6 +46,8 @@ import { DesignPreviewFrame } from "./DesignPreviewFrame"
 import { TweaksParameterPanel } from "./TweaksParameterPanel"
 import { useDesignTweaks } from "./use-design-tweaks"
 import { materializeTweaks, readTweakDeclaration, readyTweakKeys } from "../../../../shared/design-tweaks"
+import { decorateDesignNodes, stripDesignHostRuntime } from "../../../../shared/design-node-ids"
+import { shouldUseDesignPatch, type DesignPatchTarget } from "../../../../shared/design-patch"
 import type {
   AnswerValue,
   ChatTab,
@@ -324,7 +326,7 @@ function hydrateTabStateHtml(state: TabState, html: string): TabState {
       state.activeVariationId && variations.some((v) => v.id === state.activeVariationId)
         ? state.activeVariationId
         : (variations[0]?.id ?? null),
-    reloadKey: state.reloadKey + 1
+    reloadKey: state.appliedPatch?.mode === "live" ? state.reloadKey : state.reloadKey + 1
   }
 }
 
@@ -661,6 +663,9 @@ function getPointAnchor(doc: Document | null, point: DrawPoint): DesignElementAn
   const rect = element.getBoundingClientRect()
   if (rect.width <= 0 || rect.height <= 0) return undefined
   return {
+    nodeId: element.getAttribute("data-design-node") || undefined,
+    sectionId: element.closest("[data-design-section]")?.getAttribute("data-design-section") || undefined,
+    artifactRevision: Number(doc.documentElement.dataset.designArtifactRevision ?? 0),
     selector: buildElementSelector(element),
     tagName: element.tagName.toLowerCase(),
     label: getDrawElementLabel(element),
@@ -701,6 +706,11 @@ function resolveAnchorElement(
   anchor: DesignElementAnchor | undefined
 ): Element | null {
   if (!doc || !anchor?.selector) return null
+  if (anchor.artifactRevision !== undefined && anchor.artifactRevision !== Number(doc.documentElement.dataset.designArtifactRevision ?? 0)) return null
+  if (anchor.nodeId) {
+    const stable = [...doc.querySelectorAll("[data-design-node]")].find((element) => element.getAttribute("data-design-node") === anchor.nodeId)
+    if (stable) return stable
+  }
   try {
     const direct = doc.querySelector(anchor.selector)
     if (direct) return direct
@@ -924,6 +934,7 @@ async function readPreviewDependencyDataUrlFile(resolvedPath: string): Promise<s
 }
 
 async function prepareHtmlForSrcDoc(html: string, htmlPath?: string | null): Promise<string> {
+  html = decorateDesignNodes(html)
   const inlinedHtml = htmlPath
     ? await buildDesignHtmlPreviewDocument({
         html,
@@ -1760,6 +1771,7 @@ export function DesignView(): React.JSX.Element {
     let disposed = false
     let appliedSeq = -1
     let sourceHtml: string | undefined
+    let preparedSourceHtml: string | undefined
     let initial = true
     const applySnapshot = () => {
       const snapshot = client.get(id)
@@ -1779,6 +1791,11 @@ export function DesignView(): React.JSX.Element {
         state.html = previous.html
         state.variations = previous.variations
         state.reloadKey = previous.reloadKey
+      }
+      if (snapshot.state.html && preparedSourceHtml !== snapshot.state.html) {
+        // A source revision is visible only when its matching prepared document is ready.
+        state.artifactRevision = previous.artifactRevision
+        state.appliedPatch = previous.appliedPatch
       }
       if (previous.inputValue) state.inputValue = previous.inputValue
       if (!initial) {
@@ -1807,7 +1824,9 @@ export function DesignView(): React.JSX.Element {
             )
               return
             const latest = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
-            const hydrated = hydrateTabStateHtml(latest, html)
+            const committed = client.get(id)!.state
+            const hydrated = hydrateTabStateHtml({ ...latest, artifactRevision: committed.artifactRevision, appliedPatch: committed.appliedPatch }, html)
+            preparedSourceHtml = raw
             hydrated.draftPreview = client.get(id)?.state.draftPreview ?? null
             hydrated.tweaks = client.get(id)?.state.tweaks
             const savedVariations = client.get(id)?.state.variations
@@ -2515,7 +2534,7 @@ export function DesignView(): React.JSX.Element {
         const { html } = msg as { html: string }
         const tabId = activeTabIdRef.current
         const state = tabStatesRef.current[tabId]
-        const patchedHtml = ensureEditMode(html)
+        const patchedHtml = ensureEditMode(stripDesignHostRuntime(html))
         scheduleArtifactSave({
           artifactId: makeDesignArtifactId(currentSessionIdRef.current, tabId),
           html: patchedHtml,
@@ -2620,15 +2639,32 @@ export function DesignView(): React.JSX.Element {
       skill?: DesignSkillReference | null,
       sourceArtifactPath?: string | null,
       freshAgentThread = false,
-      rollbackSnapshot?: DesignIterationRollbackSnapshot | null
+      rollbackSnapshot?: DesignIterationRollbackSnapshot | null,
+      patchTargets?: DesignPatchTarget[]
     ) => {
+      const state = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
+      const local = isIteration && !image && !skill && shouldUseDesignPatch(prompt, !!patchTargets?.length)
+      const observations = (patchTargets ?? []).flatMap((target) => {
+        const doc = iframeRef.current?.contentDocument
+        const el = doc && [...doc.querySelectorAll<HTMLElement>("[data-design-node]")].find((n) => n.dataset.designNode === target.nodeId)
+        if (!el) return []
+        return [el, el.parentElement].filter((n): n is HTMLElement => !!n?.dataset.designNode).map((n) => {
+          const style = getComputedStyle(n), box = n.getBoundingClientRect()
+          return { nodeId: n.dataset.designNode!, box: { width: box.width, height: box.height },
+            computed: Object.fromEntries(["display", "position", "width", "height", "gap", "padding", "margin", "grid-template-columns", "flex-direction", "font-size", "line-height", "color", "background-color"].map((key) => [key, style.getPropertyValue(key)])) }
+        })
+      })
       startManagedRun({
-        kind: "agent",
+        kind: local ? "patch" : "agent",
         prompt,
         isIteration,
         modelId,
         cleanUserMsg,
-        currentHtml: isIteration
+        patch: local ? { targets: patchTargets ?? [], variationId: state.activeVariationId,
+          artifactRevision: state.artifactRevision ?? 0,
+          observations,
+          viewport: { width: iframeRef.current?.contentWindow?.innerWidth ?? 1440, height: iframeRef.current?.contentWindow?.innerHeight ?? 1000 } } : undefined,
+        currentHtml: isIteration && !local
           ? getCurrentDesignHtml(tabStatesRef.current[SINGLE_DESIGN_TAB_ID])
           : undefined,
         imageData: image?.base64,
@@ -2858,7 +2894,8 @@ ${commentLines}${variantNote}`
         undefined,
         state.artifactPath,
         false,
-        rollbackSnapshot
+        rollbackSnapshot,
+        [{ ...draft?.anchor, instruction: text }]
       )
     },
     [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt]
@@ -2906,7 +2943,8 @@ ${commentLines}${variantNote}`
         undefined,
         state.artifactPath,
         false,
-        rollbackSnapshot
+        rollbackSnapshot,
+        [{ ...comment.anchor, instruction: text }]
       )
     },
     [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt]
@@ -2977,7 +3015,8 @@ ${commentLines}${variantNote}`
       undefined,
       state.artifactPath,
       false,
-      rollbackSnapshot
+      rollbackSnapshot,
+      pending.map((comment) => ({ ...comment.anchor, instruction: comment.text }))
     )
   }, [activeTabId, tabStates, updateTs, startGeneration, buildCommentPrompt])
 
@@ -3290,7 +3329,18 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       undefined,
       state.artifactPath,
       false,
-      rollbackSnapshot
+      rollbackSnapshot,
+      [...state.drawStrokes.flatMap((stroke) => {
+        const doc = iframeRef.current?.contentDocument ?? null
+        const points = resolveAnchoredStrokePoints(doc, stroke)
+        const step = Math.max(1, Math.floor(points.length / 12))
+        const anchors = points.filter((_p, i) => i % step === 0).slice(0, 12).map((p) => getPointAnchor(doc, p)).filter((a): a is DesignElementAnchor => !!a)
+        const unique = new Map(anchors.map((a) => [a.nodeId || a.selector, a]))
+        if (!unique.size && stroke.anchor) unique.set(stroke.anchor.nodeId || stroke.anchor.selector, stroke.anchor)
+        const instruction = state.drawNotes.filter((note) => note.strokeId === stroke.id).map((note) => note.text).join("；") || userInstruction
+        return [...unique.values()].map((anchor) => ({ ...anchor, instruction }))
+      }),
+        ...state.drawNotes.filter((note) => !note.strokeId).map((note) => ({ ...note.anchor, instruction: note.text }))]
     )
   }, [activeTabId, tabStates, updateTs, startGeneration, buildDrawPrompt])
 
@@ -4736,6 +4786,17 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
 
                 <div style={S.tweaksDivider} />
                 {/* Zoom */}
+                {(ts.canUndoPatch || ts.canRedoPatch) && <>
+                  <button style={S.zoomBtn} disabled={!ts.canUndoPatch || isGenerating} title="撤销局部修改" onClick={() => {
+                    const id = currentSessionIdRef.current
+                    if (id) void getDesignSessionClient().patchHistory(id, "undo").catch((error) => showToast(String(error)))
+                  }}>撤销</button>
+                  <button style={S.zoomBtn} disabled={!ts.canRedoPatch || isGenerating} title="重做局部修改" onClick={() => {
+                    const id = currentSessionIdRef.current
+                    if (id) void getDesignSessionClient().patchHistory(id, "redo").catch((error) => showToast(String(error)))
+                  }}>重做</button>
+                  <div style={S.tweaksDivider} />
+                </>}
                 <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                   <button onClick={() => setZoom((z) => Math.max(25, z - 25))} style={S.zoomBtn}>
                     −
@@ -4772,6 +4833,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             <span>{ts.draftPreview.status === "incomplete" ? "草稿未完成" : ts.draftPreview.phase === "validating" ? "正在检查页面" : "正在生成页面"}{ts.draftPreview.totalSections > 0 ? ` · ${ts.draftPreview.completedSections.length}/${ts.draftPreview.totalSections} 区块` : ""}</span>
             {!!ts.html && <button onClick={() => setSavedVersionSelection({ sessionId: currentSessionId, runId: ts.draftPreview?.runId, show: !showSavedVersion })}>{showSavedVersion ? "查看生成草稿" : "查看已定稿版本"}</button>}
           </div>}
+          {!!ts.patchStatus && <div role="status" data-testid="design-patch-status" style={{ padding: "8px 16px", fontSize: 12, background: "#fffbeb", color: "#92400e" }}>{ts.patchStatus.message}</div>}
           {/* Canvas Content */}
           <div style={S.canvas}>
             {ts.rightTab === "questions" ? (
@@ -4959,6 +5021,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                 html={displayHtml}
                                 draft={visibleDraft}
                                 tweaks={tweakEditor.state}
+                                appliedPatch={ts.appliedPatch}
+                                artifactRevision={ts.artifactRevision ?? 0}
                                 initialScroll={{ x: ts.iframeScrollX, y: ts.iframeScrollY }}
                                 onVisible={(runId, revision) => { const id = currentSessionIdRef.current; if (id) getDesignSessionClient().previewVisible(id, runId, revision) }}
                                 style={{
@@ -5216,7 +5280,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
 
                         {tweaksOn && tweakEditor.state && activeMode !== "edit" && (
                           <TweaksParameterPanel state={tweakEditor.state}
-                            disabled={visibleDraft?.phase === "validating" || (isGenerating && !visibleDraft)}
+                            disabled={visibleDraft?.phase === "validating" || ts.patchStatus?.phase === "validating" || (isGenerating && !visibleDraft && !ts.patchStatus)}
                             availableKeys={visibleDraft ? readyTweakKeys(visibleDraft.html, tweakEditor.state.declaration) : undefined}
                             error={tweakEditor.error} unsaved={tweakEditor.unsaved}
                             onChange={tweakEditor.change}

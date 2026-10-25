@@ -1,6 +1,7 @@
 import type { FileAttachment as BaseFileAttachment } from "@/types"
 import type { DesignDraftPreview, DesignGenerationMetrics } from "../../../../shared/design-progressive"
 import type { DesignTweaksState } from "../../../../shared/design-tweaks"
+import type { DesignAppliedPatch, DesignPatchMetrics, DesignPatchStatus } from "../../../../shared/design-patch"
 
 export type FileAttachment = BaseFileAttachment
 
@@ -104,6 +105,9 @@ export interface VariationItem {
 }
 
 export interface DesignElementAnchor {
+  nodeId?: string
+  sectionId?: string
+  artifactRevision?: number
   selector: string
   tagName: string
   label?: string
@@ -328,6 +332,12 @@ export interface DesignApprovalRequest {
 }
 
 export interface TabState {
+  artifactRevision?: number
+  appliedPatch?: DesignAppliedPatch | null
+  patchStatus?: DesignPatchStatus | null
+  patchMetrics?: DesignPatchMetrics
+  canUndoPatch?: boolean
+  canRedoPatch?: boolean
   messages: Message[]
   html: string
   draftPreview?: DesignDraftPreview | null
