@@ -23,7 +23,7 @@ export function BotGroupMessageActions({
       label={`${author}的消息操作`}
       className="bot-group-message-actions"
       replyAction={
-        text.trim() && onReply ? (
+        onReply ? (
           <button
             type="button"
             className="bot-icon-button"

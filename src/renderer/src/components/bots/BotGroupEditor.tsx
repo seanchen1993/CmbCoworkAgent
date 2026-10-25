@@ -104,7 +104,7 @@ export function BotGroupEditor({
           {!nameOnly && (
             <div className="max-h-72 overflow-y-auto space-y-1">
               {bots
-                .filter((bot) => !bot.archived)
+                .filter((bot) => !bot.archived || group?.memberIds.includes(bot.id))
                 .map((bot) => (
                   <label
                     key={bot.id}
@@ -112,6 +112,9 @@ export function BotGroupEditor({
                   >
                     <BotAvatar color={bot.color} shape={bot.shape} size={32} />
                     <span className="min-w-0 flex-1 truncate text-sm">{bot.name}</span>
+                    {bot.archived && (
+                      <span className="shrink-0 text-xs text-muted-foreground">已归档</span>
+                    )}
                     <input
                       type="checkbox"
                       checked={members.includes(bot.id)}

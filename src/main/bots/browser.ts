@@ -74,6 +74,7 @@ interface OwnedPage {
   botId: string
   page: Page
   automation: OwnedPageAutomation
+  viewed?: boolean
   dialog?: Dialog
   pendingInput?: Promise<void>
   downloads: Array<{ file: string; state: "saving" | "saved" | "failed" }>
@@ -740,15 +741,25 @@ export class BotBrowserService {
         }))
     )
   }
+  private viewedPage(botId: string): OwnedPage | undefined {
+    const pages = [...this.pages.values()].filter(
+      (entry) => entry.botId === botId && !entry.page.isClosed()
+    )
+    return pages.find((entry) => entry.viewed) ?? pages[0]
+  }
+  private rememberViewed(entry: OwnedPage): void {
+    for (const page of this.pages.values())
+      if (page.botId === entry.botId) page.viewed = page === entry
+  }
   async preview(botId: string, pageId?: string): Promise<BotBrowserState> {
     return this.lock.withKey("browser", async () => {
       if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
       const pages = await this.pageList(botId)
       const targetId = pageId ?? (this.human?.botId === botId ? this.human.pageId : undefined)
-      const selected = targetId
-        ? this.pages.get(targetId)
-        : [...this.pages.values()].find((item) => item.botId === botId)
+      const selected = targetId ? this.pages.get(targetId) : this.viewedPage(botId)
       if (selected && selected.botId !== botId) throw new BotError("CONFLICT", "页面不属于此 Bot")
+      // Keep the chosen target across return/remount, including a failed capture's retry.
+      if (selected && !selected.page.isClosed()) this.rememberViewed(selected)
       let captureError: string | undefined
       const image =
         selected && !selected.dialog && !selected.page.isClosed()
@@ -797,6 +808,7 @@ export class BotBrowserService {
         if (this.stopping || this.human !== claim || claim.status !== "active")
           throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后重试")
         claim.pageId = entry.id
+        this.rememberViewed(entry)
       })
       return
     }
@@ -812,12 +824,13 @@ export class BotBrowserService {
     this.human = claim
     try {
       await this.lock.withKey("browser", async () => {
-        const entry = await this.page(botId, pageId)
+        const entry = await this.page(botId, pageId ?? this.viewedPage(botId)?.id)
         await this.engine!.show(entry.page, claim.generation)
         if (this.stopping || this.human !== claim || entry.page.isClosed())
           throw new BotError("CONFLICT", "浏览器已关闭，请重新打开")
         claim.pageId = entry.id
         claim.status = "active"
+        this.rememberViewed(entry)
       })
     } catch (error) {
       if (this.human === claim) this.human = null
@@ -870,6 +883,7 @@ export class BotBrowserService {
       if (this.human === claim && claim.status === "active") {
         await this.engine!.show(entry.page, claim.generation)
         claim.pageId = entry.id
+        this.rememberViewed(entry)
       }
     })
   }
@@ -917,6 +931,7 @@ export class BotBrowserService {
         await this.engine!.show(next.page, expectedGeneration)
         check()
         claim!.pageId = next.id
+        this.rememberViewed(next)
         return next.id
       }
       if (entry.dialog)
@@ -930,6 +945,7 @@ export class BotBrowserService {
       await this.engine!.show(entry.page, expectedGeneration)
       check()
       claim!.pageId = entry.id
+      this.rememberViewed(entry)
       return entry.id
     })
   }

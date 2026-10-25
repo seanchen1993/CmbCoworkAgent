@@ -25,6 +25,7 @@ import {
   createBotCollaborationTools
 } from "./tools"
 import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
+import { snapshotBotDeliveryFile } from "./file-copy"
 import { BotBrowserActionError, type BotBrowserService } from "./browser"
 import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { convertToOpenAITool } from "@langchain/core/utils/function_calling"
@@ -478,6 +479,7 @@ it("delivers verified current-workspace files and rejects missing, private, link
       {
         filePath: expect.stringContaining("核验 报告.md"),
         name: "核验 报告.md",
+        attachmentPath: expect.stringContaining(".bot-deliveries/"),
         size: Buffer.byteLength("合成成果：50.75")
       }
     ])
@@ -503,6 +505,69 @@ it("delivers verified current-workspace files and rejects missing, private, link
     await rm(root, { recursive: true, force: true })
   }
 })
+
+it("freezes each public delivery and keeps identical call retries stable", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "bot-revision-"))
+  try {
+    const source = join(workspace, "report.md"),
+      publish = vi.fn()
+    const [deliver] = createBotDeliveryTools(workspace, new AbortController().signal, publish)
+    const call = (id: string) =>
+      deliver.invoke({ type: "tool_call", id, name: deliver.name, args: { files: ["report.md"] } })
+    await writeFile(source, "VERSION1")
+    const first = parseBotFileDelivery((await call("first")).content)!
+    expect(parseBotFileDelivery((await call("first")).content)).toEqual(first)
+    await writeFile(source, "VERSION2")
+    const second = parseBotFileDelivery((await call("second")).content)!
+    expect(first[0].filePath).toBe(second[0].filePath)
+    expect(first[0].size).toBe(second[0].size)
+    expect(first[0].attachmentPath).not.toBe(second[0].attachmentPath)
+    expect(await readFile(first[0].attachmentPath!, "utf8")).toBe("VERSION1")
+    expect(await readFile(second[0].attachmentPath!, "utf8")).toBe("VERSION2")
+    expect(await readFile(source, "utf8")).toBe("VERSION2")
+    expect(publish).toHaveBeenNthCalledWith(1, first, "first")
+    expect(publish).toHaveBeenNthCalledWith(2, first, "first")
+    expect(publish).toHaveBeenNthCalledWith(3, second, "second")
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+it.each(["changed", "removed"])(
+  "imports the exact public peer attachment when its original was %s",
+  async (change) => {
+    const root = await mkdtemp(join(tmpdir(), "bot-peer-snapshot-"))
+    try {
+      const mine = join(root, "mine"),
+        peer = join(root, "peer")
+      await mkdir(mine)
+      await mkdir(peer)
+      const original = join(peer, "report.md"),
+        signal = new AbortController().signal
+      await writeFile(original, "SENT_V1")
+      const sent = await snapshotBotDeliveryFile(peer, original, signal)
+      if (change === "changed") await writeFile(original, "EDIT_V2")
+      else await rm(original)
+      const [deliver] = createBotDeliveryTools(mine, signal, undefined, {
+        workspacePath: peer,
+        files: [{ filePath: original, name: "report.md", ...sent }]
+      })
+      const result = await deliver.invoke({
+        type: "tool_call",
+        id: "copy-peer",
+        name: deliver.name,
+        args: { files: [original] }
+      })
+      const copied = parseBotFileDelivery(result.content)!
+      expect(copied).toHaveLength(1)
+      expect(await readFile(copied[0].filePath, "utf8")).toBe("SENT_V1")
+      expect(await readFile(copied[0].attachmentPath!, "utf8")).toBe("SENT_V1")
+      expect(await readFile(sent.attachmentPath, "utf8")).toBe("SENT_V1")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+)
 
 it("keeps internal file return distinct from an explicit public group delivery", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "bot-file-return-"))
@@ -544,8 +609,11 @@ it("keeps internal file return distinct from an explicit public group delivery",
     expect(capture).toHaveBeenCalledTimes(1)
     expect(publish).not.toHaveBeenCalled()
     const publicResult = await call(delivered, { files: ["draft.md"], content: "Reviewed result" })
-    expect(parseBotFileDelivery(publicResult.content)).toEqual(receipt.files)
-    expect(publish).toHaveBeenCalledExactlyOnceWith(receipt.files, "file-scope", "Reviewed result")
+    const publicFiles = parseBotFileDelivery(publicResult.content)!
+    expect(publicFiles).toMatchObject(receipt.files)
+    expect(publicFiles[0].attachmentPath).toContain(".bot-deliveries/")
+    expect(receipt.files[0]).not.toHaveProperty("attachmentPath")
+    expect(publish).toHaveBeenCalledExactlyOnceWith(publicFiles, "file-scope", "Reviewed result")
     controller.abort(new Error("cancelled"))
     await expect(call(returned, { files: ["draft.md"] })).rejects.toThrow("cancelled")
     expect(capture).toHaveBeenCalledTimes(1)

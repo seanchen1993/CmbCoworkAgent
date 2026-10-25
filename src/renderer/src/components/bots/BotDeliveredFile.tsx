@@ -12,6 +12,7 @@ export function BotDeliveredFile({
   groupId,
   threadId,
   filePath,
+  attachmentPath,
   label,
   size
 }: {
@@ -20,10 +21,12 @@ export function BotDeliveredFile({
   groupId?: string
   threadId: string
   filePath: string
+  attachmentPath?: string
   label?: ReactNode
   size?: number
 }) {
   const name = filePath.split(/[\\/]/).pop() || filePath
+  const openedPath = attachmentPath ?? filePath
   const [saving, setSaving] = useState(false)
   const lock = useRef(false)
   const save = async () => {
@@ -31,7 +34,7 @@ export function BotDeliveredFile({
     lock.current = true
     setSaving(true)
     try {
-      await client.exportFile(botId, filePath, groupId)
+      await client.exportFile(botId, openedPath, groupId)
     } catch (cause) {
       toast.error(botErrorMessage(cause, "文件保存失败，请重试"))
     } finally {
@@ -47,7 +50,12 @@ export function BotDeliveredFile({
         aria-label={`打开 ${name}`}
         title={filePath}
         onClick={() =>
-          emitOpenResourcePreview({ threadId, filePath, workspacePathKind: "absolute" })
+          emitOpenResourcePreview({
+            threadId,
+            filePath: openedPath,
+            ...(attachmentPath ? { markdownBasePath: filePath } : {}),
+            workspacePathKind: "absolute"
+          })
         }
       >
         <FileText size={22} strokeWidth={1.5} aria-hidden="true" />

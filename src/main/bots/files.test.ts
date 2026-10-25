@@ -1,9 +1,27 @@
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises"
+import {
+  mkdtemp,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { resolveBotWorkspaceFile } from "./workspace-file"
-import { botImportDestination, copyBotFile, copyBotFileBytes } from "./file-copy"
+import {
+  botImportDestination,
+  copyBotFile,
+  copyBotFileBytes,
+  hashBotFile,
+  snapshotBotDeliveryFile
+} from "./file-copy"
+import { openStableFileHandle } from "../services/stable-file-handle"
 
 const roots: string[] = []
 async function fixture() {
@@ -15,6 +33,97 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 describe("Bot files", () => {
+  it("retains sent bytes and the original name across equal-size revisions without replacing an open snapshot", async () => {
+    const root = await fixture(),
+      source = join(root, "核验 报告.md")
+    const signal = new AbortController().signal
+    await writeFile(source, "V1_SENT")
+    const first = await snapshotBotDeliveryFile(root, source, signal)
+    const held = await openStableFileHandle(root, first.attachmentPath)
+    try {
+      const inode = (await stat(first.attachmentPath)).ino
+      expect(await snapshotBotDeliveryFile(root, source, signal)).toEqual(first)
+      expect((await stat(first.attachmentPath)).ino).toBe(inode)
+      await held.assertPathIdentity()
+      await writeFile(source, "V2_EDIT")
+      const second = await snapshotBotDeliveryFile(root, source, signal)
+      expect(second.attachmentPath).not.toBe(first.attachmentPath)
+      expect(basename(first.attachmentPath)).toBe(basename(source))
+      expect(first.size).toBe(second.size)
+      expect(await readFile(first.attachmentPath, "utf8")).toBe("V1_SENT")
+      expect(await readFile(second.attachmentPath, "utf8")).toBe("V2_EDIT")
+      expect(await readFile(source, "utf8")).toBe("V2_EDIT")
+      expect(await hashBotFile(root, source, signal)).not.toBe(
+        await hashBotFile(root, first.attachmentPath, signal)
+      )
+      expect(await hashBotFile(root, source, signal)).toBe(
+        await hashBotFile(root, second.attachmentPath, signal)
+      )
+      await rm(source)
+      expect(await readFile(first.attachmentPath, "utf8")).toBe("V1_SENT")
+      await held.assertPathIdentity()
+    } finally {
+      await held.handle.close()
+    }
+    expect(
+      (await readdir(join(root, ".bot-deliveries"))).some((name) => name.endsWith(".part"))
+    ).toBe(false)
+  })
+  it("keeps zero-byte deliveries and streams above the original import/export copy cap", async () => {
+    const root = await fixture(),
+      source = join(root, "large.bin")
+    const signal = new AbortController().signal
+    const handle = await open(source, "w")
+    await handle.close()
+    const empty = await snapshotBotDeliveryFile(root, source, signal)
+    expect(empty.size).toBe(0)
+    expect((await stat(empty.attachmentPath)).size).toBe(0)
+    const large = await open(source, "r+")
+    await large.truncate(100 * 1024 * 1024 + 1)
+    await large.close()
+    await expect(copyBotFile(root, source, join(root, "export.bin"), signal)).rejects.toThrow(
+      "100 MiB"
+    )
+    const sent = await snapshotBotDeliveryFile(root, source, signal)
+    expect(sent.size).toBe(100 * 1024 * 1024 + 1)
+    expect((await stat(sent.attachmentPath)).size).toBe(sent.size)
+    expect((await stat(empty.attachmentPath)).size).toBe(0)
+  })
+  it("rejects changed snapshots, linked destinations, outside sources and cancellation without partial publication", async () => {
+    const root = await fixture(),
+      workspace = join(root, "workspace")
+    await mkdir(workspace)
+    const source = join(workspace, "report.md"),
+      outside = join(root, "secret.md")
+    const signal = new AbortController().signal
+    await writeFile(source, "ORIGINAL")
+    await writeFile(outside, "SECRET")
+    const sent = await snapshotBotDeliveryFile(workspace, source, signal)
+    await writeFile(sent.attachmentPath, "TAMPERED")
+    await expect(snapshotBotDeliveryFile(workspace, source, signal)).rejects.toThrow("附件发生变化")
+    await rm(sent.attachmentPath)
+    await symlink(source, sent.attachmentPath)
+    await expect(snapshotBotDeliveryFile(workspace, source, signal)).rejects.toThrow("附件发生变化")
+    await expect(snapshotBotDeliveryFile(workspace, outside, signal)).rejects.toThrow()
+    const aborted = new AbortController()
+    aborted.abort(new Error("cancelled"))
+    await expect(snapshotBotDeliveryFile(workspace, source, aborted.signal)).rejects.toThrow(
+      "cancelled"
+    )
+    await expect(hashBotFile(workspace, source, aborted.signal)).rejects.toThrow("cancelled")
+    expect(
+      (await readdir(join(workspace, ".bot-deliveries"))).some((name) => name.endsWith(".part"))
+    ).toBe(false)
+    await rm(join(workspace, ".bot-deliveries"), { recursive: true })
+    await symlink(
+      root,
+      join(workspace, ".bot-deliveries"),
+      process.platform === "win32" ? "junction" : "dir"
+    )
+    await expect(snapshotBotDeliveryFile(workspace, source, signal)).rejects.toThrow("符号链接")
+    expect(await readFile(outside, "utf8")).toBe("SECRET")
+    expect(await realpath(source)).toBe(await resolveBotWorkspaceFile(workspace, "report.md"))
+  })
   it("accepts an absolute native workspace alias while keeping relative IDs and realpath boundaries strict", async () => {
     const root = await fixture(),
       workspace = join(root, "workspace"),

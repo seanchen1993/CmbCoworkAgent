@@ -111,6 +111,7 @@ export function BotMessageFilePreview({
             key={`${threadId}:${request.intentId}`}
             threadId={threadId}
             filePath={request.filePath}
+            markdownBasePath={request.markdownBasePath}
             workspacePathKind={request.workspacePathKind}
             externalFullPath={request.externalPreviewGrant ? request.filePath : undefined}
             externalPreviewGrant={request.externalPreviewGrant}

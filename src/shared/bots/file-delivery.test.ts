@@ -50,4 +50,21 @@ describe("verified file delivery projection", () => {
     expect(parseBotFileDelivery("x".repeat(40_001))).toBeNull()
     expect(parseBotFileDelivery(null)).toBeNull()
   })
+  it("preserves optional sent-byte paths while accepting legacy references and rejecting malformed copies", () => {
+    const legacy = { filePath: "/workspace/report.md", name: "report.md", size: 0 }
+    const sent = { ...legacy, attachmentPath: "/workspace/.bot-deliveries/hash/report.md" }
+    const parse = (files: unknown[]) =>
+      parseBotFileDelivery(JSON.stringify({ kind: "bot-file-delivery", files }))
+    expect(parse([sent])).toEqual([sent])
+    expect(parse([legacy])).toEqual([legacy])
+    for (const attachmentPath of [null, "", "bad\0path", "x".repeat(4097), 12])
+      expect(parse([{ ...legacy, attachmentPath }])).toBeNull()
+    // Adding a snapshot must not reduce the previously accepted eight-path range.
+    const long = Array.from({ length: 8 }, (_, i) => ({
+      ...legacy,
+      filePath: `/${i}/` + "a".repeat(3990),
+      attachmentPath: `/${i}/` + "b".repeat(3990)
+    }))
+    expect(parse(long)).toEqual(long)
+  })
 })

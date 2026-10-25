@@ -594,6 +594,24 @@ export function BotGroupConversation({
                     const author = item.authorBotId
                       ? bots.find((bot) => bot.id === item.authorBotId)
                       : null
+                    const replyText = (
+                      displayText.trim()
+                        ? displayText
+                        : (item.files ?? []).map((file) => file.name).join("、")
+                    ).slice(0, 1000)
+                    const replyToMessage = replyText
+                      ? () => {
+                          editDraft({
+                            replyTo: {
+                              id: item.id,
+                              ordinal: item.ordinal,
+                              authorBotId: item.authorBotId,
+                              text: replyText
+                            }
+                          })
+                          inputRef.current?.focus()
+                        }
+                      : undefined
                     const position = index - history.firstIndex
                     const previous = messages[position - 1]
                     const previousAnswer = previous && answerReplies.get(previous.id)?.at(-1)
@@ -744,17 +762,7 @@ export function BotGroupConversation({
                                   onError={(cause) =>
                                     setError(botErrorMessage(cause, "复制失败，请重试。"))
                                   }
-                                  onReply={() => {
-                                    editDraft({
-                                      replyTo: {
-                                        id: item.id,
-                                        ordinal: item.ordinal,
-                                        authorBotId: item.authorBotId,
-                                        text: displayText.slice(0, 1000)
-                                      }
-                                    })
-                                    inputRef.current?.focus()
-                                  }}
+                                  onReply={replyToMessage}
                                 />
                               </div>
                             )}
@@ -768,6 +776,7 @@ export function BotGroupConversation({
                                     groupId={group.id}
                                     threadId={`group-${group.id}-${author.id}`}
                                     filePath={file.filePath}
+                                    attachmentPath={file.attachmentPath}
                                     size={file.size}
                                   />
                                 ))}
@@ -776,6 +785,7 @@ export function BotGroupConversation({
                                     messageId={item.id}
                                     author={author.name}
                                     text=""
+                                    onReply={replyToMessage}
                                     onError={(cause) => setError(botErrorMessage(cause))}
                                   />
                                 )}

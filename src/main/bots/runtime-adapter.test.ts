@@ -108,6 +108,7 @@ const fixture = vi.hoisted(() => ({
     ) => string[]
   >(() => ["delivery"]),
   verifyFiles: vi.fn(),
+  hashFile: vi.fn<(root: string, path: string, signal: AbortSignal) => Promise<string>>(),
   returnFileTools: vi.fn<
     (
       workspace: string,
@@ -118,6 +119,10 @@ const fixture = vi.hoisted(() => ({
   publishFiles: vi.fn()
 }))
 vi.mock("./work-tools", () => ({ createBotWorkTools: fixture.workTools }))
+vi.mock("./file-copy", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./file-copy")>()),
+  hashBotFile: fixture.hashFile
+}))
 vi.mock("../db", () => ({
   getThreadCore: fixture.thread,
   updateThread: fixture.update,
@@ -302,6 +307,7 @@ beforeEach(() => {
   fixture.answerQuestion.mockReset().mockReturnValue(true)
   fixture.subscribeQuestion.mockReset().mockReturnValue(fixture.unsubscribeQuestion)
   fixture.verifyFiles.mockReset().mockResolvedValue([])
+  fixture.hashFile.mockReset().mockResolvedValue("sent-hash")
   fixture.workflowActive.mockReturnValue(false)
   fixture.workflowPending.mockResolvedValue(false)
   fixture.workerActive.mockReturnValue(false)
@@ -1179,6 +1185,86 @@ describe("Bot Runtime integration", () => {
     await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
     expect(fixture.peers).not.toHaveBeenCalled()
     expect(fixture.start.mock.calls[0][2].extraSystemPrompt).not.toContain("CURRENT_PEER_NAME")
+  })
+
+  it.each([
+    "unchanged",
+    "equal-size edit",
+    "missing snapshot",
+    "changed during read",
+    "legacy",
+    "cancelled"
+  ])("checks exact peer output bytes only for immutable public cards (%s)", async (kind) => {
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+    const file = {
+      filePath: "/synthetic/workspaces/group-g/report.md",
+      name: "report.md",
+      size: 7
+    }
+    const snapshot = "/synthetic/workspaces/group-g/.bot-deliveries/v1/report.md"
+    fixture.groupMessages.mockReturnValue([
+      {
+        id: "files-peer-task-call",
+        groupId: "g",
+        ordinal: 1,
+        authorBotId: "b",
+        text: "",
+        createdAt: 1,
+        files: [{ ...file, ...(kind === "legacy" ? {} : { attachmentPath: snapshot }) }]
+      }
+    ])
+    const controller = new AbortController()
+    fixture.hashFile.mockImplementation(async (_root, path) => {
+      if (kind === "cancelled") {
+        controller.abort(new Error("cancelled during receipt read"))
+        throw controller.signal.reason
+      }
+      if (kind === "missing snapshot" && path === snapshot) throw new Error("ENOENT")
+      if (kind === "changed during read") throw new Error("file changed")
+      return kind === "equal-size edit" && path === file.filePath ? "new-hash" : "sent-hash"
+    })
+    const callback: BotTask = {
+      ...task,
+      threadId: "group-g-a",
+      requestId: "reply-peer-task",
+      origin: {
+        kind: "bot",
+        groupId: "g",
+        fromBotId: "b",
+        rootTaskId: "root",
+        depth: 1,
+        expectsReply: false,
+        replyFiles: [file]
+      }
+    }
+    const signal = controller.signal
+    const lease = port().acquire(bot, callback)!
+    if (kind === "cancelled") {
+      await expect(lease.execute(signal, vi.fn())).rejects.toThrow("cancelled during receipt read")
+      expect(fixture.start).not.toHaveBeenCalled()
+      lease.release()
+      return
+    }
+    await lease.execute(signal, vi.fn())
+    lease.release()
+    const context = fixture.start.mock.calls[0][2]
+    const reminder = context.checkFinalDelivery!([
+      new HumanMessage("Peer result"),
+      new AIMessage("(pass)")
+    ])
+    if (["unchanged", "legacy"].includes(kind)) expect(reminder).toBeUndefined()
+    else expect(reminder).toContain("bot_send_message")
+    if (kind === "legacy") expect(fixture.hashFile).not.toHaveBeenCalled()
+    else {
+      expect(fixture.hashFile).toHaveBeenCalledWith(
+        "/synthetic/workspaces/group-g",
+        file.filePath,
+        signal
+      )
+      expect(
+        fixture.hashFile.mock.calls.every(([root]) => root === "/synthetic/workspaces/group-g")
+      ).toBe(true)
+    }
   })
 
   it.each([0, 1, 2])(

@@ -200,7 +200,9 @@ describe("Bot spreadsheet content preview", () => {
     }))
     const html = renderWorkbook(sheets)
     expect(html.match(/<tr>/g)).toHaveLength(OFFICE_PREVIEW_MAX_ROWS)
-    expect(html.match(/<td\b/g)).toHaveLength(OFFICE_PREVIEW_MAX_ROWS * OFFICE_PREVIEW_MAX_COLUMNS)
+    expect(html.match(/<td\b/g)).toHaveLength(
+      (OFFICE_PREVIEW_MAX_ROWS - 1) * OFFICE_PREVIEW_MAX_COLUMNS
+    )
     expect(html.match(/role="tab"/g)).toHaveLength(OFFICE_PREVIEW_MAX_SHEETS)
     expect(html).not.toContain(`column-${OFFICE_PREVIEW_MAX_COLUMNS}`)
     expect(html).toContain("仅展示部分行、列或工作表")
@@ -214,5 +216,54 @@ describe("Bot spreadsheet content preview", () => {
     expect(renderWorkbook([{ name: "空表", rows: [], truncated: false }], true)).toContain(
       "请下载查看完整工作簿"
     )
+  })
+
+  it("keeps table headers, preview row numbers and fixed-width cells readable without interpreting text", () => {
+    const longValue = "长备注".repeat(100)
+    const html = renderWorkbook([
+      {
+        name: "明细",
+        rows: [
+          ["编号", "金额", "备注"],
+          ["A", "0", longValue],
+          ["B", "74.13", '<b>literal</b>\t\n"quoted"'],
+          ["C", "", "   "]
+        ],
+        truncated: false
+      }
+    ])
+    expect(html).toContain("<thead")
+    expect(html).toContain('scope="col"')
+    expect(html).toContain('scope="row"')
+    expect(html).toContain('aria-label="预览第 2 行 · 金额：0"')
+    expect(html).toContain('aria-label="预览第 2 行 · 编号：A"')
+    expect(html).toContain('aria-label="预览第 4 行 · 金额：空单元格"')
+    expect(html).toContain('aria-label="预览第 3 行 · 备注：&lt;b&gt;literal&lt;/b&gt;')
+    expect(html).toContain('data-office-row="1" data-office-column="1"')
+    expect(html).toContain(">0</button>")
+    expect(html).toContain(longValue)
+    expect(html).toContain("&lt;b&gt;literal&lt;/b&gt;")
+    expect(html).not.toContain("<b>literal</b>")
+    expect(html).toContain("table-fixed")
+    expect(html).toContain("width:176px")
+    expect(html).toContain("truncate")
+    expect(html).not.toContain('aria-label="所选单元格"')
+  })
+
+  it("does not multiply a long first cell into every row's accessible name", () => {
+    const header = "长列名".repeat(2000)
+    const html = renderWorkbook([
+      {
+        name: "长表头",
+        rows: [[header], ["0"], [""]],
+        truncated: false
+      }
+    ])
+    const labels = html.match(/aria-label="预览第 [^"]*"/g) ?? []
+    expect(labels).toHaveLength(3)
+    expect(labels.every((label) => label.length < 260)).toBe(true)
+    expect(labels.slice(1).every((label) => label.length < 130)).toBe(true)
+    expect(html).toContain(header)
+    expect(html).toContain(">0</button>")
   })
 })

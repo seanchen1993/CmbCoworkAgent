@@ -350,6 +350,7 @@ export function BotConversationTools({
                 groupId={groupId}
                 threadId={threadId}
                 filePath={file.filePath}
+                attachmentPath={file.attachmentPath}
                 size={file.size}
               />
             ))}

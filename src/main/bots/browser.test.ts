@@ -306,6 +306,163 @@ describe("Bot browser ownership and control", () => {
     expect((await service.preview("a")).captureError).toBeUndefined()
   })
 
+  it.each([false, true])(
+    "retains the last shown page after return and default preview reentry (help=%s)",
+    async (help) => {
+      const first = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+      const second = JSON.parse(
+        await service.act(
+          "a",
+          { action: "navigate", newTab: true, url: "https://example.test/B" },
+          signal()
+        )
+      )
+      const waiting = vi.fn()
+      let resumed: Promise<string> | undefined
+      if (help) {
+        resumed = service.act(
+          "a",
+          { action: "request_help", pageId: second.pageId, instruction: "Inspect B" },
+          signal(),
+          waiting
+        )
+        await vi.waitFor(() => expect(waiting).toHaveBeenCalledWith(true))
+      } else await service.takeOver("a", second.pageId)
+      try {
+        const before = await service.preview("a")
+        expect(before.pageId).toBe(second.pageId)
+        await service.giveBack("a", before.generation)
+        if (resumed) expect(JSON.parse(await resumed).pageId).toBe(second.pageId)
+        for (let reentry = 0; reentry < 2; reentry++)
+          expect(await service.preview("a")).toMatchObject({
+            pageId: second.pageId,
+            control: "bot",
+            pages: [{ id: first.pageId }, { id: second.pageId }]
+          })
+        // UI selection does not retarget a model call that omitted pageId.
+        expect(JSON.parse(await service.act("a", { action: "observe" }, signal())).pageId).toBe(
+          first.pageId
+        )
+        expect(context.entries[1].bringToFront).toHaveBeenCalledOnce()
+      } finally {
+        if ((await service.preview("a")).control === "human") await service.giveBack("a")
+        await resumed
+      }
+    }
+  )
+
+  it("keeps the original default until a page is selected and remembers each owner's choice", async () => {
+    const first = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const second = JSON.parse(
+      await service.act(
+        "a",
+        { action: "navigate", newTab: true, url: "https://example.test/B" },
+        signal()
+      )
+    )
+    const peer = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    expect((await service.preview("a")).pageId).toBe(first.pageId)
+    await service.preview("a", second.pageId)
+    expect((await service.preview("b")).pageId).toBe(peer.pageId)
+    expect((await service.preview("a")).pageId).toBe(second.pageId)
+    await service.takeOver("a")
+    expect(context.entries[0].bringToFront).not.toHaveBeenCalled()
+    expect(context.entries[1].bringToFront).toHaveBeenCalledOnce()
+    await service.giveBack("a")
+    expect((await service.preview("b")).pageId).toBe(peer.pageId)
+    expect((await service.preview("a")).pages.map((page) => page.id)).toEqual([
+      first.pageId,
+      second.pageId
+    ])
+  })
+
+  it("does not replace the remembered page with a missing or foreign explicit target", async () => {
+    await service.act("a", { action: "observe" }, signal())
+    const second = JSON.parse(
+      await service.act(
+        "a",
+        { action: "navigate", newTab: true, url: "https://example.test/B" },
+        signal()
+      )
+    )
+    const peer = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    await service.preview("a", second.pageId)
+    expect(await service.preview("a", "missing")).toMatchObject({ pageId: null, image: null })
+    await expect(service.preview("a", peer.pageId)).rejects.toThrow("不属于")
+    await expect(service.takeOver("a", "missing")).rejects.toThrow("已关闭")
+    expect((await service.preview("a")).pageId).toBe(second.pageId)
+    expect(context.entries.every((page) => !page.closed)).toBe(true)
+  })
+
+  it.each([false, true])(
+    "keeps the last successful view when showing another page fails (active=%s)",
+    async (active) => {
+      const first = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+      const second = JSON.parse(
+        await service.act(
+          "a",
+          { action: "navigate", newTab: true, url: "https://example.test/B" },
+          signal()
+        )
+      )
+      await service.preview("a", first.pageId)
+      if (active) await service.takeOver("a", first.pageId)
+      const engine = (await launch.mock.results[0].value) as BotBrowserEngine
+      vi.spyOn(engine, "show").mockRejectedValueOnce(new Error("Synthetic show failure"))
+      await expect(service.takeOver("a", second.pageId)).rejects.toThrow("Synthetic show failure")
+      expect((await service.preview("a")).pageId).toBe(first.pageId)
+      if (active) await service.giveBack("a")
+      expect((await service.preview("a")).pageId).toBe(first.pageId)
+    }
+  )
+
+  it("retries the selected page after capture failure instead of returning to the first page", async () => {
+    await service.act("a", { action: "observe" }, signal())
+    const second = JSON.parse(
+      await service.act(
+        "a",
+        { action: "navigate", newTab: true, url: "https://example.test/B" },
+        signal()
+      )
+    )
+    const engine = (await launch.mock.results[0].value) as BotBrowserEngine
+    const capture = vi
+      .spyOn(engine, "capturePage")
+      .mockRejectedValueOnce(new Error("Synthetic capture failure"))
+    expect(await service.preview("a", second.pageId)).toMatchObject({
+      pageId: second.pageId,
+      image: null,
+      captureError: "暂时无法获取浏览器画面，请刷新重试"
+    })
+    expect(await service.preview("a")).toMatchObject({ pageId: second.pageId, control: "bot" })
+    expect(capture).toHaveBeenLastCalledWith(context.entries[1])
+    expect(context.entries.every((page) => !page.closed)).toBe(true)
+  })
+
+  it("forgets a closed viewed page and retains a successfully opened human tab after return", async () => {
+    const first = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const second = JSON.parse(
+      await service.act(
+        "a",
+        { action: "navigate", newTab: true, url: "https://example.test/B" },
+        signal()
+      )
+    )
+    const peer = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    await service.preview("a", second.pageId)
+    await service.act("a", { action: "close", pageId: second.pageId }, signal())
+    expect((await service.preview("a")).pageId).toBe(first.pageId)
+    await service.takeOver("a")
+    const lease = await service.preview("a")
+    const next = await service.operateAsHuman("a", { action: "new" }, lease.generation)
+    await service.giveBack("a", lease.generation)
+    expect((await service.preview("a")).pageId).toBe(next)
+    await service.act("a", { action: "close", pageId: next! }, signal())
+    expect((await service.preview("a")).pageId).toBe(first.pageId)
+    expect((await service.preview("b")).pageId).toBe(peer.pageId)
+    expect(context.entries).toHaveLength(4)
+  })
+
   it("keeps human navigation and tab controls on the leased owner's exact pages", async () => {
     const a = JSON.parse(
       await service.act("a", { action: "navigate", url: "https://example.test/form" }, signal())

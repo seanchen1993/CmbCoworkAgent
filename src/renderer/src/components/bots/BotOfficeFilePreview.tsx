@@ -1,4 +1,6 @@
 import * as React from "react"
+import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   OFFICE_PREVIEW_MAX_COLUMNS,
@@ -88,6 +90,287 @@ function projectOfficeHtml(html: string) {
   return projectOfficeNodes(document.querySelector("template")?.content.childNodes ?? [])
 }
 
+type Cell = { row: number; column: number }
+type CellRange = { anchor: Cell; focus: Cell }
+
+function SpreadsheetTable({
+  preview,
+  sheet
+}: {
+  preview: WorkspaceOfficePreviewData
+  sheet: { name: string; rows: string[][] } | undefined
+}) {
+  const rows = sheet?.rows.slice(0, OFFICE_PREVIEW_MAX_ROWS) ?? []
+  const columns = Math.min(
+    OFFICE_PREVIEW_MAX_COLUMNS,
+    rows.reduce((count, row) => Math.max(count, row.length), 0)
+  )
+  // A long first cell is still readable in full; repeating it in every row's
+  // accessible name must not multiply the bounded preview payload.
+  const columnLabels = Array.from({ length: columns }, (_, column) => {
+    const header = rows[0]?.[column] ?? ""
+    return (
+      (header.length > 80 ? `${header.slice(0, 80).replace(/[\uD800-\uDBFF]$/, "")}…` : header) ||
+      `第 ${column + 1} 列`
+    )
+  })
+  const root = React.useRef<HTMLDivElement>(null)
+  const surface = React.useRef<HTMLDivElement>(null)
+  const [state, setState] = React.useState<{
+    preview: WorkspaceOfficePreviewData
+    range: CellRange | null
+    expanded: boolean
+  }>({ preview, range: null, expanded: false })
+  if (state.preview !== preview) setState({ preview, range: null, expanded: false })
+  const range = state.preview === preview ? state.range : null
+  const expanded = state.preview === preview && state.expanded
+  const valueAt = (cell: Cell) => rows[cell.row]?.[cell.column] ?? ""
+  const labelAt = (cell: Cell) => `预览第 ${cell.row + 1} 行 · ${columnLabels[cell.column]}`
+  const bounds = range && {
+    top: Math.min(range.anchor.row, range.focus.row),
+    bottom: Math.max(range.anchor.row, range.focus.row),
+    left: Math.min(range.anchor.column, range.focus.column),
+    right: Math.max(range.anchor.column, range.focus.column)
+  }
+  const selected = (cell: Cell) =>
+    Boolean(
+      bounds &&
+      cell.row >= bounds.top &&
+      cell.row <= bounds.bottom &&
+      cell.column >= bounds.left &&
+      cell.column <= bounds.right
+    )
+  const focusCell = (cell: Cell) => {
+    const button = root.current?.querySelector<HTMLButtonElement>(
+      `[data-office-row="${cell.row}"][data-office-column="${cell.column}"]`
+    )
+    button?.focus({ preventScroll: true })
+    button?.scrollIntoView({ block: "nearest", inline: "nearest" })
+  }
+  const choose = (cell: Cell, extend = false, initialAnchor = cell) => {
+    setState({
+      preview,
+      range: { anchor: extend ? (range?.anchor ?? initialAnchor) : cell, focus: cell },
+      expanded: false
+    })
+    focusCell(cell)
+  }
+  const selectionText = () => {
+    if (!bounds) return ""
+    const escape = (value: string) =>
+      /[\t\r\n"]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value
+    return rows
+      .slice(bounds.top, bounds.bottom + 1)
+      .map((row) =>
+        Array.from({ length: bounds.right - bounds.left + 1 }, (_, offset) =>
+          escape(row[bounds.left + offset] ?? "")
+        ).join("\t")
+      )
+      .join("\n")
+  }
+  const copy = async () => {
+    if (!range) return
+    const text = selectionText()
+    try {
+      await navigator.clipboard.writeText(text)
+      toast.success("已复制所选单元格")
+    } catch {
+      toast.error("复制失败，请重试")
+    }
+  }
+  // Radix's outer dialog handles Escape at document capture. Give this preview's
+  // selection the first Escape, without intercepting another dialog or later Escapes.
+  React.useEffect(() => {
+    if (!range) return
+    const onEscape = (event: KeyboardEvent) => {
+      const scope = root.current
+      if (
+        event.key !== "Escape" ||
+        event.defaultPrevented ||
+        event.isComposing ||
+        !(event.target instanceof Node) ||
+        !scope?.contains(event.target)
+      )
+        return
+      event.preventDefault()
+      event.stopPropagation()
+      setState({ preview, range: null, expanded: false })
+      surface.current?.focus({ preventScroll: true })
+    }
+    window.addEventListener("keydown", onEscape, true)
+    return () => window.removeEventListener("keydown", onEscape, true)
+  }, [preview, range])
+  const cellButton = (cell: Cell) => {
+    const value = valueAt(cell)
+    const valueLabel =
+      value === ""
+        ? "空单元格"
+        : value.length > 120
+          ? `${value.slice(0, 120).replace(/[\uD800-\uDBFF]$/, "")}…`
+          : value
+    const active = range?.focus.row === cell.row && range.focus.column === cell.column
+    return (
+      <button
+        type="button"
+        data-office-row={cell.row}
+        data-office-column={cell.column}
+        aria-label={`${labelAt(cell)}：${valueLabel}`}
+        title={value || undefined}
+        tabIndex={active || (!range && cell.row === 0 && cell.column === 0) ? 0 : -1}
+        className={`block min-h-9 w-full truncate px-3 py-2 text-left font-normal focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 ${selected(cell) ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"}`}
+        onClick={(event) => choose(cell, event.shiftKey)}
+      >
+        {value || "\u00a0"}
+      </button>
+    )
+  }
+  return (
+    <div
+      ref={root}
+      className="flex min-h-0 flex-1 flex-col"
+      onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing || event.altKey) return
+        const target = event.target as HTMLElement
+        const cell = target.closest<HTMLButtonElement>("[data-office-row]")
+        if (!cell && target !== surface.current) return
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c" && range) {
+          event.preventDefault()
+          event.stopPropagation()
+          void copy()
+          return
+        }
+        if (event.ctrlKey || event.metaKey || !rows.length || !columns) return
+        const delta = (
+          { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] } as Record<
+            string,
+            number[]
+          >
+        )[event.key]
+        if (!delta) return
+        event.preventDefault()
+        event.stopPropagation()
+        const current = range?.focus ?? {
+          row: Number(cell?.dataset.officeRow ?? 0),
+          column: Number(cell?.dataset.officeColumn ?? 0)
+        }
+        choose(
+          {
+            row: Math.max(0, Math.min(rows.length - 1, current.row + delta[0])),
+            column: Math.max(0, Math.min(columns - 1, current.column + delta[1]))
+          },
+          event.shiftKey,
+          current
+        )
+      }}
+    >
+      {range && (
+        <div
+          className="shrink-0 border-b border-border bg-muted/40 px-4 py-2"
+          role="region"
+          aria-label="所选单元格"
+        >
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span className="min-w-0 flex-1 truncate">
+              {labelAt(range.focus)}
+              {bounds && (bounds.top !== bounds.bottom || bounds.left !== bounds.right)
+                ? `（${bounds.bottom - bounds.top + 1} 行 × ${bounds.right - bounds.left + 1} 列）`
+                : ""}
+            </span>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setState({ ...state, expanded: !expanded })}
+              aria-expanded={expanded}
+            >
+              {expanded ? "收起完整值" : "展开完整值"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => void copy()}>
+              复制所选单元格
+            </Button>
+          </div>
+          <div
+            aria-label="单元格完整值"
+            className={
+              expanded
+                ? "max-h-40 overflow-auto whitespace-pre-wrap break-all text-sm"
+                : "truncate whitespace-pre text-sm"
+            }
+          >
+            {valueAt(range.focus) || "\u00a0"}
+          </div>
+        </div>
+      )}
+      <div
+        ref={surface}
+        tabIndex={-1}
+        className="min-h-0 flex-1 overflow-auto p-4 focus-visible:outline-none"
+      >
+        {rows.length && columns ? (
+          <table
+            role="grid"
+            aria-label={sheet?.name}
+            aria-multiselectable="true"
+            className="table-fixed border-collapse text-sm"
+            style={{ width: 48 + columns * 176, minWidth: "100%" }}
+          >
+            <colgroup>
+              <col style={{ width: 48 }} />
+              {Array.from({ length: columns }, (_, column) => (
+                <col key={column} style={{ width: 176 }} />
+              ))}
+            </colgroup>
+            <thead className="sticky top-0 z-10 bg-muted">
+              <tr>
+                <th
+                  scope="col"
+                  className="border border-border px-2 text-xs font-normal"
+                  title="预览行号"
+                >
+                  #
+                </th>
+                {Array.from({ length: columns }, (_, column) => (
+                  <th
+                    key={column}
+                    scope="col"
+                    aria-selected={selected({ row: 0, column })}
+                    className="border border-border text-left"
+                  >
+                    {cellButton({ row: 0, column })}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.slice(1).map((_, index) => (
+                <tr key={index}>
+                  <th
+                    scope="row"
+                    className="border border-border bg-muted/40 px-2 text-right text-xs font-normal text-muted-foreground"
+                  >
+                    {index + 2}
+                  </th>
+                  {Array.from({ length: columns }, (_, column) => (
+                    <td
+                      key={column}
+                      role="gridcell"
+                      aria-selected={selected({ row: index + 1, column })}
+                      className="border border-border"
+                    >
+                      {cellButton({ row: index + 1, column })}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="text-muted-foreground">工作表为空。</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function BotOfficeFilePreview({
   preview,
   filePath
@@ -148,30 +431,11 @@ export function BotOfficeFilePreview({
       </TabsList>
       <TabsContent
         value={String(selectedSheet)}
-        className="mt-0 min-h-0 flex-1 overflow-auto p-4 focus-visible:ring-inset"
+        className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden focus-visible:ring-inset"
       >
-        {rows.length ? (
-          <table className="w-full border-collapse text-sm">
-            <tbody>
-              {rows.map((row, rowIndex) => (
-                <tr key={rowIndex}>
-                  {row.slice(0, OFFICE_PREVIEW_MAX_COLUMNS).map((cell, columnIndex) => (
-                    <td
-                      key={columnIndex}
-                      className="whitespace-pre-wrap border border-border px-3 py-2 align-top"
-                    >
-                      {cell}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <p className="text-muted-foreground">工作表为空。</p>
-        )}
+        <SpreadsheetTable key={selectedSheet} preview={preview} sheet={sheet} />
         {truncated && (
-          <p role="status" className="mt-4 text-sm text-muted-foreground">
+          <p role="status" className="shrink-0 px-4 py-2 text-sm text-muted-foreground">
             内容较多，仅展示部分行、列或工作表。请下载查看完整工作簿。
           </p>
         )}

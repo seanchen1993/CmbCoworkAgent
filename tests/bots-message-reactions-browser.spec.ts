@@ -12,6 +12,7 @@ declare global {
       calls: Array<{ scope: string; id: string; emoji: string; present: boolean }>
       reads: Array<{ scope: string; ids: string[] }>
       copiedTexts: string[]
+      replies: string[]
       fail: boolean
       hold: boolean
       holdRead: boolean
@@ -53,7 +54,7 @@ const scopeOf=t=>JSON.stringify(t);const clone=x=>JSON.parse(JSON.stringify(x));
 const methods={hostId:'host',subscribe(fn){listeners.add(fn);state.maxListeners=Math.max(state.maxListeners,listeners.size);return()=>listeners.delete(fn)},async messageReactions(target,ids){const scope=scopeOf(target),rev=revision;state.reads.push({scope,ids});if(state.failRead){state.failRead=false;throw new Error('host拒绝读取回应')}const items=ids.map(messageId=>({messageId,canReact:messageId!=='missing'||state.missingReady,reactions:clone(records.get(scope+messageId)||[])}));if(state.holdRead){state.holdRead=false;await new Promise(r=>releaseRead=r)}return {revision:rev,items}},async setMessageReaction(target,messageId,emoji,present){const scope=scopeOf(target);state.calls.push({scope,id:messageId,emoji,present});if(state.hold){state.hold=false;await new Promise(r=>release=r)}if(state.fail){state.fail=false;throw new Error('host拒绝保存回应')}const previous=records.get(scope+messageId)||[];const actors=previous.find(x=>x.emoji===emoji)?.actors||[];const items=previous.filter(x=>x.emoji!==emoji);if(present||actors.length)items.push({emoji,count:actors.length+Number(present),mine:present,...(actors.length?{actors}:{})});records.set(scope+messageId,items);return {revision:++revision,item:{messageId,canReact:true,reactions:clone(items)}}}};
 const readTransport=methods.messageReactions;methods.messageReactions=async(...args)=>{state.activeReads++;state.maxActiveReads=Math.max(state.maxActiveReads,state.activeReads);try{return await readTransport(...args)}finally{state.activeReads--}};
 const alternate={...methods};
-const state=window.reactionFixture={calls:[],reads:[],copiedTexts:[],fail:false,hold:false,holdRead:false,missingReady:false,failRead:false,activeReads:0,maxActiveReads:0,maxListeners:0,get listenerCount(){return listeners.size},unmount(){root.render(null)},release(){release()},releaseRead(){releaseRead()},modelReaction(){const target={kind:'bot',botId:'BOT-AUTHOR',workId:'work'};records.set(scopeOf(target)+id,[{emoji:'👍',count:1,mine:false,actors:[{botId:'actual-bot',name:'验收 Bot'}]}]);revision++;this.invalidate('BOT-AUTHOR')},invalidate(scope='A',hint=true){const target=scope==='G'?{kind:'group',groupId:'g'}:{workId:'work',botId:scope,kind:'bot'};for(const listener of listeners)listener({hostId:'host',revision,...(hint?{reactionTarget:target}:{})})},render(scope='A',readOnly=false,other=false,enabled=true,extra=0){const target=scope==='G'?{kind:'group',groupId:'g'}:{kind:'bot',botId:scope,workId:'work'};root.render(<BotMessageReactionsProvider client={other?alternate:methods} target={target} messageIds={[id,'missing','file',...Array.from({length:extra},(_,i)=>'extra-'+i)]} readOnly={readOnly} enabled={enabled}><article data-row='middle'><BotMessageActions messageId={id} replyAction={<button aria-label='回复消息'>reply</button>} moreActions={<button aria-label='复制消息'>copy</button>}/></article><article data-row='missing'><BotMessageActions messageId='missing'/></article><article className='bot-group-message' data-row='file'><BotGroupMessageActions messageId='file' author='文件发送者' text='' onError={()=>{}}/></article><article data-row='group-copy'><BotGroupMessageActions messageId='group-copy' author='群成员' text='群消息正文' onError={()=>{}}/></article></BotMessageReactionsProvider>)}};Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{state.copiedTexts.push(text)}}});state.render();`
+const state=window.reactionFixture={calls:[],reads:[],copiedTexts:[],replies:[],fail:false,hold:false,holdRead:false,missingReady:false,failRead:false,activeReads:0,maxActiveReads:0,maxListeners:0,get listenerCount(){return listeners.size},unmount(){root.render(null)},release(){release()},releaseRead(){releaseRead()},modelReaction(){const target={kind:'bot',botId:'BOT-AUTHOR',workId:'work'};records.set(scopeOf(target)+id,[{emoji:'👍',count:1,mine:false,actors:[{botId:'actual-bot',name:'验收 Bot'}]}]);revision++;this.invalidate('BOT-AUTHOR')},invalidate(scope='A',hint=true){const target=scope==='G'?{kind:'group',groupId:'g'}:{workId:'work',botId:scope,kind:'bot'};for(const listener of listeners)listener({hostId:'host',revision,...(hint?{reactionTarget:target}:{})})},render(scope='A',readOnly=false,other=false,enabled=true,extra=0){const target=scope==='G'?{kind:'group',groupId:'g'}:{kind:'bot',botId:scope,workId:'work'};root.render(<BotMessageReactionsProvider client={other?alternate:methods} target={target} messageIds={[id,'missing','file',...Array.from({length:extra},(_,i)=>'extra-'+i)]} readOnly={readOnly} enabled={enabled}><article data-row='middle'><BotMessageActions messageId={id} replyAction={<button aria-label='回复消息'>reply</button>} moreActions={<button aria-label='复制消息'>copy</button>}/></article><article data-row='missing'><BotMessageActions messageId='missing'/></article><article className='bot-group-message' data-row='file'><BotGroupMessageActions messageId='file' author='文件发送者' text='' onReply={()=>state.replies.push('file')} onError={()=>{}}/></article><article data-row='group-copy'><BotGroupMessageActions messageId='group-copy' author='群成员' text='群消息正文' onReply={()=>state.replies.push('group-copy')} onError={()=>{}}/></article><article data-row='empty-system'><BotGroupMessageActions messageId='empty-system' author='系统' text='' onError={()=>{}}/></article></BotMessageReactionsProvider>)}};Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{state.copiedTexts.push(text)}}});state.render();`
     },
     bundle: true,
     write: false,
@@ -200,6 +201,23 @@ const state=window.reactionFixture={calls:[],reads:[],copiedTexts:[],fail:false,
         .isEnabled(),
       true,
       "file-only genuine messages remain reactable"
+    )
+    await page
+      .locator('[data-row="file"]')
+      .getByRole("button", { name: "回复文件发送者的消息", exact: true })
+      .click()
+    await page
+      .locator('[data-row="group-copy"]')
+      .getByRole("button", { name: "回复群成员的消息", exact: true })
+      .click()
+    assert.deepEqual(await page.evaluate(() => window.reactionFixture.replies), [
+      "file",
+      "group-copy"
+    ])
+    assert.equal(
+      await page.locator('[data-row="empty-system"]').getByRole("button", { name: /回复/ }).count(),
+      0,
+      "an empty system row without a reply action stays unavailable"
     )
     const groupMore = page
       .locator('[data-row="group-copy"]')

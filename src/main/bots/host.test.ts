@@ -1250,6 +1250,43 @@ describe("Bot control state", () => {
     expect(db.activities().some((activity) => activity.kind === "bot")).toBe(false)
   })
 
+  it.each(["rename", "add", "remove"] as const)(
+    "allows a group to %s while retaining an existing archived member",
+    (action) => {
+      const db = store(),
+        a = db.create({ ...input, name: "A" }),
+        b = db.create({ ...input, name: "B" }),
+        c = db.create({ ...input, name: "C" })
+      const group = db.saveGroup({ name: "Room", memberIds: [a.id, b.id] })
+      db.update({ ...b, expectedVersion: b.version, archived: true })
+      const changes = {
+        name: action === "rename" ? "Renamed" : group.name,
+        memberIds:
+          action === "add" ? [a.id, b.id, c.id] : action === "remove" ? [b.id] : group.memberIds
+      }
+      const updated = db.saveGroup(changes, group)
+      expect(updated).toMatchObject({ ...changes, version: group.version + 1 })
+      expect(db.getBot(b.id).archived).toBe(true)
+      expect(db.recentTasks()).toEqual([])
+    }
+  )
+
+  it("rejects newly added archived members, including rejoining a previous group", () => {
+    const db = store(),
+      a = db.create({ ...input, name: "A" }),
+      b = db.create({ ...input, name: "B" })
+    const group = db.saveGroup({ name: "Room", memberIds: [a.id, b.id] })
+    db.update({ ...b, expectedVersion: b.version, archived: true })
+    expect(() => db.saveGroup({ name: "New room", memberIds: [a.id, b.id] })).toThrow(
+      "请先恢复已归档的成员"
+    )
+    const removed = db.saveGroup({ name: group.name, memberIds: [a.id] }, group)
+    expect(() => db.saveGroup({ name: group.name, memberIds: [a.id, b.id] }, removed)).toThrow(
+      "请先恢复已归档的成员"
+    )
+    expect(db.getGroup(group.id)).toEqual(removed)
+  })
+
   it("provides current room members without inferring them from a title or expanding recipients", () => {
     const db = store(),
       first = db.create({ ...input, name: "First" }),

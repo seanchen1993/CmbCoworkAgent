@@ -4,6 +4,8 @@ import { inferWorkspacePreviewPathKind } from "./resource-preview-paths"
 export interface OpenResourcePreviewDetail {
   threadId: string
   filePath: string
+  /** Original workspace document used only to resolve Markdown's relative images. */
+  markdownBasePath?: string
   /** Monotonic user/application intent used to reject late async authorization results. */
   intentId: number
   workspacePathKind: WorkspaceFilePreviewWorkspacePathKind

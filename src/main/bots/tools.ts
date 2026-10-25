@@ -17,7 +17,7 @@ import {
   type BotBrowserService,
   type BotBrowserUploadLock
 } from "./browser"
-import { botImportDestination, copyBotFile } from "./file-copy"
+import { botImportDestination, copyBotFile, snapshotBotDeliveryFile } from "./file-copy"
 import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../agent/runtime-tool-catalog"
 import { getHookAgentIdFromRequest } from "../hooks/execution-context"
 import { parseBotReactionEmoji } from "../../shared/bots/message-reactions"
@@ -163,10 +163,23 @@ function createBotFileTools(
               })
             } catch (error) {
               if (!peer || !isAbsolute(fileId)) throw error
-              const source = await resolveBotWorkspaceFile(peer.workspacePath, fileId, {
-                allowAbsolute: true
-              })
-              if (!peer.files.some((file) => file.filePath === source)) throw error
+              // A public receipt authorizes its retained bytes even after the
+              // editable original changes. Internal returns have no snapshot.
+              let reference = peer.files.find(
+                (file) => file.filePath === fileId || file.attachmentPath === fileId
+              )
+              if (!reference) {
+                const original = await resolveBotWorkspaceFile(peer.workspacePath, fileId, {
+                  allowAbsolute: true
+                })
+                reference = peer.files.find((file) => file.filePath === original)
+              }
+              if (!reference) throw error
+              const source = await resolveBotWorkspaceFile(
+                peer.workspacePath,
+                reference.attachmentPath ?? reference.filePath,
+                { allowAbsolute: true }
+              )
               selected.push({ path: source, peer: true })
             }
           }
@@ -187,6 +200,14 @@ function createBotFileTools(
             local.push(destination)
           }
           const deliveredFiles = await verifyBotDeliveryFiles(workspacePath, local, signal)
+          if (mode !== "return") {
+            for (const file of deliveredFiles)
+              Object.assign(
+                file,
+                await snapshotBotDeliveryFile(workspacePath, file.filePath, signal)
+              )
+          }
+          signal.throwIfAborted()
           const callId =
             config.toolCall?.id ?? JSON.stringify(deliveredFiles.map((file) => file.filePath))
           if (content === undefined) publish?.(deliveredFiles, callId)
@@ -220,7 +241,7 @@ function createBotFileTools(
         description:
           mode === "return"
             ? "Verify existing workspace files and return their references privately to the delegating Bot in the automatic collaboration reply. This does not publish attachments or deliver files to the user. Use this for internal drafts and results; the caller owns public delivery. Use bot_deliver_files only for an explicitly authorized public group attachment. Use workspace-relative paths, retaining subdirectories. Existence, ownership and metadata are verified; references are not immutable copies or proof of content correctness. Never return a directory, another Bot's private file or an unverified path."
-            : "Deliver actual completed or useful partial files as attachments that can be opened and saved. Use workspace-relative paths, retaining subdirectories; this verifies existence, ownership and metadata. References to current workspace files are not immutable copies. The host includes verified references in automatic private collaboration replies and verifies declared outputFiles before completion. Never deliver a directory or an unverified path. " +
+            : "Deliver actual completed or useful partial files as attachments that can be opened and saved. Use workspace-relative paths, retaining subdirectories; this verifies existence, ownership and metadata. Each public attachment retains its sent bytes separately from the editable workspace original. The host includes verified references in automatic private collaboration replies and verifies declared outputFiles before completion. Never deliver a directory or an unverified path. " +
               (publicGroup
                 ? "This publishes to the current shared group. When the user requested a summary with these files, include it in content so the text and attachments are delivered together. Ordinary assistant text is private and is not published. Set content to an empty string for a file-only delivery. Only current workspace files are eligible; other Bots' private files are rejected."
                 : peer

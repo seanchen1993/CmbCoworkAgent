@@ -2,6 +2,8 @@ export interface BotDeliveredFile {
   filePath: string
   name: string
   size: number
+  /** Sent-byte copy for public attachment cards; absent on legacy/internal references. */
+  attachmentPath?: string
 }
 
 /** Explicit delegation outputs, never paths inferred from reply prose. Portable workspace IDs. */
@@ -37,7 +39,8 @@ export const BOT_REPLY_FILES_PREFIX = "\n\n本轮已验证的成果文件引用�
 
 /** A bounded projection of real tool results, never a parser for arbitrary assistant prose. */
 export function parseBotFileDelivery(content: unknown): BotDeliveredFile[] | null {
-  if (typeof content !== "string" || content.length > 40_000) return null
+  // Eight existing path records plus their optional sent-byte paths.
+  if (typeof content !== "string" || content.length > 80_000) return null
   try {
     const result = JSON.parse(content)
     if (
@@ -55,6 +58,11 @@ export function parseBotFileDelivery(content: unknown): BotDeliveredFile[] | nul
         !file.filePath ||
         file.filePath.length > 4096 ||
         file.filePath.includes("\0") ||
+        (file.attachmentPath !== undefined &&
+          (typeof file.attachmentPath !== "string" ||
+            !file.attachmentPath ||
+            file.attachmentPath.length > 4096 ||
+            file.attachmentPath.includes("\0"))) ||
         typeof file.name !== "string" ||
         !file.name ||
         file.name.length > 4096 ||
@@ -66,10 +74,11 @@ export function parseBotFileDelivery(content: unknown): BotDeliveredFile[] | nul
         return null
       seen.add(file.filePath)
     }
-    return result.files.map(({ filePath, name, size }: BotDeliveredFile) => ({
+    return result.files.map(({ filePath, name, size, attachmentPath }: BotDeliveredFile) => ({
       filePath,
       name,
-      size
+      size,
+      ...(attachmentPath === undefined ? {} : { attachmentPath })
     }))
   } catch {
     return null

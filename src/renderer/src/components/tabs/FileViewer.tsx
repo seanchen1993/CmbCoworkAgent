@@ -54,6 +54,8 @@ interface FileViewerProps {
   transport?: BotFilePreviewTransport
   cacheNamespace?: string
   filePath: string
+  /** Workspace-only base for relative Markdown images; content still reads filePath. */
+  markdownBasePath?: string
   threadId?: string
   externalFullPath?: string
   /** How main should interpret an ungranted workspace path. Absolute remains workspace-bounded. */
@@ -97,6 +99,7 @@ function formatBytes(bytes: number): string {
 
 export function FileViewer({
   filePath,
+  markdownBasePath,
   threadId,
   externalFullPath,
   workspacePathKind,
@@ -584,7 +587,7 @@ export function FileViewer({
       <div className="h-full min-h-0 overflow-y-auto right-panel-scroll">
         <MarkdownPreview
           content={content}
-          path={displayPath}
+          path={externalFullPath ? displayPath : (markdownBasePath ?? displayPath)}
           showHeader={false}
           showModeToggle={false}
           viewMode={previewMode}
