@@ -19,7 +19,7 @@ describe("project thread title", () => {
   it("uses the explicitly selected skill and requests only the current node label", async () => {
     resolveStage.mockResolvedValue({ name: "技术设计", status: "进行中" })
     expect(await generateProjectThreadTitle(message, " 方案设计 ", binding)).toBe(
-      "[技术设计]方案设计"
+      "方案设计·技术设计"
     )
     expect(resolveStage).toHaveBeenCalledWith("project", "feature", { labelOnly: true })
   })
@@ -32,12 +32,12 @@ describe("project thread title", () => {
   })
 
   it.each([undefined, "", " "])(
-    "prefixes the message title with the current label when the skill is absent: %j",
+    "appends the current label to the message title when the skill is absent: %j",
     async (skillName) => {
       resolveStage.mockResolvedValue({ name: "技术设计", status: "进行中" })
       const text = "使用方案设计技能完成设计。" + "详细说明".repeat(20)
       expect(await generateProjectThreadTitle(text, skillName, binding)).toBe(
-        `[技术设计]${generateTitle(text)}`
+        `${generateTitle(text)}·技术设计`
       )
       expect(resolveStage).toHaveBeenCalledWith("project", "feature", { labelOnly: true })
     }
