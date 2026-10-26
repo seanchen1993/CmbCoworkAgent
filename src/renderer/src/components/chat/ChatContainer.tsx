@@ -6750,7 +6750,7 @@ export function ChatContainer({
       try {
         await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
         if (isManagedRunSessionActive) {
-          toast.success("已退出托管模式")
+          toast.success("已退出托管模式", { duration: 1200 })
         }
       } finally {
         if (goalUi.goal) {

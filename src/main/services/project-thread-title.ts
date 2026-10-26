@@ -14,7 +14,7 @@ export async function generateProjectThreadTitle(
         const stage = await resolveHarnessFeatureCurrentStage(projectId, slug, {
           labelOnly: true
         })
-        if (stage?.name.trim()) return `[${stage.name.trim()}]${name || generateTitle(message)}`
+        if (stage?.name.trim()) return `${name || generateTitle(message)}·${stage.name.trim()}`
       }
     }
   } catch (error) {

@@ -3049,6 +3049,11 @@ interface CustomAPI {
     syncKnowledgeBase: (idKey: string) => Promise<KnowledgeBaseSyncResult>
     getKnowledgePreview: (idKey: string) => Promise<HarnessKnowledgePreviewResult>
     cancelKnowledgePreviewRequests: () => Promise<void>
+    selectProjectDirectory: () => Promise<{
+      workspacePath: string
+      projectDir: string
+      validationError: string | null
+    } | null>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput
@@ -3108,6 +3113,7 @@ interface CustomAPI {
     getManagedRunEvents: (
       input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
     ) => Promise<ManagedRunEventsPage>
+    getManagedRuns: (projectId: string, featureId: string) => Promise<ManagedRunSummary[]>
     getLatestManagedRun: (projectId: string, featureId: string) => Promise<ManagedRunSummary | null>
     cancelDialogTips: () => Promise<void>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
