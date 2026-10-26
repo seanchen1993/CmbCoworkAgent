@@ -24,6 +24,7 @@ const resourcePanelOverlay = readFileSync(
   new URL("../panels/ResourcePanelOverlay.tsx", import.meta.url),
   "utf8"
 )
+const overlayDrawer = readFileSync(new URL("../panels/OverlayDrawer.tsx", import.meta.url), "utf8")
 const latestCompletedResource = readFileSync(
   new URL("../../lib/latest-completed-resource.ts", import.meta.url),
   "utf8"
@@ -202,6 +203,18 @@ describe("persisted active file preview isolation", () => {
     expect(resourcePanelOverlay).toMatch(
       /if \(standardRightPanelMounted\) \{\s*setOpen\(false\)\s*setRightModule\(nextMode\)/
     )
+  })
+
+  it("keeps the resource drawer resizable from its left border", () => {
+    expect(overlayDrawer).toContain('role="separator"')
+    expect(overlayDrawer).toContain('aria-orientation="vertical"')
+    expect(overlayDrawer).toContain('document.body.style.cursor = "col-resize"')
+    expect(overlayDrawer).toContain(
+      "setWidth(clampWidth(start.width - (latestClientX - start.clientX)))"
+    )
+    expect(overlayDrawer).toContain("suppressBackdropCloseRef.current = true")
+    expect(overlayDrawer).toContain("if (suppressBackdropCloseRef.current)")
+    expect(overlayDrawer).toContain("onClick={handleBackdropClick}")
   })
 
   it("defers ambiguous POSIX path intent until main applies the authoritative boundary", () => {
