@@ -151,7 +151,11 @@ export function BotGroupEditor({
             <Button variant="ghost" type="button" disabled={busy} onClick={onClose}>
               取消
             </Button>
-            <Button disabled={busy || !name.trim() || !members.length}>保存</Button>
+            <Button
+              disabled={busy || !name.trim() || (!members.length && group?.memberIds.length !== 0)}
+            >
+              保存
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>

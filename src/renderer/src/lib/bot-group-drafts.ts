@@ -6,7 +6,7 @@ import {
 } from "./bot-group-mentions"
 import { botErrorMessage } from "./bot-error-message"
 import { create } from "zustand"
-import type { BotClient, BotGroup } from "../../../shared/bots/contracts"
+import type { BotClient, BotGroup, SendBotGroupMessageInput } from "../../../shared/bots/contracts"
 import type { FileAttachment } from "../../../shared/file-attachment"
 import { buildAttachmentMessageParts } from "../../../shared/attachment-message-parts"
 import { loadGroupDraft, saveGroupDraft, pruneSavedGroupDrafts } from "./bot-group-draft-storage"
@@ -128,82 +128,89 @@ export const useBotGroupDrafts = create<{
     })
 }))
 
+/** A retry keeps the accepted request's payload, independently of later membership changes. */
+export function hasUnchangedGroupRequest(draft: Pick<GroupDraft, "request" | "revision">): boolean {
+  return draft.request !== null && draft.request.revision === draft.revision
+}
+
 /** Keep the in-flight lock and retry identity outside the mounted conversation. */
 export async function sendGroupDraft(client: BotClient, group: BotGroup): Promise<void> {
   const key = groupDraftKey(client.hostId, group.id)
   const draft = useBotGroupDrafts.getState().drafts[key] ?? EMPTY_GROUP_DRAFT
   if (draft.sending) return
-  const text =
-    `${draft.text.trim() || (draft.attachments.length ? "请分析以下文件内容。" : "")}${buildAttachmentMessageParts(draft.attachments).attachmentModelBlocks}`.trim()
-  const mentions = validGroupMentions(draft.text, draft.mentions)
-  const recipients = groupMessageRecipients(mentions, group.memberIds, {
-    targets: draft.targets,
-    replyAuthorId: draft.replyTo?.authorBotId
-  })
-  if (recipients.error) {
-    useBotGroupDrafts.setState((state) => ({
-      drafts: {
-        ...state.drafts,
-        [key]: {
-          ...draft,
-          error: recipients.error
-        }
-      }
-    }))
-    return
-  }
-  const targetBotIds = [...new Set(recipients.ids)].sort()
-  if (draft.sending || !text || !targetBotIds.length) return
-  if (text.length > 30_000) {
-    useBotGroupDrafts.setState((state) => ({
-      drafts: {
-        ...state.drafts,
-        [key]: { ...draft, error: "消息和附件内容合计超过 30,000 字符，请减少内容后重试。" }
-      }
-    }))
-    return
-  }
-  const targets = JSON.stringify(targetBotIds)
-  const leading = draft.text.length - draft.text.trimStart().length
-  const sentMentions = mentions.map((mention) => ({
-    ...mention,
-    start: mention.start - leading,
-    end: mention.end - leading
-  }))
-  const mentionIdentity = JSON.stringify(sentMentions)
-  let mentionsMatch =
-    draft.request?.mentions === undefined || draft.request.mentions === mentionIdentity
-  if (!mentionsMatch && draft.request?.mentions !== undefined) {
+  const retry = hasUnchangedGroupRequest(draft) ? draft.request : null
+  let request: NonNullable<GroupDraft["request"]>
+  let input: SendBotGroupMessageInput
+  if (retry) {
+    request = retry
     try {
-      // Restoring a draft may reorder fields; compare the same validated payload as the Host.
-      const input = {
+      // Do not recompute recipients or metadata: the Host may already have accepted this request.
+      input = parseGroupMessage({
         groupId: group.id,
-        requestId: draft.request.id,
-        text,
-        targetBotIds,
-        ...(draft.replyTo ? { replyToId: draft.replyTo.id } : {})
-      }
-      const canonical = (mentions: unknown) =>
-        JSON.stringify(parseGroupMessage({ ...input, mentions }).mentions ?? [])
-      mentionsMatch = canonical(JSON.parse(draft.request.mentions)) === canonical(sentMentions)
-    } catch {
-      // Invalid saved metadata cannot identify the current request.
+        requestId: request.id,
+        text: request.text,
+        targetBotIds: JSON.parse(request.targets),
+        ...(request.replyToId ? { replyToId: request.replyToId } : {}),
+        // Pre-upgrade requests omitted mention metadata; preserve that wire contract too.
+        ...(request.mentions !== undefined ? { mentions: JSON.parse(request.mentions) } : {})
+      })
+    } catch (cause) {
+      useBotGroupDrafts.setState((state) => ({
+        drafts: {
+          ...state.drafts,
+          [key]: { ...draft, error: botErrorMessage(cause, "原发送记录无效，请编辑后重新发送。") }
+        }
+      }))
+      return
+    }
+  } else {
+    const text =
+      `${draft.text.trim() || (draft.attachments.length ? "请分析以下文件内容。" : "")}${buildAttachmentMessageParts(draft.attachments).attachmentModelBlocks}`.trim()
+    const mentions = validGroupMentions(draft.text, draft.mentions)
+    const recipients = groupMessageRecipients(mentions, group.memberIds, {
+      targets: draft.targets,
+      replyAuthorId: draft.replyTo?.authorBotId
+    })
+    if (recipients.error) {
+      useBotGroupDrafts.setState((state) => ({
+        drafts: { ...state.drafts, [key]: { ...draft, error: recipients.error } }
+      }))
+      return
+    }
+    const targetBotIds = [...new Set(recipients.ids)].sort()
+    if (!text || !targetBotIds.length) return
+    if (text.length > 30_000) {
+      useBotGroupDrafts.setState((state) => ({
+        drafts: {
+          ...state.drafts,
+          [key]: { ...draft, error: "消息和附件内容合计超过 30,000 字符，请减少内容后重试。" }
+        }
+      }))
+      return
+    }
+    const leading = draft.text.length - draft.text.trimStart().length
+    const sentMentions = mentions.map((mention) => ({
+      ...mention,
+      start: mention.start - leading,
+      end: mention.end - leading
+    }))
+    request = {
+      id: crypto.randomUUID(),
+      text,
+      targets: JSON.stringify(targetBotIds),
+      mentions: JSON.stringify(sentMentions),
+      ...(draft.replyTo ? { replyToId: draft.replyTo.id } : {}),
+      revision: draft.revision
+    }
+    input = {
+      groupId: group.id,
+      requestId: request.id,
+      text,
+      targetBotIds,
+      ...(request.replyToId ? { replyToId: request.replyToId } : {}),
+      ...(sentMentions.length ? { mentions: sentMentions } : {})
     }
   }
-  const request =
-    draft.request?.text === text &&
-    draft.request.targets === targets &&
-    draft.request.replyToId === draft.replyTo?.id &&
-    mentionsMatch
-      ? { ...draft.request, revision: draft.revision }
-      : {
-          id: crypto.randomUUID(),
-          text,
-          targets,
-          mentions: mentionIdentity,
-          ...(draft.replyTo ? { replyToId: draft.replyTo.id } : {}),
-          revision: draft.revision
-        }
   const pending = persistDraft(key, { ...draft, request, sending: true, error: null })
   if (pending.storageError) {
     pending.sending = false
@@ -213,16 +220,7 @@ export async function sendGroupDraft(client: BotClient, group: BotGroup): Promis
   if (pending.storageError) return
   let error: string | null = null
   try {
-    await client.sendGroup({
-      groupId: group.id,
-      requestId: request.id,
-      text,
-      targetBotIds,
-      ...(request.replyToId ? { replyToId: request.replyToId } : {}),
-      // A pre-upgrade unacknowledged request was sent without mention metadata.
-      // Retry its exact payload rather than creating a second task or changing its identity.
-      ...(request.mentions !== undefined && sentMentions.length ? { mentions: sentMentions } : {})
-    })
+    await client.sendGroup(input)
   } catch (cause) {
     error = botErrorMessage(cause, "发送失败，请重试。")
   }

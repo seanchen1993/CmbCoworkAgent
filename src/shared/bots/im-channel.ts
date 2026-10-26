@@ -51,12 +51,14 @@ function object(
     throw new Error("IM Bot 数据字段不匹配")
   return data
 }
-function id(value: unknown): asserts value is string {
+/** Opaque gateway identifiers; local Bot and filesystem IDs use their own stricter validator. */
+export function botImExternalId(value: unknown): string {
   if (typeof value !== "string" || !/^[A-Za-z0-9:_-]{1,128}$/.test(value))
     throw new Error("IM Bot 标识无效")
+  return value
 }
 function common(data: Record<string, unknown>): void {
-  id(data.botId)
+  botImExternalId(data.botId)
   if (data.kind !== "dm" && data.kind !== "group") throw new Error("IM Bot 受众无效")
   if (typeof data.label !== "string" || !data.label.trim() || data.label.length > 100)
     throw new Error("IM Bot 名称无效")
@@ -75,8 +77,8 @@ export function assertBotImEvent(value: unknown): asserts value is BotImEvent {
     "senderId"
   ])
   common(route)
-  id(route.bindingId)
-  id(route.senderId)
+  botImExternalId(route.bindingId)
+  botImExternalId(route.senderId)
 }
 export function assertBotImBinding(value: unknown): asserts value is BotImBinding {
   const binding = object(
@@ -95,7 +97,7 @@ export function assertBotImBinding(value: unknown): asserts value is BotImBindin
     ["instruction", "peerLabel"]
   )
   common(binding)
-  id(binding.id)
+  botImExternalId(binding.id)
   if (
     binding.peerLabel !== undefined &&
     (typeof binding.peerLabel !== "string" ||
@@ -109,7 +111,7 @@ export function assertBotImBinding(value: unknown): asserts value is BotImBindin
     if (typeof binding[key] !== "string" || !Number.isFinite(Date.parse(binding[key])))
       throw new Error("IM Bot 时间无效")
   }
-  if (binding.conversationKey !== null) id(binding.conversationKey)
+  if (binding.conversationKey !== null) botImExternalId(binding.conversationKey)
   if (binding.state === "active" && !binding.conversationKey) throw new Error("IM Bot 路由缺失")
   if (
     binding.instruction !== undefined &&

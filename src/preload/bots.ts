@@ -80,6 +80,10 @@ export const localBotsApi: BotClient = {
     ),
   exportFile: (botId, fileId, groupId, workId) =>
     ipcRenderer.invoke("bots:files:export", LOCAL_BOT_HOST_ID, botId, fileId, groupId, workId),
+  exportGroupFile: (groupId, fileId) =>
+    ipcRenderer.invoke("bots:files:export-group", LOCAL_BOT_HOST_ID, groupId, fileId),
+  groupFileWorkspace: (groupId) =>
+    ipcRenderer.invoke("bots:files:group-workspace", LOCAL_BOT_HOST_ID, groupId),
   shareFile: (botId, fileId, targetBotId, groupId, workId) =>
     ipcRenderer.invoke(
       "bots:files:share",

@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { DatabaseSync } from "node:sqlite"
 import type { IpcMain } from "electron"
 import { botContinuationMessageId } from "../bots/continuation"
-import { parseSendBotMessage } from "../../shared/bots/validation"
+import { parseGroup, parseSendBotMessage } from "../../shared/bots/validation"
+import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { BotStore } from "../bots/store"
+import { LocalBotHost } from "../bots/host"
+import { BotImChannelService, type BotImGatewayClient } from "../services/im/bot-channel-service"
+import { assertBotImBinding, assertBotImEvent, type BotImBinding } from "../../shared/bots/im-channel"
 const fixture = vi.hoisted(() => ({
   getHost: vi.fn(),
   conversationLinks:{forBot:()=>[],forThread:()=>null},
@@ -70,13 +76,18 @@ vi.mock("../bots/runtime-adapter", () => ({ prepareBotThread: vi.fn() }))
 vi.mock("./bot-files", () => ({ registerBotFileHandlers: vi.fn() }))
 import { registerBotHandlers } from "./bots"
 
-function register(deleteThread?: Parameters<typeof registerBotHandlers>[1], event:unknown={}) {
+function register(
+  deleteThread?: Parameters<typeof registerBotHandlers>[1],
+  event: unknown = {},
+  im?: Parameters<typeof registerBotHandlers>[2]
+) {
   const handlers = new Map<string, (...args: unknown[]) => unknown>()
   registerBotHandlers(
     {
       handle: (channel, listener) => handlers.set(channel, listener)
     } as unknown as IpcMain,
-    deleteThread
+    deleteThread,
+    im
   )
   return (channel: string, ...args: unknown[]) => handlers.get(channel)!(event, ...args)
 }
@@ -85,6 +96,197 @@ beforeEach(() => {
   fixture.getHost.mockImplementation(() => fixture)
 })
 describe("Bot IPC boundaries", () => {
+  it.each(["binding:synthetic", "b".repeat(128)])(
+    "manages a wire-valid opaque binding %s through the actual IM service",
+    async (bindingId) => {
+      const db = new NativeSqliteAdapter(new DatabaseSync(":memory:")),
+        store = new BotStore(db),
+        host = new LocalBotHost(store, { acquire: () => null, onAvailable: () => () => {} }),
+        bot = store.create({ name: "IM", instructions: "", color: "#123456", modelRef: null }),
+        other = store.create({ name: "Other", instructions: "", color: "#123456", modelRef: null })
+      let binding: BotImBinding = {
+        id: bindingId,
+        botId: bot.id,
+        kind: "group",
+        label: "Synthetic",
+        version: 1,
+        state: "active",
+        conversationKey: "conversation:synthetic",
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 90000).toISOString()
+      }
+      const client = {
+        getStatus: () => ({ principalId: "owner" }) as ReturnType<BotImGatewayClient["getStatus"]>,
+        supportsBotChannel: () => true,
+        botBindingCommand: vi.fn<BotImGatewayClient["botBindingCommand"]>(async (command) => {
+          if (command.action === "list") return { items: [binding], before: null }
+          if (command.action !== "revoke") throw new Error("unexpected command")
+          expect(command.bindingId).toBe(bindingId)
+          binding = { ...binding, state: "revoked", version: command.expectedVersion + 1 }
+          return binding
+        }),
+        sendAcknowledgement: vi.fn<BotImGatewayClient["sendAcknowledgement"]>(async () => {}),
+        acquireBotPermit: vi.fn<BotImGatewayClient["acquireBotPermit"]>(async () => ({
+          status: "granted", leaseId: "lease", expiresAt: new Date(Date.now() + 90000).toISOString()
+        })),
+        renewBotPermit: vi.fn<BotImGatewayClient["renewBotPermit"]>(),
+        submitReply: vi.fn<BotImGatewayClient["submitReply"]>()
+      } satisfies BotImGatewayClient
+      const service = new BotImChannelService(client, "realm", () => host),
+        manager = {
+          setBotHostResolver: vi.fn(),
+          botChannelStatus: () => ({ connected: true, available: true }),
+          requireBotChannel: () => service
+        },
+        frame = {},
+        event = { senderFrame: frame, sender: { mainFrame: frame } }
+      fixture.getHost.mockReturnValue(host)
+      try {
+        assertBotImBinding(binding)
+        const call = register(undefined, event, manager)
+        expect(await call("bots:im:list", "local", bot.id)).toMatchObject({ items: [binding] })
+        const input = {
+          route: {
+            bindingId, botId: bot.id, kind: binding.kind, label: binding.label,
+            version: binding.version, senderId: "employee:42"
+          },
+          event: {
+            schemaVersion: 1 as const, eventId: "event", platformMessageId: "message",
+            principalId: "owner", conversationKey: binding.conversationKey!, conversationSeq: 1,
+            message: { type: "text" as const, text: "Synthetic pending message" },
+            occurredAt: new Date().toISOString(),
+            lease: { id: "lease", expiresAt: new Date(Date.now() + 90000).toISOString() }
+          }
+        }
+        assertBotImEvent(input)
+        await service.receive(input)
+        expect(call("bots:im:history", "local", bot.id, bindingId)).toMatchObject({
+          items: [expect.objectContaining({ kind: "user", text: input.event.message.text })]
+        })
+        expect(() => call("bots:im:history", "local", other.id, bindingId)).toThrow("不属于")
+        expect(() => call("bots:im:history", "remote", bot.id, bindingId)).toThrow("本机")
+        expect(() => call("bots:im:history", "local", "bot:invalid", bindingId)).toThrow("标识")
+        expect(() => call("bots:im:create", "local", bot.id, "group", "operation:invalid")).toThrow("标识")
+        expect(() => call("bots:im:revoke", "local", bot.id, bindingId, 0)).toThrow("版本")
+        expect(() => call("bots:im:history", "local", bot.id, bindingId, "x".repeat(1025))).toThrow("游标")
+        expect(() => register(undefined, { ...event, senderFrame: {} }, manager)(
+          "bots:im:history", "local", bot.id, bindingId
+        )).toThrow("桌面")
+        for (const invalid of [undefined, null, {}, [], "", "../binding", "binding/path", "binding.id", "b".repeat(129), "binding\n"]) {
+          expect(() => call("bots:im:history", "local", bot.id, invalid)).toThrow("标识")
+          expect(() => call("bots:im:revoke", "local", bot.id, invalid, 1)).toThrow("标识")
+        }
+        expect(client.botBindingCommand).toHaveBeenCalledTimes(1)
+        expect(await call("bots:im:revoke", "local", bot.id, bindingId, 1)).toMatchObject({
+          id: bindingId, version: 2, state: "revoked"
+        })
+        expect(store.recentTasks()).toEqual([expect.objectContaining({ state: "cancelled" })])
+        expect(call("bots:im:history", "local", bot.id, bindingId)).toMatchObject({
+          items: [expect.objectContaining({ kind: "user", state: "cancelled" })]
+        })
+      } finally {
+        service.stop()
+        await host.stop()
+        db.close()
+      }
+    }
+  )
+
+  it("renames only an authoritative existing empty group through validation, Host and Store", async () => {
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    const store = new BotStore(db)
+    const host = new LocalBotHost(store, { acquire: () => null, onAvailable: () => () => {} })
+    fixture.getHost.mockReturnValue(host)
+    try {
+      const call = register()
+      const bot = store.create({ name: "A", instructions: "", color: "#123456", modelRef: null })
+      const active = call("bots:group:save", "local", {
+        name: "Active",
+        memberIds: [bot.id]
+      }) as ReturnType<BotStore["saveGroup"]>
+      const emptyInput = { name: "Empty", memberIds: [] }
+      expect(() => parseGroup(emptyInput)).toThrow("1 至 8")
+      expect(() => call("bots:group:save", "local", emptyInput)).toThrow("1 至 8")
+      expect(() => store.saveGroup(emptyInput)).toThrow("1 至 8")
+      expect(() =>
+        call(
+          "bots:group:save",
+          "local",
+          { ...emptyInput, allowEmptyMembers: true },
+          { ...active, allowEmptyMembers: true }
+        )
+      ).toThrow("1 至 8")
+      expect(store.getGroup(active.id)).toEqual(active)
+
+      const renamed = call(
+        "bots:group:save",
+        "local",
+        { ...active, name: "Normal rename" },
+        active
+      ) as typeof active
+      expect(renamed).toMatchObject({
+        name: "Normal rename",
+        memberIds: [bot.id],
+        version: active.version + 1
+      })
+      store.beginDeletion(bot.id, bot.version)
+      store.finishDeletion(bot.id)
+      const empty = store.getGroup(active.id)
+      expect(empty.memberIds).toEqual([])
+      const revision = store.revision()
+      for (const input of [
+        { ...emptyInput, memberIds: "not-an-array" },
+        { ...emptyInput, memberIds: ["../invalid"] },
+        { ...emptyInput, memberIds: ["same", "same"] },
+        { ...emptyInput, memberIds: Array.from({ length: 9 }, (_, i) => `bot-${i}`) }
+      ])
+        expect(() => call("bots:group:save", "local", input, empty)).toThrow()
+      expect(() =>
+        call("bots:group:save", "local", emptyInput, { id: empty.id, version: 0 })
+      ).toThrow("版本")
+      expect(() => call("bots:group:save", "local", emptyInput, renamed)).toThrow("刷新")
+      expect(() =>
+        call("bots:group:save", "local", emptyInput, { id: "missing", version: 1 })
+      ).toThrow("不存在")
+      expect(() => call("bots:group:save", "remote", emptyInput, empty)).toThrow("本机")
+      expect(store.revision()).toBe(revision)
+      expect(store.getGroup(empty.id)).toEqual(empty)
+
+      const saved = call(
+        "bots:group:save",
+        "local",
+        { name: "Retained history", memberIds: [] },
+        empty
+      ) as typeof empty
+      expect(saved).toMatchObject({
+        id: empty.id,
+        name: "Retained history",
+        memberIds: [],
+        version: empty.version + 1
+      })
+      const peer = store.create({ name: "B", instructions: "", color: "#123456", modelRef: null })
+      expect(() =>
+        call("bots:group:save", "local", { ...saved, memberIds: ["missing-bot"] }, saved)
+      ).toThrow("不存在")
+      const joined = call(
+        "bots:group:save",
+        "local",
+        { ...saved, memberIds: [peer.id] },
+        saved
+      ) as typeof saved
+      expect(joined.memberIds).toEqual([peer.id])
+      expect(() => call("bots:group:save", "local", emptyInput, joined)).toThrow("1 至 8")
+      store.beginDeletion(peer.id, peer.version)
+      store.finishDeletion(peer.id)
+      const emptyAgain = store.getGroup(saved.id)
+      store.beginGroupDeletion(emptyAgain.id, emptyAgain.version)
+      expect(() => call("bots:group:save", "local", emptyInput, emptyAgain)).toThrow("删除")
+    } finally {
+      await host.stop()
+      db.close()
+    }
+  })
+
   it("validates scoped reaction identity, full catalog emoji and explicit idempotent state", () => {
     const call = register(), target = { kind: "bot", botId: "a", workId: "work-a" }
     call("bots:message-reactions", "local", target, ["native:assistant.1"])

@@ -268,6 +268,24 @@ describe("durable group drafts", () => {
     expect(sendGroup.mock.calls[1][0].mentions).toBeUndefined()
     expect(sendGroup.mock.calls[1][0].targetBotIds).toEqual(["b"])
   })
+  it("retains an invalid saved retry record without silently creating another request", async () => {
+    const sendGroup = vi.fn().mockRejectedValue(new Error("Lost acknowledgement"))
+    const client = { hostId: "local", sendGroup } as unknown as BotClient
+    useBotGroupDrafts.getState().edit(key, { text: "Original work" })
+    await sendGroupDraft(client, group)
+    const originalId = sendGroup.mock.calls[0][0].requestId
+    const storageKey = [...values.keys()][0]
+    const saved = JSON.parse(values.get(storageKey)!)
+    saved.request.targets = "not JSON"
+    values.set(storageKey, JSON.stringify(saved))
+    useBotGroupDrafts.setState({ drafts: {} })
+    useBotGroupDrafts.getState().restore(key)
+    await sendGroupDraft(client, group)
+    expect(sendGroup).toHaveBeenCalledOnce()
+    expect(useBotGroupDrafts.getState().drafts[key].request?.id).toBe(originalId)
+    expect(useBotGroupDrafts.getState().drafts[key].error).not.toBeNull()
+    expect(useBotGroupDrafts.getState().drafts[key].text).toBe("Original work")
+  })
   it("never sends without persisting the retry ID and preserves the editable draft on storage failure", async () => {
     const sendGroup = vi.fn().mockResolvedValue(undefined)
     const client = { hostId: "local", sendGroup } as unknown as BotClient

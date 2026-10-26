@@ -568,7 +568,14 @@ const BOT_BROWSER_ACTIONS = new Set([
   "close",
   "upload",
   "dialog",
-  "request_help"
+  "request_help",
+  "hover",
+  "drag",
+  "select",
+  "fill_form",
+  "wait",
+  "evaluate",
+  "back"
 ])
 
 type RuntimePromptToolPolicy = {

@@ -15,11 +15,11 @@ afterEach(async () => {
   await Promise.all(hosts.splice(0).map((h) => h.stop()))
   databases.splice(0).forEach((d) => d.close())
 })
-function fixture() {
+function fixture(readContext?: ConstructorParameters<typeof BotStore>[5]) {
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
   databases.push(db)
   let time = 1000
-  const store = new BotStore(db, () => ++time)
+  const store = new BotStore(db, () => ++time, undefined, undefined, undefined, readContext)
   const input = { name: "Owner", instructions: "Keep role", color: "#ea2845", modelRef: null }
   const bot = store.create(input),
     peer = store.create({ ...input, name: "Peer" })
@@ -33,6 +33,190 @@ function finish(store: BotStore, id: string) {
 }
 
 describe("durable local independent works", () => {
+  it("forwards every applied supplement in chronological order on creation and follow-up", () => {
+    const f = fixture()
+    const source = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "source",
+      message: "Check project"
+    })
+    f.store.transition(source.id, "running")
+    const supplement = (requestId: string, message: string, parentId = source.id) => {
+      const task = f.store.enqueue({ botId: f.bot.id, requestId, message })
+      f.store.injectIntoRun(task.id, parentId)
+      return task
+    }
+    const first = supplement("first", "Only read; never modify files.")
+    const second = supplement("second", "Inspect src first.")
+    // Equal timestamps still preserve the actual enqueue order.
+    f.db.run("UPDATE bot_tasks SET created_at=? WHERE id IN (?,?)", [2000, first.id, second.id])
+    f.store.enqueue({ botId: f.bot.id, requestId: "pending", message: "Not yet applied" })
+    const unrelated = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "other-source",
+      message: "Other request"
+    })
+    const otherApplied = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "other-applied",
+      message: "Belongs to another source"
+    })
+    f.db.run("UPDATE bot_tasks SET state='running',injected_into=? WHERE id=?", [
+      unrelated.id,
+      otherApplied.id
+    ])
+    const cancelled = supplement("cancelled", "Cancelled supplement")
+    f.store.transition(cancelled.id, "cancelled")
+    const notification = f.store.enqueue(
+      { botId: f.bot.id, requestId: "notification", message: "Not a user request" },
+      { kind: "notification", notificationKind: "command", key: "synthetic" }
+    )
+    // Verify the projection still excludes non-user rows with a source reference.
+    f.db.run("UPDATE bot_tasks SET state='running',injected_into=? WHERE id=?", [
+      source.id,
+      notification.id
+    ])
+    const otherBot = f.store.enqueue({
+      botId: f.peer.id,
+      requestId: "other-bot",
+      message: "Another Bot's request"
+    })
+    f.db.run("UPDATE bot_tasks SET state='running',injected_into=? WHERE id=?", [
+      source.id,
+      otherBot.id
+    ])
+    const otherThread = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "other-thread",
+      message: "Another thread's request"
+    })
+    f.db.run("UPDATE bot_tasks SET state='running',injected_into=?,thread_id=? WHERE id=?", [
+      source.id,
+      "other-thread",
+      otherThread.id
+    ])
+    const created = f.store.createWork(
+      { botId: f.bot.id, operationId: "all-supplements", title: "Review", goal: "Model summary" },
+      { taskId: source.id, callId: "create", key: "create" }
+    )
+    const expected = [source.message, first.message, second.message].join("\n\n用户后续补充：\n")
+    expect(created.task.message).toBe(expected)
+    finish(f.store, created.task.id)
+    const sent = f.store.sendWork(
+      { taskId: source.id, callId: "follow-up", key: "follow-up" },
+      created.work.id,
+      "Different model summary"
+    )
+    expect(sent.message).toBe(expected)
+    expect(f.store.getTask(first.id).message).toBe(first.message)
+  })
+
+  it("forwards actual introduction supplements without the synthetic greeting", () => {
+    const f = fixture(),
+      source = f.store.introduce(f.bot.id)!
+    f.store.transition(source.id, "running")
+    expect(() =>
+      f.store.createWork(
+        { botId: f.bot.id, operationId: "intro-without-user", title: "Review", goal: "Summary" },
+        { taskId: source.id, callId: "without-user", key: "without-user" }
+      )
+    ).toThrow("用户交办")
+    const messages = ["Review only; do not write.", "Keep the original files."]
+    messages.forEach((message, i) => {
+      const task = f.store.enqueue({ botId: f.bot.id, requestId: `intro-${i}`, message })
+      f.store.injectIntoRun(task.id, source.id)
+    })
+    const created = f.store.createWork(
+      { botId: f.bot.id, operationId: "intro-work", title: "Review", goal: "Summary" },
+      { taskId: source.id, callId: "create", key: "create" }
+    )
+    expect(created.task.message).toBe(messages.join("\n\n用户后续补充：\n"))
+    expect(created.task.message).not.toContain(source.message)
+    finish(f.store, created.task.id)
+    expect(
+      f.store.sendWork(
+        { taskId: source.id, callId: "send", key: "send" },
+        created.work.id,
+        "Summary"
+      ).message
+    ).toBe(created.task.message)
+  })
+
+  it.each([false, true])(
+    "rejects oversized complete work input atomically (context: %s)",
+    (withContext) => {
+      const context = [{ id: "context", role: "user" as const, ordinal: 1, text: "C".repeat(8000) }]
+      const f = fixture(withContext ? () => context : undefined)
+      const source = f.store.enqueue({
+        botId: f.bot.id,
+        requestId: "large-source",
+        message: "A".repeat(32_000)
+      })
+      f.store.transition(source.id, "running")
+      const child = f.store.enqueue({
+        botId: f.bot.id,
+        requestId: "large-child",
+        message: "B".repeat(withContext ? 25_000 : 32_000)
+      })
+      f.store.injectIntoRun(child.id, source.id)
+      const snapshot = () => ({
+        revision: f.store.revision(),
+        tasks: f.store.recentTasks(),
+        works: f.store.listWorks(f.bot.id),
+        commands: f.db.exec("SELECT * FROM bot_work_commands"),
+        activity: f.store.activities()
+      })
+      const before = snapshot()
+      const input = {
+        botId: f.bot.id,
+        operationId: "too-large",
+        title: "Review",
+        goal: "Summary",
+        ...(withContext ? { contextMessageIds: ["context"] } : {})
+      }
+      const authority = { taskId: source.id, callId: "create", key: "create" }
+      expect(() => f.store.createWork(input, authority)).toThrow("消息格式或长度无效")
+      expect(snapshot()).toEqual(before)
+      f.store.transition(child.id, "cancelled")
+      const retry = f.store.createWork(input, authority)
+      expect(retry.task.message).toContain(source.message)
+      expect(f.store.listWorks(f.bot.id).items).toHaveLength(1)
+    }
+  )
+
+  it("rejects an oversized work follow-up without a receipt or task/version/activity change", () => {
+    const f = fixture(),
+      created = f.create()
+    finish(f.store, created.task.id)
+    const source = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "large-send",
+      message: "A".repeat(32_000)
+    })
+    f.store.transition(source.id, "running")
+    const child = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "large-send-child",
+      message: "B".repeat(32_000)
+    })
+    f.store.injectIntoRun(child.id, source.id)
+    const snapshot = () => ({
+      revision: f.store.revision(),
+      tasks: f.store.recentTasks(),
+      work: f.store.getWork(f.bot.id, created.work.id),
+      commands: f.db.exec("SELECT * FROM bot_work_commands"),
+      activity: f.store.activities()
+    })
+    const before = snapshot(),
+      authority = { taskId: source.id, callId: "send", key: "send" }
+    expect(() => f.store.sendWork(authority, created.work.id, "Summary")).toThrow(
+      "消息格式或长度无效"
+    )
+    expect(snapshot()).toEqual(before)
+    f.store.transition(child.id, "cancelled")
+    expect(f.store.sendWork(authority, created.work.id, "Summary").message).toBe(source.message)
+  })
+
   it("preserves the user's exact constraints through autonomous creation and later forwarded revisions", () => {
     const f = fixture()
     const original = "在指定目录设计读书会计划，只要文字，不创建文件。"

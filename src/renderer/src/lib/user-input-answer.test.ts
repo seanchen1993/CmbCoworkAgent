@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest"
-import { userInputAnswers } from "./user-input-answer"
+import {
+  userInputAnswers,
+  pendingUserInputPatch,
+  userInputDraftPatch,
+  type UserInputDraft
+} from "./user-input-answer"
+import type { UserInputRequest } from "@/types"
 
 const questions = [
   {
@@ -137,5 +143,71 @@ describe("original user input response projection", () => {
       }
     })
     expect(draft.format.additionalText).toBe(" ")
+  })
+})
+
+describe("pending inbox answer draft lifetime", () => {
+  const request: UserInputRequest = {
+    requestId: "pending-one",
+    threadId: "group-live",
+    createdAt: "2026-10-25T00:00:00Z",
+    questions
+  }
+  const draft: UserInputDraft = {
+    requestId: request.requestId,
+    answers: {
+      format: { type: "options", optionIndices: [0] },
+      name: { type: "other", text: "Keep this constraint" }
+    },
+    activeIndex: 1
+  }
+
+  it("retains the same pending request draft when hydrated again", () => {
+    expect(pendingUserInputPatch({ userInputDraft: draft }, { ...request }).userInputDraft).toBe(
+      draft
+    )
+  })
+
+  it("drops the draft on submit, cancellation or replacement, never restoring a completed answer", () => {
+    expect(pendingUserInputPatch({ userInputDraft: draft }, null).userInputDraft).toBeNull()
+    expect(
+      pendingUserInputPatch({ userInputDraft: draft }, { ...request, requestId: "next" })
+        .userInputDraft
+    ).toBeNull()
+    const ended = pendingUserInputPatch({ userInputDraft: draft }, null)
+    expect(pendingUserInputPatch(ended, { ...request }).userInputDraft).toBeNull()
+  })
+
+  it("rejects late draft updates for an ended or replaced request", () => {
+    let invoked = false
+    const update = () => {
+      invoked = true
+      return draft
+    }
+    expect(userInputDraftPatch({ pendingUserInput: null }, request.requestId, update)).toEqual({})
+    expect(
+      userInputDraftPatch(
+        { pendingUserInput: { ...request, requestId: "next" } },
+        request.requestId,
+        update
+      )
+    ).toEqual({})
+    expect(invoked).toBe(false)
+  })
+
+  it("applies successive answer and navigation updates to the same live draft without mixing requests", () => {
+    const state = { pendingUserInput: request, userInputDraft: { ...draft, requestId: "old" } }
+    const first = userInputDraftPatch(state, request.requestId, (previous) => ({
+      ...previous,
+      answers: { format: { type: "options", optionIndices: [0] } }
+    }))
+    expect(first.userInputDraft?.answers.name).toBeUndefined()
+    const second = userInputDraftPatch({ ...state, ...first }, request.requestId, (previous) => ({
+      ...previous,
+      activeIndex: 1
+    }))
+    expect(second.userInputDraft?.answers.format).toEqual({ type: "options", optionIndices: [0] })
+    expect(second.userInputDraft?.activeIndex).toBe(1)
+    expect(second.userInputDraft?.requestId).toBe(request.requestId)
   })
 })

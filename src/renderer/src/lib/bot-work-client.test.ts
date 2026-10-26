@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
-import type { BotClient, BotTask } from "../../../shared/bots/contracts"
+import type { BotChangeEvent, BotClient, BotTask } from "../../../shared/bots/contracts"
+import { BotClientRegistry } from "../../../shared/bots/client-registry"
 import type { BotWorkItem } from "../../../shared/bots/work"
 import { botWorkClient } from "./bot-work-client"
 
@@ -54,6 +55,110 @@ function fixture() {
   return { client, scoped: botWorkClient(client, work) }
 }
 describe("original beta client bound to a work", () => {
+  it("preserves the complete frozen local client through the registry facade", async () => {
+    const base = fixture().client
+    let receive: ((event: BotChangeEvent) => void) | undefined
+    const unsubscribe = vi.fn(() => {
+      receive = undefined
+    })
+    const client = Object.freeze({
+      ...base,
+      hostId: "local",
+      filePreview: Object.freeze({}),
+      cancel: vi.fn(async () => undefined),
+      subscribe: vi.fn((listener: (event: BotChangeEvent) => void) => {
+        receive = listener
+        return unsubscribe
+      })
+    }) as unknown as BotClient
+    const registry = new BotClientRegistry()
+    registry.register(client)
+    const registered = registry.get("local")
+    expect(Object.keys(registered)).toEqual([])
+    const scoped = botWorkClient(registered, work)
+    expect(scoped.hostId).toBe("local")
+    expect(scoped.filePreview).toBe(client.filePreview)
+    expect(scoped.subscribe).toBe(scoped.subscribe)
+    expect(scoped.cancel).toBe(scoped.cancel)
+    const listener = vi.fn()
+    const stop = scoped.subscribe(listener)
+    receive!({ hostId: "other", revision: 1 })
+    receive!({ hostId: "local", revision: 1 })
+    expect(listener).toHaveBeenCalledTimes(1)
+    stop()
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+    expect(receive).toBeUndefined()
+    await scoped.cancel("queued-task")
+    expect(client.cancel).toHaveBeenCalledWith("queued-task")
+    await scoped.open(work.botId)
+    expect(client.open).toHaveBeenCalledWith(work.botId, work.id)
+    await scoped.setMessageReaction({ kind: "bot", botId: work.botId }, "m", "👍", false)
+    expect(client.setMessageReaction).toHaveBeenCalledWith(
+      { kind: "bot", botId: work.botId, workId: work.id },
+      "m",
+      "👍",
+      false
+    )
+  })
+  it("keeps private-field receivers for direct and registered class clients", async () => {
+    class Client {
+      #hostId = "class-host"
+      #preview = Object.freeze({})
+      #listeners = new Set<(event: BotChangeEvent) => void>()
+      #calls: unknown[][] = []
+      get hostId() {
+        return this.#hostId
+      }
+      get filePreview() {
+        return this.#preview
+      }
+      get calls() {
+        return this.#calls
+      }
+      get listenerCount() {
+        return this.#listeners.size
+      }
+      subscribe(listener: (event: BotChangeEvent) => void) {
+        this.#listeners.add(listener)
+        return () => this.#listeners.delete(listener)
+      }
+      async cancel(id: string) {
+        this.#calls.push(["cancel", id])
+      }
+      async open(id: string, workId?: string) {
+        this.#calls.push(["open", id, workId])
+        return { threadId: work.threadId }
+      }
+      async send(input: Parameters<BotClient["send"]>[0]) {
+        this.#calls.push(["send", input])
+        return { ...input, threadId: work.threadId } as BotTask
+      }
+    }
+    for (const registered of [false, true]) {
+      const raw = Object.freeze(new Client())
+      const registry = new BotClientRegistry()
+      registry.register(raw as unknown as BotClient)
+      const scoped = botWorkClient(
+        registered ? registry.get(raw.hostId) : (raw as unknown as BotClient),
+        work
+      )
+      expect(scoped.hostId).toBe(raw.hostId)
+      expect(scoped.filePreview).toBe(raw.filePreview)
+      const stop = scoped.subscribe(vi.fn())
+      expect(raw.listenerCount).toBe(1)
+      stop()
+      expect(raw.listenerCount).toBe(0)
+      const cancel = scoped.cancel
+      await cancel("queued-task")
+      await scoped.open(work.botId)
+      await scoped.send({ botId: work.botId, requestId: "r", message: "Edit" })
+      expect(raw.calls).toEqual([
+        ["cancel", "queued-task"],
+        ["open", work.botId, work.id],
+        ["send", { botId: work.botId, requestId: "r", message: "Edit", workId: work.id }]
+      ])
+    }
+  })
   it("keeps send, receipts, references, file operations and browser on one actual target", async () => {
     const { client, scoped } = fixture()
     await scoped.open(work.botId)

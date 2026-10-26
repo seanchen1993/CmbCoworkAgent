@@ -1,10 +1,15 @@
 import { DatabaseSync } from "node:sqlite"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
+import { LocalBotHost, type BotRunPort } from "./host"
 
 const databases: NativeSqliteAdapter[] = []
-afterEach(() => databases.splice(0).forEach((db) => db.close()))
+const hosts: LocalBotHost[] = []
+afterEach(async () => {
+  await Promise.all(hosts.splice(0).map((host) => host.stop()))
+  databases.splice(0).forEach((db) => db.close())
+})
 
 function fixture() {
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
@@ -176,4 +181,224 @@ describe("yielded foreground command ownership", () => {
     store.flushReplies()
     expect(store.recentTasks().filter((task) => task.requestId === reply.requestId)).toHaveLength(1)
   })
+})
+
+const routineActions = ["edit", "pause", "remove"] as const
+type RoutineAction = (typeof routineActions)[number]
+
+function routineFixture() {
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  databases.push(db)
+  const store = new BotStore(db, () => 1000)
+  const bot = store.create({
+    name: "Routine",
+    instructions: "",
+    color: "#ea2845",
+    modelRef: null
+  })
+  const config = {
+    name: "Daily report",
+    message: "Verify and deliver the original report",
+    frequency: "daily" as const,
+    runAtTime: "09:00",
+    enabled: true
+  }
+  const schedule = store.saveSchedule(bot.id, config, "2030-01-01T09:00:00Z")
+  const enqueue = (requestId = "original-routine") =>
+    store.enqueue(
+      { botId: bot.id, requestId, message: config.message },
+      { kind: "schedule", scheduleId: schedule.id }
+    )
+  const command = {
+    id: "routine-command",
+    threadId: bot.threadId,
+    command: "synthetic command (never executed)",
+    cwd: "/synthetic",
+    startedAt: 10
+  }
+  const result = {
+    id: command.id,
+    threadId: command.threadId,
+    output: "VERIFIED_REPORT",
+    exitCode: 0,
+    truncated: false,
+    cancelled: false
+  }
+  const files = [{ filePath: "/synthetic/report.md", name: "report.md", size: 15 }]
+  return { db, store, bot, config, schedule, enqueue, command, result, files }
+}
+
+function changeRoutine(context: ReturnType<typeof routineFixture>, action: RoutineAction) {
+  const { store, bot, config, schedule } = context
+  const current = store.schedules().find((item) => item.id === schedule.id)!
+  if (action === "remove") store.removeSchedule(current.id, current.version)
+  else
+    store.saveSchedule(
+      bot.id,
+      action === "pause" ? { ...config, enabled: false } : { ...config, message: "New scope" },
+      action === "pause" ? null : "2030-01-02T09:00:00Z",
+      current
+    )
+}
+
+describe("routine changes during foreground continuation", () => {
+  it.each(
+    routineActions.flatMap((action) =>
+      (["queued", "running", "waiting_user", "checkpoint", "command"] as const).map((state) => ({
+        action,
+        state
+      }))
+    )
+  )("$action only cancels an unstarted trigger ($state)", ({ action, state }) => {
+    const context = routineFixture()
+    const { store, bot, enqueue, files, command } = context
+    const task = enqueue()
+    const user = store.enqueue({ botId: bot.id, requestId: "user-control", message: "Keep user" })
+    const other = store.enqueue(
+      { botId: bot.id, requestId: "other-routine", message: "Keep other routine" },
+      { kind: "schedule", scheduleId: "other-schedule" }
+    )
+    if (state !== "queued") store.transition(task.id, "running")
+    if (state === "waiting_user") store.transition(task.id, "waiting_user")
+    if (state === "command") store.acceptCommand(task.id, command, true)
+    if (state === "checkpoint" || state === "command") store.deferTask(task.id, "saved", files)
+    changeRoutine(context, action)
+    expect(store.getTask(task.id)).toMatchObject({
+      state:
+        state === "queued"
+          ? "cancelled"
+          : state === "checkpoint" || state === "command"
+            ? "queued"
+            : state,
+      message: context.config.message
+    })
+    expect(store.getTask(user.id).state).toBe("queued")
+    expect(store.getTask(other.id).state).toBe("queued")
+    expect(store.taskCheckpoint(task.id)).toBe(
+      state === "checkpoint" || state === "command" ? "saved" : undefined
+    )
+    expect(store.continuationFiles(task.id)).toEqual(
+      state === "checkpoint" || state === "command" ? files : []
+    )
+    expect(store.activeCommandThreads()).toEqual(state === "command" ? [bot.threadId] : [])
+  })
+
+  it.each(routineActions)(
+    "resumes and delivers the same accepted command after %s without a duplicate trigger",
+    async (action) => {
+      const context = routineFixture()
+      const { store, command, result, files, enqueue, schedule } = context
+      const executions: string[] = []
+      const settled = vi.fn()
+      const errors = vi.fn()
+      let host!: LocalBotHost
+      const runtime: BotRunPort = {
+        onAvailable: () => () => {},
+        onSettled: settled,
+        acquire: (_bot, task) => ({
+          release: () => undefined,
+          execute: async () => {
+            const checkpoint = store.taskCheckpoint(task.id)
+            executions.push(checkpoint ? "resume" : "start")
+            if (!checkpoint) {
+              host.commandLifecycle(task.id, true).accepted(command)
+              return { state: "deferred", checkpointId: "saved", files }
+            }
+            expect(checkpoint).toBe("saved")
+            expect(store.continuationFiles(task.id)).toEqual(files)
+            expect(store.continuationCommandResults(task.id)).toEqual([
+              expect.objectContaining({ output: result.output, state: "completed", exitCode: 0 })
+            ])
+            return { state: "completed", result: "Verified original report", files }
+          }
+        })
+      }
+      host = new LocalBotHost(store, runtime, 1, errors)
+      hosts.push(host)
+      const task = enqueue()
+      await vi.waitFor(() => expect(store.taskCheckpoint(task.id)).toBe("saved"))
+      changeRoutine(context, action)
+      const latest = store.schedules().find((item) => item.id === schedule.id)
+      store.fireSchedule(latest ?? schedule, "2030-01-03T09:00:00Z")
+      expect(store.recentTasks()).toHaveLength(1)
+      expect(store.getTask(task.id).state).toBe("queued")
+      expect(store.nextQueued([])).toBeNull()
+      expect(store.activeCommandThreads()).toEqual([command.threadId])
+      const lifecycle = host.commandLifecycle(task.id, true)
+      lifecycle.settled(result)
+      lifecycle.settled(result)
+      await vi.waitFor(() => expect(store.getTask(task.id).state).toBe("completed"))
+      expect(executions).toEqual(["start", "resume"])
+      expect(settled).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ id: task.id }),
+        "completed",
+        "Verified original report",
+        files
+      )
+      expect(store.recentTasks()).toHaveLength(1)
+      expect(store.activeCommandThreads()).toEqual([])
+      expect(store.taskCheckpoint(task.id)).toBeUndefined()
+      expect(errors).not.toHaveBeenCalled()
+    }
+  )
+
+  it("still requires the exact stop receipt when explicitly cancelling a removed routine's run", async () => {
+    const context = routineFixture()
+    const { store, enqueue, command, result, bot } = context
+    let release!: () => void
+    const cancelCommands = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve
+        })
+    )
+    const host = new LocalBotHost(store, {
+      acquire: () => null,
+      onAvailable: () => () => {},
+      cancelCommands
+    })
+    hosts.push(host)
+    const task = enqueue()
+    store.transition(task.id, "running")
+    store.acceptCommand(task.id, command, true)
+    store.deferTask(task.id, "saved")
+    changeRoutine(context, "remove")
+    const other = store.enqueue({ botId: bot.id, requestId: "private-control", message: "Keep" })
+    host.cancel(task.id)
+    host.cancel(task.id)
+    await vi.waitFor(() =>
+      expect(cancelCommands).toHaveBeenCalledExactlyOnceWith(bot.threadId, [command.id])
+    )
+    expect(store.getTask(task.id).state).toBe("queued")
+    host.commandLifecycle(task.id, true).settled({ ...result, cancelled: true, exitCode: 130 })
+    expect(store.getTask(task.id).state).toBe("queued")
+    release()
+    await vi.waitFor(() => expect(store.getTask(task.id).state).toBe("cancelled"))
+    expect(store.getTask(other.id).state).toBe("queued")
+    expect(store.activeCommandThreads()).toEqual([])
+    expect(store.taskCheckpoint(task.id)).toBeUndefined()
+    expect(store.recentTasks().filter((item) => item.origin.kind === "notification")).toEqual([])
+  })
+
+  it.each(routineActions)(
+    "interrupts rather than replays a preserved %s continuation after restart",
+    (action) => {
+      const context = routineFixture()
+      const { store, enqueue, command, result } = context
+      const task = enqueue()
+      store.transition(task.id, "running")
+      store.acceptCommand(task.id, command, true)
+      store.deferTask(task.id, "saved")
+      changeRoutine(context, action)
+      store.recover()
+      store.settleCommand(result)
+      store.recover()
+      expect(store.getTask(task.id).state).toBe("interrupted")
+      expect(store.taskCheckpoint(task.id)).toBeUndefined()
+      expect(store.continuationCommandResults(task.id)).toEqual([])
+      expect(store.nextQueued([])).toBeNull()
+      expect(store.recentTasks()).toHaveLength(1)
+      expect(store.activeCommandThreads()).toEqual([])
+    }
+  )
 })

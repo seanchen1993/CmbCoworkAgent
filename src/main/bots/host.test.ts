@@ -28,6 +28,66 @@ afterEach(async () => {
 })
 
 describe("Bot control state", () => {
+  it.each(["reject", "throw"] as const)(
+    "reports browser member cleanup %s without reverting durable membership",
+    async (mode) => {
+      const db = store()
+      const errors = vi.fn()
+      const failure = new Error("Synthetic browser cleanup failure")
+      const cleanup = vi.fn(() => {
+        if (mode === "throw") throw failure
+        return Promise.reject(failure)
+      })
+      const host = new LocalBotHost(
+        db,
+        {
+          onAvailable: () => () => {},
+          acquire: () => null,
+          removeGroupMemberBrowser: cleanup
+        },
+        2,
+        errors
+      )
+      hosts.push(host)
+      const a = host.create(input)
+      const b = host.create({ ...input, name: "B" })
+      const group = host.saveGroup({ name: "Cleanup", memberIds: [a.id, b.id] })
+      expect(host.saveGroup({ name: group.name, memberIds: [b.id] }, group).memberIds).toEqual([b.id])
+      await vi.waitFor(() => expect(errors).toHaveBeenCalledExactlyOnceWith(failure))
+      expect(cleanup).toHaveBeenCalledExactlyOnceWith(group.id, a.id)
+      expect(() => host.browserScope(`group-${group.id}--${a.id}`)).toThrow("离开")
+    }
+  )
+
+  it("retains public file history after author removal and deletion, while rejecting new member operations", () => {
+    const db = store(),
+      a = db.create(input)
+    const group = db.saveGroup({ name: "Retained history", memberIds: [a.id] })
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "deliver-history",
+      text: "Deliver",
+      targetBotIds: [a.id]
+    })
+    const task = db.recentTasks()[0]
+    const files = [{ filePath: "/group/report.md", name: "report.md", size: 12 }]
+    db.transition(task.id, "running")
+    db.publishGroupFiles(task.id, "delivery", files)
+    db.settle(task.id, "completed", null, "Delivered", undefined, true)
+    const host = new LocalBotHost(db, { onAvailable: () => () => {}, acquire: () => null })
+    hosts.push(host)
+    db.beginDeletion(a.id, a.version)
+    db.finishDeletion(a.id)
+    const empty = db.getGroup(group.id)
+    expect(host.getGroup(group.id).memberIds).toEqual([])
+    expect(() => host.getGroupMember(group.id, a.id)).toThrow()
+    expect(() => host.getBot(a.id)).toThrow()
+    expect(host.getGroup(group.id).id).toBe(group.id)
+    expect(db.groupMessages(group.id).find((message) => message.files)?.files).toEqual(files)
+    db.beginGroupDeletion(group.id, empty.version)
+    expect(() => host.getGroup(group.id)).toThrow("删除")
+  })
+
   it("resolves only a current member's private group reference with public Bot-member identities", () => {
     const raw = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
     databases.push(raw)
@@ -833,6 +893,22 @@ describe("Bot control state", () => {
     db.transition(ordinary.id, "running")
     db.settle(ordinary.id, "completed", null, BOT_ROUTINE_SILENT)
     expect(db.activities()).toMatchObject([{ kind: "bot", id: bot.id, unread: true }])
+  })
+
+  it("keeps delivered routine files visible in activity even with a terminal silence marker", () => {
+    const db = store(),
+      bot = db.create(input)
+    const task = db.enqueue(
+      { botId: bot.id, requestId: "routine-files", message: "Produce report" },
+      { kind: "schedule", scheduleId: "daily" }
+    )
+    db.transition(task.id, "running")
+    db.settle(task.id, "completed", null, BOT_ROUTINE_SILENT, [
+      { filePath: "/synthetic/report.md", name: "report.md", size: 12 }
+    ])
+    expect(db.activities()).toMatchObject([
+      { kind: "bot", id: bot.id, unread: true, preview: "report.md" }
+    ])
   })
 
   it.each([false, true])(

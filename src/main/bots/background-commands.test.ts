@@ -304,6 +304,52 @@ describe("Bot native command receipts", () => {
     store.settleCommand({ ...result, cancelled: true })
     expect(store.beginDeletion(bot.id, bot.version)).toContain(bot.threadId)
   })
+  it("rejects archiving a still-running command without changing the Bot or queued tasks", () => {
+    const { db, store, bot, task, command } = fixture()
+    store.acceptCommand(task.id, command)
+    store.transition(task.id, "completed")
+    store.enqueue({ botId: bot.id, requestId: "queued", message: "Keep this task" })
+    const tasks = store.recentTasks()
+    const activities = store.activities()
+    const receipts = db.exec("SELECT * FROM bot_commands")
+
+    expect(() =>
+      store.update({ ...bot, name: "Must not change", archived: true, expectedVersion: bot.version })
+    ).toThrow("请先停止后台任务并等待退出，再归档 Bot")
+
+    expect(store.getBot(bot.id)).toEqual(bot)
+    expect(store.recentTasks()).toEqual(tasks)
+    expect(store.activities()).toEqual(activities)
+    expect(db.exec("SELECT * FROM bot_commands")).toEqual(receipts)
+    expect(store.activeCommandThreads()).toEqual([bot.threadId])
+  })
+  it("allows profile edits while a command runs and archiving after its result is delivered", () => {
+    const { store, bot, task, command, result } = fixture()
+    store.acceptCommand(task.id, command)
+    store.transition(task.id, "completed")
+    const edited = store.update({ ...bot, name: "Renamed", expectedVersion: bot.version })
+    expect(edited.name).toBe("Renamed")
+    expect(edited.archived).toBe(false)
+    expect(store.activeCommandThreads()).toEqual([bot.threadId])
+
+    store.settleCommand(result)
+    store.settleCommand(result)
+    const notice = store.nextQueued([])!
+    expect(notice.origin).toMatchObject({
+      kind: "notification",
+      notificationKind: "command",
+      key: command.id
+    })
+    expect(notice.message).toContain(result.output)
+    expect(store.recentTasks().filter((entry) => entry.requestId === notice.requestId)).toHaveLength(1)
+    store.transition(notice.id, "running")
+    store.settle(notice.id, "completed", null, result.output)
+
+    expect(store.update({ ...edited, archived: true, expectedVersion: edited.version }).archived).toBe(
+      true
+    )
+    expect(store.activeCommandThreads()).toEqual([])
+  })
   it("survives a finished parent turn and atomically queues exactly one verified-scope result", () => {
     const { store, bot, task, command, result } = fixture()
     store.acceptCommand(task.id, command)

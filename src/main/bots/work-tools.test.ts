@@ -5,6 +5,7 @@ import { BotStore } from "./store"
 import { LocalBotHost } from "./host"
 import { createBotWorkTools } from "./work-tools"
 import type { BotTaskOrigin } from "../../shared/bots/contracts"
+import { filterTaskSubagentTools } from "../agent/runtime-tool-catalog"
 
 const hosts: LocalBotHost[] = [],
   dbs: NativeSqliteAdapter[] = []
@@ -42,6 +43,30 @@ function fixture() {
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 15))
 describe("work Runtime tools", () => {
+  it("keeps durable work tools on the parent turn and rejects direct temporary-agent calls", async () => {
+    const f = fixture()
+    await tick()
+    const tools = createBotWorkTools(f.source.id, () => f.host, new AbortController().signal)
+    expect(filterTaskSubagentTools(tools)).toEqual([])
+    const args: Record<string, object> = {
+      bot_work_projects: { query: "Project" },
+      bot_work_list: {},
+      bot_work_create: { requestKey: "child", title: "Child work", goal: "Persistent side effect" },
+      bot_work_send: { requestKey: "child", workId: "missing", message: "side effect" },
+      bot_work_complete: { requestKey: "child", workId: "missing", expectedVersion: 1 },
+      bot_work_continue: { requestKey: "child", workId: "missing", expectedVersion: 1 }
+    }
+    for (const tool of tools) {
+      const result = (await tool.invoke(
+        { type: "tool_call", id: `child-${tool.name}`, name: tool.name, args: args[tool.name] },
+        { configurable: { cmb_subagent_owner_tool_call_id: "temporary-task" } }
+      )) as { status: string; content: string }
+      expect(result.status).toBe("error")
+      expect(result.content).toContain("parent Bot")
+    }
+    expect(f.store.listWorks(f.bot.id).items).toEqual([])
+    expect(f.store.recentTasks()).toHaveLength(1)
+  })
   it("forwards a live main user's instruction once, including a lost tool reply replay", async () => {
     const f = fixture()
     await tick()

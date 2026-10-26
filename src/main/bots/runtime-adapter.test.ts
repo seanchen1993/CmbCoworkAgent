@@ -342,6 +342,18 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
+  it("routes removed member cleanup to the same browser service with exact group and member identities", async () => {
+    const removeGroupMember = vi.fn(async () => {})
+    const runtime = createLocalBotRunPort(
+      {} as BotMemoryService,
+      () => ({} as LocalBotHost),
+      { removeGroupMember } as unknown as BotBrowserService,
+      {} as BotMemoryMaintainer
+    )
+    await runtime.removeGroupMemberBrowser?.("room", "member")
+    expect(removeGroupMember).toHaveBeenCalledExactlyOnceWith("room", "member")
+  })
+
   it.each(["user", "introduction"] as const)(
     "offers a parent-only private reaction and preserves original completion for %s",
     async (kind) => {
@@ -2070,6 +2082,355 @@ describe("Bot Runtime integration", () => {
       expect(result.files).toEqual(expectsReply ? files.slice(-8) : undefined)
     }
   )
+  it.each([2, 3, 4])(
+    "keeps bounded verified outputs for a routed %i-deep private result",
+    async (depth) => {
+      const routed: BotTask = {
+        ...task,
+        origin: {
+          kind: "bot",
+          fromBotId: "leaf",
+          rootTaskId: "root",
+          depth,
+          expectsReply: false,
+          upstreamTaskId: "actual-source"
+        }
+      }
+      const files = Array.from({ length: 10 }, (_, index) => ({
+        filePath: `/synthetic/workspaces/a/report-${index}.csv`,
+        name: `report-${index}.csv`,
+        size: index
+      }))
+      fixture.start.mockImplementation(async (_request, _delivery, context) => {
+        fixture.deliveryTools.mock.calls.at(-1)![2]!(files, "delivery")
+        context.onFinalAssistant?.({ messageId: "reply", finalText: "Verified current outputs" })
+        context.onRunTerminated?.({ outcome: "success", code: "done" })
+        return { completion: Promise.resolve() }
+      })
+      const result = await port().acquire(bot, routed)!.execute(new AbortController().signal, vi.fn())
+      expect(result).toMatchObject({ state: "completed", files: files.slice(-8) })
+      expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toBeUndefined()
+      expect(fixture.start.mock.calls.at(-1)![2].foregroundCommandLifecycle).toHaveProperty("settled")
+      expect(fixture.commandLifecycle).toHaveBeenCalledWith(task.id, true)
+    }
+  )
+  it.each([false, true])(
+    "preserves an ordinary false receipt's background and file behavior (group=%s)",
+    async (group) => {
+      const input: BotTask = {
+        ...task,
+        origin: {
+          kind: "bot",
+          fromBotId: "leaf",
+          rootTaskId: "root",
+          depth: 1,
+          expectsReply: false,
+          ...(group ? { groupId: "g" } : {})
+        }
+      }
+      if (group) fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+      fixture.start.mockImplementation(async (_request, _delivery, context) => {
+        fixture.deliveryTools.mock.calls.at(-1)![2]!(
+          [{ filePath: "/synthetic/report.csv", name: "report.csv", size: 28 }],
+          "delivery"
+        )
+        context.onRunTerminated?.({ outcome: "success", code: "done" })
+        return { completion: Promise.resolve() }
+      })
+      const result = await port().acquire(bot, input)!.execute(new AbortController().signal, vi.fn())
+      expect(result.files).toBeUndefined()
+      expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toHaveProperty("settled")
+      expect(fixture.start.mock.calls.at(-1)![2].foregroundCommandLifecycle).toBeUndefined()
+      expect(fixture.returnFileTools).not.toHaveBeenCalled()
+    }
+  )
+  it.each([false, true])(
+    "reverifies a routed result's checkpoint files before resuming (failure=%s)",
+    async (failure) => {
+      const files = [{ filePath: "/synthetic/workspaces/a/report.csv", name: "report.csv", size: 28 }]
+      const routed: BotTask = {
+        ...task,
+        origin: {
+          kind: "bot",
+          fromBotId: "leaf",
+          rootTaskId: "root",
+          depth: 2,
+          expectsReply: false,
+          upstreamTaskId: "actual-source"
+        }
+      }
+      fixture.groupCheckpoint.mockReturnValue("saved-result")
+      fixture.continuationFiles.mockReturnValue(files)
+      if (failure) fixture.verifyFiles.mockRejectedValue(new Error("original output is unavailable"))
+      else fixture.verifyFiles.mockResolvedValue(files)
+      const running = port().acquire(bot, routed)!.execute(new AbortController().signal, vi.fn())
+      if (failure) {
+        await expect(running).rejects.toThrow("original output is unavailable")
+        expect(fixture.start).not.toHaveBeenCalled()
+      } else {
+        expect(await running).toMatchObject({ state: "completed", files })
+        expect(fixture.start.mock.calls.at(-1)![2].continueBotTaskCheckpointId).toBe("saved-result")
+      }
+      expect(fixture.verifyFiles).toHaveBeenCalledWith(
+        "/synthetic/workspaces/a",
+        [files[0].filePath],
+        expect.any(AbortSignal)
+      )
+    }
+  )
+  it.each([
+    { hops: 2, scope: "private" },
+    { hops: 3, scope: "private" },
+    { hops: 4, scope: "private" },
+    { hops: 3, scope: "work" }
+  ])(
+    "delivers actual CSV bytes through Runtime, deferred command ownership and a $hops-hop $scope caller route",
+    async ({ hops, scope }) => {
+      const { DatabaseSync } = await import("node:sqlite")
+      const { NativeSqliteAdapter } = await import("../db/native-sqlite-adapter")
+      const { BotStore } = await import("./store")
+      const { LocalBotHost } = await import("./host")
+      const { mkdtemp, mkdir, writeFile, readFile, rm } = await import("node:fs/promises")
+      const { tmpdir } = await import("node:os")
+      const { join } = await import("node:path")
+      const actual = await vi.importActual<typeof import("./tools")>("./tools")
+      const directory = await mkdtemp(join(tmpdir(), "cmb-r7-runtime-owner-"))
+      const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+      const store = new BotStore(db)
+      let host: LocalBotHost | undefined
+      let finishFirst: (() => void) | undefined
+      const originalDelivery = fixture.deliveryTools.getMockImplementation()!
+      try {
+        const bots = Array.from({ length: hops + 1 }, (_, index) =>
+          store.create({ name: `Peer ${index}`, instructions: "", color: "#ea2845", modelRef: null })
+        )
+        const paths = new Map(bots.map((entry) => [entry.id, join(directory, entry.id)]))
+        for (const path of paths.values()) await mkdir(path)
+        fixture.directory.mockImplementation((_root, _kind, id) => paths.get(id)!)
+        fixture.thread.mockImplementation((threadId: string) => {
+          const owner = bots.find((entry) => entry.threadId === threadId)!
+          return {
+            metadata: JSON.stringify({
+              ...metadata(),
+              botId: owner.id,
+              workspacePath: paths.get(owner.id)
+            })
+          }
+        })
+        fixture.deliveryTools.mockImplementation(
+          actual.createBotDeliveryTools as unknown as typeof originalDelivery
+        )
+        fixture.verifyFiles.mockImplementation(actual.verifyBotDeliveryFiles)
+        const bytes = Buffer.from("\ufeffid,amount\r\nactual,74.13\r\n", "utf8")
+        const leaf = bots.at(-1)!
+        await writeFile(join(paths.get(leaf.id)!, "report.csv"), bytes)
+        const leafTool = actual.createBotDeliveryTools(
+          paths.get(leaf.id)!,
+          new AbortController().signal
+        )[0]
+        const leafFiles = JSON.parse(String(await leafTool.invoke({ files: ["report.csv"] })))
+          .files as BotDeliveredFile[]
+        const created =
+          scope === "work"
+            ? store.createWork({
+                botId: bots[0].id,
+                operationId: "work",
+                title: "Analysis",
+                goal: "Verify and deliver the report"
+              })
+            : undefined
+        const root =
+          created?.task ??
+          store.enqueue({
+            botId: bots[0].id,
+            requestId: "caller",
+            message: "Verify and deliver the report"
+          })
+        store.transition(root.id, "running")
+        const chain = [root]
+        for (let index = 1; index <= hops; index++) {
+          const next = store.delegate(
+            chain.at(-1)!.id,
+            bots[index].id,
+            "Verify and return report.csv",
+            `hop-${index}`
+          )
+          store.settle(chain.at(-1)!.id, "completed", null, "Waiting for the delegated result")
+          store.transition(next.id, "running")
+          chain.push(next)
+        }
+        // Finish the already-sent waiting notices before the final file result arrives.
+        for (let round = 0; round < 10; round++) {
+          store.flushReplies()
+          const pending = store.recentTasks().filter((entry) => entry.state === "queued")
+          if (!pending.length) break
+          for (const entry of pending) {
+            store.transition(entry.id, "running")
+            store.settle(entry.id, "completed", null, "Still waiting")
+          }
+        }
+        store.settle(chain.at(-1)!.id, "completed", null, "Leaf file verified", leafFiles)
+        store.flushReplies()
+        const first = store.recentTasks().find((entry) => entry.state === "queued")!
+        expect(first.origin).toMatchObject({
+          expectsReply: false,
+          upstreamTaskId: chain[hops - 1].id
+        })
+        let firstContext: AgentRunExecutionContext | undefined
+        const errors = vi.fn()
+        const phases: string[] = []
+        const results: Array<{ id: string; state: string; files?: BotDeliveredFile[] }> = []
+        const command = {
+          id: "never-executed-command",
+          threadId: first.threadId,
+          command: "synthetic command (never executed)",
+          cwd: paths.get(first.botId)!,
+          startedAt: 1
+        }
+        fixture.activeLease.mockImplementation(() => {
+          const active = store.recentTasks().find((entry) => entry.state === "running")
+          return active
+            ? {
+                threadId: active.threadId,
+                owner: "bot",
+                runId: active.id,
+                acquiredAt: "2026-10-25T00:00:00Z"
+              }
+            : undefined
+        })
+        fixture.start.mockImplementation(
+          async (request, _delivery, context: AgentRunExecutionContext) => {
+            const active = store
+              .recentTasks()
+              .find((entry) => entry.threadId === request.threadId && entry.state === "running")!
+            if (active.origin.kind === "user") {
+              context.onFinalAssistant?.({
+                messageId: "private",
+                finalText: "Private message answered"
+              })
+              context.onRunTerminated?.({ outcome: "success", code: "done" })
+              return { completion: Promise.resolve() }
+            }
+            const delivery = context.additionalTools!.find(
+              (entry) => entry.name === "bot_deliver_files"
+            )!
+            expect(delivery).toBeDefined()
+            expect(context.backgroundCommandLifecycle).toBeUndefined()
+            expect(context.foregroundCommandLifecycle).toHaveProperty("settled")
+            const input = context.continueBotTaskCheckpointId
+              ? store.continuationFiles(active.id)[0].filePath
+              : active.origin.kind === "bot"
+                ? active.origin.replyFiles![0].filePath
+                : ""
+            const delivered = JSON.parse(String(await delivery.invoke({ files: [input] })))
+              .files as BotDeliveredFile[]
+            expect(await readFile(delivered[0].attachmentPath!)).toEqual(bytes)
+            if (active.id === first.id && !context.continueBotTaskCheckpointId) {
+              phases.push("start")
+              firstContext = context
+              context.onSteeringReady?.(() => {
+                context.foregroundCommandLifecycle!.accepted(command)
+                return 1
+              })
+              return {
+                completion: new Promise<void>((resolve) => {
+                  finishFirst = resolve
+                })
+              }
+            }
+            if (active.id === first.id) {
+              phases.push("resume")
+              expect(context.continueBotTaskCheckpointId).toBe("saved-nested-result")
+              expect(context.extraSystemPrompt).toContain("ACTUAL_COMMAND_RESULT")
+            }
+            context.onFinalAssistant?.({
+              messageId: `done-${active.id}`,
+              finalText: "Verified final report"
+            })
+            context.onRunTerminated?.({ outcome: "success", code: "done" })
+            return { completion: Promise.resolve() }
+          }
+        )
+        const adapter = createLocalBotRunPort(
+          { editVersion: () => 7, forPrompt: () => [] } as unknown as BotMemoryService,
+          () => host!,
+          {} as BotBrowserService,
+          { enqueue: vi.fn() } as unknown as BotMemoryMaintainer
+        )
+        host = new LocalBotHost(
+          store,
+          {
+            ...adapter,
+            recover: undefined,
+            acquire: (owner, entry, work) =>
+              owner.id === bots[0].id ? null : adapter.acquire(owner, entry, work),
+            onSettled: (entry, state, _result, files) => results.push({ id: entry.id, state, files })
+          },
+          1,
+          errors
+        )
+        const lifecycle = vi.spyOn(host, "commandLifecycle")
+        fixture.checkpointTuple.mockResolvedValue({ checkpoint: { id: "saved-nested-result" } })
+        await vi.waitFor(() => expect(firstContext).toBeDefined())
+        const privateInput = host.send({
+          botId: first.botId,
+          requestId: "private-interrupt",
+          message: "Answer this independently first"
+        })
+        firstContext!.onModelRequestState?.(() => true)
+        finishFirst!()
+        await vi.waitFor(() => expect(store.taskCheckpoint(first.id)).toBe("saved-nested-result"))
+        await vi.waitFor(() => expect(store.getTask(privateInput.id).state).toBe("completed"))
+        expect(store.continuationCommandIds(first.id)).toEqual([command.id])
+        expect(lifecycle).toHaveBeenCalledWith(first.id, true)
+        expect(
+          store
+            .recentTasks()
+            .filter((entry) => entry.botId === bots[0].id && entry.state === "queued")
+        ).toHaveLength(0)
+        firstContext!.foregroundCommandLifecycle!.settled({
+          id: command.id,
+          threadId: command.threadId,
+          output: "ACTUAL_COMMAND_RESULT",
+          exitCode: 0,
+          cancelled: false,
+          truncated: false
+        })
+        let final: BotTask | undefined
+        await vi.waitFor(() => {
+          final = store
+            .recentTasks()
+            .find((entry) => entry.botId === bots[0].id && entry.state === "queued")
+          expect(final?.origin).toMatchObject({
+            kind: "bot",
+            expectsReply: false,
+            replyFiles: [expect.objectContaining({ name: "report.csv", size: bytes.length })]
+          })
+        })
+        expect(phases).toEqual(["start", "resume"])
+        expect(final!.workId).toBe(created?.work.id)
+        expect(final!.origin).toMatchObject(
+          created ? { rootWorkId: created.work.id, returnWorkId: created.work.id } : {}
+        )
+        const finalFiles = final!.origin.kind === "bot" ? final!.origin.replyFiles! : []
+        expect(await readFile(finalFiles[0].attachmentPath ?? finalFiles[0].filePath)).toEqual(bytes)
+        expect(await readFile(leafFiles[0].filePath)).toEqual(bytes)
+        expect(
+          store.recentTasks().filter((entry) => entry.origin.kind === "notification")
+        ).toHaveLength(0)
+        expect(results.filter((entry) => entry.id === first.id)).toEqual([
+          { id: first.id, state: "completed", files: expect.any(Array) }
+        ])
+        expect(errors).not.toHaveBeenCalled()
+      } finally {
+        finishFirst?.()
+        await host?.stop()
+        db.close()
+        fixture.deliveryTools.mockImplementation(originalDelivery)
+        await rm(directory, { recursive: true, force: true })
+      }
+    }
+  )
   it("initializes a new default-following Bot and uses that model for its first actual turn", async () => {
     fixture.thread.mockReturnValue(null)
     prepareBotThread({ ...bot, modelRef: null })
@@ -2435,6 +2796,84 @@ describe("Bot Runtime integration", () => {
     )
     expect(fixture.notify).toHaveBeenCalledTimes(4)
   })
+  it.each([
+    { kind: "schedule", scheduleId: "daily" },
+    { kind: "notification", notificationKind: "command", key: "command", commandSucceeded: true }
+  ] satisfies BotTask["origin"][])(
+    "settles $kind delivery facts through the Adapter and Host before deciding routine silence",
+    async (origin) => {
+      const { DatabaseSync } = await import("node:sqlite")
+      const { NativeSqliteAdapter } = await import("../db/native-sqlite-adapter")
+      const { BotStore } = await import("./store")
+      const { LocalBotHost } = await import("./host")
+      for (const delivered of [false, true]) {
+        fixture.notify.mockClear()
+        const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+        const store = new BotStore(db)
+        const owner = store.create({
+          name: "Routine owner",
+          instructions: "Produce a report when needed",
+          color: "#123456",
+          modelRef: "test-model"
+        })
+        const queued = store.enqueue(
+          { botId: owner.id, requestId: "routine-report", message: "Check status" },
+          origin
+        )
+        const files = [
+          {
+            filePath: `/synthetic/workspaces/${owner.id}/report.md`,
+            attachmentPath: `/synthetic/workspaces/${owner.id}/.bot-deliveries/hash/report.md`,
+            name: "report.md",
+            size: 40
+          }
+        ]
+        fixture.thread.mockReturnValue({
+          metadata: JSON.stringify({
+            ...metadata(),
+            botId: owner.id,
+            workspacePath: `/synthetic/workspaces/${owner.id}`
+          })
+        })
+        fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+          // The delivery tool invokes this callback only after its file validation succeeds.
+          if (delivered) fixture.deliveryTools.mock.calls.at(-1)![2]!(files, "delivery")
+          context.onFinalAssistant?.({ messageId: "reply", finalText: "BOT_ROUTINE_SILENT" })
+          context.onRunTerminated?.({ outcome: "success", code: "done" })
+          return { completion: Promise.resolve() }
+        })
+        let host!: LocalBotHost
+        const runtime = createLocalBotRunPort(
+          { editVersion: () => 7, forPrompt: () => [] } as unknown as BotMemoryService,
+          () => host,
+          {} as BotBrowserService,
+          { enqueue: fixture.summary } as unknown as BotMemoryMaintainer
+        )
+        const errors = vi.fn()
+        host = new LocalBotHost(store, runtime, 1, errors)
+        try {
+          await vi.waitFor(() => expect(store.getTask(queued.id).state).toBe("completed"))
+          expect(errors).not.toHaveBeenCalled()
+          expect(store.activities()).toEqual(
+            delivered
+              ? [
+                  expect.objectContaining({
+                    kind: "bot",
+                    id: owner.id,
+                    unread: true,
+                    preview: "report.md"
+                  })
+                ]
+              : []
+          )
+          expect(fixture.notify).toHaveBeenCalledTimes(delivered ? 1 : 0)
+        } finally {
+          await host.stop()
+          db.close()
+        }
+      }
+    }
+  )
   it.each([
     [
       {
@@ -3266,13 +3705,17 @@ describe("Bot steering uses the original runtime", () => {
       expect(interrupt).toHaveBeenCalledOnce()
       finish()
       const deferred = await pending
+      const retainsFiles =
+        origin.kind === "bot" ||
+        origin.kind === "schedule" ||
+        (origin.kind === "notification" && origin.notificationKind === "command")
       expect(deferred).toEqual({
         state: "deferred",
         checkpointId: "yielded-checkpoint",
-        ...(origin.kind === "bot" ? { files } : {})
+        ...(retainsFiles ? { files } : {})
       })
       fixture.groupCheckpoint.mockReturnValue("yielded-checkpoint")
-      fixture.continuationFiles.mockReturnValue(origin.kind === "bot" ? files : [])
+      fixture.continuationFiles.mockReturnValue(retainsFiles ? files : [])
       fixture.verifyFiles.mockResolvedValue(files)
       fixture.announce.mockClear()
       fixture.start.mockImplementation(async (request, _delivery, incoming) => {
@@ -3318,7 +3761,7 @@ describe("Bot steering uses the original runtime", () => {
       expect(await port().acquire(bot, background)!.execute(signal, vi.fn())).toEqual({
         state: "completed",
         result: "Original task result",
-        ...(origin.kind === "bot" ? { files } : {})
+        ...(retainsFiles ? { files } : {})
       })
       expect(fixture.announce).not.toHaveBeenCalled()
       if (origin.kind === "bot")

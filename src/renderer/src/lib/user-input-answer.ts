@@ -10,6 +10,43 @@ export type UserInputDraftAnswer =
     }
   | { type: "other"; text: string }
 
+/** Ephemeral answers belong to the pending inbox, not a virtualized card. */
+export interface UserInputDraft {
+  requestId: string
+  answers: Record<string, UserInputDraftAnswer>
+  activeIndex: number
+}
+
+export function emptyUserInputDraft(requestId: string): UserInputDraft {
+  return { requestId, answers: {}, activeIndex: 0 }
+}
+
+export function pendingUserInputPatch(
+  state: { userInputDraft?: UserInputDraft | null },
+  request: UserInputRequest | null
+) {
+  return {
+    pendingUserInput: request,
+    userInputDraft:
+      request && state.userInputDraft?.requestId === request.requestId ? state.userInputDraft : null
+  }
+}
+
+export function userInputDraftPatch(
+  state: { pendingUserInput: UserInputRequest | null; userInputDraft?: UserInputDraft | null },
+  requestId: string,
+  update: (draft: UserInputDraft) => UserInputDraft
+): { userInputDraft?: UserInputDraft } {
+  if (state.pendingUserInput?.requestId !== requestId) return {}
+  const draft = state.userInputDraft
+  return {
+    userInputDraft: {
+      ...update(draft?.requestId === requestId ? draft : emptyUserInputDraft(requestId)),
+      requestId
+    }
+  }
+}
+
 /** Shared by both presentations; only complete, explicitly supplied answers are submitted. */
 export function userInputAnswers(
   questions: UserInputRequest["questions"],

@@ -5,7 +5,13 @@ import type {
   WorkspaceFilePreviewReadResult
 } from "../../shared/workspace-file-preview"
 
-const mocks = vi.hoisted(() => ({ readText: vi.fn(), workspace: vi.fn(), grant: vi.fn() }))
+const mocks = vi.hoisted(() => ({
+  readText: vi.fn(),
+  workspace: vi.fn(),
+  grant: vi.fn(),
+  groupWorkspace: vi.fn()
+}))
+vi.mock("../bots/local-service", () => ({ getBotGroupFileWorkspace: mocks.groupWorkspace }))
 vi.mock("../thread-metadata-hydration/client", () => ({
   readThreadWorkspacePathInWorker: mocks.workspace
 }))
@@ -48,10 +54,57 @@ const request = (): WorkspaceFilePreviewReadRequest => ({
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.workspace.mockResolvedValue("/authoritative/workspace")
+  mocks.groupWorkspace.mockReturnValue("/authoritative/group-g")
   mocks.readText.mockResolvedValue({ result: { success: true, content: "existing text" } })
 })
 
 describe("Office opt-in uses the existing preview trust boundary", () => {
+  it("reads retained group history from its authoritative workspace without an execution thread", async () => {
+    expect(
+      await read({
+        ...request(),
+        source: {
+          threadId: "group-files-g",
+          botGroupId: "g",
+          filePath: "report.md",
+          workspacePathKind: "relative"
+        }
+      })
+    ).toMatchObject({ success: true })
+    expect(mocks.groupWorkspace).toHaveBeenCalledWith("g")
+    expect(mocks.workspace).not.toHaveBeenCalled()
+    expect(mocks.readText).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: "group-files-g", filePath: "report.md" }),
+      "/authoritative/group-g",
+      0,
+      expect.any(String),
+      undefined
+    )
+  })
+
+  it("rejects deleted groups, malformed group IDs and mixed external grants before reading", async () => {
+    mocks.groupWorkspace.mockImplementationOnce(() => {
+      throw new Error("Group unavailable")
+    })
+    expect(
+      await read({
+        ...request(),
+        source: { ...request().source, botGroupId: "g" }
+      } as WorkspaceFilePreviewReadRequest)
+    ).toMatchObject({ success: false })
+    for (const source of [
+      { threadId: "group-files-g", botGroupId: "../g", filePath: "report.md" },
+      { externalGrant: "grant", botGroupId: "g", filePath: "/private/report.md" }
+    ]) {
+      expect(await read({ ...request(), source } as WorkspaceFilePreviewReadRequest)).toMatchObject(
+        { success: false, errorCode: "invalid-request" }
+      )
+    }
+    expect(mocks.workspace).not.toHaveBeenCalled()
+    expect(mocks.readText).not.toHaveBeenCalled()
+    expect(mocks.grant).not.toHaveBeenCalled()
+  })
+
   it("passes explicit opt-in only after resolving the authoritative workspace", async () => {
     const office = { kind: "spreadsheet", sheets: [], truncated: false }
     mocks.readText.mockResolvedValue({ result: { success: true, content: "", office } })

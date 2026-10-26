@@ -9573,7 +9573,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
             }
             safeSendToWindow(window, channel, { type: "done" })
-            if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
+            const shouldRaiseCompletionAttention =
+              invokeFinalOutcome === "success" &&
+              !isInternalNotificationTurn &&
+              (runExecutionContext.source !== "bot" ||
+                runExecutionContext.shouldRaiseCompletionAttention?.() !== false)
+            if (shouldRaiseCompletionAttention) {
               emitAppAttention({
                 kind: "task-complete",
                 threadId,
@@ -9581,13 +9586,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             const postRunAssistantText = trimPostRunAssistantText(assistantText.text)
-            if (invokeFinalOutcome === "success") {
+            if (invokeFinalOutcome === "success" && runExecutionContext.source !== "bot") {
               notifyIfBackground(
                 "✅ 任务完成",
                 lastFinalText || postRunAssistantText || "对话已完成"
               )
             }
-            if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
+            if (shouldRaiseCompletionAttention) {
               showPetCompletedTaskNotice(
                 threadId,
                 getCompletedTaskTitle(thread?.title ?? undefined, message)
@@ -10063,7 +10068,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               type: "error",
               error: errMsg
             })
-            notifyIfBackground("❌ 任务失败", errMsg)
+            if (runExecutionContext.source !== "bot") {
+              notifyIfBackground("❌ 任务失败", errMsg)
+            }
             if (!isInternalNotificationTurn && isOnlineSkillEvolutionEnabled()) {
               appendTurnToProposalWindow("error", errMsg)
             } else if (!isInternalNotificationTurn) {

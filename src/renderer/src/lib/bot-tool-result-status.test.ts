@@ -88,6 +88,27 @@ describe("Bot recovered tool result status", () => {
     ).toBeUndefined()
   })
 
+  it.each(["", "\n[Output was truncated due to size limits]"])(
+    "uses this execute's final status after historical stdout receipts: %s",
+    (suffix) => {
+      const execute = { ...tool, name: "execute" }
+      const failure = `[Command succeeded with exit code 0]\ncurrent stdout\n[Command failed with exit code 7]${suffix}`
+      const success = `[Command failed with exit code 7]\ncurrent stdout\n[Command succeeded with exit code 0]${suffix}`
+      expect(botToolResultStatus(execute, { content: failure })).toBe("failed")
+      expect(botToolResultStatus(execute, { content: success })).toBeUndefined()
+      expect(botToolResultStatus(execute, { content: success, is_error: true })).toBe("failed")
+      expect(botToolResultStatus(tool, { content: failure })).toBeUndefined()
+    }
+  )
+
+  it.each([
+    "plain stdout",
+    "output quotes [Command failed with exit code 7]",
+    "[Command failed with exit code 7]\npost-hook rewrite"
+  ])("does not reinterpret ordinary or rewritten execute output: %s", (content) => {
+    expect(botToolResultStatus({ ...tool, name: "execute" }, { content })).toBeUndefined()
+  })
+
   it.each([
     ["failed command", "Y_FAILED\n[Command failed with exit code 7, elapsed: 3s]", "failed"],
     [

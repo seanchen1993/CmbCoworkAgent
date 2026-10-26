@@ -21,6 +21,11 @@ import {
   type FallbackIndexBaselineCache
 } from "./stream-fallback-baselines"
 import { isSerializedSummarizationMessage } from "../../../shared/context-compaction-messages"
+import {
+  pendingUserInputPatch,
+  userInputDraftPatch,
+  type UserInputDraft
+} from "./user-input-answer"
 import type { BotMessageReply } from "../../../shared/bots/contracts"
 import { isBotMessageReply } from "../../../shared/bots/message-reply"
 import {
@@ -676,6 +681,8 @@ export interface ThreadState {
   pendingApproval: HITLRequest | null
   approvalQueue: HITLRequest[]
   pendingUserInput: UserInputRequest | null
+  /** Retained only while its inbox request is pending; never persisted or replayed. */
+  userInputDraft?: UserInputDraft | null
   error: string | null
   errorDetail: ApiErrorDetailState | null
   hookInterruption: HookInterruptionState | null
@@ -910,6 +917,7 @@ export interface ThreadActions {
   enqueuePendingApproval: (request: HITLRequest) => void
   removePendingApproval: (requestId?: string) => void
   setPendingUserInput: (request: UserInputRequest | null) => void
+  setUserInputDraft: (requestId: string, update: (draft: UserInputDraft) => UserInputDraft) => void
   setError: (error: string | null) => void
   clearError: () => void
   clearHookInterruption: () => void
@@ -5636,7 +5644,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           updateThreadState(threadId, () => buildPendingApprovalState([]))
         },
         setPendingUserInput: (request: UserInputRequest | null) => {
-          updateThreadState(threadId, () => ({ pendingUserInput: request }))
+          updateThreadState(threadId, (state) => pendingUserInputPatch(state, request))
+        },
+        setUserInputDraft: (requestId, update) => {
+          updateThreadState(threadId, (state) => userInputDraftPatch(state, requestId, update))
         },
         setError: (error: string | null) => {
           updateThreadState(threadId, () => ({ error }))
@@ -7480,7 +7491,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const cleanupUserInput = window.api.userInput.onRequest(threadId, (request) => {
         console.log(`[ThreadProvider] User input request for thread ${threadId}:`, request)
         if (!isCurrentListenerEpoch()) return
-        updateThreadState(threadId, () => ({ pendingUserInput: request }))
+        updateThreadState(threadId, (state) => pendingUserInputPatch(state, request))
       })
       const cleanupUserInputCancel = window.api.userInput.onCancel(threadId, (data) => {
         console.log(
@@ -7489,7 +7500,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         if (!isCurrentListenerEpoch()) return
         updateThreadState(threadId, (state) => {
           if (state.pendingUserInput?.requestId !== data.requestId) return {}
-          return { pendingUserInput: null }
+          return pendingUserInputPatch(state, null)
         })
       })
       userInputListenerCleanups.current[threadId] = [cleanupUserInput, cleanupUserInputCancel]
@@ -7497,7 +7508,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         .getPending(threadId)
         .then((request) => {
           if (!request || !isCurrentListenerEpoch()) return
-          updateThreadState(threadId, () => ({ pendingUserInput: request }))
+          updateThreadState(threadId, (state) => pendingUserInputPatch(state, request))
         })
         .catch((error) => {
           console.warn(

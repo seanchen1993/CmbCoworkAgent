@@ -1,4 +1,4 @@
-import { lazy, Suspense, useRef, useState } from "react"
+import { lazy, Suspense, useMemo, useRef, useState } from "react"
 import { Download, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import {
@@ -50,6 +50,31 @@ export function BotMessageFilePreview({
   client: BotClient
 }) {
   const { request, clear } = useResourcePreviewRequest(threadId)
+  const transport = useMemo(
+    () =>
+      groupId
+        ? {
+            ...client.filePreview,
+            readFilePreview: (input: Parameters<typeof client.filePreview.readFilePreview>[0]) =>
+              client.filePreview.readFilePreview({
+                ...input,
+                source:
+                  input.source.externalGrant !== undefined
+                    ? input.source
+                    : { ...input.source, botGroupId: groupId }
+              }),
+            openMediaPreview: (input: Parameters<typeof client.filePreview.openMediaPreview>[0]) =>
+              client.filePreview.openMediaPreview({
+                ...input,
+                source:
+                  input.source.externalGrant !== undefined
+                    ? input.source
+                    : { ...input.source, botGroupId: groupId }
+              })
+          }
+        : client.filePreview,
+    [client, groupId]
+  )
   const [saving, setSaving] = useState(false)
   const savingRef = useRef(false)
   const trigger = useRef<HTMLElement | null>(null)
@@ -59,7 +84,8 @@ export function BotMessageFilePreview({
     savingRef.current = true
     setSaving(true)
     try {
-      await client.exportFile(botId, request.filePath, groupId)
+      if (groupId) await client.exportGroupFile(groupId, request.filePath)
+      else await client.exportFile(botId, request.filePath)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "文件保存失败，请重试")
     } finally {
@@ -115,7 +141,7 @@ export function BotMessageFilePreview({
             workspacePathKind={request.workspacePathKind}
             externalFullPath={request.externalPreviewGrant ? request.filePath : undefined}
             externalPreviewGrant={request.externalPreviewGrant}
-            transport={client.filePreview}
+            transport={transport}
             cacheNamespace={`bot:${client.hostId}:`}
             reloadToken={request.intentId}
             requestLane={`bot-message:${client.hostId}:${threadId}`}

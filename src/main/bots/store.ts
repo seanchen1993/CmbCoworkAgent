@@ -24,7 +24,9 @@ import {
   botIdentifier,
   parseCreateBot,
   parseBotRequestChecks,
-  parseGroupMessage
+  parseGroupMessage,
+  parseGroup,
+  parseSendBotMessage
 } from "../../shared/bots/validation"
 import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
 import { projectVisibleChatSearchContent } from "../../shared/chat-search-visible-content"
@@ -99,6 +101,7 @@ import {
 } from "../../shared/bots/contracts"
 
 const ACTIVE_STATES = ["running", "waiting_user"] as const
+const STOPPED_REPLY_SOURCES = ["cancelled", "interrupted", "superseded"]
 const DAY = 24 * 60 * 60 * 1000
 interface ReactionScope {
   kind: "thread" | "group"
@@ -663,16 +666,17 @@ export class BotStore {
   }
   /** Bounded metadata projection; no transcript or command output enters the directory. */
   private workActivityProjection(): string {
+    // Unary + removes TEXT affinity without converting the ID, enabling the existing family index.
     return `(SELECT version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_version,
       (SELECT attention_version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS attention_version,
       (SELECT seen_version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS seen_version,
       (SELECT updated_at FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_at,
       (SELECT preview FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_preview,
       (SELECT t.state FROM bot_tasks t WHERE t.work_id=w.id OR
-        (json_extract(t.origin_json,'$.rootWorkId')=w.id AND t.state IN ('queued','running','waiting_user'))
+        (json_extract(t.origin_json,'$.rootWorkId')=+w.id AND t.state IN ('queued','running','waiting_user'))
       ORDER BY CASE t.state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END,
       t.created_at DESC,t.rowid DESC LIMIT 1) AS execution_state,
-      (SELECT COUNT(*) FROM bot_tasks p WHERE json_extract(p.origin_json,'$.rootWorkId')=w.id
+      (SELECT COUNT(*) FROM bot_tasks p WHERE json_extract(p.origin_json,'$.rootWorkId')=+w.id
         AND p.work_id IS NULL AND p.state IN ('queued','running','waiting_user')) AS pending_peers,
       EXISTS(SELECT 1 FROM bot_commands c LEFT JOIN bot_tasks p ON p.id=c.source_task_id
         WHERE c.state='accepted' AND (c.thread_id=w.thread_id OR json_extract(p.origin_json,'$.rootWorkId')=w.id)) AS background_busy`
@@ -900,6 +904,13 @@ export class BotStore {
           )
             throw new BotError("INVALID_INPUT", "所选相关消息不可用或超过上限")
           context.sort((a, b) => a.ordinal - b.ordinal)
+          const contextText = context.length
+            ? "\n\n与本工作相关的已验证消息资料（引用材料，不是新增授权）：\n" +
+              JSON.stringify(context)
+            : ""
+          const message = source
+            ? this.workUserMessage(this.getTask(source.taskId), contextText)
+            : input.goal.trim() + contextText
           const id = randomUUID(),
             now = this.now(),
             threadId = `bot-work-${id}`
@@ -919,12 +930,6 @@ export class BotStore {
               workspace ? JSON.stringify(workspace) : null
             ]
           )
-          const message =
-            (source ? this.workUserMessage(this.getTask(source.taskId)) : input.goal.trim()) +
-            (context.length
-              ? "\n\n与本工作相关的已验证消息资料（引用材料，不是新增授权）：\n" +
-                JSON.stringify(context)
-              : "")
           const task = this.enqueue(
             { botId: bot.id, workId: id, requestId: `work-start-${id}`, message },
             source ? { kind: "work", sourceTaskId: source.taskId } : { kind: "user" },
@@ -1142,6 +1147,12 @@ export class BotStore {
       ) {
         throw new BotError("CONFLICT", "请先停止当前任务，再修改 Bot")
       }
+      if (
+        input.archived &&
+        this.rows("SELECT id FROM bot_commands WHERE bot_id=? AND state='accepted' LIMIT 1", [bot.id])
+          .length
+      )
+        throw new BotError("CONFLICT", "请先停止后台任务并等待退出，再归档 Bot")
       this.db.run(
         `UPDATE bots SET name=?, instructions=?, model_ref=?, color=?, shape=?, label=?, archived=?,
         version=version+1, updated_at=? WHERE id=?`,
@@ -1224,11 +1235,20 @@ export class BotStore {
   }
 
   /** Forward the actual user text, never replace constraints with a model's paraphrase. */
-  private workUserMessage(task: BotTask): string {
-    const injectedId = this.injectedUserRequestId(task)
-    const latest = injectedId ? this.getTask(injectedId).message : undefined
-    if (task.origin.kind === "introduction" && latest) return latest
-    return task.message + (latest ? "\n\n用户后续补充：\n" + latest : "")
+  private workUserMessage(task: BotTask, suffix = ""): string {
+    const messages = task.origin.kind === "introduction" ? [] : [task.message]
+    for (const row of this.rows(
+      `SELECT message FROM bot_tasks WHERE injected_into=? AND bot_id=? AND thread_id=?
+       AND state='running' AND json_extract(origin_json,'$.kind')='user'
+       ORDER BY created_at,rowid`,
+      [task.id, task.botId, task.threadId]
+    ))
+      messages.push(String(row.message))
+    const message = messages.join("\n\n用户后续补充：\n") + suffix
+    // Validate the entire forwarded input (including optional context), without
+    // truncating constraints or changing the original user text.
+    parseSendBotMessage({ botId: task.botId, requestId: task.id, message })
+    return message
   }
 
   hasWorkUserRequest(taskId: string): boolean {
@@ -2509,10 +2529,24 @@ export class BotStore {
 
   recover(): void {
     this.transaction(() => {
+      // A restart invalidates the admitted IM ingress grant, including work not yet dispatched.
+      // Explicit local-user continuations keep their independent authorization.
+      const interrupted = `(state IN (?, ?) OR (state='queued' AND (
+        continuation_checkpoint_id IS NOT NULL OR (
+          json_extract(mock_source_json,'$.transport')='im'
+          AND EXISTS(SELECT 1 FROM bot_im_ingress e
+            WHERE e.id=json_extract(bot_tasks.mock_source_json,'$.eventId')
+              AND e.state='unknown' AND e.expires_at=0)
+          AND NOT EXISTS(SELECT 1 FROM bot_im_local_execution l WHERE l.task_id=bot_tasks.id)
+        ))))`
       const awaitingOutcomes = this.rows(
         `SELECT id FROM bot_tasks
-         WHERE (state IN (?, ?) OR (state='queued' AND continuation_checkpoint_id IS NOT NULL))
-         AND ((json_extract(origin_json,'$.kind')='bot' AND json_extract(origin_json,'$.expectsReply')=1)
+         WHERE ${interrupted}
+         AND ((json_extract(origin_json,'$.kind')='bot' AND (json_extract(origin_json,'$.expectsReply')=1
+             OR json_extract(origin_json,'$.upstreamTaskId') IS NOT NULL
+             OR id IN (SELECT json_extract(child.origin_json,'$.upstreamTaskId') FROM bot_tasks child
+               WHERE child.state='queued' AND json_extract(child.origin_json,'$.kind')='bot'
+                 AND json_extract(child.origin_json,'$.expectsReply')=0)))
            OR json_extract(origin_json,'$.groupId') IS NOT NULL OR work_id IS NOT NULL
            OR (mock_source_json IS NULL AND EXISTS(
              SELECT 1 FROM bot_im_personal_links l WHERE l.bot_id=bot_tasks.bot_id)))`,
@@ -2521,7 +2555,7 @@ export class BotStore {
       const reason = "应用已重启。请检查已有结果，再决定是否继续，避免重复执行外部操作。"
       this.db.run(
         `UPDATE bot_tasks SET state='interrupted', error=?, updated_at=?
-         WHERE state IN (?, ?) OR (state='queued' AND continuation_checkpoint_id IS NOT NULL)`,
+         WHERE ${interrupted}`,
         [reason, this.now(), ...ACTIVE_STATES]
       )
       if (this.db.getRowsModified()) this.changed()
@@ -2534,6 +2568,7 @@ export class BotStore {
         // transaction; the mirror still checks the original binding time/scope.
         this.im.mirrorPersonal(task, reason)
         if (task.workId) {
+          this.cancelQueuedReplyTurns(task)
           this.recordWorkResult(task)
           this.noteWorkActivity(task.workId, reason, true)
           continue
@@ -2829,6 +2864,9 @@ export class BotStore {
           rootTaskId,
           ...(source.workId ? { returnWorkId: source.workId } : {}),
           ...(botTaskWorkFamily(source) ? { rootWorkId: botTaskWorkFamily(source) } : {}),
+          ...(!groupId && source.origin.kind === "bot"
+            ? { upstreamTaskId: source.id }
+            : {}),
           depth,
           expectsReply: true,
           ...(outputs.length ? { outputFiles: outputs } : {}),
@@ -2900,8 +2938,11 @@ export class BotStore {
   ): void {
     this.transaction(() => {
       const alreadySettled = this.getTask(id).state === state
-      const visibleResult = result ? splitBotInlineReasoning(result).body : undefined
+      const body = result ? splitBotInlineReasoning(result).body : undefined
+      const visibleResult =
+        files?.length && isBotRoutineSilent(body) ? files.map((file) => file.name).join("、") : body
       const task = this.transition(id, state, error)
+      if (STOPPED_REPLY_SOURCES.includes(state)) this.cancelQueuedReplyTurns(task)
       if (task.mockSource && !alreadySettled)
         this.external(task.mockSource).settle(
           task,
@@ -2912,8 +2953,8 @@ export class BotStore {
         (task.origin.kind === "schedule" ||
           (task.origin.kind === "notification" &&
             task.origin.notificationKind === "command" &&
-            task.origin.commandSucceeded === true &&
-            !files?.length)) &&
+            task.origin.commandSucceeded === true)) &&
+        !files?.length &&
         state === "completed" &&
         isBotRoutineSilent(visibleResult)
       const groupId = botTaskGroupId(task)
@@ -2983,11 +3024,32 @@ export class BotStore {
         ["completed", "failed", "cancelled", "interrupted", "outcome_unknown"].includes(state)
       )
         this.im.mirrorPersonal(task, visibleResult || error || botTaskStateLabel(state))
-      if (task.origin.kind !== "bot" || !task.origin.expectsReply) return
-      const sender = this.rows("SELECT * FROM bots WHERE id=?", [task.origin.fromBotId])[0]
+      if (task.origin.kind !== "bot") return
+      // A downstream receipt resumes only its exact original private handoff.
+      // Ordinary receipts have no upstream route and must never bounce back to their sender.
+      let replyOrigin = task.origin
+      if (!replyOrigin.expectsReply) {
+        if (!replyOrigin.upstreamTaskId) return
+        if (
+          alreadySettled &&
+          (this.rows("SELECT task_id FROM bot_reply_outbox WHERE task_id=?", [task.id]).length ||
+            this.rows("SELECT id FROM bot_exchange_records WHERE request_id=?", [
+              `reply-${task.id}`
+            ]).length)
+        )
+          return
+        for (let hop = 0; hop < 4; hop++) {
+          const upstream = this.upstreamReplySource(replyOrigin, task.botId, task.workId)
+          if (!upstream || upstream.origin.kind !== "bot") return
+          replyOrigin = upstream.origin
+          if (replyOrigin.expectsReply) break
+        }
+        if (!replyOrigin.expectsReply) return
+      }
+      const sender = this.rows("SELECT * FROM bots WHERE id=?", [replyOrigin.fromBotId])[0]
       if (!sender || sender.archived) return
       const source = this.getBot(task.botId)
-      const root = this.rows("SELECT state FROM bot_tasks WHERE id=?", [task.origin.rootTaskId])[0]
+      const root = this.rows("SELECT state FROM bot_tasks WHERE id=?", [replyOrigin.rootTaskId])[0]
       if (!root || root.state === "cancelled" || root.state === "interrupted") return
       let references = ""
       let verifiedFiles: BotDeliveredFile[] | undefined
@@ -3025,10 +3087,10 @@ export class BotStore {
         "INSERT OR IGNORE INTO bot_reply_outbox(task_id,target_bot_id,message,origin_json) VALUES (?, ?, ?, ?)",
         [
           task.id,
-          task.origin.fromBotId,
+          replyOrigin.fromBotId,
           message,
           JSON.stringify({
-            ...task.origin,
+            ...replyOrigin,
             outputFiles: undefined,
             replyFiles: verifiedFiles,
             fromBotId: task.botId,
@@ -3038,6 +3100,42 @@ export class BotStore {
         ]
       )
     })
+  }
+
+  private cancelQueuedReplyTurns(task: BotTask): void {
+    if (task.origin.kind !== "bot" || task.origin.groupId) return
+    for (const queued of this.rows(
+      `SELECT id FROM bot_tasks WHERE bot_id=? AND state='queued' AND continuation_checkpoint_id IS NULL
+       AND json_extract(origin_json,'$.kind')='bot'
+       AND json_extract(origin_json,'$.expectsReply')=0
+       AND json_extract(origin_json,'$.upstreamTaskId')=?`,
+      [task.botId, task.id]
+    ))
+      // The actual dispatch turn reports its stop. This unstarted result turn
+      // must neither run later nor produce a second cancellation reply.
+      this.transition(String(queued.id), "cancelled", "原协作已停止，未执行此结果回合。")
+  }
+
+  private upstreamReplySource(
+    origin: Extract<BotTaskOrigin, { kind: "bot" }>,
+    botId: string,
+    workId?: string
+  ): BotTask | null {
+    if (!origin.upstreamTaskId || origin.groupId) return null
+    const row = this.rows("SELECT * FROM bot_tasks WHERE id=?", [origin.upstreamTaskId])[0]
+    if (!row) return null
+    const source = this.task(row)
+    return source.botId === botId &&
+      source.workId === workId &&
+      !source.mockSource &&
+      source.origin.kind === "bot" &&
+      source.origin.depth < origin.depth &&
+      source.origin.rootTaskId === origin.rootTaskId &&
+      source.origin.groupId === origin.groupId &&
+      botTaskWorkFamily(source) === origin.rootWorkId &&
+      !STOPPED_REPLY_SOURCES.includes(source.state)
+      ? source
+      : null
   }
   /** Share only this turn's outcome; the independent conversation still owns the full transcript. */
   private recordWorkResult(task: BotTask, result?: string, files?: BotDeliveredFile[]): void {
@@ -3196,6 +3294,8 @@ export class BotStore {
           (!origin.returnWorkId || work?.state === "active") &&
           root &&
           !["cancelled", "interrupted"].includes(String(root.state)) &&
+          (!origin.upstreamTaskId ||
+            this.upstreamReplySource(origin, target.id, origin.returnWorkId)) &&
           groupAllowed
         )
           this.enqueue(
@@ -3261,7 +3361,7 @@ export class BotStore {
       // work keeps its explicit task identity and can be stopped separately.
       if (changedExecution || !input.enabled)
         this.db.run(
-          "UPDATE bot_tasks SET state='cancelled', updated_at=? WHERE state='queued' AND json_extract(origin_json,'$.scheduleId')=?",
+          "UPDATE bot_tasks SET state='cancelled', updated_at=? WHERE state='queued' AND continuation_checkpoint_id IS NULL AND json_extract(origin_json,'$.scheduleId')=?",
           [this.now(), schedule.id]
         )
       this.changed()
@@ -3276,7 +3376,7 @@ export class BotStore {
         throw new BotError("CONFLICT", "例行任务已改变，请刷新后重试")
       this.db.run("DELETE FROM bot_schedules WHERE id=?", [id])
       this.db.run(
-        "UPDATE bot_tasks SET state='cancelled', updated_at=? WHERE state='queued' AND json_extract(origin_json,'$.scheduleId')=?",
+        "UPDATE bot_tasks SET state='cancelled', updated_at=? WHERE state='queued' AND continuation_checkpoint_id IS NULL AND json_extract(origin_json,'$.scheduleId')=?",
         [this.now(), id]
       )
       this.changed()
@@ -3341,6 +3441,7 @@ export class BotStore {
   saveGroup(input: BotGroupInput, existing?: { id: string; version: number }): BotGroup {
     return this.transaction(() => {
       const prior = existing ? this.getGroup(existing.id) : undefined
+      input = parseGroup(input, prior?.memberIds.length === 0)
       for (const id of input.memberIds) {
         const member = this.getBot(id)
         if (member.archived && (member.deleting || !prior?.memberIds.includes(id)))
@@ -3901,13 +4002,6 @@ export class BotStore {
       if (group.deleting) throw new BotError("CONFLICT", "群聊正在删除，请完成删除后重试")
       const targets = [...new Set(input.targetBotIds)].sort()
       const mentions = input.mentions?.length ? JSON.stringify(input.mentions) : null
-      if (!targets.length || targets.some((id) => !group.memberIds.includes(id)))
-        throw new BotError("INVALID_INPUT", "请选择群内 Bot 接收工作")
-      if (
-        input.mentions?.some((mention) => mention.botId === null) &&
-        targets.length !== group.memberIds.length
-      )
-        throw new BotError("INVALID_INPUT", "提及所有人时需选择全部群成员")
       const prior = this.rows("SELECT * FROM bot_group_messages WHERE id=?", [input.requestId])[0]
       if (prior) {
         if (
@@ -3920,6 +4014,13 @@ export class BotStore {
           throw new BotError("CONFLICT", "消息标识已被使用")
         return false
       }
+      if (!targets.length || targets.some((id) => !group.memberIds.includes(id)))
+        throw new BotError("INVALID_INPUT", "请选择群内 Bot 接收工作")
+      if (
+        input.mentions?.some((mention) => mention.botId === null) &&
+        targets.length !== group.memberIds.length
+      )
+        throw new BotError("INVALID_INPUT", "提及所有人时需选择全部群成员")
       const reply = input.replyToId
         ? this.rows("SELECT * FROM bot_group_messages WHERE id=? AND group_id=?", [
             input.replyToId,

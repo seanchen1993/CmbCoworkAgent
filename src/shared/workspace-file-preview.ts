@@ -44,12 +44,15 @@ export type WorkspaceFilePreviewSource =
       threadId: string
       filePath: string
       workspacePathKind?: WorkspaceFilePreviewWorkspacePathKind
+      /** Bot group previews resolve the retained shared directory, not a member's thread. */
+      botGroupId?: string
       externalGrant?: never
     }
   | {
       externalGrant: string
       filePath: string
       threadId?: never
+      botGroupId?: never
       workspacePathKind?: never
     }
 

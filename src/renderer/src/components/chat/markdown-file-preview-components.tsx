@@ -2,12 +2,18 @@ import { isValidElement, useContext, useEffect, useMemo, useState, type ReactNod
 import type { Components } from "react-markdown"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
-import { isLocalFileLikeHref, normalizePreviewFileHref } from "@/lib/markdown-file-preview-links"
+import {
+  decodePreviewFileHref,
+  isLocalFileLikeHref,
+  normalizePreviewFileHref
+} from "@/lib/markdown-file-preview-links"
+import { resolveResourcePreviewPaths } from "@/lib/resource-preview-paths"
 import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
 import { useThreadStateSelector } from "@/lib/thread-context"
 import type { FileInfo } from "@/types"
 import {
   ChatFilePresentationContext,
+  ChatFileWorkspaceContext,
   ChatPresentationContext,
   ChatMessageIdentityContext
 } from "./chat-presentation-context"
@@ -36,20 +42,6 @@ function isAbsoluteFilePath(value: string): boolean {
   return value.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(value)
 }
 
-function normalizePathForCompare(value: string): string {
-  return stripLineSuffix(value).replace(/\\/g, "/").replace(/\/+$/, "")
-}
-
-function isWorkspaceFilePath(filePath: string, workspacePath: string | null | undefined): boolean {
-  if (!workspacePath) return false
-  const normalizedFilePath = normalizePathForCompare(filePath)
-  const normalizedWorkspacePath = normalizePathForCompare(workspacePath)
-  return (
-    normalizedFilePath === normalizedWorkspacePath ||
-    normalizedFilePath.startsWith(`${normalizedWorkspacePath}/`)
-  )
-}
-
 function stripLineSuffix(value: string): string {
   return value.replace(/:\d+(?::\d+)?$/, "")
 }
@@ -73,6 +65,7 @@ const workspaceFilePreviewIndexCache = new WeakMap<
   }
 >()
 const EMPTY_FILE_PREVIEW_INDEX = new Map<string, string>()
+const EMPTY_WORKSPACE_FILES: FileInfo[] = []
 const FILE_PREVIEW_INDEX_BATCH_SIZE = 512
 const yieldResolvers: Array<() => void> = []
 let cooperativeYieldCount = 0
@@ -160,7 +153,13 @@ function resolveInlinePreviewPath(
   const candidate = stripLineSuffix(value.trim())
   if (!candidate || candidate.endsWith("/") || candidate.endsWith("\\")) return null
   if (isAbsoluteFilePath(candidate)) {
-    return isWorkspaceFilePath(candidate, workspacePath) ? candidate : null
+    const resolved = resolveResourcePreviewPaths(
+      candidate,
+      workspacePath ?? null,
+      undefined,
+      "absolute"
+    )
+    return resolved.inWorkspace ? resolved.fullPath : null
   }
   return filePreviewIndex.get(candidate) ?? null
 }
@@ -217,7 +216,7 @@ function MarkdownFilePreviewLink({
 
 export function useMarkdownFilePreviewComponents({
   baseComponents,
-  threadId,
+  threadId: messageThreadId,
   text,
   renderCodeBlock
 }: {
@@ -228,16 +227,25 @@ export function useMarkdownFilePreviewComponents({
 }): Components {
   const botPresentation = useContext(ChatPresentationContext) === "bot"
   const presentFile = useContext(ChatFilePresentationContext)
+  const fileWorkspace = useContext(ChatFileWorkspaceContext)
+  const threadId = fileWorkspace?.threadId ?? messageThreadId
+  // Retain a live author's existing file index; the group event key is not a Runtime thread.
+  const metadataThreadId =
+    fileWorkspace?.threadId === messageThreadId ? null : (messageThreadId ?? null)
   const messageId = useContext(ChatMessageIdentityContext)
   const shouldResolveInlineFiles = Boolean(
     threadId && (text.includes("`") || (botPresentation && text.includes("](")))
   )
-  const workspacePath = useThreadStateSelector(threadId ?? null, (state) => state.workspacePath)
+  const threadWorkspace = useThreadStateSelector(
+    metadataThreadId,
+    (state) => state.workspacePath
+  )
+  const workspacePath = fileWorkspace ? fileWorkspace.workspacePath : threadWorkspace
   const workspaceFiles =
     useThreadStateSelector(
-      shouldResolveInlineFiles ? (threadId ?? null) : null,
+      shouldResolveInlineFiles ? metadataThreadId : null,
       (state) => state.workspaceFiles
-    ) ?? []
+    ) ?? EMPTY_WORKSPACE_FILES
   const [filePreviewIndex, setFilePreviewIndex] =
     useState<Map<string, string>>(EMPTY_FILE_PREVIEW_INDEX)
 
@@ -278,10 +286,23 @@ export function useMarkdownFilePreviewComponents({
           return <span>{children}</span>
         }
 
-        const relativeBotFile = botPresentation && !/^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(href)
+        const relativeBotFile =
+          botPresentation &&
+          !/^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(href) &&
+          !isLocalFileLikeHref(href)
+        const relativeHrefPath = relativeBotFile ? decodePreviewFileHref(href) : null
+        // The Host root is a literal path; only the href carries URI escapes.
         const previewPath =
           normalizePreviewFileHref(href, workspacePath) ??
-          (relativeBotFile ? resolveInlinePreviewPath(href, filePreviewIndex, workspacePath) : null)
+          (fileWorkspace && relativeBotFile && workspacePath
+            ? normalizePreviewFileHref(
+                joinWorkspacePath(encodeURI(workspacePath), href),
+                workspacePath
+              )
+            : null) ??
+          (relativeHrefPath
+            ? (filePreviewIndex.get(stripLineSuffix(relativeHrefPath)) ?? null)
+            : null)
         if (!threadId || !previewPath) {
           if (isLocalFileLikeHref(href) || relativeBotFile) {
             return (
@@ -353,6 +374,7 @@ export function useMarkdownFilePreviewComponents({
       presentFile,
       messageId,
       filePreviewIndex,
+      fileWorkspace,
       renderCodeBlock,
       threadId,
       workspacePath

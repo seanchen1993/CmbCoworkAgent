@@ -172,6 +172,8 @@ export interface AgentRunExecutionContext {
   capabilityService?: CreateAgentRuntimeOptions["capabilityService"]
   onGoalNotice?: (notice: AgentRunGoalNotice) => void
   onFinalAssistant?: (result: AgentRunFinalAssistant) => void | Promise<void>
+  /** Trusted Bot-only veto for tray/pet completion notices, evaluated after final delivery. */
+  shouldRaiseCompletionAttention?: () => boolean
   onRunCancelled?: () => void
   /** The original user-prompt/steer pipeline is ready; trusted inboxes can offer saved messages. */
   onSteeringReady?: (yieldForegroundCommands?: (stillPending: () => boolean) => number) => void

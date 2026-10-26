@@ -39,7 +39,7 @@ export function BotFilesPanel({
   conversationThreadId?: string
   refreshKey?: string
 }) {
-  const threadId = conversationThreadId ?? (group ? `group-${group.id}-${bot.id}` : bot.threadId)
+  const threadId = conversationThreadId ?? (group ? `group-files-${group.id}` : bot.threadId)
   const [page, setPage] = useState<BotFilePage | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)

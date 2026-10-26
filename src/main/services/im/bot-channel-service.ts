@@ -73,7 +73,7 @@ export class BotImChannelService {
         channelKey: botImScopeId(this.realm, principal, binding.conversationKey!),
         version: binding.version
       })
-      host.imChannel.setOnline(binding.botId, route.id, true)
+      host.setImOnline(binding.botId, route.id, true)
     } else if (binding.state === "revoked") {
       try {
         const local = host.imChannel.get(binding.botId, route.id)
@@ -223,7 +223,7 @@ export class BotImChannelService {
           bindingId: receipt.bindingId,
           eventId: receipt.id,
           messageId: botImScopeId(this.realm, principal, wire.platformMessageId),
-          senderId: payload.route.senderId,
+          senderId: botImScopeId(this.realm, principal, payload.route.senderId),
           text: wire.message.text,
           mentionsBotIds: [payload.route.botId]
         })
@@ -335,10 +335,7 @@ export class BotImChannelService {
           active.slice(offset, offset + 4).map(async (event) => {
             try {
               if (!host.imGateway.pendingTasks(event.id).length && event.taskId) {
-                host.imGateway.settle(
-                  event.id,
-                  host.imGateway.hasFailedTask(event.id) ? "failed" : "completed"
-                )
+                host.imGateway.settle(event.id, host.imGateway.settledTaskOutcome(event.id))
               } else if (event.expiresAt - Date.now() < 60000) {
                 const permit = await this.client.renewBotPermit({
                   eventId: event.payload.event.eventId,

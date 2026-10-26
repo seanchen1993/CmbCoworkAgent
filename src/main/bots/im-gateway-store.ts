@@ -231,13 +231,12 @@ export class BotImGatewayStore {
       [eventId]
     ).map((row) => String(row.id))
   }
-  hasFailedTask(eventId: string): boolean {
-    return (
-      this.rows(
-        "SELECT 1 FROM bot_tasks WHERE json_extract(mock_source_json,'$.transport')='im' AND json_extract(mock_source_json,'$.eventId')=? AND state IN ('failed','cancelled','interrupted') AND NOT EXISTS(SELECT 1 FROM bot_im_local_execution l WHERE l.task_id=bot_tasks.id) LIMIT 1",
-        [eventId]
-      ).length > 0
-    )
+  settledTaskOutcome(eventId: string): "completed" | "failed" | "unknown" {
+    const row = this.rows(
+      "SELECT state FROM bot_tasks WHERE json_extract(mock_source_json,'$.transport')='im' AND json_extract(mock_source_json,'$.eventId')=? AND state IN ('failed','cancelled','interrupted','outcome_unknown') AND NOT EXISTS(SELECT 1 FROM bot_im_local_execution l WHERE l.task_id=bot_tasks.id) ORDER BY (state='outcome_unknown') DESC LIMIT 1",
+      [eventId]
+    )[0]
+    return row?.state === "outcome_unknown" ? "unknown" : row ? "failed" : "completed"
   }
   hasLiveBindings(botId: string): boolean {
     return (

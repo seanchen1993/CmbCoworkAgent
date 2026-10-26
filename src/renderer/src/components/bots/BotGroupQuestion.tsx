@@ -1,8 +1,10 @@
-import { useThreadContext } from "@/lib/thread-context"
+import { useThreadContext, useThreadStateSelector, type ThreadState } from "@/lib/thread-context"
 import { UserInputRequestDialog } from "@/components/chat/UserInputRequestDialog"
 import type { BotDefinition, BotTask } from "../../../../shared/bots/contracts"
 import type { UserInputRequest } from "@/types"
 import { BotAvatar } from "./BotAvatar"
+
+const selectQuestionDraft = (state: ThreadState) => state.userInputDraft
 
 /** Reuses the original inbox and answer channel, without opening execution details. */
 export function BotGroupQuestion({
@@ -45,11 +47,16 @@ export function BotGroupQuestionBody({
   request: UserInputRequest
 }) {
   const context = useThreadContext()
+  const draft = useThreadStateSelector(task.threadId, selectQuestionDraft)
   return (
     <UserInputRequestDialog
       key={request.requestId}
       request={request}
       presentation="bot"
+      draft={draft}
+      onDraftChange={(update) =>
+        context.getThreadActions(task.threadId).setUserInputDraft(request.requestId, update)
+      }
       useComposerForSingleAnswer
       onSubmit={(response) => {
         // A late click must never answer a replacement request or clear its card.

@@ -34,7 +34,8 @@ export function BotDeliveredFile({
     lock.current = true
     setSaving(true)
     try {
-      await client.exportFile(botId, openedPath, groupId)
+      if (groupId) await client.exportGroupFile(groupId, openedPath)
+      else await client.exportFile(botId, openedPath)
     } catch (cause) {
       toast.error(botErrorMessage(cause, "文件保存失败，请重试"))
     } finally {

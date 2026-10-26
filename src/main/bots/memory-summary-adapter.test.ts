@@ -7,6 +7,9 @@ const fixture = vi.hoisted(() => ({
   enabled: true,
   extraction: vi.fn(),
   route: vi.fn(),
+  routingMode: "pinned" as "pinned" | "auto",
+  config: vi.fn(),
+  defaultConfig: vi.fn(),
   model: vi.fn(),
   verify: vi.fn()
 }))
@@ -20,16 +23,17 @@ vi.mock("@langchain/openai", () => ({
 }))
 vi.mock("../storage", () => ({
   isMemoryEnabled: () => fixture.enabled,
-  getGlobalRoutingMode: () => "pinned"
+  getGlobalRoutingMode: () => fixture.routingMode
 }))
 vi.mock("../routing", () => ({ resolveModel: fixture.route }))
 vi.mock("../models/registry", () => ({
-  getModelConfigByRef: () => ({ model: "test", apiKey: "synthetic-test-key" }),
-  getDefaultModelConfig: () => null
+  getModelConfigByRef: fixture.config,
+  getDefaultModelConfig: fixture.defaultConfig
 }))
 vi.mock("../memory/summarizer", () => ({ summarizeAndSave: fixture.extraction }))
 import { createBotMemoryMaintainer } from "./memory-summary-adapter"
 import { BotMemoryService } from "./memory"
+import { SelectedModelUnavailableError } from "../models/selection-error"
 
 const turn = {
   botId: "a",
@@ -49,6 +53,9 @@ const approval = (count = 1, quote = turn.userText): string =>
 beforeEach(() => {
   vi.clearAllMocks()
   fixture.enabled = true
+  fixture.routingMode = "pinned"
+  fixture.config.mockReturnValue({ model: "test", apiKey: "synthetic-test-key" })
+  fixture.defaultConfig.mockReturnValue(null)
   fixture.route.mockResolvedValue(null)
   fixture.verify.mockResolvedValue({ content: approval() })
 })
@@ -321,6 +328,107 @@ describe("Bot automatic memory verification", () => {
 })
 
 describe("Bot memory extraction wiring", () => {
+  it.each(["missing_config", "missing_credentials"] as const)(
+    "does not fall back or send private content after pinned routing reports %s",
+    async (reason) => {
+      fixture.route.mockRejectedValue(new SelectedModelUnavailableError("custom:pinned", reason))
+      fixture.defaultConfig.mockReturnValue({ model: "other", apiKey: "synthetic-default-key" })
+      const memory = { editVersion: () => 1 } as unknown as BotMemoryService
+      const maintainer = createBotMemoryMaintainer(memory, () => true)
+      try {
+        maintainer.enqueue({ ...turn, modelRef: "custom:pinned" })
+        await tick()
+        expect(fixture.defaultConfig).not.toHaveBeenCalled()
+        expect(fixture.model).not.toHaveBeenCalled()
+        expect(fixture.extraction).not.toHaveBeenCalled()
+        expect(fixture.verify).not.toHaveBeenCalled()
+      } finally {
+        await maintainer.close()
+      }
+    }
+  )
+
+  it.each([null, { model: "pinned", apiKey: "  " }])(
+    "skips a pinned configuration that disappears or loses credentials after routing: %s",
+    async (config) => {
+      fixture.route.mockResolvedValue({ resolvedModelId: "custom:pinned" })
+      fixture.config.mockReturnValue(config)
+      fixture.defaultConfig.mockReturnValue({ model: "other", apiKey: "synthetic-default-key" })
+      const memory = { editVersion: () => 1 } as unknown as BotMemoryService
+      const maintainer = createBotMemoryMaintainer(memory, () => true)
+      try {
+        maintainer.enqueue({ ...turn, modelRef: "custom:pinned" })
+        await tick()
+        expect(fixture.config).toHaveBeenCalledWith("custom:pinned")
+        expect(fixture.defaultConfig).not.toHaveBeenCalled()
+        expect(fixture.model).not.toHaveBeenCalled()
+        expect(fixture.extraction).not.toHaveBeenCalled()
+      } finally {
+        await maintainer.close()
+      }
+    }
+  )
+
+  it.each([
+    { mode: "pinned" as const, modelRef: "custom:pinned", routed: "custom:pinned" },
+    { mode: "auto" as const, modelRef: "custom:pinned", routed: "custom:economy" },
+    { mode: "pinned" as const, modelRef: null, routed: "custom:default" }
+  ])("retains valid $mode routing for $modelRef", async ({ mode, modelRef, routed }) => {
+    fixture.routingMode = mode
+    fixture.route.mockResolvedValue({ resolvedModelId: routed })
+    fixture.config.mockImplementation((ref) => ({ model: ref, apiKey: "synthetic-selected-key" }))
+    fixture.extraction.mockResolvedValue(undefined)
+    const memory = {
+      editVersion: () => 1,
+      summaryDirectory: () => "/fixture/bots/a/memory"
+    } as unknown as BotMemoryService
+    const maintainer = createBotMemoryMaintainer(memory, () => true)
+    try {
+      maintainer.enqueue({ ...turn, modelRef })
+      await tick()
+      expect(fixture.route).toHaveBeenCalledWith({
+        taskSource: "memory_summarize",
+        threadId: turn.threadId,
+        requestedModelId: modelRef ?? undefined,
+        routingMode: mode
+      })
+      expect(fixture.model).toHaveBeenCalledWith(expect.objectContaining({ model: routed }))
+      expect(fixture.defaultConfig).not.toHaveBeenCalled()
+      expect(fixture.extraction).toHaveBeenCalledOnce()
+    } finally {
+      await maintainer.close()
+    }
+  })
+
+  it.each([
+    { mode: "auto" as const, modelRef: "custom:requested", fallback: true },
+    { mode: "pinned" as const, modelRef: null, fallback: true },
+    { mode: "pinned" as const, modelRef: "custom:pinned", fallback: false }
+  ])(
+    "keeps the existing routing-error boundary for $mode/$modelRef",
+    async ({ mode, modelRef, fallback }) => {
+      fixture.routingMode = mode
+      fixture.route.mockRejectedValue(new Error("Synthetic routing service failure"))
+      fixture.config.mockReturnValue(null)
+      fixture.defaultConfig.mockReturnValue({ model: "default", apiKey: "synthetic-default-key" })
+      fixture.extraction.mockResolvedValue(undefined)
+      const memory = {
+        editVersion: () => 1,
+        summaryDirectory: () => "/fixture/bots/a/memory"
+      } as unknown as BotMemoryService
+      const maintainer = createBotMemoryMaintainer(memory, () => true)
+      try {
+        maintainer.enqueue({ ...turn, modelRef })
+        await tick()
+        expect(fixture.defaultConfig).toHaveBeenCalledTimes(Number(fallback))
+        expect(fixture.extraction).toHaveBeenCalledTimes(Number(fallback))
+        expect(fixture.model).toHaveBeenCalledTimes(Number(fallback))
+      } finally {
+        await maintainer.close()
+      }
+    }
+  )
+
   it("uses the original summarizer only for the private namespace and honors enablement at commit", async () => {
     const apply = vi.fn(),
       directory = vi.fn(() => "/fixture/bots/a/memory")

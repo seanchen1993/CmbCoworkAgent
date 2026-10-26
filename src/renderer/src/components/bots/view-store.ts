@@ -1,5 +1,26 @@
 import { create } from "zustand"
 import { persist } from "zustand/middleware"
+import type { BotDefinition, BotGroup } from "../../../../shared/bots/contracts"
+import type { BotChatRecipient } from "@/lib/bot-chat-recipients"
+import { BotDraftFileTransfer } from "@/lib/bot-new-chat-files"
+
+/** Unsubmitted composer state is renderer-session only: File bytes are never serialized. */
+export function createBotNewChatDraft() {
+  return {
+    recipients: [] as BotChatRecipient[],
+    text: "",
+    files: [] as File[],
+    busy: false,
+    transfer: { current: new BotDraftFileTransfer() },
+    attempt: { current: 0 },
+    creating: { current: false },
+    group: { current: null as BotGroup | null },
+    createdRecipients: { current: new Map<string, BotDefinition>() },
+    pendingRecipients: { current: new Map<string, Promise<BotDefinition>>() },
+    privateRecipient: { current: null as BotDefinition | null }
+  }
+}
+type BotNewChatDraft = ReturnType<typeof createBotNewChatDraft>
 
 export interface BotSidebarSection {
   id: string
@@ -58,16 +79,29 @@ export const clampBotPanelWidth = (kind: "sidebar" | "detail", width: number): n
       ? 264
       : 320
 
-/** Bot-only view preferences; existing thread context continues to own chat drafts and streams. */
-export const useBotViewStore = create<{
+interface BotViewStore {
   hosts: Record<string, BotViewState>
+  newChatDrafts: Record<string, BotNewChatDraft>
+  updateNewChat(hostId: string, draft: BotNewChatDraft | undefined): void
   update(hostId: string, patch: Partial<BotViewState>): void
-}>()(
-  persist(
-    (set) => ({
+}
+
+/** Conversation drafts/streams still belong to ThreadContext after the composer hands off. */
+export const useBotViewStore = create<BotViewStore>()((set, get, api) =>
+  persist<BotViewStore, [], [], Pick<BotViewStore, "hosts">>(
+    (persistedSet) => ({
       hosts: {},
+      newChatDrafts: {},
+      updateNewChat: (hostId, draft) =>
+        // Bypass persistence for live File references, even when localStorage is unavailable.
+        set((state) => {
+          const drafts = { ...state.newChatDrafts }
+          if (draft) drafts[hostId] = draft
+          else delete drafts[hostId]
+          return { newChatDrafts: drafts }
+        }),
       update: (hostId, patch) =>
-        set((state) => ({
+        persistedSet((state) => ({
           hosts: {
             ...Object.fromEntries(
               Object.entries(state.hosts)
@@ -79,5 +113,5 @@ export const useBotViewStore = create<{
         }))
     }),
     { name: "cmb-bots-view-v1", partialize: (state) => ({ hosts: state.hosts }) }
-  )
+  )(set, get, api)
 )

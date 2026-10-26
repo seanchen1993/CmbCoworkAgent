@@ -23,17 +23,20 @@ function record(input: unknown): Record<string, unknown> {
   return input as Record<string, unknown>
 }
 
-function identifiers(input: unknown): string[] {
-  if (!Array.isArray(input) || input.length < 1 || input.length > 8)
+function identifiers(input: unknown, allowEmpty = false): string[] {
+  if (!Array.isArray(input) || (!allowEmpty && input.length < 1) || input.length > 8)
     throw new BotError("INVALID_INPUT", "请选择 1 至 8 个 Bot")
   const result = input.map(botIdentifier)
   if (new Set(result).size !== result.length)
     throw new BotError("INVALID_INPUT", "Bot 成员不能重复")
   return result
 }
-export function parseGroup(input: unknown): BotGroupInput {
+export function parseGroup(input: unknown, allowEmptyMembers = false): BotGroupInput {
   const item = record(input)
-  return { name: boundedString(item.name, "群聊名称", 120), memberIds: identifiers(item.memberIds) }
+  return {
+    name: boundedString(item.name, "群聊名称", 120),
+    memberIds: identifiers(item.memberIds, allowEmptyMembers)
+  }
 }
 export function parseGroupMessage(input: unknown): SendBotGroupMessageInput {
   const item = record(input)

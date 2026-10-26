@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it, vi } from "vitest"
 import {
   ChatFilePresentationContext,
+  ChatFileWorkspaceContext,
   ChatPresentationContext
 } from "../components/chat/chat-presentation-context"
 import { StreamingMarkdown } from "../components/chat/StreamingMarkdown"
@@ -23,6 +24,90 @@ const WINDOWS_CASE_FILE = "【团队级-研发中台】CmbDevClaw内置浏览器
 const WINDOWS_CASE_PATH = `D:\\my-projects\\CmbCowork\\test\\${WINDOWS_CASE_FILE}`
 
 describe("StreamingMarkdown 空链接渲染", () => {
+  it.each(["report%25.md", "100%.md", "%41.md", "report%2Fv1.md"])(
+    "preserves the literal inline filename %s in the native workbench",
+    (name) => {
+      threadState.workspacePath = "/workspace"
+      try {
+        const path = `/workspace/${name}`
+        const html = renderToStaticMarkup(
+          createElement(StreamingMarkdown, { threadId: "native-thread", children: `\`${path}\`` })
+        )
+        expect(html).toContain(`<a href="${path}"`)
+      } finally {
+        threadState.workspacePath = null
+      }
+    }
+  )
+  it("keeps literal characters in the Host root when resolving a relative href", () => {
+    const present = vi.fn(({ filePath }) => createElement("span", null, filePath))
+    renderToStaticMarkup(
+      createElement(
+        ChatPresentationContext.Provider,
+        { value: "bot" },
+        createElement(
+          ChatFileWorkspaceContext.Provider,
+          { value: { threadId: "group-files-g", workspacePath: "/group%20" } },
+          createElement(
+            ChatFilePresentationContext.Provider,
+            { value: present },
+            createElement(StreamingMarkdown, {
+              threadId: "group-files-g",
+              children: "[File](report.md)"
+            })
+          )
+        )
+      )
+    )
+    expect(present).toHaveBeenCalledWith(expect.objectContaining({ filePath: "/group%20/report.md" }))
+  })
+  it.each([
+    ["/private/secret.md", "/group"],
+    ["/group/../private/secret.md", "/group"],
+    ["/group/%2e%2e/private/secret.md", "/group"],
+    ["/group%20/report.md", "/group%20"],
+    ["%2Fprivate%2Fsecret.md", "/group"],
+    ["C:/private/secret.md", "C:/group"],
+    ["C:%5Cprivate%5Csecret.md", "C:/group"],
+    ["%5Cprivate%5Csecret.md", "C:/group"],
+    ["file:///private/secret.md", "/group"],
+    ["codex-file:///private/secret.md", "/group"]
+  ])("never substitutes a group file for absolute destination %s", (href, workspacePath) => {
+    const html = renderToStaticMarkup(
+      createElement(
+        ChatPresentationContext.Provider,
+        { value: "bot" },
+        createElement(
+          ChatFileWorkspaceContext.Provider,
+          { value: { threadId: "group-files-g", workspacePath } },
+          createElement(StreamingMarkdown, {
+            threadId: "group-files-g",
+            children: `[File](${href})`
+          })
+        )
+      )
+    )
+    expect(html).not.toContain("<a ")
+    expect(html).toContain('title="文件路径暂不可预览"')
+  })
+  it("keeps native inline file previews while rejecting lexical traversal", () => {
+    threadState.workspacePath = "/workspace"
+    try {
+      const html = renderToStaticMarkup(
+        createElement(StreamingMarkdown, {
+          threadId: "native-thread",
+          children: "`/workspace/report.md` `/workspace/../private/secret.md`"
+        })
+      )
+      expect(html.match(/<a /g)).toHaveLength(1)
+      expect(html).toContain('href="/workspace/report.md"')
+      expect(html).toContain(
+        '<code class="streaming-markdown-inline-code">/workspace/../private/secret.md</code>'
+      )
+    } finally {
+      threadState.workspacePath = null
+    }
+  })
   it("presents only standalone in-workspace Bot delivery links as cards, retaining inline and external links", () => {
     threadState.workspacePath = "/workspace"
     const present = vi.fn(({ filePath, threadId, label }) =>

@@ -1,6 +1,7 @@
 import type { BuiltinRobotManager } from "../services/im/manager"
 import { BrowserWindow, powerMonitor, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { parseBotMockBinding, parseBotMockEvent } from "../bots/mock-channel-validation"
+import { botImExternalId } from "../../shared/bots/im-channel"
 import {
   BotError,
   LOCAL_BOT_HOST_ID,
@@ -159,7 +160,7 @@ export function registerBotHandlers(
   })
   ipcMain.handle("bots:im:history", (event, hostId, botId, id, before) => {
     mockDesktop(event, hostId).getBot(botIdentifier(botId))
-    return imChannel().history(botId, botIdentifier(id), mockCursor(before))
+    return imChannel().history(botId, botImExternalId(id), mockCursor(before))
   })
   ipcMain.handle("bots:im:create", (event, hostId, botId, kind, operationId) => {
     mockDesktop(event, hostId).getBot(botIdentifier(botId))
@@ -170,7 +171,7 @@ export function registerBotHandlers(
     mockDesktop(event, hostId).getBot(botIdentifier(botId))
     if (!Number.isSafeInteger(version) || version < 1)
       throw new BotError("INVALID_INPUT", "IM 绑定版本无效")
-    return imChannel().revoke(botId, botIdentifier(id), version)
+    return imChannel().revoke(botId, botImExternalId(id), version)
   })
   ipcMain.handle("bots:mock:bindings", (event, hostId, botId, before) =>
     mockDesktop(event, hostId).mockBindings(botIdentifier(botId), mockCursor(before))
@@ -297,7 +298,9 @@ export function registerBotHandlers(
     })
   })
   ipcMain.handle("bots:group:save", (_event, hostId: unknown, input: unknown, existing: unknown) =>
-    hostFor(hostId).saveGroup(parseGroup(input), parseExistingVersion(existing))
+    // An empty member array is structurally valid here. The Store permits it only
+    // when the authoritative, version-checked group is already empty.
+    hostFor(hostId).saveGroup(parseGroup(input, true), parseExistingVersion(existing))
   )
   ipcMain.handle("bots:group:messages", (_event, hostId: unknown, id: unknown, cursor: unknown) =>
     hostFor(hostId).groupMessages(botIdentifier(id), parseGroupHistoryCursor(cursor))

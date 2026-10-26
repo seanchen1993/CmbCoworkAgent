@@ -190,6 +190,8 @@ export type BotTaskOrigin =
       returnWorkId?: string
       /** Trusted work lineage shared by all async collaborators, separate from the return hop. */
       rootWorkId?: string
+      /** Host-owned source turn for this private handoff; never a peer-selected return route. */
+      upstreamTaskId?: string
       depth: number
       expectsReply: boolean
       groupId?: string
@@ -462,6 +464,10 @@ export interface BotClient {
   ): Promise<import("../file-attachment").FileAttachment[]>
   /** Accepts a relative file ID or a preview's host path, always confined to this workspace. */
   exportFile(botId: string, fileId: string, groupId?: string, workId?: string): Promise<boolean>
+  /** User access to retained group files, including groups with no remaining members. */
+  exportGroupFile(groupId: string, fileId: string): Promise<boolean>
+  /** Host-owned path used only to resolve retained public Markdown file links. */
+  groupFileWorkspace(groupId: string): Promise<string>
   shareFile(
     botId: string,
     fileId: string,

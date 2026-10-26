@@ -8,7 +8,7 @@ function stripLineSuffix(value: string): string {
   return value.replace(/:\d+(?::\d+)?$/, "")
 }
 
-function decodeHref(value: string): string | null {
+export function decodePreviewFileHref(value: string): string | null {
   try {
     return decodeURIComponent(value)
   } catch {
@@ -59,7 +59,7 @@ function pathFromCustomFileScheme(value: string, scheme: "codex-file:" | "file:"
 }
 
 function pathFromHref(value: string): string | null {
-  const decoded = decodeHref(value.trim())
+  const decoded = decodePreviewFileHref(value.trim())
   if (!decoded) return null
 
   const normalizedDrivePath = normalizeWindowsDrivePath(decoded)
@@ -118,7 +118,7 @@ export function normalizePreviewFileHref(
 }
 
 export function isLocalFileLikeHref(href: string): boolean {
-  const decoded = decodeHref(href.trim())
+  const decoded = decodePreviewFileHref(href.trim())
   if (!decoded) return true
   const withoutLine = normalizeWindowsDrivePath(stripLineSuffix(decoded))
   const lower = decoded.toLowerCase()
@@ -127,7 +127,7 @@ export function isLocalFileLikeHref(href: string): boolean {
     lower.startsWith("file:") ||
     /^[a-zA-Z]:[\\/]/.test(withoutLine) ||
     /^\/+[a-zA-Z]:[\\/]/.test(decoded) ||
-    withoutLine.startsWith("/") ||
+    /^[\\/]/.test(withoutLine) ||
     /^\\\\[^\\/]+[\\/]+[^\\/]+/.test(withoutLine) ||
     /^\/\/[^/]+\/[^/]+/.test(withoutLine)
   )

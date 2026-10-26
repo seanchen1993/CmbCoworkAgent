@@ -53,5 +53,11 @@ export const ChatFilePresentationContext = createContext<
   | null
 >(null)
 
+/** Public group Markdown uses the group's Host-resolved root, independent of its author. */
+export const ChatFileWorkspaceContext = createContext<{
+  threadId: string
+  workspacePath: string | null
+} | null>(null)
+
 /** Optional hidden rows for verified quiet background turns; underlying messages remain intact. */
 export const ChatMessageVisibilityContext = createContext<ReadonlySet<string>>(new Set())

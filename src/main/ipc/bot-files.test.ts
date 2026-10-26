@@ -5,6 +5,7 @@ import type { LocalBotHost } from "../bots/host"
 const fixture = vi.hoisted(() => ({
   getBot: vi.fn(),
   getGroupMember: vi.fn(),
+  getGroup: vi.fn(),
   prepare: vi.fn(),
   open: vi.fn(),
   save: vi.fn(),
@@ -26,6 +27,10 @@ vi.mock("electron", () => ({
   dialog: { showOpenDialog: fixture.open, showSaveDialog: fixture.save }
 }))
 vi.mock("../bots/runtime-adapter", () => ({ prepareBotThread: fixture.prepare }))
+vi.mock("../app-data-root", () => ({ getCmbCoworkAgentDataRoot: () => "/test-data" }))
+vi.mock("../bots/paths", () => ({
+  botDirectory: (root: string, kind: string, id: string) => `${root}/${kind}/${id}`
+}))
 vi.mock("../bots/workspace-file", () => ({ resolveBotWorkspaceFile: fixture.resolve }))
 vi.mock("../bots/file-copy", () => ({
   botImportDestination: fixture.destination,
@@ -67,6 +72,7 @@ beforeEach(() => {
   vi.resetAllMocks()
   fixture.getBot.mockImplementation((id) => ({ id, threadId: `private-${id}`, archived: false }))
   fixture.getGroupMember.mockImplementation((_group, id) => fixture.getBot(id))
+  fixture.getGroup.mockImplementation((id) => ({ id, memberIds: [] }))
   fixture.prepare.mockImplementation((bot, task) => (task ? "/group" : `/private/${bot.id}`))
   fixture.scan.mockResolvedValue({ scanId: "scan" })
   fixture.page.mockResolvedValue({
@@ -95,6 +101,69 @@ beforeEach(() => {
 })
 
 describe("Bot file IPC group scope", () => {
+  it("resolves a retained group's root without member or execution-thread access", async () => {
+    const call = register()
+    expect(await call("group-workspace", "g")).toBe("/test-data/bots/workspaces/group-g")
+    expect(fixture.getGroup).toHaveBeenCalledWith("g")
+    expect(fixture.getGroupMember).not.toHaveBeenCalled()
+    expect(fixture.prepare).not.toHaveBeenCalled()
+    await expect(call("group-workspace", "../g")).rejects.toThrow()
+    fixture.getGroup.mockImplementation(() => {
+      throw new Error("Group unavailable")
+    })
+    await expect(call("group-workspace", "g")).rejects.toThrow("Group unavailable")
+  })
+  it("exports retained group history with no remaining members without granting member operations", async () => {
+    const call = register()
+    fixture.getGroupMember.mockImplementation(() => {
+      throw new Error("Not a member")
+    })
+    expect(await call("export-group", "g", "report.md")).toBe(true)
+    expect(fixture.resolve).toHaveBeenCalledWith(
+      "/test-data/bots/workspaces/group-g",
+      "report.md",
+      { allowAbsolute: true }
+    )
+    expect(fixture.copy).toHaveBeenCalledWith(
+      "/test-data/bots/workspaces/group-g",
+      "/test-data/bots/workspaces/group-g/report.md",
+      "/saved/report.md"
+    )
+    expect(fixture.getGroupMember).not.toHaveBeenCalled()
+    expect(fixture.prepare).not.toHaveBeenCalled()
+    await expect(call("import", "removed", "g")).rejects.toThrow("Not a member")
+  })
+
+  it("refuses group export after group deletion, including while a save dialog is open", async () => {
+    const call = register()
+    fixture.getGroup.mockImplementationOnce(() => {
+      throw new Error("Group unavailable")
+    })
+    await expect(call("export-group", "g", "report.md")).rejects.toThrow("Group unavailable")
+    expect(fixture.save).not.toHaveBeenCalled()
+    fixture.save.mockImplementationOnce(async () => {
+      fixture.getGroup.mockImplementation(() => {
+        throw new Error("Group unavailable")
+      })
+      return { canceled: false, filePath: "/saved/report.md" }
+    })
+    await expect(call("export-group", "g", "report.md")).rejects.toThrow("Group unavailable")
+    expect(fixture.copy).not.toHaveBeenCalled()
+  })
+
+  it("keeps group history exports within the resolver boundary and supports cancelled saves", async () => {
+    const call = register()
+    fixture.resolve.mockRejectedValueOnce(new Error("Outside workspace"))
+    await expect(call("export-group", "g", "/private/b/report.md")).rejects.toThrow(
+      "Outside workspace"
+    )
+    expect(fixture.save).not.toHaveBeenCalled()
+    fixture.save.mockResolvedValueOnce({ canceled: true })
+    expect(await call("export-group", "g", "report.md")).toBe(false)
+    expect(fixture.copy).not.toHaveBeenCalled()
+    await expect(call("export-group", "../g", "report.md")).rejects.toThrow()
+  })
+
   it("binds picked and dropped composer attachments to the group and rejects membership changes before copying", async () => {
     const call = register()
     const picked = (await call("attach", "a", 3, 500, "g")) as Array<{ filePath: string }>

@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events"
+import { DatabaseSync } from "node:sqlite"
 import {
   mkdtempSync,
   rmSync,
@@ -16,6 +17,10 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { BotBrowserService } from "./browser"
 import type { BotBrowserEngine } from "./browser-engine"
+import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { BotStore } from "./store"
+import { LocalBotHost, type BotRunPort } from "./host"
+import { botGroupBrowserScope } from "../../shared/bots/contracts"
 
 const launch = vi.fn()
 class TestPage extends EventEmitter {
@@ -56,7 +61,7 @@ class TestPage extends EventEmitter {
   }
   title = async () => "Test page"
   screenshot = async () => Buffer.from("fixture")
-  opener = async () => null
+  opener = async (): Promise<TestPage | null> => null
   isClosed() {
     return this.closed
   }
@@ -126,6 +131,305 @@ afterEach(async () => {
 })
 
 describe("Bot browser ownership and control", () => {
+  it.each(["help", "manual"] as const)(
+    "releases a removed member's %s lease through Host without affecting its other conversations",
+    async (mode) => {
+      const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+      const store = new BotStore(db)
+      const errors = vi.fn()
+      const cleanup: Promise<void>[] = []
+      let scope = ""
+      let pageId = ""
+      let runSignal: AbortSignal | undefined
+      const waiting = vi.fn()
+      const removeGroupMemberBrowser = vi.fn((groupId: string, botId: string) => {
+        const operation = service.removeGroupMember(groupId, botId)
+        cleanup.push(operation)
+        return operation
+      })
+      const runtime: BotRunPort = {
+        browser: true,
+        onAvailable: () => () => {},
+        removeGroupMemberBrowser,
+        acquire: () => ({
+          release() {},
+          async execute(signal, active) {
+            runSignal = signal
+            await service.act(
+              scope,
+              mode === "help"
+                ? { action: "request_help", pageId, instruction: "Synthetic member step" }
+                : { action: "observe", pageId },
+              signal,
+              (value) => {
+                waiting(value)
+                active(value)
+              }
+            )
+            return { state: "completed" }
+          }
+        })
+      }
+      const host = new LocalBotHost(store, runtime, 2, errors)
+      try {
+        const input = { name: "A", instructions: "", color: "#123456", modelRef: null }
+        const a = host.create(input)
+        const b = host.create({ ...input, name: "B" })
+        let group = host.saveGroup({ name: "Removed member", memberIds: [a.id, b.id] })
+        const other = host.saveGroup({ name: "Other room", memberIds: [a.id, b.id] })
+        scope = botGroupBrowserScope(group.id, a.id)
+        pageId = JSON.parse(await service.act(scope, { action: "observe" }, signal())).pageId
+        for (const owner of [
+          a.id,
+          botGroupBrowserScope(other.id, a.id),
+          `work-synthetic--${a.id}`
+        ])
+          await service.act(owner, { action: "observe" }, signal())
+        if (mode === "manual") await service.takeOver(scope, pageId)
+        host.sendGroup({
+          groupId: group.id,
+          requestId: "member-help",
+          text: "Synthetic step",
+          targetBotIds: [a.id]
+        })
+        await vi.waitFor(() => expect(waiting).toHaveBeenCalledWith(true))
+        group = host.saveGroup({ name: "Renamed", memberIds: [b.id, a.id] }, group)
+        expect(removeGroupMemberBrowser).not.toHaveBeenCalled()
+        expect(runSignal?.aborted).toBe(false)
+        group = host.saveGroup({ name: group.name, memberIds: [b.id] }, group)
+        expect(runSignal?.aborted).toBe(true)
+        expect(removeGroupMemberBrowser).toHaveBeenCalledExactlyOnceWith(group.id, a.id)
+        expect(() => host.browserScope(scope)).toThrow("离开")
+        // Start the remaining member's claim immediately, before old page cleanup settles.
+        const remaining = botGroupBrowserScope(group.id, b.id)
+        await service.takeOver(host.browserScope(remaining))
+        await Promise.all(cleanup)
+        await vi.waitFor(() => expect(host.hasActiveRuns()).toBe(false))
+        expect(store.recentTasks().find((task) => task.origin.kind === "group")?.state).toBe(
+          "cancelled"
+        )
+        expect((await service.preview(remaining)).control).toBe("human")
+        expect((await service.preview(scope)).pages).toEqual([])
+        expect(context.entries.slice(0, 4).map((page) => page.closed)).toEqual([
+          true, false, false, false
+        ])
+        await service.giveBack(remaining)
+        group = host.saveGroup({ name: group.name, memberIds: [a.id, b.id] }, group)
+        const rejoined = JSON.parse(
+          await service.act(host.browserScope(scope), { action: "observe" }, signal())
+        )
+        expect(rejoined.pageId).not.toBe(pageId)
+        await service.takeOver(scope, rejoined.pageId)
+        expect((await service.preview(scope)).control).toBe("human")
+        await service.giveBack(scope)
+        expect(errors).not.toHaveBeenCalled()
+      } finally {
+        await host.stop()
+        db.close()
+      }
+    }
+  )
+
+  it("does not let delayed old-page close events revoke a quickly rejoined member's lease", async () => {
+    const scope = "group-room--a"
+    await service.act(scope, { action: "observe" }, signal())
+    await service.takeOver(scope)
+    const entered = deferred()
+    const finish = deferred()
+    const old = context.entries[0]
+    const close = old.close.bind(old)
+    old.close = async () => {
+      entered.resolve()
+      await finish.promise
+      await close()
+    }
+    const removing = service.removeGroupMember("room", "a")
+    await entered.promise
+    const rejoining = service.takeOver(scope)
+    finish.resolve()
+    await Promise.all([removing, rejoining])
+    const current = await service.preview(scope)
+    expect(current.control).toBe("human")
+    expect(current.pages).toHaveLength(1)
+    expect(old.closed).toBe(true)
+    expect(context.entries[1].closed).toBe(false)
+    await service.giveBack(scope, current.generation)
+  })
+
+  it("cleans a cancelled in-flight creation before allowing a new member page and rejects its late popup", async () => {
+    const engine = await launch()
+    launch.mockResolvedValue(engine)
+    const entered = deferred()
+    const finish = deferred()
+    const create = engine.createPage
+    engine.createPage = async () => {
+      entered.resolve()
+      await finish.promise
+      return create()
+    }
+    const controller = new AbortController()
+    const creating = service.act("group-room--a", { action: "observe" }, controller.signal)
+    const rejected = expect(creating).rejects.toThrow("removed member")
+    await entered.promise
+    controller.abort(new Error("removed member"))
+    const removing = service.removeGroupMember("room", "a")
+    finish.resolve()
+    await rejected
+    await removing
+    expect(context.entries[0].closed).toBe(true)
+    await service.takeOver("b")
+    const popup = new TestPage()
+    popup.opener = async () => context.entries[0]
+    context.entries[0].emit("popup", popup)
+    context.emit("page", popup)
+    await vi.waitFor(() => expect(popup.closed).toBe(true))
+    expect((await service.preview("b")).pages).toHaveLength(1)
+    expect((await service.preview("b")).control).toBe("human")
+    await service.giveBack("b")
+    await service.act("group-room--a", { action: "observe" }, signal())
+    expect((await service.preview("group-room--a")).pages).toHaveLength(1)
+  })
+
+  it("rejects a queued old takeover before page creation and preserves another scope's new claim", async () => {
+    const peer = JSON.parse(await service.act("peer", { action: "observe" }, signal()))
+    const entered = deferred()
+    const finish = deferred()
+    context.entries[0].snapshot.mockImplementationOnce(async () => {
+      entered.resolve()
+      await finish.promise
+      return "- heading Peer"
+    })
+    const observing = service.act("peer", { action: "observe", pageId: peer.pageId }, signal())
+    const observed = Promise.allSettled([observing])
+    await entered.promise
+    const stale = service.takeOver("group-room--a")
+    const rejected = expect(stale).rejects.toThrow("控制权已改变")
+    const removing = service.removeGroupMember("room", "a")
+    const current = service.takeOver("b")
+    const waiting = vi.fn()
+    let outcome = "pending"
+    const pending = service.act("b", { action: "observe" }, signal(), waiting).then(
+      (result) => {
+        outcome = "resolved"
+        return { result }
+      },
+      (error: unknown) => {
+        outcome = "rejected"
+        return { error }
+      }
+    )
+    expect(waiting).toHaveBeenCalledExactlyOnceWith(true)
+    finish.resolve()
+    await Promise.all([observed, rejected, removing, current])
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(context.entries).toHaveLength(2)
+    expect((await service.preview("group-room--a")).pages).toEqual([])
+    expect((await service.preview("b")).control).toBe("human")
+    expect(outcome).toBe("pending")
+    expect(waiting).toHaveBeenCalledExactlyOnceWith(true)
+    await service.giveBack("b")
+    const returned = await pending
+    expect(returned).not.toHaveProperty("error")
+    if (!("result" in returned)) throw returned.error
+    expect(JSON.parse(returned.result)).toMatchObject({
+      control: "bot",
+      content: '- textbox "Name"'
+    })
+    expect(waiting.mock.calls).toEqual([[true], [false]])
+  })
+
+  it("releases and wakes observation when the current claim's show fails", async () => {
+    const engine = await launch()
+    launch.mockResolvedValue(engine)
+    const entered = deferred()
+    const finish = deferred()
+    const show = engine.show
+    engine.show = async () => {
+      entered.resolve()
+      await finish.promise
+      throw new Error("Synthetic current show failure")
+    }
+    const taking = service.takeOver("b")
+    const rejected = expect(taking).rejects.toThrow("Synthetic current show failure")
+    await entered.promise
+    const waiting = vi.fn()
+    const observing = service.act("b", { action: "observe" }, signal(), waiting)
+    expect(waiting).toHaveBeenCalledExactlyOnceWith(true)
+    finish.resolve()
+    await rejected
+    expect(JSON.parse(await observing)).toMatchObject({
+      control: "bot",
+      content: '- textbox "Name"'
+    })
+    expect(waiting.mock.calls).toEqual([[true], [false]])
+    expect((await service.preview("b")).control).toBe("bot")
+    engine.show = show
+    await service.takeOver("b")
+    expect((await service.preview("b")).control).toBe("human")
+    await service.giveBack("b")
+  })
+
+  it("does not let a removed member's delayed return wake or invalidate a newer help request", async () => {
+    const engine = await launch()
+    launch.mockResolvedValue(engine)
+    await service.takeOver("group-room--a")
+    const entered = deferred()
+    const finish = deferred()
+    engine.hide = async () => {
+      entered.resolve()
+      await finish.promise
+    }
+    const returning = service.giveBack("group-room--a")
+    await entered.promise
+    const removing = service.removeGroupMember("room", "a")
+    const taking = service.takeOver("b")
+    finish.resolve()
+    await Promise.all([returning, removing, taking])
+    const current = await service.preview("b")
+    expect(current.control).toBe("human")
+    const waiting = vi.fn()
+    const action = service.act("b", { action: "observe", pageId: current.pageId! }, signal(), waiting)
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledWith(true))
+    expect(waiting).not.toHaveBeenCalledWith(false)
+    engine.hide = async () => {}
+    await service.giveBack("b", current.generation)
+    expect(JSON.parse(await action).control).toBe("bot")
+  })
+
+  it("keeps a peer's in-flight observation valid when releasing the removed member's human lease", async () => {
+    await service.takeOver("group-room--a")
+    const entered = deferred()
+    const finish = deferred()
+    const peer = JSON.parse(await service.act("peer", { action: "observe" }, signal()))
+    context.entries[1].snapshot.mockImplementationOnce(async () => {
+      entered.resolve()
+      await finish.promise
+      return '- heading "Peer result"'
+    })
+    const observing = service.act("peer", { action: "observe", pageId: peer.pageId }, signal())
+    await entered.promise
+    const removing = service.removeGroupMember("room", "a")
+    finish.resolve()
+    expect(JSON.parse(await observing).content).toBe('- heading "Peer result"')
+    await removing
+    expect(context.entries[1].closed).toBe(false)
+    expect((await service.preview("peer")).pageId).toBe(peer.pageId)
+  })
+
+  it("retains a failed native close for cleanup retry without permanently retiring the member scope", async () => {
+    await service.takeOver("group-room--a")
+    vi.spyOn(context.entries[0], "close").mockRejectedValueOnce(new Error("Synthetic close failure"))
+    await expect(service.removeGroupMember("room", "a")).rejects.toThrow("Synthetic close failure")
+    expect((await service.preview("group-room--a")).control).toBe("bot")
+    expect((await service.preview("group-room--a")).pages).toHaveLength(1)
+    await service.removeGroupMember("room", "a")
+    expect(context.entries[0].closed).toBe(true)
+    await service.takeOver("group-room--a")
+    expect((await service.preview("group-room--a")).control).toBe("human")
+    expect(context.entries[1].closed).toBe(false)
+    await service.giveBack("group-room--a")
+  })
+
   it("publishes a downloaded file only after saving its complete contents", async () => {
     service = new BotBrowserService(launch, () => directory)
     await service.act("a", { action: "observe" }, signal())

@@ -70,6 +70,7 @@ import { hasBotWorkflowCapability } from "../agent/workflow/bot-capability"
 import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry"
 import { isMemoryEnabled } from "../storage"
 import { isBotRoutineSilent } from "../../shared/bots/routine-silence"
+import { isBotGroupPass } from "../../shared/bots/group-discussion"
 import { withCheckpointer } from "../agent/runtime"
 import { botContinuationMessageId, canDeferBotTask, canSteerBotTask } from "./continuation"
 import { parseBotFileDelivery, type BotDeliveredFile } from "../../shared/bots/file-delivery"
@@ -309,6 +310,9 @@ export function createLocalBotRunPort(
   return {
     browser: true,
     workspaces: localBotWorkspaces,
+    removeGroupMemberBrowser(groupId, botId) {
+      return browser.removeGroupMember(groupId, botId)
+    },
     cancelCommands(threadId, ids) {
       return LocalSandbox.cancelBackgroundTasksAndWait(threadId, ids)
     },
@@ -383,16 +387,37 @@ export function createLocalBotRunPort(
         await new Promise<void>((resolve) => setImmediate(resolve))
       }
     },
-    onSettled(task, state, result) {
-      if (task.workId || !["user", "schedule", "work_result"].includes(task.origin.kind)) return
+    onSettled(task, state, result, files) {
+      const privateNotification =
+        task.origin.kind === "notification" && !botTaskGroupId(task) ? task.origin : undefined
+      const privateCommand =
+        privateNotification?.notificationKind === "command" ? privateNotification : undefined
+      const privateWorkflow = privateNotification?.notificationKind === "workflow"
+      if (
+        task.workId ||
+        (!["user", "schedule", "work_result"].includes(task.origin.kind) &&
+          !privateCommand &&
+          !privateWorkflow)
+      )
+        return
       if (state !== "completed" && state !== "failed" && state !== "outcome_unknown") return
-      if (task.origin.kind === "schedule" && state === "completed" && isBotRoutineSilent(result))
+      if (
+        (task.origin.kind === "schedule" || privateCommand?.commandSucceeded === true) &&
+        state === "completed" &&
+        !files?.length &&
+        isBotRoutineSilent(result)
+      )
         return
       const bot = getHost().getBot(task.botId)
-      notifyIfBackground(
-        `${bot.name} · ${task.origin.kind === "work_result" ? botWorkResultLabel(task.origin.executionState) : state === "completed" ? "工作已完成" : "需要你查看"}`,
-        "返回 Bots 工作区查看结果。"
-      )
+      const label =
+        task.origin.kind === "work_result"
+          ? botWorkResultLabel(task.origin.executionState)
+          : state !== "completed" || (privateCommand && privateCommand.commandSucceeded !== true)
+            ? "需要你查看"
+            : privateWorkflow
+              ? "后台任务有新结果"
+              : "工作已完成"
+      notifyIfBackground(`${bot.name} · ${label}`, "返回 Bots 工作区查看结果。")
     },
     onAvailable(listener) {
       return onLocalThreadRunLeaseReleased(listener)
@@ -551,9 +576,11 @@ export function createLocalBotRunPort(
           const resumeCheckpointId = resumeGroupBranch ? checkpointId : undefined
           const continueBotTaskCheckpointId = resumeGroupBranch ? undefined : checkpointId
           const commandResults = checkpointId ? getHost().continuationCommandResults(task.id) : []
-          const keepCommandSource =
-            task.origin.kind === "schedule" ||
-            (task.origin.kind === "bot" && task.origin.expectsReply)
+          const peerResultOwner =
+            task.origin.kind === "bot" &&
+            (task.origin.expectsReply ||
+              (!botTaskGroupId(task) && Boolean(task.origin.upstreamTaskId)))
+          const keepCommandSource = task.origin.kind === "schedule" || peerResultOwner
           const foregroundLifecycle =
             !mock && keepCommandSource ? getHost().commandLifecycle(task.id, true) : undefined
           const peerReplyFiles =
@@ -613,24 +640,29 @@ export function createLocalBotRunPort(
                 : null
           let terminal: AgentRunTerminal | undefined
           let finalText: string | undefined
+          let hasPublicContribution = false
           const reactionEligible =
             !mock &&
             !reporting &&
             !groupId &&
             !work &&
             (task.origin.kind === "user" || task.origin.kind === "introduction")
-          // Carry only outputs actually verified by the delivery tool in this run.
+          // Carry only outputs actually verified by the delivery tools.
           // The existing terminal/outbox transaction persists the reply; no second file store.
           const replyFiles = new Map<string, BotDeliveredFile>()
+          const routineDelivery =
+            !task.workId &&
+            (task.origin.kind === "schedule" ||
+              (task.origin.kind === "notification" && task.origin.notificationKind === "command"))
           const captureReplyFiles = (files: BotDeliveredFile[]): void => {
-            if (!task.workId && (task.origin.kind !== "bot" || !task.origin.expectsReply)) return
+            if (!task.workId && !routineDelivery && !peerResultOwner) return
             for (const file of files) {
               replyFiles.delete(file.filePath)
               replyFiles.set(file.filePath, file)
               if (replyFiles.size > 8) replyFiles.delete(replyFiles.keys().next().value!)
             }
           }
-          if (checkpointId && task.origin.kind === "bot" && task.origin.expectsReply) {
+          if (checkpointId && peerResultOwner) {
             const priorFiles = getHost().continuationFiles(task.id)
             if (priorFiles.length)
               captureReplyFiles(
@@ -640,6 +672,10 @@ export function createLocalBotRunPort(
                   signal
                 )
               )
+          } else if (checkpointId && routineDelivery) {
+            // These files were already publicly delivered before the pause. Retain that
+            // fact for silence/activity decisions without republishing or rereading them.
+            captureReplyFiles(getHost().continuationFiles(task.id))
           }
           // Persist provenance in the same transcript as the task, so history
           // reloads and compression never make a peer/routine look user-authored.
@@ -982,6 +1018,7 @@ export function createLocalBotRunPort(
                     : botTaskGroupId(task)
                       ? [
                           createBotGroupMessageTool(task, getHost, signal, (content) => {
+                            hasPublicContribution = true
                             finalText = content
                           }),
                           ...(task.origin.kind === "group" || profileContinuationRequest
@@ -1000,6 +1037,7 @@ export function createLocalBotRunPort(
                                 getHost().publishGroupFiles(task.id, callId, files)
                               else getHost().publishGroupFiles(task.id, callId, files, content)
                               captureReplyFiles(files)
+                              if (files.length) hasPublicContribution = true
                             },
                             undefined,
                             true
@@ -1131,6 +1169,16 @@ export function createLocalBotRunPort(
                   // republishes it; an empty private final can fall back to the actual sent text.
                   if (!groupId || splitBotInlineReasoning(output.finalText ?? "").body.trim())
                     finalText = output.finalText
+                },
+                shouldRaiseCompletionAttention: () => {
+                  if (replyFiles.size || hasPublicContribution) return true
+                  if (task.origin.kind === "schedule" && isBotRoutineSilent(finalText)) return false
+                  return !(
+                    groupId &&
+                    (task.origin.kind === "discussion" ||
+                      (task.origin.kind === "bot" && !task.origin.expectsReply)) &&
+                    isBotGroupPass(finalText)
+                  )
                 }
               }
             )

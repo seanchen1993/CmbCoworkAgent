@@ -79,13 +79,15 @@ export interface BotRunPort {
   hasPendingWork?(threadIds: readonly string[]): Promise<boolean>
   /** Cancel only this conversation's detached work through the existing managers. */
   cancelBackground?(threadId: string): void | Promise<void>
+  /** Release only a removed member's browser ownership in this group; rejoining remains allowed. */
+  removeGroupMemberBrowser?(groupId: string, botId: string): void | Promise<void>
   cancelCommands?(threadId: string, ids: readonly string[]): Promise<void>
   cancelBackgroundCommands?(commandIds: readonly string[]): void | Promise<void>
   recover?(threadIds: string[], signal: AbortSignal): Promise<void>
   /** Claim the existing runtime's thread lease before changing durable task state. */
   acquire(bot: BotDefinition, task: BotTask, work?: BotWorkItem): BotRunLease | null
   onAvailable(listener: () => void): () => void
-  onSettled?(task: BotTask, state: BotTaskState, result?: string): void
+  onSettled?(task: BotTask, state: BotTaskState, result?: string, files?: BotDeliveredFile[]): void
 }
 
 type BotProfileUpdateReceipt = BotDefinition & {
@@ -181,11 +183,17 @@ export class LocalBotHost {
   }
 
   getGroupMember(groupId: string, botId: string): BotDefinition {
+    const group = this.getGroup(groupId)
+    if (!group.memberIds.includes(botId)) throw new BotError("CONFLICT", "成员已离开此群")
+    return this.getBot(botId)
+  }
+
+  /** The user's retained group history outlives its current member list. */
+  getGroup(groupId: string): BotGroup {
     this.requireRunning()
     const group = this.store.getGroup(groupId)
     if (group.deleting) throw new BotError("CONFLICT", "群聊正在删除")
-    if (!group.memberIds.includes(botId)) throw new BotError("CONFLICT", "成员已离开此群")
-    return this.getBot(botId)
+    return group
   }
 
   /** Selected group identity facts only; never read history or publish a group message. */
@@ -365,6 +373,17 @@ export class LocalBotHost {
   }
   get imGateway() {
     return this.store.imGateway
+  }
+  /** Authenticated main-process IM registration; unchanged syncs need no queue wake. */
+  setImOnline(botId: string, id: string, online: boolean) {
+    this.requireRunning()
+    const previous = this.store.im.get(botId, id).online
+    const result = this.store.im.setOnline(botId, id, online)
+    if (previous !== result.online) {
+      this.changed()
+      this.wake()
+    }
+    return result
   }
   acceptImEvent(input: Omit<BotMockEvent, "simulation">) {
     this.requireRunning()
@@ -571,6 +590,13 @@ export class LocalBotHost {
       if (group.memberIds.includes(id)) continue
       const threadId = `group-${group.id}-${id}`
       this.store.suppressCommands(threadId)
+      try {
+        void Promise.resolve(this.runtime.removeGroupMemberBrowser?.(group.id, id)).catch(
+          this.reportError
+        )
+      } catch (error) {
+        this.reportError(error)
+      }
       void Promise.resolve(this.runtime.cancelBackground?.(threadId)).catch(this.reportError)
     }
     this.changed()
@@ -1338,7 +1364,7 @@ export class LocalBotHost {
           )
         this.changed()
         try {
-          if (!deferredCheckpoint) this.runtime.onSettled?.(task, state, finalText)
+          if (!deferredCheckpoint) this.runtime.onSettled?.(task, state, finalText, files)
         } catch (error) {
           this.reportError(error)
         }

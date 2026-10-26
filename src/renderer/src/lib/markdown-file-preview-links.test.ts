@@ -55,5 +55,7 @@ describe("markdown file preview links", () => {
     expect(isLocalFileLikeHref("%5C%5Cserver%5Cshare%5Crepo%5Cindex.ts")).toBe(true)
     expect(isLocalFileLikeHref("file:///C:/repo/index.ts")).toBe(true)
     expect(isLocalFileLikeHref("javascript:alert(1)")).toBe(false)
+    expect(isLocalFileLikeHref("%5Cprivate%5Csecret.md")).toBe(true)
+    expect(isLocalFileLikeHref("reports/report.md")).toBe(false)
   })
 })

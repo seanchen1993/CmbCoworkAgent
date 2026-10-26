@@ -358,6 +358,44 @@ describe("Bot execution presentation", () => {
     ).toBe(0)
   })
 
+  it.each(["", "\n[Output was truncated due to size limits]"])(
+    "keeps execute failures visible and folds successes based on the final receipt: %s",
+    (suffix) => {
+      const historicalSuccess = "[Command succeeded with exit code 0]"
+      const historicalFailure = "[Command failed with exit code 7]"
+      for (const active of [false, true]) {
+        const failure = projectBotExecution(
+          [
+            call("execute", "execute"),
+            result(
+              "execute",
+              false,
+              `${historicalSuccess}\ncurrent stdout\n${historicalFailure}${suffix}`
+            )
+          ],
+          active,
+          new Set()
+        )
+        expect(failure.hiddenMessages.size).toBe(0)
+        expect(failure.foldedTools.size).toBe(0)
+        const success = projectBotExecution(
+          [
+            call("execute", "execute"),
+            result(
+              "execute",
+              false,
+              `${historicalFailure}\ncurrent stdout\n${historicalSuccess}${suffix}`
+            )
+          ],
+          active,
+          new Set()
+        )
+        expect([...success.hiddenMessages]).toEqual(["execute"])
+        expect([...success.foldedTools]).toEqual([getWorkerToolUiKey("execute", "call-execute", 0)])
+      }
+    }
+  )
+
   it("only folds a pending question behind its real inline card and preserves returned errors", () => {
     const question = call("question", "request_user_input")
     expect(projectBotExecution([question], true, new Set()).hiddenMessages.size).toBe(0)

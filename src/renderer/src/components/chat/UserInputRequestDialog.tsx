@@ -10,7 +10,12 @@ import {
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
-import { userInputAnswers, type UserInputDraftAnswer as DraftAnswer } from "@/lib/user-input-answer"
+import {
+  emptyUserInputDraft,
+  userInputAnswers,
+  type UserInputDraft,
+  type UserInputDraftAnswer as DraftAnswer
+} from "@/lib/user-input-answer"
 import { BotQuestionInput } from "../bots/BotQuestionInput"
 import type { UserInputRequest, UserInputResponse } from "@/types"
 
@@ -20,6 +25,8 @@ interface UserInputRequestDialogProps {
   onLayoutChange?: (layout: UserInputRequestDialogLayout | null) => void
   presentation?: "workbench" | "bot"
   useComposerForSingleAnswer?: boolean
+  draft?: UserInputDraft | null
+  onDraftChange?: (update: (draft: UserInputDraft) => UserInputDraft) => void
 }
 
 export interface UserInputRequestDialogLayout {
@@ -38,17 +45,45 @@ export function UserInputRequestDialog({
   onSubmit,
   onLayoutChange,
   presentation = "workbench",
-  useComposerForSingleAnswer = false
+  useComposerForSingleAnswer = false,
+  draft,
+  onDraftChange
 }: UserInputRequestDialogProps): React.JSX.Element | null {
   const dialogRef = useRef<HTMLDivElement>(null)
-  const [draftAnswers, setDraftAnswers] = useState<Record<string, DraftAnswer>>({})
-  const [activeIndex, setActiveIndex] = useState(0)
+  const [localDraft, setLocalDraft] = useState(() => emptyUserInputDraft(request?.requestId ?? ""))
+  const currentDraft = onDraftChange ? draft : localDraft
+  const { answers: draftAnswers, activeIndex } =
+    currentDraft?.requestId === request?.requestId && currentDraft
+      ? currentDraft
+      : emptyUserInputDraft(request?.requestId ?? "")
+  const changeDraft = (update: (draft: UserInputDraft) => UserInputDraft): void => {
+    if (!request) return
+    const apply = (previous: UserInputDraft): UserInputDraft =>
+      update(
+        previous.requestId === request.requestId ? previous : emptyUserInputDraft(request.requestId)
+      )
+    if (onDraftChange) onDraftChange(apply)
+    else setLocalDraft(apply)
+  }
+  const setDraftAnswers = (
+    update:
+      | Record<string, DraftAnswer>
+      | ((previous: Record<string, DraftAnswer>) => Record<string, DraftAnswer>)
+  ): void =>
+    changeDraft((previous) => ({
+      ...previous,
+      answers: typeof update === "function" ? update(previous.answers) : update
+    }))
+  const setActiveIndex = (update: number | ((previous: number) => number)): void =>
+    changeDraft((previous) => ({
+      ...previous,
+      activeIndex: typeof update === "function" ? update(previous.activeIndex) : update
+    }))
   const [collapsed, setCollapsed] = useState(false)
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null)
 
   useEffect(() => {
-    setDraftAnswers({})
-    setActiveIndex(0)
+    setLocalDraft(emptyUserInputDraft(request?.requestId ?? ""))
     setCollapsed(false)
   }, [request?.requestId])
 

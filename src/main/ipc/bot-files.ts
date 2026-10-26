@@ -8,7 +8,9 @@ import {
   MAX_ATTACHMENT_FILE_NAME_LENGTH,
   type FileAttachment
 } from "../../shared/file-attachment"
-import { basename, dirname } from "node:path"
+import { basename, dirname, join } from "node:path"
+import { botDirectory } from "../bots/paths"
+import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import type { LocalBotHost } from "../bots/host"
 import { BotError } from "../../shared/bots/contracts"
 import { botIdentifier } from "../../shared/bots/validation"
@@ -308,6 +310,46 @@ export function registerBotFileHandlers(
       return attachments
     }
   )
+  const exportFile = async (
+    event: IpcMainInvokeEvent,
+    workspace: string,
+    id: unknown,
+    validate: () => unknown
+  ) => {
+    const source = await resolveBotWorkspaceFile(workspace, fileId(id), { allowAbsolute: true })
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window) throw new Error("操作窗口已关闭")
+    const destination = await dialog.showSaveDialog(window, {
+      title: "保存工作成果",
+      defaultPath: basename(source)
+    })
+    if (destination.canceled || !destination.filePath) return false
+    validate()
+    await copyBotFile(workspace, source, destination.filePath)
+    return true
+  }
+  const groupContext = (hostId: unknown, groupId: unknown) => {
+    const host = hostFor(hostId),
+      group = botIdentifier(groupId)
+    const validate = () => host.getGroup(group)
+    validate()
+    const workspace = botDirectory(
+      join(getCmbCoworkAgentDataRoot(), "bots"),
+      "workspaces",
+      `group-${group}`
+    )
+    return { workspace, validate }
+  }
+  ipcMain.handle("bots:files:group-workspace", (_event, hostId: unknown, groupId: unknown) =>
+    groupContext(hostId, groupId).workspace
+  )
+  ipcMain.handle(
+    "bots:files:export-group",
+    async (event, hostId: unknown, groupId: unknown, id: unknown) => {
+      const { workspace, validate } = groupContext(hostId, groupId)
+      return exportFile(event, workspace, id, validate)
+    }
+  )
   ipcMain.handle(
     "bots:files:export",
     async (
@@ -319,19 +361,7 @@ export function registerBotFileHandlers(
       workId: unknown
     ) => {
       const { workspace, validate } = context(hostId, botId, groupId, workId)
-      // Transcript previews carry absolute Runtime paths; the same workspace and
-      // realpath checks still apply before showing a native destination dialog.
-      const source = await resolveBotWorkspaceFile(workspace, fileId(id), { allowAbsolute: true })
-      const window = BrowserWindow.fromWebContents(event.sender)
-      if (!window) throw new Error("操作窗口已关闭")
-      const destination = await dialog.showSaveDialog(window, {
-        title: "保存工作成果",
-        defaultPath: basename(source)
-      })
-      if (destination.canceled || !destination.filePath) return false
-      validate()
-      await copyBotFile(workspace, source, destination.filePath)
-      return true
+      return exportFile(event, workspace, id, validate)
     }
   )
   ipcMain.handle(

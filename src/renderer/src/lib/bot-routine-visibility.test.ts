@@ -37,6 +37,19 @@ const turn: Message[] = [
   }
 ]
 describe("quiet Bot routine visibility", () => {
+  it.each(["bot_deliver_files", "request_user_input", "bot_request_browser_help", "bot_browser"])(
+    "retains scheduled %s cards while hiding only the terminal silence marker",
+    (name) => {
+      const messages = turn.map((message) =>
+        message.id === "check"
+          ? { ...message, tool_calls: [{ id: "action", name, args: { action: "request_help" } }] }
+          : message
+      )
+      expect([...quietBotTurnMessageIds(messages, new Map([[source.requestId, source]]))]).toEqual([
+        "final"
+      ])
+    }
+  )
   it("hides durable Host continuation boundaries before source lookup without hiding user text or assistant output", () => {
     const id = `bot-continuation:task:${"a".repeat(64)}`
     const internal: Message = { id, role: "user", content: "续办后台任务", created_at: new Date(0) }

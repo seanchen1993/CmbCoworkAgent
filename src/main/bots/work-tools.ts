@@ -3,6 +3,8 @@ import { z } from "zod"
 import { ToolMessage } from "@langchain/core/messages"
 import type { DynamicStructuredTool } from "@langchain/core/tools"
 import type { LocalBotHost } from "./host"
+import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../agent/runtime-tool-catalog"
+import { getHookAgentIdFromRequest } from "../hooks/execution-context"
 
 /** Extends the ordinary beta Runtime. Final assistant replies remain normal chat. */
 export function createBotWorkTools(
@@ -14,11 +16,16 @@ export function createBotWorkTools(
   const id = z.string().trim().min(1).max(160)
   const invoke = async (
     name: string,
-    callId: string | undefined,
+    config: { toolCall?: { id?: string } },
     action: (host: LocalBotHost) => unknown | Promise<unknown>
   ) => {
+    const callId = config.toolCall?.id
     try {
       signal.throwIfAborted()
+      if (getHookAgentIdFromRequest(config))
+        throw new Error(
+          "Temporary task agents return results to their parent Bot; only the parent Bot manages persistent work."
+        )
       if (!callId) throw new Error("缺少可信工具调用标识，未执行工作操作")
       const host = getHost()
       host.workToolSource(taskId)
@@ -43,11 +50,10 @@ export function createBotWorkTools(
   return [
     tool(
       async ({ query, cursor }, config) =>
-        invoke("bot_work_projects", config.toolCall?.id, (host) =>
-          host.workProjects(taskId, query, cursor)
-        ),
+        invoke("bot_work_projects", config, (host) => host.workProjects(taskId, query, cursor)),
       {
         name: "bot_work_projects",
+        metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
           'Find existing local projects by the name mentioned by the desktop user, with bounded metadata and pagination. For a named project, create with workspace={kind:"project",projectId:<returned ID>}. The returned path is display-only: do not convert this into a directory target. If multiple projects match, ask which one; never infer a filesystem path from a project name. This only selects a local directory, not a project-mode pipeline or cloud session. Unavailable to external/mock channels.',
         schema: z.object({
@@ -58,12 +64,13 @@ export function createBotWorkTools(
     ),
     tool(
       async ({ cursor, query }, config) =>
-        invoke("bot_work_list", config.toolCall?.id, (host) => {
+        invoke("bot_work_list", config, (host) => {
           const task = host.workToolSource(taskId)
           return host.workTargets(task.id, cursor, query)
         }),
       {
         name: "bot_work_list",
+        metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
           "List your desktop user's independent works, as bounded summaries. Use the returned exact ID; ask when the intended work is ambiguous. This is not a request to create work or read another work's transcript.",
         schema: z.object({
@@ -74,7 +81,7 @@ export function createBotWorkTools(
     ),
     tool(
       async ({ requestKey, title, goal, contextMessageIds, workspace }, config) =>
-        invoke("bot_work_create", config.toolCall?.id, (host) => {
+        invoke("bot_work_create", config, (host) => {
           const task = host.workToolSource(taskId)
           return host.createWork(
             {
@@ -90,6 +97,7 @@ export function createBotWorkTools(
         }),
       {
         name: "bot_work_create",
+        metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
           "Create a separate task conversation for the current user's work when useful. The host starts its initial execution automatically; do not also send the same instruction. Available from main chat, not recursively inside a task. Preserve the user's goal and constraints. Use a designated directory or a project ID from bot_work_projects; omit workspace for the Bot default. That workspace is retained for later revisions. Invalid targets fail without fallback. Reuse requestKey after a lost reply.",
         schema: z.object({
@@ -129,11 +137,12 @@ export function createBotWorkTools(
     ),
     tool(
       async ({ requestKey, workId, message }, config) =>
-        invoke("bot_work_send", config.toolCall?.id, (host) =>
+        invoke("bot_work_send", config, (host) =>
           host.sendWork({ taskId, callId: config.toolCall!.id!, key: requestKey }, workId, message)
         ),
       {
         name: "bot_work_send",
+        metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
           "Forward a user's follow-up to the exact same-audience task ID from a receipt or list, preserving its history and workspace. Clarify an ambiguous target. To revise completed work, continue it first, then send. Inside that task, execute directly. A queued receipt does not mean execution succeeded.",
         schema: z.object({
@@ -146,7 +155,7 @@ export function createBotWorkTools(
     ...(["complete", "continue"] as const).map((action) =>
       tool(
         async ({ requestKey, workId, expectedVersion }, config) =>
-          invoke(`bot_work_${action}`, config.toolCall?.id, (host) =>
+          invoke(`bot_work_${action}`, config, (host) =>
             host.changeWorkFromTool(
               { taskId, callId: config.toolCall!.id!, key: requestKey },
               workId,
@@ -156,6 +165,7 @@ export function createBotWorkTools(
           ),
         {
           name: `bot_work_${action}`,
+          metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
           description:
             action === "complete"
               ? "Mark the exact work completed only on the current user's explicit completion instruction. The host refuses pending work, collaboration, background commands, or completing the currently executing source work. A model result alone is not business completion."

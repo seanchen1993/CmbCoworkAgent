@@ -5,6 +5,7 @@ import type { BrowserContext, Page, Locator, Dialog, Download } from "playwright
 import { AsyncKeyedLock } from "../ipc/async-keyed-lock"
 import {
   BotError,
+  botGroupBrowserScope,
   type BotBrowserHumanAction,
   type BotBrowserState
 } from "../../shared/bots/contracts"
@@ -186,10 +187,11 @@ export class BotBrowserService {
             // Parent-created targets register their exact owner before the human-tab fallback.
             if (!opener) await this.creating?.catch(() => undefined)
             if ([...this.pages.values()].some((item) => item.page === page)) return
-            const owner =
-              [...this.pages.values()].find((item) => item.page === opener)?.botId ??
-              this.human?.botId
+            const owner = opener
+              ? [...this.pages.values()].find((item) => item.page === opener)?.botId
+              : this.human?.botId
             if (owner && !page.isClosed()) this.register(owner, page)
+            else if (opener) await page.close().catch(() => {})
           })
           .catch(() => {})
       })
@@ -226,9 +228,11 @@ export class BotBrowserService {
     }
     this.pages.set(entry.id, entry)
     page.on("close", () => {
+      if (this.pages.get(entry.id) !== entry) return
       this.pages.delete(entry.id)
       if (
         this.human?.botId === botId &&
+        this.human.status === "active" &&
         ![...this.pages.values()].some((item) => item.botId === botId)
       ) {
         this.human = null
@@ -237,6 +241,8 @@ export class BotBrowserService {
     })
     page.on("popup", (popup) => {
       if (
+        this.pages.get(entry.id) !== entry ||
+        page.isClosed() ||
         this.pages.size >= 24 ||
         [...this.pages.values()].filter((item) => item.botId === botId).length >= 6
       ) {
@@ -824,6 +830,8 @@ export class BotBrowserService {
     this.human = claim
     try {
       await this.lock.withKey("browser", async () => {
+        if (this.stopping || this.human !== claim || claim.status !== "requesting")
+          throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后重试")
         const entry = await this.page(botId, pageId ?? this.viewedPage(botId)?.id)
         await this.engine!.show(entry.page, claim.generation)
         if (this.stopping || this.human !== claim || entry.page.isClosed())
@@ -833,8 +841,10 @@ export class BotBrowserService {
         this.rememberViewed(entry)
       })
     } catch (error) {
-      if (this.human === claim) this.human = null
-      for (const wake of this.returned) wake()
+      if (this.human === claim) {
+        this.human = null
+        for (const wake of this.returned) wake()
+      }
       throw error
     }
   }
@@ -853,6 +863,8 @@ export class BotBrowserService {
     claim.status = "requesting"
     try {
       await this.lock.withKey("browser", async () => {
+        if (this.human !== claim)
+          throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后再归还")
         await this.engine?.hide()
       })
     } catch (error) {
@@ -862,11 +874,11 @@ export class BotBrowserService {
     if (this.human === claim) {
       if (outcome === "skipped") claim.helpSkipped = true
       this.human = null
+      for (const entry of this.pages.values())
+        if (entry.botId === botId) entry.automation.invalidate()
+      this.generation++
+      for (const wake of this.returned) wake()
     }
-    for (const entry of this.pages.values())
-      if (entry.botId === botId) entry.automation.invalidate()
-    this.generation++
-    for (const wake of this.returned) wake()
   }
   async navigateAsHuman(botId: string, pageId: string, address: string): Promise<void> {
     const url = new URL(address)
@@ -971,11 +983,23 @@ export class BotBrowserService {
     this.retiredBots.add(botId)
     const belongs = (scope: string) =>
       scope === botId || (!botId.startsWith("group-") && scope.endsWith(`--${botId}`))
-    if (this.human && belongs(this.human.botId)) this.human = null
-    for (const wake of this.returned) wake()
+    await this.clearPages(belongs)
+  }
+  removeGroupMember(groupId: string, botId: string): Promise<void> {
+    const scope = botGroupBrowserScope(groupId, botId)
+    return this.clearPages((owner) => owner === scope)
+  }
+  private async clearPages(belongs: (scope: string) => boolean): Promise<void> {
+    if (this.human && belongs(this.human.botId)) {
+      this.human = null
+      for (const wake of this.returned) wake()
+    }
     await this.lock.withKey("browser", async () => {
+      // FIFO puts this cleanup after in-flight operations and before a rejoined member's new ones.
+      // Keep entries until close succeeds so a failed native close remains available for cleanup retry.
       for (const entry of this.pages.values()) {
         if (!belongs(entry.botId)) continue
+        entry.automation.invalidate()
         await entry.dialog?.dismiss().catch(() => {})
         await entry.page.close({ runBeforeUnload: false })
         this.pages.delete(entry.id)

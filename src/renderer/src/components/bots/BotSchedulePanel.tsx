@@ -214,7 +214,10 @@ export function BotSchedulePanel({
                   onValueChange={(frequency) =>
                     setInput((value) => ({
                       ...value,
-                      frequency: frequency as BotScheduleInput["frequency"]
+                      frequency: frequency as BotScheduleInput["frequency"],
+                      runAtTime: value.runAtTime ?? "09:00",
+                      weekday: value.weekday ?? 1,
+                      intervalMinutes: value.intervalMinutes ?? 60
                     }))
                   }
                 >

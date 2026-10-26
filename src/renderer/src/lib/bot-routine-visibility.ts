@@ -48,6 +48,7 @@ export function quietBotTurnMessageIds(
   const ranges: Array<{ start: number; end: number; taskId: string }> = []
   const quiet = new Set<string>()
   const blocked = new Set<string>()
+  const actionable = new Set<string>()
   let start = -1
   const finish = (end: number) => {
     if (start < 0) return
@@ -66,7 +67,6 @@ export function quietBotTurnMessageIds(
     for (let i = start + 1; i < end; i++) {
       if (messages[i].role === "system") blocked.add(origin.id)
       if (
-        origin.origin.kind === "notification" &&
         messages[i].tool_calls?.some(
           (tool) =>
             tool.name === "bot_deliver_files" ||
@@ -74,8 +74,10 @@ export function quietBotTurnMessageIds(
             tool.name === "bot_request_browser_help" ||
             (tool.name === "bot_browser" && tool.args.action === "request_help")
         )
-      )
+      ) {
         blocked.add(origin.id)
+        actionable.add(origin.id)
+      }
       if (messages[i].role === "assistant" && !messages[i].subagent_tool_call_id)
         lastAssistant = messages[i]
     }
@@ -100,7 +102,8 @@ export function quietBotTurnMessageIds(
     else {
       quiet.add(origin.id)
       // Keep an actionable file/question card even when its final reply is the control marker.
-      if (origin.origin.kind === "notification") hidden.add(lastAssistant.id)
+      if (origin.origin.kind === "notification" || actionable.has(origin.id))
+        hidden.add(lastAssistant.id)
     }
   }
   for (let i = 0; i < messages.length; i++) {

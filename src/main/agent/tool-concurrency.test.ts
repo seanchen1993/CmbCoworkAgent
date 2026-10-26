@@ -419,7 +419,10 @@ describe("shared-workspace user input", () => {
 
   it.each([
     undefined,
+    null,
     {},
+    { action: null },
+    { action: 1 },
     { action: "new-file-action" },
     { action: "observe_extra" },
     '{"action":"observe"}',
@@ -429,7 +432,8 @@ describe("shared-workspace user input", () => {
     async (args) => {
       const gate = createGate(false, true),
         finish = deferred()
-      let read = false
+      let read = false,
+        write = false
       const browser = gate.wrapToolCall(
         request("bot_browser", "unknown", args),
         () => finish.promise
@@ -437,21 +441,45 @@ describe("shared-workspace user input", () => {
       const peer = gate.wrapToolCall(request("read_file"), async () => {
         read = true
       })
+      const writer = gate.wrapToolCall(request("write_file"), async () => {
+        write = true
+      })
       try {
         await turn()
         expect(read).toBe(false)
+        expect(write).toBe(false)
       } finally {
         finish.resolve()
-        await Promise.all([browser, peer])
+        await Promise.all([browser, peer, writer])
       }
     }
   )
-  it.each(["observe", "navigate", "click", "fill", "press", "scroll", "close", "dialog"])(
-    "does not hold the file lock during a trusted Bot browser %s",
+  it.each([
+    "observe",
+    "navigate",
+    "click",
+    "fill",
+    "press",
+    "scroll",
+    "close",
+    "dialog",
+    "request_help",
+    "hover",
+    "drag",
+    "select",
+    "fill_form",
+    "wait",
+    "evaluate",
+    "back"
+  ])(
+    "allows peer file tools during a trusted Bot browser %s wait while serializing file writers",
     async (action) => {
       const gate = createGate(false, true)
-      const returned = deferred()
-      let read = false
+      const returned = deferred(),
+        written = deferred()
+      let read = false,
+        firstWrite = false,
+        secondWrite = false
       const browser = gate.wrapToolCall(
         request("bot_browser", "browser", { action }),
         () => returned.promise
@@ -459,12 +487,57 @@ describe("shared-workspace user input", () => {
       const peer = gate.wrapToolCall(request("read_file"), async () => {
         read = true
       })
+      const writer = gate.wrapToolCall(request("write_file", "first"), async () => {
+        firstWrite = true
+        await written.promise
+      })
+      const nextWriter = gate.wrapToolCall(request("write_file", "second"), async () => {
+        secondWrite = true
+      })
       try {
         await turn()
         expect(read).toBe(true)
+        expect(firstWrite).toBe(true)
+        expect(secondWrite).toBe(false)
+        written.resolve()
+        await Promise.all([writer, nextWriter])
+        expect(secondWrite).toBe(true)
       } finally {
+        written.resolve()
         returned.resolve()
-        await Promise.all([browser, peer])
+        await Promise.all([browser, peer, writer, nextWriter])
+      }
+    }
+  )
+
+  it.each(["hover", "drag", "select", "fill_form", "wait", "evaluate", "back"])(
+    "keeps browser %s behind the file gate without the trusted browser opt-in",
+    async (action) => {
+      for (const userInputWithoutToolLock of [false, true]) {
+        const gate = createGate(userInputWithoutToolLock),
+          returned = deferred()
+        let read = false,
+          write = false
+        const browser = gate.wrapToolCall(
+          request("bot_browser", "browser", { action }),
+          () => returned.promise
+        )
+        const peer = gate.wrapToolCall(request("read_file"), async () => {
+          read = true
+        })
+        const writer = gate.wrapToolCall(request("write_file"), async () => {
+          write = true
+        })
+        try {
+          await turn()
+          expect(read).toBe(false)
+          expect(write).toBe(false)
+        } finally {
+          returned.resolve()
+          await Promise.all([browser, peer, writer])
+        }
+        expect(read).toBe(true)
+        expect(write).toBe(true)
       }
     }
   )

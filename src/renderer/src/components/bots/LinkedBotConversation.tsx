@@ -5,11 +5,13 @@ import type { BotWorkConversationResolution } from "../../../../shared/bots/conv
 import { useBots } from "./use-bots"
 import { BotConversation } from "./BotConversation"
 import { botWorkClient } from "@/lib/bot-work-client"
+import { useThreadStateSummaries } from "@/lib/thread-context"
 
 /** Same managed ChatContainer as the Bot entrance, not another conversation or runtime. */
 export function LinkedBotConversation({ link }: { link: BotWorkConversationResolution }) {
   const client = window.api.bots,
     { snapshot } = useBots(client)
+  const threadSummaries = useThreadStateSummaries()
   const target = useMemo(
     () => botWorkClient(client, link.work),
     [client, link.work.id, link.work.threadId]
@@ -24,7 +26,11 @@ export function LinkedBotConversation({ link }: { link: BotWorkConversationResol
           bots={snapshot?.bots ?? [link.bot]}
           schedules={snapshot?.schedules ?? []}
           tasks={tasks}
-          backgroundBusy={Boolean(snapshot?.backgroundThreads?.includes(link.work.threadId))}
+          backgroundBusy={Boolean(
+            snapshot?.backgroundThreads?.includes(link.work.threadId) ||
+            threadSummaries[link.work.threadId]?.workflowRunning ||
+            threadSummaries[link.work.threadId]?.hasRunningCoordinatorWorker
+          )}
           client={target}
           onOpenWork={(workId) => {
             void client

@@ -28,6 +28,12 @@ let browser: BotBrowserService | undefined
 let summaries: BotMemoryMaintainer | undefined
 let shutdown: Promise<void> | undefined
 
+/** Read-only group file access does not depend on a member's execution thread. */
+export function getBotGroupFileWorkspace(groupId: string): string {
+  getLocalBotHost().getGroup(groupId)
+  return botDirectory(join(getCmbCoworkAgentDataRoot(), "bots"), "workspaces", `group-${groupId}`)
+}
+
 export function getBotBrowserService(): BotBrowserService {
   return (browser ??= new BotBrowserService(
     () => startElectronBotBrowser(join(getCmbCoworkAgentDataRoot(), "bots", "browser-profile")),

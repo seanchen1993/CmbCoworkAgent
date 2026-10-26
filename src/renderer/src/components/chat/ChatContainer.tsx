@@ -2304,6 +2304,7 @@ export function ChatContainer({
     pendingApproval,
     approvalQueue,
     pendingUserInput,
+    userInputDraft,
     todos,
     error: threadError,
     errorDetail,
@@ -2339,6 +2340,7 @@ export function ChatContainer({
     removePendingApproval,
     setPendingApproval,
     setPendingUserInput,
+    setUserInputDraft,
     setActiveTurnStartTime,
     clearFinishedWorkflowRun,
     appendMessage,
@@ -3443,11 +3445,16 @@ export function ChatContainer({
 
   const handleUserInputSubmit = useCallback(
     (response: UserInputResponse): void => {
+      if (
+        surface === "bot" &&
+        threadContext.getThreadState(threadId).pendingUserInput?.requestId !== response.requestId
+      )
+        return
       window.api.userInput.sendResponse(response)
       setPendingUserInput(null)
       setUserInputDialogLayout(null)
     },
-    [setPendingUserInput]
+    [setPendingUserInput, surface, threadContext, threadId]
   )
 
   const agentValues = stream?.values as AgentStreamValues | undefined
@@ -8106,6 +8113,12 @@ export function ChatContainer({
           request={pendingUserInput}
           onSubmit={handleUserInputSubmit}
           presentation="bot"
+          draft={userInputDraft}
+          onDraftChange={
+            pendingUserInput
+              ? (update) => setUserInputDraft(pendingUserInput.requestId, update)
+              : undefined
+          }
           useComposerForSingleAnswer={botQuestionUsesComposer}
         />
       )}

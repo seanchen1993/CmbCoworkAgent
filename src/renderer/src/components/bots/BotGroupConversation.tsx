@@ -40,7 +40,10 @@ import { ChatContainer } from "@/components/chat/ChatContainer"
 import { ChatSearchContext } from "@/components/chat/ChatSearchContext"
 import type { DurableChatSearchMatch } from "@/components/chat/ChatSearchOverlay"
 import type { ChatSearchReveal } from "../../../../shared/chat-search-types"
-import { ChatPresentationContext } from "@/components/chat/chat-presentation-context"
+import {
+  ChatFileWorkspaceContext,
+  ChatPresentationContext
+} from "@/components/chat/chat-presentation-context"
 import type {
   BotClient,
   BotDefinition,
@@ -57,6 +60,7 @@ import {
   EMPTY_GROUP_DRAFT,
   groupDraftKey,
   sendGroupDraft,
+  hasUnchangedGroupRequest,
   useBotGroupDrafts
 } from "@/lib/bot-group-drafts"
 import { splitBotInlineReasoning } from "@/lib/bot-inline-reasoning"
@@ -156,6 +160,7 @@ export function BotGroupConversation({
     targets: draft.targets,
     replyAuthorId: draft.replyTo?.authorBotId
   })
+  const retrying = hasUnchangedGroupRequest(draft)
   const targets = mentioned.ids
   const editDraft = (patch: {
     text?: string
@@ -175,6 +180,36 @@ export function BotGroupConversation({
   const [older, setOlder] = useState(true)
   const refreshRef = useRef<() => void>(() => {})
   const members = bots.filter((bot) => group.memberIds.includes(bot.id))
+  const filePreviewThreadId = `group-files-${group.id}`
+  const [fileWorkspace, setFileWorkspace] = useState<{
+    client: BotClient
+    groupId: string
+    path: string
+  } | null>(null)
+  useEffect(() => {
+    let disposed = false
+    void client
+      .groupFileWorkspace(group.id)
+      .then((path) => {
+        if (!disposed) setFileWorkspace({ client, groupId: group.id, path })
+      })
+      .catch(() => {
+        if (!disposed) setFileWorkspace(null)
+      })
+    return () => {
+      disposed = true
+    }
+  }, [client, group.id])
+  const markdownWorkspace = useMemo(
+    () => ({
+      threadId: filePreviewThreadId,
+      workspacePath:
+        fileWorkspace?.client === client && fileWorkspace.groupId === group.id
+          ? fileWorkspace.path
+          : null
+    }),
+    [filePreviewThreadId, fileWorkspace, client, group.id]
+  )
   const [attaching, setAttaching] = useState(false)
   const attachmentLock = useRef(false)
   const attachmentGeneration = useRef(0)
@@ -370,10 +405,10 @@ export function BotGroupConversation({
     event.preventDefault()
     setError(null)
     // The composer already exposes this validation error, including to screen readers.
-    if (mentioned.error) return
+    if (!retrying && mentioned.error) return
     if (
       (!input.trim() && !draft.attachments.length) ||
-      !targets.length ||
+      (!retrying && !targets.length) ||
       draft.sending ||
       attachmentLock.current
     )
@@ -408,16 +443,23 @@ export function BotGroupConversation({
   }
   return (
     <ChatPresentationContext.Provider value="bot">
-      {members.map((bot) => (
+      <BotMessageFilePreview
+        botId={group.id}
+        groupId={group.id}
+        threadId={filePreviewThreadId}
+        name={group.name}
+        client={client}
+      />
+      {inspecting && (
         <BotMessageFilePreview
-          key={bot.id}
-          botId={bot.id}
+          key={inspecting.threadId}
+          botId={inspecting.botId}
           groupId={group.id}
-          threadId={`group-${group.id}-${bot.id}`}
+          threadId={inspecting.threadId}
           name={group.name}
           client={client}
         />
-      ))}
+      )}
       <header className="bot-chat-header bot-group-header">
         <button
           className="bot-title-pill"
@@ -745,13 +787,17 @@ export function BotGroupConversation({
                                       : null
                                   }
                                 >
-                                  <StreamingMarkdown
-                                    isStreaming={false}
-                                    botTranscript={Boolean(item.authorBotId)}
-                                    threadId={author ? `group-${group.id}-${author.id}` : undefined}
-                                  >
-                                    {displayText}
-                                  </StreamingMarkdown>
+                                  <ChatFileWorkspaceContext.Provider value={markdownWorkspace}>
+                                    <StreamingMarkdown
+                                      isStreaming={false}
+                                      botTranscript={Boolean(item.authorBotId)}
+                                      threadId={
+                                        author ? `group-${group.id}-${author.id}` : filePreviewThreadId
+                                      }
+                                    >
+                                      {displayText}
+                                    </StreamingMarkdown>
+                                  </ChatFileWorkspaceContext.Provider>
                                 </BotInlineMentionsContext.Provider>
                                 <BotGroupMessageActions
                                   messageId={item.id}
@@ -766,15 +812,15 @@ export function BotGroupConversation({
                                 />
                               </div>
                             )}
-                            {item.files && author && (
+                            {item.files && (
                               <div className="bot-delivered-files">
                                 {item.files.map((file) => (
                                   <BotDeliveredFile
                                     key={file.filePath}
                                     client={client}
-                                    botId={author.id}
+                                    botId={group.id}
                                     groupId={group.id}
-                                    threadId={`group-${group.id}-${author.id}`}
+                                    threadId={filePreviewThreadId}
                                     filePath={file.filePath}
                                     attachmentPath={file.attachmentPath}
                                     size={file.size}
@@ -783,7 +829,7 @@ export function BotGroupConversation({
                                 {!item.text && (
                                   <BotGroupMessageActions
                                     messageId={item.id}
-                                    author={author.name}
+                                    author={author?.name ?? "已移除的 Bot"}
                                     text=""
                                     onReply={replyToMessage}
                                     onError={(cause) => setError(botErrorMessage(cause))}
@@ -1007,7 +1053,7 @@ export function BotGroupConversation({
                       draft.sending ||
                       attaching ||
                       (!input.trim() && !draft.attachments.length) ||
-                      !targets.length
+                      (!retrying && !targets.length)
                     }
                     aria-label="发送群聊消息"
                   >
@@ -1019,7 +1065,7 @@ export function BotGroupConversation({
                   </button>
                 )}
               </div>
-              {mentioned.error && (
+              {!retrying && mentioned.error && (
                 <p role="alert" className="text-xs text-destructive">
                   {mentioned.error}
                 </p>

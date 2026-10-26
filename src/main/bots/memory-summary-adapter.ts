@@ -3,6 +3,7 @@ import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { getGlobalRoutingMode, isMemoryEnabled } from "../storage"
 import { resolveModel } from "../routing"
 import { getModelConfigByRef, getDefaultModelConfig } from "../models/registry"
+import { SelectedModelUnavailableError } from "../models/selection-error"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { summarizeAndSave, type MemoryOperation } from "../memory/summarizer"
 import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
@@ -97,16 +98,25 @@ export function createBotMemoryMaintainer(
       isActive(batch.botId) &&
       memory.editVersion(batch.botId) === batch.editVersion
     if (!eligible()) return
-    const routing = await resolveModel({
-      taskSource: "memory_summarize",
-      threadId: batch.threadId,
-      requestedModelId: batch.modelRef ?? undefined,
-      routingMode: getGlobalRoutingMode()
-    }).catch(() => null)
+    const routingMode = getGlobalRoutingMode()
+    let routing: Awaited<ReturnType<typeof resolveModel>> | null
+    try {
+      routing = await resolveModel({
+        taskSource: "memory_summarize",
+        threadId: batch.threadId,
+        requestedModelId: batch.modelRef ?? undefined,
+        routingMode
+      })
+    } catch (error) {
+      if (error instanceof SelectedModelUnavailableError) return
+      routing = null
+    }
     if (!eligible()) return
+    // A pinned config may disappear after routing; that is not consent to another provider.
     const config =
-      getModelConfigByRef(routing?.resolvedModelId ?? batch.modelRef) ?? getDefaultModelConfig()
-    if (!config?.apiKey) return
+      getModelConfigByRef(routing?.resolvedModelId ?? batch.modelRef) ??
+      (routingMode === "pinned" && batch.modelRef?.trim() ? null : getDefaultModelConfig())
+    if (!config?.apiKey?.trim()) return
     const model = new ChatOpenAI({
       model: config.model,
       apiKey: config.apiKey,

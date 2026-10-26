@@ -17,8 +17,7 @@ export function botWorkClient(client: BotClient, work: BotWorkItem): BotClient {
       throw new BotError("INVALID_INPUT", "工作会话目标不一致")
     return { kind: "bot", botId: work.botId, workId: work.id }
   }
-  return {
-    ...client,
+  const overrides = {
     open: async (botId) => {
       owner(botId)
       const receipt = await client.open(botId, work.id)
@@ -95,5 +94,17 @@ export function botWorkClient(client: BotClient, work: BotWorkItem): BotClient {
     navigateBrowser: (botId, pageId, url) => client.navigateBrowser(browser(botId), pageId, url),
     operateBrowser: (botId, action, generation) =>
       client.operateBrowser(browser(botId), action, generation)
-  }
+  } satisfies Partial<BotClient>
+  // Registry and contextBridge clients need not have enumerable properties.
+  // Use a separate facade so frozen methods can be overridden and class methods keep their receiver.
+  const methods = new Map<PropertyKey, unknown>()
+  return new Proxy({} as BotClient, {
+    get(_target, key) {
+      if (Object.prototype.hasOwnProperty.call(overrides, key)) return Reflect.get(overrides, key)
+      const value = Reflect.get(client, key, client)
+      if (typeof value !== "function") return value
+      if (!methods.has(key)) methods.set(key, value.bind(client))
+      return methods.get(key)
+    }
+  })
 }

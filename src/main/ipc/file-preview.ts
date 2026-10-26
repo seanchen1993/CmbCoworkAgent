@@ -54,9 +54,17 @@ function validateSource(source: unknown): source is WorkspaceFilePreviewSource {
     workspacePathKind === "relative" ||
     workspacePathKind === "absolute" ||
     workspacePathKind === "auto"
+  const groupId = record.botGroupId
   return hasThreadId
-    ? validBoundedString(record.threadId, 256) && filePath && validWorkspacePathKind
-    : validBoundedString(record.externalGrant, 256) && filePath && workspacePathKind === undefined
+    ? validBoundedString(record.threadId, 256) &&
+        filePath &&
+        validWorkspacePathKind &&
+        (groupId === undefined ||
+          (validBoundedString(groupId, 160) && /^[a-zA-Z0-9_-]+$/.test(groupId)))
+    : validBoundedString(record.externalGrant, 256) &&
+        filePath &&
+        workspacePathKind === undefined &&
+        groupId === undefined
 }
 
 function validateBaseRequest(
@@ -138,7 +146,9 @@ async function prepareWorkerSource(
       trustedRootPath: resolved.rootPath
     }
   }
-  const workspacePath = await readThreadWorkspacePathInWorker(source.threadId)
+  const workspacePath = source.botGroupId
+    ? (await import("../bots/local-service")).getBotGroupFileWorkspace(source.botGroupId)
+    : await readThreadWorkspacePathInWorker(source.threadId)
   if (!workspacePath) throw new Error("No workspace folder linked")
   return {
     source: {

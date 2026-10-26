@@ -63,7 +63,7 @@ import {
   saveBotConversationDraft,
   pruneBotConversationDrafts
 } from "@/lib/bot-conversation-draft"
-import { BotDraftFileTransfer, validateNewChatFiles } from "@/lib/bot-new-chat-files"
+import { validateNewChatFiles } from "@/lib/bot-new-chat-files"
 import {
   botChatRecipientKey,
   materializeBotChatRecipients,
@@ -116,10 +116,17 @@ import { BotMockChannelDialog } from "./BotMockChannelDialog"
 import { botChatAccent } from "@/lib/bot-chat-accent"
 import { BotWorkspaceMenu } from "./BotWorkspaceMenu"
 import { BotPanelDivider } from "./BotPanelDivider"
-import { useBotViewStore, DEFAULT_BOT_VIEW, clampBotPanelWidth } from "./view-store"
+import {
+  useBotViewStore,
+  DEFAULT_BOT_VIEW,
+  clampBotPanelWidth,
+  createBotNewChatDraft
+} from "./view-store"
 import "./bots.css"
 
 const COLORS = ["#ed2040", "#168bea", "#ffb800", "#9a65ee", "#37b897", "#f07e4a"]
+const PENDING_NEW_CHAT_RECIPIENT =
+  "这位 Bot 正在创建，请等待原创建结果后再重试。文字和附件仍可编辑。"
 const STATE_LABELS: Record<BotTask["state"], string> = {
   queued: "等待执行",
   running: "正在处理",
@@ -135,6 +142,7 @@ const STATE_LABELS: Record<BotTask["state"], string> = {
 function BotEditor({
   bot,
   client,
+  createBot,
   onClose,
   onSaved,
   returnFocusTo,
@@ -143,6 +151,7 @@ function BotEditor({
 }: {
   bot: BotDefinition | null
   client: BotClient
+  createBot?(input: CreateBotInput): Promise<BotDefinition>
   onClose(): void
   onSaved(bot: BotDefinition): void
   returnFocusTo?: HTMLElement | null
@@ -181,7 +190,7 @@ function BotEditor({
             expectedVersion: bot.version,
             archived: bot.archived
           })
-        : await client.create(input)
+        : await (createBot ? createBot(input) : client.create(input))
       onSaved(saved)
     } catch (cause) {
       setError(botErrorMessage(cause))
@@ -429,6 +438,10 @@ function GroupFiles({
 }
 
 export function BotsWorkspace({ client = localBotClient() }: { client?: BotClient }) {
+  return <BotWorkspaceForHost key={client.hostId} client={client} />
+}
+
+function BotWorkspaceForHost({ client }: { client: BotClient }) {
   const { snapshot, error, retry } = useBots(client)
   const [profileName, setProfileName] = useState("")
   useEffect(() => {
@@ -536,17 +549,38 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     )
   const searchInputRef = useRef<HTMLInputElement>(null)
   const [newChat, setNewChat] = useState(false)
-  const [newChatRecipients, setNewChatRecipients] = useState<BotChatRecipient[]>([])
-  const [newChatDraft, setNewChatDraft] = useState("")
-  const newChatDraftRef = useRef("")
-  const [newChatFiles, setNewChatFiles] = useState<File[]>([])
-  const newChatFilesRef = useRef<File[]>([])
-  const newChatTransfer = useRef(new BotDraftFileTransfer())
+  const [initialNewChatDraft] = useState(
+    () => useBotViewStore.getState().newChatDrafts[client.hostId] ?? createBotNewChatDraft()
+  )
+  const newChatState = useBotViewStore(
+    (state) => state.newChatDrafts[client.hostId] ?? initialNewChatDraft
+  )
+  const updateNewChatDraft = (patch: Partial<typeof newChatState>) => {
+    const state = useBotViewStore.getState()
+    state.updateNewChat(client.hostId, {
+      ...(state.newChatDrafts[client.hostId] ?? initialNewChatDraft),
+      ...patch
+    })
+  }
+  const newChatRecipients = newChatState.recipients
+  const setNewChatRecipients = (
+    value: BotChatRecipient[] | ((previous: BotChatRecipient[]) => BotChatRecipient[])
+  ) => {
+    const current = useBotViewStore.getState().newChatDrafts[client.hostId] ?? initialNewChatDraft
+    updateNewChatDraft({
+      recipients: typeof value === "function" ? value(current.recipients) : value
+    })
+  }
+  const newChatDraft = newChatState.text
+  const newChatDraftRef = useRef(newChatDraft)
+  const newChatFiles = newChatState.files
+  const newChatFilesRef = useRef(newChatFiles)
+  const newChatTransfer = initialNewChatDraft.transfer
   const editNewChatFiles = (files: File[]) => {
     try {
       validateNewChatFiles(files)
       newChatFilesRef.current = files
-      setNewChatFiles(files)
+      updateNewChatDraft({ files })
       newChatTransfer.current.keep(files)
       setNewChatError(null)
     } catch (cause) {
@@ -555,20 +589,37 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   }
   const editNewChatDraft = (value: string) => {
     newChatDraftRef.current = value
-    setNewChatDraft(value)
+    updateNewChatDraft({ text: value })
   }
-  const [newChatBusy, setNewChatBusy] = useState(false)
+  const newChatBusy = newChatState.busy
+  const setNewChatBusy = (busy: boolean) => updateNewChatDraft({ busy })
   const [newChatError, setNewChatError] = useState<string | null>(null)
-  const newChatAttempt = useRef(0)
-  const creatingChat = useRef(false)
-  const createdChatGroup = useRef<BotGroup | null>(null)
-  const createdChatRecipients = useRef(new Map<string, BotDefinition>())
-  const privateChatRecipient = useRef<BotDefinition | null>(null)
-  const newChatCreateIntent = useRef<"draft" | "send" | null>(null)
+  const newChatAttempt = initialNewChatDraft.attempt
+  const creatingChat = initialNewChatDraft.creating
+  const createdChatGroup = initialNewChatDraft.group
+  const createdChatRecipients = initialNewChatDraft.createdRecipients
+  const pendingChatRecipients = initialNewChatDraft.pendingRecipients
+  const privateChatRecipient = initialNewChatDraft.privateRecipient
+  const newChatCreateIntent = useRef<{
+    intent: "draft" | "send"
+    recipientKey: string
+  } | null>(null)
   const threadContext = useThreadContext()
   useEffect(
     () => () => {
       newChatAttempt.current++
+      const state = useBotViewStore.getState()
+      const draft = state.newChatDrafts[client.hostId]
+      if (
+        draft &&
+        !draft.busy &&
+        !draft.text &&
+        !draft.files.length &&
+        !draft.recipients.length &&
+        !draft.pendingRecipients.current.size &&
+        !draft.createdRecipients.current.size
+      )
+        state.updateNewChat(client.hostId, undefined)
     },
     []
   )
@@ -598,10 +649,6 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const openNewChat = useCallback(() => {
     if (creatingChat.current) return
     newChatAttempt.current++
-    createdChatGroup.current = null
-    createdChatRecipients.current.clear()
-    privateChatRecipient.current = null
-    setNewChatRecipients([])
     setNewChat(true)
     setNewChatError(null)
   }, [])
@@ -628,7 +675,26 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     return () => document.removeEventListener("keydown", create)
   }, [openNewChat])
   const newMenuTransfersFocus = useRef(false)
+  const createNewChatRecipient = async (input: CreateBotInput, key: string) => {
+    const pending = pendingChatRecipients.current
+    const completed = createdChatRecipients.current
+    if (pending.has(key)) throw new Error(PENDING_NEW_CHAT_RECIPIENT)
+    const operation = client.create(input)
+    pending.set(key, operation)
+    // Retain this preparation even for an empty source while the editor is unmounted.
+    updateNewChatDraft({})
+    try {
+      const bot = await operation
+      if (bot.hostId !== client.hostId) throw new Error("创建结果不属于当前主机，请核对后重试。")
+      completed.set(key, bot)
+      return bot
+    } finally {
+      if (pending.get(key) === operation) pending.delete(key)
+    }
+  }
   const openBotEditor = (bot: BotDefinition, trigger?: HTMLElement | null) => {
+    newChatAttempt.current++
+    newChatCreateIntent.current = null
     editorTrigger.current =
       trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
     setEditor(bot)
@@ -638,10 +704,24 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     trigger?: HTMLElement | null,
     intent: "draft" | "send" | null = null
   ) => {
+    newChatAttempt.current++
     editorTrigger.current =
       trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
     setNewBotName(name)
-    newChatCreateIntent.current = intent
+    const recipientKey = botChatRecipientKey({ kind: "new", name })
+    if (intent && pendingChatRecipients.current.has(recipientKey)) {
+      setNewChatError(PENDING_NEW_CHAT_RECIPIENT)
+      return
+    }
+    const prepared = intent ? createdChatRecipients.current.get(recipientKey) : undefined
+    if (prepared) {
+      newChatCreateIntent.current = null
+      setNewChatRecipients([{ kind: "bot", id: prepared.id }])
+      privateChatRecipient.current = prepared
+      void selectNewChat(`bot:${prepared.id}`, undefined, intent === "send", prepared)
+      return
+    }
+    newChatCreateIntent.current = intent ? { intent, recipientKey } : null
     setEditor("new")
   }
   const visible = useMemo(
@@ -744,7 +824,8 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const carryGroupDraft = async (
     group: BotGroup,
     isCurrent: () => boolean,
-    replacePrepared = false
+    replacePrepared = false,
+    preparedMembers?: readonly BotDefinition[]
   ) => {
     const text = newChatDraftRef.current
     const key = groupDraftKey(client.hostId, group.id)
@@ -754,8 +835,12 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     if (current?.storageError && !replacePrepared) throw new Error(current.storageError)
     if (current?.sending) throw new Error("群聊消息正在发送，请稍后重试。")
     const files = newChatFilesRef.current
-    const member = snapshot?.bots.find(
-      (bot) => group.memberIds.includes(bot.id) && !bot.archived && !bot.deleting
+    const member = (preparedMembers ?? snapshot?.bots ?? []).find(
+      (bot) =>
+        bot.hostId === client.hostId &&
+        group.memberIds.includes(bot.id) &&
+        !bot.archived &&
+        !bot.deleting
     )
     if (files.length && !member) throw new Error("群聊中没有可用于添加附件的成员")
     const attachments = member
@@ -787,6 +872,10 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     editNewChatDraft("")
     editNewChatFiles([])
     newChatTransfer.current.clear()
+    setNewChatRecipients([])
+    createdChatRecipients.current = new Map()
+    createdChatGroup.current = null
+    privateChatRecipient.current = null
   }
   const addNewChatRecipient = (recipient: BotChatRecipient) => {
     const key = botChatRecipientKey(recipient)
@@ -812,6 +901,17 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     createdBot?: BotDefinition
   ) => {
     if (creatingChat.current) return
+    if (
+      value === "recipients" &&
+      newChatRecipients.some(
+        (recipient) =>
+          recipient.kind === "new" &&
+          pendingChatRecipients.current.has(botChatRecipientKey(recipient))
+      )
+    ) {
+      setNewChatError(PENDING_NEW_CHAT_RECIPIENT)
+      return
+    }
     const onlyRecipient = newChatRecipients.length === 1 ? newChatRecipients[0] : undefined
     if (
       value === "recipients" &&
@@ -826,8 +926,14 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
       newChatRecipients.length === 1 &&
       newChatRecipients[0].kind === "new"
     ) {
-      openNewBot(newChatRecipients[0].name, undefined, send ? "send" : "draft")
-      return
+      const recipient = newChatRecipients[0]
+      const prepared = createdChatRecipients.current.get(botChatRecipientKey(recipient))
+      if (!prepared) {
+        openNewBot(recipient.name, undefined, send ? "send" : "draft")
+        return
+      }
+      value = `bot:${prepared.id}`
+      createdBot = prepared
     }
     creatingChat.current = true
     const attempt = ++newChatAttempt.current
@@ -835,6 +941,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     setNewChatError(null)
     try {
       let preparedGroup = false
+      let preparedMembers: BotDefinition[] | undefined
       if (value === "recipients") {
         const recipients = await materializeBotChatRecipients(
           client,
@@ -843,6 +950,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
           createdChatRecipients.current,
           () => attempt === newChatAttempt.current
         )
+        preparedMembers = recipients
         const names = recipients.map((bot) => bot.name)
         const name = names.join("、")
         createdGroup =
@@ -859,7 +967,12 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
       if (value.startsWith("group:")) {
         const group = createdGroup ?? snapshot?.groups.find((item) => item.id === value.slice(6))
         if (!group) throw new Error("群聊已不可用")
-        await carryGroupDraft(group, () => attempt === newChatAttempt.current, preparedGroup)
+        await carryGroupDraft(
+          group,
+          () => attempt === newChatAttempt.current,
+          preparedGroup,
+          preparedMembers
+        )
         if (attempt !== newChatAttempt.current) return
         if (send) {
           // Ownership passes to the existing persistent group draft before any network call.
@@ -1470,6 +1583,9 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     </Tooltip>
   ]
 
+  // BotEditor captures this render's ownership before awaiting create/update.
+  const editorAttempt = newChatAttempt.current
+  const editorIntent = newChatCreateIntent.current
   return (
     <TooltipProvider delayDuration={250} skipDelayDuration={150}>
       <div
@@ -2544,19 +2660,41 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             bot={editor === "new" ? null : editor}
             initialName={newBotName}
             client={client}
+            createBot={
+              editorIntent
+                ? (input) => {
+                    if (
+                      editorAttempt !== newChatAttempt.current ||
+                      editorIntent !== newChatCreateIntent.current
+                    )
+                      return Promise.reject(new Error("创建页面已变化，请从当前草稿重试。"))
+                    return createNewChatRecipient(input, editorIntent.recipientKey)
+                  }
+                : undefined
+            }
             returnFocusTo={editorTrigger.current}
             onClose={() => {
+              if (
+                editorAttempt !== newChatAttempt.current ||
+                editorIntent !== newChatCreateIntent.current
+              )
+                return
+              newChatAttempt.current++
               newChatCreateIntent.current = null
               setEditor(null)
             }}
             onSaved={(bot) => {
-              const intent = newChatCreateIntent.current
+              if (
+                editorAttempt !== newChatAttempt.current ||
+                editorIntent !== newChatCreateIntent.current
+              )
+                return
               newChatCreateIntent.current = null
-              if (editor === "new" && newChat && intent) {
+              if (editor === "new" && newChat && editorIntent) {
                 setEditor(null)
                 setNewChatRecipients([{ kind: "bot", id: bot.id }])
                 privateChatRecipient.current = bot
-                void selectNewChat(`bot:${bot.id}`, undefined, intent === "send", bot)
+                void selectNewChat(`bot:${bot.id}`, undefined, editorIntent.intent === "send", bot)
                 return
               }
               if (editor === "new" && newChat) closeNewChat()
