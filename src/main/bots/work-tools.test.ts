@@ -46,7 +46,7 @@ describe("work Runtime tools", () => {
   it("keeps durable work tools on the parent turn and rejects direct temporary-agent calls", async () => {
     const f = fixture()
     await tick()
-    const tools = createBotWorkTools(f.source.id, () => f.host, new AbortController().signal)
+    const tools = createBotWorkTools(f.source, () => f.host, new AbortController().signal)
     expect(filterTaskSubagentTools(tools)).toEqual([])
     const args: Record<string, object> = {
       bot_work_projects: { query: "Project" },
@@ -76,7 +76,7 @@ describe("work Runtime tools", () => {
       title: "Draft",
       goal: "Prepare"
     })
-    const send = createBotWorkTools(f.source.id, () => f.host, new AbortController().signal).find(
+    const send = createBotWorkTools(f.source, () => f.host, new AbortController().signal).find(
       (t) => t.name === "bot_work_send"
     )!
     const args = {
@@ -132,7 +132,7 @@ describe("work Runtime tools", () => {
       f.host.resume()
       await tick()
       expect(f.store.getTask(source.id).state).toBe("running")
-      const send = createBotWorkTools(source.id, () => f.host, new AbortController().signal).find(
+      const send = createBotWorkTools(source, () => f.host, new AbortController().signal).find(
         (t) => t.name === "bot_work_send"
       )!
       const command = { taskId: source.id, callId: "blocked", key: "blocked" }
@@ -155,7 +155,7 @@ describe("work Runtime tools", () => {
   it("uses a live lease plus actual call ID, deduplicates both call and request key, and keeps normal replies unconstrained", async () => {
     const f = fixture()
     await tick()
-    const tools = createBotWorkTools(f.source.id, () => f.host, new AbortController().signal)
+    const tools = createBotWorkTools(f.source, () => f.host, new AbortController().signal)
     const create = tools.find((t) => t.name === "bot_work_create")!
     const args = {
       requestKey: "draft",
@@ -191,8 +191,16 @@ describe("work Runtime tools", () => {
       goal: "A"
     })
     await tick()
-    const tools = createBotWorkTools(work.task.id, () => f.host, new AbortController().signal)
-    const create = tools.find((t) => t.name === "bot_work_create")!
+    const tools = createBotWorkTools(work.task, () => f.host, new AbortController().signal)
+    expect(tools.map((t) => t.name)).not.toContain("bot_work_create")
+    expect(tools.map((t) => t.name)).not.toContain("bot_work_projects")
+    expect(tools.map((t) => t.name)).toContain("bot_work_list")
+    // Even a stale/mis-scoped catalogue cannot bypass the host's live authority check.
+    const create = createBotWorkTools(
+      { id: work.task.id },
+      () => f.host,
+      new AbortController().signal
+    ).find((t) => t.name === "bot_work_create")!
     const result = await create.invoke({
       type: "tool_call",
       id: "recursive",
@@ -212,5 +220,6 @@ describe("work Runtime tools", () => {
       ).status
     ).toBe("error")
     expect(f.store.getWork(f.bot.id, work.work.id).state).toBe("active")
+    expect(f.store.listWorks(f.bot.id).items).toHaveLength(1)
   })
 })

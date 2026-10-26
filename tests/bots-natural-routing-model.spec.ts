@@ -15,7 +15,7 @@ async function main() {
   const config = await selectedBotRoutingModel()
   const endpoint = config.baseUrl.replace(/\/+$/, "") + "/chat/completions"
   const tools = createBotWorkTools(
-    "source",
+    { id: "source" },
     () => {
       throw new Error("Semantic check never executes real tools")
     },

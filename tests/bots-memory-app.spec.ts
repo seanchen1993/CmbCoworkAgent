@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
+import { DatabaseSync } from "node:sqlite"
 import { _electron } from "playwright"
 import { botTestAppOutput } from "./support/bot-test-app"
 import { waitForBotAppState } from "./support/bot-app-state"
@@ -24,6 +25,7 @@ interface ModelRequest {
 }
 
 async function main() {
+  const legacy = process.env.BOT_TEST_LEGACY_MEMORY === "1"
   const out = botTestAppOutput()
   const dir = await mkdtemp(join(tmpdir(), "bot-memory-app-"))
   const calls: Array<{ user: string; tools: string[]; called?: string }> = []
@@ -61,8 +63,12 @@ async function main() {
           memoryTools.every((name) => !tools.includes(name)),
           "disabled Bot must not advertise memory tools"
         )
-        reply = "当前未开启记忆。"
+        reply = "当前工具列表中没有 bot_memory_search、bot_remember 等记忆工具。"
       } else if (user.startsWith("MM_")) {
+        assert.ok(
+          messages.some((m) => m.role === "assistant" && m.content?.includes("当前工具列表中没有")),
+          "the same conversation must retain its earlier unavailable-tool reply"
+        )
         for (const name of memoryTools)
           assert.ok(tools.includes(name), `model request missing ${name}`)
         assert.ok(
@@ -193,7 +199,7 @@ async function main() {
     NO_PROXY: "127.0.0.1,localhost",
     NODE_USE_ENV_PROXY: "1"
   })
-  try {
+  const openApp = async () => {
     app = await _electron.launch({
       executablePath: createRequire(import.meta.url)("electron"),
       args: [join(out, "main/index.js"), `--user-data-dir=${join(dir, "electron-profile")}`],
@@ -215,6 +221,10 @@ async function main() {
         value: unknown
       ) => value
     })
+    return page
+  }
+  try {
+    let page = await openApp()
     const bot = await page.evaluate(async (baseUrl) => {
       const api = window.api
       await api.memory.setEnabled(false)
@@ -268,6 +278,27 @@ async function main() {
       assert.equal(row.state, "completed", JSON.stringify(row))
     }
     await send("MM_OFF：查看当前记忆状态。")
+    if (legacy) {
+      await app!.close()
+      app = undefined
+      // Only the isolated fixture is downgraded: reproduce an old Bot database
+      // lacking the preference column, while preserving its actual checkpoint.
+      const db = new DatabaseSync(join(dir, "agent-profile", "bots", "control.sqlite"))
+      try {
+        db.exec("ALTER TABLE bots DROP COLUMN memory_mode")
+      } finally {
+        db.close()
+      }
+      page = await openApp()
+      const migrated = await page.evaluate(
+        async (id) => (await window.api.bots.snapshot()).bots.find((b) => b.id === id),
+        bot.id
+      )
+      assert.ok(migrated)
+      assert.equal(migrated.threadId, bot.threadId)
+      assert.equal(migrated.memoryMode, "inherit")
+      await send("MM_OFF：升级后查看当前记忆状态。")
+    }
     const savedBot = await page.evaluate(async (id) => {
       const api = window.api,
         b = (await api.bots.snapshot()).bots.find((b) => b.id === id)
@@ -296,7 +327,7 @@ async function main() {
     assert.deepEqual(await memories(), [])
     assert.deepEqual(errors, [])
     console.log(
-      "PASS: global off → Bot on, exact model tool inventory, profile rollback, create/update/delete in the same conversation"
+      `PASS: ${legacy ? "legacy database migration + restored checkpoint → " : ""}global off → Bot on, exact model tool inventory, profile rollback, create/update/delete in the same conversation`
     )
   } finally {
     await writeFile(join(dir, "model-tools.json"), JSON.stringify({ calls, errors }, null, 2))

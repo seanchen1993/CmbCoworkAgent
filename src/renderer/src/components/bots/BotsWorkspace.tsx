@@ -1,4 +1,5 @@
 import { BotConversation } from "./BotConversation"
+import { BotExecutionDetailsToggle } from "./BotExecutionDetailsToggle"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { botErrorMessage } from "@/lib/bot-error-message"
 import { botCreateShortcut } from "@/lib/bot-create-shortcut"
@@ -9,7 +10,6 @@ import {
   CircleAlert,
   ChevronRight,
   Loader2,
-  ListTree,
   MoreHorizontal,
   PanelRight,
   Pin,
@@ -2066,15 +2066,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
           ) : selected ? (
             <>
               <header className="bot-chat-header">
-                <button
-                  className="bot-icon-button bot-execution-toggle"
-                  aria-label={view.showExecutionDetails ? "收起执行过程" : "查看执行过程"}
-                  title={view.showExecutionDetails ? "收起执行过程" : "查看执行过程"}
-                  aria-pressed={Boolean(view.showExecutionDetails)}
-                  onClick={() => updateView({ showExecutionDetails: !view.showExecutionDetails })}
-                >
-                  <ListTree size={18} />
-                </button>
+                <BotExecutionDetailsToggle hostId={client.hostId} compact />
                 <button
                   className="bot-title-pill"
                   ref={detailTriggerRef}

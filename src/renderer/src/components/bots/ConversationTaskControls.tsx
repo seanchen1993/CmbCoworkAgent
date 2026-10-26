@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { toast } from "sonner"
 import { useAppStore } from "@/lib/store"
 import { useThreadContext } from "@/lib/thread-context"
 import { useBotViewStore } from "./view-store"
+import { BotExecutionDetailsToggle } from "./BotExecutionDetailsToggle"
 import {
   parkLinkedConversationQueue,
   parkOrdinaryConversationQueue
@@ -44,12 +45,19 @@ export function ConversationTaskControls({
     [botId, setBotId] = useState(""),
     [title, setTitle] = useState(""),
     [goal, setGoal] = useState(""),
+    [submitted, setSubmitted] = useState(false),
     [saving, setSaving] = useState(false)
+  const formId = useId()
+  const formRef = useRef<HTMLFormElement>(null)
+  const botError = submitted && !botId ? "请选择所属 Bot。" : null
+  const titleError = submitted && !title.trim() ? "请填写任务名称。" : null
+  const goalError = submitted && !goal.trim() ? "请填写任务目标，说明希望完成什么。" : null
   const current = useRef(threadId)
   current.current = threadId
   const operation = useRef<{ fingerprint: string; id: string } | null>(null)
   useEffect(() => {
     setOpen(false)
+    setSubmitted(false)
     operation.current = null
   }, [threadId])
   const fail = (error: unknown) =>
@@ -66,12 +74,22 @@ export function ConversationTaskControls({
       setTitle(
         useAppStore.getState().threads.find((t) => t.thread_id === target)?.title ?? "会话任务"
       )
+      setGoal("")
+      setSubmitted(false)
       setOpen(true)
     } catch (error) {
       fail(error)
     }
   }
   const associate = async () => {
+    if (saving) return
+    setSubmitted(true)
+    if (!botId || !title.trim() || !goal.trim()) {
+      const field = !botId ? "botId" : !title.trim() ? "title" : "goal"
+      const control = formRef.current?.elements.namedItem(field)
+      if (control instanceof HTMLElement) control.focus()
+      return
+    }
     const target = threadId
     setSaving(true)
     try {
@@ -81,8 +99,8 @@ export function ConversationTaskControls({
       const token = row?.metadata?.cmb_thread_incarnation
       const input = {
         botId,
-        title,
-        goal,
+        title: title.trim(),
+        goal: goal.trim(),
         conversation: {
           kind: "local_thread" as const,
           threadId: target,
@@ -155,6 +173,7 @@ export function ConversationTaskControls({
               {link.bot.name} · {link.work.title} ·{" "}
               {link.work.state === "completed" ? "已完成" : "进行中"}
             </span>
+            <BotExecutionDetailsToggle hostId={link.bot.hostId} />
             <button
               className="rounded border px-2 py-1 hover:bg-muted"
               onClick={() => returnToBotTask(link)}
@@ -200,45 +219,109 @@ export function ConversationTaskControls({
               保留这段会话的消息、模型、模式和工作目录，不会立即执行。已有待发送消息将停放，由你明确继续。
             </DialogDescription>
           </DialogHeader>
-          <label>
-            所属 Bot
-            <select
-              className="block w-full rounded border bg-background p-2"
-              value={botId}
-              onChange={(e) => setBotId(e.target.value)}
-            >
-              {bots.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            任务名称
-            <input
-              className="block w-full rounded border bg-background p-2"
-              value={title}
-              maxLength={160}
-              onChange={(e) => setTitle(e.target.value)}
-            />
-          </label>
-          <label>
-            任务目标
-            <textarea
-              className="block w-full rounded border bg-background p-2"
-              value={goal}
-              maxLength={30000}
-              onChange={(e) => setGoal(e.target.value)}
-            />
-          </label>
-          <button
-            disabled={saving || !goal.trim() || !title.trim()}
-            className="rounded border px-3 py-2 hover:bg-muted"
-            onClick={() => void associate()}
+          <form
+            ref={formRef}
+            noValidate
+            className="space-y-4"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void associate()
+            }}
           >
-            关联此会话
-          </button>
+            <p className="text-xs text-muted-foreground">
+              <span className="text-destructive">*</span> 为必填项
+            </p>
+            <div className="space-y-1.5">
+              <label htmlFor={`${formId}-bot`}>
+                所属 Bot{" "}
+                <span aria-hidden="true" className="text-destructive">
+                  *
+                </span>
+              </label>
+              <select
+                id={`${formId}-bot`}
+                name="botId"
+                required
+                aria-invalid={Boolean(botError)}
+                aria-describedby={botError ? `${formId}-bot-error` : undefined}
+                className="block w-full rounded border bg-background p-2 aria-invalid:border-destructive"
+                value={botId}
+                disabled={saving}
+                onChange={(e) => setBotId(e.target.value)}
+              >
+                {bots.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.name}
+                  </option>
+                ))}
+              </select>
+              {botError && (
+                <p id={`${formId}-bot-error`} role="alert" className="text-xs text-destructive">
+                  {botError}
+                </p>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor={`${formId}-title`}>
+                任务名称{" "}
+                <span aria-hidden="true" className="text-destructive">
+                  *
+                </span>
+              </label>
+              <input
+                id={`${formId}-title`}
+                name="title"
+                required
+                aria-invalid={Boolean(titleError)}
+                aria-describedby={titleError ? `${formId}-title-error` : undefined}
+                className="block w-full rounded border bg-background p-2 aria-invalid:border-destructive"
+                value={title}
+                disabled={saving}
+                placeholder="为这项任务起个名称"
+                maxLength={160}
+                onChange={(e) => setTitle(e.target.value)}
+              />
+              {titleError && (
+                <p id={`${formId}-title-error`} role="alert" className="text-xs text-destructive">
+                  {titleError}
+                </p>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor={`${formId}-goal`}>
+                任务目标{" "}
+                <span aria-hidden="true" className="text-destructive">
+                  *
+                </span>
+              </label>
+              <textarea
+                id={`${formId}-goal`}
+                name="goal"
+                required
+                aria-invalid={Boolean(goalError)}
+                aria-describedby={goalError ? `${formId}-goal-error` : undefined}
+                className="block w-full rounded border bg-background p-2 aria-invalid:border-destructive"
+                value={goal}
+                disabled={saving}
+                rows={3}
+                placeholder="描述希望 Bot 持续完成的工作，例如：分析最近提交的改动并整理风险点"
+                maxLength={30000}
+                onChange={(e) => setGoal(e.target.value)}
+              />
+              {goalError && (
+                <p id={`${formId}-goal-error`} role="alert" className="text-xs text-destructive">
+                  {goalError}
+                </p>
+              )}
+            </div>
+            <button
+              type="submit"
+              disabled={saving}
+              className="w-full rounded border px-3 py-2 hover:bg-muted disabled:cursor-wait disabled:opacity-60"
+            >
+              {saving ? "正在关联…" : "关联此会话"}
+            </button>
+          </form>
         </DialogContent>
       </Dialog>
     </>
