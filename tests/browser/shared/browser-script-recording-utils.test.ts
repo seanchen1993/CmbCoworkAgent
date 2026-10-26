@@ -464,6 +464,24 @@ test("recorded script flow", async ({ page }) => {
     ).toContain('const 变量_目标地址 = "https://example.com/login"; // 变量-目标地址')
   })
 
+  it("ignores arbitrary trailing comments when recognizing variable declarations", () => {
+    const script = `const 变量_仓库名 = "react/react"; // 仓库名称
+const 变量_目标地址 = "https://example.com/path"; // 变量-也不读取这个名称`
+
+    expect(extractScriptRecordingVariables(script)).toEqual([
+      {
+        identifier: "变量_仓库名",
+        displayName: "仓库名",
+        isArray: false
+      },
+      {
+        identifier: "变量_目标地址",
+        displayName: "目标地址",
+        isArray: false
+      }
+    ])
+  })
+
   it("clicks radio-card choices with their semantic role", () => {
     const script = generateScriptRecording(
       [
