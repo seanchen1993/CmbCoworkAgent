@@ -12,6 +12,7 @@ interface TestWindow extends EventEmitter {
   resize: ReturnType<typeof vi.fn>
   jpeg: Buffer
   toJPEG: ReturnType<typeof vi.fn>
+  toolbar: { webContents: { mainFrame: object } }
   close(): void
   loadURL: ReturnType<typeof vi.fn>
   webContents: EventEmitter & { capturePage: ReturnType<typeof vi.fn> }
@@ -21,6 +22,7 @@ const fixture = vi.hoisted(() => ({
   windows: [] as unknown[],
   listeners: new Map<string, (message?: unknown) => void>(),
   send: vi.fn(),
+  ipc: new Map<string, (event: unknown, input: unknown) => Promise<void>>(),
   app: {
     exit: vi.fn(),
     setPath: vi.fn(),
@@ -74,6 +76,8 @@ vi.mock("electron", async () => {
       super()
       fixture.windows.push(this)
     }
+    toolbar = { webContents: { mainFrame: {} } }
+    setControl = vi.fn()
     setMenuBarVisibility = vi.fn()
     loadURL = vi.fn(async () => {})
     isDestroyed = () => this.destroyed
@@ -99,6 +103,10 @@ vi.mock("electron", async () => {
   }
   return {
     app: fixture.app,
+    ipcMain: {
+      handle: (channel: string, handler: (event: unknown, input: unknown) => Promise<void>) =>
+        fixture.ipc.set(channel, handler)
+    },
     BrowserWindow,
     session: {
       defaultSession: {
@@ -110,6 +118,10 @@ vi.mock("electron", async () => {
   }
 })
 
+vi.mock("./browser-host-window", async () => ({
+  BotBrowserWindow: (await import("electron")).BrowserWindow
+}))
+
 let sendDescriptor: PropertyDescriptor | undefined
 let connectedDescriptor: PropertyDescriptor | undefined
 
@@ -118,6 +130,7 @@ beforeEach(async () => {
   vi.clearAllMocks()
   fixture.windows.length = 0
   fixture.listeners.clear()
+  fixture.ipc.clear()
   vi.stubEnv("CMB_BOT_BROWSER_PROFILE", "/synthetic-bot-browser-profile")
   sendDescriptor = Object.getOwnPropertyDescriptor(process, "send")
   connectedDescriptor = Object.getOwnPropertyDescriptor(process, "connected")
@@ -221,6 +234,40 @@ describe("Bot browser native window lifecycle", () => {
     await command(6, "show", "owned-target-1")
     window.close()
     expect(events()).toHaveLength(2)
+  })
+
+  it("accepts toolbar commands only from trusted chrome with a live lease and relays the exact target", async () => {
+    await command(1, "create")
+    await command(2, "show", "owned-target-1", 42)
+    const window = fixture.windows[0] as TestWindow
+    const action = fixture.ipc.get("bot-browser-toolbar-action")!
+    const sender = window.toolbar.webContents
+    await expect(
+      action({ sender: window.webContents }, { action: "reload", generation: 42 })
+    ).rejects.toThrow("来源")
+    await expect(
+      action({ sender, senderFrame: {} }, { action: "reload", generation: 42 })
+    ).rejects.toThrow("来源")
+    const event = { sender, senderFrame: sender.mainFrame }
+    await expect(action(event, { action: "reload", generation: 41 })).rejects.toThrow("控制权")
+    await expect(action(event, { action: "execute", generation: 42 })).rejects.toThrow("无效")
+    const pending = action(event, { action: "reload", generation: 42 })
+    expect(fixture.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "toolbar-action",
+        requestId: 1,
+        targetId: "owned-target-1",
+        generation: 42,
+        action: "reload"
+      }),
+      expect.any(Function)
+    )
+    fixture.listeners.get("message")!({ action: "toolbar-result", requestId: 1 })
+    await pending
+    await command(3, "hide")
+    await expect(action(event, { action: "reload", generation: 42 })).rejects.toThrow("控制权")
+    expect((await command(4, "is-content", "owned-target-1")).value).toBe(true)
+    expect((await command(5, "is-content", "toolbar-target")).value).toBe(false)
   })
 
   it("reads navigation state from the exact native target without navigating", async () => {

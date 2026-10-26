@@ -57,14 +57,15 @@ app.whenReady().then(async () => {
     const a = JSON.parse(await service.act('a', { action: 'observe' }, new AbortController().signal));
     const b = JSON.parse(await service.act('b', { action: 'observe' }, new AbortController().signal));
     assert.notEqual(a.pageId, b.pageId);
-    const pages = engine.context.pages();
+    const contentPages = async () => (await Promise.all(engine.context.pages().map(async page => (await engine.isContentPage(page)) ? page : null))).filter(Boolean);
+    const pages = await contentPages();
     assert.equal(pages.length, 2);
     await assert.rejects(
       startElectronBotBrowser(${JSON.stringify(join(root, "bot-profile"))}),
       /Bot 浏览器启动失败/,
       'a second host must not take ownership of the active profile'
     );
-    assert.equal(engine.context.pages().length, 2, 'the profile owner must remain available');
+    assert.equal((await contentPages()).length, 2, 'the profile owner must remain available');
     await pages[0].setContent('<label>Name <input></label>');
     await pages[1].setContent('<label>Name <input></label>');
     await service.act('a', { action: 'fill', role: 'textbox', name: 'Name', text: 'original Electron 引擎' }, new AbortController().signal);
@@ -126,6 +127,48 @@ app.whenReady().then(async () => {
     await pages[0].goto(fixtureUrl);
     await service.takeOver('a');
     assert.equal((await service.preview('a')).control, 'human');
+    // Exercise the actual trusted toolbar, not the App-side preview controls.
+    const toolbarFor = async (address) => {
+      for (let i = 0; i < 100; i++) {
+        for (const candidate of engine.context.pages()) {
+          if (!candidate.url().startsWith('data:text/html')) continue;
+          const input = candidate.getByRole('textbox', { name: '网页地址' });
+          if (await input.count() && await input.inputValue() === address && await candidate.getByRole('button', { name: '归还 Bot', exact: true }).isEnabled()) return candidate;
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      throw new Error('Active native toolbar not found: ' + address);
+    };
+    let toolbar = await toolbarFor(fixtureUrl + '/');
+    assert.equal((await service.preview('a')).pages.length, 1, 'trusted toolbar must never become an owned content page');
+    assert.equal(await pages[0].evaluate(() => typeof window.require), 'undefined');
+    await toolbar.getByRole('textbox', { name: '网页地址' }).fill(fixtureUrl + '/toolbar-one');
+    await toolbar.getByRole('button', { name: '打开网址' }).click();
+    await pages[0].waitForURL(fixtureUrl + '/toolbar-one');
+    await toolbar.getByRole('button', { name: '后退', exact: true }).click();
+    await pages[0].waitForURL(fixtureUrl + '/');
+    await toolbar.getByRole('button', { name: '前进', exact: true }).click();
+    await pages[0].waitForURL(fixtureUrl + '/toolbar-one');
+    await pages[0].evaluate(() => document.body.dataset.synthetic = 'changed');
+    await toolbar.getByRole('button', { name: '刷新网页' }).click();
+    await pages[0].waitForFunction(() => !document.body.dataset.synthetic);
+    await toolbar.getByRole('textbox', { name: '网页地址' }).fill('file:///synthetic-secret');
+    await toolbar.getByRole('button', { name: '打开网址' }).click();
+    await toolbar.getByRole('alert').filter({ hasText: 'HTTP' }).waitFor();
+    await toolbar.getByRole('button', { name: '新建网页' }).click();
+    const newToolbar = await toolbarFor('');
+    assert.equal((await service.preview('a')).pages.length, 2);
+    assert.equal((await service.preview('b')).pages.length, 1);
+    // Save evidence of the real native window chrome before closing the new page.
+    await newToolbar.screenshot({ path: ${JSON.stringify(resolve(process.env.BOT_TEST_APP_OUT ?? "out", "artifacts/bot-browser-toolbar.png"))} });
+    await newToolbar.getByRole('button', { name: '关闭当前网页' }).click().catch(error => { if (!/closed/i.test(error.message)) throw error; });
+    toolbar = await toolbarFor(fixtureUrl + '/toolbar-one');
+    assert.equal((await service.preview('a')).pages.length, 1);
+    await toolbar.getByRole('button', { name: '归还 Bot', exact: true }).click();
+    for (let i = 0; i < 100 && (await service.preview('a')).control !== 'bot'; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal((await service.preview('a')).control, 'bot');
+    assert.equal(pages[0].isClosed(), false);
+    await service.takeOver('a', a.pageId);
     await service.navigateAsHuman('a', a.pageId, fixtureUrl + '/manual');
     await service.giveBack('a');
     assert.equal((await service.preview('a')).control, 'bot');
@@ -153,7 +196,8 @@ app.whenReady().then(async () => {
     assert.equal((await service.preview('a')).generation, helpState.generation);
     assert.equal((await service.preview('a')).helpInstruction, 'Confirm the synthetic page');
     await service.navigateAsHuman('a', a.pageId, fixtureUrl + '/help-confirmed');
-    await service.giveBack('a', helpState.generation);
+    const helpToolbar = engine.context.pages().find(page => page.url().startsWith('data:text/html') && !page.isClosed());
+    await helpToolbar.getByRole('button', { name: '归还并继续', exact: true }).click();
     assert.equal(JSON.parse(await help).url, fixtureUrl + '/help-confirmed');
     await (await import(${JSON.stringify(pathToFileURL(resolve("tests/support/bot-browser-automation-journey.mjs")).href)})).default(service, engine, fixtureUrl, workspace);
     // Do not wait for Chromium's periodic cookie flush before closing the host.

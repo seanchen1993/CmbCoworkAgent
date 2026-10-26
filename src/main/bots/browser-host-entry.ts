@@ -1,4 +1,5 @@
-import { app, BrowserWindow, session } from "electron"
+import { app, ipcMain, session } from "electron"
+import { BotBrowserWindow as BrowserWindow } from "./browser-host-window"
 import { isAbsolute } from "node:path"
 
 const profile = process.env.CMB_BOT_BROWSER_PROFILE
@@ -14,10 +15,19 @@ else {
       string,
       { window: BrowserWindow; generation?: number; capturing?: boolean }
     >()
-    const parents = new Set<BrowserWindow>()
+    const bindings = new Set<Promise<string>>()
+    let toolbarSequence = 0
+    const toolbarRequests = new Map<
+      number,
+      { resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }
+    >()
+    const trackBind = (window: BrowserWindow) => {
+      const pending = bind(window).finally(() => bindings.delete(pending))
+      bindings.add(pending)
+      return pending
+    }
     const safeUrl = (url: string) => url === "about:blank" || /^https?:\/\//i.test(url)
     const bind = async (window: BrowserWindow): Promise<string> => {
-      parents.add(window)
       window.on("close", (event) => {
         event.preventDefault()
         window.hide()
@@ -29,7 +39,6 @@ else {
           )
       })
       window.once("closed", () => {
-        parents.delete(window)
         for (const [target, owned] of targets) if (owned.window === window) targets.delete(target)
       })
       const contents = window.webContents
@@ -43,21 +52,14 @@ else {
         safeUrl(url)
           ? {
               action: "allow",
-              overrideBrowserWindowOptions: {
-                show: window.isVisible(),
-                webPreferences: {
-                  sandbox: true,
-                  contextIsolation: true,
-                  nodeIntegration: false,
-                  webSecurity: true
-                }
+              createWindow: (options) => {
+                const child = new BrowserWindow(options)
+                void trackBind(child).catch(() => child.destroy())
+                return child.webContents
               }
             }
           : { action: "deny" }
       )
-      contents.on("did-create-window", (child) => {
-        void bind(child).catch(() => child.destroy())
-      })
       contents.debugger.attach("1.3")
       try {
         const { targetInfo } = await contents.debugger.sendCommand("Target.getTargetInfo")
@@ -84,9 +86,67 @@ else {
           { urls: ["file://*/*"] },
           (_details, callback) => callback({ cancel: true })
         )
+        ipcMain.handle("bot-browser-toolbar-action", async (event, input: unknown) => {
+          const owned = [...targets.entries()].find(
+            ([, target]) => target.window.toolbar.webContents === event.sender
+          )
+          if (
+            !owned ||
+            event.senderFrame !== event.sender.mainFrame ||
+            !input ||
+            typeof input !== "object"
+          )
+            throw new Error("浏览器操作来源无效")
+          const [targetId, target] = owned
+          const { action, generation, url } = input as Record<string, unknown>
+          if (
+            !target.window.isVisible() ||
+            generation === undefined ||
+            generation !== target.generation
+          )
+            throw new Error("浏览器控制权已改变，请重新接管")
+          if (
+            typeof action !== "string" ||
+            !["back", "forward", "reload", "new", "close", "navigate", "return"].includes(action)
+          )
+            throw new Error("浏览器操作无效")
+          if (action === "navigate" && (typeof url !== "string" || url.length > 8192))
+            throw new Error("请输入有效的网址")
+          if (!process.connected || toolbarRequests.size >= 16)
+            throw new Error("浏览器暂时不可用，请稍后重试")
+          const requestId = ++toolbarSequence
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              toolbarRequests.delete(requestId)
+              reject(new Error("浏览器操作超时，请检查网页后重试"))
+            }, 25000)
+            toolbarRequests.set(requestId, { resolve, reject, timer })
+            process.send!(
+              { event: "toolbar-action", requestId, targetId, generation, action, url },
+              (error) => {
+                if (error) {
+                  clearTimeout(timer)
+                  toolbarRequests.delete(requestId)
+                  reject(error)
+                }
+              }
+            )
+          })
+        })
         process.on("message", (message: unknown) => {
           if (!message || typeof message !== "object" || Array.isArray(message)) return
-          const { id, action, targetId, generation } = message as Record<string, unknown>
+          const { id, action, targetId, generation, instruction, requestId, error } =
+            message as Record<string, unknown>
+          if (action === "toolbar-result" && typeof requestId === "number") {
+            const pending = toolbarRequests.get(requestId)
+            if (pending) {
+              toolbarRequests.delete(requestId)
+              clearTimeout(pending.timer)
+              if (typeof error === "string") pending.reject(new Error(error))
+              else pending.resolve()
+            }
+            return
+          }
           if (!Number.isSafeInteger(id) || typeof action !== "string") return
           void (async () => {
             if (action === "quit") {
@@ -94,22 +154,9 @@ else {
               return
             }
             if (action === "create") {
-              const window = new BrowserWindow({
-                show: false,
-                width: 1280,
-                height: 860,
-                title: "CMBDevClaw · Bot 浏览器",
-                webPreferences: {
-                  sandbox: true,
-                  contextIsolation: true,
-                  nodeIntegration: false,
-                  webSecurity: true,
-                  allowRunningInsecureContent: false
-                }
-              })
-              window.setMenuBarVisibility(false)
+              const window = new BrowserWindow()
               try {
-                const target = await bind(window)
+                const target = await trackBind(window)
                 await window.loadURL("about:blank")
                 return { targetId: target }
               } catch (error) {
@@ -118,8 +165,16 @@ else {
               }
             }
             if (action === "hide") {
-              for (const window of parents) if (!window.isDestroyed()) window.hide()
+              for (const target of targets.values()) {
+                target.generation = undefined
+                target.window.setControl(undefined)
+                if (!target.window.isDestroyed()) target.window.hide()
+              }
               return
+            }
+            if (action === "is-content" && typeof targetId === "string") {
+              await Promise.allSettled([...bindings])
+              return targets.has(targetId)
             }
             if (
               (action === "show" ||
@@ -177,6 +232,10 @@ else {
               )
                 throw new Error("浏览器控制版本无效")
               target!.generation = generation as number | undefined
+              window.setControl(
+                target!.generation,
+                typeof instruction === "string" ? instruction : undefined
+              )
               if (window.isMinimized()) window.restore()
               window.show()
               window.focus()

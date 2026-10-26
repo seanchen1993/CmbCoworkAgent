@@ -50,6 +50,7 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
     state: BotBrowserState
   } | null>(null)
   const state = snapshot?.botId === botId && snapshot.client === client ? snapshot.state : null
+  const human = state?.control === "human"
   const [pageId, setPageId] = useState<string>()
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -96,7 +97,7 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
       }
       let deadline: ReturnType<typeof setTimeout> | undefined
       const request = Promise.race([
-        client.browserPreview(botId, pageId),
+        client.browserPreview(botId, human ? undefined : pageId),
         new Promise<never>((_, reject) => {
           deadline = setTimeout(
             () => reject(new Error("获取浏览器画面超时，请刷新或接管后重试")),
@@ -131,7 +132,13 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
                 ? "暂未生成画面，请刷新或接管后重试"
                 : null)
           )
-          if (pageId && !next.pages.some((page) => page.id === pageId)) setPageId(undefined)
+          // Native-window navigation/new/close can change the human's active page.
+          // Explicit App selection becomes authoritative through takeOverBrowser.
+          if (
+            (next.control === "human" && !actionLock.current) ||
+            (pageId && !next.pages.some((page) => page.id === pageId))
+          )
+            setPageId(undefined)
         })
         .catch((cause) => {
           if (!disposed) setPreviewError(botErrorMessage(cause, "暂时无法获取浏览器画面"))
@@ -159,7 +166,7 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
       observer.disconnect()
       document.removeEventListener("visibilitychange", wake)
     }
-  }, [botId, client, pageId, refresh, viewerOpen])
+  }, [botId, client, pageId, refresh, viewerOpen, human])
 
   const control = async (reopen = false, outcome?: "skipped") => {
     if (actionLock.current) return
@@ -189,7 +196,6 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
     if (selectedId && selectedUrl && /^https?:\/\//i.test(selectedUrl))
       setNavigationFailure((failure) => (failure?.pageId === selectedId ? null : failure))
   }, [selectedId, selectedUrl])
-  const human = state?.control === "human"
   const pagePending = Boolean(pageId && pageId !== state?.pageId)
   const image = selected?.id === state?.pageId ? state?.image : null
   const staleImage = Boolean(image && previewError)
@@ -305,53 +311,55 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
             </SelectContent>
           </Select>
         )}
-        <div className="bot-browser-controls" role="toolbar" aria-label="网页操作">
-          <button
-            className="bot-icon-button"
-            aria-label="后退"
-            title="后退"
-            disabled={!human || busy || pagePending || !selected?.canGoBack}
-            onClick={() => void operate("back")}
-          >
-            <ArrowLeft size={16} />
-          </button>
-          <button
-            className="bot-icon-button"
-            aria-label="前进"
-            title="前进"
-            disabled={!human || busy || pagePending || !selected?.canGoForward}
-            onClick={() => void operate("forward")}
-          >
-            <ArrowRight size={16} />
-          </button>
-          <button
-            className="bot-icon-button"
-            aria-label="刷新网页"
-            title="刷新网页"
-            disabled={!human || busy || pagePending || !selected}
-            onClick={() => void operate("reload")}
-          >
-            <RefreshCw size={16} />
-          </button>
-          <button
-            className="bot-icon-button"
-            aria-label="新建网页"
-            title="新建网页"
-            disabled={!human || busy || pagePending}
-            onClick={() => void operate("new")}
-          >
-            <Plus size={16} />
-          </button>
-          <button
-            className="bot-icon-button"
-            aria-label="关闭网页"
-            title="关闭网页"
-            disabled={!human || busy || pagePending || !selected}
-            onClick={() => void operate("close")}
-          >
-            <X size={16} />
-          </button>
-        </div>
+        {human && (
+          <div className="bot-browser-controls" role="toolbar" aria-label="网页操作">
+            <button
+              className="bot-icon-button"
+              aria-label="后退"
+              title="后退"
+              disabled={!human || busy || pagePending || !selected?.canGoBack}
+              onClick={() => void operate("back")}
+            >
+              <ArrowLeft size={16} />
+            </button>
+            <button
+              className="bot-icon-button"
+              aria-label="前进"
+              title="前进"
+              disabled={!human || busy || pagePending || !selected?.canGoForward}
+              onClick={() => void operate("forward")}
+            >
+              <ArrowRight size={16} />
+            </button>
+            <button
+              className="bot-icon-button"
+              aria-label="刷新网页"
+              title="刷新网页"
+              disabled={!human || busy || pagePending || !selected}
+              onClick={() => void operate("reload")}
+            >
+              <RefreshCw size={16} />
+            </button>
+            <button
+              className="bot-icon-button"
+              aria-label="新建网页"
+              title="新建网页"
+              disabled={!human || busy || pagePending}
+              onClick={() => void operate("new")}
+            >
+              <Plus size={16} />
+            </button>
+            <button
+              className="bot-icon-button"
+              aria-label="关闭网页"
+              title="关闭网页"
+              disabled={!human || busy || pagePending || !selected}
+              onClick={() => void operate("close")}
+            >
+              <X size={16} />
+            </button>
+          </div>
+        )}
         <div className="bot-browser-preview">
           {errorPage ? (
             <div className="bot-browser-empty" role="alert">

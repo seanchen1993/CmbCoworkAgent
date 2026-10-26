@@ -166,10 +166,35 @@ export class BotBrowserService {
         // Recheck the exact target after that lock, then return outside the lock.
         void this.lock.withKey("browser", async () => {}).then(release).catch(() => {})
       })
+      const stopToolbar = engine.onToolbarAction?.(async (page, generation, action) => {
+        const entry = [...this.pages.values()].find((candidate) => candidate.page === page)
+        if (
+          this.context !== context ||
+          !entry ||
+          this.human?.botId !== entry.botId ||
+          this.human.generation !== generation
+        )
+          throw new BotError("CONFLICT", "浏览器控制权已改变，请重新接管")
+        if (action.action === "return") await this.giveBack(entry.botId, generation)
+        else if (action.action === "navigate") {
+          const address = action.url?.trim() ?? ""
+          if (!address) throw new BotError("INVALID_INPUT", "请输入网址")
+          const url = /^[a-z][a-z\d+.-]*:/i.test(address) ? address : `https://${address}`
+          await this.navigateAsHuman(entry.botId, entry.id, url, generation)
+        } else
+          await this.operateAsHuman(
+            entry.botId,
+            action.action === "new"
+              ? { action: "new" }
+              : { action: action.action, pageId: entry.id },
+            generation
+          )
+      })
       context.setDefaultTimeout(15_000)
       context.setDefaultNavigationTimeout(20_000)
       context.on("close", () => {
         stopHidden()
+        stopToolbar?.()
         if (this.context !== context) return
         this.context = undefined
         this.engine = undefined
@@ -184,6 +209,7 @@ export class BotBrowserService {
         void page
           .opener()
           .then(async (opener) => {
+            if (engine.isContentPage && !(await engine.isContentPage(page))) return
             // Parent-created targets register their exact owner before the human-tab fallback.
             if (!opener) await this.creating?.catch(() => undefined)
             if ([...this.pages.values()].some((item) => item.page === page)) return
@@ -250,7 +276,9 @@ export class BotBrowserService {
         return
       }
       try {
-        this.register(botId, popup)
+        const child = this.register(botId, popup)
+        if (this.human?.botId === botId && this.human.status === "active")
+          void this.takeOver(botId, child.id).catch(() => {})
       } catch {
         /* Capacity rejection already closes this popup. */
       }
@@ -819,7 +847,7 @@ export class BotBrowserService {
         const targetId = pageId ?? claim.pageId
         if (!targetId) throw new BotError("CONFLICT", "当前接管页面已关闭，请明确选择页面")
         const entry = await this.page(botId, targetId)
-        await this.engine!.show(entry.page, claim.generation)
+        await this.engine!.show(entry.page, claim.generation, claim.instruction)
         if (this.stopping || this.human !== claim || claim.status !== "active")
           throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后重试")
         claim.pageId = entry.id
@@ -842,7 +870,7 @@ export class BotBrowserService {
         if (this.stopping || this.human !== claim || claim.status !== "requesting")
           throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后重试")
         const entry = await this.page(botId, pageId ?? this.viewedPage(botId)?.id)
-        await this.engine!.show(entry.page, claim.generation)
+        await this.engine!.show(entry.page, claim.generation, claim.instruction)
         if (this.stopping || this.human !== claim || entry.page.isClosed())
           throw new BotError("CONFLICT", "浏览器已关闭，请重新打开")
         claim.pageId = entry.id
@@ -889,12 +917,23 @@ export class BotBrowserService {
       for (const wake of this.returned) wake()
     }
   }
-  async navigateAsHuman(botId: string, pageId: string, address: string): Promise<void> {
+  async navigateAsHuman(
+    botId: string,
+    pageId: string,
+    address: string,
+    expectedGeneration?: number
+  ): Promise<void> {
     const url = new URL(address)
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password)
       throw new BotError("INVALID_INPUT", "仅支持无内嵌凭据的 HTTP／HTTPS 地址")
     const claim = this.human
-    if (this.stopping || !claim || claim.botId !== botId || claim.status !== "active")
+    if (
+      this.stopping ||
+      !claim ||
+      claim.botId !== botId ||
+      claim.status !== "active" ||
+      (expectedGeneration !== undefined && claim.generation !== expectedGeneration)
+    )
       throw new BotError("CONFLICT", "请先接管此 Bot 的浏览器")
     await this.lock.withKey("browser", async () => {
       if (this.human !== claim || claim.status !== "active")
@@ -902,7 +941,7 @@ export class BotBrowserService {
       const entry = await this.page(botId, pageId)
       await entry.page.goto(url.href, { waitUntil: "domcontentloaded" })
       if (this.human === claim && claim.status === "active") {
-        await this.engine!.show(entry.page, claim.generation)
+        await this.engine!.show(entry.page, claim.generation, claim.instruction)
         claim.pageId = entry.id
         this.rememberViewed(entry)
       }
@@ -949,7 +988,7 @@ export class BotBrowserService {
         )
         if (!next) return null
         check()
-        await this.engine!.show(next.page, expectedGeneration)
+        await this.engine!.show(next.page, expectedGeneration, claim!.instruction)
         check()
         claim!.pageId = next.id
         this.rememberViewed(next)
@@ -963,7 +1002,7 @@ export class BotBrowserService {
       else if (action.action === "reload")
         await entry.page.reload({ waitUntil: "domcontentloaded" })
       check()
-      await this.engine!.show(entry.page, expectedGeneration)
+      await this.engine!.show(entry.page, expectedGeneration, claim!.instruction)
       check()
       claim!.pageId = entry.id
       this.rememberViewed(entry)

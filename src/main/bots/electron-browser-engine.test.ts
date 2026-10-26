@@ -95,6 +95,64 @@ describe("Electron Bot browser native capture RPC", () => {
     expect(child.send.mock.calls[0][0]).toMatchObject({ action: "capture", targetId: "owned-1" })
   })
 
+  it("dispatches toolbar commands for the exact Page and reports unknown targets or rejected leases", async () => {
+    engine = await startElectronBotBrowser("/synthetic-profile")
+    const first = await engine.createPage()
+    const second = await engine.createPage()
+    const listener = vi.fn(async () => {})
+    const stop = engine.onToolbarAction!(listener)
+    child.emit("message", {
+      event: "toolbar-action",
+      requestId: 11,
+      targetId: "owned-2",
+      generation: 8,
+      action: "reload"
+    })
+    await vi.waitFor(() =>
+      expect(listener).toHaveBeenCalledWith(second, 8, { action: "reload", url: undefined })
+    )
+    expect(listener).not.toHaveBeenCalledWith(first, expect.anything(), expect.anything())
+    await vi.waitFor(() =>
+      expect(child.send).toHaveBeenCalledWith(
+        { action: "toolbar-result", requestId: 11 },
+        expect.any(Function)
+      )
+    )
+    listener.mockRejectedValueOnce(new Error("控制权已改变"))
+    child.emit("message", {
+      event: "toolbar-action",
+      requestId: 12,
+      targetId: "owned-1",
+      generation: 7,
+      action: "return"
+    })
+    await vi.waitFor(() =>
+      expect(child.send).toHaveBeenCalledWith(
+        { action: "toolbar-result", requestId: 12, error: "控制权已改变" },
+        expect.any(Function)
+      )
+    )
+    stop()
+    child.emit("message", {
+      event: "toolbar-action",
+      requestId: 13,
+      targetId: "unknown",
+      generation: 8,
+      action: "new"
+    })
+    await vi.waitFor(() =>
+      expect(child.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: "toolbar-result",
+          requestId: 13,
+          error: expect.any(String)
+        }),
+        expect.any(Function)
+      )
+    )
+    expect(listener).toHaveBeenCalledTimes(2)
+  })
+
   it("coalesces concurrent capture readers without mixing different targets", async () => {
     engine = await startElectronBotBrowser("/synthetic-profile")
     const first = await engine.createPage()

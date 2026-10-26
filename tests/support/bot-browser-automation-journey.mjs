@@ -33,7 +33,14 @@ export default async function verifyOwnedAutomation(service, engine, fixtureUrl,
       await fs.writeFile(path.join(workspace(scope), "input.txt"), scope)
       const before = new Set(engine.context.pages())
       const opened = await act(scope, { action: "navigate", newTab: true, url: fixtureUrl })
-      const page = engine.context.pages().find((page) => !before.has(page))
+      const page = (
+        await Promise.all(
+          engine.context
+            .pages()
+            .filter((page) => !before.has(page))
+            .map(async (page) => ((await engine.isContentPage(page)) ? page : null))
+        )
+      ).find(Boolean)
       assert.ok(page)
       await page.setContent(html)
       await page.frameLocator("iframe").getByRole("button", { name: "框架按钮" }).waitFor()
