@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process"
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const state = vi.hoisted(() => ({
   root: `/tmp/harness-binding-review-${process.pid}-${Date.now()}`,
@@ -10,6 +10,7 @@ const state = vi.hoisted(() => ({
   projectExists: true,
   artifactConfig: undefined as unknown,
   sessionContextCommand: "",
+  supportedDeployUnits: ["legacy-unit"],
   knowledgeBaseIds: ["bound-knowledge"],
   inspect: vi.fn()
 }))
@@ -41,6 +42,7 @@ vi.mock("./catalog-client", () => ({
               error: null,
               value: {
                 apiVersion: 1,
+                supported_deploy_units: state.supportedDeployUnits,
                 artifact_sync: state.artifactConfig,
                 inspectCommands: {
                   [process.platform]: {
@@ -85,6 +87,7 @@ import {
   buildHarnessFeatureAgentContext,
   archiveHarnessProject,
   prepareHarnessKnowledgeDeposition,
+  getHarnessProjectPublicAgentmdDeployUnits,
   getHarnessRunDetail
 } from "./service"
 import {
@@ -114,6 +117,7 @@ beforeEach(async () => {
   state.projectExists = true
   state.artifactConfig = undefined
   state.sessionContextCommand = ""
+  state.supportedDeployUnits = ["legacy-unit"]
   state.knowledgeBaseIds = ["bound-knowledge"]
   state.inspect.mockClear()
 })
@@ -125,6 +129,107 @@ const update = () =>
     selectedDeployUnits: [],
     sessionWorkspace: { source: "directory", path: state.root }
   })
+
+describe("public system constraint indicators", () => {
+  beforeEach(async () => {
+    vi.stubEnv("CMB_COWORK_AGENT_HOME", state.root)
+    await rm(join(state.root, "knowledge"), { recursive: true, force: true })
+    await rm(join(state.root, "knowledge-state.json"), { force: true })
+    state.sessionContextCommand = "inject --knowledge-path ${knowledgePath}"
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.restoreAllMocks()
+  })
+
+  const manifest = (...ids: string[]): string =>
+    JSON.stringify({
+      systems: ids.map((deployUnitId) => ({ deployUnits: [{ deployUnitId }] }))
+    })
+
+  const saveLibraries = async (
+    libraries: Array<{ id: string; read?: string; write?: string; available?: boolean }>
+  ): Promise<void> => {
+    const saved = mergeCloudKnowledgeState(
+      null,
+      libraries.map(({ id }) => ({
+        idKey: id,
+        name: id,
+        description: "",
+        ownerId: "",
+        ownerName: "",
+        repoUrl: "https://example.test/repo.git",
+        sshUrl: null,
+        gitRef: "main"
+      }))
+    )
+    for (const [index, item] of saved.knowledgeBases.entries()) {
+      const library = libraries[index]
+      item.workspaces[0].status = library.available === false ? "failed" : "success"
+      for (const role of ["read", "write"] as const) {
+        const path = knowledgeDirectory(item.idKey, role)
+        await mkdir(join(path, ".git"), { recursive: true })
+        if (library[role] !== undefined) {
+          await writeFile(join(path, "agents.manifest.json"), library[role])
+        }
+      }
+    }
+    await writeKnowledgeState(saved)
+  }
+
+  it("keeps the configured deploy units for legacy injection commands", async () => {
+    state.sessionContextCommand = "inject"
+    state.supportedDeployUnits = [" legacy-unit ", "legacy-unit", "second"]
+    expect(await getHarnessProjectPublicAgentmdDeployUnits("p")).toEqual(["legacy-unit", "second"])
+  })
+
+  it("returns no public units without an injection command", async () => {
+    state.sessionContextCommand = ""
+    expect(await getHarnessProjectPublicAgentmdDeployUnits("p")).toEqual([])
+  })
+
+  it("merges only bound, available read manifests and ignores legacy and write content", async () => {
+    state.knowledgeBaseIds = ["first", "second", "unavailable"]
+    await saveLibraries([
+      { id: "first", read: manifest(" unit-a ", "shared"), write: manifest("write-only") },
+      { id: "second", read: manifest("shared", "unit-b") },
+      { id: "unbound", read: manifest("unbound-unit") },
+      { id: "unavailable", read: manifest("unavailable-unit"), available: false }
+    ])
+    expect(await getHarnessProjectPublicAgentmdDeployUnits("p")).toEqual([
+      "unit-a",
+      "shared",
+      "unit-b"
+    ])
+  })
+
+  it.each([
+    undefined,
+    "{invalid json",
+    JSON.stringify({ systems: {} }),
+    JSON.stringify({ systems: [{ deployUnits: {} }] }),
+    JSON.stringify({ systems: [{ deployUnits: [{ deployUnitId: "partial" }, {}] }] })
+  ])("logs invalid or missing manifests and continues with other libraries: %s", async (read) => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    state.knowledgeBaseIds = ["broken", "valid"]
+    await saveLibraries([
+      { id: "broken", read },
+      { id: "valid", read: manifest("valid-unit") }
+    ])
+    expect(await getHarnessProjectPublicAgentmdDeployUnits("p")).toEqual(["valid-unit"])
+    expect(warning).toHaveBeenCalledOnce()
+    expect(warning.mock.calls[0][1]).toMatchObject({
+      manifestPath: join(knowledgeDirectory("broken", "read"), "agents.manifest.json")
+    })
+  })
+
+  it("does not fall back to legacy units when no bound read library is available", async () => {
+    expect(await getHarnessProjectPublicAgentmdDeployUnits("p")).toEqual([])
+    state.knowledgeBaseIds = []
+    expect(await getHarnessProjectPublicAgentmdDeployUnits("p")).toEqual([])
+  })
+})
 
 describe("artifact accumulation sessions", () => {
   it("resolves the configured action with project, feature, token and workspace placeholders", async () => {

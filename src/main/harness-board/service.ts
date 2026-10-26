@@ -27,7 +27,7 @@ import type { KnowledgeDepositionWorkspace } from "../../shared/knowledge-base-t
 import { harnessNotifications } from "./notifications"
 import { spawn, type ChildProcess } from "child_process"
 import { createHash } from "crypto"
-import { access, mkdir, stat } from "node:fs/promises"
+import { access, mkdir, readFile, stat } from "node:fs/promises"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import { serialize } from "node:v8"
 import * as chardet from "jschardet"
@@ -3233,7 +3233,42 @@ export async function getHarnessProjectPublicAgentmdDeployUnits(
     configContext.configSnapshot
   )
   if (!boardCompatibility.compatible) return []
-  return uniqueStringsInOrder(configContext.configSnapshot?.value?.supported_deploy_units)
+  const command = readBoardConfigPlatformTextFromValue(
+    configContext.configSnapshot?.value ?? null,
+    "session_context_inject"
+  )
+  if (!command?.trim()) return []
+  if (!command.includes("${knowledgePath}")) {
+    return uniqueStringsInOrder(configContext.configSnapshot?.value?.supported_deploy_units)
+  }
+
+  const knowledgeBases = await resolveProjectKnowledgeBases(context.project.knowledgeBaseIds ?? [])
+  const deployUnitIds: string[] = []
+  for (const knowledgeBase of knowledgeBases) {
+    const manifestPath = join(knowledgeBase.path, "agents.manifest.json")
+    try {
+      const manifest: unknown = JSON.parse(await readFile(manifestPath, "utf8"))
+      if (!isObject(manifest) || !Array.isArray(manifest.systems)) {
+        throw new Error("系统约束清单缺少 systems 数组")
+      }
+      const ids: string[] = []
+      for (const system of manifest.systems) {
+        if (!isObject(system) || !Array.isArray(system.deployUnits)) {
+          throw new Error("系统约束清单缺少 deployUnits 数组")
+        }
+        for (const unit of system.deployUnits) {
+          if (!isObject(unit) || typeof unit.deployUnitId !== "string") {
+            throw new Error("系统约束清单的 deployUnitId 必须是字符串")
+          }
+          ids.push(unit.deployUnitId)
+        }
+      }
+      deployUnitIds.push(...ids)
+    } catch (error) {
+      console.warn("[HarnessBoard] 读取公共系统约束清单失败：", { manifestPath, error })
+    }
+  }
+  return uniqueStringsInOrder(deployUnitIds)
 }
 
 export async function getHarnessLocalAgentmdDeployUnitMappings(
