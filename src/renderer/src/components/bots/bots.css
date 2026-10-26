@@ -746,6 +746,35 @@
 .bot-detail-section > button:hover {
   color: var(--bot-text);
 }
+.bot-memory-config {
+  margin-bottom: 20px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--bot-line);
+}
+.bot-memory-config-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.bot-memory-config-trigger {
+  color: var(--bot-muted);
+  flex-shrink: 0;
+}
+.bot-memory-config-trigger:hover:not(:disabled),
+.bot-memory-config-trigger[data-state="open"] {
+  color: var(--bot-text);
+  background: var(--bot-hover);
+}
+.bot-memory-config-description {
+  margin-top: 6px;
+  color: var(--bot-muted);
+  font-size: 12px;
+}
+.bot-memory-empty {
+  padding: 4px 0 12px;
+  color: var(--bot-muted);
+}
 .bot-task-item {
   padding: 10px 0;
   border-bottom: 1px solid var(--bot-line);

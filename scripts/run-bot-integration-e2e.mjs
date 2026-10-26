@@ -71,6 +71,7 @@ export default Object.fromEntries(["main","preload","renderer"].map((name) => [
     for (const test of [
       "bots-local-work-app.spec.ts",
       "bots-conversation-link-app.spec.ts",
+      "bots-memory-app.spec.ts",
       "bots-mock-channel-app.spec.ts"
     ])
       await run(["--import", "tsx", `tests/${test}`], testEnv)
