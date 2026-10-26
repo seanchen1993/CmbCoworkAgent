@@ -1157,6 +1157,23 @@ describe("Bot Runtime integration", () => {
       const context = fixture.start.mock.calls[0][2]
       expect(context.extraSystemPrompt).not.toContain("Host-confirmed sender workspace")
       expect(context.extraSystemPrompt).not.toContain("/synthetic/workspaces/b")
+      if (inGroup) {
+        expect(context.extraSystemPrompt).toContain(
+          'working directory is "/synthetic/workspaces/group-g"'
+        )
+        const message = fixture.start.mock.calls[0][0].message
+        expect(message).toContain(
+          'Host-confirmed current group workspace for this turn: "/synthetic/workspaces/group-g"'
+        )
+        expect(message).toContain(
+          "All members executing this group assignment use this SAME working directory"
+        )
+        expect(message).toContain("do not copy files into a member's private workspace")
+      } else {
+        expect(fixture.start.mock.calls[0][0].message).not.toContain(
+          "Host-confirmed current group workspace"
+        )
+      }
     }
   )
   it.each([true, false])(
@@ -1309,6 +1326,98 @@ describe("Bot Runtime integration", () => {
       ).toBe(true)
     }
   })
+
+  it.each([
+    "same",
+    "other task",
+    "other author",
+    "partial",
+    "changed",
+    "no snapshot",
+    "text only",
+    "split delivery",
+    "peer and caller",
+    "snapshot unreadable",
+    "other path",
+    "mutable file changed"
+  ])(
+    "recognizes the caller's own completed file delivery before the peer callback (%s)",
+    async (kind) => {
+      fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+      const files = ["a.md", "b.md"].map((name) => ({
+        filePath: `/synthetic/workspaces/group-g/${name}`,
+        name,
+        size: 7,
+        attachmentPath: `/synthetic/workspaces/group-g/.bot-deliveries/returned/${name}`
+      }))
+      const publicMessages = [
+        {
+          id: `files-${kind === "other task" ? "unrelated" : "root"}-call`,
+          groupId: "g",
+          ordinal: 1,
+          authorBotId: kind === "other author" ? "other" : bot.id,
+          text: "Already delivered",
+          createdAt: 1,
+          files:
+            kind === "text only"
+              ? []
+              : files.slice(0, kind === "partial" ? 1 : 2).map((file) => ({
+                  ...file,
+                  filePath: kind === "other path" ? `${file.filePath}.other` : file.filePath,
+                  attachmentPath:
+                    kind === "no snapshot"
+                      ? undefined
+                      : `/synthetic/workspaces/group-g/.bot-deliveries/sent/${file.name}`
+                }))
+        }
+      ]
+      if (kind === "split delivery" || kind === "peer and caller") {
+        const first = publicMessages[0]
+        publicMessages.push({
+          ...first,
+          id: kind === "peer and caller" ? "files-peer-task-second" : "files-root-second",
+          authorBotId: kind === "peer and caller" ? "b" : bot.id,
+          files: first.files.slice(1)
+        })
+        first.files = first.files.slice(0, 1)
+      }
+      fixture.groupMessages.mockReturnValue(publicMessages)
+      fixture.hashFile.mockImplementation(async (_root, path) => {
+        if (kind === "snapshot unreadable" && path.includes("/sent/")) throw new Error("ENOENT")
+        if (kind === "changed" && path.includes("/returned/")) return "changed"
+        if (kind === "mutable file changed" && !path.includes("/.bot-deliveries/")) return "changed"
+        return "same"
+      })
+      const callback: BotTask = {
+        ...task,
+        threadId: "group-g-a",
+        requestId: "reply-peer-task",
+        origin: {
+          kind: "bot",
+          groupId: "g",
+          fromBotId: "b",
+          rootTaskId: "root",
+          depth: 1,
+          expectsReply: false,
+          replyFiles: files
+        }
+      }
+      const lease = port().acquire(bot, callback)!
+      await lease.execute(new AbortController().signal, vi.fn())
+      lease.release()
+      const [request, , context] = fixture.start.mock.calls[0]
+      const delivered = ["same", "split delivery", "peer and caller", "mutable file changed"].includes(
+        kind
+      )
+      expect(request.message).toContain(`public delivery for this exact peer result: ${delivered}`)
+      const reminder = context.checkFinalDelivery!([
+        new HumanMessage("Peer result"),
+        new AIMessage("(pass)")
+      ])
+      if (delivered) expect(reminder).toBeUndefined()
+      else expect(reminder).toContain("bot_send_message")
+    }
+  )
 
   it.each([0, 1, 2])(
     "keeps a file callback owed until all %s published files cover its actual outputs",

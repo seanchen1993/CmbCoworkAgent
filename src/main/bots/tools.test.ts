@@ -204,11 +204,17 @@ it.each([false, true])(
     expect(tools.map((tool) => tool.name)).toEqual(["bot_list_peers", "bot_delegate"])
     const description = tools[1].description
     if (group) {
+      expect(description).toContain("caller and recipient use the SAME current group workspace")
+      expect(description).toContain("Do not copy files into private Bot workspaces")
       expect(description).toContain("request and returned text are not automatically public")
+      expect(description).toContain("ask the recipient to use bot_return_files")
+      expect(description).toContain("bot_deliver_files publishes attachments to the group")
+      expect(description).toContain("original user explicitly assigns public delivery")
       expect(description).toContain("bot_send_message")
       expect(description).not.toContain("Private Bots have different working directories")
     } else {
       expect(description).not.toContain("bot_send_message")
+      expect(description).not.toContain("bot_return_files")
       expect(description).toContain("Private Bots have different working directories")
       expect(description).toContain("verified absolute paths for authorized input files")
       expect(description).toContain("does not copy input files")
@@ -216,7 +222,11 @@ it.each([false, true])(
     }
     expect(tools[1].schema).toHaveProperty(
       "shape.outputFiles.description",
-      expect.stringContaining("relative to the recipient's workspace")
+      expect.stringContaining(
+        group
+          ? "relative to the current shared group workspace"
+          : "relative to the recipient's workspace"
+      )
     )
   }
 )

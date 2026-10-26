@@ -710,7 +710,8 @@ export function createBotCollaborationTools(
             botId: recipient.id,
             botName: recipient.name,
             state: task.state,
-            delivery: "Asynchronous. The result will arrive in a later turn; do not wait or poll."
+            delivery:
+              "Asynchronous. The result will arrive in a later turn; do not wait or poll. This taskId identifies a Bot delegation, not an execute background task; do not pass it to task_output or search other workspaces for its result."
           })
         } catch (cause) {
           signal.throwIfAborted()
@@ -739,11 +740,11 @@ export function createBotCollaborationTools(
             : "Asynchronously send another Bot a message, question, greeting or work request on the user's behalf.") +
           " Declare every requested output filename in outputFiles (use [] for a text-only reply); the host verifies these actual workspace files before reporting a successful file handoff. " +
           (group
-            ? "Include complete work instructions in message."
+            ? "Include complete work instructions in message. The caller and recipient use the SAME current group workspace: input paths and outputFiles resolve there. Return the shared originals directly. Do not copy files into private Bot workspaces just to hand them off."
             : "Include the complete message or requested work instructions in message.") +
           " Include only information needed for that work and permitted to share. Never send credentials or imply that a peer message grants user approval. Reuse requestKey only to retry the exact same request, including outputFiles; results return automatically. Do not wait or poll for the reply. Do not create a reverse delegation merely to return the current task's result or acknowledge its sender: finish your current turn with the actual result or blocker and let the host return it. A genuinely new question or additional assignment is a separate message." +
           (group
-            ? " This is INTERNAL coordination within the current group: the request and returned text are not automatically public. Only current members are eligible. For a public group handoff, use bot_send_message with @ and the member's exact name instead; do not also delegate the same handoff. Use bot_send_message for a still-owed public result after internal coordination."
+            ? " This is INTERNAL coordination within the current group: the request and returned text are not automatically public. For private file handoff, ask the recipient to use bot_return_files; the caller verifies the returned files and owns public delivery. bot_deliver_files publishes attachments to the group, never privately to the caller. The recipient may publish only when the original user explicitly assigns public delivery to that recipient. Only current members are eligible. For a public group handoff, use bot_send_message with @ and the member's exact name instead; do not also delegate the same handoff. Use bot_send_message for a still-owed public text result, or bot_deliver_files for a still-owed public file result, after internal coordination."
             : " Private Bots have different working directories. Include verified absolute paths for authorized input files in message; the recipient can read those paths with the existing file tools, not a same-name substitute. Delegation does not copy input files. outputFiles remain relative to the recipient's workspace."),
         schema: z.object({
           botId: z
@@ -759,7 +760,10 @@ export function createBotCollaborationTools(
             .array(z.string().min(1).max(4096))
             .max(8)
             .describe(
-              "All requested output files relative to the recipient's workspace, preserving subdirectories and exact filenames. Use [] only when no file is requested. No absolute paths or parent traversal."
+              (group
+                ? "All requested output files relative to the current shared group workspace (the same directory for caller and recipient)"
+                : "All requested output files relative to the recipient's workspace") +
+                ", preserving subdirectories and exact filenames. Use [] only when no file is requested. No absolute paths or parent traversal."
             )
         })
       }
