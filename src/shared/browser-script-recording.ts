@@ -639,21 +639,49 @@ type ParsedScriptRecordingVariable = ScriptRecordingVariable & {
   defaultValue: ScriptRecordingVariableValue
 }
 
+function stripScriptLineComment(value: string): string {
+  let quote: "'" | '"' | null = null
+  let escaped = false
+
+  for (let index = 0; index < value.length - 1; index += 1) {
+    const character = value[index]!
+
+    if (quote) {
+      if (escaped) {
+        escaped = false
+      } else if (character === "\\") {
+        escaped = true
+      } else if (character === quote) {
+        quote = null
+      }
+      continue
+    }
+
+    if (character === "'" || character === '"') {
+      quote = character
+      continue
+    }
+
+    if (character === "/" && value[index + 1] === "/") {
+      return value.slice(0, index)
+    }
+  }
+
+  return value
+}
+
 function parseVariableDeclarationLine(line: string): ParsedScriptRecordingVariable | null {
   const match = /^const\s+(变量_[\p{L}\p{N}_]+)\s*(?::\s*(string\[\]))?\s*=\s*(.+)$/u.exec(line)
   if (!match) return null
 
-  const commentMatch = /\s+\/\/\s*(变量[-_].*)\s*$/u.exec(match[3]!)
-  const expression = (commentMatch ? match[3]!.slice(0, commentMatch.index) : match[3]!)
-    .trim()
-    .replace(/;$/u, "")
-    .trim()
+  const expressionWithSemicolon = stripScriptLineComment(match[3]!)
+  const expression = expressionWithSemicolon.trim().replace(/;$/u, "").trim()
   const valueExpression = parseScriptLiteralExpression(expression)
   if (valueExpression.kind !== "string" && valueExpression.kind !== "stringArray") {
     return null
   }
 
-  const displayName = deriveVariableDisplayName(match[1]!, commentMatch?.[1])
+  const displayName = deriveVariableDisplayName(match[1]!)
   if (!displayName) return null
   return {
     identifier: match[1]!,
