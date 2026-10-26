@@ -88,7 +88,10 @@ import { ThreadGroupDeleteDialog } from "@/components/sidebar/ThreadGroupDeleteD
 import { KnowledgePreviewPanel } from "@/components/harness-board/KnowledgePreviewPanel"
 import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
 import { ArtifactAccumulationButton } from "./ArtifactAccumulationButton"
-import { ManagedRunTimeline } from "@/components/harness-board/ManagedRunPanel"
+import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
+import { ManagedRunHistory } from "@/components/harness-board/ManagedRunHistory"
+import { ManagedRunStartDialog } from "./ManagedRunStartDialog"
+import { buildManagedRunSessionOptions } from "@/lib/managed-run-session-options"
 import {
   createBoundedLatestTaskQueue,
   type BoundedTaskContext
@@ -463,6 +466,7 @@ interface ProjectFeatureSessionGroup {
   slug: string
   title: string
   sessions: HarnessSessionBinding[]
+  managedRunThreadId?: string
   section: ProjectFeatureSessionGroupSection
   deleted?: boolean
 }
@@ -5346,54 +5350,6 @@ function FeatureConversationPanel({
   )
 }
 
-function FeatureDeployUnitsPanel({
-  deployUnits
-}: {
-  deployUnits: HarnessDeployUnitMapping[]
-}): React.JSX.Element {
-  return (
-    <section className={cn(harnessSurfaceClassName, "overflow-hidden bg-background-elevated")}>
-      <div className="flex min-w-0 items-center gap-2 border-b border-border/70 px-4 py-3 text-sm font-semibold">
-        <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
-        <span className="truncate">当前特性绑定的发布单元</span>
-      </div>
-      {deployUnits?.length === 0 ? (
-        <div className="px-4 py-8 text-sm text-muted-foreground">当前特性没有绑定发布单元。</div>
-      ) : (
-        <div className="divide-y divide-border/70">
-          {deployUnits?.map((deployUnit) => (
-            <div key={deployUnit.deployUnitIdMapping} className="px-4 py-3">
-              <div className="truncate text-sm font-medium" title={deployUnit.deployUnitId}>
-                {deployUnit.deployUnitId}
-              </div>
-              <div className="mt-1 flex min-w-0 items-center gap-2">
-                <div
-                  className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
-                  title={deployUnit.localRepoPath}
-                >
-                  {deployUnit.localRepoPath}
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className="size-7 shrink-0"
-                  title="打开代码库路径"
-                  onClick={() =>
-                    void openPathInFileManager(deployUnit.localRepoPath, "无法打开代码库路径")
-                  }
-                >
-                  <FolderOpen className="size-3.5" />
-                </Button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  )
-}
-
 function FeatureWorkspaceChangesPanel({
   sessions,
   threadsById
@@ -6595,9 +6551,6 @@ function FeatureDetailPage({
     detail?.run.nodes.find((node) => node.id === effectiveSelectedNodeId) ??
     detail?.run.nodes[0] ??
     null
-  const completedArtifactCount =
-    selectedNode?.artifacts?.filter((artifact) => artifact.artifactStatus === "generated").length ??
-    0
   const selectedNodeHooks = useMemo(
     () => [...(selectedNode?.hooks ?? [])].sort((a, b) => (b.ts || "").localeCompare(a.ts || "")),
     [selectedNode]
@@ -6681,12 +6634,19 @@ function FeatureDetailPage({
     null
   )
   const [managedRunDialogOpen, setManagedRunDialogOpen] = useState(false)
-  const [managedRunWorkspacePath, setManagedRunWorkspacePath] = useState("")
-  const [managedRunUserMessage, setManagedRunUserMessage] = useState("")
-  const managedRunDefaultUserMessageRef = useRef("")
-  const [managedRunImEnabled, setManagedRunImEnabled] = useState(true)
+  const managedRunSessionOptions = useMemo(
+    () =>
+      managedRunDialogOpen
+        ? buildManagedRunSessionOptions(
+            detail?.sessions ?? [],
+            threadsById,
+            allThreadStates,
+            allStreamLoadingStates
+          )
+        : [],
+    [managedRunDialogOpen, detail?.sessions, threadsById, allThreadStates, allStreamLoadingStates]
+  )
   const [openingManagedRunDialog, setOpeningManagedRunDialog] = useState(false)
-  const [pickingManagedRunWorkspace, setPickingManagedRunWorkspace] = useState(false)
   const managedRunActionInFlightRef = useRef(false)
   const [selectedSessionState, setSelectedSessionState] = useState<{
     detailKey: string
@@ -6948,19 +6908,6 @@ function FeatureDetailPage({
     [detail, setCombinedFeatureImManagement, updatingFeatureImManagement]
   )
 
-  const handlePickManagedRunWorkspace = useCallback(async (): Promise<void> => {
-    if (pickingManagedRunWorkspace) return
-    setPickingManagedRunWorkspace(true)
-    try {
-      const workspacePath = normalizeWorkspacePath(await window.api.workspace.select())
-      if (workspacePath) setManagedRunWorkspacePath(workspacePath)
-    } catch (error) {
-      toast.error(cleanIpcError(error))
-    } finally {
-      setPickingManagedRunWorkspace(false)
-    }
-  }, [pickingManagedRunWorkspace])
-
   const handleOpenManagedRunDialog = useCallback(async (): Promise<void> => {
     if (!detail || updatingManagedRun || openingManagedRunDialog || projectInteractionDisabled)
       return
@@ -6972,32 +6919,21 @@ function FeatureDetailPage({
       })
       const defaultWorkspacePath = normalizeWorkspacePath(detail.run.resolvedSessionWorkspacePath)
       if (!defaultWorkspacePath) throw new Error(MISSING_FEATURE_WORKSPACE)
-      setManagedRunWorkspacePath(defaultWorkspacePath)
-      const defaultUserMessage = getHarnessRunNextAction(detail)?.userMessage ?? ""
-      managedRunDefaultUserMessageRef.current = defaultUserMessage
-      setManagedRunUserMessage(defaultUserMessage)
-      setManagedRunImEnabled(featureImManagementAvailable)
-      setPickingManagedRunWorkspace(false)
       setManagedRunDialogOpen(true)
     } catch (error) {
       toast.error(cleanIpcError(error))
     } finally {
       setOpeningManagedRunDialog(false)
     }
-  }, [
-    detail,
-    featureImManagementAvailable,
-    openingManagedRunDialog,
-    projectInteractionDisabled,
-    updatingManagedRun
-  ])
+  }, [detail, openingManagedRunDialog, projectInteractionDisabled, updatingManagedRun])
 
   const handleManagedRunChange = useCallback(
     async (
       shouldStart: boolean,
       workspacePath?: string,
       enableImManagement = true,
-      initialUserMessage?: string
+      initialUserMessage?: string,
+      existingThreadId?: string
     ): Promise<boolean> => {
       if (
         !detail ||
@@ -7021,8 +6957,17 @@ function FeatureDetailPage({
             projectId: detail.project.projectId,
             featureId: detail.run.slug,
             workspacePath: confirmedWorkspacePath,
-            initialUserMessage
+            initialUserMessage,
+            existingThreadId
           })
+          if (existingThreadId) {
+            void window.api.threads
+              .get(existingThreadId)
+              .then((thread) => {
+                if (thread) useAppStore.getState().addThreadSummary(thread)
+              })
+              .catch((error) => console.warn("[ManagedRun] Failed to refresh session:", error))
+          }
           startStatus = startedRun.status
           startFailureReason = startedRun.failureReason
         } else {
@@ -7062,21 +7007,6 @@ function FeatureDetailPage({
       updatingManagedRun
     ]
   )
-
-  const handleConfirmManagedRun = useCallback(async (): Promise<void> => {
-    const userMessage = managedRunUserMessage.trim()
-    const initialUserMessage =
-      userMessage && userMessage !== managedRunDefaultUserMessageRef.current.trim()
-        ? userMessage
-        : undefined
-    const started = await handleManagedRunChange(
-      true,
-      managedRunWorkspacePath,
-      managedRunImEnabled,
-      initialUserMessage
-    )
-    if (started) setManagedRunDialogOpen(false)
-  }, [handleManagedRunChange, managedRunImEnabled, managedRunUserMessage, managedRunWorkspacePath])
 
   const handleContextReminderSessionCreated = useCallback(
     (threadId: string): void => {
@@ -7390,8 +7320,10 @@ function FeatureDetailPage({
                       updatingManagedRun
                     }
                   >
-                    {(openingManagedRunDialog || updatingManagedRun) && (
+                    {openingManagedRunDialog || updatingManagedRun ? (
                       <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <ManagedRunIcon />
                     )}
                     {managedRunIsRunning ? "停止托管运行" : "托管运行当前特性"}
                   </Button>
@@ -7641,8 +7573,8 @@ function FeatureDetailPage({
                     暂无阶段数据。
                   </section>
                 )}
-                <ManagedRunTimeline
-                  key={detail.run.managedRun?.runId ?? "no-managed-run"}
+                <ManagedRunHistory
+                  key={`${detail.project.projectId}:${detail.run.slug}`}
                   run={detail.run.managedRun}
                   projectId={detail.project.projectId}
                   featureId={detail.run.managedRun?.featureId ?? detail.run.slug}
@@ -7668,43 +7600,6 @@ function FeatureDetailPage({
                   }
                   onOpenThread={handleHookSessionSelect}
                 />
-                <section className={cn(harnessSurfaceClassName, "p-3")}>
-                  <div className={harnessKickerClassName}>Current stage</div>
-                  <div className="mt-2.5 flex min-w-0 items-start gap-2.5">
-                    <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border border-status-info/20 bg-status-info/10">
-                      {selectedNode ? (
-                        statusIcon(selectedNode.status, shouldAnimateStageNode(selectedNode))
-                      ) : (
-                        <Circle className="size-4 text-muted-foreground" />
-                      )}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13px] font-semibold">
-                        {selectedNode?.label ?? "暂无阶段"}
-                      </div>
-                      <div className="mt-1 text-[11px] text-muted-foreground">
-                        {selectedNode?.status.label ?? "等待阶段数据"}
-                      </div>
-                    </div>
-                    {selectedNode && <StatusPill status={selectedNode.status} />}
-                  </div>
-                  <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
-                    <div className="rounded-lg border border-border/70 bg-background/70 px-2.5 py-2">
-                      产物(已完成/预期)
-                      <strong className="mt-0.5 block text-sm text-foreground">
-                        {completedArtifactCount}/{selectedNode?.artifacts?.length ?? 0}
-                      </strong>
-                    </div>
-                    <div className="rounded-lg border border-border/70 bg-background/70 px-2.5 py-2">
-                      事件
-                      <strong className="mt-0.5 block text-sm text-foreground">
-                        {selectedNodeHooks.length}
-                      </strong>
-                    </div>
-                  </div>
-                </section>
-
-                <FeatureDeployUnitsPanel deployUnits={detail.run.selectedDeployUnits} />
                 <FeatureWorkspaceChangesPanel
                   sessions={detail.sessions}
                   threadsById={threadsById}
@@ -7741,124 +7636,28 @@ function FeatureDetailPage({
           </div>
         </div>
       )}
-      <Dialog
-        open={managedRunDialogOpen}
-        onOpenChange={(open) => {
-          if (!updatingManagedRun) setManagedRunDialogOpen(open)
-        }}
-      >
-        <DialogContent
-          className={harnessDialogContentClassName}
-          onPointerDownOutside={preventHarnessDialogOutsideClose}
-        >
-          <DialogHeader>
-            <DialogTitle>开启托管运行</DialogTitle>
-          </DialogHeader>
-          <div className="grid gap-2 py-2">
-            <div className="flex items-center gap-1.5 text-sm font-medium">
-              <span>会话工作区</span>
-              <TooltipProvider delayDuration={150}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span
-                      aria-label="托管模式会话工作区提示"
-                      className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground"
-                    >
-                      <Info className="size-3.5" />
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" className="z-[70] max-w-72">
-                    该路径将作为本次托管模式自动创建会话时使用的会话工作区
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            </div>
-            <Input
-              value={managedRunWorkspacePath}
-              readOnly
-              title={managedRunWorkspacePath}
-              placeholder="请选择文件夹"
-              aria-label="会话工作区"
-              disabled={pickingManagedRunWorkspace || updatingManagedRun}
-              className="min-w-0 cursor-pointer text-foreground"
-              onClick={() => void handlePickManagedRunWorkspace()}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault()
-                  void handlePickManagedRunWorkspace()
-                }
-              }}
-            />
-            <label className="mt-2 grid gap-2 text-sm font-medium">
-              启动会话的初始用户消息
-              <textarea
-                value={managedRunUserMessage}
-                onChange={(event) => setManagedRunUserMessage(event.target.value)}
-                placeholder="留空则使用当前步骤的默认用户消息"
-                rows={4}
-                disabled={updatingManagedRun}
-                className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm font-normal shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-              />
-            </label>
-            <div className="mt-2 flex items-start justify-between gap-4 rounded-lg border border-border/70 bg-background/70 px-3 py-2.5">
-              <div>
-                <div className="flex items-center gap-1.5 text-sm font-medium">
-                  <span>通过招乎管理托管运行</span>
-                  <TooltipProvider delayDuration={150}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          aria-label="查看通过招乎管理托管运行的说明"
-                        >
-                          <Info className="size-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="top" className="z-[70] max-w-80 text-xs leading-5">
-                        托管模式需要人工介入的决策可经由招乎审批
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {featureImUnavailableReason
-                    ? featureImUnavailableReason
-                    : "确认后同步更新“通过招乎管理特性”开关"}
-                </div>
-              </div>
-              <Switch
-                aria-label="通过招乎管理托管运行"
-                checked={managedRunImEnabled}
-                disabled={
-                  updatingManagedRun || (!managedRunImEnabled && !featureImManagementAvailable)
-                }
-                onCheckedChange={setManagedRunImEnabled}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setManagedRunDialogOpen(false)}
-              disabled={updatingManagedRun}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              onClick={() => void handleConfirmManagedRun()}
-              disabled={
-                !managedRunWorkspacePath.trim() || updatingManagedRun || pickingManagedRunWorkspace
-              }
-            >
-              {updatingManagedRun && <Loader2 className="size-4 animate-spin" />}
-              确认并开启托管
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {managedRunDialogOpen && detail && (
+        <ManagedRunStartDialog
+          key={detailKey}
+          sessions={managedRunSessionOptions}
+          previousThreadId={detail.run.managedRun?.currentSession?.threadId}
+          defaultWorkspacePath={detail.run.resolvedSessionWorkspacePath ?? ""}
+          defaultUserMessage={getHarnessRunNextAction(detail)?.userMessage ?? ""}
+          featureImManagementAvailable={featureImManagementAvailable}
+          featureImUnavailableReason={featureImUnavailableReason}
+          updatingManagedRun={updatingManagedRun}
+          onClose={() => setManagedRunDialogOpen(false)}
+          onConfirm={({ workspacePath, initialUserMessage, existingThreadId, imEnabled }) =>
+            handleManagedRunChange(
+              true,
+              workspacePath,
+              imEnabled,
+              initialUserMessage,
+              existingThreadId
+            )
+          }
+        />
+      )}
     </div>
   )
 }
@@ -8076,7 +7875,8 @@ function ProjectFeatureSidebar({
   const renderThreadItem = (
     thread: Thread,
     hoverTitle: string,
-    onSelect: () => void
+    onSelect: () => void,
+    isManagedRunning = false
   ): React.JSX.Element => {
     const threadState = allThreadStates[thread.thread_id]
     const isLoading =
@@ -8099,6 +7899,7 @@ function ProjectFeatureSidebar({
         isSelected={highlightThreadId === thread.thread_id}
         isEditing={editingThreadId === thread.thread_id}
         isUnread={unreadIds.has(thread.thread_id)}
+        isManagedRunning={isManagedRunning}
         hasPendingUserInput={hasPendingUserInput}
         editingTitle={editingTitle}
         hoverTitle={hoverTitle}
@@ -8547,7 +8348,8 @@ function ProjectFeatureSidebar({
                                           session.slug,
                                           thread.thread_id,
                                           projectDeleted
-                                        )
+                                        ),
+                                      featureGroup.managedRunThreadId === thread.thread_id
                                     )
                                   })}
                                   {renderSessionVisibilityControls(
@@ -10001,12 +9803,19 @@ export function HarnessBoardView({
 
   useEffect(() => {
     return window.api.harnessBoard.onManagedRunChanged((event) => {
-      if (event.run.status === "running") {
-        patchCachedProjectRuns(event.projectId, (run) => {
-          if (run.slug !== event.featureId || run.managedRunStatus === event.run.status) return run
-          return { ...run, managedRunStatus: event.run.status }
-        })
-      } else {
+      const managedRunThreadId =
+        event.run.status === "running" ? event.run.currentSession?.threadId : undefined
+      patchCachedProjectRuns(event.projectId, (run) => {
+        if (
+          run.slug !== event.featureId ||
+          (run.managedRunStatus === event.run.status &&
+            run.managedRunThreadId === managedRunThreadId)
+        ) {
+          return run
+        }
+        return { ...run, managedRunStatus: event.run.status, managedRunThreadId }
+      })
+      if (event.run.status !== "running") {
         void loadProjectDetail(event.projectId, { showLoading: false, reportError: false })
       }
 
@@ -11322,6 +11131,10 @@ export function HarnessBoardView({
           slug,
           title: slug,
           sessions,
+          managedRunThreadId: deleted
+            ? undefined
+            : detailsByProjectId[project.projectId]?.runs.find((run) => run.slug === slug)
+                ?.managedRunThreadId,
           section,
           ...(deleted ? { deleted: true } : {})
         }))

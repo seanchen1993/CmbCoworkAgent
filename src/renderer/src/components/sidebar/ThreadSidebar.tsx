@@ -27,6 +27,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
+import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -235,6 +236,7 @@ function ThreadListItemImpl({
   isSelected,
   isEditing,
   isUnread,
+  isManagedRunning = false,
   editingTitle,
   onSelect,
   onDelete,
@@ -261,6 +263,7 @@ function ThreadListItemImpl({
   isSelected: boolean
   isEditing: boolean
   isUnread: boolean
+  isManagedRunning?: boolean
   editingTitle: string
   onSelect: () => void
   onDelete: () => void
@@ -376,6 +379,15 @@ function ThreadListItemImpl({
               </div>
             )}
           </div>
+          {isManagedRunning && (
+            <span
+              className="inline-flex shrink-0 text-violet-500 dark:text-violet-400"
+              title="托管运行中"
+              aria-label="托管运行中"
+            >
+              <ManagedRunIcon />
+            </span>
+          )}
           {hasContextReminder && !isRunning ? (
             <span className="size-2 rounded-full bg-status-warning-foreground shrink-0" />
           ) : (
@@ -475,6 +487,7 @@ function areThreadListItemPropsEqual(
     prev.isSelected !== next.isSelected ||
     prev.isEditing !== next.isEditing ||
     prev.isUnread !== next.isUnread ||
+    prev.isManagedRunning !== next.isManagedRunning ||
     Boolean(prev.onForkFromCheckpoint) !== Boolean(next.onForkFromCheckpoint) ||
     prev.hoverTitle !== next.hoverTitle
   ) {

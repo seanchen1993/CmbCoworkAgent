@@ -3098,6 +3098,7 @@ interface CustomAPI {
     getManagedRunEvents: (
       input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
     ) => Promise<ManagedRunEventsPage>
+    getManagedRuns: (projectId: string, featureId: string) => Promise<ManagedRunSummary[]>
     getLatestManagedRun: (projectId: string, featureId: string) => Promise<ManagedRunSummary | null>
     cancelDialogTips: () => Promise<void>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void

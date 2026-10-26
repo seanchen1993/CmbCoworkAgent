@@ -4617,6 +4617,8 @@ const api = {
         "harnessBoard:getManagedRunEvents",
         input
       ) as Promise<ManagedRunEventsPage>,
+    getManagedRuns: (projectId: string, featureId: string): Promise<ManagedRunSummary[]> =>
+      ipcRenderer.invoke("harnessBoard:getManagedRuns", projectId, featureId),
     getLatestManagedRun: (
       projectId: string,
       featureId: string
