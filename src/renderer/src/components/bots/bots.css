@@ -2076,20 +2076,35 @@ button.bot-json-caret:focus-visible {
 }
 .bot-group-progress {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin: 0 auto;
   font-size: 12px;
   color: var(--bot-muted);
 }
-.bot-group-progress button {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  border-radius: 14px;
-  padding: 6px 9px;
-  background: var(--bot-panel);
+.bot-group-progress > .bot-avatar {
+  flex-shrink: 0;
+}
+.bot-group-progress-copy {
+  min-width: 0;
+  line-height: 22px;
+}
+.bot-group-progress-copy button {
+  color: var(--bot-text);
+}
+.bot-group-progress-copy button:hover {
+  text-decoration: underline;
+}
+.bot-group-progress > button {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+}
+.bot-group-progress > button:hover {
+  background: var(--bot-hover);
 }
 .bot-group-composer {
   margin: 16px auto 22px;

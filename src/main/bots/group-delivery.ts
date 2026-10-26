@@ -17,7 +17,8 @@ export function createBotGroupMessageTool(
   task: BotTask,
   getHost: () => LocalBotHost,
   signal: AbortSignal,
-  sent: (content: string) => void
+  sent: (content: string) => void,
+  completedGroupPeerWork: () => boolean = () => false
 ) {
   const currentGroupId = botTaskGroupId(task)
   const contentSchema = z.string().trim().min(1).max(60_000)
@@ -33,7 +34,8 @@ export function createBotGroupMessageTool(
         // Grok filters SendMessage("(pass)") before it enters the public room.
         // Direct user answers keep their literal text; only optional turns may abstain.
         if (
-          (task.origin.kind === "discussion" ||
+          ((task.origin.kind === "group" && completedGroupPeerWork()) ||
+            task.origin.kind === "discussion" ||
             (task.origin.kind === "bot" && !task.origin.expectsReply)) &&
           isBotGroupPass(content)
         )
@@ -83,13 +85,15 @@ export function createBotGroupMessageTool(
 /** Only actual tool receipts in the latest user boundary satisfy formal delivery. */
 export function createBotGroupDeliveryCheck(
   task: BotTask,
-  peerDeliveryPosted = false
+  peerDeliveryPosted = false,
+  completedGroupPeerWork: () => boolean = () => false
 ): TurnFinalDeliveryCheck {
   const groupId = botTaskGroupId(task)
-  const mayPass =
-    task.origin.kind === "discussion" ||
-    (task.origin.kind === "bot" && !task.origin.expectsReply && peerDeliveryPosted)
   return (messages: readonly BaseMessage[]) => {
+    const mayPass =
+      (task.origin.kind === "group" && completedGroupPeerWork()) ||
+      task.origin.kind === "discussion" ||
+      (task.origin.kind === "bot" && !task.origin.expectsReply && peerDeliveryPosted)
     let start = 0
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i]

@@ -44,6 +44,52 @@ function receipt(groupId = "g", taskId = task.id, status: "success" | "error" = 
 }
 
 describe("formal group delivery", () => {
+  it("allows a member with completed same-request peer work to pass without a public echo", async () => {
+    let eligible = true
+    const publishGroupMessage = vi.fn()
+    const sent = vi.fn()
+    const send = createBotGroupMessageTool(
+      task,
+      () => ({ publishGroupMessage }) as unknown as LocalBotHost,
+      new AbortController().signal,
+      sent,
+      () => eligible
+    )
+    const call = {
+      type: "tool_call" as const,
+      id: "completed-peer-pass",
+      name: send.name,
+      args: { content: "(pass)" }
+    }
+    const result = await send.invoke(call)
+    const messages = [
+      new HumanMessage("Original assignment"),
+      new AIMessage({ content: "", tool_calls: [call] }),
+      result,
+      new AIMessage("")
+    ]
+    expect(createBotGroupDeliveryCheck(task, false, () => eligible)(messages)).toBeUndefined()
+    expect(createBotGroupDeliveryCheck(task)(messages)).toContain("bot_send_message")
+    expect(
+      createBotGroupDeliveryCheck(task, false, () => eligible)([new AIMessage("(pass)")])
+    ).toBeUndefined()
+    expect(
+      createBotGroupDeliveryCheck(
+        task,
+        false,
+        () => eligible
+      )([new AIMessage("Here is my separate analysis")])
+    ).toContain("bot_send_message")
+    expect(publishGroupMessage).not.toHaveBeenCalled()
+    expect(sent).not.toHaveBeenCalled()
+    // A newly injected user request restores the ordinary delivery obligation.
+    const check = createBotGroupDeliveryCheck(task, false, () => eligible)
+    eligible = false
+    expect(check(messages)).toContain("bot_send_message")
+    await send.invoke(call)
+    expect(publishGroupMessage).toHaveBeenCalledOnce()
+  })
+
   it.each(["private", "current-group"] as const)(
     "rejects raw attachment arguments before any text publication in %s mode",
     async (mode) => {

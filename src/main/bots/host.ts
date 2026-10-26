@@ -144,7 +144,11 @@ export class LocalBotHost {
     private readonly nextSchedule?: (input: BotScheduleInput, from: Date) => string | null,
     private readonly mockTransport: BotMockTransport = { send: async () => "sent" }
   ) {
-    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16)
+    // Positive infinity explicitly disables only the Host-wide admission cap.
+    if (
+      concurrency !== Number.POSITIVE_INFINITY &&
+      (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16)
+    )
       throw new Error("Invalid Bot concurrency")
     store.recover()
     this.unsubscribe = runtime.onAvailable(() => this.wake())
@@ -609,6 +613,10 @@ export class LocalBotHost {
   groupTaskRequest(taskId: string): Pick<BotGroupMessage, "id" | "text" | "createdAt"> | null {
     this.requireRunning()
     return this.store.groupTaskRequest(taskId)
+  }
+  completedGroupPeerWork(taskId: string): boolean {
+    this.requireRunning()
+    return this.store.completedGroupPeerWork(taskId)
   }
   recordGroupQuestion(taskId: string, request: UserInputRequest): void {
     const run = this.active.get(taskId)
@@ -1325,6 +1333,7 @@ export class LocalBotHost {
         waitingCount = Math.max(0, waitingCount + (waiting ? 1 : -1))
         this.store.transition(task.id, waitingCount > 0 ? "waiting_user" : "running")
         this.changed()
+        if (waitingCount > 0 && botTaskGroupId(task)) this.wake()
       })
       if (result.state === "deferred") {
         deferredCheckpoint = result.checkpointId

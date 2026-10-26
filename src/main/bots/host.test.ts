@@ -3216,6 +3216,157 @@ describe("Bot host scheduling", () => {
     expect(next).toHaveBeenCalledTimes(1)
   })
 
+  it("disables the global cap with positive infinity while retaining same-Bot serialization", async () => {
+    const db = store()
+    const runs: string[] = []
+    const finish = new Map<string, () => void>()
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      acquire: (_bot, task) => ({
+        release() {},
+        execute: async (signal) => {
+          runs.push(task.id)
+          await new Promise<void>((resolve) => {
+            finish.set(task.id, resolve)
+            signal.addEventListener("abort", () => resolve(), { once: true })
+          })
+          return { state: "completed" }
+        }
+      })
+    }
+    for (const invalid of [0, -1, 1.5, 17, Number.NaN, Number.NEGATIVE_INFINITY])
+      expect(() => new LocalBotHost(db, runtime, invalid)).toThrow("Invalid Bot concurrency")
+    const host = new LocalBotHost(db, runtime, Number.POSITIVE_INFINITY)
+    hosts.push(host)
+    const bots = Array.from({ length: 17 }, () => host.create(input))
+    const tasks = bots.map((bot, index) =>
+      host.send({ botId: bot.id, requestId: `parallel-${index}`, message: "Independent task" })
+    )
+    const next = host.send({ botId: bots[0].id, requestId: "next", message: "Next task" })
+    await vi.waitFor(() => expect(runs).toHaveLength(17))
+    expect(new Set(runs)).toEqual(new Set(tasks.map((task) => task.id)))
+    expect(db.getTask(next.id).state).toBe("queued")
+    finish.get(tasks[0].id)!()
+    await vi.waitFor(() => expect(runs).toContain(next.id))
+    expect(db.getTask(tasks[0].id).state).toBe("completed")
+    for (const release of finish.values()) release()
+    await vi.waitFor(() => expect(host.hasActiveRuns()).toBe(false))
+    expect(runs).toHaveLength(18)
+    for (const task of [...tasks, next]) expect(db.getTask(task.id).state).toBe("completed")
+  })
+
+  it("wakes another group member while a question is pending without releasing the waiting Bot", async () => {
+    const db = store()
+    const runs: string[] = []
+    const finish = new Map<string, () => void>()
+    const waiting = new Map<string, (value: boolean) => void>()
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      acquire: (_bot, task) => ({
+        release() {},
+        execute: async (signal, onWaiting) => {
+          runs.push(task.id)
+          waiting.set(task.id, onWaiting)
+          await new Promise<void>((resolve) => {
+            finish.set(task.id, resolve)
+            signal.addEventListener("abort", () => resolve(), { once: true })
+          })
+          return { state: "completed", explicitGroupMessages: true }
+        }
+      })
+    }
+    const host = new LocalBotHost(db, runtime, Number.POSITIVE_INFINITY)
+    hosts.push(host)
+    const bots = [host.create(input), host.create(input)]
+    const room = db.saveGroup({ name: "Question", memberIds: bots.map((b) => b.id) })
+    host.sendGroup({
+      groupId: room.id,
+      requestId: "question",
+      text: "Independent roles",
+      targetBotIds: room.memberIds
+    })
+    await vi.waitFor(() => expect(runs).toHaveLength(1))
+    const first = db.getTask(runs[0])
+    const second = db.recentTasks().find((task) => task.botId !== first.botId)!
+    const own = host.send({
+      botId: first.botId,
+      requestId: "own-next",
+      message: "Next private request"
+    })
+    waiting.get(first.id)!(true)
+    await vi.waitFor(() => expect(runs).toContain(second.id))
+    expect(db.getTask(first.id).state).toBe("waiting_user")
+    expect(db.getTask(own.id).state).toBe("queued")
+    finish.get(second.id)!()
+    await vi.waitFor(() => expect(db.getTask(second.id).state).toBe("completed"))
+    expect(db.getTask(first.id).state).toBe("waiting_user")
+    waiting.get(first.id)!(false)
+    finish.get(first.id)!()
+    await vi.waitFor(() => expect(runs).toContain(own.id))
+    finish.get(own.id)!()
+    await vi.waitFor(() => expect(host.hasActiveRuns()).toBe(false))
+    expect(runs).toEqual([first.id, second.id, own.id])
+  })
+
+  it("serializes public room turns with no global cap, preserving other rooms and cancellation cleanup", async () => {
+    const db = store()
+    const runs: import("../../shared/bots/contracts").BotTask[] = []
+    const finish = new Map<string, () => void>()
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      acquire: (_bot, task) => ({
+        release() {},
+        execute: async () => {
+          runs.push(task)
+          await new Promise<void>((resolve) => finish.set(task.id, resolve))
+          return { state: "completed", result: "PUBLIC_PROOF" }
+        }
+      })
+    }
+    const host = new LocalBotHost(db, runtime, Number.POSITIVE_INFINITY)
+    hosts.push(host)
+    const bots = Array.from({ length: 4 }, () => host.create(input))
+    const room = db.saveGroup({ name: "Ordered", memberIds: bots.slice(0, 2).map((b) => b.id) })
+    const other = db.saveGroup({ name: "Independent", memberIds: [bots[2].id] })
+    host.sendGroup({
+      groupId: room.id,
+      requestId: "room",
+      text: "Each member acts",
+      targetBotIds: room.memberIds
+    })
+    host.sendGroup({
+      groupId: other.id,
+      requestId: "other",
+      text: "Independent",
+      targetBotIds: other.memberIds
+    })
+    const personal = host.send({ botId: bots[3].id, requestId: "personal", message: "Private" })
+    try {
+      await vi.waitFor(() => expect(runs).toHaveLength(3))
+      const first = runs.find((t) => t.origin.kind === "group" && t.origin.groupId === room.id)!
+      const second = db
+        .recentTasks()
+        .find(
+          (t) => t.origin.kind === "group" && t.origin.groupId === room.id && t.id !== first.id
+        )!
+      expect(db.getTask(second.id).state).toBe("queued")
+      expect(runs.some((t) => t.id === personal.id)).toBe(true)
+      // Abort must retain the room until physical cleanup has completed.
+      host.cancel(first.id)
+      host.resume()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(runs).toHaveLength(3)
+      finish.get(first.id)!()
+      await vi.waitFor(() => expect(runs.some((t) => t.id === second.id)).toBe(true))
+      expect(db.getTask(first.id).state).toBe("cancelled")
+      for (const resolve of finish.values()) resolve()
+      await vi.waitFor(() => expect(host.hasActiveRuns()).toBe(false))
+      expect(runs).toHaveLength(4)
+    } finally {
+      for (const resolve of finish.values()) resolve()
+    }
+  })
+
   it("runs independent bots concurrently, serializes a bot, and releases after cancellation cleanup", async () => {
     const db = store()
     const runs: string[] = [],

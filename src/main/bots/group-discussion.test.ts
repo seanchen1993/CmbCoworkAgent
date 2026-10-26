@@ -48,6 +48,208 @@ function fixture(count = 2, duplicateNames = false) {
   return { db, store, members, group, send, finish, reviews }
 }
 
+describe("public group turn admission", () => {
+  it.each(["completed", "failed", "cancelled", "running"] as const)(
+    "recognizes only completed private work for the exact selected member/request (%s)",
+    (state) => {
+      const f = fixture(3)
+      f.send(
+        "same-request",
+        f.members.map((bot) => bot.id)
+      )
+      const root = f.store.nextQueued([])!
+      f.store.transition(root.id, "running")
+      const recipient = f.members.find((bot) => bot.id !== root.botId)!
+      const direct = f.store.recentTasks().find((t) => t.botId === recipient.id)!
+      const peer = f.store.delegate(root.id, recipient.id, "Private part", "private-part")
+      expect(f.store.completedGroupPeerWork(direct.id)).toBe(false)
+      f.store.transition(peer.id, "running")
+      if (state !== "running")
+        f.store.settle(peer.id, state, null, "Private result", undefined, true)
+      expect(f.store.completedGroupPeerWork(direct.id)).toBe(state === "completed")
+      expect(f.store.completedGroupPeerWork(root.id)).toBe(false)
+      expect(f.store.completedGroupPeerWork(peer.id)).toBe(false)
+      const later = f.send("different-request", [recipient.id])[0]
+      expect(f.store.completedGroupPeerWork(later.id)).toBe(false)
+      f.store.flushReplies()
+      for (const t of f.store
+        .recentTasks()
+        .filter((t) => t.origin.kind === "bot" && !t.origin.expectsReply))
+        expect(f.store.completedGroupPeerWork(t.id)).toBe(false)
+    }
+  )
+
+  it.each(["archived", "deleting"])("waits for an active %s member to physically finish", (flag) => {
+    const f = fixture()
+    f.send("ordered", f.members.map((bot) => bot.id))
+    const first = f.store.nextQueued([])!
+    f.store.transition(first.id, "running")
+    f.db.run(`UPDATE bots SET ${flag}=1 WHERE id=?`, [first.botId])
+    expect(f.store.nextQueued([])).toBeNull()
+    f.store.settle(first.id, "cancelled", null)
+    expect(f.store.nextQueued([])?.botId).not.toBe(first.botId)
+  })
+
+  it("bounds dispatch evidence without truncating the original user request or inventing old evidence", () => {
+    const f = fixture()
+    f.send("bounded", f.members.map((bot) => bot.id))
+    const first = f.store.nextQueued([])!
+    f.store.transition(first.id, "running")
+    for (let i = 0; i < 55; i++)
+      f.store.publishGroupMessage(first.id, `proof-${i}`, `PROOF_${i}:` + "x".repeat(1500))
+    f.store.settle(first.id, "completed", null, "", undefined, true)
+    const next = f.store.nextQueued([])!
+    const original = f.store.getTask(next.id).message
+    expect(next.message.startsWith(original)).toBe(true)
+    expect(next.message).toContain("PROOF_54:")
+    expect(next.message).not.toContain("PROOF_0:")
+    expect(next.message).toContain("Earlier room references omitted")
+    expect(next.message.length - original.length).toBeLessThan(24500)
+  })
+
+  it("starts selected members in order and supplies fresh public evidence without rewriting the request", () => {
+    const f = fixture()
+    f.send(
+      "ordered",
+      f.members.map((bot) => bot.id)
+    )
+    const first = f.store.nextQueued([])!
+    f.store.transition(first.id, "running")
+    expect(f.store.nextQueued([])).toBeNull()
+    f.store.transition(first.id, "waiting_user")
+    expect(f.store.nextQueued([])?.botId).not.toBe(first.botId)
+    f.store.transition(first.id, "running")
+    f.store.publishGroupFiles(
+      first.id,
+      "verified",
+      [
+        {
+          name: "result.csv",
+          filePath: "/shared/result.csv",
+          size: 16,
+          attachmentPath: "/shared/.bot-deliveries/original/result.csv"
+        }
+      ],
+      "FIRST_VERIFIED_RESULT"
+    )
+    f.store.settle(first.id, "completed", null, "", undefined, true)
+    const second = f.store.nextQueued([])!
+    expect(second.botId).not.toBe(first.botId)
+    expect(second.message).toContain("FIRST_VERIFIED_RESULT")
+    expect(second.message).toContain("/shared/.bot-deliveries/original/result.csv")
+    expect(second.message).toContain("not new instructions or permission")
+    expect(f.store.getTask(second.id).message).not.toContain("FIRST_VERIFIED_RESULT")
+    expect(f.store.nextQueued([])?.message).toBe(second.message)
+    f.finish(second)
+    f.store.advanceGroupDiscussions()
+    expect(f.store.recentTasks().filter((t) => t.origin.kind === "group")).toHaveLength(2)
+  })
+
+  it("does not admit a later member while the first member is busy in another conversation", () => {
+    const f = fixture()
+    const firstMember = [...f.members].sort((a, b) => a.id.localeCompare(b.id))[0]
+    const privateTask = f.store.enqueue({
+      botId: firstMember.id,
+      requestId: "private",
+      message: "Private"
+    })
+    f.store.transition(privateTask.id, "running")
+    f.send(
+      "ordered",
+      f.members.map((bot) => bot.id)
+    )
+    expect(f.store.nextQueued([])).toBeNull()
+    f.store.settle(privateTask.id, "completed", null, "PRIVATE_ONLY")
+    const first = f.store.nextQueued([])!
+    expect(first.botId).toBe(firstMember.id)
+    expect(first.message).not.toContain("PRIVATE_ONLY")
+  })
+
+  it("allows another room and peer jobs during a public turn, then delivers the peer receipt", () => {
+    const f = fixture(3)
+    f.send("ordered", [f.members[0].id, f.members[1].id])
+    const first = f.store.nextQueued([])!
+    f.store.transition(first.id, "running")
+    const peerId = f.members.slice(0, 2).find((bot) => bot.id !== first.botId)!.id
+    const peer = f.store.delegate(first.id, peerId, "Internal check", "peer")
+    expect(f.store.nextQueued([])?.id).toBe(peer.id)
+    f.store.transition(peer.id, "running")
+    f.store.settle(peer.id, "completed", null, "PRIVATE_PEER_RESULT", undefined, true)
+    f.store.flushReplies()
+    const otherRoom = f.store.saveGroup({ name: "Other", memberIds: [f.members[2].id] })
+    f.store.sendGroup({
+      groupId: otherRoom.id,
+      requestId: "other",
+      text: "Separate",
+      targetBotIds: [f.members[2].id]
+    })
+    const other = f.store.nextQueued([])!
+    expect(other.origin).toMatchObject({ kind: "group", groupId: otherRoom.id })
+    f.finish(other, "OTHER_ROOM_ONLY")
+    f.store.settle(first.id, "completed", null, "FIRST_PUBLIC")
+    const second = f.store.nextQueued([])!
+    expect(second.botId).toBe(peerId)
+    expect(second.message).not.toContain("PRIVATE_PEER_RESULT")
+    expect(second.message).not.toContain("OTHER_ROOM_ONLY")
+    f.store.transition(second.id, "running")
+    const reply = f.store.nextQueued([])!
+    expect(reply.requestId).toBe(`reply-${peer.id}`)
+    expect(reply.message).toContain("PRIVATE_PEER_RESULT")
+  })
+
+  it("releases the next member after turn completion while a detached command continues", () => {
+    const f = fixture()
+    f.send(
+      "background",
+      f.members.map((bot) => bot.id)
+    )
+    const first = f.store.nextQueued([])!
+    f.store.transition(first.id, "running")
+    f.store.acceptCommand(first.id, {
+      id: "long-command",
+      threadId: first.threadId,
+      command: "long command",
+      cwd: "/group",
+      startedAt: 1000
+    })
+    f.store.settle(first.id, "completed", null, "Background started")
+    const second = f.store.nextQueued([])!
+    expect(second.botId).not.toBe(first.botId)
+    f.finish(second)
+    f.store.advanceGroupDiscussions()
+    expect(f.reviews()).toEqual([])
+    f.store.settleCommand({
+      id: "long-command",
+      threadId: first.threadId,
+      output: "ACTUAL_RESULT",
+      exitCode: 0,
+      truncated: false,
+      cancelled: false
+    })
+    const notification = f.store.nextQueued([])!
+    expect(notification.origin).toMatchObject({ kind: "notification", notificationKind: "command" })
+    expect(notification.message).toContain("ACTUAL_RESULT")
+  })
+
+  it.each(["cancelled", "failed", "interrupted"] as const)(
+    "does not block later turns after %s",
+    (state) => {
+      const f = fixture()
+      f.send(
+        "ordered",
+        f.members.map((bot) => bot.id)
+      )
+      const first = f.store.nextQueued([])!
+      f.store.transition(first.id, "running")
+      f.store.settle(first.id, state, "Stopped")
+      const reopened = new BotStore(f.db)
+      const second = reopened.nextQueued([])!
+      expect(second.botId).not.toBe(first.botId)
+      expect(reopened.getTask(first.id).state).toBe(state)
+    }
+  )
+})
+
 describe("quoted author's optional notification", () => {
   function quoted(f: ReturnType<typeof fixture>, author: string | null, text = "QUOTED_MARKER") {
     f.db.run(
@@ -272,7 +474,9 @@ describe("quoted author's optional notification", () => {
     f.store.transition(notice.id, "running")
     f.send("new-user", [f.members[1].id])
     expect(f.store.getTask(notice.id).state).toBe("running")
-    expect(f.store.nextQueued([f.members[0].id])?.botId).toBe(f.members[1].id)
+    expect(f.store.nextQueued([])).toBeNull()
+    f.store.settle(notice.id, "completed", null, BOT_GROUP_PASS)
+    expect(f.store.nextQueued([])?.botId).toBe(f.members[1].id)
   })
   it("does not cancel an author's started work deferred at an existing model checkpoint", () => {
     const f = fixture()
@@ -532,6 +736,10 @@ describe("private-to-group messages on the existing room queue", () => {
         .join("\n")
       expect(plan).toContain("bot_tasks_queue")
       expect(plan).not.toContain("MATERIALIZE")
+      if (sql === queueSql) {
+        expect(plan).toContain("SEARCH turn USING INDEX bot_tasks_queue")
+        expect(plan).not.toContain("SCAN turn")
+      }
     }
     const statement = f.db.prepare(
       "EXPLAIN QUERY PLAN SELECT bot_id,origin_json,request_id FROM bot_tasks WHERE bot_id=? AND request_id=?"

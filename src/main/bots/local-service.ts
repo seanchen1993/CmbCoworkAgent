@@ -238,7 +238,7 @@ export function getLocalBotHost(): LocalBotHost {
         getBotBrowserService(),
         summaries
       ),
-      2,
+      Number.POSITIVE_INFINITY,
       console.error,
       (input, from) =>
         computeNextRunAt(

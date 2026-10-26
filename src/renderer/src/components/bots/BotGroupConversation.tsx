@@ -51,7 +51,7 @@ import type {
   BotGroupMessage,
   BotTask
 } from "../../../../shared/bots/contracts"
-import { BotAvatar } from "./BotAvatar"
+import { BotRuntimeAvatar } from "./BotRuntimeAvatar"
 import { BotMessageFilePreview } from "./BotMessageFilePreview"
 import { BotDeliveredFile } from "./BotDeliveredFile"
 import { BotConversationTools } from "./BotConversationTools"
@@ -275,10 +275,22 @@ export function BotGroupConversation({
       }
     }
   }
+  const latestByAuthor = useMemo(() => {
+    const latest = new Map<string, string>()
+    for (const message of messages)
+      if (message.authorBotId) latest.set(message.authorBotId, message.id)
+    return latest
+  }, [messages])
   const running = botGroupActiveTasks(group.id, tasks)
   const backgroundMembers = group.memberIds.filter((id) =>
     backgroundThreads.includes(`group-${group.id}-${id}`)
   )
+  const activityTask =
+    running.find((task) => task.state === "running") ??
+    (backgroundMembers.length
+      ? undefined
+      : (running.find((task) => task.state === "waiting_user") ?? running[0]))
+  const activityBot = bots.find((bot) => bot.id === (activityTask?.botId ?? backgroundMembers[0]))
   useEffect(() => {
     let disposed = false,
       pending = false,
@@ -470,6 +482,9 @@ export function BotGroupConversation({
         >
           <BotGroupAvatar
             memberIds={group.memberIds}
+            groupId={group.id}
+            tasks={tasks}
+            backgroundThreads={backgroundThreads}
             bots={bots}
             userInitials={userInitials}
             size={26}
@@ -636,6 +651,8 @@ export function BotGroupConversation({
                     const author = item.authorBotId
                       ? bots.find((bot) => bot.id === item.authorBotId)
                       : null
+                    const authorTask = running.find((task) => task.botId === item.authorBotId)
+                    const isLatestByAuthor = author && latestByAuthor.get(author.id) === item.id
                     const replyText = (
                       displayText.trim()
                         ? displayText
@@ -707,7 +724,21 @@ export function BotGroupConversation({
                                   aria-label={`查看 ${author.name}`}
                                   onClick={() => onOpenBot(author)}
                                 >
-                                  <BotAvatar color={author.color} shape={author.shape} size={23} />
+                                  <BotRuntimeAvatar
+                                    threadId={`group-${group.id}-${author.id}`}
+                                    color={author.color}
+                                    shape={author.shape}
+                                    size={23}
+                                    busy={Boolean(
+                                      isLatestByAuthor &&
+                                      (authorTask?.state === "running" ||
+                                        backgroundMembers.includes(author.id))
+                                    )}
+                                    waiting={Boolean(
+                                      isLatestByAuthor && authorTask?.state === "waiting_user"
+                                    )}
+                                    taskCreatedAt={authorTask?.createdAt}
+                                  />
                                 </button>
                               )}
                             <time
@@ -890,25 +921,43 @@ export function BotGroupConversation({
             </div>
             {(running.length > 0 || backgroundMembers.length > 0) && (
               <div className="bot-group-progress">
-                {running.map((task) => (
-                  <button key={task.id} onClick={() => setInspecting(task)}>
-                    <span className="bot-status-dot" />
-                    {bots.find((bot) => bot.id === task.botId)?.name ?? "Bot"} ·{" "}
-                    {task.state === "waiting_user"
-                      ? "需要确认"
-                      : task.state === "queued"
-                        ? "等待执行"
-                        : "正在处理"}
-                  </button>
-                ))}
-                {backgroundMembers
-                  .filter((id) => !running.some((task) => task.botId === id))
-                  .map((id) => (
-                    <span key={id}>
-                      <span className="bot-status-dot" />
-                      {bots.find((bot) => bot.id === id)?.name ?? "Bot"} · 正在处理
+                {activityBot && (
+                  <BotRuntimeAvatar
+                    threadId={activityTask?.threadId ?? `group-${group.id}-${activityBot.id}`}
+                    color={activityBot.color}
+                    shape={activityBot.shape}
+                    size={28}
+                    busy={
+                      activityTask?.state === "running" ||
+                      (!activityTask && backgroundMembers.length > 0)
+                    }
+                    waiting={activityTask?.state === "waiting_user"}
+                    taskCreatedAt={activityTask?.createdAt}
+                  />
+                )}
+                <div className="bot-group-progress-copy" role="status" aria-live="polite">
+                  {running.map((task, index) => (
+                    <span key={task.id}>
+                      {index > 0 && "；"}
+                      <button onClick={() => setInspecting(task)}>
+                        {bots.find((bot) => bot.id === task.botId)?.name ?? "Bot"}
+                      </button>
+                      {task.state === "waiting_user"
+                        ? " 等待你回复"
+                        : task.state === "queued"
+                          ? " 等待执行"
+                          : " 正在工作…"}
                     </span>
                   ))}
+                  {backgroundMembers
+                    .filter((id) => !running.some((task) => task.botId === id))
+                    .map((id) => (
+                      <span key={id}>
+                        {running.length > 0 && "；"}
+                        {bots.find((bot) => bot.id === id)?.name ?? "Bot"} 正在工作…
+                      </span>
+                    ))}
+                </div>
                 <button
                   aria-label="停止群聊工作"
                   onClick={() =>

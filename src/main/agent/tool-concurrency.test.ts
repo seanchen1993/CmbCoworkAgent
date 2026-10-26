@@ -315,7 +315,9 @@ describe("shared-workspace user input", () => {
       const roots = db.recentTasks(),
         removed = roots.find((task) => task.botId === a.id)!,
         survivor = roots.find((task) => task.botId === b.id)!
-      await vi.waitFor(() => expect(db.getTask(survivor.id).state).toBe("running"))
+      // Public room turns now wait at admission, before reaching the unchanged file lock.
+      await turn()
+      expect(db.getTask(survivor.id).state).toBe("queued")
       expect(db.getTask(removed.id).state).toBe("running")
       expect(survivorWrites).toBe(0)
       expect(() => host.update({ ...original, name: "Stale", expectedVersion: a.version })).toThrow(
