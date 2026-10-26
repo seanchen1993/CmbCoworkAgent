@@ -332,13 +332,7 @@ export class BuiltinRobotManager {
   listGrantableFeatures(): Promise<BuiltinRobotGrantableFeature[]> {
     return this.enqueue(async () => {
       const principalId = this.gatewayStatus.principalId
-      const projects = await imFeatureBindingService.listRemoteProjects()
-      const projectFeatures = await Promise.all(
-        projects.map(async (project) => ({
-          project,
-          features: await imFeatureBindingService.listRemoteFeatures(project.id)
-        }))
-      )
+      const projectFeatures = await imFeatureBindingService.listRemoteFeatureCatalog()
       const result: BuiltinRobotGrantableFeature[] = []
       for (const { project, features } of projectFeatures) {
         for (const feature of features) {

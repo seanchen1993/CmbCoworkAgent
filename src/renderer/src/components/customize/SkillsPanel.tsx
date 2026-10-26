@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { notifyMarketPublished } from "@/lib/market-change-events"
 import {
   AlertCircle,
   ChevronDown,
@@ -1425,7 +1426,7 @@ export function SkillsPanel(): React.JSX.Element {
     initialSkillSnapshot ? "ready" : "loading"
   )
   const [skillCatalogLoadError, setSkillCatalogLoadError] = useState<string | null>(null)
-  const [uploadedSkillNames, setUploadedSkillNames] = useState<Set<string>>(() =>
+  const [uploadedSkillNames] = useState<Set<string>>(() =>
     readUploadedSkillNamesFromStorage()
   )
   const [orgInstalledSkillNames, setOrgInstalledSkillNames] = useState<Set<string>>(() =>
@@ -1533,10 +1534,6 @@ export function SkillsPanel(): React.JSX.Element {
       void refreshSkills().catch(console.error)
     })
   }, [refreshSkills])
-
-  const reloadUploadedSkillNames = useCallback(() => {
-    setUploadedSkillNames(readUploadedSkillNamesFromStorage())
-  }, [])
 
   const reloadOrgInstalledSkillNames = useCallback(() => {
     setOrgInstalledSkillNames(readOrgInstalledSkillNamesFromStorage())
@@ -2161,10 +2158,7 @@ export function SkillsPanel(): React.JSX.Element {
       const keyword = skillName.trim()
       setMarketInitialSkillCategory(null)
       setMarketInitialSkillSearchQuery(keyword || null)
-      // 兜底：当 customizeInitialTab 已经是 market 时，先切到 skills 再切回 market，
-      // 保证“更新到市场/发布到市场”后一定触发市场页切换并应用搜索词。
-      setShowCustomizeView(true, "skills")
-      setTimeout(() => setShowCustomizeView(true, "market"), 0)
+      setShowCustomizeView(true, "market")
     },
     [setMarketInitialSkillCategory, setMarketInitialSkillSearchQuery, setShowCustomizeView]
   )
@@ -2485,9 +2479,8 @@ export function SkillsPanel(): React.JSX.Element {
           if (!open) setPublishSkill(null)
         }}
         onSuccess={({ skillName, mode }) => {
-          reloadUploadedSkillNames()
-          void loadMarketSkills()
-          void refreshSkills(true).catch(console.error)
+          notifyMarketPublished("skill")
+          invalidateSkillCatalog()
 
           toast.success(
             mode === "update"

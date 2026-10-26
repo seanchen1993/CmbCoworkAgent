@@ -4,19 +4,25 @@ import { createThread as dbCreateThread } from "../db"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import {
   buildHarnessFeatureAgentContext,
+  requireHarnessFeatureWorkspace,
+  resolveHarnessFeatureCurrentStage,
   DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG
 } from "../harness-board/service"
 import { getOpenworkDir } from "../storage"
 import type { Thread } from "../types"
 import { getDefaultModel } from "../ipc/models"
 import { resolveRecentWorkspacePath } from "../ipc/recent-workspace"
+import { validateWorkspaceDirectory } from "./workspace-validation"
 
 const settingsStore = new Store({
   name: "settings",
   cwd: getOpenworkDir()
 })
 
-export async function createThreadService(metadata?: Record<string, unknown>): Promise<Thread> {
+export async function createThreadService(
+  metadata?: Record<string, unknown>,
+  options: { managedWorkspace?: boolean } = {}
+): Promise<Thread> {
   const threadId = uuid()
   const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
   const harnessFeatureMetadata =
@@ -26,10 +32,24 @@ export async function createThreadService(metadata?: Record<string, unknown>): P
       ? (nextMetadata.harnessFeature as Record<string, unknown>)
       : undefined
   if (harnessFeatureMetadata) {
+    const projectId = harnessFeatureMetadata.projectId
+    const slug = harnessFeatureMetadata.slug
+    const launchStage =
+      typeof projectId === "string" && typeof slug === "string"
+        ? await resolveHarnessFeatureCurrentStage(projectId, slug)
+        : null
     nextMetadata.harnessFeature = {
       ...harnessFeatureMetadata,
+      ...(launchStage?.name ? { launchStageName: launchStage.name } : {}),
       requestUserInputConfig: { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
     }
+  }
+
+  if (harnessFeatureMetadata && !options.managedWorkspace) {
+    const { projectId, slug } = harnessFeatureMetadata
+    if (typeof projectId !== "string" || typeof slug !== "string")
+      throw new Error("特性会话标识无效")
+    nextMetadata.workspacePath = await requireHarnessFeatureWorkspace(projectId, slug)
   }
 
   const hasWorkspacePath = Object.prototype.hasOwnProperty.call(nextMetadata, "workspacePath")
@@ -45,6 +65,12 @@ export async function createThreadService(metadata?: Record<string, unknown>): P
     }
   }
 
+  // An explicit path must not bypass validation or be persisted as a broken session.
+  // null/undefined retain the existing workspace-less thread creation behavior.
+  if (nextMetadata.workspacePath !== null && nextMetadata.workspacePath !== undefined) {
+    await validateWorkspaceDirectory(nextMetadata.workspacePath)
+  }
+
   let harnessContext: Awaited<ReturnType<typeof buildHarnessFeatureAgentContext>> = null
   try {
     const workspacePath =
@@ -55,7 +81,7 @@ export async function createThreadService(metadata?: Record<string, unknown>): P
     })
     if (harnessFeatureMetadata && harnessContext?.agentConfig?.toolConfig?.requestUserInput) {
       nextMetadata.harnessFeature = {
-        ...harnessFeatureMetadata,
+        ...(nextMetadata.harnessFeature as Record<string, unknown>),
         requestUserInputConfig: harnessContext.agentConfig.toolConfig.requestUserInput
       }
     }

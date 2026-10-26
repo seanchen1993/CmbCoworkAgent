@@ -1,4 +1,8 @@
+import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
+import { randomUUID } from "crypto"
+import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 import { foregroundToolPolicy } from "./foreground-tool-policy"
+import { AsyncRWLock, AsyncSemaphore } from "./async-lock"
 import { createTaskModelOutcomeMiddleware, withTaskModelOutcome } from "./task-model-outcome"
 import { withScopedModMcp, publishCurrentModResult } from "../mods/adapters"
 import {
@@ -6,6 +10,7 @@ import {
   createFunctionSessionViewMiddleware
 } from "./mods-session-view"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
+import { validateWorkspaceDirectory } from "../services/workspace-validation"
 import { getModCallContext } from "../mods/context"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import { ModError } from "../mods/errors"
@@ -28,7 +33,6 @@ import {
   createFilesystemMiddleware,
   createSubAgentMiddleware,
   createPatchToolCallsMiddleware,
-  createSkillsMiddleware,
   createMemoryMiddleware,
   GENERAL_PURPOSE_SUBAGENT,
   StateBackend
@@ -81,13 +85,18 @@ import { recoverMainCheckpointMessages } from "./checkpoint-message-recovery"
 import {
   LocalSandbox,
   agentFileWriteContext,
+  executeTraceContext,
   readOnlyShellExecutionContext,
   type SkillHookContextProvider
 } from "./local-sandbox"
 import { approvalMatchesRuntimeThread } from "./approval-thread-match"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
-import { combineSkillMiddlewareSources } from "./skill-sources"
+import { combineSkillMiddlewareSources, createRefreshingSkillsMiddleware } from "./skill-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
+import {
+  isSkillVisibleForProjectMode,
+  type ProjectModeSkillScope
+} from "../../shared/skill-visibility"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
@@ -117,6 +126,7 @@ import {
   getToolStrategyReminder,
   resolveEffectiveToolStrategy,
   resolveFilesystemToolStrategy,
+  resolveShellFileTelemetry,
   resolveWorkflowToolStrategy,
   SHELL_FIRST_TOOL_DESCRIPTIONS
 } from "./tool-strategy"
@@ -216,6 +226,7 @@ import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   createHookScope,
   createInheritedHookScope,
+  isSkillPathVisibleForProjectMode,
   resolvePluginIdForSkillPath,
   extractPluginIdFromProviderKey,
   resolveEnabledHooksForRun,
@@ -367,10 +378,10 @@ import {
   WorkerValuesSnapshotAccumulator,
   type WorkerValuesSnapshotContext
 } from "./coordinator-worker-stream"
-import { setAdoptionContext } from "../services/adoption-tracker"
+import { createSubagentSkillAttribution } from "./turn-attribution"
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
-import { patchRuntimeReadFileTool } from "./read-file-tool"
+import { patchRuntimeReadFileTool, resolveReadFileTraceContext } from "./read-file-tool"
 import { createWorkflowTool } from "./workflow/tool"
 import { workflowRunManager } from "./workflow/run-manager"
 import { WORKFLOW_MODE_SYSTEM_PROMPT } from "./workflow/prompts"
@@ -623,120 +634,6 @@ function shouldFastRejectActiveWorkflow(
   return toolCall?.name === "workflow" && workflowRunManager.isActive(queueId)
 }
 
-/**
- * Writer-preferring async read-write lock.
- *
- * - `read()`: multiple holders allowed. Blocks if a writer is active or waiting.
- * - `write()`: exclusive. Blocks until all readers drain and no other writer held.
- *
- * Writer preference prevents writer starvation when reads are frequent.
- */
-class AsyncRWLock {
-  private readers = 0
-  private writerHeld = false
-  private writerQueue: Array<() => void> = []
-  private readerQueue: Array<() => void> = []
-
-  async read<T>(task: () => Promise<T>): Promise<T> {
-    await this.acquireRead()
-    try {
-      return await task()
-    } finally {
-      this.releaseRead()
-    }
-  }
-
-  async write<T>(task: () => Promise<T>): Promise<T> {
-    await this.acquireWrite()
-    try {
-      return await task()
-    } finally {
-      this.releaseWrite()
-    }
-  }
-
-  private acquireRead(): Promise<void> {
-    if (!this.writerHeld && this.writerQueue.length === 0) {
-      this.readers++
-      return Promise.resolve()
-    }
-    return new Promise<void>((resolve) => {
-      this.readerQueue.push(() => {
-        this.readers++
-        resolve()
-      })
-    })
-  }
-
-  private acquireWrite(): Promise<void> {
-    if (!this.writerHeld && this.readers === 0) {
-      this.writerHeld = true
-      return Promise.resolve()
-    }
-    return new Promise<void>((resolve) => {
-      this.writerQueue.push(() => {
-        this.writerHeld = true
-        resolve()
-      })
-    })
-  }
-
-  private releaseRead(): void {
-    this.readers--
-    if (this.readers === 0 && this.writerQueue.length > 0) {
-      const next = this.writerQueue.shift()!
-      next()
-    }
-  }
-
-  private releaseWrite(): void {
-    this.writerHeld = false
-    if (this.writerQueue.length > 0) {
-      const next = this.writerQueue.shift()!
-      next()
-    } else if (this.readerQueue.length > 0) {
-      const pending = this.readerQueue.splice(0)
-      for (const wake of pending) wake()
-    }
-  }
-}
-
-class AsyncSemaphore {
-  private active = 0
-  private queue: Array<() => void> = []
-
-  constructor(private readonly limit: number) {}
-
-  async run<T>(task: () => Promise<T>): Promise<T> {
-    await this.acquire()
-    try {
-      return await task()
-    } finally {
-      this.release()
-    }
-  }
-
-  private acquire(): Promise<void> {
-    if (this.active < this.limit) {
-      this.active++
-      return Promise.resolve()
-    }
-
-    return new Promise<void>((resolve) => {
-      this.queue.push(() => {
-        this.active++
-        resolve()
-      })
-    })
-  }
-
-  private release(): void {
-    this.active = Math.max(0, this.active - 1)
-    const next = this.queue.shift()
-    if (next) next()
-  }
-}
-
 const toolConcurrencyLocks = new Map<string, AsyncRWLock>()
 const taskConcurrencyLimiters = new Map<string, AsyncSemaphore>()
 
@@ -781,6 +678,8 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
   return createMiddleware({
     name: "gradedToolConcurrency",
     wrapToolCall: async (request, handler) => {
+      const signal = request.runtime?.signal
+      signal?.throwIfAborted()
       const toolCall = request.toolCall as
         | { id?: string; name?: string; args?: unknown }
         | undefined
@@ -799,11 +698,12 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
             const waited = Date.now() - waitStart
             if (waited > 50)
               console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
+            signal?.throwIfAborted()
             return handler(request)
-          })
+          }, signal)
 
         if (toolCall?.name === "task") {
-          return taskLimiter.run(runSharedTool)
+          return taskLimiter.run(runSharedTool, signal)
         }
 
         return runSharedTool()
@@ -811,8 +711,9 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
       return lock.write(async () => {
         const waited = Date.now() - waitStart
         if (waited > 50) console.log(`[Runtime] exclusive-lock acquired ${label} after ${waited}ms`)
+        signal?.throwIfAborted()
         return handler(request)
-      })
+      }, signal)
     }
   })
 }
@@ -1248,6 +1149,7 @@ export function createScopedMcpCapabilityService(
     pluginWorkspace?: string
     featureId?: string
     harnessProjectId?: string
+    harnessAdapterId?: string
     harnessAdapterName?: string
     harnessAdapterVersion?: string
     harnessNodeName?: string
@@ -1507,6 +1409,7 @@ export function createScopedMcpCapabilityService(
             pluginWorkspace: baseContext.pluginWorkspace,
             featureId: baseContext.featureId,
             harnessProjectId: baseContext.harnessProjectId,
+            harnessAdapterId: baseContext.harnessAdapterId,
             harnessAdapterName: baseContext.harnessAdapterName,
             harnessAdapterVersion: baseContext.harnessAdapterVersion,
             harnessNodeName: baseContext.harnessNodeName,
@@ -2429,7 +2332,7 @@ function assembleDeepAgent(
   const filesystemBackend = backend ? backend : (config: any) => new StateBackend(config)
   const skillsMiddlewareArray =
     skills != null && skills.length > 0
-      ? [createSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
+      ? [createRefreshingSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
       : []
 
   const memoryMiddlewareArray =
@@ -2442,7 +2345,7 @@ function assembleDeepAgent(
   const processedSubagents = subagents.map((subagent: any) => {
     if (Runnable.isRunnable(subagent)) return subagent
     if (!("skills" in subagent) || subagent.skills?.length === 0) return subagent
-    const subagentSkillsMiddleware = createSkillsMiddleware({
+    const subagentSkillsMiddleware = createRefreshingSkillsMiddleware({
       backend: filesystemBackend,
       sources: subagent.skills ?? []
     })
@@ -2566,50 +2469,65 @@ function assembleDeepAgent(
         if (result.truncated) parts.push("\n[Output was truncated due to size limits]")
         return parts.join("")
       }
-      const customExecute = lcTool(
-        async (input: {
-          command: string
-          cwd?: string
-          run_in_background?: boolean
-        }): Promise<string> => {
-          const sandbox = filesystemBackend as LocalSandbox
-          // Read-only runtimes keep execute but may only run PROVABLY read-only
-          // commands — gated per command by isReadOnlyShellCommand. Covers both
-          // the registry path (shellAccess "read_only", e.g. Explore) and the
-          // coordinator read-only worker (workload "read_only"). Stronger than
-          // CC's prompt-only constraint AND stronger than plain "safe": "safe" is
-          // the auto-approve tier (so this never surfaces an extra prompt) but it
-          // also auto-approves build/install/codegen (npm install, cargo build,
-          // make, go run, javac …), which WRITE the tree / run arbitrary code.
-          // isReadOnlyShellCommand additionally rejects those while keeping the
-          // tools' inspection subcommands (npm ls, go list, mvn dependency:tree).
-          const readOnlyShell =
-            filesystemAccess?.shellAccess === "read_only" ||
-            filesystemAccess?.workload === "read_only"
-          if (
-            readOnlyShell &&
-            !isReadOnlyShellCommand(input.command, input.cwd ?? "", windowsShellKind)
-          ) {
-            return readOnlyExecuteBlockMessage(windowsShellKind)
-          }
-          if (input.run_in_background) {
-            if (managedExecution) {
-              return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
-            }
-            return sandbox.executeBackground(input.command, input.cwd)
-          }
-          if (input.cwd?.trim()) {
+      const runExecute = async (input: {
+        command: string
+        cwd?: string
+        run_in_background?: boolean
+      }): Promise<string> => {
+        const sandbox = filesystemBackend as LocalSandbox
+        // Read-only runtimes keep execute but may only run PROVABLY read-only
+        // commands — gated per command by isReadOnlyShellCommand. Covers both
+        // the registry path (shellAccess "read_only", e.g. Explore) and the
+        // coordinator read-only worker (workload "read_only"). Stronger than
+        // CC's prompt-only constraint AND stronger than plain "safe": "safe" is
+        // the auto-approve tier (so this never surfaces an extra prompt) but it
+        // also auto-approves build/install/codegen (npm install, cargo build,
+        // make, go run, javac …), which WRITE the tree / run arbitrary code.
+        // isReadOnlyShellCommand additionally rejects those while keeping the
+        // tools' inspection subcommands (npm ls, go list, mvn dependency:tree).
+        const readOnlyShell =
+          filesystemAccess?.shellAccess === "read_only" ||
+          filesystemAccess?.workload === "read_only"
+        if (
+          readOnlyShell &&
+          !isReadOnlyShellCommand(input.command, input.cwd ?? "", windowsShellKind)
+        ) {
+          return readOnlyExecuteBlockMessage(windowsShellKind)
+        }
+        if (input.run_in_background) {
+          if (managedExecution) {
             return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
           }
-          // Delegate to original execute handler for foreground execution
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const result = await (oldExecute as any).invoke(input)
-          if (typeof result === "string") return result
-          try {
-            return JSON.stringify(result) ?? String(result)
-          } catch {
-            return String(result)
-          }
+          return sandbox.executeBackground(input.command, input.cwd)
+        }
+        if (input.cwd?.trim()) {
+          return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
+        }
+        // Delegate to original execute handler for foreground execution
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const result = await (oldExecute as any).invoke(input)
+        if (typeof result === "string") return result
+        try {
+          return JSON.stringify(result) ?? String(result)
+        } catch {
+          return String(result)
+        }
+      }
+      const customExecute = lcTool(
+        async (
+          input: { command: string; cwd?: string; run_in_background?: boolean },
+          config?: unknown
+        ): Promise<string> => {
+          // Task subagents share this sandbox: their shell reads report to their
+          // own trace, resolved the way read_file resolves it.
+          const traceContext = soloTaskTraceManager
+            ? resolveReadFileTraceContext(config, (agentId) =>
+                soloTaskTraceManager.getTraceContextForOwner(agentId)
+              )
+            : undefined
+          return traceContext
+            ? executeTraceContext.run(traceContext, () => runExecute(input))
+            : runExecute(input)
         },
         {
           name: "execute",
@@ -5141,7 +5059,13 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     )
   }
 
-  const modRuntimeAuthority = getModsManager()?.createRuntimeAuthority({
+  // Validate even when Mods is off/uninstalled; old sessions can retain foreign or deleted paths.
+  const modManager = getModsManager()
+  if (modManager) await modManager.prepareWorkspace(workspacePath)
+  else await validateWorkspaceDirectory(workspacePath)
+  options.abortSignal?.throwIfAborted()
+
+  const modRuntimeAuthority = modManager?.createRuntimeAuthority({
     workspace: workspacePath,
     threadId,
     agentId,
@@ -5176,6 +5100,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     agentMode,
     memoryEnabled: memoryEnabledForThread
   })
+  const skillVisibility: ProjectModeSkillScope = {
+    projectMode: runtimePolicy.isProjectMode,
+    boundPluginId: pluginId,
+    boundPluginName: pluginName
+  }
   // Keep the registry catalogue tied to the task tool itself. This enables the
   // same task types in Multi and Workflow while excluding Solo, coordinator,
   // and every leaf runtime through the existing mainSubagentsEnabled policy.
@@ -5204,8 +5133,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // Only the explicit slash selection counts, not auto-routed skills.
   if (isCoordinatorMode && options.coordinatorExplicitSelectedSkill) {
     const sel = options.coordinatorExplicitSelectedSkill
-    const ownerPluginId = resolvePluginIdForSkillPath(sel.skillPath)
-    hookScope.activateSkill(sel.skillName, ownerPluginId, sel.skillPath)
+    if (isSkillPathVisibleForProjectMode(sel.skillPath, skillVisibility)) {
+      const ownerPluginId = resolvePluginIdForSkillPath(sel.skillPath)
+      hookScope.activateSkill(sel.skillName, ownerPluginId, sel.skillPath)
+    }
   }
   const resolveHooksForContext = (event: HookEvent, context: HookContext) =>
     resolveEnabledHooksForRun(
@@ -5396,6 +5327,18 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     projectCode,
     projectDir,
     onFileMutation,
+    // Shell file telemetry follows Bash First exactly where the prompts apply
+    // it (same snapshot, readonly-sandbox downgrade and role limits); standard
+    // keeps the old file-tool-only path.
+    shellFileTelemetry: resolveShellFileTelemetry(
+      windowsSandbox === "readonly" ? "standard" : toolStrategy,
+      {
+        filesystemAccess: options.filesystemAccess,
+        blockedToolNames: runtimeBlockedToolNames,
+        filesystemEnabled: !isCoordinatorMode,
+        taskSubagentsEnabled: mainSubagentsEnabled
+      }
+    ),
     abortSignal: options.abortSignal,
     runId: threadId,
     // Foreground turns on the same thread can overlap briefly during bounded
@@ -5781,8 +5724,12 @@ The workspace root is: ${fileRoot}`
   console.log("[Runtime] Skill middleware sources:", skillsSources)
 
   // Merge plugin skills sources
-  const pluginSkillSourceMetadata = getEnabledPluginSkillSourceMetadata()
-  const pluginSkillsSources = await getEnabledPluginSkillMiddlewareSources()
+  const allPluginSkillSourceMetadata = getEnabledPluginSkillSourceMetadata()
+  const pluginSkillSourceMetadata = allPluginSkillSourceMetadata.filter((source) =>
+    isSkillVisibleForProjectMode(source, skillVisibility)
+  )
+  const pluginSkillsSources =
+    await getEnabledPluginSkillMiddlewareSources(pluginSkillSourceMetadata)
   console.log("[Runtime] Plugin skills sources:", pluginSkillsSources)
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
@@ -5840,6 +5787,7 @@ The workspace root is: ${fileRoot}`
       pluginWorkspace,
       featureId,
       harnessProjectId,
+      harnessAdapterId: pluginId,
       harnessAdapterName,
       harnessAdapterVersion,
       harnessNodeName,
@@ -6118,6 +6066,9 @@ The workspace root is: ${fileRoot}`
               // its background subagents must not re-prompt per file edit
               // (shell execution stays gated).
               autoApproveFileEdits: true,
+              // Only shared-workspace mutations belong to the parent's commit
+              // scope. Isolated worktrees retain their own generation records.
+              onFileMutation: worktreeIsolation ? undefined : onFileMutation,
               managedExecution
             })
             if (worktreeIsolation) worktreeSubagentThreads.add(subagentOptions.threadId)
@@ -6222,6 +6173,7 @@ The workspace root is: ${fileRoot}`
     pluginWorkspace,
     featureId,
     harnessProjectId,
+    harnessAdapterId: pluginId,
     harnessAdapterName,
     harnessAdapterVersion,
     harnessNodeName,
@@ -6330,6 +6282,10 @@ The workspace root is: ${fileRoot}`
   }
 
   const coordinatorWorkerRunner: CoordinatorWorkerRunner = async (workerInput) => {
+    const syncWorkerCodeSkills = createSubagentSkillAttribution({
+      threadId: workerInput.workerThreadId,
+      parentThreadId: workerInput.parentThreadId
+    })
     const workerActionStationarityTurnId = `${workerInput.workerThreadId}:turn:${workerInput.workerTurn}`
     const workerSubagent = buildCoordinatorWorkerSubagents(
       coordinatorWorkerProjectInstructions || undefined,
@@ -6407,13 +6363,14 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     let workerTraceError: string | undefined
     let workerValuesSnapshotAccumulator: WorkerValuesSnapshotAccumulator | undefined
     const syncWorkerSkillAttribution = (): void => {
-      if (!workerTracer) return
       const usedSkills = workerSkillUsageDetector.getUsedSkillNames()
       const skillSource = workerSkillUsageDetector.getUsedSkillSourceRefs()
-      workerTracer.setUsedSkills(usedSkills)
-      workerTracer.setSkillSource(skillSource)
-      workerTracer.setEvolvedSkills(workerSkillUsageDetector.getUsedEvolvedSkillNames())
-      setAdoptionContext(workerInput.workerThreadId, { usedSkills, skillSource })
+      workerTracer?.setUsedSkills(usedSkills)
+      workerTracer?.setSkillSource(skillSource)
+      workerTracer?.setEvolvedSkills(workerSkillUsageDetector.getUsedEvolvedSkillNames())
+      // Inherit once per worker turn; only this worker's own reads can change
+      // its snapshot or contribute Skills back to the coordinator.
+      syncWorkerCodeSkills({ usedSkills, skillSource })
     }
     const cancelWorkerBackgroundTasks = (): void => {
       LocalSandbox.cancelBackgroundTasks(workerInput.workerThreadId)
@@ -6447,6 +6404,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     // stays the worker thread id and is not part of this bundle.
     const workerHarnessContext = {
       agentId: workerInput.workerId,
+      onFileMutation,
       systemId,
       pluginRoot,
       pluginId,
@@ -6528,6 +6486,20 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         )
         workerRuntimeTraceContext = workerTracer?.getTraceContext() ?? traceContext
       }
+      // Trace creation resets adoption context. Restore inherited Skills before
+      // the first tool can generate code, even if this worker never reads a Skill.
+      runTraceSideEffect("CoordinatorWorker Skill initialization", syncWorkerSkillAttribution)
+      const workerPromptMessage = new HumanMessage({
+        content: effectiveWorkerPrompt,
+        id: randomUUID()
+      })
+      const workerTraceRecorder = workerTracer
+        ? new TurnTraceRecorder({
+            tracer: workerTracer,
+            userMessageId: workerPromptMessage.id,
+            requireUserMessageAnchor: true
+          })
+        : undefined
       const streamConfig = {
         configurable: { thread_id: workerInput.workerThreadId },
         callbacks: [],
@@ -6545,6 +6517,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
               stream: { mode: mode as "messages" | "values", data }
             })
           }
+          if (mode === "values") workerTraceRecorder?.onRawValues(data)
           const valuesContext = workerValuesSnapshotAccumulator?.createContext(mode, data)
           runTraceSideEffect("CoordinatorWorker Skill observer", () => {
             if (observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)) {
@@ -6672,10 +6645,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             onFailureFuseNotice
           })
 
-          workerStream = await workerAgent.stream(
-            { messages: [new HumanMessage(effectiveWorkerPrompt)] },
-            streamConfig
-          )
+          workerStream = await workerAgent.stream({ messages: [workerPromptMessage] }, streamConfig)
           usedWorkerModelId = candidateId
           runTraceSideEffect("CoordinatorWorker", () => workerTracer?.setModelId(candidateId))
           break
@@ -7327,6 +7297,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
   }
 
   const agent = createDeepAgent({
+    middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
     model,
     summarizationModel: contextCompactionModel,
     tools: mainTools,

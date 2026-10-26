@@ -1,6 +1,9 @@
+import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
 import { initializeNotificationRuntime } from "./notification-runtime"
 import { notificationService } from "./services/notification-service"
 import { registerNotificationHandlers } from "./ipc/notifications"
+import type { UiGuideConfig } from "../shared/ui-guides"
+import { acknowledgeUiGuide, getUiGuideState, recordUiGuideDisplay } from "./db/ui-guide-store"
 import {
   app,
   BrowserWindow,
@@ -49,6 +52,7 @@ import {
 } from "./logging"
 import {
   createMainLogForwarder,
+  getRendererConsoleLevelName,
   createMainLogForwardingGate,
   createSafeLogMethod,
   createSafeLogProcessingGuard,
@@ -156,21 +160,6 @@ function isTrackEventPayload(payload: unknown): payload is {
       typeof record.properties === "object" &&
       !Array.isArray(record.properties))
   )
-}
-
-function getConsoleLevelName(level: number): string {
-  switch (level) {
-    case 0:
-      return "INFO"
-    case 1:
-      return "WARN"
-    case 2:
-      return "ERROR"
-    case 3:
-      return "DEBUG"
-    default:
-      return "LOG"
-  }
 }
 
 function shouldMirrorRendererBrowserLog(message: string): boolean {
@@ -384,7 +373,8 @@ import { configureManagedRunProjectDirectories } from "./harness-board/managed-r
 import {
   getHarnessProjectRootPath,
   initializeHarnessManagedRunProjectDirectories,
-  listHarnessManagedRunProjectDirectories
+  listHarnessManagedRunProjectDirectories,
+  markHarnessProjectManagedRunStarted
 } from "./harness-board/service"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
@@ -423,7 +413,7 @@ import {
   startRegisteredGitHookEventSync,
   stopRegisteredGitHookEventSync
 } from "./services/git-hook-service"
-import { getAllThreadSummaries, initializeDatabase, flush } from "./db"
+import { getAllThreadSummaries, initializeDatabase, flush, getDb } from "./db"
 import { closeThreadMessageHydrationWorker } from "./thread-message-hydration/client"
 import { closeCheckpointRuntimeProjectionWorker } from "./checkpointer/runtime-projection-client"
 import { closeThreadMetadataHydrationWorker } from "./thread-metadata-hydration/client"
@@ -813,7 +803,7 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    writeRendererLog(getConsoleLevelName(level), message, { sourceId, line })
+    writeRendererLog(getRendererConsoleLevelName(level), message, { sourceId, line })
     if (shouldMirrorRendererBrowserLog(message)) {
       const location = sourceId ? `${sourceId}:${line}` : `line:${line}`
       console.log(`${formatMirroredRendererBrowserLog(message)} (${location})`)
@@ -1101,7 +1091,15 @@ if (browserNativeMessagingHostLaunch) {
       console.log("[Main] HttpEventReporter registered, sending events to:", traceBaseUrl)
     }
 
-    await initializeHarnessManagedRunProjectDirectories()
+    let harnessConfigAvailable = false
+    try {
+      await initializeHarnessConfigV2(getOpenworkDir())
+      harnessConfigAvailable = true
+    } catch (error) {
+      // The project-mode readers surface this error; unrelated app features remain available.
+      console.error("[HarnessBoard] Configuration initialization failed:", error)
+    }
+    if (harnessConfigAvailable) await initializeHarnessManagedRunProjectDirectories()
     configureManagedRunProjectDirectories({
       resolveProjectDirectory: getHarnessProjectRootPath,
       listProjectDirectories: listHarnessManagedRunProjectDirectories
@@ -1111,13 +1109,20 @@ if (browserNativeMessagingHostLaunch) {
     // index. Prefers the backend event service (VITE_API_TRACE_BASE_URL) and
     // falls back to writing ES directly (VITE_ES_NODES); no-ops when neither is
     // configured.
-    startHarnessStatusReporter()
+    if (harnessConfigAvailable) startHarnessStatusReporter()
 
     // Initialize database
     await initializeDatabase()
     initializeNotificationRuntime()
     await notificationService.recover()
-    recoverManagedRunsAtStartup()
+    if (harnessConfigAvailable) {
+      // 回填「托管运行」标签：磁盘上已有托管记录的项目，在本次升级之前跑过但没有标记。
+      // 标记是单调的，重复写是空操作，所以每次启动都跑一遍也没关系。不 await，不挡启动。
+      const { projectIdsWithRuns } = recoverManagedRunsAtStartup()
+      for (const projectId of projectIdsWithRuns) {
+        void markHarnessProjectManagedRunStarted(projectId).catch(() => undefined)
+      }
+    }
     cleanupLegacySkillEvalRecords()
 
     // Initialize adoption tracker (side-effect only; never blocks startup)
@@ -1157,6 +1162,15 @@ if (browserNativeMessagingHostLaunch) {
     registerAdoptionTraceHandlers(ipcMain)
     registerFeatureGateHandlers(ipcMain)
     registerNotificationHandlers(ipcMain)
+    ipcMain.handle("uiGuides:getState", (_event, config: UiGuideConfig) =>
+      getUiGuideState(getDb(), config)
+    )
+    ipcMain.handle("uiGuides:recordDisplay", (_event, config: UiGuideConfig) =>
+      recordUiGuideDisplay(getDb(), config)
+    )
+    ipcMain.handle("uiGuides:acknowledge", (_event, config: UiGuideConfig) =>
+      acknowledgeUiGuide(getDb(), config)
+    )
     registerHarnessBoardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)

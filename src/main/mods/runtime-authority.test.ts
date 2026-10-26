@@ -12,6 +12,7 @@ import { getModCallContext, modCallContext } from "./context"
 import type { ModRuntimeAuthority } from "./runtime-instance"
 import {
   createDeepAgent,
+  createAgentRuntime,
   wrapTaskToolWithOwnerMetadata,
   SUBAGENT_OWNER_METADATA_KEY
 } from "../agent/runtime"
@@ -41,6 +42,37 @@ vi.mock("electron", () => ({
 const cleanup: Array<() => void> = []
 afterEach(() => {
   for (const run of cleanup.splice(0).reverse()) run()
+})
+
+it("rejects a stale session workspace before allocating Mods authority or starting a model", async () => {
+  const f = fixture()
+  const createAuthority = vi.spyOn(f.manager, "createRuntimeAuthority")
+  try {
+    await expect(
+      createAgentRuntime({
+        workspacePath: join(f.workspace, "missing"),
+        threadId: "invalid-workspace"
+      })
+    ).rejects.toMatchObject({ code: "invalid_workspace_path" })
+    expect(createAuthority).not.toHaveBeenCalled()
+  } finally {
+    createAuthority.mockRestore()
+  }
+})
+
+it("validates a stale workspace when no Mods manager is installed", async () => {
+  const previous = getModsManager()
+  setModsManager(undefined)
+  try {
+    await expect(
+      createAgentRuntime({
+        workspacePath: join(tmpdir(), "missing-workspace", "Users", "demo"),
+        threadId: "invalid-workspace-no-mods"
+      })
+    ).rejects.toMatchObject({ code: "invalid_workspace_path" })
+  } finally {
+    setModsManager(previous)
+  }
 })
 
 function fixture(blockedToolNames = new Set<string>(), readOnly = false) {

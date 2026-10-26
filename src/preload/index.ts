@@ -1,9 +1,22 @@
 import type {
+  KnowledgeAccumulationData,
+  KnowledgeActiveDetails,
+  KnowledgeFileReaders,
+  KnowledgeProjectStats,
+  KnowledgeReadDetails,
+  KnowledgeReadFileRef,
+  KnowledgeRecentConstraintFiles
+} from "../shared/dashboard-knowledge-overview"
+import type { EfficiencyPluginFilter } from "../shared/dashboard-efficiency-compute"
+import type { ProjectCodeTraceRequest } from "../shared/project-code-trace"
+import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
+import type {
   AppNotification,
   AppDecisionInput,
   AppDecisionResult
 } from "../shared/app-notifications"
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
+import type { UiGuideConfig, UiGuideState } from "../shared/ui-guides"
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
 import type { ModCard, ModProjection, ModWorkspaceStatus } from "../shared/mods/types"
@@ -154,6 +167,7 @@ import type {
   HarnessRunArtifactRevealInput,
   HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
+  HarnessDeployUnitConfig,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
@@ -373,9 +387,9 @@ const electronAPI = {
       value
     ) as Promise<AgentRuntimeSettings>,
   onNotifyMsg: (callback: (msg: string) => void) => {
-    ipcRenderer.on("notify-login-msg", (_event, data) => {
-      callback(data)
-    })
+    const handler = (_event: unknown, data: string): void => callback(data)
+    ipcRenderer.on("notify-login-msg", handler)
+    return () => ipcRenderer.removeListener("notify-login-msg", handler)
   },
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => ipcRenderer.send(channel, ...args),
@@ -645,6 +659,14 @@ ipcRenderer.on(
 
 // Custom APIs for renderer
 const api = {
+  uiGuides: {
+    getState: (config: UiGuideConfig): Promise<UiGuideState> =>
+      ipcRenderer.invoke("uiGuides:getState", config),
+    recordDisplay: (config: UiGuideConfig): Promise<boolean> =>
+      ipcRenderer.invoke("uiGuides:recordDisplay", config),
+    acknowledge: (config: UiGuideConfig): Promise<void> =>
+      ipcRenderer.invoke("uiGuides:acknowledge", config)
+  },
   agent: {
     // Send message and receive events via callback
     invoke: (
@@ -1563,6 +1585,11 @@ const api = {
     },
     getUserInfo: (): Promise<UserInfoConfig | null> => {
       return ipcRenderer.invoke("models:getUserInfo") as Promise<UserInfoConfig | null>
+    },
+    onUserInfoChanged: (callback: () => void): (() => void) => {
+      const handler = (): void => callback()
+      ipcRenderer.on("models:userInfoChanged", handler)
+      return () => ipcRenderer.removeListener("models:userInfoChanged", handler)
     },
     deleteCustomConfig: (id: string): Promise<void> => {
       return ipcRenderer.invoke("models:deleteCustomConfig", id) as Promise<void>
@@ -3954,20 +3981,91 @@ const api = {
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | string[] | null }
+      opts?: {
+        upperOrgLv1?: string | string[] | null
+        fromLeanOnly?: boolean | null
+        createdInRangeOnly?: boolean | null
+        refreshProjects?: boolean
+        skipProjectList?: boolean
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMode", range, granularity, opts),
     projectModeCodeStats: (
       range: { from: string; to: string },
-      opts: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null } | undefined,
+      opts:
+        | {
+            upperOrgLv1?: string | string[] | null
+            fromLeanOnly?: boolean | null
+            createdInRangeOnly?: boolean | null
+          }
+        | undefined,
       source: string | null
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeCodeStats", range, opts, source),
-    efficiency: (
+    knowledgeAccumulation: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeAccumulationData
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeAccumulation", opts),
+    knowledgeActiveDetails: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeActiveDetails
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeActiveDetails", opts),
+    knowledgeReadDetails: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeReadDetails
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeReadDetails", opts),
+    knowledgeReadReaders: (
+      file: KnowledgeReadFileRef,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{
+      success: boolean
+      data?: KnowledgeFileReaders
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeReadReaders", file, opts),
+    knowledgeProjectStats: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{
+      success: boolean
+      data?: KnowledgeProjectStats
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeProjectStats", range, opts),
+    knowledgeRecentConstraintFiles: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeRecentConstraintFiles
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeRecentConstraintFiles", opts),
+    knowledgeCommitRate: (
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:knowledgeCommitRate", range, opts),
+    efficiency: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null } & EfficiencyPluginFilter
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:efficiency", range, opts),
+    projectMetricGroupOptions: (
+      filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
+    ): Promise<{ success: boolean; data?: string[]; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMetricGroupOptions", filters),
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -3997,12 +4095,18 @@ const api = {
       ipcRenderer.invoke("dashboard:projectModeProjects", range, options),
     projectModeExportData: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+      opts?: {
+        upperOrgLv1?: string | string[] | null
+        fromLeanOnly?: boolean | null
+        createdInRangeOnly?: boolean | null
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeExportData", range, opts),
+    projectCodeTrace: (input: ProjectCodeTraceRequest) =>
+      ipcRenderer.invoke("dashboard:projectCodeTrace", input),
     projectModeTraces: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: {
         limit?: number
         page?: number
@@ -4021,15 +4125,22 @@ const api = {
     projectModeFeatureNodes: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string }
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:projectModeFeatureNodes", projectId, featureSlug, range),
+      ipcRenderer.invoke("dashboard:projectModeFeatureNodes", projectId, featureSlug, range, opts),
     projectModeOperationalDetails: (
       scope: { projectId: string; featureSlug?: string; nodeName?: string },
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeOperationalDetails", scope, range, opts),
+    projectModeStageAnalysis: (
+      projectId: string,
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeStageAnalysis", projectId, range, opts),
     pluginAggregate: (
       adapterName: string,
       range: { from: string; to: string }
@@ -4038,7 +4149,7 @@ const api = {
     projectModeFeatureCommits: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: {
         page?: number
         pageSize?: number
@@ -4057,7 +4168,7 @@ const api = {
       ),
     projectModeProjectCommits: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: {
         page?: number
         pageSize?: number
@@ -4230,7 +4341,7 @@ const api = {
       ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit, mode, triggerScope),
     threadTraces: (
       threadId: string,
-      options?: { scope?: "platform" | "project" }
+      options?: DashboardThreadTraceScope
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:threadTraces", threadId, options),
     marketSkillRecentTraces: (
@@ -4300,6 +4411,8 @@ const api = {
       page: number
       pageSize: number
       totalTraces: number
+      viewMode?: "thread" | "trace"
+      triggerScope?: "active" | "all"
       traces: unknown[]
     }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportSkillTraces", payload),
@@ -4367,17 +4480,17 @@ const api = {
       ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessAdapterRegistryItem[]>,
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
-    getDeployUnitMappings: (): Promise<HarnessDeployUnitMapping[]> =>
+    getDeployUnitMappings: (): Promise<HarnessDeployUnitConfig[]> =>
       ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<
-        HarnessDeployUnitMapping[]
+        HarnessDeployUnitConfig[]
       >,
     getLeanTokenConfig: (): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke("harnessBoard:getLeanTokenConfig") as Promise<HarnessLeanTokenConfig>,
     saveDeployUnitMappings: (
-      mappings: HarnessDeployUnitMapping[]
-    ): Promise<HarnessDeployUnitMapping[]> =>
+      mappings: HarnessDeployUnitConfig[]
+    ): Promise<HarnessDeployUnitConfig[]> =>
       ipcRenderer.invoke("harnessBoard:saveDeployUnitMappings", mappings) as Promise<
-        HarnessDeployUnitMapping[]
+        HarnessDeployUnitConfig[]
       >,
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke(

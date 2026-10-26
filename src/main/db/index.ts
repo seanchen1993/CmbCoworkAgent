@@ -1,4 +1,5 @@
 import { ensureAppNotificationsSchema } from "./app-notifications-schema"
+import { ensureUiGuideSchema } from "./ui-guide-store"
 import {
   getDbPath,
   getMemorySessionOptInMigrationState,
@@ -952,6 +953,7 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   )
 
   ensureAppNotificationsSchema(db)
+  ensureUiGuideSchema(db)
   ensureImServiceSchema(db)
 
   migrateLegacyMemorySessionOptIn(db)
@@ -1416,6 +1418,26 @@ export function getThreadMessageCount(threadId: string): number {
 
 export function hasThreadMessages(threadId: string): boolean {
   return getThreadMessageCount(threadId) > 0
+}
+
+/** Indexed identity-only lookup; queued later messages must not hide the first turn. */
+export function isFirstThreadUserMessage(threadId: string, messageId?: string): boolean {
+  const stmt = getDb().prepare(
+    `SELECT message_id FROM thread_messages
+     WHERE thread_id = ? AND role = 'user'
+     ORDER BY ordinal ASC, created_at ASC, message_id ASC LIMIT 2`
+  )
+  try {
+    stmt.bind([threadId])
+    if (!stmt.step()) return false
+    const firstId = String(stmt.getAsObject().message_id)
+    if (messageId?.trim()) return firstId === messageId.trim()
+    // Legacy callers do not always supply an ID. Only a single persisted user
+    // message proves this is the initial turn; otherwise keep the heuristic.
+    return !stmt.step()
+  } finally {
+    stmt.free()
+  }
 }
 
 /**

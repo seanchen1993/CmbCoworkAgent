@@ -227,6 +227,21 @@ export class NativeSqliteAdapter {
     return statement
   }
 
+  /** Keep a large DELETE's WAL checkpoint out of the main-thread COMMIT.
+   * The caller must schedule a background checkpoint after committing. WAL
+   * durability is unchanged; restore the connection policy even on rollback.
+   */
+  withoutAutomaticCheckpoint<T>(operation: () => T): T {
+    this.assertOpen()
+    const pages = Number(this.native.prepare("PRAGMA wal_autocheckpoint").get()?.wal_autocheckpoint)
+    this.native.exec("PRAGMA wal_autocheckpoint = 0")
+    try {
+      return operation()
+    } finally {
+      this.native.exec(`PRAGMA wal_autocheckpoint = ${pages}`)
+    }
+  }
+
   /** Move committed WAL pages into the main file without copying the full database. */
   flush(mode: "FULL" | "TRUNCATE" = "FULL"): void {
     this.assertOpen()

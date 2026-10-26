@@ -1,0 +1,1912 @@
+{
+  "description": "Use exact input for normalization unit tests. For HTTP integration, merge into a valid legacy fixture after removing all seven new statistics fields. Expected fields here cover only the stage group; normalize the tool group independently first. Preserve all original validation.",
+  "cases": [
+    {
+      "name": "legacy_missing",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0
+      },
+      "expectedIndexedStageFields": {},
+      "expectedAbsentStageFields": [
+        "stageUsageSchemaVersion",
+        "stageUsageComplete",
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "complete",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedAbsentStageFields": [],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "complete_zero",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 0,
+        "totalModelCalls": 0,
+        "totalInputTokens": 0,
+        "totalOutputTokens": 0,
+        "totalTokens": 0,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": []
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": []
+      },
+      "expectedAbsentStageFields": [],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "unattributed_is_not_turn_start",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedAbsentStageFields": [],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "no_token_usage_does_not_remove_model_call",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 0,
+        "totalOutputTokens": 0,
+        "totalTokens": 0,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "totalTokens": 0,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 0
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "totalTokens": 0,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 0
+          }
+        ]
+      },
+      "expectedAbsentStageFields": [],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "partial",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 20,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedAbsentStageFields": [],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "total_mismatch",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 99,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "question_mismatch",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 1,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "duplicate_bucket",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "missing_count",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "negative_count",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": -1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "fractional_count",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1.5,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "string_count",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": "1",
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "boolean_count",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": true,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "status_without_name",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "blank_name",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": " ",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "too_long_name",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "reported_calls_exceed_models",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 2
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "tokens_without_models",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 0,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 0
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "question_exceeds_tools",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 2,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "too_many_buckets",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "0",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "1",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "2",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "3",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "4",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "5",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "6",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "7",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "8",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "9",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "10",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "11",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "12",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "13",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "14",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "15",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "16",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "17",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "18",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "19",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "20",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "21",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "22",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "23",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "24",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "25",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "26",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "27",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "28",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "29",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "30",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "31",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "32",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "33",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "34",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "35",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "36",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "37",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "38",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "39",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "40",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "41",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "42",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "43",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "44",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "45",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "46",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "47",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "48",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "49",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "50",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "51",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "52",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "53",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "54",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "55",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "56",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "57",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "58",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "59",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "60",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "61",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "62",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "63",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "64",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "incomplete_tool_group",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "long_sum_overflow",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "a",
+            "nodeStatus": "进行中",
+            "toolCalls": 9223372036854775807,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "b",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "unknown_version",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 2,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 2,
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "invalid_version",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 1,
+        "totalModelCalls": 1,
+        "totalInputTokens": 10,
+        "totalOutputTokens": 2,
+        "totalTokens": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": "1",
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageComplete": false
+      },
+      "expectedAbsentStageFields": [
+        "stageUsageSchemaVersion",
+        "stageUsage"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "same_stage_different_status",
+      "input": {
+        "harnessProjectId": "p",
+        "harnessFeatureSlug": "f",
+        "totalToolCalls": 2,
+        "totalModelCalls": 2,
+        "totalInputTokens": 20,
+        "totalOutputTokens": 4,
+        "totalTokens": 24,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 2
+          }
+        ],
+        "userInputRequestCount": 0,
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "plan",
+            "nodeStatus": "已完成",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedIndexedStageFields": {
+        "stageUsageSchemaVersion": 1,
+        "stageUsageComplete": true,
+        "stageUsage": [
+          {
+            "nodeName": "plan",
+            "nodeStatus": "进行中",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          },
+          {
+            "nodeName": "plan",
+            "nodeStatus": "已完成",
+            "toolCalls": 1,
+            "modelCalls": 1,
+            "inputTokens": 10,
+            "outputTokens": 2,
+            "totalTokens": 12,
+            "userInputRequests": 0,
+            "tokenUsageReportedCalls": 1
+          }
+        ]
+      },
+      "expectedAbsentStageFields": [],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    }
+  ]
+}

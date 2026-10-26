@@ -1,3 +1,5 @@
+import { BrowserWindow } from "electron"
+import { userIdentityKey } from "../../shared/user-identity"
 import { getUserInfo, upsertUserInfoConfig, type UserInfoConfig } from "../storage"
 
 const ENTERPRISE_LOGIN_REFRESH_TIMEOUT_MS = 15_000
@@ -105,7 +107,13 @@ async function requestEnterpriseLoginRefresh(
     const body = record(payload.body)
     if (!body) throw new Error("登录凭据刷新响应缺少 body")
     const nextUserInfo = mergeUserInfo(userInfo, body)
+    const previousIdentity = userIdentityKey(getUserInfo())
     upsertUserInfoConfig(nextUserInfo)
+    if (previousIdentity !== userIdentityKey(nextUserInfo)) {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send("models:userInfoChanged")
+      }
+    }
     return nextUserInfo
   } catch (error) {
     console.warn("[EnterpriseLogin] token-refresh:error", {

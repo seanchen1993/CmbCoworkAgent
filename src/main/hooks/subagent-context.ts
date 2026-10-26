@@ -49,6 +49,7 @@ export type SubagentStopHarnessContext = Pick<
   | "pluginWorkspace"
   | "featureId"
   | "harnessProjectId"
+  | "harnessAdapterId"
   | "harnessAdapterName"
   | "harnessAdapterVersion"
   | "harnessNodeName"
@@ -94,6 +95,7 @@ export function buildSubagentStopHookContext(input: SubagentStopHookContextInput
     pluginWorkspace: input.pluginWorkspace,
     featureId: input.featureId,
     harnessProjectId: input.harnessProjectId,
+    harnessAdapterId: input.harnessAdapterId,
     harnessAdapterName: input.harnessAdapterName,
     harnessAdapterVersion: input.harnessAdapterVersion,
     harnessNodeName: input.harnessNodeName,

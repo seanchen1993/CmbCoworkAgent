@@ -1,3 +1,5 @@
+import { randomUUID } from "crypto"
+import { TurnTraceRecorder } from "../trace/turn-trace-recorder"
 import {
   withSubagentSessionCapture,
   subagentSessionCallbacks
@@ -19,7 +21,7 @@ import {
   type TraceCollector
 } from "../trace/collector"
 import type { TraceContext, TraceNodeStatus, TraceOutcome } from "../trace/types"
-import { setAdoptionContext } from "../../services/adoption-tracker"
+import { createSubagentSkillAttribution } from "../turn-attribution"
 import { validateJsonSchemaValue } from "./json-schema"
 import {
   WORKFLOW_STRUCTURED_OUTPUT_MAX_ATTEMPTS,
@@ -343,6 +345,10 @@ async function runOnce(
   const attemptSuffix = attempt > 1 ? `_r${attempt}` : ""
   const threadId = `${deps.parentThreadId}__wf_${runShort}_a${request.agentIndex}${attemptSuffix}`
   const agentId = `${request.runId}:agent:${request.agentIndex}`
+  const syncCodeSkills = createSubagentSkillAttribution({
+    threadId,
+    parentThreadId: deps.parentThreadId
+  })
 
   // Subagent lifetime signal: parent abort, plus optional per-agent timeout when
   // CMB_WORKFLOW_AGENT_TIMEOUT_MS is configured.
@@ -354,6 +360,8 @@ async function runOnce(
   timeoutTimer?.unref?.()
 
   const structured: { value: unknown; called: boolean } = { value: undefined, called: false }
+  const promptMessage = new HumanMessage({ content: request.prompt, id: randomUUID() })
+  let traceRecorder: TurnTraceRecorder | undefined
   let tracer: TraceCollector | undefined
   let latestSnapshot: unknown
   let traceTerminalRecorded = false
@@ -364,26 +372,19 @@ async function runOnce(
     deriveWorkerState: false
   })
   const syncSkillAttribution = (): void => {
-    if (!tracer) return
     const usedSkills = skillUsageDetector.getUsedSkillNames()
     const skillSource = skillUsageDetector.getUsedSkillSourceRefs()
-    tracer.setUsedSkills(usedSkills)
-    tracer.setSkillSource(skillSource)
-    tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
-    setAdoptionContext(threadId, { usedSkills, skillSource })
+    tracer?.setUsedSkills(usedSkills)
+    tracer?.setSkillSource(skillSource)
+    tracer?.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
+    syncCodeSkills({ usedSkills, skillSource })
   }
   const recordValuesSnapshot = (snapshot: unknown): void => {
     latestSnapshot = snapshot
+    traceRecorder?.onRawValues(snapshot)
     const valuesContext = valuesSnapshotAccumulator.createContext("values", snapshot)
     runTraceSideEffect("Workflow Skill observer", () => {
-      if (
-        observeSkillUsageFromStream(
-          "values",
-          snapshot,
-          skillUsageDetector,
-          valuesContext
-        )
-      ) {
+      if (observeSkillUsageFromStream("values", snapshot, skillUsageDetector, valuesContext)) {
         syncSkillAttribution()
       }
     })
@@ -397,6 +398,15 @@ async function runOnce(
     // Purge any stale per-thread state before creating the runtime.
     await deps.cleanupThread(threadId).catch(() => undefined)
     tracer = createWorkflowSubagentTrace(deps, request, threadId)
+    // Trace creation resets adoption context. Restore inherited Skills before
+    // the first tool can generate code, even if this agent never reads a Skill.
+    runTraceSideEffect("Workflow Skill initialization", syncSkillAttribution)
+    if (tracer)
+      traceRecorder = new TurnTraceRecorder({
+        tracer,
+        userMessageId: promptMessage.id,
+        requireUserMessageAnchor: true
+      })
 
     const additionalTools = request.schema
       ? [
@@ -472,7 +482,7 @@ async function runOnce(
     let snapshot = await raceWithAbort(
       (async () =>
         consumeValuesStream(
-          await runtime.stream({ messages: [new HumanMessage(request.prompt)] }, streamConfig),
+          await runtime.stream({ messages: [promptMessage] }, streamConfig),
           controller.signal,
           stopAfterStructuredAccepted,
           recordValuesSnapshot
@@ -645,10 +655,7 @@ async function runOnce(
           traceTerminalRecorded = true
         }
       })
-      const traceSnapshot = latestSnapshot
-      finishTraceInBackground(tracerToFinish, traceOutcome, traceError, "Workflow", () => {
-        recordWorkflowTraceToolDetails(tracerToFinish, traceSnapshot)
-      })
+      finishTraceInBackground(tracerToFinish, traceOutcome, traceError, "Workflow")
     }
     if (timeoutTimer) clearTimeout(timeoutTimer)
     request.signal.removeEventListener("abort", onParentAbort)
@@ -2185,22 +2192,6 @@ export function extractWorkflowTraceToolDetails(snapshot: unknown): WorkflowTrac
       status: result?.status ?? "unknown"
     }
   })
-}
-
-function recordWorkflowTraceToolDetails(tracer: TraceCollector, snapshot: unknown): void {
-  for (const tool of extractWorkflowTraceToolDetails(snapshot)) {
-    const toolNodeId = tracer.addToolNode({
-      name: tool.name,
-      ...(tool.input !== undefined ? { input: tool.input } : {}),
-      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {})
-    })
-    tracer.addToolResultNode({
-      parentId: toolNodeId,
-      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
-      ...(tool.output !== undefined ? { output: tool.output } : {}),
-      status: tool.status
-    })
-  }
 }
 
 /**

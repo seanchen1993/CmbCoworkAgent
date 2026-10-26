@@ -43,6 +43,7 @@ import type { ThreadGitContext } from "@/lib/thread-context"
 import type { GitCommitHistoryRecord } from "../../../../shared/git-commit-history"
 import type { TaskCardItem } from "../../../../shared/task-card-types"
 import { useWorkspaceTaskCard } from "@/components/git/use-workspace-task-card"
+import { useAppStore } from "@/lib/store"
 
 const GIT_BRANCH_REFRESH_EVENT = "cmb:git-branch-switched"
 const COMMIT_TYPE_VALUES = new Set<string>([
@@ -308,6 +309,7 @@ export function GitPanelView({
   initialGitContext?: ThreadGitContext | null
   onOpenFileFolder?: (filePath: string) => void
 }): React.JSX.Element {
+  const showCustomizeView = useAppStore((state) => state.showCustomizeView)
   const metaRequestIdRef = useRef(0)
   const diffRequestIdRef = useRef(0)
   const fileDiffRequestIdRef = useRef(0)
@@ -346,6 +348,7 @@ export function GitPanelView({
   const [diffFileError, setDiffFileError] = useState<string | null>(null)
   const diffLoadingPathRef = useRef<string | null>(null)
   const pendingRefreshRef = useRef<{ meta: boolean; diff: boolean } | null>(null)
+  const fileRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadedDiffPathRef = useRef<string | null>(null)
   const [diffReloadVersion, setDiffReloadVersion] = useState(0)
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
@@ -410,6 +413,8 @@ export function GitPanelView({
 
   useEffect(
     () => () => {
+      activeThreadIdRef.current = ""
+      pendingRefreshRef.current = null
       metaRequestIdRef.current += 1
       diffRequestIdRef.current += 1
       fileDiffRequestIdRef.current += 1
@@ -432,18 +437,21 @@ export function GitPanelView({
 
   const refresh = useCallback(
     async (options?: { meta?: boolean; diff?: boolean }) => {
-      if (!threadId) return
-      const shouldRefreshMeta = options?.meta ?? false
-      const shouldRefreshDiff = options?.diff ?? true
+      if (!threadId || activeThreadIdRef.current !== threadId) return
+      const pendingRefresh = pendingRefreshRef.current
+      const shouldRefreshMeta = Boolean((options?.meta ?? false) || pendingRefresh?.meta)
+      const shouldRefreshDiff = Boolean((options?.diff ?? true) || pendingRefresh?.diff)
       if (!shouldRefreshMeta && !shouldRefreshDiff) return
-      if (diffLoadingPathRef.current) {
-        const pendingRefresh = pendingRefreshRef.current
-        pendingRefreshRef.current = {
-          meta: Boolean(pendingRefresh?.meta || shouldRefreshMeta),
-          diff: Boolean(pendingRefresh?.diff || shouldRefreshDiff)
-        }
+      if (fileRefreshTimerRef.current) {
+        clearTimeout(fileRefreshTimerRef.current)
+        fileRefreshTimerRef.current = null
+      }
+      // 设置覆盖期间只合并查询需求，返回后补刷新；继续接收共享文件通知。
+      if (useAppStore.getState().showCustomizeView || diffLoadingPathRef.current) {
+        pendingRefreshRef.current = { meta: shouldRefreshMeta, diff: shouldRefreshDiff }
         return
       }
+      pendingRefreshRef.current = null
 
       let toastShown = false
       setError(null)
@@ -520,6 +528,12 @@ export function GitPanelView({
   useEffect(() => {
     void refresh({ meta: true, diff: true })
   }, [refresh])
+
+  useEffect(() => {
+    if (!showCustomizeView && pendingRefreshRef.current) {
+      void refresh({ meta: false, diff: false })
+    }
+  }, [showCustomizeView, refresh])
 
   useEffect(() => {
     const handleBranchSwitched = (event: Event): void => {
@@ -816,7 +830,12 @@ export function GitPanelView({
 
   const loadFileDiff = useCallback(
     async (filePath: string): Promise<void> => {
-      if (!threadId || !filePath || diffLoadingPath === filePath) return
+      if (
+        !threadId ||
+        !filePath ||
+        useAppStore.getState().showCustomizeView ||
+        diffLoadingPathRef.current === filePath
+      ) return
       const requestDiffId = diffRequestIdRef.current
       const requestFileDiffId = ++fileDiffRequestIdRef.current
       const requestThreadId = threadId
@@ -834,7 +853,8 @@ export function GitPanelView({
         return
       }
 
-      // 清除旧缓存，开始加载新文件
+      // 内容和缓存路径一起失效，避免 A → B 加载中 → A 时误命中已清空的 A。
+      loadedDiffPathRef.current = null
       setCurrentFileDiff(null)
       setDiffFileError(null)
       diffLoadingPathRef.current = filePath
@@ -858,6 +878,8 @@ export function GitPanelView({
         }
       } catch (e) {
         if (!isLatestFileRequest()) return
+        // 失败也算本轮已读取，避免错误/加载状态变化触发连续请求；刷新时清除此记录。
+        loadedDiffPathRef.current = filePath
         setDiffFileError(e instanceof Error ? e.message : "加载文件 diff 失败")
       } finally {
         if (isLatestFileRequest()) {
@@ -873,7 +895,7 @@ export function GitPanelView({
         }
       }
     },
-    [threadId, diffLoadingPath, repositories, refresh]
+    [threadId, repositories, refresh]
   )
 
   const toggleFileExpanded = useCallback(
@@ -885,11 +907,11 @@ export function GitPanelView({
   )
 
   useEffect(() => {
-    // 刷新后只有当前展开文件需要重新加载，且仅当未缓存过或文件列表已更新时
-    if (!expandedFilePath) return
-    if (loadedDiffPathRef.current === expandedFilePath && !diffFileError) return
+    // 设置期间不发起单文件读取；返回后只补未读取或刷新失效的当前文件。
+    if (showCustomizeView || !expandedFilePath) return
+    if (loadedDiffPathRef.current === expandedFilePath) return
     void loadFileDiff(expandedFilePath)
-  }, [expandedFilePath, loadFileDiff, diffFileError, diffReloadVersion])
+  }, [showCustomizeView, expandedFilePath, loadFileDiff, diffReloadVersion])
 
   const toggleFileSelected = useCallback((filePath: string): void => {
     setSelectedFilePaths((prev) => {
@@ -947,20 +969,27 @@ export function GitPanelView({
 
   useEffect(() => {
     if (!threadId) return
-    let refreshTimer: ReturnType<typeof setTimeout> | null = null
     const cleanup = window.api.workspace.onFilesChanged((data) => {
       if (!data.threadIds.includes(threadId)) return
       if (rejectInFlightRef.current || Date.now() < suppressFileChangeRefreshUntilRef.current) {
         return
       }
-      if (refreshTimer) clearTimeout(refreshTimer)
-      const isMetaChange = data.changeType === "meta"
-      refreshTimer = setTimeout(() => {
-        void refresh({ meta: isMetaChange, diff: true })
+      // 在防抖前累计，避免后到的普通文件通知覆盖仓库信息的刷新需求。
+      pendingRefreshRef.current = {
+        meta: Boolean(pendingRefreshRef.current?.meta || data.changeType === "meta"),
+        diff: true
+      }
+      if (fileRefreshTimerRef.current) clearTimeout(fileRefreshTimerRef.current)
+      fileRefreshTimerRef.current = null
+      if (useAppStore.getState().showCustomizeView) return
+      fileRefreshTimerRef.current = setTimeout(() => {
+        fileRefreshTimerRef.current = null
+        void refresh({ meta: false, diff: false })
       }, 120)
     })
     return () => {
-      if (refreshTimer) clearTimeout(refreshTimer)
+      if (fileRefreshTimerRef.current) clearTimeout(fileRefreshTimerRef.current)
+      fileRefreshTimerRef.current = null
       cleanup()
     }
   }, [threadId, refresh])

@@ -25,6 +25,41 @@ afterEach(() => {
 })
 
 describe("NativeSqliteAdapter", () => {
+  it("defers checkpoint maintenance without losing the atomic deletion or connection policy", () => {
+    const path = temporaryDatabasePath("deletion.sqlite")
+    const { database } = openNativeSqliteDatabase(path, "DeletionTest")
+    try {
+      database.run("CREATE TABLE rows (id INTEGER PRIMARY KEY, value TEXT)")
+      database.run("INSERT INTO rows VALUES (1, 'keep')")
+      database.run("PRAGMA wal_autocheckpoint = 17")
+      expect(() =>
+        database.withoutAutomaticCheckpoint(() => {
+          expect(database.exec("PRAGMA wal_autocheckpoint")[0].values[0][0]).toBe(0)
+          database.run("BEGIN")
+          database.run("DELETE FROM rows")
+          database.run("ROLLBACK")
+          throw new Error("aborted deletion")
+        })
+      ).toThrow("aborted deletion")
+      expect(database.exec("PRAGMA wal_autocheckpoint")[0].values[0][0]).toBe(17)
+      expect(database.exec("SELECT count(*) FROM rows")[0].values[0][0]).toBe(1)
+      database.withoutAutomaticCheckpoint(() => {
+        database.run("BEGIN")
+        database.run("DELETE FROM rows")
+        database.run("COMMIT")
+      })
+      expect(database.exec("PRAGMA wal_autocheckpoint")[0].values[0][0]).toBe(17)
+      // A different connection sees the committed deletion before any checkpoint.
+      const reader = new DatabaseSync(path, { readOnly: true })
+      try {
+        expect(reader.prepare("SELECT count(*) AS count FROM rows").get()?.count).toBe(0)
+      } finally {
+        reader.close()
+      }
+    } finally {
+      database.close()
+    }
+  })
   it("opens an existing standard SQLite file produced by sql.js", async () => {
     const databasePath = temporaryDatabasePath("legacy.sqlite")
     const SQL = await initSqlJs()

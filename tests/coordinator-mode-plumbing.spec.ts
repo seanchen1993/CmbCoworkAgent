@@ -3489,6 +3489,16 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
     "workflow leaf runtime receives the stable agent id"
   )
   assertIncludes(
+    runtime,
+    "onFileMutation: worktreeIsolation ? undefined : onFileMutation",
+    "shared workflow leaves report file mutations without polluting parent scope with isolated worktree paths"
+  )
+  assertIncludes(
+    runtime,
+    "agentId: workerInput.workerId,\n      onFileMutation,",
+    "coordinator runtime rebuilds retain the parent file mutation sink"
+  )
+  assertIncludes(
     agentIpc,
     "buildSubagentStopHookContext({",
     "SubagentStop production path uses the tested context builder"

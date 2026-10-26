@@ -1,3 +1,4 @@
+import { requireHarnessFeatureWorkspace } from "../harness-board/service"
 import {
   BrowserWindow,
   shell,
@@ -90,6 +91,7 @@ import type {
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
   HarnessDeployUnitMapping,
+  HarnessDeployUnitConfig,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
@@ -304,7 +306,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "harnessBoard:getDeployUnitMappings",
-    async (): Promise<HarnessDeployUnitMapping[]> => {
+    async (): Promise<HarnessDeployUnitConfig[]> => {
       return listHarnessDeployUnitMappings()
     }
   )
@@ -318,7 +320,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "harnessBoard:saveDeployUnitMappings",
-    async (_event, mappings: HarnessDeployUnitMapping[]): Promise<HarnessDeployUnitMapping[]> => {
+    async (_event, mappings: HarnessDeployUnitConfig[]): Promise<HarnessDeployUnitConfig[]> => {
       return saveHarnessDeployUnitMappings(mappings)
     }
   )
@@ -499,6 +501,8 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:validateManagedRunStart",
     async (_event, input: ManagedRunStartValidationInput): Promise<void> => {
+      // Preflight only: startManagedRun repeats this gate inside the per-feature lock.
+      await requireHarnessFeatureWorkspace(input.projectId, input.featureId)
       return managedRunController.validateStart(input)
     }
   )

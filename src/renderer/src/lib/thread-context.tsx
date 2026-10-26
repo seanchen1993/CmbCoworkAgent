@@ -1585,6 +1585,7 @@ interface CustomEventData {
 interface ThreadStreamHolderProps {
   threadId: string
   managedAutoSendRun?: ManagedAutoSendStreamStartEvent
+  onManagedAutoSendRunTerminal: (threadId: string, runId: string) => void
   messages: readonly Message[]
   checkpointFallbackIndexBaselines?: StreamFallbackIndexBaselines
   subagentTranscriptBaseline: Record<string, Message[]>
@@ -1596,12 +1597,17 @@ interface ThreadStreamHolderProps {
 
 const DEFAULT_THREAD_STATE = normalizeThreadState(createDefaultThreadState())
 const MAX_RETAINED_IDLE_STREAM_HOLDERS = 6
+type ManagedAutoSendRunState = {
+  start: ManagedAutoSendStreamStartEvent
+  terminal: boolean
+}
 
 // Component that holds a stream and notifies subscribers. memo keeps an update
 // to thread A from re-running useStream for every previously opened thread.
 const ThreadStreamHolder = memo(function ThreadStreamHolder({
   threadId,
   managedAutoSendRun,
+  onManagedAutoSendRunTerminal,
   messages,
   checkpointFallbackIndexBaselines,
   subagentTranscriptBaseline,
@@ -1628,7 +1634,13 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
   // live values snapshot, so reused raw task IDs cannot claim a legacy bucket.
   const [transport] = useState(() => {
     const seededTransport = new ElectronIPCTransport(
-      managedAutoSendRun ? { managedAutoSendRunId: managedAutoSendRun.runId } : undefined
+      managedAutoSendRun
+        ? {
+            managedAutoSendRunId: managedAutoSendRun.runId,
+            onManagedAutoSendRunTerminal: (runId: string) =>
+              onManagedAutoSendRunTerminal(threadId, runId)
+          }
+        : undefined
     )
     seededTransport.seedSubagentTranscriptBaseline(threadId, subagentTranscriptBaseline)
     seededTransport.setFallbackIndexBaselines(fallbackIndexBaselines)
@@ -1728,8 +1740,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const [dehydrationEligibilityRevision, setDehydrationEligibilityRevision] = useState(0)
   const [activeThreadIds, setActiveThreadIds] = useState<Set<string>>(new Set())
   const [managedAutoSendRuns, setManagedAutoSendRuns] = useState<
-    Record<string, ManagedAutoSendStreamStartEvent>
+    Record<string, ManagedAutoSendRunState>
   >({})
+  const handleManagedAutoSendRunTerminal = useCallback((threadId: string, runId: string): void => {
+    setManagedAutoSendRuns((previous) => {
+      const current = previous[threadId]
+      if (!current || current.start.runId !== runId || current.terminal) return previous
+      return { ...previous, [threadId]: { ...current, terminal: true } }
+    })
+  }, [])
   const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({})
   const initializedThreadsRef = useRef<Set<string>>(new Set())
   const previousCurrentThreadIdRef = useRef<string | null>(null)
@@ -7450,10 +7469,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     return window.api.agent.onManagedAutoSendStreamStart((event) => {
-      setManagedAutoSendRuns((prev) => ({
-        ...prev,
-        [event.threadId]: event
-      }))
+      setManagedAutoSendRuns((previous) =>
+        previous[event.threadId]?.start.runId === event.runId
+          ? previous
+          : { ...previous, [event.threadId]: { start: event, terminal: false } }
+      )
       const wasInitialized = initializedThreadsRef.current.has(event.threadId)
       initializeThread(event.threadId)
       if (wasInitialized) {
@@ -7963,12 +7983,17 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       {Array.from(activeThreadIds).map((threadId) => {
         const state = threadStatesRef.current[threadId]
         if (!state?.subagentTranscriptBaselineReady) return null
-        const managedAutoSendRun = managedAutoSendRuns[threadId]
+        const managedAutoSendRunState = managedAutoSendRuns[threadId]
+        const managedAutoSendRun = managedAutoSendRunState?.terminal
+          ? undefined
+          : managedAutoSendRunState?.start
+        // Keep the holder mounted on terminal; a later remount must not replay the old run.
         return (
           <ThreadStreamHolder
-            key={`${threadId}:${managedAutoSendRun?.runId ?? "standard"}`}
+            key={`${threadId}:${managedAutoSendRunState?.start.runId ?? "standard"}`}
             threadId={threadId}
             managedAutoSendRun={managedAutoSendRun}
+            onManagedAutoSendRunTerminal={handleManagedAutoSendRunTerminal}
             messages={state.messages}
             checkpointFallbackIndexBaselines={checkpointFallbackIndexBaselinesRef.current[threadId]}
             subagentTranscriptBaseline={state.subagentTranscripts}

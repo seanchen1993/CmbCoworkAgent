@@ -854,6 +854,8 @@ type MainView =
   | "thread"
   | "customize"
   | "evolution"
+  | "scheduled"
+  | "market"
   | "kanban"
   | "harness"
   | "claudecode"
@@ -901,6 +903,7 @@ export interface SubagentFocusView {
   subagentId: string
   name: string
   description: string
+  startedAt?: Date
   status?: "pending" | "running" | "completed" | "failed" | "cancelled"
 }
 
@@ -1002,6 +1005,7 @@ interface AppState {
 
   // Customize view state
   showCustomizeView: boolean
+  accountRevision: number
   customizeInitialTab: string | null
   customizeInitialSection: string | null
   marketInitialSkillCategory: string | null
@@ -1176,6 +1180,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   dashboardAllowed: null,
   previousThreadId: null,
   showCustomizeView: false,
+  accountRevision: 0,
   customizeInitialTab: null,
   customizeInitialSection: null,
   marketInitialSkillCategory: null,
@@ -2119,15 +2124,23 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Dashboard actions
   loadDashboardAllowed: async () => {
+    const accountRevision = get().accountRevision
     const allowed = await window.api.dashboard.isAllowed().catch(() => false)
     const state = get()
+    if (state.accountRevision !== accountRevision) return
     set({
       dashboardAllowed: allowed,
       ...(allowed
         ? {}
         : {
             showDashboardView: false,
-            mainView: state.mainView === "dashboard" ? ("thread" as const) : state.mainView
+            ...(state.mainView === "dashboard"
+              ? {
+                  mainView: "thread" as const,
+                  currentThreadId: resolveChatThreadId(state.threads, state.previousThreadId),
+                  previousThreadId: null
+                }
+              : {})
           })
     })
   },
@@ -2231,34 +2244,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setShowCustomizeView: (show: boolean, tab?: string, section?: string) => {
-    if (show) {
-      set({
-        showCustomizeView: true,
-        showKanbanView: false,
-        showHarnessBoardView: false,
-        showClaudeCodeView: false,
-        showDashboardView: false,
-        customizeInitialTab: tab ?? null,
-        customizeInitialSection: section ?? null,
-        mainView: "customize",
-        workerFocusView: null,
-        workerFocusMessagesThreadId: null,
-        workerFocusMessages: [],
-        subagentFocusView: null,
-        workflowAgentFocusView: null
-      })
-    } else {
-      const restored = get().previousThreadId
-      const currentThreadId = resolveChatThreadId(get().threads, restored)
-      set({
-        showCustomizeView: false,
-        customizeInitialTab: null,
-        customizeInitialSection: null,
-        mainView: "thread",
-        currentThreadId,
-        previousThreadId: null
-      })
+    // Keep legacy callers working after these panels moved out of settings.
+    if (show && (tab === "scheduled" || tab === "market")) {
+      get().setMainView(tab)
+      return
     }
+    // Settings covers the current workspace; closing it does not navigate.
+    set({
+      showCustomizeView: show,
+      customizeInitialTab: show ? (tab ?? null) : null,
+      customizeInitialSection: show ? (section ?? null) : null
+    })
   },
 
   setMarketInitialSkillCategory: (category) => {
@@ -2282,6 +2278,25 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setMainView: (view) => {
+    if (view === "scheduled" || view === "market") {
+      set({
+        mainView: view,
+        showCustomizeView: false,
+        showKanbanView: false,
+        showHarnessBoardView: false,
+        showClaudeCodeView: false,
+        showDashboardView: false,
+        customizeInitialTab: null,
+        customizeInitialSection: null,
+        workerFocusView: null,
+        workerFocusMessagesThreadId: null,
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
+      })
+      return
+    }
+
     if (view === "kanban") {
       set({
         mainView: "kanban",
@@ -2301,37 +2316,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     if (view === "customize") {
-      set({
-        mainView: "customize",
-        showCustomizeView: true,
-        showKanbanView: false,
-        showHarnessBoardView: false,
-        showClaudeCodeView: false,
-        showDashboardView: false,
-        workerFocusView: null,
-        workerFocusMessagesThreadId: null,
-        workerFocusMessages: [],
-        subagentFocusView: null,
-        workflowAgentFocusView: null
-      })
+      get().setShowCustomizeView(true)
       return
     }
 
     if (view === "evolution") {
-      set({
-        mainView: "customize",
-        showCustomizeView: true,
-        showKanbanView: false,
-        showHarnessBoardView: false,
-        showClaudeCodeView: false,
-        customizeInitialTab: "evolution",
-        showDashboardView: false,
-        workerFocusView: null,
-        workerFocusMessagesThreadId: null,
-        workerFocusMessages: [],
-        subagentFocusView: null,
-        workflowAgentFocusView: null
-      })
+      get().setShowCustomizeView(true, "evolution")
       return
     }
 

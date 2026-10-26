@@ -85,7 +85,8 @@ export interface AgentGitRepositorySnapshot {
   dirtyFingerprints: Record<string, string>
 }
 
-export type AgentFileMutationKind = "write" | "edit" | "upload"
+/** `shell`: a file an agent shell command changed, observed around the command. */
+export type AgentFileMutationKind = "write" | "edit" | "upload" | "shell"
 
 const touchedFilesByThread = new Map<string, Set<string>>()
 

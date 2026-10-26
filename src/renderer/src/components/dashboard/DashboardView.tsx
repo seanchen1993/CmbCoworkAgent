@@ -3,6 +3,8 @@
  *
  * Operations overview and skill evaluation dashboard.
  */
+import { KnowledgeOverviewPanel } from "./panels/KnowledgeOverviewPanel"
+import { useKnowledgeOverview } from "./use-knowledge-overview"
 import {
   isValidElement,
   memo,
@@ -67,6 +69,7 @@ import {
   type DashboardProjectModeFeatureNode,
   type DashboardProjectModeOperationalDetailScope,
   type DashboardProjectModeOperationalDetails,
+  type DashboardProjectModeStageAnalysis,
   type DashboardPluginAggregate,
   type DashboardProjectModeData,
   type DashboardAwardSkillContribution,
@@ -83,9 +86,13 @@ import {
 } from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
 import { ProjectModePanel } from "./panels/ProjectModePanel"
+import { DrilldownArrow } from "./DrilldownArrow"
 import { EfficiencyPanel } from "./panels/EfficiencyPanel"
+import { ProjectMetricGroupFilter } from "./panels/ProjectMetricGroupFilter"
 import { AwardsPanel, type AwardSkillRow, type TeamBenchmarkRow } from "./panels/AwardsPanel"
+import { formatAwardAdoptionExportValues } from "@/lib/award-code-adoption"
 import { STAGE_BUCKET_LABELS, type StageBucket } from "../../../../shared/harness-stage-bucket"
+import { toolRankingCountLabel } from "../../../../shared/dashboard-tool-usage"
 import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
@@ -267,7 +274,10 @@ function buildDashboardAnalysisPanelSnapshot({
           totalSkills: overview.totalSkills,
           totalSkillCalls: overview.totalSkillCalls,
           totalTools: overview.totalTools,
-          totalToolCalls: overview.totalToolCalls,
+          // 没有完整计数时排行是「用过该工具的 Trace 数」，调用总数未知，不能给 0。
+          toolRankingMetric: overview.toolUsageCoverage?.metric ?? "traces",
+          totalToolCalls:
+            overview.toolUsageCoverage?.metric === "calls" ? overview.totalToolCalls : null,
           codeGeneratedLines: overview.codeGeneratedLines,
           codeMeasuredGeneratedLines: overview.codeMeasuredGeneratedLines,
           codeEffectiveGeneratedLines: overview.codeEffectiveGeneratedLines,
@@ -800,13 +810,13 @@ function TimeControlBar({
   }
 
   return (
-    <div className="flex items-center gap-3 px-6 py-3 border-b border-border bg-background/80 backdrop-blur-sm">
+    <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-border bg-background/80 backdrop-blur-sm">
       {/* Granularity tabs */}
-      <div className="flex items-center rounded-lg border border-border overflow-hidden">
+      <div className="flex shrink-0 items-center rounded-lg border border-border overflow-hidden">
         {GRANULARITY_OPTIONS.map((opt) => (
           <button
             key={opt.value}
-            className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={`whitespace-nowrap px-3 py-1.5 text-xs font-medium transition-colors ${
               granularity === opt.value
                 ? "bg-primary text-primary-foreground"
                 : "text-muted-foreground hover:bg-muted/50"
@@ -828,7 +838,7 @@ function TimeControlBar({
 
       {/* Navigation arrows (not for custom) */}
       {granularity !== "custom" && (
-        <div className="flex items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1">
           <Button variant="ghost" size="icon-sm" onClick={() => onNavigate("prev")}>
             <ChevronLeft className="size-4" />
           </Button>
@@ -843,7 +853,7 @@ function TimeControlBar({
 
       {/* Custom date picker */}
       {granularity === "custom" && showDatePicker && (
-        <div className="flex flex-col gap-1">
+        <div className="flex shrink-0 flex-col gap-1">
           <div className="flex items-center gap-2">
             <input
               type="date"
@@ -883,7 +893,7 @@ function TimeControlBar({
       )}
 
       {granularity === "custom" && !showDatePicker && (
-        <span className="text-xs text-foreground font-medium">
+        <span className="shrink-0 whitespace-nowrap text-xs text-foreground font-medium">
           {formatRangeLabel(range.from, range.to, granularity)}
           <button className="ml-2 text-primary underline" onClick={() => setShowDatePicker(true)}>
             修改
@@ -899,7 +909,7 @@ function TimeControlBar({
       <Button
         variant="ghost"
         size="sm"
-        className="gap-1.5 text-xs"
+        className="shrink-0 gap-1.5 text-xs"
         onClick={onRefresh}
         disabled={loading}
       >
@@ -971,7 +981,7 @@ function OrgFilterBar({
         : `已选 ${value.length} 个室`
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
       <Building2 className="size-3.5 text-muted-foreground" />
       <span className="text-xs text-muted-foreground">室筛选</span>
       <Popover open={open} onOpenChange={setOpen}>
@@ -1092,7 +1102,7 @@ const USER_LIST_EXPORT_MAX_PAGES = 100
 const USER_TRACE_PAGE_SIZE = 10
 const SKILL_TRACE_PAGE_SIZE = 10
 const PROJECT_TRACE_PAGE_SIZE = 10
-const PROJECT_TRACE_TRIGGER_SCOPE: DashboardTraceTriggerScope = "active"
+const PROJECT_TRACE_TRIGGER_SCOPE: DashboardTraceTriggerScope = "all"
 
 type DashboardSubPage =
   | { kind: "main" }
@@ -1105,7 +1115,13 @@ type DashboardSubPage =
       projectMode?: boolean
     }
 
-type DashboardMainTab = "overview" | "skill-eval" | "project-mode" | "efficiency" | "awards"
+type DashboardMainTab =
+  | "overview"
+  | "skill-eval"
+  | "project-mode"
+  | "knowledge"
+  | "efficiency"
+  | "awards"
 
 function formatNumber(value: number): string {
   return Math.round(value).toLocaleString("zh-CN")
@@ -1602,6 +1618,7 @@ function UserListPage({
                     <td className="px-3 py-2">
                       <div className="font-medium text-foreground">
                         {user.userName || user.sapId}
+                        <DrilldownArrow className="ml-1" />
                       </div>
                       <div className="font-mono text-[10px] text-muted-foreground">
                         {user.sapId}
@@ -1980,6 +1997,7 @@ function DashboardTabBar({
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "平台运营概览" },
     ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : []),
+    ...(projectModeAllowed ? ([{ id: "knowledge", label: "知识沉淀运营概览" }] as const) : []),
     // 研发效能沿用项目模式的可见性：两者统计范围同源（项目模式 + 精益项目）。
     ...(projectModeAllowed ? ([{ id: "efficiency", label: "研发效能" }] as const) : []),
     // 评奖辅助看板仅对管理员名单可见。
@@ -2089,8 +2107,9 @@ const SkillEvalSkillRow = memo(function SkillEvalSkillRow({
     >
       <span className={`h-8 rounded-full ${active ? "bg-primary" : "bg-transparent"}`} />
       <div className="min-w-0">
-        <div className={`truncate font-medium ${active ? "text-foreground" : "text-foreground"}`}>
-          {skill.skillName}
+        <div className="flex min-w-0 items-center gap-1 font-medium text-foreground">
+          <span className="truncate">{skill.skillName}</span>
+          <DrilldownArrow />
         </div>
         <div
           className={`mt-0.5 text-[11px] ${active ? "text-foreground/70" : "text-muted-foreground"}`}
@@ -2165,7 +2184,10 @@ const SkillEvalRunRow = memo(function SkillEvalRunRow({
         )}
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-foreground">{run.skillName}</span>
+            <span className="font-medium text-foreground">
+              {run.skillName}
+              <DrilldownArrow className="ml-1" />
+            </span>
             {run.skillVersion && <Badge variant="outline">{run.skillVersion}</Badge>}
             <Badge variant={run.pass ? "nominal" : "critical"}>
               {formatSkillEvalScore(run.score)}
@@ -2648,6 +2670,7 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
             aria-current={selectedSkillKey === null ? "true" : undefined}
           >
             全部运行
+            <DrilldownArrow className="ml-1" />
           </button>
           {data.skills.map((skill) => {
             const key = skillEvalKey(skill.skillName, skill.skillVersion)
@@ -2743,6 +2766,8 @@ export function DashboardView(): React.JSX.Element {
     selectedOrgLv1List,
     fromLeanProjectsOnly,
     setFromLeanProjectsOnly,
+    createdInRangeProjectsOnly,
+    setCreatedInRangeProjectsOnly,
     orgOptions,
     loading,
     userStatsLoading,
@@ -2756,8 +2781,11 @@ export function DashboardView(): React.JSX.Element {
     skillEval,
     projectMode,
     projectModeLoading,
+    projectListLoading,
     projectModeError,
     efficiency,
+    efficiencyPluginFilter,
+    setEfficiencyPluginFilter,
     efficiencyLoading,
     efficiencyError,
     fetchEfficiency,
@@ -2765,6 +2793,10 @@ export function DashboardView(): React.JSX.Element {
     projectModeCodeStatsOverride,
     projectModeCodeStatsLoading,
     selectProjectModeCodeSource,
+    knowledgeCommitRate,
+    knowledgeCommitRateLoading,
+    knowledgeCommitRateError,
+    fetchKnowledgeCommitRate,
     projectModeProjectPages,
     projectModeProjectPageLoading,
     projectModeProjectPageError,
@@ -2784,6 +2816,51 @@ export function DashboardView(): React.JSX.Element {
   const [exporting, setExporting] = useState(false)
   const [projectMetricRefreshKey, setProjectMetricRefreshKey] = useState(0)
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
+  const [projectModeAllowed, setProjectModeAllowed] = useState(false)
+  const [selectedGroupNames, setSelectedGroupNames] = useState<string[]>([])
+  const [groupOptions, setGroupOptions] = useState<string[]>([])
+  const [groupOptionsLoading, setGroupOptionsLoading] = useState(false)
+  const [groupOptionsError, setGroupOptionsError] = useState<string | null>(null)
+  const [knowledgeRefreshKey, setKnowledgeRefreshKey] = useState(0)
+  const knowledgeOverview = useKnowledgeOverview(
+    activeMainTab === "knowledge" && projectModeAllowed,
+    range,
+    selectedOrgLv1List,
+    knowledgeRefreshKey
+  )
+  useEffect(() => {
+    setSelectedGroupNames([])
+    setGroupOptions([])
+  }, [selectedOrgLv1List])
+  useEffect(() => {
+    if (activeMainTab !== "efficiency" || !projectModeAllowed || selectedOrgLv1List.length === 0) {
+      setGroupOptionsLoading(false)
+      return
+    }
+    let cancelled = false
+    setGroupOptionsLoading(true)
+    setGroupOptionsError(null)
+    void window.api.dashboard
+      .projectMetricGroupOptions({ range, upperOrgLv1: selectedOrgLv1List })
+      .then((result) => {
+        if (cancelled) return
+        if (!result.success) throw new Error(result.error || "获取项目组失败")
+        const options = result.data ?? []
+        setGroupOptions(options)
+        setSelectedGroupNames((current) => current.filter((group) => options.includes(group)))
+      })
+      .catch((error) => {
+        if (cancelled) return
+        setGroupOptions([])
+        setGroupOptionsError(error instanceof Error ? error.message : String(error))
+      })
+      .finally(() => {
+        if (!cancelled) setGroupOptionsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activeMainTab, projectModeAllowed, projectMetricRefreshKey, range, selectedOrgLv1List])
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [analysisAgentAllowed, setAnalysisAgentAllowed] = useState(false)
   const [traceEvolverReviewAdmin, setTraceEvolverReviewAdmin] = useState(false)
@@ -2806,7 +2883,6 @@ export function DashboardView(): React.JSX.Element {
       analysisRevealClicksRef.current = 0
     }, 600)
   }, [])
-  const [projectModeAllowed, setProjectModeAllowed] = useState(false)
   // 评奖辅助看板访问门禁（仅 DASHBOARD_AWARDS_ADMIN 名单）。
   const [awardsAdmin, setAwardsAdmin] = useState(false)
   // 技能评估 tab 访问门禁（仅 DASHBOARD_SKILL_EVAL 白名单）。
@@ -2874,7 +2950,9 @@ export function DashboardView(): React.JSX.Element {
     // 否则停在已经不再渲染的 tab 上会看到一片空白。
     const leaveProjectModeGatedTabs = (): void => {
       setActiveMainTab((current) =>
-        current === "project-mode" || current === "efficiency" ? "overview" : current
+        current === "project-mode" || current === "knowledge" || current === "efficiency"
+          ? "overview"
+          : current
       )
     }
 
@@ -3011,6 +3089,8 @@ export function DashboardView(): React.JSX.Element {
     useState<DashboardTraceTriggerScope>("active")
   const [userDetailTraceExporting, setUserDetailTraceExporting] = useState(false)
   const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
+  const [marketSkillItems, setMarketSkillItems] = useState<MarketItem[]>([])
+  const [marketSkillsError, setMarketSkillsError] = useState<string | null>(null)
   const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
   const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<
     Record<string, SkillUploaderProfile>
@@ -3114,10 +3194,17 @@ export function DashboardView(): React.JSX.Element {
     skillEvalScopeOptions
   ])
 
-  // 项目模式 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选 /「仅精益项目」开关变化时重拉。
+  // 项目模式 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选 /「仅精益项目」/「仅本期新建」
+  // 开关变化时重拉。
   useEffect(() => {
     if (activeMainTab !== "project-mode" || !projectModeAllowed) return
-    void fetchProjectMode(range, granularity, selectedOrgLv1List, fromLeanProjectsOnly)
+    void fetchProjectMode(
+      range,
+      granularity,
+      selectedOrgLv1List,
+      fromLeanProjectsOnly,
+      createdInRangeProjectsOnly
+    )
   }, [
     activeMainTab,
     fetchProjectMode,
@@ -3125,8 +3212,20 @@ export function DashboardView(): React.JSX.Element {
     projectModeAllowed,
     range,
     selectedOrgLv1List,
-    fromLeanProjectsOnly
+    fromLeanProjectsOnly,
+    createdInRangeProjectsOnly
   ])
+
+  // 技能修改采纳率随知识面板的时间范围和室筛选变化。
+  useEffect(() => {
+    if (activeMainTab !== "knowledge" || !projectModeAllowed) return
+    void fetchKnowledgeCommitRate(range, selectedOrgLv1List)
+    return () => {
+      void window.api.dashboard
+        .cancelRequests(["dashboard:knowledgeCommitRate"])
+        .catch(() => undefined)
+    }
+  }, [activeMainTab, fetchKnowledgeCommitRate, projectModeAllowed, range, selectedOrgLv1List])
 
   // 研发效能 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选变化时重拉。
   // 不挂「仅精益项目」开关——该范围在后端固定，不随开关变化。
@@ -3144,18 +3243,26 @@ export function DashboardView(): React.JSX.Element {
     // 个人构建技能名集：取应用市场（marketApi.getSkills）条目名，后端按名聚合并按名回传。
     const personalSkillNames = Array.from(
       new Set(
-        Array.from(marketSkillMap.values())
-          .map((item) => item.name?.trim() || "")
+        marketSkillItems
+          .map((item) => item.name?.trim() || item.filename?.trim() || "")
           .filter(Boolean)
       )
     )
 
     async function loadSkillContribs(): Promise<void> {
       if (marketSkillsLoading) return
+      if (marketSkillsError) {
+        if (!cancelled) {
+          setAwardSkillsError(marketSkillsError)
+          setAwardSkillsLoading(false)
+        }
+        return
+      }
       if (personalSkillNames.length === 0) {
         if (!cancelled) {
           setAwardSkillContribs([])
           setAwardSkillsError(null)
+          setAwardSkillsLoading(false)
         }
         return
       }
@@ -3183,6 +3290,17 @@ export function DashboardView(): React.JSX.Element {
       }
     }
 
+    void loadSkillContribs()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeMainTab, awardsAdmin, range, marketSkillItems, marketSkillsLoading, marketSkillsError])
+
+  // 应用奖不依赖市场列表，避免市场加载期间重复触发全量查询。
+  useEffect(() => {
+    if (activeMainTab !== "awards" || !awardsAdmin) return
+    let cancelled = false
     async function loadUserApps(): Promise<void> {
       if (!cancelled) {
         setAwardUsersLoading(true)
@@ -3205,13 +3323,11 @@ export function DashboardView(): React.JSX.Element {
       }
     }
 
-    void loadSkillContribs()
     void loadUserApps()
-
     return () => {
       cancelled = true
     }
-  }, [activeMainTab, awardsAdmin, range, marketSkillMap, marketSkillsLoading])
+  }, [activeMainTab, awardsAdmin, range])
 
   // 团队标杆奖懒加载：拉取室/组指标后，按上传时间过滤市场技能，再按作者归属补「贡献技能数 / 覆盖数」。
   useEffect(() => {
@@ -3220,6 +3336,13 @@ export function DashboardView(): React.JSX.Element {
 
     async function loadTeam(): Promise<void> {
       if (marketSkillsLoading) return
+      if (marketSkillsError) {
+        if (!cancelled) {
+          setAwardTeamError(marketSkillsError)
+          setAwardTeamLoading(false)
+        }
+        return
+      }
       if (!cancelled) {
         setAwardTeamLoading(true)
         setAwardTeamError(null)
@@ -3234,7 +3357,7 @@ export function DashboardView(): React.JSX.Element {
         const rawRows = (result.data as DashboardAwardTeamBenchmarkRow[]) ?? []
         const knownShiList = rawRows.map((row) => row.shi).filter(Boolean)
         const knownGroupsByShi = buildKnownTeamGroupsByShi(rawRows)
-        const uploadedInRangeSkills = Array.from(marketSkillMap.values()).filter((item) =>
+        const uploadedInRangeSkills = marketSkillItems.filter((item) =>
           isMarketSkillUploadedInRange(item, range)
         )
         const skillContribs = buildTeamSkillContributions(
@@ -3256,7 +3379,8 @@ export function DashboardView(): React.JSX.Element {
         if (coverageGroups.length > 0) {
           const cov = await window.api.dashboard.awardsTeamSkillCoverage(range, coverageGroups)
           if (cancelled) return
-          if (cov.success) coverageByOrg = (cov.data as Record<string, number>) ?? {}
+          if (!cov.success) throw new Error(cov.error || "获取技能覆盖数据失败")
+          coverageByOrg = (cov.data as Record<string, number>) ?? {}
         }
 
         const enriched: TeamBenchmarkRow[] = rawRows.map((row) => ({
@@ -3267,8 +3391,7 @@ export function DashboardView(): React.JSX.Element {
             const key = child.group ? teamOrgContributionKey(row.shi, child.group) : ""
             return {
               ...child,
-              contributedSkillCount:
-                skillContribs.byOrg.get(key)?.contributedSkillKeys.size ?? 0,
+              contributedSkillCount: skillContribs.byOrg.get(key)?.contributedSkillKeys.size ?? 0,
               skillCoverageShiCount: coverageByOrg[key] ?? 0,
               children: undefined
             }
@@ -3292,8 +3415,9 @@ export function DashboardView(): React.JSX.Element {
     activeMainTab,
     awardsAdmin,
     range,
-    marketSkillMap,
+    marketSkillItems,
     marketSkillsLoading,
+    marketSkillsError,
     skillUploaderProfiles
   ])
 
@@ -3328,7 +3452,7 @@ export function DashboardView(): React.JSX.Element {
     })
   }, [awardSkillContribs, marketSkillMap, skillUploaderProfiles])
 
-  // 评奖辅助看板导出：两个 sheet（技能贡献奖 / 技能应用奖），口径同界面，四个入库率全列。
+  // 评奖辅助看板导出：三个奖项，四个入库率及分子分母同界面。
   const handleAwardsExport = useCallback(async () => {
     setExporting(true)
     try {
@@ -3364,10 +3488,7 @@ export function DashboardView(): React.JSX.Element {
           r.crossOrgCount >= 2 ? "是" : "否",
           r.userCount,
           r.callCount,
-          formatPercent(r.codeStats?.measuredAdoptionRate ?? null),
-          formatPercent(r.codeStats?.pushedAdoptionRate ?? null),
-          formatPercent(r.codeStats?.inclusiveAdoptionRate ?? null),
-          formatPercent(r.codeStats?.inclusivePushedAdoptionRate ?? null)
+          ...formatAwardAdoptionExportValues(r.codeStats)
         ])
       })
 
@@ -3401,10 +3522,7 @@ export function DashboardView(): React.JSX.Element {
           r.toolCallCount,
           r.threadCount,
           r.featureCount,
-          formatPercent(r.codeStats?.measuredAdoptionRate ?? null),
-          formatPercent(r.codeStats?.pushedAdoptionRate ?? null),
-          formatPercent(r.codeStats?.inclusiveAdoptionRate ?? null),
-          formatPercent(r.codeStats?.inclusivePushedAdoptionRate ?? null)
+          ...formatAwardAdoptionExportValues(r.codeStats)
         ])
       })
 
@@ -3422,10 +3540,7 @@ export function DashboardView(): React.JSX.Element {
             row.skillCoverageShiCount === null ? "" : row.skillCoverageShiCount,
             row.skillUsageCount,
             row.codeStats?.adoptedLines ?? 0,
-            formatPercent(row.codeStats?.measuredAdoptionRate ?? null),
-            formatPercent(row.codeStats?.pushedAdoptionRate ?? null),
-            formatPercent(row.codeStats?.inclusiveAdoptionRate ?? null),
-            formatPercent(row.codeStats?.inclusivePushedAdoptionRate ?? null)
+            ...formatAwardAdoptionExportValues(row.codeStats)
           ])
         }
         emit(shiRow, false)
@@ -3541,14 +3656,20 @@ export function DashboardView(): React.JSX.Element {
         const result = await marketApi.getSkills()
         if (cancelled) return
         if (result.success && result.data) {
+          setMarketSkillsError(
+            result.hasNextPage ? "技能市场列表未完整返回，无法生成完整评奖结果" : null
+          )
+          setMarketSkillItems(result.data)
           setMarketSkillKeys(buildMarketSkillKeySet(result.data))
           setMarketSkillMap(buildMarketSkillMap(result.data))
           void loadUploaderProfiles(result.data)
           return
         }
+        setMarketSkillsError(result.error || "获取技能市场数据失败")
         console.warn("[Dashboard] Failed to load marketplace skills:", result.error)
       } catch (error) {
         if (!cancelled) {
+          setMarketSkillsError(error instanceof Error ? error.message : String(error))
           console.warn("[Dashboard] Failed to load marketplace skills:", error)
         }
       } finally {
@@ -3696,13 +3817,26 @@ export function DashboardView(): React.JSX.Element {
   }, [])
 
   const handleRefresh = useCallback(() => {
-    refresh()
+    const refreshedRange = refresh(activeMainTab !== "knowledge")
     if (activeMainTab === "skill-eval") {
       setSkillEvalSelectedSkillKey(undefined)
       clearSkillEval()
     }
     if (activeMainTab === "project-mode") {
-      void fetchProjectMode(range, granularity, selectedOrgLv1List, fromLeanProjectsOnly)
+      void fetchProjectMode(
+        range,
+        granularity,
+        selectedOrgLv1List,
+        fromLeanProjectsOnly,
+        createdInRangeProjectsOnly,
+        true
+      )
+    }
+    if (activeMainTab === "knowledge") {
+      setKnowledgeRefreshKey((current) => current + 1)
+      if (refreshedRange.from === range.from && refreshedRange.to === range.to) {
+        void fetchKnowledgeCommitRate(range, selectedOrgLv1List)
+      }
     }
     if (activeMainTab === "efficiency") {
       void fetchEfficiency(range, selectedOrgLv1List)
@@ -3712,12 +3846,14 @@ export function DashboardView(): React.JSX.Element {
     activeMainTab,
     clearSkillEval,
     fetchProjectMode,
+    fetchKnowledgeCommitRate,
     fetchEfficiency,
     granularity,
     range,
     refresh,
     selectedOrgLv1List,
-    fromLeanProjectsOnly
+    fromLeanProjectsOnly,
+    createdInRangeProjectsOnly
   ])
 
   const handleProjectOpenTraces = useCallback(
@@ -3749,19 +3885,20 @@ export function DashboardView(): React.JSX.Element {
       const res = await window.api.dashboard.projectModeFeatureNodes(
         project.projectId,
         feature.slug,
-        range
+        null,
+        { upperOrgLv1: selectedOrgLv1List }
       )
       if (!res.success) throw new Error(res.error ?? "获取阶段数据失败")
       return Array.isArray(res.data) ? (res.data as DashboardProjectModeFeatureNode[]) : []
     },
-    [range]
+    [selectedOrgLv1List]
   )
 
   const loadProjectOperationalDetails = useCallback(
     async (
       scope: DashboardProjectModeOperationalDetailScope
     ): Promise<DashboardProjectModeOperationalDetails> => {
-      const res = await window.api.dashboard.projectModeOperationalDetails(scope, range, {
+      const res = await window.api.dashboard.projectModeOperationalDetails(scope, null, {
         upperOrgLv1: selectedOrgLv1List
       })
       if (!res.success || !res.data) {
@@ -3769,7 +3906,21 @@ export function DashboardView(): React.JSX.Element {
       }
       return res.data as DashboardProjectModeOperationalDetails
     },
-    [range, selectedOrgLv1List]
+    [selectedOrgLv1List]
+  )
+
+  // 单项目的阶段耗时分析，按项目累计，并应用室筛选。
+  const loadProjectStageAnalysis = useCallback(
+    async (projectId: string): Promise<DashboardProjectModeStageAnalysis> => {
+      const res = await window.api.dashboard.projectModeStageAnalysis(projectId, null, {
+        upperOrgLv1: selectedOrgLv1List
+      })
+      if (!res.success || !res.data) {
+        throw new Error(res.error ?? "获取阶段耗时分析失败")
+      }
+      return res.data as DashboardProjectModeStageAnalysis
+    },
+    [selectedOrgLv1List]
   )
 
   // 插件聚合的按阶段细分，跟随面板当前时间范围（range 变化即得到新回调，展开中的细分会重拉）。
@@ -3809,7 +3960,7 @@ export function DashboardView(): React.JSX.Element {
       setProjectTracesLoading(true)
       setProjectTracesError(null)
       try {
-        const res = await window.api.dashboard.projectModeTraces(currentProject.projectId, range, {
+        const res = await window.api.dashboard.projectModeTraces(currentProject.projectId, null, {
           tracePage: projectTracePage,
           tracePageSize: PROJECT_TRACE_PAGE_SIZE,
           mode: projectTraceViewMode,
@@ -3857,8 +4008,7 @@ export function DashboardView(): React.JSX.Element {
     projectTraceStageBucket,
     projectTracePage,
     projectTraceProject,
-    projectTraceViewMode,
-    range
+    projectTraceViewMode
   ])
 
   useEffect(() => {
@@ -3942,6 +4092,8 @@ export function DashboardView(): React.JSX.Element {
         page: skillTracePage,
         pageSize: skillDetail.tracePageSize || SKILL_TRACE_PAGE_SIZE,
         totalTraces: skillDetail.totalTraces,
+        viewMode: skillDetail.traceViewMode ?? skillTraceViewMode,
+        triggerScope: skillDetail.traceTriggerScope ?? skillTraceTriggerScope,
         traces: skillDetail.traces
       })
       if (!result.success && !result.canceled) {
@@ -3952,7 +4104,7 @@ export function DashboardView(): React.JSX.Element {
     } finally {
       setSkillTraceExporting(false)
     }
-  }, [range, selectedSkill, skillDetail, skillTracePage])
+  }, [range, selectedSkill, skillDetail, skillTracePage, skillTraceTriggerScope, skillTraceViewMode])
 
   const loadUserList = useCallback(
     async (
@@ -4220,14 +4372,39 @@ export function DashboardView(): React.JSX.Element {
     setProjectTracePage(1)
   }, [])
 
+  const loadProjectUserThreadTraces = useCallback(
+    async (threadId: string): Promise<DashboardTraceDetail[]> =>
+      unwrapThreadTracesResponse(
+        await window.api.dashboard.threadTraces(threadId, {
+          scope: "project",
+          range,
+          triggerScope: userDetailTraceTriggerScope
+        })
+      ),
+    [range, userDetailTraceTriggerScope]
+  )
   const loadProjectThreadTraces = useCallback(
     async (threadId: string): Promise<DashboardTraceDetail[]> => {
-      // 同上：失败抛出，交给 TraceExplorer 显示并允许重试，别缓存成空成功。
+      if (!projectTraceProject) return []
       return unwrapThreadTracesResponse(
-        await window.api.dashboard.threadTraces(threadId, { scope: "project" })
+        await window.api.dashboard.threadTraces(threadId, {
+          scope: "project",
+          projectId: projectTraceProject.projectId,
+          featureSlug: projectTraceFeature?.slug,
+          nodeName: projectTraceNode?.nodeName,
+          nodeStatus: projectTraceStatus ?? undefined,
+          stageBucket: projectTraceStageBucket ?? undefined,
+          triggerScope: PROJECT_TRACE_TRIGGER_SCOPE
+        })
       )
     },
-    []
+    [
+      projectTraceProject,
+      projectTraceFeature,
+      projectTraceNode,
+      projectTraceStatus,
+      projectTraceStageBucket
+    ]
   )
 
   const subPageDetailSapId = subPage.kind === "user-detail" ? subPage.sapId : null
@@ -4417,12 +4594,12 @@ export function DashboardView(): React.JSX.Element {
           ? await window.api.dashboard.projectModeFeatureCommits(
               scope.projectId,
               scope.featureSlug,
-              range,
+              null,
               commitOptions
             )
           : await window.api.dashboard.projectModeProjectCommits(
               scope.projectId,
-              range,
+              null,
               commitOptions
             )
         if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
@@ -4433,11 +4610,15 @@ export function DashboardView(): React.JSX.Element {
         setFeatureCommitLoading(false)
       }
     },
-    [featureCommitDeptFilter, featureCommitUserFilter, range, selectedOrgLv1List]
+    [featureCommitDeptFilter, featureCommitUserFilter, selectedOrgLv1List]
   )
 
   const handleProjectOpenFeatureCommits = useCallback(
-    (project: DashboardProjectModeProject, feature: DashboardProjectModeFeature) => {
+    (
+      project: DashboardProjectModeProject,
+      feature: DashboardProjectModeFeature,
+      pushedOnly = false
+    ) => {
       if (!feature.slug) return
       const scope = {
         projectId: project.projectId,
@@ -4449,7 +4630,7 @@ export function DashboardView(): React.JSX.Element {
       setFeatureCommitUserValue("")
       setFeatureCommitUserFilter("")
       setFeatureCommitScope(scope)
-      void loadFeatureCommits(scope, 1, false, "", "")
+      void loadFeatureCommits(scope, 1, pushedOnly, "", "")
     },
     [loadFeatureCommits]
   )
@@ -4517,6 +4698,10 @@ export function DashboardView(): React.JSX.Element {
 
       // 1. Overview summary
       if (overview) {
+        // 没有完整计数时，Tool 排行是「用过该工具的 Trace 数」，调用总数未知。
+        const toolCountLabel = toolRankingCountLabel(overview.toolUsageCoverage)
+        const toolCallTotal =
+          overview.toolUsageCoverage?.metric === "calls" ? overview.totalToolCalls : "暂无完整计数"
         sheets.push({
           name: "使用概览",
           header: ["指标", "值"],
@@ -4550,7 +4735,7 @@ export function DashboardView(): React.JSX.Element {
             ["Skill 种类数", overview.totalSkills],
             ["Skill 调用次数", overview.totalSkillCalls],
             ["Tool 种类数", overview.totalTools],
-            ["Tool 调用次数", overview.totalToolCalls]
+            ["Tool 调用次数", toolCallTotal]
           ]
         })
 
@@ -4614,10 +4799,10 @@ export function DashboardView(): React.JSX.Element {
         if (exportFilteredTools.length > 0) {
           sheets.push({
             name: "Tool使用排行(已过滤)",
-            header: ["排名", "Tool", "调用次数"],
+            header: ["排名", "Tool", toolCountLabel],
             rows: [
               ["Tool 种类数", overview.totalTools, ""],
-              ["Tool 调用次数", overview.totalToolCalls, ""],
+              ["Tool 调用次数", toolCallTotal, ""],
               ["", "", ""],
               ...exportFilteredTools.map((t, i) => [i + 1, t.tool, t.count])
             ]
@@ -4630,10 +4815,10 @@ export function DashboardView(): React.JSX.Element {
         if (exportAllTools.length > 0) {
           sheets.push({
             name: "Tool使用排行(全部)",
-            header: ["排名", "Tool", "调用次数"],
+            header: ["排名", "Tool", toolCountLabel],
             rows: [
               ["Tool 种类数", overview.totalTools, ""],
-              ["Tool 调用次数", overview.totalToolCalls, ""],
+              ["Tool 调用次数", toolCallTotal, ""],
               ["", "", ""],
               ...exportAllTools.map((t, i) => [i + 1, t.tool, t.count])
             ]
@@ -4773,7 +4958,8 @@ export function DashboardView(): React.JSX.Element {
     try {
       const exportDataResult = await window.api.dashboard.projectModeExportData(range, {
         upperOrgLv1: selectedOrgLv1List,
-        fromLeanOnly: fromLeanProjectsOnly
+        fromLeanOnly: fromLeanProjectsOnly,
+        createdInRangeOnly: createdInRangeProjectsOnly
       })
       if (!exportDataResult.success || !exportDataResult.data) {
         throw new Error(exportDataResult.error ?? "获取项目导出明细失败")
@@ -4938,10 +5124,11 @@ export function DashboardView(): React.JSX.Element {
         projectMode.tools.byToolFilteredAll.length > 0
           ? projectMode.tools.byToolFilteredAll
           : projectMode.tools.byTool
+      const toolCountLabel = toolRankingCountLabel(projectMode.tools.toolUsageCoverage)
       if (exportFilteredTools.length > 0) {
         sheets.push({
           name: "项目Tool使用排行(已过滤)",
-          header: ["排名", "Tool", "调用次数"],
+          header: ["排名", "Tool", toolCountLabel],
           rows: exportFilteredTools.map((tool, index) => [index + 1, tool.tool, tool.count])
         })
       }
@@ -4953,7 +5140,7 @@ export function DashboardView(): React.JSX.Element {
       if (exportAllTools.length > 0) {
         sheets.push({
           name: "项目Tool使用排行(全部)",
-          header: ["排名", "Tool", "调用次数"],
+          header: ["排名", "Tool", toolCountLabel],
           rows: exportAllTools.map((tool, index) => [index + 1, tool.tool, tool.count])
         })
       }
@@ -4979,6 +5166,7 @@ export function DashboardView(): React.JSX.Element {
     range,
     selectedOrgLv1List,
     fromLeanProjectsOnly,
+    createdInRangeProjectsOnly,
     marketSkillMap,
     skillUploaderProfiles
   ])
@@ -5040,17 +5228,33 @@ export function DashboardView(): React.JSX.Element {
         }
         orgFilter={
           subPage.kind === "main" ? (
-            <OrgFilterBar
-              value={selectedOrgLv1List}
-              options={orgOptions}
-              loading={loading}
-              onChange={setOrgFilter}
-            />
+            <>
+              <OrgFilterBar
+                value={selectedOrgLv1List}
+                options={orgOptions}
+                loading={loading}
+                onChange={(rooms) => {
+                  setSelectedGroupNames([])
+                  setGroupOptions([])
+                  setOrgFilter(rooms)
+                }}
+              />
+              {activeMainTab === "efficiency" && projectModeAllowed ? (
+                <ProjectMetricGroupFilter
+                  value={selectedGroupNames}
+                  options={groupOptions}
+                  loading={groupOptionsLoading}
+                  disabled={selectedOrgLv1List.length === 0}
+                  error={groupOptionsError}
+                  onChange={setSelectedGroupNames}
+                />
+              ) : null}
+            </>
           ) : null
         }
       />
 
-      {error && (
+      {error && (activeMainTab !== "knowledge" || subPage.kind !== "main") && (
         <div className="mx-6 mt-4 flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive">
           <AlertCircle className="size-4 shrink-0" />
           <span>{error}</span>
@@ -5088,6 +5292,7 @@ export function DashboardView(): React.JSX.Element {
                   disabled={activeMainTab === "project-mode" && !projectModeAllowed}
                 >
                   <Bot className="size-3.5" /> 指标分析
+                  <DrilldownArrow />
                 </Button>
               ) : (
                 // 隐藏入口：在「指标分析」按钮原位置放一个不可见热区，连续点三下才显形。
@@ -5154,7 +5359,7 @@ export function DashboardView(): React.JSX.Element {
             onTraceTriggerScopeChange={handleUserTraceTriggerScopeChange}
             onExportPage={handleUserTraceExport}
             exporting={userDetailTraceExporting}
-            loadThreadTraces={subPage.projectMode ? loadProjectThreadTraces : undefined}
+            loadThreadTraces={subPage.projectMode ? loadProjectUserThreadTraces : undefined}
           />
         </ScrollArea>
       ) : (
@@ -5194,16 +5399,30 @@ export function DashboardView(): React.JSX.Element {
                 onSelectedSkillKeyChange={setSkillEvalSelectedSkillKey}
               />
             </div>
+          ) : activeMainTab === "knowledge" && projectModeAllowed ? (
+            <div className="p-6">
+              <KnowledgeOverviewPanel
+                {...knowledgeOverview}
+                rooms={selectedOrgLv1List}
+                refreshKey={knowledgeRefreshKey}
+                rate={knowledgeCommitRate}
+                rateLoading={knowledgeCommitRateLoading}
+                rateError={knowledgeCommitRateError}
+              />
+            </div>
           ) : activeMainTab === "project-mode" && projectModeAllowed ? (
             <div className="space-y-6 p-6">
               <ProjectModePanel
+                codeTraceOrgLv1={selectedOrgLv1List}
                 data={projectMode}
                 loading={projectModeLoading}
+                projectListLoading={projectListLoading}
                 error={projectModeError}
                 codeSource={projectModeCodeSource}
                 codeStatsOverride={projectModeCodeStatsOverride}
                 codeStatsLoading={projectModeCodeStatsLoading}
                 onCodeSourceChange={selectProjectModeCodeSource}
+                createdInRangeProjectsOnly={createdInRangeProjectsOnly}
                 headerAction={
                   <div className="flex items-center gap-2">
                     <Button
@@ -5216,6 +5435,17 @@ export function DashboardView(): React.JSX.Element {
                     >
                       <Filter className="size-3.5" />
                       仅精益项目
+                    </Button>
+                    <Button
+                      variant={createdInRangeProjectsOnly ? "default" : "outline"}
+                      size="sm"
+                      className="gap-1.5 text-xs"
+                      onClick={() => setCreatedInRangeProjectsOnly((v) => !v)}
+                      disabled={projectModeLoading}
+                      title="仅统计创建时间落在当前所选时间范围内的项目"
+                    >
+                      <Filter className="size-3.5" />
+                      仅本期新建
                     </Button>
                     <Button
                       variant="outline"
@@ -5242,6 +5472,7 @@ export function DashboardView(): React.JSX.Element {
                 onOpenProjectCommits={handleProjectOpenProjectCommits}
                 loadFeatureNodes={loadProjectFeatureNodes}
                 loadOperationalDetails={loadProjectOperationalDetails}
+                loadStageAnalysis={loadProjectStageAnalysis}
                 loadPluginAggregate={loadPluginAggregateNodes}
                 fetchAdapterProjectPage={fetchAdapterProjectPage}
                 onSkillClick={handleSkillClick}
@@ -5272,10 +5503,13 @@ export function DashboardView(): React.JSX.Element {
           ) : activeMainTab === "efficiency" && projectModeAllowed ? (
             <EfficiencyPanel
               data={efficiency}
+              pluginFilter={efficiencyPluginFilter}
+              onPluginFilterChange={setEfficiencyPluginFilter}
               loading={efficiencyLoading}
               error={efficiencyError}
               range={range}
               upperOrgLv1={selectedOrgLv1List}
+              groupNames={selectedGroupNames}
               projectMetricRefreshKey={projectMetricRefreshKey}
             />
           ) : (

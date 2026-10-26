@@ -1,3 +1,4 @@
+import type { DashboardToolUsageCoverage } from "../../../../../shared/dashboard-tool-usage"
 /**
  * Shared dashboard presentation pieces reused across panels (operations
  * overview + project-mode overview) so both render skill/tool rankings and the
@@ -6,6 +7,7 @@
 /* eslint-disable react-refresh/only-export-components */
 import { useState } from "react"
 import { Search, X, Info } from "lucide-react"
+import { DrilldownArrow } from "../DrilldownArrow"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { formatRankingMatchStatus, sumRankingCounts } from "@/lib/dashboard-ranking-status"
@@ -298,9 +300,14 @@ export function SearchableRankingPanel({
   titleTooltipContent,
   renderNameAddon,
   showMatchedTotalCalls = false,
-  className
+  className,
+  metricNote,
+  callTotalLabel
 }: {
   title: string
+  metricNote?: string
+  /** Replaces "共 N 次调用" when the counts are not invocations. */
+  callTotalLabel?: string
   totalKinds: number
   totalCalls: number
   defaultItems: RankingItem[]
@@ -347,14 +354,19 @@ export function SearchableRankingPanel({
               <span className="font-semibold text-foreground">{totalKinds}</span> 种
             </span>
             <span className="text-border">|</span>
-            <span>
-              共 <span className="font-semibold text-foreground">{formatNumber(totalCalls)}</span>{" "}
-              次调用
-            </span>
+            {callTotalLabel ? (
+              <span>{callTotalLabel}</span>
+            ) : (
+              <span>
+                共 <span className="font-semibold text-foreground">{formatNumber(totalCalls)}</span>{" "}
+                次调用
+              </span>
+            )}
           </div>
         </div>
         {headerActions}
       </div>
+      {metricNote ? <p className="mb-2 text-[10px] text-muted-foreground">{metricNote}</p> : null}
 
       <div className="mb-3 flex shrink-0 items-center gap-2">
         <div className="relative flex-1">
@@ -435,6 +447,7 @@ export function SearchableRankingPanel({
                     onClick={() => onItemClick(item.name)}
                   >
                     {content}
+                    <DrilldownArrow />
                   </button>
                 )
               }
@@ -681,6 +694,7 @@ export function CodeAdoptionFunnel({
                     <span className="font-semibold" style={{ color: s.color }}>
                       {formatPercent(s.rate)}
                     </span>
+                    {clickable ? <DrilldownArrow /> : null}
                   </div>
                   <div className="mt-0.5 whitespace-nowrap text-[10px] text-muted-foreground">
                     采纳 {formatNumber(s.adoptedLines)} / 生成 {formatNumber(s.generatedLines)}
@@ -966,6 +980,7 @@ function SkillAdoptionRankingPanel({
                     onClick={() => onSkillClick(item.skill)}
                   >
                     {content}
+                    <DrilldownArrow />
                   </button>
                 )
               }
@@ -1077,7 +1092,8 @@ export function ToolRankingPanel({
   byToolFilteredAll,
   byToolAllFull,
   totalTools,
-  totalToolCalls
+  totalToolCalls,
+  toolUsageCoverage
 }: {
   byTool: ToolRankingDatum[]
   byToolAll: ToolRankingDatum[]
@@ -1085,8 +1101,11 @@ export function ToolRankingPanel({
   byToolAllFull: ToolRankingDatum[]
   totalTools: number
   totalToolCalls: number
+  toolUsageCoverage?: DashboardToolUsageCoverage
 }): React.JSX.Element {
   const [showAll, setShowAll] = useState(false)
+  // Counts are invocations only when the data says so; otherwise they are trace counts.
+  const calls = toolUsageCoverage?.metric === "calls" ? toolUsageCoverage : undefined
   const defaultItems: RankingItem[] = (showAll ? byToolAll : byTool).map((item) => ({
     name: item.tool,
     count: item.count
@@ -1100,12 +1119,22 @@ export function ToolRankingPanel({
         ? byToolFilteredAll
         : byTool
   ).map((item) => ({ name: item.tool, count: item.count }))
-  const totalKinds = searchItems.length > 0 ? searchItems.length : totalTools
-  const totalCalls = searchItems.length > 0 ? sumRankingCounts(searchItems) : totalToolCalls
+  const totalKinds = showAll ? totalTools : (toolUsageCoverage?.filteredTools ?? searchItems.length)
+  const totalCalls = showAll ? totalToolCalls : (toolUsageCoverage?.filteredCalls ?? 0)
+  const metricNote = calls
+    ? `按实际记录的工具调用次数统计；完整采集 ${calls.completeTraceCount}/${calls.traceCount} 条 Trace。` +
+      (calls.completeTraceCount < calls.traceCount
+        ? "旧版或采集不完整的 Trace 未计入，当前为已知下限。"
+        : "") +
+      (calls.rankingTruncated ? "排行仅返回前 1000 种工具，合计包含全部工具。" : "")
+    : "当前范围没有完整的调用次数数据，排行按用过该工具的 Trace 数统计，不是调用次数。" +
+      (toolUsageCoverage?.rankingTruncated ? "排行仅返回前 1000 种工具。" : "")
 
   return (
     <SearchableRankingPanel
       title="Tool 使用"
+      metricNote={metricNote}
+      callTotalLabel={calls ? undefined : "按 Trace 数排行"}
       totalKinds={totalKinds}
       totalCalls={totalCalls}
       defaultItems={defaultItems}

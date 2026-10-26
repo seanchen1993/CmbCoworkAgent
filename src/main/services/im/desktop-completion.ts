@@ -145,7 +145,8 @@ export class ImDesktopCompletionObserver {
         deliveryId,
         conversationKey: grant.conversationKey,
         text: finalText,
-        prefix
+        prefix,
+        format: "markdown"
       })
     )
 

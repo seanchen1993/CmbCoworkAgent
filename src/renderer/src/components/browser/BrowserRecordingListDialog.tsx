@@ -36,6 +36,7 @@ import {
 
 export interface BrowserRecordingListDialogProps {
   open: boolean
+  visible?: boolean
   onOpenChange: (open: boolean) => void
   initialSelectedFileName?: string | null
   isPlaybackRunning: boolean
@@ -177,6 +178,7 @@ interface DetailDraftState {
 
 export function BrowserRecordingListDialog({
   open,
+  visible = true,
   onOpenChange,
   initialSelectedFileName,
   isPlaybackRunning,
@@ -431,7 +433,8 @@ export function BrowserRecordingListDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    // 设置只遮住弹层，不改变 open，避免触发上面的草稿重置和文件重读。
+    <Dialog open={open && visible} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-[1300px] flex-col gap-0 overflow-hidden border-border/70 p-0 shadow-2xl sm:max-h-[88vh]">
         <DialogHeader className="shrink-0 border-b border-border/70 bg-[linear-gradient(180deg,color-mix(in_srgb,var(--primary)_7%,transparent),transparent)] px-5 pt-2 pb-1">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
