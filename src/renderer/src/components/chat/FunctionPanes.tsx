@@ -12,7 +12,8 @@ import {
   type FunctionPaneSnapshot,
   type FunctionUiElement,
   type FunctionUiNode,
-  type FunctionUiAction
+  type FunctionUiAction,
+  type FunctionFocusTarget
 } from "../../../../shared/mods/v2/ui"
 import type { ModJson, ModObject } from "../../../../shared/mods/types"
 import { FunctionClient } from "./FunctionClient"
@@ -310,6 +311,17 @@ function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Ele
   panesRef.current = panes
   const sections = useRef(new Map<string, HTMLElement>())
   const attemptedFocus = useRef(new Set<string>())
+  const [focusTransactions, setFocusTransactions] = useState<
+    {
+      threadId: string
+      pane: string
+      request: string
+      generation: string
+      epoch: number
+      acknowledged: boolean
+      target?: FunctionFocusTarget
+    }[]
+  >([])
   const focusEpoch = useRef(0)
   const applyingFocus = useRef(false)
   const loadedThread = useRef<string | undefined>(undefined)
@@ -414,6 +426,46 @@ function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Ele
       }
     }
   }, [panes, threadId, resultsVisible])
+  // A focus acknowledgement invalidates the old drawing. Apply focus only after React has
+  // committed its replacement; otherwise the first keystroke can carry a retired handler.
+  useEffect(() => {
+    const finished = new Set<(typeof focusTransactions)[number]>()
+    for (const transaction of focusTransactions) {
+      const current = panes.find((pane) => pane.key === transaction.pane)
+      if (
+        transaction.threadId !== threadId ||
+        loadedThread.current !== threadId ||
+        !resultsVisible ||
+        transaction.epoch !== focusEpoch.current ||
+        current?.focusRequest?.id !== transaction.request
+      ) {
+        finished.add(transaction)
+        continue
+      }
+      if (
+        !transaction.acknowledged ||
+        current.focusRequest.pending ||
+        current.generation === transaction.generation
+      ) continue
+      finished.add(transaction)
+      if (!desktopAllowsPaneFocus()) continue
+      const section = sections.current.get(transaction.pane)
+      const element = section && paneFocusElement(section, transaction.target)
+      if (
+        !section?.isConnected ||
+        !section.getClientRects().length ||
+        !element?.isConnected ||
+        element.matches(":disabled")
+      ) continue
+      applyingFocus.current = true
+      try {
+        element.focus({ preventScroll: true })
+      } finally {
+        applyingFocus.current = false
+      }
+    }
+    if (finished.size) setFocusTransactions((current) => current.filter((row) => !finished.has(row)))
+  }, [focusTransactions, panes, threadId, resultsVisible])
   useEffect(() => {
     if (loadedThread.current !== threadId || !resultsVisible) return
     const currentIds = new Set(
@@ -426,6 +478,11 @@ function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Ele
       if (!request?.pending || attemptedFocus.current.has(request.id)) continue
       attemptedFocus.current.add(request.id)
       const epoch = focusEpoch.current
+      const transaction = {
+        threadId, pane: pane.key, request: request.id,
+        generation: pane.generation, epoch, acknowledged: false
+      }
+      setFocusTransactions((current) => [...current, transaction])
       const allowed = desktopAllowsPaneFocus() && Boolean(sections.current.get(pane.key)?.getClientRects().length)
       void window.api.mods
         .paneAct(threadId, {
@@ -438,21 +495,17 @@ function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Ele
           value: { focused: allowed, request: request.id }
         })
         .then((result) => {
-          if (!result?.focused || epoch !== focusEpoch.current || !desktopAllowsPaneFocus()) return
-          const current = panesRef.current.find((row) => row.key === pane.key)
-          if (current?.focusRequest?.id !== request.id) return
-          const section = sections.current.get(pane.key)
-          if (!section?.isConnected) return
-          const element = paneFocusElement(section, result.target)
-          if (!element || !element.isConnected || element.matches(":disabled")) return
-          applyingFocus.current = true
-          try {
-            element.focus({ preventScroll: true })
-          } finally {
-            applyingFocus.current = false
-          }
+          setFocusTransactions((current) =>
+            current.flatMap((row) =>
+              row === transaction
+                ? result?.focused
+                  ? [{ ...row, acknowledged: true, target: result.target }]
+                  : []
+                : [row]
+            )
+          )
         })
-        .catch(() => {})
+        .catch(() => setFocusTransactions((current) => current.filter((row) => row !== transaction)))
         .finally(() => refreshRef.current())
     }
   }, [panes, threadId, resultsVisible])
@@ -530,6 +583,11 @@ function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Ele
     },
     [threadId]
   )
+  const focusPending = (pane: FunctionPaneSnapshot): boolean =>
+    Boolean(pane.focusRequest?.pending) ||
+    focusTransactions.some((row) =>
+      row.threadId === threadId && row.pane === pane.key && row.request === pane.focusRequest?.id
+    )
   if (!panes.length && !error) return null
   return (
     <div className="mx-auto my-2 w-full max-w-3xl space-y-2" data-function-panes>
@@ -631,7 +689,7 @@ function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Ele
           >
             <Element
               node={pane.tree}
-              busy={busy}
+              busy={busy || focusPending(pane)}
               retainFocusWhileBusy
               act={(node, kind, value) => act(pane, node, kind, value)}
               markdown={{ threadId, address: { kind: "pane", pane: pane.key,
@@ -650,7 +708,7 @@ function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Ele
                     snapshot={client}
                     refresh={() => refreshRef.current()}
                     render={(tree, busy, act, markdown) => (
-                      <Element node={tree} busy={busy} act={act} markdown={markdown}
+                      <Element node={tree} busy={busy || focusPending(pane)} act={act} markdown={markdown}
                         retainFocusWhileBusy />
                     )}
                   />

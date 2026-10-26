@@ -53,7 +53,7 @@ async function main() {
         window.paneFixture.actions.push({id,...action});
         if(action.kind==='close'){rows[id]=[];emitPane(id);return {focused:false}};
         if(action.kind==='focus'&&action.value?.request){const row=rows[id][0];
-          if(row?.focusRequest?.id===action.value.request)row.focusRequest.pending=false;
+          if(row?.focusRequest?.id===action.value.request){row.focusRequest.pending=false;row.generation='focus-draw-'+(++serial);emitPane(id)};
           return {focused:action.value.focused,target:{plugin:'p',element:'pane-action'}}};
         return {focused:false};
       };

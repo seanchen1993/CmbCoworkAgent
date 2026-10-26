@@ -116,7 +116,7 @@
     "test:mods:flows:files:browser": "tsx tests/mods-flow-files-browser.spec.ts",
     "test:mods:evaluation:runtime": "tsx tests/mods-evaluation-runtime.spec.ts",
     "test:mods-skill-evaluation-runtime": "tsx tests/mods-skill-evaluation-runtime.spec.ts",
-    "test:mods:ui-colors": "tsx tests/mods-ansi-color-browser.spec.ts && tsx tests/mods-button-hotkey-browser.spec.ts && tsx tests/chat-scroll-overlay-browser.spec.ts && tsx tests/mods-pane-reveal-browser.spec.ts",
+    "test:mods:ui-colors": "tsx tests/mods-ansi-color-browser.spec.ts && tsx tests/mods-button-hotkey-browser.spec.ts && tsx tests/chat-scroll-overlay-browser.spec.ts && tsx tests/mods-pane-reveal-browser.spec.ts && tsx tests/mods-packaged-focus-browser.spec.ts",
     "test:mods:commands:browser": "node tests/mods-command-admission-browser.spec.mjs",
     "test:mods:community-examples": "tsx tests/mods-community-examples-browser.spec.ts",
     "test:mods:journey": "node tests/sparks-assistant-workbench-browser.spec.mjs && tsx tests/replay-theater-site-browser.spec.ts && tsx tests/mods-first-paint-browser.spec.ts && tsx tests/mods-assistant-prefix-browser.spec.ts && tsx tests/mods-message-recovery-browser.spec.ts && tsx tests/mods-progress-sites-browser.spec.ts && tsx tests/mods-flow-browser.spec.ts && tsx tests/git-branch-switcher-browser.spec.ts && tsx tests/question-site-layout-browser.spec.ts && tsx tests/mods-prompt-readiness-browser.spec.ts && tsx tests/mods-prompt-capability-browser.spec.ts",
