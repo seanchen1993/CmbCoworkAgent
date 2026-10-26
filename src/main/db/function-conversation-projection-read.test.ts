@@ -108,6 +108,32 @@ describe("fresh joined canonical read and exact private composition", () => {
     expect(result.columns?.reasoning).toBeNull()
   })
 
+  it.each([false, true])("keeps large history untouched and rejects final same-id recreation=%s", recreate => {
+    const f = fixture(), row = appDb.getThreadCore(f.threadId)!
+    const metadata = JSON.stringify({ ...JSON.parse(row.metadata!),
+      llmFileHistory: "历史🙂".repeat(20_000), retainedScope: { enabled: true } })
+    f.database.run("UPDATE threads SET metadata=? WHERE thread_id=?", [metadata, f.threadId])
+    const writes = vi.spyOn(f.database, "run")
+    const read = () => appDb.withCanonicalThreadMessageReadScope(f.threadId, reader => {
+      const result = reader.requireSnapshotAndPresentation(f.uuid)
+      if (recreate) reader.runGuard(() => {
+        f.database.run("DELETE FROM threads WHERE thread_id=?", [f.threadId])
+        appDb.createThread(f.threadId, { workspacePath: directory })
+        f.database.run("UPDATE threads SET created_at=? WHERE thread_id=?",
+          [row.created_at, f.threadId])
+      })
+      return result
+    })
+    if (recreate) {
+      expect(read).toThrow("MODS_CONVERSATION_THREAD_CHANGED")
+      expect(appDb.getThreadCore(f.threadId)?.created_at).toBe(row.created_at)
+    } else {
+      expect(read().snapshot.id).toBe(f.uuid)
+      expect(writes).not.toHaveBeenCalled()
+      expect(appDb.getThreadCore(f.threadId)?.metadata).toBe(metadata)
+    }
+  })
+
   it("reads snapshot and presentation together and still rejects a later source mutation", () => {
     const f = fixture()
     const observed = appDb.withCanonicalThreadMessageReadScope(f.threadId,

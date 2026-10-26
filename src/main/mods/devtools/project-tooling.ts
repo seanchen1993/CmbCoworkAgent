@@ -2,7 +2,8 @@ import AdmZip from "adm-zip"
 import { mkdir, writeFile } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
 import { createAuthoringTemplate } from "./authoring-templates"
-import type { AuthoringSourceBundle } from "./authoring-bundle"
+import { createAuthoringSourceBundle, type AuthoringSourceBundle } from "./authoring-bundle"
+import { compileNativeComposition, NATIVE_COMPOSITION_PATH } from "../../plugins/native-composition"
 import {
   createProjectTemplate,
   type ProjectTemplateInput,
@@ -10,7 +11,7 @@ import {
 } from "./project-template"
 import { compileProjectHarness } from "./project-harness"
 import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
-import { readProjectSource } from "./project-source"
+import { readAuthoringProjectSource, readProjectSource } from "./project-source"
 import { inspectProjectSource } from "./project-doctor"
 import { testProjectSource } from "./project-contract"
 import type { ClawActionDescriptor } from "../../../shared/mods/claw-actions"
@@ -61,9 +62,18 @@ export async function initProjectPlugin(
 }
 
 /** Compilation publishes a new directory, never edits an installed or source package in place. */
-export async function compileProjectPlugin(directory: string, outputDirectory: string) {
-  const source = await readProjectSource(directory)
-  const bundle = compileProjectHarness(source.bundle)
+export async function compileProjectPlugin(directory: string, outputDirectory: string,
+  availableActions: readonly ClawActionDescriptor[] = []) {
+  const source = await readAuthoringProjectSource(directory)
+  const native = source.bundle.files.find(file => file.path === NATIVE_COMPOSITION_PATH)
+  if (native && source.bundle.files.some(file =>
+    file.path === "devclaw.harness.json" || file.path === "mods/business/manifest.json"))
+    throw Error("NATIVE_COMPOSITION_MULTIPLE_SOURCES")
+  const bundle = native ? createAuthoringSourceBundle(compileNativeComposition(JSON.parse(native.text), {
+    files: source.bundle.files.map(file => ({ path: file.path, bytes: Buffer.from(file.text) })),
+    actionCatalog: availableActions
+  }).files.map(file => ({ path: file.path, text: file.bytes.toString("utf8") })))
+    : compileProjectHarness(source.bundle)
   const manifest = parseProjectRuntimeManifest(
     JSON.parse(bundle.files.find((file) => file.path === "devclaw.project-runtime.json")!.text)
   )
@@ -105,7 +115,7 @@ export async function packProjectPlugin(
   resourcePaths?: readonly string[]
 ) {
   guard()
-  const source = await readProjectSource(directory, resourcePaths)
+  const source = await readAuthoringProjectSource(directory, resourcePaths)
   guard()
   if (expectedDigest !== undefined && source.bundle.digest !== expectedDigest)
     throw Error("PROJECT_SOURCE_CHANGED")
@@ -154,7 +164,7 @@ export async function prepareProjectDevelopment(
   resourcePaths?: readonly string[]
 ) {
   guard()
-  const source = await readProjectSource(directory, resourcePaths)
+  const source = await readAuthoringProjectSource(directory, resourcePaths)
   guard()
   if (expectedDigest !== undefined && source.bundle.digest !== expectedDigest)
     throw Error("PROJECT_SOURCE_CHANGED")

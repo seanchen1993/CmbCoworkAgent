@@ -12,12 +12,31 @@ export type LocalProjectSummary = Pick<
   "projectId" | "name" | "workspace" | "status" | "stageIndex" | "updatedAt" | "packageVersion"
 >
 export interface LocalProjectView {
+  importedSource?: { sourceProjectId: string; prefixStageIds: string[]; reexecuteStageIds?: string[] }
+  resultApprovalRequired?: boolean
   project: HostProjectState
   operations: HostProjectOperation[]
   preview?: { state: "active" | "expired"; revision?: number }
+  resultReview?: import("./host-types").HostResultReview
+  resultReviewError?: string
+  continuation?: { reason: string; error?: string }
+  migrationReview?: import("./host-types").HostPlanMigrationReview
+  inputWait?: { operationId: string; requestId: string; threadId: string; status: "waiting" | "answered";
+    resumable: boolean }
 }
 export type LocalProjectCommand =
-  | { kind: "prepare"; expectedVersion: number; idempotencyKey: string }
+  | { kind: "prepare"; expectedVersion: number; idempotencyKey: string; stageInstructions?: string }
+  | { kind: "continue"; expectedVersion: number }
+  | { kind: "review-plan"; expectedVersion: number }
+  | { kind: "migrate-plan"; review: import("./host-types").HostPlanMigrationReview }
+  | { kind: "resume-input"; operationId: string; requestId: string }
+  | {
+      kind: "approve-result"
+      operationId: string
+      review: import("./host-types").HostResultReview
+      decision: "approved" | "rejected"
+      feedback?: string
+    }
   | {
       kind: "approve"
       operationId: string
@@ -26,9 +45,21 @@ export type LocalProjectCommand =
       decision: "approved" | "rejected"
       contextProviderApproval?: import("./host-types").HostContextProviderApproval
     }
-  | { kind: "start" | "validate" | "advance" | "cancel" | "reconcile"; operationId: string }
+  | { kind: "start" | "validate" | "validate-imported" | "advance" | "cancel" | "reconcile"; operationId: string }
+
+export interface LocalProjectImportApi {
+  sources(): Promise<Array<{ projectId: string; packageId: string; workspace: string; frozen: boolean }>>
+  target(installedPluginId: string): Promise<{ adapters?: import("./host-types").HostLegacyAdapterDescription[]; stages: Array<{
+    id: string; title: string; eligible: boolean; reason?: string; artifacts: Array<{ id: string; path: string }>
+  }> }>
+  review(input: import("./host-types").HostLegacyImportInput): Promise<import("./host-types").HostLegacyImportReview>
+  reviewAdapter(input: import("./host-types").HostLegacyAdapterInput): Promise<import("./host-types").HostLegacyImportReview>
+  resumeReview(sourceProjectId: string): Promise<import("./host-types").HostLegacyImportReview>
+  confirm(review: import("./host-types").HostLegacyImportReview): Promise<LocalProjectView>
+}
 
 export interface LocalProjectApi {
+  legacyImport: LocalProjectImportApi
   mods: import("./function-source").ProjectFunctionSourceApi
   library: import("./project-library").ProjectLibraryApi
   preview: import("./development-preview").ProjectPreviewApi

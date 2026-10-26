@@ -5,11 +5,17 @@ export const EXTENSION_BOARD_API_VERSION = 2 as const
 export const EXTENSION_CONTRACT_API_VERSION = "devclaw.extension-contract/v1" as const
 export const REQUIRED_BUSINESS_CHECKS_PROTOCOL = "devclaw.required-business-checks/v1" as const
 export const CONTEXT_HANDOFF_PROTOCOL = "devclaw.context-handoff/v1" as const
+export const DECLARED_CONTEXT_FILES_PROTOCOL = "devclaw.declared-context-files/v1" as const
+export const CONTEXT_MATERIALS_PROTOCOL = "devclaw.context-materials/v1" as const
+export const EXECUTION_RESOURCES_PROTOCOL = "devclaw.execution-resources/v1" as const
 /** Explicit checked artifact selection, currently consumed by the reviewed legacy adapter. */
 export const VERIFIED_ARTIFACTS_PROTOCOL = "devclaw.verified-artifacts/v1" as const
 export const SUPPORTED_EXTENSION_PROTOCOLS: readonly string[] = [
   REQUIRED_BUSINESS_CHECKS_PROTOCOL,
   CONTEXT_HANDOFF_PROTOCOL,
+  DECLARED_CONTEXT_FILES_PROTOCOL,
+  CONTEXT_MATERIALS_PROTOCOL,
+  EXECUTION_RESOURCES_PROTOCOL,
   VERIFIED_ARTIFACTS_PROTOCOL
 ]
 
@@ -19,8 +25,20 @@ export interface ExtensionContextContract {
   configuration: "host-resolved"
   knowledge: { required: boolean; binding?: string }
   provider?:
-    | { entry: string; actionId?: never; operations: Array<"session-context" | "sync-knowledge"> }
-    | { actionId: string; entry?: never; operations: Array<"session-context"> }
+    | { entry: string; actionId?: never; files?: never; materials?: never; operations: Array<"session-context" | "sync-knowledge"> }
+    | { actionId: string; entry?: never; files?: never; materials?: ContextMaterials; operations: Array<"session-context"> }
+    | { entry?: never; actionId?: never; files: DeclaredContextFile[]; materials?: never; operations: Array<"session-context"> }
+}
+
+export interface ContextMaterials {
+  roots: Array<{ id: string; source: "package" | "knowledge"; path?: string }>
+  configuration: string[]
+}
+
+export interface DeclaredContextFile {
+  source: "package" | "knowledge"
+  path: string
+  stages?: string[]
 }
 
 export interface ExtensionContract {
@@ -28,6 +46,12 @@ export interface ExtensionContract {
   requires: string[]
   context?: ExtensionContextContract
   verifiedArtifacts?: { artifactIds: string[] }
+  executionResources?: ExecutionResourcesContract
+}
+
+export interface ExecutionResourcesContract {
+  profiles: string[]
+  workspaces: Array<{ id: string; binding: string }>
 }
 
 function invalid(detail = "INVALID"): never {
@@ -80,7 +104,7 @@ export function parseExtensionContract(
   value: unknown,
   supportedProtocols: readonly string[] = SUPPORTED_EXTENSION_PROTOCOLS
 ): ExtensionContract {
-  const raw = object(value, ["apiVersion", "requires"], ["context", "verifiedArtifacts"])
+  const raw = object(value, ["apiVersion", "requires"], ["context", "verifiedArtifacts", "executionResources"])
   if (
     raw.apiVersion !== EXTENSION_CONTRACT_API_VERSION ||
     !Array.isArray(raw.requires) ||
@@ -128,7 +152,32 @@ export function parseExtensionContract(
       }
     }
     if (input.provider !== undefined) {
-      const provider = object(input.provider, ["operations"], ["entry", "actionId"])
+      const provider = object(input.provider, ["operations"], ["entry", "actionId", "files", "materials"])
+      let materials: ContextMaterials | undefined
+      if (provider.materials !== undefined) {
+        if (!raw.requires.includes(CONTEXT_MATERIALS_PROTOCOL) || !provider.actionId ||
+          provider.entry !== undefined || provider.files !== undefined)
+          return invalid("MATERIALS_PROTOCOL_REQUIRED")
+        const selection = object(provider.materials, ["roots", "configuration"])
+        if (!Array.isArray(selection.roots) || selection.roots.length > 8 ||
+          !Array.isArray(selection.configuration) || selection.configuration.length > 16 ||
+          (!selection.roots.length && !selection.configuration.length) ||
+          new Set(selection.configuration).size !== selection.configuration.length ||
+          selection.configuration.some(key => typeof key !== "string" || !/^[a-zA-Z][\w.-]{0,79}$/.test(key)))
+          return invalid("MATERIALS_INVALID")
+        const roots = selection.roots.map((value): ContextMaterials["roots"][number] => {
+          const root = object(value, ["id", "source"], ["path"])
+          if (typeof root.id !== "string" || !/^[a-zA-Z][\w.-]{0,63}$/.test(root.id) ||
+            (root.source !== "package" && root.source !== "knowledge") ||
+            (root.source === "knowledge" && !context!.knowledge.binding))
+            return invalid("MATERIALS_INVALID")
+          return { id: root.id, source: root.source,
+            ...(root.path === undefined ? {} : { path: relativeEntry(root.path) }) }
+        })
+        if (new Set(roots.map(root => root.id)).size !== roots.length)
+          return invalid("MATERIALS_INVALID")
+        materials = { roots, configuration: [...selection.configuration] as string[] }
+      }
       if (
         !Array.isArray(provider.operations) ||
         !provider.operations.length ||
@@ -139,18 +188,44 @@ export function parseExtensionContract(
         )
       )
         return invalid()
-      if (provider.actionId !== undefined) {
+      if (provider.files !== undefined) {
+        if (!raw.requires.includes(DECLARED_CONTEXT_FILES_PROTOCOL) ||
+          provider.entry !== undefined || provider.actionId !== undefined ||
+          !Array.isArray(provider.files) || !provider.files.length || provider.files.length > 32 ||
+          provider.operations.length !== 1 || provider.operations[0] !== "session-context")
+          return invalid("DECLARED_FILES_INVALID")
+        const files = provider.files.map((value): DeclaredContextFile => {
+          const file = object(value, ["source", "path"], ["stages"])
+          if (file.source !== "package" && file.source !== "knowledge") return invalid()
+          if (file.source === "knowledge" && !context!.knowledge.binding)
+            return invalid("KNOWLEDGE_BINDING_REQUIRED")
+          if (file.stages !== undefined && (!Array.isArray(file.stages) || !file.stages.length ||
+            file.stages.length > 32 || new Set(file.stages).size !== file.stages.length ||
+            file.stages.some(id => typeof id !== "string" || !/^[a-zA-Z0-9][\w.-]{0,63}$/.test(id))))
+            return invalid()
+          return { source: file.source, path: relativeEntry(file.path),
+            ...(file.stages === undefined ? {} : { stages: [...file.stages] as string[] }) }
+        })
+        if (new Set(files.map(file => `${file.source}:${file.path.toLowerCase()}`)).size !== files.length)
+          return invalid("DECLARED_FILES_DUPLICATE")
+        context.provider = { files, operations: ["session-context"] }
+      } else if (provider.actionId !== undefined) {
         if (provider.entry !== undefined || typeof provider.actionId !== "string" ||
           !/^[a-zA-Z0-9][\w.-]{0,63}$/.test(provider.actionId) ||
           provider.operations.length !== 1 || provider.operations[0] !== "session-context")
           return invalid()
-        context.provider = { actionId: provider.actionId, operations: ["session-context"] }
+        context.provider = { actionId: provider.actionId, operations: ["session-context"],
+          ...(materials ? { materials } : {}) }
       } else context.provider = {
         entry: relativeEntry(provider.entry),
         operations: [...provider.operations] as Array<"session-context" | "sync-knowledge">
       }
     }
   } else if (raw.requires.includes(CONTEXT_HANDOFF_PROTOCOL)) return invalid("CONTEXT_REQUIRED")
+  if (raw.requires.includes(DECLARED_CONTEXT_FILES_PROTOCOL) && !context?.provider?.files)
+    return invalid("DECLARED_FILES_REQUIRED")
+  if (raw.requires.includes(CONTEXT_MATERIALS_PROTOCOL) && !context?.provider?.materials)
+    return invalid("MATERIALS_REQUIRED")
   let verifiedArtifacts: ExtensionContract["verifiedArtifacts"]
   if (raw.verifiedArtifacts !== undefined) {
     if (!raw.requires.includes(VERIFIED_ARTIFACTS_PROTOCOL))
@@ -164,10 +239,38 @@ export function parseExtensionContract(
     verifiedArtifacts = { artifactIds: [...selection.artifactIds] }
   } else if (raw.requires.includes(VERIFIED_ARTIFACTS_PROTOCOL))
     return invalid("VERIFIED_ARTIFACTS_REQUIRED")
+  let executionResources: ExecutionResourcesContract | undefined
+  if (raw.executionResources !== undefined) {
+    if (!raw.requires.includes(EXECUTION_RESOURCES_PROTOCOL))
+      return invalid("EXECUTION_RESOURCES_PROTOCOL_REQUIRED")
+    const declaration = object(raw.executionResources, ["profiles", "workspaces"])
+    if (!Array.isArray(declaration.profiles) || declaration.profiles.length > 16 ||
+      !Array.isArray(declaration.workspaces) || declaration.workspaces.length > 8 ||
+      (!declaration.profiles.length && !declaration.workspaces.length))
+      return invalid("EXECUTION_RESOURCES_INVALID")
+    const profiles = declaration.profiles.map(value => {
+      const path = relativeEntry(value)
+      if (!path.endsWith(".md")) return invalid("EXECUTION_RESOURCE_PROFILE_INVALID")
+      return path
+    })
+    const workspaces = declaration.workspaces.map(value => {
+      const workspace = object(value, ["id", "binding"])
+      if (typeof workspace.id !== "string" || !/^[a-zA-Z][\w.-]{0,63}$/.test(workspace.id) ||
+        typeof workspace.binding !== "string" || !/^[a-zA-Z][\w.-]{0,79}$/.test(workspace.binding))
+        return invalid("EXECUTION_RESOURCE_BINDING_INVALID")
+      return { id: workspace.id, binding: workspace.binding }
+    })
+    if (new Set(profiles.map(path => path.toLowerCase())).size !== profiles.length ||
+      new Set(workspaces.map(workspace => workspace.id)).size !== workspaces.length)
+      return invalid("EXECUTION_RESOURCES_DUPLICATE")
+    executionResources = { profiles, workspaces }
+  } else if (raw.requires.includes(EXECUTION_RESOURCES_PROTOCOL))
+    return invalid("EXECUTION_RESOURCES_REQUIRED")
   return {
     apiVersion: EXTENSION_CONTRACT_API_VERSION,
     requires: [...raw.requires],
     ...(context ? { context } : {}),
+    ...(executionResources ? { executionResources } : {}),
     ...(verifiedArtifacts ? { verifiedArtifacts } : {})
   }
 }

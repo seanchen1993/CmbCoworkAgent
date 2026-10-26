@@ -14,6 +14,9 @@ import { installDerivedPluginDirectory, inspectCompletePluginDirectory } from ".
 import type { PluginDerivationScope } from "../../shared/plugin-derivation"
 import { DerivationProposalService } from "../plugins/derivation-proposal"
 import { generateDerivationProposal } from "../plugins/derivation-model"
+import { getProjectActionCatalog } from "../harness-board/project-action-runtime"
+import { getModsManager } from "../mods/manager"
+import type { ClawActionIdentity } from "../../shared/mods/claw-actions"
 
 export function registerPluginDerivationHandlers(ipc: IpcMain, window: () => BrowserWindow | null) {
   const service = new PluginDerivationService(join(getOpenworkDir(), "plugin-derivations"), {
@@ -47,6 +50,7 @@ export function registerPluginDerivationHandlers(ipc: IpcMain, window: () => Bro
     if (!row) throw Error("插件制作会话不存在")
     const incarnation = captureThreadIncarnation(row)
     const workspace = input.expectedWorkspace
+    let assertCatalogCurrent: (() => void) | undefined
     const guard = () => {
       if (
         !owner ||
@@ -71,6 +75,7 @@ export function registerPluginDerivationHandlers(ipc: IpcMain, window: () => Bro
         throw Error("插件制作会话已变化")
       const metadata = latest.metadata ? JSON.parse(latest.metadata) : {}
       if (metadata.workspacePath !== workspace) throw Error("插件制作工作区已变化")
+      assertCatalogCurrent?.()
     }
     guard()
     return {
@@ -89,6 +94,51 @@ export function registerPluginDerivationHandlers(ipc: IpcMain, window: () => Bro
         return typeof metadata.model === "string" && metadata.model ? metadata.model : undefined
       })(),
       guard,
+      catalog: async (providers: readonly ClawActionIdentity[] = []) => {
+        guard()
+        const actions = await getProjectActionCatalog(workspace, input.threadId)
+        guard()
+        const selected = actions.filter((action) =>
+          providers.some(
+            (provider) =>
+              action.pluginId === provider.pluginId &&
+              action.plugin === provider.plugin &&
+              action.digest === provider.digest &&
+              action.actionId === provider.actionId
+          )
+        )
+        if (selected.length) {
+          const manager = getModsManager()
+          if (!manager) throw Error("原生组合检查提供器不可用")
+          const canonical = manager.workspaceKey(workspace)
+          const captures = selected.map((action) => {
+            const grant = manager.store.getGrant(canonical, `function:${action.plugin}`)
+            const source = getPlugins().find(
+              (plugin) => plugin.id === action.pluginId && plugin.enabled
+            )
+            if (!grant?.enabled || grant.digest !== action.digest || !source)
+              throw Error("原生组合检查提供器授权已变化")
+            return () => {
+              if (
+                !manager.isEnabled(canonical) ||
+                !getPlugins().some(
+                  (plugin) =>
+                    plugin.id === source.id && plugin.path === source.path && plugin.enabled
+                )
+              )
+                throw Error("原生组合检查提供器授权已变化")
+              manager.store.assertGrant(grant)
+            }
+          })
+          const previous = assertCatalogCurrent
+          assertCatalogCurrent = () => {
+            previous?.()
+            captures.forEach((assertCurrent) => assertCurrent())
+          }
+          guard()
+        }
+        return actions
+      },
       window: owner!
     }
   }
@@ -136,7 +186,7 @@ export function registerPluginDerivationHandlers(ipc: IpcMain, window: () => Bro
   })
   ipc.handle("plugins:derivation:revise", (event, input) => {
     const scope = access(event, input)
-    return service.revise(scope.owner, input.copyId, input.requestId, scope.guard)
+    return service.revise(scope.owner, input.copyId, input.requestId, scope.guard, scope.catalog)
   })
   ipc.handle("plugins:derivation:inspect-upstream", (event, input) => {
     const scope = access(event, input)
@@ -144,7 +194,14 @@ export function registerPluginDerivationHandlers(ipc: IpcMain, window: () => Bro
   })
   ipc.handle("plugins:derivation:create", (event, input) => {
     const scope = access(event, input)
-    return service.create(scope.owner, input.inspectionId, input.name, input.requestId, scope.guard)
+    return service.create(
+      scope.owner,
+      input.inspectionId,
+      input.name,
+      input.requestId,
+      scope.guard,
+      scope.catalog
+    )
   })
   ipc.handle("plugins:derivation:list", (event, input) => {
     const scope = access(event, input)
@@ -185,16 +242,22 @@ export function registerPluginDerivationHandlers(ipc: IpcMain, window: () => Bro
   })
   ipc.handle("plugins:derivation:check", (event, input) => {
     const scope = access(event, input)
-    return service.check(scope.owner, input.copyId, scope.guard)
+    return service.check(scope.owner, input.copyId, scope.guard, scope.catalog)
   })
   ipc.handle("plugins:derivation:install", (event, input) => {
     const scope = access(event, input)
-    return service.install(scope.owner, input.copyId, input.expectedDigest, scope.guard)
+    return service.install(
+      scope.owner,
+      input.copyId,
+      input.expectedDigest,
+      scope.guard,
+      scope.catalog
+    )
   })
   ipc.handle("plugins:derivation:open-source", async (event, input) => {
     const scope = access(event, input)
     const path = service.sourcePath(input.copyId, scope.owner)
-    await service.check(scope.owner, input.copyId, scope.guard)
+    await service.check(scope.owner, input.copyId, scope.guard, scope.catalog)
     scope.guard()
     const error = await shell.openPath(path)
     if (error) throw Error(error)

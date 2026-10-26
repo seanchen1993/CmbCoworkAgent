@@ -536,6 +536,43 @@ async function fixture(
   }
 }
 
+it("requires the original baseline for child branches while preserving repeated original-baseline iteration", async () => {
+  const f = await fixture()
+  const plan = await f.prepare("downstream")
+  const created = await f.debug.create(f.context, {
+    threadId: f.scope.threadId, preparationId: plan.id, expectedDigest: plan.candidateDigest
+  })
+  const branch = f.service.get(created.projectId)!
+  const workspace = join(f.root, "rebranch")
+  await mkdir(workspace)
+  const input = {
+    baselineId: f.snapshot.id, sourceProjectId: branch.projectId,
+    expectedSourceVersion: branch.version, stageId: branch.manifest.stages[0].id,
+    projectId: randomUUID(), name: "Cannot reset inherited prefix", workspace,
+    installedPluginId: branch.installedPluginId, goal: branch.goal
+  }
+  await expect(f.service.createBranchAtStage(input)).rejects.toThrow("ORIGINAL_BASELINE_REQUIRED")
+  expect(f.service.get(input.projectId)).toBeUndefined()
+  const cold = new ProjectStageDebugSessions(f.dependencies)
+  expect(() => cold.authorizeBranch({
+    input, source: branch, candidate: { ...branch, projectId: input.projectId, workspace },
+    sourceSnapshotRoot: f.packages.read(branch.pluginDigest).root,
+    candidateSnapshotRoot: f.packages.read(branch.pluginDigest).root
+  })).toThrow("ORIGINAL_BASELINE_REQUIRED")
+  // End the inactive preview before acquiring another lease for the same draft.
+  expect(f.service.operations(branch.projectId)).toEqual([])
+  f.registry.finish(branch, f.scope, f.service.operations(branch.projectId))
+  f.debug.end(branch)
+  const next = await f.prepare("downstream")
+  const iterated = await f.debug.create(f.context, {
+    threadId: f.scope.threadId, preparationId: next.id, expectedDigest: next.candidateDigest
+  })
+  expect(iterated.projectId).not.toBe(branch.projectId)
+  expect(f.debug.list(f.context).branches.map(value => value.sourceProjectId))
+    .toEqual([f.original.projectId, f.original.projectId])
+  expect(f.service.get(f.original.projectId)).toEqual(f.original)
+}, 15000)
+
 it("creates a native prompt-Hook branch without borrowing original approvals or dropping the declaration", async () => {
   const f = await fixture(false, undefined, () => {}, {
     apiVersion: "devclaw.stage-recovery/v1",

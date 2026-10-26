@@ -1,4 +1,5 @@
 import type { HostActionCheckEvidence } from "./action-check-evidence"
+import { hostArtifactReferenceBudget } from "./action-check-evidence"
 import type { ModObject } from "../../../shared/mods/types"
 import { clawActionObject } from "../../../shared/mods/claw-actions"
 import type { ProjectRuntimeManifest } from "../../../shared/project-runtime"
@@ -8,7 +9,11 @@ import type {
   HostProjectState,
   HostValidationReceipt
 } from "../../../shared/project-runtime/host-types"
-import { validateRegisteredToolInput, validateToolSchema } from "../../mods/v2/tool-schema"
+import {
+  validateHostArtifactSchema,
+  validateRegisteredToolInput,
+  validateToolSchema
+} from "../../mods/v2/tool-schema"
 import { hostStateError } from "./host-state-protocol"
 import { readRuntimeScopedFile, runtimeDigest, runtimeDirectoryIdentity } from "./safe-files"
 
@@ -116,10 +121,16 @@ export function validateHostStage(
           new TextDecoder("utf-8", { fatal: true }).decode(file.bytes)
         )
         // Tool schema's bounded data profile accepts an object root; it never resolves remote refs.
-        validateRegisteredToolInput(
-          clawActionObject(check.schema),
-          clawActionObject(value) as ModObject
-        )
+        const referenceBudget = hostArtifactReferenceBudget(actionChecks, check.artifactId)
+        if (referenceBudget !== undefined) {
+          if ((file.bytes?.length ?? 0) > referenceBudget)
+            throw Error("PROJECT_ARTIFACT_SCHEMA_LIMIT")
+          validateHostArtifactSchema(clawActionObject(check.schema), value, referenceBudget)
+        } else
+          validateRegisteredToolInput(
+            clawActionObject(check.schema),
+            clawActionObject(value) as ModObject
+          )
       } catch {
         result = "failed"
       }

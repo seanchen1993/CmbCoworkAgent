@@ -2479,12 +2479,6 @@ function ProjectListSection({
             <col className="w-[190px]" />
             <col className="w-[202px]" />
             <col className="w-[190px]" />
-            <col className="w-[202px]" />
-            <col className="w-[190px]" />
-            <col className="w-[110px]" />
-            <col className="w-[120px]" />
-            {/* Token 输入 / 输出：表头比原来的「Token / 请求问答」多一个空格，120px 差 1px */}
-            <col className="w-[128px]" />
             <col className="w-[110px]" />
             <col className="w-[120px]" />
             {/* Token 输入 / 输出：表头比原来的「Token / 请求问答」多一个空格，120px 差 1px */}
@@ -2864,14 +2858,13 @@ async function resolvePluginUploaderProfiles(
 
 /** 拉取一次市场插件信息，按插件名建立 name → {场景, 负责人, 部门} 映射。市场不可用时静默降级为空。 */
 function usePluginMarketInfo(): Map<string, PluginMarketInfo> {
-  const [infoMap, setInfoMap] = useState<Map<string, PluginMarketInfo>>(new Map())
+  const [infoMap, setInfoMap] = useState<Map<string, PluginMarketInfo>>(() =>
+    new Map(import.meta.env.DEV ? Object.entries(DEV_MOCK_PLUGIN_MARKET_INFO) : [])
+  )
   useEffect(() => {
     let cancelled = false
     // DEV：市场 API 通常不可达，直接使用 mock，无需发请求。
-    if (import.meta.env.DEV) {
-      setInfoMap(new Map(Object.entries(DEV_MOCK_PLUGIN_MARKET_INFO)))
-      return
-    }
+    if (import.meta.env.DEV) return
     void (async () => {
       const res = await marketApi
         .getPlugins({ allowMockOnError: false, silent: true })

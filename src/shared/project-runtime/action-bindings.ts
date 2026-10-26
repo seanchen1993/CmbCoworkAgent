@@ -8,6 +8,10 @@ import {
 } from "../mods/claw-actions"
 import { encodeModJson } from "../mods/validation"
 import type { ModObject } from "../mods/types"
+import {
+  PROJECT_ARTIFACT_REFERENCE_FORMAT,
+  PROJECT_ARTIFACT_REFERENCE_MAX_BYTES
+} from "./artifact-reference"
 
 export const PROJECT_ACTION_LOCK_PATH = "devclaw.project-actions.lock.json"
 export const PROJECT_ACTION_LOCK_MAX_BYTES = 128 * 1024
@@ -18,6 +22,13 @@ export type ProjectActionBinding = ClawActionBinding & {
   config: ModObject
   inputFrom?:
     | { kind: "artifact"; artifactId: string; pointer: string; format?: "json" | "text" }
+    | {
+        kind: "artifact"
+        artifactId: string
+        pointer: ""
+        format: typeof PROJECT_ARTIFACT_REFERENCE_FORMAT
+        maxBytes: number
+      }
     | { kind: "action"; actionId: string; pointer: string }
   inputSchema: ModObject
   configSchema: ModObject | null
@@ -71,15 +82,37 @@ export function parseProjectActionLock(value: unknown): ProjectActionLock {
     const target = projectActionTarget({ command: item.command, platform: item.platform })
     let inputFrom: ProjectActionBinding["inputFrom"]
     if (item.inputFrom !== undefined) {
-      const source = record(item.inputFrom, ["kind", "pointer"], ["artifactId", "actionId", "format"])
+      const source = record(item.inputFrom, ["kind", "pointer"], ["artifactId", "actionId", "format", "maxBytes"])
       const pointer = parseClawOutputPointer(source.pointer)
       if (source.kind === "artifact" && source.actionId === undefined) {
-        if (source.format !== undefined && source.format !== "json" && source.format !== "text")
-          throw Error("PROJECT_ACTION_SOURCE_INVALID")
-        if (source.format === "text" && pointer !== "") throw Error("PROJECT_ACTION_SOURCE_INVALID")
-        inputFrom = { kind: "artifact", artifactId: id(source.artifactId), pointer,
-          ...(source.format ? { format: source.format as "json" | "text" } : {}) }
-      } else if (source.kind === "action" && source.artifactId === undefined && source.format === undefined)
+        if (source.format === PROJECT_ARTIFACT_REFERENCE_FORMAT) {
+          if (
+            pointer !== "" ||
+            !target.platform ||
+            !Number.isSafeInteger(source.maxBytes) ||
+            (source.maxBytes as number) < 1 ||
+            (source.maxBytes as number) > PROJECT_ARTIFACT_REFERENCE_MAX_BYTES
+          )
+            throw Error("PROJECT_ACTION_SOURCE_INVALID")
+          inputFrom = {
+            kind: "artifact",
+            artifactId: id(source.artifactId),
+            pointer: "",
+            format: PROJECT_ARTIFACT_REFERENCE_FORMAT,
+            maxBytes: source.maxBytes as number
+          }
+        } else {
+          if (
+            source.maxBytes !== undefined ||
+            (source.format !== undefined && source.format !== "json" && source.format !== "text")
+          )
+            throw Error("PROJECT_ACTION_SOURCE_INVALID")
+          if (source.format === "text" && pointer !== "")
+            throw Error("PROJECT_ACTION_SOURCE_INVALID")
+          inputFrom = { kind: "artifact", artifactId: id(source.artifactId), pointer,
+            ...(source.format ? { format: source.format as "json" | "text" } : {}) }
+        }
+      } else if (source.kind === "action" && source.artifactId === undefined && source.format === undefined && source.maxBytes === undefined)
         inputFrom = { kind: "action", actionId: id(source.actionId), pointer }
       else throw Error("PROJECT_ACTION_SOURCE_INVALID")
     }

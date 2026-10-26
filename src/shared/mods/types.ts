@@ -168,6 +168,7 @@ export interface ModWorkspaceStatus {
 }
 
 export interface ModAuditEntry {
+  processLifecycle?: import("./process-lifecycle").ProcessLifecycle
   cursor: number
   callId: string
   toolId: string

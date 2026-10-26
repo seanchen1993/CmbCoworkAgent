@@ -3,7 +3,7 @@ import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 import type { DevelopmentProjectTrialRequest } from "../../../shared/mods/development"
 import type { DevelopmentScope } from "../v2/development-session"
 import { getProjectActionCatalog } from "../../harness-board/project-action-runtime"
-import { isProjectSourcePath, readProjectSource } from "./project-source"
+import { isProjectSourcePath, readAuthoringProjectSource } from "./project-source"
 import { normalizeProjectResourcePaths } from "./project-resource-paths"
 import {
   projectAuthoringSessions,
@@ -26,7 +26,7 @@ export async function requestCreatorHostBusinessTrial(input: {
   const resourcePaths = normalizeProjectResourcePaths(
     input.expectedFiles.filter((file) => !isProjectSourcePath(file.path)).map((file) => file.path)
   )
-  const source = await readProjectSource(input.root, resourcePaths)
+  const source = await readAuthoringProjectSource(input.root, resourcePaths)
   input.guard()
   // Dropping a knowledge resource, Hook or executable would change the candidate. Never
   // silently turn a partially imported assembly into an approved Host trial.

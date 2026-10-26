@@ -1,6 +1,7 @@
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import { encodeModJson } from "../../../shared/mods/validation"
 import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { PROJECT_ARTIFACT_REFERENCE_MAX_BYTES } from "../../../shared/project-runtime/artifact-reference"
 
 const types = ["object", "array", "string", "number", "integer", "boolean", "null"]
 const annotations = ["title", "description", "default", "examples", "$comment"]
@@ -183,6 +184,27 @@ function isMultiple(value: number, divisor: number): boolean {
 /** No coercion, defaults, regex, external resolution or unbounded recursive references. */
 export function validateRegisteredToolInput(schema: ModObject, input: ModObject): void {
   if (encodeModJson(input).length > 64000) throw new ModFunctionError("MODS_TOOL_INPUT_LIMIT")
+  validateSchemaInput(schema, input)
+}
+
+/** Host-only artifact profile. Does not change the SDK/tool input budget or schema work limits. */
+export function validateHostArtifactSchema(
+  schema: ModObject,
+  input: unknown,
+  maxBytes: number
+): void {
+  if (
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < 1 ||
+    maxBytes > PROJECT_ARTIFACT_REFERENCE_MAX_BYTES ||
+    !isModObject(input) ||
+    Buffer.byteLength(encodeModJson(input)) > maxBytes
+  )
+    throw new ModFunctionError("PROJECT_ARTIFACT_SCHEMA_LIMIT")
+  validateSchemaInput(schema, input)
+}
+
+function validateSchemaInput(schema: ModObject, input: ModObject): void {
   let work = 0
   const tick = () => {
     if (++work > 20000) throw new ModFunctionError("MODS_TOOL_VALIDATION_LIMIT")

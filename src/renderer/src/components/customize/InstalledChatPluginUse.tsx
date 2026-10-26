@@ -10,10 +10,12 @@ import { FunctionPluginApproval } from "./FunctionPluginApproval"
 /** Native consent, then actual registrations. Discovery never silently enables a plugin. */
 export function InstalledChatPluginUse({
   input,
-  report
+  report,
+  purpose
 }: {
   input: PluginStartUseInput
   report: PluginStartUseReport
+  purpose?: "dependency"
 }) {
   const [current, setCurrent] = useState(report)
   const [workspace, setWorkspace] = useState<ModWorkspaceStatus>()
@@ -118,7 +120,9 @@ export function InstalledChatPluginUse({
   const ready = mod?.state === "ready" && global && workspace?.enabled
   return (
     <section aria-label="聊天插件使用入口" className="space-y-3 rounded border p-3">
-      <h4 className="font-medium">{current.identity.name} 的聊天使用方式</h4>
+      <h4 className="font-medium">
+        {current.identity.name} 的{purpose === "dependency" ? "依赖授权" : "聊天使用方式"}
+      </h4>
       {mod && (
         <>
           <p className="text-sm">先核对原生权限；总开关、项目开关与代码授权需要分别确认。</p>
@@ -182,84 +186,94 @@ export function InstalledChatPluginUse({
               })
             }
           />
-          <button
-            className="rounded border px-3 py-2"
-            disabled={busy || !ready}
-            onClick={() =>
-              void run(async (fresh) => {
-                const exact = fresh.chat?.functionMod
-                if (!exact?.digest || exact.state !== "ready")
-                  throw Error("PLUGIN_START_USE_PERMISSION_CHANGED")
-                const actual = await window.api.mods.commands(input.threadId)
-                const drawings = await window.api.mods.panes(input.threadId)
-                return () => {
-                  setCommands(
-                    actual.filter(
-                      (command) =>
-                        !command.isHidden &&
-                        command.modId === `function:${exact.name}` &&
-                        command.digest === exact.digest
-                    )
-                  )
-                  setPanes(
-                    drawings.filter((pane) => pane.plugin === exact.name).map((pane) => pane.title)
-                  )
-                  setLoaded(true)
+          {purpose !== "dependency" && (
+            <>
+              <button
+                className="rounded border px-3 py-2"
+                disabled={busy || !ready}
+                onClick={() =>
+                  void run(async (fresh) => {
+                    const exact = fresh.chat?.functionMod
+                    if (!exact?.digest || exact.state !== "ready")
+                      throw Error("PLUGIN_START_USE_PERMISSION_CHANGED")
+                    const actual = await window.api.mods.commands(input.threadId)
+                    const drawings = await window.api.mods.panes(input.threadId)
+                    return () => {
+                      setCommands(
+                        actual.filter(
+                          (command) =>
+                            !command.isHidden &&
+                            command.modId === `function:${exact.name}` &&
+                            command.digest === exact.digest
+                        )
+                      )
+                      setPanes(
+                        drawings
+                          .filter((pane) => pane.plugin === exact.name)
+                          .map((pane) => pane.title)
+                      )
+                      setLoaded(true)
+                    }
+                  }, true)
                 }
-              }, true)
-            }
-          >
-            读取实际注册的命令与面板入口
-          </button>
-          {loaded && (
-            <div role="status" className="space-y-2 text-sm">
-              {commands.map((command) => (
-                <p key={command.command}>
-                  <code>/{command.command}</code>
-                  {command.argumentHint ? ` ${command.argumentHint}` : ""}：{command.name}
-                </p>
-              ))}
-              {panes.map((title, index) => (
-                <p key={`${title}-${index}`}>已打开面板：{title}</p>
-              ))}
-              {!commands.length && !panes.length && (
-                <p>
-                  当前插件没有注册可见命令或打开的面板。它可能通过事件、工具或聊天组件生效；不能据此假定已完成业务任务。
-                </p>
+              >
+                读取实际注册的命令与面板入口
+              </button>
+              {loaded && (
+                <div role="status" className="space-y-2 text-sm">
+                  {commands.map((command) => (
+                    <p key={command.command}>
+                      <code>/{command.command}</code>
+                      {command.argumentHint ? ` ${command.argumentHint}` : ""}：{command.name}
+                    </p>
+                  ))}
+                  {panes.map((title, index) => (
+                    <p key={`${title}-${index}`}>已打开面板：{title}</p>
+                  ))}
+                  {!commands.length && !panes.length && (
+                    <p>
+                      当前插件没有注册可见命令或打开的面板。它可能通过事件、工具或聊天组件生效；不能据此假定已完成业务任务。
+                    </p>
+                  )}
+                  {!!commands.length && (
+                    <p>返回原聊天后输入上述命令，填写参数并确认发送；这里不自动执行命令。</p>
+                  )}
+                  {!!panes.length && (
+                    <button
+                      className="rounded border px-3 py-2"
+                      onClick={() =>
+                        void run(async () => () => {
+                          if (
+                            !goToConfigurationThread(nativeScope, () => openClawSidebar("results"))
+                          )
+                            throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
+                        })
+                      }
+                    >
+                      查看此聊天已打开的面板
+                    </button>
+                  )}
+                </div>
               )}
-              {!!commands.length && (
-                <p>返回原聊天后输入上述命令，填写参数并确认发送；这里不自动执行命令。</p>
-              )}
-              {!!panes.length && (
-                <button
-                  className="rounded border px-3 py-2"
-                  onClick={() =>
-                    void run(async () => () => {
-                      if (!goToConfigurationThread(nativeScope, () => openClawSidebar("results")))
-                        throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
-                    })
-                  }
-                >
-                  查看此聊天已打开的面板
-                </button>
-              )}
-            </div>
+              <button
+                className="rounded border px-3 py-2"
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => () => {
+                    if (
+                      !goToConfigurationThread(nativeScope, () => openClawSidebar("configuration"))
+                    )
+                      throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
+                  })
+                }
+              >
+                前往此聊天的原生常用搭配设置
+              </button>
+            </>
           )}
-          <button
-            className="rounded border px-3 py-2"
-            disabled={busy}
-            onClick={() =>
-              void run(async () => () => {
-                if (!goToConfigurationThread(nativeScope, () => openClawSidebar("configuration")))
-                  throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
-              })
-            }
-          >
-            前往此聊天的原生常用搭配设置
-          </button>
         </>
       )}
-      {!!current.chat?.skills.length && (
+      {purpose !== "dependency" && !!current.chat?.skills.length && (
         <div className="space-y-2 text-sm">
           <p>本插件公开的技能入口：</p>
           {current.chat.skills.map((skill) => (
@@ -278,7 +292,7 @@ export function InstalledChatPluginUse({
         </p>
       )}
       <button className="rounded border px-3 py-2" disabled={busy} onClick={() => void run()}>
-        重新核对聊天使用条件
+        {purpose === "dependency" ? "重新核对依赖授权" : "重新核对聊天使用条件"}
       </button>
       {error && (
         <p role="alert" className="text-sm text-destructive">

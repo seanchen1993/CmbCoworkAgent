@@ -8,7 +8,7 @@ export function readNativeChildModsContext(threadId: string) {
 }
 
 /** Returns the real persisted data owner, never a fabricated synthetic thread row. */
-export function readNativeChildModsThread(threadId: string) {
+export function readNativeChildModsThread(threadId: string, read = getThreadCore) {
   const child = readNativeChildModsContext(threadId)
-  return { child, thread: getThreadCore(child?.parentThreadId ?? threadId) }
+  return { child, thread: read(child?.parentThreadId ?? threadId) }
 }

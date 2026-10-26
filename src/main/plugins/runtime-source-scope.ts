@@ -1,4 +1,5 @@
-import { resolve, dirname, join } from "node:path"
+import { resolve, dirname, join, isAbsolute } from "node:path"
+import type { AgentProfile } from "../agent/agent-registry"
 import { isSameWorkspacePath } from "../../shared/workspace-path"
 import { AsyncLocalStorage } from "node:async_hooks"
 import type { PluginCapability } from "../../shared/plugin-capabilities"
@@ -14,7 +15,18 @@ export interface RuntimeCapabilitySource {
   packageDigest: string
 }
 
+/** Host resolves these from retained package declarations and approved directory bindings. */
+export interface RuntimeExecutionResources {
+  profiles: AgentProfile[]
+  workspaces: readonly { id: string; path: string }[]
+  fingerprint: string
+}
+
 export interface RuntimePluginSourceBinding {
+  /** Main-issued stage execution declaration and original input identity. */
+  executionMode?: "normal" | "workflow"
+  inputFingerprint?: string
+  executionResources?: RuntimeExecutionResources
   /** Main-issued file-only debug admission, never reconstructed from thread metadata. */
   stageDebug?: { workspace: string; baselineId: string; allowPromptHooks?: boolean;
     commandHooks?: StageRecoveryCommandPolicy }
@@ -33,6 +45,8 @@ export interface RuntimePluginSourceBinding {
   stageId: string
   /** Host-generated stage instructions, never a renderer-supplied system prompt. */
   stagePrompt?: string
+  /** Host-generated inheritable background/constraints, excluding the parent stage task. */
+  subagentContextPrompt?: string
   /** Host-resolved required project context, retained through original model/child boundaries. */
   requiredContextText?: string
   plugin: PluginMetadata
@@ -93,6 +107,37 @@ export function issueRuntimePluginSourceToken(
   assertSource?: () => void,
   assertRuntime?: () => void
 ): RuntimePluginSourceToken {
+  if (binding.executionMode !== undefined &&
+      (binding.mode !== "host" || !["normal", "workflow"].includes(binding.executionMode)))
+    throw Error("PROJECT_EXECUTION_MODE_INVALID")
+  if (binding.inputFingerprint !== undefined &&
+      (binding.mode !== "host" || !/^[a-f0-9]{64}$/.test(binding.inputFingerprint)))
+    throw Error("PROJECT_EXECUTION_INPUT_IDENTITY_INVALID")
+  const resources = binding.executionResources
+  if (resources) {
+    if (binding.mode !== "host" || !/^[a-f0-9]{64}$/.test(resources.fingerprint) ||
+        !Array.isArray(resources.profiles) || resources.profiles.length > 32 ||
+        !Array.isArray(resources.workspaces) || resources.workspaces.length > 16)
+      throw Error("PROJECT_EXECUTION_RESOURCES_INVALID")
+    const names = new Set<string>(), ids = new Set<string>()
+    for (const profile of resources.profiles) {
+      if (!profile || typeof profile.name !== "string" || !profile.name || names.has(profile.name) ||
+          typeof profile.systemPrompt !== "string" || typeof profile.description !== "string" ||
+          !["none", "read_only", "full"].includes(profile.shellAccess) ||
+          !Array.isArray(profile.disallowedTools) || profile.disallowedTools.some(tool => typeof tool !== "string"))
+        throw Error("PROJECT_EXECUTION_PROFILE_INVALID")
+      if (profile.toolAllowlist !== undefined && (!Array.isArray(profile.toolAllowlist) ||
+          profile.toolAllowlist.some(tool => typeof tool !== "string" || !tool)))
+        throw Error("PROJECT_EXECUTION_PROFILE_INVALID")
+      names.add(profile.name)
+    }
+    for (const workspace of resources.workspaces) {
+      if (!workspace || !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(workspace.id) ||
+          ids.has(workspace.id) || typeof workspace.path !== "string" || !isAbsolute(workspace.path))
+        throw Error("PROJECT_EXECUTION_WORKSPACE_INVALID")
+      ids.add(workspace.id)
+    }
+  }
   const token = Object.freeze({ kind: "host-plugin-source" as const })
   const lease = acquireSnapshotPathLeases(snapshotPaths(binding), "issued-source-token", true)
   try { tokens.set(token, freeze(structuredClone(binding))) }

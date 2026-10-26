@@ -6,6 +6,8 @@ import type { WorkflowRunObservation } from "../../agent/workflow/observation"
 import type { ModObject } from "../../../shared/mods/types"
 
 export interface WorkflowPlatformDependencies {
+  inspectActions?(context: NativePlatformCallContext, runId: string, offset?: number, limit?: number): ModObject
+  launch?(context: NativePlatformCallContext, action: "start" | "resume", input: ModObject): Promise<ModObject>
   active(workspace: string, threadId: string): Promise<WorkflowRunObservation | null>
   latest(workspace: string, threadId: string): Promise<WorkflowRunObservation | null>
   inspect(
@@ -57,6 +59,12 @@ export function createWorkflowPlatformProvider(
       scope: "conversation",
       stateSchema: object,
       actions: [
+        { id: "start", title: "原生确认后启动工作流", inputSchema: { type: "object",
+          additionalProperties: false, required: ["script"], properties: {
+            script: { type: "string", minLength: 1, maxLength: 12000 }, args: {} } },
+          outputSchema: object, requiredPermissions: ["platform.read"], cancellable: false, idempotency: "keyed" },
+        { id: "resume", title: "原生确认后恢复原工作流", inputSchema: runInput,
+          outputSchema: object, requiredPermissions: ["platform.read"], cancellable: false, idempotency: "keyed" },
         {
           id: "inspect",
           title: "读取工作流任务与工作树",
@@ -65,6 +73,7 @@ export function createWorkflowPlatformProvider(
             properties: {
               ...runInput.properties,
               agentOffset: { type: "integer", minimum: 0, maximum: 1_000_000 },
+              actionOffset: { type: "integer", minimum: 0, maximum: 256 },
               worktreeOffset: { type: "integer", minimum: 0, maximum: 1_000_000 },
               limit: { type: "integer", minimum: 1, maximum: 32 }
             }
@@ -128,6 +137,12 @@ export function createWorkflowPlatformProvider(
     },
     act: async (context, action, input) => {
       context.assertCurrent()
+      if (action === "start" || action === "resume") {
+        if (!deps.launch) throw Error("WORKFLOW_NATIVE_RUNTIME_UNAVAILABLE")
+        const result = await deps.launch(context, action, input)
+        context.assertCurrent()
+        return result
+      }
       const runId = input.runId as string
       if (action === "inspect") {
         const result = await deps.inspect(
@@ -137,7 +152,12 @@ export function createWorkflowPlatformProvider(
           input as { agentOffset?: number; worktreeOffset?: number; limit?: number }
         )
         context.assertCurrent()
-        return { found: result !== null, run: result }
+        if (result?.nativeParent && (result.nativeParent.provider !== context.caller.name ||
+          result.nativeParent.digest !== context.caller.digest ||
+          result.nativeParent.incarnation !== context.incarnation)) throw Error("WORKFLOW_NATIVE_PARENT_MISMATCH")
+        return { found: result !== null, run: result ? { ...result,
+          ...deps.inspectActions?.(context, runId, input.actionOffset as number | undefined,
+            input.limit as number | undefined) } : null }
       }
       if (action !== "cancel") throw Error("WORKFLOW_ACTION_UNKNOWN")
       const active = await deps.active(context.workspace, context.threadId)

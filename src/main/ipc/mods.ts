@@ -1,3 +1,4 @@
+import { withTrustedFunctionWait } from "../mods/v2/trusted-function-wait"
 import { setProjectRuntimeFunctions } from "../harness-board/project-runtime-function-source"
 import { ApplicationCompletionPolicies } from "../mods/v2/application-completion-policy"
 import { createHostProjectInputIdentity } from "../harness-board/project-runtime/package-input-identity"
@@ -6,7 +7,8 @@ import { registerBuiltinAdvisorHandlers } from "./builtin-advisor"
 import { registerCommunityExampleHandlers } from "./mods-community-examples"
 import { registerPluginStartUseHandlers } from "./plugin-start-use"
 import { PluginStartUseService } from "../plugins/plugin-start-use"
-import { pluginStartUseConfigurationIssues } from "../plugins/plugin-start-use-diagnostics"
+import { pluginStartUseConfigurationIssues, pluginStartUseDependencyIssues } from "../plugins/plugin-start-use-diagnostics"
+import { projectRuntimeDependencies } from "../harness-board/project-runtime-dependencies"
 import { pluginChatStartUseEntries } from "../plugins/plugin-chat-start-use"
 import { notifyHooksChanged } from "../hooks/notifications"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
@@ -32,6 +34,10 @@ import { registerPromptComposerHandlers } from "./mods-prompt"
 import { FunctionDesktopBroker } from "../mods/v2/desktop-broker"
 import { nativePlatformProviders } from "../mods/v2/platform-native-providers"
 import { createProjectStageDebugPlatformProvider } from "../mods/v2/platform-project-stage-debug-provider"
+import {
+  createNativeProjectRuntimePlatformProvider,
+  executeProjectRuntimeNativeCommand
+} from "../mods/v2/platform-project-runtime-native"
 import { ProjectStageDebugReviewHub } from "../mods/v2/project-stage-debug-review-hub"
 import { getProjectStageDebugSessions } from "../mods/devtools/project-stage-debug"
 import { writeFunctionClipboard } from "../mods/v2/native-clipboard"
@@ -61,7 +67,9 @@ import { app, dialog, clipboard, safeStorage, shell, BrowserWindow, type IpcMain
 import { join } from "node:path"
 import { writeFile } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
-import { getDb, getThreadCore, getThreadMessagesByIds, getUserMessagePromptOrigin } from "../db"
+import {
+  getDb, getThreadCore, getThreadRuntimeScope, getThreadMessagesByIds, getUserMessagePromptOrigin
+} from "../db"
 import { functionConversationTranscriptFields, isFunctionConversationNotice } from
   "../../shared/mods/v2/conversation-transcript"
 import {
@@ -82,6 +90,7 @@ import { ModsManager, setModsManager, setModsUnavailable } from "../mods/manager
 import { ModError, modErrorCode } from "../mods/errors"
 import { installPluginFromDir } from "./plugins"
 import { CreatorProjectDeliveries } from "../mods/devtools/creator-project-delivery"
+import { CreatorSourceSets } from "../mods/devtools/creator-source-set"
 import { observeProjectDeliveryInstallation, readProjectDeliveryInventory } from "../plugins/plugin-delivery-observation"
 import { withPluginCatalogMutation } from "../plugins/catalog-mutation"
 import { bundledModExamplesRoot } from "../mods/bundled-examples"
@@ -97,7 +106,7 @@ import {
   recordFunctionCancellationReceipt
 } from "../mods/v2/execution-context"
 import { functionCallTurn, functionCallIdentity, functionCallAuthority, functionCallAgent,
-  withFunctionTransportExecution, runFunctionHostCall } from "../mods/v2/host-call"
+  withFunctionTransportExecution, runFunctionHostCall, observeFunctionProcess } from "../mods/v2/host-call"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import type { ModCommandDescriptor, ModJson, ModObject } from "../../shared/mods/types"
 import { resolveAgentModeFromMetadata } from "../../shared/agent-mode-metadata"
@@ -123,7 +132,10 @@ import {
 import type { FunctionModelForkSnapshot } from "../mods/v2/model-operations"
 import { FunctionRegisteredTools } from "../mods/v2/registered-tools"
 import { queryFunctionToolPermission } from "../mods/v2/tool-permission-host"
+import { confirmFunctionProcess } from "./mods-process-approval"
 import { functionFileScope } from "../mods/v2/file-permission-host"
+import { assertWorkflowResourceProcess } from "../mods/v2/workflow-resource-access"
+import { currentWorkflowWorktreeActionScope } from "../agent/workflow/worktree-action-scope"
 import { assertFunctionMcpServerAvailable } from "../mods/v2/mcp-names"
 import { getGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { registerModsFlowHandlers } from "./mods-flows"
@@ -183,11 +195,12 @@ import { auditNativeSnapshotReferences } from "../harness-board/project-runtime/
 import { registerPlatformFileEditSink } from "../mods/v2/platform-native-file-edits"
 import { registerPlatformHandlers } from "./mods-platform"
 import { runPlatformUserAction } from "../mods/v2/platform-user-action"
+import { configureWorkflowDeterministicActions } from "../agent/workflow/deterministic-action-native"
 import { builtinInstructionsStore } from "../mods/builtins/instructions"
 import { builtinChangeReviewService } from "../mods/builtins/change-review"
 import { projectBuiltinRunOverview } from "../mods/builtins/overview"
 import { describeDevClawBuiltins } from "../mods/builtins/registry"
-import { readBuiltinProjectFacts } from "../mods/builtins/project-facts"
+import { readBuiltinProjectBinding, readBuiltinProjectFacts } from "../mods/builtins/project-facts"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
   let reconcileCreatorReuse: ((threadId?: string) => void) | undefined
@@ -428,6 +441,26 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         })
         context.assertCurrent()
         return result.response === 0
+      }), createNativeProjectRuntimePlatformProvider(async request => {
+        request.assertCurrent()
+        const owner = window()
+        if (!owner || owner.isDestroyed()) return { status: "rejected" }
+        const labels = { continue: "连续执行项目", cancel: "停止当前步骤", reconcile: "核对执行结果" }
+        const result = await dialog.showMessageBox(owner, {
+          signal: request.context.signal,
+          type: "question", title: labels[request.kind],
+          message: `插件 ${request.context.caller.name} 请求${labels[request.kind]}`,
+          detail: `项目：${request.projectId}\n版本：${request.expectedVersion}\n` +
+            (request.kind === "continue"
+              ? "最多继续 16 个阶段，新的执行或成果审批仍会停下等待确认。失败和未知结果不会自动重试。"
+              : request.kind === "cancel"
+                ? "请求停止不代表撤销已发生的文件修改或外部操作。"
+                : "只核对已有执行事实与成果，不会授权重新执行。"),
+          buttons: [labels[request.kind], "暂不处理"], defaultId: 1, cancelId: 1
+        })
+        request.assertCurrent()
+        if (result.response !== 0) return { status: "rejected" }
+        return executeProjectRuntimeNativeCommand(request)
       }), createProjectStageDebugPlatformProvider({
         creator: context => {
           context.assertCurrent()
@@ -545,6 +578,10 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         return runFunctionHostCall({
           store: manager.store,
           identity,
+          ...(method === "process.run" ? {
+            processLifecycle: (event: import("../../shared/mods/process-lifecycle").ProcessLifecycleEvent) =>
+              manager.store.recordProcessLifecycle(identity.callId, event)
+          } : {}),
           assertLive,
           admit: async () => {
             if (manager.protects(workspace))
@@ -595,7 +632,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         if (choice.response !== 1) throw new ModError("MODS_HTTP_DENIED")
       },
       authorizeProcess: async (workspace, threadId, grant, request, signal) => {
+        const resourceGuard = assertWorkflowResourceProcess(workspace, threadId, request)
         const assertLive = () => {
+          resourceGuard?.()
           signal.throwIfAborted()
           manager.store.assertGrant(grant)
           if (writableThreadScope(threadId) !== workspace)
@@ -611,29 +650,46 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
             identity,
             "process.run",
             { ...request, argv: [...request.argv] },
-            signal
+            signal,
+            (phase) => observeFunctionProcess(`policy-${phase}`)
           )
         assertLive()
         const owner = window()
         if (!owner || owner.isDestroyed()) throw new ModError("MODS_PROCESS_APPROVAL_UNAVAILABLE")
-        const choice = await dialog.showMessageBox(owner, {
-          signal,
-          type: "question",
-          title: "批准插件运行本机命令",
-          message: `插件 ${grant.modId} 请求运行 ${request.argv[0]}`,
-          detail:
-            "此命令以当前系统用户权限运行，可访问本机文件和网络。\n\n" +
-            JSON.stringify(request, null, 2),
-          buttons: ["拒绝", "允许本次命令"],
-          defaultId: 0,
-          cancelId: 0,
-          noLink: true
-        })
+        try {
+          await confirmFunctionProcess(grant.modId, request, {
+            signal,
+            tempRoot: app.getPath("userData"),
+            assertCurrent: () => {
+              assertLive()
+              if (owner !== window() || owner.isDestroyed())
+                throw new ModError("MODS_PROCESS_APPROVAL_UNAVAILABLE")
+            },
+            showDialog: (options) => {
+              observeFunctionProcess("approval-waiting")
+              return withTrustedFunctionWait("user-approval", signal, async () => {
+                assertLive()
+                if (owner !== window() || owner.isDestroyed())
+                  throw new ModError("MODS_PROCESS_APPROVAL_UNAVAILABLE")
+                const choice = await dialog.showMessageBox(owner, options)
+                assertLive()
+                return choice
+              })
+            },
+            openPath: (path) => shell.openPath(path)
+          })
+          observeFunctionProcess("approval-allowed")
+        } catch (error) {
+          if (error instanceof ModError && error.code === "MODS_PROCESS_DENIED")
+            observeFunctionProcess("approval-rejected")
+          throw error
+        }
         assertLive()
-        if (choice.response !== 1) throw new ModError("MODS_PROCESS_DENIED")
       },
       cwd: (workspace, threadId) => {
         assertFunctionDataScope(workspace, threadId)
+        const resource = currentWorkflowWorktreeActionScope(workspace, threadId)
+        if (resource) return resource.boundary.workspaceRoot
         return manager.functionRuntimeScope(workspace, threadId).workspace
       },
       fileScope: (workspace, threadId) =>
@@ -786,12 +842,12 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
             assertFunctionDataScope(workspace, threadId)
           }
         }
-        const row = getThreadCore(threadId)
+        const row = getThreadRuntimeScope(threadId)
         if (!row || writableThreadScope(threadId) !== workspace)
           throw new ModError("MODS_CALL_SCOPE_CHANGED")
         const incarnation = captureThreadIncarnation(row)
         return () => {
-          if (!matchesThreadIncarnation(getThreadCore(threadId), incarnation) ||
+          if (!matchesThreadIncarnation(getThreadRuntimeScope(threadId), incarnation) ||
             writableThreadScope(threadId) !== workspace)
             throw new ModError("MODS_CALL_SCOPE_CHANGED")
         }
@@ -799,13 +855,13 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       captureDisplayScope: (workspace, threadId) => {
         // Native child execution keeps its separate host identity protocol.
         if (readNativeChildModsContext(threadId)) return undefined
-        const database = getDb(), row = getThreadCore(threadId)
+        const database = getDb(), row = getThreadRuntimeScope(threadId)
         if (!row || writableThreadScope(threadId) !== workspace)
           throw new ModError("MODS_CALL_SCOPE_CHANGED")
         const incarnation = captureThreadIncarnation(row)
         return { database, workspace, threadId, incarnation, assertCurrent: () => {
           if (getDb() !== database ||
-            !matchesThreadIncarnation(getThreadCore(threadId), incarnation) ||
+            !matchesThreadIncarnation(getThreadRuntimeScope(threadId), incarnation) ||
             writableThreadScope(threadId) !== workspace)
             throw new ModError("MODS_CALL_SCOPE_CHANGED")
         } }
@@ -1205,12 +1261,22 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     diagnostics: async (plugin, input, guard) => {
       const facts = await functions.prepareRuntimeSourceFacts({ workspace: input.expectedWorkspace, plugin })
       guard()
-      if (!facts?.userConfig) return []
-      const view = await functions.userConfig(
-        input.expectedWorkspace, input.threadId, plugin.id, new AbortController().signal, guard
-      )
+      const dependencies = await projectRuntimeDependencies({
+        root: plugin.path, workspace: input.expectedWorkspace, manager: functions,
+        plugins: getPlugins, assertCurrent: guard
+      }).review()
+      const issues = pluginStartUseDependencyIssues(dependencies, {
+        enabled: manager.isEnabled(input.expectedWorkspace),
+        globallyEnabled: manager.isGloballyEnabled()
+      })
+      if (facts?.userConfig) {
+        const view = await functions.userConfig(
+          input.expectedWorkspace, input.threadId, plugin.id, new AbortController().signal, guard
+        )
+        issues.push(...pluginStartUseConfigurationIssues(view))
+      }
       guard()
-      return pluginStartUseConfigurationIssues(view)
+      return issues
     },
     chatEntries: async (plugin, input, guard) => {
       guard()
@@ -1530,7 +1596,64 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   development.configureProjectDeliveryStatus(threadId => {
     try { return creatorProjectDeliveries.status(threadId) } catch { return undefined }
   })
+  const creatorSourceSets = new CreatorSourceSets({
+    root: join(getOpenworkDir(), "creator-source-sets"), settings: manager.store,
+    context: threadId => development.reuseContext(threadId),
+    occupied: threadId => !!getLocalThreadRunLease(threadId) || manager.functionTurns.hasUnsettled(threadId) || functions.configurationBusy(threadId),
+    sessions: projectAuthoringSessions, deliveries: creatorProjectDeliveries,
+    plugins: readDeliveryPlugins, install: installDerivedPluginDirectory,
+    validatePackage: inspectCompletePluginDirectory,
+    functions: workspace => functions.status(workspace),
+    assertAuthorized: (workspace, bindings) => {
+      const plugins = readDeliveryPlugins()
+      for (const binding of bindings) {
+        const grant = manager.store.getGrant(workspace, `function:${binding.name}`)
+        if (!grant?.enabled || grant.digest !== binding.digest ||
+          !plugins.some(plugin => plugin.id === binding.pluginId && plugin.enabled !== false))
+          throw Error("SOURCE_SET_AUTHORIZATION_CHANGED")
+      }
+    },
+    observeInstallation: (input, guard) => withPluginCatalogMutation(() =>
+      observeProjectDeliveryInstallation(getPluginsDir(), readDeliveryPlugins, input, guard)),
+    invalidate: () => { invalidateEnabledSkillsCache(); invalidatePluginHooksCache() },
+    changed: threadId => {
+      const owner = window()
+      if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed())
+        owner.webContents.send("mods:development-changed", { threadId })
+    }
+  })
+  development.configureSourceSetStatus(threadId => {
+    try { return creatorSourceSets.status(threadId) } catch { return undefined }
+  })
   registerModsDevelopmentHandlers(ipcMain, development, trusted, {
+    importSourceSet: async input => {
+      const context = development.reuseContext(input.threadId)
+      if (context.scope.workspace !== manager.workspaceKey(input.expectedWorkspace)) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+      const owner = window()
+      if (!owner || owner.isDestroyed()) throw Error("DEVELOPMENT_WINDOW_CHANGED")
+      const result = await dialog.showOpenDialog(owner, { title: "选择含 devclaw.source-set.json 的作者源码目录", properties: ["openDirectory"] })
+      context.assertCurrent()
+      if (owner !== window() || owner.isDestroyed()) throw Error("DEVELOPMENT_WINDOW_CHANGED")
+      if (!result.canceled && result.filePaths.length === 1)
+        await creatorSourceSets.import(input.threadId, context.scope.workspace, result.filePaths[0])
+      return development.status(input.threadId)
+    },
+    advanceSourceSet: async input => {
+      await creatorSourceSets.advance(input.threadId, manager.workspaceKey(input.expectedWorkspace), input.id)
+      return development.status(input.threadId)
+    },
+    cancelSourceSet: async input => {
+      await creatorSourceSets.cancel(input.threadId, manager.workspaceKey(input.expectedWorkspace), input.id)
+      return development.status(input.threadId)
+    },
+    installSourceSetDependency: async input => {
+      await creatorSourceSets.install(input.threadId, manager.workspaceKey(input.expectedWorkspace), input.id, input.dependencyId)
+      return development.status(input.threadId)
+    },
+    reconcileSourceSetDependency: async input => {
+      await creatorSourceSets.reconcile(input.threadId, manager.workspaceKey(input.expectedWorkspace), input.id, input.dependencyId)
+      return development.status(input.threadId)
+    },
     approveModularization: async input => {
       await creatorBusiness.approveModularization(input.threadId, input.expectedWorkspace, input)
       return development.status(input.threadId)
@@ -1627,6 +1750,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         owner.webContents.send("mods:flow-changed", { threadId })
     }
   })
+  configureWorkflowDeterministicActions({
+    functions,
+    store: manager.store.functionState,
+    workspaceKey: workspace => manager.workspaceKey(workspace),
+    thread: getThreadCore,
+    runOwned: (scope, work) => runPlatformUserAction(queue, manager, scope.workspace,
+      scope.threadId, scope.signal, scope.assertCurrent, work)
+  })
   setProjectRuntimeFunctions(functions, workspace => manager.workspaceKey(workspace), {
     settingsStamp: workspace => JSON.stringify(["enabled", "policy", "epoch"].map(key =>
       manager.store.getSetting(`${key}:${workspace}`, ""))),
@@ -1641,6 +1772,12 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   })
   setProjectActionRuntime(normalizeProjectActionRuntime({ flows: evaluationFlows,
     ...projectInputs,
+    captureOperationRetirement: (workspace, threadId) =>
+      manager.captureFunctionThreadRetirement(threadId, workspace),
+    verifyReadOnlyContextProvider: (workspace, threadId, provider, signal) =>
+      functions.verifyReadOnlyContextProvider(workspace, threadId, provider, signal),
+    verifyReadOnlyCheckProvider: (workspace, threadId, provider, signal) =>
+      functions.verifyReadOnlyCheckProvider(workspace, threadId, provider, signal),
     publishRequiredContext: (workspace, text, signal) => manager.publish(workspace, text, undefined, signal),
     readRuns: (workspace, threadId) => new FlowStore(manager.store).runs(workspace, threadId),
     readActionResult: (workspace, threadId, runId, executionId) =>
@@ -1767,6 +1904,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         await captured.retire()
       } }
     },
+    captureIdleThreadRetirement: (workspace, threadId) => {
+      const captured = functions.captureIdleThreadRetirement(workspace, threadId)
+      return { ...captured, retire: async () => {
+        captured.assertCurrent()
+        queue.closeThread(threadId)
+        await captured.retire()
+      } }
+    },
     close: () => { functions.close(); desktopBroker.close(); promptBroker.close() }
   })
   app.once("will-quit", () => {
@@ -1852,7 +1997,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   function readThreadWorkspacePath(threadId: string): string {
     if (typeof threadId !== "string" || threadId.length > 200)
       throw new ModError("MODS_THREAD_INVALID")
-    const { thread } = readNativeChildModsThread(threadId)
+    const { thread } = readNativeChildModsThread(threadId, getThreadRuntimeScope)
     if (!thread) throw new ModError("MODS_THREAD_MISSING")
     const metadata =
       typeof thread.metadata === "string" ? JSON.parse(thread.metadata) : thread.metadata
@@ -1902,7 +2047,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   }
   function writableThreadScope(threadId: string): string {
     const workspace = threadScope(threadId)
-    const { thread } = readNativeChildModsThread(threadId)
+    const { thread } = readNativeChildModsThread(threadId, getThreadRuntimeScope)
     if (!thread) throw new ModError("MODS_THREAD_MISSING")
     const metadata =
       typeof thread.metadata === "string" ? JSON.parse(thread.metadata) : thread.metadata
@@ -1926,20 +2071,18 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     const worker = readNativeChildModsContext(threadId)
     if (worker) assertFunctionDataScope(manager.workspaceKey(worker.workspace), threadId)
     const selected = resolveClawThread(worker?.parentThreadId ?? threadId,
-      getThreadCore, (workspace) => manager.workspaceKey(workspace))
+      getThreadRuntimeScope, (workspace) => manager.workspaceKey(workspace))
     return worker && selected ? { threadId, identity: selected.identity } : selected
   }
   function functionCapabilityContext(workspace: string, threadId: string) {
     const worker = readNativeChildModsContext(threadId)
     if (worker) assertFunctionDataScope(manager.workspaceKey(worker.workspace), threadId)
     return resolveCapabilityContext(workspace, worker?.parentThreadId ?? threadId, {
-      thread: getThreadCore,
+      thread: getThreadRuntimeScope,
       projectWorkspaces: getHarnessCapabilityWorkspaces,
       featureWorkspace: getHarnessCapabilityFeatureWorkspace,
       hostProject: (id, root, binding) => {
-        const facts = readBuiltinProjectFacts(id, root)
-        return facts.facts.state === "observed" && facts.review?.projectId ===
-          (binding as { projectId?: string }).projectId
+        return readBuiltinProjectBinding(id, root, (binding as { projectId?: string }).projectId)
       }
     })
   }

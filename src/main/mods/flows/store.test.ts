@@ -8,6 +8,8 @@ describe("flow persistence", () => {
     const data = new Map<string, string>()
     const settings = {
       getSetting: (key: string, fallback = "") => data.get(key) ?? fallback,
+      settingsWithPrefix: (prefix: string) => [...data].filter(([key]) => key.startsWith(prefix))
+        .map(([key, value]) => ({ key, value })),
       setSetting: (key: string, value: string) => {
         data.set(key, value)
       }
@@ -63,6 +65,7 @@ describe("flow persistence", () => {
         threadId: "thread",
         flow,
         startedAt: n,
+        finishedAt: n + 1,
         status: "complete",
         epoch: 0,
         attempts: [],
@@ -73,5 +76,28 @@ describe("flow persistence", () => {
     expect(f.store.runs("A", "thread")).toHaveLength(20)
     expect(f.store.runs("A", "thread")[0].id).toBe("run-24")
     expect(f.store.runs("B", "thread")).toEqual([])
+  })
+  it("scans every overlapping thread after restart and fences history changes without blocking siblings", () => {
+    const f = fixture(), flow = f.store.save("C:/repo", createAutobizFlow("plugin"), 0)
+    const run: FlowRun = { id: "original", workspace: "C:/repo", threadId: "other-stage", flow,
+      startedAt: 1, finishedAt: 2, status: "complete", epoch: 0, attempts: [], failureCounts: {} }
+    f.store.put(run)
+    const guard = new FlowStore(f.settings).assertWorkspaceResourcesSettled("C:/repo/subdir")
+    f.store.put({ ...run, id: "sibling", workspace: "C:/repo-other", status: "running" })
+    guard.assertCurrent()
+    f.store.put({ ...run, id: "new" })
+    expect(guard.assertCurrent).toThrow("CHANGED")
+    f.store.put({ ...run, status: "interrupted" })
+    expect(() => new FlowStore(f.settings).assertWorkspaceResourcesSettled("C:/repo")).toThrow("UNSETTLED")
+    expect(f.store.run("C:/repo", "other-stage", "original")?.status).toBe("interrupted")
+  })
+  it("never evicts unknown effects when completed runs fill history", () => {
+    const f = fixture(), flow = f.store.save("A", createAutobizFlow("plugin"), 0)
+    const base: FlowRun = { id: "unknown", workspace: "A", threadId: "thread", flow,
+      startedAt: 1, finishedAt: 2, status: "interrupted", epoch: 0, attempts: [], failureCounts: {} }
+    f.store.put(base)
+    for (let n = 0; n < 30; n++) f.store.put({ ...base, id: `known-${n}`, status: "complete" })
+    expect(f.store.run("A", "thread", "unknown")).toBeDefined()
+    expect(() => f.store.assertWorkspaceResourcesSettled("A")).toThrow("UNSETTLED")
   })
 })

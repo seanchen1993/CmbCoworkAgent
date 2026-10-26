@@ -6,7 +6,7 @@ import type {
 import type { PluginMetadata } from "../../types"
 import type { DevelopmentScope } from "../v2/development-session"
 import type { ProjectDevelopmentSnapshot } from "./project-development-session"
-import { readProjectSource } from "./project-source"
+import { readAuthoringProjectSource as readProjectSource } from "./project-source"
 import { inspectProjectSource } from "./project-doctor"
 import type { ClawActionDescriptor } from "../../../shared/mods/claw-actions"
 import { isSameWorkspacePath } from "../../../shared/workspace-path"

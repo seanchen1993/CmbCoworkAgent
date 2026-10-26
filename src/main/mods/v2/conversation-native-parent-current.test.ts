@@ -192,6 +192,43 @@ async function fixture(options: { genericStore?: boolean; wrappedBackend?: boole
 }
 
 describe("actual native parent current execution", () => {
+  it.each(["incarnation", "lease"])("keeps parent history while rejecting final %s revocation", async kind => {
+    const f = await fixture(), row = appDb.getThreadCore(f.threadId)!
+    const metadata = JSON.stringify({ ...JSON.parse(row.metadata!),
+      llmFileHistory: "历史🙂".repeat(20_000), retainedScope: { enabled: true } })
+    f.database.run("UPDATE threads SET metadata=? WHERE thread_id=?", [metadata, f.threadId])
+    const original = appDb.getThreadRuntimeScope
+    const scopeRead = vi.spyOn(appDb, "getThreadRuntimeScope")
+      .mockImplementation(id => {
+        const result = original(id)
+        if (id === f.threadId) expect(result?.metadata).not.toContain("llmFileHistory")
+        return result
+      })
+    const writes = vi.spyOn(f.database, "run")
+    try {
+      expect(f.run()).toEqual({ source: 1, scope: 1 })
+      expect(scopeRead).toHaveBeenCalledWith(f.threadId)
+      expect(writes).not.toHaveBeenCalled()
+      expect(appDb.getThreadCore(f.threadId)?.metadata).toBe(metadata)
+      f.scope(() => {
+        if (kind === "lease") releaseLocalThreadRunLease(f.threadId, "desktop", f.runId)
+        else {
+          f.database.run("DELETE FROM threads WHERE thread_id=?", [f.threadId])
+          appDb.createThread(f.threadId, JSON.parse(metadata))
+          f.database.run("UPDATE threads SET created_at=? WHERE thread_id=?",
+            [row.created_at, f.threadId])
+        }
+      })
+      expect(() => f.run()).toThrow()
+      expect(appDb.getThreadCore(f.threadId)?.created_at).toBe(row.created_at)
+      f.scope(() => {})
+      f.database.run("UPDATE threads SET metadata=? WHERE thread_id=?", [metadata, f.threadId])
+      if (kind === "lease") claimLocalThreadRunLease({ threadId: f.threadId,
+        runId: f.runId, owner: "desktop" })
+      expect(() => f.run()).toThrow()
+    } finally { writes.mockRestore(); scopeRead.mockRestore(); await f.close() }
+  })
+
   it("keeps an admitted independent child on its own physical lease after parent lease release", async () => {
     const f = await fixture()
     const physicalThreadId = randomUUID(), runId = randomUUID(), agentId = `mods-agent:${randomUUID()}`

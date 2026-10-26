@@ -1,7 +1,9 @@
+import { isHostWorkflowExecution } from "./host-execution"
 import { createHash, randomUUID } from "crypto"
 import {
   existsSync,
   lstatSync,
+  opendirSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -9,9 +11,10 @@ import {
   writeFileSync
 } from "fs"
 import { mkdir, open, opendir, rename, rm, stat, unlink, writeFile } from "fs/promises"
-import { dirname, join, resolve } from "path"
+import { basename, dirname, join, resolve } from "path"
 import { Worker, type ResourceLimits } from "worker_threads"
 import { getCmbCoworkAgentDataRoot } from "../../app-data-root"
+import { workspacePathsOverlap } from "../../../shared/workspace-path"
 import {
   openStableFileHandle,
   readStableFileHandleBounded
@@ -847,7 +850,7 @@ try {
     "scriptSha256", "args", "status", "phases", "currentPhase", "agents",
     "worktrees", "logs", "journal", "result", "resultSidecarStatus", "error",
     "warning", "stats", "startedAt", "updatedAt", "completedAt",
-    "notificationDelivered", "notificationOwner", "resumed", "endedAt"
+    "notificationDelivered", "notificationOwner", "resumed", "endedAt", "nativeParent", "hostExecution"
   ])
   for (const key of Object.keys(parsed)) {
     if (!knownKeys.has(key)) throw new Error("workflow run JSON contains an unknown field")
@@ -1249,6 +1252,7 @@ function isPersistedWorkflowRunShape(value: unknown): value is PersistedWorkflow
     mutable.status = "aborted"
   }
   const run = value as Partial<PersistedWorkflowRun>
+  if (run.hostExecution !== undefined && !isHostWorkflowExecution(run.hostExecution)) return false
   if (
     run.version !== 1 ||
     typeof run.runId !== "string" ||
@@ -3000,6 +3004,128 @@ export async function countUnresolvedWorkflowWorktreesAsync(
     unresolved += counts.reduce<number>((sum, value) => sum + value, 0)
   }
   return unresolved
+}
+
+/** Storage keys are lossy; ambiguous separator/truncation matches must fail closed. */
+function workflowWorkspaceBucketsOverlap(left: string, right: string): boolean {
+  const key = (value: string) => (process.platform === "win32" ? value.toLowerCase() : value).slice(0, 200)
+  const a = key(left), b = key(right)
+  const prefix = (value: string) => value.endsWith("-") || value.length === 200 ? value : `${value}-`
+  return a === b || a.startsWith(prefix(b)) || b.startsWith(prefix(a))
+}
+
+/** Read original durable histories across overlapping workspace buckets, including after restart. */
+export async function assertWorkspaceWorkflowRunsSettled(
+  workspacePath: string,
+  knownWorkspaces: readonly string[] = []
+): Promise<{ assertCurrent(): void }> {
+  if (knownWorkspaces.length > 4096) throw Error("WORKFLOW_RESOURCE_SCAN_INCOMPLETE")
+  const candidates = await getProjectThreadDataDirectoryReadCandidates(workspacePath, "workflow-scope-probe")
+  let remainingEntries = WORKFLOW_RUN_DIRECTORY_MAX_ENTRIES
+  const observations = new Map<string, string | null>()
+  const bucketSnapshots = new Map<string, { selected: string; buckets: string; identity: string | null }>()
+  const fingerprint = (value: NonNullable<ReturnType<typeof statSync>>) =>
+    [value.dev, value.ino, value.size, value.mtimeMs, value.ctimeMs].join(":")
+  const observe = async (path: string) => {
+    try { observations.set(path, fingerprint(await stat(path))) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+      observations.set(path, null)
+    }
+  }
+  const entries = async (path: string, limit = 4096) => {
+    await observe(path)
+    try {
+      const result = await readWorkflowDirectoryEntriesBounded(path, Math.min(limit, remainingEntries))
+      remainingEntries -= result.length
+      return result
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" ||
+          (error as NodeJS.ErrnoException).code === "ENOTDIR") return []
+      throw error
+    }
+  }
+  const roots = new Set(candidates.map(dirname))
+  for (const candidate of candidates) {
+    const selected = basename(dirname(candidate))
+    const projects = dirname(dirname(candidate))
+    const buckets = (await entries(projects)).filter(bucket => workflowWorkspaceBucketsOverlap(selected, bucket)).sort()
+    let identity: string | null = null
+    try { const info = await stat(projects); identity = `${info.dev}:${info.ino}` }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error }
+    observations.delete(projects)
+    bucketSnapshots.set(projects, { selected, buckets: JSON.stringify(buckets), identity })
+    for (const bucket of buckets) roots.add(join(projects, bucket))
+  }
+  const legacyRoots = new Set<string>()
+  const selectedWorkspace = resolve(workspacePath)
+  // Original thread metadata supplies legacy descendant workspaces. Do not walk
+  // arbitrary project contents (such as node_modules) to discover historical stores.
+  for (let ancestor = selectedWorkspace; ; ancestor = dirname(ancestor)) {
+    legacyRoots.add(join(ancestor, ".cmbdevclaw", "workflows"))
+    if (dirname(ancestor) === ancestor) break
+  }
+  for (const workspace of knownWorkspaces)
+    if (workspacePathsOverlap(workspace, selectedWorkspace))
+      legacyRoots.add(join(resolve(workspace), ".cmbdevclaw", "workflows"))
+  for (const legacy of legacyRoots) roots.add(legacy)
+  for (const root of roots) {
+    for (const thread of await entries(root)) {
+      const dir = legacyRoots.has(root) ? join(root, thread) : join(root, thread, "workflows")
+      const files = await entries(dir, WORKFLOW_RUN_DIRECTORY_MAX_ENTRIES)
+      const runIds = new Set(files.flatMap(file => {
+        const id = file.endsWith(".json.bak") ? file.slice(0, -9)
+          : file.endsWith(".json") ? file.slice(0, -5) : ""
+        return isValidWorkflowRunId(id) ? [id] : []
+      }))
+      for (const runId of runIds) {
+        // Observe before the async read so an earlier result cannot change unnoticed.
+        await observe(runFilePathInDir(dir, runId))
+        await observe(`${runFilePathInDir(dir, runId)}.bak`)
+        const located = await loadWorkflowRunFromDirAsync(dir, runId)
+        if (!located) throw Error("WORKFLOW_RESOURCES_UNCONFIRMED")
+        const run = located.run
+        if (run.status === "running") throw Error("WORKFLOW_RESOURCES_UNCONFIRMED")
+        // A failed deterministic parent may have an unsettled external action receipt.
+        // A caller must reconcile that original operation before admitting migration.
+        if (run.status !== "completed")
+          throw Error("WORKFLOW_RESOURCES_UNCONFIRMED")
+        for (const record of run.worktrees ?? []) {
+          if ((record.status !== "merged" && record.status !== "discarded") || record.cleanupPending)
+            throw Error("WORKFLOW_RESOURCES_UNSETTLED")
+          try { await stat(record.directory); throw Error("WORKFLOW_RESOURCES_UNSETTLED") }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error }
+        }
+      }
+    }
+  }
+  const assertCurrent = () => {
+    for (const [path, expected] of bucketSnapshots) {
+      const buckets: string[] = []
+      try {
+        const info = statSync(path)
+        if (expected.identity !== null && `${info.dev}:${info.ino}` !== expected.identity)
+          throw Error("WORKFLOW_RESOURCES_CHANGED")
+        const directory = opendirSync(path)
+        let count = 0
+        try {
+          for (let entry = directory.readSync(); entry; entry = directory.readSync()) {
+            if (++count > 4096) throw Error("WORKFLOW_RESOURCE_SCAN_INCOMPLETE")
+            if (workflowWorkspaceBucketsOverlap(expected.selected, entry.name)) buckets.push(entry.name)
+          }
+        } finally { directory.closeSync() }
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error }
+      if (JSON.stringify(buckets.sort()) !== expected.buckets) throw Error("WORKFLOW_RESOURCES_CHANGED")
+    }
+    for (const [path, expected] of observations) {
+      let actual: string | null = null
+      try { actual = fingerprint(statSync(path)) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error }
+      if (actual !== expected) throw Error("WORKFLOW_RESOURCES_CHANGED")
+    }
+  }
+  assertCurrent()
+  return { assertCurrent }
 }
 
 /**

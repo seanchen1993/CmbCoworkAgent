@@ -9,6 +9,7 @@ import type {
   AgentRunRequest
 } from "../agent/agent-run-service"
 import { nativePluginPromptRun } from "../agent/mods-plugin-prompt-entry"
+import { settledRunCancellationTerminal } from "../agent/run-cancellation-settlement"
 
 type RunEntry = (
   request: AgentRunRequest,
@@ -55,6 +56,7 @@ function loadRunEntry(blocked: boolean) {
     "getThreadCore",
     "uuid",
     "nativePluginPromptRun",
+    "settledRunCancellationTerminal",
     code
   )(
     (implementation: RunEntry) => {
@@ -65,7 +67,8 @@ function loadRunEntry(blocked: boolean) {
     (channel: string, requestId: string) => `${channel}:${requestId}`,
     getThreadCore,
     randomUUID,
-    nativePluginPromptRun
+    nativePluginPromptRun,
+    settledRunCancellationTerminal
   )
   return { entry, blocksThread, getThreadCore, reachedExecution }
 }

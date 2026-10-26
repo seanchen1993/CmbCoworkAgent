@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks"
+import { markRunCancellationEffectDispatched } from "../agent/run-cancellation-settlement"
 import { randomUUID } from "node:crypto"
 import { setTimeout as delay } from "node:timers/promises"
 import type { ModObject } from "../../shared/mods/types"
@@ -37,6 +38,7 @@ export function withModToolCall<T, R extends ToolRequest>(
   handler: (request: R, nativePublish?: <V>(value: V) => Promise<V>,
     nativeTail?: <V>(handler: () => Promise<V>) => Promise<V>) => Promise<T>
 ): Promise<T | ToolMessage> {
+  markRunCancellationEffectDispatched()
   const manager = getModsManager()
   const completion = binding.runtimeAuthority && request.toolCall
     ? captureCurrentFunctionNativeToolCompletion(binding.runtimeAuthority, request.toolCall) : undefined

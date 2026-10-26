@@ -8,11 +8,13 @@ import {
   withNativeConfigurationScope
 } from "../mods/v2/native-configuration-scope"
 import type { projectRuntimeFunctionSource } from "../harness-board/project-runtime-function-source"
+import type { projectRuntimeDependencies } from "../harness-board/project-runtime-dependencies"
 
 export type NativeProjectSourceContext = ReturnType<typeof projectRuntimeFunctionSource> & {
   project: { projectId: string; version: number; pluginDigest: string }
   guard(): void
   authorityGuard(): void
+  dependencies?: ReturnType<typeof projectRuntimeDependencies>
 }
 
 /** The original native editor and exact-source consent, with a host-owned target resolver. */
@@ -28,10 +30,14 @@ export function registerNativeProjectSourceHandlers(
   async function review(event: IpcMainInvokeEvent, projectId: string) {
     const context = await scope(event, projectId)
     const source = await context.manager.runtimeSourceReview(context.input)
+    const dependencies = await context.dependencies?.review()
     context.guard()
     const workspaceEnabled =
       context.workspaceControl?.enabled(context.input.workspace) ?? source?.state !== "disabled"
     const globallyEnabled = context.workspaceControl?.globallyEnabled() ?? workspaceEnabled
+    if (!workspaceEnabled && globallyEnabled)
+      for (const dependency of dependencies ?? [])
+        if (dependency.state === "ready") dependency.state = "needs-approval"
     return {
       projectId,
       projectVersion: context.project.version,
@@ -39,6 +45,7 @@ export function registerNativeProjectSourceHandlers(
       workspace: context.input.workspace,
       workspaceEnabled,
       globallyEnabled,
+      ...(dependencies ? { dependencies } : {}),
       ...(source
         ? {
             source: {
@@ -106,13 +113,21 @@ export function registerNativeProjectSourceHandlers(
         if (!isModObject(value) || typeof value.threadId !== "string")
           throw Error("PROJECT_INVALID_INPUT")
         const context = await scope(event, value.threadId)
-        // Only this package's native editor is exposed; no model path or arbitrary source override.
+        // Only this package or an exact server-held action-lock provider can open the editor.
         if (
-          value.pluginId !== context.input.plugin.id ||
           (value.expectedWorkspace !== undefined &&
             value.expectedWorkspace !== context.input.workspace) ||
           (value.workspace !== undefined && value.workspace !== context.input.workspace)
         )
+          throw Error("PROJECT_INPUT_CHANGED")
+        const dependency = value.pluginId === context.input.plugin.id ? undefined
+          : typeof value.pluginId === "string" ? await context.dependencies?.resolve(value.pluginId).catch(error => {
+            if (error instanceof Error && error.message === "PROJECT_DEPENDENCY_NOT_DECLARED")
+              throw Error("PROJECT_INPUT_CHANGED")
+            throw error
+          })
+          : undefined
+        if (value.pluginId !== context.input.plugin.id && !dependency)
           throw Error("PROJECT_INPUT_CHANGED")
         const frame = event.sender.mainFrame
         const guard = () => {
@@ -123,13 +138,14 @@ export function registerNativeProjectSourceHandlers(
         const contentGuard = () => {
           guard()
           context.guard()
+          dependency?.assertCurrent()
           guard()
         }
         return withNativeConfigurationScope(
           {
             workspace: context.input.workspace,
             projectId: value.threadId,
-            plugin: context.input.plugin,
+            plugin: dependency?.plugin ?? context.input.plugin,
             assertCurrent: guard,
             assertContentCurrent: contentGuard
           },
@@ -139,6 +155,42 @@ export function registerNativeProjectSourceHandlers(
     }
   )
   ipc.handle(`${prefix}:mods-read`, review)
+  ipc.handle(`${prefix}:mods-approve-dependency`, async (event, input: unknown) => {
+    if (!isModObject(input) || Object.keys(input).some(key =>
+      !["projectId", "projectVersion", "packageDigest", "pluginId", "compiledDigest"].includes(key)) ||
+      typeof input.projectId !== "string" || typeof input.pluginId !== "string" ||
+      typeof input.compiledDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.compiledDigest))
+      throw Error("PROJECT_INVALID_INPUT")
+    const context = await scope(event, input.projectId)
+    if (context.project.version !== input.projectVersion || context.project.pluginDigest !== input.packageDigest)
+      throw Error("PROJECT_INPUT_CHANGED")
+    if (!context.dependencies) throw Error("PROJECT_DEPENDENCY_NOT_DECLARED")
+    if (pending.has(input.projectId)) throw Error("PROJECT_MODS_APPROVAL_BUSY")
+    pending.add(input.projectId)
+    try {
+      const dependency = await context.dependencies.resolve(input.pluginId)
+      if (dependency.expected.digest !== input.compiledDigest) throw Error("PROJECT_DEPENDENCY_CHANGED")
+      const controls = context.workspaceControl
+      if (controls && !controls.globallyEnabled()) throw Error("PROJECT_MODS_GLOBALLY_DISABLED")
+      const settings = controls?.settingsStamp(context.input.workspace)
+      const guard = () => {
+        dependency.assertCurrent()
+        if ((controls && !controls.globallyEnabled()) || controls?.settingsStamp(context.input.workspace) !== settings)
+          throw Error("PROJECT_MODS_APPROVAL_CHANGED")
+      }
+      guard()
+      // Dependencies retain their original installed workspace grant, not the parent's project grant.
+      await context.manager.approve(context.input.workspace, dependency.plugin.id, input.compiledDigest, guard)
+      guard()
+      if (controls && !controls.enabled(context.input.workspace)) {
+        try { controls.enable(context.input.workspace) }
+        catch { throw Error("PROJECT_MODS_WORKSPACE_ENABLE_UNCONFIRMED") }
+      }
+      return review(event, input.projectId)
+    } finally {
+      pending.delete(input.projectId)
+    }
+  })
   ipc.handle(
     `${prefix}:mods-approve`,
     async (event, input: Parameters<ProjectFunctionSourceApi["approve"]>[0]) => {

@@ -1,0 +1,27 @@
+{
+  "apiVersion": "autobiz.native-ops-provenance/v1",
+  "sources": [
+    {
+      "path": "skills/autoops/autoops-cicd/SKILL.md",
+      "sha256": "fa6a76199da535bc9e3e6acd1d9e7b7bc45d31815070553f581a67ab2ad3f820"
+    },
+    {
+      "path": "skills/autoops/autoops-archive/SKILL.md",
+      "sha256": "e9b0a93e6a6fa8902800be44403e84f38c0eed316c81824c7d5e82072bf3e83f"
+    }
+  ],
+  "preserved": [
+    "CI/CD checklist and PR body preparation",
+    "Prior validated Code evidence and source artifact lineage",
+    "Explicit release status and rollback plan",
+    "Archive immutable source text and source digests"
+  ],
+  "replaced": [
+    "Host completed state replaces moving old state directories"
+  ],
+  "unsupported": [
+    "External pipeline/PR/deployment publication requires an authorized provider and original receipts",
+    "Knowledge deposition and remote repository synchronization",
+    "Old stable state import"
+  ]
+}

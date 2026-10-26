@@ -534,9 +534,16 @@ it("native view lifecycle bypasses a full durable ledger while ordinary effects 
   const f = await fixture("return {count:++count}", { platformHub: broker })
   for (let i = 0; i < 300; i++) {
     const owner = {}
-    expect(
-      await f.session.platform.nativeUiOpenAct(ref, "increment", {}, `view-${i}`, f.signal, owner)
-    ).toMatchObject({ status: "succeeded" })
+    const opened = await f.session.platform.nativeUiOpenAct(
+      ref,
+      "increment",
+      {},
+      `view-${i}`,
+      f.signal,
+      owner
+    )
+    expect(opened.error, `native view ${i}`).toBeUndefined()
+    expect(opened).toMatchObject({ status: "succeeded" })
     const closed = await f.session.platform.nativeCleanupAct(
       ref,
       "increment",

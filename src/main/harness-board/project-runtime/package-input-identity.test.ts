@@ -13,6 +13,7 @@ import {
   wrapProjectRuntimeManifest,
   CONTEXT_HANDOFF_PROTOCOL
 } from "../../../shared/project-runtime"
+import { DECLARED_CONTEXT_FILES_PROTOCOL, EXECUTION_RESOURCES_PROTOCOL } from "../../../shared/project-runtime"
 import { FunctionModsManager } from "../../mods/v2/manager"
 import { ModControlStore } from "../../mods/control-store"
 import { FunctionUserConfigValues } from "../../mods/v2/user-config-values"
@@ -185,6 +186,74 @@ async function fixture(saveConfiguration = true) {
     input
   }
 }
+
+it("reads declared knowledge from the original saved binding without starting a guest or leaking its local path", async () => {
+  const f = await fixture()
+  writeFileSync(join(f.source, "devclaw.project-runtime.json"), JSON.stringify(
+    wrapProjectRuntimeManifest(f.state.manifest, {
+      apiVersion: "devclaw.extension-contract/v1",
+      requires: [CONTEXT_HANDOFF_PROTOCOL, DECLARED_CONTEXT_FILES_PROTOCOL],
+      context: { sourceAccess: "read-only", mutableData: "host", configuration: "host-resolved",
+        knowledge: { required: true, binding: "knowledge" },
+        provider: { operations: ["session-context"], files: [
+          { source: "knowledge", path: "glossary.md", stages: ["draft"] }
+        ] } }
+    })
+  ))
+  await f.input.prepareInputIdentity(f.state, f.source)
+  const value = f.input.readDeclaredContext(f.state, f.source, "draft")
+  expect(value).toContain("invoice=approved")
+  expect(value).not.toContain(f.knowledge)
+  const first = f.input.inputIdentity(f.state, f.source)
+  // An explicitly selected glossary must not scan an unrelated large knowledge subtree.
+  writeFileSync(join(f.knowledge, "unrelated.bin"), Buffer.alloc(33 * 1024 * 1024))
+  expect(f.input.inputIdentity(f.state, f.source)).toBe(first)
+  const nextStage = { ...f.state, stageIndex: 1 }
+  const later = f.input.inputIdentity(nextStage, f.source)
+  writeFileSync(join(f.knowledge, "glossary.md"), "invoice=changed")
+  expect(f.input.inputIdentity(f.state, f.source)).not.toBe(first)
+  expect(f.input.inputIdentity(nextStage, f.source)).toBe(later)
+  expect(f.input.readDeclaredContext(f.state, f.source, "draft")).toContain("invoice=changed")
+  const empty = join(f.root, "empty-knowledge")
+  mkdirSync(empty)
+  f.values.save(f.root, "document-native-id", f.schema, "knowledge", empty, 1, () => {})
+  expect(() => f.input.readDeclaredContext(f.state, f.source, "draft")).toThrow()
+})
+
+it("exposes only declared public configuration through the original saved configuration store", async () => {
+  const f = await fixture()
+  const input = { workspace: f.root, plugin: {
+    id: "native-uuid", name: "document-project", path: f.source, enabled: true
+  } }
+  expect(f.functions.readRuntimePublicConfiguration(input, ["audience"]))
+    .toEqual({ audience: "product" })
+  expect(f.functions.readRuntimePublicConfiguration(input, [])).toEqual({})
+  for (const keys of [["knowledge"], ["missing"], ["audience", "audience"]])
+    expect(() => f.functions.readRuntimePublicConfiguration(input, keys)).toThrow()
+  f.values.save(f.root, "document-native-id", f.schema, "audience", "engineering", 1, () => {})
+  expect(f.functions.readRuntimePublicConfiguration(input, ["audience"]))
+    .toEqual({ audience: "engineering" })
+})
+
+it("binds execution workspace aliases to original required directory configuration and invalidates rebinding", async () => {
+  const f = await fixture()
+  const write = (binding: string) => writeFileSync(join(f.source, "devclaw.project-runtime.json"), JSON.stringify(
+    wrapProjectRuntimeManifest(f.state.manifest, {
+      apiVersion: "devclaw.extension-contract/v1", requires: [EXECUTION_RESOURCES_PROTOCOL],
+      executionResources: { profiles: [], workspaces: [{ id: "repository", binding }] }
+    })))
+  write("knowledge")
+  const first = f.input.inputIdentity(f.state, f.source)
+  expect(f.input.readExecutionResources(f.state, f.source)?.workspaces[0])
+    .toMatchObject({ id: "repository", path: expect.stringMatching(/knowledge$/) })
+  const next = join(f.root, "next-repository")
+  mkdirSync(next)
+  f.values.save(f.root, "document-native-id", f.schema, "knowledge", next, 1, () => {})
+  expect(f.input.inputIdentity(f.state, f.source)).not.toBe(first)
+  expect(f.input.readExecutionResources(f.state, f.source)?.workspaces[0].path).toMatch(/next-repository$/)
+  write("audience")
+  expect(() => f.input.readExecutionResources(f.state, f.source)).toThrow("WORKSPACE_BINDING_INVALID")
+})
 
 it("creates a real retained project before required configuration is filled, then blocks stage preparation until native values are saved", async () => {
   const f = await fixture(false)

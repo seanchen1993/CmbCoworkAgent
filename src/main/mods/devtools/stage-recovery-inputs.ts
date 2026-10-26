@@ -37,6 +37,8 @@ export interface NativeStageRecoverySource {
   /** Explicit native callers may retain a bare package's authority without inventing inputs. */
   retainAuthority?: true
   guard(): void
+  /** Optional full content fence, separate from authority checks at every IO boundary. */
+  assertInputsCurrent?(): void
 }
 type Configuration = NonNullable<
   Awaited<ReturnType<FunctionModsManager["captureStageRecoveryConfiguration"]>>
@@ -321,8 +323,10 @@ export class StageRecoveryInputs implements StageRecoveryInputAdapter {
       inputIdentity: context.inputIdentity,
       guard: () => {
         context.signal.throwIfAborted()
-        context.assertInputsCurrent?.()
-      }
+        if (context.assertAuthorityCurrent) context.assertAuthorityCurrent()
+        else context.assertInputsCurrent?.()
+      },
+      assertInputsCurrent: context.assertInputsCurrent
     })
   }
   async captureOwnedProject(input: NativeStageRecoverySource) {
@@ -331,6 +335,7 @@ export class StageRecoveryInputs implements StageRecoveryInputAdapter {
       this.assertRoot()
     }
     guard()
+    input.assertInputsCurrent?.()
     const config = await this.deps.manager.captureStageRecoveryConfiguration(
       this.configurationWorkspace(input.workspace),
       input.packageRoot,
@@ -389,6 +394,7 @@ export class StageRecoveryInputs implements StageRecoveryInputAdapter {
           knowledge = value as string
         }
       }
+      if (contract?.provider?.materials) record.providerContext = true
       if (contract?.provider?.entry) {
         const board = readRuntimeScopedFile(
           input.packageRoot,
@@ -446,12 +452,14 @@ export class StageRecoveryInputs implements StageRecoveryInputAdapter {
       } else if (contract?.knowledge.required) fail("KNOWLEDGE_REQUIRED")
       guard()
       if (config) this.deps.manager.assertStageRecoveryConfiguration(config)
+      input.assertInputsCurrent?.()
       const pointer = { schemaVersion: 1 as const, id, digest: digest(record) }
       writeFileSync(join(this.root, id, "record.json"), JSON.stringify(record), {
         flag: "wx",
         mode: 0o600
       })
       await this.assertCurrent(pointer, guard)
+      input.assertInputsCurrent?.()
       completed = true
       return pointer
     } finally {

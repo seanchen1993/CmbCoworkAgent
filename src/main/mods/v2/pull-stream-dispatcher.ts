@@ -335,7 +335,7 @@ export function dispatchFunctionPullStream(
     signal: options.signal,
     deadline: () => {
       const deadline = new FunctionDispatchDeadline(options.timeoutMs ?? 120000, options.signal,
-        options.dispatchCutNs)
+        options.dispatchCutNs, !options.dispatchCutNs)
       signal = AbortSignal.any([controller.signal, deadline.signal])
       return { value: deadline, shared: false }
     },

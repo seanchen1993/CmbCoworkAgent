@@ -1,3 +1,4 @@
+import { assertWorkflowResourceAdmission } from "../../agent/workflow/resource-deadline"
 import { isFunctionContentBoundary } from "./content-boundary"
 import { validateFunctionModelResult, type FunctionModelProtocol, type FunctionModelResult, type FunctionForkResult } from "../../../shared/mods/v2/model-protocol"
 import {
@@ -1505,6 +1506,7 @@ export class FunctionSession {
   }
 
   private assertLive(plugin?: FunctionPlugin, publication = false, startup = true, cleanup = false): void {
+    if (!cleanup) assertWorkflowResourceAdmission()
     const end = this.endScopes.getStore()
     if (!cleanup && !this.endCleanupScopes.getStore()) {
       if (end) end.assertLive()

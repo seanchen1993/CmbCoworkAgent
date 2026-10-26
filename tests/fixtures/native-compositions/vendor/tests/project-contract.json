@@ -1,0 +1,90 @@
+{
+  "apiVersion": "devclaw.project-contract/v1",
+  "cases": [
+    {
+      "id": "normalize-valid",
+      "stageId": "normalize",
+      "files": [
+        {
+          "path": "normalize.json",
+          "text": "{\"registrationId\": \"REG-001\"}"
+        }
+      ],
+      "expected": "passed"
+    },
+    {
+      "id": "normalize-missing",
+      "stageId": "normalize",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "compliance-valid",
+      "stageId": "compliance",
+      "files": [
+        {
+          "path": "compliance.json",
+          "text": "{\"status\": \"requires-review\"}"
+        }
+      ],
+      "expected": "passed"
+    },
+    {
+      "id": "compliance-missing",
+      "stageId": "compliance",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "risk-valid",
+      "stageId": "risk",
+      "files": [
+        {
+          "path": "risk.json",
+          "text": "{\"risk\": \"medium\"}"
+        }
+      ],
+      "expected": "passed"
+    },
+    {
+      "id": "risk-missing",
+      "stageId": "risk",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "approval-valid",
+      "stageId": "approval",
+      "files": [
+        {
+          "path": "approval.json",
+          "text": "{\"decision\": \"pending-human-review\"}"
+        }
+      ],
+      "expected": "passed"
+    },
+    {
+      "id": "approval-missing",
+      "stageId": "approval",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "archive-valid",
+      "stageId": "archive",
+      "files": [
+        {
+          "path": "archive.json",
+          "text": "{\"record\": \"VENDOR-001\"}"
+        }
+      ],
+      "expected": "passed"
+    },
+    {
+      "id": "archive-missing",
+      "stageId": "archive",
+      "files": [],
+      "expected": "failed"
+    }
+  ]
+}

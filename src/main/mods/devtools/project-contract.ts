@@ -82,6 +82,8 @@ export async function testProjectSource(bundle: AuthoringSourceBundle, manifest:
     return { valid: results.every(result => result.matched), digest: bundle.digest,
       scope: "isolated-host-artifact-checks", cases: results,
       limitations: ["真实读取隔离产物并执行宿主校验器；未执行 Skill、模型或业务脚本。",
+        ...(manifest.checks.some((check) => check.kind === "action")
+          ? ["公开动作业务检查未执行，其回执保持 unknown；仅负例通过不代表业务验证成功，须在授权试用中执行真实检查器。"] : []),
         "人工审批、阶段事务、失败重试、正式安装和业务内容质量仍需生产场景验收。"] }
   } finally {
     await rm(root, { recursive: true, force: true })

@@ -12,6 +12,7 @@ import {
 import { modCallContext } from "../mods/context"
 import { registerStageCheckReceiptSink } from "./stage-check-receipts"
 import { STAGE_CHECK_RECEIPT_PREFIX } from "../../shared/project-runtime/stage-check-receipt"
+import * as workspaceLocks from "../agent/file-operation-lock"
 
 const held = vi.hoisted(() => ({ preference: vi.fn<() => Promise<void>>() }))
 vi.mock("../harness-board/composition-python-cache", async (original) => {
@@ -87,6 +88,7 @@ function fixture(required = false, withRoot = false, stdout = '{"continue":true}
     snapshots.read(snapshot.digest)
     if (existsSync(marker)) postCommandObserved = true
   })
+  let authorized = true
   const token = issueRuntimePluginSourceToken(
     {
       mode: "legacy",
@@ -100,7 +102,10 @@ function fixture(required = false, withRoot = false, stdout = '{"continue":true}
       plugin,
       ...(required ? { requiredHooks: ["gate"] } : {})
     },
-    full
+    full,
+    () => {
+      if (!authorized) throw Error("SOURCE_AUTHORITY_REVOKED")
+    }
   )
   const hook: Omit<PluginHookMetadata, "pluginRoot"> & { pluginRoot?: string } = {
     id: required ? "plugin:installed/gate" : "ordinary",
@@ -128,6 +133,9 @@ function fixture(required = false, withRoot = false, stdout = '{"continue":true}
     hook,
     context,
     full,
+    revoke: () => {
+      authorized = false
+    },
     postCommandObserved: () => postCommandObserved,
     change: () => writeFileSync(join(snapshot.root, "rule.txt"), "changed source bytes")
   }
@@ -192,6 +200,44 @@ it.each([false, true])(
       expect(existsSync(f.marker)).toBe(false)
       expect(observed).not.toHaveBeenCalled()
     })
+  }
+)
+
+it.each(["source", "authority"])(
+  "rechecks %s after waiting for the actual workspace execution lock",
+  async (change) => {
+    const f = fixture(false, true)
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const holder = workspaceLocks.withWorkspaceExecution(f.root, "write", async () => {
+      entered.resolve()
+      await release.promise
+    })
+    await entered.promise
+    const queued = vi.spyOn(workspaceLocks, "withWorkspaceExecution")
+    try {
+      await withRuntimePluginSource(f.token, async () => {
+        f.full.mockClear()
+        const observed = vi.fn()
+        const pending = runHooks([f.hook], "PreToolUse", f.context, observed)
+        await vi.waitFor(() => expect(queued).toHaveBeenCalledOnce())
+        expect(f.full).not.toHaveBeenCalled()
+        expect(existsSync(f.marker)).toBe(false)
+        if (change === "source") f.change()
+        else f.revoke()
+        release.resolve()
+        await expect(pending).rejects.toThrow(
+          change === "source" ? "PACKAGE_CHANGED" : "SOURCE_AUTHORITY_REVOKED"
+        )
+        expect(f.full).toHaveBeenCalledTimes(change === "source" ? 1 : 0)
+        expect(existsSync(f.marker)).toBe(false)
+        expect(observed).not.toHaveBeenCalled()
+      })
+    } finally {
+      release.resolve()
+      await holder
+      queued.mockRestore()
+    }
   }
 )
 

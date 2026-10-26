@@ -1,0 +1,24 @@
+{
+  "apiVersion": "autobiz.native-knowledge-provenance/v1",
+  "sources": [
+    {
+      "path": "mods/business/autobiz.knowledge/collector-gray-matter.cjs",
+      "sha256": "a18fe1c53ab582a75ca3818a5eddf4109efa787594e571324ffe41cd899aceb1",
+      "adaptations": [
+        "Disable gray-matter.read filesystem entry",
+        "Keep orig string instead of Buffer for parser metadata; parsed data/body unchanged",
+        "Disable optional Node buffer detection; YAML binary remains native Uint8Array/array semantics",
+        "Disable optional esprima require and executable JavaScript YAML tag resolver; unsafe JavaScript tags rejected by selector"
+      ]
+    },
+    {
+      "path": "hooks/collect-knowledge.js",
+      "sha256": "405c948b60ea7c79d255c9795697255dbe5f5c4ac1290a2a135fcba5e39d840f",
+      "adaptations": [
+        "Host scoped relative-path documents instead of direct filesystem traversal",
+        "Explicit current deployment appType configuration instead of remote metadata request",
+        "Reject missing selected deployment knowledge instead of silently substituting partial success"
+      ]
+    }
+  ]
+}

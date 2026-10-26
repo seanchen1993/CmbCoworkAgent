@@ -13,10 +13,18 @@ function workflowFactory(deps: Record<string, unknown>, selected = "createRuntim
     ts.ScriptKind.TS
   )
   let factory: ts.ArrowFunction | undefined
+  const optionsByName = new Map<string, ts.ObjectLiteralExpression>()
+  function findOptions(node: ts.Node) {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
+        ts.isObjectLiteralExpression(node.initializer)) optionsByName.set(node.name.text, node.initializer)
+    ts.forEachChild(node, findOptions)
+  }
+  findOptions(source)
   function visit(node: ts.Node) {
     if (ts.isCallExpression(node) && node.expression.getText(source) === "createWorkflowTool") {
-      const options = node.arguments[0]
-      if (!ts.isObjectLiteralExpression(options)) throw Error("Workflow options changed")
+      const argument = node.arguments[0]
+      const options = ts.isIdentifier(argument) ? optionsByName.get(argument.text) : argument
+      if (!options || !ts.isObjectLiteralExpression(options)) throw Error("Workflow options changed")
       const subagents = options.properties.find(
         (property) =>
           ts.isPropertyAssignment(property) && property.name.getText(source) === "subagentDeps"
@@ -139,6 +147,7 @@ it.each(["full", "read_only", "none"])(
         threadId: "child",
         agentId: "reviewer",
         shellAccess,
+        toolAllowlist: ["read_file"],
         worktreeIsolation: { workspaceRoot: "isolated-worktree" }
       })
     ).toBe(runtime)
@@ -146,6 +155,7 @@ it.each(["full", "read_only", "none"])(
       expect.objectContaining({
         threadId: "child",
         workspacePath: "parent-workspace",
+        allowedToolNames: ["read_file", "structured_output"],
         approvalThreadId: "parent-thread",
         harnessAgentsPrompt: "TEAM_REQUIRED_KNOWLEDGE",
         agentmdLoadStatus: status,

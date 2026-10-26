@@ -97,7 +97,9 @@ export function projectCreatorTrialJourney(input: {
               ? "needs-approval"
               : "ready"
             : operation.status === "succeeded" && passed
-              ? "checks-passed"
+              ? stage.resultApproval === "human" && operation.resultApproval?.decision !== "approved"
+                ? "needs-approval"
+                : "checks-passed"
               : operation.status === "failed" ||
                   operation.status === "cancelled" ||
                   checks.some((check) => check.result === "failed" || check.result === "blocked")

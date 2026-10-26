@@ -1,15 +1,18 @@
+import { FunctionTrustedWaitClock, createTrustedFunctionWaitScope } from "./trusted-function-wait"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { FunctionSharedWallCut } from "./shared-wall-cut"
 
 /** Bounds caller waits without pretending that an abort-ignoring host effect has finished. */
 export class FunctionDispatchDeadline {
   private readonly controller = new AbortController()
-  private readonly timer: ReturnType<typeof setTimeout>
+  private timer: ReturnType<typeof setTimeout>
   private closed = false
   private readonly cut: FunctionSharedWallCut
+  private readonly waitClock?: FunctionTrustedWaitClock
+  private readonly waitScope?: ReturnType<typeof createTrustedFunctionWaitScope>
   readonly signal: AbortSignal
 
-  constructor(ms: number, parent?: AbortSignal, inheritedCutNs?: string) {
+  constructor(ms: number, parent?: AbortSignal, inheritedCutNs?: string, trustedWait = false) {
     const timeoutMs = Math.min(Math.max(ms, 1), 120000)
     const local = FunctionSharedWallCut.after(timeoutMs)
     const inherited = inheritedCutNs === undefined ? undefined : new FunctionSharedWallCut(inheritedCutNs)
@@ -18,10 +21,31 @@ export class FunctionDispatchDeadline {
     this.signal = parent
       ? AbortSignal.any([parent, this.controller.signal])
       : this.controller.signal
-    this.timer = setTimeout(() => this.expire(), Math.max(1, this.cut.remainingMs()))
+    if (trustedWait && inheritedCutNs === undefined) {
+      this.waitClock = new FunctionTrustedWaitClock(timeoutMs)
+      this.waitScope = createTrustedFunctionWaitScope({ clock: this.waitClock,
+        assertCurrent: () => this.assertLive(), changed: () => this.arm(),
+        abort: error => this.controller.abort(error) })
+    }
+    this.timer = setTimeout(() => this.checkExpiry(), this.remainingMs())
   }
 
   get sharedCutNs(): string { return this.cut.expiresAtNs }
+
+  run<T>(run: () => T): T { return this.waitScope ? this.waitScope.run(run) : run() }
+
+  private remainingMs(): number {
+    return Math.max(1, this.waitClock ? this.waitClock.expiresAt - performance.now() : this.cut.remainingMs())
+  }
+  private arm(): void {
+    clearTimeout(this.timer)
+    if (!this.closed) this.timer = setTimeout(() => this.checkExpiry(),
+      this.waitClock?.nextCheckMs ?? this.remainingMs())
+  }
+  private checkExpiry(): void {
+    if (this.waitClock && performance.now() < this.waitClock.expiresAt) this.arm()
+    else this.expire()
+  }
 
   private expire(): void {
     this.controller.abort(
@@ -39,7 +63,7 @@ export class FunctionDispatchDeadline {
     if (this.signal.aborted) throw this.failure()
     if (this.closed)
       throw new ModFunctionError("MODS_INVOCATION_ENDED", "MODS_INVOCATION_ENDED", true)
-    if (this.cut.remainingMs() <= 0) {
+    if (this.waitClock ? performance.now() >= this.waitClock.expiresAt : this.cut.remainingMs() <= 0) {
       this.expire()
       throw this.failure()
     }
@@ -70,5 +94,6 @@ export class FunctionDispatchDeadline {
   close(): void {
     this.closed = true
     clearTimeout(this.timer)
+    this.waitScope?.close()
   }
 }

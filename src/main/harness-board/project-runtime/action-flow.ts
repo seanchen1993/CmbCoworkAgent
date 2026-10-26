@@ -22,6 +22,21 @@ export function createProjectActionFlow(
     throw Error("PROJECT_ACTION_FLOW_INVALID")
   captured.assertCurrent()
   captured.assertScope(state)
+  for (const binding of captured.bindings) {
+    if (!captured.referenceActionIds?.includes(binding.id)) continue
+    // Native Flow uses a UUID run/execution identity. Reserve their full sizes before dispatch.
+    const envelope = {
+      version: 1,
+      input: binding.input,
+      config: binding.config,
+      task: state.goal,
+      runId: "flow_" + "0".repeat(36),
+      stepId: binding.id,
+      executionId: "0".repeat(36)
+    }
+    if (Buffer.byteLength(JSON.stringify(envelope)) > 16000)
+      throw Error("PROJECT_ARTIFACT_REFERENCE_ENVELOPE_LIMIT")
+  }
   const definition: HostFlowDefinition = {
     schemaVersion: 2,
     execution: { kind: "host" },

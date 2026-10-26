@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
+const installed = vi.hoisted(() => ({ plugins: [] as PluginMetadata[] }))
 vi.mock("electron", () => ({
   app: { getPath: () => tmpdir(), getName: () => "test", getVersion: () => "0" },
   BrowserWindow: { getAllWindows: () => [] },
@@ -9,7 +10,8 @@ vi.mock("electron", () => ({
 }))
 vi.mock("../storage", () => ({
   getEnabledPluginSkillSourceMetadata: () => [],
-  getDisabledSkills: () => []
+  getDisabledSkills: () => [],
+  getPlugins: () => installed.plugins
 }))
 import { PluginStartUseService } from "./plugin-start-use"
 import { pluginChatStartUseEntries } from "./plugin-chat-start-use"
@@ -23,6 +25,7 @@ import type { PluginMetadata } from "../types"
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close()
+  installed.plugins = []
 })
 function fixture(name: string, withMods: boolean) {
   const owned = mkdtempSync(join(tmpdir(), "chat-start-use-"))
@@ -92,6 +95,7 @@ function fixture(name: string, withMods: boolean) {
     )
   }
   const installedPlugins = [plugin]
+  installed.plugins = installedPlugins
   const store = new ModControlStore(join(owned, "control.sqlite"))
   const guests = new Set<FunctionGuestRuntime>()
   let loads = 0

@@ -11,6 +11,7 @@ import {
   isTrustedMainLogToggleRequest,
   isTrustedRendererUrl,
   resolveTrustedRendererUrl,
+  resolveTrustedAppRendererUrl,
   type MainLogForwardWindow,
   type MainLogForwardWebContents
 } from "./main-log-forwarding"
@@ -404,6 +405,32 @@ describe("trusted renderer log IPC", () => {
   const expectedPackagedUrl = resolveTrustedRendererUrl(
     "file:///Applications/CMBDevClaw/out/renderer/index.html"
   )
+
+  it.each([
+    { mode: "packaged", packaged: true, dev: "http://localhost:5173", expected: "file" },
+    { mode: "local production build", packaged: false, dev: undefined, expected: "file" },
+    {
+      mode: "development server",
+      packaged: false,
+      dev: "http://localhost:5173",
+      expected: "dev"
+    }
+  ])("selects the actual local renderer for $mode", ({ packaged, dev, expected }) => {
+    const file = "file:///C:/app/out/renderer/index.html"
+    const trusted = resolveTrustedAppRendererUrl(packaged, dev, file)
+    expect(trusted).toBe(expected === "file" ? file : "http://localhost:5173/")
+    expect(isTrustedRendererUrl(trusted + "?thread=1#chat", trusted)).toBe(true)
+    expect(isTrustedRendererUrl("https://example.test/untrusted", trusted)).toBe(false)
+  })
+
+  it("does not trust an external development server or a remote file host", () => {
+    expect(
+      resolveTrustedAppRendererUrl(false, "https://example.test/app", "file:///app/index.html")
+    ).toBeUndefined()
+    expect(
+      resolveTrustedAppRendererUrl(true, undefined, "file://remote/app/index.html")
+    ).toBeUndefined()
+  })
 
   it("matches the exact local renderer path while ignoring only query and hash", () => {
     expect(

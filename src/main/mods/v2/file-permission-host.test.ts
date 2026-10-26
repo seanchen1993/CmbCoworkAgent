@@ -1,6 +1,8 @@
 import { beforeEach, expect, it, vi } from "vitest"
 import { functionFileScope } from "./file-permission-host"
 import type { ModsManager } from "../manager"
+import { withWorkflowWorktreeActionScope } from "../../agent/workflow/worktree-action-scope"
+import { resolve } from "node:path"
 
 const { probe, mode } = vi.hoisted(() => ({ probe: vi.fn(), mode: vi.fn() }))
 vi.mock("../../agent/local-sandbox", () => ({ LocalSandbox: { createPermissionProbe: probe } }))
@@ -22,6 +24,24 @@ beforeEach(() => {
     assertLive: live,
     queryTool: query
   })
+})
+
+it("narrows a signed workflow resource while preserving original tool rules and rejecting late access", async () => {
+  const boundary = { workspaceRoot: resolve("checkout"), worktreeRoot: resolve("checkout"),
+    commonDir: resolve("main/.git"), branch: "feature" }
+  let captured!: ReturnType<typeof capture>
+  await withWorkflowWorktreeActionScope({ workspace: "/project", threadId: "thread", runId: "run",
+    boundary, assertCurrent: () => {} }, async () => {
+    captured = capture()
+    expect(captured.workspace).toBe(boundary.workspaceRoot)
+    expect(probe).toHaveBeenCalledWith(expect.objectContaining({ worktreeIsolation: boundary }))
+    expect(await captured.queryTool("host:read_file", { file_path: resolve("checkout/file.md") }))
+      .toEqual({ decision: "allow" })
+    query.mockResolvedValueOnce({ decision: "deny", reason: "original policy" })
+    expect(await captured.queryTool("host:read_file", { file_path: resolve("checkout/file.md") }))
+      .toMatchObject({ decision: "deny" })
+  })
+  expect(() => captured.assertLive()).toThrow("SCOPE_CHANGED")
 })
 
 it("uses the live backend and its execution root without constructing a project probe", async () => {

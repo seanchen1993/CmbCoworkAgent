@@ -1,4 +1,14 @@
 import type { FunctionConfigApi } from "../mods/v2/config-api"
+export interface ProjectFunctionDependencyReview {
+  pluginId: string
+  name: string
+  digest: string
+  actionIds: string[]
+  state: "ready" | "needs-approval" | "disabled" | "missing" | "source-changed" | "invalid"
+  capabilities: string[]
+  hasConfiguration?: boolean
+  configurationReady?: boolean
+}
 export interface ProjectFunctionSourceReview {
   projectId: string
   projectVersion: number
@@ -6,6 +16,7 @@ export interface ProjectFunctionSourceReview {
   workspace: string
   workspaceEnabled?: boolean
   globallyEnabled?: boolean
+  dependencies?: ProjectFunctionDependencyReview[]
   source?: {
     pluginId?: string
     name: string
@@ -27,6 +38,13 @@ export interface ProjectFunctionSourceApi {
     projectId: string
     projectVersion: number
     packageDigest: string
+    compiledDigest: string
+  }): Promise<ProjectFunctionSourceReview>
+  approveDependency?(input: {
+    projectId: string
+    projectVersion: number
+    packageDigest: string
+    pluginId: string
     compiledDigest: string
   }): Promise<ProjectFunctionSourceReview>
 }

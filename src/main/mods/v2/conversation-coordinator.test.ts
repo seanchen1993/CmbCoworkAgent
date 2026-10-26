@@ -91,6 +91,43 @@ function fixture(candidate = false) {
 }
 
 describe("actual owner conversation coordinator", () => {
+  it.each(["recreate", "malformed", "source"] as const)(
+    "rechecks the live owner through the small scope projection and rejects %s", async mode => {
+      const f = fixture()
+      const raw = appDb.getThreadCore(f.threadId)!
+      const metadata = JSON.stringify({ ...JSON.parse(raw.metadata!),
+        llmFileHistory: { content: "中文😀".repeat(40_000) }, keep: { unchanged: true } })
+      appDb.updateThread(f.threadId, { metadata })
+      const original = appDb.getThreadCore(f.threadId)!.metadata
+      const prepared = await f.coordinator.prepareRuntime(f.context.workspace, f.threadId)
+      const full = vi.spyOn(appDb, "getThreadCore")
+      const scope = vi.spyOn(appDb, "getThreadRuntimeScope")
+      try {
+        for (let index = 0; index < 3; index++) prepared.target.assertCurrent()
+        expect(full).not.toHaveBeenCalled()
+        expect(scope.mock.results.length).toBeGreaterThanOrEqual(3)
+        for (const result of scope.mock.results) {
+          expect(result.type).toBe("return")
+          expect(result.value?.metadata).not.toContain("llmFileHistory")
+        }
+        if (mode === "recreate") {
+          appDb.deleteThread(f.threadId)
+          appDb.createThread(f.threadId)
+          appDb.getDb().run("UPDATE threads SET created_at=? WHERE thread_id=?",
+            [raw.created_at, f.threadId])
+        } else if (mode === "malformed") {
+          appDb.getDb().run("UPDATE threads SET metadata=? WHERE thread_id=?", ["{broken", f.threadId])
+        } else f.retire()
+        expect(() => prepared.target.assertCurrent()).toThrow()
+      } finally {
+        full.mockRestore()
+        scope.mockRestore()
+        f.close()
+      }
+      if (mode === "source") expect(appDb.getThreadCore(f.threadId)?.metadata).toBe(original)
+    }
+  )
+
   it.each([false, true])(
     "admits a fresh child parent across turns when preparing inside the first lease is %s",
     async (prepareInsideLease) => {

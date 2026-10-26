@@ -87,7 +87,10 @@ function actualFunctions(pending: Map<string, Pending>) {
     getLocalThreadRunLease,
     captureCurrentRunMessageQueueOwner, isCurrentRunMessageQueueOwner, resolveStreamTranscriptFlush,
     reconcileNativePartialQueuedMessages,
-    getDb: appDb.getDb, getThreadCore: appDb.getThreadCore,
+    getDb: appDb.getDb, getThreadCore: (...args: Parameters<typeof appDb.getThreadCore>) =>
+      appDb.getThreadCore(...args),
+    getThreadRuntimeScope: (...args: Parameters<typeof appDb.getThreadRuntimeScope>) =>
+      appDb.getThreadRuntimeScope(...args),
     getThreadMessageIdentityContext: appDb.getThreadMessageIdentityContext,
     partitionCanonicalThreadMessageEchoes: appDb.partitionCanonicalThreadMessageEchoes,
     appendThreadMessageTextDelta: appDb.appendThreadMessageTextDelta,
@@ -131,6 +134,39 @@ it("flushes only the exact UUID and leaves other entries plus their original tim
   expect(appDb.getThreadMessages(f.threadId).map(message => message.id)).toEqual([one, other])
   expect(f.pending.has(f.key)).toBe(false)
 })
+
+it.each(["recreate", "malformed"] as const)(
+  "keeps full history untouched while the actual flush scope rejects %s", mode => {
+    const f = fixture(), uuid = randomUUID()
+    const row = appDb.getThreadCore(f.threadId)!
+    appDb.updateThread(f.threadId, { metadata: JSON.stringify({ ...JSON.parse(row.metadata!),
+      llmFileHistory: { content: "中文😀".repeat(40_000) }, kept: "original" }) })
+    const original = appDb.getThreadCore(f.threadId)!.metadata
+    const full = vi.spyOn(appDb, "getThreadCore")
+    const scope = vi.spyOn(appDb, "getThreadRuntimeScope")
+    const flush = f.api.captureNativeConversationTranscriptFlush(f.threadId, f.runToken,
+      f.controller.signal)
+    f.queue(uuid, "Real persisted content")
+    flush(uuid)
+    expect(full).not.toHaveBeenCalled()
+    expect(scope.mock.results.length).toBeGreaterThanOrEqual(3)
+    for (const result of scope.mock.results) {
+      expect(result.type).toBe("return")
+      expect(result.value?.metadata).not.toContain("llmFileHistory")
+    }
+    expect(appDb.getThreadMessages(f.threadId).map(message => message.id)).toEqual([uuid])
+    expect(appDb.getThreadCore(f.threadId)?.metadata).toBe(original)
+    if (mode === "recreate") {
+      appDb.deleteThread(f.threadId)
+      appDb.createThread(f.threadId, { workspacePath: directory })
+      appDb.getDb().run("UPDATE threads SET created_at=? WHERE thread_id=?",
+        [row.created_at, f.threadId])
+    } else appDb.getDb().run("UPDATE threads SET metadata=? WHERE thread_id=?", ["{broken", f.threadId])
+    const pending = f.queue(randomUUID(), "Must remain pending")
+    expect(() => flush(pending.id)).toThrow()
+    expect(f.pending.get(f.key)?.messages).toContain(pending)
+  }
+)
 
 it("does not disturb a missing UUID, another run or its timer", () => {
   const f = fixture(), otherRun = randomUUID(), otherKey = `${f.threadId}\u0000${otherRun}`

@@ -208,3 +208,37 @@ it("protects canonical rendered project instructions after heading normalization
     })
   ).toBeUndefined()
 })
+
+// Evaluate the actual createDeepAgent call's Mods contribution property as well
+// as its plain prompt input; a second injection path must not restore the goal.
+it.each(["host", "legacy", undefined])("selects the same task background for both prompt channels: %s", mode => {
+  const parent = "MAIN_STAGE_AND_REJECTION_GOAL"
+  const background = "FROZEN_DELEGATION_BOUNDARIES"
+  const agents = "PROTECTED_KNOWLEDGE_CONFIG_AND_AGENTS"
+  const taskPluginPromptInject = evaluate(initializer("taskPluginPromptInject"), {
+    hostModeSource: mode ? { mode, subagentContextPrompt: background } : undefined,
+    renderPluginPromptInject: (text: string | undefined) => text,
+    renderedPluginPromptInject: parent
+  })
+  const deps = { taskPluginPromptInject, combinedAgentsPrompt: agents,
+    projectModeTaskSubagentsInheritFullContext: true,
+    modInstructionContext: { name: "claudeMd" }, requiredProjectPrompt: agents }
+  const plain = evaluate(initializer("taskSubagentExtraSystemPrompt"), deps)
+  let contributions: ts.Expression | undefined
+  function visit(node: ts.Node) {
+    if (ts.isCallExpression(node) && node.expression.getText(source) === "createDeepAgent" &&
+        ts.isObjectLiteralExpression(node.arguments[0])) {
+      const property = node.arguments[0].properties.find(p => ts.isPropertyAssignment(p) &&
+        p.name.getText(source) === "modTaskProjectContributions")
+      if (property && ts.isPropertyAssignment(property)) contributions = property.initializer
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  expect(contributions).toBeDefined()
+  const mods = evaluate(contributions!, deps) as Array<{ text: string; requiredText?: string }>
+  expect(mods.map(item => item.text).join("")).toBe(plain)
+  expect(mods.at(-1)?.requiredText).toBe(agents)
+  expect(plain).toContain(mode === "host" ? background : parent)
+  if (mode === "host") expect(plain).not.toContain(parent)
+})

@@ -41,6 +41,7 @@ import type { StageRecoveryInputAdapter } from "./stage-recovery-inputs"
 import { readProjectRecoveryContext } from "../../harness-board/project-runtime/recovery-context"
 import type { StageRecoveryInputSnapshot } from "./stage-recovery-inputs"
 import { readPackageExtensionContract } from "../../plugins/extension-contract"
+import { getProjectActionCatalog } from "../../harness-board/project-action-runtime"
 
 function fail(code: string): never {
   throw Error(`PROJECT_STAGE_DEBUG_${code}`)
@@ -82,6 +83,8 @@ interface Dependencies {
   platform(): HostProjectService
   retainedRoot(project: HostProjectState): string
   assertWorkspaceIdle(workspace: string): void
+  /** Original durable Flow/workflow/background-resource fence; mandatory for action branches. */
+  authorizeResources?(workspace: string): Promise<{ assertCurrent(): void }>
   assertInspectionScope?(scope: DevelopmentScope): void
   recoveryInputs?: StageRecoveryInputAdapter
   /** Registered native adapter reads exact side-effect evidence; never runs the original Hook. */
@@ -195,8 +198,13 @@ export class ProjectStageDebugSessions {
         signal: context.signal,
         guard: () => {
           context.signal.throwIfAborted()
-          context.assertInputsCurrent?.()
-        }
+          // Preserve the original caller fence on every await without hashing the entire
+          // package and knowledge tree once per workspace entry. Legacy callers retain
+          // their original full guard when no separate authority fence is available.
+          if (context.assertAuthorityCurrent) context.assertAuthorityCurrent()
+          else context.assertInputsCurrent?.()
+        },
+        assertInputsCurrent: context.assertInputsCurrent
       })
       if (recoveryInputs)
         this.providerInputSnapshots.set(context.operation.operationId, recoveryInputs)
@@ -505,6 +513,10 @@ export class ProjectStageDebugSessions {
       await this.deps.recoveryInputs.assertCurrent(snapshot.recoveryInputs, guard)
     }
     const project = this.source(snapshot)
+    const resourceFence = project.manifest.actions.length
+      ? await (this.deps.authorizeResources?.(project.workspace) ??
+          fail("RESOURCE_ADAPTER_REQUIRED"))
+      : undefined
     if (
       this.records(scopeKey).some(
         (branch) =>
@@ -519,17 +531,22 @@ export class ProjectStageDebugSessions {
       fail("CANDIDATE_CHANGED")
     const candidateCurrent = () => {
       guard()
+      resourceFence?.assertCurrent()
       const current = this.deps.sessions.read(scope, input.draftId)
       if (current.revision !== input.revision || current.source.digest !== input.expectedDigest)
         fail("CANDIDATE_CHANGED")
     }
+    const actions = project.manifest.actions.length
+      ? await getProjectActionCatalog(scope.workspace, scope.threadId)
+      : []
+    candidateCurrent()
     await this.deps.sessions.inspect(
       scope,
       candidate.id,
       candidate.revision,
       "dev",
       candidateCurrent,
-      []
+      actions
     )
     candidateCurrent()
     const sourceIdentity = await this.deps.platform().readDebugInputIdentity(project.projectId)
@@ -633,8 +650,15 @@ export class ProjectStageDebugSessions {
       const snapshot = this.snapshots.read(preparation.view.snapshotId, scopeKey)
       const source = this.source(snapshot)
       const candidate = this.deps.sessions.read(scope, preparation.draftId)
+      const resourceFence = source.manifest.actions.length
+        ? await (this.deps.authorizeResources?.(source.workspace) ??
+            fail("RESOURCE_ADAPTER_REQUIRED"))
+        : undefined
+      let branchFence: { assertCurrent(): void } | undefined
       const check = () => {
         guard()
+        resourceFence?.assertCurrent()
+        branchFence?.assertCurrent()
         const current = this.deps.sessions.read(scope, preparation.draftId)
         if (
           current.source.digest !== input.expectedDigest ||
@@ -662,7 +686,18 @@ export class ProjectStageDebugSessions {
           scope,
           this.deps.platform().operations(source.projectId, 200)
         )
-      await this.deps.sessions.inspect(scope, candidate.id, candidate.revision, "dev", check, [])
+      const actions = source.manifest.actions.length
+        ? await getProjectActionCatalog(scope.workspace, scope.threadId)
+        : []
+      check()
+      await this.deps.sessions.inspect(
+        scope,
+        candidate.id,
+        candidate.revision,
+        "dev",
+        check,
+        actions
+      )
       check()
       const lease = this.deps.sessions.acquireDevelopment(
         scope,
@@ -672,6 +707,8 @@ export class ProjectStageDebugSessions {
       )
       release = lease.release
       await this.snapshots.materialize(snapshot.id, scopeKey, lease.snapshot.workspace, check)
+      if (source.manifest.actions.length)
+        branchFence = await this.deps.authorizeResources!(lease.snapshot.workspace)
       check()
       const projectId = randomUUID()
       const plugin = await this.deps.registry.register({
@@ -682,7 +719,7 @@ export class ProjectStageDebugSessions {
         // scope. The caller's file-only policy resumes before any plugin or executor is entered.
         guard: () => withRuntimePluginSource(undefined, guard),
         release: lease.release,
-        actions: []
+        actions
       })
       registered = plugin.id
       if (snapshot.recoveryInputs) {
@@ -763,6 +800,12 @@ export class ProjectStageDebugSessions {
   }
 
   authorizeBranch(context: HostStageBranchAdmissionContext) {
+    // Iteration reuses the original baseline. A debug child has no independent upstream
+    // execution history and must not become a new source that drops inherited restrictions.
+    const assertOriginalBaseline = () => {
+      if (this.findRecord(context.source.projectId)) fail("ORIGINAL_BASELINE_REQUIRED")
+    }
+    assertOriginalBaseline()
     const admission = this.admissions.get(context.input.baselineId)
     const record = admission?.record
     if (
@@ -786,8 +829,12 @@ export class ProjectStageDebugSessions {
       context.candidate,
       !!snapshot.recoveryInputs
     )
-    admission.check()
-    return { assertCurrent: admission.check }
+    const assertCurrent = () => {
+      admission.check()
+      assertOriginalBaseline()
+    }
+    assertCurrent()
+    return { assertCurrent }
   }
 
   /** Inspect pinned evidence only. This neither registers a preview nor restores a live grant. */

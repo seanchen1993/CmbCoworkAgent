@@ -40,10 +40,12 @@ it("reuses the support source in full catalog and bounded discovery instead of d
   const support = developmentCatalogPage("support")
   const overview = developmentCatalogPage()
   expect(full.support).toBe(CREATOR_S1_SUPPORT)
-  if (!("content" in support) || !overview.supportProfile) throw Error("expected discovery pages")
+  if (!("content" in support) || !("supportProfile" in overview) || !overview.supportProfile)
+    throw Error("expected discovery pages")
   expect(support.content).toEqual({
     ...full.support,
-    conditionalCapabilities: full.support.conditionalCapabilities.slice(0, 2)
+    conditionalCapabilities: full.support.conditionalCapabilities.slice(0,
+      "nextCursor" in support ? support.nextCursor : full.support.conditionalCapabilities.length)
   })
   expect(full.deliveryGuidance).toContain(full.support.authoringConstraints.usageMetrics)
   expect(overview.supportProfile.scope).toBe(full.support.scope)
@@ -78,6 +80,17 @@ it("discovers every conditional capability through bounded support pages without
     CREATOR_S1_SUPPORT.conditionalCapabilities.length + 1
   ])
     expect(() => developmentCatalogPage("support", invalid)).toThrow("DEVELOPMENT_CATALOG_CURSOR")
+})
+
+it.each(
+  CREATOR_S1_SUPPORT.conditionalCapabilities.map((capability, cursor) => ({ capability, cursor }))
+)("keeps $capability.id discoverable from its exact cursor", ({ capability, cursor }) => {
+  const page = developmentCatalogPage("support", cursor)
+  if (!("content" in page) || typeof page.content !== "object" || Array.isArray(page.content))
+    throw Error("expected support page")
+  expect(JSON.stringify(page).length).toBeLessThan(8000)
+  expect(page.content.conditionalCapabilities[0]).toEqual(capability)
+  expect(page.content.authoringConstraints).toEqual(CREATOR_S1_SUPPORT.authoringConstraints)
 })
 
 afterEach(async () => {

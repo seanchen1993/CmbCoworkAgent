@@ -8,6 +8,8 @@ import { ModControlStore } from "../control-store"
 import { ClawStore } from "../claw-store"
 import { prepareProjectActionSelection } from "../../harness-board/project-action-selection"
 import { createProjectActionBinding } from "../../harness-board/project-runtime/action-input"
+import { withProjectActionScope } from "../../harness-board/project-action-scope"
+import { resolveClawThread } from "../claw-scope"
 import type { ModJson } from "../../../shared/mods/types"
 import type { ClawActionEnvelope } from "../../../shared/mods/claw-actions"
 
@@ -324,4 +326,55 @@ it("does not mutate a host selection when its incarnation changes during catalog
   ).rejects.toThrow("PROJECT_ACTION_SCOPE_CHANGED")
   expect(closed).toBe(false)
   expect(store.read(f.root).revision).toBe(0)
+})
+
+it.each(["normal", "workflow"])("selects declared providers through the real %s Host scope without changing its model mode", async agentMode => {
+  const f = await fixture()
+  const binding = { projectId: "project", operationId: "operation", stageId: "stage",
+    pluginDigest: "a".repeat(64) }
+  const metadata = { workspacePath: f.root, agentMode, cmb_thread_incarnation: "original",
+    hostProjectRuntime: binding }
+  const store = new ClawStore(f.store)
+  let active = true, closed = 0
+  const resolve = () => resolveClawThread("thread", id =>
+    id === "thread" ? { metadata } : null)
+  const host = {
+    store,
+    assertScope: () => {
+      const selected = resolve()
+      if (!selected || selected.threadId !== "thread") throw Error("PROJECT_ACTION_SCOPE_CHANGED")
+      return selected.identity
+    },
+    catalog: (workspace: string, threadId: string) => f.manager.actionCatalog(workspace, threadId),
+    closeThread: (threadId: string) => { closed++; f.manager.closeThread(threadId) }
+  }
+  expect(resolve()).toBeNull()
+  await withProjectActionScope("thread", binding, () => {
+    if (!active) throw Error("OWNER_REVOKED")
+  }, async () => {
+    const action = (await host.catalog(f.root, "thread")).find(item => item.plugin === "reviewer")!
+    const bindings = [createProjectActionBinding("review", action, { file: "orders.ts" })]
+    await prepareProjectActionSelection(f.root, "thread", bindings, host)
+    expect(closed).toBe(1)
+    expect(metadata.agentMode).toBe(agentMode)
+    expect(metadata.hostProjectRuntime).toEqual(binding)
+    expect(store.selection(f.root, host.assertScope()).profile?.capabilities).toEqual([
+      { pluginId: action.pluginId, name: action.plugin, digest: action.digest }
+    ])
+    const prepared = await f.manager.prepareAction(f.root, "thread", action, new AbortController().signal)
+    expect(await f.manager.runAction(f.root, "thread", prepared, envelope,
+      new AbortController().signal)).toMatchObject({ output: { provider: "reviewer" } })
+    const revision = store.read(f.root).revision
+    await expect(prepareProjectActionSelection(f.root, "thread", bindings, {
+      ...host,
+      catalog: async (...args) => {
+        const actions = await host.catalog(...args)
+        active = false
+        return actions
+      }
+    })).rejects.toThrow("OWNER_REVOKED")
+    expect(closed).toBe(1)
+    expect(store.read(f.root).revision).toBe(revision)
+  })
+  expect(resolve()).toBeNull()
 })

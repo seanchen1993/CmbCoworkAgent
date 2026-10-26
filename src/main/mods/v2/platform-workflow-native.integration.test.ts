@@ -194,7 +194,10 @@ it("notifies a native subscriber after a user-cancelled run actually leaves its 
   vi.stubEnv("CMB_COWORK_AGENT_HOME", join(root, "data"))
   const threadId = `cancel-${Date.now()}`,
     runId = generateWorkflowRunId()
-  const provider = nativePlatformProviders(async () => true)[0]
+  const provider = nativePlatformProviders(async () => true).find(
+    candidate => candidate.provider === "native.workflow" && candidate.descriptor.id === "runs"
+  )
+  if (!provider?.watch) throw Error("NATIVE_WORKFLOW_WATCH_REQUIRED")
   let ready!: () => void, observed!: () => void
   const started = new Promise<void>((resolve) => {
     ready = resolve
@@ -221,7 +224,7 @@ it("notifies a native subscriber after a user-cancelled run actually leaves its 
       throw Error("not used")
     }
   }
-  const stop = provider.watch!(context)
+  const stop = provider.watch(context)
   let timeout: ReturnType<typeof setTimeout> | undefined
   try {
     await workflowRunManager.prepareLaunch(root, threadId)

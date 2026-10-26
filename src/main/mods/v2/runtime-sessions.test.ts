@@ -77,7 +77,7 @@ async function fixture(startup = "", hooks = "") {
         changed: () => {},
         readSession: async () => {
           if (state.readGate) { state.reading = true; await state.readGate }
-          return {}
+          return []
         },
         configurationBusy: () => state.busy,
         openConversationOwner: () => {
@@ -251,6 +251,60 @@ it("a captured predecessor cannot retire a replacement VM with the same thread i
   expect(current.retire()).toBe(first)
   await first
   expect(f.state.drains).toBe(2)
+})
+
+it("retires eight settled operation sessions through their exact owners without SessionEnd", async () => {
+  const f = await fixture("", 'on("session.end",async($)=>{await $.store.set("unexpected-end",true)})')
+  for (let index = 0; index < 8; index++) {
+    const thread = `operation-${index}`
+    expect(await f.run(thread)).toEqual({ text: "1" })
+    const captured = f.manager.captureIdleThreadRetirement(f.root, thread)
+    expect(captured.resident).toBe(true)
+    await captured.retire()
+    expect(f.manager.runtimeSessions()).toMatchObject({ limit: 6, resident: 0, reserved: 0 })
+  }
+  expect(f.state.drains).toBe(8)
+  expect(f.store.functionState.get(JSON.stringify([f.root, "release-demo"]), "unexpected-end"))
+    .toBeUndefined()
+})
+
+it("rejects a new or replaced session after an idle retirement capture", async () => {
+  const f = await fixture()
+  const empty = f.manager.captureIdleThreadRetirement(f.root, "same")
+  await f.run("same")
+  expect(() => empty.retire()).toThrow("MODS_SCOPE_CHANGED")
+  const old = f.manager.captureIdleThreadRetirement(f.root, "same")
+  await f.manager.closeThreadAndWait("same")
+  await f.run("same")
+  expect(() => old.retire()).toThrow("MODS_SCOPE_CHANGED")
+  expect(await f.run("same")).toEqual({ text: "2" })
+})
+
+it("does not retire an executing provider as a settled operation", async () => {
+  const f = await fixture(
+    'await $.command.register({name:"held",description:"Held"})',
+    'on("command.run",{command:"held"},async($)=>{await $.session.messages();return{text:"read"}})'
+  )
+  const gate = Promise.withResolvers<void>()
+  f.state.readGate = gate.promise
+  const command = (await f.manager.commands(f.root, "active")).find(item => item.command === "held")!
+  const work = f.manager.runCommand(f.root, "active", command, "", f.signal)
+  try {
+    await vi.waitFor(() => expect(f.state.reading).toBe(true))
+    expect(() => f.manager.captureIdleThreadRetirement(f.root, "active"))
+      .toThrow("MODS_RUNTIME_SESSION_BUSY")
+    expect(f.state.drains).toBe(0)
+  } finally { gate.resolve(); await work }
+  await f.manager.captureIdleThreadRetirement(f.root, "active").retire()
+})
+
+it("retains failed operation cleanup capacity instead of admitting another owner", async () => {
+  const f = await fixture()
+  await f.run("failed-cleanup")
+  f.state.failDrain = true
+  await expect(f.manager.captureIdleThreadRetirement(f.root, "failed-cleanup").retire())
+    .rejects.toThrow()
+  expect(f.manager.runtimeSessions()).toMatchObject({ resident: 1, reserved: 1 })
 })
 
 it("reads occupancy without loading and releases only the selected VM before admitting seven", async () => {

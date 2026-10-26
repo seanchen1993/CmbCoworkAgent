@@ -23,6 +23,7 @@ import {
 } from "../../harness-board/project-runtime/safe-files"
 import { discoverSkillsSync } from "../../skills/discovery"
 import { isSupportedHookEvent } from "../../hooks/types"
+import { readProjectActionLock } from "../../harness-board/project-runtime/action-input"
 import {
   assertStageRecoveryDeclaration,
   readStageRecoveryPolicy,
@@ -149,18 +150,37 @@ export function assertStageDebugPackageSupported(
       deny("MCP_UNSUPPORTED")
     if (packageUsesSharedMods(root, parsed) && !isConfigurationOnlyPackage(root))
       deny("SHARED_MODS_UNSUPPORTED")
-    if (
-      manifest.checks.some(
-        (check) => check.kind === "action" || check.actionId || check.sideEffect !== "read"
-      )
-    )
+    if (manifest.checks.some((check) => check.sideEffect !== "read"))
       deny("CHECK_EFFECT_UNSUPPORTED")
     if (
       parseClawActionExports(raw.claw).length ||
-      manifest.actions.length ||
       manifest.stages.some((stage) => stage.actionIds.length)
     )
       deny("ACTIONS_UNSUPPORTED")
+    if (manifest.actions.length) {
+      // This only admits immutable contracts. The original executor independently proves
+      // each provider's real permission set and confines its dispatch before any check runs.
+      const provider = contract?.context?.provider
+      if (provider?.actionId && (!provider.materials || !options.frozenInputsBound))
+        deny("CONTEXT_PROVIDER_RECOVERY_REQUIRED")
+      const allowed = new Set(
+        manifest.checks.filter((check) => check.kind === "action").map((check) => check.actionId!)
+      )
+      if (provider?.actionId) allowed.add(provider.actionId)
+      if (manifest.actions.some((action) => !allowed.has(action.id))) deny("ACTIONS_UNSUPPORTED")
+      const lock = readProjectActionLock(root, manifest)
+      if (lock.bindings.some((binding) => !binding.platform || !allowed.has(binding.id)))
+        deny("ACTIONS_UNSUPPORTED")
+      for (const check of manifest.checks.filter((check) => check.kind === "action")) {
+        const binding = lock.bindings.find((item) => item.id === check.actionId)
+        if (
+          !binding?.platform ||
+          binding.inputFrom?.kind !== "artifact" ||
+          binding.inputFrom.artifactId !== check.artifactId
+        )
+          deny("CHECK_INPUT_UNSUPPORTED")
+      }
+    }
 
     const hookPath = parsed.hooks ?? DEFAULT_PLUGIN_HOOKS_PATH
     const declaredHooks = json(root, hookPath, parsed.hooks !== undefined)

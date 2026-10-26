@@ -25,7 +25,7 @@ function isFreeformOption(label: string): boolean {
   )
 }
 
-function removeFreeformOptions(questions: UserInputQuestion[]): UserInputQuestion[] {
+export function removeFreeformOptions(questions: UserInputQuestion[]): UserInputQuestion[] {
   return questions.map((question) => ({
     ...question,
     options: question.options.filter((option) => !isFreeformOption(option.label))
@@ -92,6 +92,8 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
         waitStarted = true
         const response = await requestUserInput({
           threadId: context.threadId,
+          toolCallId: (config as { toolCall?: { id?: string }; toolCallId?: string })?.toolCall?.id ??
+            (config as { toolCallId?: string })?.toolCallId,
           questions: removeFreeformOptions(input.questions),
           autoResolutionMs,
           autoResolution: {

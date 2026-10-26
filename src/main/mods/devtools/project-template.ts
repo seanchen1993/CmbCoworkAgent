@@ -1,4 +1,5 @@
 import { createAuthoringSourceBundle, type AuthoringSourceBundle } from "./authoring-bundle"
+import { createNativeProjectTemplate } from "./project-native-template"
 import {
   parseProjectRuntimeManifest,
   type ProjectRuntimeManifest
@@ -10,6 +11,7 @@ import {
 } from "./project-harness"
 
 export type ProjectTemplateKind =
+  | "native-modular"
   | "project-lite"
   | "harness-lite"
   | "harness-fullstack"
@@ -33,6 +35,7 @@ export function createProjectTemplate(input: ProjectTemplateInput): AuthoringSou
   ) {
     throw Error("PROJECT_TEMPLATE_INPUT")
   }
+  if (input.template === "native-modular") return createNativeProjectTemplate(input)
   if (input.template && input.template !== "project-lite") return createHarnessTemplate(input)
   const manifest: ProjectRuntimeManifest = parseProjectRuntimeManifest({
     apiVersion: "devclaw.project-runtime/v1",

@@ -8,6 +8,8 @@ import { readPluginManifest } from "../../plugins/manifest"
 import { packageUsesSharedMods } from "./package-preflight"
 import { readProjectActionLock } from "./action-input"
 import { readProjectRecoveryContext } from "./recovery-context"
+import { readDeclaredContextFiles } from "./declared-context-files"
+import { readRetainedExecutionResources } from "./execution-resources"
 import {
   readRuntimeScopedFile,
   runtimeDigest,
@@ -21,6 +23,7 @@ type InputManager = Pick<
   | "getRuntimeSourceFacts"
   | "readUserConfigIdentity"
   | "readUserConfigDirectoryIdentity"
+  | "readRuntimePublicConfiguration"
   | "assertRuntimeSourceConfiguration"
 >
 
@@ -80,7 +83,63 @@ export function createHostProjectInputIdentity(
       enabled: true
     }
   })
+  const executionResources = (project: ProjectRuntimeInputScope, root: string) =>
+    readRetainedExecutionResources(root, binding => {
+      const input = source(project, root)
+      manager.assertRuntimeSourceConfiguration(input)
+      const facts = manager.getRuntimeSourceFacts(input)
+      const field = facts?.userConfig?.[binding]
+      if (!facts || !field || field.type !== "directory" || field.sensitive || field.multiple || !field.required)
+        throw Error("PROJECT_EXECUTION_WORKSPACE_BINDING_INVALID")
+      const value = manager.readUserConfigDirectoryIdentity(project.workspace, facts.name, binding)
+      if (typeof value !== "string" || !value) throw Error("PROJECT_EXECUTION_WORKSPACE_REQUIRED")
+      return value
+    })
   return {
+    readExecutionResources: executionResources,
+    readContextMaterials(project: ProjectRuntimeInputScope, root: string) {
+      const context = readPackageExtensionContract(root)?.context
+      const materials = context?.provider?.materials
+      if (!materials) throw Error("PROJECT_CONTEXT_MATERIALS_REQUIRED")
+      const input = source(project, root)
+      manager.assertRuntimeSourceConfiguration(input)
+      const facts = manager.getRuntimeSourceFacts(input)
+      if (!facts) throw Error("PROJECT_INPUT_SOURCE_NOT_PREPARED")
+      const key = context.knowledge.binding
+      const field = key && facts.userConfig?.[key]
+      const selected = key && field && field.type === "directory" && !field.multiple && !field.sensitive
+        ? manager.readUserConfigDirectoryIdentity(project.workspace, facts.name, key) : undefined
+      const roots = materials.roots.map(material => {
+        const base = material.source === "package" ? root : selected
+        if (!base) throw Error("PROJECT_KNOWLEDGE_BINDING_INVALID")
+        const canonical = runtimeDirectory(base)
+        const path = material.path ? runtimeDirectory(join(canonical, material.path)) : canonical
+        // runtimeDirectory rejects aliases/symlinks, including a redirected parent segment.
+        return { id: material.id, path, source: material.source }
+      })
+      const configuration = manager.readRuntimePublicConfiguration(input, materials.configuration)
+      return { roots, configuration }
+    },
+    readDeclaredContext(project: ProjectRuntimeInputScope, root: string, stageId: string): string {
+      const declaration = readPackageExtensionContract(root)?.context
+      if (!declaration?.provider?.files) throw Error("PROJECT_DECLARED_CONTEXT_REQUIRED")
+      manager.assertRuntimeSourceConfiguration(source(project, root))
+      const facts = manager.getRuntimeSourceFacts(source(project, root))
+      const key = declaration.knowledge.binding
+      const field = key && facts?.userConfig?.[key]
+      if (key && (!facts || !field || field.type !== "directory" || field.sensitive || field.multiple))
+        throw Error("PROJECT_KNOWLEDGE_BINDING_INVALID")
+      const selected = key && facts
+        ? manager.readUserConfigDirectoryIdentity(project.workspace, facts.name, key) : undefined
+      const identity = facts ? authority(project.workspace, [facts.name]) : null
+      return readDeclaredContextFiles({ context: declaration, snapshotRoot: root,
+        knowledgeRoot: typeof selected === "string" && selected ? selected : undefined,
+        stageId, assertCurrent: () => {
+          manager.assertRuntimeSourceConfiguration(source(project, root))
+          if (JSON.stringify(facts ? authority(project.workspace, [facts.name]) : null) !== JSON.stringify(identity))
+            throw Error("PROJECT_CONTEXT_CONFIGURATION_CHANGED")
+        } })
+    },
     async prepareInputIdentity(project: ProjectRuntimeInputScope, root: string): Promise<void> {
       // Creating a project must leave the original native configuration form reachable.
       // Only immutable compiler/schema facts are required before that form exists.
@@ -131,10 +190,19 @@ export function createHostProjectInputIdentity(
           manager.readUserConfigDirectoryIdentity(project.workspace, own.name, key) ?? field.default
         if (value !== undefined && value !== "") {
           if (typeof value !== "string") throw Error("PROJECT_KNOWLEDGE_BINDING_INVALID")
-          knowledge = fingerprintProjectKnowledge(value, context.knowledge.required)
           boundKnowledge = runtimeDirectory(value)
+          // Explicit file providers depend on selected documents, not the entire directory.
+          // Keep actual byte checks at commit boundaries; metadata-only caches are not evidence.
+          if (!context.provider?.files)
+            knowledge = fingerprintProjectKnowledge(value, context.knowledge.required)
         } else if (context.knowledge.required && !context.provider?.entry)
           throw Error("PROJECT_KNOWLEDGE_REQUIRED")
+      }
+      if (context?.provider?.files) {
+        const stage = project.stageIndex === undefined ? undefined
+          : project.manifest.stages[project.stageIndex]
+        knowledge = runtimeDigest(readDeclaredContextFiles({ context, snapshotRoot: root,
+          knowledgeRoot: boundKnowledge, stageId: stage?.id, assertCurrent: () => {} }))
       }
       if (context?.provider?.entry) {
         if (!host.contextDataRoot || !metadata.version)
@@ -195,7 +263,8 @@ export function createHostProjectInputIdentity(
           config,
           rules: host.rules(project.workspace, names),
           knowledge: knowledge ?? null,
-          mutableContext: mutableContext ?? null
+          mutableContext: mutableContext ?? null,
+          executionResources: executionResources(project, root)?.fingerprint ?? null
         })
       )
     }

@@ -10,15 +10,24 @@ import { readProjectRuntimeDescription } from "../harness-board/project-runtime/
 import { assertHostPackageSupported } from "../harness-board/project-runtime/package-preflight"
 import { inspectHostProjectExecution } from "../harness-board/project-runtime/host-execution-inspector"
 import { compareProjectVersions } from "../../shared/project-runtime/version-report"
+import { effectiveHostResultApproval } from "../../shared/project-runtime/import-approval-policy"
 import { registerLegacyProjectRuntimeHandlers } from "./project-runtime-legacy"
+import { registerProjectImportHandlers } from "./project-runtime-import"
+import { authorizeProjectWorkspaceResources } from "./project-workspace-resources"
 import { ProjectWorkspaceModeGuard } from "../harness-board/project-runtime/workspace-mode-guard"
-import { projectHostFacts, registerBuiltinProjectFacts } from "../mods/builtins/project-facts"
-import { getThreadCore } from "../db"
+import {
+  matchesProjectHostBinding, projectHostFacts, registerBuiltinProjectBinding, registerBuiltinProjectFacts
+} from "../mods/builtins/project-facts"
+import { getThreadCore, getThreadRuntimeScope } from "../db"
+import { getHostInputWait, getHostInputContinuation } from "../services/user-input"
+import { configureHostInputResumeHandler } from "./user-input"
+import { workflowRunManager } from "../agent/workflow/run-manager"
+import { LocalSandbox } from "../agent/local-sandbox"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import { getProjectActionRuntime } from "../harness-board/project-action-runtime"
 import { projectActionResults } from "../harness-board/project-action-results"
 import { readProjectActionLock } from "../harness-board/project-runtime/action-input"
-import { isSameWorkspacePath } from "../../shared/workspace-path"
+import { isSameWorkspacePath, workspacePathsOverlap } from "../../shared/workspace-path"
 import {
   isProjectPreviewId,
   projectPreviewRegistry
@@ -33,6 +42,10 @@ import {
 import { StageRecoveryInputs } from "../mods/devtools/stage-recovery-inputs"
 import { getProjectRuntimeFunctionManager } from "../harness-board/project-runtime-function-source"
 import { getModsManager } from "../mods/manager"
+import {
+  configureProjectRuntimePlatformResolver,
+  configureProjectRuntimeNativeCommand
+} from "../mods/v2/platform-project-runtime-native"
 import { ProjectLibrary } from "../harness-board/project-runtime/project-library"
 import { registerProjectCompositionHandlers } from "./project-composition"
 import { createLegacyCompositionDependencies } from "../harness-board/project-runtime/composition-legacy-production"
@@ -46,7 +59,8 @@ import type { ProjectLibraryApi } from "../../shared/project-runtime/project-lib
 import type {
   LocalProjectCommand,
   LocalProjectSummary,
-  LocalProjectTemplate
+  LocalProjectTemplate,
+  LocalProjectView
 } from "../../shared/project-runtime/platform-api"
 
 /** Separate from legacy Harness storage and enterprise configuration. */
@@ -74,6 +88,7 @@ export function registerProjectRuntimeHandlers(
       registry: projectPreviewRegistry,
       platform,
       retainedRoot: (project) => snapshots!.read(project.pluginDigest).root,
+      authorizeResources: workspace => authorizeProjectWorkspaceResources([workspace]),
       assertInspectionScope: (scope) => {
         const thread = getThreadCore(scope.threadId)
         const metadata =
@@ -101,6 +116,42 @@ export function registerProjectRuntimeHandlers(
   }
   configureProjectStageDebugResolver(stageDebug)
   const runOwners = new Map<string, BrowserWindow>()
+  const inputResumeOwners = new Map<string, BrowserWindow>()
+  async function resumeSavedInput(requestId: string, threadId: string, owner: BrowserWindow) {
+    if (owner !== mainWindow() || owner.isDestroyed() || owner.webContents.isDestroyed())
+      throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
+    const record = getHostInputContinuation(requestId)
+    if (!record || record.request.threadId !== threadId)
+      throw Error("PROJECT_OPERATION_SCOPE_CHANGED")
+    const operationId = record.binding.operationId
+    if (inputResumeOwners.has(operationId)) throw Error("PROJECT_OPERATION_ALREADY_RUNNING")
+    const continuedOperations = new Set<string>()
+    inputResumeOwners.set(operationId, owner)
+    try {
+      const result = await platform().resumeInput(operationId, requestId, {
+        assertAuthority: () => {
+          if (owner !== mainWindow() || owner.isDestroyed() || owner.webContents.isDestroyed())
+            throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
+        },
+        beforeStart: operation => {
+          if (owner !== mainWindow() || owner.isDestroyed() || owner.webContents.isDestroyed())
+            throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
+          runOwners.set(operation.operationId, owner)
+          continuedOperations.add(operation.operationId)
+        }
+      })
+      const remaining = getHostInputContinuation(requestId)
+      if (result.status === "unknown" && remaining?.status === "answered" &&
+        remaining.continuation?.claimed === false)
+        throw Error("PROJECT_INPUT_RESUME_BLOCKED")
+    } finally {
+      inputResumeOwners.delete(operationId)
+      for (const id of continuedOperations)
+        if (runOwners.get(id) === owner) runOwners.delete(id)
+      projectAuthoringSessions.notifyTrialProject(record.binding.projectId)
+    }
+  }
+  configureHostInputResumeHandler(resumeSavedInput)
   const compositions = registerProjectCompositionHandlers(ipc, {
     trusted,
     host: platform,
@@ -157,6 +208,16 @@ export function registerProjectRuntimeHandlers(
     project: platform().get(projectId),
     operations: platform().operations(projectId, 100)
   }))
+  registerBuiltinProjectBinding((threadId, workspace, projectId) => {
+    if (!service) return false
+    const row = getThreadRuntimeScope(threadId)
+    const metadata = typeof row?.metadata === "string" ? JSON.parse(row.metadata) : row?.metadata
+    const binding = metadata?.hostProjectRuntime
+    if (!binding || binding.projectId !== projectId || typeof binding.operationId !== "string")
+      return false
+    return matchesProjectHostBinding(threadId, workspace, binding,
+      service.get(projectId), service.bindingOperation(projectId, binding.operationId))
+  })
   registerBuiltinProjectFacts((threadId, workspace) => {
     if (!service) return undefined
     const row = getThreadCore(threadId)
@@ -176,6 +237,7 @@ export function registerProjectRuntimeHandlers(
     if (
       !owner ||
       owner.isDestroyed() ||
+      owner.webContents.isDestroyed() ||
       event.sender !== owner.webContents ||
       event.senderFrame !== owner.webContents.mainFrame
     )
@@ -197,6 +259,63 @@ export function registerProjectRuntimeHandlers(
       )
       snapshots = new HostPackageSnapshots(join(root, "packages"))
       service = new HostProjectService(store, snapshots, {
+        authorizePlanMigration: async project => {
+          const installed = getPlugins().find(plugin => plugin.id === project.installedPluginId)
+          const identity = installed && JSON.stringify([installed.id, installed.name, installed.path,
+            installed.version, installed.enabled])
+          const resourceGuard = await workflowRunManager.assertWorkspaceResourcesSettled(project.workspace)
+          const flowManager = getProjectActionRuntime().flows
+          if (!flowManager.assertWorkspaceResourcesSettled) throw Error("PROJECT_FLOW_RUNTIME_UNAVAILABLE")
+          const flowGuard = flowManager.assertWorkspaceResourcesSettled(project.workspace)
+          const operations = store.listOperations(project.projectId, 200)
+          if (operations.length === 200) throw Error("PROJECT_MIGRATION_RESOURCE_HISTORY_LIMIT")
+          const assertCurrent = () => {
+            resourceGuard.assertCurrent()
+            flowGuard.assertCurrent()
+            const current = getPlugins().find(plugin => plugin.id === project.installedPluginId)
+            if (isProjectPreviewId(project.installedPluginId) || !current?.enabled ||
+              JSON.stringify([current.id, current.name, current.path, current.version, current.enabled]) !== identity)
+              throw Error("PROJECT_PLUGIN_UNAVAILABLE")
+            for (const operation of operations)
+              if (operation.execution && LocalSandbox.hasActiveBackgroundTasks(operation.execution.threadId))
+                throw Error("PROJECT_BACKGROUND_TASKS_ACTIVE")
+            if (LocalSandbox.hasActiveBackgroundTasksInWorkspace(project.workspace))
+              throw Error("PROJECT_BACKGROUND_TASKS_ACTIVE")
+            for (const lease of listLocalThreadRunLeases()) {
+              const raw = getThreadCore(lease.threadId)?.metadata
+              const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
+              if (typeof metadata?.workspacePath === "string" &&
+                workspacePathsOverlap(metadata.workspacePath, project.workspace))
+                throw Error("PROJECT_WORKSPACE_BUSY")
+            }
+          }
+          assertCurrent()
+          return { assertCurrent }
+        },
+        assertInputResumeSafe: async (project, operation) => {
+          const guard = await workflowRunManager.assertWorkspaceResourcesSettled(project.workspace)
+          const flowManager = getProjectActionRuntime().flows
+          if (!flowManager.assertWorkspaceResourcesSettled) throw Error("PROJECT_FLOW_RUNTIME_UNAVAILABLE")
+          const flowGuard = flowManager.assertWorkspaceResourcesSettled(project.workspace)
+          const assertCurrent = () => {
+            guard.assertCurrent()
+            flowGuard.assertCurrent()
+            if (!operation.execution || LocalSandbox.hasActiveBackgroundTasks(operation.execution.threadId))
+              throw Error("PROJECT_BACKGROUND_TASKS_ACTIVE")
+            if (LocalSandbox.hasActiveBackgroundTasksInWorkspace(project.workspace))
+              throw Error("PROJECT_BACKGROUND_TASKS_ACTIVE")
+            for (const lease of listLocalThreadRunLeases()) {
+              if (lease.threadId === operation.execution.threadId) continue
+              const raw = getThreadCore(lease.threadId)?.metadata
+              const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
+              if (typeof metadata?.workspacePath === "string" &&
+                workspacePathsOverlap(metadata.workspacePath, project.workspace))
+                throw Error("PROJECT_WORKSPACE_BUSY")
+            }
+          }
+          assertCurrent()
+          return { assertCurrent }
+        },
         reconcileRecoveryHooks: (project) => stageDebug().reconcileNativeHookFacts(project),
         assertCommand: (project, kind) => stageDebug().assertCommand(project, kind),
         authorizeStageBranch: async (context) => stageDebug().authorizeBranch(context),
@@ -259,7 +378,9 @@ export function registerProjectRuntimeHandlers(
             library ??= new ProjectLibrary(libraryPath)
             context.knowledgeReference = library.knowledgeContext(context.project.projectId)
           }
-          const owner = runOwners.get(context.operation.operationId)
+          const owner = context.recoveryInput
+            ? inputResumeOwners.get(context.operation.operationId) ?? runOwners.get(context.operation.operationId)
+            : runOwners.get(context.operation.operationId)
           if (!owner || owner.isDestroyed()) throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
           const { executeHostProjectStage } =
             await import("../harness-board/project-action-executor")
@@ -285,7 +406,58 @@ export function registerProjectRuntimeHandlers(
     }
     return service
   }
-  registerLegacyProjectRuntimeHandlers(ipc, trusted, compositionGuard)
+  configureProjectRuntimePlatformResolver(platform)
+  configureProjectRuntimeNativeCommand(async request => {
+    request.assertCurrent()
+    const owner = mainWindow()
+    if (!owner || owner.isDestroyed()) throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
+    const api = platform()
+    const project = api.get(request.projectId)
+    if (!project || internalCompositionProject(project.projectId))
+      throw Error("PROJECT_OPERATION_SCOPE_CHANGED")
+    if (project.version !== request.expectedVersion || project.pluginDigest !== request.pluginDigest)
+      throw Error("PROJECT_HOST_VERSION_CONFLICT")
+    if (request.kind === "continue") {
+      const owned = new Set<string>()
+      try {
+        const result = await api.continue(project.projectId, {
+          maxSteps: 16,
+          maxDurationMs: 15 * 60_000,
+          assertAuthority: () => {
+            request.assertAuthority()
+            if (owner !== mainWindow() || owner.isDestroyed() || owner.webContents.isDestroyed())
+              throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
+          },
+          beforeStart: operation => {
+            request.assertAuthority()
+            if (owner.isDestroyed()) throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
+            if (runOwners.has(operation.operationId)) throw Error("PROJECT_OPERATION_ALREADY_RUNNING")
+            owned.add(operation.operationId)
+            runOwners.set(operation.operationId, owner)
+          }
+        })
+        projectAuthoringSessions.notifyTrialProject(project.projectId)
+        return { status: result.reason === "unknown" ? "unknown" : "completed",
+          projectVersion: result.project.version,
+          operationStatus: result.operations.at(-1)?.status,
+          stopReason: result.reason }
+      } finally {
+        for (const operationId of owned) runOwners.delete(operationId)
+      }
+    }
+    request.assertCurrent()
+    const result = request.kind === "cancel"
+      ? api.cancel(request.operationId) : await api.reconcile(request.operationId, () => {
+        request.assertAuthority()
+        if (owner !== mainWindow() || owner.isDestroyed() || owner.webContents.isDestroyed())
+          throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
+      })
+    projectAuthoringSessions.notifyTrialProject(project.projectId)
+    return { status: result.status === "unknown" ? "unknown" : "completed",
+      projectVersion: api.get(project.projectId)!.version, operationStatus: result.status }
+  })
+  const legacy = registerLegacyProjectRuntimeHandlers(ipc, trusted, compositionGuard)
+  registerProjectImportHandlers(ipc, { legacy, trusted, host: platform, view })
   function libraryScope(event: IpcMainInvokeEvent, projectId: string) {
     trusted(event)
     if (internalCompositionProject(projectId)) throw Error("COMPOSITION_USE_PARENT_PROJECT")
@@ -360,16 +532,44 @@ export function registerProjectRuntimeHandlers(
     (project) => snapshots!.read(project.pluginDigest).root,
     internalCompositionProject
   )
-  function view(projectId: string) {
+  function view(projectId: string): LocalProjectView {
     if (internalCompositionProject(projectId)) throw Error("COMPOSITION_USE_PARENT_PROJECT")
     const api = platform()
     const project = api.get(projectId)
     if (!project) throw Error("PROJECT_NOT_FOUND")
-    return {
+    const result: LocalProjectView = {
       project,
       operations: api.operations(projectId, 20),
       preview: projectPreviewRegistry.describe(project)
     }
+    const imported = api.importedSource(projectId)
+    result.resultApprovalRequired = effectiveHostResultApproval(
+      project.manifest.stages[project.stageIndex], imported)
+    if (imported) result.importedSource = { sourceProjectId: imported.review.sourceProjectId,
+      prefixStageIds: imported.review.prefixStageIds,
+      reexecuteStageIds: imported.review.adaptation?.reexecuteStageIds ?? [] }
+    const waitingOperation = result.operations.find(item => item.expectedVersion === project.version &&
+      (item.status === "unknown" || item.status === "started"))
+    if (waitingOperation) {
+      const wait = getHostInputWait(waitingOperation.operationId)
+      if (wait && !wait.continuation?.claimed && (wait.status === "waiting" || wait.status === "answered"))
+        result.inputWait = { operationId: waitingOperation.operationId,
+          requestId: wait.request.requestId, threadId: wait.request.threadId, status: wait.status,
+          resumable: wait.continuation?.priorToolsSettled === true }
+    }
+    if (result.resultApprovalRequired) {
+      const operation = result.operations.find(item =>
+        item.expectedVersion === project.version && item.status === "succeeded")
+      if (operation) {
+        try {
+          result.resultReview = api.resultReview(operation.operationId)
+        } catch {
+          // Keep history readable after changes or revocation; never show a stale approval form.
+          result.resultReviewError = "成果或检查已变化，请重新核对后再审批。"
+        }
+      }
+    }
+    return result
   }
   ipc.handle("project-runtime:templates", async (event) => {
     trusted(event)
@@ -588,13 +788,21 @@ export function registerProjectRuntimeHandlers(
     "project-runtime:command",
     async (event, projectId: string, command: LocalProjectCommand) => {
       const owner = trusted(event)
+      const assertAuthority = () => {
+        if (trusted(event) !== owner) throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
+      }
       const api = platform()
       const current = view(projectId)
       if (!command || typeof command !== "object" || Array.isArray(command))
         throw Error("PROJECT_INVALID_COMMAND")
+      const stageInstructions = command.kind === "prepare" ? command.stageInstructions : undefined
+      const commandGuard = command.kind === "continue" || command.kind === "resume-input" ||
+        command.kind === "validate-imported" ? "start"
+        : command.kind === "review-plan" || command.kind === "migrate-plan" ? "prepare"
+        : command.kind === "approve-result" ? "advance" : command.kind
       // Local native receipts are reconciled by the service before unresolved-Hook guards.
       // This never authorizes an external inspector or an execution.
-      if (command.kind !== "reconcile") stageDebug().assertCommand(current.project, command.kind)
+      if (command.kind !== "reconcile") stageDebug().assertCommand(current.project, commandGuard)
       if (
         isProjectPreviewId(current.project.installedPluginId) &&
         command.kind !== "cancel" &&
@@ -603,11 +811,41 @@ export function registerProjectRuntimeHandlers(
         projectPreviewRegistry.assertProject(current.project)
       // Native cancellation never depends on an invalid configuration or unavailable knowledge.
       if (command.kind !== "cancel") await api.prepareRuntimeInputs(projectId)
-      if (command.kind === "prepare") {
+      assertAuthority()
+      let continuation: LocalProjectView["continuation"]
+      let migrationReview: LocalProjectView["migrationReview"]
+      if (command.kind === "review-plan") {
+        migrationReview = await api.reviewPlanMigration(projectId, command.expectedVersion)
+      } else if (command.kind === "migrate-plan") {
+        if (!command.review || command.review.projectId !== projectId)
+          throw Error("PROJECT_OPERATION_SCOPE_CHANGED")
+        await api.migratePlan(command.review, assertAuthority)
+      } else if (command.kind === "continue") {
+        if (command.expectedVersion !== current.project.version)
+          throw Error("PROJECT_HOST_VERSION_CONFLICT")
+        const owned = new Set<string>()
+        try {
+          const result = await api.continue(projectId, {
+            maxSteps: 16,
+            maxDurationMs: 15 * 60_000,
+            assertAuthority,
+            beforeStart: operation => {
+              trusted(event)
+              if (runOwners.has(operation.operationId)) throw Error("PROJECT_OPERATION_ALREADY_RUNNING")
+              owned.add(operation.operationId)
+              runOwners.set(operation.operationId, owner)
+            }
+          })
+          continuation = { reason: result.reason, ...(result.error ? { error: result.error } : {}) }
+        } finally {
+          for (const operationId of owned) runOwners.delete(operationId)
+        }
+      } else if (command.kind === "prepare") {
         api.prepare({
           projectId,
           expectedVersion: command.expectedVersion,
-          idempotencyKey: command.idempotencyKey
+          idempotencyKey: command.idempotencyKey,
+          ...(stageInstructions !== undefined ? { stageInstructions } : {})
         })
       } else {
         // Resolve against durable identity, never accept an operation belonging to another project.
@@ -615,7 +853,16 @@ export function registerProjectRuntimeHandlers(
           (item) => item.operationId === command.operationId
         )
         if (!operation) throw Error("PROJECT_OPERATION_SCOPE_CHANGED")
-        if (command.kind === "approve")
+        if (command.kind === "approve-result") {
+          if (!command.review || command.review.operationId !== operation.operationId)
+            throw Error("PROJECT_OPERATION_SCOPE_CHANGED")
+          api.decideResultApproval(operation.operationId, {
+            ...command.review,
+            decision: command.decision,
+            ...(command.feedback === undefined ? {} : { feedback: command.feedback }),
+            actorId: "desktop-user"
+          })
+        } else if (command.kind === "approve")
           api.approve(operation.operationId, {
             expectedVersion: command.expectedVersion,
             inputFingerprint: command.inputFingerprint,
@@ -627,13 +874,19 @@ export function registerProjectRuntimeHandlers(
           })
         else if (command.kind === "advance") api.transition(operation.operationId)
         else if (command.kind === "cancel") api.cancel(operation.operationId)
-        else if (command.kind === "validate") await api.validate(operation.operationId)
-        else if (command.kind === "reconcile") await api.reconcile(operation.operationId)
-        else if (command.kind === "start") {
+        else if (command.kind === "validate") await api.validate(operation.operationId, assertAuthority)
+        else if (command.kind === "reconcile") await api.reconcile(operation.operationId, assertAuthority)
+        else if (command.kind === "resume-input") {
+          if (!operation.execution ||
+            getHostInputContinuation(command.requestId)?.binding.operationId !== operation.operationId)
+            throw Error("PROJECT_OPERATION_SCOPE_CHANGED")
+          await resumeSavedInput(command.requestId, operation.execution.threadId, owner)
+        } else if (command.kind === "start" || command.kind === "validate-imported") {
           if (runOwners.has(operation.operationId)) throw Error("PROJECT_OPERATION_ALREADY_RUNNING")
           runOwners.set(operation.operationId, owner)
           try {
-            await api.start(operation.operationId)
+            if (command.kind === "validate-imported") await api.validateImported(operation.operationId, assertAuthority)
+            else await api.start(operation.operationId, { assertInputsCurrent: assertAuthority })
           } finally {
             runOwners.delete(operation.operationId)
             projectAuthoringSessions.notifyTrialProject(projectId)
@@ -646,7 +899,8 @@ export function registerProjectRuntimeHandlers(
         projectPreviewRegistry.complete(updated, api.operations(projectId, 100))
       if (updated.status === "completed") stageDebug().end(updated)
       projectAuthoringSessions.notifyTrialProject(projectId)
-      return view(projectId)
+      return { ...view(projectId), ...(continuation ? { continuation } : {}),
+        ...(migrationReview ? { migrationReview } : {}) }
     }
   )
 }

@@ -6,6 +6,8 @@ import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 import { hostProjectFixture } from "./host-fixtures.test-helper"
 import { assertStageBranchSourceCompatible } from "./stage-branch-compatibility"
 import { MARKET_CONTENT_PREFIX, protectMarketDirectory } from "../../services/market-content"
+import { createNativeProjectTemplate } from "../../mods/devtools/project-native-template"
+import { compileNativeComposition, nativeCompositionSchema } from "../../plugins/native-composition"
 
 const roots: string[] = []
 afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })))
@@ -45,7 +47,8 @@ function fixture(shared = false, skill = `${declaration}Original body\n`) {
     original,
     candidate,
     edit: (text: string) => writeFileSync(join(candidate, manifest.stages[1].skill!), text),
-    check: () => assertStageBranchSourceCompatible(original, candidate, manifest, manifest, "review")
+    check: () =>
+      assertStageBranchSourceCompatible(original, candidate, manifest, manifest, "review")
   }
 }
 
@@ -71,6 +74,55 @@ describe("stage branch Skill declaration compatibility", () => {
     expect(setup.check).toThrow("PROJECT_HOST_BRANCH_SKILL_DECLARATION_INVALID")
   })
 
+  it("recompiles a future native Skill body but preserves author contracts and frontmatter", () => {
+    const root = mkdtempSync(join(tmpdir(), "native-branch-contract-"))
+    roots.push(root)
+    const bundle = createNativeProjectTemplate({ packageId: "docs", name: "Documents" })
+    const source = nativeCompositionSchema.parse(
+      JSON.parse(bundle.files.find((file) => file.path === "composition/source.json")!.text)
+    )
+    const files = bundle.files.map((file) => ({ path: file.path, bytes: Buffer.from(file.text) }))
+    const save = (name: string, changedSource = source, body = "\nImproved review\n") => {
+      const compiled = compileNativeComposition(changedSource, {
+        actionCatalog: [],
+        files: files
+          .filter(
+            (file) =>
+              changedSource.resources.includes(file.path) ||
+              changedSource.modules.some((module) => module.skill === file.path)
+          )
+          .map((file) =>
+            file.path === "modules/review/SKILL.md"
+              ? { ...file, bytes: Buffer.concat([file.bytes, Buffer.from(body)]) }
+              : file
+          )
+      })
+      const folder = join(root, name)
+      for (const file of compiled.files) {
+        mkdirSync(dirname(join(folder, file.path)), { recursive: true })
+        writeFileSync(join(folder, file.path), file.bytes)
+      }
+      return { folder, manifest: parseProjectRuntimeManifest(compiled.runtime) }
+    }
+    const before = save("before", source, "")
+    const after = save("after")
+    const check = () =>
+      assertStageBranchSourceCompatible(
+        before.folder,
+        after.folder,
+        before.manifest,
+        after.manifest,
+        "review"
+      )
+    expect(check).not.toThrow()
+    const changed = structuredClone(source)
+    changed.modules[1].outputs[0].contract = "different-review/v2"
+    save("after", changed)
+    expect(check).toThrow("BRANCH_CONTRACT_CHANGED")
+    save("after")
+    writeFileSync(join(after.folder, "modules/review/SKILL.md"), "uncompiled")
+    expect(check).toThrow("AUTHOR_SOURCE_INVALID")
+  })
   it("allows only a revised body with the exact original declaration", () => {
     const setup = fixture()
     setup.edit(`${declaration}Improved review instructions\n\n---\nA body separator\n`)

@@ -37,7 +37,7 @@ export async function runProjectCli(args: string[]): Promise<{
   if (command === "init") {
     const template = options.get("--template") ?? "project-lite"
     if (
-      !["project-lite", "command", "harness-lite", "harness-fullstack", "harness-data"].includes(
+      !["project-lite", "native-modular", "command", "harness-lite", "harness-fullstack", "harness-data"].includes(
         template
       )
     )

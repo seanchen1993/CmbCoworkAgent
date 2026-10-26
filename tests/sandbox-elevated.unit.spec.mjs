@@ -1,6 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
+import ts from "typescript"
 
 const localSandboxSource = readFileSync(
   new URL("../src/main/agent/local-sandbox.ts", import.meta.url),
@@ -2549,12 +2550,16 @@ test("isolated worktree provisioning requires the durable run index", () => {
   )
 })
 
-test("isolated commits use native Git without the old staging broker", () => {
+test("isolated commits retain native Git boundaries without the retired staging broker", () => {
   assert.doesNotMatch(
     gitWorktreeSource,
-    /commitWorkflowWorktree|stageWorkflowWorktreeUnlocked/,
-    "isolated add/commit must preserve the agent's actual native Git index and hooks"
+    /\bcommitWorkflowWorktree\b|\bstageWorkflowWorktreeUnlocked\b/,
+    "the retired staging broker must not intercept ordinary agent Git commands"
   )
+  assert.match(gitWorktreeSource, /export async function commitWorkflowWorktreeChanges\(/)
+  assert.match(gitWorktreeSource, /native checkpoint requires a writable named resource/)
+  assert.match(gitWorktreeSource, /\["update-ref", `refs\/heads\/\$\{record\.branch\}`, commit, input\.expectedParent\]/,
+    "file-only native checkpoints must compare and swap the owned branch parent")
   assert.match(
     localSandboxSource,
     /executionPlan\.writableRoots\.push\(commonDir\)/,
@@ -2733,11 +2738,23 @@ test("workflow run IPC strips the (tens-of-MB) journal before sending a run to t
   // The renderer DTO never reads `journal`; resume reads it main-side via
   // loadWorkflowRun, not from a renderer round-trip — so get-run and hydrate must
   // drop it before IPC. `script` is kept (the run dialog renders it).
-  assert.match(
-    workflowsIpcSource,
-    /function stripJournalForRenderer\(run: PersistedWorkflowRun \| null\)/,
-    "workflows IPC exposes a journal-stripping projection"
-  )
+  const source = ts.createSourceFile("workflows.ts", workflowsIpcSource, ts.ScriptTarget.Latest, true)
+  const declaration = source.statements.find(statement =>
+    ts.isFunctionDeclaration(statement) && statement.name?.text === "stripJournalForRenderer")
+  assert.ok(declaration, "workflows IPC exposes a journal-stripping projection")
+  const compiled = ts.transpileModule(declaration.getText(source), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
+  }).outputText
+  const project = new Function(`${compiled}; return stripJournalForRenderer`)()
+  assert.equal(project(null), null)
+  const empty = { journal: [], script: "source", worktreeReadError: "retained diagnostic" }
+  assert.equal(project(empty), empty)
+  const original = { ...empty, journal: [{ result: "x".repeat(1024 * 1024) }] }
+  const projected = project(original)
+  assert.equal(projected.journal.length, 0)
+  assert.equal(projected.script, original.script)
+  assert.equal(projected.worktreeReadError, original.worktreeReadError)
+  assert.equal(original.journal.length, 1, "projection must not erase the main-process resume journal")
   assert.match(
     workflowsIpcSource,
     /return stripJournalForRenderer\(run\)/,
@@ -2750,6 +2767,83 @@ test("workflow run IPC strips the (tens-of-MB) journal before sending a run to t
   )
 })
 
+test("actual workflow claim preserves surface owner, exact Host run and atomic failure semantics", async () => {
+  const ipcAst = ts.createSourceFile("agent.ts", agentIpcSource, ts.ScriptTarget.Latest, true)
+  const initializers = []
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(ipcAst) === "pendingWorkflowRun" &&
+      node.initializer && ts.isAwaitExpression(node.initializer) &&
+      ts.isCallExpression(node.initializer.expression) &&
+      node.initializer.expression.expression.getText(ipcAst) ===
+        "workflowRunManager.claimPendingNotificationAsync") initializers.push(node.initializer)
+    ts.forEachChild(node, visit)
+  }
+  visit(ipcAst)
+  assert.equal(initializers.length, 1, "execute the unique production notification claim")
+  const compile = source => ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
+  }).outputText
+  const claim = new Function(compile(`async function claim(workflowRunManager, workspacePath,
+    threadId, backgroundNotificationOwner, hostWorkflowNotice) {
+      return ${initializers[0].getText(ipcAst)}
+    }`) + "; return claim")()
+  const managerAst = ts.createSourceFile("run-manager.ts", workflowRunManagerSource,
+    ts.ScriptTarget.Latest, true)
+  const names = ["rememberNotificationOwner", "findPendingNotificationAsync",
+    "claimPendingNotificationAsync", "clearNotificationInFlight"]
+  const methods = []
+  function collect(node) {
+    if (ts.isMethodDeclaration(node) && names.includes(node.name.getText(managerAst))) methods.push(node)
+    ts.forEachChild(node, collect)
+  }
+  collect(managerAst)
+  assert.equal(methods.length, names.length, "execute original manager lookup/claim/release bodies")
+  let lookupFails = false
+  const rows = [
+    { runId: "new-managed", startedAt: "2026-10-26T09:00:02Z", notificationOwner: "managed" },
+    { runId: "new-desktop", startedAt: "2026-10-26T09:00:01Z", notificationOwner: "desktop" },
+    { runId: "old-managed", startedAt: "2026-10-26T09:00:00Z", notificationOwner: "managed" }
+  ].map(row => ({ ...row, threadId: "thread", status: "completed", notificationDelivered: false }))
+  const Fixture = new Function("findUndeliveredTerminalRunAsync", compile(`class Fixture {
+    constructor() {
+      this.flushFailedRuns = new Map(); this.inFlightNotifications = new Set();
+      this.notificationOwners = new Map()
+    }
+    ${methods.map(method => method.getText(managerAst)).join("\n")}
+  }`) + "; return Fixture")(async (workspace, threadId, predicate) => {
+    assert.equal(workspace, "workspace")
+    assert.equal(threadId, "thread")
+    await Promise.resolve()
+    if (lookupFails) throw Error("ORIGINAL_LOOKUP_UNKNOWN")
+    return rows.find(predicate) ?? null
+  })
+  const manager = new Fixture()
+  const invoke = (owner, notice) => claim(manager, "workspace", "thread", owner, notice)
+  assert.equal((await invoke("desktop"))?.runId, "new-desktop", "do not take newest foreign owner")
+  manager.clearNotificationInFlight("new-desktop")
+  const expected = { runId: "old-managed", startedAt: rows[2].startedAt }
+  for (const [owner, notice] of [
+    ["desktop", expected], ["managed", { ...expected, runId: "absent" }],
+    ["managed", { ...expected, startedAt: rows[0].startedAt }]
+  ]) {
+    assert.equal(await invoke(owner, notice), null, "no fallback to another owner/run/incarnation")
+    assert.equal(manager.inFlightNotifications.size, 0)
+  }
+  const concurrent = await Promise.all([invoke("managed", expected), invoke("managed", expected)])
+  assert.equal(concurrent.filter(Boolean).length, 1, "one atomic claim after concurrent async reads")
+  assert.equal(concurrent.find(Boolean).runId, expected.runId)
+  assert.deepEqual([...manager.inFlightNotifications], [expected.runId])
+  assert(rows.every(row => row.notificationDelivered === false), "claim never acknowledges success")
+  manager.clearNotificationInFlight(expected.runId)
+  lookupFails = true
+  await assert.rejects(invoke("managed", expected), /ORIGINAL_LOOKUP_UNKNOWN/)
+  assert.equal(manager.inFlightNotifications.size, 0, "unknown lookup cannot leave or invent a claim")
+  assert(rows.every(row => row.notificationDelivered === false))
+  lookupFails = false
+  assert.equal((await invoke("managed", expected))?.runId, expected.runId,
+    "release/failure keeps the same original notification eligible")
+})
+
 test("workflow notification is at-least-once: delivered persisted only on SUCCESS (crash re-reports)", () => {
   // Turn START atomically discovers + claims the run IN MEMORY only — it must NOT
   // persist the durable delivered flag here (that was the at-most-once crash hole).
@@ -2760,8 +2854,8 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   )
   assert.match(
     agentIpcSource,
-    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner \}\s*\)/,
-    "notification turn uses the atomic async claim"
+    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner,\s*\.\.\.\(hostWorkflowNotice \? \{ expected: \{\s*runId: hostWorkflowNotice\.runId, startedAt: hostWorkflowNotice\.startedAt\s*\}\s*\} : \{\}\)\s*\}\s*\)/,
+    "notification turn uses the atomic owner-scoped claim with the exact Host run incarnation"
   )
   const notificationClaimStart = agentIpcSource.indexOf(
     "claimWorkflowNotification(pendingWorkflowRun.runId, runToken)"

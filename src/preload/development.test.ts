@@ -2,6 +2,23 @@ import { describe, expect, it, vi } from "vitest"
 import { createDevelopmentBridge } from "./development"
 
 describe("development preload bridge", () => {
+  it("forwards source-set choices without accepting filesystem paths or installation authority", async () => {
+    const invoke = vi.fn(async () => ({}))
+    const api = createDevelopmentBridge(invoke, () => () => {})
+    const scope = { threadId: "creator", expectedWorkspace: "workspace" }
+    await api.importSourceSet!(scope)
+    await api.advanceSourceSet!({ ...scope, id: "set" })
+    await api.cancelSourceSet!({ ...scope, id: "set" })
+    await api.installSourceSetDependency!({ ...scope, id: "set", dependencyId: "dep" })
+    await api.reconcileSourceSetDependency!({ ...scope, id: "set", dependencyId: "dep" })
+    expect(invoke.mock.calls).toEqual([
+      ["mods:development:import-source-set", scope],
+      ["mods:development:advance-source-set", { ...scope, id: "set" }],
+      ["mods:development:cancel-source-set", { ...scope, id: "set" }],
+      ["mods:development:install-source-set-dependency", { ...scope, id: "set", dependencyId: "dep" }],
+      ["mods:development:reconcile-source-set-dependency", { ...scope, id: "set", dependencyId: "dep" }]
+    ])
+  })
   it("routes isolated business trials and original source consent through exact native payloads", async () => {
     const invoke = vi.fn<(channel: string, input: unknown) => Promise<unknown>>(async () => ({}))
     const api = createDevelopmentBridge(invoke, () => () => {}).businessTrial!

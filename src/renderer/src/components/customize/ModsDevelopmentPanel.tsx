@@ -38,6 +38,7 @@ import { BusinessCreatorReviewCard } from "./BusinessCreatorReviewCard"
 import { BusinessCreatorTrialDialog } from "./BusinessCreatorTrialDialog"
 import { CreatorPlanningPanel } from "./CreatorPlanningPanel"
 import { CreatorProjectDeliveryCard } from "./CreatorProjectDeliveryCard"
+import { CreatorSourceSetCard } from "./CreatorSourceSetCard"
 import { CreatorPluginModularizationCard } from "./CreatorPluginModularizationCard"
 import { creatorJourneyView } from "./creator-journey-view"
 import { CreatorTrialJourneyCard } from "./CreatorTrialJourneyCard"
@@ -1015,12 +1016,15 @@ function ScopedDevelopment({
             className="scroll-mt-4 space-y-3"
           >
             <h3 className="font-semibold">保存为插件并复用</h3>
-            {status && (status.projectDelivery || (useProjectCandidate && status.projectTrial)) && (
+            {status && creatorReady && <CreatorSourceSetCard threadId={threadId} workspace={status.workspace}
+              status={status.sourceSet} api={api} onStatus={accept} />}
+            {status && (status.projectDelivery || ((useProjectCandidate || status.sourceSet?.phase === "ready") && status.projectTrial)) && (
               <CreatorProjectDeliveryCard
                 threadId={threadId}
                 workspace={status.workspace}
-                request={useProjectCandidate ? status.projectTrial : undefined}
+                request={useProjectCandidate || status.sourceSet?.phase === "ready" ? status.projectTrial : undefined}
                 delivery={status.projectDelivery}
+                preparedBySourceSet={status.sourceSet?.phase === "ready"}
                 api={api}
                 onStatus={accept}
               />

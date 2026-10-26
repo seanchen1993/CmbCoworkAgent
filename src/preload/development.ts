@@ -7,6 +7,11 @@ export function createDevelopmentBridge(
   subscribe: (channel: string, callback: (payload: unknown) => void) => () => void
 ): DevelopmentApi {
   return {
+    importSourceSet: input => invoke("mods:development:import-source-set", input) as ReturnType<NonNullable<DevelopmentApi["importSourceSet"]>>,
+    advanceSourceSet: input => invoke("mods:development:advance-source-set", input) as ReturnType<NonNullable<DevelopmentApi["advanceSourceSet"]>>,
+    cancelSourceSet: input => invoke("mods:development:cancel-source-set", input) as ReturnType<NonNullable<DevelopmentApi["cancelSourceSet"]>>,
+    installSourceSetDependency: input => invoke("mods:development:install-source-set-dependency", input) as ReturnType<NonNullable<DevelopmentApi["installSourceSetDependency"]>>,
+    reconcileSourceSetDependency: input => invoke("mods:development:reconcile-source-set-dependency", input) as ReturnType<NonNullable<DevelopmentApi["reconcileSourceSetDependency"]>>,
     prepareProjectDelivery: input => invoke("mods:development:prepare-project-delivery", input) as
       ReturnType<NonNullable<DevelopmentApi["prepareProjectDelivery"]>>,
     installProjectDelivery: input => invoke("mods:development:install-project-delivery", input) as

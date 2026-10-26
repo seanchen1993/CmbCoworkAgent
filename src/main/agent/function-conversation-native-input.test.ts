@@ -396,6 +396,54 @@ describe("actual user input private source", () => {
     expect(() => readFunctionConversationNativeInput(receipt)).toThrow()
   })
 
+  it.each(["recreate", "workspace", "malformed", "lease", "source"] as const)(
+    "reads fresh scope without large history and rejects changed %s", mode => {
+      const f = fixture(), other = fixture()
+      const row = appDb.getThreadCore(f.threadId)!
+      const metadata = JSON.stringify({ ...JSON.parse(row.metadata!),
+        llmFileHistory: { content: "中文😀".repeat(40_000) }, kept: "original" })
+      appDb.updateThread(f.threadId, { metadata })
+      const original = appDb.getThreadCore(f.threadId)!.metadata
+      let live = true
+      const input = { ...f.source(), assertCurrent: () => {
+        if (!live) throw Error("ACTUAL_INPUT_SOURCE_RETIRED")
+      } }
+      const full = vi.spyOn(appDb, "getThreadCore")
+      const scope = vi.spyOn(appDb, "getThreadRuntimeScope")
+      try {
+        const receipt = captureFunctionConversationNativeInput(input)
+        for (let index = 0; index < 3; index++) readFunctionConversationNativeInput(receipt)
+        expect(full).not.toHaveBeenCalled()
+        expect(scope.mock.results.length).toBeGreaterThanOrEqual(4)
+        for (const result of scope.mock.results) {
+          expect(result.type).toBe("return")
+          expect(result.value?.metadata).not.toContain("llmFileHistory")
+        }
+        if (mode === "recreate") {
+          appDb.deleteThread(f.threadId)
+          appDb.createThread(f.threadId, { workspacePath: f.workspace })
+          appDb.getDb().run("UPDATE threads SET created_at=? WHERE thread_id=?",
+            [row.created_at, f.threadId])
+        } else if (mode === "workspace") {
+          appDb.updateThread(f.threadId, { metadata: JSON.stringify({
+            ...JSON.parse(original!), workspacePath: other.workspace }) })
+        } else if (mode === "malformed") {
+          appDb.getDb().run("UPDATE threads SET metadata=? WHERE thread_id=?", ["{broken", f.threadId])
+        } else if (mode === "lease") {
+          releaseLocalThreadRunLease(f.threadId, "desktop", f.physicalRunId)
+          expect(claimLocalThreadRunLease({ threadId: f.threadId, owner: "desktop",
+            runId: f.physicalRunId }).acquired).toBe(true)
+        } else live = false
+        expect(() => readFunctionConversationNativeInput(receipt)).toThrow()
+      } finally {
+        full.mockRestore()
+        scope.mockRestore()
+      }
+      if (mode === "source" || mode === "lease")
+        expect(appDb.getThreadCore(f.threadId)?.metadata).toBe(original)
+    }
+  )
+
   it("rejects a new actual thread incarnation at the same persisted thread ID", () => {
     const f = fixture(), receipt = captureFunctionConversationNativeInput(f.source())
     appDb.deleteThread(f.threadId)

@@ -161,7 +161,7 @@ const BRIDGE_PRELUDE = `
       return promise;
     });
   }
-  for (const name of ["parallel", "pipeline", "workflow", "readFile", "writeFile", "glob", "exists"]) {
+  for (const name of ["action", "worktree", "parallel", "pipeline", "workflow", "readFile", "writeFile", "glob", "exists"]) {
     if (typeof bridge[name] === "function") define(name, wrapAsync(bridge[name]));
   }
   if (typeof bridge.phase === "function") define("phase", wrapSync(bridge.phase));
@@ -285,6 +285,19 @@ export async function runWorkflowScriptInSandbox(
       }
       return callHostAgent(prompt, boxedOpts)
     }
+  }
+  // Deterministic action payloads need the same timeout-bounded VM-to-host copy as agent opts.
+  for (const name of ["action", "worktree"]) {
+  const rawHostAction = globalsForSandbox[name]
+  if (typeof rawHostAction === "function") {
+    const stringifyTimeout = Math.min(CONSOLE_STRINGIFY_TIMEOUT_MS, syncTimeoutMs)
+    globalsForSandbox[name] = (input: unknown): unknown => {
+      const boxed = input === undefined ? undefined
+        : inSyncSegment || ctxHolder.current === undefined ? JSON.parse(JSON.stringify(input))
+          : serializeAgentOptsInVm(ctxHolder.current, sandbox, input, stringifyTimeout)
+      return rawHostAction(boxed)
+    }
+  }
   }
   // Inject the host primitives behind a hidden bridge (hardened as defense in
   // depth). The bridge prelude promotes them to vm-realm globals and deletes

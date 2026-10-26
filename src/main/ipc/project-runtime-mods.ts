@@ -4,6 +4,7 @@ import type { HostProjectState } from "../../shared/project-runtime/host-types"
 import type { HostProjectService } from "../harness-board/project-runtime/host-service"
 import { projectRuntimeFunctionSource } from "../harness-board/project-runtime-function-source"
 import { getPlugins } from "../storage"
+import { projectRuntimeDependencies } from "../harness-board/project-runtime-dependencies"
 import {
   isProjectPreviewId,
   projectPreviewRegistry
@@ -56,7 +57,12 @@ export function registerProjectRuntimeModsHandlers(
     }
     // retainedRoot already admitted the complete package; identity reads never reuse content proof.
     authorityGuard()
-    return { project, root, guard, authorityGuard, ...projectRuntimeFunctionSource(project, root) }
+    const source = projectRuntimeFunctionSource(project, root)
+    const dependencies = projectRuntimeDependencies({
+      root, workspace: source.input.workspace, manager: source.manager,
+      plugins: getPlugins, assertCurrent: guard
+    })
+    return { project, root, guard, authorityGuard, ...source, dependencies }
   }
   registerNativeProjectSourceHandlers(ipc, "project-runtime", scope)
 }

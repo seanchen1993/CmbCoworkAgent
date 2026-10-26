@@ -15,6 +15,7 @@ export function CreatorProjectDeliveryCard(props: {
   workspace: string
   request?: DevelopmentProjectTrialRequest
   delivery?: DevelopmentStatus["projectDelivery"]
+  preparedBySourceSet?: boolean
   api: DevelopmentApi
   onStatus(status: DevelopmentStatus): void
 }) {
@@ -36,6 +37,7 @@ function ScopedDelivery({
   workspace,
   request,
   delivery,
+  preparedBySourceSet,
   api,
   onStatus
 }: Parameters<typeof CreatorProjectDeliveryCard>[0]) {
@@ -103,7 +105,7 @@ function ScopedDelivery({
           ? "保存会冻结当前候选源码，创建独立的新插件，保留原插件。可保存尚未完成试用的候选；保存、安装和导出均不代表业务验收通过。试用记录对应上方来源版本，改名后的插件没有因此自动重跑。"
           : "原候选已变化或当前没有试用请求。此处只核对历史安装、导出事实；不会重放操作，也不能沿用旧版本批准。新交付需准备新候选并重新确认。"}
       </p>
-      {request && (
+      {request && !preparedBySourceSet && (
         <>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="grid gap-1 text-sm">

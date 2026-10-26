@@ -11,6 +11,7 @@ import {
 } from "../plugins/runtime-source-scope"
 import { prepareAgentRunAdmission } from "./agent-run-admission"
 import { classifyManagedAgentFailure } from "./managed-agent-failure"
+import { createRunCancellationSettlement, recordRunCancellation } from "./run-cancellation-settlement"
 
 export type AgentRunRequest = AgentInvokeParams
 
@@ -56,6 +57,8 @@ export interface AgentRunDelivery {
 export interface AgentRunHandle {
   threadId: string
   completion: Promise<void>
+  /** Main-only original physical producer evidence, read after completion and owned cleanup. */
+  cancellationSettlement?: () => { requested: boolean; confirmed: boolean }
   /** Exact observers then original admission settle/transfer, after external lease release.
    * Existing owned background Workflow cleanup may still be deferred to its original owner. */
   sourceSettlement?: Promise<void>
@@ -116,6 +119,15 @@ export interface AgentGoalControlResult {
  * that their lease or security policy belongs to the desktop.
  */
 export interface AgentRunExecutionContext {
+  /** Exact original Host-owned completed workflow, never renderer input. */
+  hostWorkflowNotification?: { runId: string; startedAt: string; assertCurrent(): void }
+  /** Original main-process owner, invoked by ordinary Stop; never a renderer operation id. */
+  onStopRequested?: () => void
+  /** Main-only checkpoint continuation, admitted by the Host against its durable input request. */
+  hostUserInputResume?: {
+    requestId: string
+    beforeResume: (checkpoint: unknown) => void
+  }
   /** Main-only owner contract; never accepted from renderer invoke parameters. */
   deferSourceSettlement?: boolean
   /** Installed by startAgentRun for the exact original producer's logical entry. */
@@ -212,6 +224,11 @@ type AgentGoalControlImplementation = (
  * ESM import cycle.
  */
 let agentRunImplementation: AgentRunImplementation | null = null
+let agentResumeImplementation: AgentRunImplementation | null = null
+
+export function registerAgentResumeImplementation(implementation: AgentRunImplementation): void {
+  agentResumeImplementation = implementation
+}
 let agentGoalControlImplementation: AgentGoalControlImplementation | null = null
 let activeAgentRunInspector: ActiveAgentRunInspector = () => false
 let activeAgentRunCanceller: ActiveAgentRunCanceller = () => false
@@ -305,9 +322,16 @@ export async function startAgentRun(
   if (!delivery.isAvailable()) {
     throw new Error("Agent run delivery is unavailable")
   }
-  const implementation = agentRunImplementation
+  const implementation = context.hostUserInputResume ? agentResumeImplementation : agentRunImplementation
+  if (!implementation) throw Error("Agent checkpoint resume service is not initialized")
   const admission = await prepareAgentRunAdmission(request, context)
   if (admission) context = admission.context
+  const cancellation = createRunCancellationSettlement()
+  const onRunCancelled = context.onRunCancelled
+  context = { ...context, onRunCancelled: () => {
+    recordRunCancellation()
+    onRunCancelled?.()
+  } }
   const deferred =
     context.deferSourceSettlement === true && context.localRunLease?.managedExternally === true
   const logicalSettlements = new Map<Promise<void>, () => void>()
@@ -331,7 +355,7 @@ export async function startAgentRun(
   const physical = Promise.resolve()
     .then(() =>
       withRuntimePluginSource(context.pluginSourceSnapshot, () =>
-        implementation(request, delivery, context)
+        cancellation.run(() => implementation(request, delivery, context))
       )
     )
     .catch((error) => {
@@ -368,6 +392,7 @@ export async function startAgentRun(
     void sourceSettlement.catch(() => {})
     return {
       threadId: request.threadId,
+      cancellationSettlement: cancellation.read,
       completion: physical.finally(() => delivery.finish?.(request.threadId)),
       sourceSettlement,
       invalidateSourceSettlement: () => {
@@ -385,6 +410,7 @@ export async function startAgentRun(
   })
   return {
     threadId: request.threadId,
+    cancellationSettlement: cancellation.read,
     completion
   }
 }

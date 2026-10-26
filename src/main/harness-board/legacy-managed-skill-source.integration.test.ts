@@ -12,6 +12,7 @@ const state = vi.hoisted(() => ({ plugin: undefined as PluginMetadata | undefine
 vi.mock("electron", () => ({ app: { getPath: () => tmpdir(), getName: () => "test", getVersion: () => "0" },
   BrowserWindow: { getAllWindows: () => [] }, ipcMain: { handle: () => {} }, shell: {} }))
 vi.mock("../storage", () => ({ getDisabledSkills: () => [],
+  getPlugins: () => (state.plugin ? [state.plugin] : []),
   getEnabledPluginSkillSourceMetadata: () => [] }))
 vi.mock("./service", () => ({ getHarnessProjectAdapterSnapshot: async () => state.plugin }))
 vi.mock("../services/thread-service", () => ({ createThreadService: vi.fn() }))

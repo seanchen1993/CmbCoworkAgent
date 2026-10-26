@@ -17,6 +17,7 @@ import { PROJECT_ACTION_LOCK_PATH } from "../../../shared/project-runtime/action
 import { compileProjectHarness, HARNESS_SOURCE_PATH } from "./project-harness"
 import { parsePluginCapabilities } from "../../../shared/plugin-capabilities"
 import { assertProjectPackageExtensions } from "./project-package-extensions"
+import { compileNativeComposition, NATIVE_COMPOSITION_PATH } from "../../plugins/native-composition"
 
 export interface ProjectDoctorReport {
   valid: boolean
@@ -102,6 +103,28 @@ export function inspectProjectSource(
         "PROJECT_HARNESS_INVALID",
         "节点定义、技能或示例无效；请修复后显式 compile。",
         HARNESS_SOURCE_PATH
+      )
+    }
+  }
+  if (get(NATIVE_COMPOSITION_PATH)) {
+    try {
+      if (get(HARNESS_SOURCE_PATH) || get("mods/business/manifest.json"))
+        throw Error("NATIVE_COMPOSITION_MULTIPLE_SOURCES")
+      const compiled = compileNativeComposition(JSON.parse(get(NATIVE_COMPOSITION_PATH)!), {
+        files: bundle.files.map((file) => ({ path: file.path, bytes: Buffer.from(file.text) })),
+        actionCatalog: availableActions
+      })
+      if (compiled.files.some((file) => get(file.path) !== file.bytes.toString("utf8")))
+        issue(
+          "NATIVE_COMPOSITION_STALE",
+          "组合源或已生成文件已改变；请重新编译并复核检查。",
+          NATIVE_COMPOSITION_PATH
+        )
+    } catch {
+      issue(
+        "NATIVE_COMPOSITION_INVALID",
+        "组合契约、资源或实际检查提供器不匹配；不能静默降级。",
+        NATIVE_COMPOSITION_PATH
       )
     }
   }
@@ -192,7 +215,9 @@ export function inspectProjectSource(
         issue("PROJECT_SCHEMA_UNSUPPORTED", `检查 ${check.id} 的 JSON Schema 超出宿主支持范围。`)
       }
     }
-    if (check.kind === "action")
+    // Native composition binds every check to captured artifact bytes and a current public
+    // provider above; the original Host check phase supplies its durable execution facts.
+    if (check.kind === "action" && !get(NATIVE_COMPOSITION_PATH))
       issue("PROJECT_ACTION_CHECK_NOT_ENABLED", `动作校验 ${check.id} 需要经已验证的执行链接入。`)
   }
   for (const action of manifest.actions) {

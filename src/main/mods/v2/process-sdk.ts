@@ -2,8 +2,16 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { realpath, stat } from "node:fs/promises"
 import path from "node:path"
 import { StringDecoder } from "node:string_decoder"
+import { createHash } from "node:crypto"
+import { observeFunctionProcess } from "./host-call"
+import { assertWorkflowResourceAdmission, prepareWorkflowDeadlineProcess,
+  workflowResourceDeadlineSignal } from "../../agent/workflow/resource-deadline"
 import { resolveWindowsBackgroundJobControllerPath } from "../../agent/windows-background-job-controller-path"
 import { ModFunctionError, isModObject } from "../../../shared/mods/v2/contracts"
+import {
+  activeWorkflowVerificationAccessScope,
+  verifyWorkflowVerificationCurrent
+} from "../../agent/workflow/worktree-action-scope"
 import type { ModObject } from "../../../shared/mods/types"
 
 const OUTPUT_LIMIT = 256 * 1024
@@ -159,6 +167,7 @@ async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
 function active(context: FunctionProcessContext, signal: AbortSignal): void {
   signal.throwIfAborted()
   context.assertLive()
+  assertWorkflowResourceAdmission()
 }
 
 function internalWaitMilliseconds(input: ModObject, request: FunctionProcessRequest): number | undefined {
@@ -381,7 +390,9 @@ function launch(
 export class FunctionProcessHost {
   spawn(input: ModObject, context: FunctionProcessContext): FunctionProcessStream {
     const controller = new AbortController()
-    const signal = AbortSignal.any([context.signal, controller.signal])
+    const signal = AbortSignal.any([context.signal, controller.signal,
+      ...(workflowResourceDeadlineSignal() ? [workflowResourceDeadlineSignal()!] : [])])
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined
     let running: RunningProcess | undefined
     let resolveResult!: (value: ModObject) => void
     let rejectResult!: (reason: unknown) => void
@@ -414,11 +425,24 @@ export class FunctionProcessHost {
         const request = await functionProcessRequest(input, context.cwd, true)
         active(context, signal)
         await abortable(context.authorize(request, signal), signal)
+        if (activeWorkflowVerificationAccessScope() !== undefined)
+          await abortable(verifyWorkflowVerificationCurrent(), signal)
         active(context, signal)
+        const deadline = await prepareWorkflowDeadlineProcess(request.argv)
+        active(context, signal)
+        if (deadline) deadlineTimer = setTimeout(() => controller.abort(failure("MODS_PROCESS_TIMEOUT")), deadline.timeoutMs)
         running = launch(request, context, signal)
-        void running.started.then(resolveStarted, rejectStarted)
+        const admitted = running.started.then(async () => {
+          await deadline?.started()
+          resolveStarted()
+        })
+        void admitted.catch(rejectStarted)
         while (true) {
           const next = await running.next()
+          if (next.done) {
+            await admitted
+            await deadline?.finished((next.value.code as number | null) ?? 1)
+          }
           active(context, signal)
           const value = await abortable(context.publish(next.value, signal), signal)
           active(context, signal)
@@ -436,6 +460,7 @@ export class FunctionProcessHost {
         settle(undefined, error)
         throw error
       } finally {
+        clearTimeout(deadlineTimer)
         await running?.close()
         settle()
       }
@@ -465,21 +490,36 @@ export class FunctionProcessHost {
   }
 
   async run(input: ModObject, context: FunctionProcessContext): Promise<ModObject> {
+    observeFunctionProcess("preparing")
+    if (workflowResourceDeadlineSignal()) context = { ...context,
+      signal: AbortSignal.any([context.signal, workflowResourceDeadlineSignal()!]) }
     active(context, context.signal)
     const request = await functionProcessRequest(input, context.cwd, false)
+    observeFunctionProcess(
+      "prepared",
+      createHash("sha256").update(JSON.stringify(request)).digest("hex")
+    )
     active(context, context.signal)
     const waitMs = internalWaitMilliseconds(input, request)
-    if (waitMs === undefined)
+    if (waitMs === undefined) {
+      observeFunctionProcess("authorizing")
       await abortable(context.authorize(request, context.signal), context.signal)
+      observeFunctionProcess("authorized")
+    }
+    if (waitMs === undefined && activeWorkflowVerificationAccessScope() !== undefined)
+      await abortable(verifyWorkflowVerificationCurrent(), context.signal)
+    active(context, context.signal)
+    const deadline = waitMs === undefined ? await prepareWorkflowDeadlineProcess(request.argv) : undefined
     active(context, context.signal)
     const controller = new AbortController()
     const signal = AbortSignal.any([context.signal, controller.signal])
     const timer = setTimeout(
       () => controller.abort(failure("MODS_PROCESS_TIMEOUT")),
-      request.timeoutMs!
+      Math.min(request.timeoutMs!, deadline?.timeoutMs ?? Infinity)
     )
     let running: RunningProcess | undefined
     let waitTimer: ReturnType<typeof setTimeout> | undefined
+    let closeObserved = false
     try {
       if (waitMs !== undefined) {
         await abortable(new Promise<void>(resolve => {
@@ -492,12 +532,23 @@ export class FunctionProcessHost {
           throw failure("MODS_PROCESS_OUTPUT_LIMIT")
         return value
       }
+      // Persist dispatch before spawn. Missing READY never proves that no child ran.
+      observeFunctionProcess("spawn-dispatched")
       running = launch(request, context, signal)
+      const admitted = running.started.then(() => {
+        observeFunctionProcess("started")
+        return deadline?.started()
+      })
+      void admitted.catch(() => {})
       const outputs = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }
       while (true) {
         const next = await running.next()
         if (next.done) {
           await running.close()
+          observeFunctionProcess("closed")
+          closeObserved = true
+          await admitted
+          await deadline?.finished((next.value.code as number | null) ?? 1)
           active(context, signal)
           const value = {
             exitCode: next.value.code ?? 1,
@@ -506,7 +557,9 @@ export class FunctionProcessHost {
           }
           if (Buffer.byteLength(JSON.stringify(value)) > 900_000)
             throw failure("MODS_PROCESS_OUTPUT_LIMIT")
+          observeFunctionProcess("publishing")
           const published = await abortable(context.publish(value, signal), signal)
+          observeFunctionProcess("published")
           active(context, signal)
           if (Buffer.byteLength(JSON.stringify(published)) > 900_000)
             throw failure("MODS_PROCESS_OUTPUT_LIMIT")
@@ -524,6 +577,7 @@ export class FunctionProcessHost {
       clearTimeout(timer)
       clearTimeout(waitTimer)
       await running?.close()
+      if (running && !closeObserved) observeFunctionProcess("closed")
     }
   }
 }

@@ -16,7 +16,7 @@ vi.mock("../../services/subagent-session-capture", () => ({
 }))
 vi.mock("../../services/adoption-tracker", () => ({ setAdoptionContext: vi.fn() }))
 
-import { workflowRunManager, deferOwnedRuntimeWorkflowSettlement } from "./run-manager"
+import { workflowRunManager, deferOwnedRuntimeWorkflowSettlement, cancelOwnedRuntimeWorkflows } from "./run-manager"
 import { validateWorkflowScript } from "./script"
 import { loadWorkflowRun } from "./run-store"
 import { currentRuntimePluginSource, issueRuntimePluginSourceToken, withRuntimePluginSource } from "../../plugins/runtime-source-scope"
@@ -191,6 +191,52 @@ function assertRetired(result: ReturnType<typeof deferOwnedRuntimeWorkflowSettle
   if (failed) expect(result.failure).toBeInstanceOf(Error)
   else expect(result.failure).toBeUndefined()
 }
+
+it("cancels only exact-token children and retains ownership until physical cleanup settles", async () => {
+  const f = fixture()
+  const entered = deferred(), cleanupEntered = deferred(), cleanupReleased = deferred()
+  const runId = "wf_" + randomUUID().replaceAll("-", "").slice(0, 12)
+  const script = 'export const meta={name:"cancel owner",description:"exact source"}\nreturn await agent("task")'
+  let childSignal!: AbortSignal
+  cleanup.push(async () => { cleanupReleased.resolve(); await workflowRunManager.cancelAndWait(f.threadId) })
+  await workflowRunManager.prepareLaunch(f.root, f.threadId)
+  const launch = withRuntimePluginSource(f.token, () => workflowRunManager.launch({
+    threadId: f.threadId, workspacePath: f.root, runId, script,
+    parsed: validateWorkflowScript(script), scriptSha256: "f".repeat(64),
+    subagentDeps: { parentThreadId: f.threadId, isRetryableApiError: () => false,
+      cleanupThread: async () => {
+        if (!childSignal) return
+        cleanupEntered.resolve()
+        await cleanupReleased.promise
+      },
+      createRuntime: async (options) => {
+        childSignal = options.abortSignal
+        return { stream: async () => (async function* () {
+          entered.resolve()
+          await new Promise<void>(done => childSignal.addEventListener("abort", () => done(), { once: true }))
+          yield ["values", { messages: [new AIMessage("late cancelled output")] }]
+        })() }
+      }
+    }
+  }))
+  await launch.whenInitialPersisted
+  await entered.promise
+  const unrelated = withRuntimePluginSource(f.token, () => issueRuntimePluginSourceToken({ ...currentRuntimePluginSource()! }))
+  cancelOwnedRuntimeWorkflows(unrelated)
+  expect(childSignal.aborted).toBe(false)
+  cancelOwnedRuntimeWorkflows(f.token)
+  await cleanupEntered.promise
+  expect(childSignal.aborted).toBe(true)
+  expect(workflowRunManager.activeRunId(f.threadId)).toBe(runId)
+  let finished = false
+  const settled = workflowRunManager.waitForRunLifecycle(f.threadId, runId).then(() => { finished = true })
+  await new Promise<void>(done => setImmediate(done))
+  expect(finished).toBe(false)
+  cleanupReleased.resolve()
+  await settled
+  expect(loadWorkflowRun(f.root, f.threadId, runId)?.status).toBe("aborted")
+  expect(workflowRunManager.activeRunId(f.threadId)).toBeUndefined()
+})
 
 it.each([false, true])("retains exact-token fast physical failure until the later parent settlement (fail=%s)", async fail => {
   const f = fixture()

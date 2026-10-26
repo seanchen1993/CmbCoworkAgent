@@ -34,7 +34,7 @@ export interface DerivationSnapshot {
   manifests: string[]
 }
 
-const excludedName = (name: string) =>
+export const isDerivationExcludedName = (name: string) =>
   /^(?:\.git|\.svn|\.hg|node_modules|__pycache__|\.venv|venv|\.cache|\.pytest_cache|logs?|\.autobizdevops|\.env(?:\..*)?|credentials?(?:\..*)?|secrets?(?:\..*)?|id_rsa|id_ed25519|\.ssh|\.aws|\.azure|\.npmrc|\.pypirc|\.netrc|auth\.json|settings\.local\.json)$/i.test(
     name
   ) || /\.(?:log|pyc|pem|key|p12|pfx)$/i.test(name)
@@ -114,7 +114,7 @@ export async function snapshotDerivationSource(directory: string): Promise<Deriv
       )
         throw Error("插件包含链接或硬链接")
       if (failure) return
-      if (excludedName(entry.name)) {
+      if (isDerivationExcludedName(entry.name)) {
         excluded.push(path)
         continue
       }

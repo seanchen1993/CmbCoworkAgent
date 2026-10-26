@@ -45,6 +45,8 @@ import { LIBRARY_AGENT_PROFILES } from "./library"
 export type AgentShellAccess = "none" | "read_only" | "full"
 
 export interface AgentProfile {
+  /** Retained Host profiles also exclude unknown/MCP/Mod tool surfaces. */
+  toolAllowlist?: string[]
   /** Identifier used as agentType / subagent_type. */
   name: string
   /** Shown to the model when it picks an agent. */
@@ -565,6 +567,34 @@ function parseAgentContent(
     disallowedTools: policy.disallowedTools,
     shellAccess: policy.shellAccess
   }
+}
+
+/** Retained project profiles fail closed on misspelled policy instead of widening permissions. */
+export function parseRetainedAgentProfile(path: string, content: string): AgentProfile {
+  if (Buffer.byteLength(content) > 64 * 1024) throw Error("PROJECT_PROFILE_LIMIT")
+  const fields = parseYamlFrontmatter(content)
+  const allowed = new Set(["name", "description", "tools", "disallowedtools", "workload", "model"])
+  const seen = new Set<string>()
+  for (const key of Object.keys(fields)) {
+    const normalized = key.toLowerCase()
+    if (!allowed.has(normalized) || seen.has(normalized)) throw Error("PROJECT_PROFILE_POLICY_INVALID")
+    seen.add(normalized)
+    if (normalized === "workload" && !["read_only", "verify", "full"].includes(fields[key].trim()))
+      throw Error("PROJECT_PROFILE_POLICY_INVALID")
+    if (normalized === "tools" || normalized === "disallowedtools")
+      for (const token of parseToolList(fields[key]))
+        if (token !== "*" && !normalizeToolName(token)) throw Error("PROJECT_PROFILE_TOOL_INVALID")
+  }
+  const profile = parseAgentContent(path, basename(path, ".md"), content)
+  if (!profile || !profile.systemPrompt.trim() || BUNDLED_AGENT_NAMES_LOWER.has(profile.name.toLowerCase()))
+    throw Error("PROJECT_PROFILE_IDENTITY_INVALID")
+  const explicitTools = Object.entries(fields).find(([key]) => key.toLowerCase() === "tools")?.[1]
+  const parsedTools = explicitTools === undefined ? [...KNOWN_TOOLS] : parseToolList(explicitTools)
+    .flatMap(name => name === "*" ? [...KNOWN_TOOLS] : [normalizeToolName(name)!])
+  profile.toolAllowlist = [...new Set(parsedTools)].filter(name =>
+    !profile.disallowedTools.includes(name) && (profile.shellAccess !== "none" ||
+      (name !== "execute" && name !== "task_output")))
+  return profile
 }
 
 /** Parse one `.cmbcoworkagent/agents/<name>.md` file into a profile. Returns null

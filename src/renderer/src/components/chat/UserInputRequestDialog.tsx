@@ -98,7 +98,8 @@ function ActiveUserInputRequestDialog({
       if (event.defaultPrevented || useAppStore.getState().showCustomizeView) return
       if (event.key !== "Escape") return
       event.preventDefault()
-      handleIgnore()
+      if (request.recoveryRequired) setCollapsed(true)
+      else handleIgnore()
     }
 
     window.addEventListener("keydown", handleKeyDown)
@@ -447,7 +448,7 @@ function ActiveUserInputRequestDialog({
               跳过全部问题
             </Button>
             <Button type="button" size="sm" onClick={handleSubmit} disabled={!canSubmit}>
-              提交
+              {request.recoveryRequired ? "保存答案并检查续接" : "提交"}
             </Button>
           </div>
         </div>
@@ -514,6 +515,11 @@ function ActiveUserInputRequestDialog({
           data-user-input-content
           className={collapsed ? "hidden" : "min-h-0 flex-1 overflow-y-auto overscroll-contain"}
         >
+          {request.recoveryRequired && (
+            <p role="status" className="border-b border-border px-4 py-3 text-sm">
+              此问题已保存。提交后系统会检查原任务是否能安全续接；无法确认时保留答案，并在任务记录中提示下一步。
+            </p>
+          )}
           <FunctionFeedback threadId={request.threadId} requestId={request.requestId} />
           <FunctionQuestionSite
             key={request.requestId}

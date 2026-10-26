@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { workspacePathsOverlap } from "../../../shared/workspace-path"
 import { parseFlowDefinition } from "../../../shared/mods/flows/schema"
 import type { FlowRun, SavedFlow } from "../../../shared/mods/flows/types"
 import type { FlowPersistence } from "./contracts"
@@ -13,6 +14,7 @@ import {
 } from "./recovery-history"
 
 export interface FlowSettingsStore {
+  settingsWithPrefix?(prefix: string, limit?: number): { key: string; value: string }[]
   getSetting(key: string, fallback?: string): string
   setSetting(key: string, value: string): void
   /** Atomic replace, or insert only if absent when expected is undefined; false means conflict. */
@@ -21,8 +23,40 @@ export interface FlowSettingsStore {
 export function flowDigest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex")
 }
+function resourcesUnsettled(run: FlowRun): boolean {
+  return !["complete", "failed", "cancelled"].includes(run.status) ||
+    !Number.isFinite(run.finishedAt) || Boolean(run.pendingApproval) ||
+    run.attempts.some(attempt => !["passed", "failed", "skipped"].includes(attempt.status) ||
+      (attempt.status !== "skipped" && (!Number.isFinite(attempt.finishedAt) || !attempt.result)))
+}
 export class FlowStore implements FlowPersistence {
   constructor(private readonly settings: FlowSettingsStore) {}
+  /** Read original histories across all threads; a terminal UI label is not settlement. */
+  assertWorkspaceResourcesSettled(workspace: string): { assertCurrent(): void } {
+    const scan = () => {
+      if (!this.settings.settingsWithPrefix) throw Error("FLOW_WORKSPACE_SCAN_UNAVAILABLE")
+      const selected: { key: string; value: string }[] = []
+      for (const item of this.settings.settingsWithPrefix('["diy-flow-v1","runs",')) {
+        const parts: unknown = JSON.parse(item.key)
+        if (!Array.isArray(parts) || parts.length !== 4 ||
+            typeof parts[2] !== "string" || typeof parts[3] !== "string")
+          throw Error("FLOW_RUN_STORAGE_INVALID")
+        if (!workspacePathsOverlap(workspace, parts[2])) continue
+        if (Buffer.byteLength(item.value) > 4 * 1024 * 1024) throw Error("FLOW_HISTORY_LIMIT")
+        const runs = this.rawRuns(parts[2], parts[3])
+        for (const run of runs) {
+          if (resourcesUnsettled(run))
+            throw Error("FLOW_WORKSPACE_RESOURCES_UNSETTLED")
+        }
+        selected.push(item)
+      }
+      return flowDigest(selected)
+    }
+    const fingerprint = scan()
+    return { assertCurrent: () => {
+      if (scan() !== fingerprint) throw Error("FLOW_WORKSPACE_RESOURCES_CHANGED")
+    } }
+  }
   private key(kind: string, ...parts: string[]): string {
     return JSON.stringify(["diy-flow-v1", kind, ...parts])
   }
@@ -168,10 +202,20 @@ export class FlowStore implements FlowPersistence {
         throw Error("FLOW_RECOVERY_STALE")
       return
     }
-    const next = complete.slice(0, 20)
+    // Unknown effects cannot disappear merely because newer history fills the UI quota.
+    const protectedRuns = complete.filter(row => row.id === run.id || resourcesUnsettled(row))
+    if (protectedRuns.length > 20) throw Error("FLOW_UNSETTLED_HISTORY_LIMIT")
+    const retainedIds = new Set(protectedRuns.map(row => row.id))
+    for (const row of complete) {
+      if (retainedIds.size >= 20) break
+      retainedIds.add(row.id)
+    }
+    const next = complete.filter(row => retainedIds.has(row.id))
     let encoded = JSON.stringify(next)
     while (Buffer.byteLength(encoded) > 4 * 1024 * 1024 && next.length > 1) {
-      next.pop()
+      const removable = next.findLastIndex(row => row.id !== run.id && !resourcesUnsettled(row))
+      if (removable < 0) throw Error("FLOW_UNSETTLED_HISTORY_LIMIT")
+      next.splice(removable, 1)
       encoded = JSON.stringify(next)
     }
     if (Buffer.byteLength(encoded) > 4 * 1024 * 1024) throw Error("FLOW_HISTORY_LIMIT")

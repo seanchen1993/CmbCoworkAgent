@@ -57,6 +57,41 @@ it("rejects non-progressing or unbounded pages", () => {
     expect(() => observeWorkflowRun(source(1), { limit: value })).toThrow()
 })
 
+it("projects the original declared repository reference without inferring one from paths", () => {
+  const run = source(0)
+  run.worktrees = [undefined, "secondary"].map((workspaceRef, index) => ({
+    id: `tree-${index}`, runId: run.runId, threadId: run.threadId,
+    branch: `workflow/${index}`, directory: `/private/tree-${index}`,
+    workspaceDirectory: `/private/tree-${index}`, sourceRoot: "/private/source",
+    sourceRelativePath: "", sourceBranch: "main", gitRoot: "/private/source",
+    commonDir: "/private/source/.git", baseCommit: "a".repeat(40),
+    headCommit: "b".repeat(40), integrationCommit: "c".repeat(40),
+    dirty: false, status: "merged", updatedAt: "updated",
+    resource: { id: String(index).repeat(64), generation: 1, state: "sealed",
+      sourceIdentity: "source", parentIdentity: "parent", ownerToken: "private-owner",
+      sealedCommit: "b".repeat(40), ...(workspaceRef ? { workspaceRef } : {}) }
+  }))
+  const page = observeWorkflowRun(run)
+  expect(page.worktrees.map(row => row.resource?.workspaceRef)).toEqual([null, "secondary"])
+  expect(page.worktrees[1]).toMatchObject({ integrationCommit: "c".repeat(40),
+    resource: { sealedCommit: "b".repeat(40), state: "sealed" } })
+  expect(page.worktrees[1].resource).not.toHaveProperty("ownerToken")
+  run.result = { detail: "x".repeat(5900) }
+  run.worktrees = [run.worktrees[0]]
+  const startedAt = 1000
+  run.worktrees[0].resource!.budgets = [{
+    budgetId: "large-history", generation: 1, startedAt, firstDeadlineAt: 2000, deadlineAt: 3000,
+    policy: { firstExecutionMs: 1000, totalMs: 2000, commandMs: 500 }, status: "active",
+    commands: [{ commandId: "ut", argv: ["x".repeat(6000)], status: "prepared" }]
+  }]
+  const bounded = observeWorkflowRun(run)
+  expect(bounded.worktrees).toHaveLength(1)
+  expect(bounded.nextWorktreeOffset).toBeNull()
+  expect(bounded.worktrees[0].resource?.budgetsTruncated).toBe(true)
+  expect(bounded.worktrees[0].resource?.budgets).toEqual([])
+  expect(run.worktrees[0].resource!.budgets[0].commands[0].argv[0]).toHaveLength(6000)
+})
+
 it("preserves complete workflow pages through protected Mod publication and native capture", () => {
   const run = source(2)
   const pages = [0, 1].map((agentOffset) => {

@@ -233,6 +233,7 @@ export interface DevelopmentTrialStatus {
 }
 
 export interface DevelopmentStatus {
+  sourceSet?: ProjectSourceSetStatus
   projectDelivery?: CreatorProjectDeliveryStatus
   planning?: import("./creator-planning").CreatorPlanningStatus
   save?: DevelopmentCompositionSaveStatus
@@ -264,6 +265,11 @@ export interface DevelopmentStatus {
 
 /** Renderer controls are deliberately separate from the model's draft/trial request tool. */
 export interface DevelopmentApi extends Partial<CreatorPlanningApi> {
+  importSourceSet?(input: AuthoringScope): Promise<DevelopmentStatus>
+  advanceSourceSet?(input: AuthoringScope & { id: string }): Promise<DevelopmentStatus>
+  cancelSourceSet?(input: AuthoringScope & { id: string }): Promise<DevelopmentStatus>
+  installSourceSetDependency?(input: AuthoringScope & { id: string; dependencyId: string }): Promise<DevelopmentStatus>
+  reconcileSourceSetDependency?(input: AuthoringScope & { id: string; dependencyId: string }): Promise<DevelopmentStatus>
   prepareProjectDelivery?(input: AuthoringScope & {
     requestId: string; digest: string; name: string; version: string
   }): Promise<DevelopmentStatus>
@@ -315,6 +321,21 @@ export interface DevelopmentApi extends Partial<CreatorPlanningApi> {
   cancelComposition(input: AuthoringScope): Promise<DevelopmentStatus>
   undoTrial(input: AuthoringScope): Promise<DevelopmentStatus>
   onChanged(callback: (event: { threadId: string }) => void): () => void
+}
+
+export interface ProjectSourceSetStatus {
+  id: string
+  title: string
+  phase: "dependencies" | "compiling" | "ready" | "needs-review" | "failed" | "cancelled"
+  error?: string
+  dependencies: Array<{
+    id: string
+    name: string
+    version: string
+    digest: string
+    phase: "prepared" | "installing" | "installed" | "unknown"
+    pluginId?: string
+  }>
 }
 
 /** A checked independent package; saving or installing never proves business acceptance. */

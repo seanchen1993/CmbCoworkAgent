@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { FunctionUserConfigView } from "../../shared/mods/v2/user-config-view"
-import { pluginStartUseConfigurationIssues } from "./plugin-start-use-diagnostics"
+import { pluginStartUseConfigurationIssues, pluginStartUseDependencyIssues } from "./plugin-start-use-diagnostics"
 
 const view = (fields: FunctionUserConfigView["fields"]): FunctionUserConfigView => ({
   pluginId: "plugin", plugin: "sample", digest: "a".repeat(64), workspace: "workspace",
@@ -12,6 +12,20 @@ const field = (extra: Partial<FunctionUserConfigView["fields"][number]>) => ({
 })
 
 describe("start-use missing configuration facts", () => {
+  it("reports locked dependency readiness without claiming that opening the project authorizes execution", () => {
+    const dependency = { pluginId: "id", name: "rules", digest: "a".repeat(64), actionIds: ["check"], capabilities: [] }
+    expect(pluginStartUseDependencyIssues([{ ...dependency, state: "ready", configurationReady: true }])).toEqual([])
+    for (const state of ["needs-approval", "missing", "disabled", "source-changed", "invalid"] as const)
+      expect(pluginStartUseDependencyIssues([{ ...dependency, state }])).toEqual([
+        expect.objectContaining({ code: "dependency", resolution: "project-form", message: expect.stringContaining("rules") })
+      ])
+    expect(pluginStartUseDependencyIssues([{ ...dependency, state: "ready", configurationReady: false }])[0].message)
+      .toContain("配置")
+    expect(pluginStartUseDependencyIssues([{ ...dependency, state: "ready" }], { enabled: false, globallyEnabled: true })[0].code)
+      .toBe("permission")
+    expect(pluginStartUseDependencyIssues([], { enabled: false, globallyEnabled: false })).toEqual([])
+    expect(pluginStartUseDependencyIssues(Array.from({ length: 100 }, () => ({ ...dependency, state: "missing" as const })))).toHaveLength(49)
+  })
   it("does not mistake false or zero for missing and does not require live approval", () => {
     expect(pluginStartUseConfigurationIssues(view([
       field({ type: "boolean", value: false }), field({ type: "number", value: 0 }),

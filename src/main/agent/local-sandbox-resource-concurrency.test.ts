@@ -11,6 +11,8 @@ import * as fileOperations from "./file-operation-lock"
 import { runWorkflowEngine } from "./workflow/engine"
 import { createWorkflowRunStore, generateWorkflowRunId, sha256Hex } from "./workflow/run-store"
 import { validateWorkflowScript } from "./workflow/script"
+import { withWorkflowResourceDeadline } from "./workflow/resource-deadline"
+import type { WorkflowResourceDeadline } from "./workflow/types"
 
 const roots: string[] = []
 const releases: Array<() => void> = []
@@ -59,6 +61,30 @@ afterEach(async () => {
 })
 
 describe("sandbox resource concurrency", () => {
+  it("rechecks the original deadline after an awaited file lock without changing the file", async () => {
+    const { root, file } = await fixture()
+    const startedAt = Date.now()
+    const budget: WorkflowResourceDeadline = {
+      budgetId: "batch-1", generation: 1,
+      policy: { firstExecutionMs: 60_000, totalMs: 120_000, commandMs: 30_000 },
+      startedAt, firstDeadlineAt: startedAt + 60_000, deadlineAt: startedAt + 120_000,
+      status: "active", commands: []
+    }
+    await expect(withWorkflowResourceDeadline({
+      identity: "original-owner", read: () => budget, save: async () => {}, assertCurrent: vi.fn()
+    }, async () => {
+      const sandbox = new LocalSandbox({ rootDir: root, windowsSandbox: "none" })
+      await sandbox.read(file)
+      const held = holdEdit(sandbox)
+      const pending = sandbox.edit(file, "zero", "late")
+      await held.entered.promise
+      vi.spyOn(Date, "now").mockReturnValue(budget.firstDeadlineAt)
+      held.release.resolve()
+      await pending
+    })).rejects.toThrow("EXPIRED")
+    expect(await readFile(file, "utf8")).toBe("zero")
+  })
+
   it("keeps isolated background process lifetimes out of file admission", async () => {
     const { root, file } = await fixture()
     const sandbox = new LocalSandbox({

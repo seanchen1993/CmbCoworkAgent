@@ -1,4 +1,5 @@
 import { invalidateThreadTitleObservers } from "./thread-title-observer"
+import { startHostRuntimeTiming } from "../services/host-runtime-timing"
 import { ensureAppNotificationsSchema } from "./app-notifications-schema"
 import { ensureUiGuideSchema } from "./ui-guide-store"
 import {
@@ -558,6 +559,12 @@ function migrateLegacyMemorySessionOptIn(database: NativeSqliteAdapter): void {
   }
 }
 
+// SQLite maintains this read-only projection in the same transaction as every thread write.
+// Keep its expression identical in the index and SELECT: no authorization is cached here.
+const THREAD_RUNTIME_SCOPE_INDEX = "idx_threads_runtime_scope_v1"
+const THREAD_RUNTIME_SCOPE_EXPRESSION =
+  "CASE WHEN json_valid(metadata) THEN json_remove(metadata, '$.llmFileHistory') ELSE metadata END"
+
 export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   if (db) return db
   const dbPath = getDbPath()
@@ -946,6 +953,10 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
 
   ensureLegacyMessageTimeArchive(db)
   db.run(`CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at)`)
+  db.run(
+    `CREATE INDEX IF NOT EXISTS ${THREAD_RUNTIME_SCOPE_INDEX}
+     ON threads(thread_id, ${THREAD_RUNTIME_SCOPE_EXPRESSION})`
+  )
   db.run(
     `CREATE INDEX IF NOT EXISTS idx_thread_messages_thread_order ON thread_messages(thread_id, ordinal, created_at)`
   )
@@ -5041,11 +5052,11 @@ function canonicalReadScope(reader: CanonicalThreadMessageReadScope) {
 /** Explicit private composition only. Standalone public calls always obtain a fresh operation. */
 export function withCanonicalThreadMessageReadScope<T>(threadId: string,
   run: (reader: CanonicalThreadMessageReadScope) => T): T {
-  const database = getDb(), thread = getThreadCore(threadId)
+  const database = getDb(), thread = getThreadRuntimeScope(threadId)
   if (!thread) throw Error("MODS_CONVERSATION_THREAD_CHANGED")
   const incarnation = captureThreadIncarnation(thread)
   const guard = () => {
-    if (getDb() !== database || !matchesThreadIncarnation(getThreadCore(threadId), incarnation))
+    if (getDb() !== database || !matchesThreadIncarnation(getThreadRuntimeScope(threadId), incarnation))
       throw Error("MODS_CONVERSATION_THREAD_CHANGED")
     assertThreadMessageForkReady(threadId)
   }
@@ -6496,6 +6507,7 @@ const threadCoreStatements = new WeakMap<NativeSqliteAdapter, NativeSqliteReadOn
 const threadCoreQueriesInUse = new WeakSet<NativeSqliteAdapter>()
 
 export function getThreadCore(threadId: string): ThreadSummaryRow | null {
+  const finishTiming = startHostRuntimeTiming("threadRead")
   const database = getDb()
   const temporary = threadCoreQueriesInUse.has(database)
   if (!temporary) threadCoreQueriesInUse.add(database)
@@ -6514,6 +6526,42 @@ export function getThreadCore(threadId: string): ThreadSummaryRow | null {
     throw error
   } finally {
     if (!temporary) threadCoreQueriesInUse.delete(database)
+    finishTiming()
+  }
+}
+
+// Authority consumers do not need file-adoption history. Keep every other field and
+// malformed JSON unchanged so existing scope parsers retain their fail-closed semantics.
+const THREAD_RUNTIME_SCOPE_QUERY = `SELECT thread_id, created_at, updated_at,
+  ${THREAD_RUNTIME_SCOPE_EXPRESSION} AS metadata, status, title
+  FROM threads INDEXED BY ${THREAD_RUNTIME_SCOPE_INDEX} WHERE thread_id = ?`
+const threadRuntimeScopeStatements = new WeakMap<NativeSqliteAdapter, NativeSqliteReadOne>()
+const threadRuntimeScopeQueriesInUse = new WeakSet<NativeSqliteAdapter>()
+
+/** Read-only runtime scope projection. Never use this row for a metadata replacement. */
+export function getThreadRuntimeScope(threadId: string): ThreadSummaryRow | null {
+  const finishTiming = startHostRuntimeTiming("threadRead")
+  const database = getDb()
+  const temporary = threadRuntimeScopeQueriesInUse.has(database)
+  if (!temporary) threadRuntimeScopeQueriesInUse.add(database)
+  let read: NativeSqliteReadOne | undefined
+  try {
+    read = temporary
+      ? database.prepareReadOne(THREAD_RUNTIME_SCOPE_QUERY)
+      : threadRuntimeScopeStatements.get(database)
+    if (!read) {
+      read = database.prepareReadOne(THREAD_RUNTIME_SCOPE_QUERY)
+      threadRuntimeScopeStatements.set(database, read)
+    }
+    const row = read([threadId])
+    return row ? row as unknown as ThreadSummaryRow : null
+  } catch (error) {
+    if (!temporary && threadRuntimeScopeStatements.get(database) === read)
+      threadRuntimeScopeStatements.delete(database)
+    throw error
+  } finally {
+    if (!temporary) threadRuntimeScopeQueriesInUse.delete(database)
+    finishTiming()
   }
 }
 

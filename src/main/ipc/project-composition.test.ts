@@ -66,6 +66,7 @@ vi.mock("../harness-board/service", () => ({
   getHarnessCapabilityFeatureWorkspace: () => undefined
 }))
 vi.mock("../mods/builtins/project-facts", () => ({
+  readBuiltinProjectBinding: () => false,
   readBuiltinProjectFacts: () => ({ facts: { state: "unavailable" } })
 }))
 vi.mock("../plugins/project-capability-selection", async (importOriginal) => {

@@ -56,6 +56,9 @@ function fixture() {
   const state = {
     incarnation: "original-incarnation",
     busy: false,
+    workersRunning: false,
+    workerTerminalPending: false,
+    autoNotifications: false,
     resident: true,
     hasTail: true,
     sameHandle: true,
@@ -69,7 +72,9 @@ function fixture() {
     }
   }
   const waiters = new Map<string, Set<() => void>>()
-  const actual = functions("./auto-mode-controller.ts", ["awaitManagedRetirement", "retireManagedPredecessor"], {
+  const actual = functions("./auto-mode-controller.ts", [
+    "awaitManagedRetirement", "retireManagedPredecessor", "hasPendingCoordinatorWork"
+  ], {
     managedRetirementStopWaiters: waiters,
     isManagedRunStopRequested: () => state.stopped,
     getThreadCore: () => ({ ...thread, created_at: state.incarnation }),
@@ -84,6 +89,11 @@ function fixture() {
     managedRunStore: { getRun: () => ({ snapshot: run, corrupt: false }) },
     isSameWorkspacePath: (left: string, right: string) => left === right,
     isAgentRunBusy: () => state.busy,
+    coordinatorWorkerManager: {
+      hasRunningWorkersForThread: () => state.workersRunning,
+      hasTerminalWorkerAwaitingNotificationForThread: () => state.workerTerminalPending,
+      hasAutoRunnableNotifications: () => state.autoNotifications
+    },
     workflowRunManager: { isBusyForThreadAsync: async () => false }
   })
   return {
@@ -158,6 +168,32 @@ it("awaits the captured original source tail before retiring a generated stage",
   expect(f.retire).toHaveBeenCalledOnce()
   expect(f.release).toHaveBeenCalledOnce()
 })
+
+it.each(["workersRunning", "workerTerminalPending", "autoNotifications"] as const)(
+  "does not retire or release when %s remains after the original source tail",
+  async pending => {
+    const f = fixture()
+    const rejected = expect(f.advance()).rejects.toThrow("MANAGED_SESSION_RETIREMENT_UNCONFIRMED")
+    f.state[pending] = true
+    f.sourceTail.resolve()
+    await rejected
+    expect(f.retire).not.toHaveBeenCalled()
+    expect(f.release).not.toHaveBeenCalled()
+  }
+)
+
+it.each(["workersRunning", "workerTerminalPending", "autoNotifications"] as const)(
+  "rechecks %s after asynchronous VM retirement before releasing the original handle",
+  async pending => {
+    const f = fixture()
+    f.retire.mockImplementation(async () => { f.state[pending] = true })
+    const rejected = expect(f.advance()).rejects.toThrow("MANAGED_SESSION_RETIREMENT_SCOPE_CHANGED")
+    f.sourceTail.resolve()
+    await rejected
+    expect(f.retire).toHaveBeenCalledOnce()
+    expect(f.release).not.toHaveBeenCalled()
+  }
+)
 
 it.each([
   "incarnation",

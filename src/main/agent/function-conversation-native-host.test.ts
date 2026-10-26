@@ -2310,6 +2310,7 @@ function actualPartialDebounce(f: Awaited<ReturnType<typeof fixture>>) {
     getLocalThreadRunLease, captureCurrentRunMessageQueueOwner, isCurrentRunMessageQueueOwner,
     resolveStreamTranscriptFlush, reconcileNativePartialQueuedMessages,
     getDb: appDb.getDb, getThreadCore: appDb.getThreadCore,
+    getThreadRuntimeScope: appDb.getThreadRuntimeScope,
     getThreadMessageIdentityContext: appDb.getThreadMessageIdentityContext,
     partitionCanonicalThreadMessageEchoes: appDb.partitionCanonicalThreadMessageEchoes,
     appendThreadMessageTextDelta: appDb.appendThreadMessageTextDelta,

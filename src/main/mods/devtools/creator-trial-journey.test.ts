@@ -123,6 +123,21 @@ function fixture() {
 }
 
 describe("creator trial native evidence projection", () => {
+  it("shows output approval as a real pending decision rather than an ordinary transition", () => {
+    const f = fixture()
+    f.project.manifest.stages[0].resultApproval = "human"
+    expect(f.read()).toMatchObject({
+      phase: "needs-approval", canDeliver: false, stages: [{ status: "needs-approval" }]
+    })
+    f.operation.resultApproval = {
+      operationId: "operation", expectedVersion: 1, inputFingerprint: digest,
+      pluginDigest: digest, artifactFingerprint: digest, receiptFingerprint: digest,
+      policyDigest: digest, actorId: "person", decision: "approved", decidedAt: 4
+    }
+    expect(f.read()).toMatchObject({ phase: "needs-transition", canDeliver: false })
+    f.operation.resultApproval.decision = "rejected"
+    expect(f.read()).toMatchObject({ phase: "needs-approval", canDeliver: false })
+  })
   it("keeps a successful model with missing checks unknown rather than successful", () => {
     const f = fixture()
     f.operation.receipts = []

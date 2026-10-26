@@ -1,0 +1,221 @@
+{
+  "apiVersion": "devclaw.native-composition/v1",
+  "plugin": {
+    "id": "vendor-native-fixture",
+    "version": "1.0.0",
+    "title": "供应商准入独立验证",
+    "description": "同一通用契约的独立流程fixture，不宣称为完整合规产品。"
+  },
+  "resources": [
+    "tests/project-contract.json"
+  ],
+  "environment": [],
+  "modules": [
+    {
+      "id": "normalize",
+      "version": "1.0.0",
+      "title": "资料归一化",
+      "skill": "modules/normalize/SKILL.md",
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "normalize",
+          "path": "normalize.json",
+          "contract": "vendor.normalize/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "normalize.schema",
+          "kind": "json-schema",
+          "artifactId": "normalize",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "registrationId"
+            ],
+            "properties": {
+              "registrationId": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "none"
+    },
+    {
+      "id": "compliance",
+      "version": "1.0.0",
+      "title": "合规检查",
+      "skill": "modules/compliance/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "normalize",
+          "contract": "vendor.normalize/v1"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "compliance",
+          "path": "compliance.json",
+          "contract": "vendor.compliance/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "compliance.schema",
+          "kind": "json-schema",
+          "artifactId": "compliance",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "requires-review",
+                  "eligible"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "none"
+    },
+    {
+      "id": "risk",
+      "version": "1.0.0",
+      "title": "风险评估",
+      "skill": "modules/risk/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "compliance",
+          "contract": "vendor.compliance/v1"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "risk",
+          "path": "risk.json",
+          "contract": "vendor.risk/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "risk.schema",
+          "kind": "json-schema",
+          "artifactId": "risk",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "risk"
+            ],
+            "properties": {
+              "risk": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "none"
+    },
+    {
+      "id": "approval",
+      "version": "1.0.0",
+      "title": "人工批准",
+      "skill": "modules/approval/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "risk",
+          "contract": "vendor.risk/v1"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "approval",
+          "path": "approval.json",
+          "contract": "vendor.approval/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "approval.schema",
+          "kind": "json-schema",
+          "artifactId": "approval",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "decision"
+            ],
+            "properties": {
+              "decision": {
+                "const": "pending-human-review"
+              }
+            }
+          }
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "human"
+    },
+    {
+      "id": "archive",
+      "version": "1.0.0",
+      "title": "归档",
+      "skill": "modules/archive/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "approval",
+          "contract": "vendor.approval/v1"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "archive",
+          "path": "archive.json",
+          "contract": "vendor.archive/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "archive.schema",
+          "kind": "json-schema",
+          "artifactId": "archive",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "record"
+            ],
+            "properties": {
+              "record": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "none"
+    }
+  ]
+}

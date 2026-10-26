@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ThreadSummaryPage } from "../../../main/types"
 import type { Thread } from "../types"
 import { useAppStore } from "./store"
+import { isOrdinaryFlowMetadata } from "../../../shared/mods/flows/scope"
 
 function createThread(threadId: string): Thread {
   return {
@@ -44,6 +45,40 @@ describe("app store thread-directory loading", () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it("keeps a selected Host stage read-only after its terminal directory refresh", async () => {
+    const binding = {
+      projectId: "project",
+      operationId: "operation",
+      stageId: "prd",
+      pluginDigest: "a".repeat(64)
+    }
+    const selected = {
+      ...createThread("host-stage"),
+      metadata: {
+        workspacePath: "C:/project",
+        hostProjectRuntime: binding
+      }
+    }
+    useAppStore.setState({ threads: [selected], currentThreadId: selected.thread_id })
+    const completed = { ...selected, updated_at: new Date(2) }
+    vi.stubGlobal("window", {
+      api: {
+        threads: {
+          listPage: vi.fn().mockResolvedValue(createPage([completed]))
+        }
+      }
+    })
+
+    await useAppStore.getState().loadThreads()
+
+    const state = useAppStore.getState()
+    expect(state.currentThreadId).toBe(selected.thread_id)
+    expect(state.threads[0]).toEqual(completed)
+    expect(state.threads[0].metadata?.hostProjectRuntime).toStrictEqual(binding)
+    expect(Boolean(state.threads[0].metadata?.hostProjectRuntime)).toBe(true)
+    expect(isOrdinaryFlowMetadata(state.threads[0].metadata)).toBe(false)
   })
 
   it("refreshes the directory without navigating away from project mode", async () => {
@@ -110,10 +145,7 @@ describe("app store thread-directory loading", () => {
     const refreshPage = new Promise<ThreadSummaryPage>((resolve) => {
       resolveRefresh = resolve
     })
-    const listPage = vi
-      .fn()
-      .mockReturnValueOnce(bootstrapPage)
-      .mockReturnValueOnce(refreshPage)
+    const listPage = vi.fn().mockReturnValueOnce(bootstrapPage).mockReturnValueOnce(refreshPage)
     vi.stubGlobal("window", { api: { threads: { listPage } } })
 
     const bootstrap = useAppStore.getState().loadThreads({ selectInitialThread: true })
@@ -158,7 +190,10 @@ describe("app store thread-directory loading", () => {
     vi.stubGlobal("window", { api: { threads: { listPage } } })
 
     const bootstrap = useAppStore.getState().loadThreads({ selectInitialThread: true })
-    const supersededRefresh = useAppStore.getState().loadThreads().catch(() => undefined)
+    const supersededRefresh = useAppStore
+      .getState()
+      .loadThreads()
+      .catch(() => undefined)
     resolveBootstrap?.(createPage([chatThread]))
     await Promise.resolve()
     await Promise.resolve()
@@ -177,17 +212,24 @@ describe("app store thread-directory loading", () => {
     const listPage = vi.fn().mockRejectedValue(new Error("latest refresh failed"))
     vi.stubGlobal("window", { api: { threads: { listPage } } })
 
-    await expect(
-      useAppStore.getState().loadThreads({ selectInitialThread: true })
-    ).rejects.toThrow("latest refresh failed")
+    await expect(useAppStore.getState().loadThreads({ selectInitialThread: true })).rejects.toThrow(
+      "latest refresh failed"
+    )
   })
   it("publishes a confirmed workspace to new-thread summaries without host writes or navigation", () => {
     const thread = { ...createThread("workspace-new"), metadata: { model: "keep-model" } }
-    useAppStore.setState({ threads: [thread], currentThreadId: thread.thread_id, showCustomizeView: true })
+    useAppStore.setState({
+      threads: [thread],
+      currentThreadId: thread.thread_id,
+      showCustomizeView: true
+    })
     vi.stubGlobal("window", { api: {} })
     useAppStore.getState().syncThreadWorkspaceSummary(thread.thread_id, "C:/owned/project")
     const state = useAppStore.getState()
-    expect(state.threads[0].metadata).toEqual({ model: "keep-model", workspacePath: "C:/owned/project" })
+    expect(state.threads[0].metadata).toEqual({
+      model: "keep-model",
+      workspacePath: "C:/owned/project"
+    })
     expect(state.currentThreadId).toBe(thread.thread_id)
     expect(state.showCustomizeView).toBe(true)
     const rows = state.threads
@@ -216,5 +258,4 @@ describe("app store thread-directory loading", () => {
     useAppStore.getState().syncThreadWorkspaceSummary(thread.thread_id, "C:/owned/late")
     expect(useAppStore.getState().threads).toEqual([])
   })
-
 })

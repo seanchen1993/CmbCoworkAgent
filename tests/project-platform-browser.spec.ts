@@ -42,21 +42,27 @@ async function verifyLocalProjects(root: string, browser: Browser, artifacts: st
     stdin: { loader: "tsx", resolveDir: root, contents: `
       import React from 'react'; import {createRoot} from 'react-dom/client';
       import {LocalProjectsPanel} from './src/renderer/src/components/harness-board/LocalProjectsPanel';
+      import {parseProjectRuntimeManifestV1} from './src/shared/project-runtime/manifest';
       const root=createRoot(document.getElementById('root')), calls=[], pending=[];
       if(!crypto.randomUUID)Object.defineProperty(crypto,'randomUUID',{value:()=> 'fixture-key-'+calls.length});
       const views={}; let delay='', valid=false, holdRead=false,finishNavigation; const reads=[],navigationReads=[];
       function make(id,human=false) { return {project:{projectId:id,name:'任务 '+id,goal:'目标 '+id,
         workspace:'C:/fixture/'+id,pluginDigest:'fixture-digest',status:'active',stageIndex:0,version:1,updatedAt:1,packageVersion:'1.0.0',
-        manifest:{stages:[{id:'draft',title:'草稿',approval:human?'human':'none'}],
-          artifacts:[{id:'draft',path:'draft.md'}],checks:[{id:'exists',artifactId:'draft',kind:'file-exists'}]}},operations:[]}; }
+        manifest:parseProjectRuntimeManifestV1({apiVersion:'devclaw.project-runtime/v1',plugin:{id:'fixture-template',version:'1.0.0'},mode:'host',stateOwner:'host',
+          stages:[{id:'draft',title:'草稿',skill:'draft',actionIds:[],artifactIds:['draft'],checkIds:['exists'],approval:human?'human':'none'}],actions:[],
+          artifacts:[{id:'draft',path:'draft.md',required:true}],checks:[{id:'exists',artifactId:'draft',kind:'file-exists',sideEffect:'read'}],environment:[],
+          capabilities:{execution:true,conditionalTransition:true,idempotency:true,reconciliation:true,cancellation:true}})},operations:[]}; }
       views.A=make('A'); views.B=make('B',true); views.E=make('E'); views.F=make('F',true);
       views.G=make('G'); views.G.operations=[{operationId:'G-op',stageId:'draft',expectedVersion:1,status:'succeeded',updatedAt:1,receipts:[],execution:{threadId:'G-thread'}}];
       views.D=make('D',true);
       views.D.project.manifest.stages[0].actionIds=['format-note'];
-      views.D.project.manifest.actions=[{id:'format-note',ref:{plugin:'公开整理插件'}}];
+      views.D.project.manifest.actions=[{id:'format-note',ref:{pluginId:'format-plugin',plugin:'public-format-plugin',digest:'d'.repeat(64),actionId:'format-note'}}];
+      views.D.project.manifest=parseProjectRuntimeManifestV1(views.D.project.manifest);
       const copy=value=>JSON.parse(JSON.stringify(value));
       window.api={threads:{get:async id=>{navigationReads.push(id);return new Promise(resolve=>finishNavigation=()=>resolve({thread_id:id,metadata:{workspacePath:'C:/fixture/G',hostProjectRuntime:{projectId:'G',operationId:'G-op',stageId:'draft',pluginDigest:'fixture-digest'}}}))}},file:{selectDirectory:async()=>({canceled:false,filePaths:['C:/fixture/new']})},
         harnessBoard:{localProjects:{
+          mods:{read:async id=>{const project=views[id].project;return {projectId:project.projectId,projectVersion:project.version,packageDigest:project.pluginDigest,workspace:project.workspace}},
+            approve:async()=>{throw Error('UNEXPECTED_FUNCTION_APPROVAL')}},
           templates:async()=>[{installedPluginId:'installed-uuid',name:'两阶段模板',version:'1.0.0',stages:['草稿','检查']}],
           list:async()=>Object.values(views).map(x=>copy(x.project)),
           get:async id=>{const result=copy(views[id]); if(holdRead)return new Promise(resolve=>reads.push(()=>resolve(result)));return result},
@@ -94,7 +100,7 @@ async function verifyLocalProjects(root: string, browser: Browser, artifacts: st
   await page.keyboard.press("Enter")
   await page.getByRole("heading", { name: "内置功能与本地项目任务", exact: true }).waitFor()
   await page.getByRole("article").getByRole("link", { name: "制作项目模板", exact: true }).first().click()
-  await page.getByRole("heading", { name: "从零制作一个两阶段项目插件", exact: true }).waitFor()
+  await page.getByRole("heading", { name: "只写技能和节点，制作自己的项目插件", exact: true }).waitFor()
   await page.keyboard.press("Escape")
   await page.getByRole("dialog").waitFor({ state: "detached" })
   assert.equal(await page.evaluate(() => (window as unknown as ProjectFixtureWindow).fixture.calls.length), 0, "reading offline help must not mutate projects")
@@ -116,7 +122,7 @@ async function verifyLocalProjects(root: string, browser: Browser, artifacts: st
   assert.deepEqual(await page.evaluate(() => (window as unknown as ProjectFixtureWindow).fixture.calls.filter(x => ["selected", "hydrated"].includes(x[0])).map(x => x[0])), ["hydrated", "selected", "hydrated", "selected"])
   await task("D").focus()
   await page.keyboard.press("Enter")
-  await page.getByText("公开整理插件 · format-note", { exact: true }).waitFor()
+  await page.getByText("public-format-plugin · format-note", { exact: true }).waitFor()
   assert.equal(await page.getByRole("button", { name: "只检查已有成果", exact: true }).count(), 0)
   await page.getByRole("button", { name: "开始当前阶段", exact: true }).click()
   await page.getByRole("button", { name: "批准并执行" }).waitFor()

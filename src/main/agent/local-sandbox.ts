@@ -1,6 +1,8 @@
+import { assertWorkflowResourceAdmission, captureWorkflowResourceAdmission, workflowResourceCommandTimeout, workflowResourceDeadlineSignal } from "./workflow/resource-deadline"
 import { decodeMarketContent, findProtectedMarketRoot, prepareMarketCommand, resolveMarketRuntimePath, MARKET_CONTENT_DENIED } from "../services/market-content"
 import { getCustomSkillsDir, getPlugins } from "../storage"
 import { suppressCompositionPythonCache } from "../harness-board/composition-python-cache"
+import { workspacePathsOverlap } from "../../shared/workspace-path"
 import { captureProjectActionContentGuard } from "../harness-board/project-action-scope"
 import {
   assertCurrentRuntimePluginSourceContent,
@@ -2032,11 +2034,12 @@ export class LocalSandbox
     this.runId = options.runId ?? this.id
     const sourceGuard = captureRuntimePluginSourceContentGuard()
     const projectGuard = captureProjectActionContentGuard(this.runId)
-    if (sourceGuard || projectGuard)
-      this.retainedSourceGuard = () => {
-        sourceGuard?.()
-        projectGuard?.()
-      }
+    const deadlineGuard = captureWorkflowResourceAdmission()
+    this.retainedSourceGuard = () => {
+      deadlineGuard()
+      sourceGuard?.()
+      projectGuard?.()
+    }
     this.aclOwnerId = options.aclOwnerId ?? this.runId
     this.timeout = options.timeout ?? 60_000 // 1 minute default
     this.maxOutputBytes = options.maxOutputBytes ?? 100_000 // ~100KB default
@@ -3297,7 +3300,9 @@ export class LocalSandbox
       workspacePath: this.workingDir,
       sessionId: this.runId
     }
+    assertWorkflowResourceAdmission()
     const preResult = await this.runHooks("PreToolUse", context)
+    assertWorkflowResourceAdmission()
     throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
     if (toolName !== "execute" && !preResult?.blocked && preResult?.decision !== "block") {
       await authorizeCurrentModInput(
@@ -3305,6 +3310,7 @@ export class LocalSandbox
         LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput)
       )
     }
+    assertWorkflowResourceAdmission()
     if (this.stageDebugFilePolicy)
       assertStageDebugToolCall(this.stageDebugFilePolicy, toolName,
         LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput))
@@ -4806,6 +4812,7 @@ export class LocalSandbox
       const flags = fsConstants.O_WRONLY | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW
       const fd = await fs.open(resolvedPath, flags)
       try {
+        assertWorkflowResourceAdmission()
         await fd.writeFile(encoded)
       } finally {
         await fd.close()
@@ -4855,6 +4862,7 @@ export class LocalSandbox
     await capability.handle.truncate(0)
     let offset = 0
     while (offset < encoded.length) {
+      assertWorkflowResourceAdmission()
       const { bytesWritten } = await capability.handle.write(
         encoded,
         offset,
@@ -5223,8 +5231,23 @@ export class LocalSandbox
           // Check the current namespace immediately before writing through the opened handle.
           // This is an application boundary, not a directory lock or an OS sandbox.
           assertStageDebugToolCall(policy, "write_file", { filePath: resolvedPath })
+          assertWorkflowResourceAdmission()
           await opened.writeFile(effectiveContent, "utf-8")
           assertStageDebugToolCall(policy, "write_file", { filePath: resolvedPath })
+        } finally { await opened.close() }
+        r = { path: effectiveFilePath, filesUpdate: null }
+      } else if (workflowResourceDeadlineSignal()) {
+        await fs.mkdir(path.dirname(resolvedPath), { recursive: true })
+        this.retainedSourceGuard?.()
+        let opened: Awaited<ReturnType<typeof fs.open>>
+        try { opened = await fs.open(resolvedPath, "wx") }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+          return { error: `File '${effectiveFilePath}' already exists. Use edit_file to modify it.` }
+        }
+        try {
+          this.retainedSourceGuard?.()
+          await opened.writeFile(effectiveContent, "utf8")
         } finally { await opened.close() }
         r = { path: effectiveFilePath, filesUpdate: null }
       } else r = await super.write(effectiveFilePath, effectiveContent)
@@ -7098,9 +7121,10 @@ export class LocalSandbox
   private static readonly pendingBackgroundTaskStarts = new Set<{
     abortController: AbortController
     settled: Promise<void>
+    cwd: string
   }>()
 
-  private static beginBackgroundTaskStart(): {
+  private static beginBackgroundTaskStart(cwd: string): {
     abortController: AbortController
     finish: () => void
   } | null {
@@ -7109,6 +7133,7 @@ export class LocalSandbox
     const abortController = new AbortController()
     let resolveSettled!: () => void
     const pending = {
+      cwd,
       abortController,
       settled: new Promise<void>((resolve) => {
         resolveSettled = resolve
@@ -7174,7 +7199,7 @@ export class LocalSandbox
    * Use `getTaskOutput(taskId)` to retrieve the result or check progress.
    */
   async executeBackground(command: string, cwd?: string): Promise<string> {
-    const pendingStart = LocalSandbox.beginBackgroundTaskStart()
+    const pendingStart = LocalSandbox.beginBackgroundTaskStart(this.resolveExecutionCwd(cwd))
     if (!pendingStart) return LocalSandbox.backgroundStartCancelledMessage()
     try {
       return await this.executeBackgroundAfterStart(command, cwd, pendingStart.abortController)
@@ -7591,6 +7616,15 @@ export class LocalSandbox
     for (const task of LocalSandbox.backgroundTasks.values()) {
       if (task.threadId === threadId && !task.settled) return true
     }
+    return false
+  }
+
+  /** Includes other conversations and starts still waiting for their original admission. */
+  static hasActiveBackgroundTasksInWorkspace(workspace: string): boolean {
+    for (const pending of LocalSandbox.pendingBackgroundTaskStarts)
+      if (workspacePathsOverlap(workspace, pending.cwd)) return true
+    for (const task of LocalSandbox.backgroundTasks.values())
+      if (!task.settled && workspacePathsOverlap(workspace, task.cwd)) return true
     return false
   }
 
@@ -8288,7 +8322,9 @@ export class LocalSandbox
   ): Promise<LocalExecuteResponse> {
     const methodStartMs = Date.now()
     const effectiveMode = sandboxModeOverride ?? this.windowsSandbox
-    const effectiveAbortSignal = overrideAbortSignal ?? this.abortSignal
+    const baseAbortSignal = overrideAbortSignal ?? this.abortSignal
+      const deadlineSignal = workflowResourceDeadlineSignal()
+      const effectiveAbortSignal = deadlineSignal ? AbortSignal.any([deadlineSignal, ...(baseAbortSignal ? [baseAbortSignal] : [])]) : baseAbortSignal
     const executionCwd = this.resolveExecutionCwd(cwd)
     const sandboxWorkspaceRoot = path.resolve(this.workingDir)
     // Package install commands (pip, npm, cargo, etc.) often fail in elevated mode due to
@@ -8643,6 +8679,7 @@ export class LocalSandbox
         console.log(`[LocalSandbox] sandbox cwd: ${sandboxWorkspaceRoot}`)
         console.log(`[LocalSandbox] command cwd: ${executionCwd}`)
 
+        const cmdTimeout = workflowResourceCommandTimeout(timeoutMs ?? this.timeout)
         this.retainedSourceGuard?.()
         const proc = spawn(this.codexExePath, sandboxArgs, {
           cwd: sandboxWorkspaceRoot,
@@ -8668,7 +8705,6 @@ export class LocalSandbox
           options?.onTermination?.(termination)
         }
 
-        const cmdTimeout = timeoutMs ?? this.timeout
         const timeoutId = setTimeout(() => {
           if (resolved || timedOut || aborted) return
           console.log(`[LocalSandbox] timeout: pid=${proc.pid}, killing after ${cmdTimeout}ms`)
@@ -8957,7 +8993,9 @@ export class LocalSandbox
       let firstDataAt = 0
 
       // Effective abort signal: per-task override (for background tasks) or conversation-level signal.
-      const effectiveAbortSignal = overrideAbortSignal ?? this.abortSignal
+      const baseAbortSignal = overrideAbortSignal ?? this.abortSignal
+      const deadlineSignal = workflowResourceDeadlineSignal()
+      const effectiveAbortSignal = deadlineSignal ? AbortSignal.any([deadlineSignal, ...(baseAbortSignal ? [baseAbortSignal] : [])]) : baseAbortSignal
 
       // On Windows with bash-like shells (Git Bash / MSYS2), non-ASCII
       // characters in command-line arguments get corrupted: MSYS2's runtime
@@ -9000,6 +9038,7 @@ export class LocalSandbox
           : shellBase === "cmd"
             ? "cmd"
             : "stdin"
+      const cmdTimeout = workflowResourceCommandTimeout(timeoutMs ?? this.timeout)
       this.retainedSourceGuard?.()
       const proc = useWindowsBackgroundJob
         ? spawn(resolveWindowsBackgroundJobControllerPath(), [shell, windowsBackgroundShellKind], {
@@ -9060,7 +9099,6 @@ export class LocalSandbox
         options?.onTermination?.(termination)
       }
 
-      const cmdTimeout = timeoutMs ?? this.timeout
       const timeoutId = setTimeout(() => {
         if (resolved || timedOut || aborted) return
         timedOut = true

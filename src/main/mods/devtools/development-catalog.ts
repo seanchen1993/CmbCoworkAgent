@@ -123,8 +123,7 @@ export function developmentCatalogPage(
     const capabilities = catalog.support.conditionalCapabilities
     if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > capabilities.length)
       throw Error("DEVELOPMENT_CATALOG_CURSOR")
-    const size = 2
-    return {
+      const page = (size: number) => ({
       contract: catalog.contract,
       section,
       cursor,
@@ -133,7 +132,12 @@ export function developmentCatalogPage(
         conditionalCapabilities: capabilities.slice(cursor, cursor + size)
       },
       ...(cursor + size < capabilities.length ? { nextCursor: cursor + size } : {})
-    }
+      })
+      let size = Math.min(2, capabilities.length - cursor)
+      while (size > 1 && JSON.stringify(page(size)).length >= 8000) size--
+      const result = page(size)
+      if (JSON.stringify(result).length >= 8000) throw Error("DEVELOPMENT_SUPPORT_PAGE_LIMIT")
+      return result
   }
   if (section === "overview")
     return {

@@ -1,8 +1,16 @@
+import { currentRuntimePluginSource } from "../plugins/runtime-source-scope"
 import { publishDevelopmentTurnSettlement } from "../mods/v2/development-turn-settlement"
 import { observeStopFailure } from "../hooks/stop-failure-observer"
 import { foregroundToolPolicy } from "../agent/foreground-tool-policy"
 import { managedBizRetryService } from "../harness-board/biz-retry-service"
 import { classifyManagedAgentFailure } from "../agent/managed-agent-failure"
+import {
+  captureRunCancellationRequest,
+  confirmRunCancellationSettlement,
+  invalidateRunCancellationSettlement,
+  recordRunCancellation,
+  settledRunCancellationTerminal
+} from "../agent/run-cancellation-settlement"
 import { IpcMain, BrowserWindow, dialog } from "electron"
 import { getModsManager } from "../mods/manager"
 import { isPlainComposerSubmission } from "../../shared/mods/v2/prompt-submission"
@@ -26,6 +34,7 @@ import {
   getStreamTranscriptValueLocalOccurrence
 } from "./stream-transcript-values"
 import { AsyncLocalStorage } from "node:async_hooks"
+import { hasHostInputInterrupt } from "../services/user-input"
 import { types as nativeTypes } from "node:util"
 import { nowIsoLocal } from "../util/local-time"
 import { StreamAssistantText } from "./stream-assistant-text"
@@ -105,6 +114,7 @@ import {
   flushStrict,
   getDb,
   getThreadCore,
+  getThreadRuntimeScope,
   isFirstThreadUserMessage,
   getThreadMessageIdentityContext,
   getThreadMessageProviderOccurrencesBeforeUser,
@@ -467,6 +477,7 @@ import {
   notifyAgentRunSettled,
   registerAgentGoalControlImplementation,
   registerAgentRunImplementation,
+  registerAgentResumeImplementation,
   startAgentRun,
   settleAgentFunctionTurn,
   type AgentRunDelivery,
@@ -573,6 +584,7 @@ function releaseWorkflowNotification(runId: string, runToken: string): boolean {
   })
 }
 const streamChannelByRunController = new WeakMap<AbortController, string>()
+const stopRequestByRunController = new WeakMap<AbortController, () => void>()
 
 let agentTaskShutdownStarted = false
 const agentRunExecutionContextStorage = new AsyncLocalStorage<AgentRunExecutionContext>()
@@ -2026,6 +2038,7 @@ async function settlePhysicalAgentRun({
   runOwner = "desktop",
   releaseRunLease = true
 }: PhysicalAgentRunSettlementOptions): Promise<void> {
+  const cancellationOwned = ownsPhysicalStreamRunLease(threadId, runToken, controller)
   const functionTurnOwner =
     functionTurnReason || controller.signal.aborted || turnStateShouldDispose
       ? getModsManager()?.functionTurns.captureSettlementOwner(threadId, runToken)
@@ -2046,6 +2059,7 @@ async function settlePhysicalAgentRun({
     !physicalRunHasSuccessor(threadId, runToken, controller)
   const reportSettlementError = (phaseName: string, error: unknown): void => {
     developmentSettlementFailed = true
+    invalidateRunCancellationSettlement()
     console.warn(
       `[Agent] ${kind} settlement phase failed for thread ${threadId} (${phaseName}):`,
       error
@@ -2158,6 +2172,26 @@ async function settlePhysicalAgentRun({
   catch (error) {
     developmentSettlementFailed = true
     functionTurnFailure = { error }
+  }
+
+  if (controller.signal.aborted) {
+    let receiptsConfirmed = false
+    try {
+      const manager = getModsManager()
+      if (manager && functionTurnOwner) {
+        const counts = manager.store.turnSummary(
+          functionTurnOwner.workspace, threadId, functionTurnOwner.turnId
+        )
+        receiptsConfirmed = counts.running === 0 && counts.unknown === 0
+      }
+    } catch {
+      // Missing or unreadable original evidence is never a cancellation proof.
+    }
+    confirmRunCancellationSettlement(
+      cancellationOwned && !physicalRunHasSuccessor(threadId, runToken, controller) &&
+      releaseRunLease && receiptsConfirmed && transcriptFlushSucceeded &&
+      !developmentSettlementFailed && !functionTurnFailure
+    )
   }
 
   if (releaseRunLease && developmentIncarnation &&
@@ -3943,9 +3977,11 @@ async function deliverManagedAgentRunCompletion(
 }
 
 function notifyManagedAgentRunCancelled(context: AgentRunExecutionContext): void {
+  recordRunCancellation()
   try {
     context.onRunCancelled?.()
   } catch (error) {
+    invalidateRunCancellationSettlement()
     console.warn("[Agent] Managed run cancellation callback failed:", error)
   }
 }
@@ -4140,7 +4176,7 @@ function flushPendingStreamTranscriptMessages(
 export function captureNativeConversationTranscriptFlush(threadId: string, runToken: string,
   signal: AbortSignal): (uuid: string) => void {
   const assertQueueOwner = captureCurrentRunMessageQueueOwner(threadId, runToken)
-  const database = getDb(), thread = getThreadCore(threadId)
+  const database = getDb(), thread = getThreadRuntimeScope(threadId)
   const ownsLease = captureLocalThreadRunLease(threadId)
   if (!thread || !ownsLease || getLocalThreadRunLease(threadId)?.runId !== runToken)
     throw new Error("MODS_CONVERSATION_NATIVE_SOURCE_INVALID")
@@ -4148,7 +4184,7 @@ export function captureNativeConversationTranscriptFlush(threadId: string, runTo
   const assertCurrent = () => {
     assertQueueOwner()
     throwIfPhysicalStreamRunIsInactive(threadId, runToken, signal)
-    const current = getThreadCore(threadId)
+    const current = getThreadRuntimeScope(threadId)
     if (!ownsLease() || getDb() !== database || !current ||
       !matchesThreadIncarnation(current, incarnation))
       throw new Error("MODS_CONVERSATION_NATIVE_SOURCE_INVALID")
@@ -6564,6 +6600,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const nextRunToken = startTurnStateRun(nextTurnState, nextInvokeRunToken)
             const nextAbortController = new AbortController()
             activeRuns.set(threadId, nextAbortController)
+            stopRequestByRunController.set(nextAbortController,
+              captureRunCancellationRequest(runExecutionContext.onStopRequested))
             streamChannelByRunController.set(nextAbortController, channel)
             let nextResolveActiveRunSettled: () => void = () => {}
             const nextActiveRunSettledPromise = new Promise<void>((resolve) => {
@@ -7516,6 +7554,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const hasWorkflowNotificationPrefix =
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_TURN_TRIGGER) ||
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
+          const hostWorkflowNotice = runExecutionContext.hostWorkflowNotification
+          if (hostWorkflowNotice) {
+            if (!matchesWorkflowNotificationPrompt || parsedThreadMetadata.agentMode !== "workflow" ||
+                backgroundNotificationOwner !== "managed" ||
+                !runExecutionContext.pluginSourceSnapshot)
+              throw Error("HOST_WORKFLOW_NOTIFICATION_SCOPE_CHANGED")
+            hostWorkflowNotice.assertCurrent()
+          }
           if (matchesWorkflowNotificationPrompt && parsedThreadMetadata.agentMode === "workflow") {
             // Scoped to this turn's owner. The trigger only ever arrives from an
             // automatic summary, and two of those can be pending on one thread:
@@ -7524,9 +7570,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const pendingWorkflowRun = await workflowRunManager.claimPendingNotificationAsync(
               workspacePath,
               threadId,
-              { owner: backgroundNotificationOwner }
+              { owner: backgroundNotificationOwner,
+                ...(hostWorkflowNotice ? { expected: {
+                  runId: hostWorkflowNotice.runId, startedAt: hostWorkflowNotice.startedAt
+                } } : {}) }
             )
             if (!pendingWorkflowRun) {
+              if (hostWorkflowNotice) throw Error("HOST_WORKFLOW_NOTIFICATION_MISSING")
               console.log("[Workflow] Ignoring stale workflow notification trigger", { threadId })
               safeSendToWindow(window, channel, { type: "done" })
               finishTraceInBackground(tracer, "success", "WORKFLOW_NOTIFICATION_STALE", "Agent")
@@ -7534,6 +7584,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
             claimWorkflowNotification(pendingWorkflowRun.runId, runToken)
             try {
+              hostWorkflowNotice?.assertCurrent()
               const workflowOutputFile = resolveWorkflowOutputFile(
                 workspacePath,
                 pendingWorkflowRun.threadId,
@@ -9295,6 +9346,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
           }
 
+          if (!abortController.signal.aborted && hasHostInputInterrupt(threadId)) {
+            // A durable graph wait is not completion. Stop/revision hooks must not run past it.
+            runExecutionContext.onRunTerminated?.({ outcome: "unknown", code: "host_user_input_waiting" })
+            turnStateShouldDispose = true
+            invokeDoneAttempted = true
+            safeSendToWindow(window, channel, { type: "done" })
+            return
+          }
           if (!abortController.signal.aborted) {
             while (!abortController.signal.aborted) {
               const completionOutcome = await runCompletionHooksWithRevision({
@@ -10185,6 +10244,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose = true
           }
         } catch (error) {
+          if (classifyManagedAgentFailure(error) === "unknown")
+            invalidateRunCancellationSettlement()
           const failureDisposition = classifyPhysicalStreamRunFailure({
             ownsLease: ownsPhysicalStreamRunLease(threadId, runToken, abortController),
             signalAborted: abortController.signal.aborted,
@@ -10597,7 +10658,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // Nothing classified this run: an early return, or a throw before the
       // main body ever started. Reporting `unknown` lets a managed caller tell
       // "ended without a reply" from "never reported".
-      runExecutionContext.onRunTerminated?.({ outcome: "unknown", code: "unknown" })
+      runExecutionContext.onRunTerminated?.(settledRunCancellationTerminal())
     })
   })
 
@@ -10638,22 +10699,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   })
 
   // Handle agent resume (after interrupt approval/rejection via useStream)
-  ipcMain.on(
-    "agent:resume",
-    async (
-      event,
-      {
-        threadId,
-        streamRequestId,
-        command,
-        modelId,
-        agentMode: requestedAgentMode
-      }: AgentResumeParams
-    ) => {
+  // Shared original resume lifecycle; native Host callbacks cannot be supplied by a renderer.
+  const resumeOriginalAgentRun = async (
+    { threadId, streamRequestId, command, modelId, agentMode: requestedAgentMode }: AgentResumeParams,
+    window: BrowserWindow | null,
+    nativeContext?: AgentRunExecutionContext
+  ): Promise<void> => {
       const channel = resolveAgentStreamRequestChannel(`agent:stream:${threadId}`, streamRequestId)
       lastFetchErrorByChannel.delete(channel)
       lastFailoverByChannel.delete(channel)
-      const window = BrowserWindow.fromWebContents(event.sender)
+
 
       console.log("[Agent] Received resume request:", { threadId, command, modelId })
 
@@ -10673,6 +10728,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           console.warn("[Agent] Failed to parse thread metadata, using empty object")
       })
       let metadata = parsedThreadMetadata.metadata
+      const hostResumeSource = nativeContext?.hostUserInputResume
+        ? currentRuntimePluginSource() : undefined
+      const hostResumeMode = hostResumeSource?.executionMode ?? "normal"
+      if (nativeContext?.hostUserInputResume &&
+        (hostResumeSource?.mode !== "host" || hostResumeSource.threadId !== threadId ||
+          (metadata.agentMode ?? "normal") !== hostResumeMode))
+        throw Error("HOST_USER_INPUT_RESUME_MODE_CHANGED")
+      const rejectedScope = nativeContext?.verifyResolvedThread?.({
+        workspacePath: parsedThreadMetadata.workspacePath, metadata
+      })
+      if (rejectedScope) throw Error(rejectedScope)
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = parsedThreadMetadata.workspacePath
       let harnessAgentContext: HarnessAgentContext
@@ -10704,6 +10770,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const resumeAgentMode: AgentMode = resumeForcedByEnvironment
         ? "coordinator"
         : (requestedResumeMode ?? initialResumeAgentMode)
+      if (nativeContext?.hostUserInputResume && resumeAgentMode !== hostResumeMode)
+        throw Error("HOST_USER_INPUT_RESUME_MODE_CHANGED")
       const expectedResumePublicationContext = {
         workspacePath,
         mode: resumeAgentMode,
@@ -10925,6 +10993,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             activeRuns.set(threadId, nextAbortController)
             streamChannelByRunController.set(nextAbortController, channel)
             let nextResolveResumeRunSettled: () => void = () => {}
+            stopRequestByRunController.set(nextAbortController,
+              captureRunCancellationRequest(nativeContext?.onStopRequested))
             const nextResumeRunSettledPromise = new Promise<void>((resolve) => {
               nextResolveResumeRunSettled = resolve
             })
@@ -10979,6 +11049,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         })
         pendingPhysicalStreamRunSetupGuard = physicalStreamRunSetupGuard
+        const abortNativeResume = () => { nativeContext?.onRunCancelled?.(); abortController.abort() }
+        nativeContext?.signal?.addEventListener("abort", abortNativeResume, { once: true })
+        if (nativeContext?.signal?.aborted) abortNativeResume()
+        physicalStreamRunSetupGuard.addCleanup(() =>
+          nativeContext?.signal?.removeEventListener("abort", abortNativeResume))
         physicalStreamRunSetupGuard.addCleanup((_wasActive, wasOwner) => {
           if (!wasOwner) return
           revokeSandboxAclsForRun(threadId)
@@ -11370,7 +11445,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const decisionType = command?.resume?.decision || "approve"
           const pendingCount = command?.resume?.pendingCount ?? 1
           const decisions = Array.from({ length: pendingCount }, () => ({ type: decisionType }))
-          const resumeValue = { decisions }
+          const resumeValue = nativeContext?.hostUserInputResume
+            ? { requestId: nativeContext.hostUserInputResume.requestId } : { decisions }
+          let hostCheckpointAdmitted = false
           flushPendingStreamTranscriptMessages(threadId, runToken)
           const resumeDurableRuntimeTail = await getDurableRuntimeTail(threadId)
           throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
@@ -11451,6 +11528,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
                 })
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+              if (nativeContext?.hostUserInputResume && !hostCheckpointAdmitted) {
+                const checkpoint = await resumeAgent.getState(resumeStreamConfig)
+                throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+                nativeContext.hostUserInputResume.beforeResume(checkpoint)
+                hostCheckpointAdmitted = true
+              }
               resumeStream = await resumeAgent.stream(
                 new Command({ resume: resumeValue }),
                 resumeStreamConfig
@@ -11461,7 +11544,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               resumeErrorModelId = candidateId
               break
             } catch (err) {
-              if (!isRetryableApiError(err)) throw err
+              if (nativeContext?.hostUserInputResume || !isRetryableApiError(err)) throw err
               resumeFailoverAttempts.push({
                 modelId: candidateId,
                 error: String(err),
@@ -11649,7 +11732,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               await consumeResumeStream(activeResumeStream)
               break
             } catch (midErr) {
-              if (isHookHaltError(midErr)) throw midErr
+              if (nativeContext?.hostUserInputResume || isHookHaltError(midErr)) throw midErr
               const retry = await retryStreamAfterDisconnect(
                 midErr,
                 resumeStreamDisconnectRetries,
@@ -11704,6 +11787,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
           }
 
+          if (!abortController.signal.aborted && hasHostInputInterrupt(threadId)) {
+            nativeContext?.onRunTerminated?.({ outcome: "unknown", code: "host_user_input_waiting" })
+            turnStateShouldDispose = true
+            safeSendToWindow(window, channel, { type: "done" })
+            return
+          }
           if (!abortController.signal.aborted) {
             const completionOutcome = await runCompletionHooksWithRevision({
                 bindHookAccounting,
@@ -11975,7 +12064,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   })
               }
             ],
-            removeWindowListener: removeWindowClosedSubscription,
+            removeWindowListener: () => {
+              removeWindowClosedSubscription()
+              nativeContext?.signal?.removeEventListener("abort", abortNativeResume)
+            },
             settleNotifications: () => settleResumeDrainedCoordinatorNotifications("restore"),
             cleanupNotificationSkills: () => {
               if (!clearResumeCoordinatorNotificationSelectedSkillsOnExit) return
@@ -12006,6 +12098,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose,
             disposeTurnState: () => disposeTurnRuntimeState(threadId, turnState)
           })
+          nativeContext?.onRunTerminated?.({
+            outcome: abortController.signal.aborted ? "unknown" : resumeAutoModeTerminal?.outcome ?? "unknown",
+            code: resumeAutoModeTerminal?.endReason.code ?? "resume_terminal_missing"
+          })
         }
       } catch (error) {
         if (!pendingPhysicalStreamRunSetupGuard) throw error
@@ -12017,8 +12113,23 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         pendingPhysicalStreamRunSetupGuard?.abandon()
         pendingPhysicalStreamRunSetupGuard = undefined
       }
-    }
-  )
+  }
+  registerAgentResumeImplementation((request, delivery, incoming) => {
+    let reported = false
+    const context: AgentRunExecutionContext = { ...incoming, onRunTerminated: (terminal) => {
+      if (reported) return
+      reported = true
+      incoming.onRunTerminated?.(terminal)
+    } }
+    return agentRunExecutionContextStorage.run(context, () => resumeOriginalAgentRun({
+      threadId: request.threadId, streamRequestId: request.streamRequestId,
+      modelId: request.modelId, agentMode: request.agentMode, command: {}
+    }, delivery.window, context)).finally(() => {
+      context.onRunTerminated?.({ outcome: "unknown", code: "resume_terminal_missing" })
+    })
+  })
+  ipcMain.on("agent:resume", (event, request: AgentResumeParams) =>
+    resumeOriginalAgentRun(request, BrowserWindow.fromWebContents(event.sender)))
 
   // Handle HITL interrupt response
   // NOTE: With the orchestrator-based approval system, execute commands are no
@@ -13275,6 +13386,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         let cancelledBackground = false
         if (controller && !cancelWorkers) {
+          try {
+            stopRequestByRunController.get(controller)?.()
+          } catch (error) {
+            // A failed owner callback vetoes proof, but must never prevent the physical stop.
+            console.warn("[Agent] Original stop owner could not record cancellation:", error)
+          }
           // Foreground cancellation should stop the active run and any thread-scoped
           // background tasks it launched. "Stop background workers" uses the same IPC
           // entrypoint with cancelWorkers=true and must not abort the foreground turn.

@@ -26,6 +26,7 @@ import {
   withImInboxRuntimePolicy
 } from "../src/main/services/im/desktop-run-bridge"
 import type { PreparedRemoteStandardTurnInput } from "../src/main/services/im/remote-runner"
+import { settledRunCancellationTerminal } from "../src/main/agent/run-cancellation-settlement"
 
 const PROJECT_ROOT = resolve(__dirname, "..")
 
@@ -249,8 +250,13 @@ function testTheRunBodyStillHonoursWhatTheBridgeDependsOn(): void {
   )
   assert(
     entry.includes(".finally(() => {") &&
-      entry.includes('onRunTerminated?.({ outcome: "unknown", code: "unknown" })'),
+      entry.includes("onRunTerminated?.(settledRunCancellationTerminal())"),
     "an unclassified run must still report a terminal, or onRunTerminated is a lie"
+  )
+  assert.deepEqual(
+    settledRunCancellationTerminal(),
+    { outcome: "unknown", code: "unknown" },
+    "without an original cancellation proof, fallback must remain unknown"
   )
   assert(
     agent.includes('code: "prompt_blocked"'),

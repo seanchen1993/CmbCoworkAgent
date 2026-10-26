@@ -4776,6 +4776,18 @@ const api = {
   },
   harnessBoard: {
     localProjects: {
+      legacyImport: {
+        sources: () => ipcRenderer.invoke("project-runtime:import-sources"),
+        target: (installedPluginId: string) => ipcRenderer.invoke("project-runtime:import-target", installedPluginId),
+        review: (input: import("../shared/project-runtime/host-types").HostLegacyImportInput) =>
+          ipcRenderer.invoke("project-runtime:import-review", input),
+        reviewAdapter: (input: import("../shared/project-runtime/host-types").HostLegacyAdapterInput) =>
+          ipcRenderer.invoke("project-runtime:import-review-adapter", input),
+        resumeReview: (sourceProjectId: string) =>
+          ipcRenderer.invoke("project-runtime:import-resume-review", sourceProjectId),
+        confirm: (review: import("../shared/project-runtime/host-types").HostLegacyImportReview) =>
+          ipcRenderer.invoke("project-runtime:import-confirm", review)
+      },
       mods: {
         ...createNativeProjectSourceBridge((channel, input) => ipcRenderer.invoke(channel, input), "project-runtime")
       },

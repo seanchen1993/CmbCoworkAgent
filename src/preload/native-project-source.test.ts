@@ -40,6 +40,9 @@ it("routes the original native editor and consent without exposing generic confi
   }
   await api.approve(approval)
   expect(invoke).toHaveBeenLastCalledWith("project-composition-unit:mods-approve", approval)
+  const dependency = { ...approval, pluginId: "locked-provider" }
+  await api.approveDependency!(dependency)
+  expect(invoke).toHaveBeenLastCalledWith("project-composition-unit:mods-approve-dependency", dependency)
   const count = invoke.mock.calls.length
   await expect(api.config.configList("host-routing-key")).rejects.toThrow("UNSUPPORTED")
   await expect(api.config.configSet("host-routing-key", "native.policy", false)).rejects.toThrow(

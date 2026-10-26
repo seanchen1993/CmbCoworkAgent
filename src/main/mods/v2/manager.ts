@@ -1,10 +1,12 @@
 import { currentNativeConfigurationScope } from "./native-configuration-scope"
+import { markRunCancellationEffectDispatched } from "../../agent/run-cancellation-settlement"
 import { captureProjectActionContentGuard } from "../../harness-board/project-action-scope"
 import { retainOriginalActionText } from "./action-result-text"
 import { assertUserConfigSchemaCurrent, userConfigSchemaDigest, userConfigRecordDigest } from "./user-config-migration"
 import { FunctionDevelopmentSessions, DEVELOPMENT_CAPABILITIES, developmentCapabilities, type DevelopmentScope, type DevelopmentRevision, type DevelopmentStatus, type DevelopmentActivation, type DevelopmentCandidate } from "./development-session"
 import { developmentUiOnly } from "./development-conversation-owner"
 import { PlatformCapabilityHub } from "./platform-capabilities-hub"
+import { bindNativeProjectContextProvider, assertNativeProjectContextMethod } from "./project-context-scope"
 import { withDevelopmentNativeAuthority } from "./development-native-authority"
 import { platformRegistrationCapabilities } from "./platform-capabilities-validation"
 import type { NativeHostFileEdit } from "./platform-capabilities-types"
@@ -244,9 +246,12 @@ interface FunctionConnection {
   stopAndDrain?(): Promise<void>
 }
 interface SessionEntry {
+  constructionOwner?: FunctionOperationScope
   runtimeSourceToken?: RuntimePluginSourceToken
   assertRuntimeSourceContent?: () => void
   hostSourceBound?: boolean
+  /** Set only by the original Host after its run/workflow/MCP physical settlement. */
+  emptyHostSourceSettled?: boolean
   catalogInvalidated?: boolean
   execution: FunctionGuestExecutionFacts
   registrationProbe: boolean
@@ -277,6 +282,8 @@ interface SessionEntry {
   trustedBuiltins: Map<string, FunctionPlugin>
 }
 interface FunctionOperationScope {
+  method: PropertyKey
+  settled: Promise<void>
   workspace: string
   threadId: string
   active: boolean
@@ -561,6 +568,7 @@ export class FunctionModsManager {
   private readonly pendingSessionBuilds = new Map<string, {
     epoch: number
     promise: Promise<SessionEntry>
+    owner?: FunctionOperationScope
   }>()
   private readonly probeRetirements = new Map<string, Promise<void>>()
   private capacityReclaim?: Promise<void>
@@ -595,6 +603,8 @@ export class FunctionModsManager {
   private readonly releasedSessions = new Map<string, RuntimeStopReceipt>()
   private runtimeReceiptError?: string
   private readonly operations = new AsyncLocalStorage<FunctionOperationScope>()
+  /** Actual admitted calls, removed only by their original physical finally/iterator close. */
+  private readonly activeOperations = new Set<FunctionOperationScope>()
   private readonly turnOwners = new WeakMap<AbortSignal, Map<string, { entry?: SessionEntry }>>()
   private readonly stopConfigurationIdle: () => void
   private readonly configurationIdleListeners = new Set<(threadId: string) => void>()
@@ -1096,7 +1106,8 @@ export class FunctionModsManager {
   }
 
   /** A completed provider's ordinary VM cannot stand in for an admitted Host package. */
-  private async admitHostSourceSession(workspace: string, threadId: string): Promise<void> {
+  private async admitHostSourceSession(workspace: string, threadId: string,
+    ownedAdmission = false): Promise<void> {
     const binding = currentRuntimePluginSource()
     if (binding?.mode !== "host") return
     if (!isSameWorkspacePath(binding.workspace, workspace))
@@ -1104,19 +1115,93 @@ export class FunctionModsManager {
     const token = captureRuntimePluginSourceToken()!
     const key = JSON.stringify([workspace, threadId])
     if (this.sessions.get(key)?.runtimeSourceToken === token) return
-    const pending = this.applying.get(key)
-    if (pending) await pending
+    if (!ownedAdmission) {
+      for (let pending = this.applying.get(key); pending; pending = this.applying.get(key))
+        await pending
+      if (this.sessions.get(key)?.runtimeSourceToken === token) return
+      const resident = this.sessions.get(key)
+      if ((resident?.runtimeSourceToken || resident?.hostSourceBound) &&
+        !resident.emptyHostSourceSettled)
+        throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+      const construction = this.pendingSessionBuilds.get(key)
+      const origin = construction?.owner ?? this.sessions.get(key)?.constructionOwner
+      const admitted = [...new Set([...this.activeOperations, ...(origin ? [origin] : [])])]
+        .filter(scope => scope.active && scope.workspace === workspace && scope.threadId === threadId)
+      const epoch = this.epoch(workspace)
+      const assertSource = captureRuntimePluginSourceContentGuard()!
+      const task = Promise.resolve().then(async () => {
+        // Only the original UI/discovery constructor may finish before handoff. An
+        // executing command/Flow is never awaited as permission to replace its owner.
+        if (admitted.length && admitted.every(scope => scope !== this.operations.getStore() &&
+          ["siteRead", "siteMount", "siteMountOutcome", "siteRender", "panes", "commands",
+            "logs", "feedback", "feedbackPresentation", "effectiveStatus", "registeredTools",
+            "turnNotices", "runtimeReady"]
+            .includes(String(scope.method)))) {
+          if (construction) await construction.promise
+          await Promise.all(admitted.map(scope => scope.settled))
+        }
+        assertSource()
+        this.host.assertThread?.(workspace, threadId)
+        if (this.epoch(workspace) !== epoch)
+          throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+        await this.admitHostSourceSession(workspace, threadId, true)
+      })
+      // Reserve before any await: new UI waits, while the captured constructor's own
+      // nested operations retain their existing admission and can physically finish.
+      this.applying.set(key, task)
+      try { await task }
+      finally { if (this.applying.get(key) === task) this.applying.delete(key) }
+      return
+    }
     const entry = this.sessions.get(key)
-    if (!entry || entry.runtimeSourceToken === token) return
-    if (entry.runtimeSourceToken || entry.hostSourceBound)
+    if (entry?.runtimeSourceToken === token) return
+    if ((entry?.runtimeSourceToken || entry?.hostSourceBound) && !entry.emptyHostSourceSettled)
       throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+    if (!entry && !this.host.enabled(workspace)) return
+    const sources = this.sources().filter(source => source.enabled)
+    if (sources.length) {
+      const epoch = this.epoch(workspace)
+      const assertSource = captureRuntimePluginSourceContentGuard()!
+      const status = await this.inspectEffectiveStatus(workspace, threadId)
+      assertSource()
+      this.host.assertThread?.(workspace, threadId)
+      if (this.closed || !this.host.enabled(workspace) || this.epoch(workspace) !== epoch ||
+        captureRuntimePluginSourceToken() !== token || this.sessions.get(key) !== entry)
+        throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+      // An unapproved Function is not an empty source set. Quiet discovery leaves
+      // its first graph unconstructed; handoff must not retire a live UI owner.
+      if (sources.some(source => !status.some(item =>
+        item.pluginId === source.id && item.state === "ready"))) {
+        if (entry) throw new ModFunctionError("PROJECT_MODS_APPROVAL_REQUIRED")
+        return
+      }
+    }
+    if (!entry) {
+      // An empty Function set is still an exact Host source. Keep its original session
+      // through live input waits so an ordinary drawing cannot populate it with global Mods.
+      await this.session(workspace, threadId, true)
+      return
+    }
     if (entry.probeRetirementError)
       throw new ModFunctionError("MODS_RUNTIME_SOURCE_CLEANUP_UNCONFIRMED", entry.probeRetirementError)
-    if (!entry.loaded || !entry.client.stopAndDrain || entry.completionChecks.size || entry.developmentPlugins.size ||
-      this.endingEntries.has(key) || this.pendingSessionBuilds.has(key) ||
-      this.probeRetirements.has(key) || this.runtimeReservations.has(key) ||
-      !entry.activity.pauseIfIdle())
+    const blockers = {
+      unloaded: !entry.loaded,
+      physicalDrainUnavailable: !entry.client.stopAndDrain,
+      completionChecks: entry.completionChecks.size,
+      development: entry.developmentPlugins.size,
+      ending: this.endingEntries.has(key),
+      building: this.pendingSessionBuilds.has(key),
+      probeRetirement: this.probeRetirements.has(key),
+      runtimeReservation: this.runtimeReservations.has(key)
+    }
+    if (Object.values(blockers).some(Boolean) || !entry.activity.pauseForRelease()) {
+      console.warn("[Mods] Host source admission busy", {
+        threadId, generation: entry.generation, ...blockers,
+        activity: entry.activity.size,
+        retirementBlocking: entry.activity.retirementBlockingSize
+      })
       throw new ModFunctionError("MODS_RUNTIME_SOURCE_BUSY")
+    }
     const assertSource = captureRuntimePluginSourceContentGuard()!
     const epoch = this.epoch(workspace)
     const assertCurrent = () => {
@@ -1144,14 +1229,26 @@ export class FunctionModsManager {
         if (this.retiringEntries.has(entry))
           throw new ModFunctionError("MODS_RUNTIME_SOURCE_CLEANUP_UNCONFIRMED")
         this.sessions.delete(key)
+        // The same admission owns the gap until the empty or populated Host entry exists.
+        // UI operations wait for this task instead of racing to recreate the old global set.
+        await this.session(workspace, threadId, true)
       } catch (error) {
         entry.probeRetirementError = "MODS_RUNTIME_SOURCE_CLEANUP_UNCONFIRMED"
         throw error
       }
     })
-    this.applying.set(key, task)
-    try { await task }
-    finally { if (this.applying.get(key) === task) this.applying.delete(key) }
+    await task
+  }
+
+  /** Main-only exact-token settlement; an input card or terminal label cannot release a run. */
+  settleEmptyHostSource(token: RuntimePluginSourceToken): void {
+    for (const entry of this.sessions.values()) {
+      if (entry.runtimeSourceToken !== token || !entry.hostSourceBound || !entry.loaded ||
+        !entry.session || entry.session.plugins.length || entry.snapshots.size ||
+        entry.developmentPlugins.size || entry.completionChecks.size ||
+        entry.session.hasReleaseResources) continue
+      entry.emptyHostSourceSettled = true
+    }
   }
 
   private async withOperation(workspace: string, threadId: string, method: PropertyKey,
@@ -1167,6 +1264,14 @@ export class FunctionModsManager {
     if (!classicEnd) this.assertEndAdmission(workspace, threadId)
     this.startupModels.assertOrdinaryEntry(workspace, threadId, method)
     const candidate = this.candidateConstruction.getStore()
+    // The admitted Host build owns `applying` while it pins even an empty source set.
+    // Its internal read-only discovery must not await that same build. No guest entry
+    // or independent UI caller receives this construction scope.
+    if (method === "effectiveStatus" && candidate?.hostSourceBound && !candidate.loaded &&
+      candidate.workspace === workspace && candidate.threadId === threadId &&
+      this.sessions.get(key) === candidate &&
+      candidate.runtimeSourceToken === captureRuntimePluginSourceToken())
+      return run()
     // This helper reads code/grants/selection only; it never enters the paused old runtime.
     if (method === "effectiveStatus" && candidate?.initializer.strict &&
       this.candidates.has(candidate) && candidate.workspace === workspace && candidate.threadId === threadId)
@@ -1190,15 +1295,24 @@ export class FunctionModsManager {
       throw new ModFunctionError("MODS_CONFIG_RELOAD_STOPPED", "组件已停用，正在清理或需核对清理结果。")
     const original = this.sessions.get(key)
     if (applyBefore && original && !this.endingEntries.has(key)) await this.applyConfigurationIfIdle(original)
-    const application = this.applying.get(key)
-    if (application && !this.endingEntries.has(key)) await application
+    for (let application = this.applying.get(key);
+      application && !this.endingEntries.has(key); application = this.applying.get(key))
+      await application
     if (terminal && this.sessions.get(key) !== terminalEntry)
       throw new ModFunctionError("MODS_SCOPE_CHANGED")
     if (!classicEnd) this.assertEndAdmission(workspace, threadId)
+    const settled = Promise.withResolvers<void>()
     const scope: FunctionOperationScope = {
-      workspace, threadId, active: true
+      workspace, threadId, active: true, method, settled: settled.promise
     }
-    const finish = () => { scope.active = false; scope.release?.(); scope.release = undefined }
+    this.activeOperations.add(scope)
+    const finish = () => {
+      scope.active = false
+      scope.release?.()
+      scope.release = undefined
+      this.activeOperations.delete(scope)
+      settled.resolve()
+    }
     return this.operations.run(scope, async () => {
       let retained = false
       try {
@@ -1560,6 +1674,25 @@ export class FunctionModsManager {
     })
   }
 
+  /** Native dependency review only: current installed-source workspace grant, never a project grant. */
+  isInstalledRuntimeSourceApproved(input: {
+    workspace: string
+    plugin: ModPluginSource
+    name: string
+    digest: string
+  }): boolean {
+    const installed = this.host.plugins().find(source => source.id === input.plugin.id)
+    if (this.closed || !installed?.enabled || installed.path !== input.plugin.path ||
+      installed.name !== input.plugin.name)
+      throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+    // The caller preloads the original compilation; this synchronous read rechecks its byte proof.
+    const facts = this.getRuntimeSourceFacts(input)
+    if (!facts || facts.configurationOnly || facts.name !== input.name || facts.digest !== input.digest)
+      throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+    const grant = this.store.getGrant(input.workspace, `function:${facts.name}`)
+    return !!grant?.enabled && grant.digest === facts.digest
+  }
+
   private retainedRuntimeCompilation(input: {workspace:string;plugin:ModPluginSource}): CompiledFunctionPlugin | undefined {
     if (this.closed || !input.workspace || !input.plugin.enabled)
       throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
@@ -1807,6 +1940,26 @@ export class FunctionModsManager {
     const value = record.values[key]
     if (typeof value !== "string") throw new ModFunctionError("MODS_USER_CONFIG_INVALID")
     return value || undefined
+  }
+  /** Native material preparation may expose only explicitly declared, non-secret non-path values. */
+  readRuntimePublicConfiguration(input: { workspace: string; plugin: ModPluginSource }, keys: readonly string[]): ModObject {
+    const compiled = this.retainedRuntimeCompilation(input)
+    if (!compiled || keys.length > 16 || new Set(keys).size !== keys.length)
+      throw new ModFunctionError("MODS_USER_CONFIG_INVALID")
+    this.assertRuntimeSourceConfiguration(input)
+    const saved = this.userConfigValues.read(input.workspace, compiled.name)
+    const values: ModObject = {}
+    for (const key of keys) {
+      const field = compiled.userConfig?.[key]
+      if (!field || field.sensitive || field.type === "file" || field.type === "directory" ||
+        Object.hasOwn(saved.sealed ?? {}, key))
+        throw new ModFunctionError("MODS_USER_CONFIG_PRIVATE_FIELD")
+      const value = resolveFunctionUserConfig({ [key]: field }, saved.values)[key]
+      if (value !== undefined) values[key] = structuredClone(value)
+    }
+    if (Buffer.byteLength(JSON.stringify(values)) > 4096)
+      throw new ModFunctionError("MODS_USER_CONFIG_INVALID")
+    return values
   }
   /** Validated source identity and current effective configuration, without returning values. */
   async readDirectoryUserConfigSnapshot(workspace: string, sourceRoot: string) {
@@ -3901,6 +4054,52 @@ export class FunctionModsManager {
     return this.captureThreadRetirement(threadId).retire()
   }
 
+  /** Trusted operation tail only. Unknown/live owners cannot be made idle by retirement. */
+  captureIdleThreadRetirement(workspace: string, threadId: string) {
+    const captured = this.captureThreadRetirement(threadId)
+    const entries = [...this.sessions].filter(([, entry]) => entry.threadId === threadId)
+    const key = JSON.stringify([workspace, threadId])
+    const assertCurrent = () => {
+      captured.assertCurrent()
+      if (this.closed || this.applying.has(key) || this.pendingSessionBuilds.has(key) ||
+        this.probeRetirements.has(key) || this.runtimeReservations.has(key) ||
+        entries.some(([, entry]) => entry.workspace !== workspace || !entry.loaded ||
+          !entry.client.stopAndDrain || entry.probeRetirementError ||
+          entry.developmentPlugins.size || entry.completionChecks.size ||
+          entry.activity.releaseBlockingSize || entry.session?.hasReleaseResources ||
+          entry.session?.nativeBehaviorSelectionHeld ||
+          entry.session?.plugins.some(plugin => plugin.guest.stats.disposed)) ||
+        this.endingEntries.has(key) || [...this.candidates].some(entry =>
+          entry.workspace === workspace && entry.threadId === threadId))
+        throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
+    }
+    assertCurrent()
+    let retirement: Promise<void> | undefined
+    return { resident: captured.resident, assertCurrent, retire: () => {
+      if (retirement) return retirement
+      assertCurrent()
+      const paused: SessionEntry[] = []
+      try {
+        for (const [, entry] of entries) {
+          if (!entry.activity.pauseForRelease())
+            throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
+          paused.push(entry)
+        }
+      } catch (error) {
+        for (const entry of paused) entry.activity.resume()
+        throw error
+      }
+      // Hold the same admission gate until original physical cleanup finishes. In
+      // particular, a historical drawing cannot replace the captured VM mid-drain.
+      const task = Promise.resolve().then(() => captured.retire())
+      this.applying.set(key, task)
+      retirement = task.finally(() => {
+        if (this.applying.get(key) === task) this.applying.delete(key)
+      })
+      return retirement
+    } }
+  }
+
   private async retireCapturedThread(threadId: string,
     entries: Array<[string, SessionEntry]>): Promise<void> {
     const reservations = entries.map(([key, entry]) => ({
@@ -3971,7 +4170,7 @@ export class FunctionModsManager {
       return this.session(workspace, threadId, registrationOnly)
     }
     if (!pending) {
-      pending = { epoch: this.epoch(workspace),
+      pending = { epoch: this.epoch(workspace), owner: this.operations.getStore(),
         promise: this.buildEntry(workspace, threadId, registrationOnly) }
       this.pendingSessionBuilds.set(key, pending)
     }
@@ -4117,6 +4316,7 @@ export class FunctionModsManager {
         (!privateBuild && this.reloadControl.error(workspace, threadId)))
         throw new ModFunctionError("MODS_SCOPE_CHANGED")
       const entry: SessionEntry = {
+        constructionOwner: this.operations.getStore(),
         ...(runtimeSourceToken ? { runtimeSourceToken } : {}),
         ...(assertRuntimeSourceContent ? { assertRuntimeSourceContent } : {}),
         ...(runtimeSource?.mode === "host" ? { hostSourceBound: true } : {}),
@@ -4235,7 +4435,8 @@ export class FunctionModsManager {
             assertConfigurationSourcesCurrent(snapshot.sourcePath!, snapshot.compiled)
         }
       }
-      current.loading = this.candidateConstruction.run(privateBuild ? current : undefined, async () => {
+      current.loading = this.candidateConstruction.run(
+        privateBuild || runtimeSource?.mode === "host" ? current : undefined, async () => {
         try {
           const plugins: FunctionPlugin[] = []
           const ready = new Set(
@@ -4244,7 +4445,13 @@ export class FunctionModsManager {
               .map((s) => s.pluginId)
           )
           const selected = this.clawSelection(workspace, threadId)
-          for (const source of this.sources(selected)) {
+          const sources = this.sources(selected)
+          assertLive()
+          if (runtimeSource?.mode === "host" && sources.some(source =>
+            source.enabled && (prepared ? !prepared.sourcePlugins.has(source.id)
+              : !ready.has(source.id))))
+            throw new ModFunctionError("PROJECT_MODS_APPROVAL_REQUIRED")
+          for (const source of sources) {
             if (prepared ? !prepared.sourcePlugins.has(source.id)
               : !ready.has(source.id)) continue
             if (!source.enabled) continue
@@ -5001,7 +5208,7 @@ export class FunctionModsManager {
             this.assertConfiguredOptions(workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
           assertLive()
           current.loaded = true
-          if (!privateBuild && runtimeSourceToken && plugins.length) {
+          if (!privateBuild && runtimeSourceToken) {
             // A native-only drawing predates this source admission. It cannot be upgraded
             // in place: invalidate its publication guard and let the renderer mount a new
             // drawing under the exact, now-loaded source owner.
@@ -5676,6 +5883,10 @@ export class FunctionModsManager {
       const prepared = event === "prompt.context"
         ? synchronizePromptContext(safe, presentationInput) : safe
       assertCurrent()
+      if (event.startsWith("classic.") && entry.session!.plugins.some(plugin =>
+        plugin.guest.registrations.some(registration =>
+          matchesEventPattern(registration.pattern, event))))
+        markRunCancellationEffectDispatched()
       const result = ["prompt.compose", "prompt.section", "prompt.context", "prompt.attachment"].includes(event)
         ? await entry.session!.promptComposition(event as FunctionPromptEvent,
             prepared as ModObject, signal, runCore)
@@ -7020,6 +7231,8 @@ export class FunctionModsManager {
     const stopped = Boolean(this.reloadControl.error(workspace, threadId))
     const entry = this.sessions.get(key)
     let native = true
+    const emptyHost = entry?.hostSourceBound && entry.loaded &&
+      entry.session?.plugins.length === 0 && entry.snapshots.size === 0
     const expectedRefs: ModObject[] = []
     if (!hostMessage && enabled && !stopped &&
       (entry?.session?.plugins.length || this.hasSources(workspace, threadId))) {
@@ -7052,7 +7265,7 @@ export class FunctionModsManager {
       if (entry?.loaded && enabled && !stopped) {
         if (this.entryDrains.has(entry) || this.endingEntries.has(key))
           throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
-        entry.session!.assertTransportLive()
+        if (!emptyHost) entry.session!.assertTransportLive()
         for (const snapshot of entry.snapshots.values()) {
           this.store.assertGrant(snapshot.grant)
           this.assertSnapshotSource(snapshot)
@@ -7062,7 +7275,7 @@ export class FunctionModsManager {
     }
     const assertCurrent = () => {
       assertIdentity()
-      if (entry?.loaded && enabled && !stopped) {
+      if (entry?.loaded && enabled && !stopped && !emptyHost) {
         entry.assertRuntimeSourceContent?.()
         for (const snapshot of entry.snapshots.values()) {
           this.assertSnapshotContent(snapshot)
@@ -7186,7 +7399,12 @@ export class FunctionModsManager {
       assertCurrent()
       // A visible site is an entry point: approved modules must start without a command warmup.
       // Inspect grants before allocating a runtime, and retain cancellation during discovery.
-      let hasFunctions = enabled && !stopped && (!!retained || this.hasSources(workspace, threadId))
+      // The empty Host selection remains empty for native history after its execution token
+      // expires. Reading old messages neither revives that token nor discovers global Mods.
+      const emptyHost = resident?.hostSourceBound && resident.loaded &&
+        resident.session?.plugins.length === 0
+      let hasFunctions = enabled && !stopped && !emptyHost &&
+        (!!retained || this.hasSources(workspace, threadId))
       // turn.step can retain a native-only session while installed functions await approval.
       // Its presence alone must not turn every ordinary transcript slot into a retired site.
       // Recheck current authority unless this exact resident has actual loaded functions.
@@ -7360,6 +7578,67 @@ export class FunctionModsManager {
     )
   }
 
+  /** Actual compiled permissions, export identity and current grant; usable during cold recovery. */
+  async verifyReadOnlyContextProvider(workspace: string, threadId: string,
+    identity: ClawActionIdentity, signal: AbortSignal): Promise<() => void> {
+    return this.verifyReadOnlyProvider(workspace, threadId, identity, signal, true)
+  }
+
+  async verifyReadOnlyCheckProvider(workspace: string, threadId: string,
+    identity: ClawActionIdentity, signal: AbortSignal): Promise<() => void> {
+    return this.verifyReadOnlyProvider(workspace, threadId, identity, signal, false)
+  }
+
+  private async verifyReadOnlyProvider(workspace: string, threadId: string,
+    identity: ClawActionIdentity, signal: AbortSignal, requireRead: boolean): Promise<() => void> {
+    const incarnation = this.host.threadIncarnationKey?.(workspace, threadId)
+    const threadGuard = this.host.captureSiteGuard?.(workspace, threadId)
+    const prepared = await this.prepareAction(workspace, threadId, identity, signal)
+    if (prepared.route !== "platform") throw new ModFunctionError("PROJECT_CONTEXT_PLATFORM_REQUIRED")
+    const entry = await this.session(workspace, threadId)
+    const assertCurrent = () => {
+      signal.throwIfAborted()
+      this.host.assertThread?.(workspace, threadId)
+      if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      const provider = entry.session!.platform.assertInfo(prepared.platform.ref, prepared.platform.source)
+      const capabilities = platformRegistrationCapabilities(provider.plugin.guest.registrations)
+      if (capabilities.some(method => !["platform.read", "platform.act"].includes(method)) ||
+        !capabilities.includes("platform.act") || (requireRead && !capabilities.includes("platform.read")))
+        throw new ModFunctionError("PROJECT_CONTEXT_PROVIDER_NOT_READONLY")
+    }
+    assertCurrent()
+    if (!requireRead) return assertCurrent
+    // Recovery reuses a completed read-only context fact, not this VM's execution
+    // authority. Host admission legitimately drains this ordinary provider VM
+    // before restoring the graph. Keep its exact compiled source/grant proof,
+    // while checking current bytes and authority again at the checkpoint claim.
+    const snapshot = entry.snapshots.get(identity.plugin)
+    if (!snapshot || snapshot.sourceId !== identity.pluginId ||
+      snapshot.compiled.digest !== identity.digest)
+      throw new ModFunctionError("CLAW_ACTION_PROVIDER_CHANGED")
+    const epoch = this.epoch(workspace)
+    const nativeEpoch = this.nativeEpochs.get(workspace) ?? this.initialEpoch
+    const protects = this.host.protects?.(workspace)
+    const assertEvidenceCurrent = () => {
+      signal.throwIfAborted()
+      threadGuard?.()
+      this.host.assertThread?.(workspace, threadId)
+      if (this.closed || !this.host.enabled(workspace) || this.epoch(workspace) !== epoch ||
+        (this.nativeEpochs.get(workspace) ?? this.initialEpoch) !== nativeEpoch ||
+        this.host.protects?.(workspace) !== protects ||
+        this.host.threadIncarnationKey?.(workspace, threadId) !== incarnation)
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      this.assertSnapshotSource(snapshot)
+      this.assertSnapshotContent(snapshot)
+      assertFunctionSourcesCurrent(snapshot.compiled)
+      this.assertConfiguredOptions(workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
+      this.store.assertGrant(snapshot.grant)
+    }
+    assertEvidenceCurrent()
+    return assertEvidenceCurrent
+  }
+
   async prepareAction(
     workspace: string,
     threadId: string,
@@ -7457,6 +7736,7 @@ export class FunctionModsManager {
     )
       throw new ModFunctionError("CLAW_ACTION_ENVELOPE_INVALID")
     const current = await this.prepareAction(workspace, threadId, prepared.action, signal)
+    if (current.route !== "platform") assertNativeProjectContextMethod("command")
     if (
       encodeModJson(current.action) !== encodeModJson(prepared.action) ||
       current.route !== prepared.route ||
@@ -7479,7 +7759,24 @@ export class FunctionModsManager {
     let platformPassed: boolean | undefined
     let result: ModObject
     if (current.route === "platform") {
-      entry.session!.platform.assertInfo(current.platform.ref, current.platform.source)
+      const contextProvider = entry.session!.platform.assertInfo(current.platform.ref, current.platform.source)
+      const assertContextProviderCurrent = () => {
+        this.host.assertThread?.(workspace, threadId)
+        if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+          throw new ModFunctionError("MODS_SCOPE_CHANGED")
+        entry.session!.platform.assertInfo(current.platform.ref, current.platform.source)
+      }
+      bindNativeProjectContextProvider({ workspace, threadId,
+        provider: { pluginId: current.action.pluginId, plugin: current.action.plugin,
+          digest: current.action.digest, actionId: current.action.actionId },
+        ref: current.platform.ref, action: current.platform.action.id,
+        capabilities: platformRegistrationCapabilities(contextProvider.plugin.guest.registrations),
+        assertProviderCurrent: assertContextProviderCurrent,
+        assertCurrent: () => {
+          signal.throwIfAborted()
+          assertContextProviderCurrent()
+        }
+      })
       const requestKey = "flow:" + createHash("sha256")
         .update(JSON.stringify([current.action.pluginId, envelope.runId,
           envelope.stepId, envelope.executionId])).digest("hex")

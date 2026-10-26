@@ -142,7 +142,7 @@ function fixture() {
   const display: Display = runInNewContext(code, {
     ipcMain: { handle: (channel: string, handler: Handler) => handlers.set(channel, handler) },
     process: { env: {} }, URL, __dirname: nativeDirectory, join, pathToFileURL,
-    window: () => owner, getThreadCore,
+    window: () => owner, getThreadCore, getThreadRuntimeScope: getThreadCore,
     ...nativeChildThreadReaders(getThreadCore),
     manager: { workspaceKey: (workspace: string) => workspace, functionUserScope,
       commands: legacyCommands, isEnabled: () => true }, functions, queue: { enqueue },

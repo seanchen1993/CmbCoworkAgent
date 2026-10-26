@@ -1,4 +1,20 @@
 import { randomUUID } from "node:crypto"
+import type { ClawActionDescriptor, ClawActionIdentity } from "../../shared/mods/claw-actions"
+import {
+  parseProjectActionLock,
+  PROJECT_ACTION_LOCK_PATH
+} from "../../shared/project-runtime/action-bindings"
+import { AUTHORING_BUNDLE_LIMITS } from "../mods/devtools/authoring-bundle"
+import {
+  readRuntimeScopedFile,
+  runtimeDigest,
+  runtimeDirectoryIdentity
+} from "../harness-board/project-runtime/safe-files"
+import { NATIVE_COMPOSITION_PATH } from "./native-composition"
+import {
+  assertNativeCompositionCurrent,
+  renameNativeComposition
+} from "./native-composition-derivation"
 import type { ProjectDeliveryObservation } from "./plugin-delivery-observation"
 import { isDeepStrictEqual } from "node:util"
 import { prepareNodeCompositionFiles } from "./derivation-node-composition"
@@ -10,7 +26,10 @@ import {
   readFileSync,
   writeFileSync,
   renameSync,
-  readdirSync
+  readdirSync,
+  opendirSync,
+  lstatSync,
+  realpathSync
 } from "node:fs"
 import { dirname, join } from "node:path"
 import type { PluginMetadata } from "../types"
@@ -27,6 +46,9 @@ import {
   renameDerivation,
   writeDerivationFiles,
   DERIVATION_NOTES,
+  DERIVATION_LIMITS,
+  isDerivationExcludedName,
+  compareDerivationPaths,
   type DerivationSnapshot
 } from "./derivation-source"
 import {
@@ -57,7 +79,11 @@ interface Inspection {
   originalId?: string
   expires: number
   parentCopyId?: string
+  native?: boolean
 }
+type NativeCatalog = (
+  providers: readonly ClawActionIdentity[]
+) => Promise<readonly ClawActionDescriptor[]>
 interface Ledger {
   copies: CopyRecord[]
   families: DerivationFamily[]
@@ -225,7 +251,13 @@ export class PluginDerivationService {
       ? { root: original.path, pluginId: original.id, digest: record.sourceDigest }
       : undefined
   }
-  async revise(owner: string, copyId: string, requestId: string, guard: () => void) {
+  async revise(
+    owner: string,
+    copyId: string,
+    requestId: string,
+    guard: () => void,
+    catalog?: NativeCatalog
+  ) {
     guard()
     const parent = this.record(copyId, owner)
     const existing = this.ledger.copies.find(
@@ -239,14 +271,23 @@ export class PluginDerivationService {
     if (!installed || parent.status !== "installed") throw Error("请先安装插件再创建新版本")
     const inspection = await this.inspect(installed.path, owner, guard, installed.id)
     this.inspections.get(inspection.inspectionId)!.parentCopyId = copyId
-    const base = parent.name.replace(/-v\d+$/, "").slice(0, 60)
+    const base = parent.name
+      .replace(/-v\d+$/, "")
+      .slice(0, this.inspections.get(inspection.inspectionId)!.native ? 55 : 60)
     let version = 2
     const names = new Set([
       ...this.ledger.copies.map((copy) => copy.name.toLowerCase()),
       ...this.deps.plugins().map((plugin) => plugin.name.toLowerCase())
     ])
     while (names.has(`${base}-v${version}`.toLowerCase())) version++
-    return this.create(owner, inspection.inspectionId, `${base}-v${version}`, requestId, guard)
+    return this.create(
+      owner,
+      inspection.inspectionId,
+      `${base}-v${version}`,
+      requestId,
+      guard,
+      catalog
+    )
   }
   async inspectUpstream(
     owner: string,
@@ -289,7 +330,9 @@ export class PluginDerivationService {
       ...this.ledger.copies.map((copy) => copy.name.toLowerCase()),
       ...this.deps.plugins().map((item) => item.name.toLowerCase())
     ])
-    const base = `${record.name.slice(0, 55)}-来源更新`
+    const base = snapshot.files.some((file) => file.path === NATIVE_COMPOSITION_PATH)
+      ? `${record.name.slice(0, 48)}-upstream`
+      : `${record.name.slice(0, 55)}-来源更新`
     let version = 1
     while (names.has(`${base}-${version}`.toLowerCase())) version++
     inspection.suggestedName = `${base}-${version}`
@@ -583,12 +626,15 @@ export class PluginDerivationService {
       sourceId,
       familyId: family.familyId,
       originalId: family.originalId,
+      native: snapshot.files.some((file) => file.path === NATIVE_COMPOSITION_PATH),
       expires: Date.now() + 30 * 60_000
     })
     return {
       inspectionId,
       sourceName: snapshot.name,
-      suggestedName: `${snapshot.name.slice(0, 65)}-我的副本`,
+      suggestedName: snapshot.files.some((file) => file.path === NATIVE_COMPOSITION_PATH)
+        ? `${snapshot.name.slice(0, 55)}-copy`
+        : `${snapshot.name.slice(0, 65)}-我的副本`,
       digest: snapshot.digest,
       fileCount: snapshot.files.length,
       totalBytes: snapshot.totalBytes,
@@ -598,18 +644,126 @@ export class PluginDerivationService {
   }
   private warnings(snapshot: DerivationSnapshot): string[] {
     const warnings = ["完整业务验证需在新项目中运行原检查；静态检查不代表业务通过。"]
+    if (snapshot.files.some((file) => file.path === NATIVE_COMPOSITION_PATH))
+      warnings.push(
+        "原生组合名称须以英文字母或数字开头，最多64位，只含英文、数字、下划线、点和短横线。复制和检查需在当前工作区保留原检查提供器的授权；修改组合后须重新编译。"
+      )
     if (snapshot.files.some((file) => file.path === ".mcp.json"))
       warnings.push("此插件包含 MCP；使用原生项目入口，连接器仍需原有配置与授权。")
     if (snapshot.files.some((file) => /\.py$/.test(file.path)))
       warnings.push("此插件包含 Python 脚本；新项目需准备原插件要求的 Python 环境。")
     return warnings
   }
+  private async nativeCatalog(
+    snapshot: DerivationSnapshot,
+    catalog: NativeCatalog | undefined,
+    guard: () => void,
+    related: DerivationSnapshot[] = []
+  ): Promise<readonly ClawActionDescriptor[]> {
+    if (!snapshot.files.some((file) => file.path === NATIVE_COMPOSITION_PATH)) return []
+    guard()
+    if (!catalog) throw Error("原生组合副本需要当前工作区的真实检查目录，请从原插件制作入口重试")
+    const lock = snapshot.files.find((file) => file.path === PROJECT_ACTION_LOCK_PATH)
+    if (!lock) throw Error("PROJECT_DERIVATION_SOURCE_INVALID")
+    const providers = parseProjectActionLock(JSON.parse(lock.bytes.toString("utf8"))).bindings.map(
+      (binding) => binding.ref
+    )
+    const assertFiles = [snapshot, ...related].map((value) => this.captureNativeSnapshot(value))
+    const actions = await catalog(providers)
+    guard()
+    assertNativeCompositionCurrent(snapshot, actions)
+    assertFiles.forEach((assertCurrent) => assertCurrent())
+    guard()
+    return actions
+  }
+  private captureNativeSnapshot(snapshot: DerivationSnapshot): () => void {
+    // The native doctor already applies this bounded text budget. Recheck original files
+    // synchronously after the final catalog await, keeping its live authority fence valid.
+    if (
+      snapshot.files.length > AUTHORING_BUNDLE_LIMITS.files ||
+      snapshot.totalBytes > AUTHORING_BUNDLE_LIMITS.totalBytes
+    )
+      throw Error("原生组合源码超限")
+    const rootIdentity = runtimeDirectoryIdentity(snapshot.root)
+    const expected = new Map(snapshot.files.map((file) => [file.path, file]))
+    const observe = () => {
+      if (runtimeDirectoryIdentity(snapshot.root) !== rootIdentity)
+        throw Error("原生组合源码已变化，请重新检查")
+      const entries: Array<[string, string]> = [],
+        excluded: string[] = []
+      const files = new Set<string>()
+      let visited = 0
+      const walk = (directory: string, prefix: string, depth: number) => {
+        if (depth > DERIVATION_LIMITS.depth) throw Error("原生组合目录超限")
+        const handle = opendirSync(directory)
+        try {
+          for (let entry = handle.readSync(); entry; entry = handle.readSync()) {
+            if (++visited > DERIVATION_LIMITS.files) throw Error("原生组合目录超限")
+            const path = prefix + entry.name,
+              absolute = join(directory, entry.name)
+            const stat = lstatSync(absolute, { bigint: true })
+            if (
+              stat.isSymbolicLink() ||
+              realpathSync(absolute) !== absolute ||
+              (stat.isFile() && stat.nlink !== 1n)
+            )
+              throw Error("原生组合源码包含链接")
+            entries.push([
+              path,
+              [
+                stat.dev,
+                stat.ino,
+                stat.mode & 0o777n,
+                stat.isDirectory() ? "directory" : "file"
+              ].join(":")
+            ])
+            if (isDerivationExcludedName(entry.name)) {
+              excluded.push(path)
+              continue
+            }
+            if (stat.isDirectory()) {
+              walk(absolute, path + "/", depth + 1)
+              continue
+            }
+            const file = expected.get(path)
+            if (!stat.isFile() || !file || Number(stat.mode & 0o777n) !== (file.mode & 0o777))
+              throw Error("原生组合源码已变化，请重新检查")
+            const observed = readRuntimeScopedFile(
+              snapshot.root,
+              path,
+              AUTHORING_BUNDLE_LIMITS.fileBytes
+            )
+            if (!observed.bytes || runtimeDigest(observed.bytes) !== file.digest)
+              throw Error("原生组合源码已变化，请重新检查")
+            entries.push([path, observed.fingerprint])
+            files.add(path)
+          }
+        } finally {
+          handle.closeSync()
+        }
+      }
+      walk(snapshot.root, "", 0)
+      if (
+        files.size !== expected.size ||
+        JSON.stringify(excluded.sort(compareDerivationPaths)) !==
+          JSON.stringify([...snapshot.excluded].sort(compareDerivationPaths)) ||
+        runtimeDirectoryIdentity(snapshot.root) !== rootIdentity
+      )
+        throw Error("原生组合源码已变化，请重新检查")
+      return JSON.stringify(entries.sort(([left], [right]) => compareDerivationPaths(left, right)))
+    }
+    const before = observe()
+    return () => {
+      if (observe() !== before) throw Error("原生组合源码已变化，请重新检查")
+    }
+  }
   async create(
     owner: string,
     inspectionId: string,
     name: string,
     requestId: string,
-    guard: () => void
+    guard: () => void,
+    catalog?: NativeCatalog
   ) {
     return this.locked(async () => {
       guard()
@@ -627,11 +781,21 @@ export class PluginDerivationService {
       if (typeof name !== "string") throw Error("新插件名称无效")
       name = name.trim()
       if (
+        snapshot.files.some((file) => file.path === NATIVE_COMPOSITION_PATH) &&
+        !/^[a-zA-Z0-9][\w.-]{0,63}$/.test(name)
+      )
+        throw Error(
+          "原生组合名称须以英文字母或数字开头，最多64位，只含英文、数字、下划线、点和短横线"
+        )
+      if (
         this.deps.plugins().some((plugin) => plugin.name.toLowerCase() === name.toLowerCase()) ||
         this.ledger.copies.some((copy) => copy.name.toLowerCase() === name.toLowerCase())
       )
         throw Error("插件名称已存在，请选择独立名称")
-      const files = renameDerivation(snapshot, name)
+      const actions = await this.nativeCatalog(snapshot, catalog, guard)
+      const files = snapshot.files.some((file) => file.path === NATIVE_COMPOSITION_PATH)
+        ? renameNativeComposition(snapshot, name, undefined, actions)
+        : renameDerivation(snapshot, name)
       const copyId = randomUUID()
       const temporary = await mkdtemp(join(this.root, ".creating-"))
       const final = join(this.root, copyId)
@@ -690,6 +854,7 @@ export class PluginDerivationService {
           })
         }
         await writeFile(join(temporary, "receipt.json"), JSON.stringify(record), { flag: "wx" })
+        await this.nativeCatalog(created, catalog, guard, [snapshot])
         guard()
         renameSync(temporary, final)
         this.ledger.copies.push(record)
@@ -705,7 +870,7 @@ export class PluginDerivationService {
     if (typeof text !== "string" || Buffer.byteLength(text) > 64 * 1024) throw Error("业务说明过长")
     return this.saveFile(owner, copyId, DERIVATION_NOTES, text, digest, guard)
   }
-  async check(owner: string, copyId: string, guard: () => void) {
+  async check(owner: string, copyId: string, guard: () => void, catalog?: NativeCatalog) {
     return this.locked(async () => {
       const record = this.record(copyId, owner)
       const snapshot = await snapshotDerivationSource(this.sourcePath(copyId, owner))
@@ -713,6 +878,7 @@ export class PluginDerivationService {
       await this.deps.validatePackage?.(snapshot.root)
       if ((await snapshotDerivationSource(snapshot.root)).digest !== snapshot.digest)
         throw Error("源码已变化，请重新检查")
+      await this.nativeCatalog(snapshot, catalog, guard)
       guard()
       record.digest = snapshot.digest
       record.fileCount = snapshot.files.length
@@ -727,7 +893,13 @@ export class PluginDerivationService {
       return this.view(record)
     })
   }
-  async install(owner: string, copyId: string, digest: string, guard: () => void) {
+  async install(
+    owner: string,
+    copyId: string,
+    digest: string,
+    guard: () => void,
+    catalog?: NativeCatalog
+  ) {
     return this.locked(async () => {
       const record = this.record(copyId, owner)
       guard()
@@ -737,6 +909,7 @@ export class PluginDerivationService {
       const snapshot = await snapshotDerivationSource(this.sourcePath(copyId, owner))
       if (snapshot.digest !== digest || snapshot.name !== record.name)
         throw Error("源码已变化，请重新检查")
+      await this.nativeCatalog(snapshot, catalog, guard)
       const temporary = await mkdtemp(join(this.root, ".installing-"))
       const pluginId = record.pluginId ?? randomUUID()
       try {
@@ -765,6 +938,7 @@ export class PluginDerivationService {
             if (installed.digest !== digest) throw Error("安装文件与已检查副本不一致")
             const currentSource = await snapshotDerivationSource(this.sourcePath(copyId, owner))
             if (currentSource.digest !== digest) throw Error("源码已变化，请重新检查")
+            await this.nativeCatalog(installed, catalog, guard, [currentSource])
             guard()
           }
         )

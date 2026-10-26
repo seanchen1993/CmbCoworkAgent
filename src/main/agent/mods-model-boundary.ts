@@ -12,6 +12,7 @@ import type { ModHookStream, FunctionStreamOptions } from "../mods/v2/stream-dis
 import { currentCompletionBudget, reserveCompletionModelUsage } from "../mods/v2/completion-budget"
 import { composeModPrompt } from "./mods-prompt-composition"
 import { assertRequiredPromptContext, promptContributionsFor } from "./mods-prompt-sources"
+import { measureHostRuntimeAsync, reportHostRuntimeTiming } from "../services/host-runtime-timing"
 import type {
   FunctionPromptCore,
   FunctionPromptEvent
@@ -544,6 +545,8 @@ class ModAwareChatModel extends BaseChatModel {
       const providerRunId = randomUUID()
       const fallbackMessageId = `run-${providerRunId}`
       let providerMessageId: string | undefined
+      const preparationStarted = performance.now()
+      let preparationReported = false
       try {
         let provider = delegate
         let selection: FunctionStepModel | undefined
@@ -578,7 +581,7 @@ class ModAwareChatModel extends BaseChatModel {
         }
         if (boundTools && presentation) {
           const { describeModTools } = await import("./mods-tool-descriptions")
-          const tools = await describeModTools(
+          const tools = await measureHostRuntimeAsync("describeTools", () => describeModTools(
             boundTools.tools,
             (input) =>
               presentation(
@@ -589,7 +592,7 @@ class ModAwareChatModel extends BaseChatModel {
                 context.signal
               ),
             assertActive
-          )
+          ))
           providerTools = tools
           const base = stepModel ? provider : toolBindingBase
           if (!base.bindTools) throw new Error("MODS_MODEL_TOOLS_UNSUPPORTED")
@@ -598,7 +601,7 @@ class ModAwareChatModel extends BaseChatModel {
         assertRequiredPromptContext(providerMessages, authority)
         if (promptComposition) {
           const model = selection?.model ?? String(received.model)
-          const composed = await composeModPrompt(
+          const composed = await measureHostRuntimeAsync("composePrompt", () => composeModPrompt(
             messages,
             {
               model,
@@ -624,7 +627,7 @@ class ModAwareChatModel extends BaseChatModel {
               ),
             assertActive,
             promptContributionsFor(messages, authority)
-          )
+          ))
           providerMessages = composed.messages
           assertActive()
           finalPromptText = composed.text
@@ -650,6 +653,8 @@ class ModAwareChatModel extends BaseChatModel {
         // Use the public stream API with an empty callback list.  Calling the
         // protected provider method directly is not stable across LangChain
         // releases (and some providers do not expose it at runtime).
+        reportHostRuntimeTiming(performance.now() - preparationStarted)
+        preparationReported = true
         raw = await runProvider(() =>
           provider.stream(providerMessages, {
             ...options,
@@ -701,6 +706,8 @@ class ModAwareChatModel extends BaseChatModel {
           yield frameFor(ref, sequence - 1, chunk)
         }
       } finally {
+        if (!preparationReported)
+          reportHostRuntimeTiming(performance.now() - preparationStarted, true)
         try {
           if (raw)
             await runProvider(() => raw!.return?.().then(() => undefined) ?? Promise.resolve())

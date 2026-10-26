@@ -39,3 +39,11 @@ export function isSameWorkspacePath(
   const normalizedRight = normalizeWorkspacePathKey(right)
   return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight)
 }
+
+/** Equality or a parent/child directory relationship; sibling name prefixes are distinct. */
+export function workspacePathsOverlap(left: string, right: string): boolean {
+  const a = normalizeWorkspacePathKey(left) || (/^[\\/]+$/.test(left) ? "/" : "")
+  const b = normalizeWorkspacePathKey(right) || (/^[\\/]+$/.test(right) ? "/" : "")
+  return Boolean(a && b && (a === b || a.startsWith(b.endsWith("/") ? b : `${b}/`) ||
+    b.startsWith(a.endsWith("/") ? a : `${a}/`)))
+}

@@ -79,16 +79,17 @@ it.each([true, false])(
     const create = vi.fn<(metadata: Record<string, unknown>, options: unknown) => Promise<{ thread_id: string }>>(async () => ({
       thread_id: "thread"
     }))
+    const title = vi.fn(async () => "Project title")
     const invoke = new Function(
       "readInternalHarnessProject",
       "createThreadService",
-      "generateTitle",
+      "generateProjectThreadTitle",
       "HARNESS_SOURCE",
       javascript + ";return createManagedHarnessSession"
     )(
       () => (internal ? { context: {} } : undefined),
       create,
-      (value: string) => value,
+      title,
       "autobizdevops"
     )
     await invoke({
@@ -98,10 +99,15 @@ it.each([true, false])(
       runId: "run",
       nodeId: "node",
       nextAction: { userMessage: "Goal" }
+    }, "review")
+    expect(title).toHaveBeenCalledExactlyOnceWith("Goal", "review", {
+      projectId: "project", slug: "feature"
     })
     expect(create.mock.calls[0]?.[0]).toMatchObject({
+      title: "Project title",
       harnessFeature: { projectId: "project", runId: "run" }
     })
+    expect(create.mock.calls[0]?.[1]).toEqual({ managedWorkspace: true })
     expect(
       (create.mock.calls[0]?.[0] as unknown as Record<string, unknown>).isInternalFlowRuntime
     ).toBe(internal ? true : undefined)

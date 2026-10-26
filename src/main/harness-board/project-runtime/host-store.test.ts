@@ -4,6 +4,8 @@ import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it } from "vitest"
 import { HostProjectStore } from "./host-store"
+import { hostResultReview, parseHostOperation } from "./host-state-protocol"
+import { boundHostCheckDiagnostic } from "./host-check-diagnostics"
 import {
   hostProjectFixture,
   prepareFixture,
@@ -33,6 +35,141 @@ afterEach(() => {
 })
 
 describe("persistent host project state", () => {
+  it("freezes explicit stage instructions across reopen and idempotency without inheriting them", () => {
+    const { store, path } = fixture()
+    const project = store.get("local-docs")
+    const operation = store.prepare({ ...prepareFixture(), stageInstructions: "  Review the boundary.\n保留检查。  " })
+    expect(operation.stageInstructions).toBe("Review the boundary.\n保留检查。")
+    const cold = openStore(path)
+    expect(cold.getOperation(operation.operationId)?.stageInstructions).toBe(operation.stageInstructions)
+    expect(cold.prepare({ ...prepareFixture(), stageInstructions: operation.stageInstructions })).toEqual(operation)
+    expect(() => cold.prepare(prepareFixture())).toThrow("IDEMPOTENCY_CONFLICT")
+    expect(() => cold.prepare({ ...prepareFixture(), stageInstructions: "Changed" })).toThrow("IDEMPOTENCY_CONFLICT")
+    expect(() => cold.prepare({ ...prepareFixture(), idempotencyKey: "active", stageInstructions: "New" }))
+      .toThrow("OPERATION_ACTIVE")
+    cold.cancel(operation.operationId)
+    const next = cold.prepare({ ...prepareFixture(), idempotencyKey: "explicit-next" })
+    expect(next.stageInstructions).toBeUndefined()
+    expect(next.approval).toBeNull()
+    expect(next.receipts).toEqual([])
+    expect(cold.get("local-docs")).toEqual(project)
+    expect(() => parseHostOperation({ ...next, stageInstructions: " Unnormalized " }))
+      .toThrow("STAGE_INSTRUCTIONS_INVALID")
+  })
+
+  it.each(["", " \n\t ", "x".repeat(4001), "bad\u0000text", 3, null])(
+    "rejects invalid supplemental stage instructions %j", value => {
+      const { store } = fixture()
+      expect(() => store.prepare({ ...prepareFixture(), stageInstructions: value as string }))
+        .toThrow("STAGE_INSTRUCTIONS_INVALID")
+    }
+  )
+
+  it("does not allow supplemental instructions to replay an unknown operation", () => {
+    const { store } = fixture()
+    const operation = store.prepare({ ...prepareFixture(), stageInstructions: "Original instruction" })
+    const ticket = store.start(operation.operationId, TEST_FINGERPRINT)
+    store.recordResult(ticket, { outcome: "unknown", receipts: [] })
+    expect(() => store.prepare({ ...prepareFixture(), idempotencyKey: "retry", stageInstructions: "Retry" }))
+      .toThrow("OPERATION_ACTIVE")
+    expect(store.getOperation(operation.operationId)?.stageInstructions).toBe("Original instruction")
+  })
+
+  it("persists original failure diagnostics across reopen without creating a validation receipt or success", () => {
+    const root = mkdtempSync(join(tmpdir(), "host-failed-check-store-"))
+    roots.push(root)
+    const path = join(root, "state.sqlite")
+    const store = openStore(path)
+    const creation = hostProjectFixture(root)
+    const provider = { pluginId: "checker-installation", plugin: "checker", digest: "c".repeat(64), actionId: "check" }
+    creation.manifest.actions = [{ id: "validate", ref: provider }]
+    creation.manifest.checks[0] = { id: "document-exists", artifactId: "document",
+      kind: "action", actionId: "validate", sideEffect: "read" }
+    store.create(creation)
+    const operation = store.prepare(prepareFixture())
+    const ticket = store.start(operation.operationId, TEST_FINGERPRINT)
+    store.bindExecutionThread(ticket, "original-thread")
+    const diagnostic = boundHostCheckDiagnostic({ checkId: "document-exists", actionId: "validate",
+      provider, runId: "original-flow", executionId: "original-execution",
+      inputFingerprint: TEST_FINGERPRINT, resultDigest: "d".repeat(64)
+    }, "check failed", { errors: [{ code: "INVALID_SOURCE", detail: "version must be 1" }] })
+    expect(() => store.recordExecutionTerminal(ticket, { outcome: "success", code: "forged",
+      checkDiagnostics: [diagnostic] })).toThrow("CHECK_DIAGNOSTICS_INVALID")
+    expect(() => store.recordExecutionTerminal(ticket, { outcome: "error", code: "project_checks_failed",
+      checkDiagnostics: [{ ...diagnostic, provider: { ...provider, pluginId: "other" } }] }))
+      .toThrow("CHECK_DIAGNOSTICS_INVALID")
+    store.recordExecutionTerminal(ticket, { outcome: "error", code: "project_checks_failed",
+      checkDiagnostics: [diagnostic] })
+    store.recordResult(ticket, { outcome: "failed", receipts: [] })
+    const cold = openStore(path)
+    const result = cold.getOperation(operation.operationId)!
+    expect(result.status).toBe("failed")
+    expect(result.receipts).toEqual([])
+    expect(result.execution?.terminal?.checkDiagnostics).toEqual([diagnostic])
+    expect(() => cold.transition(operation.operationId, TEST_FINGERPRINT)).toThrow()
+    const mismatched = structuredClone(result)
+    mismatched.execution!.terminal!.checkDiagnostics![0].inputFingerprint = "e".repeat(64)
+    expect(() => parseHostOperation(mismatched)).toThrow("CHECK_DIAGNOSTICS_INVALID")
+  })
+
+  it("normalizes historical operations without result approval without accepting unknown fields", () => {
+    const { store } = fixture()
+    const operation = store.prepare(prepareFixture())
+    const historical = { ...operation }
+    delete historical.resultApproval
+    expect(parseHostOperation(historical).resultApproval).toBeNull()
+    expect(() => parseHostOperation({ ...historical, implicitResultApproval: true })).toThrow(
+      "SCHEMA_INVALID"
+    )
+  })
+
+  it("requires a separate exact result binding even after execution was approved", () => {
+    const root = mkdtempSync(join(tmpdir(), "host-result-store-"))
+    roots.push(root)
+    const store = openStore(join(root, "state.sqlite"))
+    const creation = hostProjectFixture(root)
+    creation.manifest.stages[0].approval = "human"
+    creation.manifest.stages[0].resultApproval = "human"
+    const project = store.create(creation)
+    const operation = store.prepare(prepareFixture())
+    store.decideApproval(operation.operationId, {
+      expectedVersion: 1,
+      inputFingerprint: TEST_FINGERPRINT,
+      decision: "approved",
+      actorId: "user"
+    })
+    const ticket = store.start(operation.operationId, TEST_FINGERPRINT)
+    const settled = store.recordResult(ticket, {
+      outcome: "succeeded",
+      receipts: [receiptFixture(ticket)]
+    })
+    const review = hostResultReview(project, settled, "d".repeat(64))
+    expect(() => store.transition(operation.operationId, TEST_FINGERPRINT, review)).toThrow(
+      "RESULT_APPROVAL_REQUIRED"
+    )
+    expect(() =>
+      store.decideResultApproval(operation.operationId, {
+        ...review,
+        receiptFingerprint: "f".repeat(64),
+        decision: "approved",
+        actorId: "user"
+      })
+    ).toThrow("RESULT_APPROVAL_MISMATCH")
+    store.decideResultApproval(operation.operationId, {
+      ...review,
+      decision: "approved",
+      actorId: "user"
+    })
+    expect(() =>
+      store.transition(operation.operationId, TEST_FINGERPRINT, {
+        ...review,
+        artifactFingerprint: "f".repeat(64)
+      })
+    ).toThrow("RESULT_APPROVAL_MISMATCH")
+    expect(store.transition(operation.operationId, TEST_FINGERPRINT, review).version).toBe(2)
+    expect(store.transition(operation.operationId, TEST_FINGERPRINT).version).toBe(2)
+  })
+
   it("binds separate context-script consent to the exact durable operation even for automatic stages", () => {
     const f = fixture()
     const contextProvider = {

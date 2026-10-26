@@ -5,6 +5,7 @@ import { appendFileSync, lstatSync, readFileSync, readdirSync, writeFileSync } f
 import { join, resolve } from "node:path"
 import type { ElectronApplication, Page } from "playwright"
 import type { LocalProjectView } from "../src/shared/project-runtime/platform-api"
+import { hasNativeCreatorWork } from "../src/renderer/src/components/customize/creator-workspace-visibility"
 import {
   createHeadlessProjectCompositionLaunch,
   projectCompositionCandidate,
@@ -88,7 +89,7 @@ async function open() {
     ;(window as unknown as { __name: unknown }).__name = (value: unknown) => value
   })
 }
-async function showCreator() {
+async function showCreator(emptyAuthorThreadId?: string) {
   const workspace = page.getByRole("dialog", { name: "插件创作工作区", exact: true })
   const closeWorkspace = async () => {
     if (!(await workspace.isVisible())) return
@@ -110,9 +111,21 @@ async function showCreator() {
   // surface after selection rather than treating the child conversation's closed state as proof.
   const trigger = page.getByLabel("聊天模式与 Mod 状态", { exact: true })
     .locator('button[aria-haspopup="dialog"]')
-  await trigger.waitFor()
-  if ((await trigger.getAttribute("aria-expanded")) === "false") await trigger.click()
-  await workspace.waitFor({ state: "visible" })
+  if (emptyAuthorThreadId) {
+    const status = await page.evaluate(threadId =>
+      window.api.mods.development.status({ threadId }), emptyAuthorThreadId)
+    assert.equal(status.threadId, emptyAuthorThreadId)
+    assert.equal(status.mode, "creator")
+    assert.equal(status.enabled, true)
+    assert.equal(hasNativeCreatorWork(status), false,
+      "Only the initial empty creator may lack a native workspace")
+    assert.equal(await trigger.count(), 0,
+      "An empty creator uses its original composer until native work exists")
+  } else {
+    await trigger.waitFor()
+    if ((await trigger.getAttribute("aria-expanded")) === "false") await trigger.click()
+    await workspace.waitFor({ state: "visible" })
+  }
   await page.waitForFunction(() =>
     [...document.querySelectorAll<HTMLButtonElement>('[aria-label="聊天模式"] button')]
       .some((button) => button.textContent?.trim() === "创造者模式" && !button.disabled)
@@ -187,7 +200,7 @@ async function main() {
     )
     await page.reload()
     await page.waitForFunction(() => Boolean(window.api?.mods))
-    await showCreator()
+    await showCreator(author)
     await page
       .locator("textarea.composer-textarea")
       .fill(

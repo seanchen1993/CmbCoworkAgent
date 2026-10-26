@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { createHash } from "node:crypto"
 import { afterEach, expect, it, vi } from "vitest"
 import type { BrowserWindow } from "electron"
 import type { HostSkillExecutionContext } from "./project-runtime/host-service"
@@ -10,21 +11,25 @@ import type { ClawActionDescriptor } from "../../shared/mods/claw-actions"
 import { resolveClawActionInput } from "../../shared/mods/claw-actions"
 import { hostProjectFixture } from "./project-runtime/host-fixtures.test-helper"
 import { PROJECT_ACTION_LOCK_PATH } from "../../shared/project-runtime/action-bindings"
-import { createProjectActionBinding } from "./project-runtime/action-input"
-import { readHostActionCheckEvidence } from "./project-runtime/action-check-evidence"
+import { createProjectActionBinding, captureProjectActionInputs, readProjectActionLock } from "./project-runtime/action-input"
+import { executeProjectActionPhase } from "./project-action-phase"
+import { readHostActionCheckEvidence, readHistoricalHostCheckDiagnostics } from "./project-runtime/action-check-evidence"
 import { publishOriginalFlowActionResult } from "../mods/flows/action-execution-facts"
-import { wrapProjectRuntimeManifest, CONTEXT_HANDOFF_PROTOCOL } from "../../shared/project-runtime"
+import { wrapProjectRuntimeManifest, CONTEXT_HANDOFF_PROTOCOL, CONTEXT_MATERIALS_PROTOCOL } from "../../shared/project-runtime"
 import { fingerprintHostStageInput, validateHostStage } from "./project-runtime/host-validators"
 import { FlowManager } from "../mods/flows/manager"
 import { FlowStore } from "../mods/flows/store"
 import { isOrdinaryFlowMetadata } from "../../shared/mods/flows/scope"
 import { projectActionFlowMetadata } from "./project-action-scope"
-import { setProjectActionRuntime } from "./project-action-runtime"
+import { setProjectActionRuntime, getProjectActionRuntime } from "./project-action-runtime"
+import { DECLARED_CONTEXT_FILES_PROTOCOL } from "../../shared/project-runtime"
+import { readDeclaredContextFiles } from "./project-runtime/declared-context-files"
+import { readPackageExtensionContract } from "../plugins/extension-contract"
 import { FunctionModsManager } from "../mods/v2/manager"
 import { readOriginalActionText } from "../mods/v2/action-result-text"
 import { FunctionGuestRuntime } from "../mods/v2/guest-runtime"
 import { ModControlStore } from "../mods/control-store"
-import { captureProjectActionContentGuard } from "./project-action-scope"
+import { captureProjectActionContentGuard, captureSettledProjectSkill } from "./project-action-scope"
 
 const mock = vi.hoisted(() => ({
   metadata: {} as Record<string, unknown>,
@@ -33,6 +38,10 @@ const mock = vi.hoisted(() => ({
   skill: vi.fn()
 }))
 vi.mock("../db", () => ({
+  createThread: (_id: string, metadata: Record<string, unknown>) => {
+    mock.metadata = metadata
+    return { created_at: 1, metadata: JSON.stringify(metadata) }
+  },
   getThreadCore: () => ({ created_at: 1, metadata: JSON.stringify(mock.metadata) })
 }))
 vi.mock("./host-skill-executor", () => ({ executeHostProjectSkill: mock.skill }))
@@ -47,6 +56,168 @@ vi.mock("./project-runtime/package-snapshots", () => ({
   }
 }))
 import { executeHostProjectStage } from "./project-action-executor"
+
+it("exposes settled Skill proof to original post-Skill actions without early final success", async () => {
+  let retained: ReturnType<typeof captureSettledProjectSkill>
+  const f = fixture(async () => {
+    retained = captureSettledProjectSkill({
+      projectId: f.context.project.projectId, operationId: f.context.operation.operationId,
+      stageId: f.context.operation.stageId, threadId: f.root,
+      pluginDigest: f.context.project.pluginDigest, inputFingerprint: f.context.operation.inputFingerprint
+    })
+    expect(retained).toBeDefined()
+    retained!.assertCurrent()
+    expect(f.recordTerminal).not.toHaveBeenCalled()
+    return { passed: true, source: "native-check", summary: "checked" }
+  })
+  await expect(f.start()).resolves.toBe("succeeded")
+  expect(() => retained!.assertCurrent()).toThrow("PROJECT_SKILL_SETTLEMENT_SCOPE_CHANGED")
+})
+
+it("does not mint settled Skill proof or run post-actions from a success label without its terminal", async () => {
+  const f = fixture()
+  mock.skill.mockImplementationOnce(async (context: HostSkillExecutionContext) => {
+    context.bindThread(f.root)
+    return "succeeded"
+  })
+  await expect(f.start()).resolves.toBe("unknown")
+  expect(f.calls).toEqual([])
+  expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+    outcome: "unknown", code: "project_skill_terminal_unconfirmed"
+  })
+})
+
+it.each(["succeeded", "failed"])("settles the complete %s operation before publishing its terminal", async outcome => {
+  const f = fixture(async () => ({ passed: outcome === "succeeded", source: "native-check", summary: "checked" }))
+  const gate = Promise.withResolvers<void>()
+  const retire = vi.fn(async () => {
+    expect(f.calls).toContain("disposed")
+    expect(f.recordTerminal).not.toHaveBeenCalled()
+    await gate.promise
+  })
+  setProjectActionRuntime({ ...getProjectActionRuntime(), captureOperationRetirement: () => ({
+    resident: true, assertCurrent: () => {}, retire
+  }) })
+  const result = f.start()
+  await vi.waitFor(() => expect(retire).toHaveBeenCalledOnce())
+  expect(f.recordTerminal).not.toHaveBeenCalled()
+  gate.resolve()
+  await expect(result).resolves.toBe(outcome)
+  expect(f.recordTerminal).toHaveBeenCalledOnce()
+})
+
+it("keeps cleanup failure unknown and never publishes the preceding successful terminal", async () => {
+  const f = fixture()
+  setProjectActionRuntime({ ...getProjectActionRuntime(), captureOperationRetirement: () => ({
+    resident: true, assertCurrent: () => {}, retire: async () => { throw Error("EXIT_UNCONFIRMED") }
+  }) })
+  await expect(f.start()).resolves.toBe("unknown")
+  expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+    outcome: "unknown", code: "project_runtime_retirement_unconfirmed"
+  })
+})
+
+it.each(["owner-before", "capture", "admission", "owner-before-retire", "retire", "owner-after"])(
+  "logs only the exact retirement phase and safe code after %s fails", async phase => {
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      const f = fixture(undefined, state => {
+        state.manifest.stages[1].actionIds = []
+        state.manifest.stages[1].checkIds = []
+      })
+      let ownerCalls = 0
+      let modelSettled = false
+      mock.skill.mockImplementationOnce(async (context: HostSkillExecutionContext) => {
+        context.bindThread(f.root)
+        context.recordTerminal({ outcome: "error", code: "MODEL_FAILURE" })
+        modelSettled = true
+        return "failed"
+      })
+      const fail = () => { throw Error("ORIGINAL_OWNER_REVOKED") }
+      f.context.assertAuthorityCurrent = () => {
+        if (!modelSettled) return
+        ownerCalls++
+        if ((phase === "owner-before" && ownerCalls === 1) ||
+            (phase === "owner-before-retire" && ownerCalls === 2) ||
+            (phase === "owner-after" && ownerCalls === 3)) fail()
+      }
+      const retire = vi.fn(async () => { if (phase === "retire") fail() })
+      setProjectActionRuntime({ ...getProjectActionRuntime(), captureOperationRetirement: () => {
+        if (phase === "capture") fail()
+        return { resident: true, assertCurrent: () => { if (phase === "admission") fail() }, retire }
+      } })
+      await expect(f.start()).resolves.toBe("unknown")
+      expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+        outcome: "unknown", code: "project_runtime_retirement_unconfirmed"
+      })
+      expect(log).toHaveBeenCalledExactlyOnceWith("[ProjectRuntime] Retirement failed",
+        { phase, code: "ORIGINAL_OWNER_REVOKED" })
+      expect(retire).toHaveBeenCalledTimes(["retire", "owner-after"].includes(phase) ? 1 : 0)
+    } finally { log.mockRestore() }
+  }
+)
+
+it.each([
+  Error("private path /input/document and body"),
+  Error("A".repeat(97)),
+  Error("APPARENT_CODE\n"),
+  { message: "NOT_AN_ERROR", privateBody: "must not be logged" },
+  "PRIVATE_BODY"
+])("does not disclose arbitrary retirement failure details (%#)", async error => {
+  const log = vi.spyOn(console, "warn").mockImplementation(() => {})
+  try {
+    const f = fixture()
+    setProjectActionRuntime({ ...getProjectActionRuntime(), captureOperationRetirement: () => ({
+      resident: true, assertCurrent: () => {}, retire: async () => { throw error }
+    }) })
+    await expect(f.start()).resolves.toBe("unknown")
+    expect(log).toHaveBeenCalledExactlyOnceWith("[ProjectRuntime] Retirement failed",
+      { phase: "retire", code: "UNKNOWN" })
+    expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+      outcome: "unknown", code: "project_runtime_retirement_unconfirmed"
+    })
+  } finally { log.mockRestore() }
+})
+
+it("preserves the unconfirmed terminal even when the diagnostic logger throws", async () => {
+  const log = vi.spyOn(console, "warn").mockImplementation(() => { throw Error("LOGGER_FAILED") })
+  try {
+    const f = fixture()
+    setProjectActionRuntime({ ...getProjectActionRuntime(), captureOperationRetirement: () => ({
+      resident: true, assertCurrent: () => {}, retire: async () => { throw Error("CLEANUP_FAILED") }
+    }) })
+    await expect(f.start()).resolves.toBe("unknown")
+    expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+      outcome: "unknown", code: "project_runtime_retirement_unconfirmed"
+    })
+  } finally { log.mockRestore() }
+})
+
+it.each(["host_user_input_waiting", "unconfirmed"])("does not retire %s ownership", async code => {
+  const f = fixture()
+  const capture = vi.fn(() => ({ resident: true, assertCurrent: () => {}, retire: async () => {} }))
+  setProjectActionRuntime({ ...getProjectActionRuntime(), captureOperationRetirement: capture })
+  mock.skill.mockImplementationOnce(async (context: HostSkillExecutionContext) => {
+    context.bindThread(f.root)
+    context.recordTerminal({ outcome: "unknown", code })
+    return "unknown"
+  })
+  await expect(f.start()).resolves.toBe("unknown")
+  expect(capture).not.toHaveBeenCalled()
+})
+
+it("retires the original recovered input thread even when Skill does not bind it again", async () => {
+  const f = fixture()
+  const capture = vi.fn(() => ({ resident: true, assertCurrent: () => {}, retire: async () => {} }))
+  setProjectActionRuntime({ ...getProjectActionRuntime(), captureOperationRetirement: capture })
+  f.context.recoveryInput = { request: { threadId: f.root } } as NonNullable<HostSkillExecutionContext["recoveryInput"]>
+  mock.skill.mockImplementationOnce(async (context: HostSkillExecutionContext) => {
+    context.recordTerminal({ outcome: "success", code: "resumed" })
+    return "succeeded"
+  })
+  await expect(f.start()).resolves.toBe("succeeded")
+  expect(capture).toHaveBeenCalledExactlyOnceWith(f.root, f.root)
+})
 
 const roots: string[] = []
 afterEach(() => {
@@ -212,6 +383,485 @@ function fixture(
     start: () => executeHostProjectStage(context, {} as BrowserWindow, () => {})
   }
 }
+
+function contextDispatchFixture(materials = false, execute?: FlowExecution["execute"]) {
+  const f = fixture(execute)
+  const manifest = f.context.project.manifest
+  manifest.stages[1].actionIds = []
+  manifest.stages[1].checkIds = []
+  writeFileSync(join(f.root, "devclaw.project-runtime.json"), JSON.stringify(
+    wrapProjectRuntimeManifest(manifest, {
+      apiVersion: "devclaw.extension-contract/v1",
+      requires: [CONTEXT_HANDOFF_PROTOCOL, ...(materials ? [CONTEXT_MATERIALS_PROTOCOL] : [])],
+      context: {
+        sourceAccess: "read-only", mutableData: "host", configuration: "host-resolved",
+        knowledge: { required: false },
+        provider: {
+          actionId: "first", operations: ["session-context"],
+          ...(materials ? { materials: {
+            roots: [{ id: "package", source: "package" as const }], configuration: []
+          } } : {})
+        }
+      }
+    })
+  ))
+  const retire = vi.fn(async () => {})
+  const capture = vi.fn(() => ({ resident: true, assertCurrent: () => {}, retire }))
+  setProjectActionRuntime({ ...getProjectActionRuntime(), captureOperationRetirement: capture })
+  const startSaved = vi.spyOn(f.flows, "startSaved")
+  return { ...f, retire, capture, startSaved }
+}
+
+it("notifies dispatch only after selection and definition capture, before the original start attempt", async () => {
+  const f = fixture()
+  const captured = captureProjectActionInputs(f.context.project,
+    readProjectActionLock(f.root, f.context.project.manifest))
+  const selection = Promise.withResolvers<void>()
+  const prepare = vi.fn(async () => { await selection.promise })
+  const beforeDispatch = vi.fn()
+  const startSaved = vi.spyOn(f.flows, "startSaved").mockImplementationOnce(async () => {
+    expect(beforeDispatch).toHaveBeenCalledOnce()
+    throw Error("ORIGINAL_DISPATCH_REJECTED")
+  })
+  setProjectActionRuntime({ ...getProjectActionRuntime(), prepareSelection: prepare })
+  const result = executeProjectActionPhase(f.context, f.root, captured, "context",
+    () => {}, () => {}, beforeDispatch)
+  const rejection = expect(result).rejects.toThrow("ORIGINAL_DISPATCH_REJECTED")
+  await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce())
+  expect(beforeDispatch).not.toHaveBeenCalled()
+  expect(startSaved).not.toHaveBeenCalled()
+  selection.resolve()
+  await rejection
+  expect(beforeDispatch).toHaveBeenCalledOnce()
+  expect(startSaved).toHaveBeenCalledOnce()
+})
+
+it.each(["selection", "materials", "definition"])(
+  "settles a context %s pre-dispatch failure before publishing failed", async failure => {
+    const f = contextDispatchFixture(failure === "materials")
+    const runtime = getProjectActionRuntime()
+    setProjectActionRuntime({ ...runtime,
+      prepareSelection: async () => {
+        if (failure === "selection") throw Error("SELECTION_UNAVAILABLE")
+        if (failure === "definition") f.context.ticket.operationId = ""
+      },
+      readContextMaterials: () => { throw Error("MATERIALS_UNAVAILABLE") }
+    })
+    const gate = Promise.withResolvers<void>()
+    f.retire.mockImplementationOnce(async () => { await gate.promise })
+    const result = f.start()
+    await vi.waitFor(() => expect(f.retire).toHaveBeenCalledOnce())
+    expect(f.recordTerminal).not.toHaveBeenCalled()
+    expect(f.startSaved).not.toHaveBeenCalled()
+    expect(f.flowStore.runs(f.root, f.root)).toEqual([])
+    expect(f.calls).toEqual([])
+    gate.resolve()
+    await expect(result).resolves.toBe("failed")
+    expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+      outcome: "error", code: "project_action_dependencies_unavailable"
+    })
+  }
+)
+
+it("keeps context pre-dispatch failure unknown when exact retirement fails", async () => {
+  const f = contextDispatchFixture()
+  setProjectActionRuntime({ ...getProjectActionRuntime(), prepareSelection: async () => {
+    throw Error("SELECTION_UNAVAILABLE")
+  } })
+  f.retire.mockRejectedValueOnce(Error("EXIT_UNCONFIRMED"))
+  await expect(f.start()).resolves.toBe("unknown")
+  expect(f.startSaved).not.toHaveBeenCalled()
+  expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+    outcome: "unknown", code: "project_runtime_retirement_unconfirmed"
+  })
+})
+
+it.each(["revoked", "cancelled", "cancelled-settled"])(
+  "preserves original owner settlement guards after pre-dispatch %s", async scenario => {
+    const f = contextDispatchFixture()
+    let revoked = false
+    f.context.assertAuthorityCurrent = () => { if (revoked) throw Error("OWNER_REVOKED") }
+    const settlement = vi.fn()
+    if (scenario === "cancelled-settled") f.context.assertSettlementCurrent = settlement
+    setProjectActionRuntime({ ...getProjectActionRuntime(), prepareSelection: async () => {
+      if (scenario === "revoked") revoked = true
+      else f.controller.abort()
+    } })
+    await expect(f.start()).resolves.toBe(scenario === "cancelled-settled" ? "failed" : "unknown")
+    expect(f.startSaved).not.toHaveBeenCalled()
+    expect(f.calls).toEqual([])
+    if (scenario === "cancelled-settled") {
+      expect(settlement).toHaveBeenCalled()
+      expect(f.retire).toHaveBeenCalledOnce()
+      expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+        outcome: "error", code: "project_action_dependencies_unavailable"
+      })
+    } else {
+      expect(f.retire).not.toHaveBeenCalled()
+      expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+        outcome: "unknown", code: "project_runtime_retirement_unconfirmed"
+      })
+    }
+  }
+)
+
+it("keeps an attempted context start unknown even when startSaved itself rejects", async () => {
+  const f = contextDispatchFixture()
+  f.startSaved.mockRejectedValueOnce(Error("ORIGINAL_DISPATCH_REJECTED"))
+  await expect(f.start()).resolves.toBe("unknown")
+  expect(f.startSaved).toHaveBeenCalledOnce()
+  expect(f.calls).toEqual([])
+  expect(f.capture).not.toHaveBeenCalled()
+  expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+    outcome: "unknown", code: "project_context_provider_unverified"
+  })
+})
+
+it("preserves original Flow failure facts and unknown after context dispatch", async () => {
+  const f = contextDispatchFixture(false, async () => ({
+    passed: false, source: "native-check", summary: "original provider failed"
+  }))
+  await expect(f.start()).resolves.toBe("unknown")
+  expect(f.startSaved).toHaveBeenCalledOnce()
+  expect(f.calls).toEqual(["first", "disposed"])
+  const [run] = f.flowStore.runs(f.root, f.root)
+  expect(run.status).toBe("failed")
+  expect(run.attempts.some(attempt => attempt.stepId === "first" && attempt.status === "failed"))
+    .toBe(true)
+  expect(f.capture).not.toHaveBeenCalled()
+  expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+    outcome: "unknown", code: "project_context_provider_unverified"
+  })
+})
+
+function checkPreparationFixture(execute?: FlowExecution["execute"]) {
+  const f = fixture(execute, undefined, {
+    pluginId: "installed", plugin: "formatter", digest: "a".repeat(64),
+    actionId: "format", name: "Check", platform: { id: "check", version: "1.0.0", action: "check" },
+    inputSchema: { type: "object" }, outputSchema: { type: "object" }
+  })
+  const manifest = f.context.project.manifest
+  manifest.artifacts.push({ id: "output", path: "output.json", required: true })
+  manifest.stages[1].artifactIds = ["output"]
+  manifest.stages[1].actionIds = []
+  manifest.stages[1].checkIds = ["output-check"]
+  manifest.checks.push({ id: "output-check", kind: "action", sideEffect: "read",
+    artifactId: "output", actionId: "first" })
+  const lock = JSON.parse(readFileSync(join(f.root, PROJECT_ACTION_LOCK_PATH), "utf8"))
+  lock.bindings[0].inputFrom = { kind: "artifact", artifactId: "output", pointer: "",
+    format: "artifact-reference-v1", maxBytes: 28000 }
+  writeFileSync(join(f.root, PROJECT_ACTION_LOCK_PATH), JSON.stringify(lock))
+  writeFileSync(join(f.root, "output.json"), JSON.stringify({ text: "x".repeat(35898) }))
+  let skillSettled = false
+  const original = mock.skill.getMockImplementation()!
+  mock.skill.mockImplementation(async (context: HostSkillExecutionContext) => {
+    const result = await original(context)
+    skillSettled = true
+    return result
+  })
+  const retire = vi.fn(async () => {})
+  const capture = vi.fn(() => ({ resident: true, assertCurrent: () => {}, retire }))
+  setProjectActionRuntime({ ...getProjectActionRuntime(), captureOperationRetirement: capture })
+  return { ...f, capture, retire, skillSettled: () => skillSettled }
+}
+
+it("fails an oversized current check input only after settled Skill and exact physical retirement", async () => {
+  const f = checkPreparationFixture()
+  const gate = Promise.withResolvers<void>()
+  f.retire.mockImplementation(async () => { await gate.promise })
+  const result = f.start()
+  await vi.waitFor(() => expect(f.retire).toHaveBeenCalledOnce())
+  expect(f.skillSettled()).toBe(true)
+  expect(readFileSync(join(f.root, "output.json")).length).toBe(35909)
+  expect(f.calls).toEqual([])
+  expect(f.flowStore.runs(f.root, f.root)).toEqual([])
+  expect(f.recordTerminal).not.toHaveBeenCalled()
+  gate.resolve()
+  await expect(result).resolves.toBe("failed")
+  expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({ outcome: "error", code: "project_check_input_limit" })
+  expect(f.retire).toHaveBeenCalledOnce()
+})
+
+it.each(["catalog", "source-before", "source-after", "cancelled", "prior-limit", "prior-limit-with-current-limit", "prior-missing", "malformed-current"])(
+  "keeps %s check preparation unconfirmed rather than inferring an output-limit failure", async scenario => {
+    const f = checkPreparationFixture()
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      if (scenario === "catalog") {
+        const original = f.catalog.getMockImplementation()!
+        f.catalog.mockImplementation(async () => {
+          if (f.skillSettled()) throw Error("PROJECT_HOST_FILE_LIMIT")
+          return original()
+        })
+      }
+      if (scenario.startsWith("source-")) {
+        let reads = 0
+        f.context.assertInputsCurrent = () => {
+          if (f.skillSettled() && ++reads === (scenario === "source-before" ? 1 : 3))
+            throw Error("ORIGINAL_SOURCE_CHANGED")
+        }
+      }
+      if (scenario === "cancelled") f.context.assertAuthorityCurrent = () => {
+        if (f.skillSettled()) {
+          f.controller.abort()
+          f.controller.signal.throwIfAborted()
+        }
+      }
+      if (scenario.startsWith("prior-")) {
+        if (scenario !== "prior-limit-with-current-limit") writeFileSync(join(f.root, "output.json"), "{}")
+        if (scenario.startsWith("prior-limit")) writeFileSync(join(f.root, "input.json"), "x".repeat(28001))
+        else {
+          const original = mock.skill.getMockImplementation()!
+          mock.skill.mockImplementation(async (context: HostSkillExecutionContext) => {
+            const result = await original(context)
+            rmSync(join(f.root, "input.json"))
+            return result
+          })
+        }
+      }
+      if (scenario === "malformed-current") {
+        const lock = JSON.parse(readFileSync(join(f.root, PROJECT_ACTION_LOCK_PATH), "utf8"))
+        lock.bindings[0].inputFrom = { kind: "artifact", artifactId: "output", pointer: "", format: "json" }
+        writeFileSync(join(f.root, PROJECT_ACTION_LOCK_PATH), JSON.stringify(lock))
+        writeFileSync(join(f.root, "output.json"), "not JSON")
+      }
+      await expect(f.start()).resolves.toBe("unknown")
+      expect(f.calls).toEqual([])
+      expect(f.capture).not.toHaveBeenCalled()
+      expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+        outcome: "unknown", code: "project_phase_preparation_unconfirmed"
+      })
+      expect(log).toHaveBeenCalledWith("[ProjectRuntime] Phase preparation failed", {
+        phase: scenario === "catalog" ? "catalog" : scenario === "cancelled" ? "owner" : "check-inputs",
+        code: scenario === "malformed-current" ? "UNKNOWN" : expect.stringMatching(/^[A-Z][A-Z0-9_]{0,95}$/)
+      })
+    } finally { log.mockRestore() }
+  }
+)
+
+it("does not turn a check-input limit into a retryable failure after an external action dispatched", async () => {
+  const f = checkPreparationFixture(async () => ({ passed: true, source: "native-check", summary: "done" }))
+  f.context.project.manifest.stages[1].actionIds = ["second"]
+  await expect(f.start()).resolves.toBe("unknown")
+  expect(f.calls).toEqual(["second", "disposed"])
+  expect(f.capture).not.toHaveBeenCalled()
+  expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+    outcome: "unknown", code: "project_phase_preparation_unconfirmed"
+  })
+})
+
+it("keeps oversized-output cleanup failure unknown and contains preparation logging failure", async () => {
+  const f = checkPreparationFixture()
+  f.retire.mockRejectedValue(Error("CLEANUP_UNCONFIRMED"))
+  const log = vi.spyOn(console, "warn").mockImplementation(() => { throw Error("LOGGER_FAILED") })
+  try {
+    await expect(f.start()).resolves.toBe("unknown")
+    expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+      outcome: "unknown", code: "project_runtime_retirement_unconfirmed"
+    })
+    expect(f.calls).toEqual([])
+  } finally { log.mockRestore() }
+})
+
+it.each([Error("private /path and document body"), { message: "UNTRUSTED" }, Error("APPARENT_CODE\n")])(
+  "does not disclose unknown preparation errors (%#)", async error => {
+    const f = checkPreparationFixture()
+    const original = f.catalog.getMockImplementation()!
+    f.catalog.mockImplementation(async () => {
+      if (f.skillSettled()) throw error
+      return original()
+    })
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      await expect(f.start()).resolves.toBe("unknown")
+      expect(log).toHaveBeenCalledExactlyOnceWith("[ProjectRuntime] Phase preparation failed",
+        { phase: "catalog", code: "UNKNOWN" })
+      expect(f.capture).not.toHaveBeenCalled()
+    } finally { log.mockRestore() }
+  }
+)
+
+it("records preparation unknown even if its diagnostic logger throws", async () => {
+  const f = checkPreparationFixture()
+  const original = f.catalog.getMockImplementation()!
+  f.catalog.mockImplementation(async () => {
+    if (f.skillSettled()) throw Error("CATALOG_CHANGED")
+    return original()
+  })
+  const log = vi.spyOn(console, "warn").mockImplementation(() => { throw Error("LOGGER_FAILED") })
+  try {
+    await expect(f.start()).resolves.toBe("unknown")
+    expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+      outcome: "unknown", code: "project_phase_preparation_unconfirmed"
+    })
+    expect(f.capture).not.toHaveBeenCalled()
+  } finally { log.mockRestore() }
+})
+it.each([
+  { passed: true, importOverride: false }, { passed: false, importOverride: false },
+  { passed: true, importOverride: true }, { passed: false, importOverride: true }
+])(
+  "runs imported artifact business checks through real Flow without invoking Skill ($passed, import policy=$importOverride)",
+  async ({ passed, importOverride }) => {
+    const descriptor: ClawActionDescriptor = {
+      pluginId: "installed",
+      plugin: "formatter",
+      digest: "a".repeat(64),
+      actionId: "format",
+      name: "Check",
+      platform: { id: "check", version: "1.0.0", action: "check" },
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" }
+    }
+    const f = fixture(
+      async (step) =>
+        publishOriginalFlowActionResult(
+          {
+            passed,
+            source: "plugin-action",
+            summary: "actual check",
+            provider:
+              step.kind === "plugin-action"
+                ? {
+                    pluginId: step.pluginId,
+                    plugin: step.plugin,
+                    digest: step.digest,
+                    actionId: step.actionId
+                  }
+                : undefined
+          },
+          async (result) => result
+        ),
+      undefined,
+      descriptor
+    )
+    f.context.importedValidationOnly = true
+    f.context.project.manifest.stages[1].actionIds = []
+    f.context.project.manifest.stages[1].resultApproval = importOverride ? "none" : "human"
+    if (importOverride) f.context.importedResultApprovalRequired = true
+    f.context.project.manifest.checks[0] = {
+      id: "document-exists",
+      kind: "action",
+      sideEffect: "read",
+      artifactId: "document",
+      actionId: "first"
+    }
+    const lock = JSON.parse(readFileSync(join(f.root, PROJECT_ACTION_LOCK_PATH), "utf8"))
+    lock.bindings[0].inputFrom = {
+      kind: "artifact",
+      artifactId: "document",
+      pointer: "",
+      format: "json"
+    }
+    writeFileSync(join(f.root, PROJECT_ACTION_LOCK_PATH), JSON.stringify(lock))
+    await expect(f.start()).resolves.toBe(passed ? "succeeded" : "failed")
+    expect(mock.skill).not.toHaveBeenCalled()
+    expect(f.calls).toEqual(["first", "disposed"])
+    expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+      outcome: passed ? "success" : "error",
+      code: passed ? "import_validation_complete" : "import_validation_check_failed",
+      ...(passed ? {} : { checkDiagnostics: [expect.objectContaining({
+        checkId: "document-exists", actionId: "first", summary: "actual check"
+      })] })
+    })
+  }
+)
+
+it.each([false, true])("retains bounded original failed-check diagnostics and reads pre-upgrade failures without replay (redacted=%s)", async redacted => {
+  const f = fixture(async step => publishOriginalFlowActionResult({
+    passed: false, source: "plugin-action", summary: "Business rules rejected the artifact",
+    provider: step.kind === "plugin-action" ? {
+      pluginId: step.pluginId, plugin: step.plugin, digest: step.digest, actionId: step.actionId
+    } : undefined,
+    output: { errors: [{ code: "SOURCE_CONTEXT_INVALID", detail: "version must be 1" }],
+      warnings: Array.from({ length: 12 }, () => "snapshot path is required"),
+      privateStdin: "must never be projected" }
+  }, async result => redacted ? { ...result, summary: "redacted", output: { errors: [] } } : result))
+  f.context.project.manifest.stages[1].actionIds = []
+  f.context.project.manifest.checks[0] = {
+    id: "document-exists", kind: "action", sideEffect: "read", artifactId: "document", actionId: "first"
+  }
+  const lock = JSON.parse(readFileSync(join(f.root, PROJECT_ACTION_LOCK_PATH), "utf8"))
+  lock.bindings[0].inputFrom = { kind: "artifact", artifactId: "document", pointer: "", format: "json" }
+  writeFileSync(join(f.root, PROJECT_ACTION_LOCK_PATH), JSON.stringify(lock))
+  await expect(f.start()).resolves.toBe("failed")
+  const terminal = f.recordTerminal.mock.calls.at(-1)![0]
+  expect(terminal.code).toBe("project_checks_failed")
+  expect(terminal.checkDiagnostics).toHaveLength(1)
+  const diagnostic = terminal.checkDiagnostics[0]
+  expect(diagnostic).toMatchObject({ checkId: "document-exists", actionId: "first",
+    inputFingerprint: f.context.ticket.inputFingerprint, truncated: true,
+    errors: redacted ? [] : [{ code: "SOURCE_CONTEXT_INVALID", message: "version must be 1" }] })
+  expect(diagnostic.warnings).toHaveLength(redacted ? 0 : 8)
+  expect(JSON.stringify(diagnostic)).not.toContain("must never be projected")
+  if (redacted) expect(JSON.stringify(diagnostic)).not.toContain("version must be 1")
+  const historical = { ...f.context.operation, status: "failed" as const,
+    execution: { threadId: f.root, terminal: { outcome: "error" as const,
+      code: "project_checks_failed", settledAt: Date.now() } } }
+  expect(readHistoricalHostCheckDiagnostics(f.context.project, historical, f.root)).toEqual([diagnostic])
+  expect(historical.execution.terminal).not.toHaveProperty("checkDiagnostics")
+  expect(f.calls).toEqual(["first", "disposed"])
+  const runtime = getProjectActionRuntime()
+  const original = runtime.readActionResult!
+  runtime.readActionResult = (...args) => {
+    const fact = original(...args)!
+    return { ...fact, provider: { ...fact.provider, pluginId: "other-installation" } }
+  }
+  expect(() => readHistoricalHostCheckDiagnostics(f.context.project, historical, f.root))
+    .toThrow("PROJECT_ACTION_NATIVE_FACTS_SCOPE_CHANGED")
+  runtime.readActionResult = original
+  writeFileSync(join(f.root, "input.json"), '{"text":"changed after the failed check"}')
+  expect(() => readHistoricalHostCheckDiagnostics(f.context.project, historical, f.root))
+    .toThrow("PROJECT_ACTION_NATIVE_FACTS_SCOPE_CHANGED")
+})
+
+it("injects declared file context through native publication before Skill and preserves following action execution", async () => {
+  const f = fixture()
+  writeFileSync(join(f.root, "rules.md"), "selected domain rules")
+  writeFileSync(
+    join(f.root, "devclaw.project-runtime.json"),
+    JSON.stringify(
+      wrapProjectRuntimeManifest(f.context.project.manifest, {
+        apiVersion: "devclaw.extension-contract/v1",
+        requires: [CONTEXT_HANDOFF_PROTOCOL, DECLARED_CONTEXT_FILES_PROTOCOL],
+        context: {
+          sourceAccess: "read-only",
+          mutableData: "host",
+          configuration: "host-resolved",
+          knowledge: { required: false },
+          provider: {
+            operations: ["session-context"],
+            files: [{ source: "package", path: "rules.md", stages: ["review"] }]
+          }
+        }
+      })
+    )
+  )
+  setProjectActionRuntime({
+    ...getProjectActionRuntime(),
+    readDeclaredContext: (_project, root, stageId) =>
+      readDeclaredContextFiles({
+        context: readPackageExtensionContract(root)!.context!,
+        snapshotRoot: root,
+        stageId,
+        assertCurrent: () => {}
+      })
+  })
+  f.publishRequiredContext.mockImplementation(async (_workspace, text) =>
+    text.replace("selected", "published")
+  )
+  mock.skill.mockImplementation(async (value: HostSkillExecutionContext) => {
+    value.bindThread(f.root)
+    const prepared = await value.prepareThread?.(f.root)
+    expect(prepared?.requiredContextText).toContain("published domain rules")
+    expect(prepared?.requiredContextText).not.toContain("selected domain rules")
+    value.recordTerminal({ outcome: "success", code: "skill_success" })
+    return "succeeded"
+  })
+  await expect(f.start()).resolves.toBe("succeeded")
+  expect(f.calls).toEqual(["first", "second", "disposed"])
+})
+
 it("runs real Flow sequencing and saves overall success only after action disposal", async () => {
   const f = fixture()
   expect(isOrdinaryFlowMetadata(mock.metadata)).toBe(false)
@@ -510,9 +1160,11 @@ it("checks the main-owned copied-input guard after the Skill and before starting
     writeFileSync(inputPath, "model changed input copy")
     return outcome
   })
-  await expect(f.start()).rejects.toThrow("COMPOSITION_INPUTS_CHANGED")
+  await expect(f.start()).resolves.toBe("unknown")
   expect(f.calls).toEqual([])
-  expect(f.recordTerminal).not.toHaveBeenCalled()
+  expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({
+    outcome: "unknown", code: "project_phase_preparation_unconfirmed"
+  })
 })
 it("allows a declared current output to change and validates its new bytes", async () => {
   const f = fixture(async () => {
@@ -574,10 +1226,19 @@ it("does not launch actions when the Skill failed or provider identity changed",
   expect(f.calls).toEqual([])
 })
 
-it.each(["valid", "invalid", "context-nontext", "context-negative"])(
+it.each([
+  "valid",
+  "invalid",
+  "context-nontext",
+  "context-negative",
+  "debug-valid",
+  "debug-broad",
+  "debug-nested"
+])(
   "loads a generic real Guest context and checks actual artifacts through original Flow (%s)",
   async (scenario) => {
-    const valid = scenario === "valid"
+    const debug = scenario.startsWith("debug-")
+    const valid = scenario === "valid" || debug
     const root = mkdtempSync(join(tmpdir(), "generic-project-provider-"))
     roots.push(root)
     const source = join(root, "provider")
@@ -608,7 +1269,7 @@ it.each(["valid", "invalid", "context-nontext", "context-negative"])(
     on.capability({apiVersion:"devclaw.capability/v1",id:"document",version:"1.0.0",
       title:"Document provider",scope:"conversation",stateSchema:{type:"object"},actions:[{
         id:"run",title:"Run",inputSchema:{type:"object"},outputSchema:{type:"object"},
-        requiredPermissions:[],cancellable:true,idempotency:"keyed"
+        requiredPermissions:${JSON.stringify(scenario === "debug-broad" ? ["fs.read"] : [])},cancellable:true,idempotency:"keyed"
       }]},{act:async($,event)=>{
         const input=event.input.input;
         if(input.mode==="context") return ${JSON.stringify(
@@ -620,6 +1281,7 @@ it.each(["valid", "invalid", "context-nontext", "context-negative"])(
                 output: { kind: "context" }
               }
         )};
+        ${scenario === "debug-nested" ? 'await $.platform.read({provider:"native.project-context",id:"materials",version:"1.0.0"});' : ""}
         const ok=input.content==="Invoice: approved billing record";
         return {status:ok?"succeeded":"failed",text:"Checked actual content",output:{accepted:ok,content:input.content}}
       }})
@@ -776,14 +1438,32 @@ it.each(["valid", "invalid", "context-nontext", "context-negative"])(
       f.publishRequiredContext.mockImplementation(async (_workspace, text) =>
         text.replace("invoice means", "invoice denotes")
       )
+      if (debug) {
+        f.context.stageDebug = { workspace: f.root, baselineId: "captured-stage-input" }
+        manifest.actions = manifest.actions.filter((action) => action.id !== contextBinding.id)
+        writeFileSync(
+          join(f.root, PROJECT_ACTION_LOCK_PATH),
+          JSON.stringify({
+            apiVersion: "devclaw.project-actions-lock/v1",
+            bindings: [checkBinding, retainedBinding]
+          })
+        )
+        writeFileSync(join(f.root, "devclaw.project-runtime.json"), JSON.stringify(manifest))
+        setProjectActionRuntime({
+          ...getProjectActionRuntime(),
+          verifyReadOnlyCheckProvider: (...args) => functions.verifyReadOnlyCheckProvider(...args)
+        })
+      }
       let loaded: string | undefined
       mock.skill.mockImplementation(async (value: HostSkillExecutionContext) => {
         value.bindThread(f.root)
         const prepared = await value.prepareThread?.(f.root)
         loaded = prepared?.requiredContextText
-        expect(loaded).toContain("Required glossary")
-        expect(loaded).toContain("invoice denotes")
-        expect(loaded).not.toContain("invoice means")
+        if (!debug) {
+          expect(loaded).toContain("Required glossary")
+          expect(loaded).toContain("invoice denotes")
+          expect(loaded).not.toContain("invoice means")
+        }
         writeFileSync(
           join(f.root, "input.json"),
           valid ? "Invoice: approved billing record" : "invented billing record"
@@ -791,6 +1471,20 @@ it.each(["valid", "invalid", "context-nontext", "context-negative"])(
         value.recordTerminal({ outcome: "success", code: "real-skill-terminal" })
         return "succeeded"
       })
+      if (scenario === "debug-broad") {
+        await expect(f.start()).resolves.toBe("failed")
+        expect(f.calls).toEqual([])
+        expect(f.recordTerminal).toHaveBeenCalledWith({
+          outcome: "error",
+          code: "project_action_dependencies_unavailable"
+        })
+        return
+      }
+      if (scenario === "debug-nested") {
+        await expect(f.start()).resolves.not.toBe("succeeded")
+        expect(f.calls).toEqual(["verify-document", "disposed"])
+        return
+      }
       if (scenario.startsWith("context-")) {
         await expect(f.start()).resolves.toBe("unknown")
         expect(f.calls).toEqual(["required-context", "disposed"])
@@ -821,8 +1515,7 @@ it.each(["valid", "invalid", "context-nontext", "context-negative"])(
       )
       expect(receipts[0].result).toBe(valid ? "passed" : "failed")
       expect(f.calls).toEqual([
-        "required-context",
-        "disposed",
+        ...(!debug ? ["required-context", "disposed"] : []),
         "verify-document",
         "verify-retained",
         "disposed"
@@ -858,4 +1551,121 @@ it.each(["valid", "invalid", "context-nontext", "context-negative"])(
     }
   },
   20_000
+)
+
+it.each(["valid", "text-changed", "fact-changed", "grant-revoked"])(
+  "reuses a settled context phase only with retained text, original facts and fresh authority (%s)",
+  async (scenario) => {
+    const f = fixture(async (step) =>
+      publishOriginalFlowActionResult(
+        {
+          passed: true,
+          summary: "context",
+          source: "plugin-action",
+          provider:
+            step.kind === "plugin-action"
+              ? {
+                  pluginId: step.pluginId,
+                  plugin: step.plugin,
+                  digest: step.digest,
+                  actionId: step.actionId
+                }
+              : undefined
+        },
+        async (value) => value,
+        "original context"
+      )
+    )
+    const manifest = f.context.project.manifest
+    manifest.stages[1].actionIds = []
+    manifest.stages[1].checkIds = []
+    writeFileSync(
+      join(f.root, "devclaw.project-runtime.json"),
+      JSON.stringify(
+        wrapProjectRuntimeManifest(manifest, {
+          apiVersion: "devclaw.extension-contract/v1",
+          requires: [CONTEXT_HANDOFF_PROTOCOL],
+          context: {
+            sourceAccess: "read-only",
+            mutableData: "host",
+            configuration: "host-resolved",
+            knowledge: { required: false },
+            provider: { actionId: "first", operations: ["session-context"] }
+          }
+        })
+      )
+    )
+    let canonical = ""
+    mock.skill.mockImplementationOnce(async (value: HostSkillExecutionContext) => {
+      value.bindThread(f.root)
+      canonical = (await value.prepareThread?.(f.root))?.requiredContextText ?? ""
+      value.recordTerminal({ outcome: "unknown", code: "host_user_input_waiting" })
+      return "unknown"
+    })
+    await expect(f.start()).resolves.toBe("unknown")
+    expect(f.calls).toEqual(["first", "disposed"])
+    const [run] = f.flowStore.runs(f.root, f.root)
+    const attempt = run.attempts.find((item) => item.stepId === "first")!
+    const fact = f.flowStore.actionResult(f.root, f.root, run.id, attempt.executionId)!
+    const assertCurrent = vi.fn()
+    const verify = vi.fn(async () => {
+      if (scenario === "grant-revoked") throw Error("GRANT_REVOKED")
+      return assertCurrent
+    })
+    setProjectActionRuntime({ ...getProjectActionRuntime(), verifyReadOnlyContextProvider: verify })
+    f.context.recoveryInput = {
+      schemaVersion: 1,
+      status: "answered",
+      response: null,
+      reason: null,
+      binding: {
+        projectId: f.context.project.projectId,
+        operationId: "operation",
+        stageId: "review",
+        installedPluginId: "installed",
+        expectedVersion: 2,
+        pluginDigest: f.context.project.pluginDigest,
+        inputFingerprint: f.context.ticket.inputFingerprint,
+        incarnationKey: "test"
+      },
+      request: { requestId: "request", threadId: f.root, createdAt: "now", questions: [] },
+      continuation: {
+        protocol: "host-user-input-interrupt/v1",
+        toolCallId: "input",
+        claimed: false,
+        priorToolsSettled: true,
+        requiredContextText: scenario === "text-changed" ? "changed" : canonical,
+        contextResumeProof: {
+          authority: {
+            protocol: "devclaw.native-project-context-readonly/v1",
+            workspace: f.root,
+            threadId: f.root,
+            operationId: "operation",
+            inputIdentity: f.context.ticket.inputFingerprint,
+            provider: fact.provider,
+            policy: "native-materials-only/v1"
+          },
+          providerId: "first",
+          runId: run.id,
+          executionId: scenario === "fact-changed" ? "other" : fact.executionId,
+          definitionDigest: fact.definitionDigest,
+          canonicalContextDigest: createHash("sha256").update(canonical).digest("hex")
+        }
+      }
+    }
+    mock.skill.mockImplementationOnce(async (value: HostSkillExecutionContext) => {
+      // The real executor skips prepareThread on recovery; no provider replay is permitted.
+      value.assertInputResumeResourcesCurrent?.()
+      value.recordTerminal({ outcome: "success", code: "resumed" })
+      return "succeeded"
+    })
+    if (scenario === "valid") {
+      await expect(f.start()).resolves.toBe("succeeded")
+      expect(assertCurrent).toHaveBeenCalledTimes(2)
+    } else
+      await expect(f.start()).rejects.toThrow(
+        scenario === "grant-revoked" ? "GRANT_REVOKED" : "PROJECT_INPUT_RESUME_CONTEXT_"
+      )
+    expect(f.calls).toEqual(["first", "disposed"])
+  }
 )

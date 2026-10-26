@@ -68,8 +68,17 @@ function sourceExits() {
       node.expression.getText(file).startsWith("cancellationTerminalPending &&")
   )
   const successful = assignment("invokeDoneAttempted").filter(
-    (node) => node.parent !== publication[0]?.thenStatement
+    (node) => node.parent !== publication[0]?.thenStatement &&
+      !(ts.isIfStatement(node.parent.parent) &&
+        node.parent.parent.expression.getText(file).includes("hasHostInputInterrupt(threadId)"))
   )
+  const inputWait = nodes.filter((node): node is ts.IfStatement => ts.isIfStatement(node) &&
+    node.expression.getText(file).includes("hasHostInputInterrupt(threadId)") &&
+    node.thenStatement.getText(file).includes("invokeDoneAttempted = true"))
+  expect(inputWait).toHaveLength(1)
+  expect(inputWait[0].thenStatement.getText(file)).toContain('outcome: "unknown"')
+  expect(inputWait[0].thenStatement.getText(file)).toContain('code: "host_user_input_waiting"')
+  expect(inputWait[0].thenStatement.getText(file)).not.toContain('kind: "task-complete"')
   const helpers = file.statements.filter(
     (node): node is ts.FunctionDeclaration =>
       ts.isFunctionDeclaration(node) &&

@@ -14,6 +14,7 @@ import {
 } from "./client"
 import { GOAL_USER_MESSAGE_EVENT_PREFIX } from "../../shared/goal-events"
 import type { Thread } from "../types"
+import { isOrdinaryFlowMetadata } from "../../shared/mods/flows/scope"
 
 let buildDirectory = ""
 let workerPath = ""
@@ -93,6 +94,83 @@ function clientFor(path: string): ThreadMetadataHydrationClient {
 }
 
 describe("ThreadMetadataHydrationClient", () => {
+  it("preserves exact Host identity when a completed stage refreshes the real task directory", async () => {
+    const { database, path } = fixture()
+    const binding = {
+      projectId: "project",
+      operationId: "operation",
+      stageId: "prd",
+      pluginDigest: "a".repeat(64)
+    }
+    const metadata = {
+      title: "x".repeat(8192),
+      workspacePath: "C:/project",
+      outputStyle: "y".repeat(8192),
+      hostProjectRuntime: binding
+    }
+    database
+      .prepare(
+        `INSERT INTO threads
+      (thread_id,created_at,updated_at,metadata,status,thread_values,title)
+      VALUES ('host-stage',1,2,?,'busy','{}','PRD')`
+      )
+      .run(JSON.stringify(metadata))
+    const client = clientFor(path)
+    try {
+      const selected = await client.readThread("host-stage")
+      expect(selected?.metadata?.hostProjectRuntime).toStrictEqual(binding)
+      database
+        .prepare("UPDATE threads SET status='idle',updated_at=3 WHERE thread_id='host-stage'")
+        .run()
+      const page = await client.readListPage({ limit: 1 }, 7)
+      expect(page.threads).toHaveLength(1)
+      expect(page.threads[0].status).toBe("idle")
+      expect(page.threads[0].metadata?.hostProjectRuntime).toStrictEqual(binding)
+      expect(isOrdinaryFlowMetadata(page.threads[0].metadata)).toBe(false)
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(20 * 1024)
+    } finally {
+      database.close()
+    }
+  })
+
+  it("keeps malformed Host attribution read-only without publishing oversized or extra fields", async () => {
+    const { database, path } = fixture()
+    const binding = {
+      projectId: "project",
+      operationId: "operation",
+      stageId: "prd",
+      pluginDigest: "a".repeat(64)
+    }
+    const malformed = [
+      null,
+      "host",
+      [],
+      { ...binding, projectId: "x".repeat(513) },
+      { ...binding, operationId: 7 },
+      { ...binding, pluginDigest: "invalid" },
+      { ...binding, arbitrary: { source: "must not cross IPC" } }
+    ]
+    const insert = database.prepare(`INSERT INTO threads
+      (thread_id,created_at,updated_at,metadata,status,thread_values,title)
+      VALUES (?,1,2,?,'idle','{}','PRD')`)
+    for (const [index, value] of malformed.entries())
+      insert.run(
+        `host-${index}`,
+        JSON.stringify({
+          workspacePath: "C:/project",
+          hostProjectRuntime: value,
+          arbitrary: { secret: "not projected" }
+        })
+      )
+    database.close()
+    const page = await clientFor(path).readListPage({ limit: 20 }, 7)
+    expect(page.threads).toHaveLength(malformed.length)
+    for (const thread of page.threads) {
+      expect(thread.metadata).toStrictEqual({ workspacePath: "C:/project", hostProjectRuntime: {} })
+      expect(isOrdinaryFlowMetadata(thread.metadata)).toBe(false)
+    }
+  })
+
   it("bounds its heap and rejects a clean early exit before replacing the worker", async () => {
     expect(THREAD_METADATA_HYDRATION_WORKER_RESOURCE_LIMITS.maxOldGenerationSizeMb).toBe(256)
     const { database, path } = fixture()
@@ -342,9 +420,7 @@ describe("ThreadMetadataHydrationClient", () => {
     clients.push(client)
 
     const first = client.readListPage({ limit: 2 }, 7)
-    const replacements = Array.from({ length: 12 }, () =>
-      client.readListPage({ limit: 2 }, 7)
-    )
+    const replacements = Array.from({ length: 12 }, () => client.readListPage({ limit: 2 }, 7))
     await new Promise<void>((resolve) => setImmediate(resolve))
     expect(worker.queryMessages).toHaveLength(1)
 
@@ -444,11 +520,13 @@ describe("ThreadMetadataHydrationClient", () => {
         ordinal
       )
     }
-    database.prepare(
-      `INSERT INTO thread_goal_events
+    database
+      .prepare(
+        `INSERT INTO thread_goal_events
        (thread_id, goal_id, active_window_id, message, created_at)
        VALUES ('goal-page-thread', 'goal-page', 'window-page', ?, 1)`
-    ).run(`${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal historical`)
+      )
+      .run(`${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal historical`)
     database.exec("COMMIT")
     database.close()
 

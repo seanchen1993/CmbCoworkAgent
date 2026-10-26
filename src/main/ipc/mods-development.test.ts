@@ -20,6 +20,8 @@ function fixture() {
   }
   service.status.mockReturnValue({ workspace: "workspace" })
   const actions = {
+    importSourceSet: vi.fn(), advanceSourceSet: vi.fn(), cancelSourceSet: vi.fn(),
+    installSourceSetDependency: vi.fn(), reconcileSourceSetDependency: vi.fn(),
     undoComposition: vi.fn(),
     cancelComposition: vi.fn(),
     undoTrial: vi.fn(),
@@ -56,6 +58,13 @@ describe("development IPC authority", () => {
     const requestId = "3e901082-1468-4c56-962c-d48e60d9c9b6"
     const digest = "a".repeat(64)
     const cases = [
+      ["import-source-set", f.actions.importSourceSet, scope],
+      ["advance-source-set", f.actions.advanceSourceSet, { ...scope, id: requestId }],
+      ["cancel-source-set", f.actions.cancelSourceSet, { ...scope, id: requestId }],
+      ["install-source-set-dependency", f.actions.installSourceSetDependency,
+        { ...scope, id: requestId, dependencyId: requestId }],
+      ["reconcile-source-set-dependency", f.actions.reconcileSourceSetDependency,
+        { ...scope, id: requestId, dependencyId: requestId }],
       ["prepare-project-delivery", f.actions.prepareProjectDelivery,
         { ...scope, requestId, digest, name: "new-project", version: "1.0.0" }],
       ["install-project-delivery", f.actions.installProjectDelivery,

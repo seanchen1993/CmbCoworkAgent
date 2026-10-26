@@ -186,7 +186,12 @@ npm run dist
 | `npm run dist` | 构建并使用 electron-builder 打包 |
 | `npm run lint` | ESLint 检查 |
 | `npm run typecheck` | TS 类型检查（node + web） |
+| `npm test` | 单元、真实运行时集成与独立回归测试 |
 | `npm run format` | Prettier 格式化 |
+
+`npm test` 包含真实 Git、Python、Java 和 Maven 集成，需准备 Git、Python 3、
+JDK 17+、Maven 及对应离线编译依赖。工具路径从环境配置或 PATH 解析，缺失时明确失败，
+不会跳过真实编译。具体前置条件见[原生组合测试说明](resources/native-compositions/README.md)。
 
 ## 开发者工具日志开关（F12）
 

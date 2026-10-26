@@ -7,6 +7,9 @@ import {
 import { observeWorkflowRun } from "../../agent/workflow/observation"
 import { onWorkflowObservationChange } from "../../agent/workflow/observation-events"
 import { createWorkflowPlatformProvider } from "./platform-workflow-provider"
+import { createNativeProjectContextPlatformProvider } from "./platform-project-context-provider"
+import { executeNativeWorkflowLaunch } from "../../agent/workflow/native-launch"
+import { observeWorkflowDeterministicActions } from "../../agent/workflow/deterministic-action-native"
 import type { NativePlatformCallContext } from "./platform-capabilities-types"
 
 /** Original services are shared by native UI and Mods; this factory owns no task state. */
@@ -14,7 +17,11 @@ export function nativePlatformProviders(
   confirmCancel: (context: NativePlatformCallContext, runId: string) => Promise<boolean>
 ) {
   return [
+    createNativeProjectContextPlatformProvider(),
     createWorkflowPlatformProvider({
+      launch: executeNativeWorkflowLaunch,
+      inspectActions: (context, runId, offset, limit) =>
+        observeWorkflowDeterministicActions(context, runId, offset, limit),
       active: (workspace, threadId) => workflowRunManager.observeActiveRun(workspace, threadId),
       latest: async (workspace, threadId) => {
         const fallbacks = await workflowRunManager.observationFallbacks(workspace, threadId)

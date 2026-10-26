@@ -15,6 +15,11 @@ export function registerModsDevelopmentHandlers(
   service: ModDevelopmentService,
   trusted: (event: IpcMainInvokeEvent) => void,
   actions?: {
+    importSourceSet?(input: AuthoringScope): Promise<unknown>
+    advanceSourceSet?(input: AuthoringScope & { id: string }): Promise<unknown>
+    cancelSourceSet?(input: AuthoringScope & { id: string }): Promise<unknown>
+    installSourceSetDependency?(input: AuthoringScope & { id: string; dependencyId: string }): Promise<unknown>
+    reconcileSourceSetDependency?(input: AuthoringScope & { id: string; dependencyId: string }): Promise<unknown>
     undoComposition(input: AuthoringScope): Promise<unknown>
     cancelComposition(input: AuthoringScope): unknown
     undoTrial(input: AuthoringScope): Promise<unknown>
@@ -40,6 +45,25 @@ export function registerModsDevelopmentHandlers(
       const parsed = schema.safeParse(input)
       if (!parsed.success) throw Error("DEVELOPMENT_INPUT")
       return run(parsed.data)
+    })
+  }
+  register("import-source-set", scope.strict(), input => {
+    if (!actions?.importSourceSet) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
+    return actions.importSourceSet(input)
+  })
+  register("advance-source-set", scope.extend({ id: z.string().uuid() }).strict(), input => {
+    if (!actions?.advanceSourceSet) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
+    return actions.advanceSourceSet(input)
+  })
+  register("cancel-source-set", scope.extend({ id: z.string().uuid() }).strict(), input => {
+    if (!actions?.cancelSourceSet) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
+    return actions.cancelSourceSet(input)
+  })
+  for (const name of ["install-source-set-dependency", "reconcile-source-set-dependency"] as const) {
+    register(name, scope.extend({ id: z.string().uuid(), dependencyId: z.string().uuid() }).strict(), input => {
+      const action = name === "install-source-set-dependency" ? actions?.installSourceSetDependency : actions?.reconcileSourceSetDependency
+      if (!action) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
+      return action(input)
     })
   }
   register("prepare-project-delivery", scope.extend({ requestId: z.string().uuid(),

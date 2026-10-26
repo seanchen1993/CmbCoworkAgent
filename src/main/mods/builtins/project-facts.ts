@@ -1,6 +1,7 @@
 import type { BuiltinProjectFacts } from "../../../shared/mods/builtins"
 import type { BuiltinChangeReviewEvidence } from "../../../shared/mods/builtin-change-review"
 import { resolve } from "node:path"
+import { startHostRuntimeTiming } from "../../services/host-runtime-timing"
 import type {
   HostProjectOperation,
   HostProjectState
@@ -20,6 +21,31 @@ export interface ProjectFactObservation {
 }
 type Reader = (threadId: string, workspace: string) => ProjectFactObservation | undefined
 let reader: Reader | undefined
+type BindingReader = (threadId: string, workspace: string, projectId: string) => boolean
+let bindingReader: BindingReader | undefined
+
+/** Main-only admission read, separate from the richer diagnostic/UI observation. */
+export function registerBuiltinProjectBinding(next: BindingReader) {
+  if (bindingReader) throw Error("PROJECT_BINDING_ALREADY_REGISTERED")
+  bindingReader = next
+  return () => {
+    if (bindingReader === next) bindingReader = undefined
+  }
+}
+export function readBuiltinProjectBinding(
+  threadId: string,
+  workspace: string,
+  projectId: unknown
+): boolean {
+  const finishTiming = startHostRuntimeTiming("hostFacts")
+  try {
+    return typeof projectId === "string" && bindingReader?.(threadId, workspace, projectId) === true
+  } catch {
+    return false
+  } finally {
+    finishTiming()
+  }
+}
 /** Main-only observation provider. It neither creates a runtime nor executes a project. */
 export function registerBuiltinProjectFacts(next: Reader) {
   if (reader) throw Error("PROJECT_FACTS_ALREADY_REGISTERED")
@@ -32,6 +58,7 @@ export function readBuiltinProjectFacts(
   threadId: string,
   workspace: string
 ): ProjectFactObservation {
+  const finishTiming = startHostRuntimeTiming("hostFacts")
   try {
     return (
       reader?.(threadId, workspace) ?? {
@@ -42,8 +69,37 @@ export function readBuiltinProjectFacts(
   } catch {
     // An observational ledger must never prevent ordinary chat from starting.
     return { identity: "unavailable", facts: { state: "unavailable" } }
+  } finally {
+    finishTiming()
   }
 }
+export function matchesProjectHostBinding(
+  threadId: string,
+  workspace: string,
+  binding: unknown,
+  project: HostProjectState | undefined,
+  operation: HostProjectOperation | undefined
+): boolean {
+  if (!project || !binding || typeof binding !== "object") return false
+  const scope = binding as Record<string, unknown>
+  const index = project.manifest.stages.findIndex((stage) => stage.id === scope.stageId)
+  if (
+    (process.platform === "win32"
+      ? resolve(project.workspace).toLowerCase() !== resolve(workspace).toLowerCase()
+      : project.workspace !== workspace) ||
+    project.projectId !== scope.projectId ||
+    project.pluginDigest !== scope.pluginDigest ||
+    !operation ||
+    operation.operationId !== scope.operationId ||
+    index < 0 ||
+    operation.stageId !== scope.stageId ||
+    operation.execution?.threadId !== threadId ||
+    operation.pluginDigest !== project.pluginDigest
+  )
+    return false
+  return true
+}
+
 export function projectHostFacts(
   threadId: string,
   workspace: string,
@@ -54,20 +110,9 @@ export function projectHostFacts(
   if (!project || !binding || typeof binding !== "object") return undefined
   const scope = binding as Record<string, unknown>
   const operation = operations.find((item) => item.operationId === scope.operationId)
-  const index = project.manifest.stages.findIndex((stage) => stage.id === scope.stageId)
-  if (
-    (process.platform === "win32"
-      ? resolve(project.workspace).toLowerCase() !== resolve(workspace).toLowerCase()
-      : project.workspace !== workspace) ||
-    project.projectId !== scope.projectId ||
-    project.pluginDigest !== scope.pluginDigest ||
-    !operation ||
-    index < 0 ||
-    operation.stageId !== scope.stageId ||
-    operation.execution?.threadId !== threadId ||
-    operation.pluginDigest !== project.pluginDigest
-  )
+  if (!operation || !matchesProjectHostBinding(threadId, workspace, binding, project, operation))
     return undefined
+  const index = project.manifest.stages.findIndex((stage) => stage.id === scope.stageId)
   const checks = { passed: 0, failed: 0, blocked: 0, unknown: 0 }
   for (const receipt of operation.receipts) checks[receipt.result]++
   const facts: BuiltinProjectFacts = {

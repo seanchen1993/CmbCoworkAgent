@@ -27,11 +27,25 @@ export interface NativePlatformCallContext {
     requestKey: string
   ): Promise<PlatformCapabilityActionResult>
 }
+export interface NativePlatformActionAccess {
+  identity: string
+  assertCurrent(): void
+  /** Main-only byte fence at the final await acceptance boundary; never a routine authority hook. */
+  assertContentCurrent?(): void
+}
 export interface NativePlatformCapabilityProvider {
   readonly provider: string
   readonly descriptor: PlatformCapabilityDescriptor
   /** Stable implementation identity, supplied only by the main process. */
   readonly digest?: string
+  /** Main-only scope fence, checked before cached reads and receipts as well as dispatch. */
+  accessScope?(context: NativePlatformCallContext): string
+  /** Opt-in native-only selector. Never persist ordinary action input or guest credentials. */
+  actionSelector?(action: string, input: ModObject): ModObject | undefined
+  /** Revalidates exact read evidence before new dispatch, cached receipt and publication. */
+  prepareActionAccess?(
+    context: NativePlatformCallContext, action: string, selector: unknown
+  ): Promise<NativePlatformActionAccess | undefined>
   read?(context: NativePlatformCallContext): Promise<ModJson> | ModJson
   /** Attach to original business events; no timer or observer is started by discovery. */
   watch?(context: NativePlatformCallContext): () => void

@@ -99,6 +99,17 @@ export function resolveTrustedRendererUrl(value: unknown): string | undefined {
   return url && isLocalRendererUrl(url) ? url.href : undefined
 }
 
+/** Match the main window's local load branch, including unpackaged production builds. */
+export function resolveTrustedAppRendererUrl(
+  isPackaged: boolean,
+  developmentUrl: string | undefined,
+  rendererFileUrl: string
+): string | undefined {
+  return resolveTrustedRendererUrl(
+    !isPackaged && developmentUrl ? developmentUrl : rendererFileUrl
+  )
+}
+
 /** Query/hash may carry HMR state; origin and pathname must still match exactly. */
 export function isTrustedRendererUrl(actual: unknown, expected: string | undefined): boolean {
   if (!expected) return false

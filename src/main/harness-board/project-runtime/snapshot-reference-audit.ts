@@ -2,7 +2,8 @@ import { existsSync, lstatSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import type { SnapshotReferenceAudit } from "./snapshot-retention"
-import { parseHostOperation, parseHostProjectState } from "./host-state-protocol"
+import { hostDigest, hostRecord, hostText, parseHostOperation, parseHostProjectState } from "./host-state-protocol"
+import { parseHostLegacyImportReceipt } from "./legacy-import-protocol"
 import { parseProjectComposition } from "../../../shared/project-runtime/composition"
 import { parseCompositionUnitContext, parseCompositionUnitContexts } from "../../../shared/project-runtime/composition-api"
 
@@ -160,6 +161,40 @@ const databases: Array<{ path: string[]; tables: Record<string, Table>; hostSche
           parseHostProjectState(value)
         }
       },
+      host_plan_migrations: {
+        optional: true,
+        columns: ["project_id", "version", "data"],
+        json: ["data"],
+        requiresDigest: true,
+        validate: value => {
+          const migration = hostRecord(value, ["review", "previous", "next", "actor"])
+          const previous = parseHostProjectState(migration.previous)
+          const next = parseHostProjectState(migration.next)
+          const review = hostRecord(migration.review, ["projectId", "expectedVersion", "sourceDigest",
+            "targetDigest", "targetVersion", "inputFingerprint", "candidateInputFingerprint",
+            "preservedStageIds", "remainingStageIds", "contractDigest"])
+          for (const key of ["sourceDigest", "targetDigest", "inputFingerprint", "candidateInputFingerprint",
+            "contractDigest"]) hostDigest(review[key])
+          for (const key of ["preservedStageIds", "remainingStageIds"]) {
+            const ids = review[key]
+            if (!Array.isArray(ids) || ids.length > 32 || new Set(ids).size !== ids.length)
+              throw Error("SNAPSHOT_REFERENCE_RECORD_INVALID")
+            for (const id of ids) hostText(id)
+          }
+          if (migration.actor !== "desktop-user" || previous.projectId !== next.projectId ||
+            next.version !== previous.version + 1 || review.projectId !== previous.projectId ||
+            review.expectedVersion !== previous.version || review.sourceDigest !== previous.pluginDigest ||
+            review.targetDigest !== next.pluginDigest || review.targetVersion !== next.packageVersion)
+            throw Error("SNAPSHOT_REFERENCE_RECORD_INVALID")
+        }
+      },
+      host_legacy_imports: {
+        optional: true, columns: ["project_id", "data"], json: ["data"], requiresDigest: true,
+        validate: value => {
+          const receipt = parseHostLegacyImportReceipt(value)
+          legacy(receipt.review.source)
+        }
+      },
       host_operations: {
         columns: [
           "id",
@@ -193,6 +228,22 @@ const databases: Array<{ path: string[]; tables: Record<string, Table>; hostSche
         json: ["data"],
         requiresDigest: true,
         validate: legacy
+      },
+      legacy_import_freezes: {
+        optional: true, columns: ["project_id", "data"], json: ["data"], requiresDigest: true,
+        validate: value => {
+          const freeze = hostRecord(value, ["source", "reviewDigest", "frozenAt",
+            ...(value && typeof value === "object" && Object.hasOwn(value, "review") ? ["review"] : [])])
+          legacy(freeze.source)
+          hostDigest(freeze.reviewDigest)
+          if (!Number.isSafeInteger(freeze.frozenAt)) throw Error("SNAPSHOT_REFERENCE_RECORD_INVALID")
+          if (freeze.review !== undefined) {
+            const receipt = parseHostLegacyImportReceipt({ review: freeze.review, confirmedAt: freeze.frozenAt,
+              actor: "desktop-user", historicalSuccess: "untrusted-source-only" })
+            if (receipt.review.reviewDigest !== freeze.reviewDigest || JSON.stringify(receipt.review.source) !== JSON.stringify(freeze.source))
+              throw Error("SNAPSHOT_REFERENCE_RECORD_INVALID")
+          }
+        }
       }
     }
   },

@@ -1,5 +1,6 @@
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -21,12 +22,14 @@ import {
   wrapProjectRuntimeManifest,
   CONTEXT_HANDOFF_PROTOCOL
 } from "../../../shared/project-runtime"
+import { CONTEXT_MATERIALS_PROTOCOL } from "../../../shared/project-runtime"
 import {
   extensionContextStorageKey,
   prepareExtensionContext
 } from "../../harness-board/extension-context"
 import { createHostProjectInputIdentity } from "../../harness-board/project-runtime/package-input-identity"
 import { readProjectRecoveryContext } from "../../harness-board/project-runtime/recovery-context"
+import { createProjectActionBinding } from "../../harness-board/project-runtime/action-input"
 import type { HostSkillExecutionContext } from "../../harness-board/project-runtime/host-service"
 
 const cleanup: Array<() => void> = []
@@ -211,6 +214,38 @@ async function fixture(external = true, configurationOnly = false) {
   }
 }
 
+it("checks full input bytes at capture and record boundaries without dropping IO authority", async () => {
+  const f = await fixture()
+  let authorityChecks = 0, fullChecks = 0
+  const pointer = await f.recovery.capture({ ...f.context,
+    assertAuthorityCurrent: () => { authorityChecks++ },
+    assertInputsCurrent: () => { fullChecks++ }
+  })
+  expect(pointer).toBeDefined()
+  expect(fullChecks).toBe(3)
+  expect(authorityChecks).toBeGreaterThan(fullChecks)
+  await expect(f.recovery.assertCurrent(pointer!, () => {})).resolves.toBeUndefined()
+})
+
+it.each(["copy", "publication"])("rejects changed input bytes during recovery %s and removes the incomplete record", async phase => {
+  const f = await fixture()
+  const source = join(f.root, "external-input.txt")
+  writeFileSync(source, "original input")
+  let authorityChecks = 0
+  await expect(f.recovery.capture({ ...f.context,
+    assertAuthorityCurrent: () => {
+      authorityChecks++
+      if (phase === "copy" ? authorityChecks === 4 : readdirSync(f.copies).some(
+        id => existsSync(join(f.copies, id, "record.json"))
+      )) writeFileSync(source, "modified input")
+    },
+    assertInputsCurrent: () => {
+      if (readFileSync(source, "utf8") !== "original input") throw Error("INPUT_CONTENT_CHANGED")
+    }
+  })).rejects.toThrow("INPUT_CONTENT_CHANGED")
+  expect(readdirSync(f.copies)).toEqual(["bindings"])
+})
+
 it.each([true, false])(
   "restores native config, sealed credentials, knowledge and provider context with external binding=%s",
   async (external) => {
@@ -259,6 +294,93 @@ it.each([true, false])(
     ).toEqual(["warehouse"])
   }
 )
+
+it("binds a materials selector to frozen native knowledge and public configuration without transferring grants", async () => {
+  const f = await fixture(true, true)
+  const manifest = f.context.project.manifest
+  manifest.actions = [
+    {
+      id: "selector",
+      ref: {
+        pluginId: "selector-install",
+        plugin: "selector",
+        actionId: "select",
+        digest: "a".repeat(64)
+      }
+    }
+  ]
+  const wrapped = wrapProjectRuntimeManifest(manifest, {
+    apiVersion: "devclaw.extension-contract/v1",
+    requires: [CONTEXT_HANDOFF_PROTOCOL, CONTEXT_MATERIALS_PROTOCOL],
+    context: {
+      sourceAccess: "read-only",
+      mutableData: "host",
+      configuration: "host-resolved",
+      knowledge: { required: true, binding: "knowledge" },
+      provider: {
+        actionId: "selector",
+        operations: ["session-context"],
+        materials: {
+          roots: [{ id: "knowledge", source: "knowledge" }],
+          configuration: ["audience"]
+        }
+      }
+    }
+  })
+  for (const path of [f.source, f.target.packageRoot]) {
+    writeFileSync(join(path, "devclaw.project-runtime.json"), JSON.stringify(wrapped))
+    writeFileSync(
+      join(path, "devclaw.project-actions.lock.json"),
+      JSON.stringify({
+        apiVersion: "devclaw.project-actions-lock/v1",
+        bindings: [
+          createProjectActionBinding(
+            "selector",
+            {
+              ...manifest.actions[0].ref,
+              name: "Select",
+              platform: { id: "materials", version: "1.0.0", action: "select" },
+              inputSchema: { type: "object" }
+            },
+            {}
+          )
+        ]
+      })
+    )
+  }
+  const pointer = (await f.recovery.capture(f.context))!
+  await f.recovery.bind(pointer, f.target, () => {})
+  const bound = readProjectRecoveryContext(f.branch, { name: "docs", version: "1.0.0" })!
+  expect(bound.knowledgeRoot).toBeDefined()
+  expect(bound.configuration?.audience).toBe("engineers")
+  expect(bound.configuration?.token).toBeUndefined()
+  expect(bound.configuration?.secretDefault).toBeUndefined()
+  expect(readFileSync(join(bound.knowledgeRoot!, "rules.md"), "utf8")).toBe(
+    "PRESERVE_EXACT_KNOWLEDGE"
+  )
+  expect(f.store.getGrant(f.branch, "function:selector")).toBeNull()
+  const identity = createHostProjectInputIdentity(f.manager, {
+    rules: () => [],
+    contextDataRoot: f.data
+  })
+  const branch = {
+    ...f.context.project,
+    projectId: "branch",
+    workspace: f.branch,
+    installedPluginId: f.target.installedPluginId
+  }
+  await identity.prepareInputIdentity(branch, f.target.packageRoot)
+  const materials = identity.readContextMaterials(branch, f.target.packageRoot)
+  expect(materials.roots).toEqual([
+    { id: "knowledge", path: bound.knowledgeRoot, source: "knowledge" }
+  ])
+  expect(materials.configuration).toEqual({ audience: "engineers" })
+  writeFileSync(join(f.knowledge, "rules.md"), "original edited after branch snapshot")
+  bound.assertCurrent()
+  expect(readFileSync(join(bound.knowledgeRoot!, "rules.md"), "utf8")).toBe(
+    "PRESERVE_EXACT_KNOWLEDGE"
+  )
+})
 
 it("recovers a real configuration-only Host package through native forms without a guest or transferred approval", async () => {
   const f = await fixture(true, true)

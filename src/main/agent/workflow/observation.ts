@@ -1,4 +1,5 @@
 import type { PersistedWorkflowRun } from "./types"
+import type { ModJson } from "../../../shared/mods/types"
 
 /** A bounded projection of the original store, never a second workflow state holder. */
 export function observeWorkflowRun(
@@ -33,10 +34,28 @@ export function observeWorkflowRun(
       cleanupPending: worktree.cleanupPending ?? false,
       baseCommit: worktree.baseCommit,
       headCommit: worktree.headCommit ?? null,
-      updatedAt: worktree.updatedAt.slice(0, 40)
+      updatedAt: worktree.updatedAt.slice(0, 40),
+      resource: worktree.resource ? {
+        id: worktree.resource.id,
+        generation: worktree.resource.generation,
+        state: worktree.resource.state,
+        budgets: Buffer.byteLength(JSON.stringify(worktree.resource.budgets ?? [])) <= 8000
+          ? JSON.parse(JSON.stringify(worktree.resource.budgets ?? [])) as ModJson : [],
+        budgetsTruncated: Buffer.byteLength(JSON.stringify(worktree.resource.budgets ?? [])) > 8000,
+        workspaceRef: worktree.resource.workspaceRef ?? null,
+        sealedCommit: worktree.resource.sealedCommit ?? null
+      } : null,
+      integrationCommit: worktree.integrationCommit ?? null
     }))
   const result = {
     runId: run.runId.slice(0, 160),
+    scriptSha256: run.scriptSha256,
+    nativeParent: run.nativeParent ?? null,
+    hostExecution: run.hostExecution ? { ...run.hostExecution } : null,
+    result: Buffer.byteLength(JSON.stringify(run.result ?? null)) <= 6000
+      ? JSON.parse(JSON.stringify(run.result ?? null)) as ModJson : null,
+    resultTruncated: Buffer.byteLength(JSON.stringify(run.result ?? null)) > 6000 ||
+      run.resultSidecarStatus === "available" || run.resultSidecarStatus === "unavailable",
     status: run.status,
     name: run.workflowName.slice(0, 160),
     phase: run.currentPhase?.slice(0, 160) ?? null,
@@ -55,11 +74,17 @@ export function observeWorkflowRun(
   }
   // Match the original capability hub's 16 KB state limit; pagination keeps all rows reachable.
   while (
-    Buffer.byteLength(JSON.stringify(result)) > 14_000 &&
+    Buffer.byteLength(JSON.stringify(result)) > 9_000 &&
     (agents.length || worktrees.length)
   ) {
     if (agents.length > worktrees.length || !worktrees.length) agents.pop()
-    else worktrees.pop()
+    else if (worktrees.length === 1 && worktrees[0].resource &&
+        !worktrees[0].resource.budgetsTruncated &&
+        JSON.stringify(worktrees[0].resource.budgets) !== "[]") {
+      // A single large history must advance pagination with an explicit incomplete fact.
+      worktrees[0].resource.budgets = []
+      worktrees[0].resource.budgetsTruncated = true
+    } else worktrees.pop()
   }
   result.nextAgentOffset =
     agentOffset + agents.length < run.agents.length ? agentOffset + agents.length : null

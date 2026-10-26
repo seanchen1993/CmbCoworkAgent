@@ -5,9 +5,11 @@ import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 
-const paths = vi.hoisted(() => ({ database: "" }))
+const paths = vi.hoisted(() => ({ database: "", skills: "" }))
 vi.mock("../storage", () => ({
   getDbPath: () => paths.database,
+  getCustomSkillsDir: () => paths.skills,
+  getPlugins: () => [],
   getOpenworkDir: () => tmpdir(),
   getWindowsSandboxMode: () => "none",
   getBuiltinRobotSettings: () => ({ enabled: false }),
@@ -44,6 +46,8 @@ beforeEach(async () => {
   if (process.platform === "win32") vi.stubEnv("SHELL", "C:/Program Files/Git/bin/bash.exe")
   root = mkdtempSync(join(tmpdir(), "native-background-"))
   paths.database = join(root, "actual.sqlite")
+  paths.skills = join(root, "skills")
+  mkdirSync(paths.skills)
   await db.initializeDatabase()
   globallyEnabled = true
   manager = new ModsManager(join(root, "mods.sqlite"), () => [], async () => true, () => {},
@@ -103,7 +107,13 @@ const timer=setInterval(()=>{if(fs.existsSync(release)){
     expect(mint).toHaveBeenCalledTimes(priorMints + 1)
     const taskId = started.match(/id:\s*([a-f0-9]+)/i)?.[1]
     expect(taskId).toBeTruthy()
-    await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 10000 })
+    await vi.waitUntil(() => {
+      const result = first.sandbox.getTaskOutput(taskId!)
+      if (!result) throw Error("Native background task receipt disappeared before ready")
+      if (result.completed && !existsSync(ready))
+        throw Error(`Native background task ended before ready: ${JSON.stringify(result)}`)
+      return existsSync(ready)
+    }, { timeout: 10000 })
     const pid = JSON.parse(readFileSync(ready, "utf8")).pid as number
     expect(alive(pid)).toBe(true)
     return { taskId: taskId!, pid }

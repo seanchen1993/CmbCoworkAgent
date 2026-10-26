@@ -1,0 +1,623 @@
+{
+  "apiVersion": "devclaw.native-composition/v1",
+  "plugin": {
+    "id": "autobiz-native-slice",
+    "version": "0.1.4",
+    "title": "AutoBiz原生业务流程",
+    "description": "需求、规格、设计、Plan、Code、发布准备和归档的原生迁移；保留明确兼容性缺项，公共Host拥有阶段，workflow和Git资源拥有Code执行。"
+  },
+  "resources": [
+    "knowledge/domain-method.md",
+    "knowledge/configuration-mapping.json",
+    "tests/project-contract.json",
+    "knowledge/review-specs.md",
+    "knowledge/review-design.md",
+    "workflows/native-code.workflow.js",
+    "agents/native-implementer.md",
+    "agents/native-reviewer.md",
+    "agents/native-test-author.md",
+    "devclaw.capabilities.json",
+    "hooks/hooks.json",
+    "hooks/check-secrets.py",
+    "hooks/secret_rules.py",
+    "devclaw.legacy-import.json"
+  ],
+  "environment": [],
+  "modules": [
+    {
+      "id": "convert",
+      "version": "0.1.1",
+      "title": "需求转换",
+      "skill": "modules/convert/SKILL.md",
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "normalized",
+          "path": "NORMALIZED_REQUIREMENTS.json",
+          "contract": "autobiz.normalized/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "convert.shape",
+          "kind": "json-schema",
+          "artifactId": "normalized",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "feature",
+              "revision",
+              "requirements"
+            ],
+            "properties": {
+              "feature": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 2
+              },
+              "requirements": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": "convert.business",
+          "kind": "action",
+          "artifactId": "normalized",
+          "provider": {
+            "plugin": "autobiz-native-rules",
+            "actionId": "convert"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 28000
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "none"
+    },
+    {
+      "id": "prd",
+      "version": "0.1.1",
+      "title": "PRD",
+      "skill": "modules/prd/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "normalized",
+          "contract": "autobiz.normalized/v1"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "prd",
+          "path": "PRD.bundle.json",
+          "contract": "autobiz.prd/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "prd.shape",
+          "kind": "json-schema",
+          "artifactId": "prd",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "feature",
+              "stage",
+              "files"
+            ],
+            "properties": {
+              "feature": {
+                "type": "string",
+                "minLength": 1
+              },
+              "stage": {
+                "type": "string"
+              },
+              "files": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": "prd.business",
+          "kind": "action",
+          "artifactId": "prd",
+          "provider": {
+            "plugin": "autobiz-native-rules",
+            "actionId": "prd"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 28000
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "none"
+    },
+    {
+      "id": "specs",
+      "version": "0.1.1",
+      "title": "行为规格",
+      "skill": "modules/specs/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "normalized",
+          "contract": "autobiz.normalized/v1"
+        },
+        {
+          "artifactId": "prd",
+          "contract": "autobiz.prd/v1"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "specs",
+          "path": "SPECS.bundle.json",
+          "contract": "autobiz.specs/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "specs.shape",
+          "kind": "json-schema",
+          "artifactId": "specs",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "feature",
+              "stage",
+              "files"
+            ],
+            "properties": {
+              "feature": {
+                "type": "string",
+                "minLength": 1
+              },
+              "stage": {
+                "type": "string"
+              },
+              "files": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": "specs.business",
+          "kind": "action",
+          "artifactId": "specs",
+          "provider": {
+            "plugin": "autobiz-native-rules",
+            "actionId": "specs"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 28000
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "none"
+    },
+    {
+      "id": "design",
+      "version": "0.1.1",
+      "title": "设计确认",
+      "skill": "modules/design/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "normalized",
+          "contract": "autobiz.normalized/v1"
+        },
+        {
+          "artifactId": "prd",
+          "contract": "autobiz.prd/v1"
+        },
+        {
+          "artifactId": "specs",
+          "contract": "autobiz.specs/v1"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "design",
+          "path": "DESIGN.bundle.json",
+          "contract": "autobiz.design/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "design.shape",
+          "kind": "json-schema",
+          "artifactId": "design",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "feature",
+              "stage",
+              "files"
+            ],
+            "properties": {
+              "feature": {
+                "type": "string",
+                "minLength": 1
+              },
+              "stage": {
+                "type": "string"
+              },
+              "files": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": "design.business",
+          "kind": "action",
+          "artifactId": "design",
+          "provider": {
+            "plugin": "autobiz-native-rules",
+            "actionId": "design"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 28000
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "human"
+    },
+    {
+      "id": "plan",
+      "version": "0.1.1",
+      "title": "实施计划",
+      "skill": "modules/plan/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "normalized",
+          "contract": "autobiz.normalized/v1"
+        },
+        {
+          "artifactId": "prd",
+          "contract": "autobiz.prd/v1"
+        },
+        {
+          "artifactId": "specs",
+          "contract": "autobiz.specs/v1"
+        },
+        {
+          "artifactId": "design",
+          "contract": "autobiz.design/v1"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "plan",
+          "path": "PLAN.bundle.json",
+          "contract": "autobiz.plan/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "plan.shape",
+          "kind": "json-schema",
+          "artifactId": "plan",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "feature",
+              "stage",
+              "files"
+            ],
+            "properties": {
+              "feature": {
+                "type": "string",
+                "minLength": 1
+              },
+              "stage": {
+                "type": "string"
+              },
+              "files": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": "plan.business",
+          "kind": "action",
+          "artifactId": "plan",
+          "provider": {
+            "plugin": "autobiz-native-rules",
+            "actionId": "plan"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 28000
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "none"
+    },
+    {
+      "id": "code",
+      "version": "1.0.2",
+      "title": "代码交付",
+      "skill": "modules/code/SKILL.md",
+      "executionMode": "workflow",
+      "inputs": [
+        {
+          "artifactId": "normalized",
+          "contract": "autobiz.normalized/v1"
+        },
+        {
+          "artifactId": "prd",
+          "contract": "autobiz.prd/v1"
+        },
+        {
+          "artifactId": "specs",
+          "contract": "autobiz.specs/v1"
+        },
+        {
+          "artifactId": "design",
+          "contract": "autobiz.design/v1"
+        },
+        {
+          "artifactId": "plan",
+          "contract": "autobiz.plan/v1"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "code",
+          "path": "CODE_RESULT.json",
+          "contract": "autobiz.code-result/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "code.schema",
+          "kind": "json-schema",
+          "artifactId": "code",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "feature",
+              "runId"
+            ],
+            "properties": {
+              "feature": {
+                "type": "string",
+                "minLength": 1
+              },
+              "runId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              }
+            }
+          }
+        },
+        {
+          "id": "code.business",
+          "kind": "action",
+          "artifactId": "code",
+          "provider": {
+            "plugin": "autobiz-native-rules",
+            "actionId": "code"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 28000,
+          "bindProviderIdentity": "nativeCompositionProvider"
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "human"
+    },
+    {
+      "id": "cicd",
+      "version": "0.1.1",
+      "title": "CI/CD准备确认",
+      "skill": "modules/cicd/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "normalized",
+          "contract": "autobiz.normalized/v1"
+        },
+        {
+          "artifactId": "prd",
+          "contract": "autobiz.prd/v1"
+        },
+        {
+          "artifactId": "specs",
+          "contract": "autobiz.specs/v1"
+        },
+        {
+          "artifactId": "design",
+          "contract": "autobiz.design/v1"
+        },
+        {
+          "artifactId": "plan",
+          "contract": "autobiz.plan/v1"
+        },
+        {
+          "artifactId": "code",
+          "contract": "autobiz.code-result/v1"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "cicd",
+          "path": "CICD.bundle.json",
+          "contract": "autobiz.cicd/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "cicd.business",
+          "kind": "action",
+          "artifactId": "cicd",
+          "provider": {
+            "plugin": "autobiz-native-rules",
+            "actionId": "cicd"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 28000,
+          "bindProviderIdentity": "nativeCompositionProvider"
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "human"
+    },
+    {
+      "id": "archive",
+      "version": "0.1.1",
+      "title": "过程归档",
+      "skill": "modules/archive/SKILL.md",
+      "inputs": [
+        {
+          "artifactId": "normalized",
+          "contract": "autobiz.normalized/v1"
+        },
+        {
+          "artifactId": "prd",
+          "contract": "autobiz.prd/v1"
+        },
+        {
+          "artifactId": "specs",
+          "contract": "autobiz.specs/v1"
+        },
+        {
+          "artifactId": "design",
+          "contract": "autobiz.design/v1"
+        },
+        {
+          "artifactId": "plan",
+          "contract": "autobiz.plan/v1"
+        },
+        {
+          "artifactId": "code",
+          "contract": "autobiz.code-result/v1"
+        },
+        {
+          "artifactId": "cicd",
+          "contract": "autobiz.cicd/v1"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "archive",
+          "path": "ARCHIVE.bundle.json",
+          "contract": "autobiz.archive/v1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "archive.business",
+          "kind": "action",
+          "artifactId": "archive",
+          "provider": {
+            "plugin": "autobiz-native-rules",
+            "actionId": "archive"
+          },
+          "format": "artifact-reference-v1",
+          "maxBytes": 524288,
+          "bindProviderIdentity": "nativeCompositionProvider"
+        }
+      ],
+      "approval": "none",
+      "resultApproval": "none"
+    }
+  ],
+  "configuration": {
+    "userConfig": {
+      "knowledgeRoot": {
+        "type": "directory",
+        "title": "本次任务知识目录",
+        "description": "绑定已确认的组织知识根；按所选部署单元frontmatter及最近AGENTS.md选择知识。",
+        "required": true
+      },
+      "selectedDeployUnits": {
+        "type": "string",
+        "title": "所选部署单元（JSON）",
+        "description": "必须提供非空JSON数组，每项为deployUnitId及appType(frontend/backend)；使用实际元数据或人工确认，不含凭据。",
+        "required": true
+      }
+    }
+  },
+  "context": {
+    "sourceAccess": "read-only",
+    "mutableData": "host",
+    "configuration": "host-resolved",
+    "knowledge": {
+      "required": true,
+      "binding": "knowledgeRoot"
+    },
+    "provider": {
+      "actionId": "knowledge.context",
+      "operations": [
+        "session-context"
+      ],
+      "materials": {
+        "roots": [
+          {
+            "id": "knowledge",
+            "source": "knowledge"
+          },
+          {
+            "id": "package",
+            "source": "package",
+            "path": "knowledge"
+          }
+        ],
+        "configuration": [
+          "selectedDeployUnits"
+        ]
+      }
+    }
+  },
+  "contextAction": {
+    "id": "knowledge.context",
+    "provider": {
+      "plugin": "autobiz-native-knowledge",
+      "actionId": "context"
+    },
+    "input": {}
+  },
+  "executionResources": {
+    "profiles": [
+      "agents/native-implementer.md",
+      "agents/native-reviewer.md",
+      "agents/native-test-author.md"
+    ],
+    "workspaces": []
+  }
+}

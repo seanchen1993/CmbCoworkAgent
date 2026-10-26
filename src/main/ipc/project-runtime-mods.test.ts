@@ -19,10 +19,13 @@ import { FunctionModsManager } from "../mods/v2/manager"
 import { FunctionGuestRuntime } from "../mods/v2/guest-runtime"
 import { ModControlStore } from "../mods/control-store"
 import { ModsManager } from "../mods/manager"
+import type { ModPluginSource } from "../mods/manager"
+import { compileFunctionPlugin } from "../mods/v2/loader"
+import { createProjectActionBinding } from "../harness-board/project-runtime/action-input"
 
-const state = vi.hoisted(() => ({ enabled: true }))
+const state = vi.hoisted(() => ({ enabled: true, dependencies: [] as ModPluginSource[] }))
 vi.mock("../storage", () => ({
-  getPlugins: () => [{ id: "installation", enabled: state.enabled }]
+  getPlugins: () => [{ id: "installation", enabled: state.enabled }, ...state.dependencies]
 }))
 const nativeDialogs = vi.hoisted(() => ({
   choose: async () => ({ canceled: false, filePaths: ["C:/chosen-knowledge"] }),
@@ -39,12 +42,14 @@ const cleanup: Array<() => void> = []
 afterEach(() => {
   for (const close of cleanup.splice(0).reverse()) close()
   state.enabled = true
+  state.dependencies = []
 })
 async function fixture(
   config = false,
   preview = false,
   migration = false,
-  workspaceControls = false
+  workspaceControls = false,
+  withDependency = false
 ) {
   const root = mkdtempSync(join(tmpdir(), "project-native-mods-")),
     source = join(root, "source"),
@@ -116,6 +121,32 @@ async function fixture(
     join(source, "mods/main.ts"),
     "export function register(on){on('session.start',async($,e,next)=>next(e))}"
   )
+  if (withDependency) {
+    const path = join(root, "dependency")
+    mkdirSync(join(path, "mods"), { recursive: true })
+    writeFileSync(join(path, "plugin.json"), JSON.stringify({
+      name: "dependency-package", version: "1.0.0", mods: "mods/manifest.json"
+    }))
+    writeFileSync(join(path, "mods/manifest.json"), JSON.stringify({
+      apiVersion: "cmb.mods/v2", id: "locked-rules", entry: "main.ts",
+      userConfig: { label: { type: "string", title: "Label", description: "Required", required: true } }
+    }))
+    writeFileSync(join(path, "mods/main.ts"), "export function register(on){on('session.start',async($,e,next)=>next(e))}")
+    state.dependencies = [{ id: "dependency", name: "dependency-package", path, enabled: true }]
+    const compiled = await compileFunctionPlugin(path)
+    const binding = createProjectActionBinding("dependency-check", {
+      pluginId: "dependency", plugin: compiled.name, digest: compiled.digest,
+      actionId: "check", name: "Check", command: "check", inputSchema: { type: "object" }
+    }, {})
+    const manifestPath = join(source, "devclaw.project-runtime.json")
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+    manifest.actions = [{ id: binding.id, ref: binding.ref }]
+    manifest.stages[0].actionIds = [binding.id]
+    writeFileSync(manifestPath, JSON.stringify(manifest))
+    writeFileSync(join(source, "devclaw.project-actions.lock.json"), JSON.stringify({
+      apiVersion: "devclaw.project-actions-lock/v1", bindings: [binding]
+    }))
+  }
   let previewCurrent = true
   const previewScope = {
     threadId: "creator",
@@ -190,11 +221,12 @@ async function fixture(
     : undefined
   const control = core?.store ?? new ModControlStore(join(root, "mods.sqlite"))
   let probe: Promise<void> | undefined
+  let probeEntered: (() => void) | undefined
   let beforePublication: (() => Promise<void>) | undefined
   const manager = new FunctionModsManager(
     control,
     {
-      plugins: () => [],
+      plugins: () => state.dependencies,
       secretProtector: testSecretProtector(),
       enabled: (workspace) => (core ? core.isEnabled(workspace) : true),
       publish: async (_, value) => {
@@ -207,6 +239,7 @@ async function fixture(
       const guests: FunctionGuestRuntime[] = []
       return {
         async load(code, options) {
+          probeEntered?.()
           await probe
           const guest = await FunctionGuestRuntime.create(code, options)
           guests.push(guest)
@@ -313,8 +346,9 @@ async function fixture(
     },
     call: (channel: string, input: unknown, eventOverride = event) =>
       handlers.get("project-runtime:mods-" + channel)!(eventOverride, input),
-    gate(value: Promise<void> | undefined) {
+    gate(value: Promise<void> | undefined, entered?: () => void) {
       probe = value
+      probeEntered = entered
     }
   }
 }
@@ -344,6 +378,128 @@ it("reads exact compiled facts and approves through the original manager only in
   expect(f.control.getGrant(f.workspace, "function:real-compiled-id")).toEqual(ordinary)
   expect(f.control.getGrant(f.root, "function:real-compiled-id")).toBeNull()
   expect(f.service.operations("project")).toEqual([])
+})
+
+it("reviews missing dependency configuration and saves it through the exact native editor without granting", async () => {
+  const f = await fixture(false, false, false, false, true)
+  const review = await f.call("read", "project")
+  expect(review.dependencies).toEqual([expect.objectContaining({
+    pluginId: "dependency", name: "locked-rules", actionIds: ["check"],
+    state: "needs-approval", configurationReady: false, hasConfiguration: true
+  })])
+  const view = await f.native("", {
+    threadId: "project", pluginId: "dependency", expectedWorkspace: f.workspace
+  })
+  expect(view.pluginId).toBe("dependency")
+  await f.native("-save", {
+    threadId: "project", pluginId: view.pluginId, digest: view.digest, key: "label",
+    value: "project-specific", revision: view.savedRevision, workspace: view.workspace
+  })
+  expect(f.control.getGrant(f.workspace, "function:locked-rules")).toBeNull()
+  expect(f.manager.readUserConfigIdentity(f.workspace, "locked-rules").savedRevision).toBe(1)
+  expect(f.service.operations("project")).toEqual([])
+})
+
+it("explicitly grants a configured locked dependency only in the project workspace", async () => {
+  const f = await fixture(false, false, false, true, true)
+  const workspace = f.core!.workspaceKey(f.workspace)
+  new FunctionUserConfigValues(f.control).save(workspace, "locked-rules", {
+    label: { type: "string", title: "Label", description: "Required", required: true }
+  }, "label", "project-specific", 0, () => {})
+  const review = await f.call("read", "project")
+  const digest = review.dependencies[0].digest
+  expect(review.dependencies[0]).toMatchObject({ state: "needs-approval", configurationReady: true })
+  const approved = await f.call("approve-dependency", {
+    projectId: "project", projectVersion: review.projectVersion,
+    packageDigest: review.packageDigest, pluginId: "dependency", compiledDigest: digest
+  })
+  expect(approved.dependencies[0].state).toBe("ready")
+  expect(approved.workspaceEnabled).toBe(true)
+  expect(f.enabledWorkspaces).toEqual([workspace])
+  expect(approved.dependencies[0].configurationReady).toBe(true)
+  expect(f.control.getGrant(workspace, "function:locked-rules")?.digest).toBe(digest)
+  expect(f.control.getGrant(f.root, "function:locked-rules")).toBeNull()
+  expect(f.control.getProjectFunctionGrant(f.workspace, "project", review.packageDigest, "locked-rules")).toBeNull()
+  expect(approved.source.state).toBe("needs-approval")
+  expect(f.service.operations("project")).toEqual([])
+})
+
+it("refuses undeclared providers and wrong workspace, project version or locked digest", async () => {
+  const f = await fixture(false, false, false, false, true)
+  const review = await f.call("read", "project")
+  const input = {
+    projectId: "project", projectVersion: review.projectVersion,
+    packageDigest: review.packageDigest, pluginId: "dependency", compiledDigest: review.dependencies[0].digest
+  }
+  await expect(f.call("approve-dependency", { ...input, pluginId: "arbitrary" }))
+    .rejects.toThrow("PROJECT_DEPENDENCY_NOT_DECLARED")
+  await expect(f.call("approve-dependency", { ...input, projectVersion: input.projectVersion + 1 }))
+    .rejects.toThrow("PROJECT_INPUT_CHANGED")
+  await expect(f.call("approve-dependency", { ...input, compiledDigest: "f".repeat(64) }))
+    .rejects.toThrow("PROJECT_DEPENDENCY_CHANGED")
+  await expect(f.native("", { threadId: "project", pluginId: "arbitrary" }))
+    .rejects.toThrow("PROJECT_INPUT_CHANGED")
+  await expect(f.native("", { threadId: "project", pluginId: "dependency", expectedWorkspace: f.root }))
+    .rejects.toThrow("PROJECT_INPUT_CHANGED")
+  expect(f.control.getGrant(f.workspace, "function:locked-rules")).toBeNull()
+})
+
+it("reports missing, disabled and changed dependency sources without granting or replacing them", async () => {
+  const f = await fixture(false, false, false, false, true)
+  const dependency = state.dependencies[0]
+  dependency.enabled = false
+  expect((await f.call("read", "project")).dependencies[0].state).toBe("disabled")
+  state.dependencies = []
+  expect((await f.call("read", "project")).dependencies[0].state).toBe("missing")
+  state.dependencies = [{ ...dependency, enabled: true }]
+  writeFileSync(join(dependency.path, "mods/main.ts"), "export function register(on){}")
+  expect((await f.call("read", "project")).dependencies[0].state).toBe("source-changed")
+  expect(f.control.getGrant(f.workspace, "function:locked-rules")).toBeNull()
+})
+
+it("reads the exact workspace grant again after asynchronous dependency preparation", async () => {
+  const f = await fixture(false, false, false, false, true)
+  const initial = await f.call("read", "project")
+  const dependency = initial.dependencies[0]
+  f.control.grant(f.workspace, `function:${dependency.name}`, dependency.digest, true)
+  const input = { workspace: f.workspace, plugin: state.dependencies[0], name: dependency.name, digest: dependency.digest }
+  expect(f.manager.isInstalledRuntimeSourceApproved(input)).toBe(true)
+  expect(f.manager.isInstalledRuntimeSourceApproved({ ...input, workspace: f.root })).toBe(false)
+  expect(() => f.manager.isInstalledRuntimeSourceApproved({ ...input, digest: "f".repeat(64) }))
+    .toThrow("MODS_CONFIG_SOURCE_CHANGED")
+  const prepare = f.manager.prepareRuntimeSourceFacts.bind(f.manager)
+  vi.spyOn(f.manager, "prepareRuntimeSourceFacts").mockImplementation(async request => {
+    const facts = await prepare(request)
+    if (request.plugin.id === dependency.pluginId)
+      f.control.grant(f.workspace, `function:${dependency.name}`, dependency.digest, false)
+    return facts
+  })
+  expect((await f.call("read", "project")).dependencies[0].state).toBe("needs-approval")
+  expect(f.manager.isInstalledRuntimeSourceApproved(input)).toBe(false)
+})
+
+it("rechecks the locked provider after the approval probe and rejects a late source replacement", async () => {
+  const f = await fixture(false, false, false, false, true)
+  const review = await f.call("read", "project")
+  const view = await f.native("", { threadId: "project", pluginId: "dependency" })
+  await f.native("-save", {
+    threadId: "project", pluginId: view.pluginId, digest: view.digest, key: "label", value: "configured",
+    revision: view.savedRevision, workspace: view.workspace
+  })
+  let release!: () => void
+  let entered!: () => void
+  const loading = new Promise<void>(resolve => { entered = resolve })
+  f.gate(new Promise<void>(resolve => { release = resolve }), entered)
+  const pending = f.call("approve-dependency", {
+    projectId: "project", projectVersion: review.projectVersion, packageDigest: review.packageDigest,
+    pluginId: "dependency", compiledDigest: view.digest
+  })
+  void pending.catch(() => {})
+  await loading
+  state.dependencies[0] = { ...state.dependencies[0], enabled: false }
+  release()
+  await expect(pending).rejects.toThrow()
+  expect(f.control.getGrant(f.workspace, "function:locked-rules")).toBeNull()
 })
 
 it("enables only the actual project directory after explicit native source consent using the original workspace settings", async () => {

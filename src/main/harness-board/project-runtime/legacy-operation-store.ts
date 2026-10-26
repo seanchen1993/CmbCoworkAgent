@@ -6,6 +6,8 @@ import type {
 } from "../../../shared/project-runtime/legacy-operations"
 import { hostDigest, hostRecord, hostStateError, hostText } from "./host-state-protocol"
 import type { ProjectWorkspaceModeGuard } from "./workspace-mode-guard"
+import type { HostLegacyImportReview } from "../../../shared/project-runtime/host-types"
+import { parseHostLegacyImportReceipt } from "./legacy-import-protocol"
 
 function timestamp(value: unknown): number {
   if (!Number.isSafeInteger(value) || Number(value) < 0) hostStateError("LEGACY_LEDGER_INVALID")
@@ -43,6 +45,8 @@ function binding(value: unknown): LegacyProjectRuntimeBinding {
     enabledAt: timestamp(raw.enabledAt)
   }
 }
+/** Same strict source schema used by the original ledger and immutable import provenance. */
+export const parseLegacyProjectRuntimeBinding = binding
 function operation(value: unknown): LegacyProjectOperation {
   const raw = hostRecord(value, [
     "schemaVersion",
@@ -102,6 +106,7 @@ export class LegacyOperationStore {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS legacy_bindings (project_id TEXT PRIMARY KEY, workspace TEXT NOT NULL, plugin_id TEXT NOT NULL, data TEXT NOT NULL);
       CREATE UNIQUE INDEX IF NOT EXISTS legacy_binding_scope ON legacy_bindings(workspace,plugin_id);
+      CREATE TABLE IF NOT EXISTS legacy_import_freezes (project_id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS legacy_operations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, request_id TEXT NOT NULL, workspace TEXT NOT NULL, plugin_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(project_id,request_id));
       CREATE UNIQUE INDEX IF NOT EXISTS legacy_active_scope ON legacy_operations(workspace,plugin_id) WHERE status IN ('started','unknown');`)
   }
@@ -133,11 +138,56 @@ export class LegacyOperationStore {
       .get(projectId)
     return row ? binding(JSON.parse(String(row.data))) : undefined
   }
+  listBindings(): LegacyProjectRuntimeBinding[] {
+    const rows = this.db.prepare("SELECT data FROM legacy_bindings ORDER BY project_id LIMIT 201").all()
+    if (rows.length > 200) hostStateError("LEGACY_IMPORT_SOURCE_LIMIT")
+    return rows.map(row => binding(JSON.parse(String(row.data))))
+  }
+  importFreeze(projectId: string): { source: LegacyProjectRuntimeBinding; reviewDigest: string; frozenAt: number; review?: HostLegacyImportReview } | undefined {
+    const row = this.db.prepare("SELECT data FROM legacy_import_freezes WHERE project_id=?").get(projectId)
+    if (!row) return undefined
+    const value = JSON.parse(String(row.data))
+    const raw = hostRecord(value, ["source", "reviewDigest", "frozenAt", ...(Object.hasOwn(value, "review") ? ["review"] : [])])
+    const source = binding(raw.source)
+    if (source.projectId !== projectId) hostStateError("LEGACY_IMPORT_FREEZE_INVALID")
+    const review = raw.review === undefined ? undefined : parseHostLegacyImportReceipt({
+      review: raw.review, confirmedAt: raw.frozenAt, actor: "desktop-user", historicalSuccess: "untrusted-source-only"
+    }).review
+    if (review && (review.reviewDigest !== raw.reviewDigest || JSON.stringify(review.source) !== JSON.stringify(source)))
+      hostStateError("LEGACY_IMPORT_FREEZE_INVALID")
+    return { source, reviewDigest: hostDigest(raw.reviewDigest), frozenAt: timestamp(raw.frozenAt), ...(review ? { review } : {}) }
+  }
+  assertNotFrozen(projectId: string): void {
+    if (this.importFreeze(projectId)) hostStateError("LEGACY_PROJECT_FROZEN_FOR_IMPORT")
+  }
+  freezeForImport(projectId: string, reviewDigest: string, assertCurrent: () => void, review?: HostLegacyImportReview) {
+    return this.transaction(() => {
+      const previous = this.importFreeze(projectId)
+      if (previous) {
+        if (previous.reviewDigest !== reviewDigest) hostStateError("LEGACY_IMPORT_REVIEW_CHANGED")
+        assertCurrent()
+        return previous
+      }
+      const source = this.getBinding(projectId) ?? hostStateError("LEGACY_BINDING_MISSING")
+      if (this.db.prepare("SELECT id FROM legacy_operations WHERE project_id=? AND status IN ('started','unknown')").get(projectId))
+        hostStateError("LEGACY_OPERATION_ACTIVE")
+      assertCurrent()
+      if (review) {
+        parseHostLegacyImportReceipt({ review, confirmedAt: this.now(), actor: "desktop-user", historicalSuccess: "untrusted-source-only" })
+        if (review.reviewDigest !== reviewDigest || JSON.stringify(review.source) !== JSON.stringify(source))
+          hostStateError("LEGACY_IMPORT_FREEZE_INVALID")
+      }
+      const frozen = { source, reviewDigest: hostDigest(reviewDigest), frozenAt: this.now(), ...(review ? { review: structuredClone(review) } : {}) }
+      this.db.prepare("INSERT INTO legacy_import_freezes VALUES (?,?)").run(projectId, JSON.stringify(frozen))
+      return frozen
+    })
+  }
   enable(
     input: Omit<LegacyProjectRuntimeBinding, "schemaVersion" | "enabledAt">
   ): LegacyProjectRuntimeBinding {
     const next = binding({ ...input, schemaVersion: 1, enabledAt: this.now() })
     return this.transaction(() => {
+      this.assertNotFrozen(next.projectId)
       const previous = this.getBinding(next.projectId)
       if (previous) {
         if (
@@ -160,6 +210,7 @@ export class LegacyOperationStore {
   /** Removes only opt-in routing. History and unknown ownership are never discarded. */
   disable(projectId: string): void {
     this.transaction(() => {
+      this.assertNotFrozen(projectId)
       if (
         this.db
           .prepare(
@@ -204,6 +255,7 @@ export class LegacyOperationStore {
       businessStateValidity: "unknown"
     })
     const result = this.transaction(() => {
+      this.assertNotFrozen(next.projectId)
       const owner = this.getBinding(next.projectId)
       if (
         !owner ||

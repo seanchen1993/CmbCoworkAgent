@@ -11,6 +11,19 @@ import { normalizeProjectResourcePaths } from "./project-resource-paths"
 import { BUSINESS_MOD_MANIFEST } from "../../../shared/business-mods"
 import { parseBusinessModCatalog } from "../../plugins/business-mod-manifest"
 import { readRuntimeScopedFileAsync } from "../../harness-board/project-runtime/safe-files-async"
+import { NATIVE_COMPOSITION_PATH, nativeCompositionSchema } from "../../plugins/native-composition"
+import { assertOriginalContent, assertOriginalUpload } from "../../services/market-content"
+
+/** Authoring can copy/export source; protected installs remain runtime/diagnostic inputs only. */
+export async function readAuthoringProjectSource(directory: string, resources?: readonly string[]) {
+  assertOriginalContent(directory)
+  const source = await readProjectSource(directory, resources)
+  assertOriginalContent(directory)
+  assertOriginalContent(source.root)
+  for (const file of source.bundle.files)
+    assertOriginalUpload(Buffer.from(file.text, "utf8"), file.path)
+  return source
+}
 
 export const isProjectSourcePath = (path: string, resourcePaths: readonly string[] = []) =>
   [
@@ -26,8 +39,11 @@ export const isProjectSourcePath = (path: string, resourcePaths: readonly string
     "devclaw.project-actions.lock.json",
     "devclaw.harness.json"
   ].includes(path) ||
+  path === NATIVE_COMPOSITION_PATH ||
+  path === "composition/lock.json" ||
   path === ".mcp.json" ||
-  (/^(?:mods|hooks|skills)\/[A-Za-z0-9_./-]+$/.test(path) && hasAuthoringTextExtension(path)) ||
+  (/^(?:mods|hooks|skills|modules|knowledge)\/[A-Za-z0-9_./-]+$/.test(path) &&
+    hasAuthoringTextExtension(path)) ||
   resourcePaths.includes(path)
 
 /** Bounded declared package resources. No credentials, external imports or filesystem links. */
@@ -42,6 +58,18 @@ export async function readProjectSource(
   const root = await realpath(directory)
   let declaredResources = importedResources
   let requiredResources: string[] = []
+  const nativeSource = await readRuntimeScopedFileAsync(
+    root,
+    NATIVE_COMPOSITION_PATH,
+    AUTHORING_BUNDLE_LIMITS.fileBytes
+  )
+  if (nativeSource.bytes) {
+    const source = nativeCompositionSchema.parse(JSON.parse(nativeSource.bytes.toString("utf8")))
+    requiredResources = normalizeProjectResourcePaths([
+      ...new Set([...source.resources, ...source.modules.map((module) => module.skill)])
+    ])
+    declaredResources ??= requiredResources.filter((path) => !isProjectSourcePath(path))
+  }
   {
     // Portable CLI/source readback follows the public catalog's explicit resource closure.
     // These paths remain bounded text input, not execution or filesystem permission grants.
@@ -51,6 +79,7 @@ export async function readProjectSource(
       AUTHORING_BUNDLE_LIMITS.fileBytes
     )
     if (file.bytes) {
+      if (nativeSource.bytes) throw Error("NATIVE_COMPOSITION_MULTIPLE_SOURCES")
       const catalog = parseBusinessModCatalog(
         JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(file.bytes))
       )
@@ -95,7 +124,9 @@ export async function readProjectSource(
       if (matchesResource(path)) normalizeProjectResourcePaths([path], entry.isDirectory())
       if (
         entry.isDirectory() &&
-        (/^(?:mods|hooks|skills)(?:\/[A-Za-z0-9_./-]+)?$/.test(path) ||
+        (/^(?:mods|hooks|skills|modules|knowledge|composition)(?:\/[A-Za-z0-9_./-]+)?$/.test(
+          path
+        ) ||
           path === "tests" ||
           matchesResource(path) ||
           resourcePaths.some((resource) => resource.startsWith(`${path}/`)))

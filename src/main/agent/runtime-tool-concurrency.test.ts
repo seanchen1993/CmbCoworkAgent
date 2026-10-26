@@ -3,6 +3,7 @@ import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
 import { AsyncRWLock, AsyncSemaphore } from "./async-lock"
 import { classifyCommandConcurrency } from "./exec-policy"
+import { assertWorkflowResourceAdmission } from "./workflow/resource-deadline"
 
 interface ToolRequest {
   toolCall: { id: string; name: string }
@@ -53,6 +54,7 @@ function createHarness() {
     "createMiddleware",
     "classifyCommandConcurrency",
     "workflowRunManager",
+    "assertWorkflowResourceAdmission",
     `${compiled}\nreturn createGradedToolConcurrencyMiddleware`
   )
   const create = load(
@@ -60,7 +62,8 @@ function createHarness() {
     AsyncSemaphore,
     (middleware: ConcurrencyMiddleware) => middleware,
     classifyCommandConcurrency,
-    { isActive: (queueId: string) => activeWorkflows.has(queueId) }
+    { isActive: (queueId: string) => activeWorkflows.has(queueId) },
+    assertWorkflowResourceAdmission
   ) as (queueId: string) => ConcurrencyMiddleware
   return { create, activeWorkflows }
 }

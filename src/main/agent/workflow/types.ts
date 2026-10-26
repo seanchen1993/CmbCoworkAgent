@@ -225,7 +225,46 @@ export type WorkflowWorktreeStatus =
 /** Durable ownership record for one workflow-created worktree. This is persisted
  * independently of the model result, so a restart can distinguish user work from
  * disposable checkout residue even when the workflow returns unrelated data. */
+export interface WorkflowWorktreeResourceIdentity {
+  /** Absolute admission facts owned by this original resource; never reset on resume. */
+  budgets?: WorkflowResourceDeadline[]
+  workspaceRef?: string
+  executionResourcesFingerprint?: string
+  id: string
+  sourceIdentity: string
+  parentIdentity: string
+  ownerToken: string
+  generation: number
+  state: "leased" | "sealed" | "unknown"
+  sealedCommit?: string
+}
+
+export interface WorkflowResourceDeadline {
+  budgetId: string
+  generation: number
+  policy: { firstExecutionMs: number; totalMs: number; commandMs: number }
+  startedAt: number
+  firstDeadlineAt: number
+  deadlineAt: number
+  firstCommandAt?: number
+  settledAt?: number
+  status: "active" | "succeeded" | "failed"
+  executionId?: string
+  commands: Array<{
+    commandId: string
+    argv: string[]
+    executionId?: string
+    intentAt?: number
+    startedAt?: number
+    finishedAt?: number
+    exitCode?: number
+    status: "prepared" | "unknown" | "finished"
+  }>
+}
+
 export interface WorkflowWorktreeRecord {
+  /** Optional named resource owned by the original workflow ledger. */
+  resource?: WorkflowWorktreeResourceIdentity
   /** Native association stamped at provisioning; absent in historical records, never guessed. */
   agentIndex?: number
   id: string
@@ -249,6 +288,14 @@ export interface WorkflowWorktreeRecord {
    * cannot distinguish a user's manual merge. */
   integrationParent?: string
   integrationCommit?: string
+  /** Native same-run target; the candidate's original source ownership never changes. */
+  integrationTarget?: {
+    worktreeId: string
+    ownerToken: string
+    generation: number
+    directory: string
+    branch: string
+  }
   dirty: boolean
   status: WorkflowWorktreeStatus
   /** True while a terminal checkout/branch still needs explicit cleanup. */
@@ -276,6 +323,11 @@ export interface WorkflowWorktreeIsolationBoundary {
 
 /** Options accepted by the sandboxed `agent(prompt, opts)` primitive. */
 export interface WorkflowAgentOptions {
+  /** Native checkpoint after a named file-only agent; returns {output, commitSha}. */
+  commitChanges?: boolean
+  /** Opaque named worktree handle issued to this exact run. */
+  resourceHandle?: string
+  deadlineBudgetId?: string
   label?: string
   phase?: string
   /** JSON Schema for validated structured output. */
@@ -303,6 +355,9 @@ export interface WorkflowSubagentResult {
 
 /** Injected executor that runs one subagent. Kept abstract so the engine stays electron-free. */
 export type WorkflowSubagentRunner = (request: {
+  toolAllowlist?: string[]
+  resourceHandle?: string
+  deadlineBudgetId?: string
   prompt: string
   schema?: Record<string, unknown>
   model?: string
@@ -399,7 +454,16 @@ export type WorkflowProgressEmitter = (event: WorkflowProgressEvent) => void
  * regardless of call order. `index` records the call order within its run (for
  * display/persistence) but is NOT used for matching.
  */
+export interface WorkflowResourceJournalCheckpoint {
+  handle: string
+  generation: number
+  resourceId: string
+  sourceIdentity: string
+  headCommit: string
+}
+
 export interface WorkflowJournalEntry {
+  resourceCheckpoint?: WorkflowResourceJournalCheckpoint
   index: number
   /**
    * sha256 of the call identity: child + prompt + schema + resolved model +
@@ -448,7 +512,20 @@ export const WORKFLOW_PROMPT_PREVIEW_MAX_CHARS = 600
 export const WORKFLOW_RESULT_PREVIEW_MAX_CHARS = 800
 
 /** Full persisted state for one workflow run (atomic JSON on disk). */
+export interface HostWorkflowExecution {
+  projectId: string
+  operationId: string
+  stageId: string
+  packageDigest: string
+  inputFingerprint: string
+  threadId: string
+  incarnationKey: string
+}
+
 export interface PersistedWorkflowRun {
+  /** Original main-issued Host source at launch; absent on historical/unowned runs. */
+  hostExecution?: HostWorkflowExecution
+  nativeParent?: { threadId: string; incarnation: string; provider: string; digest: string }
   version: 1
   runId: string
   threadId: string

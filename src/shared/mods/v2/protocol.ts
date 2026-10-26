@@ -25,6 +25,8 @@ export type FunctionRequest = {
       metadata: Omit<FunctionInvocation, "signal">
       uiDrawing?: FunctionUiResolveWireDrawing
     }
+  | { type: "trusted-wait"; requestId: string; callId: string; ticket: string;
+      phase: "begin" | "end"; allowanceMs?: number; creditMs?: number }
   | { type: "dispose" | "cancel" }
   | { type: "reply"; value?: FunctionHostReply; error?: FunctionWireError }
   | FunctionUiResolveWireRequest

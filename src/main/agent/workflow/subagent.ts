@@ -102,6 +102,7 @@ export interface WorkflowSubagentRuntime {
 export interface WorkflowSubagentDeps {
   /** Creates a one-shot agent runtime for a subagent thread. */
   createRuntime: (options: {
+    toolAllowlist?: string[]
     threadId: string
     agentId: string
     modelId?: string
@@ -133,6 +134,7 @@ export interface WorkflowSubagentDeps {
 }
 
 export interface RunWorkflowSubagentRequest {
+  toolAllowlist?: string[]
   flowPromptOnly?: FlowPromptOnlySubagentOptions
   /** Native flow owns retries and must not silently execute the step a second time. */
   singleAttempt?: boolean
@@ -493,6 +495,7 @@ async function runOnce(
       traceContext: tracer?.getTraceContext() ?? deps.traceContext,
       label: request.label,
       disallowedTools: request.disallowedTools,
+      toolAllowlist: request.toolAllowlist,
       shellAccess: request.shellAccess,
       worktreeIsolation: request.worktreeIsolation,
       ...(request.flowPromptOnly && invocation
@@ -787,6 +790,7 @@ export async function createRuntimeWithModelFallback(
     additionalTools?: DynamicStructuredTool[]
     traceContext?: TraceContext
     label: string
+    toolAllowlist?: string[]
     disallowedTools?: string[]
     shellAccess?: AgentShellAccess
     worktreeIsolation?: WorkflowWorktreeIsolationBoundary
@@ -801,6 +805,7 @@ export async function createRuntimeWithModelFallback(
     additionalTools: options.additionalTools,
     traceContext: options.traceContext,
     disallowedTools: options.disallowedTools,
+    toolAllowlist: options.toolAllowlist,
     shellAccess: options.shellAccess,
     worktreeIsolation: options.worktreeIsolation,
     ...(options.flowPromptOnly ? { flowPromptOnly: options.flowPromptOnly } : {})

@@ -15,6 +15,7 @@ import {
 import { isPathInside } from "./paths"
 import { WORKFLOW_TOOL_DESCRIPTION } from "./prompts"
 import { loadAgentProfiles, loadAgentProfilesAsync, type AgentProfile } from "../agent-registry"
+import type { RuntimeExecutionResources } from "../../plugins/runtime-source-scope"
 import { workflowRunManager } from "./run-manager"
 import {
   clearAllAgentToolStreams,
@@ -83,6 +84,10 @@ const workflowToolSchema = z.object({
 })
 
 export interface CreateWorkflowToolOptions {
+  executionResources?: RuntimeExecutionResources
+  /** Main-only admission guard, rechecked after asynchronous approval and immediately before launch. */
+  assertCurrent?: () => void
+  nativeParent?: PersistedWorkflowRun["nativeParent"]
   threadId: string
   workspacePath: string
   modelId?: string
@@ -99,6 +104,8 @@ export interface CreateWorkflowToolOptions {
   approvalStore?: ApprovalStore
   /** Surfaces the approval card on the parent thread's UI. */
   requestApproval?: (req: ApprovalRequest) => Promise<ApprovalDecision>
+  /** Native call admission may end before the background owner's approval channel does. */
+  requestLaunchApproval?: (req: ApprovalRequest) => Promise<ApprovalDecision>
   subagentDeps: Omit<WorkflowSubagentDeps, "parentThreadId" | "defaultModelId">
   /** File-operation admission shared with agent tools. The engine supplies
    * per-file exclusivity. Threaded to the engine via the launch request. */
@@ -161,6 +168,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
 
   return tool(
     async (input: z.infer<typeof workflowToolSchema>) => {
+      options.assertCurrent?.()
       if (workflowRunManager.isActive(threadId)) {
         throw new Error(
           `A dynamic workflow (${workflowRunManager.activeRunId(threadId)}) is already running in this thread. Wait for its task-notification, or the user can cancel it from the workflow panel.`
@@ -211,7 +219,9 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // One immutable registry snapshot is both fingerprinted for approval and
       // executed by the engine. A profile file changed while the approval card
       // is open therefore cannot silently alter this launch's permissions.
-      const executionProfiles = await loadAgentProfilesAsync(workspacePath)
+      const executionProfiles = options.executionResources
+        ? structuredClone(options.executionResources.profiles)
+        : await loadAgentProfilesAsync(workspacePath)
 
       // Run-before approval gate. Reject → don't launch; return a plain message
       // so the model relays it to the user instead of retrying.
@@ -235,6 +245,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
           2
         )
       }
+      options.assertCurrent?.()
 
       // Journal dropped (script/args changed) but the runId is REUSED: the fresh re-run's agents may
       // have different callHashes, orphaning the prior run's tool-stream sidecars (the per-agent
@@ -270,8 +281,21 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // before launch; launch itself remains a synchronous active-map critical
       // section, so concurrent calls still cannot start two runs on one thread.
       await workflowRunManager.prepareLaunch(workspacePath, threadId)
+      options.assertCurrent?.()
 
       const launch = workflowRunManager.launch({
+        executionResources: options.executionResources,
+        approveResourceMerge: async plan => {
+          if (!options.requestApproval) throw Error("WORKTREE_RESOURCE_APPROVAL_UNAVAILABLE")
+          const decision = await options.requestApproval({ id: randomUUID(),
+            tool_call: { id: randomUUID(), name: "workflow_resource_merge", args: { ...plan } },
+            safety_level: "needs_approval", cwd: workspacePath,
+            reason: "确认将已封存工作树的真实提交合入源分支；拒绝将保留候选。此确认独立于项目产物审批。",
+            allowed_decisions: ["approve", "reject"], allowed_approval_types: ["approve", "reject"]
+          } as ApprovalRequest)
+          return decision?.type === "approve"
+        },
+        nativeParent: options.nativeParent,
         threadId,
         workspacePath,
         runId,
@@ -422,7 +446,7 @@ async function ensureWorkflowApproved(
     key,
     patternKey,
     async () => {
-      const approval = await requestApproval({
+      const approval = await (options.requestLaunchApproval ?? requestApproval)({
         id: randomUUID(),
         tool_call: {
           id: randomUUID(),

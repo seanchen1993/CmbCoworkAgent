@@ -1,3 +1,4 @@
+import { createTrustedFunctionWaitScope } from "./trusted-function-wait"
 import type { ModJson } from "../../../shared/mods/types"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { FunctionDispatchDeadline } from "./dispatch-deadline"
@@ -17,6 +18,7 @@ export function boundFunctionStream<T extends AsyncGenerator<ModJson, ModJson>>(
   const actualTerminal = new Promise<void>((resolve) => {
     terminal = resolve
   })
+  const logicalWaitScope = createTrustedFunctionWaitScope()
   let ended = false
   let closing: Promise<IteratorResult<ModJson, ModJson>> | undefined
   let activeAdvances = 0
@@ -42,6 +44,7 @@ export function boundFunctionStream<T extends AsyncGenerator<ModJson, ModJson>>(
       deadline.signal.removeEventListener("abort", listener)
     }
     if (!activeAdvances) closeShared()
+    logicalWaitScope.close()
     terminal()
   }
   const startClose = (value: ModJson): Promise<IteratorResult<ModJson, ModJson>> => {
@@ -58,8 +61,7 @@ export function boundFunctionStream<T extends AsyncGenerator<ModJson, ModJson>>(
     void closing.catch(() => {})
     return closing
   }
-  const advance = async (value: ModJson | undefined) => {
-    if (ended) return source.next(value)
+  const advance = (value: ModJson | undefined) => ended ? source.next(value) : logicalWaitScope.run(async () => {
     activeAdvances++
     const { value: deadline, shared } = scope.deadline()
     if (shared && !watched.has(deadline)) {
@@ -69,7 +71,7 @@ export function boundFunctionStream<T extends AsyncGenerator<ModJson, ModJson>>(
     }
     try {
       deadline.assertLive()
-      const actual = source.next(value)
+      const actual = deadline.run(() => source.next(value))
       void actual.then(
         (item) => {
           if (item.done) finish()
@@ -86,7 +88,7 @@ export function boundFunctionStream<T extends AsyncGenerator<ModJson, ModJson>>(
       if (!shared) deadline.close()
       if (ended && !activeAdvances) closeShared()
     }
-  }
+  })
   const close = async (value: ModJson): Promise<IteratorResult<ModJson, ModJson>> => {
     scope.cancel(new ModFunctionError("MODS_STREAM_CLOSED"))
     const deadline = new FunctionDispatchDeadline(scope.cleanupMs ?? 1000)

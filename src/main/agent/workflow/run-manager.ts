@@ -1,26 +1,36 @@
+import { captureHostWorkflowExecution } from "./host-execution"
 import { BrowserWindow, webContents, type WebContents } from "electron"
 import { mkdir, stat, writeFile } from "fs/promises"
 import { join, resolve } from "path"
 import { canonicalizeWorkspacePath } from "../context-history-path"
+import { getPersistedThreadWorkspaceBindings } from "../../db"
+import { workspacePathsOverlap } from "../../../shared/workspace-path"
 import { serializeWorkflowAgentSnapshotMessages } from "./agent-snapshot"
 import { observeWorkflowRun, type WorkflowRunObservation } from "./observation"
 import { emitWorkflowObservationChange } from "./observation-events"
 import { runWorkflowEngine, toJsonSafe } from "./engine"
+import { nativeWorkflowDeterministicActionRunner, nativeWorkflowDeadlineReceiptVerifier } from "./deterministic-action-native"
+import { workflowResourceDeadlineSignal } from "./resource-deadline"
+import { createWorkflowWorktreeResourceRunner } from "./worktree-resource"
+import { withWorkflowWorktreeActionScope } from "./worktree-action-scope"
 import { isPathInside } from "./paths"
 import {
   clearAgentToolStream,
   countUnresolvedWorkflowWorktreesAsync,
+  assertWorkspaceWorkflowRunsSettled,
   createWorkflowRunStore,
   findUndeliveredTerminalRun,
   findUndeliveredTerminalRunAsync,
   getWorkflowRunsDir,
   isWorkflowRunDirDisposed,
   loadWorkflowRunForResumeAsync,
+  loadWorkflowRunAsync,
   markWorkflowRunNotified,
   newerWorkflowWorktreeRecord,
   persistAgentToolStream,
   persistRecoveredRun,
   prepareWorkflowRunStorage,
+  sha256Hex,
   pruneWorkflowRuns,
   type WorkflowFlushFailureSnapshot,
   workflowThreadDisposalEpoch
@@ -35,7 +45,7 @@ import {
   type WorkflowWorktreeIsolationBoundary,
   type WorkflowWorktreeRecord
 } from "./types"
-import { WorkflowWorktreeLedger } from "./worktree-lease"
+import { WorkflowWorktreeLedger, type WorkflowWorktreeMergePlan } from "./worktree-lease"
 import {
   identifyRepository,
   listWorkflowWorktreeRecordsForPrune,
@@ -45,6 +55,9 @@ import { emitAppAttention } from "../../app-attention-events"
 import type { AgentProfile } from "../agent-registry"
 import {
   captureRuntimePluginSourceToken,
+  withRuntimePluginSource,
+  captureRuntimePluginSourceAuthorityGuard,
+  captureRuntimePluginSourceContentGuard,
   type RuntimePluginSourceToken
 } from "../../plugins/runtime-source-scope"
 
@@ -64,6 +77,9 @@ import {
 export const WORKFLOW_EVENTS_CHANNEL_PREFIX = "agent:workflow-events:"
 
 export interface WorkflowLaunchRequest {
+  executionResources?: import("../../plugins/runtime-source-scope").RuntimeExecutionResources
+  approveResourceMerge?(plan: WorkflowWorktreeMergePlan): Promise<boolean>
+  nativeParent?: PersistedWorkflowRun["nativeParent"]
   threadId: string
   workspacePath: string
   runId: string
@@ -109,6 +125,7 @@ interface ActiveWorkflowRun {
   workspacePath: string
   /** Canonical identity prepared asynchronously before production launch. */
   workspaceKey: string
+  resourceWorkspacePaths: readonly string[]
   runId: string
   workflowName: string
   controller: AbortController
@@ -516,6 +533,21 @@ function workspaceKey(p: string): string {
 }
 
 class WorkflowRunManager {
+  private readonly resourceRevisions = new Map<string, number>()
+
+  private resourceRevisionFor(workspacePath: string): number {
+    const key = workspaceKey(workspacePath)
+    let revision = 0
+    for (const [changed, value] of this.resourceRevisions) {
+      if (changed === key || isPathInside(changed, key) || isPathInside(key, changed)) revision += value
+    }
+    return revision
+  }
+
+  private recordResourceMutation(workspacePath: string): void {
+    const key = workspaceKey(workspacePath)
+    this.resourceRevisions.set(key, (this.resourceRevisions.get(key) ?? 0) + 1)
+  }
   private readonly active = new Map<string, ActiveWorkflowRun>()
   /** One bounded failure fact from the original physical owner, never a second run state. */
   private readonly retiredSourceFailures = new WeakMap<RuntimePluginSourceToken, Error>()
@@ -708,6 +740,43 @@ class WorkflowRunManager {
     if (entry?.runId === runId) await entry.settled
   }
 
+  /** Capture only the exact in-process Host launch, never an id supplied by a model. */
+  captureHostRun(token: RuntimePluginSourceToken, threadId: string, runId: string) {
+    const entry = this.active.get(threadId)
+    if (!entry || entry.runId !== runId || entry.sourceToken !== token)
+      throw Error("HOST_WORKFLOW_OWNER_CHANGED")
+    const hostExecution = withRuntimePluginSource(token, () => captureHostWorkflowExecution(threadId))
+    if (!hostExecution) throw Error("HOST_WORKFLOW_EXECUTION_MISSING")
+    const startedAt = entry.observe().startedAt
+    const executionIdentity = JSON.stringify(hostExecution)
+    const assertCurrent = () => {
+      const current = withRuntimePluginSource(token, () => captureHostWorkflowExecution(threadId))
+      if (JSON.stringify(current) !== executionIdentity)
+        throw Error("HOST_WORKFLOW_EXECUTION_CHANGED")
+      const active = this.active.get(threadId)
+      if (active && active !== entry) throw Error("HOST_WORKFLOW_OWNER_CHANGED")
+    }
+    const wait = async () => {
+      assertCurrent()
+      await entry.settled
+      assertCurrent()
+      if (entry.sourceSettlementFailure() || this.retiredSourceFailures.get(token))
+        throw Error("HOST_WORKFLOW_SETTLEMENT_UNCONFIRMED")
+    }
+    return Object.freeze({
+      runId, startedAt, assertCurrent, wait,
+      read: async () => {
+        await wait()
+        const saved = await loadWorkflowRunAsync(entry.workspacePath, threadId, runId)
+        assertCurrent()
+        if (!saved || saved.startedAt !== startedAt || saved.threadId !== threadId ||
+            saved.runId !== runId || JSON.stringify(saved.hostExecution) !== executionIdentity)
+          throw Error("HOST_WORKFLOW_EXECUTION_CHANGED")
+        return saved
+      }
+    })
+  }
+
   /** Transfer only this admission's resources to its already-running physical children.
    * The foreground turn returns immediately; a later notification is a different owner.
    */
@@ -737,6 +806,12 @@ class WorkflowRunManager {
     })
     void finalization.catch(() => console.error("[Workflow] Owned source cleanup unconfirmed"))
     return { deferred: true }
+  }
+
+  cancelOwnedRuntimeWorkflows(token: RuntimePluginSourceToken): void {
+    for (const entry of this.active.values()) {
+      if (entry.sourceToken === token) this.cancel(entry.threadId, entry.runId, false)
+    }
   }
 
   broadcastWorktreeRecord(threadId: string, runId: string, record: WorkflowWorktreeRecord): void {
@@ -833,14 +908,14 @@ class WorkflowRunManager {
   activeRunForWorkspace(workspacePath: string): { threadId: string; runId: string } | undefined {
     const key = workspaceKey(workspacePath)
     for (const run of this.active.values()) {
-      const runKey = run.workspaceKey
+      const runKeys = [run.workspaceKey, ...run.resourceWorkspacePaths.map(workspaceKey)]
       // Equal OR nested EITHER way: a run on /repo and a launch/turn on
       // /repo/packages/a write into the same tree — the parent run can touch the
       // child dir, and the child's auto-commit can capture the parent run's edits.
       // An exact-path match alone leaves nested workspaces racing, so treat a
       // parent/child overlap as a clash too. (auto-commit skip reuses this method,
       // so both the launch mutex and the skip are covered by this one change.)
-      if (runKey === key || isPathInside(runKey, key) || isPathInside(key, runKey)) {
+      if (runKeys.some(runKey => runKey === key || isPathInside(runKey, key) || isPathInside(key, runKey))) {
         return { threadId: run.threadId, runId: run.runId }
       }
     }
@@ -857,9 +932,58 @@ class WorkflowRunManager {
     await Promise.all(
       activeAtStart.map(async (run) => {
         run.workspaceKey = await prepareWorkspaceKey(run.workspacePath)
+        await Promise.all(run.resourceWorkspacePaths.map(prepareWorkspaceKey))
       })
     )
     return this.activeRunForWorkspace(workspacePath)
+  }
+
+  /** Read-only migration guard: existing run and Git manifests remain the owners. */
+  async assertWorkspaceResourcesSettled(workspacePath: string, threadId?: string): Promise<{ assertCurrent(): void }> {
+    const revision = this.resourceRevisionFor(workspacePath)
+    const assertIdle = () => {
+      if (this.resourceRevisionFor(workspacePath) !== revision) throw Error("WORKFLOW_RESOURCES_CHANGED")
+      if (this.activeRunForWorkspace(workspacePath) || this.overlappingIntegrationLease(workspacePath))
+        throw Error("WORKFLOW_RESOURCES_ACTIVE")
+      if ([...this.flushFailedRuns.values()].some(run =>
+        this.flushFailedWorkspaceKeys.get(run.runId) === workspaceKey(workspacePath)))
+        throw Error("WORKFLOW_RESOURCES_UNCONFIRMED")
+    }
+    await this.activeRunForWorkspaceAsync(workspacePath)
+    assertIdle()
+    const bindings = () => getPersistedThreadWorkspaceBindings()
+      .filter(binding => workspacePathsOverlap(binding.workspacePath, workspacePath))
+      .map(binding => binding.workspacePath)
+    const knownWorkspaces = [...new Set(bindings())].sort()
+    const bindingIdentity = JSON.stringify(knownWorkspaces)
+    const persisted = await assertWorkspaceWorkflowRunsSettled(workspacePath, knownWorkspaces)
+    const assertPersisted = () => {
+      if (JSON.stringify([...new Set(bindings())].sort()) !== bindingIdentity)
+        throw Error("WORKFLOW_RESOURCES_CHANGED")
+      persisted.assertCurrent()
+    }
+    if (threadId && await countUnresolvedWorkflowWorktreesAsync(workspacePath, threadId,
+      { failClosedOnUnreadable: true })) throw Error("WORKFLOW_RESOURCES_UNSETTLED")
+    const repository = await identifyRepository(workspacePath)
+    if (repository) {
+      const manifests = await listWorkflowWorktreeRecordsForPrune(repository.commonDir)
+      if (!manifests.reliable) throw Error("WORKFLOW_RESOURCES_UNCONFIRMED")
+      for (const record of manifests.records) {
+        const root = workspaceKey(record.sourceRoot), selected = workspaceKey(workspacePath)
+        if (root !== selected && !isPathInside(root, selected) && !isPathInside(selected, root)) continue
+        if ((record.status !== "merged" && record.status !== "discarded") || record.cleanupPending)
+          throw Error("WORKFLOW_RESOURCES_UNSETTLED")
+        try {
+          await stat(record.directory)
+          throw Error("WORKFLOW_RESOURCES_UNSETTLED")
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+        }
+      }
+    }
+    assertPersisted()
+    assertIdle()
+    return { assertCurrent: () => { assertPersisted(); assertIdle() } }
   }
 
   private overlappingIntegrationLease(
@@ -886,16 +1010,18 @@ class WorkflowRunManager {
         reason: `workspace integration is already in progress for ${existing.ownerRunId}`
       }
     }
-    const active = this.activeRunForWorkspace(workspacePath)
-    if (active && active.runId !== ownerRunId) {
+    const key = workspaceKey(workspacePath)
+    const active = [...this.active.values()].find(run => run.runId !== ownerRunId &&
+      (run.workspaceKey === key || isPathInside(run.workspaceKey, key) || isPathInside(key, run.workspaceKey)))
+    if (active) {
       return {
         acquired: false,
         reason: `workflow ${active.runId} is active on the source workspace; wait before integration`
       }
     }
-    const key = workspaceKey(workspacePath)
     const lease = { workspacePath, workspaceKey: key, ownerRunId }
     this.workspaceIntegrationLeases.set(key, lease)
+    this.recordResourceMutation(workspacePath)
     return {
       acquired: true,
       release: () => {
@@ -1129,7 +1255,8 @@ class WorkflowRunManager {
         "This thread is changing mode or workspace; retry the workflow after the transition finishes."
       )
     }
-    const integration = this.overlappingIntegrationLease(request.workspacePath)
+    const integration = [request.workspacePath, ...(request.executionResources?.workspaces.map(item => item.path) ?? [])]
+      .map(path => this.overlappingIntegrationLease(path)).find(Boolean)
     if (integration) {
       throw new Error(
         `Cannot launch a workflow while source integration is in progress for ${integration.ownerRunId}.`
@@ -1172,6 +1299,8 @@ class WorkflowRunManager {
       description: request.parsed.meta.description,
       script: request.script,
       scriptSha256: request.scriptSha256,
+      nativeParent: request.nativeParent,
+      hostExecution: captureHostWorkflowExecution(request.threadId),
       args: toJsonSafe(request.args),
       status: "running",
       phases: [],
@@ -1220,17 +1349,24 @@ class WorkflowRunManager {
       threadId: request.threadId,
       workspacePath: request.workspacePath,
       workspaceKey: workspaceKey(request.workspacePath),
+      resourceWorkspacePaths: request.executionResources?.workspaces.map(item => item.path) ?? [],
       runId: request.runId,
       workflowName: request.parsed.meta.name,
       controller,
       userCancelled: false,
       settled: Promise.resolve(),
       worktrees: new WorkflowWorktreeLedger({
+        executionResources: request.executionResources,
         workspacePath: request.workspacePath,
         runId: request.runId,
         threadId: request.threadId,
         signal: controller.signal,
+        parentIdentity: sha256Hex(JSON.stringify([request.scriptSha256, request.args ?? null])),
+        existingWorktrees: request.existingWorktrees,
+        integrate: (sourceRoot, work) => this.withWorkspaceIntegrationLease(sourceRoot, request.runId, work),
+        approveMerge: request.approveResourceMerge,
         onRecordChange: (record) => {
+          this.recordResourceMutation(record.sourceRoot)
           runStore.update((run) => {
             const records = run.worktrees ?? []
             const index = records.findIndex((candidate) => candidate.id === record.id)
@@ -1245,6 +1381,7 @@ class WorkflowRunManager {
           })
         },
         onRecordDelete: (record) => {
+          this.recordResourceMutation(record.sourceRoot)
           runStore.update((run) => {
             run.worktrees = (run.worktrees ?? []).filter((candidate) => candidate.id !== record.id)
           })
@@ -1261,6 +1398,39 @@ class WorkflowRunManager {
     }
     this.notificationOwners.set(request.runId, request.notificationOwner ?? "desktop")
     this.active.set(request.threadId, entry)
+    this.recordResourceMutation(request.workspacePath)
+    for (const path of entry.resourceWorkspacePaths) this.recordResourceMutation(path)
+    const resourceAuthority = captureRuntimePluginSourceAuthorityGuard()
+    const resourceContent = captureRuntimePluginSourceContentGuard()
+    const assertResourceOwner = () => {
+      controller.signal.throwIfAborted()
+      resourceAuthority?.()
+      resourceContent?.()
+      if (this.active.get(request.threadId) !== entry) throw Error("WORKTREE_RESOURCE_OWNER_CHANGED")
+    }
+    const worktreeRunner = createWorkflowWorktreeResourceRunner(entry.worktrees,
+      sha256Hex(JSON.stringify([request.scriptSha256, request.args ?? null])), assertResourceOwner,
+      nativeWorkflowDeadlineReceiptVerifier(request))
+    const actionRunner = nativeWorkflowDeterministicActionRunner({
+      workspacePath: request.workspacePath, threadId: request.threadId, runId: request.runId,
+      scriptSha256: request.scriptSha256, args: request.args, signal: controller.signal,
+      runResource: (handle, work, budgetId) => entry.worktrees.useResource(handle, async info => {
+        const boundary = await resolveWorkflowWorktreeIsolationBoundary(info)
+        return withWorkflowWorktreeActionScope({ workspace: workspaceKey(request.workspacePath),
+          threadId: request.threadId, runId: request.runId, boundary,
+          assertCurrent: assertResourceOwner }, work)
+      }, budgetId),
+      runDeadlineResource: (handle, budgetId, work) => entry.worktrees.useResource(handle, work, budgetId),
+      runVerificationResource: (verification, work) => entry.worktrees.useVerificationResource(
+        verification.handle, verification.expectedCommit, assertResourceOwner,
+        scope => withWorkflowWorktreeActionScope({ ...scope,
+          workspace: workspaceKey(request.workspacePath), threadId: request.threadId,
+          runId: request.runId }, work)),
+      assertCurrent: () => {
+        controller.signal.throwIfAborted()
+        if (this.active.get(request.threadId) !== entry) throw Error("WORKFLOW_ACTION_PARENT_CHANGED")
+      }
+    })
     const retireSourceOwner = async () => {
       const failure = entry.sourceSettlementFailure()
       if (entry.sourceToken && failure && !this.retiredSourceFailures.has(entry.sourceToken))
@@ -1310,6 +1480,21 @@ class WorkflowRunManager {
           // agents instead of replaying the old model's cached result. (#1)
           defaultModelId: request.subagentDeps.defaultModelId,
           runExclusiveFileWrite: request.runExclusiveFileWrite,
+          actionRunner: actionRunner ? async (...args) => {
+            if (!await runStore.isCurrentSnapshotPersistedAsync())
+              throw Error("WORKFLOW_ACTION_PARENT_NOT_DURABLE")
+            return actionRunner(...args)
+          } : undefined,
+          worktreeRunner: async (...args) => {
+            if (!await runStore.isCurrentSnapshotPersistedAsync())
+              throw Error("WORKTREE_RESOURCE_PARENT_NOT_DURABLE")
+            return worktreeRunner(...args)
+          },
+          resourceJournal: {
+            commit: (handle, expectedParent, budgetId) => entry.worktrees.commitResourceChanges(handle, expectedParent, budgetId),
+            capture: handle => entry.worktrees.captureResourceJournalCheckpoint(handle),
+            validate: (handle, checkpoint) => entry.worktrees.validateResourceJournalCheckpoint(handle, checkpoint)
+          },
           subagentRunner: async (subRequest) => {
             // Display-only tool stream (best-effort; never affects the run): keep this
             // agent's latest "values" snapshot, broadcast it live while it's being
@@ -1354,9 +1539,11 @@ class WorkflowRunManager {
                 label: subRequest.label,
                 phase: subRequest.phase,
                 runId: request.runId,
-                signal: subRequest.signal,
+                signal: workflowResourceDeadlineSignal()
+                  ? AbortSignal.any([subRequest.signal, workflowResourceDeadlineSignal()!]) : subRequest.signal,
                 roleSystemPrompt: subRequest.roleSystemPrompt,
                 disallowedTools: subRequest.disallowedTools,
+                toolAllowlist: subRequest.toolAllowlist,
                 shellAccess: subRequest.shellAccess,
                 worktreeIsolation,
                 onValues: (snapshot) => {
@@ -1371,6 +1558,14 @@ class WorkflowRunManager {
                 }
               })
 
+            if (subRequest.resourceHandle) {
+              assertResourceOwner()
+              return entry.worktrees.useResource(subRequest.resourceHandle, async info => {
+                const boundary = await resolveWorkflowWorktreeIsolationBoundary(info)
+                assertResourceOwner()
+                return spawn(boundary)
+              }, subRequest.deadlineBudgetId).finally(finishToolStream)
+            }
             if (subRequest.isolation !== "worktree") {
               return await spawn().finally(finishToolStream)
             }
@@ -1643,10 +1838,12 @@ class WorkflowRunManager {
   async findPendingNotificationAsync(
     workspacePath: string,
     threadId: string,
-    options: { owner?: WorkflowNotificationOwner } = {}
+    options: { owner?: WorkflowNotificationOwner; expected?: { runId: string; startedAt: string } } = {}
   ): Promise<PersistedWorkflowRun | null> {
     const ownedByCaller = (run: PersistedWorkflowRun): boolean =>
-      options.owner === undefined || (run.notificationOwner ?? "desktop") === options.owner
+      (options.owner === undefined || (run.notificationOwner ?? "desktop") === options.owner) &&
+      (!options.expected || (run.runId === options.expected.runId &&
+        run.startedAt === options.expected.startedAt))
     for (const snapshot of this.flushFailedRuns.values()) {
       if (
         snapshot.threadId === threadId &&
@@ -1672,7 +1869,7 @@ class WorkflowRunManager {
   async claimPendingNotificationAsync(
     workspacePath: string,
     threadId: string,
-    options: { owner?: WorkflowNotificationOwner } = {}
+    options: { owner?: WorkflowNotificationOwner; expected?: { runId: string; startedAt: string } } = {}
   ): Promise<PersistedWorkflowRun | null> {
     const run = await this.findPendingNotificationAsync(workspacePath, threadId, options)
     if (!run || this.inFlightNotifications.has(run.runId)) return null
@@ -1991,6 +2188,10 @@ class WorkflowRunManager {
 }
 
 export const workflowRunManager = new WorkflowRunManager()
+
+export function cancelOwnedRuntimeWorkflows(token: RuntimePluginSourceToken): void {
+  workflowRunManager.cancelOwnedRuntimeWorkflows(token)
+}
 
 export function deferOwnedRuntimeWorkflowSettlement(
   token: RuntimePluginSourceToken,

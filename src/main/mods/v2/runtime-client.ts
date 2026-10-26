@@ -1,6 +1,12 @@
+import { FunctionTrustedWaitClock, withTrustedFunctionWaitScope,
+  FUNCTION_TRUSTED_WAIT_ACK_MS } from "./trusted-function-wait"
 import { FunctionDisplayPreparationChannel } from "./display-preparation"
 import { randomUUID } from "node:crypto"
-import { AsyncResource } from "node:async_hooks"
+import { AsyncLocalStorage, AsyncResource } from "node:async_hooks"
+import {
+  markRunCancellationEffectDispatched,
+  observeRunCancellationEffect
+} from "../../agent/run-cancellation-settlement"
 import { utilityProcess, type UtilityProcess } from "electron"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
@@ -28,12 +34,16 @@ interface Pending {
   runtimeId: string
   host?: FunctionHostCall
   expiresAt: number
+  waitClock?: FunctionTrustedWaitClock
   controller: AbortController
   resolve(value: ModJson): void
   reject(error: Error): void
   detach(): void
   uiResolve?: FunctionUiResolveTransportAdapter
 }
+const waitCalls = new AsyncLocalStorage<readonly { pending: Pending; callId: string }[]>()
+const waitCallSignals = new WeakMap<AbortSignal, { pending: Pending; callId: string }>()
+
 interface ModuleBinding {
   host: FunctionHostCall
   controller: AbortController
@@ -350,9 +360,11 @@ export class FunctionRuntimeClient {
         controller
       })
       const signal = AbortSignal.any([controller.signal, pending.controller.signal])
+      waitCallSignals.set(signal, { pending, callId: message.id })
       void Promise.resolve()
         .then(() => {
           signal.throwIfAborted()
+          pending.waitClock?.assertDispatchAllowed()
           const args = parseModJson(encodeModJson(message.args)) as ModJson
           if (!lifetime || lifetime.owner !== child) throw new ModFunctionError("MODS_UNLOADED")
           return lifetime.run(() => pending.host!(message.method, args, signal))
@@ -417,26 +429,62 @@ export class FunctionRuntimeClient {
     if (signal?.aborted) throw new ModFunctionError("MODS_CANCELLED")
     if (this.pending.size >= 128) throw new ModFunctionError("MODS_HOST_CAPACITY")
     const id = randomUUID()
-    return new Promise((resolve, reject) => {
-      const controller = new AbortController()
-      const cancel = (): void => {
-        controller.abort(new ModFunctionError("MODS_CANCELLED"))
-        this.child?.postMessage({ type: "cancel", id, runtimeId: data.runtimeId })
-      }
-      this.pending.set(id, {
+    const clock = data.type === "invoke" ? new FunctionTrustedWaitClock(timeout) : undefined
+    let pending!: Pending
+    const controller = new AbortController()
+    const cancel = (reason: Error = new ModFunctionError("MODS_CANCELLED")): void => {
+      controller.abort(reason)
+      this.child?.postMessage({ type: "cancel", id, runtimeId: data.runtimeId })
+    }
+    const onAbort = () => cancel()
+    const generation = this.generation
+    const child = this.child
+    const assertCurrent = () => {
+      signal?.throwIfAborted()
+      controller.signal.throwIfAborted()
+      if (this.child !== child || this.generation !== generation || this.pending.get(id) !== pending)
+        throw new ModFunctionError("MODS_STALE_INVOCATION")
+    }
+    const control = async (ticket: string, phase: "begin" | "end", value: number) => {
+      assertCurrent()
+      const call = waitCalls.getStore()?.find(entry => entry.pending === pending)
+      const actual = call && this.calls.get(call.callId)
+      if (!call || !actual || actual.requestId !== id || actual.runtimeId !== data.runtimeId ||
+        actual.controller.signal.aborted) throw new ModFunctionError("MODS_TRUSTED_WAIT_SCOPE")
+      const ack = await this.request({ type: "trusted-wait", runtimeId: data.runtimeId, requestId: id,
+        callId: call.callId, ticket, phase,
+        ...(phase === "begin" ? { allowanceMs: value } : { creditMs: value }) },
+        undefined, AbortSignal.any([controller.signal, actual.controller.signal]), FUNCTION_TRUSTED_WAIT_ACK_MS)
+      assertCurrent()
+      if (!isModObject(ack) || ack.acknowledged !== true || Object.keys(ack).length !== 1)
+        throw new ModFunctionError("MODS_TRUSTED_WAIT_ACK_INVALID")
+    }
+    const execute = () => new Promise<ModJson>((resolve, reject) => {
+      const invocationHost: FunctionHostCall | undefined = host ? (method, args, callSignal, context) => {
+        if (!clock) return host(method, args, callSignal, context)
+        const actual = waitCallSignals.get(callSignal)
+        if (!actual || actual.pending !== pending) throw new ModFunctionError("MODS_TRUSTED_WAIT_SCOPE")
+        return waitCalls.run([...(waitCalls.getStore() ?? []), actual], () => host(method, args, callSignal, context))
+      } : undefined
+      pending = {
         kind: data.type,
         runtimeId: data.runtimeId,
-        host: host ? AsyncResource.bind(host) : undefined,
-        resolve,
-        reject,
-        controller,
+        host: invocationHost ? AsyncResource.bind(observeRunCancellationEffect(invocationHost)) : undefined,
+        resolve, reject, controller,
+        ...(clock ? { waitClock: clock } : {}),
         ...(uiResolve ? { uiResolve } : {}),
-        expiresAt: performance.now() + timeout,
-        detach: () => signal?.removeEventListener("abort", cancel)
-      })
-      signal?.addEventListener("abort", cancel, { once: true })
+        get expiresAt() { return clock?.expiresAt ?? fixedExpiresAt },
+        detach: () => signal?.removeEventListener("abort", onAbort)
+      }
+      const fixedExpiresAt = performance.now() + timeout
+      this.pending.set(id, pending)
+      signal?.addEventListener("abort", onAbort, { once: true })
       this.child!.postMessage({ ...data, id })
     })
+    return clock ? withTrustedFunctionWaitScope({ clock, assertCurrent,
+      prepare: (ticket, allowance) => control(ticket, "begin", allowance),
+      finish: (ticket, credit) => control(ticket, "end", credit), abort: cancel
+    }, execute) : execute()
   }
 
   async load(code: string, options: ModObject = {}): Promise<FunctionGuest> {
@@ -478,7 +526,7 @@ export class FunctionRuntimeClient {
       assertLive()
       if (this.modules.has(runtimeId)) throw new ModFunctionError("MODS_MODULE_HOST_ALREADY_BOUND")
       this.modules.set(runtimeId, {
-        host: AsyncResource.bind(host),
+        host: AsyncResource.bind(observeRunCancellationEffect(host)),
         controller: new AbortController(),
         onDispose
       })
@@ -524,6 +572,8 @@ export class FunctionRuntimeClient {
       },
       async invoke(registration, event, host, invocation: FunctionInvocation) {
         assertLive()
+        // Guest code may consume resources whose module host predates this run's scope.
+        markRunCancellationEffectDispatched()
         const { signal, ...metadata } = invocation
         const uiDrawing = metadata.event === "ui.render" ? draw() : undefined
         return (await request(

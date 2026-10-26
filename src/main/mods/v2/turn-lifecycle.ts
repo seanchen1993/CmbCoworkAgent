@@ -104,6 +104,8 @@ export class FunctionTurnLifecycle {
     runId: string
   ):
     | {
+        workspace: string
+        turnId: string
         settlement: Promise<void>
         invalidate(): void
       }
@@ -112,6 +114,8 @@ export class FunctionTurnLifecycle {
       entry = this.entries.get(key)
     if (!entry) return undefined
     return {
+      workspace: entry.binding.workspace,
+      turnId: entry.binding.turnId,
       settlement: entry.settlement.promise,
       invalidate: () => {
         if (this.entries.get(key) !== entry) return

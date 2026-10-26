@@ -1,0 +1,53 @@
+{
+  "apiVersion": "devclaw.project-contract/v1",
+  "cases": [
+    {
+      "id": "convert-missing",
+      "stageId": "convert",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "prd-missing",
+      "stageId": "prd",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "specs-missing",
+      "stageId": "specs",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "design-missing",
+      "stageId": "design",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "plan-missing",
+      "stageId": "plan",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "code-missing",
+      "stageId": "code",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "cicd-missing",
+      "stageId": "cicd",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "archive-missing",
+      "stageId": "archive",
+      "files": [],
+      "expected": "failed"
+    }
+  ]
+}

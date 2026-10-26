@@ -1,11 +1,20 @@
 import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { afterEach, expect, it } from "vitest"
+import { afterEach, expect, it, vi } from "vitest"
+vi.mock("electron", () => ({ BrowserWindow: { getAllWindows: () => [] } }))
+vi.mock("../../app-attention-events", () => ({ emitAppAttention: () => {} }))
+import {
+  requestUserInput,
+  getPendingUserInputForThread,
+  submitUserInputResponse,
+  cancelUserInputsForThread
+} from "../../services/user-input"
 import { FunctionModsManager } from "./manager"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { compileFunctionPlugin } from "./loader"
 import { ModControlStore } from "../control-store"
+import type { ModJson } from "../../../shared/mods/types"
 import {
   currentRuntimePluginSource,
   issueRuntimePluginSourceToken,
@@ -17,7 +26,7 @@ afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close()
 })
 
-async function fixture() {
+async function fixture(plainParent = false, warmup = true) {
   const root = mkdtempSync(join(tmpdir(), "mods-host-handoff-")),
     workspace = join(root, "workspace")
   mkdirSync(workspace)
@@ -49,21 +58,39 @@ async function fixture() {
     on("session.start",async($,e,next)=>{await $.command.register({name:"parent",description:"Exact parent"});return next(e)})
   }`
   )
+  if (plainParent) {
+    rmSync(join(parent.path, "mods"), { recursive: true })
+    writeFileSync(join(parent.path, "plugin.json"),
+      JSON.stringify({ name: parent.name, version: "1.0.0" }))
+    mkdirSync(join(parent.path, "hooks"))
+    writeFileSync(join(parent.path, "hooks/hooks.json"), JSON.stringify({ hooks: {
+      PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: "python check.py" }] }]
+    } }))
+    writeFileSync(join(parent.path, "hooks/check.py"), "print('{}')\n")
+  }
   const retained = join(root, "retained")
   cpSync(parent.path, retained, { recursive: true })
   const store = new ModControlStore(join(root, "control.sqlite"))
   let onTool = async () => {},
+    onLoad = async () => {},
+    onPublish: (value: ModJson) => Promise<void> = async () => {},
     onDrain = async () => {},
     drains = 0,
     active = true
   const guests: FunctionGuestRuntime[] = []
+  const changed = vi.fn()
   const manager = new FunctionModsManager(
     store,
     {
       plugins: () => [provider, parent],
       enabled: () => true,
-      changed: () => {},
-      publish: async (_, value) => value,
+      protects: () => true,
+      captureSiteGuard: () => () => {},
+      captureDisplayScope: (_, threadId) => ({ database: store, workspace, threadId,
+        incarnation: { token: "incarnation", legacyCreatedAt: 1 }, assertCurrent: () => {} }),
+      pendingQuestion: (threadId) => getPendingUserInputForThread(threadId),
+      changed,
+      publish: async (_, value) => { await onPublish(value); return value },
       clawApplicable: () => false,
       callTool: async () => {
         await onTool()
@@ -74,6 +101,7 @@ async function fixture() {
       const local: FunctionGuestRuntime[] = []
       return {
         async load(code, options) {
+          await onLoad()
           const guest = await FunctionGuestRuntime.create(code, options)
           guests.push(guest)
           local.push(guest)
@@ -94,6 +122,7 @@ async function fixture() {
     () => rmSync(root, { recursive: true, force: true }),
     () => store.close(),
     async () => {
+      cancelUserInputsForThread("stage", "test cleanup")
       onDrain = async () => {}
       manager.close()
       await Promise.all(guests.map((guest) => guest.dispose()))
@@ -108,7 +137,7 @@ async function fixture() {
     scope: { projectId: "project", packageDigest: "a".repeat(64) }
   }
   const facts = await manager.prepareRuntimeSourceFacts(input)
-  await manager.approveRuntimeSource({ ...input, digest: facts!.digest }, () => {})
+  if (facts) await manager.approveRuntimeSource({ ...input, digest: facts.digest }, () => {})
   const token = issueRuntimePluginSourceToken(
     {
       mode: "host",
@@ -140,8 +169,8 @@ async function fixture() {
       if (!active) throw Error("PROJECT_REVOKED")
     }
   )
-  const before = await manager.commands(workspace, "stage")
-  expect(before.map((command) => command.command)).toEqual(["provider"])
+  const before = warmup ? await manager.commands(workspace, "stage") : []
+  if (warmup) expect(before.map((command) => command.command)).toEqual(["provider"])
   return {
     manager,
     workspace,
@@ -149,8 +178,12 @@ async function fixture() {
     token,
     input,
     facts,
+    provider,
     before,
     guests,
+    changed,
+    onPublish: (run: (value: ModJson) => Promise<void>) => { onPublish = run },
+    onLoad: (run: () => Promise<void>) => { onLoad = run },
     drains: () => drains,
     onTool: (run: () => Promise<void>) => {
       onTool = run
@@ -163,6 +196,34 @@ async function fixture() {
     }
   }
 }
+
+it("keeps the ordinary owner usable until every retained capability has exact project consent", async () => {
+  const f = await fixture(true)
+  const binding = withRuntimePluginSource(f.token, () => currentRuntimePluginSource()!)
+  const plugin = { ...binding.plugin, ...f.provider }
+  const token = issueRuntimePluginSourceToken({
+    ...binding,
+    capabilitySources: [{
+      plugin,
+      packageDigest: "b".repeat(64),
+      capability: { id: "context", title: "Context", kind: "skill", usage: "project",
+        entry: "skills/context/SKILL.md", dependsOn: [] }
+    }]
+  })
+  const prior = [...f.guests], drains = f.drains()
+  await expect(withRuntimePluginSource(token, () =>
+    f.manager.runtimeReady(f.workspace, "stage"))).rejects.toThrow("PROJECT_MODS_APPROVAL_REQUIRED")
+  expect(f.drains()).toBe(drains)
+  expect(prior.every(guest => !guest.stats.disposed)).toBe(true)
+  expect((await f.manager.commands(f.workspace, "stage")).map(row => row.command))
+    .toEqual(["provider"])
+  const input = { workspace: f.workspace, plugin, scope: f.input.scope }
+  const facts = await f.manager.prepareRuntimeSourceFacts(input)
+  await f.manager.approveRuntimeSource({ ...input, digest: facts!.digest }, () => {})
+  expect((await withRuntimePluginSource(token, () =>
+    f.manager.commands(f.workspace, "stage"))).map(row => row.command)).toEqual(["provider"])
+  expect(prior.every(guest => guest.stats.disposed)).toBe(true)
+})
 
 it("retires the actual provider VM before loading exact-consent parent Mods for the same Host thread", async () => {
   const f = await fixture(),
@@ -213,6 +274,197 @@ it("retires the actual provider VM before loading exact-consent parent Mods for 
   await expect(
     withRuntimePluginSource(other, () => f.manager.commands(f.workspace, "stage"))
   ).rejects.toThrow("MODS_RUNTIME_SOURCE_CHANGED")
+})
+
+it("retains a traditional-Hook-only Host owner through real live input and ordinary UI callbacks", async () => {
+  const f = await fixture(true)
+  expect(f.facts).toBeUndefined()
+  const signal = new AbortController().signal
+  const run = async <T>(work: () => Promise<T>) => withRuntimePluginSource(f.token, work)
+  // No Function modules means no Function graph nodes, even though the Host has an identity.
+  expect(await run(() => f.manager.runtimeReady(f.workspace, "stage", signal))).toBe(false)
+  await run(() => f.manager.turnStart(f.workspace, "stage", { turnId: "live", text: "draft" }, signal))
+  const generation = f.manager.runtimeSessions(f.workspace).sessions[0].generation
+  const guests = f.guests.length
+  const pending = requestUserInput({ threadId: "stage", abortSignal: signal,
+    allowDeferredRenderer: true, questions: [{ id: "ui", header: "UI", question: "UI scope?",
+      options: [{ label: "Backend only", description: "No UI" },
+        { label: "Include UI", description: "Include frontend" }] }] })
+  void pending.catch(() => {})
+  const request = getPendingUserInputForThread("stage")!
+  // These calls are outside the Host ALS, just like the native renderer while the tool waits.
+  expect(await f.manager.commands(f.workspace, "stage")).toEqual([])
+  const owner = await f.manager.siteMount(f.workspace, "stage", "AskUserQuestion", undefined,
+    request.requestId)
+  expect(owner).toBeTruthy()
+  expect(await f.manager.siteRender(f.workspace, "stage", owner!, {
+    tool: "request_user_input", questions: JSON.parse(JSON.stringify(request.questions)) as ModJson
+  })).toBeTruthy()
+  expect(submitUserInputResponse({ requestId: request.requestId, answers: { ui: {
+    type: "option", questionId: "ui", optionIndex: 0, label: "Backend only", description: "No UI"
+  } } })).toBe(true)
+  expect((await pending).answers.ui).toMatchObject({ optionIndex: 0 })
+  await f.manager.siteUnmount(f.workspace, "stage", owner!)
+  const stream = await run(() => f.manager.turnStep(f.workspace, "stage",
+    { turnId: "live", index: 1, messageCount: 3, model: "native" },
+    async function* () { yield { kind: "text", text: "continued" }; return { answer: "continued" } }, signal))
+  for await (const chunk of stream) expect(chunk).toEqual({ kind: "text", text: "continued" })
+  expect(await stream.result).toEqual({ answer: "continued" })
+  await run(() => f.manager.turnComplete(f.workspace, "stage", {
+    turnId: "live", answer: "continued", durationMs: 1, isAborted: false, reason: "answer"
+  }, signal))
+  expect(f.manager.runtimeSessions(f.workspace).sessions[0].generation).toBe(generation)
+  expect(f.guests).toHaveLength(guests)
+  expect(await run(() => f.manager.runtimeReady(f.workspace, "stage", signal))).toBe(false)
+  const binding = withRuntimePluginSource(f.token, () => currentRuntimePluginSource()!)
+  const resumed = issueRuntimePluginSourceToken(binding)
+  await expect(withRuntimePluginSource(resumed, () => f.manager.turnStart(f.workspace, "stage",
+    { turnId: "resume", text: "saved answer" }, new AbortController().signal)))
+    .rejects.toThrow("MODS_RUNTIME_SOURCE_CHANGED")
+  f.manager.settleEmptyHostSource(f.token)
+  f.revoke()
+  await expect(run(() => f.manager.commands(f.workspace, "stage"))).rejects.toThrow("PROJECT_REVOKED")
+  const history = await f.manager.siteMount(f.workspace, "stage", "AssistantMessage")
+  expect(history).toBeTruthy()
+  expect(await f.manager.siteRender(f.workspace, "stage", history!, {
+    text: "continued", isFirstOfReply: true
+  })).toBeTruthy()
+  await f.manager.siteUnmount(f.workspace, "stage", history!)
+  expect(await f.manager.siteRead(f.workspace, "stage", "AssistantMessage", {
+    text: "continued", isFirstOfReply: true
+  }, "history:assistant")).toMatchObject({ state: "projected" })
+  expect(f.guests).toHaveLength(guests)
+  await withRuntimePluginSource(resumed, () => f.manager.turnStart(f.workspace, "stage",
+    { turnId: "resume", text: "saved answer" }, new AbortController().signal))
+  expect(f.manager.runtimeSessions(f.workspace).sessions[0].generation).not.toBe(generation)
+  expect(await f.manager.commands(f.workspace, "stage")).toEqual([])
+})
+
+it.each([true, false])("pins the Host turn owner before queued UI can rebuild (empty=%s)", async (empty) => {
+  const f = await fixture(empty)
+  const began = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  f.onDrain(async () => { began.resolve(); await release.promise })
+  const starting = withRuntimePluginSource(f.token, () => f.manager.turnStart(f.workspace, "stage",
+    { turnId: "handoff", text: "start" }, new AbortController().signal))
+  await began.promise
+  const drawingDiscovery = f.manager.commands(f.workspace, "stage")
+  release.resolve()
+  await starting
+  expect((await drawingDiscovery).map(row => row.command)).toEqual(empty ? [] : ["parent"])
+  const binding = withRuntimePluginSource(f.token, () => currentRuntimePluginSource()!)
+  const foreign = issueRuntimePluginSourceToken({ ...binding, operationId: "another-operation" })
+  await expect(withRuntimePluginSource(foreign, () => f.manager.commands(f.workspace, "stage")))
+    .rejects.toThrow("MODS_RUNTIME_SOURCE_CHANGED")
+  if (!empty) {
+    f.manager.settleEmptyHostSource(f.token)
+    await expect(withRuntimePluginSource(foreign, () => f.manager.commands(f.workspace, "stage")))
+      .rejects.toThrow("MODS_RUNTIME_SOURCE_CHANGED")
+  }
+})
+
+it.each(["ui-first", "host-first"] as const)(
+  "serializes first runtimeReady and real UI construction (%s) through live continuation",
+  async (order) => {
+    const f = await fixture(true, false)
+    const signal = new AbortController().signal
+    const run = async <T>(work: () => Promise<T>) => withRuntimePluginSource(f.token, work)
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+    const drawing = () => f.manager.siteRead(f.workspace, "stage", "AssistantMessage",
+      { text: "Preparing", isFirstOfReply: true }, "first:message")
+    let drawn: ReturnType<typeof drawing>
+    let prepared: Promise<boolean>
+    let navigation: Promise<unknown> = Promise.resolve()
+    if (order === "ui-first") {
+      f.onLoad(async () => { entered.resolve(); await release.promise })
+      drawn = drawing()
+      await entered.promise
+      navigation = Promise.all([
+        f.manager.panes(f.workspace, "stage"), f.manager.logs(f.workspace, "stage"),
+        f.manager.feedback(f.workspace, "stage"), f.manager.feedbackPresentation(f.workspace, "stage"),
+        f.manager.commands(f.workspace, "stage"), f.manager.registeredTools(f.workspace, "stage")
+      ])
+      // This independent actual discovery completes while those reads await the held load.
+      await f.manager.effectiveStatus(f.workspace, "stage")
+      let ready = false
+      prepared = run(() => f.manager.runtimeReady(f.workspace, "stage", signal))
+        .then(value => { ready = true; return value })
+      expect(ready).toBe(false)
+      release.resolve()
+    } else {
+      prepared = run(() => f.manager.runtimeReady(f.workspace, "stage", signal))
+      drawn = drawing()
+    }
+    await drawn
+    await navigation
+    expect(await prepared).toBe(false)
+    const generation = f.manager.runtimeSessions(f.workspace).sessions[0].generation
+    expect(f.changed).toHaveBeenCalledWith("stage", `source-replaced:${generation}`)
+    const guestCount = f.guests.length
+    if (order === "host-first") expect(guestCount).toBe(0)
+    await run(() => f.manager.turnStart(f.workspace, "stage", { turnId: "first", text: "draft" }, signal))
+    const pending = requestUserInput({ threadId: "stage", abortSignal: signal,
+      allowDeferredRenderer: true, questions: [{ id: "ui", header: "UI", question: "UI scope?",
+        options: [{ label: "Backend", description: "No UI" }, { label: "UI", description: "Frontend" }] }] })
+    void pending.catch(() => {})
+    const request = getPendingUserInputForThread("stage")!
+    const owner = await f.manager.siteMount(f.workspace, "stage", "AskUserQuestion", undefined, request.requestId)
+    expect(owner).toBeTruthy()
+    await f.manager.siteRender(f.workspace, "stage", owner!, JSON.parse(JSON.stringify({
+      tool: "request_user_input", questions: request.questions
+    })) as Record<string, ModJson>)
+    expect(submitUserInputResponse({ requestId: request.requestId, answers: { ui: {
+      type: "option", questionId: "ui", optionIndex: 0, label: "Backend", description: "No UI"
+    } } })).toBe(true)
+    await pending
+    await f.manager.siteUnmount(f.workspace, "stage", owner!)
+    const stream = await run(() => f.manager.turnStep(f.workspace, "stage",
+      { turnId: "first", index: 1, messageCount: 3, model: "native" },
+      async function* () { yield { kind: "text", text: "continued" }; return { answer: "continued" } }, signal))
+    for await (const chunk of stream) expect(chunk).toEqual({ kind: "text", text: "continued" })
+    expect(await stream.result).toEqual({ answer: "continued" })
+    await run(() => f.manager.turnComplete(f.workspace, "stage", {
+      turnId: "first", answer: "continued", durationMs: 1, isAborted: false, reason: "answer"
+    }, signal))
+    const binding = withRuntimePluginSource(f.token, () => currentRuntimePluginSource()!)
+    f.manager.settleEmptyHostSource(f.token)
+    f.revoke()
+    expect(await drawing()).toMatchObject({ state: "projected" })
+    const resumed = issueRuntimePluginSourceToken(binding)
+    expect(await withRuntimePluginSource(resumed, () => f.manager.runtimeReady(f.workspace, "stage")))
+      .toBe(false)
+    expect(f.manager.runtimeSessions(f.workspace).sessions[0].generation).not.toBe(generation)
+    expect(f.guests).toHaveLength(guestCount)
+  }
+)
+
+it("waits for every already-admitted UI read, including a non-constructor, before Host preparation", async () => {
+  const f = await fixture(true, false)
+  const loading = Promise.withResolvers<void>(), load = Promise.withResolvers<void>()
+  const publishing = Promise.withResolvers<void>(), publish = Promise.withResolvers<void>()
+  f.onLoad(async () => { loading.resolve(); await load.promise })
+  f.onPublish(async value => {
+    if (JSON.stringify(value).includes("Second drawing")) {
+      publishing.resolve()
+      await publish.promise
+    }
+  })
+  const draw = (text: string) => f.manager.siteRead(f.workspace, "stage", "AssistantMessage",
+    { text, isFirstOfReply: true }, text)
+  const first = draw("First drawing")
+  await loading.promise
+  const second = draw("Second drawing")
+  void second.catch(() => {})
+  load.resolve()
+  await publishing.promise
+  await first
+  let finished = false
+  const preparing = withRuntimePluginSource(f.token, () => f.manager.runtimeReady(f.workspace, "stage"))
+    .then(result => { finished = true; return result })
+  expect(finished).toBe(false)
+  publish.resolve()
+  await second
+  expect(await preparing).toBe(false)
+  expect(await f.manager.commands(f.workspace, "stage")).toEqual([])
 })
 
 it("never replaces an actually running provider call or borrows its active grant", async () => {

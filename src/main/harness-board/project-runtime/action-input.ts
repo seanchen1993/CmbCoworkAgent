@@ -17,6 +17,11 @@ import type { HostProjectState } from "../../../shared/project-runtime/host-type
 import { validateRegisteredToolInput, validateToolSchema } from "../../mods/v2/tool-schema"
 import { validateClawActionConfig } from "../../mods/v2/action-config"
 import { readRuntimeScopedFile, runtimeDigest, runtimeDirectoryIdentity } from "./safe-files"
+import {
+  PROJECT_ARTIFACT_REFERENCE_FORMAT,
+  PROJECT_ARTIFACT_REFERENCE_TOTAL_BYTES
+} from "../../../shared/project-runtime/artifact-reference"
+import { captureProjectArtifactReference } from "./artifact-reference"
 
 function stable(value: unknown): string {
   const sort = (value: unknown): unknown =>
@@ -155,6 +160,8 @@ export function assertProjectActionLock(
       const binding = lock.bindings.find((item) => item.id === id)
       if (!binding) throw Error("PROJECT_ACTION_LOCK_MISMATCH")
       const from = binding.inputFrom
+      if (from?.kind === "artifact" && from.format === PROJECT_ARTIFACT_REFERENCE_FORMAT)
+        throw Error("PROJECT_ACTION_REFERENCE_CHECK_ONLY")
       if (from?.kind === "artifact" && !priorArtifacts.has(from.artifactId))
         throw Error("PROJECT_ACTION_INPUT_NOT_PRIOR")
       if (
@@ -176,7 +183,9 @@ export function assertProjectActionLock(
         checkActions.has(binding.id) ||
         binding.inputFrom?.kind !== "artifact" ||
         binding.inputFrom.artifactId !== check.artifactId ||
-        binding.inputFrom.pointer !== ""
+        binding.inputFrom.pointer !== "" ||
+        (binding.inputFrom.format === PROJECT_ARTIFACT_REFERENCE_FORMAT &&
+          (check.sideEffect !== "read" || !binding.platform || Object.keys(binding.input).length))
       )
         throw Error("PROJECT_ACTION_CHECK_INPUT_INVALID")
       checkActions.add(binding.id)
@@ -188,6 +197,7 @@ export interface CapturedProjectActionInputs {
   stageId: string
   bindings: ProjectActionBinding[]
   fingerprint: string
+  referenceActionIds?: readonly string[]
   assertScope(state: HostProjectState): void
   /** Re-read the exact approved artifact inputs before starting an external action. */
   assertCurrent(): void
@@ -244,6 +254,35 @@ export function captureProjectActionInputs(
         if (!predecessors.has(from.artifactId) && !isCheck)
           throw Error("PROJECT_ACTION_INPUT_NOT_PRIOR")
         if (isCheck && from.pointer !== "") throw Error("PROJECT_ACTION_CHECK_INPUT_INVALID")
+        if (from.format === PROJECT_ARTIFACT_REFERENCE_FORMAT) {
+          if (
+            !isCheck ||
+            !binding.platform ||
+            Object.keys(binding.input).length ||
+            !project.manifest.checks.some(
+              (check) =>
+                check.actionId === id &&
+                check.artifactId === from.artifactId &&
+                check.sideEffect === "read"
+            )
+          )
+            throw Error("PROJECT_ACTION_REFERENCE_CHECK_ONLY")
+          const reference = captureProjectArtifactReference(
+            project,
+            lock,
+            from.artifactId,
+            from.maxBytes
+          )
+          bytes += reference.bytes
+          if (bytes > PROJECT_ARTIFACT_REFERENCE_TOTAL_BYTES)
+            throw Error("PROJECT_ACTION_INPUT_LIMIT")
+          next.input = reference.input
+          delete next.inputFrom
+          validateRegisteredToolInput(binding.inputSchema, next.input)
+          files.push(...reference.files)
+          seen.add(id)
+          return next
+        }
         const artifact = project.manifest.artifacts.find((item) => item.id === from.artifactId)
         if (
           !artifact ||
@@ -296,6 +335,14 @@ export function captureProjectActionInputs(
   return {
     stageId: stage.id,
     ...captured,
+    referenceActionIds: lock.bindings
+      .filter(
+        (binding) =>
+          captured.bindings.some((item) => item.id === binding.id) &&
+          binding.inputFrom?.kind === "artifact" &&
+          binding.inputFrom.format === PROJECT_ARTIFACT_REFERENCE_FORMAT
+      )
+      .map((binding) => binding.id),
     assertScope: (value) => {
       if (scope(value) !== capturedScope) throw Error("PROJECT_ACTION_SCOPE_CHANGED")
     },

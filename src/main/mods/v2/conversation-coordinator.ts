@@ -12,7 +12,7 @@ import {
 } from "../../../shared/mods/v2/session-append"
 import { readFunctionConversationTranscriptStamp, sameFunctionConversationTranscriptStamp } from
   "../../../shared/mods/v2/conversation-transcript"
-import { getDb, getThreadCore } from "../../db"
+import { getDb, getThreadCore, getThreadRuntimeScope } from "../../db"
 import { readFunctionConversationThreadIdentityCurrent } from
   "../../db/function-conversation-thread-identity-read"
 import { captureLocalThreadRunLease } from "../../agent/thread-run-lease"
@@ -211,7 +211,7 @@ function assertOwnerFull(owner: Owner, dispatch: OwnerFullDispatch): void {
   dispatch.signal(dispatch.controller(owner.controller))
   dispatch.source(context)
   dispatch.scope(context)
-  if (!matchesThreadIncarnation(getThreadCore(context.threadId), owner.incarnation))
+  if (!matchesThreadIncarnation(getThreadRuntimeScope(context.threadId), owner.incarnation))
     throw new ModFunctionError("MODS_CONVERSATION_THREAD_CHANGED")
   if (owner.child) dispatch.child(owner.child)
 }
@@ -744,7 +744,7 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
         assertDataCurrent()
         targetExecution.assertCurrent()
         assertDataCurrent()
-        if (!matchesThreadIncarnation(getThreadCore(original.context.threadId), original.incarnation))
+        if (!matchesThreadIncarnation(getThreadRuntimeScope(original.context.threadId), original.incarnation))
           throw new ModFunctionError("MODS_CONVERSATION_THREAD_CHANGED")
         assertDataCurrent()
       } catch (error) { record.failed = true; throw error }
@@ -904,7 +904,7 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
         }
         this.families.assertSharedDataCurrent(proof)
         this.registry.assertTargetDataCurrent(owner.context.owner, target, input.authority)
-        if (!matchesThreadIncarnation(getThreadCore(ownerData.context.threadId), ownerData.incarnation))
+        if (!matchesThreadIncarnation(getThreadRuntimeScope(ownerData.context.threadId), ownerData.incarnation))
           throw new ModFunctionError("MODS_CONVERSATION_THREAD_CHANGED")
         assertDataFacts()
       }

@@ -99,6 +99,7 @@ export function createNativeProjectSourceBridge(
       input: Parameters<
         import("../shared/project-runtime/function-source").ProjectFunctionSourceApi["approve"]
       >[0]
-    ) => ipcRenderer.invoke(`${prefix}:mods-approve`, input)
+    ) => ipcRenderer.invoke(`${prefix}:mods-approve`, input),
+    approveDependency: input => ipcRenderer.invoke(`${prefix}:mods-approve-dependency`, input)
   }
 }

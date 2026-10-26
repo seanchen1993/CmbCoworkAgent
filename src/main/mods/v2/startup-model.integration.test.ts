@@ -160,15 +160,75 @@ async function fixture(
     },
     () => {
       const guests: FunctionGuestRuntime[] = []
+      const loading = new Set<Promise<FunctionGuestRuntime>>()
+      const failures: unknown[] = []
+      let closed = false
+      let draining: Promise<void> | undefined
+      const drain = (): Promise<void> => {
+        closed = true
+        return draining ??= (async () => {
+          await Promise.allSettled([...loading])
+          await Promise.allSettled(guests.map(async (guest) => {
+            try {
+              await guest.dispose()
+              expect(guest.stats.disposed).toBe(true)
+              expect(guest.stats.frames).toBe(0)
+              expect(guest.stats.replies).toBe(0)
+            } catch (error) {
+              failures.push(error)
+            }
+          }))
+          if (failures.length) throw new AggregateError(failures, "STARTUP_FIXTURE_DRAIN_FAILED")
+        })()
+      }
       return {
-        load: async (source, options) => {
-          const guest = await FunctionGuestRuntime.create(source, options)
-          guests.push(guest)
-          return guest
+        load: (source, options) => {
+          if (closed) return Promise.reject(new Error("STARTUP_FIXTURE_CLIENT_CLOSED"))
+          const operation = (async () => {
+            let guest: FunctionGuestRuntime
+            try {
+              guest = await FunctionGuestRuntime.create(source, options)
+            } catch (error) {
+              failures.push(error)
+              throw error
+            }
+            // Keep the original disposal failure even if the Guest already set disposed=true.
+            // The session may dispose first; its own retirement assertion remains authoritative.
+            const originalDispose = guest.dispose.bind(guest)
+            let disposalFailed = false
+            let disposalFailure: unknown
+            guest.dispose = (...args: Parameters<FunctionGuestRuntime["dispose"]>) => {
+              if (disposalFailed) throw disposalFailure
+              try {
+                originalDispose(...args)
+              } catch (error) {
+                disposalFailed = true
+                disposalFailure = error
+                failures.push(error)
+                throw error
+              }
+            }
+            guests.push(guest)
+            if (closed) {
+              await guest.dispose()
+              throw new Error("STARTUP_FIXTURE_CLIENT_CLOSED")
+            }
+            return guest
+          })()
+          loading.add(operation)
+          void operation.then(() => loading.delete(operation), () => loading.delete(operation))
+          return operation
         },
         stop: () => {
-          for (const guest of guests) void guest.dispose()
-        }
+          closed = true
+          const stopped: unknown[] = []
+          for (const guest of guests) {
+            try { guest.dispose() } catch (error) { stopped.push(error) }
+          }
+          void drain().catch(() => {})
+          if (stopped.length) throw new AggregateError(stopped, "STARTUP_FIXTURE_STOP_FAILED")
+        },
+        stopAndDrain: drain
       }
     }
   )

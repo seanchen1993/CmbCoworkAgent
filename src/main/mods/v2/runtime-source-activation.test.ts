@@ -244,6 +244,13 @@ it("requires explicit native approval in each real preview directory and never b
   expect(
     await withRuntimePluginSource(f.token, () => f.manager.runtimeReady(f.workspace, "stage"))
   ).toBe(false)
+  // Renderer discovery before consent must not pin a false empty graph.
+  await withRuntimePluginSource(f.token, async () => {
+    expect(await f.manager.commands(f.workspace, "stage")).toEqual([])
+    expect(await f.manager.panes(f.workspace, "stage")).toEqual([])
+    expect(await f.manager.runtimeReady(f.workspace, "stage")).toBe(false)
+  })
+  expect(f.loads()).toBe(0)
   await expect(
     f.manager.approveRuntimeSource({ ...f.input, digest: "b".repeat(64) }, () => {})
   ).rejects.toThrow("MODS_APPROVAL_STALE")

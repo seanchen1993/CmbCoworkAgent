@@ -154,6 +154,7 @@ function composerRouteFixture() {
     ipcMain: { handle: (_channel: string, value: typeof handler) => { handler = value } },
     process: { env: {} }, URL, __dirname: directory,
     join, pathToFileURL, window: () => owner, getThreadCore,
+    getThreadRuntimeScope: getThreadCore,
     ...nativeChildThreadReaders(getThreadCore),
     manager: { workspaceKey, isEnabled, status, candidates, approve }, ModError: Error
   }) as (threadId: string) => string

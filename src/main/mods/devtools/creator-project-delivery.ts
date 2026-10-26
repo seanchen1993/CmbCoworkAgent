@@ -9,12 +9,12 @@ import type { BusinessDraftSettings } from "./creator-business-draft"
 import type { DerivationServiceDependencies } from "../../plugins/derivation-service"
 import {
   derivationContentIdentity,
-  renameDerivation,
   snapshotDerivationSource,
   writeDerivationFiles
 } from "../../plugins/derivation-source"
 import { packProjectPlugin } from "./project-tooling"
 import { getProjectActionCatalog } from "../../harness-board/project-action-runtime"
+import { renameNativeComposition } from "../../plugins/native-composition-derivation"
 import { businessCreatorScopeKey } from "./creator-business-draft"
 import {
   observeProjectDeliveryExport,
@@ -229,14 +229,16 @@ export class CreatorProjectDeliveries {
         this.persist(previous.record, previous.raw, guard)
         this.live.add(previous.record.status.id)
       } else {
-        const files = renameDerivation(snapshot, input.name, input.version)
+        const actions = await (this.deps.actions ?? getProjectActionCatalog)(workspace, threadId)
+        guard()
+        const files = renameNativeComposition(snapshot, input.name, input.version, actions)
+        guard()
         await mkdir(this.deps.root, { recursive: true })
         const id = randomUUID()
         const directory = join(this.deps.root, id)
         await mkdir(directory)
         await writeDerivationFiles(directory, files)
         guard()
-        const actions = await (this.deps.actions ?? getProjectActionCatalog)(workspace, threadId)
         const validationDirectory = await mkdtemp(join(this.deps.root, "check-"))
         await packProjectPlugin(
           directory,

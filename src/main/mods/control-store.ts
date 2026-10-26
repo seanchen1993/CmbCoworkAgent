@@ -17,6 +17,11 @@ import { ModError } from "./errors"
 import { FunctionStateStore } from "./v2/state-store"
 import { developmentNativeGrant, assertDevelopmentNativeGrant } from "./v2/development-native-authority"
 import type { CompletionEvidenceRecord } from "./v2/completion-evidence"
+import {
+  PROCESS_LIFECYCLE_PHASES,
+  type ProcessLifecycle,
+  type ProcessLifecycleEvent
+} from "../../shared/mods/process-lifecycle"
 
 export interface ModGrant {
   /** Main-only marker; authority also requires this exact object in the store's WeakMap. */
@@ -100,7 +105,8 @@ export class ModControlStore {
         "publication",
         "rule_ids",
         "reconciliation",
-        "model_usage"
+        "model_usage",
+        "process_lifecycle"
       ]) {
         if (!columns.has(column)) this.db.exec(`ALTER TABLE mods_calls ADD COLUMN ${column} TEXT`)
       }
@@ -152,6 +158,17 @@ export class ModControlStore {
   getSetting(key: string, fallback = "false"): string {
     const row = this.db.prepare("SELECT value FROM mods_meta WHERE key = ?").get(key)
     return typeof row?.value === "string" ? row.value : fallback
+  }
+
+  /** Native bounded observation of original settings, never a guest state namespace. */
+  settingsWithPrefix(prefix: string, limit = 4096): { key: string; value: string }[] {
+    if (!prefix || !Number.isSafeInteger(limit) || limit < 1 || limit > 4096)
+      throw Error("MODS_SETTINGS_SCAN_INVALID")
+    const rows = this.db.prepare(
+      "SELECT key,value FROM mods_meta WHERE substr(key,1,?)=? ORDER BY key LIMIT ?"
+    ).all(prefix.length, prefix, limit + 1)
+    if (rows.length > limit) throw Error("MODS_SETTINGS_SCAN_LIMIT")
+    return rows.map(row => ({ key: String(row.key), value: String(row.value) }))
   }
 
   saveJob(job: ModCommandJob): void {
@@ -614,6 +631,37 @@ export class ModControlStore {
       .run(status, Date.now(), id)
   }
 
+  recordProcessLifecycle(id: string, event: ProcessLifecycleEvent): void {
+    if (
+      !PROCESS_LIFECYCLE_PHASES.includes(event.phase) ||
+      !Number.isSafeInteger(event.at) ||
+      event.at < 0 ||
+      (event.requestDigest !== undefined && !/^[a-f0-9]{64}$/.test(event.requestDigest))
+    )
+      throw new ModError("MODS_PROCESS_OBSERVATION_INVALID")
+    const row = this.db
+      .prepare(
+        "SELECT process_lifecycle FROM mods_calls WHERE id=? AND tool_id='process.run' AND status='running'"
+      )
+      .get(id)
+    if (!row) throw new ModError("MODS_PROCESS_OBSERVATION_STALE")
+    const record: ProcessLifecycle =
+      typeof row.process_lifecycle === "string"
+        ? JSON.parse(row.process_lifecycle)
+        : { version: 1, events: [] }
+    if (record.events.at(-1)?.phase === event.phase) return
+    if (record.events.length >= 32) throw new ModError("MODS_PROCESS_OBSERVATION_LIMIT")
+    // Copy only the fixed schema: runtime callers cannot accidentally persist request bodies.
+    record.events.push({
+      phase: event.phase,
+      at: event.at,
+      ...(event.requestDigest === undefined ? {} : { requestDigest: event.requestDigest })
+    })
+    this.db
+      .prepare("UPDATE mods_calls SET process_lifecycle=? WHERE id=? AND status='running'")
+      .run(JSON.stringify(record), id)
+  }
+
   status(id: string): string | undefined {
     const row = this.db.prepare("SELECT status FROM mods_calls WHERE id=?").get(id)
     return typeof row?.status === "string" ? row.status : undefined
@@ -666,7 +714,8 @@ export class ModControlStore {
         publication: (row.publication ?? "pending") as ModAuditEntry["publication"],
         ruleIds: row.rule_ids ? JSON.parse(String(row.rule_ids)) : [],
         reconciliation: row.reconciliation as ModAuditEntry["reconciliation"],
-        ...(typeof row.model_usage === "string" ? { modelUsage: JSON.parse(row.model_usage) } : {})
+        ...(typeof row.model_usage === "string" ? { modelUsage: JSON.parse(row.model_usage) } : {}),
+        ...(typeof row.process_lifecycle === "string" ? { processLifecycle: JSON.parse(row.process_lifecycle) } : {})
       }))
   }
 

@@ -28,6 +28,30 @@ it("collects the unchanged suite exactly once and schedules native graphs before
     expect(NATIVE_INTEGRATION_TESTS).toContain(
       "src/main/agent/function-conversation-native-keeper.test.ts"
     )
+    expect(NATIVE_INTEGRATION_TESTS).toContain(
+      "src/main/agent/native-derived-config.integration.test.ts"
+    )
+    expect(NATIVE_INTEGRATION_TESTS).toContain(
+      "src/main/agent/native-shared-derived-config.integration.test.ts"
+    )
+    expect(NATIVE_INTEGRATION_TESTS).toContain(
+      "src/main/harness-board/project-runtime/composition-host-adapter.test.ts"
+    )
+    expect(NATIVE_INTEGRATION_TESTS).toContain(
+      "src/main/mods/devtools/project-stage-debug.test.ts"
+    )
+    expect(NATIVE_INTEGRATION_TESTS).toContain(
+      "src/main/mods/devtools/creator-source-set.integration.test.ts"
+    )
+    expect(NATIVE_INTEGRATION_TESTS).toContain(
+      "src/main/plugins/autobiz-native-host.integration.test.ts"
+    )
+    expect(NATIVE_INTEGRATION_TESTS).toContain(
+      "src/main/plugins/autobiz-native-multirepo.integration.test.ts"
+    )
+    expect(NATIVE_INTEGRATION_TESTS).toContain(
+      "src/main/plugins/autobiz-native-performance.integration.test.ts"
+    )
     const native = context.projects.find((project) => project.name === "native-integration")
     const parallel = context.projects.find((project) => project.name === "parallel")
     expect(native?.config.sequence.groupOrder).toBe(0)

@@ -189,12 +189,16 @@ describe("LocalSandbox background-task settlement", () => {
         waitForProcessTree: true
       })
       expect(LocalSandbox.hasActiveBackgroundTasks(threadId)).toBe(true)
+      expect(LocalSandbox.hasActiveBackgroundTasksInWorkspace(process.cwd())).toBe(true)
+      expect(LocalSandbox.hasActiveBackgroundTasksInWorkspace(join(process.cwd(), "nested"))).toBe(true)
+      expect(LocalSandbox.hasActiveBackgroundTasksInWorkspace(`${process.cwd()}-sibling`)).toBe(false)
 
       LocalSandbox.cancelBackgroundTasks(threadId)
 
       const visibleResult = sandbox.getTaskOutput(taskId!)
       expect(visibleResult).toMatchObject({ completed: true, exitCode: 130 })
       expect(LocalSandbox.hasActiveBackgroundTasks(threadId)).toBe(true)
+      expect(LocalSandbox.hasActiveBackgroundTasksInWorkspace(process.cwd())).toBe(true)
 
       const task = getBackgroundTasks().get(taskId!)
       expect(task?.completion).toBeInstanceOf(Promise)
@@ -214,6 +218,7 @@ describe("LocalSandbox background-task settlement", () => {
       termination.resolve()
       await deletionFence
       expect(LocalSandbox.hasActiveBackgroundTasks(threadId)).toBe(false)
+      expect(LocalSandbox.hasActiveBackgroundTasksInWorkspace(process.cwd())).toBe(false)
       expect(sandbox.getTaskOutput(taskId!)).toMatchObject({ completed: true, exitCode: 130 })
     } finally {
       if (taskId) getBackgroundTasks().delete(taskId)
@@ -240,6 +245,7 @@ describe("LocalSandbox background-task settlement", () => {
     const started = sandbox.executeBackground("echo must-not-spawn")
     expect(LocalSandbox.hasActiveProcesses()).toBe(false)
     expect(LocalSandbox.hasActiveExecutionTasks()).toBe(true)
+    expect(LocalSandbox.hasActiveBackgroundTasksInWorkspace(process.cwd())).toBe(true)
 
     const shutdown = LocalSandbox.cancelAllBackgroundTasksAndWait(1_000)
     preToolUse.resolve(undefined)
@@ -248,6 +254,7 @@ describe("LocalSandbox background-task settlement", () => {
     await expect(shutdown).resolves.toBe(true)
     expect(executeRaw).not.toHaveBeenCalled()
     expect(LocalSandbox.hasActiveExecutionTasks()).toBe(false)
+    expect(LocalSandbox.hasActiveBackgroundTasksInWorkspace(process.cwd())).toBe(false)
   })
 
   it("bounds shutdown when a pre-spawn hook does not settle", async () => {

@@ -134,15 +134,50 @@ export class LegacyProjectRuntimeService {
   get(projectId: string) {
     return this.store.getBinding(projectId)
   }
+  listImportSources() {
+    return this.store.listBindings().map(source => ({ projectId: source.projectId,
+      packageId: source.packageId, workspace: source.workspace,
+      frozen: !!this.store.importFreeze(source.projectId) }))
+  }
+  async reviewImportSource(projectId: string) {
+    if (!this.deps.assertInstalledSourceCurrent || !this.deps.assertProjectBindingCurrent)
+      hostStateError("LEGACY_IMPORT_SOURCE_AUTHORITY_REQUIRED")
+    const source = this.store.getBinding(projectId) ?? hostStateError("LEGACY_BINDING_MISSING")
+    const installed = await this.deps.resolvePlugin(projectId, source.workspace)
+    if (!installed.enabled || installed.id !== source.installedPluginId) hostStateError("PLUGIN_UNAVAILABLE")
+    const snapshot = this.snapshots.read(source.packageDigest)
+    const history = this.store.list(projectId, 200)
+    if (history.length === 200 || history.some(operation => ["started", "unknown"].includes(operation.status)))
+      hostStateError("LEGACY_OPERATION_ACTIVE")
+    const historyDigest = runtimeDigest(JSON.stringify(history))
+    const assertCurrent = () => {
+      this.deps.assertProjectIdle(projectId, source.workspace)
+      this.deps.assertInstalledSourceCurrent?.(projectId, source.workspace, source.installedPluginId)
+      this.deps.assertProjectBindingCurrent?.(projectId, source.workspace, source.installedPluginId)
+      this.snapshots.read(source.packageDigest)
+      if (JSON.stringify(this.store.getBinding(projectId)) !== JSON.stringify(source) ||
+        runtimeDigest(JSON.stringify(this.store.list(projectId, 200))) !== historyDigest)
+        hostStateError("LEGACY_IMPORT_SOURCE_CHANGED")
+    }
+    assertCurrent()
+    return { source, snapshotRoot: snapshot.root, historyDigest, assertCurrent }
+  }
+  importFreeze(projectId: string) { return this.store.importFreeze(projectId) }
+  freezeForImport(projectId: string, reviewDigest: string, assertCurrent: () => void,
+    review?: import("../../../shared/project-runtime/host-types").HostLegacyImportReview) {
+    return this.store.freezeForImport(projectId, reviewDigest, assertCurrent, review)
+  }
   /** Prepare exact native Skill paths before an Agent exists, without admitting a run. */
   async withBoundSkillSource<T>(projectId: string, workspaceInput: string,
     work: (source: LegacyBoundSkillSource | undefined) => Promise<T>): Promise<T> {
     const binding = this.store.getBinding(projectId)
     if (!binding) return work(undefined)
+    this.store.assertNotFrozen(projectId)
     const workspace = runtimeDirectory(workspaceInput)
     if (workspace !== binding.workspace) hostStateError("LEGACY_WORKSPACE_CHANGED")
     return withSnapshotRetention([this.snapshots.root], async () => {
       const assertBinding = () => {
+        this.store.assertNotFrozen(projectId)
         if (JSON.stringify(this.store.getBinding(projectId)) !== JSON.stringify(binding))
           hostStateError("LEGACY_RUN_SCOPE_CHANGED")
         this.deps.assertInstalledSourceCurrent?.(projectId, workspace, binding.installedPluginId)
@@ -247,6 +282,7 @@ export class LegacyProjectRuntimeService {
       stopGate = registerLegacyProjectEntryGate((projectId, featureId, workspace, source) => {
         const binding = this.store.getBinding(projectId)
         if (!binding) return
+        this.store.assertNotFrozen(projectId)
         if (
           !source ||
           source.mode !== "legacy" ||
@@ -286,6 +322,7 @@ export class LegacyProjectRuntimeService {
     if (!thread) return undefined
     const binding = this.store.getBinding(thread.projectId)
     if (!binding) return undefined
+    this.store.assertNotFrozen(thread.projectId)
     const featureId = thread.featureId || LEGACY_PROJECT_SESSION_SCOPE
     if (incoming.pluginSourceSnapshot) hostStateError("LEGACY_SOURCE_CONFLICT")
     if (runtimeDirectory(thread.workspace) !== binding.workspace)
@@ -308,6 +345,7 @@ export class LegacyProjectRuntimeService {
     )
       hostStateError("LEGACY_MCP_SOURCE_AUTHORITY_REQUIRED")
     const assertThread = () => {
+      this.store.assertNotFrozen(thread.projectId)
       incoming.signal?.throwIfAborted()
       if (JSON.stringify(this.deps.resolveThread(request.threadId)) !== JSON.stringify(thread))
         hostStateError("LEGACY_THREAD_CHANGED")

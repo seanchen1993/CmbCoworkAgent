@@ -1,7 +1,7 @@
 import { HumanMessage } from "@langchain/core/messages"
 import { realpathSync, statSync } from "node:fs"
 import { types } from "node:util"
-import { getDb, getThreadCore, getThreadMessageCanonicalId } from "../db"
+import { getDb, getThreadRuntimeScope, getThreadMessageCanonicalId } from "../db"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import { captureLocalThreadRunLease, getLocalThreadRunLease } from "./thread-run-lease"
 import { captureNativeMessage } from "./native-message-capture"
@@ -216,7 +216,7 @@ export function captureFunctionConversationNativeInput(
         own(rawTranscript, "disposition") !== disposition ||
         !transcriptData.matches(originalWrite))) fail()
     }
-    const database = getDb(), thread = getThreadCore(threadId)
+    const database = getDb(), thread = getThreadRuntimeScope(threadId)
     // Keep the original persistent key, but resolve both sides equally for Windows 8.3 aliases.
     const admittedWorkspace = canonical(workspace)
     if (!thread || canonical(workspacePath(thread.metadata)) !== admittedWorkspace) fail()
@@ -236,7 +236,7 @@ export function captureFunctionConversationNativeInput(
       if (state.failed) fail()
       active.throwIfAborted()
       if (getDb() !== database || !ownsLease()) fail()
-      const current = getThreadCore(threadId), currentLease = getLocalThreadRunLease(threadId)
+      const current = getThreadRuntimeScope(threadId), currentLease = getLocalThreadRunLease(threadId)
       if (!current || !matchesThreadIncarnation(current, incarnation) || !currentLease ||
         currentLease.owner !== lease.owner || currentLease.runId !== lease.runId ||
         currentLease.acquiredAt !== lease.acquiredAt) fail()

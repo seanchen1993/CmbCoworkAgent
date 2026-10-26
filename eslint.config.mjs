@@ -21,6 +21,8 @@ export default defineConfig(
       "output/**",
       // Byte-identical official compatibility fixtures; provenance hashes guard these sources.
       "tests/fixtures/mods-upstream/**",
+      // Original business reference files are checked by provenance, not rewritten by lint.
+      "tests/fixtures/native-compositions/legacy-reference/**",
       // Runtime conversations, generated workflow scripts, caches and traces.
       // They are user data rather than repository source; scanning them makes
       // lint time and output grow with application usage.
@@ -72,6 +74,8 @@ export default defineConfig(
         parallel: "readonly",
         pipeline: "readonly",
         workflow: "readonly",
+        action: "readonly",
+        worktree: "readonly",
         phase: "readonly",
         log: "readonly",
         glob: "readonly",

@@ -1,4 +1,4 @@
-import type { ClawActionDescriptor } from "../../shared/mods/claw-actions"
+import type { ClawActionDescriptor, ClawActionIdentity } from "../../shared/mods/claw-actions"
 import type { FlowManager } from "../mods/flows/manager"
 import type { ProjectActionBinding } from "../../shared/project-runtime/action-bindings"
 import type { HostProjectState } from "../../shared/project-runtime/host-types"
@@ -9,9 +9,21 @@ import type { FlowActionExecutionFacts } from "../mods/flows/action-execution-fa
 export type ProjectRuntimeInputScope = Pick<
   HostProjectState,
   "workspace" | "installedPluginId" | "packageId" | "pluginDigest" | "manifest"
->
+> & Partial<Pick<HostProjectState, "stageIndex">>
 
 interface ProjectActionRuntime {
+  /** Original manager instance capture; no lookup of a replacement owner during cleanup. */
+  captureOperationRetirement?(workspace: string, threadId: string): {
+    resident: boolean
+    assertCurrent(): void
+    retire(): Promise<void>
+  }
+  verifyReadOnlyCheckProvider?(workspace: string, threadId: string,
+    provider: ClawActionIdentity, signal: AbortSignal): Promise<() => void>
+  readExecutionResources?(project: ProjectRuntimeInputScope, snapshotRoot: string):
+    import("../plugins/runtime-source-scope").RuntimeExecutionResources | undefined
+  verifyReadOnlyContextProvider?(workspace: string, threadId: string,
+    provider: ClawActionIdentity, signal: AbortSignal): Promise<() => void>
   /** Pure ledger read: unlike FlowManager.runs this must not reconcile or write history. */
   readRuns?(workspace: string, threadId: string): FlowRun[]
   /** Main-only original result custody; public Flow result rewrites are not business evidence. */
@@ -26,7 +38,13 @@ interface ProjectActionRuntime {
   /** Preloaded schema/source names + original config/rules revisions; no package/knowledge reads. */
   captureInputAuthorityIdentity?(project: ProjectRuntimeInputScope, snapshotRoot: string): () => string
   publishRequiredContext?(workspace: string, text: string, signal: AbortSignal): Promise<string>
-  flows: Pick<FlowManager, "startSaved" | "waitForSettlement" | "run" | "cancel">
+  readDeclaredContext?(project: ProjectRuntimeInputScope, snapshotRoot: string, stageId: string): string
+  readContextMaterials?(project: ProjectRuntimeInputScope, snapshotRoot: string): {
+    roots: Array<{ id: string; path: string; source?: "package" | "knowledge" }>
+    configuration: import("../../shared/mods/types").ModObject
+  }
+  flows: Pick<FlowManager, "startSaved" | "waitForSettlement" | "run" | "cancel"> &
+    Partial<Pick<FlowManager, "assertWorkspaceResourcesSettled">>
   catalog(workspace: string, threadId: string): Promise<ClawActionDescriptor[]>
   prepareSelection(
     workspace: string,
@@ -40,6 +58,32 @@ export function normalizeProjectActionRuntime(
   workspaceKey: (workspace: string) => string
 ): ProjectActionRuntime {
   return {
+    ...(value.captureOperationRetirement ? {
+      captureOperationRetirement: (workspace: string, threadId: string) =>
+        value.captureOperationRetirement!(workspaceKey(workspace), threadId)
+    } : {}),
+    ...(value.verifyReadOnlyCheckProvider ? {
+      verifyReadOnlyCheckProvider: (workspace: string, threadId: string,
+        provider: ClawActionIdentity, signal: AbortSignal) =>
+        value.verifyReadOnlyCheckProvider!(workspaceKey(workspace), threadId, provider, signal)
+    } : {}),
+    ...(value.readExecutionResources ? {
+      readExecutionResources: (project: ProjectRuntimeInputScope, root: string) =>
+        value.readExecutionResources!({ ...project, workspace: workspaceKey(project.workspace) }, root)
+    } : {}),
+    ...(value.verifyReadOnlyContextProvider ? {
+      verifyReadOnlyContextProvider: (workspace: string, threadId: string,
+        provider: ClawActionIdentity, signal: AbortSignal) =>
+        value.verifyReadOnlyContextProvider!(workspaceKey(workspace), threadId, provider, signal)
+    } : {}),
+    ...(value.readContextMaterials ? {
+      readContextMaterials: (project: ProjectRuntimeInputScope, root: string) =>
+        value.readContextMaterials!({ ...project, workspace: workspaceKey(project.workspace) }, root)
+    } : {}),
+    ...(value.readDeclaredContext ? {
+      readDeclaredContext: (project: ProjectRuntimeInputScope, root: string, stageId: string) =>
+        value.readDeclaredContext!({ ...project, workspace: workspaceKey(project.workspace) }, root, stageId)
+    } : {}),
     ...(value.readRuns
       ? {
           readRuns: (workspace: string, threadId: string) =>
@@ -81,6 +125,10 @@ export function normalizeProjectActionRuntime(
     prepareSelection: (workspace, threadId, bindings) =>
       value.prepareSelection(workspaceKey(workspace), threadId, bindings),
     flows: {
+      ...(value.flows.assertWorkspaceResourcesSettled ? {
+        assertWorkspaceResourcesSettled: (workspace: string) =>
+          value.flows.assertWorkspaceResourcesSettled!(workspaceKey(workspace))
+      } : {}),
       startSaved: (workspace, threadId, saved, task, assertOwnerCurrent) =>
         value.flows.startSaved(
           workspaceKey(workspace),
@@ -97,6 +145,11 @@ export function normalizeProjectActionRuntime(
   }
 }
 let runtime: ProjectActionRuntime | undefined
+
+/** Absent only in adapters that do not own a Function runtime. */
+export function projectOperationRetirementCapture() {
+  return runtime?.captureOperationRetirement
+}
 
 /** Registers the application's existing manager; never creates a second execution system. */
 export function setProjectActionRuntime(value: ProjectActionRuntime): void {

@@ -8,6 +8,7 @@ import { prepareExtensionContext } from "./extension-context"
 import { isDerivedPlugin, setDerivationFamilies } from "../plugins/derivation-scope"
 import { startOwnedHookCommand } from "../hooks/owned-command"
 import { findHookProcessCleanupError } from "../hooks/owned-process-error"
+import { prepareMarketCommand } from "../services/market-content"
 import {
   createHarnessInvocationDeadline,
   HarnessInvocationSemaphore,
@@ -53,6 +54,7 @@ function runner(deps: Record<string, unknown>) {
     waitForHarnessInvocation,
     findHookProcessCleanupError,
     startOwnedHookCommand,
+    prepareMarketCommand,
     harnessInvocationSemaphore: new HarnessInvocationSemaphore(1),
     HARNESS_ADAPTER_MAX_BUFFER: 1024 * 1024,
     formatAdapterError: (error: Error) => error.message,

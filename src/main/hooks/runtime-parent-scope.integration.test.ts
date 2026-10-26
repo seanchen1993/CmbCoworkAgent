@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import AdmZip from "adm-zip"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
+import { AIMessage } from "@langchain/core/messages"
 import type { PluginHookMetadata, PluginMetadata } from "../types"
 import type { RuntimePluginSourceBinding } from "../plugins/runtime-source-scope"
 
@@ -20,11 +21,17 @@ vi.mock("../storage", async importOriginal => {
     getHookLoggingConfig: () => ({ diagnostic: false }), getUserInfo: () => undefined
   }
 })
-vi.mock("../mods/manager", () => ({ getModsManager: () => ({ isEnabled: () => false }) }))
+vi.mock("../mods/manager", async original => ({
+  ...(await original<typeof import("../mods/manager")>()), getModsManager: () => undefined
+}))
 vi.mock("./log-record", () => ({ persistHookResultRecord: vi.fn() }))
 vi.mock("../services/event-reporter", () => ({ trackEvent: vi.fn() }))
 vi.mock("../services/setup-state", () => ({ hasWorkspaceBeenInitialised: () => true,
   markWorkspaceInitialised: vi.fn() }))
+vi.mock("../services/subagent-session-capture", () => ({
+  withSubagentSessionCapture: (_context: unknown, _label: string, run: () => Promise<unknown>) => run(),
+  subagentSessionCallbacks: () => []
+}))
 import { parsePluginHooks } from "../storage"
 import { issueRuntimePluginSourceToken, withRuntimePluginSource } from "../plugins/runtime-source-scope"
 import { readRuntimeRequiredHooks } from "../plugins/runtime-required-hooks"
@@ -32,6 +39,8 @@ import { createHookScope, filterScopedHooks, resolveEnabledHooksForRun } from ".
 import { partitionRequiredBusinessHooks } from "./required-business-checks"
 import { runHooks, type HookContext } from "./runner"
 import { fireSessionStartOnce, fireSessionEndAll } from "./session-lifecycle"
+import { runWorkflowSubagent } from "../agent/workflow/subagent"
+import { LocalSandbox } from "../agent/local-sandbox"
 
 let root = ""
 beforeEach(() => {
@@ -69,6 +78,80 @@ function binding(parent: PluginMetadata, extra: Partial<RuntimePluginSourceBindi
 const context = (): HookContext => ({ sessionId: "native-stage", workspacePath: root,
   harnessProjectId: "composition-parent", harnessAdapterId: "composition-wrapper",
   featureId: "sample", skillName: "native-prd", toolName: "read_file", toolArgs: {} })
+
+it.each(["allow", "content-block", "missing", "crash", "expired", "package-allow", "package-block", "package-edit-block"])(
+  "enforces retained required hooks before a real workflow child writes physical bytes (%s)", async scenario => {
+    const parent = plugin("native-parent"), workspace = join(root, "workspace")
+    mkdirSync(workspace)
+    const script = join(parent.path, "hooks", "guard.py")
+    writeFileSync(script, [
+      "import json, sys",
+      "payload = json.load(sys.stdin)",
+      scenario === "crash" ? "raise RuntimeError('guard failed')" :
+        "print(json.dumps({'decision':'block','reason':'fixture forbidden content'}) if 'FORBIDDEN' in json.dumps(payload.get('tool_input', {})) else '{}')"
+    ].join("\n"))
+    writeFileSync(join(parent.path, "hooks/hooks.json"), JSON.stringify({ hooks: {
+      PreToolUse: [{ matcher: "write_file|edit_file", hooks: [{ type: "command",
+        command: `python -I -B "${script}"` }] }]
+    } }))
+    writeFileSync(join(parent.path, "devclaw.capabilities.json"), JSON.stringify({
+      apiVersion: "devclaw.capabilities/v1", capabilities: [{ id: "build", title: "Build",
+        kind: "skill", usage: "project", entry: "skills/build/SKILL.md", dependsOn: [],
+        requiredHooks: ["PreToolUse:0:0"] }]
+    }))
+    const actualPackage = scenario.startsWith("package-")
+    if (actualPackage) {
+      const resources = resolve("resources/native-compositions/autobiz")
+      for (const file of ["devclaw.capabilities.json", "hooks/hooks.json", "hooks/check-secrets.py", "hooks/secret_rules.py"])
+        writeFileSync(join(parent.path, file), readFileSync(join(resources, file)))
+    }
+    const requiredHooks = readRuntimeRequiredHooks(parent,
+      { entry: actualPackage ? "skills/native-code/SKILL.md" : "skills/build/SKILL.md" })
+    expect(requiredHooks).toEqual(["plugin:native-parent/PreToolUse:0:0"])
+    expect(readRuntimeRequiredHooks(parent, { entry: "skills/other/SKILL.md" })).toEqual([])
+    let live = true
+    const token = issueRuntimePluginSourceToken(binding(parent, { mode: "host", workspace, requiredHooks }),
+      undefined, () => { if (!live) throw Error("CHILD_SOURCE_EXPIRED") })
+    if (scenario === "missing") writeFileSync(join(parent.path, "hooks/hooks.json"), '{"hooks":{}}')
+    const target = join(workspace, actualPackage ? "child.properties" : "child.txt")
+    if (scenario === "package-edit-block") writeFileSync(target, "password=${APP_PASSWORD}")
+    const content = actualPackage
+      ? scenario === "package-allow" ? "password=${APP_PASSWORD}" : "password=fixture-forbidden-value"
+      : scenario === "content-block" ? "FORBIDDEN" : "approved bytes"
+    let result: unknown
+    const cleaned = vi.fn(async () => undefined)
+    const run = withRuntimePluginSource(token, () => runWorkflowSubagent({
+      parentThreadId: "native-stage", isRetryableApiError: () => false, cleanupThread: cleaned,
+      createRuntime: async options => {
+        expect(options.threadId).not.toBe("native-stage")
+        const hookScope = createHookScope()
+        const sandbox = new LocalSandbox({ rootDir: workspace, runId: options.threadId,
+          agentId: options.agentId, windowsSandbox: "none", hookScope,
+          hookResolver: (event, context) => resolveEnabledHooksForRun(workspace, event, context, hookScope) })
+        return { stream: async () => (async function* () {
+          if (scenario === "expired") live = false
+          result = scenario === "package-edit-block"
+            ? await sandbox.edit(target, "password=${APP_PASSWORD}", content)
+            : await sandbox.write(target, content)
+          yield ["values", { messages: [new AIMessage(JSON.stringify(result))] }]
+        })() }
+      }
+    }, {
+      prompt: "write through the native file backend", agentIndex: 0, label: "file-writer",
+      runId: "required-hook-run", signal: new AbortController().signal, singleAttempt: true
+    }))
+    if (scenario === "missing" || scenario === "expired") await expect(run).rejects.toThrow()
+    else await run
+    expect(cleaned).toHaveBeenCalled()
+    if (scenario === "allow" || scenario === "package-allow") expect(readFileSync(target, "utf8")).toBe(content)
+    else if (scenario === "package-edit-block") expect(readFileSync(target, "utf8")).toBe("password=${APP_PASSWORD}")
+    else expect(existsSync(target)).toBe(false)
+    if (scenario === "content-block" || scenario === "crash" || scenario.endsWith("-block")) {
+      expect(result).toHaveProperty("error")
+      expect(JSON.stringify(result)).not.toContain("fixture-forbidden-value")
+    }
+  }
+)
 
 it("observes authority once for the synchronous initial scope projection and again on the next call", () => {
   const parent = plugin()

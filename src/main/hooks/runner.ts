@@ -1,6 +1,8 @@
 import { prepareMarketCommand, resolveMarketRuntimePath } from "../services/market-content"
+import { markRunCancellationEffectDispatched } from "../agent/run-cancellation-settlement"
 import { prepareStageCheckReceipts } from "./stage-check-receipts"
 import { hookExecutionResult } from "./execution-result"
+import { markHostInputExternalBoundary } from "../services/user-input"
 import {
   partitionRequiredBusinessHooks,
   requiredBusinessCheckFailure
@@ -1335,6 +1337,8 @@ async function executeHook(
   onLateHookResult?: HookResultCallback,
   accounting?: HookModelAccounting
 ): Promise<HookResult> {
+  // Reusing an existing once/in-flight Hook is also not an effect-free run.
+  markRunCancellationEffectDispatched()
   // Compaction cannot begin until its gate settles. Imported async settings
   // are adapted to an awaited gate, including once/in-flight deduplication.
   if (["PreCompact", "PostToolBatch", "UserPromptExpansion"].includes(event) && hook.async === true)
@@ -1445,7 +1449,9 @@ async function executeSyncHook(
   requiredAuthorityCheck?: () => void,
   accounting?: HookModelAccounting
 ): Promise<HookResult> {
+  markRunCancellationEffectDispatched()
   const hookType = hook.type ?? "command"
+  if (hookType !== "prompt") markHostInputExternalBoundary(context.sessionId)
   // Command preparation only derives bounded metadata. Its complete source fence stays
   // below, after the preference await and immediately before the actual process starts.
   if (hookType === "prompt" || hookType === "http") assertCurrentRuntimePluginSourceContent()
@@ -1470,7 +1476,9 @@ async function executeSyncHook(
     const pluginRoot = (hook as ScopedHook).pluginRoot ?? context.pluginRoot
     if (pluginRoot && (await suppressCompositionPythonCache(pluginRoot)))
       env = { ...env, PYTHONDONTWRITEBYTECODE: "1" }
-    assertCurrentRuntimePluginSourceContent()
+    // The workspace queue may await. Check authority here and retained bytes once inside
+    // runCommand, after admission and immediately before preparing the actual command.
+    currentRuntimePluginSource()
     const signals = [context.signal, context.abortSignal, getModCallContext()?.signal].filter(
       (signal): signal is AbortSignal => signal !== undefined
     )

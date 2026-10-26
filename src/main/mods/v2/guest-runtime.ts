@@ -1,3 +1,4 @@
+import { FunctionTrustedWaitClock, withTrustedFunctionWaitScope } from "./trusted-function-wait"
 import { registerFunctionDirectDisplaySource } from "./display-preparation"
 import { installFunctionBase64Host } from "./guest-base64"
 import { wireError } from "./wire"
@@ -6,6 +7,7 @@ import { PLATFORM_VIEW_OPEN_METHODS, PLATFORM_VIEW_CLEANUP_METHODS } from "../..
 import { encodeFunctionNextReply } from "./next-reply-wire"
 import { randomUUID } from "node:crypto"
 import { AsyncResource } from "node:async_hooks"
+import { observeRunCancellationEffect } from "../../agent/run-cancellation-settlement"
 import {
   getQuickJS,
   type QuickJSContext,
@@ -57,6 +59,7 @@ interface InvocationFrame {
   host: FunctionHostCall
   controller: AbortController
   expiresAt: number
+  waitClock?: FunctionTrustedWaitClock
   budget?: FunctionHookBudget
   sharedCut?: FunctionSharedWallCut
   msAllowance?: number
@@ -171,6 +174,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
         (frame.platformUiOpen && !PLATFORM_VIEW_OPEN_METHODS.includes(op)))
         throw Error("MODS_PLATFORM_CLEANUP_ONLY")
       guest.assertFrame(frame, op === "stream.close")
+      frame.waitClock?.assertDispatchAllowed()
       const input = parseModJson(context.getString(json)) as ModJson
       if (performance.now() >= frame.expiresAt) throw Error("MODS_BUDGET_EXCEEDED")
       frame.budget?.assertRemaining()
@@ -304,6 +308,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
         .then(() => {
           callSignal.throwIfAborted()
           if (frame?.sharedCut && !cleanup) frame.sharedCut.assertLive()
+          frame?.waitClock?.assertDispatchAllowed()
           const cut = frame?.sharedCut?.expiresAtNs ?? (token ? guest.closedCuts.get(token) : undefined)
           return guest.moduleHost!(op, input, callSignal, cut ? { dispatchCutNs: cut } : undefined)
         })
@@ -904,7 +909,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
   bindModuleHost(host: FunctionHostCall, onDispose?: () => void): void {
     if (this.disposed) throw new ModFunctionError("MODS_UNLOADED")
     if (this.moduleHost) throw new ModFunctionError("MODS_MODULE_HOST_ALREADY_BOUND")
-    this.moduleHost = AsyncResource.bind(host)
+    this.moduleHost = AsyncResource.bind(observeRunCancellationEffect(host))
     this.moduleDispose = onDispose
   }
 
@@ -954,7 +959,8 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
     event: ModObject,
     host: FunctionHostCall,
     options: FunctionInvocation,
-    uiDrawing?: FunctionUiResolveWireDrawing
+    uiDrawing?: FunctionUiResolveWireDrawing,
+    externalWaitClock?: FunctionTrustedWaitClock
   ): Promise<{ value?: ModJson; absent?: boolean }> {
     if (this.promiseSettlementFailure) return Promise.reject(this.promiseSettlementFailure)
     if (this.disposed) return Promise.reject(new ModFunctionError("MODS_UNLOADED"))
@@ -962,14 +968,16 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
     if (this.frames.size >= 32) return Promise.reject(new ModFunctionError("MODS_FRAME_LIMIT"))
     const { signal, admission, ownBudgetMs, dispatchCutNs, ...metadata } = options
     const token = randomUUID()
-    return new Promise((resolve, reject) => {
+    const waitClock = externalWaitClock ?? new FunctionTrustedWaitClock(functionInvocationTimeoutMs(options))
+    const run = () => new Promise<{ value?: ModJson; absent?: boolean }>((resolve, reject) => {
       const cancel = (): void => this.cancel(token,
         signal?.reason instanceof ModFunctionError ? signal.reason.code : "MODS_CANCELLED")
       const frame: InvocationFrame = {
         id: token,
-        host: AsyncResource.bind(host),
+        host: AsyncResource.bind(observeRunCancellationEffect(host)),
         controller: new AbortController(),
-        expiresAt: performance.now() + functionInvocationTimeoutMs(options),
+        get expiresAt() { return waitClock.expiresAt },
+        waitClock,
         ...(uiDrawing && options.event === "ui.render" && typeof options.uiGeneration === "string" &&
           typeof event.requestId === "string" && typeof event.component === "string" ? {
             uiDrawing: Object.freeze({ drawing: Object.freeze({ ...uiDrawing }),
@@ -1033,6 +1041,14 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
         })
       } else execute()
     })
+    // Worker control owns its external clock. Direct native runtimes use the same causal meter.
+    if (externalWaitClock) return run().finally(() => waitClock.close())
+    return withTrustedFunctionWaitScope({ clock: waitClock,
+      assertCurrent: () => {
+        signal?.throwIfAborted()
+        if (this.disposed || !this.frames.has(token)) throw new ModFunctionError("MODS_STALE_INVOCATION")
+      }, abort: error => this.cancel(token, error instanceof ModFunctionError ? error.code : "MODS_CANCELLED")
+    }, run)
   }
 
   /** Private load-time raw-function result path. Ordinary invoke remains strict ModJSON. */
@@ -1059,7 +1075,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       const cancel = () => this.cancel(token,
         signal?.reason instanceof ModFunctionError ? signal.reason.code : "MODS_CANCELLED")
       const frame: InvocationFrame = {
-        id: token, host: AsyncResource.bind(host), controller: new AbortController(),
+        id: token, host: AsyncResource.bind(observeRunCancellationEffect(host)), controller: new AbortController(),
         expiresAt: Math.min(absoluteExpiresAt,
           performance.now() + functionInvocationTimeoutMs(options)),
         ...(ownBudgetMs === undefined ? {} : { budget: new FunctionHookBudget(ownBudgetMs) }),

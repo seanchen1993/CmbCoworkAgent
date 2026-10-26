@@ -44,6 +44,12 @@ function readExtensionContract(
   const contract = projectRuntimeExtensionContract(raw)
   if (contract) {
     const runtime = parseProjectRuntimeManifest(raw)
+    if (contract.executionResources) {
+      if (runtime.mode !== "host") throw Error("EXTENSION_CONTRACT_EXECUTION_RESOURCES_HOST_REQUIRED")
+      for (const path of contract.executionResources.profiles)
+        if (!read(path, 64 * 1024).bytes?.length)
+          throw Error("EXTENSION_CONTRACT_EXECUTION_PROFILE_MISSING")
+    }
     if (contract.verifiedArtifacts) {
       const adapter = read("devclaw.stage-checks.json", 1024)
       const declaration = adapter.bytes ? JSON.parse(adapter.bytes.toString("utf8")) : undefined
@@ -53,7 +59,15 @@ function readExtensionContract(
           output.path === AUTOBIZ_CONTEXT_OUTPUT.path && output.required))
         throw Error("EXTENSION_CONTRACT_VERIFIED_ARTIFACTS_ADAPTER_UNSUPPORTED")
     }
-    if (contract.context?.provider?.actionId) {
+    if (contract.context?.provider?.files) {
+      if (runtime.mode !== "host") throw Error("EXTENSION_CONTRACT_DECLARED_FILES_HOST_REQUIRED")
+      for (const file of contract.context.provider.files) {
+        if (file.stages?.some(id => !runtime.stages.some(stage => stage.id === id)))
+          throw Error("EXTENSION_CONTRACT_CONTEXT_STAGE_MISSING")
+        if (file.source === "package" && !read(file.path, 28_000).bytes?.length)
+          throw Error("EXTENSION_CONTRACT_PROVIDER_MISSING")
+      }
+    } else if (contract.context?.provider?.actionId) {
       if (runtime.mode !== "host" || !readProjectActionLock(root, runtime, read).bindings.some(
         binding => binding.id === contract.context!.provider!.actionId))
         throw Error("EXTENSION_CONTRACT_ACTION_PROVIDER_MISSING")

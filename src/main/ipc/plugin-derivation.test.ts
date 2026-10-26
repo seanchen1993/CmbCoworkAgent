@@ -1,12 +1,18 @@
 import { expect, it, vi, afterEach } from "vitest"
 import type { IpcMain, IpcMainInvokeEvent, BrowserWindow } from "electron"
 import { randomUUID } from "node:crypto"
+import type { ClawActionIdentity } from "../../shared/mods/claw-actions"
 const state = vi.hoisted(() => ({
   workspace: "C:/fixture",
   incarnation: "first",
   modelRef: "selected-model",
   dialog: vi.fn(),
   inspect: vi.fn(),
+  create: vi.fn(),
+  check: vi.fn(),
+  install: vi.fn(),
+  catalog: vi.fn(),
+  grantEnabled: true,
   revise: vi.fn(),
   upstream: vi.fn(),
   files: vi.fn(),
@@ -21,7 +27,9 @@ vi.mock("electron", () => ({
 }))
 vi.mock("../storage", () => ({
   getOpenworkDir: () => "C:/never-written",
-  getPlugins: () => [{ id: "p", name: "package", path: "C:/package", description: "test" }],
+  getPlugins: () => [
+    { id: "p", name: "package", path: "C:/package", enabled: true, description: "test" }
+  ],
   invalidateEnabledSkillsCache: () => {},
   invalidatePluginHooksCache: () => {}
 }))
@@ -43,8 +51,32 @@ vi.mock("./plugins", () => ({
   installDerivedPluginDirectory: vi.fn(),
   inspectCompletePluginDirectory: vi.fn()
 }))
+vi.mock("../harness-board/project-action-runtime", () => ({
+  getProjectActionCatalog: (...args: unknown[]) => state.catalog(...args)
+}))
+vi.mock("../mods/manager", () => ({
+  getModsManager: () => ({
+    workspaceKey: (workspace: string) => workspace,
+    isEnabled: () => true,
+    store: {
+      getGrant: () => ({ enabled: state.grantEnabled, digest: "a".repeat(64) }),
+      assertGrant: () => {
+        if (!state.grantEnabled) throw Error("GRANT_REVOKED")
+      }
+    }
+  })
+}))
 vi.mock("../plugins/derivation-service", () => ({
   PluginDerivationService: class {
+    create(...args: unknown[]) {
+      return state.create(...args)
+    }
+    check(...args: unknown[]) {
+      return state.check(...args)
+    }
+    install(...args: unknown[]) {
+      return state.install(...args)
+    }
     revise(...args: unknown[]) {
       return state.revise(...args)
     }
@@ -72,8 +104,52 @@ import { registerPluginDerivationHandlers } from "./plugin-derivation"
 afterEach(() => {
   state.workspace = "C:/fixture"
   state.incarnation = "first"
+  state.grantEnabled = true
   vi.clearAllMocks()
   vi.unstubAllEnvs()
+})
+it("retains the original grant fence after native catalog resolution until the final mutation", async () => {
+  const f = fixture()
+  const provider = { pluginId: "p", plugin: "package", digest: "a".repeat(64), actionId: "check" }
+  state.catalog.mockResolvedValue([provider])
+  state.create.mockImplementation(async (...args: unknown[]) => {
+    const catalog = args.at(-1) as (providers: ClawActionIdentity[]) => Promise<unknown>
+    const guard = args.at(-2) as () => void
+    await catalog([provider])
+    state.grantEnabled = false
+    guard()
+  })
+  await expect(
+    f.call("create", {
+      ...f.scope,
+      inspectionId: "inspection",
+      name: "new-copy",
+      requestId: randomUUID()
+    })
+  ).rejects.toThrow("GRANT_REVOKED")
+})
+it("does not require grants for unrelated providers outside the native source lock", async () => {
+  const f = fixture()
+  const provider = { pluginId: "p", plugin: "package", digest: "a".repeat(64), actionId: "check" }
+  state.catalog.mockResolvedValue([
+    provider,
+    { pluginId: "unrelated-disabled", plugin: "other", digest: "b".repeat(64), actionId: "other" }
+  ])
+  state.create.mockImplementation(async (...args: unknown[]) => {
+    const catalog = args.at(-1) as (providers: ClawActionIdentity[]) => Promise<unknown[]>
+    const guard = args.at(-2) as () => void
+    const actions = await catalog([provider])
+    guard()
+    return actions.length
+  })
+  await expect(
+    f.call("create", {
+      ...f.scope,
+      inspectionId: "inspection",
+      name: "new-copy",
+      requestId: randomUUID()
+    })
+  ).resolves.toBe(2)
 })
 function fixture() {
   vi.stubEnv("ELECTRON_RENDERER_URL", "http://localhost:5173")
@@ -117,6 +193,7 @@ it("scopes revision and upstream checks before accessing persisted source paths"
     expect.any(String),
     "copy",
     "request",
+    expect.any(Function),
     expect.any(Function)
   )
   f.call("inspect-upstream", { ...f.scope, copyId: "copy", path: "untrusted" })
@@ -132,6 +209,33 @@ it("scopes revision and upstream checks before accessing persisted source paths"
   expect(state.revise).toHaveBeenCalledTimes(1)
   expect(state.upstream).toHaveBeenCalledTimes(1)
 })
+it.each(["create", "check", "install"])(
+  "binds %s native catalogs to the original scope across awaits",
+  async (method) => {
+    const f = fixture()
+    const action = state[method as "create" | "check" | "install"]
+    action.mockImplementation(async (...args: unknown[]) => {
+      const catalog = args.at(-1) as () => Promise<unknown>
+      return catalog()
+    })
+    state.catalog.mockImplementation(async () => {
+      state.incarnation = "replacement"
+      return [{ pluginId: "actual" }]
+    })
+    await expect(
+      f.call(method, {
+        ...f.scope,
+        inspectionId: "inspection",
+        copyId: "copy",
+        name: "copy",
+        requestId: randomUUID(),
+        expectedDigest: "digest",
+        catalog: [{ pluginId: "forged" }]
+      })
+    ).rejects.toThrow("会话已变化")
+    expect(state.catalog).toHaveBeenCalledWith("C:/fixture", "thread")
+  }
+)
 it("rechecks window and workspace after native directory selection", async () => {
   const f = fixture()
   state.dialog.mockImplementation(async () => {

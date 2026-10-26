@@ -10,6 +10,7 @@ import type {
 } from "../../../../shared/project-runtime/stage-debug"
 import { ProjectStageDebugComparisonCard } from "./ProjectStageDebugComparisonCard"
 import { isSameWorkspacePath } from "../../../../shared/workspace-path"
+import { projectRuntimeRecoveryMessage } from "../harness-board/project-runtime-message"
 
 const statusLabels = {
   ready: "待原生确认并执行",
@@ -23,6 +24,8 @@ type DebugList = Awaited<ReturnType<ProjectStageDebugApi["list"]>>
 
 function stageDebugErrorMessage(cause: unknown): string {
   const code = cause instanceof Error ? cause.message : String(cause)
+  if (/PROJECT_STAGE_DEBUG_(READONLY_ADAPTER_REQUIRED|CHECK_INPUT_UNSUPPORTED|CHECK_EFFECT_UNSUPPORTED)|PROJECT_READONLY_CHECK_/.test(code))
+    return projectRuntimeRecoveryMessage(code)!
   const original = "原项目、产物和检查要求均保留，请继续使用原项目入口。"
   if (/RECOVERY_APPROVAL_REQUIRED/.test(code))
     return "本次 Hooks 恢复需要重新核对命令与外部副作用。请重新准备方案，阅读说明并单独勾选确认；旧方案的确认不会继承。"

@@ -47,6 +47,31 @@ it("enumerates every host project beyond UI pagination and retains all historica
   for (const version of all) expect(audit.digests.has(version)).toBe(true)
 }, 15000)
 
+it("retains both plan versions from the original migration transaction and rejects malformed history", () => {
+  const f = fixture()
+  const path = join(f.base, "local-projects", "state.sqlite")
+  const store = new HostProjectStore(path)
+  cleanup.push(() => store.close())
+  const project = store.create(hostProjectFixture(f.base))
+  const candidate = { ...project, pluginDigest: digest("new-plan"), packageVersion: "1.0.1",
+    manifest: { ...project.manifest, plugin: { ...project.manifest.plugin, version: "1.0.1" } } }
+  const review = { projectId: project.projectId, expectedVersion: project.version,
+    sourceDigest: project.pluginDigest, targetDigest: candidate.pluginDigest,
+    targetVersion: candidate.packageVersion, inputFingerprint: digest("input"),
+    candidateInputFingerprint: digest("candidate-input"), preservedStageIds: [],
+    remainingStageIds: candidate.manifest.stages.map(stage => stage.id), contractDigest: digest("contract") }
+  store.commitPlanMigration(candidate, project.version, review, () => {})
+  const audit = f.audit()
+  expect(audit.blockers).toEqual([])
+  expect(audit.digests.has(project.pluginDigest)).toBe(true)
+  expect(audit.digests.has(candidate.pluginDigest)).toBe(true)
+  const db = f.db(["local-projects", "state.sqlite"])
+  db.prepare("UPDATE host_plan_migrations SET data=?").run(JSON.stringify({
+    review, previous: project, next: { ...candidate, version: 2 }, actor: "unrecognized"
+  }))
+  expect(f.audit().complete).toBe(false)
+})
+
 it("keeps disabled legacy history, all composition units, internal projects, selections and baseline receipts", () => {
   const f = fixture(),
     legacy = f.db(["legacy-project-runtime", "operations.sqlite"])

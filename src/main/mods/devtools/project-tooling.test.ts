@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   initProjectPlugin,
+  compileProjectPlugin,
   packProjectPlugin,
   prepareProjectDevelopment,
   testProjectPlugin
@@ -15,6 +16,8 @@ import { createProjectTemplate } from "./project-template"
 import { bindProjectPublicAction } from "./project-action-reuse"
 import { readPluginManifest, getPluginSkillSearchSources } from "../../plugins/manifest"
 import { discoverSkills } from "../../skills/discovery"
+import { MARKET_CONTENT_DENIED, protectMarketDirectory } from "../../services/market-content"
+import { readAuthoringProjectSource, readProjectSource } from "./project-source"
 
 const roots: string[] = []
 afterEach(async () => {
@@ -29,6 +32,25 @@ async function fixture() {
 }
 
 describe("lightweight project authoring", () => {
+  it("rejects protected native packages at authoring boundaries while keeping local authoring and runtime reads", async () => {
+    const root = await mkdtemp(join(tmpdir(), "protected-native-authoring-"))
+    roots.push(root)
+    const directory = join(root, "source")
+    await initProjectPlugin(directory, { packageId: "native-docs", name: "Native", template: "native-modular" })
+    await expect(compileProjectPlugin(directory, join(root, "compiled"))).resolves.toBeDefined()
+    await expect(prepareProjectDevelopment(directory, join(root, "trial"))).resolves.toMatchObject({ status: "prepared" })
+    await expect(packProjectPlugin(directory, join(root, "local.zip"))).resolves.toBeDefined()
+    protectMarketDirectory(directory)
+    await expect(readAuthoringProjectSource(directory)).rejects.toThrow(MARKET_CONTENT_DENIED)
+    await expect(compileProjectPlugin(directory, join(root, "denied-compiled"))).rejects.toThrow(MARKET_CONTENT_DENIED)
+    await expect(prepareProjectDevelopment(directory, join(root, "denied-trial"))).rejects.toThrow(MARKET_CONTENT_DENIED)
+    await expect(packProjectPlugin(directory, join(root, "denied.zip"))).rejects.toThrow(MARKET_CONTENT_DENIED)
+    await expect(readProjectSource(directory)).resolves.toBeDefined()
+    await expect(doctorProjectPlugin(directory)).resolves.toHaveProperty("diagnostics")
+    const source = getPluginSkillSearchSources(directory, readPluginManifest(directory)!.manifest)
+    expect((await discoverSkills(source[0].sourceDir, source[0].maxDepth)).length).toBeGreaterThan(0)
+  })
+
   it("generates a package recognized by the real installer metadata and skill discovery", async () => {
     const { directory } = await fixture()
     const result = readPluginManifest(directory)!

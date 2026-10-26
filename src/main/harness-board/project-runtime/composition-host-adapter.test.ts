@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -159,24 +159,31 @@ function fixture(
 }
 
 describe("composition through original HostProjectService", () => {
-  it("materializes verified handoffs after native configuration preallocates both unit roots", async () => {
-    const f = fixture({ mappedInput: "incoming/document.md" })
-    const prepared = await f.service.prepare(f.definition, "prepared-handoff")
-    expect(prepared.configurationPending).toBe(true)
-    expect(f.executeSkill).not.toHaveBeenCalled()
-    // Inspect the real original workspace mapping rather than manufacturing a consumer root.
-    const registeredRoot = f.service.store.unitWorkspace(prepared.id, "unit1")!
-    expect(existsSync(registeredRoot)).toBe(true)
-    expect(existsSync(join(registeredRoot, "incoming/document.md"))).toBe(false)
-    await f.service.startPrepared(prepared.id, prepared.version)
-    const run = await f.service.waitForSettlement(prepared.id)
-    expect(run.status).toBe("succeeded")
-    expect(f.executeSkill).toHaveBeenCalledTimes(4)
-    const consumer = f.executeSkill.mock.calls[2][0]
-    expect(consumer.project.workspace).toBe(registeredRoot)
-    expect(readFileSync(join(consumer.project.workspace, "incoming/document.md"), "utf8"))
-      .toBe("documents-review")
-    expect(consumer.assertInputsCurrent).toBeTypeOf("function")
+  describe("preallocated handoff", () => {
+    let f: ReturnType<typeof fixture>
+    beforeEach(() => {
+      // Build independent packages, snapshots and stores outside the behavior timer.
+      // Native preparation and all four checked Host stages remain inside the case.
+      f = fixture({ mappedInput: "incoming/document.md" })
+    })
+    it("materializes verified handoffs after native configuration preallocates both unit roots", async () => {
+      const prepared = await f.service.prepare(f.definition, "prepared-handoff")
+      expect(prepared.configurationPending).toBe(true)
+      expect(f.executeSkill).not.toHaveBeenCalled()
+      // Inspect the real original workspace mapping rather than manufacturing a consumer root.
+      const registeredRoot = f.service.store.unitWorkspace(prepared.id, "unit1")!
+      expect(existsSync(registeredRoot)).toBe(true)
+      expect(existsSync(join(registeredRoot, "incoming/document.md"))).toBe(false)
+      await f.service.startPrepared(prepared.id, prepared.version)
+      const run = await f.service.waitForSettlement(prepared.id)
+      expect(run.status).toBe("succeeded")
+      expect(f.executeSkill).toHaveBeenCalledTimes(4)
+      const consumer = f.executeSkill.mock.calls[2][0]
+      expect(consumer.project.workspace).toBe(registeredRoot)
+      expect(readFileSync(join(consumer.project.workspace, "incoming/document.md"), "utf8"))
+        .toBe("documents-review")
+      expect(consumer.assertInputsCurrent).toBeTypeOf("function")
+    })
   })
   it("rejects a conflicting preallocated copy before admitting the consumer engine", async () => {
     const f = fixture({ mappedInput: "incoming/document.md" })

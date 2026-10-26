@@ -5,6 +5,8 @@ import { parseSkillFrontmatter } from "../../skills/frontmatter"
 import { readPackageProtocolFiles } from "./package-snapshots"
 import { hostStateError } from "./host-state-protocol"
 import { decodeHostPackageSkill } from "./package-skill-content"
+import { inspectHostPlanMigration } from "./plan-migration"
+import { NATIVE_COMPOSITION_PATH } from "../../plugins/native-composition"
 
 /** The runtime parser tolerates malformed YAML. Debug admission must never reuse that fallback. */
 function skillDeclaration(bytes: Buffer): string {
@@ -49,6 +51,33 @@ export function assertStageBranchSourceCompatible(
     readPackageProtocolFiles(originalRoot).map((file) => [file.path, file.bytes])
   )
   const revised = readPackageProtocolFiles(candidateRoot)
+  if (files.has(NATIVE_COMPOSITION_PATH)) {
+    if (
+      !files
+        .get(NATIVE_COMPOSITION_PATH)!
+        .equals(
+          revised.find((file) => file.path === NATIVE_COMPOSITION_PATH)?.bytes ?? Buffer.alloc(0)
+        )
+    )
+      hostStateError("BRANCH_CONTRACT_CHANGED")
+    // Validate both complete compiler projections, then preserve all non-future resources.
+    // A source Skill edit changes its generated Skill and lock together; neither is trusted alone.
+    inspectHostPlanMigration(
+      { status: "active", packageId: original.plugin.id, stageIndex: index, manifest: original },
+      candidate,
+      originalRoot,
+      candidateRoot
+    )
+    for (const file of revised) {
+      if (
+        mutable.has(file.path) &&
+        files.has(file.path) &&
+        skillDeclaration(files.get(file.path)!) !== skillDeclaration(file.bytes)
+      )
+        hostStateError("BRANCH_SKILL_DECLARATION_INVALID")
+    }
+    return
+  }
   if (
     revised.length !== files.size ||
     revised.some(

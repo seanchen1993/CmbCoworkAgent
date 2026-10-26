@@ -5,12 +5,13 @@ import { dirname, join } from "node:path"
 import { createAuthoringSourceBundle, type AuthoringSourceBundle } from "./authoring-bundle"
 import { createProjectTemplate, type ProjectTemplateKind } from "./project-template"
 import { compileProjectHarness } from "./project-harness"
+import { compileNativeComposition, nativeCompositionSchema, NATIVE_COMPOSITION_PATH } from "../../plugins/native-composition"
 import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 import { isProjectSourcePath } from "./project-source"
 import { inspectProjectSource } from "./project-doctor"
 import { testProjectSource } from "./project-contract"
 import { packProjectPlugin } from "./project-tooling"
-import { readProjectSource } from "./project-source"
+import { readAuthoringProjectSource as readProjectSource } from "./project-source"
 import {
   ProjectDevelopmentSessions,
   type ProjectDevelopmentView
@@ -365,14 +366,52 @@ export class ProjectAuthoringSessions {
     guard()
     const draft = this.read(scope, id)
     if (draft.revision !== revision) throw Error("PROJECT_DRAFT_REVISION_CHANGED")
-    const source = compileProjectHarness(draft.source)
+    const native = draft.source.files.find((file) => file.path === NATIVE_COMPOSITION_PATH)
+    if (
+      native &&
+      draft.source.files.some(
+        (file) =>
+          file.path === "devclaw.harness.json" || file.path === "mods/business/manifest.json"
+      )
+    )
+      throw Error("NATIVE_COMPOSITION_MULTIPLE_SOURCES")
+    const availableActions = native ? await this.actions(scope.workspace, scope.threadId) : []
+    guard()
+    const source = native
+      ? createAuthoringSourceBundle(
+          compileNativeComposition(JSON.parse(native.text), {
+            files: draft.source.files.map((file) => ({
+              path: file.path,
+              bytes: Buffer.from(file.text)
+            })),
+            actionCatalog: availableActions
+          }).files.map((file) => ({ path: file.path, text: file.bytes.toString("utf8") }))
+        )
+      : compileProjectHarness(draft.source)
+    if (native && !inspectProjectSource(source, [], availableActions).report.valid)
+      throw Error("NATIVE_COMPOSITION_DOCTOR_FAILED")
     const manifest = parseProjectRuntimeManifest(
       JSON.parse(source.files.find((file) => file.path === "devclaw.project-runtime.json")!.text)
     )
     const tests = await testProjectSource(source, manifest)
     guard()
     if (!tests.valid) throw Error("PROJECT_HARNESS_CONTRACT_FAILED")
-    return this.save(scope, { id, name: draft.name, revision, files: source.files }, guard)
+    const saved = await this.save(
+      scope,
+      { id, name: draft.name, revision, files: source.files },
+      guard,
+      draft.resourcePaths
+    )
+    return native
+      ? {
+          ...saved,
+          validation: {
+            doctor: inspectProjectSource(source, [], availableActions).report,
+            tests,
+            businessActionsExecuted: false
+          }
+        }
+      : saved
   }
   async bindAction(
     scope: DevelopmentScope,
@@ -418,7 +457,10 @@ export class ProjectAuthoringSessions {
     this.busy.add(key)
     try {
       const source = createAuthoringSourceBundle(input.files)
-      const resourcePaths = normalizeProjectResourcePaths(checkedResourcePaths ??
+      const nativeSource = source.files.find(file => file.path === NATIVE_COMPOSITION_PATH)
+      const nativeResources = nativeSource
+        ? nativeCompositionSchema.parse(JSON.parse(nativeSource.text)).resources : undefined
+      const resourcePaths = normalizeProjectResourcePaths(checkedResourcePaths ?? nativeResources ??
         this.session(scope)?.drafts.get(input.id)?.resourcePaths ?? [])
       if (source.files.some((file) => !isProjectSourcePath(file.path, resourcePaths)))
         throw Error("PROJECT_DRAFT_FILE_UNSUPPORTED")

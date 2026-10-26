@@ -22,6 +22,7 @@ export function InstalledPluginStartUse(props: {
   workspace: string
   pluginId: string
   expected: PluginStartUseInput["expected"]
+  purpose?: "dependency"
 }) {
   const accountRevision = useAppStore((state) => state.accountRevision)
   return <ScopedStartUse key={JSON.stringify([accountRevision, props])} {...props} />
@@ -30,7 +31,8 @@ function ScopedStartUse({
   threadId,
   workspace,
   pluginId,
-  expected
+  expected,
+  purpose
 }: Parameters<typeof InstalledPluginStartUse>[0]) {
   const [report, setReport] = useState<PluginStartUseReport>()
   const [busy, setBusy] = useState(false)
@@ -91,9 +93,19 @@ function ScopedStartUse({
   )
   return (
     <section aria-label="已安装插件开始使用" className="space-y-3 rounded-lg border p-3">
-      <p className="text-sm">直接核对新插件的入口、配置与运行条件，然后进入对应使用表单。</p>
+      <p className="text-sm">
+        {purpose === "dependency"
+          ? "在这里完成此依赖的启用、原生授权和配置，然后继续准备模板。"
+          : "直接核对新插件的入口、配置与运行条件，然后进入对应使用表单。"}
+      </p>
       <button type="button" disabled={busy} className={button} onClick={() => void check(false)}>
-        {busy ? "正在核对使用条件…" : report ? "重新检查使用条件" : "开始使用"}
+        {busy
+          ? "正在核对使用条件…"
+          : report
+            ? "重新检查使用条件"
+            : purpose === "dependency"
+              ? "核对依赖使用条件"
+              : "开始使用"}
       </button>
       {report && (
         <>
@@ -113,11 +125,13 @@ function ScopedStartUse({
             </div>
           )}
           <p role="status" className="text-sm">
-            {report.kind === "host-project"
-              ? "此插件通过本地项目任务使用，下一步将直接打开已选好模板的创建表单。"
-              : report.kind === "plugin-project"
-                ? "此插件通过项目流程使用，下一步将打开对应插件的项目入口。"
-                : "此插件用于聊天，下一步返回当前配置所对应的聊天。"}
+            {purpose === "dependency"
+              ? "完成后请继续本页的模板准备，无需离开此流程。"
+              : report.kind === "host-project"
+                ? "此插件通过本地项目任务使用，下一步将直接打开已选好模板的创建表单。"
+                : report.kind === "plugin-project"
+                  ? "此插件通过项目流程使用，下一步将打开对应插件的项目入口。"
+                  : "此插件用于聊天，下一步返回当前配置所对应的聊天。"}
           </p>
           {report.issues.length > 0 && (
             <ul className="list-disc space-y-1 pl-5 text-sm">
@@ -140,23 +154,27 @@ function ScopedStartUse({
             </div>
           )}
           {report.kind === "chat" && !report.activationRequired && (
-            <InstalledChatPluginUse input={input} report={report} />
+            <InstalledChatPluginUse input={input} report={report} purpose={purpose} />
           )}
-          <button
-            type="button"
-            disabled={busy || !report.canOpen}
-            className={button}
-            onClick={() => void check(true)}
-          >
-            {report.kind === "host-project"
-              ? "进入本地任务创建"
-              : report.kind === "plugin-project"
-                ? "进入项目创建"
-                : "返回原聊天使用上述入口"}
-          </button>
-          <p className="text-xs text-muted-foreground">
-            进入表单不会创建项目、启动步骤或自动授权；填写并确认后才执行对应原生操作。
-          </p>
+          {purpose !== "dependency" && (
+            <>
+              <button
+                type="button"
+                disabled={busy || !report.canOpen}
+                className={button}
+                onClick={() => void check(true)}
+              >
+                {report.kind === "host-project"
+                  ? "进入本地任务创建"
+                  : report.kind === "plugin-project"
+                    ? "进入项目创建"
+                    : "返回原聊天使用上述入口"}
+              </button>
+              <p className="text-xs text-muted-foreground">
+                进入表单不会创建项目、启动步骤或自动授权；填写并确认后才执行对应原生操作。
+              </p>
+            </>
+          )}
         </>
       )}
       {error && (

@@ -1,7 +1,10 @@
+import { assertWorkflowResourceAdmission } from "./workflow/resource-deadline"
 import { createProjectCheckpointTool } from "./tools/project-checkpoint-tool"
 import { observeBuiltinPolicyDecision } from "../mods/builtins/policy-decisions"
 import { captureRuntimePluginSourceContentGuard } from "../plugins/runtime-source-scope"
 import { createRuntimeSourceBoundary, bindRuntimeSourceProfile } from "./runtime-source-boundary"
+import { createHostUserInputInterruptMiddleware } from "./host-user-input-interrupt"
+import { hasHostUserInputScope } from "../services/user-input"
 import type { FlowPromptOnlyRuntimeOptions } from "./flow-prompt-runtime-contract"
 import { builtinInstructionsStore, type InstructionScope } from "../mods/builtins/instructions"
 import { builtinChangeReviewService } from "../mods/builtins/change-review"
@@ -483,7 +486,8 @@ import { createSubagentSkillAttribution } from "./turn-attribution"
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool, resolveReadFileTraceContext } from "./read-file-tool"
-import { createWorkflowTool } from "./workflow/tool"
+import { createWorkflowTool, type CreateWorkflowToolOptions } from "./workflow/tool"
+import { registerNativeWorkflowLaunch } from "./workflow/native-launch"
 import { workflowRunManager } from "./workflow/run-manager"
 import { WORKFLOW_MODE_SYSTEM_PROMPT } from "./workflow/prompts"
 import {
@@ -777,6 +781,7 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
   return createMiddleware({
     name: "gradedToolConcurrency",
     wrapToolCall: async (request, handler) => {
+      assertWorkflowResourceAdmission()
       const signal = request.runtime?.signal
       signal?.throwIfAborted()
       const toolCall = request.toolCall as
@@ -789,7 +794,7 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
       if (tier === "bypass") {
         // A task waits for its entire child run. Holding a resource lock here
         // would block parent tools and deadlock children sharing this queue.
-        return taskLimiter.run(async () => handler(request), signal)
+        return taskLimiter.run(async () => { assertWorkflowResourceAdmission(); return handler(request) }, signal)
       }
       const label = `${toolCall?.name ?? "unknown"}:${toolCall?.id ?? "no-id"}`
       const waitStart = Date.now()
@@ -800,6 +805,7 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
             if (waited > 50)
               console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
             signal?.throwIfAborted()
+            assertWorkflowResourceAdmission()
             return handler(request)
           }, signal)
 
@@ -809,6 +815,7 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
         const waited = Date.now() - waitStart
         if (waited > 50) console.log(`[Runtime] exclusive-lock acquired ${label} after ${waited}ms`)
         signal?.throwIfAborted()
+        assertWorkflowResourceAdmission()
         return handler(request)
       }, signal)
     }
@@ -3698,6 +3705,12 @@ function assembleDeepAgent(
       createPatchToolCallsMiddleware(),
       ...skillsMiddlewareArray,
       ...memoryMiddlewareArray,
+      ...(hasHostUserInputScope(threadId) ? [createHostUserInputInterruptMiddleware(
+        !mainBlockedToolNames.includes("request_user_input") &&
+        (!mainAllowedToolNames || mainAllowedToolNames.includes("request_user_input")),
+        new Set(tools.map((tool: { name?: string }) => tool.name)
+          .filter((name: string | undefined): name is string => !!name && name !== "request_user_input"))
+      )] : []),
       ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
       ...customMiddleware,
       ...outputStyleTurnReminderMiddleware,
@@ -5826,6 +5839,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     options.filesystemAccess?.shellAccess === "read_only" ||
     options.filesystemAccess?.workload === "read_only"
   const isCoordinatorMode = agentMode === "coordinator"
+  const hostModeSource = currentRuntimePluginSource()
+  if (hostModeSource?.mode === "host" && hostModeSource.threadId === threadId &&
+      agentMode !== (hostModeSource.executionMode ?? "normal"))
+    throw Error("PROJECT_EXECUTION_MODE_CHANGED")
   const isWorkflowMode = agentMode === "workflow"
   const outputStyle =
     agentMode === "normal"
@@ -6931,8 +6948,11 @@ The workspace root is: ${fileRoot}`
     extraTools.push(...(options.additionalTools as unknown as RuntimeTool[]))
   }
 
-  if (isWorkflowMode) {
-    const workflowAgentProfiles = await loadAgentProfilesAsync(workspacePath)
+  if (isWorkflowMode || (!options.disableSubagents && modRuntimeAuthority)) {
+    const workflowExecutionResources = currentRuntimePluginSource()?.executionResources
+    const workflowAgentProfiles = workflowExecutionResources
+      ? structuredClone(workflowExecutionResources.profiles)
+      : await loadAgentProfilesAsync(workspacePath)
     const worktreeSubagentThreads = new Set<string>()
     const workflowModsChildren = new Map<string, () => void>()
     // Dynamic Workflows: the model writes a JS orchestration script; the run
@@ -6940,8 +6960,8 @@ The workspace root is: ${fileRoot}`
     // its abort), each agent() runs as a one-shot leaf runtime on its own
     // checkpoint thread, and approvals surface on this (parent) thread's UI
     // via approvalThreadId — mirroring coordinator async workers.
-    extraTools.push(
-      createWorkflowTool({
+    const workflowOptions: CreateWorkflowToolOptions = {
+        executionResources: workflowExecutionResources,
         threadId,
         workspacePath,
         modelId,
@@ -6951,7 +6971,15 @@ The workspace root is: ${fileRoot}`
         // workflow before running"): the model writing a workflow can fan out
         // many file-editing subagents and spend real tokens, so the user
         // confirms once (Approve / Approve-session / Reject) before launch.
-        readYoloMode: getYoloMode,
+        readYoloMode: hostModeSource?.mode === "host" ? () => false : getYoloMode,
+        ...(hostModeSource?.mode === "host" ? {
+          yoloMode: false,
+          assertCurrent: () => {
+            options.abortSignal?.throwIfAborted()
+            modRuntimeAuthority?.assertLive()
+            assertCurrentRuntimePluginSourceContent()
+          }
+        } : {}),
         approvalStore,
         requestApproval,
         // Share admission with file tools; the engine and backend acquire the
@@ -6997,6 +7025,8 @@ The workspace root is: ${fileRoot}`
               actionStationarityTurnId: subagentOptions.threadId,
               approvalThreadId: threadId,
               workspacePath,
+              allowedToolNames: subagentOptions.toolAllowlist
+                ? [...subagentOptions.toolAllowlist, "structured_output"] : undefined,
               ...(worktreeIsolation ? { worktreeIsolation } : {}),
               modelId: subagentOptions.modelId,
               extraSystemPrompt: subagentOptions.extraSystemPrompt,
@@ -7136,8 +7166,12 @@ The workspace root is: ${fileRoot}`
           hasPendingApproval: (runId?: string): boolean =>
             hasPendingWorkflowApproval(threadId, runId)
         }
-      }) as unknown as RuntimeTool
-    )
+      }
+    registerNativeWorkflowLaunch(workflowOptions, () => {
+      options.abortSignal?.throwIfAborted()
+      modRuntimeAuthority?.assertLive()
+    }, options.abortSignal)
+    if (isWorkflowMode) extraTools.push(createWorkflowTool(workflowOptions) as unknown as RuntimeTool)
   }
 
   wrapToolErrors(extraTools)
@@ -8227,8 +8261,13 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     )
   const projectModeTaskSubagentsInheritFullContext =
     runtimePolicy.isProjectMode && mainSubagentsEnabled
+  // Host stage execution/feedback belongs to the parent only. Its frozen child
+  // context retains shared constraints; legacy project context remains unchanged.
+  const taskPluginPromptInject = hostModeSource?.mode === "host"
+    ? renderPluginPromptInject(hostModeSource.subagentContextPrompt)
+    : renderedPluginPromptInject
   const taskSubagentExtraSystemPrompt = projectModeTaskSubagentsInheritFullContext
-    ? resolvedProjectContextPrompt
+    ? [taskPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") || undefined
     : combinedAgentsPrompt
 
   const runtimeAgentRef: { current?: DeepAgent } = {}
@@ -8556,12 +8595,12 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       : modSystemContributions,
     modTaskProjectContributions: projectModeTaskSubagentsInheritFullContext
       ? [
-          ...(renderedPluginPromptInject ? [
-            { id: "cmb:plugin-context", text: renderedPluginPromptInject, scope: "session" }
+          ...(taskPluginPromptInject ? [
+            { id: "cmb:plugin-context", text: taskPluginPromptInject, scope: "session" }
           ] : []),
           ...(combinedAgentsPrompt ? [
             { id: "cmb:agents", text:
-              `${renderedPluginPromptInject ? "\n\n" : ""}${combinedAgentsPrompt}`, scope: "session",
+              `${taskPluginPromptInject ? "\n\n" : ""}${combinedAgentsPrompt}`, scope: "session",
               context: modInstructionContext, requiredText: requiredProjectPrompt }
           ] : [])
         ]

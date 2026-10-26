@@ -29,6 +29,13 @@ import type { NativePlatformCallContext } from "./platform-capabilities-types"
 
 let root: string, workspace: string
 const threadId = "native-fallback-thread"
+function workflowProvider() {
+  const provider = nativePlatformProviders(async () => false).find(
+    candidate => candidate.provider === "native.workflow" && candidate.descriptor.id === "runs"
+  )
+  if (!provider?.read) throw Error("NATIVE_WORKFLOW_READ_REQUIRED")
+  return provider
+}
 const originalManager = workflowRunManager as unknown as {
   captureFlushFailedRun(
     request: { runId: string; threadId: string; workspacePath: string },
@@ -96,7 +103,7 @@ it("reads the original terminal fallback instead of its stale running disk copy"
   })
   expect(await store.flush()).toBe(true)
   capture(record(runId, "completed"))
-  const provider = nativePlatformProviders(async () => false)[0]
+  const provider = workflowProvider()
   expect(await provider.read!(context())).toMatchObject({
     activeRunId: null,
     run: { status: "completed" }
@@ -109,7 +116,7 @@ it("reads the original terminal fallback instead of its stale running disk copy"
 it("includes memory-only terminal results but refuses another workspace", async () => {
   const runId = generateWorkflowRunId()
   capture(record(runId, "completed"))
-  const provider = nativePlatformProviders(async () => false)[0]
+  const provider = workflowProvider()
   expect(await provider.read!(context())).toMatchObject({ run: { runId, status: "completed" } })
   expect(await provider.read!(context(root))).toMatchObject({ run: null })
   expect(await provider.act(context(root), "inspect", { runId })).toMatchObject({ found: false })
@@ -123,7 +130,7 @@ it("marks an inactive persisted running record unconfirmed", async () => {
     initial: record(runId, "running")
   })
   expect(await store.flush()).toBe(true)
-  expect(await nativePlatformProviders(async () => false)[0].read!(context())).toMatchObject({
+  expect(await workflowProvider().read!(context())).toMatchObject({
     status: "unknown",
     reason: "WORKFLOW_TERMINAL_STATE_UNCONFIRMED",
     activeRunId: null
@@ -138,7 +145,7 @@ it("reports a selected unavailable latest run instead of ready with no result", 
     initial: record(runId, "completed")
   })
   expect(await store.flush()).toBe(true)
-  const provider = nativePlatformProviders(async () => false)[0]
+  const provider = workflowProvider()
   expect(await provider.read!(context())).toMatchObject({ run: { runId } })
   const path = runFilePath(workspace, threadId, runId)
   rmSync(path, { force: true })

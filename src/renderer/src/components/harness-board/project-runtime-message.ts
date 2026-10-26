@@ -1,8 +1,58 @@
 /** Shared recovery wording for both project entry points; technical details remain expandable. */
 export function projectRuntimeRecoveryMessage(error: string): string | undefined {
+  if (error.includes("project_check_input_limit"))
+    return "本阶段产物超过插件声明的读取上限，检查尚未启动。请按阶段说明精简产物，或填写本次阶段补充说明后重新开始。系统不会自动放宽校验。"
+  if (error.includes("project_phase_preparation_unconfirmed"))
+    return "步骤收尾尚未核实。请保留原会话与产物，先点击“核对上次执行结果”；核对前不会自动重跑或推进。"
+  if (error.includes("PROJECT_STAGE_DEBUG_ORIGINAL_BASELINE_REQUIRED"))
+    return "请回到原任务的阶段基线继续调试。当前调试结果不能再作为新的来源分支；使用原基线可以保留原有检查和批准边界。"
+  if (error.includes("IMPORT_STAGE_REEXECUTION_REQUIRED"))
+    return "此导入阶段需要重新执行技能生成成果，不能只校验旧文件。请在当前任务点击继续执行，完成实际检查和新的成果确认。"
+  if (/WORKTREE_DEADLINE_(EXPIRED|COMMAND_UNKNOWN|RECEIPT_UNCONFIRMED)/.test(error))
+    return "执行已超过声明时限，或原命令结果尚未核实。请先在运行记录中核对命令、工作树和产物，再处理失败；重新打开会话不会重置时限，也不会自动重跑结果不明的命令。"
+  if (error.includes("IMPORT_REVALIDATION_PENDING"))
+    return "导入的前序步骤尚未全部重新验收。请先在当前任务完成重跑、实际检查和成果确认，再修改后续计划或创建调试分支；不能通过改步骤名称跳过验收。"
+  if (error.includes("IMPORT_PREFIX_BRANCH_UNSUPPORTED"))
+    return "目前不能将调试分支起点设在导入的历史范围内。可在导入范围之后调试新步骤；需要重做旧步骤时，请创建独立任务，不能沿用旧批准。"
+  if (error.includes("IMPORT_REVIEW_NOT_RECORDED"))
+    return "这条旧版冻结记录没有保存完整导入方案，无法安全恢复。请保留原目录和已复制文件，并将问题详情交给维护者核对；不能新建方案覆盖该冻结记录。"
+  if (error.includes("IMPORT_REVIEW_MISSING"))
+    return "尚未找到已保存的冻结方案，请更新旧项目列表后重新核对。"
+  if (/IMPORT_ADAPTER_UNAVAILABLE|IMPORT_CHECKPOINT_(UNKNOWN|UNSUPPORTED)/.test(error))
+    return "此插件尚未支持该来源或当前检查点的导入。请核对原项目特性标识和插件声明，先在旧项目处理到受支持的稳定点；不会把旧成功记录直接当作新步骤完成。"
+  if (error.includes("IMPORT_ADAPTER_PARAMETERS_INVALID"))
+    return "请填写插件要求的原项目标识；这里只接受字母、数字、短横线和下划线，不填写目录或脚本。"
+  if (/IMPORT_(SOURCE_MISSING|ADAPTER_MAPPING_INVALID|ADAPTER_COLLISION|ADAPTER_INVALID)/.test(error))
+    return "原材料缺失或插件的导入规则不兼容。请核对问题详情中的文件和规则，再由作者修正适配声明；系统不会补造原文件、锁摘要或历史批准。"
+  if (error.includes("IMPORT_ADAPTER_LIMIT"))
+    return "原材料超出本次安全读取范围。请由插件作者缩小导入声明的文件范围，保留必需产物和检查，再重新核对。"
+  if (/PROJECT_STAGE_DEBUG_(READONLY_ADAPTER_REQUIRED|CHECK_INPUT_UNSUPPORTED|CHECK_EFFECT_UNSUPPORTED)|PROJECT_READONLY_CHECK_/.test(error))
+    return "此阶段的检查尚不满足隔离调试条件，原项目与检查要求均保留。请在创造者模式核对提供器权限和输入；需要执行脚本或操作外部资源的检查须先接入受控恢复适配，不能删除检查后继续。"
+  if (error.includes("IMPORTED_STAGE_REVALIDATION_REQUIRED"))
+    return "当前阶段使用旧项目导入的成果。请点击“重新验证导入成果”，完成真实检查和新的成果确认后再继续。"
+  if (/IMPORT_STAGE_REQUIRES_CHECKS_AND_NEW_RESULT_APPROVAL|IMPORT_CHECK_ADAPTER_REQUIRED|IMPORT_STAGE_CHECKS_REQUIRED|IMPORT_ARTIFACT_CHECK_REQUIRED/.test(error))
+    return "目标插件尚未声明可独立执行的检查和新的成果确认。请先在创造者模式补齐这些声明，再核对导入；不能沿用旧审批跳过检查。"
+  if (/IMPORT_(SOURCE_CHANGED|SOURCE_MATERIAL_CHANGED|TARGET_CHANGED|REVIEW_CHANGED|WORKSPACE_CHANGED|ARTIFACT_CHANGED)/.test(error))
+    return "源文件、目标文件或插件版本已变化，当前核对结果已失效。请保留已有文件，重新核对导入方案；已冻结的旧入口不会自动恢复写入。"
+  if (/IMPORT_WORKSPACE_OVERLAP|IMPORT_TARGET_FILE_EXISTS/.test(error))
+    return "请为导入选择独立目录，并核对是否存在同名文件。系统不会覆盖原成果，也不会在旧项目目录中同时运行两套流程。"
+  if (/PROJECT_(?:HOST_)?INPUT_RESUME|HOST_USER_INPUT_RESUME_MISMATCH/.test(error))
+    return "回答已保留，但暂时无法安全续接原步骤。请查看原阶段会话，核对插件版本、知识配置和未结束的子任务，再从任务页继续已保存输入；不要重新执行旧步骤代替续接。"
+  if (error.includes("RESULT_APPROVAL_MISMATCH"))
+    return "成果或检查记录与确认时不同，旧确认已不能使用。请重新检查成果，再确认当前版本。"
+  if (/PLAN_MIGRATION_RESOURCE_ADAPTER_REQUIRED|PLAN_MIGRATION_RESOURCE_CHECK_REQUIRED/.test(error))
+    return "此任务含尚未支持迁移的外部动作或动态上下文。现有任务继续使用固定版本；可用新版插件创建独立任务，不能直接替换当前任务的步骤。"
+  if (/PLAN_MIGRATION_(COMPLETED|SHARED_RESOURCE|CONFIGURATION|ENVIRONMENT)/.test(error))
+    return "新版修改了已完成步骤或共享规则、知识、配置，不能只替换后续步骤。请保留当前任务，调整候选只修改未完成步骤，或创建独立任务重新验证。"
+  if (error.includes("PLAN_MIGRATION_UNCHANGED"))
+    return "已安装插件与本任务固定版本一致，目前没有可采用的步骤更新。"
+  if (/PLAN_MIGRATION_(REVIEW_CHANGED|TARGET_INVALID)/.test(error))
+    return "待采用的插件版本已变化或不兼容。请重新检查已安装版本，核对后再确认更新。"
+  if (/WORKSPACE_OPERATION_ACTIVE|WORKFLOW_RESOURCES_UNSETTLED|FLOW_WORKSPACE_|PROJECT_BACKGROUND_TASKS_ACTIVE|PROJECT_WORKSPACE_BUSY/.test(error))
+    return "此工作目录仍有未结算的操作或工作树。请先在原任务中停止并核对结果，再更新步骤；不会自动重放或删除这些资源。"
   if (error.includes("PROJECT_LEGACY_RUNTIME_UNAVAILABLE"))
     return "项目运行记录暂时无法读取，不能核实先前的执行状态，项目执行已暂停。普通聊天仍可使用。请重启应用后更新记录；如仍失败，请将问题详情交给维护者修复。"
   if (error.includes("PROJECT_WORKSPACE_MODE_CONFLICT"))
-    return "此工作目录已用于另一种项目运行方式。请继续使用已绑定的项目，或为新项目选择另一个目录；系统不会合并或迁移现有成果。"
+    return "此工作目录已用于另一种项目运行方式。请继续使用已绑定的项目，或为新项目选择另一个目录；如需保留旧成果，请使用明确的导入入口核对，不会自动合并状态。"
   return undefined
 }

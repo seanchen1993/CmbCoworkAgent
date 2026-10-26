@@ -180,6 +180,11 @@ function observeDataQueries() {
     if (observing) threads++
     return getThread(...args)
   })
+  const getScope = appDb.getThreadRuntimeScope
+  const scopeSpy = vi.spyOn(appDb, "getThreadRuntimeScope").mockImplementation((...args) => {
+    if (observing) threads++
+    return getScope(...args)
+  })
   const readIdentity = threadIdentity.readFunctionConversationThreadIdentityCurrent
   const identitySpy = vi.spyOn(threadIdentity, "readFunctionConversationThreadIdentityCurrent")
     .mockImplementation(function(this: unknown, ...args: Parameters<typeof readIdentity>) {
@@ -197,11 +202,49 @@ function observeDataQueries() {
     start: () => { joins = 0; threads = 0; observing = true },
     finish: () => { observing = false; return { joins, threads } },
     close: () => { observing = false; prepareSpy.mockRestore(); threadSpy.mockRestore()
-      identitySpy.mockRestore() }
+      scopeSpy.mockRestore(); identitySpy.mockRestore() }
   }
 }
 
 describe("actual shared native joined data scope", () => {
+  it("keeps large parent history and rejects a changed incarnation before shared postflight", async () => {
+    let checked = false
+    const f = await fixture(() => { throw Error("REVOKED_REGISTRATION_REACHED_MODEL") }, undefined,
+      ({ registration, coordinator, authority }) => {
+        const view = readFunctionConversationSharedNativeRegistration(registration, coordinator, authority)
+        const threadId = view.target.ref.threadId, row = appDb.getThreadCore(threadId)!
+        const metadata = JSON.stringify({ ...JSON.parse(row.metadata!),
+          llmFileHistory: "历史🙂".repeat(20_000), retainedScope: { enabled: true } })
+        appDb.getDb().run("UPDATE threads SET metadata=? WHERE thread_id=?", [metadata, threadId])
+        const readScope = appDb.getThreadRuntimeScope
+        const scopeSpy = vi.spyOn(appDb, "getThreadRuntimeScope").mockImplementation(id => {
+          const result = readScope(id)
+          if (id === threadId) expect(result?.metadata).not.toContain("llmFileHistory")
+          return result
+        })
+        const writes = vi.spyOn(appDb.getDb(), "run")
+        try {
+          view.assertDataCurrent()
+          expect(scopeSpy).toHaveBeenCalledWith(threadId)
+          expect(writes).not.toHaveBeenCalled()
+          expect(appDb.getThreadCore(threadId)?.metadata).toBe(metadata)
+          appDb.getDb().run("DELETE FROM threads WHERE thread_id=?", [threadId])
+          appDb.createThread(threadId, JSON.parse(metadata))
+          appDb.getDb().run("UPDATE threads SET created_at=? WHERE thread_id=?",
+            [row.created_at, threadId])
+          expect(() => view.assertDataCurrent()).toThrow("MODS_CONVERSATION_THREAD_CHANGED")
+          expect(appDb.getThreadCore(threadId)?.created_at).toBe(row.created_at)
+          checked = true
+          throw Error("ACTUAL_SHARED_INCARNATION_REVOKED")
+        } finally { writes.mockRestore(); scopeSpy.mockRestore() }
+      })
+    try {
+      await expect(f.start()).rejects.toThrow()
+      expect(checked).toBe(true)
+      expect(f.modelCalls()).toBe(0)
+    } finally { await f.close() }
+  })
+
   it("keeps registration full callbacks while replacing only its completed pure postflight", async () => {
     const observation = observeDataQueries()
     let observingSource = false, sources = 0, baselineSources = 0, checked = false

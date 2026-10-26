@@ -154,9 +154,20 @@ export function parseProjectRuntimeManifestV1(value: unknown): ProjectRuntimeMan
           const stage = record(
             value,
             ["id", "title", "actionIds", "artifactIds", "checkIds", "approval"],
-            ["skill"]
+            ["skill", "resultApproval", "executionMode"]
           )
           if (stage.approval !== "none" && stage.approval !== "human") return invalid()
+          if (
+            stage.resultApproval !== undefined &&
+            stage.resultApproval !== "none" && stage.resultApproval !== "human"
+          ) return invalid()
+          if (raw.mode !== "host" && stage.resultApproval !== undefined) return invalid()
+          if (stage.executionMode !== undefined) {
+            if (raw.mode !== "host" ||
+                !["normal", "workflow"].includes(String(stage.executionMode)) ||
+                typeof stage.executionMode !== "string" ||
+                (stage.executionMode === "workflow" && stage.skill === undefined)) return invalid()
+          }
           return {
             id: id(stage.id),
             title: text(stage.title),
@@ -164,6 +175,12 @@ export function parseProjectRuntimeManifestV1(value: unknown): ProjectRuntimeMan
             artifactIds: refs(stage.artifactIds),
             checkIds: refs(stage.checkIds),
             approval: stage.approval,
+            ...(stage.executionMode === undefined ? {} : {
+              executionMode: stage.executionMode as "normal" | "workflow"
+            }),
+            ...(stage.resultApproval === undefined ? {} : {
+              resultApproval: stage.resultApproval as "none" | "human"
+            }),
             ...(stage.skill === undefined ? {} : { skill: relativePath(stage.skill) })
           }
         })

@@ -1,4 +1,5 @@
 import { AGENT_GRAPH_RECURSION_LIMIT_MIN } from "../../shared/agent-runtime-limits"
+import { bindHostUserInputScope } from "../services/user-input"
 import { queryFunctionAgentList } from "./v2/agent-list-host"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, resolve } from "node:path"
@@ -1904,6 +1905,26 @@ it.each(["off", "no-source", "unapproved"] as const)(
     expect(notify).not.toHaveBeenCalled()
   }
 )
+it("adds the durable input graph boundary only to the active main-issued Host thread", async () => {
+  const f = fixture()
+  class Model extends FakeChatModel { bindTools() { return this } }
+  const nodes = async (threadId: string) => Object.keys((await createDeepAgent({
+    threadId, model: new Model({}), backend: f.sandbox, mainFilesystemEnabled: false,
+    mainTodosEnabled: false, mainSubagentsEnabled: false,
+    summarizationTrigger: { type: "messages", value: 200 }
+  }).getGraphAsync() as unknown as { nodes: Record<string, unknown> }).nodes)
+  const original = await nodes("thread")
+  const release = bindHostUserInputScope("thread", { projectId: "project", operationId: "operation",
+    stageId: "draft", installedPluginId: "installed", expectedVersion: 1,
+    pluginDigest: "a".repeat(64), inputFingerprint: "b".repeat(64), incarnationKey: "incarnation"
+  }, () => {})
+  try {
+    expect(await nodes("thread")).toHaveLength(original.length + 1)
+    expect(await nodes("ordinary-thread")).toEqual(original)
+  } finally { release() }
+  expect(await nodes("thread")).toEqual(original)
+})
+
 it("retains native instruction and batch observers without an authorized Function Mods graph", async () => {
   const f = fixture()
   const parent = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!

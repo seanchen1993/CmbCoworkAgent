@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import {
   link,
   mkdir,
@@ -271,6 +271,57 @@ describe("native stage input snapshots", () => {
         }
       })
     ).rejects.toThrow("PACKAGE_CHANGED")
+    expect(await readdir(f.snapshotRoot)).toEqual([])
+  })
+  it("keeps full input checks bounded while retaining authority checks at every copied file", async () => {
+    const f = await fixture()
+    for (let index = 0; index < 32; index++)
+      await writeFile(join(f.workspace, `extra-${index}.txt`), `original-${index}`)
+    let authorityChecks = 0, fullChecks = 0
+    const snapshot = await f.snapshots.capture({ ...f.input,
+      guard: () => { authorityChecks++ },
+      assertInputsCurrent: () => { fullChecks++ }
+    })
+    expect(snapshot.files).toHaveLength(35)
+    expect(authorityChecks).toBeGreaterThan(32 * 4)
+    expect(fullChecks).toBeGreaterThan(1)
+    expect(fullChecks).toBeLessThan(16)
+    expect(f.snapshots.read(snapshot.id, f.input.scopeKey).files).toEqual(snapshot.files)
+  })
+  it.each(["copy", "publication", "after-publication"])("rejects external input changes during %s before returning the captured workspace", async phase => {
+    const f = await fixture()
+    const external = join(f.root, "external-context.txt")
+    await writeFile(external, "original context")
+    let authorityChecks = 0, fullChecks = 0
+    await expect(f.snapshots.capture({ ...f.input,
+      guard: () => {
+        authorityChecks++
+        if (phase === "copy" ? authorityChecks === 8 : phase === "after-publication" &&
+          readdirSync(f.snapshotRoot).some(id => existsSync(join(f.snapshotRoot, id, "snapshot.json"))))
+          writeFileSync(external, "modified context")
+      },
+      assertInputsCurrent: () => {
+        fullChecks++
+        if (phase === "publication" && fullChecks === 3)
+          writeFileSync(external, "modified context")
+        if (readFileSync(external, "utf8") !== "original context")
+          throw Error("SOURCE_CONTENT_CHANGED")
+      }
+    })).rejects.toThrow("SOURCE_CONTENT_CHANGED")
+    expect(fullChecks).toBeGreaterThan(1)
+    expect(await readdir(f.snapshotRoot)).toEqual([])
+  })
+  it("refuses a metadata target created concurrently before publication", async () => {
+    const f = await fixture()
+    let fullChecks = 0
+    await expect(f.snapshots.capture({ ...f.input,
+      assertInputsCurrent: () => {
+        if (++fullChecks !== 3) return
+        const [id] = readdirSync(f.snapshotRoot)
+        expect(id).toMatch(/^[a-f0-9]{64}$/)
+        writeFileSync(join(f.snapshotRoot, id, "snapshot.json"), "concurrent owner", { flag: "wx" })
+      }
+    })).rejects.toMatchObject({ code: "EEXIST" })
     expect(await readdir(f.snapshotRoot)).toEqual([])
   })
   it("detects retained runtime changes and rejects mismatched original operation/version", async () => {

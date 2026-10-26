@@ -1,5 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest"
 import { FunctionGuestRuntime } from "./guest-runtime"
+import { FunctionDispatcher } from "./dispatcher"
+import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from "./session"
 import { FunctionSessionActivity } from "./session-activity"
 
@@ -326,12 +328,131 @@ it("keeps a refused later period terminal after an ordinary callback failed", as
     on("command.run",async $=>{
       $.clock.every(20,()=>{throw new Error("first period")});return {ok:true}
     });`)
-  const invocation = vi.spyOn(guest, "invoke")
-  await session.run("start", "")
-  await vi.waitFor(() => expect(debugLog).toHaveBeenCalledWith("timer", "MODS_TIMER_DENIED"))
-  await new Promise((resolve) => setTimeout(resolve, 80))
-  expect(invocation.mock.calls.filter(([id]) => id === "resource")).toHaveLength(1)
-  expect(guest.stats).toMatchObject({ frames: 0, replies: 0 })
+  const knownCodes = new Set([
+    "MODS_BUDGET_EXCEEDED",
+    "MODS_HOOK_BUDGET_EXCEEDED",
+    "MODS_CANCELLED",
+    "MODS_DISPATCH_TIMEOUT",
+    "MODS_FRAME_LIMIT",
+    "MODS_GUEST_ERROR",
+    "MODS_HOOK_FAILED",
+    "MODS_HOST_ERROR",
+    "MODS_INVOCATION_ENDED",
+    "MODS_RESOURCE_CLOSED",
+    "MODS_RPC_LIMIT",
+    "MODS_STALE_INVOCATION",
+    "MODS_UNLOADED",
+    "MODS_TRUSTED_WAIT_STALE",
+    "MODS_TRUSTED_WAIT_EXPIRED",
+    "MODS_TRUSTED_WAIT_DISPATCH_BLOCKED"
+  ])
+  const events: Array<{
+    event: string
+    resource: boolean
+    elapsedMs: number
+    outcome: "returned" | "rejected"
+    nativeCode?: string
+    stats: typeof guest.stats
+  }> = []
+  const dispatchErrors: Array<{ event: string; nativeCode: string }> = []
+  const matcherErrors: Array<{ nativeCode: string; stats: typeof guest.stats }> = []
+  const nativeMatches = guest.matches.bind(guest)
+  const matcherSpy = vi.spyOn(guest, "matches").mockImplementation((...args) => {
+    try {
+      return nativeMatches(...args)
+    } catch (error) {
+      matcherErrors.push({
+        nativeCode:
+          error instanceof ModFunctionError && knownCodes.has(error.code)
+            ? error.code
+            : "REDACTED_NON_NATIVE_OR_UNLISTED",
+        stats: guest.stats
+      })
+      throw error
+    }
+  })
+  const nativeDispatch = FunctionDispatcher.prototype.dispatch
+  const dispatchSpy = vi
+    .spyOn(FunctionDispatcher.prototype, "dispatch")
+    .mockImplementation(async function (this: FunctionDispatcher, ...args) {
+      try {
+        return await nativeDispatch.apply(this, args)
+      } catch (error) {
+        dispatchErrors.push({
+          event: ["session.start", "command.run", "clock.every"].includes(args[0])
+            ? args[0]
+            : "other",
+          nativeCode:
+            error instanceof ModFunctionError && knownCodes.has(error.code)
+              ? error.code
+              : "REDACTED_NON_NATIVE_OR_UNLISTED"
+        })
+        throw error
+      }
+    })
+  const nativeInvoke = guest.invoke.bind(guest)
+  const invocation = vi.spyOn(guest, "invoke").mockImplementation(async (...args) => {
+    const started = performance.now()
+    const event = ["session.start", "command.run", "clock.every"].includes(args[3].event)
+      ? args[3].event
+      : "other"
+    try {
+      const value = await nativeInvoke(...args)
+      events.push({
+        event,
+        resource: args[0] === "resource",
+        elapsedMs: performance.now() - started,
+        outcome: "returned",
+        stats: guest.stats
+      })
+      return value
+    } catch (error) {
+      events.push({
+        event,
+        resource: args[0] === "resource",
+        elapsedMs: performance.now() - started,
+        outcome: "rejected",
+        stats: guest.stats,
+        nativeCode:
+          error instanceof ModFunctionError && knownCodes.has(error.code)
+            ? error.code
+            : "REDACTED_NON_NATIVE_OR_UNLISTED"
+      })
+      throw error
+    }
+  })
+  try {
+    await session.run("start", "")
+    await vi.waitFor(() => expect(debugLog).toHaveBeenCalledWith("timer", "MODS_TIMER_DENIED"))
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(invocation.mock.calls.filter(([id]) => id === "resource")).toHaveLength(1)
+    expect(guest.stats).toMatchObject({ frames: 0, replies: 0 })
+  } catch (error) {
+    // Never print callback text, arbitrary Guest codes, arguments, or returned payloads.
+    console.error(
+      "[timer-refusal-diagnostic]",
+      JSON.stringify({
+        events,
+        dispatchErrors,
+        matcherErrors,
+        stats: guest.stats,
+        debugCodes: debugLog.mock.calls.map(([, code]) =>
+          [
+            "MODS_TIMER_DENIED",
+            "MODS_TIMER_FAILED",
+            "MODS_TIMER_CALLBACK_LIMIT",
+            "MODS_RESOURCE_CLOSED"
+          ].includes(code)
+            ? code
+            : "REDACTED"
+        )
+      })
+    )
+    throw error
+  } finally {
+    dispatchSpy.mockRestore()
+    matcherSpy.mockRestore()
+  }
 })
 
 it.each(["revoke", "dispose", "close"] as const)(

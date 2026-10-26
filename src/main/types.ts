@@ -1212,6 +1212,8 @@ export interface UserInputRequest {
   questions: UserInputQuestion[]
   autoResolutionMs?: number
   createdAt: string
+  /** The request survived process loss; answering saves data but cannot resume the old model run. */
+  recoveryRequired?: boolean
 }
 
 export type UserInputAnswer =

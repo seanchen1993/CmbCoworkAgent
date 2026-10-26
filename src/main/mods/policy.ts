@@ -1,4 +1,6 @@
+import { withTrustedFunctionWait } from "./v2/trusted-function-wait"
 import { observeBuiltinPolicyDecision } from "./builtins/policy-decisions"
+import { startHostRuntimeTiming } from "../services/host-runtime-timing"
 import { createHash } from "node:crypto"
 import { readFileSync, statSync } from "node:fs"
 import type { ModIdentity, ModJson, ModObject } from "../../shared/mods/types"
@@ -145,17 +147,48 @@ export class ManagedModPolicy {
     return visit(filterModData(value, true)) as T
   }
 
-  private async invoke(method: string, event: ModObject, signal?: AbortSignal): Promise<ModObject> {
+  private async invoke(method: string, event: ModObject, signal?: AbortSignal,
+    entered?: () => void): Promise<ModObject> {
     if (this.waiting >= 32) throw new ModError("MODS_POLICY_CAPACITY")
     this.waiting++
+    const queued = this.waiting > 1
     const prior = this.queue
     let release = (): void => {}
-    this.queue = new Promise<void>((resolve) => {
+    const slot = new Promise<void>((resolve) => {
       release = resolve
     })
-    await prior
+    // A cancelled waiter releases its slot, but cannot release the earlier active call.
+    this.queue = prior.then(() => slot)
+    let cancel: (() => void) | undefined
+    let admitted = false
+    const finishQueueTiming = startHostRuntimeTiming("policyQueue")
     try {
+      const waitForPrior = () => Promise.race([prior, new Promise<never>((_resolve, reject) => {
+        cancel = () => reject(new ModError("MODS_CANCELLED"))
+        signal?.addEventListener("abort", cancel, { once: true })
+        if (signal?.aborted) cancel()
+      })])
+      if (queued) await withTrustedFunctionWait("policy-queue", signal, waitForPrior)
+      else await waitForPrior()
+      finishQueueTiming()
+      signal?.removeEventListener("abort", cancel!)
       if (signal?.aborted) throw new ModError("MODS_CANCELLED")
+      admitted = true
+      entered?.()
+      return await this.invokeAdmitted(method, event, signal)
+    } finally {
+      finishQueueTiming()
+      if (cancel) signal?.removeEventListener("abort", cancel)
+      // Bound cancelled nodes as well until their predecessor drains; abort spam must
+      // not create an unbounded promise chain behind a stalled policy worker.
+      if (admitted) this.waiting--
+      else void prior.then(() => { this.waiting-- })
+      release()
+    }
+  }
+
+  private async invokeAdmitted(method: string, event: ModObject, signal?: AbortSignal): Promise<ModObject> {
+    try {
       if (this.generation !== this.client.version) this.loaded = undefined
       if (!this.loaded) {
         this.loaded = this.client.load("managed-policy", POLICY_CODE).then(() => {
@@ -179,9 +212,6 @@ export class ManagedModPolicy {
       this.loaded = undefined
       this.client.stop("MODS_POLICY_FAILURE")
       throw new ModError(signal?.aborted ? "MODS_CANCELLED" : "MODS_POLICY_UNAVAILABLE")
-    } finally {
-      this.waiting--
-      release()
     }
   }
 
@@ -189,8 +219,10 @@ export class ManagedModPolicy {
     identity: ModIdentity,
     toolId: string,
     args: Record<string, unknown>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    observe?: (phase: "queued" | "entered" | "allowed") => void
   ): Promise<void> {
+    observe?.("queued")
     const result = await this.invoke(
       "admit",
       {
@@ -198,12 +230,14 @@ export class ManagedModPolicy {
         toolId,
         args: filterModData(args, false)
       },
-      signal
+      signal,
+      () => observe?.("entered")
     )
     observeBuiltinPolicyDecision({ threadId: identity.threadId, workspace: identity.workspace, id: identity.callId,
       source: "managed-policy", event: toolId, decision: result.allow === true ? "allow" : "deny",
       code: result.allow === true ? "MODS_POLICY_ALLOWED" : "MODS_POLICY_TOOL_DENIED", policyDigest: this.digest })
     if (result.allow !== true) throw new ModError("MODS_POLICY_TOOL_DENIED")
+    observe?.("allowed")
   }
 
   async filter(

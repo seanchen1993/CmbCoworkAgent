@@ -1406,8 +1406,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertMatches(
     agentIpc,
-    /claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner \}\s*\)/,
-    "a workflow summary claims a run its own surface owes, not whichever is newest"
+    /claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner,\s*\.\.\.\(hostWorkflowNotice \? \{ expected: \{\s*runId: hostWorkflowNotice\.runId, startedAt: hostWorkflowNotice\.startedAt\s*\}\s*\} : \{\}\)\s*\}\s*\)/,
+    "a workflow summary keeps its surface owner and a managed Host notice pins the exact run incarnation"
   )
   assertIncludes(
     agentIpc,
@@ -3535,10 +3535,20 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
     /catch \(midStreamErr\) \{\s+if \(isHookHaltError\(midStreamErr\)\) throw midStreamErr/,
     "initial stream bypasses disconnect retry for Hook halts"
   )
-  assert(
-    (agentIpc.match(/catch \(midErr\) \{\s+if \(isHookHaltError\(midErr\)\) throw midErr/g) ?? [])
-      .length === 2,
-    "resume and interrupt-continue must both bypass disconnect retry for Hook halts"
+  assertMatches(
+    agentIpc,
+    /catch \(midErr\) \{\s+if \(nativeContext\?\.hostUserInputResume \|\| isHookHaltError\(midErr\)\) throw midErr/,
+    "resume bypasses disconnect retry for Hook halts and all Host input checkpoint failures"
+  )
+  assertMatches(
+    agentIpc,
+    /catch \(midErr\) \{\s+if \(isHookHaltError\(midErr\)\) throw midErr/,
+    "interrupt-continue bypasses disconnect retry for Hook halts"
+  )
+  assertMatches(
+    agentIpc,
+    /catch \(err\) \{\s+if \(nativeContext\?\.hostUserInputResume \|\| !isRetryableApiError\(err\)\) throw err/,
+    "Host input checkpoint resume never replays Command through model failover"
   )
   assertMatches(
     agentIpc,

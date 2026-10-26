@@ -11,6 +11,7 @@ import {
 } from "../../../shared/project-runtime"
 import { createProjectTemplate } from "./project-template"
 import { assertStageDebugPackageSupported } from "./project-stage-debug-admission"
+import { createProjectActionBinding } from "../../harness-board/project-runtime/action-input"
 
 const roots: string[] = []
 afterEach(() => {
@@ -45,6 +46,41 @@ function fixture() {
 }
 
 describe("confined stage debug package admission", () => {
+  it("admits only artifact-bound platform check contracts, leaving real permission proof to execution", () => {
+    const f = fixture()
+    const descriptor = {
+      pluginId: "installed",
+      plugin: "checks",
+      digest: "a".repeat(64),
+      actionId: "verify",
+      name: "Verify",
+      platform: { id: "checks", version: "1.0.0", action: "verify" },
+      inputSchema: { type: "object" as const }
+    }
+    const artifactId = f.manifest().checks[0].artifactId
+    const binding = createProjectActionBinding(
+      "verify",
+      descriptor,
+      {},
+      {},
+      { kind: "artifact", artifactId, pointer: "", format: "text" }
+    )
+    f.runtime((manifest) => {
+      manifest.actions = [{ id: binding.id, ref: binding.ref }]
+      manifest.checks[0] = { ...manifest.checks[0], kind: "action", actionId: binding.id }
+    })
+    const lock = { apiVersion: "devclaw.project-actions-lock/v1", bindings: [binding] }
+    f.put("devclaw.project-actions.lock.json", lock)
+    expect(f.check).not.toThrow()
+    delete binding.inputFrom
+    f.put("devclaw.project-actions.lock.json", lock)
+    // The original lock parser already rejects a check without its exact artifact input.
+    expect(f.check).toThrow("PACKAGE_INVALID")
+    f.runtime((manifest) => {
+      manifest.stages[0].actionIds = [binding.id]
+    })
+    expect(f.check).toThrow("ACTIONS_UNSUPPORTED")
+  })
   it("admits metadata-only configuration only behind a native frozen input binding and keeps guest behavior denied", () => {
     const f = fixture()
     const userConfig = {

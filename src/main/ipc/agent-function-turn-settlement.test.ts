@@ -3,6 +3,10 @@ import ts from "typescript"
 import { expect, it, vi } from "vitest"
 import { settleAgentFunctionTurn } from "../agent/agent-run-service"
 import { runSettlementPhases } from "../agent/run-settlement-fence"
+import {
+  confirmRunCancellationSettlement,
+  invalidateRunCancellationSettlement
+} from "../agent/run-cancellation-settlement"
 
 // Run the actual IPC settlement body without booting the unrelated Electron IPC registry.
 const source = ts.createSourceFile(
@@ -38,6 +42,10 @@ function fixture(settlement: Promise<void>) {
     captureThreadIncarnation: () => "original",
     matchesThreadIncarnation: () => true,
     physicalRunHasSuccessor: () => false,
+    ownsPhysicalStreamRunLease: (threadId: string, token: string, controller: AbortController) =>
+      threadId === options.threadId && token === options.runToken && controller === options.controller,
+    confirmRunCancellationSettlement,
+    invalidateRunCancellationSettlement,
     runSettlementPhases,
     settleAgentFunctionTurn,
     agentRunExecutionContextStorage: {

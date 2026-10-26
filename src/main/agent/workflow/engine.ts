@@ -9,6 +9,7 @@ import {
 } from "../../services/stable-file-handle"
 import { runWorkflowScriptInSandbox } from "./sandbox"
 import { withFileOperation } from "../file-operation-lock"
+import type { WorkflowDeterministicActionRunner } from "./deterministic-action"
 import { validateWorkflowScript, MAX_WORKFLOW_SCRIPT_BYTES } from "./script"
 import { sha256Hex, type WorkflowRunStore } from "./run-store"
 import { resolveExistingWorkspacePath, resolveWorkspaceWritePath } from "./paths"
@@ -94,6 +95,14 @@ export interface WorkflowEngineOptions {
    * The legacy name is retained for embedded callers; per-file exclusivity is
    * enforced below regardless of whether this admission callback is supplied. */
   runExclusiveFileWrite?: <T>(fn: () => Promise<T>, signal?: AbortSignal) => Promise<T>
+  /** Main-only adapter to the original durable Mods action service. */
+  actionRunner?: WorkflowDeterministicActionRunner
+  worktreeRunner?: WorkflowDeterministicActionRunner
+  resourceJournal?: {
+    commit?(handle: string, expectedParent: string, budgetId?: string): Promise<void>
+    capture(handle: string): Promise<NonNullable<WorkflowJournalEntry["resourceCheckpoint"]>>
+    validate(handle: string, checkpoint: NonNullable<WorkflowJournalEntry["resourceCheckpoint"]>): Promise<void>
+  }
 }
 
 export interface WorkflowEngineResult {
@@ -124,6 +133,8 @@ interface SharedRuntime {
   agentsFailed: number
   outputTokens: number
   callSeq: number
+  actionCount: number
+  actionInvocations: number
 }
 
 // Process-wide concurrency ceiling shared by ALL runs + nested children, so
@@ -162,7 +173,9 @@ export async function runWorkflowEngine(
     agentsCached: 0,
     agentsFailed: 0,
     outputTokens: 0,
-    callSeq: 0
+    callSeq: 0,
+    actionCount: 0,
+    actionInvocations: 0
   }
   // Content-based replay (official semantics): index the journal by call-identity
   // HASH, not by call index. A resumed agent() replays whenever its hash has an
@@ -423,7 +436,7 @@ export async function runWorkflowEngine(
     // workflow did no real work. Keep it completed (the script may legitimately
     // short-circuit on empty input) but flag it so the outcome isn't silent.
     const warning =
-      shared.agentCount === 0 && shared.agentsCached === 0
+      shared.agentCount === 0 && shared.agentsCached === 0 && shared.actionCount === 0
         ? "this workflow completed without running any agent() — if that is unexpected, the script returned before doing work"
         : undefined
     return await finalize(
@@ -466,6 +479,8 @@ interface GlobalsContext extends WorkflowEngineOptions {
    * call-identity hash so two different child files sharing the SAME meta.name don't
    * cross-hit each other's journal cache (#5). */
   childCacheKey?: string
+  /** Stable child location, unlike its changing content digest. */
+  childActionKey?: string
 }
 
 /**
@@ -598,6 +613,41 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
     (prompt: unknown, agentOptions?: unknown): Promise<unknown> => runAgent(prompt, agentOptions)
   )
 
+  const nativeCall = (kind: "action" | "worktree") => suppressUnhandled(async (input: unknown): Promise<unknown> => {
+    let release!: () => void
+    const marker = new Promise<void>(resolveMarker => { release = resolveMarker })
+    shared.pendingAgentRuns.add(marker)
+    shared.actionInvocations++
+    try {
+      await new Promise<void>(tick => setImmediate(tick))
+      if (signal.aborted) return parkForever()
+      if (shared.actionInvocations > WORKFLOW_MAX_AGENT_INVOCATIONS) {
+        shared.fatalError ??= new WorkflowFatalError("WORKFLOW_ACTION_INVOCATION_LIMIT")
+        return parkForever()
+      }
+      const runner = kind === "action" ? context.actionRunner : context.worktreeRunner
+      if (!runner) throw new WorkflowFatalError("WORKFLOW_ACTION_UNAVAILABLE")
+      if (shared.actionCount >= 128) throw new WorkflowFatalError("WORKFLOW_ACTION_LIMIT")
+      shared.actionCount++
+      const result = await runner(input,
+        context.childActionKey && context.childCacheKey
+          ? { identity: context.childActionKey, scriptSha256: context.childCacheKey } : undefined,
+        signal)
+      throwIfAborted()
+      log(`${kind} ${String(result.stepId ?? result.resourceId ?? "")}: ${String(result.status)}`)
+      return result
+    } catch (error) {
+      // A script cannot suppress an unknown side effect and report the parent as completed.
+      shared.fatalError ??= new WorkflowFatalError(describeWorkflowError(error))
+      throw error
+    } finally {
+      shared.pendingAgentRuns.delete(marker)
+      release()
+    }
+  })
+  const action = nativeCall("action")
+  const worktree = nativeCall("worktree")
+
   const runAgent = async (prompt: unknown, agentOptions?: unknown): Promise<unknown> => {
     // Register a lifetime marker SYNCHRONOUSLY at call time, so finalize's
     // drain sees this call even when it is spawned from a late .then chain.
@@ -707,7 +757,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         `opts.isolation "${request.ignoredIsolation}" is not supported here — running in the shared workspace (file writes are serialized across the run)`
       )
     }
-    const isolated = request.options.isolation === "worktree"
+    const isolated = request.options.isolation === "worktree" || Boolean(request.options.resourceHandle)
     // Reserve the slot and the resume key synchronously (no await in between),
     // so a parallel() fan-out cannot overshoot the agent cap or race callSeq.
     shared.agentCount += 1
@@ -750,13 +800,17 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
           ? {
               systemPrompt: agentProfile.systemPrompt,
               disallowedTools: [...agentProfile.disallowedTools].sort(),
+              ...(agentProfile.toolAllowlist ? { toolAllowlist: [...agentProfile.toolAllowlist].sort() } : {}),
               shellAccess: agentProfile.shellAccess
             }
           : null,
         // Preserve the pre-worktree hash for ordinary agents so existing journals
         // still replay after an upgrade. An explicitly isolated call gets a
         // distinct identity and can never consume a shared-workspace entry.
-        ...(request.options.isolation ? { isolation: request.options.isolation } : {})
+        ...(request.options.isolation ? { isolation: request.options.isolation } : {}),
+        ...(request.options.resourceHandle ? { resourceHandle: request.options.resourceHandle } : {}),
+        ...(request.options.deadlineBudgetId ? { deadlineBudgetId: request.options.deadlineBudgetId } : {}),
+        ...(request.options.commitChanges ? { commitChanges: true } : {})
       })
     )
 
@@ -771,6 +825,17 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
     const bucket = context.availableByHash.get(callHash)
     const cached = bucket && bucket.length > 0 ? bucket.shift() : undefined
     if (cached) {
+      if (request.options.resourceHandle) {
+        try {
+          if (!cached.resourceCheckpoint || !context.resourceJournal)
+            throw Error("WORKTREE_RESOURCE_JOURNAL_UNCONFIRMED")
+          await context.resourceJournal.validate(request.options.resourceHandle, cached.resourceCheckpoint)
+        } catch (error) {
+          shared.fatalError ??= new WorkflowFatalError(describeWorkflowError(error))
+          throw shared.fatalError
+        }
+        throwIfAborted()
+      }
       const resultPreview = workflowAgentResultPreview(
         cached.result,
         cached.structured,
@@ -820,7 +885,8 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
       })
       // Copy on the way out: the journal entry is live persisted state, and a
       // script mutating a replayed object in place must not corrupt it.
-      return cached.hasStructured ? toJsonSafe(cached.structured) : cached.result
+      const output = cached.hasStructured ? toJsonSafe(cached.structured) : cached.result
+      return request.options.commitChanges ? { output, commitSha: cached.resourceCheckpoint!.headCommit } : output
     }
 
     const execution = shared.limiter(async () => {
@@ -840,6 +906,10 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
       })
       try {
         throwIfAborted()
+        const commitParent = request.options.commitChanges
+          ? await context.resourceJournal?.capture(request.options.resourceHandle!) : undefined
+        if (request.options.commitChanges && (!commitParent || !context.resourceJournal?.commit))
+          throw new WorkflowFatalError("WORKTREE_RESOURCE_COMMIT_UNAVAILABLE")
         const result = await context.subagentRunner({
           prompt: request.prompt,
           schema: request.options.schema,
@@ -851,8 +921,11 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
           signal,
           roleSystemPrompt: agentProfile?.systemPrompt,
           disallowedTools: agentProfile?.disallowedTools,
+          toolAllowlist: agentProfile?.toolAllowlist,
           shellAccess: agentProfile?.shellAccess,
-          isolation: request.options.isolation
+          isolation: request.options.isolation,
+          resourceHandle: request.options.resourceHandle,
+          deadlineBudgetId: request.options.deadlineBudgetId
         })
         throwIfAborted()
 
@@ -875,7 +948,16 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         const structuredOversized =
           structuredSafe !== undefined &&
           (structuredSerialization?.json?.length ?? 0) > WORKFLOW_RESULT_MAX_CHARS
-        if (isolated) {
+        if (request.options.resourceHandle && (structuredOversized || result.modelFellBack))
+          throw new WorkflowFatalError("WORKTREE_RESOURCE_RESULT_NOT_REPLAYABLE")
+        if (commitParent) await context.resourceJournal!.commit!(request.options.resourceHandle!, commitParent.headCommit,
+          request.options.deadlineBudgetId)
+        const resourceCheckpoint = request.options.resourceHandle
+          ? await context.resourceJournal?.capture(request.options.resourceHandle) : undefined
+        if (request.options.resourceHandle && !resourceCheckpoint)
+          throw new WorkflowFatalError("WORKTREE_RESOURCE_JOURNAL_UNAVAILABLE")
+        throwIfAborted()
+        if (isolated && !request.options.resourceHandle) {
           // An isolated agent's real deliverable is its owned checkout, not only
           // its text. Replaying it would require revalidating the persisted
           // checkout/branch/manifest as one unit. Keep resume simple and honest:
@@ -903,7 +985,8 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
             result: text,
             structured: structuredSafe,
             hasStructured: Boolean(request.options.schema),
-            outputTokens: result.outputTokens
+            outputTokens: result.outputTokens,
+            ...(resourceCheckpoint ? { resourceCheckpoint } : {})
           })
         }
         recordAgentState(runStore, {
@@ -936,9 +1019,13 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         // an isolated checkout: schema calls return the exact validated object;
         // non-schema calls return their final text. The run ledger and UI retain
         // branch/path/status for review and integration.
-        return value
+        return request.options.commitChanges ? { output: value, commitSha: resourceCheckpoint!.headCommit } : value
       } catch (error) {
         if (signal.aborted || isWorkflowAbortError(error)) throw new WorkflowAbortError()
+        if (request.options.resourceHandle) {
+          shared.fatalError ??= new WorkflowFatalError(describeWorkflowError(error))
+          throw shared.fatalError
+        }
         if (isWorkflowFatalError(error)) throw error
 
         const message = describeWorkflowError(error)
@@ -1069,7 +1156,9 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
       childName: parsedChild.meta.name,
       // Key the journal on the child SCRIPT content, so two different child files
       // with the same meta.name can't cross-hit each other's journal cache.
-      childCacheKey: sha256Hex(source)
+      childCacheKey: sha256Hex(source),
+      childActionKey: process.platform === "win32"
+        ? resolve(context.workspacePath, name).toLowerCase() : resolve(context.workspacePath, name)
     })
     // A child workflow's return value is consumed by the parent script; its
     // value is already vm-serialized plain JSON (no hostile getters survive).
@@ -1289,6 +1378,8 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
 
   return {
     agent,
+    action,
+    worktree,
     parallel: suppressUnhandled(parallel),
     pipeline: suppressUnhandled(pipeline),
     workflow: suppressUnhandled(workflowFn),
@@ -1387,6 +1478,24 @@ function normalizeAgentArgs(
       : undefined
   if (candidate.isolation === "worktree") {
     options.isolation = "worktree"
+  }
+  if (candidate.resourceHandle !== undefined) {
+    if (typeof candidate.resourceHandle !== "string" ||
+      !/^[a-f0-9-]{36}$/.test(candidate.resourceHandle)) throw Error("WORKTREE_RESOURCE_HANDLE_INVALID")
+    if (candidate.isolation !== undefined && candidate.isolation !== "worktree")
+      throw Error("WORKTREE_RESOURCE_ISOLATION_CONFLICT")
+    options.resourceHandle = candidate.resourceHandle
+  }
+  if (candidate.commitChanges !== undefined) {
+    if (typeof candidate.commitChanges !== "boolean" || !options.resourceHandle)
+      throw Error("WORKTREE_RESOURCE_COMMIT_OPTIONS_INVALID")
+    options.commitChanges = candidate.commitChanges
+  }
+  if (candidate.deadlineBudgetId !== undefined) {
+    if (!options.resourceHandle || typeof candidate.deadlineBudgetId !== "string" ||
+        !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(candidate.deadlineBudgetId))
+      throw Error("WORKTREE_DEADLINE_BINDING_INVALID")
+    options.deadlineBudgetId = candidate.deadlineBudgetId
   }
   return { prompt, options, agentType, ignoredIsolation }
 }

@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
+import ts from "typescript"
 
 /**
  * 项目列表用 table-fixed + <colgroup> 钉死列宽，所以 <col> 个数必须和表头单元格个数
@@ -20,6 +21,25 @@ const source = readFileSync(
   resolve(dirname(fileURLToPath(import.meta.url)), "./ProjectModePanel.tsx"),
   "utf8"
 )
+
+it("开发模式首次读取即有市场说明，不在effect中再触发一次更新", () => {
+  const parsed = ts.createSourceFile("panel.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const hook = parsed.statements.find(node => ts.isFunctionDeclaration(node) &&
+    node.name?.text === "usePluginMarketInfo")!
+  const compiled = ts.transpileModule(hook.getText(parsed).replaceAll("import.meta.env.DEV", "true"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
+  }).outputText
+  const update = vi.fn()
+  const effects: Array<() => unknown> = []
+  const example = { fixture: { useScenario: "测试", managerName: "", managerDepartment: "" } }
+  const run = new Function("useState", "useEffect", "DEV_MOCK_PLUGIN_MARKET_INFO",
+    `${compiled}; return usePluginMarketInfo()`)
+  const result = run((initial: unknown) => [typeof initial === "function" ? initial() : initial, update],
+    (effect: () => unknown) => effects.push(effect), example) as Map<string, unknown>
+  expect(result.get("fixture")).toEqual(example.fixture)
+  for (const effect of effects) effect()
+  expect(update).not.toHaveBeenCalled()
+})
 
 /** 可选列由 showSuspectedTechnicalDetailMetric 控制，表头和 colgroup 里各有一处。 */
 const OPTIONAL_FLAG = "showSuspectedTechnicalDetailMetric"

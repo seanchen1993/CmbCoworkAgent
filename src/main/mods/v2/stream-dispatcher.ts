@@ -309,7 +309,7 @@ export function dispatchFunctionStream(
   return boundFunctionStream(output, {
     signal: options.signal,
     deadline: () => {
-      sharedDeadline ??= new FunctionDispatchDeadline(options.timeoutMs ?? 120000, options.signal)
+      sharedDeadline ??= new FunctionDispatchDeadline(options.timeoutMs ?? 120000, options.signal, undefined, true)
       signal = AbortSignal.any([controller.signal, sharedDeadline.signal])
       return { value: sharedDeadline, shared: true }
     },

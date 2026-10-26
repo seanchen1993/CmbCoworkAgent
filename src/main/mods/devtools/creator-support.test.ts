@@ -6,6 +6,16 @@ import {
 } from "./creator-support"
 
 describe("creator support scopes", () => {
+  it("discovers native composition without promising legacy equivalence or unrestricted migration", () => {
+    const native = CREATOR_S1_SUPPORT.authoringConstraints.nativeComposition
+    expect(native.source).toBe("composition/source.json")
+    expect(native.compilation.action).toBe("project_compile")
+    expect(native.stateOwner).toBe("host")
+    expect(native.execution).toBe("unverified-until-fresh-native-trial")
+    expect(native.requirements.join(" ")).toContain("不手写成功凭据")
+    expect(native.limitations.join(" ")).toContain("恢复适配")
+    expect(native.limitations.join(" ")).toContain("静态转换")
+  })
   it("separates the function S1 promise from conditional Host project capabilities", () => {
     expect(CREATOR_S1_SUPPORT.scope.id).toBe("function-authoring-s1")
     expect(CREATOR_S1_SUPPORT.conditionalCapabilities).toBe(CREATOR_CONDITIONAL_CAPABILITIES)
@@ -68,11 +78,12 @@ describe("creator support scopes", () => {
       "native-baseline",
       "source-settled",
       "compatible-candidate",
+      "readonly-native-actions",
       "fresh-native-consent"
     ])
     expect(
       debug.blockers.find((value) => value.signals.includes("PROJECT_STAGE_DEBUG_SOURCE_UNSETTLED"))
-    ).toMatchObject({ owner: "user", reason: expect.stringContaining("不得自动重放") })
+    ).toMatchObject({ owner: "user", reason: expect.stringContaining("未知副作用不自动重放") })
     const adapter = debug.blockers.find((value) => value.owner === "host-adapter-maintainer")!
     expect(adapter.signals).toEqual(
       expect.arrayContaining([
@@ -82,7 +93,7 @@ describe("creator support scopes", () => {
         "PROJECT_STAGE_DEBUG_CAPABILITY_FLOW_UNSUPPORTED"
       ])
     )
-    expect(adapter.reason).toContain("不删除功能绕过检查")
+    expect(adapter.reason).toContain("不删功能绕过检查")
   })
 
   it("distinguishes context occupancy from cumulative usage and never invents measurements", () => {
@@ -115,7 +126,7 @@ describe("creator support scopes", () => {
     expect(delivery.guarantees.join(" ")).toContain("不会安装、授权或执行")
     expect(delivery.guarantees.join(" ")).toContain("不代表真实业务验收通过")
     expect(debug.guarantees.join(" ")).toContain("不恢复数据库、网络、发布或 Git 状态")
-    expect(debug.guarantees.join(" ")).toContain("真实终态可冷核对")
+    expect(debug.guarantees.join(" ")).toContain("命令 Hook 终态可冷核对")
     const plugin = CREATOR_CONDITIONAL_CAPABILITIES.find(
       (item) => item.id === "plugin-owned-stage-recovery"
     )!

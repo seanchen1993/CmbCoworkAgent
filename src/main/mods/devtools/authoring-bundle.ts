@@ -11,7 +11,7 @@ export interface AuthoringSourceBundle {
   files: AuthoringSourceFile[]
 }
 export const AUTHORING_BUNDLE_LIMITS = Object.freeze({
-  files: 32,
+  files: 64,
   fileBytes: 64 * 1024,
   totalBytes: 256 * 1024,
   pathLength: 160
@@ -102,7 +102,8 @@ export function createAuthoringSourceBundle(input: unknown): AuthoringSourceBund
   }
   if (
     !files.some((file) =>
-      ["plugin.json", ".claude-plugin/plugin.json", ".codex-plugin/plugin.json"].includes(file.path)
+      ["plugin.json", ".claude-plugin/plugin.json", ".codex-plugin/plugin.json",
+        "composition/source.json"].includes(file.path)
     )
   )
     throw Error("AUTHORING_PLUGIN_MANIFEST_REQUIRED")

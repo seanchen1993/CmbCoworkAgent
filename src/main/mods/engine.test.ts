@@ -89,6 +89,15 @@ async function fixture(body: string, options: Partial<ModManifest> = {}) {
 }
 
 describe("Mod execution contract", () => {
+  it.each([
+    { value: "background task started; result unknown", status: "succeeded" },
+    { value: { output: "pipe drain incomplete", exitCode: null }, status: "succeeded" },
+    { value: { output: "command timeout", exitCode: 124 }, status: "failed" }
+  ])("does not represent process-tree settlement in ordinary core status: $status", async ({ value, status }) => {
+    const f = await fixture("")
+    await f.engine.dispatch({ ...f.request, toolId: "host:execute" }, async () => value)
+    expect(f.store.audit("workspace")[0].status).toBe(status)
+  })
   it.each(["admission", "lost-reply", "foreign-receipt"])(
     "keeps %s execution facts distinct without treating a child failure as proof about its parent",
     async (mode) => {

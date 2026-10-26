@@ -162,4 +162,5 @@ export function registerLegacyProjectRuntimeHandlers(
     service.disable(projectId)
     return view(projectId)
   })
+  return service
 }

@@ -11,3 +11,7 @@ resources/mods/autobiz-knowledge/collector-THIRD-PARTY-NOTICES.md -text
 examples/sparks-task-workbench/** text eol=lf
 examples/sparks-edit-reminder/** text eol=lf
 examples/sparks-stage-debugger/** text eol=lf
+
+# Native composition resources carry provenance hashes and must retain LF bytes.
+resources/native-compositions/** text eol=lf
+tests/fixtures/native-compositions/** text eol=lf

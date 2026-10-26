@@ -1,0 +1,223 @@
+{
+  "protocol": "devclaw.legacy-import-adapter/v1",
+  "adapters": [
+    {
+      "id": "autobiz-documents",
+      "title": "AutoBiz旧文档稳定点迁移",
+      "sourcePackageIds": [
+        "autobiz-converted-requirements"
+      ],
+      "parameters": [
+        {
+          "id": "feature",
+          "label": "旧项目特性标识"
+        }
+      ],
+      "checkpoint": {
+        "sourcePath": ".autobizdevops/state.json",
+        "pointers": [
+          [
+            "features",
+            "{feature}",
+            "checkpoint"
+          ],
+          [
+            "{feature}"
+          ]
+        ]
+      },
+      "stablePoints": [
+        {
+          "value": "convert_done",
+          "prefixStageIds": [
+            "convert"
+          ],
+          "reexecuteStageIds": [
+            "convert"
+          ]
+        },
+        {
+          "value": "prd_done",
+          "prefixStageIds": [
+            "convert",
+            "prd"
+          ],
+          "reexecuteStageIds": [
+            "convert",
+            "prd"
+          ]
+        },
+        {
+          "value": "specs_done",
+          "prefixStageIds": [
+            "convert",
+            "prd",
+            "specs"
+          ],
+          "reexecuteStageIds": [
+            "convert",
+            "prd",
+            "specs"
+          ]
+        },
+        {
+          "value": "design_done",
+          "prefixStageIds": [
+            "convert",
+            "prd",
+            "specs",
+            "design"
+          ],
+          "reexecuteStageIds": [
+            "convert",
+            "prd",
+            "specs"
+          ]
+        },
+        {
+          "value": "plan_done",
+          "prefixStageIds": [
+            "convert",
+            "prd",
+            "specs",
+            "design",
+            "plan"
+          ],
+          "reexecuteStageIds": [
+            "convert",
+            "prd",
+            "specs"
+          ]
+        }
+      ],
+      "artifacts": [
+        {
+          "artifactId": "normalized",
+          "stageId": "convert",
+          "fields": {
+            "feature": "{feature}",
+            "stage": "convert"
+          },
+          "files": [
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/NORMALIZED_REQUIREMENTS.json",
+              "path": "NORMALIZED_REQUIREMENTS.json",
+              "optional": true
+            }
+          ],
+          "trees": []
+        },
+        {
+          "artifactId": "prd",
+          "stageId": "prd",
+          "fields": {
+            "feature": "{feature}",
+            "stage": "prd"
+          },
+          "files": [
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/PRD.md",
+              "path": "PRD.md"
+            },
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/UI_CONTEXT.json",
+              "path": "UI_CONTEXT.json",
+              "optional": true
+            },
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/IMPLEMENTATION_SCOPE.json",
+              "path": "IMPLEMENTATION_SCOPE.json",
+              "optional": true
+            },
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/source-context.json",
+              "path": "source-context.json",
+              "optional": true
+            }
+          ],
+          "trees": [
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/sources",
+              "targetPrefix": "sources",
+              "suffix": "*",
+              "optional": true
+            }
+          ]
+        },
+        {
+          "artifactId": "specs",
+          "stageId": "specs",
+          "fields": {
+            "feature": "{feature}",
+            "stage": "specs"
+          },
+          "files": [
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/proposal.md",
+              "path": "proposal.md"
+            },
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/UI_CONTEXT.json",
+              "path": "UI_CONTEXT.json"
+            }
+          ],
+          "trees": [
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/specs",
+              "targetPrefix": "specs",
+              "suffix": "/spec.md",
+              "optional": true
+            }
+          ]
+        },
+        {
+          "artifactId": "design",
+          "stageId": "design",
+          "fields": {
+            "feature": "{feature}",
+            "stage": "design"
+          },
+          "files": [
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/design.md",
+              "path": "design.md"
+            },
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/.design-contract.lock.json",
+              "path": ".design-contract.lock.json"
+            }
+          ],
+          "trees": []
+        },
+        {
+          "artifactId": "plan",
+          "stageId": "plan",
+          "fields": {
+            "feature": "{feature}",
+            "stage": "plan"
+          },
+          "files": [
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/plan.json",
+              "path": "plan.json"
+            },
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/PLAN.md",
+              "path": "PLAN.md",
+              "optional": true,
+              "materialOnly": true
+            }
+          ],
+          "trees": [
+            {
+              "sourcePath": ".autobizdevops/features/{feature}/plans",
+              "targetPrefix": "plans",
+              "suffix": "/plan.json",
+              "optional": true
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

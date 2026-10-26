@@ -13,10 +13,14 @@ export interface ProjectRuntimeManifest {
     id: string
     title: string
     skill?: string
+    /** Retained Host declaration; does not grant execution or merge approval. */
+    executionMode?: "normal" | "workflow"
     actionIds: string[]
     artifactIds: string[]
     checkIds: string[]
     approval: "none" | "human"
+    /** Optional output review, separate from permission to execute the stage. */
+    resultApproval?: "none" | "human"
   }>
   actions: Array<{ id: string; ref: ClawActionIdentity }>
   artifacts: Array<{ id: string; path: string; required: boolean }>

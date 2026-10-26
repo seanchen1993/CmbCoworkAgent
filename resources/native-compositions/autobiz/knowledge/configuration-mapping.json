@@ -1,0 +1,56 @@
+{
+  "apiVersion": "autobiz.native-migration-map/v1",
+  "scope": "eight-stage-native-composition-with-explicit-parity-gaps",
+  "mappings": [
+    {
+      "legacy": "projectCode / feature",
+      "target": "Host task goal and stable artifact feature identity",
+      "status": "partial",
+      "limitation": "Initial feature label is artifact-owned; no claim of equality to a legacy Feature record."
+    },
+    {
+      "legacy": "implementationScope",
+      "target": "Pinned PRD bundle IMPLEMENTATION_SCOPE.json",
+      "status": "migrated"
+    },
+    {
+      "legacy": "knowledge_path / selectedDeployUnits / agentsRepo",
+      "target": "Host knowledgeRoot binding + schema string selectedDeployUnits + separately authorized read-only contextAction using native.project-context materials",
+      "status": "partial",
+      "reason": "Preserves frontmatter deploy_unit selection, nearest AGENTS boundary, common Product Knowledge, Service Knowledge and frontend Component/Reference versus backend Reference. Explicit appType replaces remote lookup; repository sync and remote metadata lookup are not implemented."
+    },
+    {
+      "legacy": "knowledge_config.nextAction / leanToken",
+      "target": "Separately authorized knowledge deposition action and credential reference",
+      "status": "blocked",
+      "reason": "No secret values or old prompt-token substitution are exported."
+    },
+    {
+      "legacy": "inspectCommands.project_status / feature_status / checkpoint",
+      "target": "Host project and operation projection",
+      "status": "replaced"
+    },
+    {
+      "legacy": "design_contract_lock",
+      "target": "Same design digest and definition consistency rules inside pinned bundle",
+      "status": "migrated"
+    },
+    {
+      "legacy": "human_gate_design_done",
+      "target": "Host resultApproval=human bound to validated artifact version",
+      "status": "replaced"
+    },
+    {
+      "legacy": "autoops-cicd",
+      "target": "CICD.bundle.json preparation with original Code workflow receipts",
+      "status": "partial",
+      "limitation": "Only prepared-only mode. No external publish/deployment provider is configured; external or unknown publication claims fail."
+    },
+    {
+      "legacy": "autoops-archive",
+      "target": "ARCHIVE.bundle.json exact seven source artifacts and SHA-256; Host terminal completion",
+      "status": "replaced",
+      "limitation": "No old state-directory move or external knowledge deposition."
+    }
+  ]
+}

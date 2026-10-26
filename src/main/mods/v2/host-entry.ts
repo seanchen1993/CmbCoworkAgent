@@ -1,8 +1,9 @@
+import { FunctionTrustedWaitClock } from "./trusted-function-wait"
 import { prepareFunctionDisplayEnvelope } from "./display-preparation"
 import { randomUUID } from "node:crypto"
 import type { ModJson } from "../../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
-import { ModFunctionError, type FunctionHostReply } from "../../../shared/mods/v2/contracts"
+import { ModFunctionError, functionInvocationTimeoutMs, type FunctionHostReply } from "../../../shared/mods/v2/contracts"
 import type { FunctionRequest, FunctionResponse } from "../../../shared/mods/v2/protocol"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { fromWireError, wireError } from "./wire"
@@ -30,11 +31,12 @@ const uiAssemblies = new Map<string, {
 const physicalUiIdentity = Object.freeze({})
 const uiCredits = new Map<string, { assembly: string; runtimeId: string;
   resolve(credit: FunctionUiResolveWireCredit): void; reject(error: Error): void; detach(): void }>()
-const frames = new Map<string, { runtimeId: string; controller: AbortController }>()
+const frames = new Map<string, { runtimeId: string; controller: AbortController; waitClock?: FunctionTrustedWaitClock }>()
 const replies = new Map<
   string,
   {
     runtimeId: string
+    requestId?: string
     resolve(value: FunctionHostReply): void
     reject(error: Error): void
     detach(): void
@@ -105,6 +107,19 @@ port.on("message", ({ data: request }) => {
 })
 
 async function handle(request: FunctionRequest): Promise<ModJson> {
+  if (request.type === "trusted-wait") {
+    const frame = frames.get(request.requestId)
+    const call = replies.get(request.callId)
+    if (!frame?.waitClock || frame.runtimeId !== request.runtimeId || frame.controller.signal.aborted ||
+      call?.requestId !== request.requestId || call.runtimeId !== request.runtimeId)
+      throw new ModFunctionError("MODS_TRUSTED_WAIT_SCOPE")
+    if (request.phase === "begin" && typeof request.allowanceMs === "number")
+      frame.waitClock.begin(request.ticket, request.allowanceMs)
+    else if (request.phase === "end" && typeof request.creditMs === "number")
+      frame.waitClock.end(request.ticket, request.creditMs)
+    else throw new ModFunctionError("MODS_TRUSTED_WAIT_INVALID")
+    return { acknowledged: true }
+  }
   if (request.type === "prepare-ui-resolve") {
     if (uiAssemblies.size || frames.size >= 128 || !request.assembly ||
       !runtimes.has(request.runtimeId) || request.participants.length > 16)
@@ -218,13 +233,14 @@ async function handle(request: FunctionRequest): Promise<ModJson> {
   if (request.type !== "invoke") throw new ModFunctionError("MODS_REQUEST_INVALID")
   if (frames.size >= 128) throw new ModFunctionError("MODS_HOST_CAPACITY")
   const controller = new AbortController()
-  frames.set(request.id, { runtimeId: request.runtimeId, controller })
+  const waitClock = new FunctionTrustedWaitClock(functionInvocationTimeoutMs(request.metadata))
+  frames.set(request.id, { runtimeId: request.runtimeId, controller, waitClock })
   try {
     return await guest.invoke(
       request.registration,
       request.event,
       (method, args, signal) => forwardCall(request.runtimeId, request.id, method, args, signal),
-      { ...request.metadata, signal: controller.signal }, request.uiDrawing
+      { ...request.metadata, signal: controller.signal }, request.uiDrawing, waitClock
     )
   } finally {
     frames.delete(request.id)
@@ -281,6 +297,7 @@ function forwardCall(
     }
     replies.set(id, {
       runtimeId,
+      requestId,
       resolve,
       reject,
       detach: () => signal.removeEventListener("abort", cancel)

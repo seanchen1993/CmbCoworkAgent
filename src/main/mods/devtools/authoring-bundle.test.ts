@@ -5,6 +5,22 @@ const manifest = { path: "plugin.json", text: '{"name":"example"}' }
 const source = { path: "hooks/main.ts", text: "export function register() {}\n" }
 
 describe("authoring source snapshots", () => {
+  it("retains up to 64 module/resource files while preserving the total byte budget", () => {
+    const files = [
+      manifest,
+      ...Array.from({ length: 63 }, (_, index) => ({
+        path: `resources/${index}.md`,
+        text: "bounded"
+      }))
+    ]
+    expect(createAuthoringSourceBundle(files).files).toHaveLength(64)
+    expect(() =>
+      createAuthoringSourceBundle([...files, { path: "resources/overflow.md", text: "x" }])
+    ).toThrow("AUTHORING_SOURCE_LIMIT")
+    expect(() =>
+      createAuthoringSourceBundle(files.map((file) => ({ ...file, text: "x".repeat(5000) })))
+    ).toThrow("AUTHORING_SOURCE_LIMIT")
+  })
   it.each(["mjs", "cjs", "mts", "cts", "py", "sh", "ps1", "txt"])(
     "preserves bounded %s text bytes and revalidates their saved digest without executing them",
     (suffix) => {

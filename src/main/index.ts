@@ -64,7 +64,7 @@ import {
   isEpipeError,
   isTrustedMainLogToggleRequest,
   isTrustedRendererUrl,
-  resolveTrustedRendererUrl
+  resolveTrustedAppRendererUrl
 } from "./main-log-forwarding"
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
 import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
@@ -127,10 +127,10 @@ const mainLogForwardingGate = createMainLogForwardingGate()
 let mainWindow: BrowserWindow | null = null
 let mainWindowStartupReady = false
 let mainWindowUnresponsive = false
-const trustedMainRendererUrl = resolveTrustedRendererUrl(
-  app.isPackaged
-    ? pathToFileURL(join(__dirname, "../renderer/index.html")).href
-    : process.env["ELECTRON_RENDERER_URL"]
+const trustedMainRendererUrl = resolveTrustedAppRendererUrl(
+  app.isPackaged,
+  process.env["ELECTRON_RENDERER_URL"],
+  pathToFileURL(join(__dirname, "../renderer/index.html")).href
 )
 const EVENT_CATEGORIES = new Set<EventCategory>([
   "skill",
@@ -341,6 +341,7 @@ import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
 import { registerWorkspaceFilePreviewHandlers } from "./ipc/file-preview"
+import { registerDirectoryPickerHandler } from "./ipc/directory-picker"
 import { closeWorkspaceFilePreviewWorker } from "./workspace-file-preview/client"
 import { closeFileAttachmentParserWorker } from "./file-attachment-parser/client"
 import {
@@ -1155,6 +1156,7 @@ if (browserNativeMessagingHostLaunch) {
     registerWorkflowHandlers(ipcMain)
     registerThreadHandlers(ipcMain)
     registerModelHandlers(ipcMain)
+    registerDirectoryPickerHandler(ipcMain, () => mainWindow, trustedMainRendererUrl)
     registerWorkspaceFilePreviewHandlers(ipcMain)
     registerWorkspaceFilePreviewProtocol()
     registerSkillsHandlers(ipcMain)

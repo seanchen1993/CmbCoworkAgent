@@ -58,6 +58,8 @@ const THREAD_LIST_SMALL_OBJECT_KEYS = new Set([
   "imDeliveryContext"
 ])
 const THREAD_LIST_PRIORITY_KEYS = [
+  // Host stage identity controls read-only chat and must survive directory refreshes.
+  "hostProjectRuntime",
   // Remote IM session identity: the sidebar and chat banner classify threads by
   // these, so they must lead the priority queue — priority keys consume the
   // per-row char budget in array order, and a large known key later would
@@ -179,6 +181,31 @@ function projectThreadListMetadata(
       key.length > THREAD_LIST_METADATA_KEY_CHAR_LIMIT ||
       valueChars >= THREAD_LIST_METADATA_VALUE_CHAR_BUDGET
     ) {
+      continue
+    }
+    if (key === "hostProjectRuntime") {
+      // Never turn malformed Host attribution into an ordinary editable conversation.
+      // A bounded empty marker remains read-only; it grants no project authority.
+      const binding =
+        value && typeof value === "object" && !Array.isArray(value)
+          ? (value as Record<string, unknown>)
+          : undefined
+      const keys = ["projectId", "operationId", "stageId", "pluginDigest"]
+      const valid =
+        binding &&
+        Object.keys(binding).length === keys.length &&
+        keys.every(
+          (field) =>
+            typeof binding[field] === "string" &&
+            (binding[field] as string).trim().length > 0 &&
+            (binding[field] as string).length <= 512 &&
+            !(binding[field] as string).includes("\0")
+        ) &&
+        /^[a-f0-9]{64}$/.test(binding.pluginDigest as string)
+      const identity = valid && binding
+        ? Object.fromEntries(keys.map((field) => [field, binding[field]])) : {}
+      projected[key] = identity
+      valueChars += JSON.stringify(identity).length
       continue
     }
     if (

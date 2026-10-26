@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { HostProjectService, type HostProjectServiceDependencies } from "./host-service"
 import { HostPackageSnapshots } from "./package-snapshots"
@@ -90,6 +91,393 @@ async function prepareReview(setup: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe("production host project adapter", () => {
+  it.each(["authorize", "execute"])("rejects stage instructions replaced after the %s await", async phase => {
+    const setup = await fixture()
+    const operation = setup.service.prepare({ projectId: "local-docs", expectedVersion: 1,
+      idempotencyKey: "explicit-instructions", stageInstructions: "  Keep the original boundary  " })
+    expect(operation.stageInstructions).toBe("Keep the original boundary")
+    expect(() => setup.service.prepare({ projectId: "local-docs", expectedVersion: 1,
+      idempotencyKey: "explicit-instructions", stageInstructions: "Changed" }))
+      .toThrow("IDEMPOTENCY_CONFLICT")
+    const replace = async () => {
+      await Promise.resolve()
+      const connection = new DatabaseSync(join(setup.root, "projects.sqlite"))
+      try {
+        const row = connection.prepare("SELECT data FROM host_operations WHERE id=?").get(operation.operationId)!
+        const changed = JSON.parse(String(row.data))
+        changed.stageInstructions = "Substituted after await"
+        connection.prepare("UPDATE host_operations SET data=? WHERE id=?")
+          .run(JSON.stringify(changed), operation.operationId)
+      } finally { connection.close() }
+    }
+    let invoked = false
+    setup.dependencies.authorize = phase === "authorize" ? replace : async () => {}
+    setup.dependencies.executeSkill = async context => {
+      invoked = true
+      expect(context.stageInstructions).toBe("Keep the original boundary")
+      expect(context.project.goal).toBe("Write a document")
+      await replace()
+      expect(() => context.assertAuthorityCurrent!()).toThrow("STAGE_INSTRUCTIONS_CHANGED")
+      context.assertInputsCurrent!()
+      return "succeeded"
+    }
+    if (phase === "authorize") {
+      await expect(setup.service.start(operation.operationId)).rejects.toThrow("STAGE_INSTRUCTIONS_CHANGED")
+      expect(invoked).toBe(false)
+    } else {
+      const result = await setup.service.start(operation.operationId)
+      expect(result.status).toBe("unknown")
+      expect(result.receipts).toEqual([])
+      expect(invoked).toBe(true)
+    }
+    expect(setup.store.get("local-docs")?.goal).toBe("Write a document")
+  })
+
+  it.each(["feedback", "decision", "receipt", "target"])(
+    "rejects a changed revision %s across the original async authorization boundary", async change => {
+      const setup = await fixture({ executeSkill: async context => {
+        context.bindThread(`thread-${context.operation.operationId}`)
+        writeFileSync(join(context.project.workspace, "document.md"), "Original output")
+        context.recordTerminal({ outcome: "success", code: "physical-success" })
+        return "succeeded"
+      } }, manifest => { manifest.stages[0].resultApproval = "human" })
+      const first = setup.service.prepare({ projectId: "local-docs", expectedVersion: 1, idempotencyKey: "first" })
+      await setup.service.start(first.operationId)
+      setup.service.decideResultApproval(first.operationId, { ...setup.service.resultReview(first.operationId),
+        decision: "rejected", actorId: "desktop-user", feedback: "Revise the boundary" })
+      setup.service.cancel(first.operationId)
+      const retry = setup.service.prepare({ projectId: "local-docs", expectedVersion: 1, idempotencyKey: "retry" })
+      let invoked = false
+      setup.dependencies.executeSkill = async () => { invoked = true; return "succeeded" }
+      setup.dependencies.authorize = async () => {
+        await Promise.resolve()
+        const connection = new DatabaseSync(join(setup.root, "projects.sqlite"))
+        try {
+          const id = change === "target" ? retry.operationId : first.operationId
+          const row = connection.prepare("SELECT data FROM host_operations WHERE id=?").get(id)!
+          const operation = JSON.parse(String(row.data))
+          if (change === "feedback") operation.resultApproval.feedback = "Substituted opinion"
+          else if (change === "decision") operation.resultApproval.decision = "approved"
+          else if (change === "receipt") operation.receipts[0].artifactFingerprint = "f".repeat(64)
+          else delete operation.resultFeedbackSource
+          connection.prepare("UPDATE host_operations SET data=? WHERE id=?").run(JSON.stringify(operation), id)
+        } finally { connection.close() }
+      }
+      await expect(setup.service.start(retry.operationId)).rejects.toThrow(
+        change === "decision" ? "RESULT_FEEDBACK_INVALID" : change === "receipt"
+          ? "RESULT_APPROVAL_MISMATCH" : "RESULT_FEEDBACK_CHANGED")
+      expect(invoked).toBe(false)
+    }
+  )
+
+  it("keeps the native revision binding live across Skill awaits and fails closed on a replaced rejection", async () => {
+    let running = false
+    let databasePath = ""
+    const setup = await fixture({ executeSkill: async context => {
+      context.bindThread(`thread-${context.operation.operationId}`)
+      if (running) {
+        expect(context.previousResultFeedback?.feedback).toBe("Use the original source")
+        expect(Object.isFrozen(context.previousResultFeedback)).toBe(true)
+        await Promise.resolve()
+        const connection = new DatabaseSync(databasePath)
+        try {
+          const id = context.previousResultFeedback!.operationId
+          const row = connection.prepare("SELECT data FROM host_operations WHERE id=?").get(id)!
+          const original = JSON.parse(String(row.data))
+          original.resultApproval.feedback = "Changed while running"
+          connection.prepare("UPDATE host_operations SET data=? WHERE id=?").run(JSON.stringify(original), id)
+        } finally { connection.close() }
+        expect(() => context.assertAuthorityCurrent!()).toThrow("RESULT_FEEDBACK_CHANGED")
+        context.assertAuthorityCurrent!()
+      }
+      writeFileSync(join(context.project.workspace, "document.md"), "Original output")
+      context.recordTerminal({ outcome: "success", code: "physical-success" })
+      return "succeeded"
+    } }, manifest => { manifest.stages[0].resultApproval = "human" })
+    databasePath = join(setup.root, "projects.sqlite")
+    const first = setup.service.prepare({ projectId: "local-docs", expectedVersion: 1, idempotencyKey: "first" })
+    await setup.service.start(first.operationId)
+    setup.service.decideResultApproval(first.operationId, { ...setup.service.resultReview(first.operationId),
+      decision: "rejected", actorId: "desktop-user", feedback: "Use the original source" })
+    setup.service.cancel(first.operationId)
+    const retry = setup.service.prepare({ projectId: "local-docs", expectedVersion: 1, idempotencyKey: "retry" })
+    running = true
+    const result = await setup.service.start(retry.operationId)
+    expect(result.status).toBe("unknown")
+    expect(result.receipts).toEqual([])
+  })
+
+  it.each(["destroyed", "replaced"])("does not start validation after its desktop window is %s during authorization", async change => {
+    let release!: () => void
+    let entered!: () => void
+    const waiting = new Promise<void>(resolve => { entered = resolve })
+    const owner = { destroyed: false }
+    let mainWindow = owner
+    const setup = await fixture({ authorize: async () => {
+      entered()
+      await new Promise<void>(resolve => { release = resolve })
+    } })
+    const operation = setup.service.prepare({ projectId: "local-docs", expectedVersion: 1,
+      idempotencyKey: "window-validation" })
+    const before = setup.store.getOperation(operation.operationId)
+    const running = setup.service.validate(operation.operationId, () => {
+      if (mainWindow !== owner || owner.destroyed) throw Error("WINDOW_REVOKED")
+    })
+    await waiting
+    if (change === "destroyed") owner.destroyed = true
+    else mainWindow = { destroyed: false }
+    release()
+    await expect(running).rejects.toThrow("WINDOW_REVOKED")
+    expect(setup.store.getOperation(operation.operationId)).toEqual(before)
+    expect(setup.dependencies.executeSkill).not.toHaveBeenCalled()
+  })
+
+  it("keeps post-execution approval separate, durable and bound to the actual output", async () => {
+    const setup = await fixture({}, (manifest) => {
+      manifest.stages[0].approval = "human"
+      manifest.stages[0].resultApproval = "human"
+    })
+    const operation = setup.service.prepare({
+      projectId: "local-docs",
+      expectedVersion: 1,
+      idempotencyKey: "result"
+    })
+    setup.service.approve(operation.operationId, {
+      expectedVersion: 1,
+      inputFingerprint: operation.inputFingerprint,
+      decision: "approved",
+      actorId: "user"
+    })
+    expect((await setup.service.start(operation.operationId)).status).toBe("succeeded")
+    expect(() => setup.service.transition(operation.operationId)).toThrow(
+      "RESULT_APPROVAL_REQUIRED"
+    )
+    const review = setup.service.resultReview(operation.operationId)
+    const decision = { ...review, decision: "approved" as const, actorId: "reviewer" }
+    setup.service.decideResultApproval(operation.operationId, decision)
+    expect(
+      setup.service.decideResultApproval(operation.operationId, decision).resultApproval
+    ).toMatchObject(decision)
+    const cold = new HostProjectStore(join(setup.root, "projects.sqlite"))
+    try {
+      expect(cold.getOperation(operation.operationId)?.resultApproval).toMatchObject(decision)
+    } finally {
+      cold.close()
+    }
+    writeFileSync(join(setup.workspace, "document.md"), "Revised after approval")
+    expect(() => setup.service.transition(operation.operationId)).toThrow("EVIDENCE_STALE")
+    expect(setup.service.get("local-docs")?.version).toBe(1)
+  })
+
+  it("binds optional unchecked outputs too and refuses stale or conflicting decisions", async () => {
+    const setup = await fixture({}, (manifest) => {
+      manifest.stages[0].resultApproval = "human"
+      manifest.artifacts.push({ id: "note", path: "note.md", required: false })
+      manifest.stages[0].artifactIds.push("note")
+    })
+    const result = await setup.service.continue("local-docs")
+    expect(result.reason).toBe("result_approval_required")
+    const operation = result.operations[0]
+    const review = setup.service.resultReview(operation.operationId)
+    writeFileSync(join(setup.workspace, "note.md"), "Additional output")
+    expect(() =>
+      setup.service.decideResultApproval(operation.operationId, {
+        ...review,
+        decision: "approved",
+        actorId: "user"
+      })
+    ).toThrow("RESULT_APPROVAL_MISMATCH")
+    const current = setup.service.resultReview(operation.operationId)
+    setup.service.decideResultApproval(operation.operationId, {
+      ...current,
+      decision: "rejected",
+      actorId: "user"
+    })
+    expect(setup.store.getOperation(operation.operationId)?.status).toBe("succeeded")
+    expect((await setup.service.continue("local-docs")).reason).toBe("result_rejected")
+    expect(() =>
+      setup.service.decideResultApproval(operation.operationId, {
+        ...current,
+        decision: "approved",
+        actorId: "user"
+      })
+    ).toThrow("RESULT_APPROVAL_ALREADY_DECIDED")
+    expect(setup.dependencies.executeSkill).toHaveBeenCalledTimes(1)
+  })
+
+  it("continues with per-stage authorization, stops at budgets, and resumes without replay", async () => {
+    const setup = await fixture({}, (manifest) => {
+      manifest.stages.forEach((stage) => {
+        stage.approval = "none"
+      })
+    })
+    const beforeStart = vi.fn()
+    expect((await setup.service.continue("local-docs", { maxSteps: 1, beforeStart })).reason).toBe(
+      "budget"
+    )
+    expect(setup.service.get("local-docs")?.version).toBe(2)
+    expect((await setup.service.continue("local-docs", { beforeStart })).reason).toBe("completed")
+    expect(beforeStart).toHaveBeenCalledTimes(2)
+    expect(setup.dependencies.authorize).toHaveBeenCalledTimes(2)
+    expect(setup.dependencies.executeSkill).toHaveBeenCalledTimes(2)
+    expect((await setup.service.continue("local-docs")).operations).toEqual([])
+  })
+
+  it("does not commit an already approved result after caller revocation during input preparation", async () => {
+    let revoked = false, revokeDuringPreparation = false
+    const setup = await fixture({
+      prepareInputIdentity: async () => {
+        if (revokeDuringPreparation) {
+          await Promise.resolve()
+          revoked = true
+        }
+      }
+    }, manifest => { manifest.stages[0].resultApproval = "human" })
+    const first = await setup.service.continue("local-docs")
+    const operation = first.operations[0]
+    setup.service.decideResultApproval(operation.operationId, {
+      ...setup.service.resultReview(operation.operationId), decision: "approved", actorId: "user"
+    })
+    revokeDuringPreparation = true
+    const beforeStart = vi.fn()
+    const result = await setup.service.continue("local-docs", {
+      beforeStart, assertAuthority: () => { if (revoked) throw Error("CALLER_REVOKED") }
+    })
+    expect(result.reason).toBe("blocked")
+    expect(result.error).toBe("CALLER_REVOKED")
+    expect(setup.service.get("local-docs")?.version).toBe(1)
+    expect(setup.store.getOperation(operation.operationId)?.status).toBe("succeeded")
+    expect(beforeStart).not.toHaveBeenCalled()
+    expect(setup.dependencies.executeSkill).toHaveBeenCalledTimes(1)
+  })
+
+  it("rechecks caller authority after the asynchronous beforeStart callback", async () => {
+    const setup = await fixture()
+    let revoked = false
+    const result = await setup.service.continue("local-docs", {
+      beforeStart: async () => { await Promise.resolve(); revoked = true },
+      assertAuthority: () => { if (revoked) throw Error("CALLER_REVOKED") }
+    })
+    expect(result.reason).toBe("blocked")
+    expect(result.error).toBe("CALLER_REVOKED")
+    expect(setup.dependencies.executeSkill).not.toHaveBeenCalled()
+    expect(setup.service.get("local-docs")?.version).toBe(1)
+  })
+
+  it("retains an uncertain execution without committing when the caller is revoked during work", async () => {
+    let revoked = false
+    const setup = await fixture({ executeSkill: async context => {
+      context.assertInputsCurrent!()
+      writeFileSync(join(context.project.workspace, "document.md"), "Execution actually wrote this")
+      revoked = true
+      await Promise.resolve()
+      context.assertInputsCurrent!()
+      return "succeeded"
+    } })
+    const result = await setup.service.continue("local-docs", {
+      assertAuthority: () => { if (revoked) throw Error("CALLER_REVOKED") }
+    })
+    expect(result.reason).toBe("blocked")
+    expect(setup.service.get("local-docs")?.version).toBe(1)
+    expect(readFileSync(join(setup.workspace, "document.md"), "utf8")).toBe("Execution actually wrote this")
+    expect(setup.service.operations("local-docs")[0].status).toBe("unknown")
+  })
+
+  it("stops before human authorization and continues after an explicit result decision", async () => {
+    const setup = await fixture({}, (manifest) => {
+      manifest.stages[0].resultApproval = "human"
+    })
+    const first = await setup.service.continue("local-docs")
+    expect(first.reason).toBe("result_approval_required")
+    const operation = first.operations[0]
+    setup.service.decideResultApproval(operation.operationId, {
+      ...setup.service.resultReview(operation.operationId),
+      decision: "approved",
+      actorId: "user"
+    })
+    const next = await setup.service.continue("local-docs")
+    expect(next.reason).toBe("approval_required")
+    expect(next.project.version).toBe(2)
+    expect(next.operations.at(-1)?.approval).toBeNull()
+    expect(setup.dependencies.executeSkill).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(["failed", "unknown", "cancelled"] as const)(
+    "never replays a %s operation during continuation",
+    async (outcome) => {
+      const executeSkill = vi.fn(async () => outcome)
+      const setup = await fixture({ executeSkill })
+      expect((await setup.service.continue("local-docs")).reason).toBe(outcome)
+      expect((await setup.service.continue("local-docs")).reason).toBe(outcome)
+      expect(executeSkill).toHaveBeenCalledTimes(1)
+      expect(setup.service.get("local-docs")?.version).toBe(1)
+    }
+  )
+
+  it("stops when authorization is revoked between stages", async () => {
+    const authorize = vi.fn(async () => {
+      if (authorize.mock.calls.length === 2) throw new Error("AUTHORITY_REVOKED")
+    })
+    const setup = await fixture({ authorize }, (manifest) => {
+      manifest.stages.forEach((stage) => {
+        stage.approval = "none"
+      })
+    })
+    const result = await setup.service.continue("local-docs")
+    expect(result.reason).toBe("blocked")
+    expect(result.error).toContain("AUTHORITY_REVOKED")
+    expect(result.project.version).toBe(2)
+    expect(setup.dependencies.executeSkill).toHaveBeenCalledTimes(1)
+  })
+
+  it("resumes a persisted result decision without executing the completed stage again", async () => {
+    const setup = await fixture({}, (manifest) => {
+      manifest.stages[0].resultApproval = "human"
+      manifest.stages[1].approval = "none"
+    })
+    const waiting = await setup.service.continue("local-docs")
+    expect(waiting.reason).toBe("result_approval_required")
+    const id = waiting.operations[0].operationId
+    const coldStore = new HostProjectStore(join(setup.root, "projects.sqlite"))
+    try {
+      const cold = new HostProjectService(coldStore, setup.snapshots, setup.dependencies)
+      expect((await cold.continue("local-docs")).reason).toBe("result_approval_required")
+      cold.decideResultApproval(id, {
+        ...cold.resultReview(id),
+        decision: "approved",
+        actorId: "user"
+      })
+      expect((await cold.continue("local-docs")).reason).toBe("completed")
+      expect(setup.dependencies.executeSkill).toHaveBeenCalledTimes(2)
+    } finally {
+      coldStore.close()
+    }
+  })
+
+  it("admits only one continuation while a stage is physically executing", async () => {
+    let release!: () => void
+    let markEntered!: () => void
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve
+    })
+    const pending = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const executeSkill = vi.fn(async (context) => {
+      markEntered()
+      await pending
+      writeFileSync(join(context.project.workspace, "document.md"), "Actual result")
+      return "succeeded" as const
+    })
+    const setup = await fixture({ executeSkill })
+    const running = setup.service.continue("local-docs", { maxSteps: 1 })
+    await entered
+    expect((await setup.service.continue("local-docs")).reason).toBe("busy")
+    release()
+    expect((await running).reason).toBe("budget")
+    expect(executeSkill).toHaveBeenCalledTimes(1)
+  })
+
   it("keeps routine authority free of package and knowledge reads while rechecking full inputs at execution settlement", async () => {
     let revision = 1, contentRevision = 1
     const inputIdentity = vi.fn(() => `content:${contentRevision}`)
@@ -169,6 +557,24 @@ describe("production host project adapter", () => {
     expect(fence).toHaveBeenCalled()
     expect(() => captured!()).toThrow("PROJECT_HOST_OPERATION_SCOPE_CHANGED")
     expect(() => authority!()).toThrow("PROJECT_HOST_OPERATION_SCOPE_CHANGED")
+  })
+  it("retains the caller fence in routine authority checks before any later input read", async () => {
+    let current = true
+    const inputIdentity = vi.fn(() => "unchanged-inputs")
+    const setup = await fixture({ inputIdentity, executeSkill: async context => {
+      const fullReads = inputIdentity.mock.calls.length
+      context.assertAuthorityCurrent!()
+      current = false
+      expect(() => context.assertAuthorityCurrent!()).toThrow("CALLER_REVOKED")
+      expect(inputIdentity).toHaveBeenCalledTimes(fullReads)
+      return "succeeded"
+    } })
+    const operation = setup.service.prepare({ projectId: "local-docs", expectedVersion: 1,
+      idempotencyKey: "caller-authority" })
+    const result = await setup.service.start(operation.operationId, { assertInputsCurrent: () => {
+      if (!current) throw Error("CALLER_REVOKED")
+    } })
+    expect(result).toMatchObject({ status: "unknown", receipts: [] })
   })
   it.each(["unchanged", "configuration", "knowledge", "explicit-input"])(
     "checks %s at cancellation settlement without restoring ordinary authority",
@@ -457,6 +863,34 @@ describe("production host project adapter", () => {
       })
     ).toThrow("OPERATION_ACTIVE")
   })
+  it("keeps unknown results unresolved if the caller is revoked while inspecting them", async () => {
+    let revoked = false
+    const inspect = vi.fn(async () => {
+      await Promise.resolve()
+      revoked = true
+      return "succeeded" as const
+    })
+    const setup = await fixture({
+      executeSkill: async context => {
+        writeFileSync(join(context.project.workspace, "document.md"), "Existing output")
+        return "unknown"
+      },
+      inspectOperation: inspect
+    })
+    const operation = setup.service.prepare({
+      projectId: "local-docs", expectedVersion: 1, idempotencyKey: "revoked-inspection"
+    })
+    await setup.service.start(operation.operationId)
+    await expect(setup.service.reconcile(operation.operationId, () => {
+      if (revoked) throw Error("CALLER_REVOKED")
+    })).rejects.toThrow("CALLER_REVOKED")
+    expect(setup.store.getOperation(operation.operationId)?.status).toBe("unknown")
+    expect(setup.service.get("local-docs")?.version).toBe(1)
+    revoked = false
+    inspect.mockResolvedValue("succeeded")
+    expect((await setup.service.reconcile(operation.operationId)).status).toBe("succeeded")
+  })
+
   it("reconciles a persisted original terminal after reopening without executing again", async () => {
     const setup = await fixture({
       executeSkill: vi.fn(async (context) => {

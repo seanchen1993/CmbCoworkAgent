@@ -1760,6 +1760,11 @@ export class ModsManager {
     invalidateAll?(): void
     closeThread(threadId: string): void
     closeThreadAndWait?(threadId: string): Promise<void>
+    captureIdleThreadRetirement?(workspace: string, threadId: string): {
+      resident: boolean
+      assertCurrent(): void
+      retire(): Promise<void>
+    }
     captureThreadRetirement?(threadId: string): {
       resident: boolean
       assertCurrent(): void
@@ -1926,15 +1931,20 @@ export class ModsManager {
     await this.functionLifecycle.closeThreadAndWait(threadId)
   }
 
-  captureFunctionThreadRetirement(threadId: string) {
+  captureFunctionThreadRetirement(threadId: string, idleWorkspace?: string) {
     const lifecycle = this.functionLifecycle
-    const captured = lifecycle?.captureThreadRetirement?.(threadId)
+    const captured = idleWorkspace === undefined
+      ? lifecycle?.captureThreadRetirement?.(threadId)
+      : lifecycle?.captureIdleThreadRetirement?.(this.workspaceKey(idleWorkspace), threadId)
     if (lifecycle && !captured) throw new ModError("MODS_RESOURCE_CLEANUP_PENDING")
     let retirement: Promise<void> | undefined
-    return { resident: captured?.resident ?? false, retire: () => {
-      if (retirement) return retirement
+    const assertCurrent = () => {
       if (this.functionLifecycle !== lifecycle) throw new ModError("MODS_SCOPE_CHANGED")
       captured?.assertCurrent()
+    }
+    return { resident: captured?.resident ?? false, assertCurrent, retire: () => {
+      if (retirement) return retirement
+      assertCurrent()
       this.invalidateFunctionThreadOwner(threadId)
       return retirement = captured?.retire() ?? Promise.resolve()
     } }

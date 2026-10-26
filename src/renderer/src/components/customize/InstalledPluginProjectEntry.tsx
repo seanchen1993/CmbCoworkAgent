@@ -1,12 +1,8 @@
 import { useEffect, useRef, useState } from "react"
-import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { captureConfigurationScope } from "@/lib/configuration-target"
-import {
-  dismissDerivedProject,
-  openDerivedProject,
-  useDerivedProjectIntent
-} from "@/lib/derived-project-intent"
+import { openDerivedProject } from "@/lib/derived-project-intent"
+import { InstalledPluginStartUse } from "./InstalledPluginStartUse"
 import { useFeatureGate } from "@/lib/feature-gates"
 import { useAppStore } from "@/lib/store"
 import {
@@ -25,9 +21,6 @@ export function InstalledPluginProjectEntry(props: {
 }) {
   const projectMode = useFeatureGate(FEATURE_GATES.projectMode)
   const pluginVersion = useAppStore((state) => state.pluginVersion)
-  const pendingIntent = useDerivedProjectIntent()
-  const pending = useRef(pendingIntent)
-  pending.current = pendingIntent
   const scopeKey = JSON.stringify([props.pluginId, props.scope, props.active, projectMode.enabled])
   const currentKey = useRef(scopeKey)
   currentKey.current = scopeKey
@@ -103,12 +96,6 @@ export function InstalledPluginProjectEntry(props: {
       setEntry(actual)
       if (actual.kind === "unavailable") return
       if (actual.kind === "legacy") openDerivedProject(actual.pluginId, actual.name, props.scope)
-      else {
-        if (pending.current) dismissDerivedProject(pending.current.id)
-        toast.info(`在“本地项目任务”点击“新建本地任务”，选择“${actual.name}”即可。`)
-        useAppStore.getState().setShowCustomizeView(false)
-        useAppStore.getState().setShowHarnessBoardView(true)
-      }
     } catch {
       if (mounted.current && generation.current === token)
         setError("项目入口已变化或暂不可用，请重新检查。")
@@ -122,16 +109,21 @@ export function InstalledPluginProjectEntry(props: {
     return <p className="text-sm">插件已保存。当前应用暂未开放项目模式。</p>
   return (
     <div className="space-y-2 text-sm" aria-label="已安装插件项目入口">
-      {entry && entry.kind !== "unavailable" && (
+      {entry?.kind === "legacy" && (
         <Button
           disabled={loading || props.disabled || projectMode.loading}
           onClick={() => void open()}
         >
-          {entry.kind === "host" ? "打开本地项目任务" : "新建项目"}
+          新建项目
         </Button>
       )}
       {entry?.kind === "host" && (
-        <p className="text-muted-foreground">进入后点击“新建本地任务”，选择“{entry.name}”。</p>
+        <InstalledPluginStartUse
+          threadId={props.scope.threadId}
+          workspace={props.scope.expectedWorkspace}
+          pluginId={entry.pluginId}
+          expected={{ name: entry.name, version: entry.version }}
+        />
       )}
       {loading && <p role="status">正在确认已安装插件的项目入口…</p>}
       {entry?.kind === "unavailable" && <p role="status">{entry.reason}</p>}

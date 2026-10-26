@@ -1,0 +1,142 @@
+[
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/artifact_rules.py",
+    "sha256": "701451a7547f9c48ba12a984a02db2444cc94ddcbbcdf9500cb1117d496a1e53",
+    "bytes": 45470
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/check.py",
+    "sha256": "8205ad677f780b93ef31709558ebc4cf20dc84b89700a21177422b1f82563a2a",
+    "bytes": 9792
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/native_context.py",
+    "sha256": "48a847b77db45101df3813c3d7ed8c83e912f5284279dada9eadc4111ea699d2",
+    "bytes": 963
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/ops.py",
+    "sha256": "8fcb70ce4e327759b8b0616eb44629281dbe8df0afe10c65caf45f083591e495",
+    "bytes": 3160
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/performance.py",
+    "sha256": "77c02e6363a32a0730ac0436bcce77688bf44367f30f0794fe096678c9d0b3c2",
+    "bytes": 3771
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/prd_rules.py",
+    "sha256": "d9565281209219d3eb6a3645ee4f1496e1a2465f9a6d976744785f65b99ece3e",
+    "bytes": 1690
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/repair.py",
+    "sha256": "889ad9c566b25259993153ca48de0f34d9bc9ee2aac7a455d34a75d0c2f6ede6",
+    "bytes": 4240
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/artifact_ref_validator.py",
+    "sha256": "9a995f481e759115ec2d446040b413fa156ac9710d88626cbf3fe8291007c2c2",
+    "bytes": 24449
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/code_task_context.py",
+    "sha256": "0e57a728b18ad6ae28432005fc94cee7417482c28517fc2d1fd8ce72220fa6cc",
+    "bytes": 6552
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/command_executable.py",
+    "sha256": "39dabc36297ecc015c6a39acb357bb5d5f428f26907be1db2eb0306a7b44ce12",
+    "bytes": 291
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/compile_command_policy.py",
+    "sha256": "714c4cc83d3c0fbd2d2bdad236f9aebf8f6e1c0682e66a9bda8ba16bea86f4ff",
+    "bytes": 2674
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/design_contract_lock.py",
+    "sha256": "6e05a6cf8dcb01c60503effa5b8c99f63283155622b99905a7fe4264b98269ad",
+    "bytes": 4906
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/frontend_route_constants.py",
+    "sha256": "ab6cea3a86dcbb949a8a01a43e01f17ff8e45ea382f85179ef0882f2a084c97b",
+    "bytes": 295
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/implementation_scope.py",
+    "sha256": "810a6d62db93971b9e6bed1f8f7ef318f7d012832d346e4cd515e32e2e479997",
+    "bytes": 1762
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/parallel_validation_ownership.py",
+    "sha256": "64d42e68e8a5ac72d5e5aa5e18c6c993a9ed03df99e5321eac6c777210d2774d",
+    "bytes": 6663
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/performance_rules.py",
+    "sha256": "b1c3a1935ad305f1c359548eab880b12f394b3c5845d9ab31b23c019bb6369f7",
+    "bytes": 20151
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/plan_granularity.py",
+    "sha256": "57a71e878a5b6b360539806998996ef12816541bce7e7f9dc1d82c373a82ad69",
+    "bytes": 1873
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/plan_json.py",
+    "sha256": "7609c6cc59a8a60c3069fe4147b966e428d112035efda71d5e22d7401065048a",
+    "bytes": 58387
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/plan_scope.py",
+    "sha256": "9932d8ff66fecc89416f08c8119ea4758f66ce5aeab1dd4491d7da9e5d751f94",
+    "bytes": 7439
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/plan_write_ownership.py",
+    "sha256": "d42cba07031ccfae4b407bd3455745505a9c892ded4d084fc70209712ab677ab",
+    "bytes": 9082
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/secret_rules.py",
+    "sha256": "4fd07ec0ef26f0f23923f3eb1c6cf7c6a3af6c15fd972b132d0bde5361833541",
+    "bytes": 2470
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/source_context.py",
+    "sha256": "510c161e6011012a53e1c58247a3a569b956d0875b8ead753bbb2dfc3237a6bd",
+    "bytes": 7451
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/source_references.py",
+    "sha256": "387ec3f0ac4791e501aee87d2aa3a2f19656e30bd19cd1f30aed843f924449d8",
+    "bytes": 6972
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/spec_contract.py",
+    "sha256": "388b5edd801edfdf9e412e7e376fbe26402e3ea0cb51bde85d53f8c21abbd7e4",
+    "bytes": 821
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/ui_context.py",
+    "sha256": "eb396be48a6ed4d64b49b84769c37abf0426294b8b4a034d65d76fb6840fe33c",
+    "bytes": 14467
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/utest_command_policy.py",
+    "sha256": "e3e347240dd1d2b5668cde5e863b1eee4f8c3af5bbce610ed04735fd25458af9",
+    "bytes": 2439
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/checks/hooks/utest_repair_contract.py",
+    "sha256": "6ae3438bc15fd8f21d82fa81c13af5f4b38e9d9b64748e857d615ca05ca81a3e",
+    "bytes": 27678
+  },
+  {
+    "path": "resources/native-compositions/autobiz-rules/mods/rules-bundle.ts",
+    "sha256": "07f2553ce74506b13d3b9843125a6e45f9cf3cdb45a102948a26b1c872ba9b36",
+    "bytes": 291126
+  }
+]

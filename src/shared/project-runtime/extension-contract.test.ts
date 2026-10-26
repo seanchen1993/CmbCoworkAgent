@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
 import {
   CONTEXT_HANDOFF_PROTOCOL,
+  CONTEXT_MATERIALS_PROTOCOL,
+  EXECUTION_RESOURCES_PROTOCOL,
   EXTENSION_CONTRACT_API_VERSION,
   REQUIRED_BUSINESS_CHECKS_PROTOCOL,
   VERIFIED_ARTIFACTS_PROTOCOL,
@@ -55,6 +57,46 @@ const context = {
 }
 
 describe("negotiated extension contracts", () => {
+  it("negotiates execution profiles and config-backed workspace names without accepting arbitrary roots", () => {
+    const executionResources = { profiles: ["agents/reviewer.md"],
+      workspaces: [{ id: "backend", binding: "repository" }] }
+    const value = { ...required, requires: [EXECUTION_RESOURCES_PROTOCOL], executionResources }
+    expect(parseExtensionContract(value).executionResources).toEqual(executionResources)
+    for (const resources of [
+      { ...executionResources, profiles: ["../reviewer.md"] },
+      { ...executionResources, profiles: ["reviewer.js"] },
+      { ...executionResources, profiles: ["agents/reviewer.md", "agents/Reviewer.md"] },
+      { ...executionResources, workspaces: [{ id: "backend", path: "C:/source" }] },
+      { ...executionResources, workspaces: [executionResources.workspaces[0], executionResources.workspaces[0]] },
+      { profiles: [], workspaces: [] }
+    ]) expect(() => parseExtensionContract({ ...value, executionResources: resources })).toThrow()
+    expect(() => parseExtensionContract({ ...value, requires: [REQUIRED_BUSINESS_CHECKS_PROTOCOL] })).toThrow()
+    expect(() => parseExtensionContract({ ...value, executionResources: undefined })).toThrow()
+  })
+  it("negotiates bounded named materials only for an action provider with explicit knowledge binding", () => {
+    const materials = { roots: [
+      { id: "methods", source: "package", path: "knowledge" },
+      { id: "business", source: "knowledge" }
+    ], configuration: ["selectedDeployUnits"] }
+    const provider = { actionId: "select-context", operations: ["session-context"], materials }
+    const value = { ...required, requires: [CONTEXT_HANDOFF_PROTOCOL, CONTEXT_MATERIALS_PROTOCOL],
+      context: { ...context, provider } }
+    expect(parseExtensionContract(value).context?.provider?.materials).toEqual(materials)
+    expect(() => parseExtensionContract({ ...value, requires: [CONTEXT_HANDOFF_PROTOCOL] })).toThrow()
+    expect(() => parseExtensionContract({ ...value,
+      context: { ...value.context, knowledge: { required: false } } })).toThrow()
+    for (const invalid of [
+      { ...materials, roots: [...materials.roots, materials.roots[0]] },
+      { ...materials, roots: [{ id: "x", source: "package", path: "../outside" }] },
+      { ...materials, configuration: ["key", "key"] },
+      { ...materials, configuration: ["secret", 3] },
+      { roots: [], configuration: [] }
+    ]) expect(() => parseExtensionContract({ ...value,
+      context: { ...value.context, provider: { ...provider, materials: invalid } } })).toThrow()
+    expect(() => parseExtensionContract({ ...value,
+      context: { ...value.context, provider: { entry: "context.py",
+        operations: ["session-context"], materials } } })).toThrow()
+  })
   it("requires explicit version negotiation and bounded unique checked artifact IDs", () => {
     const value = { ...required, requires: [VERIFIED_ARTIFACTS_PROTOCOL],
       verifiedArtifacts: { artifactIds: ["sql_results", "quality"] } }

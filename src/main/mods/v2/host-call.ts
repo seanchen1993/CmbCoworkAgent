@@ -1,4 +1,6 @@
+import { withoutTrustedFunctionWaitScope } from "./trusted-function-wait"
 import { AsyncLocalStorage } from "node:async_hooks"
+import { markRunCancellationEffectDispatched } from "../../agent/run-cancellation-settlement"
 import { randomUUID } from "node:crypto"
 import type { ModControlStore, ModGrant } from "../control-store"
 import { getModCallContext, modCallContext } from "../context"
@@ -14,12 +16,27 @@ import {
 import { assertModRuntimeAuthority, type ModRuntimeAuthority } from "../runtime-instance"
 import { functionComponentAudit } from "./component-audit"
 import { assertDevelopmentNativeGrant } from "./development-native-authority"
+import type {
+  ProcessLifecycleEvent,
+  ProcessLifecyclePhase
+} from "../../../shared/mods/process-lifecycle"
 
 const calls = new AsyncLocalStorage<{
   identity: ModIdentity
   active: boolean
   runtimeAuthority?: ModRuntimeAuthority
+  process?: { observed: boolean; dispatched: boolean; record(event: ProcessLifecycleEvent): void }
 }>()
+
+/** Main-only SDK observation, bound to the exact live effect receipt by the existing ALS. */
+export function observeFunctionProcess(phase: ProcessLifecyclePhase, requestDigest?: string): void {
+  const scope = calls.getStore()
+  if (!scope?.process) return
+  if (!scope.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
+  if (phase === "preparing") scope.process.observed = true
+  if (phase === "spawn-dispatched") scope.process.dispatched = true
+  scope.process.record({ phase, at: Date.now(), ...(requestDigest ? { requestDigest } : {}) })
+}
 
 function functionCallScope(workspace: string, threadId: string) {
   const scope = functionExecutionScope(workspace, threadId)
@@ -59,7 +76,7 @@ export function withFunctionAgentExecution<T>(
   scope: Parameters<typeof withFreshFunctionExecution>[0],
   run: () => Promise<T>
 ): Promise<T> {
-  return calls.exit(() => modCallContext.exit(() => withFreshFunctionExecution(scope, run)))
+  return withoutTrustedFunctionWaitScope(() => calls.exit(() => modCallContext.exit(() => withFreshFunctionExecution(scope, run))))
 }
 
 /** Host-only model transport entry never inherits a guest file-write fence or receipt. */
@@ -67,12 +84,12 @@ export function withFunctionTransportExecution<T>(
   scope: Parameters<typeof withFreshFunctionTransport>[0],
   run: () => Promise<T>
 ): Promise<T> {
-  return calls.exit(() => modCallContext.exit(() => withFreshFunctionTransport(scope, run)))
+  return withoutTrustedFunctionWaitScope(() => calls.exit(() => modCallContext.exit(() => withFreshFunctionTransport(scope, run))))
 }
 
 /** Main-only lifecycle creation; it grants no guest capability or physical run identity. */
 export function withDetachedFunctionLifecycle<T>(run: () => Promise<T>): Promise<T> {
-  return calls.exit(() => modCallContext.exit(() => withoutFunctionExecution(run)))
+  return withoutTrustedFunctionWaitScope(() => calls.exit(() => modCallContext.exit(() => withoutFunctionExecution(run))))
 }
 
 /** Host-only expired cleanup: clear ancestor receipts and retain an explicitly closed owner. */
@@ -80,7 +97,7 @@ export function withFunctionAgentCleanup<T>(
   scope: Parameters<typeof withClosedFunctionExecution>[0],
   run: () => Promise<T>
 ): Promise<T> {
-  return calls.exit(() => modCallContext.exit(() => withClosedFunctionExecution(scope, run)))
+  return withoutTrustedFunctionWaitScope(() => calls.exit(() => modCallContext.exit(() => withClosedFunctionExecution(scope, run))))
 }
 
 /** Resolve provenance before creating a command adapter, without minting an unused receipt. */
@@ -140,6 +157,7 @@ export function assertFunctionGrant(
 }
 
 interface FunctionHostCall<T, R> {
+  processLifecycle?(event: ProcessLifecycleEvent): void
   store: Pick<ModControlStore, "settle" | "blockPublication">
   identity: ModIdentity
   assertLive(): void
@@ -158,10 +176,15 @@ interface FunctionHostCall<T, R> {
  * a lost response stays unknown and is never replayed by this boundary.
  */
 export async function runFunctionHostCall<T, R>(call: FunctionHostCall<T, R>): Promise<R> {
+  markRunCancellationEffectDispatched()
+  const process = call.processLifecycle
+    ? { observed: false, dispatched: false, record: call.processLifecycle }
+    : undefined
   const scope = {
     identity: call.identity,
     active: true,
-    runtimeAuthority: functionCallAuthority(call.identity.workspace, call.identity.threadId)
+    runtimeAuthority: functionCallAuthority(call.identity.workspace, call.identity.threadId),
+    process
   }
   const assertLive = () => {
     scope.runtimeAuthority?.assertLive()
@@ -194,7 +217,12 @@ export async function runFunctionHostCall<T, R>(call: FunctionHostCall<T, R>): P
     return published
   } catch (error) {
     if (claimed) {
-      if (!settled) call.store.settle(call.identity.callId, started ? "unknown" : "not_started")
+      if (!settled) {
+        const notStarted = !started || (process?.observed === true && !process.dispatched)
+        if (process?.observed && notStarted)
+          process.record({ phase: "not-started", at: Date.now() })
+        call.store.settle(call.identity.callId, notStarted ? "not_started" : "unknown")
+      }
       call.store.blockPublication(call.identity.callId)
     }
     throw error

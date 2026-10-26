@@ -1,0 +1,7 @@
+{
+  "protocol": "devclaw.project-source-set/v1",
+  "title": "AutoBiz 原生任务模板",
+  "goal": "根据业务需求完成后端实现、实际验证、发布准备及成果归档。需要配置组织知识，实际外部发布不在此模板范围。",
+  "project": "autobiz",
+  "dependencies": ["autobiz-rules", "autobiz-knowledge"]
+}

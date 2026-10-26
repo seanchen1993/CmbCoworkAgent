@@ -32,6 +32,7 @@ import { planFlowRecoveryReservation, type RecoveryHistoryRun } from "./recovery
 import { bindFlowPromptReceipt, flowPromptReceiptDigest } from "./prompt-recovery-receipt"
 import { createHash } from "node:crypto"
 import { prepareFlowRuntimeAdmission } from "./runtime-admission"
+import { workspacePathsOverlap } from "../../../shared/workspace-path"
 
 interface ActiveFlow {
   run: FlowRun
@@ -58,6 +59,30 @@ const resumable = (run: FlowRun) => promptOnly(run) || filesOnly(run)
 
 /** Business sequencing only. Models, tools, permissions and checkpoint commits remain native. */
 export class FlowManager {
+  private readonly resourceChanges = new Map<string, number>()
+  private readonly resourceOwners = new Map<symbol, string>()
+  private ownWorkspaceResource(workspace: string): () => void {
+    this.resourceChanges.set(workspace, (this.resourceChanges.get(workspace) ?? 0) + 1)
+    const token = Symbol()
+    this.resourceOwners.set(token, workspace)
+    return () => { this.resourceOwners.delete(token) }
+  }
+  assertWorkspaceResourcesSettled(workspace: string): { assertCurrent(): void } {
+    const revision = () => [...this.resourceChanges].reduce((total, [path, value]) =>
+      total + (workspacePathsOverlap(path, workspace) ? value : 0), 0)
+    const expected = revision()
+    const live = () => {
+      if (revision() !== expected) throw Error("FLOW_WORKSPACE_RESOURCES_CHANGED")
+      if ([...this.resourceOwners.values()].some(path => workspacePathsOverlap(path, workspace)) ||
+          [...this.active.values()].some(item => workspacePathsOverlap(item.run.workspace, workspace)) ||
+          [...this.admissionSettlements.values()].some(item => workspacePathsOverlap(item.workspace, workspace)))
+        throw Error("FLOW_WORKSPACE_RESOURCES_UNSETTLED")
+    }
+    live()
+    if (!this.store.assertWorkspaceResourcesSettled) throw Error("FLOW_WORKSPACE_SCAN_UNAVAILABLE")
+    const stored = this.store.assertWorkspaceResourcesSettled(workspace)
+    return { assertCurrent: () => { live(); stored.assertCurrent(); live() } }
+  }
   private readonly active = new Map<string, ActiveFlow>()
   private readonly admissionSettlements = new Map<string, {
     workspace: string
@@ -93,6 +118,7 @@ export class FlowManager {
     if (!claimLocalThreadRunLease({ threadId, owner: "mods", runId: leaseId }).acquired)
       throw Error("FLOW_FILE_PUBLICATION_BUSY")
     const leaseCurrent = captureLocalThreadRunLease(threadId)!
+    const releaseResource = this.ownWorkspaceResource(workspace)
     const guard = () => {
       signal.throwIfAborted()
       assertCallerCurrent()
@@ -109,6 +135,7 @@ export class FlowManager {
         ? { ...(result as Omit<FlowFileReview, "runDigest">), runDigest: digest }
         : (result as FlowFilePublicationOutcome)
     } finally {
+      releaseResource()
       releaseLocalThreadRunLease(threadId, "mods", leaseId)
     }
   }
@@ -235,6 +262,8 @@ export class FlowManager {
     recovery: boolean,
     work: () => Promise<FlowRun>
   ): Promise<FlowRun> {
+    const releaseResource = this.ownWorkspaceResource(workspace)
+    try {
     const pendingAdmission = prepareFlowRuntimeAdmission({
       workspace,
       threadId,
@@ -242,9 +271,9 @@ export class FlowManager {
       input
     })
     // Preserve the ordinary entry's synchronous prefix when no project binding applies.
-    if (!pendingAdmission) return work()
+    if (!pendingAdmission) return await work()
     const admission = await pendingAdmission
-    if (!admission) return work()
+    if (!admission) return await work()
     let run: FlowRun
     try {
       run = await admission.run(work)
@@ -269,6 +298,7 @@ export class FlowManager {
     if (active?.run.id === run.id) active.done = settled
     else await settled
     return run
+    } finally { releaseResource() }
   }
 
   private async startSavedAdmitted(

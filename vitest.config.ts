@@ -56,6 +56,8 @@ export const VITEST_TEST_INCLUDE = [
   "src/renderer/src/components/panels/right-panel-render-window.test.ts",
   "src/renderer/src/components/harness-board/harness-board-cache.test.ts",
   "src/renderer/src/components/harness-board/project-capability-controller.test.ts",
+  "src/renderer/src/components/harness-board/project-runtime-message.test.ts",
+  "src/renderer/src/components/harness-board/project-check-diagnostics.test.ts",
   "src/renderer/src/components/harness-board/bounded-latest-task-queue.test.ts",
   "src/renderer/src/components/harness-board/harness-board-render-window.test.ts",
   "src/renderer/src/components/harness-board/harness-settings-lazy.test.ts",
@@ -70,7 +72,16 @@ export const VITEST_TEST_INCLUDE = [
 export const NATIVE_INTEGRATION_TESTS = [
   "src/main/agent/function-conversation-native-host.test.ts",
   "src/main/agent/function-conversation-native-keeper.test.ts",
-  "src/main/mods/v2/conversation-shared-native-host.test.ts"
+  "src/main/agent/native-derived-config.integration.test.ts",
+  "src/main/agent/native-shared-derived-config.integration.test.ts",
+  "src/main/harness-board/project-runtime/composition-host-adapter.test.ts",
+  "src/main/mods/v2/conversation-shared-native-host.test.ts",
+  "src/main/mods/devtools/project-stage-debug.test.ts",
+  "src/main/mods/devtools/creator-source-set.integration.test.ts",
+  "src/main/plugins/autobiz-native-host.integration.test.ts",
+  "src/main/plugins/autobiz-native-code.integration.test.ts",
+  "src/main/plugins/autobiz-native-performance.integration.test.ts",
+  "src/main/plugins/autobiz-native-multirepo.integration.test.ts"
 ]
 
 export default defineConfig({
@@ -82,7 +93,7 @@ export default defineConfig({
   },
   test: {
     // Preserve the Node-only suite and command-line file/name filters. These
-    // native graph suites need exclusive CPU while retaining their real 5s limits.
+    // native graph/OS suites need exclusive CPU while retaining their original time limits.
     environment: "node",
     projects: [
       {

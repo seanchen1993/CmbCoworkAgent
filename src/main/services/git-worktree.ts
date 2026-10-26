@@ -1,7 +1,9 @@
+import { assertWorkflowResourceAdmission, assertWorkflowDeadlineHistoryTransition, validWorkflowDeadlines,
+  workflowResourceDeadlineSignal } from "../agent/workflow/resource-deadline"
 import { execFile } from "child_process"
 import { createHash, randomBytes } from "crypto"
 import * as fs from "fs/promises"
-import { homedir } from "os"
+import { homedir, tmpdir } from "os"
 import * as path from "path"
 import { promisify } from "util"
 import type {
@@ -981,6 +983,27 @@ function worktreeRecordPath(commonDir: string, id: string, appDataRoot: string):
 function isWorkflowWorktreeRecord(value: unknown): value is WorkflowWorktreeRecord {
   if (!value || typeof value !== "object") return false
   const record = value as Record<string, unknown>
+  const target = record.integrationTarget as Record<string, unknown> | undefined
+  if (target !== undefined && (!target || typeof target !== "object" || Array.isArray(target) ||
+      typeof target.worktreeId !== "string" || typeof target.ownerToken !== "string" ||
+      !/^[a-f0-9-]{36}$/.test(target.ownerToken) || !Number.isSafeInteger(target.generation) ||
+      Number(target.generation) < 1 || typeof target.directory !== "string" || !path.isAbsolute(target.directory) ||
+      typeof target.branch !== "string" || !target.branch.startsWith(`${WORKFLOW_WORKTREE_BRANCH_PREFIX}/`))) return false
+  const resource = record.resource as Record<string, unknown> | undefined
+  if (resource && !validWorkflowDeadlines(resource.budgets)) return false
+  if (resource !== undefined && (!resource || typeof resource !== "object" || Array.isArray(resource) ||
+    (resource.workspaceRef !== undefined && (typeof resource.workspaceRef !== "string" ||
+      !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(resource.workspaceRef))) ||
+    (resource.executionResourcesFingerprint !== undefined && (typeof resource.executionResourcesFingerprint !== "string" ||
+      !/^[a-f0-9]{64}$/.test(resource.executionResourcesFingerprint))) ||
+    typeof resource.id !== "string" || !/^[a-f0-9]{64}$/.test(resource.id) ||
+    typeof resource.parentIdentity !== "string" || !/^[a-f0-9]{64}$/.test(resource.parentIdentity) ||
+    typeof resource.sourceIdentity !== "string" || !/^[a-f0-9]{64}$/.test(resource.sourceIdentity) ||
+    typeof resource.ownerToken !== "string" || !/^[a-f0-9-]{36}$/.test(resource.ownerToken) ||
+    !Number.isSafeInteger(resource.generation) || Number(resource.generation) < 1 ||
+    !["leased", "sealed", "unknown"].includes(String(resource.state)) ||
+    (resource.sealedCommit !== undefined && (typeof resource.sealedCommit !== "string" ||
+      !/^[a-f0-9]{40,64}$/i.test(resource.sealedCommit))))) return false
   const validStatuses = new Set([
     "provisioning",
     "running",
@@ -1030,7 +1053,8 @@ const worktreeRecordWriteLocks = new Map<string, Promise<void>>()
  * publication so concurrent writers cannot replace a different owner's proof. */
 export async function persistWorkflowWorktreeRecord(
   record: WorkflowWorktreeRecord,
-  appDataRoot = defaultWorktreeAppDataRoot()
+  appDataRoot = defaultWorktreeAppDataRoot(),
+  assertPublish?: () => void
 ): Promise<void> {
   // Reject bad NEW writes before creating directories or replacing an existing
   // ownership proof. The reader's limit is also the writer's contract.
@@ -1070,10 +1094,13 @@ export async function persistWorkflowWorktreeRecord(
       ) {
         throw new GitWorktreeError("refusing to overwrite a different worktree ownership record")
       }
+      if ((existing.resource?.generation ?? 0) > (snapshot.resource?.generation ?? 0))
+        throw new GitWorktreeError("refusing to overwrite a newer worktree resource generation")
+      assertWorkflowDeadlineHistoryTransition(existing.resource?.budgets, snapshot.resource?.budgets)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
     }
-    await writeWorkflowWorktreeRecord(target, serialized)
+    await writeWorkflowWorktreeRecord(target, serialized, assertPublish)
   })
   const tail = operation.then(
     () => undefined,
@@ -1087,7 +1114,9 @@ export async function persistWorkflowWorktreeRecord(
   }
 }
 
-async function writeWorkflowWorktreeRecord(target: string, serialized: string): Promise<void> {
+async function writeWorkflowWorktreeRecord(
+  target: string, serialized: string, assertPublish?: () => void
+): Promise<void> {
   const recordsRoot = path.dirname(target)
   await fs.mkdir(recordsRoot, { recursive: true })
   const temp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
@@ -1102,6 +1131,7 @@ async function writeWorkflowWorktreeRecord(target: string, serialized: string): 
     if (!writeComplete) await fs.rm(temp, { force: true }).catch(() => undefined)
   }
   try {
+    assertPublish?.()
     await fs.rename(temp, target)
     // Persist the directory entry as well. Some Windows filesystems reject
     // syncing directory handles, so durability there remains best-effort.
@@ -1507,6 +1537,8 @@ async function materializeWorkspaceHookSupport(
 }
 
 interface CreateWorkflowWorktreeInput {
+  /** Native named lease identity, persisted before checkout creation. */
+  resource?: WorkflowWorktreeRecord["resource"]
   /** Any directory inside the repository — usually the run's workspace path. */
   workspacePath: string
   /** Run id, used for the branch/directory name and ownership attribution. */
@@ -1561,6 +1593,7 @@ export async function createWorkflowWorktree(
     if (input.persistOwnership) {
       const now = new Date().toISOString()
       ownershipRecord = {
+        ...(input.resource ? { resource: input.resource } : {}),
         id: info.name,
         runId: input.runId,
         threadId: input.threadId ?? input.runId,
@@ -2124,6 +2157,34 @@ export async function inspectWorkflowWorktree(
   return { pristine: !changed, dirty, headCommit }
 }
 
+/** Verify a promoted source checkout without treating build outputs as commits.
+ * Host plumbing disables repository hooks and retains the original Git identity checks.
+ */
+export async function verifyWorkflowPromotedSource(
+  workspace: string,
+  record: WorkflowWorktreeRecord,
+  expectedCommit: string,
+  signal?: AbortSignal
+): Promise<WorkflowWorktreeIsolationBoundary> {
+  const repo = await identifyRepository(workspace, signal)
+  if (!repo || canonicalKey(repo.sourceRoot) !== canonicalKey(record.sourceRoot) ||
+      canonicalKey(repo.commonDir) !== canonicalKey(record.commonDir) ||
+      canonicalKey(await canonicalPath(workspace)) !==
+        canonicalKey(path.join(record.sourceRoot, record.sourceRelativePath)))
+    throw Error("WORKTREE_VERIFICATION_SOURCE_CHANGED")
+  const [head, branch, status] = await Promise.all([
+    git(repo.sourceRoot, ["rev-parse", "HEAD"], GIT_QUERY_TIMEOUT_MS, signal),
+    git(repo.sourceRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"], GIT_QUERY_TIMEOUT_MS, signal),
+    git(repo.sourceRoot, ["status", "--porcelain=v1", "--untracked-files=no"], GIT_QUERY_TIMEOUT_MS, signal)
+  ])
+  signal?.throwIfAborted()
+  if (head.code !== 0 || branch.code !== 0 || status.code !== 0 ||
+      head.stdout.trim() !== expectedCommit || branch.stdout.trim() !== record.sourceBranch ||
+      status.stdout.trim()) throw Error("WORKTREE_VERIFICATION_HEAD_CHANGED")
+  return { workspaceRoot: await canonicalPath(workspace), worktreeRoot: repo.sourceRoot,
+    commonDir: repo.commonDir, branch: record.sourceBranch }
+}
+
 interface WorkflowWorktreeDiff {
   record: WorkflowWorktreeRecord
   /** Human-readable bounded summary: commits, diffstat, then working-tree status. */
@@ -2561,6 +2622,117 @@ export async function cleanupWorkflowWorktree(input: {
   })
 }
 
+/** Native checkpoint for file-only agents. No hooks, clean/smudge filters or shell command. */
+export async function commitWorkflowWorktreeChanges(input: {
+  workspacePath: string
+  record: WorkflowWorktreeRecord
+  expectedParent: string
+  appDataRoot?: string
+  signal?: AbortSignal
+}): Promise<WorkflowWorktreeRecord> {
+  return withWorktreeActionLock(input.record, async () => {
+    const record = await loadCurrentWorkflowWorktreeRecord(input.record, input.appDataRoot)
+    const root = locatedWorkflowWorktreeAppDataRoot(record, input.appDataRoot)
+    if (!record.resource || record.resource.state !== "leased" || record.status !== "running")
+      throw new GitWorktreeError("native checkpoint requires a writable named resource")
+    const repo = await assertManagedWorkflowWorktree(record, input.workspacePath, root)
+    return withRepoLock(canonicalKey(repo.commonDir), async () => {
+      const configured = await git(record.directory, ["config", "--name-only", "--get-regexp",
+        "^filter\\..*\\.(clean|smudge|process|required)$"])
+      if (configured.infrastructureFailure || (configured.code !== 0 && configured.code !== 1))
+        throw new GitWorktreeError("cannot verify native checkpoint filter policy")
+      const filterKeys = configured.stdout.split(/\r?\n/).filter(Boolean)
+      if (filterKeys.length > 256) throw new GitWorktreeError("native checkpoint filter policy limit")
+      const filterOverrides = filterKeys.flatMap(key => ["-c", `${key}=${key.endsWith(".required") ? "false" : ""}`])
+      const run = async (args: string[], raw = false) => {
+        assertWorkflowResourceAdmission()
+        const signal = workflowResourceDeadlineSignal()
+          ? AbortSignal.any([...(input.signal ? [input.signal] : []), workflowResourceDeadlineSignal()!])
+          : input.signal
+        signal?.throwIfAborted()
+        const result = await git(record.directory, ["-c", "core.fsmonitor=false", ...filterOverrides, ...args],
+          getWorkflowWorktreeTimeoutMs(), signal)
+        if (result.code !== 0) throw new GitWorktreeError(gitFailure(result, "native checkpoint failed"))
+        return raw ? result.stdout : result.stdout.trim()
+      }
+      // Installed filters (for example LFS) do not affect ordinary code files.
+      // Refuse any actual file whose attributes request external transformation.
+      const files = (await run(["ls-files", "--cached", "--others", "--exclude-standard", "-z"], true))
+        .split("\0").filter(Boolean)
+      if (files.length > 4096) throw new GitWorktreeError("native checkpoint file scan limit")
+      for (const batch of gitPathBatches(files)) {
+        const attributes = (await run(["check-attr", "-z", "filter", "--", ...batch], true)).split("\0")
+        for (let index = 2; index < attributes.length; index += 3)
+          if (!["unspecified", "unset"].includes(attributes[index]))
+            throw new GitWorktreeError("native checkpoint does not support files with Git content filters")
+      }
+      if (await run(["rev-parse", "HEAD"]) !== input.expectedParent ||
+          await run(["symbolic-ref", "--short", "HEAD"]) !== record.branch ||
+          await currentGitOperation(record.directory))
+        throw new GitWorktreeError("native checkpoint parent changed", "source-busy")
+      const changed = await run(["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "HEAD"], true)
+      const untracked = await run(["ls-files", "--others", "--exclude-standard", "-z"], true)
+      const paths = [...new Set((changed + "\0" + untracked).split("\0").filter(Boolean))]
+      if (paths.length > 512) throw new GitWorktreeError("native checkpoint file limit")
+      assertGitPathsInScope(paths, record.sourceRelativePath)
+      if (!paths.length) return record
+      const temp = await fs.mkdtemp(path.join(tmpdir(), "workflow-checkpoint-"))
+      let total = 0
+      try {
+        const entries: { name: string; mode?: string; hash?: string }[] = []
+        for (const name of paths) {
+          input.signal?.throwIfAborted()
+          const absolute = path.resolve(record.directory, name)
+          if (!isPathInsideOrSame(absolute, record.directory) || name.split(/[\\/]/).includes(".git"))
+            throw new GitWorktreeError("native checkpoint path escaped its resource")
+          const stat = await fs.lstat(absolute).catch(error => {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+            throw error
+          })
+          if (!stat) { entries.push({ name }); continue }
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 8 * 1024 * 1024)
+            throw new GitWorktreeError("native checkpoint requires bounded regular files")
+          const opened = await openStableFileHandle(record.directory, absolute)
+          let bytes: Buffer
+          try { bytes = await readStableFileHandleBounded(opened, 8 * 1024 * 1024) }
+          finally { await opened.handle.close() }
+          total += bytes.length
+          if (total > 32 * 1024 * 1024) throw new GitWorktreeError("native checkpoint byte limit")
+          const saved = path.join(temp, String(entries.length))
+          await fs.writeFile(saved, bytes, { flag: "wx" })
+          const hash = await run(["hash-object", "-w", `--path=${name}`, "--", saved])
+          if (!/^[a-f0-9]{40,64}$/.test(hash)) throw new GitWorktreeError("invalid checkpoint object")
+          const tracked = await run(["ls-files", "--stage", "--", name])
+          const mode = tracked.startsWith("100755 ") || (!tracked && process.platform !== "win32" && (stat.mode & 0o111))
+            ? "100755" : "100644"
+          entries.push({ name, mode, hash })
+        }
+        // Every file has been bounded/read before the first index mutation. The
+        // original resource owns this index; failure retains it as unknown.
+        await run(["read-tree", input.expectedParent])
+        for (const entry of entries) await run(entry.hash
+          ? ["update-index", "--add", "--cacheinfo", entry.mode!, entry.hash, entry.name]
+          : ["update-index", "--force-remove", "--", entry.name])
+        const tree = await run(["write-tree"])
+        const commit = await run(["-c", "commit.gpgsign=false", "commit-tree", tree,
+          "-p", input.expectedParent, "-m", "Checkpoint workflow resource changes"])
+        if (!/^[a-f0-9]{40,64}$/.test(commit)) throw new GitWorktreeError("invalid checkpoint commit")
+        await assertWorkflowWorktreeDeliverablePathsInScope(record.directory, input.expectedParent,
+          commit, record.sourceRelativePath, getWorkflowWorktreeTimeoutMs(), input.signal)
+        if (await run(["rev-parse", "HEAD"]) !== input.expectedParent ||
+            await run(["symbolic-ref", "--short", "HEAD"]) !== record.branch)
+          throw new GitWorktreeError("native checkpoint owner changed", "source-busy")
+        await run(["update-ref", `refs/heads/${record.branch}`, commit, input.expectedParent])
+        const actual = await inspectWorkflowWorktree(record.directory, record.baseCommit)
+        if (actual.dirty || actual.headCommit !== commit)
+          throw new GitWorktreeError("native checkpoint changed while committing; verify retained changes")
+        return transitionWorkflowWorktreeRecord(record, "running", { headCommit: commit,
+          dirty: false, error: undefined }, root)
+      } finally { await fs.rm(temp, { recursive: true, force: true }) }
+    })
+  })
+}
+
 /** Merge one committed deliverable into the original source branch. New source
  * mutations require an unchanged, clean source checkout plus serialized conflict
  * preflight. If the branch already contains the deliverable, ancestry is enough
@@ -2570,6 +2742,12 @@ export async function mergeWorkflowWorktree(input: {
   record: WorkflowWorktreeRecord
   appDataRoot?: string
   signal?: AbortSignal
+  /** Native reviewed resource plan. Rechecked inside the original repository transaction. */
+  expectedHeadCommit?: string
+  expectedSourceCommit?: string
+  /** Main-issued target from the SAME original run ledger. Never a guest filesystem path. */
+  targetRecord?: WorkflowWorktreeRecord
+  reconcileOnly?: boolean
   /** Deterministic regression seam for the irreversible ref-CAS boundary. */
   testHooks?: { afterSourceRefAdvanced?: () => void | Promise<void> }
 }): Promise<WorkflowWorktreeActionResult> {
@@ -2579,13 +2757,45 @@ export async function mergeWorkflowWorktree(input: {
       throw new GitWorktreeError("workflow integration was cancelled", "source-busy")
     }
   }
-  return withWorktreeActionLock(input.record, async () => {
+  const locked = async (): Promise<WorkflowWorktreeActionResult> => {
     throwIfAborted()
     const current = await loadCurrentWorkflowWorktreeRecord(input.record, input.appDataRoot)
     const appDataRoot = locatedWorkflowWorktreeAppDataRoot(current, input.appDataRoot)
     const repo = await assertManagedWorkflowWorktree(current, input.workspacePath, appDataRoot, {
       allowMissingCheckout: true
     })
+    let targetRecord: WorkflowWorktreeRecord | undefined
+    if (input.targetRecord) {
+      targetRecord = await loadCurrentWorkflowWorktreeRecord(input.targetRecord, appDataRoot)
+      await assertManagedWorkflowWorktree(targetRecord, input.workspacePath, appDataRoot)
+      const identity = { worktreeId: targetRecord.id, ownerToken: targetRecord.resource?.ownerToken,
+        generation: targetRecord.resource?.generation, directory: targetRecord.directory, branch: targetRecord.branch }
+      if (!current.resource || !targetRecord.resource || current.id === targetRecord.id ||
+          current.runId !== targetRecord.runId || current.threadId !== targetRecord.threadId ||
+          canonicalKey(current.commonDir) !== canonicalKey(targetRecord.commonDir) ||
+          canonicalKey(current.sourceRoot) !== canonicalKey(targetRecord.sourceRoot) ||
+          current.sourceRelativePath !== targetRecord.sourceRelativePath ||
+          JSON.stringify(current.integrationTarget) !== JSON.stringify(identity) ||
+          !["running", "recoverable"].includes(targetRecord.status))
+        throw new GitWorktreeError("resource integration target identity changed", "source-busy")
+    } else if (current.integrationTarget) {
+      throw new GitWorktreeError("resource integration requires its original target owner", "source-busy")
+    }
+    const targetRoot = targetRecord?.directory ?? current.sourceRoot
+    const targetBranch = targetRecord?.branch ?? current.sourceBranch
+    const finish = async (record: WorkflowWorktreeRecord, headCommit: string, signal?: AbortSignal) => {
+      if (targetRecord) {
+        const target = await inspectWorkflowWorktree(targetRoot, targetRecord.baseCommit,
+          operationTimeoutMs, signal)
+        if (target.dirty || !target.headCommit)
+          throw new GitWorktreeError("integration target checkout is not settled", "source-busy")
+        targetRecord = await transitionWorkflowWorktreeRecord(targetRecord, "running", {
+          headCommit: target.headCommit, dirty: false,
+          resource: { ...targetRecord.resource!, state: "leased" }, error: undefined
+        }, appDataRoot)
+      }
+      return finishMergedWorkflowWorktree(record, repo, headCommit, appDataRoot, operationTimeoutMs, signal)
+    }
     if (
       current.status !== "ready" &&
       current.status !== "recoverable" &&
@@ -2598,12 +2808,18 @@ export async function mergeWorkflowWorktree(input: {
       let record = current
       try {
         throwIfAborted()
+        if (input.reconcileOnly) {
+          const tip = await git(targetRoot, ["rev-parse", `refs/heads/${targetBranch}`])
+          if (!record.integrationCommit || !record.integrationParent || tip.code !== 0 ||
+              tip.stdout.trim() !== record.integrationCommit)
+            throw new GitWorktreeError("resource integration has no exact owned transaction to reconcile", "source-busy")
+        }
         // A manually integrated deliverable remains safely recognizable by its
         // recorded commit even when Git/the user has already removed the linked
         // checkout.  This is deliberately read-only: without a checkout there
         // is no new work to inspect or source state to refresh.
         if (repo.checkoutState === "missing") {
-          const sourceBranch = record.sourceBranch
+          const sourceBranch = targetBranch
           const headCommit = record.headCommit
           if (
             !sourceBranch ||
@@ -2617,7 +2833,7 @@ export async function mergeWorkflowWorktree(input: {
           }
           const targetRef = `refs/heads/${sourceBranch}`
           const alreadyIntegrated = await git(
-            record.sourceRoot,
+            targetRoot,
             ["merge-base", "--is-ancestor", headCommit, targetRef],
             operationTimeoutMs,
             input.signal
@@ -2628,7 +2844,7 @@ export async function mergeWorkflowWorktree(input: {
             )
           }
           const stillIntegrated = await git(
-            record.sourceRoot,
+            targetRoot,
             ["merge-base", "--is-ancestor", headCommit, targetRef],
             operationTimeoutMs,
             input.signal
@@ -2639,14 +2855,7 @@ export async function mergeWorkflowWorktree(input: {
               "source-busy"
             )
           }
-          return finishMergedWorkflowWorktree(
-            record,
-            repo,
-            headCommit,
-            appDataRoot,
-            operationTimeoutMs,
-            input.signal
-          )
+          return finish(record, headCommit, input.signal)
         }
         const inspected = await inspectWorkflowWorktree(
           record.directory,
@@ -2656,6 +2865,8 @@ export async function mergeWorkflowWorktree(input: {
         )
         throwIfAborted()
         if (!inspected.headCommit) throw new GitWorktreeError("cannot resolve deliverable HEAD")
+        if (input.expectedHeadCommit && inspected.headCommit !== input.expectedHeadCommit)
+          throw new GitWorktreeError("approved deliverable commit changed", "source-busy")
         if (inspected.dirty) {
           throw new GitWorktreeError(
             "commit or discard all worktree changes before merging",
@@ -2691,9 +2902,20 @@ export async function mergeWorkflowWorktree(input: {
           operationTimeoutMs,
           input.signal
         )
-        const targetRef = `refs/heads/${record.sourceBranch}`
+        const targetRef = `refs/heads/${targetBranch}`
+        if (input.expectedSourceCommit) {
+          // Native promotion approval also covers the already-integrated cleanup
+          // branch below. Verify its reviewed checkout before any mutation.
+          const [approvedHead, approvedBranch] = await Promise.all([
+            git(targetRoot, ["rev-parse", "HEAD"]),
+            git(targetRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+          ])
+          if (approvedHead.code !== 0 || approvedHead.stdout.trim() !== input.expectedSourceCommit ||
+            approvedBranch.code !== 0 || approvedBranch.stdout.trim() !== targetBranch)
+            throw new GitWorktreeError("approved source checkout changed", "source-busy")
+        }
         const alreadyIntegrated = await git(
-          record.sourceRoot,
+          targetRoot,
           ["merge-base", "--is-ancestor", inspected.headCommit, targetRef],
           operationTimeoutMs,
           input.signal
@@ -2711,19 +2933,19 @@ export async function mergeWorkflowWorktree(input: {
             Boolean(record.integrationCommit && record.integrationParent)
           if (recordedOwnedTip) {
             const [targetTip, checkoutBranch] = await Promise.all([
-              git(record.sourceRoot, ["rev-parse", targetRef]),
-              git(record.sourceRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+              git(targetRoot, ["rev-parse", targetRef]),
+              git(targetRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"])
             ])
             if (
               targetTip.code === 0 &&
               targetTip.stdout.trim() === record.integrationCommit &&
               checkoutBranch.code === 0 &&
-              checkoutBranch.stdout.trim() === record.sourceBranch
+              checkoutBranch.stdout.trim() === targetBranch
             ) {
               const [targetTree, indexTree, parentTree] = await Promise.all([
-                git(record.sourceRoot, ["rev-parse", `${targetRef}^{tree}`]),
-                git(record.sourceRoot, ["write-tree"], operationTimeoutMs, input.signal),
-                git(record.sourceRoot, ["rev-parse", `${record.integrationParent}^{tree}`])
+                git(targetRoot, ["rev-parse", `${targetRef}^{tree}`]),
+                git(targetRoot, ["write-tree"], operationTimeoutMs, input.signal),
+                git(targetRoot, ["rev-parse", `${record.integrationParent}^{tree}`])
               ])
               needsOwnedCheckoutRepair =
                 targetTree.code === 0 &&
@@ -2735,7 +2957,7 @@ export async function mergeWorkflowWorktree(input: {
           }
           if (!needsOwnedCheckoutRepair) {
             const stillIntegrated = await git(
-              record.sourceRoot,
+              targetRoot,
               ["merge-base", "--is-ancestor", inspected.headCommit, targetRef],
               operationTimeoutMs,
               input.signal
@@ -2746,43 +2968,38 @@ export async function mergeWorkflowWorktree(input: {
                 "source-busy"
               )
             }
-            return finishMergedWorkflowWorktree(
-              record,
-              repo,
-              inspected.headCommit,
-              appDataRoot,
-              operationTimeoutMs,
-              input.signal
-            )
+            return finish(record, inspected.headCommit, input.signal)
           }
         }
 
-        const sourceBranch = await git(record.sourceRoot, [
+        const sourceBranch = await git(targetRoot, [
           "symbolic-ref",
           "--quiet",
           "--short",
           "HEAD"
         ])
-        if (sourceBranch.code !== 0 || sourceBranch.stdout.trim() !== record.sourceBranch) {
+        if (sourceBranch.code !== 0 || sourceBranch.stdout.trim() !== targetBranch) {
           throw new GitWorktreeError(
-            `source checkout must remain on ${record.sourceBranch} before merging`,
+            `source checkout must remain on ${targetBranch} before merging`,
             "source-busy"
           )
         }
-        const existingOperation = await currentGitOperation(record.sourceRoot)
+        const existingOperation = await currentGitOperation(targetRoot)
         if (existingOperation) {
           throw new GitWorktreeError(
             `source checkout has an in-progress Git operation (${existingOperation}); finish it before merging`,
             "source-busy"
           )
         }
-        const sourceHeadResult = await git(record.sourceRoot, ["rev-parse", "HEAD"])
+        const sourceHeadResult = await git(targetRoot, ["rev-parse", "HEAD"])
         const sourceHead = sourceHeadResult.code === 0 ? sourceHeadResult.stdout.trim() : ""
         if (!sourceHead) throw new GitWorktreeError("cannot resolve source HEAD")
+        if (input.expectedSourceCommit && sourceHead !== input.expectedSourceCommit)
+          throw new GitWorktreeError("approved source commit changed", "source-busy")
         throwIfAborted()
         if (alreadyIntegrated.code !== 0) {
           const sourceStatus = await inspectWorkspaceStatus(
-            record.sourceRoot,
+            targetRoot,
             "",
             operationTimeoutMs,
             input.signal
@@ -2800,7 +3017,7 @@ export async function mergeWorkflowWorktree(input: {
           }
 
           const preflight = await git(
-            record.sourceRoot,
+            targetRoot,
             ["merge-tree", "--write-tree", sourceHead, inspected.headCommit],
             operationTimeoutMs,
             input.signal
@@ -2820,7 +3037,7 @@ export async function mergeWorkflowWorktree(input: {
             throw new GitWorktreeError("merge preflight did not return a valid result tree")
           }
           const integrationPaths = await listChangedGitPaths(
-            record.sourceRoot,
+            targetRoot,
             sourceHead,
             mergeTree,
             operationTimeoutMs,
@@ -2828,7 +3045,7 @@ export async function mergeWorkflowWorktree(input: {
           )
           assertGitPathsInScope(integrationPaths, record.sourceRelativePath)
           await assertNoGitlinkChanges(
-            record.sourceRoot,
+            targetRoot,
             sourceHead,
             mergeTree,
             integrationPaths,
@@ -2836,7 +3053,7 @@ export async function mergeWorkflowWorktree(input: {
             input.signal
           )
           await assertNoIgnoredSourceCollisions(
-            record.sourceRoot,
+            targetRoot,
             integrationPaths,
             operationTimeoutMs,
             input.signal
@@ -2853,14 +3070,14 @@ export async function mergeWorkflowWorktree(input: {
             operationBeforeMutation,
             statusBeforeMutation
           ] = await Promise.all([
-            git(record.sourceRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]),
-            git(record.sourceRoot, ["rev-parse", "HEAD"]),
-            currentGitOperation(record.sourceRoot),
-            inspectWorkspaceStatus(record.sourceRoot, "", operationTimeoutMs, input.signal)
+            git(targetRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]),
+            git(targetRoot, ["rev-parse", "HEAD"]),
+            currentGitOperation(targetRoot),
+            inspectWorkspaceStatus(targetRoot, "", operationTimeoutMs, input.signal)
           ])
           if (
             branchBeforeMutation.code !== 0 ||
-            branchBeforeMutation.stdout.trim() !== record.sourceBranch ||
+            branchBeforeMutation.stdout.trim() !== targetBranch ||
             headBeforeMutation.code !== 0 ||
             headBeforeMutation.stdout.trim() !== sourceHead ||
             operationBeforeMutation ||
@@ -2879,7 +3096,7 @@ export async function mergeWorkflowWorktree(input: {
           // expected-old atomic ref update. An IDE branch switch can no longer
           // redirect the integration into a different branch.
           const committed = await git(
-            record.sourceRoot,
+            targetRoot,
             [
               "-c",
               `core.hooksPath=${GIT_DISABLED_HOOKS_PATH}`,
@@ -2909,7 +3126,7 @@ export async function mergeWorkflowWorktree(input: {
           )
           throwIfAborted()
           const advanced = await git(
-            record.sourceRoot,
+            targetRoot,
             [...GIT_NO_HOOKS_ARGS, "update-ref", targetRef, mergeCommit, sourceHead],
             GIT_QUERY_TIMEOUT_MS
           )
@@ -2924,15 +3141,15 @@ export async function mergeWorkflowWorktree(input: {
           // even if cancellation was requested. Aborting halfway would leave a
           // source branch pointing at the integration commit with a stale index;
           // the recovery record is safer than abandoning this transaction.
-          const checkoutBranch = await git(record.sourceRoot, [
+          const checkoutBranch = await git(targetRoot, [
             "symbolic-ref",
             "--quiet",
             "--short",
             "HEAD"
           ])
-          if (checkoutBranch.code !== 0 || checkoutBranch.stdout.trim() !== record.sourceBranch) {
+          if (checkoutBranch.code !== 0 || checkoutBranch.stdout.trim() !== targetBranch) {
             await rollbackAtomicWorkflowIntegration(
-              record.sourceRoot,
+              targetRoot,
               targetRef,
               mergeCommit,
               sourceHead,
@@ -2941,13 +3158,13 @@ export async function mergeWorkflowWorktree(input: {
           }
           try {
             await assertNoIgnoredSourceCollisions(
-              record.sourceRoot,
+              targetRoot,
               integrationPaths,
               operationTimeoutMs
             )
           } catch (error) {
             await rollbackAtomicWorkflowIntegration(
-              record.sourceRoot,
+              targetRoot,
               targetRef,
               mergeCommit,
               sourceHead,
@@ -2958,13 +3175,13 @@ export async function mergeWorkflowWorktree(input: {
           // branch check, HEAD follows that checkout instead of injecting the
           // workflow tree into the wrong branch's index/worktree.
           const refreshed = await git(
-            record.sourceRoot,
+            targetRoot,
             [...GIT_NO_HOOKS_ARGS, "read-tree", "-m", "-u", sourceHead, "HEAD"],
             operationTimeoutMs
           )
           if (refreshed.code !== 0) {
             await rollbackAtomicWorkflowIntegration(
-              record.sourceRoot,
+              targetRoot,
               targetRef,
               mergeCommit,
               sourceHead,
@@ -2977,7 +3194,7 @@ export async function mergeWorkflowWorktree(input: {
         // source index/worktree is refreshed. On retry, repair only the exact
         // merge commit we created and use read-tree's two-tree carry-forward
         // mode, which refuses overlap and preserves local working-tree edits.
-        const targetParents = await git(record.sourceRoot, [
+        const targetParents = await git(targetRoot, [
           "rev-list",
           "--parents",
           "-n",
@@ -2990,7 +3207,7 @@ export async function mergeWorkflowWorktree(input: {
           Boolean(record.integrationCommit && record.integrationParent) &&
           (
             await git(
-              record.sourceRoot,
+              targetRoot,
               ["merge-base", "--is-ancestor", record.integrationCommit!, targetRef],
               operationTimeoutMs
             )
@@ -3008,7 +3225,7 @@ export async function mergeWorkflowWorktree(input: {
           )
         }
 
-        const checkoutBeforeVerification = await git(record.sourceRoot, [
+        const checkoutBeforeVerification = await git(targetRoot, [
           "symbolic-ref",
           "--quiet",
           "--short",
@@ -3016,25 +3233,25 @@ export async function mergeWorkflowWorktree(input: {
         ])
         if (
           checkoutBeforeVerification.code !== 0 ||
-          checkoutBeforeVerification.stdout.trim() !== record.sourceBranch
+          checkoutBeforeVerification.stdout.trim() !== targetBranch
         ) {
           if (exactOwnedTip) {
             await rollbackAtomicWorkflowIntegration(
-              record.sourceRoot,
+              targetRoot,
               targetRef,
               record.integrationCommit!,
               record.integrationParent!,
-              `source checkout left ${record.sourceBranch} before integration verification`
+              `source checkout left ${targetBranch} before integration verification`
             )
           }
           throw new GitWorktreeError(
-            `source checkout left ${record.sourceBranch}; the integrated branch was not changed`,
+            `source checkout left ${targetBranch}; the integrated branch was not changed`,
             "source-busy"
           )
         }
         const [targetTreeResult, indexTreeResult] = await Promise.all([
-          git(record.sourceRoot, ["rev-parse", `${targetRef}^{tree}`]),
-          git(record.sourceRoot, ["write-tree"], operationTimeoutMs)
+          git(targetRoot, ["rev-parse", `${targetRef}^{tree}`]),
+          git(targetRoot, ["write-tree"], operationTimeoutMs)
         ])
         const targetTree = targetTreeResult.code === 0 ? targetTreeResult.stdout.trim() : ""
         let indexTree = indexTreeResult.code === 0 ? indexTreeResult.stdout.trim() : ""
@@ -3046,20 +3263,20 @@ export async function mergeWorkflowWorktree(input: {
             )
           }
           const repairPaths = await listChangedGitPaths(
-            record.sourceRoot,
+            targetRoot,
             record.integrationParent!,
             record.integrationCommit!,
             operationTimeoutMs
           )
           try {
             await assertNoIgnoredSourceCollisions(
-              record.sourceRoot,
+              targetRoot,
               repairPaths,
               operationTimeoutMs
             )
           } catch (error) {
             await rollbackAtomicWorkflowIntegration(
-              record.sourceRoot,
+              targetRoot,
               targetRef,
               record.integrationCommit!,
               record.integrationParent!,
@@ -3067,20 +3284,20 @@ export async function mergeWorkflowWorktree(input: {
             )
           }
           const repaired = await git(
-            record.sourceRoot,
+            targetRoot,
             [...GIT_NO_HOOKS_ARGS, "read-tree", "-m", "-u", record.integrationParent!, "HEAD"],
             operationTimeoutMs
           )
           if (repaired.code !== 0) {
             await rollbackAtomicWorkflowIntegration(
-              record.sourceRoot,
+              targetRoot,
               targetRef,
               record.integrationCommit!,
               record.integrationParent!,
               `source checkout has overlapping local work (${gitFailure(repaired, "safe read-tree repair failed")})`
             )
           }
-          const repairedTree = await git(record.sourceRoot, ["write-tree"], operationTimeoutMs)
+          const repairedTree = await git(targetRoot, ["write-tree"], operationTimeoutMs)
           indexTree = repairedTree.code === 0 ? repairedTree.stdout.trim() : ""
           if (indexTree !== targetTree) {
             throw new GitWorktreeError(
@@ -3091,7 +3308,7 @@ export async function mergeWorkflowWorktree(input: {
         }
 
         const integratedAfterMerge = await git(
-          record.sourceRoot,
+          targetRoot,
           ["merge-base", "--is-ancestor", inspected.headCommit, targetRef],
           operationTimeoutMs
         )
@@ -3101,13 +3318,7 @@ export async function mergeWorkflowWorktree(input: {
             "source-busy"
           )
         }
-        return finishMergedWorkflowWorktree(
-          record,
-          repo,
-          inspected.headCommit,
-          appDataRoot,
-          operationTimeoutMs
-        )
+        return finish(record, inspected.headCommit)
       } catch (error) {
         const recoveryError = error instanceof Error ? error.message : String(error)
         const latest = await loadCurrentWorkflowWorktreeRecord(record, appDataRoot).catch(
@@ -3139,7 +3350,10 @@ export async function mergeWorkflowWorktree(input: {
         )
       }
     })
-  })
+  }
+  const records = input.targetRecord ? [input.record, input.targetRecord].sort((a,b) => a.id.localeCompare(b.id)) : [input.record]
+  return withWorktreeActionLock(records[0], () => records[1]
+    ? withWorktreeActionLock(records[1], locked) : locked())
 }
 
 /** Remove a terminal ownership manifest only after its run history is durable.

@@ -1,0 +1,36 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "autobiz-native-knowledge",
+  "claw": {
+    "componentsVersion": 1,
+    "components": [
+      {
+        "id": "main",
+        "name": "AutoBiz组织知识",
+        "kind": "module",
+        "entry": "main.ts",
+        "dependsOn": [],
+        "actionIds": ["context"]
+      }
+    ],
+    "actions": [
+      {
+        "id": "context",
+        "name": "读取本阶段所选组织知识",
+        "platform": {
+          "id": "knowledge",
+          "version": "1.0.0",
+          "action": "context"
+        },
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {}
+        },
+        "outputSchema": {
+          "type": "object"
+        }
+      }
+    ]
+  }
+}

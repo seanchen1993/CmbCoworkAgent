@@ -71,6 +71,7 @@ export interface FlowHost {
   changed(threadId: string): void
 }
 export interface FlowPersistence {
+  assertWorkspaceResourcesSettled?(workspace: string): { assertCurrent(): void }
   /** Host-only original execution facts; never a serialized guest result or UI API. */
   recordActionResult?(run: FlowRun, attempt: FlowAttempt, result: FlowStepResult): void
   reserveRecovery?(

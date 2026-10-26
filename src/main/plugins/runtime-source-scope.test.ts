@@ -45,6 +45,21 @@ function fixture(id: string): RuntimePluginSourceBinding {
 }
 
 describe("host-only retained package source scope", () => {
+  it("clones and freezes Host-issued execution resources and refuses malformed references", () => {
+    const binding: RuntimePluginSourceBinding = { ...fixture("resource"), mode: "host",
+      executionResources: { fingerprint: "b".repeat(64), workspaces: [{ id: "repo", path: "C:/repo" }],
+        profiles: [{ name: "review", description: "review", systemPrompt: "read only", source: "user",
+          disallowedTools: ["write_file"], shellAccess: "read_only" }] } }
+    const token = issueRuntimePluginSourceToken(binding)
+    binding.executionResources!.profiles[0].disallowedTools.length = 0
+    withRuntimePluginSource(token, () => {
+      expect(currentRuntimePluginSource()?.executionResources?.profiles[0].disallowedTools).toEqual(["write_file"])
+      expect(Object.isFrozen(currentRuntimePluginSource()?.executionResources?.workspaces)).toBe(true)
+    })
+    expect(() => issueRuntimePluginSourceToken({ ...binding, mode: "legacy" })).toThrow("INVALID")
+    binding.executionResources!.workspaces = [{ id: "repo", path: "relative" }]
+    expect(() => issueRuntimePluginSourceToken(binding)).toThrow("WORKSPACE_INVALID")
+  })
   it.each([
     { mode: undefined, preserveParentContext: false, selected: false },
     { mode: "legacy", preserveParentContext: false, selected: false },

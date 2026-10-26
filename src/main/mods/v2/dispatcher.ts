@@ -129,7 +129,7 @@ export class FunctionDispatcher {
       return this.dispatchWithin(event, input, options)
     const deadline = new FunctionDispatchDeadline(
       options.timeoutMs ?? (event === "session.end" ? 1500 : 120000),
-      options.signal, options.dispatchCutNs
+      options.signal, options.dispatchCutNs, event !== "session.end" && !options.dispatchCutNs
     )
     const entered = <T>(run: () => Promise<T>): Promise<T> => {
       deadline.assertLive()
@@ -148,7 +148,7 @@ export class FunctionDispatcher {
         deadline.wait(entered(() => options.protectResult!(value))) } : {})
     }
     try {
-      return await deadline.wait(this.dispatchWithin(event, input, bounded, deadline))
+      return await deadline.run(() => deadline.wait(this.dispatchWithin(event, input, bounded, deadline)))
     } finally {
       deadline.close()
     }

@@ -1,5 +1,6 @@
 import type { HostProjectState } from "../../shared/project-runtime/host-types"
 import type { FunctionModsManager } from "../mods/v2/manager"
+import type { RuntimePluginSourceToken } from "../plugins/runtime-source-scope"
 
 let current:
   | {
@@ -31,6 +32,10 @@ export function getProjectRuntimeFunctionManager(): FunctionModsManager {
   return current.manager
 }
 
+export function settleProjectRuntimeFunctionSource(token: RuntimePluginSourceToken): void {
+  current?.manager.settleEmptyHostSource(token)
+}
+
 export function projectRuntimeFunctionSource(project: Pick<HostProjectState,
   "workspace" | "projectId" | "pluginDigest" | "installedPluginId" | "packageId">, root: string) {
   if (!current) throw Error("PROJECT_MODS_RUNTIME_UNAVAILABLE")
@@ -50,4 +55,5 @@ export async function assertProjectRuntimeSourceApproved(project: HostProjectSta
   const { manager, input } = projectRuntimeFunctionSource(project, root)
   const review = await manager.runtimeSourceReview(input)
   if (review && review.state !== "ready") throw Error("PROJECT_MODS_APPROVAL_REQUIRED")
+  return review
 }

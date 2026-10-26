@@ -42,6 +42,22 @@ export function runtimeFixture(): ProjectRuntimeManifest {
 }
 
 describe("project runtime declaration", () => {
+  it("preserves optional output approval without changing legacy input approval", () => {
+    const fixture = runtimeFixture()
+    fixture.stages[0].resultApproval = "human"
+    const parsed = parseProjectRuntimeManifest(fixture)
+    expect(parsed.stages[0].approval).toBe("none")
+    expect(parsed.stages[0].resultApproval).toBe("human")
+    expect(parsed.stages[1]).not.toHaveProperty("resultApproval")
+    expect(() => parseProjectRuntimeManifest({
+      ...fixture, mode: "legacy", stateOwner: "plugin"
+    })).toThrow("PROJECT_RUNTIME_MANIFEST_INVALID")
+    for (const resultApproval of [true, "approved", null]) {
+      expect(() => parseProjectRuntimeManifest({
+        ...fixture, stages: [{ ...fixture.stages[0], resultApproval }]
+      })).toThrow("PROJECT_RUNTIME_MANIFEST_INVALID")
+    }
+  })
   it("keeps host linear stages and legacy ownership separate", () => {
     const fixture = runtimeFixture()
     expect(parseProjectRuntimeManifest(fixture)).toEqual(fixture)

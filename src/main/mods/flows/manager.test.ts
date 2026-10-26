@@ -54,6 +54,8 @@ function fixture(steps: FlowStep[], overrides: Partial<FlowExecution> = {},
   options: { host?: boolean; maxExecutions?: number } = {}) {
   const settings = new Map<string, string>()
   const store = new FlowStore({
+    settingsWithPrefix: prefix => [...settings].filter(([key]) => key.startsWith(prefix))
+      .map(([key, value]) => ({ key, value })),
     getSetting: (key, fallback = "") => settings.get(key) ?? fallback,
     setSetting: (key, value) => {
       settings.set(key, value)
@@ -175,11 +177,16 @@ it("notifies again after physical cleanup releases the active workspace", async 
     }
   }, { host: true })
   const observations: boolean[] = []
+  const prior = f.manager.assertWorkspaceResourcesSettled(f.workspace)
+  const sibling = f.manager.assertWorkspaceResourcesSettled(f.workspace + "-other")
   f.host.changed = () => {
     observations.push(f.manager.activeSummary(f.workspace, f.thread) !== null)
   }
   const started = await f.start()
   await vi.waitFor(() => expect(disposing).toBe(true))
+  expect(() => f.manager.assertWorkspaceResourcesSettled(f.workspace)).toThrow("UNSETTLED")
+  expect(prior.assertCurrent).toThrow("CHANGED")
+  sibling.assertCurrent()
   expect(f.manager.activeSummary(f.workspace, f.thread)?.status).toBe("running")
   expect(getLocalThreadRunLease(f.thread)?.owner).toBe("mods")
   expect(terminal(f.manager.run(f.workspace, f.thread, started.id)!)).toBe(false)
@@ -188,6 +195,7 @@ it("notifies again after physical cleanup releases the active workspace", async 
   expect(f.manager.activeSummary(f.workspace, f.thread)).toBeNull()
   expect(getLocalThreadRunLease(f.thread)).toBeUndefined()
   expect(observations.at(-1)).toBe(false)
+  f.manager.assertWorkspaceResourcesSettled(f.workspace).assertCurrent()
 })
 
 it("completes two host steps at their exact execution budget without charging the summary receipt", async () => {

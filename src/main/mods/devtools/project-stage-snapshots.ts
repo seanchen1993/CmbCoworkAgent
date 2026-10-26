@@ -4,7 +4,7 @@ import {
   type ProjectFileInventory
 } from "../../harness-board/project-runtime/bounded-project-files"
 import { randomUUID } from "node:crypto"
-import { mkdirSync, readdirSync } from "node:fs"
+import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, writeFileSync } from "node:fs"
 import { lstat, mkdir, open, readdir, rm } from "node:fs/promises"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import type {
@@ -71,6 +71,8 @@ interface CaptureInput {
   inputIdentity: string
   recoveryInputs?: StageRecoveryInputSnapshot
   guard(): void
+  /** Full content checks bracket capture and publication; guard still runs at every IO boundary. */
+  assertInputsCurrent?(): void
   signal?: AbortSignal
 }
 function fail(code: string): never {
@@ -168,6 +170,7 @@ export class ProjectStageSnapshots {
   }
   async capture(input: CaptureInput): Promise<StageInputSnapshot> {
     input.guard()
+    input.assertInputsCurrent?.()
     input.signal?.throwIfAborted()
     text(input.scopeKey)
     text(input.inputIdentity)
@@ -195,6 +198,7 @@ export class ProjectStageSnapshots {
     }
     const stable = () => {
       guard()
+      input.assertInputsCurrent?.()
       guardWorkspace()
       guardSource()
     }
@@ -282,11 +286,10 @@ export class ProjectStageSnapshots {
       const snapshot: StageInputSnapshot = { ...metadata, id }
       const encoded = Buffer.from(JSON.stringify(snapshot))
       if (encoded.length > PROJECT_STAGE_SNAPSHOT_LIMITS.metadataBytes) fail("LIMIT")
-      stable()
       const destination = join(this.root, id)
       await mkdir(destination, { mode: 0o700 })
       created = destination
-      stable()
+      guard()
       await mkdir(join(destination, "files"), { mode: 0o700 })
       for (const directory of directories) {
         guard()
@@ -301,8 +304,16 @@ export class ProjectStageSnapshots {
           guard
         )
       }
+      // Metadata is bounded and published synchronously between complete input fences.
+      // Keep exclusive creation and durability without rehashing inputs at each write await.
       stable()
-      await this.writeNew(join(destination, "snapshot.json"), encoded, false, guard)
+      const metadataFile = openSync(join(destination, "snapshot.json"), "wx", 0o600)
+      try {
+        writeFileSync(metadataFile, encoded)
+        fsyncSync(metadataFile)
+      } finally {
+        closeSync(metadataFile)
+      }
       stable()
       return structuredClone(snapshot)
     } catch (error) {

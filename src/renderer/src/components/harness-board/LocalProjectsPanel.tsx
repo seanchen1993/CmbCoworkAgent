@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { ProjectActionResults } from "./ProjectActionResults"
+import { ProjectCheckDiagnostics } from "./ProjectCheckDiagnostics"
+import { LocalProjectImport } from "./LocalProjectImport"
 import { ProjectLibraryPanel } from "./ProjectLibraryPanel"
 import { ProjectFunctionConsent } from "./ProjectFunctionConsent"
 import { navigateProjectThread } from "./project-thread-navigation"
@@ -56,6 +58,7 @@ export function LocalProjectsPanel() {
   const [projects, setProjects] = useState<LocalProjectSummary[]>([])
   const [selected, setSelected] = useState<string>()
   const [creating, setCreating] = useState(false)
+  const [importing, setImporting] = useState(false)
   const [error, setError] = useState<unknown>()
   const [loading, setLoading] = useState(false)
   const startUseIntent = useHostPluginStartUseIntent()
@@ -147,15 +150,37 @@ export function LocalProjectsPanel() {
               setSelected(undefined)
               setStartUse(undefined)
               setCreating(true)
+              setImporting(false)
             }}
             className="underline"
           >
             新建本地任务
           </button>
+          <button
+            type="button"
+            className="underline"
+            onClick={() => {
+              setCreating(false)
+              setImporting(true)
+              setSelected(undefined)
+            }}
+          >
+            导入旧项目成果
+          </button>
         </div>
       </div>
       {!!error && <ProjectError error={error} />}
-      {creating ? (
+      {importing ? (
+        <LocalProjectImport
+          templates={templates}
+          onCancel={() => setImporting(false)}
+          onCreated={(view) => {
+            setImporting(false)
+            setSelected(view.project.projectId)
+            void refresh()
+          }}
+        />
+      ) : creating ? (
         <CreateLocalProject
           key={startUse?.id ?? "manual"}
           templates={templates}
@@ -416,6 +441,8 @@ export function LocalProjectRun({
   projectId: string
   onChanged: () => void
 }) {
+  const [resultFeedback, setResultFeedback] = useState<{ scope: string; text: string }>()
+  const [stageInstructions, setStageInstructions] = useState<{ scope: string; text: string }>()
   const [packageFunctionsReady, setPackageFunctionsReady] = useState(false)
   const [providerConsent, setProviderConsent] = useState<{
     operationId: string
@@ -452,6 +479,7 @@ export function LocalProjectRun({
   }, [])
   const observing =
     busy ||
+    (!!view?.inputWait && view.inputWait.resumable !== false) ||
     view?.operations.some((item) => item.status === "started" || item.status === "cancel_requested")
   useEffect(() => {
     if (!observing) return
@@ -519,6 +547,25 @@ export function LocalProjectRun({
       }
     }
   }
+  const operation = view?.operations.find(
+    (item) =>
+      item.expectedVersion === view.project.version &&
+      ["prepared", "started", "cancel_requested", "succeeded", "unknown"].includes(item.status)
+  )
+  const feedbackScope = JSON.stringify([
+    projectId, view?.project.version, view?.project.stageIndex, operation?.operationId
+  ])
+  const feedbackText = resultFeedback?.scope === feedbackScope ? resultFeedback.text : ""
+  useEffect(() => setResultFeedback(undefined), [feedbackScope])
+  const latestStageOperation = view?.operations.find((item) =>
+    item.expectedVersion === view.project.version &&
+    item.stageId === view.project.manifest.stages[view.project.stageIndex]?.id
+  )
+  const instructionsScope = JSON.stringify([
+    projectId, view?.project.version, view?.project.stageIndex, latestStageOperation?.operationId
+  ])
+  const instructionsText = stageInstructions?.scope === instructionsScope ? stageInstructions.text : ""
+  useEffect(() => setStageInstructions(undefined), [instructionsScope])
   if (!view)
     return (
       <div>
@@ -528,14 +575,34 @@ export function LocalProjectRun({
   const { project, operations } = view
   const metrics = projectLocalMetrics(operations)
   const stage = project.manifest.stages[project.stageIndex]
-  const operation = operations.find(
-    (item) =>
-      item.expectedVersion === project.version &&
-      ["prepared", "started", "cancel_requested", "succeeded", "unknown"].includes(item.status)
+  const importedStage = Boolean(stage && view.importedSource?.prefixStageIds.includes(stage.id))
+  const reexecuteImportedStage = Boolean(
+    stage && view.importedSource?.reexecuteStageIds?.includes(stage.id)
   )
+  const validateImportedStage = importedStage && !reexecuteImportedStage
+  const canAddStageInstructions = !validateImportedStage && !operation &&
+    latestStageOperation?.status === "failed" && !operations.some((item) =>
+      ["started", "cancel_requested", "unknown"].includes(item.status)
+    )
+  const pendingStageInstructions = canAddStageInstructions ? instructionsText.trim() : ""
+  const executionKind = validateImportedStage ? ("validate-imported" as const) : ("start" as const)
+  const resultApprovalRequired = view.resultApprovalRequired ?? stage?.resultApproval === "human"
+  const resultApproved =
+    !resultApprovalRequired ||
+    (operation?.resultApproval?.decision === "approved" &&
+      view.resultReview &&
+      operation.resultApproval.artifactFingerprint === view.resultReview.artifactFingerprint &&
+      operation.resultApproval.receiptFingerprint === view.resultReview.receiptFingerprint &&
+      operation.resultApproval.policyDigest === view.resultReview.policyDigest)
   const stageActions =
     project.manifest.actions?.filter((item) => stage?.actionIds?.includes(item.id)) ?? []
-  const canCheckFilesOnly = stageActions.length === 0 && !operation?.contextProvider
+  const canCheckFilesOnly =
+    !importedStage &&
+    stageActions.length === 0 &&
+    !operation?.contextProvider &&
+    !project.manifest.checks.some(
+      (check) => stage?.checkIds.includes(check.id) && check.kind === "action"
+    )
   const providerApproved =
     !operation?.contextProvider ||
     (providerConsent?.operationId === operation.operationId &&
@@ -544,20 +611,60 @@ export function LocalProjectRun({
     const next = await command({
       kind: "prepare",
       expectedVersion: project.version,
-      idempotencyKey: crypto.randomUUID()
+      idempotencyKey: crypto.randomUUID(),
+      ...(kind === "start" && pendingStageInstructions
+        ? { stageInstructions: pendingStageInstructions } : {})
     })
     const prepared = next.operations.find(
       (item) => item.expectedVersion === project.version && item.status === "prepared"
     )
     if (!prepared) throw Error("PROJECT_PREPARE_NOT_CONFIRMED")
     if (
+      next.project.version !== project.version ||
+      next.project.stageIndex !== project.stageIndex ||
+      next.project.pluginDigest !== project.pluginDigest ||
+      prepared.stageId !== stage?.id
+    ) throw Error("PROJECT_SCOPE_CHANGED")
+    if (kind === "start" && pendingStageInstructions) {
+      if (prepared.stageInstructions !== pendingStageInstructions)
+        throw Error("PROJECT_PREPARE_NOT_CONFIRMED")
+      setStageInstructions(undefined)
+    }
+    if (
       (stage?.approval !== "human" && !prepared.contextProvider) ||
       prepared.approval?.decision === "approved"
     )
-      await command({ kind, operationId: prepared.operationId })
+      await command({
+        kind: kind === "start" ? executionKind : kind,
+        operationId: prepared.operationId
+      })
+  }
+  const retryRejectedResult = async () => {
+    if (operation?.status !== "succeeded" || operation.resultApproval?.decision !== "rejected")
+      throw Error("PROJECT_SCOPE_CHANGED")
+    const cancelled = await command({ kind: "cancel", operationId: operation.operationId })
+    if (
+      cancelled.project.version !== project.version ||
+      cancelled.project.stageIndex !== project.stageIndex ||
+      cancelled.project.pluginDigest !== project.pluginDigest ||
+      !cancelled.operations.some((item) =>
+        item.operationId === operation.operationId && item.status === "cancelled"
+      )
+    ) throw Error("PROJECT_SCOPE_CHANGED")
+    await prepareAnd("start")
   }
   return (
     <div className="space-y-4 border-t pt-4" aria-label="本地任务运行过程">
+      {validateImportedStage && (
+        <p className="text-sm text-muted-foreground">
+          当前成果来自旧项目。点击“重新验证导入成果”只执行实际检查，随后确认这份成果；历史成功不会自动计入新任务。
+        </p>
+      )}
+      {reexecuteImportedStage && (
+        <p className="text-sm text-muted-foreground">
+          旧材料已保留。当前阶段需要重新执行技能并通过检查，再由你确认新成果；旧项目的完成状态不会自动沿用。
+        </p>
+      )}
       <div className="flex flex-wrap justify-between gap-2">
         <h3 className="break-all font-medium">
           {project.name} · {stage?.title ?? "已完成"}
@@ -567,6 +674,35 @@ export function LocalProjectRun({
         </button>
       </div>
       <p className="whitespace-pre-wrap break-words text-sm">{project.goal}</p>
+      {view.inputWait && (
+        <div role="status" className="rounded border p-3 text-sm space-y-2">
+          <p>
+            {view.inputWait.resumable === false
+              ? "问题与已提交的回答均已保留，但此步骤存在尚未证明已结束的外部操作。请在原会话核对执行结果，当前不能自动续接或重跑。"
+              : view.inputWait.status === "waiting"
+                ? "此步骤正在等待你的回答，请打开阶段会话填写输入卡片。"
+                : "回答已保存。继续前会核对原任务检查点、插件版本与子任务状态，避免重复执行。"}
+          </p>
+          {view.inputWait.status === "answered" && view.inputWait.resumable !== false && (
+            <button
+              type="button"
+              className="underline"
+              disabled={busy}
+              onClick={() =>
+                void act(() =>
+                  command({
+                    kind: "resume-input",
+                    operationId: view.inputWait!.operationId,
+                    requestId: view.inputWait!.requestId
+                  })
+                )
+              }
+            >
+              继续已保存输入
+            </button>
+          )}
+        </div>
+      )}
       {view.preview && (
         <p className="rounded bg-muted p-2 text-sm">
           {view.preview.state === "active"
@@ -602,6 +738,22 @@ export function LocalProjectRun({
         ))}
       </ol>
       {!!error && <ProjectError error={error} />}
+      {view.resultReviewError && (
+        <p role="alert" className="text-sm text-destructive">
+          {view.resultReviewError}
+        </p>
+      )}
+      {view.continuation && (
+        <p role="status" className="text-sm">
+          {view.continuation.reason === "completed"
+            ? "任务已完成。"
+            : view.continuation.reason === "budget"
+              ? "本次连续执行已到边界，可检查结果后继续。"
+              : ["approval_required", "result_approval_required"].includes(view.continuation.reason)
+                ? "任务已停在需要你确认的位置，请处理下方待办。"
+                : "连续执行已停止，请核对当前步骤的结果与待办后继续。"}
+        </p>
+      )}
       {project.status === "active" &&
         view.preview?.state !== "expired" &&
         !["started", "cancel_requested", "unknown"].includes(operation?.status ?? "") && (
@@ -622,6 +774,23 @@ export function LocalProjectRun({
           打开“查看本次会话”可查看实时进度，处理文件修改等确认。确认后助手会继续执行。
         </p>
       )}
+      {canAddStageInstructions && (
+        <label className="block space-y-2 text-sm">
+          <span>本次阶段补充说明（可选）</span>
+          <textarea
+            aria-label="本次阶段补充说明（可选）"
+            maxLength={4000}
+            disabled={busy}
+            value={instructionsText}
+            onChange={(event) => setStageInstructions({ scope: instructionsScope, text: event.target.value })}
+            className="min-h-24 w-full rounded border bg-background p-2"
+          />
+          <span className="block text-muted-foreground">
+            仅用于下一次尝试的修订要求，原检查和审批仍会重新执行；不会改写上次失败记录。
+            填写后请点击“开始当前阶段”提交，不会自动启动。
+          </span>
+        </label>
+      )}
       <fieldset
         disabled={
           view.preview?.state === "expired" &&
@@ -629,6 +798,23 @@ export function LocalProjectRun({
         }
         className="flex flex-wrap gap-3 text-sm"
       >
+        {stage &&
+          !importedStage &&
+          !["started", "cancel_requested", "unknown"].includes(operation?.status ?? "") && (
+            <button
+              type="button"
+              disabled={busy || !packageFunctionsReady || Boolean(pendingStageInstructions)}
+              className="rounded border px-3 py-2 disabled:opacity-50"
+              onClick={() =>
+                void act(() => command({ kind: "continue", expectedVersion: project.version }))
+              }
+            >
+              连续执行至下一确认点
+            </button>
+          )}
+        {pendingStageInstructions && (
+          <p className="w-full text-muted-foreground">已有补充说明，请点击“开始当前阶段”；连续执行不会携带这份说明。</p>
+        )}
         {stage && !operation && (
           <>
             <button
@@ -637,12 +823,12 @@ export function LocalProjectRun({
               className="rounded border px-3 py-2 disabled:opacity-50"
               onClick={() => void act(() => prepareAnd("start"))}
             >
-              开始当前阶段
+              {validateImportedStage ? "重新验证导入成果" : "开始当前阶段"}
             </button>
             {canCheckFilesOnly && (
               <button
                 type="button"
-                disabled={busy}
+                disabled={busy || Boolean(pendingStageInstructions)}
                 className="underline disabled:opacity-50"
                 onClick={() => void act(() => prepareAnd("validate"))}
               >
@@ -712,7 +898,7 @@ export function LocalProjectRun({
                           }
                         : {})
                     })
-                    await command({ kind: "start", operationId: operation.operationId })
+                    await command({ kind: executionKind, operationId: operation.operationId })
                   })
                 }
               >
@@ -767,10 +953,12 @@ export function LocalProjectRun({
                 type="button"
                 disabled={busy || !packageFunctionsReady}
                 onClick={() =>
-                  void act(() => command({ kind: "start", operationId: operation.operationId }))
+                  void act(() =>
+                    command({ kind: executionKind, operationId: operation.operationId })
+                  )
                 }
               >
-                继续执行
+                {validateImportedStage ? "重新验证导入成果" : "继续执行"}
               </button>
               {canCheckFilesOnly && (
                 <button
@@ -787,7 +975,98 @@ export function LocalProjectRun({
               )}
             </>
           )}
-        {operation?.status === "succeeded" && (
+        {operation?.status === "succeeded" && resultApprovalRequired && !resultApproved && (
+          <div className="w-full space-y-2 rounded border p-3" aria-label="成果确认">
+            <p>
+              “{stage.title}
+              ”的检查已完成。请查看本阶段成果后决定是否接受；这与允许助手执行是两次不同的确认。
+            </p>
+            {operation.resultApproval?.decision === "rejected" && (
+              <>
+                <p>你已拒绝这版成果，流程尚未推进。</p>
+                {operation.resultApproval.feedback && (
+                  <p className="whitespace-pre-wrap break-words" aria-label="已保存的修改意见">
+                    已保存的修改意见：{operation.resultApproval.feedback}
+                  </p>
+                )}
+              </>
+            )}
+            <p className="text-xs text-muted-foreground">
+              确认绑定当前成果和检查记录，文件发生变化后需重新核对。
+            </p>
+            <label className="block space-y-1">
+              <span>修改意见（拒绝时保存，可选）</span>
+              <textarea
+                aria-label="成果修改意见"
+                className="block w-full rounded border bg-background p-2"
+                rows={3}
+                maxLength={4000}
+                disabled={busy}
+                readOnly={operation.resultApproval?.decision === "rejected"}
+                value={operation.resultApproval?.decision === "rejected"
+                  ? operation.resultApproval.feedback ?? "" : feedbackText}
+                onChange={(event) => setResultFeedback({ scope: feedbackScope, text: event.target.value })}
+                placeholder="说明需要修改的内容；不会改变原检查和权限要求。"
+              />
+              <span className="text-xs text-muted-foreground">
+                {operation.resultApproval?.decision === "rejected"
+                  ? "本次拒绝和意见已保存，不能改写；重新执行会保留这份记录。"
+                  : "最多 4000 字符，先拒绝保存再重新执行。"}
+              </span>
+            </label>
+            <button
+              type="button"
+              disabled={busy || !view.resultReview || Boolean(operation.resultApproval)}
+              className="rounded border px-3 py-2"
+              onClick={() =>
+                void act(() =>
+                  command({
+                    kind: "approve-result",
+                    operationId: operation.operationId,
+                    review: view.resultReview!,
+                    decision: "approved"
+                  })
+                )
+              }
+            >
+              接受当前成果
+            </button>
+            <button
+              type="button"
+              disabled={busy || !view.resultReview || Boolean(operation.resultApproval)}
+              className="ml-3 underline"
+              onClick={() =>
+                void act(() =>
+                  command({
+                    kind: "approve-result",
+                    operationId: operation.operationId,
+                    review: view.resultReview!,
+                    decision: "rejected",
+                    ...(feedbackText.trim() ? { feedback: feedbackText.trim() } : {})
+                  })
+                )
+              }
+            >
+              拒绝当前成果
+            </button>
+            {operation.resultApproval?.decision === "rejected" && !validateImportedStage && (
+              <div className="space-y-1">
+                <button
+                  type="button"
+                  disabled={busy || !packageFunctionsReady}
+                  className="rounded border px-3 py-2 disabled:opacity-50"
+                  onClick={() => void act(retryRejectedResult)}
+                >
+                  按修改意见重新执行
+                </button>
+                <p className="text-xs text-muted-foreground">
+                  使用已保存的意见创建新的本阶段操作，保留原检查和拒绝记录；需要执行确认时会再次停下。
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+        {operation?.status === "succeeded" && resultApproved && (
           <button
             type="button"
             disabled={busy}
@@ -891,6 +1170,14 @@ export function LocalProjectRun({
                 </button>
               )}
               {item.approval?.decision === "rejected" && <p>你已拒绝本次执行，可重新准备。</p>}
+              {item.stageInstructions && (
+                <p className="whitespace-pre-wrap break-words" aria-label="本次操作已保存的阶段补充说明">
+                  本次操作的阶段补充说明：{item.stageInstructions}
+                </p>
+              )}
+              {item.resultApproval?.decision === "rejected" && item.resultApproval.feedback && (
+                <p className="whitespace-pre-wrap break-words">成果修改意见：{item.resultApproval.feedback}</p>
+              )}
               {item.execution?.threadId &&
                 project.manifest.stages.some(
                   (stage) => stage.id === item.stageId && (stage.actionIds?.length ?? 0) > 0
@@ -916,11 +1203,17 @@ export function LocalProjectRun({
                   </p>
                 )
               })}
-              {item.status === "failed" && !item.receipts.length && (
-                <p className="mt-1 text-muted-foreground">
-                  本次步骤未完成；若已调用助手，请查看对应会话。核对问题详情和成果文件后可重新开始。
-                </p>
-              )}
+              <ProjectCheckDiagnostics terminal={item.execution?.terminal} />
+              {(item.status === "failed" || item.status === "unknown") &&
+                !item.receipts.length &&
+                !item.execution?.terminal?.checkDiagnostics?.length &&
+                (item.status === "failed" ||
+                  projectRuntimeRecoveryMessage(item.execution?.terminal?.code ?? "")) && (
+                  <p aria-label="本次步骤问题说明" className="mt-1 text-muted-foreground">
+                    {projectRuntimeRecoveryMessage(item.execution?.terminal?.code ?? "") ??
+                      "本次步骤未完成；若已调用助手，请查看对应会话。核对问题详情和成果文件后可重新开始。"}
+                  </p>
+                )}
             </li>
           ))}
         </ul>
@@ -950,7 +1243,9 @@ export function LocalProjectRun({
         <summary className="cursor-pointer">任务配置与版本</summary>
         <p className="mt-2 break-all">工作目录：{project.workspace}</p>
         <p>固定模板版本：{project.packageVersion}。插件更新不会替换本任务的模板副本。</p>
-        <p className="mt-1">停止执行不撤销已写入的文件；检查通过后仍需点击进入下一阶段。</p>
+        <p className="mt-1">
+          停止执行不撤销已写入的文件。连续执行会在需要确认、执行失败或结果待核对时停下。
+        </p>
         <p className="mt-1">
           阶段会话用于回看过程。需要重试时从本任务开始，继续使用固定版本和检查规则。
         </p>
@@ -977,6 +1272,40 @@ export function LocalProjectRun({
               <p key={index}>{line}</p>
             ))}
             <p>{versions.guidance}</p>
+          </div>
+        )}
+        {!view.preview && project.status === "active" && (
+          <div className="mt-3 space-y-2">
+            <button
+              type="button"
+              className="underline"
+              disabled={busy || !!operation}
+              onClick={() =>
+                void act(() => command({ kind: "review-plan", expectedVersion: project.version }))
+              }
+            >
+              检查是否可采用已安装插件的新步骤
+            </button>
+            <p>
+              仅在无活动任务且已完成阶段的规则、技能与成果保持有效时，允许替换后续步骤。需要恢复适配的外部动作会明确阻止迁移。
+            </p>
+            {view.migrationReview && (
+              <div className="rounded border p-2" aria-label="步骤更新确认">
+                <p>目标插件版本：{view.migrationReview.targetVersion}</p>
+                <p>保留已完成阶段：{view.migrationReview.preservedStageIds.join(" → ") || "无"}</p>
+                <p>后续阶段：{view.migrationReview.remainingStageIds.join(" → ")}</p>
+                <button
+                  type="button"
+                  className="mt-2 underline"
+                  disabled={busy}
+                  onClick={() =>
+                    void act(() => command({ kind: "migrate-plan", review: view.migrationReview! }))
+                  }
+                >
+                  确认更新后续步骤
+                </button>
+              </div>
+            )}
           </div>
         )}
       </details>

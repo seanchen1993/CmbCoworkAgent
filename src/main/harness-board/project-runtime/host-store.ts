@@ -3,6 +3,8 @@ import { mkdirSync } from "node:fs"
 import { dirname, isAbsolute, resolve } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import type { ProjectWorkspaceModeGuard } from "./workspace-mode-guard"
+import { parseHostLegacyImportReceipt } from "./legacy-import-protocol"
+import { effectiveHostResultApproval } from "../../../shared/project-runtime/import-approval-policy"
 import type {
   HostActionPrepareInput,
   HostActionResult,
@@ -10,8 +12,14 @@ import type {
   HostProjectCreateInput,
   HostProjectOperation,
   HostProjectState,
-  HostContextProviderApproval
+  HostContextProviderApproval,
+  HostResultApprovalInput,
+  HostResultReview
 } from "../../../shared/project-runtime/host-types"
+import type { HostExecutionTerminal } from "../../../shared/project-runtime/host-types"
+import { parseHostCheckDiagnostics } from "./host-check-diagnostics"
+import { captureHostResultFeedbackSource } from "./host-result-feedback"
+import type { HostLegacyImportReceipt } from "../../../shared/project-runtime/host-types"
 import {
   hostDigest,
   hostInteger,
@@ -22,7 +30,11 @@ import {
   parseHostProjectState,
   parseHostReceipt,
   parseHostContextProvider,
-  parseHostContextProviderApproval
+  parseHostContextProviderApproval,
+  hostResultReview,
+  assertHostResultReview,
+  parseHostResultFeedback,
+  parseHostStageInstructions
 } from "./host-state-protocol"
 
 const ACTIVE_STATUSES = ["prepared", "started", "cancel_requested", "succeeded", "unknown"]
@@ -56,6 +68,13 @@ export class HostProjectStore {
           );
           CREATE UNIQUE INDEX IF NOT EXISTS host_one_active_operation ON host_operations(project_id)
             WHERE status IN ('prepared','started','cancel_requested','succeeded','unknown');
+          CREATE TABLE IF NOT EXISTS host_plan_migrations (
+            project_id TEXT NOT NULL REFERENCES host_projects(id), version INTEGER NOT NULL,
+            data TEXT NOT NULL, PRIMARY KEY(project_id,version)
+          );
+          CREATE TABLE IF NOT EXISTS host_legacy_imports (
+            project_id TEXT PRIMARY KEY REFERENCES host_projects(id), data TEXT NOT NULL
+          );
         `)
         const schema = this.db
           .prepare("SELECT value FROM project_runtime_meta WHERE key='schema'")
@@ -121,6 +140,10 @@ export class HostProjectStore {
       .prepare("SELECT id,project_id,idempotency_key,status,data FROM host_operations WHERE id=?")
       .get(hostText(operationId))
     if (!row) return undefined
+    return this.parseOperationRow(row)
+  }
+
+  private parseOperationRow(row: Record<string, unknown>): HostProjectOperation {
     const operation = parseHostOperation(JSON.parse(String(row.data)))
     if (
       operation.operationId !== row.id ||
@@ -141,6 +164,18 @@ export class HostProjectStore {
       .map((row) => this.requireOperation(String(row.id)))
   }
 
+  /** Preserve the original twenty-row admission window and fail closed on any invalid row.
+   * Read once without constructing UI facts, diagnostics or issuing one SQL read per operation.
+   */
+  getRecentBindingOperation(projectId: string, operationId: string): HostProjectOperation | undefined {
+    const rows = this.db.prepare(
+      "SELECT id,project_id,idempotency_key,status,data FROM host_operations " +
+      "WHERE project_id=? ORDER BY rowid DESC LIMIT 20"
+    ).all(hostText(projectId))
+    const operations = rows.map(row => this.parseOperationRow(row))
+    return operations.find(operation => operation.operationId === operationId)
+  }
+
   findOperation(projectId: string, idempotencyKey: string): HostProjectOperation | undefined {
     const row = this.db
       .prepare("SELECT id FROM host_operations WHERE project_id=? AND idempotency_key=?")
@@ -152,13 +187,84 @@ export class HostProjectStore {
     return this.createAtStage(input)
   }
 
-  /** Main-only branch construction after service-owned baseline admission, never a stage advance. */
-  createBranch(input: HostProjectCreateInput, stageId: string): HostProjectState {
-    hostText(stageId)
-    return this.createAtStage(input, stageId)
+  /** Stable boundary only; never cancels a live/unknown operation in order to permit migration. */
+  assertPlanMigrationBoundary(projectId: string, expectedVersion: number): HostProjectState {
+    const project = this.requireProject(projectId)
+    this.assertImportPrefixComplete(projectId)
+    if (project.version !== expectedVersion || project.status !== "active") hostStateError("VERSION_CONFLICT")
+    this.assertWorkspaceAvailable(project)
+    return project
   }
 
-  private createAtStage(input: HostProjectCreateInput, stageId?: string): HostProjectState {
+  lastStageTransition(projectId: string, stageId: string) {
+    const row = this.db.prepare(`SELECT id,transition_result FROM host_operations
+      WHERE project_id=? AND status='transitioned' AND json_extract(data,'$.stageId')=?
+      ORDER BY rowid DESC LIMIT 1`).get(hostText(projectId), hostText(stageId))
+    if (!row || typeof row.transition_result !== "string") hostStateError("PLAN_MIGRATION_HISTORY_MISSING")
+    return { operation: this.requireOperation(String(row.id)),
+      project: parseHostProjectState(JSON.parse(row.transition_result)) }
+  }
+
+  commitPlanMigration(candidate: HostProjectState, expectedVersion: number,
+    review: import("../../../shared/project-runtime/host-types").HostPlanMigrationReview,
+    assertCurrent: () => void): HostProjectState {
+    return this.transaction(() => {
+      const current = this.assertPlanMigrationBoundary(candidate.projectId, expectedVersion)
+      const next = parseHostProjectState({ ...current,
+        packageVersion: candidate.packageVersion, pluginDigest: candidate.pluginDigest,
+        manifest: candidate.manifest, version: current.version + 1, updatedAt: this.now() })
+      if (review.projectId !== current.projectId || review.expectedVersion !== current.version ||
+        review.sourceDigest !== current.pluginDigest || review.targetDigest !== next.pluginDigest ||
+        review.targetVersion !== next.packageVersion || next.stageIndex >= next.manifest.stages.length)
+        hostStateError("PLAN_MIGRATION_REVIEW_CHANGED")
+      assertCurrent()
+      this.assertImportPrefixComplete(current.projectId)
+      this.db.prepare("INSERT INTO host_plan_migrations(project_id,version,data) VALUES (?,?,?)")
+        .run(next.projectId, next.version, JSON.stringify({ review, previous: current, next, actor: "desktop-user" }))
+      const result = this.db.prepare("UPDATE host_projects SET version=?,data=? WHERE id=? AND version=?")
+        .run(next.version, JSON.stringify(next), next.projectId, expectedVersion)
+      if (result.changes !== 1) hostStateError("VERSION_CONFLICT")
+      return next
+    }, candidate.workspace)
+  }
+
+  /** Main-only branch construction after service-owned baseline admission, never a stage advance. */
+  createBranch(input: HostProjectCreateInput, stageId: string,
+    source: { projectId: string; expectedVersion: number }): HostProjectState {
+    hostText(stageId)
+    return this.createAtStage(input, stageId, undefined, () => {
+      const project = this.requireProject(hostText(source.projectId))
+      if (project.version !== source.expectedVersion) hostStateError("BRANCH_SOURCE_CHANGED")
+      this.assertImportPrefixComplete(project.projectId, stageId)
+    })
+  }
+  /** Import review remains mandatory until every original prefix stage has crossed its new gates. */
+  assertImportPrefixComplete(projectId: string, branchStageId?: string): void {
+    const receipt = this.importedSource(projectId)
+    if (receipt?.review.protocol !== "devclaw.host-legacy-import/v2") return
+    const project = this.requireProject(projectId)
+    if (project.stageIndex < receipt.review.prefixStageIds.length ||
+      receipt.review.prefixStageIds.some((id, index) => project.manifest.stages[index]?.id !== id))
+      hostStateError("IMPORT_REVALIDATION_PENDING")
+    if (branchStageId && receipt.review.prefixStageIds.includes(branchStageId))
+      hostStateError("IMPORT_PREFIX_BRANCH_UNSUPPORTED")
+  }
+  importedSource(projectId: string): HostLegacyImportReceipt | undefined {
+    const row = this.db.prepare("SELECT data FROM host_legacy_imports WHERE project_id=?").get(projectId)
+    if (!row) return undefined
+    const receipt = parseHostLegacyImportReceipt(JSON.parse(String(row.data)))
+    if (receipt.review.target.projectId !== projectId) hostStateError("IMPORT_RECEIPT_INVALID")
+    return receipt
+  }
+  createImported(input: HostProjectCreateInput, receipt: HostLegacyImportReceipt): HostProjectState {
+    receipt = parseHostLegacyImportReceipt(receipt)
+    if (receipt.review.target.projectId !== input.projectId || receipt.review.targetDigest !== input.pluginDigest)
+      hostStateError("IMPORT_TARGET_CHANGED")
+    return this.createAtStage(input, undefined, receipt)
+  }
+
+  private createAtStage(input: HostProjectCreateInput, stageId?: string, receipt?: HostLegacyImportReceipt,
+    assertSource?: () => void): HostProjectState {
     hostRecord(input, [
       "projectId",
       "name",
@@ -189,10 +295,13 @@ export class HostProjectStore {
       state = parseHostProjectState({ ...state, stageIndex })
     }
     return this.transaction(() => {
+      assertSource?.()
       if (this.get(state.projectId)) hostStateError("PROJECT_EXISTS")
       this.db
         .prepare("INSERT INTO host_projects(id,version,data) VALUES (?,?,?)")
         .run(state.projectId, state.version, JSON.stringify(state))
+      if (receipt) this.db.prepare("INSERT INTO host_legacy_imports VALUES (?,?)")
+        .run(state.projectId, JSON.stringify(receipt))
       return state
     }, state.workspace)
   }
@@ -205,7 +314,8 @@ export class HostProjectStore {
       "stageId",
       "idempotencyKey",
       "inputFingerprint",
-      ...(Object.hasOwn(input, "contextProvider") ? ["contextProvider"] : [])
+      ...(Object.hasOwn(input, "contextProvider") ? ["contextProvider"] : []),
+      ...(Object.hasOwn(input, "stageInstructions") ? ["stageInstructions"] : [])
     ])
     hostText(input.projectId)
     hostInteger(input.expectedVersion, 1)
@@ -213,6 +323,10 @@ export class HostProjectStore {
     hostText(input.idempotencyKey)
     hostDigest(input.inputFingerprint)
     if (Object.hasOwn(input, "contextProvider")) parseHostContextProvider(input.contextProvider)
+    const stageInstructions = parseHostStageInstructions(input.stageInstructions)
+    input = { ...input }
+    delete input.stageInstructions
+    if (stageInstructions) input.stageInstructions = stageInstructions
     return this.transaction(() => {
       const previous = this.db
         .prepare("SELECT id FROM host_operations WHERE project_id=? AND idempotency_key=?")
@@ -223,6 +337,7 @@ export class HostProjectStore {
           operation.expectedVersion !== input.expectedVersion ||
           operation.stageId !== input.stageId ||
           operation.inputFingerprint !== input.inputFingerprint ||
+          operation.stageInstructions !== stageInstructions ||
           JSON.stringify(operation.contextProvider) !== JSON.stringify(input.contextProvider)
         )
           hostStateError("IDEMPOTENCY_CONFLICT")
@@ -251,8 +366,11 @@ export class HostProjectStore {
         startedAt: null,
         execution: null,
         approval: null,
+        resultApproval: null,
         receipts: []
       }
+      const feedbackSource = captureHostResultFeedbackSource(operation, this.listOperations(state.projectId, 200))
+      if (feedbackSource) operation.resultFeedbackSource = feedbackSource
       this.db
         .prepare(
           "INSERT INTO host_operations(id,project_id,idempotency_key,status,data) VALUES (?,?,?,?,?)"
@@ -360,6 +478,26 @@ export class HostProjectStore {
     })
   }
 
+  /** Main-only checkpoint continuation; never retries an unknown action or creates another operation. */
+  resumeInterrupted(operationId: string, currentInputFingerprint: string): HostExecutionTicket {
+    return this.transaction(() => {
+      const operation = this.requireOperation(operationId)
+      const state = this.requireProject(operation.projectId)
+      this.assertCurrent(state, operation)
+      this.assertInput(operation, currentInputFingerprint)
+      this.assertApproval(state, operation)
+      if (operation.status !== "unknown" || operation.cancelRequestedAt !== null ||
+        !operation.execution || operation.receipts.length ||
+        (operation.execution.terminal && operation.execution.terminal.code !== "host_user_input_waiting"))
+        hostStateError("INPUT_RESUME_UNSAFE")
+      this.assertWorkspaceAvailable(state, operationId)
+      operation.status = "started"
+      operation.execution.terminal = null
+      this.saveOperation(operation)
+      return this.issueTicket(operation)
+    }, this.requireProject(this.requireOperation(operationId).projectId).workspace)
+  }
+
   bindExecutionThread(ticket: HostExecutionTicket, threadId: string): void {
     this.transaction(() => {
       const operation = this.requireTicket(ticket)
@@ -372,10 +510,7 @@ export class HostProjectStore {
 
   recordExecutionTerminal(
     ticket: HostExecutionTicket,
-    terminal: {
-      outcome: "success" | "error" | "unknown" | "cancelled"
-      code: string
-    }
+    terminal: HostExecutionTerminal
   ): void {
     this.transaction(() => {
       const operation = this.requireTicket(ticket)
@@ -385,12 +520,71 @@ export class HostProjectStore {
         operation.execution.terminal
       )
         hostStateError("EXECUTION_TERMINAL_INVALID")
-      operation.execution.terminal = { ...terminal, settledAt: this.now() }
+      const diagnostics = terminal.checkDiagnostics && parseHostCheckDiagnostics(terminal.checkDiagnostics)
+      const project = this.requireProject(operation.projectId)
+      if (diagnostics && (terminal.outcome !== "error" || diagnostics.some(item =>
+        item.inputFingerprint !== operation.inputFingerprint ||
+        !project.manifest.stages[project.stageIndex].checkIds.includes(item.checkId) ||
+        !project.manifest.checks.some(check => check.id === item.checkId &&
+          check.kind === "action" && check.actionId === item.actionId) ||
+        !project.manifest.actions.some(action => action.id === item.actionId &&
+          action.ref.pluginId === item.provider.pluginId && action.ref.plugin === item.provider.plugin &&
+          action.ref.digest === item.provider.digest && action.ref.actionId === item.provider.actionId))))
+        hostStateError("CHECK_DIAGNOSTICS_INVALID")
+      operation.execution.terminal = { ...terminal,
+        ...(diagnostics ? { checkDiagnostics: diagnostics } : {}), settledAt: this.now() }
       this.saveOperation(operation)
     })
   }
 
-  transition(operationId: string, currentInputFingerprint: string): HostProjectState {
+  decideResultApproval(operationId: string, input: HostResultApprovalInput): HostProjectOperation {
+    hostRecord(input, [
+      "operationId",
+      "expectedVersion",
+      "inputFingerprint",
+      "pluginDigest",
+      "artifactFingerprint",
+      "receiptFingerprint",
+      "policyDigest",
+      "decision",
+      "actorId",
+      ...(Object.hasOwn(input, "feedback") ? ["feedback"] : [])
+    ])
+    const feedback = parseHostResultFeedback(input.feedback, input.decision)
+    if (feedback && input.actorId !== "desktop-user") hostStateError("RESULT_FEEDBACK_INVALID")
+    return this.transaction(() => {
+      const operation = this.requireOperation(operationId)
+      const state = this.requireProject(operation.projectId)
+      this.assertCurrent(state, operation)
+      if (operation.status !== "succeeded") hostStateError("VALIDATION_REQUIRED")
+      if (!effectiveHostResultApproval(state.manifest.stages[state.stageIndex], this.importedSource(state.projectId)))
+        hostStateError("RESULT_APPROVAL_NOT_REQUIRED")
+      assertHostResultReview(hostResultReview(state, operation, input.artifactFingerprint, this.importedSource(state.projectId)), input)
+      if (!["approved", "rejected"].includes(input.decision)) hostStateError("SCHEMA_INVALID")
+      hostText(input.actorId)
+      if (operation.resultApproval) {
+        assertHostResultReview(operation.resultApproval, input)
+        if (
+          operation.resultApproval.decision !== input.decision ||
+          operation.resultApproval.actorId !== input.actorId ||
+          operation.resultApproval.feedback !== feedback
+        )
+          hostStateError("RESULT_APPROVAL_ALREADY_DECIDED")
+        return operation
+      }
+      operation.resultApproval = { ...input, decidedAt: this.now() }
+      delete operation.resultApproval.feedback
+      if (feedback) operation.resultApproval.feedback = feedback
+      // Rejection is a business decision about an existing result, not a failed execution.
+      return this.saveOperation(operation)
+    })
+  }
+
+  transition(
+    operationId: string,
+    currentInputFingerprint: string,
+    currentResultReview?: HostResultReview
+  ): HostProjectState {
     return this.transaction(() => {
       const operation = this.requireOperation(operationId)
       const state = this.requireProject(operation.projectId)
@@ -406,6 +600,15 @@ export class HostProjectStore {
       this.assertApproval(state, operation)
       if (operation.status !== "succeeded") hostStateError("VALIDATION_REQUIRED")
       const stage = state.manifest.stages[state.stageIndex]
+      if (effectiveHostResultApproval(stage, this.importedSource(state.projectId))) {
+        if (operation.resultApproval?.decision !== "approved" || !currentResultReview)
+          hostStateError("RESULT_APPROVAL_REQUIRED")
+        assertHostResultReview(
+          hostResultReview(state, operation, currentResultReview.artifactFingerprint, this.importedSource(state.projectId)),
+          currentResultReview
+        )
+        assertHostResultReview(currentResultReview, operation.resultApproval)
+      }
       if (
         stage.checkIds.some(
           (checkId) =>
@@ -481,8 +684,10 @@ export class HostProjectStore {
   /** Host-owned read/check callback; it must inspect outcomes, never rerun the original action. */
   async reconcile(
     operationId: string,
-    inspect: (operation: HostProjectOperation, state: HostProjectState) => Promise<HostActionResult>
+    inspect: (operation: HostProjectOperation, state: HostProjectState) => Promise<HostActionResult>,
+    assertAuthority?: () => void
   ): Promise<HostProjectOperation> {
+    assertAuthority?.()
     const nonce = randomUUID()
     const prepared = this.transaction(() => {
       const operation = this.requireOperation(operationId)
@@ -499,6 +704,7 @@ export class HostProjectStore {
         structuredClone(prepared.state)
       )
       return this.transaction(() => {
+        assertAuthority?.()
         const row = this.db
           .prepare("SELECT owner_nonce FROM host_operations WHERE id=?")
           .get(operationId)
