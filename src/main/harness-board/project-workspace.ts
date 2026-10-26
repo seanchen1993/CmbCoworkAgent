@@ -24,14 +24,14 @@ export async function assertEmptyProjectDirectory(projectPath: string): Promise<
     throw new Error("项目工作区文件夹不存在或无法访问，请重新选择")
   }
   if (!info.isDirectory()) {
-    throw new Error("请选择文件夹作为项目工作区")
+    throw new Error("请选择空文件夹作为插件工作区")
   }
   if ((await readdir(projectPath)).length > 0) {
-    throw new Error("项目工作区文件夹必须为空，不能包含隐藏文件或文件夹")
+    throw new Error("插件工作区必须为空，不能包含隐藏文件或文件夹")
   }
   try {
     await access(projectPath, constants.W_OK)
   } catch {
-    throw new Error("项目工作区文件夹不可写，请选择其他文件夹")
+    throw new Error("插件工作区不可写，请选择其他文件夹")
   }
 }

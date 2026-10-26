@@ -29,20 +29,20 @@ export function ProjectWorkspaceField({
   return (
     <div className="mt-3 grid min-w-0 gap-1.5 text-xs font-medium text-muted-foreground">
       <div className="flex items-center gap-1">
-        <span id={`${id}-label`}>项目工作区文件夹 *</span>
+        <span id={`${id}-label`}>插件工作区 *</span>
         <TooltipProvider delayDuration={150}>
           <Tooltip>
             <TooltipTrigger asChild>
               <button
                 type="button"
-                aria-label="项目工作区文件夹说明"
+                aria-label="插件工作区文件夹说明"
                 className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <Info className="size-3.5" />
               </button>
             </TooltipTrigger>
             <TooltipContent side="top" className="z-[70] max-w-72">
-              插件工作区，存放 spec.md、plan.md，非代码/会话路径
+              存放 spec.md、plan.md等插件运行产物，非代码仓库路径
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>
@@ -58,7 +58,7 @@ export function ProjectWorkspaceField({
           aria-labelledby={`${id}-label`}
           title={projectPath || undefined}
         >
-          {projectPath || "选择空文件夹作为项目工作区"}
+          {projectPath || "选择空文件夹作为插件工作区"}
         </div>
         {!readOnly && (
           <Button
