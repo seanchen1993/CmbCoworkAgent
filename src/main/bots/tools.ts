@@ -1,6 +1,6 @@
 import { tool } from "langchain"
 import { z } from "zod"
-import { isMemoryEnabled } from "../storage"
+import { isBotMemoryEnabled } from "./memory-policy"
 import type { DynamicStructuredTool } from "@langchain/core/tools"
 import { ToolMessage } from "@langchain/core/messages"
 import { basename, isAbsolute } from "node:path"
@@ -776,7 +776,7 @@ export function createBotMemoryTools(
 ): DynamicStructuredTool[] {
   const check = () => {
     signal.throwIfAborted()
-    if (!isMemoryEnabled()) throw new Error("长期记忆已在设置中关闭")
+    if (!isBotMemoryEnabled(bot)) throw new Error("此 Bot 的长期记忆已关闭")
   }
   // Like Bot delivery/browser tools, return an error ToolMessage before the
   // original Runtime's compatibility wrapper can turn a thrown error into success text.

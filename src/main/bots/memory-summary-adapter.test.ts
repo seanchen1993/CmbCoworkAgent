@@ -34,6 +34,7 @@ vi.mock("../memory/summarizer", () => ({ summarizeAndSave: fixture.extraction })
 import { createBotMemoryMaintainer } from "./memory-summary-adapter"
 import { BotMemoryService } from "./memory"
 import { SelectedModelUnavailableError } from "../models/selection-error"
+import { isBotMemoryEnabled } from "./memory-policy"
 
 const turn = {
   botId: "a",
@@ -70,6 +71,81 @@ const preference = {
 }
 
 describe("Bot automatic memory verification", () => {
+  it.each([
+    ["enabled", false, true],
+    ["disabled", true, false],
+    ["inherit", false, false],
+    ["inherit", true, true]
+  ] as const)(
+    "uses Bot memory %s over global %s before extraction and commit",
+    async (memoryMode, global, enabled) => {
+      fixture.enabled = global
+      const root = mkdtempSync(join(tmpdir(), "bot-memory-policy-"))
+      const memory = new BotMemoryService(root)
+      fixture.extraction.mockImplementation(async (options) => options.apply([preference]))
+      const maintainer = createBotMemoryMaintainer(
+        memory,
+        () => true,
+        () => isBotMemoryEnabled({ memoryMode })
+      )
+      try {
+        maintainer.enqueue({ ...turn, editVersion: 0 })
+        await tick()
+        expect(fixture.extraction).toHaveBeenCalledTimes(enabled ? 1 : 0)
+        expect(fixture.verify).toHaveBeenCalledTimes(enabled ? 1 : 0)
+        expect(memory.list("a")).toHaveLength(enabled ? 1 : 0)
+      } finally {
+        await maintainer.close()
+        await memory.close()
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+  )
+
+  it.each(["disabled", "enabled-again"] as const)(
+    "discards an in-flight summary after Bot memory is %s",
+    async (change) => {
+      const root = mkdtempSync(join(tmpdir(), "bot-memory-policy-change-"))
+      const memory = new BotMemoryService(root)
+      let version = 1
+      let enabled = true
+      let finish!: () => void
+      let started!: () => void
+      const pending = new Promise<void>((resolve) => (started = resolve))
+      fixture.extraction.mockImplementation(async (options) => options.apply([preference]))
+      fixture.verify.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = () => resolve({ content: approval() })
+            started()
+          })
+      )
+      const maintainer = createBotMemoryMaintainer(
+        memory,
+        (_id, expected) => expected === version,
+        () => enabled
+      )
+      try {
+        maintainer.enqueue({ ...turn, editVersion: 0, botVersion: version })
+        await pending
+        enabled = false
+        version++
+        if (change === "enabled-again") {
+          enabled = true
+          version++
+        }
+        finish()
+        await tick()
+        expect(memory.list("a")).toEqual([])
+      } finally {
+        finish?.()
+        await maintainer.close()
+        await memory.close()
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+  )
+
   it.each([false, true])(
     "runs the original extractor before an independent approval of %s",
     async (approved) => {

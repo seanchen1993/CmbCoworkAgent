@@ -28,6 +28,55 @@ afterEach(async () => {
 })
 
 describe("Bot control state", () => {
+  it("upgrades old Bots to inherited memory and preserves explicit overrides across older-client edits and reopening", () => {
+    const raw = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    databases.push(raw)
+    raw.run(`CREATE TABLE bots (
+      id TEXT PRIMARY KEY, thread_id TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
+      instructions TEXT NOT NULL, model_ref TEXT, color TEXT NOT NULL,
+      archived INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    INSERT INTO bots VALUES ('legacy', 'legacy-thread', 'Legacy', '', NULL, '#123456', 0, 1, 1, 1)`)
+    const db = new BotStore(raw)
+    const legacy = db.getBot("legacy")
+    expect(legacy.memoryMode).toBe("inherit")
+    const enabled = db.create(parseCreateBot({ ...input, memoryMode: "enabled" }))
+    const disabled = db.update(
+      parseUpdateBot({
+        ...legacy,
+        expectedVersion: legacy.version,
+        memoryMode: "disabled"
+      })
+    )
+    // An older client sends no field: a rename must not silently reset the override.
+    const oldClient = { ...disabled }
+    delete oldClient.memoryMode
+    const renamed = db.update(
+      parseUpdateBot({
+        ...oldClient,
+        name: "Renamed",
+        expectedVersion: disabled.version
+      })
+    )
+    expect(renamed.memoryMode).toBe("disabled")
+    expect(new BotStore(raw).getBot(enabled.id).memoryMode).toBe("enabled")
+    expect(new BotStore(raw).getBot(renamed.id).memoryMode).toBe("disabled")
+    expect(db.create(input).memoryMode).toBe("inherit")
+    expect(() =>
+      db.update({ ...renamed, expectedVersion: disabled.version, memoryMode: "inherit" })
+    ).toThrow("已被修改")
+    expect(
+      db.update({ ...renamed, expectedVersion: renamed.version, memoryMode: "inherit" }).memoryMode
+    ).toBe("inherit")
+    for (const value of [null, true, "on", ""]) {
+      expect(() => parseCreateBot({ ...input, memoryMode: value })).toThrow("长期记忆")
+      expect(() =>
+        parseUpdateBot({ ...renamed, expectedVersion: renamed.version, memoryMode: value })
+      ).toThrow("长期记忆")
+    }
+  })
+
   it.each(["reject", "throw"] as const)(
     "reports browser member cleanup %s without reverting durable membership",
     async (mode) => {

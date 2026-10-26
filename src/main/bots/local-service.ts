@@ -17,6 +17,7 @@ import { BotBrowserService } from "./browser"
 import { startElectronBotBrowser } from "./electron-browser-engine"
 import { botDirectory } from "./paths"
 import { createBotMemoryMaintainer } from "./memory-summary-adapter"
+import { isBotMemoryEnabled } from "./memory-policy"
 import type { BotMemoryMaintainer } from "./memory-maintainer"
 import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
 import { setWorkConversationLookup } from "./conversation-link-authority"
@@ -86,15 +87,20 @@ export function getLocalBotHost(): LocalBotHost {
     "Bots"
   ).database
   try {
-    summaries ??= createBotMemoryMaintainer(getBotMemoryService(), (id) => {
-      if (shutdown || !host) return false
-      try {
-        // Eligibility needs one Bot, not a snapshot of every queue, group and schedule.
-        return !host.getBot(id).archived
-      } catch {
-        return false
-      }
-    })
+    summaries ??= createBotMemoryMaintainer(
+      getBotMemoryService(),
+      (id, version) => {
+        if (shutdown || !host) return false
+        try {
+          // A settings change also invalidates an already queued/in-flight summary.
+          const bot = host.getBot(id)
+          return !bot.archived && (version === undefined || bot.version === version)
+        } catch {
+          return false
+        }
+      },
+      (id) => isBotMemoryEnabled(host!.getBot(id))
+    )
     host = new LocalBotHost(
       new BotStore(
         database,

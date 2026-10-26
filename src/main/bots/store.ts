@@ -286,6 +286,8 @@ export class BotStore {
         db.run("ALTER TABLE bots ADD COLUMN deleting INTEGER NOT NULL DEFAULT 0")
       if (!this.rows("PRAGMA table_info(bots)").some((column) => column.name === "label"))
         db.run("ALTER TABLE bots ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+      if (!this.rows("PRAGMA table_info(bots)").some((column) => column.name === "memory_mode"))
+        db.run("ALTER TABLE bots ADD COLUMN memory_mode TEXT NOT NULL DEFAULT 'inherit'")
       if (
         !this.rows("PRAGMA table_info(bots)").some(
           (column) => column.name === "introduction_pending"
@@ -590,6 +592,7 @@ export class BotStore {
       name: String(row.name),
       instructions: String(row.instructions),
       modelRef: row.model_ref == null ? null : String(row.model_ref),
+      memoryMode: (row.memory_mode ?? "inherit") as BotDefinition["memoryMode"],
       color: String(row.color),
       shape: row.shape as BotDefinition["shape"],
       label: String(row.label ?? ""),
@@ -1062,8 +1065,8 @@ export class BotStore {
       }
       const now = this.now()
       this.db.run(
-        `INSERT INTO bots (id, thread_id, name, instructions, model_ref, color, shape, label, created_at, updated_at, introduction_pending)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        `INSERT INTO bots (id, thread_id, name, instructions, model_ref, color, shape, label, memory_mode, created_at, updated_at, introduction_pending)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         [
           id,
           randomUUID(),
@@ -1073,6 +1076,7 @@ export class BotStore {
           input.color,
           input.shape ?? "drop",
           input.label ?? "",
+          input.memoryMode ?? "inherit",
           now,
           now
         ]
@@ -1154,7 +1158,7 @@ export class BotStore {
       )
         throw new BotError("CONFLICT", "请先停止后台任务并等待退出，再归档 Bot")
       this.db.run(
-        `UPDATE bots SET name=?, instructions=?, model_ref=?, color=?, shape=?, label=?, archived=?,
+        `UPDATE bots SET name=?, instructions=?, model_ref=?, color=?, shape=?, label=?, memory_mode=?, archived=?,
         version=version+1, updated_at=? WHERE id=?`,
         [
           input.name,
@@ -1163,6 +1167,7 @@ export class BotStore {
           input.color,
           input.shape ?? bot.shape ?? "drop",
           input.label ?? bot.label ?? "",
+          input.memoryMode ?? bot.memoryMode ?? "inherit",
           input.archived,
           this.now(),
           bot.id

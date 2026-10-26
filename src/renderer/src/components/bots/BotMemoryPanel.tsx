@@ -9,17 +9,23 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
-import type { BotClient, BotDefinition, BotMemory } from "../../../../shared/bots/contracts"
+import type {
+  BotClient,
+  BotDefinition,
+  BotMemory,
+  BotMemoryMode
+} from "../../../../shared/bots/contracts"
 
 export function BotMemoryPanel({
-  botId,
+  bot,
   client,
   peers
 }: {
-  botId: string
+  bot: BotDefinition
   client: BotClient
   peers: BotDefinition[]
 }) {
+  const botId = bot.id
   const [entries, setEntries] = useState<BotMemory[] | null>(null)
   const [editing, setEditing] = useState<BotMemory | "new" | null>(null)
   const [name, setName] = useState("")
@@ -106,6 +112,20 @@ export function BotMemoryPanel({
       if (mounted.current) setBusy(false)
     }
   }
+  const changeMemoryMode = async (memoryMode: BotMemoryMode) => {
+    if (lock.current) return
+    lock.current = true
+    setBusy(true)
+    setError(null)
+    try {
+      await client.update({ ...bot, memoryMode, expectedVersion: bot.version })
+    } catch (cause) {
+      if (mounted.current) setError(botErrorMessage(cause, "设置保存失败"))
+    } finally {
+      lock.current = false
+      if (mounted.current) setBusy(false)
+    }
+  }
   return (
     <section className="bot-detail-section">
       <div className="mb-4 flex items-center justify-between">
@@ -118,6 +138,27 @@ export function BotMemoryPanel({
         >
           <Plus size={16} />
         </button>
+      </div>
+      <div className="mb-4 space-y-2">
+        <p className="text-sm font-medium">长期记忆</p>
+        <Select
+          value={bot.memoryMode ?? "inherit"}
+          disabled={busy}
+          onValueChange={(value) => void changeMemoryMode(value as BotMemoryMode)}
+        >
+          <SelectTrigger aria-label="长期记忆">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="inherit">跟随全局设置</SelectItem>
+            <SelectItem value="enabled">开启</SelectItem>
+            <SelectItem value="disabled">关闭</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          单独开启或关闭优先于全局设置，仅影响此 Bot 的私有记忆。
+          关闭后停止读取和自动保存，已有记忆仍可手动管理。
+        </p>
       </div>
       <p className="mb-4 text-xs text-muted-foreground">
         此 Bot 保存的偏好和经验。你可以随时修改或删除。

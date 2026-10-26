@@ -68,7 +68,7 @@ import {
 import { buildBotPrompt, buildBotStoppedTaskPrompt } from "./prompt"
 import { hasBotWorkflowCapability } from "../agent/workflow/bot-capability"
 import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry"
-import { isMemoryEnabled } from "../storage"
+import { isBotMemoryEnabled } from "./memory-policy"
 import { isBotRoutineSilent } from "../../shared/bots/routine-silence"
 import { isBotGroupPass } from "../../shared/bots/group-discussion"
 import { withCheckpointer } from "../agent/runtime"
@@ -945,7 +945,7 @@ export function createLocalBotRunPort(
                     bot,
                     task,
                     workspacePath,
-                    !mock && !reporting && !botTaskGroupId(task) && isMemoryEnabled()
+                    !mock && !reporting && !botTaskGroupId(task) && isBotMemoryEnabled(bot)
                       ? memory.forPrompt(bot.id)
                       : [],
                     work?.goal
@@ -1095,7 +1095,9 @@ export function createLocalBotRunPort(
                                 Boolean(profileContinuationRequest)
                               )
                             : []),
-                          ...createBotMemoryTools(bot, memory, signal, task.origin.kind === "user"),
+                          ...(isBotMemoryEnabled(bot)
+                            ? createBotMemoryTools(bot, memory, signal, task.origin.kind === "user")
+                            : []),
                           ...createBotBrowserTools(
                             bot,
                             browser,
@@ -1235,12 +1237,14 @@ export function createLocalBotRunPort(
             }
             if (
               !mock &&
+              isBotMemoryEnabled(bot) &&
               (task.origin.kind === "user" ||
                 (task.origin.kind === "introduction" && supplementalMessages.size > 0)) &&
               !signal.aborted
             )
               summaries.enqueue({
                 botId: bot.id,
+                botVersion: bot.version,
                 threadId: task.threadId,
                 modelRef: bot.modelRef,
                 editVersion: memoryEditVersion,

@@ -25,6 +25,42 @@ function tools(signal = new AbortController().signal, allowDelete = true) {
   return createBotMemoryTools(bot, memory, signal, allowDelete)
 }
 
+it.each([
+  [undefined, false, false],
+  [undefined, true, true],
+  ["inherit", false, false],
+  ["inherit", true, true],
+  ["enabled", false, true],
+  ["enabled", true, true],
+  ["disabled", false, false],
+  ["disabled", true, false]
+] as const)(
+  "applies Bot memory %s over global %s to reads, writes and deletion",
+  async (memoryMode, global, enabled) => {
+    flags.enabled = global
+    const entry = memory.write("a", { name: "Preference", content: "Original" })
+    const all = createBotMemoryTools(
+      { ...bot, memoryMode },
+      memory,
+      new AbortController().signal,
+      true
+    )
+    for (const [name, args] of [
+      ["bot_memory_get", { id: entry.id }],
+      ["bot_remember", { name: "New preference", content: "Durable fact" }],
+      ["bot_forget", { id: entry.id, expectedVersion: entry.version }]
+    ] as const) {
+      const result = await all
+        .find((tool) => tool.name === name)!
+        .invoke({ type: "tool_call", id: name, name, args })
+      expect(result.status).toBe(enabled ? "success" : "error")
+    }
+    expect(memory.list("a").map((entry) => entry.content.trim())).toEqual([
+      enabled ? "Durable fact" : "Original"
+    ])
+  }
+)
+
 it("lets a temporary worker read references but leaves persistent memory changes to its parent", async () => {
   const entry = memory.write("a", { name: "Preference", content: "Keep this fact" })
   const before = memory.editVersion("a")

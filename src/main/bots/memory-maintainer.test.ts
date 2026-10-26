@@ -28,18 +28,22 @@ describe("Bot background memory batches", () => {
     maintainer.enqueue(batch("a", "third"))
     maintainer.enqueue(batch("b", "stale"))
     maintainer.enqueue(batch("b", "after deletion", 2))
+    maintainer.enqueue({ ...batch("c", "before disabling"), botVersion: 1 })
+    maintainer.enqueue({ ...batch("c", "after re-enabling"), botVersion: 3 })
     expect(received).toHaveLength(1)
     release()
     await tick()
     expect(received.map((item) => item.conversation)).toEqual([
       "first",
       "second\n\nthird",
-      "after deletion"
+      "after deletion",
+      "after re-enabling"
     ])
     expect(received.map((item) => item.userText)).toEqual([
       "first",
       "second\n\nthird",
-      "after deletion"
+      "after deletion",
+      "after re-enabling"
     ])
     await maintainer.close()
   })

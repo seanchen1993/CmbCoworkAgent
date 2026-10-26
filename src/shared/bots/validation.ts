@@ -1,9 +1,11 @@
 import {
   BotError,
   BOT_AVATAR_SHAPES,
+  BOT_MEMORY_MODES,
   BOT_REQUEST_RECEIPT_LIMIT,
   type BotRequestCheck,
   type BotAvatarShape,
+  type BotMemoryMode,
   type CreateBotInput,
   type SendBotMessageInput,
   type UpdateBotInput,
@@ -116,10 +118,13 @@ export function parseCreateBot(input: unknown): CreateBotInput {
   if (!/^#[0-9a-f]{6}$/i.test(color)) throw new BotError("INVALID_INPUT", "头像颜色无效")
   if (item.shape != null && !BOT_AVATAR_SHAPES.includes(item.shape as BotAvatarShape))
     throw new BotError("INVALID_INPUT", "头像形状无效")
+  if (item.memoryMode !== undefined && !BOT_MEMORY_MODES.includes(item.memoryMode as BotMemoryMode))
+    throw new BotError("INVALID_INPUT", "长期记忆设置无效")
   return {
     name: boundedString(item.name, "名称", 80),
     instructions: boundedString(item.instructions, "职责", 8_000, true),
     modelRef: item.modelRef == null ? null : boundedString(item.modelRef, "模型", 256),
+    ...(item.memoryMode !== undefined ? { memoryMode: item.memoryMode as BotMemoryMode } : {}),
     color,
     ...(item.label !== undefined ? { label: boundedString(item.label, "标签", 80, true) } : {}),
     ...(item.shape != null ? { shape: item.shape as BotAvatarShape } : {})

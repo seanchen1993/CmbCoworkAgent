@@ -2076,6 +2076,49 @@ describe("Bot Runtime integration", () => {
       "Private Bot memory reference"
     )
   })
+  it.each([
+    ["enabled", false, true],
+    ["disabled", true, false],
+    ["inherit", false, false],
+    ["inherit", true, true]
+  ] as const)(
+    "uses Bot memory %s over global %s for the whole private turn",
+    async (memoryMode, global, enabled) => {
+      fixture.memoryEnabled = global
+      fixture.memorySnapshot.mockReturnValue([
+        { id: "fact", name: "Format", content: "Three sections", version: "v1" }
+      ])
+      const configured = { ...bot, memoryMode }
+      await port().acquire(configured, task)!.execute(new AbortController().signal, vi.fn())
+      expect(fixture.memorySnapshot).toHaveBeenCalledTimes(enabled ? 1 : 0)
+      expect(fixture.memoryTools).toHaveBeenCalledTimes(enabled ? 1 : 0)
+      expect(fixture.summary).toHaveBeenCalledTimes(enabled ? 1 : 0)
+      if (enabled)
+        expect(fixture.summary).toHaveBeenCalledWith(
+          expect.objectContaining({ botId: bot.id, botVersion: bot.version })
+        )
+      const context = fixture.start.mock.calls[0][2]
+      expect(context.extraSystemPrompt.includes("Private Bot memory reference")).toBe(enabled)
+      // The override must not enable the ordinary conversation's separate memory store.
+      expect(JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata).memoryEnabled).toBe(false)
+    }
+  )
+  it("does not expose private memory to group turns even with an explicit Bot override", async () => {
+    fixture.memoryEnabled = false
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+    await port()
+      .acquire(
+        { ...bot, memoryMode: "enabled" },
+        {
+          ...task,
+          origin: { kind: "group", groupId: "g", messageId: "m" }
+        }
+      )!
+      .execute(new AbortController().signal, vi.fn())
+    expect(fixture.memorySnapshot).not.toHaveBeenCalled()
+    expect(fixture.memoryTools).not.toHaveBeenCalled()
+    expect(fixture.summary).not.toHaveBeenCalled()
+  })
   it("starts a new inbox turn without inheriting a completed command's graph callbacks", async () => {
     AsyncLocalStorageProviderSingleton.initializeGlobalInstance(new AsyncLocalStorage())
     let inherited: unknown = "unchecked"

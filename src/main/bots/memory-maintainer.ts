@@ -2,6 +2,8 @@ import { SingleFlightBatchCoalescer } from "../agent/run-settlement-fence"
 
 export interface BotMemoryBatch {
   botId: string
+  /** Prevent a delayed summary from crossing a Bot settings change. */
+  botVersion?: number
   threadId: string
   modelRef: string | null
   editVersion: number
@@ -48,7 +50,7 @@ export class BotMemoryMaintainer {
           if (!prior && pending.size >= 200) continue
           pending.set(
             id,
-            prior?.editVersion === next.editVersion
+            prior?.editVersion === next.editVersion && prior.botVersion === next.botVersion
               ? {
                   ...next,
                   conversation: compact(`${prior.conversation}\n\n${next.conversation}`),

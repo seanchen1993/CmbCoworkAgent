@@ -49,6 +49,9 @@ export const BOT_AVATAR_SHAPES = [
 ] as const
 export type BotAvatarShape = (typeof BOT_AVATAR_SHAPES)[number]
 
+export const BOT_MEMORY_MODES = ["inherit", "enabled", "disabled"] as const
+export type BotMemoryMode = (typeof BOT_MEMORY_MODES)[number]
+
 export interface BotHostInfo {
   id: string
   kind: "local" | "remote"
@@ -64,6 +67,8 @@ export interface BotDefinition {
   name: string
   instructions: string
   modelRef: string | null
+  /** Missing on older clients; explicit values override the global long-term memory setting. */
+  memoryMode?: BotMemoryMode
   color: string
   shape?: BotAvatarShape
   /** User-facing profile label; never treated as runtime instructions. */
@@ -80,6 +85,7 @@ export interface CreateBotInput {
   name: string
   instructions: string
   modelRef: string | null
+  memoryMode?: BotMemoryMode
   color: string
   shape?: BotAvatarShape
   /** User-facing profile label; never treated as runtime instructions. */

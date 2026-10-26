@@ -89,13 +89,14 @@ function isApproved(content: unknown, userText: string, operationCount: number):
 /** Reuse original extraction and routing; the Bot verifies scope before its versioned commit. */
 export function createBotMemoryMaintainer(
   memory: BotMemoryService,
-  isActive: (botId: string) => boolean
+  isActive: (botId: string, version?: number) => boolean,
+  memoryEnabled: (botId: string) => boolean = () => isMemoryEnabled()
 ): BotMemoryMaintainer {
   return new BotMemoryMaintainer(async (batch, signal) => {
     const eligible = () =>
       !signal.aborted &&
-      isMemoryEnabled() &&
-      isActive(batch.botId) &&
+      isActive(batch.botId, batch.botVersion) &&
+      memoryEnabled(batch.botId) &&
       memory.editVersion(batch.botId) === batch.editVersion
     if (!eligible()) return
     const routingMode = getGlobalRoutingMode()

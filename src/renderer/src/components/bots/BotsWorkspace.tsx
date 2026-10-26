@@ -2480,7 +2480,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   ) : detailTab === "memory" ? (
                     <BotMemoryPanel
                       key={`${client.hostId}:${selected.id}`}
-                      botId={selected.id}
+                      bot={selected}
                       client={client}
                       peers={snapshot?.bots ?? []}
                     />
