@@ -16,7 +16,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { BotBrowserService } from "./browser"
-import type { BotBrowserEngine } from "./browser-engine"
+import type { BotBrowserEngine, BotBrowserToolbarAction } from "./browser-engine"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { LocalBotHost, type BotRunPort } from "./host"
@@ -29,9 +29,9 @@ class TestPage extends EventEmitter {
   goto = vi.fn(async (url: string) => {
     this.address = url
   })
-  goBack = vi.fn(async (_options: unknown) => null)
-  goForward = vi.fn(async (_options: unknown) => null)
-  reload = vi.fn(async (_options: unknown) => null)
+  goBack = vi.fn<(options: unknown) => Promise<null>>(async () => null)
+  goForward = vi.fn<(options: unknown) => Promise<null>>(async () => null)
+  reload = vi.fn<(options: unknown) => Promise<null>>(async () => null)
   fill = vi.fn(async () => {})
   click = vi.fn(async () => {})
   press = vi.fn(async () => {})
@@ -91,6 +91,9 @@ class TestContext extends EventEmitter {
   }
 }
 let context: TestContext, service: BotBrowserService, directory: string
+let toolbar:
+  | ((page: TestPage, generation: number, action: BotBrowserToolbarAction) => Promise<void>)
+  | undefined
 let hidden: ((page: TestPage, generation: number) => void) | undefined
 const signal = () => new AbortController().signal
 function deferred() {
@@ -104,6 +107,7 @@ beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "bot-browser-test-"))
   context = new TestContext()
   hidden = undefined
+  toolbar = undefined
   launch.mockReset().mockImplementation(
     async () =>
       ({
@@ -111,12 +115,18 @@ beforeEach(() => {
         createPage: () => context.newPage(),
         getTitle: async () => "Test page",
         getPageState: async () => ({ title: "Test page", canGoBack: false, canGoForward: false }),
-        capturePage: vi.fn(async (_page: TestPage) => Buffer.from("fixture")),
+        capturePage: vi.fn<(page: TestPage) => Promise<Buffer>>(async () => Buffer.from("fixture")),
         show: (page: TestPage) => page.bringToFront(),
         onWindowHidden: (listener: (page: TestPage, generation: number) => void) => {
           hidden = listener
           return () => {
             if (hidden === listener) hidden = undefined
+          }
+        },
+        onToolbarAction: (listener: typeof toolbar) => {
+          toolbar = listener
+          return () => {
+            toolbar = undefined
           }
         },
         hide: async () => {},
@@ -131,6 +141,38 @@ afterEach(async () => {
 })
 
 describe("Bot browser ownership and control", () => {
+  it("routes native toolbar actions through the same owner and lease, excluding browser chrome", async () => {
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    await service.takeOver("a", a.pageId)
+    const state = await service.preview("a")
+    await toolbar!(context.entries[0], state.generation, {
+      action: "navigate",
+      url: "example.test/manual"
+    })
+    expect(context.entries[0].url()).toBe("https://example.test/manual")
+    await expect(
+      toolbar!(context.entries[1], state.generation, { action: "reload" })
+    ).rejects.toThrow("控制权")
+    await expect(
+      toolbar!(context.entries[0], state.generation - 1, { action: "new" })
+    ).rejects.toThrow("控制权")
+    await expect(
+      toolbar!(context.entries[0], state.generation, { action: "navigate", url: "file:///secret" })
+    ).rejects.toThrow("HTTP")
+    const engine = await launch.mock.results[0].value
+    engine.isContentPage = async () => false
+    await context.newPage()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect((await service.preview("a")).pages.map((page) => page.id)).toEqual([a.pageId])
+    expect((await service.preview("b")).pages.map((page) => page.id)).toEqual([b.pageId])
+    await toolbar!(context.entries[0], state.generation, { action: "return" })
+    expect((await service.preview("a")).control).toBe("bot")
+    await expect(
+      toolbar!(context.entries[0], state.generation, { action: "reload" })
+    ).rejects.toThrow("控制权")
+  })
+
   it.each(["help", "manual"] as const)(
     "releases a removed member's %s lease through Host without affecting its other conversations",
     async (mode) => {
@@ -152,7 +194,7 @@ describe("Bot browser ownership and control", () => {
         onAvailable: () => () => {},
         removeGroupMemberBrowser,
         acquire: () => ({
-          release() {},
+          release: vi.fn(),
           async execute(signal, active) {
             runSignal = signal
             await service.act(
@@ -567,6 +609,34 @@ describe("Bot browser ownership and control", () => {
       finishInput?.()
     }
   })
+  it("does not let a slow preview block takeover or return a deleted page's late frame", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const finish = deferred()
+    const engine = (await launch.mock.results[0].value) as BotBrowserEngine
+    const capture = vi.spyOn(engine, "capturePage").mockImplementationOnce(async () => {
+      await finish.promise
+      return Buffer.from("late frame")
+    })
+    const preview = service.preview("a", pageId)
+    let takeover: Promise<void> | undefined
+    try {
+      await vi.waitFor(() => expect(capture).toHaveBeenCalled())
+      const shown = context.entries[0].bringToFront
+      takeover = service.takeOver("a", pageId)
+      void takeover.catch(() => {})
+      await vi.waitFor(() => expect(shown).toHaveBeenCalled(), { timeout: 300 })
+      await takeover
+      await context.entries[0].close()
+    } finally {
+      finish.resolve()
+      await takeover?.catch(() => {})
+    }
+    const result = await preview
+    expect(result.image).toBeNull()
+    expect(result.pageId).toBeNull()
+    expect(result.pages).toEqual([])
+  })
+
   it("returns current control and history metadata when capture fails, then recovers on the same page", async () => {
     const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
     const page = context.entries[0]

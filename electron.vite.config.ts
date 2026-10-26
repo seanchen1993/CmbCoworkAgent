@@ -104,6 +104,7 @@ export default defineConfig({
           index: "src/main/bootstrap.ts",
           application: "src/main/index.ts",
           "bot-browser-host": "src/main/bots/browser-host-entry.ts",
+          "bot-browser-toolbar-preload": "src/main/bots/browser-toolbar-preload.ts",
           "browser-native-host": "src/main/browser/chrome/browser-native-host-entry.ts",
           "pty-host": "src/main/pty-host.ts",
           "code-exec-helper": "src/main/code-exec/helper-entry.ts",

@@ -81,7 +81,7 @@ visible(value){for(const observer of observers)observer.callback([{isIntersectin
 hidden(value){hidden=value;document.dispatchEvent(new Event('visibilitychange'))}};
 const client={hostId:'local',browserPreview:(botId,pageId)=>{state.previewCalls.push(pageId||state.selected||'none');if(state.previewFailure)return Promise.reject(new Error('预览暂时不可用'));if(state.staleReply){const reply=state.staleReply;state.staleReply=null;return Promise.resolve(reply)}const selected=state.pages.find(p=>p.id===(pageId||state.selected))?.id??null,reply={pages:state.pages.map(p=>({...p})),pageId:selected,image:state.captureFailure||state.dialogPending?null:state.images[selected],control:state.control,generation:state.generation,dialogPending:state.dialogPending,helpInstruction:state.helpInstruction,captureError:state.captureFailure?'暂时无法获取浏览器画面，请刷新重试':undefined};if(state.holdNextPreview){state.holdNextPreview=false;return new Promise(resolve=>state.releasePreview=()=>{state.releasePreview=null;resolve(reply)})}return Promise.resolve(reply)},
 navigateBrowser:async(botId,pageId,url)=>{state.navigationCalls.push({pageId,url});const page=state.pages.find(p=>p.id===pageId);if(state.mode==='refused'){if(state.staleAfterFailure){state.staleAfterFailure=false;state.staleReply={pages:state.pages.map(p=>({...p})),pageId,image:state.images[pageId],control:'human',generation:1}}page.url='chrome-error://chromewebdata/';page.title='故障页 A';if(state.raceRelease){state.raceRelease=false;queueMicrotask(()=>state.releasePreview?.())}throw new Error('page.goto: net::ERR_CONNECTION_REFUSED at '+url+'\\nCall log:\\n  - navigating to "'+url+'", waiting until "load"')}page.url=url;page.title=pageId==='a'?'表单 A 已恢复':'预览 B';if(state.mode==='timeout')throw new Error('page.goto: Timeout 15000ms exceeded.\\nCall log:\\n - navigating to "'+url+'"')},
-giveBackBrowser:async(botId,generation,outcome)=>{state.giveBackCalls++;state.giveBackOutcomes.push({botId,generation,outcome});if(state.controlFailure)throw new Error('浏览器控制权已变化，请重新读取');state.control='bot';state.helpInstruction=undefined;state.generation++},takeOverBrowser:async(botId,pageId)=>{state.takeOverCalls.push({botId,pageId});if(state.holdNextTakeOver){state.holdNextTakeOver=false;await new Promise(resolve=>state.releaseTakeOver=()=>{state.releaseTakeOver=null;resolve()})}if(state.takeOverFailure)throw new Error('旧scope选页失败');if(state.control!=='human')state.generation++;state.control='human'},
+giveBackBrowser:async(botId,generation,outcome)=>{state.giveBackCalls++;state.giveBackOutcomes.push({botId,generation,outcome});if(state.controlFailure)throw new Error('浏览器控制权已变化，请重新读取');state.control='bot';state.helpInstruction=undefined;state.generation++},takeOverBrowser:async(botId,pageId)=>{state.takeOverCalls.push({botId,pageId});if(state.holdNextTakeOver){state.holdNextTakeOver=false;await new Promise(resolve=>state.releaseTakeOver=()=>{state.releaseTakeOver=null;resolve()})}if(state.takeOverFailure)throw new Error('旧scope选页失败');if(state.control!=='human')state.generation++;state.control='human';if(pageId)state.selected=pageId},
 operateBrowser:async(botId,action,generation)=>{state.operationCalls.push({botId,action:{...action},generation});if(state.operateFailure)throw new Error(state.operateFailure);if(state.control!=='human'||generation!==state.generation)throw new Error('浏览器控制权已变化，请刷新后重试');if(action.action==='new'){if(action.pageId)throw new Error('新建不能指定旧页面');const id='new-'+(++state.newPages);state.pages.push({id,url:'about:blank',title:'新标签页',canGoBack:false,canGoForward:false});state.images[id]=image('purple');return state.selected=id}const page=state.pages.find(p=>p.id===action.pageId);if(!page)throw new Error('页面已关闭');if(action.action==='close'){state.pages=state.pages.filter(p=>p.id!==page.id);delete state.images[page.id];state.selected=state.pages[0]?.id??null;if(!state.selected){state.control='bot';state.generation++}return state.selected}if(action.action==='back'){page.url='https://a.example.test/previous';page.canGoBack=false;page.canGoForward=true}if(action.action==='forward'){page.url='https://a.example.test/form';page.canGoBack=true;page.canGoForward=false}return page.id}};
 state.previewInFlight=0;state.maxPreviewInFlight=0;Object.defineProperties(state,{observerCount:{get:()=>observers.size},visibilityListenerCount:{get:()=>visibilityListeners.size}});
 const previewTransport=client.browserPreview;client.browserPreview=(...args)=>{state.previewInFlight++;state.maxPreviewInFlight=Math.max(state.maxPreviewInFlight,state.previewInFlight);return previewTransport(...args).finally(()=>state.previewInFlight--)};
@@ -490,7 +490,11 @@ state.target('test-bot');`
     assert.match((await preview.locator("img").getAttribute("alt")) ?? "", /上次可用画面/)
     assert.ok((await page.locator(".bot-browser-location").innerText()).includes("上次可用画面"))
     for (const name of ["后退", "前进", "刷新网页", "新建网页", "关闭网页"])
-      assert.equal(await action(name).isDisabled(), true)
+      assert.equal(
+        await action(name).count(),
+        0,
+        "Bot-controlled preview hides human-only controls"
+      )
     const viewOnlyCalls = await page.evaluate(() => window.browserPanelFixture.takeOverCalls.length)
     await preview.getByRole("button").click()
     await viewer.waitFor()
@@ -567,6 +571,24 @@ state.target('test-bot');`
     await page.evaluate(() => (window.browserPanelFixture.captureFailure = false))
     await refreshPreview()
     await preview.locator('img[alt="预览 B的实时预览"]').waitFor()
+    // A native-window action changes the current page after an explicit App selection.
+    const takeoversBeforeNativeSwitch = await page.evaluate(
+      () => window.browserPanelFixture.takeOverCalls.length
+    )
+    await page.evaluate(() => {
+      window.browserPanelFixture.selected = "a"
+    })
+    await refreshPreview()
+    await preview.locator('img[alt="表单 A 已恢复的实时预览"]').waitFor()
+    assert.equal(
+      await page.evaluate(() => window.browserPanelFixture.takeOverCalls.length),
+      takeoversBeforeNativeSwitch
+    )
+    await page.evaluate(() => {
+      window.browserPanelFixture.selected = "b"
+    })
+    await refreshPreview()
+    await preview.locator('img[alt="预览 B的实时预览"]').waitFor()
     await preview.getByRole("button").click()
     await viewer.waitFor()
     await viewer.getByRole("button", { name: "打开可操作浏览器窗口", exact: true }).click()
@@ -618,6 +640,7 @@ state.target('test-bot');`
     assert.equal(await preview.locator("img").count(), 0)
     await page.evaluate(() => {
       window.browserPanelFixture.captureFailure = false
+      window.browserPanelFixture.selected = "a"
       window.browserPanelFixture.target("test-bot")
     })
     await preview.locator("img").waitFor()
@@ -739,7 +762,7 @@ state.target('test-bot');`
       .getByText("当前没有打开的网页。打开浏览器后可以继续浏览。", { exact: true })
       .waitFor()
     assert.equal(await preview.locator("img").count(), 0)
-    assert.equal(await action("新建网页").isDisabled(), true)
+    assert.equal(await action("新建网页").count(), 0)
     await action("打开浏览器").waitFor()
 
     // Exercise actual component lifecycle with visibility inputs; no profile or browser service.

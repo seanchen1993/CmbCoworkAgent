@@ -166,10 +166,35 @@ export class BotBrowserService {
         // Recheck the exact target after that lock, then return outside the lock.
         void this.lock.withKey("browser", async () => {}).then(release).catch(() => {})
       })
+      const stopToolbar = engine.onToolbarAction?.(async (page, generation, action) => {
+        const entry = [...this.pages.values()].find((candidate) => candidate.page === page)
+        if (
+          this.context !== context ||
+          !entry ||
+          this.human?.botId !== entry.botId ||
+          this.human.generation !== generation
+        )
+          throw new BotError("CONFLICT", "浏览器控制权已改变，请重新接管")
+        if (action.action === "return") await this.giveBack(entry.botId, generation)
+        else if (action.action === "navigate") {
+          const address = action.url?.trim() ?? ""
+          if (!address) throw new BotError("INVALID_INPUT", "请输入网址")
+          const url = /^[a-z][a-z\d+.-]*:/i.test(address) ? address : `https://${address}`
+          await this.navigateAsHuman(entry.botId, entry.id, url, generation)
+        } else
+          await this.operateAsHuman(
+            entry.botId,
+            action.action === "new"
+              ? { action: "new" }
+              : { action: action.action, pageId: entry.id },
+            generation
+          )
+      })
       context.setDefaultTimeout(15_000)
       context.setDefaultNavigationTimeout(20_000)
       context.on("close", () => {
         stopHidden()
+        stopToolbar?.()
         if (this.context !== context) return
         this.context = undefined
         this.engine = undefined
@@ -184,6 +209,7 @@ export class BotBrowserService {
         void page
           .opener()
           .then(async (opener) => {
+            if (engine.isContentPage && !(await engine.isContentPage(page))) return
             // Parent-created targets register their exact owner before the human-tab fallback.
             if (!opener) await this.creating?.catch(() => undefined)
             if ([...this.pages.values()].some((item) => item.page === page)) return
@@ -250,7 +276,9 @@ export class BotBrowserService {
         return
       }
       try {
-        this.register(botId, popup)
+        const child = this.register(botId, popup)
+        if (this.human?.botId === botId && this.human.status === "active")
+          void this.takeOver(botId, child.id).catch(() => {})
       } catch {
         /* Capacity rejection already closes this popup. */
       }
@@ -758,43 +786,52 @@ export class BotBrowserService {
       if (page.botId === entry.botId) page.viewed = page === entry
   }
   async preview(botId: string, pageId?: string): Promise<BotBrowserState> {
-    return this.lock.withKey("browser", async () => {
-      if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
-      const pages = await this.pageList(botId)
-      const targetId = pageId ?? (this.human?.botId === botId ? this.human.pageId : undefined)
-      const selected = targetId ? this.pages.get(targetId) : this.viewedPage(botId)
-      if (selected && selected.botId !== botId) throw new BotError("CONFLICT", "页面不属于此 Bot")
-      // Keep the chosen target across return/remount, including a failed capture's retry.
-      if (selected && !selected.page.isClosed()) this.rememberViewed(selected)
-      let captureError: string | undefined
-      const image =
-        selected && !selected.dialog && !selected.page.isClosed()
-          ? await this.engine!
-              .capturePage(selected.page)
-              .catch(() => {
-                captureError = "暂时无法获取浏览器画面，请刷新重试"
-                return null
-              })
-          : null
-      return {
-        pages,
-        pageId: selected?.id ?? null,
-        generation: this.human?.botId === botId ? this.human.generation : this.generation,
-        control:
-          this.human?.botId === botId
-            ? this.human.status === "active"
-              ? "human"
-              : "requesting"
-            : this.human
-              ? "other-human"
-              : "bot",
-        image: image ? `data:image/jpeg;base64,${image.toString("base64")}` : null,
-        ...(captureError ? { captureError } : {}),
-        dialogPending: Boolean(selected?.dialog),
-        helpInstruction: this.human?.botId === botId ? this.human.instruction : undefined
-      }
-    })
+    // Read-only previews must not queue behind navigation or block takeover.
+    // The engine bounds and coalesces captures for each exact native target.
+    if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
+    const targetId = pageId ?? (this.human?.botId === botId ? this.human.pageId : undefined)
+    const selected = targetId ? this.pages.get(targetId) : this.viewedPage(botId)
+    if (selected && selected.botId !== botId) throw new BotError("CONFLICT", "页面不属于此 Bot")
+    // Remember selection before awaiting so a late capture cannot undo a newer selection.
+    if (selected && !selected.page.isClosed()) this.rememberViewed(selected)
+    const engine = this.engine
+    const pages = await this.pageList(botId)
+    let captureError: string | undefined
+    const image =
+      engine && selected && !selected.dialog && !selected.page.isClosed()
+        ? await engine.capturePage(selected.page).catch(() => {
+            captureError = "暂时无法获取浏览器画面，请刷新重试"
+            return null
+          })
+        : null
+    // Capturing holds no operation lock: a target can close or be retired meanwhile.
+    if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
+    const current =
+      selected && this.pages.get(selected.id) === selected && !selected.page.isClosed()
+        ? selected
+        : undefined
+    return {
+      pages: pages.filter((page) => this.pages.has(page.id)),
+      pageId: current?.id ?? null,
+      generation: this.human?.botId === botId ? this.human.generation : this.generation,
+      control:
+        this.human?.botId === botId
+          ? this.human.status === "active"
+            ? "human"
+            : "requesting"
+          : this.human
+            ? "other-human"
+            : "bot",
+      image:
+        current && !current.dialog && image
+          ? `data:image/jpeg;base64,${image.toString("base64")}`
+          : null,
+      ...(current && !current.dialog && captureError ? { captureError } : {}),
+      dialogPending: Boolean(current?.dialog),
+      helpInstruction: this.human?.botId === botId ? this.human.instruction : undefined
+    }
   }
+
   async takeOver(botId: string, pageId?: string, instruction?: string): Promise<void> {
     if (this.stopping) throw new BotError("STOPPING", "浏览器正在退出")
     if (this.human && this.human.botId !== botId)
@@ -810,7 +847,7 @@ export class BotBrowserService {
         const targetId = pageId ?? claim.pageId
         if (!targetId) throw new BotError("CONFLICT", "当前接管页面已关闭，请明确选择页面")
         const entry = await this.page(botId, targetId)
-        await this.engine!.show(entry.page, claim.generation)
+        await this.engine!.show(entry.page, claim.generation, claim.instruction)
         if (this.stopping || this.human !== claim || claim.status !== "active")
           throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后重试")
         claim.pageId = entry.id
@@ -833,7 +870,7 @@ export class BotBrowserService {
         if (this.stopping || this.human !== claim || claim.status !== "requesting")
           throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后重试")
         const entry = await this.page(botId, pageId ?? this.viewedPage(botId)?.id)
-        await this.engine!.show(entry.page, claim.generation)
+        await this.engine!.show(entry.page, claim.generation, claim.instruction)
         if (this.stopping || this.human !== claim || entry.page.isClosed())
           throw new BotError("CONFLICT", "浏览器已关闭，请重新打开")
         claim.pageId = entry.id
@@ -880,12 +917,23 @@ export class BotBrowserService {
       for (const wake of this.returned) wake()
     }
   }
-  async navigateAsHuman(botId: string, pageId: string, address: string): Promise<void> {
+  async navigateAsHuman(
+    botId: string,
+    pageId: string,
+    address: string,
+    expectedGeneration?: number
+  ): Promise<void> {
     const url = new URL(address)
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password)
       throw new BotError("INVALID_INPUT", "仅支持无内嵌凭据的 HTTP／HTTPS 地址")
     const claim = this.human
-    if (this.stopping || !claim || claim.botId !== botId || claim.status !== "active")
+    if (
+      this.stopping ||
+      !claim ||
+      claim.botId !== botId ||
+      claim.status !== "active" ||
+      (expectedGeneration !== undefined && claim.generation !== expectedGeneration)
+    )
       throw new BotError("CONFLICT", "请先接管此 Bot 的浏览器")
     await this.lock.withKey("browser", async () => {
       if (this.human !== claim || claim.status !== "active")
@@ -893,7 +941,7 @@ export class BotBrowserService {
       const entry = await this.page(botId, pageId)
       await entry.page.goto(url.href, { waitUntil: "domcontentloaded" })
       if (this.human === claim && claim.status === "active") {
-        await this.engine!.show(entry.page, claim.generation)
+        await this.engine!.show(entry.page, claim.generation, claim.instruction)
         claim.pageId = entry.id
         this.rememberViewed(entry)
       }
@@ -940,7 +988,7 @@ export class BotBrowserService {
         )
         if (!next) return null
         check()
-        await this.engine!.show(next.page, expectedGeneration)
+        await this.engine!.show(next.page, expectedGeneration, claim!.instruction)
         check()
         claim!.pageId = next.id
         this.rememberViewed(next)
@@ -954,7 +1002,7 @@ export class BotBrowserService {
       else if (action.action === "reload")
         await entry.page.reload({ waitUntil: "domcontentloaded" })
       check()
-      await this.engine!.show(entry.page, expectedGeneration)
+      await this.engine!.show(entry.page, expectedGeneration, claim!.instruction)
       check()
       claim!.pageId = entry.id
       this.rememberViewed(entry)

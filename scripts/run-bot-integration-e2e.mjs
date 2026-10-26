@@ -64,6 +64,8 @@ export default Object.fromEntries(["main","preload","renderer"].map((name) => [
     await run(["--import", "tsx", "tests/bot-native-browser-host.spec.ts"], {
       BOT_TEST_APP_OUT: out
     })
+    await run(["--import", "tsx", "tests/bots-browser-preview-browser.spec.ts"])
+    await run(["--import", "tsx", "tests/bots-browser-panel-browser.spec.ts"])
   } else if (!process.argv.includes("--build-only")) {
     const testEnv = { BOT_TEST_APP_OUT: out }
     for (const test of [
