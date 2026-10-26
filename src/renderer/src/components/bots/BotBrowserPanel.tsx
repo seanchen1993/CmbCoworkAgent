@@ -94,8 +94,17 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
         capturing = false
         return
       }
-      const request = client
-        .browserPreview(botId, pageId)
+      let deadline: ReturnType<typeof setTimeout> | undefined
+      const request = Promise.race([
+        client.browserPreview(botId, pageId),
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(
+            () => reject(new Error("获取浏览器画面超时，请刷新或接管后重试")),
+            25_000
+          )
+        })
+      ])
+        .finally(() => clearTimeout(deadline))
         .then((next) => {
           if (disposed) return
           setSnapshot((previous) => {
@@ -116,7 +125,12 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
               state: { ...next, image: keepImage ? before.image : next.image }
             }
           })
-          setPreviewError(next.captureError ?? null)
+          setPreviewError(
+            next.captureError ??
+              (next.pages.length && !next.image && !next.dialogPending
+                ? "暂未生成画面，请刷新或接管后重试"
+                : null)
+          )
           if (pageId && !next.pages.some((page) => page.id === pageId)) setPageId(undefined)
         })
         .catch((cause) => {
@@ -380,13 +394,15 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
             <div className="bot-browser-empty">
               <Monitor size={30} strokeWidth={1.4} />
               <p>
-                {!state
-                  ? "正在读取浏览器状态…"
-                  : state.dialogPending
-                    ? "网页有待处理的弹窗"
-                    : state.pages.length
-                      ? "正在获取画面…"
-                      : "当前没有打开的网页。打开浏览器后可以继续浏览。"}
+                {previewError
+                  ? "画面暂不可用"
+                  : !state
+                    ? "正在读取浏览器状态…"
+                    : state.dialogPending
+                      ? "网页有待处理的弹窗"
+                      : state.pages.length
+                        ? "正在获取画面…"
+                        : "当前没有打开的网页。打开浏览器后可以继续浏览。"}
               </p>
             </div>
           )}

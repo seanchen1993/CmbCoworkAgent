@@ -758,43 +758,52 @@ export class BotBrowserService {
       if (page.botId === entry.botId) page.viewed = page === entry
   }
   async preview(botId: string, pageId?: string): Promise<BotBrowserState> {
-    return this.lock.withKey("browser", async () => {
-      if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
-      const pages = await this.pageList(botId)
-      const targetId = pageId ?? (this.human?.botId === botId ? this.human.pageId : undefined)
-      const selected = targetId ? this.pages.get(targetId) : this.viewedPage(botId)
-      if (selected && selected.botId !== botId) throw new BotError("CONFLICT", "页面不属于此 Bot")
-      // Keep the chosen target across return/remount, including a failed capture's retry.
-      if (selected && !selected.page.isClosed()) this.rememberViewed(selected)
-      let captureError: string | undefined
-      const image =
-        selected && !selected.dialog && !selected.page.isClosed()
-          ? await this.engine!
-              .capturePage(selected.page)
-              .catch(() => {
-                captureError = "暂时无法获取浏览器画面，请刷新重试"
-                return null
-              })
-          : null
-      return {
-        pages,
-        pageId: selected?.id ?? null,
-        generation: this.human?.botId === botId ? this.human.generation : this.generation,
-        control:
-          this.human?.botId === botId
-            ? this.human.status === "active"
-              ? "human"
-              : "requesting"
-            : this.human
-              ? "other-human"
-              : "bot",
-        image: image ? `data:image/jpeg;base64,${image.toString("base64")}` : null,
-        ...(captureError ? { captureError } : {}),
-        dialogPending: Boolean(selected?.dialog),
-        helpInstruction: this.human?.botId === botId ? this.human.instruction : undefined
-      }
-    })
+    // Read-only previews must not queue behind navigation or block takeover.
+    // The engine bounds and coalesces captures for each exact native target.
+    if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
+    const targetId = pageId ?? (this.human?.botId === botId ? this.human.pageId : undefined)
+    const selected = targetId ? this.pages.get(targetId) : this.viewedPage(botId)
+    if (selected && selected.botId !== botId) throw new BotError("CONFLICT", "页面不属于此 Bot")
+    // Remember selection before awaiting so a late capture cannot undo a newer selection.
+    if (selected && !selected.page.isClosed()) this.rememberViewed(selected)
+    const engine = this.engine
+    const pages = await this.pageList(botId)
+    let captureError: string | undefined
+    const image =
+      engine && selected && !selected.dialog && !selected.page.isClosed()
+        ? await engine.capturePage(selected.page).catch(() => {
+            captureError = "暂时无法获取浏览器画面，请刷新重试"
+            return null
+          })
+        : null
+    // Capturing holds no operation lock: a target can close or be retired meanwhile.
+    if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
+    const current =
+      selected && this.pages.get(selected.id) === selected && !selected.page.isClosed()
+        ? selected
+        : undefined
+    return {
+      pages: pages.filter((page) => this.pages.has(page.id)),
+      pageId: current?.id ?? null,
+      generation: this.human?.botId === botId ? this.human.generation : this.generation,
+      control:
+        this.human?.botId === botId
+          ? this.human.status === "active"
+            ? "human"
+            : "requesting"
+          : this.human
+            ? "other-human"
+            : "bot",
+      image:
+        current && !current.dialog && image
+          ? `data:image/jpeg;base64,${image.toString("base64")}`
+          : null,
+      ...(current && !current.dialog && captureError ? { captureError } : {}),
+      dialogPending: Boolean(current?.dialog),
+      helpInstruction: this.human?.botId === botId ? this.human.instruction : undefined
+    }
   }
+
   async takeOver(botId: string, pageId?: string, instruction?: string): Promise<void> {
     if (this.stopping) throw new BotError("STOPPING", "浏览器正在退出")
     if (this.human && this.human.botId !== botId)

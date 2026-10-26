@@ -19,7 +19,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const http = require('node:http');
 const path = require('node:path');
-const { app } = require('electron');
+const { app, nativeImage } = require('electron');
 app.setPath('userData', ${JSON.stringify(join(root, "parent-profile"))});
 app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
@@ -29,7 +29,14 @@ app.whenReady().then(async () => {
   await fs.mkdir(workspace('a'), { recursive: true });
   await fs.writeFile(path.join(workspace('a'), 'upload.txt'), 'synthetic upload');
   const server = http.createServer((req, res) => {
-    if (req.url === '/login') {
+    if (req.url === '/slow-font.woff') {
+      // Deliberately never finish a font request. Preview must not wait for
+      // document.fonts.ready, unlike the old Playwright screenshot path.
+      return;
+    } else if (req.url === '/slow-font') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<style>@font-face{font-family:pending;src:url(/slow-font.woff)}body{background:rgb(220,30,40);font-family:pending}</style><title>Pending font</title><p>Preview must remain available</p>');
+    } else if (req.url === '/login') {
       res.writeHead(200, { 'Content-Type': 'text/html', 'Set-Cookie': 'native-host-auth=synthetic; Max-Age=3600; Path=/; HttpOnly; SameSite=Lax' });
       res.end('<title>Cookie accepted</title>');
     } else if (req.url === '/session') {
@@ -88,6 +95,35 @@ app.whenReady().then(async () => {
     assert.equal(await fs.readFile(path.join(workspace('a'), download.file), 'utf8'), 'synthetic download');
     const screenshot = await service.preview('a');
     assert.ok(screenshot.image.startsWith('data:image/jpeg;base64,'));
+    await pages[0].goto(fixtureUrl + '/slow-font', { waitUntil: 'domcontentloaded' });
+    await pages[0].waitForFunction(() => document.fonts.status === 'loading');
+    await assert.rejects(pages[0].screenshot({ timeout: 500 }), /Timeout|timeout/,
+      'the old screenshot path waits for the pending font');
+    let nativeFrame;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      nativeFrame = await service.preview('a', a.pageId);
+      assert.equal(nativeFrame.captureError, undefined);
+      const pixels = nativeImage.createFromDataURL(nativeFrame.image).toBitmap();
+      // BGRA pixel in the page background, not an empty/white capture.
+      if (pixels[2] > 180 && pixels[1] < 80 && pixels[0] < 80) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const red = nativeImage.createFromDataURL(nativeFrame.image).toBitmap();
+    assert.ok(red[2] > 180 && red[1] < 80 && red[0] < 80, 'hidden page must yield painted pixels despite the stalled font');
+    assert.equal(await pages[0].evaluate(() => document.fonts.status), 'loading');
+    await engine.show(pages[0]);
+    await engine.hide();
+    await pages[0].evaluate(() => document.body.style.background = 'rgb(20,40,220)');
+    let blue;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const frame = await service.preview('a', a.pageId);
+      assert.equal(frame.captureError, undefined);
+      blue = nativeImage.createFromDataURL(frame.image).toBitmap();
+      if (blue[0] > 180 && blue[1] < 80 && blue[2] < 80) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.ok(blue[0] > 180 && blue[1] < 80 && blue[2] < 80, 'preview must refresh after the window is shown then hidden');
+    await pages[0].goto(fixtureUrl);
     await service.takeOver('a');
     assert.equal((await service.preview('a')).control, 'human');
     await service.navigateAsHuman('a', a.pageId, fixtureUrl + '/manual');
@@ -160,7 +196,7 @@ app.whenReady().then(async () => {
       assert.ok(output.includes("BOT_NATIVE_HOST_PASS"), output)
       assert.ok(output.includes("BOT_OWNED_AUTOMATION_PASS"), output)
       console.log(
-        "PASS: production Bot browser adapter resolves duplicate labels and iframe refs, isolates task/group pages and popups, runs forms/hover/drag/wait/evaluate, preserves scoped uploads/downloads, paginates long snapshots, and resumes human takeover without replaying input. Persistent cookies survive a host restart."
+        "PASS: production Bot browser adapter resolves duplicate labels and iframe refs, isolates task/group pages and popups, runs forms/hover/drag/wait/evaluate, preserves scoped uploads/downloads, paginates long snapshots, and resumes human takeover without replaying input. Native previews render hidden pages with stalled fonts and refresh after hiding. Persistent cookies survive a host restart."
       )
     } finally {
       clearTimeout(timer)

@@ -134,16 +134,34 @@ else {
               if (action === "capture") {
                 // A parent's RPC timeout cannot cancel Electron's native capture promise.
                 if (target!.capturing) throw new Error("Bot 浏览器正在截图，请稍候")
+                const contents = window.webContents
+                const throttled = contents.getBackgroundThrottling()
+                contents.setBackgroundThrottling(false)
                 target!.capturing = true
+                const capture = Promise.resolve()
+                  .then(() => contents.capturePage(undefined, { stayHidden: true }))
+                  .finally(() => {
+                    // A timed-out native promise still owns this target until it settles.
+                    target!.capturing = false
+                  })
+                let timer: ReturnType<typeof setTimeout> | undefined
                 try {
-                  const image = await window.webContents.capturePage(undefined, { stayHidden: true })
+                  const image = await Promise.race([
+                    capture,
+                    new Promise<never>((_, reject) => {
+                      timer = setTimeout(() => reject(new Error("Bot 浏览器截图超时")), 4000)
+                    })
+                  ])
                   if (image.isEmpty()) throw new Error("Bot 浏览器截图为空")
-                  const jpeg = image.toJPEG(60)
+                  const preview =
+                    image.getSize().width > 1280 ? image.resize({ width: 1280 }) : image
+                  const jpeg = preview.toJPEG(60)
                   if (!jpeg.length) throw new Error("Bot 浏览器截图为空")
                   if (jpeg.length > 18 * 1024 * 1024) throw new Error("Bot 浏览器截图过大")
                   return jpeg.toString("base64")
                 } finally {
-                  target!.capturing = false
+                  clearTimeout(timer)
+                  if (!contents.isDestroyed()) contents.setBackgroundThrottling(throttled)
                 }
               }
               if (action === "get-title") return window.webContents.getTitle()

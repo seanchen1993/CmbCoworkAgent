@@ -29,9 +29,9 @@ class TestPage extends EventEmitter {
   goto = vi.fn(async (url: string) => {
     this.address = url
   })
-  goBack = vi.fn(async (_options: unknown) => null)
-  goForward = vi.fn(async (_options: unknown) => null)
-  reload = vi.fn(async (_options: unknown) => null)
+  goBack = vi.fn<(options: unknown) => Promise<null>>(async () => null)
+  goForward = vi.fn<(options: unknown) => Promise<null>>(async () => null)
+  reload = vi.fn<(options: unknown) => Promise<null>>(async () => null)
   fill = vi.fn(async () => {})
   click = vi.fn(async () => {})
   press = vi.fn(async () => {})
@@ -111,7 +111,7 @@ beforeEach(() => {
         createPage: () => context.newPage(),
         getTitle: async () => "Test page",
         getPageState: async () => ({ title: "Test page", canGoBack: false, canGoForward: false }),
-        capturePage: vi.fn(async (_page: TestPage) => Buffer.from("fixture")),
+        capturePage: vi.fn<(page: TestPage) => Promise<Buffer>>(async () => Buffer.from("fixture")),
         show: (page: TestPage) => page.bringToFront(),
         onWindowHidden: (listener: (page: TestPage, generation: number) => void) => {
           hidden = listener
@@ -152,7 +152,7 @@ describe("Bot browser ownership and control", () => {
         onAvailable: () => () => {},
         removeGroupMemberBrowser,
         acquire: () => ({
-          release() {},
+          release: vi.fn(),
           async execute(signal, active) {
             runSignal = signal
             await service.act(
@@ -567,6 +567,34 @@ describe("Bot browser ownership and control", () => {
       finishInput?.()
     }
   })
+  it("does not let a slow preview block takeover or return a deleted page's late frame", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const finish = deferred()
+    const engine = (await launch.mock.results[0].value) as BotBrowserEngine
+    const capture = vi.spyOn(engine, "capturePage").mockImplementationOnce(async () => {
+      await finish.promise
+      return Buffer.from("late frame")
+    })
+    const preview = service.preview("a", pageId)
+    let takeover: Promise<void> | undefined
+    try {
+      await vi.waitFor(() => expect(capture).toHaveBeenCalled())
+      const shown = context.entries[0].bringToFront
+      takeover = service.takeOver("a", pageId)
+      void takeover.catch(() => {})
+      await vi.waitFor(() => expect(shown).toHaveBeenCalled(), { timeout: 300 })
+      await takeover
+      await context.entries[0].close()
+    } finally {
+      finish.resolve()
+      await takeover?.catch(() => {})
+    }
+    const result = await preview
+    expect(result.image).toBeNull()
+    expect(result.pageId).toBeNull()
+    expect(result.pages).toEqual([])
+  })
+
   it("returns current control and history metadata when capture fails, then recovers on the same page", async () => {
     const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
     const page = context.entries[0]

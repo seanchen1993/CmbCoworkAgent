@@ -7,6 +7,9 @@ interface TestWindow extends EventEmitter {
   canGoBack: boolean
   canGoForward: boolean
   captureEmpty: boolean
+  captureWidth: number
+  throttled: boolean
+  resize: ReturnType<typeof vi.fn>
   jpeg: Buffer
   toJPEG: ReturnType<typeof vi.fn>
   close(): void
@@ -37,14 +40,23 @@ vi.mock("electron", async () => {
     canGoForward = false
     targetId = `owned-target-${fixture.windows.length + 1}`
     captureEmpty = false
+    captureWidth = 1280
+    throttled = true
+    resize = vi.fn(() => ({ toJPEG: this.toJPEG }))
     jpeg = Buffer.from(`native-${this.targetId}`)
-    toJPEG = vi.fn((_quality: number) => this.jpeg)
+    toJPEG = vi.fn(() => this.jpeg)
     webContents = Object.assign(new EventEmitter(), {
       getTitle: () => "Synthetic browser page",
       isDestroyed: () => this.destroyed,
+      getBackgroundThrottling: () => this.throttled,
+      setBackgroundThrottling: (value: boolean) => {
+        this.throttled = value
+      },
       setWindowOpenHandler: vi.fn(),
-      capturePage: vi.fn(async (_rect: unknown, _opts: unknown) => ({
+      capturePage: vi.fn(async () => ({
         isEmpty: () => this.captureEmpty,
+        getSize: () => ({ width: this.captureWidth, height: 860 }),
+        resize: this.resize,
         toJPEG: this.toJPEG
       })),
       navigationHistory: {
@@ -124,6 +136,7 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   vi.unstubAllEnvs()
   if (sendDescriptor) Object.defineProperty(process, "send", sendDescriptor)
@@ -290,7 +303,7 @@ describe("Bot browser native window lifecycle", () => {
     await vi.waitFor(() => expect(first.webContents.capturePage).toHaveBeenCalledTimes(1))
     expect((await command(4, "capture", "owned-target-1")).error).toBe("Bot 浏览器正在截图，请稍候")
     expect((await command(5, "capture", "owned-target-2")).error).toBeUndefined()
-    finish({ isEmpty: () => false, toJPEG: () => first.jpeg })
+    finish({ isEmpty: () => false, getSize: () => ({ width: 1280 }), toJPEG: () => first.jpeg })
     await vi.waitFor(() =>
       expect(fixture.send).toHaveBeenCalledWith(expect.objectContaining({ id: 3 }))
     )
@@ -298,6 +311,48 @@ describe("Bot browser native window lifecycle", () => {
     first.webContents.capturePage.mockRejectedValueOnce(new Error("Synthetic native failure"))
     expect((await command(7, "capture", "owned-target-1")).error).toBe("Synthetic native failure")
     expect((await command(8, "capture", "owned-target-1")).error).toBeUndefined()
+  })
+
+  it("restores background throttling on timeout while retaining the unfinished native capture guard", async () => {
+    await command(1, "create")
+    const window = fixture.windows[0] as TestWindow
+    let finish!: (image: unknown) => void
+    window.webContents.capturePage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    vi.useFakeTimers()
+    fixture.listeners.get("message")!({ id: 2, action: "capture", targetId: "owned-target-1" })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(window.throttled).toBe(false)
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(fixture.send).toHaveBeenCalledWith({ id: 2, error: "Bot 浏览器截图超时" })
+    expect(window.throttled).toBe(true)
+    expect((await command(3, "capture", "owned-target-1")).error).toBe("Bot 浏览器正在截图，请稍候")
+    expect(window.webContents.capturePage).toHaveBeenCalledTimes(1)
+    // A stuck preview must not prevent native window control.
+    expect((await command(4, "show", "owned-target-1", 7)).error).toBeUndefined()
+    finish({ isEmpty: () => false, getSize: () => ({ width: 1280 }), toJPEG: () => window.jpeg })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fixture.send.mock.calls.filter(([message]) => message.id === 2)).toHaveLength(1)
+    expect((await command(5, "capture", "owned-target-1")).error).toBeUndefined()
+    expect(window.throttled).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("bounds wide native previews and preserves an already unthrottled window", async () => {
+    await command(1, "create")
+    const window = fixture.windows[0] as TestWindow
+    window.captureWidth = 2560
+    window.throttled = false
+    expect((await command(2, "capture", "owned-target-1")).error).toBeUndefined()
+    expect(window.resize).toHaveBeenCalledExactlyOnceWith({ width: 1280 })
+    expect(window.throttled).toBe(false)
+    window.webContents.capturePage.mockRejectedValueOnce(new Error("Synthetic failure"))
+    expect((await command(3, "capture", "owned-target-1")).error).toBe("Synthetic failure")
+    expect(window.throttled).toBe(false)
   })
 
   it("preserves crash destruction and parent-owned shutdown", async () => {

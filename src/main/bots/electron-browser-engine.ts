@@ -165,6 +165,7 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
     const context = browser.contexts()[0]
     if (!context) throw new Error("Bot 浏览器上下文不可用")
     const identities = new WeakMap<Page, string>()
+    const captures = new WeakMap<Page, Promise<Buffer>>()
     const targetOf = async (page: Page): Promise<string> => {
       const cached = identities.get(page)
       if (cached) return cached
@@ -202,26 +203,32 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
           canGoForward: boolean
         }
       },
-      async capturePage(page) {
-        try {
-          const value = await call("capture", await targetOf(page), undefined, 5000)
-          if (typeof value !== "string" || !value || value.length > 24 * 1024 * 1024)
-            throw new Error("Bot 浏览器截图数据无效")
-          const image = Buffer.from(value, "base64")
-          if (!image.length || image.toString("base64") !== value)
-            throw new Error("Bot 浏览器截图数据无效")
-          return image
-        } catch (error) {
-          // Native failures need diagnostics, without logging URLs or page content.
-          const reason =
-            error instanceof Error && error.message === "Bot 浏览器响应超时"
-              ? "timeout"
-              : error instanceof Error && error.message === "Bot 浏览器截图为空"
-                ? "empty"
-                : "unavailable"
-          console.warn("[BotBrowser] Native preview capture failed:", reason)
-          throw error
-        }
+      capturePage(page) {
+        const pendingCapture = captures.get(page)
+        if (pendingCapture) return pendingCapture
+        const capture = (async () => {
+          try {
+            const value = await call("capture", await targetOf(page), undefined, 5000)
+            if (typeof value !== "string" || !value || value.length > 24 * 1024 * 1024)
+              throw new Error("Bot 浏览器截图数据无效")
+            const image = Buffer.from(value, "base64")
+            if (!image.length || image.toString("base64") !== value)
+              throw new Error("Bot 浏览器截图数据无效")
+            return image
+          } catch (error) {
+            // Native failures need diagnostics, without logging URLs or page content.
+            const reason =
+              error instanceof Error && /Bot 浏览器(?:响应|截图)超时/.test(error.message)
+                ? "timeout"
+                : error instanceof Error && error.message === "Bot 浏览器截图为空"
+                  ? "empty"
+                  : "unavailable"
+            console.warn("[BotBrowser] Native preview capture failed:", reason)
+            throw error
+          }
+        })().finally(() => captures.delete(page))
+        captures.set(page, capture)
+        return capture
       },
       async show(page, generation) {
         await call("show", await targetOf(page), generation)

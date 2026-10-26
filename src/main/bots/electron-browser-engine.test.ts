@@ -95,6 +95,31 @@ describe("Electron Bot browser native capture RPC", () => {
     expect(child.send.mock.calls[0][0]).toMatchObject({ action: "capture", targetId: "owned-1" })
   })
 
+  it("coalesces concurrent capture readers without mixing different targets", async () => {
+    engine = await startElectronBotBrowser("/synthetic-profile")
+    const first = await engine.createPage()
+    const second = await engine.createPage()
+    holdCapture = true
+    child.send.mockClear()
+    const captures = [
+      engine.capturePage(first),
+      engine.capturePage(first),
+      engine.capturePage(second)
+    ]
+    await vi.waitFor(() => expect(child.send).toHaveBeenCalledTimes(2))
+    for (const [request] of child.send.mock.calls) {
+      child.emit("message", {
+        id: request.id,
+        value: Buffer.from(request.targetId).toString("base64")
+      })
+    }
+    expect((await Promise.all(captures)).map((image) => image.toString())).toEqual([
+      "owned-1",
+      "owned-1",
+      "owned-2"
+    ])
+  })
+
   it("rejects invalid or empty capture replies and logs only a fixed failure classification", async () => {
     engine = await startElectronBotBrowser("/synthetic-profile")
     const page = await engine.createPage()
@@ -127,11 +152,13 @@ describe("Electron Bot browser native capture RPC", () => {
     expect(await pending).toMatchObject({ message: "Bot 浏览器响应超时" })
     expect(vi.getTimerCount()).toBe(0)
     child.emit("message", { id: request.id, value: Buffer.from("late").toString("base64") })
-    // Sixteen fresh requests fit only when the expired request left the existing pending map.
+    // Repeated readers share one new RPC after the timed-out capture releases its slot.
+    const before = child.send.mock.calls.length
     const next = Array.from({ length: 16 }, () =>
       engine!.capturePage(page).catch((error: Error) => error)
     )
     await vi.advanceTimersByTimeAsync(0)
+    expect(child.send.mock.calls.length - before).toBe(1)
     await vi.advanceTimersByTimeAsync(5000)
     expect(
       (await Promise.all(next)).every(
