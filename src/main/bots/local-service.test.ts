@@ -15,6 +15,8 @@ const fixture = vi.hoisted(() => ({
   databaseClose: vi.fn(),
   getThread: vi.fn(),
   getMessages: vi.fn(),
+  getFollowingMessages: vi.fn(),
+  readReply: undefined as ((...args: unknown[]) => unknown) | undefined,
   readReactions: undefined as ((...args: unknown[]) => unknown) | undefined,
   removeReactions: vi.fn(),
   openDatabase: vi.fn(),
@@ -23,7 +25,8 @@ const fixture = vi.hoisted(() => ({
 }))
 vi.mock("../db", () => ({
   getThreadCore: fixture.getThread,
-  getThreadMessagesByIds: fixture.getMessages
+  getThreadMessagesByIds: fixture.getMessages,
+  getThreadMessagesAfterAnyId: fixture.getFollowingMessages
 }))
 vi.mock("../agent/pending-notification-scheduler", () => ({
   pendingNotificationScheduler: { setManagedDispatcher: vi.fn() }
@@ -37,6 +40,7 @@ vi.mock("./store", () => ({
   BotStore: class {
     constructor(...args: unknown[]) {
       fixture.readReactions = args[6] as typeof fixture.readReactions
+      fixture.readReply = args[3] as typeof fixture.readReply
     }
   }
 }))
@@ -92,6 +96,37 @@ beforeEach(() => {
 })
 
 describe("Bot local service shutdown", () => {
+  it("resolves a private file-only reply from its own successful delivery receipt and sent bytes", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    fixture.getMessages.mockReturnValue([{
+      id: "file-card", ordinal: 12, role: "assistant", content: "",
+      tool_calls: [{ id: "delivery", name: "bot_deliver_files", args: {} }]
+    }])
+    const receipt = {
+      id: "receipt", ordinal: 13, role: "tool", name: "bot_deliver_files", tool_call_id: "delivery",
+      content: JSON.stringify({ kind: "bot-file-delivery", files: [
+        { name: "report.json", size: 44, filePath: "/workspace/report.json", attachmentPath: "/workspace/.sent/v1.json" }
+      ] })
+    }
+    fixture.getFollowingMessages.mockReturnValue([receipt])
+    const reply = fixture.readReply!("owned-thread", "file-card") as { id: string; text: string; preview: string }
+    expect(reply.id).toBe("file-card")
+    expect(reply.text).toContain("report.json")
+    expect(reply.text).toContain("/workspace/.sent/v1.json")
+    expect(reply.preview).toBe("📎 report.json")
+    expect(reply.text).not.toContain('"path":"/workspace/report.json"')
+    for (const following of [
+      [{ ...receipt, is_error: true }],
+      [{ ...receipt, tool_call_id: "unrelated" }],
+      [{ role: "user", content: "next turn" }, receipt],
+      [{ role: "assistant", content: "next call" }, receipt]
+    ]) {
+      fixture.getFollowingMessages.mockReturnValue(following)
+      expect((fixture.readReply!("owned-thread", "file-card") as { text: string }).text).toBe("")
+    }
+    await service.stopLocalBotHost()
+  })
   it("uses the initialized host for committed reaction cleanup and fences cleanup during shutdown", async () => {
     const service = await import("./local-service")
     service.getLocalBotHost()

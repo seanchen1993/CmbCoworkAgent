@@ -801,6 +801,7 @@ export function BotGroupConversation({
                                 </BotInlineMentionsContext.Provider>
                                 <BotGroupMessageActions
                                   messageId={item.id}
+                                  allowReaction={Boolean(item.authorBotId)}
                                   author={
                                     author?.name ?? (item.authorBotId ? "已移除的 Bot" : "你")
                                   }
@@ -829,6 +830,7 @@ export function BotGroupConversation({
                                 {!item.text && (
                                   <BotGroupMessageActions
                                     messageId={item.id}
+                                    allowReaction={Boolean(item.authorBotId)}
                                     author={author?.name ?? "已移除的 Bot"}
                                     text=""
                                     onReply={replyToMessage}

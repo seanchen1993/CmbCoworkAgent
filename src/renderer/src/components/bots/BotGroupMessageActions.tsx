@@ -8,18 +8,21 @@ export function BotGroupMessageActions({
   author,
   text,
   onReply,
+  allowReaction = true,
   onError
 }: {
   messageId?: string
   author: string
   text: string
   onReply?(): void
+  allowReaction?: boolean
   onError(error: unknown): void
 }) {
   const [copied, setCopied] = useState(false)
   return (
     <BotMessageActions
       messageId={messageId ?? ""}
+      allowReaction={allowReaction}
       label={`${author}的消息操作`}
       className="bot-group-message-actions"
       replyAction={

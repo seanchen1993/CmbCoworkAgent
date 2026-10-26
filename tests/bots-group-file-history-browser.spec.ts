@@ -38,13 +38,14 @@ window.electron={process:{platform:'darwin'}};
 const root=createRoot(document.getElementById('root'));
 const author={id:'author',name:'Original author',shape:'circle',color:'#ff2850'};
 const peer={...author,id:'peer',name:'Remaining member'};
-const state=window.historyFixture={reads:[],media:[],saves:[],privateSaves:[],render(mode){
+const state=window.historyFixture={reads:[],media:[],saves:[],privateSaves:[],groupLists:[],memberLists:[],imports:[],shares:[],render(mode){
  state.mode=mode;
  const group={id:'g',name:'Retained files',memberIds:mode.startsWith('empty')?[]:mode==='current'?['author','peer']:['peer'],version:1};
  const bots=['current','removed'].includes(mode)?[author,peer]:mode.startsWith('empty')?[]:[peer];
- root.render(mode==='native-links'?<ChatPresentationContext.Provider value='bot'><StreamingMarkdown threadId='group-g-native'>{'[URI相对文件](%41.md) '+String.fromCharCode(96)+'%41.md'+String.fromCharCode(96)}</StreamingMarkdown><BotMessageFilePreview client={client} botId='native' threadId='group-g-native' name='Native'/></ChatPresentationContext.Provider>:mode==='private'?<><BotDeliveredFile client={client} botId='private-bot' threadId='private-thread' filePath='/private/report.md'/><BotMessageFilePreview client={client} botId='private-bot' threadId='private-thread' name='Private'/></>:<><BotGroupConversation key={mode} client={client} group={group} bots={bots} tasks={mode==='current'?[{id:'task',threadId:'group-g-peer',botId:'peer',state:'running',origin:{kind:'group',groupId:'g',messageId:'request'}}]:[]} revision={1} userInitials='U' detailOpen={false} onEdit={()=>{}} onDetails={()=>{}} onOpenBot={()=>{}} onBrowser={()=>{}} onFiles={()=>{}}/>{mode==='current'&&<BotFilesPanel key={'library-'+mode} client={client} group={group} bot={peer} peers={bots}/>}</>);
+ root.render(mode==='native-links'?<ChatPresentationContext.Provider value='bot'><StreamingMarkdown threadId='group-g-native'>{'[URI相对文件](%41.md) '+String.fromCharCode(96)+'%41.md'+String.fromCharCode(96)}</StreamingMarkdown><BotMessageFilePreview client={client} botId='native' threadId='group-g-native' name='Native'/></ChatPresentationContext.Provider>:mode==='private'?<><BotDeliveredFile client={client} botId='private-bot' threadId='private-thread' filePath='/private/report.md'/><BotMessageFilePreview client={client} botId='private-bot' threadId='private-thread' name='Private'/></>:<><BotGroupConversation key={mode} client={client} group={group} bots={bots} tasks={mode==='current'?[{id:'task',threadId:'group-g-peer',botId:'peer',state:'running',origin:{kind:'group',groupId:'g',messageId:'request'}}]:[]} revision={1} userInitials='U' detailOpen={false} onEdit={()=>{}} onDetails={()=>{}} onOpenBot={()=>{}} onBrowser={()=>{}} onFiles={()=>{}}/><BotFilesPanel key={'library-'+mode} client={client} group={group} bot={bots.find(bot=>group.memberIds.includes(bot.id))} peers={bots}/></>);
 }};
-const client=window.fixtureClient={hostId:'fixture',subscribe(){return()=>{}},async groupFileWorkspace(){return '/group'},async listFiles(){return {files:[{path:'library.md',is_dir:false,size:12,modified_at:'2026-10-25T00:00:00Z'}],cursor:null}},async cancelFileList(){},async groupMessages(){return [{id:'file-delivery',ordinal:1,groupId:'g',authorBotId:'author',text:'[查看正文文件](/group/report.md) [相对路径](report.md) [拒绝越界](../private/secret.md) [拒绝根外绝对路径](/private/secret.md) [拒绝绝对路径穿越](/group/../private/secret.md) [拒绝编码路径穿越](/group/%2e%2e/private/secret.md) [拒绝编码绝对路径](%2Fprivate%2Fsecret.md) '+String.fromCharCode(96)+'report.md'+String.fromCharCode(96),createdAt:1,files:window.historyFixture.mode?.endsWith('link-only')?[]:[{filePath:'/group/report.md',attachmentPath:'/group/.deliveries/snapshot.md',name:'report.md',size:12}]}]},async messageReactions(target,ids){return {revision:1,items:ids.map(messageId=>({messageId,canReact:true,reactions:[]}))}},async exportGroupFile(...args){state.saves.push(args);return true},async exportFile(...args){state.privateSaves.push(args);return true},filePreview:{async readFilePreview(input){state.reads.push(input.source);return {success:true,content:'preserved bytes'}},async openMediaPreview(input){state.media.push(input.source);return {success:false,error:'fixture'}},cancelReadFilePreview(){},revokeMediaPreview(){}}};
+const libraryPage=()=>({files:[{path:'library.md',is_dir:false,size:12,modified_at:'2026-10-25T00:00:00Z'}],cursor:null});
+const client=window.fixtureClient={hostId:'fixture',subscribe(){return()=>{}},async groupFileWorkspace(){return '/group'},async listGroupFiles(...args){state.groupLists.push({mode:state.mode,args});return libraryPage()},async listFiles(...args){state.memberLists.push(args);return libraryPage()},async importFiles(...args){state.imports.push(args);return []},async shareFile(...args){state.shares.push(args);return 'shared.md'},async cancelFileList(){},async groupMessages(){return [{id:'file-delivery',ordinal:1,groupId:'g',authorBotId:'author',text:'[查看正文文件](/group/report.md) [相对路径](report.md) [拒绝越界](../private/secret.md) [拒绝根外绝对路径](/private/secret.md) [拒绝绝对路径穿越](/group/../private/secret.md) [拒绝编码路径穿越](/group/%2e%2e/private/secret.md) [拒绝编码绝对路径](%2Fprivate%2Fsecret.md) '+String.fromCharCode(96)+'report.md'+String.fromCharCode(96),createdAt:1,files:window.historyFixture.mode?.endsWith('link-only')?[]:[{filePath:'/group/report.md',attachmentPath:'/group/.deliveries/snapshot.md',name:'report.md',size:12}]}]},async messageReactions(target,ids){return {revision:1,items:ids.map(messageId=>({messageId,canReact:true,reactions:[]}))}},async exportGroupFile(...args){state.saves.push(args);return true},async exportFile(...args){state.privateSaves.push(args);return true},filePreview:{async readFilePreview(input){state.reads.push(input.source);return {success:true,content:'preserved bytes'}},async openMediaPreview(input){state.media.push(input.source);return {success:false,error:'fixture'}},cancelReadFilePreview(){},revokeMediaPreview(){}}};
 state.prepareRetry=async()=>{
  const key=groupDraftKey('fixture','g');
  useBotGroupDrafts.setState({drafts:{}});
@@ -178,8 +179,8 @@ state.render('removed');`
         await page.keyboard.press("Escape")
         await page.getByTestId("file-preview").waitFor({ state: "hidden" })
       }
-      if (mode === "current") {
-        const openLibrary = async () => {
+      if (mode !== "private") {
+        const openLibrary = async (save = false) => {
           await page.locator('button.bot-file-name[title="library.md"]').click()
           await page.getByTestId("file-preview").waitFor()
           assert.equal(await page.getByTestId("file-preview").count(), 1)
@@ -187,10 +188,54 @@ state.render('removed');`
           assert.equal(source.threadId, "group-files-g")
           assert.equal(source.botGroupId, "g")
           assert.equal(source.filePath, "library.md")
+          if (save) {
+            const previousSaves = await page.evaluate(() => (window as any).historyFixture.saves.length)
+            await page.getByRole("button", { name: "保存工作成果", exact: true }).click()
+            await page.waitForFunction((count) => (window as any).historyFixture.saves.length === count + 1, previousSaves)
+            assert.deepEqual(
+              await page.evaluate(() => (window as any).historyFixture.saves.at(-1)),
+              ["g", "library.md"],
+              `${mode}: library preview saves through the retained group owner`
+            )
+          }
           await page.keyboard.press("Escape")
           await page.getByTestId("file-preview").waitFor({ state: "hidden" })
         }
-        await openLibrary()
+        await openLibrary(true)
+        const library = await page.evaluate(() => (window as any).historyFixture)
+        assert.equal(library.groupLists.at(-1).mode, mode)
+        assert.deepEqual(library.groupLists.at(-1).args, ["g", undefined])
+        assert.deepEqual(library.memberLists, [], "group reads never impersonate a member")
+        const add = page.getByRole("button", { name: "添加资料", exact: true })
+        if (mode === "empty") {
+          if (await add.count()) assert.equal(await add.isEnabled(), false)
+        } else assert.equal(await add.isEnabled(), true, `${mode}: actual member keeps import`)
+        await page.getByRole("button", { name: "library.md的操作", exact: true }).click()
+        const share = page.getByRole("button", { name: "分享给 Bot", exact: true })
+        if (mode === "empty") {
+          if (await share.count()) assert.equal(await share.isEnabled(), false)
+        } else assert.equal(await share.isEnabled(), true, `${mode}: actual member keeps sharing`)
+        const previousSaves = await page.evaluate(() => (window as any).historyFixture.saves.length)
+        await page.getByRole("button", { name: "保存到本机", exact: true }).click()
+        await page.waitForFunction((count) => (window as any).historyFixture.saves.length === count + 1, previousSaves)
+        assert.deepEqual(
+          await page.evaluate(() => (window as any).historyFixture.saves.at(-1)),
+          ["g", "library.md"],
+          `${mode}: library row exports without a member identity`
+        )
+        assert.equal(
+          await page.evaluate(() => (window as any).historyFixture.privateSaves.length),
+          0
+        )
+        assert.deepEqual(
+          await page.evaluate(() => ({
+            imports: (window as any).historyFixture.imports,
+            shares: (window as any).historyFixture.shares
+          })),
+          { imports: [], shares: [] }
+        )
+        await page.keyboard.press("Escape")
+        if (mode !== "current") continue
         await page.getByRole("button", { name: "Remaining member · 正在处理", exact: true }).click()
         await openLibrary()
         for (const action of [
@@ -254,7 +299,7 @@ state.render('removed');`
     assert.equal(await retryButton.isEnabled(), false, "an edited new request keeps current-membership validation")
     assert.deepEqual(errors, [])
     console.log(
-      "PASS: removed author, deleted author, empty group: cards + snapshot preview + media scope + both saves; private preview/export unchanged; real absolute/relative Markdown links including deleted-author/empty link-only history, rejected traversal, and group library before/during inspection plus inspected card/link/tool routes, single dialog and cleanup; real group composer unchanged retry remains exact after member removal, edited request still blocked"
+      "PASS: removed author, deleted author, empty group: cards + snapshot preview + media scope + both saves; member-independent group library listing, single preview and group exports, empty-group import/share unavailable; private preview/export and current-member write controls unchanged; real absolute/relative Markdown links including deleted-author/empty link-only history, rejected traversal, library during inspection plus inspected card/link/tool routes and cleanup; real group composer unchanged retry remains exact after member removal, edited request still blocked"
     )
   } finally {
     await browser.close()

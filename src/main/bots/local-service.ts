@@ -1,4 +1,4 @@
-import { getThreadCore, getThreadMessagesByIds } from "../db"
+import { getThreadCore, getThreadMessagesByIds, getThreadMessagesAfterAnyId } from "../db"
 import { pendingNotificationScheduler } from "../agent/pending-notification-scheduler"
 import { createBotNotificationDispatcher } from "./notification-dispatch"
 import { BotError } from "../../shared/bots/contracts"
@@ -20,6 +20,7 @@ import { createBotMemoryMaintainer } from "./memory-summary-adapter"
 import type { BotMemoryMaintainer } from "./memory-maintainer"
 import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
 import { setWorkConversationLookup } from "./conversation-link-authority"
+import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
 
 let host: LocalBotHost | undefined
 let database: NativeSqliteAdapter | undefined
@@ -120,11 +121,40 @@ export function getLocalBotHost(): LocalBotHost {
                   .filter((block) => block.type === "text")
                   .map((block) => block.text ?? "")
                   .join("\n")
+          let body = message.role === "assistant" ? splitBotInlineReasoning(text).body : text
+          let preview: string | undefined
+          // Quote published bytes, not the mutable working path or model-supplied arguments.
+          // Receipts belong to this exact assistant batch; never follow reused ids into a later turn.
+          if (message.role === "assistant" && message.tool_calls?.some(call => call.name === "bot_deliver_files")) {
+            const calls = new Set(message.tool_calls.filter(call => call.name === "bot_deliver_files").map(call => call.id))
+            const references: string[] = []
+            const names: string[] = []
+            let remaining = 7_000
+            let omitted = 0
+            for (const result of getThreadMessagesAfterAnyId(threadId, [messageId], message.tool_calls.length)) {
+              if (result.role !== "tool") break
+              if (result.is_error || result.name !== "bot_deliver_files" || !calls.delete(result.tool_call_id ?? "")) continue
+              for (const file of parseBotFileDelivery(result.content) ?? []) {
+                const reference = JSON.stringify({ name: file.name.slice(0, 200), path: file.attachmentPath ?? file.filePath, size: file.size })
+                if (reference.length + 1 > remaining) { omitted++; continue }
+                references.push(reference)
+                names.push(file.name.slice(0, 200))
+                remaining -= reference.length + 1
+              }
+            }
+            if (references.length) {
+              preview = ("📎 " + names.join("、") + (omitted ? `（另${omitted}份）` : "")).slice(0, 2_000)
+              const files = "已发送附件（引用资料）：\n" + references.join("\n") +
+                (omitted ? `\n另有${omitted}份附件超出引用预览，请从原消息查看。` : "")
+              body = files + (body ? "\n\n" + body.slice(0, 8_000 - files.length - 2) : "")
+            }
+          }
           return {
             id: message.id,
             ordinal: message.ordinal!,
             role: message.role,
-            text: message.role === "assistant" ? splitBotInlineReasoning(text).body : text
+            text: body,
+            ...(preview ? { preview } : {})
           }
         },
         (request, messageId) => {

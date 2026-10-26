@@ -15,12 +15,14 @@ export function BotMessageActions({
   messageId,
   replyAction,
   moreActions,
+  allowReaction = true,
   className,
   label = "消息操作"
 }: {
   messageId: string
   replyAction?: ReactNode
   moreActions?: ReactNode
+  allowReaction?: boolean
   className?: string
   label?: string
 }) {
@@ -28,7 +30,7 @@ export function BotMessageActions({
   const state = reactions?.stateFor(messageId)
   const pending = reactions?.pending(messageId) ?? false
   const error = reactions?.errorFor(messageId)
-  const disabled = !state?.canReact || Boolean(reactions?.readOnly) || pending
+  const disabled = !allowReaction || !state?.canReact || Boolean(reactions?.readOnly) || pending
   const pickerDisabled = !reactions || Boolean(reactions.readOnly) || pending
   const selected = new Set(state?.reactions.filter((item) => item.mine).map((item) => item.emoji))
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -49,57 +51,59 @@ export function BotMessageActions({
         aria-label={label}
         className={cn("flex items-center gap-1", className)}
       >
-        <Popover
-          open={pickerOpen}
-          onOpenChange={(open) => {
-            if (open && !pickerDisabled && !state?.canReact) reactions?.retry()
-            setPickerOpen(open)
-            if (!open) setFullPicker(false)
-          }}
-        >
-          <PopoverTrigger asChild>
-            <button
-              type="button"
-              aria-label="添加表情回应"
-              title={disabled ? "等待消息确认或当前只读" : "添加表情回应"}
-              disabled={pickerDisabled}
-              className={actionClass}
-            >
-              <Smile size={16} />
-            </button>
-          </PopoverTrigger>
-          <PopoverContent data-bot-popup align="start" className="p-2" aria-label="选择表情回应">
-            {fullPicker ? (
-              <Suspense fallback={<p role="status">正在加载表情…</p>}>
-                <FullEmojiPicker selected={selected} disabled={disabled} onSelect={toggle} />
-              </Suspense>
-            ) : (
-              <div className="flex items-center gap-1">
-                {quickEmoji.map((emoji) => (
+        {allowReaction && (
+          <Popover
+            open={pickerOpen}
+            onOpenChange={(open) => {
+              if (open && !pickerDisabled && !state?.canReact) reactions?.retry()
+              setPickerOpen(open)
+              if (!open) setFullPicker(false)
+            }}
+          >
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                aria-label="添加表情回应"
+                title={disabled ? "等待消息确认或当前只读" : "添加表情回应"}
+                disabled={pickerDisabled}
+                className={actionClass}
+              >
+                <Smile size={16} />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent data-bot-popup align="start" className="p-2" aria-label="选择表情回应">
+              {fullPicker ? (
+                <Suspense fallback={<p role="status">正在加载表情…</p>}>
+                  <FullEmojiPicker selected={selected} disabled={disabled} onSelect={toggle} />
+                </Suspense>
+              ) : (
+                <div className="flex items-center gap-1">
+                  {quickEmoji.map((emoji) => (
+                    <button
+                      key={emoji}
+                      type="button"
+                      aria-label={`${selected.has(emoji) ? "取消" : "回应"} ${emoji}`}
+                      aria-pressed={selected.has(emoji)}
+                      disabled={disabled}
+                      className="size-8 rounded text-xl hover:bg-accent aria-pressed:bg-accent"
+                      onClick={() => toggle(emoji)}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
                   <button
-                    key={emoji}
                     type="button"
-                    aria-label={`${selected.has(emoji) ? "取消" : "回应"} ${emoji}`}
-                    aria-pressed={selected.has(emoji)}
-                    disabled={disabled}
-                    className="size-8 rounded text-xl hover:bg-accent aria-pressed:bg-accent"
-                    onClick={() => toggle(emoji)}
+                    aria-label="更多表情"
+                    className={actionClass}
+                    onClick={() => setFullPicker(true)}
                   >
-                    {emoji}
+                    <MoreHorizontal size={16} />
                   </button>
-                ))}
-                <button
-                  type="button"
-                  aria-label="更多表情"
-                  className={actionClass}
-                  onClick={() => setFullPicker(true)}
-                >
-                  <MoreHorizontal size={16} />
-                </button>
-              </div>
-            )}
-          </PopoverContent>
-        </Popover>
+                </div>
+              )}
+            </PopoverContent>
+          </Popover>
+        )}
         {replyAction}
         {moreActions && (
           <Popover open={moreOpen} onOpenChange={setMoreOpen}>
@@ -129,7 +133,7 @@ export function BotMessageActions({
       </div>
       {Boolean(state?.reactions.length) && (
         <div
-          className="flex flex-wrap gap-1 py-1"
+          className="bot-message-reactions"
           role="group"
           aria-label="消息表情回应"
           data-message-reactions
@@ -147,10 +151,9 @@ export function BotMessageActions({
               }
               aria-pressed={item.mine}
               onClick={() => toggle(item.emoji)}
-              className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-sm aria-pressed:border-primary aria-pressed:bg-accent disabled:opacity-60"
+              className="bot-message-reaction"
             >
               <span>{item.emoji}</span>
-              <span>{item.count}</span>
             </button>
           ))}
         </div>

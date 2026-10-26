@@ -31,7 +31,10 @@ export function isBotMessageReply(value: unknown): value is BotMessageReply {
     typeof item.text === "string" &&
     item.text.length > 0 &&
     item.text.length <= 8_000 &&
-    !item.text.includes("\0")
+    !item.text.includes("\0") &&
+    (item.preview === undefined ||
+      (typeof item.preview === "string" && item.preview.length > 0 &&
+        item.preview.length <= 2_000 && !item.preview.includes("\0")))
   )
 }
 

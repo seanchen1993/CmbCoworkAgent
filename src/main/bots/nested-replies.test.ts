@@ -19,7 +19,7 @@ afterEach(async () => {
   databases.splice(0).forEach((db) => db.close())
 })
 
-function fixture(hops = 2, scope: "private" | "work" | "group" = "private", settleParents = true) {
+function fixture(hops = 2, scope: "private" | "work" | "group" = "private", settleParents = true, relayOutputs: string[] = []) {
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
   databases.push(db)
   let time = 1000
@@ -55,7 +55,7 @@ function fixture(hops = 2, scope: "private" | "work" | "group" = "private", sett
   store.transition(root.id, "running")
   const chain = [root]
   for (let i = 1; i <= hops; i++) {
-    chain.push(store.delegate(chain[i - 1].id, bots[i].id, `Analyze part ${i}`, `part-${i}`))
+    chain.push(store.delegate(chain[i - 1].id, bots[i].id, `Analyze part ${i}`, `part-${i}`, i === 1 ? relayOutputs : []))
     if (settleParents)
       store.settle(
         chain[i - 1].id,
@@ -96,6 +96,57 @@ function finish(store: BotStore, task: BotTask, result: string, explicitGroupMes
 }
 
 describe("nested private collaboration result return", () => {
+  it.each(["private", "work"] as const)(
+    "retains the original %s report requirement until downstream integration",
+    (scope) => {
+      const f = fixture(2, scope, false, ["reports/final.json"])
+      const relay = f.chain[1], leaf = f.chain[2]
+      expect(f.store.peerHandoff(relay.id)).toEqual({ pending: true, outputFiles: ["reports/final.json"] })
+      f.store.settle(relay.id, "completed", null, "Waiting for downstream calculation")
+      f.store.settle(leaf.id, "completed", null, "ACTUAL_RESULT")
+      const integration = receipt(f.store, leaf)
+      expect(integration.origin).not.toHaveProperty("outputFiles")
+      expect(f.store.peerHandoff(integration.id)).toEqual({ pending: false, outputFiles: ["reports/final.json"] })
+      const stopped = fixture(2, scope, false, ["reports/final.json"])
+      stopped.store.settle(stopped.chain[2].id, "completed", null, "ACTUAL_RESULT")
+      const late = receipt(stopped.store, stopped.chain[2])
+      stopped.store.settle(stopped.chain[1].id, "cancelled", "User stopped the original handoff")
+      expect(stopped.store.peerHandoff(late.id).outputFiles).toEqual([])
+    }
+  )
+
+  it.each(["private", "work"] as const)(
+    "does not report an intermediate %s handoff complete while its child is still pending",
+    (scope) => {
+      const f = fixture(2, scope, false)
+      const middle = f.chain[1], leaf = f.chain[2]
+      f.store.settle(middle.id, "completed", null, "Delegated; waiting for the actual result")
+      f.store.flushReplies()
+      expect(f.store.recentTasks().some(task => task.requestId === `reply-${middle.id}`)).toBe(false)
+      f.store.settle(leaf.id, "completed", null, "VERIFIED_LEAF_RESULT")
+      const integration = receipt(f.store, leaf)
+      finish(f.store, integration, "VERIFIED_AGGREGATE")
+      const final = receipt(f.store, integration)
+      expect(final.botId).toBe(f.bots[0].id)
+      expect(final.message).toContain("VERIFIED_AGGREGATE")
+    }
+  )
+
+  it("waits for an already-finished child's undrained result rather than reporting the dispatch complete", () => {
+    const f = fixture(2, "private", false)
+    f.store.settle(f.chain[2].id, "completed", null, "VERIFIED_RESULT")
+    f.store.settle(f.chain[1].id, "completed", null, "Delegated; waiting")
+    f.store.flushReplies()
+    expect(f.store.recentTasks().some(task => task.requestId === `reply-${f.chain[1].id}`)).toBe(false)
+    finish(f.store, receipt(f.store, f.chain[2]), "INTEGRATED_RESULT")
+  })
+
+  it("still reports an intermediate failure immediately when its child is pending", () => {
+    const f = fixture(2, "private", false)
+    f.store.settle(f.chain[1].id, "failed", "ACTUAL_FAILURE")
+    expect(receipt(f.store, f.chain[1]).message).toContain("ACTUAL_FAILURE")
+  })
+
   it.each([1, 2, 3, 4])(
     "returns an integrated %i-hop result to its exact original caller without a reply loop",
     (hops) => {

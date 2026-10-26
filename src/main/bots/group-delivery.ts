@@ -162,8 +162,8 @@ export function createBotGroupDeliveryCheck(
     if (mayPass && isBotGroupPass(body)) return undefined
     if (
       task.origin.kind === "notification" &&
-      task.origin.notificationKind === "command" &&
-      task.origin.commandSucceeded === true &&
+      (task.origin.notificationKind === "reaction" ||
+        (task.origin.notificationKind === "command" && task.origin.commandSucceeded === true)) &&
       isBotRoutineSilent(body)
     )
       return undefined

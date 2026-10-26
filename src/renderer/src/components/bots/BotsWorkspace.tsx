@@ -423,17 +423,15 @@ function GroupFiles({
   const member =
     bots.find((bot) => group.memberIds.includes(bot.id) && !bot.deleting && !bot.archived) ??
     bots.find((bot) => group.memberIds.includes(bot.id) && !bot.deleting)
-  return member ? (
+  return (
     <BotFilesPanel
-      key={`${group.id}:${member.id}`}
+      key={`${group.id}:${member?.id ?? ""}`}
       bot={member}
       group={group}
       peers={bots}
       client={client}
       refreshKey={botFileRefreshKey(tasks)}
     />
-  ) : (
-    <p className="p-5 text-sm text-muted-foreground">添加群成员后即可查看共享资料。</p>
   )
 }
 

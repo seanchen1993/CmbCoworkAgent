@@ -1,4 +1,5 @@
 import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
+import { parseBotFileDelivery } from "../../../../shared/bots/file-delivery"
 import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
 import {
   ContextMenu,
@@ -883,11 +884,16 @@ function MessageBubbleImpl({
     return null
   }
 
+  const hasDeliveredFiles = presentation === "bot" && message.tool_calls?.some((call, index) => {
+    if (call.name !== "bot_deliver_files") return false
+    const result = toolResults?.get(getWorkerToolUiKey(message.id, call.id, index))
+    return result && !result.is_error && Boolean(parseBotFileDelivery(result.content))
+  })
   const replyButton =
     replyActions &&
     replyActions.canReply !== false &&
     (isUser || presentation === "bot" || !isStreaming) &&
-    plainTextForCopy.trim() ? (
+    (plainTextForCopy.trim() || hasDeliveredFiles) ? (
       <button
         type="button"
         className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
@@ -943,7 +949,7 @@ function MessageBubbleImpl({
                 onClick={() => replyActions.jump(quotedReply)}
               >
                 <Reply size={14} />
-                <span>“{cleanUserAttachmentContentForDisplay(quotedReply.text)}”</span>
+                <span>“{cleanUserAttachmentContentForDisplay(quotedReply.preview ?? quotedReply.text)}”</span>
               </button>
             )}
             <div
@@ -1001,6 +1007,7 @@ function MessageBubbleImpl({
             {presentation === "bot" ? (
               <BotMessageActions
                 messageId={message.id}
+                allowReaction={false}
                 replyAction={replyButton}
                 className="opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
                 moreActions={
@@ -1162,7 +1169,12 @@ function MessageBubbleImpl({
           {!shouldHideDuration && <DurationShow durationMs={duration} text="耗时" />}
         </div>
       )}
-      <div className="flex-1 min-w-0 space-y-2 overflow-hidden">
+      <div
+        className={cn(
+          "flex-1 min-w-0 space-y-2 overflow-hidden",
+          presentation === "bot" && "bot-assistant-content"
+        )}
+      >
         {reasoningText && showExecutionDetails && (
           <div className="px-3">
             <button
@@ -1202,8 +1214,10 @@ function MessageBubbleImpl({
           )}
         {presentation === "bot" && content ? (
           <div className="bot-assistant-content-row">
-            {assistantBody}
-            {botAssistantActions}
+            <div className="bot-message-bubble-wrap">
+              {assistantBody}
+              {botAssistantActions}
+            </div>
           </div>
         ) : (
           assistantBody

@@ -202,7 +202,7 @@ export type BotTaskOrigin =
     }
   | {
       kind: "notification"
-      notificationKind: "workflow" | "coordinator" | "command"
+      notificationKind: "workflow" | "coordinator" | "command" | "reaction"
       /** Inherits the host-owned collaboration quota; never an owner permission. */
       rootWorkId?: string
       key: string
@@ -331,6 +331,8 @@ export interface BotMessageReply {
   ordinal: number
   role: "user" | "assistant"
   text: string
+  /** Compact file label; text retains the verified attachment reference for execution. */
+  preview?: string
 }
 
 export interface BotSnapshot {
@@ -440,6 +442,8 @@ export interface BotClient {
   readonly conversations?: import("./conversation").BotConversationClient
   /** Optional group scope resolves to its shared workspace after validating current membership. */
   listFiles(botId: string, cursor?: string, groupId?: string, workId?: string): Promise<BotFilePage>
+  /** User access to a retained group's library does not require an active member. */
+  listGroupFiles(groupId: string, cursor?: string): Promise<BotFilePage>
   cancelFileList(cursor: string): Promise<void>
   importFiles(
     botId: string,

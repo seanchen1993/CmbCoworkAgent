@@ -55,6 +55,8 @@ export const localBotsApi: BotClient = {
   },
   listFiles: (botId, cursor, groupId, workId) =>
     ipcRenderer.invoke("bots:files:list", LOCAL_BOT_HOST_ID, botId, cursor, groupId, workId),
+  listGroupFiles: (groupId, cursor) =>
+    ipcRenderer.invoke("bots:files:list-group", LOCAL_BOT_HOST_ID, groupId, cursor),
   cancelFileList: (cursor) => ipcRenderer.invoke("bots:files:cancel", LOCAL_BOT_HOST_ID, cursor),
   importFiles: (botId, groupId, maxFiles, workId) =>
     ipcRenderer.invoke("bots:files:import", LOCAL_BOT_HOST_ID, botId, groupId, maxFiles, workId),

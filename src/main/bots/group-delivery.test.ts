@@ -573,6 +573,17 @@ describe("formal group delivery", () => {
     }
   )
 
+  it("allows quiet group reaction feedback but still requires real delivery for a correction", () => {
+    const feedback: BotTask = { ...task, origin: {
+      kind: "notification", notificationKind: "reaction", groupId: "g", key: "answer"
+    } }
+    const check = createBotGroupDeliveryCheck(feedback)
+    expect(check([new HumanMessage("Feedback"), new AIMessage(BOT_ROUTINE_SILENT)])).toBeUndefined()
+    expect(check([new HumanMessage("Feedback"), new AIMessage("Corrected")])).toContain("bot_send_message")
+    expect(check(receipt())).toBeUndefined()
+    expect(createBotGroupDeliveryCheck(task)([new AIMessage(BOT_ROUTINE_SILENT)])).toContain("bot_send_message")
+  })
+
   it("returns the real host receipt, preserves tool errors, and honors cancellation", async () => {
     const controller = new AbortController(),
       sent = vi.fn()

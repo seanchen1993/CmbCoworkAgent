@@ -138,6 +138,39 @@ export function registerBotFileHandlers(
       getFileAttachmentParserClient().cancelLatest(`bot-attachment:${owner}`)
     })
   }
+  const listFiles = async (
+    event: IpcMainInvokeEvent,
+    workspace: string,
+    next: unknown,
+    validate: () => unknown = () => undefined
+  ) => {
+    const owner = event.sender.id
+    attachCleanup(event)
+    const scan = next == null ? await openWorkspaceFileScan(owner, workspace) : cursor(next)
+    try {
+      validate()
+      const page = await readWorkspaceFileScanPage(
+        owner,
+        scan.scanId,
+        "continuation" in scan ? scan.continuation : undefined
+      )
+      validate()
+      if (page.workspacePath !== workspace) {
+        throw new BotError("CONFLICT", "资料分页不属于此 Bot")
+      }
+      return {
+        files: page.files,
+        cursor: page.done
+          ? null
+          : Buffer.from(
+              JSON.stringify({ scanId: scan.scanId, continuation: page.continuation })
+            ).toString("base64url")
+      }
+    } catch (error) {
+      await cancelWorkspaceFileScan(owner, scan.scanId)
+      throw error
+    }
+  }
   ipcMain.handle(
     "bots:files:list",
     async (
@@ -149,26 +182,7 @@ export function registerBotFileHandlers(
       workId: unknown
     ) => {
       const { workspace } = context(hostId, botId, groupId, workId)
-      const owner = event.sender.id
-      attachCleanup(event)
-      const scan = next == null ? await openWorkspaceFileScan(owner, workspace) : cursor(next)
-      const page = await readWorkspaceFileScanPage(
-        owner,
-        scan.scanId,
-        "continuation" in scan ? scan.continuation : undefined
-      )
-      if (page.workspacePath !== workspace) {
-        await cancelWorkspaceFileScan(owner, scan.scanId)
-        throw new BotError("CONFLICT", "资料分页不属于此 Bot")
-      }
-      return {
-        files: page.files,
-        cursor: page.done
-          ? null
-          : Buffer.from(
-              JSON.stringify({ scanId: scan.scanId, continuation: page.continuation })
-            ).toString("base64url")
-      }
+      return listFiles(event, workspace, next)
     }
   )
   ipcMain.handle("bots:files:cancel", async (event, hostId: unknown, value: unknown) => {
@@ -340,8 +354,16 @@ export function registerBotFileHandlers(
     )
     return { workspace, validate }
   }
-  ipcMain.handle("bots:files:group-workspace", (_event, hostId: unknown, groupId: unknown) =>
-    groupContext(hostId, groupId).workspace
+  ipcMain.handle(
+    "bots:files:group-workspace",
+    (_event, hostId: unknown, groupId: unknown) => groupContext(hostId, groupId).workspace
+  )
+  ipcMain.handle(
+    "bots:files:list-group",
+    (event, hostId: unknown, groupId: unknown, next: unknown) => {
+      const { workspace, validate } = groupContext(hostId, groupId)
+      return listFiles(event, workspace, next, validate)
+    }
   )
   ipcMain.handle(
     "bots:files:export-group",

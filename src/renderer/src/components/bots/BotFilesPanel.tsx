@@ -32,14 +32,15 @@ export function BotFilesPanel({
   conversationThreadId,
   refreshKey = ""
 }: {
-  bot: BotDefinition
+  bot?: BotDefinition
   peers: BotDefinition[]
   client: BotClient
   group?: { id: string; name: string }
   conversationThreadId?: string
   refreshKey?: string
 }) {
-  const threadId = conversationThreadId ?? (group ? `group-files-${group.id}` : bot.threadId)
+  const threadId =
+    conversationThreadId ?? (group ? `group-files-${group.id}` : (bot?.threadId ?? ""))
   const [page, setPage] = useState<BotFilePage | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -58,8 +59,14 @@ export function BotFilesPanel({
     setLoading(true)
     setError(null)
     void (async () => {
-      if (!group) await client.open(bot.id)
-      const next = await client.listFiles(bot.id, cursor, group?.id)
+      let next: BotFilePage
+      if (group) {
+        next = await client.listGroupFiles(group.id, cursor)
+      } else {
+        if (!bot) throw new Error("Bot 不存在")
+        await client.open(bot.id)
+        next = await client.listFiles(bot.id, cursor)
+      }
       if (disposed) {
         if (next.cursor) await client.cancelFileList(next.cursor)
         return
@@ -76,7 +83,7 @@ export function BotFilesPanel({
     return () => {
       disposed = true
     }
-  }, [bot.id, group?.id, client, cursor, revision])
+  }, [bot?.id, group?.id, client, cursor, revision])
   useEffect(
     () => () => {
       if (scan.current) void client.cancelFileList(scan.current).catch(() => {})
@@ -125,9 +132,10 @@ export function BotFilesPanel({
           <button
             className="bot-icon-button"
             aria-label="添加资料"
-            disabled={mutating || bot.archived}
+            disabled={mutating || !bot || bot.archived || bot.deleting}
             onClick={() =>
               void mutate(async () => {
+                if (!bot) return
                 await client.importFiles(bot.id, group?.id)
                 await refresh()
               })
@@ -208,7 +216,9 @@ export function BotFilesPanel({
                       className="flex items-center gap-2 rounded-md p-2 text-sm hover:bg-accent w-full"
                       onClick={() =>
                         void mutate(() =>
-                          client.exportFile(bot.id, relativeId(file.path), group?.id)
+                          group
+                            ? client.exportGroupFile(group.id, relativeId(file.path))
+                            : client.exportFile(bot!.id, relativeId(file.path))
                         )
                       }
                     >
@@ -217,6 +227,7 @@ export function BotFilesPanel({
                     </button>
                     <button
                       className="flex items-center gap-2 rounded-md p-2 text-sm hover:bg-accent w-full"
+                      disabled={!bot}
                       onClick={() => {
                         setTarget("")
                         setSharing(relativeId(file.path))
@@ -261,7 +272,7 @@ export function BotFilesPanel({
                 <option value="">选择 Bot</option>
                 {peers
                   .filter(
-                    (peer) => (group || peer.id !== bot.id) && !peer.archived && !peer.deleting
+                    (peer) => (group || peer.id !== bot?.id) && !peer.archived && !peer.deleting
                   )
                   .map((peer) => (
                     <option key={peer.id} value={peer.id}>
@@ -272,9 +283,10 @@ export function BotFilesPanel({
             </label>
             <button
               className="bot-browser-control justify-center"
-              disabled={!target || mutating}
+              disabled={!target || mutating || !bot}
               onClick={() =>
                 void mutate(async () => {
+                  if (!bot) return
                   await client.shareFile(bot.id, sharing, target, group?.id)
                   setSharing(null)
                   toast.success("资料已分享")

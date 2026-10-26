@@ -55,12 +55,12 @@ function fixture() {
 }
 
 describe("Bot control history retention", () => {
-  it("retains command provenance after pruning without copying its internal payload or crossing owners", () => {
+  it.each(["command", "reaction"] as const)("retains %s provenance after pruning without copying its internal payload or crossing owners", (notificationKind) => {
     const f = fixture()
-    const requestId = `notification:${f.bot.threadId}:command:command-1`
+    const requestId = `notification:${f.bot.threadId}:${notificationKind}:command-1`
     const origin = {
       kind: "notification",
-      notificationKind: "command",
+      notificationKind,
       key: "command-1",
       commandSucceeded: true
     } as const

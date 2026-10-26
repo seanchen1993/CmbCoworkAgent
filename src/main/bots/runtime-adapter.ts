@@ -393,16 +393,20 @@ export function createLocalBotRunPort(
       const privateCommand =
         privateNotification?.notificationKind === "command" ? privateNotification : undefined
       const privateWorkflow = privateNotification?.notificationKind === "workflow"
+      const privateReaction = privateNotification?.notificationKind === "reaction"
       if (
         task.workId ||
         (!["user", "schedule", "work_result"].includes(task.origin.kind) &&
           !privateCommand &&
-          !privateWorkflow)
+          !privateWorkflow &&
+          !privateReaction)
       )
         return
       if (state !== "completed" && state !== "failed" && state !== "outcome_unknown") return
       if (
-        (task.origin.kind === "schedule" || privateCommand?.commandSucceeded === true) &&
+        (task.origin.kind === "schedule" ||
+          privateCommand?.commandSucceeded === true ||
+          privateReaction) &&
         state === "completed" &&
         !files?.length &&
         isBotRoutineSilent(result)
@@ -416,7 +420,9 @@ export function createLocalBotRunPort(
             ? "需要你查看"
             : privateWorkflow
               ? "后台任务有新结果"
-              : "工作已完成"
+              : privateReaction
+                ? "有新回复"
+                : "工作已完成"
       notifyIfBackground(`${bot.name} · ${label}`, "返回 Bots 工作区查看结果。")
     },
     onAvailable(listener) {
@@ -651,9 +657,10 @@ export function createLocalBotRunPort(
           // The existing terminal/outbox transaction persists the reply; no second file store.
           const replyFiles = new Map<string, BotDeliveredFile>()
           const routineDelivery =
-            !task.workId &&
-            (task.origin.kind === "schedule" ||
-              (task.origin.kind === "notification" && task.origin.notificationKind === "command"))
+            (task.origin.kind === "notification" && task.origin.notificationKind === "reaction") ||
+            (!task.workId &&
+              (task.origin.kind === "schedule" ||
+                (task.origin.kind === "notification" && task.origin.notificationKind === "command")))
           const captureReplyFiles = (files: BotDeliveredFile[]): void => {
             if (!task.workId && !routineDelivery && !peerResultOwner) return
             for (const file of files) {
@@ -830,7 +837,8 @@ export function createLocalBotRunPort(
                   mock || reporting
                     ? "normal"
                     : task.origin.kind === "notification" &&
-                        task.origin.notificationKind !== "command"
+                        (task.origin.notificationKind === "workflow" ||
+                          task.origin.notificationKind === "coordinator")
                       ? task.origin.notificationKind === "workflow"
                         ? "workflow"
                         : "coordinator"
@@ -1172,7 +1180,13 @@ export function createLocalBotRunPort(
                 },
                 shouldRaiseCompletionAttention: () => {
                   if (replyFiles.size || hasPublicContribution) return true
-                  if (task.origin.kind === "schedule" && isBotRoutineSilent(finalText)) return false
+                  if (
+                    (task.origin.kind === "schedule" ||
+                      (task.origin.kind === "notification" &&
+                        task.origin.notificationKind === "reaction")) &&
+                    isBotRoutineSilent(finalText)
+                  )
+                    return false
                   return !(
                     groupId &&
                     (task.origin.kind === "discussion" ||
@@ -1206,19 +1220,18 @@ export function createLocalBotRunPort(
             }
           }
           if (terminal?.outcome === "success") {
-            if (
-              task.origin.kind === "bot" &&
-              task.origin.expectsReply &&
-              task.origin.outputFiles?.length
-            ) {
-              const files = await verifyBotDeliveryFiles(
-                workspacePath,
-                task.origin.outputFiles,
-                signal
-              )
-              // Declared outputs prove the internal handoff has real files;
-              // only an explicit delivery tool may publish them to the room.
-              captureReplyFiles(files)
+            if (task.origin.kind === "bot") {
+              const handoff = getHost().peerHandoff(task)
+              if (!handoff.pending && handoff.outputFiles.length) {
+                const files = await verifyBotDeliveryFiles(
+                  workspacePath,
+                  handoff.outputFiles,
+                  signal
+                )
+                // Verify the original contract at integration, not while dispatch is waiting.
+                // Only an explicit delivery tool may publish these files to the room.
+                captureReplyFiles(files)
+              }
             }
             if (
               !mock &&

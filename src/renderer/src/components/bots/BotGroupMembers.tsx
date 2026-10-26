@@ -78,7 +78,7 @@ export function BotGroupMembers({
           className="bot-member-add h-auto w-full border-0 shadow-none"
           aria-label="添加成员"
         >
-          <span className="flex items-center gap-3">
+          <span className="bot-member-add-label">
             {busy ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />}
             {group.memberIds.length >= 8 ? "已达 8 位成员上限" : "添加成员"}
           </span>

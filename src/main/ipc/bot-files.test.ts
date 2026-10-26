@@ -6,6 +6,8 @@ const fixture = vi.hoisted(() => ({
   getBot: vi.fn(),
   getGroupMember: vi.fn(),
   getGroup: vi.fn(),
+  getWork: vi.fn(),
+  initializeWorkThread: vi.fn(),
   prepare: vi.fn(),
   open: vi.fn(),
   save: vi.fn(),
@@ -101,6 +103,149 @@ beforeEach(() => {
 })
 
 describe("Bot file IPC group scope", () => {
+  it("lists and pages retained empty-group files without resolving a member or execution thread", async () => {
+    const call = register()
+    const workspace = "/test-data/bots/workspaces/group-g"
+    fixture.page.mockResolvedValueOnce({
+      workspacePath: workspace,
+      files: [{ path: "/report.md", is_dir: false }],
+      done: false,
+      continuation: "next-page"
+    })
+    const first = (await call("list-group", "g")) as {
+      files: Array<{ path: string }>
+      cursor: string
+    }
+    expect(first.files).toEqual([{ path: "/report.md", is_dir: false }])
+    expect(JSON.parse(Buffer.from(first.cursor, "base64url").toString("utf8"))).toEqual({
+      scanId: "scan",
+      continuation: "next-page"
+    })
+    fixture.page.mockResolvedValueOnce({ workspacePath: workspace, files: [], done: true })
+    expect(await call("list-group", "g", first.cursor)).toEqual({ files: [], cursor: null })
+    expect(fixture.scan).toHaveBeenCalledExactlyOnceWith(1, workspace)
+    expect(fixture.page).toHaveBeenLastCalledWith(1, "scan", "next-page")
+    expect(fixture.getGroup).toHaveBeenCalledWith("g")
+    expect(fixture.getGroupMember).not.toHaveBeenCalled()
+    expect(fixture.getBot).not.toHaveBeenCalled()
+    expect(fixture.prepare).not.toHaveBeenCalled()
+    expect(fixture.initializeWorkThread).not.toHaveBeenCalled()
+  })
+
+  it("rejects invalid or unavailable groups before opening a file scan", async () => {
+    const call = register()
+    for (const id of [null, "../g", "/private/a", {}, ""])
+      await expect(call("list-group", id)).rejects.toThrow()
+    fixture.getGroup.mockImplementation(() => {
+      throw new Error("Group unavailable")
+    })
+    await expect(call("list-group", "missing")).rejects.toThrow("Group unavailable")
+    expect(fixture.scan).not.toHaveBeenCalled()
+    expect(fixture.page).not.toHaveBeenCalled()
+  })
+
+  it.each(["/test-data/bots/workspaces/group-other", "/private/a"])(
+    "rejects and cancels a group cursor whose scan belongs to %s",
+    async (workspacePath) => {
+      const call = register()
+      const next = Buffer.from(
+        JSON.stringify({ scanId: "other-scan", continuation: "next-page" })
+      ).toString("base64url")
+      fixture.page.mockResolvedValueOnce({
+        workspacePath,
+        files: [{ path: "/other-secret.md" }],
+        done: false
+      })
+      await expect(call("list-group", "g", next)).rejects.toThrow()
+      expect(fixture.scan).not.toHaveBeenCalled()
+      expect(fixture.page).toHaveBeenCalledWith(1, "other-scan", "next-page")
+      expect(fixture.cancel).toHaveBeenCalledWith(1, "other-scan")
+    }
+  )
+
+  it.each(["opening the scan", "reading a page"])(
+    "rejects and cancels a retained-group scan when the group is deleted while %s",
+    async (phase) => {
+      const call = register()
+      const revoke = () =>
+        fixture.getGroup.mockImplementation(() => {
+          throw new Error("Group deleted during scan")
+        })
+      if (phase === "opening the scan")
+        fixture.scan.mockImplementationOnce(async () => {
+          revoke()
+          return { scanId: "scan" }
+        })
+      else
+        fixture.page.mockImplementationOnce(async () => {
+          revoke()
+          return {
+            workspacePath: "/test-data/bots/workspaces/group-g",
+            files: [{ path: "/report.md" }],
+            done: false
+          }
+        })
+      await expect(call("list-group", "g")).rejects.toThrow("Group deleted during scan")
+      expect(fixture.cancel).toHaveBeenCalledWith(1, "scan")
+    }
+  )
+
+  it("does not grant imports, composer attachments or sharing through empty-group read access", async () => {
+    const call = register()
+    fixture.page.mockResolvedValueOnce({
+      workspacePath: "/test-data/bots/workspaces/group-g",
+      files: [{ path: "/report.md" }],
+      done: true
+    })
+    fixture.getGroupMember.mockImplementation(() => {
+      throw new Error("Not a member")
+    })
+    await expect(call("list-group", "g")).resolves.toMatchObject({ cursor: null })
+    const bytes = new TextEncoder().encode("synthetic").buffer
+    await expect(call("import", "removed", "g")).rejects.toThrow("Not a member")
+    await expect(call("attach", "removed", 1, 500, "g")).rejects.toThrow("Not a member")
+    await expect(
+      call("attach-bytes", "removed", [{ fileName: "report.md", bytes }], 500, "g")
+    ).rejects.toThrow("Not a member")
+    await expect(call("share", "removed", "report.md", "target", "g")).rejects.toThrow(
+      "Not a member"
+    )
+    expect(fixture.open).not.toHaveBeenCalled()
+    expect(fixture.destination).not.toHaveBeenCalled()
+    expect(fixture.copy).not.toHaveBeenCalled()
+    expect(fixture.copyBytes).not.toHaveBeenCalled()
+  })
+
+  it("retains private and independent-work list scopes without consulting group authority", async () => {
+    const call = register()
+    const work = { id: "w", botId: "a", threadId: "work-w" }
+    fixture.getWork.mockReturnValue(work)
+    fixture.prepare.mockImplementation((bot, _task, selectedWork) =>
+      selectedWork ? "/independent-work" : `/private/${bot.id}`
+    )
+    for (const [workspacePath, workId] of [
+      ["/private/a", undefined],
+      ["/independent-work", "w"]
+    ]) {
+      fixture.page.mockResolvedValueOnce({ workspacePath, files: [], done: true })
+      expect(await call("list", "a", undefined, undefined, workId)).toEqual({
+        files: [],
+        cursor: null
+      })
+      expect(fixture.scan).toHaveBeenCalledWith(1, workspacePath)
+    }
+    expect(fixture.getWork).toHaveBeenCalledWith("a", "w")
+    expect(fixture.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      { threadId: "work-w", origin: { kind: "user" } },
+      work
+    )
+    expect(fixture.initializeWorkThread).toHaveBeenCalledExactlyOnceWith("a", "w")
+    expect(fixture.getGroup).not.toHaveBeenCalled()
+    expect(fixture.getGroupMember).not.toHaveBeenCalled()
+    await expect(call("list", "a", undefined, "g", "w")).rejects.toThrow("不能混用")
+  })
+
   it("resolves a retained group's root without member or execution-thread access", async () => {
     const call = register()
     expect(await call("group-workspace", "g")).toBe("/test-data/bots/workspaces/group-g")

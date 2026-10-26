@@ -8949,7 +8949,7 @@ export function ChatContainer({
                         onClick={() => jumpToBotReply(draftBotReplyTo)}
                       >
                         <Reply size={15} />
-                        <span>“{cleanUserAttachmentContentForDisplay(draftBotReplyTo.text)}”</span>
+                        <span>“{cleanUserAttachmentContentForDisplay(draftBotReplyTo.preview ?? draftBotReplyTo.text)}”</span>
                       </button>
                       <button
                         type="button"

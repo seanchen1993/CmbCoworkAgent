@@ -16,10 +16,11 @@ declare global {
       calls: string[]
       loading: boolean
       runningTool: boolean
+      renderMembers(width: number): void
       render(
         mode: "bot" | "default",
         loading?: boolean,
-        layout?: "short" | "long" | "table",
+        layout?: "short" | "long" | "table" | "file" | "failed-file",
         userReaction?: boolean,
         canReply?: boolean
       ): void
@@ -46,12 +47,15 @@ import {createRoot} from 'react-dom/client';
 import {ChatMessageVirtualList} from './src/renderer/src/components/chat/ChatMessageVirtualList';
 import {ChatPresentationContext,ChatReplyActionsContext} from './src/renderer/src/components/chat/chat-presentation-context';
 import {BotMessageReactionsContext} from './src/renderer/src/components/bots/bot-message-reactions-context';
+import {BotGroupMembers} from './src/renderer/src/components/bots/BotGroupMembers';
+import {getWorkerToolUiKey} from './src/renderer/src/lib/worker-tool-result-key';
 const root=createRoot(document.getElementById('root'));
 const noop=()=>{};
 const ids=['first','provider:response/model::cmb-same-role-duplicate:assistant:2','provider:response/model::cmb-same-role-duplicate:assistant:3'];
 const messages=[{id:'user',role:'user',content:'请分段报告',created_at:new Date(1)},...ids.map((id,i)=>({id,ordinal:2+i*2,role:'assistant',content:['第一条已完成','中间这条独立结果','最后一条结果'][i],created_at:new Date(2+i)}))];
 const props={lastUserMessageIndex:0,contentVersion:0,historyHasMore:false,historyPageLoading:false,historyRemainingCount:0,onLoadEarlierHistoryPage:noop,historyGapBeforeMessageId:null,canLoadReleasedHistory:false,onLoadReleasedHistoryWindow:noop,onRestoreLatestHistoryWindow:noop,hookLoggingEnabled:false,hookLogBucketByTurnId:new Map(),detachedHookLogBuckets:[],contentMessageRefs:{current:new Map()},setMessageRef:()=>noop,toolResults:new Map(),toolCallStates:new Map(),pendingApprovalToolCallKeys:new Set(),pendingApproval:null,autoApproveGitPush:false,onApprovalDecision:noop,onEditUserMessage:noop,onSetGoalFromMessage:noop,onForkFromMessage:null,forkingMessageId:null,onOpenHookLogBucket:noop,threadId:'reply-fixture',customScrollParent:document.getElementById('viewport'),virtuosoRef:{current:null},navigatorVirtualRangeRef:{current:null},initialTopMostItemIndex:{index:'LAST',align:'end',behavior:'auto'},onInitialVirtualItemsRendered:noop,onContentHeightChanged:noop,onAtBottomStateChange:noop,footer:null,assistantDurationMsById:new Map(),userSendTimeLabelById:new Map([["user","08:00"]])};
-const state=window.replyFixture={ids,calls:[],mode:'bot',loading:false,runningTool:false,render(mode='bot',loading=false,layout='short',userReaction=true,canReply=true){state.mode=mode;state.loading=loading;state.runningTool=loading;document.getElementById('root').dataset.chatSurface=mode;const shown=messages.map(m=>m.role!=='assistant'||layout==='short'?m:{...m,content:layout==='long'?'长消息正文和不能断开的链接 https://example.com/'+ 'a'.repeat(120)+' 结束。'.repeat(24):'| 项目 | 内容 | 补充 |\\n| --- | --- | --- |\\n| 已完成 | https://example.com/'+ 'a'.repeat(160)+' | 表格内容 |'});if(loading)shown[shown.length-1]={...shown.at(-1),tool_calls:[{id:'held-execute',name:'execute',args:{command:'held'}}]};const tools=loading?new Map([['held-execute',{status:'running',name:'execute'}]]):props.toolCallStates;root.render(<ChatPresentationContext.Provider value={mode}><ChatReplyActionsContext.Provider value={{canReply,reply:id=>state.calls.push(id),setDraftReply:noop,quoteFor:()=>undefined,jump:noop}}><BotMessageReactionsContext.Provider value={{stateFor:id=>({messageId:id,canReact:true,reactions:id==='user'?(userReaction?[{emoji:"👍",count:1,mine:false,actors:[{botId:"actor-bot",name:"验收 Bot"}]}]:[]):[{emoji:"👍",count:1,mine:true}]}),pending:()=>false,errorFor:()=>undefined,readOnly:false,set:async()=>{},retry:noop}}><ChatMessageVirtualList {...props} isLoading={loading} toolCallStates={tools} messages={shown} visibleMessageIndexes={shown.map((_,i)=>i)}/></BotMessageReactionsContext.Provider></ChatReplyActionsContext.Provider></ChatPresentationContext.Provider>)} };
+const state=window.replyFixture={ids,calls:[],mode:'bot',loading:false,runningTool:false,render(mode='bot',loading=false,layout='short',userReaction=true,canReply=true){state.mode=mode;state.loading=loading;state.runningTool=loading;document.getElementById('root').dataset.chatSurface=mode;const shown=messages.map(m=>m.role!=='assistant'||layout==='short'?m:{...m,content:layout==='long'?'长消息正文和不能断开的链接 https://example.com/'+ 'a'.repeat(120)+' 结束。'.repeat(24):'| 项目 | 内容 | 补充 |\\n| --- | --- | --- |\\n| 已完成 | https://example.com/'+ 'a'.repeat(160)+' | 表格内容 |'});const fileLayout=layout==='file'||layout==='failed-file';if(fileLayout){shown.splice(0,shown.length,...messages);shown[1]={...messages[1],content:'',tool_calls:[{id:'file-call',name:'bot_deliver_files',args:{}}]}}const fileResults=fileLayout?new Map([[getWorkerToolUiKey(ids[0],'file-call',0),{content:JSON.stringify({kind:'bot-file-delivery',files:[{name:'report.json',filePath:'/workspace/report.json',size:44}]}),is_error:layout==='failed-file'}]]):props.toolResults;if(loading)shown[shown.length-1]={...shown.at(-1),tool_calls:[{id:'held-execute',name:'execute',args:{command:'held'}}]};const tools=loading?new Map([['held-execute',{status:'running',name:'execute'}]]):props.toolCallStates;root.render(<ChatPresentationContext.Provider value={mode}><ChatReplyActionsContext.Provider value={{canReply,reply:id=>state.calls.push(id),setDraftReply:noop,quoteFor:()=>undefined,jump:noop}}><BotMessageReactionsContext.Provider value={{stateFor:id=>({messageId:id,canReact:true,reactions:id==='user'?(userReaction?[{emoji:"👍",count:1,mine:false,actors:[{botId:"actor-bot",name:"验收 Bot"}]}]:[]):[{emoji:"👍",count:1,mine:true}]}),pending:()=>false,errorFor:()=>undefined,readOnly:false,set:async()=>{},retry:noop}}><ChatMessageVirtualList {...props} isLoading={loading} toolResults={fileResults} toolCallStates={tools} messages={shown} visibleMessageIndexes={shown.map((_,i)=>i)}/></BotMessageReactionsContext.Provider></ChatReplyActionsContext.Provider></ChatPresentationContext.Provider>)} };
+state.renderMembers=(width)=>{const m={id:'m',name:'Existing',color:'#999',shape:'circle'},a={...m,id:'a',name:'Available'};root.render(<div style={{width}}><BotGroupMembers group={{id:'g',name:'G',version:1,memberIds:['m']}} bots={[m,a]} client={{saveGroup:async()=>{}}} onOpen={noop}/></div>)};
 state.render();`
       },
       bundle: true,
@@ -99,7 +103,9 @@ state.render();`
       "src/renderer/src/components/chat/MessageBubble.tsx",
       "src/renderer/src/components/chat/ChatMessageVirtualList.tsx",
       "src/renderer/src/components/chat/StreamingMarkdown.tsx",
-      "src/renderer/src/components/bots/BotMessageActions.tsx"
+      "src/renderer/src/components/bots/BotMessageActions.tsx",
+      "src/renderer/src/components/bots/BotGroupMembers.tsx",
+      "src/renderer/src/components/ui/select.tsx"
     ]
     const stylesheet = await compile(await readFile("src/renderer/src/index.css", "utf8"), {
       base: resolve("src/renderer/src"),
@@ -144,6 +150,7 @@ state.render();`
     const userRow = page.locator('[data-chat-message-row][data-message-role="user"]')
     const userChip = userRow.locator("[data-message-reactions] button")
     await userChip.waitFor()
+    assert.equal(await userRow.getByRole("button", {name:"添加表情回应",exact:true}).count(), 0, "user messages do not offer self-reactions")
     await page.mouse.move(0, 0)
     const userVisibility = () =>
       userChip.evaluate((chip) => {
@@ -265,11 +272,18 @@ state.render();`
         const geometry = await row.evaluate((node) => {
           const body = node.querySelector("[data-message-body]")!.getBoundingClientRect()
           const actions = node
-            .querySelector(".bot-assistant-content-row > [data-message-actions]")!
+            .querySelector(".bot-message-bubble-wrap > [data-message-actions]")!
             .getBoundingClientRect()
           const reactions = node.querySelector("[data-message-reactions]")!.getBoundingClientRect()
           const content = node.querySelector(".bot-assistant-content-row")!
+          let clipped = false
+          for (let ancestor = content.parentElement; ancestor && ancestor !== node.parentElement; ancestor = ancestor.parentElement) {
+            const style = getComputedStyle(ancestor)
+            const bounds = ancestor.getBoundingClientRect()
+            if (["hidden", "clip"].includes(style.overflowY) && reactions.top < bounds.top) clipped = true
+          }
           return {
+            clipped,
             body: { right: body.right, top: body.top, bottom: body.bottom },
             actions: {
               left: actions.left,
@@ -277,10 +291,10 @@ state.render();`
               bottom: actions.bottom,
               right: actions.right
             },
-            reactions: { top: reactions.top, left: reactions.left, width: reactions.width },
+            reactions: { top: reactions.top, left: reactions.left, right: reactions.right, width: reactions.width },
             row: content.getBoundingClientRect().toJSON(),
             overflow: content.scrollWidth > content.clientWidth + 1,
-            order: [...content.querySelectorAll(":scope > [data-message-actions] > button")].map(
+            order: [...content.querySelectorAll(".bot-message-bubble-wrap > [data-message-actions] > button")].map(
               (button) => button.getAttribute("aria-label")
             )
           }
@@ -299,12 +313,13 @@ state.render();`
           `${layout}/${width}: no horizontal overflow`
         )
         assert(
-          geometry.reactions.top >= Math.max(geometry.body.bottom, geometry.actions.bottom),
-          `${layout}/${width}: reaction pills remain below`
+          geometry.reactions.top < geometry.body.top && geometry.reactions.top >= geometry.body.top - 14,
+          `${layout}/${width}: the reaction sits on the bubble's upper edge`
         )
+        assert.equal(geometry.clipped, false, "the complete upper-right badge is not clipped by message ancestors")
         assert(
-          Math.abs(geometry.reactions.width - geometry.row.width) <= 1,
-          `${layout}/${width}: reactions use the full next row`
+          Math.abs(geometry.reactions.width - 28) <= 1 && Math.abs(geometry.reactions.right - geometry.body.right - 8) <= 1,
+          `${layout}/${width}: one compact badge sits at the bubble's right corner ${JSON.stringify(geometry)}`
         )
         assert.deepEqual(geometry.order, ["添加表情回应", "回复消息", "更多消息操作"])
       }
@@ -344,7 +359,7 @@ state.render();`
     assert.equal(
       await streamingBody!.evaluate(
         (body) =>
-          body.isConnected && body.parentElement?.classList.contains("bot-assistant-content-row")
+          body.isConnected && body.parentElement?.classList.contains("bot-message-bubble-wrap")
       ),
       true,
       "completion retains the original Bot body and parent"
@@ -383,6 +398,32 @@ state.render();`
       12,
       "workbench reply icon keeps its original size"
     )
+    await page.evaluate(() => window.replyFixture.render("bot", false, "file"))
+    await rows.first().getByRole("button", { name: "回复消息", exact: true }).waitFor()
+    await rows.first().getByRole("button", { name: "回复消息", exact: true }).click({ force: true })
+    assert.equal(await page.evaluate(() => window.replyFixture.calls.at(-1)), "first", "file-only reply keeps the original assistant identity")
+    await page.evaluate(() => window.replyFixture.render("bot", false, "failed-file"))
+    await rows.first().getByRole("button", { name: "回复消息", exact: true }).waitFor({ state: "detached" })
+    await page.evaluate(() => window.replyFixture.render("default", false, "file"))
+    assert.equal(await rows.first().getByRole("button", { name: "回复消息", exact: true }).count(), 0, "native workbench file actions unchanged")
+    for (const dark of [false, true]) {
+      await page.evaluate(dark => document.documentElement.classList.toggle("dark", dark), dark)
+      for (const width of [224, 320]) {
+        await page.evaluate(width => window.replyFixture.renderMembers(width), width)
+        const trigger = page.getByRole("combobox", {name:"添加成员",exact:true})
+        await trigger.waitFor()
+        const geometry = await trigger.evaluate(button => {
+          const label = button.querySelector(".bot-member-add-label")!
+          const icon = label.querySelector("svg")!.getBoundingClientRect()
+          const node = [...label.childNodes].find(node => node.nodeType === Node.TEXT_NODE && node.textContent?.includes("添加成员"))!
+          const range = document.createRange(); range.selectNode(node)
+          const text = range.getBoundingClientRect()
+          return {icon:icon.toJSON(),text:text.toJSON(),height:button.getBoundingClientRect().height}
+        })
+        assert(Math.abs(geometry.icon.y + geometry.icon.height / 2 - geometry.text.y - geometry.text.height / 2) <= 2, `member icon/text aligned at ${width}, dark=${dark}`)
+        assert(geometry.text.x >= geometry.icon.right && geometry.height < 56, "add member stays on one row")
+      }
+    }
     assert.deepEqual(errors, [])
     console.log(
       "PASS: per-bubble Bot reply keeps exact ids while loading and a hidden tool runs without finish metadata; workbench streaming/actions unchanged; production CSS geometry and streaming DOM stability"

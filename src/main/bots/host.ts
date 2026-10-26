@@ -684,6 +684,11 @@ export class LocalBotHost {
     return task
   }
 
+  peerHandoff(task: Pick<BotTask, "id">) {
+    this.requireRunning()
+    return this.store.peerHandoff(task.id)
+  }
+
   saveSchedule(
     botId: string,
     input: BotScheduleInput,
@@ -927,7 +932,10 @@ export class LocalBotHost {
     const canonicalTarget = parseBotReactionTarget(target)
     const before = this.store.revision()
     const result = this.store.setMessageReaction(canonicalTarget, messageId, emoji, present)
-    if (result.revision !== before) this.changed(undefined, canonicalTarget)
+    if (result.revision !== before) {
+      this.changed(undefined, canonicalTarget)
+      if (present) this.wake()
+    }
     return result
   }
 

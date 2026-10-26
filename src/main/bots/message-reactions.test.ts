@@ -5,8 +5,9 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
-import { LocalBotHost } from "./host"
+import { LocalBotHost, type BotRunPort } from "./host"
 import type { BotReactionTarget } from "../../shared/bots/message-reactions"
+import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
 import nativeEmoji from "../../shared/bots/reaction-emoji-native.json"
 import { parseBotReactionEmoji } from "../../shared/bots/message-reactions"
 
@@ -24,30 +25,32 @@ function fixture(path = ":memory:") {
   const read = vi.fn((_botId: string, threadId: string, ids: string[]) =>
     (messages.get(threadId) ?? []).filter((message) => ids.includes(message.id))
   )
-  const store = new BotStore(db, () => 1000, undefined, undefined, undefined, undefined, read)
+  const quote = vi.fn((threadId: string, id: string) => {
+    const message = messages.get(threadId)?.find((entry) => entry.id === id)
+    return message ? { ...message, text: "Actual prior answer" } : null
+  })
+  const store = new BotStore(db, () => 1000, undefined, quote, undefined, undefined, read)
   const bot = store.create({ name: "A", instructions: "", color: "#123456", modelRef: null })
   const target: BotReactionTarget = { kind: "bot", botId: bot.id }
   messages.set(bot.threadId, [{ id: "native:message.1", role: "assistant", ordinal: 0 }])
-  return { db, store, bot, target, messages, read }
+  return { db, store, bot, target, messages, read, quote }
 }
 
 describe("persisted local user message reactions", () => {
-  it("keeps different emoji, cancels one, canonicalizes heart aliases and advances revision only for changes", () => {
+  it("replaces the selected emoji, canonicalizes aliases and advances revision only for changes", () => {
     const f = fixture(),
       id = "native:message.1",
       revision = f.store.revision()
-    expect(f.store.setMessageReaction(f.target, id, "👍", true).revision).toBe(revision + 1)
-    expect(f.store.setMessageReaction(f.target, id, "👍", true).revision).toBe(revision + 1)
+    const added = f.store.setMessageReaction(f.target, id, "👍", true).revision
+    expect(added).toBeGreaterThan(revision)
+    expect(f.store.setMessageReaction(f.target, id, "👍", true).revision).toBe(added)
     f.store.setMessageReaction(f.target, id, "❤", true)
     f.store.setMessageReaction(f.target, id, "❤️", true)
     const state = f.store.messageReactions(f.target, [id]).items[0]
     expect(state).toEqual({
       messageId: id,
       canReact: true,
-      reactions: [
-        { emoji: "❤️", count: 1, mine: true },
-        { emoji: "👍", count: 1, mine: true }
-      ]
+      reactions: [{ emoji: "❤️", count: 1, mine: true }]
     })
     const changed = f.store.setMessageReaction(f.target, id, "👍", false)
     expect(changed.item.reactions).toEqual([{ emoji: "❤️", count: 1, mine: true }])
@@ -55,6 +58,20 @@ describe("persisted local user message reactions", () => {
     expect(
       f.db.exec("PRAGMA table_info(bot_message_reactions)")[0].values.map((row) => row[1])
     ).toEqual(["scope_kind", "scope_id", "message_id", "emoji", "added_at", "actor"])
+  })
+  it("rejects group user messages while retaining assistant reactions, including deleted authors", () => {
+    const f = fixture(), group = f.store.saveGroup({ name: "Group", memberIds: [f.bot.id] })
+    const target: BotReactionTarget = { kind: "group", groupId: group.id }
+    f.db.run("INSERT INTO bot_group_messages(id,group_id,author_bot_id,text,targets_json,created_at) VALUES('user',?,NULL,'User','[]',1)", [group.id])
+    expect(() => f.store.setMessageReaction(target, "user", "🎉", true)).toThrow("不可用")
+    expect(f.store.messageReactions(target, ["user"]).items[0]).toEqual({messageId:"user",canReact:false,reactions:[]})
+    f.db.run("INSERT INTO bot_group_messages(id,group_id,author_bot_id,text,targets_json,created_at) VALUES('answer',?,?,'Answer','[]',2)", [group.id, f.bot.id])
+    f.store.setMessageReaction(target, "answer", "👍", true)
+    f.store.setMessageReaction(target, "answer", "🎉", true)
+    const changed = f.store.setMessageReaction(target, "answer", "👍", true)
+    expect(changed.item.reactions).toEqual([{emoji:"👍",count:1,mine:true}])
+    expect(f.store.setMessageReaction(target, "answer", "👍", true).revision).toBe(changed.revision)
+    expect(f.store.setMessageReaction(target, "answer", "👍", false).item.reactions).toEqual([])
   })
   it("binds identical native IDs separately in private/work/other Bot/public group scopes", () => {
     const f = fixture(),
@@ -66,7 +83,7 @@ describe("persisted local user message reactions", () => {
       title: "Work",
       goal: "Draft"
     }).work
-    f.messages.set(work.threadId, [{ id, role: "user", ordinal: 0 }])
+    f.messages.set(work.threadId, [{ id, role: "assistant", ordinal: 0 }])
     f.messages.set(peer.threadId, [{ id, role: "assistant", ordinal: 0 }])
     const workTarget: BotReactionTarget = {
       ...(f.target as { kind: "bot"; botId: string }),
@@ -82,8 +99,8 @@ describe("persisted local user message reactions", () => {
     ).toThrow("不属于")
     const group = f.store.saveGroup({ name: "Group", memberIds: [f.bot.id, peer.id] })
     f.db.run(
-      "INSERT INTO bot_group_messages(id,group_id,author_bot_id,text,targets_json,created_at) VALUES(?,?,NULL,'','[]',1)",
-      [id, group.id]
+      "INSERT INTO bot_group_messages(id,group_id,author_bot_id,text,targets_json,created_at) VALUES(?,?,?,'','[]',1)",
+      [id, group.id, f.bot.id]
     )
     const groupTarget: BotReactionTarget = { kind: "group", groupId: group.id }
     f.store.setMessageReaction(groupTarget, id, "😂", true)
@@ -104,7 +121,7 @@ describe("persisted local user message reactions", () => {
   it("accepts file-only identities, refuses absent/tool/temporary IDs and never queries other transcript scopes", () => {
     const f = fixture()
     f.messages.set(f.bot.threadId, [
-      { id: "file-only", role: "user", ordinal: 1 },
+      { id: "file-only", role: "assistant", ordinal: 1 },
       { id: "tool", role: "tool", ordinal: 2 } as unknown as Identity,
       { id: "temporary", role: "assistant" } as Identity
     ])
@@ -167,8 +184,8 @@ describe("persisted local user message reactions", () => {
       title: "Disposable",
       goal: "Disposable"
     }).work
-    f.messages.set(admitted.threadId, [{ id, role: "user", ordinal: 0 }])
-    f.messages.set(disposable.threadId, [{ id, role: "user", ordinal: 0 }])
+    f.messages.set(admitted.threadId, [{ id, role: "assistant", ordinal: 0 }])
+    f.messages.set(disposable.threadId, [{ id, role: "assistant", ordinal: 0 }])
     f.store.setMessageReaction(
       { kind: "bot", botId: f.bot.id, workId: admitted.id },
       id,
@@ -208,7 +225,7 @@ describe("persisted local user message reactions", () => {
     f.store.removeMessageReactionsForThreads([admitted.threadId])
     expect(f.db.exec("SELECT COUNT(*) FROM bot_message_reactions")[0].values).toEqual([[0]])
   })
-  it("publishes only changed revisions and creates no task or model wake for reactions", async () => {
+  it("queues one hidden private feedback for an add and wakes only after the committed change", async () => {
     const f = fixture(),
       acquire = vi.fn(() => null)
     const host = new LocalBotHost(f.store, { acquire, onAvailable: () => () => {} })
@@ -217,7 +234,6 @@ describe("persisted local user message reactions", () => {
     const listener = vi.fn()
     host.subscribe(listener)
     acquire.mockClear()
-    const before = f.store.recentTasks()
     host.setMessageReaction(f.target, "native:message.1", "👍", true)
     host.setMessageReaction(f.target, "native:message.1", "👍", true)
     await new Promise<void>((resolve) => setImmediate(resolve))
@@ -227,9 +243,161 @@ describe("persisted local user message reactions", () => {
       revision: f.store.revision(),
       reactionTarget: f.target
     })
-    expect(f.store.recentTasks()).toEqual(before)
-    expect(acquire).not.toHaveBeenCalled()
+    const tasks = f.store.recentTasks()
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0]).toMatchObject({
+      botId: f.bot.id,
+      threadId: f.bot.threadId,
+      origin: { kind: "notification", notificationKind: "reaction", key: "native:message.1" }
+    })
+    expect(tasks[0].message).toContain("Actual prior answer")
+    expect(f.store.messageOrigins(f.bot.id, [tasks[0].requestId])[0].origin).toEqual(tasks[0].origin)
+    expect(acquire).toHaveBeenCalledWith(f.bot, tasks[0], undefined)
   })
+  it("keeps adds, replacement, undo and no-op retries distinct", () => {
+    const f = fixture(),
+      id = "native:message.1"
+    f.store.setMessageReaction(f.target, id, "👍", true)
+    f.store.setMessageReaction(f.target, id, "👍", true)
+    expect(f.store.recentTasks()).toHaveLength(1)
+    f.store.setMessageReaction(f.target, id, "👎", true)
+    expect(f.store.recentTasks()).toHaveLength(2)
+    f.store.setMessageReaction(f.target, id, "👍", false)
+    f.store.setMessageReaction(f.target, id, "👎", false)
+    expect(f.store.recentTasks()).toHaveLength(2)
+    const group = f.store.saveGroup({ name: "Group", memberIds: [f.bot.id] })
+    f.db.run(
+      "INSERT INTO bot_group_messages(id,group_id,author_bot_id,text,targets_json,created_at) VALUES('answer',?,?,'Answer','[]',2)",
+      [group.id, f.bot.id]
+    )
+    f.store.setMessageReaction({ kind: "group", groupId: group.id }, "answer", "👍", true)
+    expect(f.store.recentTasks()).toHaveLength(3)
+    const feedback = f.store.recentTasks().find((task) => task.origin.kind === "notification" && task.origin.groupId === group.id)!
+    expect(feedback).toMatchObject({
+      botId: f.bot.id,
+      threadId: `group-${group.id}-${f.bot.id}`,
+      origin: { kind: "notification", notificationKind: "reaction", groupId: group.id, key: "answer" }
+    })
+    expect(feedback.message).toContain("Answer")
+    f.store.setMessageReaction({ kind: "group", groupId: group.id }, "answer", "👍", true)
+    f.store.setMessageReaction({ kind: "group", groupId: group.id }, "answer", "👍", false)
+    expect(f.store.recentTasks()).toHaveLength(3)
+    f.store.transition(feedback.id, "running")
+    f.store.settle(feedback.id, "completed", null, BOT_ROUTINE_SILENT)
+    expect(f.store.groupMessages(group.id)).toHaveLength(1)
+  })
+  it("wakes only the live group author, retaining badges for removed or archived authors", async () => {
+    const f = fixture(), peer = f.store.create({ name: "B", instructions: "", color: "#123456", modelRef: null })
+    const group = f.store.saveGroup({ name: "Feedback", memberIds: [f.bot.id, peer.id] })
+    f.db.run("INSERT INTO bot_group_messages(id,group_id,author_bot_id,text,targets_json,created_at) VALUES('answer',?,?,'Exact answer','[]',2)", [group.id, f.bot.id])
+    const acquire = vi.fn(() => null), host = new LocalBotHost(f.store, { acquire, onAvailable: () => () => {} })
+    hosts.push(host)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    acquire.mockClear()
+    const target: BotReactionTarget = { kind: "group", groupId: group.id }
+    host.setMessageReaction(target, "answer", "👍", true)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    const feedback = f.store.recentTasks()[0]
+    expect(acquire).toHaveBeenCalledWith(f.bot, feedback, undefined)
+    expect(f.store.recentTasks()).toHaveLength(1)
+    f.store.transition(feedback.id, "cancelled")
+    f.store.saveGroup({ name: group.name, memberIds: [peer.id] }, { id: group.id, version: group.version })
+    host.setMessageReaction(target, "answer", "👎", true)
+    expect(f.store.recentTasks()).toHaveLength(1)
+    const latest = f.store.getGroup(group.id)
+    f.store.saveGroup({ name: latest.name, memberIds: [f.bot.id, peer.id] }, { id: group.id, version: latest.version })
+    f.store.update({ ...f.bot, expectedVersion: f.bot.version, archived: true })
+    host.setMessageReaction(target, "answer", "❤️", true)
+    expect(f.store.recentTasks()).toHaveLength(1)
+    expect(f.store.messageReactions(target, ["answer"]).items[0].reactions[0].emoji).toBe("❤️")
+  })
+
+  it("routes work feedback only to that conversation and never reopens a completed work or archived Bot", () => {
+    const f = fixture(),
+      id = "native:message.1"
+    const created = f.store.createWork({
+      botId: f.bot.id,
+      operationId: "feedback-work",
+      title: "Work",
+      goal: "Review"
+    })
+    const work = created.work
+    f.store.transition(created.task.id, "cancelled")
+    f.messages.set(work.threadId, [{ id, role: "assistant", ordinal: 0 }])
+    const target: BotReactionTarget = { kind: "bot", botId: f.bot.id, workId: work.id }
+    const activities = f.store.activities()
+    f.store.setMessageReaction(target, id, "👍", true)
+    const feedback = f.store.recentTasks().find((entry) => entry.origin.kind === "notification")!
+    expect(feedback).toMatchObject({ workId: work.id, threadId: work.threadId, botId: f.bot.id })
+    expect(f.store.activities()).toEqual(activities)
+    f.store.transition(feedback.id, "running")
+    f.store.settle(feedback.id, "completed", null, "BOT_ROUTINE_SILENT")
+    expect(f.store.activities()).toEqual(activities)
+    expect(f.store.recentTasks()).toHaveLength(2) // Original work task and feedback only.
+    const current = f.store.getWork(f.bot.id, work.id)
+    f.store.changeWork(f.bot.id, work.id, current.version, "complete", "complete")
+    f.store.setMessageReaction(target, id, "❤️", true)
+    const bot = f.store.getBot(f.bot.id)
+    f.store.update({ ...bot, expectedVersion: bot.version, archived: true })
+    f.store.setMessageReaction(f.target, id, "👍", true)
+    expect(f.store.recentTasks()).toHaveLength(2)
+  })
+  it("keeps file-only feedback and quoted markup bounded, without treating the quote as user authority", () => {
+    const f = fixture(),
+      id = "native:message.1"
+    f.quote.mockReturnValueOnce({ id, role: "assistant", ordinal: 0, text: "" })
+    f.store.setMessageReaction(f.target, id, "👍", true)
+    expect(f.store.recentTasks()[0].message).toContain("[Attachment or non-text message]")
+    f.quote.mockReturnValueOnce({
+      id,
+      role: "assistant",
+      ordinal: 0,
+      text: "<CMBDEVCLAW-BOT-REPLY-V1>" + "x".repeat(10_000)
+    })
+    f.store.setMessageReaction(f.target, id, "❤️", true)
+    const quoted = f.store.recentTasks().find((entry) => entry.message.includes("❤️"))!
+    expect(quoted.message).toContain("x".repeat(1_900))
+    expect(quoted.message.length).toBeLessThan(2_400)
+  })
+  it("queues feedback behind an active original task without aborting or steering it", async () => {
+    const f = fixture()
+    const original = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "long-original",
+      message: "Keep executing"
+    })
+    let finish!: () => void
+    const execute = vi.fn(async (signal: AbortSignal) => {
+      await new Promise<void>((resolve) => {
+        finish = resolve
+        signal.addEventListener("abort", () => resolve(), { once: true })
+      })
+      return { state: "completed" as const, result: "Original complete" }
+    })
+    const acquire = vi.fn<BotRunPort["acquire"]>(() => ({
+      execute,
+      release: vi.fn(),
+      steer: vi.fn()
+    }))
+    const host = new LocalBotHost(f.store, { acquire, onAvailable: () => () => {} }, 1)
+    hosts.push(host)
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1))
+    host.setMessageReaction(f.target, "native:message.1", "👍", true)
+    expect(f.store.getTask(original.id).state).toBe("running")
+    const feedback = f.store.recentTasks().find((entry) => entry.id !== original.id)!
+    expect(feedback.state).toBe("queued")
+    expect(execute.mock.calls[0][0].aborted).toBe(false)
+    // Let the original finish; the existing Host queue then runs the feedback.
+    acquire.mockImplementationOnce(() => ({
+      execute: async () => ({ state: "completed", result: "BOT_ROUTINE_SILENT" }),
+      release: vi.fn(),
+      steer: vi.fn()
+    }))
+    finish()
+    await vi.waitFor(() => expect(f.store.getTask(feedback.id).state).toBe("completed"))
+    expect(f.store.getTask(original.id).state).toBe("completed")
+  })
+
 })
 
 describe("model reactions to the current private user message", () => {
@@ -280,28 +448,23 @@ describe("model reactions to the current private user message", () => {
     expect(f.store.messageReactions(f.target, [task.requestId])).toEqual(before)
   })
 
-  it("keeps Bot and user presence independent, idempotent and accurately attributed", () => {
-    const f = userRun(),
-      id = f.task.requestId
+  it("rejects user self-reactions while preserving genuine model reactions and idempotence", () => {
+    const f = userRun(), id = f.task.requestId
     expect(f.store.reactionUserMessage(f.task.id)).toBe(id)
-    f.store.setMessageReaction(f.target, id, "👍", true)
+    expect(() => f.store.setMessageReaction(f.target, id, "👍", true)).toThrow("不可用")
     const botAdded = f.store.setBotMessageReaction(f.task.id, "👍", true)
+    expect(botAdded.item.canReact).toBe(false)
     expect(botAdded.item.reactions).toEqual([
-      { emoji: "👍", count: 2, mine: true, actors: [{ botId: f.bot.id, name: "A" }] }
-    ])
-    expect(f.store.setBotMessageReaction(f.task.id, "👍", true)).toEqual(botAdded)
-    const userRemoved = f.store.setMessageReaction(f.target, id, "👍", false)
-    expect(userRemoved.item.reactions).toEqual([
       { emoji: "👍", count: 1, mine: false, actors: [{ botId: f.bot.id, name: "A" }] }
     ])
-    expect(f.store.setMessageReaction(f.target, id, "👍", false)).toEqual(userRemoved)
+    expect(f.store.setBotMessageReaction(f.task.id, "👍", true)).toEqual(botAdded)
+    expect(() => f.store.setMessageReaction(f.target, id, "👍", false)).toThrow("不可用")
     const removed = f.store.setBotMessageReaction(f.task.id, "👍", false)
     expect(removed.item.reactions).toEqual([])
     expect(f.store.setBotMessageReaction(f.task.id, "👍", false)).toEqual(removed)
     expect(f.store.recentTasks()).toHaveLength(1)
   })
-
-  it("migrates legacy user rows and timestamps without changing their projection or losing another actor", () => {
+  it("preserves legacy data while hiding disallowed user self-reactions and retaining model reactions", () => {
     const f = userRun(),
       id = f.task.requestId
     f.db.run(`DROP TABLE bot_message_reactions;
@@ -323,9 +486,9 @@ describe("model reactions to the current private user message", () => {
       undefined,
       f.read
     )
-    expect(reopened.messageReactions(f.target, [id]).items[0].reactions).toEqual([
-      { emoji: "👍", count: 1, mine: true }
-    ])
+    expect(reopened.messageReactions(f.target, [id]).items[0]).toEqual({
+      messageId: id, canReact: false, reactions: []
+    })
     expect(
       f.db.exec(
         "SELECT scope_kind,scope_id,message_id,emoji,added_at,actor FROM bot_message_reactions"
@@ -374,7 +537,7 @@ describe("model reactions to the current private user message", () => {
     const f = userRun(),
       id = f.task.requestId
     const emoji = [...new Set(nativeEmoji.map(parseBotReactionEmoji))].slice(0, 65)
-    for (const value of emoji.slice(0, 64)) f.store.setMessageReaction(f.target, id, value, true)
+    for (const value of emoji.slice(0, 64)) f.store.setBotMessageReaction(f.task.id, value, true)
     expect(f.store.setBotMessageReaction(f.task.id, emoji[0], true).item.reactions).toHaveLength(64)
     expect(() => f.store.setBotMessageReaction(f.task.id, emoji[64], true)).toThrow("上限")
     for (const origin of [

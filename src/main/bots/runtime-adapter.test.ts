@@ -108,6 +108,7 @@ const fixture = vi.hoisted(() => ({
     ) => string[]
   >(() => ["delivery"]),
   verifyFiles: vi.fn(),
+  peerHandoff: vi.fn<(task: BotTask) => { pending: boolean; outputFiles: readonly string[] }>(),
   hashFile: vi.fn<(root: string, path: string, signal: AbortSignal) => Promise<string>>(),
   returnFileTools: vi.fn<
     (
@@ -265,6 +266,7 @@ function port(linked?: BotWorkItem, mock?: BotMockExecution) {
         groupMessages: fixture.groupMessages,
         groupTaskRequest: fixture.groupTaskRequest,
         peers: fixture.peers,
+        peerHandoff: fixture.peerHandoff,
         recordGroupQuestion: fixture.recordQuestion,
         recordGroupQuestionResult: fixture.recordQuestionResult
       }) as unknown as LocalBotHost,
@@ -307,6 +309,11 @@ beforeEach(() => {
   fixture.answerQuestion.mockReset().mockReturnValue(true)
   fixture.subscribeQuestion.mockReset().mockReturnValue(fixture.unsubscribeQuestion)
   fixture.verifyFiles.mockReset().mockResolvedValue([])
+  fixture.peerHandoff.mockReset().mockImplementation((current) => ({
+    pending: false,
+    outputFiles: current.origin.kind === "bot" && current.origin.expectsReply
+      ? current.origin.outputFiles ?? [] : []
+  }))
   fixture.hashFile.mockReset().mockResolvedValue("sent-hash")
   fixture.workflowActive.mockReturnValue(false)
   fixture.workflowPending.mockResolvedValue(false)
@@ -342,6 +349,30 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
+  it("runs reaction feedback in the original normal mode and makes attention depend on useful output", async () => {
+    fixture.thread.mockReturnValue({
+      metadata: JSON.stringify({ ...metadata(), agentMode: "normal" })
+    })
+    fixture.start.mockImplementationOnce(async (request, _delivery, context) => {
+      expect(request.agentMode).toBe("normal")
+      expect(request.coordinatorInternalNotification).toBeUndefined()
+      expect(context.commandInternalNotification).toBe(false)
+      context.onFinalAssistant?.({ messageId: "quiet", finalText: "BOT_ROUTINE_SILENT" })
+      expect(context.shouldRaiseCompletionAttention?.()).toBe(false)
+      context.onFinalAssistant?.({ messageId: "correction", finalText: "Corrected result" })
+      expect(context.shouldRaiseCompletionAttention?.()).toBe(true)
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    await port()
+      .acquire(bot, {
+        ...task,
+        origin: { kind: "notification", notificationKind: "reaction", key: "old-answer" }
+      })!
+      .execute(new AbortController().signal, vi.fn())
+    expect(fixture.announce).not.toHaveBeenCalled()
+    expect(fixture.summary).not.toHaveBeenCalled()
+  })
   it("routes removed member cleanup to the same browser service with exact group and member identities", async () => {
     const removeGroupMember = vi.fn(async () => {})
     const runtime = createLocalBotRunPort(
@@ -1936,6 +1967,32 @@ describe("Bot Runtime integration", () => {
     expect(fixture.deliveryTools.mock.calls.at(-1)![4]).toBe(true)
     expect(result).toMatchObject({ state: "completed", files })
   })
+  it("does not reject an outstanding private relay because its final report is not written yet", async () => {
+    fixture.peerHandoff.mockReturnValue({ pending: true, outputFiles: ["report.json"] })
+    fixture.verifyFiles.mockRejectedValue(new Error("Report does not exist until the child returns"))
+    const relay: BotTask = {
+      ...task,
+      origin: { kind: "bot", fromBotId: "caller", rootTaskId: "root", depth: 1,
+        expectsReply: true, outputFiles: ["report.json"] }
+    }
+    await expect(port().acquire(bot, relay)!.execute(new AbortController().signal, vi.fn()))
+      .resolves.toMatchObject({ state: "completed" })
+    expect(fixture.verifyFiles).not.toHaveBeenCalled()
+  })
+
+  it("enforces the original report contract when the private result turn actually integrates it", async () => {
+    fixture.peerHandoff.mockReturnValue({ pending: false, outputFiles: ["report.json"] })
+    fixture.verifyFiles.mockRejectedValue(new Error("Original report still missing"))
+    const result: BotTask = {
+      ...task,
+      origin: { kind: "bot", fromBotId: "leaf", rootTaskId: "root", depth: 2,
+        expectsReply: false, upstreamTaskId: "original-relay" }
+    }
+    await expect(port().acquire(bot, result)!.execute(new AbortController().signal, vi.fn()))
+      .rejects.toThrow("Original report still missing")
+    expect(fixture.verifyFiles).toHaveBeenCalledWith("/synthetic/workspaces/a", ["report.json"], expect.any(AbortSignal))
+  })
+
   it("verifies declared peer outputs even when the model returns only a written path", async () => {
     const files = [{ filePath: "/synthetic/workspaces/a/report.md", name: "report.md", size: 40 }]
     fixture.verifyFiles.mockResolvedValue(files)
@@ -2798,7 +2855,8 @@ describe("Bot Runtime integration", () => {
   })
   it.each([
     { kind: "schedule", scheduleId: "daily" },
-    { kind: "notification", notificationKind: "command", key: "command", commandSucceeded: true }
+    { kind: "notification", notificationKind: "command", key: "command", commandSucceeded: true },
+    { kind: "notification", notificationKind: "reaction", key: "earlier-message" }
   ] satisfies BotTask["origin"][])(
     "settles $kind delivery facts through the Adapter and Host before deciding routine silence",
     async (origin) => {
@@ -3617,6 +3675,7 @@ describe("Bot steering uses the original runtime", () => {
     { kind: "bot", fromBotId: "b", rootTaskId: "root", depth: 1, expectsReply: true },
     { kind: "schedule", scheduleId: "routine" },
     { kind: "notification", notificationKind: "command", key: "command" },
+    { kind: "notification", notificationKind: "reaction", key: "earlier" },
     {
       kind: "notification",
       notificationKind: "workflow",
@@ -3674,6 +3733,7 @@ describe("Bot steering uses the original runtime", () => {
     { kind: "bot", fromBotId: "b", rootTaskId: "root", depth: 1, expectsReply: true },
     { kind: "schedule", scheduleId: "routine" },
     { kind: "notification", notificationKind: "command", key: "command" },
+    { kind: "notification", notificationKind: "reaction", key: "earlier" },
     {
       kind: "notification",
       notificationKind: "workflow",
@@ -3708,7 +3768,7 @@ describe("Bot steering uses the original runtime", () => {
       const retainsFiles =
         origin.kind === "bot" ||
         origin.kind === "schedule" ||
-        (origin.kind === "notification" && origin.notificationKind === "command")
+        (origin.kind === "notification" && ["command", "reaction"].includes(origin.notificationKind))
       expect(deferred).toEqual({
         state: "deferred",
         checkpointId: "yielded-checkpoint",
@@ -3740,7 +3800,9 @@ describe("Bot steering uses the original runtime", () => {
             ? "delegated work"
             : origin.kind === "schedule"
               ? "a scheduled invocation"
-              : "a background execution result"
+              : origin.kind === "notification" && origin.notificationKind === "reaction"
+                ? "The user added a reaction"
+                : "a background execution result"
         )
         expect(incoming.commandInternalNotification).toBe(
           origin.kind === "notification" && origin.notificationKind === "command"

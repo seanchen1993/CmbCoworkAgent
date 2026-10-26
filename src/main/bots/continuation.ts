@@ -45,6 +45,7 @@ export function canDeferBotTask(task: Pick<BotTask, "origin">): boolean {
     ["group", "discussion", "bot", "schedule"].includes(task.origin.kind) ||
     (task.origin.kind === "notification" &&
       (task.origin.notificationKind === "command" ||
+        task.origin.notificationKind === "reaction" ||
         (task.origin.notificationKind === "workflow" && Boolean(task.origin.runStartedAt))))
   )
 }

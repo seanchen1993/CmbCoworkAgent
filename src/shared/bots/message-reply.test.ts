@@ -9,6 +9,12 @@ import { botIdentifier, parseSendBotMessage } from "./validation"
 const reply = { id: "original", ordinal: 4, role: "assistant" as const, text: "选中的中间消息" }
 
 describe("durable Bot reply identities", () => {
+  it("keeps a bounded attachment label separate from the verified execution reference", () => {
+    const selected = { ...reply, text: '已发送附件：{"path":"/sent/original.json"}', preview: "📎 report.json" }
+    expect(parseBotMessageReply(formatBotMessageReply("核对原件", selected))?.reply).toEqual(selected)
+    for (const preview of ["", "x".repeat(2001), "bad\0label", 42])
+      expect(isBotMessageReply({ ...selected, preview })).toBe(false)
+  })
   it.each([
     "provider:response/model.2",
     buildMessageRoleCollisionId("provider-response", "assistant"),

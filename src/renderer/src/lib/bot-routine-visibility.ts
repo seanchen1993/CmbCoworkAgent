@@ -4,7 +4,8 @@ import { BOT_ROUTINE_SILENT, isBotRoutineSilent } from "../../../shared/bots/rou
 import { splitBotInlineReasoning } from "../../../shared/bots/inline-reasoning"
 import {
   botContinuationTaskId,
-  isBotCommandNotificationMessageId
+  isBotCommandNotificationMessageId,
+  isBotReactionNotificationMessageId
 } from "../../../shared/bots/task-continuation"
 
 /** Preserve invisible task boundaries even before source lookup or after history hydration. */
@@ -16,7 +17,9 @@ export function hiddenBotTaskMessageIds(
   for (const message of messages)
     if (
       message.role === "user" &&
-      (botContinuationTaskId(message.id) || isBotCommandNotificationMessageId(message.id))
+      (botContinuationTaskId(message.id) ||
+        isBotCommandNotificationMessageId(message.id) ||
+        isBotReactionNotificationMessageId(message.id))
     )
       hidden.add(message.id)
   return hidden
@@ -57,8 +60,9 @@ export function quietBotTurnMessageIds(
       origin?.origin.kind !== "schedule" &&
       !(
         origin?.origin.kind === "notification" &&
-        origin.origin.notificationKind === "command" &&
-        origin.origin.commandSucceeded === true
+        (origin.origin.notificationKind === "reaction" ||
+          (origin.origin.notificationKind === "command" &&
+            origin.origin.commandSucceeded === true))
       )
     )
       return

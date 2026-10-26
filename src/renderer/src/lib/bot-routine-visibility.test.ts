@@ -37,6 +37,34 @@ const turn: Message[] = [
   }
 ]
 describe("quiet Bot routine visibility", () => {
+  it("hides feedback input before hydration and keeps useful reaction replies and interactive cards", () => {
+    const requestId = `notification:thread:reaction:${"12345678-1234-1234-1234-123456789abc"}`
+    const feedback: BotMessageOrigin = {
+      ...source,
+      requestId,
+      origin: { kind: "notification", notificationKind: "reaction", key: "earlier" }
+    }
+    const messages = turn.map((message) =>
+      message.id === "scheduled" ? { ...message, id: requestId } : message
+    )
+    expect(hiddenBotTaskMessageIds(messages, new Map())).toEqual(new Set([requestId]))
+    const origins = new Map([[requestId, feedback]])
+    expect(hiddenBotTaskMessageIds(messages, origins)).toEqual(new Set(messages.map((m) => m.id)))
+    const useful = messages.map((m) => (m.id === "final" ? { ...m, content: "Corrected answer" } : m))
+    expect(hiddenBotTaskMessageIds(useful, origins)).toEqual(new Set([requestId]))
+    for (const name of ["bot_deliver_files", "request_user_input", "bot_request_browser_help"]) {
+      const interactive = messages.map((m) =>
+        m.id === "check" ? { ...m, tool_calls: [{ id: "action", name, args: {} }] } : m
+      )
+      expect(hiddenBotTaskMessageIds(interactive, origins)).toEqual(new Set([requestId, "final"]))
+    }
+    for (const state of ["failed", "cancelled", "outcome_unknown"] as const)
+      expect(
+        hiddenBotTaskMessageIds(messages, new Map([[requestId, { ...feedback, state }]]))
+      ).toEqual(new Set([requestId]))
+    const literal = [{ ...messages[0], id: "real-user", content: requestId }]
+    expect(hiddenBotTaskMessageIds(literal, new Map())).toEqual(new Set())
+  })
   it.each(["bot_deliver_files", "request_user_input", "bot_request_browser_help", "bot_browser"])(
     "retains scheduled %s cards while hiding only the terminal silence marker",
     (name) => {

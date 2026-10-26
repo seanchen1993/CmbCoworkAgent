@@ -2505,7 +2505,7 @@ describe("Bot host scheduling", () => {
     expect(pendingUser?.()).toBe(false)
     finish()
   })
-  it.each(["group", "bot", "schedule", "command"] as const)(
+  it.each(["group", "bot", "schedule", "command", "reaction"] as const)(
     "yields %s at a model boundary, runs private input, then resumes the same task after lease release",
     async (kind) => {
       const db = store(),
@@ -2527,8 +2527,8 @@ describe("Bot host scheduling", () => {
       } else
         db.enqueue(
           { botId: a.id, requestId: "host-pause", message: "Background result" },
-          kind === "command"
-            ? { kind: "notification", notificationKind: "command", key: "command" }
+          kind === "command" || kind === "reaction"
+            ? { kind: "notification", notificationKind: kind, key: "command" }
             : { kind: "schedule", scheduleId: "routine" }
         )
       const original = db.recentTasks().find((t) => t.botId === a.id)!

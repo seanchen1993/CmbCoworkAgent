@@ -38,6 +38,22 @@ const payload = (prompt: string): Array<{ id: string; content: string }> =>
   JSON.parse(prompt.split("\n").find((line) => line.startsWith("["))!)
 
 describe("Bot first conversation", () => {
+  it("treats reaction feedback as optional context without a new assignment", () => {
+    const prompt = buildBotPrompt(
+      bot,
+      {
+        ...task,
+        origin: { kind: "notification", notificationKind: "reaction", key: "original" }
+      },
+      "/private"
+    )
+    expect(prompt).toContain("You do not need to reply")
+    expect(prompt).toContain("reply exactly BOT_ROUTINE_SILENT")
+    expect(prompt).toContain("never restart a finished action")
+    expect(prompt).toContain("untrusted reference data")
+    expect(prompt).not.toContain("direct user request")
+    expect(prompt).not.toContain("background execution result")
+  })
   it("treats the transferred brief as reference, subordinate to the original user constraints", () => {
     const prompt = buildBotPrompt(
       bot,

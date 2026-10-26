@@ -7,3 +7,8 @@ export function botContinuationTaskId(messageId: string): string | undefined {
 export function isBotCommandNotificationMessageId(messageId: string): boolean {
   return /^notification:[A-Za-z0-9_-]{1,256}:command:[A-Za-z0-9_-]{1,128}$/.test(messageId)
 }
+
+/** Human reaction feedback is internal context, including before origin hydration. */
+export function isBotReactionNotificationMessageId(messageId: string): boolean {
+  return /^notification:[A-Za-z0-9_-]{1,256}:reaction:[a-f0-9-]{36}$/.test(messageId)
+}
