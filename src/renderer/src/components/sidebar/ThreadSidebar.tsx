@@ -1225,7 +1225,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                   <span className="min-w-0 truncate">项目模式</span>
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="bottom" sideOffset={6}>本地项目任务与已开通的项目功能</TooltipContent>
+              <TooltipContent side="bottom" sideOffset={6}>项目列表与已开通的项目功能</TooltipContent>
             </Tooltip>
           </TooltipProvider>
         </div>

@@ -5,6 +5,14 @@ import { resolve } from "node:path"
 import { build } from "esbuild"
 import { chromium, type Browser, type Page } from "playwright"
 
+interface EntryFixtureWindow {
+  calls: Array<[string, ...unknown[]]>
+  show(id?: string): void
+  finish(...values: Array<string | boolean>): void
+  reenter(): void
+  conflict(): void
+}
+
 const root = resolve(__dirname, "..")
 const output = resolve(root, "output/project-platform-20261012/browser-entry")
 mkdirSync(output, { recursive: true })
@@ -28,7 +36,7 @@ async function fixture(browser: Browser, contents: string) {
             namespace: "fixture"
           }))
           build.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
-            contents: `export const useAppStore={getState:()=>({setShowHarnessBoardView:value=>window.calls.push(['navigate-project',value]),selectThread:id=>window.calls.push(['navigate-thread',id])})}`
+            contents: `const state={accountRevision:0,threads:[],setShowHarnessBoardView:value=>window.calls.push(['navigate-project',value]),selectThread:id=>window.calls.push(['navigate-thread',id])};export const useAppStore=selector=>selector(state);useAppStore.getState=()=>state`
           }))
         }
       }
@@ -75,37 +83,37 @@ async function gate(browser: Browser, decision: "enabled" | "disabled" | "offlin
   `
   )
   await page.getByRole("status").filter({ hasText: "正在准备项目入口" }).waitFor()
-  assert.equal(await page.getByRole("button", { name: "新建本地任务" }).count(), 0)
+  assert.equal(await page.getByRole("button", { name: "新建项目" }).count(), 0)
   assert.equal(await page.getByLabel("原企业输入").count(), 0)
-  await page.evaluate((decision) => (window as any).finish(decision), decision)
+  await page.evaluate((decision) => (window as unknown as EntryFixtureWindow).finish(decision), decision)
   if (decision === "enabled") {
     await page.getByLabel("原企业输入").fill("保留的企业草稿")
-    await page.evaluate(() => (window as any).show())
+    await page.evaluate(() => (window as unknown as EntryFixtureWindow).show())
     assert.equal(await page.getByLabel("原企业输入").inputValue(), "保留的企业草稿")
-    assert.equal(await page.getByRole("button", { name: "新建本地任务" }).count(), 0)
+    assert.equal(await page.getByRole("button", { name: "新建项目" }).count(), 0)
   } else {
-    await page.getByRole("button", { name: "新建本地任务" }).click()
-    await page.getByLabel("任务名称").fill("保留的本地草稿")
-    await page.evaluate(() => (window as any).show())
-    assert.equal(await page.getByLabel("任务名称").inputValue(), "保留的本地草稿")
+    await page.getByRole("button", { name: "新建项目" }).click()
+    await page.getByLabel("项目名称").fill("保留的本地草稿")
+    await page.evaluate(() => (window as unknown as EntryFixtureWindow).show())
+    assert.equal(await page.getByLabel("项目名称").inputValue(), "保留的本地草稿")
     assert.equal(
       await page.evaluate(
-        () => (window as any).calls.filter((row) => row[0] === "enterprise-mounted").length
+        () => (window as unknown as EntryFixtureWindow).calls.filter((row) => row[0] === "enterprise-mounted").length
       ),
       0
     )
   }
-  await page.evaluate(() => (window as any).reenter())
+  await page.evaluate(() => (window as unknown as EntryFixtureWindow).reenter())
   await tick(page)
   if (decision === "enabled") {
     assert.equal(await page.getByRole("status").filter({ hasText: "正在准备项目入口" }).count(), 0)
     await page.getByLabel("原企业输入").fill("已开通刷新保留")
-    await page.evaluate(() => (window as any).finish("enabled"))
+    await page.evaluate(() => (window as unknown as EntryFixtureWindow).finish("enabled"))
     assert.equal(await page.getByLabel("原企业输入").inputValue(), "已开通刷新保留")
   } else {
     await page.getByRole("status").filter({ hasText: "正在准备项目入口" }).waitFor()
-    assert.equal(await page.getByLabel("任务名称").count(), 0)
-    await page.evaluate(() => (window as any).finish("enabled"))
+    assert.equal(await page.getByLabel("项目名称").count(), 0)
+    await page.evaluate(() => (window as unknown as EntryFixtureWindow).finish("enabled"))
     await page.getByLabel("原企业输入").waitFor()
   }
   await page.screenshot({ path: resolve(output, `gate-${decision}.png`), fullPage: true })
@@ -126,15 +134,15 @@ async function details(browser: Browser) {
   `
   )
   await tick(page)
-  assert.equal(await page.evaluate(() => (window as any).calls.length), 0)
+  assert.equal(await page.evaluate(() => (window as unknown as EntryFixtureWindow).calls.length), 0)
   await page.getByRole("button", { name: "运行过程", exact: true }).focus()
   await page.keyboard.press("Enter")
   await page.getByRole("dialog", { name: "本阶段运行过程" }).waitFor()
-  await page.evaluate(() => (window as any).show("B"))
-  await page.evaluate(() => (window as any).finish())
+  await page.evaluate(() => (window as unknown as EntryFixtureWindow).show("B"))
+  await page.evaluate(() => (window as unknown as EntryFixtureWindow).finish())
   assert.equal(await page.getByText("真实范围 A", { exact: true }).count(), 0)
   await page.getByRole("button", { name: "运行过程", exact: true }).click()
-  await page.evaluate(() => (window as any).finish())
+  await page.evaluate(() => (window as unknown as EntryFixtureWindow).finish())
   await page.getByText("真实范围 B", { exact: true }).waitFor({ state: "attached" })
   await page.getByText("项目规范 · 本次来源", { exact: true }).click()
   await page.screenshot({ path: resolve(output, "readonly-project-dialog.png"), fullPage: true })
@@ -143,14 +151,14 @@ async function details(browser: Browser) {
   await page.getByRole("button", { name: "返回项目任务", exact: true }).click()
   assert.equal(
     await page.evaluate(
-      () => (window as any).calls.filter((row) => row[0] === "navigate-project").length
+      () => (window as unknown as EntryFixtureWindow).calls.filter((row) => row[0] === "navigate-project").length
     ),
     1
   )
   assert.equal(
     await page.evaluate(
       () =>
-        (window as any).calls.filter(
+        (window as unknown as EntryFixtureWindow).calls.filter(
           (row) => row[0] === "advisor" && !["view", "cancel"].includes(row[2])
         ).length
     ),
@@ -173,23 +181,23 @@ async function legacy(browser: Browser) {
   await page.getByText("保留插件版本与运行记录 · 可选", { exact: true }).click()
   await page.getByText("正在读取项目版本与执行记录…", { exact: true }).waitFor()
   assert.equal(await page.getByText("尚未开启，当前仍使用原项目方式。", { exact: true }).count(), 0)
-  await page.evaluate(() => (window as any).finish("A", false))
+  await page.evaluate(() => (window as unknown as EntryFixtureWindow).finish("A", false))
   await page.getByRole("button", { name: "为此项目开启" }).dblclick()
   assert.equal(
-    await page.evaluate(() => (window as any).calls.filter((row) => row[0] === "enable").length),
+    await page.evaluate(() => (window as unknown as EntryFixtureWindow).calls.filter((row) => row[0] === "enable").length),
     1
   )
-  await page.evaluate(() => (window as any).show("B"))
-  await page.evaluate(() => (window as any).finish("A", true))
+  await page.evaluate(() => (window as unknown as EntryFixtureWindow).show("B"))
+  await page.evaluate(() => (window as unknown as EntryFixtureWindow).finish("A", true))
   await page.getByText("保留插件版本与运行记录 · 可选", { exact: true }).click()
   assert.equal(await page.getByText(/已保留插件版本/).count(), 0)
-  await page.evaluate(() => (window as any).finish("B", true, true))
+  await page.evaluate(() => (window as unknown as EntryFixtureWindow).finish("B", true, true))
   await page.getByRole("button", { name: "恢复使用已安装版本" }).waitFor()
   assert.equal(await page.getByRole("button", { name: "恢复使用已安装版本" }).isDisabled(), true)
   await page.getByRole("button", { name: "查看原会话" }).click()
   await tick(page)
   assert.equal(
-    await page.evaluate(() => (window as any).calls.filter((row) => row[0] === "disable").length),
+    await page.evaluate(() => (window as unknown as EntryFixtureWindow).calls.filter((row) => row[0] === "disable").length),
     0
   )
   await page.screenshot({ path: resolve(output, "legacy-unknown.png"), fullPage: true })
@@ -241,7 +249,7 @@ async function failureMessages(browser: Browser, kind: "local" | "legacy") {
     .getByRole("alert")
     .getByText(/重启应用后更新记录/)
     .waitFor()
-  await page.evaluate(() => (window as any).conflict())
+  await page.evaluate(() => (window as unknown as EntryFixtureWindow).conflict())
   await page
     .getByRole("button", { name: kind === "local" ? "更新列表" : "更新执行记录", exact: true })
     .click()
@@ -250,7 +258,7 @@ async function failureMessages(browser: Browser, kind: "local" | "legacy") {
     .getByText(/为新项目选择另一个目录/)
     .waitFor()
   assert.equal(
-    await page.evaluate(() => (window as any).calls.filter((row) => row[0] !== "read").length),
+    await page.evaluate(() => (window as unknown as EntryFixtureWindow).calls.filter((row) => row[0] !== "read").length),
     0
   )
   await page.screenshot({ path: resolve(output, `${kind}-conflict.png`), fullPage: true })

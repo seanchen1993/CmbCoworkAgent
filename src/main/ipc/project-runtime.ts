@@ -4,7 +4,11 @@ import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { getOpenworkDir, getPlugins } from "../storage"
 import { HostProjectStore } from "../harness-board/project-runtime/host-store"
-import { HostPackageSnapshots } from "../harness-board/project-runtime/package-snapshots"
+import {
+  capturePackageMetadataGuard,
+  HostPackageSnapshots
+} from "../harness-board/project-runtime/package-snapshots"
+import { derivationContentIdentity, snapshotDerivationSource } from "../plugins/derivation-source"
 import { HostProjectService } from "../harness-board/project-runtime/host-service"
 import { readProjectRuntimeDescription } from "../harness-board/project-runtime/description"
 import { assertHostPackageSupported } from "../harness-board/project-runtime/package-preflight"
@@ -574,11 +578,45 @@ export function registerProjectRuntimeHandlers(
   ipc.handle("project-runtime:templates", async (event) => {
     trusted(event)
     const results: LocalProjectTemplate[] = []
+    const identityGuards: Array<() => void> = []
     for (const plugin of getPlugins()
       .filter((plugin) => plugin.enabled)
       .slice(0, 100)) {
-      const description = await readProjectRuntimeDescription(plugin.path)
+      const identity = {
+        id: plugin.id,
+        path: plugin.path,
+        name: plugin.name,
+        version: plugin.version
+      }
+      const assertInstalled = () => {
+        trusted(event)
+        const current = getPlugins().find((item) => item.id === identity.id)
+        if (
+          !current?.enabled ||
+          current.path !== identity.path ||
+          current.name !== identity.name ||
+          current.version !== identity.version
+        )
+          throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
+      }
+      const description = await readProjectRuntimeDescription(identity.path)
+      assertInstalled()
       if (description?.status !== "ready" || description.manifest.mode !== "host") continue
+      const assertSource = capturePackageMetadataGuard(identity.path)
+      const source = await snapshotDerivationSource(identity.path)
+      assertInstalled()
+      assertSource()
+      if (
+        source.files.find((file) => file.path === "devclaw.project-runtime.json")?.digest !==
+          description.declarationDigest ||
+        description.manifest.plugin.id !== identity.name ||
+        description.manifest.plugin.version !== identity.version
+      )
+        throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
+      identityGuards.push(() => {
+        assertInstalled()
+        assertSource()
+      })
       let unavailableReason: string | undefined
       try {
         assertHostPackageSupported(plugin.path, description.manifest)
@@ -593,10 +631,17 @@ export function registerProjectRuntimeHandlers(
         name: plugin.name,
         version: plugin.version,
         stages: description.manifest.stages.map((stage) => stage.title),
+        expectedTemplate: {
+          pluginId: identity.id,
+          name: identity.name,
+          version: identity.version,
+          digest: derivationContentIdentity(source.files)
+        },
         ...(unavailableReason ? { unavailableReason } : {})
       })
     }
     trusted(event)
+    for (const assertIdentity of identityGuards) assertIdentity()
     return results
   })
   ipc.handle("project-runtime:list", (event, afterProjectId = ""): LocalProjectSummary[] => {
@@ -719,6 +764,7 @@ export function registerProjectRuntimeHandlers(
         workspace: string
         installedPluginId: string
         goal: string
+        expectedTemplate?: import("../../shared/plugin-start-use").PluginStartUseIdentity
         expectedPlugin?: import("../../shared/plugin-start-use").PluginStartUseIdentity
         startUseScope?: import("../../shared/plugin-derivation").PluginDerivationScope
       }
@@ -731,7 +777,30 @@ export function registerProjectRuntimeHandlers(
         isProjectPreviewId(input.installedPluginId)
       )
         throw Error("PROJECT_PREVIEW_EXPLICIT_ENTRY_REQUIRED")
-      const { startUseScope, ...creation } = input
+      input = structuredClone(input)
+      const { startUseScope, expectedTemplate, ...creation } = input
+      if (Object.hasOwn(input, "expectedTemplate")) {
+        if (Object.hasOwn(input, "expectedPlugin") || Object.hasOwn(input, "startUseScope"))
+          throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
+        if (
+          !expectedTemplate ||
+          typeof expectedTemplate !== "object" ||
+          Array.isArray(expectedTemplate) ||
+          Object.keys(expectedTemplate).sort().join(",") !== "digest,name,pluginId,version" ||
+          expectedTemplate.pluginId !== input.installedPluginId ||
+          typeof expectedTemplate.name !== "string" ||
+          !expectedTemplate.name.trim() ||
+          expectedTemplate.name.length > 4096 ||
+          typeof expectedTemplate.version !== "string" ||
+          !expectedTemplate.version.trim() ||
+          expectedTemplate.version.length > 4096 ||
+          typeof expectedTemplate.digest !== "string" ||
+          !/^[a-f0-9]{64}$/.test(expectedTemplate.digest)
+        )
+          throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
+        // Ordinary template identity uses the same retained-source CAS, without Creator authority.
+        creation.expectedPlugin = expectedTemplate
+      }
       let assertCurrent = () => {
         trusted(event)
       }

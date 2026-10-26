@@ -1,5 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { readFileSync } from "node:fs"
+import ts from "typescript"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import { ModControlStore } from "../control-store"
@@ -43,6 +45,8 @@ async function fixture(startup = "", hooks = "") {
   const store = new ModControlStore(join(root, "control.sqlite"))
   const state = {
     busy: false,
+    enabled: true,
+    threadCurrent: true,
     drains: 0,
     gate: undefined as Promise<void> | undefined,
     failDrain: false,
@@ -50,6 +54,7 @@ async function fixture(startup = "", hooks = "") {
     loadGate: undefined as Promise<void> | undefined,
     publishGate: undefined as Promise<void> | undefined,
     publishing: false,
+    afterPublishWait: undefined as (() => Promise<void>) | undefined,
     transportProof: true,
     oldPeer: false,
     pending: 0,
@@ -65,13 +70,15 @@ async function fixture(startup = "", hooks = "") {
       store,
       {
         plugins: () => [{ id: "p", name: "release-demo", path, enabled: true }],
-        enabled: () => true,
+        enabled: () => state.enabled,
+        assertThread: () => { if (!state.threadCurrent) throw Error("MODS_SCOPE_CHANGED") },
         clawApplicable: () => true,
         publish: async (_workspace, value) => {
           if (state.publishGate) {
             state.publishing = true
             await state.publishGate
           }
+          await state.afterPublishWait?.()
           return value
         },
         changed: () => {},
@@ -296,6 +303,196 @@ it("does not retire an executing provider as a settled operation", async () => {
     expect(f.state.drains).toBe(0)
   } finally { gate.resolve(); await work }
   await f.manager.captureIdleThreadRetirement(f.root, "active").retire()
+})
+
+it("waits for original UI reads before retiring and gates newly arriving reads", async () => {
+  const f = await fixture()
+  await f.run("reading")
+  const gate = Promise.withResolvers<void>()
+  f.state.publishGate = gate.promise
+  const reading = f.manager.logs(f.root, "reading")
+  await vi.waitFor(() => expect(f.state.publishing).toBe(true))
+  const captured = f.manager.captureIdleThreadRetirement(f.root, "reading")
+  const beforeRetire = vi.fn()
+  let nestedRead = false
+  f.state.afterPublishWait = async () => {
+    f.state.afterPublishWait = undefined
+    await f.manager.panes(f.root, "reading")
+    nestedRead = true
+  }
+  let retired = false
+  const retiring = captured.retire(beforeRetire).then(() => { retired = true })
+  let lateRead = false
+  const late = f.manager.logs(f.root, "reading").then(() => { lateRead = true })
+  try {
+    await Promise.resolve()
+    expect(retired).toBe(false)
+    expect(lateRead).toBe(false)
+    expect(beforeRetire).not.toHaveBeenCalled()
+    expect(f.state.drains).toBe(0)
+  } finally { gate.resolve() }
+  await reading
+  await retiring
+  await late
+  expect(beforeRetire).toHaveBeenCalledTimes(1)
+  expect(nestedRead).toBe(true)
+  expect(f.state.drains).toBe(1)
+  expect(f.manager.runtimeSessions()).toMatchObject({ resident: 0, reserved: 0 })
+})
+
+it.each(["grant", "source", "epoch", "disabled", "thread-cancelled"])(
+  "does not retire after %s changes while original UI reads settle", async change => {
+    const f = await fixture()
+    await f.run("reading")
+    const gate = Promise.withResolvers<void>()
+    f.state.publishGate = gate.promise
+    const reading = f.manager.logs(f.root, "reading").catch(error => error)
+    await vi.waitFor(() => expect(f.state.publishing).toBe(true))
+    const captured = f.manager.captureIdleThreadRetirement(f.root, "reading")
+    const beforeRetire = vi.fn()
+    const retiring = captured.retire(beforeRetire).catch(error => error)
+    if (change === "grant") {
+      const compiled = await compileFunctionPlugin(f.path)
+      f.store.grant(f.root, "function:release-demo", compiled.digest, false)
+    } else if (change === "source") {
+      await writeFile(join(f.path, "hooks/register.ts"), "export function register() {}")
+    } else if (change === "disabled") {
+      f.state.enabled = false
+    } else if (change === "thread-cancelled") {
+      f.state.threadCurrent = false
+    } else {
+      f.manager.invalidate(f.root)
+    }
+    gate.resolve()
+    await reading
+    expect(await retiring).toBeInstanceOf(Error)
+    expect(beforeRetire).not.toHaveBeenCalled()
+    if (change !== "epoch") expect(f.state.drains).toBe(0)
+  }
+)
+
+it("rejects a new operation admitted after capture instead of adopting its scope", async () => {
+  const f = await fixture()
+  await f.run("reading")
+  const captured = f.manager.captureIdleThreadRetirement(f.root, "reading")
+  const gate = Promise.withResolvers<void>()
+  f.state.publishGate = gate.promise
+  const reading = f.manager.logs(f.root, "reading")
+  await vi.waitFor(() => expect(f.state.publishing).toBe(true))
+  try {
+    expect(() => captured.retire()).toThrow("MODS_RUNTIME_SESSION_BUSY")
+    expect(f.state.drains).toBe(0)
+  } finally { gate.resolve(); await reading }
+})
+
+it("does not confuse a provider running beside a UI read with an idle owner", async () => {
+  const f = await fixture(
+    'await $.command.register({name:"held",description:"Held"})',
+    'on("command.run",{command:"held"},async($)=>{await $.session.messages();return{text:"read"}})'
+  )
+  const command = (await f.manager.commands(f.root, "mixed")).find(item => item.command === "held")!
+  const uiGate = Promise.withResolvers<void>(), providerGate = Promise.withResolvers<void>()
+  f.state.readGate = providerGate.promise
+  const working = f.manager.runCommand(f.root, "mixed", command, "", f.signal)
+  await vi.waitFor(() => expect(f.state.reading).toBe(true))
+  f.state.publishGate = uiGate.promise
+  const reading = f.manager.logs(f.root, "mixed")
+  await vi.waitFor(() => expect(f.state.publishing).toBe(true))
+  try {
+    expect(() => f.manager.captureIdleThreadRetirement(f.root, "mixed"))
+      .toThrow("MODS_RUNTIME_SESSION_BUSY")
+    expect(f.state.drains).toBe(0)
+  } finally { uiGate.resolve(); providerGate.resolve(); await reading; await working }
+})
+
+it.each(["resource", "resource-opening", "nativeSelection", "unloaded"])(
+  "keeps %s a hard blocker even beside an original UI read", async blocker => {
+    const f = await fixture()
+    await f.run("reading")
+    const entry = [...(f.manager as unknown as { sessions: Map<string, {
+      loaded: boolean
+      activity: { retainFreshResource(): { ready(): void; release(): void } }
+      session: { holdNativeBehaviorSelection(active: boolean): void }
+    }> }).sessions.values()][0]
+    const gate = Promise.withResolvers<void>()
+    f.state.publishGate = gate.promise
+    const reading = f.manager.logs(f.root, "reading")
+    await vi.waitFor(() => expect(f.state.publishing).toBe(true))
+    const resource = blocker.startsWith("resource") ? entry.activity.retainFreshResource() : undefined
+    if (blocker === "resource") resource?.ready()
+    if (blocker === "nativeSelection") entry.session.holdNativeBehaviorSelection(true)
+    if (blocker === "unloaded") entry.loaded = false
+    try {
+      const captured = () => f.manager.captureIdleThreadRetirement(f.root, "reading")
+      // A resource not attributable to UI must remain a blocker, not just finish later.
+      expect(captured).toThrow("MODS_RUNTIME_SESSION_BUSY")
+      expect(f.state.drains).toBe(0)
+    } finally {
+      resource?.release()
+      entry.session.holdNativeBehaviorSelection(false)
+      entry.loaded = true
+      gate.resolve()
+      await reading
+    }
+  }
+)
+
+// Exercise the installed IPC lifecycle adapter itself, not a copied callback fixture.
+function originalIdleRetirementBridge(functions: FunctionModsManager, queue: { closeThread(thread: string): void }) {
+  const path = join(import.meta.dirname, "../../ipc/mods.ts")
+  const source = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true)
+  const matches: ts.PropertyAssignment[] = []
+  const visit = (node: ts.Node) => {
+    if (ts.isPropertyAssignment(node) && node.name.getText(source) === "captureIdleThreadRetirement")
+      matches.push(node)
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  expect(matches).toHaveLength(1)
+  const output = ts.transpile(`const bridge = ${matches[0].initializer.getText(source)}`,
+    { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS })
+  return new Function("functions", "queue", `${output}; return bridge`)(functions, queue) as
+    (workspace: string, thread: string) => ReturnType<FunctionModsManager["captureIdleThreadRetirement"]>
+}
+
+it.each([false, true])("keeps the real IPC queue and outer owner alive until reads settle (replace=%s)", async replace => {
+  const f = await fixture()
+  await f.run("bridged")
+  const gate = Promise.withResolvers<void>()
+  f.state.publishGate = gate.promise
+  const reading = f.manager.logs(f.root, "bridged")
+  await vi.waitFor(() => expect(f.state.publishing).toBe(true))
+  const queue = { closeThread: vi.fn() }
+  const invalidate = vi.fn()
+  const lifecycle = { captureIdleThreadRetirement: originalIdleRetirementBridge(f.manager, queue) }
+  const outer = {
+    functionLifecycle: lifecycle,
+    workspaceKey: (value: string) => value,
+    invalidateFunctionThreadOwner: invalidate
+  }
+  const captured = ModsManager.prototype.captureFunctionThreadRetirement.call(
+    outer as unknown as ModsManager, "bridged", f.root)
+  const retiring = captured.retire().catch(error => error)
+  await Promise.resolve()
+  expect(queue.closeThread).not.toHaveBeenCalled()
+  expect(invalidate).not.toHaveBeenCalled()
+  expect(f.state.drains).toBe(0)
+  if (replace) outer.functionLifecycle = { ...lifecycle }
+  gate.resolve()
+  await reading
+  const result = await retiring
+  if (replace) {
+    expect(result).toBeInstanceOf(Error)
+    expect(queue.closeThread).not.toHaveBeenCalled()
+    expect(invalidate).not.toHaveBeenCalled()
+    expect(f.state.drains).toBe(0)
+  } else {
+    expect(result).toBeUndefined()
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith("bridged")
+    expect(queue.closeThread).toHaveBeenCalledExactlyOnceWith("bridged")
+    expect(invalidate.mock.invocationCallOrder[0]).toBeLessThan(queue.closeThread.mock.invocationCallOrder[0])
+    expect(f.state.drains).toBe(1)
+  }
 })
 
 it("retains failed operation cleanup capacity instead of admitting another owner", async () => {

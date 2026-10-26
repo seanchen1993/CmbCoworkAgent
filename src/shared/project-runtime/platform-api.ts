@@ -6,6 +6,8 @@ export interface LocalProjectTemplate {
   version: string
   stages: string[]
   unavailableReason?: string
+  /** Identity shown at template selection; never an execution approval. */
+  expectedTemplate?: import("../plugin-start-use").PluginStartUseIdentity
 }
 export type LocalProjectSummary = Pick<
   HostProjectState,
@@ -76,6 +78,7 @@ export interface LocalProjectApi {
     workspace: string
     installedPluginId: string
     goal: string
+    expectedTemplate?: import("../plugin-start-use").PluginStartUseIdentity
     expectedPlugin?: import("../plugin-start-use").PluginStartUseIdentity
     startUseScope?: import("../plugin-derivation").PluginDerivationScope
   }): Promise<LocalProjectView>

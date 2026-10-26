@@ -1906,10 +1906,13 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     },
     captureIdleThreadRetirement: (workspace, threadId) => {
       const captured = functions.captureIdleThreadRetirement(workspace, threadId)
-      return { ...captured, retire: async () => {
+      return { ...captured, retire: async (beforeRetire?: () => void) => {
         captured.assertCurrent()
-        queue.closeThread(threadId)
-        await captured.retire()
+        await captured.retire(() => {
+          captured.assertCurrent()
+          beforeRetire?.()
+          queue.closeThread(threadId)
+        })
       } }
     },
     close: () => { functions.close(); desktopBroker.close(); promptBroker.close() }

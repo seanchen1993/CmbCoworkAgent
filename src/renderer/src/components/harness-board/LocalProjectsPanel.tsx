@@ -34,6 +34,8 @@ const operationNames = {
 }
 function message(error: unknown) {
   const text = error instanceof Error ? error.message : String(error)
+  if (/TEMPLATE_IDENTITY|PACKAGE_IDENTITY_MISMATCH/.test(text))
+    return "项目插件身份尚未就绪或已变化。请更新列表，重新选择插件后再创建。"
   if (/PROJECT_MODS_APPROVAL_REQUIRED/.test(text))
     return "请先在“本包功能权限”中核对源码和能力范围，并确认授权后再开始当前阶段。"
   const recovery = projectRuntimeRecoveryMessage(text)
@@ -126,12 +128,12 @@ export function LocalProjectsPanel() {
     }
   }, [startUse, accountRevision, threads])
   return (
-    <section aria-label="本地项目任务" className="space-y-4 rounded-xl border bg-background p-4">
+    <section aria-label="项目列表" className="space-y-4 rounded-xl border bg-background p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="font-semibold">本地项目任务</h2>
+          <h2 className="font-semibold">项目列表</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            选择模板，填写目标，按阶段完成。无需填写企业项目编号。
+            选择项目插件，填写配置，按阶段完成并保留运行记录。
           </p>
         </div>
         <div className="flex flex-wrap gap-3 text-sm">
@@ -154,7 +156,7 @@ export function LocalProjectsPanel() {
             }}
             className="underline"
           >
-            新建本地任务
+            新建项目
           </button>
           <button
             type="button"
@@ -199,25 +201,10 @@ export function LocalProjectsPanel() {
         <>
           {!projects.length && !loading && (
             <p className="text-sm text-muted-foreground">
-              还没有本地任务。新建后会保留每一步的结果和检查记录。
+              还没有项目。新建后会保留每一步的结果和检查记录。
             </p>
           )}
-          <div className="flex flex-wrap gap-2">
-            {projects.map((project) => (
-              <button
-                key={project.projectId}
-                type="button"
-                aria-pressed={selected === project.projectId}
-                className="max-w-full rounded-lg border px-3 py-2 text-left text-sm aria-pressed:border-primary"
-                onClick={() => setSelected(project.projectId)}
-              >
-                <span className="break-all">{project.name}</span>
-                <span className="ml-2 text-xs text-muted-foreground">
-                  {project.status === "completed" ? "已完成" : `第 ${project.stageIndex + 1} 阶段`}
-                </span>
-              </button>
-            ))}
-          </div>
+          <HostProjectListItems projects={projects} selected={selected} onSelect={setSelected} />
           {projects.length >= 20 && (
             <button
               disabled={loading}
@@ -225,7 +212,7 @@ export function LocalProjectsPanel() {
               className="text-xs underline"
               onClick={() => void refresh(true)}
             >
-              加载更多任务
+              加载更多项目
             </button>
           )}
           {selected && (
@@ -235,6 +222,23 @@ export function LocalProjectsPanel() {
       )}
     </section>
   )
+}
+
+export function HostProjectListItems({ projects, selected, onSelect }: {
+  projects: LocalProjectSummary[]
+  selected?: string
+  onSelect: (projectId: string) => void
+}) {
+  return <div className="grid gap-2">{projects.map((project) => (
+    <button key={project.projectId} type="button" data-project-runtime="host"
+      aria-label={`打开项目 ${project.name}`} aria-pressed={selected === project.projectId}
+      className="rounded-xl border bg-background p-4 text-left aria-pressed:border-primary"
+      onClick={() => onSelect(project.projectId)}>
+      <span className="font-medium">{project.name}</span>
+      <span className="ml-3 text-sm text-muted-foreground">{project.status === "completed" ? "已完成" : `第 ${project.stageIndex + 1} 阶段`}</span>
+      <p className="mt-1 truncate text-xs text-muted-foreground">{project.workspace}</p>
+    </button>
+  ))}</div>
 }
 
 function ProjectError({ error }: { error: unknown }) {
@@ -249,25 +253,33 @@ function ProjectError({ error }: { error: unknown }) {
   )
 }
 
-function CreateLocalProject({
+export function CreateLocalProject({
   templates,
   startUse,
+  installedPluginId,
+  onBusyChange,
   onCancel,
   onCreated
 }: {
   templates: LocalProjectTemplate[]
   startUse?: HostPluginStartUseIntent
+  installedPluginId?: string
+  onBusyChange?: (busy: boolean) => void
   onCancel: () => void
   onCreated: (view: LocalProjectView) => void
 }) {
   const [name, setName] = useState("")
   const [goal, setGoal] = useState("")
   const [workspace, setWorkspace] = useState("")
-  const [template, setTemplate] = useState(
-    startUse?.report.identity.pluginId ??
-      templates.find((item) => !item.unavailableReason)?.installedPluginId ??
-      ""
-  )
+  const captureTemplate = (id: string) => {
+    const identity = templates.find((item) => item.installedPluginId === id)?.expectedTemplate
+    return { id, expectedTemplate: identity ? { ...identity } : undefined }
+  }
+  const [selection, setSelection] = useState(() => captureTemplate(
+    installedPluginId ?? startUse?.report.identity.pluginId ??
+      templates.find((item) => !item.unavailableReason)?.installedPluginId ?? ""
+  ))
+  const template = selection.id
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>()
   const active = useRef(true)
@@ -285,13 +297,16 @@ function CreateLocalProject({
         event.preventDefault()
         if (lock.current) return
         lock.current = true
+        const account = useAppStore.getState().accountRevision
+        const current = () => active.current && useAppStore.getState().accountRevision === account
         setBusy(true)
+        onBusyChange?.(true)
         setError(undefined)
         try {
           if (startUse) {
             if (!hostPluginStartUseCurrent(startUse)) throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
             const actual = await window.api.plugins.prepareStartUse(startUse.input)
-            if (!active.current) return
+            if (!current()) return
             const fixed = startUse.report.identity
             if (
               !hostPluginStartUseCurrent(startUse) ||
@@ -304,6 +319,8 @@ function CreateLocalProject({
             )
               throw Error("PROJECT_HOST_PACKAGE_IDENTITY_MISMATCH")
           }
+          if (!startUse && (!selection.expectedTemplate || selection.expectedTemplate.pluginId !== template))
+            throw Error("PROJECT_HOST_TEMPLATE_IDENTITY_REQUIRED")
           const result = await window.api.harnessBoard.localProjects.create({
             name: name.trim(),
             goal: goal.trim(),
@@ -317,14 +334,14 @@ function CreateLocalProject({
                     expectedWorkspace: startUse.input.expectedWorkspace
                   }
                 }
-              : {})
+              : { expectedTemplate: selection.expectedTemplate })
           })
-          if (active.current) onCreated(result)
+          if (current() && (!startUse || hostPluginStartUseCurrent(startUse))) onCreated(result)
         } catch (cause) {
           if (active.current) setError(cause)
         } finally {
           lock.current = false
-          if (active.current) setBusy(false)
+          if (active.current) { setBusy(false); onBusyChange?.(false) }
         }
       }}
     >
@@ -333,13 +350,13 @@ function CreateLocalProject({
           暂无可用模板。请先在插件中安装项目模板包；开发示例为 project-docs-lite。
         </p>
       )}
-      <label className="grid gap-1 text-sm">
-        项目模板
+      {!installedPluginId && <label className="grid gap-1 text-sm">
+        项目插件
         <select
           required
           value={template}
           disabled={busy || !!startUse}
-          onChange={(event) => setTemplate(event.target.value)}
+          onChange={(event) => setSelection(captureTemplate(event.target.value))}
           className="rounded border bg-background p-2"
         >
           <option value="" disabled>
@@ -356,7 +373,7 @@ function CreateLocalProject({
             </option>
           ))}
         </select>
-      </label>
+      </label>}
       {templates
         .filter((item) => item.unavailableReason)
         .map((item) => (
@@ -370,7 +387,7 @@ function CreateLocalProject({
         </p>
       )}
       <label className="grid gap-1 text-sm">
-        任务名称
+        项目名称
         <input
           required
           maxLength={200}
@@ -416,7 +433,7 @@ function CreateLocalProject({
       </div>
       {!!error && <ProjectError error={error} />}
       <p className="text-xs text-muted-foreground">
-        创建仅保存配置；进入任务后点击“开始当前阶段”才会调用助手。
+        创建仅保存配置；进入项目后点击“开始当前阶段”才会调用助手。
       </p>
       <div className="flex gap-4 text-sm">
         <button
@@ -424,7 +441,7 @@ function CreateLocalProject({
           disabled={busy || !workspace || !template}
           className="rounded border px-3 py-2 disabled:opacity-50"
         >
-          {busy ? "正在创建…" : "创建任务"}
+          {busy ? "正在创建…" : "创建项目"}
         </button>
         <button type="button" disabled={busy} onClick={onCancel}>
           返回列表

@@ -19,7 +19,10 @@ import { BizRetryNotice } from "./BizRetryNotice"
 import { ProjectWorkspaceField } from "./ProjectWorkspaceField"
 import { ProjectCapabilityPanel } from "./ProjectCapabilityPanel"
 import { ProjectCompositionEntry } from "./ProjectCompositionEntry"
-import { LocalProjectsPanel } from "./LocalProjectsPanel"
+import { CreateLocalProject, HostProjectListItems, LocalProjectRun } from "./LocalProjectsPanel"
+import type { LocalProjectSummary, LocalProjectTemplate, LocalProjectView } from "../../../../shared/project-runtime/platform-api"
+import { dismissHostPluginStartUse, hostPluginStartUseCurrent, useHostPluginStartUseIntent, type HostPluginStartUseIntent } from "@/lib/plugin-start-use-intent"
+import { SparksDocumentationLink } from "../customize/SparksDocumentationLink"
 import { ProjectPlatformEntry } from "./ProjectPlatformEntry"
 import { prepareProjectCapabilitySession } from "./project-capability-session"
 import {
@@ -2081,6 +2084,7 @@ function AdapterOptionHeader({
 }
 
 function AdapterPicker({
+  allowHost = false,
   registry,
   value,
   installingPluginNames,
@@ -2088,6 +2092,7 @@ function AdapterPicker({
   onInstallPlugin,
   onValueChange
 }: {
+  allowHost?: boolean
   registry: ProjectModeAdapterItem[]
   value: string
   installingPluginNames: Set<string>
@@ -2183,6 +2188,7 @@ function AdapterPicker({
             {filteredRegistry.length ? (
               <AdapterSelectGroups
                 registry={filteredRegistry}
+                allowHost={allowHost}
                 selectedId={value}
                 installingPluginNames={installingPluginNames}
                 onInstallPlugin={(adapter) => {
@@ -2240,19 +2246,23 @@ function AdapterInstallButton({
 }
 
 function AdapterSelectItem({
+  allowHost = false,
   adapter,
   selectedId,
   onSelect,
   installingPluginNames,
   onInstallPlugin
 }: {
+  allowHost?: boolean
   adapter: HarnessAdapterRegistryItem
   selectedId: string
   onSelect: (adapterId: string) => void
   installingPluginNames: Set<string>
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
 }): React.JSX.Element {
-  const compatibilityMessage = boardCompatibilityMessage(adapter.boardCompatibility)
+  const compatibilityMessage = allowHost && adapter.runtimeMode === "host"
+    ? adapter.enabled === false ? "插件已停用，请先启用。" : undefined
+    : boardCompatibilityMessage(adapter.boardCompatibility)
   if (adapter.boardCompatibility.status === "missing-plugin") {
     return (
       <div
@@ -2292,7 +2302,7 @@ function AdapterSelectItem({
       role="option"
       data-adapter-option
       aria-selected={selectedId === adapter.id}
-      disabled={!adapter.boardCompatibility.compatible}
+      disabled={adapter.runtimeMode === "host" ? !allowHost || adapter.enabled === false : !adapter.boardCompatibility.compatible}
       onClick={() => onSelect(adapter.id)}
       className="group relative flex w-full min-w-0 rounded-sm py-2 pl-4 pr-10 text-left text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
     >
@@ -2322,12 +2332,14 @@ function AdapterSelectItem({
 }
 
 function AdapterSelectGroups({
+  allowHost = false,
   registry,
   selectedId,
   onSelect,
   installingPluginNames,
   onInstallPlugin
 }: {
+  allowHost?: boolean
   registry: ProjectModeAdapterItem[]
   selectedId: string
   onSelect: (adapterId: string) => void
@@ -2373,6 +2385,7 @@ function AdapterSelectGroups({
                   </div>
                   {group.adapters.map((adapter) => (
                     <AdapterSelectItem
+                  allowHost={allowHost}
                       key={adapter.id}
                       adapter={adapter}
                       selectedId={selectedId}
@@ -2827,7 +2840,10 @@ function DeployUnitSearchInput({
   )
 }
 
-function ProjectFormDialog({
+export function ProjectFormDialog({
+  hostTemplates = [],
+  hostStartUse,
+  onHostCreated,
   open,
   creating,
   form,
@@ -2841,6 +2857,9 @@ function ProjectFormDialog({
   onPickWorkspace,
   onSubmit
 }: {
+  hostTemplates?: LocalProjectTemplate[]
+  hostStartUse?: HostPluginStartUseIntent
+  onHostCreated?: (view: LocalProjectView) => void
   open: boolean
   creating: boolean
   form: HarnessProjectCreateInput
@@ -2854,6 +2873,7 @@ function ProjectFormDialog({
   onPickWorkspace: () => void
   onSubmit: () => void
 }): React.JSX.Element {
+  const [hostBusy, setHostBusy] = useState(false)
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
   const projectDirEditedRef = useRef(false)
   useEffect(() => {
@@ -2878,6 +2898,30 @@ function ProjectFormDialog({
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
   const selectedAdapterMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
 
+  const hostSelected = selectedAdapter?.runtimeMode === "host"
+  const picker = <fieldset disabled={creating || hostBusy || !!hostStartUse}>
+    <AdapterPicker allowHost value={form.adapterId} registry={registry}
+      installingPluginNames={installingPluginNames} portalContainer={dialogPortalContainer}
+      onInstallPlugin={onInstallPlugin}
+      onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })} />
+  </fieldset>
+  if (hostSelected) return (
+    <Dialog open={open} onOpenChange={(next) => { if (!hostBusy) onOpenChange(next) }}>
+      <DialogContent ref={setDialogPortalContainer} className="max-h-[90vh] overflow-y-auto"
+        onPointerDownOutside={preventHarnessDialogOutsideClose}>
+        <DialogHeader><DialogTitle>新建项目</DialogTitle></DialogHeader>
+        {picker}
+        {selectedAdapter.enabled === false || !hostTemplates.some((item) =>
+          item.installedPluginId === selectedAdapter.id && item.name === selectedAdapter.name &&
+          item.version === selectedAdapter.version && !item.unavailableReason)
+          ? <p role="status">项目插件尚未就绪，请启用插件并更新列表。</p>
+          : <CreateLocalProject key={selectedAdapter.id} templates={hostTemplates}
+              installedPluginId={selectedAdapter.id} startUse={hostStartUse}
+              onBusyChange={setHostBusy} onCancel={() => onOpenChange(false)}
+              onCreated={(view) => { setHostBusy(false); onHostCreated?.(view) }} />}
+      </DialogContent>
+    </Dialog>
+  )
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -2893,6 +2937,7 @@ function ProjectFormDialog({
         </DialogHeader>
         <div className="min-h-0 overflow-y-auto py-1 pr-1">
           <div className="grid gap-4">
+            {picker}
             <section className="rounded-md border border-border bg-muted/30 p-3">
               <div className="mb-3 text-sm font-semibold">项目信息</div>
               <div className="grid grid-cols-2 items-start gap-3">
@@ -3001,16 +3046,6 @@ function ProjectFormDialog({
             <section className="rounded-md border border-border bg-muted/30 p-3">
               <div className="mb-3 text-sm font-semibold">插件配置</div>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                <AdapterPicker
-                  value={form.adapterId}
-                  registry={registry}
-                  installingPluginNames={installingPluginNames}
-                  portalContainer={dialogPortalContainer}
-                  onInstallPlugin={onInstallPlugin}
-                  onValueChange={(adapterId) =>
-                    onChange({ ...form, adapterId, adapterType: "plugin" })
-                  }
-                />
                 {selectedAdapterMessage && (
                   <span className="text-status-warning">{selectedAdapterMessage}</span>
                 )}
@@ -8692,7 +8727,8 @@ interface HarnessBoardViewProps {
 }
 
 export function HarnessBoardView(props: HarnessBoardViewProps = {}): React.JSX.Element {
-  return <ProjectPlatformEntry onActiveSessionThreadChange={props.onActiveSessionThreadChange}>
+  const accountRevision = useAppStore((state) => state.accountRevision)
+  return <ProjectPlatformEntry key={accountRevision} onActiveSessionThreadChange={props.onActiveSessionThreadChange}>
     <EnterpriseHarnessBoardView {...props} />
   </ProjectPlatformEntry>
 }
@@ -8700,6 +8736,33 @@ export function HarnessBoardView(props: HarnessBoardViewProps = {}): React.JSX.E
 function EnterpriseHarnessBoardView({
   onActiveSessionThreadChange
 }: HarnessBoardViewProps = {}): React.JSX.Element {
+  const [hostProjects, setHostProjects] = useState<LocalProjectSummary[]>([])
+  const [hostTemplates, setHostTemplates] = useState<LocalProjectTemplate[]>([])
+  const [selectedHostProject, setSelectedHostProject] = useState<string>()
+  const [hostError, setHostError] = useState<string>()
+  const [hostStartUse, setHostStartUse] = useState<HostPluginStartUseIntent>()
+  const hostStartUseIntent = useHostPluginStartUseIntent()
+  const hostReadSequence = useRef(0)
+  const refreshHostProjects = useCallback(async (more = false) => {
+    const sequence = ++hostReadSequence.current
+    try {
+      const [templates, items] = await Promise.all([
+        window.api.harnessBoard.localProjects.templates(),
+        window.api.harnessBoard.localProjects.list(more ? hostProjects.at(-1)?.projectId : undefined)
+      ])
+      if (sequence !== hostReadSequence.current) return
+      setHostTemplates(templates)
+      setHostProjects((previous) => more ? [...previous, ...items.filter((item) =>
+        !previous.some((old) => old.projectId === item.projectId))] : items)
+      setHostError(undefined)
+    } catch (cause) {
+      if (sequence === hostReadSequence.current) setHostError(cleanIpcError(cause))
+    }
+  }, [hostProjects])
+  useEffect(() => {
+    void refreshHostProjects()
+    return () => { hostReadSequence.current++ }
+  }, [])
   const [initialCatalogSnapshot] = useState(readHarnessBoardCatalogCache)
   const [projects, setProjects] = useState<HarnessProjectListItem[]>(
     () => initialCatalogSnapshot?.projects ?? []
@@ -10275,12 +10338,15 @@ function EnterpriseHarnessBoardView({
   const visibleProjectCount = catalogSummary.matchedProjects
 
   const resetCreateForm = useCallback(() => {
+    setHostStartUse(undefined)
     setDerivedCreationSource(null)
     setForm(createEmptyProjectForm())
     setFormError(null)
   }, [])
 
   const openCreateDialog = useCallback(() => {
+    setHostStartUse(undefined)
+    void refreshHostProjects()
     setDerivedCreationSource(null)
     setCreatedDerivedProject(null)
     setCreatedProjectNodesOpen(false)
@@ -10288,7 +10354,24 @@ function EnterpriseHarnessBoardView({
     setFormError(null)
     openProjectDialogAdapterSession()
     setDialogOpen(true)
-  }, [openProjectDialogAdapterSession])
+  }, [openProjectDialogAdapterSession, refreshHostProjects])
+
+  useEffect(() => {
+    if (!hostStartUseIntent || dialogOpen || editingProject) return
+    const intent = hostStartUseIntent
+    if (!hostPluginStartUseCurrent(intent)) {
+      setHostError("原聊天或插件来源已变化，请返回原入口重新选择。")
+      dismissHostPluginStartUse(intent.id)
+      return
+    }
+    setHostStartUse(intent)
+    setForm(createEmptyProjectForm(intent.report.identity.pluginId))
+    setFormError(null)
+    void refreshHostProjects()
+    openProjectDialogAdapterSession()
+    setDialogOpen(true)
+    dismissHostPluginStartUse(intent.id)
+  }, [hostStartUseIntent, dialogOpen, editingProject, openProjectDialogAdapterSession, refreshHostProjects])
 
   const handleCreateDialogOpenChange = useCallback(
     (open: boolean) => {
@@ -11346,6 +11429,7 @@ function EnterpriseHarnessBoardView({
 
   const openProjectDetail = useCallback(
     (projectId: string): void => {
+      setSelectedHostProject(undefined)
       projectSidebarScrollIntentRef.current = "top"
       setSelectedProjectSession(null)
       setSelectedFeature(null)
@@ -12194,6 +12278,17 @@ function EnterpriseHarnessBoardView({
     onActiveSessionThreadChange?.(selectedProjectSession?.threadId ?? null)
   }, [onActiveSessionThreadChange, selectedFeature, selectedProjectSession?.threadId])
 
+  if (selectedHostProject) return (
+    <div className="h-full overflow-y-auto p-4">
+      <Button variant="ghost" onClick={() => { setSelectedHostProject(undefined); void refreshHostProjects() }}>
+        <ArrowLeft className="mr-2 size-4" />项目列表
+      </Button>
+      <SparksDocumentationLink initialFile="project-platform.md" label="使用说明" />
+      <LocalProjectRun key={selectedHostProject} projectId={selectedHostProject}
+        onChanged={() => void refreshHostProjects()} />
+    </div>
+  )
+
   if (selectedFeature) {
     const selectedFeatureDeleted = selectedFeature.deleted === true
     const selectedFeatureThread = threadsById.get(selectedFeature.activeSessionThreadId ?? "")
@@ -12381,11 +12476,12 @@ function EnterpriseHarnessBoardView({
             </div>
           </div>
           <div className={cn(harnessPageHeaderActionsClassName, "pt-2")}>
+            <SparksDocumentationLink initialFile="project-platform.md" label="使用说明" />
             <Button
               variant="ghost"
               size="sm"
               className={harnessDetailRefreshButtonClassName}
-              onClick={() => void loadProjects({ force: true })}
+              onClick={() => { void loadProjects({ force: true }); void refreshHostProjects() }}
             >
               {loadingProjects ? (
                 <Loader2 className="size-4 animate-spin" />
@@ -12411,7 +12507,6 @@ function EnterpriseHarnessBoardView({
 
       <ScrollArea className="min-h-0 flex-1">
         <main className="w-full space-y-7 p-2">
-          <LocalProjectsPanel />
           {loadError && (
             <div className="flex items-start gap-2 rounded-xl border border-status-critical/30 bg-status-critical/10 px-4 py-3 text-sm text-status-critical shadow-sm">
               <AlertCircle className="mt-0.5 size-4 shrink-0" />
@@ -12441,12 +12536,20 @@ function EnterpriseHarnessBoardView({
               </TabsList>
               {projectModeTab === "projects" && (
                 <div className="text-sm text-muted-foreground">
-                  {catalogSummary.matchedProjects} 个项目
+                  {catalogSummary.matchedProjects + hostProjects.length} 个项目
                 </div>
               )}
             </div>
 
             <TabsContent value="projects" className="mt-0">
+              {hostError && <p role="alert" className="mb-3 text-sm text-destructive">{hostError}</p>}
+              <div className="mb-3 grid gap-2">
+                <HostProjectListItems projects={hostProjects.filter((project) => !query.trim() ||
+                  [project.name, project.workspace].some((value) => value.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())))}
+                  onSelect={setSelectedHostProject} />
+                {hostProjects.length >= 20 && <button type="button" className="text-sm underline"
+                  onClick={() => void refreshHostProjects(true)}>加载更多项目</button>}
+              </div>
               {loadingProjects ? (
                 <div
                   className={cn(
@@ -12459,7 +12562,7 @@ function EnterpriseHarnessBoardView({
                     正在同步项目看板
                   </div>
                 </div>
-              ) : projects.length === 0 ? (
+              ) : projects.length === 0 && hostProjects.length > 0 ? null : projects.length === 0 ? (
                 <div className="flex min-h-[360px] items-center justify-center">
                   <div
                     className={cn(
@@ -12729,6 +12832,15 @@ function EnterpriseHarnessBoardView({
         <Button variant="ghost" onClick={() => dismissDerivedProject(derivedProjectIntent.id)}>稍后设置</Button>
       </div>}
       <ProjectFormDialog
+        hostTemplates={hostTemplates}
+        hostStartUse={hostStartUse}
+        onHostCreated={(view) => {
+          setDialogOpen(false)
+          closeProjectDialogAdapterSession()
+          resetCreateForm()
+          setSelectedHostProject(view.project.projectId)
+          void refreshHostProjects()
+        }}
         open={dialogOpen}
         creating={creating}
         form={form}

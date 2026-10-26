@@ -4059,42 +4059,104 @@ export class FunctionModsManager {
     const captured = this.captureThreadRetirement(threadId)
     const entries = [...this.sessions].filter(([, entry]) => entry.threadId === threadId)
     const key = JSON.stringify([workspace, threadId])
+    const epoch = this.epoch(workspace)
+    const enabled = this.host.enabled(workspace)
+    const protects = this.host.protects?.(workspace)
+    const origin = this.operations.getStore()
+    const operations = () => [...this.activeOperations].filter(scope =>
+      scope.active && scope.workspace === workspace && scope.threadId === threadId)
+    const readMethods = new Set([
+      "siteRead", "siteMount", "siteMountOutcome", "siteRender", "siteUnmount", "panes",
+      "commands", "logs", "feedback", "feedbackPresentation", "effectiveStatus",
+      "registeredTools", "turnNotices"
+    ])
+    // Capture only original display/discovery calls. Execution/Flow/action scopes are
+    // never waited out as permission to retire, and the current caller cannot await itself.
+    const admitted = operations().filter(scope => scope !== origin &&
+      readMethods.has(String(scope.method)) &&
+      entries.some(([, entry]) => scope.entry === entry))
+    let task: Promise<void> | undefined
     const assertCurrent = () => {
       captured.assertCurrent()
-      if (this.closed || this.applying.has(key) || this.pendingSessionBuilds.has(key) ||
-        this.probeRetirements.has(key) || this.runtimeReservations.has(key) ||
-        entries.some(([, entry]) => entry.workspace !== workspace || !entry.loaded ||
-          !entry.client.stopAndDrain || entry.probeRetirementError ||
-          entry.developmentPlugins.size || entry.completionChecks.size ||
-          entry.activity.releaseBlockingSize || entry.session?.hasReleaseResources ||
-          entry.session?.nativeBehaviorSelectionHeld ||
-          entry.session?.plugins.some(plugin => plugin.guest.stats.disposed)) ||
-        this.endingEntries.has(key) || [...this.candidates].some(entry =>
-          entry.workspace === workspace && entry.threadId === threadId))
+      const active = operations()
+      const pendingReads = admitted.filter(scope => scope.active).length
+      const blockers = {
+        closed: this.closed,
+        applying: this.applying.has(key) && this.applying.get(key) !== task,
+        building: this.pendingSessionBuilds.has(key),
+        probeRetirement: this.probeRetirements.has(key),
+        runtimeReservation: this.runtimeReservations.has(key),
+        ending: this.endingEntries.has(key),
+        candidates: [...this.candidates].filter(entry =>
+          entry.workspace === workspace && entry.threadId === threadId).length,
+        wrongWorkspace: entries.some(([, entry]) => entry.workspace !== workspace),
+        unloaded: entries.some(([, entry]) => !entry.loaded),
+        physicalDrainUnavailable: entries.some(([, entry]) => !entry.client.stopAndDrain),
+        failedCleanup: entries.some(([, entry]) => Boolean(entry.probeRetirementError)),
+        development: entries.reduce((sum, [, entry]) => sum + entry.developmentPlugins.size, 0),
+        completionChecks: entries.reduce((sum, [, entry]) => sum + entry.completionChecks.size, 0),
+        releaseBlocking: entries.reduce((sum, [, entry]) => sum + entry.activity.releaseBlockingSize, 0),
+        backgroundResources: entries.reduce((sum, [, entry]) => sum + entry.activity.releaseResourceSize, 0),
+        resources: entries.some(([, entry]) => entry.session?.hasReleaseResources),
+        nativeSelection: entries.some(([, entry]) => entry.session?.nativeBehaviorSelectionHeld),
+        disposed: entries.some(([, entry]) => entry.session?.plugins.some(plugin => plugin.guest.stats.disposed)),
+        otherOperations: active.filter(scope => !admitted.includes(scope)).length
+      }
+      const { releaseBlocking, ...hardBlockers } = blockers
+      if (Object.values(hardBlockers).some(Boolean) || (releaseBlocking && !pendingReads)) {
+        try {
+          console.warn("[Mods] Operation retirement busy", { ...blockers, pendingUiReads: pendingReads })
+        } catch { /* Diagnostics cannot change retirement admission. */ }
         throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
+      }
+      this.host.assertThread?.(workspace, threadId)
+      if (this.epoch(workspace) !== epoch || this.host.enabled(workspace) !== enabled ||
+        this.host.protects?.(workspace) !== protects)
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      for (const [, entry] of entries) {
+        entry.assertRuntimeSourceContent?.()
+        for (const snapshot of entry.snapshots.values()) {
+          this.store.assertGrant(snapshot.grant)
+          this.assertSnapshotSource(snapshot)
+          this.assertConfiguredOptions(workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
+          this.assertSnapshotContent(snapshot)
+          if (!snapshot.assertRuntimeSourceContent)
+            assertConfigurationSourcesCurrent(snapshot.sourcePath ?? snapshot.compiled.root, snapshot.compiled)
+        }
+      }
+      captured.assertCurrent()
     }
     assertCurrent()
     let retirement: Promise<void> | undefined
-    return { resident: captured.resident, assertCurrent, retire: () => {
+    return { resident: captured.resident, assertCurrent, retire: (beforeRetire?: () => void) => {
       if (retirement) return retirement
       assertCurrent()
-      const paused: SessionEntry[] = []
-      try {
-        for (const [, entry] of entries) {
-          if (!entry.activity.pauseForRelease())
-            throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
-          paused.push(entry)
+      // New readers wait on the original admission gate. Already admitted readers keep
+      // their own scopes, including nested calls, until their real finally releases them.
+      task = Promise.resolve().then(async () => {
+        await Promise.all(admitted.map(scope => scope.settled))
+        assertCurrent()
+        const paused: SessionEntry[] = []
+        try {
+          for (const [, entry] of entries) {
+            if (!entry.activity.pauseForRelease())
+              throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
+            paused.push(entry)
+          }
+          // The enclosing manager invalidates native owners only after the captured
+          // readers finish. This synchronous callback grants no new execution authority.
+          beforeRetire?.()
+          captured.assertCurrent()
+          await captured.retire()
+        } catch (error) {
+          for (const entry of paused) entry.activity.resume()
+          throw error
         }
-      } catch (error) {
-        for (const entry of paused) entry.activity.resume()
-        throw error
-      }
-      // Hold the same admission gate until original physical cleanup finishes. In
-      // particular, a historical drawing cannot replace the captured VM mid-drain.
-      const task = Promise.resolve().then(() => captured.retire())
+      })
       this.applying.set(key, task)
+      const ownedTask = task
       retirement = task.finally(() => {
-        if (this.applying.get(key) === task) this.applying.delete(key)
+        if (this.applying.get(key) === ownedTask) this.applying.delete(key)
       })
       return retirement
     } }

@@ -63,7 +63,7 @@ async function verifyLocalProjects(root: string, browser: Browser, artifacts: st
         harnessBoard:{localProjects:{
           mods:{read:async id=>{const project=views[id].project;return {projectId:project.projectId,projectVersion:project.version,packageDigest:project.pluginDigest,workspace:project.workspace}},
             approve:async()=>{throw Error('UNEXPECTED_FUNCTION_APPROVAL')}},
-          templates:async()=>[{installedPluginId:'installed-uuid',name:'两阶段模板',version:'1.0.0',stages:['草稿','检查']}],
+          templates:async()=>[{installedPluginId:'installed-uuid',name:'两阶段模板',version:'1.0.0',stages:['草稿','检查'],expectedTemplate:{pluginId:'installed-uuid',name:'两阶段模板',version:'1.0.0',digest:'a'.repeat(64)}}],
           list:async()=>Object.values(views).map(x=>copy(x.project)),
           get:async id=>{const result=copy(views[id]); if(holdRead)return new Promise(resolve=>reads.push(()=>resolve(result)));return result},
           versions:async id=>({retainedVersion:'1.0.0',installedVersion:'2.0.0',differences:['检查规则发生变化，原检查通过记录不能代替新版检查。'],guidance:'当前任务继续使用原模板副本。'}),
@@ -93,12 +93,12 @@ async function verifyLocalProjects(root: string, browser: Browser, artifacts: st
   const assets = resolve(root, process.env.SPARKS_BROWSER_BUILD ?? "out", "renderer/assets")
   const css = existsSync(assets) ? readdirSync(assets).find(name => /^index-.*\.css$/.test(name)) : undefined
   if (css) await page.addStyleTag({ path: resolve(assets, css) })
-  const task = (id: string) => page.getByRole("button", { name: new RegExp(`^任务 ${id}`) })
+  const task = (id: string) => page.getByRole("button", { name: new RegExp(`^打开项目 任务 ${id}`) })
   const tick = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
   const help = page.getByRole("link", { name: /使用说明/ })
   await help.focus()
   await page.keyboard.press("Enter")
-  await page.getByRole("heading", { name: "内置功能与本地项目任务", exact: true }).waitFor()
+  await page.getByRole("heading", { name: "内置功能与项目模式", exact: true }).waitFor()
   await page.getByRole("article").getByRole("link", { name: "制作项目模板", exact: true }).first().click()
   await page.getByRole("heading", { name: "只写技能和节点，制作自己的项目插件", exact: true }).waitFor()
   await page.keyboard.press("Escape")
@@ -196,11 +196,11 @@ async function verifyLocalProjects(root: string, browser: Browser, artifacts: st
   await page.getByRole("button", { name: "开始当前阶段", exact: true }).click()
   await page.getByRole("button", { name: "拒绝本次执行" }).click()
   await page.getByText("你已拒绝本次执行，可重新准备。").waitFor()
-  await page.getByRole("button", { name: "新建本地任务" }).click()
-  await page.getByLabel("任务名称").fill("新任务")
+  await page.getByRole("button", { name: "新建项目" }).click()
+  await page.getByLabel("项目名称").fill("新任务")
   await page.getByLabel("希望完成什么").fill("准备一份文档")
   await page.getByRole("button", { name: "选择工作目录" }).click()
-  await page.getByRole("button", { name: "创建任务", exact: true }).click()
+  await page.getByRole("button", { name: "创建项目", exact: true }).click()
   await page.getByText("目标 C", { exact: true }).waitFor()
   assert.equal(await page.evaluate(() => (window as unknown as ProjectFixtureWindow).fixture.calls.filter(x => x[0] === "create").length), 1)
   assert.equal(await page.evaluate(() => (window as unknown as ProjectFixtureWindow).fixture.calls.filter(x => x[0] === "start" && x[1] === "C").length), 0)

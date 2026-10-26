@@ -1,15 +1,35 @@
-import { expect, it, vi } from "vitest"
+import { afterEach, expect, it, vi } from "vitest"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { hostProjectFixture } from "../harness-board/project-runtime/host-fixtures.test-helper"
+import { derivationContentIdentity, snapshotDerivationSource } from "../plugins/derivation-source"
 import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from "electron"
 
-const state = vi.hoisted(() => ({ service: undefined as unknown }))
+const state = vi.hoisted(() => ({
+  service: undefined as unknown,
+  plugins: [] as Array<{ id: string; path: string; name: string; version: string; enabled: boolean }>,
+  afterSnapshot: undefined as (() => void) | undefined
+}))
 vi.mock("electron", () => ({ BrowserWindow: {} }))
-vi.mock("../storage", () => ({ getOpenworkDir: () => "C:/unused-runtime-authority", getPlugins: () => [] }))
+vi.mock("../storage", () => ({ getOpenworkDir: () => "C:/unused-runtime-authority", getPlugins: () => state.plugins }))
 vi.mock("../db", () => ({ getThreadCore: () => undefined }))
 vi.mock("../harness-board/project-runtime/host-service", () => ({
   HostProjectService: class { constructor() { return state.service as object } }
 }))
 vi.mock("../harness-board/project-runtime/host-store", () => ({ HostProjectStore: class {} }))
-vi.mock("../harness-board/project-runtime/package-snapshots", () => ({ HostPackageSnapshots: class {} }))
+vi.mock("../harness-board/project-runtime/package-snapshots", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../harness-board/project-runtime/package-snapshots")>(),
+  HostPackageSnapshots: class {}
+}))
+vi.mock("../plugins/derivation-source", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../plugins/derivation-source")>()
+  return { ...original, snapshotDerivationSource: async (directory: string) => {
+    const snapshot = await original.snapshotDerivationSource(directory)
+    state.afterSnapshot?.()
+    return snapshot
+  } }
+})
 vi.mock("../harness-board/project-runtime/workspace-mode-guard", () => ({ ProjectWorkspaceModeGuard: class {} }))
 vi.mock("./project-runtime-legacy", () => ({ registerLegacyProjectRuntimeHandlers: () => undefined }))
 vi.mock("./project-runtime-import", () => ({ registerProjectImportHandlers: () => {} }))
@@ -131,4 +151,196 @@ it.each(["destroyed", "replaced"])("rejects the actual desktop command before ap
   release()
   await expect(result).rejects.toThrow("PROJECT_UNTRUSTED_SENDER")
   expect(approve).not.toHaveBeenCalled()
+})
+
+
+const templateRoots: string[] = []
+afterEach(() => {
+  state.plugins = []
+  state.afterSnapshot = undefined
+  for (const root of templateRoots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
+
+function nativeHandlers() {
+  let destroyed = false
+  const contents = { mainFrame: {}, isDestroyed: () => destroyed }
+  const owner = { isDestroyed: () => destroyed, webContents: contents } as unknown as BrowserWindow
+  const handlers = new Map<string, (...args: unknown[]) => unknown>()
+  registerProjectRuntimeHandlers(
+    {
+      handle: (name: string, handler: (...args: unknown[]) => unknown) =>
+        handlers.set(name, handler)
+    } as unknown as IpcMain,
+    () => owner
+  )
+  const event = {
+    sender: contents,
+    senderFrame: contents.mainFrame
+  } as unknown as IpcMainInvokeEvent
+  return {
+    call: (name: string, ...args: unknown[]) =>
+      handlers.get(`project-runtime:${name}`)!(event, ...args),
+    destroy: () => {
+      destroyed = true
+    }
+  }
+}
+
+function installedTemplate() {
+  const root = mkdtempSync(join(tmpdir(), "project-template-identity-"))
+  templateRoots.push(root)
+  const manifest = hostProjectFixture(root).manifest
+  writeFileSync(join(root, "plugin.json"), JSON.stringify({ name: "docs", version: "1.0.0" }))
+  writeFileSync(join(root, "devclaw.project-runtime.json"), JSON.stringify(manifest))
+  for (const stage of manifest.stages) {
+    mkdirSync(join(root, "skills", stage.id), { recursive: true })
+    writeFileSync(join(root, stage.skill!), "Original reviewed stage")
+  }
+  const plugin = {
+    id: `installed-${state.plugins.length}`,
+    path: root,
+    name: "docs",
+    version: "1.0.0",
+    enabled: true
+  }
+  state.plugins.push(plugin)
+  return plugin
+}
+
+it("returns exact ordinary template content identities without scanning unrelated broken plugins", async () => {
+  const plugin = installedTemplate()
+  const other = installedTemplate()
+  const malformed = mkdtempSync(join(tmpdir(), "not-a-host-template-"))
+  templateRoots.push(malformed)
+  writeFileSync(join(malformed, "devclaw.project-runtime.json"), "{bad json")
+  state.plugins.unshift(
+    { ...plugin, id: "missing-chat", path: join(malformed, "missing") },
+    { ...plugin, id: "malformed-chat", path: malformed },
+    { ...plugin, id: "disabled", enabled: false }
+  )
+  const expected = derivationContentIdentity((await snapshotDerivationSource(plugin.path)).files)
+  const result = (await nativeHandlers().call("templates")) as Array<Record<string, unknown>>
+  expect(result).toHaveLength(2)
+  expect(result[0]).toMatchObject({
+    installedPluginId: plugin.id,
+    expectedTemplate: { pluginId: plugin.id, name: "docs", version: "1.0.0", digest: expected }
+  })
+  expect(result[1]).toMatchObject({
+    installedPluginId: other.id,
+    expectedTemplate: { pluginId: other.id, digest: expected }
+  })
+})
+
+it.each(["bytes", "disabled", "replaced", "window"])(
+  "does not publish a template identity after %s changes during its real source read",
+  async (change) => {
+    const plugin = installedTemplate()
+    const handlers = nativeHandlers()
+    state.afterSnapshot = () => {
+      if (change === "bytes") writeFileSync(join(plugin.path, "skills/draft/SKILL.md"), "Changed")
+      if (change === "disabled") plugin.enabled = false
+      if (change === "replaced") state.plugins = [{ ...plugin, path: `${plugin.path}-new` }]
+      if (change === "window") handlers.destroy()
+    }
+    await expect(handlers.call("templates")).rejects.toThrow()
+  }
+)
+
+it("rechecks earlier template identities after later template reads", async () => {
+  const first = installedTemplate()
+  installedTemplate()
+  let reads = 0
+  state.afterSnapshot = () => {
+    if (++reads === 2) writeFileSync(join(first.path, "skills/draft/SKILL.md"), "Late change")
+  }
+  await expect(nativeHandlers().call("templates")).rejects.toThrow("PACKAGE_CHANGED")
+})
+
+function creationService(localCreate: (...args: unknown[]) => unknown) {
+  const project = {
+    projectId: "project",
+    installedPluginId: "installed",
+    version: 1,
+    status: "active",
+    stageIndex: 0,
+    manifest: { stages: [{}] }
+  }
+  state.service = {
+    recoverInterrupted: () => {},
+    importedSource: () => undefined,
+    get: () => project,
+    operations: () => [],
+    localCreate
+  }
+  return project
+}
+
+const templateIdentity = {
+  pluginId: "installed",
+  name: "docs",
+  version: "1.0.0",
+  digest: "a".repeat(64)
+}
+const templateCreation = {
+  name: "Project",
+  workspace: "C:/workspace",
+  goal: "Review",
+  installedPluginId: "installed"
+}
+
+it("routes ordinary expectedTemplate through the retained-source CAS without a Creator thread", async () => {
+  const entered = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>()
+  let captured: Record<string, unknown> | undefined
+  const project = creationService(async (...args) => {
+    captured = args[0] as Record<string, unknown>
+    entered.resolve()
+    await release.promise
+    const assertCurrent = args[1] as () => void
+    assertCurrent()
+    return project
+  })
+  const expectedTemplate = { ...templateIdentity }
+  const pending = nativeHandlers().call("create", { ...templateCreation, expectedTemplate })
+  await entered.promise
+  expectedTemplate.digest = "b".repeat(64)
+  release.resolve()
+  await pending
+  expect(captured).toMatchObject({ ...templateCreation, expectedPlugin: templateIdentity })
+  expect(captured).not.toHaveProperty("expectedTemplate")
+  expect(captured).not.toHaveProperty("startUseScope")
+})
+
+it("keeps Creator scope mandatory and rejects mixing or malformed ordinary identities", async () => {
+  const localCreate = vi.fn()
+  creationService(localCreate)
+  const handlers = nativeHandlers()
+  for (const input of [
+    { expectedPlugin: templateIdentity },
+    { expectedTemplate: templateIdentity, expectedPlugin: templateIdentity },
+    {
+      expectedTemplate: templateIdentity,
+      startUseScope: { threadId: "fake", expectedWorkspace: "C:/workspace" }
+    },
+    { expectedTemplate: null },
+    { expectedTemplate: { ...templateIdentity, pluginId: "other" } },
+    { expectedTemplate: { ...templateIdentity, digest: "invalid" } },
+    { expectedTemplate: { ...templateIdentity, grant: true } }
+  ])
+    await expect(handlers.call("create", { ...templateCreation, ...input })).rejects.toThrow()
+  expect(localCreate).not.toHaveBeenCalled()
+})
+
+it("keeps ordinary template creation fenced after its native await", async () => {
+  const handlers = nativeHandlers()
+  creationService(async (...args) => {
+    await Promise.resolve()
+    handlers.destroy()
+    const assertCurrent = args[1] as () => void
+    assertCurrent()
+    throw Error("unexpected commit")
+  })
+  await expect(
+    handlers.call("create", { ...templateCreation, expectedTemplate: templateIdentity })
+  ).rejects.toThrow("PROJECT_UNTRUSTED_SENDER")
 })

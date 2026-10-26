@@ -1763,7 +1763,7 @@ export class ModsManager {
     captureIdleThreadRetirement?(workspace: string, threadId: string): {
       resident: boolean
       assertCurrent(): void
-      retire(): Promise<void>
+      retire(beforeRetire?: () => void): Promise<void>
     }
     captureThreadRetirement?(threadId: string): {
       resident: boolean
@@ -1945,6 +1945,11 @@ export class ModsManager {
     return { resident: captured?.resident ?? false, assertCurrent, retire: () => {
       if (retirement) return retirement
       assertCurrent()
+      if (idleWorkspace !== undefined && captured)
+        return retirement = captured.retire(() => {
+          assertCurrent()
+          this.invalidateFunctionThreadOwner(threadId)
+        })
       this.invalidateFunctionThreadOwner(threadId)
       return retirement = captured?.retire() ?? Promise.resolve()
     } }

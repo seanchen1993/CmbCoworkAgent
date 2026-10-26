@@ -56,6 +56,12 @@ export class FunctionSessionActivity {
     return [...this.tokens].filter(token => !token.retirementUi).length
   }
 
+  /** Non-UI background ownership never becomes releasable merely because a drawing is pending. */
+  get releaseResourceSize(): number {
+    return [...this.tokens].filter(token => token.retirementUi === false ||
+      (token.kind === "resource" && !token.retirementUi)).length
+  }
+
   pauseForRelease(): boolean {
     if (this.closed || this.paused || this.releaseBlockingSize) return false
     this.paused = true

@@ -86,7 +86,7 @@ async function main() {
     await overviewImage.evaluate((image: HTMLImageElement) => image.decode())
     checks.push("Both reviewed screenshots render offline with alt text; failed images show a readable placeholder and can reload after navigation")
     await page.getByRole("article").getByRole("link", { name: "项目能力", exact: true }).click()
-    await page.getByRole("heading", { name: "内置功能与本地项目任务", exact: true }).waitFor()
+    await page.getByRole("heading", { name: "内置功能与项目模式", exact: true }).waitFor()
     for (const name of ["项目会话标题栏的项目能力入口", "窄屏下的项目能力选择面板"]) {
       const image = page.getByRole("img", { name, exact: true })
       await image.scrollIntoViewIfNeeded()

@@ -11,17 +11,15 @@ import { packProjectPlugin } from "../src/main/mods/devtools/project-tooling"
 import { compositionEnvironment } from "./support/mods-composition-fixtures"
 import { saveProjectKnowledge, exerciseProjectLibrary, KNOWLEDGE_MARKER } from "./support/project-library-packaged-journey"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
+import { projectBuiltPreview } from "./support/project-built-preview"
+import { createUnifiedHostProject, openUnifiedHostProject } from "./support/project-unified-native-journey"
 import {
   startProjectPlatformModel,
   type ProjectModelPhase
 } from "./support/project-platform-model-fixture"
 
 const root = resolve(__dirname, "..")
-// Fail before launching anything when no newly built production package has been selected.
-assert(
-  process.env.CMB_MODS_PACKAGED_DIR?.trim(),
-  "Set CMB_MODS_PACKAGED_DIR to the reviewed new package"
-)
+const selectedLaunch = projectBuiltPreview(root, process.env.CMB_MODS_PACKAGED_DIR)
 const artifacts = resolve(
   root,
   process.env.CMB_PROJECT_PLATFORM_E2E_ARTIFACTS ??
@@ -44,7 +42,13 @@ function pass(label: string) {
   console.log("PASS " + label)
 }
 async function boot() {
+  selectedLaunch.assertCurrent()
   app = await launch(60000)
+  const identity = await selectedLaunch.verify(app, join(root, "out/main"))
+  if (identity) {
+    const launches = (readBack.previewLaunches ??= []) as unknown[]
+    launches.push(identity)
+  }
   app.process().stdout?.on("data", (chunk) => appendFileSync(join(artifacts, "runtime.log"), chunk))
   app.process().stderr?.on("data", (chunk) => appendFileSync(join(artifacts, "runtime.log"), chunk))
   page = await app.firstWindow()
@@ -72,14 +76,8 @@ async function waitView(accept: (view: LocalProjectView) => boolean, label: stri
   return view
 }
 async function openProject() {
-  const back = page.getByRole("button", { name: "返回会话", exact: true })
-  if (await back.isVisible()) await back.click()
   // Never bypass the public navigation with a store mutation or enterprise-gate fixture.
-  await page.getByRole("tab", { name: "项目模式", exact: true }).click()
-  await page.getByRole("region", { name: "本地项目任务" }).waitFor()
-  await page.getByRole("button", { name: "更新列表", exact: true }).click()
-  await page.getByRole("button", { name: new RegExp(`^${taskName}`) }).click()
-  await page.getByRole("heading", { name: new RegExp(`^${taskName} ·`) }).waitFor()
+  await openUnifiedHostProject(page, taskName)
 }
 async function terminal(previousCount: number, status: HostProjectOperation["status"]) {
   const deadline = Date.now() + 90000
@@ -384,19 +382,25 @@ async function main() {
     const template = templates.find((item) => item.name === "project-docs-lite")
     assert(template && !template.unavailableReason, JSON.stringify(templates))
     assert.notEqual(template.installedPluginId, "project-docs-lite")
-    let view = await page.evaluate((input) => window.api.harnessBoard.localProjects.create(input), {
+    let view = await createUnifiedHostProject(app, page, {
       name: taskName,
       workspace,
       installedPluginId: template.installedPluginId,
+      pluginName: template.name,
+      version: template.version,
       goal: "在当前阶段生成文档产物；按照固定 Skill 执行，只报告实际完成的工作。"
     })
     projectId = view.project.projectId
     const digest = view.project.pluginDigest
-    assert.equal(view.project.packageVersion, "0.1.0")
+    assert.equal(
+      view.project.packageVersion,
+      JSON.parse(readFileSync(join(root, "examples/project-docs-lite/plugin.json"), "utf8")).version,
+      "Created project must retain the actual authored package version"
+    )
     assert.equal(model.requests.length, 0)
     assert.equal(existsSync(join(workspace, "draft.md")), false)
     pass(
-      "Real author pack → formal plugin install → discoverable host template → create without inference"
+      "Real author pack → formal plugin install → ordinary New Project form → Host creation without inference"
     )
     await openProject()
     await page.getByRole("button", { name: "开始当前阶段", exact: true }).click()
@@ -486,7 +490,7 @@ async function main() {
       projectId
     )
     await page.screenshot({ path: join(artifacts, "reopened-fixed-version.png") })
-    await page.getByRole("region", { name: "本地项目任务" }).getByRole("link", { name: /使用说明/ }).click()
+    await page.getByRole("link", { name: /使用说明/ }).first().click()
     const docImage = page.getByRole("img", { name: /成果与经验的交付详情/ })
     await docImage.scrollIntoViewIfNeeded()
     await docImage.evaluate((image: HTMLImageElement) => image.decode())
@@ -503,6 +507,7 @@ async function main() {
       JSON.stringify(
         {
           complete: true,
+          execution: selectedLaunch.execution,
           checks,
           isolated,
           workspace,
@@ -512,6 +517,7 @@ async function main() {
           hooks: model.hooks,
           errors,
           limitations: [
+            ...(selectedLaunch.preview ? ["Normal built Electron preview, not an ASAR/package validation"] : []),
             "Loopback deterministic provider, not customer model quality",
             "One ordinary viewport; 45 settled frames do not prove absence of every transient flash",
             "No arbitrary interrupted-stage resume, legacy migration, or external service side effects claimed"

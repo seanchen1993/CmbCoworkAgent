@@ -5,6 +5,7 @@ import AdmZip from "adm-zip"
 import { delimiter, dirname, join, resolve } from "node:path"
 import type { ElectronApplication, Page } from "playwright"
 import type { LocalProjectView } from "../src/shared/project-runtime/platform-api"
+import { openUnifiedHostProject } from "./support/project-unified-native-journey"
 import {
   createHeadlessProjectCompositionLaunch,
   projectCompositionCandidate,
@@ -677,11 +678,7 @@ async function main() {
         await onboarding.click()
         mark("native-existing-project-onboarding-dismissed")
       }
-      const projects = page.getByRole("region", { name: "本地项目任务", exact: true })
-      await projects.waitFor()
-      await projects.getByRole("button", { name: "更新列表", exact: true }).click()
-      await projects.getByRole("button", { name: /^Roundtrip project/ }).click()
-      await page.getByRole("heading", { name: /^Roundtrip project ·/ }).waitFor()
+      await openUnifiedHostProject(page, installedProject.project.name)
       const consent = page.getByRole("region", { name: "本包功能权限", exact: true })
       const approve = consent.getByRole("button", { name: "确认本包灵件权限", exact: true })
       assert(await approve.isDisabled())

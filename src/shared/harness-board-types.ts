@@ -61,6 +61,7 @@ export interface HarnessRequestUserInputConfig {
 
 export type HarnessBoardCompatibilityStatus =
   | "compatible"
+  | "host-runtime"
   | "missing-plugin"
   | "missing-board-config"
   | "invalid-board-config"
@@ -85,6 +86,10 @@ export interface HarnessAdapterSnapshot {
 }
 
 export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
+  /** Discovery only. Host templates use the original project-runtime APIs, never legacy board APIs. */
+  runtimeMode?: "legacy" | "host"
+  /** Installed state, not execution authorization. Omission preserves older registry consumers. */
+  enabled?: boolean
   description: string
   useScenario?: string
   developerName?: string

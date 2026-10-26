@@ -527,8 +527,7 @@ async function main() {
     await page.keyboard.press("Escape")
     if (process.env.COMPOSITION_E2E_DOCS === "1") {
       await page.getByRole("button", { name: "项目列表", exact: true }).first().click()
-      await page.getByRole("region", { name: "本地项目任务", exact: true })
-        .getByRole("link", { name: /使用说明/ }).click()
+      await page.getByRole("link", { name: /使用说明/ }).first().click()
       const documentation = page.getByRole("dialog", { name: "DevClaw Sparks 官方说明" })
       await documentation.waitFor()
       for (const name of ["项目会话标题栏的项目能力入口", "窄屏下的项目能力选择面板"]) {

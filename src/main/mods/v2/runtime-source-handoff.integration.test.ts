@@ -276,6 +276,41 @@ it("retires the actual provider VM before loading exact-consent parent Mods for 
   ).rejects.toThrow("MODS_RUNTIME_SOURCE_CHANGED")
 })
 
+it.each([false, true])(
+  "retires an exact Host Guest using its project grant without a workspace grant (revoked=%s)",
+  async revoked => {
+    const f = await fixture()
+    expect((await withRuntimePluginSource(f.token, () =>
+      f.manager.commands(f.workspace, "stage"))).map(row => row.command)).toEqual(["parent"])
+    expect(f.store.getGrant(f.workspace, "function:parent")).toBeNull()
+    const projectGrant = f.store.getProjectFunctionGrant(
+      f.workspace, "project", "a".repeat(64), "parent")!
+    expect(projectGrant).toMatchObject({ enabled: true, digest: f.facts!.digest })
+    const liveGuests = f.guests.filter(guest => !guest.stats.disposed)
+    expect(liveGuests).toHaveLength(1)
+    const drains = f.drains()
+    // Operation-tail retirement has no ambient source scope. The captured grant must
+    // retain its original project identity rather than fall back to workspace consent.
+    const captured = f.manager.captureIdleThreadRetirement(f.workspace, "stage")
+    expect(captured.resident).toBe(true)
+    if (revoked) {
+      f.store.grantProjectFunction(
+        f.workspace, "project", "a".repeat(64), "parent", f.facts!.digest, false)
+      expect(() => captured.retire()).toThrow("MODS_GRANT_REVOKED")
+      expect(f.drains()).toBe(drains)
+      expect(liveGuests.every(guest => !guest.stats.disposed)).toBe(true)
+    } else {
+      await captured.retire()
+      expect(f.drains()).toBe(drains + 1)
+      expect(liveGuests.every(guest => guest.stats.disposed)).toBe(true)
+      expect(f.manager.runtimeSessions()).toMatchObject({ resident: 0, reserved: 0 })
+      expect(f.store.getProjectFunctionGrant(
+        f.workspace, "project", "a".repeat(64), "parent")).toEqual(projectGrant)
+    }
+    expect(f.store.getGrant(f.workspace, "function:parent")).toBeNull()
+  }
+)
+
 it("retains a traditional-Hook-only Host owner through real live input and ordinary UI callbacks", async () => {
   const f = await fixture(true)
   expect(f.facts).toBeUndefined()

@@ -382,7 +382,7 @@ function ProjectLibraryContents({ view }: { view: LocalProjectView }) {
                 确认发送{selected.status !== "saved" ? "未确认部分" : ""}
               </button>
               {!!view.preview && (
-                <p className="text-xs">试用项目不能向外发送；请先安装模板并新建本地任务。</p>
+                <p className="text-xs">试用项目不能向外发送；请先安装模板并新建项目。</p>
               )}
             </fieldset>
           )}

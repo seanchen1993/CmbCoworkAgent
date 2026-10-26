@@ -128,9 +128,9 @@ function ScopedStartUse({
             {purpose === "dependency"
               ? "完成后请继续本页的模板准备，无需离开此流程。"
               : report.kind === "host-project"
-                ? "此插件通过本地项目任务使用，下一步将直接打开已选好模板的创建表单。"
+                ? "下一步打开“新建项目”，已选好此项目插件。"
                 : report.kind === "plugin-project"
-                  ? "此插件通过项目流程使用，下一步将打开对应插件的项目入口。"
+                  ? "下一步打开“新建项目”，已选好此项目插件。"
                   : "此插件用于聊天，下一步返回当前配置所对应的聊天。"}
           </p>
           {report.issues.length > 0 && (
@@ -165,7 +165,7 @@ function ScopedStartUse({
                 onClick={() => void check(true)}
               >
                 {report.kind === "host-project"
-                  ? "进入本地任务创建"
+                  ? "进入项目创建"
                   : report.kind === "plugin-project"
                     ? "进入项目创建"
                     : "返回原聊天使用上述入口"}

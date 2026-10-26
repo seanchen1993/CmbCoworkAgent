@@ -55,7 +55,9 @@ it("reobserves protocols on every page even when the board config bytes remain c
   expect(first.registry[0].boardCompatibility.compatible).toBe(true)
   expect(first.registryNextCursor).toBe(1)
   fs.writeFileSync(join(f.plugin, "devclaw.project-runtime.json"), f.host)
-  expect(read(first.registryNextCursor!).registry).toEqual([])
+  expect(read(first.registryNextCursor!).registry).toMatchObject([
+    { runtimeMode: "host", boardCompatibility: { compatible: false } }
+  ])
   fs.rmSync(join(f.plugin, "devclaw.project-runtime.json"))
   expect(read(first.registryNextCursor!).registry[0].boardCompatibility.compatible).toBe(true)
 })
@@ -151,7 +153,7 @@ it.each(["host", "unknown"])(
       return opened
     }) as typeof fs.opendirSync)
     const result = readHarnessCatalogPage(f.projects, f.plugins, { includeProjects: false })
-    // A canonical Host is excluded; a platform-level case/identity rejection remains a
+    // A canonical Host uses its own runtime; a platform-level case/identity rejection remains a
     // diagnostic row. Neither may fall back to a compatible runtime-less board package.
     expect(result.registry.every((row) => !row.boardCompatibility.compatible)).toBe(true)
   }
@@ -179,6 +181,9 @@ it("bounds root enumeration and falls back to exact safe reads instead of inferr
   }) as typeof fs.opendirSync)
   expect(
     readHarnessCatalogPage(f.projects, f.plugins, { includeProjects: false }).registry
-  ).toEqual([])
+  ).toMatchObject([
+    { runtimeMode: "host", boardCompatibility: { compatible: false } },
+    { runtimeMode: "host", boardCompatibility: { compatible: false } }
+  ])
   expect(reads).toBe(HOST_PACKAGE_LIMITS.files + HOST_PACKAGE_LIMITS.directories + 1)
 })

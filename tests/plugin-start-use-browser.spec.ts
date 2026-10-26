@@ -168,8 +168,8 @@ async function main() {
     await page.addScriptTag({ content: bundled.outputFiles[0].text })
     const start = page.getByRole("region", { name: "已安装插件开始使用", exact: true })
     const read = () => start.getByRole("button", { name: "开始使用", exact: true }).click()
-    const open = () => start.getByRole("button", { name: "进入本地任务创建", exact: true }).click()
-    const form = page.getByRole("region", { name: "本地项目任务", exact: true })
+    const open = () => start.getByRole("button", { name: "进入项目创建", exact: true }).click()
+    const form = page.getByRole("region", { name: "项目列表", exact: true })
     for (const name of ["installed-disabled-docs", "installed-disabled-warehouse"]) {
       await page.evaluate((name) => {
         const f = (window as unknown as FixtureWindow).fixture
@@ -178,7 +178,7 @@ async function main() {
       }, name)
       await read()
       assert(
-        await start.getByRole("button", { name: "进入本地任务创建", exact: true }).isDisabled()
+        await start.getByRole("button", { name: "进入项目创建", exact: true }).isDisabled()
       )
       assert.equal(
         await page.evaluate(() => (window as unknown as FixtureWindow).fixture.enables.length),
@@ -197,7 +197,7 @@ async function main() {
         0
       )
       await open()
-      await form.getByRole("combobox", { name: "项目模板", exact: true }).waitFor()
+      await form.getByRole("combobox", { name: "项目插件", exact: true }).waitFor()
       assert.equal(
         await page.evaluate(() => (window as unknown as FixtureWindow).fixture.commands.length),
         0
@@ -247,25 +247,25 @@ async function main() {
       await page.evaluate((name) => (window as unknown as FixtureWindow).fixture.reset(name), name)
       await read()
       await open()
-      await form.getByRole("combobox", { name: "项目模板", exact: true }).waitFor()
+      await form.getByRole("combobox", { name: "项目插件", exact: true }).waitFor()
       assert.equal(
-        await form.getByRole("combobox", { name: "项目模板", exact: true }).inputValue(),
+        await form.getByRole("combobox", { name: "项目插件", exact: true }).inputValue(),
         "installed"
       )
       assert.equal(
-        await form.getByRole("combobox", { name: "项目模板", exact: true }).isDisabled(),
+        await form.getByRole("combobox", { name: "项目插件", exact: true }).isDisabled(),
         true
       )
       assert((await form.innerText()).includes(name))
       const before = await page.evaluate(
         () => (window as unknown as FixtureWindow).fixture.create.length
       )
-      await form.getByRole("textbox", { name: "任务名称", exact: true }).fill("我的独立任务")
+      await form.getByRole("textbox", { name: "项目名称", exact: true }).fill("我的独立任务")
       await form
         .getByRole("textbox", { name: "希望完成什么", exact: true })
         .fill("保留原生检查并产生实际产物")
       await form.getByRole("button", { name: "选择工作目录", exact: true }).click()
-      await form.getByRole("button", { name: "创建任务", exact: true }).click()
+      await form.getByRole("button", { name: "创建项目", exact: true }).click()
       await page.waitForFunction(
         (before) => (window as unknown as FixtureWindow).fixture.create.length === before + 1,
         before
@@ -302,15 +302,15 @@ async function main() {
     )
 
     await open()
-    await form.getByRole("combobox", { name: "项目模板", exact: true }).waitFor()
-    await form.getByRole("textbox", { name: "任务名称", exact: true }).fill("过期插件不能创建")
+    await form.getByRole("combobox", { name: "项目插件", exact: true }).waitFor()
+    await form.getByRole("textbox", { name: "项目名称", exact: true }).fill("过期插件不能创建")
     await form.getByRole("textbox", { name: "希望完成什么", exact: true }).fill("测试变更拒绝")
     await form.getByRole("button", { name: "选择工作目录", exact: true }).click()
     const previous = await page.evaluate(
       () => (window as unknown as FixtureWindow).fixture.create.length
     )
     await page.evaluate(() => (window as unknown as FixtureWindow).fixture.fail())
-    await form.getByRole("button", { name: "创建任务", exact: true }).click()
+    await form.getByRole("button", { name: "创建项目", exact: true }).click()
     await form.getByRole("alert").waitFor()
     assert.equal(
       await page.evaluate(() => (window as unknown as FixtureWindow).fixture.create.length),
@@ -325,7 +325,7 @@ async function main() {
       ;(window as unknown as FixtureWindow).fixture.changeAccount()
       ;(window as unknown as FixtureWindow).fixture.release()
     })
-    assert.equal(await page.getByRole("region", { name: "本地项目任务", exact: true }).count(), 0)
+    assert.equal(await page.getByRole("region", { name: "项目列表", exact: true }).count(), 0)
     assert.equal(
       await page.evaluate(() => (window as unknown as FixtureWindow).fixture.create.length),
       previous

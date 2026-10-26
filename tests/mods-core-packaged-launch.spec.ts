@@ -1,9 +1,11 @@
 /** Launch selection only; real package/ASAR identity and business flows are tested in Electron. */
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { modsCoreLaunchOptions } from "./support/mods-core-packaged-launch"
+import { projectBuiltPreview } from "./support/project-built-preview"
 
 const fixture = mkdtempSync(join(tmpdir(), "cmb-mods-core-launch-test-"))
 const isolated = join(fixture, "profile")
@@ -85,7 +87,25 @@ try {
   assert.throws(() => modsCoreLaunchOptions(fixture, isolated, env, resourcesLink), /FILE_INVALID/)
   pass("Package and resources directory links are rejected")
 
-  assert.equal(checks.length, 8)
+  const entry = join(fixture, "out/main/index.js")
+  mkdirSync(dirname(entry), { recursive: true })
+  writeFileSync(entry, "reviewed-build-fixture")
+  const expected = createHash("sha256").update("reviewed-build-fixture").digest("hex")
+  assert.throws(() => projectBuiltPreview(fixture, undefined, {}), /PACKAGE_OR_PREVIEW_REQUIRED/)
+  assert.throws(() => projectBuiltPreview(fixture, undefined,
+    { CMB_PROJECT_BUILT_PREVIEW: "1" }), /MAIN_SHA_REQUIRED/)
+  const previewEnv = { CMB_PROJECT_BUILT_PREVIEW: "1", CMB_PROJECT_EXPECTED_MAIN_SHA256: expected }
+  for (const selectedPackage of [directory, "", join(fixture, "missing")])
+    assert.throws(() => projectBuiltPreview(fixture, selectedPackage, previewEnv), /MODES_CONFLICT/)
+  const preview = projectBuiltPreview(fixture, undefined, previewEnv)
+  assert.equal(preview.execution, "normal-built-Electron")
+  preview.assertCurrent()
+  writeFileSync(entry, "unreviewed-build")
+  assert.throws(() => preview.assertCurrent(), /MAIN_CHANGED/)
+  assert.equal(projectBuiltPreview(fixture, directory, {}).execution, "packaged-asar")
+  pass("Project preview is explicit, digest pinned, and cannot override an explicit package")
+
+  assert.equal(checks.length, 9)
 } finally {
   // Only remove the mkdtemp tree created by this test, including links to its own fixtures.
   assert.equal(dirname(resolve(fixture)), resolve(tmpdir()))

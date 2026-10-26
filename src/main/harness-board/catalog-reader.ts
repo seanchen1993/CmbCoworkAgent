@@ -17,7 +17,7 @@ import {
   runtimeRelativePath
 } from "./project-runtime/safe-files"
 import { HOST_PACKAGE_LIMITS } from "./project-runtime/package-snapshots"
-import { EXTENSION_BOARD_API_VERSION } from "../../shared/project-runtime"
+import { EXTENSION_BOARD_API_VERSION, parseProjectRuntimeManifest } from "../../shared/project-runtime"
 import type {
   HarnessAdapterRegistryItem,
   HarnessBoardCatalogPageInput,
@@ -335,6 +335,7 @@ interface BoardConfigSnapshot {
 type BoardConfigReader = (path: string) => BoardConfigSnapshot
 interface CatalogPackageObservation {
   semantics: AutobizPackageSemantics
+  runtimeMode: "legacy" | "host"
   assertCurrent(): void
 }
 
@@ -383,8 +384,14 @@ function observeCatalogPackage(root: string, boardPresent: boolean): CatalogPack
   // The catalog's existing presence filter selects candidates only. It grants no source
   // authority; an actual projected board is safely probed before any content/cache use.
   const semantics = readAutobizPackageSemantics(read, boardPresent)
+  // The existing Host create API reads this fixed root declaration. Do not route an
+  // unassembled catalog or an unrelated capability entry to a different create API.
+  const runtimeBytes = read("devclaw.project-runtime.json", 65_536)
+  const runtimeMode = runtimeBytes
+    ? parseProjectRuntimeManifest(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(runtimeBytes))).mode
+    : "legacy"
   assertCurrent()
-  return { semantics, assertCurrent }
+  return { semantics, runtimeMode, assertCurrent }
 }
 
 function setConfigCache(path: string, signature: string, value: BoardConfigSnapshot): void {
@@ -1144,11 +1151,17 @@ function toProjectListItem(
 
 function toRegistryItem(
   plugin: PluginMetadata,
-  readConfig: BoardConfigReader = readBoardConfig
+  readConfig: BoardConfigReader = readBoardConfig,
+  runtimeMode: "legacy" | "host" = "legacy"
 ): HarnessAdapterRegistryItem {
-  const boardCompatibility = compatibility(plugin, plugin.name, readConfig)
-  const config = readConfig(plugin.path)
-  const commands = isRecord(config.value?.inspectCommands)
+  const boardCompatibility: HarnessBoardCompatibility = runtimeMode === "host"
+    ? { status: "host-runtime", compatible: false, appApiVersion: APP_BOARD_API_VERSION,
+      label: "原生项目模板", message: "使用原生项目运行时创建和管理；不使用旧版看板协议。" }
+    : compatibility(plugin, plugin.name, readConfig)
+  // A Host may contain ordinary board-named data. Discovery must never execute or
+  // advertise its legacy commands, even when those bytes resemble a board config.
+  const config = runtimeMode === "host" ? undefined : readConfig(plugin.path)
+  const commands = isRecord(config?.value?.inspectCommands)
     ? config.value?.inspectCommands[process.platform]
     : null
   return {
@@ -1156,6 +1169,8 @@ function toRegistryItem(
     name: text(plugin.name, 1_024),
     version: text(plugin.version, 256),
     type: "plugin",
+    runtimeMode,
+    enabled: plugin.enabled === true,
     description: text(plugin.description, MAX_REGISTRY_TEXT),
     ...(text(plugin.useScenario, 512) ? { useScenario: text(plugin.useScenario, 512) } : {}),
     pullKnowledgeAvailable: isRecord(commands) && Boolean(text(commands.pull_knowledge).trim()),
@@ -1185,14 +1200,15 @@ export function readHarnessCatalogPage(
   const observationErrors = new Map<string, string>()
   const pageConfigs = new Map<string, BoardConfigSnapshot>()
   const plugins = readPlugins(pluginStorePath).filter((plugin) => {
-    if (!existsSync(join(plugin.path, BOARD_CONFIG_REL_PATH))) return false
+    const boardPresent = existsSync(join(plugin.path, BOARD_CONFIG_REL_PATH))
+    if (!boardPresent && !existsSync(join(plugin.path, "devclaw.project-runtime.json"))) return false
     const cached = observations.get(plugin.path)
-    if (cached) return cached.semantics.legacyProject
+    if (cached) return cached.runtimeMode === "host" || (boardPresent && cached.semantics.legacyProject)
     if (observationErrors.has(plugin.path)) return true
     try {
-      const observed = observeCatalogPackage(plugin.path, true)
+      const observed = observeCatalogPackage(plugin.path, boardPresent)
       observations.set(plugin.path, observed)
-      return observed.semantics.legacyProject
+      return observed.runtimeMode === "host" || (boardPresent && observed.semantics.legacyProject)
     } catch (error) {
       // Keep a diagnostic row; readBoardConfig records the classification failure before
       // reading board bytes. A malformed declared protocol must not appear compatible.
@@ -1212,8 +1228,11 @@ export function readHarnessCatalogPage(
     pageConfigs.set(path, config)
     return config
   }
-  const pluginById = new Map(plugins.map((plugin) => [plugin.id, plugin]))
-  const pluginByName = new Map(plugins.map((plugin) => [plugin.name, plugin]))
+  // Existing legacy projects keep their original protocol boundary. Discovering a Host
+  // template does not make an old project bound to the same id/name board-compatible.
+  const legacyPlugins = plugins.filter((plugin) => observations.get(plugin.path)?.runtimeMode !== "host")
+  const pluginById = new Map(legacyPlugins.map((plugin) => [plugin.id, plugin]))
+  const pluginByName = new Map(legacyPlugins.map((plugin) => [plugin.name, plugin]))
   const query = text(input.query).trim().toLocaleLowerCase()
   const projectId = text(input.projectId, 512).trim()
   const projectIds = new Set(
@@ -1279,7 +1298,8 @@ export function readHarnessCatalogPage(
       index += 1
     ) {
       if ((index & 15) === 0 && isCancelled(cancelFlag)) break
-      const projected = toRegistryItem(boardPlugins[index], readConfig)
+      const plugin = boardPlugins[index]
+      const projected = toRegistryItem(plugin, readConfig, observations.get(plugin.path)?.runtimeMode)
       const candidate = { projects, registry: [...registry, projected] }
       if (Buffer.byteLength(JSON.stringify(candidate), "utf8") > maxResponseBytes) break
       registry.push(projected)

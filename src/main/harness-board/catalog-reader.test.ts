@@ -126,7 +126,7 @@ describe("Harness catalog reader", () => {
     expect(result.registry[0].version).toBe("2.0.0")
     expect(readFileSync(paths.projects, "utf8")).toBe(storedBefore)
   })
-  it("excludes a native Host package with same-named ordinary board data from the legacy registry", async () => {
+  it("discovers a native Host template without making same-named board data legacy-compatible", async () => {
     const paths = await makeCatalog(1)
     const plugin = JSON.parse(readFileSync(paths.plugins, "utf8"))[0]
     const source = createProjectTemplate({ packageId: "host-only", name: "Host" })
@@ -134,9 +134,73 @@ describe("Harness catalog reader", () => {
       source.files.find((file) => file.path === "devclaw.project-runtime.json")!.text)
     writeFileSync(join(plugin.path, "board_core/board_config.json"), "ordinary text")
     const result = readHarnessCatalogPage(paths.projects, paths.plugins, { registryLimit: 1 })
-    expect(result.registry).toEqual([])
-    expect(result.summary.totalRegistry).toBe(0)
+    expect(result.registry).toMatchObject([{ id: plugin.id, runtimeMode: "host", enabled: true,
+      pullKnowledgeAvailable: false, boardCompatibility: { status: "host-runtime", compatible: false } }])
+    expect(result.summary.totalRegistry).toBe(1)
     expect(result.projects[0].boardCompatibility.compatible).toBe(false)
+  })
+
+  it("lists Host templates without board resources and keeps disabled installation state explicit", async () => {
+    const paths = await makeCatalog(2)
+    const plugins = JSON.parse(readFileSync(paths.plugins, "utf8"))
+    const source = createProjectTemplate({ packageId: "host-only", name: "Host" })
+    writeFileSync(join(plugins[0].path, "devclaw.project-runtime.json"),
+      source.files.find((file) => file.path === "devclaw.project-runtime.json")!.text)
+    rmSync(join(plugins[0].path, "board_core/board_config.json"))
+    plugins[1].name = plugins[0].name
+    plugins[1].enabled = false
+    writeFileSync(paths.plugins, JSON.stringify(plugins))
+    const before = readFileSync(paths.projects, "utf8")
+    const first = readHarnessCatalogPage(paths.projects, paths.plugins, { registryLimit: 1 })
+    const second = readHarnessCatalogPage(paths.projects, paths.plugins, {
+      includeProjects: false, registryLimit: 1, registryCursor: first.registryNextCursor!
+    })
+    expect(first.registry).toMatchObject([{ id: "adapter-0", runtimeMode: "host", enabled: true }])
+    expect(second.registry).toMatchObject([{ id: "adapter-1", runtimeMode: "host", enabled: false }])
+    expect(second.registry[0].name).toBe(first.registry[0].name)
+    expect(second.registry[0].version).toBe(first.registry[0].version)
+    expect(second.registryNextCursor).toBeNull()
+    expect(first.summary.totalRegistry).toBe(2)
+    expect(first.projects.every((row) => !row.boardCompatibility.compatible)).toBe(true)
+    expect(readFileSync(paths.projects, "utf8")).toBe(before)
+  })
+
+  it("keeps malformed Host declarations diagnostic and never falls back to board compatibility", async () => {
+    const paths = await makeCatalog(1)
+    const plugin = JSON.parse(readFileSync(paths.plugins, "utf8"))[0]
+    const file = join(plugin.path, "devclaw.project-runtime.json")
+    for (const value of ["{", JSON.stringify({ apiVersion: "devclaw.project-runtime/v999" })]) {
+      writeFileSync(file, value)
+      const result = readHarnessCatalogPage(paths.projects, paths.plugins, {})
+      expect(result.registry).toHaveLength(1)
+      expect(result.registry[0].runtimeMode).not.toBe("host")
+      expect(result.registry[0].boardCompatibility).toMatchObject({ compatible: false, status: "invalid-board-config" })
+      expect(result.projects[0].boardCompatibility.compatible).toBe(false)
+    }
+  })
+
+  it("preserves legacy project binding and bounded Host registry pages with colliding names", async () => {
+    const paths = await makeCatalog(2)
+    const plugins = JSON.parse(readFileSync(paths.plugins, "utf8"))
+    const hostRoot = join(plugins[0].path, "..", "host")
+    mkdirSync(hostRoot)
+    const source = createProjectTemplate({ packageId: "host-only", name: "Host" })
+    writeFileSync(join(hostRoot, "devclaw.project-runtime.json"),
+      source.files.find((file) => file.path === "devclaw.project-runtime.json")!.text)
+    plugins[1] = { ...plugins[1], name: plugins[0].name, path: hostRoot }
+    const hostRows = Array.from({ length: 20 }, (_, index) => ({ ...plugins[1], id: `host-${index}` }))
+    writeFileSync(paths.plugins, JSON.stringify([plugins[0], ...hostRows]))
+    const result = readHarnessCatalogPage(paths.projects, paths.plugins, { registryLimit: 64 }, 16000)
+    expect(result.projects[0].harnessAdapter.id).toBe("adapter-0")
+    expect(result.projects[0].boardCompatibility.compatible).toBe(true)
+    expect(result.registry[0]).toMatchObject({ id: "adapter-0", runtimeMode: "legacy", boardCompatibility: { compatible: true } })
+    expect(result.registry.slice(1).every((row) => row.runtimeMode === "host" && !row.boardCompatibility.compatible)).toBe(true)
+    expect(result.registryNextCursor).not.toBeNull()
+    expect(Buffer.byteLength(JSON.stringify({ projects: result.projects, registry: result.registry }), "utf8")).toBeLessThanOrEqual(16000)
+    const next = readHarnessCatalogPage(paths.projects, paths.plugins, {
+      includeProjects: false, registryCursor: result.registryNextCursor!, registryLimit: 64
+    })
+    expect(new Set([...result.registry, ...next.registry].map((row) => row.id)).size).toBe(21)
   })
 
   it("rejects changed extension requirements at the original board entry even when board bytes are cached", async () => {

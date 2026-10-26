@@ -4,12 +4,14 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import AdmZip from "adm-zip"
 import type { ElectronApplication, Page } from "playwright"
 import { parseProjectRuntimeManifest } from "../src/shared/project-runtime"
 import type { ModWorkspaceStatus } from "../src/shared/mods/types"
+import { projectBuiltPreview } from "./support/project-built-preview"
+import { createUnifiedHostProject, openUnifiedHostProject } from "./support/project-unified-native-journey"
 import {
   createHeadlessProjectCompositionLaunch,
   projectCompositionCandidate,
@@ -85,9 +87,9 @@ function sourceIdentity() {
     )
   )
 }
-assert(process.env.COMPOSITION_E2E_PACKAGED_DIR?.trim(), "Real packaged ASAR required; no fallback")
+const selectedLaunch = projectBuiltPreview(root, process.env.COMPOSITION_E2E_PACKAGED_DIR)
 const candidate = projectCompositionCandidate(root)
-assert.equal(candidate.execution, "packaged-asar")
+assert.equal(candidate.execution, selectedLaunch.preview ? "built-output" : "packaged-asar")
 assert.match(process.env.CREATOR_E2E_EXPECTED_SHA256 ?? "", /^[a-f0-9]{64}$/)
 assert.equal(candidate.sha256, process.env.CREATOR_E2E_EXPECTED_SHA256)
 assert.match(process.env.CREATOR_E2E_EXPECTED_SOURCE_SHA256 ?? "", /^[a-f0-9]{64}$/)
@@ -100,14 +102,16 @@ assert.equal(
 const fixture = projectCompositionEnvironment(root)
 const model = creatorProjectDeliveryModel()
 const evidence: Record<string, unknown> = {
+  execution: selectedLaunch.execution,
   candidate,
   sourceSha256,
   isolated: fixture.isolated,
   modelCapacity: { contextTokens: 64000, outputTokens: 4096, inputBudgetTokens: 58904,
     alignedWith: "tests/mods-creator-business-e2e.spec.ts" },
   limits: [
-    "Actual public packaged native tools and approval IPC; deterministic loopback is not external model quality.",
-    "The native file picker receives only three bounded fixture responses; no production API bypass.",
+    "Actual public native tools and approval IPC; deterministic loopback is not external model quality.",
+    ...(selectedLaunch.preview ? ["Normal built Electron preview, not an ASAR/package validation."] : []),
+    "Native export/directory pickers receive bounded fixture responses; project creation uses the public form.",
     "Doctor/contract/pack success validates this declared technical contract; business stages are not executed or claimed passed.",
     "Source authority is observed through native mods.status effective ready sources, not private stored grant records.",
     "No S6 debugger, rollback, inherited source authorization or automatic plugin update is claimed."
@@ -141,9 +145,11 @@ async function main() {
   assert(address && typeof address !== "string")
   const watchdog = setTimeout(() => void app?.close(), 300000)
   try {
+    selectedLaunch.assertCurrent()
     app = await createHeadlessProjectCompositionLaunch(root, fixture, {
       unobtrusivePresentation: true
     })()
+    evidence.application = await selectedLaunch.verify(app, fixture.isolated)
     const processHandle = app.process()
     processHandle.stdout?.on("data", (bytes) =>
       appendFileSync(join(fixture.isolated, "main.stdout.log"), bytes)
@@ -284,6 +290,8 @@ async function main() {
       false
     )
     const confirm = { ...scope, deliveryId: delivery.id, digest: delivery.digest }
+    const wrongWorkspace = `${scope.expectedWorkspace}-wrong`
+    mkdirSync(wrongWorkspace)
     const crossScope = await page.evaluate(
       async (input) => {
         try {
@@ -293,7 +301,7 @@ async function main() {
           return String(error)
         }
       },
-      { ...confirm, expectedWorkspace: `${scope.expectedWorkspace}-wrong` }
+      { ...confirm, expectedWorkspace: wrongWorkspace }
     )
     assert.match(crossScope, /PROJECT_DELIVERY_REVIEW_REQUIRED|DEVELOPMENT_SCOPE_CHANGED/)
     const installed = await page.evaluate(
@@ -315,6 +323,7 @@ async function main() {
     const outputRuntime = parseProjectRuntimeManifest(
       JSON.parse(readFileSync(join(output.path, "devclaw.project-runtime.json"), "utf8"))
     )
+    assert.equal(outputRuntime.mode, "host")
     assert.equal(outputManifest.name, name)
     assert.equal(outputManifest.version, version)
     assert.equal(outputRuntime.plugin.id, name)
@@ -401,6 +410,53 @@ async function main() {
       assert.equal(readFileSync(join(original.path, file.path), "utf8"), file.text)
     assert(!existsSync(join(original.path, "devclaw.project-runtime.json")))
     assert(!existsSync(join(original.path, "tests/project-contract.json")))
+    const startUseInput = {
+      threadId: scope.threadId,
+      expectedWorkspace: scope.expectedWorkspace,
+      pluginId: output.id,
+      expected: { name: output.name, version: output.version }
+    }
+    const startUse = await page.evaluate(
+      (input) => window.api.plugins.prepareStartUse(input), startUseInput
+    )
+    assert.equal(startUse.activationRequired, true, "Creator delivery must require explicit enablement")
+    assert.equal(startUse.canOpen, false)
+    const enabled = await page.evaluate(
+      (input) => window.api.plugins.enableStartUse(input),
+      { ...startUseInput, expected: {
+        name: output.name, version: output.version, digest: startUse.identity.digest
+      } }
+    )
+    assert.equal(enabled.activationRequired, undefined)
+    assert.equal(enabled.canOpen, true)
+    assert.equal(enabled.identity.digest, startUse.identity.digest)
+    assert.deepEqual(
+      effectiveSourceAuthorization(await page.evaluate((id) => window.api.mods.status(id), scope.threadId)),
+      authorizationBefore,
+      "Explicit catalog enablement must not grant executable source authority"
+    )
+    evidence.activation = { before: startUse.activationRequired, after: enabled.activationRequired,
+      canOpen: enabled.canOpen, identity: enabled.identity }
+    const projectWorkspace = join(fixture.isolated, "installed-project-workspace")
+    mkdirSync(projectWorkspace)
+    const modelRequestsBeforeCreate = model.requests.length
+    const created = await createUnifiedHostProject(app, page, {
+      name: "Creator installed ordinary project",
+      workspace: projectWorkspace,
+      installedPluginId: output.id,
+      pluginName: output.name,
+      version: output.version,
+      goal: "Verify ordinary project creation from the installed Host package; do not run a stage."
+    })
+    assert.deepEqual(created.project.manifest.stages, outputRuntime.stages)
+    assert.equal(model.requests.length, modelRequestsBeforeCreate)
+    await page.reload()
+    await openUnifiedHostProject(page, created.project.name)
+    const reopened = await page.evaluate(id => window.api.harnessBoard.localProjects.get(id),
+      created.project.projectId)
+    assert.deepEqual(reopened, created)
+    assert.equal(model.requests.length, modelRequestsBeforeCreate)
+    evidence.ordinaryProject = { created, reopened, stagesExecuted: false }
     assert.deepEqual(rendererErrors, [])
     assert.deepEqual(model.errors, [])
     assert.equal(
@@ -435,6 +491,11 @@ async function main() {
     passed = true
   } catch (error) {
     evidence.error = String(error)
+    if (page && !page.isClosed()) {
+      await page.screenshot({ path: join(fixture.isolated, "failure.png") }).catch(() => {})
+      const snapshot = await page.locator("body").ariaSnapshot().catch(() => "unavailable")
+      writeFileSync(join(fixture.isolated, "failure-ui.txt"), snapshot)
+    }
     throw error
   } finally {
     clearTimeout(watchdog)
@@ -443,7 +504,7 @@ async function main() {
     await new Promise<void>((done) => model.server.close(() => done()))
     save()
   }
-  console.log(`PASS packaged native Creator project delivery: ${fixture.isolated}`)
+  console.log(`PASS ${selectedLaunch.execution} native Creator project delivery: ${fixture.isolated}`)
 }
 void main().catch((error) => {
   console.error(error)

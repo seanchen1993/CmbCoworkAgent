@@ -14,7 +14,6 @@ import {
 } from "react"
 import { ApplicationUsageGuide } from "@/components/guides/ApplicationUsageGuide"
 import { PageEntryGuide } from "@/components/guides/PageEntryGuide"
-import projectModeGuideImage from "@/assets/guides/feature-create-guide-v5.png"
 import {
   Sparkles,
   Briefcase,
@@ -1527,12 +1526,23 @@ function App(): React.JSX.Element {
                     <PageEntryGuide
                       active={!showCustomizeView}
                       guideId="project-mode-getting-started"
-                      revision={1}
+                      revision={2}
                       maxShowCount={3}
                       title="项目模式使用引导"
-                      imageSrc={projectModeGuideImage}
-                      imageAlt="项目模式操作引导：配置发布单元与仓库、创建特性时选择发布单元、配置会话工作区"
-                    />
+                    >
+                      <div className="space-y-4 px-2 pb-4 text-sm">
+                        <h2 className="text-lg font-semibold">选择插件，开始项目任务</h2>
+                        <ol className="list-decimal space-y-3 pl-5">
+                          <li>点击“新建项目”，选择已安装并启用的项目插件。</li>
+                          <li>填写项目名称、任务目标和工作目录，按插件要求补齐配置。</li>
+                          <li>创建后核对阶段与权限，点击“开始当前阶段”执行任务。</li>
+                          <li>在项目中查看会话、产物和检查结果，通过检查并确认后继续下一阶段。</li>
+                        </ol>
+                        <p className="text-muted-foreground">
+                          创造者安装的新项目插件也从这里使用。已有项目可从项目列表重新打开；兼容插件继续保留其原有的项目和发布单元配置。
+                        </p>
+                      </div>
+                    </PageEntryGuide>
                   </Suspense>
                 </main>
                 {isHarnessAgentFocusActive && (
