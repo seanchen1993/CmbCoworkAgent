@@ -3038,6 +3038,11 @@ interface CustomAPI {
     syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
     getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
     cancelKnowledgePreviewRequests: () => Promise<void>
+    selectProjectDirectory: () => Promise<{
+      workspacePath: string
+      projectDir: string
+      validationError: string | null
+    } | null>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput

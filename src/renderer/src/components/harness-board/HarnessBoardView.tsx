@@ -648,10 +648,6 @@ function sanitizeHarnessNameInput(value: string): string {
   return value.replace(/\s+/g, "")
 }
 
-function sanitizeProjectDirFromProjectName(value: string): string {
-  return value.replace(/[^\u4e00-\u9fffA-Za-z0-9_-]/gu, "")
-}
-
 function readThreadHarnessFeature(thread: Thread): HarnessFeatureThreadMetadata | null {
   const harnessFeature = thread.metadata?.harnessFeature
   if (!harnessFeature || typeof harnessFeature !== "object") return null
@@ -2854,6 +2850,8 @@ function DeployUnitSearchInput({
 function ProjectFormDialog({
   open,
   creating,
+  workspaceValidating,
+  workspaceError,
   form,
   registry,
   installingPluginNames,
@@ -2867,6 +2865,8 @@ function ProjectFormDialog({
 }: {
   open: boolean
   creating: boolean
+  workspaceValidating: boolean
+  workspaceError: string | null
   form: HarnessProjectCreateInput
   registry: ProjectModeAdapterItem[]
   installingPluginNames: Set<string>
@@ -2879,13 +2879,10 @@ function ProjectFormDialog({
   onSubmit: () => void
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
-  const projectDirEditedRef = useRef(false)
-  useEffect(() => {
-    if (!open) projectDirEditedRef.current = false
-  }, [open])
   const projectDirError =
     getHarnessNameError("项目文件夹", form.projectDir) ??
-    getTextLengthError("项目文件夹", form.projectDir, PROJECT_DIR_MAX_CHARS)
+    getTextLengthError("项目文件夹", form.projectDir, PROJECT_DIR_MAX_CHARS) ??
+    workspaceError
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
   const projectNameLengthError = getTextLengthError("项目名称", form.name, PROJECT_NAME_MAX_CHARS)
   const projectCodeLengthError = getTextLengthError(
@@ -2941,10 +2938,7 @@ function ProjectFormDialog({
                         name: project.projectName,
                         projectCode: project.projectCode,
                         systemId: project.systemId || form.systemId,
-                        systemName: project.systemName || form.systemName,
-                        projectDir: !projectDirEditedRef.current
-                          ? sanitizeProjectDirFromProjectName(project.projectName)
-                          : form.projectDir
+                        systemName: project.systemName || form.systemName
                       })
                     }}
                     portalContainer={dialogPortalContainer}
@@ -2963,10 +2957,7 @@ function ProjectFormDialog({
                     onValueChange={(name) => {
                       onChange({
                         ...form,
-                        name,
-                        projectDir: !projectDirEditedRef.current
-                          ? sanitizeProjectDirFromProjectName(name)
-                          : form.projectDir
+                        name
                       })
                     }}
                     onSelect={(project) => {
@@ -2975,10 +2966,7 @@ function ProjectFormDialog({
                         name: project.projectName,
                         projectCode: project.projectCode,
                         systemId: project.systemId || form.systemId,
-                        systemName: project.systemName || form.systemName,
-                        projectDir: !projectDirEditedRef.current
-                          ? sanitizeProjectDirFromProjectName(project.projectName)
-                          : form.projectDir
+                        systemName: project.systemName || form.systemName
                       })
                     }}
                     portalContainer={dialogPortalContainer}
@@ -3043,18 +3031,9 @@ function ProjectFormDialog({
                 workspacePath={form.workspacePath}
                 projectDir={form.projectDir}
                 error={projectDirError}
+                disabled={creating || workspaceValidating}
                 onPickWorkspace={onPickWorkspace}
-                onProjectDirChange={(value) => {
-                  const projectDir = sanitizeHarnessNameInput(value)
-                  projectDirEditedRef.current = Boolean(projectDir.trim())
-                  onChange({ ...form, projectDir })
-                }}
               />
-              {form.workspacePath.trim() && form.projectDir.trim() && (
-                <p className="mt-1.5 break-all text-xs leading-relaxed text-muted-foreground">
-                  将在 {resolveProjectRootPath(form)} 路径下创建本项目的插件工作目录。
-                </p>
-              )}
             </section>
 
             {error && (
@@ -3065,13 +3044,19 @@ function ProjectFormDialog({
           </div>
         </div>
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={creating}>
+          <Button
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+            disabled={creating || workspaceValidating}
+          >
             取消
           </Button>
           <Button
             onClick={onSubmit}
             disabled={
               creating ||
+              workspaceValidating ||
+              Boolean(workspaceError) ||
               verification.pending ||
               metadataRequiredMissing(form) ||
               metadataNameInvalid(form) ||
@@ -8464,6 +8449,8 @@ export function HarnessBoardView({
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<HarnessProjectCreateInput>(() => createEmptyProjectForm())
   const [formError, setFormError] = useState<string | null>(null)
+  const [workspaceValidating, setWorkspaceValidating] = useState(false)
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null)
   const [editingProject, setEditingProject] = useState<HarnessProjectListItem | null>(null)
   const [editForm, setEditForm] = useState<HarnessProjectMetadataUpdateInput>(() =>
     createEmptyProjectMetadataForm()
@@ -9944,11 +9931,13 @@ export function HarnessBoardView({
   const resetCreateForm = useCallback(() => {
     setForm(createEmptyProjectForm())
     setFormError(null)
+    setWorkspaceError(null)
   }, [])
 
   const openCreateDialog = useCallback(() => {
     setForm(createEmptyProjectForm())
     setFormError(null)
+    setWorkspaceError(null)
     openProjectDialogAdapterSession()
     setDialogOpen(true)
   }, [openProjectDialogAdapterSession])
@@ -9959,24 +9948,42 @@ export function HarnessBoardView({
         openCreateDialog()
         return
       }
-      if (!creating) {
+      if (!creating && !workspaceValidating) {
         setDialogOpen(false)
         closeProjectDialogAdapterSession()
         resetCreateForm()
       }
     },
-    [closeProjectDialogAdapterSession, creating, openCreateDialog, resetCreateForm]
+    [
+      closeProjectDialogAdapterSession,
+      creating,
+      workspaceValidating,
+      openCreateDialog,
+      resetCreateForm
+    ]
   )
 
   const handlePickWorkspace = async (): Promise<void> => {
-    const workspacePath = await window.api.workspace.select()
-    if (workspacePath) {
-      setForm((current) => ({ ...current, workspacePath }))
+    if (creating || workspaceValidating) return
+    setWorkspaceValidating(true)
+    try {
+      const selected = await window.api.harnessBoard.selectProjectDirectory()
+      if (selected) {
+        const { workspacePath, projectDir, validationError } = selected
+        setForm((current) => ({ ...current, workspacePath, projectDir }))
+        setWorkspaceError(validationError)
+        setFormError(null)
+      }
+    } catch (error) {
+      setWorkspaceError(cleanIpcError(error))
+    } finally {
+      setWorkspaceValidating(false)
     }
   }
 
   const handleSubmit = async (): Promise<void> => {
-    if (creating || createProjectVerification.pending) return
+    if (creating || createProjectVerification.pending || workspaceValidating || workspaceError)
+      return
     setFormError(null)
     if (metadataRequiredMissing(form)) {
       setFormError("所有字段均为必填")
@@ -12228,6 +12235,8 @@ export function HarnessBoardView({
       <ProjectFormDialog
         open={dialogOpen}
         creating={creating}
+        workspaceValidating={workspaceValidating}
+        workspaceError={workspaceError}
         form={form}
         registry={projectDialogAdapterRegistry}
         installingPluginNames={updatingPluginNames}
