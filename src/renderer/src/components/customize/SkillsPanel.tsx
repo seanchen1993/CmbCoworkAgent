@@ -3042,11 +3042,13 @@ function SkillItem(props: {
               市场
             </Badge>
           )}
-          <SkillMarketUpdate
-            skill={skill}
-            marketVersion={marketInfo?.version}
-            hasMarketEntry={hasMarketEntry}
-          />
+          {!isFeatured && (
+            <SkillMarketUpdate
+              skill={skill}
+              marketVersion={marketInfo?.version}
+              hasMarketEntry={hasMarketEntry}
+            />
+          )}
           {isEdited && (
             <Badge
               variant="outline"
@@ -3358,11 +3360,13 @@ export function SkillDetail(props: {
                     市场
                   </Badge>
                 )}
-                <SkillMarketUpdate
-                  skill={skill}
-                  marketVersion={marketInfo?.version}
-                  hasMarketEntry={hasMarketEntry}
-                />
+                {!isFeatured && (
+                  <SkillMarketUpdate
+                    skill={skill}
+                    marketVersion={marketInfo?.version}
+                    hasMarketEntry={hasMarketEntry}
+                  />
+                )}
                 {isEdited && (
                   <Badge
                     variant="outline"
@@ -3401,7 +3405,7 @@ export function SkillDetail(props: {
             </div>
             {!hideActions && (
               <div className="flex items-center gap-1.5 shrink-0">
-                {canUpdateMarket && (
+                {canUpdateMarket && !isFeatured && (
                   <SkillMarketUpdate
                     variant="button"
                     skill={skill}
