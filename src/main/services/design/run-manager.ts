@@ -731,8 +731,9 @@ export class DesignRunManager {
 
   setWorkspace(id: string, path: string): DesignSessionSnapshot {
     const next = this.get(id)
-    if (next.activeRunId) throw new Error("设计运行中无法切换工作目录，请先停止任务")
     if (!path.trim()) throw new Error("工作目录不能为空")
+    if (next.workspacePath === path) return next
+    if (next.activeRunId) throw new Error("设计运行中无法切换工作目录，请先停止任务")
     next.workspacePath = path
     return this.commit(next, [{ type: "edited", fields: ["workspacePath"] }])
   }

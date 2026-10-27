@@ -65,6 +65,7 @@ import { ResourcePanelOverlay } from "@/components/panels/ResourcePanelOverlay"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { DEFAULT_BROWSER_CDP_CONFIG, useAppStore } from "@/lib/store"
+import { REQUIREMENT_DESIGN_NAVIGATE_EVENT } from "@/lib/requirement-design-entry"
 import { useGitChangeNoticeListener } from "@/components/git/GitChangeNotice"
 import { ThreadProvider } from "@/lib/thread-context"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
@@ -387,6 +388,15 @@ function App(): React.JSX.Element {
   const selectRequirementHistory = useCallback(() => {
     setActiveModeTab("requirements")
     setMainView("design")
+  }, [setMainView])
+
+  useEffect(() => {
+    const navigateToDesign = (): void => {
+      setActiveModeTab("design")
+      setMainView("design")
+    }
+    window.addEventListener(REQUIREMENT_DESIGN_NAVIGATE_EVENT, navigateToDesign)
+    return () => window.removeEventListener(REQUIREMENT_DESIGN_NAVIGATE_EVENT, navigateToDesign)
   }, [setMainView])
 
   // Keep the route consumed by the expensive center/right surfaces atomic. A

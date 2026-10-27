@@ -414,8 +414,12 @@ describe("background design conversations", () => {
   it("keeps workspace changes separate from an active run's captured configuration", async () => {
     const h = harness()
     h.create()
-    h.manager.setWorkspace("ds_a", "/workspace-a")
+    const changed = h.manager.setWorkspace("ds_a", "/workspace-a")
+    const publishedChanges = h.changes.length
+    expect(h.manager.setWorkspace("ds_a", "/workspace-a").seq).toBe(changed.seq)
+    expect(h.changes).toHaveLength(publishedChanges)
     const emit = await h.start()
+    expect(() => h.manager.setWorkspace("ds_a", "/workspace-a")).not.toThrow()
     expect(() => h.manager.setWorkspace("ds_a", "/workspace-b")).toThrow("运行中")
     emit({ type: "error", error: "结束" })
     h.manager.setWorkspace("ds_a", "/workspace-b")

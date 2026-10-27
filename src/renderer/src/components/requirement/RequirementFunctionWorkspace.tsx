@@ -117,23 +117,29 @@ export function RequirementFunctionWorkspace({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#fbfcfe] p-4">
-      <div className="mb-3 flex shrink-0 items-center gap-3">
-        <Button type="button" variant="ghost" size="sm" className="h-8 gap-1 px-2" onClick={onBack}>
+      <div className="mb-1.5 flex shrink-0 items-center gap-2">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-6 gap-1 px-1.5 text-xs"
+          onClick={onBack}
+        >
           <ArrowLeft className="size-3.5" />
           返回功能清单
         </Button>
-        <h2 className="min-w-0 truncate text-base font-semibold text-foreground">
+        <h2 className="min-w-0 truncate text-sm font-semibold text-foreground">
           {functionInfo.fr}：{functionInfo.name || "未命名功能"} · 预览
         </h2>
-        <span className="shrink-0 rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary">
+        <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
           {prototypeGenerated ? "原型设计阶段" : "规范 PRD 阶段"}
         </span>
       </div>
 
       <div className="grid min-h-0 flex-1 grid-cols-2 gap-3">
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border/80 bg-white">
-          <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border/70 px-4">
-            <span className="text-xs font-medium text-muted-foreground">MD 预览</span>
+        <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border/80 bg-white transition-colors duration-200 hover:border-primary/70">
+          <header className="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-primary/20 bg-primary/[0.08] px-3.5">
+            <span className="text-xs font-semibold text-foreground/75">MD 预览</span>
             <span
               className="min-w-0 flex-1 truncate text-center text-xs text-muted-foreground/80"
               title={filePath}
@@ -216,15 +222,25 @@ export function RequirementFunctionWorkspace({
           </div>
         </section>
 
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border/80 bg-white">
-          <header className="flex h-12 shrink-0 items-center justify-between border-b border-border/70 px-4">
-            <span className="text-xs font-medium text-muted-foreground">原型预览</span>
+        <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border/80 bg-white transition-colors duration-200 hover:border-primary/70">
+          <header className="flex h-10 shrink-0 items-center justify-between border-b border-primary/20 bg-primary/[0.08] px-3.5">
+            <span className="text-xs font-semibold text-foreground/75">原型预览</span>
             {prototypeGenerated ? (
               <span className="rounded-full bg-status-nominal/10 px-2.5 py-1 text-[11px] font-medium text-status-nominal">
                 动态原型 v1
               </span>
             ) : null}
-            <span className="text-xs text-muted-foreground/70">支持继续设计</span>
+            {prototypeGenerated ? (
+              <Button
+                type="button"
+                size="sm"
+                className="h-7 px-2.5 text-xs"
+                disabled={conversationLoading}
+                onClick={onRequestPrototypeDesign}
+              >
+                继续完善设计
+              </Button>
+            ) : null}
           </header>
           <div className="relative min-h-0 flex-1 bg-slate-50/70">
             {prototypeGenerated && prototypePreview ? (
@@ -265,18 +281,6 @@ export function RequirementFunctionWorkspace({
               </div>
             )}
           </div>
-          {prototypeGenerated ? (
-            <footer className="flex h-14 shrink-0 items-center border-t border-border/70 bg-white px-4">
-              <Button
-                type="button"
-                size="sm"
-                disabled={conversationLoading}
-                onClick={onRequestPrototypeDesign}
-              >
-                继续设计
-              </Button>
-            </footer>
-          ) : null}
         </section>
       </div>
     </div>

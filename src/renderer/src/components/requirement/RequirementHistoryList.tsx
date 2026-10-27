@@ -80,6 +80,7 @@ const REMOTE_MOCK_REQUIREMENT: RequirementRecord = {
         file: "FR-001.md",
         keywords: ["会员", "迁移"],
         htmlFile: "prototype.html",
+        htmlId: "",
         needDesign: "1"
       }
     ]
@@ -423,7 +424,7 @@ export function RequirementHistoryList({
                     role={item.origin === "space" ? "button" : undefined}
                     tabIndex={item.origin === "space" ? 0 : undefined}
                     className={cn(
-                      "group relative min-h-[150px] rounded-xl border border-border bg-background-elevated p-4 ring-primary/20 transition-[border-color,box-shadow] duration-200 hover:border-primary/70 hover:ring-1",
+                      "group relative flex min-h-[150px] flex-col rounded-xl border border-border bg-background-elevated p-4 ring-primary/20 transition-[border-color,box-shadow] duration-200 hover:border-primary/70 hover:ring-1",
                       item.origin === "space" && "cursor-pointer"
                     )}
                     onClick={(event) => {
@@ -540,7 +541,7 @@ export function RequirementHistoryList({
                     >
                       {description}
                     </p>
-                    <div className="mt-6 flex flex-wrap items-end justify-between gap-4">
+                    <div className="mt-auto flex flex-wrap items-end justify-between gap-4 pt-6">
                       <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
                         <Avatar className="size-6">
                           <AvatarFallback className="bg-primary/12 text-[10px] text-primary">
@@ -552,7 +553,11 @@ export function RequirementHistoryList({
                         </span>
                         <span className="text-border-emphasis">·</span>
                         <span className="whitespace-nowrap tabular-nums">
-                          {item.origin === "space" ? item.updatedAt : `更新 ${item.updatedAt}`}
+                          {item.updatedAt
+                            ? item.origin === "space"
+                              ? item.updatedAt
+                              : `更新 ${item.updatedAt}`
+                            : "时间暂无"}
                         </span>
                         {item.workspaceMissing ? (
                           <AlertTriangle

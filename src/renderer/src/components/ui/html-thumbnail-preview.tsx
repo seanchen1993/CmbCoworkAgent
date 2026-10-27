@@ -1,19 +1,10 @@
-import { Eye } from "lucide-react"
+import { useEffect, useState } from "react"
+import { Eye, Loader2 } from "lucide-react"
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
-
-function resolveBrowserUrl(browserUrl: string, workspacePath?: string | null): string {
-  if (!workspacePath || /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(browserUrl)) return browserUrl
-
-  const normalizedWorkspace = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "")
-  const normalizedFile = browserUrl.replace(/\\/g, "/").replace(/^\/+/, "")
-  const absolutePath = `${normalizedWorkspace}/${normalizedFile}`
-  return window.electron.process.platform === "win32"
-    ? `file:///${encodeURI(absolutePath)}`
-    : `file://${encodeURI(absolutePath)}`
-}
+import { resolveHtmlPreviewBrowserUrl } from "@/lib/html-preview-browser-url"
 
 export function HtmlThumbnailPreview({
   html,
@@ -32,9 +23,15 @@ export function HtmlThumbnailPreview({
   fit?: "thumbnail" | "fill"
   className?: string
 }): React.JSX.Element {
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    setLoading(true)
+  }, [html])
+
   const openInBrowser = (): void => {
     openResourcePanelOverlay("browser", {
-      browserUrl: resolveBrowserUrl(browserUrl, browserWorkspacePath)
+      browserUrl: resolveHtmlPreviewBrowserUrl(browserUrl, browserWorkspacePath)
     })
   }
 
@@ -45,6 +42,8 @@ export function HtmlThumbnailPreview({
         srcDoc={html}
         sandbox="allow-scripts"
         tabIndex={-1}
+        onLoad={() => setLoading(false)}
+        onError={() => setLoading(false)}
         className={cn(
           "block border-0 bg-white",
           fit === "fill"
@@ -52,6 +51,14 @@ export function HtmlThumbnailPreview({
             : "pointer-events-none h-[500%] w-[500%] origin-top-left scale-[0.2]"
         )}
       />
+      {loading ? (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/90 text-primary backdrop-blur-[1px]">
+          <div className="flex items-center gap-2 text-xs font-medium">
+            <Loader2 className="size-4 animate-spin" />
+            正在加载预览
+          </div>
+        </div>
+      ) : null}
       {onSelect ? (
         <button
           type="button"
@@ -67,9 +74,9 @@ export function HtmlThumbnailPreview({
               type="button"
               aria-label={`放大查看${title}`}
               onClick={openInBrowser}
-              className="absolute right-2 top-2 z-20 inline-flex size-7 cursor-pointer items-center justify-center rounded-md border border-border bg-background/95 text-muted-foreground shadow-sm transition-colors duration-200 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="absolute right-0 top-2 z-20 inline-flex h-8 w-10 cursor-pointer items-center justify-center rounded-l-full border border-r-0 border-primary/70 bg-primary text-primary-foreground shadow-md transition-colors duration-200 hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2"
             >
-              <Eye className="size-3.5" />
+              <Eye className="size-4" strokeWidth={2.2} />
             </button>
           </TooltipTrigger>
           <TooltipContent side="top">点击可以放大预览完整页面效果</TooltipContent>

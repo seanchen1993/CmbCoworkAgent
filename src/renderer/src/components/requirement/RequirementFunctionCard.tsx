@@ -48,7 +48,7 @@ export function RequirementFunctionCard({
         <div className="flex min-w-0 flex-1 items-start gap-3 p-4">
           <div className="flex shrink-0 flex-col items-center gap-1.5">
             <span className="rounded-md bg-primary/10 px-2 py-1 text-xs font-semibold text-primary">
-              {functionInfo.fr}
+              {functionInfo.fr || functionInfo.id}
             </span>
             {functionInfo.file ? (
               <>
@@ -107,7 +107,7 @@ export function RequirementFunctionCard({
                     <div className="mt-2 line-clamp-2 leading-6">
                       {functionInfo.keywords.map((keyword, keywordIndex) => (
                         <span
-                          key={`${functionInfo.fr}-${keyword}-${keywordIndex}`}
+                          key={`${functionInfo.fr || functionInfo.id}-${keyword}-${keywordIndex}`}
                           className="mb-1.5 mr-1.5 inline-flex rounded border border-border/70 bg-muted/30 px-1.5 py-0.5 text-[11px] text-muted-foreground"
                         >
                           {keyword}
@@ -125,7 +125,7 @@ export function RequirementFunctionCard({
           </div>
         </div>
         {actions ? (
-          <div className="relative flex min-h-[156px] w-[208px] shrink-0 self-stretch items-center justify-center overflow-hidden border-l border-border/70 bg-slate-50/70">
+          <div className="relative flex w-[208px] shrink-0 self-stretch items-center justify-center overflow-hidden border-l border-border/70 bg-slate-50/70 shadow-[-8px_0_16px_-12px_rgba(15,23,42,0.45)]">
             {actions}
           </div>
         ) : null}

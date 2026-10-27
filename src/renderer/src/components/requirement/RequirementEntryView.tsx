@@ -47,6 +47,12 @@ function fromRequirementSpaceItem(
   namespace: NamespaceTreeNode
 ): RequirementRecord {
   const owner = typeof item.owner === "string" ? { id: item.owner, name: item.owner } : item.owner
+  const sourceTime = item.updateTime || item.updatedAt || item.createTime || ""
+  const parsedTime = sourceTime ? new Date(sourceTime) : null
+  const hasValidTime = parsedTime !== null && Number.isFinite(parsedTime.getTime())
+  const displayTime = hasValidTime
+    ? parsedTime.toLocaleString("zh-CN", { hour12: false })
+    : sourceTime
   return {
     id: `space:${namespace.devopsOrgId}:${item.code}`,
     threadIds: [],
@@ -56,8 +62,8 @@ function fromRequirementSpaceItem(
     workspaceMissing: false,
     coreFilesMissing: false,
     coreFilesMissingReason: null,
-    updatedAt: item.createTime ?? "",
-    updatedAtTimestamp: item.createTime ? new Date(item.createTime).getTime() || 0 : 0,
+    updatedAt: displayTime,
+    updatedAtTimestamp: hasValidTime ? parsedTime.getTime() : 0,
     system: namespace.pathName.split("/").filter(Boolean).at(-1) || namespace.pathName,
     status: "",
     fileName: "",

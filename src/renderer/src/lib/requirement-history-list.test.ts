@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   getRequirementCompletedSteps,
+  normalizeRequirementHtmlFilePath,
   type RequirementRecord
 } from "../components/requirement/requirement-data"
 
@@ -35,6 +36,19 @@ function requirementAtStep(
 }
 
 describe("requirement history progress", () => {
+  it("accepts only absolute generated HTML paths", () => {
+    expect(
+      normalizeRequirementHtmlFilePath(
+        "/workspace/requirement/.cmb-design/ds_123_design-main/index.html"
+      )
+    ).toBe("/workspace/requirement/.cmb-design/ds_123_design-main/index.html")
+    expect(normalizeRequirementHtmlFilePath("原型设计/fr-1.html")).toBe("")
+    expect(normalizeRequirementHtmlFilePath("prd/原型设计/fr-1.html")).toBe("")
+    expect(normalizeRequirementHtmlFilePath("C:\\workspace\\.cmb-design\\index.html")).toBe(
+      "C:/workspace/.cmb-design/index.html"
+    )
+  })
+
   it("caps step 5 at step 4 until the manifest is published", () => {
     expect(getRequirementCompletedSteps(requirementAtStep(5))).toBe(4)
     expect(getRequirementCompletedSteps(requirementAtStep(4))).toBe(4)

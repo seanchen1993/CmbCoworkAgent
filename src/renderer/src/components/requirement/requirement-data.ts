@@ -19,12 +19,14 @@ export type RequirementPrdManifest = {
     needDesign: NeedDesignChoice
   }
   functions: Array<{
+    id?: string
     fr: string
     name: string
     description: string
     file: string
     keywords: string[]
     htmlFile: string
+    htmlId: string
     needDesign: NeedDesignChoice
   }>
 }
@@ -61,6 +63,13 @@ export type RequirementUser = {
   id: string
   name: string
   avatarUrl?: string
+}
+
+export function normalizeRequirementHtmlFilePath(filePath: string): string {
+  const normalized = filePath.trim().replace(/\\/g, "/")
+  const absolutePath =
+    /^[a-zA-Z]:\//.test(normalized) || normalized.startsWith("//") || normalized.startsWith("/")
+  return absolutePath ? normalized : ""
 }
 
 export function getRequirementThreadIds(
@@ -114,7 +123,7 @@ export function fromPersistedRequirement(
 
 export function getRequirementModules(requirement: RequirementRecord): RequirementModule[] {
   return requirement.prdManifest.functions.map((functionInfo) => ({
-    moduleId: functionInfo.fr,
+    moduleId: functionInfo.fr || functionInfo.id || "",
     name: functionInfo.name,
     filePath: functionInfo.file,
     description: functionInfo.description,

@@ -14,6 +14,8 @@ export type ProductRequirement = {
   priority?: string
   owner?: string | { id?: string; name?: string }
   createTime?: string
+  updateTime?: string
+  updatedAt?: string
   functionList?: ProductRequirementFunction[]
 }
 
@@ -121,14 +123,16 @@ const MOCK_REQUIREMENTS: Record<string, ProductRequirement[]> = {
       title: "Mock 需求 A-1",
       status: "OPEN",
       priority: "HIGH",
-      owner: "Mock 负责人 1"
+      owner: "Mock 负责人 1",
+      createTime: "2026-10-22T09:30:00+08:00"
     },
     {
       code: "P2603-2412",
       title: "Mock 需求 A-2",
       status: "OPEN",
       priority: "MEDIUM",
-      owner: "Mock 负责人 2"
+      owner: "Mock 负责人 2",
+      createTime: "2026-10-21T16:20:00+08:00"
     }
   ],
   "org-mobile": [
@@ -137,14 +141,16 @@ const MOCK_REQUIREMENTS: Record<string, ProductRequirement[]> = {
       title: "Mock 需求 B-1",
       status: "OPEN",
       priority: "HIGH",
-      owner: "Mock 负责人 3"
+      owner: "Mock 负责人 3",
+      createTime: "2026-10-20T11:15:00+08:00"
     },
     {
       code: "P2602-1044",
       title: "Mock 需求 B-2",
       status: "DRAFT",
       priority: "LOW",
-      owner: "Mock 负责人 4"
+      owner: "Mock 负责人 4",
+      createTime: "2026-10-19T14:40:00+08:00"
     }
   ],
   "org-credit": [
@@ -153,7 +159,8 @@ const MOCK_REQUIREMENTS: Record<string, ProductRequirement[]> = {
       title: "Mock 需求 C-1",
       status: "OPEN",
       priority: "MEDIUM",
-      owner: "Mock 负责人 5"
+      owner: "Mock 负责人 5",
+      createTime: "2026-10-18T10:05:00+08:00"
     }
   ]
 }
