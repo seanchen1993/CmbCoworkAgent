@@ -5,13 +5,15 @@ import type { DynamicStructuredTool } from "@langchain/core/tools"
 import type { LocalBotHost } from "./host"
 import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../agent/runtime-tool-catalog"
 import { getHookAgentIdFromRequest } from "../hooks/execution-context"
+import type { BotTask } from "../../shared/bots/contracts"
 
 /** Extends the ordinary beta Runtime. Final assistant replies remain normal chat. */
 export function createBotWorkTools(
-  taskId: string,
+  task: Pick<BotTask, "id" | "workId">,
   getHost: () => LocalBotHost,
   signal: AbortSignal
 ): DynamicStructuredTool[] {
+  const taskId = task.id
   const key = z.string().trim().min(1).max(160)
   const id = z.string().trim().min(1).max(160)
   const invoke = async (
@@ -178,5 +180,8 @@ export function createBotWorkTools(
         }
       )
     )
-  ] as DynamicStructuredTool[]
+  ].filter(
+    (entry) =>
+      !task.workId || (entry.name !== "bot_work_create" && entry.name !== "bot_work_projects")
+  ) as DynamicStructuredTool[]
 }

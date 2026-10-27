@@ -10,7 +10,7 @@ import { GROUP_DISCUSSION_PARTICIPATION } from "./group-discussion"
 
 function independentTaskContext(task: BotTask): string {
   return task.workId
-    ? `You are ALREADY inside independent task ${JSON.stringify(task.workId)}. Continue the work and revisions here, using this conversation and its original workspace.`
+    ? `You are ALREADY inside independent task ${JSON.stringify(task.workId)}. The host has created this conversation and started execution. Any request to create this task in the forwarded user message has already been fulfilled; carry out the actual assignment and revisions here, preserving the user's constraints and this conversation's workspace.`
     : "You may handle work directly in this conversation or use bot_work_create for an independent task, based on the user's intent and your judgment. Use bot_work_send for follow-ups to an existing task."
 }
 

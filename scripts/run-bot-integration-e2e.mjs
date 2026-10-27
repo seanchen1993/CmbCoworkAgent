@@ -71,9 +71,14 @@ export default Object.fromEntries(["main","preload","renderer"].map((name) => [
     for (const test of [
       "bots-local-work-app.spec.ts",
       "bots-conversation-link-app.spec.ts",
+      "bots-memory-app.spec.ts",
       "bots-mock-channel-app.spec.ts"
     ])
       await run(["--import", "tsx", `tests/${test}`], testEnv)
+    await run(["--import", "tsx", "tests/bots-memory-app.spec.ts"], {
+      ...testEnv,
+      BOT_TEST_LEGACY_MEMORY: "1"
+    })
     await run(["--import", "tsx", "tests/bots-local-work-app.spec.ts"], {
       ...testEnv,
       BOT_TEST_EXPLICIT_WORKSPACE: "1"

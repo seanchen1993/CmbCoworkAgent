@@ -69,11 +69,56 @@ async function main() {
         if (user.includes("LINK_UNLINKED")) reply = "LINK_UNLINKED_REPLY：普通会话继续保留。"
         if (user.includes("memory") && !user.includes("LINK_")) reply = "[]"
       }
+      const linkedTurn = !reporting && /LINK_(MODIFY_FROM_BOT|MODIFY_FROM_CHAT|NEW_WORK)/.test(user)
+      const toolNames = (body.tools ?? []).map(
+        (entry: { function: { name: string } }) => entry.function.name
+      )
+      if (linkedTurn) {
+        assert.ok(
+          !toolNames.includes("bot_work_create"),
+          "a task must not offer recursive creation"
+        )
+        assert.ok(
+          !toolNames.includes("bot_work_projects"),
+          "a task must keep its assigned workspace"
+        )
+        assert.ok(all.includes("ALREADY inside independent task"))
+      }
+      const turnMessages = messages.slice(
+        messages.findLastIndex((entry: { role: string }) => entry.role === "user") + 1
+      )
+      const inspectFile =
+        linkedTurn &&
+        user.includes("LINK_MODIFY_FROM_CHAT") &&
+        !turnMessages.some((entry: { role: string }) => entry.role === "tool")
+      const reasoning = inspectFile
+        ? "LINK_DETAIL_THOUGHT：先读取原目录的材料，再继续当前任务。"
+        : undefined
+      const toolCalls = inspectFile
+        ? [
+            {
+              id: `link-read-${calls.length}`,
+              type: "function",
+              function: {
+                name: "read_file",
+                arguments: JSON.stringify({ file_path: join(originalWorkspace, "existing.md") })
+              }
+            }
+          ]
+        : undefined
       if (body.stream) {
         res.writeHead(200, { "content-type": "text/event-stream" })
         for (const [delta, finish_reason] of [
-          [{ content: reply }, null],
-          [{}, "stop"]
+          [
+            toolCalls
+              ? {
+                  reasoning_content: reasoning,
+                  tool_calls: toolCalls.map((call) => ({ index: 0, ...call }))
+                }
+              : { content: reply },
+            null
+          ],
+          [{}, toolCalls ? "tool_calls" : "stop"]
         ])
           res.write(
             `data: ${JSON.stringify({ id: `link-${calls.length}`, object: "chat.completion.chunk", model: "local-link", choices: [{ index: 0, delta, finish_reason }] })}\n\n`
@@ -86,7 +131,15 @@ async function main() {
             object: "chat.completion",
             model: "local-link",
             choices: [
-              { index: 0, message: { role: "assistant", content: reply }, finish_reason: "stop" }
+              {
+                index: 0,
+                message: {
+                  role: "assistant",
+                  content: toolCalls ? null : reply,
+                  ...(toolCalls ? { tool_calls: toolCalls, reasoning_content: reasoning } : {})
+                },
+                finish_reason: toolCalls ? "tool_calls" : "stop"
+              }
             ],
             usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 }
           })
@@ -175,7 +228,8 @@ async function main() {
             model: "local-link",
             apiKey: "synthetic-only",
             maxTokens: 64000,
-            maxOutputTokens: 2048
+            maxOutputTokens: 2048,
+            enableThinking: true
           })
         await api.models.setDefault("custom:link-original")
         const bot = await api.bots.create({
@@ -380,6 +434,35 @@ async function main() {
       )
     )
     console.log("stage: both conversation entrances return results to the owning Bot")
+    const detailButton = () => page.getByRole("button", { name: /^(查看|收起)执行过程$/ })
+    assert.equal(await detailButton().getAttribute("aria-pressed"), "false")
+    assert.equal(await chat().getByRole("button", { name: "思考", exact: true }).count(), 0)
+    await detailButton().click()
+    assert.equal(await detailButton().getAttribute("aria-pressed"), "true")
+    const thinking = chat().getByRole("button", { name: "思考", exact: true }).last()
+    await thinking.waitFor()
+    if ((await thinking.getAttribute("aria-expanded")) !== "true") await thinking.click()
+    await chat()
+      .getByText(/LINK_DETAIL_THOUGHT/)
+      .waitFor()
+    const fileCall = chat().getByText(/读取文件.*existing\.md/).first()
+    await fileCall.waitFor()
+    await fileCall.click()
+    await chat().getByText(/Original workspace content/).waitFor()
+    await page.screenshot({
+      path: join(out, "artifacts", "linked-task-execution-details.png"),
+      fullPage: true
+    })
+    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).click()
+    assert.equal(await detailButton().getAttribute("aria-pressed"), "true")
+    await detailButton().click()
+    await page.getByRole("button", { name: "在对话模式打开", exact: true }).click()
+    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).waitFor()
+    assert.equal(await detailButton().getAttribute("aria-pressed"), "false")
+    assert.equal(await chat().getByRole("button", { name: "思考", exact: true }).count(), 0)
+    console.log(
+      "stage: linked-task reasoning and tool details toggle stays in sync across entrances"
+    )
     // Both entrances edit the actual Thread model, never the Bot default.
     await chat().getByRole("button", { name: "Original fixture", exact: true }).click()
     await page.getByText("Bot default fixture", { exact: true }).last().click()

@@ -1,5 +1,5 @@
 import { botErrorMessage } from "@/lib/bot-error-message"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { Check, Loader2, Pencil, Plus, Share2, Trash2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
@@ -16,6 +16,12 @@ import type {
   BotMemoryMode
 } from "../../../../shared/bots/contracts"
 
+const memoryDescriptions: Record<BotMemoryMode, string> = {
+  inherit: "跟随设置中的记忆开关，仅用于此 Bot。",
+  enabled: "在对话中读取和保存记忆，优先于全局设置。",
+  disabled: "暂停读取和自动保存，已有记忆仍可管理。"
+}
+
 export function BotMemoryPanel({
   bot,
   client,
@@ -26,6 +32,8 @@ export function BotMemoryPanel({
   peers: BotDefinition[]
 }) {
   const botId = bot.id
+  const memoryMode = bot.memoryMode ?? "inherit"
+  const memoryDescriptionId = useId()
   const [entries, setEntries] = useState<BotMemory[] | null>(null)
   const [editing, setEditing] = useState<BotMemory | "new" | null>(null)
   const [name, setName] = useState("")
@@ -128,6 +136,32 @@ export function BotMemoryPanel({
   }
   return (
     <section className="bot-detail-section">
+      <div className="bot-memory-config">
+        <div className="bot-memory-config-row">
+          <span className="font-medium">记忆配置</span>
+          <Select
+            value={memoryMode}
+            disabled={busy}
+            onValueChange={(value) => void changeMemoryMode(value as BotMemoryMode)}
+          >
+            <SelectTrigger
+              aria-label="记忆配置"
+              aria-describedby={memoryDescriptionId}
+              className="bot-memory-config-trigger h-8 w-auto gap-2 rounded-lg border-0 px-2 py-1 text-xs shadow-none"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent align="end" showScrollButtons={false}>
+              <SelectItem value="inherit">跟随全局</SelectItem>
+              <SelectItem value="enabled">开启</SelectItem>
+              <SelectItem value="disabled">关闭</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <p id={memoryDescriptionId} className="bot-memory-config-description">
+          {memoryDescriptions[memoryMode]}
+        </p>
+      </div>
       <div className="mb-4 flex items-center justify-between">
         <h3 className="!mb-0">私有记忆</h3>
         <button
@@ -139,30 +173,6 @@ export function BotMemoryPanel({
           <Plus size={16} />
         </button>
       </div>
-      <div className="mb-4 space-y-2">
-        <p className="text-sm font-medium">长期记忆</p>
-        <Select
-          value={bot.memoryMode ?? "inherit"}
-          disabled={busy}
-          onValueChange={(value) => void changeMemoryMode(value as BotMemoryMode)}
-        >
-          <SelectTrigger aria-label="长期记忆">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="inherit">跟随全局设置</SelectItem>
-            <SelectItem value="enabled">开启</SelectItem>
-            <SelectItem value="disabled">关闭</SelectItem>
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          单独开启或关闭优先于全局设置，仅影响此 Bot 的私有记忆。
-          关闭后停止读取和自动保存，已有记忆仍可手动管理。
-        </p>
-      </div>
-      <p className="mb-4 text-xs text-muted-foreground">
-        此 Bot 保存的偏好和经验。你可以随时修改或删除。
-      </p>
       {(error || readError) && (
         <p role="alert" className="mb-3 text-xs text-destructive">
           {error || readError}
@@ -352,7 +362,10 @@ export function BotMemoryPanel({
             </article>
           ))
         ) : (
-          <p className="text-muted-foreground">还没有保存记忆。</p>
+          <div className="bot-memory-empty">
+            <p>暂无记忆</p>
+            <p className="mt-1 text-xs">保存的偏好和经验会显示在这里，可随时编辑。</p>
+          </div>
         )
       ) : (
         !error && !readError && <Loader2 className="size-4 animate-spin" />

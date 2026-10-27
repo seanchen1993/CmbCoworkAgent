@@ -1041,7 +1041,7 @@ export function createLocalBotRunPort(
                 additionalTools: reporting
                   ? []
                   : mock
-                    ? createBotWorkTools(task.id, getHost, signal)
+                    ? createBotWorkTools(task, getHost, signal)
                     : botTaskGroupId(task)
                       ? [
                           createBotGroupMessageTool(task, getHost, signal, (content) => {
@@ -1097,7 +1097,7 @@ export function createLocalBotRunPort(
                             profileContinuationRequest)
                             ? [createBotGroupMessageTool(task, getHost, signal, () => {})]
                             : []),
-                          ...createBotWorkTools(task.id, getHost, signal),
+                          ...createBotWorkTools(task, getHost, signal),
                           ...createBotDeliveryTools(
                             workspacePath,
                             signal,

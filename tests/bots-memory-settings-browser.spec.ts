@@ -62,9 +62,9 @@ createRoot(document.getElementById("root")).render(<App/>);
     page.on("pageerror", (error) => errors.push(error.message))
     await page.setContent('<div id="root"></div>')
     await page.addScriptTag({ content: result.outputFiles[0].text })
-    const setting = page.getByRole("combobox", { name: "长期记忆", exact: true })
+    const setting = page.getByRole("combobox", { name: "记忆配置", exact: true })
     await setting.waitFor()
-    assert.equal(await setting.textContent(), "跟随全局设置")
+    assert.equal(await setting.textContent(), "跟随全局")
     const change = async (label: string) => {
       await setting.click()
       await page.getByRole("option", { name: label, exact: true }).click()
@@ -101,11 +101,11 @@ createRoot(document.getElementById("root")).render(<App/>);
     )
     assert.equal(await setting.textContent(), "关闭")
     assert.equal(await page.getByText("Saved preference a", { exact: true }).count(), 1)
-    await change("跟随全局设置")
+    await change("跟随全局")
     await page.waitForFunction(
       () => (window as FixtureWindow).fixture.bots[0].memoryMode === "inherit"
     )
-    assert.equal(await setting.textContent(), "跟随全局设置")
+    assert.equal(await setting.textContent(), "跟随全局")
     assert.deepEqual(errors, [])
     console.log(
       "Bot memory settings: override, persistence, isolation, retained entries and failed save passed"
