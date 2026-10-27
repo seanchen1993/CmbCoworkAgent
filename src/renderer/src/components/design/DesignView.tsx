@@ -6,10 +6,8 @@ import { buildDesignVariationDocument } from "@/lib/design-variation-document"
 import { getDesignPreviewViewport } from "@/lib/design-preview-viewport"
 import { useAppStore } from "@/lib/store"
 // 需求详情进入设计模式的适配逻辑集中在独立 Hook，避免侵入设计器主体流程。
-import {
-  useRequirementDesignEntry,
-  type ActiveRequirementDesignEntry
-} from "./use-requirement-design-entry"
+import { useRequirementDesignEntry } from "./use-requirement-design-entry"
+import { usePersistentRequirementDesignEntry } from "./use-persistent-requirement-design-entry"
 import { CodeModal } from "./CodeModal"
 import { CustomModelDialog } from "../chat/CustomModelDialog"
 import {
@@ -1415,7 +1413,8 @@ export function DesignView(): React.JSX.Element {
   const [activeSkillIndex, setActiveSkillIndex] = useState(0)
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
   // 记录当前需求入口，供需求模式顶部栏展示并手动回写 Manifest。
-  const [requirementEntry, setRequirementEntry] = useState<ActiveRequirementDesignEntry | null>(null)
+  const [requirementEntry, setRequirementEntry, removeRequirementEntry] =
+    usePersistentRequirementDesignEntry(currentSessionId)
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
   // Open the creation workspace when there is no editor session to restore.
   const [creationPageOpen, setCreationPageOpen] = useState(
@@ -1886,6 +1885,7 @@ export function DesignView(): React.JSX.Element {
         creationSelection?: DesignCreationSelection
         /** 从需求入口创建设计时预填需求描述。 */
         initialInputValue?: string
+        initialAttachedFiles?: FileAttachment[]
         /** 从需求入口创建设计时绑定需求工作区。 */
         workspacePath?: string
       }
@@ -1902,9 +1902,11 @@ export function DesignView(): React.JSX.Element {
         ...session.tabStates[SINGLE_DESIGN_TAB_ID],
         selectedDesignSystemId: selectedForSession?.id ?? null,
         creationSelection: options?.creationSelection ?? null,
-        attachedFiles: options?.creationSelection?.requirement.attachment
-          ? [options.creationSelection.requirement.attachment]
-          : null,
+        attachedFiles:
+          options?.initialAttachedFiles ??
+          (options?.creationSelection?.requirement.attachment
+            ? [options.creationSelection.requirement.attachment]
+            : null),
         // 普通新建设计保持空输入；需求入口可直接带入设计提示词。
         inputValue: options?.initialInputValue ?? ""
       }
@@ -2417,12 +2419,8 @@ export function DesignView(): React.JSX.Element {
 
   // Navigation detaches the view; only the explicit Stop action cancels a run.
   const openSession = useCallback(
-    (id: string, preserveRequirementEntry = false) => {
+    (id: string) => {
       setCreationPageOpen(false)
-      // 从普通会话入口切换时解除需求绑定；需求跳转会显式要求保留。
-      if (!preserveRequirementEntry) {
-        setRequirementEntry(null)
-      }
       // 重选当前会话不会触发加载 Effect，因此直接复用已打开状态，避免恢复页卡死。
       if (currentSessionIdRef.current === id) {
         localStorage.setItem(SESSION_LAST_KEY, id)
@@ -2451,8 +2449,6 @@ export function DesignView(): React.JSX.Element {
   })
 
   const backToGallery = useCallback(() => {
-    // 返回设计列表即结束本次需求关联，防止后续产物误写到旧需求。
-    setRequirementEntry(null)
     flushArtifactEdits()
     currentSessionIdRef.current = null
     setCurrentSessionId(null)
@@ -2466,6 +2462,7 @@ export function DesignView(): React.JSX.Element {
       void getDesignSessionClient()
         .remove(id)
         .then(() => {
+          removeRequirementEntry(id)
           localStorage.removeItem(sessionDataKey(id))
           localStorage.setItem(`design_migrated_v1_${id}`, "1")
           if (currentSessionIdRef.current === id) backToGallery()
@@ -2473,7 +2470,7 @@ export function DesignView(): React.JSX.Element {
         })
         .catch((error) => showToast(`删除设计失败：${String(error)}`))
     },
-    [backToGallery, showToast]
+    [backToGallery, removeRequirementEntry, showToast]
   )
 
   // ── Inject / remove mode scripts when activeMode changes ─
@@ -3994,7 +3991,6 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           onDesignSystemChange={setCreateDesignSystemId}
           importingSource={importingSource}
           onEnterDesign={(selection) => {
-            setRequirementEntry(null)
             createSession(undefined, {
               designSystemId: selection.designSystemId,
               creationSelection: selection
@@ -4300,7 +4296,15 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           htmlId={currentSessionId}
           artifactPath={ts.artifactPath}
           artifactMetadata={ts.artifactMetadata as Record<string, unknown> | null}
-          disabled={!getCurrentDesignHtml(ts).trim() || isGenerating}
+          disabledReason={
+            !requirementEntry.bindingReady || requirementEntry.htmlId !== currentSessionId
+              ? "需求关联正在初始化，请稍候"
+              : isGenerating
+                ? "设计正在生成中，完成后才能同步到需求"
+                : !getCurrentDesignHtml(ts).trim()
+                  ? "尚未生成设计内容，无法同步到需求"
+                  : undefined
+          }
           onArtifactPathChange={(filePath) => updateTs(activeTabId, { artifactPath: filePath })}
           onEntryChange={setRequirementEntry}
           showToast={showToast}

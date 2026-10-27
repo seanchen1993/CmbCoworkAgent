@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { Loader2, Save } from "lucide-react"
 
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { ActiveRequirementDesignEntry } from "./use-requirement-design-entry"
 
 export function RequirementDesignContextBar({
@@ -9,7 +10,7 @@ export function RequirementDesignContextBar({
   htmlId,
   artifactPath,
   artifactMetadata,
-  disabled,
+  disabledReason,
   onArtifactPathChange,
   onEntryChange,
   showToast
@@ -19,7 +20,7 @@ export function RequirementDesignContextBar({
   htmlId: string
   artifactPath?: string | null
   artifactMetadata?: Record<string, unknown> | null
-  disabled: boolean
+  disabledReason?: string
   onArtifactPathChange: (filePath: string) => void
   onEntryChange: (entry: ActiveRequirementDesignEntry) => void
   showToast: (message: string) => void
@@ -27,6 +28,7 @@ export function RequirementDesignContextBar({
   const [saving, setSaving] = useState(false)
   const requirementName = entry.requirementName?.trim() || "未命名需求"
   const functionName = entry.functionName?.trim() || "未命名功能"
+  const effectiveDisabledReason = saving ? "正在同步设计，请稍候" : disabledReason
 
   const save = async (): Promise<void> => {
     setSaving(true)
@@ -94,15 +96,33 @@ export function RequirementDesignContextBar({
           <strong className="ml-1.5 font-semibold text-foreground">{functionName}</strong>
         </span>
       </div>
-      <button
-        type="button"
-        disabled={disabled || saving}
-        onClick={() => void save()}
-        className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md bg-status-info px-3 text-xs font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-55"
-      >
-        {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3" />}
-        {saving ? "同步中..." : "同步到需求里"}
-      </button>
+      <TooltipProvider delayDuration={200}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span
+              tabIndex={effectiveDisabledReason ? 0 : -1}
+              className={effectiveDisabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"}
+            >
+              <button
+                type="button"
+                disabled={Boolean(effectiveDisabledReason)}
+                onClick={() => void save()}
+                className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md bg-status-info px-3 text-xs font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-55"
+              >
+                {saving ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Save className="size-3" />
+                )}
+                {saving ? "同步中..." : "同步到需求里"}
+              </button>
+            </span>
+          </TooltipTrigger>
+          {effectiveDisabledReason ? (
+            <TooltipContent side="bottom">{effectiveDisabledReason}</TooltipContent>
+          ) : null}
+        </Tooltip>
+      </TooltipProvider>
     </div>
   )
 }

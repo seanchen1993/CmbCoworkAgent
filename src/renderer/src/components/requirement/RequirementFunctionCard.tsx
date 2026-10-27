@@ -1,12 +1,154 @@
 import type { ReactNode } from "react"
-import { Eye, FolderOpen } from "lucide-react"
+import { Check, CheckCircle2, EllipsisVertical, Eye, FolderOpen, Palette } from "lucide-react"
 
+import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from "@/components/ui/dropdown-menu"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import type { RequirementPrdManifest } from "./requirement-data"
+import type { NeedDesignChoice, RequirementPrdManifest } from "./requirement-data"
 
 type RequirementFunctionInfo = RequirementPrdManifest["functions"][number]
+
+// 已选择设计状态后的统一修改入口；原型缩略图和状态卡片共用同一菜单。
+export function RequirementPrototypeMenu({
+  needDesign,
+  disabled,
+  onChange,
+  onDesign,
+  className
+}: {
+  needDesign: NeedDesignChoice
+  disabled: boolean
+  onChange: (needDesign: NeedDesignChoice) => void
+  onDesign: () => void
+  className?: string
+}): React.JSX.Element {
+  const needsDesign = needDesign === "1"
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          disabled={disabled}
+          aria-label="更改原型设计选项"
+          className={cn(
+            "inline-flex size-10 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-white/90 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-50",
+            className
+          )}
+        >
+          <EllipsisVertical className="size-4" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        className="w-40"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <DropdownMenuItem onSelect={onDesign} className="cursor-pointer">
+          <Palette />
+          <span className="flex-1">去设计</span>
+          {needsDesign ? <Check className="text-primary" /> : null}
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onChange("0")} className="cursor-pointer">
+          <CheckCircle2 />
+          <span className="flex-1">无需设计</span>
+          {!needsDesign ? <Check className="text-status-nominal" /> : null}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+// 未选择时提供首次决策；已选择后分别展示“继续设计”操作或“无需设计”状态。
+export function RequirementPrototypeAction({
+  needDesign,
+  choiceMade,
+  disabled,
+  onChange,
+  onDesign
+}: {
+  needDesign: NeedDesignChoice
+  choiceMade: boolean
+  disabled: boolean
+  onChange: (needDesign: NeedDesignChoice) => void
+  onDesign: () => void
+}): React.JSX.Element {
+  if (!choiceMade) {
+    return (
+      <div className="flex w-full flex-col gap-2 px-4 py-3">
+        <Button
+          type="button"
+          size="sm"
+          className="h-9 w-full gap-1.5 rounded-lg shadow-sm"
+          disabled={disabled}
+          onClick={onDesign}
+        >
+          <Palette className="size-3.5" />
+          去设计
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-9 w-full rounded-lg border-border/80 bg-white/90 text-muted-foreground"
+          disabled={disabled}
+          onClick={() => onChange("0")}
+        >
+          无需设计
+        </Button>
+      </div>
+    )
+  }
+
+  const needsDesign = needDesign === "1"
+  return (
+    <div
+      className={cn(
+        "relative flex h-full min-h-[112px] w-full items-center justify-center overflow-hidden px-4 py-3",
+        needsDesign
+          ? "bg-gradient-to-br from-primary/5 via-white to-status-info/10"
+          : "bg-gradient-to-br from-status-nominal/5 via-white to-emerald-50/80"
+      )}
+    >
+      <RequirementPrototypeMenu
+        needDesign={needDesign}
+        disabled={disabled}
+        onChange={onChange}
+        onDesign={onDesign}
+        className="absolute right-1 top-1"
+      />
+
+      {needsDesign ? (
+        <Button
+          type="button"
+          size="sm"
+          disabled={disabled}
+          onClick={onDesign}
+          className="h-9 gap-2 rounded-lg px-4 shadow-sm transition-transform hover:-translate-y-0.5"
+        >
+          <Palette className="size-4" />
+          继续设计
+        </Button>
+      ) : (
+        <div className="flex max-w-[150px] flex-col items-center text-center">
+          <span className="mb-2 inline-flex size-8 items-center justify-center rounded-full border border-status-nominal/20 bg-status-nominal/10 text-status-nominal shadow-sm">
+            <CheckCircle2 className="size-4" />
+          </span>
+          <span className="text-sm font-semibold text-foreground">无需设计</span>
+          <span className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            此功能已跳过原型设计
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
 
 export function RequirementFunctionCard({
   functionInfo,
@@ -34,7 +176,12 @@ export function RequirementFunctionCard({
       )}
       onClick={(event) => {
         if (!onOpenDetails) return
-        if ((event.target as HTMLElement).closest("button, a, input, textarea, select")) return
+        if (
+          (event.target as HTMLElement).closest(
+            "button, a, input, textarea, select, [role=menuitem], [role=menu]"
+          )
+        )
+          return
         onOpenDetails()
       }}
       onKeyDown={(event) => {

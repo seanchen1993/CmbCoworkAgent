@@ -35,7 +35,7 @@ import {
   type RequirementPrdManifest,
   type RequirementRecord
 } from "./requirement-data"
-import { openRequirementDesign } from "@/lib/requirement-design-entry"
+import { buildRequirementDesignPrompt, openRequirementDesign } from "@/lib/requirement-design-entry"
 import {
   enableRequirementSessionExperts,
   getRequirementSessionCapabilities
@@ -384,7 +384,8 @@ function RequirementConversationSession({
   const prototypeStepEnabled =
     prdGenerationCompleted && (prototypeRoute !== null || requirementSpacePublished)
   const requirementSpaceStepEnabled =
-    prdGenerationCompleted && (prototypeStepCompleted || requirementSpacePublished)
+    (requirementSpaceManifest?.prd.currentStep ?? 0) >= 5 ||
+    (prdGenerationCompleted && (prototypeStepCompleted || requirementSpacePublished))
   const conversationLoading = streamLoading || threadState?.scheduledTaskLoading === true
   const persistPrototypeState = useCallback(
     async (
@@ -478,7 +479,10 @@ function RequirementConversationSession({
         functionName: `${functionInfo.fr} ${functionInfo.name}`.trim(),
         workspacePath,
         requirementFilePath,
-        prompt: `请为功能「${functionInfo.fr} ${functionInfo.name}」设计原型。请以 ${relativeFile} 中的需求为依据，生成完整、可交互的单页 HTML 原型。`,
+        prompt: buildRequirementDesignPrompt(
+          `${functionInfo.fr} ${functionInfo.name}`,
+          relativeFile
+        ),
         htmlId: functionInfo.htmlId?.trim() ?? ""
       })
     },

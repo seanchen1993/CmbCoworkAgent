@@ -16,13 +16,6 @@ import {
 import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
 import { Button } from "@/components/ui/button"
 import { HtmlThumbnailPreview } from "@/components/ui/html-thumbnail-preview"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
@@ -33,7 +26,11 @@ import type {
   RequirementPrdManifest,
   RequirementRecord
 } from "./requirement-data"
-import { RequirementFunctionCard } from "./RequirementFunctionCard"
+import {
+  RequirementFunctionCard,
+  RequirementPrototypeAction,
+  RequirementPrototypeMenu
+} from "./RequirementFunctionCard"
 import { RequirementFunctionWorkspace } from "./RequirementFunctionWorkspace"
 import { RequirementPrdSummaryCard } from "./RequirementPrdSummaryCard"
 
@@ -124,63 +121,6 @@ function getDisplayFileName(filePath: string): string {
 function isRequirementSpacePublished(manifest: RequirementPrdManifest | null): boolean {
   return (
     manifest?.prd.status.toLowerCase() === "published" || Boolean(manifest?.prd.prDetailUrl?.trim())
-  )
-}
-
-function PrototypeDesignSelect({
-  needDesign,
-  choiceMade,
-  disabled,
-  onChange,
-  onDesign
-}: {
-  needDesign: NeedDesignChoice
-  choiceMade: boolean
-  disabled: boolean
-  onChange: (needDesign: NeedDesignChoice) => void
-  onDesign: () => void
-}): React.JSX.Element {
-  if (!choiceMade) {
-    return (
-      <div className="flex items-center gap-2">
-        <Button type="button" size="sm" disabled={disabled} onClick={onDesign}>
-          去设计
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="bg-white"
-          disabled={disabled}
-          onClick={() => onChange("0")}
-        >
-          无需设计
-        </Button>
-      </div>
-    )
-  }
-
-  return (
-    <Select
-      value={needDesign === "1" ? "design" : "skip"}
-      disabled={disabled}
-      onValueChange={(value) => (value === "design" ? onDesign() : onChange("0"))}
-    >
-      <SelectTrigger
-        aria-label="选择原型设计状态"
-        className="h-8 w-[112px] rounded-full bg-white px-3 text-xs font-medium shadow-none hover:border-primary/60 focus:ring-primary/15"
-      >
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent position="popper" className="min-w-[112px]">
-        <SelectItem value="skip" className="text-xs">
-          无需设计
-        </SelectItem>
-        <SelectItem value="design" className="text-xs">
-          去设计
-        </SelectItem>
-      </SelectContent>
-    </Select>
   )
 }
 
@@ -917,9 +857,21 @@ export function RequirementStepsPanel({
                             reloadToken={prdPreviewReloadToken}
                             workspacePath={workspacePath}
                           />
+                          <RequirementPrototypeMenu
+                            needDesign={functionInfo.needDesign}
+                            disabled={conversationLoading}
+                            onChange={(needDesign) =>
+                              updatePrototypeFunctionDesign(functionInfo, needDesign)
+                            }
+                            onDesign={() => {
+                              updatePrototypeFunctionDesign(functionInfo, "1")
+                              requestPrototypeDesign(functionInfo)
+                            }}
+                            className="absolute right-1 top-1 z-10 bg-white/90 shadow-sm backdrop-blur-sm"
+                          />
                         </div>
                       ) : (
-                        <PrototypeDesignSelect
+                        <RequirementPrototypeAction
                           needDesign={functionInfo.needDesign}
                           choiceMade={choiceMade}
                           disabled={conversationLoading}
@@ -1141,9 +1093,21 @@ export function RequirementStepsPanel({
                                   reloadToken={prdPreviewReloadToken}
                                   workspacePath={workspacePath}
                                 />
+                                <RequirementPrototypeMenu
+                                  needDesign={functionInfo.needDesign}
+                                  disabled={conversationLoading}
+                                  onChange={(needDesign) =>
+                                    updatePrototypeFunctionDesign(functionInfo, needDesign)
+                                  }
+                                  onDesign={() => {
+                                    updatePrototypeFunctionDesign(functionInfo, "1")
+                                    requestPrototypeDesign(functionInfo)
+                                  }}
+                                  className="absolute right-1 top-1 z-10 bg-white/90 shadow-sm backdrop-blur-sm"
+                                />
                               </div>
                             ) : (
-                              <PrototypeDesignSelect
+                              <RequirementPrototypeAction
                                 needDesign={functionInfo.needDesign}
                                 choiceMade={prototypeStatus?.choiceMade ?? false}
                                 disabled={conversationLoading}
