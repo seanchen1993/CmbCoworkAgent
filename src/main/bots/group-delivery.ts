@@ -17,8 +17,7 @@ export function createBotGroupMessageTool(
   task: BotTask,
   getHost: () => LocalBotHost,
   signal: AbortSignal,
-  sent: (content: string) => void,
-  completedGroupPeerWork: () => boolean = () => false
+  sent: (content: string) => void
 ) {
   const currentGroupId = botTaskGroupId(task)
   const contentSchema = z.string().trim().min(1).max(60_000)
@@ -32,9 +31,9 @@ export function createBotGroupMessageTool(
             "Temporary task agents return results to their parent; only the parent Bot sends group messages."
           )
         // Grok filters SendMessage("(pass)") before it enters the public room.
-        // Direct user answers keep their literal text; only optional turns may abstain.
+        // Every public member turn may abstain when it owes no contribution.
         if (
-          ((task.origin.kind === "group" && completedGroupPeerWork()) ||
+          (task.origin.kind === "group" ||
             task.origin.kind === "discussion" ||
             (task.origin.kind === "bot" && !task.origin.expectsReply)) &&
           isBotGroupPass(content)
@@ -85,13 +84,12 @@ export function createBotGroupMessageTool(
 /** Only actual tool receipts in the latest user boundary satisfy formal delivery. */
 export function createBotGroupDeliveryCheck(
   task: BotTask,
-  peerDeliveryPosted = false,
-  completedGroupPeerWork: () => boolean = () => false
+  peerDeliveryPosted = false
 ): TurnFinalDeliveryCheck {
   const groupId = botTaskGroupId(task)
   return (messages: readonly BaseMessage[]) => {
     const mayPass =
-      (task.origin.kind === "group" && completedGroupPeerWork()) ||
+      task.origin.kind === "group" ||
       task.origin.kind === "discussion" ||
       (task.origin.kind === "bot" && !task.origin.expectsReply && peerDeliveryPosted)
     let start = 0
@@ -174,7 +172,7 @@ export function createBotGroupDeliveryCheck(
     return (
       "Use bot_send_message to post the actual reply to this shared group, or bot_deliver_files for requested attachments. Plain assistant text is private and does not reach the room. Use verified existing results; do not redo completed actions." +
       (mayPass
-        ? " If this optional/internal turn owes no new public contribution, return exactly (pass)."
+        ? " If this member owes no work or new public contribution under the current request, return exactly (pass). Do not skip assigned work, requested files, or reporting a blocker."
         : " The host has not confirmed a public reply for this result; plain text and a pass marker do not satisfy delivery.")
     )
   }

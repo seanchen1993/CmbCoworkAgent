@@ -5,6 +5,9 @@ import type { EditorView } from "@tiptap/pm/view"
 import { history, undo, redo, closeHistory } from "@tiptap/pm/history"
 import {
   groupEditorContent,
+  privateEditorContent,
+  privateEditorDraft,
+  groupEditorPosition,
   groupEditorDraft,
   groupEditorExtensions,
   groupEditorOffset,
@@ -306,5 +309,38 @@ describe("Grok editor motion adaptation", () => {
     vi.stubGlobal("navigator", { platform: "Win32" })
     expect(press("a")).toBe(false)
     expect([state.selection.anchor, state.selection.head]).toEqual([5, 8])
+  })
+})
+
+
+describe("private mention editor uses the same atoms without group broadcast", () => {
+  it("round trips same-named Bot and group identities among Unicode and paragraphs", () => {
+    const text = "🙂 @同名\n@同名 收到"
+    const mentions = [
+      { start: 3, end: 6, botId: "peer", label: "同名" },
+      { start: 7, end: 10, kind: "group" as const, groupId: "room", label: "同名" }
+    ]
+    const doc = schema.nodeFromJSON(privateEditorContent(text, mentions))
+    expect(privateEditorDraft(doc.toJSON())).toEqual({ text, mentions })
+    for (const offset of [0, 2, 3, 6, 7, 10, 11, 13])
+      expect(groupEditorOffset(doc, groupEditorPosition(doc, offset))).toBe(Math.min(offset, text.length))
+    expect(groupEditorOffset(doc, groupEditorPosition(doc, 5))).toBe(6)
+  })
+
+  it("backspace drops the identity, undo restores it, pasted text binds no identity", () => {
+    const text = "@乙"
+    const mentions = [{ start: 0, end: 2, botId: "peer", label: "乙" }]
+    let state = EditorState.create({ schema, doc: schema.nodeFromJSON(privateEditorContent(text, mentions)), plugins: [history()] })
+    state = state.apply(state.tr.setSelection(TextSelection.create(state.doc, 2)))
+    const view = { get state() { return state }, dispatch: (tr: Parameters<typeof state.apply>[0]) => { state = state.apply(tr) } }
+    expect(groupEditorDeleteMention(view, true)).toBe(true)
+    expect(privateEditorDraft(state.doc.toJSON())).toEqual({ text: "@", mentions: [] })
+    undo(state, view.dispatch)
+    expect(privateEditorDraft(state.doc.toJSON())).toEqual({ text, mentions })
+    expect(privateEditorDraft(privateEditorContent(text, []))).toEqual({ text, mentions: [] })
+  })
+
+  it("rejects the group Everyone token in private chat rather than manufacturing a recipient", () => {
+    expect(() => privateEditorDraft(groupEditorContent("@所有人", [{ start: 0, end: 4, botId: null, label: "所有人" }]))).toThrow()
   })
 })

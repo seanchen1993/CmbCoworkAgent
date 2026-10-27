@@ -1,3 +1,4 @@
+import type { FileInfo } from "@/types"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   isMentionedWorkspaceFileForWorkspace,
@@ -154,4 +155,28 @@ describe("bounded @file attachment reads", () => {
     expect(result.attachments).toEqual([])
     expect(result.warningMessage).toBe("@文件所属工作区已变更，旧工作区引用未被发送。")
   })
+})
+
+
+it("keeps explicit Bot identities while resolving same-named and surrounding real file references", async () => {
+  const rawMessage = "@a.csv @b.csv @a.csv @c.csv @b.csv"
+  const protectedRanges = [{ start: 7, end: 13 }, { start: 14, end: 20 }]
+  const reads: string[] = []
+  const result = await resolveAtFileAttachments({
+    rawMessage, protectedRanges, attachments: [], mentionedFiles: [], workspacePath: "/workspace",
+    workspaceFiles: ["a.csv", "b.csv", "c.csv"].map(path => ({ path, name: path, is_dir: false } as FileInfo)),
+    maxAttachments: 5, maxTotalChars: 1000,
+    readWorkspaceFile: async path => { reads.push(path); return { success: true, content: "id,amount\n1,3" } }
+  })
+  expect(reads).toEqual(["/a.csv", "/c.csv", "/b.csv"])
+  expect(result.cleanedMessage).toBe("a.csv @b.csv @a.csv c.csv b.csv")
+  expect(result.attachments).toHaveLength(3)
+  const onlyBot = await resolveAtFileAttachments({
+    rawMessage: "@b.csv", protectedRanges: [{ start: 0, end: 6 }], attachments: [], mentionedFiles: [], workspacePath: "/workspace",
+    workspaceFiles: [{ path: "b.csv", name: "b.csv", is_dir: false } as FileInfo], maxAttachments: 5, maxTotalChars: 1000,
+    readWorkspaceFile: async () => { throw new Error("Selected Bot is not a file") }
+  })
+  expect(onlyBot.attachments).toEqual([])
+  expect(onlyBot.cleanedMessage).toBe("@b.csv")
+  expect(onlyBot.textEdits).toEqual([])
 })

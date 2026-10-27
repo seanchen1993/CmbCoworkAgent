@@ -49,36 +49,6 @@ function fixture(count = 2, duplicateNames = false) {
 }
 
 describe("public group turn admission", () => {
-  it.each(["completed", "failed", "cancelled", "running"] as const)(
-    "recognizes only completed private work for the exact selected member/request (%s)",
-    (state) => {
-      const f = fixture(3)
-      f.send(
-        "same-request",
-        f.members.map((bot) => bot.id)
-      )
-      const root = f.store.nextQueued([])!
-      f.store.transition(root.id, "running")
-      const recipient = f.members.find((bot) => bot.id !== root.botId)!
-      const direct = f.store.recentTasks().find((t) => t.botId === recipient.id)!
-      const peer = f.store.delegate(root.id, recipient.id, "Private part", "private-part")
-      expect(f.store.completedGroupPeerWork(direct.id)).toBe(false)
-      f.store.transition(peer.id, "running")
-      if (state !== "running")
-        f.store.settle(peer.id, state, null, "Private result", undefined, true)
-      expect(f.store.completedGroupPeerWork(direct.id)).toBe(state === "completed")
-      expect(f.store.completedGroupPeerWork(root.id)).toBe(false)
-      expect(f.store.completedGroupPeerWork(peer.id)).toBe(false)
-      const later = f.send("different-request", [recipient.id])[0]
-      expect(f.store.completedGroupPeerWork(later.id)).toBe(false)
-      f.store.flushReplies()
-      for (const t of f.store
-        .recentTasks()
-        .filter((t) => t.origin.kind === "bot" && !t.origin.expectsReply))
-        expect(f.store.completedGroupPeerWork(t.id)).toBe(false)
-    }
-  )
-
   it.each(["archived", "deleting"])("waits for an active %s member to physically finish", (flag) => {
     const f = fixture()
     f.send("ordered", f.members.map((bot) => bot.id))

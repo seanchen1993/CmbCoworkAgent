@@ -26,7 +26,9 @@ import {
   userInputDraftPatch,
   type UserInputDraft
 } from "./user-input-answer"
-import type { BotMessageReply } from "../../../shared/bots/contracts"
+import { rebaseGroupMentions } from "./bot-group-mentions"
+import { parseBotMessageMentions } from "../../../shared/bots/message-mentions"
+import type { BotMessageMention, BotMessageReply } from "../../../shared/bots/contracts"
 import { isBotMessageReply } from "../../../shared/bots/message-reply"
 import {
   CONTEXT_COMPACTION_EVENT_TYPE,
@@ -695,6 +697,7 @@ export interface ThreadState {
   harnessAgentmdLoadStatus: HarnessAgentmdLoadStatusState | null
   draftInput: string
   draftBotReplyTo?: BotMessageReply | null
+  draftBotMentions?: BotMessageMention[]
   /** Managed Bot composer attachments survive navigation; no binary data is retained here. */
   draftAttachments: FileAttachment[]
   harnessNextActionDialogTips: string | null
@@ -932,6 +935,7 @@ export interface ThreadActions {
     update: ContextReminderState | ((prev: ContextReminderState) => ContextReminderState)
   ) => void
   setDraftInput: (input: string) => void
+  setDraftBotInput: (input: string, mentions: BotMessageMention[]) => void
   setDraftBotReplyTo: (reply: BotMessageReply | null) => void
   setDraftAttachments: (
     update: FileAttachment[] | ((previous: FileAttachment[]) => FileAttachment[])
@@ -5738,7 +5742,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }))
         },
         setDraftInput: (input: string) => {
-          updateThreadState(threadId, () => ({ draftInput: input }))
+          updateThreadState(threadId, (state) => ({
+            draftInput: input,
+            ...(state.draftBotMentions?.length ? {
+              draftBotMentions: rebaseGroupMentions(state.draftInput, input, state.draftBotMentions)
+            } : {})
+          }))
+        },
+        setDraftBotInput: (input, mentions) => {
+          const selected = parseBotMessageMentions(input, mentions)
+          updateThreadState(threadId, () => ({ draftInput: input, draftBotMentions: selected }))
         },
         setDraftBotReplyTo: (draftBotReplyTo) => {
           updateThreadState(threadId, () => ({ draftBotReplyTo }))

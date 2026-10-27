@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import type { BotMessageReply } from "../../../shared/bots/contracts"
+import type { BotMessageMention, BotMessageReply } from "../../../shared/bots/contracts"
 import type { FileAttachment } from "../../../shared/file-attachment"
 import {
   bindBotConversationDraft,
@@ -20,6 +20,7 @@ const file: FileAttachment = {
 const fixture = () => {
   let state = {
     draftInput: "",
+    draftBotMentions: undefined as BotMessageMention[] | undefined,
     draftAttachments: [] as FileAttachment[],
     draftBotReplyTo: null as BotMessageReply | null,
     messages: []
@@ -30,6 +31,7 @@ const fixture = () => {
     for (const listener of listeners) listener()
   }
   const actions = {
+    setDraftBotInput: (draftInput: string, draftBotMentions: BotMessageMention[]) => publish({ draftInput, draftBotMentions }),
     setDraftBotReplyTo: (draftBotReplyTo: BotMessageReply | null) => publish({ draftBotReplyTo }),
     setDraftInput: (draftInput: string) => publish({ draftInput }),
     setDraftAttachments: (draftAttachments: FileAttachment[]) => publish({ draftAttachments })
@@ -86,7 +88,7 @@ describe("private Bot drafts in the original ThreadContext", () => {
     const f = fixture()
     expect(restoreBotConversationDraft(f.context, "local", "a", "thread", "work")).toBeNull()
     expect(f.state().draftInput).toBe(text)
-    expect(f.state()).not.toHaveProperty("draftBotMentions")
+    expect(f.state().draftBotMentions).toBeUndefined()
     expect(saveBotConversationDraft(f.context, "local", "a", "thread", "work")).toBeNull()
     expect(JSON.parse(values.get(key)!)).not.toHaveProperty("mentions")
   })
@@ -251,4 +253,23 @@ describe("private Bot drafts in the original ThreadContext", () => {
     expect(values.has('cmb-bot-conversation-draft-v1:["other-host","removed"]')).toBe(true)
     expect(values.get(groupKey)).toBe("group record")
   })
+})
+
+
+it("persists a selected identity with its draft, but rejects damaged identity/text bindings", () => {
+  const f = fixture()
+  const mentions = [{ start: 0, end: 2, botId: "peer", label: "乙" }]
+  const unbind = bindBotConversationDraft(f.context, "local", "a", "thread", vi.fn())
+  f.actions.setDraftBotInput("@乙 你好", mentions)
+  f.actions.setDraftAttachments([file])
+  const cold = fixture()
+  expect(restoreBotConversationDraft(cold.context, "local", "a", "thread")).toBeNull()
+  expect(cold.state()).toMatchObject({ draftInput: "@乙 你好", draftBotMentions: mentions, draftAttachments: [file] })
+  const key = 'cmb-bot-conversation-draft-v1:["local","a"]'
+  const saved = JSON.parse(values.get(key)!)
+  values.set(key, JSON.stringify({ ...saved, text: "@甲 你好" }))
+  const broken = fixture()
+  expect(restoreBotConversationDraft(broken.context, "local", "a", "thread")).toBeTruthy()
+  expect(broken.state().draftInput).toBe("")
+  unbind()
 })

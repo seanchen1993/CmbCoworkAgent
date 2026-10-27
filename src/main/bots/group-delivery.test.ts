@@ -44,52 +44,22 @@ function receipt(groupId = "g", taskId = task.id, status: "success" | "error" = 
 }
 
 describe("formal group delivery", () => {
-  it("allows a member with completed same-request peer work to pass without a public echo", async () => {
-    let eligible = true
-    const publishGroupMessage = vi.fn()
-    const sent = vi.fn()
-    const send = createBotGroupMessageTool(
-      task,
-      () => ({ publishGroupMessage }) as unknown as LocalBotHost,
-      new AbortController().signal,
-      sent,
-      () => eligible
-    )
-    const call = {
-      type: "tool_call" as const,
-      id: "completed-peer-pass",
-      name: send.name,
-      args: { content: "(pass)" }
-    }
-    const result = await send.invoke(call)
-    const messages = [
-      new HumanMessage("Original assignment"),
-      new AIMessage({ content: "", tool_calls: [call] }),
-      result,
-      new AIMessage("")
-    ]
-    expect(createBotGroupDeliveryCheck(task, false, () => eligible)(messages)).toBeUndefined()
-    expect(createBotGroupDeliveryCheck(task)(messages)).toContain("bot_send_message")
+  it("does not force an unassigned room member to acknowledge a user request", () => {
+    const check = createBotGroupDeliveryCheck(task)
     expect(
-      createBotGroupDeliveryCheck(task, false, () => eligible)([new AIMessage("(pass)")])
+      check([
+        new HumanMessage("Only member B has work; member A need not reply."),
+        new AIMessage("(pass)")
+      ])
     ).toBeUndefined()
+    // Silence is not a substitute for publishing an actual result or blocker.
     expect(
-      createBotGroupDeliveryCheck(
-        task,
-        false,
-        () => eligible
-      )([new AIMessage("Here is my separate analysis")])
+      check([
+        new HumanMessage("Member A: report your result."),
+        new AIMessage("Finished: total 19.00")
+      ])
     ).toContain("bot_send_message")
-    expect(publishGroupMessage).not.toHaveBeenCalled()
-    expect(sent).not.toHaveBeenCalled()
-    // A newly injected user request restores the ordinary delivery obligation.
-    const check = createBotGroupDeliveryCheck(task, false, () => eligible)
-    eligible = false
-    expect(check(messages)).toContain("bot_send_message")
-    await send.invoke(call)
-    expect(publishGroupMessage).toHaveBeenCalledOnce()
   })
-
   it.each(["private", "current-group"] as const)(
     "rejects raw attachment arguments before any text publication in %s mode",
     async (mode) => {
@@ -404,14 +374,14 @@ describe("formal group delivery", () => {
       new AIMessage("")
     ]
     expect(createBotGroupDeliveryCheck(review)(transcript)).toBeUndefined()
-    expect(createBotGroupDeliveryCheck(task)(transcript)).toContain("bot_send_message")
+    expect(createBotGroupDeliveryCheck(task)(transcript)).toBeUndefined()
     expect(createBotGroupDeliveryCheck(review)([transcript[0], result, transcript[3]])).toContain(
       "bot_send_message"
     )
-    // A literal answer to a direct user request is not an optional abstention.
+    // The public room protocol applies to initial member turns as well.
     const direct = createBotGroupMessageTool(task, () => host, new AbortController().signal, sent)
     await direct.invoke(call)
-    expect(publishGroupMessage).toHaveBeenCalledExactlyOnceWith(task.id, "pass-1", "(pass)")
+    expect(publishGroupMessage).not.toHaveBeenCalled()
   })
 
   it("lets a real asynchronous handoff yield without forcing a waiting acknowledgement", () => {
@@ -563,7 +533,7 @@ describe("formal group delivery", () => {
     }
   })
 
-  it("preserves private peer results and only permits pass on internal/optional turns", () => {
+  it("preserves private peer result obligations while allowing public members to abstain", () => {
     const final = (text: string) => [new HumanMessage("Work"), new AIMessage(text)]
     const peer: BotTask = {
       ...task,
@@ -585,7 +555,7 @@ describe("formal group delivery", () => {
     }
     expect(createBotGroupDeliveryCheck(review)(final("(pass)"))).toBeUndefined()
     expect(createBotGroupDeliveryCheck(review)(final("New result"))).toContain("bot_send_message")
-    expect(createBotGroupDeliveryCheck(task)(final("(pass)"))).toContain("bot_send_message")
+    expect(createBotGroupDeliveryCheck(task)(final("(pass)"))).toBeUndefined()
     const callback: BotTask = {
       ...peer,
       origin: {

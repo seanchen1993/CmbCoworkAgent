@@ -155,6 +155,10 @@ export function BotConversation({
         ? { textOnlyReason: "模拟渠道仅支持文字和同受众工作，不支持附件、技能或本机资源。" }
         : {}),
       ownerConversation: Boolean(work?.conversation?.state === "bound"),
+      ...(!work ? { mentionOptions: {
+        bots: bots.filter((peer) => peer.hostId === bot.hostId && peer.id !== bot.id && !peer.archived && !peer.deleting),
+        groups: mentionGroups
+      } } : {}),
       submit,
       submitDraft,
       validateDraft: validateBotDraft,
@@ -176,6 +180,10 @@ export function BotConversation({
     [
       submit,
       submitDraft,
+      bots,
+      mentionGroups,
+      work,
+      bot.hostId,
       reconcileDrafts,
       work?.source,
       work?.conversation?.state,

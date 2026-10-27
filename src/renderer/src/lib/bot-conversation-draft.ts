@@ -1,4 +1,6 @@
 import { z } from "zod"
+import type { BotMessageMention } from "../../../shared/bots/contracts"
+import { parseBotMessageMentions } from "../../../shared/bots/message-mentions"
 import { isBotMessageReply } from "../../../shared/bots/message-reply"
 import type { useThreadContext } from "./thread-context"
 import {
@@ -14,11 +16,16 @@ type DraftContext = Pick<
 >
 const prefix = "cmb-bot-conversation-draft-v1:"
 const schema = botDraftContentSchema.extend({
-  version: z.literal(1),
+  version: z.union([z.literal(1), z.literal(2)]),
+  mentions: z.array(z.custom<BotMessageMention>()).optional(),
   replyTo: z
     .custom<import("../../../shared/bots/contracts").BotMessageReply>(isBotMessageReply)
     .nullable()
     .optional()
+}).superRefine((draft, ctx) => {
+  if (draft.version !== 2) return
+  try { parseBotMessageMentions(draft.text, draft.mentions) }
+  catch { ctx.addIssue({ code: z.ZodIssueCode.custom, message: "提及草稿无效" }) }
 })
 const key = (hostId: string, botId: string, workId?: string) =>
   prefix + JSON.stringify(workId ? [hostId, botId, workId] : [hostId, botId])
@@ -43,7 +50,9 @@ export function restoreBotConversationDraft(
   if (saved.error) return saved.error
   if (saved.draft) {
     const actions = context.getThreadActions(threadId)
-    actions.setDraftInput(saved.draft.text)
+    if (saved.draft.version === 2 && saved.draft.mentions?.length)
+      actions.setDraftBotInput(saved.draft.text, saved.draft.mentions)
+    else actions.setDraftInput(saved.draft.text)
     actions.setDraftAttachments(saved.draft.attachments)
     if (saved.draft.replyTo) actions.setDraftBotReplyTo(saved.draft.replyTo)
   }
@@ -61,7 +70,8 @@ export function saveBotConversationDraft(
   return saveBotDraftRecord(
     key(hostId, botId, workId),
     {
-      version: 1 as const,
+      version: 2 as const,
+      ...(current.draftBotMentions?.length ? { mentions: current.draftBotMentions } : {}),
       text: current.draftInput,
       attachments: current.draftAttachments,
       replyTo: current.draftBotReplyTo ?? null
@@ -84,7 +94,8 @@ export function bindBotConversationDraft(
   let {
     draftInput: previousText,
     draftAttachments: previousAttachments,
-    draftBotReplyTo: previousReply
+    draftBotReplyTo: previousReply,
+    draftBotMentions: previousMentions
   } = context.getThreadState(threadId)
   const save = () => onError(saveBotConversationDraft(context, hostId, botId, threadId, workId))
   if (restoreError) onError(restoreError)
@@ -94,12 +105,14 @@ export function bindBotConversationDraft(
     if (
       current.draftInput === previousText &&
       current.draftAttachments === previousAttachments &&
-      current.draftBotReplyTo === previousReply
+      current.draftBotReplyTo === previousReply &&
+      current.draftBotMentions === previousMentions
     )
       return
     previousText = current.draftInput
     previousAttachments = current.draftAttachments
     previousReply = current.draftBotReplyTo
+    previousMentions = current.draftBotMentions
     save()
   })
 }

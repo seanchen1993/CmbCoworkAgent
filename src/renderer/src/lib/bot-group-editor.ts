@@ -7,6 +7,8 @@ import { Placeholder, UndoRedo } from "@tiptap/extensions"
 import { Plugin, TextSelection } from "@tiptap/pm/state"
 import type { EditorView } from "@tiptap/pm/view"
 import { Slice, type Node as EditorNode } from "@tiptap/pm/model"
+import type { BotMessageMention } from "../../../shared/bots/contracts"
+import { parseBotMessageMentions } from "../../../shared/bots/message-mentions"
 import { validGroupMentions, type BotGroupMention } from "./bot-group-mentions"
 
 // Adapted from Grok's rich-text-editor.tsx: a plain prompt with inline mention atoms,
@@ -15,6 +17,10 @@ export function groupEditorContent(
   text: string,
   mentions: readonly BotGroupMention[]
 ): JSONContent {
+  return mentionEditorContent(text, validGroupMentions(text, mentions))
+}
+
+function mentionEditorContent(text: string, mentions: readonly (BotGroupMention | BotMessageMention)[]): JSONContent {
   const content: JSONContent[] = [{ type: "paragraph", content: [] }]
   const append = (value: string) => {
     value.split("\n").forEach((line, index) => {
@@ -23,11 +29,13 @@ export function groupEditorContent(
     })
   }
   let offset = 0
-  for (const mention of validGroupMentions(text, mentions)) {
+  for (const mention of mentions) {
     append(text.slice(offset, mention.start))
     content.at(-1)!.content!.push({
       type: "groupMention",
-      attrs: { botId: mention.botId, label: mention.label }
+      attrs: "kind" in mention && mention.kind === "group"
+        ? { kind: "group", groupId: mention.groupId, label: mention.label }
+        : { botId: mention.botId, label: mention.label }
     })
     offset = mention.end
   }
@@ -35,9 +43,24 @@ export function groupEditorContent(
   return { type: "doc", content }
 }
 
+/** Private chat shares the atom/clipboard model; selected IDs remain the existing message contract. */
+export function privateEditorContent(text: string, mentions: readonly BotMessageMention[]): JSONContent {
+  return mentionEditorContent(text, parseBotMessageMentions(text, mentions))
+}
+
+export function privateEditorDraft(doc: JSONContent): { text: string; mentions: BotMessageMention[] } {
+  const draft = mentionEditorDraft(doc)
+  return { text: draft.text, mentions: parseBotMessageMentions(draft.text, draft.mentions) }
+}
+
 export function groupEditorDraft(doc: JSONContent): { text: string; mentions: BotGroupMention[] } {
+  const draft = mentionEditorDraft(doc)
+  return { text: draft.text, mentions: draft.mentions.filter((item): item is BotGroupMention => !("kind" in item)) }
+}
+
+function mentionEditorDraft(doc: JSONContent): { text: string; mentions: (BotGroupMention | BotMessageMention)[] } {
   let text = ""
-  const mentions: BotGroupMention[] = []
+  const mentions: (BotGroupMention | BotMessageMention)[] = []
   const visit = (node: JSONContent) => {
     if (node.type === "text") text += node.text ?? ""
     else if (node.type === "hardBreak") text += "\n"
@@ -45,7 +68,9 @@ export function groupEditorDraft(doc: JSONContent): { text: string; mentions: Bo
       const { label, botId } = node.attrs
       const start = text.length
       text += `@${label}`
-      if (botId === null || typeof botId === "string")
+      if (node.attrs.kind === "group" && typeof node.attrs.groupId === "string")
+        mentions.push({ start, end: text.length, kind: "group", groupId: node.attrs.groupId, label })
+      else if (botId === null || typeof botId === "string")
         mentions.push({ start, end: text.length, botId, label })
     } else node.content?.forEach(visit)
   }
@@ -60,6 +85,30 @@ export function groupEditorOffset(doc: EditorNode, position: number): number {
   return doc.textBetween(0, position, "\n", (node) =>
     node.type.name === "groupMention" ? `@${node.attrs.label}` : "\n"
   ).length
+}
+
+/** Convert the plain draft cursor into a PM position without placing it inside an atom. */
+export function groupEditorPosition(doc: EditorNode, offset: number): number {
+  const target = Math.max(0, offset)
+  let result: number | undefined, end = 1, plain = 0, seenParagraph = false
+  doc.descendants((node, pos) => {
+    if (result !== undefined) return false
+    if (node.isTextblock) {
+      if (seenParagraph) plain++
+      seenParagraph = true
+      end = pos + 1
+      if (plain >= target) { result = end; return false }
+    }
+    if (!node.isInline) return true
+    const length = node.isText ? node.text!.length
+      : node.type.name === "groupMention" ? `@${node.attrs.label}`.length : 1
+    end = pos + node.nodeSize
+    if (target <= plain + length)
+      result = node.isText ? pos + Math.max(0, target - plain) : target <= plain ? pos : end
+    plain += length
+    return false
+  })
+  return result ?? end
 }
 
 /** Match Grok's Mention backspace: return to the trigger without retaining its recipient ID. */
@@ -84,7 +133,7 @@ export const GroupMentionNode = Node.create({
   inline: true,
   atom: true,
   selectable: false,
-  addAttributes: () => ({ botId: { default: null }, label: { default: "" } }),
+  addAttributes: () => ({ botId: { default: null }, label: { default: "" }, kind: { default: null }, groupId: { default: null } }),
   // Clipboard/drag HTML is never a source of recipient authority.
   parseHTML: () => [],
   renderText: ({ node }) => `@${node.attrs.label}`,
@@ -100,7 +149,7 @@ export const GroupMentionNode = Node.create({
       new Plugin({
         filterTransaction: (transaction) => {
           if (!transaction.docChanged) return true
-          const draft = groupEditorDraft(transaction.doc.toJSON())
+          const draft = mentionEditorDraft(transaction.doc.toJSON())
           return draft.text.length <= 30_000 && draft.mentions.length <= 128
         }
       })

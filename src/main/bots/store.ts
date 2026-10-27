@@ -1961,31 +1961,6 @@ export class BotStore {
       : null
   }
 
-  /** A selected member may already have served this exact request through a private handoff. */
-  completedGroupPeerWork(taskId: string): boolean {
-    const task = this.getTask(taskId)
-    if (task.origin.kind !== "group") return false
-    return !!this.rows(
-      `SELECT 1 FROM bot_tasks peer JOIN bot_tasks root
-       ON root.id=json_extract(peer.origin_json,'$.rootTaskId')
-       WHERE peer.bot_id=? AND peer.thread_id=? AND peer.state='completed'
-         AND peer.created_at>=? AND json_extract(peer.origin_json,'$.kind')='bot'
-         AND json_extract(peer.origin_json,'$.expectsReply')=1
-         AND json_extract(peer.origin_json,'$.groupId')=?
-         AND json_extract(root.origin_json,'$.kind')='group'
-         AND json_extract(root.origin_json,'$.groupId')=?
-         AND json_extract(root.origin_json,'$.messageId')=? LIMIT 1`,
-      [
-        task.botId,
-        task.threadId,
-        task.createdAt,
-        task.origin.groupId,
-        task.origin.groupId,
-        task.origin.messageId
-      ]
-    )[0]
-  }
-
   pendingConversationTasks(botId: string, groupId?: string, workId?: string): BotTask[] {
     if (groupId && workId) throw new BotError("INVALID_INPUT", "工作与群目标不能混用")
     const threadId = workId

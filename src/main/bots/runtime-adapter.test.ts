@@ -60,7 +60,6 @@ const fixture = vi.hoisted(() => ({
   recordQuestionResult: vi.fn(),
   publishMessage: vi.fn(() => ({ groupId: "g", messageId: "sent-message" })),
   groupMessages: vi.fn<() => BotGroupMessage[]>(() => []),
-  completedGroupPeerWork: vi.fn(() => false),
   groupTaskRequest: vi.fn<() => Pick<BotGroupMessage, "id" | "text" | "createdAt"> | null>(
     () => null
   ),
@@ -265,7 +264,6 @@ function port(linked?: BotWorkItem, mock?: BotMockExecution) {
         publishGroupFiles: fixture.publishFiles,
         publishGroupMessage: fixture.publishMessage,
         groupMessages: fixture.groupMessages,
-        completedGroupPeerWork: fixture.completedGroupPeerWork,
         groupTaskRequest: fixture.groupTaskRequest,
         peers: fixture.peers,
         peerHandoff: fixture.peerHandoff,
@@ -329,7 +327,6 @@ beforeEach(() => {
   fixture.continuationFiles.mockReset().mockReturnValue([])
   fixture.stoppedTasks.mockReset().mockReturnValue([])
   fixture.groupMessages.mockReset().mockReturnValue([])
-  fixture.completedGroupPeerWork.mockReset().mockReturnValue(false)
   fixture.groupTaskRequest.mockReset().mockReturnValue(null)
   fixture.peers.mockReset().mockReturnValue([])
   fixture.checkpointTuple
@@ -352,37 +349,39 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
-  it.each([true, false])(
-    "only permits direct-member silence with exact completed peer work (%s)",
-    async (completed) => {
-      fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
-      fixture.completedGroupPeerWork.mockReturnValue(completed)
-      fixture.start.mockImplementationOnce(async (request, _delivery, context) => {
-        expect(
-          request.message.includes("completed internal work linked to this exact group request")
-        ).toBe(completed)
-        const reminder = context.checkFinalDelivery!([
-          new HumanMessage("Current request"),
+  it("lets an unassigned public member pass while retaining delivery checks for real output", async () => {
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+    fixture.start.mockImplementationOnce(async (request, _delivery, context) => {
+      expect(request.message).toContain("Being selected to take a room turn does not require")
+      expect(request.message).toContain("Do not skip remaining analysis or requested files")
+      expect(
+        context.checkFinalDelivery!([
+          new HumanMessage("Only the other member has work"),
           new AIMessage("(pass)")
         ])
-        if (completed) expect(reminder).toBeUndefined()
-        else expect(reminder).toContain("bot_send_message")
-        context.onFinalAssistant?.({ messageId: "quiet", finalText: "(pass)" })
-        expect(context.shouldRaiseCompletionAttention?.()).toBe(!completed)
-        context.onRunTerminated?.({ outcome: "success", code: "done" })
-        return { completion: Promise.resolve() }
-      })
-      await port()
-        .acquire(bot, {
-          ...task,
-          threadId: "group-g-a",
-          origin: { kind: "group", groupId: "g", messageId: "current" }
-        })!
-        .execute(new AbortController().signal, vi.fn())
-      expect(fixture.completedGroupPeerWork).toHaveBeenCalledWith(task.id)
-      expect(fixture.publishMessage).not.toHaveBeenCalled()
-    }
-  )
+      ).toBeUndefined()
+      expect(
+        context.checkFinalDelivery!([
+          new HumanMessage("Now perform your own new assignment"),
+          new AIMessage("Done")
+        ])
+      ).toContain("bot_send_message")
+      context.onFinalAssistant?.({ messageId: "quiet", finalText: "(pass)" })
+      expect(context.shouldRaiseCompletionAttention?.()).toBe(false)
+      context.onFinalAssistant?.({ messageId: "result", finalText: "New result" })
+      expect(context.shouldRaiseCompletionAttention?.()).toBe(true)
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    await port()
+      .acquire(bot, {
+        ...task,
+        threadId: "group-g-a",
+        origin: { kind: "group", groupId: "g", messageId: "current" }
+      })!
+      .execute(new AbortController().signal, vi.fn())
+    expect(fixture.publishMessage).not.toHaveBeenCalled()
+  })
 
   it("runs reaction feedback in the original normal mode and makes attention depend on useful output", async () => {
     fixture.thread.mockReturnValue({
@@ -2975,7 +2974,7 @@ describe("Bot Runtime integration", () => {
     if (origin.kind === "group") {
       expect(prompt).toContain("The host has selected you as a recipient")
       expect(prompt).toContain("Follow the user's actual requested scope")
-      expect(fixture.start.mock.calls[0][0].message).toContain("Current direct user request.")
+      expect(fixture.start.mock.calls[0][0].message).toContain("Current user request.")
     } else expect(prompt).not.toContain("The host has selected you as a recipient")
     if (origin.kind === "discussion") {
       expect(fixture.profileTools).not.toHaveBeenCalled()
@@ -4165,7 +4164,8 @@ describe("private Bot selected identity context", () => {
     expect(request.message).toBe(input.message)
     expect(context.extraSystemPrompt).toContain(JSON.stringify({ kind: "group", ...reference }))
     expect(context.extraSystemPrompt).toContain("Bot members only")
-    expect(context.extraSystemPrompt).toContain("does not send a message or authorize delegation")
+    expect(context.extraSystemPrompt).toContain("You can reach these Bots with bot_delegate using their IDs")
+    expect(context.extraSystemPrompt).toContain("asks not to contact it")
     expect(fixture.groupReference).toHaveBeenCalledWith("stable-group", bot.id)
     fixture.steer.mockResolvedValue({ queued: true })
     expect(await port().acquire(bot, task)!.steer!(input, () => true)).toBe(true)
@@ -4223,7 +4223,8 @@ describe("private Bot selected identity context", () => {
       JSON.stringify({ id: "stable-peer", currentName: "Renamed", description: "Public role" })
     )
     expect(context.extraSystemPrompt).not.toContain("PRIVATE_PEER_INSTRUCTIONS")
-    expect(context.extraSystemPrompt).toContain("does not send a message or authorize delegation")
+    expect(context.extraSystemPrompt).toContain("You can reach these Bots with bot_delegate using their IDs")
+    expect(context.extraSystemPrompt).toContain("asks not to contact it")
     expect(context.extraSystemPrompt).toContain(
       "never replace an unavailable Bot with a same-name Bot"
     )

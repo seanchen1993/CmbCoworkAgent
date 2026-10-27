@@ -614,10 +614,6 @@ export class LocalBotHost {
     this.requireRunning()
     return this.store.groupTaskRequest(taskId)
   }
-  completedGroupPeerWork(taskId: string): boolean {
-    this.requireRunning()
-    return this.store.completedGroupPeerWork(taskId)
-  }
   recordGroupQuestion(taskId: string, request: UserInputRequest): void {
     const run = this.active.get(taskId)
     if (!run) return

@@ -3503,3 +3503,8 @@ button.bot-inline-mention:focus-visible {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Private chat uses the same atomic mention editor inside the original composer. */
+.bot-private-input { padding: 14px 94px 14px 46px; line-height: 22px; }
+.bot-private-input .bot-group-editor { min-height: 20px; max-height: 176px; padding: 0; }
+.bot-private-input .bot-group-editor[contenteditable="false"] { opacity: .7; }

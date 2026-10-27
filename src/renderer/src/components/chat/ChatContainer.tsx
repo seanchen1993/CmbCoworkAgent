@@ -1,4 +1,6 @@
-import type { BotMessageReply } from "../../../../shared/bots/contracts"
+import type { BotGroupInputControl } from "@/components/bots/BotGroupMentionInput"
+import { parseBotMessageMentions } from "../../../../shared/bots/message-mentions"
+import type { BotDefinition, BotGroup, BotMessageReply } from "../../../../shared/bots/contracts"
 import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useModCommands } from "../../features/slash-commands/useModCommands"
@@ -902,7 +904,12 @@ const CHAT_SURFACE_CONFIG: Record<ChatSurface, ChatSurfaceConfig> = {
   }
 }
 
+const BotPrivateMentionInput = React.lazy(() => import("@/components/bots/BotGroupMentionInput")
+  .then((module) => ({ default: module.BotPrivateMentionInput })))
+
 export interface ManagedChatTurn {
+  /** Only local private Bot conversations supply a verified same-host roster. */
+  mentionOptions?: { bots: BotDefinition[]; groups: readonly BotGroup[] }
   /** Trusted local task: preserve the Thread's original model/mode controls. */
   ownerConversation?: boolean
   /** A trusted external work stays text-only even when opened on the desktop. */
@@ -1755,6 +1762,8 @@ export function ChatContainer({
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const botInputRef = useRef<BotGroupInputControl | null>(null)
+  const [botCaret, setBotCaret] = useState(0)
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
@@ -2316,6 +2325,7 @@ export function ChatContainer({
     currentModel,
     draftInput: input,
     draftBotReplyTo,
+    draftBotMentions,
     draftAttachments,
     harnessNextActionDialogTips,
     draftSkill: selectedSkill,
@@ -2365,6 +2375,7 @@ export function ChatContainer({
     clearHookInterruption,
     setContextReminder,
     setDraftInput: setInput,
+    setDraftBotInput,
     setDraftBotReplyTo,
     setDraftAttachments,
     setHarnessNextActionDialogTips,
@@ -4779,7 +4790,7 @@ export function ChatContainer({
   const cancelBotReply = useCallback(() => {
     replySelection.current++
     setDraftBotReplyTo(null)
-    inputRef.current?.focus()
+    ;(botInputRef.current ?? inputRef.current)?.focus()
   }, [setDraftBotReplyTo])
   const botReplyScrollRef = useRef(scrollToMessageById)
   useLayoutEffect(() => {
@@ -4827,7 +4838,7 @@ export function ChatContainer({
                 .then((reply) => {
                   if (!chatViewMountedRef.current || selection !== replySelection.current) return
                   setDraftBotReplyTo(reply)
-                  inputRef.current?.focus()
+                  ;(botInputRef.current ?? inputRef.current)?.focus()
                 })
                 .catch((error) => {
                   if (chatViewMountedRef.current && selection === replySelection.current)
@@ -5324,7 +5335,7 @@ export function ChatContainer({
   ])
   // Focus input on mount
   useEffect(() => {
-    inputRef.current?.focus()
+    ;(botInputRef.current ?? inputRef.current)?.focus()
   }, [threadId])
 
   const handleDismissError = (): void => {
@@ -5447,10 +5458,11 @@ export function ChatContainer({
   )
   const atFileMentions = useAtFileMentions({
     input,
-    cursorOffset: inputRef.current?.selectionStart ?? input.length,
+    cursorOffset: managedTurn?.mentionOptions ? botCaret : inputRef.current?.selectionStart ?? input.length,
     workspaceFiles,
     loadMoreWorkspaceFiles: loadMoreWorkspaceMentionFiles,
-    disabled: Boolean(managedTurn?.textOnlyReason) || slash.mode.kind === "slash" || !workspacePath
+    disabled: Boolean(managedTurn?.textOnlyReason) || slash.mode.kind === "slash" || !workspacePath ||
+      Boolean(managedTurn?.mentionOptions && draftBotMentions?.some((item) => botCaret > item.start && botCaret <= item.end))
   })
   const slashPopoverKind = slash.mode.kind
   const hasPendingGoalTransportPayload =
@@ -5561,7 +5573,7 @@ export function ChatContainer({
       setInput(nextInput)
       slashResetSelection()
       requestAnimationFrame(() => {
-        const textarea = inputRef.current
+        const textarea = botInputRef.current ?? inputRef.current
         if (!textarea) return
         const cursor = nextInput.length
         textarea.setSelectionRange(cursor, cursor)
@@ -5617,7 +5629,7 @@ export function ChatContainer({
 
         setInput(nextInput)
         requestAnimationFrame(() => {
-          const textarea = inputRef.current
+          const textarea = botInputRef.current ?? inputRef.current
           if (!textarea) return
           textarea.setSelectionRange(nextCursor, nextCursor)
         })
@@ -5822,9 +5834,12 @@ export function ChatContainer({
     ]
   )
 
-  const handleSubmit = async (e: React.FormEvent, defaultText = ""): Promise<void> => {
+  const handleSubmit = async (e: Pick<Event, "preventDefault">, defaultText = ""): Promise<void> => {
     e.preventDefault()
     const trimmedInput = defaultText || input.trim()
+    let selectedBotMentions = !defaultText && managedTurn?.mentionOptions
+      ? parseBotMessageMentions(trimmedInput, draftBotMentions, input.length - input.trimStart().length)
+      : []
     if (
       managedTurn?.textOnlyReason &&
       (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser)
@@ -6096,6 +6111,7 @@ export function ChatContainer({
       try {
         atFileResolution = await resolveAtFileAttachments({
           rawMessage,
+          ...(selectedBotMentions.length ? { protectedRanges: selectedBotMentions } : {}),
           attachments: claimedAttachments,
           mentionedFiles: claimedMentionedFiles,
           workspacePath,
@@ -6136,6 +6152,13 @@ export function ChatContainer({
         mentionAttachmentLimitHit,
         warningMessage: atFileWarningMessage
       } = atFileResolution
+      for (const edit of [...atFileResolution.textEdits].reverse()) {
+        const next = rawMessage.slice(0, edit.start) + edit.text + rawMessage.slice(edit.end)
+        const delta = edit.text.length - (edit.end - edit.start)
+        selectedBotMentions = selectedBotMentions.map((mention) => mention.start >= edit.end
+          ? { ...mention, start: mention.start + delta, end: mention.end + delta } : mention)
+        rawMessage = next
+      }
       rawMessage = cleanedMessage
 
       // These are delivery warnings, not run failures. A thread error blocks the
@@ -6211,6 +6234,7 @@ export function ChatContainer({
       const composedDraft: QueuedMessage = {
         id: crypto.randomUUID(),
         text: userText,
+        ...(selectedBotMentions.length ? { botMentions: parseBotMessageMentions(userText, selectedBotMentions) } : {}),
         ...(surface === "bot" && draftBotReplyTo ? { botReplyTo: draftBotReplyTo } : {}),
         attachmentModelBlocks,
         attachmentDisplayPrefix,
@@ -6237,7 +6261,8 @@ export function ChatContainer({
           return
         }
         const currentDraft = threadContext.getThreadState(threadId)
-        if (!defaultText && currentDraft.draftInput.trim() === trimmedInput) setInput("")
+        if (!defaultText && currentDraft.draftInput.trim() === trimmedInput &&
+          (!managedTurn.mentionOptions || currentDraft.draftBotMentions === draftBotMentions)) setInput("")
         if (currentDraft.draftAttachments === claimedAttachments) setAttachments([])
         if (composedDraft.botReplyTo && currentDraft.draftBotReplyTo === composedDraft.botReplyTo)
           setDraftBotReplyTo(null)
@@ -6249,7 +6274,7 @@ export function ChatContainer({
         void managedTurn.submitDraft(composedDraft).catch((error) => {
           setError(error instanceof Error ? error.message : "消息未发送，原内容已保留。")
         })
-        requestAnimationFrame(() => inputRef.current?.focus())
+        requestAnimationFrame(() => (botInputRef.current ?? inputRef.current)?.focus())
         return
       }
 
@@ -6263,7 +6288,7 @@ export function ChatContainer({
         // FAILED submit attempt right after Stop can't accidentally un-suppress.
         setQueueAutoDrainSuppressed(false)
         requestAnimationFrame(() => {
-          inputRef.current?.focus()
+          (botInputRef.current ?? inputRef.current)?.focus()
         })
         return
       }
@@ -7077,16 +7102,16 @@ export function ChatContainer({
     return () => window.removeEventListener("focus", reconcile)
   }, [reconcileBotDrafts, botDraftReceiptRevision, queuedMessages, historyLoading])
 
-  const handleKeyDown = (e: React.KeyboardEvent): void => {
+  const handleKeyDown = (e: React.KeyboardEvent | KeyboardEvent): void => {
     // IME composing (Chinese/Japanese/Korean) should not trigger submit on Enter
-    const isComposing = e.nativeEvent.isComposing || isComposingRef.current
+    const isComposing = ("nativeEvent" in e ? e.nativeEvent.isComposing : e.isComposing) || isComposingRef.current
     if (isComposing) return
 
     // Slash popover nav takes over keys while open.
     if (slash.mode.kind === "slash") {
       if (e.key === "Enter" && !e.shiftKey && isBareGoalSlashCommandInput(input)) {
         e.preventDefault()
-        const form = (e.currentTarget as HTMLTextAreaElement).form
+        const form = (e.target as HTMLElement).closest("form")
         form?.requestSubmit()
         return
       }
@@ -7127,7 +7152,7 @@ export function ChatContainer({
       }
     }
 
-    if (atFileMentions.mode.kind === "at-file") {
+    if (!managedTurn?.mentionOptions && atFileMentions.mode.kind === "at-file") {
       if (e.key === "ArrowDown") {
         e.preventDefault()
         atFileMentions.moveSelection(1)
@@ -7183,7 +7208,7 @@ export function ChatContainer({
 
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
-      handleSubmit(e)
+      void handleSubmit(e)
     }
   }
 
@@ -7619,7 +7644,7 @@ export function ChatContainer({
       const nextInput = customPrompt || prompt
       setInput(nextInput)
       requestAnimationFrame(() => {
-        const textarea = inputRef.current
+        const textarea = botInputRef.current ?? inputRef.current
         if (!textarea) return
         textarea.focus()
         const cursor = nextInput.length
@@ -7702,7 +7727,7 @@ export function ChatContainer({
       setInput(nextInput)
 
       requestAnimationFrame(() => {
-        const textarea = inputRef.current
+        const textarea = botInputRef.current ?? inputRef.current
         if (!textarea) return
         textarea.focus()
         const cursor = nextInput.length
@@ -7734,7 +7759,7 @@ export function ChatContainer({
       const nextInput = /^\/goal(?:\s|$)/i.test(body) ? body : `/goal ${body}`
       setInput(nextInput)
       requestAnimationFrame(() => {
-        const textarea = inputRef.current
+        const textarea = botInputRef.current ?? inputRef.current
         if (!textarea) return
         textarea.focus()
         textarea.setSelectionRange(nextInput.length, nextInput.length)
@@ -7900,7 +7925,7 @@ export function ChatContainer({
     setInput(nextInput)
     setGoalDetailsOpen(false)
     requestAnimationFrame(() => {
-      const textarea = inputRef.current
+      const textarea = botInputRef.current ?? inputRef.current
       if (!textarea) return
       textarea.focus()
       textarea.setSelectionRange(nextInput.length, nextInput.length)
@@ -8934,7 +8959,7 @@ export function ChatContainer({
                   skillsLoading={skillsLoading}
                 />
                 <AtFileMentionPopover
-                  mode={atFileMentions.mode}
+                  mode={managedTurn?.mentionOptions ? { kind: "closed" } : atFileMentions.mode}
                   selectedIdx={atFileMentions.selectedIdx}
                   onHoverIdx={atFileMentions.setSelectedIdx}
                   onSelectFile={applyAtFileMention}
@@ -9399,7 +9424,8 @@ export function ChatContainer({
                       data-bot-composer={managedTurn ? true : undefined}
                       data-bot-owner-composer={managedTurn?.ownerConversation ? true : undefined}
                       className={cn(
-                        "relative flex-1 min-w-0 flex flex-col overflow-hidden rounded-[28px] border border-border/80 shadow-sm transition-colors duration-300",
+                        "relative flex-1 min-w-0 flex flex-col rounded-[28px] border border-border/80 shadow-sm transition-colors duration-300",
+                        managedTurn?.mentionOptions ? "overflow-visible" : "overflow-hidden",
                         pendingUserInput
                           ? "border-primary/25 bg-background"
                           : appleIntelligenceGlowEnabled && glowVisible
@@ -9557,6 +9583,44 @@ export function ChatContainer({
                         </div>
                       )}
                       {/* Textarea */}
+                      {managedTurn?.mentionOptions ? (
+                        <React.Suspense fallback={<div className="p-4 text-sm text-muted-foreground">正在载入输入框…</div>}>
+                        <BotPrivateMentionInput
+                          text={input}
+                          mentions={draftBotMentions ?? []}
+                          members={managedTurn.mentionOptions.bots}
+                          inputRef={botInputRef}
+                          placeholder={botReplyActions && draftBotReplyTo ? "回复…" : inputPlaceholder}
+                          onEdit={({ text, mentions }) => setDraftBotInput(text, mentions)}
+                          onCancelReply={() => {
+                            if (!draftBotReplyTo) return false
+                            setDraftBotReplyTo(null)
+                            return true
+                          }}
+                          onPasteFiles={(files) => {
+                            const attach = managedTurn.attachFileBytes
+                            if (!attach) return
+                            void addManagedAttachments(async (maxFiles, maxChars) => {
+                              const bytes = [] as Array<{ fileName: string; bytes: ArrayBuffer }>
+                              for (const file of files.slice(0, maxFiles)) {
+                                if (file.size > MAX_ATTACHMENT_FILE_BYTES) throw new Error(`文件“${file.name}”过大，单文件不超过 5MB`)
+                                bytes.push({ fileName: file.name, bytes: await file.arrayBuffer() })
+                              }
+                              return attach(bytes, maxChars)
+                            })
+                          }}
+                          privateChat={{
+                            groups: managedTurn.mentionOptions.groups,
+                            disabled: effectiveInputDisabled,
+                            files: atFileMentions.mode.kind === "at-file" ? atFileMentions.mode.suggestions : [],
+                            onSelectFile: applyAtFileMention,
+                            onKeyDown: handleKeyDown,
+                            onCaret: setBotCaret,
+                            className: composerRightClearanceClass ?? undefined
+                          }}
+                        />
+                        </React.Suspense>
+                      ) : (
                       <textarea
                         ref={inputRef}
                         value={input}
@@ -9592,6 +9656,7 @@ export function ChatContainer({
                         rows={managedTurn ? 1 : 2}
                         style={{ minHeight: "44px", maxHeight: "200px" }}
                       />
+                      )}
                       {/* Bottom bar: primary execution controls left, send button right */}
                       <div
                         data-composer-actions

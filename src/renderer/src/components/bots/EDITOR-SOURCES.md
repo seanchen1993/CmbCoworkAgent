@@ -1,4 +1,4 @@
-# Group composer source references
+# Bot composer source references
 
 The group editor adapts the user-provided Grok Bot reconstructed frontend:
 
@@ -13,8 +13,16 @@ workflow, PR, emoji, global clipboard, model, and service integration are omitte
 CMB-specific adapters connect the editor to the existing `text + mentions` draft,
 member ID validation, attachment handler, and `BotMentionLabel` avatar rendering.
 No rich-text JSON or second draft is persisted. Pasted labels do not create bound
-recipient IDs. The original workbench composer and Agent Runtime are unchanged
-by this editor adaptation.
+recipient IDs. Private Bot conversations now reuse these atoms through an optional managed-composer
+input; the ordinary workbench keeps its textarea, and Agent Runtime execution is unchanged.
+Private selections use the existing `BotMessageMention` and durable outbox contract,
+with no Everyone token. The v2 private draft record retains selected identities;
+v1 withdrawn drafts remain plain text. Explicit identities are protected from
+workspace-file parsing, while selected or typed file references keep their original
+attachment path. Source-side addressing follows `workflow-commands.ts`
+`withMentionedAgentsContext` and `agent-messaging.ts` `buildMentionedAgentsContext`;
+selection itself does not send or broadcast a message. Actual communication remains
+with the current Bot and its existing delegation tool.
 
 The CMB group editor supplies ProseMirror's `clipboardTextParser` using the same
 plain-prompt document builder. This preserves empty paragraphs that the library's
