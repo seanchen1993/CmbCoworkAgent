@@ -685,6 +685,7 @@ describe("Bot Runtime integration", () => {
     lease.release()
     const [request, , context] = fixture.start.mock.calls[0]
     expect(request).toMatchObject({ threadId: bot.threadId, agentMode: "normal" })
+    expect(context.openingReplyReminder).toBe(false)
     expect(context.remotePolicy).toMatchObject({
       allowedToolNames: [
         "bot_work_list",
@@ -791,6 +792,7 @@ describe("Bot Runtime integration", () => {
       .acquire(bot, { ...task, id: "desktop", threadId: work.threadId, workId: work.id }, work)!
       .execute(new AbortController().signal, vi.fn())
     expect(fixture.start.mock.calls[1][2].additionalTools).toContain("owned-browser")
+    expect(fixture.start.mock.calls[1][2].openingReplyReminder).toBe(false)
     expect(fixture.browserTools.mock.calls[0][4]).toBe(`work-${work.id}--${bot.id}`)
     expect(fixture.deliveryTools.mock.calls[0][0]).toBe(work.workspace!.path)
     expect(
@@ -2918,6 +2920,7 @@ describe("Bot Runtime integration", () => {
       .acquire(bot, { ...task, origin, ...(origin.kind === "work" ? { workId: "work" } : {}) })!
       .execute(new AbortController().signal, vi.fn())
     const prompt = fixture.start.mock.calls[0][2].extraSystemPrompt as string
+    expect(fixture.start.mock.calls[0][2].openingReplyReminder).toBe(origin.kind === "user")
     if (["user", "group", "work"].includes(origin.kind)) {
       expect(fixture.stoppedTasks).toHaveBeenCalledWith(task.id)
       expect(prompt).toContain(stoppedContext)

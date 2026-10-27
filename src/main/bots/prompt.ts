@@ -8,6 +8,11 @@ import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
 import type { BotStoppedTaskContext } from "./continuation"
 import { GROUP_DISCUSSION_PARTICIPATION } from "./group-discussion"
 
+/** Opening-reply supervision is limited to direct user messages in the main private chat. */
+export function isBotMainUserTurn(task: BotTask): boolean {
+  return task.origin.kind === "user" && !task.workId && !task.mockSource
+}
+
 function independentTaskContext(task: BotTask): string {
   return task.workId
     ? `You are ALREADY inside independent task ${JSON.stringify(task.workId)}. The host has created this conversation and started execution. Any request to create this task in the forwarded user message has already been fulfilled; carry out the actual assignment and revisions here, preserving the user's constraints and this conversation's workspace.`
@@ -140,7 +145,9 @@ export function buildBotPrompt(
     "For implementation work, check each requested acceptance criterion against the actual delivered files. Verify the documented user-facing invocation directly, without a test wrapper changing its arguments. Confirm the claimed tests actually ran; a zero exit code alone is insufficient. Passing self-tests alone does not establish requirement coverage. Distinguish an implementation defect from an incorrect test expectation before changing either; do not weaken acceptance criteria to make tests pass.",
     ...(task.origin.kind === "user" || task.origin.kind === "group"
       ? [
-          "For a direct user request, answer a simple question directly. Before tools for substantive work, give one brief visible reply describing the first action; keep the user informed at meaningful milestones and finish with the actual deliverable. An opening acknowledgement does not complete the task."
+          isBotMainUserTurn(task)
+            ? "Reply first in normal assistant text. Answer simple questions directly. Before tools for substantive work, briefly describe your first step and include the next needed tool call in the same response so execution continues. Keep the user informed at meaningful milestones and finish with the actual deliverable. An opening acknowledgement does not complete the task."
+            : "For a direct user request, answer a simple question directly. Before tools for substantive work, give one brief visible reply describing the first action; keep the user informed at meaningful milestones and finish with the actual deliverable. An opening acknowledgement does not complete the task."
         ]
       : []),
     "When the user asks to operate a browser themselves, or a step needs their login, verification or personal confirmation, call bot_request_browser_help on the observed page with one short instruction. This opens the browser and shows the user a return button; a text request alone does not transfer control. The call waits and resumes with fresh page evidence. Continue the requested work after that return. Never ask for passwords, 2FA codes or cookies in conversation, and do not claim the user finished before observing the result.",

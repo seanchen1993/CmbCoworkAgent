@@ -166,6 +166,8 @@ export interface AgentRunExecutionContext {
   additionalTools?: CreateAgentRuntimeOptions["additionalTools"]
   /** Trusted Bot delivery check; renderer input cannot supply this callback. */
   checkFinalDelivery?: CreateAgentRuntimeOptions["checkFinalDelivery"]
+  /** Bot main-private-chat only; not a renderer setting or a leaf-agent option. */
+  openingReplyReminder?: CreateAgentRuntimeOptions["openingReplyReminder"]
   toolConcurrencyQueueId?: string
   userInputWithoutToolLock?: CreateAgentRuntimeOptions["userInputWithoutToolLock"]
   botBrowserToolsOwnFileLock?: CreateAgentRuntimeOptions["botBrowserToolsOwnFileLock"]

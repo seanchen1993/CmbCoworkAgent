@@ -8178,7 +8178,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               checkFinalDelivery:
                 runExecutionContext.source === "bot"
                   ? runExecutionContext.checkFinalDelivery
-                  : undefined
+                  : undefined,
+              openingReplyReminder:
+                runExecutionContext.source === "bot" && runExecutionContext.openingReplyReminder
             }),
             harnessContext: harnessAgentContext,
             remotePolicy: runExecutionContext.remotePolicy
