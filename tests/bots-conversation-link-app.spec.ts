@@ -399,7 +399,14 @@ async function main() {
     await chat().waitFor()
     // Main chat learns the association and can retrieve pre-link history without running that work.
     await page.getByRole("button", { name: "返回主对话", exact: true }).first().click()
-    await page.locator("[data-bot-association-notice]").waitFor()
+    assert.equal(await page.locator("[data-bot-association-notice]").count(), 0)
+    await page.locator(`[data-work-id="${linked.work.id}"]`).waitFor()
+    await page.locator(`[data-work-id="${linked.work.id}"]`).click()
+    await page.getByText("来源 · 已有会话关联", { exact: true }).waitFor()
+    await page.getByRole("button", { name: "打开原会话", exact: true }).waitFor()
+    await chat().getByText(/LINK_INITIAL_REPLY/).last().waitFor()
+    await page.screenshot({ path: join(out, "artifacts", "bot-unified-task-source.png"), fullPage: true })
+    await page.getByRole("button", { name: "返回主对话", exact: true }).first().click()
     const notices = await page.evaluate(
       async (id) => (window as any).api.bots.works.associations(id),
       setup.bot.id
@@ -475,7 +482,7 @@ async function main() {
       fullPage: true
     })
     console.log(
-      "stage: association notice -> model history search/read -> exact source reveal without task execution"
+      "stage: unified task directory -> model history search/read -> exact source reveal without task execution"
     )
     await page.getByRole("tab", { name: "资料库", exact: true }).click()
     await page
@@ -500,7 +507,7 @@ async function main() {
           ["queued", "running", "waiting_user"].includes(t.state)
         )
     )
-    await page.getByRole("button", { name: "在对话模式打开", exact: true }).click()
+    await page.getByRole("button", { name: "打开原会话", exact: true }).click()
     await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).waitFor()
     await page
       .getByText(/LINK_INITIAL_REPLY/)
@@ -588,7 +595,7 @@ async function main() {
     await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).click()
     assert.equal(await detailButton().getAttribute("aria-pressed"), "true")
     await detailButton().click()
-    await page.getByRole("button", { name: "在对话模式打开", exact: true }).click()
+    await page.getByRole("button", { name: "打开原会话", exact: true }).click()
     await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).waitFor()
     assert.equal(await detailButton().getAttribute("aria-pressed"), "false")
     assert.equal(await chat().getByRole("button", { name: "思考", exact: true }).count(), 0)
@@ -614,7 +621,7 @@ async function main() {
         (await (window as any).api.threads.get(id)).metadata.model === "custom:link-original",
       threadId
     )
-    await page.getByRole("button", { name: "在对话模式打开", exact: true }).click()
+    await page.getByRole("button", { name: "打开原会话", exact: true }).click()
     await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).waitFor()
     await page.getByRole("button", { name: "完成任务", exact: true }).click()
     await page.getByRole("button", { name: "继续处理", exact: true }).waitFor()
@@ -714,6 +721,10 @@ async function main() {
     )
     await page.reload()
     await page.getByText("新建独立任务的对话", { exact: true }).first().click()
+    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).waitFor()
+    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).click()
+    await page.getByText("来源 · Bot 内新建", { exact: true }).waitFor()
+    await page.getByRole("button", { name: "在对话模式打开", exact: true }).click()
     await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).waitFor()
     const newLink = await page.evaluate(
       async (id) => (window as any).api.bots.conversations.resolve(id),

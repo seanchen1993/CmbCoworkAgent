@@ -1,4 +1,3 @@
-import { BotAssociationNotices } from "./BotAssociationNotices"
 import "./bots.css"
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { CircleAlert, Loader2, X } from "lucide-react"
@@ -248,7 +247,6 @@ export function BotConversation({
         bots={bots}
         schedules={schedules}
       >
-        {!work && <BotAssociationNotices client={client} botId={bot.id} onOpenWork={onOpenWork} />}
         <ChatContainer
           threadId={threadId}
           surface="bot"

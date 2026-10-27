@@ -250,7 +250,8 @@ async function main() {
     const mainId = setup.bot.threadId
     await ready(mainId)
     const notice = page.locator("[data-bot-association-notice]")
-    await notice.waitFor()
+    assert.equal(await notice.count(), 0)
+    await page.locator(`[data-work-id="${linked.work.id}"]`).waitFor()
     const beforeWorkRuns = await page.evaluate(
       async (id) =>
         (await (window as ApiWindow).api.bots.snapshot()).tasks.filter((t: any) => t.workId === id)
@@ -278,14 +279,16 @@ async function main() {
       fullPage: true,
       animations: "disabled"
     })
-    await notice.locator("summary").click()
+    await page.locator(`[data-work-id="${linked.work.id}"]`).click()
+    await page.getByText("来源 · 已有会话关联", { exact: true }).waitFor()
     await paint()
     await page.screenshot({
-      path: join(dir, "01-associated-expanded.png"),
+      path: join(dir, "01-associated-task-details.png"),
       fullPage: true,
       animations: "disabled"
     })
-    await notice.locator("summary").click()
+    await page.getByRole("button", { name: "返回主对话", exact: true }).first().click()
+    await ready(mainId)
     console.log("stage: real-model-correct-final-decisions", {
       toolNames: calls.map((call: any) => call.name)
     })
@@ -374,7 +377,7 @@ async function main() {
     await page.evaluate(() => document.documentElement.classList.remove("dark"))
     await sourceGroup.getByRole("button").first().click()
     await sourceVisible(threadId, sourceReceipt.receipt.entries[0].source.messageId)
-    await page.getByRole("button", { name: "在对话模式打开", exact: true }).click()
+    await page.getByRole("button", { name: "打开原会话", exact: true }).click()
     page.once("dialog", (dialog) => void dialog.accept())
     await page.getByRole("button", { name: "解除任务关联", exact: true }).click()
     await page.getByRole("button", { name: "关联为 Bot 任务", exact: true }).waitFor()

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { useAppStore } from "@/lib/store"
-import { Plus, ArrowLeft, Check, RotateCcw } from "lucide-react"
+import { Plus, ArrowLeft, ArrowUpRight, Check, RotateCcw } from "lucide-react"
 import type { BotClient } from "../../../../shared/bots/contracts"
 import type { BotWorkItem, BotWorkSummary } from "../../../../shared/bots/work"
 import type { useBotWorks } from "./use-bot-works"
@@ -160,6 +160,15 @@ export function BotWorkPanel({
   ]
   const selectedPath =
     selected?.workspace?.path ?? (workspace?.id === selected?.id ? workspace?.path : undefined)
+  const sourceLabel = selected?.source
+    ? selected.source.transport === "im" ? "IM 渠道交办" : "模拟渠道交办"
+    : selected?.conversation?.origin === "existing"
+      ? selected.conversation.ref.kind === "project_session"
+        ? "已有项目会话关联"
+        : selected.conversation.ref.kind === "cloud_session"
+          ? "已有云端会话关联"
+          : "已有会话关联"
+      : "Bot 内新建"
   return (
     <section className="bot-detail-section bot-works" aria-label="独立任务">
       <div className="bot-works-heading">
@@ -184,9 +193,13 @@ export function BotWorkPanel({
               {selected.state === "completed" ? <RotateCcw size={13} /> : <Check size={13} />}{" "}
               {selected.state === "completed" ? "继续处理" : "完成任务"}
             </button>
+          </div>
+          <div className="bot-work-origin" aria-label="任务来源">
+            <span>来源 · {sourceLabel}</span>
             {!selected.source && client.conversations && (
               <button disabled={saving} onClick={() => void openConversation()}>
-                在对话模式打开
+                {selected.conversation?.origin === "existing" ? "打开原会话" : "在对话模式打开"}
+                <ArrowUpRight size={13} aria-hidden="true" />
               </button>
             )}
           </div>
