@@ -158,6 +158,131 @@ function fixture(
 }
 
 describe("authenticated IM on the existing Bot host", () => {
+  it("exposes retained groups separately from private previews and keeps read boundaries scoped", async () => {
+    const f = fixture(),
+      a = await f.binding(),
+      b = await f.binding()
+    f.remote.set(a.id, { ...a, peerLabel: "项目协作群" })
+    await f.service.list(f.bot.id)
+    await f.service.receive(f.event(a, "group-a", "A 群的消息"))
+    await f.service.receive(f.event(b, "group-b", "B 群的消息"))
+    await eventually(
+      () =>
+        f.calls.length === 2 &&
+        f.calls.every((task) => f.store.getTask(task.id).state === "completed")
+    )
+    const groups = f.host.snapshot().imConversations!
+    expect(groups).toHaveLength(2)
+    const first = groups.find((item) => item.bindingId === a.id)!
+    const second = groups.find((item) => item.bindingId === b.id)!
+    expect(first.title).toBe("项目协作群")
+    expect(first.activity.preview).toBe("reply:A 群的消息")
+    expect(first.activity.unread).toBe(true)
+    expect(
+      f.store.activities().find((item) => item.kind === "bot" && item.id === f.bot.id)?.preview ??
+        ""
+    ).not.toContain("群的消息")
+    f.host.markRead("im", first.id, first.activity.version)
+    expect(
+      f.host.snapshot().imConversations!.find((item) => item.id === first.id)?.activity.unread
+    ).toBe(false)
+    expect(
+      f.host.snapshot().imConversations!.find((item) => item.id === second.id)?.activity.unread
+    ).toBe(true)
+    await f.service.receive(f.event(a, "later", "新的消息"))
+    await eventually(
+      () => f.calls.length === 3 && f.store.getTask(f.calls[2].id).state === "completed"
+    )
+    f.host.markRead("im", first.id, first.activity.version)
+    expect(
+      f.host.snapshot().imConversations!.find((item) => item.id === first.id)?.activity.unread
+    ).toBe(true)
+    await f.service.revoke(f.bot.id, a.id, a.version)
+    f.service.disconnected()
+    const retained = f.host.snapshot().imConversations!.find((item) => item.id === first.id)!
+    expect(retained.state).toBe("revoked")
+    expect(retained.connected).toBe(false)
+    expect(
+      f.host.imConversationHistory(f.bot.id, first.id).items.map((entry) => entry.text)
+    ).toContain("A 群的消息")
+    expect(
+      f.host
+        .imConversationHistory(f.bot.id, first.id)
+        .items.some((entry) => entry.text.includes("B 群"))
+    ).toBe(false)
+    const other = f.store.create({
+      name: "Other",
+      color: "#123456",
+      instructions: "",
+      modelRef: null
+    })
+    expect(() => f.host.imConversationHistory(other.id, first.id)).toThrow("不存在")
+    expect(() => f.host.imConversationWorks(other.id, first.id)).toThrow("不存在")
+    expect(() => f.host.markRead("im", "unknown", 1)).toThrow("不存在")
+  })
+
+  it("upgrades old group previews without replaying messages or rewriting history", async () => {
+    const f = fixture(),
+      binding = await f.binding()
+    await f.service.receive(f.event(binding, "old", "旧群消息"))
+    await eventually(
+      () => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed"
+    )
+    const group = f.host.snapshot().imConversations![0]
+    const before = f.host.imConversationHistory(f.bot.id, group.id).items
+    f.db.run("DELETE FROM bot_activity WHERE kind='im'")
+    f.db.run("INSERT OR REPLACE INTO bot_activity VALUES('bot',?,9,9,4,?,'reply:旧群消息')", [
+      f.bot.id,
+      Date.now()
+    ])
+    const restored = new BotStore(f.db)
+    expect(restored.imGateway.groupConversations()[0].activity.preview).toBe("reply:旧群消息")
+    expect(restored.activities().find((item) => item.id === f.bot.id)?.preview).toBe("")
+    expect(restored.imConversationHistory(f.bot.id, group.id).items).toEqual(before)
+    const version = restored.imGateway.groupConversations()[0].activity.version
+    const restarted = new BotStore(f.db)
+    expect(restarted.imGateway.groupConversations()[0].activity.version).toBe(version)
+    expect(f.calls).toHaveLength(1)
+  })
+
+  it("scopes group work lists and unread clocks without changing private or simulated works", async () => {
+    const f = fixture(async (task, host) => {
+      if (!task.workId)
+        await host.createWork(
+          { botId: task.botId, operationId: task.id, title: task.message, goal: "Write notice" },
+          { taskId: task.id, callId: task.id, key: task.id }
+        )
+      return { state: "completed", result: `done:${task.message}` }
+    })
+    const a = await f.binding(),
+      b = await f.binding()
+    await f.service.receive(f.event(a, "a", "A 群任务"))
+    await f.service.receive(f.event(b, "b", "B 群任务"))
+    await eventually(
+      () =>
+        f.calls.length === 4 && f.store.recentTasks().every((task) => task.state === "completed")
+    )
+    const groups = f.host.snapshot().imConversations!
+    const first = groups.find((item) => item.bindingId === a.id)!
+    const second = groups.find((item) => item.bindingId === b.id)!
+    const aWorks = f.host.imConversationWorks(f.bot.id, first.id)
+    expect(aWorks.items.map((work) => work.title)).toEqual(["A 群任务"])
+    expect(f.host.imConversationWorks(f.bot.id, second.id).items.map((work) => work.title)).toEqual(
+      ["B 群任务"]
+    )
+    expect(f.host.imConversationWorks(f.bot.id, first.id, undefined, "B 群").items).toEqual([])
+    expect(aWorks.items[0].activity?.unread).toBe(true)
+    expect(f.store.workActivities()).toEqual([])
+    const clock = f.db.exec("SELECT version FROM bot_activity WHERE kind='work-bot'")[0]
+      .values[0][0] as number
+    f.host.markWorksRead(f.bot.id, clock)
+    expect(f.host.imConversationWorks(f.bot.id, first.id).items[0].activity?.unread).toBe(true)
+    f.host.markRead("work", aWorks.items[0].id, aWorks.items[0].activity!.version)
+    expect(f.host.imConversationWorks(f.bot.id, first.id).items[0].activity?.unread).toBe(false)
+    expect(f.host.imConversationWorks(f.bot.id, second.id).items[0].activity?.unread).toBe(true)
+    expect(f.errors).toEqual([])
+  })
+
   it.each(["dm", "group"] as const)(
     "runs a wire-valid opaque sender once in %s and preserves its frozen source",
     async (kind) => {
@@ -204,7 +329,8 @@ describe("authenticated IM on the existing Bot host", () => {
       ]) {
         const client = {
           ...f.client,
-          getStatus: () => ({ principalId: principal }) as ReturnType<BotImGatewayClient["getStatus"]>
+          getStatus: () =>
+            ({ principalId: principal }) as ReturnType<BotImGatewayClient["getStatus"]>
         }
         const service = new BotImChannelService(client, realm, () => f.host)
         services.push(service)
@@ -816,61 +942,65 @@ describe("authenticated IM on the existing Bot host", () => {
     expect(f.errors).toEqual([])
   })
 
-  it.each(["member-a", "employee:42"])("creates, revises and continues work with frozen sender %s", async (sender) => {
-    let workId = ""
-    const f = fixture(async (task, host) => {
-      if (task.workId) return { state: "completed", result: `notice:${task.message}` }
-      const source = { taskId: task.id, callId: task.id, key: task.id }
-      if (task.message === "create") {
-        workId = (
-          await host.createWork(
-            { botId: task.botId, operationId: task.id, title: "周末通知", goal: "Write notice" },
-            source
+  it.each(["member-a", "employee:42"])(
+    "creates, revises and continues work with frozen sender %s",
+    async (sender) => {
+      let workId = ""
+      const f = fixture(async (task, host) => {
+        if (task.workId) return { state: "completed", result: `notice:${task.message}` }
+        const source = { taskId: task.id, callId: task.id, key: task.id }
+        if (task.message === "create") {
+          workId = (
+            await host.createWork(
+              { botId: task.botId, operationId: task.id, title: "周末通知", goal: "Write notice" },
+              source
+            )
+          ).work.id
+        } else if (task.message === "revise") host.sendWork(source, workId, "Change to Sunday")
+        else if (task.message === "complete" || task.message === "continue")
+          await host.changeWorkFromTool(
+            source,
+            workId,
+            host.getWork(task.botId, workId).version,
+            task.message
           )
-        ).work.id
-      } else if (task.message === "revise") host.sendWork(source, workId, "Change to Sunday")
-      else if (task.message === "complete" || task.message === "continue")
-        await host.changeWorkFromTool(
-          source,
-          workId,
-          host.getWork(task.botId, workId).version,
-          task.message
-        )
-      return { state: "completed", result: `handled:${task.message}` }
-    })
-    const b = await f.binding()
-    const event = (id: string) => {
-      const input = f.event(b, id, id)
-      input.route.senderId = sender
-      return input
-    }
-    await f.service.receive(event("create"))
-    await eventually(
-      () => f.calls.length === 2 && f.store.recentTasks().every((t) => t.state === "completed")
-    )
-    await f.service.receive(event("revise"))
-    await eventually(
-      () => f.calls.length === 4 && f.store.recentTasks().every((t) => t.state === "completed")
-    )
-    await f.service.receive(event("complete"))
-    await eventually(() => f.host.getWork(f.bot.id, workId).state === "completed")
-    await f.service.receive(event("continue"))
-    await eventually(() => f.host.getWork(f.bot.id, workId).state === "active")
-    expect(f.host.listWorks(f.bot.id).items).toHaveLength(1)
-    expect(f.calls.filter((t) => t.workId).map((t) => t.workId)).toEqual([workId, workId])
-    expect(f.host.getWork(f.bot.id, workId).source?.transport).toBe("im")
-    expect(f.host.getWork(f.bot.id, workId).source?.senderId).toBe(
-      botImScopeId("realm", "owner", sender)
-    )
-    for (const task of f.calls.filter((task) => task.mockSource)) {
-      const saved = f.store.getTask(task.id)
-      expect(saved.mockSource?.senderId).toBe(botImScopeId("realm", "owner", sender))
-      expect(f.store.im.validateSource(saved.mockSource!, f.bot.id, false)).toEqual(
-        saved.mockSource
+        return { state: "completed", result: `handled:${task.message}` }
+      })
+      const b = await f.binding()
+      const event = (id: string) => {
+        const input = f.event(b, id, id)
+        input.route.senderId = sender
+        return input
+      }
+      await f.service.receive(event("create"))
+      await eventually(
+        () => f.calls.length === 2 && f.store.recentTasks().every((t) => t.state === "completed")
       )
+      await f.service.receive(event("revise"))
+      await eventually(
+        () => f.calls.length === 4 && f.store.recentTasks().every((t) => t.state === "completed")
+      )
+      await f.service.receive(event("complete"))
+      await eventually(() => f.host.getWork(f.bot.id, workId).state === "completed")
+      await f.service.receive(event("continue"))
+      await eventually(() => f.host.getWork(f.bot.id, workId).state === "active")
+      expect(f.host.listWorks(f.bot.id).items).toHaveLength(0)
+      expect(f.host.imConversationWorks(f.bot.id, f.host.getWork(f.bot.id, workId).source!.bindingId).items.map((item) => item.id)).toEqual([workId])
+      expect(f.calls.filter((t) => t.workId).map((t) => t.workId)).toEqual([workId, workId])
+      expect(f.host.getWork(f.bot.id, workId).source?.transport).toBe("im")
+      expect(f.host.getWork(f.bot.id, workId).source?.senderId).toBe(
+        botImScopeId("realm", "owner", sender)
+      )
+      for (const task of f.calls.filter((task) => task.mockSource)) {
+        const saved = f.store.getTask(task.id)
+        expect(saved.mockSource?.senderId).toBe(botImScopeId("realm", "owner", sender))
+        expect(f.store.im.validateSource(saved.mockSource!, f.bot.id, false)).toEqual(
+          saved.mockSource
+        )
+      }
+      expect(f.errors).toEqual([])
     }
-    expect(f.errors).toEqual([])
-  })
+  )
 
   it("rejects forged routes and changed duplicate contents before running the model", async () => {
     const f = fixture(),

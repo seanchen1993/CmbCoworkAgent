@@ -251,8 +251,34 @@ export class LocalBotHost {
       activities: this.store.activities(),
       workActivity: this.store.workActivities(),
       personalIm: this.store.imGateway.personalStatuses(),
+      imConversations: this.store.imGateway.groupConversations(),
       backgroundThreads: this.store.activeCommandThreads()
     }
+  }
+
+  imConversationHistory(botId: string, id: string, before?: string) {
+    return this.store.imConversationHistory(botId, id, before)
+  }
+  imConversationWorks(botId: string, id: string, cursor?: string, query?: string) {
+    return this.store.imConversationWorks(botId, id, cursor, query)
+  }
+
+  memoryContext(
+    botId: string,
+    groupId?: string
+  ): import("../../shared/bots/memory-scope").BotMemoryContext {
+    this.getBot(botId)
+    if (!groupId) return {}
+    if (groupId.startsWith("im-")) {
+      const route = this.store.imGateway.binding(groupId)
+      if (!route || route.binding.botId !== botId || route.binding.kind !== "group")
+        throw new BotError("NOT_FOUND", "群聊不属于当前 Bot")
+    } else if (groupId.startsWith("mock-")) {
+      this.store.mock.get(botId, groupId.slice(5))
+    } else if (!this.getGroup(groupId).memberIds.includes(botId)) {
+      throw new BotError("NOT_FOUND", "Bot 不是当前群成员")
+    }
+    return { groupId }
   }
 
   subscribe(listener: (event: BotChangeEvent) => void): () => void {
@@ -366,7 +392,7 @@ export class LocalBotHost {
   }
   listWorks(botId: string, cursor?: string, query?: string) {
     this.getBot(botId)
-    return this.store.listWorks(botId, cursor, query)
+    return this.store.listWorks(botId, cursor, query, "desktop")
   }
   workTargets(taskId: string, cursor?: string, query?: string) {
     const task = this.workToolSource(taskId)
@@ -592,7 +618,7 @@ export class LocalBotHost {
     this.requireRunning()
     return this.store.requestReceipts(botId, checks, workId)
   }
-  markRead(kind: "bot" | "group" | "work", id: string, throughVersion: number): void {
+  markRead(kind: "bot" | "group" | "work" | "im", id: string, throughVersion: number): void {
     this.requireRunning()
     this.store.markRead(kind, id, throughVersion)
     this.changed()

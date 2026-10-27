@@ -371,11 +371,12 @@ export interface BotSnapshot {
   backgroundThreads?: string[]
   /** Verified owner DMs linked to the personal main conversation; no account identifiers. */
   personalIm?: Array<{ botId: string; connected: boolean }>
+  imConversations?: import("./im-channel").BotImConversation[]
 }
 
 /** Bounded list metadata, not a second transcript. Revisions also survive clock changes. */
 export interface BotConversationActivity {
-  kind: "bot" | "group" | "work"
+  kind: "bot" | "group" | "work" | "im"
   id: string
   version: number
   updatedAt: number
@@ -397,6 +398,8 @@ export interface BotMemory {
   name: string
   content: string
   version: string
+  /** Legacy entries without a scope remain private. */
+  scope?: import("./memory-scope").BotMemoryScope
 }
 
 export interface BotBrowserHumanAction {
@@ -443,6 +446,7 @@ export interface WriteBotMemoryInput {
   expectedVersion?: string
   name: string
   content: string
+  scope?: import("./memory-scope").BotMemoryScope
 }
 
 /** The local implementation uses IPC. A future remote implementation must preserve this contract. */
@@ -515,7 +519,10 @@ export interface BotClient {
   messageReply(botId: string, messageId: string, workId?: string): Promise<BotMessageReply>
   messageReactions(target: BotReactionTarget, messageIds: string[]): Promise<BotMessageReactions>
   setMessageReaction(
-    target: BotReactionTarget, messageId: string, emoji: string, present: boolean
+    target: BotReactionTarget,
+    messageId: string,
+    emoji: string,
+    present: boolean
   ): Promise<BotMessageReactionUpdate>
   requestReceipts(
     botId: string,
@@ -530,9 +537,9 @@ export interface BotClient {
     workId?: string
   ): Promise<BotExchangePage>
   markUnread(kind: "bot" | "group", id: string): Promise<void>
-  markRead(kind: "bot" | "group" | "work", id: string, throughVersion: number): Promise<void>
+  markRead(kind: "bot" | "group" | "work" | "im", id: string, throughVersion: number): Promise<void>
   open(botId: string, workId?: string): Promise<{ threadId: string }>
-  listMemory(botId: string): Promise<BotMemory[]>
+  listMemory(botId: string, groupId?: string): Promise<BotMemory[]>
   writeMemory(botId: string, input: WriteBotMemoryInput): Promise<BotMemory>
   removeMemory(botId: string, id: string, expectedVersion: string): Promise<void>
   shareMemory(

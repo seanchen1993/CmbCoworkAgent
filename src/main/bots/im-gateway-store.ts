@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
-import type { BotImBinding, BotImEvent } from "../../shared/bots/im-channel"
+import type { BotImBinding, BotImEvent, BotImConversation } from "../../shared/bots/im-channel"
 import { BotError } from "../../shared/bots/contracts"
 
 export interface StoredBotImEvent {
@@ -132,6 +132,34 @@ export class BotImGatewayStore {
       WHERE b.revoked=0 AND json_extract(r.binding_json,'$.state')='active'
       GROUP BY r.bot_id HAVING COUNT(*)=1`
     ).map((row) => ({ botId: String(row.bot_id), connected: Boolean(row.online) }))
+  }
+  groupConversations(): BotImConversation[] {
+    // One local metadata query; no network calls or transcript scans per sidebar row.
+    return this.rows(
+      `SELECT r.id,r.bot_id,json_extract(r.binding_json,'$.id') AS binding_id,
+        json_extract(r.binding_json,'$.peerLabel') AS title,b.revoked,b.online,b.created_at,
+        a.version,a.updated_at,a.preview,a.attention_version,a.seen_version
+       FROM bot_im_routes r JOIN bot_im_bindings b ON b.id=r.id
+       JOIN bots bot ON bot.id=r.bot_id
+       LEFT JOIN bot_activity a ON a.kind='im' AND a.id=r.id
+       WHERE b.kind='group'
+       ORDER BY COALESCE(a.updated_at,b.created_at) DESC,r.id`
+    ).map((row) => ({
+      id: String(row.id),
+      botId: String(row.bot_id),
+      bindingId: String(row.binding_id),
+      title: String(row.title || "招乎群聊"),
+      state: row.revoked ? "revoked" : "active",
+      connected: !row.revoked && Boolean(row.online),
+      activity: {
+        kind: "im",
+        id: String(row.id),
+        version: Number(row.version ?? 0),
+        updatedAt: Number(row.updated_at ?? row.created_at),
+        preview: String(row.preview ?? ""),
+        unread: Number(row.attention_version ?? 0) > Number(row.seen_version ?? 0)
+      }
+    }))
   }
   binding(id: string): StoredBotImBinding | null {
     const row = this.rows("SELECT * FROM bot_im_routes WHERE id=?", [id])[0]

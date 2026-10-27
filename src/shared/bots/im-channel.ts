@@ -36,6 +36,17 @@ export interface BotImBindingPage {
   before: string | null
 }
 
+/** Local read model only: no gateway credentials or private account identifiers. */
+export interface BotImConversation {
+  id: string
+  botId: string
+  bindingId: string
+  title: string
+  state: "active" | "revoked"
+  connected: boolean
+  activity: import("./contracts").BotConversationActivity
+}
+
 function object(
   value: unknown,
   required: string[],
@@ -137,6 +148,18 @@ export function assertBotImBindingResult(
 }
 
 export interface BotImClient {
+  conversationWorks?(
+    botId: string,
+    conversationId: string,
+    cursor?: string,
+    query?: string
+  ): Promise<import("./work").BotWorkPage>
+  /** Local retained group history remains readable while disconnected or revoked. */
+  conversationHistory?(
+    botId: string,
+    conversationId: string,
+    before?: string
+  ): Promise<{ items: import("./mock-channel").BotMockFeedEntry[]; before: string | null }>
   history(
     botId: string,
     bindingId: string,

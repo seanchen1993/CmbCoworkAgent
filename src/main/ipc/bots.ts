@@ -162,6 +162,23 @@ export function registerBotHandlers(
     mockDesktop(event, hostId).getBot(botIdentifier(botId))
     return imChannel().history(botId, botImExternalId(id), mockCursor(before))
   })
+  ipcMain.handle("bots:im:conversation-history", (event, hostId, botId, id, before) =>
+    mockDesktop(event, hostId).imConversationHistory(
+      botIdentifier(botId),
+      botIdentifier(id),
+      mockCursor(before)
+    )
+  )
+  ipcMain.handle("bots:im:conversation-works", (event, hostId, botId, id, cursor, query) => {
+    if (query !== undefined && (typeof query !== "string" || query.length > 160))
+      throw new BotError("INVALID_INPUT", "任务搜索内容无效")
+    return mockDesktop(event, hostId).imConversationWorks(
+      botIdentifier(botId),
+      botIdentifier(id),
+      mockCursor(cursor),
+      query
+    )
+  })
   ipcMain.handle("bots:im:create", (event, hostId, botId, kind, operationId) => {
     mockDesktop(event, hostId).getBot(botIdentifier(botId))
     if (kind !== "dm" && kind !== "group") throw new BotError("INVALID_INPUT", "IM 受众无效")
@@ -254,11 +271,7 @@ export function registerBotHandlers(
     "bots:browser:operate",
     (_event, hostId: unknown, id: unknown, input: unknown, generation: unknown) => {
       const scope = hostFor(hostId).browserScope(botIdentifier(id))
-      if (
-        typeof generation !== "number" ||
-        !Number.isSafeInteger(generation) ||
-        generation < 0
-      )
+      if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 0)
         throw new BotError("INVALID_INPUT", "浏览器控制版本无效")
       if (
         !input ||
@@ -452,7 +465,7 @@ export function registerBotHandlers(
     "bots:mark-read",
     (_event, hostId: unknown, kind: unknown, id: unknown, version: unknown) => {
       if (
-        (kind !== "bot" && kind !== "group" && kind !== "work") ||
+        (kind !== "bot" && kind !== "group" && kind !== "work" && kind !== "im") ||
         !Number.isSafeInteger(version) ||
         Number(version) < 1
       )
@@ -460,13 +473,19 @@ export function registerBotHandlers(
       return hostFor(hostId).markRead(kind, botIdentifier(id), Number(version))
     }
   )
-  ipcMain.handle("bots:memory:list", (_event, hostId: unknown, id: unknown) => {
-    const bot = hostFor(hostId).getBot(botIdentifier(id))
-    return getBotMemoryService().list(bot.id)
+  ipcMain.handle("bots:memory:list", (_event, hostId: unknown, id: unknown, groupId: unknown) => {
+    const host = hostFor(hostId)
+    const bot = host.getBot(botIdentifier(id))
+    return getBotMemoryService().list(
+      bot.id,
+      host.memoryContext(bot.id, groupId == null ? undefined : botIdentifier(groupId))
+    )
   })
   ipcMain.handle("bots:memory:write", (_event, hostId: unknown, id: unknown, input: unknown) => {
     const bot = hostFor(hostId).getBot(botIdentifier(id))
-    return getBotMemoryService().write(bot.id, parseWriteBotMemory(input))
+    const parsed = parseWriteBotMemory(input)
+    if (parsed.scope?.kind === "group") hostFor(hostId).memoryContext(bot.id, parsed.scope.groupId)
+    return getBotMemoryService().write(bot.id, parsed)
   })
   ipcMain.handle(
     "bots:memory:remove",
@@ -538,14 +557,26 @@ export function registerBotHandlers(
   ipcMain.handle(
     "bots:message-reactions",
     (_event, hostId: unknown, target: unknown, messageIds: unknown) =>
-      hostFor(hostId).messageReactions(parseBotReactionTarget(target), parseBotReactionMessageIds(messageIds))
+      hostFor(hostId).messageReactions(
+        parseBotReactionTarget(target),
+        parseBotReactionMessageIds(messageIds)
+      )
   )
   ipcMain.handle(
     "bots:set-message-reaction",
-    (_event, hostId: unknown, target: unknown, messageId: unknown, emoji: unknown, present: unknown) =>
+    (
+      _event,
+      hostId: unknown,
+      target: unknown,
+      messageId: unknown,
+      emoji: unknown,
+      present: unknown
+    ) =>
       hostFor(hostId).setMessageReaction(
-        parseBotReactionTarget(target), parseBotReactionMessageId(messageId),
-        parseBotReactionEmoji(emoji), parseBotReactionPresent(present)
+        parseBotReactionTarget(target),
+        parseBotReactionMessageId(messageId),
+        parseBotReactionEmoji(emoji),
+        parseBotReactionPresent(present)
       )
   )
   ipcMain.handle(

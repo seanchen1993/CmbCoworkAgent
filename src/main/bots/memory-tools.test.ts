@@ -21,6 +21,38 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
 const bot = { id: "a" } as BotDefinition
+it("exposes only shared and current-group facts and preserves error receipts on cross-scope writes", async () => {
+  const own = memory.writeInContext("a", { name: "Own", content: "Group fact" }, { groupId: "g" })
+  const shared = memory.write("a", {
+    name: "Shared",
+    content: "Reusable format",
+    scope: { kind: "shared" }
+  })
+  const hidden = memory.write("a", { name: "Private", content: "Private fact" })
+  const all = createBotMemoryTools(bot, memory, new AbortController().signal, true, {
+    groupId: "g"
+  })
+  const call = (name: string, args: Record<string, unknown>) =>
+    all.find((tool) => tool.name === name)!.invoke({ type: "tool_call", id: name, name, args })
+  const list = await call("bot_memory_list", {})
+  expect(
+    JSON.parse(list.content)
+      .map((entry: { id: string }) => entry.id)
+      .sort()
+  ).toEqual([own.id, shared.id].sort())
+  expect((await call("bot_memory_get", { id: hidden.id })).status).toBe("error")
+  expect(
+    (await call("bot_forget", { id: shared.id, expectedVersion: shared.version })).status
+  ).toBe("error")
+  expect(
+    (await call("bot_remember", { name: "Global", content: "Should not spread", scope: "shared" }))
+      .status
+  ).toBe("error")
+  const saved = await call("bot_remember", { name: "New", content: "Another group fact" })
+  expect(saved.status).toBe("success")
+  expect(JSON.parse(saved.content).scope).toEqual({ kind: "group", groupId: "g" })
+})
+
 function tools(signal = new AbortController().signal, allowDelete = true) {
   return createBotMemoryTools(bot, memory, signal, allowDelete)
 }

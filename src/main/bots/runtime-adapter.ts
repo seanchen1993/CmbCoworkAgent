@@ -1,3 +1,4 @@
+import { botMemoryContext } from "../../shared/bots/memory-scope"
 import { createLocalBotWorkHistory } from "./work-history"
 import { botWorkBrowserScope, type BotWorkItem } from "../../shared/bots/work"
 import { notifyIfBackground } from "../services/notify"
@@ -510,7 +511,8 @@ export function createLocalBotRunPort(
           let injected = false
           const mentionContext = mentionedBotContext(message, getHost())
           const browserPrefix = message.message.startsWith(BOT_BROWSER_PROMPT_PREFIX)
-            ? BOT_BROWSER_PROMPT_PREFIX : ""
+            ? BOT_BROWSER_PROMPT_PREFIX
+            : ""
           const result = await steerAgentRun({
             threadId: task.threadId,
             owner: "bot",
@@ -518,7 +520,10 @@ export function createLocalBotRunPort(
             message: {
               id: message.requestId,
               content: mentionContext
-                ? browserPrefix + mentionContext + "\n\n" + message.message.slice(browserPrefix.length)
+                ? browserPrefix +
+                  mentionContext +
+                  "\n\n" +
+                  message.message.slice(browserPrefix.length)
                 : message.message,
               ...(mentionContext ? { displayContent: message.message } : {}),
               beforeInject: () => {
@@ -626,6 +631,17 @@ export function createLocalBotRunPort(
             })
           )
             return { state: "completed" }
+          const memoryContext = botMemoryContext(task)
+          const scopedMemoryTools = () =>
+            isBotMemoryEnabled(bot)
+              ? createBotMemoryTools(
+                  bot,
+                  memory,
+                  signal,
+                  ["user", "group", "mock"].includes(task.origin.kind),
+                  memoryContext
+                )
+              : []
           const memoryEditVersion = mock ? 0 : memory.editVersion(bot.id)
           const groupId = botTaskGroupId(task)
           if (groupId)
@@ -662,7 +678,8 @@ export function createLocalBotRunPort(
             (task.origin.kind === "notification" && task.origin.notificationKind === "reaction") ||
             (!task.workId &&
               (task.origin.kind === "schedule" ||
-                (task.origin.kind === "notification" && task.origin.notificationKind === "command")))
+                (task.origin.kind === "notification" &&
+                  task.origin.notificationKind === "command")))
           const captureReplyFiles = (files: BotDeliveredFile[]): void => {
             if (!task.workId && !routineDelivery && !peerResultOwner) return
             for (const file of files) {
@@ -966,8 +983,8 @@ export function createLocalBotRunPort(
                     bot,
                     task,
                     workspacePath,
-                    !mock && !reporting && !botTaskGroupId(task) && isBotMemoryEnabled(bot)
-                      ? memory.forPrompt(bot.id)
+                    !reporting && isBotMemoryEnabled(bot)
+                      ? memory.forPrompt(bot.id, memoryContext)
                       : [],
                     work?.goal
                   ) +
@@ -1047,9 +1064,10 @@ export function createLocalBotRunPort(
                 additionalTools: reporting
                   ? []
                   : mock
-                    ? createBotWorkTools(task, getHost, signal)
+                    ? [...createBotWorkTools(task, getHost, signal), ...scopedMemoryTools()]
                     : botTaskGroupId(task)
                       ? [
+                          ...scopedMemoryTools(),
                           createBotGroupMessageTool(task, getHost, signal, (content) => {
                             hasPublicContribution = true
                             finalText = content
@@ -1120,9 +1138,7 @@ export function createLocalBotRunPort(
                                 Boolean(profileContinuationRequest)
                               )
                             : []),
-                          ...(isBotMemoryEnabled(bot)
-                            ? createBotMemoryTools(bot, memory, signal, task.origin.kind === "user")
-                            : []),
+                          ...scopedMemoryTools(),
                           ...createBotBrowserTools(
                             bot,
                             browser,
@@ -1144,7 +1160,7 @@ export function createLocalBotRunPort(
                 remotePolicy: reporting
                   ? botTextOnlyRemotePolicy([])
                   : mock
-                    ? botMockRemotePolicy()
+                    ? botMockRemotePolicy(isBotMemoryEnabled(bot))
                     : { disableScheduler: true },
                 verifyResolvedThread: (resolved) => {
                   if (!resultStillLinked()) return "原任务关联已解除，未回传结果。"
@@ -1263,6 +1279,7 @@ export function createLocalBotRunPort(
             }
             if (
               !mock &&
+              !memoryContext.groupId &&
               isBotMemoryEnabled(bot) &&
               (task.origin.kind === "user" ||
                 (task.origin.kind === "introduction" && supplementalMessages.size > 0)) &&

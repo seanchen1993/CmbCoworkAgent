@@ -26,13 +26,21 @@ export function BotWorkPanel({
   controller,
   selected,
   onSelect,
-  disabled
+  disabled,
+  heading = "独立任务",
+  allowCreate = true,
+  backLabel = "返回主对话",
+  onBack
 }: {
   client: BotClient
   botId: string
   controller: ReturnType<typeof useBotWorks>
   selected: BotWorkItem | null
   onSelect(id: string | null): void
+  heading?: string
+  allowCreate?: boolean
+  backLabel?: string
+  onBack?(): void
   disabled: boolean
 }) {
   const [editing, setEditing] = useState(false),
@@ -161,7 +169,9 @@ export function BotWorkPanel({
   const selectedPath =
     selected?.workspace?.path ?? (workspace?.id === selected?.id ? workspace?.path : undefined)
   const sourceLabel = selected?.source
-    ? selected.source.transport === "im" ? "IM 渠道交办" : "模拟渠道交办"
+    ? selected.source.transport === "im"
+      ? "IM 渠道交办"
+      : "模拟渠道交办"
     : selected?.conversation?.origin === "existing"
       ? selected.conversation.ref.kind === "project_session"
         ? "已有项目会话关联"
@@ -170,24 +180,26 @@ export function BotWorkPanel({
           : "已有会话关联"
       : "Bot 内新建"
   return (
-    <section className="bot-detail-section bot-works" aria-label="独立任务">
+    <section className="bot-detail-section bot-works" aria-label={heading}>
       <div className="bot-works-heading">
-        <h3>独立任务</h3>
-        <button
-          disabled={disabled || saving}
-          onClick={() => setEditing(!editing)}
-          aria-label="新建独立任务"
-        >
-          <Plus size={16} />
-        </button>
+        <h3>{heading}</h3>
+        {allowCreate && (
+          <button
+            disabled={disabled || saving}
+            onClick={() => setEditing(!editing)}
+            aria-label="新建独立任务"
+          >
+            <Plus size={16} />
+          </button>
+        )}
       </div>
       {selected && (
         <div className="bot-work-current">
           <span>{status(selected)}</span>
           <div>
-            <button onClick={() => onSelect(null)}>
+            <button onClick={() => (onBack ? onBack() : onSelect(null))}>
               <ArrowLeft size={13} />
-              返回主对话
+              {backLabel}
             </button>
             <button disabled={disabled || saving} onClick={() => void lifecycle()}>
               {selected.state === "completed" ? <RotateCcw size={13} /> : <Check size={13} />}{" "}

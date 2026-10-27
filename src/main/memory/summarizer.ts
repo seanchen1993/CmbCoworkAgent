@@ -144,6 +144,8 @@ export interface SummarizeOptions {
   model: ChatOpenAI
   conversation: string
   memoryDir: string
+  /** Scoped owners may exclude other audiences from extraction. */
+  allowedFilenames?: readonly string[]
   scopeHint?: string
   allowedTypes?: MemoryType[]
   signal?: AbortSignal
@@ -402,9 +404,12 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
 
   let uiChanged = false
   try {
-    const headers = scanMemoryFiles(memoryDir)
+    const allowed = options.allowedFilenames ? new Set(options.allowedFilenames) : undefined
+    const headers = scanMemoryFiles(memoryDir).filter(
+      (entry) => !allowed || allowed.has(entry.filename)
+    )
     const manifestText = buildManifestForPrompt(headers)
-    const currentMemoryMd = readCurrentMemoryMd(memoryDir)
+    const currentMemoryMd = allowed ? "" : readCurrentMemoryMd(memoryDir)
     const existingFilenames = new Set(headers.map((h) => h.filename))
 
     const truncated =

@@ -3558,9 +3558,18 @@ button.bot-inline-mention:focus-visible {
 }
 
 /* Private chat uses the same atomic mention editor inside the original composer. */
-.bot-private-input { padding: 14px 94px 14px 46px; line-height: 22px; }
-.bot-private-input .bot-group-editor { min-height: 20px; max-height: 176px; padding: 0; }
-.bot-private-input .bot-group-editor[contenteditable="false"] { opacity: .7; }
+.bot-private-input {
+  padding: 14px 94px 14px 46px;
+  line-height: 22px;
+}
+.bot-private-input .bot-group-editor {
+  min-height: 20px;
+  max-height: 176px;
+  padding: 0;
+}
+.bot-private-input .bot-group-editor[contenteditable="false"] {
+  opacity: 0.7;
+}
 /* History citations use the quiet Bot disclosure treatment. */
 .bot-history-sources summary {
   display: flex;
@@ -3678,4 +3687,20 @@ button.bot-inline-mention:focus-visible {
   .bot-source-chevron {
     transition: none;
   }
+}
+
+.bot-memory-scope-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.bot-memory-scope-label {
+  display: inline-block;
+  margin: 4px 0 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
 }

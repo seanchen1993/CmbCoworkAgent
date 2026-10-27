@@ -39,20 +39,24 @@ export function BotImChannelDialog({
   bot,
   onClose,
   onOpenWork,
-  onOpenMain
+  onOpenMain,
+  onOpenConversation,
+  initialBindingId
 }: {
   client: BotClient
   bot: BotDefinition
   onClose(): void
   onOpenWork(id: string): void
   onOpenMain?(): void
+  onOpenConversation?(bindingId: string): void
+  initialBindingId?: string | null
 }) {
   const api = client.im!
   const [status, setStatus] = useState<{ connected: boolean; available: boolean } | null>(null)
   const [bindings, setBindings] = useState<BotImBinding[]>([])
   const [cursor, setCursor] = useState<string | null>(null)
   const [kind, setKind] = useState<"dm" | "group">("dm")
-  const [selected, setSelected] = useState<string | null>(null)
+  const [selected, setSelected] = useState<string | null>(initialBindingId ?? null)
   const [entries, setEntries] = useState<BotMockFeedEntry[]>([])
   const [historyCursor, setHistoryCursor] = useState<string | null>(null)
   const [historyNotice, setHistoryNotice] = useState<string | null>(null)
@@ -332,6 +336,19 @@ export function BotImChannelDialog({
         </div>
         {chosen && (
           <section className="space-y-3 border-t pt-4">
+            {chosen.kind === "group" &&
+              ["active", "revoked"].includes(chosen.state) &&
+              onOpenConversation && (
+                <button
+                  className={button}
+                  onClick={() => {
+                    onOpenConversation(chosen.id)
+                    onClose()
+                  }}
+                >
+                  打开群会话 →
+                </button>
+              )}
             <h3 className="text-sm font-medium">
               {chosen.kind === "group" ? "群聊" : "私聊"}接入记录
             </h3>

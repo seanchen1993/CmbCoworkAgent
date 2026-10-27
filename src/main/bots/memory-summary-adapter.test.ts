@@ -277,6 +277,7 @@ describe("Bot automatic memory verification", () => {
     const memory = {
       editVersion: () => 1,
       summaryDirectory: () => "/fixture/bots/a/memory",
+      list: () => [],
       applySummary: vi.fn()
     } as unknown as BotMemoryService
     fixture.extraction.mockImplementation(async (options) => {
@@ -323,6 +324,7 @@ describe("Bot automatic memory verification", () => {
     const memory = {
       editVersion: () => 1,
       summaryDirectory: () => "/fixture/bots/a/memory",
+      list: () => [],
       applySummary: vi.fn()
     } as unknown as BotMemoryService
     fixture.extraction.mockImplementation(async (options) => options.apply([preference]))
@@ -404,6 +406,26 @@ describe("Bot automatic memory verification", () => {
 })
 
 describe("Bot memory extraction wiring", () => {
+  it("passes only private filenames into extraction, keeping shared and group references out", async () => {
+    const root = mkdtempSync(join(tmpdir(), "bot-memory-extraction-scope-"))
+    const memory = new BotMemoryService(root)
+    const own = memory.write("a", { name: "Private", content: "Private" })
+    memory.write("a", { name: "Shared", content: "Shared", scope: { kind: "shared" } })
+    memory.writeInContext("a", { name: "Group", content: "Group" }, { groupId: "g" })
+    fixture.extraction.mockResolvedValue(undefined)
+    const maintainer = createBotMemoryMaintainer(memory, () => true)
+    try {
+      maintainer.enqueue({ ...turn, editVersion: memory.editVersion("a") })
+      await tick()
+      expect(fixture.extraction).toHaveBeenCalledWith(
+        expect.objectContaining({ allowedFilenames: [`${own.id}.md`] })
+      )
+    } finally {
+      await maintainer.close()
+      await memory.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
   it.each(["missing_config", "missing_credentials"] as const)(
     "does not fall back or send private content after pinned routing reports %s",
     async (reason) => {
@@ -456,7 +478,8 @@ describe("Bot memory extraction wiring", () => {
     fixture.extraction.mockResolvedValue(undefined)
     const memory = {
       editVersion: () => 1,
-      summaryDirectory: () => "/fixture/bots/a/memory"
+      summaryDirectory: () => "/fixture/bots/a/memory",
+      list: () => []
     } as unknown as BotMemoryService
     const maintainer = createBotMemoryMaintainer(memory, () => true)
     try {
@@ -490,7 +513,8 @@ describe("Bot memory extraction wiring", () => {
       fixture.extraction.mockResolvedValue(undefined)
       const memory = {
         editVersion: () => 1,
-        summaryDirectory: () => "/fixture/bots/a/memory"
+        summaryDirectory: () => "/fixture/bots/a/memory",
+        list: () => []
       } as unknown as BotMemoryService
       const maintainer = createBotMemoryMaintainer(memory, () => true)
       try {
@@ -511,6 +535,7 @@ describe("Bot memory extraction wiring", () => {
     const memory = {
       editVersion: () => 1,
       summaryDirectory: directory,
+      list: () => [],
       applySummary: apply
     } as unknown as BotMemoryService
     let commit: ((operations: []) => void) | undefined

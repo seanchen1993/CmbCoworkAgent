@@ -95,7 +95,7 @@ const fixture = vi.hoisted(() => ({
   notify: vi.fn(),
   browserTools: vi.fn<(...args: unknown[]) => string[]>(() => ["owned-browser"]),
   fileLock: vi.fn(async (_queueId: string, operation: () => Promise<string>) => operation()),
-  memoryTools: vi.fn(() => ["private-memory"]),
+  memoryTools: vi.fn(() => ["scoped-memory"]),
   memoryEnabled: true,
   memorySnapshot: vi.fn(() => [] as BotMemory[]),
   deliveryTools: vi.fn<
@@ -312,8 +312,10 @@ beforeEach(() => {
   fixture.verifyFiles.mockReset().mockResolvedValue([])
   fixture.peerHandoff.mockReset().mockImplementation((current) => ({
     pending: false,
-    outputFiles: current.origin.kind === "bot" && current.origin.expectsReply
-      ? current.origin.outputFiles ?? [] : []
+    outputFiles:
+      current.origin.kind === "bot" && current.origin.expectsReply
+        ? (current.origin.outputFiles ?? [])
+        : []
   }))
   fixture.hashFile.mockReset().mockResolvedValue("sent-hash")
   fixture.workflowActive.mockReturnValue(false)
@@ -412,7 +414,7 @@ describe("Bot Runtime integration", () => {
     const removeGroupMember = vi.fn(async () => {})
     const runtime = createLocalBotRunPort(
       {} as BotMemoryService,
-      () => ({} as LocalBotHost),
+      () => ({}) as LocalBotHost,
       { removeGroupMember } as unknown as BotBrowserService,
       {} as BotMemoryMaintainer
     )
@@ -692,7 +694,12 @@ describe("Bot Runtime integration", () => {
         "bot_work_create",
         "bot_work_send",
         "bot_work_complete",
-        "bot_work_continue"
+        "bot_work_continue",
+        "bot_memory_search",
+        "bot_memory_list",
+        "bot_memory_get",
+        "bot_remember",
+        "bot_forget"
       ],
       allowedSkillNames: [],
       disableHooks: true,
@@ -701,14 +708,14 @@ describe("Bot Runtime integration", () => {
       disableMemoryInjection: true,
       filesystemAccess: { shellAccess: "none" }
     })
-    expect(context.additionalTools).toEqual(["works"])
+    expect(context.additionalTools).toEqual(["works", "scoped-memory"])
     expect(
       context.verifyResolvedThread({
         metadata: metadata(),
         workspacePath: metadata().workspacePath
       })
     ).toBeNull()
-    expect(fixture.memorySnapshot).not.toHaveBeenCalled()
+    expect(fixture.memorySnapshot).toHaveBeenCalledWith(bot.id, {})
     expect(fixture.browserTools).not.toHaveBeenCalled()
     expect(fixture.create).not.toHaveBeenCalled()
     expect(JSON.parse(fixture.update.mock.calls[0][1].metadata)).toMatchObject(metadata())
@@ -780,7 +787,7 @@ describe("Bot Runtime integration", () => {
     })
     lease.release()
     const remote = fixture.start.mock.calls[0][2]
-    expect(remote.additionalTools).toEqual(["works"])
+    expect(remote.additionalTools).toEqual(["works", "scoped-memory"])
     expect(remote.remotePolicy.disableMcpTools).toBe(true)
     expect(fixture.browserTools).not.toHaveBeenCalled()
     expect(
@@ -1443,9 +1450,12 @@ describe("Bot Runtime integration", () => {
       await lease.execute(new AbortController().signal, vi.fn())
       lease.release()
       const [request, , context] = fixture.start.mock.calls[0]
-      const delivered = ["same", "split delivery", "peer and caller", "mutable file changed"].includes(
-        kind
-      )
+      const delivered = [
+        "same",
+        "split delivery",
+        "peer and caller",
+        "mutable file changed"
+      ].includes(kind)
       expect(request.message).toContain(`public delivery for this exact peer result: ${delivered}`)
       const reminder = context.checkFinalDelivery!([
         new HumanMessage("Peer result"),
@@ -1572,7 +1582,7 @@ describe("Bot Runtime integration", () => {
     fixture.start.mockImplementation(
       async (_request, _delivery, context: AgentRunExecutionContext) => {
         expect(context.checkFinalDelivery).toBeTypeOf("function")
-        const send = context.additionalTools![0]
+        const send = context.additionalTools!.find((tool) => tool.name === "bot_send_message")!
         expect(send.name).toBe("bot_send_message")
         await send.invoke({
           type: "tool_call",
@@ -2115,14 +2125,23 @@ describe("Bot Runtime integration", () => {
   })
   it("does not reject an outstanding private relay because its final report is not written yet", async () => {
     fixture.peerHandoff.mockReturnValue({ pending: true, outputFiles: ["report.json"] })
-    fixture.verifyFiles.mockRejectedValue(new Error("Report does not exist until the child returns"))
+    fixture.verifyFiles.mockRejectedValue(
+      new Error("Report does not exist until the child returns")
+    )
     const relay: BotTask = {
       ...task,
-      origin: { kind: "bot", fromBotId: "caller", rootTaskId: "root", depth: 1,
-        expectsReply: true, outputFiles: ["report.json"] }
+      origin: {
+        kind: "bot",
+        fromBotId: "caller",
+        rootTaskId: "root",
+        depth: 1,
+        expectsReply: true,
+        outputFiles: ["report.json"]
+      }
     }
-    await expect(port().acquire(bot, relay)!.execute(new AbortController().signal, vi.fn()))
-      .resolves.toMatchObject({ state: "completed" })
+    await expect(
+      port().acquire(bot, relay)!.execute(new AbortController().signal, vi.fn())
+    ).resolves.toMatchObject({ state: "completed" })
     expect(fixture.verifyFiles).not.toHaveBeenCalled()
   })
 
@@ -2131,12 +2150,23 @@ describe("Bot Runtime integration", () => {
     fixture.verifyFiles.mockRejectedValue(new Error("Original report still missing"))
     const result: BotTask = {
       ...task,
-      origin: { kind: "bot", fromBotId: "leaf", rootTaskId: "root", depth: 2,
-        expectsReply: false, upstreamTaskId: "original-relay" }
+      origin: {
+        kind: "bot",
+        fromBotId: "leaf",
+        rootTaskId: "root",
+        depth: 2,
+        expectsReply: false,
+        upstreamTaskId: "original-relay"
+      }
     }
-    await expect(port().acquire(bot, result)!.execute(new AbortController().signal, vi.fn()))
-      .rejects.toThrow("Original report still missing")
-    expect(fixture.verifyFiles).toHaveBeenCalledWith("/synthetic/workspaces/a", ["report.json"], expect.any(AbortSignal))
+    await expect(
+      port().acquire(bot, result)!.execute(new AbortController().signal, vi.fn())
+    ).rejects.toThrow("Original report still missing")
+    expect(fixture.verifyFiles).toHaveBeenCalledWith(
+      "/synthetic/workspaces/a",
+      ["report.json"],
+      expect.any(AbortSignal)
+    )
   })
 
   it("verifies declared peer outputs even when the model returns only a written path", async () => {
@@ -2201,11 +2231,14 @@ describe("Bot Runtime integration", () => {
     const saved = { id: "fact", name: "Format", content: "Three sections", version: "v1" }
     fixture.memorySnapshot.mockReturnValue([saved])
     await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
-    expect(fixture.memorySnapshot.mock.calls).toEqual([[bot.id]])
+    expect(fixture.memorySnapshot.mock.calls).toEqual([[bot.id, {}]])
     expect(fixture.start.mock.calls[0][2].extraSystemPrompt).toContain('"content":"Three sections"')
     fixture.memorySnapshot.mockReturnValue([{ ...saved, content: "Four sections", version: "v2" }])
     await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
-    expect(fixture.memorySnapshot.mock.calls).toEqual([[bot.id], [bot.id]])
+    expect(fixture.memorySnapshot.mock.calls).toEqual([
+      [bot.id, {}],
+      [bot.id, {}]
+    ])
     const prompt = fixture.start.mock.calls[1][2].extraSystemPrompt
     expect(prompt).toContain('"content":"Four sections"')
     expect(prompt).not.toContain("Three sections")
@@ -2219,7 +2252,7 @@ describe("Bot Runtime integration", () => {
     await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
     expect(fixture.memorySnapshot).not.toHaveBeenCalled()
     expect(fixture.start.mock.calls[0][2].extraSystemPrompt).not.toContain(
-      "Private Bot memory reference"
+      "Scoped Bot memory reference"
     )
   })
   it.each([
@@ -2244,7 +2277,7 @@ describe("Bot Runtime integration", () => {
           expect.objectContaining({ botId: bot.id, botVersion: bot.version })
         )
       const context = fixture.start.mock.calls[0][2]
-      expect(context.extraSystemPrompt.includes("Private Bot memory reference")).toBe(enabled)
+      expect(context.extraSystemPrompt.includes("Scoped Bot memory reference")).toBe(enabled)
       // The override must not enable the ordinary conversation's separate memory store.
       expect(JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata).memoryEnabled).toBe(false)
     }
@@ -2261,8 +2294,14 @@ describe("Bot Runtime integration", () => {
         }
       )!
       .execute(new AbortController().signal, vi.fn())
-    expect(fixture.memorySnapshot).not.toHaveBeenCalled()
-    expect(fixture.memoryTools).not.toHaveBeenCalled()
+    expect(fixture.memorySnapshot).toHaveBeenCalledWith(bot.id, { groupId: "g" })
+    expect(fixture.memoryTools).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.any(AbortSignal),
+      true,
+      { groupId: "g" }
+    )
     expect(fixture.summary).not.toHaveBeenCalled()
   })
   it("starts a new inbox turn without inheriting a completed command's graph callbacks", async () => {
@@ -2353,10 +2392,14 @@ describe("Bot Runtime integration", () => {
         context.onRunTerminated?.({ outcome: "success", code: "done" })
         return { completion: Promise.resolve() }
       })
-      const result = await port().acquire(bot, routed)!.execute(new AbortController().signal, vi.fn())
+      const result = await port()
+        .acquire(bot, routed)!
+        .execute(new AbortController().signal, vi.fn())
       expect(result).toMatchObject({ state: "completed", files: files.slice(-8) })
       expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toBeUndefined()
-      expect(fixture.start.mock.calls.at(-1)![2].foregroundCommandLifecycle).toHaveProperty("settled")
+      expect(fixture.start.mock.calls.at(-1)![2].foregroundCommandLifecycle).toHaveProperty(
+        "settled"
+      )
       expect(fixture.commandLifecycle).toHaveBeenCalledWith(task.id, true)
     }
   )
@@ -2383,9 +2426,13 @@ describe("Bot Runtime integration", () => {
         context.onRunTerminated?.({ outcome: "success", code: "done" })
         return { completion: Promise.resolve() }
       })
-      const result = await port().acquire(bot, input)!.execute(new AbortController().signal, vi.fn())
+      const result = await port()
+        .acquire(bot, input)!
+        .execute(new AbortController().signal, vi.fn())
       expect(result.files).toBeUndefined()
-      expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toHaveProperty("settled")
+      expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toHaveProperty(
+        "settled"
+      )
       expect(fixture.start.mock.calls.at(-1)![2].foregroundCommandLifecycle).toBeUndefined()
       expect(fixture.returnFileTools).not.toHaveBeenCalled()
     }
@@ -2393,7 +2440,9 @@ describe("Bot Runtime integration", () => {
   it.each([false, true])(
     "reverifies a routed result's checkpoint files before resuming (failure=%s)",
     async (failure) => {
-      const files = [{ filePath: "/synthetic/workspaces/a/report.csv", name: "report.csv", size: 28 }]
+      const files = [
+        { filePath: "/synthetic/workspaces/a/report.csv", name: "report.csv", size: 28 }
+      ]
       const routed: BotTask = {
         ...task,
         origin: {
@@ -2407,7 +2456,8 @@ describe("Bot Runtime integration", () => {
       }
       fixture.groupCheckpoint.mockReturnValue("saved-result")
       fixture.continuationFiles.mockReturnValue(files)
-      if (failure) fixture.verifyFiles.mockRejectedValue(new Error("original output is unavailable"))
+      if (failure)
+        fixture.verifyFiles.mockRejectedValue(new Error("original output is unavailable"))
       else fixture.verifyFiles.mockResolvedValue(files)
       const running = port().acquire(bot, routed)!.execute(new AbortController().signal, vi.fn())
       if (failure) {
@@ -2448,7 +2498,12 @@ describe("Bot Runtime integration", () => {
       const originalDelivery = fixture.deliveryTools.getMockImplementation()!
       try {
         const bots = Array.from({ length: hops + 1 }, (_, index) =>
-          store.create({ name: `Peer ${index}`, instructions: "", color: "#ea2845", modelRef: null })
+          store.create({
+            name: `Peer ${index}`,
+            instructions: "",
+            color: "#ea2845",
+            modelRef: null
+          })
         )
         const paths = new Map(bots.map((entry) => [entry.id, join(directory, entry.id)]))
         for (const path of paths.values()) await mkdir(path)
@@ -2610,7 +2665,8 @@ describe("Bot Runtime integration", () => {
             recover: undefined,
             acquire: (owner, entry, work) =>
               owner.id === bots[0].id ? null : adapter.acquire(owner, entry, work),
-            onSettled: (entry, state, _result, files) => results.push({ id: entry.id, state, files })
+            onSettled: (entry, state, _result, files) =>
+              results.push({ id: entry.id, state, files })
           },
           1,
           errors
@@ -2659,7 +2715,9 @@ describe("Bot Runtime integration", () => {
           created ? { rootWorkId: created.work.id, returnWorkId: created.work.id } : {}
         )
         const finalFiles = final!.origin.kind === "bot" ? final!.origin.replyFiles! : []
-        expect(await readFile(finalFiles[0].attachmentPath ?? finalFiles[0].filePath)).toEqual(bytes)
+        expect(await readFile(finalFiles[0].attachmentPath ?? finalFiles[0].filePath)).toEqual(
+          bytes
+        )
         expect(await readFile(leafFiles[0].filePath)).toEqual(bytes)
         expect(
           store.recentTasks().filter((entry) => entry.origin.kind === "notification")
@@ -2962,14 +3020,13 @@ describe("Bot Runtime integration", () => {
     expect(prompt).not.toContain("always give a short answer")
     expect(prompt).not.toContain("self-tests prove completion")
     expect(prompt).toContain(inGroup ? "shared group workspace" : "private Bot workspace")
-    if (inGroup) expect(fixture.memoryTools).not.toHaveBeenCalled()
-    else
-      expect(fixture.memoryTools).toHaveBeenCalledWith(
-        bot,
-        expect.anything(),
-        expect.any(AbortSignal),
-        origin.kind === "user"
-      )
+    expect(fixture.memoryTools).toHaveBeenCalledWith(
+      bot,
+      expect.anything(),
+      expect.any(AbortSignal),
+      origin.kind === "user" || origin.kind === "group",
+      inGroup ? { groupId: "g" } : {}
+    )
     expect(prompt).toContain(`Your stable Bot ID is ${JSON.stringify(bot.id)}`)
     expect(prompt).toContain(`your current name is ${JSON.stringify(bot.name)}`)
     if (inGroup) {
@@ -3207,7 +3264,7 @@ describe("Bot Runtime integration", () => {
         "works",
         "delivery",
         "own-profile",
-        "private-memory",
+        "scoped-memory",
         "owned-browser",
         "collaboration",
         "routine"
@@ -3299,6 +3356,7 @@ describe("Bot Runtime integration", () => {
     const [request, , context] = fixture.start.mock.calls[0]
     expect(request.threadId).toBe("group-g-a")
     expect(context.additionalTools).toEqual([
+      "scoped-memory",
       expect.objectContaining({ name: "bot_send_message" }),
       "delivery",
       "owned-browser",
@@ -3332,8 +3390,8 @@ describe("Bot Runtime integration", () => {
     expect(upload).toHaveBeenCalledTimes(1)
     expect(fixture.announce).not.toHaveBeenCalled()
     expect(fixture.summary).not.toHaveBeenCalled()
-    expect(fixture.memorySnapshot).not.toHaveBeenCalled()
-    expect(context.extraSystemPrompt).not.toContain("Private Bot memory reference")
+    expect(fixture.memorySnapshot).toHaveBeenCalledWith(bot.id, { groupId: "g" })
+    expect(context.extraSystemPrompt).not.toContain("Scoped Bot memory reference")
   })
   it("offers the existing own-profile tool to direct group users without exposing private memory", async () => {
     fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
@@ -3345,15 +3403,22 @@ describe("Bot Runtime integration", () => {
       })!
       .execute(new AbortController().signal, vi.fn())
     expect(fixture.start.mock.calls[0][2].additionalTools).toEqual([
+      "scoped-memory",
       expect.objectContaining({ name: "bot_send_message" }),
       "own-profile",
       "delivery",
       "owned-browser",
       "collaboration"
     ])
-    expect(fixture.memoryTools).not.toHaveBeenCalled()
+    expect(fixture.memoryTools).toHaveBeenCalledWith(
+      bot,
+      expect.anything(),
+      expect.any(AbortSignal),
+      true,
+      { groupId: "g" }
+    )
     expect(fixture.summary).not.toHaveBeenCalled()
-    expect(fixture.memorySnapshot).not.toHaveBeenCalled()
+    expect(fixture.memorySnapshot).toHaveBeenCalledWith(bot.id, { groupId: "g" })
   })
   it.each<BotTask["origin"]>([
     { kind: "bot", fromBotId: "peer", rootTaskId: "root", depth: 1, expectsReply: true },
@@ -3956,7 +4021,8 @@ describe("Bot steering uses the original runtime", () => {
       const retainsFiles =
         origin.kind === "bot" ||
         origin.kind === "schedule" ||
-        (origin.kind === "notification" && ["command", "reaction"].includes(origin.notificationKind))
+        (origin.kind === "notification" &&
+          ["command", "reaction"].includes(origin.notificationKind))
       expect(deferred).toEqual({
         state: "deferred",
         checkpointId: "yielded-checkpoint",
@@ -4122,6 +4188,41 @@ describe("Bot steering uses the original runtime", () => {
     })
     expect(beforeInject).not.toHaveBeenCalled() // only the graph's injection boundary may claim it
   })
+  it("injects an authored work follow-up unchanged and claims it only when consumed", async () => {
+    fixture.steer.mockResolvedValue({ queued: true })
+    const workTask: BotTask = {
+      ...task,
+      workId: "work",
+      origin: { kind: "work", sourceTaskId: "initial-main", dispatch: "create" }
+    }
+    const addition: BotTask = {
+      ...workTask,
+      id: "addition",
+      requestId: "authored-follow-up",
+      message: "Update the plan to 4 pm in the existing work directory.",
+      origin: {
+        kind: "work",
+        sourceTaskId: "main-revision",
+        dispatch: "follow_up",
+        sourceMessageIds: ["main-user-message"]
+      }
+    }
+    const beforeInject = vi.fn(() => true)
+    expect(await port().acquire(bot, workTask)!.steer!(addition, beforeInject)).toBe(true)
+    expect(fixture.steer).toHaveBeenCalledExactlyOnceWith({
+      threadId: workTask.threadId,
+      owner: "bot",
+      runId: workTask.id,
+      message: {
+        id: addition.requestId,
+        content: addition.message,
+        beforeInject: expect.any(Function)
+      }
+    })
+    expect(beforeInject).not.toHaveBeenCalled()
+    expect(fixture.steer.mock.calls[0][0].message.beforeInject()).toBe(true)
+    expect(beforeInject).toHaveBeenCalledOnce()
+  })
   it("does not inject private user messages into peers, routines or another conversation", async () => {
     fixture.pendingQuestion.mockReturnValue(question)
     const beforeInject = vi.fn(() => true)
@@ -4168,7 +4269,9 @@ describe("private Bot selected identity context", () => {
     expect(request.message).toBe(input.message)
     expect(context.extraSystemPrompt).toContain(JSON.stringify({ kind: "group", ...reference }))
     expect(context.extraSystemPrompt).toContain("Bot members only")
-    expect(context.extraSystemPrompt).toContain("You can reach these Bots with bot_delegate using their IDs")
+    expect(context.extraSystemPrompt).toContain(
+      "You can reach these Bots with bot_delegate using their IDs"
+    )
     expect(context.extraSystemPrompt).toContain("asks not to contact it")
     expect(fixture.groupReference).toHaveBeenCalledWith("stable-group", bot.id)
     fixture.steer.mockResolvedValue({ queued: true })
@@ -4227,7 +4330,9 @@ describe("private Bot selected identity context", () => {
       JSON.stringify({ id: "stable-peer", currentName: "Renamed", description: "Public role" })
     )
     expect(context.extraSystemPrompt).not.toContain("PRIVATE_PEER_INSTRUCTIONS")
-    expect(context.extraSystemPrompt).toContain("You can reach these Bots with bot_delegate using their IDs")
+    expect(context.extraSystemPrompt).toContain(
+      "You can reach these Bots with bot_delegate using their IDs"
+    )
     expect(context.extraSystemPrompt).toContain("asks not to contact it")
     expect(context.extraSystemPrompt).toContain(
       "never replace an unavailable Bot with a same-name Bot"

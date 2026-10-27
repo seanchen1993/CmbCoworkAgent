@@ -75,7 +75,7 @@ async function running(f: ReturnType<typeof fixture>) {
 
 describe("independent work uses beta's interactive inbox", () => {
   it.each(["direct", "forwarded"] as const)(
-    "injects a %s revision into an autonomously created task and returns the actual context",
+    "injects the actual %s instruction into the same work and reports the consumed context",
     async (kind) => {
       const f = fixture()
       const source = f.store.enqueue({
@@ -86,13 +86,18 @@ describe("independent work uses beta's interactive inbox", () => {
       f.store.transition(source.id, "running")
       const { work, task } = f.store.createWork(
         { botId: f.bot.id, operationId: "create", title: "Plan", goal: "Write a plan" },
-        { taskId: source.id, callId: "create", key: "create" }
+        { taskId: source.id, callId: "create", key: "create" },
+        { kind: "directory", path: "/synthetic/plan-workspace" }
       )
       f.store.settle(source.id, "completed", null, "Started")
       await vi.waitFor(() => expect(f.store.getTask(task.id).state).toBe("running"))
       f.host.onSteeringReady(task.id)
       f.wait(true)
       const revision = "Change the time to four; keep the directory"
+      // bot_work_send executes the Bot's prepared instruction, not the source
+      // main-chat wording. Keep both distinct so a raw-text fallback is caught.
+      const preparedRevision = "Update the plan to 4 pm in the existing work directory."
+      const instruction = kind === "direct" ? revision : preparedRevision
       let child!: BotTask
       if (kind === "direct") {
         child = f.host.send({
@@ -107,7 +112,7 @@ describe("independent work uses beta's interactive inbox", () => {
             child = f.host.sendWork(
               { taskId: main.id, callId: "forward", key: "forward" },
               work.id,
-              "Edit plan"
+              preparedRevision
             )
             return { state: "completed", result: "Forwarded" }
           },
@@ -116,14 +121,47 @@ describe("independent work uses beta's interactive inbox", () => {
         f.host.send({ botId: f.bot.id, requestId: "main", message: revision })
         await vi.waitFor(() => expect(child).toBeDefined())
       }
+      expect(child.message).toBe(instruction)
+      expect(f.steer).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ id: child.id, workId: work.id, message: instruction }),
+        expect.any(Function)
+      )
+      if (kind === "forwarded") {
+        expect(child.origin).toMatchObject({
+          kind: "work",
+          dispatch: "follow_up",
+          sourceMessageIds: ["main"]
+        })
+        expect(f.store.recentTasks().find((item) => item.requestId === "main")).toMatchObject({
+          message: revision
+        })
+      }
       expect(f.injections.has(child.id)).toBe(true)
       expect(f.injections.get(child.id)!()).toBe(true)
       expect(f.store.getTask(child.id).state).toBe("running")
       expect(f.store.getTask(child.id).threadId).toBe(work.threadId)
       f.finish({ state: "completed", result: "Plan at four" })
       await vi.waitFor(() => expect(f.store.getTask(child.id).state).toBe("completed"))
-      const report = f.store.recentTasks().find((item) => item.origin.kind === "work_result")
-      expect(report?.message).toContain(revision)
+      const reports = f.store.recentTasks().filter((item) => item.origin.kind === "work_result")
+      expect(reports).toHaveLength(1)
+      expect(reports[0].threadId).toBe(f.bot.threadId)
+      expect(JSON.parse(reports[0].message)).toMatchObject({
+        workId: work.id,
+        executionState: "completed",
+        requestContext: {
+          messages: [
+            { text: "Write a plan", truncated: false },
+            { text: instruction, truncated: false }
+          ],
+          messagesOmitted: false
+        },
+        result: "Plan at four",
+        businessState: "active",
+        pendingExecution: false
+      })
+      if (kind === "forwarded") expect(reports[0].message).not.toContain(revision)
+      expect(f.store.listWorks(f.bot.id).items).toHaveLength(1)
+      expect(f.store.getWork(f.bot.id, work.id).workspace).toEqual(work.workspace)
       expect(f.acquire.mock.calls.filter(([, run]) => run.workId === work.id)).toHaveLength(1)
     }
   )
