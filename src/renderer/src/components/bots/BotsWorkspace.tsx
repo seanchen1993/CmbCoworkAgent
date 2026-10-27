@@ -117,7 +117,6 @@ import {
   BotImConversationDetails,
   BotImConversationRows
 } from "./BotImConversation"
-import { BotMockChannelDialog } from "./BotMockChannelDialog"
 import { botChatAccent } from "@/lib/bot-chat-accent"
 import { BotWorkspaceMenu } from "./BotWorkspaceMenu"
 import { BotPanelDivider } from "./BotPanelDivider"
@@ -720,7 +719,6 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   const [newBotName, setNewBotName] = useState("")
   const [imBot, setImBot] = useState<BotDefinition | null>(null)
   const [imBindingId, setImBindingId] = useState<string | null>(null)
-  const [mockBot, setMockBot] = useState<BotDefinition | null>(null)
   const editorTrigger = useRef<HTMLElement | null>(null)
   const profileMenuTrigger = useRef<HTMLButtonElement | null>(null)
   const newConversationTrigger = useRef<HTMLButtonElement | null>(null)
@@ -2602,14 +2600,6 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                         IM 接入
                       </button>
                     )}
-                    {client.mock && (
-                      <button
-                        className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
-                        onClick={() => setMockBot(selected)}
-                      >
-                        模拟 IM 接入
-                      </button>
-                    )}
                     <button
                       className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
                       onClick={() => void archive(selected)}
@@ -2864,6 +2854,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
             client={client}
             bot={imBot}
             initialBindingId={imBindingId}
+            onOpenSettings={() => useAppStore.getState().setShowCustomizeView(true, "robot")}
             onOpenConversation={(bindingId) => {
               const group = snapshot?.imConversations?.find(
                 (item) => item.botId === imBot.id && item.bindingId === bindingId
@@ -2893,27 +2884,6 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 }
               })
             }
-          />
-        )}
-        {mockBot && client.mock && (
-          <BotMockChannelDialog
-            key={`${client.hostId}:${mockBot.id}`}
-            bot={mockBot}
-            client={client}
-            revision={snapshot?.revision ?? 0}
-            onClose={() => setMockBot(null)}
-            onOpenWork={(id) => {
-              updateView({
-                selectedId: mockBot.id,
-                groupId: null,
-                detailOpen: true,
-                detailTab: "details",
-                activeWorkIdByBot: {
-                  ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
-                  [mockBot.id]: id
-                }
-              })
-            }}
           />
         )}
         {editor && (

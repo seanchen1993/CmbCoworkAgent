@@ -27,19 +27,6 @@ export const localBotsApi: BotClient = {
     revoke: (botId, bindingId, version) =>
       ipcRenderer.invoke("bots:im:revoke", LOCAL_BOT_HOST_ID, botId, bindingId, version)
   },
-  mock: {
-    binding: (botId, id) => ipcRenderer.invoke("bots:mock:binding", LOCAL_BOT_HOST_ID, botId, id),
-    bindings: (botId, before) =>
-      ipcRenderer.invoke("bots:mock:bindings", LOCAL_BOT_HOST_ID, botId, before),
-    create: (input) => ipcRenderer.invoke("bots:mock:create", LOCAL_BOT_HOST_ID, input),
-    revoke: (botId, id, version) =>
-      ipcRenderer.invoke("bots:mock:revoke", LOCAL_BOT_HOST_ID, botId, id, version),
-    online: (botId, id, online) =>
-      ipcRenderer.invoke("bots:mock:online", LOCAL_BOT_HOST_ID, botId, id, online),
-    inject: (input) => ipcRenderer.invoke("bots:mock:inject", LOCAL_BOT_HOST_ID, input),
-    history: (botId, id, before) =>
-      ipcRenderer.invoke("bots:mock:history", LOCAL_BOT_HOST_ID, botId, id, before)
-  },
   works: {
     associations: (botId) => ipcRenderer.invoke("bots:work:associations", LOCAL_BOT_HOST_ID, botId),
     resolveSource: (botId, source) =>

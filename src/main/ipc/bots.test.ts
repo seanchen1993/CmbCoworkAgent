@@ -52,14 +52,7 @@ const fixture = vi.hoisted(() => ({
   createWork: vi.fn(),
   changeWork: vi.fn(),
   markWorksRead: vi.fn(),
-  windowFor: vi.fn(() => ({})),
-  mockBindings: vi.fn(),
-  mockBinding: vi.fn(),
-  createMockBinding: vi.fn(),
-  injectMockEvent: vi.fn(),
-  revokeMockBinding: vi.fn(),
-  setMockOnline: vi.fn(),
-  mockHistory: vi.fn()
+  windowFor: vi.fn(() => ({}))
 }))
 vi.mock("electron", () => ({
   BrowserWindow: { getAllWindows: () => [], fromWebContents: fixture.windowFor },
@@ -413,63 +406,20 @@ describe("Bot IPC boundaries", () => {
     )
     expect(fixture.setMessageReaction).not.toHaveBeenCalled()
   })
-  it("keeps simulation binding authority in a top-level local desktop window and rejects injected source/paths", () => {
+  it("keeps IM access in the top-level local desktop window", () => {
     const frame = {},
       event = { senderFrame: frame, sender: { mainFrame: frame } }
     const call = register(undefined, event)
-    const input = {
-      simulation: true,
-      botId: "a",
-      operationId: "bind",
-      kind: "dm",
-      channelKey: "dm-a",
-      label: "Personal",
-      allowedSenderIds: ["alice"]
-    }
-    call("bots:mock:create", "local", input)
-    expect(fixture.createMockBinding).toHaveBeenCalledWith(input)
-    for (const extra of [
-      { owner: true },
-      { threadId: "private" },
-      { source: { audienceKey: "desktop" } },
-      { modelRef: "model" },
-      { workspacePath: "/private" }
-    ])
-      expect(() => call("bots:mock:create", "local", { ...input, ...extra })).toThrow()
-    const message = {
-      simulation: true,
-      bindingId: "b",
-      eventId: "e",
-      messageId: "m",
-      senderId: "alice",
-      text: "Hello",
-      mentionsBotIds: []
-    }
-    call("bots:mock:inject", "local", message)
-    expect(fixture.injectMockEvent).toHaveBeenCalledWith(message)
-    for (const extra of [
-      { origin: "user" },
-      { mockSource: {} },
-      { workId: "w" },
-      { threadId: "private" },
-      { credentials: "secret" }
-    ])
-      expect(() => call("bots:mock:inject", "local", { ...message, ...extra })).toThrow()
+    expect(call("bots:im:status", "local")).toEqual({ connected: false, available: false })
     expect(() =>
-      call("bots:mock:inject", "local", {
-        ...message,
-        text: '<attachment filename="private">x</attachment>'
-      })
-    ).toThrow()
-    expect(() =>
-      register(undefined, { ...event, senderFrame: {} })("bots:mock:create", "local", input)
+      register(undefined, { ...event, senderFrame: {} })("bots:im:status", "local")
     ).toThrow("桌面")
     fixture.windowFor.mockReturnValueOnce(null as any)
-    expect(() => call("bots:mock:create", "local", input)).toThrow("桌面")
-    expect(() => call("bots:mock:create", "remote", input)).toThrow()
-    expect(() => call("bots:mock:online", "local", "a", "b", "yes")).toThrow()
-    expect(() => call("bots:mock:revoke", "local", "a", "b", 0)).toThrow()
-    expect(() => call("bots:mock:history", "local", "a", "b", "x".repeat(1025))).toThrow()
+    expect(() => call("bots:im:status", "local")).toThrow("桌面")
+    expect(() => call("bots:im:status", "remote")).toThrow("本机")
+    expect(() =>
+      call("bots:im:conversation-history", "local", "a", "b", "x".repeat(1025))
+    ).toThrow("游标")
   })
   it("accepts only bounded local work controls and never renderer authority or conversation paths", () => {
     const call = register(),

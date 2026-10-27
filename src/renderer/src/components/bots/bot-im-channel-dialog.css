@@ -1,0 +1,443 @@
+.bot-im-connect[data-cmb-modal-dialog] {
+  --im-muted: var(--muted-foreground);
+  --im-line: color-mix(in srgb, var(--foreground) 10%, transparent);
+  --im-soft: color-mix(in srgb, var(--foreground) 3%, var(--background));
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: calc(100vw - 40px);
+  max-width: 620px;
+  max-height: min(860px, calc(100dvh - 64px));
+  padding: 0;
+  border: 1px solid var(--im-line);
+  border-radius: 20px;
+  color: var(--foreground);
+  background: var(--background);
+  box-shadow:
+    0 24px 80px #0002,
+    0 4px 12px #0001;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.bot-im-connect-header {
+  padding: 28px 52px 22px 28px;
+  flex-shrink: 0;
+}
+.bot-im-connect-header h2 {
+  outline: none;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.bot-im-connect-header p {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--im-muted);
+}
+.bot-im-connect-body {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 28px 24px;
+  min-height: 0;
+}
+.bot-im-connect button {
+  cursor: pointer;
+}
+.bot-im-connect button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+.bot-im-connect button:focus-visible,
+.bot-im-connect summary:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 3px;
+}
+.bot-im-connect-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--im-soft);
+}
+.bot-im-connect-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  margin-top: 8px;
+  border-radius: 50%;
+  background: var(--im-muted);
+}
+.bot-im-connect-dot[data-online="true"] {
+  background: #31916b;
+}
+.bot-im-connect-status-copy {
+  min-width: 0;
+  flex: 1;
+}
+.bot-im-connect-status-copy strong {
+  font-weight: 500;
+}
+.bot-im-connect-status-copy p {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--im-muted);
+}
+.bot-im-connect-status-copy .bot-im-connect-link {
+  margin-top: 7px;
+}
+.bot-im-connect-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  color: var(--im-muted);
+}
+.bot-im-connect-icon:hover:not(:disabled),
+.bot-im-connect-revoke:hover:not(:disabled) {
+  background: var(--im-line);
+  color: var(--foreground);
+}
+.bot-im-connect-setup {
+  margin-top: 24px;
+}
+.bot-im-connect h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--im-muted);
+}
+.bot-im-connect-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.bot-im-connect-choice {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px;
+  border: 1px solid var(--im-line);
+  border-radius: 12px;
+  cursor: pointer;
+}
+.bot-im-connect-choice:hover,
+.bot-im-connect-choice[data-selected="true"] {
+  background: var(--im-soft);
+}
+.bot-im-connect-choice[data-selected="true"] {
+  border-color: color-mix(in srgb, var(--foreground) 65%, transparent);
+}
+.bot-im-connect-choice:has(input:focus-visible) {
+  outline: 2px solid var(--foreground);
+  outline-offset: 3px;
+}
+.bot-im-connect-choice:has(input:disabled) {
+  cursor: default;
+}
+.bot-im-connect-choice input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.bot-im-connect-choice-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.bot-im-connect-choice-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--im-line);
+  border-radius: 50%;
+}
+.bot-im-connect-choice[data-selected="true"] .bot-im-connect-choice-check {
+  background: var(--foreground);
+  color: var(--background);
+}
+.bot-im-connect-choice strong {
+  font-size: 14px;
+  font-weight: 550;
+}
+.bot-im-connect-choice > span:last-child {
+  color: var(--im-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.bot-im-connect-create {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-top: 16px;
+}
+.bot-im-connect-create p {
+  max-width: 260px;
+  font-size: 12px;
+  color: var(--im-muted);
+}
+.bot-im-connect-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-height: 38px;
+  padding: 8px 14px;
+  border-radius: 9px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.bot-im-connect-primary {
+  background: var(--foreground);
+  color: var(--background);
+}
+.bot-im-connect-primary:hover:not(:disabled) {
+  opacity: 0.85;
+}
+.bot-im-connect-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+  font-size: 12px;
+  color: var(--foreground);
+}
+.bot-im-connect-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.bot-im-connect-error {
+  margin-top: 16px;
+  font-size: 12px;
+  color: var(--destructive);
+  overflow-wrap: anywhere;
+}
+.bot-im-connect-bindings {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--im-line);
+}
+.bot-im-connect-bindings h3 > span {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.bot-im-connect-binding + .bot-im-connect-binding {
+  border-top: 1px solid var(--im-line);
+}
+.bot-im-connect-binding-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+.bot-im-connect-binding-select {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+.bot-im-connect-binding-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--im-soft);
+  color: var(--im-muted);
+}
+.bot-im-connect-binding-name {
+  min-width: 0;
+  flex: 1;
+}
+.bot-im-connect-binding-name strong {
+  display: block;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bot-im-connect-binding-name time {
+  display: block;
+  color: var(--im-muted);
+  font-size: 11px;
+}
+.bot-im-connect-binding-state {
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--im-muted);
+}
+.bot-im-connect-binding-state[data-state="active"] {
+  color: #27815d;
+}
+.dark .bot-im-connect-binding-state[data-state="active"] {
+  color: #7ec8a8;
+}
+.bot-im-connect-chevron {
+  flex-shrink: 0;
+  color: var(--im-muted);
+}
+.bot-im-connect-binding[data-selected="true"] .bot-im-connect-chevron {
+  transform: rotate(180deg);
+}
+.bot-im-connect-revoke {
+  padding: 4px 7px;
+  border-radius: 6px;
+  color: var(--im-muted);
+  font-size: 11px;
+}
+.bot-im-connect-binding-detail {
+  padding: 8px 0 16px;
+}
+.bot-im-connect-binding-detail p {
+  color: var(--im-muted);
+  font-size: 12px;
+}
+.bot-im-connect-code {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--im-line);
+  border-radius: 9px;
+  background: var(--im-soft);
+}
+.bot-im-connect-code code {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.bot-im-connect-code-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin-top: 7px;
+  color: var(--im-muted);
+  font-size: 11px;
+}
+.bot-im-connect-binding-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.bot-im-connect-history {
+  margin-top: 16px;
+  border-top: 1px solid var(--im-line);
+}
+.bot-im-connect summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 0;
+  list-style: none;
+  cursor: pointer;
+  font-size: 12px;
+}
+.bot-im-connect summary::-webkit-details-marker {
+  display: none;
+}
+.bot-im-connect details[open] > summary > svg {
+  transform: rotate(180deg);
+}
+.bot-im-connect-history-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 16px;
+}
+.bot-im-connect-hint,
+.bot-im-connect-help p {
+  color: var(--im-muted);
+  font-size: 12px;
+  line-height: 1.8;
+}
+.bot-im-connect-record {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--im-soft);
+}
+.bot-im-connect-record header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--im-muted);
+}
+.bot-im-connect-record > p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.bot-im-connect-record .bot-im-connect-link {
+  margin-top: 8px;
+}
+.bot-im-connect-help {
+  margin-top: 22px;
+  border-top: 1px solid var(--im-line);
+  color: var(--im-muted);
+}
+.bot-im-connect-history + .bot-im-connect-help {
+  margin-top: 0;
+}
+.bot-im-connect-help summary {
+  padding-bottom: 0;
+}
+.bot-im-connect-help[open] summary {
+  padding-bottom: 10px;
+}
+.bot-im-connect-help p + p {
+  margin-top: 5px;
+}
+@media (max-width: 520px) {
+  .bot-im-connect[data-cmb-modal-dialog] {
+    width: calc(100vw - 24px);
+    max-height: calc(100dvh - 32px);
+    border-radius: 16px;
+  }
+  .bot-im-connect-header {
+    padding: 24px 44px 18px 20px;
+  }
+  .bot-im-connect-body {
+    padding: 0 20px 20px;
+  }
+  .bot-im-connect-choices {
+    gap: 8px;
+  }
+  .bot-im-connect-choice {
+    padding: 12px;
+  }
+  .bot-im-connect-create {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .bot-im-connect-create p {
+    max-width: none;
+  }
+  .bot-im-connect-binding-select {
+    gap: 8px;
+  }
+}

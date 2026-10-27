@@ -104,7 +104,6 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
                 "BotImConversation",
                 "BotImConversationRows",
                 "BotImConversationDetails",
-                "BotMockChannelDialog",
                 "BotPanelDivider",
                 "CustomModelDialog"
               ]

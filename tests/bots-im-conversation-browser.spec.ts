@@ -73,7 +73,6 @@ async function main() {
                   "BotBrowserPanel",
                   "BotFilesPanel",
                   "BotWorkspaceMenu",
-                  "BotMockChannelDialog",
                   "BotAppearancePicker",
                   "BotAvatarEditor",
                   "BotDeleteDialog",
@@ -185,6 +184,17 @@ async function main() {
     await page.getByRole("button", { name: "返回 Bot 主对话", exact: true }).click()
     await page.getByTestId("private-conversation").getByText("私人主对话").waitFor()
     assert.equal(await page.getByRole("button", { name: /演示准备清单/ }).count(), 0)
+    await page.getByRole("button", { name: "更多 Bot 操作", exact: true }).click()
+    assert.equal(await page.getByRole("button", { name: "模拟 IM 接入", exact: true }).count(), 0)
+    await page.getByRole("button", { name: "IM 接入", exact: true }).waitFor()
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifacts, "bot-im-menu.png")
+    })
+    await page.getByRole("button", { name: "IM 接入", exact: true }).click()
+    await page.getByRole("heading", { name: "IM 接入 · 招乎T", exact: true }).waitFor()
+    await page.keyboard.press("Escape")
+    await page.keyboard.press("Escape")
     // A late history result cannot populate the next selected group.
     await page.evaluate(() => {
       ;(window as any).fixture.hold = true
@@ -220,8 +230,8 @@ async function main() {
     })
     await page.getByRole("button", { name: "招乎群聊：产品协作群", exact: true }).click()
     await page.getByRole("button", { name: "管理群接入", exact: true }).click()
-    await page.getByRole("button", { name: "打开群会话 →", exact: true }).waitFor()
-    await page.getByRole("button", { name: "打开群会话 →", exact: true }).click()
+    await page.getByRole("button", { name: "打开群会话", exact: true }).waitFor()
+    await page.getByRole("button", { name: "打开群会话", exact: true }).click()
     await page.getByLabel("产品协作群消息记录").waitFor()
     // Recoverable local read failure and retry, without falling back to private chat.
     await page.evaluate(() => {

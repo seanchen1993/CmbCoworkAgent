@@ -74,22 +74,6 @@ export interface BotMockFeedEntry {
   workId?: string
   createdAt: number
 }
-export interface BotMockClient {
-  binding(botId: string, bindingId: string): Promise<BotMockBinding>
-  bindings(
-    botId: string,
-    before?: string
-  ): Promise<{ items: BotMockBinding[]; before: string | null }>
-  create(input: CreateBotMockBinding): Promise<BotMockBinding>
-  revoke(botId: string, bindingId: string, expectedVersion: number): Promise<BotMockBinding>
-  online(botId: string, bindingId: string, online: boolean): Promise<BotMockBinding>
-  inject(input: BotMockEvent): Promise<BotMockEventReceipt>
-  history(
-    botId: string,
-    bindingId: string,
-    before?: string
-  ): Promise<{ items: BotMockFeedEntry[]; before: string | null }>
-}
 export interface BotMockExecution {
   source: BotMockSource
   threadId: string

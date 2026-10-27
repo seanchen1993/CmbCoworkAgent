@@ -5,7 +5,7 @@ import type {
   BotMessageReactionUpdate
 } from "./message-reactions"
 import type { BotWorkClient } from "./work"
-import type { BotMockClient, BotMockSource } from "./mock-channel"
+import type { BotMockSource } from "./mock-channel"
 import type { WorkspaceFileScanEntry } from "../workspace-file-scan"
 import type { BotDeliveredFile } from "./file-delivery"
 import type { UserInputRequest } from "../../main/types"
@@ -454,7 +454,6 @@ export type BotGroupHistoryCursor = number | { targetMessageId: string }
 
 export interface BotClient {
   im?: BotImClient
-  mock?: BotMockClient
   readonly hostId: string
   readonly filePreview: BotFilePreviewTransport
   readonly works?: BotWorkClient

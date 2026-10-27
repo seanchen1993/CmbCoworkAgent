@@ -72,7 +72,8 @@ export default Object.fromEntries(["main","preload","renderer"].map((name) => [
       "bots-local-work-app.spec.ts",
       "bots-conversation-link-app.spec.ts",
       "bots-memory-app.spec.ts",
-      "bots-mock-channel-app.spec.ts"
+      "bots-im-dialog-browser.spec.ts",
+      "bots-im-conversation-browser.spec.ts"
     ])
       await run(["--import", "tsx", `tests/${test}`], testEnv)
     await run(["--import", "tsx", "tests/bots-memory-app.spec.ts"], {
@@ -82,10 +83,6 @@ export default Object.fromEntries(["main","preload","renderer"].map((name) => [
     await run(["--import", "tsx", "tests/bots-local-work-app.spec.ts"], {
       ...testEnv,
       BOT_TEST_EXPLICIT_WORKSPACE: "1"
-    })
-    await run(["--import", "tsx", "tests/bots-mock-channel-app.spec.ts"], {
-      ...testEnv,
-      M05_MOCK_MESSAGE_CONTROLS_ONLY: "1"
     })
     console.log("Bot integration App journeys passed. Build and screenshots:", out)
   }
