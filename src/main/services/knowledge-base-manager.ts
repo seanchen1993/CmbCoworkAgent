@@ -33,11 +33,14 @@ import {
   validateKnowledgeRepositorySource
 } from "./knowledge-repository"
 
-const REFRESH_INTERVAL_MS = 90 * 60 * 1_000
+const BACKGROUND_REFRESH_DELAY_MS = 10 * 60 * 1_000
+const MIN_REFRESH_INTERVAL_MS = 75 * 60 * 1_000
+const REFRESH_INTERVAL_JITTER_MS = 30 * 60 * 1_000
 const QUERY_PATH = "/devclaw/knowledge-config/query"
 const QUERY_TIMEOUT_MS = 5_000
 
-let refreshTimer: ReturnType<typeof setInterval> | null = null
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
+let backgroundRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let refreshing = false
 let syncingId: string | null = null
 let syncingRole: KnowledgeWorkspaceRole | null = null
@@ -479,20 +482,41 @@ export async function assertSelectableKnowledgeBaseIds(
   return normalized
 }
 
-export function refreshKnowledgeBasesInBackground(): void {
+function runBackgroundRefresh(): void {
+  if (backgroundRefreshTimer) clearTimeout(backgroundRefreshTimer)
+  backgroundRefreshTimer = null
   void refreshKnowledgeBases().catch((error) =>
     console.warn(`[knowledge_manage] 配置刷新失败：${errorMessage(error)}`)
   )
 }
 
-export function startKnowledgeBaseManager(): void {
-  if (refreshTimer) return
-  refreshKnowledgeBasesInBackground()
-  refreshTimer = setInterval(refreshKnowledgeBasesInBackground, REFRESH_INTERVAL_MS)
+export function refreshKnowledgeBasesInBackground(): void {
+  if (backgroundRefreshTimer) return
+  backgroundRefreshTimer = setTimeout(
+    runBackgroundRefresh,
+    Math.random() * BACKGROUND_REFRESH_DELAY_MS
+  )
+  backgroundRefreshTimer.unref?.()
+}
+
+function schedulePeriodicRefresh(): void {
+  const delay = MIN_REFRESH_INTERVAL_MS + Math.random() * REFRESH_INTERVAL_JITTER_MS
+  refreshTimer = setTimeout(() => {
+    runBackgroundRefresh()
+    schedulePeriodicRefresh()
+  }, delay)
   refreshTimer.unref?.()
 }
 
+export function startKnowledgeBaseManager(): void {
+  if (refreshTimer) return
+  refreshKnowledgeBasesInBackground()
+  schedulePeriodicRefresh()
+}
+
 export function stopKnowledgeBaseManager(): void {
-  if (refreshTimer) clearInterval(refreshTimer)
+  if (refreshTimer) clearTimeout(refreshTimer)
+  if (backgroundRefreshTimer) clearTimeout(backgroundRefreshTimer)
   refreshTimer = null
+  backgroundRefreshTimer = null
 }

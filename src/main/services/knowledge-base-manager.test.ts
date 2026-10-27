@@ -28,6 +28,7 @@ import {
   listKnowledgeBases,
   prepareKnowledgeDeposition,
   refreshKnowledgeBases,
+  refreshKnowledgeBasesInBackground,
   resolveProjectKnowledgeBases,
   startKnowledgeBaseManager,
   stopKnowledgeBaseManager,
@@ -392,14 +393,102 @@ it("blocks deposition only while its write role is updating, never during read u
 it("uses only the normal periodic refresh for failures", async () => {
   vi.mocked(globalThis.fetch).mockRejectedValue(new Error("offline"))
   vi.useFakeTimers()
+  vi.spyOn(Math, "random").mockReturnValue(0.5)
   startKnowledgeBaseManager()
+  expect(globalThis.fetch).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(5 * 60_000)
   await vi.waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(1))
   await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
   await vi.advanceTimersByTimeAsync(60_000)
   expect(globalThis.fetch).toHaveBeenCalledTimes(1)
-  await vi.advanceTimersByTimeAsync(90 * 60_000)
+  await vi.advanceTimersByTimeAsync(83 * 60_000)
+  expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+  await vi.advanceTimersByTimeAsync(60_000)
   await vi.waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(2))
   await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
+})
+
+it("reuses pending automatic refreshes without postponing them and keeps manual refresh immediate", async () => {
+  vi.useFakeTimers()
+  vi.spyOn(Math, "random").mockReturnValue(0.5)
+  const fetchMock = cloud([]).mockImplementation(
+    async () => new Response(JSON.stringify({ code: 200, data: { items: [] } }))
+  )
+  startKnowledgeBaseManager()
+  startKnowledgeBaseManager()
+  await vi.advanceTimersByTimeAsync(2 * 60_000)
+  refreshKnowledgeBasesInBackground()
+  await refreshKnowledgeBases()
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  await vi.advanceTimersByTimeAsync(3 * 60_000 - 1)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  await vi.advanceTimersByTimeAsync(1)
+  await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+  await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
+  await vi.advanceTimersByTimeAsync(10 * 60_000)
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+})
+
+it("randomizes every periodic interval and merges a pending automatic refresh at the periodic trigger", async () => {
+  vi.useFakeTimers()
+  vi.spyOn(Math, "random")
+    .mockReturnValueOnce(0)
+    .mockReturnValueOnce(0)
+    .mockReturnValueOnce(1 - Number.EPSILON)
+    .mockReturnValue(0.5)
+  const fetchMock = cloud([]).mockImplementation(
+    async () => new Response(JSON.stringify({ code: 200, data: { items: [] } }))
+  )
+  startKnowledgeBaseManager()
+  await vi.advanceTimersByTimeAsync(1)
+  await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+  await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
+  await vi.advanceTimersByTimeAsync(75 * 60_000 - 2)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  await vi.advanceTimersByTimeAsync(1)
+  await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+  await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
+  await vi.advanceTimersByTimeAsync(104 * 60_000)
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  refreshKnowledgeBasesInBackground()
+  await vi.advanceTimersByTimeAsync(60_000)
+  await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+  await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
+  await vi.advanceTimersByTimeAsync(5 * 60_000)
+  expect(fetchMock).toHaveBeenCalledTimes(3)
+})
+
+it("skips an automatic refresh while a manual refresh is still running", async () => {
+  vi.useFakeTimers()
+  vi.spyOn(Math, "random").mockReturnValue(0.5)
+  let finishRead!: () => void
+  mocks.syncKnowledgeRepository.mockImplementationOnce(
+    () => new Promise((resolve) => (finishRead = () => resolve({ updated: false })))
+  )
+  const pending = refreshKnowledgeBases()
+  await vi.waitFor(() => expect(finishRead).toBeDefined())
+  refreshKnowledgeBasesInBackground()
+  await vi.advanceTimersByTimeAsync(5 * 60_000)
+  expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+  expect(mocks.syncKnowledgeRepository).toHaveBeenCalledTimes(1)
+  finishRead()
+  await pending
+})
+
+it("cancels pending startup, identity and periodic refreshes when stopped", async () => {
+  vi.useFakeTimers()
+  vi.spyOn(Math, "random").mockReturnValue(0.5)
+  const fetchMock = cloud([]).mockImplementation(
+    async () => new Response(JSON.stringify({ code: 200, data: { items: [] } }))
+  )
+  startKnowledgeBaseManager()
+  stopKnowledgeBaseManager()
+  await vi.advanceTimersByTimeAsync(120 * 60_000)
+  expect(fetchMock).not.toHaveBeenCalled()
+  refreshKnowledgeBasesInBackground()
+  stopKnowledgeBaseManager()
+  await vi.advanceTimersByTimeAsync(10 * 60_000)
+  expect(fetchMock).not.toHaveBeenCalled()
 })
 
 it("stores a single friendly description from the first underlying failure and deduplicates the toast", async () => {
