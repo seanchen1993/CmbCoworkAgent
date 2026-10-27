@@ -426,6 +426,23 @@ export function BotConversationTools({
     (message: Message) => {
       if (message.role !== "user") return null
       const task = taskByMessage.get(message.id)
+      if (task?.origin.kind === "work" && task.origin.dispatch) {
+        return (
+          <section className="bot-work-instruction" aria-label="Bot 交办说明">
+            <div className="bot-work-instruction-label">
+              {task.origin.dispatch === "create" ? "Bot 交办" : "Bot 补充"}
+            </div>
+            <div className="bot-work-instruction-text">
+              {typeof message.content === "string"
+                ? message.content
+                : message.content
+                    .filter((block) => block.type === "text")
+                    .map((block) => block.text)
+                    .join("\n")}
+            </div>
+          </section>
+        )
+      }
       if (task?.origin.kind === "work_result") {
         const origin = task.origin
         return (

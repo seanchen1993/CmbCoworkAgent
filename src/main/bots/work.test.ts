@@ -33,7 +33,7 @@ function finish(store: BotStore, id: string) {
 }
 
 describe("durable local independent works", () => {
-  it("forwards every applied supplement in chronological order on creation and follow-up", () => {
+  it("executes the Bot brief and retains only source IDs for applied user supplements", () => {
     const f = fixture()
     const source = f.store.enqueue({
       botId: f.bot.id,
@@ -99,19 +99,21 @@ describe("durable local independent works", () => {
       { botId: f.bot.id, operationId: "all-supplements", title: "Review", goal: "Model summary" },
       { taskId: source.id, callId: "create", key: "create" }
     )
-    const expected = [source.message, first.message, second.message].join("\n\n用户后续补充：\n")
-    expect(created.task.message).toBe(expected)
+    const expected = [source.requestId, first.requestId, second.requestId]
+    expect(created.task.message).toBe("Model summary")
+    expect(created.task.origin).toMatchObject({ dispatch: "create", sourceMessageIds: expected })
     finish(f.store, created.task.id)
     const sent = f.store.sendWork(
       { taskId: source.id, callId: "follow-up", key: "follow-up" },
       created.work.id,
       "Different model summary"
     )
-    expect(sent.message).toBe(expected)
+    expect(sent.message).toBe("Different model summary")
+    expect(sent.origin).toMatchObject({ dispatch: "follow_up", sourceMessageIds: expected })
     expect(f.store.getTask(first.id).message).toBe(first.message)
   })
 
-  it("forwards actual introduction supplements without the synthetic greeting", () => {
+  it("retains introduction supplement references without forwarding the greeting or raw requests", () => {
     const f = fixture(),
       source = f.store.introduce(f.bot.id)!
     f.store.transition(source.id, "running")
@@ -130,7 +132,8 @@ describe("durable local independent works", () => {
       { botId: f.bot.id, operationId: "intro-work", title: "Review", goal: "Summary" },
       { taskId: source.id, callId: "create", key: "create" }
     )
-    expect(created.task.message).toBe(messages.join("\n\n用户后续补充：\n"))
+    expect(created.task.message).toBe("Summary")
+    expect(created.task.origin).toMatchObject({ sourceMessageIds: ["intro-0", "intro-1"] })
     expect(created.task.message).not.toContain(source.message)
     finish(f.store, created.task.id)
     expect(
@@ -142,47 +145,59 @@ describe("durable local independent works", () => {
     ).toBe(created.task.message)
   })
 
-  it.each([false, true])(
-    "rejects oversized complete work input atomically (context: %s)",
-    (withContext) => {
-      const context = [{ id: "context", role: "user" as const, ordinal: 1, text: "C".repeat(8000) }]
-      const f = fixture(withContext ? () => context : undefined)
-      const source = f.store.enqueue({
-        botId: f.bot.id,
-        requestId: "large-source",
-        message: "A".repeat(32_000)
-      })
-      f.store.transition(source.id, "running")
-      const child = f.store.enqueue({
-        botId: f.bot.id,
-        requestId: "large-child",
-        message: "B".repeat(withContext ? 25_000 : 32_000)
-      })
-      f.store.injectIntoRun(child.id, source.id)
-      const snapshot = () => ({
-        revision: f.store.revision(),
-        tasks: f.store.recentTasks(),
-        works: f.store.listWorks(f.bot.id),
-        commands: f.db.exec("SELECT * FROM bot_work_commands"),
-        activity: f.store.activities()
-      })
-      const before = snapshot()
-      const input = {
-        botId: f.bot.id,
-        operationId: "too-large",
-        title: "Review",
-        goal: "Summary",
-        ...(withContext ? { contextMessageIds: ["context"] } : {})
-      }
-      const authority = { taskId: source.id, callId: "create", key: "create" }
-      expect(() => f.store.createWork(input, authority)).toThrow("消息格式或长度无效")
-      expect(snapshot()).toEqual(before)
-      f.store.transition(child.id, "cancelled")
-      const retry = f.store.createWork(input, authority)
-      expect(retry.task.message).toContain(source.message)
-      expect(f.store.listWorks(f.bot.id).items).toHaveLength(1)
+  it("keeps long source messages and selected context as references, without inflating the assignment", () => {
+    const context = [{ id: "context", role: "user" as const, ordinal: 1, text: "C".repeat(8000) }]
+    const f = fixture(() => context)
+    const source = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "large-source",
+      message: "A".repeat(32_000)
+    })
+    f.store.transition(source.id, "running")
+    const child = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "large-child",
+      message: "B".repeat(32_000)
+    })
+    f.store.injectIntoRun(child.id, source.id)
+    const input = {
+      botId: f.bot.id,
+      operationId: "brief",
+      title: "Review",
+      goal: "Review src without editing files.",
+      contextMessageIds: ["context"]
     }
-  )
+    const authority = { taskId: source.id, callId: "create", key: "create" }
+    const created = f.store.createWork(input, authority)
+    expect(created.task.message).toBe(input.goal)
+    expect(created.task.origin).toMatchObject({
+      sourceMessageIds: [source.requestId, child.requestId, "context"]
+    })
+    expect(f.store.createWork(input, authority)).toEqual(created)
+    expect(f.store.listWorks(f.bot.id).items).toHaveLength(1)
+    expect(f.store.getTask(source.id).message).toBe(source.message)
+  })
+
+  it("rejects unavailable context references atomically", () => {
+    const f = fixture(() => [])
+    const source = f.store.enqueue({ botId: f.bot.id, requestId: "source", message: "Review" })
+    f.store.transition(source.id, "running")
+    const before = f.store.recentTasks()
+    expect(() =>
+      f.store.createWork(
+        {
+          botId: f.bot.id,
+          operationId: "missing",
+          title: "Review",
+          goal: "Review src",
+          contextMessageIds: ["foreign"]
+        },
+        { taskId: source.id, callId: "missing", key: "missing" }
+      )
+    ).toThrow("所选相关消息不可用")
+    expect(f.store.recentTasks()).toEqual(before)
+    expect(f.store.listWorks(f.bot.id).items).toHaveLength(0)
+  })
 
   it("rejects an oversized work follow-up without a receipt or task/version/activity change", () => {
     const f = fixture(),
@@ -209,15 +224,15 @@ describe("durable local independent works", () => {
     })
     const before = snapshot(),
       authority = { taskId: source.id, callId: "send", key: "send" }
-    expect(() => f.store.sendWork(authority, created.work.id, "Summary")).toThrow(
+    expect(() => f.store.sendWork(authority, created.work.id, "X".repeat(64_001))).toThrow(
       "消息格式或长度无效"
     )
     expect(snapshot()).toEqual(before)
     f.store.transition(child.id, "cancelled")
-    expect(f.store.sendWork(authority, created.work.id, "Summary").message).toBe(source.message)
+    expect(f.store.sendWork(authority, created.work.id, "Summary").message).toBe("Summary")
   })
 
-  it("preserves the user's exact constraints through autonomous creation and later forwarded revisions", () => {
+  it("persists the actual Bot instructions and their provenance through creation, revision and reload", () => {
     const f = fixture()
     const original = "在指定目录设计读书会计划，只要文字，不创建文件。"
     const source = f.store.enqueue({ botId: f.bot.id, requestId: "original", message: original })
@@ -227,12 +242,17 @@ describe("durable local independent works", () => {
         botId: f.bot.id,
         operationId: "create",
         title: "读书会",
-        goal: "错误改写：生成 Markdown 文件"
+        goal: "设计读书会计划，仅回复文字，不创建文件。"
       },
       { taskId: source.id, callId: "create", key: "create" }
     )
-    expect(created.task.message).toBe(original)
-    expect(created.work.goal).toBe("错误改写：生成 Markdown 文件")
+    expect(created.task.message).toBe(created.work.goal)
+    expect(created.task.origin).toMatchObject({
+      dispatch: "create",
+      sourceTaskId: source.id,
+      sourceMessageIds: [source.requestId]
+    })
+    expect(created.work.goal).toBe("设计读书会计划，仅回复文字，不创建文件。")
     f.store.settle(source.id, "completed", null, "已交办")
     finish(f.store, created.task.id)
     const revision = "改到四点，仍然只要文字，不写文件。"
@@ -241,10 +261,23 @@ describe("durable local independent works", () => {
     const sent = f.store.sendWork(
       { taskId: next.id, callId: "send", key: "send" },
       created.work.id,
-      "错误改写：更新文件"
+      "将读书会时间改为四点，保持纯文字回复，不写文件。"
     )
-    expect(sent.message).toBe(revision)
-    expect(sent.origin).toMatchObject({ kind: "work", instructionSummary: "错误改写：更新文件" })
+    expect(sent.message).toBe("将读书会时间改为四点，保持纯文字回复，不写文件。")
+    expect(f.store.getTask(next.id).message).toBe(revision)
+    expect(sent.origin).toMatchObject({
+      kind: "work",
+      dispatch: "follow_up",
+      sourceTaskId: next.id,
+      sourceMessageIds: [next.requestId]
+    })
+    const reopened = new BotStore(f.db)
+    expect(reopened.getTask(sent.id).message).toBe(sent.message)
+    expect(
+      reopened.messageOrigins(f.bot.id, [sent.requestId], undefined, created.work.id)[0].origin
+    ).toEqual(sent.origin)
+    expect(reopened.messageOrigins(f.bot.id, [sent.requestId])).toEqual([])
+    expect(reopened.messageOrigins(f.peer.id, [sent.requestId])).toEqual([])
     expect(sent.threadId).toBe(created.work.threadId)
   })
   it("keeps beta question receipts and batched work context as separate constructor ports", () => {

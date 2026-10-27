@@ -176,7 +176,16 @@ export type BotTaskOrigin =
       mentions?: BotMessageMention[]
     }
   | { kind: "introduction" }
-  | { kind: "work"; sourceTaskId: string; instructionSummary?: string }
+  | {
+      kind: "work"
+      sourceTaskId: string
+      /** Present on new dispatches; their message is the actual Bot-authored instruction. */
+      dispatch?: "create" | "follow_up"
+      /** Host-captured source references, never copied into the task's model input. */
+      sourceMessageIds?: string[]
+      /** Legacy forwarded turns kept the Bot's brief separate from the user message. */
+      instructionSummary?: string
+    }
   | {
       /** Host-recorded result of one independent task turn, delivered to this Bot's main chat. */
       kind: "work_result"

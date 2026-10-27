@@ -2819,6 +2819,22 @@ button.bot-json-caret:focus-visible {
 .bot-routine-event[open] > summary > svg:last-of-type {
   transform: rotate(90deg);
 }
+.bot-work-instruction {
+  max-width: 100%;
+  border-left: 2px solid var(--bot-line, #e5e5e5);
+  padding: 4px 0 4px 14px;
+}
+.bot-work-instruction-label {
+  margin-bottom: 6px;
+  color: var(--bot-muted, #888);
+  font-size: 12px;
+}
+.bot-work-instruction-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.65;
+}
 .bot-routine-instructions {
   padding: 10px 16px;
   margin-top: 4px;

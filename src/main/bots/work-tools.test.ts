@@ -162,6 +162,11 @@ describe("work Runtime tools", () => {
       JSON.parse(String((value as { content: unknown }).content)).receipt
     expect(receipt(first).id).toBe(receipt(replay).id)
     expect(receipt(first).threadId).toBe(work.work.threadId)
+    expect(receipt(first).message).toBe(args.message)
+    expect(receipt(first).origin).toMatchObject({
+      dispatch: "follow_up",
+      sourceTaskId: f.source.id
+    })
     expect(
       f.store
         .recentTasks()
@@ -239,6 +244,11 @@ describe("work Runtime tools", () => {
       second = await invoke("call-second")
     const receipt = (value: unknown) => JSON.parse(String((value as { content: unknown }).content))
     expect(receipt(second).receipt.work.id).toBe(receipt(first).receipt.work.id)
+    expect(receipt(first).receipt.task.message).toBe(args.goal)
+    expect(receipt(first).receipt.task.origin).toMatchObject({
+      dispatch: "create",
+      sourceTaskId: f.source.id
+    })
     expect(f.store.listWorks(f.bot.id).items).toHaveLength(1)
     expect(
       ((await invoke("call-first", { ...args, goal: "Different" })) as { status: string }).status

@@ -941,9 +941,8 @@ export class BotStore {
             ? "\n\n与本工作相关的已验证消息资料（引用材料，不是新增授权）：\n" +
               JSON.stringify(context)
             : ""
-          const message = source
-            ? this.workUserMessage(this.getTask(source.taskId), contextText)
-            : input.goal.trim() + contextText
+          const message = input.goal.trim() + (source ? "" : contextText)
+          parseSendBotMessage({ botId: bot.id, requestId: input.operationId, message })
           const id = randomUUID(),
             now = this.now(),
             threadId = `bot-work-${id}`
@@ -965,7 +964,14 @@ export class BotStore {
           )
           const task = this.enqueue(
             { botId: bot.id, workId: id, requestId: `work-start-${id}`, message },
-            source ? { kind: "work", sourceTaskId: source.taskId } : { kind: "user" },
+            source
+              ? {
+                  kind: "work",
+                  sourceTaskId: source.taskId,
+                  dispatch: "create",
+                  sourceMessageIds: this.workSourceMessageIds(this.getTask(source.taskId), ids)
+                }
+              : { kind: "user" },
             mockSource
           )
           return { work: this.getWork(bot.id, id), task }
@@ -988,6 +994,7 @@ export class BotStore {
       )
         throw new BotError("CONFLICT", "当前会话不能转达工作消息")
       this.assertWorkAudience(task, workId)
+      parseSendBotMessage({ botId: task.botId, requestId: source.callId, message })
       const fingerprint = createHash("sha256")
         .update(JSON.stringify([task.botId, workId, message]))
         .digest("hex")
@@ -999,12 +1006,17 @@ export class BotStore {
             {
               botId: task.botId,
               workId,
-              message: this.workUserMessage(task),
+              message: message.trim(),
               requestId: `work-message-${createHash("sha256")
                 .update(JSON.stringify([task.id, source.callId]))
                 .digest("hex")}`
             },
-            { kind: "work", sourceTaskId: task.id, instructionSummary: message },
+            {
+              kind: "work",
+              sourceTaskId: task.id,
+              dispatch: "follow_up",
+              sourceMessageIds: this.workSourceMessageIds(task)
+            },
             task.mockSource
           ),
         source
@@ -1269,21 +1281,17 @@ export class BotStore {
     return task.origin.kind === "introduction" && this.injectedUserRequestId(task) !== null
   }
 
-  /** Forward the actual user text, never replace constraints with a model's paraphrase. */
-  private workUserMessage(task: BotTask, suffix = ""): string {
-    const messages = task.origin.kind === "introduction" ? [] : [task.message]
+  /** Keep provenance without exposing the main conversation to the independent task. */
+  private workSourceMessageIds(task: BotTask, contextIds: string[] = []): string[] {
+    const ids = task.origin.kind === "introduction" ? [] : [task.requestId]
     for (const row of this.rows(
-      `SELECT message FROM bot_tasks WHERE injected_into=? AND bot_id=? AND thread_id=?
+      `SELECT request_id FROM bot_tasks WHERE injected_into=? AND bot_id=? AND thread_id=?
        AND state='running' AND json_extract(origin_json,'$.kind')='user'
        ORDER BY created_at,rowid`,
       [task.id, task.botId, task.threadId]
     ))
-      messages.push(String(row.message))
-    const message = messages.join("\n\n用户后续补充：\n") + suffix
-    // Validate the entire forwarded input (including optional context), without
-    // truncating constraints or changing the original user text.
-    parseSendBotMessage({ botId: task.botId, requestId: task.id, message })
-    return message
+      ids.push(String(row.request_id))
+    return [...new Set([...ids, ...contextIds])]
   }
 
   hasWorkUserRequest(taskId: string): boolean {
@@ -2221,6 +2229,7 @@ export class BotStore {
         origin.kind !== "bot" &&
         origin.kind !== "schedule" &&
         origin.kind !== "work_result" &&
+        !(origin.kind === "work" && origin.dispatch) &&
         !(origin.kind === "notification" && ["command", "reaction"].includes(origin.notificationKind)) &&
         !(origin.kind === "user" && (origin.replyTo || origin.mentions?.length))
       )
@@ -2443,6 +2452,7 @@ export class BotStore {
           task.origin.kind === "bot" ||
           task.origin.kind === "schedule" ||
           task.origin.kind === "work_result" ||
+          (task.origin.kind === "work" && task.origin.dispatch) ||
           (task.origin.kind === "notification" &&
             ["command", "reaction"].includes(task.origin.notificationKind)) ||
           botTaskGroupId(task) ||

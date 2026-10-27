@@ -135,16 +135,25 @@ export function createBotWorkTools(
         name: "bot_work_create",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
-          "Create a separate task conversation for the current user's work when useful. The host starts its initial execution automatically; do not also send the same instruction. Available from main chat, not recursively inside a task. Preserve the user's goal and constraints. Use a designated directory or a project ID from bot_work_projects; omit workspace for the Bot default. That workspace is retained for later revisions. Invalid targets fail without fallback. Reuse requestKey after a lost reply.",
+          "Create a separate task conversation when useful. The host executes goal as your assignment, without forwarding the user's raw message. Include the needed context, user constraints and expected outcome; report only what you actually assigned. The host starts execution automatically; do not send it again. Available from main chat, not recursively inside a task. Use a designated directory or project ID from bot_work_projects; omit workspace for the Bot default. The workspace is retained for revisions. Invalid targets fail without fallback. Reuse requestKey after a lost reply.",
         schema: z.object({
           requestKey: key,
           title: z.string().trim().min(1).max(160),
-          goal: z.string().trim().min(1).max(30000),
+          goal: z
+            .string()
+            .trim()
+            .min(1)
+            .max(30000)
+            .describe(
+              "Your self-contained execution instruction for this task, including relevant user constraints."
+            ),
           contextMessageIds: z
             .array(id)
             .max(12)
             .default([])
-            .describe("Relevant verified message IDs to carry as context, at most 24KB total."),
+            .describe(
+              "Optional verified source message IDs for provenance only; their text is not forwarded. Put necessary context in goal."
+            ),
           workspace: z
             .discriminatedUnion("kind", [
               z
@@ -180,11 +189,18 @@ export function createBotWorkTools(
         name: "bot_work_send",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
-          "Forward a user's follow-up to the exact same-audience task ID from a receipt or list, preserving its history and workspace. Clarify an ambiguous target. To revise completed work, continue it first, then send. Inside that task, execute directly. A queued receipt does not mean execution succeeded.",
+          "Send your prepared follow-up instruction to the exact same-audience task ID from a receipt or list, preserving its history and workspace. The task executes message, not the user's raw wording: resolve references and preserve their constraints. Clarify an ambiguous target. To revise completed work, continue it first, then send. Inside that task, execute directly. A queued receipt does not mean execution succeeded.",
         schema: z.object({
           requestKey: key,
           workId: id,
-          message: z.string().trim().min(1).max(30000)
+          message: z
+            .string()
+            .trim()
+            .min(1)
+            .max(30000)
+            .describe(
+              "The actual instruction to execute in the existing task, with relevant context and constraints."
+            )
         })
       }
     ),

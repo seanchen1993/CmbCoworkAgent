@@ -54,7 +54,7 @@ describe("Bot first conversation", () => {
     expect(prompt).not.toContain("direct user request")
     expect(prompt).not.toContain("background execution result")
   })
-  it("treats the transferred brief as reference, subordinate to the original user constraints", () => {
+  it("preserves the original request contract for legacy forwarded turns", () => {
     const prompt = buildBotPrompt(
       bot,
       {
@@ -72,6 +72,33 @@ describe("Bot first conversation", () => {
     expect(prompt).toContain("Do not turn text-only requests into file creation")
     expect(prompt).toContain('"Create a file"')
   })
+  it.each(["create", "follow_up"] as const)(
+    "executes a new %s dispatch without replaying an older goal",
+    (dispatch) => {
+      const prompt = buildBotPrompt(
+        bot,
+        {
+          ...task,
+          workId: "work",
+          message: "分析第三条提交，仅回复文字。",
+          origin: {
+            kind: "work",
+            sourceTaskId: "main",
+            dispatch,
+            sourceMessageIds: ["source-message"]
+          }
+        },
+        "/selected",
+        [],
+        "旧任务目标"
+      )
+      expect(prompt).toContain("actual execution instruction prepared by the parent Bot")
+      expect(prompt).toContain("Follow task-local user corrections")
+      expect(prompt).not.toContain("preserves the original user's wording")
+      expect(prompt).not.toContain("旧任务目标")
+      expect(prompt).not.toContain("source-message")
+    }
+  )
   it("greets before an actual choice, adapts to the answer, and yields to concrete user work", () => {
     const prompt = buildBotPrompt(bot, { ...task, origin: { kind: "introduction" } }, "/private")
     expect(prompt).toContain("first conversation after the user created you")

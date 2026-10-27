@@ -55,6 +55,30 @@ function fixture() {
 }
 
 describe("Bot control history retention", () => {
+  it("retains Bot assignment labels and source references after execution pruning", () => {
+    const f = fixture()
+    const source = f.store.enqueue({ botId: f.bot.id, requestId: "parent", message: "用户原话" })
+    f.store.transition(source.id, "running")
+    const { work, task } = f.store.createWork(
+      { botId: f.bot.id, operationId: "create", title: "Review", goal: "分析提交并总结" },
+      { taskId: source.id, callId: "create", key: "create" }
+    )
+    f.store.settle(source.id, "completed", null, "已交办")
+    f.store.transition(task.id, "running")
+    f.store.settle(task.id, "completed", null, "完成分析")
+    f.store.flushReplies()
+    const notice = f.store.recentTasks().find((entry) => entry.origin.kind === "work_result")!
+    f.store.transition(notice.id, "running")
+    f.store.settle(notice.id, "completed", null, "已反馈")
+    f.transcripts.set(work.threadId, new Map([[task.requestId, task.message]]))
+    f.fillTail()
+    f.store.pruneTaskHistory()
+    expect(f.native.prepare("SELECT message FROM bot_exchange_archive WHERE id=?").get(task.id)).toEqual({ message: null })
+    const origins = f.reopen().messageOrigins(f.bot.id, [task.requestId], undefined, work.id)
+    expect(origins[0].origin).toEqual(task.origin)
+    expect(origins[0].origin).toMatchObject({ dispatch: "create", sourceMessageIds: ["parent"] })
+    expect(f.reopen().messageOrigins(f.bot.id, [task.requestId])).toEqual([])
+  })
   it.each(["command", "reaction"] as const)("retains %s provenance after pruning without copying its internal payload or crossing owners", (notificationKind) => {
     const f = fixture()
     const requestId = `notification:${f.bot.threadId}:${notificationKind}:command-1`
