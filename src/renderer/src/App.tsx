@@ -29,6 +29,7 @@ import { SettingsOverlay } from "@/components/customize/SettingsOverlay"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import { TabbedPanel } from "@/components/tabs"
 import { RightPanel } from "@/components/panels/RightPanel"
+import { useRightPanelLayout } from "@/components/panels/useRightPanelLayout"
 import { WorkerStreamPanel } from "@/components/chat/WorkerStreamPanel"
 import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
 import { WorkflowAgentStreamPanel } from "@/components/chat/WorkflowAgentStreamPanel"
@@ -125,14 +126,6 @@ const LEFT_MIN = 200
 const LEFT_MAX = 400
 const LEFT_DEFAULT = 280
 const LEFT_RESIZE_HANDLE_WIDTH = 6
-
-const RIGHT_MIN = 250
-const RIGHT_MAX = 1600
-const RIGHT_DEFAULT = 300
-const RIGHT_PREVIEW_EXPAND_VW = 0.35
-const BROWSER_FULLSCREEN_RIGHT_DEFAULT_PERCENT = 66.67
-const BROWSER_FULLSCREEN_MIN_PANEL_PERCENT = 20
-const BROWSER_FULLSCREEN_MAX_PANEL_PERCENT = 80
 
 interface WorkerSplitHandleProps {
   onDrag: (totalDelta: number) => void
@@ -328,14 +321,25 @@ function App(): React.JSX.Element {
 
   const [isLoading, setIsLoading] = useState(true)
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT)
-  const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT)
-  const [browserFullscreenRightPercent, setBrowserFullscreenRightPercent] = useState(
-    BROWSER_FULLSCREEN_RIGHT_DEFAULT_PERCENT
-  )
   const [workerSplitLeftPercent, setWorkerSplitLeftPercent] = useState(50)
-  const [previewFullscreen, setPreviewFullscreen] = useState(false)
-  const [browserFullscreen, setBrowserFullscreen] = useState(false)
   const [harnessSessionThreadId, setHarnessSessionThreadId] = useState<string | null>(null)
+  const {
+    rightPanelSplitRef,
+    rightPanelMainRef,
+    rightPanelContainerRef,
+    previewFullscreen,
+    browserFullscreen,
+    showRightResizeHandle,
+    mainClassName: fullscreenMainClassName,
+    mainStyle: fullscreenMainStyle,
+    panelClassName: fullscreenRightPanelClassName,
+    panelStyle: fullscreenRightPanelStyle,
+    handleRightResizeStart,
+    handleRightResize,
+    handleRightResizeEnd,
+    setPreviewFullscreen,
+    setBrowserFullscreen
+  } = useRightPanelLayout({ rightModule })
 
   // Version and local-IP metadata belong to the application lifetime, not to a
   // ChatContainer. Keeping these listeners here avoids repeating IPC requests
@@ -413,24 +417,6 @@ function App(): React.JSX.Element {
   const renderedMainView = renderedRoute.mainView
   const renderedThreadId = renderedRoute.threadId
   const renderedHarnessSessionThreadId = renderedRoute.harnessSessionThreadId
-  const isRightPanelFullscreen = previewFullscreen || browserFullscreen
-  const showRightResizeHandle = !previewFullscreen
-  const fullscreenMainClassName = browserFullscreen
-    ? "relative flex min-w-0 flex-col overflow-hidden"
-    : "relative flex flex-1 min-w-0 flex-col overflow-hidden"
-  const fullscreenMainStyle = browserFullscreen
-    ? { flex: `${100 - browserFullscreenRightPercent} 1 0%` }
-    : undefined
-  const fullscreenRightPanelClassName = browserFullscreen
-    ? "min-w-0"
-    : isRightPanelFullscreen
-      ? "min-w-0 flex-1"
-      : "shrink-0 pl-0"
-  const fullscreenRightPanelStyle = browserFullscreen
-    ? { flex: `${browserFullscreenRightPercent} 1 0%` }
-    : isRightPanelFullscreen
-      ? undefined
-      : { width: rightWidth }
   const isThreadWorkerFocusActive =
     renderedMainView === "thread" &&
     Boolean(renderedThreadId && renderedRoute.workerFocusView?.threadId === renderedThreadId)
@@ -605,13 +591,8 @@ function App(): React.JSX.Element {
 
   // Track drag start widths
   const dragStartWidths = useRef<{ left: number; right: number } | null>(null)
-  const rightPanelSplitRef = useRef<HTMLDivElement>(null)
   const workerSplitRef = useRef<HTMLDivElement>(null)
   const workerSplitStartRef = useRef<{ leftPercent: number; width: number } | null>(null)
-  const browserFullscreenSplitStartRef = useRef<{ rightPercent: number; width: number } | null>(
-    null
-  )
-  const previewCollapsedWidthRef = useRef<number | null>(null)
 
   // Set platform-specific titlebar insets and track zoom
   useLayoutEffect(() => {
@@ -669,34 +650,6 @@ function App(): React.JSX.Element {
     [leftWidth, leftMinWidth]
   )
 
-  const handleRightResize = useCallback(
-    (totalDelta: number) => {
-      if (browserFullscreen) {
-        if (!browserFullscreenSplitStartRef.current) {
-          browserFullscreenSplitStartRef.current = {
-            rightPercent: browserFullscreenRightPercent,
-            width: rightPanelSplitRef.current?.clientWidth || window.innerWidth
-          }
-        }
-        const { rightPercent, width } = browserFullscreenSplitStartRef.current
-        const nextPercent = rightPercent - (totalDelta / Math.max(1, width)) * 100
-        setBrowserFullscreenRightPercent(
-          Math.min(
-            BROWSER_FULLSCREEN_MAX_PANEL_PERCENT,
-            Math.max(BROWSER_FULLSCREEN_MIN_PANEL_PERCENT, nextPercent)
-          )
-        )
-        return
-      }
-      if (!dragStartWidths.current) {
-        dragStartWidths.current = { left: leftWidth, right: rightWidth }
-      }
-      const newWidth = dragStartWidths.current.right - totalDelta
-      setRightWidth(Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, newWidth)))
-    },
-    [browserFullscreen, browserFullscreenRightPercent, leftWidth, rightWidth]
-  )
-
   const handleWorkerSplitResize = useCallback(
     (totalDelta: number) => {
       if (!workerSplitStartRef.current) {
@@ -711,23 +664,6 @@ function App(): React.JSX.Element {
     },
     [workerSplitLeftPercent]
   )
-
-  const handlePreviewExpand = useCallback(() => {
-    setRightWidth((prev) => {
-      if (previewCollapsedWidthRef.current === null) {
-        previewCollapsedWidthRef.current = prev
-      }
-      const target = Math.round(window.innerWidth * RIGHT_PREVIEW_EXPAND_VW)
-      return Math.min(RIGHT_MAX, Math.max(prev, target))
-    })
-  }, [])
-
-  const handlePreviewCollapse = useCallback(() => {
-    if (previewCollapsedWidthRef.current !== null) {
-      setRightWidth(previewCollapsedWidthRef.current)
-      previewCollapsedWidthRef.current = null
-    }
-  }, [])
 
   const selectPreviewModule = useCallback(() => {
     openResourcePanelOverlay("preview")
@@ -745,14 +681,6 @@ function App(): React.JSX.Element {
     if (!rightPanelWorkRequest) return
     setRightModule("work")
   }, [rightPanelWorkRequest, setRightModule])
-
-  useEffect(() => {
-    if (rightModule === "work") {
-      handlePreviewCollapse()
-      return
-    }
-    handlePreviewExpand()
-  }, [handlePreviewCollapse, handlePreviewExpand, rightModule])
 
   const handleHarnessActiveSessionThreadChange = useCallback((threadId: string | null) => {
     setHarnessSessionThreadId((prev) => (prev === threadId ? prev : threadId))
@@ -854,7 +782,6 @@ function App(): React.JSX.Element {
     const handleMouseUp = (): void => {
       dragStartWidths.current = null
       workerSplitStartRef.current = null
-      browserFullscreenSplitStartRef.current = null
     }
     document.addEventListener("mouseup", handleMouseUp)
     return () => document.removeEventListener("mouseup", handleMouseUp)
@@ -1337,7 +1264,11 @@ function App(): React.JSX.Element {
                       </main>
                     ) : (
                       !previewFullscreen && (
-                        <main className={fullscreenMainClassName} style={fullscreenMainStyle}>
+                        <main
+                          ref={rightPanelMainRef}
+                          className={fullscreenMainClassName}
+                          style={fullscreenMainStyle}
+                        >
                           {renderedThreadId ? (
                             <TabbedPanel threadId={renderedThreadId} showTabBar={false} />
                           ) : (
@@ -1353,9 +1284,16 @@ function App(): React.JSX.Element {
 
                 {renderedMainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
                   <>
-                    {showRightResizeHandle && <ResizeHandle onDrag={handleRightResize} />}
+                    {showRightResizeHandle && (
+                      <ResizeHandle
+                        onDragStart={handleRightResizeStart}
+                        onDrag={handleRightResize}
+                        onDragEnd={handleRightResizeEnd}
+                      />
+                    )}
                     {/* Right Panel - floating style */}
                     <div
+                      ref={rightPanelContainerRef}
                       style={fullscreenRightPanelStyle}
                       className={fullscreenRightPanelClassName}
                     >
@@ -1416,6 +1354,7 @@ function App(): React.JSX.Element {
                   />
                 )}
                 <main
+                  ref={isHarnessAgentFocusActive ? undefined : rightPanelMainRef}
                   key="harness-main"
                   style={
                     isHarnessAgentFocusActive
@@ -1472,8 +1411,15 @@ function App(): React.JSX.Element {
                   !rightPanelCollapsed &&
                   !isHarnessAgentFocusActive && (
                     <>
-                      {showRightResizeHandle && <ResizeHandle onDrag={handleRightResize} />}
+                      {showRightResizeHandle && (
+                        <ResizeHandle
+                          onDragStart={handleRightResizeStart}
+                          onDrag={handleRightResize}
+                          onDragEnd={handleRightResizeEnd}
+                        />
+                      )}
                       <div
+                        ref={rightPanelContainerRef}
                         style={fullscreenRightPanelStyle}
                         className={fullscreenRightPanelClassName}
                       >

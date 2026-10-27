@@ -10,7 +10,9 @@ import {
   Play,
   RotateCcw,
   Save,
+  Search,
   Trash2,
+  X,
   XCircle
 } from "lucide-react"
 import { toast } from "sonner"
@@ -18,6 +20,7 @@ import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
   Dialog,
   DialogContent,
@@ -33,6 +36,7 @@ import {
   formatPlaybackDuration,
   type BrowserPlaybackHistoryEntry
 } from "./browser-playback-history"
+import { hasBrowserRecordingNameConflict } from "@/lib/browser-recording-name"
 
 export interface BrowserRecordingListDialogProps {
   open: boolean
@@ -392,6 +396,7 @@ export function BrowserRecordingListDialog({
     loadingFileName === selectedEntry?.fileName &&
     loadingAction === "saveAs"
   const isLibraryFull = entries.length >= MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES
+  const saveAsNameConflict = hasBrowserRecordingNameConflict(entries, detailDisplayNameValue)
 
   const handleSaveDetailScript = async (): Promise<void> => {
     const displayName = detailDisplayNameValue.trim()
@@ -412,6 +417,10 @@ export function BrowserRecordingListDialog({
   const handleSaveAsScript = async (): Promise<void> => {
     const displayName = detailDisplayNameValue.trim()
     if (!selectedEntry || !detailScriptValue.trim() || !displayName) return
+    if (saveAsNameConflict) {
+      toast.error("另存为必须使用新的操作名称")
+      return
+    }
     const savedEntry = await onSaveAsScript(selectedEntry, detailScriptValue, displayName)
     setSelectedFileName(savedEntry.fileName)
     setDetailScript(detailScriptValue)
@@ -453,11 +462,6 @@ export function BrowserRecordingListDialog({
                   </TabsTrigger>
                 </TabsList>
               </Tabs>
-              <p className="text-[11px] text-muted-foreground">
-                {activeTab === "recordings"
-                  ? `已保存 ${entries.length}/${MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES} 个可复用操作`
-                  : `共 ${playbackHistory.length} 条回放记录`}
-              </p>
             </div>
             {activeTab === "recordings" ? (
               <Button
@@ -506,15 +510,43 @@ export function BrowserRecordingListDialog({
                   </div>
                 ) : (
                   <div className="flex min-h-0 flex-1 flex-col gap-3">
-                    <Input
-                      value={displayNameFilter}
-                      onChange={(event) => {
-                        setDisplayNameFilter(event.target.value)
-                        setCurrentPage(1)
-                      }}
-                      placeholder="输入操作名称筛选"
-                      className="h-9 rounded-lg border-border/80 bg-background text-sm shadow-none"
-                    />
+                    <div className="space-y-1.5">
+                      <label
+                        htmlFor="browser-recording-name-filter"
+                        className="text-xs font-medium text-foreground"
+                      >
+                        筛选操作
+                      </label>
+                      <div className="relative">
+                        <Search
+                          className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+                          strokeWidth={1.8}
+                        />
+                        <Input
+                          id="browser-recording-name-filter"
+                          value={displayNameFilter}
+                          onChange={(event) => {
+                            setDisplayNameFilter(event.target.value)
+                            setCurrentPage(1)
+                          }}
+                          placeholder="输入操作名称筛选"
+                          className="h-10 rounded-lg border-border bg-muted/30 pl-9 pr-9 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:border-primary/60 focus-visible:bg-background focus-visible:ring-2 focus-visible:ring-primary/20"
+                        />
+                        {displayNameFilter ? (
+                          <button
+                            type="button"
+                            className="absolute right-2.5 top-1/2 inline-flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            aria-label="清空操作名称筛选"
+                            onClick={() => {
+                              setDisplayNameFilter("")
+                              setCurrentPage(1)
+                            }}
+                          >
+                            <X className="size-3.5" strokeWidth={1.8} />
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
                     {isLibraryFull && (
                       <div
                         className="rounded-lg border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-[11px] text-status-warning"
@@ -536,7 +568,7 @@ export function BrowserRecordingListDialog({
                               <col />
                               <col className="w-[76px]" />
                               <col className="w-[72px]" />
-                              <col className="w-[72px]" />
+                              <col className="w-[144px]" />
                               <col className="w-[120px]" />
                             </colgroup>
                             <thead className="sticky top-0 z-10 bg-muted/95 text-[11px] font-medium text-muted-foreground backdrop-blur supports-[backdrop-filter]:bg-muted/85">
@@ -608,8 +640,8 @@ export function BrowserRecordingListDialog({
                                       )}
                                     </td>
                                     <td
-                                      className="truncate px-2 py-3 align-middle text-[11px] text-muted-foreground"
-                                      title={entry.createdAt}
+                                      className="whitespace-nowrap px-2 py-3 align-middle text-[11px] text-muted-foreground"
+                                      title={formatRecordingTime(entry.createdAt)}
                                     >
                                       {formatRecordingTime(entry.createdAt)}
                                     </td>
@@ -714,9 +746,17 @@ export function BrowserRecordingListDialog({
                   <div className="flex-1 min-w-0">
                     <DialogTitle className="text-base">编辑可复用操作</DialogTitle>
                     <DialogDescription className="mt-1 text-[12px] leading-5">
-                      {selectedEntry
-                        ? "可编辑自动化脚本和操作名称；保存修改会更新当前操作，另存为会创建新的可复用操作。"
-                        : "请选择一项可复用操作查看详情。"}
+                      {selectedEntry ? (
+                        <>
+                          可编辑自动化脚本和操作名称；保存修改会更新当前操作，另存为会创建新的可复用操作。
+                          <span className="font-medium text-primary">
+                            建议使用清晰、具体的名称描述操作要完成的任务，方便 Agent
+                            后续准确识别并直接复用。
+                          </span>
+                        </>
+                      ) : (
+                        "请选择一项可复用操作查看详情。"
+                      )}
                     </DialogDescription>
                   </div>
                   {selectedEntry ? (
@@ -749,6 +789,7 @@ export function BrowserRecordingListDialog({
                           )
                         }}
                         placeholder="请输入操作名称"
+                        aria-invalid={saveAsNameConflict || undefined}
                         className="h-8 w-[240px] rounded-lg border-border/80 bg-background text-xs shadow-none"
                       />
                       <Button
@@ -774,30 +815,47 @@ export function BrowserRecordingListDialog({
                         )}
                         保存修改
                       </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-8 rounded-lg text-[11px]"
-                        disabled={
-                          !selectedEntry ||
-                          !detailScriptValue.trim() ||
-                          !detailDisplayNameValue.trim() ||
-                          detailLoading ||
-                          isSaveLoading ||
-                          isSaveAsLoading ||
-                          isContinueLoading ||
-                          isLibraryFull
-                        }
-                        onClick={() => void handleSaveAsScript()}
-                      >
-                        {isSaveAsLoading ? (
-                          <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                        ) : (
-                          <Copy className="size-3.5" strokeWidth={1.8} />
-                        )}
-                        另存为
-                      </Button>
+                      <TooltipProvider delayDuration={150}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span
+                              className="inline-flex"
+                              tabIndex={saveAsNameConflict ? 0 : undefined}
+                            >
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-8 rounded-lg text-[11px]"
+                                disabled={
+                                  !selectedEntry ||
+                                  !detailScriptValue.trim() ||
+                                  !detailDisplayNameValue.trim() ||
+                                  detailLoading ||
+                                  isSaveLoading ||
+                                  isSaveAsLoading ||
+                                  isContinueLoading ||
+                                  isLibraryFull ||
+                                  saveAsNameConflict
+                                }
+                                onClick={() => void handleSaveAsScript()}
+                              >
+                                {isSaveAsLoading ? (
+                                  <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                                ) : (
+                                  <Copy className="size-3.5" strokeWidth={1.8} />
+                                )}
+                                另存为
+                              </Button>
+                            </span>
+                          </TooltipTrigger>
+                          {saveAsNameConflict ? (
+                            <TooltipContent side="top" className="z-[70] text-xs">
+                              另存为必须使用新的操作名称
+                            </TooltipContent>
+                          ) : null}
+                        </Tooltip>
+                      </TooltipProvider>
                       <Button
                         type="button"
                         size="sm"
