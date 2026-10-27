@@ -1,3 +1,4 @@
+import { openCreatorStep } from "./support/creator-navigation"
 /* Actual native UI/IPC/installer/OS secret store. Controlled loopback model and one-shot lost-receipt fault. */
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
@@ -355,12 +356,12 @@ async function enterCreatorForNewRequest() {
   // Restart restores durable observations, never the previous creator-mode admission.
   // Only a new explicit native action may enable the next human authoring request.
   const before = await status()
-  assert.equal(before.mode, "normal")
-  assert.equal(before.enabled, false)
-  const after = await page!.evaluate(
-    (scope) => window.api.mods.development.setMode({ ...scope, mode: "creator" }),
-    scope
-  )
+  if (before.mode !== "creator") {
+    assert.equal(before.enabled, false)
+    await page!.getByRole("button", { name: "创造者模式", exact: true }).click()
+  }
+  const after = await until(status, value => value.mode === "creator" && value.enabled,
+    "explicit creator mode selection")
   assert.equal(after.mode, "creator")
   assert.equal(after.enabled, true)
   return {
@@ -369,7 +370,7 @@ async function enterCreatorForNewRequest() {
     afterMode: after.mode,
     afterEnabled: after.enabled,
     mechanism:
-      "Explicit original native creator-mode action for a new human request; not restart recovery"
+      "User-selected creator mode for a fresh human request; source approvals remain separate"
   }
 }
 async function openInterruptedBusinessReview() {
@@ -379,16 +380,16 @@ async function openInterruptedBusinessReview() {
   assert.equal(before.business?.review?.phase, "unknown")
   assert.equal(before.business?.review?.canConfirm, false)
   assert.equal(before.business?.review?.canReconcile, true)
+  await page!.getByRole("button", { name: "创造者模式", exact: true }).click()
+  await until(status, value => value.mode === "creator" && value.enabled,
+    "explicit creator selection for result inspection")
+  await openCreatorStep(page!, "delivery")
   const card = page!.getByRole("article", { name: "业务插件组装确认" })
-  // Sidebar navigation may dismiss the workspace opened by the initial status read.
-  // Reopen the original readback entry without restoring creator-mode admission.
-  if (!(await card.isVisible()))
-    await page!.getByRole("button", { name: "插件结果待核对", exact: true }).click()
   await card.waitFor({ state: "visible" })
-  await card.getByRole("button", { name: "核对中断结果", exact: true }).waitFor()
+  await card.getByRole("button", { name: "核对实际交付结果", exact: true }).waitFor()
   const after = await status()
-  assert.equal(after.mode, "normal")
-  assert.equal(after.enabled, false)
+  assert.equal(after.mode, "creator")
+  assert.equal(after.enabled, true)
   assert.equal(after.business?.review?.planId, before.business?.review?.planId)
   assert.equal(after.business?.review?.canConfirm, false)
   return {
@@ -397,7 +398,7 @@ async function openInterruptedBusinessReview() {
     planId: after.business?.review?.planId,
     canConfirm: after.business?.review?.canConfirm,
     canReconcile: after.business?.review?.canReconcile,
-    mechanism: "Original interrupted-result workspace trigger; no creator authorization or replay"
+    mechanism: "Explicit creator selection opens result inspection without restoring source approval or replaying effects"
   }
 }
 async function secretProof(view: FunctionUserConfigView, key: string) {
@@ -557,8 +558,9 @@ async function main() {
       "business native review"
     )
     await armLostReceipt("install")
+    await openCreatorStep(page!, "delivery")
     const businessCard = () => page!.getByRole("article", { name: "业务插件组装确认" })
-    await businessCard().getByRole("button", { name: "保存为新插件并安装", exact: true }).click()
+    await businessCard().getByRole("button", { name: "保存插件", exact: true }).click()
     const unknownInstall = await until(
       status,
       (value) => value.business?.review?.phase === "unknown",
@@ -572,7 +574,7 @@ async function main() {
     await restart()
     assert.equal((await status()).business?.review?.phase, "unknown")
     evidence.installReadbackNativeEntry = await openInterruptedBusinessReview()
-    await businessCard().getByRole("button", { name: "核对中断结果", exact: true }).click()
+    await businessCard().getByRole("button", { name: "核对实际交付结果", exact: true }).click()
     const reconciled = await until(
       status,
       (value) => value.business?.review?.phase === "installed",
@@ -600,6 +602,7 @@ async function main() {
       (value) => Boolean(value.business?.review?.canConfirm),
       "fresh native export approval"
     )
+    await openCreatorStep(page!, "delivery")
     const output = join(fixture.isolated, "recovered-plugin.zip")
     await app!.evaluate(({ dialog }, output) => {
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: output })
@@ -620,7 +623,7 @@ async function main() {
     const changed = Buffer.from(actualZip)
     changed[changed.length - 1] ^= 1
     writeFileSync(output, changed)
-    await businessCard().getByRole("button", { name: "核对中断结果", exact: true }).click()
+    await businessCard().getByRole("button", { name: "核对实际交付结果", exact: true }).click()
     await until(
       status,
       (value) => value.business?.review?.reconciliation?.outcome === "unknown",
@@ -628,7 +631,7 @@ async function main() {
     )
     assert.equal((await status()).business!.review!.phase, "unknown")
     writeFileSync(output, actualZip)
-    await businessCard().getByRole("button", { name: "核对中断结果", exact: true }).click()
+    await businessCard().getByRole("button", { name: "核对实际交付结果", exact: true }).click()
     const exported = await until(
       status,
       (value) => value.business?.review?.phase === "exported",

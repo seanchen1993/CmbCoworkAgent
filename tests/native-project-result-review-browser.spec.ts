@@ -149,11 +149,16 @@ async function main() {
     }))
     await page.goto("http://127.0.0.1:47777/")
     await page.addScriptTag({ content: result.outputFiles[0].text })
-    const reset = async (mode: string) => page.evaluate(value =>
-      (window as unknown as {fixture:{reset(mode:string):void}}).fixture.reset(value), mode)
+    const reset = async (mode: string) => {
+      await page.evaluate(value =>
+        (window as unknown as {fixture:{reset(mode:string):void}}).fixture.reset(value), mode)
+      if (mode.startsWith("instructions")) {
+        await page.getByText("补充要求（可选）", { exact: true }).click()
+      }
+    }
     await page.getByRole("button", { name: "接受当前成果", exact: true }).waitFor()
     assert.equal(await page.getByRole("button", { name: "确认完成任务", exact: true }).count(), 0)
-    await page.getByRole("button", { name: "连续执行至下一确认点", exact: true }).click()
+    await page.getByRole("button", { name: "开始执行", exact: true }).click()
     await page.getByText("任务已停在需要你确认的位置，请处理下方待办。").waitFor()
     await page.getByRole("button", { name: "拒绝当前成果", exact: true }).click()
     await page.getByText("你已拒绝这版成果，流程尚未推进。").waitFor()
@@ -163,7 +168,7 @@ async function main() {
     await reset("review") // A separate undecided result accepts without feedback; never overwrite rejection.
     await page.getByRole("button", { name: "接受当前成果", exact: true }).click()
     await page.getByRole("button", { name: "确认完成任务", exact: true }).waitFor()
-    await page.getByRole("button", { name: "连续执行至下一确认点", exact: true }).click()
+    await page.getByRole("button", { name: "开始执行", exact: true }).click()
     await page.getByRole("heading", { name: "设计任务 · 已完成" }).waitFor()
     const calls = await page.evaluate(() => (window as unknown as { fixture: { calls: Array<{kind:string;decision?:string;review?:unknown}> } }).fixture.calls)
     assert.deepEqual(calls.map(call => [call.kind, call.decision]), [
@@ -177,7 +182,7 @@ async function main() {
       (window as unknown as {fixture:{calls:Array<{kind:string;operationId?:string;feedback?:string;stageInstructions?:string;idempotencyKey?:string}>}}).fixture.calls.slice(value), offset)
     const instructions = page.getByRole("textbox", { name: "本次阶段补充说明（可选）", exact: true })
     const startStage = page.getByRole("button", { name: "开始当前阶段", exact: true })
-    const continuous = page.getByRole("button", { name: "连续执行至下一确认点", exact: true })
+    const continuous = page.getByRole("button", { name: "开始执行", exact: true })
     const preparationOffset = await commandCount()
     await reset("instructions-limit")
     const preparationMessage = page.getByLabel("本次步骤问题说明", { exact: true })
@@ -338,7 +343,7 @@ async function main() {
     assert.equal(await page.getByLabel("新任务名称", { exact: true }).isDisabled(), true)
     await page.getByRole("button", { name: "确认冻结并导入", exact: true }).click()
     assert.equal(await instructions.count(), 0)
-    assert.equal(await page.getByRole("button", { name: "连续执行至下一确认点", exact: true }).count(), 0)
+    assert.equal(await page.getByRole("button", { name: "开始执行", exact: true }).count(), 0)
     await page.getByRole("button", { name: "重新验证导入成果", exact: true }).click()
     await page.getByRole("button", { name: "接受当前成果", exact: true }).waitFor()
     const imports = await page.evaluate(() => (window as unknown as {fixture:{calls:Array<{kind:string;input?:{artifacts:unknown};review?:{artifacts:unknown}}>}}).fixture.calls.filter(call => call.kind.startsWith("import-") || call.kind === "validate-imported"))

@@ -46,7 +46,7 @@ function ScopedStartUse({
     }
   }, [])
   const input: PluginStartUseInput = { threadId, expectedWorkspace: workspace, pluginId, expected }
-  const check = async (open: boolean, enable = false) => {
+  const start = async (openChat = false) => {
     if (lock.current || !active.current) return
     lock.current = true
     setBusy(true)
@@ -56,28 +56,55 @@ function ScopedStartUse({
     try {
       const actualInput = {
         ...input,
-        expected:
-          (open || enable) && report
-            ? {
-                name: report.identity.name,
-                version: report.identity.version,
-                digest: report.identity.digest
-              }
-            : expected
+        expected: report
+          ? {
+              name: report.identity.name,
+              version: report.identity.version,
+              digest: report.identity.digest
+            }
+          : expected
       }
-      // Re-read before enabling so a late account/scope change cannot dispatch a mutation.
+      // One user action prepares the exact installation and opens its native use form.
       let next = await window.api.plugins.prepareStartUse(actualInput)
       if (!active.current) return
       if (useAppStore.getState().accountRevision !== account || !current())
         throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
-      if (enable && next.activationRequired) {
-        next = await window.api.plugins.enableStartUse(actualInput)
+      const pinnedInput = {
+        ...actualInput,
+        expected: {
+          name: next.identity.name,
+          version: next.identity.version,
+          digest: next.identity.digest
+        }
+      }
+      if (
+        next.identity.pluginId !== pluginId ||
+        next.identity.name !== actualInput.expected.name ||
+        next.identity.version !== actualInput.expected.version ||
+        (actualInput.expected.digest && next.identity.digest !== actualInput.expected.digest)
+      )
+        throw Error("PLUGIN_START_USE_IDENTITY_CHANGED")
+      if (next.activationRequired) {
+        next = await window.api.plugins.enableStartUse(pinnedInput)
         if (!active.current) return
         if (useAppStore.getState().accountRevision !== account || !current())
           throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
       }
       setReport(next)
-      if (open) openPluginStartUse(actualInput, next)
+      // Configuration belongs to this chat only when the native report says so.
+      // Project-scoped setup remains in the destination project form.
+      const needsConfiguration = next.issues.some(
+        (issue) =>
+          ["configuration", "knowledge"].includes(issue.code) &&
+          issue.resolution === "plugin-settings"
+      )
+      if (
+        purpose !== "dependency" &&
+        (next.kind !== "chat" || openChat) &&
+        next.canOpen &&
+        !needsConfiguration
+      )
+        openPluginStartUse(pinnedInput, next)
     } catch (cause) {
       if (active.current) {
         setReport(undefined)
@@ -89,50 +116,32 @@ function ScopedStartUse({
     }
   }
   const configuration = report?.issues.some(
-    (issue) => issue.code === "configuration" || issue.code === "knowledge"
+    (issue) =>
+      ["configuration", "knowledge"].includes(issue.code) && issue.resolution === "plugin-settings"
   )
   return (
-    <section aria-label="已安装插件开始使用" className="space-y-3 rounded-lg border p-3">
-      <p className="text-sm">
-        {purpose === "dependency"
-          ? "在这里完成此依赖的启用、原生授权和配置，然后继续准备模板。"
-          : "直接核对新插件的入口、配置与运行条件，然后进入对应使用表单。"}
-      </p>
-      <button type="button" disabled={busy} className={button} onClick={() => void check(false)}>
+    <section aria-label="已安装插件开始使用" className="space-y-3">
+      <button
+        type="button"
+        disabled={busy}
+        className={`${button} border-primary bg-primary text-primary-foreground hover:bg-primary/90`}
+        onClick={() => void start()}
+      >
         {busy
-          ? "正在核对使用条件…"
-          : report
-            ? "重新检查使用条件"
-            : purpose === "dependency"
-              ? "核对依赖使用条件"
+          ? "正在打开…"
+          : purpose === "dependency"
+            ? "准备此依赖"
+            : configuration
+              ? "保存后继续"
               : "开始使用"}
       </button>
       {report && (
         <>
-          {report.activationRequired && (
-            <div className="space-y-2 rounded border p-3">
-              <p className="text-sm">
-                新插件已安装，尚未启用。启用后将重新检查配置和使用入口；运行权限仍需另行确认。
-              </p>
-              <button
-                type="button"
-                className={button}
-                disabled={busy}
-                onClick={() => void check(false, true)}
-              >
-                启用新插件
-              </button>
-            </div>
+          {purpose === "dependency" && (
+            <p role="status" className="text-sm">
+              {report.issues.length ? "请完成此依赖的设置。" : "依赖已准备，请继续制作。"}
+            </p>
           )}
-          <p role="status" className="text-sm">
-            {purpose === "dependency"
-              ? "完成后请继续本页的模板准备，无需离开此流程。"
-              : report.kind === "host-project"
-                ? "下一步打开“新建项目”，已选好此项目插件。"
-                : report.kind === "plugin-project"
-                  ? "下一步打开“新建项目”，已选好此项目插件。"
-                  : "此插件用于聊天，下一步返回当前配置所对应的聊天。"}
-          </p>
           {report.issues.length > 0 && (
             <ul className="list-disc space-y-1 pl-5 text-sm">
               {report.issues.map((issue, index) => (
@@ -142,39 +151,31 @@ function ScopedStartUse({
           )}
           {configuration && (
             <div className="space-y-2 rounded border p-3">
-              <p className="text-sm font-medium">补齐当前聊天的插件配置与知识绑定</p>
+              <p className="text-sm font-medium">填写后即可使用</p>
               <FunctionUserConfig
                 threadId={threadId}
                 pluginId={pluginId}
                 expectedWorkspace={workspace}
+                initiallyOpen
               />
-              <p className="text-xs text-muted-foreground">
-                保存后点击“重新检查使用条件”。新项目仍会按实际工作目录重新核对配置和权限。
-              </p>
             </div>
           )}
           {report.kind === "chat" && !report.activationRequired && (
             <InstalledChatPluginUse input={input} report={report} purpose={purpose} />
           )}
-          {purpose !== "dependency" && (
-            <>
+          {report.kind === "chat" &&
+            purpose !== "dependency" &&
+            report.canOpen &&
+            !configuration && (
               <button
                 type="button"
-                disabled={busy || !report.canOpen}
                 className={button}
-                onClick={() => void check(true)}
+                disabled={busy}
+                onClick={() => void start(true)}
               >
-                {report.kind === "host-project"
-                  ? "进入项目创建"
-                  : report.kind === "plugin-project"
-                    ? "进入项目创建"
-                    : "返回原聊天使用上述入口"}
+                返回聊天
               </button>
-              <p className="text-xs text-muted-foreground">
-                进入表单不会创建项目、启动步骤或自动授权；填写并确认后才执行对应原生操作。
-              </p>
-            </>
-          )}
+            )}
         </>
       )}
       {error && (

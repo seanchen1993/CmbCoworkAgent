@@ -46,7 +46,7 @@ async function main() {
       function CoveredGuide(){const ref=React.useRef(null);React.useEffect(()=>{document.getElementById('covered').dataset.ready='true'},[]);
         return <div id="covered" inert aria-hidden="true"><section ref={ref}><h2 data-visible-target>被遮盖的工作区</h2>
           <AnchoredGuide active config={visibilityConfig} rootRef={ref} steps={visibilitySteps}/></section></div>}
-      window.fixture={calls,render,covered:()=>root.render(<React.StrictMode><CoveredGuide/></React.StrictMode>),state:()=>state({guideId:"mods-creator-workspace-stage-debug",revision:1}),
+      window.fixture={calls,render,covered:()=>root.render(<React.StrictMode><CoveredGuide/></React.StrictMode>),state:()=>state({guideId:"mods-creator-workspace-stage-debug",revision:2}),
         noPreview:()=>{delete window.api.harnessBoard.localProjects.preview;render()},
         ordinary:()=>{current.mode="normal";delete current.projectTrial;current.drafts=[];current.trials=[];render("ordinary")},
         nativeWork:()=>{current.projectTrial={id:"native-request",draftId:"native-draft",name:"Native candidate",revision:1,digest:"b".repeat(64),goal:"Native creation"};listeners.forEach(fn=>fn({threadId:"ordinary"}))},

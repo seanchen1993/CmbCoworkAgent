@@ -29,7 +29,7 @@ export function CreatorTrialJourneyCard({
       className="space-y-3 rounded-xl border bg-background p-4"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="font-semibold">整轮试用验收</h4>
+        <h4 className="font-semibold">试用结果</h4>
         <span
           role="status"
           className={`rounded-md px-2 py-1 text-xs ${
@@ -41,85 +41,93 @@ export function CreatorTrialJourneyCard({
           {view.label}
         </span>
       </div>
-      <p className="text-sm">下一步：{view.nextStep}</p>
+      {!view.passed && <p className="text-sm">{view.nextStep}</p>}
       {journey && view.current && (
         <>
-          <p className="text-xs text-muted-foreground">
-            下列阶段和执行会话属于同一轮项目试用。通过状态依据原运行器的检查与推进凭据，不能由助手自报成功替代。
-          </p>
-          <ol className="space-y-2" aria-label="本轮阶段验收">
-            {journey.stages.map((stage, index) => (
-              <li key={stage.id}>
-                <details
-                  className="rounded-lg border p-3"
-                  open={["running", "failed", "needs-approval", "checks-passed"].includes(
-                    stage.status
-                  )}
-                >
-                  <summary className="cursor-pointer text-sm font-medium">
-                    {index + 1}. {stage.title} · {stageLabels[stage.status]}
-                    <span className="ml-2 text-xs font-normal text-muted-foreground">
-                      {stage.checks.length} 项检查 · {stage.sessions.length} 次执行
-                    </span>
-                  </summary>
-                  <div className="mt-3 grid gap-3 text-xs sm:grid-cols-2">
-                    <div className="space-y-1">
-                      <p className="font-medium">产物要求</p>
-                      {stage.artifacts.length ? (
-                        stage.artifacts.map((artifact) => (
-                          <p key={artifact.id} className="break-all">
-                            {artifact.path} ·{" "}
-                            {artifact.required === null
-                              ? "由原校验决定"
-                              : artifact.required
-                                ? "必需"
-                                : "可选"}
+          <details>
+            <summary className="cursor-pointer text-sm text-muted-foreground">
+              已通过 {journey.stages.filter((stage) => stage.status === "passed").length} /{" "}
+              {journey.stages.length} 步 · 查看结果
+            </summary>
+            <ol className="space-y-2" aria-label="本轮阶段验收">
+              {journey.stages.map((stage, index) => (
+                <li key={stage.id}>
+                  <details className="rounded-lg border p-3" open={stage.status === "failed"}>
+                    <summary className="cursor-pointer text-sm font-medium">
+                      {index + 1}. {stage.title} · {stageLabels[stage.status]}
+                      <span className="ml-2 text-xs font-normal text-muted-foreground">
+                        {stage.checks.length} 项检查 · {stage.sessions.length} 次执行
+                      </span>
+                    </summary>
+                    <div className="mt-3 grid gap-3 text-xs sm:grid-cols-2">
+                      <div className="space-y-1">
+                        <p className="font-medium">产物要求</p>
+                        {stage.artifacts.length ? (
+                          stage.artifacts.map((artifact) => (
+                            <p key={artifact.id} className="break-all">
+                              {artifact.path} ·{" "}
+                              {artifact.required === null
+                                ? "由原校验决定"
+                                : artifact.required
+                                  ? "必需"
+                                  : "可选"}
+                            </p>
+                          ))
+                        ) : (
+                          <p className="text-muted-foreground">本阶段未声明产物要求。</p>
+                        )}
+                      </div>
+                      <div className="space-y-1">
+                        <p className="font-medium">原运行器校验</p>
+                        {stage.checks.length ? (
+                          stage.checks.map((check) => (
+                            <p key={check.id} className="break-words">
+                              {check.id} · {checkLabels[check.result]}
+                              {check.validatorVersion && (
+                                <span className="text-muted-foreground">
+                                  {" "}
+                                  · {check.validatorVersion}
+                                </span>
+                              )}
+                            </p>
+                          ))
+                        ) : (
+                          <p className="text-muted-foreground">
+                            本阶段未声明检查；请结合原阶段推进记录核对。
                           </p>
-                        ))
-                      ) : (
-                        <p className="text-muted-foreground">本阶段未声明产物要求。</p>
-                      )}
+                        )}
+                      </div>
                     </div>
-                    <div className="space-y-1">
-                      <p className="font-medium">原运行器校验</p>
-                      {stage.checks.length ? (
-                        stage.checks.map((check) => (
-                          <p key={check.id} className="break-words">
-                            {check.id} · {checkLabels[check.result]}
-                            {check.validatorVersion && (
-                              <span className="text-muted-foreground">
-                                {" "}
-                                · {check.validatorVersion}
-                              </span>
-                            )}
-                          </p>
-                        ))
-                      ) : (
-                        <p className="text-muted-foreground">
-                          本阶段未声明检查；请结合原阶段推进记录核对。
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                  {!!stage.sessions.length && (
-                    <details className="mt-3 text-xs text-muted-foreground">
-                      <summary className="cursor-pointer">
-                        查看所属执行会话（{stage.sessions.length}）
-                      </summary>
-                      <ul className="mt-2 space-y-1">
-                        {stage.sessions.map((session) => (
-                          <li key={session.operationId} className="break-all">
-                            {session.threadId} · {session.status}
-                            {session.terminalOutcome ? ` · ${session.terminalOutcome}` : ""}
-                          </li>
-                        ))}
-                      </ul>
-                    </details>
-                  )}
-                </details>
-              </li>
-            ))}
-          </ol>
+                    {!!stage.sessions.length && (
+                      <details className="mt-3 text-xs text-muted-foreground">
+                        <summary className="cursor-pointer">
+                          查看所属执行会话（{stage.sessions.length}）
+                        </summary>
+                        <ul className="mt-2 space-y-1">
+                          {stage.sessions.map((session) => (
+                            <li key={session.operationId} className="break-all">
+                              {session.threadId} · {session.status}
+                              {session.terminalOutcome ? ` · ${session.terminalOutcome}` : ""}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
+                  </details>
+                </li>
+              ))}
+            </ol>
+          </details>
+          {journey.stages.some((stage) => stage.status === "failed") && (
+            <p role="alert" className="text-sm text-destructive">
+              未通过：
+              {journey.stages
+                .filter((stage) => stage.status === "failed")
+                .map((stage) => stage.title)
+                .join("、")}
+              。可在聊天中描述需要修改的地方。
+            </p>
+          )}
           {!!journey.diagnostics.length && (
             <details className="text-xs text-muted-foreground">
               <summary className="cursor-pointer">

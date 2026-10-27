@@ -57,7 +57,7 @@ it("keeps original dependency authorization in place without navigation away fro
         }
       }
     )
-    await h.page.getByRole("button", { name: "核对依赖使用条件", exact: true }).click()
+    await h.page.getByRole("button", { name: "准备此依赖", exact: true }).click()
     await h.page.getByRole("button", { name: "授权以上能力", exact: true }).click()
     await h.page.getByText("已获原生授权", { exact: false }).waitFor()
     expect(approved).toBe(1)

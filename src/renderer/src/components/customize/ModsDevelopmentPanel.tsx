@@ -41,7 +41,6 @@ import { CreatorProjectDeliveryCard } from "./CreatorProjectDeliveryCard"
 import { CreatorSourceSetCard } from "./CreatorSourceSetCard"
 import { CreatorPluginModularizationCard } from "./CreatorPluginModularizationCard"
 import { creatorJourneyView } from "./creator-journey-view"
-import { CreatorTrialJourneyCard } from "./CreatorTrialJourneyCard"
 import { CreatorWorkspaceNavigation } from "./CreatorWorkspaceNavigation"
 import { isHostBusinessCreatorReview } from "./creator-project-route"
 
@@ -228,6 +227,7 @@ function ScopedDevelopment({
   promotionBlocked: boolean
 }) {
   const [open, setOpen] = useState(false)
+  const [workspaceTab, setWorkspaceTab] = useState<"trial" | "delivery">("trial")
   const workspaceBody = useRef<HTMLElement>(null)
   const focusChatAfterClose = useRef(false)
   const [status, setStatus] = useState<DevelopmentStatus | null>(null)
@@ -248,6 +248,16 @@ function ScopedDevelopment({
   const [stageDebugReview, setStageDebugReview] = useState<StageDebugReviewIntent>()
   const [creatorOptionsOpen, setCreatorOptionsOpen] = useState(false)
   const [businessTrialOpen, setBusinessTrialOpen] = useState(false)
+  useEffect(() => {
+    setWorkspaceTab("trial")
+  }, [status?.projectTrial?.id, status?.business?.review?.planId, stageDebugReview?.id])
+  useEffect(() => {
+    if (status?.sourceSet?.phase === "ready") setWorkspaceTab("delivery")
+  }, [status?.sourceSet?.id, status?.sourceSet?.phase])
+  useEffect(() => {
+    if (status?.projectDelivery && !status.projectTrial && !status.business?.review)
+      setWorkspaceTab("delivery")
+  }, [status?.projectDelivery?.id, status?.projectTrial?.id, status?.business?.review?.planId])
   const accept = useCallback(
     (next: DevelopmentStatus) => {
       if (account.current !== useAppStore.getState().accountRevision)
@@ -673,21 +683,6 @@ function ScopedDevelopment({
     if (mode === "entry") onReturnToChat?.()
   }
   const showNavigation = projectCreation || !status?.trials.length
-  const nextWorkspaceStep =
-    modularization?.phase === "needs-confirmation"
-      ? "create"
-      : (useProjectCandidate && projectJourney?.passed) || businessJourney?.passed
-        ? "delivery"
-        : useProjectCandidate &&
-            ["failed", "unknown", "needs-transition"].includes(
-              status?.projectTrial?.journey?.phase ?? ""
-            )
-          ? "acceptance"
-          : businessTrial && ["completed", "failed", "unknown"].includes(businessTrial.phase)
-            ? "acceptance"
-            : projectCreation
-              ? "trial"
-              : "create"
   const navigate = (target: "create" | "trial" | "acceptance" | "delivery") => {
     if (target === "create" && onReturnToChat) {
       focusChatAfterClose.current = true
@@ -695,9 +690,12 @@ function ScopedDevelopment({
       if (mode === "entry") onReturnToChat()
       return
     }
-    workspaceBody.current
-      ?.querySelector<HTMLElement>(`[data-creator-section="${target}"]`)
-      ?.scrollIntoView({ block: "start", behavior: "smooth" })
+    setWorkspaceTab(target === "delivery" ? "delivery" : "trial")
+    requestAnimationFrame(() =>
+      workspaceBody.current
+        ?.querySelector<HTMLElement>(`[data-creator-section="${target}"]`)
+        ?.scrollIntoView({ block: "start" })
+    )
   }
   const content = (
     <section
@@ -714,13 +712,17 @@ function ScopedDevelopment({
         className="flex flex-wrap items-center justify-between gap-2"
       >
         <h2 className="font-semibold">
-          {mode === "chat" ? "当前创作" : "在所选聊天使用创造者模式"}
+          {status?.projectTrial?.name ?? businessReview?.name ?? "当前插件"}
         </h2>
         <AnchoredGuide
           active={workspaceVisible && (mode === "entry" || open)}
           config={creatorWorkspaceGuide}
           steps={creatorWorkspaceGuideSteps}
           rootRef={workspaceBody}
+          onStepChange={(step) => {
+            if (step.id === "delivery") setWorkspaceTab("delivery")
+            else if (["trial", "acceptance", "debug"].includes(step.id)) setWorkspaceTab("trial")
+          }}
         />
         <button
           type="button"
@@ -739,12 +741,9 @@ function ScopedDevelopment({
           aria-label="重新进入创造者模式"
           className="space-y-3 rounded-xl border bg-muted/30 p-4"
         >
-          <h3 className="font-medium">本次创作控制尚未开启</h3>
+          <h3 className="font-medium">继续上次创作</h3>
           <p className="text-sm leading-6 text-muted-foreground">
-            当前处于普通模式，或应用重启后尚未重新进入创造者模式。项目候选与阶段调试历史需要重新进入后读取；没有显示记录，不表示候选、阶段快照或试用历史已丢失。
-          </p>
-          <p className="text-xs leading-5 text-muted-foreground">
-            请明确重新进入后查看原候选与阶段调试历史。重新进入只建立本次创作控制，历史文件与检查记录保留；不会恢复旧分支的运行授权或工具批准，也不会把历史通过结果计为新执行的验收。新的执行须重新确认。
+            已保留候选和试用记录，重新进入后可继续查看。
           </p>
           <button
             type="button"
@@ -757,24 +756,7 @@ function ScopedDevelopment({
         </section>
       )}
       {(!awaitingApproval || projectCreation) && (
-        <div className="space-y-3 rounded-xl border bg-muted/30 p-4" aria-label="创作流程导航">
-          <p className="text-sm font-medium">
-            {hostBusinessReview && status?.projectTrial
-              ? `${status.projectTrial.name} · 版本 ${status.projectTrial.revision}`
-              : businessReview
-                ? `${businessReview.name} · v${businessReview.version}`
-                : status?.projectTrial
-                  ? `${status.projectTrial.name} · 版本 ${status.projectTrial.revision}`
-                  : creatorReady
-                    ? "从需求到可复用插件"
-                    : "重新进入后查看原会话的持久创作记录"}
-          </p>
-          {useProjectCandidate && projectJourney && (
-            <div role="status" className="space-y-1 text-sm">
-              <p className="font-medium">{projectJourney.label}</p>
-              <p className="text-xs text-muted-foreground">下一步：{projectJourney.nextStep}</p>
-            </div>
-          )}
+        <div className="space-y-2 text-sm" aria-label="创作流程导航">
           {businessTrial && (
             <p role="status" className="text-xs text-muted-foreground">
               {businessJourney?.passed
@@ -788,14 +770,8 @@ function ScopedDevelopment({
                       : "下一步：打开本轮试用，核对候选、参数与权限后运行。"}
             </p>
           )}
-          {projectCreation && (
-            <p className="text-xs leading-5 text-muted-foreground">
-              需求和修改始终在原聊天中进行。独立项目和阶段会话是同一轮试用的执行记录，
-              请在这里核对整轮结果，再保存或导出插件。
-            </p>
-          )}
           {mode === "entry" && showNavigation && (
-            <CreatorWorkspaceNavigation onNavigate={navigate} currentStep={nextWorkspaceStep} />
+            <CreatorWorkspaceNavigation onNavigate={navigate} currentStep={workspaceTab} />
           )}
           {onReturnToChat && (
             <button
@@ -808,7 +784,7 @@ function ScopedDevelopment({
                 if (mode === "entry") onReturnToChat()
               }}
             >
-              返回原聊天继续创作
+              返回聊天修改
             </button>
           )}
         </div>
@@ -879,22 +855,22 @@ function ScopedDevelopment({
         <>
           <section
             data-creator-section="trial"
+            hidden={workspaceTab !== "trial"}
             aria-label="试用当前候选"
             className="scroll-mt-4 space-y-3"
           >
-            <h3 className="font-semibold">运行试用与核对结果</h3>
             {creatorReady && !businessReview && !status?.projectTrial && (
               <p className="text-sm text-muted-foreground">
                 还没有准备好项目候选。回到原聊天提出需求，助手准备好当前版本后，将在这里显示试用入口。
               </p>
             )}
             {businessReview && !hostBusinessReview && (
-              <div className="space-y-2 rounded-xl border bg-card p-4">
+              <section
+                aria-label="业务插件试用"
+                className="space-y-2 rounded-xl border bg-card p-4"
+              >
                 <p className="font-medium">
                   {businessReview.name} · v{businessReview.version}
-                </p>
-                <p className="text-xs leading-5 text-muted-foreground">
-                  试用保留原插件，运行与本次创作关联。查看整轮记录和各阶段校验后，再决定是否保存为新插件。
                 </p>
                 {api.businessTrial && !businessTrialDiagnostic && (
                   <button
@@ -906,14 +882,14 @@ function ScopedDevelopment({
                       setBusinessTrialOpen(true)
                     }}
                   >
-                    {businessTrial ? "继续查看本轮试用与验收" : "配置并试用此版本"}
+                    {businessTrial ? "继续试用" : "开始试用"}
                   </button>
                 )}
-              </div>
+              </section>
             )}
             {status?.projectTrial && (
               <article
-                className="space-y-3 rounded-xl border bg-card p-3"
+                className="space-y-3"
                 aria-label="项目真实试用请求"
                 data-creator-stage-debug-review={inlineStageDebugReview ? true : undefined}
               >
@@ -922,19 +898,11 @@ function ScopedDevelopment({
                     其他项目试用记录 · 与当前组装来源不同
                   </p>
                 )}
-                <p className="text-sm font-medium">
-                  {status.projectTrial.name} · 版本 {status.projectTrial.revision}
-                </p>
-                <p className="text-xs leading-5 text-muted-foreground">
-                  此候选使用原项目运行器试用。各阶段分别执行，但归属于下面同一轮试用；
-                  产物和校验统一汇总。修改源码后需准备新版本，不会改动正在运行的任务。
-                </p>
                 <ProjectDevelopmentPreviewPanel
                   key={status.projectTrial.id}
                   threadId={threadId}
                   workspace={status.workspace}
                   request={status.projectTrial}
-                  showJourney={!useProjectCandidate}
                   stageDebugReview={inlineStageDebugReview}
                   onRequestRepair={onRequestRepair}
                   onReturnToChat={() => {
@@ -953,11 +921,6 @@ function ScopedDevelopment({
                 <p className="text-sm font-medium">
                   {status.configuration.plugin} · {status.configuration.label}
                 </p>
-                <p className="text-xs leading-5 text-muted-foreground">
-                  请在原生参数表单中选择或填写。敏感内容不会交给助手；参数保存在当前项目，
-                  同一项目使用此插件的聊天共享。保存后，正在执行的任务继续使用原设置，结束后应用。
-                  此表单不批准插件代码或扩大权限。
-                </p>
                 <FunctionUserConfig
                   key={status.configuration.id}
                   threadId={threadId}
@@ -970,118 +933,142 @@ function ScopedDevelopment({
                 />
               </article>
             )}
-          </section>
-          <section
-            data-creator-section="acceptance"
-            aria-label="创作验收入口"
-            className="scroll-mt-4 space-y-3 rounded-xl border p-4"
-          >
-            <h3 className="font-semibold">验收整轮试用</h3>
-            <p className="text-sm text-muted-foreground">
-              会话结束、代码检查通过和插件安装成功分别代表不同结果。业务通过需要原流程的阶段、必需产物、校验及人工确认凭据。
-            </p>
-            {useProjectCandidate && status?.projectTrial && (
-              <CreatorTrialJourneyCard
-                threadId={threadId}
-                digest={status.projectTrial.digest}
-                journey={status.projectTrial.journey}
-              />
-            )}
-            {businessReview &&
-            !hostBusinessReview &&
-            api.businessTrial &&
-            !businessTrialDiagnostic ? (
-              <button
-                type="button"
-                className={button}
-                onClick={() => {
-                  setOpen(false)
-                  setBusinessTrialOpen(true)
-                }}
-              >
-                查看本轮阶段和验收记录
+            {projectJourney?.passed && (
+              <button type="button" className={primaryButton} onClick={() => navigate("delivery")}>
+                试用通过，保存插件
               </button>
-            ) : (
-              creatorReady &&
-              !status?.projectTrial && (
-                <p className="text-xs text-muted-foreground">
-                  项目候选准备后将在这里显示逐阶段校验；缺少凭据时显示待核对。
-                </p>
-              )
             )}
           </section>
+          {!status?.projectTrial && (
+            <section
+              data-creator-section="acceptance"
+              hidden={workspaceTab !== "trial"}
+              aria-label="创作验收入口"
+              className="scroll-mt-4 space-y-3 rounded-xl border p-4"
+            >
+              {businessReview &&
+              !hostBusinessReview &&
+              api.businessTrial &&
+              !businessTrialDiagnostic ? (
+                <button
+                  type="button"
+                  className={button}
+                  onClick={() => {
+                    setOpen(false)
+                    setBusinessTrialOpen(true)
+                  }}
+                >
+                  查看本轮阶段和验收记录
+                </button>
+              ) : (
+                creatorReady &&
+                !status?.projectTrial && (
+                  <p className="text-xs text-muted-foreground">
+                    项目候选准备后将在这里显示逐阶段校验；缺少凭据时显示待核对。
+                  </p>
+                )
+              )}
+            </section>
+          )}
           <section
             data-creator-section="delivery"
+            hidden={workspaceTab !== "delivery"}
             aria-label="保存插件交付"
             className="scroll-mt-4 space-y-3"
           >
-            <h3 className="font-semibold">保存为插件并复用</h3>
-            {status && creatorReady && <CreatorSourceSetCard threadId={threadId} workspace={status.workspace}
-              status={status.sourceSet} api={api} onStatus={accept} />}
-            {status && (status.projectDelivery || ((useProjectCandidate || status.sourceSet?.phase === "ready") && status.projectTrial)) && (
-              <CreatorProjectDeliveryCard
-                threadId={threadId}
-                workspace={status.workspace}
-                request={useProjectCandidate || status.sourceSet?.phase === "ready" ? status.projectTrial : undefined}
-                delivery={status.projectDelivery}
-                preparedBySourceSet={status.sourceSet?.phase === "ready"}
-                api={api}
-                onStatus={accept}
-              />
+            {status && creatorReady && (
+              <details open={!!status.sourceSet && status.sourceSet.phase !== "ready"}>
+                <summary className="cursor-pointer text-sm text-muted-foreground">
+                  从源码导入
+                </summary>
+                <CreatorSourceSetCard
+                  threadId={threadId}
+                  workspace={status.workspace}
+                  status={status.sourceSet}
+                  api={api}
+                  onStatus={accept}
+                />
+              </details>
             )}
+            {status &&
+              (status.projectDelivery ||
+                ((useProjectCandidate || status.sourceSet?.phase === "ready") &&
+                  status.projectTrial)) && (
+                <CreatorProjectDeliveryCard
+                  threadId={threadId}
+                  workspace={status.workspace}
+                  request={
+                    useProjectCandidate || status.sourceSet?.phase === "ready"
+                      ? status.projectTrial
+                      : undefined
+                  }
+                  delivery={status.projectDelivery}
+                  preparedBySourceSet={status.sourceSet?.phase === "ready"}
+                  api={api}
+                  onStatus={accept}
+                />
+              )}
             {businessReview ? (
-              <BusinessCreatorReviewCard
-                review={businessReview}
-                busy={busy}
-                startUseScope={status ? { threadId, workspace: status.workspace } : undefined}
-                presentation={hostBusinessReview ? "source" : "delivery"}
-                onTrial={
-                  !hostBusinessReview && api.businessTrial && !businessTrialDiagnostic
-                    ? () => {
-                        setOpen(false)
-                        setBusinessTrialOpen(true)
-                      }
-                    : undefined
-                }
-                onApprove={() =>
-                  void operate(
-                    (expectedWorkspace) =>
-                      api.approveBusiness({
-                        threadId,
-                        expectedWorkspace,
-                        planId: businessReview.planId,
-                        digest: businessReview.digest
-                      }),
-                    accept
-                  )
-                }
-                onExport={() =>
-                  void operate(
-                    (expectedWorkspace) =>
-                      api.exportBusiness({
-                        threadId,
-                        expectedWorkspace,
-                        planId: businessReview.planId,
-                        digest: businessReview.digest
-                      }),
-                    accept
-                  )
-                }
-                onRead={() =>
-                  void (businessReview.canReconcile
-                    ? operate(
-                        (expectedWorkspace) =>
-                          api.reconcileBusiness({
-                            threadId,
-                            expectedWorkspace,
-                            planId: businessReview.planId,
-                            digest: businessReview.digest
-                          }),
-                        accept
-                      )
-                    : read())
-                }
-              />
+              <details open={!hostBusinessReview}>
+                <summary
+                  hidden={!hostBusinessReview}
+                  className="cursor-pointer text-sm text-muted-foreground"
+                >
+                  组装详情
+                </summary>
+                <BusinessCreatorReviewCard
+                  review={businessReview}
+                  busy={busy}
+                  startUseScope={status ? { threadId, workspace: status.workspace } : undefined}
+                  presentation={hostBusinessReview ? "source" : "delivery"}
+                  onTrial={
+                    !hostBusinessReview && api.businessTrial && !businessTrialDiagnostic
+                      ? () => {
+                          setOpen(false)
+                          setBusinessTrialOpen(true)
+                        }
+                      : undefined
+                  }
+                  onApprove={() =>
+                    void operate(
+                      (expectedWorkspace) =>
+                        api.approveBusiness({
+                          threadId,
+                          expectedWorkspace,
+                          planId: businessReview.planId,
+                          digest: businessReview.digest
+                        }),
+                      accept
+                    )
+                  }
+                  onExport={() =>
+                    void operate(
+                      (expectedWorkspace) =>
+                        api.exportBusiness({
+                          threadId,
+                          expectedWorkspace,
+                          planId: businessReview.planId,
+                          digest: businessReview.digest
+                        }),
+                      accept
+                    )
+                  }
+                  onRead={() =>
+                    void (businessReview.canReconcile
+                      ? operate(
+                          (expectedWorkspace) =>
+                            api.reconcileBusiness({
+                              threadId,
+                              expectedWorkspace,
+                              planId: businessReview.planId,
+                              digest: businessReview.digest
+                            }),
+                          accept
+                        )
+                      : read())
+                  }
+                />
+              </details>
             ) : (
               !status?.projectTrial && (
                 <p className="text-sm text-muted-foreground">
@@ -1097,17 +1084,13 @@ function ScopedDevelopment({
         data-creator-section="create"
         className="scroll-mt-4 space-y-3 rounded-xl border p-4"
         open={
-          (!businessReview && !status?.projectTrial) ||
           awaitingApproval > 0 ||
           failed ||
           uncertain ||
           (!!independentStageDebugReview && projectPreviewOpen)
         }
       >
-        <summary className="cursor-pointer font-semibold">Mod 组件、聊天组合与高级制作设置</summary>
-        <p className="text-xs leading-5 text-muted-foreground">
-          这里管理当前聊天中的 Mod。项目试用、整轮验收和插件交付分别在上方独立区域查看。
-        </p>
+        <summary className="cursor-pointer text-sm text-muted-foreground">组件与高级设置</summary>
         {reuse && (
           <DevelopmentReusePlanCard
             plan={reuse}
@@ -1806,6 +1789,7 @@ function ScopedDevelopment({
         }}
         onOpenDelivery={() => {
           setBusinessTrialOpen(false)
+          setWorkspaceTab("delivery")
           setOpen(true)
           requestAnimationFrame(() =>
             workspaceBody.current
@@ -1931,11 +1915,9 @@ function ScopedDevelopment({
             }}
           >
             <DialogTitle>插件创作工作区</DialogTitle>
-            <DialogDescription>
-              原聊天负责需求和修改，工作区负责试用、验收和保存交付。
-            </DialogDescription>
+            <DialogDescription>先试用，满意后保存为插件。</DialogDescription>
             {showNavigation && (
-              <CreatorWorkspaceNavigation onNavigate={navigate} currentStep={nextWorkspaceStep} />
+              <CreatorWorkspaceNavigation onNavigate={navigate} currentStep={workspaceTab} />
             )}
             <div className="min-h-0 overflow-y-auto pr-1">{content}</div>
           </DialogContent>

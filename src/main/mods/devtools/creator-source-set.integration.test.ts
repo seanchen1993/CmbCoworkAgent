@@ -333,7 +333,7 @@ it("drives real vendor import, compile, install and start-use services through t
   try {
     await h.page.getByRole("button", { name: "选择作者源码目录", exact: true }).click()
     await h.page.getByRole("button", { name: "核对权限并准备模板", exact: true }).click()
-    await h.page.getByRole("button", { name: "确认安装新插件", exact: true }).waitFor()
+    await h.page.getByRole("button", { name: "保存插件", exact: true }).waitFor()
     expect(status().projectDelivery!.name).not.toBe(
       JSON.parse(
         sessions
@@ -381,7 +381,7 @@ it("drives real vendor import, compile, install and start-use services through t
     await expect.poll(() => status().sourceSet?.phase).toBe("ready")
     expect(f.installed).not.toHaveBeenCalled()
     expect(sessions.list(f.scope)[0].revision).toBe(revision)
-    await h.page.getByRole("button", { name: "确认安装新插件", exact: true }).click()
+    await h.page.getByRole("button", { name: "保存插件", exact: true }).click()
     await expect.poll(() => deliveries.status(f.threadId)?.phase).toBe("installed")
     deliveries = new CreatorProjectDeliveries({ ...f.deliveryDependencies, sessions })
     sets = new CreatorSourceSets({ ...f.deps, sessions, deliveries })
@@ -391,10 +391,6 @@ it("drives real vendor import, compile, install and start-use services through t
     }, status())
     await h.page.evaluate("window.fixture.setStatus(window.coldStatus)")
     await h.page.getByRole("button", { name: "开始使用", exact: true }).click()
-    await h.page.getByText(/此插件通过本地项目任务使用/).waitFor()
-    if (await h.page.getByRole("button", { name: "启用新插件", exact: true }).count())
-      await h.page.getByRole("button", { name: "启用新插件", exact: true }).click()
-    await h.page.getByRole("button", { name: "进入本地任务创建", exact: true }).click()
     await expect
       .poll(() => h.page.evaluate("window.fixture.startUseIntent()?.report.kind"))
       .toBe("host-project")

@@ -168,7 +168,6 @@ async function main() {
     await page.addScriptTag({ content: bundled.outputFiles[0].text })
     const start = page.getByRole("region", { name: "已安装插件开始使用", exact: true })
     const read = () => start.getByRole("button", { name: "开始使用", exact: true }).click()
-    const open = () => start.getByRole("button", { name: "进入项目创建", exact: true }).click()
     const form = page.getByRole("region", { name: "项目列表", exact: true })
     for (const name of ["installed-disabled-docs", "installed-disabled-warehouse"]) {
       await page.evaluate((name) => {
@@ -177,17 +176,7 @@ async function main() {
         f.disable()
       }, name)
       await read()
-      assert(
-        await start.getByRole("button", { name: "进入项目创建", exact: true }).isDisabled()
-      )
-      assert.equal(
-        await page.evaluate(() => (window as unknown as FixtureWindow).fixture.enables.length),
-        0
-      )
-      await start.getByRole("button", { name: "启用新插件", exact: true }).click()
-      await start
-        .getByRole("button", { name: "启用新插件", exact: true })
-        .waitFor({ state: "detached" })
+      await form.getByRole("combobox", { name: "项目插件", exact: true }).waitFor()
       assert.equal(
         await page.evaluate(() => (window as unknown as FixtureWindow).fixture.enables.length),
         1
@@ -196,14 +185,12 @@ async function main() {
         await page.evaluate(() => (window as unknown as FixtureWindow).fixture.approvals.length),
         0
       )
-      await open()
-      await form.getByRole("combobox", { name: "项目插件", exact: true }).waitFor()
       assert.equal(
         await page.evaluate(() => (window as unknown as FixtureWindow).fixture.commands.length),
         0
       )
       results.push(
-        `${name}: disabled install requires explicit exact enablement, fresh diagnostics, then the real native form`
+        `${name}: one explicit Start Use pins and enables the exact install, then opens the native form without execution grants`
       )
     }
     for (const change of ["uninstall", "change"] as const) {
@@ -211,13 +198,14 @@ async function main() {
         const f = (window as unknown as FixtureWindow).fixture
         f.reset("disabled-stale")
         f.disable()
+        f.delay()
       })
       await read()
       await page.evaluate(
         (change) => (window as unknown as FixtureWindow).fixture[change](),
         change
       )
-      await start.getByRole("button", { name: "启用新插件", exact: true }).click()
+      await page.evaluate(() => (window as unknown as FixtureWindow).fixture.release())
       await start.getByRole("alert").waitFor()
       assert.equal(
         await page.evaluate(() => (window as unknown as FixtureWindow).fixture.enables.length),
@@ -229,10 +217,9 @@ async function main() {
       const f = (window as unknown as FixtureWindow).fixture
       f.reset("disabled-late-account")
       f.disable()
+      f.delay()
     })
     await read()
-    await page.evaluate(() => (window as unknown as FixtureWindow).fixture.delay())
-    await start.getByRole("button", { name: "启用新插件", exact: true }).click()
     await page.evaluate(() => {
       const f = (window as unknown as FixtureWindow).fixture
       f.changeAccount()
@@ -246,7 +233,6 @@ async function main() {
     for (const name of ["docs", "warehouse-quality"]) {
       await page.evaluate((name) => (window as unknown as FixtureWindow).fixture.reset(name), name)
       await read()
-      await open()
       await form.getByRole("combobox", { name: "项目插件", exact: true }).waitFor()
       assert.equal(
         await form.getByRole("combobox", { name: "项目插件", exact: true }).inputValue(),
@@ -293,7 +279,8 @@ async function main() {
     await start.getByRole("region", { name: "原生插件配置", exact: true }).waitFor()
     assert((await start.innerText()).includes("请补齐当前插件知识绑定"))
     await page.evaluate(() => (window as unknown as FixtureWindow).fixture.missing(false))
-    await start.getByRole("button", { name: "重新检查使用条件", exact: true }).click()
+    await start.getByRole("button", { name: "保存后继续", exact: true }).click()
+    await form.getByRole("combobox", { name: "项目插件", exact: true }).waitFor()
     await start
       .getByRole("region", { name: "原生插件配置", exact: true })
       .waitFor({ state: "detached" })
@@ -301,8 +288,6 @@ async function main() {
       "configuration/knowledge remediation stays in the handoff and fresh recheck clears the blocker"
     )
 
-    await open()
-    await form.getByRole("combobox", { name: "项目插件", exact: true }).waitFor()
     await form.getByRole("textbox", { name: "项目名称", exact: true }).fill("过期插件不能创建")
     await form.getByRole("textbox", { name: "希望完成什么", exact: true }).fill("测试变更拒绝")
     await form.getByRole("button", { name: "选择工作目录", exact: true }).click()

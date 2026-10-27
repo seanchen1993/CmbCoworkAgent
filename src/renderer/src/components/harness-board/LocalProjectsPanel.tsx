@@ -224,21 +224,36 @@ export function LocalProjectsPanel() {
   )
 }
 
-export function HostProjectListItems({ projects, selected, onSelect }: {
+export function HostProjectListItems({
+  projects,
+  selected,
+  onSelect
+}: {
   projects: LocalProjectSummary[]
   selected?: string
   onSelect: (projectId: string) => void
 }) {
-  return <div className="grid gap-2">{projects.map((project) => (
-    <button key={project.projectId} type="button" data-project-runtime="host"
-      aria-label={`打开项目 ${project.name}`} aria-pressed={selected === project.projectId}
-      className="rounded-xl border bg-background p-4 text-left aria-pressed:border-primary"
-      onClick={() => onSelect(project.projectId)}>
-      <span className="font-medium">{project.name}</span>
-      <span className="ml-3 text-sm text-muted-foreground">{project.status === "completed" ? "已完成" : `第 ${project.stageIndex + 1} 阶段`}</span>
-      <p className="mt-1 truncate text-xs text-muted-foreground">{project.workspace}</p>
-    </button>
-  ))}</div>
+  return (
+    <div className="grid gap-2">
+      {projects.map((project) => (
+        <button
+          key={project.projectId}
+          type="button"
+          data-project-runtime="host"
+          aria-label={`打开项目 ${project.name}`}
+          aria-pressed={selected === project.projectId}
+          className="rounded-xl border bg-background p-4 text-left aria-pressed:border-primary"
+          onClick={() => onSelect(project.projectId)}
+        >
+          <span className="font-medium">{project.name}</span>
+          <span className="ml-3 text-sm text-muted-foreground">
+            {project.status === "completed" ? "已完成" : `第 ${project.stageIndex + 1} 阶段`}
+          </span>
+          <p className="mt-1 truncate text-xs text-muted-foreground">{project.workspace}</p>
+        </button>
+      ))}
+    </div>
+  )
 }
 
 function ProjectError({ error }: { error: unknown }) {
@@ -275,10 +290,14 @@ export function CreateLocalProject({
     const identity = templates.find((item) => item.installedPluginId === id)?.expectedTemplate
     return { id, expectedTemplate: identity ? { ...identity } : undefined }
   }
-  const [selection, setSelection] = useState(() => captureTemplate(
-    installedPluginId ?? startUse?.report.identity.pluginId ??
-      templates.find((item) => !item.unavailableReason)?.installedPluginId ?? ""
-  ))
+  const [selection, setSelection] = useState(() =>
+    captureTemplate(
+      installedPluginId ??
+        startUse?.report.identity.pluginId ??
+        templates.find((item) => !item.unavailableReason)?.installedPluginId ??
+        ""
+    )
+  )
   const template = selection.id
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>()
@@ -319,7 +338,10 @@ export function CreateLocalProject({
             )
               throw Error("PROJECT_HOST_PACKAGE_IDENTITY_MISMATCH")
           }
-          if (!startUse && (!selection.expectedTemplate || selection.expectedTemplate.pluginId !== template))
+          if (
+            !startUse &&
+            (!selection.expectedTemplate || selection.expectedTemplate.pluginId !== template)
+          )
             throw Error("PROJECT_HOST_TEMPLATE_IDENTITY_REQUIRED")
           const result = await window.api.harnessBoard.localProjects.create({
             name: name.trim(),
@@ -341,7 +363,10 @@ export function CreateLocalProject({
           if (active.current) setError(cause)
         } finally {
           lock.current = false
-          if (active.current) { setBusy(false); onBusyChange?.(false) }
+          if (active.current) {
+            setBusy(false)
+            onBusyChange?.(false)
+          }
         }
       }}
     >
@@ -350,30 +375,32 @@ export function CreateLocalProject({
           暂无可用模板。请先在插件中安装项目模板包；开发示例为 project-docs-lite。
         </p>
       )}
-      {!installedPluginId && <label className="grid gap-1 text-sm">
-        项目插件
-        <select
-          required
-          value={template}
-          disabled={busy || !!startUse}
-          onChange={(event) => setSelection(captureTemplate(event.target.value))}
-          className="rounded border bg-background p-2"
-        >
-          <option value="" disabled>
-            请选择模板
-          </option>
-          {templates.map((item) => (
-            <option
-              key={item.installedPluginId}
-              disabled={!!item.unavailableReason}
-              value={item.installedPluginId}
-            >
-              {item.name} · {item.version}
-              {item.unavailableReason ? "（暂不支持）" : ""}
+      {!installedPluginId && (
+        <label className="grid gap-1 text-sm">
+          项目插件
+          <select
+            required
+            value={template}
+            disabled={busy || !!startUse}
+            onChange={(event) => setSelection(captureTemplate(event.target.value))}
+            className="rounded border bg-background p-2"
+          >
+            <option value="" disabled>
+              请选择模板
             </option>
-          ))}
-        </select>
-      </label>}
+            {templates.map((item) => (
+              <option
+                key={item.installedPluginId}
+                disabled={!!item.unavailableReason}
+                value={item.installedPluginId}
+              >
+                {item.name} · {item.version}
+                {item.unavailableReason ? "（暂不支持）" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       {templates
         .filter((item) => item.unavailableReason)
         .map((item) => (
@@ -570,18 +597,26 @@ export function LocalProjectRun({
       ["prepared", "started", "cancel_requested", "succeeded", "unknown"].includes(item.status)
   )
   const feedbackScope = JSON.stringify([
-    projectId, view?.project.version, view?.project.stageIndex, operation?.operationId
+    projectId,
+    view?.project.version,
+    view?.project.stageIndex,
+    operation?.operationId
   ])
   const feedbackText = resultFeedback?.scope === feedbackScope ? resultFeedback.text : ""
   useEffect(() => setResultFeedback(undefined), [feedbackScope])
-  const latestStageOperation = view?.operations.find((item) =>
-    item.expectedVersion === view.project.version &&
-    item.stageId === view.project.manifest.stages[view.project.stageIndex]?.id
+  const latestStageOperation = view?.operations.find(
+    (item) =>
+      item.expectedVersion === view.project.version &&
+      item.stageId === view.project.manifest.stages[view.project.stageIndex]?.id
   )
   const instructionsScope = JSON.stringify([
-    projectId, view?.project.version, view?.project.stageIndex, latestStageOperation?.operationId
+    projectId,
+    view?.project.version,
+    view?.project.stageIndex,
+    latestStageOperation?.operationId
   ])
-  const instructionsText = stageInstructions?.scope === instructionsScope ? stageInstructions.text : ""
+  const instructionsText =
+    stageInstructions?.scope === instructionsScope ? stageInstructions.text : ""
   useEffect(() => setStageInstructions(undefined), [instructionsScope])
   if (!view)
     return (
@@ -597,10 +632,11 @@ export function LocalProjectRun({
     stage && view.importedSource?.reexecuteStageIds?.includes(stage.id)
   )
   const validateImportedStage = importedStage && !reexecuteImportedStage
-  const canAddStageInstructions = !validateImportedStage && !operation &&
-    latestStageOperation?.status === "failed" && !operations.some((item) =>
-      ["started", "cancel_requested", "unknown"].includes(item.status)
-    )
+  const canAddStageInstructions =
+    !validateImportedStage &&
+    !operation &&
+    latestStageOperation?.status === "failed" &&
+    !operations.some((item) => ["started", "cancel_requested", "unknown"].includes(item.status))
   const pendingStageInstructions = canAddStageInstructions ? instructionsText.trim() : ""
   const executionKind = validateImportedStage ? ("validate-imported" as const) : ("start" as const)
   const resultApprovalRequired = view.resultApprovalRequired ?? stage?.resultApproval === "human"
@@ -630,7 +666,8 @@ export function LocalProjectRun({
       expectedVersion: project.version,
       idempotencyKey: crypto.randomUUID(),
       ...(kind === "start" && pendingStageInstructions
-        ? { stageInstructions: pendingStageInstructions } : {})
+        ? { stageInstructions: pendingStageInstructions }
+        : {})
     })
     const prepared = next.operations.find(
       (item) => item.expectedVersion === project.version && item.status === "prepared"
@@ -641,7 +678,8 @@ export function LocalProjectRun({
       next.project.stageIndex !== project.stageIndex ||
       next.project.pluginDigest !== project.pluginDigest ||
       prepared.stageId !== stage?.id
-    ) throw Error("PROJECT_SCOPE_CHANGED")
+    )
+      throw Error("PROJECT_SCOPE_CHANGED")
     if (kind === "start" && pendingStageInstructions) {
       if (prepared.stageInstructions !== pendingStageInstructions)
         throw Error("PROJECT_PREPARE_NOT_CONFIRMED")
@@ -664,10 +702,11 @@ export function LocalProjectRun({
       cancelled.project.version !== project.version ||
       cancelled.project.stageIndex !== project.stageIndex ||
       cancelled.project.pluginDigest !== project.pluginDigest ||
-      !cancelled.operations.some((item) =>
-        item.operationId === operation.operationId && item.status === "cancelled"
+      !cancelled.operations.some(
+        (item) => item.operationId === operation.operationId && item.status === "cancelled"
       )
-    ) throw Error("PROJECT_SCOPE_CHANGED")
+    )
+      throw Error("PROJECT_SCOPE_CHANGED")
     await prepareAnd("start")
   }
   return (
@@ -721,15 +760,15 @@ export function LocalProjectRun({
         </div>
       )}
       {view.preview && (
-        <p className="rounded bg-muted p-2 text-sm">
+        <p className="text-xs text-muted-foreground">
           {view.preview.state === "active"
-            ? `隔离试用版本 ${view.preview.revision}。此任务固定当前源码，结束本次试用后可创建新版本；不会更新正式插件。`
+            ? `正在试用版本 ${view.preview.revision}`
             : "此试用已结束或随应用重启失效，历史仍可查看。请回制作会话重新准备，不能从旧试用继续执行。"}
         </p>
       )}
       {stageActions.length > 0 && (
-        <div className="space-y-1 rounded bg-muted/30 p-3 text-sm">
-          <p>助手完成本阶段后，将按顺序调用以下插件功能：</p>
+        <details className="space-y-1 text-xs text-muted-foreground">
+          <summary className="cursor-pointer">本步骤使用的功能（{stageActions.length}）</summary>
           <ol className="list-inside list-decimal">
             {stageActions.map((item) => (
               <li key={item.id} className="break-words">
@@ -737,10 +776,7 @@ export function LocalProjectRun({
               </li>
             ))}
           </ol>
-          <p className="text-xs text-muted-foreground">
-            全部执行并通过检查后才能继续。仅有成果文件不能代替这些操作。
-          </p>
-        </div>
+        </details>
       )}
       <ol className="flex flex-wrap gap-3 text-xs">
         {project.manifest.stages.map((item, index) => (
@@ -792,21 +828,23 @@ export function LocalProjectRun({
         </p>
       )}
       {canAddStageInstructions && (
-        <label className="block space-y-2 text-sm">
-          <span>本次阶段补充说明（可选）</span>
-          <textarea
-            aria-label="本次阶段补充说明（可选）"
-            maxLength={4000}
-            disabled={busy}
-            value={instructionsText}
-            onChange={(event) => setStageInstructions({ scope: instructionsScope, text: event.target.value })}
-            className="min-h-24 w-full rounded border bg-background p-2"
-          />
-          <span className="block text-muted-foreground">
-            仅用于下一次尝试的修订要求，原检查和审批仍会重新执行；不会改写上次失败记录。
-            填写后请点击“开始当前阶段”提交，不会自动启动。
-          </span>
-        </label>
+        <details className="text-sm">
+          <summary className="cursor-pointer text-muted-foreground">补充要求（可选）</summary>
+          <label className="block space-y-2 text-sm">
+            <span>本次阶段补充说明（可选）</span>
+            <textarea
+              aria-label="本次阶段补充说明（可选）"
+              maxLength={4000}
+              disabled={busy}
+              value={instructionsText}
+              onChange={(event) =>
+                setStageInstructions({ scope: instructionsScope, text: event.target.value })
+              }
+              className="min-h-24 w-full rounded border bg-background p-2"
+            />
+            <span className="block text-xs text-muted-foreground">填写后点击“开始当前阶段”。</span>
+          </label>
+        </details>
       )}
       <fieldset
         disabled={
@@ -821,16 +859,18 @@ export function LocalProjectRun({
             <button
               type="button"
               disabled={busy || !packageFunctionsReady || Boolean(pendingStageInstructions)}
-              className="rounded border px-3 py-2 disabled:opacity-50"
+              className="rounded border border-primary bg-primary px-3 py-2 text-primary-foreground disabled:opacity-50"
               onClick={() =>
                 void act(() => command({ kind: "continue", expectedVersion: project.version }))
               }
             >
-              连续执行至下一确认点
+              开始执行
             </button>
           )}
         {pendingStageInstructions && (
-          <p className="w-full text-muted-foreground">已有补充说明，请点击“开始当前阶段”；连续执行不会携带这份说明。</p>
+          <p className="w-full text-muted-foreground">
+            已有补充说明，请点击“开始当前阶段”；连续执行不会携带这份说明。
+          </p>
         )}
         {stage && !operation && (
           <>
@@ -994,10 +1034,7 @@ export function LocalProjectRun({
           )}
         {operation?.status === "succeeded" && resultApprovalRequired && !resultApproved && (
           <div className="w-full space-y-2 rounded border p-3" aria-label="成果确认">
-            <p>
-              “{stage.title}
-              ”的检查已完成。请查看本阶段成果后决定是否接受；这与允许助手执行是两次不同的确认。
-            </p>
+            <p>“{stage.title}”已完成检查，请确认成果。</p>
             {operation.resultApproval?.decision === "rejected" && (
               <>
                 <p>你已拒绝这版成果，流程尚未推进。</p>
@@ -1008,9 +1045,6 @@ export function LocalProjectRun({
                 )}
               </>
             )}
-            <p className="text-xs text-muted-foreground">
-              确认绑定当前成果和检查记录，文件发生变化后需重新核对。
-            </p>
             <label className="block space-y-1">
               <span>修改意见（拒绝时保存，可选）</span>
               <textarea
@@ -1020,9 +1054,14 @@ export function LocalProjectRun({
                 maxLength={4000}
                 disabled={busy}
                 readOnly={operation.resultApproval?.decision === "rejected"}
-                value={operation.resultApproval?.decision === "rejected"
-                  ? operation.resultApproval.feedback ?? "" : feedbackText}
-                onChange={(event) => setResultFeedback({ scope: feedbackScope, text: event.target.value })}
+                value={
+                  operation.resultApproval?.decision === "rejected"
+                    ? (operation.resultApproval.feedback ?? "")
+                    : feedbackText
+                }
+                onChange={(event) =>
+                  setResultFeedback({ scope: feedbackScope, text: event.target.value })
+                }
                 placeholder="说明需要修改的内容；不会改变原检查和权限要求。"
               />
               <span className="text-xs text-muted-foreground">
@@ -1135,7 +1174,10 @@ export function LocalProjectRun({
         </div>
       )}
       <ProjectLibraryPanel key={project.projectId} view={view} />
-      <details open className="rounded-lg bg-muted/30 p-3">
+      <details
+        open={!!operation || ["failed", "unknown"].includes(latestStageOperation?.status ?? "")}
+        className="rounded-lg bg-muted/30 p-3"
+      >
         <summary className="cursor-pointer text-sm font-medium">检查结果与历史</summary>
         {!operations.length && (
           <p className="mt-2 text-xs text-muted-foreground">
@@ -1188,12 +1230,17 @@ export function LocalProjectRun({
               )}
               {item.approval?.decision === "rejected" && <p>你已拒绝本次执行，可重新准备。</p>}
               {item.stageInstructions && (
-                <p className="whitespace-pre-wrap break-words" aria-label="本次操作已保存的阶段补充说明">
+                <p
+                  className="whitespace-pre-wrap break-words"
+                  aria-label="本次操作已保存的阶段补充说明"
+                >
                   本次操作的阶段补充说明：{item.stageInstructions}
                 </p>
               )}
               {item.resultApproval?.decision === "rejected" && item.resultApproval.feedback && (
-                <p className="whitespace-pre-wrap break-words">成果修改意见：{item.resultApproval.feedback}</p>
+                <p className="whitespace-pre-wrap break-words">
+                  成果修改意见：{item.resultApproval.feedback}
+                </p>
               )}
               {item.execution?.threadId &&
                 project.manifest.stages.some(

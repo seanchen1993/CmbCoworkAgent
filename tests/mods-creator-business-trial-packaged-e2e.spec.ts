@@ -207,8 +207,7 @@ function prepareCollectorDependencies(record: DevelopmentBusinessTrialStatus) {
 }
 async function configureCurrentTrial(expectedId: string) {
   const dialog = page.getByRole("dialog", { name: "插件试用与整轮验收" })
-  await dialog.getByRole("checkbox", { name: /我已核对此候选版本和目标/ }).check()
-  await dialog.getByRole("button", { name: "确认创建隔离试用", exact: true }).click()
+  await dialog.getByRole("button", { name: "继续准备试用", exact: true }).click()
   let prepared = await until(
     trial,
     (value) => value.id === expectedId && value.phase === "needs-configuration",
@@ -399,7 +398,7 @@ async function main() {
     const firstSnapshotDigest = (await snapshotDerivationSource(firstPrepared.source)).digest
     const dialog = page.getByRole("dialog", { name: "插件试用与整轮验收" })
     const started = Date.now()
-    await dialog.getByRole("button", { name: "确认并启动试用", exact: true }).click()
+    await dialog.getByRole("button", { name: "开始执行", exact: true }).click()
     await dialog.getByRole("button", { name: "Close", exact: true }).click()
     const creatorComposer = page.locator("textarea.composer-textarea").first()
     await creatorComposer.fill("CREATOR_DRAFT_MUST_SURVIVE_TRIAL: 试用期间保留的修改意见")
@@ -409,7 +408,7 @@ async function main() {
       "Original creator composer must stay editable while the embedded trial session is read-only"
     )
     await page.getByRole("button", { name: "业务插件试用中", exact: true }).click()
-    await page.getByRole("button", { name: "继续查看本轮试用与验收", exact: true }).click()
+    await page.getByRole("button", { name: "继续试用", exact: true }).click()
     let firstTrialThreadId: string | undefined
     const checked = await until(
       async () => {
@@ -539,7 +538,7 @@ async function main() {
     await dialog.getByRole("button", { name: "Close", exact: true }).click()
     await creatorComposer.fill("")
     await page.getByRole("button", { name: "业务插件组装", exact: true }).click()
-    await page.getByRole("button", { name: "继续查看本轮试用与验收", exact: true }).click()
+    await page.getByRole("button", { name: "继续试用", exact: true }).click()
     await dialog
       .getByRole("textbox", { name: "业务插件试用反馈", exact: true })
       .fill(
@@ -560,7 +559,7 @@ async function main() {
     const secondPrepared = await configureCurrentTrial(revised.id)
     assert.notEqual(secondPrepared.workspace, firstPrepared.workspace)
     assert.notEqual(secondPrepared.source, firstPrepared.source)
-    await dialog.getByRole("button", { name: "确认并启动试用", exact: true }).click()
+    await dialog.getByRole("button", { name: "开始执行", exact: true }).click()
     const interrupted = await until(
       trial,
       (value) =>

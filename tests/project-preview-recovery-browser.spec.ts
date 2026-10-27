@@ -100,7 +100,7 @@ async function main() {
     assert.equal(await page.getByText("原项目 original-project-A", { exact: true }).count(), 0)
     assert.equal(await page.getByRole("checkbox").isChecked(), false)
     await page.evaluate("window.fixture.show('A')")
-    await page.getByRole("button", { name: "查看本轮执行与阶段操作", exact: true }).click()
+    await page.getByRole("button", { name: "查看试用", exact: true }).click()
     await page.getByText("原项目 original-project-A", { exact: true }).waitFor()
     await page.evaluate("window.fixture.scenario('needs-confirmation',true)")
     await recover.waitFor()
@@ -116,13 +116,13 @@ async function main() {
     await page.getByText(/草稿已改变/).waitFor()
     assert.equal(await recover.count(), 0)
     await page.getByRole("button", { name: "结束保留的试用（保留文件）", exact: true }).click()
-    await page.getByRole("button", { name: "创建试用项目（稍后开始任务）", exact: true }).waitFor()
+    await page.getByRole("button", { name: "开始试用", exact: true }).waitFor()
     assert.deepEqual(await page.evaluate("window.fixture.finishes.at(-1)"), {
       threadId: "A",
       projectId: "original-project-A",
       draftId: "docs"
     })
-    assert.equal(await page.getByRole("checkbox").isChecked(), false)
+    assert.equal(await page.getByRole("checkbox").count(), 0)
     await page.evaluate("window.fixture.scenario('missing')")
     await page.getByRole("button", { name: "清除未创建记录（保留文件）", exact: true }).click()
     assert.equal(await page.evaluate("window.fixture.finishes.length"), 2)
@@ -137,7 +137,7 @@ async function main() {
       "Inspecting historical debug results must not restore live execution")
     await page.getByRole("button", { name: "结束保留的试用（保留文件）", exact: true }).click()
     assert.equal(await page.evaluate("window.fixture.finishes.length"), 3)
-    await page.getByRole("button", { name: "创建试用项目（稍后开始任务）", exact: true }).waitFor()
+    await page.getByRole("button", { name: "开始试用", exact: true }).waitFor()
     await page.evaluate("window.fixture.scenario('needs-confirmation',true,true)")
     await page.getByText("请先查看保留的执行记录并核对实际结果", { exact: false }).waitFor()
     assert.equal(await recover.count(), 0)

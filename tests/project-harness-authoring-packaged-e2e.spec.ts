@@ -1,3 +1,4 @@
+import { openCreatorProjectPreview } from "./support/creator-navigation"
 /** Real packaged mod_authoring → Skill+nodes → compile → UI preview → two native-tool stages. */
 import assert from "node:assert/strict"
 import { randomUUID } from "node:crypto"
@@ -174,15 +175,12 @@ async function main() {
     if ((await creatorTrigger.getAttribute("aria-expanded")) === "false")
       await creatorTrigger.click()
     await workspaceDialog.waitFor()
-    const panel = page.getByRole("region", { name: "项目模板隔离试用", exact: true })
-    if (!(await panel.isVisible()))
-      await workspaceDialog.getByText("高级：独立项目试用", { exact: true }).click()
-    await panel.waitFor()
-    await panel.getByRole("button", { name: "刷新项目草稿", exact: true }).click()
+    const panel = await openCreatorProjectPreview(page)
+    await panel.getByRole("button", { name: "刷新", exact: true }).click()
     await panel.getByLabel("这次试用希望完成什么").fill("保留原稿，生成独立复核版本和真实检查记录")
-    const create = panel.getByRole("button", { name: "创建试用项目（稍后开始任务）", exact: true })
-    assert(await create.isDisabled())
-    await panel.getByRole("checkbox").check()
+    const create = panel.getByRole("button", { name: "开始试用", exact: true })
+    assert(await create.isEnabled())
+    assert.equal(await panel.getByRole("checkbox").count(), 0)
     const beforeCreate = model.requests.length
     await create.click()
     const deadline = Date.now() + 15000

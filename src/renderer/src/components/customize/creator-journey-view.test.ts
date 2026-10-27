@@ -40,7 +40,7 @@ describe("creator journey verdict", () => {
       { threadId: "stage-chat", operationId: "op", status: "completed", terminalOutcome: "success" }
     ]
     expect(creatorJourneyView(journey, scope).passed).toBe(false)
-    expect(creatorJourneyView(journey, scope).nextStep).toContain("下一阶段")
+    expect(creatorJourneyView(journey, scope).nextStep).toContain("下一步")
   })
   it("keeps an invalidated source's historical pass from becoming the current verdict", () => {
     const journey = fixture()

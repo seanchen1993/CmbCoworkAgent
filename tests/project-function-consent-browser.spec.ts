@@ -121,6 +121,7 @@ async function dependencyConsent(browser: Browser) {
       .click()
     await page.evaluate("window.fixture.resolve()")
     await page.waitForFunction("window.fixture.ready.some(([id,value])=>id==='A'&&value)")
+    await page.getByText("项目设置 · 已就绪", { exact: true }).click()
     for (const flag of ["workspaceEnabled", "globallyEnabled"]) {
       await page.evaluate(
         (key) => window.eval(`window.fixture.set('A',${JSON.stringify(key)},false)`),
@@ -271,7 +272,7 @@ async function main() {
     await page.getByRole("checkbox").check()
     await approve.click()
     await page.evaluate("window.fixture.resolve()")
-    await page.getByText("此目录已授权当前源码版本。", { exact: true }).waitFor()
+    await page.getByText("项目设置 · 已就绪", { exact: true }).waitFor()
     assert.deepEqual(errors, [])
     await dependencyConsent(browser)
     console.log(

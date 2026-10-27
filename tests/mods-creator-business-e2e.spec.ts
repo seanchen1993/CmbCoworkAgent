@@ -1,3 +1,4 @@
+import { openCreatorStep } from "./support/creator-navigation"
 /* Real Electron IPC, creator tools and installer; deterministic local model, isolated data. */
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
@@ -332,8 +333,9 @@ async function main() {
       ),
       "Model must not install"
     )
+    await openCreatorStep(page, "delivery")
     const card = page.getByRole("article", { name: "业务插件组装确认" })
-    await card.getByRole("button", { name: "保存为新插件并安装", exact: true }).click()
+    await card.getByRole("button", { name: "保存插件", exact: true }).click()
     const installed = await until(
       status,
       (value) => value.business?.review?.phase === "installed",
@@ -398,7 +400,7 @@ async function main() {
     assert.equal(contract.apiVersion, "devclaw.project-runtime/v2")
     assert.equal(contract.extensionContract.context.configuration, "host-resolved")
     assert.equal((await snapshotDerivationSource(original)).digest, originalDigest)
-    await page.getByRole("button", { name: "返回原聊天继续创作", exact: true }).click()
+    await page.getByRole("button", { name: "返回聊天修改", exact: true }).click()
     await page
       .locator("textarea.composer-textarea")
       .fill(
@@ -415,7 +417,8 @@ async function main() {
         ),
       "same-name update review"
     )
-    assert.equal(await card.getByRole("button", { name: "保存为新插件并安装", exact: true }).count(), 0)
+    await openCreatorStep(page, "delivery")
+    assert.equal(await card.getByRole("button", { name: "保存插件", exact: true }).count(), 0)
     assert(
       !readFileSync(join(installedPlugin.path, extensionPath), "utf8").includes("修订版"),
       "Dialogue authoring must not overwrite the installed version"

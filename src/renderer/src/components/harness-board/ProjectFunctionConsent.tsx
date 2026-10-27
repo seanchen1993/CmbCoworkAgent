@@ -57,6 +57,10 @@ function ProjectFunctionConsentScope({
   const [error, setError] = useState("")
   const [confirmed, setConfirmed] = useState<string>()
   const [busy, setBusy] = useState(false)
+  const [expanded, setExpanded] = useState<boolean>()
+  useEffect(() => {
+    if (review) setExpanded(!ready(review))
+  }, [review])
   const pending = useRef(false)
   const generation = useRef(0)
   const mounted = useRef(false)
@@ -140,138 +144,147 @@ function ProjectFunctionConsentScope({
     ...(review?.dependencies ?? []).map((source) => ({ source, dependency: true }))
   ]
   return (
-    <section className="space-y-2 rounded border p-3 text-xs" aria-label="本包功能权限">
-      {review && needsExecution(review) && review.globallyEnabled === false && (
-        <p role="alert">应用灵件功能已关闭，请在原设置中启用后重新核对。不会自动更改全局开关。</p>
-      )}
-      {review && needsExecution(review) && review.workspaceEnabled === false && (
-        <p role="status">当前项目目录尚未启用灵件功能，请完成下方原生确认后再执行。</p>
-      )}
-      {error ? (
-        <p role="alert">{error}</p>
-      ) : (
-        review &&
-        sources.map(({ source, dependency }) => {
-          const configurationOnly =
-            "configurationOnly" in source && source.configurationOnly === true
-          const key = JSON.stringify([dependency, source.pluginId, source.digest])
-          const label = dependency ? `依赖功能：${source.name}` : "本包权限与参数"
-          const unavailable = !["ready", "needs-approval"].includes(source.state)
-          return (
-            <section key={key} aria-label={label} className="space-y-2 rounded border p-2">
-              <p>
-                {dependency ? "依赖功能" : configurationOnly ? "本包原生配置" : "本包灵件"}：
-                {source.name}
-              </p>
-              <p className="break-all">源码摘要：{source.digest}</p>
-              <p className="break-all">
-                {configurationOnly ? "配置目录" : "授权目录"}：{review.workspace}
-              </p>
-              {dependency && "actionIds" in source && (
-                <p>项目使用的动作：{source.actionIds.join("、")}</p>
-              )}
-              <p>
-                {configurationOnly
-                  ? review.dependencies?.length
-                    ? "主包只声明原生参数，不运行 Mod 代码，也不需要授予虚拟机权限。下列依赖功能仍需分别核对参数和授权，全部就绪后才能执行阶段。"
-                    : "此包只声明原生参数，不运行 Mod 代码，也不需要授予虚拟机权限。参数就绪后，阶段操作仍须按原流程确认。"
-                  : source.state === "ready"
-                    ? "此目录已授权当前源码版本。"
-                    : source.state === "disabled"
-                      ? "此功能或应用灵件开关已关闭，请先按原设置启用，再重新核对。"
-                      : source.state === "missing"
-                        ? "缺少项目锁定的依赖插件。请通过原插件安装入口安装对应版本后重新核对。"
-                        : source.state === "source-changed"
-                          ? "已安装依赖与项目锁定的源码摘要不一致。请恢复对应版本，或按原项目更新流程重新审核；不能直接批准不同源码。"
-                          : source.state === "invalid"
-                            ? "依赖功能无法通过原生检查。请修复插件或参数后重新核对。"
-                            : "当前源码版本尚未获准在此目录运行。"}
-              </p>
-              {!configurationOnly && (
-                <>
-                  {"scannedMethods" in source && (
+    <section aria-label="本包功能权限">
+      <details
+        className="space-y-2 rounded border p-3 text-xs"
+        open={expanded ?? (!review || !ready(review))}
+        onToggle={(event) => setExpanded(event.currentTarget.open)}
+      >
+        <summary className="cursor-pointer text-sm font-medium">
+          项目设置 · {review && ready(review) ? "已就绪" : "待完成"}
+        </summary>
+        {review && needsExecution(review) && review.globallyEnabled === false && (
+          <p role="alert">应用灵件功能已关闭，请在原设置中启用后重新核对。不会自动更改全局开关。</p>
+        )}
+        {review && needsExecution(review) && review.workspaceEnabled === false && (
+          <p role="status">当前项目目录尚未启用灵件功能，请完成下方原生确认后再执行。</p>
+        )}
+        {error ? (
+          <p role="alert">{error}</p>
+        ) : (
+          review &&
+          sources.map(({ source, dependency }) => {
+            const configurationOnly =
+              "configurationOnly" in source && source.configurationOnly === true
+            const key = JSON.stringify([dependency, source.pluginId, source.digest])
+            const label = dependency ? `依赖功能：${source.name}` : "本包权限与参数"
+            const unavailable = !["ready", "needs-approval"].includes(source.state)
+            return (
+              <section key={key} aria-label={label} className="space-y-2 rounded border p-2">
+                <p>
+                  {dependency ? "依赖功能" : configurationOnly ? "本包原生配置" : "本包灵件"}：
+                  {source.name}
+                </p>
+                <p className="break-all">
+                  {configurationOnly ? "配置目录" : "授权目录"}：{review.workspace}
+                </p>
+                <p>
+                  {configurationOnly
+                    ? review.dependencies?.length
+                      ? "主包只声明原生参数，不运行 Mod 代码，也不需要授予虚拟机权限。下列依赖功能仍需分别核对参数和授权，全部就绪后才能执行阶段。"
+                      : "此包只声明原生参数，不运行 Mod 代码，也不需要授予虚拟机权限。参数就绪后，阶段操作仍须按原流程确认。"
+                    : source.state === "ready"
+                      ? "此目录已授权当前源码版本。"
+                      : source.state === "disabled"
+                        ? "此功能或应用灵件开关已关闭，请先按原设置启用，再重新核对。"
+                        : source.state === "missing"
+                          ? "缺少项目锁定的依赖插件。请通过原插件安装入口安装对应版本后重新核对。"
+                          : source.state === "source-changed"
+                            ? "已安装依赖与项目锁定的源码摘要不一致。请恢复对应版本，或按原项目更新流程重新审核；不能直接批准不同源码。"
+                            : source.state === "invalid"
+                              ? "依赖功能无法通过原生检查。请修复插件或参数后重新核对。"
+                              : "当前源码版本尚未获准在此目录运行。"}
+                </p>
+                {!configurationOnly && (
+                  <>
+                    <details className="text-muted-foreground">
+                      <summary className="cursor-pointer">来源与能力</summary>
+                      <p className="break-all">源码摘要：{source.digest}</p>
+                      {dependency && "actionIds" in source && (
+                        <p>项目使用的动作：{source.actionIds.join("、")}</p>
+                      )}
+                      {"scannedMethods" in source && (
+                        <p>
+                          静态识别的调用：
+                          {source.scannedMethods.join("、") || "未识别到直接 SDK 调用"}
+                        </p>
+                      )}
+                      {"scanIncomplete" in source && source.scanIncomplete && (
+                        <p>静态扫描不能覆盖所有动态调用，请核对完整能力范围和源码。</p>
+                      )}
+                      <details>
+                        <summary>完整授权范围</summary>
+                        <p className="break-words">{source.capabilities.join("、")}</p>
+                      </details>
+                      <p>授权沿用原灵件权限机制；文件、网络、进程和工具操作仍按原规则单独确认。</p>
+                    </details>
+                  </>
+                )}
+                {!configurationOnly &&
+                  review.workspaceEnabled === false &&
+                  review.globallyEnabled !== false && (
                     <p>
-                      静态识别的调用：{source.scannedMethods.join("、") || "未识别到直接 SDK 调用"}
+                      确认权限将启用当前项目目录的灵件功能。同目录的其他聊天也会使用此前已授权的功能；不会启用其他目录或更改全局开关。
                     </p>
                   )}
-                  {"scanIncomplete" in source && source.scanIncomplete && (
-                    <p>静态扫描不能覆盖所有动态调用，请核对完整能力范围和源码。</p>
-                  )}
-                  <details>
-                    <summary>完整授权范围</summary>
-                    <p className="break-words">{source.capabilities.join("、")}</p>
-                  </details>
-                  <p>授权沿用原灵件权限机制；文件、网络、进程和工具操作仍按原规则单独确认。</p>
-                </>
-              )}
-              {!configurationOnly &&
-                review.workspaceEnabled === false &&
-                review.globallyEnabled !== false && (
-                  <p>
-                    确认权限将启用当前项目目录的灵件功能。同目录的其他聊天也会使用此前已授权的功能；不会启用其他目录或更改全局开关。
-                  </p>
-                )}
-              {source.hasConfiguration && (!dependency || !unavailable) && (
-                <>
-                  <FunctionUserConfig
-                    threadId={projectId}
-                    pluginId={source.pluginId ?? ""}
-                    expectedWorkspace={review.workspace}
-                    expectedDigest={source.digest}
-                    initiallyOpen
-                    api={api.config}
-                    hideRuntimeControls
-                    onSaved={() => void refresh()}
-                  />
-                  <p>
-                    参数保存在本项目的工作目录，下一次项目操作使用新值；保存参数不等于授权代码运行。
-                  </p>
-                </>
-              )}
-              {source.configurationReady === false && (
-                <p role="alert">请先补齐必需参数或确认配置迁移，再授权并运行此功能。</p>
-              )}
-              {!configurationOnly && source.state === "needs-approval" && (
-                <>
-                  {dependency && !api.approveDependency && (
-                    <p role="alert">当前入口暂不支持依赖授权，请更新应用后重新核对。</p>
-                  )}
-                  <label className="flex items-start gap-2">
-                    <input
-                      type="checkbox"
-                      checked={confirmed === key}
-                      onChange={(event) => setConfirmed(event.target.checked ? key : undefined)}
-                      disabled={busy}
+                {source.hasConfiguration && (!dependency || !unavailable) && (
+                  <>
+                    <FunctionUserConfig
+                      threadId={projectId}
+                      pluginId={source.pluginId ?? ""}
+                      expectedWorkspace={review.workspace}
+                      expectedDigest={source.digest}
+                      initiallyOpen={source.configurationReady === false}
+                      api={api.config}
+                      hideRuntimeControls
+                      onSaved={() => void refresh()}
                     />
-                    我已核对{dependency ? "此依赖" : "本包"}
-                    源码版本、目录及完整能力范围，允许此版本在本目录运行，并按需启用本目录的灵件功能。
-                  </label>
-                  <button
-                    type="button"
-                    disabled={
-                      confirmed !== key ||
-                      busy ||
-                      source.configurationReady === false ||
-                      (dependency && !api.approveDependency)
-                    }
-                    className="rounded border px-2 py-1 disabled:opacity-50"
-                    onClick={() => void approve(source, dependency)}
-                  >
-                    {dependency ? `确认依赖权限：${source.name}` : approvalLabel}
-                  </button>
-                </>
-              )}
-            </section>
-          )
-        })
-      )}
-      <button type="button" disabled={busy} className="underline" onClick={() => void refresh()}>
-        {review?.dependencies?.length
-          ? "重新核对本包及依赖权限"
-          : review?.source?.configurationOnly
-            ? "重新核对本包参数"
-            : "重新核对本包权限"}
-      </button>
+                  </>
+                )}
+                {source.configurationReady === false && (
+                  <p role="alert">请先补齐必需参数或确认配置迁移，再授权并运行此功能。</p>
+                )}
+                {!configurationOnly && source.state === "needs-approval" && (
+                  <>
+                    {dependency && !api.approveDependency && (
+                      <p role="alert">当前入口暂不支持依赖授权，请更新应用后重新核对。</p>
+                    )}
+                    <label className="flex items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={confirmed === key}
+                        onChange={(event) => setConfirmed(event.target.checked ? key : undefined)}
+                        disabled={busy}
+                      />
+                      允许{dependency ? "此依赖" : "此插件"}在上方目录运行
+                    </label>
+                    <button
+                      type="button"
+                      disabled={
+                        confirmed !== key ||
+                        busy ||
+                        source.configurationReady === false ||
+                        (dependency && !api.approveDependency)
+                      }
+                      className="rounded border px-2 py-1 disabled:opacity-50"
+                      onClick={() => void approve(source, dependency)}
+                    >
+                      {dependency ? `确认依赖权限：${source.name}` : approvalLabel}
+                    </button>
+                  </>
+                )}
+              </section>
+            )
+          })
+        )}
+        <button type="button" disabled={busy} className="underline" onClick={() => void refresh()}>
+          {review?.dependencies?.length
+            ? "重新核对本包及依赖权限"
+            : review?.source?.configurationOnly
+              ? "重新核对本包参数"
+              : "重新核对本包权限"}
+        </button>
+      </details>
     </section>
   )
 }

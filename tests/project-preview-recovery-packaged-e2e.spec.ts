@@ -1,3 +1,4 @@
+import { openCreatorProjectPreview } from "./support/creator-navigation"
 /** Real creator tools/native trial UI, persisted restart, fresh approval and original executor. */
 import assert from "node:assert/strict"
 import { appendFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
@@ -111,11 +112,8 @@ async function showAuthor(id: string) {
   const remaining = deadline - Date.now()
   assert(remaining > 0, "Native author status did not open within the original 20s budget")
   await region.waitFor({ timeout: remaining })
-  const trial = page.getByRole("region", { name: "项目模板隔离试用", exact: true })
-  if (!(await trial.isVisible()))
-    await page.getByText("高级：独立项目试用", { exact: true }).click()
-  await trial.waitFor()
-  await trial.getByRole("button", { name: "刷新项目草稿", exact: true }).click()
+  const trial = await openCreatorProjectPreview(page)
+  await trial.getByRole("button", { name: "刷新", exact: true }).click()
   assert.equal(
     (await page.evaluate((threadId) => window.api.mods.development.status({ threadId }), id)).mode,
     "creator"
@@ -303,9 +301,9 @@ async function main() {
       "real authoring request"
     )
     let panel = await showAuthor(author)
-    const create = panel.getByRole("button", { name: "创建试用项目（稍后开始任务）", exact: true })
-    assert(await create.isDisabled())
-    await panel.getByRole("checkbox").check()
+    const create = panel.getByRole("button", { name: "开始试用", exact: true })
+    assert(await create.isEnabled())
+    assert.equal(await panel.getByRole("checkbox").count(), 0)
     const beforeCreate = model.requests.length
     await create.click()
     mark("native-project-created-click-complete")
@@ -333,7 +331,7 @@ async function main() {
       mark("native-required-configuration-saved")
       await consent.getByRole("checkbox").check()
       await approve.click()
-      await consent.getByText("此目录已授权当前源码版本。", { exact: true }).waitFor()
+      await consent.getByText("项目设置 · 已就绪", { exact: true }).waitFor()
       mark("native-source-consent-complete")
       assert.equal(
         model.requests.length,
@@ -537,8 +535,7 @@ async function main() {
     assert.equal(await acceptance.getByLabel("本轮阶段验收", { exact: true })
       .locator(":scope > li").count(), 2)
     await panel.getByLabel("这次试用希望完成什么").fill("第二个独立试用，不继承前次产物")
-    await panel.getByRole("checkbox").check()
-    await panel.getByRole("button", { name: "创建试用项目（稍后开始任务）", exact: true }).click()
+    await panel.getByRole("button", { name: "开始试用", exact: true }).click()
     const next = await until(
       () => page.evaluate((id) => window.api.harnessBoard.localProjects.preview.list(id), author),
       (value) => Boolean(value.drafts[0]?.projectId && value.drafts[0].projectId !== projectId),
@@ -686,7 +683,7 @@ async function main() {
       await consent.getByRole("button", { name: "保存", exact: true }).click()
       await consent.getByRole("checkbox").check()
       await approve.click()
-      await consent.getByText("此目录已授权当前源码版本。", { exact: true }).waitFor()
+      await consent.getByText("项目设置 · 已就绪", { exact: true }).waitFor()
       mark("native-installed-required-config-and-consent-complete")
       await prepareNativeMcpApproval(plugin.id)
       const ordinary = await page.evaluate((id) => window.api.mods.status(id), author)

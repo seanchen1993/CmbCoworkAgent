@@ -1,3 +1,4 @@
+import { openCreatorProjectPreview } from "./support/creator-navigation"
 /** Normal Electron build/ASAR, native creator + S6 IPC/UI, real tools and original validators. */
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
@@ -94,7 +95,7 @@ async function showCreator() {
   const closeWorkspace = async () => {
     if (!(await workspace.isVisible())) return
     const returnToChat = workspace.getByRole("button", {
-      name: "返回原聊天继续创作", exact: true
+      name: "返回聊天修改", exact: true
     })
     if (await returnToChat.isVisible()) await returnToChat.click()
     else await workspace.getByRole("button", { name: "Close", exact: true }).click()
@@ -140,11 +141,8 @@ async function showAuthor() {
     await pause()
   }
   assert(Date.now() < deadline, "Native creator status opener exceeded original 20s budget")
-  const preview = page.getByRole("region", { name: "项目模板隔离试用", exact: true })
-  if (!(await preview.isVisible()))
-    await page.getByText("高级：独立项目试用", { exact: true }).click()
-  await preview.waitFor()
-  await preview.getByRole("button", { name: "刷新项目草稿", exact: true }).click()
+  const preview = await openCreatorProjectPreview(page)
+  await preview.getByRole("button", { name: "刷新", exact: true }).click()
   return preview
 }
 const readProject = (projectId: string) =>
@@ -201,9 +199,9 @@ async function main() {
       "original creator tools prepare trial"
     )
     let panel = await showAuthor()
-    const create = panel.getByRole("button", { name: "创建试用项目（稍后开始任务）", exact: true })
-    assert(await create.isDisabled())
-    await panel.getByRole("checkbox").check()
+    const create = panel.getByRole("button", { name: "开始试用", exact: true })
+    assert(await create.isEnabled())
+    assert.equal(await panel.getByRole("checkbox").count(), 0)
     await create.click()
     const listing = await until(
       () => page.evaluate((id) => window.api.harnessBoard.localProjects.preview.list(id), author),
@@ -237,7 +235,7 @@ async function main() {
         assert.equal(await branchButton.count(), 1)
         await branchButton.click()
       } else {
-        await owner.getByRole("button", { name: "查看本轮执行与阶段操作", exact: true }).click()
+        await owner.getByRole("button", { name: "查看试用", exact: true }).click()
       }
       const expected = await readProject(projectId)
       const stage = expected.project.manifest.stages[expected.project.stageIndex]

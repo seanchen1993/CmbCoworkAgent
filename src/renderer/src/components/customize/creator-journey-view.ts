@@ -45,17 +45,19 @@ export function creatorJourneyView(
     nextStep: !current
       ? "刷新原试用记录，核对当前候选版本。"
       : passed
-        ? "可核对业务效果，再保存为独立插件。"
+        ? "可保存为插件。"
         : journey.phase === "ready"
-          ? "在原试用项目开始当前阶段。"
+          ? "点击“开始执行”。"
           : journey.phase === "needs-transition"
-            ? "在原试用项目确认进入下一阶段。"
+            ? "检查已通过，可进入下一步。"
             : journey.phase === "needs-approval"
-              ? "在原试用项目处理待确认事项。"
+              ? "请处理下方待确认事项。"
               : journey.phase === "failed"
-                ? "查看未通过的检查，在原聊天提交修改需求后试用新版本。"
+                ? "查看未通过的检查，回到聊天修改。"
                 : journey.phase === "running"
-                  ? "等待原项目执行，阶段记录会归入同一轮试用。"
-                  : "在原试用项目核对阶段、产物和检查；会话结束不能代替验收。"
+                  ? "正在执行，请稍候。"
+                  : journey.phase === "not-started"
+                    ? "点击“开始执行”。"
+                    : "请核对本轮结果。"
   }
 }
