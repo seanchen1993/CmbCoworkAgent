@@ -1,4 +1,5 @@
 import type { DesignSessionApi } from "../shared/managed-design-session"
+import type { DesignTemplateApi } from "../shared/design-template"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type { RequirementRuntimeItem } from "../main/ipc/requirements"
 import type {
@@ -2182,6 +2183,9 @@ interface CustomAPI {
     cancelByThread: (threadId: string) => Promise<boolean>
   }
   design: {
+    importTemplate: DesignTemplateApi["importTemplate"]
+    listImportedTemplates: DesignTemplateApi["listImportedTemplates"]
+    readTemplate: DesignTemplateApi["readTemplate"]
     sessions: DesignSessionApi
     generate: (
       sessionId: string,

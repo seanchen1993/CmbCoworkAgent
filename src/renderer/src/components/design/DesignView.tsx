@@ -2692,7 +2692,7 @@ export function DesignView(): React.JSX.Element {
       patchTargets?: DesignPatchTarget[]
     ) => {
       const state = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
-      const local = isIteration && !image && !skill && shouldUseDesignPatch(prompt, !!patchTargets?.length)
+      const local = isIteration && !image && !skill && !state.creationSelection?.template.package && shouldUseDesignPatch(prompt, !!patchTargets?.length)
       const observations = (patchTargets ?? []).flatMap((target) => {
         const doc = iframeRef.current?.contentDocument
         const el = doc && [...doc.querySelectorAll<HTMLElement>("[data-design-node]")].find((n) => n.dataset.designNode === target.nodeId)
@@ -2713,7 +2713,9 @@ export function DesignView(): React.JSX.Element {
           artifactRevision: state.artifactRevision ?? 0,
           observations,
           viewport: { width: iframeRef.current?.contentWindow?.innerWidth ?? 1440, height: iframeRef.current?.contentWindow?.innerHeight ?? 1000 } } : undefined,
-        currentHtml: isIteration && !local
+        // Package sessions use the durable source in the main process, not the
+        // preview document containing inlined multi-megabyte vendor bundles.
+        currentHtml: isIteration && !local && !state.creationSelection?.template.package
           ? getCurrentDesignHtml(tabStatesRef.current[SINGLE_DESIGN_TAB_ID])
           : undefined,
         imageData: image?.base64,

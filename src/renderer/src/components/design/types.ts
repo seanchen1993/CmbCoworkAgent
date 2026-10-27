@@ -1,4 +1,5 @@
 import type { FileAttachment as BaseFileAttachment } from "@/types"
+import type { DesignTemplateReference } from "../../../../shared/design-template"
 import type { DesignDraftPreview, DesignGenerationMetrics } from "../../../../shared/design-progressive"
 import type { DesignTweaksState } from "../../../../shared/design-tweaks"
 import type { DesignAppliedPatch, DesignPatchMetrics, DesignPatchStatus } from "../../../../shared/design-patch"
@@ -69,6 +70,7 @@ export interface DesignCreationSelection {
     name: string | null
     html: string | null
     path: string | null
+    package?: DesignTemplateReference
   }
   requirement: {
     mode: "select" | "upload" | "none"
@@ -270,6 +272,7 @@ export interface DirectionCard {
 }
 
 export interface DesignArtifactMetadata {
+  templatePackage?: DesignTemplateReference
   tweaks?: DesignTweaksState | null
   artifactId: string
   title?: string

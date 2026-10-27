@@ -1,4 +1,5 @@
 import type { DesignSessionApi, DesignSessionChange } from "../shared/managed-design-session"
+import type { DesignTemplateApi } from "../shared/design-template"
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
@@ -4485,6 +4486,9 @@ const api = {
     }
   },
   design: {
+    importTemplate: ((source) => ipcRenderer.invoke("design:import-template", source)) satisfies DesignTemplateApi["importTemplate"],
+    listImportedTemplates: (() => ipcRenderer.invoke("design:list-imported-templates")) satisfies DesignTemplateApi["listImportedTemplates"],
+    readTemplate: ((reference) => ipcRenderer.invoke("design:read-template", reference)) satisfies DesignTemplateApi["readTemplate"],
     sessions: {
       tweak: (id, command) => ipcRenderer.invoke("design:session-tweak", { id, command }),
       patchHistory: (id, operation, revision) => ipcRenderer.invoke("design:patch-history", { id, operation, revision }),

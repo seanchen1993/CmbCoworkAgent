@@ -16,6 +16,10 @@ import { Button } from "@/components/ui/button"
 import { HtmlThumbnailPreview } from "@/components/ui/html-thumbnail-preview"
 import { cn } from "@/lib/utils"
 import type {
+  DesignTemplatePackage,
+  DesignTemplateSummary
+} from "../../../../shared/design-template"
+import type {
   DesignCreationSelection,
   DesignSessionKind,
   DesignSystemInfo,
@@ -112,7 +116,8 @@ export function DesignCreationPage({
   const [templatesError, setTemplatesError] = useState<string | null>(null)
   const [selectedTemplateId, setSelectedTemplateId] = useState("")
   const [templatePage, setTemplatePage] = useState(0)
-  const [uploadedTemplate, setUploadedTemplate] = useState<UploadedFile | null>(null)
+  const [uploadedTemplate, setUploadedTemplate] = useState<DesignTemplatePackage | null>(null)
+  const [importedTemplates, setImportedTemplates] = useState<DesignTemplateSummary[]>([])
   const [templateUploading, setTemplateUploading] = useState(false)
   const [templateError, setTemplateError] = useState<string | null>(null)
   const [requirementMode, setRequirementMode] = useState<SelectionMode>("select")
@@ -153,32 +158,52 @@ export function DesignCreationPage({
     }
   }, [])
 
-  const busy = workspaceLoading || importingSource !== null
-  const canStart = !busy && !templateUploading && !requirementUploading
+  useEffect(() => {
+    let cancelled = false
+    void window.api.design
+      .listImportedTemplates()
+      .then((items) => {
+        if (!cancelled) setImportedTemplates(items)
+      })
+      .catch((error) => console.warn("[Design] Imported template list unavailable", error))
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
-  const selectTemplateFile = async (): Promise<void> => {
+  const busy = workspaceLoading || importingSource !== null
+  const canStart =
+    !busy &&
+    !templateUploading &&
+    !requirementUploading &&
+    (templateMode !== "upload" || !!uploadedTemplate)
+
+  const selectTemplateFile = async (source: "file" | "directory" = "file"): Promise<void> => {
     setTemplateUploading(true)
     setTemplateError(null)
     try {
-      const picked = await window.api.file.selectCode()
-      if (picked.canceled || picked.filePaths.length === 0) return
-      const htmlPath = picked.filePaths.find((filePath) => /\.html?$/i.test(filePath))
-      if (!htmlPath) {
-        setTemplateError("请选择 HTML 文件，以便在这里预览模板。")
-        return
-      }
-      const result = await window.api.file.readText(htmlPath)
-      if (!result.success || !result.content) {
-        setTemplateError(result.error || "无法读取模板文件。")
-        return
-      }
-      setUploadedTemplate({
-        name: result.filename || getPathName(htmlPath),
-        path: htmlPath,
-        html: result.content
-      })
+      const result = await window.api.design.importTemplate(source)
+      if (result.canceled) return
+      if (!result.template) throw new Error(result.error || "无法读取模板包")
+      setUploadedTemplate(result.template)
+      const items = await window.api.design.listImportedTemplates()
+      setImportedTemplates(items)
     } catch (error) {
       setTemplateError(error instanceof Error ? error.message : "上传模板失败")
+    } finally {
+      setTemplateUploading(false)
+    }
+  }
+
+  const readImportedTemplate = async (id: string, entryPath: string): Promise<void> => {
+    setTemplateUploading(true)
+    setTemplateError(null)
+    try {
+      const result = await window.api.design.readTemplate({ id, entryPath })
+      if (!result.template) throw new Error(result.error || "无法读取模板入口")
+      setUploadedTemplate(result.template)
+    } catch (error) {
+      setTemplateError(error instanceof Error ? error.message : "加载模板失败")
     } finally {
       setTemplateUploading(false)
     }
@@ -252,7 +277,14 @@ export function DesignCreationPage({
         mode: templateMode,
         name: templateName,
         html: templateHtml,
-        path: templateMode === "upload" ? (uploadedTemplate?.path ?? null) : null
+        path:
+          templateMode === "upload" && uploadedTemplate
+            ? `${uploadedTemplate.rootDir}/${uploadedTemplate.entryPath}`
+            : null,
+        package:
+          templateMode === "upload" && uploadedTemplate
+            ? { id: uploadedTemplate.id, entryPath: uploadedTemplate.entryPath }
+            : undefined
       },
       requirement: {
         mode: requirementMode,
@@ -546,28 +578,103 @@ export function DesignCreationPage({
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex min-w-0 items-center gap-2 text-sm text-foreground">
                       <Upload className="size-4 text-primary" />{" "}
-                      <span className="truncate">{uploadedTemplate?.name || "上传 HTML 模板"}</span>
+                      <span className="truncate">
+                        {uploadedTemplate?.name || "上传 HTML、ZIP 或模板文件夹"}
+                      </span>
                     </div>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      disabled={templateUploading}
-                      onClick={() => void selectTemplateFile()}
-                    >
-                      {templateUploading && <LoaderCircle className="size-3.5 animate-spin" />}
-                      选择文件
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={templateUploading}
+                        onClick={() => void selectTemplateFile("directory")}
+                      >
+                        <FolderOpen className="size-3.5" /> 选择文件夹
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={templateUploading}
+                        onClick={() => void selectTemplateFile()}
+                      >
+                        {templateUploading && <LoaderCircle className="size-3.5 animate-spin" />}
+                        选择 HTML / ZIP
+                      </Button>
+                    </div>
                   </div>
+                  <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                    整包保留页面、框架、样式和图片；支持浏览器可直接运行的模板。源码工程请先构建为静态页面。
+                  </p>
+                  {importedTemplates.length > 0 && (
+                    <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+                      已导入模板
+                      <select
+                        aria-label="已导入模板"
+                        disabled={templateUploading}
+                        value={uploadedTemplate?.id ?? ""}
+                        className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1.5 text-foreground"
+                        onChange={(event) => {
+                          const item = importedTemplates.find(
+                            (template) => template.id === event.target.value
+                          )
+                          if (item) void readImportedTemplate(item.id, item.entryPath)
+                        }}
+                      >
+                        <option value="" disabled>
+                          选择已保存的模板
+                        </option>
+                        {importedTemplates.map((template) => (
+                          <option key={template.id} value={template.id}>
+                            {template.name} · {template.framework}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {uploadedTemplate && (
+                    <div className="mt-3 space-y-2 text-xs text-muted-foreground">
+                      <p>
+                        {uploadedTemplate.framework} · {uploadedTemplate.files.length} 个文件 ·{" "}
+                        {(uploadedTemplate.totalBytes / 1024 / 1024).toFixed(2)} MB
+                      </p>
+                      <label className="flex items-center gap-2">
+                        页面入口
+                        <select
+                          aria-label="模板页面入口"
+                          value={uploadedTemplate.entryPath}
+                          disabled={templateUploading}
+                          className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1.5 text-foreground"
+                          onChange={(event) =>
+                            void readImportedTemplate(uploadedTemplate.id, event.target.value)
+                          }
+                        >
+                          {uploadedTemplate.pages.map((page) => (
+                            <option key={page} value={page}>
+                              {page}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {uploadedTemplate.warnings.map((warning) => (
+                        <p key={warning} className="text-amber-700">
+                          {warning}
+                        </p>
+                      ))}
+                    </div>
+                  )}
                   {templateError && (
                     <p className="mt-2 text-xs text-destructive">{templateError}</p>
                   )}
-                  {uploadedTemplate?.html && (
+                  {uploadedTemplate?.previewUrl && (
                     <iframe
                       title="上传模板预览"
-                      srcDoc={uploadedTemplate.html}
-                      sandbox=""
-                      className="mt-4 block h-48 w-full rounded border border-border bg-white"
+                      key={`${uploadedTemplate.id}:${uploadedTemplate.entryPath}`}
+                      src={uploadedTemplate.previewUrl}
+                      sandbox="allow-scripts allow-forms allow-modals"
+                      referrerPolicy="no-referrer"
+                      className="mt-4 block h-80 w-full rounded border border-border bg-white"
                     />
                   )}
                 </div>

@@ -9,7 +9,11 @@
 
 import fs from "fs"
 import path from "path"
-import { ipcMain, BrowserWindow, app, net, type WebContents } from "electron"
+import { ipcMain, BrowserWindow, app, net, dialog, type WebContents } from "electron"
+import { DesignTemplatePackages, buildTemplatePackageContext } from "../services/design/template-packages"
+import { DesignTemplatePreview } from "../services/design/template-preview"
+import { createDesignArtifactZip } from "../services/design/artifact-package"
+import type { DesignTemplateReference, DesignTemplateImportResult } from "../../shared/design-template"
 import Store from "electron-store"
 import { getDb } from "../db"
 import { DesignSessionStore } from "../services/design/session-store"
@@ -618,6 +622,7 @@ interface DesignTemplateInfo {
 }
 
 interface DesignArtifactMetadata {
+  templatePackage?: DesignTemplateReference
   tweaks?: DesignTweaksState | null
   artifactId: string
   title?: string
@@ -1106,11 +1111,6 @@ function readFreshDesignArtifactDraftFile(
   return readDesignArtifactFile(resolvedFile, workspacePath)
 }
 
-function isSkippableDesignPackageEntry(relativePath: string): boolean {
-  const name = path.basename(relativePath)
-  return name.startsWith(".draft-") || name.startsWith(".source-")
-}
-
 function stripAssetQueryAndHash(value: string): string {
   const hashIndex = value.indexOf("#")
   const beforeHash = hashIndex >= 0 ? value.slice(0, hashIndex) : value
@@ -1170,26 +1170,6 @@ function getReferencedDesignLocalAssets(html: string, rootDir: string): Set<stri
   return assets
 }
 
-function listDesignArtifactPackageFiles(rootDir: string): Array<{ filePath: string; relativePath: string }> {
-  const files: Array<{ filePath: string; relativePath: string }> = []
-  const visit = (dirPath: string) => {
-    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
-      const fullPath = path.join(dirPath, entry.name)
-      const relativePath = path.relative(rootDir, fullPath).replace(/\\/g, "/")
-      if (!relativePath || relativePath.startsWith("..") || isSkippableDesignPackageEntry(relativePath)) {
-        continue
-      }
-      if (entry.isDirectory()) {
-        visit(fullPath)
-      } else if (entry.isFile()) {
-        files.push({ filePath: fullPath, relativePath })
-      }
-    }
-  }
-  visit(rootDir)
-  return files
-}
-
 function getDesignArtifactPackageInfo(
   filePath: string | undefined,
   workspacePath?: string
@@ -1223,25 +1203,14 @@ function exportDesignArtifactPackage(
     return { success: false, error: info.error ?? "Design artifact not found" }
   }
   try {
-    const files = listDesignArtifactPackageFiles(info.dirPath)
-    if (files.length === 0) return { success: false, error: "Design artifact package is empty" }
-
-    const zip = new AdmZip()
-    for (const file of files) {
-      const zipDir = path.dirname(file.relativePath)
-      if ((tweaks || htmlOverride) && sameResolvedFilePath(file.filePath, info.filePath)) zip.addFile(file.relativePath, Buffer.from(materializeTweaks(htmlOverride ?? fs.readFileSync(file.filePath, "utf8"), tweaks)))
-      else zip.addLocalFile(file.filePath, zipDir === "." ? "" : zipDir, path.basename(file.relativePath))
-    }
-    const zipBuffer = zip.toBuffer()
+    const zipBuffer = createDesignArtifactZip(info.dirPath, info.filePath,
+      tweaks || htmlOverride ? materializeTweaks(htmlOverride ?? fs.readFileSync(info.filePath, "utf8"), tweaks) : undefined)
     const baseName = path.basename(info.dirPath).replace(/[^a-zA-Z0-9._-]/g, "_") || "design"
     return {
       success: true,
       fileName: `${baseName}.zip`,
-      relatedFileCount: info.relatedFileCount ?? Math.max(0, files.length - 1),
-      buffer: zipBuffer.buffer.slice(
-        zipBuffer.byteOffset,
-        zipBuffer.byteOffset + zipBuffer.byteLength
-      )
+      relatedFileCount: info.relatedFileCount ?? 0,
+      buffer: Uint8Array.from(zipBuffer).buffer
     }
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
@@ -2749,6 +2718,36 @@ function sleepDesignRetryDelay(ms: number, signal: AbortSignal): Promise<void> {
 // ─────────────────────────────────────────────────────────
 
 export function registerDesignHandlers(): void {
+  const templatePackages = new DesignTemplatePackages(path.join(getOpenworkDir(), "design-template-packages"))
+  const templatePreview = new DesignTemplatePreview()
+  app.on("will-quit", () => templatePreview.close())
+  const readTemplate = async (reference: DesignTemplateReference): Promise<DesignTemplateImportResult> => {
+    try {
+      const template = templatePackages.read(reference)
+      template.previewUrl = await templatePreview.url(template)
+      return { template }
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+  ipcMain.handle("design:list-imported-templates", () => templatePackages.list())
+  ipcMain.handle("design:read-template", (_event, reference: DesignTemplateReference) => readTemplate(reference))
+  ipcMain.handle("design:import-template", async (event, source: "file" | "directory"): Promise<DesignTemplateImportResult> => {
+    try {
+      if (source !== "file" && source !== "directory") throw new Error("模板来源无效")
+      const owner = BrowserWindow.fromWebContents(event.sender)
+      const options: Electron.OpenDialogOptions = source === "directory"
+        ? { title: "选择模板文件夹", properties: ["openDirectory"] }
+        : { title: "选择 HTML 或 ZIP 模板", properties: ["openFile"], filters: [{ name: "模板", extensions: ["html", "htm", "zip"] }] }
+      const picked = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options)
+      if (picked.canceled || !picked.filePaths[0]) return { canceled: true }
+      const template = templatePackages.importSource(picked.filePaths[0])
+      template.previewUrl = await templatePreview.url(template)
+      return { template }
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) }
+    }
+  })
   const subscribers = new Map<number, Set<string>>()
   const publish = (change: DesignSessionChange) => {
     for (const window of BrowserWindow.getAllWindows()) {
@@ -2779,6 +2778,9 @@ export function registerDesignHandlers(): void {
       activeDesignAgents.get(runId)?.abort()
     },
     execute: async (request, runId, emit, snapshot) => {
+      if (request.kind === "patch" && snapshot.state.creationSelection?.template.package) {
+        request = { ...request, kind: "agent", isIteration: true, currentHtml: materializeTweaks(snapshot.state.html, snapshot.state.tweaks, false) }
+      }
       if (request.kind === "patch") {
         const controller = new AbortController()
         const configs = getCustomModelConfigs()
@@ -2876,7 +2878,7 @@ export function registerDesignHandlers(): void {
       const channel =
         request.kind === "questions"
           ? "design:ask-questions"
-          : request.kind === "image"
+          : request.kind === "image" && !snapshot.state.creationSelection?.template.package
             ? "design:generate-from-image"
             : "design:agent-generate"
       const execute = designExecutors.get(channel)
@@ -2895,9 +2897,12 @@ export function registerDesignHandlers(): void {
           workspacePath: snapshot.workspacePath ?? undefined,
           artifactId: `${request.designSessionId}_design-main`,
           currentHtml: request.isIteration
-            ? request.currentHtml || snapshot.state.html
+            ? snapshot.state.creationSelection?.template.package
+              ? materializeTweaks(snapshot.state.html, snapshot.state.tweaks, false)
+              : request.currentHtml || snapshot.state.html
             : undefined,
           designSystemId: snapshot.state.selectedDesignSystemId ?? undefined,
+          templatePackage: snapshot.state.creationSelection?.template.package,
         })
       } finally {
         managedDesignSinks.delete(runId)
@@ -3531,7 +3536,7 @@ export function registerDesignHandlers(): void {
   registerDesignExecutor(
     "design:agent-generate",
     async (event, {
-      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath, designSessionId, designSystemId,
+      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath, designSessionId, designSystemId, templatePackage,
     }: {
       sessionId: string
       prompt: string
@@ -3546,6 +3551,7 @@ export function registerDesignHandlers(): void {
       sourceArtifactPath?: string
       designSessionId?: string
       designSystemId?: string
+      templatePackage?: DesignTemplateReference
     }) => {
       const channel = `design:stream:${sessionId}`
       const win = event.sender ? BrowserWindow.fromWebContents(event.sender) : null
@@ -3673,6 +3679,9 @@ export function registerDesignHandlers(): void {
           ? currentHtml
           : ""
         const outputArtifactPath = preparedArtifact.filePath
+        const templateContext = templatePackage
+          ? buildTemplatePackageContext(templatePackages.materialize(templatePackage, path.dirname(outputArtifactPath)))
+          : ""
         const draftArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
         const sourcePathIsOutput = sameResolvedFilePath(sourceArtifact.filePath, outputArtifactPath)
         let sourceFilePathForPrompt: string | undefined
@@ -3743,7 +3752,7 @@ export function registerDesignHandlers(): void {
           ? `${promptWithCurrentHtml}${designSystemContext}`
           : promptWithCurrentHtml
         const promptWithSkill = skillContext ? `${promptWithDesignSystem}${skillContext}` : promptWithDesignSystem
-        const promptWithArtifact = `${promptWithSkill}${artifactInstruction}`
+        const promptWithArtifact = `${promptWithSkill}${artifactInstruction}${templateContext}`
         if (htmlForIteration) storeDesignHtml(htmlStoreKey, htmlForIteration)
 
         let candidateDraftPath = draftArtifactPath
@@ -3773,7 +3782,7 @@ export function registerDesignHandlers(): void {
           threadId: runtimeThreadId,
           workspacePath,
           modelId,
-          extraSystemPrompt: DESIGN_SYSTEM_PROMPT,
+          extraSystemPrompt: DESIGN_SYSTEM_PROMPT + (templatePackage ? "\n\n## Selected template package\nUse the selected local template's framework, component library and theme. Its dependencies have already been copied by the host. Keep relative local script/style references instead of inlining vendor bundles or switching to remote CDNs. Produce exactly one complete HTML page, preserving React/Vue and JSX/Babel where present. These template rules override generic inline-only and variation instructions.\n" : ""),
           noSchedulerTool: true,
           noSkillEvolutionTool: true,
           enableAgentsPrompt: false,
@@ -4261,6 +4270,7 @@ export function registerDesignHandlers(): void {
               designSystemCategory: designSystemId ? getDesignSystemById(designSystemId).info?.category ?? null : null,
               preview: { thumbnailText: makeDesignThumbnailText(artifactHtml) },
               variations: extractDesignVariationMetadata(artifactHtml),
+              templatePackage,
               tweaks,
             })
           }
