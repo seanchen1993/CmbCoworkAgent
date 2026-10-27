@@ -1,3 +1,4 @@
+import { useChatSourceNavigation } from "@/lib/chat-source-navigation"
 import type { BotGroupInputControl } from "@/components/bots/BotGroupMentionInput"
 import { parseBotMessageMentions } from "../../../../shared/bots/message-mentions"
 import type { BotDefinition, BotGroup, BotMessageReply } from "../../../../shared/bots/contracts"
@@ -4797,7 +4798,7 @@ export function ChatContainer({
     botReplyScrollRef.current = scrollToMessageById
   }, [scrollToMessageById])
   const jumpToBotReply = useCallback(
-    (reply: BotMessageReply) => {
+    (reply: Pick<BotMessageReply, "id" | "ordinal">) => {
       invalidateDurableMessageReveal()
       const revealed = revealDurableMessage({ messageId: reply.id, ordinal: reply.ordinal })
       const generation = durableMessageWindowGenerationRef.current
@@ -4821,6 +4822,18 @@ export function ChatContainer({
     },
     [invalidateDurableMessageReveal, revealDurableMessage, waitForTranscriptCommit]
   )
+  const historySourceTarget = useChatSourceNavigation((state) => state.target)
+  useEffect(() => {
+    if (
+      !historySourceTarget ||
+      historySourceTarget.threadId !== threadId ||
+      historyLoading ||
+      !scrollParent
+    )
+      return
+    useChatSourceNavigation.getState().clear()
+    jumpToBotReply({ id: historySourceTarget.messageId, ordinal: historySourceTarget.ordinal })
+  }, [historySourceTarget, threadId, historyLoading, scrollParent, jumpToBotReply])
   const botReplyActions = useMemo(
     () =>
       surface !== "bot" || !replySource

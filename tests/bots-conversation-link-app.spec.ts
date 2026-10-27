@@ -94,7 +94,7 @@ async function main() {
       const reasoning = inspectFile
         ? "LINK_DETAIL_THOUGHT：先读取原目录的材料，再继续当前任务。"
         : undefined
-      const toolCalls = inspectFile
+      let toolCalls = inspectFile
         ? [
             {
               id: `link-read-${calls.length}`,
@@ -106,6 +106,54 @@ async function main() {
             }
           ]
         : undefined
+      if (!reporting && user.includes("LINK_HISTORY_QUERY")) {
+        assert.ok(toolNames.includes("bot_work_search") && toolNames.includes("bot_work_read"))
+        const linkedPrompt = messages.find(
+          (m: any) => m.role === "system" && JSON.stringify(m.content).includes("Recent links:")
+        )
+        assert.ok(linkedPrompt, "main Bot receives associated-work metadata without a task run")
+        const prompt =
+          typeof linkedPrompt.content === "string"
+            ? linkedPrompt.content
+            : linkedPrompt.content.map((block: any) => block.text ?? "").join("\n")
+        const workId = /"workId":"([^"]+)"/.exec(prompt)?.[1]
+        assert.ok(workId)
+        const receipts = turnMessages
+          .filter((m: any) => m.role === "tool")
+          .map((m: any) => JSON.parse(m.content))
+        const searched = receipts.find((r: any) => r.operation === "bot_work_search")
+        const read = receipts.find((r: any) => r.operation === "bot_work_read")
+        if (!searched)
+          toolCalls = [
+            {
+              id: `history-search-${calls.length}`,
+              type: "function",
+              function: {
+                name: "bot_work_search",
+                arguments: JSON.stringify({ workId, query: "LINK_INITIAL" })
+              }
+            }
+          ]
+        else if (!read) {
+          assert.ok(searched.receipt.entries.length)
+          const original = searched.receipt.entries.find((e: any) => e.role === "user")
+          toolCalls = [
+            {
+              id: `history-read-${calls.length}`,
+              type: "function",
+              function: {
+                name: "bot_work_read",
+                arguments: JSON.stringify({ workId, messageId: original.source.messageId })
+              }
+            }
+          ]
+        } else {
+          assert.ok(read.receipt.entries.some((e: any) => e.text.includes("LINK_INITIAL_REPLY")))
+          const original = read.receipt.entries.find((e: any) => e.role === "user")
+          reply = `LINK_HISTORY_FOUND：原讨论已经保留。[查看原消息](${original.href})`
+          toolCalls = undefined
+        }
+      }
       if (body.stream) {
         res.writeHead(200, { "content-type": "text/event-stream" })
         for (const [delta, finish_reason] of [
@@ -255,7 +303,7 @@ async function main() {
     const threadId = setup.thread.thread_id
     const chat = () => page.locator(`[data-chat-thread-id="${threadId}"]`)
     const send = async (text: string) => {
-      await chat().locator("textarea").last().fill(text)
+      await chat().locator('textarea, [role="textbox"][contenteditable="true"]').last().fill(text)
       await page.evaluate(
         () =>
           new Promise<void>((done) =>
@@ -266,11 +314,11 @@ async function main() {
     }
     const assertComposerLayout = async () => {
       const composer = page.locator("[data-bot-owner-composer]").last()
-      const inputBox = await composer.locator("textarea").boundingBox(),
+      const inputBox = await composer.locator('textarea, [role="textbox"][contenteditable="true"]').boundingBox(),
         actionsBox = await composer.locator("[data-composer-actions]").boundingBox()
       assert.ok(
         inputBox && actionsBox && inputBox.y + inputBox.height <= actionsBox.y + 1,
-        "model/mode toolbar must sit below the textarea"
+        "model/mode toolbar must sit below the editor"
       )
     }
     await page
@@ -349,6 +397,86 @@ async function main() {
     console.log("stage: existing-associated-no-execution", threadId, linked.work.id)
     await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).click()
     await chat().waitFor()
+    // Main chat learns the association and can retrieve pre-link history without running that work.
+    await page.getByRole("button", { name: "返回主对话", exact: true }).first().click()
+    await page.locator("[data-bot-association-notice]").waitFor()
+    const notices = await page.evaluate(
+      async (id) => (window as any).api.bots.works.associations(id),
+      setup.bot.id
+    )
+    assert.equal(notices.items.length, 1)
+    assert.equal(notices.items[0].workId, linked.work.id)
+    const beforeHistory = await page.evaluate(
+      async (id) =>
+        (await (window as any).api.bots.snapshot()).tasks.filter((t: any) => t.workId === id)
+          .length,
+      linked.work.id
+    )
+    const mainChat = page.locator(`[data-chat-thread-id="${setup.bot.threadId}"]`)
+    await mainChat
+      .locator('textarea, [role="textbox"][contenteditable="true"]')
+      .last()
+      .fill("LINK_HISTORY_QUERY：查一下关联会话最早讨论了什么，附原消息来源。")
+    await mainChat.locator('button[type="submit"]').last().click()
+    await mainChat.getByText(/LINK_HISTORY_FOUND/).waitFor({ timeout: 90000 })
+    await waitForBotAppState(
+      page,
+      async () =>
+        !(await (window as any).api.bots.snapshot()).tasks.some((t: any) =>
+          ["queued", "running", "waiting_user"].includes(t.state)
+        )
+    )
+    assert.equal(
+      await page.evaluate(
+        async (id) =>
+          (await (window as any).api.bots.snapshot()).tasks.filter((t: any) => t.workId === id)
+            .length,
+        linked.work.id
+      ),
+      beforeHistory,
+      "history queries must not dispatch task execution"
+    )
+    await mainChat.locator("[data-bot-history-sources]").first().waitFor()
+    await page.screenshot({
+      path: join(out, "artifacts", "bot-history-main-sources.png"),
+      fullPage: true
+    })
+    const sourceReference = await page.evaluate(async (id) => {
+      const messages = await (window as any).api.threads.getMessages(id)
+      for (const message of messages) {
+        if (message.role !== "tool" || typeof message.content !== "string") continue
+        try {
+          const value = JSON.parse(message.content)
+          if (value.operation === "bot_work_read") return value.receipt.entries[0].source
+        } catch {
+          /* unrelated tool payload */
+        }
+      }
+      throw new Error("missing source receipt")
+    }, setup.bot.threadId)
+    await mainChat.getByRole("button", { name: "查看原消息", exact: true }).click()
+    await chat().waitFor()
+    const sourceMessage = chat().getByText("LINK_INITIAL：先在普通对话讨论。", { exact: true })
+    await sourceMessage.waitFor()
+    await page.waitForFunction((id) => {
+      const root = document.querySelector(`[data-chat-thread-id="${id}"]`)
+      const rows = Array.from(root?.querySelectorAll("[data-chat-message-id]") ?? [])
+      const source = rows.find((row) =>
+        row.textContent?.includes("LINK_INITIAL：先在普通对话讨论。")
+      )
+      const viewport = root?.querySelector("[data-radix-scroll-area-viewport]")
+      if (!source || !viewport) return false
+      const a = source.getBoundingClientRect(),
+        b = viewport.getBoundingClientRect()
+      return a.top >= b.top - 10 && a.top < b.bottom
+    }, threadId)
+    await page.screenshot({
+      path: join(out, "artifacts", "bot-history-source-reveal.png"),
+      fullPage: true
+    })
+    console.log(
+      "stage: association notice -> model history search/read -> exact source reveal without task execution"
+    )
     await page.getByRole("tab", { name: "资料库", exact: true }).click()
     await page
       .getByRole("button", { name: /existing.md/ })
@@ -445,10 +573,14 @@ async function main() {
     await chat()
       .getByText(/LINK_DETAIL_THOUGHT/)
       .waitFor()
-    const fileCall = chat().getByText(/读取文件.*existing\.md/).first()
+    const fileCall = chat()
+      .getByText(/读取文件.*existing\.md/)
+      .first()
     await fileCall.waitFor()
     await fileCall.click()
-    await chat().getByText(/Original workspace content/).waitFor()
+    await chat()
+      .getByText(/Original workspace content/)
+      .waitFor()
     await page.screenshot({
       path: join(out, "artifacts", "linked-task-execution-details.png"),
       fullPage: true
@@ -533,6 +665,18 @@ async function main() {
       ),
       null
     )
+    const stale = await page.evaluate(
+      async ({ botId, source }) => {
+        try {
+          await (window as any).api.bots.works.resolveSource(botId, source)
+          return "unexpected success"
+        } catch (error) {
+          return String(error)
+        }
+      },
+      { botId: setup.bot.id, source: sourceReference }
+    )
+    assert.notEqual(stale, "unexpected success", "an old source cannot reopen an unlinked task")
     await send("LINK_UNLINKED：解除后继续普通对话。")
     await page
       .getByText(/LINK_UNLINKED_REPLY/)

@@ -336,6 +336,24 @@ export function registerBotHandlers(
       return hostFor(hostId).markWorksRead(botIdentifier(botId), version)
     }
   )
+  ipcMain.handle("bots:work:associations", (event, hostId, botId) =>
+    mockDesktop(event, hostId).associatedWorks(botIdentifier(botId))
+  )
+  ipcMain.handle("bots:work:source", (event, hostId, botId, source) => {
+    if (
+      !source ||
+      typeof source !== "object" ||
+      ["workId", "messageId", "incarnation"].some(
+        (key) => typeof source[key] !== "string" || !source[key] || source[key].length > 512
+      )
+    )
+      throw new BotError("INVALID_INPUT", "历史来源无效")
+    return mockDesktop(event, hostId).resolveWorkHistorySource(botIdentifier(botId), {
+      workId: botIdentifier(source.workId),
+      messageId: source.messageId,
+      incarnation: source.incarnation
+    })
+  })
   ipcMain.handle("bots:work:get", (_event, hostId: unknown, botId: unknown, workId: unknown) =>
     hostFor(hostId).getWork(botIdentifier(botId), botIdentifier(workId))
   )

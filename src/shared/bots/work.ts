@@ -62,6 +62,9 @@ export interface BotWorkPage {
   nextCursor: string | null
 }
 export interface BotWorkClient {
+  associations?(botId: string): Promise<{ items: import("./work-history").BotWorkAssociation[]; hasMore: boolean }>
+  resolveSource?(botId: string, source: import("./work-history").BotWorkHistorySource): Promise<{ threadId: string; messageId: string; ordinal: number }>
+
   list(botId: string, cursor?: string, query?: string): Promise<BotWorkPage>
   get(botId: string, workId: string): Promise<BotWorkItem>
   markAllRead(botId: string, throughVersion: number): Promise<void>

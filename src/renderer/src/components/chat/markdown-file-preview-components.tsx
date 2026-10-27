@@ -1,5 +1,6 @@
 import { isValidElement, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
 import type { Components } from "react-markdown"
+import { ArrowUpRight } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import {
@@ -12,6 +13,7 @@ import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
 import { useThreadStateSelector } from "@/lib/thread-context"
 import type { FileInfo } from "@/types"
 import {
+  ChatHistorySourceContext,
   ChatFilePresentationContext,
   ChatFileWorkspaceContext,
   ChatPresentationContext,
@@ -227,6 +229,7 @@ export function useMarkdownFilePreviewComponents({
 }): Components {
   const botPresentation = useContext(ChatPresentationContext) === "bot"
   const presentFile = useContext(ChatFilePresentationContext)
+  const openHistorySource = useContext(ChatHistorySourceContext)
   const fileWorkspace = useContext(ChatFileWorkspaceContext)
   const threadId = fileWorkspace?.threadId ?? messageThreadId
   // Retain a live author's existing file index; the group event key is not a Runtime thread.
@@ -286,6 +289,22 @@ export function useMarkdownFilePreviewComponents({
           return <span>{children}</span>
         }
 
+        if (href.startsWith("#bot-history/")) {
+          return openHistorySource ? (
+            <button
+              type="button"
+              className="bot-history-citation"
+              data-history-source={href}
+              title="打开原会话并定位这条消息"
+              onClick={() => openHistorySource(href)}
+            >
+              {children}
+              <ArrowUpRight size={12} aria-hidden="true" />
+            </button>
+          ) : (
+            <span>{children}</span>
+          )
+        }
         const relativeBotFile =
           botPresentation &&
           !/^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(href) &&
@@ -372,6 +391,7 @@ export function useMarkdownFilePreviewComponents({
       baseComponents,
       botPresentation,
       presentFile,
+      openHistorySource,
       messageId,
       filePreviewIndex,
       fileWorkspace,

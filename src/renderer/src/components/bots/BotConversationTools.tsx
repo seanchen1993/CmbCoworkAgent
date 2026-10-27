@@ -1,3 +1,8 @@
+import { BotHistorySources } from "./BotHistorySources"
+import { toast } from "sonner"
+import { parseBotWorkHistoryHref } from "../../../../shared/bots/work-history"
+import { botHistoryReceipt } from "@/lib/bot-history-receipt"
+import { useChatSourceNavigation } from "@/lib/chat-source-navigation"
 import {
   useCallback,
   useEffect,
@@ -19,6 +24,7 @@ import type {
 } from "../../../../shared/bots/contracts"
 import { useThreadContext, useThreadStateSelector } from "@/lib/thread-context"
 import {
+  ChatHistorySourceContext,
   ChatPresentationContext,
   ChatReplySourceContext,
   ChatActivityPresentationContext,
@@ -238,6 +244,23 @@ export function BotConversationTools({
   useEffect(() => {
     if (!exchangeId && exchangeTrigger.current?.isConnected) exchangeTrigger.current.focus()
   }, [exchangeId])
+  const openHistorySource = useCallback(
+    (href: string) => {
+      const source = parseBotWorkHistoryHref(href)
+      if (!source || !client.works?.resolveSource || !onOpenWork || groupId) {
+        toast.error("此历史来源暂不可用，请重新查询。")
+        return
+      }
+      void client.works
+        .resolveSource(botId, source)
+        .then((target) => {
+          useChatSourceNavigation.getState().request(target)
+          onOpenWork(source.workId)
+        })
+        .catch((error) => toast.error(error instanceof Error ? error.message : "无法定位原消息"))
+    },
+    [client, botId, onOpenWork, groupId]
+  )
   const presentTool = useCallback(
     (tool: ToolCall, result?: Pick<ToolResult, "content" | "is_error">) => {
       if (!result) {
@@ -281,6 +304,14 @@ export function BotConversationTools({
           <div className="bot-profile-event" role="note" title={profileEvent}>
             {profileEvent}
           </div>
+        )
+      const history = botHistoryReceipt(tool, result)
+      if (history?.entries.length && !groupId)
+        return (
+          <BotHistorySources
+            page={history}
+            onOpen={openHistorySource}
+          />
         )
       const workReceipt = botWorkReceipt(tool, result, botId)
       if (workReceipt && onOpenWork)
@@ -377,6 +408,7 @@ export function BotConversationTools({
       )
     },
     [
+      openHistorySource,
       bots,
       onOpenWork,
       schedules,
@@ -466,7 +498,7 @@ export function BotConversationTools({
     [client, botId, groupId, deliveredReferences]
   )
   return (
-    <>
+    <ChatHistorySourceContext.Provider value={groupId ? null : openHistorySource}>
       <div className="bot-conversation-content" hidden={Boolean(exchangeId)}>
         <ChatToolPresentationContext.Provider value={presentTool}>
           <ChatMessagePresentationContext.Provider value={presentMessage}>
@@ -513,6 +545,6 @@ export function BotConversationTools({
           onClose={() => setExchangeId(null)}
         />
       )}
-    </>
+    </ChatHistorySourceContext.Provider>
   )
 }

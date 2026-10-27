@@ -3537,3 +3537,167 @@ button.bot-inline-mention:focus-visible {
 .bot-private-input { padding: 14px 94px 14px 46px; line-height: 22px; }
 .bot-private-input .bot-group-editor { min-height: 20px; max-height: 176px; padding: 0; }
 .bot-private-input .bot-group-editor[contenteditable="false"] { opacity: .7; }
+/* Conversation associations and citations share the quiet Bot disclosure treatment. */
+.bot-association-notices {
+  margin: 0 24px 8px;
+  font-size: 12px;
+  color: var(--bot-muted, var(--muted-foreground));
+}
+.bot-association-notices summary,
+.bot-history-sources summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 2px;
+  cursor: pointer;
+  list-style: none;
+}
+.bot-association-notices summary::-webkit-details-marker,
+.bot-history-sources summary::-webkit-details-marker {
+  display: none;
+}
+.bot-association-notices summary > svg,
+.bot-history-sources summary > svg,
+.bot-association-list button > svg,
+.bot-history-source-list button > svg {
+  flex-shrink: 0;
+}
+.bot-association-preview {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--bot-text, var(--foreground));
+}
+.bot-association-notices summary > span:not(.bot-association-preview) {
+  flex-shrink: 0;
+}
+.bot-source-count {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.bot-source-chevron {
+  transition: transform 140ms ease;
+}
+.bot-association-notices[open] > summary .bot-source-chevron,
+.bot-history-sources[open] > summary .bot-source-chevron {
+  transform: rotate(90deg);
+}
+.bot-association-notices p {
+  margin: 4px 0 8px 24px;
+}
+.bot-association-list {
+  max-height: 192px;
+  overflow-y: auto;
+  margin-left: 24px;
+}
+.bot-association-list button,
+.bot-history-source-list button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+.bot-association-list button:hover,
+.bot-history-source-list button:hover {
+  background: var(--bot-hover, var(--muted));
+}
+.bot-source-copy {
+  display: block;
+  flex: 1;
+  min-width: 0;
+}
+.bot-association-title,
+.bot-association-goal {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.bot-association-title {
+  color: var(--bot-text, var(--foreground));
+}
+.bot-association-goal {
+  margin-top: 3px;
+}
+.bot-history-sources {
+  width: min(100%, 520px);
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--bot-muted, var(--muted-foreground));
+}
+.bot-history-sources > summary {
+  width: fit-content;
+}
+.bot-history-source-list {
+  max-height: 264px;
+  overflow-y: auto;
+  margin: 4px 0 8px 6px;
+  padding-left: 12px;
+  border-left: 1px solid var(--bot-line, var(--border));
+}
+.bot-history-source-title {
+  margin: 4px 10px;
+  font-weight: 500;
+  color: var(--bot-text, var(--foreground));
+  overflow-wrap: anywhere;
+}
+.bot-history-source-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+.bot-history-source-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+  color: var(--bot-text, var(--foreground));
+}
+.bot-history-sources small {
+  display: block;
+  margin: 4px 0 8px 20px;
+}
+.bot-history-citation {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--bot-muted, var(--muted-foreground));
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.bot-history-citation svg {
+  display: inline;
+  vertical-align: baseline;
+  margin-left: 2px;
+  opacity: 0.65;
+}
+.bot-history-citation:hover {
+  text-decoration-color: currentColor;
+}
+.bot-association-notices summary:hover,
+.bot-history-sources summary:hover {
+  color: var(--bot-text, var(--foreground));
+}
+.bot-association-notices summary:focus-visible,
+.bot-history-sources summary:focus-visible,
+.bot-association-list button:focus-visible,
+.bot-history-source-list button:focus-visible,
+.bot-history-citation:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bot-source-chevron {
+    transition: none;
+  }
+}

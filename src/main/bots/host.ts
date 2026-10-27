@@ -1,3 +1,8 @@
+import type {
+  BotWorkHistoryInput,
+  BotWorkHistoryPort,
+  BotWorkHistorySource
+} from "../../shared/bots/work-history"
 import { AsyncResource } from "node:async_hooks"
 import {
   botWorkBrowserScope,
@@ -73,6 +78,7 @@ export interface BotRunLease {
 }
 
 export interface BotRunPort {
+  workHistory?: BotWorkHistoryPort
   browser?: boolean
   workspaces?: BotWorkWorkspacePort
   /** Existing workflow/coordinator managers remain authoritative, including durable pending results. */
@@ -370,6 +376,33 @@ export class LocalBotHost {
       query,
       task.mockSource?.audienceKey ?? "desktop"
     )
+  }
+  associatedWorks(botId: string) {
+    this.getBot(botId)
+    return this.store.associatedWorks(botId)
+  }
+  private historyTarget(taskId: string, workId: string) {
+    const task = this.workToolSource(taskId)
+    const work = this.getWork(task.botId, workId)
+    if (task.mockSource || work.source || work.audienceKey !== "desktop")
+      throw new BotError("CONFLICT", "渠道会话不能读取本机私有历史")
+    return work
+  }
+  async workHistory(taskId: string, input: BotWorkHistoryInput) {
+    if (!this.runtime.workHistory) throw new BotError("CONFLICT", "此主机暂不支持历史查询")
+    const work = this.historyTarget(taskId, input.workId)
+    const result = await this.runtime.workHistory.query(work, input)
+    this.historyTarget(taskId, input.workId)
+    return result
+  }
+  async resolveWorkHistorySource(botId: string, source: BotWorkHistorySource) {
+    if (!this.runtime.workHistory) throw new BotError("CONFLICT", "此主机暂不支持历史定位")
+    const work = this.getWork(botId, source.workId)
+    if (work.source || work.audienceKey !== "desktop")
+      throw new BotError("CONFLICT", "不是本机私有任务")
+    const result = await this.runtime.workHistory.resolve(work, source)
+    this.getWork(botId, source.workId)
+    return result
   }
   /** Main-process authenticated IM adapter only; not exposed as a renderer injection API. */
   get imChannel() {

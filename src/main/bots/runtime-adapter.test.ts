@@ -261,6 +261,7 @@ function port(linked?: BotWorkItem, mock?: BotMockExecution) {
         continuationFiles: fixture.continuationFiles,
         continuationCommandResults: fixture.commandResults,
         stoppedTaskContext: fixture.stoppedTasks,
+        associatedWorks: () => ({ items: [], hasMore: false }),
         publishGroupFiles: fixture.publishFiles,
         publishGroupMessage: fixture.publishMessage,
         groupMessages: fixture.groupMessages,

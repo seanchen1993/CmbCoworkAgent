@@ -37,6 +37,8 @@ export const localBotsApi: BotClient = {
       ipcRenderer.invoke("bots:mock:history", LOCAL_BOT_HOST_ID, botId, id, before)
   },
   works: {
+    associations: (botId) => ipcRenderer.invoke("bots:work:associations", LOCAL_BOT_HOST_ID, botId),
+    resolveSource: (botId, source) => ipcRenderer.invoke("bots:work:source", LOCAL_BOT_HOST_ID, botId, source),
     markAllRead: (botId, version) =>
       ipcRenderer.invoke("bots:work:mark-all-read", LOCAL_BOT_HOST_ID, botId, version),
     summaries: (botId, workIds) =>

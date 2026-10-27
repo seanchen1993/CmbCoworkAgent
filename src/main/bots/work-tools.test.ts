@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
-import { LocalBotHost } from "./host"
+import { LocalBotHost, type BotRunPort } from "./host"
 import { createBotWorkTools } from "./work-tools"
 import type { BotTaskOrigin } from "../../shared/bots/contracts"
 import { filterTaskSubagentTools } from "../agent/runtime-tool-catalog"
@@ -13,7 +13,7 @@ afterEach(async () => {
   await Promise.all(hosts.splice(0).map((h) => h.stop()))
   dbs.splice(0).forEach((d) => d.close())
 })
-function fixture() {
+function fixture(history?: BotRunPort["workHistory"]) {
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
   dbs.push(db)
   const store = new BotStore(db),
@@ -24,6 +24,7 @@ function fixture() {
       modelRef: null
     })
   const host = new LocalBotHost(store, {
+    workHistory: history,
     onAvailable: () => () => {},
     acquire: () => ({
       release() {},
@@ -51,6 +52,8 @@ describe("work Runtime tools", () => {
     const args: Record<string, object> = {
       bot_work_projects: { query: "Project" },
       bot_work_list: {},
+      bot_work_search: { workId: "missing", query: "history" },
+      bot_work_read: { workId: "missing" },
       bot_work_create: { requestKey: "child", title: "Child work", goal: "Persistent side effect" },
       bot_work_send: { requestKey: "child", workId: "missing", message: "side effect" },
       bot_work_complete: { requestKey: "child", workId: "missing", expectedVersion: 1 },
@@ -66,6 +69,73 @@ describe("work Runtime tools", () => {
     }
     expect(f.store.listWorks(f.bot.id).items).toEqual([])
     expect(f.store.recentTasks()).toHaveLength(1)
+  })
+  it("reads only owned tasks under the live source lease, without enqueueing work", async () => {
+    let queries = 0
+    const f = fixture({
+      query: async (work) => {
+        queries++
+        return {
+          work: { id: work.id, title: work.title, goal: work.goal },
+          entries: [],
+          nextCursor: null,
+          scanned: 0,
+          truncated: false,
+          coverage: "exhausted"
+        }
+      },
+      resolve: async () => {
+        throw new Error("unused")
+      }
+    })
+    await tick()
+    const linked = f.store.conversations.prepare({
+      botId: f.bot.id,
+      operationId: "linked",
+      title: "Original",
+      goal: "Read only",
+      conversation: {
+        kind: "local_thread",
+        threadId: "existing",
+        incarnation: { token: "original", legacyCreatedAt: 1 }
+      }
+    })
+    f.store.conversations.bound(f.bot.id, linked.id, linked.conversation!.ref)
+    const read = createBotWorkTools(f.source, () => f.host, new AbortController().signal).find(
+      (tool) => tool.name === "bot_work_read"
+    )!
+    const before = f.store.recentTasks().length
+    const result = await read.invoke({
+      type: "tool_call",
+      id: "read-history",
+      name: read.name,
+      args: { workId: linked.id }
+    })
+    expect(JSON.stringify(result)).toContain("bot-work-receipt")
+    expect(queries).toBe(1)
+    expect(f.store.recentTasks()).toHaveLength(before)
+    const stranger = f.store.create({
+      name: "Other",
+      instructions: "Other",
+      color: "#ea2845",
+      modelRef: null
+    })
+    const other = f.store.conversations.prepare({
+      botId: stranger.id,
+      operationId: "stranger",
+      title: "Other",
+      goal: "Private",
+      conversation: {
+        kind: "local_thread",
+        threadId: "other",
+        incarnation: { token: "other", legacyCreatedAt: 2 }
+      }
+    })
+    await expect(f.host.workHistory(f.source.id, { workId: other.id })).rejects.toThrow()
+    expect(queries).toBe(1)
+    await f.host.stop()
+    await expect(f.host.workHistory(f.source.id, { workId: linked.id })).rejects.toThrow()
+    expect(queries).toBe(1)
   })
   it("forwards a live main user's instruction once, including a lost tool reply replay", async () => {
     const f = fixture()

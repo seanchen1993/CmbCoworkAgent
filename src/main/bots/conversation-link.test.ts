@@ -91,6 +91,13 @@ describe("local conversation ownership journal", () => {
     let db = new NativeSqliteAdapter(new DatabaseSync(path))
     try {
       let store = new BotStore(db)
+      const plan = db.exec(`EXPLAIN QUERY PLAN SELECT id,title,substr(goal,1,1200),created_at FROM bot_work_items INDEXED BY bot_work_association_notice
+        WHERE bot_id='owner' AND detached=0 AND audience_key='desktop'
+          AND json_extract(conversation_json,'$.origin')='existing'
+          AND json_extract(conversation_json,'$.state')='bound'
+        ORDER BY ordinal DESC LIMIT 9`)
+      expect(JSON.stringify(plan)).toContain("bot_work_association_notice")
+      expect(JSON.stringify(plan)).not.toContain("TEMP B-TREE")
       const bot = store.create({
         name: "Owner",
         instructions: "Keep role",
@@ -110,6 +117,7 @@ describe("local conversation ownership journal", () => {
       }
       const work = store.conversations.prepare(input)
       expect(work.conversation?.state).toBe("preparing")
+      expect(store.associatedWorks(bot.id).items).toEqual([])
       expect(store.recentTasks()).toHaveLength(0)
       expect(() =>
         store.enqueue({
@@ -127,6 +135,8 @@ describe("local conversation ownership journal", () => {
         "其他内容"
       )
       store.conversations.bound(bot.id, work.id, input.conversation)
+      store.conversations.bound(bot.id, work.id, input.conversation)
+      expect(store.associatedWorks(bot.id).items).toEqual([{ workId: work.id, title: input.title, goal: input.goal, createdAt: work.createdAt }])
       const task = store.enqueue({
         botId: bot.id,
         workId: work.id,
@@ -141,6 +151,7 @@ describe("local conversation ownership journal", () => {
       store.conversations.beginDetach(bot.id, work.id, store.getWork(bot.id, work.id).version)
       store.conversations.detached(bot.id, work.id)
       expect(store.listWorks(bot.id).items).toHaveLength(0)
+      expect(store.associatedWorks(bot.id).items).toEqual([])
       expect(() => store.conversations.prepare(input)).toThrow("旧操作")
       expect(() => store.conversations.bound(bot.id, work.id, input.conversation)).toThrow()
       const another = store.conversations.prepare({ ...input, operationId: "link-two" })

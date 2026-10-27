@@ -22,6 +22,32 @@ const result = (id: string, is_error = false, content = "done"): Message => ({
 })
 
 describe("Bot execution presentation", () => {
+  it("keeps usable history sources visible and folds empty search results", () => {
+    const message = call("history", "bot_work_search")
+    const source = { workId: "work-id", messageId: "message-id", incarnation: "a".repeat(64) }
+    const entry = {
+      source,
+      href: `#bot-history/${source.workId}/${source.messageId}/${source.incarnation}`,
+      text: "Final decision",
+      role: "user",
+      createdAt: created_at.getTime(),
+      ordinal: 1,
+      truncated: false
+    }
+    for (const entries of [[], [entry]]) {
+      const returned = result("history", false, JSON.stringify({
+        kind: "bot-work-receipt",
+        operation: "bot_work_search",
+        receipt: {
+          work: { id: source.workId, title: "Planning", goal: "Review" },
+          entries, nextCursor: null, scanned: 1, truncated: false, coverage: "exhausted"
+        }
+      }))
+      const projection = projectBotExecution([message, returned], false, new Set())
+      expect(projection.foldedTools.size).toBe(entries.length ? 0 : 1)
+      expect(projection.hiddenMessages.has(message.id)).toBe(entries.length === 0)
+    }
+  })
   it.each([
     ["bot_request_browser_help", {}],
     ["bot_browser", { action: "request_help" }]

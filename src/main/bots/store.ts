@@ -354,6 +354,13 @@ export class BotStore {
       )
       db.run("CREATE INDEX IF NOT EXISTS bot_tasks_updated ON bot_tasks(updated_at,id)")
       upgradeWorkConversationSchema(db)
+      // The main Bot reads a tiny recent-link notice every turn, even when most works
+      // are unlinked/generated. Avoid scanning that entire Bot's task directory.
+      db.run(`CREATE INDEX IF NOT EXISTS bot_work_association_notice
+        ON bot_work_items(bot_id, ordinal DESC)
+        WHERE detached=0 AND audience_key='desktop'
+          AND json_extract(conversation_json,'$.origin')='existing'
+          AND json_extract(conversation_json,'$.state')='bound'`)
       if (!this.rows("PRAGMA table_info(bot_work_items)").some((c) => c.name === "workspace_json"))
         db.run("ALTER TABLE bot_work_items ADD COLUMN workspace_json TEXT")
       // Conversation references outlive disposable execution records. Payload stays in the Runtime
@@ -726,6 +733,29 @@ export class BotStore {
     )
     if (rows.length !== workIds.length) throw new BotError("NOT_FOUND", "工作摘要不属于当前 Bot")
     return rows.map((row) => this.workSummary(row))
+  }
+  /** The durable binding itself is the notice; replaying a link never duplicates it. */
+  associatedWorks(botId: string) {
+    this.getBot(botId)
+    const rows = this.rows(
+      `SELECT id,title,substr(goal,1,1200) AS goal,created_at FROM bot_work_items INDEXED BY bot_work_association_notice
+       WHERE bot_id=? AND detached=0 AND audience_key='desktop'
+         AND json_extract(conversation_json,'$.origin')='existing'
+         AND json_extract(conversation_json,'$.state')='bound'
+       ORDER BY ordinal DESC LIMIT 9`,
+      [botId]
+    )
+    return {
+      items: rows
+        .slice(0, 8)
+        .map((r) => ({
+          workId: String(r.id),
+          title: String(r.title),
+          goal: String(r.goal),
+          createdAt: Number(r.created_at)
+        })),
+      hasMore: rows.length > 8
+    }
   }
   listWorks(botId: string, cursor?: string, query = "", audience?: string): BotWorkPage {
     this.getBot(botId)

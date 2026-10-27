@@ -1,3 +1,4 @@
+import { botHistoryReceipt } from "./bot-history-receipt"
 import type { Message, ToolCall, ToolCallState, ToolResult } from "@/types"
 import { buildToolResultAssociations, getWorkerToolUiKey } from "./worker-tool-result-key"
 import { splitBotInlineReasoning } from "./bot-inline-reasoning"
@@ -30,6 +31,7 @@ export function isBotExecutionTool(
     botBrowserHelpHistory(tool, result) ||
     botProfileEvent(tool, result) ||
     parseBotWorkReceipt(tool, result) ||
+    botHistoryReceipt(tool, result)?.entries.length ||
     (schedule && schedule.action !== "list") ||
     (tool.name === "bot_deliver_files" && parseBotFileDelivery(result.content)) ||
     delegatedTaskReceipt(tool, result)

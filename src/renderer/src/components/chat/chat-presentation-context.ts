@@ -61,3 +61,6 @@ export const ChatFileWorkspaceContext = createContext<{
 
 /** Optional hidden rows for verified quiet background turns; underlying messages remain intact. */
 export const ChatMessageVisibilityContext = createContext<ReadonlySet<string>>(new Set())
+
+/** Validated, local task-history navigation; absent for ordinary links and external channels. */
+export const ChatHistorySourceContext = createContext<((href: string) => void) | null>(null)
