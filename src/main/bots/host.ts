@@ -180,8 +180,15 @@ export class LocalBotHost {
     if (id.startsWith("work-")) {
       const [workId, botId, extra] = id.slice(5).split("--")
       if (!workId || !botId || extra) throw new BotError("INVALID_INPUT", "工作浏览器目标无效")
-      if (this.getWork(botId, workId).source)
+      const source = this.getWork(botId, workId).source
+      if (source && source.transport !== "im")
         throw new BotError("CONFLICT", "模拟渠道不开放本机浏览器")
+    } else if (id.startsWith("im-")) {
+      const [bindingId, botId, extra] = id.slice(3).split("--")
+      const binding = this.imGateway.binding(bindingId)
+      if (!bindingId || !botId || extra || !binding || binding.binding.botId !== botId)
+        throw new BotError("INVALID_INPUT", "群浏览器目标无效")
+      this.getBot(botId)
     } else if (id.startsWith("group-")) {
       const [groupId, memberId, extra] = id.slice(6).split("--")
       if (!memberId || extra) throw new BotError("INVALID_INPUT", "请选择要查看的群成员浏览器")
@@ -410,7 +417,10 @@ export class LocalBotHost {
   private historyTarget(taskId: string, workId: string) {
     const task = this.workToolSource(taskId)
     const work = this.getWork(task.botId, workId)
-    if (task.mockSource || work.source || work.audienceKey !== "desktop")
+    if (
+      (task.mockSource && task.mockSource.transport !== "im") ||
+      work.audienceKey !== (task.mockSource?.audienceKey ?? "desktop")
+    )
       throw new BotError("CONFLICT", "渠道会话不能读取本机私有历史")
     return work
   }
@@ -424,8 +434,8 @@ export class LocalBotHost {
   async resolveWorkHistorySource(botId: string, source: BotWorkHistorySource) {
     if (!this.runtime.workHistory) throw new BotError("CONFLICT", "此主机暂不支持历史定位")
     const work = this.getWork(botId, source.workId)
-    if (work.source || work.audienceKey !== "desktop")
-      throw new BotError("CONFLICT", "不是本机私有任务")
+    if (work.source && work.source.transport !== "im")
+      throw new BotError("CONFLICT", "不是本机或 IM 任务")
     const result = await this.runtime.workHistory.resolve(work, source)
     this.getWork(botId, source.workId)
     return result
@@ -511,9 +521,10 @@ export class LocalBotHost {
     if (existing) return existing
     if (input.workspace && !this.runtime.workspaces)
       throw new BotError("CONFLICT", "当前主机不支持选择任务工作目录")
-    const workspace = task?.mockSource
-      ? undefined
-      : await this.runtime.workspaces?.resolve(input.botId, input.workspace)
+    const workspace =
+      task?.mockSource && task.mockSource.transport !== "im"
+        ? undefined
+        : await this.runtime.workspaces?.resolve(input.botId, input.workspace)
     this.requireRunning()
     if (source) this.workToolSource(source.taskId)
     const receipt = this.store.createWork(input, source, workspace)
@@ -524,7 +535,11 @@ export class LocalBotHost {
   async workProjects(taskId: string, query: string, cursor?: number) {
     const validate = () => {
       const task = this.workToolSource(taskId)
-      if (task.mockSource || task.workId || !this.store.hasWorkUserRequest(task.id))
+      if (
+        (task.mockSource && task.mockSource.transport !== "im") ||
+        task.workId ||
+        !this.store.hasWorkUserRequest(task.id)
+      )
         throw new BotError("CONFLICT", "只能在本机主对话的当前用户交办中查找项目")
     }
     validate()
@@ -755,14 +770,15 @@ export class LocalBotHost {
   saveSchedule(
     botId: string,
     input: BotScheduleInput,
-    existing?: { id: string; version: number }
+    existing?: { id: string; version: number },
+    sourceTaskId?: string
   ): BotSchedule {
     this.requireRunning()
     if (!this.nextSchedule) throw new BotError("CONFLICT", "此主机未启用例行任务")
     if (input.enabled && input.frequency === "once" && Date.parse(input.runAt ?? "") <= Date.now())
       throw new BotError("INVALID_INPUT", "执行时间必须在未来")
     const next = input.enabled ? this.nextSchedule(input, new Date()) : null
-    const schedule = this.store.saveSchedule(botId, input, next, existing)
+    const schedule = this.store.saveSchedule(botId, input, next, existing, sourceTaskId)
     this.changed()
     this.armSchedules()
     return schedule
@@ -920,7 +936,11 @@ export class LocalBotHost {
     const work = this.store.workForThread(botId, threadId)
     // A late result remains in the original manager's history. It cannot reopen or run a closed work.
     if (work?.state === "completed") return
-    const expectedThread = work?.threadId ?? (groupId ? `group-${groupId}-${botId}` : bot.threadId)
+    const imParent = this.store.imThreadSource(botId, threadId)
+    if (imParent?.mockSource)
+      this.store.im.validateSource(imParent.mockSource, this.store.im.continuationOwner(imParent))
+    const expectedThread =
+      work?.threadId ?? imParent?.threadId ?? (groupId ? `group-${groupId}-${botId}` : bot.threadId)
     if (threadId !== expectedThread) throw new BotError("CONFLICT", "后台通知不属于此 Bot 会话")
     if (groupId) {
       const group = this.store.getGroup(groupId)
@@ -946,10 +966,12 @@ export class LocalBotHost {
       {
         kind: "notification",
         notificationKind: kind,
+        ...(imParent ? { sourceTaskId: imParent.id } : {}),
         key,
         ...(groupId ? { groupId } : {}),
         ...(runStartedAt ? { runStartedAt } : {})
-      }
+      },
+      imParent?.mockSource
     )
     this.changed()
     this.wake()

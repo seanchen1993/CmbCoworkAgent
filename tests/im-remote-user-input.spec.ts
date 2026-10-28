@@ -1,3 +1,4 @@
+import { botInteractionRoutes } from "../src/main/services/im/bot-interaction-route"
 import assert from "node:assert/strict"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -112,7 +113,12 @@ async function createContext(
   const cardSends = {
     accept: true,
     sent: 0,
-    cards: [] as Array<{ tag: string; json: string }>,
+    cards: [] as Array<{
+      tag: string
+      json: string
+      botEventId?: string
+      conversationKey?: string
+    }>,
     /** When set, a send stays in flight until it resolves. */
     hold: null as Promise<void> | null
   }
@@ -123,9 +129,19 @@ async function createContext(
     usesTextReplies: (conversationKey) => conversations.getReplyMode(conversationKey) === "text",
     gateway: {
       isAuthenticated: () => true,
-      sendCard: async (card: { tag: string; content: unknown }) => {
+      sendCard: async (card: {
+        tag: string
+        content: unknown
+        botEventId?: string
+        conversationKey?: string
+      }) => {
         cardSends.sent += 1
-        cardSends.cards.push({ tag: card.tag, json: JSON.stringify(card.content) })
+        cardSends.cards.push({
+          tag: card.tag,
+          json: JSON.stringify(card.content),
+          botEventId: card.botEventId,
+          conversationKey: card.conversationKey
+        })
         if (cardSends.hold) await cardSends.hold
         return cardSends.accept
           ? ({ state: "accepted" } as const)
@@ -725,7 +741,80 @@ async function testASwitchDuringTheCardSendStillHandsTheQuestionOver(): Promise<
   }
 }
 
+async function testBotGroupCardRoundtripAndRouteRevocation(): Promise<void> {
+  const context = await createContext()
+  let active = true
+  const disconnect = botInteractionRoutes.setTransport(() => true)
+  const detach = botInteractionRoutes.register({
+    realm: "gateway-a",
+    principalId: ROUTE.principalId,
+    conversationKey: "bot-group",
+    kind: "group",
+    threadId: "thread-1",
+    prefix: "【群任务】",
+    botEventId: "source-event",
+    senderId: "requester",
+    isCurrent: () => active
+  })
+  try {
+    const request = userInputRequest({ requestId: "bot-question" })
+    await context.publish(request)
+    assert.equal(context.cardSends.cards[0].botEventId, "source-event")
+    assert.equal(context.cardSends.cards[0].conversationKey, "bot-group")
+    assert.match(await context.service.resolveAnswer({ ...ROUTE, argument: "A1B2C3 1" }), /不属于/)
+    assert.match(
+      await context.service.resolveAnswer({
+        ...ROUTE,
+        conversationKey: "bot-group",
+        botSenderId: "other",
+        argument: "A1B2C3 1"
+      }),
+      /群成员/
+    )
+    assert.equal(context.responses.length, 0)
+    assert.match(
+      await context.service.resolveCardAnswers({
+        ...ROUTE,
+        conversationKey: "bot-group",
+        requestId: request.requestId,
+        feedback: [{ key: "q0", value: "1" }]
+      }),
+      /已从招乎提交/
+    )
+    assert.equal(context.responses.length, 1)
+    assert.match(
+      await context.service.resolveCardAnswers({
+        ...ROUTE,
+        conversationKey: "bot-group",
+        requestId: request.requestId,
+        feedback: []
+      }),
+      /不存在|不再/
+    )
+    assert.equal(context.responses.length, 1)
+    await context.publish(userInputRequest({ requestId: "bot-question-revoked" }))
+    active = false
+    assert.match(
+      await context.service.resolveAnswer({
+        ...ROUTE,
+        conversationKey: "bot-group",
+        botSenderId: "requester",
+        argument: "D4E5F6 1"
+      }),
+      /连接已变化/
+    )
+    assert.equal(context.responses.length, 1)
+  } finally {
+    detach()
+    disconnect()
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function main(): Promise<void> {
+  await testBotGroupCardRoundtripAndRouteRevocation()
   await testAHeldBackQuestionIsResentOnceAsText()
   await testAnAnsweredQuestionIsNotResent()
   await testAQuestionBeingAnsweredIsNotResent()

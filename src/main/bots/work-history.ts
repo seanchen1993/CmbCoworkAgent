@@ -30,8 +30,9 @@ export function createLocalBotWorkHistory(getHost: () => LocalBotHost): BotWorkH
     const row = getThreadCore(current.threadId)
     if (
       !row ||
-      current.source ||
-      current.audienceKey !== "desktop" ||
+      (current.source && current.source.transport !== "im") ||
+      (!current.source && current.audienceKey !== "desktop") ||
+      current.audienceKey !== work.audienceKey ||
       current.threadId !== work.threadId
     )
       throw invalid()
@@ -44,7 +45,11 @@ export function createLocalBotWorkHistory(getHost: () => LocalBotHost): BotWorkH
       metadata.botWorkId !== work.id ||
       metadata.botHostId !== "local" ||
       metadata.botGroupId != null ||
-      metadata.botMockBindingId != null
+      (metadata.botMockBindingId ?? null) !== (current.source?.bindingId ?? null) ||
+      (current.source &&
+        (metadata.botMockConversationId !== current.source.conversationId ||
+          metadata.botMockGrantVersion !== current.source.grantVersion ||
+          metadata.botAudienceKey !== current.audienceKey))
     )
       throw invalid()
     const incarnation = createHash("sha256")

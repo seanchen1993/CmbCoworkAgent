@@ -1,3 +1,4 @@
+import { botInteractionRoutes } from "../services/im/bot-interaction-route"
 import { describe, expect, it, vi, beforeEach } from "vitest"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
@@ -239,11 +240,16 @@ const task: BotTask = {
   updatedAt: 1,
   origin: { kind: "user" }
 }
-function port(linked?: BotWorkItem, mock?: BotMockExecution) {
+function port(
+  linked?: BotWorkItem,
+  mock?: BotMockExecution,
+  imGateway?: LocalBotHost["imGateway"]
+) {
   return createLocalBotRunPort(
     { editVersion: () => 7, forPrompt: fixture.memorySnapshot } as unknown as BotMemoryService,
     () =>
       ({
+        imGateway,
         getBot: fixture.getBot,
         getGroupReference: fixture.groupReference,
         workToolSource: fixture.workToolSource,
@@ -657,7 +663,90 @@ describe("Bot Runtime integration", () => {
       expect(fixture.start.mock.calls[0][2].checkFinalDelivery).toBeUndefined()
     }
   )
-  it("runs owner IM on the native main thread with text-only capabilities, then preserves desktop capabilities", async () => {
+  it("upgrades a legacy IM group task in place and retains its selected directory", async () => {
+    const source: BotMockExecution["source"] = {
+      transport: "im",
+      bindingId: "group-binding",
+      grantVersion: 1,
+      conversationId: "group-thread",
+      audienceKey: "im-group",
+      eventId: "event",
+      messageId: "message",
+      senderId: "member"
+    }
+    const work: BotWorkItem = {
+      id: "group-work",
+      botId: bot.id,
+      threadId: "group-work-thread",
+      parentThreadId: "group-thread",
+      title: "Review",
+      goal: "Review git",
+      audienceKey: source.audienceKey,
+      source,
+      state: "active",
+      version: 1,
+      threadInitialized: true,
+      createdAt: 1,
+      updatedAt: 1,
+      executionState: null,
+      pendingPeers: 0,
+      backgroundBusy: false,
+      workspace: { kind: "directory", path: "/synthetic/repo" }
+    }
+    const old = {
+      ...metadata(),
+      botWorkId: work.id,
+      botMockBindingId: source.bindingId,
+      botMockGrantVersion: 1,
+      botMockConversationId: source.conversationId,
+      botAudienceKey: source.audienceKey,
+      workspacePath: work.workspace!.path,
+      agentMode: "normal",
+      disableAgentsPrompt: true,
+      allowedSkills: [],
+      allowedExperts: []
+    }
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(old) })
+    const incoming = {
+      ...task,
+      threadId: work.threadId,
+      workId: work.id,
+      mockSource: source,
+      origin: { kind: "work" as const, sourceTaskId: "group-parent" }
+    }
+    const lease = port(work, {
+      source,
+      threadId: work.threadId,
+      threadInitialized: true,
+      label: "Group"
+    }).acquire(bot, incoming, work)!
+    await lease.execute(new AbortController().signal, vi.fn())
+    const updated = JSON.parse(fixture.update.mock.calls[0][1].metadata)
+    expect(updated).toMatchObject({
+      botMockTransport: "im",
+      workspacePath: "/synthetic/repo",
+      botAudienceKey: "im-group"
+    })
+    expect(updated.allowedSkills).toBeUndefined()
+    expect(updated.disableAgentsPrompt).toBeUndefined()
+    expect(fixture.create).not.toHaveBeenCalled()
+    const context = fixture.start.mock.calls[0][2]
+    expect(context.remotePolicy).toEqual({ disableScheduler: true })
+    expect(context.additionalTools).toContain("owned-browser")
+    expect(context.extraSystemPrompt).not.toContain("No files, shell")
+    expect(
+      context.verifyResolvedThread({ metadata: updated, workspacePath: work.workspace!.path })
+    ).toBeNull()
+    expect(
+      context.verifyResolvedThread({
+        metadata: { ...updated, botMockBindingId: "other" },
+        workspacePath: work.workspace!.path
+      })
+    ).not.toBeNull()
+    lease.release()
+  })
+
+  it("runs owner IM with local capabilities and preserves the native main thread", async () => {
     const source = {
       transport: "im" as const,
       personal: true as const,
@@ -686,29 +775,18 @@ describe("Bot Runtime integration", () => {
     })
     lease.release()
     const [request, , context] = fixture.start.mock.calls[0]
-    expect(request).toMatchObject({ threadId: bot.threadId, agentMode: "normal" })
+    expect(request).toMatchObject({ threadId: bot.threadId, agentMode: "workflow" })
     expect(context.openingReplyReminder).toBe(false)
-    expect(context.remotePolicy).toMatchObject({
-      allowedToolNames: [
-        "bot_work_list",
-        "bot_work_create",
-        "bot_work_send",
-        "bot_work_complete",
-        "bot_work_continue",
-        "bot_memory_search",
-        "bot_memory_list",
-        "bot_memory_get",
-        "bot_remember",
-        "bot_forget"
-      ],
-      allowedSkillNames: [],
-      disableHooks: true,
-      disableSubagents: true,
-      disableMcpTools: true,
-      disableMemoryInjection: true,
-      filesystemAccess: { shellAccess: "none" }
-    })
-    expect(context.additionalTools).toEqual(["works", "scoped-memory"])
+    expect(context.remotePolicy).toEqual({ disableScheduler: true })
+    expect(context.additionalTools).toEqual([
+      "works",
+      "scoped-memory",
+      "delivery",
+      "collaboration",
+      "routine",
+      "own-profile",
+      "owned-browser"
+    ])
     expect(
       context.verifyResolvedThread({
         metadata: metadata(),
@@ -716,7 +794,7 @@ describe("Bot Runtime integration", () => {
       })
     ).toBeNull()
     expect(fixture.memorySnapshot).toHaveBeenCalledWith(bot.id, {})
-    expect(fixture.browserTools).not.toHaveBeenCalled()
+    expect(fixture.browserTools.mock.calls[0][4]).toBe(bot.id)
     expect(fixture.create).not.toHaveBeenCalled()
     expect(JSON.parse(fixture.update.mock.calls[0][1].metadata)).toMatchObject(metadata())
     expect(JSON.parse(fixture.update.mock.calls[0][1].metadata).botMockBindingId).toBeUndefined()
@@ -729,6 +807,60 @@ describe("Bot Runtime integration", () => {
     expect(desktop.remotePolicy).toEqual({ disableScheduler: true })
     expect(fixture.memorySnapshot).toHaveBeenCalled()
     expect(fixture.browserTools).toHaveBeenCalled()
+  })
+
+  it("exposes the existing question tool only with a negotiated, live Bot route", async () => {
+    const source = {
+      transport: "im" as const,
+      personal: true as const,
+      bindingId: "dm",
+      grantVersion: 1,
+      conversationId: "dm-channel",
+      audienceKey: "desktop",
+      eventId: "im-event",
+      messageId: "m",
+      senderId: "owner"
+    }
+    const current = {
+      id: "dm",
+      realm: "realm",
+      principal: "owner",
+      binding: { kind: "dm", state: "active", version: 1, conversationKey: "bot-dm" }
+    }
+    const disconnect = botInteractionRoutes.setTransport(
+      (realm, principal) => realm === "realm" && principal === "owner"
+    )
+    const incoming = {
+      ...task,
+      mockSource: source,
+      origin: { kind: "mock" as const, bindingId: "dm", eventId: "im-event" }
+    }
+    const lease = port(
+      undefined,
+      { source, threadId: bot.threadId, threadInitialized: false, label: "本人" },
+      {
+        binding: () => current,
+        event: () => ({
+          payload: { event: { eventId: "wire-event" }, route: { senderId: "owner" } }
+        })
+      } as unknown as LocalBotHost["imGateway"]
+    ).acquire(bot, incoming)!
+    try {
+      await lease.execute(new AbortController().signal, vi.fn())
+      const context = fixture.start.mock.calls[0][2]
+      expect(context.remotePolicy).toEqual({ disableScheduler: true })
+      expect(context.additionalTools).toContain("owned-browser")
+      expect(botInteractionRoutes.get(task.threadId)).toMatchObject({
+        conversationKey: "bot-dm",
+        botEventId: "wire-event"
+      })
+      current.binding.state = "revoked"
+      expect(botInteractionRoutes.get(task.threadId)).toBeNull()
+    } finally {
+      lease.release()
+      disconnect()
+    }
+    expect(botInteractionRoutes.has(task.threadId)).toBe(false)
   })
 
   it("keeps the personal task workspace and browser scope when switching between IM and desktop", async () => {
@@ -787,9 +919,16 @@ describe("Bot Runtime integration", () => {
     })
     lease.release()
     const remote = fixture.start.mock.calls[0][2]
-    expect(remote.additionalTools).toEqual(["works", "scoped-memory"])
-    expect(remote.remotePolicy.disableMcpTools).toBe(true)
-    expect(fixture.browserTools).not.toHaveBeenCalled()
+    expect(remote.additionalTools).toEqual([
+      "works",
+      "scoped-memory",
+      "delivery",
+      "collaboration",
+      "routine",
+      "owned-browser"
+    ])
+    expect(remote.remotePolicy).toEqual({ disableScheduler: true })
+    expect(fixture.browserTools.mock.calls[0][4]).toBe(`work-${work.id}--${bot.id}`)
     expect(
       remote.verifyResolvedThread({ metadata: nativeMetadata, workspacePath: work.workspace!.path })
     ).toBeNull()

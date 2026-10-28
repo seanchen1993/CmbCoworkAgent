@@ -133,6 +133,10 @@ const memories: any[] = [
   }
 ]
 const client = {
+  browserPreview: async (scope: string) => {
+    f.calls.push(["browser", scope])
+    return { pages: [], pageId: null, image: null, generation: 1, control: "bot" }
+  },
   hostId: "local",
   snapshot: async () => ({
     host: { id: "local", kind: "local", name: "本机", capabilities: {} },

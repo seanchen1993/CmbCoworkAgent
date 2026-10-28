@@ -10,11 +10,14 @@ import {
   UsersRound,
   X
 } from "lucide-react"
+import { parseBotWorkHistoryHref } from "../../../../shared/bots/work-history"
+import { useChatSourceNavigation } from "@/lib/chat-source-navigation"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type {
   BotClient,
   BotDefinition,
+  BotSchedule,
   BotConversationActivity
 } from "../../../../shared/bots/contracts"
 import type { BotImConversation as Conversation } from "../../../../shared/bots/im-channel"
@@ -25,6 +28,10 @@ import { useBotReadState } from "./use-bot-read-state"
 import type { useBotWorks } from "./use-bot-works"
 import type { BotWorkItem } from "../../../../shared/bots/work"
 import { BotWorkPanel } from "./BotWorkPanel"
+import { BotBrowserPanel } from "./BotBrowserPanel"
+import { botImBrowserScope } from "../../../../shared/bots/im-channel"
+import { botWorkBrowserScope } from "../../../../shared/bots/work"
+import { BotSchedulePanel } from "./BotSchedulePanel"
 import { BotMemoryPanel } from "./BotMemoryPanel"
 import "./bot-im-conversation.css"
 
@@ -129,6 +136,21 @@ export function BotImConversation({
   })
   const mounted = useRef(true),
     epoch = useRef(0)
+  const openHistory = async (href: string) => {
+    const source = parseBotWorkHistoryHref(href),
+      currentEpoch = epoch.current
+    if (!source || !client.works?.resolveSource) return
+    try {
+      const work = await client.works.get(bot.id, source.workId)
+      if (work.source?.bindingId !== conversation.id) throw new Error("此来源不属于当前群聊")
+      const target = await client.works.resolveSource(bot.id, source)
+      if (!mounted.current || currentEpoch !== epoch.current) return
+      useChatSourceNavigation.getState().request(target)
+      onWork(work.id)
+    } catch (cause) {
+      if (mounted.current && currentEpoch === epoch.current) setError(botErrorMessage(cause))
+    }
+  }
   const scroll = useRef<HTMLDivElement>(null),
     atBottom = useRef(true)
   const anchor = useRef<{ height: number; top: number } | null>(null)
@@ -332,7 +354,15 @@ export function BotImConversation({
                       remarkPlugins={[remarkGfm]}
                       components={{
                         a: ({ href, children }) =>
-                          href && /^https?:\/\//i.test(href) ? (
+                          href && parseBotWorkHistoryHref(href) ? (
+                            <button
+                              className="bot-im-text-button"
+                              onClick={() => void openHistory(href)}
+                            >
+                              {children}
+                              <ArrowUpRight size={13} />
+                            </button>
+                          ) : href && /^https?:\/\//i.test(href) ? (
                             <a href={href} target="_blank" rel="noreferrer">
                               {children}
                             </a>
@@ -383,6 +413,7 @@ export function BotImConversationDetails({
   onWork,
   controller,
   selectedWork,
+  schedules = [],
   onBack
 }: {
   conversation: Conversation
@@ -395,9 +426,11 @@ export function BotImConversationDetails({
   onWork(id: string): void
   controller: ReturnType<typeof useBotWorks>
   selectedWork: BotWorkItem | null
+  schedules?: BotSchedule[]
   onBack(): void
 }) {
   const [memoryOpen, setMemoryOpen] = useState(false)
+  const [computerOpen, setComputerOpen] = useState(false)
   return (
     <>
       <div className="bot-detail-actions">
@@ -453,6 +486,34 @@ export function BotImConversationDetails({
           groupId={conversation.id}
         />
       )}
+      <div className="bot-im-details-section">
+        <button
+          className="bot-im-text-button"
+          aria-expanded={computerOpen}
+          onClick={() => setComputerOpen(!computerOpen)}
+        >
+          电脑 <ChevronRight size={14} />
+        </button>
+        {computerOpen && (
+          <BotBrowserPanel
+            key={selectedWork?.id ?? conversation.id}
+            client={client}
+            botId={
+              selectedWork
+                ? botWorkBrowserScope(selectedWork.id, bot.id)
+                : botImBrowserScope(conversation.id, bot.id)
+            }
+          />
+        )}
+      </div>
+      <BotSchedulePanel
+        botId={bot.id}
+        client={client}
+        allowCreate={false}
+        schedules={schedules.filter(
+          (item) => item.botId === bot.id && item.audienceKey === `im:${conversation.id}`
+        )}
+      />
       <div className="bot-im-details-section bot-im-connection-section">
         <h3>接入</h3>
         <p>{imConversationStatus(conversation)}</p>

@@ -36,6 +36,8 @@ async function main() {
                 if (
                   [
                     "./BotImConversation",
+                    "./BotBrowserPanel",
+                    "./BotSchedulePanel",
                     "./BotAvatar",
                     "./BotRuntimeAvatar",
                     "./BotStorefrontIcon",
@@ -142,6 +144,14 @@ async function main() {
     )
     assert.equal(await page.locator(".bots-conversation textarea").count(), 0)
     const artifacts = join(process.env.BOT_TEST_APP_OUT!, "artifacts")
+    await page.getByRole("button", { name: "电脑", exact: true }).click()
+    await page.waitForFunction(() =>
+      (window as any).fixture.calls.some(
+        (c: any[]) => c[0] === "browser" && c[1] === "im-group-a--bot"
+      )
+    )
+    await page.screenshot({ animations: "disabled", path: join(artifacts, "bot-im-computer.png") })
+    await page.getByRole("button", { name: "电脑", exact: true }).click()
     await page.screenshot({
       animations: "disabled",
       path: join(artifacts, "bot-im-group-light.png")
@@ -163,6 +173,13 @@ async function main() {
       animations: "disabled",
       path: join(artifacts, "bot-im-task-scope.png")
     })
+    await details.getByRole("button", { name: "电脑", exact: true }).click()
+    await page.waitForFunction(() =>
+      (window as any).fixture.calls.some(
+        (c: any[]) => c[0] === "browser" && c[1] === "work-work-a--bot"
+      )
+    )
+    await details.getByRole("button", { name: "电脑", exact: true }).click()
     await details.getByRole("button", { name: "继续处理", exact: true }).click()
     await details.getByRole("button", { name: "完成任务", exact: true }).waitFor()
     await page.getByRole("button", { name: "← 产品协作群", exact: true }).click()

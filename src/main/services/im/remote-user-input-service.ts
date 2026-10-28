@@ -1,3 +1,4 @@
+import { botInteractionRoutes } from "./bot-interaction-route"
 import { randomBytes } from "node:crypto"
 import { existsSync, realpathSync, statSync } from "node:fs"
 import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
@@ -52,6 +53,9 @@ interface RemoteUserInputRoute {
   conversationKey: string
   threadId: string
   prefix: string
+  botEventId?: string
+  senderId?: string
+  isCurrent?: () => boolean
 }
 
 interface RemoteUserInputSession {
@@ -245,6 +249,7 @@ export class ImRemoteUserInputService {
 
   async resolveAnswer(input: {
     argument: string
+    botSenderId?: string
     principalId: string
     conversationKey: string
   }): Promise<string> {
@@ -264,11 +269,15 @@ export class ImRemoteUserInputService {
       return "该输入短码不属于当前招乎会话。"
     }
 
+    if (session.route.isCurrent && !session.route.isCurrent())
+      return "该问题所属的 Bot 连接已变化，请重新发起。"
     const pending = this.dependencies.getPendingForThread(session.route.threadId)
     if (!pending || pending.requestId !== session.request.requestId) {
       this.removeSession(session.request.requestId)
       return "这项补充输入已在桌面处理或不再有效。"
     }
+    if (session.route.senderId && input.botSenderId !== session.route.senderId)
+      return "请由提出这项问题的群成员回答。"
     const question = session.request.questions[session.questionIndex]
     if (!question) {
       this.removeSession(session.request.requestId)
@@ -388,6 +397,8 @@ export class ImRemoteUserInputService {
     ) {
       return "该表单不属于当前招乎会话。"
     }
+    if (session.route.isCurrent && !session.route.isCurrent())
+      return "该问题所属的 Bot 连接已变化，请重新发起。"
     const pending = this.dependencies.getPendingForThread(session.route.threadId)
     if (!pending || pending.requestId !== session.request.requestId) {
       this.removeSession(session.request.requestId)
@@ -603,6 +614,7 @@ export class ImRemoteUserInputService {
   private async publishCard(session: RemoteUserInputSession): Promise<boolean> {
     const interaction = await this.dependencies.cards.publish({
       kind: "user_input",
+      botEventId: session.route.botEventId,
       threadId: session.route.threadId,
       principalId: session.route.principalId,
       conversationKey: session.route.conversationKey,
@@ -621,6 +633,12 @@ export class ImRemoteUserInputService {
   }
 
   private resolveRoute(threadId: string): RemoteUserInputRoute | null {
+    if (botInteractionRoutes.has(threadId)) {
+      const route = botInteractionRoutes.get(threadId)
+      return route
+        ? { ...route, isCurrent: () => botInteractionRoutes.get(threadId) === route }
+        : null
+    }
     const thread = this.dependencies.getThread(threadId)
     if (!thread) return null
     const parsed = parseStandardThreadMetadata(thread.metadata)

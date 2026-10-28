@@ -1,3 +1,4 @@
+import { submitFormattedImReply } from "./submit-formatted-reply"
 import type { RemoteImReplyFormat, RemoteImReplyV1 } from "../../../shared/im-gateway-contract"
 import { trackEvent } from "../event-reporter"
 import { imEventStore, type ImEventStore, type ImReplyOutboxRecord } from "./event-store"
@@ -141,17 +142,7 @@ export class ImReplyClient {
     record: ImReplyOutboxRecord,
     format: RemoteImReplyFormat
   ): Promise<ImReplySubmissionResult> {
-    if (format === "text") return this.gateway.submitReply(toReply(record, "text"))
-    try {
-      return await this.gateway.submitReply(toReply(record, "markdown"))
-    } catch (error) {
-      if (errorDetails(error).reasonCode !== "INVALID_PAYLOAD") throw error
-      console.warn("[IM] Gateway refused a markdown reply; sending it as text.", {
-        deliveryId: record.deliveryId,
-        segmentIndex: record.segmentIndex
-      })
-      return this.gateway.submitReply(toReply(record, "text"))
-    }
+    return submitFormattedImReply(this.gateway, toReply(record, format))
   }
 
   private async sendOne(

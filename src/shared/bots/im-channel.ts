@@ -170,3 +170,8 @@ export interface BotImClient {
   create(botId: string, kind: "dm" | "group", operationId: string): Promise<BotImBinding>
   revoke(botId: string, bindingId: string, version: number): Promise<BotImBinding>
 }
+
+/** Local binding ID scopes pages to one IM audience; never use the platform group ID. */
+export function botImBrowserScope(bindingId: string, botId: string): string {
+  return `im-${bindingId}--${botId}`
+}

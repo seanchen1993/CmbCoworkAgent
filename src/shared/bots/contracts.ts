@@ -201,6 +201,8 @@ export type BotTaskOrigin =
       /** Captured by the host at delivery, never supplied by the receiving model. */
       fromBotName?: string
       rootTaskId: string
+      /** Exact caller turn; preserves IM audience across asynchronous handoffs. */
+      sourceTaskId?: string
       /** Host-captured return route; a peer cannot choose another private conversation. */
       returnWorkId?: string
       /** Trusted work lineage shared by all async collaborators, separate from the return hop. */
@@ -218,6 +220,8 @@ export type BotTaskOrigin =
   | {
       kind: "notification"
       notificationKind: "workflow" | "coordinator" | "command" | "reaction"
+      /** Host-owned originating turn, used to retain an authenticated IM route. */
+      sourceTaskId?: string
       /** Inherits the host-owned collaboration quota; never an owner permission. */
       rootWorkId?: string
       key: string
@@ -227,7 +231,7 @@ export type BotTaskOrigin =
       runStartedAt?: string
       groupId?: string
     }
-  | { kind: "schedule"; scheduleId: string }
+  | { kind: "schedule"; scheduleId: string; sourceTaskId?: string }
   | { kind: "discussion"; groupId: string; messageId: string; round: number }
   | { kind: "group"; groupId: string; messageId: string }
 
@@ -320,6 +324,10 @@ export interface BotScheduleInput {
   enabled: boolean
 }
 export interface BotSchedule extends BotScheduleInput {
+  /** Host-captured source; cannot be chosen by model or renderer input. */
+  sourceTaskId?: string
+  audienceKey?: string
+  workId?: string
   id: string
   botId: string
   version: number

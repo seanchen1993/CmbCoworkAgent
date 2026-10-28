@@ -2387,6 +2387,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
               <BotImConversationDetails
                 key={selectedIm.id}
                 conversation={selectedIm}
+                schedules={snapshot?.schedules ?? []}
                 bot={selected}
                 client={client}
                 revision={snapshot?.revision ?? 0}
@@ -2759,7 +2760,10 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                         botId={selected.id}
                         client={client}
                         schedules={(snapshot?.schedules ?? []).filter(
-                          (item) => item.botId === selected.id
+                          (item) =>
+                            item.botId === selected.id &&
+                            (item.audienceKey ?? "desktop") ===
+                              (selectedWork?.audienceKey ?? "desktop")
                         )}
                       />
                       <section className="bot-detail-section">

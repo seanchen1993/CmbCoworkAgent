@@ -590,10 +590,20 @@ export function createBotScheduleTools(
           signal.throwIfAborted()
           assertParentBot(config)
           const host = getHost(),
-            schedules = host.snapshot().schedules.filter((item) => item.botId === bot.id)
+            schedules = host
+              .snapshot()
+              .schedules.filter(
+                (item) =>
+                  item.botId === bot.id &&
+                  (item.audienceKey ?? "desktop") === (task.mockSource?.audienceKey ?? "desktop")
+              )
           if (input.action === "list") return JSON.stringify(schedules)
           if (
             task.origin.kind !== "user" &&
+            !(
+              task.mockSource?.transport === "im" &&
+              (task.origin.kind === "mock" || task.origin.kind === "work")
+            ) &&
             !(task.origin.kind === "introduction" && host.hasDirectUserRequest(task.id))
           )
             throw new Error("创建或修改例行任务需要用户直接交办")
@@ -618,7 +628,8 @@ export function createBotScheduleTools(
             host.saveSchedule(
               bot.id,
               schedule,
-              prior ? { id: prior.id, version: prior.version } : undefined
+              prior ? { id: prior.id, version: prior.version } : undefined,
+              ...(task.mockSource?.transport === "im" ? [task.id] : [])
             )
           )
         } catch (cause) {

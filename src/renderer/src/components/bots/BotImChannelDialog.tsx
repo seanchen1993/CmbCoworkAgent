@@ -549,7 +549,7 @@ export function BotImChannelDialog({
             <div>
               <p>每个私聊或群聊可绑定一个 Bot，更换时先撤销原绑定。</p>
               <p>本人私聊与 App 主对话共用历史和任务，绑定后开始同步新消息。</p>
-              <p>群聊可使用 Bot 共享与群内记忆。本机文件和电脑操作不向 IM 开放。</p>
+              <p>私聊和群聊可使用 Bot 的本机执行能力；群聊使用 Bot 共享与本群记忆。</p>
             </div>
           </details>
         </div>

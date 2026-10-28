@@ -275,6 +275,10 @@ export class BotImGatewayStore {
     )
   }
   removeBot(botId: string): void {
+    this.db.run(
+      "DELETE FROM bot_im_continuations WHERE owner_bot_id=? OR task_id IN (SELECT id FROM bot_tasks WHERE bot_id=?)",
+      [botId, botId]
+    )
     this.db.run("DELETE FROM bot_im_personal_links WHERE bot_id=?", [botId])
     this.db.run("DELETE FROM bot_im_personal_owners WHERE bot_id=?", [botId])
     this.db.run(

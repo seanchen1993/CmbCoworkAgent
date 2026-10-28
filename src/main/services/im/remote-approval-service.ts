@@ -1,3 +1,4 @@
+import { botInteractionRoutes } from "./bot-interaction-route"
 import { randomBytes } from "node:crypto"
 import { existsSync, realpathSync, statSync } from "node:fs"
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path"
@@ -48,6 +49,8 @@ interface RemoteApprovalRoute {
   threadId: string
   workspacePath: string
   prefix: string
+  botEventId?: string
+  isCurrent?: () => boolean
 }
 
 interface RemoteApprovalCode {
@@ -417,6 +420,8 @@ export class ImRemoteApprovalService {
     ) {
       return "该审批短码不属于当前招乎会话。"
     }
+    if (pendingCode.route.isCurrent && !pendingCode.route.isCurrent())
+      return "此 Bot 连接已变化，请回到桌面确认。"
     if (!pendingCode.allowedDecisions.includes(input.decision)) {
       return "该请求不接受这个审批决定，请使用提示中的可用指令或回到桌面确认。"
     }
@@ -452,6 +457,10 @@ export class ImRemoteApprovalService {
       return "无法安全写入远程审批审计，本次决定未执行；请重试或回到桌面确认。"
     }
 
+    if (pendingCode.route.isCurrent && !pendingCode.route.isCurrent()) {
+      await this.dependencies.audits.remove(pendingCode.requestId)
+      return "此 Bot 连接已变化，请回到桌面确认。"
+    }
     const result = this.dependencies.broker.decide({
       source: {
         kind: "im",
@@ -674,6 +683,7 @@ export class ImRemoteApprovalService {
   ): Promise<boolean> {
     const interaction = await this.dependencies.cards.publish({
       kind: "approval",
+      botEventId: code.route.botEventId,
       threadId: code.route.threadId,
       principalId: code.route.principalId,
       conversationKey: code.route.conversationKey,
@@ -767,6 +777,12 @@ export class ImRemoteApprovalService {
     const parsed = parseStandardThreadMetadata(thread.metadata)
     const workspacePath = parsed.workspacePath ? canonicalDirectory(parsed.workspacePath) : null
     if (!workspacePath) return null
+    if (botInteractionRoutes.has(threadId)) {
+      const route = botInteractionRoutes.get(threadId)
+      return route?.kind === "dm"
+        ? { ...route, workspacePath, isCurrent: () => botInteractionRoutes.get(threadId) === route }
+        : null
+    }
 
     const threadGrant = this.dependencies.access.getThreadGrant(threadId)
     if (threadGrant?.state === "active") {

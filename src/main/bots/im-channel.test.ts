@@ -1,3 +1,10 @@
+import type { BotWorkHistoryPort } from "../../shared/bots/work-history"
+import { botMemoryContext } from "../../shared/bots/memory-scope"
+import { mkdtemp, writeFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { execFileSync } from "node:child_process"
+import type { BotWorkWorkspacePort } from "../../shared/bots/work"
 import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
@@ -16,6 +23,10 @@ import { buildBotPrompt } from "./prompt"
 import { parseBotMockSource } from "./mock-channel-validation"
 import { canSteerBotTask } from "./continuation"
 
+const interactionCommand = vi.hoisted(() => vi.fn(async () => undefined))
+vi.mock("../services/im/bot-interaction-command", () => ({
+  handleBotImInteractionCommand: interactionCommand
+}))
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => {
   for (const close of cleanups.splice(0)) await close()
@@ -34,7 +45,9 @@ function fixture(
     signal: AbortSignal
   ) => ReturnType<BotRunLease["execute"]>,
   externalBindingId?: string,
-  available: () => boolean = () => true
+  available: () => boolean = () => true,
+  workspaces?: BotWorkWorkspacePort,
+  workHistory?: BotWorkHistoryPort
 ) {
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:")),
     store = new BotStore(db)
@@ -49,6 +62,8 @@ function fixture(
   const host: LocalBotHost = new LocalBotHost(
     store,
     {
+      workspaces,
+      workHistory,
       onAvailable: () => () => {},
       acquire: (_bot, task) =>
         available()
@@ -72,6 +87,7 @@ function fixture(
   const client = {
     getStatus: () => ({ principalId: "owner" }) as ReturnType<BotImGatewayClient["getStatus"]>,
     supportsBotChannel: () => true,
+    supportsMarkdownReplies: vi.fn(() => false),
     botBindingCommand: vi.fn<BotImGatewayClient["botBindingCommand"]>(async (command) => {
       if (command.action === "list") return { items: [...remote.values()], before: null }
       if (command.action === "revoke") {
@@ -116,7 +132,8 @@ function fixture(
     client,
     "realm",
     () => host,
-    (error) => errors.push(error)
+    (error) => errors.push(error),
+    () => false
   )
   service.start()
   cleanups.push(async () => {
@@ -158,6 +175,318 @@ function fixture(
 }
 
 describe("authenticated IM on the existing Bot host", () => {
+  it("allows App attachments and same-group task history while rejecting another group's history", async () => {
+    const works = new Map<string, string>()
+    const query = vi.fn(async (work) => ({
+      work: { id: work.id, title: work.title, goal: work.goal },
+      entries: [],
+      nextCursor: null,
+      scanned: 0,
+      truncated: false,
+      coverage: "exhausted" as const
+    }))
+    const f = fixture(
+      async (task, host) => {
+        if (task.origin.kind === "mock" && task.message === "create") {
+          const created = await host.createWork(
+            {
+              botId: task.botId,
+              operationId: "create",
+              title: "Scoped work",
+              goal: "do this work"
+            },
+            { taskId: task.id, callId: "create", key: "create" }
+          )
+          works.set(task.mockSource!.bindingId, created.work.id)
+        }
+        if (task.message === "read") {
+          const own = works.get(task.mockSource!.bindingId)!
+          const foreign = [...works.values()].find((id) => id !== own)!
+          await host.workHistory(task.id, { workId: own })
+          await expect(host.workHistory(task.id, { workId: foreign })).rejects.toThrow("私有历史")
+        }
+        return { state: "completed", result: "done" }
+      },
+      undefined,
+      undefined,
+      undefined,
+      { query, resolve: vi.fn() }
+    )
+    const a = await f.binding(),
+      b = await f.binding()
+    await f.service.receive(f.event(a, "a-create", "create"))
+    await eventually(() => works.size === 1)
+    await f.service.receive(f.event(b, "b-create", "create"))
+    await eventually(() => works.size === 2)
+    await f.service.receive(f.event(a, "read", "read"))
+    await eventually(
+      () =>
+        query.mock.calls.length === 1 &&
+        f.calls.some((t) => t.message === "read" && f.store.getTask(t.id).state === "completed")
+    )
+    const workId = [...works.values()][0]
+    const attachment = '<user_attachment path="/tmp/report.md">report.md</user_attachment> 分析附件'
+    const local = f.store.enqueue({
+      botId: f.bot.id,
+      workId,
+      requestId: "app-attachment",
+      message: attachment
+    })
+    f.host.resume()
+    await eventually(() => f.store.getTask(local.id).state === "completed")
+    expect(local.mockSource!.bindingId).toBe([...works.keys()][0])
+    expect(f.calls.find((t) => t.id === local.id)?.message).toBe(attachment)
+    expect(f.errors).toEqual([])
+  })
+
+  it("returns asynchronous Bot collaboration to its original IM group without touching private threads", async () => {
+    let peerId = ""
+    const f = fixture(async (task, host) => {
+      if (task.origin.kind === "mock") {
+        host.delegate(task.id, peerId, "Review the assigned work", "peer", [])
+        return { state: "completed", result: "已交办" }
+      }
+      if (task.origin.kind === "bot" && task.origin.expectsReply)
+        return { state: "completed", result: "peer-result" }
+      return { state: "completed", result: "group-final" }
+    })
+    peerId = f.store.create({ name: "Peer", instructions: "", color: "#123456", modelRef: null }).id
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "collaboration"))
+    await eventually(() => f.calls.some((t) => t.origin.kind === "bot" && !t.origin.expectsReply))
+    await eventually(() =>
+      f.client.submitReply.mock.calls.some(([reply]) =>
+        reply.message.content.includes("group-final")
+      )
+    )
+    const root = f.calls[0],
+      child = f.calls.find((t) => t.botId === peerId)!,
+      reply = f.calls.at(-1)!
+    expect(child.threadId).not.toBe(f.store.getBot(peerId).threadId)
+    expect(botMemoryContext(child)).toEqual({ groupId: root.mockSource!.bindingId })
+    expect(reply.threadId).toBe(root.threadId)
+    expect(reply.mockSource).toEqual(root.mockSource)
+    expect(f.store.im.execution(child, false)?.source.bindingId).toBe(root.mockSource!.bindingId)
+    expect(
+      f.client.submitReply.mock.calls.every(([r]) => r.conversationKey === binding.conversationKey)
+    ).toBe(true)
+    expect(f.errors).toEqual([])
+  })
+
+  it("keeps workflow and detached command callbacks in the IM group after ingress completion", async () => {
+    const f = fixture(async (task, host) => {
+      if (task.origin.kind === "mock")
+        host.commandLifecycle(task.id).accepted({
+          id: "im-command",
+          threadId: task.threadId,
+          command: "git status",
+          cwd: "/tmp",
+          startedAt: Date.now()
+        })
+      return {
+        state: "completed",
+        result: task.origin.kind === "mock" ? "started" : "callback-result"
+      }
+    })
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "background"))
+    await eventually(
+      () => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed"
+    )
+    const root = f.calls[0]
+    f.host
+      .commandLifecycle(root.id)
+      .settled({
+        id: "im-command",
+        threadId: root.threadId,
+        exitCode: 0,
+        output: "clean",
+        cancelled: false,
+        truncated: false
+      })
+    await eventually(() => f.calls.length >= 2)
+    f.host.enqueueNotification(
+      root.botId,
+      root.threadId,
+      "workflow",
+      "wf-im",
+      "workflow done",
+      undefined,
+      new Date().toISOString()
+    )
+    await eventually(() => f.calls.length === 3)
+    await eventually(() => f.store.getTask(f.calls[2].id).state === "completed")
+    expect(
+      f.calls.every(
+        (t) =>
+          t.threadId === root.threadId && t.mockSource?.bindingId === root.mockSource!.bindingId
+      )
+    ).toBe(true)
+    expect(f.errors).toEqual([])
+  })
+
+  it("persists a group routine's audience and stops it when the binding is revoked", async () => {
+    let scheduleId = ""
+    const f = fixture(async (task) => {
+      if (task.origin.kind === "mock") {
+        const schedule = f.store.saveSchedule(
+          task.botId,
+          {
+            name: "Group reminder",
+            message: "only this group",
+            frequency: "interval",
+            intervalMinutes: 5,
+            enabled: true
+          },
+          new Date().toISOString(),
+          undefined,
+          task.id
+        )
+        scheduleId = schedule.id
+      }
+      return { state: "completed", result: "routine-result" }
+    })
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "routine"))
+    await eventually(
+      () => Boolean(scheduleId) && f.store.getTask(f.calls[0].id).state === "completed"
+    )
+    const schedule = f.store.schedules().find((s) => s.id === scheduleId)!
+    expect(schedule.audienceKey).toBe(f.calls[0].mockSource!.audienceKey)
+    f.store.fireSchedule(schedule, new Date(Date.now() + 300000).toISOString())
+    f.host.resume()
+    await eventually(
+      () => f.calls.length === 2 && f.store.getTask(f.calls[1].id).state === "completed"
+    )
+    expect(f.calls[1].threadId).toBe(f.calls[0].threadId)
+    expect(f.calls[1].origin.kind).toBe("schedule")
+    const local = f.calls[0].mockSource!
+    f.store.im.revoke(f.bot.id, local.bindingId, local.grantVersion)
+    f.store.fireSchedule(f.store.schedules()[0], new Date().toISOString())
+    expect(f.store.schedules()[0].enabled).toBe(false)
+    expect(f.calls).toHaveLength(2)
+    expect(f.errors).toEqual([])
+  })
+
+  it("creates a group Git task in the selected directory and retains it for follow-up", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "bot-im-git-"))
+    cleanups.push(() => rm(directory, { recursive: true, force: true }))
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: directory, encoding: "utf8" }).trim()
+    git("init", "--quiet")
+    await writeFile(join(directory, "README.md"), "local IM test")
+    git("add", "README.md")
+    git(
+      "-c",
+      "user.name=Bot Test",
+      "-c",
+      "user.email=bot-test@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "IM workspace test"
+    )
+    const head = git("rev-parse", "HEAD")
+    let workId = ""
+    const results: string[] = []
+    const resolve = vi.fn(async () => ({ kind: "directory" as const, path: directory }))
+    const f = fixture(
+      async (task, host) => {
+        if (task.workId) {
+          const work = host.getWork(task.botId, task.workId)
+          results.push(
+            execFileSync("git", ["log", "-1", "--format=%H"], {
+              cwd: work.workspace!.path,
+              encoding: "utf8"
+            }).trim()
+          )
+          return { state: "completed", result: results.at(-1) }
+        }
+        const source = { taskId: task.id, callId: task.id, key: task.id }
+        if (!workId) {
+          const created = await host.createWork(
+            {
+              botId: task.botId,
+              operationId: task.id,
+              title: "Git review",
+              goal: "Read latest commit",
+              workspace: { kind: "directory", path: directory }
+            },
+            source
+          )
+          workId = created.work.id
+        } else host.sendWork(source, workId, "Read latest commit again")
+        return { state: "completed", result: "dispatched" }
+      },
+      undefined,
+      () => true,
+      { resolve, projects: async () => ({ items: [], nextCursor: null }) }
+    )
+    const binding = await f.binding("group")
+    await f.service.receive(f.event(binding, "git-request", "创建任务查看指定目录的最新提交"))
+    await eventually(() => results.length === 1).catch((error) => {
+      throw new Error(
+        JSON.stringify(
+          f.store.recentTasks().map((t) => ({ state: t.state, error: t.error, workId: t.workId }))
+        ) + String(error)
+      )
+    })
+    await f.service.receive(f.event(binding, "git-follow-up", "继续检查这个任务"))
+    await eventually(() => results.length === 2)
+    expect(results).toEqual([head, head])
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(f.host.getWork(f.bot.id, workId).workspace?.path).toBe(directory)
+    expect(f.host.listWorks(f.bot.id).items).toEqual([])
+    const group = f.host.snapshot().imConversations![0]
+    expect(f.host.imConversationWorks(f.bot.id, group.id).items.map((w) => w.id)).toEqual([workId])
+    expect(f.host.browserScope(`im-${group.id}--${f.bot.id}`)).toBe(`im-${group.id}--${f.bot.id}`)
+    expect(f.host.browserScope(`work-${workId}--${f.bot.id}`)).toBe(`work-${workId}--${f.bot.id}`)
+    expect(() => f.host.browserScope(`im-unknown--${f.bot.id}`)).toThrow()
+    expect(f.errors).toEqual([])
+  })
+  it("routes an IM answer around a waiting Bot run and deduplicates redelivery", async () => {
+    interactionCommand.mockClear()
+    const f = fixture(async (_task, _host, signal) => {
+      await new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true })
+      )
+      return { state: "failed" }
+    })
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "question", "帮我安排会议"))
+    await eventually(() => f.calls.length === 1)
+    const answer = f.event(binding, "answer", "/回答 A1B2C3 1")
+    await f.service.receive(answer)
+    await f.service.receive(answer)
+    expect(interactionCommand).toHaveBeenCalledTimes(1)
+    expect(interactionCommand).toHaveBeenCalledWith(
+      answer,
+      "owner",
+      botImScopeId("realm", "owner", "answer")
+    )
+    expect(f.calls).toHaveLength(1)
+    expect(f.client.sendAcknowledgement).toHaveBeenCalledWith(
+      expect.objectContaining({ eventId: "answer", type: "completed" })
+    )
+    expect(f.errors).toEqual([])
+  })
+  it.each(["dm", "group"] as const)(
+    "sends Markdown for %s without changing segment identity on explicit downgrade",
+    async (kind) => {
+      const f = fixture(),
+        binding = await f.binding(kind)
+      f.client.supportsMarkdownReplies.mockReturnValue(true)
+      const rejection = Object.assign(new Error("old node"), { reasonCode: "INVALID_PAYLOAD" })
+      f.client.submitReply.mockRejectedValueOnce(rejection)
+      await f.service.receive(f.event(binding, "markdown", "**加粗** 与表格"))
+      await eventually(() => f.client.submitReply.mock.calls.length === 2)
+      const [markdown, fallback] = f.client.submitReply.mock.calls.map(([reply]) => reply)
+      expect(markdown.message.type).toBe("markdown")
+      expect(fallback).toEqual({ ...markdown, message: { ...markdown.message, type: "text" } })
+      expect(fallback.conversationKey).toBe(binding.conversationKey)
+      expect(f.calls).toHaveLength(1)
+    }
+  )
   it("exposes retained groups separately from private previews and keeps read boundaries scoped", async () => {
     const f = fixture(),
       a = await f.binding(),
@@ -985,7 +1314,11 @@ describe("authenticated IM on the existing Bot host", () => {
       await f.service.receive(event("continue"))
       await eventually(() => f.host.getWork(f.bot.id, workId).state === "active")
       expect(f.host.listWorks(f.bot.id).items).toHaveLength(0)
-      expect(f.host.imConversationWorks(f.bot.id, f.host.getWork(f.bot.id, workId).source!.bindingId).items.map((item) => item.id)).toEqual([workId])
+      expect(
+        f.host
+          .imConversationWorks(f.bot.id, f.host.getWork(f.bot.id, workId).source!.bindingId)
+          .items.map((item) => item.id)
+      ).toEqual([workId])
       expect(f.calls.filter((t) => t.workId).map((t) => t.workId)).toEqual([workId, workId])
       expect(f.host.getWork(f.bot.id, workId).source?.transport).toBe("im")
       expect(f.host.getWork(f.bot.id, workId).source?.senderId).toBe(

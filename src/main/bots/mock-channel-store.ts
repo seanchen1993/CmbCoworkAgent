@@ -49,6 +49,8 @@ export class BotMockChannelStore {
           id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,binding_id TEXT NOT NULL,grant_version INTEGER NOT NULL,
           conversation_id TEXT NOT NULL,reply_to_message_id TEXT NOT NULL,source_task_id TEXT UNIQUE NOT NULL,
           work_id TEXT,text TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS bot_im_continuations (task_id TEXT PRIMARY KEY,source_task_id TEXT NOT NULL,owner_bot_id TEXT NOT NULL,thread_id TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS bot_im_continuations_source ON bot_im_continuations(source_task_id);
         CREATE INDEX IF NOT EXISTS bot_mock_outbox_pending ON bot_mock_outbox(state,created_at,id);
         CREATE INDEX IF NOT EXISTS bot_mock_outbox_page ON bot_mock_outbox(binding_id,created_at,id);`)
       for (const [table, column] of [
@@ -237,6 +239,44 @@ export class BotMockChannelStore {
     )
       this.run("INSERT OR IGNORE INTO bot_im_local_execution VALUES(?)", [task.id])
   }
+  /** Durable route captured only by the host when admitting an internal continuation. */
+  registerContinuation(task: BotTask, parent: BotTask): void {
+    if (
+      this.transport !== "im" ||
+      task.mockSource?.transport !== "im" ||
+      JSON.stringify(task.mockSource) !== JSON.stringify(parent.mockSource)
+    )
+      throw new BotError("CONFLICT", "后台任务来源已改变")
+    const owner = this.continuationOwner(parent)
+    this.validateSource(task.mockSource, owner)
+    this.run("INSERT OR IGNORE INTO bot_im_continuations VALUES(?,?,?,?)", [
+      task.id,
+      parent.id,
+      owner,
+      task.threadId
+    ])
+    this.run("INSERT OR IGNORE INTO bot_im_local_execution VALUES(?)", [task.id])
+  }
+  continuationOwner(task: BotTask): string {
+    if (this.transport !== "im") return task.botId
+    const row = this.rows(
+      "SELECT owner_bot_id,thread_id FROM bot_im_continuations WHERE task_id=?",
+      [task.id]
+    )[0]
+    if (row && row.thread_id !== task.threadId) throw new BotError("CONFLICT", "后台任务会话已改变")
+    return row ? String(row.owner_bot_id) : task.botId
+  }
+  isContinuation(task: BotTask): boolean {
+    return (
+      this.transport === "im" &&
+      Boolean(
+        this.rows("SELECT 1 FROM bot_im_continuations WHERE task_id=? AND thread_id=?", [
+          task.id,
+          task.threadId
+        ]).length
+      )
+    )
+  }
   private permitSql(taskAlias: string): string {
     return `(EXISTS(SELECT 1 FROM bot_im_local_execution l WHERE l.task_id=${taskAlias}.id) OR EXISTS(SELECT 1 FROM bot_im_ingress ie WHERE ie.id=json_extract(${taskAlias}.mock_source_json,'$.eventId') AND ie.state='active' AND ie.expires_at>${this.now()}))`
   }
@@ -341,8 +381,12 @@ export class BotMockChannelStore {
         throw new BotError("CONFLICT", "模拟来源证明缺失")
       return undefined
     }
-    const source = this.validateSource(task.mockSource, task.botId, requireActive),
-      binding = this.get(task.botId, source.bindingId)
+    const source = this.validateSource(
+        task.mockSource,
+        this.continuationOwner(task),
+        requireActive
+      ),
+      binding = this.get(this.continuationOwner(task), source.bindingId)
     if (
       requireActive &&
       this.transport === "im" &&
@@ -351,6 +395,14 @@ export class BotMockChannelStore {
           .length)
     )
       throw new BotError("CONFLICT", "IM 执行许可已失效，已停止处理")
+    if (this.isContinuation(task)) {
+      if (task.workId) {
+        const work = this.owner.getWork(task.botId, task.workId)
+        if (work.threadId !== task.threadId || work.audienceKey !== source.audienceKey)
+          throw new BotError("CONFLICT", "后台任务与原受众不一致")
+      }
+      return { source, threadId: task.threadId, threadInitialized: true, label: binding.label }
+    }
     if (task.workId) {
       const work = this.owner.getWork(task.botId, task.workId)
       if (
@@ -570,11 +622,14 @@ export class BotMockChannelStore {
   }
   settle(task: BotTask, state: BotTaskState, text: string): void {
     if (!task.mockSource) return
-    const source = this.validateSource(task.mockSource, task.botId, false)
+    const owner = this.continuationOwner(task)
+    const source = this.validateSource(task.mockSource, owner, false)
+    // A collaborator returns to its caller through the existing Bot reply outbox.
+    if (task.origin.kind === "bot" && task.origin.expectsReply) return
     this.run("UPDATE bot_mock_events SET execution_state=? WHERE task_id=?", [state, task.id])
     // Personal work reports once through the existing main-conversation result notification.
     if (source.personal && task.workId) return
-    const binding = this.get(task.botId, source.bindingId)
+    const binding = this.get(owner, source.bindingId)
     const output = text.trim() || "本轮没有可确认的文字结果，请查看执行状态。"
     this.run("INSERT OR IGNORE INTO bot_mock_outbox VALUES(?,?,?,?,?,?,?,?,?,?,?)", [
       `mock-reply-${task.id}`,

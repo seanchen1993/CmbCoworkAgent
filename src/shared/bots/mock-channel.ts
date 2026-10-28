@@ -17,7 +17,7 @@ export interface BotMockBinding {
 /** Persisted external source; omitted transport identifies existing local simulations. */
 export interface BotMockSource {
   transport?: "im"
-  /** Host-verified owner DM shares the personal thread; this turn still has text-only tools. */
+  /** Host-verified owner DM shares the personal thread and local Bot capabilities. */
   personal?: true
   bindingId: string
   grantVersion: number

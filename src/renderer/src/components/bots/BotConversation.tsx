@@ -52,9 +52,11 @@ export function BotConversation({
   onOpenGroup?(groupId: string): void
 }) {
   const mentionGroups = useMemo(
-    () => groups.filter(
-      (group) => !group.deleting && group.hostId === bot.hostId && group.memberIds.includes(bot.id)
-    ),
+    () =>
+      groups.filter(
+        (group) =>
+          !group.deleting && group.hostId === bot.hostId && group.memberIds.includes(bot.id)
+      ),
     [groups, bot.hostId, bot.id]
   )
   const threadId = work?.threadId ?? bot.threadId
@@ -66,7 +68,10 @@ export function BotConversation({
     )
   )
   // The host rejects unpersisted rows; task completion refreshes the same IDs.
-  const reactionIds = useMemo(() => JSON.parse(reactionIdsKey ?? "[]") as string[], [reactionIdsKey])
+  const reactionIds = useMemo(
+    () => JSON.parse(reactionIdsKey ?? "[]") as string[],
+    [reactionIdsKey]
+  )
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [draftStorageError, setDraftStorageError] = useState<string | null>(null)
@@ -151,14 +156,24 @@ export function BotConversation({
   }, [sender, client, bot.id])
   const managedTurn = useMemo<ManagedChatTurn>(
     () => ({
-      ...(work?.source
+      ...(work?.source && work.source.transport !== "im"
         ? { textOnlyReason: "模拟渠道仅支持文字和同受众工作，不支持附件、技能或本机资源。" }
         : {}),
       ownerConversation: Boolean(work?.conversation?.state === "bound"),
-      ...(!work ? { mentionOptions: {
-        bots: bots.filter((peer) => peer.hostId === bot.hostId && peer.id !== bot.id && !peer.archived && !peer.deleting),
-        groups: mentionGroups
-      } } : {}),
+      ...(!work
+        ? {
+            mentionOptions: {
+              bots: bots.filter(
+                (peer) =>
+                  peer.hostId === bot.hostId &&
+                  peer.id !== bot.id &&
+                  !peer.archived &&
+                  !peer.deleting
+              ),
+              groups: mentionGroups
+            }
+          }
+        : {}),
       submit,
       submitDraft,
       validateDraft: validateBotDraft,
@@ -234,32 +249,40 @@ export function BotConversation({
           </button>
         </div>
       )}
-      <BotMessageReactionsProvider client={client} target={{ kind: "bot", botId: bot.id, ...(work ? { workId: work.id } : {}) }} messageIds={reactionIds} enabled={!work?.source} refreshKey={`${running?.id ?? ""}:${running?.state ?? "idle"}`}>
-      <BotConversationTools
+      <BotMessageReactionsProvider
         client={client}
-        botId={bot.id}
-        conversationThreadId={threadId}
-        onOpenWork={onOpenWork}
-        onOpenBot={onOpenBot}
-        onOpenGroup={onOpenGroup}
-        groups={mentionGroups}
-        tasks={tasks}
-        bots={bots}
-        schedules={schedules}
+        target={{ kind: "bot", botId: bot.id, ...(work ? { workId: work.id } : {}) }}
+        messageIds={reactionIds}
+        enabled={!work?.source}
+        refreshKey={`${running?.id ?? ""}:${running?.state ?? "idle"}`}
       >
-        <ChatContainer
-          threadId={threadId}
-          surface="bot"
-          managedTurn={managedTurn}
-          readOnlyReason={
-            bot.archived
-              ? "Bot 已归档，恢复后可以继续对话。"
-              : work?.state === "completed"
-                ? "工作已完成，点击右侧「继续处理」可在原会话继续。"
-                : null
-          }
-        />
-      </BotConversationTools>
+        <BotConversationTools
+          client={client}
+          botId={bot.id}
+          conversationThreadId={threadId}
+          onOpenWork={onOpenWork}
+          onOpenBot={onOpenBot}
+          onOpenGroup={onOpenGroup}
+          groups={mentionGroups}
+          tasks={tasks}
+          bots={bots}
+          schedules={schedules.filter(
+            (item) => (item.audienceKey ?? "desktop") === (work?.audienceKey ?? "desktop")
+          )}
+        >
+          <ChatContainer
+            threadId={threadId}
+            surface="bot"
+            managedTurn={managedTurn}
+            readOnlyReason={
+              bot.archived
+                ? "Bot 已归档，恢复后可以继续对话。"
+                : work?.state === "completed"
+                  ? "工作已完成，点击右侧「继续处理」可在原会话继续。"
+                  : null
+            }
+          />
+        </BotConversationTools>
       </BotMessageReactionsProvider>
       <BotMessageFilePreview botId={bot.id} threadId={threadId} name={bot.name} client={client} />
     </>

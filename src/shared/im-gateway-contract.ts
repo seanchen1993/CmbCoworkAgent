@@ -332,6 +332,8 @@ export type ImCardInteractionKind =
   | "biz_retry"
 
 export interface RemoteImCardSendV1 {
+  /** Original Bot event freezes the question's audience and answering member. */
+  botEventId?: string
   schemaVersion: typeof IM_GATEWAY_SCHEMA_VERSION
   interactionId: string
   conversationKey: string
@@ -430,13 +432,14 @@ export function assertRemoteImCardSendV1(value: unknown): asserts value is Remot
       "kind",
       "content"
     ],
-    [],
+    ["botEventId"],
     "card"
   )
   assertSchemaVersion(card.schemaVersion)
   requireNonEmptyString(card.interactionId, "card.interactionId")
   requireNonEmptyString(card.conversationKey, "card.conversationKey")
   requireNonEmptyString(card.idempotencyKey, "card.idempotencyKey")
+  if (card.botEventId !== undefined) requireNonEmptyString(card.botEventId, "card.botEventId")
   const tag = requireNonEmptyString(card.tag, "card.tag")
   if (!/^[A-Za-z0-9_-]{16,128}$/u.test(tag)) {
     throw new ImGatewayContractError(
