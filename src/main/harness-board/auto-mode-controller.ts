@@ -1258,7 +1258,11 @@ export async function resolveManagedBizRetryDecision(
       imRoute: input.channel === "im" ? input.route : undefined
     }
     const prepared = await prepareManagedHarnessSession(sessionInput)
-    const created = await createManagedHarnessSession(sessionInput, prepared.skillName)
+    const created = await createManagedHarnessSession(
+      sessionInput,
+      prepared.skillName,
+      prepared.skillDescription
+    )
     const executionRun: ManagedRunSnapshot = {
       ...run,
       currentSession: { threadId: created.threadId },

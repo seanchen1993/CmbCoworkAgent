@@ -1292,7 +1292,7 @@ interface CustomAPI {
     }>
     generateTitle: (
       message: string,
-      context?: { threadId: string; skillName?: string }
+      context?: { threadId: string; skillName?: string; skillDescription?: string }
     ) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
   }
@@ -3039,6 +3039,11 @@ interface CustomAPI {
     syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
     getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
     cancelKnowledgePreviewRequests: () => Promise<void>
+    selectProjectDirectory: () => Promise<{
+      workspacePath: string
+      projectDir: string
+      validationError: string | null
+    } | null>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput

@@ -1345,7 +1345,7 @@ const api = {
     },
     generateTitle: (
       message: string,
-      context?: { threadId: string; skillName?: string }
+      context?: { threadId: string; skillName?: string; skillDescription?: string }
     ): Promise<string> => {
       return ipcRenderer.invoke("threads:generateTitle", message, context)
     },
@@ -4458,6 +4458,11 @@ const api = {
       ) as Promise<HarnessKnowledgePreviewResult>,
     cancelKnowledgePreviewRequests: (): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelKnowledgePreviewRequests") as Promise<void>,
+    selectProjectDirectory: (): Promise<{
+      workspacePath: string
+      projectDir: string
+      validationError: string | null
+    } | null> => ipcRenderer.invoke("harnessBoard:selectProjectDirectory"),
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
     searchEnterpriseProjects: (

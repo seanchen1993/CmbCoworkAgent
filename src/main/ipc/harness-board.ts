@@ -1,6 +1,8 @@
 import { requireHarnessFeatureWorkspace } from "../harness-board/service"
+import { validateProjectDirectorySelection } from "../harness-board/project-workspace"
 import {
   BrowserWindow,
+  dialog,
   shell,
   type IpcMain,
   type IpcMainInvokeEvent,
@@ -373,6 +375,24 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("harnessBoard:cancelKnowledgePreviewRequests", (event): void => {
     cancelHarnessKnowledgePreviewOwner(event.sender.id)
+  })
+
+  ipcMain.handle("harnessBoard:selectProjectDirectory", async (event) => {
+    const parent = BrowserWindow.fromWebContents(event.sender)
+    const options = {
+      title: "选择项目工作区文件夹",
+      message: "请选择空文件夹，或新建一个文件夹作为项目工作区",
+      properties: ["openDirectory", "createDirectory"] as Array<"openDirectory" | "createDirectory">
+    }
+    const result = parent
+      ? await dialog.showOpenDialog(parent, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled || !result.filePaths[0]) return null
+    const selectedPath = result.filePaths[0]
+    if (path.dirname(selectedPath) === selectedPath) {
+      throw new Error("请选择具体的项目文件夹，不能使用磁盘根目录")
+    }
+    return validateProjectDirectorySelection(selectedPath)
   })
 
   ipcMain.handle(
