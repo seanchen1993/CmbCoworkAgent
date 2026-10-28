@@ -1,3 +1,7 @@
+import {
+  COORDINATOR_NOTIFICATION_PROMPT,
+  WORKFLOW_NOTIFICATION_TURN_PROMPT
+} from "../../shared/internal-notification-turn"
 import { botInteractionRoutes } from "../services/im/bot-interaction-route"
 import { describe, expect, it, vi, beforeEach } from "vitest"
 import { AsyncLocalStorage } from "node:async_hooks"
@@ -45,12 +49,14 @@ const fixture = vi.hoisted(() => ({
   directory: vi.fn((_root: string, _kind: string, id: string) => `/synthetic/workspaces/${id}`),
   thread: vi.fn(),
   realpath: vi.fn(),
+  realpathNative: vi.fn(),
   create: vi.fn(),
   defaultModel: vi.fn(),
   update: vi.fn(),
   start: vi.fn(),
   managedDelivery: vi.fn<(...args: unknown[]) => object>(() => ({})),
   mirror: vi.fn(),
+  imOpening: vi.fn(),
   steer: vi.fn(),
   activeLease: vi.fn<() => LocalThreadRunLease | undefined>(),
   pendingQuestion: vi.fn<() => UserInputRequest | null>(),
@@ -132,7 +138,7 @@ vi.mock("../db", () => ({
 }))
 vi.mock("node:fs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:fs")>()),
-  realpathSync: fixture.realpath
+  realpathSync: Object.assign(fixture.realpath, { native: fixture.realpathNative })
 }))
 vi.mock("../models/registry", () => ({
   getAvailableModelConfigOrDefault: fixture.defaultModel,
@@ -250,6 +256,7 @@ function port(
     () =>
       ({
         imGateway,
+        imChannel: { openingReply: fixture.imOpening },
         getBot: fixture.getBot,
         getGroupReference: fixture.groupReference,
         workToolSource: fixture.workToolSource,
@@ -303,6 +310,9 @@ beforeEach(() => {
     .mockReturnValue({ ...task, state: "running", origin: { kind: "introduction" } })
   fixture.hasDirectUserRequest.mockReset().mockReturnValue(false)
   fixture.directory.mockImplementation((_root, _kind, id) => `/synthetic/workspaces/${id}`)
+  fixture.realpathNative.mockReset().mockImplementation(() => {
+    throw new Error("Missing synthetic path")
+  })
   fixture.realpath.mockReset().mockImplementation(() => {
     throw new Error("Missing synthetic path")
   })
@@ -776,7 +786,36 @@ describe("Bot Runtime integration", () => {
     lease.release()
     const [request, , context] = fixture.start.mock.calls[0]
     expect(request).toMatchObject({ threadId: bot.threadId, agentMode: "workflow" })
-    expect(context.openingReplyReminder).toBe(false)
+    expect(context.openingReplyReminder).toBe(true)
+    expect(context.extraSystemPrompt).toContain("Reply first in normal assistant text")
+    const mirror = (
+      fixture.managedDelivery.mock.calls[0][0] as { mirror(threadId: string, event: unknown): void }
+    ).mirror
+    const progress = {
+      type: "turn-messages",
+      messages: [
+        {
+          id: "opening",
+          role: "assistant",
+          content: "我先检查。",
+          reasoning: "PRIVATE_THINKING",
+          tool_calls: [{}]
+        }
+      ]
+    }
+    mirror(bot.threadId, progress)
+    expect(fixture.imOpening).toHaveBeenCalledWith(incoming.id, "我先检查。")
+    fixture.imOpening.mockClear()
+    mirror("other-thread", progress)
+    mirror(bot.threadId, { ...progress, type: "full-messages" })
+    mirror(bot.threadId, {
+      type: "turn-messages",
+      messages: [
+        { role: "tool", content: "PRIVATE_TOOL" },
+        { role: "assistant", content: "最终结果" }
+      ]
+    })
+    expect(fixture.imOpening).not.toHaveBeenCalled()
     expect(context.remotePolicy).toEqual({ disableScheduler: true })
     expect(context.additionalTools).toEqual([
       "works",
@@ -1934,9 +1973,7 @@ describe("Bot Runtime integration", () => {
         threadId: "existing"
       })
       const context = fixture.start.mock.calls[0][2] as AgentRunExecutionContext
-      expect(context.toolConcurrencyQueueId).toBe(
-        workspacePath === "/synthetic/workspaces/a" ? bot.id : "workspace:/original/workspace"
-      )
+      expect(context.toolConcurrencyQueueId).toBe(`workspace:${workspacePath}`)
       expect(context.verifyResolvedThread!({ workspacePath, metadata: original })).toBeNull()
       const upload = vi.fn(async () => "uploaded")
       const withUpload = fixture.browserTools.mock.calls.at(-1)![5] as (
@@ -1956,6 +1993,65 @@ describe("Bot Runtime integration", () => {
       )
     }
   )
+
+  it.each([
+    ["workflow", WORKFLOW_NOTIFICATION_TURN_PROMPT],
+    ["coordinator", COORDINATOR_NOTIFICATION_PROMPT]
+  ] as const)(
+    "preserves the exact group %s receipt prompt for the native notification handler",
+    async (kind, message) => {
+      fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+      await port()
+        .acquire(bot, {
+          ...task,
+          threadId: "group-g-a",
+          message,
+          origin: { kind: "notification", notificationKind: kind, groupId: "g", key: "receipt" }
+        })!
+        .execute(new AbortController().signal, vi.fn())
+      const [request, , context] = fixture.start.mock.calls[0]
+      expect(request.message).toBe(message)
+      expect(context.extraSystemPrompt).toContain("/synthetic/workspaces/group-g")
+      expect(context.toolConcurrencyQueueId).toBe("workspace:/synthetic/workspaces/group-g")
+    }
+  )
+
+  it("shares a file queue across canonical workspace aliases while retaining separate thread and browser scopes", async () => {
+    const contexts: AgentRunExecutionContext[] = []
+    fixture.realpathNative.mockImplementation((path: string) =>
+      path === "/synthetic/workspaces/a" || path === "/synthetic/workspaces/group-g"
+        ? "/actual/shared-project"
+        : path
+    )
+    for (const groupId of [undefined, "g", "other-group"]) {
+      const current = {
+        ...task,
+        id: `task-${groupId ?? "private"}`,
+        threadId: groupId ? `group-${groupId}-a` : bot.threadId,
+        origin: groupId
+          ? { kind: "group" as const, groupId, messageId: "m" }
+          : { kind: "user" as const }
+      }
+      fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata(groupId)) })
+      await port().acquire(bot, current)!.execute(new AbortController().signal, vi.fn())
+      contexts.push(fixture.start.mock.calls.at(-1)![2] as AgentRunExecutionContext)
+    }
+    expect(contexts.map((context) => context.toolConcurrencyQueueId)).toEqual([
+      "workspace:/actual/shared-project",
+      "workspace:/actual/shared-project",
+      "workspace:/synthetic/workspaces/group-other-group"
+    ])
+    expect(fixture.start.mock.calls.map(([request]) => request.threadId)).toEqual([
+      bot.threadId,
+      "group-g-a",
+      "group-other-group-a"
+    ])
+    expect(fixture.browserTools.mock.calls.map((args) => args[4] ?? bot.id)).toEqual([
+      bot.id,
+      "group-g--a",
+      "group-other-group--a"
+    ])
+  })
 
   it.each(["directory", "project"] as const)(
     "executes %s tasks in the pinned directory and refuses metadata rebinding",
@@ -3394,7 +3490,7 @@ describe("Bot Runtime integration", () => {
       source: "bot",
       allowTrustedTransportSkillMarker: true,
       capabilityService: fixture.scope,
-      toolConcurrencyQueueId: "a",
+      toolConcurrencyQueueId: "workspace:/synthetic/workspaces/a",
       userInputWithoutToolLock: true,
       botBrowserToolsOwnFileLock: true,
       additionalTools: [
@@ -3517,7 +3613,7 @@ describe("Bot Runtime integration", () => {
       expect.any(Function)
     )
     expect(context.allowTrustedTransportSkillMarker).toBe(false)
-    expect(context.toolConcurrencyQueueId).toBe("bot-group-g")
+    expect(context.toolConcurrencyQueueId).toBe("workspace:/synthetic/workspaces/group-g")
     expect(context.userInputWithoutToolLock).toBe(true)
     expect(context.botBrowserToolsOwnFileLock).toBe(true)
     const upload = vi.fn(async () => "attached")
@@ -3525,7 +3621,7 @@ describe("Bot Runtime integration", () => {
       operation: typeof upload
     ) => Promise<string>
     expect(await withFileLock(upload)).toBe("attached")
-    expect(fixture.fileLock).toHaveBeenCalledWith("bot-group-g", upload)
+    expect(fixture.fileLock).toHaveBeenCalledWith("workspace:/synthetic/workspaces/group-g", upload)
     expect(upload).toHaveBeenCalledTimes(1)
     expect(fixture.announce).not.toHaveBeenCalled()
     expect(fixture.summary).not.toHaveBeenCalled()

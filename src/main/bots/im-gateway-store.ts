@@ -163,16 +163,18 @@ export class BotImGatewayStore {
     return this.rows(
       `SELECT r.id,r.bot_id,json_extract(r.binding_json,'$.id') AS binding_id,
         json_extract(r.binding_json,'$.peerLabel') AS title,b.revoked,b.online,b.created_at,
-        a.version,a.updated_at,a.preview,a.attention_version,a.seen_version
+        a.version,a.updated_at,a.preview,a.attention_version,a.seen_version,c.thread_id
        FROM bot_im_routes r JOIN bot_im_bindings b ON b.id=r.id
        JOIN bots bot ON bot.id=r.bot_id
        LEFT JOIN bot_activity a ON a.kind='im' AND a.id=r.id
+       LEFT JOIN bot_im_conversations c ON c.binding_id=r.id AND c.bot_id=r.bot_id
        WHERE b.kind='group'
        ORDER BY COALESCE(a.updated_at,b.created_at) DESC,r.id`
     ).map((row) => ({
       id: String(row.id),
       botId: String(row.bot_id),
       bindingId: String(row.binding_id),
+      ...(row.thread_id ? { threadId: String(row.thread_id) } : {}),
       title: String(row.title || "招乎群聊"),
       state: row.revoked ? "revoked" : "active",
       connected: !row.revoked && Boolean(row.online),

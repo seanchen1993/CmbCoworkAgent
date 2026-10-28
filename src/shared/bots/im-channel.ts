@@ -41,6 +41,8 @@ export interface BotImConversation {
   id: string
   botId: string
   bindingId: string
+  /** Native execution thread, present after the first admitted group message. */
+  threadId?: string
   title: string
   state: "active" | "revoked"
   connected: boolean
@@ -148,6 +150,7 @@ export function assertBotImBindingResult(
 }
 
 export interface BotImClient {
+  stopConversation(botId: string, conversationId: string): Promise<void>
   conversationWorks?(
     botId: string,
     conversationId: string,

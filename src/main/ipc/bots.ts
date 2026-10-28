@@ -161,6 +161,9 @@ export function registerBotHandlers(
     desktopHost(event, hostId).getBot(botIdentifier(botId))
     return imChannel().history(botId, botImExternalId(id), historyCursor(before))
   })
+  ipcMain.handle("bots:im:conversation-stop", (event, hostId, botId, id) =>
+    desktopHost(event, hostId).stopImConversation(botIdentifier(botId), botIdentifier(id))
+  )
   ipcMain.handle("bots:im:conversation-history", (event, hostId, botId, id, before) =>
     desktopHost(event, hostId).imConversationHistory(
       botIdentifier(botId),

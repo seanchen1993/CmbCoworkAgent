@@ -432,6 +432,21 @@ export class BotStore {
     return this.im.history(botId, id, before)
   }
 
+  imConversationControl(botId: string, id: string) {
+    this.requireImGroup(botId, id)
+    const tasks = this.rows(
+      `SELECT * FROM bot_tasks WHERE state IN ('queued','running','waiting_user')
+      AND work_id IS NULL AND json_extract(origin_json,'$.rootWorkId') IS NULL
+      AND json_extract(mock_source_json,'$.transport')='im'
+      AND json_extract(mock_source_json,'$.bindingId')=?`,
+      [id]
+    ).map((row) => this.task(row))
+    const threads = this.rows(
+      "SELECT thread_id FROM bot_im_conversations WHERE binding_id=? AND bot_id=?",
+      [id, botId]
+    ).map((row) => String(row.thread_id))
+    return { tasks, threads: [...new Set([...threads, ...tasks.map((task) => task.threadId)])] }
+  }
   imConversationWorks(botId: string, id: string, cursor?: string, query?: string) {
     this.requireImGroup(botId, id)
     return this.listWorks(botId, cursor, query, `im:${id}`)
@@ -2703,23 +2718,18 @@ export class BotStore {
     ).map((row) => String(row.thread_id))
   }
 
-  nextQueued(
-    excludedThreads: readonly string[],
-    allowWork = true,
-    cancellingBots: readonly string[] = []
-  ): BotTask | null {
+  nextQueued(excludedThreads: readonly string[], allowWork = true): BotTask | null {
     const exclusion = excludedThreads.length
       ? `AND t.thread_id NOT IN (${excludedThreads.map(() => "?").join(",")})`
       : ""
     const row = this.rows(
       `SELECT t.* FROM bot_tasks t JOIN bots b ON b.id=t.bot_id
       WHERE t.state='queued' AND b.archived=0 AND b.deleting=0 ${exclusion}
-      ${cancellingBots.length ? `AND t.bot_id NOT IN (${cancellingBots.map(() => "?").join(",")})` : ""}
       AND ${this.mock.runnableSql("t")} AND ${this.im.runnableSql("t")}
       AND (t.work_id IS NULL OR EXISTS(SELECT 1 FROM bot_work_items own WHERE own.id=t.work_id AND own.bot_id=t.bot_id AND own.state='active' AND own.detached=0 AND (own.conversation_json IS NULL OR json_extract(own.conversation_json,'$.state')='bound')))
       AND (json_extract(t.origin_json,'$.rootWorkId') IS NULL OR EXISTS(SELECT 1 FROM bot_work_items root JOIN bots owner ON owner.id=root.bot_id WHERE root.id=json_extract(t.origin_json,'$.rootWorkId') AND root.state='active' AND owner.archived=0 AND owner.deleting=0))
       ${allowWork ? "" : "AND t.work_id IS NULL AND json_extract(t.origin_json,'$.rootWorkId') IS NULL"}
-      AND NOT EXISTS (SELECT 1 FROM bot_tasks a WHERE (a.thread_id=t.thread_id OR (a.bot_id=t.bot_id AND a.work_id IS NULL AND t.work_id IS NULL)) AND a.state IN ('running','waiting_user'))
+      AND NOT EXISTS (SELECT 1 FROM bot_tasks a WHERE a.thread_id=t.thread_id AND a.state IN ('running','waiting_user'))
       AND NOT (json_extract(t.origin_json,'$.kind') IN ('group','discussion') AND EXISTS (
         SELECT 1 FROM bot_tasks turn JOIN bots member ON member.id=turn.bot_id
         WHERE turn.state IN ('queued','running')
@@ -2741,12 +2751,12 @@ export class BotStore {
       ORDER BY CASE WHEN t.work_id IS NULL AND json_extract(t.origin_json,'$.rootWorkId') IS NULL THEN 0 ELSE 1 END, CASE COALESCE(json_extract(t.origin_json,'$.kind'),'user')
         WHEN 'user' THEN 0 WHEN 'group' THEN 1 WHEN 'bot' THEN 2 ELSE 3 END,
       t.created_at, t.rowid LIMIT 1`,
-      [...excludedThreads, ...cancellingBots]
+      [...excludedThreads]
     )[0]
     if (!row) return null
     const task = this.task(row)
     // Serialize executing public turns; a member waiting for user input yields the room.
-    // Its own Bot/thread stays protected by the preceding running/waiting_user check.
+    // Its own thread stays protected; private chat and other rooms can proceed independently.
     // Peer jobs/replies and detached commands
     // keep their own lifecycle; holding those behind a room turn could deadlock it.
     if (task.origin.kind !== "group") return task

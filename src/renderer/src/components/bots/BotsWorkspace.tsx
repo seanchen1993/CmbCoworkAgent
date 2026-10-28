@@ -2210,6 +2210,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
             />
           ) : selectedIm && selected && !activeWorkId ? (
             <BotImConversation
+              tasks={snapshot?.tasks ?? []}
               key={selectedIm.id}
               conversation={selectedIm}
               bot={selected}

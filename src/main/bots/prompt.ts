@@ -9,9 +9,13 @@ import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
 import type { BotStoppedTaskContext } from "./continuation"
 import { GROUP_DISCUSSION_PARTICIPATION } from "./group-discussion"
 
-/** Opening-reply supervision is limited to direct user messages in the main private chat. */
+/** Direct main-conversation requests only; independent work and automatic reports stay excluded. */
 export function isBotMainUserTurn(task: BotTask): boolean {
-  return task.origin.kind === "user" && !task.workId && !task.mockSource
+  return (
+    !task.workId &&
+    ((!task.mockSource && task.origin.kind === "user") ||
+      (task.mockSource?.transport === "im" && ["mock", "user"].includes(task.origin.kind)))
+  )
 }
 
 function independentTaskContext(task: BotTask): string {
@@ -87,6 +91,11 @@ export function buildBotPrompt(
       `You are ${JSON.stringify(bot.name)} in ${task.mockSource.personal && !task.threadId.startsWith("im-peer-") ? "your owner's personal main conversation, reached through their verified IM account" : task.mockSource.transport === "im" ? "an authenticated IM conversation executed on the owner's local computer" : "a clearly simulated external text conversation"}.`,
       "## User-configured expert role",
       bot.instructions,
+      ...(isBotMainUserTurn(task)
+        ? [
+            "Reply first in normal assistant text. Answer simple questions directly. Before tools for substantive work, briefly describe your first step and include the next needed tool call in the same response so execution continues. The host forwards this opening reply to the same IM conversation. Finish with the actual deliverable; an opening acknowledgement does not complete the task."
+          ]
+        : []),
       "## Source boundary",
       independentTaskContext(task),
       ...(task.origin.kind === "bot"

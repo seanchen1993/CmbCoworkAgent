@@ -115,7 +115,7 @@ describe("public group turn admission", () => {
     expect(f.store.recentTasks().filter((t) => t.origin.kind === "group")).toHaveLength(2)
   })
 
-  it("does not admit a later member while the first member is busy in another conversation", () => {
+  it("keeps public member order without waiting for the first member's private conversation", () => {
     const f = fixture()
     const firstMember = [...f.members].sort((a, b) => a.id.localeCompare(b.id))[0]
     const privateTask = f.store.enqueue({
@@ -128,11 +128,18 @@ describe("public group turn admission", () => {
       "ordered",
       f.members.map((bot) => bot.id)
     )
-    expect(f.store.nextQueued([])).toBeNull()
-    f.store.settle(privateTask.id, "completed", null, "PRIVATE_ONLY")
     const first = f.store.nextQueued([])!
     expect(first.botId).toBe(firstMember.id)
+    f.store.transition(first.id, "running")
+    expect(f.store.nextQueued([])).toBeNull()
+    expect(f.store.getTask(privateTask.id).state).toBe("running")
+    f.store.settle(privateTask.id, "completed", null, "PRIVATE_ONLY")
     expect(first.message).not.toContain("PRIVATE_ONLY")
+    expect(f.store.nextQueued([])).toBeNull()
+    f.finish(first)
+    const second = f.store.nextQueued([])!
+    expect(second.botId).not.toBe(firstMember.id)
+    expect(second.message).not.toContain("PRIVATE_ONLY")
   })
 
   it("allows another room and peer jobs during a public turn, then delivers the peer receipt", () => {

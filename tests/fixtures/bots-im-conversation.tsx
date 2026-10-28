@@ -32,6 +32,7 @@ const groups = [
     id: "group-a",
     botId: bot.id,
     bindingId: "binding-a",
+    threadId: "im-a",
     title: "产品协作群",
     state: "active",
     connected: true,
@@ -41,6 +42,7 @@ const groups = [
     id: "group-b",
     botId: bot.id,
     bindingId: "binding-b",
+    threadId: "im-b",
     title: "体验优化小组",
     state: "active",
     connected: false,
@@ -89,6 +91,8 @@ const f = ((window as any).fixture = {
   reads: [] as any[],
   opened: [] as any[],
   manage: 0,
+  tasks: [] as any[],
+  cancelled: [] as string[],
   hold: false,
   release: null as any,
   fail: false,
@@ -139,12 +143,18 @@ const client = {
     return { pages: [], pageId: null, image: null, generation: 1, control: "bot" }
   },
   hostId: "local",
+  cancel: async (id: string) => {
+    f.cancelled.push(id)
+    const task = f.tasks.find((item) => item.id === id)
+    if (task) task.state = "cancelled"
+    f.bump()
+  },
   snapshot: async () => ({
     host: { id: "local", kind: "local", name: "本机", capabilities: {} },
     bots: [bot],
     groups: [],
     imConversations: groups.map((g) => ({ ...g, activity: { ...g.activity } })),
-    tasks: [],
+    tasks: f.tasks.map((task) => ({ ...task })),
     activities: [
       { kind: "bot", id: "bot", version: 1, unread: true, updatedAt: 1, preview: "私人主对话" }
     ],
@@ -186,6 +196,18 @@ const client = {
     }
   },
   im: {
+    stopConversation: async (_bot: string, id: string) => {
+      for (const task of f.tasks.filter(
+        (task) =>
+          task.mockSource?.bindingId === id &&
+          !task.workId &&
+          ["running", "queued", "waiting_user"].includes(task.state)
+      )) {
+        f.cancelled.push(task.id)
+        task.state = "cancelled"
+      }
+      f.bump()
+    },
     conversationHistory: async (botId: string, id: string, before?: string) => {
       f.calls.push({ botId, id, before })
       if (f.hold) {

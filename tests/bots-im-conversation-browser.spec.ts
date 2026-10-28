@@ -30,7 +30,7 @@ async function main() {
             b.onResolve(
               {
                 filter:
-                  /(?:^@\/lib\/(?:store|thread-context)$|^\.\/Bot[A-Z]|^@\/components\/chat\/CustomModelDialog$)/
+                  /(?:^@\/lib\/(?:store|thread-context)$|^\.\/Bot[A-Z]|^@\/components\/chat\/(?:CustomModelDialog|ChatContainer)$)/
               },
               (a) => {
                 if (
@@ -61,6 +61,12 @@ async function main() {
                 contents = `const state={models:[],threads:[],mainView:'bots',showCustomizeView:false,loadThreads:()=>{}};export const useAppStore=Object.assign(selector=>selector(state),{getState:()=>state});`
               else if (a.path === "@/lib/thread-context")
                 contents = `const state={messages:[],draftInput:'',draftAttachments:[],queuedMessages:[]};const context={initializeThread:()=>{},getThreadState:()=>state,getThreadActions:()=>({setDraftInput:()=>{},setDraftAttachments:()=>{}}),subscribeToThreadState:()=>()=>{}};export const useThreadContext=()=>context;export const useThreadStateSummaries=()=>({});`
+              else if (a.path === "@/components/chat/ChatContainer")
+                contents = `export const ChatContainer=({threadId,readOnlyReason})=><div data-testid="native-execution" data-thread={threadId}>{readOnlyReason}</div>;`
+              else if (a.path === "./BotConversationTools")
+                contents = `export const BotConversationTools=({children,conversationThreadId,executionDetails})=><div data-testid="execution-tools" data-thread={conversationThreadId} data-details={executionDetails}>{children}</div>;`
+              else if (a.path === "./BotMessageFilePreview")
+                contents = `export const BotMessageFilePreview=()=>null;`
               else if (a.path === "./BotConversation")
                 contents = `export const BotConversation=({work})=><div data-testid="private-conversation">{work?.id==='work-a'?'任务对话：演示准备清单':'私人主对话'}</div>;`
               else
@@ -130,7 +136,7 @@ async function main() {
     page.setDefaultTimeout(10000)
     page.on("pageerror", (error) => {
       errors.push(error.message)
-      console.error(error.message)
+      console.error(error.stack)
     })
     await page.getByLabel("产品协作群消息记录").waitFor()
     await page.getByText("已整理好本周的项目进展。", { exact: true }).last().waitFor()
@@ -144,6 +150,96 @@ async function main() {
     )
     assert.equal(await page.locator(".bots-conversation textarea").count(), 0)
     const artifacts = join(process.env.BOT_TEST_APP_OUT!, "artifacts")
+    assert.equal(await page.getByRole("button", { name: "执行详情", exact: true }).count(), 0)
+    await page.getByRole("button", { name: "查看执行过程", exact: true }).click()
+    assert.equal(await page.getByTestId("native-execution").getAttribute("data-thread"), "im-a")
+    assert.equal(await page.getByTestId("execution-tools").getAttribute("data-details"), "true")
+    assert.equal(
+      await page
+        .getByRole("button", { name: "收起执行过程", exact: true })
+        .getAttribute("aria-pressed"),
+      "true"
+    )
+    assert.equal(await page.getByRole("button", { name: "返回群聊", exact: true }).count(), 0)
+    await page.getByRole("button", { name: "招乎群聊：体验优化小组", exact: true }).click()
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-testid="native-execution"]')?.getAttribute("data-thread") ===
+        "im-b"
+    )
+    await page.getByRole("button", { name: "招乎群聊：产品协作群", exact: true }).click()
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-testid="native-execution"]')?.getAttribute("data-thread") ===
+        "im-a"
+    )
+    await page.getByRole("button", { name: "收起执行过程", exact: true }).click()
+    await page.getByLabel("产品协作群消息记录").waitFor({ state: "visible" })
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.tasks = [
+        {
+          id: "im-task-a",
+          botId: "bot",
+          threadId: "im-a",
+          state: "running",
+          origin: { kind: "mock" },
+          mockSource: { transport: "im", bindingId: "group-a" }
+        },
+        {
+          id: "im-task-queued",
+          botId: "bot",
+          threadId: "im-a",
+          state: "queued",
+          origin: { kind: "mock" },
+          mockSource: { transport: "im", bindingId: "group-a" }
+        },
+        {
+          id: "other-group",
+          botId: "bot",
+          threadId: "im-b",
+          state: "running",
+          origin: { kind: "mock" },
+          mockSource: { transport: "im", bindingId: "group-b" }
+        },
+        {
+          id: "private",
+          botId: "bot",
+          threadId: "private",
+          state: "queued",
+          origin: { kind: "user" }
+        },
+        {
+          id: "work",
+          botId: "bot",
+          threadId: "task-a",
+          workId: "work-a",
+          state: "running",
+          origin: { kind: "mock" },
+          mockSource: { transport: "im", bindingId: "group-a" }
+        }
+      ]
+      f.bump()
+    })
+    await page.getByRole("button", { name: "停止群内执行", exact: true }).waitFor()
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifacts, "bot-im-execution-controls.png")
+    })
+    await page.getByRole("button", { name: "停止群内执行", exact: true }).click()
+    await page.waitForFunction(() => (window as any).fixture.cancelled.length === 2)
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.cancelled), [
+      "im-task-a",
+      "im-task-queued"
+    ])
+    await page
+      .getByRole("button", { name: "停止群内执行", exact: true })
+      .waitFor({ state: "detached" })
+    await page.evaluate(() => {
+      ;(window as any).fixture.tasks = []
+      ;(window as any).fixture.bump()
+    })
+
     await page.getByRole("button", { name: "电脑", exact: true }).click()
     await page.waitForFunction(() =>
       (window as any).fixture.calls.some(

@@ -1,9 +1,17 @@
 .bot-im-list {
   margin-top: 22px;
 }
-.bot-chat-header > .bot-icon-button.bot-im-back {
+.bot-chat-header.bot-im-header {
+  grid-template-columns: 70px minmax(0, 1fr) 70px;
+}
+.bot-im-header-actions {
   grid-column: 1;
   grid-row: 1;
+  display: flex;
+  gap: 2px;
+}
+.bot-im-header > .bot-icon-button {
+  justify-self: end;
 }
 .bot-im-list > h3 {
   padding: 0 20px 8px;
@@ -333,4 +341,32 @@
 
 .bot-im-details-section .bot-browser-panel {
   padding: 16px 0 0;
+}
+
+.bot-im-transcript[hidden] {
+  display: none;
+}
+.bot-im-execution-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+  padding: 10px 24px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.bot-im-execution-bar > span {
+  flex: 1;
+}
+.bot-im-execution-bar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.bot-im-execution-bar button:hover:not(:disabled) {
+  color: var(--foreground);
+}
+.bot-im-execution-bar button:disabled {
+  opacity: 0.5;
 }

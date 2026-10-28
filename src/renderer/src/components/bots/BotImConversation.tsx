@@ -4,6 +4,7 @@ import {
   ArrowUpRight,
   ChevronRight,
   Loader2,
+  Square,
   MoreHorizontal,
   PanelRight,
   RefreshCw,
@@ -16,6 +17,7 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type {
   BotClient,
+  BotTask,
   BotDefinition,
   BotSchedule,
   BotConversationActivity
@@ -33,6 +35,11 @@ import { botImBrowserScope } from "../../../../shared/bots/im-channel"
 import { botWorkBrowserScope } from "../../../../shared/bots/work"
 import { BotSchedulePanel } from "./BotSchedulePanel"
 import { BotMemoryPanel } from "./BotMemoryPanel"
+import { ChatContainer } from "@/components/chat/ChatContainer"
+import { BotConversationTools } from "./BotConversationTools"
+import { BotMessageFilePreview } from "./BotMessageFilePreview"
+import { BotExecutionDetailsToggle } from "./BotExecutionDetailsToggle"
+import { useBotViewStore } from "./view-store"
 import "./bot-im-conversation.css"
 
 const stateLabels: Record<string, string> = {
@@ -106,6 +113,7 @@ export function BotImConversation({
   bot,
   client,
   revision,
+  tasks = [],
   detailOpen,
   onDetails,
   onManage,
@@ -116,12 +124,42 @@ export function BotImConversation({
   bot: BotDefinition
   client: BotClient
   revision: number
+  tasks?: BotTask[]
   detailOpen: boolean
   onDetails(): void
   onManage(): void
   onMain(): void
   onWork(id: string): void
 }) {
+  const showExecutionDetails = useBotViewStore((state) =>
+    Boolean(state.hosts[client.hostId]?.showExecutionDetails)
+  )
+  const executionThreadId = showExecutionDetails ? conversation.threadId : undefined
+  const [stopping, setStopping] = useState(false)
+  const [controlError, setControlError] = useState<string | null>(null)
+  const groupTasks = tasks.filter(
+    (task) =>
+      task.mockSource?.transport === "im" &&
+      task.mockSource.bindingId === conversation.id &&
+      task.botId === bot.id &&
+      !task.workId &&
+      !("rootWorkId" in task.origin && task.origin.rootWorkId)
+  )
+  const activeTasks = groupTasks.filter((task) =>
+    ["queued", "running", "waiting_user"].includes(task.state)
+  )
+  const stop = async () => {
+    if (stopping) return
+    setStopping(true)
+    setControlError(null)
+    try {
+      await client.im!.stopConversation(bot.id, conversation.id)
+    } catch (cause) {
+      if (mounted.current) setControlError(botErrorMessage(cause))
+    } finally {
+      if (mounted.current) setStopping(false)
+    }
+  }
   const [entries, setEntries] = useState<BotMockFeedEntry[]>([])
   const [cursor, setCursor] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -152,7 +190,8 @@ export function BotImConversation({
     }
   }
   const scroll = useRef<HTMLDivElement>(null),
-    atBottom = useRef(true)
+    atBottom = useRef(true),
+    scrollTop = useRef(0)
   const anchor = useRef<{ height: number; top: number } | null>(null)
   useEffect(() => {
     mounted.current = true
@@ -210,12 +249,13 @@ export function BotImConversation({
   useBotReadState(client, presented)
   useLayoutEffect(() => {
     const node = scroll.current
-    if (!node) return
+    if (!node || executionThreadId) return
     if (anchor.current) {
       node.scrollTop = anchor.current.top + node.scrollHeight - anchor.current.height
       anchor.current = null
-    } else if (atBottom.current) node.scrollTop = node.scrollHeight
-  }, [entries])
+    } else node.scrollTop = atBottom.current ? node.scrollHeight : scrollTop.current
+    scrollTop.current = node.scrollTop
+  }, [entries, executionThreadId])
   const more = async () => {
     if (!cursor || moreBusy || loading || !client.im?.conversationHistory) return
     setMoreBusy(true)
@@ -247,14 +287,18 @@ export function BotImConversation({
   const ordered = [...entries].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
   return (
     <>
-      <header className="bot-chat-header">
-        <button
-          className="bot-icon-button bot-im-back"
-          aria-label="返回 Bot 主对话"
-          onClick={onMain}
-        >
-          <ArrowLeft size={19} />
-        </button>
+      <header className="bot-chat-header bot-im-header">
+        <div className="bot-im-header-actions">
+          <BotExecutionDetailsToggle hostId={client.hostId} compact />
+          <button
+            className="bot-icon-button"
+            aria-label="返回 Bot 主对话"
+            title="返回 Bot 主对话"
+            onClick={onMain}
+          >
+            <ArrowLeft size={19} />
+          </button>
+        </div>
         <button
           className="bot-title-pill"
           onClick={onDetails}
@@ -282,13 +326,57 @@ export function BotImConversation({
           <MoreHorizontal size={17} />
         </button>
       </div>
+      {controlError && (
+        <div className="bot-notice" role="alert">
+          {controlError}
+        </div>
+      )}
+      {executionThreadId && (
+        <div className="bot-conversation-content">
+          <BotMessageFilePreview
+            client={client}
+            botId={bot.id}
+            threadId={executionThreadId}
+            name={conversation.title}
+          />
+          <BotConversationTools
+            executionDetails
+            client={client}
+            botId={bot.id}
+            conversationThreadId={executionThreadId}
+            bots={[bot]}
+            onOpenWork={onWork}
+            tasks={groupTasks.filter((task) => task.threadId === executionThreadId)}
+          >
+            <ChatContainer
+              key={executionThreadId}
+              threadId={executionThreadId}
+              surface="bot"
+              readOnlyReason="请在招乎群中继续交流；当前审批可在此处理。"
+              allowUserInputInReadOnly
+              managedTurn={{
+                busy: activeTasks.some((task) => task.threadId === executionThreadId),
+                cancel: stop,
+                submit: async () => {
+                  throw new Error("请在招乎群中发送消息")
+                },
+                placeholder: "请在招乎群中发送消息"
+              }}
+            />
+          </BotConversationTools>
+        </div>
+      )}
       <div
+        hidden={Boolean(executionThreadId)}
         className="bot-im-transcript"
         ref={scroll}
         aria-label={`${conversation.title}消息记录`}
         onScroll={() => {
           const node = scroll.current
-          if (node) atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 100
+          if (node && !executionThreadId) {
+            atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 100
+            scrollTop.current = node.scrollTop
+          }
         }}
       >
         {cursor && (
@@ -391,6 +479,21 @@ export function BotImConversation({
           )
         })}
       </div>
+      {activeTasks.length > 0 && (
+        <div className="bot-im-execution-bar" role="status">
+          <span>
+            {activeTasks.some((task) => task.state === "running")
+              ? "正在处理"
+              : activeTasks.some((task) => task.state === "waiting_user")
+                ? "等待你处理"
+                : "等待执行"}
+          </span>
+          <button disabled={stopping} onClick={() => void stop()}>
+            <Square size={13} />
+            {stopping ? "正在停止…" : "停止群内执行"}
+          </button>
+        </div>
+      )}
       <footer className="bot-im-composer-note">
         <UsersRound size={17} strokeWidth={1.5} />
         <span>

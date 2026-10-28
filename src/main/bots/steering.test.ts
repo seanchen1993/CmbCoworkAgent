@@ -560,14 +560,14 @@ describe("group input during an existing question", () => {
     expect(f.injections.get(child.id)!()).toBe(true)
   })
 
-  it("preserves early private-inbox priority during group startup", async () => {
+  it("does not yield a starting group conversation to unrelated private input", async () => {
     const f = await groupQuestion(false)
     f.host.send({ botId: f.bot.id, requestId: "private-first", message: "Private question" })
     expect(f.yieldToUser).not.toHaveBeenCalled()
     f.host.onSteeringReady(f.root.id)
-    expect(f.yieldToUser).toHaveBeenCalledOnce()
-    expect(f.yieldToUser.mock.calls[0][0]()).toBe(true)
+    expect(f.yieldToUser).not.toHaveBeenCalled()
     expect(f.steer).not.toHaveBeenCalled()
+    expect(f.store.getTask(f.root.id).state).toBe("waiting_user")
   })
 
   it("does not inject another room or a private message into this question", async () => {

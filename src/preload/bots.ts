@@ -14,6 +14,7 @@ export const localBotsApi: BotClient = {
       ipcRenderer.invoke("bots:conversation:unlink", LOCAL_BOT_HOST_ID, botId, workId, version)
   },
   im: {
+    stopConversation: (botId, id) => ipcRenderer.invoke("bots:im:conversation-stop", LOCAL_BOT_HOST_ID, botId, id),
     conversationWorks: (botId, id, cursor, query) =>
       ipcRenderer.invoke("bots:im:conversation-works", LOCAL_BOT_HOST_ID, botId, id, cursor, query),
     conversationHistory: (botId, id, before) =>

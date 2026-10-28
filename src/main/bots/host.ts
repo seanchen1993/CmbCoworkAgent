@@ -118,7 +118,7 @@ export class LocalBotHost {
   private readonly deletions = new Map<string, Promise<void>>()
   private readonly commandCancellations = new Map<
     string,
-    { botId: string; threadId: string; done: Promise<void> }
+    { threadId: string; done: Promise<void> }
   >()
   private readonly listeners = new Set<(event: BotChangeEvent) => void>()
   private readonly unsubscribe: () => void
@@ -1060,13 +1060,11 @@ export class LocalBotHost {
     const backgroundRun = [...this.active.values()].find(
       (candidate) =>
         candidate.botId === task.botId &&
+        candidate.task.threadId === task.threadId &&
         canDeferBotTask(candidate.task) &&
-        (!task.workId || candidate.task.threadId === task.threadId) &&
-        (!candidate.task.workId || candidate.task.threadId === task.threadId) &&
         (task.origin.kind !== "group" ||
           (candidate.task.origin.kind === "bot" &&
             candidate.task.origin.groupId === groupId &&
-            candidate.task.threadId === task.threadId &&
             this.store.getTask(candidate.task.id).state === "waiting_user"))
     )
     if (backgroundRun?.steeringReady && !backgroundRun.controller.signal.aborted) {
@@ -1126,14 +1124,9 @@ export class LocalBotHost {
     )
       return
     run.steeringReady = true
-    // Preserve the original private-inbox priority while a background/group
-    // runtime is starting. Its own room is an additional, separate inbox.
-    for (const task of this.store.pendingConversationTasks(run.botId, undefined, run.task.workId))
+    // Only this conversation can steer or yield its running turn.
+    for (const task of this.store.pendingTasksForThread(run.task.threadId))
       this.steerUserMessage(task)
-    const groupId = botTaskGroupId(run.task)
-    if (groupId && (run.task.origin.kind === "group" || run.task.origin.kind === "bot"))
-      for (const task of this.store.pendingConversationTasks(run.botId, groupId))
-        this.steerUserMessage(task)
   }
 
   taskCheckpoint(taskId: string): string | undefined {
@@ -1234,16 +1227,26 @@ export class LocalBotHost {
             this.faulted = true
             this.reportError(error)
           })
-        this.commandCancellations.set(task.id, { botId: task.botId, threadId: task.threadId, done })
+        this.commandCancellations.set(task.id, { threadId: task.threadId, done })
         return
       }
-      if (this.store.taskCheckpoint(taskId)) this.store.settle(taskId, "cancelled", null)
+      if (this.store.taskCheckpoint(taskId) || task.mockSource?.transport === "im")
+        this.store.settle(taskId, "cancelled", null)
       else this.store.transition(taskId, "cancelled")
       this.changed()
       this.wake()
     }
   }
 
+  stopImConversation(botId: string, bindingId: string): void {
+    this.requireRunning()
+    const { tasks, threads } = this.store.imConversationControl(botId, bindingId)
+    for (const task of tasks) this.cancel(task.id)
+    for (const threadId of threads) {
+      this.store.suppressCommands(threadId)
+      void Promise.resolve(this.runtime.cancelBackground?.(threadId)).catch(this.reportError)
+    }
+  }
   stopConversation(botId: string, groupId?: string, workId?: string): void {
     if (groupId && workId) throw new BotError("INVALID_INPUT", "群与工作目标不能混用")
     const bot = groupId ? this.getGroupMember(groupId, botId) : this.getBot(botId)
@@ -1330,8 +1333,7 @@ export class LocalBotHost {
     while (!this.stopping && this.active.size < this.concurrency) {
       const task = this.store.nextQueued(
         [...excluded],
-        ![...this.active.values()].some((run) => !!botTaskWorkFamily(run.task)),
-        [...this.commandCancellations.values()].map((run) => run.botId)
+        ![...this.active.values()].some((run) => !!botTaskWorkFamily(run.task))
       )
       if (!task) return
       excluded.add(task.threadId)

@@ -25,6 +25,8 @@ import { isBotGroupPass } from "../../shared/bots/group-discussion"
 import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
 import { isBotRoutineSilent } from "../../shared/bots/routine-silence"
 import { hasBotWorkflowCapability } from "../../shared/bots/workflow-capability"
+import { botMemoryContext } from "../../shared/bots/memory-scope"
+import { isBotMainUserTurn } from "../bots/prompt"
 import { botWorkResultLabel } from "../../shared/bots/work-result"
 import { WORKFLOW_NOTIFICATION_TURN_PROMPT } from "../../shared/internal-notification-turn"
 import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../agent/runtime-tool-catalog"
@@ -327,6 +329,7 @@ async function complete({
       profileContinuationRequest: () => null,
       onSteeringReady: vi.fn(),
       stoppedTaskContext: () => [],
+      associatedWorks: () => ({ items: [], hasMore: false }),
       publishGroupMessage: publishedText,
       publishGroupFiles: publishedFiles,
       peers: () => []
@@ -347,9 +350,13 @@ async function complete({
       botTextOnlyRemotePolicy,
       coordinatorWorkerManager: { hasAutoRunnableNotifications: () => true },
       localBotWorkspaces: {},
+      createLocalBotWorkHistory: () => ({}),
+      botInteractionRoutes: { enabled: () => false },
+      botMemoryContext,
+      isBotMainUserTurn,
       claimLocalThreadRunLease: () => ({ acquired: true }),
       prepareBotThread: () => workspace,
-      localWorkFileQueue: () => bot.id,
+      botWorkspaceFileQueue: () => `workspace:${workspace}`,
       subscribePendingUserInput: () => () => {},
       AsyncLocalStorageProviderSingleton: {
         getInstance: () => ({ run: (_value: unknown, execute: () => unknown) => execute() })
@@ -364,7 +371,7 @@ async function complete({
       hasBotWorkflowCapability,
       createBotMcpScope: () => ({}),
       getGlobalMcpCapabilityService: () => ({}),
-      isMemoryEnabled: () => false,
+      isBotMemoryEnabled: () => false,
       buildBotPrompt: () => "Synthetic prompt",
       buildBotStoppedTaskPrompt: () => "",
       mentionedBotContext: () => "",

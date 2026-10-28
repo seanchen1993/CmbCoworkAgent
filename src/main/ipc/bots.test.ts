@@ -220,6 +220,21 @@ describe("Bot IPC boundaries", () => {
           "不存在"
         )
         expect(() => call("bots:im:conversation-works", "remote", bot.id, localId)).toThrow("本机")
+        expect(() => call("bots:im:conversation-stop", "remote", bot.id, localId)).toThrow("本机")
+        expect(() => call("bots:im:conversation-stop", "local", other.id, localId)).toThrow(
+          "不存在"
+        )
+        expect(() => call("bots:im:conversation-stop", "local", bot.id, "../invalid")).toThrow(
+          "标识"
+        )
+        expect(() =>
+          register(undefined, { ...event, senderFrame: {} }, manager)(
+            "bots:im:conversation-stop",
+            "local",
+            bot.id,
+            localId
+          )
+        ).toThrow("桌面")
         expect(() => call("bots:im:conversation-history", "local", bot.id, localId, "bad")).toThrow(
           "游标"
         )

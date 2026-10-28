@@ -330,7 +330,7 @@ describe("durable local independent works", () => {
     ).toBe(true)
     expect(new Set(notifications.map((task) => task.requestId)).size).toBe(2)
   })
-  it("retains beta Bot/group serialization while allowing a separate work alongside it", () => {
+  it("runs private chat and separate work alongside the same Bot's group conversation", () => {
     const f = fixture()
     const group = f.store.saveGroup({ name: "Room", memberIds: [f.bot.id, f.peer.id] })
     f.store.sendGroup({
@@ -347,11 +347,14 @@ describe("durable local independent works", () => {
       message: "Continue privately"
     })
     const work = f.create()
+    expect(f.store.nextQueued([])?.id).toBe(main.id)
+    f.store.transition(main.id, "running")
     expect(f.store.nextQueued([])?.id).toBe(work.task.id)
     f.store.transition(work.task.id, "running")
     expect(f.store.nextQueued([])).toBeNull()
     f.store.settle(groupTask.id, "completed", null, "Room reply")
-    expect(f.store.nextQueued([])?.id).toBe(main.id)
+    expect(f.store.getTask(main.id).state).toBe("running")
+    expect(f.store.nextQueued([])).toBeNull()
   })
 
   it("rejects mixed group/work stop targets before changing either conversation", () => {
