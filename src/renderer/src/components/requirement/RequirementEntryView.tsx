@@ -20,6 +20,7 @@ import { getSelectedRequirementSystem, useRequirementStore } from "./requirement
 import type { DesignSystemInfo } from "../design/types"
 import { useAppStore } from "@/lib/store"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
+import { REQUIREMENT_CONVERSATION_ENTRY_KEY } from "@/lib/requirement-design-entry"
 import {
   leanstarRequirementsApi,
   type NamespaceTreeNode,
@@ -171,10 +172,24 @@ export function RequirementEntryView(): React.JSX.Element {
       .then((nextRequirements) => {
         if (cancelled) return
         setRequirements(nextRequirements)
+        const returnRequirementId = localStorage.getItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
+        localStorage.removeItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
         const firstLocalRequirement =
           nextRequirements.find((item) => item.origin !== "space") ?? null
-        setSelectedRequirement((current) => current ?? firstLocalRequirement)
-        if (firstLocalRequirement) setScreen("conversation")
+        const initialRequirement =
+          nextRequirements.find((item) => item.id === returnRequirementId) ?? firstLocalRequirement
+        if (returnRequirementId && initialRequirement?.id !== returnRequirementId) {
+          toast.error("未找到关联的需求会话")
+        }
+        setSelectedRequirement((current) => current ?? initialRequirement)
+        if (initialRequirement) {
+          if (initialRequirement.id === returnRequirementId) {
+            const threadId = getRequirementThreadIds(initialRequirement)[0] ?? null
+            setSelectedRequirementThreadId(threadId)
+            if (threadId) void selectThread(threadId, { preserveView: true })
+          }
+          setScreen("conversation")
+        }
         setRequirementsLoaded(true)
       })
       .catch((error: unknown) => {
@@ -186,7 +201,7 @@ export function RequirementEntryView(): React.JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [loadRequirements])
+  }, [loadRequirements, selectThread])
 
   useEffect(() => {
     if (

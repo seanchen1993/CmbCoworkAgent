@@ -2,6 +2,8 @@ export const REQUIREMENT_DESIGN_ENTRY_KEY = "pending-requirement-design"
 // 独立保存“设计会话 -> 需求功能”映射，不侵入原有设计会话数据结构。
 export const REQUIREMENT_DESIGN_ASSOCIATIONS_KEY = "requirement-design-associations"
 export const REQUIREMENT_DESIGN_NAVIGATE_EVENT = "requirement-design:navigate"
+export const REQUIREMENT_CONVERSATION_ENTRY_KEY = "pending-requirement-conversation"
+export const REQUIREMENT_CONVERSATION_NAVIGATE_EVENT = "requirement-conversation:navigate"
 
 export type RequirementDesignEntry = {
   requirementId: string
@@ -40,6 +42,11 @@ export function buildRequirementDesignPrompt(
 export function openRequirementDesign(entry: RequirementDesignEntry): void {
   localStorage.setItem(REQUIREMENT_DESIGN_ENTRY_KEY, JSON.stringify(entry))
   window.dispatchEvent(new Event(REQUIREMENT_DESIGN_NAVIGATE_EVENT))
+}
+
+export function returnToRequirementConversation(requirementId: string): void {
+  localStorage.setItem(REQUIREMENT_CONVERSATION_ENTRY_KEY, requirementId)
+  window.dispatchEvent(new Event(REQUIREMENT_CONVERSATION_NAVIGATE_EVENT))
 }
 
 type RequirementEntryStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">

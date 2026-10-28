@@ -65,7 +65,10 @@ import { ResourcePanelOverlay } from "@/components/panels/ResourcePanelOverlay"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { DEFAULT_BROWSER_CDP_CONFIG, useAppStore } from "@/lib/store"
-import { REQUIREMENT_DESIGN_NAVIGATE_EVENT } from "@/lib/requirement-design-entry"
+import {
+  REQUIREMENT_CONVERSATION_NAVIGATE_EVENT,
+  REQUIREMENT_DESIGN_NAVIGATE_EVENT
+} from "@/lib/requirement-design-entry"
 import { useGitChangeNoticeListener } from "@/components/git/GitChangeNotice"
 import { ThreadProvider } from "@/lib/thread-context"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
@@ -385,6 +388,7 @@ function App(): React.JSX.Element {
     setActiveModeTab("design")
     setMainView("design")
   }, [setMainView])
+
   const selectRequirementHistory = useCallback(() => {
     setActiveModeTab("requirements")
     setMainView("design")
@@ -395,8 +399,16 @@ function App(): React.JSX.Element {
       setActiveModeTab("design")
       setMainView("design")
     }
+    const navigateToRequirement = (): void => {
+      setActiveModeTab("requirements")
+      setMainView("design")
+    }
     window.addEventListener(REQUIREMENT_DESIGN_NAVIGATE_EVENT, navigateToDesign)
-    return () => window.removeEventListener(REQUIREMENT_DESIGN_NAVIGATE_EVENT, navigateToDesign)
+    window.addEventListener(REQUIREMENT_CONVERSATION_NAVIGATE_EVENT, navigateToRequirement)
+    return () => {
+      window.removeEventListener(REQUIREMENT_DESIGN_NAVIGATE_EVENT, navigateToDesign)
+      window.removeEventListener(REQUIREMENT_CONVERSATION_NAVIGATE_EVENT, navigateToRequirement)
+    }
   }, [setMainView])
 
   // Keep the route consumed by the expensive center/right surfaces atomic. A

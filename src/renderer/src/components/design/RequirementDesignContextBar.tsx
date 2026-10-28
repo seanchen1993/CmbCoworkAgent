@@ -1,8 +1,9 @@
 import { useState } from "react"
-import { Loader2, Save } from "lucide-react"
+import { ArrowLeft, Loader2, Save, WandSparkles } from "lucide-react"
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { ActiveRequirementDesignEntry } from "./use-requirement-design-entry"
+import { returnToRequirementConversation } from "@/lib/requirement-design-entry"
 
 export function RequirementDesignContextBar({
   entry,
@@ -82,7 +83,8 @@ export function RequirementDesignContextBar({
 
   return (
     <div className="flex h-11 shrink-0 items-center gap-4 border-y border-status-info/30 bg-status-info/10 px-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
-      <span className="shrink-0 rounded-full bg-status-info px-2 py-0.5 text-[11px] font-semibold text-white">
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-status-info px-2 py-0.5 text-[11px] font-semibold text-white">
+        <WandSparkles className="size-3 animate-pulse" aria-hidden="true" />
         需求原型设计中
       </span>
       <div className="flex min-w-0 flex-1 items-center gap-4 text-xs">
@@ -123,6 +125,14 @@ export function RequirementDesignContextBar({
           ) : null}
         </Tooltip>
       </TooltipProvider>
+      <button
+        type="button"
+        onClick={() => returnToRequirementConversation(entry.requirementId)}
+        className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-status-info/40 bg-background/80 px-3 text-xs font-semibold text-foreground shadow-sm transition-colors hover:bg-status-info/15"
+      >
+        <ArrowLeft className="size-3" />
+        返回需求
+      </button>
     </div>
   )
 }
