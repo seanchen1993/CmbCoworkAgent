@@ -3715,6 +3715,7 @@ function DashboardContent({
       setSkillTracesLoading(true)
       try {
         const result = await window.api.dashboard.skillDetail(skill, range, {
+          projectMode: activeMainTab === "project-mode",
           page,
           pageSize: SKILL_TRACE_PAGE_SIZE,
           mode: traceViewMode,
@@ -3728,7 +3729,7 @@ function DashboardContent({
         setSkillTracesLoading(false)
       }
     },
-    [range, skillTraceViewMode, skillTraceTriggerScope]
+    [activeMainTab, range, skillTraceViewMode, skillTraceTriggerScope]
   )
 
   const handleSkillClick = useCallback(
@@ -4102,6 +4103,7 @@ function DashboardContent({
     setSkillTraceExporting(true)
     try {
       const result = await window.api.dashboard.exportSkillTraces({
+        projectMode: activeMainTab === "project-mode",
         skill: selectedSkill,
         range,
         page: skillTracePage,
@@ -4119,7 +4121,15 @@ function DashboardContent({
     } finally {
       setSkillTraceExporting(false)
     }
-  }, [range, selectedSkill, skillDetail, skillTracePage, skillTraceTriggerScope, skillTraceViewMode])
+  }, [
+    activeMainTab,
+    range,
+    selectedSkill,
+    skillDetail,
+    skillTracePage,
+    skillTraceTriggerScope,
+    skillTraceViewMode
+  ])
 
   const loadUserList = useCallback(
     async (
@@ -4397,6 +4407,17 @@ function DashboardContent({
         })
       ),
     [range, userDetailTraceTriggerScope]
+  )
+  const loadProjectSkillThreadTraces = useCallback(
+    async (threadId: string): Promise<DashboardTraceDetail[]> =>
+      unwrapThreadTracesResponse(
+        await window.api.dashboard.threadTraces(threadId, {
+          scope: "project",
+          range,
+          triggerScope: skillTraceTriggerScope
+        })
+      ),
+    [range, skillTraceTriggerScope]
   )
   const loadProjectThreadTraces = useCallback(
     async (threadId: string): Promise<DashboardTraceDetail[]> => {
@@ -5612,6 +5633,9 @@ function DashboardContent({
           if (!open) setSkillTracePage(1)
         }}
         skill={selectedSkill}
+        loadThreadTraces={
+          activeMainTab === "project-mode" ? loadProjectSkillThreadTraces : undefined
+        }
         traces={skillDetail?.traces ?? []}
         codeStats={skillDetail?.stats ?? null}
         tracePage={skillTracePage}

@@ -3575,7 +3575,7 @@ function ProjectModePanelContent({
           <span className="font-medium text-foreground">项目总数 / 特性总数</span>{" "}
           为当前状态；汇总指标按
           <span className="font-medium text-foreground">所选时间范围</span>
-          统计，项目列表展示累计数据。
+          统计，项目列表展示累计数据；测试项目不计入本页统计。
         </p>
         <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-3 xl:grid-cols-6">
           <StatCard

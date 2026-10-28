@@ -1,4 +1,11 @@
 import {
+  excludesTestProjects,
+  excludeTestProjectsFromQuery,
+  withProjectModeTestExclusion,
+  projectModeTestScopeCacheKey,
+  testProjectLookupScope
+} from "./project-mode-test-projects"
+import {
   buildAwardSkillMatchFilter,
   groupAwardSkillCandidates,
   mapAwardBatches,
@@ -373,6 +380,7 @@ async function esQuery(
     operation?: "search" | "field_caps"
   }
 ): Promise<unknown> {
+  if (options?.operation !== "field_caps") body = excludeTestProjectsFromQuery(index, body)
   const nodes = getEsNodes()
   if (nodes.length === 0) throw new Error("ES_NODES not configured")
 
@@ -1183,6 +1191,7 @@ type TraceViewMode = "thread" | "trace"
 type TraceTriggerScope = "active" | "all"
 
 interface TracePageOptions {
+  projectMode?: boolean
   page?: number
   pageSize?: number
   limit?: number
@@ -13840,7 +13849,7 @@ async function fetchProjectModeMetricSortedPage(
     eventIndex: getEsIndex("event"),
     traceIndex: getEsIndex("trace")
   }
-  const cacheKey = JSON.stringify([scope, sortBy])
+  const cacheKey = JSON.stringify([scope, sortBy, projectModeTestScopeCacheKey()])
   let metrics = projectAttentionRankingCache.get(cacheKey)
   if (!metrics) {
     const generation = projectAttentionRankingCache.generation
@@ -13896,6 +13905,7 @@ async function fetchProjectModeProjectPage(
     access.sapId,
     access.ystId,
     visibility,
+    projectModeTestScopeCacheKey(),
     filters,
     options?.page ?? 1,
     options?.pageSize ?? 10,
@@ -13973,7 +13983,7 @@ const projectModeCommitIdCache = new ProjectModePageCache<string[]>()
 
 async function projectModeCommitIds(filters: Record<string, unknown>[]): Promise<string[]> {
   const index = getEsIndex("event")
-  const key = JSON.stringify([getEsNodes(), index, filters])
+  const key = JSON.stringify([getEsNodes(), index, filters, projectModeTestScopeCacheKey()])
   const cached = projectModeCommitIdCache.get(key)
   if (cached) return cached
   const generation = projectModeCommitIdCache.generation
@@ -15505,6 +15515,47 @@ type DashboardRequestHandler<TArgs extends unknown[], TResult> = (
   ...args: TArgs
 ) => TResult | Promise<TResult>
 
+async function runDashboardHandlerInProjectScope<T>(
+  channel: string,
+  args: readonly unknown[],
+  operation: () => Promise<T>
+): Promise<T | { success: false; error: string }> {
+  if (import.meta.env.DEV || !excludesTestProjects(channel, args)) return operation()
+  try {
+    const access = requireDashboardProjectModeAccess()
+    const scope = testProjectLookupScope(channel, args)
+    const accessFilter = buildProjectModeOrgFilter(scope, access)
+    return await withProjectModeTestExclusion(
+      {
+        eventIndex: getEsIndex("event"),
+        traceIndex: getEsIndex("trace"),
+        accessFilters: [
+          ...(accessFilter ? [accessFilter] : []),
+          ...(scope.projectId ? [{ term: { "properties.projectId": scope.projectId } }] : [])
+        ],
+        query: esQuery
+      },
+      operation
+    )
+  } catch (error) {
+    if (isDashboardRequestCancelled(error) || isDashboardEsRequestCancelled(error)) throw error
+    logDashboardRequestError(channel, error)
+    return { success: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+function registerScopedDashboardHandler<TArgs extends unknown[], TResult>(
+  target: typeof ipcMain,
+  channel: string,
+  handler: DashboardRequestHandler<TArgs, TResult>
+): void {
+  target.handle(channel, (event, ...rawArgs) =>
+    runDashboardHandlerInProjectScope(channel, rawArgs, () =>
+      Promise.resolve(handler(event, ...(rawArgs as TArgs)))
+    )
+  )
+}
+
 function registerLatestDashboardHandler<TArgs extends unknown[], TResult>(
   target: typeof ipcMain,
   channel: string,
@@ -15516,7 +15567,9 @@ function registerLatestDashboardHandler<TArgs extends unknown[], TResult>(
     const family = resolveFamily(...args)
     try {
       return await dashboardRequestCoordinator.run(event.sender, family, () =>
-        Promise.resolve(handler(event, ...args))
+        runDashboardHandlerInProjectScope(channel, args, () =>
+          Promise.resolve(handler(event, ...args))
+        )
       )
     } catch (error) {
       if (isDashboardRequestCancelled(error) || isDashboardEsRequestCancelled(error)) {
@@ -15974,7 +16027,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:projectModeExportData",
     async (_, range: TimeRange, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) {
@@ -16105,7 +16159,13 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   registerLatestDashboardHandler(
     _ipcMain,
     "dashboard:projectModeFeatureNodes",
-    async (_, projectId: string, featureSlug: string, range: TimeRange | null, opts?: OrgFilterOptions) => {
+    async (
+      _,
+      projectId: string,
+      featureSlug: string,
+      range: TimeRange | null,
+      opts?: OrgFilterOptions
+    ) => {
       if (import.meta.env.DEV)
         return { success: true, data: makeMockProjectModeFeatureNodes(projectId, featureSlug) }
       try {
@@ -16195,7 +16255,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     (adapterName) => `dashboard:pluginAggregate:${adapterName.slice(0, 256)}`
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:projectModeFeatureCommits",
     async (
       _,
@@ -16226,7 +16287,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:projectModeProjectCommits",
     async (
       _,
@@ -16317,7 +16379,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   })
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:userDetail",
     async (_, sapId: string, range: TimeRange, options?: UserDetailOptions) => {
       const normalizedSapId = sapId?.trim?.() ?? ""
@@ -16333,7 +16396,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:uncommittedRanking",
     async (_, range: TimeRange, options?: UncommittedScopeOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockUncommittedRanking(options) }
@@ -16346,7 +16410,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:uncommittedDetail",
     async (_, sapId: string, range: TimeRange, options?: UncommittedScopeOptions) => {
       const normalizedSapId = sapId?.trim?.() ?? ""
@@ -16608,7 +16673,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:threadTraces",
     async (_, threadId: string, options?: ThreadTracesOptions) => {
       if (import.meta.env.DEV) {
@@ -16660,7 +16726,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:skillDetail",
     async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
       if (import.meta.env.DEV)
@@ -16687,7 +16754,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:nonGitAdoptionReports",
     async (_, range: TimeRange, options?: NonGitAdoptionReportsOptions) => {
       if (import.meta.env.DEV)
@@ -16713,102 +16781,113 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   })
 
-  _ipcMain.handle("dashboard:exportSkillTraces", async (event, rawPayload: unknown) => {
-    try {
-      const payload = normalizeTraceExportPayload(rawPayload)
-      if (!payload.skill) return { success: false, error: "skill is required" }
-      if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
+  registerScopedDashboardHandler(
+    _ipcMain,
+    "dashboard:exportSkillTraces",
+    async (event, rawPayload: unknown) => {
+      try {
+        const payload = normalizeTraceExportPayload(rawPayload)
+        if (!payload.skill) return { success: false, error: "skill is required" }
+        if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
 
-      const exportedAt = new Date().toISOString()
-      const date = exportedAt.slice(0, 10)
-      const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
-      const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
-        title: "导出 Skill 会话历史",
-        defaultPath: `${safeExportFileName(payload.skill)}-traces-page-${payload.page}-${date}.zip`,
-        filters: [{ name: "Zip Archive", extensions: ["zip"] }]
-      })
+        const exportedAt = new Date().toISOString()
+        const date = exportedAt.slice(0, 10)
+        const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+        const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+          title: "导出 Skill 会话历史",
+          defaultPath: `${safeExportFileName(payload.skill)}-traces-page-${payload.page}-${date}.zip`,
+          filters: [{ name: "Zip Archive", extensions: ["zip"] }]
+        })
 
-      if (result.canceled || !result.filePath) {
-        return { success: false, canceled: true }
+        if (result.canceled || !result.filePath) {
+          return { success: false, canceled: true }
+        }
+
+        payload.traces = await fetchTraceExportDetails(payload)
+        const zip = new AdmZip()
+        zip.addFile(
+          "traces.md",
+          Buffer.from(formatTraceExportMarkdown(payload, exportedAt), "utf-8")
+        )
+        zip.addFile(
+          "traces.json",
+          Buffer.from(`${stringifyExportValue({ version: 1, exportedAt, ...payload })}\n`, "utf-8")
+        )
+        await zip.writeZipPromise(result.filePath)
+
+        return { success: true, filePath: result.filePath }
+      } catch (e) {
+        console.error("[Dashboard] exportSkillTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
-
-      payload.traces = await fetchTraceExportDetails(payload)
-      const zip = new AdmZip()
-      zip.addFile("traces.md", Buffer.from(formatTraceExportMarkdown(payload, exportedAt), "utf-8"))
-      zip.addFile(
-        "traces.json",
-        Buffer.from(`${stringifyExportValue({ version: 1, exportedAt, ...payload })}\n`, "utf-8")
-      )
-      await zip.writeZipPromise(result.filePath)
-
-      return { success: true, filePath: result.filePath }
-    } catch (e) {
-      console.error("[Dashboard] exportSkillTraces error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  })
+  )
 
-  _ipcMain.handle("dashboard:exportUserTraces", async (event, rawPayload: unknown) => {
-    try {
-      const payload = normalizeUserTraceExportPayload(rawPayload)
-      if (!payload.sapId) return { success: false, error: "sapId is required" }
-      if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
+  registerScopedDashboardHandler(
+    _ipcMain,
+    "dashboard:exportUserTraces",
+    async (event, rawPayload: unknown) => {
+      try {
+        const payload = normalizeUserTraceExportPayload(rawPayload)
+        if (!payload.sapId) return { success: false, error: "sapId is required" }
+        if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
 
-      const exportedAt = new Date().toISOString()
-      const date = exportedAt.slice(0, 10)
-      const viewLabel = payload.viewMode === "thread" ? "threads" : "traces"
-      const displayName = payload.userName || payload.sapId
-      const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
-      const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
-        title: `导出用户 ${payload.viewMode === "thread" ? "Thread" : "Trace"} 历史`,
-        defaultPath: `${safeExportFileName(`${displayName}-${payload.sapId}`)}-${viewLabel}-page-${payload.page}-${date}.zip`,
-        filters: [{ name: "Zip Archive", extensions: ["zip"] }]
-      })
+        const exportedAt = new Date().toISOString()
+        const date = exportedAt.slice(0, 10)
+        const viewLabel = payload.viewMode === "thread" ? "threads" : "traces"
+        const displayName = payload.userName || payload.sapId
+        const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+        const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+          title: `导出用户 ${payload.viewMode === "thread" ? "Thread" : "Trace"} 历史`,
+          defaultPath: `${safeExportFileName(`${displayName}-${payload.sapId}`)}-${viewLabel}-page-${payload.page}-${date}.zip`,
+          filters: [{ name: "Zip Archive", extensions: ["zip"] }]
+        })
 
-      if (result.canceled || !result.filePath) {
-        return { success: false, canceled: true }
+        if (result.canceled || !result.filePath) {
+          return { success: false, canceled: true }
+        }
+
+        payload.traces = await fetchTraceExportDetails(
+          payload,
+          payload.projectMode
+            ? { scope: "project", range: payload.range, triggerScope: payload.triggerScope }
+            : undefined
+        )
+        const zip = new AdmZip()
+        zip.addFile(
+          `${viewLabel}.md`,
+          Buffer.from(formatUserTraceExportMarkdown(payload, exportedAt), "utf-8")
+        )
+        const commonPayload = {
+          version: 1,
+          exportedAt,
+          exportType: payload.viewMode,
+          user: {
+            sapId: payload.sapId,
+            ...(payload.ystId ? { ystId: payload.ystId } : {}),
+            userName: payload.userName
+          },
+          range: payload.range,
+          page: payload.page,
+          pageSize: payload.pageSize,
+          totalItems: payload.totalItems,
+          triggerScope: payload.triggerScope,
+          projectMode: payload.projectMode
+        }
+        const data =
+          payload.viewMode === "thread"
+            ? { ...commonPayload, threads: groupTraceExportThreads(payload.traces) }
+            : { ...commonPayload, traces: payload.traces }
+        zip.addFile(`${viewLabel}.json`, Buffer.from(`${stringifyExportValue(data)}\n`, "utf-8"))
+        await zip.writeZipPromise(result.filePath)
+
+        return { success: true, filePath: result.filePath }
+      } catch (e) {
+        console.error("[Dashboard] exportUserTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
-
-      payload.traces = await fetchTraceExportDetails(
-        payload,
-        payload.projectMode
-          ? { scope: "project", range: payload.range, triggerScope: payload.triggerScope }
-          : undefined
-      )
-      const zip = new AdmZip()
-      zip.addFile(
-        `${viewLabel}.md`,
-        Buffer.from(formatUserTraceExportMarkdown(payload, exportedAt), "utf-8")
-      )
-      const commonPayload = {
-        version: 1,
-        exportedAt,
-        exportType: payload.viewMode,
-        user: {
-          sapId: payload.sapId,
-          ...(payload.ystId ? { ystId: payload.ystId } : {}),
-          userName: payload.userName
-        },
-        range: payload.range,
-        page: payload.page,
-        pageSize: payload.pageSize,
-        totalItems: payload.totalItems,
-        triggerScope: payload.triggerScope,
-        projectMode: payload.projectMode
-      }
-      const data =
-        payload.viewMode === "thread"
-          ? { ...commonPayload, threads: groupTraceExportThreads(payload.traces) }
-          : { ...commonPayload, traces: payload.traces }
-      zip.addFile(`${viewLabel}.json`, Buffer.from(`${stringifyExportValue(data)}\n`, "utf-8"))
-      await zip.writeZipPromise(result.filePath)
-
-      return { success: true, filePath: result.filePath }
-    } catch (e) {
-      console.error("[Dashboard] exportUserTraces error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  })
+  )
 
   _ipcMain.handle(
     "dashboard:exportExcel",

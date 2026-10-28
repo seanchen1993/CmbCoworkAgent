@@ -156,7 +156,8 @@ async function buildProjectDoc(
   // carries id/name but not version, so resolve it separately). Best-effort.
   let adapterVersion: string | undefined
   try {
-    adapterVersion = (await getHarnessProjectAdapterSnapshot(project.projectId))?.version || undefined
+    adapterVersion =
+      (await getHarnessProjectAdapterSnapshot(project.projectId))?.version || undefined
   } catch {
     adapterVersion = undefined
   }
@@ -173,6 +174,9 @@ async function buildProjectDoc(
     // by the current flag — re-upserted every poll, so a false→true flip reflects
     // without backfilling the append-only trace/event docs.
     projectFromLean: project.projectFromLean === true,
+    // Current metadata, not an append-only Trace flag: flips apply to all project history.
+    // Legacy projects without this setting remain normal projects.
+    isTestProject: project.isTestProject === true,
     systemId: project.systemId,
     systemName: project.systemName,
     workspacePath: project.workspacePath,
@@ -213,7 +217,11 @@ async function buildProjectDoc(
 // ES upsert (PUT _doc/{id} overwrites the whole document)
 // ─────────────────────────────────────────────────────────
 
-async function upsertProjectDoc(docId: string, doc: Record<string, unknown>): Promise<void> {
+async function upsertProjectDoc(
+  docId: string,
+  doc: Record<string, unknown>,
+  partial = false
+): Promise<void> {
   const nodes = getEsNodes()
   if (nodes.length === 0) return
 
@@ -226,12 +234,12 @@ async function upsertProjectDoc(docId: string, doc: Record<string, unknown>): Pr
 
   let lastError: Error | null = null
   for (const node of nodes) {
-    const url = `${node}/${getEventIndex()}/_doc/${encodeURIComponent(docId)}`
+    const url = `${node}/${getEventIndex()}/${partial ? "_update" : "_doc"}/${encodeURIComponent(docId)}`
     try {
       const resp = await fetch(url, {
-        method: "PUT",
+        method: partial ? "POST" : "PUT",
         headers,
-        body: JSON.stringify(doc),
+        body: JSON.stringify(partial ? { doc } : doc),
         signal: AbortSignal.timeout(WRITE_TIMEOUT_MS)
       })
       if (!resp.ok) {
@@ -248,13 +256,15 @@ async function upsertProjectDoc(docId: string, doc: Record<string, unknown>): Pr
 }
 
 /**
- * Read the feature count of the project's existing snapshot in ES.
+ * Read only the existing feature count and test-project classification in ES.
  *
- * Returns the count when it can be determined (a missing document / 404 counts
- * as 0), or `null` when ES could not be reached at all. The caller treats
+ * A missing document / 404 has count 0; `null` means ES could not be reached.
+ * The caller treats
  * `null` as "can't confirm" and errs on the side of preserving existing data.
  */
-async function fetchExistingFeatureCount(docId: string): Promise<number | null> {
+async function fetchExistingSnapshotState(
+  docId: string
+): Promise<{ featureCount: number; isTestProject?: boolean } | null> {
   const nodes = getEsNodes()
   if (nodes.length === 0) return null
 
@@ -266,22 +276,28 @@ async function fetchExistingFeatureCount(docId: string): Promise<number | null> 
   }
 
   for (const node of nodes) {
-    const url = `${node}/${getEventIndex()}/_doc/${encodeURIComponent(docId)}?_source=properties.featureCount,properties.features`
+    const url = `${node}/${getEventIndex()}/_doc/${encodeURIComponent(docId)}?_source=properties.featureCount,properties.features.slug,properties.isTestProject`
     try {
       const resp = await fetch(url, {
         method: "GET",
         headers,
         signal: AbortSignal.timeout(WRITE_TIMEOUT_MS)
       })
-      if (resp.status === 404) return 0
+      if (resp.status === 404) return { featureCount: 0 }
       if (!resp.ok) throw new Error(`ES ${resp.status}`)
       const json = (await resp.json()) as {
-        _source?: { properties?: { featureCount?: unknown; features?: unknown } }
+        _source?: {
+          properties?: { featureCount?: unknown; features?: unknown; isTestProject?: boolean }
+        }
       }
       const props = json._source?.properties
-      if (typeof props?.featureCount === "number") return props.featureCount
-      if (Array.isArray(props?.features)) return props.features.length
-      return 0
+      const featureCount =
+        typeof props?.featureCount === "number"
+          ? props.featureCount
+          : Array.isArray(props?.features)
+            ? props.features.length
+            : 0
+      return { featureCount, isTestProject: props?.isTestProject }
     } catch (e) {
       console.warn(
         `[HarnessStatusReporter] ES read failed on ${node} for ${docId}:`,
@@ -345,11 +361,20 @@ async function reportOneProject(
 
   // Direct-ES fallback: perform the preservation guard client-side.
   if (newFeatureCount === 0) {
-    const existing = await fetchExistingFeatureCount(docId)
-    if (existing === null || existing > 0) {
+    const existing = await fetchExistingSnapshotState(docId)
+    if (existing === null || existing.featureCount > 0) {
+      // Preserve features on an unsuccessful inspect, but allow the classification to change.
+      // A partial update cannot replace the existing feature array; no doc_as_upsert.
+      if (existing && existing.isTestProject !== (project.isTestProject === true)) {
+        await upsertProjectDoc(
+          docId,
+          { properties: { isTestProject: project.isTestProject === true } },
+          true
+        )
+      }
       console.warn(
         `[HarnessStatusReporter] Skipped ${project.projectId}: probe returned 0 features ` +
-          `but existing snapshot has ${existing ?? "unknown"} — preserving previous data`
+          `but existing snapshot has ${existing?.featureCount ?? "unknown"} — preserving previous data`
       )
       return "skipped"
     }
