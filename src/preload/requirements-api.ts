@@ -122,7 +122,7 @@ export const requirementsApi = {
     reqId: string
     workspacePath: string
     requirementFilePath: string
-    htmlFile: string
+    htmlFile?: string
     htmlId: string
   }) =>
     ipcRenderer.invoke("requirements:update-function-html", payload) as Promise<{

@@ -107,6 +107,12 @@ export class DesignSessionClient {
   create(seed: DesignSessionSeed): Promise<DesignSessionSnapshot> {
     return this.enqueue(seed.id, async () => this.apply(await this.api.create(seed)))
   }
+  async waitUntilReady(id: string): Promise<DesignSessionSnapshot> {
+    await this.pending.get(id)
+    const snapshot = this.get(id)
+    if (!snapshot) throw new Error("设计会话创建失败")
+    return snapshot
+  }
   patch(
     id: string,
     patch: Partial<TabState>,

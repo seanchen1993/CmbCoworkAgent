@@ -2438,7 +2438,7 @@ export function DesignView(): React.JSX.Element {
     [flushArtifactEdits]
   )
 
-  // 消费需求详情页传入的数据，并负责恢复会话及回写生成后的 HTML 绑定。
+  // 消费需求详情页传入的数据：首次创建会话，后续打开已有会话。
   useRequirementDesignEntry({
     sessionReady,
     createSession,

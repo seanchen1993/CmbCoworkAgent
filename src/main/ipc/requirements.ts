@@ -419,9 +419,8 @@ async function updateRequirementFunctionHtml(
   htmlFile: string
   htmlId: string
 }> {
-  const htmlFile = path.resolve(payload.htmlFile || "")
   const htmlId = payload.htmlId?.trim() || ""
-  if (!htmlId || !(await fs.stat(htmlFile)).isFile()) throw new Error("HTML 文件或设计会话无效")
+  if (!htmlId) throw new Error("设计会话无效")
   const { list, index, item } = requirement
   const manifestResult = await readWorkspaceManifest(item)
   if (manifestResult.status !== "ok") throw new Error("无法读取需求 Manifest")
@@ -434,6 +433,11 @@ async function updateRequirementFunctionHtml(
   const rawFunction: Record<string, unknown> = isRecord(rawFunctions[match.index])
     ? (rawFunctions[match.index] as Record<string, unknown>)
     : {}
+  const existingHtmlFile = manifestResult.manifest.functions[match.index].htmlFile
+  const htmlFile = payload.htmlFile?.trim() ? path.resolve(payload.htmlFile) : existingHtmlFile
+  if (payload.htmlFile?.trim() && !(await fs.stat(htmlFile)).isFile()) {
+    throw new Error("HTML 文件无效")
+  }
   const updatedRaw = {
     ...manifestResult.raw,
     functions: rawFunctions.map((entry, entryIndex) =>

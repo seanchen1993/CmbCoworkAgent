@@ -56,7 +56,7 @@ export function isCurrentOpenResourcePreviewIntent(
   )
 }
 
-function normalizeOpenResourcePreviewDetail(
+export function createOpenResourcePreviewDetail(
   detail: OpenResourcePreviewRequest
 ): OpenResourcePreviewDetail {
   return {
@@ -76,7 +76,7 @@ function normalizeOpenResourcePreviewDetail(
 export function emitOpenResourcePreview(detail: OpenResourcePreviewRequest): void {
   window.dispatchEvent(
     new CustomEvent<OpenResourcePreviewDetail>(RESOURCE_PREVIEW_OPEN_EVENT, {
-      detail: normalizeOpenResourcePreviewDetail(detail)
+      detail: createOpenResourcePreviewDetail(detail)
     })
   )
 }
@@ -87,7 +87,7 @@ export function onOpenResourcePreview(
   const handler = (event: Event): void => {
     const customEvent = event as CustomEvent<OpenResourcePreviewRequest>
     if (!customEvent.detail?.threadId || !customEvent.detail?.filePath) return
-    callback(normalizeOpenResourcePreviewDetail(customEvent.detail))
+    callback(createOpenResourcePreviewDetail(customEvent.detail))
   }
   window.addEventListener(RESOURCE_PREVIEW_OPEN_EVENT, handler as EventListener)
   return () => {

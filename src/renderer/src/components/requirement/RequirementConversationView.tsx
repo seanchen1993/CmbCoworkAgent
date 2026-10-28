@@ -470,14 +470,23 @@ function RequirementConversationSession({
     (functionInfo: { fr: string; name: string; file: string; htmlId?: string }): void => {
       if (conversationLoading) return
       const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
+      const workspaceRoot = workspacePath.replace(/[\\/]+$/, "")
       const relativeFile = normalizePrdFilePath(functionInfo.file).replace(/^\/+/, "")
+      const relativeOverviewFile = normalizePrdFilePath(
+        requirementSpaceManifest?.prd.file ?? ""
+      ).replace(/^\/+/, "")
       const separator = workspacePath.includes("\\") ? "\\" : "/"
-      const requirementFilePath = `${workspacePath.replace(/[\\/]+$/, "")}${separator}${relativeFile.replace(/\//g, separator)}`
+      const requirementFilePath = `${workspaceRoot}${separator}${relativeFile.replace(/\//g, separator)}`
+      const requirementOverviewFilePath = relativeOverviewFile
+        ? `${workspaceRoot}${separator}${relativeOverviewFile.replace(/\//g, separator)}`
+        : undefined
       openRequirementDesign({
         requirementId: requirement.id,
         requirementName: requirement.title,
         functionName: `${functionInfo.fr} ${functionInfo.name}`.trim(),
         workspacePath,
+        previewThreadId: threadId ?? undefined,
+        requirementOverviewFilePath,
         requirementFilePath,
         prompt: buildRequirementDesignPrompt(
           `${functionInfo.fr} ${functionInfo.name}`,
@@ -491,6 +500,8 @@ function RequirementConversationSession({
       requirement.id,
       requirement.requirementPath,
       requirement.title,
+      requirementSpaceManifest?.prd.file,
+      threadId,
       threadState?.workspacePath
     ]
   )

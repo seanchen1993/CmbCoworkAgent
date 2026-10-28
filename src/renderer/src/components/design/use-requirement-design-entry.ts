@@ -12,6 +12,8 @@ export type ActiveRequirementDesignEntry = RequirementDesignEntry & {
   bindingReady: boolean
 }
 
+const REQUIREMENT_ATTACHMENT_MAX_CHARS = 24_000
+
 type CreateRequirementSession = (
   meta?: Partial<SessionMeta>,
   options?: {
@@ -20,8 +22,6 @@ type CreateRequirementSession = (
     workspacePath?: string
   }
 ) => string
-
-const REQUIREMENT_ATTACHMENT_MAX_CHARS = 24_000
 
 // 将功能 PRD 转换为设计模式原有的附件结构，复用既有附件展示与上下文同步流程。
 async function readRequirementAttachment(filePath: string): Promise<FileAttachment> {
@@ -81,8 +81,7 @@ export function useRequirementDesignEntry({
   onEntryChange: (entry: ActiveRequirementDesignEntry | null) => void
   showToast: (message: string) => void
 }): void {
-  // Consume the cross-mode entry once, then restore in descending fidelity:
-  // managed session, saved HTML, or a blank session with the prompt prefilled.
+  // 首次进入时创建会话并立即回写 htmlId；已有会话丢失时不做 HTML 恢复。
   useEffect(() => {
     if (!sessionReady) return
     const raw = localStorage.getItem(REQUIREMENT_DESIGN_ENTRY_KEY)
@@ -97,75 +96,39 @@ export function useRequirementDesignEntry({
         setWorkspacePath(entry.workspacePath)
         const client = getDesignSessionClient()
         const requirementAttachment = await readRequirementAttachment(entry.requirementFilePath)
-        if (entry.htmlId && client.list().some((session) => session.id === entry.htmlId)) {
-          if (client.get(entry.htmlId)?.workspacePath !== entry.workspacePath) {
-            await client.setWorkspace(entry.htmlId, entry.workspacePath)
-          }
-          await bindRequirementAttachment(entry.htmlId, requirementAttachment)
-          openSession(entry.htmlId)
-          onEntryChange({ ...entry, bindingReady: true })
-          return
-        }
-
-        const binding = await window.api.requirements.getFunctionHtml({
-          workspacePath: entry.workspacePath,
-          requirementFilePath: entry.requirementFilePath
-        })
-        if (!binding.success) throw new Error(binding.error || "读取需求原型绑定失败")
-        const htmlFile = binding.htmlFile?.trim() ?? ""
-        if (htmlFile) {
-          const readResult = await window.api.file.readText(htmlFile)
-          if (!readResult.success || !readResult.content) {
-            throw new Error(readResult.error || "读取已有原型 HTML 失败")
-          }
+        if (!entry.htmlId) {
           const sessionId = createSession(
+            { title: entry.requirementFilePath.split(/[\\/]/).pop() || "需求原型" },
             {
-              title: entry.requirementFilePath.split(/[\\/]/).pop() || "需求原型",
-              kind: "import_html"
-            },
-            {
+              initialInputValue: entry.prompt,
               initialAttachedFiles: [requirementAttachment],
               workspacePath: entry.workspacePath
             }
           )
-          await client.patch(sessionId, {
-            html: readResult.content,
-            artifactPath: htmlFile,
-            generationState: "done",
-            inputValue: ""
-          })
-          onEntryChange({ ...entry, htmlId: sessionId, htmlFile, bindingReady: true })
+          await client.waitUntilReady(sessionId)
           const updated = await window.api.requirements.updateFunctionHtml({
             reqId: entry.requirementId,
             workspacePath: entry.workspacePath,
             requirementFilePath: entry.requirementFilePath,
-            htmlFile,
             htmlId: sessionId
           })
-          if (!updated.success) throw new Error(updated.error || "更新设计会话失败")
+          if (!updated.success) throw new Error(updated.error || "同步设计会话失败")
+          onEntryChange({ ...entry, htmlId: sessionId, bindingReady: true })
           return
         }
-
-        const sessionId = createSession(
-          { title: entry.requirementFilePath.split(/[\\/]/).pop() || "需求原型" },
-          {
-            initialInputValue: entry.prompt,
-            initialAttachedFiles: [requirementAttachment],
-            workspacePath: entry.workspacePath
-          }
-        )
-        onEntryChange({ ...entry, htmlId: sessionId, bindingReady: true })
+        if (!client.list().some((session) => session.id === entry.htmlId)) {
+          throw new Error("设计会话不存在")
+        }
+        if (client.get(entry.htmlId)?.workspacePath !== entry.workspacePath) {
+          await client.setWorkspace(entry.htmlId, entry.workspacePath)
+        }
+        await bindRequirementAttachment(entry.htmlId, requirementAttachment)
+        openSession(entry.htmlId)
+        onEntryChange({ ...entry, bindingReady: true })
       } catch (error) {
         onEntryChange(null)
         showToast(error instanceof Error ? error.message : "打开需求设计失败")
       }
     })()
-  }, [
-    createSession,
-    onEntryChange,
-    openSession,
-    sessionReady,
-    setWorkspacePath,
-    showToast
-  ])
+  }, [createSession, onEntryChange, openSession, sessionReady, setWorkspacePath, showToast])
 }

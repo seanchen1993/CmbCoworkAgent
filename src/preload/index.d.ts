@@ -2461,7 +2461,7 @@ interface CustomAPI {
       reqId: string
       workspacePath: string
       requirementFilePath: string
-      htmlFile: string
+      htmlFile?: string
       htmlId: string
     }) => Promise<{
       success: boolean

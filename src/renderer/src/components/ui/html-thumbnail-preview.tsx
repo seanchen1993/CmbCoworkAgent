@@ -24,9 +24,17 @@ export function HtmlThumbnailPreview({
   className?: string
 }): React.JSX.Element {
   const [loading, setLoading] = useState(true)
+  const [showLoading, setShowLoading] = useState(false)
 
   useEffect(() => {
     setLoading(true)
+    setShowLoading(false)
+    const showTimer = window.setTimeout(() => setShowLoading(true), 120)
+    const settleTimer = window.setTimeout(() => setLoading(false), 800)
+    return () => {
+      window.clearTimeout(showTimer)
+      window.clearTimeout(settleTimer)
+    }
   }, [html])
 
   const openInBrowser = (): void => {
@@ -40,7 +48,8 @@ export function HtmlThumbnailPreview({
       <iframe
         title={title}
         srcDoc={html}
-        sandbox="allow-scripts"
+        sandbox={fit === "fill" ? "allow-scripts" : ""}
+        loading="lazy"
         tabIndex={-1}
         onLoad={() => setLoading(false)}
         onError={() => setLoading(false)}
@@ -51,7 +60,7 @@ export function HtmlThumbnailPreview({
             : "pointer-events-none h-[500%] w-[500%] origin-top-left scale-[0.2]"
         )}
       />
-      {loading ? (
+      {loading && showLoading ? (
         <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/90 text-primary backdrop-blur-[1px]">
           <div className="flex items-center gap-2 text-xs font-medium">
             <Loader2 className="size-4 animate-spin" />

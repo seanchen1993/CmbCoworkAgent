@@ -210,6 +210,7 @@ function PrototypeHtmlPreview({
   }
   return (
     <HtmlThumbnailPreview
+      key={previewKey}
       html={preview.html}
       title={`原型预览 ${filePath}`}
       browserUrl={filePath}
@@ -925,9 +926,7 @@ export function RequirementStepsPanel({
           ) : requirementSpaceManifest ? (
             <div className="space-y-3 bg-[#fbfcfe] p-4">
               <div className="flex min-h-5 items-center gap-3">
-                <h2 className="text-sm font-semibold leading-5 text-foreground">
-                  发布需求空间3.0
-                </h2>
+                <h2 className="text-sm font-semibold leading-5 text-foreground">发布需求空间3.0</h2>
                 <p className="text-xs leading-4 text-muted-foreground">
                   发布后写入需求空间，供研发与测试查阅
                 </p>
@@ -1017,9 +1016,7 @@ export function RequirementStepsPanel({
                                   ) : (
                                     <Send className="size-3.5" />
                                   )}
-                                  {publishRequestQueued
-                                    ? "发布请求已发送"
-                                    : "发布到需求空间3.0"}
+                                  {publishRequestQueued ? "发布请求已发送" : "发布到需求空间3.0"}
                                 </Button>
                               </span>
                             </TooltipTrigger>

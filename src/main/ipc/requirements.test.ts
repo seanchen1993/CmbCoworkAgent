@@ -653,6 +653,19 @@ describe("requirement source preview", () => {
       "utf-8"
     )
 
+    const sessionBound = (await updateFunctionHtml(null, {
+      reqId: created.requirement.reqId,
+      workspacePath,
+      requirementFilePath,
+      htmlId: "ds_first123"
+    })) as { success: boolean; error?: string }
+    expect(sessionBound.success, sessionBound.error).toBe(true)
+    expect(JSON.parse(readFileSync(manifestPath, "utf-8")).functions[0]).toMatchObject({
+      htmlFile: "",
+      htmlId: "ds_first123",
+      needDesign: "1"
+    })
+
     const updated = (await updateFunctionHtml(null, {
       reqId: created.requirement.reqId,
       workspacePath,

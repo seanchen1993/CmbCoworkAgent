@@ -81,11 +81,11 @@ export function RequirementPrototypeAction({
 }): React.JSX.Element {
   if (!choiceMade) {
     return (
-      <div className="flex w-full flex-col gap-2 px-4 py-3">
+      <div className="flex w-full flex-col items-center gap-2 px-4 py-3">
         <Button
           type="button"
           size="sm"
-          className="h-9 w-full gap-1.5 rounded-lg shadow-sm"
+          className="h-9 w-28 gap-1.5 rounded-lg shadow-sm"
           disabled={disabled}
           onClick={onDesign}
         >
@@ -96,10 +96,11 @@ export function RequirementPrototypeAction({
           type="button"
           size="sm"
           variant="outline"
-          className="h-9 w-full rounded-lg border-border/80 bg-white/90 text-muted-foreground"
+          className="h-9 w-28 gap-1.5 rounded-lg border-border/80 bg-white/90 text-muted-foreground"
           disabled={disabled}
           onClick={() => onChange("0")}
         >
+          <CheckCircle2 className="size-3.5" />
           无需设计
         </Button>
       </div>
@@ -130,7 +131,7 @@ export function RequirementPrototypeAction({
           size="sm"
           disabled={disabled}
           onClick={onDesign}
-          className="h-9 gap-2 rounded-lg px-4 shadow-sm transition-transform hover:-translate-y-0.5"
+          className="h-9 w-28 gap-2 rounded-lg px-4 shadow-sm transition-transform hover:-translate-y-0.5"
         >
           <Palette className="size-4" />
           继续设计

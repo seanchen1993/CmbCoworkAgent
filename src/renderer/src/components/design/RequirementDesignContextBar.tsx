@@ -1,9 +1,10 @@
 import { useState } from "react"
-import { ArrowLeft, Loader2, Save, WandSparkles } from "lucide-react"
+import { ArrowLeft, Eye, Loader2, Save, WandSparkles } from "lucide-react"
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { ActiveRequirementDesignEntry } from "./use-requirement-design-entry"
 import { returnToRequirementConversation } from "@/lib/requirement-design-entry"
+import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 
 export function RequirementDesignContextBar({
   entry,
@@ -30,6 +31,28 @@ export function RequirementDesignContextBar({
   const requirementName = entry.requirementName?.trim() || "未命名需求"
   const functionName = entry.functionName?.trim() || "未命名功能"
   const effectiveDisabledReason = saving ? "正在同步设计，请稍候" : disabledReason
+
+  const previewButton = (filePath: string | undefined, title: string): React.JSX.Element => (
+    <button
+      type="button"
+      disabled={!filePath || !entry.previewThreadId}
+      onClick={() => {
+        if (!filePath || !entry.previewThreadId) return
+        openResourcePanelOverlay("preview", {
+          filePreview: {
+            threadId: entry.previewThreadId,
+            filePath,
+            workspacePathKind: "absolute"
+          }
+        })
+      }}
+      aria-label={`预览${title}`}
+      title={filePath ? `在右侧预览${title}` : `暂无${title}文件`}
+      className="ml-1 inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-status-info/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      <Eye className="size-3.5" />
+    </button>
+  )
 
   const save = async (): Promise<void> => {
     setSaving(true)
@@ -88,14 +111,18 @@ export function RequirementDesignContextBar({
         需求原型设计中
       </span>
       <div className="flex min-w-0 flex-1 items-center gap-4 text-xs">
-        <span className="min-w-0 truncate text-muted-foreground">
-          需求名称
-          <strong className="ml-1.5 font-semibold text-foreground">{requirementName}</strong>
+        <span className="flex min-w-0 items-center text-muted-foreground">
+          <span className="shrink-0">需求名称</span>
+          <strong className="ml-1.5 truncate font-semibold text-foreground">
+            {requirementName}
+          </strong>
+          {previewButton(entry.requirementOverviewFilePath, "需求文件")}
         </span>
         <span className="h-4 w-px shrink-0 bg-status-info/30" />
-        <span className="min-w-0 truncate text-muted-foreground">
-          功能名称
-          <strong className="ml-1.5 font-semibold text-foreground">{functionName}</strong>
+        <span className="flex min-w-0 items-center text-muted-foreground">
+          <span className="shrink-0">功能名称</span>
+          <strong className="ml-1.5 truncate font-semibold text-foreground">{functionName}</strong>
+          {previewButton(entry.requirementFilePath, "功能文件")}
         </span>
       </div>
       <TooltipProvider delayDuration={200}>

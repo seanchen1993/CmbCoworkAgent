@@ -1,3 +1,5 @@
+import type { OpenResourcePreviewRequest } from "./resource-preview-events"
+
 export type ResourcePanelOverlayMode = "preview" | "git" | "browser"
 
 /** Inline text preview (e.g. a remote requirement document without a workspace file). */
@@ -12,12 +14,15 @@ export interface ResourcePanelOverlayOpenOptions {
   browserUrl?: string
   /** Optional inline text rendered by the preview module instead of a file. */
   inlinePreview?: ResourcePanelInlinePreview
+  /** Workspace file rendered through the paged file preview pipeline. */
+  filePreview?: OpenResourcePreviewRequest
 }
 
 export interface ResourcePanelOverlayOpenDetail {
   mode: ResourcePanelOverlayMode
   browserUrl?: string
   inlinePreview?: ResourcePanelInlinePreview
+  filePreview?: OpenResourcePreviewRequest
 }
 
 const RESOURCE_PANEL_OVERLAY_OPEN_EVENT = "resource-panel-overlay:open"
@@ -29,7 +34,8 @@ export function openResourcePanelOverlay(
   const detail: ResourcePanelOverlayOpenDetail = {
     mode,
     ...(options?.browserUrl ? { browserUrl: options.browserUrl } : {}),
-    ...(options?.inlinePreview ? { inlinePreview: options.inlinePreview } : {})
+    ...(options?.inlinePreview ? { inlinePreview: options.inlinePreview } : {}),
+    ...(options?.filePreview ? { filePreview: options.filePreview } : {})
   }
   window.dispatchEvent(
     new CustomEvent<ResourcePanelOverlayOpenDetail>(RESOURCE_PANEL_OVERLAY_OPEN_EVENT, {

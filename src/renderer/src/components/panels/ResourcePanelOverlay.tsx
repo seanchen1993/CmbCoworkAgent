@@ -9,6 +9,12 @@ import {
   type ResourcePanelOverlayMode
 } from "@/lib/resource-panel-overlay-events"
 import { useResourcePreviewRequest } from "@/lib/use-resource-preview-request"
+import {
+  createOpenResourcePreviewDetail,
+  emitOpenResourcePreview,
+  type OpenResourcePreviewDetail,
+  type OpenResourcePreviewRequest
+} from "@/lib/resource-preview-events"
 
 interface ResourcePanelOverlayProps {
   isAgentFocusActive: boolean
@@ -33,10 +39,14 @@ export function ResourcePanelOverlay({
   const [mode, setMode] = useState<ResourcePanelOverlayMode>("preview")
   const [browserUrl, setBrowserUrl] = useState<string | null>(null)
   const [inlinePreview, setInlinePreview] = useState<ResourcePanelInlinePreview | null>(null)
+  const [filePreview, setFilePreview] = useState<OpenResourcePreviewDetail | null>(null)
+  const [filePreviewThreadId, setFilePreviewThreadId] = useState<string | null>(null)
   const handlePreviewRequest = useCallback((): void => {
     setMode("preview")
     setBrowserUrl(null)
     setInlinePreview(null)
+    setFilePreview(null)
+    setFilePreviewThreadId(null)
     setOpen(true)
   }, [])
   const { request: previewRequest, clear: clearPreviewRequest } = useResourcePreviewRequest(
@@ -44,25 +54,41 @@ export function ResourcePanelOverlay({
     !standardRightPanelMounted,
     handlePreviewRequest
   )
-  const overlayThreadId = renderedPanelThreadId
+  const overlayThreadId = filePreviewThreadId ?? renderedPanelThreadId
 
   const close = useCallback(() => {
     setOpen(false)
+    setFilePreview(null)
+    setFilePreviewThreadId(null)
+    clearPreviewRequest()
+  }, [clearPreviewRequest])
+  const clearHandledPreviewRequest = useCallback(() => {
+    setFilePreview(null)
     clearPreviewRequest()
   }, [clearPreviewRequest])
 
   const selectMode = useCallback(
     (
       nextMode: ResourcePanelOverlayMode,
-      options?: { browserUrl?: string; inlinePreview?: ResourcePanelInlinePreview }
+      options?: {
+        browserUrl?: string
+        inlinePreview?: ResourcePanelInlinePreview
+        filePreview?: OpenResourcePreviewRequest
+      }
     ) => {
       if (standardRightPanelMounted) {
         setRightModule(nextMode)
+        if (options?.filePreview) emitOpenResourcePreview(options.filePreview)
         return
       }
       setMode(nextMode)
       setBrowserUrl(options?.browserUrl ?? null)
       setInlinePreview(options?.inlinePreview ?? null)
+      const nextFilePreview = options?.filePreview
+        ? createOpenResourcePreviewDetail(options.filePreview)
+        : null
+      setFilePreview(nextFilePreview)
+      setFilePreviewThreadId(nextFilePreview?.threadId ?? null)
       setOpen(true)
     },
     [setRightModule, standardRightPanelMounted]
@@ -72,7 +98,8 @@ export function ResourcePanelOverlay({
     return onOpenResourcePanelOverlay((detail) =>
       selectMode(detail.mode, {
         browserUrl: detail.browserUrl,
-        inlinePreview: detail.inlinePreview
+        inlinePreview: detail.inlinePreview,
+        filePreview: detail.filePreview
       })
     )
   }, [selectMode])
@@ -109,8 +136,10 @@ export function ResourcePanelOverlay({
         showSystemConstraints={renderedMainView === "harness"}
         browserInitialUrl={mode === "browser" ? browserUrl : null}
         inlinePreview={mode === "preview" ? inlinePreview : null}
-        resourcePreviewRequest={mode === "preview" || mode === "browser" ? previewRequest : null}
-        onResourcePreviewRequestHandled={clearPreviewRequest}
+        resourcePreviewRequest={
+          mode === "preview" || mode === "browser" ? (filePreview ?? previewRequest) : null
+        }
+        onResourcePreviewRequestHandled={clearHandledPreviewRequest}
         listenForResourcePreview={false}
         onRequestPreviewMode={() => setMode("preview")}
         onRequestWorkMode={close}

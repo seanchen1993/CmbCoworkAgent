@@ -10,6 +10,8 @@ export type RequirementDesignEntry = {
   requirementName?: string
   functionName?: string
   workspacePath: string
+  previewThreadId?: string
+  requirementOverviewFilePath?: string
   requirementFilePath: string
   prompt: string
   htmlId: string
