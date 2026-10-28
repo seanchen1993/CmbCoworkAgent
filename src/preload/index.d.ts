@@ -1,4 +1,10 @@
 import type {
+  ManagedRunSchedule,
+  ManagedRunScheduleInput,
+  ManagedRunScheduleIdentity,
+  ManagedRunScheduleChange
+} from "../shared/managed-run-schedule"
+import type {
   KnowledgeAccumulationData,
   KnowledgeActiveDetails,
   KnowledgeFileReaders,
@@ -3072,6 +3078,17 @@ interface CustomAPI {
     ensureFeatureThreadImGrant: (
       input: HarnessFeatureThreadGrantInput
     ) => Promise<HarnessFeatureThreadGrantResult>
+    getActiveManagedRunSchedules: () => Promise<ManagedRunSchedule[]>
+    getManagedRunSchedule: (
+      projectId: string,
+      featureId: string
+    ) => Promise<ManagedRunSchedule | null>
+    scheduleManagedRun: (input: ManagedRunScheduleInput) => Promise<ManagedRunSchedule>
+    cancelManagedRunSchedule: (input: ManagedRunScheduleIdentity) => Promise<void>
+    updateManagedRunSchedule: (
+      input: ManagedRunScheduleIdentity & { scheduledAt: string }
+    ) => Promise<void>
+    onManagedRunScheduleChanged: (callback: (event: ManagedRunScheduleChange) => void) => () => void
     validateManagedRunStart: (input: ManagedRunStartValidationInput) => Promise<void>
     startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>
     stopManagedRun: (input: ManagedRunStopInput) => Promise<boolean>

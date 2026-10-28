@@ -91,6 +91,8 @@ import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
 import { ArtifactAccumulationButton } from "./ArtifactAccumulationButton"
 import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
 import { ManagedRunHistory } from "@/components/harness-board/ManagedRunHistory"
+import { ManagedRunScheduleNotice } from "./ManagedRunScheduleNotice"
+import { useManagedRunSchedule, useManagedRunScheduleIndex } from "@/lib/use-managed-run-schedule"
 import { ManagedRunStartDialog } from "./ManagedRunStartDialog"
 import { buildManagedRunSessionOptions } from "@/lib/managed-run-session-options"
 import {
@@ -6504,6 +6506,7 @@ function FeatureDetailPage({
   onBackToProject,
   onEditDeployUnits,
   onRefresh,
+  managedScheduleRefreshRevision,
   onFeatureImManagementSaved,
   onActiveSessionChange,
   onSessionViewChange,
@@ -6521,6 +6524,7 @@ function FeatureDetailPage({
   onBackToProject: () => void
   onEditDeployUnits: () => void
   onRefresh: () => void | Promise<void>
+  managedScheduleRefreshRevision: number
   onFeatureImManagementSaved: (projectId: string, featureId: string, enabled: boolean) => void
   onActiveSessionChange?: (threadId: string) => void
   onSessionViewChange?: (viewing: boolean) => void
@@ -6570,6 +6574,11 @@ function FeatureDetailPage({
     selectedNode?.status ?? { label: "读取中", uiKind: "unknown" as const }
   const managedRun = detail?.run.managedRun
   const managedRunIsRunning = managedRun?.status === "running"
+  const managedSchedule = useManagedRunSchedule(
+    projectDeleted ? undefined : detail?.project.projectId,
+    detail?.run.slug,
+    managedScheduleRefreshRevision
+  )
   const managedRunSessionThreadId = managedRun?.currentSession?.threadId
   const managedRunStatus = managedRun ? managedRunStatusToHarnessStatus(managedRun.status) : null
   const nodeGroups = useMemo(() => groupStageNodes(detail?.run.nodes ?? []), [detail])
@@ -6929,7 +6938,8 @@ function FeatureDetailPage({
       workspacePath?: string,
       enableImManagement = true,
       initialUserMessage?: string,
-      existingThreadId?: string
+      existingThreadId?: string,
+      scheduledAt?: string
     ): Promise<boolean> => {
       if (
         !detail ||
@@ -6949,6 +6959,18 @@ function FeatureDetailPage({
           const confirmedWorkspacePath = normalizeWorkspacePath(workspacePath)
           if (!confirmedWorkspacePath) throw new Error("请选择本次托管使用的会话工作区")
           await setCombinedFeatureImManagement(enableImManagement)
+          if (scheduledAt) {
+            await window.api.harnessBoard.scheduleManagedRun({
+              projectId: detail.project.projectId,
+              featureId: detail.run.slug,
+              workspacePath: confirmedWorkspacePath,
+              initialUserMessage,
+              existingThreadId,
+              scheduledAt
+            })
+            toast.success("已预约托管运行")
+            return true
+          }
           const startedRun = await window.api.harnessBoard.startManagedRun({
             projectId: detail.project.projectId,
             featureId: detail.run.slug,
@@ -7313,7 +7335,11 @@ function FeatureDetailPage({
                       !detail ||
                       projectInteractionDisabled ||
                       openingManagedRunDialog ||
-                      updatingManagedRun
+                      updatingManagedRun ||
+                      (!managedRunIsRunning &&
+                        (managedSchedule.loading ||
+                          Boolean(managedSchedule.schedule) ||
+                          Boolean(managedSchedule.error)))
                     }
                   >
                     {openingManagedRunDialog || updatingManagedRun ? (
@@ -7397,6 +7423,17 @@ function FeatureDetailPage({
           )}
         </div>
       </div>
+
+      {effectiveActiveDetailTab === "feature" && (
+        <ManagedRunScheduleNotice
+          key={`${detailKey}:${managedSchedule.schedule?.scheduleId ?? ""}`}
+          className={harnessSurfaceClassName}
+          schedule={managedSchedule.schedule}
+          error={managedSchedule.error}
+          onRetry={managedSchedule.reload}
+          disabled={projectDeleted}
+        />
+      )}
 
       {activeSessionThreadIdForView ? (
         <div className="flex min-h-0 flex-1 flex-col pt-3">
@@ -7643,13 +7680,20 @@ function FeatureDetailPage({
           featureImUnavailableReason={featureImUnavailableReason}
           updatingManagedRun={updatingManagedRun}
           onClose={() => setManagedRunDialogOpen(false)}
-          onConfirm={({ workspacePath, initialUserMessage, existingThreadId, imEnabled }) =>
+          onConfirm={({
+            workspacePath,
+            initialUserMessage,
+            existingThreadId,
+            imEnabled,
+            scheduledAt
+          }) =>
             handleManagedRunChange(
               true,
               workspacePath,
               imEnabled,
               initialUserMessage,
-              existingThreadId
+              existingThreadId,
+              scheduledAt
             )
           }
         />
@@ -7660,6 +7704,7 @@ function FeatureDetailPage({
 
 function ProjectFeatureSidebar({
   groups,
+  managedScheduleRefreshRevision,
   collapsedKeys,
   pinnedProjectIds,
   pinnedFeatureKeys,
@@ -7698,6 +7743,7 @@ function ProjectFeatureSidebar({
   onEditingTitleChange
 }: {
   groups: ProjectSessionProjectGroup[]
+  managedScheduleRefreshRevision: number
   collapsedKeys: Set<string>
   pinnedProjectIds: Set<string>
   pinnedFeatureKeys: Set<string>
@@ -7744,6 +7790,7 @@ function ProjectFeatureSidebar({
         loadMoreThreads: state.loadMoreThreads
       }))
     )
+  const managedScheduleIndex = useManagedRunScheduleIndex(managedScheduleRefreshRevision)
   const highlightThreadId = isViewingSession ? currentThreadId : null
   const scrollAreaRef = useRef<HTMLDivElement | null>(null)
   const pendingScrollRestoreRef = useRef<number | null>(null)
@@ -8184,6 +8231,12 @@ function ProjectFeatureSidebar({
                       )
                     })()}
                     {group.featureGroups.map((featureGroup) => {
+                      const managedScheduleAt =
+                        !projectDeleted && !featureGroup.deleted
+                          ? managedScheduleIndex.get(
+                              JSON.stringify([group.project.projectId, featureGroup.slug])
+                            )
+                          : undefined
                       const featureCollapsed = collapsedKeys.has(featureGroup.key)
                       const featurePinned =
                         !projectDeleted && pinnedFeatureKeys.has(featureGroup.key)
@@ -8246,6 +8299,15 @@ function ProjectFeatureSidebar({
                             >
                               {featureGroup.title}
                             </span>
+                            {managedScheduleAt && (
+                              <span
+                                className="inline-flex shrink-0 text-status-nominal"
+                                title={`已预约托管：${managedScheduleAt}`}
+                                aria-label={`已预约托管：${managedScheduleAt}`}
+                              >
+                                <ManagedRunIcon />
+                              </span>
+                            )}
                             {hasUnreadFeatureSession && (
                               <span className="size-2 rounded-full bg-status-info shrink-0" />
                             )}
@@ -9860,8 +9922,10 @@ export function HarnessBoardView({
     []
   )
 
+  const [managedScheduleRefreshRevision, setManagedScheduleRefreshRevision] = useState(0)
   const refreshSelectedRunDetail = useCallback(
     async (options: { rethrow?: boolean } = {}): Promise<void> => {
+      setManagedScheduleRefreshRevision((revision) => revision + 1)
       if (!selectedFeature || selectedFeature.deleted) return
       setLoadingRun(true)
       setLoadError(null)
@@ -11680,6 +11744,7 @@ export function HarnessBoardView({
           </div>
           <ProjectFeatureSidebar
             groups={projectSidebarGroups}
+            managedScheduleRefreshRevision={managedScheduleRefreshRevision}
             collapsedKeys={collapsedFeatureKeys}
             pinnedProjectIds={pinnedProjectIds}
             pinnedFeatureKeys={pinnedFeatureKeys}
@@ -11791,6 +11856,7 @@ export function HarnessBoardView({
           onBackToProject={handleBackToProject}
           onEditDeployUnits={openFeatureDeployUnitEditDialog}
           onRefresh={refreshSelectedRunDetail}
+          managedScheduleRefreshRevision={managedScheduleRefreshRevision}
           onFeatureImManagementSaved={handleFeatureImManagementSaved}
           onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}

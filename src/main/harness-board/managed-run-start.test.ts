@@ -28,7 +28,11 @@ const dependencies = vi.hoisted(() => ({
   grant: vi.fn(),
   send: vi.fn(),
   getThread: vi.fn(),
-  getThreadCore: vi.fn()
+  getThreadCore: vi.fn(),
+  assertScheduleCanStart: vi.fn()
+}))
+vi.mock("./managed-run-scheduler", () => ({
+  managedRunScheduler: { assertCanStart: dependencies.assertScheduleCanStart }
 }))
 vi.mock("electron", () => ({ BrowserWindow: { getAllWindows: () => [] } }))
 vi.mock("../db", () => ({
@@ -569,5 +573,94 @@ describe("start managed mode with an existing session", () => {
     await expect(start({ existingThreadId: undefined, workspacePath: root })).rejects.toThrow(
       "已有运行中的会话"
     )
+  })
+
+  it("starts a scheduled new session even when another session under the feature is active", async () => {
+    dependencies.active.mockReturnValue(true)
+    const run = await start({
+      existingThreadId: undefined,
+      workspacePath: root,
+      scheduledStartId: "reservation"
+    })
+    expect(run.status).toBe("running")
+    expect(dependencies.createThread).toHaveBeenCalledTimes(1)
+    expect(dependencies.assertScheduleCanStart).toHaveBeenCalledWith(
+      "project",
+      "feature",
+      "reservation"
+    )
+  })
+
+  it("still rejects a busy selected session when startup comes from a reservation", async () => {
+    dependencies.active.mockReturnValue(true)
+    await expect(start({ scheduledStartId: "reservation" })).rejects.toThrow("所选会话仍在运行")
+    expect(dependencies.startAgent).not.toHaveBeenCalled()
+  })
+
+  it("still rejects a second managed run when startup comes from a reservation", async () => {
+    await start()
+    await expect(
+      start({
+        existingThreadId: undefined,
+        workspacePath: root,
+        scheduledStartId: "reservation"
+      })
+    ).rejects.toThrow("已有运行中的托管 Run")
+  })
+
+  it("uses the reserved workspace for an existing session and clears the replaced workspace context", async () => {
+    updateOrigin({
+      metadata: JSON.stringify({
+        ...metadata(),
+        workspacePath: tmpdir(),
+        isWorktree: true,
+        gitRoot: tmpdir(),
+        worktreeBranch: "other",
+        llmModifiedFiles: ["other.txt"],
+        gitContext: { workspacePath: tmpdir() }
+      })
+    })
+    dependencies.startAgent.mockImplementationOnce(
+      async (request, _delivery, context: AgentRunExecutionContext) => {
+        const current = metadata()
+        expect(current.workspacePath).toBe(root)
+        expect(current.isWorktree).toBeUndefined()
+        expect(current.gitRoot).toBeUndefined()
+        expect(current.worktreeBranch).toBeUndefined()
+        expect(current.llmModifiedFiles).toBeUndefined()
+        expect(current.gitContext).toBeUndefined()
+        expect(
+          context.verifyResolvedThread?.({ workspacePath: root, metadata: current })
+        ).toBeNull()
+        return { threadId: request.threadId, completion: Promise.resolve() }
+      }
+    )
+    const run = await start({ scheduledStartId: "reservation", workspacePath: root })
+    expect(run.status).toBe("running")
+    expect(run.workspacePath).toBe(root)
+    expect(dependencies.createThread).not.toHaveBeenCalled()
+    expect(dependencies.workflowBusy).toHaveBeenCalledWith("origin", root)
+  })
+
+  it("does not fall back to the current workspace if the reserved directory no longer exists", async () => {
+    await expect(
+      start({
+        scheduledStartId: "reservation",
+        workspacePath: join(root, "removed")
+      })
+    ).rejects.toThrow("所选会话工作区不存在")
+    expect(metadata().workspacePath).toBe(root)
+    expect(dependencies.startAgent).not.toHaveBeenCalled()
+  })
+
+  it("keeps the original workspace when the reserved workspace has background workflow work", async () => {
+    updateOrigin({ metadata: JSON.stringify({ ...metadata(), workspacePath: tmpdir() }) })
+    dependencies.workflowBusy.mockImplementation(
+      async (_threadId: string, workspace: string) => workspace === root
+    )
+    const run = await start({ scheduledStartId: "reservation", workspacePath: root })
+    expect(run.status).toBe("failed")
+    expect(metadata().workspacePath).toBe(tmpdir())
+    expect(dependencies.startAgent).not.toHaveBeenCalled()
   })
 })

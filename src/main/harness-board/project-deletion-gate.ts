@@ -2,12 +2,16 @@ import { hasActiveTopLevelAgentRun } from "../agent/agent-run-service"
 import { coordinatorWorkerManager } from "../agent/coordinator-worker-manager"
 import { workflowRunManager } from "../agent/workflow/run-manager"
 import { getAllThreadSummaries } from "../db"
+import { managedRunScheduler } from "./managed-run-scheduler"
 import { managedRunStore } from "./managed-run-store"
 import { readHarnessFeatureMetadata } from "./service"
 
 export async function assertHarnessProjectCanBeDeleted(projectId: string): Promise<void> {
   const normalizedProjectId = projectId.trim()
   if (!normalizedProjectId) throw new Error("Project id is required")
+  if (managedRunScheduler.hasActiveProject(normalizedProjectId)) {
+    throw new Error("项目存在托管预约，请先退出预约托管模式再删除")
+  }
   const hasRunningManagedRun = managedRunStore
     .listProjectRuns(normalizedProjectId)
     .some(

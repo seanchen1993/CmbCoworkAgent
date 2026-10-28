@@ -29,6 +29,7 @@ import {
   type CreateManagedHarnessSessionInput
 } from "./auto-mode-action-executor"
 import { managedRunStore } from "./managed-run-store"
+import { managedRunScheduler } from "./managed-run-scheduler"
 import {
   bindExistingManagedSession,
   requireIdleManagedSession
@@ -72,6 +73,7 @@ export interface AutoModeAgentTurnEndInput {
 
 export interface ManagedRunStartRequest extends ManagedRunStartInput {
   delivery: AgentRunDelivery
+  scheduledStartId?: string
 }
 
 interface HarnessFeatureContext {
@@ -190,6 +192,7 @@ function assertManagedRunCanStart(
 }
 
 export function validateManagedRunStart(input: ManagedRunStartValidationInput): void {
+  managedRunScheduler.assertCanStart(input.projectId, input.featureId)
   // Allow opening the picker to show running sessions as disabled options.
   // Submission still applies the existing feature-wide execution gate.
   assertManagedRunCanStart(input.projectId, input.featureId, false)
@@ -604,7 +607,8 @@ async function inspectAndLaunch(
   sourceEvent: ManagedRunSourceRef,
   terminal?: Pick<AgentTurnEndEvent, "outcome" | "endReason" | "contextUsage">,
   initialUserMessage?: string,
-  existingThreadId?: string
+  existingThreadId?: string,
+  useReservedWorkspace = false
 ): Promise<void> {
   if (isManagedRunStopRequested(run)) return
   const feature = await inspectHarnessManagedFeatureStatus(run.projectId, run.featureId)
@@ -753,9 +757,10 @@ async function inspectAndLaunch(
       const session = await requireIdleManagedSession({
         projectId: run.projectId,
         featureId: run.featureId,
-        threadId: existingThreadId
+        threadId: existingThreadId,
+        launchWorkspacePath: useReservedWorkspace ? workspacePath : undefined
       })
-      if (session.workspacePath !== workspacePath) {
+      if (!useReservedWorkspace && session.workspacePath !== workspacePath) {
         throw new Error("所选会话的工作区已变化，请重新选择后再开启托管")
       }
       if (isManagedRunStopRequested(decidedRun)) return
@@ -773,7 +778,19 @@ async function inspectAndLaunch(
           nextActionHash: feature.nextActionHash
         }
       })
-      bindExistingManagedSession(session, run.runId, feature.currentNodeId)
+      bindExistingManagedSession(
+        session,
+        run.runId,
+        feature.currentNodeId,
+        useReservedWorkspace ? workspacePath : undefined
+      )
+      if (useReservedWorkspace && session.workspacePath !== workspacePath) {
+        for (const window of BrowserWindow.getAllWindows()) {
+          if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+            window.webContents.send("threads:changed")
+          }
+        }
+      }
       await startPreparedManagedAgentRun(preparedRun, {
         source: "desktop",
         verifyResolvedThread: ({ workspacePath: resolvedWorkspacePath, metadata }) => {
@@ -872,9 +889,11 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
           threadId: existingThreadId
         })
       : undefined
-    const workspacePath =
-      existingSession?.workspacePath ??
-      (typeof input.workspacePath === "string" ? input.workspacePath.trim() : "")
+    const requestedWorkspacePath =
+      typeof input.workspacePath === "string" ? input.workspacePath.trim() : ""
+    const workspacePath = input.scheduledStartId
+      ? requestedWorkspacePath
+      : (existingSession?.workspacePath ?? requestedWorkspacePath)
     if (!workspacePath) {
       throw new Error("请选择本次托管使用的会话工作区")
     }
@@ -887,7 +906,8 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
     if (!workspaceDirectoryExists) {
       throw new Error("所选会话工作区不存在或不是文件夹")
     }
-    assertManagedRunCanStart(input.projectId, input.featureId)
+    managedRunScheduler.assertCanStart(input.projectId, input.featureId, input.scheduledStartId)
+    assertManagedRunCanStart(input.projectId, input.featureId, !input.scheduledStartId)
 
     const created = managedRunStore.createRun(input.projectId, input.featureId, workspacePath)
     const sourceEvent = managedRunStore.appendEvent(created, {
@@ -908,7 +928,8 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
         sourceEvent,
         undefined,
         input.initialUserMessage,
-        existingThreadId
+        existingThreadId,
+        Boolean(input.scheduledStartId)
       )
     } catch (error) {
       const failed = recordManagedRunDecision({
