@@ -1616,6 +1616,10 @@ export interface CustomModelConfig {
   enableThinkingEffort?: boolean
   thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
+  /** Assigned by the built-in registry; never accepted from custom model storage. */
+  transport?: import("../shared/model-catalog").ModelTransport
+  notice?: string
+  unavailableReason?: string
 }
 
 export interface BuiltinModelOverride {

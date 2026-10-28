@@ -36,6 +36,8 @@ import {
 } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
+import { getModelClientOptions } from "../models/connection"
+import type { ModelTransport } from "../../shared/model-catalog"
 import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
 import {
   createTurnCompletionGateMiddleware,
@@ -4223,6 +4225,7 @@ export function getModelInstance(
     enableThinking?: boolean
     enableThinkingEffort?: boolean
     thinkingEffort?: "low" | "high" | "max"
+    transport?: ModelTransport
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,
@@ -4291,14 +4294,14 @@ export function getModelInstance(
             ...(enableThinking ? { thinking: { type: "enabled" } } : {})
           })
     },
-    configuration: {
-      baseURL: customConfig.baseUrl,
+    ...getModelClientOptions(customConfig, {
+      sessionId: captureThreadId,
       fetch: withModelResponseDiagnostics(
         modelFetch,
         { model: resolvedModel, purpose },
         (diagnostic) => console.log("[Runtime][ModelResponse]", JSON.stringify(diagnostic))
       )
-    }
+    })
   }
 
   let model: ChatOpenAI
@@ -4761,7 +4764,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     customConfig,
     retryHooks,
     maxRetryAttempts,
-    "context-compaction"
+    "context-compaction",
+    threadId
   )
   const projectThreadDataDirectory = await getProjectThreadDataDirectory(workspacePath, threadId)
   const conversationHistoryPathPrefix = path.join(

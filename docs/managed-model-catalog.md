@@ -44,3 +44,22 @@ CMB_BUILTIN_MODEL_API_KEY=<由凭据管理系统注入，不要提交到 Git>
 清单没有 `modelCatalog`、目录为空或首次拉取失败时，客户端只使用内置的 MiniMax 作为本地兜底模型，不会额外注入 DeepSeek。成功加载过后台目录后，后续刷新失败会继续保留上一次内存中的有效目录。客户端启动时拉取一次，并等待首次请求完成后才启动调度器、心跳和 ChatX，之后每 30 分钟刷新。
 
 模型列表将用户保存的默认模型放在首位；固定模型被后台撤下或失去密钥时，ChatX 会回退到保存的默认可用模型。
+
+## 闲时模型（UAT）
+
+在仓库 `.env` 中配置以下变量，沿用 `envcrypt` Git 过滤器加密保存的流程（见 [环境变量加密说明](env-encryption-guide.md)）：
+
+```dotenv
+MAIN_VITE_IDLE_MODEL_BASE_URL=<UAT 网关地址，路径截至 /pattern/llm/v1>
+MAIN_VITE_IDLE_MODEL_API_KEY=<独立团队提供的 UAT 网关凭据>
+```
+
+这两个变量只注入主进程，不下发到渲染进程。配置地址后，客户端会独立加入 `builtin:idle-ultra`，不受远端目录替换影响，也不复用其他内置模型的密钥。
+
+- 默认显示为“闲时模型 Ultra”，请求模式固定 `ultra`，上下文窗口固定 128,000 Tokens；连接信息、模式和上下文窗口不可由用户修改。最大输出 Tokens 等其他参数沿用现有设置。
+- 展示北京时间 `22:00–次日 07:00` 的服务时间提示，所有时段均允许选择；客户端不设置时间门禁。
+- 每次请求从当前登录用户信息读取八位 `sapId`，作为 `x-spaid`；缺少或格式不正确时禁止调用，并提示完善用户信息。
+- 网关凭据使用 `x-gateway-key`，会话使用 `x-session-id`，每次调用携带 `x-request-id`。主对话与上下文压缩沿用同一个 Thread ID；独立子会话使用自身 Thread ID，无 Thread 的辅助调用使用模型实例生命周期内稳定的独立会话 ID。
+- 复用 OpenAI 聊天、SSE 与工具调用协议。界面始终显示配置名称，响应中的实际模型名仅用于诊断。
+- 沿用现有重试等待策略，不读取 `retry_after_ms` 或 `Retry-After`；`434` 显示“码豆余额不足”，不进行自动重试或模型故障切换。保留其他网关错误的 `errorMsg` 和请求追踪 ID。
+- 此网关提供 OpenAI 接口，暂不用于要求 Anthropic 接口的 Claude Code 终端。

@@ -1,6 +1,15 @@
 import { BrowserWindow } from "electron"
 import type { RemoteModelCatalog, RemoteModelCatalogItem } from "../../shared/model-catalog"
 import {
+  IDLE_MODEL_ID,
+  IDLE_MODEL_MODE,
+  IDLE_MODEL_MAX_TOKENS,
+  IDLE_MODEL_NOTICE,
+  isModelAvailable,
+  isValidSapId,
+  type BuiltinModelLockedField
+} from "../../shared/model-catalog"
+import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_MAX_TOKENS,
   DEFAULT_TEMPERATURE,
@@ -19,6 +28,7 @@ import {
   getBuiltinModelOverrides,
   getCustomModelConfigs,
   getStoredDefaultModelId,
+  getUserInfo,
   resetBuiltinModelOverride as resetStoredBuiltinModelOverride,
   setStoredDefaultModelId,
   setBuiltinModelOverride as setStoredBuiltinModelOverride,
@@ -31,7 +41,7 @@ import { calculateSummarizationTriggerTokens } from "../../shared/model-token-bu
 import { getHiddenEndpoint } from "../security/hidden-endpoints"
 
 export type ModelSource = "builtin" | "custom"
-export type BuiltinModelOrigin = "remote" | "fallback"
+export type BuiltinModelOrigin = "remote" | "fallback" | "local"
 export type ModelRef = `builtin:${string}` | `custom:${string}`
 
 export interface ResolvedModelConfig extends CustomModelConfig {
@@ -43,7 +53,7 @@ export interface ResolvedModelConfig extends CustomModelConfig {
 export interface BuiltinModelPublicConfig extends Omit<ResolvedModelConfig, "apiKey"> {
   source: "builtin"
   hasApiKey: boolean
-  lockedFields: Array<"baseUrl" | "model" | "apiKey">
+  lockedFields: BuiltinModelLockedField[]
 }
 
 interface BuiltinModelDefinition extends CustomModelConfig {
@@ -243,8 +253,28 @@ function normalizeCatalog(catalog: unknown): BuiltinModelDefinition[] | null {
 }
 
 function getBaseDefinitions(): BuiltinModelDefinition[] {
-  if (remoteDefinitions?.length) return remoteDefinitions
-  return FALLBACK_CATALOG.map((item) => normalizeDefinition(item, "fallback"))
+  const definitions = remoteDefinitions?.length
+    ? remoteDefinitions
+    : FALLBACK_CATALOG.map((item) => normalizeDefinition(item, "fallback"))
+  const baseUrl = (import.meta.env.MAIN_VITE_IDLE_MODEL_BASE_URL ?? "").trim()
+  if (!baseUrl) return definitions
+  const idleModel: BuiltinModelDefinition = {
+    ...normalizeDefinition(
+      {
+        id: IDLE_MODEL_ID,
+        name: "闲时模型 Ultra",
+        baseUrl,
+        model: IDLE_MODEL_MODE,
+        maxTokens: IDLE_MODEL_MAX_TOKENS,
+        apiKey: import.meta.env.MAIN_VITE_IDLE_MODEL_API_KEY,
+        tier: "premium"
+      },
+      "local"
+    ),
+    transport: "idle-gateway",
+    notice: IDLE_MODEL_NOTICE
+  }
+  return [...definitions.filter((item) => item.id !== IDLE_MODEL_ID), idleModel]
 }
 
 function normalizeOverride(
@@ -305,18 +335,27 @@ function normalizeOverride(
 export function getBuiltinModelConfigs(): ResolvedModelConfig[] {
   const overrides = getBuiltinModelOverrides()
   return getBaseDefinitions().map((base) => {
+    const isIdle = base.transport === "idle-gateway"
     let override: BuiltinModelOverride = {}
     try {
-      override = normalizeOverride(overrides[base.id], base)
+      const stored = overrides[base.id]
+      override = normalizeOverride(
+        isIdle && stored ? { ...stored, maxTokens: IDLE_MODEL_MAX_TOKENS } : stored,
+        base
+      )
     } catch (error) {
       console.warn(`[Models] Ignoring invalid local override for ${base.id}:`, error)
     }
     return {
       ...base,
       ...override,
-      apiKey:
-        base.apiKey?.trim() ||
-        getBuiltinModelApiKey({ allowBundledFallback: base.model === BUNDLED_CREDENTIAL_MODEL }),
+      apiKey: isIdle
+        ? base.apiKey
+        : base.apiKey?.trim() ||
+          getBuiltinModelApiKey({ allowBundledFallback: base.model === BUNDLED_CREDENTIAL_MODEL }),
+      ...(isIdle && !isValidSapId(getUserInfo()?.sapId)
+        ? { unavailableReason: "请先完善当前用户的八位 SAP 员工编号" }
+        : {}),
       ref: `builtin:${base.id}`,
       source: "builtin",
       origin: base.origin
@@ -329,7 +368,12 @@ export function getBuiltinModelPublicConfigs(): BuiltinModelPublicConfig[] {
     ...config,
     source: "builtin",
     hasApiKey: Boolean(apiKey),
-    lockedFields: ["baseUrl", "model", "apiKey"]
+    lockedFields: [
+      "baseUrl",
+      "model",
+      "apiKey",
+      ...(config.transport === "idle-gateway" ? ["maxTokens" as const] : [])
+    ]
   }))
 }
 
@@ -375,7 +419,7 @@ export function getModelConfigs(): ResolvedModelConfig[] {
   const configs = collectModelConfigs()
   const selectedDefault =
     resolveModelConfigFromList(configs, getStoredDefaultModelId()) ??
-    configs.find((config) => Boolean(config.apiKey)) ??
+    configs.find(isModelAvailable) ??
     configs[0]
   if (!selectedDefault) return configs
   const defaultRef = toModelRef(selectedDefault)
@@ -407,7 +451,7 @@ export function getDefaultModelConfig(): ResolvedModelConfig | null {
   if (configs.length === 0) return null
   return (
     resolveModelConfigFromList(configs, getStoredDefaultModelId()) ??
-    configs.find((config) => Boolean(config.apiKey)) ??
+    configs.find(isModelAvailable) ??
     configs[0] ??
     null
   )
@@ -418,20 +462,27 @@ export function getAvailableModelConfigOrDefault(
   value?: string | null
 ): ResolvedModelConfig | null {
   const requested = getModelConfigByRef(value)
-  if (requested?.apiKey) return requested
+  if (isModelAvailable(requested)) return requested
   const selectedDefault = getDefaultModelConfig()
-  if (selectedDefault?.apiKey) return selectedDefault
-  return getModelConfigs().find((config) => Boolean(config.apiKey)) ?? null
+  if (isModelAvailable(selectedDefault)) return selectedDefault
+  return getModelConfigs().find(isModelAvailable) ?? null
 }
 
 export function getModelByTier(tier: "premium" | "economy"): ResolvedModelConfig | null {
-  const configs = getModelConfigs().filter((config) => Boolean(config.apiKey))
+  const configs = getModelConfigs().filter(isModelAvailable)
   return configs.find((config) => (config.tier ?? "premium") === tier) ?? configs[0] ?? null
 }
 
 export function updateBuiltinModelOverride(id: string, input: BuiltinModelOverride): void {
   const base = getBaseDefinitions().find((item) => item.id === id)
   if (!base) throw new Error("未找到内置模型")
+  if (
+    base.transport === "idle-gateway" &&
+    input.maxTokens !== undefined &&
+    input.maxTokens !== IDLE_MODEL_MAX_TOKENS
+  ) {
+    throw new Error("闲时模型的上下文窗口固定为 128k，不能修改")
+  }
   const normalized = normalizeOverride(input, base)
   const diff: BuiltinModelOverride = {}
   const keys: Array<keyof BuiltinModelOverride> = [

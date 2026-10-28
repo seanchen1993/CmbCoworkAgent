@@ -1,6 +1,8 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
+  readonly MAIN_VITE_IDLE_MODEL_BASE_URL?: string
+  readonly MAIN_VITE_IDLE_MODEL_API_KEY?: string
   readonly VITE_UNIFIED_IM_GATEWAY_WS_URL?: string
   readonly VITE_API_BASE_URL?: string
   readonly VITE_ENTERPRISE_PROJECT_QUERY_URL?: string
