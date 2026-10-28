@@ -73,6 +73,7 @@ export function BotImChannelDialog({
     items: BotMockFeedEntry[]
     before: string | null
   } | null>(null)
+  const removedBindings = useRef(new Set<string>())
   const loadedBindingPages = useRef(false)
   const [busy, setBusy] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -84,9 +85,11 @@ export function BotImChannelDialog({
   selection.current = selected
   const merge = (values: BotImBinding[]) =>
     setBindings((old) =>
-      [...new Map([...old, ...values].map((value) => [value.id, value])).values()].sort(
-        (a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id)
-      )
+      [...new Map([...old, ...values].map((value) => [value.id, value])).values()]
+        .filter((value) =>
+          !["revoked", "expired"].includes(value.state) || !removedBindings.current.has(value.id)
+        )
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
     )
 
   const refresh = useCallback(async () => {
@@ -308,7 +311,7 @@ export function BotImChannelDialog({
             </p>
           )}
 
-          {bindings.length > 0 && (
+          {(bindings.length > 0 || cursor) && (
             <section className="bot-im-connect-bindings" aria-label="已有接入">
               <h3>
                 已有接入 <span>{bindings.length}</span>
@@ -352,6 +355,29 @@ export function BotImChannelDialog({
                           aria-hidden="true"
                         />
                       </button>
+                      {["revoked", "expired"].includes(binding.state) && (
+                        <button
+                          className="bot-im-connect-revoke"
+                          disabled={busy || !status?.available}
+                          title="从本机接入列表删除，保留会话和任务历史"
+                          aria-label={`删除${binding.peerLabel ?? (binding.kind === "dm" ? "本人私聊" : "群聊")}接入记录`}
+                          onClick={() =>
+                            void action(async () => {
+                              await api.remove(bot.id, binding.id)
+                              removedBindings.current.add(binding.id)
+                              if (live.current) {
+                                setBindings((old) => old.filter((item) => item.id !== binding.id))
+                                if (selection.current === binding.id) {
+                                  selection.current = null
+                                  setSelected(null)
+                                }
+                              }
+                            })
+                          }
+                        >
+                          删除
+                        </button>
+                      )}
                       {["pending", "active"].includes(binding.state) && (
                         <button
                           className="bot-im-connect-revoke"

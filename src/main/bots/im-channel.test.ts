@@ -11,7 +11,7 @@ import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { LocalBotHost, type BotRunLease } from "./host"
 import { BotImChannelService, type BotImGatewayClient } from "../services/im/bot-channel-service"
-import { botImScopeId } from "./im-gateway-store"
+import { BotImGatewayStore, botImScopeId } from "./im-gateway-store"
 import {
   assertBotImBinding,
   assertBotImEvent,
@@ -175,6 +175,62 @@ function fixture(
 }
 
 describe("authenticated IM on the existing Bot host", () => {
+  it("removes inactive configurations durably without deleting group history or task records", async () => {
+    const f = fixture(),
+      binding = await f.binding()
+    await f.service.receive(f.event(binding, "retained", "保留这段群聊记录"))
+    await eventually(
+      () => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed"
+    )
+    const taskId = f.calls[0].id
+    expect(() => f.service.remove(f.bot.id, binding.id)).toThrow("只能删除")
+    const revoked = await f.service.revoke(f.bot.id, binding.id, binding.version)
+    f.service.remove(f.bot.id, binding.id)
+    f.service.remove(f.bot.id, binding.id) // Idempotent retries.
+    expect((await f.service.list(f.bot.id)).items).toEqual([])
+    expect(f.remote.get(binding.id)?.state).toBe("revoked")
+    expect(f.service.history(f.bot.id, binding.id).items.map((entry) => entry.text)).toContain(
+      "保留这段群聊记录"
+    )
+    expect(f.store.getTask(taskId).state).toBe("completed")
+    expect(f.host.snapshot().imConversations).toEqual([
+      expect.objectContaining({ bindingId: binding.id, state: "revoked" })
+    ])
+    const reopened = new BotImGatewayStore(f.db)
+    expect(reopened.visibleBindings("realm", "owner", [revoked])).toEqual([])
+    expect(reopened.visibleBindings("other-realm", "owner", [revoked])).toEqual([revoked])
+    expect(reopened.visibleBindings("realm", "other-owner", [revoked])).toEqual([revoked])
+  })
+  it("only removes terminal records owned by the selected Bot and preserves pagination", async () => {
+    const f = fixture()
+    const pending = await f.service.create(f.bot.id, "group", "pending")
+    expect(() => f.service.remove(f.bot.id, pending.id)).toThrow("只能删除")
+    const expired: BotImBinding = { ...pending, state: "expired" }
+    f.remote.set(expired.id, expired)
+    await f.service.list(f.bot.id)
+    const other = f.store.create({
+      name: "Other",
+      instructions: "",
+      color: "#123456",
+      modelRef: null
+    })
+    expect(() => f.service.remove(other.id, expired.id)).toThrow("不属于")
+    expect(() => f.service.remove(f.bot.id, "missing")).toThrow("不属于")
+    f.service.remove(f.bot.id, expired.id)
+    f.client.botBindingCommand.mockResolvedValueOnce({ items: [expired], before: "123" })
+    expect(await f.service.list(f.bot.id)).toEqual({ items: [], before: "123" })
+    // A late authoritative activation cannot become invisible after an expired snapshot was removed.
+    f.remote.set(expired.id, {
+      ...expired,
+      state: "active",
+      version: 1,
+      conversationKey: "late-active"
+    })
+    expect((await f.service.list(f.bot.id)).items).toEqual([
+      expect.objectContaining({ state: "active" })
+    ])
+  })
+
   it("allows App attachments and same-group task history while rejecting another group's history", async () => {
     const works = new Map<string, string>()
     const query = vi.fn(async (work) => ({

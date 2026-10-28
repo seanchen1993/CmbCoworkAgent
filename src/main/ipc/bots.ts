@@ -183,6 +183,10 @@ export function registerBotHandlers(
     if (kind !== "dm" && kind !== "group") throw new BotError("INVALID_INPUT", "IM 受众无效")
     return imChannel().create(botId, kind, botIdentifier(operationId))
   })
+  ipcMain.handle("bots:im:remove", (event, hostId, botId, id) => {
+    desktopHost(event, hostId).getBot(botIdentifier(botId))
+    return imChannel().remove(botId, botImExternalId(id))
+  })
   ipcMain.handle("bots:im:revoke", (event, hostId, botId, id, version) => {
     desktopHost(event, hostId).getBot(botIdentifier(botId))
     if (!Number.isSafeInteger(version) || version < 1)

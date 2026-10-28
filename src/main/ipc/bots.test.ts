@@ -83,6 +83,7 @@ vi.mock("../bots/conversation-link-service", () => ({
   unlinkWorkConversation: vi.fn(),
   unlinkDeletingWorkConversation: vi.fn()
 }))
+vi.mock("../services/im/withheld-text-notices", () => ({ conversationSwitchedToText: () => false }))
 vi.mock("../db", () => ({ getThreadCore: fixture.getThread }))
 vi.mock("../bots/runtime-adapter", () => ({ prepareBotThread: vi.fn() }))
 vi.mock("./bot-files", () => ({ registerBotFileHandlers: vi.fn() }))
@@ -261,6 +262,7 @@ describe("Bot IPC boundaries", () => {
         ]) {
           expect(() => call("bots:im:history", "local", bot.id, invalid)).toThrow("标识")
           expect(() => call("bots:im:revoke", "local", bot.id, invalid, 1)).toThrow("标识")
+          expect(() => call("bots:im:remove", "local", bot.id, invalid)).toThrow("标识")
         }
         expect(client.botBindingCommand).toHaveBeenCalledTimes(1)
         expect(await call("bots:im:revoke", "local", bot.id, bindingId, 1)).toMatchObject({
@@ -269,6 +271,12 @@ describe("Bot IPC boundaries", () => {
           state: "revoked"
         })
         expect(store.recentTasks()).toEqual([expect.objectContaining({ state: "cancelled" })])
+        expect(call("bots:im:history", "local", bot.id, bindingId)).toMatchObject({
+          items: [expect.objectContaining({ kind: "user", state: "cancelled" })]
+        })
+        expect(() => call("bots:im:remove", "remote", bot.id, bindingId)).toThrow("本机")
+        expect(() => call("bots:im:remove", "local", other.id, bindingId)).toThrow("不属于")
+        call("bots:im:remove", "local", bot.id, bindingId)
         expect(call("bots:im:history", "local", bot.id, bindingId)).toMatchObject({
           items: [expect.objectContaining({ kind: "user", state: "cancelled" })]
         })

@@ -47,6 +47,7 @@ const groups = [
     activity: activity("group-b", "三个界面问题，已整理为改进清单。")
   }
 ]
+const removedBindings = new Set<string>()
 const t = new Date("2026-10-27T14:30:00+08:00").getTime()
 const entry = (id: string, text: string, kind = "bot", extra = {}) => ({
   id,
@@ -214,10 +215,23 @@ const client = {
           version: 1,
           conversationKey: "a",
           createdAt: new Date(t).toISOString()
-        }
-      ],
+        },
+        ...["revoked", "expired"].map((state) => ({
+          id: `binding-${state}`,
+          botId: "bot",
+          kind: "group",
+          state,
+          version: 2,
+          peerLabel: state === "revoked" ? "已撤销测试群" : "已过期测试群",
+          createdAt: new Date(t).toISOString(),
+          expiresAt: new Date(t).toISOString()
+        }))
+      ].filter((binding) => !removedBindings.has(binding.id)),
       before: null
     }),
+    remove: async (_botId: string, id: string) => {
+      removedBindings.add(id)
+    },
     history: async () => ({ items: [], before: null })
   }
 }

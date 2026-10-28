@@ -126,7 +126,11 @@ export class BotImChannelService {
     if (!("items" in value) || principal !== this.identity())
       throw new Error("IM 身份已变化，请刷新")
     if (epoch !== this.epoch) throw new Error("连接已变化，请刷新绑定")
-    return { ...value, items: value.items.map((binding) => this.register(binding, principal)) }
+    const items = value.items.map((binding) => this.register(binding, principal))
+    return {
+      ...value,
+      items: this.getHost().imGateway.visibleBindings(this.realm, principal, items)
+    }
   }
   async revoke(botId: string, bindingId: string, expectedVersion: number): Promise<BotImBinding> {
     const epoch = this.epoch,
@@ -141,6 +145,11 @@ export class BotImChannelService {
     if ("items" in value || principal !== this.identity()) throw new Error("IM 身份已变化，请刷新")
     if (epoch !== this.epoch) throw new Error("连接已变化，请刷新绑定")
     return this.register(value, principal)
+  }
+  remove(botId: string, bindingId: string): void {
+    const principal = this.identity()
+    this.getHost().getBot(botId)
+    this.getHost().imGateway.removeBinding(botId, botImScopeId(this.realm, principal, bindingId))
   }
   history(botId: string, bindingId: string, before?: string) {
     const host = this.getHost(),

@@ -24,6 +24,8 @@ export const localBotsApi: BotClient = {
     list: (botId, before) => ipcRenderer.invoke("bots:im:list", LOCAL_BOT_HOST_ID, botId, before),
     create: (botId, kind, operationId) =>
       ipcRenderer.invoke("bots:im:create", LOCAL_BOT_HOST_ID, botId, kind, operationId),
+    remove: (botId, bindingId) =>
+      ipcRenderer.invoke("bots:im:remove", LOCAL_BOT_HOST_ID, botId, bindingId),
     revoke: (botId, bindingId, version) =>
       ipcRenderer.invoke("bots:im:revoke", LOCAL_BOT_HOST_ID, botId, bindingId, version)
   },

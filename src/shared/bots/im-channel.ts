@@ -169,6 +169,8 @@ export interface BotImClient {
   list(botId: string, before?: string): Promise<BotImBindingPage>
   create(botId: string, kind: "dm" | "group", operationId: string): Promise<BotImBinding>
   revoke(botId: string, bindingId: string, version: number): Promise<BotImBinding>
+  /** Remove an inactive record from this device's configuration list, retaining history. */
+  remove(botId: string, bindingId: string): Promise<void>
 }
 
 /** Local binding ID scopes pages to one IM audience; never use the platform group ID. */
