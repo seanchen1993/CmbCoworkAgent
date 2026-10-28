@@ -615,9 +615,6 @@ function hideMainWindowToTray(window: BrowserWindow): void {
   if (window.isDestroyed()) return
   window.hide()
   showPendingAppAttention()
-  if (process.platform === "darwin" && app.dock) {
-    app.dock.hide()
-  }
 }
 
 function clearCloseToTrayPromptState(): void {
@@ -948,6 +945,25 @@ function ensureMainWindowVisible(): BrowserWindow | null {
   return mainWindow
 }
 
+/**
+ * Pet 点击在主窗口的显示与隐藏状态之间切换。
+ */
+function toggleMainWindowVisibilityFromPet(): BrowserWindow | null {
+  if (
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    mainWindow.isVisible() &&
+    !mainWindow.isMinimized()
+  ) {
+    hideMainWindowToTray(mainWindow)
+    // Pet 只切换主窗口显隐，macOS Dock 中的应用图标应始终保留。
+    applyMacDockIcon()
+    return mainWindow
+  }
+
+  return ensureMainWindowVisible()
+}
+
 function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
   const workspaces: string[] = []
   const seen = new Set<string>()
@@ -1012,7 +1028,7 @@ if (browserNativeMessagingHostLaunch) {
     // Set dock icon on macOS
     applyMacDockIcon()
     configurePetWindow({
-      ensureMainWindowVisible,
+      toggleMainWindowVisibility: toggleMainWindowVisibilityFromPet,
       applyMacDockIcon
     })
 
