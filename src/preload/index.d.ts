@@ -1292,7 +1292,7 @@ interface CustomAPI {
     }>
     generateTitle: (
       message: string,
-      context?: { threadId: string; skillName?: string }
+      context?: { threadId: string; skillName?: string; skillDescription?: string }
     ) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
   }

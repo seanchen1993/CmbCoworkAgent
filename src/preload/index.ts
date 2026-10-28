@@ -1345,7 +1345,7 @@ const api = {
     },
     generateTitle: (
       message: string,
-      context?: { threadId: string; skillName?: string }
+      context?: { threadId: string; skillName?: string; skillDescription?: string }
     ): Promise<string> => {
       return ipcRenderer.invoke("threads:generateTitle", message, context)
     },

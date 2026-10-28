@@ -22,6 +22,7 @@ const dependencies = vi.hoisted(() => ({
   inspect: vi.fn(),
   startAgent: vi.fn(),
   createThread: vi.fn(),
+  generateTitle: vi.fn(async () => "新任务"),
   requestDecision: vi.fn(),
   deliveryAvailable: vi.fn(),
   grant: vi.fn(),
@@ -99,7 +100,7 @@ vi.mock("../ipc/skills", () => ({
 vi.mock("../storage", () => ({ getDisabledSkills: () => [] }))
 vi.mock("../services/thread-service", () => ({ createThreadService: dependencies.createThread }))
 vi.mock("../services/project-thread-title", () => ({
-  generateProjectThreadTitle: async () => "新任务"
+  generateProjectThreadTitle: dependencies.generateTitle
 }))
 vi.mock("../services/im/feature-thread-grant", () => ({
   materializeHarnessFeatureThreadGrant: dependencies.grant
@@ -406,6 +407,12 @@ describe("start managed mode with an existing session", () => {
     const run = await start({ existingThreadId: undefined, workspacePath: root })
     expect(run.status).toBe("running")
     expect(run.currentSession?.threadId).toBe("created")
+    expect(dependencies.generateTitle).toHaveBeenCalledWith(
+      expect.any(String),
+      "dev-code",
+      { projectId: "project", slug: "feature" },
+      "实现代码"
+    )
     expect(dependencies.createThread).toHaveBeenCalledOnce()
     expect(metadata().harnessFeature.runId).toBe(oldRun.runId)
   })
