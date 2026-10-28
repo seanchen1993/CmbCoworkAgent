@@ -112,6 +112,26 @@ async function makeCatalog(size: number): Promise<{ projects: string; plugins: s
 }
 
 describe("Harness catalog reader", () => {
+  it.each([true, false, undefined])(
+    "preserves test project selection in project lists and contexts: %j",
+    async (isTestProject) => {
+      const paths = await makeCatalog(1)
+      const store = JSON.parse(readFileSync(paths.projects, "utf8"))
+      if (isTestProject !== undefined) store.projects[0].isTestProject = isTestProject
+      writeFileSync(paths.projects, JSON.stringify(store))
+
+      const page = readHarnessCatalogPage(paths.projects, paths.plugins, {})
+      const contexts = readHarnessProjectContexts(paths.projects, paths.plugins, ["project-0"])
+      expect(page.projects).toHaveLength(1)
+      expect(page.projects[0].isTestProject).toBe(isTestProject)
+      expect(contexts.projects["project-0"]?.project.isTestProject).toBe(isTestProject)
+      if (isTestProject === undefined) {
+        expect(page.projects[0]).not.toHaveProperty("isTestProject")
+        expect(contexts.projects["project-0"]?.project).not.toHaveProperty("isTestProject")
+      }
+    }
+  )
+
   it.each([false, true])(
     "preserves artifact and knowledge actions in protected config: %s",
     async (protectedContent) => {

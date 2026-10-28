@@ -8,6 +8,7 @@ import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryNotice } from "./BizRetryNotice"
 import { ProjectWorkspaceField } from "./ProjectWorkspaceField"
+import { ProjectTestField } from "./ProjectTestField"
 import {
   Fragment,
   startTransition,
@@ -947,6 +948,7 @@ async function createHarnessSession(params: CreateHarnessSessionParams): Promise
 }
 
 function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boolean {
+  if (typeof form.isTestProject !== "boolean") return true
   return [
     form.adapterId,
     form.adapterType,
@@ -1000,6 +1002,7 @@ function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectM
     name: project.name,
     projectCode: project.projectCode,
     projectFromLean: project.projectFromLean ?? false,
+    isTestProject: project.isTestProject,
     projectDir: project.projectDir,
     description: project.description,
     systemId: project.systemId,
@@ -2976,7 +2979,7 @@ function ProjectFormDialog({
                     <span className="text-status-critical">{projectNameLengthError}</span>
                   )}
                 </label>
-                <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   项目描述
                   <Input
                     value={form.description}
@@ -2989,6 +2992,10 @@ function ProjectFormDialog({
                     <span className="text-status-critical">{projectDescriptionLengthError}</span>
                   )}
                 </label>
+                <ProjectTestField
+                  value={form.isTestProject}
+                  onChange={(isTestProject) => onChange({ ...form, isTestProject })}
+                />
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   系统编号 *
                   <Input
@@ -3188,7 +3195,7 @@ function ProjectEditDialog({
                     <span className="text-status-critical">{projectNameLengthError}</span>
                   )}
                 </label>
-                <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   项目描述
                   <Input
                     value={form.description}
@@ -3201,6 +3208,10 @@ function ProjectEditDialog({
                     <span className="text-status-critical">{projectDescriptionLengthError}</span>
                   )}
                 </label>
+                <ProjectTestField
+                  value={form.isTestProject}
+                  onChange={(isTestProject) => onChange({ ...form, isTestProject })}
+                />
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   系统编号 *
                   <Input

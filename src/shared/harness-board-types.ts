@@ -232,6 +232,7 @@ export interface HarnessProjectMetadata {
   description: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   systemId: string
   systemName: string
@@ -255,6 +256,7 @@ export interface HarnessProjectCreateInput {
   name: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   description: string
   systemId: string
@@ -474,6 +476,7 @@ export interface HarnessProjectMetadataUpdateInput {
   name: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   description: string
   systemId: string
@@ -487,6 +490,7 @@ export interface HarnessProjectListItem {
   description: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   systemId: string
   systemName: string
