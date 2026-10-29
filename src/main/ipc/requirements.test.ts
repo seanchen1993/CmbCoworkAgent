@@ -666,6 +666,23 @@ describe("requirement source preview", () => {
       needDesign: "1"
     })
 
+    const missingHtml = (await updateFunctionHtml(null, {
+      reqId: created.requirement.reqId,
+      workspacePath,
+      requirementFilePath,
+      htmlFile: join(workspacePath, ".cmb-design", "missing", "index.html"),
+      htmlId: "ds_missinghtml"
+    })) as { success: boolean; error?: string }
+    expect(missingHtml).toMatchObject({
+      success: false,
+      error: "HTML 文件不存在或无法访问"
+    })
+    expect(JSON.parse(readFileSync(manifestPath, "utf-8")).functions[0]).toMatchObject({
+      htmlFile: "",
+      htmlId: "ds_first123",
+      needDesign: "1"
+    })
+
     const updated = (await updateFunctionHtml(null, {
       reqId: created.requirement.reqId,
       workspacePath,
