@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
 import { formatSkillUseBlock } from "./skill-use-block"
 import {
+  BUILTIN_BROWSER_INSTRUCTIONS_CLOSE,
+  BUILTIN_BROWSER_INSTRUCTIONS_OPEN,
   BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
   BUILTIN_BROWSER_PROMPT_PREFIX,
   stripUserInputTransportDecorations
@@ -49,6 +51,14 @@ describe("stripUserInputTransportDecorations", () => {
     ).toBe("打开首页")
   })
 
+  it("recognizes the browser wrapper without matching its prompt text", () => {
+    expect(
+      stripUserInputTransportDecorations(
+        `${BUILTIN_BROWSER_INSTRUCTIONS_OPEN}\n任意新版提示词\n${BUILTIN_BROWSER_INSTRUCTIONS_CLOSE}\n打开首页`
+      )
+    ).toBe("打开首页")
+  })
+
   it("drops a leading slash command but not a leading absolute path", () => {
     expect(stripUserInputTransportDecorations("/goal 把首页速度提上去")).toBe("把首页速度提上去")
     expect(stripUserInputTransportDecorations("/Users/demo/src 看下")).toBe("/Users/demo/src 看下")
@@ -56,11 +66,20 @@ describe("stripUserInputTransportDecorations", () => {
 })
 
 describe("built-in browser prefixes", () => {
+  it("uses reusable-operation wording", () => {
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("匹配的可复用操作")
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).not.toContain("匹配的录制脚本")
+  })
+
+  it("uses the iframe extractor after snapshots discover iframes", () => {
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("页面读取先用 browser_snapshot")
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("发现 iframe")
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("inAppBrowser_extract_iframes")
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("支持跨域")
+  })
+
   it("stay the pair the composer actually prepends", () => {
-    // The renderer derives the no-screenshot form from the base prefix; if that
-    // derivation ever changes shape, this pins the spelling main relies on.
-    expect(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX).toBe(
-      `${BUILTIN_BROWSER_PROMPT_PREFIX.slice(0, -1)}（不允许使用截图功能）：`
-    )
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toMatch(/^<builtin-browser-instructions>/)
+    expect(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX).toMatch(/^<builtin-browser-instructions>/)
   })
 })

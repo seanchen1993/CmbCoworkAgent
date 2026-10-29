@@ -8,7 +8,15 @@ const mocks = vi.hoisted(() => ({
   read: vi.fn(),
   execute: vi.fn(),
   cancel: vi.fn(),
-  state: vi.fn()
+  state: vi.fn(),
+  prepare: vi.fn(),
+  extractIframes: vi.fn()
+}))
+vi.mock("../../browser/cdp/playwright-mcp-bridge", () => ({
+  preparePlaywrightInAppBrowser: mocks.prepare
+}))
+vi.mock("../../browser/core/browser-service-registry", () => ({
+  getGlobalBrowserService: () => ({ extractIframeInformation: mocks.extractIframes })
 }))
 vi.mock("../../browser/record/common/browser-script-library-service", () => ({
   listBrowserScriptLibraryEntries: mocks.list,
@@ -19,7 +27,7 @@ vi.mock("../../browser/record/common/browser-script-execution-service", () => ({
   cancelRecordingScriptExecutionInBuiltinBrowser: mocks.cancel,
   getBrowserScriptExecutionState: mocks.state
 }))
-import { createBrowserRecordingTools } from "./browser-recording-tools"
+import { createInAppBrowserTools } from "./in-app-browser-tools"
 const capabilities = [
   { providerDisplayName: "In-app-browser", toolName: "browser_snapshot" }
 ] as McpCapabilityTool[]
@@ -37,26 +45,49 @@ beforeEach(() => {
   )
   mocks.state.mockReturnValue({ status: "idle" })
   mocks.execute.mockResolvedValue(undefined)
+  mocks.prepare.mockResolvedValue(undefined)
+  mocks.extractIframes.mockResolvedValue({ frames: [] })
 })
-describe("browser recording agent tools", () => {
+describe("in-app browser agent tools", () => {
   it.each([false, undefined])(
     "does not inject without explicit browser opt-in: %s",
     async (enabled) => {
       browserConfig.config.mockReturnValue({ enabled })
-      expect(await createBrowserRecordingTools(capabilities, context)).toEqual([])
+      expect(await createInAppBrowserTools(capabilities, context)).toEqual([])
     }
   )
   it("does not inject before the browser endpoint is running", async () => {
     browserConfig.port.mockReturnValue(null)
-    expect(await createBrowserRecordingTools(capabilities, context)).toEqual([])
+    expect(await createInAppBrowserTools(capabilities, context)).toEqual([])
   })
-  it("injects both tools when enabled and ready", async () => {
-    expect(
-      (await createBrowserRecordingTools(capabilities, context)).map((tool) => tool.name)
-    ).toEqual(["inAppBrowser_list_recordings", "inAppBrowser_execute_recording"])
+  it("injects browser helper tools when enabled and ready", async () => {
+    expect((await createInAppBrowserTools(capabilities, context)).map((tool) => tool.name)).toEqual(
+      [
+        "inAppBrowser_list_recordings",
+        "inAppBrowser_execute_recording",
+        "inAppBrowser_extract_iframes"
+      ]
+    )
+  })
+  it("forwards iframe text and link pagination independently", async () => {
+    const extractTool = (await createInAppBrowserTools(capabilities, context))[2]
+
+    await extractTool.invoke({
+      frameIndex: 3,
+      maxTextCharsPerFrame: 8_000,
+      textOffset: 12_000,
+      linkOffset: 100
+    })
+
+    expect(mocks.extractIframes).toHaveBeenCalledWith({
+      frameIndex: 3,
+      maxTextCharsPerFrame: 8_000,
+      textOffset: 12_000,
+      linkOffset: 100
+    })
   })
   it("rejects existing tools after browser control is disabled", async () => {
-    const tools = await createBrowserRecordingTools(capabilities, context)
+    const tools = await createInAppBrowserTools(capabilities, context)
     browserConfig.config.mockReturnValue({ enabled: false })
     await expect(tools[0].invoke({})).rejects.toThrow("开启内置浏览器")
     await expect(tools[1].invoke(input)).rejects.toThrow("开启内置浏览器")
@@ -64,9 +95,9 @@ describe("browser recording agent tools", () => {
     expect(mocks.execute).not.toHaveBeenCalled()
   })
   it("requires the in-app snapshot capability", async () => {
-    expect(await createBrowserRecordingTools([], context)).toEqual([])
+    expect(await createInAppBrowserTools([], context)).toEqual([])
     expect(
-      await createBrowserRecordingTools(
+      await createInAppBrowserTools(
         [{ ...capabilities[0], providerDisplayName: "other" }] as McpCapabilityTool[],
         context
       )
@@ -74,7 +105,7 @@ describe("browser recording agent tools", () => {
   })
   it("discovers names and exact variables without exposing script source", async () => {
     const result = JSON.parse(
-      (await (await createBrowserRecordingTools(capabilities, context))[0].invoke({})) as string
+      (await (await createInAppBrowserTools(capabilities, context))[0].invoke({})) as string
     )
     expect(result.recordings[0]).toMatchObject({
       name: "市场系统查询企业管户信息",
@@ -92,7 +123,7 @@ describe("browser recording agent tools", () => {
           finish = resolve
         })
     )
-    const pending = (await createBrowserRecordingTools(capabilities, context))[1].invoke(input)
+    const pending = (await createInAppBrowserTools(capabilities, context))[1].invoke(input)
     await vi.waitFor(() => expect(mocks.execute).toHaveBeenCalled())
     expect(mocks.execute).toHaveBeenCalledWith(expect.objectContaining({ ...context, ...input }))
     expect(mocks.list).toHaveBeenCalledWith({ includeVariableInfo: false })
@@ -100,7 +131,7 @@ describe("browser recording agent tools", () => {
     finish()
     expect(JSON.parse((await pending) as string)).toMatchObject({
       status: "completed",
-      nextStep: expect.stringContaining("browser_snapshot")
+      nextStep: expect.stringContaining("先调用 browser_snapshot")
     })
   })
   it.each([
@@ -109,7 +140,7 @@ describe("browser recording agent tools", () => {
     `C:\\recordings\\${input.fileName}`,
     "市场系统查询企业管户信息"
   ])("resolves a listed recording from a stable reference: %s", async (fileName) => {
-    const executeTool = (await createBrowserRecordingTools(capabilities, context))[1]
+    const executeTool = (await createInAppBrowserTools(capabilities, context))[1]
 
     await executeTool.invoke({ ...input, fileName })
 
@@ -125,7 +156,7 @@ describe("browser recording agent tools", () => {
     ])
 
     await expect(
-      (await createBrowserRecordingTools(capabilities, context))[1].invoke({
+      (await createInAppBrowserTools(capabilities, context))[1].invoke({
         ...input,
         fileName: "重复名称"
       })
@@ -139,7 +170,7 @@ describe("browser recording agent tools", () => {
     { fileName: "missing.spec.ts" }
   ])("rejects invalid arguments without running old recorded values: %j", async (overrides) => {
     await expect(
-      (await createBrowserRecordingTools(capabilities, context))[1].invoke({
+      (await createInAppBrowserTools(capabilities, context))[1].invoke({
         ...input,
         ...overrides
       })
@@ -149,13 +180,13 @@ describe("browser recording agent tools", () => {
   it("propagates playback failures instead of reporting completion", async () => {
     mocks.execute.mockRejectedValue(new Error("定位失败"))
     await expect(
-      (await createBrowserRecordingTools(capabilities, context))[1].invoke(input)
+      (await createInAppBrowserTools(capabilities, context))[1].invoke(input)
     ).rejects.toThrow("定位失败")
   })
   it("does not cancel an existing manual playback", async () => {
     mocks.state.mockReturnValue({ status: "running" })
     await expect(
-      (await createBrowserRecordingTools(capabilities, context))[1].invoke(input)
+      (await createInAppBrowserTools(capabilities, context))[1].invoke(input)
     ).rejects.toThrow("已有回放")
     expect(mocks.execute).not.toHaveBeenCalled()
     expect(mocks.cancel).not.toHaveBeenCalled()
@@ -170,7 +201,7 @@ describe("browser recording agent tools", () => {
         })
     )
     const pending = (
-      await createBrowserRecordingTools(capabilities, {
+      await createInAppBrowserTools(capabilities, {
         ...context,
         abortSignal: controller.signal
       })
