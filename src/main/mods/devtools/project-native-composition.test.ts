@@ -5,6 +5,8 @@ import { ProjectAuthoringSessions } from "./project-authoring-session"
 import { readProjectSource } from "./project-source"
 import { compileFunctionPlugin } from "../v2/loader"
 import type { DevelopmentScope } from "../v2/development-session"
+import { compileNativeComposition } from "../../plugins/native-composition"
+import { readFileSync } from "node:fs"
 
 const scope: DevelopmentScope = {
   threadId: "native-composition-creator",
@@ -18,6 +20,32 @@ afterEach(async () => {
 })
 
 describe("native module source through existing project_compile", () => {
+  it("explicitly upgrades pretty metadata to a new digest and requires a new native trial confirmation", async () => {
+    const source = await readProjectSource(resolve("tests/fixtures/native-compositions/vendor"))
+    const native = source.bundle.files.find(file => file.path === "composition/source.json")!
+    const pretty = compileNativeComposition(JSON.parse(native.text), {
+      files: source.bundle.files.map(file => ({ path: file.path, bytes: Buffer.from(file.text) })),
+      actionCatalog: [], legacyGeneratedPretty: true
+    })
+    const sessions = new ProjectAuthoringSessions(async () => [])
+    const draft = await sessions.save(scope, { id: "pretty", name: "旧格式", revision: 0,
+      files: pretty.files.map(file => ({ path: file.path, text: file.bytes.toString("utf8") })) }, () => {})
+    roots.add(dirname(draft.directory))
+    const previous = await sessions.requestTrial(scope, draft.id, draft.revision, "核对旧格式原生项目", () => {})
+    expect(previous).toMatchObject({ phase: "needs-approval", executed: false })
+    const before = readFileSync(resolve(draft.directory, "devclaw.project-actions.lock.json"), "utf8")
+    const compiled = await sessions.compile(scope, draft.id, draft.revision, () => {})
+    expect(compiled.revision).toBe(draft.revision + 1)
+    expect(compiled.source.digest).not.toBe(draft.source.digest)
+    expect(sessions.trialRequest(scope)).toBeUndefined()
+    expect(readFileSync(resolve(draft.directory, "devclaw.project-actions.lock.json"), "utf8")).toBe(before)
+    const next = await sessions.requestTrial(scope, draft.id, compiled.revision, "核对旧格式原生项目", () => {})
+    expect(next).toMatchObject({ phase: "needs-approval", executed: false })
+    expect(next.request.id).not.toBe(previous.request.id)
+    expect(next.request.digest).toBe(compiled.source.digest)
+    expect(next.request.digest).not.toBe(previous.request.digest)
+  })
+
   it("saves, compiles, doctors and reads the same source resources without a second runtime author source", async () => {
     const source = await readProjectSource(resolve("tests/fixtures/native-compositions/vendor"))
     let catalogs = 0
@@ -114,5 +142,18 @@ describe("native module source through existing project_compile", () => {
     expect(await sessions.inspect(scope, draft.id, 2, "doctor", () => {}, [])).toMatchObject({
       valid: false
     })
+    const independent = { ...actions.find((action) => action.actionId === "convert")!,
+      pluginId: "independent-validator", plugin: "independent-validator" }
+    actions.push(independent)
+    const files = compiled.source.files.map((file) => {
+      if (file.path !== "composition/source.json") return file
+      const value = JSON.parse(file.text)
+      value.modules[0].checks.find((check: { kind: string }) => check.kind === "action").provider.plugin = "independent-validator"
+      return { ...file, text: JSON.stringify(value) }
+    })
+    const revised = await sessions.save(scope, { id: draft.id, name: draft.name,
+      revision: compiled.revision, files }, () => {})
+    const rebound = await sessions.compile(scope, draft.id, revised.revision, () => {})
+    expect(rebound).toMatchObject({ validation: { doctor: { valid: true }, businessActionsExecuted: false } })
   })
 })

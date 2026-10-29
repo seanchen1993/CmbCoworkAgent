@@ -15,6 +15,13 @@ export interface RuntimeCapabilitySource {
   packageDigest: string
 }
 
+/** Exact public-action providers. Never a Skill, MCP or classic Hook selection. */
+export interface RuntimeActionSource {
+  plugin: PluginMetadata
+  name: string
+  digest: string
+}
+
 /** Host resolves these from retained package declarations and approved directory bindings. */
 export interface RuntimeExecutionResources {
   profiles: AgentProfile[]
@@ -34,6 +41,7 @@ export interface RuntimePluginSourceBinding {
   requiredHooks?: readonly string[]
   mode?: "host" | "legacy" | "capabilities"
   capabilitySources?: readonly RuntimeCapabilitySource[]
+  actionSources?: readonly RuntimeActionSource[]
   preserveParentContext?: boolean
   featureId?: string
   threadId: string
@@ -65,7 +73,8 @@ const retainedTokens = new FinalizationRegistry<SnapshotLease>((lease) => {
   try { lease.release() } catch { /* An uncertain lease is retained on disk. */ }
 })
 function snapshotPaths(binding: RuntimePluginSourceBinding): string[] {
-  return [binding.plugin.path, ...(binding.capabilitySources ?? []).map((item) => item.plugin.path)]
+  return [binding.plugin.path, ...(binding.capabilitySources ?? []).map((item) => item.plugin.path),
+    ...(binding.actionSources ?? []).map((item) => item.plugin.path)]
 }
 
 /** Hold a deferred native owner until its physical work/close completes. */
@@ -107,6 +116,19 @@ export function issueRuntimePluginSourceToken(
   assertSource?: () => void,
   assertRuntime?: () => void
 ): RuntimePluginSourceToken {
+  if (binding.actionSources !== undefined) {
+    if (binding.mode !== "host" || !Array.isArray(binding.actionSources) ||
+        binding.actionSources.length > 8) throw Error("PROJECT_ACTION_SOURCES_INVALID")
+    const ids = new Set<string>(), names = new Set<string>()
+    for (const item of binding.actionSources) {
+      if (!item || !item.plugin?.id || !item.plugin.enabled || !isAbsolute(item.plugin.path) ||
+          !item.name || !/^[a-f0-9]{64}$/.test(item.digest) || ids.has(item.plugin.id) ||
+          names.has(item.name) || item.plugin.id === binding.plugin.id)
+        throw Error("PROJECT_ACTION_SOURCES_INVALID")
+      ids.add(item.plugin.id)
+      names.add(item.name)
+    }
+  }
   if (binding.executionMode !== undefined &&
       (binding.mode !== "host" || !["normal", "workflow"].includes(binding.executionMode)))
     throw Error("PROJECT_EXECUTION_MODE_INVALID")

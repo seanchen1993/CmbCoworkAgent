@@ -12,6 +12,69 @@ import {
 import { functionAuthoringDeclarations } from "./authoring-declarations"
 import { CREATOR_S1_SUPPORT } from "./creator-support"
 import { AUTHORING_TEMPLATE_KINDS } from "../../../shared/mods/authoring"
+import { PROJECT_DEPENDENCY_AUTHORING } from "./development-dependency-catalog"
+import ts from "typescript"
+
+/** Extract exact fragments from the same declarations used by the isolated compiler. */
+function targetedDeclarations(source: string, events: string[], methods: string[]) {
+  const file = ts.createSourceFile("devclaw-mods.d.ts", source, ts.ScriptTarget.Latest, true)
+  const named = new Map<string, ts.InterfaceDeclaration | ts.TypeAliasDeclaration>()
+  const index = (node: ts.Node) => {
+    if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node))
+      named.set(node.name.text, node)
+    ts.forEachChild(node, index)
+  }
+  index(file)
+  const snippets: ts.Node[] = []
+  const on = named.get("On")
+  if (on && ts.isInterfaceDeclaration(on)) {
+    for (const member of on.members) {
+      if (ts.isCallSignatureDeclaration(member)) {
+        const literals: string[] = []
+        const visit = (node: ts.Node) => {
+          if (ts.isStringLiteral(node)) literals.push(node.text)
+          ts.forEachChild(node, visit)
+        }
+        if (member.parameters[0]?.type) visit(member.parameters[0].type)
+        if (events.some((event) => literals.includes(event))) snippets.push(member)
+      } else if (events.includes("platform.action") && member.name?.getText(file) === "capability")
+        snippets.push(member)
+    }
+  }
+  const base = named.get("SDKBase")
+  if (base && ts.isInterfaceDeclaration(base)) {
+    for (const method of methods) {
+      const [family, name] = method.split(".")
+      const property = base.members.find((member) => member.name?.getText(file) === family)
+      if (!property || !ts.isPropertySignature(property) || !property.type) continue
+      const type = ts.isTypeReferenceNode(property.type)
+        ? named.get(property.type.typeName.getText(file)) : property.type
+      if (type && (ts.isTypeLiteralNode(type) || ts.isInterfaceDeclaration(type))) {
+        for (const member of type.members)
+          if (member.name?.getText(file) === name) snippets.push(member)
+      }
+    }
+  }
+  const dependencies = new Set<ts.Node>()
+  const omitted = new Set(["SDK", "SDKBase", "On", "Register"])
+  const collect = (node: ts.Node) => {
+    if (ts.isTypeReferenceNode(node) || ts.isExpressionWithTypeArguments(node)) {
+      const name = ts.isTypeReferenceNode(node) ? node.typeName.getText(file)
+        : node.expression.getText(file)
+      const declaration = named.get(name)
+      if (declaration && !omitted.has(name) && !dependencies.has(declaration)) {
+        dependencies.add(declaration)
+        ts.forEachChild(declaration, collect)
+      }
+    }
+    ts.forEachChild(node, collect)
+  }
+  snippets.forEach(collect)
+  return {
+    signatures: snippets.map((node) => node.getText(file)),
+    types: [...dependencies].map((node) => node.getText(file))
+  }
+}
 
 export const DEVELOPMENT_COUNTER_EXAMPLE = `import type { Register } from "devclaw-mods"
 export const register: Register = (on) => {
@@ -48,6 +111,13 @@ export function developmentCatalog() {
     support: CREATOR_S1_SUPPORT,
     hostDisplay: describeFunctionDisplayRouting(),
     authoringTemplates: [...AUTHORING_TEMPLATE_KINDS],
+    projectDependencies: PROJECT_DEPENDENCY_AUTHORING,
+    draftWorkflow: {
+      newDraft: "首次 revision=0。",
+      scaffold: { saved: false, next: "result.files 完整数组传 submit.files。" },
+      edit: "修改用 read(id).revision。",
+      submitValid: "check.valid=true 后结束本轮等原生确认，勿重复提交。"
+    },
     types: functionAuthoringDeclarations("result-v1"),
     events: FUNCTION_COMPATIBILITY_EVENT_NAMES.map((name) => ({
       name,
@@ -76,10 +146,10 @@ export function developmentCatalog() {
       "组合用 mod_composition list 搜索摘要，details 按需读取配置 schema；stage 同轮累积并深合并配置，可引用真实模型、技能、MCP 和已保存步骤。save/apply_saved 保存套用命名组合，undo/cancel 撤销选择或取消排队。提交后结束本轮，再核对真实回执。",
       "用户参数在灵件清单 userConfig 声明，由原生参数表单绑定；缺必填项不批准执行。升级重命名或删除字段可在同份声明加入 userConfigSchema:{version:1,migrations:[{fromVersion:0,toVersion:1,changes:[{kind:'rename',from:'oldLabel',to:'label'}]}]}，并声明 cmbCompatibility:{modelProtocol:'result-v1',userConfigMigrations:'v1'}；后续版本逐一连续迁移，删除用 {kind:'remove',key:'字段名'}，不运行迁移脚本。迁移须原生确认，失败保留旧配置；导出不携带本机保存值、凭据或授权。",
       "公共快捷指令应采用灵件专属名称，避免与已启用灵件重名。出现 MODS_COMMAND_CONFLICT 时修改本草稿的指令名称及使用说明，再重新请求试用；不要替用户关闭其他插件来绕开冲突。",
-      "后续询问当前试用状态时先调用 list，依据 trials 最新 phase/error 回答。request_trial 的 needs-approval 只是当时快照；后续 failed 表示加载失败，不是仍待授权。不要循环轮询或自动重试；读取失败原因、修复后再请求用户试用。",
-      "先实现最小完整效果，优先 submit 合并保存、检查和请求试用；诊断失败再修复。结束本轮，不循环等待授权。当前聊天恢复用 resume_trial，明确跨聊天复用才 request_reuse，由用户在一张原生卡确认后宿主完成原安装事务。",
-      "交付说明只列如何触发、应看到什么、必要设置；不要把源码摘要、内部状态或接口清单当使用步骤。",
-      "明确当前应用的聊天与实际生效状态；切回普通模式保留已生效功能，停止试用另行处理。",
+      "试用状态先 list，按最新 trials.phase/error 回答；needs-approval 仅为快照，failed 是加载失败。勿循环轮询或重试；先读失败原因，再修复并申请确认。",
+      "优先 submit 最小完整效果；诊断失败再修复，有效即结束本轮等确认。恢复当前聊天用 resume_trial，跨聊天复用才 request_reuse；原安装事务仍须原生卡确认。",
+      "交付只说明触发、预期结果和必要设置，不罗列源码摘要、内部状态或接口。",
+      "说明实际聊天与生效状态；切回普通模式不停止试用。",
       "明确触发条件，例如 edit_file 完成后触发，不等于发送普通消息后触发。注册的命令写明参数示例。",
       "需要文件、网络、模型、进程或业务能力时，可直接请求授权后的真实试用，无需先正式安装。确认绑定当前源码与目标，实际动作仍走宿主原权限；静态检查、隔离预览或批准都不是实际结果。",
       "session.start 只登记指令和无副作用界面。真实文件、网络、模型及长期任务放到生效后用户触发的动作中；候选阶段禁止外部效果，失败时旧可用版保留。",
@@ -116,9 +186,37 @@ export function developmentCatalog() {
 /** Targeted discovery stays within the normal tool-result budget instead of dumping the SDK. */
 export function developmentCatalogPage(
   section: "overview" | "types" | "events" | "sdk" | "support" = "overview",
-  cursor = 0
+  cursor = 0,
+  query?: string
 ) {
   const catalog = developmentCatalog()
+  if (query !== undefined) {
+    if (!query.trim() || query.length > 120) throw Error("DEVELOPMENT_CATALOG_QUERY")
+    if (!["overview", "events", "sdk"].includes(section))
+      throw Error("DEVELOPMENT_CATALOG_QUERY_SECTION")
+    const exact = query.trim()
+    const events = section === "sdk" ? [] : catalog.events.filter((event) => event.name === exact)
+    const methods = section === "events" ? [] : catalog.sdkMethods.filter((method) => method === exact)
+    const declarations = targetedDeclarations(catalog.types, events.map((event) => event.name), methods)
+    const text = [...declarations.signatures, ...declarations.types].join("\n\n")
+    if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > text.length)
+      throw Error("DEVELOPMENT_CATALOG_CURSOR")
+    const end = Math.min(cursor + 4500, text.length)
+    return {
+      contract: catalog.contract, section, query: exact, cursor,
+      scope: "static-authoring-contract", grantsAuthority: false,
+      events, sdkMethods: methods,
+      matched: events.length + methods.length > 0,
+      declarationAvailable: declarations.signatures.length > 0,
+      content: text.slice(cursor, end), totalCharacters: text.length,
+      complete: end === text.length,
+      ...(end < text.length ? { nextCursor: end } : {}),
+      declarationScope:
+        "同一 result-v1 作者声明的精确签名及引用数据类型片段，并非完整独立 d.ts。SDK<Owner> 由宿主提供；按 SDK 方法继续 query。运行时支持不保证存在作者重载；无签名不编造。",
+      discovery:
+        "query 精确匹配事件名或 SDK 方法；默认 overview 同时匹配两类。完整类型仍用 catalogSection=types 分页；有 nextCursor 时继续同一 query。静态发现不含已安装动作或授权。"
+    }
+  }
   if (section === "support") {
     const capabilities = catalog.support.conditionalCapabilities
     if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > capabilities.length)
@@ -159,10 +257,11 @@ export function developmentCatalogPage(
       package: catalog.package,
       examples: { skillLifecycle: catalog.examples.skillLifecycle },
       authoringTemplates: catalog.authoringTemplates,
+      draftWorkflow: catalog.draftWorkflow,
       deliveryGuidance: catalog.deliveryGuidance,
       limitations: catalog.limitations,
       discovery:
-        "用 catalogSection=support/types/events/sdk 分页读取精确声明；nextCursor 存在时继续，缺省返回入门范围。"
+        "query精查；types按nextCursor分页。project-dependencies查未安装执行/校验Mod；sourceId→dependency_prepare，assetPath读源码，project_read仅草稿。"
     }
   const value =
     section === "types" ? catalog.types : section === "events" ? catalog.events : catalog.sdkMethods
@@ -174,6 +273,7 @@ export function developmentCatalogPage(
     section,
     cursor,
     content: value.slice(cursor, cursor + size),
+    ...(section === "types" ? { discovery: "可用 catalogSection=events/sdk 配合 query 精确事件名或SDK方法定向读取；此处保持完整类型原样分页。" } : {}),
     ...(cursor + size < value.length ? { nextCursor: cursor + size } : {})
   }
 }

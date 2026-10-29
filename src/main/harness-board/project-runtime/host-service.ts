@@ -325,8 +325,8 @@ export class HostProjectService {
   get(projectId: string): HostProjectState | undefined {
     return this.store.get(projectId)
   }
-  list(limit = 50, afterProjectId = ""): HostProjectState[] {
-    return this.store.listProjects(limit, afterProjectId)
+  list(limit = 50, afterProjectId = "", query = ""): HostProjectState[] {
+    return this.store.listProjects(limit, afterProjectId, query)
   }
   operations(projectId: string, limit = 50): HostProjectOperation[] {
     return this.store.listOperations(projectId, limit).map(operation => this.withCheckDiagnostics(operation))

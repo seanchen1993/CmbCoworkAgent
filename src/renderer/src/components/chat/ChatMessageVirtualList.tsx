@@ -29,6 +29,7 @@ import {
 } from "./user-message-expansion-context"
 import { subscribeToMessageDiscard, type MessageAttempts } from "@/lib/message-discard-events"
 import { projectChatVirtualWindow } from "./chat-virtual-window"
+import { installChatDetachedLayoutAnchor } from "./chat-detached-layout-anchor"
 import { ChatVirtualPrependLayout, type ChatVirtualPrependLayoutContext } from "./chat-virtual-prepend-layout"
 import type { ChatSearchLocation, ChatSearchReveal } from "../../../../shared/chat-search-types"
 import type {
@@ -154,6 +155,7 @@ export interface ChatMessageVirtualListProps {
   onInitialVirtualItemsRendered: () => void
   onContentHeightChanged: () => void
   onAtBottomStateChange: (atBottom: boolean) => void
+  readDetachedAnchorLease?: () => number | null
   footer: React.ReactNode
 }
 
@@ -408,6 +410,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   onInitialVirtualItemsRendered,
   onContentHeightChanged,
   onAtBottomStateChange,
+  readDetachedAnchorLease,
   footer
 }: ChatMessageVirtualListProps): React.JSX.Element | null {
   const virtualRows = useMemo(() => visibleMessageIndexes.map(messageIndex => {
@@ -440,6 +443,35 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     return claimVirtualizedChatScrollAnchor(customScrollParent)
   }, [customScrollParent, shouldVirtualize])
   const presentationRoot = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const root = presentationRoot.current
+    if (!shouldVirtualize || !root) return
+    let frame: number | undefined
+    const hasPending = (node: Node): boolean => node instanceof Element &&
+      (node.matches("[data-function-site-pending]") ||
+        Boolean(node.querySelector("[data-function-site-pending]")))
+    const observer = new MutationObserver(records => {
+      if (frame !== undefined || !records.some(record => record.type === "attributes" ||
+        [...record.addedNodes, ...record.removedNodes].some(hasPending))) return
+      frame = requestAnimationFrame(() => {
+        frame = undefined
+        onContentHeightChanged()
+      })
+    })
+    observer.observe(root, { subtree: true, childList: true, attributes: true,
+      attributeFilter: ["data-function-site-pending", "aria-busy"] })
+    return () => {
+      observer.disconnect()
+      if (frame !== undefined) cancelAnimationFrame(frame)
+    }
+  }, [customScrollParent, onContentHeightChanged, shouldVirtualize])
+  useLayoutEffect(() => {
+    if (!shouldVirtualize || !customScrollParent || !presentationRoot.current ||
+      !readDetachedAnchorLease) return
+    return installChatDetachedLayoutAnchor({ root: presentationRoot.current,
+      viewport: customScrollParent, readLease: readDetachedAnchorLease })
+  }, [shouldVirtualize, customScrollParent, readDetachedAnchorLease,
+    virtualWindow.key, virtualWindow.firstItemIndex])
   const [presentedThread, setPresentedThread] = useState<string | null>(null)
   // Only a first live user row bypasses history settling. A running history still needs the barrier.
   const firstLiveUserRow = isFirstLiveChatUserRow(isLoading, canLoadReleasedHistory,

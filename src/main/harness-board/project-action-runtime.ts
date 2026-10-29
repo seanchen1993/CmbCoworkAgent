@@ -34,6 +34,9 @@ interface ProjectActionRuntime {
     executionId: string
   ): FlowActionExecutionFacts | undefined
   prepareInputIdentity?(project: ProjectRuntimeInputScope, snapshotRoot: string): Promise<void>
+  /** Explicit non-sensitive keys only; values are resolved by the original main-process store. */
+  readPublicConfiguration?(project: ProjectRuntimeInputScope, snapshotRoot: string,
+    keys: readonly string[]): import("../../shared/mods/types").ModObject
   inputIdentity?(project: ProjectRuntimeInputScope, snapshotRoot: string): string
   /** Preloaded schema/source names + original config/rules revisions; no package/knowledge reads. */
   captureInputAuthorityIdentity?(project: ProjectRuntimeInputScope, snapshotRoot: string): () => string
@@ -79,6 +82,11 @@ export function normalizeProjectActionRuntime(
     ...(value.readContextMaterials ? {
       readContextMaterials: (project: ProjectRuntimeInputScope, root: string) =>
         value.readContextMaterials!({ ...project, workspace: workspaceKey(project.workspace) }, root)
+    } : {}),
+    ...(value.readPublicConfiguration ? {
+      readPublicConfiguration: (project: ProjectRuntimeInputScope, root: string,
+        keys: readonly string[]) => value.readPublicConfiguration!(
+          { ...project, workspace: workspaceKey(project.workspace) }, root, keys)
     } : {}),
     ...(value.readDeclaredContext ? {
       readDeclaredContext: (project: ProjectRuntimeInputScope, root: string, stageId: string) =>

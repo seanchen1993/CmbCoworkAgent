@@ -64,6 +64,16 @@ it("explains original-plugin modularization, native journey evidence and explici
     expect(prompt).toContain(text)
 })
 
+it("routes native source edits and dependency reuse before legacy modularization", () => {
+  const prompt = modAuthoringRuntimePrompt([{ name: "mod_business" }, { name: "mod_authoring" }])!
+  expect(prompt.indexOf("先按真实源码选择创作入口")).toBeLessThan(prompt.indexOf("inspect_raw(pluginId)"))
+  for (const text of ["composition/source.json", "dependency_prepare", "project-dependencies",
+    "sourcePatch", "add /modules/-", "test 目标模块的 id",
+    "不能按插件名称", "不再 inspect_raw", "由项目使用入口填写"])
+    expect(prompt).toContain(text)
+  expect(modAuthoringRuntimePrompt([{ name: "mod_business" }])).not.toContain("dependency_save")
+})
+
 it("does not inject creator tools or guidance into another scope, a subagent, a project runtime or a disabled chat", () => {
   fixture()
   for (const other of [

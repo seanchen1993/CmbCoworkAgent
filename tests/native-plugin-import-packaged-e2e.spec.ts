@@ -82,12 +82,19 @@ async function picker(path: string | null) {
   }, path)
 }
 async function installedView() {
-  await page!.getByRole("navigation").filter({ has: page!.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
+  await page!
+    .getByRole("navigation")
+    .filter({ has: page!.getByRole("button", { name: "基础功能", exact: true }) })
+    .getByRole("button", { name: "插件", exact: true })
+    .click()
   await page!
     .getByRole("navigation", { name: "灵件工作区" })
     .getByRole("button", { name: "我已添加", exact: true })
     .click()
   await page!.getByRole("region", { name: "已安装插件", exact: true }).waitFor()
+  const imports = page!.locator("[data-plugin-import-controls]")
+  if (!(await imports.evaluate((element) => (element as HTMLDetailsElement).open)))
+    await imports.locator(":scope > summary").click()
 }
 async function main() {
   try {
@@ -201,7 +208,10 @@ async function main() {
     await installedView()
     await picker(source)
     await page.getByRole("button", { name: "从文件夹安装", exact: true }).click()
-    await page.getByRole("status").filter({ hasText: "尚未启用" }).waitFor()
+    await page
+      .getByRole("status", { name: "灵件操作结果", exact: true })
+      .filter({ hasText: "已添加" })
+      .waitFor()
     const original = (await page.evaluate(() => window.api.plugins.list())).find(
       (p) => p.name === JSON.parse(readFileSync(join(source, "plugin.json"), "utf8")).name
     )
@@ -254,23 +264,28 @@ async function main() {
     await picker(fixture)
     await page.getByRole("button", { name: "从文件夹安装", exact: true }).click()
     const card = page.getByRole("article", { name: "Native local project fixture", exact: true })
-    await card.getByRole("button", { name: "启用插件", exact: true }).waitFor()
+    await card.getByRole("button", { name: "启用", exact: true }).waitFor()
     const mini = (await page.evaluate(() => window.api.plugins.list())).find(
       (p) => p.name === "Native local project fixture"
     )!
     assert(mini && !mini.enabled && mini.hasProjectMode)
-    await card.getByRole("button", { name: "设置使用", exact: true }).click()
+    await card.getByRole("button", { name: "管理", exact: true }).click()
+    await card.getByRole("button", { name: "插件配置", exact: true }).click()
     await page.getByRole("heading", { name: mini.name, exact: true }).waitFor()
     await page.getByRole("button", { name: "编辑文件", exact: true }).waitFor()
     await installedView()
-    await card.getByRole("button", { name: "启用插件", exact: true }).click()
-    await card.getByRole("button", { name: "停用插件", exact: true }).waitFor()
+    await card.getByRole("button", { name: "启用", exact: true }).click()
+    await page.getByRole("region", { name: "为新插件创建项目" }).waitFor()
+    assert.equal(
+      (await page.evaluate(() => window.api.plugins.list())).find((p) => p.id === mini.id)!
+        .enabled,
+      true
+    )
     assert.equal(
       (await page.evaluate(() => window.api.plugins.list())).find((p) => p.id === original.id)!
         .enabled,
       false
     )
-    await card.getByRole("button", { name: "新建项目", exact: true }).click()
     await page
       .getByRole("region", { name: "为新插件创建项目" })
       .getByRole("button", { name: "填写新项目" })
@@ -290,6 +305,8 @@ async function main() {
     await page.getByText("原生插件导入验收", { exact: true }).first().click()
     await page.getByRole("button", { name: "自定义设置", exact: true }).click()
     await installedView()
+    if (await card.getByRole("button", { name: "管理", exact: true }).isVisible())
+      await card.getByRole("button", { name: "管理", exact: true }).click()
     await card.getByRole("button", { name: "从此插件创建", exact: true }).click()
     const derivation = page.getByRole("region", { name: "从已有插件创建", exact: true })
     await derivation

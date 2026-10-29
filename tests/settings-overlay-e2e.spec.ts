@@ -1,11 +1,13 @@
 /** Real Electron shell, React and preload. Remote market responses are deterministic fixtures. */
 import assert from "node:assert/strict"
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { basename, join, resolve } from "node:path"
 import { _electron, type ElectronApplication, type Page } from "playwright"
 import AdmZip from "adm-zip"
+import { startIsolatedAppRenderer } from "./support/isolated-app-renderer"
+import { decodeMarketContent, MARKET_CONTENT_DENIED } from "../src/main/services/market-content"
 
 const root = resolve(__dirname, "..")
 const requireLocal = createRequire(join(root, "package.json"))
@@ -40,12 +42,16 @@ type GitFixtureMain = typeof globalThis & {
 async function main(): Promise<void> {
   let app: ElectronApplication | undefined
   let page: Page | undefined
+  let renderer: Awaited<ReturnType<typeof startIsolatedAppRenderer>> | undefined
   const errors: string[] = []
   const counts = { lists: 0, downloads: 0 }
   let orgDownloads = 0
   let mcpPublished = false
   let pluginPublished = false
   let skillPublished = false
+  const protectedSkillText = "内容受保护，可直接使用。仅自己上传的原始技能支持查看和在线编辑。"
+  const ownedSkillName = "overlay-owned-preview"
+  const ownedSkillMarkdown = `---\nname: ${ownedSkillName}\nversion: 1.0.0\ndescription: Original local preview fixture\n---\n# Preserved skill preview\n\nOriginal file content.`
   const orgSkillName = "覆盖层组织技能"
   const orgSkillMarkdown = `---\nname: ${orgSkillName}\ndescription: organization skill fixture\n---\n# Preserved organization preview\n\nOrganization file content.`
   const orgZip = new AdmZip()
@@ -79,6 +85,10 @@ async function main(): Promise<void> {
     mkdirSync(orgSkillDir, { recursive: true })
     const orgSkillPath = join(orgSkillDir, "SKILL.md")
     writeFileSync(orgSkillPath, orgSkillMarkdown)
+    const ownedSkillDir = join(dataRoot, "skills", ownedSkillName)
+    mkdirSync(ownedSkillDir, { recursive: true })
+    const ownedSkillPath = join(ownedSkillDir, "SKILL.md")
+    writeFileSync(ownedSkillPath, ownedSkillMarkdown)
     const publishSkillDir = join(dataRoot, "skills", "overlay-publish-skill")
     mkdirSync(publishSkillDir, { recursive: true })
     writeFileSync(
@@ -115,6 +125,8 @@ async function main(): Promise<void> {
       HTTPS_PROXY: "http://127.0.0.1:9",
       NO_PROXY: "127.0.0.1,localhost"
     })
+    renderer = await startIsolatedAppRenderer(root, isolated)
+    env.ELECTRON_RENDERER_URL = renderer.url
     app = await _electron.launch({
       executablePath:
         process.platform === "win32" ? join(root, "tests/support/electron-launcher.cmd") : binary,
@@ -129,6 +141,11 @@ async function main(): Promise<void> {
     await app.evaluate("globalThis.__name = (value) => value")
     page = await app.firstWindow()
     page.setDefaultTimeout(15_000)
+    const projectGuide = page.getByRole("dialog", { name: "项目模式使用引导", exact: true })
+    await page.addLocatorHandler(projectGuide, async () => {
+      await projectGuide.getByRole("button", { name: "知道了，不再提示", exact: true }).click()
+      await projectGuide.waitFor({ state: "hidden" })
+    })
     await app.evaluate(({ ipcMain }) => {
       for (const channel of ["open-login-page", "open-login-window"]) {
         ipcMain.removeHandler(channel)
@@ -157,7 +174,13 @@ async function main(): Promise<void> {
       await route.fulfill({ json: { returnCode: "SUC0000", body: user } })
     })
     await page.route("**/gw/mgr/open-api/skill/**", async (route) => {
-      const pathname = new URL(route.request().url()).pathname
+      const endpoint = new URL(route.request().url())
+      assert.equal(
+        endpoint.origin,
+        renderer!.backendOrigin,
+        "Organization market uses only the explicitly configured fixture backend"
+      )
+      const pathname = endpoint.pathname
       if (pathname.endsWith("/document/download")) {
         orgDownloads++
         await route.fulfill({
@@ -192,6 +215,11 @@ async function main(): Promise<void> {
       }
     })
     await page.route("**/api/trajectories/marketplace/**", async (route) => {
+      assert.equal(
+        new URL(route.request().url()).origin,
+        renderer!.backendOrigin,
+        "Market uses only the explicitly configured fixture backend"
+      )
       if (route.request().url().includes("/list/")) {
         counts.lists++
         const mcp = {
@@ -245,6 +273,7 @@ async function main(): Promise<void> {
     })
     await page.getByRole("button", { name: "自定义设置", exact: true }).waitFor()
     await page.reload({ waitUntil: "domcontentloaded" })
+    assert.equal(page.url(), renderer.url, "The native trusted renderer entry loads the fixture build")
     page.on("pageerror", (error) => errors.push(error.message))
     await page.getByRole("button", { name: "自定义设置", exact: true }).waitFor()
     await page.evaluate(() =>
@@ -257,7 +286,7 @@ async function main(): Promise<void> {
       })
     )
     const pluginInstall = await page.evaluate(
-      (bytes) =>
+      (bytes: number[]) =>
         window.api.plugins.install(
           new Uint8Array(bytes).buffer,
           "overlay-plugin.zip",
@@ -274,6 +303,20 @@ async function main(): Promise<void> {
     const close = async (): Promise<void> => {
       await page!.getByRole("button", { name: "返回应用", exact: true }).click()
       await page!.locator("[data-workspace-surface][inert]").waitFor({ state: "detached" })
+    }
+    const selectSettingsPage = async (name: string, group = "基础功能"): Promise<void> => {
+      const settings = page!.getByRole("dialog", { name: "设置", exact: true })
+      const nav = settings.getByRole("navigation")
+      const header = nav.getByRole("button", { name: group, exact: true })
+        .and(nav.locator("button[aria-expanded]"))
+      if ((await header.getAttribute("aria-expanded")) === "false") await header.click()
+      // Group and leaf labels may be identical; only the leaf actually selects a page.
+      const item = nav.getByRole("button", { name, exact: true })
+        .and(nav.locator("button:not([aria-expanded])"))
+      await item.click()
+      await item.and(nav.locator('[aria-current="page"]')).waitFor()
+      if (name === "插件")
+        await settings.getByRole("button", { name: "导入与发布", exact: true }).click()
     }
 
     await open()
@@ -309,8 +352,10 @@ async function main(): Promise<void> {
     const search = page.getByPlaceholder(/搜索/).last()
     await search.fill("overlay-skill")
     await page.getByRole("heading", { name: "overlay-skill", exact: true }).click()
-    await page.getByText("Original file content.", { exact: false }).waitFor()
-    const preview = await page.getByText("Original file content.", { exact: false }).elementHandle()
+    await page.getByText(protectedSkillText, { exact: true }).waitFor()
+    const preview = await page.getByText(protectedSkillText, { exact: true }).elementHandle()
+    assert.equal(await page.getByText("Original file content.", { exact: false }).count(), 0)
+    assert.equal(counts.downloads, 0, "Protected market Skill details must not download source ZIPs")
     const before = { ...counts }
     await open()
     await page.keyboard.press(process.platform === "darwin" ? "Meta+f" : "Control+f")
@@ -320,8 +365,34 @@ async function main(): Promise<void> {
       "market detail DOM must survive"
     )
     assert.deepEqual(counts, before, "ordinary settings return must not refetch lists or ZIP files")
-    pass("market detail and file preview stay mounted without repeat downloads")
+    pass("protected market detail stays mounted without source disclosure or repeat downloads")
     await page.screenshot({ path: join(artifacts, "market-return.png") })
+
+    // Raw preview belongs to the user's own local Skill; market content remains protected.
+    const ownedNativeSkill = await page.evaluate(async (name) =>
+      (await window.api.skills.list()).find((skill) => skill.name === name), ownedSkillName)
+    assert(ownedNativeSkill)
+    assert.equal(ownedNativeSkill?.contentOrigin, "local")
+    assert.equal(ownedNativeSkill.path, ownedSkillPath)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await open()
+      const ownSettings = page.getByRole("dialog", { name: "设置", exact: true })
+      await selectSettingsPage("技能")
+      await ownSettings.getByRole("button", { name: ownedSkillName, exact: true }).click()
+      await ownSettings.getByText("Original file content.", { exact: true }).waitFor()
+      const originalRead = await page.evaluate((path) => window.api.skills.read(path), ownedSkillPath)
+      assert.equal(originalRead.success, true)
+      assert.equal(originalRead.content, ownedSkillMarkdown)
+      await ownSettings.getByRole("button", { name: "编辑", exact: true }).click()
+      assert.equal(await ownSettings.locator("textarea").inputValue(),
+        "# Preserved skill preview\n\nOriginal file content.")
+      await ownSettings.getByRole("button", { name: "取消", exact: true }).click()
+      await close()
+      assert.equal(readFileSync(ownedSkillPath, "utf8"), ownedSkillMarkdown)
+      assert(await preview!.evaluate((element) => element.isConnected))
+      assert.equal(counts.downloads, 0)
+    }
+    pass("owned local Skill uses native file reads and retains the original preview after settings reopens")
 
     await page.getByRole("button", { name: /返回列表/ }).click()
     assert.equal(await search.inputValue(), "overlay-skill")
@@ -338,9 +409,12 @@ async function main(): Promise<void> {
     pass("search and list scroll position survive settings and Escape")
 
     await open()
-    await page.getByRole("button", { name: "个人信息", exact: true }).last().click()
+    assert.equal((await page.evaluate(() => window.api.models.getUserInfo()))?.sapId,
+      "overlay-initial-user")
+    await selectSettingsPage("个人信息", "个人信息")
     await page.getByRole("button", { name: "退出登录", exact: true }).click()
     await page.getByRole("button", { name: "立即登录", exact: true }).waitFor()
+    assert.equal((await page.evaluate(() => window.api.models.getUserInfo()))?.sapId, "")
     await page.evaluate(() =>
       window.api.models.upsertUserInfo({
         sapId: "overlay-user",
@@ -355,6 +429,7 @@ async function main(): Promise<void> {
         ystAccessToken: ""
       })
     )
+    assert.equal((await page.evaluate(() => window.api.models.getUserInfo()))?.sapId, "overlay-user")
     await close()
     await page.getByRole("heading", { name: "overlay-skill", exact: true }).waitFor()
     assert.equal(await search.inputValue(), "", "relogin reloads identity-dependent market data")
@@ -371,7 +446,7 @@ async function main(): Promise<void> {
     assert.equal(await page.getByRole("button", { name: "精品", exact: true }).count(), 1)
     pass("ordinary settings return preserves the selected market filter")
     await open()
-    await page.getByRole("button", { name: "MCP 连接器", exact: true }).click()
+    await selectSettingsPage("连接工具")
     await page.getByRole("button", { name: "overlay-mcp", exact: true }).click()
     await page.getByRole("button", { name: "发布到市场", exact: true }).click()
     await page.locator("#chinese-name").fill("覆盖层测试连接器")
@@ -386,7 +461,7 @@ async function main(): Promise<void> {
     pass("publishing from a nested settings dialog refreshes and opens the existing market")
 
     await open()
-    await page.getByRole("button", { name: "MCP 连接器", exact: true }).click()
+    await selectSettingsPage("连接工具")
     await page.getByRole("button", { name: "overlay-mcp", exact: true }).click()
     page.once("dialog", (dialog) => {
       void dialog.accept()
@@ -402,8 +477,12 @@ async function main(): Promise<void> {
     await page.getByRole("button", { name: "卸载", exact: true }).waitFor()
     await open()
     const pluginSettings = page.getByRole("dialog", { name: "设置", exact: true })
-    await pluginSettings.getByRole("button", { name: "插件", exact: true }).click()
-    await pluginSettings.getByText("overlay-plugin", { exact: true }).first().click()
+    await selectSettingsPage("插件")
+    await pluginSettings
+      .locator("[data-plugin-source-list]")
+      .getByRole("button")
+      .filter({ has: page.getByText("overlay-plugin", { exact: true }) })
+      .click()
     await pluginSettings.getByRole("button", { name: "发布到市场", exact: true }).click()
     await page.locator("#chinese-name").fill("覆盖层测试插件")
     await page.locator("#description").fill("Plugin published from settings")
@@ -416,8 +495,12 @@ async function main(): Promise<void> {
     pass("publishing a plugin from settings opens its refreshed market result")
 
     await open()
-    await pluginSettings.getByRole("button", { name: "插件", exact: true }).click()
-    await pluginSettings.getByText("overlay-plugin", { exact: true }).first().click()
+    await selectSettingsPage("插件")
+    await pluginSettings
+      .locator("[data-plugin-source-list]")
+      .getByRole("button")
+      .filter({ has: page.getByText("overlay-plugin", { exact: true }) })
+      .click()
     await pluginSettings.getByRole("button", { name: "卸载", exact: true }).click()
     await page
       .getByRole("dialog", { name: "确认卸载", exact: true })
@@ -433,7 +516,7 @@ async function main(): Promise<void> {
     await page.keyboard.press("Escape")
     await open()
     const skillSettings = page.getByRole("dialog", { name: "设置", exact: true })
-    await skillSettings.getByRole("button", { name: "技能", exact: true }).click()
+    await selectSettingsPage("技能")
     await skillSettings.getByRole("button", { name: "overlay-publish-skill", exact: true }).click()
     await skillSettings.getByRole("button", { name: "同步到市场", exact: true }).click()
     await page.locator("#chinese-name").fill("覆盖层测试技能")
@@ -448,15 +531,16 @@ async function main(): Promise<void> {
 
     await page.getByRole("tab", { name: "组织级技能", exact: true }).click()
     await page.getByRole("heading", { name: orgSkillName, exact: true }).click()
-    await page.getByText("Organization file content.", { exact: false }).waitFor()
+    await page.getByText(protectedSkillText, { exact: true }).waitFor()
+    assert.equal(await page.getByText("Organization file content.", { exact: false }).count(), 0)
     await page.getByRole("button", { name: "卸载", exact: true }).waitFor()
     const orgPreview = await page
-      .getByText("Organization file content.", { exact: false })
+      .getByText(protectedSkillText, { exact: true })
       .elementHandle()
     const beforeOrgDownloads = orgDownloads
     await open()
     const settings = page.getByRole("dialog", { name: "设置", exact: true })
-    await settings.getByRole("button", { name: "技能", exact: true }).click()
+    await selectSettingsPage("技能")
     await settings.getByRole("button", { name: orgSkillName, exact: true }).click()
     // Keep the real handlers: a burst must share the existing catalog path,
     // not start a legacy full-directory scan for every notification.
@@ -523,6 +607,12 @@ async function main(): Promise<void> {
     )
     assert(reinstalledSkill, "detail must support reinstalling the local skill")
     assert(existsSync(reinstalledSkill.path), "reinstalled skill must exist on disk")
+    assert.equal(decodeMarketContent(readFileSync(reinstalledSkill.path)).toString("utf8"),
+      orgSkillMarkdown)
+    const protectedRead = await page.evaluate((path) => window.api.skills.read(path), reinstalledSkill.path)
+    assert.equal(protectedRead.success, false, "Installed market source stays protected through native IPC")
+    assert.equal(protectedRead.error, MARKET_CONTENT_DENIED)
+    assert.equal(orgDownloads, beforeOrgDownloads + 1, "Only explicit reinstallation downloads the ZIP")
     assert(await orgPreview!.evaluate((element) => element.isConnected))
     pass(
       "organization detail updates after settings deletion and supports reinstall without leaving detail"
@@ -646,18 +736,20 @@ async function main(): Promise<void> {
     await page.getByRole("tab", { name: "Skills", exact: true }).click()
     await search.fill("")
     await page.getByRole("heading", { name: "overlay-skill", exact: true }).click()
-    await page.getByText("Original file content.", { exact: false }).waitFor()
+    await page.getByText(protectedSkillText, { exact: true }).waitFor()
     const signedInPreview = await page
-      .getByText("Original file content.", { exact: false })
+      .getByText(protectedSkillText, { exact: true })
       .elementHandle()
     await open()
-    await page.getByRole("button", { name: "个人信息", exact: true }).last().click()
+    assert.equal((await page.evaluate(() => window.api.models.getUserInfo()))?.sapId, "overlay-user")
+    await selectSettingsPage("个人信息", "个人信息")
     await page.getByRole("button", { name: "退出登录", exact: true }).click()
     await page.getByRole("button", { name: "立即登录", exact: true }).waitFor()
+    assert.equal((await page.evaluate(() => window.api.models.getUserInfo()))?.sapId, "")
     await close()
     await page.getByRole("heading", { name: "overlay-skill", exact: true }).waitFor()
     assert.equal(await signedInPreview!.evaluate((node) => node.isConnected), false)
-    pass("logout through settings clears retained identity-dependent detail and preview")
+    pass("logout through settings clears retained identity-dependent protected detail")
 
     await page.getByRole("button", { name: "自动化", exact: true }).click()
     await page.getByRole("heading", { name: "定时任务", exact: true }).waitFor()
@@ -744,7 +836,7 @@ async function main(): Promise<void> {
     })
     const skillThread = await page.locator("[data-chat-thread-id]").getAttribute("data-chat-thread-id")
     const emitSkillConfirmation = (requestId: string) => app!.evaluate(
-      ({ BrowserWindow }, { requestId, threadId }) => {
+      ({ BrowserWindow }, { requestId, threadId, content }) => {
         for (const win of BrowserWindow.getAllWindows()) {
           win.webContents.send("skill:confirmRequest", {
             requestId,
@@ -752,11 +844,11 @@ async function main(): Promise<void> {
             skillId: "overlay-confirm-skill",
             name: "Overlay confirmation",
             description: "Pending skill must survive settings",
-            content: "# Original skill draft"
+            content
           })
         }
       },
-      { requestId, threadId: skillThread }
+      { requestId, threadId: skillThread, content: ownedSkillMarkdown }
     )
     await open()
     await emitSkillConfirmation("overlay-skill-approve")
@@ -771,6 +863,7 @@ async function main(): Promise<void> {
     pass("skill confirmation waits behind settings; Escape closes settings without rejecting it")
 
     await skillDialog.getByRole("button", { name: "查看/编辑完整 SKILL.md 草稿" }).click()
+    assert.equal(await skillDialog.locator("textarea").inputValue(), ownedSkillMarkdown)
     await skillDialog.locator("textarea").fill("# Edited skill draft")
     // A global notification can open settings while a workspace dialog is open.
     // Invoke the same settings action without depending on a remote notification.
@@ -1100,7 +1193,8 @@ async function main(): Promise<void> {
     await page.evaluate(async (workspacePath) => {
       const thread = await window.api.threads.create({ title: "Overlay fork fixture", workspacePath })
       await window.api.threads.appendMessages(thread.thread_id, [{
-        id: "overlay-fork-message", role: "assistant", content: "Overlay fork message"
+        id: "overlay-fork-message", role: "assistant", content: "Overlay fork message",
+        created_at: new Date("2026-09-24T10:00:00Z")
       }])
     }, isolated)
     await app.evaluate(({ ipcMain, BrowserWindow }) => {
@@ -1374,14 +1468,33 @@ async function main(): Promise<void> {
     assert.deepEqual(errors, [])
     writeFileSync(
       join(artifacts, "result.json"),
-      JSON.stringify({ checks, counts, errors }, null, 2)
+      JSON.stringify(
+        {
+          checks,
+          counts,
+          errors,
+          renderer: {
+            url: renderer.url,
+            output: renderer.output,
+            backendOrigin: renderer.backendOrigin,
+            production: true,
+            envFilesLoaded: false
+          }
+        },
+        null,
+        2
+      )
     )
   } catch (error) {
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => undefined)
     console.error("Renderer errors:", errors)
     throw error
   } finally {
-    await app?.close()
+    try {
+      await app?.close()
+    } finally {
+      await renderer?.close()
+    }
   }
 }
 

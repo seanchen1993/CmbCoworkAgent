@@ -32,7 +32,7 @@ export function creatorEntryError(error: unknown): string {
   if (/SETUP_PARTIAL/.test(message))
     return "部分功能已开启，但尚未进入创造者模式。请核对当前聊天后重试。"
   if (/RECOVERY/.test(message))
-    return "项目设置需要恢复，请打开“灵件与使用设置 → 我已添加”核对恢复说明后重试。Claw 工作台也可直接打开“灵件与使用设置”。"
+    return "项目设置需要恢复，请到“插件 → 我已添加”查看恢复说明。"
   if (/SCOPE|STALE|WORKSPACE/.test(message))
     return "聊天或项目已变化，请重新选择目标聊天后再进入创造者模式。"
   return "暂时无法进入创造者模式，请稍后重试。"

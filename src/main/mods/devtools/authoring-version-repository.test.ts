@@ -15,6 +15,7 @@ import { build } from "esbuild"
 import { createAuthoringSourceBundle } from "./authoring-bundle"
 import { createAuthoringTemplate } from "./authoring-templates"
 import { AuthoringPreflightClient } from "./authoring-preflight-client"
+import type { AuthoringPreviewAnalysis } from "./authoring-preflight"
 import { compileFunctionPlugin } from "../v2/loader"
 import { readPureFunctionSource } from "./authoring-install-source"
 import { AuthoringVersionRepository } from "./authoring-version-repository"
@@ -84,10 +85,36 @@ const input = () => ({
   signal: new AbortController().signal,
   assertCurrent: () => {}
 })
-const analysis = () => ({
-  compiled: { digest: "a".repeat(64) },
-  sdk: { strictCompatible: true },
-  typecheck: { valid: true, digest: "a".repeat(64) }
+const analysis = (): AuthoringPreviewAnalysis => ({
+  compiled: {
+    name: "test",
+    digest: "a".repeat(64),
+    modelProtocol: "result-v1",
+    code: "",
+    options: {}
+  },
+  sdk: {
+    scope: "static-sdk-usage",
+    digest: "a".repeat(64),
+    modelProtocol: "result-v1",
+    runtimeVerified: false,
+    parameterCoverage: "selected-protocol-differences",
+    strictCompatible: true,
+    truncated: false,
+    usages: [],
+    diagnostics: [],
+    registrationEvents: [],
+    registrationEventsVerified: false
+  },
+  typecheck: {
+    scope: "authoring-subset",
+    valid: true,
+    digest: "a".repeat(64),
+    runtimeProvidersVerified: false,
+    standardLibraries: "development-es-only",
+    dependencyRegistry: false,
+    diagnostics: []
+  }
 })
 const fakeChecks = () =>
   vi
@@ -266,6 +293,7 @@ describe("immutable authoring preparation", () => {
   )
 
   it("real Worker type failure cannot publish a version", async () => {
+    const run = vi.spyOn(AuthoringPreflightClient.prototype, "run")
     const request = input()
     request.source = createAuthoringSourceBundle(
       request.source.files.map((file) =>
@@ -274,7 +302,18 @@ describe("immutable authoring preparation", () => {
           : file
       )
     )
-    await expect(repository().prepare(request)).rejects.toThrow("CHECK_FAILED")
+    await expect(repository().prepare(request)).rejects.toMatchObject({
+      message: "AUTHORING_VERSION_CHECK_FAILED",
+      check: {
+        digest: request.source.digest,
+        valid: false,
+        runtimeVerified: false,
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: "2322", file: "mods/main.ts" })
+        ])
+      }
+    })
+    expect(run).toHaveBeenCalledTimes(1)
     expect(readdirSync(join(directory, "versions"))).toEqual([])
   }, 20_000)
 
@@ -472,7 +511,7 @@ describe("immutable authoring preparation", () => {
 
   it("requires SDK checks as well as types and cleans worker failures", async () => {
     const run = fakeChecks()
-    run.mockResolvedValueOnce({ ...analysis(), sdk: { strictCompatible: false } } as Awaited<
+    run.mockResolvedValueOnce({ ...analysis(), sdk: { ...analysis().sdk, strictCompatible: false } } as Awaited<
       ReturnType<AuthoringPreflightClient["run"]>
     >)
     await expect(repository().prepare(input())).rejects.toThrow("CHECK_FAILED")

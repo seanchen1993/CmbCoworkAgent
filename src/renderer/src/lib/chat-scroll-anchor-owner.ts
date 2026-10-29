@@ -19,7 +19,7 @@ interface AnchorOwner {
 const owners = new WeakMap<AnchorViewport, AnchorOwner>()
 const property = "overflow-anchor"
 
-/** Virtuoso owns resize compensation while this exact chat viewport is virtualized. */
+/** Virtual list and detached reading controllers own compensation instead of the browser. */
 export function claimVirtualizedChatScrollAnchor(viewport: AnchorViewport): () => void {
   const style = viewport.style
   const current = {

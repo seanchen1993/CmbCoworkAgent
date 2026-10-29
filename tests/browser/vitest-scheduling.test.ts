@@ -13,6 +13,10 @@ it("collects the unchanged suite exactly once and schedules native graphs before
     watch: false
   })
   try {
+    // Tinypool reads these root values in Vitest 3. Project-only assertions miss the real cap.
+    expect(context.config.maxWorkers).toBe(2)
+    expect(context.config.minWorkers).toBe(1)
+    expect(context.config.testTimeout).toBe(5000)
     const specs = await context.globTestSpecifications()
     const original = await glob(VITEST_TEST_INCLUDE, {
       cwd: root,
@@ -34,11 +38,13 @@ it("collects the unchanged suite exactly once and schedules native graphs before
     expect(NATIVE_INTEGRATION_TESTS).toContain(
       "src/main/agent/native-shared-derived-config.integration.test.ts"
     )
+    expect(NATIVE_INTEGRATION_TESTS).toContain("src/main/agent/workflow/worktree-resource.test.ts")
     expect(NATIVE_INTEGRATION_TESTS).toContain(
       "src/main/harness-board/project-runtime/composition-host-adapter.test.ts"
     )
+    expect(NATIVE_INTEGRATION_TESTS).toContain("src/main/mods/devtools/project-stage-debug.test.ts")
     expect(NATIVE_INTEGRATION_TESTS).toContain(
-      "src/main/mods/devtools/project-stage-debug.test.ts"
+      "src/main/mods/devtools/project-creator-host-journey.test.ts"
     )
     expect(NATIVE_INTEGRATION_TESTS).toContain(
       "src/main/mods/devtools/creator-source-set.integration.test.ts"
@@ -59,6 +65,8 @@ it("collects the unchanged suite exactly once and schedules native graphs before
     expect(native?.config.pool).toBe("forks")
     expect(native?.config.poolOptions?.forks).toMatchObject({ singleFork: true, isolate: true })
     expect(parallel?.config.poolOptions?.forks?.singleFork).not.toBe(true)
+    expect(parallel?.config.maxWorkers).toBe(2)
+    expect(parallel?.config.minWorkers).toBe(1)
     for (const spec of specs) {
       expect(spec.project.name).toBe(
         nativeFiles.has(canonical(spec.moduleId)) ? "native-integration" : "parallel"

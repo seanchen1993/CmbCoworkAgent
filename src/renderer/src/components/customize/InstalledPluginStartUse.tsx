@@ -23,36 +23,71 @@ export function InstalledPluginStartUse(props: {
   pluginId: string
   expected: PluginStartUseInput["expected"]
   purpose?: "dependency"
+  actionLabel?: string
+  disabled?: boolean
+  onBusyChange?(busy: boolean): void
 }) {
   const accountRevision = useAppStore((state) => state.accountRevision)
-  return <ScopedStartUse key={JSON.stringify([accountRevision, props])} {...props} />
+  const { threadId, workspace, pluginId, expected, purpose } = props
+  const scope = [
+    accountRevision,
+    threadId,
+    workspace,
+    pluginId,
+    expected.name,
+    expected.version,
+    expected.digest,
+    purpose
+  ]
+  return <ScopedStartUse key={JSON.stringify(scope)} {...props} />
 }
 function ScopedStartUse({
   threadId,
   workspace,
   pluginId,
   expected,
-  purpose
+  purpose,
+  actionLabel,
+  disabled = false,
+  onBusyChange
 }: Parameters<typeof InstalledPluginStartUse>[0]) {
   const [report, setReport] = useState<PluginStartUseReport>()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const [chatReady, setChatReady] = useState(false)
   const active = useRef(true)
   const lock = useRef(false)
+  const disabledRef = useRef(disabled)
+  disabledRef.current = disabled
+  const busyCallback = useRef(onBusyChange)
+  busyCallback.current = onBusyChange
   useEffect(() => {
     active.current = true
     return () => {
       active.current = false
+      busyCallback.current?.(false)
     }
   }, [])
   const input: PluginStartUseInput = { threadId, expectedWorkspace: workspace, pluginId, expected }
-  const start = async (openChat = false) => {
-    if (lock.current || !active.current) return
+  const start = async (openChat = false, inspectOnly = false) => {
+    if (lock.current || !active.current || disabledRef.current) return
     lock.current = true
     setBusy(true)
+    busyCallback.current?.(true)
     setError("")
+    setChatReady(false)
     const account = useAppStore.getState().accountRevision
     const current = captureConfigurationScope({ threadId, workspace })
+    const guard = () => {
+      if (
+        !active.current ||
+        disabledRef.current ||
+        useAppStore.getState().accountRevision !== account ||
+        !current()
+      )
+        throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
+    }
+    let activationAttempted = false
     try {
       const actualInput = {
         ...input,
@@ -64,11 +99,9 @@ function ScopedStartUse({
             }
           : expected
       }
-      // One user action prepares the exact installation and opens its native use form.
+      // A chat plugin opens its exact native consent form before any catalog mutation.
       let next = await window.api.plugins.prepareStartUse(actualInput)
-      if (!active.current) return
-      if (useAppStore.getState().accountRevision !== account || !current())
-        throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
+      guard()
       const pinnedInput = {
         ...actualInput,
         expected: {
@@ -84,11 +117,10 @@ function ScopedStartUse({
         (actualInput.expected.digest && next.identity.digest !== actualInput.expected.digest)
       )
         throw Error("PLUGIN_START_USE_IDENTITY_CHANGED")
-      if (next.activationRequired) {
+      if (next.kind !== "chat" && next.activationRequired && !inspectOnly) {
+        activationAttempted = true
         next = await window.api.plugins.enableStartUse(pinnedInput)
-        if (!active.current) return
-        if (useAppStore.getState().accountRevision !== account || !current())
-          throw Error("PLUGIN_START_USE_SCOPE_CHANGED")
+        guard()
       }
       setReport(next)
       // Configuration belongs to this chat only when the native report says so.
@@ -100,6 +132,7 @@ function ScopedStartUse({
       )
       if (
         purpose !== "dependency" &&
+        !inspectOnly &&
         (next.kind !== "chat" || openChat) &&
         next.canOpen &&
         !needsConfiguration
@@ -112,7 +145,11 @@ function ScopedStartUse({
       }
     } finally {
       lock.current = false
-      if (active.current) setBusy(false)
+      if (activationAttempted) window.dispatchEvent(new Event("mods:configuration-changed"))
+      if (active.current) {
+        setBusy(false)
+        busyCallback.current?.(false)
+      }
     }
   }
   const configuration = report?.issues.some(
@@ -121,20 +158,22 @@ function ScopedStartUse({
   )
   return (
     <section aria-label="已安装插件开始使用" className="space-y-3">
-      <button
-        type="button"
-        disabled={busy}
-        className={`${button} border-primary bg-primary text-primary-foreground hover:bg-primary/90`}
-        onClick={() => void start()}
-      >
-        {busy
-          ? "正在打开…"
-          : purpose === "dependency"
-            ? "准备此依赖"
-            : configuration
-              ? "保存后继续"
-              : "开始使用"}
-      </button>
+      {(!report || report.kind !== "chat" || error) && (
+        <button
+          type="button"
+          disabled={busy || disabled}
+          className={`${button} border-primary bg-primary text-primary-foreground hover:bg-primary/90`}
+          onClick={() => void start()}
+        >
+          {busy
+            ? "正在打开…"
+            : purpose === "dependency"
+              ? "准备此依赖"
+              : configuration
+                ? "保存后继续"
+                : (actionLabel ?? "开始使用")}
+        </button>
+      )}
       {report && (
         <>
           {purpose === "dependency" && (
@@ -142,14 +181,16 @@ function ScopedStartUse({
               {report.issues.length ? "请完成此依赖的设置。" : "依赖已准备，请继续制作。"}
             </p>
           )}
-          {report.issues.length > 0 && (
+          {report.issues.some((issue) => report.kind !== "chat" || issue.code !== "permission") && (
             <ul className="list-disc space-y-1 pl-5 text-sm">
-              {report.issues.map((issue, index) => (
-                <li key={`${issue.code}-${index}`}>{issue.message}</li>
-              ))}
+              {report.issues
+                .filter((issue) => report.kind !== "chat" || issue.code !== "permission")
+                .map((issue, index) => (
+                  <li key={`${issue.code}-${index}`}>{issue.message}</li>
+                ))}
             </ul>
           )}
-          {configuration && (
+          {configuration && report.kind !== "chat" && (
             <div className="space-y-2 rounded border p-3">
               <p className="text-sm font-medium">填写后即可使用</p>
               <FunctionUserConfig
@@ -157,20 +198,37 @@ function ScopedStartUse({
                 pluginId={pluginId}
                 expectedWorkspace={workspace}
                 initiallyOpen
+                onSaved={() => void start(false, true)}
               />
+              <button
+                className={button}
+                disabled={busy || disabled}
+                onClick={() => void start(false, true)}
+              >
+                重新检查
+              </button>
             </div>
           )}
-          {report.kind === "chat" && !report.activationRequired && (
-            <InstalledChatPluginUse input={input} report={report} purpose={purpose} />
+          {report.kind === "chat" && (
+            <InstalledChatPluginUse
+              input={input}
+              report={report}
+              purpose={purpose}
+              disabled={disabled}
+              onBusyChange={onBusyChange}
+              onReportChange={setReport}
+              onReadyChange={setChatReady}
+            />
           )}
           {report.kind === "chat" &&
             purpose !== "dependency" &&
             report.canOpen &&
+            chatReady &&
             !configuration && (
               <button
                 type="button"
                 className={button}
-                disabled={busy}
+                disabled={busy || disabled}
                 onClick={() => void start(true)}
               >
                 返回聊天

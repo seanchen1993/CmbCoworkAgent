@@ -1,4 +1,5 @@
 import type { Thread } from "@/types"
+import { readHostProjectThreadTarget } from "./host-project-thread"
 
 export function isHarnessFeatureThread(thread: Thread | null | undefined): boolean {
   const harnessFeature = thread?.metadata?.harnessFeature
@@ -21,7 +22,11 @@ export function isHarnessProjectSessionThread(thread: Thread | null | undefined)
 }
 
 export function isHarnessProjectModeThread(thread: Thread | null | undefined): boolean {
-  return isHarnessFeatureThread(thread) || isHarnessProjectSessionThread(thread)
+  return (
+    isHarnessFeatureThread(thread) ||
+    isHarnessProjectSessionThread(thread) ||
+    readHostProjectThreadTarget(thread) !== null
+  )
 }
 
 export function findFirstChatThread(threads: Thread[]): Thread | null {

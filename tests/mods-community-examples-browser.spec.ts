@@ -45,7 +45,7 @@ approveFunction:async(t,id,digest,ws)=>{calls.push(['grant',t,id,digest,ws]);if(
 configureGlobal:async value=>{calls.push(['global',value]);globalOn=value;return value},
 configure:async(t,value,policy,ws)=>{calls.push(['configure',t,value,policy,ws]);status.enabled=value;claw.enabled=value}};
 window.api={mods};window.electron={openExternal:async url=>{window.openedSource=url}};
-window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listPending:()=>typeof releaseList==='function',releaseList:()=>releaseList(),disabled:()=>reset('disabled'),noScope:()=>{reset();thread=null;workspace=null;mount()},get:()=>structuredClone({calls,claw,status,globalOn}),failGrant:()=>failGrant=true,hold:()=>hold=true,switchScope:()=>{thread='other-thread';workspace='c:/other';mount()},release:()=>release(),changeRevision:()=>claw.bindingRevision++,active:value=>{active=value;mount(false)}};reset();
+window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listPending:()=>typeof releaseList==='function',releaseList:()=>releaseList(),disabled:()=>reset('disabled'),noScope:()=>{reset();thread=null;workspace=null;mount()},get:()=>structuredClone({calls,claw,status,globalOn}),failGrant:()=>failGrant=true,hold:()=>hold=true,switchScope:()=>{thread='other-thread';workspace='c:/other';mount()},release:()=>release(),changeRevision:()=>claw.bindingRevision++,changeDigest:()=>status.functionMods.find(x=>x.name==='replay-theater').digest='b'.repeat(64),active:value=>{active=value;mount(false)}};reset();
 `
     },
     bundle: true,
@@ -81,6 +81,7 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
     const get = async () =>
       (await call("get")) as {
         calls: unknown[][]
+        globalOn: boolean
         claw: {
           active: {
             name: string
@@ -101,22 +102,26 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
       await page.getByRole("dialog").waitFor()
     }
     const confirm = async () => {
-      await page.getByRole("checkbox").check()
-      await click("确认并使用")
+      await click("允许并用于当前聊天")
     }
     await page.getByRole("heading", { name: "挑一个小帮手" }).waitFor()
     assert.equal(await page.getByRole("article").count(), PLATFORM_EXAMPLES.length + 3)
     assert.deepEqual((await get()).calls, [])
     for (const example of [...PLATFORM_EXAMPLES, ...COMMUNITY_EXAMPLES]) {
-      assert(await card(example.title).getByText("怎样触发与核对效果", { exact: true }).isVisible())
+      assert.equal(
+        await card(example.title).getByText(example.usage, { exact: true }).isVisible(),
+        false
+      )
+      await card(example.title).locator("summary").click()
       assert(await card(example.title).getByText(example.usage, { exact: true }).isVisible())
+      await card(example.title).locator("summary").click()
     }
+    await card("用量天气").locator("summary").click()
     assert(
       await card("用量天气")
         .getByText(/不是累计输入\/输出 Token/)
         .isVisible()
     )
-    await card("用量天气").locator("summary").click()
     await card("用量天气").getByRole("button", { name: "查看官方源码", exact: true }).click()
     assert.equal(
       await page.evaluate(() => (window as unknown as { openedSource: string }).openedSource),
@@ -124,7 +129,8 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
     )
     assert.deepEqual((await get()).calls, [])
     await start()
-    assert(await page.getByRole("button", { name: "确认并使用" }).isDisabled())
+    assert(await page.getByRole("button", { name: "允许并用于当前聊天" }).isEnabled())
+    assert.equal(await page.getByRole("checkbox").count(), 0)
     assert(
       await page
         .getByRole("dialog")
@@ -137,12 +143,18 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
     )
     await click("暂不使用")
     assert.deepEqual(
+      (await get()).calls.map((row) => row[0]),
+      ["install"],
+      "Cancelling must not grant, change selection or enable plugin execution"
+    )
+    assert.deepEqual(
       (await get()).claw.active.capabilities.map((row) => row.name),
       ["other", "token-weather"]
     )
     await start()
     await confirm()
     await page.getByRole("button", { name: "返回聊天使用修改回放" }).waitFor()
+    assert(await page.getByText("接下来怎么用", { exact: true }).isVisible())
     let state = await get()
     assert.deepEqual(
       state.claw.active.capabilities.map((row) => row.name),
@@ -153,12 +165,15 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
     assert.deepEqual(state.claw.active.skills, { mode: "selected", items: [] })
     assert.deepEqual(state.claw.active.builtins, { contextMeter: true })
     await call("remount")
-    await card("修改回放").getByRole("button", { name: "正在使用" }).waitFor()
+    await card("修改回放").getByRole("button", { name: "返回聊天使用" }).waitFor()
     await card("用量天气").getByRole("button", { name: "核对冲突后使用" }).waitFor()
-    const writes = state.calls.filter((row) => row[0] !== "install").length
-    await card("修改回放").getByRole("button", { name: "正在使用" }).click()
-    await page.getByText(/已在当前聊天使用/).waitFor()
-    assert.equal((await get()).calls.filter((row) => row[0] !== "install").length, writes)
+    const previousCalls = (await get()).calls.length
+    await card("修改回放").getByRole("button", { name: "返回聊天使用" }).click()
+    assert.deepEqual(
+      (await get()).calls.slice(previousCalls),
+      [["return"]],
+      "An active example returns to chat without reinstalling or writing settings"
+    )
 
     await call("reset")
     await card("任务能力提供方").locator("summary").click()
@@ -183,11 +198,11 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
       ["install"]
     )
     await confirm()
-    await card("任务能力提供方").getByRole("button", { name: "正在使用" }).waitFor()
+    await card("任务能力提供方").getByRole("button", { name: "返回聊天使用" }).waitFor()
     await start("个人任务工作台")
     assert.equal((await get()).calls.filter((row) => row[0] === "grant").length, 1)
     await confirm()
-    await card("个人任务工作台").getByRole("button", { name: "正在使用" }).waitFor()
+    await card("个人任务工作台").getByRole("button", { name: "返回聊天使用" }).waitFor()
     state = await get()
     assert.deepEqual(
       state.claw.active.capabilities.map((row) => row.name),
@@ -219,15 +234,25 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
       0
     )
     await start("阶段调试工作台")
-    assert(await page.getByRole("button", { name: "确认并使用" }).isDisabled())
+    assert(await page.getByRole("button", { name: "允许并用于当前聊天" }).isEnabled())
+    assert.equal(await page.getByRole("checkbox").count(), 0)
     assert.equal((await get()).calls.filter((row) => row[0] === "grant").length, 2)
     assert((await get()).calls.some((row) => row[0] === "install" && row[1] === "stage-debugger"))
     await confirm()
-    await card("阶段调试工作台").getByRole("button", { name: "正在使用" }).waitFor()
+    await card("阶段调试工作台").getByRole("button", { name: "返回聊天使用" }).waitFor()
     state = await get()
     assert(state.claw.active.capabilities.some((row) => row.name === "stage-debugger"))
     assert.deepEqual(state.claw.active.models, { default: "chosen", roles: { Explore: "fast" } })
 
+    await call("disabled")
+    await start("危险命令确认")
+    await click("暂不使用")
+    assert.deepEqual(
+      (await get()).calls.map((row) => row[0]),
+      ["install"],
+      "Cancelling cannot change a profile, grant permission or restore disabled execution"
+    )
+    assert.equal((await get()).globalOn, false)
     await call("disabled")
     await start("危险命令确认")
     assert(
@@ -271,6 +296,20 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
     )
 
     await call("reset")
+    await start()
+    await call("changeDigest")
+    await confirm()
+    await page
+      .getByRole("alert")
+      .getByText(/安装版本、授权或助手组合已变化/)
+      .waitFor()
+    assert.deepEqual(
+      (await get()).calls.map((row) => row[0]),
+      ["install"],
+      "An approval preview for the old digest must not authorize a new source"
+    )
+
+    await call("reset")
     await call("hold")
     await card("修改回放").getByRole("button", { name: "添加并使用" }).click()
     await call("switchScope")
@@ -284,8 +323,9 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
     assert.equal(await page.getByRole("dialog").count(), 0)
 
     await call("noScope")
-    await card("用量天气").getByRole("button", { name: "用于当前聊天" }).click()
-    await page.getByText(/用量天气已安装。为聊天选择项目目录后/).waitFor()
+    assert(await card("用量天气").getByRole("button", { name: "已添加" }).isDisabled())
+    await card("修改回放").getByRole("button", { name: "添加插件" }).click()
+    await page.getByText(/修改回放已添加。在上方选择有项目目录的聊天后/).waitFor()
     assert.deepEqual(
       (await get()).calls.map((row) => row[0]),
       ["install"]
@@ -350,14 +390,14 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
         {
           passed: true,
           checks: [
-            "nine Chinese cards with visible triggers, expected effects and honest provenance; no initial writes",
+            "Chinese cards focus on purpose; usage and provenance expand on demand; no initial writes",
             "provider and consumer need separate explicit consent and preserve current profile",
             "behavior preview and repeatable file demo guidance",
             "exact consent and conflict cancellation",
-            "preserved profile; same-version no-op",
+            "preserved profile; active example returns without installing or writing",
             "pin then grant then apply then enable",
             "grant failure retained installation",
-            "changed binding rejects writes",
+            "changed binding or source digest rejects old approval writes",
             "late installation after scope switch cannot authorize",
             "installation without project",
             "hidden and restored page rejects a pending approval receipt",

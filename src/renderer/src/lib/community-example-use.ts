@@ -1,5 +1,12 @@
-import { parseClawProfile, type ClawApi, type ClawView } from "../../../shared/mods/claw"
+import {
+  clawIssues,
+  parseClawProfile,
+  type ClawApi,
+  type ClawCapability,
+  type ClawView
+} from "../../../shared/mods/claw"
 import type { CommunityExampleInstallation } from "../../../shared/mods/community-examples"
+import { resolveClawComponents } from "../../../shared/mods/claw-components"
 import type { ModWorkspaceStatus } from "../../../shared/mods/types"
 import { normalizeWorkspacePathKey } from "../../../shared/workspace-path"
 import { proposeSparksExampleSelection, sparksExampleBaseline } from "./sparks-example-selection"
@@ -35,13 +42,28 @@ export interface ExampleUseContext {
   assertCurrent(): void
 }
 
-export interface ExampleUsePlan {
+export type InstalledPluginUseApi = ExampleUseApi
+export type InstalledPluginUseContext = ExampleUseContext
+
+export interface InstalledPluginUsePlan {
+  kind: "installed" | "example"
+  scope: { threadId: string; workspace: string }
   snapshot: Snapshot
-  installation: CommunityExampleInstallation
+  installation: { pluginId: string; pluginName: string; activationRequired?: boolean }
+  activationRequired?: boolean
   target: { pluginId: string; name: string; digest: string }
   selection: ReturnType<typeof proposeSparksExampleSelection>
   baseline: ReturnType<typeof sparksExampleBaseline>
   capabilities: string[]
+  replacements: Array<{
+    previous: ClawCapability
+    next?: ClawCapability
+    reason: "conflict" | "version" | "components"
+  }>
+}
+
+export interface ExampleUsePlan extends InstalledPluginUsePlan {
+  installation: CommunityExampleInstallation
 }
 
 async function read(api: ExampleUseApi, context: ExampleUseContext): Promise<Snapshot> {
@@ -58,7 +80,7 @@ async function read(api: ExampleUseApi, context: ExampleUseContext): Promise<Sna
     normalizeWorkspacePathKey(status.workspace) !== normalizeWorkspacePathKey(context.workspace) ||
     claw.workspace !== status.workspace
   )
-    throw Error("项目或会话范围已变化，请返回当前聊天后重新打开示例。")
+    throw Error("项目或会话范围已变化，请返回当前聊天后重新核对插件。")
   return { status, claw, global }
 }
 
@@ -102,48 +124,164 @@ export async function prepareExampleUse(
   installation: CommunityExampleInstallation,
   displayTitle: string = installation.pluginName
 ): Promise<ExampleUsePlan> {
+  return {
+    ...(await prepareUse(api, context, installation, displayTitle, "example")),
+    installation
+  }
+}
+
+/** Read-only exact-source consent for an installed Function Mod and this chat's selection. */
+export async function prepareInstalledPluginUse(
+  api: InstalledPluginUseApi,
+  context: InstalledPluginUseContext,
+  installation: InstalledPluginUsePlan["installation"],
+  displayName: string = installation.pluginName
+): Promise<InstalledPluginUsePlan> {
+  return prepareUse(api, context, installation, displayName, "installed")
+}
+
+async function prepareUse(
+  api: ExampleUseApi,
+  context: ExampleUseContext,
+  installation: InstalledPluginUsePlan["installation"],
+  displayTitle: string,
+  kind: InstalledPluginUsePlan["kind"]
+): Promise<InstalledPluginUsePlan> {
   const snapshot = await read(api, context)
   const mod = snapshot.status.functionMods?.find((row) => row.pluginId === installation.pluginId)
   if (
     !mod?.digest ||
     mod.name !== installation.pluginName ||
-    (mod.state !== "ready" && mod.state !== "needs-approval")
+    (mod.state !== "ready" &&
+      mod.state !== "needs-approval" &&
+      !(kind === "installed" && installation.activationRequired && mod.state === "disabled"))
   )
-    throw Error("示例未就绪或已在插件管理中禁用，请先到已安装列表核对状态。")
+    throw Error("插件未就绪或已禁用，请先到已安装列表核对状态。")
   const target = newClawCapability(mod, snapshot.claw.usageContext ?? "chat")
-  const selection = proposeSparksExampleSelection(snapshot.claw, target, {
-    id: `example-${crypto.randomUUID()}`,
-    name: `官方示例 · ${displayTitle}`
+  const baseline = sparksExampleBaseline(snapshot.claw, {
+    id: `${kind === "example" ? "example" : "plugin"}-base-${crypto.randomUUID()}`,
+    name: kind === "example" ? "使用示例前的助手组合" : "使用插件前的助手组合"
   })
-  const reusable = (profile: ExampleUsePlan["baseline"]) => {
+  const identity = {
+    id: `${kind === "example" ? "example" : "plugin"}-${crypto.randomUUID()}`,
+    name:
+      kind === "example" ? `官方示例 · ${displayTitle}` : `使用插件 · ${displayTitle}`.slice(0, 80)
+  }
+  // Official examples retain their declared peer replacement. Arbitrary installed sources
+  // have no inferred conflicts: preserve every other capability and all profile settings.
+  const selection =
+    kind === "example"
+      ? proposeSparksExampleSelection(snapshot.claw, target, identity)
+      : (() => {
+          const profile = { ...structuredClone(baseline), ...identity }
+          const existing = profile.capabilities.find((row) => row.pluginId === target.pluginId)
+          if (
+            profile.capabilities.some(
+              (row) => row.name === target.name && row.pluginId !== target.pluginId
+            )
+          )
+            throw Error("同名插件身份已变化，请调整聊天搭配后重新核对；不会替换其他来源。")
+          profile.capabilities = [
+            ...profile.capabilities.filter((row) => row.pluginId !== target.pluginId),
+            {
+              ...structuredClone(target),
+              ...(existing ? { components: structuredClone(existing.components) } : {})
+            }
+          ]
+          if (profile.capabilities.length > 8)
+            throw Error("加入插件会超过 8 个能力的组合上限，请先调整聊天搭配；不会移除其他能力。")
+          return {
+            profile,
+            removed: [] as ClawCapability[],
+            alreadySelected: existing?.name === target.name && existing.digest === target.digest
+          }
+        })()
+  const replacements: InstalledPluginUsePlan["replacements"] = selection.removed.map(
+    (previous) => ({
+      previous: structuredClone(previous),
+      reason: "conflict"
+    })
+  )
+  if (kind === "installed") {
+    // The exact target's missing grant/enablement is what this review can repair.
+    // Every unrelated selection issue still requires the original native repair flow.
+    const targetIssues = clawIssues(
+      {
+        ...baseline,
+        capabilities: baseline.capabilities.filter(
+          (row) =>
+            row.pluginId === target.pluginId && row.name === target.name && row.digest === target.digest
+        )
+      },
+      snapshot.claw.capabilities
+    )
+    if (
+      selection.alreadySelected &&
+      snapshot.claw.issues.some((issue) => !targetIssues.includes(issue))
+    )
+      throw Error("当前聊天搭配存在待处理问题，请先调整搭配后重新核对插件。")
+    const existing = baseline.capabilities.find((row) => row.pluginId === target.pluginId)
+    if (existing) {
+      const chosen = existing.components
+      // Never silently expand an existing component choice or discard its parameters.
+      let usableSelection: boolean
+      try {
+        usableSelection = !mod.components?.length
+          ? !chosen
+          : resolveClawComponents(
+              mod.components,
+              chosen ?? { mode: "all", ids: [], config: {} },
+              snapshot.claw.usageContext ?? "chat"
+            ).length > 0
+      } catch {
+        throw Error("此插件的已选组件、依赖或参数已变化，请先调整聊天搭配后重新核对。")
+      }
+      if (!usableSelection) {
+        throw Error("此插件尚未选择当前场景的可用组件，请先调整聊天搭配后重新核对。")
+      }
+      const next = selection.profile.capabilities.find((row) => row.pluginId === target.pluginId)!
+      if (
+        existing.digest !== next.digest ||
+        stable(existing.components) !== stable(next.components)
+      )
+        replacements.push({
+          previous: structuredClone(existing),
+          next: structuredClone(next),
+          reason: existing.digest !== next.digest ? "version" : "components"
+        })
+    }
+  }
+  const reusable = (profile: InstalledPluginUsePlan["baseline"]) => {
     const content = (value: typeof profile) =>
       stable({ ...parseClawProfile(value), id: "", name: "" })
     const existing = snapshot.claw.profiles.find((row) => content(row) === content(profile))
     return structuredClone(existing ?? profile)
   }
   selection.profile = reusable(selection.profile)
-  const baseline = reusable(
-    sparksExampleBaseline(snapshot.claw, {
-      id: `example-base-${crypto.randomUUID()}`,
-      name: "使用示例前的助手组合"
-    })
-  )
+  const retainedBaseline = reusable(baseline)
   const missing = (profile: typeof baseline) =>
     !snapshot.claw.profiles.some((row) => row.id === profile.id)
   const requiredProfiles =
-    Number(!snapshot.claw.active && missing(baseline)) +
-    Number(!selection.alreadySelected && missing(selection.profile))
+    Number(
+      !snapshot.claw.active &&
+        !(kind === "installed" && selection.alreadySelected) &&
+        missing(retainedBaseline)
+    ) + Number(!selection.alreadySelected && missing(selection.profile))
   if (snapshot.claw.profiles.length + requiredProfiles > 24)
     throw Error(
       "助手组合已达到 24 个保存上限。可在“助手组合”选择已有组合，或调整已有组合后重新核对；此次未授权或切换。"
     )
   return {
+    kind,
+    scope: { threadId: context.threadId, workspace: context.workspace },
     snapshot,
     installation,
+    ...(mod.state === "disabled" ? { activationRequired: true } : {}),
     target,
     capabilities: mod.capabilities,
     selection,
-    baseline
+    baseline: retainedBaseline,
+    replacements
   }
 }
 
@@ -154,11 +292,39 @@ export async function applyExampleUse(
   plan: ExampleUsePlan,
   progress: (message: string) => void
 ): Promise<void> {
+  await applyInstalledPluginUse(api, context, plan, progress)
+}
+
+export interface InstalledPluginUseActivation {
+  enable(): Promise<void>
+  configurationReady(): Promise<boolean>
+}
+
+export type InstalledPluginUseResult =
+  | { state: "ready" }
+  | { state: "configuration"; plan: InstalledPluginUsePlan }
+
+/** Each acknowledged write must match its prediction; partial/unknown results require a new plan. */
+export async function applyInstalledPluginUse(
+  api: InstalledPluginUseApi,
+  context: InstalledPluginUseContext,
+  plan: InstalledPluginUsePlan,
+  progress: (message: string) => void,
+  activation?: InstalledPluginUseActivation
+): Promise<InstalledPluginUseResult> {
+  context.assertCurrent()
+  if (
+    plan.scope.threadId !== context.threadId ||
+    normalizeWorkspacePathKey(plan.scope.workspace) !== normalizeWorkspacePathKey(context.workspace)
+  )
+    throw Error("项目或会话范围已变化，请重新核对插件；未继续执行。")
+  if (plan.activationRequired && !activation)
+    throw Error("此插件尚未启用，请重新核对启用确认；未继续执行。")
   let expected = structuredClone(plan.snapshot)
   const verify = async (grantedId?: string) => {
     const actual = await read(api, context)
     if (signature(actual, grantedId) !== signature(expected, grantedId))
-      throw Error("安装版本、授权或助手组合已变化，请重新点击示例并核对；未继续执行。")
+      throw Error("安装版本、授权或助手组合已变化，请重新核对插件；未继续执行。")
     expected = actual
   }
   const saveAndApply = async (profile: ExampleUsePlan["baseline"]) => {
@@ -210,14 +376,33 @@ export async function applyExampleUse(
     await verify()
   }
   await verify()
-  if (!expected.claw.active) {
+  if (!expected.claw.active && !(plan.kind === "installed" && plan.selection.alreadySelected)) {
     progress("正在保留当前助手组合…")
     // Freeze implicit ready selection before project-wide approval can add another provider.
     await saveAndApply(plan.baseline)
   }
+  if (plan.activationRequired) {
+    await verify()
+    context.assertCurrent()
+    await activation!.enable()
+    // Catalog enablement may only change this exact target's disabled state. In particular,
+    // it cannot reuse a changed workspace, composition or source as newly given consent.
+    await verify(plan.target.pluginId)
+    const enabled = expected.status.functionMods?.find((row) => row.pluginId === plan.target.pluginId)
+    if (!enabled || !["ready", "needs-approval"].includes(enabled.state))
+      throw Error("启用结果尚未确认，请重新读取；不会自动重复启用。")
+    const configurationReady = await activation!.configurationReady()
+    context.assertCurrent()
+    await verify()
+    if (!configurationReady)
+      return {
+        state: "configuration",
+        plan: { ...plan, snapshot: expected, activationRequired: false }
+      }
+  }
   const current = expected.status.functionMods?.find((row) => row.pluginId === plan.target.pluginId)
   if (current?.state !== "ready") {
-    progress("正在授权已确认的示例版本…")
+    progress(plan.kind === "example" ? "正在授权已确认的示例版本…" : "正在授权已确认的插件版本…")
     await verify()
     context.assertCurrent()
     await api.approveFunction(
@@ -257,13 +442,35 @@ export async function applyExampleUse(
     expected.status.enabled = true
     await verify()
   }
-  if (
-    !expected.claw.active?.capabilities.some(
-      (row) => row.pluginId === plan.target.pluginId && row.digest === plan.target.digest
-    )
+  const actualSelection =
+    expected.claw.active ??
+    (plan.kind === "installed"
+      ? sparksExampleBaseline(expected.claw, {
+          id: "verified-implicit",
+          name: "当前默认助手组合"
+        })
+      : null)
+  const selected = actualSelection?.capabilities.find(
+    (row) => row.pluginId === plan.target.pluginId && row.digest === plan.target.digest
   )
-    throw Error("尚未确认当前聊天使用此版本，请重新读取。")
+  if (!selected) throw Error("尚未确认当前聊天使用此版本，请重新读取。")
+  if (plan.kind === "installed") {
+    const mod = expected.status.functionMods?.find((row) => row.pluginId === plan.target.pluginId)
+    if (
+      expected.claw.issues.length ||
+      !mod ||
+      mod.state !== "ready" ||
+      (mod.components?.length &&
+        !resolveClawComponents(
+          mod.components,
+          selected.components,
+          expected.claw.usageContext ?? "chat"
+        ).length)
+    )
+      throw Error("尚未确认当前聊天使用此版本的组件，请重新读取。")
+  }
   context.assertCurrent()
+  return { state: "ready" }
 }
 
 export type ExampleUsageState = "installed" | "using" | "conflict"

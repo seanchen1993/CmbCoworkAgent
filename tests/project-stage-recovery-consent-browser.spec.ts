@@ -16,6 +16,7 @@ async function main() {
     format: "iife",
     jsx: "automatic",
     define: { "process.env.NODE_ENV": '"development"' },
+    alias: { "@": resolve(root, "src/renderer/src") },
     plugins: [
       {
         name: "bound-native-configuration-form",
@@ -62,9 +63,9 @@ async function main() {
   try {
     await page.setContent('<div id="root"></div>')
     await page.addScriptTag({ content: script.outputFiles[0].text })
-    await page.getByText(/此包只声明原生参数，不运行 Mod 代码/).waitFor()
+    await page.getByText("此包仅需配置参数，无需代码运行授权。", { exact: true }).waitFor()
     assert.equal(
-      await page.getByRole("button", { name: "确认本包灵件权限", exact: true }).count(),
+      await page.getByRole("button", { name: "允许本包在当前目录运行", exact: true }).count(),
       0
     )
     await page.getByRole("button", { name: "保存原生参数", exact: true }).click()

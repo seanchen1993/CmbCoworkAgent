@@ -1,10 +1,94 @@
 import { describe, expect, it } from "vitest"
-import { createAuthoringSourceBundle, readAuthoringSourceBundle } from "./authoring-bundle"
+import {
+  AUTHORING_BUNDLE_LIMITS,
+  AuthoringSourceLimitError,
+  createAuthoringSourceBundle,
+  readAuthoringSourceBundle
+} from "./authoring-bundle"
 
 const manifest = { path: "plugin.json", text: '{"name":"example"}' }
 const source = { path: "hooks/main.ts", text: "export function register() {}\n" }
+function sourceLimitError(input: unknown): AuthoringSourceLimitError {
+  try {
+    createAuthoringSourceBundle(input)
+  } catch (error) {
+    expect(error).toBeInstanceOf(AuthoringSourceLimitError)
+    expect((error as Error).message).toBe("AUTHORING_SOURCE_LIMIT")
+    return error as AuthoringSourceLimitError
+  }
+  throw Error("Expected a source limit failure")
+}
 
 describe("authoring source snapshots", () => {
+  it.each([0, 65])("reports the actual %i file count without file data", (count) => {
+    const error = sourceLimitError(
+      Array.from({ length: count }, (_, index) => ({
+        path: `PRIVATE_PATH_${index}.md`,
+        text: "PRIVATE_CONTENT"
+      }))
+    )
+    expect(error.diagnostic).toEqual({ resource: "files", observed: count, min: 1, limit: 64 })
+    expect(Object.isFrozen(error.diagnostic)).toBe(true)
+    expect(JSON.stringify(error.diagnostic)).not.toContain("PRIVATE_")
+  })
+
+  it("counts UTF-8 paths and content at the exact total limit and stops at the first overflow", () => {
+    const files = [
+      manifest,
+      ...Array.from({ length: 4 }, (_, index) => ({
+        path: `PRIVATE_RESOURCE_${index}.md`,
+        text: "中".repeat(20000)
+      }))
+    ]
+    const size = (rows: typeof files) =>
+      rows.reduce(
+        (total, file) =>
+          total + Buffer.byteLength(file.path, "utf8") + Buffer.byteLength(file.text, "utf8"),
+        0
+      )
+    const tail = { path: "PRIVATE_TAIL.md", text: "" }
+    tail.text = "x".repeat(
+      AUTHORING_BUNDLE_LIMITS.totalBytes - size(files) - Buffer.byteLength(tail.path, "utf8")
+    )
+    const exact = [...files, tail]
+    expect(size(exact)).toBe(AUTHORING_BUNDLE_LIMITS.totalBytes)
+    expect(createAuthoringSourceBundle(exact).files).toHaveLength(exact.length)
+    const overflow = [
+      ...files,
+      { ...tail, text: tail.text + "x" },
+      { path: "PRIVATE_UNREAD.md", text: "PRIVATE_UNREAD_CONTENT" }
+    ]
+    const error = sourceLimitError(overflow)
+    expect(error.diagnostic).toEqual({
+      resource: "totalBytes",
+      observedBytes: AUTHORING_BUNDLE_LIMITS.totalBytes + 1,
+      limit: AUTHORING_BUNDLE_LIMITS.totalBytes
+    })
+    expect(size(overflow)).toBeGreaterThan(AUTHORING_BUNDLE_LIMITS.totalBytes + 1)
+    expect(JSON.stringify(error.diagnostic)).not.toMatch(/PRIVATE_|中|text|path/)
+  })
+
+  it("keeps unknowable counts and per-file UTF-8 failures on their original rejection boundaries", () => {
+    for (const input of [undefined, {}, new Proxy([], {})]) {
+      try {
+        createAuthoringSourceBundle(input)
+        throw Error("Expected a generic limit failure")
+      } catch (error) {
+        expect(error).not.toBeInstanceOf(AuthoringSourceLimitError)
+        expect((error as Error).message).toBe("AUTHORING_SOURCE_LIMIT")
+      }
+    }
+    expect(() =>
+      createAuthoringSourceBundle([
+        manifest,
+        {
+          path: "PRIVATE_LARGE.md",
+          text: "中".repeat(22000)
+        }
+      ])
+    ).toThrow("AUTHORING_SOURCE_TEXT")
+  })
+
   it("retains up to 64 module/resource files while preserving the total byte budget", () => {
     const files = [
       manifest,

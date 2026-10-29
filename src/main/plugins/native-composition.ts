@@ -2,7 +2,11 @@ import { z } from "zod"
 import type { ClawActionDescriptor } from "../../shared/mods/claw-actions"
 import { clawActionObject } from "../../shared/mods/claw-actions"
 import type { ProjectActionBinding } from "../../shared/project-runtime/action-bindings"
-import { PROJECT_ACTION_LOCK_PATH } from "../../shared/project-runtime/action-bindings"
+import {
+  PROJECT_ACTION_LOCK_PATH,
+  parseProjectCheckConfigurationKeys
+} from "../../shared/project-runtime/action-bindings"
+import { PROJECT_ARTIFACT_REFERENCE_MAX_FILES } from "../../shared/project-runtime/artifact-reference"
 import {
   wrapProjectRuntimeManifest,
   parseExtensionContract,
@@ -28,6 +32,9 @@ import { parseSkillNameFromFrontmatterYaml } from "../skills/frontmatter"
 import { businessModExtensionContract } from "./business-mod-assembly-contract"
 import { parsePortableBusinessModUserConfig } from "./business-mod-user-config"
 import { parseFunctionUserConfigSchema } from "../../shared/mods/v2/user-config-schema"
+import { assertNativeCompositionDependencies } from "./native-composition-dependencies"
+export { NativeCompositionDependencyError } from "./native-composition-dependencies"
+export type { NativeCompositionDependencyDiagnostic } from "./native-composition-dependencies"
 
 export const NATIVE_COMPOSITION_PATH = "composition/source.json"
 const id = z.string().regex(/^[a-zA-Z0-9][\w.-]{0,63}$/)
@@ -35,6 +42,14 @@ const text = z.string().trim().min(1).max(2000)
 const path = z.string().min(1).max(512).transform(runtimeRelativePath)
 const schema = z.record(z.string(), z.unknown())
 const artifact = z.object({ id, path, contract: text }).strict()
+const configurationKeys = z.array(z.string()).refine((keys) => {
+  try {
+    parseProjectCheckConfigurationKeys(keys)
+    return true
+  } catch {
+    return false
+  }
+}, "PROJECT_CHECK_CONFIGURATION_KEYS_INVALID")
 
 /** Author source is deliberately smaller than a runtime manifest, with no self-issued grants. */
 export const nativeCompositionSchema = z
@@ -91,6 +106,7 @@ export const nativeCompositionSchema = z
                         .max(512 * 1024)
                         .optional(),
                       bindProviderIdentity: id.optional(),
+                      configurationKeys: configurationKeys.optional(),
                       config: schema.optional()
                     })
                     .strict()
@@ -114,46 +130,19 @@ export interface NativeCompositionFile {
   bytes: Buffer
 }
 
-export interface NativeCompositionDependencyDiagnostic {
-  plugin: string
-  actionId: string
-  usedBy: string
-  state: "missing-or-not-authorized" | "ambiguous"
-  candidates: Array<{ pluginId: string; digest: string }>
-  next: string
-}
-export class NativeCompositionDependencyError extends Error {
-  constructor(readonly dependencies: NativeCompositionDependencyDiagnostic[]) {
-    super("NATIVE_COMPOSITION_PROVIDER_UNRESOLVED")
-  }
-}
-function assertDependencies(source: NativeComposition, catalog: readonly ClawActionDescriptor[]) {
-  const references = [
-    ...(source.contextAction
-      ? [{ ...source.contextAction.provider, usedBy: source.contextAction.id }]
-      : []),
-    ...source.modules.flatMap((module) =>
-      module.checks.flatMap((check) =>
-        check.kind === "action" ? [{ ...check.provider, usedBy: check.id }] : []
-      )
-    )
-  ]
-  const dependencies: NativeCompositionDependencyDiagnostic[] = []
-  for (const reference of references) {
-    const matches = catalog.filter(
-      (action) => action.plugin === reference.plugin && action.actionId === reference.actionId
-    )
-    if (matches.length !== 1)
-      dependencies.push({
-        ...reference,
-        state: matches.length ? "ambiguous" : "missing-or-not-authorized",
-        candidates: matches.map((action) => ({ pluginId: action.pluginId, digest: action.digest })),
-        next: matches.length
-          ? "作者需核对重复安装并经原生插件管理保留唯一目标，再读取 project_actions 重新编译。"
-          : "作者提供检查 Mod 源码；用户在原生安装/授权界面确认该依赖，再读取 project_actions 重新编译。目录缺失不能区分未安装与未授权，不可猜测身份或自动授权。"
-      })
-  }
-  if (dependencies.length) throw new NativeCompositionDependencyError(dependencies)
+/** Read-only replay accepts only the two exact compiler layouts, never semantic JSON equality. */
+export function nativeCompositionLegacyGeneratedPretty(
+  actionLock: string | Uint8Array | undefined
+): boolean {
+  const text = typeof actionLock === "string"
+    ? actionLock
+    : actionLock === undefined
+      ? ""
+      : new TextDecoder("utf-8", { fatal: true }).decode(actionLock)
+  const value: unknown = JSON.parse(text)
+  if (text === JSON.stringify(value) + "\n") return false
+  if (text === JSON.stringify(value, null, 2) + "\n") return true
+  throw Error("NATIVE_COMPOSITION_GENERATED_FORMAT_INVALID")
 }
 
 function unique(values: string[], error: string) {
@@ -177,13 +166,34 @@ export function compileNativeComposition(
   options: {
     files: readonly NativeCompositionFile[]
     actionCatalog: readonly ClawActionDescriptor[]
+    /** Doctor-only replay of an existing pre-projection package; explicit compile omits this. */
+    legacyInputArtifactStages?: ReadonlySet<string>
+    /** Internal read-only replay only. New authoring/derivation always emits compact metadata. */
+    legacyGeneratedPretty?: boolean
   }
 ) {
   const encoded = JSON.stringify(value)
   if (!encoded || Buffer.byteLength(encoded) > 256 * 1024) throw Error("NATIVE_COMPOSITION_LIMIT")
   const source = nativeCompositionSchema.parse(value)
-  assertDependencies(source, options.actionCatalog)
   const userConfig = parsePortableBusinessModUserConfig(source.configuration?.userConfig)
+  for (const module of source.modules) {
+    const selected = [
+      ...new Set(module.checks.flatMap((check) =>
+        check.kind === "action" ? check.configurationKeys ?? [] : []))
+    ]
+    if (selected.length) parseProjectCheckConfigurationKeys(selected)
+    for (const check of module.checks) {
+      if (check.kind !== "action" || !check.configurationKeys) continue
+      if (check.format !== "artifact-reference-v1")
+        throw Error("NATIVE_COMPOSITION_CHECK_CONFIGURATION_INVALID")
+      for (const key of check.configurationKeys) {
+        const field = userConfig && Object.hasOwn(userConfig, key) ? userConfig[key] : undefined
+        if (!field || field.sensitive || !["string", "number", "boolean"].includes(field.type))
+          throw Error("NATIVE_COMPOSITION_CHECK_CONFIGURATION_INVALID")
+      }
+    }
+  }
+  assertNativeCompositionDependencies(source, options.actionCatalog)
   const userConfigSchema = parseFunctionUserConfigSchema(
     source.configuration?.userConfigSchema,
     userConfig
@@ -216,14 +226,23 @@ export function compileNativeComposition(
           context: source.context
         })
   if (source.executionResources !== undefined) {
-    extension = parseExtensionContract({ ...extension,
+    extension = parseExtensionContract({
+      ...extension,
       requires: [...extension.requires, EXECUTION_RESOURCES_PROTOCOL],
-      executionResources: source.executionResources })
+      executionResources: source.executionResources
+    })
     for (const path of extension.executionResources!.profiles)
-      if (!source.resources.includes(path)) throw Error("NATIVE_COMPOSITION_PROFILE_RESOURCE_MISSING")
+      if (!source.resources.includes(path))
+        throw Error("NATIVE_COMPOSITION_PROFILE_RESOURCE_MISSING")
     for (const { binding } of extension.executionResources!.workspaces) {
       const field = userConfig?.[binding]
-      if (!field || field.type !== "directory" || field.sensitive || field.multiple || !field.required)
+      if (
+        !field ||
+        field.type !== "directory" ||
+        field.sensitive ||
+        field.multiple ||
+        !field.required
+      )
         throw Error("NATIVE_COMPOSITION_WORKSPACE_BINDING_INVALID")
     }
   }
@@ -332,6 +351,15 @@ export function compileNativeComposition(
       if (!output) throw Error("NATIVE_COMPOSITION_INPUT_NOT_PRIOR")
       if (output.contract !== input.contract) throw Error("NATIVE_COMPOSITION_CONTRACT_MISMATCH")
     }
+    const legacyInputProjection = options.legacyInputArtifactStages?.has(module.id) === true
+    if (
+      module.checks.some(
+        (check) => check.kind === "action" && check.format === "artifact-reference-v1"
+      ) &&
+      (legacyInputProjection ? produced.size : module.inputs.length) + 1 >
+        PROJECT_ARTIFACT_REFERENCE_MAX_FILES
+    )
+      throw Error("NATIVE_COMPOSITION_REFERENCE_INPUT_LIMIT")
     for (const output of module.outputs) {
       if (!module.checks.some((check) => check.artifactId === output.id))
         throw Error("NATIVE_COMPOSITION_OUTPUT_UNCHECKED")
@@ -369,14 +397,18 @@ export function compileNativeComposition(
         }
         const actionId = check.id
         bindings.push(
-          createProjectActionBinding(actionId, provider, {}, config, {
-            kind: "artifact",
-            artifactId: check.artifactId,
-            pointer: "",
-            ...(check.format === "artifact-reference-v1"
-              ? { format: check.format, maxBytes: check.maxBytes! }
-              : { format: check.format })
-          })
+          createProjectActionBinding(
+            actionId, provider, {}, config,
+            {
+              kind: "artifact",
+              artifactId: check.artifactId,
+              pointer: "",
+              ...(check.format === "artifact-reference-v1"
+                ? { format: check.format, maxBytes: check.maxBytes! }
+                : { format: check.format })
+            },
+            check.configurationKeys
+          )
         )
         checks.push({
           id: check.id,
@@ -407,6 +439,9 @@ export function compileNativeComposition(
       skill: compiledSkill,
       ...(module.executionMode === undefined ? {} : { executionMode: module.executionMode }),
       actionIds: [],
+      ...(module.inputs.length === produced.size || legacyInputProjection
+        ? {}
+        : { inputArtifactIds: module.inputs.map((input) => input.artifactId) }),
       artifactIds: module.outputs.map((output) => output.id),
       checkIds: module.checks.map((check) => check.id),
       approval: module.approval,
@@ -469,7 +504,9 @@ export function compileNativeComposition(
     [PROJECT_ACTION_LOCK_PATH, actionLock]
   ] as const) {
     if (retained.has(path)) throw Error("NATIVE_COMPOSITION_GENERATED_PATH_COLLISION")
-    retained.set(path, Buffer.from(JSON.stringify(value, null, 2) + "\n"))
+    const indentation =
+      path === NATIVE_COMPOSITION_PATH || options.legacyGeneratedPretty === true ? 2 : undefined
+    retained.set(path, Buffer.from(JSON.stringify(value, null, indentation) + "\n"))
   }
   return {
     source,

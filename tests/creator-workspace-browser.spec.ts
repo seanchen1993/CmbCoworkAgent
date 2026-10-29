@@ -93,6 +93,13 @@ async function main() {
         renderMain();listeners.forEach(fn=>fn({threadId:"creator"}));
       };
       window.fixture={calls,cold: coldCreator,host:renderHost,journey:renderJourney,hostRoute:renderHostRoute,nativeReview:requestNativeReview,
+        emptySource:()=>{
+          persistentColdTrial=undefined;reviewIntent=undefined;
+          current={threadId:"creator",workspace:"C:/creator",enabled:true,mode:"normal",drafts:[],trials:[],business:{drafts:[]}};
+          api.importSourceSet=async input=>{calls.push(["import-source",input]);current.sourceSet={id:"imported-source",title:"本次导入的源码",phase:"dependencies",dependencies:[{id:"dependency",name:"待确认依赖",version:"1.0.0",digest:"7".repeat(64),phase:"prepared"}]};return structuredClone(current)};
+          renderMain();listeners.forEach(fn=>fn({threadId:"creator"}));reviewListeners.forEach(fn=>fn(undefined));
+        },
+        deliveryAttention:phase=>{current.projectDelivery=phase?{id:'retained-delivery',requestId:'historical-request',sourceDigest:'9'.repeat(64),name:'retained-copy',version:'1.0.0',digest:'8'.repeat(64),phase,canInstall:false,canExport:false,canReconcile:true,error:phase==='failed'?'PROJECT_DELIVERY_NAME_ALREADY_INSTALLED':undefined}:undefined;listeners.forEach(fn=>fn({threadId:'creator'}))},
         sourceSetReady:()=>{current.sourceSet={id:"native-source-set",title:"导入的作者源码",phase:"ready",dependencies:[]};listeners.forEach(fn=>fn({threadId:"creator"}))},
         hostRoutePassed:()=>{const journey=structuredClone(hostRouteEvidence);journey.phase="passed";journey.canDeliver=true;journey.stages[0].status="passed";current.projectTrial.journey=journey;listeners.forEach(fn=>fn({threadId:"creator"}))},
         changeHost:()=>{request.digest="d".repeat(64);renderHost()},modularize:()=>{current.business={drafts:[],modularization:{requestId:"migration",sourceDigest:"e".repeat(64),sourceName:"原始插件",phase:"needs-confirmation",summary:"保留原运行器、配置与校验，拆分可识别步骤",resources:8,mods:[{id:"step-a",title:"识别阶段"}],diagnostics:[],canConfirm:true}};renderMain()}};
@@ -257,7 +264,8 @@ async function main() {
     await page.getByText("版本设置", { exact: true }).click()
     await page.getByRole("textbox", { name: "新插件版本", exact: true }).fill("2.0.0")
     await page.getByRole("button", { name: "保存插件", exact: true }).click()
-    await page.getByText("新插件已安装。", { exact: true }).waitFor()
+    await page.getByRole("heading", { name: "插件已保存", exact: true }).waitFor()
+    await page.getByRole("button", { name: "开始使用", exact: true }).waitFor()
     assert.equal(
       await page.evaluate("window.fixture.calls.filter(row=>row[0]==='install-host').length"),
       1
@@ -376,6 +384,37 @@ async function main() {
     await page.waitForFunction(() => document.querySelector('[aria-label="聊天模式与 Mod 状态"] button[aria-haspopup="dialog"]')?.textContent === "整轮试用已通过")
     assert.equal(await hostTrigger.textContent(), "整轮试用已通过")
     await page.screenshot({ path: join(output, "matched-host-route.png"), fullPage: true })
+    const beforeDeliveryAttention = await page.evaluate("window.fixture.calls.length")
+    for (const phase of ["unknown", "failed"]) {
+      await openCreatorStep(page, "trial")
+      await workspace.getByRole("button", { name: "返回聊天修改", exact: true }).click()
+      await workspace.waitFor({ state: "detached" })
+      await page.evaluate(
+        (phase) => window.eval("window.fixture.deliveryAttention(" + JSON.stringify(phase) + ")"),
+        phase
+      )
+      await workspace.waitFor()
+      await workspace.getByRole("region", { name: "保存插件交付", exact: true }).waitFor()
+      assert.equal(
+        await workspace.getByRole("region", { name: "试用当前候选", exact: true }).count(),
+        0,
+        "An unresolved or failed delivery must surface its own visible destination even with a retained trial"
+      )
+      if (phase === "unknown")
+        await workspace.getByRole("status").filter({ hasText: "上次操作结果待核对" }).waitFor()
+      else
+        await workspace.getByRole("alert").filter({ hasText: "此名称已被已安装插件使用" }).waitFor()
+      assert.equal(
+        await page.evaluate("window.fixture.calls.length"),
+        beforeDeliveryAttention,
+        "Attention routing only presents retained facts; it must not install, export or replay the trial"
+      )
+    }
+    await page.screenshot({
+      path: join(output, "delivery-attention-with-retained-trial.png"),
+      fullPage: true
+    })
+    await page.evaluate("window.fixture.deliveryAttention(null)")
     await openCreatorStep(page, "trial")
     const beforeSourceReady = await page.evaluate("window.fixture.calls.length")
     await page.evaluate("window.fixture.sourceSetReady()")
@@ -482,6 +521,19 @@ async function main() {
     assert.equal(await page.evaluate("window.fixture.calls.filter(row=>row[0]==='set-mode').at(-1)[1].mode"), "normal",
       "Normal mode remains an explicit user choice and must not auto-reenter creator mode")
 
+    await page.evaluate("window.fixture.emptySource()")
+    await workspace.waitFor({ state: "hidden" })
+    assert.equal(await rail.getByRole("button", { name: "导入插件源码", exact: true }).count(), 0)
+    await rail.getByRole("button", { name: "创造者模式", exact: true }).click()
+    await workspace.waitFor({ state: "hidden" })
+    const importStart = await page.evaluate("window.fixture.calls.length")
+    await rail.getByRole("button", { name: "导入插件源码", exact: true }).click()
+    const importedSource = workspace.getByRole("region", { name: "导入项目作者源码", exact: true })
+    await importedSource.getByText("本次导入的源码", { exact: true }).waitFor()
+    assert.deepEqual(await page.evaluate("window.fixture.calls.slice(" + importStart + ").filter(row=>row[0]!=='cold-history-list')"), [
+      ["import-source", { threadId: "creator", expectedWorkspace: "C:/creator" }]
+    ], "Importing an author source opens its dependency review without installing or authorizing anything")
+    await page.screenshot({ path: join(output, "empty-creator-source-import.png") })
     assert.deepEqual(errors, [])
     console.log(
       "PASS creator workspace navigation, long-flow disclosure, delivery, chat return, mobile bounds and 18-stage native-status aggregate verdicts"

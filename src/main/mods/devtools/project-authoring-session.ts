@@ -1,15 +1,20 @@
 import { createHash, randomUUID } from "node:crypto"
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
+import { lstat, mkdtemp, mkdir, realpath, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
-import { createAuthoringSourceBundle, type AuthoringSourceBundle } from "./authoring-bundle"
+import { basename, dirname, join, resolve } from "node:path"
+import { createAuthoringSourceBundle, readAuthoringFileChanges, type AuthoringSourceBundle } from "./authoring-bundle"
 import { createProjectTemplate, type ProjectTemplateKind } from "./project-template"
 import { compileProjectHarness } from "./project-harness"
 import { compileNativeComposition, nativeCompositionSchema, NATIVE_COMPOSITION_PATH } from "../../plugins/native-composition"
 import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 import { isProjectSourcePath } from "./project-source"
 import { inspectProjectSource } from "./project-doctor"
-import { testProjectSource } from "./project-contract"
+import {
+  assertProjectAuthoringSkillMetadata,
+  ProjectAuthoringSkillMetadataError,
+  projectAuthoringSkillDiagnostics
+} from "./project-authoring-skill-metadata"
+import { assertProjectContractPassed, testProjectSource } from "./project-contract"
 import { packProjectPlugin } from "./project-tooling"
 import { readAuthoringProjectSource as readProjectSource } from "./project-source"
 import {
@@ -24,6 +29,8 @@ import type { ProjectActionBinding } from "../../../shared/project-runtime/actio
 import type { AuthoringAtomicSettings } from "./authoring-config-snapshot"
 import type { DevelopmentProjectTrialRequest } from "../../../shared/mods/development"
 import { normalizeProjectResourcePaths } from "./project-resource-paths"
+import { ProjectDraftFileError } from "./project-draft-file-error"
+import { patchProjectComposition, ProjectSourcePatchError } from "./project-source-patch"
 import type { HostProjectOperation, HostProjectState } from "../../../shared/project-runtime/host-types"
 import {
   projectCreatorTrialJourney,
@@ -71,8 +78,9 @@ export class ProjectAuthoringSessions {
   private changed: (threadId: string) => void = () => undefined
   private persistence?: { settings: AuthoringAtomicSettings; directory: string }
 
-  configurePersistence(settings: AuthoringAtomicSettings, directory: string) {
+  configurePersistence(settings: AuthoringAtomicSettings, directory: string, trialRoot?: string) {
     if (this.sessions.size) throw Error("PROJECT_DRAFT_PERSISTENCE_BUSY")
+    this.development = new ProjectDevelopmentSessions(trialRoot)
     this.persistence = { settings, directory }
   }
 
@@ -252,12 +260,19 @@ export class ProjectAuthoringSessions {
     const draft = this.read(scope, id)
     if (draft.revision !== revision) throw Error("PROJECT_DRAFT_REVISION_CHANGED")
     const previous = this.trialRequest(scope)
-    if (previous?.journey && previous.draftId === id && previous.revision === revision &&
-      previous.digest === draft.source.digest && previous.goal === goal.trim() &&
-      JSON.stringify(previous.origin) === JSON.stringify(origin))
+    const retainedRequest =
+      !!previous &&
+      previous.draftId === id &&
+      previous.revision === revision &&
+      previous.digest === draft.source.digest &&
+      previous.goal === goal.trim() &&
+      JSON.stringify(previous.origin) === JSON.stringify(origin)
+    if (previous?.journey && retainedRequest)
       return { phase: "needs-approval" as const, executed: false as const, request: previous }
     if (previous?.journey && this.development.read(scope, previous.draftId)?.activeRuns)
       throw Error("PROJECT_DEV_RUNNING")
+    // A retained exact request may be rechecked after restart. A new goal/source is new authoring.
+    if (!retainedRequest) assertProjectAuthoringSkillMetadata(draft.source)
     const result = await this.inspect(scope, id, revision, "dev", guard, actions)
     if (!result || (result as ProjectDevelopmentView).status !== "prepared")
       throw Error("PROJECT_DEV_DOCTOR_FAILED")
@@ -290,17 +305,86 @@ export class ProjectAuthoringSessions {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
     }
-    await mkdir(draft.directory, { recursive: true })
-    for (const file of draft.source.files) {
-      guard()
-      const path = join(draft.directory, file.path)
-      await mkdir(dirname(path), { recursive: true })
-      guard()
-      await writeFile(path, file.text, { flag: "wx", encoding: "utf8" })
+    const missing = async () => {
+      try {
+        await lstat(draft.directory)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return true
+        throw error
+      }
+      return false
     }
     guard()
-    if ((await readProjectSource(draft.directory, draft.resourcePaths)).bundle.digest !== draft.source.digest)
-      throw Error("PROJECT_SOURCE_CHANGED")
+    if (!(await missing())) throw Error("PROJECT_SOURCE_CHANGED")
+    const parent = resolve(dirname(draft.directory))
+    await mkdir(parent, { recursive: true })
+    const parentIdentity = await realpath(parent)
+    const samePath = (left: string, right: string) => process.platform === "win32" ?
+      left.toLowerCase() === right.toLowerCase() : left === right
+    if (!samePath(parentIdentity, parent)) throw Error("PROJECT_SOURCE_CHANGED")
+    guard()
+    const staging = await mkdtemp(join(parent, ".project-source-"))
+    const cleanup = async () => {
+      if (dirname(resolve(staging)) !== parent || !basename(staging).startsWith(".project-source-"))
+        throw Error("PROJECT_SOURCE_CHANGED")
+      const stat = await lstat(staging).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error
+        return undefined
+      })
+      if (stat) {
+        if (!stat.isDirectory() || stat.isSymbolicLink() ||
+            !samePath(await realpath(staging), resolve(staging))) throw Error("PROJECT_SOURCE_CHANGED")
+        await rm(staging, { recursive: true, force: false })
+      }
+    }
+    try {
+      for (const file of draft.source.files) {
+        guard()
+        const path = join(staging, file.path)
+        await mkdir(dirname(path), { recursive: true })
+        guard()
+        await writeFile(path, file.text, { flag: "wx", encoding: "utf8" })
+      }
+      guard()
+      if ((await readProjectSource(staging, draft.resourcePaths)).bundle.digest !== draft.source.digest)
+        throw Error("PROJECT_SOURCE_CHANGED")
+      guard()
+      if (!samePath(await realpath(parent), parentIdentity)) throw Error("PROJECT_SOURCE_CHANGED")
+      guard()
+      if (await missing()) {
+        try {
+          await rename(staging, draft.directory)
+        } catch (error) {
+          // A concurrent recovery may publish the same source; only exact readback is accepted.
+          if (await missing()) throw error
+        }
+      }
+      guard()
+      if ((await readProjectSource(draft.directory, draft.resourcePaths)).bundle.digest !== draft.source.digest)
+        throw Error("PROJECT_SOURCE_CHANGED")
+    } finally {
+      // Remove only this owned mkdtemp result, never the final source directory.
+      await cleanup()
+    }
+  }
+
+  /** Recreate exact persisted author source only; never restore preview grants or execution. */
+  async materializeForDelivery(scope: DevelopmentScope, id: string, revision: number,
+    digest: string, guard: () => void) {
+    const current = () => {
+      guard()
+      const request = this.trialRequest(scope)
+      const draft = this.read(scope, id)
+      if (request?.draftId !== id || request.revision !== revision || request.digest !== digest ||
+          draft.revision !== revision || draft.source.digest !== digest)
+        throw Error("PROJECT_DELIVERY_CANDIDATE_CHANGED")
+      return draft
+    }
+    const draft = current()
+    await this.materialize(draft, guard)
+    const retained = current()
+    if (retained.directory !== draft.directory) throw Error("PROJECT_DELIVERY_CANDIDATE_CHANGED")
+    return retained
   }
 
   setChanged(callback: (threadId: string) => void) {
@@ -351,6 +435,21 @@ export class ProjectAuthoringSessions {
     return { ...structuredClone(draft), development: this.development.read(scope, id) }
   }
 
+  private hasRetainedSkillSource(scope: DevelopmentScope, draft: ProjectDraft): boolean {
+    const prepared = this.development.read(scope, draft.id)
+    if (
+      prepared?.currentRevision === draft.revision &&
+      prepared.currentDigest === draft.source.digest
+    )
+      return true
+    const request = this.trialRequest(scope)
+    return (
+      request?.draftId === draft.id &&
+      request.revision === draft.revision &&
+      request.digest === draft.source.digest
+    )
+  }
+
   async scaffold(
     scope: DevelopmentScope,
     id: string,
@@ -375,6 +474,7 @@ export class ProjectAuthoringSessions {
       )
     )
       throw Error("NATIVE_COMPOSITION_MULTIPLE_SOURCES")
+    if (native) assertProjectAuthoringSkillMetadata(draft.source)
     const availableActions = native ? await this.actions(scope.workspace, scope.threadId) : []
     guard()
     const source = native
@@ -395,7 +495,7 @@ export class ProjectAuthoringSessions {
     )
     const tests = await testProjectSource(source, manifest)
     guard()
-    if (!tests.valid) throw Error("PROJECT_HARNESS_CONTRACT_FAILED")
+    assertProjectContractPassed(tests)
     const saved = await this.save(
       scope,
       { id, name: draft.name, revision, files: source.files },
@@ -462,8 +562,14 @@ export class ProjectAuthoringSessions {
         ? nativeCompositionSchema.parse(JSON.parse(nativeSource.text)).resources : undefined
       const resourcePaths = normalizeProjectResourcePaths(checkedResourcePaths ?? nativeResources ??
         this.session(scope)?.drafts.get(input.id)?.resourcePaths ?? [])
-      if (source.files.some((file) => !isProjectSourcePath(file.path, resourcePaths)))
-        throw Error("PROJECT_DRAFT_FILE_UNSUPPORTED")
+      const unsupportedPaths = source.files
+        .filter((file) => !isProjectSourcePath(file.path, resourcePaths))
+        .map((file) => file.path)
+      if (unsupportedPaths.length)
+        throw new ProjectDraftFileError(
+          unsupportedPaths,
+          nativeSource ? NATIVE_COMPOSITION_PATH : undefined
+        )
       let session = this.session(scope)
       if (!session) {
         if (this.sessions.size >= 16) throw new ProjectDraftLimitError("sessions")
@@ -499,6 +605,8 @@ export class ProjectAuthoringSessions {
       session.drafts.set(input.id, draft)
       if (this.development.read(scope, input.id)) {
         try {
+          // Saving a new revision must not turn an invalid new Skill into retained preparation.
+          assertProjectAuthoringSkillMetadata(source)
           const actions = source.files.some(
             (file) => file.path === "devclaw.project-actions.lock.json"
           )
@@ -506,9 +614,16 @@ export class ProjectAuthoringSessions {
             : []
           guard()
           await this.development.stage(scope, draft, session.root, guard, actions)
-        } catch {
+        } catch (error) {
           guard()
-          this.development.block(scope, input.id, revision, "PROJECT_DEV_UPDATE_UNAVAILABLE")
+          this.development.block(
+            scope,
+            input.id,
+            revision,
+            error instanceof ProjectAuthoringSkillMetadataError
+              ? "PROJECT_AUTHORING_SKILL_METADATA_INVALID"
+              : "PROJECT_DEV_UPDATE_UNAVAILABLE"
+          )
         }
       }
       guard()
@@ -517,6 +632,46 @@ export class ProjectAuthoringSessions {
     } finally {
       this.busy.delete(key)
     }
+  }
+
+  /** Upserts exact files against one immutable revision; all omitted resources remain intact. */
+  async patch(
+    scope: DevelopmentScope,
+    input: { id: string; revision: number; sourceDigest: string; files?: unknown; sourcePatch?: unknown },
+    guard: () => void
+  ): Promise<ProjectDraft> {
+    guard()
+    const previous = this.read(scope, input.id)
+    if (previous.revision !== input.revision) throw Error("PROJECT_DRAFT_REVISION_CHANGED")
+    if (previous.source.digest !== input.sourceDigest) throw Error("PROJECT_DRAFT_SOURCE_CHANGED")
+    if (input.files === undefined && input.sourcePatch === undefined)
+      throw Error("DEVELOPMENT_INPUT")
+    const changes = input.files === undefined ? [] : readAuthoringFileChanges(input.files)
+    const files = new Map(previous.source.files.map((file) => [file.path, file]))
+    if (input.sourcePatch !== undefined) {
+      if (changes.some(file => file.path === NATIVE_COMPOSITION_PATH))
+        throw new ProjectSourcePatchError("CONFLICT")
+      const nativeSource = files.get(NATIVE_COMPOSITION_PATH)
+      if (!nativeSource) throw new ProjectSourcePatchError("NATIVE_REQUIRED")
+      const text = patchProjectComposition(nativeSource.text, input.sourcePatch)
+      const validation = nativeCompositionSchema.safeParse(JSON.parse(text))
+      if (!validation.success)
+        throw new ProjectSourcePatchError("SCHEMA", undefined,
+          "/" + validation.error.issues[0].path.map(part => String(part)
+            .replace(/~/g, "~0").replace(/\//g, "~1")).join("/"))
+      files.set(NATIVE_COMPOSITION_PATH, {
+        path: NATIVE_COMPOSITION_PATH,
+        text
+      })
+    }
+    for (const file of changes) files.set(file.path, file)
+    // No await before save acquires its existing busy lock and performs native validation/CAS.
+    return this.save(scope, {
+      id: previous.id,
+      name: previous.name,
+      revision: previous.revision,
+      files: [...files.values()]
+    }, guard)
   }
 
   async inspect(
@@ -531,7 +686,17 @@ export class ProjectAuthoringSessions {
     const draft = this.read(scope, id)
     if (draft.revision !== revision) throw Error("PROJECT_DRAFT_REVISION_CHANGED")
     const { report, manifest } = inspectProjectSource(draft.source, [], availableActions)
-    if (action === "doctor") return report
+    if (action === "doctor") {
+      const diagnostics = projectAuthoringSkillDiagnostics(draft.source)
+      if (diagnostics.length) {
+        report.valid = false
+        report.diagnostics.push(...diagnostics)
+      }
+      return report
+    }
+    // Only main-process exact prepared/persisted identities retain the historical Host rule.
+    if (!this.hasRetainedSkillSource(scope, draft))
+      assertProjectAuthoringSkillMetadata(draft.source)
     if (!report.valid || !manifest) return { valid: false, doctor: report }
     if (action === "dev" || action === "pack") await this.materialize(draft, guard)
     let result: unknown

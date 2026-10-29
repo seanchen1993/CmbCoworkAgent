@@ -117,6 +117,9 @@ function ScopedDelivery({
         operation === "install" ? api.installProjectDelivery : api.exportProjectDelivery
       if (!request || !deliver || unresolved) throw Error("DEVELOPMENT_SCOPE_CHANGED")
       let prepared = delivery
+      const installedDelivery = operation === "export" && installed ? delivery : undefined
+      const targetName = installedDelivery?.name ?? name.trim()
+      const targetVersion = installedDelivery?.version ?? version.trim()
       const allowed = (value: NonNullable<typeof delivery>) =>
         operation === "install" ? value.canInstall : value.canExport
       if (
@@ -124,7 +127,7 @@ function ScopedDelivery({
         !prepared ||
         !allowed(prepared) ||
         (!preparedBySourceSet &&
-          (prepared.name !== name.trim() || prepared.version !== version.trim()))
+          (prepared.name !== targetName || prepared.version !== targetVersion))
       ) {
         if (!api.prepareProjectDelivery) throw Error("PROJECT_DELIVERY_REVIEW_REQUIRED")
         const next = validateStatus(
@@ -133,8 +136,8 @@ function ScopedDelivery({
             expectedWorkspace: workspace,
             requestId: request.id,
             digest: request.digest,
-            name: name.trim(),
-            version: version.trim()
+            name: targetName,
+            version: targetVersion
           })
         )
         assertCurrent()
@@ -143,14 +146,24 @@ function ScopedDelivery({
         onStatus(next)
       }
       assertCurrent()
+      const phases =
+        operation === "export"
+          ? ["needs-confirmation", "installed", "exported"]
+          : ["needs-confirmation", "exported"]
       if (
         !prepared ||
         prepared.requestId !== request.id ||
         prepared.sourceDigest !== request.digest ||
-        !["needs-confirmation", "exported"].includes(prepared.phase) ||
+        !phases.includes(prepared.phase) ||
         !allowed(prepared) ||
+        (installedDelivery &&
+          (prepared.id !== installedDelivery.id ||
+            prepared.digest !== installedDelivery.digest ||
+            prepared.pluginId !== installedDelivery.pluginId ||
+            prepared.name !== installedDelivery.name ||
+            prepared.version !== installedDelivery.version)) ||
         (!preparedBySourceSet &&
-          (prepared.name !== name.trim() || prepared.version !== version.trim()))
+          (prepared.name !== targetName || prepared.version !== targetVersion))
       )
         throw Error("PROJECT_DELIVERY_CANDIDATE_CHANGED")
       return deliver({
@@ -163,8 +176,53 @@ function ScopedDelivery({
   return (
     <section aria-label="项目候选保存为新插件" className="space-y-3 rounded-xl border p-4">
       <h4 className="font-semibold">
-        {request ? (installed ? "插件已保存" : "保存插件") : "核对历史插件交付"}
+        {request
+          ? unresolved
+            ? "核对保存结果"
+            : installed
+              ? "插件已保存"
+              : "保存插件"
+          : "核对历史插件交付"}
       </h4>
+      {historical && (
+        <p className="text-sm text-muted-foreground">
+          下方交付记录属于历史候选，请重新准备当前版本。
+        </p>
+      )}
+      {unresolved && (
+        <p role="status" className="text-sm">
+          上次操作结果待核对，请先检查结果。
+        </p>
+      )}
+      {(error || delivery?.error) && (
+        <p role="alert" className="text-sm text-destructive">
+          {error || projectDeliveryError(new Error(delivery!.error))}
+        </p>
+      )}
+      {delivery?.phase === "failed" && !error && !delivery.error && !delivery.reconciliation && (
+        <p role="alert" className="text-sm text-destructive">
+          上次保存未完成，请检查名称与版本后重新保存。
+        </p>
+      )}
+      {delivery?.canReconcile && api.reconcileProjectDelivery && (
+        <button
+          type="button"
+          className={`${button} border-primary bg-primary text-primary-foreground hover:bg-primary/90`}
+          disabled={busy}
+          onClick={() =>
+            void act(() =>
+              api.reconcileProjectDelivery!({
+                threadId,
+                expectedWorkspace: workspace,
+                deliveryId: delivery.id,
+                digest: delivery.digest
+              })
+            )
+          }
+        >
+          核对实际交付结果
+        </button>
+      )}
       {!installed && request && !preparedBySourceSet && (
         <>
           <label className="grid gap-1 text-sm">
@@ -197,16 +255,6 @@ function ScopedDelivery({
             </label>
           </details>
         </>
-      )}
-      {historical && (
-        <p className="text-sm text-muted-foreground">
-          下方交付记录属于历史候选，请重新准备当前版本。
-        </p>
-      )}
-      {unresolved && (
-        <p role="status" className="text-sm">
-          上次操作结果待核对，请先检查结果。
-        </p>
       )}
       {request && !installed && (
         <>
@@ -250,65 +298,39 @@ function ScopedDelivery({
       )}
       {delivery && (
         <div className="space-y-3">
-          <p className="text-sm">
-            {delivery.name} · v{delivery.version}
-          </p>
+          {(installed || historical) && (
+            <p className="text-sm">
+              {delivery.name} · v{delivery.version}
+            </p>
+          )}
           {installed && (
-            <>
-              <p role="status" className="text-sm">
-                新插件已安装。
-              </p>
-              <InstalledPluginStartUse
-                threadId={threadId}
-                workspace={workspace}
-                pluginId={delivery.pluginId!}
-                expected={{
-                  name: delivery.name,
-                  version: delivery.version,
-                  digest: delivery.digest
-                }}
-              />
-            </>
+            <InstalledPluginStartUse
+              disabled={busy || unresolved}
+              threadId={threadId}
+              workspace={workspace}
+              pluginId={delivery.pluginId!}
+              expected={{
+                name: delivery.name,
+                version: delivery.version,
+                digest: delivery.digest
+              }}
+            />
           )}
           <div className="flex flex-wrap gap-2">
-            {request && current && delivery.canExport && (
-              <button
-                type="button"
-                className={button}
-                disabled={busy || !api.exportProjectDelivery}
-                onClick={() =>
-                  void act(() =>
-                    api.exportProjectDelivery!({
-                      threadId,
-                      expectedWorkspace: workspace,
-                      deliveryId: delivery.id,
-                      digest: delivery.digest
-                    })
-                  )
-                }
-              >
-                导出 ZIP…
-              </button>
-            )}
-            {delivery.canReconcile && api.reconcileProjectDelivery && (
-              <button
-                type="button"
-                className={button}
-                disabled={busy}
-                onClick={() =>
-                  void act(() =>
-                    api.reconcileProjectDelivery!({
-                      threadId,
-                      expectedWorkspace: workspace,
-                      deliveryId: delivery.id,
-                      digest: delivery.digest
-                    })
-                  )
-                }
-              >
-                核对实际交付结果
-              </button>
-            )}
+            {request &&
+              current &&
+              installed &&
+              !unresolved &&
+              (delivery.canExport || (installed && api.prepareProjectDelivery)) && (
+                <button
+                  type="button"
+                  className={button}
+                  disabled={busy || !api.exportProjectDelivery}
+                  onClick={() => void save("export")}
+                >
+                  {delivery.canExport ? "导出 ZIP…" : "核对并导出 ZIP…"}
+                </button>
+              )}
           </div>
           {delivery.reconciliation && (
             <p role="status" className="text-sm">
@@ -325,16 +347,18 @@ function ScopedDelivery({
           )}
           <details className="text-xs text-muted-foreground">
             <summary className="cursor-pointer">保存详情</summary>
-            <p className="mt-2 break-all">来源候选：{delivery.sourceDigest}</p>
+            <p className="mt-2">
+              {delivery.name} · v{delivery.version}
+            </p>
+            <p className="break-all">来源候选：{delivery.sourceDigest}</p>
             <p className="break-all">新插件包：{delivery.digest}</p>
+            {delivery.error && <p className="break-all">诊断代码：{delivery.error}</p>}
+            {delivery.reconciliation?.reason && (
+              <p className="break-words">核对说明：{delivery.reconciliation.reason}</p>
+            )}
             <p>导出不包含本机知识库、凭据及试用数据。</p>
           </details>
         </div>
-      )}
-      {error && (
-        <p role="alert" className="text-sm text-destructive">
-          {error}
-        </p>
       )}
     </section>
   )

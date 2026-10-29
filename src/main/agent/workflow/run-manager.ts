@@ -1,5 +1,6 @@
 import { captureHostWorkflowExecution } from "./host-execution"
 import { BrowserWindow, webContents, type WebContents } from "electron"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { mkdir, stat, writeFile } from "fs/promises"
 import { join, resolve } from "path"
 import { canonicalizeWorkspacePath } from "../context-history-path"
@@ -533,6 +534,8 @@ function workspaceKey(p: string): string {
 }
 
 class WorkflowRunManager {
+  // Captured during main initialization, before any foreground Function entry.
+  private readonly runInHostContext = AsyncLocalStorage.snapshot()
   private readonly resourceRevisions = new Map<string, number>()
 
   private resourceRevisionFor(workspacePath: string): number {
@@ -1340,7 +1343,10 @@ class WorkflowRunManager {
       sourceSettlementFailure: () => {
         if (physicalCleanupFailure) return Error("WORKFLOW_PHYSICAL_CLEANUP_UNCONFIRMED")
         const state = runStore.state
-        if (state.status !== "completed" || state.stats.agentsFailed > 0 ||
+        // A known engine error is a settled execution result, not a physical cleanup
+        // failure. Its original notification/checks retain and report that error.
+        if ((state.status !== "completed" && state.status !== "error") ||
+            (state.status === "completed" && state.stats.agentsFailed > 0) ||
             state.worktrees?.some(tree => tree.cleanupPending))
           return Error("WORKFLOW_SOURCE_OWNER_NOT_SUCCEEDED")
         return undefined
@@ -1452,8 +1458,9 @@ class WorkflowRunManager {
         emitWorkflowObservationChange(request.threadId, request.runId)
       }
     }
-    entry.settled = (async () => {
+    const settle = async (sourceFailure?: { error: unknown }) => {
       try {
+        if (sourceFailure) throw sourceFailure.error
         try {
           await launchReady
         } catch (error) {
@@ -1715,7 +1722,16 @@ class WorkflowRunManager {
           await Promise.reject(error)
         }
       }
-    })()
+    }
+    entry.settled = this.runInHostContext(() => {
+      try {
+        return withRuntimePluginSource(entry.sourceToken, () => settle())
+      } catch (error) {
+        // A synchronous source rebind failure still owns the original cleanup.
+        // The async body's rejection is deliberately not caught or replayed here.
+        return settle({ error })
+      }
+    })
 
     return {
       runId: request.runId,

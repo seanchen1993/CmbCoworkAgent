@@ -31,12 +31,12 @@ async function fixture(browser: Browser, contents: string) {
       {
         name: "isolated-navigation-only",
         setup(build) {
-          build.onResolve({ filter: /(?:^|\/)lib\/store$/ }, () => ({
+          build.onResolve({ filter: /(?:^@\/lib\/store$|^\.\/store$|\/lib\/store$)/ }, () => ({
             path: "navigation",
             namespace: "fixture"
           }))
           build.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
-            contents: `const state={accountRevision:0,threads:[],setShowHarnessBoardView:value=>window.calls.push(['navigate-project',value]),selectThread:id=>window.calls.push(['navigate-thread',id])};export const useAppStore=selector=>selector(state);useAppStore.getState=()=>state`
+            contents: `const state={accountRevision:0,threads:['A','B'].map(id=>({thread_id:id,metadata:{workspacePath:'C:/'+id,hostProjectRuntime:{projectId:'project-'+id,operationId:'operation-'+id,stageId:'review',pluginDigest:'a'.repeat(64)}}})),setShowHarnessBoardView:value=>window.calls.push(['navigate-project',value]),selectThread:id=>window.calls.push(['navigate-thread',id])};export const useAppStore=selector=>selector(state);useAppStore.getState=()=>state;useAppStore.subscribe=()=>()=>{}`
           }))
         }
       }
@@ -53,7 +53,10 @@ async function fixture(browser: Browser, contents: string) {
   })
   const page = await browser.newPage({ viewport: { width: 380, height: 850 } })
   page.on("pageerror", (error) => uiErrors.push(error.message))
-  await page.setContent('<html><body><div id="root"></div></body></html>')
+  await page.route("http://127.0.0.1:47778/**", (route) => route.fulfill({
+    contentType: "text/html", body: '<html><body><div id="root"></div></body></html>'
+  }))
+  await page.goto("http://127.0.0.1:47778/")
   await page.addScriptTag({ content: bundled.outputFiles[0].text })
   const assets = resolve(root, "out/renderer/assets")
   const css = existsSync(assets)

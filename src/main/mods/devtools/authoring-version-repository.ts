@@ -26,6 +26,7 @@ import type { AuthoringSourceBundle } from "./authoring-bundle"
 import { AuthoringPreflightClient } from "./authoring-preflight-client"
 import { readPureFunctionSource } from "./authoring-install-source"
 import { readBoundedAuthoringVersionFile } from "./authoring-version-file"
+import { AuthoringValidationError, authoringValidationResult } from "./authoring-validation-result"
 
 export const AUTHORING_VERSION_LIMITS = Object.freeze({ versions: 16, bytes: 4 * 1024 * 1024 })
 export interface PreparedAuthoringVersion {
@@ -627,12 +628,12 @@ export class AuthoringVersionRepository {
         if (initialSourceIdentity !== this.sourceIdentity(sourceDirectory, source))
           throw Error("AUTHORING_VERSION_CHANGED")
         if (
-          !analysis.sdk.strictCompatible ||
-          !analysis.typecheck.valid ||
           !sha(analysis.compiled.digest) ||
           analysis.compiled.digest !== analysis.typecheck.digest
         )
           throw Error("AUTHORING_VERSION_CHECK_FAILED")
+        if (!analysis.sdk.strictCompatible || !analysis.typecheck.valid)
+          throw new AuthoringValidationError(authoringValidationResult(source.digest, analysis))
         const record: PreparedAuthoringVersion = {
           schemaVersion: 1,
           coverage: "prepared-source-only-v1",

@@ -87,7 +87,7 @@ async function main() {
     const enable = page.getByRole("button", { name: "启用应用和当前项目灵件", exact: true })
     await enable.waitFor()
     assert.deepEqual(await writes(), [])
-    await page.getByRole("button", { name: "灵件与使用设置", exact: true }).click()
+    await page.getByRole("button", { name: "插件", exact: true }).click()
     assert.deepEqual(
       await page.evaluate(() => (window as unknown as { navigation: unknown }).navigation),
       [true, "mods", "installed"]
@@ -121,7 +121,7 @@ async function main() {
     await enable.waitFor()
     await call("recovery")
     await page
-      .getByText("权限设置需要恢复，请查看“灵件与使用设置”中的恢复说明；暂不允许开启。", {
+      .getByText("权限设置需要恢复，请到“插件”查看恢复说明。", {
         exact: true
       })
       .waitFor()
@@ -208,7 +208,7 @@ async function main() {
         ["project", "a", true, true, "C:/a"]
       ]
     )
-    await page.getByRole("button", { name: "灵件与使用设置", exact: true }).click()
+    await page.getByRole("button", { name: "插件", exact: true }).click()
     assert.deepEqual(
       await page.evaluate(() =>
         (window as unknown as { fixture: { navigation(): unknown[][] } }).fixture.navigation()

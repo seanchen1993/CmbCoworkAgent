@@ -1036,6 +1036,7 @@ function MessageBubbleImpl({
               key={`duration:${threadId}:${message.id}:${messageGeneration}`}
               threadId={threadId}
               component="TurnDuration"
+              presentationId={JSON.stringify([message.id, messageGeneration])}
               facts={{ word: "耗时", durationMs: duration }}
               className="text-xs text-muted-foreground/70"
               renderNative={(safe) => <DurationShow durationMs={Number(safe.durationMs)} text={String(safe.word)} />}

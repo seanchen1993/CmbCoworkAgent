@@ -8,7 +8,14 @@ import { navigateProjectThread } from "./project-thread-navigation"
 import { SparksDocumentationLink } from "../customize/SparksDocumentationLink"
 import { projectRuntimeRecoveryMessage } from "./project-runtime-message"
 import { projectLocalMetrics } from "../../../../shared/project-runtime/metrics"
+import { isSameWorkspacePath } from "../../../../shared/workspace-path"
 import { useAppStore } from "@/lib/store"
+import {
+  dismissHostProjectIntent,
+  hostProjectIntentCurrent,
+  useHostProjectIntent
+} from "@/lib/host-project-intent"
+import { readHostProjectThreadTarget, resolveHostProjectThread } from "@/lib/host-project-thread"
 import {
   dismissHostPluginStartUse,
   hostPluginStartUseCurrent,
@@ -69,6 +76,33 @@ export function LocalProjectsPanel() {
   const accountRevision = useAppStore((state) => state.accountRevision)
   const threads = useAppStore((state) => state.threads)
   const sequence = useRef(0)
+  const projectIntent = useHostProjectIntent()
+  useEffect(() => {
+    if (!projectIntent) return
+    let current = true
+    setSelected(undefined)
+    setCreating(false)
+    setImporting(false)
+    setError(undefined)
+    void resolveHostProjectThread(projectIntent.target, {
+      readThread: id => window.api.threads.get(id, { requestScope: "foreground-hydration" }),
+      readProject: id => window.api.harnessBoard.localProjects.get(id),
+      isCurrent: () => current && hostProjectIntentCurrent(projectIntent)
+    }).then(id => {
+      if (!current) return
+      if (id && hostProjectIntentCurrent(projectIntent)) {
+        setSelected(id)
+        setCreating(false)
+        setImporting(false)
+      } else setError(Error("HOST_PROJECT_NAVIGATION_CHANGED"))
+      dismissHostProjectIntent(projectIntent.id)
+    }).catch(cause => {
+      if (!current) return
+      setError(cause)
+      dismissHostProjectIntent(projectIntent.id)
+    })
+    return () => { current = false }
+  }, [projectIntent])
   const refresh = async (more = false) => {
     const token = ++sequence.current
     setLoading(true)
@@ -1198,6 +1232,7 @@ export function LocalProjectRun({
                   className="mt-1 underline"
                   onClick={() => {
                     const navigation = ++latestNavigation.current
+                    const account = useAppStore.getState().accountRevision
                     void import("../../lib/store")
                       .then(({ useAppStore, isThreadDeletionPending }) =>
                         navigateProjectThread(
@@ -1206,14 +1241,15 @@ export function LocalProjectRun({
                             projectId: project.projectId,
                             operationId: item.operationId,
                             stageId: item.stageId,
-                            pluginDigest: project.pluginDigest,
+                            pluginDigest: item.pluginDigest,
                             workspace: project.workspace
                           },
                           {
                             read: (id) =>
                               window.api.threads.get(id, { requestScope: "foreground-hydration" }),
                             isCurrent: () =>
-                              active.current && navigation === latestNavigation.current,
+                              active.current && navigation === latestNavigation.current &&
+                              account === useAppStore.getState().accountRevision,
                             isRetired: isThreadDeletionPending,
                             add: (thread) => useAppStore.getState().addThreadSummary(thread),
                             select: (id) => useAppStore.getState().selectThread(id)
@@ -1282,6 +1318,8 @@ export function LocalProjectRun({
           ))}
         </ul>
       </details>
+      <HostProjectSessions projectId={project.projectId} workspace={project.workspace}
+        operationThreadIds={operations.flatMap(item => item.execution?.threadId ? [item.execution.threadId] : [])} />
       <details className="text-xs text-muted-foreground">
         <summary className="cursor-pointer">耗时与重复执行</summary>
         <p className="mt-2">
@@ -1375,4 +1413,52 @@ export function LocalProjectRun({
       </details>
     </div>
   )
+}
+
+/** Keep older stage sessions reachable after project-owned threads leave the ordinary chat list. */
+function HostProjectSessions({ projectId, workspace, operationThreadIds }: {
+  projectId: string
+  workspace: string
+  operationThreadIds: string[]
+}) {
+  const threads = useAppStore(state => state.threads) ?? []
+  const hasMore = useAppStore(state => state.threadDirectoryHasMore)
+  const loading = useAppStore(state => state.threadDirectoryLoadingMore)
+  const [error, setError] = useState<string>()
+  const lifecycle = useRef(0)
+  useEffect(() => () => { lifecycle.current++ }, [])
+  const shown = new Set(operationThreadIds)
+  const sessions = threads.flatMap(thread => {
+    const target = readHostProjectThreadTarget(thread)
+    return target && target.projectId === projectId && !shown.has(target.threadId) &&
+      isSameWorkspacePath(target.workspace, workspace) ? [{ thread, target }] : []
+  })
+  return <details className="text-xs text-muted-foreground">
+    <summary className="cursor-pointer">更早的阶段会话</summary>
+    <ul className="mt-2 space-y-2">
+      {sessions.map(({ thread, target }) => <li key={thread.thread_id}>
+        <button type="button" className="underline" onClick={() => {
+          const revision = ++lifecycle.current
+          const account = useAppStore.getState().accountRevision
+          void import("../../lib/store").then(({ useAppStore, isThreadDeletionPending }) =>
+            navigateProjectThread(target, {
+              read: id => window.api.threads.get(id, { requestScope: "foreground-hydration" }),
+              isCurrent: () => lifecycle.current === revision &&
+                account === useAppStore.getState().accountRevision,
+              isRetired: isThreadDeletionPending,
+              add: value => useAppStore.getState().addThreadSummary(value),
+              select: id => useAppStore.getState().selectThread(id)
+            })
+          ).catch(() => setError("无法打开原阶段会话，请更新项目记录后重试。"))
+        }}>{thread.title || target.stageId}</button>
+      </li>)}
+    </ul>
+    {!sessions.length && <p className="mt-2">已加载记录中没有更早的阶段会话。</p>}
+    {hasMore && <button type="button" disabled={loading} className="mt-2 underline"
+      onClick={() => void useAppStore.getState().loadMoreThreads().catch(() =>
+        setError("会话列表暂时无法读取，请重试。"))}>
+      {loading ? "正在读取会话…" : "加载更多会话"}
+    </button>}
+    {error && <p role="alert">{error}</p>}
+  </details>
 }

@@ -1,6 +1,47 @@
 import { useRef, type ReactNode } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
+import { ArrowLeft, Loader2 } from "lucide-react"
+import { Button } from "@/components/ui/button"
 import { SettingsReturnFocusContext } from "./settings-return-focus"
+
+export function SettingsBackButton({ onClick }: { onClick: () => void }): React.JSX.Element {
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="h-7 gap-2 px-0"
+      aria-label="返回应用"
+      onClick={onClick}
+    >
+      <span className="flex h-7 w-9 items-center justify-center">
+        <ArrowLeft className="size-6" strokeWidth={1} />
+      </span>
+      <span className="text-base font-bold">返回应用</span>
+    </Button>
+  )
+}
+
+/** Keep navigation available while the settings module loads, without mounting its editors. */
+export function SettingsLoadingShell({ onClose }: { onClose: () => void }): React.JSX.Element {
+  return (
+    <div className="flex h-full flex-col overflow-hidden bg-background sm:flex-row">
+      <div className="flex max-h-[35%] shrink-0 flex-col border-b border-border sm:max-h-none sm:w-[200px] sm:border-b-0 sm:border-r">
+        <div className="flex items-center gap-2 p-3">
+          <SettingsBackButton onClick={onClose} />
+        </div>
+        <div aria-hidden="true" className="space-y-4 px-5 py-3">
+          <div className="h-3 w-24 animate-pulse rounded bg-muted" />
+          <div className="h-3 w-32 animate-pulse rounded bg-muted" />
+          <div className="h-3 w-28 animate-pulse rounded bg-muted" />
+        </div>
+      </div>
+      <div role="status" className="flex min-h-0 flex-1 items-center justify-center gap-3 p-6">
+        <Loader2 aria-hidden="true" className="size-5 animate-spin text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">正在打开自定义助手，可随时返回应用。</p>
+      </div>
+    </div>
+  )
+}
 
 /** A full-page settings layer. The workspace underneath keeps its DOM and layout. */
 export function SettingsOverlay({

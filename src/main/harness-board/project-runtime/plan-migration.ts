@@ -1,11 +1,16 @@
 import { isDeepStrictEqual } from "node:util"
-import type { HostProjectState, ProjectRuntimeManifest } from "../../../shared/project-runtime"
+import {
+  parseProjectRuntimeManifest,
+  type HostProjectState,
+  type ProjectRuntimeManifest
+} from "../../../shared/project-runtime"
 import { readPackageProtocolFiles } from "./package-snapshots"
 import { readPackageExtensionContract } from "../../plugins/extension-contract"
 import { hostStateError } from "./host-state-protocol"
 import { runtimeDigest } from "./safe-files"
 import {
   compileNativeComposition,
+  nativeCompositionLegacyGeneratedPretty,
   nativeCompositionSchema,
   NATIVE_COMPOSITION_PATH
 } from "../../plugins/native-composition"
@@ -22,6 +27,9 @@ function nativeFutureSkills(files: Map<string, Buffer>, completed: number): stri
   if (!sourceBytes) return []
   try {
     const source = nativeCompositionSchema.parse(JSON.parse(sourceBytes.toString("utf8")))
+    const runtimeBytes = files.get("devclaw.project-runtime.json")
+    if (!runtimeBytes) throw Error("missing runtime")
+    const manifest = parseProjectRuntimeManifest(JSON.parse(runtimeBytes.toString("utf8")))
     // Rebuild only the retained compiler projection. These descriptors confer no runtime grant.
     const catalog = new Map<string, ClawActionDescriptor>()
     const lockBytes = files.get(PROJECT_ACTION_LOCK_PATH)
@@ -46,6 +54,10 @@ function nativeFutureSkills(files: Map<string, Buffer>, completed: number): stri
     ]
     const compiled = compileNativeComposition(source, {
       actionCatalog: [...catalog.values()],
+      legacyGeneratedPretty: nativeCompositionLegacyGeneratedPretty(lockBytes),
+      legacyInputArtifactStages: new Set(
+        manifest.stages.filter((stage) => stage.inputArtifactIds === undefined).map((stage) => stage.id)
+      ),
       files: inputs.map((path) => {
         const bytes = files.get(path)
         if (!bytes) throw Error("missing source")

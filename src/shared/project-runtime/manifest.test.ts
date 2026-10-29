@@ -42,6 +42,33 @@ export function runtimeFixture(): ProjectRuntimeManifest {
 }
 
 describe("project runtime declaration", () => {
+  it("keeps explicit prior artifact inputs and preserves absent legacy declarations", () => {
+    const fixture = runtimeFixture()
+    fixture.stages[0].inputArtifactIds = []
+    fixture.stages[1].inputArtifactIds = ["document"]
+    expect(
+      parseProjectRuntimeManifest(fixture).stages.map((stage) => stage.inputArtifactIds)
+    ).toEqual([[], ["document"]])
+    expect(parseProjectRuntimeManifest(runtimeFixture()).stages[1]).not.toHaveProperty(
+      "inputArtifactIds"
+    )
+    for (const inputArtifactIds of [["missing"], ["document", "document"], [null], null]) {
+      const invalid = runtimeFixture()
+      Object.assign(invalid.stages[1], { inputArtifactIds })
+      expect(() => parseProjectRuntimeManifest(invalid)).toThrow("PROJECT_RUNTIME_MANIFEST_INVALID")
+    }
+    const current = runtimeFixture()
+    current.stages[0].inputArtifactIds = ["document"]
+    expect(() => parseProjectRuntimeManifest(current)).toThrow("PROJECT_RUNTIME_MANIFEST_INVALID")
+    const forward = runtimeFixture()
+    forward.artifacts.push({ id: "future", path: "future.json", required: true })
+    forward.stages[1].artifactIds.push("future")
+    forward.stages[0].inputArtifactIds = ["future"]
+    expect(() => parseProjectRuntimeManifest(forward)).toThrow("PROJECT_RUNTIME_MANIFEST_INVALID")
+    expect(() =>
+      parseProjectRuntimeManifest({ ...fixture, mode: "legacy", stateOwner: "plugin" })
+    ).toThrow()
+  })
   it("preserves optional output approval without changing legacy input approval", () => {
     const fixture = runtimeFixture()
     fixture.stages[0].resultApproval = "human"
@@ -49,13 +76,20 @@ describe("project runtime declaration", () => {
     expect(parsed.stages[0].approval).toBe("none")
     expect(parsed.stages[0].resultApproval).toBe("human")
     expect(parsed.stages[1]).not.toHaveProperty("resultApproval")
-    expect(() => parseProjectRuntimeManifest({
-      ...fixture, mode: "legacy", stateOwner: "plugin"
-    })).toThrow("PROJECT_RUNTIME_MANIFEST_INVALID")
+    expect(() =>
+      parseProjectRuntimeManifest({
+        ...fixture,
+        mode: "legacy",
+        stateOwner: "plugin"
+      })
+    ).toThrow("PROJECT_RUNTIME_MANIFEST_INVALID")
     for (const resultApproval of [true, "approved", null]) {
-      expect(() => parseProjectRuntimeManifest({
-        ...fixture, stages: [{ ...fixture.stages[0], resultApproval }]
-      })).toThrow("PROJECT_RUNTIME_MANIFEST_INVALID")
+      expect(() =>
+        parseProjectRuntimeManifest({
+          ...fixture,
+          stages: [{ ...fixture.stages[0], resultApproval }]
+        })
+      ).toThrow("PROJECT_RUNTIME_MANIFEST_INVALID")
     }
   })
   it("keeps host linear stages and legacy ownership separate", () => {

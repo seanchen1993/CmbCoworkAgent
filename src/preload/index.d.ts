@@ -1,5 +1,6 @@
 import type { PluginInstallMode, PluginInstallResult } from "../shared/plugin-install"
 import type { PreparePluginStartUse } from "../shared/plugin-start-use"
+import type { ReadPluginFlowDefinition } from "../shared/plugin-flow-definition"
 import type { WindowPresentationBridge } from "../shared/window-presentation"
 import type { DashboardToolUsageCoverage } from "../shared/dashboard-tool-usage"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
@@ -2348,6 +2349,7 @@ interface CustomAPI {
   plugins: {
     prepareStartUse: PreparePluginStartUse
     enableStartUse: PreparePluginStartUse
+    flowDefinition: ReadPluginFlowDefinition
     list: () => Promise<PluginMetadata[]>
     install: (
       buffer: ArrayBuffer,

@@ -25,12 +25,17 @@ export async function sourceSetBrowser(
       import{useAppStore}from"./src/renderer/src/lib/store";
       import{readHostPluginStartUseIntent}from"./src/renderer/src/lib/plugin-start-use-intent";
       const listeners=new Set(),accepted=[],calls=[];
-      const call=(method,input)=>{calls.push({method,input});return window.sourceSetNative(method,input)};
+      const call=(method,input)=>{
+        const record={method,input,pending:true};calls.push(record);
+        return window.sourceSetNative(method,input).finally(()=>{record.pending=false});
+      };
       const api=Object.fromEntries(["status","importSourceSet","advanceSourceSet","cancelSourceSet",
         "installSourceSetDependency","reconcileSourceSetDependency","installProjectDelivery",
         "reconcileProjectDelivery"].map(method=>[method,input=>call(method,input)]));
       window.electron={process:{platform:"win32"}};
       window.api={mods:{onConfigurationChanged:listener=>{listeners.add(listener);return()=>listeners.delete(listener)},
+        clawView:threadId=>call("clawView",{threadId}),
+        clawChange:(threadId,mutation)=>call("clawChange",{threadId,mutation}),
         status:threadId=>call("modsStatus",{threadId}),globalEnabled:()=>call("modsGlobal",{}),
         approveFunction:(threadId,pluginId,digest,expectedWorkspace)=>call("approveFunction",{threadId,pluginId,digest,expectedWorkspace})},
         plugins:{prepareStartUse:input=>call("prepareStartUse",input),enableStartUse:input=>call("enableStartUse",input)}};
@@ -43,6 +48,7 @@ export async function sourceSetBrowser(
       const activate=()=>useAppStore.setState({currentThreadId:scope.threadId,showCustomizeView:false,
         threads:[{thread_id:scope.threadId,title:"Source set",metadata:{workspacePath:scope.workspace}}]});
       window.fixture={accepted,calls,notify:()=>{for(const listener of listeners)listener()},
+        pendingStartUse:()=>calls.some(call=>call.pending&&["prepareStartUse","enableStartUse"].includes(call.method)),
         startUseIntent:()=>readHostPluginStartUseIntent(),
         setStatus:next=>{status=next;render()},
         switchTarget:next=>{scope=next;status={...scope,drafts:[],trials:[],enabled:true};activate();render()},

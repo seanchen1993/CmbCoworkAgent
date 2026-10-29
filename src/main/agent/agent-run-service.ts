@@ -120,7 +120,13 @@ export interface AgentGoalControlResult {
  */
 export interface AgentRunExecutionContext {
   /** Exact original Host-owned completed workflow, never renderer input. */
-  hostWorkflowNotification?: { runId: string; startedAt: string; assertCurrent(): void }
+  hostWorkflowNotification?: {
+    runId: string
+    startedAt: string
+    assertCurrent(): void
+    /** Main-only complete source check at notification capture; never guest authority. */
+    assertSourceCurrent?(): void
+  }
   /** Original main-process owner, invoked by ordinary Stop; never a renderer operation id. */
   onStopRequested?: () => void
   /** Main-only checkpoint continuation, admitted by the Host against its durable input request. */

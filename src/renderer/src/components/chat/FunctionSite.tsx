@@ -31,24 +31,48 @@ import { FunctionSiteRecovery, functionSiteErrorCode,
 import { validateFunctionNativeContent } from "../../../../shared/mods/v2/engine"
 import { functionInlineLabel, functionInlineTree, functionNativeHint,
   functionNativeProps } from "../../lib/function-native-content"
-import { functionSitePresentationKey } from "../../lib/function-site-presentation"
-import { observeFunctionSiteGeometry, type FunctionSiteGeometry } from "../../lib/function-site-geometry"
+import { functionSitePresentationKey,
+  type FunctionSitePresentationCache } from "../../lib/function-site-presentation"
+import { functionSiteLayoutContainer, observeFunctionSiteGeometry,
+  type FunctionSiteGeometry } from "../../lib/function-site-geometry"
+import { observeFunctionSiteLayoutWidth } from "../../lib/function-site-width"
+import { subscribeFunctionSiteCardsChanged,
+  subscribeFunctionSiteConfigurationChanged } from "../../lib/function-site-events"
 
 const DEFAULT_SITE_CLASS_NAME =
   "mx-auto w-full max-w-3xl overflow-auto text-xs text-muted-foreground"
 
 /** Neutral geometry only: never render or measure the unverified native fallback. */
-function FunctionSitePending({ component, slow = false, quiet = false }: {
+function FunctionSitePending({ component, slow = false, quiet = false, cache, presentationKey }: {
   component: FunctionUiSite
   slow?: boolean
   quiet?: boolean
+  cache?: FunctionSitePresentationCache | null
+  presentationKey?: string | null
 }): React.JSX.Element | null {
+  const placeholder = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const node = placeholder.current
+    if (!node || !cache || !presentationKey) return
+    // display:contents has no box. Use the same allocated width as the verified
+    // drawing, never measure or render the caller's unverified fallback.
+    const slot = node.parentElement
+    const container = slot ? functionSiteLayoutContainer(slot) : null
+    if (!container) return
+    const width = observeFunctionSiteLayoutWidth(container, layoutWidth => {
+      const height = cache.measuredHeight(presentationKey, layoutWidth)
+      const minHeight = height === undefined ? "" : `${height}px`
+      if (node.style.minHeight !== minHeight) node.style.minHeight = minHeight
+    })
+    const stop = cache.subscribe(width.refresh, presentationKey)
+    return () => { width.dispose(); stop() }
+  }, [cache, presentationKey, quiet])
   if (quiet) return null
   const message = ["UserMessage", "AssistantMessage", "CommandOutput"].includes(component)
   // Optional decorations should not introduce bars or layout rows while they are unknown.
   if (!message && !slow) return null
   return (
-    <div data-function-site-pending className={message
+    <div ref={placeholder} data-function-site-pending className={message
       ? `space-y-2 py-1${component === "UserMessage" ? " w-40 max-w-full" : ""}` : undefined}
       aria-label="正在读取内容">
       {message && <div aria-hidden="true" className="space-y-2">
@@ -140,7 +164,7 @@ export function FunctionSite(props: Parameters<typeof FunctionSiteSurface>[0]): 
   }
   return !ready ? <section data-function-site={props.component} aria-busy={!loadError || undefined}
     className={props.className ?? DEFAULT_SITE_CLASS_NAME}>
-      {loadError ? <p role="alert" className="text-destructive">
+      {loadError && props.fallback == null ? null : loadError ? <p role="alert" className="text-destructive">
         {loadError.error}
         {loadError.retry && <button type="button" className="ml-2 underline"
           onClick={loadError.retry}>重试读取</button>}
@@ -316,10 +340,12 @@ function FunctionSiteSurface({
     if (!presentationCache || !node || !projected || !presentationKey) return
     return observeFunctionSiteGeometry(node, geometry => {
       if (projectionRef.current === projected && projected.ticket.current() &&
-        projected.inputRevision === inputVersion.current.revision)
+        projected.inputRevision === inputVersion.current.revision) {
         projectedGeometry.current = { projection: projected, geometry }
+        presentationCache.measure(presentationKey, component, geometry, projected.snapshot.key)
+      }
     })
-  }, [presentationCache, projected, presentationKey])
+  }, [presentationCache, projected, presentationKey, component])
   useLayoutEffect(() => () => {
     const current = projectionRef.current
     if (!presentationCache || !current?.ticket.current() || !current.presentationCurrent ||
@@ -385,10 +411,12 @@ function FunctionSiteSurface({
     if (!presentationCache || !node || !snapshot || !frame || !presentationKey) return
     return observeFunctionSiteGeometry(node, geometry => {
       if (frameRef.current === frame && frame.ticket.current() &&
-        frame.inputRevision === inputVersion.current.revision)
+        frame.inputRevision === inputVersion.current.revision) {
         measuredPresentation.current = { frame, geometry }
+        presentationCache.measure(presentationKey, component, geometry)
+      }
     })
-  }, [presentationCache, snapshot, frame, presentationKey])
+  }, [presentationCache, snapshot, frame, presentationKey, component])
   useLayoutEffect(() => () => {
     // Deletion interleaves DOM writes across rows. Never force layout here: use the last
     // observation for this exact protected frame; a cold frame can retain its natural size.
@@ -756,7 +784,7 @@ function FunctionSiteSurface({
       update()
     }
     retryRef.current = reset
-    const stop = window.api.mods.onCardsChanged((event) => {
+    const stop = subscribeFunctionSiteCardsChanged(window.api.mods, (event) => {
       if (event.threadId === threadId && event.scope?.startsWith("site-projection:")) {
         const hostKey = event.scope.slice("site-projection:".length)
         if (projectionRef.current?.snapshot.key === hostKey ||
@@ -857,7 +885,7 @@ function FunctionSiteSurface({
         setReading(false)
       } else if (queued) update()
     }
-    const stopConfiguration = window.api.mods.onConfigurationChanged((event) => {
+    const stopConfiguration = subscribeFunctionSiteConfigurationChanged(window.api.mods, (event) => {
       if (event?.scope !== "schema") reset()
     })
     window.addEventListener("mods:configuration-changed", reset)
@@ -1058,7 +1086,8 @@ function FunctionSiteSurface({
               return native?.nativeUnchanged ? null :
                 <Element node={functionSiteDefault(component, props)} busy act={async () => {}} />
             }} />}
-        </div> : <FunctionSitePending component={component} slow={reading && showReading} quiet={
+        </div> : <FunctionSitePending component={component} slow={reading && showReading}
+          cache={presentationCache} presentationKey={presentationKey} quiet={
           ["UserMessage", "AssistantMessage"].includes(component) &&
           typeof facts.text === "string" && !facts.text.trim()} />)}
       {error && (

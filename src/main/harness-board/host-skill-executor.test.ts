@@ -1307,6 +1307,42 @@ describe("Host managed workflow result turns", () => {
     }
   }
 
+  it("keeps repeated native notice ownership checks off the source-content read boundary", async () => {
+    const f = await fixture(false, false, false, {}, declareWorkflow)
+    const original = originalWorkflow()
+    const reads = vi.spyOn(HostPackageSnapshots.prototype, "read")
+    let turns = 0, readsAtNotification = 0
+    try {
+      registerAgentRunImplementation(async (request, _delivery, context) => {
+        if (++turns === 1) {
+          context.onDetachedResultAvailable?.({
+            kind: "workflow", threadId: request.threadId, runId: original.fact.runId
+          })
+        } else {
+          const notice = context.hostWorkflowNotification!
+          readsAtNotification = reads.mock.calls.length
+          for (let index = 0; index < 3; index++) notice.assertCurrent()
+          expect(reads.mock.calls.length).toBe(readsAtNotification)
+          expect(original.fact.assertCurrent).toHaveBeenCalled()
+          const installed = mock.plugins
+          mock.plugins = []
+          expect(() => notice.assertCurrent()).toThrow("PLUGIN_UNAVAILABLE")
+          mock.plugins = installed
+          notice.assertCurrent()
+          original.deliver()
+          writeFileSync(join(f.workspace, "document.md"), "Original notification consumed")
+        }
+        context.onRunTerminated?.({ outcome: "success", code: "original-notification" })
+      })
+      const operation = f.service.prepare({ projectId: "local-docs", expectedVersion: 1,
+        idempotencyKey: "native-notice-source-boundary" })
+      expect((await f.service.start(operation.operationId)).status).toBe("succeeded")
+      expect(turns).toBe(2)
+      // The original consume/final execution boundaries still revalidate every byte.
+      expect(reads.mock.calls.length).toBeGreaterThan(readsAtNotification)
+    } finally { reads.mockRestore() }
+  })
+
   it("waits physical workflow settlement before the same-source result turn and original checks", async () => {
     const f = await fixture(false, false, true, {}, declareWorkflow)
     const physical = Promise.withResolvers<void>()

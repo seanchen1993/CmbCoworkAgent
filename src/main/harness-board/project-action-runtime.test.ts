@@ -4,6 +4,22 @@ import type { FlowRun, FlowChatTask } from "../../shared/mods/flows/types"
 import type { ProjectActionBinding } from "../../shared/project-runtime/action-bindings"
 import { FlowManager } from "../mods/flows/manager"
 import { FlowStore } from "../mods/flows/store"
+import { hostProjectFixture } from "./project-runtime/host-fixtures.test-helper"
+
+it("normalizes only the workspace for the main-only public configuration projection", () => {
+  const project = hostProjectFixture("C:\\Work\\Project")
+  const keys = ["audience"]
+  const read = vi.fn(() => ({ audience: "native" }))
+  const runtime = normalizeProjectActionRuntime({
+    readPublicConfiguration: read,
+    catalog: async () => [], prepareSelection: async () => {},
+    flows: { startSaved: vi.fn(), waitForSettlement: vi.fn(), run: vi.fn(), cancel: vi.fn() }
+  }, workspace => workspace.toLowerCase())
+  expect(runtime.readPublicConfiguration!(project, "immutable-source", keys))
+    .toEqual({ audience: "native" })
+  expect(read).toHaveBeenCalledWith({ ...project, workspace: "c:\\work\\project" }, "immutable-source", keys)
+  expect(project.workspace).toBe("C:\\Work\\Project")
+})
 
 it("uses the Mods key for Windows catalog, selection and every Flow lifecycle operation", async () => {
   const raw = "C:\\Users\\Author\\Project"

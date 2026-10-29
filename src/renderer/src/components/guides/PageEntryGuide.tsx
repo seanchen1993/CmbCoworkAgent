@@ -3,6 +3,7 @@ import { toast } from "sonner"
 import type { UiGuideConfig } from "../../../../shared/ui-guides"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogFooter, DialogTitle } from "@/components/ui/dialog"
+import { subscribeCurrentPageEntryGuideDismiss } from "./page-entry-guide-intent"
 
 interface PageEntryGuideProps extends UiGuideConfig {
   active: boolean
@@ -33,13 +34,21 @@ function ActivePageEntryGuide({
   const [open, setOpen] = useState(false)
   const [acknowledging, setAcknowledging] = useState(false)
   const countedRef = useRef(false)
+  const dismissedRef = useRef(false)
+
+  useEffect(() => {
+    return subscribeCurrentPageEntryGuideDismiss(guideId, () => {
+      dismissedRef.current = true
+      setOpen(false)
+    })
+  }, [guideId])
 
   useEffect(() => {
     let cancelled = false
     void window.api.uiGuides
       .getState({ guideId, revision, maxShowCount })
       .then((state) => {
-        if (!cancelled) setOpen(state.shouldShow)
+        if (!cancelled && !dismissedRef.current) setOpen(state.shouldShow)
       })
       .catch((error) => console.warn("[UiGuide] Failed to read guide state:", error))
     return () => {

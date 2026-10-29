@@ -115,6 +115,10 @@ interface ToolRequest {
 const nativeToolScope = new AsyncLocalStorage<ToolRequest>()
 const nativeToolGetStore = AsyncLocalStorage.prototype.getStore
 const nativeToolExit = AsyncLocalStorage.prototype.exit
+/** A new independent Host child never inherits its parent's ToolNode completion receipt. */
+export function withoutFunctionNativeToolCompletion<T>(run: () => T): T {
+  return Reflect.apply(nativeToolExit, nativeToolScope, [run]) as T
+}
 const nativeToolRequests = new WeakSet<ToolRequest>()
 const nativeToolHas = WeakSet.prototype.has, nativeToolAdd = WeakSet.prototype.add
 export interface FunctionNativeToolCompletion {

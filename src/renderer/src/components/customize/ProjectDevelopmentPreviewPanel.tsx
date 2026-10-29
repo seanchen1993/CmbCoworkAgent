@@ -378,6 +378,14 @@ function ScopedPreview({
             )}
         </article>
       ))}
+      {selected && (
+        <section aria-label="本轮试用项目执行" className="min-w-0 space-y-3 rounded-xl border p-3">
+          {selectedDebug && <h4 className="font-medium">隔离调试分支的阶段操作</h4>}
+          <Suspense fallback={<p>正在打开试用项目…</p>}>
+            <LocalProjectRun key={selected} projectId={selected} onChanged={() => void act(read)} />
+          </Suspense>
+        </section>
+      )}
       {api.stageDebug && (
         <details
           data-creator-guide="stage-debug"
@@ -419,14 +427,6 @@ function ScopedPreview({
             </div>
           )}
         </details>
-      )}
-      {selected && (
-        <section aria-label="本轮试用项目执行" className="min-w-0 space-y-3 rounded-xl border p-3">
-          {selectedDebug && <h4 className="font-medium">隔离调试分支的阶段操作</h4>}
-          <Suspense fallback={<p>正在打开试用项目…</p>}>
-            <LocalProjectRun key={selected} projectId={selected} onChanged={() => void act(read)} />
-          </Suspense>
-        </section>
       )}
       {request && (onRequestRepair || onReturnToChat) && (
         <details aria-label="回原创作对话优化" className="space-y-3 text-sm">

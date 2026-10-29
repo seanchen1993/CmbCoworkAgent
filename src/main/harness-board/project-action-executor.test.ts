@@ -30,6 +30,8 @@ import { readOriginalActionText } from "../mods/v2/action-result-text"
 import { FunctionGuestRuntime } from "../mods/v2/guest-runtime"
 import { ModControlStore } from "../mods/control-store"
 import { captureProjectActionContentGuard, captureSettledProjectSkill } from "./project-action-scope"
+import { HostProjectStore } from "./project-runtime/host-store"
+import { HostProjectCoordinator } from "./project-runtime/host-coordinator"
 
 const mock = vi.hoisted(() => ({
   metadata: {} as Record<string, unknown>,
@@ -565,6 +567,95 @@ function checkPreparationFixture(execute?: FlowExecution["execute"]) {
   return { ...f, capture, retire, skillSettled: () => skillSettled }
 }
 
+it("runs checks with native selected configuration and recaptures it for original successful evidence", async () => {
+  const f = checkPreparationFixture(async step => {
+    expect(step).toMatchObject({ input: { configuration: { audience: "native UI", timeout: 1000 } } })
+    return publishOriginalFlowActionResult({
+      passed: true, source: "plugin-action", summary: "checked against native configuration",
+      provider: step.kind === "plugin-action" ? {
+        pluginId: step.pluginId, plugin: step.plugin, digest: step.digest, actionId: step.actionId
+      } : undefined
+    }, async result => result)
+  })
+  writeFileSync(join(f.root, "output.json"), '{"text":"real output"}')
+  const lockPath = join(f.root, PROJECT_ACTION_LOCK_PATH)
+  const lock = JSON.parse(readFileSync(lockPath, "utf8"))
+  lock.bindings[0].configurationKeys = ["audience", "timeout"]
+  writeFileSync(lockPath, JSON.stringify(lock))
+  let audience = "native UI"
+  const read = vi.fn<NonNullable<ReturnType<typeof getProjectActionRuntime>["readPublicConfiguration"]>>((_project, root, keys) => {
+    expect(root).toBe(f.root)
+    expect(keys).toEqual(["audience", "timeout"])
+    return { audience, timeout: 1000 }
+  })
+  setProjectActionRuntime({ ...getProjectActionRuntime(), readPublicConfiguration: read })
+  let loaded = ""
+  const originalSkill = mock.skill.getMockImplementation()!
+  mock.skill.mockImplementation(async (value: HostSkillExecutionContext) => {
+    const prepare = value.prepareThread
+    return originalSkill({ ...value, prepareThread: async (id: string) => {
+      const result = await prepare?.(id)
+      loaded = result?.requiredContextText ?? ""
+      return result
+    } })
+  })
+  f.publishRequiredContext.mockImplementation(async (_workspace, text) => text.replace("native UI", "published UI"))
+  await expect(f.start()).resolves.toBe("succeeded")
+  expect(loaded).toContain("Required stage configuration.")
+  expect(loaded).toContain('"configuration":{"audience":"published UI","timeout":1000}')
+  expect(loaded).not.toContain('"audience":"native UI"')
+  expect(f.publishRequiredContext).toHaveBeenCalledWith(f.root,
+    JSON.stringify({ stageId: "review", configuration: { audience: "native UI", timeout: 1000 } }),
+    f.controller.signal)
+  expect(f.calls).toEqual(["first", "disposed"])
+  const operation = { ...f.context.operation, execution: { threadId: f.root,
+    terminal: { outcome: "success" as const, code: "project_actions_complete", settledAt: 1 } } }
+  const evidence = () => readHostActionCheckEvidence(f.context.project, f.context.ticket, operation, f.root)
+  expect(evidence().get("output-check")?.result).toBe("passed")
+  audience = "new native UI value"
+  expect(() => evidence()).toThrow("PROJECT_ACTION_NATIVE_FACTS_SCOPE_CHANGED")
+})
+
+it("rejects a model supplied reserved configuration field before Skill or check execution", async () => {
+  const f = checkPreparationFixture()
+  const lockPath = join(f.root, PROJECT_ACTION_LOCK_PATH)
+  const lock = JSON.parse(readFileSync(lockPath, "utf8"))
+  lock.bindings[0].configurationKeys = ["audience"]
+  lock.bindings[0].input.configuration = { audience: "model supplied" }
+  writeFileSync(lockPath, JSON.stringify(lock))
+  const read = vi.fn(() => ({ audience: "real UI" }))
+  setProjectActionRuntime({ ...getProjectActionRuntime(), readPublicConfiguration: read })
+  await expect(f.start()).rejects.toThrow("PROJECT_ACTION_CHECK_INPUT_INVALID")
+  expect(mock.skill).not.toHaveBeenCalled()
+  expect(f.calls).toEqual([])
+  expect(read).not.toHaveBeenCalled()
+})
+
+it.each(["empty", "nul", "oversize", "combined-limit", "source-changed"])(
+  "does not execute checks when selected stage configuration publication fails: %s", async scenario => {
+    const f = checkPreparationFixture()
+    const lockPath = join(f.root, PROJECT_ACTION_LOCK_PATH)
+    const lock = JSON.parse(readFileSync(lockPath, "utf8"))
+    lock.bindings[0].configurationKeys = ["audience"]
+    writeFileSync(lockPath, JSON.stringify(lock))
+    setProjectActionRuntime({ ...getProjectActionRuntime(), readPublicConfiguration: () => ({ audience: "native" }) })
+    let changed = false
+    f.context.assertInputsCurrent = () => { if (changed) throw Error("CONFIGURATION_CHANGED") }
+    if (scenario === "combined-limit")
+      f.context.prepareThread = async () => ({ requiredContextText: "x".repeat(31_950) })
+    f.publishRequiredContext.mockImplementation(async (_workspace, text) => {
+      if (scenario === "empty") return ""
+      if (scenario === "nul") return "unsafe\0text"
+      if (scenario === "oversize") return "x".repeat(28_001)
+      if (scenario === "source-changed") changed = true
+      return text
+    })
+    await expect(f.start()).resolves.toBe("failed")
+    expect(f.calls).toEqual([])
+    expect(f.recordTerminal).toHaveBeenCalledWith({ outcome: "error", code: "project_action_dependencies_unavailable" })
+  }
+)
+
 it("fails an oversized current check input only after settled Skill and exact physical retirement", async () => {
   const f = checkPreparationFixture()
   const gate = Promise.withResolvers<void>()
@@ -580,6 +671,99 @@ it("fails an oversized current check input only after settled Skill and exact ph
   await expect(result).resolves.toBe("failed")
   expect(f.recordTerminal).toHaveBeenCalledExactlyOnceWith({ outcome: "error", code: "project_check_input_limit" })
   expect(f.retire).toHaveBeenCalledOnce()
+})
+
+it("persists native failed file receipts for a missing current check output without executing its action", async () => {
+  const f = checkPreparationFixture()
+  rmSync(join(f.root, "output.json"))
+  const store = new HostProjectStore(join(f.root, "host.sqlite"))
+  try {
+    const input = hostProjectFixture(f.root)
+    input.manifest = structuredClone(f.context.project.manifest)
+    const state = store.create(input)
+    const gate = Promise.withResolvers<void>()
+    f.retire.mockImplementation(async () => { await gate.promise })
+    const coordinator = new HostProjectCoordinator(store, {
+      authorize: async () => {},
+      fingerprint: async project => fingerprintHostStageInput(project, project.goal),
+      execute: async (project, ticket, signal) => {
+        if (project.stageIndex === 0) return "succeeded"
+        mock.metadata.hostProjectRuntime = { projectId: project.projectId, operationId: ticket.operationId,
+          stageId: ticket.stageId, pluginDigest: ticket.pluginDigest }
+        return executeHostProjectStage({ ...f.context, project, ticket, signal,
+          operation: store.getOperation(ticket.operationId)!,
+          bindThread: id => store.bindExecutionThread(ticket, id),
+          recordTerminal: value => store.recordExecutionTerminal(ticket, value)
+        }, {} as BrowserWindow, () => {})
+      },
+      validate: async (project, ticket, signal) => validateHostStage(project, ticket, signal, Date.now,
+        readHostActionCheckEvidence(project, ticket, store.getOperation(ticket.operationId)!, f.root))
+    })
+    const first = store.prepare({ projectId: state.projectId, stageId: "draft", expectedVersion: 1,
+      idempotencyKey: "actual-draft", inputFingerprint: fingerprintHostStageInput(state, state.goal) })
+    expect((await coordinator.executePrepared(first.operationId)).status).toBe("succeeded")
+    const review = store.transition(first.operationId, first.inputFingerprint)
+    const operation = store.prepare({ projectId: review.projectId, stageId: "review", expectedVersion: 2,
+      idempotencyKey: "actual-missing-output", inputFingerprint: fingerprintHostStageInput(review, review.goal) })
+    store.decideApproval(operation.operationId, { expectedVersion: 2, inputFingerprint: operation.inputFingerprint,
+      decision: "approved", actorId: "native-user" })
+    const pending = coordinator.executePrepared(operation.operationId)
+    await vi.waitFor(() => expect(f.retire).toHaveBeenCalledOnce())
+    expect(store.getOperation(operation.operationId)?.status).toBe("started")
+    expect(store.getOperation(operation.operationId)?.execution?.terminal).toBeNull()
+    gate.resolve()
+    const result = await pending
+    expect(result.status).toBe("failed")
+    expect(result.execution?.terminal).toMatchObject({ outcome: "success", code: "project_check_input_missing" })
+    expect(result.receipts).toEqual([expect.objectContaining({ checkId: "output-check", result: "failed",
+      validatorVersion: "host-action/v1", operationId: operation.operationId,
+      inputFingerprint: operation.inputFingerprint })])
+    expect(f.calls).toEqual([])
+    expect(f.flowStore.runs(f.root, f.root)).toEqual([])
+    expect(() => store.transition(operation.operationId, operation.inputFingerprint)).toThrow("VALIDATION_REQUIRED")
+    expect(store.get(state.projectId)?.stageIndex).toBe(1)
+  } finally { store.close() }
+})
+
+it.each(["prior", "source", "unsafe-path", "execution-error", "execution-unknown", "cleanup"] as const)(
+  "does not infer a missing-current validation result after %s uncertainty", async scenario => {
+    const f = checkPreparationFixture()
+    rmSync(join(f.root, "output.json"))
+    if (scenario === "prior") {
+      const original = mock.skill.getMockImplementation()!
+      mock.skill.mockImplementation(async context => {
+        const result = await original(context)
+        rmSync(join(f.root, "input.json"))
+        return result
+      })
+    }
+    if (scenario === "source") f.context.assertInputsCurrent = () => {
+      if (f.skillSettled()) throw Error("ORIGINAL_SOURCE_CHANGED")
+    }
+    if (scenario === "unsafe-path")
+      f.context.project.manifest.artifacts.find(item => item.id === "output")!.path = ".env"
+    if (scenario.startsWith("execution-")) mock.skill.mockImplementation(async context => {
+      context.bindThread(f.root)
+      const unknown = scenario === "execution-unknown"
+      context.recordTerminal({ outcome: unknown ? "unknown" : "error", code: "original_failure" })
+      return unknown ? "unknown" : "failed"
+    })
+    if (scenario === "cleanup") f.retire.mockRejectedValue(Error("PHYSICAL_CLEANUP_UNCONFIRMED"))
+    await expect(f.start()).resolves.toBe(scenario === "execution-error" ? "failed" : "unknown")
+    expect(f.calls).toEqual([])
+    expect(f.recordTerminal).not.toHaveBeenCalledWith({ outcome: "success", code: "project_check_input_missing" })
+  })
+
+it("rejects an appeared output before standard missing-file validation can reuse empty action evidence", async () => {
+  const f = checkPreparationFixture()
+  rmSync(join(f.root, "output.json"))
+  await expect(f.start()).resolves.toBe("succeeded")
+  const operation = { ...f.context.operation, execution: { threadId: f.root,
+    terminal: { ...f.recordTerminal.mock.calls[0][0], settledAt: Date.now() } } }
+  expect(readHostActionCheckEvidence(f.context.project, f.context.ticket, operation, f.root).size).toBe(0)
+  writeFileSync(join(f.root, "output.json"), "{}")
+  expect(() => readHostActionCheckEvidence(f.context.project, f.context.ticket, operation, f.root))
+    .toThrow("PROJECT_ACTION_INPUT_CHANGED")
 })
 
 it.each(["catalog", "source-before", "source-after", "cancelled", "prior-limit", "prior-limit-with-current-limit", "prior-missing", "malformed-current"])(
@@ -1553,7 +1737,7 @@ it.each([
   20_000
 )
 
-it.each(["valid", "text-changed", "fact-changed", "grant-revoked"])(
+it.each(["valid", "text-changed", "fact-changed", "grant-revoked", "selected", "selected-text-changed", "selected-value-changed"])(
   "reuses a settled context phase only with retained text, original facts and fresh authority (%s)",
   async (scenario) => {
     const f = fixture(async (step) =>
@@ -1579,6 +1763,26 @@ it.each(["valid", "text-changed", "fact-changed", "grant-revoked"])(
     const manifest = f.context.project.manifest
     manifest.stages[1].actionIds = []
     manifest.stages[1].checkIds = []
+    const selected = scenario.startsWith("selected")
+    if (selected) {
+      const [original] = await f.catalog()
+      const checkProvider: ClawActionDescriptor = {
+        pluginId: original.pluginId, plugin: original.plugin, digest: original.digest,
+        actionId: "validate", name: "Validate", inputSchema: { type: "object" },
+        outputSchema: { type: "object" }, platform: { id: "validation", version: "1.0.0", action: "check" }
+      }
+      const lock = readProjectActionLock(f.root, manifest)
+      lock.bindings[1] = createProjectActionBinding("second", checkProvider, {}, {}, {
+        kind: "artifact", artifactId: "document", pointer: "", format: "artifact-reference-v1", maxBytes: 28000
+      }, ["audience"])
+      manifest.actions = lock.bindings.map(({ id, ref }) => ({ id, ref }))
+      manifest.checks.push({ id: "selected-check", kind: "action", artifactId: "document",
+        sideEffect: "read", actionId: "second" })
+      manifest.stages[1].checkIds = ["selected-check"]
+      writeFileSync(join(f.root, PROJECT_ACTION_LOCK_PATH), JSON.stringify(lock))
+      f.catalog.mockResolvedValue([original, checkProvider])
+      setProjectActionRuntime({ ...getProjectActionRuntime(), readPublicConfiguration: () => ({ audience: "native UI" }) })
+    }
     writeFileSync(
       join(f.root, "devclaw.project-runtime.json"),
       JSON.stringify(
@@ -1604,6 +1808,7 @@ it.each(["valid", "text-changed", "fact-changed", "grant-revoked"])(
     })
     await expect(f.start()).resolves.toBe("unknown")
     expect(f.calls).toEqual(["first", "disposed"])
+    if (selected) expect(canonical).toContain('"configuration":{"audience":"native UI"}')
     const [run] = f.flowStore.runs(f.root, f.root)
     const attempt = run.attempts.find((item) => item.stepId === "first")!
     const fact = f.flowStore.actionResult(f.root, f.root, run.id, attempt.executionId)!
@@ -1634,7 +1839,8 @@ it.each(["valid", "text-changed", "fact-changed", "grant-revoked"])(
         toolCallId: "input",
         claimed: false,
         priorToolsSettled: true,
-        requiredContextText: scenario === "text-changed" ? "changed" : canonical,
+        requiredContextText: scenario === "text-changed" ? "changed"
+          : scenario === "selected-text-changed" ? canonical.replace("native UI", "forged") : canonical,
         contextResumeProof: {
           authority: {
             protocol: "devclaw.native-project-context-readonly/v1",
@@ -1653,19 +1859,23 @@ it.each(["valid", "text-changed", "fact-changed", "grant-revoked"])(
         }
       }
     }
+    if (scenario === "selected-value-changed")
+      f.context.assertInputsCurrent = () => { throw Error("CONFIGURATION_CHANGED") }
+    f.recordTerminal.mockClear()
     mock.skill.mockImplementationOnce(async (value: HostSkillExecutionContext) => {
       // The real executor skips prepareThread on recovery; no provider replay is permitted.
       value.assertInputResumeResourcesCurrent?.()
       value.recordTerminal({ outcome: "success", code: "resumed" })
       return "succeeded"
     })
-    if (scenario === "valid") {
+    if (scenario === "valid" || scenario === "selected") {
       await expect(f.start()).resolves.toBe("succeeded")
-      expect(assertCurrent).toHaveBeenCalledTimes(2)
+      if (!selected) expect(assertCurrent).toHaveBeenCalledTimes(2)
     } else
       await expect(f.start()).rejects.toThrow(
-        scenario === "grant-revoked" ? "GRANT_REVOKED" : "PROJECT_INPUT_RESUME_CONTEXT_"
+        scenario === "grant-revoked" ? "GRANT_REVOKED"
+          : scenario === "selected-value-changed" ? "CONFIGURATION_CHANGED" : "PROJECT_INPUT_RESUME_CONTEXT_"
       )
-    expect(f.calls).toEqual(["first", "disposed"])
+    expect(f.calls).toEqual(["first", "disposed", ...(scenario === "selected" ? ["second", "disposed"] : [])])
   }
 )

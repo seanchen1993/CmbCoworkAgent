@@ -24,15 +24,12 @@ export function AssistantWorkbench({
             <h1 className="text-2xl font-semibold">用一句话定制助手</h1>
             <SparksDocumentationLink />
           </div>
-          <p className="text-sm leading-6 text-muted-foreground">
-            普通模式处理日常任务；创造者模式根据你的描述，制作、修改或组合灵件，并应用到聊天。
-          </p>
         </header>
         <section className="rounded-2xl border border-primary/20 bg-primary/5 p-5 sm:p-7">
           <WandSparkles className="mb-3 size-6 text-primary" aria-hidden="true" />
           <h2 className="text-lg font-semibold">想让助手怎么做，直接说</h2>
           <p className="mb-5 mt-2 text-sm leading-6 text-muted-foreground">
-            例如：“读取文件失败时自动重试一次”，或“把代码检查和修改提醒组合起来，应用到这段聊天”。助手会选择合适的方式完成。
+            例如：“给聊天增加代码检查提醒”，或“在这个项目插件前加一个需求转换步骤”。助手会先检查可用能力，再准备候选供你试用。
           </p>
           <button
             type="button"
@@ -51,9 +48,6 @@ export function AssistantWorkbench({
               {creatorError}
             </p>
           )}
-          <p className="mt-3 text-xs leading-5 text-muted-foreground">
-            进入后回到所选聊天，直接输入需求。需要新权限时会说明并请你确认，应用进度在聊天中显示。
-          </p>
         </section>
         <section className="rounded-xl border bg-card p-5">
           <h2 className="font-semibold">找一点灵感</h2>
@@ -70,13 +64,11 @@ export function AssistantWorkbench({
         </section>
         <details className="rounded-xl border p-4 text-sm">
           <summary className="cursor-pointer font-medium">高级：手动管理与效果测试</summary>
-          <p className="my-3 leading-6 text-muted-foreground">
-            已有灵件、搭配和执行步骤仍可单独管理，也可以用测试任务检查效果。
-          </p>
+          <p className="my-3 leading-6 text-muted-foreground">管理插件、聊天搭配和测试任务。</p>
           <div className="flex flex-wrap gap-2">
             {(
               [
-                ["mods", "管理灵件"],
+                ["mods", "管理插件"],
                 ["claw", "管理常用搭配"],
                 ["flows", "聊天任务模板"],
                 ["evaluation", "查看效果测试"]

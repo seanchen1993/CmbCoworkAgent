@@ -56,7 +56,7 @@ async function main() {
       window.api={mods:{development:{onChanged:fn=>{listeners.add(fn);return()=>listeners.delete(fn)}}},harnessBoard:{localProjects:{preview:{
         list:async threadId=>({threadId,workspace:'C:/fixture/'+threadId,drafts:[{id:'docs',name:'文档模板 '+threadId,revision,digest:String(revision).repeat(64),development:{devId:'dev-'+threadId,workspace:'C:/isolated/'+threadId,currentRevision:revision,currentDigest:'digest-'+revision,pendingRevision:null,activeRuns:0,updateState:'current'}}]}),
         create:async input=>{creates.push(input);return new Promise(resolve=>finish=()=>resolve('project-'+input.threadId))},
-        finish:async()=>{}
+        finish:async()=>{},stageDebug:{list:async()=>({snapshots:[],branches:[],diagnostics:[]})}
       }}}};
       const show=thread=>root.render(<React.StrictMode><ProjectDevelopmentPreviewPanel threadId={thread} workspace={'C:/fixture/'+thread}/></React.StrictMode>);
       window.fixture={creates,show,repairs,finish:()=>finish(),finishRepair:()=>repairFinish(),
@@ -112,6 +112,26 @@ async function main() {
     await create.click()
     await page.evaluate(() => (window as unknown as FixtureWindow).fixture.finish())
     await page.getByText("打开项目 project-A", { exact: true }).waitFor()
+    assert.equal(
+      await page
+        .getByRole("region", { name: "本轮试用项目执行", exact: true })
+        .evaluate((element) =>
+          Boolean(
+            element.compareDocumentPosition(
+              document.querySelector('[data-creator-guide="stage-debug"]')!
+            ) & Node.DOCUMENT_POSITION_FOLLOWING
+          )
+        ),
+      true,
+      "Native trial execution and its approvals must precede optional stage debugging"
+    )
+    assert.equal(
+      await page
+        .locator('[data-creator-guide="stage-debug"]')
+        .evaluate((element) => (element as HTMLDetailsElement).open),
+      false,
+      "Optional debugging stays collapsed while the native trial is immediately accessible"
+    )
     assert.equal(await page.evaluate("window.fixture.creates.at(-1).expectedDigest"), "2".repeat(64))
     await page.evaluate(() => (window as unknown as FixtureWindow).fixture.update())
     await page.getByText("文档模板 A · 版本 2", { exact: true }).waitFor({ state: "detached" })

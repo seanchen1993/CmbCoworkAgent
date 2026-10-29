@@ -66,6 +66,29 @@ it.each([
   expect(data).not.toHaveBeenCalled()
 })
 
+it.each(["composition", "reuse"])(
+  "notifies committed workspace settings even when subsequent %s reconciliation fails", (failure) => {
+    let enabled = false
+    const send = vi.fn((channel: string) => {
+      expect(channel).toBe("mods:configuration-changed")
+      expect(enabled).toBe(true)
+    })
+    const reconcile = (kind: string) => () => { if (kind === failure) throw Error("RECONCILE_FAILED") }
+    const handler = globalHandler({
+      scope: () => "workspace", writableScope: () => "workspace",
+      captureThreadIncarnation, matchesThreadIncarnation,
+      getThreadCore: () => ({ thread_id: "thread", created_at: 1, metadata: null }),
+      manager: { configure: (_workspace: string, value: boolean) => { enabled = value } },
+      creatorComposition: { reconcile: reconcile("composition") },
+      creatorReuse: { reconcileAuthorizations: reconcile("reuse") },
+      window: () => ({ isDestroyed: () => false, webContents: { send } })
+    }, "mods:configure")
+    expect(() => handler({}, { threadId: "thread", expectedWorkspace: "workspace",
+      enabled: true, outputPolicy: false })).toThrow("RECONCILE_FAILED")
+    expect(send).toHaveBeenCalledTimes(1)
+  }
+)
+
 it.each(["workspace", "incarnation", "frame"])(
   "rejects reconciliation after dialog wait when %s changes", async change => {
     let workspace = "A"

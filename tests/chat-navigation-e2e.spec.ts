@@ -25,6 +25,7 @@ const titles = {
   folded: "Navigation E2E folded answer",
   history: "Navigation E2E historical pages"
 }
+let expectedMatch: { text: string; messageId: string } | null = null
 interface FixtureApi {
   threads: {
     create(metadata: Record<string, unknown>): Promise<{ id?: string; thread_id?: string }>
@@ -106,6 +107,7 @@ async function matchSnapshot(page: Page) {
 }
 
 async function expectVisibleMatch(page: Page, text: string, messageId: string): Promise<void> {
+  expectedMatch = { text, messageId }
   let stableChecks = 0
   await until(async () => {
     const snapshot = await matchSnapshot(page)
@@ -607,22 +609,117 @@ async function main(): Promise<void> {
     if (page) {
       const snapshot = await matchSnapshot(page).catch(() => null)
       const layout = await page
-        .evaluate(() => {
-          const row = document.querySelector<HTMLElement>('[data-chat-message-id="folded-1"]')
-          const viewport = row?.closest<HTMLElement>("[data-radix-scroll-area-viewport]")
+        .evaluate(async (target) => {
+          interface DiagnosticHook {
+            memoizedState?: unknown
+            next?: DiagnosticHook | null
+          }
+          interface DiagnosticFiber {
+            child?: DiagnosticFiber | null
+            sibling?: DiagnosticFiber | null
+            return?: DiagnosticFiber | null
+            stateNode?: { current?: DiagnosticFiber }
+            memoizedProps?: {
+              threadId?: string
+              messages?: Array<{ id: string }>
+              visibleMessageIndexes?: number[]
+              virtuosoRef?: { current?: unknown }
+            }
+            memoizedState?: DiagnosticHook | null
+          }
+          const scope = document.querySelector<HTMLElement>("[data-chat-thread-id]")
+          const threadId = scope?.dataset.chatThreadId
+          const rows = [...(scope?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? [])]
+          const row = rows.find(candidate => candidate.dataset.chatMessageId === target?.messageId)
+          const viewport = scope?.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]")
           const registry = (CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights
           const range = [...(registry.get("chat-search-active") ?? [])][0]
+          let projection: Record<string, unknown> | null = null
+          let scrollState: Record<string, unknown> | null = null
+          const fiberKey = scope && Object.keys(scope).find(key => key.startsWith("__reactFiber$"))
+          let fiber = scope && fiberKey
+            ? Reflect.get(scope, fiberKey) as DiagnosticFiber
+            : undefined
+          while (fiber?.return) fiber = fiber.return
+          const stack = fiber ? [fiber.stateNode?.current ?? fiber] : []
+          let visited = 0
+          while (stack.length && visited++ < 20_000) {
+            const current = stack.pop()!
+            const props = current.memoizedProps
+            if (props?.threadId === threadId) {
+              const messages = props.messages
+              const indexes = props.visibleMessageIndexes
+              if (messages && indexes && props.virtuosoRef) {
+                const messageIndex = messages.findIndex(message => message.id === target?.messageId)
+                projection = {
+                  messages: messages.length,
+                  firstId: messages[0]?.id,
+                  lastId: messages.at(-1)?.id,
+                  targetResident: messageIndex >= 0,
+                  targetMessageIndex: messageIndex,
+                  targetVisibleIndex: indexes.indexOf(messageIndex),
+                  visibleCount: indexes.length,
+                  virtualHandleAvailable: Boolean(props.virtuosoRef.current)
+                }
+              }
+              let hook = current.memoizedState
+              for (let count = 0; hook && count < 120; count++, hook = hook.next) {
+                const state = hook.memoizedState as Record<string, unknown> | null
+                const ref = state?.current as Record<string, unknown> | undefined
+                if (ref?.threadId === threadId && typeof ref.mode === "string") {
+                  scrollState = {
+                    mode: ref.mode,
+                    generation: ref.generation,
+                    programmaticScrollGuard: ref.programmaticScrollGuard
+                  }
+                }
+                if (projection && Array.isArray(state?.identities) &&
+                  typeof state.firstItemIndex === "number") {
+                  projection.virtualWindow = {
+                    firstItemIndex: state.firstItemIndex,
+                    count: state.identities.length,
+                    generation: state.generation
+                  }
+                }
+              }
+            }
+            if (current.sibling) stack.push(current.sibling)
+            if (current.child) stack.push(current.child)
+          }
+          const durableTarget = target && threadId
+            ? await window.api.threads.getMessagesPage(threadId, {
+                targetMessageId: target.messageId,
+                limit: 1
+              }).then(page => ({
+                total: page.total,
+                count: page.messages.length,
+                targetPresent: page.messages.some(message => message.id === target.messageId),
+                firstId: page.messages[0]?.id,
+                lastId: page.messages.at(-1)?.id,
+                hasMore: page.hasMore
+              })).catch(() => ({ readFailed: true }))
+            : null
           return {
+            expectedMessageId: target?.messageId,
+            threadId,
             mounted: Boolean(row),
-            containsTarget: row?.textContent?.includes("FOLDED_TARGET"),
+            containsTarget: target ? Boolean(row?.textContent?.includes(target.text)) : false,
             foldedButtons: row?.querySelectorAll("[data-chat-search-expand-markdown]").length,
             range: range?.getBoundingClientRect().toJSON(),
             row: row?.getBoundingClientRect().toJSON(),
             viewport: viewport?.getBoundingClientRect().toJSON(),
             scrollTop: viewport?.scrollTop,
-            scrollHeight: viewport?.scrollHeight
+            scrollHeight: viewport?.scrollHeight,
+            presentation: scope?.querySelector<HTMLElement>("[data-chat-initial-presentation]")
+              ?.dataset.chatInitialPresentation,
+            mountedIds: rows.map(candidate => candidate.dataset.chatMessageId),
+            virtualItems: [...(scope?.querySelectorAll<HTMLElement>("[data-item-index]") ?? [])]
+              .map(item => ({ index: item.dataset.index, itemIndex: item.dataset.itemIndex })),
+            projection,
+            scrollState,
+            durableTarget
           }
-        })
+        }, expectedMatch)
         .catch(() => null)
       writeFileSync(
         join(artifacts, "failure-details.json"),

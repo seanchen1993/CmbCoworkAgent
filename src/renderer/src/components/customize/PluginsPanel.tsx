@@ -50,7 +50,9 @@ import { readUploadedItemNamesFromStorage } from "./MarketPanel/marketPublishSto
 import { toast } from "sonner"
 
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
-type PluginMcpServerDetail = Awaited<ReturnType<typeof window.api.plugins.getDetail>>["mcpServerDetails"][number]
+type PluginMcpServerDetail = Awaited<
+  ReturnType<typeof window.api.plugins.getDetail>
+>["mcpServerDetails"][number]
 const PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL =
   import.meta.env.VITE_PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL?.trim()
 const LOCAL_UPLOADED_PLUGIN_NAMES_KEY = "plugins_panel_uploaded_plugin_names"
@@ -75,7 +77,14 @@ interface PluginConsoleInfo {
 }
 
 function getEmptyPluginDetail(): PluginDetail {
-  return { skills: [], mcpServers: [], mcpServerDetails: [], hookCount: 0, hooks: [], manifest: null }
+  return {
+    skills: [],
+    mcpServers: [],
+    mcpServerDetails: [],
+    hookCount: 0,
+    hooks: [],
+    manifest: null
+  }
 }
 
 function normalizePluginNameKey(name: string): string {
@@ -124,13 +133,7 @@ function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
 }
 
 function sanitizeStringArray(values: string[]): string[] {
-  return Array.from(
-    new Set(
-      values
-        .map((value) => value.trim())
-        .filter(Boolean)
-    )
-  )
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))
 }
 
 function parseSkillsFromMarketExtraJson(extraJson?: string): string[] {
@@ -141,7 +144,10 @@ function parseSkillsFromMarketExtraJson(extraJson?: string): string[] {
   )
 }
 
-function buildPluginSkillsExtraJson(skills: string[], existingExtraJson?: string): string | undefined {
+function buildPluginSkillsExtraJson(
+  skills: string[],
+  existingExtraJson?: string
+): string | undefined {
   const normalizedSkills = sanitizeStringArray(skills)
   const existing = parseMarketExtraJson(existingExtraJson)
   const normalizedUserIds = Array.isArray(existing.grayUserIds)
@@ -443,9 +449,7 @@ export function PluginsPanel(): React.JSX.Element {
   )
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
-  const [visiblePluginLimit, setVisiblePluginLimit] = useState(
-    SKILL_PLUGIN_CATALOG_RENDER_BATCH
-  )
+  const [visiblePluginLimit, setVisiblePluginLimit] = useState(SKILL_PLUGIN_CATALOG_RENDER_BATCH)
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const loggedPluginSelectionRef = useRef<string | null>(null)
   const originMigrationDoneRef = useRef(false)
@@ -466,17 +470,23 @@ export function PluginsPanel(): React.JSX.Element {
     return !!plugin && plugin.origin !== "local"
   }, [])
 
-  const loadDetail = useCallback(async (plugin: PluginMetadata) => {
-    setSelectedPlugin(plugin)
-    setDetail(null)
-    if (shouldHidePluginDetails(plugin)) {
-      detailOwner.current.select(plugin.id)
-      return
-    }
-    await detailOwner.current.read(plugin.id,
-      () => window.api.plugins.getDetail(plugin.id), setDetail,
-      () => setDetail(getEmptyPluginDetail()))
-  }, [shouldHidePluginDetails])
+  const loadDetail = useCallback(
+    async (plugin: PluginMetadata) => {
+      setSelectedPlugin(plugin)
+      setDetail(null)
+      if (shouldHidePluginDetails(plugin)) {
+        detailOwner.current.select(plugin.id)
+        return
+      }
+      await detailOwner.current.read(
+        plugin.id,
+        () => window.api.plugins.getDetail(plugin.id),
+        setDetail,
+        () => setDetail(getEmptyPluginDetail())
+      )
+    },
+    [shouldHidePluginDetails]
+  )
 
   // Clean up debounce timer on unmount
   useEffect(() => {
@@ -703,7 +713,9 @@ export function PluginsPanel(): React.JSX.Element {
         bumpPluginVersion()
         void refreshPlugins().catch(console.error)
         if (detailOwner.current.isSelected(plugin.id)) {
-          setSelectedPlugin((prev) => (prev?.id === plugin.id ? { ...prev, enabled: newEnabled } : prev))
+          setSelectedPlugin((prev) =>
+            prev?.id === plugin.id ? { ...prev, enabled: newEnabled } : prev
+          )
         }
       } catch (e) {
         setErrorMsg(e instanceof Error ? e.message : "启用/禁用插件失败")
@@ -763,8 +775,7 @@ export function PluginsPanel(): React.JSX.Element {
     (plugin: PluginMetadata) => {
       const key = plugin.name.trim().toLowerCase()
       const hasMarketRecord = Boolean(marketPluginMap[key])
-      const localSkills =
-        selectedPlugin?.id === plugin.id && detail ? detail.skills : []
+      const localSkills = selectedPlugin?.id === plugin.id && detail ? detail.skills : []
       const fallbackSkills = parseSkillsFromMarketExtraJson(marketPluginMap[key]?.extra_json)
       const extraJson = buildPluginSkillsExtraJson(
         localSkills.length > 0 ? localSkills : fallbackSkills,
@@ -818,10 +829,13 @@ export function PluginsPanel(): React.JSX.Element {
   return (
     <>
       {/* Left panel - plugin list */}
-      <div className="w-[330px] shrink-0 border-r border-border flex flex-col">
+      <div
+        className="flex min-h-0 max-h-[40%] w-full shrink-0 flex-col border-b border-border sm:max-h-none sm:w-[330px] sm:border-r sm:border-b-0"
+        data-plugin-source-list
+      >
         <div className="p-3 border-b border-border space-y-2">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-base font-bold">Plugins</h2>
+            <h2 className="text-base font-bold">插件来源</h2>
             <div className="flex items-center gap-1">
               <div className="relative flex-1 min-w-[120px] max-w-[160px]">
                 <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
@@ -856,7 +870,7 @@ export function PluginsPanel(): React.JSX.Element {
             </div>
           </div>
         </div>
-        <ScrollArea className="flex-1">
+        <ScrollArea className="min-h-0 flex-1">
           <div className="p-2 space-y-1">
             {filteredPlugins.length === 0 ? (
               <div className="py-8 text-center text-muted-foreground text-xs">
@@ -881,75 +895,73 @@ export function PluginsPanel(): React.JSX.Element {
             ) : (
               <>
                 {visiblePlugins.map((plugin) => {
-                  const isMarketPlugin = Boolean(
-                    resolvePluginMarketInfo(plugin, marketPluginMap)
-                  )
+                  const isMarketPlugin = Boolean(resolvePluginMarketInfo(plugin, marketPluginMap))
                   return (
                     <button
-                    key={plugin.id}
-                    className={cn(
-                      "w-full text-left rounded-md border border-border/70 p-2.5 transition-colors",
-                      selectedPlugin?.id === plugin.id
-                        ? "bg-muted/70 border-border"
-                        : "hover:bg-muted/50"
-                    )}
-                    onClick={() => handleSelectPlugin(plugin)}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0 flex-1">
-                        <Puzzle
-                          className={cn(
-                            "size-4 shrink-0",
-                            plugin.enabled ? "text-primary" : "text-muted-foreground/40"
+                      key={plugin.id}
+                      className={cn(
+                        "w-full text-left rounded-md border border-border/70 p-2.5 transition-colors",
+                        selectedPlugin?.id === plugin.id
+                          ? "bg-muted/70 border-border"
+                          : "hover:bg-muted/50"
+                      )}
+                      onClick={() => handleSelectPlugin(plugin)}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <Puzzle
+                            className={cn(
+                              "size-4 shrink-0",
+                              plugin.enabled ? "text-primary" : "text-muted-foreground/40"
+                            )}
+                          />
+                          <span
+                            className={cn(
+                              "text-sm font-medium truncate",
+                              !plugin.enabled && "text-muted-foreground"
+                            )}
+                          >
+                            {plugin.name}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {isMarketPlugin && (
+                            <Badge variant="secondary" className="text-[10px] h-4 px-1.5">
+                              市场
+                            </Badge>
                           )}
-                        />
-                        <span
-                          className={cn(
-                            "text-sm font-medium truncate",
-                            !plugin.enabled && "text-muted-foreground"
+                          {plugin.version && (
+                            <Badge variant="outline" className="text-[10px] h-4 px-1.5">
+                              v{plugin.version}
+                            </Badge>
                           )}
-                        >
-                          {plugin.name}
-                        </span>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        {isMarketPlugin && (
-                          <Badge variant="secondary" className="text-[10px] h-4 px-1.5">
-                            市场
-                          </Badge>
+                      {plugin.description && (
+                        <p className="text-xs text-muted-foreground mt-1 whitespace-pre-wrap break-words">
+                          {plugin.description}
+                        </p>
+                      )}
+                      <div className="flex items-center gap-3 mt-1.5">
+                        {plugin.skillCount > 0 && (
+                          <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                            <Sparkles className="size-3" />
+                            {plugin.skillCount} skills
+                          </span>
                         )}
-                        {plugin.version && (
-                          <Badge variant="outline" className="text-[10px] h-4 px-1.5">
-                            v{plugin.version}
-                          </Badge>
+                        {plugin.mcpServerCount > 0 && (
+                          <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                            <Plug className="size-3" />
+                            {plugin.mcpServerCount} MCPs
+                          </span>
+                        )}
+                        {(plugin.hookCount ?? 0) > 0 && (
+                          <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                            <Webhook className="size-3" />
+                            {plugin.hookCount ?? 0} Hooks
+                          </span>
                         )}
                       </div>
-                    </div>
-                    {plugin.description && (
-                      <p className="text-xs text-muted-foreground mt-1 whitespace-pre-wrap break-words">
-                        {plugin.description}
-                      </p>
-                    )}
-                    <div className="flex items-center gap-3 mt-1.5">
-                      {plugin.skillCount > 0 && (
-                        <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                          <Sparkles className="size-3" />
-                          {plugin.skillCount} skills
-                        </span>
-                      )}
-                      {plugin.mcpServerCount > 0 && (
-                        <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                          <Plug className="size-3" />
-                          {plugin.mcpServerCount} MCPs
-                        </span>
-                      )}
-                      {(plugin.hookCount ?? 0) > 0 && (
-                        <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                          <Webhook className="size-3" />
-                          {plugin.hookCount ?? 0} Hooks
-                        </span>
-                      )}
-                    </div>
                     </button>
                   )
                 })}
@@ -959,9 +971,7 @@ export function PluginsPanel(): React.JSX.Element {
                     size="sm"
                     className="w-full text-xs"
                     onClick={() =>
-                      setVisiblePluginLimit(
-                        (limit) => limit + SKILL_PLUGIN_CATALOG_RENDER_BATCH
-                      )
+                      setVisiblePluginLimit((limit) => limit + SKILL_PLUGIN_CATALOG_RENDER_BATCH)
                     }
                   >
                     加载更多（剩余 {filteredPlugins.length - visiblePlugins.length}）
@@ -1098,9 +1108,10 @@ export function PluginDetailPanel(props: {
             <div>
               <h3 className="text-lg font-semibold text-foreground/85">Plugins 插件</h3>
               <p className="mt-1 text-sm text-muted-foreground leading-relaxed">
-                插件是一个可分发的功能包，可以把技能、MCP 服务、Hooks 和静态资源放在一起安装、启用、禁用和卸载。
+                插件是一个可分发的功能包，可以把技能、MCP 服务、Hooks
+                和静态资源放在一起安装、启用、禁用和卸载。
                 适合把一套完整工作流交给团队复用，而不是让每个人分别添加技能、连接器和 Hook 规则。
-                如果插件包含灵件，安装后打开“灵件与使用设置 → 我已添加”核对权限并启用；Claw 工作台也可直接打开“灵件与使用设置”。
+                安装后返回“插件”，点击“启用”或“去使用”。
               </p>
             </div>
           </div>
@@ -1108,7 +1119,7 @@ export function PluginDetailPanel(props: {
           <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-3">
             <p className="text-sm font-medium text-foreground/75">推荐目录结构</p>
             <pre className="rounded-md border bg-background p-3 text-xs overflow-x-auto text-muted-foreground">
-{`my-plugin/
+              {`my-plugin/
   plugin.json                 // 插件元信息，也可放在 .codex-plugin/plugin.json
   .mcp.json                   // 插件 MCP 配置，可选
   skills/
@@ -1125,7 +1136,8 @@ export function PluginDetailPanel(props: {
                 Skills
               </div>
               <p className="text-xs text-muted-foreground leading-relaxed">
-                放在 <span className="font-mono">skills/</span> 目录。启用插件后，技能会出现在可用技能列表中；读取或选择插件技能时，会激活该插件的运行作用域。
+                放在 <span className="font-mono">skills/</span>{" "}
+                目录。启用插件后，技能会出现在可用技能列表中；读取或选择插件技能时，会激活该插件的运行作用域。
               </p>
             </div>
             <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-2">
@@ -1134,7 +1146,8 @@ export function PluginDetailPanel(props: {
                 MCP Servers
               </div>
               <p className="text-xs text-muted-foreground leading-relaxed">
-                放在根目录 <span className="font-mono">.mcp.json</span>。remote MCP 默认携带当前用户身份 Header；插件 MCP 默认不会抢全局 MCP 的裸短别名。
+                放在根目录 <span className="font-mono">.mcp.json</span>。remote MCP
+                默认携带当前用户身份 Header；插件 MCP 默认不会抢全局 MCP 的裸短别名。
               </p>
             </div>
             <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-2">
@@ -1143,7 +1156,8 @@ export function PluginDetailPanel(props: {
                 Hooks
               </div>
               <p className="text-xs text-muted-foreground leading-relaxed">
-                默认读取 <span className="font-mono">hooks/hooks.json</span>。插件 Hook 只会在插件或插件技能进入作用域后参与执行，避免污染普通工具调用。
+                默认读取 <span className="font-mono">hooks/hooks.json</span>。插件 Hook
+                只会在插件或插件技能进入作用域后参与执行，避免污染普通工具调用。
               </p>
             </div>
           </div>
@@ -1151,21 +1165,53 @@ export function PluginDetailPanel(props: {
           <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-3">
             <p className="text-sm font-medium text-foreground/75">.mcp.json 字段说明</p>
             <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
-              <p><span className="font-mono text-foreground/70">url</span>：remote MCP 地址，支持 http/https。</p>
-              <p><span className="font-mono text-foreground/70">command / args / env</span>：stdio MCP 启动命令、参数和环境变量。</p>
-              <p><span className="font-mono text-foreground/70">transport</span>：remote 传输方式，支持 <span className="font-mono">sse</span> 或 <span className="font-mono">streamable-http</span>。</p>
-              <p><span className="font-mono text-foreground/70">headers</span>：插件自定义请求 Header。</p>
-              <p><span className="font-mono text-foreground/70">injectUserHeaders</span>：remote MCP 默认 <span className="font-mono">true</span>，会注入 <span className="font-mono">yst_id_token</span>、<span className="font-mono">sap_id</span>、<span className="font-mono">name</span>；设为 <span className="font-mono">false</span> 可关闭。</p>
-              <p><span className="font-mono text-foreground/70">priority</span>：插件 MCP 基础优先级，范围 <span className="font-mono">0..100</span>，默认 <span className="font-mono">50</span>；全局 MCP 默认 <span className="font-mono">100</span>。</p>
-              <p><span className="font-mono text-foreground/70">scope</span>：默认 <span className="font-mono">plugin-active</span>，未激活时按 lazy 工具处理；也可设 <span className="font-mono">plugin-installed</span> 常驻。</p>
-              <p><span className="font-mono text-foreground/70">fallback</span>：允许插件 MCP 连接失败时回退到全局同名 MCP。必须显式设置 <span className="font-mono">safeToRetry: true</span>，只适合查询类或幂等工具。</p>
+              <p>
+                <span className="font-mono text-foreground/70">url</span>：remote MCP 地址，支持
+                http/https。
+              </p>
+              <p>
+                <span className="font-mono text-foreground/70">command / args / env</span>：stdio
+                MCP 启动命令、参数和环境变量。
+              </p>
+              <p>
+                <span className="font-mono text-foreground/70">transport</span>：remote
+                传输方式，支持 <span className="font-mono">sse</span> 或{" "}
+                <span className="font-mono">streamable-http</span>。
+              </p>
+              <p>
+                <span className="font-mono text-foreground/70">headers</span>：插件自定义请求
+                Header。
+              </p>
+              <p>
+                <span className="font-mono text-foreground/70">injectUserHeaders</span>：remote MCP
+                默认 <span className="font-mono">true</span>，会注入{" "}
+                <span className="font-mono">yst_id_token</span>、
+                <span className="font-mono">sap_id</span>、<span className="font-mono">name</span>
+                ；设为 <span className="font-mono">false</span> 可关闭。
+              </p>
+              <p>
+                <span className="font-mono text-foreground/70">priority</span>：插件 MCP
+                基础优先级，范围 <span className="font-mono">0..100</span>，默认{" "}
+                <span className="font-mono">50</span>；全局 MCP 默认{" "}
+                <span className="font-mono">100</span>。
+              </p>
+              <p>
+                <span className="font-mono text-foreground/70">scope</span>：默认{" "}
+                <span className="font-mono">plugin-active</span>，未激活时按 lazy 工具处理；也可设{" "}
+                <span className="font-mono">plugin-installed</span> 常驻。
+              </p>
+              <p>
+                <span className="font-mono text-foreground/70">fallback</span>：允许插件 MCP
+                连接失败时回退到全局同名 MCP。必须显式设置{" "}
+                <span className="font-mono">safeToRetry: true</span>，只适合查询类或幂等工具。
+              </p>
             </div>
           </div>
 
           <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-3">
             <p className="text-sm font-medium text-foreground/75">.mcp.json 示例</p>
             <pre className="max-h-[260px] overflow-auto rounded-md border bg-background p-3 text-xs text-muted-foreground">
-{`{
+              {`{
   "search-service": {
     "url": "https://example.com/mcp",
     "transport": "streamable-http",
@@ -1194,7 +1240,8 @@ export function PluginDetailPanel(props: {
           </div>
 
           <div className="rounded-lg border border-amber-300/50 bg-amber-50 px-4 py-3 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300 leading-relaxed">
-            启用插件前请确认来源可信。remote MCP 默认会携带当前用户身份访问远程服务；fallback 会把同一组参数发送给全局同名 MCP，因此只应给可重试、幂等、无写入副作用的工具开启。
+            启用插件前请确认来源可信。remote MCP 默认会携带当前用户身份访问远程服务；fallback
+            会把同一组参数发送给全局同名 MCP，因此只应给可重试、幂等、无写入副作用的工具开启。
           </div>
         </div>
       </div>
@@ -1231,9 +1278,9 @@ export function PluginDetailPanel(props: {
   }
 
   return (
-    <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+    <div className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden" data-plugin-source-detail>
       {/* Header */}
-      <div className="p-4 border-b border-border flex items-start justify-between gap-3">
+      <div className="p-4 border-b border-border flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h2 className="text-base font-semibold truncate">{plugin.name}</h2>
@@ -1251,7 +1298,7 @@ export function PluginDetailPanel(props: {
           {author && <p className="text-xs text-muted-foreground mt-0.5">{author}</p>}
         </div>
         {!hideActions && (
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex max-w-full flex-wrap items-center justify-end gap-1.5">
             {onEditFiles && (
               <Button
                 variant="outline"
@@ -1306,7 +1353,7 @@ export function PluginDetailPanel(props: {
       )}
 
       {/* Content */}
-      <ScrollArea className="flex-1">
+      <ScrollArea className="min-h-0 flex-1">
         <div className="p-4 space-y-4">
           {/* Manifest info */}
           {manifest && (
@@ -1467,10 +1514,10 @@ export function PluginDetailPanel(props: {
                 <span className="font-mono">scope</span> 和{" "}
                 <span className="font-mono">fallback</span>。默认 remote MCP 会带上{" "}
                 <span className="font-mono">yst_id_token</span>、{" "}
-                <span className="font-mono">sap_id</span>、{" "}
-                <span className="font-mono">name</span>；若不需要，可设{" "}
-                <span className="font-mono">injectUserHeaders: false</span>。Fallback 只会在同时声明{" "}
-                <span className="font-mono">safeToRetry: true</span> 时启用。
+                <span className="font-mono">sap_id</span>、 <span className="font-mono">name</span>
+                ；若不需要，可设 <span className="font-mono">injectUserHeaders: false</span>
+                。Fallback 只会在同时声明 <span className="font-mono">safeToRetry: true</span>{" "}
+                时启用。
               </div>
               <div className="space-y-2">
                 {(detail.mcpServerDetails.length > 0
@@ -1504,7 +1551,9 @@ export function PluginDetailPanel(props: {
                     <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
                       <span>用户 Header：{server.injectUserHeaders ? "默认注入" : "不注入"}</span>
                       <span>优先级：{server.priority}（插件最高 100）</span>
-                      <span>作用域：{server.scope === "plugin-active" ? "插件激活优先" : "安装后常驻"}</span>
+                      <span>
+                        作用域：{server.scope === "plugin-active" ? "插件激活优先" : "安装后常驻"}
+                      </span>
                       <span>
                         Fallback：
                         {server.fallbackEnabled
@@ -1521,7 +1570,9 @@ export function PluginDetailPanel(props: {
           )}
 
           {/* Loading state */}
-          {!hideComponentDetails && !detail && <p className="text-xs text-muted-foreground">加载中...</p>}
+          {!hideComponentDetails && !detail && (
+            <p className="text-xs text-muted-foreground">加载中...</p>
+          )}
 
           {/* Plugin path */}
           {!hideComponentDetails && (

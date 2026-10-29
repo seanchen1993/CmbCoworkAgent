@@ -30,6 +30,9 @@ function copyResources(): { name: string; closeBundle: () => Promise<void> } {
       const destSkills = resolve("out/skills")
       mirrorRequiredDirectorySync(srcSkills, destSkills)
       mirrorRequiredDirectorySync(resolve("resources/mods"), resolve("out/resources/mods"))
+      mirrorRequiredDirectorySync(
+        resolve("resources/native-compositions"), resolve("out/resources/native-compositions")
+      )
       await mirrorBundledModExamples(resolve("."), resolve("out/resources/bundled-mods"))
       mirrorRequiredDirectorySync(
         resolve("examples/autobiz-stage-checks"),

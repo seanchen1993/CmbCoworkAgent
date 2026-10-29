@@ -2,6 +2,7 @@ import { parentPort, workerData } from "node:worker_threads"
 import { isAbsolute } from "node:path"
 import { analyzeAuthoringPreview } from "./authoring-preflight"
 import { authoringCompileDiagnostics } from "./authoring-compile-diagnostics"
+import { authoringStructureCode } from "./authoring-structure-diagnostics"
 
 /** Fixed application entry, never author-supplied Worker code or a user compiler plugin. */
 async function main() {
@@ -14,7 +15,12 @@ async function main() {
   parentPort.postMessage({ ok: true, text })
 }
 void main().catch((error) => {
-  parentPort?.postMessage({ ok: false, diagnostics:
-    typeof workerData?.directory === "string"
-      ? authoringCompileDiagnostics(error, workerData.directory) : [] })
+  parentPort?.postMessage({
+    ok: false,
+    structureCode: error instanceof Error ? authoringStructureCode(error.message) : undefined,
+    diagnostics:
+      typeof workerData?.directory === "string"
+        ? authoringCompileDiagnostics(error, workerData.directory)
+        : []
+  })
 })

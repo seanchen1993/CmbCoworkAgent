@@ -81,6 +81,8 @@ describe("native start-use discovery IPC", () => {
     const f = fixture()
     expect(() => f.call({ ...f.input, expectedWorkspace: "c:/other" })).toThrow("SCOPE_CHANGED")
     expect(() => f.call({ ...f.input, execute: true })).toThrow("INPUT_INVALID")
+    expect(() => f.call({ ...f.input, kind: "host-project" })).toThrow("INPUT_INVALID")
+    expect(() => f.call({ ...f.input, destination: "plugin-project" })).toThrow("INPUT_INVALID")
     expect(() =>
       f.call({ ...f.input, expected: { ...f.input.expected, secret: "private" } })
     ).toThrow("INPUT_INVALID")

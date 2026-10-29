@@ -212,7 +212,7 @@ function TrialContents(
         )}
         {props.onOpenDelivery && (
           <button type="button" className={button} onClick={props.onOpenDelivery}>
-            查看保存为新插件入口
+            去保存插件
           </button>
         )}
       </div>
@@ -341,6 +341,15 @@ function TrialContents(
             </details>
           </section>
           {trial.observation && (
+            <TrialHumanGates
+              key={JSON.stringify([scope.trialId, scope.expectedVersion])}
+              scope={scope}
+              api={api}
+              act={act}
+              busy={busy}
+            />
+          )}
+          {trial.observation && (
             <TrialObservation key={trial.id} trial={trial} creatorThreadId={threadId} />
           )}
           {api.recovery &&
@@ -356,15 +365,6 @@ function TrialContents(
                 onChanged={() => act(() => window.api.mods.development.status({ threadId }))}
               />
             )}
-          {trial.observation && (
-            <TrialHumanGates
-              key={JSON.stringify([scope.trialId, scope.expectedVersion])}
-              scope={scope}
-              api={api}
-              act={act}
-              busy={busy}
-            />
-          )}
           <TrialFeedback
             key={trial.id}
             trial={trial}
@@ -653,7 +653,7 @@ function TrialObservation({
   const { selected, mode } = businessCreatorTrialSessionView(trial, selectedThread)
   return (
     <section aria-label="原流程运行记录" className="min-w-0 space-y-3 rounded border p-3">
-      <h3 className="font-medium">整轮试用的原流程运行记录</h3>
+      <h3 className="font-medium">试用结果与运行记录</h3>
       {trial.journey ? (
         <CreatorTrialJourneyCard
           threadId={creatorThreadId}
@@ -663,8 +663,8 @@ function TrialObservation({
       ) : (
         <p className="rounded-lg bg-muted/40 p-3 text-sm" role="status">
           {trial.phase === "completed"
-            ? "原运行已结束；请核对下方原检查点与产物。这里尚未提供完整的逐阶段验收凭据，不能据此判定整轮业务通过。"
-            : "当前结果以原流程检查记录为准。各阶段会话仅是本轮试用的执行明细。"}
+            ? "运行已结束，验收记录尚不完整。请核对下方检查点和产物。"
+            : "请查看原流程检查结果。"}
         </p>
       )}
       <details className="rounded-lg border p-3">
@@ -698,10 +698,11 @@ function TrialObservation({
             {observation.reason}
           </p>
         )}
+        <p className="mt-3 text-xs text-muted-foreground">
+          节点信息来自最近一次原流程决策，不代表下一步正在执行的位置，也不能代替检查点凭据。
+          会话结束不等于业务阶段通过，请核对原产物和检查结果。
+        </p>
       </details>
-      <p className="text-xs text-muted-foreground">
-        节点信息来自最近一次原流程决策，不代表下一步正在执行的位置，也不能代替检查点凭据。会话结束不等于业务阶段通过；请核对原产物和检查结果。
-      </p>
       {!!observation.sessions?.length && (
         <>
           <details className="rounded-lg border p-3">

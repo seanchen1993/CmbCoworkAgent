@@ -3,8 +3,10 @@ import { expect, it, vi } from "vitest"
 import type { IpcMain, IpcMainInvokeEvent } from "electron"
 import { registerPromptComposerHandlers } from "./mods-prompt"
 import { FunctionPromptBroker, type FunctionPromptScope } from "../mods/v2/prompt-broker"
+import { ModFunctionError, MODS_COMPOSITION_REVIEW_REQUIRED } from "../../shared/mods/v2/contracts"
+import { submitAfterPromptEdit } from "../../renderer/src/lib/prompt-edit-submission"
 
-function fixture() {
+function fixture(editing?: Parameters<typeof registerPromptComposerHandlers>[3]) {
   const broker = new FunctionPromptBroker()
   const handlers = new Map<string, (event: IpcMainInvokeEvent, input: unknown) => unknown>()
   let writable = true
@@ -15,7 +17,8 @@ function fixture() {
   registerPromptComposerHandlers(
     { handle: (name, fn) => handlers.set(name, fn) } as unknown as IpcMain,
     broker,
-    scope
+    scope,
+    editing
   )
   const sender = (id: number) => {
     const events = new EventEmitter()
@@ -56,6 +59,53 @@ function fixture() {
     }
   }
 }
+
+it("preserves the unsent draft and blocks model/storage entry with an actionable composition failure", async () => {
+  const support = vi.fn(async () => {
+    throw new ModFunctionError("CLAW_CAPABILITY_CHANGED", "PRIVATE_SOURCE")
+  })
+  const run = vi.fn()
+  const f = fixture({ support, run })
+  f.call("attach", { threadId: "t", owner: "one" })
+  const draft = { text: "请继续我的普通聊天", revision: 3 }
+  const submit = vi.fn()
+  await expect(
+    submitAfterPromptEdit("revoked-composition", {
+      read: () => draft,
+      flush: async () => {
+        await f.call("edit-support", { threadId: "t", owner: "one" })
+        return draft
+      },
+      submit
+    })
+  ).rejects.toThrow(MODS_COMPOSITION_REVIEW_REQUIRED)
+  expect(draft).toEqual({ text: "请继续我的普通聊天", revision: 3 })
+  expect(submit).not.toHaveBeenCalled()
+  expect(run).not.toHaveBeenCalled()
+  const error = await Promise.resolve(
+    f.call("edit-support", { threadId: "t", owner: "one" })
+  ).catch((error) => error)
+  if (!(error instanceof Error)) throw Error("Expected a native composition review error")
+  expect(error.message).toContain("输入已保留")
+  expect(error.message).not.toContain("PRIVATE_SOURCE")
+  f.broker.close()
+})
+
+it.each([
+  new Error("CLAW_CAPABILITY_CHANGED"),
+  new ModFunctionError("MODS_SCOPE_CHANGED", "original failure"),
+  { code: "CLAW_CAPABILITY_CHANGED", message: "spoofed failure" }
+])("does not reinterpret an unrelated or spoofed support failure", async (original) => {
+  const f = fixture({
+    support: vi.fn(async () => {
+      throw original
+    }),
+    run: vi.fn()
+  })
+  f.call("attach", { threadId: "t", owner: "one" })
+  await expect(f.call("edit-support", { threadId: "t", owner: "one" })).rejects.toBe(original)
+  f.broker.close()
+})
 
 it("releases a registered composer after the thread loses writable scope", async () => {
   const f = fixture()

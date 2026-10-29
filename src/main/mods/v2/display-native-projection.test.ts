@@ -106,6 +106,24 @@ it("publishes protected passive native text with no owner or guest and reuses va
   expect(f.publish.mock.calls.length).toBeGreaterThan(count)
 })
 
+it("projects native duration decorations without owned mount/unmount churn, preserving protection", async () => {
+  const f = fixture()
+  const read = (durationMs = 1200) => f.manager.siteRead(f.root, "thread", "TurnDuration",
+    { word: "PRIVATE duration", durationMs }, "message:duration")
+  const first = await read()
+  expect(first.state).toBe("projected")
+  expect(JSON.stringify(first)).toContain("SAFE duration")
+  expect(JSON.stringify(first)).not.toContain("PRIVATE")
+  expect(JSON.stringify(first)).not.toMatch(/"(?:owner|generation|handle|press)":/)
+  const published = f.publish.mock.calls.length
+  expect(await read()).toEqual(first)
+  expect(f.publish).toHaveBeenCalledTimes(published)
+  expect(await read(2400)).not.toEqual(first)
+  expect(f.load).not.toHaveBeenCalled()
+  f.protect(false)
+  expect(await read()).toEqual({ state: "inactive", reason: "mods-disabled" })
+})
+
 it("bounds same-key waiting reads and releases their slots only when publication settles", async () => {
   const f = fixture()
   let release!: () => void

@@ -121,8 +121,12 @@ function fixture(name: string, withMods: boolean) {
   )
   const service = new PluginStartUseService({
     plugins: () => installedPlugins,
+    enable: async (_pluginId, guard) => {
+      guard()
+      plugin.enabled = true
+    },
     chatEntries: async (current, input, guard) => {
-      const skills = await listPluginSkills([
+      const skills = await listPluginSkills(current.enabled ? [
         {
           sourceDir: join(root, "skills"),
           pluginId: current.id,
@@ -130,7 +134,7 @@ function fixture(name: string, withMods: boolean) {
           pluginRoot: root,
           isProjectModePlugin: false
         }
-      ])
+      ] : [])
       const policy = await readNativeSkillUsagePolicy([plugin], () => ({
         usage: "chat",
         assertCurrent: guard
@@ -194,14 +198,15 @@ it.each(["document-review", "warehouse-quality"])(
     const approved = vi.spyOn(f.manager, "approve")
     const loadsBeforeDisabled = f.loads()
     const disabled = await f.service.prepare(pinned, () => {})
-    expect(disabled).toEqual({
+    expect(disabled).toMatchObject({
       identity: after.identity,
       kind: "chat",
       canOpen: false,
       activationRequired: true,
-      issues: []
+      issues: [],
+      chat: { functionMod: { pluginId: "installed", name, state: "disabled" }, skills: [] }
     })
-    expect(disabled.chat).toBeUndefined()
+    expect(disabled.chat?.functionMod?.digest).toBe(after.chat!.functionMod!.digest)
     expect(approved).not.toHaveBeenCalled()
     expect(f.loads()).toBe(loadsBeforeDisabled)
     expect(f.plugin.enabled).toBe(false)
@@ -228,3 +233,41 @@ it.each(["release-notes", "dataset-contract"])(
     expect(f.loads()).toBe(0)
   }
 )
+
+it("reviews a disabled business source before enabling and preserves native source/workspace grant fences", async () => {
+  const f = fixture("quality-review", true)
+  f.plugin.enabled = false
+  const approve = vi.spyOn(f.manager, "approve")
+  const before = await f.service.prepare(f.input, () => {})
+  expect(before).toMatchObject({
+    activationRequired: true,
+    canOpen: false,
+    chat: { functionMod: { state: "disabled" }, skills: [] }
+  })
+  expect(f.plugin.enabled).toBe(false)
+  expect(f.loads()).toBe(0)
+  expect(approve).not.toHaveBeenCalled()
+  const pinned = { ...f.input, expected: before.identity }
+  const enabled = await f.service.enable(pinned, () => {})
+  expect(enabled.chat?.functionMod?.state).toBe("needs-approval")
+  expect(f.loads()).toBe(0)
+  expect(await f.manager.commands(f.root, "chat")).toEqual([])
+  await f.manager.approve(f.root, "installed", enabled.chat!.functionMod!.digest!, () => {})
+  expect((await f.service.prepare(pinned, () => {})).chat?.functionMod?.state).toBe("ready")
+  expect((await f.manager.commands(f.root, "chat")).map((command) => command.command)).toContain(
+    "quality-review-check"
+  )
+  expect(approve).toHaveBeenCalledOnce()
+  const otherWorkspace = join(f.root, "another-workspace")
+  const elsewhere = await f.service.prepare(
+    { ...pinned, expectedWorkspace: otherWorkspace },
+    () => {}
+  )
+  expect(elsewhere.chat?.functionMod?.state).toBe("needs-approval")
+  expect(await f.manager.commands(otherWorkspace, "another-chat")).toEqual([])
+  writeFileSync(join(f.root, "mods/register.ts"), "export function register(on) {}")
+  await expect(f.service.prepare(pinned, () => {})).rejects.toThrow("CONTENT_CHANGED")
+  const updated = await f.service.prepare(f.input, () => {})
+  expect(updated.chat?.functionMod?.state).toBe("needs-approval")
+  expect(approve).toHaveBeenCalledOnce()
+})

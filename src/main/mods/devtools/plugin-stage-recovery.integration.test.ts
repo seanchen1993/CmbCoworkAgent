@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process"
+import { createHash } from "node:crypto"
+import AdmZip from "adm-zip"
 import { existsSync } from "node:fs"
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -17,6 +19,7 @@ import { startOwnedHookCommand } from "../../hooks/owned-command"
 
 const execute = promisify(execFile)
 const original = resolve(process.env.AUTOBIZ_BUSINESS_SOURCE ?? "C:/ai/autobiz_kanban")
+const originalCommit = "e3ff3e77a8f836b3fdf374c77578fc315d6137c1"
 const cleanup: Array<() => Promise<void> | void> = []
 afterEach(async () => {
   for (const fn of cleanup.splice(0).reverse()) await fn()
@@ -27,9 +30,60 @@ async function fixture(sandbox = false) {
   cleanup.push(() => rm(root, { recursive: true, force: true }))
   const packageRoot = join(root, "package")
   await mkdir(packageRoot)
-  // Read only the explicitly selected original. Original business code stays byte-identical.
-  const originalSnapshot = await snapshotDerivationSource(original)
-  await writeDerivationFiles(packageRoot, originalSnapshot.files)
+  // Export the original rollback implementation's exact Git objects. A developer checkout can
+  // contain prior validation output and modified board configuration; neither is fixture input.
+  const archived = await execute(
+    "git",
+    [
+      "--no-replace-objects",
+      "-C",
+      original,
+      "archive",
+      "--format=zip",
+      originalCommit,
+      "--",
+      "plugin.json",
+      ".mcp.json",
+      "hooks",
+      "board_core",
+      "skills",
+      "agents",
+      "scripts",
+      "inspect_state.py",
+      "read_state_json.py"
+    ],
+    { encoding: "buffer", maxBuffer: 32 * 1024 * 1024, timeout: 10_000, windowsHide: true }
+  ).catch((cause) => {
+    throw new Error(`AUTOBIZ_STAGE_RECOVERY_PINNED_COMMIT_UNAVAILABLE: ${originalCommit}`, {
+      cause
+    })
+  })
+  const originalFiles = new AdmZip(archived.stdout)
+    .getEntries()
+    .filter((entry) => !entry.isDirectory)
+    .map((entry) => {
+      const bytes = entry.getData()
+      return {
+        path: entry.entryName,
+        bytes,
+        mode: 0o644,
+        digest: createHash("sha256").update(bytes).digest("hex")
+      }
+    })
+  expect(originalFiles.some((file) => file.path.startsWith("output/"))).toBe(false)
+  for (const path of [
+    ".mcp.json",
+    "hooks/rollback_stage.py",
+    "hooks/stage_gate.py",
+    "hooks/hooks.json",
+    "board_core/board_config.json",
+    "board_core/state_store.py"
+  ])
+    expect(
+      originalFiles.some((file) => file.path === path),
+      path
+    ).toBe(true)
+  await writeDerivationFiles(packageRoot, originalFiles)
   await mkdir(join(packageRoot, "mods/stage-recovery"), { recursive: true })
   await cp(
     resolve("resources/mods/autobiz-stage-recovery/adapter.py"),
@@ -303,12 +357,15 @@ it.skipIf(!existsSync(original))(
     await expect(other.service.prepare(other.request)).rejects.toThrow(
       "EXTERNAL_REPOSITORY_REBIND_REQUIRED"
     )
-  await writeFile(join(other.workspace, "config.json"), JSON.stringify({
-    localRepoPath: "../../../../../outside-original-repository"
-  }))
-  await expect(other.service.prepare(other.request)).rejects.toThrow(
-    "EXTERNAL_REPOSITORY_REBIND_REQUIRED"
-  )
+    await writeFile(
+      join(other.workspace, "config.json"),
+      JSON.stringify({
+        localRepoPath: "../../../../../outside-original-repository"
+      })
+    )
+    await expect(other.service.prepare(other.request)).rejects.toThrow(
+      "EXTERNAL_REPOSITORY_REBIND_REQUIRED"
+    )
   },
   45_000
 )

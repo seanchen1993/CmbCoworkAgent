@@ -124,10 +124,15 @@ async function main() {
     await page.getByRole("button", { name: "自定义设置", exact: true }).click()
     const skip = page.getByRole("button", { name: "跳过导览", exact: true })
     if (await skip.isVisible()) await skip.click()
-    await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
+    await page
+      .getByRole("navigation")
+      .filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) })
+      .getByRole("button", { name: "插件", exact: true })
+      .click()
     if (await skip.isVisible()) await skip.click()
     await page.getByRole("button", { name: "我已添加", exact: true }).click()
     const mods = page.locator("[data-mods-settings]")
+    await mods.locator("[data-plugin-import-controls] > summary").click()
     for (const name of names) {
       await until(
         () => mods.getByLabel("选择插件 ZIP 文件", { exact: true }).isEnabled(),
@@ -143,6 +148,7 @@ async function main() {
         `install ${name}`
       )
     }
+    await mods.locator("[data-mods-more-settings] > summary").click()
     await mods.getByRole("checkbox", { name: "允许使用灵件", exact: true }).click()
     await until(
       () => page!.evaluate(() => window.api.mods.globalEnabled()),
@@ -156,8 +162,12 @@ async function main() {
       "project enable"
     )
     for (const name of names) {
+      await mods
+        .getByRole("article", { name, exact: true })
+        .getByRole("button", { name: "管理", exact: true })
+        .click()
       const card = mods.locator(`[data-function-mod-id="${name}"]`)
-      await card.getByText("查看完整能力与版本", { exact: true }).click()
+      await card.getByText("权限与版本详情", { exact: true }).click()
       await card.getByRole("button", { name: "授权以上能力", exact: true }).click()
       await until(
         () => page!.evaluate((id) => window.api.mods.status(id), threadId),

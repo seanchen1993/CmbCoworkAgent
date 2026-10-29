@@ -13,7 +13,7 @@ export function ModsUsageSettingsEntry({ disabled = false }: { disabled?: boolea
       onClick={() => useAppStore.getState().setShowCustomizeView(true, "mods", "installed")}
     >
       <Settings2 className="size-3.5" />
-      灵件与使用设置
+      插件
     </Button>
   )
 }

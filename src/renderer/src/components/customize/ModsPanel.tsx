@@ -6,6 +6,7 @@ import {
 } from "@/lib/simple-authoring-intent"
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import type { ModWorkspaceStatus } from "../../../../shared/mods/types"
+import type { FunctionPluginStatus } from "../../../../shared/mods/v2/commands"
 import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
@@ -14,8 +15,13 @@ import { goToConfigurationThread, useConfigurationDraft } from "@/lib/configurat
 import { openDerivedProject } from "@/lib/derived-project-intent"
 import { openPluginSettings } from "@/lib/plugin-settings-intent"
 import { useFeatureGate } from "@/lib/feature-gates"
-import { installedModUseState } from "@/lib/installed-mod-use-state"
+import { installedModNextAction, installedModUseState } from "@/lib/installed-mod-use-state"
 import { installedProjectPluginIdentity } from "@/lib/native-project-binding"
+import {
+  classifyInstalledPluginProjectEntry,
+  readInstalledPluginProjectEntry
+} from "@/lib/installed-plugin-project-entry"
+import type { LocalProjectTemplate } from "../../../../shared/project-runtime/platform-api"
 import type { ClawView } from "../../../../shared/mods/claw"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import type { PluginInstallResult } from "../../../../shared/plugin-install"
@@ -23,12 +29,12 @@ import { ModCreator } from "./ModCreator"
 import { FunctionCompletionPolicy } from "./FunctionCompletionPolicy"
 import { FunctionCompatibilityCheck } from "./FunctionCompatibilityCheck"
 import { FunctionPluginApproval } from "./FunctionPluginApproval"
-import { ModsGuide, ModsSetupProgress } from "./ModsGuide"
+import { ModsGuide } from "./ModsGuide"
 import { ModsImportGuide } from "./ModsImportGuide"
 import { SparksDocumentationLink } from "./SparksDocumentationLink"
 import { OfficialSparksExamples } from "./OfficialSparksExamples"
 import { SparksOperationError } from "./SparksOperationError"
-import { ModsUsageSetup } from "./ModsUsageSetup"
+import { InstalledPluginStartUse } from "./InstalledPluginStartUse"
 import { RuntimeSessions } from "./RuntimeSessions"
 import { SnapshotMaintenance } from "./SnapshotMaintenance"
 import { readReuseSelection, subscribeReuseSelection } from "./development-reuse-receipts"
@@ -41,8 +47,10 @@ import {
   DialogFooter
 } from "@/components/ui/dialog"
 
-const NativeNodeComposer = lazy(() =>
-  import("./NativeNodeComposer").then((module) => ({ default: module.NativeNodeComposer }))
+const InstalledPluginFlowDefinition = lazy(() =>
+  import("./InstalledPluginFlowDefinition").then((module) => ({
+    default: module.InstalledPluginFlowDefinition
+  }))
 )
 
 async function readWorkspaceStatus(threadId: string | null): Promise<ModWorkspaceStatus | null> {
@@ -67,7 +75,8 @@ export function ModsPanel({
   developmentAllowed,
   active = true,
   navigationRequest,
-  onSectionChange
+  onSectionChange,
+  onManageSources
 }: {
   threadId: string | null
   workspaceHint?: string | null
@@ -85,6 +94,7 @@ export function ModsPanel({
     practice?: SimpleAuthoringPracticeIntent
   }
   onSectionChange?: (section: "examples" | "create" | "installed") => void
+  onManageSources?: () => void
 }): React.JSX.Element {
   const [section, setSection] = useState<"examples" | "create" | "installed">("installed")
   const accountRevision = useAppStore((state) => state.accountRevision)
@@ -152,23 +162,15 @@ export function ModsPanel({
   return (
     <div className="mx-auto w-full max-w-5xl space-y-5 p-4 sm:p-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">灵件</h1>
-        <SparksDocumentationLink />
-      </div>
-      <p className="text-sm text-muted-foreground">
-        直接在创造者模式描述需求，也可以浏览示例或管理已有灵件。
-      </p>
-      <div className="rounded-lg bg-muted/40 px-4 py-3 text-xs text-muted-foreground">
-        <p>
-          {threadId
-            ? "添加后核对这段聊天的权限和使用设置；授权与应用状态分别显示。"
-            : "可以先添加灵件；使用时需要打开聊天。"}
-        </p>
-        <p className="mt-1 break-all">
-          {workspaceHint
-            ? `当前项目：${workspaceHint}`
-            : "尚未选择项目目录。使用前请为聊天选择项目。"}
-        </p>
+        <h1 className="text-xl font-semibold">插件</h1>
+        <div className="flex items-center gap-2">
+          {onManageSources && (
+            <Button size="sm" variant="ghost" onClick={onManageSources}>
+              导入与发布
+            </Button>
+          )}
+          <SparksDocumentationLink />
+        </div>
       </div>
       <nav aria-label="灵件工作区" className="flex flex-wrap gap-1 border-b pb-3">
         {(
@@ -298,13 +300,13 @@ export function ModsPanel({
         </div>
       </div>
       <div hidden={section !== "installed"} inert={section !== "installed"}>
-        <p className="mb-3 text-xs leading-5 text-muted-foreground">
-          这里列出已添加的插件。未应用常用搭配时按已授权的默认设置使用；有搭配时以所选聊天的实际应用版本为准。
-          插件启停属于应用管理，会影响使用它的其他聊天。
-        </p>
         {settingsVisited && (
           <ModsSettings
-            key={JSON.stringify([accountRevision, threadId, normalizeWorkspacePathKey(workspaceHint)])}
+            key={JSON.stringify([
+              accountRevision,
+              threadId,
+              normalizeWorkspacePathKey(workspaceHint)
+            ])}
             threadId={threadId}
             workspaceHint={workspaceHint}
             active={active && section === "installed"}
@@ -353,8 +355,11 @@ export function ModsSettings({
 }): React.JSX.Element {
   const projectMode = useFeatureGate(FEATURE_GATES.projectMode)
   const account = useAppStore((state) => state.accountRevision)
-  const projectScope = JSON.stringify([account, threadId, normalizeWorkspacePathKey(workspaceHint)])
-  const [projectSelection, setProjectSelection] = useState<{ scope: string; pluginId: string | null }>({
+  const projectScope = JSON.stringify([account])
+  const [projectSelection, setProjectSelection] = useState<{
+    scope: string
+    pluginId: string | null
+  }>({
     scope: projectScope,
     pluginId: null
   })
@@ -367,7 +372,14 @@ export function ModsSettings({
   const [installed, setInstalled] = useState<Awaited<ReturnType<typeof window.api.plugins.list>>>(
     []
   )
+  const [installedAccount, setInstalledAccount] = useState(account)
+  const [projectEntries, setProjectEntries] = useState<{
+    account: number
+    templates?: LocalProjectTemplate[]
+    failed?: boolean
+  }>({ account })
   const [deleteTarget, setDeleteTarget] = useState<{ pluginId: string; name: string } | null>(null)
+  const [managedPlugin, setManagedPlugin] = useState<string | null>(null)
   useEffect(() => {
     if (!active) setDeleteTarget(null)
   }, [active])
@@ -379,36 +391,65 @@ export function ModsSettings({
   const [readFailed, setReadFailed] = useState(false)
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
-  useConfigurationDraft({ threadId, workspace: workspaceHint ?? null }, false, busy)
+  const [activeUsePlugin, setActiveUsePlugin] = useState<string | null>(null)
+  const blocked = busy || activeUsePlugin !== null
+  useConfigurationDraft({ threadId, workspace: workspaceHint ?? null }, false, blocked)
   const alive = useRef(false)
   const running = useRef(false)
   const readVersion = useRef(0)
-  const installedMods = installed.filter(
-    (plugin) =>
-      (plugin.modCount ?? 0) > 0 ||
-      (plugin.businessModCount ?? 0) > 0 ||
-      (plugin.businessExtensionCount ?? 0) > 0 ||
-      status?.functionMods?.some((mod) => mod.pluginId === plugin.id) ||
-      status?.mods.some((mod) => mod.pluginId === plugin.id)
-  )
+  const navigationScope = useRef({ account, active })
+  navigationScope.current = { account, active }
   const installationNotice = (result: PluginInstallResult) => {
     const name = result.pluginName ?? "插件"
     return result.kind === "plugin"
-      ? `已安装 ${name}。${result.enabled ? "已启用，可继续使用原有功能。" : "尚未启用，请在下方点击“启用插件”。"}原有技能和检查规则已保留。`
-      : `已安装 ${name}。请在下方核对灵件权限；安装不会自动开始任务。`
+      ? `已添加 ${name}，从下方卡片启用插件或继续使用；项目插件可直接新建项目，聊天功能需选择聊天和目录。`
+      : `已添加 ${name}，点击下方“开始使用”核对权限与使用方式。`
   }
   const refresh = useCallback(async () => {
     const version = ++readVersion.current
+    setProjectEntries({ account })
     try {
+      const pluginsRead = window.api.plugins.list()
+      void pluginsRead
+        .then((plugins) =>
+          projectMode.enabled &&
+          !(threadId && workspaceHint) &&
+          plugins.some((plugin) => plugin.enabled)
+            ? window.api.harnessBoard.localProjects.templates()
+            : []
+        )
+        .then(
+          (templates) => {
+            if (
+              alive.current &&
+              version === readVersion.current &&
+              useAppStore.getState().accountRevision === account
+            )
+              setProjectEntries({ account, templates })
+          },
+          () => {
+            if (
+              alive.current &&
+              version === readVersion.current &&
+              useAppStore.getState().accountRevision === account
+            )
+              setProjectEntries({ account, failed: true })
+          }
+        )
       const [plugins, enabled, workspace, currentUsage] = await Promise.allSettled([
-        window.api.plugins.list(),
+        pluginsRead,
         window.api.mods.globalEnabled(),
         readWorkspaceStatus(threadId),
         threadId && typeof window.api.mods.clawView === "function"
           ? window.api.mods.clawView(threadId)
           : Promise.resolve(null)
       ])
-      if (!alive.current || version !== readVersion.current) return
+      if (
+        !alive.current ||
+        version !== readVersion.current ||
+        useAppStore.getState().accountRevision !== account
+      )
+        return
       if (
         workspace.status === "fulfilled" &&
         workspace.value &&
@@ -419,7 +460,10 @@ export function ModsSettings({
         setStatus(null)
         throw Error("项目范围已变化，请等待会话同步后重新读取。")
       }
-      if (plugins.status === "fulfilled") setInstalled(plugins.value)
+      if (plugins.status === "fulfilled") {
+        setInstalled(plugins.value)
+        setInstalledAccount(account)
+      }
       if (enabled.status === "fulfilled") setGlobalEnabled(enabled.value)
       if (currentUsage.status === "fulfilled") setUsage(currentUsage.value ?? null)
       setUsageReadFailed(currentUsage.status === "rejected")
@@ -439,21 +483,24 @@ export function ModsSettings({
         throw cause
       }
     }
-  }, [threadId, workspaceHint])
+  }, [account, threadId, workspaceHint, projectMode.enabled])
   useEffect(() => {
     alive.current = true
-    const update = () => {
-      if (running.current) return
+    const read = () => {
       void refresh().catch((cause) => {
         if (alive.current)
           setError(cause instanceof Error ? cause.message : "无法读取 灵件状态，请重试。")
       })
     }
-    update()
+    const update = () => {
+      if (!running.current) read()
+    }
+    read()
     const stop = window.api.mods.onConfigurationChanged(update)
     window.addEventListener("mods:configuration-changed", update)
     return () => {
       alive.current = false
+      ++readVersion.current
       stop()
       window.removeEventListener("mods:configuration-changed", update)
     }
@@ -469,281 +516,444 @@ export function ModsSettings({
       await action()
       // Global installs/toggles may finish after switching projects; notify the current view too.
       if (notify) window.dispatchEvent(new Event("mods:configuration-changed"))
-      if (!alive.current) return
+      if (!alive.current || useAppStore.getState().accountRevision !== account) return
       await refresh()
     } catch (error) {
-      if (alive.current) setError(error instanceof Error ? error.message : "操作失败")
+      if (alive.current && useAppStore.getState().accountRevision === account)
+        setError(error instanceof Error ? error.message : "操作失败")
     } finally {
       running.current = false
       if (alive.current) setBusy(false)
     }
   }
+  const functionManagement = (mod: FunctionPluginStatus) => {
+    if (!status || status.recovery || !threadId) return null
+    return (
+      <div className="space-y-3" data-function-mod-id={mod.name}>
+        <p role="status" className="text-xs text-muted-foreground" data-plugin-use-state>
+          {installedModUseState(
+            mod,
+            status.workspace,
+            globalEnabled && status.enabled,
+            usage,
+            usageReadFailed
+          )}
+        </p>
+        <FunctionPluginApproval
+          mod={mod}
+          threadId={threadId}
+          workspace={status.workspace}
+          busy={blocked}
+          onApprove={() =>
+            void run(() =>
+              window.api.mods.approveFunction(threadId, mod.pluginId, mod.digest!, status.workspace)
+            )
+          }
+        />
+        {mod.state === "ready" && (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={blocked}
+            onClick={() =>
+              void run(() => window.api.mods.revokeFunction(threadId, mod.name, status.workspace))
+            }
+          >
+            撤销权限
+          </Button>
+        )}
+        {mod.digest && mod.state !== "invalid" && (
+          <FunctionCompatibilityCheck
+            expectedWorkspace={status.workspace}
+            threadId={threadId}
+            pluginId={mod.pluginId}
+            digest={mod.digest}
+            disabled={blocked}
+          />
+        )}
+        <FunctionCompletionPolicy
+          expectedWorkspace={status.workspace}
+          threadId={threadId}
+          plugin={mod.name}
+          disabled={blocked || mod.state !== "ready"}
+        />
+      </div>
+    )
+  }
   return (
     <section className="w-full space-y-5 text-sm" data-mods-settings aria-label="灵件设置">
       <div className="space-y-1">
         <h2 className="font-semibold">我已添加</h2>
-        <p className="text-sm text-muted-foreground">
-          查看已添加的功能及所选聊天的实际使用状态。插件启停会影响使用它的其他聊天。
-        </p>
-      </div>
-      <ModsUsageSetup threadId={threadId} workspaceHint={workspaceHint} active={active} />
-      {installedMods.length > 0 && (
-        <ModsSetupProgress
-          installed={installedMods.length > 0}
-          globalLoaded={globalLoaded}
-          readFailed={readFailed}
-          globalEnabled={globalEnabled}
-          workspace={status}
-          authorized={Boolean(
-            status?.mods.some((mod) => mod.state === "ready") ||
-            status?.functionMods?.some((mod) => mod.state === "ready")
-          )}
-        />
-      )}
-      <div className="space-y-3">
-        <div>
-          <h3 className="font-semibold">添加能力</h3>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            已有插件？上传 ZIP 或选择插件文件夹即可安装。同名、同作者的插件会更新已有版本。
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <input
-            ref={uploadInput}
-            type="file"
-            accept=".zip"
-            aria-label="选择插件 ZIP 文件"
-            className="hidden"
-            disabled={busy}
-            onChange={(event) => {
-              const file = event.target.files?.[0]
-              event.target.value = ""
-              if (!file) return
-              void run(async () => {
-                if (!file.name.toLowerCase().endsWith(".zip")) throw new Error("仅支持 .zip 文件")
-                const result = await window.api.plugins.install(
-                  await file.arrayBuffer(),
-                  file.name,
-                  "local",
-                  undefined,
-                  "capabilities"
-                )
-                if (!result.success) throw new Error(result.error || "安装失败")
-                useAppStore.getState().bumpPluginVersion()
-                setNotice(installationNotice(result))
-              })
-            }}
-          />
-          <Button size="sm" disabled={busy} onClick={() => uploadInput.current?.click()}>
-            上传插件（ZIP）
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            onClick={() =>
-              void run(async () => {
-                const result = await window.api.plugins.installFromDir("capabilities")
-                if (!result.success) {
-                  if (result.error === "已取消") return
-                  throw new Error(result.error || "安装失败")
-                }
-                useAppStore.getState().bumpPluginVersion()
-                setNotice(installationNotice(result))
-              })
-            }
-          >
-            从文件夹安装
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            onClick={() =>
-              void run(async () => {
-                await window.api.mods.installExamples()
-                useAppStore.getState().bumpPluginVersion()
-                setNotice(
-                  "示范灵件 已安装。接下来开启应用和项目开关，在插件卡片完成授权；使用指南中有可复制的体验命令。"
-                )
-              })
-            }
-          >
-            安装示范灵件
-          </Button>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          请选择完整插件文件夹或 ZIP，单个脚本文件无法安装。
-        </p>
-        <ModsImportGuide />
-        {notice && (
-          <p role="status" aria-label="灵件操作结果" className="text-sm text-muted-foreground">
-            {notice}
-          </p>
-        )}
+        <p className="text-sm text-muted-foreground">从插件卡片继续使用或完成设置。</p>
       </div>
       <section
         aria-label="已安装插件"
         data-installed-mods
         className="space-y-3 rounded-xl border p-4"
       >
-        <h3 className="font-medium">已安装插件</h3>
-        <p className="text-xs text-muted-foreground">
-          保留插件原有功能，无需改写成灵件。启用后，自动检查仍按原插件规则运行。
-        </p>
-        {installed.map((plugin) => (
-          <article
-            key={plugin.id}
-            aria-label={plugin.name}
-            data-installed-mod-id={plugin.id}
-            className="space-y-3 rounded-lg bg-muted/30 p-3"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h4 className="break-all font-medium">{plugin.name}</h4>
-              <span className="text-xs text-muted-foreground">
-                {plugin.enabled ? "已启用" : "尚未启用"}
-              </span>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {plugin.skillCount} 项技能 · {plugin.hookCount ?? 0} 项自动检查
-              {` · ${plugin.mcpServerCount} 个工具连接`}
-              {(plugin.modCount ?? 0) > 0 ? ` · ${plugin.modCount} 个灵件模块` : ""}
-              {(plugin.businessModCount ?? 0) > 0
-                ? ` · ${plugin.businessModCount} 个可组合业务 Mods`
-                : ""}
-              {(plugin.businessExtensionCount ?? 0) > 0
-                ? ` · ${plugin.businessExtensionCount} 个可组合常驻扩展`
-                : ""}
-              {plugin.hasProjectMode ? " · 支持项目模式" : ""}
-            </p>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={busy}
-                onClick={() => openPluginSettings(plugin.id)}
-              >
-                设置使用
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={busy}
-                onClick={() =>
-                  void run(async () => {
-                    const result = await window.api.plugins.setEnabled(plugin.id, !plugin.enabled)
-                    if (result?.success === false)
-                      throw new Error(result.error || "启用状态未能保存，请重试。")
-                    useAppStore.getState().bumpPluginVersion()
-                  })
-                }
-              >
-                {plugin.enabled ? "停用插件" : "启用插件"}
-              </Button>
-              {plugin.hasProjectMode && (
+        {(installedAccount === account ? installed : []).map((plugin) => {
+          const mod = status?.functionMods?.find((item) => item.pluginId === plugin.id)
+          const action = installedModNextAction(
+            plugin.enabled,
+            mod,
+            globalEnabled && !!status?.enabled
+          )
+          const canUseHere = active && threadId && status && !status.recovery && !readFailed
+          const hasChatScope = Boolean(threadId && workspaceHint)
+          const entries = projectEntries.account === account ? projectEntries : undefined
+          const projectEntry =
+            !hasChatScope && entries?.templates
+              ? classifyInstalledPluginProjectEntry(plugin.id, [plugin], entries.templates)
+              : undefined
+          const projectCandidate =
+            plugin.hasProjectMode ||
+            entries?.templates?.some((template) => template.installedPluginId === plugin.id)
+          const entryFailed =
+            !hasChatScope &&
+            plugin.enabled &&
+            projectCandidate &&
+            projectEntry?.kind === "unavailable"
+          const projectUse = projectEntry?.kind === "host" || projectEntry?.kind === "legacy"
+          const managing = managedPlugin === plugin.id
+          return (
+            <article
+              key={plugin.id}
+              aria-label={plugin.name}
+              data-installed-mod-id={plugin.id}
+              className="space-y-3 rounded-lg bg-muted/30 p-3"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <h4 className="min-w-0 break-all font-medium">{plugin.name}</h4>
                 <Button
                   size="sm"
-                  variant="outline"
-                  disabled={busy || !threadId || !status || !!status.recovery || !active}
-                  aria-expanded={selectedProjectPlugin === plugin.id}
-                  onClick={() =>
-                    setProjectSelection({
-                      scope: projectScope,
-                      pluginId: selectedProjectPlugin === plugin.id ? null : plugin.id
-                    })
-                  }
+                  variant="ghost"
+                  disabled={blocked}
+                  aria-expanded={managing}
+                  onClick={() => setManagedPlugin(managing ? null : plugin.id)}
                 >
-                  {selectedProjectPlugin === plugin.id ? "收起项目流程" : "查看项目流程"}
+                  {managing ? "收起管理" : "管理"}
                 </Button>
-              )}
-              {plugin.hasProjectMode && (
-                <Button
-                  size="sm"
-                  disabled={busy || !plugin.enabled || !projectMode.enabled}
-                  onClick={() => openDerivedProject(plugin.id, plugin.name)}
-                >
-                  新建项目
-                </Button>
-              )}
-              {onDerive && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() => onDerive(plugin)}
-                >
-                  从此插件创建
-                </Button>
-              )}
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                onClick={() => setDeleteTarget({ pluginId: plugin.id, name: plugin.name })}
-              >
-                卸载
-              </Button>
-            </div>
-            {active && selectedProjectPlugin === plugin.id && plugin.hasProjectMode && threadId && status && !status.recovery && (
-              <Suspense fallback={<p role="status">正在读取项目流程…</p>}>
-                <NativeNodeComposer
-                  key={JSON.stringify([projectScope, installedProjectPluginIdentity(plugin)])}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {[
+                  plugin.skillCount > 0 && `${plugin.skillCount} 项技能`,
+                  (plugin.hookCount ?? 0) > 0 && `${plugin.hookCount} 项自动检查`,
+                  plugin.mcpServerCount > 0 && `${plugin.mcpServerCount} 个工具连接`,
+                  (plugin.modCount ?? 0) > 0 && `${plugin.modCount} 个灵件模块`,
+                  (plugin.businessModCount ?? 0) > 0 &&
+                    `${plugin.businessModCount} 个可组合业务 Mods`,
+                  (plugin.businessExtensionCount ?? 0) > 0 &&
+                    `${plugin.businessExtensionCount} 个常驻扩展`,
+                  (plugin.hasProjectMode || projectUse) && "支持项目模式"
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+              {action === "修复" ? (
+                <>
+                  <p role="alert" className="text-xs text-destructive">
+                    {mod?.error || "插件无法加载，请核对配置或重新安装。"}
+                  </p>
+                  <Button
+                    size="sm"
+                    disabled={blocked || !active}
+                    onClick={() => setManagedPlugin(plugin.id)}
+                  >
+                    修复
+                  </Button>
+                </>
+              ) : canUseHere && typeof plugin.version === "string" ? (
+                <InstalledPluginStartUse
                   threadId={threadId}
                   workspace={status.workspace}
                   pluginId={plugin.id}
-                  initialOpen
+                  expected={{ name: plugin.name, version: plugin.version }}
+                  actionLabel={action === "启用" ? "开始使用" : action}
+                  disabled={
+                    busy ||
+                    (activeUsePlugin !== null && activeUsePlugin !== plugin.id) ||
+                    (plugin.hasProjectMode && !projectMode.enabled)
+                  }
+                  onBusyChange={(value) =>
+                    setActiveUsePlugin((current) =>
+                      value ? plugin.id : current === plugin.id ? null : current
+                    )
+                  }
                 />
-              </Suspense>
-            )}
-            {plugin.hasProjectMode && !plugin.enabled && (
-              <p className="text-xs text-muted-foreground">
-                先启用插件，再新建项目。已有项目继续使用原来的设置。
-              </p>
-            )}
-            {plugin.hasProjectMode && !projectMode.loading && !projectMode.enabled && (
-              <p className="text-xs text-muted-foreground">当前应用尚未开放项目模式。</p>
-            )}
-            {!plugin.hasProjectMode && (
-              <p className="text-xs text-muted-foreground">
-                {plugin.skillCount > 0 ? "启用后可在聊天中使用技能。" : ""}
-                {plugin.mcpServerCount > 0 ? "工具连接可在“设置使用”中查看。" : ""}
-                {(plugin.hookCount ?? 0) > 0 ? "自动检查按原插件规则运行。" : ""}
-              </p>
-            )}
-            {(plugin.modCount ?? 0) > 0 && (
-              <p className="text-xs text-muted-foreground">灵件还需在下方核对并确认项目权限。</p>
-            )}
-          </article>
-        ))}
+              ) : (
+                <>
+                  <Button
+                    size="sm"
+                    disabled={
+                      busy ||
+                      !active ||
+                      (!plugin.enabled && hasChatScope) ||
+                      (plugin.enabled &&
+                        (plugin.hasProjectMode || projectUse) &&
+                        (projectMode.loading || !projectMode.enabled))
+                    }
+                    onClick={() => {
+                      if (!plugin.enabled) {
+                        if (hasChatScope) return
+                        void run(async () => {
+                          const result = await window.api.plugins.setEnabled(plugin.id, true)
+                          if (result?.success === false)
+                            throw new Error(result.error || "启用状态未能保存，请重试。")
+                          useAppStore.getState().bumpPluginVersion()
+                        })
+                      } else if (!hasChatScope && entryFailed) {
+                        void run(async () => {}, false)
+                      } else if (!hasChatScope && projectEntry?.kind === "host") {
+                        void run(async () => {
+                          const version = readVersion.current
+                          const current = () =>
+                            alive.current &&
+                            navigationScope.current.active &&
+                            navigationScope.current.account === account &&
+                            useAppStore.getState().accountRevision === account &&
+                            version === readVersion.current
+                          const actual = await readInstalledPluginProjectEntry(
+                            plugin.id,
+                            {
+                              plugins: () => window.api.plugins.list(),
+                              templates: () => window.api.harnessBoard.localProjects.templates()
+                            },
+                            current,
+                            plugin
+                          )
+                           if (actual.kind !== projectEntry?.kind)
+                            throw Error("插件项目入口已变化，请重新核对。")
+                          if (!current()) return
+                          openDerivedProject(actual.pluginId, actual.name)
+                        }, false)
+                      } else if (plugin.hasProjectMode) {
+                        openDerivedProject(plugin.id, plugin.name)
+                      } else {
+                        openPluginSettings(plugin.id)
+                      }
+                    }}
+                  >
+                    {!plugin.enabled
+                      ? hasChatScope
+                        ? "使用状态待核对"
+                        : busy
+                          ? "正在启用插件…"
+                          : "启用插件"
+                      : entryFailed
+                        ? "重新核对使用入口"
+                        : plugin.hasProjectMode || projectUse
+                          ? "去使用"
+                          : "配置"}
+                  </Button>
+                  {!hasChatScope && entryFailed && (
+                    <p role="status" className="text-xs text-muted-foreground">
+                      {projectEntry?.kind === "unavailable" && projectCandidate
+                        ? projectEntry.reason
+                        : "暂时无法确认项目入口，请重新核对。"}
+                    </p>
+                  )}
+                  {!hasChatScope && projectUse && !projectMode.loading && !projectMode.enabled && (
+                    <p role="status" className="text-xs text-muted-foreground">
+                      当前应用暂未开放项目模式。
+                    </p>
+                  )}
+                  {!plugin.hasProjectMode && hasChatScope && !canUseHere && (
+                    <p className="text-xs text-muted-foreground">
+                      {readFailed || status?.recovery
+                        ? "使用状态需要核对，请先处理下方提示。"
+                        : "打开聊天并选择项目目录后，即可使用此插件。"}
+                    </p>
+                  )}
+                </>
+              )}
+              {managing && (
+                <div className="space-y-3 border-t pt-3" aria-label={`${plugin.name}管理`}>
+                  <p className="text-xs text-muted-foreground">插件启停会影响使用它的其他聊天。</p>
+                  {!hasChatScope && plugin.enabled && entries?.failed && !plugin.hasProjectMode && (
+                    <div className="space-y-2">
+                      <p role="status" className="text-xs text-muted-foreground">
+                        暂时无法确认项目入口，插件配置仍可使用。
+                      </p>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy || !active}
+                        onClick={() => void run(async () => {}, false)}
+                      >
+                        重新核对项目入口
+                      </Button>
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={blocked}
+                      onClick={() => openPluginSettings(plugin.id)}
+                    >
+                      插件配置
+                    </Button>
+                    {plugin.enabled && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={blocked}
+                        onClick={() =>
+                          void run(async () => {
+                            const result = await window.api.plugins.setEnabled(plugin.id, false)
+                            if (result?.success === false)
+                              throw new Error(result.error || "停用状态未能保存，请重试。")
+                            useAppStore.getState().bumpPluginVersion()
+                          })
+                        }
+                      >
+                        停用插件
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={blocked || !active}
+                      aria-expanded={selectedProjectPlugin === plugin.id}
+                      onClick={() =>
+                        setProjectSelection({
+                          scope: projectScope,
+                          pluginId: selectedProjectPlugin === plugin.id ? null : plugin.id
+                        })
+                      }
+                    >
+                      {selectedProjectPlugin === plugin.id ? "收起流程定义" : "查看流程定义"}
+                    </Button>
+                    {onDerive && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={blocked}
+                        onClick={() => onDerive(plugin)}
+                      >
+                        从此插件创建
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={blocked}
+                      onClick={() => setDeleteTarget({ pluginId: plugin.id, name: plugin.name })}
+                    >
+                      卸载
+                    </Button>
+                  </div>
+                  {active && selectedProjectPlugin === plugin.id && (
+                    <Suspense fallback={<p role="status">正在读取插件流程定义…</p>}>
+                      <InstalledPluginFlowDefinition
+                        key={JSON.stringify([projectScope, installedProjectPluginIdentity(plugin)])}
+                        pluginId={plugin.id}
+                        name={plugin.name}
+                        version={plugin.version}
+                      />
+                    </Suspense>
+                  )}
+                  {mod && functionManagement(mod)}
+                </div>
+              )}
+              {plugin.hasProjectMode && !projectMode.loading && !projectMode.enabled && (
+                <p className="text-xs text-muted-foreground">当前应用尚未开放项目模式。</p>
+              )}
+            </article>
+          )
+        })}
         {installed.length === 0 && (
           <p className="text-xs text-muted-foreground">
             还没有添加插件，可以先到“挑选使用”试一个示例。
           </p>
         )}
       </section>
-      <div className="rounded-xl border bg-card p-4 space-y-2">
-        <label className="flex items-center gap-2 font-medium">
-          <input
-            type="checkbox"
-            checked={globalEnabled}
-            disabled={busy || !globalLoaded}
-            onChange={(event) =>
-              void run(async () => {
-                const value = await window.api.mods.configureGlobal(event.target.checked)
-                setGlobalEnabled(value)
-              })
-            }
-          />
-          允许使用灵件
-        </label>
-        <p className="text-xs text-muted-foreground">
-          此开关只控制灵件提供的聊天界面和自动操作，不影响上方项目插件的启用状态。
-        </p>
-      </div>
+      <details className="rounded-xl border p-4" data-plugin-import-controls>
+        <summary className="cursor-pointer font-medium">从文件添加插件</summary>
+        <div className="space-y-3 pt-3">
+          <div>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+              已有插件？上传 ZIP 或选择插件文件夹即可安装。同名、同作者的插件会更新已有版本。
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <input
+              ref={uploadInput}
+              type="file"
+              accept=".zip"
+              aria-label="选择插件 ZIP 文件"
+              className="hidden"
+              disabled={blocked}
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                event.target.value = ""
+                if (!file) return
+                void run(async () => {
+                  if (!file.name.toLowerCase().endsWith(".zip")) throw new Error("仅支持 .zip 文件")
+                  const result = await window.api.plugins.install(
+                    await file.arrayBuffer(),
+                    file.name,
+                    "local",
+                    undefined,
+                    "capabilities"
+                  )
+                  if (!result.success) throw new Error(result.error || "安装失败")
+                  useAppStore.getState().bumpPluginVersion()
+                  setNotice(installationNotice(result))
+                })
+              }}
+            />
+            <Button size="sm" disabled={blocked} onClick={() => uploadInput.current?.click()}>
+              上传插件（ZIP）
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={blocked}
+              onClick={() =>
+                void run(async () => {
+                  const result = await window.api.plugins.installFromDir("capabilities")
+                  if (!result.success) {
+                    if (result.error === "已取消") return
+                    throw new Error(result.error || "安装失败")
+                  }
+                  useAppStore.getState().bumpPluginVersion()
+                  setNotice(installationNotice(result))
+                })
+              }
+            >
+              从文件夹安装
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={blocked}
+              onClick={() =>
+                void run(async () => {
+                  await window.api.mods.installExamples()
+                  useAppStore.getState().bumpPluginVersion()
+                  setNotice("示范灵件已添加，点击插件卡片中的“启用”继续。")
+                })
+              }
+            >
+              安装示范灵件
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            请选择完整插件文件夹或 ZIP，单个脚本文件无法安装。
+          </p>
+          <ModsImportGuide />
+          {notice && (
+            <p role="status" aria-label="灵件操作结果" className="text-sm text-muted-foreground">
+              {notice}
+            </p>
+          )}
+        </div>
+      </details>
       <Dialog
         open={active && deleteTarget !== null}
         onOpenChange={(open) => {
-          if (!open && !busy) setDeleteTarget(null)
+          if (!open && !blocked) setDeleteTarget(null)
         }}
       >
         <DialogContent>
@@ -757,12 +967,12 @@ export function ModsSettings({
           </DialogHeader>
           {error && <SparksOperationError message={error} />}
           <DialogFooter>
-            <Button variant="outline" disabled={busy} onClick={() => setDeleteTarget(null)}>
+            <Button variant="outline" disabled={blocked} onClick={() => setDeleteTarget(null)}>
               取消
             </Button>
             <Button
               variant="destructive"
-              disabled={busy || !deleteTarget}
+              disabled={blocked || !deleteTarget}
               onClick={() => {
                 if (!deleteTarget) return
                 const target = deleteTarget
@@ -779,18 +989,13 @@ export function ModsSettings({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      {!status && !readFailed && (
-        <p className="rounded-xl border border-dashed p-4 text-sm leading-relaxed text-muted-foreground">
-          为当前会话选择项目目录后配置权限；安装和卸载无需项目目录。
-        </p>
-      )}
       {error && !deleteTarget && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-destructive/30 p-4">
           <SparksOperationError message={error} />
           <Button
             size="sm"
             variant="outline"
-            disabled={busy}
+            disabled={blocked}
             onClick={() => void run(async () => {}, false)}
           >
             重新读取
@@ -809,249 +1014,207 @@ export function ModsSettings({
           </details>
         </div>
       )}
-      {status && !status.recovery && threadId && (
-        <>
-          <p className="text-xs text-muted-foreground break-all">当前项目：{status.workspace}</p>
-          <div className="flex flex-wrap gap-5">
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={status.enabled}
-                disabled={busy || !globalLoaded || !globalEnabled}
-                onChange={(event) =>
-                  void run(() =>
-                    window.api.mods.configure(
-                      threadId,
-                      event.target.checked,
-                      status.outputPolicy,
-                      status.workspace
+      <details className="space-y-3 rounded-xl border p-4" data-mods-more-settings>
+        <summary className="cursor-pointer font-medium">更多设置</summary>
+        <p className="pt-3 text-xs text-muted-foreground">
+          应用开关会影响其他已授权灵件；项目设置由同目录聊天共用。
+        </p>
+        <div className="rounded-xl border bg-card p-4 space-y-2">
+          <label className="flex items-center gap-2 font-medium">
+            <input
+              type="checkbox"
+              checked={globalEnabled}
+              disabled={blocked || !globalLoaded}
+              onChange={(event) =>
+                void run(async () => {
+                  const value = await window.api.mods.configureGlobal(event.target.checked)
+                  setGlobalEnabled(value)
+                })
+              }
+            />
+            允许使用灵件
+          </label>
+          <p className="text-xs text-muted-foreground">
+            此开关只控制灵件提供的聊天界面和自动操作，不影响上方项目插件的启用状态。
+          </p>
+        </div>
+        {status && !status.recovery && threadId && (
+          <>
+            <p className="text-xs text-muted-foreground break-all">当前项目：{status.workspace}</p>
+            <div className="flex flex-wrap gap-5">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={status.enabled}
+                  disabled={blocked || !globalLoaded || !globalEnabled}
+                  onChange={(event) =>
+                    void run(() =>
+                      window.api.mods.configure(
+                        threadId,
+                        event.target.checked,
+                        status.outputPolicy,
+                        status.workspace
+                      )
                     )
-                  )
-                }
-              />
-              在此项目使用灵件
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={status.outputPolicy}
-                disabled={busy || !globalLoaded || !globalEnabled || status.policy?.required}
-                onChange={(event) =>
-                  void run(() =>
-                    window.api.mods.configure(
-                      threadId,
-                      status.enabled,
-                      event.target.checked,
-                      status.workspace
+                  }
+                />
+                在此项目使用灵件
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={status.outputPolicy}
+                  disabled={blocked || !globalLoaded || !globalEnabled || status.policy?.required}
+                  onChange={(event) =>
+                    void run(() =>
+                      window.api.mods.configure(
+                        threadId,
+                        status.enabled,
+                        event.target.checked,
+                        status.workspace
+                      )
                     )
-                  )
-                }
-              />
-              检查回答中的敏感信息{status.policy?.required ? "（组织要求）" : ""}
-            </label>
-          </div>
-          {status.outputPolicy && (
-            <p className="text-xs text-muted-foreground">
-              检查回答中是否包含常见密钥等敏感信息。开启后，完整回答检查通过才会显示，无法检查的内容不会显示。
-            </p>
-          )}
-          {status.policy && (
-            <details className="text-xs text-muted-foreground break-all">
-              <summary className="cursor-pointer">技术详情 · 检查规则版本</summary>
-              <p className="mt-2">
-                {status.policy.id} · {status.policy.digest.slice(0, 16)}
+                  }
+                />
+                检查回答中的敏感信息{status.policy?.required ? "（组织要求）" : ""}
+              </label>
+            </div>
+            {status.outputPolicy && (
+              <p className="text-xs text-muted-foreground">
+                检查回答中是否包含常见密钥等敏感信息。开启后，完整回答检查通过才会显示，无法检查的内容不会显示。
               </p>
+            )}
+            {status.policy && (
+              <details className="text-xs text-muted-foreground break-all">
+                <summary className="cursor-pointer">技术详情 · 检查规则版本</summary>
+                <p className="mt-2">
+                  {status.policy.id} · {status.policy.digest.slice(0, 16)}
+                </p>
+              </details>
+            )}
+            <details className="rounded-xl border p-4">
+              <summary className="cursor-pointer text-sm">查看进度或排查问题</summary>
+              <p className="my-3 text-xs text-muted-foreground">
+                在聊天中描述需求并发送，在原任务卡或“任务进展”查看状态、待确认事项和结果。插件面板在“结果”中，技术记录可展开排查详情。
+              </p>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  goToConfigurationThread({ threadId, workspace: status.workspace }, () =>
+                    openClawSidebar("results")
+                  )
+                }}
+              >
+                去这段聊天查看记录
+              </Button>
             </details>
-          )}
-          <details className="rounded-xl border p-4">
-            <summary className="cursor-pointer text-sm">查看进度或排查问题</summary>
-            <p className="my-3 text-xs text-muted-foreground">
-              在聊天中描述需求并发送，在原任务卡或“任务进展”查看状态、待确认事项和结果。插件面板在“结果”中，技术记录可展开排查详情。
-            </p>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                goToConfigurationThread({ threadId, workspace: status.workspace }, () =>
-                  openClawSidebar("results")
-                )
-              }}
-            >
-              去这段聊天查看记录
-            </Button>
-          </details>
-          {(status.functionMods?.length ?? 0) > 0 && (
-            <details open>
-              <summary className="cursor-pointer">
-                允许哪些插件访问项目（{status.functionMods!.length}）
-              </summary>
-              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                确认插件可以做什么，再点击授权。插件代码更新后需要重新确认。
-              </p>
-              <div className="mt-2 space-y-2">
-                {status.functionMods!.map((mod) => (
+            {status.functionMods?.some(
+              (mod) => !installed.some((plugin) => plugin.id === mod.pluginId)
+            ) && (
+              <details>
+                <summary className="cursor-pointer">其他插件权限</summary>
+                <div className="space-y-3 pt-3">
+                  {status.functionMods
+                    .filter((mod) => !installed.some((plugin) => plugin.id === mod.pluginId))
+                    .map((mod) => (
+                      <div key={mod.pluginId} className="space-y-3 rounded-lg border p-3">
+                        <strong>{mod.name}</strong>
+                        {functionManagement(mod)}
+                      </div>
+                    ))}
+                </div>
+              </details>
+            )}
+            <details>
+              <summary className="cursor-pointer">模块与权限（{status.mods.length}）</summary>
+              <div className="max-h-64 overflow-auto mt-2 space-y-2">
+                {status.mods.map((mod) => (
                   <div
                     key={mod.pluginId}
-                    className="rounded-xl border bg-card p-4 space-y-3"
-                    data-function-mod-id={mod.name}
+                    className="rounded border p-3 space-y-1"
+                    data-mod-id={mod.manifest?.id}
                   >
                     <div className="flex justify-between gap-3">
-                      <strong>{mod.name}</strong>
-                      <span
-                        className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${mod.state === "ready" ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}`}
-                      >
+                      <strong>{mod.manifest?.name ?? mod.pluginId}</strong>
+                      <span>
                         {
                           {
                             ready: "已授权",
                             disabled: "插件已禁用",
                             "needs-approval": "等待授权",
-                            invalid: "插件无效"
+                            invalid: "清单无效"
                           }[mod.state]
                         }
                       </span>
                     </div>
-                    <p role="status" className="text-sm font-medium" data-plugin-use-state>
-                      {installedModUseState(
-                        mod,
-                        status.workspace,
-                        globalEnabled && status.enabled,
-                        usage,
-                        usageReadFailed
-                      )}
+                    {mod.manifest && (
+                      <>
+                        <p className="text-xs">增强工具：{mod.manifest.tools.join("、") || "无"}</p>
+                        <p className="text-xs">
+                          读取能力：{mod.manifest.permissions.readTools.join("、") || "无"}
+                          ；执行能力：{mod.manifest.permissions.writeTools.join("、") || "无"}
+                        </p>
+                        <p className="text-xs">
+                          上下文：{mod.manifest.permissions.context.join("、") || "无"}
+                          ；插件状态存储：{mod.manifest.permissions.store ? "允许" : "不申请"}
+                          ；文本产物：{mod.manifest.permissions.artifacts ? "允许" : "不申请"}
+                        </p>
+                      </>
+                    )}
+                    <p className="text-xs font-mono break-all">
+                      版本摘要：{mod.digest ?? mod.error}
                     </p>
-                    <FunctionPluginApproval
-                      mod={mod}
-                      threadId={threadId}
-                      workspace={status.workspace}
-                      busy={busy}
-                      onApprove={() =>
-                        void run(() =>
-                          window.api.mods.approveFunction(
-                            threadId, mod.pluginId, mod.digest!, status.workspace
+                    {mod.state === "needs-approval" && mod.digest && (
+                      <Button
+                        size="sm"
+                        disabled={blocked}
+                        onClick={() =>
+                          void run(() =>
+                            window.api.mods.approve(
+                              threadId,
+                              mod.pluginId,
+                              mod.digest!,
+                              status.workspace
+                            )
                           )
-                        )
-                      }
-                    />
-                    {mod.state === "ready" && (
+                        }
+                      >
+                        授权以上权限
+                      </Button>
+                    )}
+                    {mod.state === "ready" && mod.manifest && (
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={busy}
+                        disabled={blocked}
                         onClick={() =>
                           void run(() =>
-                            window.api.mods.revokeFunction(threadId, mod.name, status.workspace)
+                            window.api.mods.revoke(threadId, mod.manifest!.id, status.workspace)
                           )
                         }
                       >
                         撤销权限
                       </Button>
                     )}
-                    {mod.digest && mod.state !== "invalid" && (
-                      <FunctionCompatibilityCheck
-                        expectedWorkspace={status.workspace}
-                        threadId={threadId}
-                        pluginId={mod.pluginId}
-                        digest={mod.digest}
-                        disabled={busy}
-                      />
-                    )}
-                    <FunctionCompletionPolicy
-                      expectedWorkspace={status.workspace}
-                      threadId={threadId}
-                      plugin={mod.name}
-                      disabled={busy || mod.state !== "ready"}
-                    />
                   </div>
                 ))}
               </div>
             </details>
-          )}
-          <details>
-            <summary className="cursor-pointer">模块与权限（{status.mods.length}）</summary>
-            <div className="max-h-64 overflow-auto mt-2 space-y-2">
-              {status.mods.map((mod) => (
-                <div
-                  key={mod.pluginId}
-                  className="rounded border p-3 space-y-1"
-                  data-mod-id={mod.manifest?.id}
-                >
-                  <div className="flex justify-between gap-3">
-                    <strong>{mod.manifest?.name ?? mod.pluginId}</strong>
-                    <span>
-                      {
-                        {
-                          ready: "已授权",
-                          disabled: "插件已禁用",
-                          "needs-approval": "等待授权",
-                          invalid: "清单无效"
-                        }[mod.state]
-                      }
-                    </span>
-                  </div>
-                  {mod.manifest && (
-                    <>
-                      <p className="text-xs">增强工具：{mod.manifest.tools.join("、") || "无"}</p>
-                      <p className="text-xs">
-                        读取能力：{mod.manifest.permissions.readTools.join("、") || "无"}
-                        ；执行能力：{mod.manifest.permissions.writeTools.join("、") || "无"}
-                      </p>
-                      <p className="text-xs">
-                        上下文：{mod.manifest.permissions.context.join("、") || "无"}
-                        ；插件状态存储：{mod.manifest.permissions.store ? "允许" : "不申请"}
-                        ；文本产物：{mod.manifest.permissions.artifacts ? "允许" : "不申请"}
-                      </p>
-                    </>
-                  )}
-                  <p className="text-xs font-mono break-all">版本摘要：{mod.digest ?? mod.error}</p>
-                  {mod.state === "needs-approval" && mod.digest && (
-                    <Button
-                      size="sm"
-                      disabled={busy}
-                      onClick={() =>
-                        void run(() =>
-                          window.api.mods.approve(
-                            threadId,
-                            mod.pluginId,
-                            mod.digest!,
-                            status.workspace
-                          )
-                        )
-                      }
-                    >
-                      授权以上权限
-                    </Button>
-                  )}
-                  {mod.state === "ready" && mod.manifest && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={busy}
-                      onClick={() =>
-                        void run(() =>
-                          window.api.mods.revoke(threadId, mod.manifest!.id, status.workspace)
-                        )
-                      }
-                    >
-                      撤销权限
-                    </Button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </details>
-          {status.diagnostics.length > 0 && (
-            <details>
-              <summary>运行诊断</summary>
-              {status.diagnostics.map((item, index) => (
-                <p className="text-xs" key={`${item.at}-${index}`}>
-                  {item.modId} · {item.code}
-                </p>
-              ))}
-            </details>
-          )}
-        </>
-      )}
+            {status.diagnostics.length > 0 && (
+              <details>
+                <summary>运行诊断</summary>
+                {status.diagnostics.map((item, index) => (
+                  <p className="text-xs" key={`${item.at}-${index}`}>
+                    {item.modId} · {item.code}
+                  </p>
+                ))}
+              </details>
+            )}
+          </>
+        )}
+      </details>
     </section>
   )
 }

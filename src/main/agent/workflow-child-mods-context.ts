@@ -6,6 +6,7 @@ import { ModError } from "../mods/errors"
 import type { WorkflowSubagentRuntime } from "./workflow/subagent"
 import type { HostRuntimeLifecycle } from "./runtime-host-lifecycle"
 import { withFunctionTransportExecution } from "../mods/v2/host-call"
+import { withoutFunctionNativeToolCompletion } from "./function-conversation-native-tools"
 import {
   captureRuntimePluginSourceToken,
   registerRuntimePluginSourceChild,
@@ -101,7 +102,8 @@ export async function createWorkflowChildModsRuntime(
   const run = async <T>(work: () => Promise<T>, entry = owner): Promise<T> => {
     if (!entry.active) throw new ModError("MODS_CALL_SCOPE_EXPIRED")
     entry.view.assertCurrent()
-    const invoke = () => withRuntimePluginSource(sourceToken, () => entries.run(entry, work))
+    const invoke = () => withoutFunctionNativeToolCompletion(() =>
+      withRuntimePluginSource(sourceToken, () => entries.run(entry, work)))
     // Creation starts with no parent's host-call receipt or execution permission.
     // Once the original child runtime is ready, use only its own native lifecycle.
     const result = await (lifecycle ? lifecycle(invoke) : withFunctionTransportExecution({
@@ -143,7 +145,10 @@ export async function createWorkflowChildModsRuntime(
           // Physical cleanup must run even when parent/source/cancellation guards fail.
           cleanup ??= Promise.resolve().then(async () => {
             frame.active = false
-            try { return await entries.run(frame, () => iterator?.return?.()) }
+            try {
+              return await withoutFunctionNativeToolCompletion(() =>
+                entries.run(frame, () => iterator?.return?.()))
+            }
             finally { release(); await lifetime.catch(() => {}) }
           })
           return cleanup

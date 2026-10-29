@@ -29,6 +29,7 @@ export const VITEST_TEST_INCLUDE = [
   "src/renderer/src/components/chat/chat-scroll-runtime-harness.test.ts",
   "src/renderer/src/components/chat/chat-scroll-navigator.test.ts",
   "src/renderer/src/components/chat/chat-virtual-window.test.ts",
+  "src/renderer/src/components/chat/chat-bottom-presentation-wait.test.ts",
   "src/renderer/src/components/chat/chat-search-overlay.test.ts",
   "src/renderer/src/components/chat/reasoning-expansion-context.test.ts",
   "src/renderer/src/lib/chat-scroll-tail-change.test.ts",
@@ -74,9 +75,11 @@ export const NATIVE_INTEGRATION_TESTS = [
   "src/main/agent/function-conversation-native-keeper.test.ts",
   "src/main/agent/native-derived-config.integration.test.ts",
   "src/main/agent/native-shared-derived-config.integration.test.ts",
+  "src/main/agent/workflow/worktree-resource.test.ts",
   "src/main/harness-board/project-runtime/composition-host-adapter.test.ts",
   "src/main/mods/v2/conversation-shared-native-host.test.ts",
   "src/main/mods/devtools/project-stage-debug.test.ts",
+  "src/main/mods/devtools/project-creator-host-journey.test.ts",
   "src/main/mods/devtools/creator-source-set.integration.test.ts",
   "src/main/plugins/autobiz-native-host.integration.test.ts",
   "src/main/plugins/autobiz-native-code.integration.test.ts",
@@ -95,6 +98,9 @@ export default defineConfig({
     // Preserve the Node-only suite and command-line file/name filters. These
     // native graph/OS suites need exclusive CPU while retaining their original time limits.
     environment: "node",
+    // Vitest 3 creates Tinypool from the root config, not per-project worker limits.
+    maxWorkers: 2,
+    minWorkers: 1,
     projects: [
       {
         extends: true,

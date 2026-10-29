@@ -3,10 +3,13 @@ import { isSameWorkspacePath } from "../../../../shared/workspace-path"
 import type { NativeNodePlan } from "../../../../shared/node-composition"
 import type { HarnessFeatureCreateInput } from "../../../../shared/harness-board-types"
 import type { HarnessKnowledgeTarget } from "../../../../shared/harness-board-types"
-import { useDerivedProjectIntent, dismissDerivedProject } from "@/lib/derived-project-intent"
+import { useDerivedProjectIntent, dismissDerivedProject, derivedProjectIntentCurrent,
+  consumeDerivedProjectIntent, type DerivedProjectIntent } from "@/lib/derived-project-intent"
 import { configurationTargetValid } from "@/lib/configuration-target"
 import type { PluginDerivationScope } from "../../../../shared/plugin-derivation"
 import { NativeNodeComposer } from "../customize/NativeNodeComposer"
+import { CreatedPluginProjectActions } from "./CreatedPluginProjectActions"
+import { dismissCurrentPageEntryGuide } from "../guides/page-entry-guide-intent"
 import { RepositoryBranchHint, RepositoryPathsField } from "./RepositoryPathField"
 import projectModeGuideImage from "@/assets/guides/feature-create-guide-v5.png"
 import {
@@ -22,6 +25,10 @@ import { ProjectCompositionEntry } from "./ProjectCompositionEntry"
 import { CreateLocalProject, HostProjectListItems, LocalProjectRun } from "./LocalProjectsPanel"
 import type { LocalProjectSummary, LocalProjectTemplate, LocalProjectView } from "../../../../shared/project-runtime/platform-api"
 import { dismissHostPluginStartUse, hostPluginStartUseCurrent, useHostPluginStartUseIntent, type HostPluginStartUseIntent } from "@/lib/plugin-start-use-intent"
+import { dismissHostProjectIntent, hostProjectIntentCurrent, useHostProjectIntent } from "@/lib/host-project-intent"
+import { resolveHostProjectThread } from "@/lib/host-project-thread"
+import { LOCAL_PROJECT_SEARCH_MAX_CHARS } from "../../../../shared/project-runtime/platform-api"
+import { projectRuntimeRecoveryMessage } from "./project-runtime-message"
 import { SparksDocumentationLink } from "../customize/SparksDocumentationLink"
 import { ProjectPlatformEntry } from "./ProjectPlatformEntry"
 import { prepareProjectCapabilitySession } from "./project-capability-session"
@@ -2919,6 +2926,21 @@ export function ProjectFormDialog({
               installedPluginId={selectedAdapter.id} startUse={hostStartUse}
               onBusyChange={setHostBusy} onCancel={() => onOpenChange(false)}
               onCreated={(view) => { setHostBusy(false); onHostCreated?.(view) }} />}
+      </DialogContent>
+    </Dialog>
+  )
+  if (!selectedAdapter) return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent ref={setDialogPortalContainer} className="max-w-2xl"
+        onPointerDownOutside={preventHarnessDialogOutsideClose}>
+        <DialogHeader><DialogTitle>新建项目</DialogTitle></DialogHeader>
+        <p role="status" className="text-sm text-muted-foreground">
+          先选择项目插件，再填写所需信息。
+        </p>
+        {picker}
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>取消</Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -8737,32 +8759,78 @@ function EnterpriseHarnessBoardView({
   onActiveSessionThreadChange
 }: HarnessBoardViewProps = {}): React.JSX.Element {
   const [hostProjects, setHostProjects] = useState<LocalProjectSummary[]>([])
+  const [query, setQuery] = useState("")
+  const hostQueryRef = useRef(query)
+  hostQueryRef.current = query
+  const hostCursorRef = useRef<string | undefined>(undefined)
+  const [hostHasMore, setHostHasMore] = useState(false)
   const [hostTemplates, setHostTemplates] = useState<LocalProjectTemplate[]>([])
   const [selectedHostProject, setSelectedHostProject] = useState<string>()
   const [hostError, setHostError] = useState<string>()
+  const [hostLoading, setHostLoading] = useState(true)
   const [hostStartUse, setHostStartUse] = useState<HostPluginStartUseIntent>()
   const hostStartUseIntent = useHostPluginStartUseIntent()
   const hostReadSequence = useRef(0)
-  const refreshHostProjects = useCallback(async (more = false) => {
+  const hostTemplateReadSequence = useRef(0)
+  const refreshHostProjects = useCallback(async (more = false, includeTemplates = true) => {
     const sequence = ++hostReadSequence.current
+    const search = hostQueryRef.current
+    const account = useAppStore.getState().accountRevision
+    setHostLoading(true)
     try {
-      const [templates, items] = await Promise.all([
-        window.api.harnessBoard.localProjects.templates(),
-        window.api.harnessBoard.localProjects.list(more ? hostProjects.at(-1)?.projectId : undefined)
+      const templateSequence = includeTemplates ? ++hostTemplateReadSequence.current : undefined
+      const templateRead = includeTemplates
+        ? window.api.harnessBoard.localProjects.templates().then((templates) => {
+            // Template identities belong to the account, not to the current search text.
+            if (templateSequence === hostTemplateReadSequence.current &&
+              account === useAppStore.getState().accountRevision) setHostTemplates(templates)
+          })
+        : undefined
+      const [, items] = await Promise.all([
+        templateRead,
+        window.api.harnessBoard.localProjects.list(more ? hostCursorRef.current : undefined, search)
       ])
-      if (sequence !== hostReadSequence.current) return
-      setHostTemplates(templates)
+      if (sequence !== hostReadSequence.current || search !== hostQueryRef.current ||
+        account !== useAppStore.getState().accountRevision) return
       setHostProjects((previous) => more ? [...previous, ...items.filter((item) =>
         !previous.some((old) => old.projectId === item.projectId))] : items)
+      hostCursorRef.current = items.at(-1)?.projectId
+      setHostHasMore(items.length === 20)
       setHostError(undefined)
     } catch (cause) {
-      if (sequence === hostReadSequence.current) setHostError(cleanIpcError(cause))
+      if (sequence === hostReadSequence.current && search === hostQueryRef.current &&
+        account === useAppStore.getState().accountRevision)
+        setHostError(projectRuntimeRecoveryMessage(cause instanceof Error ? cause.message : "") ?? cleanIpcError(cause))
+    } finally {
+      if (sequence === hostReadSequence.current && search === hostQueryRef.current &&
+        account === useAppStore.getState().accountRevision) setHostLoading(false)
     }
-  }, [hostProjects])
+  }, [])
   useEffect(() => {
     void refreshHostProjects()
-    return () => { hostReadSequence.current++ }
-  }, [])
+    return () => {
+      hostReadSequence.current++
+      hostTemplateReadSequence.current++
+    }
+  }, [refreshHostProjects])
+  const hostSearchMounted = useRef(false)
+  useEffect(() => {
+    if (!hostSearchMounted.current) {
+      hostSearchMounted.current = true
+      return
+    }
+    hostReadSequence.current++
+    hostCursorRef.current = undefined
+    setHostLoading(true)
+    setHostError(undefined)
+    setHostProjects([])
+    setHostHasMore(false)
+    const timer = setTimeout(() => void refreshHostProjects(false, false), 250)
+    return () => {
+      clearTimeout(timer)
+      hostReadSequence.current++
+    }
+  }, [query, refreshHostProjects])
   const [initialCatalogSnapshot] = useState(readHarnessBoardCatalogCache)
   const [projects, setProjects] = useState<HarnessProjectListItem[]>(
     () => initialCatalogSnapshot?.projects ?? []
@@ -8798,7 +8866,6 @@ function EnterpriseHarnessBoardView({
     ProjectModeAdapterItem[]
   >([])
   const [marketPluginItems, setMarketPluginItems] = useState<MarketItem[]>([])
-  const [query, setQuery] = useState("")
   const [catalogQuery, setCatalogQuery] = useState("")
   const [projectPageCursor, setProjectPageCursor] = useState(0)
   const [projectPageHistory, setProjectPageHistory] = useState<number[]>([0])
@@ -8820,11 +8887,13 @@ function EnterpriseHarnessBoardView({
   const [loadingRun, setLoadingRun] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const derivedProjectIntent = useDerivedProjectIntent()
+  useEffect(() => {
+    if (derivedProjectIntent && !derivedProjectIntentCurrent(derivedProjectIntent))
+      dismissDerivedProject(derivedProjectIntent.id)
+  }, [derivedProjectIntent])
   const openedExistingProjectIntentRef = useRef<string | null>(null)
-  const [derivedCreationSource, setDerivedCreationSource] = useState<{
-    pluginId: string
-    scope: PluginDerivationScope
-  } | null>(null)
+  const [derivedCreationSource, setDerivedCreationSource] = useState<DerivedProjectIntent | null>(null)
+  const creatingProjectRef = useRef(false)
   const [createdDerivedProject, setCreatedDerivedProject] = useState<{
     projectId: string
     name: string
@@ -8961,6 +9030,34 @@ function EnterpriseHarnessBoardView({
     }))
   )
   const { cleanupThread } = useThreadContext()
+  const hostProjectIntent = useHostProjectIntent()
+  useEffect(() => {
+    if (!hostProjectIntent) return
+    let current = true
+    setSelectedHostProject(undefined)
+    setHostError(undefined)
+    void resolveHostProjectThread(hostProjectIntent.target, {
+      readThread: id => window.api.threads.get(id, { requestScope: "foreground-hydration" }),
+      readProject: id => window.api.harnessBoard.localProjects.get(id),
+      isCurrent: () => current && hostProjectIntentCurrent(hostProjectIntent)
+    }).then(id => {
+      if (!current) return
+      if (id && hostProjectIntentCurrent(hostProjectIntent)) {
+        setSelectedHostProject(id)
+        setSelectedFeature(null)
+        setSelectedProjectSession(null)
+        setIsViewingSession(false)
+        setDialogOpen(false)
+      } else setHostError(projectRuntimeRecoveryMessage("HOST_PROJECT_NAVIGATION_CHANGED"))
+      dismissHostProjectIntent(hostProjectIntent.id)
+    }).catch(cause => {
+      if (!current) return
+      setHostError(projectRuntimeRecoveryMessage(cause instanceof Error ? cause.message : "") ??
+        "无法读取原项目，请从项目列表核对原目录与插件。")
+      dismissHostProjectIntent(hostProjectIntent.id)
+    })
+    return () => { current = false }
+  }, [hostProjectIntent])
   const knowledgeTarget = useMemo<HarnessKnowledgeTarget | undefined>(() =>
     selectedFeature ? { projectId: selectedFeature.projectId, featureId: selectedFeature.slug }
       : selectedProjectId ? { projectId: selectedProjectId }
@@ -10344,6 +10441,16 @@ function EnterpriseHarnessBoardView({
     setFormError(null)
   }, [])
 
+  const showProjectListForCreation = useCallback(() => {
+    // An explicit new-project handoff leaves only detail navigation, never the running project.
+    setSelectedHostProject(undefined)
+    setSelectedProjectSession(null)
+    setSelectedFeature(null)
+    setSelectedProjectId(null)
+    setIsViewingSession(false)
+    setProjectModeTab("projects")
+  }, [])
+
   const openCreateDialog = useCallback(() => {
     setHostStartUse(undefined)
     void refreshHostProjects()
@@ -10364,14 +10471,17 @@ function EnterpriseHarnessBoardView({
       dismissHostPluginStartUse(intent.id)
       return
     }
+    showProjectListForCreation()
     setHostStartUse(intent)
     setForm(createEmptyProjectForm(intent.report.identity.pluginId))
     setFormError(null)
     void refreshHostProjects()
     openProjectDialogAdapterSession()
+    dismissCurrentPageEntryGuide("project-mode-getting-started")
     setDialogOpen(true)
     dismissHostPluginStartUse(intent.id)
-  }, [hostStartUseIntent, dialogOpen, editingProject, openProjectDialogAdapterSession, refreshHostProjects])
+  }, [hostStartUseIntent, dialogOpen, editingProject, openProjectDialogAdapterSession, refreshHostProjects,
+    showProjectListForCreation])
 
   const handleCreateDialogOpenChange = useCallback(
     (open: boolean) => {
@@ -10396,8 +10506,12 @@ function EnterpriseHarnessBoardView({
   }
 
   const handleSubmit = async (): Promise<void> => {
-    if (creating || createProjectVerification.pending) return
+    if (creatingProjectRef.current || creating || createProjectVerification.pending) return
     setFormError(null)
+    if (derivedCreationSource && !derivedProjectIntentCurrent(derivedCreationSource)) {
+      setFormError("原账号、聊天或目录已变化，请取消后重新选择插件创建项目。")
+      return
+    }
     if (metadataRequiredMissing(form)) {
       setFormError("所有字段均为必填")
       return
@@ -10418,10 +10532,16 @@ function EnterpriseHarnessBoardView({
       return
     }
     const source = derivedCreationSource
+    const account = useAppStore.getState().accountRevision
+    const current = () => boardMountedRef.current &&
+      useAppStore.getState().accountRevision === account &&
+      (!source || derivedProjectIntentCurrent(source))
+    creatingProjectRef.current = true
     setCreating(true)
     try {
       const project = await window.api.harnessBoard.createProject(form)
-      if (source && project["harness-adapter"].id === source.pluginId) {
+      if (!current()) return
+      if (source?.scope && project["harness-adapter"].id === source.pluginId) {
         setCreatedProjectError(null)
         setCreatedDerivedProject({ projectId: project.projectId, name: project.name, pluginId: source.pluginId, workspacePath: project.workspacePath, scope: source.scope })
       }
@@ -10430,15 +10550,19 @@ function EnterpriseHarnessBoardView({
       resetCreateForm()
       await loadProjects({ force: true })
     } catch (error) {
-      setFormError(cleanIpcError(error))
+      if (current()) setFormError(cleanIpcError(error))
     } finally {
-      setCreating(false)
+      creatingProjectRef.current = false
+      if (boardMountedRef.current) setCreating(false)
     }
   }
 
-  const openCreatedProjectNodes = async (): Promise<void> => {
+  const openCreatedProject = async (customizeSteps = false): Promise<void> => {
     const completed = createdDerivedProject
     if (!completed || openingCreatedProjectRef.current) return
+    const account = useAppStore.getState().accountRevision
+    const current = () => useAppStore.getState().accountRevision === account &&
+      createdDerivedProjectRef.current?.projectId === completed.projectId
     openingCreatedProjectRef.current = true
     setOpeningCreatedProject(true)
     setCreatedProjectError(null)
@@ -10446,24 +10570,29 @@ function EnterpriseHarnessBoardView({
       const project = (await window.api.harnessBoard.listProjects()).find(
         (item) => item.projectId === completed.projectId
       )
-      if (createdDerivedProjectRef.current?.projectId !== completed.projectId) return
+      if (!current()) return
       if (!project || project.harnessAdapter.id !== completed.pluginId ||
         !isSameWorkspacePath(project.workspacePath, completed.workspacePath)) {
         throw new Error("项目目录或绑定插件已改变，请重新打开项目。")
+      }
+      if (!customizeSteps) {
+        setCreatedDerivedProject(null)
+        openProjectDetail(project.projectId)
+        return
       }
       let scope = completed.scope
       if (!isSameWorkspacePath(scope.expectedWorkspace, completed.workspacePath)) {
         const thread = await createThread({
           workspacePath: completed.workspacePath
         }, { preserveView: true })
-        if (createdDerivedProjectRef.current?.projectId !== completed.projectId) return
+        if (!current()) return
         scope = { threadId: thread.thread_id, expectedWorkspace: completed.workspacePath }
         setCreatedDerivedProject((current) => current?.projectId === completed.projectId
           ? { ...current, scope } : current)
       }
       setCreatedProjectNodesOpen(true)
     } catch (error) {
-      setCreatedProjectError(cleanIpcError(error))
+      if (current()) setCreatedProjectError(cleanIpcError(error))
     } finally {
       openingCreatedProjectRef.current = false
       setOpeningCreatedProject(false)
@@ -11447,7 +11576,8 @@ function EnterpriseHarnessBoardView({
 
   useEffect(() => {
     if (!derivedProjectIntent?.projectId || loadingProjects || dialogOpen || editingProject) return
-    const intent = derivedProjectIntent
+    const intent = consumeDerivedProjectIntent(derivedProjectIntent)
+    if (!intent) return
     if (openedExistingProjectIntentRef.current === intent.id) return
     openedExistingProjectIntentRef.current = intent.id
     const project = findExistingPluginProject(projects, intent)
@@ -11455,12 +11585,54 @@ function EnterpriseHarnessBoardView({
       threadId: intent.scope.threadId, workspace: intent.scope.expectedWorkspace
     }, useAppStore.getState().threads)) {
       toast.error("原项目、插件或来源工作区已变化，请返回原入口重新选择。")
-      dismissDerivedProject(intent.id)
       return
     }
     openProjectDetail(project.projectId)
-    dismissDerivedProject(intent.id)
   }, [derivedProjectIntent, projects, loadingProjects, dialogOpen, editingProject, openProjectDetail])
+
+  useEffect(() => {
+    if (!derivedProjectIntent || derivedProjectIntent.projectId || loadingProjects || hostLoading ||
+      dialogOpen || editingProject || creating || hostStartUseIntent || hostStartUse) return
+    const requested = derivedProjectIntent
+    if (!derivedProjectIntentCurrent(requested)) {
+      dismissDerivedProject(requested.id)
+      return
+    }
+    let cancelled = false
+    void window.api.harnessBoard.registry().then((registry) => {
+      if (cancelled || !boardMountedRef.current) return
+      const intent = consumeDerivedProjectIntent(requested)
+      if (!intent) return
+      const matches = registry.filter((item) => item.id === intent.pluginId)
+      const adapter = matches[0]
+      if (matches.length !== 1 || adapter.name !== intent.name || adapter.enabled === false ||
+        (adapter.runtimeMode === "host"
+          ? !hostTemplates.some((template) => template.installedPluginId === adapter.id &&
+            template.name === adapter.name && template.version === adapter.version &&
+            template.expectedTemplate && !template.unavailableReason)
+          : !adapter.boardCompatibility.compatible)) {
+        setHostError("所选插件已变化、停用或暂不可用，请更新插件列表后重新打开项目入口。")
+        return
+      }
+      showProjectListForCreation()
+      setHostStartUse(undefined)
+      setCreatedDerivedProject(null)
+      setCreatedProjectNodesOpen(false)
+      setDerivedCreationSource(intent)
+      setForm(createEmptyProjectForm(intent.pluginId))
+      setFormError(null)
+      openProjectDialogAdapterSession()
+      setProjectDialogAdapterRegistry(applyMarketAdapterDisplayData(registry, [], []))
+      dismissCurrentPageEntryGuide("project-mode-getting-started")
+      setDialogOpen(true)
+    }).catch((cause) => {
+      if (!cancelled && boardMountedRef.current && consumeDerivedProjectIntent(requested))
+        setHostError(cleanIpcError(cause))
+    })
+    return () => { cancelled = true }
+  }, [derivedProjectIntent, loadingProjects, hostLoading, dialogOpen, editingProject, creating,
+    hostStartUseIntent, hostStartUse, hostTemplates, openProjectDialogAdapterSession,
+    showProjectListForCreation])
 
   const handleUpdateProjectPlugin = useCallback(
     async (project: HarnessProjectListItem, updateInfo: MarketPluginUpdateInfo): Promise<void> => {
@@ -12471,6 +12643,7 @@ function EnterpriseHarnessBoardView({
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="搜索项目、系统编号或插件"
                 aria-label="搜索项目、系统编号或插件"
+                maxLength={LOCAL_PROJECT_SEARCH_MAX_CHARS}
                 className="h-5 border-0 bg-transparent px-0 shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
               />
             </div>
@@ -12536,7 +12709,7 @@ function EnterpriseHarnessBoardView({
               </TabsList>
               {projectModeTab === "projects" && (
                 <div className="text-sm text-muted-foreground">
-                  {catalogSummary.matchedProjects + hostProjects.length} 个项目
+                  {hostLoading ? "正在更新项目列表…" : `当前 ${catalogSummary.matchedProjects + hostProjects.length} 个项目`}
                 </div>
               )}
             </div>
@@ -12544,14 +12717,15 @@ function EnterpriseHarnessBoardView({
             <TabsContent value="projects" className="mt-0">
               {hostError && <p role="alert" className="mb-3 text-sm text-destructive">{hostError}</p>}
               <div className="mb-3 grid gap-2">
-                <HostProjectListItems projects={hostProjects.filter((project) => !query.trim() ||
-                  [project.name, project.workspace].some((value) => value.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())))}
+                <HostProjectListItems projects={hostProjects}
                   onSelect={setSelectedHostProject} />
-                {hostProjects.length >= 20 && <button type="button" className="text-sm underline"
-                  onClick={() => void refreshHostProjects(true)}>加载更多项目</button>}
+                {hostHasMore && <button type="button" className="text-sm underline"
+                  disabled={hostLoading}
+                  onClick={() => void refreshHostProjects(true, false)}>加载更多项目</button>}
               </div>
-              {loadingProjects ? (
+              {loadingProjects || (hostLoading && projects.length === 0 && hostProjects.length === 0) ? (
                 <div
+                  role="status"
                   className={cn(
                     harnessSurfaceClassName,
                     "flex min-h-[320px] items-center justify-center text-muted-foreground"
@@ -12559,10 +12733,10 @@ function EnterpriseHarnessBoardView({
                 >
                   <div className="flex items-center gap-3 rounded-full border border-border/70 bg-background/70 px-4 py-2 text-sm shadow-sm">
                     <Loader2 className="size-4 animate-spin text-status-info" />
-                    正在同步项目看板
+                    {loadingProjects ? "正在同步项目看板" : "正在查找项目…"}
                   </div>
                 </div>
-              ) : projects.length === 0 && hostProjects.length > 0 ? null : projects.length === 0 ? (
+              ) : projects.length === 0 && (hostProjects.length > 0 || hostError) ? null : projects.length === 0 ? (
                 <div className="flex min-h-[360px] items-center justify-center">
                   <div
                     className={cn(
@@ -12577,19 +12751,23 @@ function EnterpriseHarnessBoardView({
                     <div className="relative mx-auto flex size-12 items-center justify-center rounded-2xl border border-status-info/20 bg-status-info/10 text-status-info shadow-sm">
                       <Workflow className="size-5" />
                     </div>
-                    <div className="relative mt-4 text-base font-semibold">暂无项目</div>
+                    <div className="relative mt-4 text-base font-semibold">
+                      {query.trim() ? "未找到匹配项目" : "暂无项目"}
+                    </div>
                     <p className="relative mt-2 text-sm leading-6 text-muted-foreground">
-                      新建第一个项目后，这里会自动聚合系统、特性进度和风险状态。
+                      {query.trim()
+                        ? "试试其他名称、目录或插件关键词。"
+                        : "选择项目插件并新建项目，即可按步骤执行任务。"}
                     </p>
                     <Button
                       className={cn("relative mt-5 gap-2", harnessActionButtonClassName)}
-                      onClick={openCreateDialog}
+                      onClick={() => query.trim() ? setQuery("") : openCreateDialog()}
                     >
                       <span aria-hidden="true" className={harnessActionOverlayClassName} />
                       <span className={harnessActionIconClassName}>
                         <Plus className="size-2.5" />
                       </span>
-                      <span className="relative">新建项目</span>
+                      <span className="relative">{query.trim() ? "清除搜索" : "新建项目"}</span>
                     </Button>
                   </div>
                 </div>
@@ -12784,15 +12962,14 @@ function EnterpriseHarnessBoardView({
       </div>}
       {createdDerivedProject && (
         <>
-          <section role="region" aria-label="新项目已创建"
-            className="fixed bottom-6 right-6 z-40 max-w-sm space-y-2 rounded-xl border bg-background p-4 shadow-lg">
-            <p className="font-medium">{createdDerivedProject.name} · 项目已创建</p>
-            <p className="text-sm">接下来选择这个项目的步骤，核对后创建需求。</p>
-            <Button disabled={openingCreatedProject || dialogOpen || !!editingProject || !!featureDialogProject}
-              onClick={() => void openCreatedProjectNodes()}>选择这个项目的步骤</Button>
-            {createdProjectError && <p role="alert" className="text-sm text-destructive">{createdProjectError}</p>}
-            <Button variant="ghost" disabled={openingCreatedProject} onClick={() => setCreatedDerivedProject(null)}>稍后再选</Button>
-          </section>
+          <CreatedPluginProjectActions
+            name={createdDerivedProject.name}
+            busy={openingCreatedProject || dialogOpen || !!editingProject || !!featureDialogProject}
+            error={createdProjectError}
+            onOpenProject={() => void openCreatedProject()}
+            onCustomizeSteps={() => void openCreatedProject(true)}
+            onDismiss={() => setCreatedDerivedProject(null)}
+          />
           <Dialog open={createdProjectNodesOpen} onOpenChange={setCreatedProjectNodesOpen}>
             <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
               <DialogHeader>
@@ -12813,23 +12990,12 @@ function EnterpriseHarnessBoardView({
           </Dialog>
         </>
       )}
-      {derivedProjectIntent && !derivedProjectIntent.projectId && <div role="region" aria-label="为新插件创建项目"
+      {derivedProjectIntent && derivedProjectIntentCurrent(derivedProjectIntent) && !derivedProjectIntent.projectId && <div role="status" aria-label="正在准备插件项目表单"
         className="fixed bottom-6 right-6 z-40 max-w-sm space-y-2 rounded-xl border bg-background p-4 shadow-lg">
-        <p className="text-sm">为 {derivedProjectIntent.name} 新建项目，使用独立的项目目录。</p>
-        {(dialogOpen || editingProject) && <p className="text-xs text-muted-foreground">请先完成或取消当前项目表单，现有输入不会被覆盖。</p>}
-        <Button disabled={dialogOpen || !!editingProject || creating} onClick={() => {
-          setCreatedDerivedProject(null)
-          setCreatedProjectNodesOpen(false)
-          setDerivedCreationSource(derivedProjectIntent.scope ? {
-            pluginId: derivedProjectIntent.pluginId, scope: derivedProjectIntent.scope
-          } : null)
-          setForm(createEmptyProjectForm(derivedProjectIntent.pluginId))
-          setFormError(null)
-          openProjectDialogAdapterSession()
-          setDialogOpen(true)
-          dismissDerivedProject(derivedProjectIntent.id)
-        }}>填写新项目</Button>
-        <Button variant="ghost" onClick={() => dismissDerivedProject(derivedProjectIntent.id)}>稍后设置</Button>
+        <p className="text-sm">{dialogOpen || editingProject
+          ? "请先完成或取消当前项目表单，现有输入不会被覆盖。"
+          : `正在准备 ${derivedProjectIntent.name} 的新建项目表单…`}</p>
+        <Button variant="ghost" onClick={() => dismissDerivedProject(derivedProjectIntent.id)}>取消打开</Button>
       </div>}
       <ProjectFormDialog
         hostTemplates={hostTemplates}

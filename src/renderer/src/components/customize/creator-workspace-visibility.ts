@@ -10,6 +10,7 @@ export function hasNativeCreatorWork(status: DevelopmentStatus | null): boolean 
       status.configuration ||
       status.projectTrial ||
       status.projectDelivery ||
+      (status.sourceSet && status.sourceSet.phase !== "cancelled") ||
       status.composition ||
       status.reuse ||
       status.save ||

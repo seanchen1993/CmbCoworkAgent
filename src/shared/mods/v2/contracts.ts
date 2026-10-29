@@ -116,6 +116,10 @@ export interface FunctionGuest {
 }
 
 /** The host distinguishes downstream rejection from a failing optional hook. */
+export const MODS_COMPOSITION_REVIEW_REQUIRED = "MODS_COMPOSITION_REVIEW_REQUIRED"
+export const MODS_COMPOSITION_REVIEW_MESSAGE =
+  "当前聊天的功能组合需要核对。消息未发送，输入已保留。"
+
 export class ModFunctionError extends Error {
   constructor(
     readonly code: string,

@@ -2139,6 +2139,31 @@ test("workflow approval card shows the FULL script (no truncation)", () => {
 })
 
 test("workflow settle reports + retries a failed final persist (no stale notification)", () => {
+  const ast = ts.createSourceFile("run-manager.ts", workflowRunManagerSource,
+    ts.ScriptTarget.Latest, true)
+  let settle, retire, assignment
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.initializer && ts.isArrowFunction(node.initializer)) {
+      if (node.name.getText(ast) === "settle") settle = node.initializer
+      if (node.name.getText(ast) === "retireSourceOwner") retire = node.initializer
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      node.left.getText(ast) === "entry.settled") assignment = node.right
+    ts.forEachChild(node, visit)
+  }
+  visit(ast)
+  assert(settle && ts.isBlock(settle.body), "the actual asynchronous settle body is present")
+  assert(retire && ts.isBlock(retire.body), "the actual source-owner retirement helper is present")
+  assert(assignment && ts.isCallExpression(assignment), "the settled lifecycle is assigned")
+  assert.equal(assignment.expression.getText(ast), "this.runInHostContext",
+    "the settled lifecycle retains the original host context")
+  const settledBody = settle.body.getText(ast)
+  const retirementHelper = retire.body.getText(ast)
+  assert.match(assignment.getText(ast),
+    /withRuntimePluginSource\(entry\.sourceToken,\s*\(\) => settle\(\)\)/,
+    "the original settled body executes under its captured plugin source")
+  assert.match(assignment.getText(ast), /return settle\(\{ error \}\)/,
+    "a synchronous source binding failure still enters the original cleanup")
   // #4: flush() reports success now; settle must retry once and log loudly on a
   // failed final persist instead of broadcasting a notification over a stale run.
   assert.match(
@@ -2147,21 +2172,16 @@ test("workflow settle reports + retries a failed final persist (no stale notific
     "flush reports persist success/failure"
   )
   assert.match(
-    workflowRunManagerSource,
+    settledBody,
     /const finalPersisted = \(await runStore\.flush\(\)\) \|\| \(await runStore\.flush\(\)\)/,
     "settle retries the final flush once"
   )
   assert.match(
-    workflowRunManagerSource,
+    settledBody,
     /if \(!finalPersisted\)[\s\S]*?could NOT be persisted/,
     "settle logs loudly when the final persist fails"
   )
-  // Retirement now drains the source owner through a local helper. Compare its
-  // invocation in the settled body, rather than the helper's definition order.
-  const retirementHelper = workflowRunManagerSource.match(
-    /const retireSourceOwner = async \(\) => \{([\s\S]*?)\r?\n {4}\}\r?\n {4}entry\.settled/
-  )?.[1]
-  assert(retirementHelper, "the original source-owner retirement helper is present")
+  // Compare the helper invocation in the actual settle body, not its definition order.
   assert.match(
     retirementHelper,
     /finally \{\s*this\.active\.delete\(request\.threadId\)/,
@@ -2172,15 +2192,15 @@ test("workflow settle reports + retries a failed final persist (no stale notific
     1,
     "the settled body cannot remove the active entry outside the retirement helper"
   )
-  const settledBodyAt = workflowRunManagerSource.indexOf("entry.settled = (async () => {")
-  assert(settledBodyAt >= 0, "the original settled lifecycle is present")
-  const settledBody = workflowRunManagerSource.slice(settledBodyAt)
   const fallbackPublishedAt = settledBody.indexOf("this.captureFlushFailedRun(request")
   const lifecycleRemovedAt = settledBody.indexOf("await retireSourceOwner()")
+  const notificationPublishedAt = settledBody.indexOf('type: "workflow_notification"')
   assert(
     fallbackPublishedAt >= 0 && lifecycleRemovedAt >= 0 && fallbackPublishedAt < lifecycleRemovedAt,
     "terminal fallback is published before the active lifecycle entry is removed"
   )
+  assert(notificationPublishedAt > lifecycleRemovedAt,
+    "the terminal notification follows fallback publication and awaited source retirement")
 })
 
 test("workflow notification reads an in-memory snapshot when final persist failed", () => {

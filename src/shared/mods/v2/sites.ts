@@ -23,7 +23,8 @@ export const FUNCTION_UI_SITES = [
 export type FunctionUiSite = (typeof FUNCTION_UI_SITES)[number]
 /** Passive presentation eligibility still requires a host source/purity/dependency proof. */
 export const FUNCTION_PASSIVE_DISPLAY_SITES: readonly FunctionUiSite[] = [
-  "UserMessage", "AssistantMessage", "CommandOutput", "ToolUse", "ToolResult", "ToolGroup"
+  "UserMessage", "AssistantMessage", "CommandOutput", "ToolUse", "ToolResult", "ToolGroup",
+  "TurnDuration"
 ]
 export type FunctionSiteMountOutcome =
   | { state: "mounted"; owner: string }

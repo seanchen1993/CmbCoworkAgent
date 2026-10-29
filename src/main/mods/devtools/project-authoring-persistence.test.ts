@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { existsSync, readdirSync } from "node:fs"
 import AdmZip from "adm-zip"
 import { basename, dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
@@ -98,6 +99,102 @@ it("restores immutable source and trial requests after restart without restoring
   running.release()
 })
 
+it("uses the configured trial root only for new trials while retaining old workspaces and scope guards", async () => {
+  const f = await fixture()
+  const guard = () => {}
+  const draft = await f.sessions.scaffold(scope, "workspace", "隔离试用", guard)
+  await f.sessions.requestTrial(scope, draft.id, draft.revision, "原试用", guard)
+  const legacy = f.sessions.acquireDevelopment(scope, draft.id, draft.revision, guard)
+  const legacyWorkspace = legacy.snapshot.workspace
+  await writeFile(join(legacyWorkspace, "legacy.txt"), "Retained trial evidence")
+  legacy.release()
+  const restoredDirectory = f.make().read(scope, draft.id).directory
+
+  const trialRoot = join(f.root, "project-trials")
+  const make = () => {
+    const sessions = new ProjectAuthoringSessions()
+    sessions.configurePersistence(f.settings, f.sourceRoot, trialRoot)
+    return sessions
+  }
+  const sessions = make()
+  expect(sessions.read(scope, draft.id).directory).toBe(restoredDirectory)
+  expect(sessions.read(scope, draft.id).source).toEqual(draft.source)
+  expect(sessions.developmentStatus(scope, draft.id)).toBeUndefined()
+  await sessions.inspect(scope, draft.id, draft.revision, "dev", guard)
+
+  // The native recovery caller supplies its checked, retained project workspace.
+  const recovered = sessions.acquireDevelopment(
+    scope,
+    draft.id,
+    draft.revision,
+    guard,
+    legacyWorkspace
+  )
+  expect(recovered.snapshot.workspace).toBe(legacyWorkspace)
+  expect(await readFile(join(legacyWorkspace, "legacy.txt"), "utf8")).toBe(
+    "Retained trial evidence"
+  )
+  recovered.release()
+
+  const first = sessions.acquireDevelopment(scope, draft.id, draft.revision, guard)
+  expect(dirname(first.snapshot.workspace)).toBe(trialRoot)
+  expect(await readdir(first.snapshot.workspace)).toEqual([])
+  expect(first.snapshot.packagePath).toBe(recovered.snapshot.packagePath)
+  expect(first.snapshot.packagePath.startsWith(f.sourceRoot)).toBe(true)
+  expect(first.snapshot.digest).toBe(legacy.snapshot.digest)
+  expect(() => sessions.acquireDevelopment(scope, draft.id, draft.revision, guard)).toThrow(
+    "PROJECT_DEV_RUNNING"
+  )
+  expect(() => sessions.configurePersistence(f.settings, f.sourceRoot, trialRoot)).toThrow(
+    "PROJECT_DRAFT_PERSISTENCE_BUSY"
+  )
+  for (const other of [
+    { ...scope, threadId: "other-chat" },
+    { ...scope, workspace: "other-workspace" },
+    { ...scope, incarnation: { token: "recreated", legacyCreatedAt: 2 } }
+  ]) {
+    expect(() => sessions.acquireDevelopment(other, draft.id, draft.revision, guard)).toThrow(
+      "PROJECT_DRAFT_MISSING"
+    )
+  }
+  await writeFile(join(first.snapshot.workspace, "earlier.txt"), "Earlier goal output")
+  first.release()
+
+  const beforeRevocation = await readdir(trialRoot)
+  expect(() =>
+    sessions.acquireDevelopment(scope, draft.id, draft.revision, () => {
+      throw Error("revoked")
+    })
+  ).toThrow("revoked")
+  expect(await readdir(trialRoot)).toEqual(beforeRevocation)
+  const second = sessions.acquireDevelopment(scope, draft.id, draft.revision, guard)
+  expect(second.snapshot.workspace).not.toBe(first.snapshot.workspace)
+  expect(await readdir(second.snapshot.workspace)).toEqual([])
+  second.release()
+
+  const restarted = make()
+  expect(restarted.read(scope, draft.id).source).toEqual(draft.source)
+  expect(restarted.developmentStatus(scope, draft.id)).toBeUndefined()
+  await restarted.inspect(scope, draft.id, draft.revision, "dev", guard)
+  const third = restarted.acquireDevelopment(scope, draft.id, draft.revision, guard)
+  try {
+    expect(dirname(third.snapshot.workspace)).toBe(trialRoot)
+    expect([legacyWorkspace, first.snapshot.workspace, second.snapshot.workspace]).not.toContain(
+      third.snapshot.workspace
+    )
+    expect(third.snapshot.digest).toBe(first.snapshot.digest)
+    expect(await readdir(third.snapshot.workspace)).toEqual([])
+    expect(await readFile(join(first.snapshot.workspace, "earlier.txt"), "utf8")).toBe(
+      "Earlier goal output"
+    )
+    expect(await readFile(join(legacyWorkspace, "legacy.txt"), "utf8")).toBe(
+      "Retained trial evidence"
+    )
+  } finally {
+    third.release()
+  }
+})
+
 it("retains checked business origin as provenance across restart without restoring Host execution", async () => {
   const f = await fixture()
   const first = await f.sessions.scaffold(scope, "independent", "独立业务", () => {})
@@ -180,6 +277,51 @@ it("can recover missing materialized directories and rejects concurrent stale so
     )
   ).rejects.toThrow("PROJECT_DRAFT_REVISION_CHANGED")
   expect(f.make().read(scope, draft.id).revision).toBe(next.revision)
+})
+
+it("cancels recovery after a partial staged write without poisoning the final source or retry", async () => {
+  const f = await fixture()
+  const draft = await f.sessions.scaffold(scope, "atomic-docs", "Atomic source", () => {})
+  await f.sessions.requestTrial(scope, draft.id, draft.revision, "Review source", () => {})
+  const restored = f.make()
+  const retained = restored.read(scope, draft.id)
+  const parent = dirname(retained.directory)
+  let interrupted = false
+  const guard = () => {
+    const staging = readdirSync(parent).find((name) => name.startsWith(".project-source-"))
+    if (staging && existsSync(join(parent, staging, retained.source.files[0].path))) {
+      interrupted = true
+      throw Error("RECOVERY_REVOKED_MID_WRITE")
+    }
+  }
+  await expect(restored.materializeForDelivery(scope, draft.id, draft.revision,
+    draft.source.digest, guard)).rejects.toThrow("RECOVERY_REVOKED_MID_WRITE")
+  expect(interrupted).toBe(true)
+  expect(existsSync(retained.directory)).toBe(false)
+  expect((await readdir(parent)).some((name) => name.startsWith(".project-source-"))).toBe(false)
+  await restored.materializeForDelivery(scope, draft.id, draft.revision, draft.source.digest, () => {})
+  expect((await readProjectSource(retained.directory)).bundle.digest).toBe(draft.source.digest)
+  expect(restored.developmentStatus(scope, draft.id)).toBeUndefined()
+})
+
+it("accepts concurrent exact recovery publications but never overwrites an existing foreign directory", async () => {
+  const f = await fixture()
+  const draft = await f.sessions.scaffold(scope, "concurrent-docs", "Concurrent source", () => {})
+  await f.sessions.requestTrial(scope, draft.id, draft.revision, "Review source", () => {})
+  const left = f.make(), right = f.make()
+  const retained = left.read(scope, draft.id)
+  await Promise.all([left, right].map((sessions) => sessions.materializeForDelivery(
+    scope, draft.id, draft.revision, draft.source.digest, () => {})))
+  expect((await readProjectSource(retained.directory)).bundle.digest).toBe(draft.source.digest)
+  expect((await readdir(dirname(retained.directory))).some((name) =>
+    name.startsWith(".project-source-"))).toBe(false)
+  await rm(retained.directory, { recursive: true })
+  await mkdir(retained.directory)
+  await writeFile(join(retained.directory, "foreign.txt"), "Retain foreign bytes")
+  await expect(left.materializeForDelivery(scope, draft.id, draft.revision,
+    draft.source.digest, () => {})).rejects.toThrow()
+  expect(await readFile(join(retained.directory, "foreign.txt"), "utf8")).toBe("Retain foreign bytes")
+  expect(await readdir(retained.directory)).toEqual(["foreign.txt"])
 })
 
 it("binds recovered sources to the exact original chat incarnation and rejects edited source bytes", async () => {

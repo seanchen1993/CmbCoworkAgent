@@ -12,7 +12,11 @@ declare namespace DevClawMods {
   export interface ProcessResult { code:number|null;signal:string|null }
   export interface ProcessChunk { stream:"stdout"|"stderr";text:string }
   export interface Stream<C,R> extends AsyncGenerator<C,R,unknown> { readonly result:Promise<R> }
-  export interface ProcessOptions { cwd?:string;env?:Record<string,string>;stdin?:string;timeoutMs?:number }
+  export interface ProcessOptions {
+    cwd?:string;env?:Record<string,string>;stdin?:string;timeoutMs?:number;
+    /** Require one native process execution with unchanged normalized request and original result. Hooks may observe or deny; substitutions fail closed. Does not add permissions. */
+    integrity?:"native"
+  }
   export interface AgentSpec {
     name:string;description:string;prompt:string;tools?:readonly string[];disallowedTools?:readonly string[];
     model?:string;

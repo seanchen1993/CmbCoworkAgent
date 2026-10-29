@@ -33,7 +33,8 @@ import { persistHookResultRecord } from "./log-record"
 import { getModsManager } from "../mods/manager"
 import { getModCallContext } from "../mods/context"
 import { ModError } from "../mods/errors"
-import { copyClassicResult, sameClassicResult, contributedClassicFeedback } from "../mods/v2/classic-result"
+import { copyClassicResult, sameClassicResult, contributedClassicFeedback,
+  participatedClassicHandler } from "../mods/v2/classic-result"
 import type { ModObject } from "../../shared/mods/types"
 import { isModObject, ModFunctionError } from "../../shared/mods/v2/contracts"
 import { trackEvent } from "../services/event-reporter"
@@ -1460,6 +1461,12 @@ async function executeSyncHook(
   const diagnostic = getHookLoggingConfig().diagnostic
   let result: HookResult
   let stdinPayload: string | undefined
+  const finish = (value: HookResult): HookResult => {
+    value.durationMs = Date.now() - startedAt
+    if (stdinPayload !== undefined) value.stdinPayload = stdinPayload
+    if (diagnostic) value.cwd = getCommandCwd(context)
+    return value
+  }
   if (hookType === "prompt") {
     if (diagnostic) {
       const policy = hook.prompt?.trim()
@@ -1510,19 +1517,25 @@ async function executeSyncHook(
   if (!requiredBusinessCheck) assertCurrentRuntimePluginSourceContent()
   requiredBusinessCheck?.()
   if (requiredBusinessCheck && result.exitCode !== 0)
-    return applyConfiguredOnBlock(requiredBusinessCheckFailure(hook,
-      result.stderr || result.stdout || `exit ${result.exitCode}`), hook)
+    return finish(
+      applyConfiguredOnBlock(
+        requiredBusinessCheckFailure(hook, result.stderr || result.stdout || `exit ${result.exitCode}`),
+        hook
+      )
+    )
   const commitReceipts = hookType === "command" ? prepareStageCheckReceipts(hook, context, result) : undefined
   const parsed = parseHookJsonOutput(result)
   if (requiredBusinessCheck && parsed.decision === "human_gate" &&
     (event !== "PreToolUse" || context.toolName !== "execute" || !parsed.systemMessage?.trim()))
-    return requiredBusinessCheckFailure(hook, "human gates require PreToolUse(execute) and a nonempty message")
+    return finish(
+      requiredBusinessCheckFailure(hook, "human gates require PreToolUse(execute) and a nonempty message")
+    )
   const finalized = applyConfiguredOnBlock(
     normalizeHumanGateDecisionForEvent(parsed, hook, event),
     hook
   )
   if (requiredBusinessCheck && finalized.updatedInput !== undefined)
-    return requiredBusinessCheckFailure(hook, "checks cannot transform the validated input")
+    return finish(requiredBusinessCheckFailure(hook, "checks cannot transform the validated input"))
   if (commitReceipts && finalized.exitCode === 0 && !finalized.blocked && finalized.decision !== "block" && finalized.decision !== "human_gate" && finalized.continue !== false && !hook.forcedOutcome) {
     // The original receipt closure performs its own full check before invoking its sink.
     // Keep the current signal/call/generation fence without hashing twice in this stack.
@@ -1531,10 +1544,7 @@ async function executeSyncHook(
     await commitReceipts()
     requiredBusinessCheck?.()
   }
-  finalized.durationMs = Date.now() - startedAt
-  if (stdinPayload !== undefined) finalized.stdinPayload = stdinPayload
-  if (diagnostic) finalized.cwd = getCommandCwd(context)
-  return finalized
+  return finish(finalized)
 }
 /**
  * Run all matching hooks for a given event.
@@ -1740,7 +1750,8 @@ async function runClassicFunctionHook(
   event: HookEvent,
   context: HookContext,
   legacy: (input?: ModObject) => Promise<HookResult | null>,
-  assertCurrent: () => void
+  assertCurrent: () => void,
+  onSetupParticipant?: () => void
 ): Promise<HookResult | null> {
   if (!CLASSIC_HOOK_EVENTS.has(event) || !context.workspacePath || !context.sessionId) return legacy()
   const manager = getModsManager()
@@ -1790,6 +1801,7 @@ async function runClassicFunctionHook(
     signal.throwIfAborted()
     assertCurrent()
     const native = lower ? await lower : null
+    if (event === "Setup" && participatedClassicHandler(result)) onSetupParticipant?.()
     const feedbackContributed = contributedClassicFeedback(result, coreResult)
     // Empty/unapproved/nonmatching guests and next() passthrough must retain every
     // native field. A policy rewrite may change the wire result, but is not guest feedback.
@@ -2070,7 +2082,8 @@ export async function runHooks(
   hooks: HookConfig[],
   event: HookEvent,
   context: HookContext,
-  onHookResult?: HookResultCallback
+  onHookResult?: HookResultCallback,
+  onSetupParticipant?: () => void
 ): Promise<HookResult | null> {
   const source = currentRuntimePluginSource()
   if (source?.stageDebug) {
@@ -2112,7 +2125,7 @@ export async function runHooks(
       return runLegacyHooks(ordinary, event, { ...context, toolArgs }, onHookResult, null, accounting)
     }
     return runLegacyHooks(ordinary, event, context, onHookResult, null, accounting)
-  }, assertCurrent)
+  }, assertCurrent, onSetupParticipant)
   if (!required.length) return result
   assertCurrent()
   // Final validation is outside the guest fold. A guest cannot omit next(),
@@ -2164,6 +2177,9 @@ export async function runHooks(
     if (checked.decision === "human_gate") checked = {
       ...checked, decisionSource: { hookId: hook.id, pluginId: source.pluginId }
     }
+    console.log(
+      `[Hooks] ${event} hook (${hook.type ?? "command"}) "${(hook.command ?? hook.prompt ?? "").slice(0, 60)}" → exit=${checked.exitCode}, blocked=${isBlockingResult(checked)}`
+    )
     recordHookResult(event, hook, checked, hookContext, onHookResult)
     if (isBlockingResult(checked)) return {
       ...combined, ...checked, blocked: true,

@@ -1244,6 +1244,10 @@ async function runMain(failures: unknown[]): Promise<void> {
     await page!.screenshot({ path: join(artifacts, "audit.png") })
     pass("production results panel renders durable project call records")
     await openModsSettings(page!)
+    await page!
+      .getByRole("article", { name: "function-commands", exact: true })
+      .getByRole("button", { name: "管理", exact: true })
+      .click()
     const functionSettings = page!.locator('[data-function-mod-id="function-commands"]')
     await functionSettings.waitFor()
     await functionSettings.getByRole("button", { name: "授权以上能力", exact: true }).click()
@@ -3670,6 +3674,10 @@ async function runMain(failures: unknown[]): Promise<void> {
       .waitFor()
     pass("pane preferences survive renderer reload and complete application restart")
     await openModsSettings(page!)
+    await page!
+      .getByRole("article", { name: "function-commands", exact: true })
+      .getByRole("button", { name: "管理", exact: true })
+      .click()
     await page!
       .locator('[data-function-mod-id="function-commands"]')
       .getByRole("button", { name: "撤销权限", exact: true })

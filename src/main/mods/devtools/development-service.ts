@@ -11,6 +11,7 @@ import { readPureFunctionSource } from "./authoring-install-source"
 import { AuthoringVersionRepository } from "./authoring-version-repository"
 import { analyzeDevelopmentSource } from "./development-analysis"
 import { AuthoringCompileError } from "./authoring-compile-diagnostics"
+import { AuthoringValidationError } from "./authoring-validation-result"
 import { DevelopmentCandidateError } from "./development-candidate-diagnostics"
 import { CreatorRequestBudgets, creatorModelSummary, type CreatorModelObservation } from "./creator-request-budget"
 import { issueCreatorModelAccounting } from "./creator-model-accounting"
@@ -135,6 +136,12 @@ export class ModDevelopmentService {
   private readonly previousTrials = new Map<string, PreviousTrial>()
   configureReuse(service: CreatorReuseService): void {
     this.reuse = service
+  }
+  /** Original native review custody only; never inferred from a model tool result. */
+  hasPendingNativeTurnReview(threadId: string, workspace: string, turnId: string): boolean {
+    if (!this.isCreatorMode(threadId, workspace)) return false
+    const context = this.projectAuthoringContext(threadId)
+    return this.reuse?.hasPendingTurnReview(context, turnId) ?? false
   }
   configureTrialUndoStop(stop: NonNullable<ModDevelopmentService["undoStop"]>): void {
     this.undoStop = stop
@@ -563,8 +570,11 @@ export class ModDevelopmentService {
     this.deps.changed(threadId)
     return draftDocument(scope.workspace, draft)
   }
-  private async operation<T>(threadId: string, run: () => Promise<T>): Promise<T> {
+  assertAuthoringAvailable(threadId: string): void {
     if (this.busy.has(threadId) || this.busy.size >= 2) throw Error("DEVELOPMENT_BUSY")
+  }
+  private async operation<T>(threadId: string, run: () => Promise<T>): Promise<T> {
+    this.assertAuthoringAvailable(threadId)
     this.busy.add(threadId)
     try {
       return await run()
@@ -765,6 +775,10 @@ export class ModDevelopmentService {
     assertTurn: () => void
   ) {
     assertTurn()
+    signal.throwIfAborted()
+    // Saving is synchronous. Admit before it, then acquire the preparation lock without
+    // yielding, so a competing submit cannot invalidate the accepted draft revision.
+    this.assertAuthoringAvailable(threadId)
     const document = this.save(threadId, input)
     try {
       const status = await this.requestTrial(
@@ -782,6 +796,17 @@ export class ModDevelopmentService {
       }
     } catch (error) {
       assertTurn()
+      if (error instanceof AuthoringValidationError) {
+        signal.throwIfAborted()
+        const current = this.read(threadId, document.id)
+        if (
+          current.revision !== document.revision ||
+          current.source.digest !== document.source.digest ||
+          error.check.digest !== document.source.digest
+        )
+          throw Error("AUTHORING_VERSION_CHANGED")
+        return { document, check: error.check, status: this.status(threadId) }
+      }
       if (error instanceof AuthoringCompileError)
         return {
           document,

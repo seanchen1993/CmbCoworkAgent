@@ -50,6 +50,24 @@ describe("chat virtual measured window", () => {
     expect(exhausted.key).not.toBe(initial.key)
   })
 
+  it("does not assign a released historical prefix's sizes to a restored latest page", () => {
+    const historical = projectChatVirtualWindow(null, "chat", [
+      ...Array.from({ length: 872 }, (_, index) => `message-${index}`),
+      ...Array.from({ length: 320 }, (_, index) => `message-${1680 + index}`)
+    ])
+    const latest = projectChatVirtualWindow(
+      historical,
+      "chat",
+      Array.from({ length: 500 }, (_, index) => `message-${1500 + index}`)
+    )
+
+    // A net trim of 692 would reuse message-692's measured slot for message-1500,
+    // although only the tail starting at message-1680 is common to both windows.
+    expect(latest.key).not.toBe(historical.key)
+    expect(latest.firstItemIndex).toBe(10_000)
+    expect(latest.identities.at(-1)).toBe("message-1999")
+  })
+
   it("preserves an unchanged projection and rejects ambiguous overlapping identities", () => {
     const initial = projectChatVirtualWindow(null, "chat", ["user:id", "tool:id:occurrence-1"])
     expect(projectChatVirtualWindow(initial, "chat", [...initial.identities])).toBe(initial)

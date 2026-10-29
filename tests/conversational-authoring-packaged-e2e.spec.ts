@@ -479,7 +479,7 @@ async function main() {
     assert(project)
     await page
       .getByRole("region", { name: "新项目已创建" })
-      .getByRole("button", { name: "选择这个项目的步骤", exact: true })
+      .getByRole("button", { name: "调整步骤（可选）", exact: true })
       .click()
     await page.getByRole("dialog", { name: "选择新项目步骤", exact: true }).waitFor()
     await page.getByRole("checkbox").first().waitFor()
@@ -495,7 +495,7 @@ async function main() {
       .click()
     await page
       .getByRole("region", { name: "新项目已创建" })
-      .getByRole("button", { name: "选择这个项目的步骤", exact: true })
+      .getByRole("button", { name: "调整步骤（可选）", exact: true })
       .click()
     await page.getByRole("dialog", { name: "选择新项目步骤", exact: true }).waitFor()
     await page.getByRole("checkbox").first().waitFor()

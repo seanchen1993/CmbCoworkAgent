@@ -125,4 +125,26 @@ describe("installed plugin project routing", () => {
       )
     ).rejects.toThrow("query failed")
   })
+  it("rejects an installation changed since the visible card before reading its templates", async () => {
+    for (const current of [
+      { ...plugin, version: "2.0.0" },
+      { ...plugin, enabled: false },
+      { ...plugin, path: "C:/fixture/replacement" },
+      { ...plugin, updatedAt: "two" }
+    ]) {
+      const templates = vi.fn(async () => [template])
+      await expect(
+        readInstalledPluginProjectEntry(
+          plugin.id,
+          {
+            plugins: async () => [current],
+            templates
+          },
+          () => true,
+          plugin
+        )
+      ).rejects.toThrow("插件版本或状态已变化")
+      expect(templates).not.toHaveBeenCalled()
+    }
+  })
 })

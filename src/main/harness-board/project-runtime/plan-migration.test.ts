@@ -11,6 +11,8 @@ import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 import { inspectHostPlanMigration } from "./plan-migration"
 import { dirname } from "node:path"
 import type { ClawActionDescriptor } from "../../../shared/mods/claw-actions"
+import { createAuthoringSourceBundle } from "../../mods/devtools/authoring-bundle"
+import { inspectProjectSource } from "../../mods/devtools/project-doctor"
 
 const cleanup: Array<() => void> = []
 afterEach(() =>
@@ -179,7 +181,7 @@ describe("stable native plan migration", () => {
     expect((await f.service.migratePlan(review)).stageIndex).toBe(1)
     expect(f.store.getOperation(f.op.operationId)?.status).toBe("transitioned")
   })
-  it("preserves completed business bindings while recompiling future native checks", () => {
+  it.each([false, true])("preserves completed business bindings while recompiling future native checks (pretty=%s)", legacyGeneratedPretty => {
     const root = mkdtempSync(join(tmpdir(), "native-action-migration-"))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
     const descriptor: ClawActionDescriptor = {
@@ -218,9 +220,10 @@ describe("stable native plan migration", () => {
       environment: [],
       modules: [module("draft"), module("review")]
     }
-    const save = (folder: string, input: typeof source) => {
+    const save = (folder: string, input: typeof source, pretty = false) => {
       const compiled = compileNativeComposition(input, {
         actionCatalog: [descriptor],
+        legacyGeneratedPretty: pretty,
         files: input.modules.map((item) => ({
           path: item.skill,
           bytes: Buffer.from(`---\nname: ${item.id}\n---\nWrite ${item.id}`)
@@ -234,7 +237,7 @@ describe("stable native plan migration", () => {
     }
     const original = join(root, "original"),
       revised = join(root, "revised")
-    const manifest = save(original, source)
+    const manifest = save(original, source, legacyGeneratedPretty)
     const candidateSource = {
       ...source,
       plugin: { ...source.plugin, version: "1.1.0" },
@@ -268,7 +271,7 @@ describe("stable native plan migration", () => {
       "AUTHOR_SOURCE_INVALID"
     )
   })
-  it("permits verified native future author Skills but rejects hand-edited generated projections", () => {
+  it.each([false, true])("permits verified native future author Skills but rejects hand-edited generated projections (pretty=%s)", legacyGeneratedPretty => {
     const root = mkdtempSync(join(tmpdir(), "native-plan-source-"))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
     const module = (id: string) => ({
@@ -289,9 +292,10 @@ describe("stable native plan migration", () => {
       environment: [],
       modules: [module("draft"), module("review")]
     }
-    const save = (folder: string, input: typeof source) => {
+    const save = (folder: string, input: typeof source, pretty = false) => {
       const compiled = compileNativeComposition(input, {
         actionCatalog: [],
+        legacyGeneratedPretty: pretty,
         files: input.modules.map((item) => ({
           path: item.skill,
           bytes: Buffer.from(`---\nname: ${item.id}\n---\nWrite ${item.id}`)
@@ -305,12 +309,13 @@ describe("stable native plan migration", () => {
     }
     const original = join(root, "original"),
       revised = join(root, "revised")
-    const manifest = save(original, source)
-    const candidate = save(revised, {
+    const manifest = save(original, source, legacyGeneratedPretty)
+    const candidateSource = {
       ...source,
       plugin: { ...source.plugin, version: "1.1.0" },
       modules: [source.modules[0], module("normalize"), source.modules[1]]
-    })
+    }
+    const candidate = save(revised, candidateSource, legacyGeneratedPretty)
     const state = {
       ...hostProjectFixture(root),
       manifest,
@@ -325,6 +330,23 @@ describe("stable native plan migration", () => {
     expect(inspectHostPlanMigration(state, candidate, original, revised).remainingStageIds).toEqual(
       ["normalize", "review"]
     )
+    save(revised, candidateSource)
+    expect(inspectHostPlanMigration(state, candidate, original, revised).remainingStageIds)
+      .toEqual(["normalize", "review"])
+    for (const path of ["plugin.json", "composition/lock.json", "devclaw.project-runtime.json", "devclaw.project-actions.lock.json"]) {
+      const file = join(revised, path)
+      const text = readFileSync(file, "utf8")
+      writeFileSync(file, JSON.stringify(JSON.parse(text), null, 2) + "\n")
+      expect(() => inspectHostPlanMigration(state, candidate, original, revised))
+        .toThrow("AUTHOR_SOURCE_INVALID")
+      writeFileSync(file, text)
+    }
+    const actionLock = join(revised, "devclaw.project-actions.lock.json")
+    const canonical = readFileSync(actionLock, "utf8")
+    writeFileSync(actionLock, canonical + "\n")
+    expect(() => inspectHostPlanMigration(state, candidate, original, revised))
+      .toThrow("AUTHOR_SOURCE_INVALID")
+    writeFileSync(actionLock, canonical)
     writeFileSync(join(revised, "modules/review/SKILL.md"), "Changed without compiling")
     expect(() => inspectHostPlanMigration(state, candidate, original, revised)).toThrow(
       "AUTHOR_SOURCE_INVALID"
@@ -336,6 +358,166 @@ describe("stable native plan migration", () => {
     const review = await f.service.reviewPlanMigration("project", 2)
     expect((await f.service.migratePlan(review)).stageIndex).toBe(1)
   })
+
+  it.each(["all-preceding", "mixed"])(
+    "replays real pre-projection inputs without upgrading completed stages (%s)",
+    (layout) => {
+      const root = mkdtempSync(join(tmpdir(), "native-legacy-input-migration-"))
+      cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+      const module = (
+        id: string,
+        inputs: Array<{ artifactId: string; contract: string }> = []
+      ) => ({
+        id,
+        version: "1.0.0",
+        title: id,
+        skill: `modules/${id}/SKILL.md`,
+        inputs,
+        outputs: [{ id, path: `${id}.json`, contract: "document/v1" }],
+        checks: [
+          {
+            id: `${id}-shape`,
+            kind: "json-schema",
+            artifactId: id,
+            schema: { type: "object", required: [] as string[] }
+          }
+        ]
+      })
+      const source = {
+        apiVersion: "devclaw.native-composition/v1",
+        plugin: { id: "docs", version: "1.0.0", title: "Docs", description: "Documents" },
+        resources: ["tests/project-contract.json"],
+        environment: [],
+        modules: [
+          module("draft"),
+          module("review"),
+          module("finish", [{ artifactId: "review", contract: "document/v1" }])
+        ]
+      }
+      const save = (
+        folder: string,
+        input: typeof source,
+        options: {
+          legacyStages?: ReadonlySet<string>
+          pretty?: boolean
+          skillContents?: Record<string, string>
+        } = {}
+      ) => {
+        const compiled = compileNativeComposition(input, {
+          actionCatalog: [],
+          legacyGeneratedPretty: options.pretty,
+          legacyInputArtifactStages: options.legacyStages,
+          files: [
+            ...input.modules.map((item) => ({
+              path: item.skill,
+              bytes: Buffer.from(
+                `---\nname: ${item.id}\n---\n${options.skillContents?.[item.id] ?? `Write ${item.id}`}`
+              )
+            })),
+            {
+              path: "tests/project-contract.json",
+              bytes: Buffer.from(
+                JSON.stringify({
+                  apiVersion: "devclaw.project-contract/v1",
+                  cases: [
+                    { id: "missing-draft", stageId: "draft", files: [], expected: "failed" },
+                    {
+                      id: "valid-draft",
+                      stageId: "draft",
+                      files: [{ path: "draft.json", text: "{}" }],
+                      expected: "passed"
+                    }
+                  ]
+                })
+              )
+            }
+          ]
+        })
+        for (const file of compiled.files) {
+          mkdirSync(dirname(join(folder, file.path)), { recursive: true })
+          writeFileSync(join(folder, file.path), file.bytes)
+        }
+        return { compiled, manifest: parseProjectRuntimeManifest(compiled.runtime) }
+      }
+      const original = join(root, "original"),
+        revised = join(root, "revised")
+      const old = save(original, source, {
+        pretty: true,
+        legacyStages: new Set(
+          layout === "all-preceding" ? source.modules.map((item) => item.id) : ["review"]
+        )
+      })
+      // This is the actual old projection: the source declares a subset while runtime uses all prior inputs.
+      expect(source.modules[1].inputs).toEqual([])
+      expect(old.manifest.stages[1].inputArtifactIds).toBeUndefined()
+      if (layout === "mixed") expect(old.manifest.stages[2].inputArtifactIds).toEqual(["review"])
+      else expect(old.manifest.stages[2].inputArtifactIds).toBeUndefined()
+      const oldBundle = createAuthoringSourceBundle(
+        old.compiled.files.map((file) => ({
+          path: file.path,
+          text: file.bytes.toString("utf8")
+        }))
+      )
+      expect(inspectProjectSource(oldBundle).report.diagnostics).toEqual([])
+      const candidateSource = {
+        ...source,
+        plugin: { ...source.plugin, version: "1.1.0" },
+        modules: [source.modules[0], source.modules[1], module("normalize"), source.modules[2]]
+      }
+      const state = {
+        ...hostProjectFixture(root),
+        manifest: old.manifest,
+        status: "active" as const,
+        stageIndex: 1
+      }
+      const completedLegacy = new Set(
+        old.manifest.stages
+          .slice(0, state.stageIndex)
+          .filter((stage) => stage.inputArtifactIds === undefined)
+          .map((stage) => stage.id)
+      )
+      const candidate = save(revised, candidateSource, {
+        legacyStages: completedLegacy,
+        skillContents: { review: "Update the still-future review" }
+      }).manifest
+      expect(candidate.stages[1].inputArtifactIds).toEqual([])
+      expect(
+        inspectHostPlanMigration(state, candidate, original, revised).remainingStageIds
+      ).toEqual(["review", "normalize", "finish"])
+
+      const changedCheck = structuredClone(candidateSource)
+      changedCheck.modules[0].checks[0].schema.required = ["approved"]
+      const changedContract = save(revised, changedCheck, {
+        legacyStages: completedLegacy
+      }).manifest
+      expect(() => inspectHostPlanMigration(state, changedContract, original, revised)).toThrow(
+        "COMPLETED_CONTRACT_CHANGED"
+      )
+      const changedSkill = save(revised, candidateSource, {
+        legacyStages: completedLegacy,
+        skillContents: { draft: "Changed completed author source" }
+      }).manifest
+      expect(() => inspectHostPlanMigration(state, changedSkill, original, revised)).toThrow(
+        "COMPLETED_SKILL_CHANGED"
+      )
+
+      // Once review is completed its old all-preceding runtime contract cannot silently become explicit [].
+      const completedReview = { ...state, stageIndex: 2 }
+      const upgradedPast = save(revised, candidateSource, {
+        legacyStages: completedLegacy
+      }).manifest
+      expect(() =>
+        inspectHostPlanMigration(completedReview, upgradedPast, original, revised)
+      ).toThrow("COMPLETED_STAGE_CHANGED")
+      const preservedPast = save(revised, candidateSource, {
+        legacyStages: new Set([...completedLegacy, "review"])
+      }).manifest
+      expect(
+        inspectHostPlanMigration(completedReview, preservedPast, original, revised)
+          .remainingStageIds
+      ).toEqual(["normalize", "finish"])
+    }
+  )
 
   it("rejects changed approved optional artifacts even when no check references them", async () => {
     const f = await fixture({ optionalApproval: true })

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BaseChatModel } from "@langchain/core/language_models/chat_models"
@@ -29,6 +29,9 @@ import { captureCurrentFunctionNativeToolCompletion, installFunctionConversation
   type FunctionNativeToolReturnView } from
   "./function-conversation-native-tools"
 import { createFunctionConversationSharedAgent } from "./mods-conversation-shared-invocation"
+import { createWorkflowChildModsRuntime, readWorkflowChildModsContext } from "./workflow-child-mods-context"
+import { createHostRuntimeLifecycle } from "./runtime-host-lifecycle"
+import { currentFunctionExecution } from "../mods/v2/execution-context"
 
 const paths = vi.hoisted(() => ({ database: "" }))
 vi.mock("../storage", () => ({ getDbPath: () => paths.database,
@@ -226,6 +229,78 @@ describe("original known ToolNode request and completed output provenance", () =
     expect(captureRuntime).not.toHaveBeenCalled()
     expect(flush).not.toHaveBeenCalled()
     expect(f.store.readRows(f.runtime.target.ref)).toHaveLength(0)
+  })
+
+  it("keeps an independent Workflow child's file tool Hooks outside its parent's native completion scope", async () => {
+    const f = await fixture(() => false)
+    setModsManager(f.manager)
+    cleanups.push(() => setModsManager(undefined))
+    const fileRoot = mkdtempSync(join(f.workspace, "actual-child-worktree-"))
+    writeFileSync(join(fileRoot, "scope.txt"), "actual isolated child file")
+    const childThreadId = `${f.threadId}__wf_original_a1`, childAgentId = "original-workflow-child"
+    const childEffects = vi.fn()
+    let childModel: LocalModel | undefined
+    const assertParentStillRejects = () => expect(() => captureCurrentFunctionNativeToolCompletion(
+      f.authority, { name: "foreign_child_call", id: "foreign", args: {} }))
+      .toThrow("MODS_CONVERSATION_NATIVE_TOOL_SOURCE_INVALID")
+    const parentTool = tool(async () => {
+      assertParentStillRejects()
+      const child = await createWorkflowChildModsRuntime({ parentThreadId: f.threadId,
+        childThreadId, agentId: childAgentId, workspace: f.workspace, fileRoot,
+        signal: f.controller.signal }, async bindLifecycle => {
+        expect(captureCurrentFunctionNativeToolCompletion(f.authority,
+          { name: "foreign_creation_call", id: "foreign", args: {} })).toBeUndefined()
+        const instance = f.manager.createRuntimeAuthority({ workspace: f.workspace,
+          threadId: childThreadId, agentId: childAgentId, turnId: childThreadId,
+          signal: f.controller.signal })
+        const unbind = f.manager.bindThread({ workspace: f.workspace, executionWorkspace: fileRoot,
+          threadId: childThreadId, agentId: childAgentId, turnId: childThreadId,
+          runtimeAuthority: instance.authority, readOnly: true })
+        cleanups.push(() => { unbind(); instance.release() })
+        bindLifecycle(createHostRuntimeLifecycle(instance.authority, f.controller.signal))
+        const actualRead = tool(() => {
+          childEffects()
+          expect(currentFunctionExecution()?.runtimeAuthority).toBe(instance.authority)
+          expect(readWorkflowChildModsContext(childThreadId)?.fileRoot).toBe(
+            process.platform === "win32" ? fileRoot.toLowerCase() : fileRoot)
+          expect(captureCurrentFunctionNativeToolCompletion(instance.authority,
+            { name: "foreign_effect_call", id: "foreign", args: {} })).toBeUndefined()
+          return readFileSync(join(fileRoot, "scope.txt"), "utf8")
+        }, { name: "read_file", schema: z.object({}) })
+        childModel = provider([{ name: actualRead.name, id: "original-child-read", args: {} }])
+        // This independent workflow child has no native conversation ledger, as in production.
+        const graph = createAgent({ model: childModel, tools: [actualRead], middleware: [
+          createToolHookMiddleware({ runtimeAuthority: instance.authority, workspacePath: f.workspace,
+            threadId: childThreadId, agentId: childAgentId, hookTurnId: childThreadId,
+            hookScope: createHookScope(), resolveHooksForContext: () => [] })
+        ] })
+        return { stream: async (input, config) => graph.stream(
+          input as Parameters<typeof graph.stream>[0], config as Parameters<typeof graph.stream>[1]) }
+      })
+      try {
+        for await (const snapshot of await child.runtime.stream({
+          messages: [new HumanMessage("read the original isolated child file")]
+        }, { configurable: { thread_id: childThreadId }, signal: f.controller.signal,
+          streamMode: "values" })) { void snapshot }
+      } finally { child.close() }
+      assertParentStillRejects()
+      return "actual parent retained the independent child result"
+    }, { name: "workflow", schema: z.object({}) })
+    const parentModel = provider([{ name: parentTool.name, id: "original-workflow-launch", args: {} }])
+    const parent = createAgent({ model: parentModel, tools: [parentTool], checkpointer: f.saver })
+    const views: FunctionNativeToolReturnView[] = []
+    install(f, parent.graph, async view => { views.push(view); return view.message })
+    await parent.invoke({ messages: [new HumanMessage("launch the original workflow child")] }, f.config)
+    expect(childEffects).toHaveBeenCalledTimes(1)
+    expect(childModel?.requests).toHaveLength(2)
+    expect(childModel?.requests[1].filter(ToolMessage.isInstance).map(message => message.content))
+      .toEqual(["actual isolated child file"])
+    expect(parentModel.requests).toHaveLength(2)
+    expect(views).toHaveLength(1)
+    expect(views[0].origin.tool).toBe("workflow")
+    expect(views[0].originalCallId).toBe("original-workflow-launch")
+    expect((await kept(f)).filter(ToolMessage.isInstance).map(message => message.content))
+      .toEqual(["actual parent retained the independent child result"])
   })
 
   it("uses the actual requested name when the final ToolMessage has no optional name/status", async () => {

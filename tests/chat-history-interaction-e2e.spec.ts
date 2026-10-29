@@ -10,6 +10,7 @@ import {
   writeFileSync
 } from "node:fs"
 import { dirname, join, relative, resolve } from "node:path"
+import { isChatRowPresented } from "../src/renderer/src/components/chat/chat-row-presentation"
 import type { ElectronApplication, Locator, Page } from "playwright"
 import {
   createHeadlessProjectCompositionLaunch,
@@ -22,6 +23,7 @@ import {
   processObservation,
   readableDuration
 } from "./support/performance-acceptance"
+import { runThreadDisplayMetadataCases } from "./support/thread-display-metadata-e2e"
 
 const messageCount = historyScale(process.env.CHAT_HISTORY_MESSAGES)
 const lastMessageId = `history-thumb-${messageCount - 1}`
@@ -51,6 +53,8 @@ interface Observation {
   peakMountedRows: number
   maxBlankMs: number
   maxPendingMs: number
+  geometryFallbacks: number
+  geometryRowsChecked: number
   seenMessages: string[]
   blankEpisodes: Array<{
     start: number
@@ -61,6 +65,7 @@ interface Observation {
   }>
 }
 interface HistoryWindow extends Window {
+  historyRowPresented(row: Element): boolean
   historyInteraction: {
     snapshot(): { readable: number; pending: number; mounted: number }
     phase(label: string): void
@@ -134,6 +139,10 @@ const requested =
     ? "unrelated-approved-guest"
     : process.env.CHAT_HISTORY_CASE
 const diagnostic = process.env.CHAT_HISTORY_DIAGNOSTIC === "1"
+const metadataRacePreflight = process.env.CHAT_HISTORY_METADATA_RACE === "1"
+const presentationScenario = process.env.CHAT_HISTORY_PRESENTATION_SCENARIO
+assert(!presentationScenario || ["detach", "deadline"].includes(presentationScenario),
+  "Presentation scenario must be detach or deadline")
 assert(
   !requested || ["ordinary", "protected", "unrelated-approved-guest"].includes(requested),
   "Unknown case"
@@ -177,6 +186,8 @@ async function beginObservation(page: Page, threadId: string) {
         pendingStart: number | undefined,
         maxBlankMs = 0,
         maxPendingMs = 0
+      let geometryFallbacks = 0,
+        geometryRowsChecked = 0
       const start = performance.now(),
         frames: number[] = [],
         longTasks: number[] = [],
@@ -214,11 +225,31 @@ async function beginObservation(page: Page, threadId: string) {
         let readable = 0,
           pending = 0
         for (const row of visible) {
-          if (!row.isConnected) continue
+          if (!(window as unknown as HistoryWindow).historyRowPresented(row)) continue
           if (row.querySelector("[data-function-site-pending]")) pending++
           else if (row.textContent?.includes("HISTORY_CASE_")) {
             readable++
             seen.add(row.dataset.chatMessageId ?? "")
+          }
+        }
+        if (!readable && observed.size) {
+          // Virtual rows can mount before IntersectionObserver delivers its next batch.
+          // Confirm a zero-readable candidate against the bounded mounted window instead
+          // of reporting that delivery delay as an empty presentation.
+          geometryFallbacks++
+          readable = 0
+          pending = 0
+          const area = viewport.getBoundingClientRect()
+          for (const row of observed) {
+            if (!(window as unknown as HistoryWindow).historyRowPresented(row)) continue
+            geometryRowsChecked++
+            const box = row.getBoundingClientRect()
+            if (box.height <= 0 || box.bottom <= area.top || box.top >= area.bottom) continue
+            if (row.querySelector("[data-function-site-pending]")) pending++
+            else if (row.textContent?.includes("HISTORY_CASE_")) {
+              readable++
+              seen.add(row.dataset.chatMessageId ?? "")
+            }
           }
         }
         return { readable, pending, mounted: observed.size }
@@ -373,6 +404,8 @@ async function beginObservation(page: Page, threadId: string) {
             peakMountedRows,
             maxBlankMs,
             maxPendingMs,
+            geometryFallbacks,
+            geometryRowsChecked,
             seenMessages: [...seen],
             blankEpisodes
           }
@@ -436,9 +469,29 @@ async function runCase(mode: HistoryCase) {
     console.log(JSON.stringify({ mode, event }))
   }
   try {
-    app = await createHeadlessProjectCompositionLaunch(root, fixture, {
+    const launch = createHeadlessProjectCompositionLaunch(root, fixture, {
       unobtrusivePresentation: true
-    })()
+    })
+    if (presentationScenario) {
+      assert(protectedOutput, "Presentation waiting requires real protected message sites")
+      const bootstrap = join(fixture.isolated, "headless-main.cjs")
+      const hold = `
+const historyPresentationHold=globalThis.__historyPresentationHold={enabled:false,waiters:[]};
+const originalHistoryHandle=ipcMain.handle;
+ipcMain.handle=function(channel,listener){return originalHistoryHandle.call(this,channel,
+  async function(event,...args){
+    if(channel==='mods:function-site-read'&&historyPresentationHold.enabled&&
+      ['UserMessage','AssistantMessage'].includes(args[0]?.component))
+      await new Promise(resolve=>historyPresentationHold.waiters.push(resolve));
+    return listener.call(this,event,...args)
+  })};
+`
+      writeFileSync(bootstrap, readFileSync(bootstrap, "utf8").replace(
+        "const {app,BrowserWindow,ipcMain}=electron;",
+        marker => marker + hold
+      ))
+    }
+    app = await launch()
     app
       .process()
       .stdout?.on("data", (data) => appendFileSync(join(fixture.isolated, "main.stdout.log"), data))
@@ -451,6 +504,9 @@ async function runCase(mode: HistoryCase) {
     const serializer = "globalThis.__name = (fn) => fn"
     await page.addInitScript(serializer)
     await page.evaluate(serializer)
+    const presentationCheck = `globalThis.historyRowPresented = ${isChatRowPresented.toString()}`
+    await page.addInitScript(presentationCheck)
+    await page.evaluate(presentationCheck)
     if (diagnostic)
       await page.exposeBinding(
         "captureHistoryBlank",
@@ -485,6 +541,7 @@ async function runCase(mode: HistoryCase) {
     page.setDefaultTimeout(15000)
     page.on("pageerror", (error) => errors.push(error.message))
     await page.waitForFunction(() => !!window.api?.threads)
+    if (metadataRacePreflight) await runThreadDisplayMetadataCases(app, page, fixture, record)
     const title = `History thumb acceptance ${mode}`
     const threadId = await page.evaluate(
       async ({ workspace, title, protectedOutput, messageCount }) => {
@@ -544,6 +601,7 @@ async function runCase(mode: HistoryCase) {
     )
     record({
       kind: "fixture",
+      historyProvenance: "Synthetic messages appended through native IPC in a new isolated profile; no real user history was read or replayed",
       threadId,
       messageCount,
       candidate,
@@ -643,11 +701,61 @@ async function runCase(mode: HistoryCase) {
     const processBefore = await processSample(app)
     const intervalStarted = performance.now()
     const coldRequestedAt = performance.now()
+    if (presentationScenario) await app.evaluate(() => {
+      ;(globalThis as unknown as { __historyPresentationHold: { enabled: boolean } })
+        .__historyPresentationHold.enabled = true
+    })
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText(title, { exact: true }).first().click()
     const chat = page.locator(`[data-chat-thread-id="${threadId}"]`)
     const scroll = chat.locator("[data-chat-message-scroll-area]")
     const viewport = scroll.locator("[data-radix-scroll-area-viewport]")
+    if (presentationScenario) {
+      await page.waitForFunction(id => document.querySelector(
+        `[data-chat-message-id="${id}"] [data-function-site-pending]`
+      ) !== null, lastMessageId)
+      const waitingAt = performance.now()
+      const returnButton = chat.getByRole("button", { name: "回到会话底部", exact: true })
+      assert.equal(await returnButton.isVisible(), false, "Cold waiting retains initial follow intent")
+      if (presentationScenario === "detach") {
+        await viewport.hover()
+        await page.mouse.wheel(0, -600)
+      }
+      await returnButton.waitFor({ state: "visible", timeout: 7000 })
+      const elapsedMs = performance.now() - waitingAt
+      if (presentationScenario === "deadline") {
+        assert(elapsedMs > 3500, "Pending authorization must not consume the 60-frame geometry budget")
+      }
+      await app.evaluate(() => {
+        const hold = (globalThis as unknown as {
+          __historyPresentationHold: { enabled: boolean; waiters: Array<() => void> }
+        }).__historyPresentationHold
+        hold.enabled = false
+        hold.waiters.splice(0).forEach(resolve => resolve())
+      })
+      await page.waitForFunction(threadId => {
+        const viewport = document.querySelector(
+          `[data-chat-thread-id="${threadId}"] [data-radix-scroll-area-viewport]`
+        )!
+        const area = viewport.getBoundingClientRect()
+        return [...viewport.querySelectorAll<HTMLElement>("[data-chat-message-row]")].some(row => {
+          const box = row.getBoundingClientRect()
+          return box.bottom > area.top && box.top < area.bottom &&
+            (window as unknown as HistoryWindow).historyRowPresented(row) &&
+            !row.querySelector("[data-function-site-pending]") &&
+            row.textContent?.includes("HISTORY_CASE_")
+        })
+      }, threadId)
+      const detached = await viewport.evaluate(node => ({
+        top: node.scrollTop,
+        bottomGap: node.scrollHeight - node.scrollTop - node.clientHeight
+      }))
+      assert(await returnButton.isVisible(), "Late presentation completion must retain detached intent")
+      assert(detached.bottomGap > 100, "Late presentation completion must not pull the reader to the tail")
+      record({ kind: "presentation-wait-boundary", scenario: presentationScenario, elapsedMs,
+        detached, realProtectedIpc: true, outputsReplaced: false })
+      await returnButton.click()
+    }
     await chat.locator(`[data-chat-message-id="${lastMessageId}"]`).waitFor({ state: "visible" })
     await chat.locator('[data-chat-initial-presentation="ready"]').waitFor()
     await page.waitForFunction(
@@ -657,6 +765,7 @@ async function runCase(mode: HistoryCase) {
         if (
           !row ||
           !viewport ||
+          !(window as unknown as HistoryWindow).historyRowPresented(row) ||
           row.querySelector("[data-function-site-pending]") ||
           !row.textContent?.includes("HISTORY_CASE_")
         )
@@ -680,6 +789,11 @@ async function runCase(mode: HistoryCase) {
       guestStartupCold: false,
       pixelsMeasured: false
     })
+    if (presentationScenario) {
+      await page.screenshot({ path: join(fixture.isolated, "presentation-wait-recovered.png") })
+      passed = true
+      return
+    }
     // Load any actual history-page boundary through the existing UI before testing the full range.
     let pageLoads = 0
     for (
@@ -753,16 +867,17 @@ async function runCase(mode: HistoryCase) {
       const started = performance.now()
       await earlier.click()
       await page.waitForFunction(
-        ({ id, label }) => {
+        (id) => {
           const current = document.querySelector<HTMLButtonElement>(
             `[data-chat-thread-id="${id}"] [data-chat-history-boundary="older"]`
           )
-          return !current || (!current.disabled && current.textContent !== label)
+          return !current || !current.disabled
         },
-        { id: threadId, label: before.label }
+        threadId
       )
-      // The label represents the native page read, not completion of its
-      // animation-frame anchor restore. Observe the same original restore budget,
+      // React commits the loading/disabled state during the click. Waiting for
+      // its release also works when two pages both offer "the earlier 500".
+      // This is not completion of the animation-frame anchor restore. Keep its original budget:
       // with no sleeps: a loaded body must retain its offset for 12 real frames.
       const restoration = await viewport.evaluate(async (node, before) => {
         const frames: Array<{
@@ -909,7 +1024,10 @@ async function runCase(mode: HistoryCase) {
       oldestVisibleMessageId: "history-thumb-0",
       oldestReachMs: performance.now() - oldestStarted
     })
-    const returnDrag = await dragThumb(page, scroll, viewport, 1)
+    // A long history retains an older prefix and a protected latest tail with a gap.
+    // Stay detached, then use the real return action so the latest-window replacement
+    // cannot be skipped merely because a thumb drag happened to expose the old tail.
+    const returnDrag = await dragThumb(page, scroll, viewport, messageCount > 500 ? 0.65 : 1)
     const tailSetupDeadline = returnDrag.released + 15000
     const tailRemaining = () => Math.max(1, tailSetupDeadline - performance.now())
     const tailState = () =>
@@ -932,6 +1050,7 @@ async function runCase(mode: HistoryCase) {
             ready: Boolean(
               area &&
               box &&
+              tail && (window as unknown as HistoryWindow).historyRowPresented(tail) &&
               box.height > 0 &&
               box.bottom > area.top &&
               box.top < area.bottom &&
@@ -972,7 +1091,7 @@ async function runCase(mode: HistoryCase) {
     })
     let tailMethod = "thumb-drag"
     try {
-      if (!afterReturnDrag.ready) {
+      if (messageCount > 500 || !afterReturnDrag.ready) {
         // A cold virtual row may change the content height after the final pointer move.
         // This is setup for the measured gestures, not proof that one drag reached the tail.
         // Use only the actual native return action, sharing the original 15-second deadline.
@@ -990,6 +1109,7 @@ async function runCase(mode: HistoryCase) {
             if (
               !viewport ||
               !tail ||
+              !(window as unknown as HistoryWindow).historyRowPresented(tail) ||
               tail.querySelector(
                 '[data-function-site-pending], [data-function-site][aria-busy="true"]'
               ) ||
@@ -1007,6 +1127,10 @@ async function runCase(mode: HistoryCase) {
           tailMethod = "thumb-drag-then-native-return-button"
           await latest.click({ timeout: tailRemaining() })
         }
+        assert(
+          messageCount <= 500 || tailMethod === "thumb-drag-then-native-return-button",
+          "long-history setup must exercise the actual latest-window return action"
+        )
       }
       await page.waitForFunction(
         ({ threadId, lastMessageId }) => {
@@ -1018,6 +1142,7 @@ async function runCase(mode: HistoryCase) {
           if (
             !viewport ||
             !tail ||
+            !(window as unknown as HistoryWindow).historyRowPresented(tail) ||
             tail.querySelector(
               '[data-function-site-pending], [data-function-site][aria-busy="true"]'
             ) ||
@@ -1031,11 +1156,50 @@ async function runCase(mode: HistoryCase) {
         { threadId, lastMessageId },
         { timeout: tailRemaining() }
       )
+      const stability = await page.evaluate(
+        async ({ threadId, lastMessageId, budgetMs }) => {
+          const started = performance.now()
+          let stableFrames = 0
+          let previousTop: number | undefined
+          let previousHeight: number | undefined
+          const frames: Array<{ elapsedMs: number; ready: boolean; top?: number }> = []
+          while (performance.now() - started < budgetMs && stableFrames < 12) {
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+            const scope = document.querySelector(`[data-chat-thread-id="${threadId}"]`)
+            const viewport = scope?.querySelector(
+              "[data-chat-message-scroll-area] [data-radix-scroll-area-viewport]"
+            )
+            const tail = scope?.querySelector(`[data-chat-message-id="${lastMessageId}"]`)
+            const area = viewport?.getBoundingClientRect()
+            const box = tail?.getBoundingClientRect()
+            const top = box && area ? box.top - area.top : undefined
+            const ready = Boolean(
+              area && box && tail &&
+              (window as unknown as HistoryWindow).historyRowPresented(tail) &&
+              box.height > 0 && box.bottom > area.top && box.top < area.bottom &&
+              !tail?.querySelector(
+                '[data-function-site-pending], [data-function-site][aria-busy="true"]'
+              ) && tail?.textContent?.includes(`HISTORY_CASE_${lastMessageId.split("-").at(-1)}`)
+            )
+            const stable = ready && top !== undefined && previousTop !== undefined &&
+              previousHeight !== undefined && Math.abs(top - previousTop) <= 1 &&
+              Math.abs(box!.height - previousHeight) <= 1
+            stableFrames = stable ? stableFrames + 1 : 0
+            previousTop = top
+            previousHeight = box?.height
+            frames.push({ elapsedMs: performance.now() - started, ready, top })
+          }
+          return { stableFrames, frames, elapsedMs: performance.now() - started }
+        },
+        { threadId, lastMessageId, budgetMs: tailRemaining() }
+      )
+      assert.equal(stability.stableFrames, 12, "the readable latest tail must remain stable for 12 frames")
       const settled = await tailState()
       record({
         kind: "native-tail-setup",
         method: tailMethod,
         elapsedMs: performance.now() - returnDrag.released,
+        stability,
         viewport: settled
       })
       assert(
@@ -1174,6 +1338,7 @@ async function runCase(mode: HistoryCase) {
           passed,
           mode,
           diagnostic,
+          metadataRacePreflight,
           messageCount,
           candidate,
           source,
@@ -1184,6 +1349,11 @@ async function runCase(mode: HistoryCase) {
           events,
           profile: fixture.isolated,
           acceptanceLane: "native-functional-smoke",
+          readabilityMeasurement: {
+            candidates: "IntersectionObserver with bounded geometry verification of zero-readable samples",
+            maxBlankMs: "Duration without a readable body; may show pending placeholders, not a pixel-blank claim",
+            pixelBlankConfirmation: "Only separately captured screenshots confirm pixel appearance"
+          },
           fixedMachineTimingPassed: false,
           soakPassed: false,
           wholeApplicationCpuMeasured: false

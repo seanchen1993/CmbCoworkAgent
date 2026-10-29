@@ -39,6 +39,66 @@ const key = (id = "message", text = "raw", width = 800) =>
 
 afterEach(() => vi.useRealTimers())
 
+it("keeps neutral measured heights after drawing LRU eviction, with exact facts and width", () => {
+  const cache = new FunctionSitePresentationCache(() => true)
+  const measuredKey = key("measured")
+  cache.measure(measuredKey, "AssistantMessage", { height: 1391, width: 720, layoutWidth: 720 }, "host-row")
+  cache.save(measuredKey, "AssistantMessage", drawing(), 1391, cache.capture("AssistantMessage"))
+  for (let index = 0; index < 110; index++)
+    cache.save(key(`other-${index}`), "AssistantMessage", drawing(), 20,
+      cache.capture("AssistantMessage"))
+  expect(cache.read(measuredKey)).toBeNull()
+  expect(cache.measuredHeight(measuredKey, 720)).toBe(1391)
+  expect(cache.measuredHeight(measuredKey, 640)).toBeUndefined()
+  expect(cache.measuredHeight(measuredKey, Number.NaN)).toBeUndefined()
+  expect(cache.measuredHeight(key("measured", "changed"), 720)).toBeUndefined()
+  const retained = JSON.stringify([...cache["measurements"].values()])
+  expect(retained).not.toContain("protected")
+  expect(retained).not.toContain("old-owner")
+  cache.invalidateProjection("host-row")
+  expect(cache.measuredHeight(measuredKey, 720)).toBeUndefined()
+  cache.invalidate()
+})
+
+it("expires and revokes neutral measurements on row, component and capability changes", () => {
+  vi.useFakeTimers()
+  let authorized = true
+  const cache = new FunctionSitePresentationCache(() => authorized)
+  const save = () => cache.measure(key(), "AssistantMessage",
+    { height: 320, width: 600, layoutWidth: 600 })
+  save()
+  cache.invalidate("UserMessage")
+  expect(cache.measuredHeight(key(), 600)).toBe(320)
+  cache.invalidateKey(key())
+  expect(cache.measuredHeight(key(), 600)).toBeUndefined()
+  save()
+  cache.invalidate("AssistantMessage")
+  expect(cache.measuredHeight(key(), 600)).toBeUndefined()
+  save()
+  authorized = false
+  expect(cache.measuredHeight(key(), 600)).toBeUndefined()
+  authorized = true
+  vi.advanceTimersByTime(120001)
+  expect(cache.measuredHeight(key(), 600)).toBeUndefined()
+  cache.invalidate()
+})
+
+it("bounds neutral measurements within the renderer budget and rejects invalid dimensions", () => {
+  const cache = new FunctionSitePresentationCache(() => true)
+  for (let index = 0; index < 4000; index++) {
+    cache.measure(key(String(index)), "AssistantMessage",
+      { height: index + 1, width: 600, layoutWidth: 600 })
+    expect(budget.stats().bytes).toBeLessThanOrEqual(budget.stats().maxBytes)
+  }
+  expect(cache["measurements"].size).toBeLessThanOrEqual(1536)
+  expect(cache.measuredHeight(key("0"), 600)).toBeUndefined()
+  expect(cache.measuredHeight(key("3999"), 600)).toBe(4000)
+  for (const height of [Number.NaN, -1, 0, Number.POSITIVE_INFINITY, 100001])
+    cache.measure(key("invalid"), "AssistantMessage", { height, width: 600, layoutWidth: 600 })
+  expect(cache.measuredHeight(key("invalid"), 600)).toBeUndefined()
+  cache.invalidate()
+})
+
 it("retains only the input digest in protected presentation cache keys", () => {
   const cache = new FunctionSitePresentationCache(() => true)
   const raw = "PRIVATE_UNPUBLISHED_BODY_" + "秘密😀".repeat(16384)

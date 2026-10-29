@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import { Virtuoso } from "react-virtuoso"
+import * as ScrollArea from "@radix-ui/react-scroll-area"
 import {
   ChatMessageVirtualList,
   type ChatMessageVirtualListProps
@@ -12,8 +13,11 @@ import type { ChatSearchCorpus } from "../../src/renderer/src/lib/chat-search-ma
 import { createChatSearchPlan } from "../../src/shared/chat-search-plan"
 import type { ChatSearchReveal } from "../../src/shared/chat-search-types"
 import { createChatSearchIndexer } from "../../src/renderer/src/lib/chat-search-indexer"
+import { installChatDetachedLayoutAnchor } from "../../src/renderer/src/components/chat/chat-detached-layout-anchor"
+import { isChatScrollNavigationActive } from "../../src/renderer/src/components/chat/chat-scroll-navigation"
 
-type SearchCase = "occurrences" | "folded" | "delayed" | "dense" | "tail" | "inline"
+type SearchCase = "occurrences" | "folded" | "delayed" | "dense" | "tail" | "inline" | "anchored"
+  | "scrollbar-delayed" | "scrollbar-highlight"
 interface Metrics {
   renders: number
   started: number
@@ -32,6 +36,8 @@ declare global {
       hideRow?: () => void
       tick?: () => void
       finishHydration?: () => void
+      finishLayout?: () => void
+      searchNavigationActive?: () => boolean
       stressSearch(): Promise<{
         preparationMs: number
         searchMs: number
@@ -67,6 +73,8 @@ const durablePage = {
 const searchDurable = async (): Promise<typeof durablePage> => durablePage
 
 function SearchFixture({ kind }: { kind: SearchCase }): React.JSX.Element {
+  const delayed = kind === "delayed" || kind === "scrollbar-delayed"
+  const realScrollbar = kind === "scrollbar-delayed" || kind === "scrollbar-highlight"
   const indexer = useRef<ReturnType<typeof createChatSearchIndexer> | null>(null)
   const searchLocal = useCallback((corpus: ChatSearchCorpus, query: string) => {
     indexer.current ??= createChatSearchIndexer(() => new Worker(window.chatSearchWorkerUrl))
@@ -75,10 +83,37 @@ function SearchFixture({ kind }: { kind: SearchCase }): React.JSX.Element {
   const cancelLocal = useCallback(() => indexer.current?.cancel(), [])
   useEffect(() => () => indexer.current?.dispose(), [])
   const [searchReveal, setSearchReveal] = useState<ChatSearchReveal | null>(null)
-  const [visible, setVisible] = useState(kind !== "delayed")
+  const [visible, setVisible] = useState(!delayed)
   const [revision, setRevision] = useState(0)
   const [open, setOpen] = useState(true)
   const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!scrollParent) return
+    window.chatNavigationFixture.searchNavigationActive = () =>
+      isChatScrollNavigationActive(scrollParent)
+    if (kind !== "anchored") return
+    return installChatDetachedLayoutAnchor({
+      root: scrollParent,
+      viewport: scrollParent,
+      readLease: () => 1
+    })
+  }, [kind, scrollParent])
+  const layoutSpacer = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (kind !== "scrollbar-highlight") return
+    let frame = 0
+    let step = 0
+    let active = true
+    const changeLayout = (): void => {
+      if (!active) return
+      if (layoutSpacer.current) layoutSpacer.current.style.height = `${500 + (++step % 2) * 40}px`
+      frame = requestAnimationFrame(changeLayout)
+    }
+    const finish = (): void => { active = false; cancelAnimationFrame(frame) }
+    window.chatNavigationFixture.finishLayout = finish
+    frame = requestAnimationFrame(changeLayout)
+    return finish
+  }, [kind])
   const hydrationResolve = useRef<(() => void) | null>(null)
   const text = useMemo(
     () =>
@@ -114,8 +149,8 @@ function SearchFixture({ kind }: { kind: SearchCase }): React.JSX.Element {
     [text]
   )
   const getCorpus = useCallback(
-    () => (kind === "delayed" && !visible ? emptyCorpus : corpus),
-    [corpus, kind, visible]
+    () => (delayed && !visible ? emptyCorpus : corpus),
+    [corpus, delayed, visible]
   )
   const getViewport = useCallback(() => document.getElementById("viewport"), [])
   const revealDurable = useCallback(
@@ -139,14 +174,11 @@ function SearchFixture({ kind }: { kind: SearchCase }): React.JSX.Element {
     }
   }, [visible])
 
-  return (
-    <>
-      <div
-        id="viewport"
-        ref={setScrollParent}
-        style={{ height: 400, overflow: "auto", width: 700, marginTop: 80 }}
-      >
-        {kind !== "folded" && <div style={{ height: 500 }} />}
+  const content = <>
+        {kind === "anchored" ? <>
+          <div data-chat-message-row data-chat-message-id="anchor-before" style={{ height: 250 }} />
+          <div data-chat-message-row data-chat-message-id="anchor-header" style={{ height: 250 }} />
+        </> : kind !== "folded" && <div ref={layoutSpacer} style={{ height: 500 }} />}
         {visible && kind === "folded" && scrollParent && (
           <Virtuoso
             data={["Earlier context", text]}
@@ -167,7 +199,7 @@ function SearchFixture({ kind }: { kind: SearchCase }): React.JSX.Element {
           />
         )}
         {visible && kind !== "folded" && (
-          <div data-chat-message-id="message">
+          <div data-chat-message-row data-chat-message-id="message">
             <StreamingMarkdown
               searchLocation={searchReveal?.location}
               isStreaming={kind === "tail" && revision === 0}
@@ -177,7 +209,22 @@ function SearchFixture({ kind }: { kind: SearchCase }): React.JSX.Element {
           </div>
         )}
         {kind !== "folded" && <div style={{ height: 500 }} />}
-      </div>
+  </>
+  return (
+    <>
+      {realScrollbar ? (
+        <ScrollArea.Root type="always" style={{ position: "relative", height: 400, width: 700, marginTop: 80 }}>
+          <ScrollArea.Viewport id="viewport" ref={setScrollParent}
+            style={{ height: "100%", width: "100%", overflowAnchor: "none" }}>
+            {content}
+          </ScrollArea.Viewport>
+          <ScrollArea.Scrollbar orientation="vertical" data-scroll-area-scrollbar
+            style={{ width: 16, background: "#ddd" }}>
+            <ScrollArea.Thumb data-testid="search-real-scrollbar-thumb" style={{ background: "#666" }} />
+          </ScrollArea.Scrollbar>
+        </ScrollArea.Root>
+      ) : <div id="viewport" ref={setScrollParent}
+        style={{ height: 400, overflow: "auto", width: 700, marginTop: 80 }}>{content}</div>}
       <ChatSearchOverlay
         searchLocalCorpus={searchLocal}
         onCancelLocalSearch={cancelLocal}
@@ -189,7 +236,7 @@ function SearchFixture({ kind }: { kind: SearchCase }): React.JSX.Element {
         onRevealMessage={() => {
           window.chatNavigationMetrics.reveals.push(visible)
         }}
-        searchDurableMessages={kind === "delayed" ? searchDurable : undefined}
+        searchDurableMessages={delayed ? searchDurable : undefined}
         onRevealDurableMessage={revealDurable}
         recomputeKey={`${revision}:${visible}`}
       />
@@ -286,6 +333,8 @@ function mount(component: React.ReactNode): void {
   root?.unmount()
   window.chatNavigationMetrics = { renders: 0, started: performance.now(), reveals: [] }
   delete window.chatNavigationFixture.finishHydration
+  delete window.chatNavigationFixture.finishLayout
+  delete window.chatNavigationFixture.searchNavigationActive
   root = createRoot(document.getElementById("root")!)
   root.render(component)
 }

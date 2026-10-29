@@ -1,6 +1,10 @@
 import { Worker } from "node:worker_threads"
 import type { AuthoringPreviewAnalysis } from "./authoring-preflight"
-import { AuthoringCompileError, readAuthoringCompileDiagnostics } from "./authoring-compile-diagnostics"
+import {
+  AuthoringCompileError,
+  readAuthoringCompileDiagnostics
+} from "./authoring-compile-diagnostics"
+import { AuthoringStructureError, authoringStructureCode } from "./authoring-structure-diagnostics"
 
 /** Analysis has no authority to run guest code. Cancellation waits for actual Worker exit. */
 export class AuthoringPreflightClient {
@@ -54,7 +58,17 @@ export class AuthoringPreflightClient {
       worker.once("exit", () => finish(undefined, Error("AUTHORING_PREFLIGHT_EXITED")))
       worker.once("message", (message: unknown) => {
         try {
-          const row = message as { ok?: boolean; text?: string; diagnostics?: unknown }
+          const row = message as {
+            ok?: boolean
+            text?: string
+            diagnostics?: unknown
+            structureCode?: unknown
+          }
+          const structureCode = authoringStructureCode(row?.structureCode)
+          if (row?.ok === false && structureCode) {
+            finish(undefined, new AuthoringStructureError(structureCode))
+            return
+          }
           const diagnostics = readAuthoringCompileDiagnostics(row?.diagnostics)
           if (row?.ok === false && diagnostics.length > 0) {
             finish(undefined, new AuthoringCompileError(diagnostics))

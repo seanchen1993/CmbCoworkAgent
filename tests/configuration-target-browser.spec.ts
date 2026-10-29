@@ -187,7 +187,7 @@ async function main() {
     if (await advancedGroup.getAttribute("aria-expanded") !== "true") await advancedGroup.click()
     await page.getByRole("button",{name:"任务画布",exact:true}).click()
     await page.getByRole("region",{name:"TaskMmdPanel",exact:true}).getByText("目标 a -").waitFor()
-    await page.getByRole("navigation").filter({has:page.getByRole("button",{name:"基础功能",exact:true})}).getByRole("button",{name:"灵件与使用设置",exact:true}).click()
+    await page.getByRole("navigation").filter({has:page.getByRole("button",{name:"基础功能",exact:true})}).getByRole("button",{name:"插件",exact:true}).click()
     const mods=page.getByRole("region",{name:"ModsPanel",exact:true})
     await mods.getByText("目标 b C:/new-beta").waitFor()
     await page.evaluate(()=>{(window as unknown as ConfigurationWindow).holdLoad=true})
@@ -208,12 +208,88 @@ async function main() {
     assert.deepEqual(await page.evaluate(()=> (window as unknown as ConfigurationWindow).calls.filter(item=>item[0]==='creator')),
       [["creator",{threadId:"b",expectedWorkspace:"C:/new-beta",mode:"creator"}]])
     assert.equal(await page.evaluate(()=> (window as unknown as ConfigurationWindow).state().currentThreadId),"b")
+    const writesBeforePluginNavigation = await page.evaluate(
+      () =>
+        (window as unknown as ConfigurationWindow).calls.filter((item) =>
+          ["configure", "creator", "apply", "navigate"].includes(String(item[0]))
+        ).length
+    )
+    await page.evaluate(() =>
+      (window as unknown as ConfigurationWindow).patch({
+        showCustomizeView: true,
+        customizeInitialTab: "mods",
+        currentThreadId: "blank",
+        threads: [
+          {
+            thread_id: "blank",
+            title: "启动空白聊天",
+            metadata: { workspacePath: "", agentMode: "normal" }
+          }
+        ]
+      })
+    )
+    await mods.waitFor()
+    assert.equal(
+      await page.getByRole("combobox", { name: "配置目标聊天", exact: true }).count(),
+      0,
+      "plugin management does not ask for a chat when none can be configured"
+    )
+    assert.equal(await page.getByText("暂无可配置的本地聊天", { exact: true }).count(), 0)
+    await page.evaluate(() =>
+      (window as unknown as ConfigurationWindow).patch({ customizeInitialTab: "claw" })
+    )
+    await page
+      .getByRole("combobox", { name: "配置目标聊天", exact: true })
+      .getByText("暂无可配置的本地聊天", { exact: true })
+      .waitFor()
+    assert.equal(
+      await page.getByRole("combobox", { name: "配置目标聊天", exact: true }).isDisabled(),
+      true
+    )
+    await page.evaluate(() =>
+      (window as unknown as ConfigurationWindow).patch({
+        customizeInitialTab: "mods",
+        threads: [
+          {
+            thread_id: "local",
+            title: "同名聊天",
+            metadata: { workspacePath: "C:/plugin-chat", agentMode: "normal" }
+          }
+        ]
+      })
+    )
+    await page.getByText("聊天功能配置", { exact: true }).waitFor()
+    assert.equal(
+      await page.getByRole("combobox", { name: "配置目标聊天", exact: true }).isVisible(),
+      true
+    )
+    await page
+      .getByText("聊天功能使用所选聊天和工作目录；项目插件可直接新建项目。", { exact: true })
+      .waitFor()
+    await choose("C:/plugin-chat")
+    await page.evaluate(() =>
+      (window as unknown as ConfigurationWindow).patch({ customizeInitialTab: "claw" })
+    )
+    await page.getByText("为哪段聊天配置", { exact: true }).waitFor()
+    await page.getByText("下方操作使用所选聊天和工作目录。", { exact: true }).waitFor()
+    assert.equal(
+      await page.evaluate(
+        () =>
+          (window as unknown as ConfigurationWindow).calls.filter((item) =>
+            ["configure", "creator", "apply", "navigate"].includes(String(item[0]))
+          ).length
+      ),
+      writesBeforePluginNavigation,
+      "picker visibility and target selection do not dispatch runtime writes"
+    )
     assert.deepEqual(errors,[])
     await page.screenshot({path:join(output,"target-selection.png")})
     writeFileSync(join(output,"report.json"),JSON.stringify({passed:true,errors,checks:[
       "B-configured-without-navigating-A","explicit-return-to-B","late-callback-fenced",
       "dirty-and-retained-editor-cancel","busy-blocked","deleted-target-no-fallback",
-      "same-id-workspace-reselection","basic-settings-stay-A","reuse-late-response-ignored"
+      "same-id-workspace-reselection","basic-settings-stay-A","reuse-late-response-ignored",
+      "mods-without-configurable-chat-hides-picker","mods-chat-purpose-and-full-picker",
+      "other-settings-retain-original-picker"
     ]},null,2))
     console.log(`PASS independent configuration target: ${output}`)
   } catch(error) {console.error(errors);await page.screenshot({path:join(output,"failure.png")});throw error}

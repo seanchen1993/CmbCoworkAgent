@@ -57,7 +57,10 @@ const phases: Record<DevelopmentTrialStatus["phase"], string> = {
 const button =
   "inline-flex min-h-9 items-center justify-center rounded-lg border border-border bg-background px-3 py-2 text-sm font-medium transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
 const primaryButton = `${button} border-primary bg-primary text-primary-foreground hover:bg-primary/90`
-function publicError(error: unknown): string {
+function publicError(
+  error: unknown,
+  fallback = "暂时无法确认操作结果。请刷新状态，查看是否已完成。"
+): string {
   const message = error instanceof Error ? error.message : ""
   if (message.includes("CREATOR_REPAIR_QUEUE_NOT_EMPTY"))
     return "还有待发送的消息，请先处理后再修复灵件。原输入和待发送消息都已保留。"
@@ -70,8 +73,7 @@ function publicError(error: unknown): string {
     return "对话或项目归属已变化，试用已暂停。请回到原场景刷新并重新核对。"
   if (/DEVELOPMENT_SETUP_PARTIAL/.test(message))
     return "部分开关可能已开启，但创作尚未确认。保留已有设置，请刷新状态后再试；不会自动关闭其它会话使用的功能。"
-  if (/DEVELOPMENT_SETTINGS_RECOVERY/.test(message))
-    return "项目设置需要恢复，请到“灵件与使用设置 → 我已添加”查看提示。"
+  if (/DEVELOPMENT_SETTINGS_RECOVERY/.test(message)) return "项目设置需要恢复，请到“插件”查看提示。"
   if (/DEVELOPMENT_CREATOR_UNAVAILABLE/.test(message))
     return "尚未进入创造者模式，请刷新状态后重试。"
   if (/WORKSPACE_REQUIRED|LOCAL_WORKSPACE/.test(message)) return "请先选择本地项目，再制作灵件。"
@@ -84,7 +86,7 @@ function publicError(error: unknown): string {
   if (/BUSY/.test(message)) return "任务或版本仍在处理中，请等待停止完成后再操作。"
   if (/LIMIT/.test(message)) return "开发草稿或执行资源已达上限，请核对后再继续。"
   if (/CANCEL/.test(message)) return "操作已取消，请刷新并核对实际状态。"
-  return "暂时无法确认操作结果。请刷新状态，查看是否已完成。"
+  return fallback
 }
 
 export function ModsDevelopmentPanel({
@@ -244,6 +246,7 @@ function ScopedDevelopment({
   const announcedTrialAttention = useRef("")
   const announcedCompositionFailure = useRef("")
   const announcedReuse = useRef("")
+  const expandedReuseConfirmation = useRef<{ node: HTMLDetailsElement; key: string } | null>(null)
   const [projectPreviewOpen, setProjectPreviewOpen] = useState(false)
   const [stageDebugReview, setStageDebugReview] = useState<StageDebugReviewIntent>()
   const [creatorOptionsOpen, setCreatorOptionsOpen] = useState(false)
@@ -296,7 +299,8 @@ function ScopedDevelopment({
         accept(next)
         if (clearError) setMessage("")
       } catch (error) {
-        if (live.current && generation.current === ticket) setMessage(publicError(error))
+        if (live.current && generation.current === ticket)
+          setMessage(publicError(error, "暂时无法读取创作状态。请点击“重新读取状态”后继续。"))
       }
     },
     [api, threadId, accept]
@@ -483,6 +487,19 @@ function ScopedDevelopment({
     }
     if (!reuseKey) announcedReuse.current = ""
   }, [mode, reuseKey])
+  const reuseConfirmationKey = reuse?.phase === "needs-approval"
+    ? JSON.stringify([reuse.planId, reuse.sourceDigest, reuse.compiledDigest]) : ""
+  const mountReuseConfirmationDetails = useCallback((node: HTMLDetailsElement | null) => {
+    if (!reuseConfirmationKey) {
+      expandedReuseConfirmation.current = null
+      return
+    }
+    if (node && (expandedReuseConfirmation.current?.key !== reuseConfirmationKey ||
+      expandedReuseConfirmation.current.node !== node)) {
+      node.open = true
+      expandedReuseConfirmation.current = { node, key: reuseConfirmationKey }
+    }
+  }, [reuseConfirmationKey])
   const compositionRuntimeUnconfirmed =
     composition?.phase === "failed" && composition.error === "COMPOSITION_RUNTIME_UNCONFIRMED"
   const compositionUnconfirmed =
@@ -512,6 +529,23 @@ function ScopedDevelopment({
     }
   }, [mode, configurationId])
   const projectTrialId = status?.projectTrial?.id
+  const deliveryAttention =
+    status?.projectDelivery && ["unknown", "failed"].includes(status.projectDelivery.phase)
+      ? JSON.stringify([
+          status.projectDelivery.id,
+          status.projectDelivery.phase,
+          status.projectDelivery.error
+        ])
+      : ""
+  const announcedDeliveryAttention = useRef("")
+  useEffect(() => {
+    if (deliveryAttention && announcedDeliveryAttention.current !== deliveryAttention) {
+      announcedDeliveryAttention.current = deliveryAttention
+      setWorkspaceTab("delivery")
+      if (mode === "chat") setOpen(true)
+    }
+    if (!deliveryAttention) announcedDeliveryAttention.current = ""
+  }, [mode, deliveryAttention])
   const projectJourney = status?.projectTrial
     ? creatorJourneyView(status.projectTrial.journey, {
         threadId,
@@ -594,74 +628,78 @@ function ScopedDevelopment({
   const label =
     modularization?.phase === "needs-confirmation"
       ? "确认插件模块化"
-      : hostBusinessReview
-        ? (projectJourney?.label ?? "确认项目真实试用")
-        : businessTrialDiagnostic
-          ? "业务试用记录待核对"
-          : businessTrial?.phase === "unknown"
-            ? "业务试用结果待核对"
-            : businessTrial && ["needs-configuration", "ready"].includes(businessTrial.phase)
-              ? "配置业务试用"
-              : businessTrial?.phase === "running"
-                ? "业务插件试用中"
-                : businessJourney?.passed
-                  ? "整轮试用已通过"
-                  : businessTrial?.phase === "completed"
-                    ? "试用已结束，核对验收"
-                    : businessTrial?.phase === "failed"
-                      ? "业务试用失败，查看诊断"
-                      : businessReview
-                        ? businessReview.phase === "unknown"
-                          ? "插件结果待核对"
-                          : "业务插件组装"
-                        : projectTrialId
-                          ? (projectJourney?.label ?? "确认项目真实试用")
-                          : configurationId
-                            ? "填写插件参数"
-                            : undoBusy
-                              ? "正在撤销修改"
-                              : status?.undo?.phase === "failed"
-                                ? "撤销结果待核对"
-                                : reuse?.phase === "needs-approval"
-                                  ? "确认跨聊天复用"
-                                  : reuse?.phase === "unknown"
-                                    ? "复用结果待核对"
-                                    : reuse?.phase === "failed"
-                                      ? "跨聊天复用未完成"
-                                      : reuse && ["preparing", "applying"].includes(reuse.phase)
-                                        ? "正在准备跨聊天复用"
-                                        : compositionRuntimeUnconfirmed
-                                          ? "组合运行待核对"
-                                          : compositionUnconfirmed
-                                            ? "组合切换待核对"
-                                            : uncertain
-                                              ? "试用结果待核对"
-                                              : awaitingApproval
-                                                ? "确认灵件试用"
-                                                : failed
-                                                  ? "试用失败 · 查看处理"
-                                                  : composition?.phase === "failed"
-                                                    ? "组合应用失败 · 查看处理"
-                                                    : composition &&
-                                                        ["queued", "applying"].includes(
-                                                          composition.phase
-                                                        )
-                                                      ? "正在应用组合"
-                                                      : active
-                                                        ? "灵件试用中"
-                                                        : status?.trials.some((row) =>
-                                                              [
-                                                                "queued",
-                                                                "preflight",
-                                                                "retiring"
-                                                              ].includes(row.phase)
-                                                            )
-                                                          ? "正在准备试用"
-                                                          : composition?.phase === "active"
-                                                            ? "组合已应用"
-                                                            : reuse?.phase === "active"
-                                                              ? "已保存跨聊天复用"
-                                                              : "创作工作区"
+      : deliveryAttention
+        ? status?.projectDelivery?.phase === "unknown"
+          ? "保存结果待核对"
+          : "插件保存未完成"
+        : hostBusinessReview
+          ? (projectJourney?.label ?? "确认项目真实试用")
+          : businessTrialDiagnostic
+            ? "业务试用记录待核对"
+            : businessTrial?.phase === "unknown"
+              ? "业务试用结果待核对"
+              : businessTrial && ["needs-configuration", "ready"].includes(businessTrial.phase)
+                ? "配置业务试用"
+                : businessTrial?.phase === "running"
+                  ? "业务插件试用中"
+                  : businessJourney?.passed
+                    ? "整轮试用已通过"
+                    : businessTrial?.phase === "completed"
+                      ? "试用已结束，核对验收"
+                      : businessTrial?.phase === "failed"
+                        ? "业务试用失败，查看诊断"
+                        : businessReview
+                          ? businessReview.phase === "unknown"
+                            ? "插件结果待核对"
+                            : "业务插件组装"
+                          : projectTrialId
+                            ? (projectJourney?.label ?? "确认项目真实试用")
+                            : configurationId
+                              ? "填写插件参数"
+                              : undoBusy
+                                ? "正在撤销修改"
+                                : status?.undo?.phase === "failed"
+                                  ? "撤销结果待核对"
+                                  : reuse?.phase === "needs-approval"
+                                    ? "确认跨聊天复用"
+                                    : reuse?.phase === "unknown"
+                                      ? "复用结果待核对"
+                                      : reuse?.phase === "failed"
+                                        ? "跨聊天复用未完成"
+                                        : reuse && ["preparing", "applying"].includes(reuse.phase)
+                                          ? "正在准备跨聊天复用"
+                                          : compositionRuntimeUnconfirmed
+                                            ? "组合运行待核对"
+                                            : compositionUnconfirmed
+                                              ? "组合切换待核对"
+                                              : uncertain
+                                                ? "试用结果待核对"
+                                                : awaitingApproval
+                                                  ? "确认灵件试用"
+                                                  : failed
+                                                    ? "试用失败 · 查看处理"
+                                                    : composition?.phase === "failed"
+                                                      ? "组合应用失败 · 查看处理"
+                                                      : composition &&
+                                                          ["queued", "applying"].includes(
+                                                            composition.phase
+                                                          )
+                                                        ? "正在应用组合"
+                                                        : active
+                                                          ? "灵件试用中"
+                                                          : status?.trials.some((row) =>
+                                                                [
+                                                                  "queued",
+                                                                  "preflight",
+                                                                  "retiring"
+                                                                ].includes(row.phase)
+                                                              )
+                                                            ? "正在准备试用"
+                                                            : composition?.phase === "active"
+                                                              ? "组合已应用"
+                                                              : reuse?.phase === "active"
+                                                                ? "已保存跨聊天复用"
+                                                                : "创作工作区"
   const saveForReuse =
     onReuse ??
     (onOpenWorkbench
@@ -697,6 +735,26 @@ function ScopedDevelopment({
         ?.scrollIntoView({ block: "start" })
     )
   }
+  const operationFeedback = message && (
+    <div role="status" className="space-y-2 rounded-lg bg-muted p-3 text-sm">
+      <p>{message}</p>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className={button} disabled={busy} onClick={() => void read()}>
+          重新读取状态
+        </button>
+        {message.includes("灵件功能已关闭") && (
+          <button
+            type="button"
+            className={primaryButton}
+            disabled={busy}
+            onClick={() => changeMode("creator")}
+          >
+            开启灵件功能
+          </button>
+        )}
+      </div>
+    </div>
+  )
   const content = (
     <section
       aria-label="灵件对话创作"
@@ -760,14 +818,16 @@ function ScopedDevelopment({
           {businessTrial && (
             <p role="status" className="text-xs text-muted-foreground">
               {businessJourney?.passed
-                ? "本轮原生检查与推进凭据已确认通过。请再核对业务效果，然后保存为新插件。"
+                ? "试用检查已通过，可以保存插件。"
                 : businessTrial.phase === "completed"
-                  ? "原运行已结束。请先查看整轮原检查点、产物与反馈，再选择保存为新插件。"
+                  ? "试用已结束，请查看结果后保存插件。"
                   : businessTrial.phase === "running"
-                    ? "本轮试用进行中，所有阶段会话在同一轮记录中查看。"
+                    ? "试用进行中，可打开本轮记录查看进度。"
                     : businessTrial.phase === "failed"
-                      ? "本轮未完成。请查看未通过的检查和诊断，再回原聊天修改。"
-                      : "下一步：打开本轮试用，核对候选、参数与权限后运行。"}
+                      ? "试用未完成，请查看问题后回聊天修改。"
+                      : businessTrial.phase === "unknown"
+                        ? "试用结果待核对，请打开本轮记录。"
+                        : "打开试用，按提示完成设置后运行。"}
             </p>
           )}
           {mode === "entry" && showNavigation && (
@@ -861,8 +921,13 @@ function ScopedDevelopment({
           >
             {creatorReady && !businessReview && !status?.projectTrial && (
               <p className="text-sm text-muted-foreground">
-                还没有准备好项目候选。回到原聊天提出需求，助手准备好当前版本后，将在这里显示试用入口。
+                回聊天描述需求，准备好后即可在这里试用。
               </p>
+            )}
+            {projectJourney?.passed && (
+              <button type="button" className={primaryButton} onClick={() => navigate("delivery")}>
+                试用通过，保存插件
+              </button>
             )}
             {businessReview && !hostBusinessReview && (
               <section
@@ -933,63 +998,13 @@ function ScopedDevelopment({
                 />
               </article>
             )}
-            {projectJourney?.passed && (
-              <button type="button" className={primaryButton} onClick={() => navigate("delivery")}>
-                试用通过，保存插件
-              </button>
-            )}
           </section>
-          {!status?.projectTrial && (
-            <section
-              data-creator-section="acceptance"
-              hidden={workspaceTab !== "trial"}
-              aria-label="创作验收入口"
-              className="scroll-mt-4 space-y-3 rounded-xl border p-4"
-            >
-              {businessReview &&
-              !hostBusinessReview &&
-              api.businessTrial &&
-              !businessTrialDiagnostic ? (
-                <button
-                  type="button"
-                  className={button}
-                  onClick={() => {
-                    setOpen(false)
-                    setBusinessTrialOpen(true)
-                  }}
-                >
-                  查看本轮阶段和验收记录
-                </button>
-              ) : (
-                creatorReady &&
-                !status?.projectTrial && (
-                  <p className="text-xs text-muted-foreground">
-                    项目候选准备后将在这里显示逐阶段校验；缺少凭据时显示待核对。
-                  </p>
-                )
-              )}
-            </section>
-          )}
           <section
             data-creator-section="delivery"
             hidden={workspaceTab !== "delivery"}
             aria-label="保存插件交付"
             className="scroll-mt-4 space-y-3"
           >
-            {status && creatorReady && (
-              <details open={!!status.sourceSet && status.sourceSet.phase !== "ready"}>
-                <summary className="cursor-pointer text-sm text-muted-foreground">
-                  从源码导入
-                </summary>
-                <CreatorSourceSetCard
-                  threadId={threadId}
-                  workspace={status.workspace}
-                  status={status.sourceSet}
-                  api={api}
-                  onStatus={accept}
-                />
-              </details>
-            )}
             {status &&
               (status.projectDelivery ||
                 ((useProjectCandidate || status.sourceSet?.phase === "ready") &&
@@ -1072,15 +1087,54 @@ function ScopedDevelopment({
             ) : (
               !status?.projectTrial && (
                 <p className="text-sm text-muted-foreground">
-                  项目插件准备完成后，将在这里确认安装为独立插件或导出 ZIP；当前聊天中的单个 Mod
-                  可在下方保存复用。
+                  候选准备好后即可保存插件，或导出 ZIP。
                 </p>
               )
+            )}
+            {status && creatorReady && (
+              <details open={!!status.sourceSet && status.sourceSet.phase !== "ready"}>
+                <summary className="cursor-pointer text-sm text-muted-foreground">
+                  从源码导入
+                </summary>
+                <CreatorSourceSetCard
+                  threadId={threadId}
+                  workspace={status.workspace}
+                  status={status.sourceSet}
+                  api={api}
+                  onStatus={accept}
+                />
+              </details>
             )}
           </section>
         </>
       )}
+      {!projectCreation && !!status?.trials.some((row) => row.phase === "active") && (
+        <p role="status" className="rounded-lg bg-primary/5 p-3 text-sm">
+          灵件已在当前聊天生效。返回聊天验证效果，满意后保存为插件。
+        </p>
+      )}
+      {!projectCreation && !reuse && !!status?.drafts.length && (
+        <div className="flex flex-wrap gap-2" aria-label="保存灵件插件">
+          {status.drafts.map((draft) => (
+            <button
+              key={draft.id}
+              type="button"
+              className={primaryButton}
+              disabled={busy}
+              onClick={() => void operate(
+                (expectedWorkspace) => api.requestReuse({
+                  threadId, expectedWorkspace, id: draft.id, revision: draft.revision
+                }),
+                accept
+              )}
+            >
+              保存“{draft.name}”并在其他聊天复用…
+            </button>
+          ))}
+        </div>
+      )}
       <details
+        ref={mountReuseConfirmationDetails}
         data-creator-section="create"
         className="scroll-mt-4 space-y-3 rounded-xl border p-4"
         open={
@@ -1217,7 +1271,7 @@ function ScopedDevelopment({
         {mode === "entry" && !creatorMode && (
           <div className="space-y-3 rounded-lg bg-muted/50 p-3">
             <p className="text-sm">
-              进入创造者模式，一句话描述想创建、修改或组合的 Mod，助手完成配置并应用。
+              进入创造者模式，描述想制作或修改的功能、插件或项目流程，再试用候选并保存。
             </p>
             <p className="text-xs text-muted-foreground">
               会开启应用和此项目的灵件功能，已有授权的灵件可能恢复运行。
@@ -1239,7 +1293,10 @@ function ScopedDevelopment({
           </p>
         )}
         {creatorMode && status?.request && (
-          <p className="text-xs text-muted-foreground">
+          <details className="text-xs text-muted-foreground"
+            open={"error" in status.request || undefined}>
+            <summary className="cursor-pointer">制作记录与用量</summary>
+            <p className="mt-2">
             {"error" in status.request
               ? "本次制作预算无法核对，已停止继续提交。草稿和当前功能仍保留。"
               : `${status.request.groupId ? "当前目标累计" : "最近一次需求"}已检查 ${status.request.candidates}/3 个候选；重新打开界面不会重置修复次数。`}
@@ -1260,7 +1317,8 @@ function ScopedDevelopment({
                   : ""}
               </span>
             )}
-          </p>
+            </p>
+          </details>
         )}
         {status?.trials.map((row) => {
           const key = JSON.stringify([
@@ -1273,6 +1331,8 @@ function ScopedDevelopment({
           ])
           const name =
             status.drafts.find((draft) => draft.id === row.draftId)?.name ?? row.componentId
+          const savedAsPlugin = reuseCurrent && reuse?.phase === "active" &&
+            reuse.draftId === row.draftId && row.phase === "stopped"
           return (
             <article
               key={row.componentId}
@@ -1292,35 +1352,14 @@ function ScopedDevelopment({
                 className={`text-xs font-medium ${row.phase === "failed" ? "text-destructive" : row.phase === "needs-approval" ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}
                 role="status"
               >
-                {row.phase === "queued" && row.waitingReason === "turn-interrupted"
+                {savedAsPlugin ? "已保存为插件，当前聊天正在使用正式版本"
+                  : row.phase === "queued" && row.waitingReason === "turn-interrupted"
                   ? "制作已中断，待继续"
                   : row.phase === "active" && row.validation === "authorized-real"
                     ? "版本已生效，真实结果待核对"
                     : phases[row.phase]}
               </p>
-              <p className="text-xs">下一步：{developmentNextStep(row)}</p>
-              {row.phase === "active" &&
-                (!reuse || reuse.draftId !== row.draftId || !reuseCurrent) && (
-                  <button
-                    type="button"
-                    className={button}
-                    disabled={busy}
-                    onClick={() =>
-                      void operate(
-                        (expectedWorkspace) =>
-                          api.requestReuse({
-                            threadId,
-                            expectedWorkspace,
-                            id: row.draftId,
-                            revision: row.revision
-                          }),
-                        accept
-                      )
-                    }
-                  >
-                    保存并在其他聊天复用…
-                  </button>
-                )}
+              {!savedAsPlugin && <p className="text-xs">下一步：{developmentNextStep(row)}</p>}
               {row.canUndo && (
                 <button
                   type="button"
@@ -1340,7 +1379,7 @@ function ScopedDevelopment({
                   撤销这次修改
                 </button>
               )}
-              {["unknown", "stopped"].includes(row.phase) && onRequestRepair && (
+              {!savedAsPlugin && ["unknown", "stopped"].includes(row.phase) && onRequestRepair && (
                 <button
                   type="button"
                   className={button}
@@ -1627,34 +1666,6 @@ function ScopedDevelopment({
             )}
           </details>
         )}
-        {!!status?.drafts.length &&
-          !reuse &&
-          !status.trials.some((row) => row.phase === "active") && (
-            <div className="flex flex-wrap gap-2">
-              {status.drafts.map((draft) => (
-                <button
-                  key={draft.id}
-                  type="button"
-                  className={button}
-                  disabled={busy}
-                  onClick={() =>
-                    void operate(
-                      (expectedWorkspace) =>
-                        api.requestReuse({
-                          threadId,
-                          expectedWorkspace,
-                          id: draft.id,
-                          revision: draft.revision
-                        }),
-                      accept
-                    )
-                  }
-                >
-                  保存“{draft.name}”并在其他聊天复用…
-                </button>
-              ))}
-            </div>
-          )}
         {(onPromoted || saveForReuse) && !!status?.drafts.length && (
           <details className="space-y-2 rounded-lg border px-3 py-2 text-sm">
             <summary className="cursor-pointer font-medium">高级：源码与手动复用</summary>
@@ -1736,21 +1747,7 @@ function ScopedDevelopment({
           正在确认操作结果…
         </p>
       )}
-      {message && (
-        <div role="status" className="space-y-2 rounded-lg bg-muted p-3 text-sm">
-          <p>{message}</p>
-          {message.includes("灵件功能已关闭") && (
-            <button
-              type="button"
-              className={primaryButton}
-              disabled={busy}
-              onClick={() => changeMode("creator")}
-            >
-              开启灵件功能
-            </button>
-          )}
-        </div>
-      )}
+      {operationFeedback}
       {onOpenWorkbench && (
         <button
           type="button"
@@ -1760,7 +1757,7 @@ function ScopedDevelopment({
             onOpenWorkbench()
           }}
         >
-          打开灵件与使用设置
+          打开插件
         </button>
       )}
     </section>
@@ -1799,6 +1796,26 @@ function ScopedDevelopment({
         }}
       />
     )
+  const importSourceEntry = creatorMode && !workspaceVisible && api.importSourceSet && (
+    <button
+      type="button"
+      title="选择含 devclaw.source-set.json 的作者源码目录"
+      className={button}
+      disabled={busy || !status}
+      onClick={() => void operate(
+        (expectedWorkspace) => api.importSourceSet!({ threadId, expectedWorkspace }),
+        (value) => {
+          accept(value)
+          if (value.sourceSet && value.sourceSet.phase !== "cancelled") {
+            setWorkspaceTab("delivery")
+            setOpen(true)
+          }
+        }
+      )}
+    >
+      导入插件源码
+    </button>
+  )
   if (mode === "entry")
     return workspaceVisible ? (
       <>
@@ -1812,6 +1829,7 @@ function ScopedDevelopment({
             ? "已进入创造者模式，请回到原聊天描述要制作、修改或组合的插件。"
             : "在原聊天直接切换创造者模式，再描述插件需求。"}
         </p>
+        {importSourceEntry}
         {!creatorMode && (
           <button
             type="button"
@@ -1827,6 +1845,7 @@ function ScopedDevelopment({
             返回原聊天
           </button>
         )}
+        {operationFeedback}
       </section>
     )
   return (
@@ -1874,6 +1893,7 @@ function ScopedDevelopment({
           使用指引
         </button>
       )}
+      {importSourceEntry}
       {workspaceVisible && (
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>
@@ -1924,6 +1944,7 @@ function ScopedDevelopment({
         </Dialog>
       )}
       {workspaceVisible && businessTrialDialog}
+      {!workspaceVisible && operationFeedback}
     </div>
   )
 }

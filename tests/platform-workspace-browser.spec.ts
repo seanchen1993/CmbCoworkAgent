@@ -43,7 +43,7 @@ async function main() {
       const pcards=new Set(),pchanges=new Set(),pconfig=new Set(),presenters=new Set(),ops=[];
       let mounts=0,unmounts=0,seq=0,drawing=0,failTree=false,failClose=false,deferOpen=false,finishOpen,deferSurfaceRead=false,rejectRead,resolveRead,deferDisable=false,finishDisable,activeReads=0,maxActiveReads=0,completedReads=0,readFailures=[],persistentReadError='',actionError='';
       const lateFramesSeen=[];
-      let deferAction=false,finishAction;
+      let deferAction=false,finishAction,catalogFailure=false;
       let formKey='settings',formProvider='author';
       new MutationObserver(records=>{if(records.some(record=>[...record.addedNodes].some(node=>node.textContent?.includes('LATE frame '))))lateFramesSeen.push(true)}).observe(document.body,{subtree:true,childList:true});
       let present={version:1,presentable:true},nativePages=new Map(),activeThread='a',visible=true;
@@ -55,7 +55,7 @@ async function main() {
       const tree=marker=>failTree?{type:'Table',props:{columns:[],rows:[]}}:{type:'Box',props:{},children:[...(marker?[{type:'Text',props:{},children:[marker]}]:[]),{type:'Table',props:{label:'实际任务表',columns:[{key:'name',label:'任务'}],rows:[{name:'真实任务'}]}},{type:'Form',props:{key:formKey,label:'页面表单',fields:[{name:'title',label:'页面标题',type:'text',required:true}],values:{title:'原值'}},press:{plugin:formProvider,handle:1}}]};
       const frame=(t,id)=>({openId:id,entry:row(t),pane:{key:'author:board',id:'board',plugin:'author',title:'通用作者页面',generation:'12345678-1234-1234-1234-123456789012',openRequestId:id,tree:tree(),closeOnEscape:true,rows:12}});
       const api={
-        platformSurfaceList:async t=>{ops.push(['list',t]);return{revision:1,entries:[row(t),row(t,true),{...row(t),id:'navigation',key:'key-'+t+'-navigation',title:'切换作者页面',placement:'navigation'}],errors:[]}},
+        platformSurfaceList:async t=>{ops.push(['list',t]);if(catalogFailure)throw Error('CATALOG_UNAVAILABLE');return{revision:1,entries:[row(t),row(t,true),{...row(t),id:'navigation',key:'key-'+t+'-navigation',title:'切换作者页面',placement:'navigation'}],errors:[]}},
         platformBehaviorList:async t=>({revision:1,bindings:[{key:'author/format',title:'作者替换',point:'ui.toast',phase:'replace',available:true}],active:[],errors:[]}),
         platformSurfaceOpen:async(t,a,intent)=>{const id='open-'+(++seq);ops.push(['open',t,id]);const result=frame(t,id);if(deferOpen){deferOpen=false;await new Promise(r=>finishOpen=r)}nativePages.set(t,result);return result},
         platformSurfaceRead:async(t,a)=>{ops.push(['read',t,a.openId]);activeReads++;maxActiveReads=Math.max(maxActiveReads,activeReads);const captured=nativePages.get(t);try{let resumed;if(deferSurfaceRead){deferSurfaceRead=false;resumed=await new Promise((r,j)=>{resolveRead=r;rejectRead=j})}if(readFailures.length)throw Error(readFailures.shift());if(persistentReadError)throw Error(persistentReadError);const result=resumed==='old'?captured:nativePages.get(t);if(!result||result.openId!==a.openId)throw Error('stale');return{...result,pane:{...result.pane,generation:'12345678-1234-1234-1234-'+String(++drawing).padStart(12,'0'),tree:tree(resumed==='old'?'LATE frame '+a.openId:undefined)}}}finally{activeReads--;completedReads++}},
@@ -70,6 +70,7 @@ async function main() {
       function Harness({id,shown}){return <main style={{position:'relative',width:'100%',height:760}}><ChatProbe/>{shown&&<PlatformWorkspace threadId={id} active api={api}/>}</main>}
       const draw=()=>host.render(<Harness id={activeThread} shown={visible}/>);
       window.platformFixture={ops,counts:()=>({mounts,unmounts,sends,cards:pcards.size,platform:pchanges.size,activeReads,maxActiveReads,completedReads,lateFramesSeen:lateFramesSeen.length}),
+        catalogFail:value=>{catalogFailure=value;for(const fn of pchanges)fn({threadId:activeThread})},
         formIdentity:(key,provider)=>{formKey=key;formProvider=provider;for(const fn of pchanges)fn({threadId:activeThread})},
         actionDefer:()=>deferAction=true,actionFinish:()=>finishAction(),
         render:(id,show=true)=>{activeThread=id;visible=show;draw()},bad:()=>{failTree=true;for(const fn of pchanges)fn({threadId:activeThread})},good:()=>failTree=false,
@@ -115,6 +116,11 @@ async function main() {
     const open = () => page.getByRole("button", { name: "通用作者页面", exact: true }).click()
     const region = page.getByRole("region", { name: "通用作者页面", exact: true })
     await page.getByRole("button", { name: "作者侧栏", exact: true }).waitFor()
+    await page.evaluate("window.platformFixture.catalogFail(true)")
+    await page.getByText("扩展暂时不可用，聊天仍可继续", { exact: true }).waitFor()
+    await page.evaluate("window.platformFixture.catalogFail(false)")
+    await page.getByText("扩展暂时不可用，聊天仍可继续", { exact: true }).waitFor({ state: "hidden" })
+    checks.push("a successful catalogue reread clears the obsolete failure notice")
     for (const width of [375, 1280]) {
       await page.setViewportSize({ width, height: 812 })
       assert.equal(

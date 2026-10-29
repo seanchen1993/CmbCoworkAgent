@@ -269,8 +269,19 @@ describe("host-owned required business checks", () => {
         stderr: "",
         blocked: true
       })
-      expect(await f.run()).toMatchObject({ blocked: true })
-      expect(mock.execute).toHaveBeenCalledTimes(1)
+      const log = vi.spyOn(console, "log").mockImplementation(() => {})
+      try {
+        expect(await f.run()).toMatchObject({ blocked: true })
+        expect(mock.execute).toHaveBeenCalledTimes(1)
+        expect(
+          log.mock.calls.filter(
+            (call) =>
+              typeof call[0] === "string" && call[0].startsWith("[Hooks] PreToolUse hook (http)")
+          )
+        ).toEqual([['[Hooks] PreToolUse hook (http) "" → exit=1, blocked=true']])
+      } finally {
+        log.mockRestore()
+      }
     }
   )
 

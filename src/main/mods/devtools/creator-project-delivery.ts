@@ -197,7 +197,10 @@ export class CreatorProjectDeliveries {
     this.busy.add(threadId)
     try {
       guard()
-      const snapshot = await snapshotDerivationSource(draft.directory)
+      const materialized = await this.deps.sessions.materializeForDelivery(
+        context.scope, request.draftId, request.revision, request.digest, guard
+      )
+      const snapshot = await snapshotDerivationSource(materialized.directory)
       guard()
       const expected = draft.source.files
         .map((file) => [file.path, digest(Buffer.from(file.text))])

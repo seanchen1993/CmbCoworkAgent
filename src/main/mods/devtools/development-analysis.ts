@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from "node:path"
 import { readPureFunctionSource } from "./authoring-install-source"
 import { AuthoringPreflightClient } from "./authoring-preflight-client"
 import { AuthoringCompileError } from "./authoring-compile-diagnostics"
+import { authoringValidationResult } from "./authoring-validation-result"
 
 /** Return actionable compiler diagnostics without executing generated modules. */
 export async function analyzeDevelopmentSource(
@@ -32,13 +33,7 @@ export async function analyzeDevelopmentSource(
     )
     assertCurrent()
     signal.throwIfAborted()
-    return {
-      digest: bundle.digest,
-      valid: analysis.sdk.strictCompatible && analysis.typecheck.valid,
-      runtimeVerified: false,
-      diagnostics: [...analysis.typecheck.diagnostics, ...analysis.sdk.diagnostics],
-      capabilities: [...new Set(analysis.sdk.usages.map((usage) => usage.method))].sort()
-    }
+    return authoringValidationResult(bundle.digest, analysis)
   } catch (error) {
     assertCurrent()
     signal.throwIfAborted()

@@ -23,6 +23,8 @@ export function DevelopmentReusePlanCard({
   onRead: () => void
 }) {
   const canApprove = current && !!plan.planId && !!plan.compiledDigest && !!plan.targetProfileDigest
+  const needsPreparation =
+    plan.phase === "failed" && plan.error === "CREATOR_REUSE_PREPARE_REQUIRED"
   return (
     <article
       aria-label="保存并在其他聊天复用"
@@ -87,12 +89,19 @@ export function DevelopmentReusePlanCard({
               : "正式版本和可复用组合已保存，当前聊天已使用。可在其他聊天选择这份组合。"
             : plan.phase === "unknown"
               ? "保存或切换结果待核对。请先核对当前状态，不要重复安装或授权。"
-              : plan.phase === "failed"
-                ? "保存与复用尚未完成。已完成的步骤会保留，请先核对当前状态。"
-                : plan.phase === "applying"
-                  ? "正在安装、授权并保存组合，请等待当前操作完成。"
-                  : "正在核对版本、权限和当前聊天的选择…"}
+              : needsPreparation
+                ? "原准备已失效，尚未恢复安装授权。请重新核对当前草稿并准备新计划，再确认新版本与权限。"
+                : plan.phase === "failed"
+                  ? "保存与复用尚未完成。已完成的步骤会保留，请先核对当前状态。"
+                  : plan.phase === "applying"
+                    ? "正在安装、授权并保存组合，请等待当前操作完成。"
+                    : "正在核对版本、权限和当前聊天的选择…"}
         </p>
+      )}
+      {needsPreparation && onPrepare && (
+        <button type="button" className={button} disabled={busy} onClick={onPrepare}>
+          重新核对并准备
+        </button>
       )}
       {["failed", "unknown"].includes(plan.phase) && (
         <button type="button" className={button} disabled={busy} onClick={onRead}>

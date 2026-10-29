@@ -17,9 +17,8 @@ export function ModsImportGuide() {
       </summary>
       <div className="space-y-4 border-t p-4 text-sm">
         <p className="leading-relaxed text-muted-foreground">
-          已有插件压缩包，点“上传插件（ZIP）”；已有解压后的完整目录，点“从文件夹安装”。 AutoBiz
-          等项目插件可以直接安装，不需要手动转换；安装后先启用，再新建项目。
-          只有单个代码文件不能安装。下面的模板适合想自己写插件的人。
+          在“插件 → 我已添加”展开“从文件添加插件”，上传 ZIP 或选择完整插件目录。 AutoBiz
+          等项目插件可直接安装，保留原有技能与流程；单个脚本文件无法安装。
         </p>
         <div className="grid gap-4 sm:grid-cols-2">
           <pre
@@ -86,21 +85,19 @@ export function ModsImportGuide() {
           <li>
             <strong>2. 开启并授权</strong>
             <p className="mt-1 text-muted-foreground">
-              项目与技能插件：在卡片上点击“启用插件”。灵件：在“灵件与使用设置 → 我已添加”点击“启用应用和当前项目灵件”，再核对并确认权限；Claw 工作台可直接打开“灵件与使用设置”。
+              回到“我已添加”，点击插件卡片的“启用”。按提示确认能力、使用范围与计费说明；需要参数时填写配置。
             </p>
           </li>
           <li>
             <strong>3. 选择使用方式</strong>
             <p className="mt-1 text-muted-foreground">
-              按插件说明使用：命令在聊天框发送；自动运行的功能会在对应场景生效。
-              想搭配多个插件，去“助手组合”；想固定执行顺序，去“按步骤执行”。
+              点击“去使用”进入对应聊天或项目。聊天命令需补充需求后发送，自动检查按原规则触发。
             </p>
           </li>
         </ol>
         <p className="border-t pt-3 text-xs leading-relaxed text-muted-foreground">
-          Claude
-          社区插件请保留原目录结构。含灵件模块时，可在权限区检查社区兼容性并授权试用；其他插件可点“设置使用”，查看技能、工具和检查规则。
-          原有技能和项目流程仍从原入口使用。插件里的命令或面板不一定能作为流程步骤，以页面提供的选项为准。
+          Claude 社区插件请保留原目录结构。卡片“管理”中可查看配置、兼容性、权限与项目流程。
+          命令或面板能否作为组合步骤，以页面提供的选项为准。
         </p>
       </div>
     </details>

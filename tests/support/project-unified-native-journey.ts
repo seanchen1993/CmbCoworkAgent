@@ -30,9 +30,13 @@ export async function openUnifiedProjectList(page: Page) {
   await page.getByRole("button", { name: "新建项目", exact: true }).first().waitFor()
 }
 
-export async function openUnifiedHostProject(page: Page, name: string) {
+export async function openUnifiedHostProject(page: Page, name: string, workspace?: string) {
   await openUnifiedProjectList(page)
-  await page.getByRole("button", { name: `打开项目 ${name}`, exact: true }).click()
+  const named = page.getByRole("button", { name: `打开项目 ${name}`, exact: true })
+  const target = workspace
+    ? named.filter({ has: page.getByText(workspace, { exact: true }) })
+    : named
+  await target.click()
   await page.getByRole("heading", { name: new RegExp(`^${escapeRegex(name)} ·`) }).waitFor()
 }
 

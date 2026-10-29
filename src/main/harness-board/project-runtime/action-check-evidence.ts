@@ -8,6 +8,8 @@ import { captureProjectActionInputs, readProjectActionLock } from "./action-inpu
 import { readProjectActionPhaseFacts, readFailedProjectCheckDiagnostics } from "../project-action-phase"
 import { runtimeDigest } from "./safe-files"
 import { PROJECT_ARTIFACT_REFERENCE_FORMAT } from "../../../shared/project-runtime/artifact-reference"
+import { hasMissingCurrentCheckInput } from "./current-check-inputs"
+import { getProjectActionRuntime } from "../project-action-runtime"
 
 export type HostActionCheckEvidence = Pick<HostValidationReceipt, "result" | "validatorVersion">
 
@@ -25,8 +27,14 @@ export function readHistoricalHostCheckDiagnostics(
     project.manifest.stages[project.stageIndex].checkIds.includes(check.id))
   if (!checks.length) return []
   const lock = readProjectActionLock(snapshotRoot, project.manifest)
+  let runtime: ReturnType<typeof getProjectActionRuntime> | undefined
   const captured = captureProjectActionInputs(project, lock, {
-    actionIds: checks.map(check => check.actionId!), allowCheckArtifacts: true
+    actionIds: checks.map(check => check.actionId!), allowCheckArtifacts: true,
+    readConfiguration: (keys) => {
+      runtime ??= getProjectActionRuntime()
+      if (!runtime.readPublicConfiguration) throw Error("PROJECT_CHECK_CONFIGURATION_UNAVAILABLE")
+      return runtime.readPublicConfiguration(project, snapshotRoot, keys)
+    }
   })
   return readFailedProjectCheckDiagnostics({ project, ticket: {
     operationId: operation.operationId, projectId: project.projectId,
@@ -74,9 +82,22 @@ export function readHostActionCheckEvidence(
   )
     throw Error("PROJECT_ACTION_CHECK_EXECUTION_REQUIRED")
   const lock = readProjectActionLock(snapshotRoot, project.manifest)
+  if (operation.execution?.terminal?.outcome === "success" &&
+      operation.execution.terminal.code === "project_check_input_missing") {
+    // Only the native settled preparation branch can omit action evidence. Recheck the
+    // actual absence now: an appeared output needs a new real check, never old empty evidence.
+    if (!hasMissingCurrentCheckInput(project, lock)) throw Error("PROJECT_ACTION_INPUT_CHANGED")
+    return new Map()
+  }
+  let runtime: ReturnType<typeof getProjectActionRuntime> | undefined
   const captured = captureProjectActionInputs(project, lock, {
     actionIds: checks.map((item) => item.actionId!),
-    allowCheckArtifacts: true
+    allowCheckArtifacts: true,
+    readConfiguration: (keys) => {
+      runtime ??= getProjectActionRuntime()
+      if (!runtime.readPublicConfiguration) throw Error("PROJECT_CHECK_CONFIGURATION_UNAVAILABLE")
+      return runtime.readPublicConfiguration(project, snapshotRoot, keys)
+    }
   })
   const facts = readProjectActionPhaseFacts({
     project,

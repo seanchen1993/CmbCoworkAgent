@@ -18,7 +18,13 @@ import { FUNCTION_CONVERSATION_PROJECTION_COLUMNS, readFunctionConversationRawPr
 import * as humanProjectionFactory from "../db/function-conversation-native-human-projection"
 import { assertFunctionNativeHumanProjectionVariant } from
   "../db/function-conversation-native-human-projection"
-import { captureFunctionConversationNativeInput } from "./function-conversation-native-input"
+import { captureFunctionConversationNativeInput,
+  readFunctionConversationNativeInput } from "./function-conversation-native-input"
+import { captureFunctionConversationNativeWorkflowInput,
+  type NativeWorkflowNotificationInputSource } from "./function-conversation-native-workflow-input"
+import { createFunctionConversationNativeInputRetention } from "./function-conversation-native-input-retention"
+import { buildWorkflowNotificationMessage } from "./workflow/notification"
+import type { PersistedWorkflowRun } from "./workflow/types"
 import { readFunctionConversationPresentationDisposition } from
   "../db/function-conversation-presentation-disposition"
 import { FunctionNativeMessageProtector, type FunctionProtectedNativeMessage } from "./native-message-protector"
@@ -94,7 +100,9 @@ afterAll(async () => {
 /** Real AppDB/physical lease/Manager policy; no public stamp or JSON mints the source. */
 async function fixture(options: { enhanced?: boolean; protected?: boolean; fresh?: boolean;
   large?: boolean; plugin?: boolean; integrity?: "verified" | "unverified";
-  intent?: "persisted" | "blank" | "plumbing" } = {}) {
+  intent?: "persisted" | "blank" | "plumbing"; workflow?: boolean; spoofWorkflow?: boolean;
+  notificationGuard?: () => void;
+  notificationSourceGuard?: (source: NativeWorkflowNotificationInputSource, message: HumanMessage) => void } = {}) {
   const root = realpathSync(mkdtempSync(join(directory, "workspace-")))
   const workspace = process.platform === "win32" ? root.toLowerCase() : root
   const threadId = randomUUID(), physicalRunId = randomUUID(), uuid = randomUUID()
@@ -117,13 +125,26 @@ async function fixture(options: { enhanced?: boolean; protected?: boolean; fresh
     if (current) releaseLocalThreadRunLease(threadId, current.owner, current.runId)
     rmSync(root, { recursive: true, force: true })
   })
-  const original = options.large ? "safe long body ".repeat(90_000) : "original sk-abcdefghijklmnopqrstuv"
+  const noticeRun: PersistedWorkflowRun = {
+    version: 1, runId: "wf_actual_notice", threadId, workflowName: "original-result",
+    script: "", scriptSha256: "a".repeat(64), status: "error", phases: [], currentPhase: null,
+    agents: [], logs: [], journal: [], error: "Original workflow failed; no retry was executed.",
+    stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 1 },
+    startedAt: "2026-10-28T01:00:00.000Z", updatedAt: "2026-10-28T01:00:01.000Z",
+    notificationOwner: "managed"
+  }
+  const original = options.workflow || options.spoofWorkflow ? buildWorkflowNotificationMessage(noticeRun)
+    : options.large ? "safe long body ".repeat(90_000) : "original sk-abcdefghijklmnopqrstuv"
   const visible = "visible sk-abcdefghijklmnopqrstuv"
   const message = new HumanMessage({ id: uuid,
-    content: options.enhanced ? `${visible}\nprivate engine context` : original,
+    content: options.enhanced && !options.workflow ? `${visible}\nprivate engine context` : original,
     additional_kwargs: options.enhanced ? { cmb_coordinator_augmented_user_message: true,
-      cmb_visible_user_message: visible } : { actualInput: true } })
-  const origin: FunctionSessionAppendOrigin = options.plugin
+      cmb_visible_user_message: visible } : options.spoofWorkflow ? {
+        origin: { kind: "task-notification" }, hostWorkflowNotification: {
+          runId: noticeRun.runId, startedAt: noticeRun.startedAt, ownerRunToken: physicalRunId },
+        transcript: { disposition: "plumbing" }
+      } : { actualInput: true } })
+  const origin: FunctionSessionAppendOrigin = options.workflow ? { kind: "task-notification" } : options.plugin
     ? { kind: "plugin", name: "ActualOriginalPlugin" } : { kind: "composer" }
   const transcriptWrite = { id: uuid, role: "user" as const,
     content: options.intent === "blank" ? "" : options.intent === "plumbing" ? "plumbing"
@@ -136,7 +157,17 @@ async function fixture(options: { enhanced?: boolean; protected?: boolean; fresh
       origin: { kind: "plugin", name: "ActualOriginalPlugin" } }
   } : {})
   if (options.intent === "persisted") expect(persist()).toBe(1)
-  const source = captureFunctionConversationNativeInput({ message, threadId, physicalRunId,
+  const source = options.workflow ? captureFunctionConversationNativeWorkflowInput({
+    message, threadId, physicalRunId, workspace, signal: controller.signal, assertCurrent: guard,
+    ...(options.enhanced ? { visible } : {}),
+    notification: { runId: noticeRun.runId, startedAt: noticeRun.startedAt,
+      ownerRunToken: physicalRunId, content: original, assertCurrent() {
+        guard()
+        options.notificationGuard?.()
+      }, ...(options.notificationSourceGuard ? { assertSourceCurrent() {
+        return options.notificationSourceGuard!(this, message)
+      } } : {}) }
+  }) : captureFunctionConversationNativeInput({ message, threadId, physicalRunId,
     workspace, signal: controller.signal, origin, assertCurrent: guard,
     ...(options.intent ? { transcript: { write: transcriptWrite, disposition: options.intent } } : {}),
     ...(options.enhanced ? { visible } : {}) })
@@ -224,6 +255,100 @@ async function fixture(options: { enhanced?: boolean; protected?: boolean; fresh
 }
 
 describe("private protected Human presentation and original native adoption", () => {
+  it.each([false, true])("keeps the original protection deadline with separated source/owner checks=%s", async separated => {
+    let now = process.hrtime.bigint(), sourceChecks = 0, ownerChecks = 0
+    vi.spyOn(process.hrtime, "bigint").mockImplementation(() => now)
+    const fullSource = () => { sourceChecks++; now += 50_000_000n }
+    const f = await fixture({ workflow: true, fresh: true, protected: false,
+      notificationGuard: () => { ownerChecks++; if (!separated) fullSource() },
+      ...(separated ? { notificationSourceGuard: fullSource } : {}) })
+    const retention = createFunctionConversationNativeInputRetention({ source: f.source,
+      runtime: f.runtime, store: f.store, agentId: "main", flush: () => {}, register: () => {} })
+    cleanups.push(async () => { retention.close(); await retention.whenDrained() })
+    const pending = retention.retainInput({ messages: [f.message] }, {
+      configurable: { thread_id: f.runtime.binding.checkpointThreadId,
+        checkpoint_ns: f.runtime.binding.runtimeCheckpointNamespace }
+    })
+    if (separated) {
+      await pending
+      expect(sourceChecks).toBe(1)
+      expect(ownerChecks).toBeGreaterThan(800)
+      expect(f.store.readReceipt(f.runtime.target.ref, f.uuid)?.origin)
+        .toEqual({ kind: "task-notification" })
+      expect(readFunctionConversationRawProjection(f.database, f.threadId, f.uuid)?.content_json)
+        .toBe(JSON.stringify(""))
+    } else {
+      await expect(pending).rejects.toThrow("MODS_NATIVE_PROTECTION_TIMEOUT")
+      expect(sourceChecks).toBeGreaterThan(600)
+      // A deadline after COMMIT cannot erase original facts or replay that occurrence.
+      const rows = f.store.readRows(f.runtime.target.ref).length
+      expect(rows).toBeLessThanOrEqual(1)
+      await expect(retention.retainInput({ messages: [f.message] }, {
+        configurable: { thread_id: f.runtime.binding.checkpointThreadId,
+          checkpoint_ns: f.runtime.binding.runtimeCheckpointNamespace }
+      })).rejects.toThrow()
+      expect(f.store.readRows(f.runtime.target.ref)).toHaveLength(rows)
+    }
+  })
+
+  it.each(["content", "run", "resume", "owner", "callback", "revoked", "inputs", "async"] as const)(
+    "rejects original workflow capture changed during the full source check: %s", async change => {
+      await expect(fixture({ workflow: true, fresh: true, protected: false,
+        notificationSourceGuard: (notice, message) => {
+          if (change === "content") message.content = "changed original notification"
+          if (change === "run") Object.defineProperty(notice, "runId", { value: "wf_different" })
+          if (change === "resume") Object.defineProperty(notice, "startedAt", { value: "different-start" })
+          if (change === "owner") Object.defineProperty(notice, "ownerRunToken", { value: "different-owner" })
+          if (change === "callback") Object.defineProperty(notice, "assertSourceCurrent", { value: () => {} })
+          if (change === "revoked") throw Error("ORIGINAL_WORKFLOW_SOURCE_RETIRED")
+          if (change === "inputs") throw Error("PROJECT_INPUT_CHANGED")
+          if (change === "async") return Promise.reject(Error("ASYNC_SOURCE_CHECK_REJECTED"))
+          return undefined
+        } })).rejects.toThrow(change === "revoked" ? "ORIGINAL_WORKFLOW_SOURCE_RETIRED"
+          : change === "inputs" ? "PROJECT_INPUT_CHANGED" : "MODS_CONVERSATION_WORKFLOW_INPUT_INVALID")
+    }
+  )
+
+  it.each([false, true])("retains an original failed workflow notification through the full input keeper without a human bubble (augmented=%s)", async enhanced => {
+    const f = await fixture({ workflow: true, enhanced, fresh: true, protected: false })
+    expect(readFunctionConversationNativeInput(f.source).origin).toEqual({ kind: "task-notification" })
+    const projection = createNativeConversationStreamProjection({ runtime: f.runtime, store: f.store })
+    cleanups.push(() => projection.close())
+    const retention = createFunctionConversationNativeInputRetention({ source: f.source,
+      runtime: f.runtime, store: f.store, agentId: "main", flush: () => {},
+      register: (message, row) => projection.register(message, row) })
+    cleanups.push(async () => { retention.close(); await retention.whenDrained() })
+    const retained = await retention.retainInput({ messages: [f.message] }, {
+      configurable: { thread_id: f.runtime.binding.checkpointThreadId,
+        checkpoint_ns: f.runtime.binding.runtimeCheckpointNamespace }
+    }) as { messages: BaseMessage[] }
+    expect(retained.messages[0].content).toBe(f.message.content)
+    const row = f.store.readReceipt(f.runtime.target.ref, f.uuid)
+    expect(row?.origin).toEqual({ kind: "task-notification" })
+    expect(row?.nativePayload).toContain("Original workflow failed")
+    const columns = readFunctionConversationRawProjection(f.database, f.threadId, f.uuid)
+    expect(columns?.content_json).toBe(JSON.stringify(""))
+    expect(appDb.getThreadMessages(f.threadId).find((message) => message.id === f.uuid)?.content).toBe("")
+    expect(projection.omitMessage(retained.messages[0])).toBe(true)
+    expect(serializeNativeConversationStreamData("messages", [retained.messages[0], {}]))
+      .toBeUndefined()
+  })
+
+  it("does not derive a skipped-write intent from ordinary Mod metadata or a copied notification body", async () => {
+    const f = await fixture({ spoofWorkflow: true, fresh: true, protected: false })
+    expect(readFunctionConversationNativeInput(f.source).transcript).toBeUndefined()
+    await expect(f.retain()).rejects.toThrow("MODS_CONVERSATION_HUMAN_WRITE_INTENT_REQUIRED")
+    expect(readFunctionConversationRawProjection(f.database, f.threadId, f.uuid)).toBeUndefined()
+    expect(f.store.readReceipt(f.runtime.target.ref, f.uuid)).toBeUndefined()
+  })
+
+  it("rejects a retired original workflow source before any canonical projection write", async () => {
+    const f = await fixture({ workflow: true, fresh: true, protected: false })
+    f.onGuard(() => { throw Error("ORIGINAL_WORKFLOW_SOURCE_RETIRED") })
+    await expect(f.retain()).rejects.toThrow("ORIGINAL_WORKFLOW_SOURCE_RETIRED")
+    expect(readFunctionConversationRawProjection(f.database, f.threadId, f.uuid)).toBeUndefined()
+    expect(f.store.readReceipt(f.runtime.target.ref, f.uuid)).toBeUndefined()
+  })
   it.each(["blank", "plumbing"] as const)(
     "retains and seals full %s input without producing a visible body", async disposition => {
       const f = await fixture({ intent: disposition, fresh: true, protected: false })

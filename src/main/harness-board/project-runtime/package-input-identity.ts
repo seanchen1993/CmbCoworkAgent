@@ -10,6 +10,7 @@ import { readProjectActionLock } from "./action-input"
 import { readProjectRecoveryContext } from "./recovery-context"
 import { readDeclaredContextFiles } from "./declared-context-files"
 import { readRetainedExecutionResources } from "./execution-resources"
+import { parseProjectCheckConfigurationKeys } from "../../../shared/project-runtime/action-bindings"
 import {
   readRuntimeScopedFile,
   runtimeDigest,
@@ -97,6 +98,20 @@ export function createHostProjectInputIdentity(
     })
   return {
     readExecutionResources: executionResources,
+    readPublicConfiguration(project: ProjectRuntimeInputScope, root: string, keys: readonly string[]) {
+      const selected = parseProjectCheckConfigurationKeys(keys)
+      const input = source(project, root)
+      manager.assertRuntimeSourceConfiguration(input)
+      const facts = manager.getRuntimeSourceFacts(input)
+      if (!facts) throw Error("PROJECT_INPUT_SOURCE_NOT_PREPARED")
+      for (const key of selected) {
+        const field = facts.userConfig && Object.hasOwn(facts.userConfig, key)
+          ? facts.userConfig[key] : undefined
+        if (!field || field.sensitive || !["string", "number", "boolean"].includes(field.type))
+          throw Error("PROJECT_CHECK_CONFIGURATION_PRIVATE_FIELD")
+      }
+      return manager.readRuntimePublicConfiguration(input, selected)
+    },
     readContextMaterials(project: ProjectRuntimeInputScope, root: string) {
       const context = readPackageExtensionContract(root)?.context
       const materials = context?.provider?.materials

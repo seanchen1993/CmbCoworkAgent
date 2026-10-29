@@ -28,8 +28,11 @@ async function main() {
       import React,{useEffect,useLayoutEffect,useRef,useState}from'react';
       import{createRoot}from'react-dom/client';
       import{ChatMessageVirtualList}from'./src/renderer/src/components/chat/ChatMessageVirtualList';
+      import{isChatRowPresented}from'./src/renderer/src/components/chat/chat-row-presentation';
       import{ScrollArea}from'./src/renderer/src/components/ui/scroll-area';
       const noop=()=>{},refs={current:new Map()},virtual={current:null},range={current:null},maps=new Map();
+      window.layoutDetached=false;window.layoutAnchorLease=0;
+      const readLease=()=>window.layoutDetached?window.layoutAnchorLease:null;
       let phase='initial';
       const counters={mounts:0,unmounts:0,frames:0,emptyFrames:0,visibleEmptyFrames:0,maxMountedRows:0,anomalies:[],trace:[]};window.layoutCounters=counters;
       const make=(start,count,tall=false)=>Array.from({length:count},(_,i)=>({id:'row-'+(start+i),
@@ -62,6 +65,7 @@ async function main() {
           frame=requestAnimationFrame(sample)};frame=requestAnimationFrame(sample);return()=>cancelAnimationFrame(frame)},[]);
         window.layoutFixture={
           phase:value=>{phase=value},
+          rowPresented:()=>{const row=root.current.querySelector('[data-chat-message-row]');return !!row&&isChatRowPresented(row)},
           jump:index=>virtual.current.scrollToIndex({index,align:'start',behavior:'auto'}),
           position:index=>new Promise(done=>virtual.current.scrollIntoView({index,align:'start',behavior:'auto',
             calculateViewLocation:()=>({index,align:'start',behavior:'auto'}),done})),
@@ -69,6 +73,80 @@ async function main() {
           prepend:()=>setMessages(old=>[...make(-25,25),...old]),
           release:()=>setMessages(old=>old.slice(20)),
           replace:()=>setMessages(make(1000,120)),
+          historical:()=>setMessages([...make(0,872),...make(1680,320)]),
+          latest:()=>setMessages(make(1500,500)),
+          short:()=>setMessages(make(0,400).map(message=>({...message,content:'100'}))),
+          promotionWindow:()=>{setThread('pending-promotion');setMessages(make(0,400).map(message=>({...message,content:'100'})))},
+          materializationWindow:()=>{setThread('delayed-range');setMessages(make(0,400).map(message=>({...message,content:'100'})))},
+          hideRows:()=>{
+            const style=document.createElement('style');
+            style.textContent='[data-chat-message-row]{display:none!important}';
+            document.head.appendChild(style);window.delayedRangeStyle=style;
+          },
+          showRows:()=>{
+            window.delayedRangeStyle.remove();
+            root.current.querySelector('[data-chat-message-row]')?.classList.add('materialized');
+          },
+          pendingAll:()=>{
+            const viewport=root.current.querySelector('[data-radix-scroll-area-viewport]');
+            const top=viewport.getBoundingClientRect().top;
+            const rows=[...viewport.querySelectorAll('[data-chat-message-row]')];
+            window.promotionPendingId=rows.find(row=>row.getBoundingClientRect().bottom>top).dataset.chatMessageId;
+            rows.forEach(row=>row.firstElementChild.setAttribute('data-function-site-pending',''));
+          },
+          readyBeforePending:async delta=>{
+            const viewport=root.current.querySelector('[data-radix-scroll-area-viewport]');
+            const top=viewport.getBoundingClientRect().top;
+            const rows=[...viewport.querySelectorAll('[data-chat-message-row]')];
+            const index=rows.findIndex(row=>row.dataset.chatMessageId===window.promotionPendingId);
+            const row=rows[index-1],bubble=row.firstElementChild;
+            const before={id:row.dataset.chatMessageId,top:row.getBoundingClientRect().top-top};
+            bubble.style.height=(bubble.getBoundingClientRect().height+delta)+'px';
+            bubble.removeAttribute('data-function-site-pending');
+            bubble.setAttribute('aria-busy','true');
+            // Deliver the content mutation before its measurement/scroll transaction.
+            await Promise.resolve();
+            viewport.dispatchEvent(new Event('scroll'));
+            viewport.scrollTop+=delta;return before;
+          },
+          readyOriginalPending:delta=>{
+            const row=[...root.current.querySelectorAll('[data-chat-message-row]')]
+              .find(row=>row.dataset.chatMessageId===window.promotionPendingId);
+            if(!row)throw Error('Pending B should still be mounted in overscan');
+            const bubble=row.firstElementChild;
+            bubble.style.height=(bubble.getBoundingClientRect().height+delta)+'px';
+            bubble.removeAttribute('data-function-site-pending');
+          },
+          anchor:enabled=>{window.layoutDetached=!!enabled;window.layoutAnchorLease++},
+          growAbove:delta=>{
+            const viewport=root.current.querySelector('[data-radix-scroll-area-viewport]');
+            const bounds=viewport.getBoundingClientRect();
+            const rows=[...viewport.querySelectorAll('[data-chat-message-row]')];
+            const index=rows.findIndex(row=>row.getBoundingClientRect().bottom>bounds.top);
+            if(index<1)throw Error('Fixture requires an overscan row before its visible anchor');
+            const bubble=rows[index-1].firstElementChild;
+            bubble.style.height=(bubble.getBoundingClientRect().height+delta)+'px';
+          },
+          pendingFirst:()=>{
+            const viewport=root.current.querySelector('[data-radix-scroll-area-viewport]');
+            const top=viewport.getBoundingClientRect().top;
+            const row=[...viewport.querySelectorAll('[data-chat-message-row]')]
+              .find(row=>row.getBoundingClientRect().bottom>top);
+            row.firstElementChild.setAttribute('data-function-site-pending','');
+          },
+          growPending:delta=>{
+            const bubble=root.current.querySelector('[data-function-site-pending]');
+            bubble.style.height=(bubble.getBoundingClientRect().height+delta)+'px';
+          },
+          equalHeightChange:delta=>{
+            const viewport=root.current.querySelector('[data-radix-scroll-area-viewport]');
+            const top=viewport.getBoundingClientRect().top;
+            const rows=[...viewport.querySelectorAll('[data-chat-message-row]')];
+            const index=rows.findIndex(row=>row.getBoundingClientRect().bottom>top);
+            const above=rows[index-1].firstElementChild,below=rows[index+2].firstElementChild;
+            above.style.height=(above.getBoundingClientRect().height+delta)+'px';
+            below.style.height=(below.getBoundingClientRect().height-delta)+'px';
+          },
           switchThread:()=>{setThread('two');setMessages(make(1000,120,true))},
           empty:()=>setMessages([]),restore:()=>setMessages(make(2000,80)),
           snapshot:()=>({...counters,range:range.current})};
@@ -84,7 +162,7 @@ async function main() {
             threadId={thread} assistantDurationMsById={maps} userSendTimeLabelById={maps.labels??maps}
             customScrollParent={parent} virtuosoRef={virtual} navigatorVirtualRangeRef={range}
             initialTopMostItemIndex={{index:'LAST',align:'end'}} onInitialVirtualItemsRendered={noop}
-            onContentHeightChanged={noop} onAtBottomStateChange={noop} footer={null}/>
+            onContentHeightChanged={noop} onAtBottomStateChange={noop} readDetachedAnchorLease={readLease} footer={null}/>
         </ScrollArea>
       }
       createRoot(document.getElementById('root')).render(<Fixture/>);`
@@ -160,6 +238,8 @@ async function main() {
     page.waitForFunction((id) => {
       const viewport = document.querySelector("[data-radix-scroll-area-viewport]")!
       return (
+        (window as unknown as { layoutFixture: { rowPresented(): boolean } })
+          .layoutFixture.rowPresented() &&
         document.querySelector(`[data-chat-message-id="${id}"]`) &&
         Math.abs(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop) <= 2
       )
@@ -275,6 +355,187 @@ async function main() {
     await call("last")
     await settle()
     await page.locator('[data-chat-message-id="row-2079"]').waitFor()
+    await page.waitForFunction(() =>
+      (window as unknown as { layoutFixture: { rowPresented(): boolean } }).layoutFixture.rowPresented()
+    )
+    const visibilityChecks = await page.evaluate(() => {
+      const fixture = (window as unknown as { layoutFixture: { rowPresented(): boolean } }).layoutFixture
+      const row = document.querySelector<HTMLElement>("[data-chat-message-row]")!
+      const root = row.closest<HTMLElement>("[data-chat-initial-presentation]")!
+      const values = [fixture.rowPresented()]
+      row.style.visibility = "hidden"
+      values.push(fixture.rowPresented())
+      row.style.visibility = ""
+      root.setAttribute("aria-hidden", "true")
+      values.push(fixture.rowPresented())
+      root.removeAttribute("aria-hidden")
+      root.dataset.chatInitialPresentation = "pending"
+      values.push(fixture.rowPresented())
+      root.dataset.chatInitialPresentation = "ready"
+      Object.defineProperty(row, "checkVisibility", { value: undefined, configurable: true })
+      values.push(fixture.rowPresented())
+      root.style.opacity = "0"
+      values.push(fixture.rowPresented())
+      root.style.opacity = ""
+      delete (row as unknown as { checkVisibility?: unknown }).checkVisibility
+      return values
+    })
+    assert.deepEqual(visibilityChecks, [true, false, false, false, true, false],
+      "Presented rows require visible CSS/ancestors, including the compatibility path")
+    await phase("restore-latest-with-retained-tail")
+    await call("historical")
+    await call("last")
+    await waitAtEnd("row-1999")
+    const historicalTail = await page.locator('[data-chat-message-id="row-1999"]').elementHandle()
+    assert(historicalTail)
+    await call("latest")
+    await waitAtEnd("row-1999")
+    assert.equal(
+      await historicalTail.evaluate(element => element.isConnected),
+      false,
+      "Replacing both historical and latest prefixes must reprobe the retained tail's sizes"
+    )
+    assert(
+      await page.locator('[data-chat-message-id="row-1999"]').evaluate(element => {
+        const row = element.getBoundingClientRect()
+        const viewport = element.closest("[data-radix-scroll-area-viewport]")!.getBoundingClientRect()
+        return row.height > 0 && row.bottom > viewport.top && row.top < viewport.bottom
+      }),
+      "The restored latest tail must remain visible after the measurement window resets"
+    )
+    await phase("detached-async-height")
+    await call("short")
+    await waitAtEnd("row-399")
+    await call("anchor", 1)
+    const firstVisible = (readable = false) => page.evaluate((readable) => {
+      const viewport = document.querySelector("[data-radix-scroll-area-viewport]")!
+      const area = viewport.getBoundingClientRect()
+      const row = [...viewport.querySelectorAll<HTMLElement>("[data-chat-message-row]")]
+        .find(row => row.getBoundingClientRect().bottom > area.top &&
+          (!readable || !row.querySelector("[data-function-site-pending]")))!
+      return { id: row.dataset.chatMessageId!, top: row.getBoundingClientRect().top - area.top }
+    }, readable)
+    const asyncHeightHold = async (height: number) => {
+      const before = await firstVisible()
+      await call("growAbove", height)
+      await settle()
+      const after = await firstVisible()
+      writeFileSync(resolve(output, "detached-height-latest.json"),
+        JSON.stringify({ before, after, height, snapshot: await snapshot() }, null, 2) + "\n")
+      assert.equal(after.id, before.id, "An async height change must preserve the reader's row")
+      assert(Math.abs(after.top - before.top) <= 2, "The held reader's row offset must stay stable")
+      return { before, after, height }
+    }
+    const freshThumb = await thumb.boundingBox()
+    const freshBar = await bar.boundingBox()
+    assert(freshThumb && freshBar)
+    await page.mouse.move(freshThumb.x + freshThumb.width / 2, freshThumb.y + freshThumb.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(freshBar.x + freshBar.width / 2, freshBar.y + freshBar.height * 0.35, { steps: 8 })
+    await settle()
+    const held = await asyncHeightHold(700)
+    const beforeFurtherMovement = await firstVisible()
+    await page.mouse.move(freshBar.x + freshBar.width / 2, freshBar.y + freshBar.height * 0.65, { steps: 8 })
+    await settle()
+    assert.notEqual((await firstVisible()).id, beforeFurtherMovement.id,
+      "Further actual pointer movement must replace the preceding reading anchor")
+    const movedThenHeld = await asyncHeightHold(350)
+    await page.mouse.up()
+    await settle()
+    const released = await asyncHeightHold(500)
+    await call("pendingFirst")
+    const viewportBox = await page.locator("[data-radix-scroll-area-viewport]").boundingBox()
+    assert(viewportBox)
+    await page.mouse.move(viewportBox.x + viewportBox.width / 2, viewportBox.y + viewportBox.height / 2)
+    await page.mouse.wheel(0, 1)
+    await settle()
+    await page.waitForTimeout(150)
+    const readableBeforePendingGrowth = await firstVisible(true)
+    await call("growPending", 600)
+    await settle()
+    const readableAfterPendingGrowth = await firstVisible(true)
+    assert.deepEqual(readableAfterPendingGrowth, readableBeforePendingGrowth,
+      "A pending edge row must not displace the following already readable body")
+    const beforeWheel = await firstVisible()
+    await page.mouse.wheel(0, 464)
+    await settle()
+    await page.mouse.wheel(0, 232)
+    await settle()
+    assert.notEqual((await firstVisible()).id, beforeWheel.id,
+      "Successive wheel intent must keep ownership while moving")
+    await page.waitForTimeout(150)
+    const wheelStopped = await asyncHeightHold(250)
+    const equalHeightBefore = await firstVisible()
+    await call("equalHeightChange", 40)
+    await settle()
+    const equalHeightAfter = await firstVisible()
+    assert.deepEqual(equalHeightAfter, equalHeightBefore,
+      "Equal growth/shrink must release the measurement barrier without a list resize")
+    await call("anchor", 1)
+    await call("position", 42)
+    await settle()
+    assert(Math.abs(await rowOffset("row-42")) <= 2,
+      "A new navigation lease must invalidate the prior reading anchor")
+    await call("anchor", 0)
+    const followingBefore = await firstVisible()
+    await call("growAbove", 600)
+    await settle()
+    const followingAfter = await firstVisible()
+    assert(followingAfter.id !== followingBefore.id ||
+      Math.abs(followingAfter.top - followingBefore.top) > 100,
+      "Following/restoration must yield to its existing scroll owner")
+    writeFileSync(resolve(output, "detached-height-evidence.json"),
+      JSON.stringify({ held, movedThenHeld, released, readableBeforePendingGrowth,
+        readableAfterPendingGrowth, wheelStopped, equalHeightBefore, equalHeightAfter }, null, 2) + "\n")
+    await phase("pending-anchor-promotion")
+    await call("anchor", 0)
+    await call("promotionWindow")
+    await waitAtEnd("row-399")
+    await call("position", 200)
+    await settle()
+    await call("anchor", 1)
+    await call("pendingAll")
+    await page.mouse.wheel(0, 1)
+    await settle()
+    await page.waitForTimeout(150)
+    const firstReadableAbove = await call("readyBeforePending", 200) as { id: string; top: number }
+    await settle()
+    const promoted = await firstVisible(true)
+    assert.equal(promoted.id, firstReadableAbove.id,
+      "Readable A must be remembered during the measurement barrier before the viewport advances")
+    assert(Math.abs(promoted.top - firstReadableAbove.top) <= 2,
+      "Promoting A must retain its current readable offset instead of pulling B back onscreen")
+    const afterIndependentGrowth = await asyncHeightHold(200)
+    await call("readyOriginalPending", 500)
+    await settle()
+    const afterPendingBCompletes = await firstVisible(true)
+    assert.deepEqual(afterPendingBCompletes, promoted,
+      "Once A is readable, later B completion must not replace the reading anchor")
+    writeFileSync(resolve(output, "pending-promotion-evidence.json"), JSON.stringify({
+      firstReadableAbove, promoted, afterIndependentGrowth, afterPendingBCompletes
+    }, null, 2) + "\n")
+    await phase("delayed-range-first-anchor")
+    await call("anchor", 0)
+    await call("materializationWindow")
+    await waitAtEnd("row-399")
+    await call("position", 200)
+    await settle()
+    await call("hideRows")
+    await call("anchor", 1)
+    await page.mouse.wheel(0, 1)
+    await settle()
+    await page.waitForTimeout(150)
+    await call("showRows")
+    await settle()
+    const materialized = await firstVisible(true)
+    await call("growAbove", 200)
+    await settle()
+    const afterMaterializedGrowth = await firstVisible(true)
+    assert.deepEqual(afterMaterializedGrowth, materialized,
+      "A range absent at the last input capture must acquire its first readable anchor on materialization")
+    writeFileSync(resolve(output, "delayed-range-anchor-evidence.json"), JSON.stringify({
+      materialized, afterMaterializedGrowth
+    }, null, 2) + "\n")
     assert.deepEqual(errors, [])
     const evidence = {
       beforeDrag,

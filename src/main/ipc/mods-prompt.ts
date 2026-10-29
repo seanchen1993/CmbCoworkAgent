@@ -2,7 +2,11 @@ import type { IpcMain, IpcMainInvokeEvent } from "electron"
 import type { FunctionPromptBroker } from "../mods/v2/prompt-broker"
 import type { PromptComposerResponse } from "../../shared/mods/v2/prompt-composer"
 import type { PromptEditRequest } from "../../shared/mods/v2/prompt-composer"
-import type { FunctionPromptEditInput, FunctionPromptEditResult } from "../../shared/mods/v2/prompt-edit"
+import type {
+  FunctionPromptEditInput,
+  FunctionPromptEditResult
+} from "../../shared/mods/v2/prompt-edit"
+import { compositionRecoveryError } from "../mods/errors"
 
 export function registerPromptComposerHandlers(
   ipc: IpcMain,
@@ -10,32 +14,65 @@ export function registerPromptComposerHandlers(
   scope: (event: IpcMainInvokeEvent, threadId: string) => string,
   editing?: {
     support(workspace: string, threadId: string): Promise<boolean>
-    run(workspace: string, threadId: string, input: FunctionPromptEditInput, signal: AbortSignal,
-      assertOwner: () => void, nativeCursor?: number): Promise<FunctionPromptEditResult>
+    run(
+      workspace: string,
+      threadId: string,
+      input: FunctionPromptEditInput,
+      signal: AbortSignal,
+      assertOwner: () => void,
+      nativeCursor?: number
+    ): Promise<FunctionPromptEditResult>
   }
 ): void {
   const observedSenders = new WeakSet<IpcMainInvokeEvent["sender"]>()
-  ipc.handle("mods:prompt-edit-support", async (event, input: { threadId: string; owner: string }) => {
-    const workspace = scope(event, input?.threadId)
-    broker.assertEditor(event.sender.id, input.threadId, input.owner)
-    const result = editing ? await editing.support(workspace, input.threadId) : false
-    scope(event, input.threadId)
-    broker.assertEditor(event.sender.id, input.threadId, input.owner)
-    return result
-  })
+  ipc.handle(
+    "mods:prompt-edit-support",
+    async (event, input: { threadId: string; owner: string }) => {
+      const workspace = scope(event, input?.threadId)
+      broker.assertEditor(event.sender.id, input.threadId, input.owner)
+      let result: boolean
+      try {
+        result = editing ? await editing.support(workspace, input.threadId) : false
+      } catch (error) {
+        throw compositionRecoveryError(error)
+      }
+      scope(event, input.threadId)
+      broker.assertEditor(event.sender.id, input.threadId, input.owner)
+      return result
+    }
+  )
   ipc.handle("mods:prompt-edit", (event, request: PromptEditRequest) => {
     const workspace = scope(event, request?.threadId)
     if (!editing) throw Error("MODS_PROMPT_EDIT_UNAVAILABLE")
-    return broker.edit(event.sender.id, request, (input, signal, assertOwner, nativeCursor) =>
-      editing.run(workspace, request.threadId, input, signal, () => {
-        scope(event, request.threadId)
-        assertOwner()
-      }, nativeCursor))
+    return broker.edit(
+      event.sender.id,
+      request,
+      async (input, signal, assertOwner, nativeCursor) => {
+        try {
+          return await editing.run(
+            workspace,
+            request.threadId,
+            input,
+            signal,
+            () => {
+              scope(event, request.threadId)
+              assertOwner()
+            },
+            nativeCursor
+          )
+        } catch (error) {
+          throw compositionRecoveryError(error)
+        }
+      }
+    )
   })
-  ipc.handle("mods:prompt-edit-cancel", (event, input: { threadId: string; owner: string; sequence: number }) => {
-    scope(event, input?.threadId)
-    broker.cancelEdit(event.sender.id, input.threadId, input.owner, input.sequence)
-  })
+  ipc.handle(
+    "mods:prompt-edit-cancel",
+    (event, input: { threadId: string; owner: string; sequence: number }) => {
+      scope(event, input?.threadId)
+      broker.cancelEdit(event.sender.id, input.threadId, input.owner, input.sequence)
+    }
+  )
   ipc.handle("mods:prompt-attach", (event, input: { threadId: string; owner: string }) => {
     scope(event, input?.threadId)
     if (event.sender.isDestroyed()) throw Error("MODS_PROMPT_NO_COMPOSER")

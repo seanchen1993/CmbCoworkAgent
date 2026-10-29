@@ -173,6 +173,59 @@ it("revokes a disabled result on configuration change and discards late prior re
   expect(f.render()).toMatchObject({ enabled: true, ready: true })
 })
 
+it("refreshes an initially disabled display from the real workspace configure notification", async () => {
+  const f = setup()
+  f.render()
+  f.requests[0].resolve(false)
+  await settle()
+  expect(f.render()).toMatchObject({ enabled: false, ready: true })
+  const source = ts.createSourceFile("mods.ts", readFileSync(new URL(
+    "../../../main/ipc/mods.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true)
+  let selected: ts.Node | undefined
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.expression.getText(source) === "ipcMain.handle" &&
+      ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text === "mods:configure")
+      selected = node.arguments[1]
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  if (!selected) throw Error("Actual workspace configuration handler missing")
+  let enabled = false
+  const send = vi.fn((channel: string) => {
+    expect(channel).toBe("mods:configuration-changed")
+    // A notification can only trigger a fresh host read after the actual settings commit.
+    expect(enabled).toBe(expected)
+    f.notify()
+  })
+  let expected = true
+  const handler = runInNewContext(ts.transpileModule(`(${selected.getText(source)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
+  }).outputText, {
+    settingsScope: () => ({ workspace: "workspace" }), ModError: Error,
+    manager: { configure: (_workspace: string, value: boolean) => { enabled = value } },
+    creatorComposition: { reconcile: () => {} }, creatorReuse: { reconcileAuthorizations: () => {} },
+    window: () => ({ isDestroyed: () => false, webContents: { send } })
+  })
+  handler({}, { threadId: "thread", expectedWorkspace: "workspace", enabled: true, outputPolicy: false })
+  expect(f.render().ready).toBe(false)
+  expect(f.read).toHaveBeenCalledTimes(2)
+  f.requests[1].resolve(enabled)
+  await settle()
+  const active = f.render()
+  expect(active).toMatchObject({ enabled: true, ready: true })
+  // Disable while a second enabling read is still outstanding; it cannot restore authority.
+  handler({}, { threadId: "thread", expectedWorkspace: "workspace", enabled: true, outputPolicy: false })
+  expected = false
+  handler({}, { threadId: "thread", expectedWorkspace: "workspace", enabled: false, outputPolicy: false })
+  expect(active.isCurrent()).toBe(false)
+  f.requests[3].resolve(enabled)
+  await settle()
+  f.requests[2].resolve(true)
+  await settle()
+  expect(f.render()).toMatchObject({ enabled: false, ready: true })
+  expect(send).toHaveBeenCalledTimes(3)
+})
+
 it("never restores A's completed result or response across A-B-A renders", async () => {
   const f = setup()
   f.render("A", "workspace-A")
@@ -244,12 +297,14 @@ it("the real ChatContainer provider carries revocation, error and retry contract
   context.currentForkWorkspacePath = ""
   const missingWorkspace = read()
   expect(missingWorkspace.error).toBe("denied")
-  missingWorkspace.retry()
-  await settle()
-  expect(loadThreads).toHaveBeenCalledOnce()
+  expect(missingWorkspace.retry).toBeUndefined()
+  expect(loadThreads).not.toHaveBeenCalled()
   context.hasCurrentThread = false
   expect(read().error).toBeUndefined()
   expect(read().ready).toBe(false)
+  read().retry()
+  await settle()
+  expect(loadThreads).toHaveBeenCalledOnce()
 })
 
 it("re-reads a conservatively revoked decision after an abandoned scope render", async () => {

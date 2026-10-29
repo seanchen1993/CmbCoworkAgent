@@ -1,4 +1,38 @@
+/** Only the native pre-admission busy code proves this user intent has not started. */
+export function sourceSetFailureCode(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : ""
+  if (/^[A-Z][A-Z0-9_]+$/.test(message)) return message
+  const wrapped =
+    /^Error invoking remote method 'mods:development:(?:import-source-set|advance-source-set|cancel-source-set|install-source-set-dependency|reconcile-source-set-dependency)': Error: ([A-Z][A-Z0-9_]+)$/.exec(
+      message
+    )
+  return wrapped?.[1] ?? "SOURCE_SET_PREPARATION_FAILED"
+}
+
+export async function runSourceSetWhenIdle<T>(
+  work: () => Promise<T>,
+  assertCurrent: () => void,
+  wait: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+): Promise<T> {
+  const delays = [75, 125, 200, 300, 400]
+  for (let attempt = 0; ; attempt++) {
+    assertCurrent()
+    try {
+      const result = await work()
+      assertCurrent()
+      return result
+    } catch (error) {
+      const delay = delays[attempt]
+      if (sourceSetFailureCode(error) !== "SOURCE_SET_BUSY" || delay === undefined) throw error
+      await wait(delay)
+      assertCurrent()
+    }
+  }
+}
+
 export function sourceSetError(code: string): string {
+  if (code === "SOURCE_SET_BUSY")
+    return "本次操作尚未开始，原操作仍在结束处理中。请稍后再试；依赖尚未重新安装。"
   if (/DESCRIPTOR_REQUIRED|NATIVE_SOURCE_REQUIRED/.test(code))
     return "所选目录缺少作者源码集合声明或项目组合源。请选择包含 devclaw.source-set.json 的完整交付目录。"
   if (

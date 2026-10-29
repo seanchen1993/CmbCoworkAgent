@@ -12,12 +12,16 @@ async function dependencyConsent(browser: Browser) {
     format: "iife",
     jsx: "automatic",
     define: { "process.env.NODE_ENV": '"development"' },
+    alias: { "@": resolve("src/renderer/src") },
     stdin: {
       loader: "tsx",
       resolveDir: resolve(__dirname, ".."),
       contents: `
       import React from 'react';import {createRoot} from 'react-dom/client';
       import {ProjectFunctionConsent} from './src/renderer/src/components/harness-board/ProjectFunctionConsent';
+      import {useAppStore} from './src/renderer/src/lib/store';
+      import {usePluginSettingsRequest} from './src/renderer/src/lib/plugin-settings-intent';
+      if(!crypto.randomUUID)crypto.randomUUID=()=> '00000000-0000-4000-8000-000000000001';
       const root=createRoot(document.getElementById('root')),calls=[],reads=[],ready=[],states={};
       let pending,malformed;
       const state=id=>states[id]??=( {configured:false,rules:'needs-approval',knowledge:'needs-approval'} );
@@ -36,12 +40,14 @@ async function dependencyConsent(browser: Browser) {
         saveUserConfig:async(id,view,key,value)=>{calls.push({kind:'config',id,view,key,value});state(id).configured=true;return configView(id)}};
       const api={config,read:async id=>review(id),approve:async()=>{throw Error('MAIN_HAS_NO_VM')},
         approveDependency:input=>{calls.push({kind:'dependency',...input});return new Promise(resolve=>{
-          pending=()=>{state(input.projectId)[input.pluginId==='rules-id'?'rules':'knowledge']='ready';
+          pending=()=>{state(input.projectId)[input.pluginId==='rules-id'?'rules':'knowledge']='ready';state(input.projectId).workspaceEnabled=true;
             const result=review(input.projectId);if(malformed)delete result[malformed];resolve(result)}})}};
       window.api={harnessBoard:{localProjects:{mods:api}},mods:{onConfigurationChanged:()=>()=>{}}};
+      function NavigationProbe(){window.pluginNavigation=usePluginSettingsRequest();return null}
       const show=id=>root.render(<React.StrictMode><ProjectFunctionConsent projectId={id} version={3}
-        onReady={value=>ready.push([id,value])}/></React.StrictMode>);
-      window.fixture={calls,reads,ready,show,resolve:()=>pending(),set:(id,key,value)=>{state(id)[key]=value},
+        onReady={value=>ready.push([id,value])}/><NavigationProbe/></React.StrictMode>);
+      useAppStore.setState({currentThreadId:'retained-project-thread'});
+      window.fixture={calls,reads,ready,show,navigation:()=>{const s=useAppStore.getState();return {threadId:s.currentThreadId,tab:s.customizeInitialTab,pluginId:window.pluginNavigation?.pluginId}},resolve:()=>pending(),set:(id,key,value)=>{state(id)[key]=value},
         malformed:value=>{malformed=value},unsupported:()=>{delete api.approveDependency}};show('A');
     `
     }
@@ -55,18 +61,19 @@ async function dependencyConsent(browser: Browser) {
     const rules = page.getByRole("region", { name: "依赖功能：generic-rules", exact: true })
     const knowledge = page.getByRole("region", { name: "依赖功能：generic-knowledge", exact: true })
     await rules.waitFor()
-    await page.getByText("下列依赖功能仍需分别核对参数和授权", { exact: false }).waitFor()
+    await page
+      .getByText("主包仅需配置参数；请完成下列依赖的参数与授权。", { exact: false })
+      .waitFor()
     assert.equal(
-      await page.getByRole("button", { name: "确认本包灵件权限", exact: true }).count(),
+      await page.getByRole("button", { name: "允许本包在当前目录运行", exact: true }).count(),
       0
     )
     assert.equal(
       await page.evaluate("window.fixture.ready.some(([id,value])=>id==='A'&&value)"),
       false
     )
-    await rules.getByRole("checkbox").check()
     const approveRules = rules.getByRole("button", {
-      name: "确认依赖权限：generic-rules",
+      name: "允许依赖在当前目录运行：generic-rules",
       exact: true
     })
     assert(
@@ -76,7 +83,6 @@ async function dependencyConsent(browser: Browser) {
     await rules.getByRole("textbox").fill("python")
     await rules.getByRole("button", { name: "保存", exact: true }).click()
     await page.waitForFunction("window.fixture.calls.some(call=>call.kind==='config')")
-    await rules.getByRole("checkbox").check()
     await approveRules.evaluate((button) => {
       ;(button as HTMLButtonElement).click()
       ;(button as HTMLButtonElement).click()
@@ -115,25 +121,27 @@ async function dependencyConsent(browser: Browser) {
       await page.evaluate("window.fixture.ready.some(([id,value])=>id==='A'&&value)"),
       false
     )
-    await knowledge.getByRole("checkbox").check()
     await knowledge
-      .getByRole("button", { name: "确认依赖权限：generic-knowledge", exact: true })
+      .getByRole("button", { name: "允许依赖在当前目录运行：generic-knowledge", exact: true })
       .click()
     await page.evaluate("window.fixture.resolve()")
     await page.waitForFunction("window.fixture.ready.some(([id,value])=>id==='A'&&value)")
-    await page.getByText("项目设置 · 已就绪", { exact: true }).click()
+    const settings = page.getByRole("region", { name: "本包功能权限", exact: true })
+      .locator(":scope > details")
+    if (!(await settings.evaluate((node) => (node as HTMLDetailsElement).open)))
+      await settings.locator(":scope > summary").click()
     for (const flag of ["workspaceEnabled", "globallyEnabled"]) {
       await page.evaluate(
         (key) => window.eval(`window.fixture.set('A',${JSON.stringify(key)},false)`),
         flag
       )
-      await page.getByRole("button", { name: "重新核对本包及依赖权限", exact: true }).click()
+      await page.getByRole("button", { name: "重新核对", exact: true }).click()
       await page.waitForFunction("window.fixture.ready.at(-1)[1]===false")
       await page
         .getByText(
           flag === "globallyEnabled"
-            ? "应用灵件功能已关闭，请在原设置中启用后重新核对。不会自动更改全局开关。"
-            : "当前项目目录尚未启用灵件功能，请完成下方原生确认后再执行。",
+            ? "应用插件功能已关闭。请在“插件”中开启应用功能后，返回此处重新核对。"
+            : "当前目录尚未启用插件功能，请在下方确认后再执行。",
           { exact: true }
         )
         .waitFor()
@@ -142,21 +150,46 @@ async function dependencyConsent(browser: Browser) {
         flag
       )
     }
+    await page.evaluate("window.fixture.set('A','workspaceEnabled',false)")
+    await page.getByRole("button", { name: "重新核对", exact: true }).click()
+    await rules.getByRole("button", { name: "确认此版本并启用目录", exact: true }).click()
+    await page.evaluate("window.fixture.resolve()")
+    await page.getByText("项目设置 · 已就绪", { exact: true }).waitFor()
+    assert.equal(
+      await page
+        .locator("details")
+        .first()
+        .evaluate((node) => (node as HTMLDetailsElement).open),
+      true,
+      "A refreshed consent result preserves the open panel"
+    )
     for (const state of ["missing", "source-changed", "invalid", "disabled"]) {
       await page.evaluate(
         (value) => window.eval(`window.fixture.set('A','rules',${JSON.stringify(value)})`),
         state
       )
-      await page.getByRole("button", { name: "重新核对本包及依赖权限", exact: true }).click()
+      await page.getByRole("button", { name: "重新核对", exact: true }).click()
       await page.waitForFunction("window.fixture.ready.at(-1)[1]===false")
-      await page.waitForFunction(
-        "!document.querySelector('[aria-label=\"依赖功能：generic-rules\"] input[type=checkbox]')"
-      )
+      assert.equal(await rules.getByRole("checkbox").count(), 0)
       assert.equal(
         await approveRules.count(),
         0,
         `${state} must not authorize a different or unavailable source`
       )
+      const openPlugin = rules.getByRole("button", { name: "打开对应插件", exact: true })
+      assert.equal(await openPlugin.count(), state === "missing" ? 0 : 1)
+      if (state === "disabled") {
+        await openPlugin.click()
+        assert.deepEqual(
+          await page.evaluate("window.fixture.navigation()"),
+          {
+            threadId: "retained-project-thread",
+            tab: "plugins",
+            pluginId: "rules-id"
+          },
+          "Recovery opens the exact plugin settings without changing the selected project thread"
+        )
+      }
     }
     for (const omitted of ["source", "dependencies"]) {
       const id = `omitted-${omitted}`
@@ -168,7 +201,6 @@ async function dependencyConsent(browser: Browser) {
         { id, omitted }
       )
       await rules.getByText(`授权目录：C:/native/${id}`, { exact: true }).waitFor()
-      await rules.getByRole("checkbox").check()
       await approveRules.click()
       await page.evaluate("window.fixture.resolve()")
       await page.getByRole("alert").filter({ hasText: "授权未完成" }).waitFor()
@@ -190,7 +222,6 @@ async function dependencyConsent(browser: Browser) {
     await rules
       .getByText("当前入口暂不支持依赖授权，请更新应用后重新核对。", { exact: true })
       .waitFor()
-    await rules.getByRole("checkbox").check()
     assert(await approveRules.isDisabled())
     await page.evaluate("window.fixture.show('legacy')")
     await page.waitForFunction("window.fixture.ready.some(([id,value])=>id==='legacy'&&value)")
@@ -209,6 +240,7 @@ async function main() {
     format: "iife",
     jsx: "automatic",
     define: { "process.env.NODE_ENV": '"development"' },
+    alias: { "@": resolve("src/renderer/src") },
     stdin: {
       loader: "tsx",
       resolveDir: resolve(__dirname, ".."),
@@ -236,25 +268,37 @@ async function main() {
     page.on("pageerror", (error) => errors.push(error.message))
     await page.setContent('<div id="root"></div>')
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
-    const approve = page.getByRole("button", { name: "确认本包灵件权限", exact: true })
+    const approve = page.getByRole("button", { name: "允许本包在当前目录运行", exact: true })
     await approve.waitFor()
-    assert(await approve.isDisabled())
-    await page.getByText("本包灵件：actual-native-name", { exact: true }).waitFor()
-    await page.getByRole("checkbox").check()
     assert(await approve.isEnabled())
-    await page.evaluate("window.fixture.bump()")
-    await page.waitForFunction("!document.querySelector('input').checked")
-    assert(
-      await approve.isDisabled(),
-      "New project version cannot inherit unchecked native consent"
+    await page.getByText("本包插件：actual-native-name", { exact: true }).waitFor()
+    assert.equal(await page.getByRole("checkbox").count(), 0)
+    assert.equal(
+      await page.evaluate("window.fixture.calls.length"),
+      0,
+      "Reading permissions does not authorize anything"
     )
-    await page.getByRole("checkbox").check()
     await approve.evaluate((button) => {
       ;(button as HTMLButtonElement).click()
       ;(button as HTMLButtonElement).click()
     })
     assert.equal(await page.evaluate("window.fixture.calls.length"), 1)
-    assert.deepEqual(await page.evaluate("window.fixture.calls[0]"), {
+    await page.evaluate("window.fixture.bump()")
+    await page.getByRole("button", { name: "允许本包在当前目录运行", exact: true }).waitFor()
+    await page.evaluate("window.fixture.resolve()")
+    await page.waitForTimeout(80)
+    assert.equal(
+      await page.evaluate("window.fixture.ready.filter(([id,value])=>id==='A'&&value).length"),
+      0,
+      "An old version's in-flight approval cannot mark the new version ready"
+    )
+    assert.equal(
+      await page.evaluate("window.fixture.calls.length"),
+      1,
+      "A new version must wait for a new explicit approval click"
+    )
+    await approve.click()
+    assert.deepEqual(await page.evaluate("window.fixture.calls[1]"), {
       projectId: "A",
       projectVersion: 2,
       packageDigest: "a".repeat(64),
@@ -269,10 +313,17 @@ async function main() {
       await page.evaluate("window.fixture.ready.filter(([id,value])=>id==='B'&&value).length"),
       0
     )
-    await page.getByRole("checkbox").check()
     await approve.click()
     await page.evaluate("window.fixture.resolve()")
     await page.getByText("项目设置 · 已就绪", { exact: true }).waitFor()
+    assert.equal(
+      await page
+        .locator("details")
+        .first()
+        .evaluate((node) => (node as HTMLDetailsElement).open),
+      true,
+      "Completing consent preserves the open settings panel for further configuration"
+    )
     assert.deepEqual(errors, [])
     await dependencyConsent(browser)
     console.log(

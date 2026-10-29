@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { Worker } from "node:worker_threads"
 import { afterEach, expect, it, vi } from "vitest"
 import { AuthoringPreflightClient } from "./authoring-preflight-client"
+import { AuthoringStructureError } from "./authoring-structure-diagnostics"
 
 const roots: string[] = []
 const clients: AuthoringPreflightClient[] = []
@@ -97,3 +98,26 @@ it("rejects worker failure and malformed output after terminating the worker", a
     await client.stop()
   }
 })
+
+it("preserves only fixed structural diagnostics across the actual Worker boundary", async () => {
+  const client = await create(
+    'require("node:worker_threads").parentPort.postMessage({ok:false,structureCode:"CLAW_COMPONENT_ENTRY_CONFLICT",message:"PRIVATE_WORKER_SOURCE"});setInterval(()=>{},1000)'
+  )
+  const failure = await client.run(tmpdir(), new AbortController().signal).catch((error) => error)
+  expect(failure).toBeInstanceOf(AuthoringStructureError)
+  expect(failure.message).toBe("CLAW_COMPONENT_ENTRY_CONFLICT")
+  expect(failure.diagnostic.path).toBe("/entry")
+  expect(JSON.stringify(failure)).not.toContain("PRIVATE_WORKER_SOURCE")
+})
+
+it.each(["PRIVATE_WORKER_SOURCE", "__proto__", "constructor", "MODS_PRIVATE_SECRET"])(
+  "rejects unknown structural code %s without exposing it",
+  async (code) => {
+    const client = await create(
+      `require("node:worker_threads").parentPort.postMessage({ok:false,structureCode:${JSON.stringify(code)}})`
+    )
+    await expect(client.run(tmpdir(), new AbortController().signal)).rejects.toThrow(
+      "AUTHORING_PREFLIGHT_FAILED"
+    )
+  }
+)

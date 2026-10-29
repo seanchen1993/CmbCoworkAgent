@@ -144,7 +144,8 @@ export async function fireSessionStartOnce(
   // PR-11 follow-up — runHooks's "Setup" branch is now awaited and surfaces
   // a synthetic blocking result when any hook timed out or returned non-zero
   // exit. We only write the workspace setup-state marker when that returns
-  // null (success), so a failed init run will be retried on the next session.
+  // a nonblocking success from a participating handler, so empty chains and
+  // failed init runs remain eligible when Setup is installed or retried later.
   if (workspacePath && !hasWorkspaceBeenInitialised(workspacePath)) {
     const setupContext: HookContext = {
       workspacePath,
@@ -157,18 +158,26 @@ export async function fireSessionStartOnce(
     }
     bindHookAccounting?.(setupContext)
     try {
+      let participated = false
       const result = await runHooks(
         resolveEnabledHooksForRun(workspacePath, "Setup", setupContext, hookScope, onHookSkipped),
         "Setup",
         setupContext,
-        onHookResult
+        (event, hook, result) => {
+          // Only matched legacy handlers reach the runner's result callback.
+          participated = true
+          onHookResult?.(event, hook, result)
+        },
+        () => { participated = true }
       )
-      // null == every Setup hook completed with a zero exit code.
-      // A non-null blocking result signals timeout or non-zero exit;
-      // skip the marker so the next session retries the chain.
-      if (result === null) {
+      // A Function handler can return valid context without producing a legacy
+      // result. Participation comes from native dispatch provenance, not fields
+      // in its JSON output. Engine-only dispatch and pure skips do not count.
+      const succeeded = result === null || (result.exitCode === 0 && !result.blocked &&
+        result.continue !== false && result.decision !== "block")
+      if (participated && succeeded) {
         markWorkspaceInitialised(workspacePath)
-      } else {
+      } else if (!succeeded) {
         console.warn(
           `[Hooks] Setup(init) skipped marker write — at least one hook failed:`,
           result.stderr || result.stdout || "(no detail)"

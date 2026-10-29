@@ -21,8 +21,9 @@ async function main() {
       import {readDesktopSelection} from ${JSON.stringify(join(renderer, "lib/function-desktop.ts"))};
       import {beginConfigurationTarget,chooseConfigurationTarget} from ${JSON.stringify(join(renderer,"lib/configuration-target.ts"))};
       import {useAppStore} from ${JSON.stringify(join(renderer,"lib/store.ts"))};
-      const listeners=new Set(),calls=[],secretCalls=[],applies=[],reloads=[],picks=[];let failRead=false,deferRead=false,deferSave=false,deny=false,rewrite;
+      const listeners=new Set(),calls=[],secretCalls=[],applies=[],reloads=[],picks=[],migrations=[],savedSignals=[],approvals=[];let failRead=false,deferRead=false,deferSave=false,deny=false,rewrite,migrationMode='complete',deferMigration=false;
       const pendingReads=[],pendingSaves=[],pendingPicks=[],pendingSecretAcks=[];let deferSecretAck=false;
+      const migrationReplies=[];
       let view={pluginId:'p',plugin:'sample',digest:'digest',workspace:'a',savedRevision:0,
         effectiveRevision:0,state:'applied',fields:[
         {key:'tone',label:'Tone',description:'Tone description',type:'string',supported:true,required:true,value:'warm',effectiveValue:'warm'},
@@ -56,9 +57,25 @@ async function main() {
       },reloadUserConfig:async(thread,current)=>{
         reloads.push({thread,current});view={...view,state:'applied',effectiveRevision:view.savedRevision,error:undefined};
         for(const fn of listeners)fn();return clone(view);
-      },onConfigurationChanged:fn=>{listeners.add(fn);return()=>listeners.delete(fn)}}};
-      function Fixture(){const [thread,setThread]=useState('a');
+      },migrateUserConfig:async(thread,current)=>{
+        migrations.push({thread,current:clone(current)});
+        if(migrationMode==='fail')throw Error('migration rejected');
+        const next=clone(current);
+        if(migrationMode==='complete'){delete next.migration;next.savedRevision++}
+        if(migrationMode==='cancel')next.migration.diagnostics=['本次迁移已取消，配置保留。'];
+        if(deferMigration)return new Promise(resolve=>migrationReplies.push(()=>resolve(next)));
+        view=next;for(const fn of listeners)fn();return clone(next);
+      },approveFunction:async()=>{approvals.push('forbidden-approve');throw Error('NO_AUTOMATIC_APPROVAL')},
+      onConfigurationChanged:fn=>{listeners.add(fn);return()=>listeners.delete(fn)}}};
+      function Fixture(){const [thread,setThread]=useState('a'),[epoch,setEpoch]=useState(0),[mounted,setMounted]=useState(true);
         window.probe={calls,secretCalls,applies,reloads,thread:setThread,readFailure:value=>failRead=value,
+          migrations,savedSignals,approvals,migrationReplies,mounted:setMounted,
+          migrationScope:()=>{view={...view,workspace:'migration-b'};setThread('migration-b')},
+          startMigration:(mode,delayed=false)=>{migrationMode=mode;deferMigration=delayed;failRead=false;deferRead=false;deferSave=false;deny=false;rewrite=undefined;savedSignals.length=0;
+            view={pluginId:'p',plugin:'sample',digest:'migration-source',workspace:'migration-a',savedRevision:100,state:'inactive',
+              migration:{fromVersion:1,toVersion:2,digest:'migration-plan',canApply:true,changes:[{kind:'rename',from:'oldSecret',to:'secret'}],diagnostics:[]},
+              fields:[{key:'secret',label:'Migration secret',description:'Already stored; never resend',type:'string',sensitive:true,supported:true,required:false,secretState:'saved'}]};
+            setThread('migration-a');setMounted(true);setEpoch(value=>value+1)},
           beginTarget:()=>{useAppStore.setState({showCustomizeView:true,currentThreadId:'a',threads:['a','b'].map(id=>({thread_id:id,title:id,metadata:{workspacePath:id,agentMode:'normal'}}))});window.closeTarget=beginConfigurationTarget({threadId:'a',workspace:'a'})},chooseTarget:()=>chooseConfigurationTarget({threadId:'b',workspace:'b'}),closeTarget:()=>window.closeTarget(),
           readDelay:value=>deferRead=value,saveDelay:value=>deferSave=value,deny:value=>deny=value,
           reads:pendingReads,saves:pendingSaves,view:()=>view,
@@ -66,7 +83,7 @@ async function main() {
           secretAckDelay:value=>deferSecretAck=value,secretAcks:pendingSecretAcks,
           selection:()=>readDesktopSelection([document.querySelector('main')])?.text,
           change:patch=>{view={...view,...patch};for(const fn of listeners)fn()}};
-        return <main style={{width:360,margin:24}}><span id='selection-before'>Before parameters</span><FunctionUserConfig threadId={thread} pluginId='p'/><span id='selection-after'>After parameters</span></main>;
+        return <main style={{width:360,margin:24}}><span id='selection-before'>Before parameters</span>{mounted&&<FunctionUserConfig key={epoch} threadId={thread} pluginId='p' onSaved={()=>savedSignals.push({thread})}/>}<span id='selection-after'>After parameters</span></main>;
       }
       createRoot(document.getElementById('root')).render(<Fixture/>);
     `
@@ -470,6 +487,122 @@ async function main() {
     assert.equal(await page.getByLabel("Tone").count(), 0)
     assert.equal(await page.getByRole("button", { name: "保存", exact: true }).count(), 0)
     console.log("PASS switching threads and a failed new read never expose the previous draft")
+    const writesBeforeMigration = await page.evaluate("window.probe.calls.length")
+    const secretsBeforeMigration = await page.evaluate("window.probe.secretCalls.length")
+    const beginMigration = async (mode: string, delayed = false) => {
+      await page.evaluate(
+        ({ mode, delayed }) =>
+          window.eval(
+            "window.probe.startMigration(" +
+              JSON.stringify(mode) +
+              "," +
+              JSON.stringify(delayed) +
+              ")"
+          ),
+        { mode, delayed }
+      )
+      await page.getByText("插件参数", { exact: true }).click()
+      const migrate = page.getByRole("button", { name: "核对并迁移配置", exact: true })
+      await migrate.waitFor()
+      assert.equal(await migrate.isEnabled(), true)
+      assert.equal(await page.getByLabel("Migration secret", { exact: true }).inputValue(), "")
+      return migrate
+    }
+    const migrate = await beginMigration("complete")
+    await migrate.click()
+    await page.waitForFunction("window.probe.savedSignals.length===1")
+    assert.deepEqual(await page.evaluate("window.probe.savedSignals"), [{ thread: "migration-a" }])
+    assert.equal(await page.getByRole("status", { name: "插件配置迁移", exact: true }).count(), 0)
+    assert.deepEqual(await page.evaluate("window.probe.migrations.at(-1)"), {
+      thread: "migration-a",
+      current: {
+        pluginId: "p",
+        plugin: "sample",
+        digest: "migration-source",
+        workspace: "migration-a",
+        savedRevision: 100,
+        state: "inactive",
+        migration: {
+          fromVersion: 1,
+          toVersion: 2,
+          digest: "migration-plan",
+          canApply: true,
+          changes: [{ kind: "rename", from: "oldSecret", to: "secret" }],
+          diagnostics: []
+        },
+        fields: [
+          {
+            key: "secret",
+            label: "Migration secret",
+            description: "Already stored; never resend",
+            type: "string",
+            sensitive: true,
+            supported: true,
+            required: false,
+            secretState: "saved"
+          }
+        ]
+      }
+    })
+    await page.evaluate("window.probe.change({savedRevision:102})")
+    await page.waitForFunction("!document.querySelector('input').disabled")
+    assert.equal(
+      await page.evaluate("window.probe.savedSignals.length"),
+      1,
+      "The migration ACK resumes its parent once; ordinary readback cannot replay that callback"
+    )
+    assert.equal(await page.getByRole("button", { name: "保存", exact: true }).isDisabled(), true)
+    console.log(
+      "PASS completed migration resumes its parent once without resending a stored secret"
+    )
+
+    for (const mode of ["cancel", "remain", "fail"]) {
+      const action = await beginMigration(mode)
+      await action.click()
+      if (mode === "fail")
+        await page.getByRole("alert").filter({ hasText: "migration rejected" }).waitFor()
+      else if (mode === "cancel")
+        await page.getByText("本次迁移已取消，配置保留。", { exact: true }).waitFor()
+      await page.waitForFunction(() =>
+        [...document.querySelectorAll("button")].some(
+          (button) => button.textContent === "核对并迁移配置" && !button.disabled
+        )
+      )
+      assert.equal(
+        await page.evaluate("window.probe.savedSignals.length"),
+        0,
+        `${mode}: incomplete or denied migration must not resume plugin use`
+      )
+      assert.equal(await page.getByRole("status", { name: "插件配置迁移", exact: true }).count(), 1)
+    }
+    console.log("PASS cancelled, still-pending and rejected migration results never report saved")
+
+    for (const invalidation of ["scope", "unmount"]) {
+      const action = await beginMigration("complete", true)
+      await action.click()
+      await page.waitForFunction("window.probe.migrationReplies.length===1")
+      if (invalidation === "scope") {
+        await page.evaluate("window.probe.migrationScope()")
+        await page.getByText("插件参数", { exact: true }).click()
+        await page.getByLabel("Migration secret", { exact: true }).waitFor()
+      } else {
+        await page.evaluate("window.probe.mounted(false)")
+        await page.locator("[data-function-user-config]").waitFor({ state: "detached" })
+      }
+      await page.evaluate("window.probe.migrationReplies.shift()()")
+      await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => done())))
+      assert.equal(
+        await page.evaluate("window.probe.savedSignals.length"),
+        0,
+        `${invalidation}: a late ACK cannot resume a different or removed configuration editor`
+      )
+    }
+    assert.equal(await page.evaluate("window.probe.calls.length"), writesBeforeMigration)
+    assert.equal(await page.evaluate("window.probe.secretCalls.length"), secretsBeforeMigration)
+    assert.equal(await page.evaluate("window.probe.approvals.length"), 0)
+    console.log(
+      "PASS late migration ACKs after scope changes/unmount cannot resume, save secrets or approve"
+    )
     assert.deepEqual(errors, [])
   } finally {
     await browser.close()

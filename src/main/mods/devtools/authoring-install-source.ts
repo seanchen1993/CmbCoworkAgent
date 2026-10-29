@@ -9,11 +9,14 @@ export function readPureFunctionSource(input: unknown) {
   for (const file of source.files) {
     if (
       !["plugin.json", "README.md", "mods/manifest.json"].includes(file.path) &&
-      // Inert author notes and test vectors are retained with the exact source bundle;
-      // they do not introduce Skill/Hook/script registration or an executable test runner.
+      // Inert author notes, test vectors and project companions retain the exact source bundle.
+      // modules/ is not skills/ or root SKILL.md; workflows/ is not a plugin auto-load entry.
+      // Plugin metadata below still rejects skills/hooks/MCP/agents and extra registration fields.
       !/^(?:references\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\.(?:md|json)|tests\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\.json)$/.test(
         file.path
       ) &&
+      !/^modules\/(?:[A-Za-z0-9_-]+\/)+SKILL\.md$/.test(file.path) &&
+      !/^workflows\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\.workflow\.js$/.test(file.path) &&
       !/^mods\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\.(?:ts|tsx|js|jsx|css)$/.test(file.path)
     )
       throw Error("AUTHORING_INSTALL_PURE_SOURCE_REQUIRED")

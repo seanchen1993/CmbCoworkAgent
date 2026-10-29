@@ -4,6 +4,8 @@ import { WorkflowWorktreeLedger } from "./worktree-lease"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
+import { randomUUID } from "node:crypto"
+import { AIMessage } from "@langchain/core/messages"
 import { FunctionModsManager } from "../../mods/v2/manager"
 import { FunctionGuestRuntime } from "../../mods/v2/guest-runtime"
 import { ModControlStore } from "../../mods/control-store"
@@ -25,6 +27,24 @@ import {
   observeWorkflowDeterministicActions
 } from "./deterministic-action-native"
 import type { NativePlatformCallContext } from "../../mods/v2/platform-capabilities-types"
+import { workflowRunManager } from "./run-manager"
+import { loadWorkflowRun, sha256Hex } from "./run-store"
+import { validateWorkflowScript } from "./script"
+import { createHostWorkflowContinuation } from "../../harness-board/host-workflow-continuation"
+import { captureRuntimePluginSourceToken, issueRuntimePluginSourceToken,
+  withRuntimePluginSource } from "../../plugins/runtime-source-scope"
+
+vi.mock("electron", () => ({
+  app: { getPath: () => tmpdir(), getName: () => "test", getVersion: () => "0" },
+  BrowserWindow: { getAllWindows: () => [] },
+  webContents: { getAllWebContents: () => [] },
+  ipcMain: { handle: () => {}, on: () => {} }
+}))
+vi.mock("../../services/subagent-session-capture", () => ({
+  withSubagentSessionCapture: (_context: unknown, _label: string, work: () => Promise<unknown>) => work(),
+  subagentSessionCallbacks: () => []
+}))
+vi.mock("../../services/adoption-tracker", () => ({ setAdoptionContext: vi.fn() }))
 
 const closes: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -34,7 +54,7 @@ afterEach(async () => {
 async function fixture(
   resourceProbe = false,
   afterProcessApproval?: () => Promise<void>,
-  beforePublication?: () => Promise<void>
+  beforePublication?: (value: unknown) => Promise<void>
 ) {
   const incarnation = JSON.stringify({ token: null, legacyCreatedAt: 1 })
   const root = await mkdtemp(join(tmpdir(), "workflow-actions-"))
@@ -113,7 +133,7 @@ async function fixture(
             } satisfies Partial<ConstructorParameters<typeof FunctionModsManager>[1]>)
           : {}),
         publish: async (_workspace, value) => {
-          await beforePublication?.()
+          await beforePublication?.(value)
           return value
         }
       },
@@ -183,6 +203,122 @@ async function fixture(
   }
   return { root, sources, open }
 }
+
+it("owns background actions and the original result notification after its foreground entry ends", async () => {
+  let launchFromPublication: (() => Promise<void>) | undefined
+  const fixtureValue = await fixture(false, undefined, async value => {
+    if (value && typeof value === "object" &&
+      (value as Record<string, unknown>).turnId === "original-foreground") {
+      const launch = launchFromPublication
+      launchFromPublication = undefined
+      await launch?.()
+    }
+  })
+  const f = await fixtureValue.open()
+  const priorDataRoot = process.env.CMB_COWORK_AGENT_HOME
+  process.env.CMB_COWORK_AGENT_HOME = join(fixtureValue.root, "workflow-data")
+  closes.push(async () => {
+    await workflowRunManager.cancelAndWait("thread")
+    if (priorDataRoot === undefined) delete process.env.CMB_COWORK_AGENT_HOME
+    else process.env.CMB_COWORK_AGENT_HOME = priorDataRoot
+  })
+  const hostPackage = join(fixtureValue.root, "original-host-package")
+  await mkdir(hostPackage)
+  await writeFile(join(hostPackage, "plugin.json"), JSON.stringify({ name: "original-host", version: "2.0.0" }))
+  const metadata = { description: "", author: "", version: "2.0.0", enabled: true,
+    skillCount: 0, mcpServerCount: 0, createdAt: "", updatedAt: "" }
+  let live = true
+  const guard = () => {
+    f.controller.signal.throwIfAborted()
+    if (!live) throw Error("ORIGINAL_BACKGROUND_OWNER_RETIRED")
+  }
+  const token = issueRuntimePluginSourceToken({
+    mode: "host", executionMode: "workflow", threadId: "thread", incarnationKey: "original-incarnation",
+    projectId: "original-project", operationId: randomUUID(), stageId: "implementation",
+    workspace: fixtureValue.root, packageDigest: "b".repeat(64), inputFingerprint: "c".repeat(64),
+    plugin: { ...metadata, id: "original-host", name: "original-host", path: hostPackage },
+    actionSources: [{ plugin: { ...metadata, ...fixtureValue.sources[0] }, name: "provider",
+      digest: f.input.provider.digest }]
+  }, guard, guard)
+  const closeActions = configureWorkflowDeterministicActions({ ...f.dependencies,
+    workspaceKey: value => value,
+    thread: () => ({ created_at: 1, metadata: JSON.stringify({ workspacePath: fixtureValue.root }) }) })
+  closes.push(async () => closeActions())
+  const owner = createHostWorkflowContinuation({ token, workspace: fixtureValue.root,
+    threadId: "thread", assertCurrent: guard })
+  const childStarted = Promise.withResolvers<void>(), releaseChild = Promise.withResolvers<void>()
+  const releaseStale = Promise.withResolvers<void>()
+  let staleEntry: Promise<unknown> | undefined
+  const runId = `wf_${randomUUID().replaceAll("-", "").slice(0, 12)}`
+  const source = `export const meta={name:"original-background",description:"original owner"};
+    const first=await action(${JSON.stringify({ ...f.input, stepId: "before-child" })});
+    await agent("original physical child");
+    const second=await action(${JSON.stringify({ ...f.input, stepId: "after-child" })});
+    return {first:first.status,second:second.status};`
+  await workflowRunManager.prepareLaunch(fixtureValue.root, "thread")
+  const finalized = vi.fn(async () => {
+    expect(captureRuntimePluginSourceToken()).toBe(token)
+  })
+  launchFromPublication = async () => {
+    staleEntry = releaseStale.promise.then(() => f.manager.actionCatalog(fixtureValue.root, "thread"))
+    void staleEntry.catch(() => {})
+    const launch = workflowRunManager.launch({ workspacePath: fixtureValue.root, threadId: "thread",
+      runId, script: source, scriptSha256: sha256Hex(source), parsed: validateWorkflowScript(source),
+      notificationOwner: "managed", subagentDeps: {
+        parentThreadId: "thread", isRetryableApiError: () => false, cleanupThread: async () => {},
+        createRuntime: async () => ({ stream: async () => (async function* () {
+          expect(captureRuntimePluginSourceToken()).toBe(token)
+          childStarted.resolve()
+          await releaseChild.promise
+          yield ["values", { messages: [new AIMessage("original child completed")] }]
+        })() })
+      } })
+    owner.onDetachedResultAvailable({ kind: "workflow", threadId: "thread", runId })
+    expect(workflowRunManager.deferOwnedRuntimeWorkflowSettlement(token, finalized)).toEqual({ deferred: true })
+    await launch.whenInitialPersisted
+    await Promise.race([childStarted.promise,
+      workflowRunManager.waitForRunLifecycle("thread", runId).then(() => {
+        throw Error(loadWorkflowRun(fixtureValue.root, "thread", runId)?.error ?? "WORKFLOW_ENDED_BEFORE_CHILD")
+      })])
+  }
+  try {
+    await withRuntimePluginSource(token, () => f.manager.turnStart(fixtureValue.root, "thread",
+      { turnId: "original-foreground", text: "launch original workflow" }, new AbortController().signal))
+    expect(workflowRunManager.isActive("thread")).toBe(true)
+    releaseStale.resolve()
+    await expect(staleEntry).rejects.toThrow("MODS_ENTRY_EXPIRED")
+    const notified = vi.fn(async (notice: { runId: string; startedAt: string; assertCurrent(): void }) => {
+      notice.assertCurrent()
+      const pending = await workflowRunManager.claimPendingNotificationAsync(fixtureValue.root, "thread",
+        { owner: "managed", expected: notice })
+      expect(pending?.error).toBeUndefined()
+      expect(pending).toMatchObject({ runId, status: "completed", stats: { agentsTotal: 1 } })
+      // The original notification is a new native entry, never a revived foreground admission.
+      await withRuntimePluginSource(token, () => f.manager.turnStart(fixtureValue.root, "thread",
+        { turnId: "original-result-notification", text: "original workflow result" }, new AbortController().signal))
+      expect(await workflowRunManager.markNotified(fixtureValue.root, "thread", runId, notice.startedAt)).toBe(true)
+      workflowRunManager.clearNotificationInFlight(runId)
+    })
+    const notification = owner.consume(notified)
+    releaseChild.resolve()
+    await notification
+    expect(notified).toHaveBeenCalledOnce()
+    expect(finalized).toHaveBeenCalledOnce()
+    expect(loadWorkflowRun(fixtureValue.root, "thread", runId)).toMatchObject({
+      status: "completed", notificationDelivered: true,
+      result: { first: "succeeded", second: "succeeded" }
+    })
+    expect(observeWorkflowDeterministicActions({ workspace: fixtureValue.root, threadId: "thread",
+      incarnation: f.parent.incarnation, assertCurrent: guard } as NativePlatformCallContext, runId))
+      .toMatchObject({ actionCount: 2, deterministicActions: [
+        { stepId: "after-child", status: "succeeded", output: { count: 2 } },
+        { stepId: "before-child", status: "succeeded", output: { count: 1 } }
+      ] })
+    live = false
+    expect(() => withRuntimePluginSource(token, () => captureRuntimePluginSourceToken()))
+      .toThrow("ORIGINAL_BACKGROUND_OWNER_RETIRED")
+  } finally { releaseChild.resolve(); releaseStale.resolve() }
+}, 20000)
 
 it("calls the actual exported platform action and reuses its original durable result after restart", async () => {
   const fixtureValue = await fixture(),

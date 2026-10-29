@@ -1,5 +1,11 @@
 /** Shared recovery wording for both project entry points; technical details remain expandable. */
 export function projectRuntimeRecoveryMessage(error: string): string | undefined {
+  if (/PROJECT_TEMPLATE_(PLUGIN|RESPONSE)_LIMIT/.test(error))
+    return "已安装插件或模板列表超过当前读取上限。请移除不再使用的插件，或由维护者调整模板范围后更新列表；反复启用插件不会解决此限制。"
+  if (error.includes("HOST_PROJECT_NAVIGATION_CHANGED"))
+    return "原阶段会话或项目目录已变化。请重新打开阶段会话后返回项目；若项目已移除，请从项目列表核对原目录。"
+  if (error.includes("PROJECT_SEARCH_QUERY_INVALID"))
+    return "搜索内容过长或含无效字符，请缩短搜索条件后重试。"
   if (error.includes("project_check_input_limit"))
     return "本阶段产物超过插件声明的读取上限，检查尚未启动。请按阶段说明精简产物，或填写本次阶段补充说明后重新开始。系统不会自动放宽校验。"
   if (error.includes("project_phase_preparation_unconfirmed"))

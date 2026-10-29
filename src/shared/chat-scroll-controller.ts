@@ -33,6 +33,8 @@ export interface ChatViewportBottomObservation {
   detached: boolean
   downwardIntentActive: boolean
   scrollbarPointerActive: boolean
+  /** Programmatic bottom settling must not finish on an unrendered virtual tail. */
+  presentationReady?: boolean
 }
 
 export interface ChatScrollToBottomEffect {
@@ -48,6 +50,7 @@ export interface ChatScrollToBottomEffect {
 export function shouldConfirmChatViewportBottom(
   observation: ChatViewportBottomObservation
 ): boolean {
+  if (observation.presentationReady === false) return false
   if (observation.distanceToBottom > observation.atBottomThreshold) return false
   if (!observation.detached) return true
   if (observation.scrollbarPointerActive) return false

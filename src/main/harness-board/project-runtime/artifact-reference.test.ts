@@ -1,4 +1,12 @@
-import { linkSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import {
+  linkSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -30,7 +38,9 @@ import {
 } from "./host-validators"
 import { HostProjectStore } from "./host-store"
 import { hostResultReview } from "./host-state-protocol"
-import { setProjectActionRuntime } from "../project-action-runtime"
+import { parseProjectRuntimeManifest } from "../../../shared/project-runtime/manifest"
+import { getProjectActionRuntime, setProjectActionRuntime } from "../project-action-runtime"
+import type { ModObject } from "../../../shared/mods/types"
 import {
   attachFlowActionExecutionFacts,
   bindFlowActionExecutionFacts,
@@ -186,6 +196,137 @@ function originalEvidence(f: ReturnType<typeof fixture>, originalTicket?: HostEx
 }
 
 describe("Host-bound artifact references", () => {
+  function configurationFixture() {
+    const f = fixture("current", 28000)
+    f.binding.configurationKeys = ["audience", "timeout"]
+    writeFileSync(join(f.root, PROJECT_ACTION_LOCK_PATH), JSON.stringify(f.lock))
+    let values: ModObject = { audience: "native UI", timeout: 1000 }
+    const readConfiguration = vi.fn(() => values)
+    const phase = { ...f.phase, readConfiguration }
+    return { ...f, phase, readConfiguration,
+      setValues: (next: ModObject) => { values = next },
+      capture: () => captureProjectActionInputs(f.project, f.lock, phase) }
+  }
+
+  it("projects selected native values into reference input and its original Flow envelope", () => {
+    const f = configurationFixture()
+    const captured = f.capture()
+    expect(captured.bindings[0].input.configuration).toEqual({ audience: "native UI", timeout: 1000 })
+    expect(f.readConfiguration).toHaveBeenCalledWith(["audience", "timeout"])
+    const flow = createProjectActionFlow(f.project, "operation", captured, "checks")
+    expect(flow.steps[0]).toMatchObject({ input: { configuration: { audience: "native UI", timeout: 1000 } } })
+    expect(captured.bindings[0].config).toEqual({})
+    f.setValues({ audience: "changed UI", timeout: 1000 })
+    expect(() => captured.assertCurrent()).toThrow("PROJECT_ACTION_INPUT_CHANGED")
+    expect(f.capture().fingerprint).not.toBe(captured.fingerprint)
+  })
+
+  it("rejects forged, incomplete or excessive configuration and selection outside a reference check", () => {
+    const f = configurationFixture()
+    expect(() => captureProjectActionInputs(f.project, f.lock, { ...f.phase, readConfiguration: undefined }))
+      .toThrow("PROJECT_CHECK_CONFIGURATION_UNAVAILABLE")
+    const values: ModObject[] = [{ audience: "missing timeout" }, { audience: "x", timeout: 1, secret: "extra" },
+      { audience: "x".repeat(4096), timeout: 1 }]
+    for (const value of values) {
+      f.setValues(value)
+      expect(() => f.capture()).toThrow("PROJECT_CHECK_CONFIGURATION_INVALID")
+    }
+    f.binding.input.configuration = { audience: "model forged", timeout: 1 }
+    expect(() => f.capture()).toThrow("PROJECT_CHECK_CONFIGURATION_INPUT_CONFLICT")
+    f.binding.input = {}
+    expect(() => captureProjectActionInputs(f.project, f.lock, { actionIds: ["business"] }))
+      .toThrow("PROJECT_CHECK_CONFIGURATION_CHECK_ONLY")
+    f.project.manifest.stages[1].actionIds = ["business"]
+    expect(() => assertProjectActionLock(f.project.manifest, f.lock))
+      .toThrow("PROJECT_CHECK_CONFIGURATION_CHECK_ONLY")
+  })
+
+  it("recaptures native configuration for original receipt evidence and rejects a changed UI value", () => {
+    const f = configurationFixture()
+    const original = originalEvidence(f)
+    setProjectActionRuntime({ ...getProjectActionRuntime(), readPublicConfiguration: (_project, _root, keys) => {
+      expect(keys).toEqual(["audience", "timeout"])
+      return f.readConfiguration()
+    } })
+    expect(original.evidence().get("business")?.result).toBe("passed")
+    f.setValues({ audience: "changed UI", timeout: 1000 })
+    expect(() => original.evidence()).toThrow("PROJECT_ACTION_NATIVE_FACTS_SCOPE_CHANGED")
+  })
+
+  function lateStage() {
+    const f = fixture("current", 28000)
+    const current = f.project.manifest.stages[1]
+    const preceding = Array.from({ length: 8 }, (_, index) => ({
+      id: "prior-" + index,
+      title: "Prior " + index,
+      skill: "skills/prior/SKILL.md",
+      actionIds: [],
+      artifactIds: ["input-" + index],
+      checkIds: ["input-" + index + ".exists"],
+      approval: "none" as const
+    }))
+    f.project.manifest.artifacts = [
+      ...preceding.map((stage) => ({
+        id: stage.artifactIds[0],
+        path: stage.artifactIds[0] + ".json",
+        required: true
+      })),
+      f.project.manifest.artifacts.find((artifact) => artifact.id === "result")!
+    ]
+    f.project.manifest.checks = [
+      ...preceding.map((stage) => ({
+        id: stage.checkIds[0],
+        kind: "file-exists" as const,
+        artifactId: stage.artifactIds[0],
+        sideEffect: "read" as const
+      })),
+      ...f.project.manifest.checks
+    ]
+    for (const stage of preceding)
+      writeFileSync(
+        join(f.root, stage.artifactIds[0] + ".json"),
+        JSON.stringify({ value: stage.id })
+      )
+    f.project.manifest.stages = [
+      ...preceding,
+      { ...current, inputArtifactIds: ["input-2", "input-5", "input-7"] }
+    ]
+    f.project.stageIndex = 8
+    f.project.manifest = parseProjectRuntimeManifest(f.project.manifest)
+    return f
+  }
+
+  it("captures only three declared sources after eight stages without increasing reference limits", () => {
+    const f = lateStage(),
+      captured = f.capture()
+    expect(captured.bindings[0].input.sources).toMatchObject([
+      { artifactId: "input-2" },
+      { artifactId: "input-5" },
+      { artifactId: "input-7" }
+    ])
+    expect(() => captured.assertCurrent()).not.toThrow()
+    writeFileSync(join(f.root, "input-5.json"), '{"value":"changed"}')
+    expect(() => captured.assertCurrent()).toThrow("INPUT_CHANGED")
+    expect(f.capture().fingerprint).not.toBe(captured.fingerprint)
+    delete f.project.manifest.stages[8].inputArtifactIds
+    expect(() => f.capture()).toThrow("PROJECT_ARTIFACT_REFERENCE_LIMIT")
+    f.project.manifest.stages[8].inputArtifactIds = Array.from(
+      { length: 8 },
+      (_, index) => "input-" + index
+    )
+    expect(() => f.capture()).toThrow("PROJECT_ARTIFACT_REFERENCE_LIMIT")
+  })
+
+  it("rejects missing, duplicate, unknown or non-prior declared sources before yielding evidence", () => {
+    for (const inputs of [["input-2", "input-2"], ["missing"], ["result"]]) {
+      const f = lateStage()
+      f.project.manifest.stages[8].inputArtifactIds = inputs
+      expect(() => f.capture()).toThrow(/PROJECT_ACTION_(CHECK_INPUT_INVALID|INPUT_NOT_PRIOR)/)
+    }
+    const f = lateStage()
+    unlinkSync(join(f.root, "input-5.json"))
+    expect(() => f.capture()).toThrow("PROJECT_ACTION_INPUT_MISSING")
+  })
   it("captures large original UTF-8 bytes and prior files without embedding their contents", () => {
     const f = fixture()
     expect(() => assertProjectActionLock(f.project.manifest, f.lock)).not.toThrow()

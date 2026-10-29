@@ -15,12 +15,22 @@ import {
   type PresentationBudgetRecord
 } from "./function-site-presentation-budget"
 import { presentationInputDigest } from "./presentation-input-digest"
+import type { FunctionSiteGeometry } from "./function-site-geometry"
 
 const MAX_ENTRIES = 96
 const MAX_ENTRY_BYTES = 128 * 1024
 const MAX_AGE_MS = 120000
 const RECORD_BYTES = 256
 const SCOPE_BYTES = 4096
+const MAX_MEASUREMENTS = 1536
+
+interface Measurement extends PresentationBudgetRecord {
+  component: FunctionUiSite
+  hostKey?: string
+  height: number
+  layoutWidth: number
+  expires: number
+}
 
 export interface FunctionSitePresentation {
   tree?: FunctionUiElement
@@ -104,6 +114,9 @@ export function functionSitePresentationKey(
 /** Bound to one host capability decision, never an installation name or a restored owner token. */
 export class FunctionSitePresentationCache {
   private entries = new Map<string, Entry>()
+  // Neutral dimensions survive body LRU eviction. They never retain text, trees,
+  // callbacks, owners or an authority ticket, and share the renderer byte budget.
+  private measurements = new Map<string, Measurement>()
   private bytes = 0
   private metadata: PresentationBudgetRecord | undefined
   private revision = 0
@@ -169,6 +182,11 @@ export class FunctionSitePresentationCache {
       this.releaseEmptyMetadata()
     }
     const changed = new Set<string>()
+    for (const [key, measurement] of this.measurements)
+      if (measurement.hostKey === hostKey) {
+        changed.add(key)
+        this.removeMeasurement(key, measurement)
+      }
     for (const [key, entry] of this.entries)
       if (entry.hostKey === hostKey) {
         changed.add(key)
@@ -242,6 +260,67 @@ export class FunctionSitePresentationCache {
       expiresAt: entry.expires,
       current: () => this.authorized() && entry.valid && entry.expires > Date.now()
     }
+  }
+
+  measure(
+    key: string | null,
+    component: FunctionUiSite,
+    geometry: FunctionSiteGeometry,
+    hostKey?: string
+  ): void {
+    if (!key || !budget.canRetain() || !this.authorized() ||
+      !FUNCTION_PASSIVE_DISPLAY_SITES.includes(component) ||
+      !Number.isFinite(geometry.height) || geometry.height <= 0 || geometry.height > 100000 ||
+      !Number.isFinite(geometry.layoutWidth) || geometry.layoutWidth <= 0 || geometry.layoutWidth > 100000 ||
+      (hostKey !== undefined && (!hostKey || hostKey.length > 256))) return
+    const previous = this.measurements.get(key)
+    if (previous && previous.component === component && previous.hostKey === hostKey &&
+      previous.height === geometry.height && previous.layoutWidth === geometry.layoutWidth) {
+      previous.expires = Date.now() + MAX_AGE_MS
+      this.measurements.delete(key)
+      this.measurements.set(key, previous)
+      budget.touch(previous)
+      return
+    }
+    if (previous) this.removeMeasurement(key, previous)
+    while (this.measurements.size >= MAX_MEASUREMENTS) {
+      const oldest = this.measurements.entries().next().value!
+      this.removeMeasurement(oldest[0], oldest[1])
+    }
+    const measurement: Measurement = {
+      token: {},
+      component,
+      ...(hostKey ? { hostKey } : {}),
+      height: geometry.height,
+      layoutWidth: geometry.layoutWidth,
+      expires: Date.now() + MAX_AGE_MS,
+      bytes: RECORD_BYTES + (key.length + (hostKey?.length ?? 0)) * 2,
+      evict: () => {
+        this.removeMeasurement(key, measurement)
+        this.releaseEmptyMetadata()
+      }
+    }
+    this.measurements.set(key, measurement)
+    if (!this.retain(measurement) || this.measurements.get(key) !== measurement) {
+      this.removeMeasurement(key, measurement)
+      this.releaseEmptyMetadata()
+    }
+  }
+
+  measuredHeight(key: string | null, layoutWidth: number): number | undefined {
+    if (!key || !Number.isFinite(layoutWidth) || layoutWidth <= 0 || !this.authorized()) return
+    const measurement = this.measurements.get(key)
+    if (!measurement) return
+    if (measurement.expires <= Date.now()) {
+      this.removeMeasurement(key, measurement)
+      this.releaseEmptyMetadata()
+      return
+    }
+    if (Math.abs(layoutWidth - measurement.layoutWidth) >= 1) return
+    this.measurements.delete(key)
+    this.measurements.set(key, measurement)
+    budget.touch(measurement)
+    return measurement.height
   }
 
   save(
@@ -358,6 +437,9 @@ export class FunctionSitePresentationCache {
     }
     for (const [key, entry] of this.entries)
       if (!component || component === "*" || entry.component === component) this.remove(key, entry)
+    for (const [key, measurement] of this.measurements)
+      if (!component || component === "*" || measurement.component === component)
+        this.removeMeasurement(key, measurement)
     for (const [identity, admission] of this.admissions) {
       if (!component || component === "*" || admission.component === component) {
         this.removeAdmission(identity, admission)
@@ -380,6 +462,8 @@ export class FunctionSitePresentationCache {
     }
     const entry = this.entries.get(key)
     if (entry) this.remove(key, entry)
+    const measurement = this.measurements.get(key)
+    if (measurement) this.removeMeasurement(key, measurement)
     this.releaseEmptyMetadata()
     if (notify) this.notify()
   }
@@ -391,6 +475,11 @@ export class FunctionSitePresentationCache {
       this.bytes -= entry.bytes
     }
     budget.release(entry.token)
+  }
+
+  private removeMeasurement(key: string, measurement: Measurement): void {
+    if (this.measurements.get(key) === measurement) this.measurements.delete(key)
+    budget.release(measurement.token)
   }
 
   private removeAdmission(identity: string, admission: Admission): void {
@@ -437,6 +526,7 @@ export class FunctionSitePresentationCache {
   private releaseEmptyMetadata(): void {
     if (
       this.entries.size ||
+      this.measurements.size ||
       this.admissions.size ||
       this.projectionChanges.size ||
       this.components.size

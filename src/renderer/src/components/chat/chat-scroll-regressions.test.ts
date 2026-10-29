@@ -3,6 +3,11 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import type { Message } from "@/types"
 import {
+  beginChatScrollNavigation,
+  CHAT_SCROLL_NAVIGATION_EVENT,
+  isChatScrollNavigationActive
+} from "./chat-scroll-navigation"
+import {
   resolveChatMessageVirtualInitialLocation,
   shouldVirtualizeChatMessageList,
   type ChatMessageVirtualInitialLocation
@@ -41,6 +46,26 @@ function attachedState(messageCount = 10): ChatScrollState {
   return dispatch(ready, { type: "BOTTOM_CONFIRMED" }).state
 }
 
+describe("programmatic chat navigation ownership", () => {
+  it("keeps a newer navigation paused when an older asynchronous reveal completes", () => {
+    const viewport = new EventTarget() as HTMLElement
+    const otherViewport = new EventTarget() as HTMLElement
+    const transitions: boolean[] = []
+    viewport.addEventListener(CHAT_SCROLL_NAVIGATION_EVENT, () => {
+      transitions.push(isChatScrollNavigationActive(viewport))
+    })
+    const releaseFirst = beginChatScrollNavigation(viewport)
+    const releaseSecond = beginChatScrollNavigation(viewport)
+    releaseFirst()
+    expect(isChatScrollNavigationActive(viewport)).toBe(true)
+    expect(isChatScrollNavigationActive(otherViewport)).toBe(false)
+    releaseSecond()
+    releaseSecond()
+    expect(isChatScrollNavigationActive(viewport)).toBe(false)
+    expect(transitions).toEqual([true, true, false])
+  })
+})
+
 function detachedSession(threadId: string, unreadCount = 0): ChatScrollSession {
   let state = dispatch(createChatScrollState(threadId), {
     type: "DATA_READY",
@@ -67,6 +92,29 @@ function detachedSession(threadId: string, unreadCount = 0): ChatScrollSession {
 }
 
 describe("chat scroll regression scenarios", () => {
+  it("does not finish programmatic settling on a missing or pending virtual tail", () => {
+    const observation = {
+      distanceToBottom: 0,
+      movementDelta: 0,
+      atBottomThreshold: 32,
+      detachDelta: 1,
+      detached: false,
+      downwardIntentActive: false,
+      scrollbarPointerActive: false,
+      presentationReady: false
+    }
+    expect(shouldConfirmChatViewportBottom(observation)).toBe(false)
+    expect(shouldConfirmChatViewportBottom({ ...observation, presentationReady: true })).toBe(true)
+    // An explicit user reattachment is independent of the programmatic presentation gate.
+    expect(shouldConfirmChatViewportBottom({
+      ...observation,
+      detached: true,
+      movementDelta: 100,
+      downwardIntentActive: true,
+      presentationReady: true
+    })).toBe(true)
+  })
+
   it("keeps a streaming scrollbar drag detached until the pointer is released", () => {
     let state = dispatch(attachedState(), {
       type: "USER_DETACH",

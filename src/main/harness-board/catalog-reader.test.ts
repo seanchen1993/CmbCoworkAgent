@@ -203,6 +203,47 @@ describe("Harness catalog reader", () => {
     expect(new Set([...result.registry, ...next.registry].map((row) => row.id)).size).toBe(21)
   })
 
+  it("keeps an upgraded exact UUID bound when another legacy plugin has the same name", async () => {
+    const paths = await makeCatalog(2)
+    const plugins = JSON.parse(readFileSync(paths.plugins, "utf8"))
+    const hostRoot = join(plugins[0].path, "..", "host")
+    mkdirSync(hostRoot)
+    const source = createProjectTemplate({ packageId: "host-only", name: "Host" })
+    writeFileSync(join(hostRoot, "devclaw.project-runtime.json"),
+      source.files.find((file) => file.path === "devclaw.project-runtime.json")!.text)
+    plugins[1].name = plugins[0].name
+    plugins[0].path = hostRoot
+    writeFileSync(paths.plugins, JSON.stringify(plugins))
+    const before = readFileSync(paths.projects, "utf8")
+    const result = readHarnessCatalogPage(paths.projects, paths.plugins, {})
+    expect(result.projects[0].harnessAdapter).toMatchObject({
+      id: "adapter-0", name: "Adapter 0", boundVersion: "1.0.0"
+    })
+    expect(result.projects[0].boardCompatibility).toMatchObject({
+      status: "host-runtime", compatible: false,
+      message: expect.stringContaining("恢复原插件版本")
+    })
+    expect(result.projects[0].supportsDeployUnits).toBe(false)
+    expect(result.projects[1].harnessAdapter.id).toBe("adapter-1")
+    expect(result.projects[1].boardCompatibility.compatible).toBe(true)
+    expect(readFileSync(paths.projects, "utf8")).toBe(before)
+  })
+
+  it("does not replace an installed non-project UUID with a same-named legacy plugin", async () => {
+    const paths = await makeCatalog(2)
+    const plugins = JSON.parse(readFileSync(paths.plugins, "utf8"))
+    const chatRoot = join(plugins[0].path, "..", "chat")
+    mkdirSync(chatRoot)
+    plugins[1].name = plugins[0].name
+    plugins[0].path = chatRoot
+    writeFileSync(paths.plugins, JSON.stringify(plugins))
+    const result = readHarnessCatalogPage(paths.projects, paths.plugins, {})
+    expect(result.projects[0].harnessAdapter.id).toBe("adapter-0")
+    expect(result.projects[0].boardCompatibility).toMatchObject({
+      status: "missing-board-config", compatible: false
+    })
+  })
+
   it("rejects changed extension requirements at the original board entry even when board bytes are cached", async () => {
     const paths = await makeCatalog(1)
     const plugin = JSON.parse(readFileSync(paths.plugins, "utf8"))[0]

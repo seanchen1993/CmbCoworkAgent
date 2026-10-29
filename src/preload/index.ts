@@ -3451,6 +3451,8 @@ const api = {
   },
   plugins: {
     ...createPluginStartUseBridge((channel, input) => ipcRenderer.invoke(channel, input)),
+    flowDefinition: ((input) => ipcRenderer.invoke("plugins:flowDefinition", input)) as
+      import("../shared/plugin-flow-definition").ReadPluginFlowDefinition,
     // Existing plugin APIs remain independent of project-scoped module grants.
     list: (): Promise<PluginMetadata[]> =>
       ipcRenderer.invoke("plugins:list") as Promise<PluginMetadata[]>,
@@ -4815,7 +4817,8 @@ const api = {
       actionResults: (projectId: string, operationId: string) => ipcRenderer.invoke("project-runtime:action-results", projectId, operationId),
       versions: (projectId: string) => ipcRenderer.invoke("project-runtime:versions", projectId),
       templates: () => ipcRenderer.invoke("project-runtime:templates"),
-      list: (afterProjectId?: string) => ipcRenderer.invoke("project-runtime:list", afterProjectId),
+      list: (afterProjectId?: string, query?: string) =>
+        ipcRenderer.invoke("project-runtime:list", afterProjectId, query),
       get: (projectId: string) => ipcRenderer.invoke("project-runtime:get", projectId),
       create: (input: Parameters<import("../shared/project-runtime/platform-api").LocalProjectApi["create"]>[0]) =>
         ipcRenderer.invoke("project-runtime:create", input),

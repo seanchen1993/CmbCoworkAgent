@@ -239,6 +239,210 @@ describe("original plugin first modularization", () => {
     expect(candidate.inspection.stateControl.migration).toBe("not-required-for-host")
   })
 
+  it("modularizes valid reordered Host declaration tables and shared references without changing execution", async () => {
+    const source = sharedSkillTemplate()
+    edit(source, "devclaw.project-runtime.json", (value) => {
+      const runtime = parseProjectRuntimeManifest(value)
+      runtime.artifacts.reverse()
+      runtime.checks.reverse()
+      runtime.actions = ["review-action", "draft-action"].map((id) => ({
+        id,
+        ref: { pluginId: "audit-provider", plugin: "audit", digest: "a".repeat(64), actionId: id }
+      }))
+      runtime.stages[0].actionIds = ["draft-action"]
+      runtime.stages[1].actionIds = ["review-action", "draft-action"]
+      runtime.environment = ["SECOND", "FIRST"].map((id) => ({
+        id,
+        description: id,
+        required: true
+      }))
+      return runtime
+    })
+    const runtimeFile = source.files.find((file) => file.path === "devclaw.project-runtime.json")!
+    const runtime = parseProjectRuntimeManifest(JSON.parse(runtimeFile.bytes.toString("utf8")))
+    const bundle = createAuthoringSourceBundle(
+      source.files.map((file) => ({ path: file.path, text: file.bytes.toString("utf8") }))
+    )
+    expect((await testProjectSource(bundle, runtime)).valid).toBe(true)
+    const inspected = inspectPluginModularization(source)
+    expect(inspected.status).toBe("candidate")
+    expect(inspected.blockers).toEqual([])
+    const candidate = createPluginModularizationCandidate(source, {
+      confirmed: true,
+      sourceDigest: source.digest
+    })
+    expect(candidate.files.find((file) => file.path === runtimeFile.path)!.bytes).toEqual(
+      runtimeFile.bytes
+    )
+    const projection = assembleBusinessMods(
+      [
+        {
+          snapshot: { ...source, files: candidate.files, digest: candidate.digest },
+          catalog: candidate.catalog,
+          modIds: ["draft", "review"]
+        }
+      ],
+      { sources: [], name: "ordered-declarations", version: "1.0.0" }
+    )
+    const projected = parseProjectRuntimeManifest(
+      JSON.parse(projection.files.find((file) => file.path === runtimeFile.path)!.bytes.toString())
+    )
+    expect(
+      projected.stages.map(({ id, actionIds, artifactIds, checkIds }) => ({
+        id,
+        actionIds,
+        artifactIds,
+        checkIds
+      }))
+    ).toEqual(
+      runtime.stages.map(({ id, actionIds, artifactIds, checkIds }) => ({
+        id,
+        actionIds,
+        artifactIds,
+        checkIds
+      }))
+    )
+    expect(projected.actions.map((action) => action.id)).toEqual(["draft-action", "review-action"])
+    expect(projected.checks.map((check) => check.id)).toEqual(["draft-exists", "review-schema"])
+  })
+
+  it("preserves each stage's effective shared action-check order during declaration regrouping", () => {
+    const source = fixture()
+    edit(source, "devclaw.project-runtime.json", (value) => {
+      const runtime = parseProjectRuntimeManifest(value)
+      runtime.actions = ["shared-check-action", "decision-check-action"].map((id) => ({
+        id,
+        ref: { pluginId: "audit-provider", plugin: "audit", digest: "a".repeat(64), actionId: id }
+      }))
+      runtime.checks.push(
+        {
+          id: "shared-action-check",
+          kind: "action",
+          artifactId: "draft",
+          sideEffect: "read",
+          actionId: "shared-check-action"
+        },
+        {
+          id: "decision-action-check",
+          kind: "action",
+          artifactId: "decision",
+          sideEffect: "read",
+          actionId: "decision-check-action"
+        }
+      )
+      runtime.stages[0].checkIds.push("shared-action-check")
+      runtime.stages[1].artifactIds.push("draft")
+      runtime.stages[1].checkIds.push("shared-action-check", "decision-action-check")
+      return runtime
+    })
+    const catalog = inspectPluginModularization(source).catalog!
+    expect(catalog).toBeDefined()
+    expect(
+      createPluginModularizationCandidate(source, {
+        confirmed: true,
+        sourceDigest: source.digest,
+        catalog
+      }).status
+    ).toBe("needs-native-validation")
+    const stages = catalog.modules.map((mod) => structuredClone(mod.host!.stage))
+    edit(source, "devclaw.project-runtime.json", (value) => {
+      const runtime = parseProjectRuntimeManifest(value)
+      runtime.checks.reverse()
+      return runtime
+    })
+    // The same shared checks would be regrouped to shared -> decision by the first stage,
+    // changing the second stage's original decision -> shared action execution order.
+    expect(inspectPluginModularization(source).blockers[0]?.code).toBe(
+      "PLUGIN_MODULARIZATION_RUNTIME_CHANGED"
+    )
+    expect(() =>
+      createPluginModularizationCandidate(source, {
+        confirmed: true,
+        sourceDigest: source.digest,
+        catalog
+      })
+    ).toThrow("PLUGIN_MODULARIZATION_RUNTIME_CHANGED")
+    expect(catalog.modules.map((mod) => mod.host!.stage)).toEqual(stages)
+  })
+
+  it.each(["artifactIds", "checkIds"] as const)(
+    "still rejects changed stage execution order in %s",
+    (field) => {
+      const source = sharedSkillTemplate()
+      const catalog = inspectPluginModularization(source).catalog!
+      catalog.modules[1].host!.stage[field].reverse()
+      expect(() =>
+        createPluginModularizationCandidate(source, {
+          confirmed: true,
+          sourceDigest: source.digest,
+          catalog
+        })
+      ).toThrow("PLUGIN_MODULARIZATION_RUNTIME_CHANGED")
+    }
+  )
+
+  it.each(["actions", "artifacts", "checks", "environment"] as const)(
+    "still rejects changed Host declaration meaning in %s",
+    (field) => {
+      const source = fixture()
+      if (field === "actions")
+        edit(source, "devclaw.project-runtime.json", (value) => {
+          const runtime = parseProjectRuntimeManifest(value)
+          runtime.actions.push({
+            id: "prepare-action",
+            ref: {
+              pluginId: "audit-provider",
+              plugin: "audit",
+              digest: "a".repeat(64),
+              actionId: "prepare-action"
+            }
+          })
+          runtime.stages[0].actionIds.push("prepare-action")
+          return runtime
+        })
+      const catalog = inspectPluginModularization(source).catalog!
+      const host = catalog.modules[0].host!
+      if (field === "actions") host.actions[0].ref.digest = "b".repeat(64)
+      if (field === "artifacts") host.artifacts[0].path = "changed.json"
+      if (field === "checks") host.checks[0].schema = { type: "object" }
+      if (field === "environment") host.environment[0].required = false
+      expect(() =>
+        createPluginModularizationCandidate(source, {
+          confirmed: true,
+          sourceDigest: source.digest,
+          catalog
+        })
+      ).toThrow("PLUGIN_MODULARIZATION_RUNTIME_CHANGED")
+    }
+  )
+
+  it("keeps duplicate source IDs and conflicting shared declarations invalid", () => {
+    const source = sharedSkillTemplate()
+    const catalog = inspectPluginModularization(source).catalog!
+    catalog.modules[1].host!.artifacts.find((artifact) => artifact.id === "draft")!.path =
+      "other.md"
+    expect(() =>
+      createPluginModularizationCandidate(source, {
+        confirmed: true,
+        sourceDigest: source.digest,
+        catalog
+      })
+    ).toThrow()
+    edit(source, "devclaw.project-runtime.json", (value) => {
+      const runtime = parseProjectRuntimeManifest(value)
+      runtime.artifacts.push({ ...runtime.artifacts[0] })
+      return runtime
+    })
+    expect(inspectPluginModularization(source).status).toBe("needs-authoring")
+    expect(() =>
+      createPluginModularizationCandidate(source, {
+        confirmed: true,
+        sourceDigest: source.digest,
+        catalog
+      })
+    ).toThrow()
+  })
+
   it("accepts the reviewed adapter's derived config while retaining original source bytes and rules", () => {
     const { source, catalog } = legacyFixture()
     const original = source.files.find((file) => file.path === "board/config.json")!
@@ -1191,6 +1395,126 @@ describe("original plugin first modularization", () => {
         })
       ).toThrow()
   })
+
+  it.each([
+    {
+      name: "duplicate additions",
+      files: [
+        { path: "tests/new.md", text: "one" },
+        { path: "tests/new.md", text: "two" }
+      ],
+      path: "modularizationFiles.1.path",
+      code: "PLUGIN_MODULARIZATION_FILE_COLLISION"
+    },
+    {
+      name: "parent and child additions",
+      files: [
+        { path: "tests/new.md", text: "one" },
+        { path: "tests/new.md/child.md", text: "two" }
+      ],
+      path: "modularizationFiles.1.path",
+      code: "PLUGIN_MODULARIZATION_FILE_COLLISION"
+    },
+    {
+      name: "directory casing",
+      files: [
+        { path: "tests/Case/a.md", text: "one" },
+        { path: "tests/case/b.md", text: "two" }
+      ],
+      path: "modularizationFiles.1.path",
+      code: "PLUGIN_MODULARIZATION_FILE_COLLISION"
+    },
+    {
+      name: "source overwrite",
+      files: [{ path: "skills/prepare/SKILL.md", text: "PRIVATE_BODY_CANARY" }],
+      path: "modularizationFiles.0.path",
+      code: "PLUGIN_MODULARIZATION_FILE_COLLISION"
+    },
+    {
+      name: "forbidden directory",
+      files: [{ path: "hooks/new.ts", text: "PRIVATE_BODY_CANARY" }],
+      path: "modularizationFiles.0.path",
+      code: "PLUGIN_MODULARIZATION_FILE_PATH_FORBIDDEN"
+    },
+    {
+      name: "root identity",
+      files: [{ path: "plugin.json", text: "PRIVATE_BODY_CANARY" }],
+      path: "modularizationFiles.0.path",
+      code: "PLUGIN_MODULARIZATION_FILE_IDENTITY_FORBIDDEN"
+    },
+    {
+      name: "nested identity",
+      files: [{ path: "tests/devclaw.project-runtime.json", text: "PRIVATE_BODY_CANARY" }],
+      path: "modularizationFiles.0.path",
+      code: "PLUGIN_MODULARIZATION_FILE_IDENTITY_FORBIDDEN"
+    },
+    {
+      name: "absolute sensitive path",
+      files: [{ path: "C:/PRIVATE_PATH_CANARY/secrets.json", text: "PRIVATE_BODY_CANARY" }],
+      path: "modularizationFiles.0.path",
+      code: "PLUGIN_MODULARIZATION_FILE_PATH_INVALID"
+    },
+    {
+      name: "credential resource",
+      files: [{ path: "knowledge/secrets.json", text: "PRIVATE_BODY_CANARY" }],
+      path: "modularizationFiles.0.path",
+      code: "PLUGIN_MODULARIZATION_FILE_PATH_INVALID"
+    },
+    {
+      name: "file count",
+      files: Array.from({ length: 33 }, (_, index) => ({ path: `tests/${index}.md`, text: "a" })),
+      path: "modularizationFiles",
+      code: "PLUGIN_MODULARIZATION_FILES_LIMIT"
+    },
+    {
+      name: "single-file bytes",
+      files: [{ path: "tests/large.md", text: "界".repeat(21846) }],
+      path: "modularizationFiles.0.text",
+      code: "PLUGIN_MODULARIZATION_FILE_TEXT_INVALID"
+    },
+    {
+      name: "total bytes",
+      files: Array.from({ length: 5 }, (_, index) => ({
+        path: `tests/total-${index}.md`,
+        text: "a".repeat(60 * 1024)
+      })),
+      path: "modularizationFiles.4.text",
+      code: "PLUGIN_MODULARIZATION_FILES_LIMIT"
+    }
+  ])(
+    "reports safe actionable diagnostics for $name and accepts a corrected request",
+    ({ files, path, code }) => {
+      const source = fixture()
+      const before = source.files.map((file) => ({ ...file, bytes: Buffer.from(file.bytes) }))
+      let failure: unknown
+      try {
+        createPluginModularizationCandidate(source, {
+          confirmed: true,
+          sourceDigest: source.digest,
+          modularizationFiles: files
+        })
+      } catch (error) {
+        failure = error
+      }
+      expect(failure).toBeInstanceOf(BusinessModCatalogValidationError)
+      const diagnostics = (failure as BusinessModCatalogValidationError).diagnostics
+      expect(diagnostics).toEqual([{ path, code, message: expect.any(String) }])
+      expect(JSON.stringify(diagnostics)).not.toMatch(/PRIVATE_(?:BODY|PATH)_CANARY/)
+      expect(source.files).toEqual(before)
+      const catalog = inspectPluginModularization(source).catalog!
+      catalog.kernel!.resources.push("tests/fixed.md")
+      const candidate = createPluginModularizationCandidate(source, {
+        confirmed: true,
+        sourceDigest: source.digest,
+        catalog,
+        modularizationFiles: [{ path: "tests/fixed.md", text: "Corrected implementation" }]
+      })
+      expect(candidate.addedFiles).toEqual([
+        expect.objectContaining({ path: "tests/fixed.md", bytes: 24 })
+      ])
+      expect(source.files).toEqual(before)
+    }
+  )
 
   it("does not replace an original legacy runtime or infer Host ownership from an old board file", () => {
     const source = fixture()

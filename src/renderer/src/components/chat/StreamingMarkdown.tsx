@@ -1,5 +1,5 @@
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown"
-import rehypeHighlight from "rehype-highlight"
+import { rehypeChatHighlight } from "../../lib/markdown-highlight"
 import remarkGfm from "remark-gfm"
 import type { ChatSearchLocation } from "../../../../shared/chat-search-types"
 import { ChatSearchContext } from "./ChatSearchContext"
@@ -82,7 +82,7 @@ function MarkdownCodeBlock({
 const REMARK_PLUGINS = [remarkGfm, remarkStreamingMarkdownParse]
 const COMPLETED_REMARK_PLUGINS = [remarkGfm, remarkCompletedMarkdownParseCache]
 const STABLE_PREFIX_REMARK_PLUGINS = [remarkGfm, remarkStableMarkdownPrefixCache]
-const REHYPE_PLUGINS = [rehypeHighlight]
+const REHYPE_PLUGINS = [rehypeChatHighlight]
 // While streaming we skip syntax highlighting (the expensive rehype pass) and
 // reuse a single empty array identity so react-markdown doesn't see a new prop.
 const NO_REHYPE_PLUGINS: typeof REHYPE_PLUGINS = []

@@ -34,6 +34,7 @@ import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/
 import { nativeFunctionConversationWorkspace } from "../checkpointer/function-conversation-main-recovery"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { readLatestCheckpointTuple } from "../checkpointer/runtime-projection-store"
+import { createThreadDisplayMetadataGuard } from "./thread-display-read-retry"
 import {
   hasInvalidFunctionConversationTranscriptStamp,
   readFunctionConversationTranscriptStamp
@@ -186,7 +187,7 @@ async function fixture(alias = false) {
     parents: {}
   }
   await saver.put(config, checkpoint, metadata)
-  const sender = Object.assign(new EventEmitter(), { id: 9, isDestroyed: () => false })
+  const sender = Object.assign(new EventEmitter(), { id: 9, mainFrame: {}, isDestroyed: () => false })
   const counters = { ordinaryProjection: 0, nativeProjection: 0, opens: 0 }
   let beforeProjection: (() => Promise<void> | void) | undefined = undefined
   const handler = productionHandler({
@@ -196,6 +197,7 @@ async function fixture(alias = false) {
     realpathSync,
     getDb: appDb.getDb,
     getThreadCore: appDb.getThreadCore,
+    createThreadDisplayMetadataGuard,
     captureThreadIncarnation,
     matchesThreadIncarnation,
     nativeFunctionConversationWorkspace,
@@ -305,6 +307,7 @@ describe("actual coordinator worker checkpoint display read", () => {
     "junction-retarget",
     "forget",
     "navigation",
+    "frame",
     "saver-close"
   ] as const)(
     "rejects %s during the real checkpoint read and releases window listeners",
@@ -330,6 +333,7 @@ describe("actual coordinator worker checkpoint display read", () => {
           symlinkSync(replacement, f.workspace, process.platform === "win32" ? "junction" : "dir")
         } else if (kind === "forget") f.manager.forgetThread(f.parentId)
         else if (kind === "navigation") f.sender.emit("did-start-navigation")
+        else if (kind === "frame") f.sender.mainFrame = {}
         else await f.saver.close()
       })
       await expect(f.read()).rejects.toThrow()

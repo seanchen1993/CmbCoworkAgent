@@ -327,7 +327,10 @@ function FunctionUserConfigEditor({
     setError("")
     try {
       const next = await api.migrateUserConfig(threadId, view)
-      if (saveSequence.current === current) accept(next, true)
+      if (saveSequence.current === current) {
+        accept(next, true)
+        if (!next.migration) onSaved?.()
+      }
     } catch (failure) {
       if (saveSequence.current === current) setError(String(failure))
     } finally {

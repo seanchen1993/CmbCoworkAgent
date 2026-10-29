@@ -16,8 +16,10 @@ import { isSameWorkspacePath } from "../../shared/workspace-path"
 import { getPlugins } from "../storage"
 import { capabilityCatalogWorkers } from "../plugins/capability-catalog-client"
 import { readPluginCompatibility } from "../plugins/plugin-compatibility"
+import { registerPluginFlowDefinitionHandlers } from "./plugin-flow-definition"
 
 export function registerNodeCompositionHandlers(ipc: IpcMain, window: () => BrowserWindow | null) {
+  registerPluginFlowDefinitionHandlers(ipc, window)
   const service = new NativeNodeComposition({
     context: readNativeNodeContext,
     run: runNativeNodeClosure,

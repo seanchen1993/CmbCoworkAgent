@@ -12,6 +12,94 @@ import { FUNCTION_SDK_METHODS } from "../v2/sdk-capabilities"
 import { getFunctionEventSupport } from "../../../shared/mods/v2/compatibility-catalog"
 
 const roots: string[] = []
+it("discovers exact event overloads and referenced result-v1 types without dumping the SDK", () => {
+  const result = developmentCatalogPage("events", 0, "tool.call")
+  if (!("query" in result)) throw Error("Expected targeted discovery")
+  expect(result.events).toEqual([expect.objectContaining({ name: "tool.call" })])
+  expect(result.sdkMethods).toEqual([])
+  expect(result.matched).toBe(true)
+  expect(result.declarationAvailable).toBe(true)
+  expect(result.content).toContain('event:"tool.call"')
+  expect(result.content).toContain("Next<ToolEvent,Json>")
+  expect(result.content).toContain("export interface ToolEvent")
+  expect(result.content).not.toContain('event:"process.spawn"')
+  expect(result.content).not.toContain("export interface SDKBase")
+  expect(result.content.length).toBeLessThan(developmentCatalog().types.length / 3)
+  expect(JSON.stringify({ ok: true, result }).length).toBeLessThan(8000)
+  expect(result).toMatchObject({ scope: "static-authoring-contract", grantsAuthority: false })
+})
+
+it("extracts a real SDK method and UI element contracts, with exact independent paging", () => {
+  let cursor = 0
+  let content = ""
+  for (;;) {
+    const page = developmentCatalogPage("sdk", cursor, "ui.resolve")
+    if (!("query" in page)) throw Error("Expected targeted discovery")
+    expect(page.sdkMethods).toEqual(["ui.resolve"])
+    expect(page.events).toEqual([])
+    expect(JSON.stringify(page).length).toBeLessThan(8000)
+    content += page.content
+    if (!("nextCursor" in page) || page.nextCursor === undefined) {
+      expect(page.complete).toBe(true)
+      expect(content.length).toBe(page.totalCharacters)
+      break
+    }
+    expect(page.complete).toBe(false)
+    cursor = page.nextCursor
+  }
+  expect(content).toContain("resolve(event:UiEvent):UiElements")
+  expect(content).toContain("export interface UiElements")
+  expect(content).toContain("Text(props:")
+  expect(content).not.toContain("PlatformDescriptor")
+})
+
+it("keeps overlapping event and SDK names explicit and unsupported declarations honest", () => {
+  const both = developmentCatalogPage("overview", 0, "tool.call")
+  if (!("query" in both)) throw Error("Expected targeted discovery")
+  expect(both.events).toHaveLength(1)
+  expect(both.sdkMethods).toEqual(["tool.call"])
+  for (const query of ["not-real.method", "tool", "native.project-runtime", "install-private-action"]) {
+    const missing = developmentCatalogPage("overview", 0, query)
+    expect(missing).toMatchObject({ matched: false, declarationAvailable: false,
+      content: "", events: [], sdkMethods: [], complete: true, grantsAuthority: false })
+    expect(JSON.stringify(missing)).not.toContain("pluginId")
+  }
+  const runtimeOnly = developmentCatalogPage("sdk", 0, "fs.ancestors")
+  expect(runtimeOnly).toMatchObject({ matched: true, declarationAvailable: false, content: "" })
+})
+
+it("retains unfiltered events and SDK pages and rejects ambiguous query sections/cursors", () => {
+  expect(developmentCatalogPage("events")).toMatchObject({
+    content: developmentCatalog().events.slice(0, 12), nextCursor: 12
+  })
+  expect(developmentCatalogPage("sdk")).toMatchObject({
+    content: developmentCatalog().sdkMethods.slice(0, 60)
+  })
+  expect(() => developmentCatalogPage("types", 0, "tool.call"))
+    .toThrow("DEVELOPMENT_CATALOG_QUERY_SECTION")
+  expect(() => developmentCatalogPage("support", 0, "tool.call"))
+    .toThrow("DEVELOPMENT_CATALOG_QUERY_SECTION")
+  for (const cursor of [-1, 0.5, Number.NaN, 100000])
+    expect(() => developmentCatalogPage("events", cursor, "tool.call"))
+      .toThrow("DEVELOPMENT_CATALOG_CURSOR")
+  for (const query of ["", " ", "x".repeat(121)])
+    expect(() => developmentCatalogPage("sdk", 0, query)).toThrow("DEVELOPMENT_CATALOG_QUERY")
+})
+
+it("makes draft persistence, complete source and exact revision semantics available in overview", () => {
+  const catalog = developmentCatalog()
+  const overview = developmentCatalogPage()
+  if (!("draftWorkflow" in overview) || !overview.draftWorkflow)
+    throw Error("Expected overview draft workflow")
+  expect(overview.draftWorkflow).toEqual(catalog.draftWorkflow)
+  expect(overview.draftWorkflow.newDraft).toContain("revision=0")
+  expect(overview.draftWorkflow.scaffold).toMatchObject({ saved: false })
+  expect(overview.draftWorkflow.scaffold.next).toContain("result.files 完整数组")
+  expect(overview.draftWorkflow.edit).toContain("read(id)")
+  expect(overview.draftWorkflow.submitValid).toContain("结束本轮")
+  expect(JSON.stringify(overview).length).toBeLessThan(8000)
+  expect(JSON.stringify({ ok: true, result: overview }).length).toBeLessThan(8000)
+})
 it("freezes a discoverable S1 promise using real supported sites, events and SDK methods", () => {
   const page = developmentCatalogPage("support")
   if (!("content" in page) || typeof page.content !== "object" || Array.isArray(page.content))

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process"
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, resolve, toNamespacedPath } from "node:path"
 import { tmpdir } from "node:os"
@@ -91,6 +92,77 @@ it("allocates an empty private workspace for every native trial and retains earl
   expect(await readdir(third.snapshot.workspace)).toEqual([])
   third.release()
 })
+
+it("does not recreate a missing default owner or fall back from an unusable trial root", async () => {
+  const { draft } = await fixture()
+  const cleanupRoot = dirname(draft.directory)
+  const ownerRoot = join(cleanupRoot, "removed-default-owner")
+  await mkdir(ownerRoot)
+  const development = new ProjectDevelopmentSessions()
+  await development.stage(scope, draft, ownerRoot, () => {})
+  expect(dirname(resolve(ownerRoot))).toBe(resolve(cleanupRoot))
+  await rm(ownerRoot, { recursive: true })
+  expect(() =>
+    development.acquire(scope, draft.id, draft.revision, () => {}, {
+      freshWorkspace: true
+    })
+  ).toThrow()
+  await expect(stat(ownerRoot)).rejects.toMatchObject({ code: "ENOENT" })
+  expect(development.read(scope, draft.id)?.activeRuns).toBe(0)
+
+  const blockedRoot = join(cleanupRoot, "occupied-trial-root")
+  await writeFile(blockedRoot, "A file cannot be a trial root")
+  const configured = new ProjectDevelopmentSessions(blockedRoot)
+  const prepared = await configured.stage(scope, draft, cleanupRoot, () => {})
+  expect(() =>
+    configured.acquire(scope, draft.id, draft.revision, () => {}, {
+      freshWorkspace: true
+    })
+  ).toThrow()
+  expect(configured.read(scope, draft.id)).toMatchObject({
+    workspace: prepared.workspace,
+    activeRuns: 0
+  })
+})
+
+it.skipIf(process.platform !== "win32")(
+  "runs Git in a short configured trial workspace while retaining the deep immutable package",
+  async () => {
+    const { draft } = await fixture()
+    const cleanupRoot = dirname(draft.directory)
+    const ownerLength = 239 - (`/${draft.id}-development-`.length + 36)
+    const prefix = join(cleanupRoot, "long-git-owner-")
+    const ownerRoot = prefix + "x".repeat(ownerLength - prefix.length)
+    await mkdir(toNamespacedPath(ownerRoot), { recursive: true })
+    const trialRoot = join(cleanupRoot, "project-trials")
+    const development = new ProjectDevelopmentSessions(trialRoot)
+    const prepared = await development.stage(scope, draft, ownerRoot, () => {})
+    const lease = development.acquire(scope, draft.id, draft.revision, () => {}, {
+      freshWorkspace: true
+    })
+    try {
+      expect(prepared.packagePath.length).toBeGreaterThan(260)
+      expect(lease.snapshot.packagePath).toBe(prepared.packagePath)
+      expect(lease.snapshot.digest).toBe(prepared.digest)
+      expect(dirname(lease.snapshot.workspace)).toBe(trialRoot)
+      expect(lease.snapshot.workspace.length).toBeLessThan(260)
+      expect(lease.snapshot.workspace.startsWith("\\\\?\\")).toBe(false)
+      expect(await readdir(lease.snapshot.workspace)).toEqual([])
+      execFileSync("git", ["-C", lease.snapshot.workspace, "init", "--quiet"], {
+        windowsHide: true
+      })
+      expect((await stat(join(lease.snapshot.workspace, ".git"))).isDirectory()).toBe(true)
+      const directory = execFileSync(
+        "git",
+        ["-C", lease.snapshot.workspace, "rev-parse", "--show-toplevel"],
+        { encoding: "utf8", windowsHide: true }
+      )
+      expect(resolve(directory.trim())).toBe(resolve(lease.snapshot.workspace))
+    } finally {
+      lease.release()
+    }
+  }
+)
 
 it.skipIf(process.platform !== "win32")(
   "creates real Windows trials beyond MAX_PATH without exposing namespace prefixes or reusing earlier workspaces",

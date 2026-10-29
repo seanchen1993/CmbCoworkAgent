@@ -29,7 +29,8 @@ export class PluginStartUseService {
       diagnostics?(
         plugin: PluginMetadata,
         input: PluginStartUseInput,
-        guard: () => void
+        guard: () => void,
+        destination: PluginStartUseReport["kind"]
       ): Promise<PluginStartUseIssue[]>
       chatEntries?(
         plugin: PluginMetadata,
@@ -138,12 +139,11 @@ export class PluginStartUseService {
       } else if (isLegacyProjectModePluginRoot(fixed.path)) kind = "plugin-project"
       else throw Error("PLUGIN_START_USE_PROJECT_UNSUPPORTED")
     } else if (isLegacyProjectModePluginRoot(fixed.path)) kind = "plugin-project"
-    const issues = fixed.enabled ? ((await this.deps.diagnostics?.(fixed, input, guard)) ?? []) : []
+    const issues = fixed.enabled
+      ? ((await this.deps.diagnostics?.(fixed, input, guard, kind)) ?? [])
+      : []
     guard()
-    const chat =
-      fixed.enabled && kind === "chat"
-        ? await this.deps.chatEntries?.(fixed, input, guard)
-        : undefined
+    const chat = kind === "chat" ? await this.deps.chatEntries?.(fixed, input, guard) : undefined
     guard()
     const after = await snapshotDerivationSource(fixed.path)
     guard()

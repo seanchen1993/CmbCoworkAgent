@@ -82,9 +82,11 @@ import { FunctionModuleResources, functionTimerDelay, waitFunctionTimer } from "
 import { functionUiFaultReason, validateFunctionUiFault } from "../../../shared/mods/v2/ui-fault"
 import {
   FunctionProcessHost,
+  functionProcessRequest,
   type FunctionProcessRequest,
   type FunctionProcessStream
 } from "./process-sdk"
+import { isDeepStrictEqual } from "node:util"
 import { dispatchFunctionPullStream } from "./pull-stream-dispatcher"
 import { readFunctionEnvironment } from "./environment-sdk"
 import {
@@ -2246,6 +2248,7 @@ export class FunctionSession {
     if (!event.startsWith("classic.")) throw new ModFunctionError("MODS_CLASSIC_EVENT_INVALID")
     let coreResult: ModJson | undefined
     let feedbackChanged = false
+    let participated = false
     const value = await this.dispatch(event, input, signal, undefined, 0, undefined, undefined, {
       core: async (input, signal) => {
         const result = await core(input, signal)
@@ -2254,10 +2257,11 @@ export class FunctionSession {
       },
       observeBeforePublication: (result) => {
         feedbackChanged = changedClassicFeedback(result, coreResult)
-      }
+      },
+      observeClassicParticipation: (value) => { participated = value }
     })
     if (!isModObject(value)) throw new ModFunctionError("MODS_CLASSIC_RESULT")
-    recordClassicFeedback(value, feedbackChanged)
+    recordClassicFeedback(value, feedbackChanged, participated)
     return value
   }
 
@@ -2380,6 +2384,7 @@ export class FunctionSession {
       actionOwner?: string
       actionArgs?: string
       observeBeforePublication?(value: ModJson): void
+      observeClassicParticipation?(participated: boolean): void
       observeCorePublication?(original: ModJson, safe: ModJson): void
       prepareMentionPublication?(value: ModJson): ModJson
       beforeHook?(): void
@@ -2407,6 +2412,7 @@ export class FunctionSession {
         : stateScope
     // The callback belongs to this dispatch, even if its async guest branch outlives activation.
     const initializationAdmission = this.host.initializer?.captureAdmission()
+    let chainLength = 0
     const result = await this.dispatcher.dispatch(event, input, {
       ...this.endInvocationOptions(),
       ...(this.host.activity ? { retainHost: <T>(run: () => Promise<T>): Promise<T> =>
@@ -2445,6 +2451,7 @@ export class FunctionSession {
         }
       } : {}),
       validateChain: plugins => {
+        chainLength = plugins.length
         if ((event === "model.complete" || event === "model.fork") && operation?.modelProtocol) {
           const conflict = plugins.find(plugin => (plugin.modelProtocol ?? "result-v1") !== operation.modelProtocol)
           if (conflict) throw new ModFunctionError("MODS_MODEL_PROTOCOL_CONFLICT",
@@ -2822,6 +2829,10 @@ export class FunctionSession {
       }
     }
     presentation?.observeBeforePublication?.(result.value)
+    // Dispatcher indices below the validated chain length belong to actual handlers;
+    // the engine core has index === chainLength, regardless of any plugin's name.
+    presentation?.observeClassicParticipation?.(result.trace.some(entry =>
+      entry.index < chainLength && (entry.outcome === "returned" || entry.outcome === "caught")))
     operation?.assertLive?.()
     const mentionPublication = event === "prompt.mention" && presentation?.prepareMentionPublication
       ? presentation.prepareMentionPublication(result.value) : result.value
@@ -3468,6 +3479,29 @@ export class FunctionSession {
         throw new ModFunctionError("MODS_PROCESS_ARGUMENTS")
       const input: ModObject = { argv: args[0] }
       if (args[1] !== undefined) input.init = args[1]
+      const integrity = isModObject(args[1]) ? args[1].integrity : undefined
+      if (integrity !== undefined && integrity !== "native")
+        throw new ModFunctionError("MODS_PROCESS_ARGUMENTS")
+      const nativeIntegrity = integrity === "native"
+      if (nativeIntegrity) {
+        const init = { ...(args[1] as ModObject) }
+        delete init.integrity
+        input.init = init
+      }
+      const processCwd = nativeIntegrity ? this.host.cwd?.() ?? this.host.workspace : undefined
+      const expected = nativeIntegrity
+        ? await functionProcessRequest(input, processCwd!, false) : undefined
+      let coreCalls = 0
+      let authorizations = 0
+      let publications = 0
+      let originalResult: ModObject | undefined
+      let integrityFailed = false
+      const assertIntegrity = (valid: boolean) => {
+        if (!valid || integrityFailed) {
+          integrityFailed = true
+          throw new ModFunctionError("MODS_PROCESS_INTEGRITY", "MODS_PROCESS_INTEGRITY", true)
+        }
+      }
       const answer = await this.dispatch(
         method,
         input,
@@ -3477,12 +3511,15 @@ export class FunctionSession {
         {
           plugin,
           core: (request, signal) => {
+            if (nativeIntegrity) assertIntegrity(++coreCalls === 1)
             const run = () =>
               this.processHost.run(request, {
-                cwd: this.host.cwd?.() ?? this.host.workspace,
+                cwd: nativeIntegrity ? processCwd! : this.host.cwd?.() ?? this.host.workspace,
                 signal,
                 assertLive: () => this.assertLive(plugin),
                 authorize: async (finalRequest, approvalSignal) => {
+                  if (nativeIntegrity)
+                    assertIntegrity(++authorizations === 1 && isDeepStrictEqual(finalRequest, expected))
                   if (!this.host.authorizeProcess)
                     throw new ModFunctionError("MODS_PROCESS_UNAVAILABLE")
                   await this.host.authorizeProcess(plugin, finalRequest, approvalSignal, "process.run")
@@ -3490,7 +3527,12 @@ export class FunctionSession {
                   this.assertLive(plugin)
                 },
                 publish: async (value, publishSignal) => {
+                  if (nativeIntegrity) {
+                    assertIntegrity(authorizations === 1 && ++publications === 1)
+                    originalResult = structuredClone(value)
+                  }
                   const safe = await this.host.publish(value, publishSignal)
+                  if (nativeIntegrity) assertIntegrity(isDeepStrictEqual(safe, originalResult))
                   if (!isModObject(safe)) throw new ModFunctionError("MODS_PROCESS_RESULT")
                   return safe
                 }
@@ -3505,6 +3547,9 @@ export class FunctionSession {
       if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
       if (typeof answer.deny === "string")
         throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
+      if (nativeIntegrity)
+        assertIntegrity(coreCalls === 1 && authorizations === 1 && publications === 1 &&
+          originalResult !== undefined && isDeepStrictEqual(answer.value, originalResult))
       return answer.value
     }
     if (method === "clock.after" || method === "clock.every") {

@@ -13,7 +13,7 @@ import { compileProjectHarness } from "./project-harness"
 import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 import { readAuthoringProjectSource, readProjectSource } from "./project-source"
 import { inspectProjectSource } from "./project-doctor"
-import { testProjectSource } from "./project-contract"
+import { assertProjectContractPassed, testProjectSource } from "./project-contract"
 import type { ClawActionDescriptor } from "../../../shared/mods/claw-actions"
 import { compileFunctionPlugin } from "../v2/loader"
 import { readPluginManifest } from "../../plugins/manifest"
@@ -78,7 +78,7 @@ export async function compileProjectPlugin(directory: string, outputDirectory: s
     JSON.parse(bundle.files.find((file) => file.path === "devclaw.project-runtime.json")!.text)
   )
   const tests = await testProjectSource(bundle, manifest)
-  if (!tests.valid) throw Error("PROJECT_HARNESS_CONTRACT_FAILED")
+  assertProjectContractPassed(tests)
   const output = resolve(outputDirectory)
   await writeNewBundle(output, bundle)
   return {

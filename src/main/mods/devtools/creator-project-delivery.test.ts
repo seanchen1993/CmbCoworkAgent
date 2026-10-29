@@ -2,7 +2,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/pr
 import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { randomUUID } from "node:crypto"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import AdmZip from "adm-zip"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { PluginMetadata } from "../../types"
@@ -46,7 +46,7 @@ async function fixture(v2 = false) {
       return true
     }
   }
-  const sessions = new ProjectAuthoringSessions(async () => [])
+  let sessions = new ProjectAuthoringSessions(async () => [])
   sessions.configurePersistence(settings, join(root, "source"))
   let token = "first-incarnation"
   const scope: DevelopmentScope = {
@@ -245,6 +245,11 @@ async function fixture(v2 = false) {
     )
   return {
     root,
+    restart: () => {
+      sessions = new ProjectAuthoringSessions(async () => [])
+      sessions.configurePersistence(settings, join(root, "source"))
+      return { sessions, delivery: create() }
+    },
     delivery,
     sessions,
     scope,
@@ -289,6 +294,64 @@ async function fixture(v2 = false) {
 }
 
 describe("Creator checked project delivery", () => {
+  it("prepares exact persisted source after restart without restoring execution or approvals", async () => {
+    const f = await fixture()
+    const restored = f.restart()
+    const draft = restored.sessions.read(f.scope, f.draft.id)
+    expect(existsSync(draft.directory)).toBe(false)
+    expect(restored.sessions.developmentStatus(f.scope, draft.id)).toBeUndefined()
+    const prepared = await restored.delivery.prepare(f.scope.threadId, f.scope.workspace, {
+      requestId: f.request.id, digest: f.request.digest, name: "restored-source", version: "1.2.3"
+    })
+    expect(prepared).toMatchObject({ phase: "needs-confirmation", sourceDigest: f.request.digest })
+    for (const file of draft.source.files)
+      expect(await readFile(join(draft.directory, file.path), "utf8")).toBe(file.text)
+    expect(restored.sessions.developmentStatus(f.scope, draft.id)).toBeUndefined()
+    expect(f.installed).not.toHaveBeenCalled()
+  })
+
+  it("rejects a changed persisted-source directory without overwriting its existing bytes", async () => {
+    const f = await fixture()
+    const restored = f.restart()
+    const draft = restored.sessions.read(f.scope, f.draft.id)
+    await mkdir(draft.directory, { recursive: true })
+    for (const file of draft.source.files) {
+      await mkdir(dirname(join(draft.directory, file.path)), { recursive: true })
+      await writeFile(join(draft.directory, file.path), file.text)
+    }
+    await writeFile(join(draft.directory, "README.md"), "unexpected existing source")
+    await expect(restored.delivery.prepare(f.scope.threadId, f.scope.workspace, {
+      requestId: f.request.id, digest: f.request.digest, name: "changed-source", version: "1.2.3"
+    })).rejects.toThrow("PROJECT_SOURCE_CHANGED")
+    expect(await readFile(join(draft.directory, "README.md"), "utf8"))
+      .toBe("unexpected existing source")
+    expect(f.installed).not.toHaveBeenCalled()
+  })
+
+  it("rejects revoked scope during persistent-source recovery before creating a delivery", async () => {
+    const f = await fixture()
+    const restored = f.restart()
+    const preparing = restored.delivery.prepare(f.scope.threadId, f.scope.workspace, {
+      requestId: f.request.id, digest: f.request.digest, name: "revoked-source", version: "1.2.3"
+    })
+    queueMicrotask(f.changeScope)
+    await expect(preparing).rejects.toThrow("DELIVERY_SCOPE_CHANGED")
+    expect([...f.values.keys()].some((key) => key.startsWith("creator-project-delivery-v1:")))
+      .toBe(false)
+    expect(f.installed).not.toHaveBeenCalled()
+  })
+
+  it.each(["revision", "digest"] as const)("rejects stale %s before materializing source", async (field) => {
+    const f = await fixture()
+    const restored = f.restart()
+    const draft = restored.sessions.read(f.scope, f.draft.id)
+    await expect(restored.sessions.materializeForDelivery(f.scope, draft.id,
+      field === "revision" ? draft.revision + 1 : draft.revision,
+      field === "digest" ? "0".repeat(64) : draft.source.digest, () => {}))
+      .rejects.toThrow("PROJECT_DELIVERY_CANDIDATE_CHANGED")
+    expect(existsSync(draft.directory)).toBe(false)
+  })
+
   it("does not deliver new source B under an old bound native trial request A", async () => {
     const f = await fixture()
     const project = await f.bindNativeTrial()

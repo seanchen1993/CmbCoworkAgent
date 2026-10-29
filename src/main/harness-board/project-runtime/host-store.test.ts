@@ -35,6 +35,45 @@ afterEach(() => {
 })
 
 describe("persistent host project state", () => {
+  it("keeps Unicode case matching before pagination and after reopening storage", () => {
+    const { store, root, path } = fixture()
+    for (let index = 0; index < 24; index++)
+      store.create({ ...hostProjectFixture(root), projectId: `ascii-${index}`, name: "Other" })
+    store.create({
+      ...hostProjectFixture(join(root, "Équipe")),
+      projectId: "unicode-project",
+      name: "École — ПЛАН — 需求"
+    })
+    for (const query of ["école", "équipe", "план", "需求"])
+      expect(store.listProjects(20, "", query).map((project) => project.projectId))
+        .toEqual(["unicode-project"])
+    const reopened = openStore(path)
+    expect(reopened.listProjects(20, "", "ÉCOLE").map((project) => project.projectId))
+      .toEqual(["unicode-project"])
+  })
+
+  it("searches project names and workspaces before pagination with literal special characters", () => {
+    const { store, root } = fixture()
+    for (let index = 0; index < 25; index++) store.create({
+      ...hostProjectFixture(join(root, `workspace-${index}`)),
+      projectId: `project-${String(index).padStart(2, "0")}`,
+      name: index === 24 ? "Old Report_%" : "Other report"
+    })
+    expect(store.listProjects(20)).toHaveLength(20)
+    expect(store.listProjects(20, "", "old report_%").map(project => project.projectId))
+      .toEqual(["project-24"])
+    expect(store.listProjects(20, "", "workspace-24").map(project => project.projectId))
+      .toEqual(["project-24"])
+    expect(store.listProjects(200, "", hostProjectFixture(root).packageId)).toHaveLength(26)
+    expect(store.listProjects(20, "", "' OR 1=1 --")).toEqual([])
+    const first = store.listProjects(20, "", "report")
+    const next = store.listProjects(20, first.at(-1)!.projectId, "report")
+    expect(first).toHaveLength(20)
+    expect(next).toHaveLength(5)
+    expect(new Set([...first, ...next].map(project => project.projectId)).size).toBe(25)
+    expect(() => store.listProjects(20, "", "x".repeat(513))).toThrow("SEARCH_QUERY_INVALID")
+  })
+
   it("freezes explicit stage instructions across reopen and idempotency without inheriting them", () => {
     const { store, path } = fixture()
     const project = store.get("local-docs")

@@ -154,33 +154,48 @@ export function parseProjectRuntimeManifestV1(value: unknown): ProjectRuntimeMan
           const stage = record(
             value,
             ["id", "title", "actionIds", "artifactIds", "checkIds", "approval"],
-            ["skill", "resultApproval", "executionMode"]
+            ["skill", "resultApproval", "executionMode", "inputArtifactIds"]
           )
           if (stage.approval !== "none" && stage.approval !== "human") return invalid()
           if (
             stage.resultApproval !== undefined &&
-            stage.resultApproval !== "none" && stage.resultApproval !== "human"
-          ) return invalid()
+            stage.resultApproval !== "none" &&
+            stage.resultApproval !== "human"
+          )
+            return invalid()
           if (raw.mode !== "host" && stage.resultApproval !== undefined) return invalid()
+          if (raw.mode !== "host" && stage.inputArtifactIds !== undefined) return invalid()
           if (stage.executionMode !== undefined) {
-            if (raw.mode !== "host" ||
-                !["normal", "workflow"].includes(String(stage.executionMode)) ||
-                typeof stage.executionMode !== "string" ||
-                (stage.executionMode === "workflow" && stage.skill === undefined)) return invalid()
+            if (
+              raw.mode !== "host" ||
+              !["normal", "workflow"].includes(String(stage.executionMode)) ||
+              typeof stage.executionMode !== "string" ||
+              (stage.executionMode === "workflow" && stage.skill === undefined)
+            )
+              return invalid()
           }
           return {
             id: id(stage.id),
             title: text(stage.title),
             actionIds: refs(stage.actionIds),
             artifactIds: refs(stage.artifactIds),
+            ...(stage.inputArtifactIds === undefined
+              ? {}
+              : {
+                  inputArtifactIds: refs(stage.inputArtifactIds)
+                }),
             checkIds: refs(stage.checkIds),
             approval: stage.approval,
-            ...(stage.executionMode === undefined ? {} : {
-              executionMode: stage.executionMode as "normal" | "workflow"
-            }),
-            ...(stage.resultApproval === undefined ? {} : {
-              resultApproval: stage.resultApproval as "none" | "human"
-            }),
+            ...(stage.executionMode === undefined
+              ? {}
+              : {
+                  executionMode: stage.executionMode as "normal" | "workflow"
+                }),
+            ...(stage.resultApproval === undefined
+              ? {}
+              : {
+                  resultApproval: stage.resultApproval as "none" | "human"
+                }),
             ...(stage.skill === undefined ? {} : { skill: relativePath(stage.skill) })
           }
         })
@@ -253,6 +268,7 @@ export function parseProjectRuntimeManifestV1(value: unknown): ProjectRuntimeMan
     }
     if (manifest.mode === "host" && !manifest.stages.length) return invalid()
     const has = (items: { id: string }[], ref: string) => items.some((item) => item.id === ref)
+    const precedingArtifacts = new Set<string>()
     for (const stage of manifest.stages) {
       if (
         stage.actionIds.some((ref) => !has(manifest.actions, ref)) ||
@@ -260,6 +276,7 @@ export function parseProjectRuntimeManifestV1(value: unknown): ProjectRuntimeMan
         stage.checkIds.some((ref) => !has(manifest.checks, ref))
       )
         return invalid()
+      if (stage.inputArtifactIds?.some((ref) => !precedingArtifacts.has(ref))) return invalid()
       if (
         stage.checkIds.some(
           (ref) =>
@@ -269,6 +286,7 @@ export function parseProjectRuntimeManifestV1(value: unknown): ProjectRuntimeMan
         )
       )
         return invalid()
+      for (const ref of stage.artifactIds) precedingArtifacts.add(ref)
     }
     for (const check of manifest.checks) {
       if (

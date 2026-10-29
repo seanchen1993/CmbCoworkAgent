@@ -8,6 +8,7 @@ import {
   type DevelopmentRuntime
 } from "./development-service"
 import { AuthoringCompileError } from "./authoring-compile-diagnostics"
+import { AuthoringValidationError } from "./authoring-validation-result"
 import { DevelopmentCandidateError } from "./development-candidate-diagnostics"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import {
@@ -512,6 +513,114 @@ describe("conversational authoring scope", () => {
     expect(prepare).toHaveBeenCalledTimes(1)
     expect(f.analyze).not.toHaveBeenCalled()
   })
+  it("rejects a concurrent submission before saving so the accepted trial stays current", async () => {
+    mockPreparedVersions()
+    const f = fixture()
+    await f.service.setMode("one", "workspace", "creator")
+    const source = createAuthoringTemplate({
+      id: "demo",
+      name: "Demo",
+      instruction: "Demo",
+      kind: "command"
+    })
+    let release!: () => void
+    let started!: () => void
+    const pending = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const entered = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    vi.mocked(f.runtime.preflightDevelopment!).mockImplementationOnce(
+      async (_scope, _trial, guard) => {
+        started()
+        await pending
+        guard()
+      }
+    )
+    const submit = (expectedRevision: number) =>
+      f.service.submit(
+        "one",
+        { id: "demo", name: "Demo", expectedRevision, files: source.files },
+        "turn",
+        new AbortController().signal,
+        () => {}
+      )
+    const first = submit(0)
+    // Keep the in-flight rejection observed even when the regression fails before release.
+    void first.catch(() => {})
+    await entered
+    try {
+      await expect(submit(1)).rejects.toThrow("DEVELOPMENT_BUSY")
+      expect(f.service.read("one", "demo").revision).toBe(1)
+    } finally {
+      release()
+    }
+    await expect(first).resolves.toMatchObject({ document: { revision: 1 } })
+    expect(f.runtime.stageDevelopment).toHaveBeenCalledTimes(1)
+    await expect(submit(1)).resolves.toMatchObject({ document: { revision: 2 } })
+    expect(f.runtime.stageDevelopment).toHaveBeenCalledTimes(2)
+    expect(f.runtime.approveDevelopment).not.toHaveBeenCalled()
+  })
+  it("does not save a draft when the submission is already cancelled", async () => {
+    const f = fixture()
+    await f.service.setMode("one", "workspace", "creator")
+    const source = createAuthoringTemplate({
+      id: "demo",
+      name: "Demo",
+      instruction: "Demo",
+      kind: "command"
+    })
+    const abort = new AbortController()
+    abort.abort(Error("CANCELLED_CREATOR_SUBMISSION"))
+    await expect(
+      f.service.submit(
+        "one",
+        { id: "demo", name: "Demo", expectedRevision: 0, files: source.files },
+        "turn",
+        abort.signal,
+        () => {}
+      )
+    ).rejects.toThrow("CANCELLED_CREATOR_SUBMISSION")
+    expect(f.service.status("one").drafts).toEqual([])
+    expect(f.runtime.preflightDevelopment).not.toHaveBeenCalled()
+    expect(f.runtime.stageDevelopment).not.toHaveBeenCalled()
+  })
+  it("does not write a third creator draft when two other preparations occupy capacity", async () => {
+    mockPreparedVersions()
+    const f = fixture()
+    for (const threadId of ["one", "two", "three"])
+      await f.service.setMode(threadId, "workspace", "creator")
+    const source = createAuthoringTemplate({
+      id: "demo",
+      name: "Demo",
+      instruction: "Demo",
+      kind: "command"
+    })
+    const input = { id: "demo", name: "Demo", expectedRevision: 0, files: source.files }
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    vi.mocked(f.runtime.preflightDevelopment!).mockImplementation(async (_scope, _trial, guard) => {
+      await pending
+      guard()
+    })
+    const submit = (threadId: string) =>
+      f.service.submit(threadId, input, "turn", new AbortController().signal, () => {})
+    const first = submit("one")
+    const second = submit("two")
+    try {
+      await expect(submit("three")).rejects.toThrow("DEVELOPMENT_BUSY")
+      expect(f.service.status("three").drafts).toEqual([])
+    } finally {
+      release()
+    }
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2)
+    expect(f.runtime.stageDevelopment).toHaveBeenCalledTimes(2)
+    await expect(submit("three")).resolves.toMatchObject({ document: { revision: 1 } })
+    expect(f.runtime.stageDevelopment).toHaveBeenCalledTimes(3)
+  })
   it("returns actionable preparation diagnostics with the saved draft and no trial success claim", async () => {
     const f = fixture()
     await f.service.setMode("one", "workspace", "creator")
@@ -544,6 +653,80 @@ describe("conversational authoring scope", () => {
     expect(f.analyze).not.toHaveBeenCalled()
     expect(f.runtime.stageDevelopment).not.toHaveBeenCalled()
   })
+  it("returns the exact failed preparation diagnostics without compiling or checking a second time", async () => {
+    const f = fixture()
+    await f.service.setMode("one", "workspace", "creator")
+    const source = createAuthoringTemplate({
+      id: "demo",
+      name: "Demo",
+      instruction: "Demo",
+      kind: "command"
+    })
+    const check = {
+      digest: source.digest,
+      valid: false,
+      runtimeVerified: false as const,
+      diagnostics: [
+        {
+          code: "2322",
+          message: "Type number is not assignable to string",
+          file: "mods/main.ts",
+          line: 2
+        }
+      ],
+      capabilities: []
+    }
+    const prepare = vi
+      .spyOn(f.service, "requestTrial")
+      .mockRejectedValue(new AuthoringValidationError(check))
+    const result = await f.service.submit(
+      "one",
+      { id: "demo", name: "Demo", expectedRevision: 0, files: source.files },
+      "turn",
+      new AbortController().signal,
+      () => {}
+    )
+    expect(result).toMatchObject({ document: { revision: 1 }, check })
+    expect(result.check.runtimeVerified).toBe(false)
+    expect(prepare).toHaveBeenCalledTimes(1)
+    expect(f.analyze).not.toHaveBeenCalled()
+    expect(f.runtime.stageDevelopment).not.toHaveBeenCalled()
+    expect(f.runtime.approveDevelopment).not.toHaveBeenCalled()
+  })
+  it.each(["digest", "revision"])(
+    "does not reuse failed diagnostics after their source %s changes",
+    async (change) => {
+      const f = fixture()
+      await f.service.setMode("one", "workspace", "creator")
+      const source = createAuthoringTemplate({
+        id: "demo",
+        name: "Demo",
+        instruction: "Demo",
+        kind: "command"
+      })
+      vi.spyOn(f.service, "requestTrial").mockImplementationOnce(async () => {
+        if (change === "revision") f.save(1)
+        throw new AuthoringValidationError({
+          digest: change === "digest" ? "f".repeat(64) : source.digest,
+          valid: false,
+          runtimeVerified: false,
+          diagnostics: [],
+          capabilities: []
+        })
+      })
+      await expect(
+        f.service.submit(
+          "one",
+          { id: "demo", name: "Demo", expectedRevision: 0, files: source.files },
+          "turn",
+          new AbortController().signal,
+          () => {}
+        )
+      ).rejects.toThrow("AUTHORING_VERSION_CHANGED")
+      expect(f.analyze).not.toHaveBeenCalled()
+      expect(f.runtime.stageDevelopment).not.toHaveBeenCalled()
+    }
+  )
   it("returns candidate failure before staging and accepts a corrected source in the same turn", async () => {
     mockPreparedVersions()
     const f = fixture()

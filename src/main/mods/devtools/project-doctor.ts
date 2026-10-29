@@ -17,7 +17,11 @@ import { PROJECT_ACTION_LOCK_PATH } from "../../../shared/project-runtime/action
 import { compileProjectHarness, HARNESS_SOURCE_PATH } from "./project-harness"
 import { parsePluginCapabilities } from "../../../shared/plugin-capabilities"
 import { assertProjectPackageExtensions } from "./project-package-extensions"
-import { compileNativeComposition, NATIVE_COMPOSITION_PATH } from "../../plugins/native-composition"
+import {
+  compileNativeComposition,
+  nativeCompositionLegacyGeneratedPretty,
+  NATIVE_COMPOSITION_PATH
+} from "../../plugins/native-composition"
 
 export interface ProjectDoctorReport {
   valid: boolean
@@ -112,7 +116,15 @@ export function inspectProjectSource(
         throw Error("NATIVE_COMPOSITION_MULTIPLE_SOURCES")
       const compiled = compileNativeComposition(JSON.parse(get(NATIVE_COMPOSITION_PATH)!), {
         files: bundle.files.map((file) => ({ path: file.path, bytes: Buffer.from(file.text) })),
-        actionCatalog: availableActions
+        actionCatalog: availableActions,
+        legacyGeneratedPretty: nativeCompositionLegacyGeneratedPretty(get(PROJECT_ACTION_LOCK_PATH)),
+        // Reproduce old, already locked all-preceding projections without silently upgrading them.
+        // Source, generated Skills, runtime, action lock and composition lock still compare byte-for-byte.
+        legacyInputArtifactStages: new Set(
+          manifest.stages
+            .filter((stage) => stage.inputArtifactIds === undefined)
+            .map((stage) => stage.id)
+        )
       })
       if (compiled.files.some((file) => get(file.path) !== file.bytes.toString("utf8")))
         issue(

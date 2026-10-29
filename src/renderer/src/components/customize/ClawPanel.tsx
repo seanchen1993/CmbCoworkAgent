@@ -752,7 +752,7 @@ function ClawSettings({
                     hasUsableClawComponents(item, view.usageContext ?? "chat")
                   ) && (
                     <p className="text-sm text-muted-foreground">
-                      当前场景没有适用功能。可到“灵件与使用设置”管理插件，或调整下方聊天设置。
+                      暂无可用功能。请到“插件”启用，或调整下方搭配。
                     </p>
                   )}
                   {[

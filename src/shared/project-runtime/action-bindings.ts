@@ -20,6 +20,8 @@ export type ProjectActionBinding = ClawActionBinding & {
   ref: ClawActionIdentity
   input: ModObject
   config: ModObject
+  /** Public project userConfig keys selected by the author, never their values. */
+  configurationKeys?: string[]
   inputFrom?:
     | { kind: "artifact"; artifactId: string; pointer: string; format?: "json" | "text" }
     | {
@@ -54,6 +56,21 @@ function id(value: unknown): string {
     throw Error("PROJECT_ACTION_ID_INVALID")
   return value
 }
+export function parseProjectCheckConfigurationKeys(value: unknown): string[] {
+  if (
+    !Array.isArray(value) ||
+    !value.length ||
+    value.length > 16 ||
+    value.some((key) =>
+      typeof key !== "string" ||
+      !/^[a-zA-Z][\w.-]{0,79}$/.test(key) ||
+      ["constructor", "prototype", "__proto__"].includes(key)
+    ) ||
+    new Set(value).size !== value.length
+  )
+    throw Error("PROJECT_CHECK_CONFIGURATION_KEYS_INVALID")
+  return [...value] as string[]
+}
 /** Validate only the target so independent input/config size budgets remain unchanged. */
 export function projectActionTarget(value: { command?: unknown; platform?: unknown }): ClawActionBinding {
   return parseClawActionBinding({
@@ -76,7 +93,7 @@ export function parseProjectActionLock(value: unknown): ProjectActionLock {
     const item = record(
       value,
       ["id", "ref", "input", "inputSchema", "outputSchema"],
-      ["command", "platform", "config", "configSchema", "inputFrom"]
+      ["command", "platform", "config", "configSchema", "inputFrom", "configurationKeys"]
     )
     record(item.ref, ["pluginId", "plugin", "digest", "actionId"])
     const target = projectActionTarget({ command: item.command, platform: item.platform })
@@ -124,6 +141,9 @@ export function parseProjectActionLock(value: unknown): ProjectActionLock {
       ...target,
       input: clawActionObject(item.input),
       config: clawActionObject(item.config ?? {}),
+      ...(item.configurationKeys === undefined ? {} : {
+        configurationKeys: parseProjectCheckConfigurationKeys(item.configurationKeys)
+      }),
       ...(inputFrom ? { inputFrom } : {}),
       inputSchema: clawActionObject(item.inputSchema),
       configSchema: item.configSchema == null ? null : clawActionObject(item.configSchema),

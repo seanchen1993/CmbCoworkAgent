@@ -74,6 +74,11 @@ afterEach(async () => {
 })
 async function fixture() {
   const root = (state.root = mkdtempSync(join(tmpdir(), "composition-native-config-")))
+  let closing = false
+  const pendingCalls = new Set<Promise<unknown>>()
+  const heldReleases = new Set<() => void>()
+  const runIds = new Set<string>()
+  const guestDrains: Promise<void>[] = []
   cleanup.push(() => rmSync(root, { recursive: true, force: true }))
   state.workspace = join(root, "parent")
   state.incarnation = "original"
@@ -172,6 +177,8 @@ async function fixture() {
     },
     () => {
       const guests: FunctionGuestRuntime[] = []
+      const drained = Promise.withResolvers<void>()
+      guestDrains.push(drained.promise)
       return {
         async load(code, options) {
           await state.beforeProbe?.()
@@ -181,14 +188,22 @@ async function fixture() {
         },
         stop() {
           for (const guest of guests) void guest.dispose()
+          drained.resolve()
         },
         async stopAndDrain() {
-          await Promise.all(guests.map((guest) => guest.dispose()))
+          try {
+            await Promise.all(guests.map((guest) => guest.dispose()))
+          } finally {
+            drained.resolve()
+          }
         }
       }
     }
   )
-  cleanup.push(() => manager.close())
+  cleanup.push(async () => {
+    manager.close()
+    await Promise.all(guestDrains)
+  })
   setProjectRuntimeFunctions(manager, (path) => core.workspaceKey(path), {
     settingsStamp: (workspace) =>
       JSON.stringify(
@@ -237,6 +252,7 @@ async function fixture() {
   let event = { sender, senderFrame: sender.mainFrame } as unknown as IpcMainInvokeEvent
   const owner = { isDestroyed: () => false, webContents: sender } as unknown as BrowserWindow
   let closeComposition: (() => void) | undefined
+  let waitForComposition: ((runId: string) => Promise<CompositionRun>) | undefined
   cleanup.push(() => closeComposition?.())
   const register = () => {
     closeComposition?.()
@@ -248,6 +264,7 @@ async function fixture() {
       } as unknown as IpcMain,
       {
         trusted: (input) => {
+          if (closing) throw Error("TEST_FIXTURE_CLOSED")
           if (input.sender !== event.sender || input.senderFrame !== sender.mainFrame)
             throw Error("UNTRUSTED_NATIVE_FRAME")
           return owner
@@ -258,10 +275,18 @@ async function fixture() {
       }
     )
     closeComposition = () => composition().close()
+    waitForComposition = (runId) => composition().waitForSettlement(runId)
   }
   register()
-  const call = async <T>(method: string, input: unknown) =>
-    handlers.get(method)!(event, input) as Promise<T>
+  const call = <T>(method: string, input: unknown): Promise<T> => {
+    const pending = Promise.resolve().then(() => {
+      if (closing) throw Error("TEST_FIXTURE_CLOSED")
+      return handlers.get(method)!(event, input) as Promise<T>
+    })
+    pendingCalls.add(pending)
+    void pending.finally(() => pendingCalls.delete(pending)).catch(() => {})
+    return pending
+  }
   const scope = {
     projectId: "parent",
     threadId: "native-parent-chat",
@@ -287,11 +312,13 @@ async function fixture() {
       catalogRevision: "locked-catalog",
       definition
     })
-    return call<CompositionRun>("project-composition:prepare", {
+    const run = await call<CompositionRun>("project-composition:prepare", {
       scope,
       previewId: preview.id,
       requestId: "native-two-phase"
     })
+    runIds.add(run.id)
+    return run
   }
   const key = (run: CompositionRun, unitId = "first") =>
     compositionUnitConfigurationKey({ scope, runId: run.id, unitId, expectedVersion: run.version })
@@ -321,6 +348,15 @@ async function fixture() {
       compiledDigest: current.source!.digest
     })
   }
+  // Revoke new work, release every test-owned barrier, and wait for actual IPC/engine settlement
+  // before closing SQLite/Guests or removing their files, including after a Vitest timeout.
+  cleanup.push(async () => {
+    closing = true
+    for (const release of heldReleases) release()
+    state.beforeProbe = undefined
+    while (pendingCalls.size) await Promise.allSettled([...pendingCalls])
+    await Promise.allSettled([...runIds].map((runId) => waitForComposition!(runId)))
+  })
   return {
     root,
     source,
@@ -342,6 +378,7 @@ async function fixture() {
     save,
     approve,
     call,
+    releaseOnCleanup: (release: () => void) => heldReleases.add(release),
     register,
     currentEvent: () => event,
     replaceFrame() {
@@ -356,19 +393,31 @@ it("keeps native business-context endpoints bound to the actual unit, version an
   const run = await f.prepare()
   const request = { scope: f.scope, runId: run.id, unitId: "first", expectedVersion: run.version }
   expect(await f.call("project-composition:readUnitContext", request)).toEqual({
-    supported: false, required: false, candidates: [], selected: []
+    supported: false,
+    required: false,
+    candidates: [],
+    selected: []
   })
-  await expect(f.call("project-composition:readUnitContext", { ...request, sourceRoot: f.source }))
-    .rejects.toThrow("COMPOSITION_SCOPE_INVALID")
-  await expect(f.call("project-composition:readUnitContext", { ...request, unitId: "unknown" }))
-    .rejects.toThrow("COMPOSITION_CONFIGURATION_CHANGED")
-  await expect(f.call("project-composition:readUnitContext", { ...request, expectedVersion: run.version + 1 }))
-    .rejects.toThrow("COMPOSITION_VERSION_CONFLICT")
-  await expect(f.call("project-composition:saveUnitContext", {
-    ...request, deployUnitIds: ["UNDECLARED"], contextFingerprint: "a".repeat(64)
-  })).rejects.toThrow("COMPOSITION_UNIT_CONTEXT_UNSUPPORTED")
-  expect((await f.call<CompositionRun>("project-composition:read", { scope: f.scope, runId: run.id })).version)
-    .toBe(run.version)
+  await expect(
+    f.call("project-composition:readUnitContext", { ...request, sourceRoot: f.source })
+  ).rejects.toThrow("COMPOSITION_SCOPE_INVALID")
+  await expect(
+    f.call("project-composition:readUnitContext", { ...request, unitId: "unknown" })
+  ).rejects.toThrow("COMPOSITION_CONFIGURATION_CHANGED")
+  await expect(
+    f.call("project-composition:readUnitContext", { ...request, expectedVersion: run.version + 1 })
+  ).rejects.toThrow("COMPOSITION_VERSION_CONFLICT")
+  await expect(
+    f.call("project-composition:saveUnitContext", {
+      ...request,
+      deployUnitIds: ["UNDECLARED"],
+      contextFingerprint: "a".repeat(64)
+    })
+  ).rejects.toThrow("COMPOSITION_UNIT_CONTEXT_UNSUPPORTED")
+  expect(
+    (await f.call<CompositionRun>("project-composition:read", { scope: f.scope, runId: run.id }))
+      .version
+  ).toBe(run.version)
   expect(f.execute).not.toHaveBeenCalled()
 })
 
@@ -457,7 +506,10 @@ it("rejects parent/other-unit injection and late native chooser results after fr
   const held = new Promise<void>((resolve) => {
     release = resolve
   })
+  f.releaseOnCleanup(release)
+  const chosen = Promise.withResolvers<void>()
   state.choose = async () => {
+    chosen.resolve()
     await held
     return { canceled: false, filePaths: ["C:/late"] }
   }
@@ -470,10 +522,16 @@ it("rejects parent/other-unit injection and late native chooser results after fr
     key: "knowledgeRoot"
   })
   const rejected = expect(pending).rejects.toThrow(/FRAME|CHANGED/)
-  await new Promise((resolve) => setTimeout(resolve, 20))
-  f.sender.mainFrame = {}
-  release()
-  await rejected
+  void rejected.catch(() => {})
+  try {
+    await chosen.promise
+    f.sender.mainFrame = {}
+    release()
+    await rejected
+  } finally {
+    release()
+    await Promise.allSettled([pending, rejected])
+  }
   expect(f.execute).not.toHaveBeenCalled()
 })
 
@@ -542,18 +600,25 @@ it("rejects source mutation after the real path chooser and owner changes during
   const entry = new Promise<void>((resolve) => {
     entered = resolve
   })
+  f.releaseOnCleanup(release)
   state.beforeProbe = async () => {
     entered()
     await barrier
   }
   const approval = f.approve(key)
   const rejected = expect(approval).rejects.toThrow(/CONTEXT_CHANGED/)
-  await entry
-  state.incarnation = "replacement-parent"
-  release()
-  await rejected
-  state.beforeProbe = undefined
-  state.incarnation = "original"
+  void rejected.catch(() => {})
+  try {
+    await entry
+    state.incarnation = "replacement-parent"
+    release()
+    await rejected
+  } finally {
+    release()
+    await Promise.allSettled([approval, rejected])
+    state.beforeProbe = undefined
+    state.incarnation = "original"
+  }
   expect((await f.review(key)).source?.state).toBe("needs-approval")
   const bytes = readFileSync(join(f.retained.root, "mods/main.ts"), "utf8")
   state.choose = async () => {
@@ -594,6 +659,7 @@ it("rechecks every unit's actual configuration revision before the final start C
   const barrier = new Promise<void>((resolve) => {
     release = resolve
   })
+  f.releaseOnCleanup(release)
   const read = vi.spyOn(f.manager, "runtimeSourceReview").mockImplementation(async (input) => {
     const value = await original(input)
     if (input.scope.projectId === `composition:${run.id}:second`) {
@@ -608,11 +674,17 @@ it("rechecks every unit's actual configuration revision before the final start C
     expectedVersion: run.version
   })
   const rejected = expect(start).rejects.toThrow("COMPOSITION_CONFIGURATION_CHANGED")
-  await entry
-  await f.save(first, await f.config(first), "audience", "changed-during-final-check")
-  release()
-  await rejected
-  read.mockRestore()
+  void rejected.catch(() => {})
+  try {
+    await entry
+    await f.save(first, await f.config(first), "audience", "changed-during-final-check")
+    release()
+    await rejected
+  } finally {
+    release()
+    await Promise.allSettled([start, rejected])
+    read.mockRestore()
+  }
   const pending = await f.call<CompositionRun>("project-composition:read", {
     scope: f.scope,
     runId: run.id

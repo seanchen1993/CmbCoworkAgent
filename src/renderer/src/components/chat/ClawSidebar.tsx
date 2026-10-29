@@ -21,6 +21,7 @@ import { BuiltinRunOverview } from "./BuiltinRunOverview"
 import type { ModCommandDescriptor } from "../../../../shared/mods/types"
 import { chatClawEffectiveView } from "@/lib/chat-claw-effective-view"
 import { ModsUsageSettingsEntry } from "../customize/ModsUsageSettingsEntry"
+import { ClawRecoveryApproval } from "./ClawRecoveryApproval"
 
 export function ClawSidebar({
   threadId,
@@ -243,6 +244,10 @@ export function ClawSidebar({
           <p className="text-xs leading-6 text-muted-foreground">
             这里用于手动调整功能和预设。日常使用可以直接在聊天中描述需求。
           </p>
+          {binding && recovery.open && recovery.scope === recoveryScope && (
+            <ClawRecoveryApproval threadId={threadId} binding={binding} disabled={disabled}
+              onReload={() => flow.load()} />
+          )}
           <details className="rounded-xl border p-4">
             <summary className="cursor-pointer text-sm font-medium">高级：为下一条消息使用预设任务</summary>
             <div className="mt-3">
@@ -269,7 +274,7 @@ export function ClawSidebar({
               <div role="alert" className="space-y-1 text-xs text-destructive">
                 <p>
                   {effective?.state === "disabled"
-                    ? "灵件功能已关闭。点击上方‘灵件与使用设置’，核对当前聊天后明确开启，无需进入创造者模式。"
+                    ? "功能已关闭，请点击上方“插件”启用。"
                     : "这段聊天的组合暂不可用，请在‘管理助手组合’中核对。"}
                 </p>
                 {effective?.issues.map((issue) => <p key={issue}>{issue}</p>)}

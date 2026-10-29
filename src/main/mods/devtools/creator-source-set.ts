@@ -103,15 +103,17 @@ export class CreatorSourceSets {
   ) {
     const context = this.deps.context(threadId)
     context.assertCurrent()
-    if (
-      context.scope.workspace !== workspace ||
-      this.busy.has(threadId) ||
-      this.deps.occupied(threadId)
-    )
-      throw Error("SOURCE_SET_BUSY_OR_SCOPE_CHANGED")
+    if (context.scope.workspace !== workspace) throw Error("SOURCE_SET_SCOPE_CHANGED")
+    // Reserved for admission only: no work, persistence or installation has started.
+    if (this.busy.has(threadId) || this.deps.occupied(threadId)) throw Error("SOURCE_SET_BUSY")
     this.busy.add(threadId)
     try {
       return await work(context)
+    } catch (error) {
+      // A nested service must never make a possibly effected operation look safe to retry.
+      if (error instanceof Error && error.message === "SOURCE_SET_BUSY")
+        throw Error("SOURCE_SET_OPERATION_UNCONFIRMED")
+      throw error
     } finally {
       this.busy.delete(threadId)
     }

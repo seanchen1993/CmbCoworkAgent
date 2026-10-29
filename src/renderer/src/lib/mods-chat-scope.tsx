@@ -113,7 +113,7 @@ export function useModsChatState(
   [workspace, snapshot, identity, key])
   const enabled = Boolean(workspace?.trim() && current && snapshot?.enabled)
   const ready = Boolean(workspace?.trim() && current && typeof snapshot?.enabled === "boolean")
-  const error = !workspace?.trim() ? "无法确认当前聊天的工作区，请重新读取聊天信息。"
+  const error = !workspace?.trim() ? "请先选择工作目录，再开始对话或创作。"
     : current ? snapshot?.error : undefined
   const cache = current ? snapshot?.presentationCache : null
   // A token, scroll indicator or composer update must not broadcast unchanged display

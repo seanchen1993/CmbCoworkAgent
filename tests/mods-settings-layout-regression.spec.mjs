@@ -48,7 +48,7 @@ const bundle = await build({
           resolveDir: root,
           contents:
             a.path === "./ModsPanel"
-              ? `import React from "react";export const ModsPanel=({creatorMode})=>React.createElement("p",null,creatorMode?"creator-tools":"installed-management")`
+              ? `import React from "react";export const ModsPanel=({onManageSources})=>React.createElement("section",null,React.createElement("p",null,"installed-management"),React.createElement("button",{onClick:onManageSources},"导入与发布"))`
               : `export const ${a.path.slice(2)}=()=>null`,
           loader: "js"
         }))
@@ -164,7 +164,7 @@ try {
       }
       const advanced = page.getByRole("button", { name: "基础功能", exact: true })
       if ((await advanced.getAttribute("aria-expanded")) === "false") await advanced.click()
-      await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
+      await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "插件", exact: true }).click()
       await page.getByText("installed-management", { exact: true }).waitFor()
       assert.equal(await page.getByText("creator-tools", { exact: true }).count(), 0)
       if (tab === "claw") {

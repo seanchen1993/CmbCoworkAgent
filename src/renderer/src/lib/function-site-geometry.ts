@@ -1,6 +1,8 @@
 export interface FunctionSiteGeometry {
   height: number
   width: number
+  /** Allocated width, including display:contents slots whose own box is zero. */
+  layoutWidth: number
 }
 
 interface GeometryBatch {
@@ -12,6 +14,12 @@ interface GeometryBatch {
 }
 
 const batches = new WeakMap<Document, GeometryBatch>()
+
+/** Bubble width can shrink to its skeleton; the virtual row owns the stable allocation. */
+export function functionSiteLayoutContainer(node: HTMLElement): HTMLElement | null {
+  return node.closest<HTMLElement>("[data-chat-message-row]") ??
+    (node.clientWidth ? node : node.parentElement)
+}
 
 /** Measure mounted drawings together, outside React's interleaved deletion/layout phase. */
 export function observeFunctionSiteGeometry(
@@ -36,7 +44,8 @@ export function observeFunctionSiteGeometry(
     const bounds = range.getBoundingClientRect()
     range.detach()
     if (Number.isFinite(bounds.height) && Number.isFinite(bounds.width))
-      return { height: bounds.height, width: bounds.width }
+      return { height: bounds.height, width: bounds.width,
+        layoutWidth: functionSiteLayoutContainer(node)?.clientWidth || bounds.width }
     return undefined
   }
   const sample = {

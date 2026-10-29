@@ -28,7 +28,7 @@ import {
   PanelRightOpen
 } from "lucide-react"
 import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
-import { SettingsOverlay } from "@/components/customize/SettingsOverlay"
+import { SettingsLoadingShell, SettingsOverlay } from "@/components/customize/SettingsOverlay"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import { TabbedPanel } from "@/components/tabs"
 import { RightPanel } from "@/components/panels/RightPanel"
@@ -428,6 +428,9 @@ function App(): React.JSX.Element {
   const renderRoutePending = renderedRoute !== selectedRenderRoute
   const renderedMainView = renderedRoute.mainView
   const renderedThreadId = renderedRoute.threadId
+  const platformWorkspaceReady = useAppStore((state) => Boolean(
+    state.threads.find((thread) => thread.thread_id === renderedThreadId)?.metadata?.workspacePath
+  ))
   const renderedHarnessSessionThreadId = renderedRoute.harnessSessionThreadId
   const isRightPanelFullscreen = previewFullscreen || browserFullscreen
   const showRightResizeHandle = !previewFullscreen
@@ -1376,7 +1379,7 @@ function App(): React.JSX.Element {
                               选择或创建一个任务开始
                             </div>
                           )}
-                          {renderedMainView === "thread" && renderedThreadId && (
+                          {renderedMainView === "thread" && renderedThreadId && platformWorkspaceReady && (
                             <Suspense fallback={null}>
                               <PlatformWorkspace
                                 threadId={renderedThreadId}
@@ -1669,11 +1672,7 @@ function App(): React.JSX.Element {
           {showCustomizeView && (
             <SettingsOverlay onClose={() => setShowCustomizeView(false)}>
               <Suspense
-                fallback={
-                  <div className="flex flex-1 items-center justify-center">
-                    <Loader2 className="size-6 animate-spin text-muted-foreground" />
-                  </div>
-                }
+                fallback={<SettingsLoadingShell onClose={() => setShowCustomizeView(false)} />}
               >
                 <CustomizeView />
               </Suspense>

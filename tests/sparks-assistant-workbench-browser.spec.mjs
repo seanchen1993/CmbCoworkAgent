@@ -60,6 +60,7 @@ createRoot(document.getElementById('root')).render(<CustomizeView/>);`
               "./SparksTour",
               "./ModsPanel",
               "./ConfigurationTargetPicker",
+              "./SettingsOverlay",
               "./settings-return-focus"
             ].includes(a.path)
           )
@@ -238,7 +239,7 @@ try {
     await page
       .getByRole("navigation")
       .filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) })
-      .getByRole("button", { name: "灵件与使用设置", exact: true })
+      .getByRole("button", { name: "插件", exact: true })
       .click()
     await page.getByText("聊天保存的灵件", { exact: true }).waitFor()
     assert.equal(

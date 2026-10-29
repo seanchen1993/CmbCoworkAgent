@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import type { CommunityExample } from "../../../../shared/mods/community-examples"
 import { Button } from "@/components/ui/button"
 import { SparksOperationError } from "./SparksOperationError"
+import { developmentCapabilityLabel } from "./development-capability-label"
 import {
   Dialog,
   DialogContent,
@@ -54,7 +55,6 @@ export function OfficialSparksExamples({
   const [review, setReview] = useState<{ example: CommunityExample; plan: ExampleUsePlan } | null>(
     null
   )
-  const [consent, setConsent] = useState(false)
   const [used, setUsed] = useState<CommunityExample | null>(null)
   const alive = useRef(false)
   const running = useRef(false)
@@ -67,7 +67,6 @@ export function OfficialSparksExamples({
   useEffect(() => {
     if (!active) {
       setReview(null)
-      setConsent(false)
     }
   }, [active])
   const scope = JSON.stringify([threadId, workspaceHint])
@@ -152,7 +151,6 @@ export function OfficialSparksExamples({
       assertCurrent()
       setUsed(null)
       setReview(null)
-      setConsent(false)
       setProgress(`正在安装${example.title}…`)
       const result = await window.api.mods.communityExamples.install({ exampleId: example.id })
       onInstalled?.()
@@ -161,7 +159,7 @@ export function OfficialSparksExamples({
       await load()
       assertCurrent()
       if (!threadId || !workspaceHint) {
-        setNotice(`${example.title}已安装。为聊天选择项目目录后，点击“用于当前聊天”即可继续。`)
+        setNotice(`${example.title}已添加。在上方选择有项目目录的聊天后，即可用于聊天。`)
         return
       }
       setProgress("正在读取能力与当前助手组合…")
@@ -184,7 +182,7 @@ export function OfficialSparksExamples({
     })
   const confirm = () =>
     run(async () => {
-      if (!review || !consent) return
+      if (!review) return
       const selected = review
       // Close the approval form after submission. A failure requires a fresh preview, never a blind retry.
       setReview(null)
@@ -196,21 +194,13 @@ export function OfficialSparksExamples({
       await load()
       assertCurrent()
       setUsed(selected.example)
-      setNotice(`${selected.example.title}已应用到当前聊天。${selected.example.usage}`)
+      setNotice(`${selected.example.title}已用于当前聊天。`)
     })
   return (
     <section aria-label="官方灵件" className="space-y-4">
       <div>
         <h2 className="font-semibold">挑一个小帮手</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          本工程与 Anthropic 官方示例均已内置。选择后核对权限，再应用到当前聊天。
-        </p>
-        <p className="mt-2 text-sm text-muted-foreground">
-          添加仅安装文件；确认用于当前聊天后，按卡片中的操作触发并核对效果。部分示例需要打开扩展页面或选择行为实现。
-        </p>
-        <p className="mt-2 text-sm text-muted-foreground">
-          体验跨插件组合：先使用“任务能力提供方”，再使用“个人任务工作台”。两项都要在同一聊天核对并确认。
-        </p>
+        <p className="mt-1 text-sm text-muted-foreground">选择示例，确认权限后用于当前聊天。</p>
       </div>
       {loading && <p role="status">正在读取内置示例…</p>}
       <div className="grid gap-3 lg:grid-cols-3">
@@ -224,17 +214,15 @@ export function OfficialSparksExamples({
               <h3 className="font-medium">{example.title}</h3>
             </div>
             <p className="text-sm leading-relaxed">{example.description}</p>
-            <div className="rounded-md bg-muted/50 p-2 text-xs leading-relaxed">
-              <p className="font-medium">怎样触发与核对效果</p>
-              <p className="mt-1">{example.usage}</p>
-            </div>
-            {example.conflictNote && (
-              <p className="rounded-md bg-muted p-2 text-xs leading-relaxed">
-                {example.conflictNote}
-              </p>
-            )}
             <details className="text-xs text-muted-foreground">
               <summary className="cursor-pointer">使用方法与来源</summary>
+              <p className="mt-2">{example.usage}</p>
+              {example.conflictNote && <p className="mt-2">{example.conflictNote}</p>}
+              {example.id.startsWith("task-workbench-") && (
+                <p className="mt-2">
+                  组合使用时，先将“任务能力提供方”用于聊天，再添加“个人任务工作台”。两项分别确认权限。
+                </p>
+              )}
               {example.origin === "devclaw" ? (
                 <>
                   <p className="mt-2">来源：CMBDevClaw 本工程示例 · {example.version}</p>
@@ -262,26 +250,40 @@ export function OfficialSparksExamples({
             </details>
             <Button
               className="mt-auto"
-              disabled={busy || loading}
-              onClick={() => void start(example)}
+              disabled={
+                busy ||
+                loading ||
+                (usage[example.id] === "using" && !onReturnToChat) ||
+                (example.installation?.state === "installed" && (!threadId || !workspaceHint))
+              }
+              onClick={() => {
+                if (usage[example.id] === "using" && onReturnToChat) onReturnToChat()
+                else void start(example)
+              }}
             >
               {example.installation?.state === "conflict"
                 ? "核对安装冲突"
                 : usage[example.id] === "using"
-                  ? "正在使用"
+                  ? onReturnToChat
+                    ? "返回聊天使用"
+                    : "正在使用"
                   : usage[example.id] === "conflict"
                     ? "核对冲突后使用"
                     : example.installation?.state === "installed"
-                      ? "用于当前聊天"
+                      ? threadId && workspaceHint
+                        ? "用于当前聊天"
+                        : "已添加"
                       : threadId && workspaceHint
                         ? "添加并使用"
-                        : "先添加"}
+                        : "添加插件"}
             </Button>
           </article>
         ))}
       </div>
       {!threadId || !workspaceHint ? (
-        <p className="text-xs text-muted-foreground">可以先安装；使用时请为聊天选择项目目录。</p>
+        <p className="text-xs text-muted-foreground">
+          可以先添加；使用时请在上方选择有项目目录的聊天。
+        </p>
       ) : null}
       {progress && (
         <p role="status" className="text-sm">
@@ -293,10 +295,12 @@ export function OfficialSparksExamples({
           {notice}
         </p>
       )}
-      {used && onReturnToChat && (
-        <Button variant="outline" onClick={onReturnToChat}>
-          返回聊天使用{used.title}
-        </Button>
+      {used && (
+        <div className="space-y-3 rounded-lg border bg-muted/30 p-4 text-sm">
+          <p className="font-medium">接下来怎么用</p>
+          <p className="leading-relaxed">{used.usage}</p>
+          {onReturnToChat && <Button onClick={onReturnToChat}>返回聊天使用{used.title}</Button>}
+        </div>
       )}
       {error && (
         <div className="space-y-2 text-sm text-destructive">
@@ -320,11 +324,12 @@ export function OfficialSparksExamples({
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>在当前聊天使用{review?.example.title}</DialogTitle>
-            <DialogDescription>示例已安装。核对下面的变化后即可开始使用。</DialogDescription>
+            <DialogDescription>
+              确认即允许此版本在下方项目目录运行，并用于当前聊天。
+            </DialogDescription>
           </DialogHeader>
           {review && (
             <div className="space-y-3 text-sm">
-              <p>{review.example.description}</p>
               {review.plan.selection.removed.length > 0 && (
                 <p role="alert" className="rounded border border-amber-500/50 bg-amber-500/10 p-3">
                   两个示例会占用同一界面区域。确认后将从当前聊天组合移除 「
@@ -337,9 +342,15 @@ export function OfficialSparksExamples({
                   」 ，换成「{review.example.title}」。原插件保留安装，其他助手配置保留。
                 </p>
               )}
+              <p className="break-all">授权目录：{review.plan.snapshot.status.workspace}</p>
               <p>
-                能力授权对当前项目有效；助手组合的切换仅作用于当前聊天。示例可读取项目、
-                使用工具与界面，并调用已配置的模型；写文件和执行命令仍经过原有审批。
+                能力：
+                {review.plan.capabilities.slice(0, 3).map(developmentCapabilityLabel).join("、") ||
+                  "未声明额外能力"}
+                {review.plan.capabilities.length > 3 && ` 等 ${review.plan.capabilities.length} 项`}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                授权对同目录聊天有效；组合切换仅作用于当前聊天。文件、命令等操作仍按原规则审批，模型请求会产生实际用量。
               </p>
               {(!review.plan.snapshot.global || !review.plan.snapshot.status.enabled) && (
                 <p className="rounded bg-muted p-3">
@@ -353,28 +364,19 @@ export function OfficialSparksExamples({
                 </p>
               )}
               <details className="rounded border p-3 text-xs">
-                <summary className="cursor-pointer">完整能力、版本与项目</summary>
-                <p className="mt-2 break-all">项目：{review.plan.snapshot.status.workspace}</p>
+                <summary className="cursor-pointer">版本与授权详情</summary>
                 <p className="mt-2 break-all">版本：{review.plan.target.digest}</p>
-                <p className="mt-2 break-all">{review.plan.capabilities.join(" · ")}</p>
-                <p className="mt-2">模型请求会产生实际用量；此安装与应用过程不会发送模型请求。</p>
+                <p className="mt-2">能力完整范围：{review.plan.capabilities.join(" · ")}</p>
+                <p className="mt-2">此添加与应用过程不会发送模型请求。</p>
               </details>
-              <label className="flex items-start gap-2">
-                <input
-                  type="checkbox"
-                  checked={consent}
-                  onChange={(event) => setConsent(event.target.checked)}
-                />
-                我已核对能力与组合变化，允许使用这个版本
-              </label>
             </div>
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setReview(null)} disabled={busy}>
               暂不使用
             </Button>
-            <Button onClick={() => void confirm()} disabled={busy || !consent}>
-              确认并使用
+            <Button onClick={() => void confirm()} disabled={busy}>
+              允许并用于当前聊天
             </Button>
           </DialogFooter>
         </DialogContent>

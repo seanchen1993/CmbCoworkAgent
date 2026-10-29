@@ -3,6 +3,10 @@ import { projectRuntimeRecoveryMessage } from "./project-runtime-message"
 
 describe("native task recovery guidance", () => {
   it.each([
+    ["PROJECT_TEMPLATE_PLUGIN_LIMIT", "移除不再使用的插件"],
+    ["PROJECT_TEMPLATE_RESPONSE_LIMIT", "读取上限"],
+    ["HOST_PROJECT_NAVIGATION_CHANGED", "重新打开阶段会话"],
+    ["PROJECT_SEARCH_QUERY_INVALID", "缩短搜索条件"],
     ["project_check_input_limit", "检查尚未启动"],
     ["project_phase_preparation_unconfirmed", "核对前不会自动重跑或推进"],
     ["PROJECT_STAGE_DEBUG_ORIGINAL_BASELINE_REQUIRED", "回到原任务的阶段基线"],

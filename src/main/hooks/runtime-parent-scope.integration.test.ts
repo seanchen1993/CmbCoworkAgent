@@ -7,7 +7,9 @@ import { AIMessage } from "@langchain/core/messages"
 import type { PluginHookMetadata, PluginMetadata } from "../types"
 import type { RuntimePluginSourceBinding } from "../plugins/runtime-source-scope"
 
-const registry = vi.hoisted(() => ({ plugins: [] as PluginMetadata[], skills: [] as PluginHookMetadata[] }))
+const registry = vi.hoisted(() => ({
+  plugins: [] as PluginMetadata[], skills: [] as PluginHookMetadata[], diagnostic: false
+}))
 vi.mock("electron", () => ({ app: { getPath: () => tmpdir(), getName: () => "test", getVersion: () => "0" },
   BrowserWindow: { getAllWindows: () => [] }, dialog: {}, ipcMain: { handle: () => {} } }))
 vi.mock("../storage", async importOriginal => {
@@ -18,7 +20,7 @@ vi.mock("../storage", async importOriginal => {
     getEnabledPluginSkillSourceMetadata: () => [],
     getEnabledPluginHookMetadata: () => projectRuntimePluginSources(registry.plugins)
       .filter(plugin => plugin.enabled).flatMap(plugin => original.parsePluginHooks(plugin)),
-    getHookLoggingConfig: () => ({ diagnostic: false }), getUserInfo: () => undefined
+    getHookLoggingConfig: () => ({ diagnostic: registry.diagnostic }), getUserInfo: () => undefined
   }
 })
 vi.mock("../mods/manager", async original => ({
@@ -35,7 +37,9 @@ vi.mock("../services/subagent-session-capture", () => ({
 import { parsePluginHooks } from "../storage"
 import { issueRuntimePluginSourceToken, withRuntimePluginSource } from "../plugins/runtime-source-scope"
 import { readRuntimeRequiredHooks } from "../plugins/runtime-required-hooks"
-import { createHookScope, filterScopedHooks, resolveEnabledHooksForRun } from "./scope"
+import {
+  createHookScope, createInheritedHookScope, filterScopedHooks, resolveEnabledHooksForRun
+} from "./scope"
 import { partitionRequiredBusinessHooks } from "./required-business-checks"
 import { runHooks, type HookContext } from "./runner"
 import { fireSessionStartOnce, fireSessionEndAll } from "./session-lifecycle"
@@ -46,6 +50,7 @@ let root = ""
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "required-parent-scope-"))
   registry.plugins = []; registry.skills = []
+  registry.diagnostic = false
 })
 afterEach(async () => {
   await fireSessionEndAll(1000)
@@ -81,6 +86,7 @@ const context = (): HookContext => ({ sessionId: "native-stage", workspacePath: 
 
 it.each(["allow", "content-block", "missing", "crash", "expired", "package-allow", "package-block", "package-edit-block"])(
   "enforces retained required hooks before a real workflow child writes physical bytes (%s)", async scenario => {
+    registry.diagnostic = true
     const parent = plugin("native-parent"), workspace = join(root, "workspace")
     mkdirSync(workspace)
     const script = join(parent.path, "hooks", "guard.py")
@@ -120,13 +126,15 @@ it.each(["allow", "content-block", "missing", "crash", "expired", "package-allow
       : scenario === "content-block" ? "FORBIDDEN" : "approved bytes"
     let result: unknown
     const cleaned = vi.fn(async () => undefined)
+    const onHookResult = vi.fn()
+    const log = vi.spyOn(console, "log").mockImplementation(() => {})
     const run = withRuntimePluginSource(token, () => runWorkflowSubagent({
       parentThreadId: "native-stage", isRetryableApiError: () => false, cleanupThread: cleaned,
       createRuntime: async options => {
         expect(options.threadId).not.toBe("native-stage")
         const hookScope = createHookScope()
         const sandbox = new LocalSandbox({ rootDir: workspace, runId: options.threadId,
-          agentId: options.agentId, windowsSandbox: "none", hookScope,
+          agentId: options.agentId, windowsSandbox: "none", hookScope, onHookResult,
           hookResolver: (event, context) => resolveEnabledHooksForRun(workspace, event, context, hookScope) })
         return { stream: async () => (async function* () {
           if (scenario === "expired") live = false
@@ -150,8 +158,80 @@ it.each(["allow", "content-block", "missing", "crash", "expired", "package-allow
       expect(result).toHaveProperty("error")
       expect(JSON.stringify(result)).not.toContain("fixture-forbidden-value")
     }
+    const executed = scenario !== "missing" && scenario !== "expired"
+    const records = onHookResult.mock.calls.filter(call => call[0] === "PreToolUse")
+    const executionLogs = log.mock.calls.filter(call =>
+      typeof call[0] === "string" && call[0].startsWith("[Hooks] PreToolUse hook (command)"))
+    expect(records).toHaveLength(executed ? 1 : 0)
+    expect(executionLogs).toHaveLength(records.length)
+    if (executed) {
+      const checked = records[0][2]
+      const denied = scenario !== "allow" && scenario !== "package-allow"
+      expect(executionLogs[0][0]).toContain(`exit=${checked.exitCode}, blocked=${denied}`)
+      expect(checked.blocked || checked.decision === "block").toBe(denied)
+      expect(JSON.parse(checked.stdinPayload).tool_input.filePath).toBe(target)
+      expect(checked.cwd).toBe(parent.path)
+      expect(checked.durationMs).toBeGreaterThanOrEqual(0)
+    }
   }
 )
+
+it("keeps required checks on isolated child writes and a notification with restored persistent scope", async () => {
+  registry.diagnostic = true
+  const parent = plugin("workflow-parent"), workspace = join(root, "project")
+  const fileRoot = join(root, "isolated-worktree")
+  mkdirSync(workspace)
+  mkdirSync(fileRoot)
+  for (const file of ["hooks/hooks.json", "hooks/check-secrets.py", "hooks/secret_rules.py"])
+    writeFileSync(join(parent.path, file), readFileSync(resolve("resources/native-compositions/autobiz", file)))
+  const token = issueRuntimePluginSourceToken(binding(parent, {
+    mode: "host", workspace, requiredHooks: ["PreToolUse:0:0"]
+  }))
+  const parentScope = createHookScope()
+  parentScope.activateSkill("native-code", parent.id, join(parent.path, "skills/native-code/SKILL.md"))
+  parentScope.activatePersistentHooks(parsePluginHooks(parent))
+  const childScope = createInheritedHookScope(parentScope)
+  const onHookResult = vi.fn()
+  const child = new LocalSandbox({ rootDir: fileRoot, modWorkspace: workspace,
+    runId: "native-stage__wf_run_a1", agentId: "workflow-writer", windowsSandbox: "none",
+    hookScope: childScope, onHookResult,
+    hookResolver: (event, context) => resolveEnabledHooksForRun(workspace, event, context, childScope) })
+  await withRuntimePluginSource(token, async () => {
+    expect(await child.write(join(fileRoot, "allowed.properties"), "password=${APP_PASSWORD}"))
+      .not.toHaveProperty("error")
+    expect(await child.write(join(fileRoot, "blocked.properties"), "password=fixture-forbidden-value"))
+      .toHaveProperty("error")
+  })
+  expect(existsSync(join(fileRoot, "allowed.properties"))).toBe(true)
+  expect(existsSync(join(fileRoot, "blocked.properties"))).toBe(false)
+  expect(existsSync(join(workspace, "allowed.properties"))).toBe(false)
+
+  // A notification recreates per-turn activation state. Only exact persistent identities
+  // survive serialization; source authority still comes from the original host token.
+  const persisted = JSON.parse(JSON.stringify({ persistentHookKeys: parentScope.snapshot().persistentHookKeys }))
+  const restored = createHookScope({ initialPersistentHookKeys: persisted.persistentHookKeys })
+  expect(restored.activePluginIds.size).toBe(0)
+  expect(restored.activeSkillPaths.size).toBe(0)
+  expect(restored.persistentHookKeys.size).toBe(1)
+  const notification = new LocalSandbox({ rootDir: workspace, runId: "native-stage",
+    windowsSandbox: "none", hookScope: restored, onHookResult,
+    hookResolver: (event, context) => resolveEnabledHooksForRun(workspace, event, context, restored) })
+  expect(await withRuntimePluginSource(token, () =>
+    notification.write(join(workspace, "CODE_RESULT.json"), '{"status":"ready"}')))
+    .not.toHaveProperty("error")
+  const checks = onHookResult.mock.calls.filter(call => call[0] === "PreToolUse")
+  expect(checks).toHaveLength(3)
+  expect(checks.map(call => call[2].blocked)).toEqual([false, true, false])
+  expect(checks.every(call => call[1].hookSourceRoot === parent.path)).toBe(true)
+  expect(checks.every(call => call[2].cwd === parent.path)).toBe(true)
+  const payloads = checks.map(call => JSON.parse(call[2].stdinPayload))
+  expect(payloads.map(payload => payload.session_id))
+    .toEqual(["native-stage__wf_run_a1", "native-stage__wf_run_a1", "native-stage"])
+  expect(payloads.map(payload => payload.tool_input.filePath)).toEqual([
+    join(fileRoot, "allowed.properties"), join(fileRoot, "blocked.properties"),
+    join(workspace, "CODE_RESULT.json")
+  ])
+})
 
 it("observes authority once for the synchronous initial scope projection and again on the next call", () => {
   const parent = plugin()

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { mkdtempSync } from "node:fs"
+import { mkdirSync, mkdtempSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { basename, join, toNamespacedPath } from "node:path"
 import type { DevelopmentScope } from "../v2/development-session"
@@ -48,9 +48,11 @@ const identity = (scope: DevelopmentScope, id: string) =>
     .update(JSON.stringify([scope.threadId, scope.workspace, scope.incarnation, id]))
     .digest("hex")
 
-function freshTrialWorkspace(root: string): string {
+function freshTrialWorkspace(ownerRoot: string, trialRoot?: string): string {
+  const root = trialRoot ?? ownerRoot
   // Windows' native mkdtemp needs the extended prefix when its random suffix crosses
   // MAX_PATH. Keep that filesystem detail out of native project/SDK scope identities.
+  if (trialRoot !== undefined) mkdirSync(toNamespacedPath(root), { recursive: true })
   const created = mkdtempSync(toNamespacedPath(join(root, "trial-workspace-")))
   return join(root, basename(created))
 }
@@ -59,6 +61,8 @@ function freshTrialWorkspace(root: string): string {
 export class ProjectDevelopmentSessions {
   private entries = new Map<string, Entry>()
   private staging = new Set<string>()
+
+  constructor(private readonly trialRoot?: string) {}
 
   read(scope: DevelopmentScope, id: string): ProjectDevelopmentView | undefined {
     const entry = this.entries.get(identity(scope, id))
@@ -185,7 +189,7 @@ export class ProjectDevelopmentSessions {
     const workspace =
       options.retainedWorkspace ??
       (options.freshWorkspace
-        ? freshTrialWorkspace(entry.root)
+        ? freshTrialWorkspace(entry.root, this.trialRoot)
         : entry.current.workspace)
     guard()
     // A model save guard belongs to its tool turn. Retain only the actual preview lease guard.

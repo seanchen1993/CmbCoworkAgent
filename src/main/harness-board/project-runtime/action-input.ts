@@ -7,6 +7,7 @@ import { encodeModJson } from "../../../shared/mods/validation"
 import {
   PROJECT_ACTION_LOCK_MAX_BYTES,
   PROJECT_ACTION_LOCK_PATH,
+  parseProjectCheckConfigurationKeys,
   parseProjectActionLock,
   projectActionTarget,
   type ProjectActionBinding,
@@ -22,6 +23,7 @@ import {
   PROJECT_ARTIFACT_REFERENCE_TOTAL_BYTES
 } from "../../../shared/project-runtime/artifact-reference"
 import { captureProjectArtifactReference } from "./artifact-reference"
+import type { ModObject } from "../../../shared/mods/types"
 
 function stable(value: unknown): string {
   const sort = (value: unknown): unknown =>
@@ -57,7 +59,8 @@ export function createProjectActionBinding(
   action: ClawActionDescriptor,
   input: ProjectActionBinding["input"],
   config: ProjectActionBinding["config"] = {},
-  inputFrom?: ProjectActionBinding["inputFrom"]
+  inputFrom?: ProjectActionBinding["inputFrom"],
+  configurationKeys?: readonly string[]
 ): ProjectActionBinding {
   const binding = parseProjectActionLock({
     apiVersion: "devclaw.project-actions-lock/v1",
@@ -74,6 +77,7 @@ export function createProjectActionBinding(
         input,
         config,
         ...(inputFrom ? { inputFrom } : {}),
+        ...(configurationKeys === undefined ? {} : { configurationKeys }),
         inputSchema: action.inputSchema,
         configSchema: action.configSchema ?? null,
         outputSchema: action.outputSchema ?? null
@@ -159,6 +163,7 @@ export function assertProjectActionLock(
     for (const id of stage.actionIds) {
       const binding = lock.bindings.find((item) => item.id === id)
       if (!binding) throw Error("PROJECT_ACTION_LOCK_MISMATCH")
+      if (binding.configurationKeys) throw Error("PROJECT_CHECK_CONFIGURATION_CHECK_ONLY")
       const from = binding.inputFrom
       if (from?.kind === "artifact" && from.format === PROJECT_ARTIFACT_REFERENCE_FORMAT)
         throw Error("PROJECT_ACTION_REFERENCE_CHECK_ONLY")
@@ -191,6 +196,14 @@ export function assertProjectActionLock(
       checkActions.add(binding.id)
     }
   }
+  for (const binding of lock.bindings) {
+    if (binding.configurationKeys && (
+      binding.inputFrom?.kind !== "artifact" ||
+      binding.inputFrom.format !== PROJECT_ARTIFACT_REFERENCE_FORMAT ||
+      !manifest.checks.some((check) => check.kind === "action" &&
+        check.actionId === binding.id && check.sideEffect === "read")
+    )) throw Error("PROJECT_CHECK_CONFIGURATION_CHECK_ONLY")
+  }
   return lock
 }
 export interface CapturedProjectActionInputs {
@@ -202,11 +215,31 @@ export interface CapturedProjectActionInputs {
   /** Re-read the exact approved artifact inputs before starting an external action. */
   assertCurrent(): void
 }
+/** The same bounded native values feed Skill task materials and independent check inputs. */
+export function readProjectCheckConfiguration(
+  keys: readonly string[],
+  readConfiguration?: (keys: readonly string[]) => ModObject
+): ModObject {
+  const selected = parseProjectCheckConfigurationKeys(keys)
+  if (!readConfiguration) throw Error("PROJECT_CHECK_CONFIGURATION_UNAVAILABLE")
+  const configuration = clawActionObject(readConfiguration(selected))
+  if (
+    Object.keys(configuration).length !== selected.length ||
+    selected.some((key) => !Object.hasOwn(configuration, key)) ||
+    Buffer.byteLength(encodeModJson(configuration)) > 4096
+  ) throw Error("PROJECT_CHECK_CONFIGURATION_INVALID")
+  return configuration
+}
 /** Bounded JSON objects only; no path expressions, arbitrary files, credentials or code evaluation. */
 export function captureProjectActionInputs(
   state: HostProjectState,
   rawLock: ProjectActionLock,
-  phase?: { actionIds: readonly string[]; allowCheckArtifacts?: boolean }
+  phase?: {
+    actionIds: readonly string[]
+    allowCheckArtifacts?: boolean
+    /** Main-only reader bound to the original project source and configuration store. */
+    readConfiguration?: (keys: readonly string[]) => ModObject
+  }
 ): CapturedProjectActionInputs {
   const project = structuredClone(state),
     lock = parseProjectActionLock(rawLock)
@@ -243,6 +276,13 @@ export function captureProjectActionInputs(
       validateBinding(binding)
       const next = structuredClone(binding)
       const from = binding.inputFrom
+      if (binding.configurationKeys && (
+        !phase?.allowCheckArtifacts || from?.kind !== "artifact" ||
+        from.format !== PROJECT_ARTIFACT_REFERENCE_FORMAT ||
+        checkArtifacts.get(id) !== from.artifactId
+      )) throw Error("PROJECT_CHECK_CONFIGURATION_CHECK_ONLY")
+      if (binding.configurationKeys && Object.hasOwn(binding.input, "configuration"))
+        throw Error("PROJECT_CHECK_CONFIGURATION_INPUT_CONFLICT")
       if (from?.kind === "action") {
         if (
           !seen.has(from.actionId) ||
@@ -277,6 +317,13 @@ export function captureProjectActionInputs(
           if (bytes > PROJECT_ARTIFACT_REFERENCE_TOTAL_BYTES)
             throw Error("PROJECT_ACTION_INPUT_LIMIT")
           next.input = reference.input
+          if (binding.configurationKeys) {
+            if (Object.hasOwn(next.input, "configuration"))
+              throw Error("PROJECT_CHECK_CONFIGURATION_INPUT_CONFLICT")
+            next.input.configuration = readProjectCheckConfiguration(
+              binding.configurationKeys, phase?.readConfiguration
+            )
+          }
           delete next.inputFrom
           validateRegisteredToolInput(binding.inputSchema, next.input)
           files.push(...reference.files)

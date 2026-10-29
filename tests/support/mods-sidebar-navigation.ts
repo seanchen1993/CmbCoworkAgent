@@ -5,10 +5,23 @@ import { normalizeWorkspacePathKey } from "../../src/shared/workspace-path"
 /** Use the production chat switch; never write creator state or a grant from the fixture. */
 export async function enterModsCreatorChat(page: Page, threadId: string, workspace: string) {
   const chat = page.locator(`[data-chat-thread-id=${JSON.stringify(threadId)}]`)
-  const creator = chat.getByRole("button", { name: "创造者模式", exact: true })
-  await creator.waitFor({ state: "visible" })
+  const creator = chat.getByRole("button", {
+    name: "创造者模式",
+    exact: true,
+    includeHidden: true
+  })
+  await creator.waitFor({ state: "attached" })
   if ((await creator.getAttribute("aria-pressed")) !== "true") await creator.click()
-  await chat.getByRole("button", { name: "创造者模式", exact: true, pressed: true }).waitFor()
+  // Entry can open a modal, which removes the successfully pressed background control
+  // from the accessibility tree. Observe its DOM state without dismissing the modal.
+  await page.waitForFunction((id) => {
+    const selected = document.querySelector(`[data-chat-thread-id="${CSS.escape(id)}"]`)
+    return [...(selected?.querySelectorAll("button") ?? [])].some(
+      (button) =>
+        button.textContent?.trim() === "创造者模式" &&
+        button.getAttribute("aria-pressed") === "true"
+    )
+  }, threadId)
   const actual = await page.evaluate(
     (id) => window.api.mods.development.status({ threadId: id }),
     threadId
@@ -88,7 +101,10 @@ export async function openModsAdvancedSettings(
   await page
     .getByRole("navigation")
     .filter({ has: group })
-    .getByRole("button", { name: section, exact: true })
+    .getByRole("button", {
+      name: section === "灵件与使用设置" ? "插件" : section,
+      exact: true
+    })
     .click()
   if (section === "聊天任务模板") {
     const details = page.locator("[data-diy-flows] > details")
@@ -124,8 +140,13 @@ export async function openModsSettings(page: Page): Promise<void> {
 
 /** Select the active settings form; retained sidebar copies and nested help stay untouched. */
 export async function openModUserConfig(page: Page, pluginId: string): Promise<Locator> {
-  const form = page
-    .locator("[data-mods-settings]")
+  const settings = page.locator("[data-mods-settings]")
+  const card = settings.locator(`[data-installed-mod-id="${pluginId}"]`)
+  await card.waitFor({ state: "visible" })
+  const manage = card.getByRole("button", { name: "管理", exact: true })
+  if (await manage.isVisible()) await manage.click()
+  const form = card
+    .locator("[data-function-mod-id]")
     .locator(`[data-function-user-config="${pluginId}"]`)
   await form.waitFor({ state: "visible" })
   if (!(await form.evaluate((element) => (element as HTMLDetailsElement).open)))

@@ -136,7 +136,7 @@ export function ModsUsageSetup({
             {current.status.enabled ? "已开启" : "已关闭"}
           </p>
           {current.status.recovery ? (
-            <p role="alert">权限设置需要恢复，请查看“灵件与使用设置”中的恢复说明；暂不允许开启。</p>
+            <p role="alert">权限设置需要恢复，请到“插件”查看恢复说明。</p>
           ) : !enabled ? (
             <>
               <p className="text-xs leading-6 text-muted-foreground">

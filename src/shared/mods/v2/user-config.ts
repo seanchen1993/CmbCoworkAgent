@@ -16,7 +16,7 @@ export type FunctionUserConfigField = {
   max?: number
 }
 export type FunctionUserConfig = Record<string, FunctionUserConfigField>
-const fieldKeys = new Set([
+const allowedFieldKeys = [
   "type",
   "title",
   "description",
@@ -27,7 +27,74 @@ const fieldKeys = new Set([
   "sensitive",
   "min",
   "max"
-])
+] as const
+const fieldKeys = new Set<string>(allowedFieldKeys)
+const declarationReasons = {
+  "invalid-json": "Use plain finite JSON without unsafe keys, prototypes, accessors or cycles.",
+  "expected-object": "Declare userConfig as an object of field declarations.",
+  "schema-limit": "Keep userConfig within 64 fields and 64 KiB of encoded JSON.",
+  "invalid-field-name": "Use an ASCII identifier of 1 to 128 characters for each field name.",
+  "expected-field-object": "Declare the field as an object.",
+  "unsupported-key": "Remove unsupported field properties; numeric bounds use min and max.",
+  "invalid-type": "Use string, number, boolean, directory or file as the field type.",
+  "invalid-title": "Provide a nonblank title of at most 256 characters.",
+  "invalid-description": "Provide description as a string of at most 4096 characters.",
+  "invalid-flag": "Use a boolean for required, multiple and sensitive when declared.",
+  "invalid-multiple": "Use multiple only for string fields.",
+  "invalid-bounds": "Use finite min and max only for number fields, with min no greater than max.",
+  "invalid-options":
+    "Use 1 to 64 distinct nonempty strings of at most 64 characters as options, only for a non-sensitive single string field.",
+  "choice-requires-default-or-required":
+    "Give an options field a matching default or set required to true.",
+  "invalid-default":
+    "Use a default matching the field type, required flag, options and numeric bounds."
+} as const
+type FunctionUserConfigDeclarationReason = keyof typeof declarationReasons
+type FunctionUserConfigProperty = (typeof allowedFieldKeys)[number]
+type FunctionUserConfigDeclarationDiagnostic = Readonly<{
+  /** JSON Pointer relative to userConfig; unsafe field names are never reflected. */
+  path: string
+  reason: FunctionUserConfigDeclarationReason
+  message: string
+  allowedKeys?: readonly FunctionUserConfigProperty[]
+}>
+
+/** Only native declaration failures carry safe repair metadata; stored values retain their errors. */
+export class FunctionUserConfigDeclarationError extends ModFunctionError {
+  readonly diagnostic: FunctionUserConfigDeclarationDiagnostic
+
+  constructor(
+    reason: FunctionUserConfigDeclarationReason,
+    key?: string,
+    property?: FunctionUserConfigProperty
+  ) {
+    const safeKey =
+      key !== undefined &&
+      /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) &&
+      !["__proto__", "prototype", "constructor"].includes(key)
+        ? key
+        : undefined
+    super(
+      "MODS_USER_CONFIG_INVALID",
+      `Invalid plugin configuration field: ${safeKey ?? "manifest"}`
+    )
+    this.diagnostic = Object.freeze({
+      path: safeKey ? `/${safeKey}${property ? `/${property}` : ""}` : "",
+      reason,
+      message: declarationReasons[reason],
+      ...(reason === "unsupported-key" ? { allowedKeys: Object.freeze([...allowedFieldKeys]) } : {})
+    })
+    Object.defineProperty(this, "diagnostic", { writable: false, configurable: false })
+  }
+}
+
+function declarationFailure(
+  reason: FunctionUserConfigDeclarationReason,
+  key?: string,
+  property?: FunctionUserConfigProperty
+): never {
+  throw new FunctionUserConfigDeclarationError(reason, key, property)
+}
 
 function failure(key: string): never {
   // A field name may be diagnostic data; never include its stored/default value.
@@ -74,27 +141,29 @@ export function parseFunctionUserConfig(value: unknown): FunctionUserConfig | un
   try {
     bytes = new TextEncoder().encode(encodeModJson(value)).length
   } catch {
-    failure("manifest")
+    declarationFailure("invalid-json")
   }
-  if (!isModObject(value) || Object.keys(value).length > 64 || bytes > 64 * 1024)
-    failure("manifest")
+  if (!isModObject(value)) declarationFailure("expected-object")
+  if (Object.keys(value).length > 64 || bytes > 64 * 1024) declarationFailure("schema-limit")
   const entries = Object.entries(value).map(([key, item]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key)) declarationFailure("invalid-field-name")
+    if (!isModObject(item)) declarationFailure("expected-field-object", key)
+    if (Object.keys(item).some((name) => !fieldKeys.has(name)))
+      declarationFailure("unsupported-key", key)
     if (
-      !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) ||
-      !isModObject(item) ||
-      Object.keys(item).some((name) => !fieldKeys.has(name)) ||
       typeof item.type !== "string" ||
-      !["string", "number", "boolean", "directory", "file"].includes(String(item.type)) ||
-      typeof item.title !== "string" ||
-      !item.title.trim() ||
-      item.title.length > 256 ||
-      typeof item.description !== "string" ||
-      item.description.length > 4096
+      !["string", "number", "boolean", "directory", "file"].includes(String(item.type))
     )
-      failure(key)
-    for (const flag of ["required", "multiple", "sensitive"])
-      if (item[flag] !== undefined && typeof item[flag] !== "boolean") failure(key)
-    if (item.multiple === true && item.type !== "string") failure(key)
+      declarationFailure("invalid-type", key, "type")
+    if (typeof item.title !== "string" || !item.title.trim() || item.title.length > 256)
+      declarationFailure("invalid-title", key, "title")
+    if (typeof item.description !== "string" || item.description.length > 4096)
+      declarationFailure("invalid-description", key, "description")
+    for (const flag of ["required", "multiple", "sensitive"] as const)
+      if (item[flag] !== undefined && typeof item[flag] !== "boolean")
+        declarationFailure("invalid-flag", key, flag)
+    if (item.multiple === true && item.type !== "string")
+      declarationFailure("invalid-multiple", key, "multiple")
     if (item.min !== undefined || item.max !== undefined) {
       if (
         item.type !== "number" ||
@@ -102,7 +171,7 @@ export function parseFunctionUserConfig(value: unknown): FunctionUserConfig | un
         (item.max !== undefined && (typeof item.max !== "number" || !Number.isFinite(item.max))) ||
         (typeof item.min === "number" && typeof item.max === "number" && item.min > item.max)
       )
-        failure(key)
+        declarationFailure("invalid-bounds", key)
     }
     if (
       item.options !== undefined &&
@@ -117,16 +186,26 @@ export function parseFunctionUserConfig(value: unknown): FunctionUserConfig | un
         ) ||
         new Set(item.options).size !== item.options.length)
     )
-      failure(key)
+      declarationFailure("invalid-options", key, "options")
     if (
       Array.isArray(item.options) &&
       (Object.hasOwn(item, "default")
         ? typeof item.default !== "string" || !item.options.includes(item.default)
         : item.required !== true)
     )
-      failure(key)
+      declarationFailure(
+        Object.hasOwn(item, "default") ? "invalid-default" : "choice-requires-default-or-required",
+        key,
+        Object.hasOwn(item, "default") ? "default" : "options"
+      )
     const field = structuredClone(item) as unknown as FunctionUserConfigField
-    if (Object.hasOwn(item, "default")) validateFunctionUserConfigValue(key, field, item.default)
+    if (Object.hasOwn(item, "default")) {
+      try {
+        validateFunctionUserConfigValue(key, field, item.default)
+      } catch {
+        declarationFailure("invalid-default", key, "default")
+      }
+    }
     return [key, field] as const
   })
   return Object.fromEntries(entries)

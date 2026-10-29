@@ -18,6 +18,8 @@ import { captureComposerMentionSubmission } from "../../shared/mods/v2/composer-
 import { captureCurrentRunMessageQueueOwnerData } from "../agent/current-run-message-queue"
 import { persistAcceptedComposerPrompt } from "../agent/mods-prompt-admission"
 import { captureFunctionConversationNativeInput } from "../agent/function-conversation-native-input"
+import { captureFunctionConversationNativeWorkflowInput,
+  type NativeWorkflowNotificationInputSource } from "../agent/function-conversation-native-workflow-input"
 import type { FunctionSessionAppendOrigin } from "../../shared/mods/v2/session-append"
 import {
   StopHookContextCollector,
@@ -7527,6 +7529,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
           // user input for tracing and proposal capture; `effectiveMessage` is what the LLM sees.
           let effectiveMessage = modelInputMessage
+          let nativeWorkflowNotificationSource: NativeWorkflowNotificationInputSource | undefined
 
           // Workflow completion turn: the renderer submits a bare trigger marker;
           // the actual notification content is built here from the persisted run
@@ -7634,6 +7637,26 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               isInternalNotificationTurn = true
               // Workflow-only: also skip user Stop hooks for this report turn.
               isWorkflowNotificationTurn = true
+              const notificationClaim = workflowNotificationToSettle
+              nativeWorkflowNotificationSource = Object.freeze({
+                runId: pendingWorkflowRun.runId,
+                startedAt: pendingWorkflowRun.startedAt,
+                ownerRunToken: runToken,
+                content: effectiveMessage,
+                assertSourceCurrent() {
+                  if (hostWorkflowNotice?.assertSourceCurrent) hostWorkflowNotice.assertSourceCurrent()
+                  else hostWorkflowNotice?.assertCurrent()
+                  this.assertCurrent()
+                },
+                assertCurrent() {
+                  hostWorkflowNotice?.assertCurrent()
+                  if (!isWorkflowNotificationTurn || workflowNotificationToSettle !== notificationClaim ||
+                    notificationClaim.runId !== this.runId ||
+                    notificationClaim.startedAt !== this.startedAt ||
+                    notificationClaim.ownerRunToken !== this.ownerRunToken)
+                    throw Error("HOST_WORKFLOW_NOTIFICATION_SCOPE_CHANGED")
+                }
+              })
             } catch (error) {
               releaseWorkflowNotification(pendingWorkflowRun.runId, runToken)
               throw error
@@ -8430,7 +8453,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 : runExecutionContext.source === "heartbeat" ? "auto-continuation" : "composer" }
           const nativeConversationInput = userHumanMessage && workspacePath &&
             nativeInputManager?.isEnabled(workspacePath)
-            ? captureFunctionConversationNativeInput({
+            ? nativeWorkflowNotificationSource
+              ? captureFunctionConversationNativeWorkflowInput({
+                  message: userHumanMessage, threadId, physicalRunId: runToken,
+                  workspace: nativeInputManager.workspaceKey(workspacePath),
+                  signal: abortController.signal,
+                  ...(modsSubmittedText === undefined && effectiveMessage === message ? {}
+                    : { visible: visibleTranscriptUserMessage }),
+                  notification: nativeWorkflowNotificationSource,
+                  assertCurrent() {
+                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+                    if (pluginPrompt) throw Error("HOST_WORKFLOW_NOTIFICATION_SCOPE_CHANGED")
+                  }
+                })
+              : captureFunctionConversationNativeInput({
                 message: userHumanMessage, threadId, physicalRunId: runToken,
                 workspace: nativeInputManager.workspaceKey(workspacePath),
                 signal: abortController.signal, origin: nativeInputOrigin,

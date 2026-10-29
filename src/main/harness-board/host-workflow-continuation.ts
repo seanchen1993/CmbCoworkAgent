@@ -8,14 +8,18 @@ export function createHostWorkflowContinuation(input: {
   workspace: string
   threadId: string
   assertCurrent(): void
+  /** Original owner only; content is still checked at each consume/capture boundary. */
+  assertNotificationCurrent?(): void
 }) {
+  const assertSourceCurrent = input.assertCurrent.bind(input)
+  const assertNotificationCurrent = input.assertNotificationCurrent?.bind(input) ?? assertSourceCurrent
   const pending: ReturnType<typeof workflowRunManager.captureHostRun>[] = []
   const seen = new Set<string>()
   let invalid: unknown
   return {
     onDetachedResultAvailable(notice: AgentRunDetachedResultSignal): void {
       try {
-        input.assertCurrent()
+        assertSourceCurrent()
         if (notice.kind !== "workflow" || notice.threadId !== input.threadId || !notice.runId)
           throw Error("HOST_WORKFLOW_NOTIFICATION_SCOPE_CHANGED")
         const original = workflowRunManager.captureHostRun(
@@ -35,34 +39,45 @@ export function createHostWorkflowContinuation(input: {
       }
     },
     async consume(
-      run: (notice: { runId: string; startedAt: string; assertCurrent(): void }) => Promise<void>
+      run: (notice: {
+        runId: string
+        startedAt: string
+        assertCurrent(): void
+        assertSourceCurrent(): void
+      }) => Promise<void>
     ): Promise<void> {
       if (invalid) throw invalid
       while (pending.length) {
-        input.assertCurrent()
+        assertSourceCurrent()
         const original = pending.shift()!
         // Wait outside the foreground tool lock, before closing MCP/source custody.
         await original.wait()
-        input.assertCurrent()
+        assertSourceCurrent()
         const before = await original.read()
-        input.assertCurrent()
+        assertSourceCurrent()
+        // A settled engine error still owes its original result notification. Reporting
+        // that failure does not turn it into success or permit a retry/Host advance.
         if (
           before.notificationOwner !== "managed" ||
           before.notificationDelivered ||
-          before.status !== "completed"
+          (before.status !== "completed" && before.status !== "error")
         )
           throw Error("HOST_WORKFLOW_NOTIFICATION_UNCONFIRMED")
         await run({
           runId: original.runId,
           startedAt: original.startedAt,
           assertCurrent: () => {
-            input.assertCurrent()
+            assertNotificationCurrent()
+            original.assertCurrent()
+          },
+          assertSourceCurrent: () => {
+            assertSourceCurrent()
             original.assertCurrent()
           }
         })
-        input.assertCurrent()
+        assertSourceCurrent()
         const after = await original.read()
-        input.assertCurrent()
+        assertSourceCurrent()
         if (!after.notificationDelivered || after.notificationOwner !== "managed")
           throw Error("HOST_WORKFLOW_NOTIFICATION_NOT_CONSUMED")
         if (invalid) throw invalid

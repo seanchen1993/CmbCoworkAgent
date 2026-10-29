@@ -47,18 +47,26 @@ async function main() {
         delivery={delivery}api={api}onStatus={next=>{delivery=next.projectDelivery;render()}}/>);
       const status=()=>({threadId:'chat',workspace:'c:/owned',enabled:true,drafts:[],trials:[],projectDelivery:delivery});
       const api={status:async input=>{calls.push(['status',input]);return status()},
-        prepareProjectDelivery:async input=>{calls.push(['prepare',input]);delivery={...base,name:input.name,version:input.version,phase:'needs-confirmation',canInstall:true,canExport:true,canReconcile:false,
-          ...(mode==='wrong-source'?{sourceDigest:'f'.repeat(64)}:{}),...(mode==='wrong-name'?{name:'unrelated-plugin'}:{})};
+        prepareProjectDelivery:async input=>{calls.push(['prepare',input]);const pluginId=delivery?.pluginId;
+          delivery={...base,name:input.name,version:input.version,phase:pluginId?'installed':'needs-confirmation',canInstall:!pluginId,canExport:true,canReconcile:false,...(pluginId?{pluginId}:{}),
+          ...(mode==='wrong-source'||mode==='wrong-installed-source'?{sourceDigest:'f'.repeat(64)}:{}),
+          ...(mode==='wrong-name'||mode==='wrong-installed-name'?{name:'unrelated-plugin'}:{}),
+          ...(mode==='wrong-installed-package'?{digest:'f'.repeat(64)}:{}),
+          ...(mode==='wrong-installed-plugin'?{pluginId:'unrelated-installed'}:{}),
+          ...(mode==='unconfirmed-export'?{canExport:false}:{})};
           const next=status();if(mode==='delayed')await new Promise(resolve=>release=resolve);return next},
         installProjectDelivery:async input=>{calls.push(['install',input]);
           if(mode==='save'){delivery={...delivery,phase:'installed',pluginId:'fresh-installed',canInstall:false};return status()}
           delivery={...base,operation:'install'};throw Error('PROJECT_DELIVERY_INSTALL_UNCONFIRMED')},
         exportProjectDelivery:async input=>{calls.push(['export',input]);
-          if(mode==='export'){delivery={...delivery,phase:'exported',output:'C:/export/fresh.zip'};return status()}
+          if(mode==='export'||mode==='recovered-export'){delivery={...delivery,phase:'exported',output:'C:/export/fresh.zip'};return status()}
           throw Error('MUST_NOT_EXPORT')},
         reconcileProjectDelivery:async input=>{calls.push(['reconcile',input]);delivery={...base,phase:outcome==='installed'?'installed':'failed',canReconcile:false,reconciliation:{outcome,checkedAt:1},...(outcome==='installed'?{pluginId:'native-installed-id'}:{})};return status()}};
       window.fixture={calls,render,reset:()=>{delivery={...base};historical=false;render()},outcome:v=>outcome=v,
+        failed:()=>{delivery={...base,phase:'failed',canReconcile:false,error:'PROJECT_DELIVERY_NAME_ALREADY_INSTALLED'};render()},
+        prepared:()=>{delivery={...base,phase:'needs-confirmation',canInstall:true,canExport:true,canReconcile:false};render()},
         fresh:next=>{mode=next;delivery=undefined;historical=false;missingRequest=false;render()},
+        installed:next=>{mode=next;delivery={...base,phase:next==='unknown-installed'?'unknown':'installed',operation:'install',pluginId:'native-installed-id'};historical=false;missingRequest=false;render()},
         switchAccount:()=>useAppStore.setState({accountRevision:useAppStore.getState().accountRevision+1}),release:()=>release(),
         history:()=>{delivery={...base};historical=true;render()},noRequest:()=>{delivery={...base};missingRequest=true;render()},business:()=>root.render(<BusinessCreatorReviewCard
           review={{planId:'plan',copyId:'copy',name:'business',version:'1.0.0',digest:'d'.repeat(64),contentDigest:'e'.repeat(64),phase:'installed',canConfirm:false,pluginId:'business-installed-id',steps:[],diagnostics:[],reconciliation:{outcome:'conflict',checkedAt:1}}}
@@ -81,6 +89,34 @@ async function main() {
     const prepare = page.getByRole("button", { name: "保存插件", exact: true })
     await prepare.waitFor()
     assert.equal(await prepare.isDisabled(), true)
+    await page.getByRole("heading", { name: "核对保存结果", exact: true }).waitFor()
+    assert.equal(
+      await page.getByRole("button").first().innerText(),
+      "核对实际交付结果",
+      "The explicit native reconciliation action must precede disabled saving controls"
+    )
+    assert.equal(
+      await page
+        .getByText("保存详情", { exact: true })
+        .locator("..")
+        .evaluate((element) => (element as HTMLDetailsElement).open),
+      false
+    )
+    await page.evaluate("window.fixture.failed()")
+    await page.getByRole("alert").filter({ hasText: "此名称已被已安装插件使用" }).waitFor()
+    await page.getByText("保存详情", { exact: true }).click()
+    await page
+      .getByText("诊断代码：PROJECT_DELIVERY_NAME_ALREADY_INSTALLED", { exact: true })
+      .waitFor()
+    await page.getByText("保存详情", { exact: true }).click()
+    await page.evaluate("window.fixture.prepared()")
+    assert.equal(await prepare.isEnabled(), true)
+    assert.equal(
+      await page.getByRole("button", { name: /导出 ZIP/ }).count(),
+      1,
+      "A prepared candidate must expose one export action rather than duplicate ZIP buttons"
+    )
+    await page.evaluate("window.fixture.reset()")
     await page.getByText("待核对导出目标：C:/export/pending.zip", { exact: true }).waitFor()
     await page.getByRole("button", { name: "核对实际交付结果", exact: true }).click()
     await page.getByText(/已核实：未发现本次交付的执行结果/).waitFor()
@@ -93,6 +129,9 @@ async function main() {
     )
     checks.push(
       "unknown requires native reconciliation; confirmed absence permits fresh preparation only"
+    )
+    checks.push(
+      "reconciliation is the leading action; persisted failures remain visible and prepared export is singular"
     )
 
     await prepare.click()
@@ -112,6 +151,7 @@ async function main() {
     await page.getByRole("button", { name: "核对实际交付结果", exact: true }).click()
     await page.getByLabel("native start-use handoff", { exact: true }).waitFor()
     assert.deepEqual(await page.evaluate("window.startUseProps"), {
+      disabled: false,
       threadId: "chat",
       workspace: "C:/owned",
       pluginId: "native-installed-id",
@@ -119,6 +159,82 @@ async function main() {
     })
     checks.push(
       "confirmed installed identity reaches the separately tested native start-use component"
+    )
+
+    const count = (kind: string) =>
+      page.evaluate(
+        (kind) =>
+          window.eval(
+            "window.fixture.calls.filter(row=>row[0]===" + JSON.stringify(kind) + ").length"
+          ),
+        kind
+      )
+    await page.evaluate("window.fixture.installed('recovered-export')")
+    const recheckExport = page.getByRole("button", { name: "核对并导出 ZIP…", exact: true })
+    await recheckExport.waitFor()
+    const beforeRecheck = await count("prepare")
+    const beforeRecheckInstall = await count("install")
+    const beforeRecheckExport = await count("export")
+    await recheckExport.evaluate((button) => {
+      ;(button as HTMLButtonElement).click()
+      ;(button as HTMLButtonElement).click()
+    })
+    await page.getByText("导出位置：C:/export/fresh.zip", { exact: true }).waitFor()
+    assert.equal(await count("prepare"), beforeRecheck + 1)
+    assert.equal(await count("export"), beforeRecheckExport + 1)
+    assert.equal(await count("install"), beforeRecheckInstall)
+    assert.deepEqual(
+      await page.evaluate("window.fixture.calls.filter(row=>row[0]==='prepare').at(-1)[1]"),
+      {
+        threadId: "chat",
+        expectedWorkspace: "C:/owned",
+        requestId: "request",
+        digest: "a".repeat(64),
+        name: "saved-plugin",
+        version: "1.0.0"
+      }
+    )
+    assert.deepEqual(
+      await page.evaluate("window.fixture.calls.filter(row=>row[0]==='export').at(-1)[1]"),
+      {
+        threadId: "chat",
+        expectedWorkspace: "C:/owned",
+        deliveryId: "delivery",
+        digest: "b".repeat(64)
+      }
+    )
+    checks.push(
+      "installed delivery without live consent explicitly rechecks its frozen identity before export; double click never reinstalls"
+    )
+    for (const mode of [
+      "wrong-installed-source",
+      "wrong-installed-name",
+      "wrong-installed-package",
+      "wrong-installed-plugin",
+      "unconfirmed-export"
+    ]) {
+      await page.evaluate(
+        (mode) => window.eval("window.fixture.installed(" + JSON.stringify(mode) + ")"),
+        mode
+      )
+      await recheckExport.waitFor()
+      const before = await count("export")
+      await recheckExport.click()
+      await page.getByRole("alert").waitFor()
+      assert.equal(await count("export"), before)
+      assert.equal(await count("install"), beforeRecheckInstall)
+      checks.push(
+        `${mode}: rechecking cannot export another installation or reuse missing confirmation`
+      )
+    }
+    await page.evaluate("window.fixture.installed('unknown-installed')")
+    await page.getByRole("button", { name: "核对实际交付结果", exact: true }).waitFor()
+    assert.equal(await page.evaluate("window.startUseProps.disabled"), true,
+      "A retained installed identity cannot be used while its delivery result awaits reconciliation")
+    assert.equal(await recheckExport.count(), 0)
+    assert.equal(await page.getByRole("button", { name: "导出 ZIP…", exact: true }).count(), 0)
+    checks.push(
+      "unknown delivery with a retained installed identity still requires reconciliation before export"
     )
 
     await page.evaluate("window.fixture.history()")
@@ -161,9 +277,6 @@ async function main() {
     checks.push(
       "business delivery uses native content identity and never labels a conflicting export successful"
     )
-    const count = (kind: string) => page.evaluate(
-      kind => window.eval("window.fixture.calls.filter(row=>row[0]===" + JSON.stringify(kind) + ").length"), kind
-    )
     await page.evaluate("window.fixture.fresh('save')")
     const beforeSave = await count("install")
     assert.equal(await page.getByRole("textbox", { name: "新插件标识", exact: true }).inputValue(), "source-request")
@@ -172,6 +285,11 @@ async function main() {
       ;(button as HTMLButtonElement).click()
     })
     await page.getByRole("heading", { name: "插件已保存", exact: true }).waitFor()
+    assert.equal(
+      await page.getByText("新插件已安装。", { exact: true }).count(),
+      0,
+      "The saved heading and native use action replace repeated installation success text"
+    )
     assert.equal(await count("install"), beforeSave + 1)
     assert.deepEqual(await page.evaluate("window.fixture.calls.filter(row=>row[0]==='install').at(-1)[1]"), {
       threadId: "chat", expectedWorkspace: "C:/owned", deliveryId: "delivery", digest: "b".repeat(64)
@@ -190,6 +308,7 @@ async function main() {
     await page.getByRole("button", { name: "仅导出 ZIP…", exact: true }).click()
     await page.getByText("导出位置：C:/export/fresh.zip", { exact: true }).waitFor()
     assert.equal(await count("install"), beforeExport)
+    assert.equal(await page.getByRole("button", { name: /导出 ZIP/ }).count(), 1)
     checks.push("export-only prepares and exports without installing")
     await page.evaluate("window.fixture.fresh('delayed')")
     const beforeAccount = await count("install")

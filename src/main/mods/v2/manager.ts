@@ -30,6 +30,7 @@ import type { FunctionRuntimeSession, FunctionRuntimeSessions } from "../../../s
 import { readRuntimeStopReceipts, writeRuntimeStopReceipts, type RuntimeStopReceipt } from "./runtime-stop-receipts"
 import { claimConfigurationReload } from "./configuration-reload-lease"
 import { trackFunctionGuest } from "./session-guest"
+import { actionOnlyFunctionGuest } from "./action-only-guest"
 import { FunctionGuestExecutionFacts } from "./guest-execution-facts"
 import { trackFunctionSession } from "./session-facade"
 import { retainHostStream } from "./host-stream-lifetime"
@@ -1172,6 +1173,9 @@ export class FunctionModsManager {
       // its first graph unconstructed; handoff must not retire a live UI owner.
       if (sources.some(source => !status.some(item =>
         item.pluginId === source.id && item.state === "ready"))) {
+        if (binding.actionSources?.some(source => !status.some(item =>
+          item.pluginId === source.plugin.id && item.state === "ready")))
+          throw new ModFunctionError("PROJECT_MODS_APPROVAL_REQUIRED")
         if (entry) throw new ModFunctionError("PROJECT_MODS_APPROVAL_REQUIRED")
         return
       }
@@ -3000,6 +3004,12 @@ export class FunctionModsManager {
       ? projectRuntimePluginSources([])
       : binding ? [...installed.filter(plugin => plugin.id !== binding.plugin.id), binding.plugin]
         : installed
+    for (const pinned of binding?.actionSources ?? []) {
+      const live = installed.find(item => item.id === pinned.plugin.id)
+      if (!live?.enabled || !isSameWorkspacePath(live.path, pinned.plugin.path))
+        throw new ModFunctionError("CLAW_ACTION_PROVIDER_CHANGED")
+      plugins.push(live)
+    }
     let candidates: ModPluginSource[]
     if (presenceOnly) {
       const first = plugins.find((plugin) => this.isSource(plugin))
@@ -3157,7 +3167,10 @@ export class FunctionModsManager {
       if (existing) {
         await existing.loading
         assertCurrent()
-        for (const snapshot of existing.snapshots.values()) this.store.assertGrant(snapshot.grant)
+        for (const snapshot of existing.snapshots.values()) {
+          this.assertSnapshotContent(snapshot)
+          this.store.assertGrant(snapshot.grant)
+        }
         if (existing.session?.plugins.some((plugin) => plugin.guest.stats.disposed))
           throw new ModFunctionError("MODS_RUNTIME_LOST")
         return (existing.session?.plugins.length ?? 0) > 0
@@ -3327,6 +3340,8 @@ export class FunctionModsManager {
 
   private functionSourceGrant(workspace: string, name: string, explicit?: RuntimeFunctionGrantScope): ModGrant | null {
     const binding = currentRuntimePluginSource()
+    if (!explicit && binding?.actionSources?.some(item => item.name === name))
+      return this.store.getGrant(workspace, `function:${name}`)
     const scope = explicit ?? (binding?.mode === "host" ||
       (binding?.mode === "legacy" && binding.capabilitySources?.length === 0) ? binding : undefined)
     return scope ? this.store.getProjectFunctionGrant(workspace, scope.projectId, scope.packageDigest, name)
@@ -3338,6 +3353,9 @@ export class FunctionModsManager {
     for (const source of this.sources()) {
       try {
         const compiled = await this.compileStatusSource(source.path)
+        const pinned = currentRuntimePluginSource()?.actionSources?.find(item => item.plugin.id === source.id)
+        if (pinned && (compiled.name !== pinned.name || compiled.digest !== pinned.digest))
+          throw new ModFunctionError("CLAW_ACTION_PROVIDER_CHANGED")
         if (compiled.name === CONTEXT_METER_NAME)
           throw new ModFunctionError("MODS_RESERVED_BUILTIN_NAME")
         const grant = this.functionSourceGrant(workspace, compiled.name)
@@ -4523,6 +4541,9 @@ export class FunctionModsManager {
               ? await this.configurationSourceCache.read(source.path)
               : await compileFunctionPlugin(source.path)
             if (compiled.configurationOnly) throw new ModFunctionError("MODS_CONFIGURATION_ONLY")
+            const actionSource = runtimeSource?.actionSources?.find(item => item.plugin.id === source.id)
+            if (actionSource && (compiled.name !== actionSource.name || compiled.digest !== actionSource.digest))
+              throw new ModFunctionError("CLAW_ACTION_PROVIDER_CHANGED")
             if (compiled.name === CONTEXT_METER_NAME)
               throw new ModFunctionError("MODS_RESERVED_BUILTIN_NAME")
             if (
@@ -4552,7 +4573,8 @@ export class FunctionModsManager {
               : this.configuredOptions(workspace, compiled, projection.options)
             assertRuntimeSourceContent?.()
             const guest = trackFunctionGuest(
-              await current.client.load(projection.code, configured.options),
+              await current.client.load(projection.code, configured.options).then(guest =>
+                actionSource ? actionOnlyFunctionGuest(guest) : guest),
               current.activity, current.initializer, (run) => this.startupModels.fresh(() => this.operations.exit(run)), current.execution
             )
             assertLive()
@@ -4562,6 +4584,18 @@ export class FunctionModsManager {
               compiled, projection, grant, sourceId: source.id, sourcePath: source.path,
               ...(assertRuntimeSource && runtimeSourcePaths.has(JSON.stringify([source.id, source.path]))
                 ? { assertRuntimeSource, assertRuntimeSourceContent } : {}),
+              ...(actionSource ? {
+                assertRuntimeSource: () => {
+                  assertRuntimeSource?.()
+                  if (!this.host.plugins().some(item => item.id === source.id && item.enabled &&
+                      isSameWorkspacePath(item.path, source.path)))
+                    throw new ModFunctionError("CLAW_ACTION_PROVIDER_CHANGED")
+                },
+                assertRuntimeSourceContent: () => {
+                  assertRuntimeSourceContent?.()
+                  assertConfigurationSourcesCurrent(source.path, compiled)
+                }
+              } : {}),
               configuredRevision: configured.revision,
               configuredOptions: structuredClone(configured.options)
             })
@@ -7719,6 +7753,7 @@ export class FunctionModsManager {
       snapshot.compiled.digest !== pinned.digest
     )
       throw new ModFunctionError("CLAW_ACTION_PROVIDER_CHANGED")
+    this.assertSnapshotContent(snapshot)
     this.store.assertGrant(snapshot.grant)
     const exported = snapshot.projection.actions?.find((item) => item.id === pinned.actionId)
     if (!exported) throw new ModFunctionError("CLAW_ACTION_NOT_EXPORTED")
@@ -7826,6 +7861,7 @@ export class FunctionModsManager {
         this.host.assertThread?.(workspace, threadId)
         if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
           throw new ModFunctionError("MODS_SCOPE_CHANGED")
+        this.assertSnapshotContent(entry.snapshots.get(current.action.plugin)!)
         entry.session!.platform.assertInfo(current.platform.ref, current.platform.source)
       }
       bindNativeProjectContextProvider({ workspace, threadId,
@@ -7850,6 +7886,7 @@ export class FunctionModsManager {
         signal
       )
       signal.throwIfAborted()
+      assertContextProviderCurrent()
       entry.session!.platform.assertInfo(current.platform.ref, current.platform.source)
       if (receipt.status !== "succeeded")
         throw new ModFunctionError("CLAW_ACTION_PLATFORM_UNSETTLED", receipt.error)

@@ -191,6 +191,47 @@ async function vendorSource(workspace: string, dependency = false) {
   return selected
 }
 
+it("reports not-started busy separately from scope changes without installing or mutating the intent", async () => {
+  const f = await fixture()
+  await f.sourceSets.import(f.threadId, f.workspace, await vendorSource(f.workspace, true))
+  const set = f.sourceSets.status(f.threadId)!
+  f.deps.occupied = () => true
+  await expect(
+    f.sourceSets.install(f.threadId, f.workspace, set.id, set.dependencies[0].id)
+  ).rejects.toThrow(/^SOURCE_SET_BUSY$/)
+  expect(f.installed).not.toHaveBeenCalled()
+  expect(f.sourceSets.status(f.threadId)!.dependencies[0].phase).toBe("prepared")
+  await expect(
+    f.sourceSets.install(f.threadId, join(f.workspace, "different"), set.id, set.dependencies[0].id)
+  ).rejects.toThrow(/^SOURCE_SET_SCOPE_CHANGED$/)
+  expect(f.installed).not.toHaveBeenCalled()
+})
+
+it("holds its original admission until the first installation settles and never exposes post-start busy as retryable", async () => {
+  const f = await fixture()
+  await f.sourceSets.import(f.threadId, f.workspace, await vendorSource(f.workspace, true))
+  const set = f.sourceSets.status(f.threadId)!,
+    dep = set.dependencies[0]
+  const entered = Promise.withResolvers<void>(),
+    finish = Promise.withResolvers<void>()
+  f.deps.install = vi.fn(async () => {
+    entered.resolve()
+    await finish.promise
+    throw Error("SOURCE_SET_BUSY")
+  })
+  const first = f.sourceSets.install(f.threadId, f.workspace, set.id, dep.id)
+  const rejected = expect(first).rejects.toThrow(/^SOURCE_SET_OPERATION_UNCONFIRMED$/)
+  await entered.promise
+  await expect(f.sourceSets.install(f.threadId, f.workspace, set.id, dep.id)).rejects.toThrow(
+    /^SOURCE_SET_BUSY$/
+  )
+  expect(f.deps.install).toHaveBeenCalledOnce()
+  finish.resolve()
+  await rejected
+  expect(f.sourceSets.status(f.threadId)!.dependencies[0].phase).toBe("unknown")
+  expect(f.deps.install).toHaveBeenCalledOnce()
+})
+
 it("imports actual AutoBiz packages, independently installs and grants them, compiles real catalog identities and reaches original start-use", async () => {
   const f = await fixture()
   await f.sourceSets.import(f.threadId, f.workspace, resolve("resources/native-compositions"))
@@ -291,6 +332,11 @@ it("drives real vendor import, compile, install and start-use services through t
   let sets = f.sourceSets,
     deliveries = f.deliveries,
     sessions = f.sessions
+  const startUseWork: Promise<unknown>[] = []
+  const observeStartUse = (work: Promise<unknown>) => {
+    startUseWork.push(work)
+    return work
+  }
   const status = () => ({
     threadId: f.threadId,
     workspace: f.workspace,
@@ -323,9 +369,9 @@ it("drives real vendor import, compile, install and start-use services through t
           digest: input.digest
         })
       else if (method === "prepareStartUse")
-        return f.startUse.prepare(input as unknown as PluginStartUseInput, () => {})
+        return observeStartUse(f.startUse.prepare(input as unknown as PluginStartUseInput, () => {}))
       else if (method === "enableStartUse")
-        return f.startUse.enable(input as unknown as PluginStartUseInput, () => {})
+        return observeStartUse(f.startUse.enable(input as unknown as PluginStartUseInput, () => {}))
       else if (method !== "status") throw Error("UNEXPECTED_TEST_TRANSPORT")
       return status()
     }
@@ -391,6 +437,17 @@ it("drives real vendor import, compile, install and start-use services through t
     }, status())
     await h.page.evaluate("window.fixture.setStatus(window.coldStatus)")
     await h.page.getByRole("button", { name: "开始使用", exact: true }).click()
+    await expect.poll(() => startUseWork.length).toBeGreaterThan(0)
+    // Await actual native work and its browser reply, including a subsequent enable request.
+    // The remaining poll below measures intent propagation, not filesystem/preflight latency.
+    let settledStartUse = 0
+    while (true) {
+      const issued = startUseWork.slice(settledStartUse)
+      await Promise.all(issued)
+      settledStartUse += issued.length
+      const browserPending = await h.page.evaluate("window.fixture.pendingStartUse()")
+      if (!browserPending && settledStartUse === startUseWork.length) break
+    }
     await expect
       .poll(() => h.page.evaluate("window.fixture.startUseIntent()?.report.kind"))
       .toBe("host-project")
@@ -409,6 +466,7 @@ it("drives real vendor import, compile, install and start-use services through t
     )
     throw error
   } finally {
+    await Promise.allSettled(startUseWork)
     await h.browser.close()
   }
 }, 120_000)

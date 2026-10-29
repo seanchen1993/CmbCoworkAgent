@@ -1107,7 +1107,8 @@ function toProjectListItem(
   value: unknown,
   pluginById: ReadonlyMap<string, PluginMetadata>,
   pluginByName: ReadonlyMap<string, PluginMetadata>,
-  readConfig: BoardConfigReader = readBoardConfig
+  readConfig: BoardConfigReader = readBoardConfig,
+  hostPluginIds: ReadonlySet<string> = new Set()
 ): HarnessProjectListItem | null {
   const project = toProjectMetadata(value)
   if (!project) return null
@@ -1115,7 +1116,13 @@ function toProjectListItem(
   const adapterId = stored.id.trim()
   const adapterName = stored.name.trim()
   const plugin = pluginById.get(adapterId) ?? pluginByName.get(adapterName) ?? null
-  const boardCompatibility = compatibility(plugin, adapterName, readConfig)
+  const boardCompatibility: HarnessBoardCompatibility = plugin && hostPluginIds.has(plugin.id)
+    ? {
+        status: "host-runtime", compatible: false, appApiVersion: APP_BOARD_API_VERSION,
+        label: "绑定插件已改为原生项目模板",
+        message: "此旧项目绑定的插件已改为原生项目模板。请恢复原插件版本继续旧项目，或使用“导入旧项目成果”创建原生项目；同名插件不会替换原绑定。"
+      }
+    : compatibility(plugin, adapterName, readConfig)
   return {
     projectId: project.projectId,
     name: project.name,
@@ -1199,7 +1206,8 @@ export function readHarnessCatalogPage(
   const observations = new Map<string, CatalogPackageObservation>()
   const observationErrors = new Map<string, string>()
   const pageConfigs = new Map<string, BoardConfigSnapshot>()
-  const plugins = readPlugins(pluginStorePath).filter((plugin) => {
+  const installedPlugins = readPlugins(pluginStorePath)
+  const plugins = installedPlugins.filter((plugin) => {
     const boardPresent = existsSync(join(plugin.path, BOARD_CONFIG_REL_PATH))
     if (!boardPresent && !existsSync(join(plugin.path, "devclaw.project-runtime.json"))) return false
     const cached = observations.get(plugin.path)
@@ -1231,8 +1239,12 @@ export function readHarnessCatalogPage(
   // Existing legacy projects keep their original protocol boundary. Discovering a Host
   // template does not make an old project bound to the same id/name board-compatible.
   const legacyPlugins = plugins.filter((plugin) => observations.get(plugin.path)?.runtimeMode !== "host")
-  const pluginById = new Map(legacyPlugins.map((plugin) => [plugin.id, plugin]))
+  // An installed UUID remains authoritative even when its package changed mode or lost
+  // project resources. Only a genuinely absent historical UUID may use the old name fallback.
+  const pluginById = new Map(installedPlugins.map((plugin) => [plugin.id, plugin]))
   const pluginByName = new Map(legacyPlugins.map((plugin) => [plugin.name, plugin]))
+  const hostPluginIds = new Set(plugins.filter((plugin) =>
+    observations.get(plugin.path)?.runtimeMode === "host").map((plugin) => plugin.id))
   const query = text(input.query).trim().toLocaleLowerCase()
   const projectId = text(input.projectId, 512).trim()
   const projectIds = new Set(
@@ -1270,7 +1282,7 @@ export function readHarnessCatalogPage(
         seen += 1
         continue
       }
-      const projected = toProjectListItem(row, pluginById, pluginByName, readConfig)
+      const projected = toProjectListItem(row, pluginById, pluginByName, readConfig, hostPluginIds)
       if (!projected) {
         seen += 1
         nextProjectOffset = seen

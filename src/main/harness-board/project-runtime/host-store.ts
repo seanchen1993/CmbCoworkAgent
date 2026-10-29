@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite"
 import type { ProjectWorkspaceModeGuard } from "./workspace-mode-guard"
 import { parseHostLegacyImportReceipt } from "./legacy-import-protocol"
 import { effectiveHostResultApproval } from "../../../shared/project-runtime/import-approval-policy"
+import { LOCAL_PROJECT_SEARCH_MAX_CHARS } from "../../../shared/project-runtime/platform-api"
 import type {
   HostActionPrepareInput,
   HostActionResult,
@@ -54,6 +55,11 @@ export class HostProjectStore {
     mkdirSync(dirname(path), { recursive: true })
     this.db = new DatabaseSync(path, { timeout: 1000 })
     try {
+      // SQLite's built-in lower() only folds ASCII. Preserve the former UI's Unicode
+      // matching while filtering in storage before pagination; do not hydrate all projects.
+      this.db.function("devclaw_project_search_text", { deterministic: true }, (value) =>
+        typeof value === "string" ? value.toLocaleLowerCase() : ""
+      )
       this.db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")
       this.transaction(() => {
         this.db.exec(`
@@ -125,13 +131,20 @@ export class HostProjectStore {
     return state
   }
 
-  listProjects(limit = 50, afterProjectId = ""): HostProjectState[] {
+  listProjects(limit = 50, afterProjectId = "", query = ""): HostProjectState[] {
     hostInteger(limit, 1)
     if (limit > 200) hostStateError("LIMIT_INVALID")
     if (afterProjectId) hostText(afterProjectId)
+    if (typeof query !== "string" || query.length > LOCAL_PROJECT_SEARCH_MAX_CHARS || query.includes("\0"))
+      hostStateError("SEARCH_QUERY_INVALID")
+    const search = query.trim().toLocaleLowerCase()
     return this.db
-      .prepare("SELECT id FROM host_projects WHERE id>? ORDER BY id LIMIT ?")
-      .all(afterProjectId, limit)
+      .prepare(`SELECT id FROM host_projects WHERE id>?
+        AND (?='' OR instr(devclaw_project_search_text(json_extract(data,'$.name')),?)>0
+          OR instr(devclaw_project_search_text(json_extract(data,'$.workspace')),?)>0
+          OR instr(devclaw_project_search_text(json_extract(data,'$.packageId')),?)>0)
+        ORDER BY id LIMIT ?`)
+      .all(afterProjectId, search, search, search, search, limit)
       .map((row) => this.requireProject(String(row.id)))
   }
 

@@ -194,14 +194,14 @@ async function main() {
     )
     assert.equal(await page.getByRole("button", { name: "普通模式", exact: true }).count(), 0)
     await page.getByRole("button", { name: "插件", exact: true }).waitFor()
-    await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
+    await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "插件", exact: true }).click()
     await page.getByText("ModsPanel content", { exact: true }).waitFor()
     const mounted = await page.evaluate("window.panelMounted.filter(x=>x==='ModsPanel').length")
     await page.getByRole("button", { name: "基础功能", exact: true }).click()
     assert.equal(await page.getByText("ModsPanel content", { exact: true }).isVisible(), true)
-    await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).waitFor({ state: "hidden" })
+    await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "插件", exact: true }).waitFor({ state: "hidden" })
     await page.getByRole("button", { name: "基础功能", exact: true }).click()
-    await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).waitFor()
+    await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "插件", exact: true }).waitFor()
     assert.equal(
       await page.evaluate("window.panelMounted.filter(x=>x==='ModsPanel').length"),
       mounted

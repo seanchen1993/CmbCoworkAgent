@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { ChevronUp, ChevronDown, X, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { findChatSearchLocationRange, mapChatSearchDom } from "@/lib/chat-search-dom"
+import { beginChatScrollNavigation } from "./chat-scroll-navigation"
 import { chatSearchLocationKey, type ChatSearchLocation,
   type ChatSearchReveal } from "../../../../shared/chat-search-types"
 import {
@@ -551,6 +552,11 @@ export function ChatSearchOverlay({
   const highlightFrameRef = useRef<number | null>(null)
   const highlightGenerationRef = useRef(0)
   const pendingNavigationRef = useRef<number | null>(null)
+  const releaseScrollNavigationRef = useRef<(() => void) | null>(null)
+  const releaseScrollNavigation = useCallback((): void => {
+    releaseScrollNavigationRef.current?.()
+    releaseScrollNavigationRef.current = null
+  }, [])
   const validationAbortRef = useRef<AbortController | null>(null)
   const contextRevealRef = useRef<ChatSearchReveal | null>(null)
   const contextRefreshFrameRef = useRef<number | null>(null)
@@ -597,6 +603,7 @@ export function ChatSearchOverlay({
       if (pendingNavigationRef.current === null) return
       highlightGenerationRef.current += 1
       pendingNavigationRef.current = null
+      releaseScrollNavigation()
       validationAbortRef.current?.abort()
       if (highlightFrameRef.current !== null) {
         cancelAnimationFrame(highlightFrameRef.current)
@@ -613,13 +620,22 @@ export function ChatSearchOverlay({
     }
     viewport.addEventListener("keydown", onKeyDown)
     viewport.addEventListener("pointerdown", cancelNavigationFromInput, { passive: true })
+    const scrollRoot = viewport.parentElement ?? viewport
+    const cancelNavigationFromScrollbar = (event: PointerEvent): void => {
+      if (event.composedPath().some((target) => target instanceof HTMLElement &&
+        target.hasAttribute("data-scroll-area-scrollbar"))) cancelNavigationFromInput()
+    }
+    // Radix renders its scrollbar beside the viewport; capture before its thumb handler.
+    scrollRoot.addEventListener("pointerdown", cancelNavigationFromScrollbar,
+      { capture: true, passive: true })
     return () => {
       viewport.removeEventListener("wheel", cancelNavigationFromInput)
       viewport.removeEventListener("touchstart", cancelNavigationFromInput)
       viewport.removeEventListener("keydown", onKeyDown)
       viewport.removeEventListener("pointerdown", cancelNavigationFromInput)
+      scrollRoot.removeEventListener("pointerdown", cancelNavigationFromScrollbar, true)
     }
-  }, [getViewport, onCancelDurableReveal, open])
+  }, [getViewport, onCancelDurableReveal, open, releaseScrollNavigation])
 
   const setActive = useCallback((next: number): void => {
     activeIndexRef.current = next
@@ -686,6 +702,11 @@ export function ChatSearchOverlay({
       const searchGeneration = searchGenerationRef.current
       highlightGenerationRef.current = generation
       pendingNavigationRef.current = generation
+      releaseScrollNavigation()
+      const navigationViewport = getViewport()
+      if (navigationViewport) {
+        releaseScrollNavigationRef.current = beginChatScrollNavigation(navigationViewport)
+      }
       validationAbortRef.current?.abort()
       const validation = new AbortController()
       validationAbortRef.current = validation
@@ -697,7 +718,10 @@ export function ChatSearchOverlay({
       }
 
       const finish = (): void => {
-        if (pendingNavigationRef.current === generation) pendingNavigationRef.current = null
+        if (pendingNavigationRef.current === generation) {
+          pendingNavigationRef.current = null
+          releaseScrollNavigation()
+        }
         highlightFrameRef.current = null
       }
       let stableFrames = 0
@@ -841,7 +865,7 @@ export function ChatSearchOverlay({
       }
       revealMountedRow()
     },
-    [apiSupported, applyHighlights, getViewport]
+    [apiSupported, applyHighlights, getViewport, releaseScrollNavigation]
   )
 
   const publishMatches = useCallback(
@@ -1022,6 +1046,7 @@ export function ChatSearchOverlay({
     localSearchThrottleRef.current?.cancel()
     highlightGenerationRef.current += 1
     pendingNavigationRef.current = null
+    releaseScrollNavigation()
     autoRevealedQueryRef.current = ""
     localMatchesRef.current = []
     localOccurrenceCountsRef.current = new Map()
@@ -1083,7 +1108,8 @@ export function ChatSearchOverlay({
       active = false
       window.clearTimeout(timer)
     }
-  }, [normalizedQuery, onCancelDurableReveal, onCancelLocalSearch, open, searchDurableMessages])
+  }, [normalizedQuery, onCancelDurableReveal, onCancelLocalSearch, open,
+    releaseScrollNavigation, searchDurableMessages])
 
   // Leading/trailing max-wait throttling guarantees progress during an
   // uninterrupted token stream while still coalescing the hot path.
@@ -1117,12 +1143,13 @@ export function ChatSearchOverlay({
     revealCallbacksRef.current.onRevealSearchContext?.(null)
     highlightGenerationRef.current += 1
     pendingNavigationRef.current = null
+    releaseScrollNavigation()
     if (highlightFrameRef.current !== null) {
       cancelAnimationFrame(highlightFrameRef.current)
       highlightFrameRef.current = null
     }
     clearHighlights()
-  }, [open])
+  }, [open, releaseScrollNavigation])
 
   useEffect(() => {
     return () => {
@@ -1131,12 +1158,14 @@ export function ChatSearchOverlay({
       validationAbortRef.current?.abort()
       if (contextRefreshFrameRef.current !== null) cancelAnimationFrame(contextRefreshFrameRef.current)
       highlightGenerationRef.current += 1
+      pendingNavigationRef.current = null
+      releaseScrollNavigation()
       if (highlightFrameRef.current !== null) {
         cancelAnimationFrame(highlightFrameRef.current)
       }
       clearHighlights()
     }
-  }, [])
+  }, [releaseScrollNavigation])
 
   const goToMatch = useCallback(
     (direction: 1 | -1): void => {

@@ -299,15 +299,19 @@ it("keeps separate current owners when a passive candidate returns active UI", a
   }
 })
 
-it("keeps a mutable or effectful callback on its original current owner path", async () => {
+it.each(["AssistantMessage", "TurnDuration"] as const)(
+  "keeps a mutable or effectful %s callback on its original current owner path", async (component) => {
   const f = await fixture(
-    `on("ui.render",{component:"AssistantMessage"},($,e)=>
+    `on("ui.render",{component:${JSON.stringify(component)}},($,e)=>
     ({type:"Text",props:{},children:[String(++counter)]}))`,
     "let counter=0"
   )
-  const first = await f.read()
+  const read = () => component === "AssistantMessage" ? f.read() :
+    f.manager.siteRead(f.root, "thread", "TurnDuration",
+      { word: "PRIVATE duration", durationMs: 1200 }, "message:duration")
+  const first = await read()
   expect(first.state).toBe("mounted")
-  const second = await f.read()
+  const second = await read()
   expect(second.state).toBe("mounted")
   expect(f.events.filter((event) => event === "ui.render")).toHaveLength(2)
   if (first.state === "mounted") await f.manager.siteUnmount(f.root, "thread", first.owner)

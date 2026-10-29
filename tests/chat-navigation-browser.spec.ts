@@ -16,6 +16,7 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const require = createRequire(import.meta.url)
 const binary = require("electron") as string
 const baseline = process.env.CHAT_NAVIGATION_BASELINE_REF
+const scrollbarCancelOnly = process.argv.includes("--scrollbar-cancel-only")
 const artifacts = join(projectRoot, "output/chat-navigation", baseline ? "baseline" : "current")
 mkdirSync(artifacts, { recursive: true })
 
@@ -162,6 +163,7 @@ async function main(): Promise<void> {
     console.error(error.stack)
   })
   const check = async (name: string, run: () => Promise<unknown>): Promise<void> => {
+    if (scrollbarCancelOnly && !name.startsWith("real sibling scrollbar")) return
     try {
       results.push({ name, passed: true, details: await run() })
     } catch (error) {
@@ -210,8 +212,9 @@ async function main(): Promise<void> {
           scrollTop: document.getElementById("viewport")?.scrollTop
         }))
       }
-      await page.screenshot({ path: join(artifacts, `failure-${results.length}.png`) })
       results.push({ name, passed: false, error: JSON.stringify(failure) })
+      if (!scrollbarCancelOnly)
+        await page.screenshot({ path: join(artifacts, `failure-${results.length - 1}.png`) })
     }
     console.log(JSON.stringify(results.at(-1)))
   }
@@ -255,7 +258,8 @@ async function main(): Promise<void> {
       return events
     })
     const open = async (
-      kind: "occurrences" | "folded" | "delayed" | "dense" | "tail" | "inline"
+      kind: "occurrences" | "folded" | "delayed" | "dense" | "tail" | "inline" | "anchored"
+        | "scrollbar-delayed" | "scrollbar-highlight"
     ): Promise<void> => {
       await page.evaluate((value) => window.chatNavigationFixture.mountSearch(value), kind)
       await page.getByPlaceholder("在当前会话中搜索").waitFor()
@@ -291,6 +295,25 @@ async function main(): Promise<void> {
       )
       assert((await activeMatch(page)).visible)
       return { first, second }
+    })
+    await check("active search navigation yields the detached anchor then resumes it", async () => {
+      await open("anchored")
+      await waitForActiveMatch(page)
+      await page.waitForFunction(() =>
+        window.chatNavigationFixture.searchNavigationActive?.() === false
+      )
+      const before = await activeMatch(page)
+      assert(before.visible && before.scrollTop > 250, JSON.stringify(before))
+      await page.evaluate(() => {
+        document.querySelector<HTMLElement>('[data-chat-message-id="anchor-before"]')!
+          .style.height = "370px"
+      })
+      await page.waitForFunction((top) =>
+        Math.abs(document.getElementById("viewport")!.scrollTop - top - 120) < 2,
+      before.scrollTop)
+      const after = await activeMatch(page)
+      assert(after.visible, JSON.stringify(after))
+      return { before, after }
     })
     await check("folded assistant search exposes its middle", async () => {
       await open("folded")
@@ -451,6 +474,57 @@ async function main(): Promise<void> {
       assert.deepEqual(await page.evaluate(() => window.chatNavigationMetrics.reveals), [])
       assert.equal((await activeMatch(page)).scrollTop, 0)
     })
+    for (const kind of ["scrollbar-delayed", "scrollbar-highlight"] as const) {
+      await check(`real sibling scrollbar cancels ${kind === "scrollbar-delayed" ? "durable hydration" : "active highlight layout"}`, async () => {
+        await open(kind)
+        await page.waitForFunction(() => window.chatNavigationFixture.searchNavigationActive?.() === true)
+        if (kind === "scrollbar-delayed")
+          await page.waitForFunction(() => Boolean(window.chatNavigationFixture.finishHydration))
+        else await page.waitForFunction(() => {
+          const registry = (CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights
+          return [...(registry.get("chat-search-active") ?? [])][0]?.toString() === "needle"
+        })
+        const thumb = page.getByTestId("search-real-scrollbar-thumb")
+        const bounds = await thumb.boundingBox()
+        assert(bounds && bounds.width > 0 && bounds.height > 0, "A real Radix thumb must be presented")
+        assert(await thumb.evaluate((node) => {
+          const viewport = document.getElementById("viewport")!
+          const scrollbar = node.closest("[data-scroll-area-scrollbar]")!
+          return !viewport.contains(scrollbar) && scrollbar.parentElement === viewport.parentElement
+        }), "The actual scrollbar must be a viewport sibling")
+        const before = await activeMatch(page)
+        const revealsBefore = await page.evaluate(() => window.chatNavigationMetrics.reveals.length)
+        await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)
+        await page.mouse.down()
+        try {
+          assert.equal(await page.evaluate(() => window.chatNavigationFixture.searchNavigationActive?.()),
+            false, "Real scrollbar pointerdown must release the pending navigation lease")
+          await page.evaluate(() => window.chatNavigationFixture.finishLayout?.())
+          await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2 + 60,
+            { steps: 4 })
+        } finally {
+          await page.mouse.up()
+        }
+        const manualTop = await page.evaluate(() => document.getElementById("viewport")!.scrollTop)
+        assert(manualTop > before.scrollTop + 40, "The user's actual Radix thumb drag must scroll")
+        if (kind === "scrollbar-delayed")
+          await page.evaluate(() => window.chatNavigationFixture.finishHydration!())
+        const after = await page.evaluate(async () => {
+          const tops: number[] = []
+          for (let frame = 0; frame < 18; frame++) {
+            await new Promise<void>((done) => requestAnimationFrame(() => done()))
+            tops.push(document.getElementById("viewport")!.scrollTop)
+          }
+          return { tops, reveals: window.chatNavigationMetrics.reveals.length,
+            navigationActive: window.chatNavigationFixture.searchNavigationActive?.() }
+        })
+        assert(after.tops.every((top) => Math.abs(top - manualTop) < 2),
+          "Stale search completion/frames must not overwrite the actual thumb position")
+        assert.equal(after.reveals, revealsBefore, "Cancelled async work cannot reveal its old result")
+        assert.equal(after.navigationActive, false)
+        return { before, manualTop, after }
+      })
+    }
     await check("new query supersedes a pending durable navigation", async () => {
       await open("delayed")
       await page.waitForFunction(() => Boolean(window.chatNavigationFixture.finishHydration))
@@ -477,7 +551,7 @@ async function main(): Promise<void> {
   } finally {
     writeFileSync(
       join(artifacts, "browser-results.json"),
-      JSON.stringify({ baseline, results, errors }, null, 2)
+      JSON.stringify({ baseline, scope: scrollbarCancelOnly ? "scrollbar-cancel-only" : "all", results, errors }, null, 2)
     )
     await app.close()
   }

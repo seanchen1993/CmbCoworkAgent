@@ -7,7 +7,7 @@ import {
   nativePluginCapabilities,
   type NativePluginCapability
 } from "@/lib/native-plugin-capabilities"
-import { NativeNodeComposer } from "./NativeNodeComposer"
+import { InstalledPluginFlowDefinition } from "./InstalledPluginFlowDefinition"
 import { NativePluginCompatibility } from "./NativePluginCompatibility"
 
 export function NativePluginCapabilities({
@@ -41,7 +41,7 @@ export function NativePluginCapabilities({
       const next = nativePluginCapabilities(plugins, skills, JSON.parse(identities))
       setRows(next)
       setSelected((id) =>
-        next.some((row) => row.pluginId === id && row.projectMode) ? id : null
+        next.some((row) => row.pluginId === id) ? id : null
       )
     } catch (cause) {
       if (sequence.current === request) {
@@ -60,6 +60,7 @@ export function NativePluginCapabilities({
       requests.current++
     }
   }, [refresh, pluginVersion])
+  const selectedPlugin = rows.find((row) => row.pluginId === selected)
   return (
     <section aria-label="已安装的原生插件" className="space-y-3 rounded-xl border p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -118,15 +119,9 @@ export function NativePluginCapabilities({
             )}
             <div className="flex flex-wrap gap-2">
               {/* Native entry eligibility is separate from project Skill isolation. */}
-              {row.projectMode && (
-                <Button
-                  size="sm"
-                  disabled={busy || !row.enabled}
-                  onClick={() => setSelected(row.pluginId)}
-                >
-                  查看项目流程
-                </Button>
-              )}
+              <Button size="sm" disabled={busy} onClick={() => setSelected(row.pluginId)}>
+                查看流程定义
+              </Button>
               {row.projectMode && (
                 <Button size="sm" variant="outline" disabled={busy || !row.enabled}
                   onClick={() => openDerivedProject(row.pluginId, row.name,
@@ -174,13 +169,12 @@ export function NativePluginCapabilities({
           </article>
         ))}
       </div>
-      {selected && !busy && (
-        <NativeNodeComposer
+      {selectedPlugin && !busy && (
+        <InstalledPluginFlowDefinition
           key={JSON.stringify([selected, pluginVersion])}
-          threadId={threadId}
-          workspace={workspace}
-          pluginId={selected}
-          initialOpen
+          pluginId={selectedPlugin.pluginId}
+          name={selectedPlugin.name}
+          version={selectedPlugin.version}
         />
       )}
     </section>

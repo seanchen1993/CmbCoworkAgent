@@ -39,6 +39,10 @@ export function projectChatVirtualWindow(
   const nextStart = identities.findIndex((identity) => oldIndexes.has(identity))
   if (nextStart < 0) return reset()
   const oldStart = oldIndexes.get(identities[nextStart])!
+  // Restoring a latest page can remove an old historical prefix and insert a different
+  // prefix before the retained tail. A net firstItemIndex shift would assign the removed
+  // rows' measurements to those new identities. Only pure prepend/trim can retain sizes.
+  if (oldStart > 0 && nextStart > 0) return reset()
   const overlap = Math.min(old.length - oldStart, identities.length - nextStart)
   for (let index = 0; index < overlap; index++) {
     if (old[oldStart + index] !== identities[nextStart + index]) return reset()

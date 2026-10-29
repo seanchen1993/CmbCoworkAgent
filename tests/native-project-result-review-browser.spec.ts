@@ -26,7 +26,7 @@ async function main() {
       })
       builder.onLoad({ filter: /.*/, namespace: "fixture" }, args => ({
         loader: "tsx", resolveDir: root, contents: args.path === "store"
-          ? "export const useAppStore=()=>({}); useAppStore.getState=()=>({threads:[]}); export const isThreadDeletionPending=()=>false"
+          ? "const state={accountRevision:0,threads:[],threadDirectoryHasMore:false,threadDirectoryLoadingMore:false}; export const useAppStore=selector=>selector(state); useAppStore.getState=()=>state; useAppStore.subscribe=()=>()=>{}; export const isThreadDeletionPending=()=>false"
           : stubs[args.path]
       }))
     } }],

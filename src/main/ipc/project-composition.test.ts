@@ -27,6 +27,9 @@ const state = vi.hoisted(() => ({
   start: vi.fn(),
   cancel: vi.fn(),
   approve: vi.fn(),
+  getDb: vi.fn(() => {
+    throw Error("COMPOSITION_IPC_TEST_DATABASE_ACCESS_UNEXPECTED")
+  }),
   approveLegacy: vi.fn(),
   decideLegacy: vi.fn(async () => ({ applied: true, message: "continued" })),
   legacyDecision: undefined as Record<string, unknown> | undefined,
@@ -50,6 +53,7 @@ vi.mock("../storage", () => ({
   }
 }))
 vi.mock("../db", () => ({
+  getDb: state.getDb,
   getThreadCore: () => {
     state.threadReads++
     return ({
@@ -207,7 +211,13 @@ beforeEach(() => {
     return state.run
   })
 })
-afterEach(() => rmSync(state.root, { recursive: true, force: true }))
+afterEach(() => {
+  try {
+    expect(state.getDb).not.toHaveBeenCalled()
+  } finally {
+    rmSync(state.root, { recursive: true, force: true })
+  }
+})
 function fixture(legacy = false) {
   const handlers = new Map<string, (event: IpcMainInvokeEvent, input: unknown) => unknown>()
   const owner = {} as BrowserWindow

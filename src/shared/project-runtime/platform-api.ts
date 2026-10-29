@@ -1,5 +1,7 @@
 import type { HostProjectOperation, HostProjectState } from "./host-types"
 
+export const LOCAL_PROJECT_SEARCH_MAX_CHARS = 512
+
 export interface LocalProjectTemplate {
   installedPluginId: string
   name: string
@@ -70,7 +72,7 @@ export interface LocalProjectApi {
     operationId: string
   ): Promise<import("./action-results").ProjectActionResults>
   templates(): Promise<LocalProjectTemplate[]>
-  list(afterProjectId?: string): Promise<LocalProjectSummary[]>
+  list(afterProjectId?: string, query?: string): Promise<LocalProjectSummary[]>
   get(projectId: string): Promise<LocalProjectView>
   versions(projectId: string): Promise<import("./version-report").ProjectVersionReport>
   create(input: {

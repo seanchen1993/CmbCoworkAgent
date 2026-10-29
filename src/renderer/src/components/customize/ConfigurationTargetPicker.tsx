@@ -14,7 +14,13 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 const optionKey = (id: string | null, workspace: string | null) =>
   JSON.stringify([id, normalizeWorkspacePathKey(workspace)])
 
-export function ConfigurationTargetPicker({ threads }: { threads: ConfigurationThread[] }) {
+export function ConfigurationTargetPicker({
+  threads,
+  chatPluginsOnly = false
+}: {
+  threads: ConfigurationThread[]
+  chatPluginsOnly?: boolean
+}) {
   const target = useConfigurationTarget()
   const [error, setError] = useState("")
   const [open, setOpen] = useState(false)
@@ -51,7 +57,7 @@ export function ConfigurationTargetPicker({ threads }: { threads: ConfigurationT
   return (
     <section className="space-y-2 border-b px-4 py-3" aria-label="配置目标聊天">
       <label id={`${id}-label`} className="block text-sm font-medium">
-        为哪段聊天配置
+        {chatPluginsOnly ? "聊天功能配置" : "为哪段聊天配置"}
       </label>
       <Popover
         open={open && !empty}
@@ -201,7 +207,9 @@ export function ConfigurationTargetPicker({ threads }: { threads: ConfigurationT
       <p id={`${id}-hint`} className="text-xs text-muted-foreground">
         {empty
           ? "只有具有工作目录的本地聊天可配置。请先创建或打开一段本地聊天。"
-          : "切换这里只更换配置对象。应用后，点击“去这段聊天使用”再进入聊天。"}
+          : chatPluginsOnly
+            ? "聊天功能使用所选聊天和工作目录；项目插件可直接新建项目。"
+            : "下方操作使用所选聊天和工作目录。"}
       </p>
       {error && (
         <p role="alert" className="text-sm text-destructive">

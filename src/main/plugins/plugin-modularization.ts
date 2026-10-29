@@ -70,6 +70,11 @@ const object = (value: unknown): Record<string, unknown> => {
   return value as Record<string, unknown>
 }
 type SkillAlias = NonNullable<PluginModularizationInspection["aliases"]>[number]
+const modularizationFileLimit = 32
+
+function migrationFileFailure(path: string, code: string, message: string): never {
+  throw new BusinessModCatalogValidationError([{ path, code, message }], code)
+}
 
 /** Additive text authoring only, using the existing UTF-8/file/path limits and no new reader. */
 function addMigrationFiles(
@@ -78,8 +83,18 @@ function addMigrationFiles(
 ) {
   if (input === undefined)
     return { snapshot, additions: [] as Array<{ path: string; text: string }> }
-  if (!Array.isArray(input) || types.isProxy(input) || input.length > AUTHORING_BUNDLE_LIMITS.files)
-    throw Error("PLUGIN_MODULARIZATION_FILES_LIMIT")
+  if (!Array.isArray(input) || types.isProxy(input))
+    migrationFileFailure(
+      "modularizationFiles",
+      "PLUGIN_MODULARIZATION_FILES_INVALID",
+      "modularizationFiles 必须是文本文件数组，每项只包含 path 和 text。"
+    )
+  if (input.length > modularizationFileLimit)
+    migrationFileFailure(
+      "modularizationFiles",
+      "PLUGIN_MODULARIZATION_FILES_LIMIT",
+      "本次最多新增 32 个文件；保留原资源，将新增实现整理到此上限后重新请求。"
+    )
   const additions: Array<{ path: string; text: string }> = []
   const files = [...snapshot.files]
   const prefixes = new Map<string, string>()
@@ -92,29 +107,83 @@ function addMigrationFiles(
   }
   let bytes = 0
   for (let index = 0; index < input.length; index++) {
+    const field = `modularizationFiles.${index}`
     const row = Object.getOwnPropertyDescriptor(input, String(index))
-    if (!row || !("value" in row)) throw Error("PLUGIN_MODULARIZATION_FILES_INVALID")
+    if (!row || !("value" in row))
+      migrationFileFailure(
+        field,
+        "PLUGIN_MODULARIZATION_FILES_INVALID",
+        "该项必须是只包含 path 和 text 的普通数据对象；不接受访问器或缺失项。"
+      )
     // Native synthetic identity is validation-only; it is never added to the candidate.
-    const validated = createAuthoringSourceBundle([
-      { path: "plugin.json", text: '{"name":"migration-file-check","version":"1.0.0"}' },
-      row.value
-    ]).files.find((file) => file.path !== "plugin.json")!
+    let validated: { path: string; text: string }
+    try {
+      validated = createAuthoringSourceBundle([
+        { path: "plugin.json", text: '{"name":"migration-file-check","version":"1.0.0"}' },
+        row.value
+      ]).files.find((file) => file.path !== "plugin.json")!
+    } catch (error) {
+      const code = error instanceof Error ? error.message : ""
+      if (code === "AUTHORING_SOURCE_PATH")
+        migrationFileFailure(
+          `${field}.path`,
+          "PLUGIN_MODULARIZATION_FILE_PATH_INVALID",
+          "使用不超过 160 字符的包内相对文本路径；移除绝对路径、上级跳转、凭据路径或不支持的扩展名。"
+        )
+      if (code === "AUTHORING_SOURCE_COLLISION")
+        migrationFileFailure(
+          `${field}.path`,
+          "PLUGIN_MODULARIZATION_FILE_IDENTITY_FORBIDDEN",
+          "不能新增或覆盖插件身份清单；仅新增独立实现资源并在 catalog 中声明。"
+        )
+      if (code === "AUTHORING_SOURCE_TEXT")
+        migrationFileFailure(
+          `${field}.text`,
+          "PLUGIN_MODULARIZATION_FILE_TEXT_INVALID",
+          "text 必须是无空字符的有效 UTF-8 字符串，单文件最多 64 KiB；缩减或拆分后重新请求。"
+        )
+      migrationFileFailure(
+        field,
+        "PLUGIN_MODULARIZATION_FILES_INVALID",
+        "该项必须是只包含 path 和 text 的普通数据对象；不接受访问器或额外字段。"
+      )
+    }
     const { path, text } = validated
-    businessModPath(path)
-    normalizeProjectResourcePaths([path])
+    try {
+      businessModPath(path)
+      normalizeProjectResourcePaths([path])
+    } catch {
+      migrationFileFailure(
+        `${field}.path`,
+        "PLUGIN_MODULARIZATION_FILE_PATH_INVALID",
+        "该路径包含禁止发布的资源；改用独立包内文本路径，不复制凭据、缓存或本地运行配置。"
+      )
+    }
+    if (generatedPaths.has(path) || /(?:^|\/)(?:plugin\.json|devclaw\.[\w.-]+\.json)$/i.test(path))
+      migrationFileFailure(
+        `${field}.path`,
+        "PLUGIN_MODULARIZATION_FILE_IDENTITY_FORBIDDEN",
+        "不能新增或覆盖插件身份、运行契约或平台清单；仅新增独立实现资源并在 catalog 中声明。"
+      )
     if (
       !/^(?:skills|tests|knowledge|references|scripts|agents|workflows)\//.test(path) &&
       !path.startsWith("mods/business/")
     )
-      throw Error("PLUGIN_MODULARIZATION_FILE_PATH_FORBIDDEN")
-    if (generatedPaths.has(path) || /(?:^|\/)(?:plugin\.json|devclaw\.[\w.-]+\.json)$/i.test(path))
-      throw Error("PLUGIN_MODULARIZATION_FILE_IDENTITY_FORBIDDEN")
+      migrationFileFailure(
+        `${field}.path`,
+        "PLUGIN_MODULARIZATION_FILE_PATH_FORBIDDEN",
+        "新增资源须位于 skills/、mods/business/、tests/、knowledge/、references/、scripts/、agents/ 或 workflows/。"
+      )
     const parts = path.split("/")
     for (let index = 1; index <= parts.length; index++) {
       const prefix = parts.slice(0, index).join("/")
       const previous = prefixes.get(prefix.toLowerCase())
       if (previous !== undefined && previous !== prefix)
-        throw Error("PLUGIN_MODULARIZATION_FILE_COLLISION")
+        migrationFileFailure(
+          `${field}.path`,
+          "PLUGIN_MODULARIZATION_FILE_COLLISION",
+          "该路径与原资源或此前新增项的目录大小写冲突；使用拼写一致且不覆盖原资源的新路径。"
+        )
     }
     const key = path.toLowerCase()
     if (
@@ -125,9 +194,18 @@ function addMigrationFiles(
           key.startsWith(file.path.toLowerCase() + "/")
       )
     )
-      throw Error("PLUGIN_MODULARIZATION_FILE_COLLISION")
+      migrationFileFailure(
+        `${field}.path`,
+        "PLUGIN_MODULARIZATION_FILE_COLLISION",
+        "该路径重复、覆盖原文件或与文件父子路径冲突；改用独立新路径，并同步 catalog 资源引用。"
+      )
     bytes += Buffer.byteLength(path) + Buffer.byteLength(text)
-    if (bytes > AUTHORING_BUNDLE_LIMITS.totalBytes) throw Error("PLUGIN_MODULARIZATION_FILES_LIMIT")
+    if (bytes > AUTHORING_BUNDLE_LIMITS.totalBytes)
+      migrationFileFailure(
+        `${field}.text`,
+        "PLUGIN_MODULARIZATION_FILES_LIMIT",
+        "新增文件的路径与 UTF-8 文本总量超过 256 KiB；缩减新增实现，保留原资源后重新请求。"
+      )
     const content = Buffer.from(text)
     files.push({ path, bytes: content, mode: 0o644, digest: sha(content) })
     additions.push({ path, text })
@@ -138,7 +216,11 @@ function addMigrationFiles(
   }
   const totalBytes = files.reduce((sum, file) => sum + file.bytes.length, 0)
   if (files.length > DERIVATION_LIMITS.files || totalBytes > DERIVATION_LIMITS.totalBytes)
-    throw Error("PLUGIN_MODULARIZATION_FILES_LIMIT")
+    migrationFileFailure(
+      "modularizationFiles",
+      "PLUGIN_MODULARIZATION_FILES_LIMIT",
+      "原源码加新增资源超出整包文件数或字节上限；保留原插件，缩减新增实现后重新请求。"
+    )
   return {
     additions,
     snapshot: { ...snapshot, files, totalBytes, digest: derivationDigest(files, snapshot.excluded) }
@@ -636,17 +718,24 @@ function checkProjection(
       json(projection.files.find((file) => file.path === runtimePath)!)
     )
     // An authored plan may add mapping metadata, but cannot silently drop original enforcement.
-    for (const key of [
-      "mode",
-      "stateOwner",
-      "actions",
-      "artifacts",
-      "checks",
-      "environment",
-      "capabilities"
-    ] as const)
+    for (const key of ["mode", "stateOwner", "capabilities"] as const)
       if (!same(original[key], projected[key])) throw Error("PLUGIN_MODULARIZATION_RUNTIME_CHANGED")
+    // Grouping declarations by stage may change table order. Check actions additionally use
+    // their global checks-table order at runtime, so preserve that per-stage sequence below.
+    const byId = (left: { id: string }, right: { id: string }) =>
+      left.id < right.id ? -1 : left.id > right.id ? 1 : 0
+    for (const key of ["actions", "artifacts", "checks", "environment"] as const)
+      if (!same([...original[key]].sort(byId), [...projected[key]].sort(byId)))
+        throw Error("PLUGIN_MODULARIZATION_RUNTIME_CHANGED")
     if (!same(prepared?.runtime.stages ?? original.stages, projected.stages))
+      throw Error("PLUGIN_MODULARIZATION_RUNTIME_CHANGED")
+    const actionCheckOrder = (runtime: ProjectRuntimeManifest) =>
+      runtime.stages.map((stage) =>
+        runtime.checks
+          .filter((check) => stage.checkIds.includes(check.id) && check.kind === "action")
+          .map((check) => check.id)
+      )
+    if (!same(actionCheckOrder(original), actionCheckOrder(projected)))
       throw Error("PLUGIN_MODULARIZATION_RUNTIME_CHANGED")
     const originalContract = projectRuntimeExtensionContract(
       json(snapshot.files.find((file) => file.path === runtimePath)!)

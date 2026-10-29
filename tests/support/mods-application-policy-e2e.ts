@@ -12,18 +12,18 @@ export async function verifyApplicationCompletionSettings(
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Mods settings E2E", { exact: true }).first().click()
   await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-  await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "灵件与使用设置", exact: true }).click()
+  await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "插件", exact: true }).click()
   await page
     .getByRole("navigation", { name: "灵件工作区" })
     .getByRole("button", { name: "我已添加", exact: true })
     .click()
   assert.equal(await page.locator("[data-mods-locked]").count(), 0)
+  await page
+    .getByRole("article", { name: "function-commands", exact: true })
+    .getByRole("button", { name: "管理", exact: true })
+    .click()
   const row = page.locator('[data-function-mod-id="function-commands"]')
   await row.locator("[data-completion-policy]").waitFor({ state: "attached" })
-  await row.evaluate((node) => {
-    for (let parent = node.parentElement; parent; parent = parent.parentElement)
-      if (parent instanceof HTMLDetailsElement) parent.open = true
-  })
   const form = row.locator("[data-completion-policy]")
   await form.locator(":scope > summary").click()
   await form.getByRole("button", { name: "修复后再完成", exact: true }).click()

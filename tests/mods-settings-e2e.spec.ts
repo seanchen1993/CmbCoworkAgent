@@ -111,6 +111,8 @@ async function main() {
     await page!.locator("[data-installed-mods]").waitFor()
     assert.equal(await page!.locator('input[type="password"]').count(), 0)
     assert.equal(await page!.locator("[data-mods-locked]").count(), 0)
+    await page!.locator("[data-mods-more-settings] > summary").click()
+    await page!.locator("[data-plugin-import-controls] > summary").click()
     assert(await page!.getByRole("checkbox", { name: "允许使用灵件" }).isEnabled())
     assert(await page!.getByRole("button", { name: "上传插件（ZIP）" }).isEnabled())
     assert(await page!.getByRole("button", { name: "从文件夹安装" }).isEnabled())
@@ -142,6 +144,7 @@ async function main() {
     const ordinaryInstalled = (await getPlugins()).find((plugin) => plugin.name === "ordinary-skill")
     assert(ordinaryInstalled)
     assert.equal(ordinaryInstalled.enabled, false)
+    await ordinaryCard.getByRole("button", { name: "管理", exact: true }).click()
     await ordinaryCard.getByRole("button", { name: "卸载", exact: true }).click()
     await page!.getByRole("button", { name: "确认卸载", exact: true }).click()
     await ordinaryCard.waitFor({ state: "hidden" })
@@ -205,6 +208,7 @@ async function main() {
     const plugin = plugins.find((p) => p.name === "function-commands")!
     assert(plugin)
     const row = page!.locator('[data-installed-mod-id="' + plugin.id + '"]')
+    await row.getByRole("button", { name: "管理", exact: true }).click()
     await row.getByRole("button", { name: "卸载", exact: true }).click()
     const dialog = page!.getByRole("dialog", { name: "卸载插件", exact: true })
     await dialog.getByRole("button", { name: "取消", exact: true }).click()
@@ -266,9 +270,13 @@ async function main() {
     pass(
       "uninstall removes disk files, registry and live commands; stale descriptors fail and other plugins remain"
     )
+    const more = page!.locator("[data-mods-more-settings]")
+    if (!(await more.evaluate((element) => (element as HTMLDetailsElement).open)))
+      await more.locator(":scope > summary").click()
     await page!.getByRole("checkbox", { name: "允许使用灵件" }).uncheck()
     const other = (await getPlugins()).find((p) => (p.modCount ?? 0) > 0)!
     const otherRow = page!.locator('[data-installed-mod-id="' + other.id + '"]')
+    await otherRow.getByRole("button", { name: "管理", exact: true }).click()
     await otherRow.getByRole("button", { name: "卸载", exact: true }).click()
     await dialog.getByRole("button", { name: "确认卸载", exact: true }).click()
     await otherRow.waitFor({ state: "detached" })
@@ -306,7 +314,10 @@ async function main() {
         })
       })
     }, downloadedStarter)
-    await page!.getByText("安装下载好的插件", { exact: false }).first().click()
+    const fileImport = page!.locator("details[data-plugin-import-controls]")
+    if ((await fileImport.getAttribute("open")) === null)
+      await fileImport.locator(":scope > summary").click()
+    await fileImport.getByText("安装下载好的插件", { exact: false }).click()
     await page!.getByRole("button", { name: "下载插件示例（ZIP）", exact: true }).click()
     const downloadDeadline = Date.now() + 10000
     while (Date.now() < downloadDeadline) {

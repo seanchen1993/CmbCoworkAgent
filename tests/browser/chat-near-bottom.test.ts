@@ -10,6 +10,8 @@ const file = path.join(root, "src/renderer/src/components/chat/ChatContainer.tsx
 const raw = fs.readFileSync(file, "utf8")
 const ast = ts.createSourceFile(file, raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
 const names = [
+  "getVirtualTail",
+  "hasReadyVirtualTail",
   "scheduleBottomScrollEffect",
   "runChatScrollTransition",
   "dispatchChatScrollEvent",
@@ -24,10 +26,12 @@ function visit(node: ts.Node) {
   ts.forEachChild(node, visit)
 }
 visit(ast)
-if (bodies.size !== 4) throw Error("Actual callbacks unavailable")
+if (bodies.size !== names.length) throw Error("Actual callbacks unavailable")
 const source = `
 import {createChatScrollState,transitionChatScroll,isChatScrollDetached,shouldFollowChatOutput,
   mergeChatScrollEffects,resolveChatBottomScrollWriter,shouldConfirmChatViewportBottom} from "./src/shared/chat-scroll-controller"
+import {ChatBottomPresentationWait} from "./src/renderer/src/components/chat/chat-bottom-presentation-wait"
+import {isChatRowPresented} from "./src/renderer/src/components/chat/chat-row-presentation"
 const useCallback=fn=>fn, viewport=document.getElementById("viewport"), body=document.getElementById("body")
 let ownedViewport=viewport
 const scrollParent=viewport, getViewport=()=>ownedViewport
@@ -35,12 +39,15 @@ const CHAT_AT_BOTTOM_THRESHOLD_PX=32, CHAT_SCROLL_UP_DETACH_DELTA_PX=2,
   CHAT_BOTTOM_SETTLE_MAX_FRAMES=60, CHAT_FOLLOW_SETTLE_MAX_FRAMES=12
 const chatScrollStateRef={current:null},pendingBottomScrollEffectRef={current:null},bottomScrollFrameRef={current:null},
   bottomSettleAttemptRef={current:0},bottomSettleEffectKeyRef={current:""},lastVisibleMessageIndexRef={current:1},
+  lastVisibleMessageIdRef={current:null},contentMessageRefs={current:new Map()},
   messageVirtualizationEnabledRef={current:false},virtuosoRef={current:null},pendingDurableHistoryAnchorRef={current:null},
   lastObservedScrollTopRef={current:0},upwardUserScrollIntentUntilRef={current:0},
   downwardUserScrollIntentUntilRef={current:Infinity},scrollbarUserIntentActiveRef={current:false}
+const bottomPresentationWait=new ChatBottomPresentationWait()
 const applyChatScrollEvent=event=>{const t=transitionChatScroll(chatScrollStateRef.current,event);chatScrollStateRef.current=t.state;return t}
 ${names.map((name) => "const " + name + "=" + bodies.get(name)).join("\n")}
 window.actualNearBottom={async run(options={}){
+  bottomPresentationWait.clear()
   if(bottomScrollFrameRef.current!==null)cancelAnimationFrame(bottomScrollFrameRef.current)
   bottomScrollFrameRef.current=null;pendingBottomScrollEffectRef.current=null
   bottomSettleAttemptRef.current=0;bottomSettleEffectKeyRef.current=""
@@ -107,6 +114,11 @@ async function main() {
       '<div id="viewport" style="height:300px;width:300px;overflow:auto;overflow-anchor:none"><div id="body" style="height:1200px">Actual DOM geometry</div></div>'
     )
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    assert.deepEqual(
+      errors,
+      [],
+      "Actual callbacks must initialize with their production dependencies"
+    )
     for (const options of [
       {},
       { pointer: true },

@@ -1,0 +1,6 @@
+{
+  "name": "test-verification",
+  "version": "2.0.0",
+  "mods": "mods/manifest.json",
+  "description": "独立 Node test runner 与原始回执校验；e2e 通过 Host configurationKeys 选择的 e2eTestFiles/e2eSubjects/e2eTimeoutMs 核对真实 UI 入口。支持测试内浏览器 E2E；需原生进程授权。"
+}

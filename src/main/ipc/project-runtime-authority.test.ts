@@ -231,6 +231,45 @@ it("returns exact ordinary template content identities without scanning unrelate
   })
 })
 
+it("discovers a Host template after one hundred enabled ordinary plugins", async () => {
+  const plugin = installedTemplate()
+  state.plugins.unshift(...Array.from({ length: 100 }, (_, index) => ({
+    ...plugin, id: `ordinary-${index}`, path: join(plugin.path, `ordinary-${index}`)
+  })))
+  const result = await nativeHandlers().call("templates") as Array<Record<string, unknown>>
+  expect(result).toHaveLength(1)
+  expect(result[0]).toMatchObject({ installedPluginId: plugin.id })
+})
+
+it("reports the installed-plugin scan budget instead of silently hiding templates", async () => {
+  const plugin = installedTemplate()
+  state.plugins = Array.from({ length: 4097 }, (_, index) => ({
+    ...plugin, id: `installed-${index}`
+  }))
+  await expect(nativeHandlers().call("templates")).rejects.toThrow("PROJECT_TEMPLATE_PLUGIN_LIMIT")
+})
+
+it("retains all Host candidates after the former one hundred template boundary", async () => {
+  const plugin = installedTemplate()
+  state.plugins = Array.from({ length: 101 }, (_, index) => ({
+    ...plugin, id: `installed-${index}`
+  }))
+  const result = await nativeHandlers().call("templates") as Array<Record<string, unknown>>
+  expect(result).toHaveLength(101)
+  expect(result.at(-1)).toMatchObject({ installedPluginId: "installed-100" })
+})
+
+it("forwards bounded literal project search to the account's store before paging", async () => {
+  const list = vi.fn(() => [])
+  state.service = { recoverInterrupted: () => {}, list }
+  const handlers = nativeHandlers()
+  expect(await handlers.call("list", "", "report_%")).toEqual([])
+  expect(list).toHaveBeenCalledExactlyOnceWith(100, "", "report_%")
+  for (const query of ["x".repeat(513), "bad\0query", 7, null])
+    expect(() => handlers.call("list", "", query)).toThrow("SEARCH_QUERY_INVALID")
+  expect(list).toHaveBeenCalledTimes(1)
+})
+
 it.each(["bytes", "disabled", "replaced", "window"])(
   "does not publish a template identity after %s changes during its real source read",
   async (change) => {

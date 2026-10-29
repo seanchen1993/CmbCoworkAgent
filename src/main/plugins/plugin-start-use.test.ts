@@ -7,6 +7,8 @@ import { hostProjectFixture } from "../harness-board/project-runtime/host-fixtur
 import { derivationContentIdentity, snapshotDerivationSource } from "./derivation-source"
 import type { PluginMetadata } from "../types"
 import { withPluginCatalogMutation } from "./catalog-mutation"
+import { pluginStartUseDestinationConfigurationIssues } from "./plugin-start-use-diagnostics"
+import type { FunctionUserConfigView } from "../../shared/mods/v2/user-config-view"
 
 const roots: string[] = []
 afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })))
@@ -89,6 +91,121 @@ it("routes an installed ordinary plugin to chat and a legacy project to its orig
   writeFileSync(join(f.root, "board_core/board_config.json"), "{}")
   expect((await service.prepare(f.input, () => {})).kind).toBe("plugin-project")
 })
+
+it.each(["host-project", "plugin-project", "chat", "host-with-chat", "chat-with-project-skills"])(
+  "keeps required configuration in the native destination for %s",
+  async (variant) => {
+    const host = variant === "host-project" || variant === "host-with-chat"
+    const f = fixture("configured-package", host)
+    mkdirSync(join(f.root, "mods"))
+    writeFileSync(join(f.root, "mods/main.ts"), "export function register() {}")
+    writeFileSync(
+      join(f.root, "mods/manifest.json"),
+      JSON.stringify({
+        apiVersion: "cmb.mods/v2",
+        id: "configured-package",
+        entry: "main.ts",
+        userConfig: {
+          knowledgeDirectory: {
+            type: "directory",
+            title: "Knowledge",
+            description: "Selected project knowledge",
+            required: true
+          },
+          audience: {
+            type: "string",
+            title: "Audience",
+            description: "Selected project audience",
+            required: true
+          }
+        }
+      })
+    )
+    if (variant === "plugin-project") {
+      mkdirSync(join(f.root, "board_core"))
+      writeFileSync(join(f.root, "board_core/board_config.json"), "{}")
+    }
+    if (variant.endsWith("with-chat") || variant.endsWith("with-project-skills")) {
+      mkdirSync(join(f.root, "skills/review"), { recursive: true })
+      writeFileSync(join(f.root, "skills/review/SKILL.md"), "Read-only review")
+      writeFileSync(
+        join(f.root, "devclaw.capabilities.json"),
+        JSON.stringify({
+          apiVersion: "devclaw.capabilities/v1",
+          capabilities: [
+            {
+              id: "review",
+              title: "Review",
+              kind: "skill",
+              usage: "universal",
+              entry: "skills/review/SKILL.md"
+            }
+          ]
+        })
+      )
+    }
+    const configuration: FunctionUserConfigView = {
+      pluginId: f.input.pluginId,
+      plugin: f.input.expected.name,
+      workspace: f.root,
+      digest: "a".repeat(64),
+      state: "inactive",
+      savedRevision: 0,
+      fields: [
+        {
+          key: "knowledgeDirectory",
+          label: "Knowledge",
+          description: "",
+          type: "directory",
+          required: true,
+          supported: true
+        },
+        {
+          key: "audience",
+          label: "Audience",
+          description: "",
+          type: "string",
+          required: true,
+          supported: true
+        }
+      ]
+    }
+    const readChatConfiguration = vi.fn(async () => configuration)
+    const destinations: string[] = []
+    const chatEntries = vi.fn(async () => ({ skills: [] }))
+    const enable = vi.fn(async () => {})
+    const service = new PluginStartUseService({
+      plugins: f.plugins,
+      enable,
+      chatEntries,
+      diagnostics: async (_plugin, _input, guard, destination) => {
+        guard()
+        destinations.push(destination)
+        return pluginStartUseDestinationConfigurationIssues(destination, readChatConfiguration)
+      }
+    })
+    const report = await service.prepare(f.input, () => {})
+    const destination = host
+      ? "host-project"
+      : variant === "plugin-project"
+        ? "plugin-project"
+        : "chat"
+    expect(report.kind).toBe(destination)
+    expect(destinations).toEqual([destination])
+    expect(report.canOpen).toBe(true)
+    expect(readChatConfiguration).toHaveBeenCalledTimes(destination === "chat" ? 1 : 0)
+    expect(chatEntries).toHaveBeenCalledTimes(destination === "chat" ? 1 : 0)
+    expect(enable).not.toHaveBeenCalled()
+    expect(report.issues.map((issue) => [issue.code, issue.resolution])).toEqual(
+      destination === "chat"
+        ? [
+            ["knowledge", "plugin-settings"],
+            ["configuration", "plugin-settings"]
+          ]
+        : []
+    )
+  }
+)
 
 it("keeps a newly installed disabled plugin inert until exact explicit enablement, then diagnoses fresh", async () => {
   const f = fixture()

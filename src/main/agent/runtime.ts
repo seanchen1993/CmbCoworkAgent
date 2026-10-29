@@ -92,6 +92,7 @@ import { ModError } from "../mods/errors"
 import { collectRuntimeToolCatalog } from "./runtime-tool-catalog"
 import type { FunctionToolInfo } from "../../shared/mods/v2/tools"
 import { currentFunctionExecution } from "../mods/v2/execution-context"
+import { createCreatorNativeReviewMiddleware } from "./creator-native-review-middleware"
 import { getModDevelopmentService } from "../mods/devtools/development-service"
 import { bindCreatorTraceUsage, readCreatorTraceId, bindRuntimeTraceContext } from "./trace/live-tool-evidence"
 import { readInternalHarnessProject } from "../harness-board/internal-project-context"
@@ -2472,6 +2473,7 @@ function assembleDeepAgent(
     onBuiltinTaskInstructionRequest,
     nativeConversationInput,
     completionCancellation,
+    creatorReviewMiddleware,
     // Windows shell kind the runtime's commands execute in (derived from the
     // sandbox). Threaded into the read-only execute gate so Windows PowerShell
     // read-only cmdlets (Get-Content, …) aren't false-blocked. "unknown" =
@@ -2500,6 +2502,7 @@ function assembleDeepAgent(
     conciseModeEnabled = false,
     clawSkillPolicy
   }: {
+    creatorReviewMiddleware?: ReturnType<typeof createCreatorNativeReviewMiddleware>
     onFinalSystemPrompt?: (prompt: string) => void
     onTaskSubagentPromptsResolved?: (prompts: Array<{ name: string; systemPrompt: string }>) => void
     onToolFailureSignal?: (input: {
@@ -3593,6 +3596,7 @@ function assembleDeepAgent(
     middleware: [
       ...(nativeConversationHost ? [nativeConversationHost.middleware] : []),
       ...(conversationMiddleware ? [conversationMiddleware] : []),
+      ...(creatorReviewMiddleware ? [creatorReviewMiddleware] : []),
       // FIRST (outermost wrapToolCall): reject recovered-malformed calls before
       // ANY tool lifecycle — PreToolUse hooks must not block/rewrite them (that
       // would replace the diagnosis with a misleading message), and the fuse/
@@ -8198,6 +8202,23 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     typeof tool === "object" && tool !== null && "name" in tool && typeof tool.name === "string" &&
     nativeCreatorTools.has(tool as RuntimeTool) &&
     (!options.allowedToolNames || options.allowedToolNames.includes(tool.name))))
+  const creatorReviewMiddleware =
+    !runtimePolicy.isProjectMode &&
+    !isCoordinatorMode &&
+    !isWorkflowMode &&
+    (!agentId || agentId === "main") &&
+    (!options.allowedToolNames || options.allowedToolNames.includes("mod_authoring")) &&
+    mainTools.some(
+      (tool) => nativeCreatorTools.has(tool as RuntimeTool) &&
+        (tool as RuntimeTool).name === "mod_authoring"
+    )
+      ? createCreatorNativeReviewMiddleware({
+          threadId,
+          workspace: workspacePath,
+          runToken: options.currentRunMessageQueueOwnerToken,
+          signal: options.abortSignal
+        })
+      : undefined
   if (authoringPrompt) {
     appendSystemContribution("cmb:mod-authoring", authoringPrompt)
     modSystemContributions[modSystemContributions.length - 1].requiredText = authoringPrompt
@@ -8544,6 +8565,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     },
     onNativeConversationTranscriptFlush: options.onNativeConversationTranscriptFlush,
     nativeConversationInput: options.nativeConversationInput,
+    creatorReviewMiddleware,
     middleware: [
       ...(stageDebug ? [createStageDebugFileMiddleware({ ...stageDebug,
         snapshotRoot: debugSource!.plugin.path }, assertStageDebugEnvironment)] : []),

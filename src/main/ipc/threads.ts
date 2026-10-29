@@ -84,6 +84,10 @@ import { prepareFunctionConversationCanonicalDisplay,
   type FunctionConversationCanonicalDisplayView } from
   "../checkpointer/function-conversation-canonical-display"
 import type { CanonicalThreadDisplayWitness } from "../thread-message-hydration/protocol"
+import {
+  createThreadDisplayMetadataGuard,
+  withThreadDisplayMetadataRetry
+} from "./thread-display-read-retry"
 import { hasInvalidFunctionConversationTranscriptStamp,
   readFunctionConversationTranscriptStamp } from "../../shared/mods/v2/conversation-transcript"
 import { functionConversationForkIdentity } from
@@ -2863,26 +2867,43 @@ function formatMarkdown(payload: ExportPayload): string {
 }
 
 function captureThreadDisplayRead(event: IpcMainInvokeEvent, threadId: string) {
-  const database = getDb(), row = getThreadCore(threadId)
+  const database = getDb(),
+    row = getThreadCore(threadId)
   if (!row || event.sender.isDestroyed()) throw Error("MODS_CONVERSATION_DISPLAY_SOURCE_INVALID")
-  const incarnation = captureThreadIncarnation(row), controller = new AbortController()
+  const incarnation = captureThreadIncarnation(row),
+    controller = new AbortController()
+  const sender = event.sender,
+    frame = sender.mainFrame
   const close = () => controller.abort()
-  event.sender.on("did-start-navigation", close)
-  event.sender.on("render-process-gone", close)
-  event.sender.on("destroyed", close)
-  const assertCurrent = () => {
+  sender.on("did-start-navigation", close)
+  sender.on("render-process-gone", close)
+  sender.on("destroyed", close)
+  const metadataGuard = createThreadDisplayMetadataGuard(row.metadata, () => {
     controller.signal.throwIfAborted()
     const current = getThreadCore(threadId)
-    if (event.sender.isDestroyed() || getDb() !== database ||
-      !matchesThreadIncarnation(current, incarnation) || current?.metadata !== row.metadata)
+    if (
+      event.sender !== sender ||
+      sender.isDestroyed() ||
+      sender.mainFrame !== frame ||
+      getDb() !== database ||
+      !matchesThreadIncarnation(current, incarnation)
+    )
       throw Error("MODS_CONVERSATION_THREAD_CHANGED")
-  }
-  return { database, row, incarnation, signal: controller.signal, assertCurrent,
+    return current!.metadata
+  })
+  return {
+    database,
+    row,
+    incarnation,
+    signal: controller.signal,
+    assertCurrent: metadataGuard.assertCurrent,
+    canRetryMetadata: metadataGuard.canRetryMetadata,
     dispose() {
-      event.sender.removeListener("did-start-navigation", close)
-      event.sender.removeListener("render-process-gone", close)
-      event.sender.removeListener("destroyed", close)
-    } }
+      sender.removeListener("did-start-navigation", close)
+      sender.removeListener("render-process-gone", close)
+      sender.removeListener("destroyed", close)
+    }
+  }
 }
 
 function captureLatestCheckpointDisplayRead(event: IpcMainInvokeEvent, threadId: string) {
@@ -3322,22 +3343,29 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       event,
       { threadId, options }: { threadId: string; options?: ThreadMessagesPageOptions }
     ) => {
-      const read = captureThreadDisplayRead(event, threadId)
-      const source = { assertCurrent: read.assertCurrent,
-        verify: (witnesses: readonly CanonicalThreadDisplayWitness[]) =>
-          verifyCanonicalThreadDisplayWitnesses(threadId, witnesses, read.assertCurrent) }
-      try {
-        return await readThreadMessagesPageInWorker(threadId, options, event.sender.id, source)
-      } catch (error) {
-        if (!isThreadMessageHydrationWorkerUnavailable(error)) throw error
-        console.warn("[ThreadHydrationWorker] unavailable; restarting the isolated reader", error)
-        // Never deserialize a transcript row on Electron main as a fallback:
-        // the first durable row may legitimately exceed the page budget. The
-        // client drops a failed worker, so one retry starts a fresh isolated
-        // reader; a second failure is surfaced for the renderer to retry.
-        await new Promise<void>((resolve) => setImmediate(resolve))
-        return await readThreadMessagesPageInWorker(threadId, options, event.sender.id, source)
-      } finally { read.dispose() }
+      return withThreadDisplayMetadataRetry(
+        options?.requestScope === "foreground-hydration" ? event.sender : undefined,
+        () => captureThreadDisplayRead(event, threadId),
+        async (read) => {
+          const source = {
+            assertCurrent: read.assertCurrent,
+            verify: (witnesses: readonly CanonicalThreadDisplayWitness[]) =>
+              verifyCanonicalThreadDisplayWitnesses(threadId, witnesses, read.assertCurrent)
+          }
+          try {
+            return await readThreadMessagesPageInWorker(threadId, options, event.sender.id, source)
+          } catch (error) {
+            if (!isThreadMessageHydrationWorkerUnavailable(error)) throw error
+            console.warn("[ThreadHydrationWorker] unavailable; restarting the isolated reader", error)
+            // Never deserialize a transcript row on Electron main as a fallback:
+            // the first durable row may legitimately exceed the page budget. The
+            // client drops a failed worker, so one retry starts a fresh isolated
+            // reader; a second failure is surfaced for the renderer to retry.
+            await new Promise<void>((resolve) => setImmediate(resolve))
+            return await readThreadMessagesPageInWorker(threadId, options, event.sender.id, source)
+          }
+        }
+      )
     }
   )
 

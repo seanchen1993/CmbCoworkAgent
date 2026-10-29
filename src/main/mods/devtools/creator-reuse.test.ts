@@ -11,9 +11,45 @@ import type { ClawProfile } from "../../../shared/mods/claw"
 import { CreatorCompositionSave } from "./creator-composition-save"
 import { CreatorCompositionHistory } from "./creator-composition-history"
 import type { DevelopmentTrialStatus } from "../../../shared/mods/development"
+import { BaseChatModel } from "@langchain/core/language_models/chat_models"
+import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
+import type { ChatResult } from "@langchain/core/outputs"
+import { tool } from "@langchain/core/tools"
+import { MemorySaver } from "@langchain/langgraph"
+import { createAgent } from "langchain"
+import { z } from "zod"
+import { readFileSync } from "node:fs"
+import ts from "typescript"
+import { ModDevelopmentService, setModDevelopmentService } from "./development-service"
+import { createCreatorNativeReviewMiddleware } from "../../agent/creator-native-review-middleware"
+import {
+  claimLocalThreadRunLease,
+  getLocalThreadRunLease,
+  onLocalThreadRunLeaseReleased,
+  releaseLocalThreadRunLease
+} from "../../agent/thread-run-lease"
+import {
+  clearTurnCompletionGateState,
+  createTurnCompletionGateMiddleware,
+  describeTurnCompletionFailure,
+  readTurnCompletionGateReport
+} from "../../agent/turn-completion-integrity"
+import { settleAgentFunctionTurn } from "../../agent/agent-run-service"
+import { runSettlementPhases } from "../../agent/run-settlement-fence"
+import {
+  clearCurrentRunMessageQueue,
+  createCurrentRunMessageQueueMiddleware,
+  peekCurrentRunMessageQueue,
+  queueCurrentRunMessage,
+  setCurrentRunInjectionNotifier,
+  setCurrentRunMessageQueueOwner
+} from "../../agent/current-run-message-queue"
 
 const services: CreatorReuseService[] = []
+const reviewCleanup: Array<() => void> = []
 afterEach(() => {
+  for (const cleanup of reviewCleanup.splice(0).reverse()) cleanup()
+  setModDevelopmentService(undefined)
   for (const service of services.splice(0)) service.close()
 })
 
@@ -251,7 +287,655 @@ function fixture() {
   }
 }
 
+class ReviewModel extends BaseChatModel {
+  readonly calls: BaseMessage[][] = []
+  constructor(private readonly names: string[]) {
+    super({})
+  }
+  _llmType(): string {
+    return "native-creator-review-test"
+  }
+  bindTools(): this {
+    return this
+  }
+  async _generate(messages: BaseMessage[]): Promise<ChatResult> {
+    this.calls.push([...messages])
+    const message = new AIMessage({
+      id: `model-${this.calls.length}`,
+      content: this.calls.length === 1 ? "" : "continued normally",
+      tool_calls:
+        this.calls.length === 1
+          ? this.names.map((name, index) => ({ name, args: {}, id: `call-${index}` }))
+          : []
+    })
+    return { generations: [{ message, text: String(message.content) }] }
+  }
+}
+
+const reviewSchema = z.object({})
+function reviewTool(
+  work: () => Promise<string>,
+  options: { name: string; description: string; schema: typeof reviewSchema }
+) {
+  return tool(work, options)
+}
+
+// Execute the original IPC success/physical-settlement bodies without booting Electron.
+// Graph routing, checkpointing, leases and the native reuse observer remain real.
+function originalIpcCompletion(f: Awaited<ReturnType<typeof reviewGraphFixture>>) {
+  const source = ts.createSourceFile(
+    "agent.ts",
+    readFileSync(new URL("../../ipc/agent.ts", import.meta.url), "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  )
+  let completionGate: ts.IfStatement | undefined, done: ts.Statement[] | undefined
+  const visit = (node: ts.Node) => {
+    if (
+      !completionGate &&
+      ts.isIfStatement(node) &&
+      node.expression.getText(source) === 'invokeFinalOutcome === "success"' &&
+      node.thenStatement
+        .getText(source)
+        .includes("const completionFailure = readTurnCompletionFailure")
+    )
+      completionGate = node
+    if (!done && ts.isBlock(node)) {
+      const index = node.statements.findIndex(
+        (statement) => statement.getText(source) === "turnStateShouldDispose = true"
+      )
+      if (
+        index >= 0 &&
+        node.statements[index + 1]?.getText(source).startsWith("if (!autoModeTerminal)")
+      )
+        done = [...node.statements.slice(index, index + 4)]
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  const settlement = source.statements.find(
+    (statement) =>
+      ts.isFunctionDeclaration(statement) && statement.name?.text === "settlePhysicalAgentRun"
+  )
+  if (!completionGate || !done || !settlement) throw Error("ORIGINAL_IPC_COMPLETION_REQUIRED")
+  const controller = f.controller,
+    events: unknown[] = []
+  const bindings = {
+    threadId: f.scope.threadId,
+    runToken: f.turnId,
+    window: {},
+    channel: "native-review-ui",
+    invokeFinalReason: undefined,
+    turnStateShouldDispose: false,
+    invokeDoneAttempted: false,
+    invokeFinalOutcome: "success",
+    autoModeTerminal: undefined,
+    readTurnCompletionFailure: (thread: string, turn: string) => {
+      const report = readTurnCompletionGateReport(thread, turn)
+      return report ? describeTurnCompletionFailure(report) : null
+    },
+    markInvokeIncomplete: (reason: string) => {
+      throw Error(reason)
+    },
+    sendHookNotice: () => {},
+    markAutoModeTerminal: (outcome: string, endReason: string) => {
+      events.push({ outcome, endReason })
+    },
+    safeSendToWindow: (_window: unknown, _channel: string, event: unknown) => events.push(event),
+    getModsManager: () => undefined,
+    getThreadCore: () => ({ id: f.scope.threadId }),
+    captureThreadIncarnation: () => f.scope.incarnation,
+    matchesThreadIncarnation: () => true,
+    physicalRunHasSuccessor: () => false,
+    ownsPhysicalStreamRunLease: () => true,
+    confirmRunCancellationSettlement: () => {},
+    invalidateRunCancellationSettlement: () => {},
+    runSettlementPhases,
+    settleAgentFunctionTurn,
+    agentRunExecutionContextStorage: { getStore: () => undefined },
+    flushPendingStreamTranscriptMessages: async () => {},
+    discardStreamTranscriptToolCallAccumulators: () => {},
+    invalidateCurrentRunMessagePreparer: () => {},
+    activeRuns: new Map([[f.scope.threadId, controller]]),
+    activeRunSettled: new Map(),
+    clearCurrentRunMessageQueue: () => {},
+    revokeSandboxAclsForRun: () => {},
+    notifyAgentRunSettled: () => {},
+    shouldDisposeTurnState: () => false,
+    discardAgentAutoCommitTracking: () => {},
+    releaseLocalThreadRunLease,
+    publishDevelopmentTurnSettlement,
+    runPostRunMaintenanceInBackground: () => {},
+    RUN_SETTLEMENT_NOTIFICATION_TIMEOUT_MS: 1000
+  }
+  const javascript = ts.transpileModule(
+    [
+      completionGate.getText(source),
+      ...done.map((statement) => statement.getText(source)),
+      settlement.getText(source),
+      "return settlePhysicalAgentRun"
+    ].join("\n"),
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }
+  ).outputText
+  const execute = new Function(...Object.keys(bindings), javascript)(
+    ...Object.values(bindings)
+  ) as (input: Record<string, unknown>) => Promise<void>
+  return {
+    events,
+    settle: () =>
+      execute({
+        kind: "invoke",
+        functionTurnReason: "answer",
+        threadId: f.scope.threadId,
+        runToken: f.turnId,
+        controller,
+        settledPromise: Promise.resolve(),
+        resolveSettlement: () => {},
+        removeWindowListener: () => {},
+        settleNotifications: async () => {},
+        cleanupNotificationSkills: () => {},
+        turnStateShouldDispose: false,
+        disposeTurnState: () => {}
+      })
+  }
+}
+
+async function reviewGraphFixture() {
+  const f = fixture(),
+    turnId = "native-review-turn"
+  const development = new ModDevelopmentService({
+    drafts: f.deps.drafts,
+    runtime: {
+      developmentRetention: () => ({ releasable: false, revisions: [] }),
+      developmentStatus: () => [],
+      stageDevelopment: () => {
+        throw Error("TEST_MUST_NOT_EXECUTE_TRIAL")
+      },
+      approveDevelopment: () => {
+        throw Error("TEST_MUST_NOT_APPROVE_TRIAL")
+      },
+      stopDevelopment: () => {
+        throw Error("TEST_MUST_NOT_STOP_TRIAL")
+      }
+    },
+    versionsRoot: "unused-native-review-versions",
+    workerEntry: "unused-native-review-worker",
+    context: () => f.context,
+    changed: () => {}
+  })
+  development.configureReuse(f.service)
+  await development.setEnabled(f.scope.threadId, f.scope.workspace, true)
+  setModDevelopmentService(development)
+  setCurrentRunMessageQueueOwner(f.scope.threadId, turnId)
+  expect(
+    claimLocalThreadRunLease({
+      threadId: f.scope.threadId,
+      runId: turnId,
+      owner: "desktop"
+    }).acquired
+  ).toBe(true)
+  f.deps.busy = () => !!getLocalThreadRunLease(f.scope.threadId)
+  const stopIdle = onLocalThreadRunLeaseReleased((lease) => {
+    if (lease.threadId === f.scope.threadId) f.idle()
+  })
+  reviewCleanup.push(() => {
+    stopIdle()
+    releaseLocalThreadRunLease(f.scope.threadId, "desktop", turnId)
+    clearTurnCompletionGateState(f.scope.threadId, turnId)
+    clearCurrentRunMessageQueue(f.scope.threadId, turnId)
+    setCurrentRunInjectionNotifier(() => {})
+  })
+  const controller = new AbortController()
+  const middleware = createCreatorNativeReviewMiddleware({
+    threadId: f.scope.threadId,
+    workspace: f.scope.workspace,
+    runToken: turnId,
+    signal: controller.signal
+  })!
+  expect(middleware).toBeDefined()
+  const run = (tools: ReturnType<typeof reviewTool>[]) => {
+    const model = new ReviewModel(tools.map((item) => item.name))
+    const graph = createAgent({
+      model,
+      tools,
+      checkpointer: new MemorySaver(),
+      middleware: [middleware, createTurnCompletionGateMiddleware({ ownerRunToken: turnId }),
+        createCurrentRunMessageQueueMiddleware(turnId)]
+    })
+    const config = { configurable: { thread_id: f.scope.threadId }, recursionLimit: 18 }
+    return {
+      model,
+      graph,
+      config,
+      snapshot: async (): Promise<{
+        next: readonly string[]
+        values: { messages: BaseMessage[] }
+      }> => graph.getState(config),
+      invoke: () =>
+        graph.invoke(
+          {
+            messages: [
+              new HumanMessage({
+                id: "original-human",
+                content: "prepare the dependency for native review"
+              })
+            ]
+          },
+          config
+        )
+    }
+  }
+  const settle = (outcome: "completed" | "failed" | "cancelled" = "completed") =>
+    publishDevelopmentTurnSettlement({
+      threadId: f.scope.threadId,
+      incarnation: f.scope.incarnation,
+      turnId,
+      outcome
+    })
+  return { ...f, development, turnId, controller, run, settle }
+}
+
+describe("native creator review handoff in the actual agent graph", () => {
+  it("lets the original queue inject a real user steer before ending an early-approved review", async () => {
+    const f = await reviewGraphFixture()
+    const prepared = Promise.withResolvers<void>(), finishTool = Promise.withResolvers<void>()
+    const injected: string[] = []
+    setCurrentRunInjectionNotifier((thread, messages, context) => {
+      expect(thread).toBe(f.scope.threadId)
+      expect(context?.runToken).toBe(f.turnId)
+      injected.push(...messages.map(message => message.id))
+    })
+    const graph = f.run([reviewTool(async () => {
+      await f.request(f.turnId)
+      await f.service.approve(f.context, f.approval())
+      prepared.resolve()
+      await finishTool.promise
+      return "native review prepared and already approved"
+    }, { name: "mod_authoring", description: "Original preparation", schema: reviewSchema })])
+    const pending = graph.invoke()
+    await prepared.promise
+    expect(queueCurrentRunMessage(f.scope.threadId, {
+      id: "actual-user-steer", content: "先别安装，请按我刚补充的方案修改"
+    }, f.turnId)).toBe(true)
+    expect(peekCurrentRunMessageQueue(f.scope.threadId)).toHaveLength(1)
+    expect(f.install.apply).not.toHaveBeenCalled()
+    finishTool.resolve()
+    const result = await pending
+    expect(graph.model.calls).toHaveLength(2)
+    expect(graph.model.calls[1].at(-1)).toMatchObject({
+      id: "actual-user-steer", content: "先别安装，请按我刚补充的方案修改"
+    })
+    expect(injected).toEqual(["actual-user-steer"])
+    expect(peekCurrentRunMessageQueue(f.scope.threadId)).toEqual([])
+    expect((result.messages as BaseMessage[]).filter(HumanMessage.isInstance)
+      .map(message => message.id)).toEqual(["original-human", "actual-user-steer"])
+    expect((await graph.snapshot()).next).toEqual([])
+    expect(f.install.apply).not.toHaveBeenCalled()
+  })
+
+  it("reaches original IPC UI completion and completed settlement after the real graph ends", async () => {
+    const f = await reviewGraphFixture()
+    const graph = f.run([
+      tool(
+        async () => {
+          await f.request(f.turnId)
+          await f.service.approve(f.context, f.approval())
+          return "native review prepared and user already approved"
+        },
+        { name: "mod_authoring", description: "Original native preparation", schema: z.object({}) }
+      )
+    ])
+    await graph.invoke()
+    expect(graph.model.calls).toHaveLength(1)
+    expect((await graph.snapshot()).next).toEqual([])
+    expect(f.install.apply).not.toHaveBeenCalled()
+    const ipc = originalIpcCompletion(f)
+    expect(ipc.events).toEqual([{ outcome: "success", endReason: "normal" }, { type: "done" }])
+    await ipc.settle()
+    expect(getLocalThreadRunLease(f.scope.threadId)).toBeUndefined()
+    await vi.waitFor(() => expect(f.service.status(f.scope)?.phase).toBe("active"))
+    expect(f.install.apply).toHaveBeenCalledTimes(1)
+    expect(f.approveInstalled).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([false, true])(
+    "settles the whole ToolNode batch and original checkpoint before review (early approval %s)",
+    async (earlyApproval) => {
+      const f = await reviewGraphFixture()
+      const prepared = Promise.withResolvers<void>(),
+        tail = Promise.withResolvers<void>()
+      const graph = f.run([
+        tool(
+          async () => {
+            await f.request(f.turnId)
+            if (earlyApproval) await f.service.approve(f.context, f.approval())
+            prepared.resolve()
+            return JSON.stringify(f.service.status(f.scope))
+          },
+          {
+            name: "mod_authoring",
+            description: "Original native preparation",
+            schema: z.object({})
+          }
+        ),
+        tool(
+          async () => {
+            await tail.promise
+            return "the other original tool completed"
+          },
+          { name: "batch_tail", description: "Other original batch work", schema: z.object({}) }
+        )
+      ])
+      const pending = graph.invoke()
+      await prepared.promise
+      expect(graph.model.calls).toHaveLength(1)
+      expect(f.install.apply).not.toHaveBeenCalled()
+      expect(f.service.hasPendingTurnReview(f.context, f.turnId)).toBe(true)
+      let finished = false
+      void pending.then(() => {
+        finished = true
+      })
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(finished).toBe(false)
+      tail.resolve()
+      const result = await pending
+      const state = await graph.snapshot()
+      expect(state.next).toEqual([])
+      expect(graph.model.calls).toHaveLength(1)
+      const messages = result.messages as BaseMessage[]
+      expect(messages.filter(HumanMessage.isInstance).map((message) => message.id)).toEqual([
+        "original-human"
+      ])
+      expect(messages.filter(AIMessage.isInstance)).toHaveLength(1)
+      expect(
+        messages
+          .filter(ToolMessage.isInstance)
+          .map((message) => message.tool_call_id)
+          .sort()
+      ).toEqual(["call-0", "call-1"])
+      expect(state.values.messages.map((message) => message.id)).toEqual(
+        messages.map((message) => message.id)
+      )
+      const completion = readTurnCompletionGateReport(f.scope.threadId, f.turnId)
+      expect(completion ? describeTurnCompletionFailure(completion) : null).toBeNull()
+      expect(f.install.apply).not.toHaveBeenCalled()
+
+      // The original completed observer is the only path that settles the plan.
+      // Its original installer still waits for real physical lease release.
+      f.settle()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(f.install.apply).not.toHaveBeenCalled()
+      expect(f.service.hasPendingTurnReview(f.context, f.turnId)).toBe(false)
+      releaseLocalThreadRunLease(f.scope.threadId, "desktop", f.turnId)
+      if (!earlyApproval) {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(f.service.status(f.scope)?.phase).toBe("needs-approval")
+        expect(f.install.apply).not.toHaveBeenCalled()
+        await f.service.approve(f.context, f.approval())
+      }
+      await vi.waitFor(() => expect(f.service.status(f.scope)?.phase).toBe("active"))
+      expect(f.install.apply).toHaveBeenCalledTimes(1)
+      expect(f.approveInstalled).toHaveBeenCalledTimes(1)
+      expect(f.applySelection).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it.each(["source", "compiled", "turn", "scope", "mode", "lease", "queue-owner", "failed", "unknown"])(
+    "does not yield for changed or unconfirmed original facts: %s",
+    async (change) => {
+      const f = await reviewGraphFixture()
+      const graph = f.run([
+        tool(
+          async () => {
+            await f.request(change === "turn" ? "different-original-turn" : f.turnId)
+            if (change === "source") f.changeSource()
+            if (change === "compiled") f.prepared.compiledDigest = "c".repeat(64)
+            if (change === "scope") f.stale()
+            if (change === "mode")
+              await f.development.setMode(f.scope.threadId, f.scope.workspace, "normal")
+            if (change === "lease") {
+              releaseLocalThreadRunLease(f.scope.threadId, "desktop", f.turnId)
+              // Reusing the public run id cannot revive the captured physical owner.
+              claimLocalThreadRunLease({
+                threadId: f.scope.threadId,
+                owner: "desktop",
+                runId: f.turnId
+              })
+            }
+            if (change === "queue-owner") {
+              clearCurrentRunMessageQueue(f.scope.threadId, f.turnId)
+              setCurrentRunMessageQueueOwner(f.scope.threadId, f.turnId)
+            }
+            if (change === "failed") {
+              f.settle("failed")
+              await vi.waitFor(() => expect(f.service.status(f.scope)?.phase).toBe("failed"))
+            }
+            if (change === "unknown") {
+              f.install.apply.mockResolvedValueOnce({
+                operationId: "operation",
+                installationId: "formal-plugin",
+                versionId: "version",
+                state: "unknown"
+              } as never)
+              f.settle()
+              await f.service.approve(f.context, f.approval())
+              releaseLocalThreadRunLease(f.scope.threadId, "desktop", f.turnId)
+              await vi.waitFor(() => expect(f.service.status(f.scope)?.phase).toBe("unknown"))
+              claimLocalThreadRunLease({
+                threadId: f.scope.threadId,
+                owner: "desktop",
+                runId: f.turnId
+              })
+            }
+            if (["source", "compiled", "turn", "scope", "failed", "unknown"].includes(change))
+              expect(f.service.hasPendingTurnReview(f.context, f.turnId)).toBe(false)
+            if (change === "mode")
+              expect(
+                f.development.hasPendingNativeTurnReview(
+                  f.scope.threadId, f.scope.workspace, f.turnId
+                )
+              ).toBe(false)
+            return JSON.stringify({ phase: "needs-approval", planId: "not-authority" })
+          },
+          {
+            name: "mod_authoring",
+            description: "Original native preparation",
+            schema: z.object({})
+          }
+        )
+      ])
+      const result = await graph.invoke()
+      expect(graph.model.calls).toHaveLength(2)
+      expect(result.messages.at(-1)?.content).toBe("continued normally")
+      expect(f.install.apply).toHaveBeenCalledTimes(change === "unknown" ? 1 : 0)
+      expect(f.approveInstalled).not.toHaveBeenCalled()
+    }
+  )
+
+  it("never treats ordinary tool review JSON as a native plan", async () => {
+    const f = await reviewGraphFixture()
+    const graph = f.run([
+      tool(
+        async () =>
+          JSON.stringify({
+            phase: "needs-approval",
+            turnId: f.turnId,
+            sourceDigest: f.prepared.sourceDigest,
+            compiledDigest: f.prepared.compiledDigest
+          }),
+        {
+          name: "ordinary_tool",
+          description: "Untrusted ordinary output",
+          schema: z.object({})
+        }
+      )
+    ])
+    await graph.invoke()
+    expect(graph.model.calls).toHaveLength(2)
+    expect(f.service.status(f.scope)).toBeUndefined()
+    expect(f.install.prepare).not.toHaveBeenCalled()
+    expect(f.install.apply).not.toHaveBeenCalled()
+  })
+
+  it("does not install handoff middleware outside the original desktop creator scope", async () => {
+    const f = await reviewGraphFixture()
+    expect(
+      createCreatorNativeReviewMiddleware({
+        threadId: f.scope.threadId,
+        workspace: "different-workspace",
+        runToken: f.turnId
+      })
+    ).toBeUndefined()
+    expect(
+      createCreatorNativeReviewMiddleware({
+        threadId: f.scope.threadId,
+        workspace: f.scope.workspace,
+        runToken: "different-run"
+      })
+    ).toBeUndefined()
+    releaseLocalThreadRunLease(f.scope.threadId, "desktop", f.turnId)
+    claimLocalThreadRunLease({ threadId: f.scope.threadId, owner: "mods", runId: f.turnId })
+    expect(
+      createCreatorNativeReviewMiddleware({
+        threadId: f.scope.threadId,
+        workspace: f.scope.workspace,
+        runToken: f.turnId
+      })
+    ).toBeUndefined()
+    releaseLocalThreadRunLease(f.scope.threadId, "mods", f.turnId)
+    claimLocalThreadRunLease({ threadId: f.scope.threadId, owner: "desktop", runId: f.turnId })
+    await f.development.setMode(f.scope.threadId, f.scope.workspace, "normal")
+    expect(
+      createCreatorNativeReviewMiddleware({
+        threadId: f.scope.threadId,
+        workspace: f.scope.workspace,
+        runToken: f.turnId
+      })
+    ).toBeUndefined()
+  })
+})
+
 describe("one-review formal creator reuse", () => {
+  it("projects a cold unstarted review as requiring fresh preparation without changing its record", async () => {
+    const f = fixture()
+    const write = vi.spyOn(f.deps.settings, "compareAndSetSetting")
+    await f.request()
+    const approval = f.approval()
+    const [storageKey, , stored] = write.mock.calls.at(-1)!
+    f.service.close()
+    write.mockClear()
+    const restored = f.create()
+    expect(restored.status(f.scope)).toMatchObject({
+      ...approval,
+      phase: "failed",
+      error: "CREATOR_REUSE_PREPARE_REQUIRED"
+    })
+    expect(f.deps.settings.getSetting(storageKey)).toBe(stored)
+    expect(write).not.toHaveBeenCalled()
+    await expect(restored.approve(f.context, approval)).rejects.toThrow(
+      "CREATOR_REUSE_PREPARE_REQUIRED"
+    )
+    expect(f.install.prepare).toHaveBeenCalledTimes(1)
+    expect(f.install.apply).not.toHaveBeenCalled()
+    expect(f.approveInstalled).not.toHaveBeenCalled()
+    await restored.request(f.context, f.deps.readDraft(), {
+      signal: new AbortController().signal,
+      assertTurn: () => {}
+    })
+    expect(restored.status(f.scope)).toMatchObject({ phase: "needs-approval" })
+    expect(restored.status(f.scope)?.error).toBeUndefined()
+    expect(restored.status(f.scope)?.planId).not.toBe(approval.planId)
+    await expect(restored.approve(f.context, approval)).rejects.toThrow(
+      "CREATOR_REUSE_APPROVAL_CHANGED"
+    )
+    expect(f.install.prepare).toHaveBeenCalledTimes(2)
+    expect(f.install.apply).not.toHaveBeenCalled()
+    expect(f.approveInstalled).not.toHaveBeenCalled()
+  })
+
+  it("prepares the current changed draft and source only after a fresh explicit request", async () => {
+    const f = fixture()
+    await f.request()
+    const old = f.approval()
+    f.service.close()
+    const source = createAuthoringTemplate({
+      id: "demo",
+      name: "Demo",
+      instruction: "New source",
+      kind: "command"
+    })
+    const next = { ...f.deps.readDraft(), revision: 2, currentRevision: 2, source }
+    f.deps.readDraft = () => next
+    f.prepared.sourceDigest = source.digest
+    f.prepared.compiledDigest = "c".repeat(64)
+    const restored = f.create()
+    expect(restored.status(f.scope)).toMatchObject({
+      phase: "failed",
+      sourceDigest: old.sourceDigest
+    })
+    await expect(restored.approve(f.context, old)).rejects.toThrow("CREATOR_REUSE_PREPARE_REQUIRED")
+    expect(f.install.prepare).toHaveBeenCalledTimes(1)
+    await restored.request(f.context, next, {
+      signal: new AbortController().signal,
+      assertTurn: () => {}
+    })
+    expect(restored.status(f.scope)).toMatchObject({
+      phase: "needs-approval",
+      revision: 2,
+      sourceDigest: source.digest,
+      compiledDigest: f.prepared.compiledDigest
+    })
+    expect(restored.status(f.scope)?.planId).not.toBe(old.planId)
+    expect(f.install.apply).not.toHaveBeenCalled()
+  })
+
+  it("does not offer an old review or replay writes in another thread, directory or incarnation", async () => {
+    const f = fixture()
+    await f.request()
+    const approval = f.approval()
+    f.service.close()
+    const restored = f.create()
+    for (const change of [
+      { threadId: "other-thread" },
+      { workspace: "other-directory" },
+      { incarnation: { token: "recreated", legacyCreatedAt: 2 } }
+    ]) {
+      const scope = { ...f.scope, ...change }
+      expect(restored.status(scope)).toBeUndefined()
+      await expect(restored.approve({ ...f.context, scope }, approval)).rejects.toThrow(
+        "CREATOR_REUSE_APPROVAL_CHANGED"
+      )
+    }
+    expect(f.install.prepare).toHaveBeenCalledTimes(1)
+    expect(f.install.apply).not.toHaveBeenCalled()
+    expect(f.approveInstalled).not.toHaveBeenCalled()
+  })
+
+  it("keeps interrupted writes and unknown records on their read-only reconciliation path", async () => {
+    const f = fixture()
+    const write = vi.spyOn(f.deps.settings, "compareAndSetSetting")
+    await f.request()
+    const [storageKey, , stored] = write.mock.calls.at(-1)!
+    f.service.close()
+    const restored = f.create()
+    for (const phase of ["applying", "unknown"] as const) {
+      const plan = JSON.parse(stored)
+      plan.status.phase = phase
+      plan.step = "installing"
+      f.deps.settings.setSetting(storageKey, JSON.stringify(plan))
+      expect(restored.status(f.scope)?.phase).toBe("unknown")
+      await expect(restored.reconcile(f.context)).resolves.toMatchObject({ phase: "unknown" })
+    }
+    const started = JSON.parse(stored)
+    started.step = "installing"
+    f.deps.settings.setSetting(storageKey, JSON.stringify(started))
+    expect(restored.status(f.scope)?.phase).toBe("needs-approval")
+    expect(f.install.prepare).toHaveBeenCalledTimes(1)
+    expect(f.install.apply).not.toHaveBeenCalled()
+    expect(f.approveInstalled).not.toHaveBeenCalled()
+  })
+
   it("completes a named save through the real reuse approval without a second installer", async () => {
     const f = fixture()
     const history = new CreatorCompositionHistory(f.deps.settings)

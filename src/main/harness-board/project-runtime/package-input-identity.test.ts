@@ -235,6 +235,48 @@ it("exposes only declared public configuration through the original saved config
     .toEqual({ audience: "engineering" })
 })
 
+it("projects only selected public native configuration without requiring a context provider", async () => {
+  const f = await fixture()
+  expect(f.input.readPublicConfiguration(f.state, f.source, ["audience"]))
+    .toEqual({ audience: "product" })
+  for (const keys of [["knowledge"], ["missing"], ["constructor"], ["audience", "audience"], []])
+    expect(() => f.input.readPublicConfiguration(f.state, f.source, keys)).toThrow()
+  const original = f.input.inputIdentity(f.state, f.source)
+  const authority = f.input.captureInputAuthorityIdentity(f.state, f.source)
+  const revision = authority()
+  f.values.save(f.root, "document-native-id", f.schema, "audience", "engineering", 1, () => {})
+  expect(f.input.readPublicConfiguration(f.state, f.source, ["audience"]))
+    .toEqual({ audience: "engineering" })
+  expect(f.input.inputIdentity(f.state, f.source)).not.toBe(original)
+  expect(authority()).not.toBe(revision)
+  f.values.save(f.root, "document-native-id", f.schema, "audience", "product", 2, () => {})
+  expect(authority()).not.toBe(revision)
+})
+
+it("rejects runtime private selectors, invalid required config and oversized public projections", async () => {
+  const f = await fixture()
+  const manifestPath = join(f.source, "mods/manifest.json")
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+  manifest.userConfig.privateValue = { type: "string", title: "Private", description: "Private", sensitive: true }
+  manifest.userConfig.localFile = { type: "file", title: "Local file", description: "Path" }
+  manifest.userConfig.enabled = { type: "boolean", title: "Enabled", description: "Flag", default: false }
+  manifest.userConfig.timeout = { type: "number", title: "Timeout", description: "Count", default: 0 }
+  manifest.userConfig.labels = { type: "string", multiple: true, title: "Labels", description: "Labels", default: ["native"] }
+  writeFileSync(manifestPath, JSON.stringify(manifest))
+  await f.input.prepareInputIdentity(f.state, f.source)
+  for (const key of ["privateValue", "localFile"])
+    expect(() => f.input.readPublicConfiguration(f.state, f.source, [key]))
+      .toThrow("PROJECT_CHECK_CONFIGURATION_PRIVATE_FIELD")
+  expect(f.input.readPublicConfiguration(f.state, f.source, ["enabled", "timeout", "labels"]))
+    .toEqual({ enabled: false, timeout: 0, labels: ["native"] })
+  f.values.save(f.root, "document-native-id", f.schema, "audience", "x".repeat(4096), 1, () => {})
+  expect(() => f.input.readPublicConfiguration(f.state, f.source, ["audience"]))
+    .toThrow("MODS_USER_CONFIG_INVALID")
+  const unset = await fixture(false)
+  expect(() => unset.input.readPublicConfiguration(unset.state, unset.source, ["audience"]))
+    .toThrow("Invalid plugin configuration field: knowledge")
+})
+
 it("binds execution workspace aliases to original required directory configuration and invalidates rebinding", async () => {
   const f = await fixture()
   const write = (binding: string) => writeFileSync(join(f.source, "devclaw.project-runtime.json"), JSON.stringify(

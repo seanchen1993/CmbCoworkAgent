@@ -16,6 +16,8 @@ export interface ProjectRuntimeManifest {
     /** Retained Host declaration; does not grant execution or merge approval. */
     executionMode?: "normal" | "workflow"
     actionIds: string[]
+    /** Explicit prior inputs for artifact-reference checks; absent retains all-preceding v1 behavior. */
+    inputArtifactIds?: string[]
     artifactIds: string[]
     checkIds: string[]
     approval: "none" | "human"

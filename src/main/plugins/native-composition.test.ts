@@ -8,14 +8,16 @@ import { build } from "esbuild"
 import { describe, expect, it } from "vitest"
 import {
   compileNativeComposition,
+  nativeCompositionLegacyGeneratedPretty,
   nativeCompositionSchema,
   readNativeCompositionFiles
 } from "./native-composition"
 import { compileFunctionPlugin } from "../mods/v2/loader"
-import { createAuthoringSourceBundle } from "../mods/devtools/authoring-bundle"
+import { AUTHORING_BUNDLE_LIMITS, createAuthoringSourceBundle } from "../mods/devtools/authoring-bundle"
 import { inspectProjectSource } from "../mods/devtools/project-doctor"
 import { testProjectSource } from "../mods/devtools/project-contract"
 import { parseProjectRuntimeManifest } from "../../shared/project-runtime"
+import type { ClawActionDescriptor } from "../../shared/mods/claw-actions"
 
 const vendorRoot = resolve("tests/fixtures/native-compositions/vendor")
 const businessRoot = resolve("resources/native-compositions/autobiz")
@@ -31,6 +33,104 @@ const compileVendor = (source = sourceAt(vendorRoot)) =>
   })
 
 describe("single-source native composition", () => {
+  const metadataPaths = [
+    "composition/lock.json", "plugin.json", "devclaw.project-runtime.json",
+    "devclaw.project-actions.lock.json"
+  ]
+  const bundleOf = (files: Array<{ path: string; bytes: Buffer }>) =>
+    createAuthoringSourceBundle(files.map(({ path, bytes }) => ({ path, text: bytes.toString("utf8") })))
+
+  it("compacts only generated metadata, preserves source/resources and reaches a stable recompilation", () => {
+    const source = sourceAt(vendorRoot)
+    const files = readNativeCompositionFiles(vendorRoot, source)
+    const current = compileNativeComposition(source, { files, actionCatalog: [] })
+    const legacy = compileNativeComposition(source, { files, actionCatalog: [], legacyGeneratedPretty: true })
+    for (const file of current.files) {
+      const previous = legacy.files.find(item => item.path === file.path)!
+      if (metadataPaths.includes(file.path)) {
+        expect(file.bytes.toString()).toBe(JSON.stringify(JSON.parse(previous.bytes.toString())) + "\n")
+        expect(file.bytes.length).toBeLessThan(previous.bytes.length)
+      } else expect(file.bytes).toEqual(previous.bytes)
+    }
+    expect(nativeCompositionLegacyGeneratedPretty(current.files.find(file =>
+      file.path === "devclaw.project-actions.lock.json")!.bytes)).toBe(false)
+    const repeated = compileNativeComposition(source, { files: current.files, actionCatalog: [] })
+    expect(repeated.files).toEqual(current.files)
+    expect(bundleOf(repeated.files).digest).toBe(bundleOf(current.files).digest)
+  })
+
+  it("doctors a retained pretty package and creates a different explicit compact source digest", () => {
+    const source = sourceAt(vendorRoot)
+    const files = readNativeCompositionFiles(vendorRoot, source)
+    const original = bundleOf(compileNativeComposition(source, {
+      files, actionCatalog: [], legacyGeneratedPretty: true
+    }).files)
+    const actionLock = original.files.find(file => file.path === "devclaw.project-actions.lock.json")!
+    expect(nativeCompositionLegacyGeneratedPretty(actionLock.text)).toBe(true)
+    expect(inspectProjectSource(original).report.diagnostics).toEqual([])
+    const compiled = compileNativeComposition(source, {
+      files: original.files.map(file => ({ path: file.path, bytes: Buffer.from(file.text) })),
+      actionCatalog: []
+    })
+    const compact = bundleOf(compiled.files)
+    expect(compact.digest).not.toBe(original.digest)
+    expect(inspectProjectSource(compact).report.diagnostics).toEqual([])
+    const metadata = new Set(metadataPaths)
+    for (const file of original.files.filter(file => !metadata.has(file.path)))
+      expect(compact.files.find(item => item.path === file.path)?.text).toBe(file.text)
+    expect(actionLock.text).toBe(JSON.stringify(JSON.parse(actionLock.text), null, 2) + "\n")
+  })
+
+  it("rejects mixed generated layouts, altered content and noncanonical whitespace during replay", () => {
+    const source = sourceAt(vendorRoot)
+    const files = readNativeCompositionFiles(vendorRoot, source)
+    const current = compileNativeComposition(source, { files, actionCatalog: [] })
+    const legacy = compileNativeComposition(source, { files, actionCatalog: [], legacyGeneratedPretty: true })
+    expect(inspectProjectSource(bundleOf(current.files)).report.valid).toBe(true)
+    expect(inspectProjectSource(bundleOf(legacy.files)).report.valid).toBe(true)
+    for (const [base, other] of [[current, legacy], [legacy, current]]) {
+      for (const path of metadataPaths) {
+        const mixed = base.files.map(file => file.path === path ? other.files.find(item => item.path === path)! : file)
+        expect(inspectProjectSource(bundleOf(mixed)).report.valid).toBe(false)
+      }
+    }
+    const lock = current.files.find(file => file.path === "devclaw.project-actions.lock.json")!
+    for (const text of [lock.bytes.toString() + "\n", lock.bytes.toString().replace(/\n/g, "\r\n"), " " + lock.bytes.toString()])
+      expect(() => nativeCompositionLegacyGeneratedPretty(text)).toThrow()
+    const changed = current.files.map(file => file.path === "plugin.json"
+      ? { ...file, bytes: Buffer.from(file.bytes.toString().replace('"skills":"skills"', '"skills":"other"')) }
+      : file)
+    expect(inspectProjectSource(bundleOf(changed)).report.valid).toBe(false)
+  })
+
+  it("fits an append-shaped expanded bundle through lossless compaction without changing any limit", () => {
+    const source = sourceAt(vendorRoot)
+    const paths = Array.from({ length: 4 }, (_, index) => `knowledge/padding-${index}.md`)
+    source.resources.push(...paths)
+    const files = [...readNativeCompositionFiles(vendorRoot, sourceAt(vendorRoot)),
+      ...paths.map(path => ({ path, bytes: Buffer.alloc(0) }))]
+    const size = (items: typeof files) => items.reduce((sum, file) => sum + Buffer.byteLength(file.path) + file.bytes.length, 0)
+    const initial = compileNativeComposition(source, { files, actionCatalog: [], legacyGeneratedPretty: true })
+    const padding = AUTHORING_BUNDLE_LIMITS.totalBytes + 503 - size(initial.files)
+    expect(padding).toBeGreaterThan(0)
+    for (const [index, path] of paths.entries()) {
+      const bytes = Math.floor(padding / paths.length) + (index < padding % paths.length ? 1 : 0)
+      expect(bytes).toBeLessThanOrEqual(AUTHORING_BUNDLE_LIMITS.fileBytes)
+      files.find(file => file.path === path)!.bytes = Buffer.alloc(bytes, "x")
+    }
+    const authored = bundleOf([...files, { path: "composition/source.json", bytes: Buffer.from(JSON.stringify(source, null, 2) + "\n") }])
+    expect(authored.files.length).toBeLessThan(AUTHORING_BUNDLE_LIMITS.files)
+    const legacy = compileNativeComposition(source, { files, actionCatalog: [], legacyGeneratedPretty: true })
+    expect(size(legacy.files)).toBe(AUTHORING_BUNDLE_LIMITS.totalBytes + 503)
+    expect(() => bundleOf(legacy.files)).toThrow("AUTHORING_SOURCE_LIMIT")
+    const compact = compileNativeComposition(source, { files, actionCatalog: [] })
+    expect(size(compact.files)).toBeLessThan(AUTHORING_BUNDLE_LIMITS.totalBytes)
+    expect(() => bundleOf(compact.files)).not.toThrow()
+    for (const file of files)
+      expect(compact.files.find(item => item.path === file.path)?.bytes).toEqual(file.bytes)
+    expect(AUTHORING_BUNDLE_LIMITS).toEqual({ files: 64, fileBytes: 65536, totalBytes: 262144, pathLength: 160 })
+  })
+
   it("compiles independent supplier semantics and runs actual Host schema validators", async () => {
     const result = compileVendor()
     const manifest = parseProjectRuntimeManifest(result.runtime)
@@ -65,6 +165,125 @@ describe("single-source native composition", () => {
     const unchecked = sourceAt(vendorRoot)
     unchecked.modules[0].outputs.push({ id: "hidden", path: "hidden.json", contract: "hidden/v1" })
     expect(() => compileVendor(unchecked)).toThrow("OUTPUT_UNCHECKED")
+  })
+
+  it("projects declared subset inputs and doctors old subset packages without silently changing them", () => {
+    const source = sourceAt(vendorRoot)
+    const files = readNativeCompositionFiles(vendorRoot, source)
+    const current = compileNativeComposition(source, { files, actionCatalog: [] })
+    const runtime = parseProjectRuntimeManifest(current.runtime)
+    expect(runtime.stages[0]).not.toHaveProperty("inputArtifactIds")
+    expect(runtime.stages[1]).not.toHaveProperty("inputArtifactIds")
+    expect(runtime.stages[2].inputArtifactIds).toEqual(["compliance"])
+    const legacy = compileNativeComposition(source, {
+      files,
+      actionCatalog: [],
+      legacyInputArtifactStages: new Set(source.modules.map((module) => module.id))
+    })
+    const bundle = (compiled: typeof current) =>
+      createAuthoringSourceBundle(
+        compiled.files.map(({ path, bytes }) => ({ path, text: bytes.toString("utf8") }))
+      )
+    const old = bundle(legacy)
+    expect(inspectProjectSource(old).report.diagnostics).toEqual([])
+    expect(
+      parseProjectRuntimeManifest(legacy.runtime).stages.every(
+        (stage) => stage.inputArtifactIds === undefined
+      )
+    ).toBe(true)
+    expect(inspectProjectSource(bundle(current)).report.diagnostics).toEqual([])
+    // Removing a new declaration alone cannot claim the old semantics: its original lock still binds it.
+    const removed = bundle(current)
+    const file = removed.files.find((file) => file.path === "devclaw.project-runtime.json")!
+    const envelope = JSON.parse(file.text)
+    for (const stage of (envelope.runtime ?? envelope).stages) delete stage.inputArtifactIds
+    file.text = JSON.stringify(envelope, null, 2) + "\n"
+    expect(inspectProjectSource(removed).report.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "NATIVE_COMPOSITION_STALE" })])
+    )
+    for (const path of [
+      "composition/source.json",
+      "modules/risk/SKILL.md",
+      "composition/lock.json"
+    ]) {
+      const changed = bundle(legacy)
+      const asset = changed.files.find((file) => file.path === path)!
+      if (path === "composition/source.json") {
+        const modified = JSON.parse(asset.text)
+        modified.modules[2].inputs = [modified.modules[1].inputs[0]]
+        asset.text = JSON.stringify(modified)
+      } else asset.text += "changed"
+      expect(inspectProjectSource(changed).report.valid).toBe(false)
+    }
+  })
+
+  it("compiles a ninth-stage reference check with three inputs and rejects eight without dropping any", () => {
+    const source = sourceAt(vendorRoot),
+      template = source.modules[0]
+    source.modules = Array.from({ length: 8 }, (_, index) => ({
+      ...structuredClone(template),
+      id: "phase-" + index,
+      title: "Phase " + index,
+      inputs: [],
+      outputs: [
+        { id: "input-" + index, path: "input-" + index + ".json", contract: "sample/input-v1" }
+      ],
+      checks: [
+        {
+          id: "input-" + index + ".shape",
+          kind: "json-schema" as const,
+          artifactId: "input-" + index,
+          schema: { type: "object" }
+        }
+      ]
+    }))
+    source.modules.push({
+      ...structuredClone(template),
+      id: "verify",
+      title: "Verify",
+      inputs: [2, 5, 7].map((index) => ({
+        artifactId: "input-" + index,
+        contract: "sample/input-v1"
+      })),
+      outputs: [{ id: "verification", path: "verification.json", contract: "sample/result-v1" }],
+      checks: [
+        {
+          id: "verification.check",
+          kind: "action",
+          artifactId: "verification",
+          provider: { plugin: "verification-provider", actionId: "check" },
+          format: "artifact-reference-v1",
+          maxBytes: 28000
+        }
+      ]
+    })
+    const action: ClawActionDescriptor = {
+      pluginId: "installed-provider",
+      plugin: "verification-provider",
+      digest: "a".repeat(64),
+      actionId: "check",
+      name: "Reference check",
+      platform: { id: "verification", version: "1.0.0", action: "check" },
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" }
+    }
+    const options = {
+      files: readNativeCompositionFiles(vendorRoot, sourceAt(vendorRoot)),
+      actionCatalog: [action]
+    }
+    const compiled = compileNativeComposition(source, options)
+    expect(parseProjectRuntimeManifest(compiled.runtime).stages[8].inputArtifactIds).toEqual([
+      "input-2",
+      "input-5",
+      "input-7"
+    ])
+    source.modules[8].inputs = Array.from({ length: 8 }, (_, index) => ({
+      artifactId: "input-" + index,
+      contract: "sample/input-v1"
+    }))
+    expect(() => compileNativeComposition(source, options)).toThrow(
+      "NATIVE_COMPOSITION_REFERENCE_INPUT_LIMIT"
+    )
   })
 
   it("rejects malicious paths, case collisions, unknown fields and missing providers", () => {
@@ -114,6 +333,19 @@ describe("single-source native composition", () => {
       files: readNativeCompositionFiles(businessRoot, source),
       actionCatalog
     })
+    const legacyProjection = compileNativeComposition(source, {
+      files: readNativeCompositionFiles(businessRoot, source),
+      actionCatalog,
+      legacyInputArtifactStages: new Set(source.modules.map((module) => module.id))
+    })
+    for (const path of [
+      "devclaw.project-runtime.json",
+      "composition/lock.json",
+      "devclaw.project-actions.lock.json"
+    ])
+      expect(result.files.find((file) => file.path === path)!.bytes).toEqual(
+        legacyProjection.files.find((file) => file.path === path)!.bytes
+      )
     const plugin = JSON.parse(
       result.files.find((file) => file.path === "devclaw.project-runtime.json")!.bytes.toString()
     )

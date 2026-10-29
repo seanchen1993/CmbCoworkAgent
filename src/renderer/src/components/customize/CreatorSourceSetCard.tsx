@@ -3,7 +3,7 @@ import type { DevelopmentApi, DevelopmentStatus } from "../../../../shared/mods/
 import { captureConfigurationScope } from "@/lib/configuration-target"
 import { InstalledPluginStartUse } from "./InstalledPluginStartUse"
 import { useAppStore } from "@/lib/store"
-import { sourceSetError } from "./source-set-view"
+import { runSourceSetWhenIdle, sourceSetError, sourceSetFailureCode } from "./source-set-view"
 import { isSameWorkspacePath } from "../../../../shared/workspace-path"
 
 const button = "rounded border px-3 py-2 text-sm disabled:opacity-50"
@@ -26,8 +26,20 @@ export function CreatorSourceSetCard(props: Props) {
 function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Props) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const [busyDependencies, setBusyDependencies] = useState<ReadonlySet<string>>(() => new Set())
   const pending = useRef(false),
-    live = useRef(true)
+    live = useRef(true),
+    childPending = useRef(new Set<string>()),
+    advanceRequested = useRef(false)
+  const blocked = busy || busyDependencies.size > 0
+  const dependencyBusy = useCallback((id: string, value: boolean) => {
+    if (!live.current || childPending.current.has(id) === value) return
+    const next = new Set(childPending.current)
+    if (value) next.add(id)
+    else next.delete(id)
+    childPending.current = next
+    setBusyDependencies(next)
+  }, [])
   useEffect(() => {
     live.current = true
     return () => {
@@ -35,8 +47,8 @@ function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Pro
     }
   }, [])
   const run = useCallback(
-    async (work: () => Promise<DevelopmentStatus>) => {
-      if (pending.current || !live.current) return
+    async (work: () => Promise<DevelopmentStatus>, waitForIdle = true) => {
+      if (pending.current || childPending.current.size > 0 || !live.current) return
       pending.current = true
       setBusy(true)
       setError("")
@@ -44,18 +56,16 @@ function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Pro
       const account = useAppStore.getState().accountRevision
       const current = () => account === useAppStore.getState().accountRevision && scopeCurrent()
       try {
-        const next = await work()
+        const assertCurrent = () => {
+          if (!live.current || !current()) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+        }
+        const next = waitForIdle ? await runSourceSetWhenIdle(work, assertCurrent) : await work()
         if (!live.current || !current()) return
         if (next.threadId !== threadId || !isSameWorkspacePath(next.workspace, workspace))
           throw Error("DEVELOPMENT_SCOPE_CHANGED")
         onStatus(next)
       } catch (cause) {
-        if (live.current && current())
-          setError(
-            cause instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(cause.message)
-              ? cause.message
-              : "SOURCE_SET_PREPARATION_FAILED"
-          )
+        if (live.current && current()) setError(sourceSetFailureCode(cause))
         // A lost installation reply must reveal the original pending intent, never retry it.
         if (live.current && current()) {
           try {
@@ -100,9 +110,19 @@ function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Pro
     )
       return
     return window.api.mods.onConfigurationChanged(() => {
+      if (childPending.current.size > 0) {
+        advanceRequested.current = true
+        return
+      }
       void advance()
     })
   }, [status, advance])
+  useEffect(() => {
+    if (!blocked && advanceRequested.current) {
+      advanceRequested.current = false
+      void advance()
+    }
+  }, [blocked, advance])
   return (
     <section aria-label="导入项目作者源码" className="space-y-3 rounded border p-3">
       <p className="text-sm">
@@ -111,12 +131,13 @@ function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Pro
       <button
         className={button}
         disabled={
-          busy ||
+          blocked ||
           !api.importSourceSet ||
           (!!status && !["ready", "cancelled"].includes(status.phase))
         }
         onClick={() =>
-          void run(() => api.importSourceSet!({ threadId, expectedWorkspace: workspace }))
+          // A native directory picker needs a new user click; never reopen it from an idle retry.
+          void run(() => api.importSourceSet!({ threadId, expectedWorkspace: workspace }), false)
         }
       >
         选择作者源码目录
@@ -141,7 +162,7 @@ function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Pro
               {dep.phase === "prepared" && (
                 <button
                   className={button}
-                  disabled={busy || !api.installSourceSetDependency}
+                  disabled={blocked || !api.installSourceSetDependency}
                   onClick={() =>
                     void run(() =>
                       api.installSourceSetDependency!({
@@ -161,7 +182,7 @@ function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Pro
                   <p>上次安装结果待核对，不能直接重新安装。</p>
                   <button
                     className={button}
-                    disabled={busy || !api.reconcileSourceSetDependency}
+                    disabled={blocked || !api.reconcileSourceSetDependency}
                     onClick={() =>
                       void run(() =>
                         api.reconcileSourceSetDependency!({
@@ -184,6 +205,8 @@ function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Pro
                   workspace={workspace}
                   pluginId={dep.pluginId}
                   expected={{ name: dep.name, version: dep.version, digest: dep.digest }}
+                  disabled={busy || (busyDependencies.size > 0 && !busyDependencies.has(dep.id))}
+                  onBusyChange={(value) => dependencyBusy(dep.id, value)}
                 />
               )}
             </div>
@@ -192,7 +215,7 @@ function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Pro
             <button
               className={button}
               disabled={
-                busy ||
+                blocked ||
                 status.dependencies.some((dep) => dep.phase !== "installed") ||
                 !api.advanceSourceSet
               }
@@ -207,7 +230,7 @@ function ScopedSourceSetCard({ threadId, workspace, status, api, onStatus }: Pro
           {status.phase !== "ready" && (
             <button
               className={button}
-              disabled={busy || !api.cancelSourceSet}
+              disabled={blocked || !api.cancelSourceSet}
               onClick={() =>
                 void run(() =>
                   api.cancelSourceSet!({ threadId, expectedWorkspace: workspace, id: status.id })

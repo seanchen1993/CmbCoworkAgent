@@ -177,6 +177,48 @@ export class CreatorReuseService {
     }
     return status
   }
+  /** Main-only graph handoff. Public status/ToolMessage data cannot establish this fact. */
+  hasPendingTurnReview(context: DevelopmentContext, turnId: string): boolean {
+    try {
+      context.assertCurrent()
+      const entry = this.entries.get(context.scope.threadId)
+      if (
+        this.closed ||
+        !entry ||
+        !same(entry.plan.scope, context.scope) ||
+        entry.plan.turnId !== turnId ||
+        entry.plan.settled ||
+        entry.applying ||
+        entry.plan.step !== "review" ||
+        entry.plan.installed ||
+        !entry.prepared
+      )
+        return false
+      const { plan, prepared } = entry
+      if (
+        plan.status.error ||
+        !(
+          (plan.status.phase === "needs-approval" && !entry.approved) ||
+          (plan.status.phase === "applying" && entry.approved)
+        ) ||
+        plan.status.sourceDigest !== prepared.sourceDigest ||
+        plan.status.compiledDigest !== prepared.compiledDigest ||
+        !plan.target ||
+        plan.status.targetProfileDigest !== sha(plan.target)
+      )
+        return false
+      this.assertTarget(entry)
+      context.assertCurrent()
+      this.guard(entry)
+      return (
+        this.entries.get(context.scope.threadId) === entry &&
+        same(this.read(context.scope), plan) &&
+        !plan.settled
+      )
+    } catch {
+      return false
+    }
+  }
   /** Exact original transaction facts for completing a separately requested named save. */
   compositionFacts(scope: DevelopmentScope) {
     const plan = this.read(scope)
@@ -189,6 +231,22 @@ export class CreatorReuseService {
     const plan = this.read(scope)
     if (!plan) return undefined
     const entry = this.entries.get(scope.threadId)
+    // An unstarted review can be prepared again only through a new explicit request.
+    if (
+      plan.step === "review" &&
+      !plan.installed &&
+      plan.status.phase === "needs-approval" &&
+      !(
+        entry &&
+        !this.closed &&
+        same(entry.plan.scope, scope) &&
+        entry.plan.status.planId === plan.status.planId &&
+        entry.prepared &&
+        entry.prepared.sourceDigest === plan.status.sourceDigest &&
+        entry.prepared.compiledDigest === plan.status.compiledDigest
+      )
+    )
+      return { ...plan.status, phase: "failed", error: "CREATOR_REUSE_PREPARE_REQUIRED" }
     // A restart keeps observations and exact identities, never the old approval callback.
     if (
       ["preparing", "applying"].includes(plan.status.phase) &&

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { createRequire } from "node:module"
-import { compileFunctionPlugin } from "../v2/loader"
+import { compileFunctionPlugin, type CompiledFunctionPlugin } from "../v2/loader"
 import { functionAuthoringDeclarations } from "./authoring-declarations"
 
 function libraryDirectory(): { path: string; bundled: boolean } {
@@ -11,9 +11,15 @@ function libraryDirectory(): { path: string; bundled: boolean } {
   return { path: dirname(require.resolve("typescript")), bundled: false }
 }
 
-/** Compiler input is an immutable plugin snapshot plus our fixed SDK and trusted ES libraries. */
+/** Standalone callers capture a fresh plugin snapshot before checking it. */
 export async function checkFunctionAuthorTypes(directory: string) {
   const compiled = await compileFunctionPlugin(directory, { captureSources: true })
+  return checkCompiledFunctionAuthorTypes(compiled)
+}
+
+/** Uses captured source only, plus our fixed SDK and trusted ES libraries. */
+export async function checkCompiledFunctionAuthorTypes(compiled: Readonly<CompiledFunctionPlugin>) {
+  if (!compiled.authoringSources) throw Error("AUTHORING_SOURCE_SNAPSHOT_REQUIRED")
   const ts = await import("typescript")
   const sourceExtensions: Record<string, import("typescript").Extension> = {
     ".ts": ts.Extension.Ts,
@@ -29,7 +35,7 @@ export async function checkFunctionAuthorTypes(directory: string) {
     process.platform === "win32" ? resolve(file).toLowerCase() : resolve(file)
   const sdkPath = resolve(compiled.root, ".__cmb_authoring__/devclaw-mods.d.ts")
   const sources = new Map(
-    Object.entries(compiled.authoringSources!).map(([name, text]) => [
+    Object.entries(compiled.authoringSources).map(([name, text]) => [
       canonical(resolve(compiled.root, name)),
       text
     ])

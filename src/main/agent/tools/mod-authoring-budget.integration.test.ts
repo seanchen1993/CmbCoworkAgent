@@ -67,6 +67,13 @@ it("bounds real authoring tools across reconstruction using the original service
   await service.setEnabled(threadId, workspace, true)
   setModDevelopmentService(service)
   claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "native-run" })
+  const source = createAuthoringTemplate({
+    id: "demo",
+    name: "Demo",
+    instruction: "Test",
+    kind: "command"
+  })
+  service.save(threadId, { id: "demo", name: "Demo", expectedRevision: 0, files: source.files })
   const request = vi.spyOn(service, "requestTrial").mockResolvedValue(service.status(threadId))
   const args = { action: "request_trial" as const, id: "demo", revision: 1 }
   for (let i = 0; i < 3; i++) {

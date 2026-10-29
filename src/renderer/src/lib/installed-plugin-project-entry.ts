@@ -15,6 +15,17 @@ export type InstalledPluginProjectEntry =
   | { kind: "legacy"; pluginId: string; name: string; version?: string }
   | { kind: "unavailable"; reason: string }
 
+const identity = (item: InstalledProjectPlugin) =>
+  JSON.stringify([
+    item.id,
+    item.name,
+    item.version,
+    item.enabled,
+    item.hasProjectMode,
+    item.path,
+    item.updatedAt
+  ])
+
 export function classifyInstalledPluginProjectEntry(
   pluginId: string,
   plugins: readonly InstalledProjectPlugin[],
@@ -45,7 +56,8 @@ export async function readInstalledPluginProjectEntry(
     plugins(): Promise<readonly InstalledProjectPlugin[]>
     templates(): Promise<readonly LocalProjectTemplate[]>
   },
-  isCurrent: () => boolean
+  isCurrent: () => boolean,
+  expected?: InstalledProjectPlugin
 ): Promise<InstalledPluginProjectEntry> {
   const guard = () => {
     if (!isCurrent()) throw Error("配置聊天或目录已变化，请重新打开项目入口。")
@@ -54,6 +66,8 @@ export async function readInstalledPluginProjectEntry(
   const before = await api.plugins()
   guard()
   const first = before.find((item) => item.id === pluginId)
+  if (expected && (!first || identity(first) !== identity(expected)))
+    throw Error("插件版本或状态已变化，请重新检查项目入口。")
   if (!first?.enabled) return classifyInstalledPluginProjectEntry(pluginId, before, [])
   const templates = await api.templates()
   guard()
@@ -61,16 +75,6 @@ export async function readInstalledPluginProjectEntry(
   guard()
   const current = after.find((item) => item.id === pluginId)
   if (!current?.enabled) return classifyInstalledPluginProjectEntry(pluginId, after, [])
-  const identity = (item: InstalledProjectPlugin) =>
-    JSON.stringify([
-      item.id,
-      item.name,
-      item.version,
-      item.enabled,
-      item.hasProjectMode,
-      item.path,
-      item.updatedAt
-    ])
   if (identity(first) !== identity(current))
     throw Error("插件版本或状态已变化，请重新检查项目入口。")
   return classifyInstalledPluginProjectEntry(pluginId, after, templates)

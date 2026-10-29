@@ -19,6 +19,9 @@ import { isPromptSubmissionReady } from "@/lib/prompt-submission-readiness"
 import { PromptDecorations } from "./PromptDecorations"
 import { useChatFlow } from "@/lib/use-chat-flow"
 import { ClawSidebar, ClawComposerBar } from "./ClawSidebar"
+import { openClawRecovery } from "../../lib/claw-sidebar"
+import { ModCompositionRecoveryNotice } from "./ModCompositionRecoveryNotice"
+import { MODS_COMPOSITION_REVIEW_REQUIRED } from "../../../../shared/mods/v2/contracts"
 import { ProjectRunDetails } from "./ProjectRunDetails"
 import { isOrdinaryFlowMetadata } from "../../../../shared/mods/flows/scope"
 import { isDevelopmentThreadMetadata } from "../../../../shared/mods/development-scope"
@@ -234,6 +237,8 @@ import {
 } from "../../../../shared/file-attachment"
 import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
 import { resolveChatSearchContiguousTailStart } from "@/lib/chat-search-gap-boundary"
+import { ChatBottomPresentationWait } from "./chat-bottom-presentation-wait"
+import { isChatRowPresented } from "./chat-row-presentation"
 import { createMessageIdIndexLookup, type MessageIdIndexLookup } from "@/lib/lazy-message-id-index"
 import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
@@ -1459,15 +1464,18 @@ function DialogTipsMarkdown({ content }: { content: string }): React.JSX.Element
 function ChatErrorCard({
   error,
   detail,
-  onDismiss
+  onDismiss,
+  onReviewComposition
 }: {
   error: string
   detail: ApiErrorDetailState | null
   onDismiss: () => void
+  onReviewComposition: () => void
 }): React.JSX.Element {
   const [showDetails, setShowDetails] = useState(false)
 
-  const title = detail?.statusLabel
+  const compositionRecovery = error.includes(MODS_COMPOSITION_REVIEW_REQUIRED)
+  const title = compositionRecovery ? "功能组合需要核对" : detail?.statusLabel
     ? `${detail.statusLabel}${detail.status ? `（${detail.status}）` : ""}`
     : "代理出错"
   const reason = (detail?.reason || error || "").trim()
@@ -1498,12 +1506,13 @@ function ChatErrorCard({
       <AlertCircle className="size-5 text-destructive shrink-0 mt-0.5" />
       <div className="flex-1 min-w-0">
         <div className="font-medium text-destructive text-sm">{title}</div>
-        {reason && (
+        {compositionRecovery && <ModCompositionRecoveryNotice onReview={onReviewComposition} />}
+        {!compositionRecovery && reason && (
           <div className="text-sm text-muted-foreground mt-1 break-words whitespace-pre-wrap">
             {reason}
           </div>
         )}
-        {hint && <div className="text-xs text-muted-foreground/90 mt-1">{hint}</div>}
+        {!compositionRecovery && hint && <div className="text-xs text-muted-foreground/90 mt-1">{hint}</div>}
 
         {hasDetails && (
           <>
@@ -1763,7 +1772,9 @@ export function ChatContainer({
   const bottomScrollFrameRef = useRef<number | null>(null)
   const bottomSettleAttemptRef = useRef(0)
   const bottomSettleEffectKeyRef = useRef("")
+  const [bottomPresentationWait] = useState(() => new ChatBottomPresentationWait())
   const lastVisibleMessageIndexRef = useRef(-1)
+  const lastVisibleMessageIdRef = useRef<string | null>(null)
   const messageVirtualizationEnabledRef = useRef(false)
   const lastObservedScrollTopRef = useRef(0)
   const upwardUserScrollIntentUntilRef = useRef(0)
@@ -2372,9 +2383,10 @@ export function ChatContainer({
     () => ({
       threadId,
       ...modsChatState,
-      // A missing directory entry is still loading; a loaded entry without workspace is an error.
+      // Unbound chats need directory selection; only failed reads offer a retry.
       error: hasCurrentThread ? modsChatState.error : undefined,
-      retry: currentForkWorkspacePath ? modsChatState.retry : reloadMissingThread
+      retry: currentForkWorkspacePath ? modsChatState.retry
+        : hasCurrentThread ? undefined : reloadMissingThread
     }),
     [threadId, modsChatState, hasCurrentThread, currentForkWorkspacePath, reloadMissingThread]
   )
@@ -4067,6 +4079,7 @@ export function ChatContainer({
   )
 
   useLayoutEffect(() => {
+    bottomPresentationWait.clear()
     if (bottomScrollFrameRef.current !== null) {
       window.cancelAnimationFrame(bottomScrollFrameRef.current)
       bottomScrollFrameRef.current = null
@@ -4096,7 +4109,7 @@ export function ChatContainer({
     upwardUserScrollIntentUntilRef.current = 0
     downwardUserScrollIntentUntilRef.current = 0
     scrollbarUserIntentActiveRef.current = false
-  }, [threadId])
+  }, [bottomPresentationWait, threadId])
 
   useEffect(() => {
     if (scrollParent || !scrollRef.current) return
@@ -4115,10 +4128,37 @@ export function ChatContainer({
     visibleMessageIndexes.length
   )
   lastVisibleMessageIndexRef.current = visibleMessageIndexes.length - 1
+  lastVisibleMessageIdRef.current = lastContentMessageId
   messageVirtualizationEnabledRef.current = isMessageVirtualizationEnabled
   useEffect(() => {
     pendingDurableHistoryAnchorRef.current = null
   }, [threadId])
+
+  const getVirtualTail = useCallback((viewport: HTMLElement): HTMLElement | undefined => {
+    const messageId = lastVisibleMessageIdRef.current
+    if (!messageId) return undefined
+    return contentMessageRefs.current.get(messageId) ??
+      Array.from(viewport.querySelectorAll<HTMLElement>("[data-chat-message-row]"))
+        .find(candidate => candidate.dataset.chatMessageId === messageId)
+  }, [])
+
+  const hasReadyVirtualTail = useCallback((viewport: HTMLElement): boolean => {
+    if (!messageVirtualizationEnabledRef.current) return true
+    const row = getVirtualTail(viewport)
+    // A short pending row can already be at the physical bottom. It is not yet
+    // proof that the current virtual tail has a rendered, protected presentation.
+    return Boolean(row && isChatRowPresented(row) &&
+      !row.querySelector("[data-function-site-pending]") &&
+      row.getBoundingClientRect().height > 0)
+  }, [getVirtualTail])
+
+  const readDetachedAnchorLease = useCallback((): number | null => {
+    const state = chatScrollStateRef.current
+    if (state?.mode !== "detached" || state.programmaticScrollGuard ||
+      pendingDurableHistoryAnchorRef.current || pendingChatSessionAnchorRef.current ||
+      pendingDurableSearchRevealIdRef.current) return null
+    return durableMessageWindowGenerationRef.current
+  }, [])
 
   const scheduleBottomScrollEffect = useCallback(
     (
@@ -4161,6 +4201,7 @@ export function ChatContainer({
         }
         const lastVisibleIndex = lastVisibleMessageIndexRef.current
         if (!viewport || lastVisibleIndex < 0) {
+          bottomPresentationWait.clear()
           applyChatScrollEvent({
             type:
               pending.reason === "content-appended" || pending.reason === "content-grown"
@@ -4206,12 +4247,37 @@ export function ChatContainer({
         // A virtual-index write only guarantees that the final message is mounted. The Virtuoso
         // footer sits after that item, so confirm only after the next-frame viewport phase has had
         // a chance to include the measured footer as well.
-        if (writer === "viewport" && distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
+        if (writer === "viewport" && distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX &&
+          hasReadyVirtualTail(viewport)) {
+          bottomPresentationWait.clear()
           bottomSettleAttemptRef.current = 0
           bottomSettleEffectKeyRef.current = ""
           applyChatScrollEvent({
             type: "BOTTOM_CONFIRMED",
             generation: pending.generation
+          })
+          return
+        }
+
+        if (writer === "viewport" && virtualized &&
+          getVirtualTail(viewport)?.querySelector("[data-function-site-pending]")) {
+          // Authorization/guest startup does not spend the geometry frame budget. Park after
+          // this single positioning write; real presentation/height events resume this intent.
+          pendingBottomScrollEffectRef.current = pending
+          bottomPresentationWait.park(settleKey, () => {
+            const waiting = pendingBottomScrollEffectRef.current
+            const current = chatScrollStateRef.current
+            if (!waiting || waiting.generation !== pending.generation ||
+              current?.generation !== pending.generation || !shouldFollowChatOutput(current)) return
+            pendingBottomScrollEffectRef.current = null
+            if (bottomScrollFrameRef.current !== null) {
+              window.cancelAnimationFrame(bottomScrollFrameRef.current)
+              bottomScrollFrameRef.current = null
+            }
+            bottomSettleAttemptRef.current = 0
+            bottomSettleEffectKeyRef.current = ""
+            applyChatScrollEvent({ type: longSettle ? "SCROLL_TO_BOTTOM_FAILED" :
+              "PROGRAMMATIC_SCROLL_END", generation: pending.generation })
           })
           return
         }
@@ -4231,6 +4297,7 @@ export function ChatContainer({
 
         bottomSettleAttemptRef.current = 0
         bottomSettleEffectKeyRef.current = ""
+        bottomPresentationWait.clear()
         applyChatScrollEvent({
           type: longSettle ? "SCROLL_TO_BOTTOM_FAILED" : "PROGRAMMATIC_SCROLL_END",
           generation: pending.generation
@@ -4240,12 +4307,13 @@ export function ChatContainer({
       if (runImmediately) run()
       else bottomScrollFrameRef.current = window.requestAnimationFrame(run)
     },
-    [applyChatScrollEvent, getViewport]
+    [applyChatScrollEvent, bottomPresentationWait, getViewport, getVirtualTail, hasReadyVirtualTail]
   )
 
   const runChatScrollTransition = useCallback(
     (transition: ChatScrollTransition): ChatScrollState => {
       if (transition.state.mode === "restoring" || isChatScrollDetached(transition.state)) {
+        bottomPresentationWait.clear()
         pendingBottomScrollEffectRef.current = null
         if (bottomScrollFrameRef.current !== null) {
           window.cancelAnimationFrame(bottomScrollFrameRef.current)
@@ -4255,7 +4323,7 @@ export function ChatContainer({
       for (const effect of transition.effects) scheduleBottomScrollEffect(effect)
       return transition.state
     },
-    [scheduleBottomScrollEffect]
+    [bottomPresentationWait, scheduleBottomScrollEffect]
   )
 
   const dispatchChatScrollEvent = useCallback(
@@ -4361,12 +4429,13 @@ export function ChatContainer({
         })
       }
       pendingBottomScrollEffectRef.current = null
+      bottomPresentationWait.clear()
       if (bottomScrollFrameRef.current !== null) {
         window.cancelAnimationFrame(bottomScrollFrameRef.current)
         bottomScrollFrameRef.current = null
       }
     }
-  }, [getViewport, threadId])
+  }, [bottomPresentationWait, getViewport, threadId])
   const searchDurableMessages = useCallback(
     (query: string, options: DurableChatSearchOptions): Promise<DurableChatSearchPage> => {
       return window.api.threads.searchMessages(threadId, query, options)
@@ -4434,7 +4503,11 @@ export function ChatContainer({
           detachDelta: CHAT_SCROLL_UP_DETACH_DELTA_PX,
           detached: isChatScrollDetached(state),
           downwardIntentActive: performance.now() <= downwardUserScrollIntentUntilRef.current,
-          scrollbarPointerActive: scrollbarUserIntentActiveRef.current
+          scrollbarPointerActive: scrollbarUserIntentActiveRef.current,
+          presentationReady: !state.programmaticScrollGuard ||
+            scrollbarUserIntentActiveRef.current ||
+            performance.now() <= downwardUserScrollIntentUntilRef.current ||
+            hasReadyVirtualTail(scrollParent)
         })
       ) {
         const confirmed = dispatchChatScrollEvent({
@@ -4594,6 +4667,7 @@ export function ChatContainer({
     }
   }, [
     dispatchChatScrollEvent,
+    hasReadyVirtualTail,
     invalidateDurableMessageReveal,
     scheduleBottomScrollEffect,
     scrollParent
@@ -4674,14 +4748,16 @@ export function ChatContainer({
       // That is layout, not proof that a detached reader intentionally returned to the bottom.
       // Manual downward scrolling is confirmed by the viewport scroll listener; the button changes
       // mode to following before its programmatic settle, so both intentional paths still work.
-      if (atBottom && state && !isChatScrollDetached(state)) {
+      const viewport = getViewport()
+      if (atBottom && state && !isChatScrollDetached(state) &&
+        (!state.programmaticScrollGuard || (viewport && hasReadyVirtualTail(viewport)))) {
         dispatchChatScrollEvent({
           type: "BOTTOM_CONFIRMED",
           generation: chatScrollUiState.generation
         })
       }
     },
-    [chatScrollUiState.generation, dispatchChatScrollEvent]
+    [chatScrollUiState.generation, dispatchChatScrollEvent, getViewport, hasReadyVirtualTail]
   )
 
   useLayoutEffect(() => {
@@ -5340,7 +5416,7 @@ export function ChatContainer({
       return "任务运行中，可使用取消按钮停止当前任务"
     }
     if (hasPendingFilePayload) return "输入消息或直接发送文件..."
-    if (creatorMode) return "描述想创建、修改或组合的 Mod，助手会完成配置并应用到当前聊天"
+    if (creatorMode) return "描述想制作或修改的功能、插件或项目流程"
     if (!goal) return "向 CMBDevClaw 提问，/ 输入命令；@ 引用文件；Shift + Enter 换行"
     if (goal.status === "active") {
       return "输入新消息会暂停当前 Goal；查看详情用 /goal status"
@@ -8236,7 +8312,8 @@ export function ChatContainer({
         </div>
       )}
       {threadError && !isLoading && (
-        <ChatErrorCard error={threadError} detail={errorDetail} onDismiss={handleDismissError} />
+        <ChatErrorCard error={threadError} detail={errorDetail} onDismiss={handleDismissError}
+          onReviewComposition={() => openClawRecovery(threadId)} />
       )}
     </div>
   )
@@ -8557,6 +8634,7 @@ export function ChatContainer({
                     onInitialVirtualItemsRendered={handleInitialVirtualItemsRendered}
                     onContentHeightChanged={handleContentHeightChanged}
                     onAtBottomStateChange={handleVirtualAtBottomStateChange}
+                    readDetachedAnchorLease={readDetachedAnchorLease}
                     footer={chatMessageListFooter}
                   />
                 </div>

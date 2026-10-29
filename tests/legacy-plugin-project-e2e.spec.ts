@@ -160,6 +160,7 @@ async function main() {
     assert.equal(await page.evaluate(() => window.api.mods.globalEnabled()), false)
     await page.getByRole("button", { name: "自定义设置", exact: true }).click()
     await page.getByRole("button", { name: "插件", exact: true }).click()
+    await page.getByRole("button", { name: "导入与发布", exact: true }).click()
     await page.getByText("暂无安装的插件", { exact: true }).waitFor()
     const installed = await page.evaluate(
       (bytes) => window.api.plugins.install(new Uint8Array(bytes).buffer, "legacy.zip", "local"),

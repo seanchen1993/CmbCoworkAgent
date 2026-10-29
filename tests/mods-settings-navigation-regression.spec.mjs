@@ -82,7 +82,8 @@ createRoot(document.getElementById('root')).render(<CustomizeView/>);`
               "./ModsPanel",
               "./EvaluationPanel",
               "./SparksTour",
-              "./ConfigurationTargetPicker"
+              "./ConfigurationTargetPicker",
+              "./SettingsOverlay"
             ].includes(a.path)
           )
             return { path: a.path, namespace: "empty" }
@@ -124,11 +125,11 @@ async function dismissTour(page) {
 }
 async function navigate(page, name) {
   const group = page.getByRole("button", {
-    name: name === "灵件与使用设置" ? "基础功能" : "高级特性",
+    name: name === "插件" ? "基础功能" : "高级特性",
     exact: true
   })
   if (
-    ["搭配管理", "聊天任务模板", "灵件与使用设置"].includes(name) &&
+    ["搭配管理", "聊天任务模板", "插件"].includes(name) &&
     (await group.getAttribute("aria-expanded")) === "false"
   )
     await group.click()
@@ -163,6 +164,28 @@ async function assertInert(page, locator) {
 try {
   {
     const { page, errors } = await open("mods")
+    const entry = page
+      .locator("nav")
+      .filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) })
+      .getByRole("button", { name: "插件", exact: true })
+    assert.equal(await entry.count(), 1, "Plugin management has one main menu entry")
+    await page.getByRole("button", { name: "导入与发布", exact: true }).click()
+    await page.getByRole("heading", { name: "导入与发布", exact: true }).waitFor()
+    assert.equal(
+      await entry.getAttribute("aria-current"),
+      "page",
+      "The plugin entry remains active on its source management subpage"
+    )
+    await page.getByRole("button", { name: "返回插件", exact: true }).click()
+    await page.getByRole("heading", { name: "插件", exact: true }).waitFor()
+    assert.equal(await entry.getAttribute("aria-current"), "page")
+    assert.deepEqual(await page.evaluate(() => window.fixture.calls), [])
+    assert.deepEqual(errors, [])
+    result.unifiedPluginEntry = { singleEntry: true, sourceSubpageHighlighted: true }
+    await page.close()
+  }
+  {
+    const { page, errors } = await open("mods")
     await page
       .getByRole("navigation", { name: "灵件工作区", exact: true })
       .getByRole("button", { name: "我已添加", exact: true })
@@ -174,9 +197,11 @@ try {
     assert.deepEqual(await page.evaluate(() => window.projectMounts), [])
     await page.evaluate(() => window.fixture.projectPlugins())
     const first = page.getByRole("article", { name: "project-a", exact: true })
+    await first.getByRole("button", { name: "管理", exact: true }).click()
     await first.getByRole("button", { name: "查看项目流程", exact: true }).click()
     await first.getByRole("region", { name: "selected-native-project", exact: true }).waitFor()
     const second = page.getByRole("article", { name: "project-b", exact: true })
+    await second.getByRole("button", { name: "管理", exact: true }).click()
     await second.getByRole("button", { name: "查看项目流程", exact: true }).click()
     await second.getByRole("region", { name: "selected-native-project", exact: true }).waitFor()
     assert.equal(
@@ -195,6 +220,10 @@ try {
     await page
       .getByRole("region", { name: "selected-native-project", exact: true })
       .waitFor({ state: "detached" })
+    await page
+      .getByRole("article", { name: "project-b", exact: true })
+      .getByRole("button", { name: "管理", exact: true })
+      .click()
     await page
       .getByRole("article", { name: "project-b", exact: true })
       .getByRole("button", { name: "查看项目流程", exact: true })
@@ -281,15 +310,15 @@ try {
     await name.fill("Unsaved authoring title")
     await navigate(page, "聊天任务模板")
     await assertInert(page, name)
-    await navigate(page, "灵件与使用设置")
+    await navigate(page, "插件")
     assert.equal(await name.inputValue(), "Unsaved authoring title")
     await navigate(page, "对话创作")
     await assertInert(page, name)
-    await navigate(page, "灵件与使用设置")
+    await navigate(page, "插件")
     assert.equal(await name.inputValue(), "Unsaved authoring title")
     await navigate(page, "聊天任务模板")
     await chooseB(page)
-    await navigate(page, "灵件与使用设置")
+    await navigate(page, "插件")
     await page
       .getByRole("navigation", { name: "灵件工作区", exact: true })
       .getByRole("button", { name: "对话创作", exact: true })

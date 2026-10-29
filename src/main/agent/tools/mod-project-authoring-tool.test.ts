@@ -26,6 +26,226 @@ afterEach(async () => {
 })
 
 describe("natural language project authoring actions", () => {
+  it("applies fixed native source deltas alone or atomically with resources through the real tool", async () => {
+    const scope = {
+      threadId,
+      workspace: "workspace",
+      incarnation: { token: `delta-${++sequence}`, legacyCreatedAt: 1 }
+    }
+    setModDevelopmentService({
+      isCreatorMode: () => true,
+      projectAuthoringContext: () => ({ scope, assertCurrent: () => undefined }),
+      assertScope: () => undefined
+    } as unknown as ModDevelopmentService)
+    claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "run" })
+    const original = await projectAuthoringSessions.scaffold(
+      scope,
+      "delta",
+      "Delta",
+      () => {},
+      "native-modular"
+    )
+    roots.add(dirname(original.directory))
+    const author = createModAuthoringTool({ threadId, workspace: scope.workspace })
+    const first = JSON.parse(
+      await author.invoke({
+        action: "project_patch",
+        id: original.id,
+        revision: 1,
+        sourceDigest: original.source.digest,
+        sourcePatch: [{ op: "replace", path: "/plugin/title", value: "Delta title" }]
+      })
+    )
+    expect(first).toMatchObject({
+      ok: true,
+      result: { revision: 2, preservedUnchangedFiles: true, runtimeVerified: false }
+    })
+    const current = projectAuthoringSessions.read(scope, original.id)
+    const files = [
+      { path: "workflows/verify.workflow.js", text: "// Exact inert companion" },
+      { path: "tests/verify/case.json", text: '{"case":"retained"}' }
+    ]
+    const changed = JSON.parse(
+      await author.invoke({
+        action: "project_patch",
+        id: current.id,
+        revision: current.revision,
+        sourceDigest: current.source.digest,
+        files,
+        sourcePatch: files.map((file) => ({ op: "add", path: "/resources/-", value: file.path }))
+      })
+    )
+    expect(changed).toMatchObject({ ok: true, result: { revision: 3 } })
+    const updated = projectAuthoringSessions.read(scope, current.id)
+    expect(updated.source.files).toEqual(expect.arrayContaining(files))
+    for (const file of original.source.files.filter(
+      (file) => file.path !== "composition/source.json"
+    ))
+      expect(updated.source.files.find((value) => value.path === file.path)).toEqual(file)
+    const failed = JSON.parse(
+      await author.invoke({
+        action: "project_patch",
+        id: updated.id,
+        revision: updated.revision,
+        sourceDigest: updated.source.digest,
+        sourcePatch: [
+          { op: "replace", path: "/plugin/title", value: "Never saved" },
+          { op: "test", path: "/plugin/id", value: "wrong" }
+        ]
+      })
+    )
+    expect(failed).toMatchObject({
+      ok: false,
+      error: "PROJECT_SOURCE_PATCH_TEST_FAILED",
+      currentDraft: { id: updated.id, revision: 3, sourceDigest: updated.source.digest },
+      sourcePatch: { operationIndex: 1, path: "/plugin/id" },
+      sourceUnchanged: true,
+      executed: false
+    })
+    expect(projectAuthoringSessions.read(scope, updated.id).source).toEqual(updated.source)
+    const invalidSchema = JSON.parse(
+      await author.invoke({
+        action: "project_patch",
+        id: updated.id,
+        revision: updated.revision,
+        sourceDigest: updated.source.digest,
+        sourcePatch: [{ op: "replace", path: "/plugin/version", value: "invalid" }]
+      })
+    )
+    expect(invalidSchema).toMatchObject({
+      ok: false,
+      error: "PROJECT_SOURCE_PATCH_SCHEMA",
+      sourcePatch: { path: "/plugin/version" },
+      currentDraft: { revision: 3 }
+    })
+    expect(
+      author.schema.safeParse({
+        action: "project_patch",
+        sourcePatch: [{ op: "move", path: "/modules/0" }]
+      }).success
+    ).toBe(false)
+    expect(author.description).toContain("sourcePatch")
+    expect(author.description).toContain("add /modules/-")
+  })
+  it("returns exact undeclared paths and unchanged native source so one atomic patch can repair them", async () => {
+    const scope = {
+      threadId,
+      workspace: "workspace",
+      incarnation: { token: `resources-${++sequence}`, legacyCreatedAt: 1 }
+    }
+    setModDevelopmentService({
+      isCreatorMode: () => true,
+      projectAuthoringContext: () => ({ scope, assertCurrent: () => undefined }),
+      assertScope: () => undefined
+    } as unknown as ModDevelopmentService)
+    claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "run" })
+    const draft = await projectAuthoringSessions.scaffold(
+      scope,
+      "declared-resources",
+      "Resources",
+      () => {},
+      "native-modular"
+    )
+    roots.add(dirname(draft.directory))
+    const author = createModAuthoringTool({ threadId, workspace: scope.workspace })
+    const files = [
+      { path: "workflows/verify.workflow.js", text: "// Inert workflow source" },
+      { path: "tests/e2e-cases/sample.json", text: '{"scenario":"sample"}' }
+    ]
+    const patch = {
+      action: "project_patch" as const,
+      id: draft.id,
+      revision: draft.revision,
+      sourceDigest: draft.source.digest,
+      files
+    }
+    const raw = await author.invoke(patch)
+    if (typeof raw !== "string") throw Error("STRING_REQUIRED")
+    const rejected = JSON.parse(raw)
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: "PROJECT_DRAFT_FILE_UNSUPPORTED",
+      unsupportedPaths: ["tests/e2e-cases/sample.json", "workflows/verify.workflow.js"],
+      declarationPath: "composition/source.json",
+      sourceUnchanged: true,
+      executed: false,
+      currentDraft: { id: draft.id, exists: true, revision: 1, sourceDigest: draft.source.digest }
+    })
+    expect(rejected.hint).toContain("composition/source.json.resources")
+    expect(rejected.hint).toContain("同一次 project_patch")
+    expect(rejected.hint).toContain("原子保存")
+    expect(rejected.hint).toContain("不能使用 execute、write_file")
+    expect(projectAuthoringSessions.read(scope, draft.id).revision).toBe(1)
+    const declaration = draft.source.files.find((file) => file.path === "composition/source.json")!
+    const source = JSON.parse(declaration.text)
+    source.resources = [...source.resources, ...files.map((file) => file.path)]
+    const repaired = await author.invoke({
+      ...patch,
+      files: [{ path: declaration.path, text: JSON.stringify(source) }, ...files]
+    })
+    if (typeof repaired !== "string") throw Error("STRING_REQUIRED")
+    expect(JSON.parse(repaired)).toMatchObject({
+      ok: true,
+      result: { revision: 2, preservedUnchangedFiles: true }
+    })
+    expect(projectAuthoringSessions.read(scope, draft.id).source.files).toEqual(
+      expect.arrayContaining(files)
+    )
+  })
+  it("reads bounded exact files and patches the same native draft without resubmitting its resources", async () => {
+    const scope = {
+      threadId,
+      workspace: "workspace",
+      incarnation: { token: `patch-${++sequence}`, legacyCreatedAt: 1 }
+    }
+    setModDevelopmentService({
+      isCreatorMode: () => true,
+      projectAuthoringContext: () => ({ scope, assertCurrent: () => undefined }),
+      assertScope: () => undefined
+    } as unknown as ModDevelopmentService)
+    claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "run" })
+    const draft = await projectAuthoringSessions.scaffold(scope, "patch", "Patch", () => {})
+    roots.add(dirname(draft.directory))
+    const author = createModAuthoringTool({ threadId, workspace: scope.workspace })
+    const patch = {
+      action: "project_patch" as const,
+      id: draft.id,
+      revision: draft.revision,
+      sourceDigest: draft.source.digest,
+      files: [{ path: "README.md", text: "Only this file changes" }]
+    }
+    const raw = await author.invoke(patch)
+    if (typeof raw !== "string") throw Error("STRING_REQUIRED")
+    expect(JSON.parse(raw)).toMatchObject({
+      ok: true,
+      result: { revision: 2, preservedUnchangedFiles: true, runtimeVerified: false }
+    })
+    const current = projectAuthoringSessions.read(scope, draft.id)
+    for (const file of draft.source.files.filter((file) => file.path !== "README.md"))
+      expect(current.source.files.find((item) => item.path === file.path)).toEqual(file)
+    const page = await author.invoke({
+      action: "project_read",
+      id: draft.id,
+      assetPath: "README.md"
+    })
+    if (typeof page !== "string") throw Error("STRING_REQUIRED")
+    expect(JSON.parse(page)).toMatchObject({
+      ok: true,
+      result: {
+        revision: 2,
+        sourceDigest: current.source.digest,
+        readMode: "file-page",
+        file: { text: "Only this file changes" }
+      }
+    })
+    const stale = await author.invoke(patch)
+    if (typeof stale !== "string") throw Error("STRING_REQUIRED")
+    expect(JSON.parse(stale)).toMatchObject({
+      ok: false,
+      error: "PROJECT_DRAFT_REVISION_CHANGED",
+      currentDraft: { revision: 2 }
+    })
+  })
   it.each(["revision", "drafts", "sessions"] as const)(
     "returns actionable %s capacity recovery through the real tool error boundary",
     async (reason) => {
@@ -56,7 +276,9 @@ describe("natural language project authoring actions", () => {
       expect(result).toMatchObject({ ok: false, error: "PROJECT_DRAFT_LIMIT", limit: reason })
       expect(result.hint).toContain("project_read")
       expect(result.hint).toContain(reason === "revision" ? "revision:0" : "project_pack")
-      expect(result.hint).toContain(reason === "revision" ? "公开动作锁" : "运行、权限与未核对试用不会自动恢复")
+      expect(result.hint).toContain(
+        reason === "revision" ? "公开动作锁" : "运行、权限与未核对试用不会自动恢复"
+      )
     }
   )
   it("lists live authorized actions, binds exact contracts and packages without executing providers", async () => {
@@ -252,20 +474,44 @@ describe("natural language project authoring actions", () => {
     )
     expect(packed.ok).toBe(true)
     expect(packed.result.output).toMatch(/\.zip$/)
-    expect(JSON.parse(await author.invoke({ action: "project_list" })).result)
-      .toContainEqual(expect.objectContaining({ id: "docs-test", revision: 3 }))
-    const trial = JSON.parse(await author.invoke({ action: "project_request_trial",
-      id: "docs-test", revision: 3, goal: "实际生成并复核文档" }))
-    expect(trial).toMatchObject({ ok: true, result: { phase: "needs-approval", executed: false,
-      request: { draftId: "docs-test", revision: 3, goal: "实际生成并复核文档" } } })
-    expect(projectAuthoringSessions.developmentStatus(scope, "docs-test"))
-      .toMatchObject({ status: "prepared", executed: false, activeRuns: 0 })
+    expect(JSON.parse(await author.invoke({ action: "project_list" })).result).toContainEqual(
+      expect.objectContaining({ id: "docs-test", revision: 3 })
+    )
+    const trial = JSON.parse(
+      await author.invoke({
+        action: "project_request_trial",
+        id: "docs-test",
+        revision: 3,
+        goal: "实际生成并复核文档"
+      })
+    )
+    expect(trial).toMatchObject({
+      ok: true,
+      result: {
+        phase: "needs-approval",
+        executed: false,
+        request: { draftId: "docs-test", revision: 3, goal: "实际生成并复核文档" }
+      }
+    })
+    expect(projectAuthoringSessions.developmentStatus(scope, "docs-test")).toMatchObject({
+      status: "prepared",
+      executed: false,
+      activeRuns: 0
+    })
     const readTrial = JSON.parse(await author.invoke({ action: "project_read", id: "docs-test" }))
-    expect(readTrial.result.trial).toMatchObject({ id: trial.result.request.id,
-      draftId: "docs-test", revision: 3, goal: "实际生成并复核文档" })
+    expect(readTrial.result.trial).toMatchObject({
+      id: trial.result.request.id,
+      draftId: "docs-test",
+      revision: 3,
+      goal: "实际生成并复核文档"
+    })
     const listTrial = JSON.parse(await author.invoke({ action: "project_list" }))
-    expect(listTrial.result).toContainEqual(expect.objectContaining({ id: "docs-test",
-      trial: expect.objectContaining({ id: trial.result.request.id }) }))
+    expect(listTrial.result).toContainEqual(
+      expect.objectContaining({
+        id: "docs-test",
+        trial: expect.objectContaining({ id: trial.result.request.id })
+      })
+    )
     expect(service.requestTrial).not.toHaveBeenCalled()
     expect(author.schema.safeParse({ action: "project_install" }).success).toBe(false)
     expect(author.schema.safeParse({ action: "project_approve" }).success).toBe(false)

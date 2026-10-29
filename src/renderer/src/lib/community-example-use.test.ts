@@ -3,7 +3,9 @@ import { parseClawProfile, type ClawView } from "../../../shared/mods/claw"
 import type { ModWorkspaceStatus } from "../../../shared/mods/types"
 import {
   applyExampleUse,
+  applyInstalledPluginUse,
   prepareExampleUse,
+  prepareInstalledPluginUse,
   readExampleUsage,
   type ExampleUseApi
 } from "./community-example-use"
@@ -383,5 +385,327 @@ it("previews only applicable example components and invalidates a mode change be
   expect(f.calls).toEqual([])
   f.claw.usageContext = "project"
   await expect(applyExampleUse(f.api, f.context, plan, () => {})).rejects.toThrow("已变化")
+  expect(f.calls).toEqual([])
+})
+
+it("adds a ready installed plugin without inferring official example conflicts or losing settings", async () => {
+  const f = fixture()
+  f.status.functionMods![1].state = "ready"
+  f.claw.active!.completionRules = []
+  f.claw.active!.flow = {
+    revision: 1,
+    digest: "f".repeat(64),
+    updatedAt: 1,
+    definition: {
+      schemaVersion: 2,
+      id: "kept-flow",
+      name: "保留流程",
+      goal: "keep",
+      execution: { kind: "host" },
+      timeoutMs: 1000,
+      maxExecutions: 1,
+      steps: [{ id: "keep", name: "保留", kind: "agent", enabled: true, prompt: "保留原流程" }]
+    }
+  }
+  const previous = structuredClone(f.claw.active!)
+  const plan = await prepareInstalledPluginUse(f.api, f.context, f.installation, "我的回放")
+  expect(f.calls).toEqual([])
+  expect(plan.selection.alreadySelected).toBe(false)
+  expect(plan.selection.profile.name).toBe("使用插件 · 我的回放")
+  expect(plan.replacements).toEqual([])
+  await applyInstalledPluginUse(f.api, f.context, plan, () => {})
+  expect(f.calls).toEqual(["save", "apply", "global", "project"])
+  expect(f.claw.active?.capabilities.map((row) => row.name)).toEqual([
+    "token-weather",
+    "other",
+    "replay-theater"
+  ])
+  expect(f.claw.profiles.find((row) => row.id === "original")).toEqual(f.original)
+  for (const key of ["models", "skills", "mcp", "builtins", "flow", "completionRules"] as const)
+    expect(f.claw.active?.[key]).toEqual(previous[key])
+})
+
+it("keeps an exact implicit ready plugin unbound without saving another composition", async () => {
+  const f = fixture(true)
+  const plan = await prepareInstalledPluginUse(f.api, f.context, {
+    pluginId: "other",
+    pluginName: "other"
+  })
+  expect(plan.selection.alreadySelected).toBe(true)
+  expect(plan.replacements).toEqual([])
+  await applyInstalledPluginUse(f.api, f.context, plan, () => {})
+  expect(f.calls).toEqual(["global", "project"])
+  expect(f.claw.active).toBeNull()
+})
+
+it("refuses an invalid empty component choice instead of claiming the installed source is usable", async () => {
+  const f = fixture()
+  const mod = f.status.functionMods![1]
+  mod.state = "ready"
+  mod.components = [
+    {
+      id: "panel",
+      name: "Panel",
+      kind: "module",
+      entry: "panel.ts",
+      dependsOn: [],
+      actionIds: [],
+      usage: "chat"
+    }
+  ]
+  f.claw.active!.capabilities = [
+    {
+      pluginId: mod.pluginId,
+      name: mod.name,
+      digest: mod.digest!,
+      components: { mode: "selected", ids: [], config: {} }
+    }
+  ]
+  await expect(prepareInstalledPluginUse(f.api, f.context, f.installation)).rejects.toThrow(
+    "已选组件"
+  )
+  expect(f.calls).toEqual([])
+})
+
+it("preserves a nonempty installed component choice and its parameters across a source update", async () => {
+  const f = fixture()
+  const mod = f.status.functionMods![1]
+  mod.state = "ready"
+  mod.components = ["panel", "helper"].map((id) => ({
+    id,
+    name: id,
+    kind: "module" as const,
+    entry: `${id}.ts`,
+    dependsOn: [],
+    actionIds: [],
+    usage: "chat" as const
+  }))
+  const components = {
+    mode: "selected" as const,
+    ids: ["panel"],
+    config: { panel: { label: "mine" } }
+  }
+  f.claw.active!.capabilities = [
+    { pluginId: mod.pluginId, name: mod.name, digest: "e".repeat(64), components }
+  ]
+  const plan = await prepareInstalledPluginUse(f.api, f.context, f.installation)
+  expect(plan.replacements).toMatchObject([
+    {
+      previous: { digest: "e".repeat(64), components },
+      next: { digest: mod.digest, components },
+      reason: "version"
+    }
+  ])
+  await applyInstalledPluginUse(f.api, f.context, plan, () => {})
+  expect(f.claw.active!.capabilities[0].components).toEqual(components)
+})
+
+it("refuses unavailable selected components instead of silently discarding their parameters", async () => {
+  const f = fixture()
+  const mod = f.status.functionMods![1]
+  mod.state = "ready"
+  mod.components = [
+    {
+      id: "new",
+      name: "New",
+      kind: "module",
+      entry: "new.ts",
+      dependsOn: [],
+      actionIds: [],
+      usage: "chat"
+    }
+  ]
+  f.claw.active!.capabilities = [
+    {
+      pluginId: mod.pluginId,
+      name: mod.name,
+      digest: mod.digest!,
+      components: { mode: "selected", ids: ["old"], config: { old: { label: "mine" } } }
+    }
+  ]
+  await expect(prepareInstalledPluginUse(f.api, f.context, f.installation)).rejects.toThrow(
+    "已选组件"
+  )
+  expect(f.calls).toEqual([])
+})
+
+it("pins the exact chat in an installed plan even when another chat has identical directory state", async () => {
+  const f = fixture()
+  const plan = await prepareInstalledPluginUse(f.api, f.context, f.installation)
+  await expect(
+    applyInstalledPluginUse(f.api, { ...f.context, threadId: "other-chat" }, plan, () => {})
+  ).rejects.toThrow("范围已变化")
+  expect(f.calls).toEqual([])
+})
+
+it("reviews a disabled installed source without mutation and enables, grants and selects after one consent", async () => {
+  const f = fixture(true)
+  f.status.functionMods![1].state = "disabled"
+  const installation = { ...f.installation, activationRequired: true }
+  const plan = await prepareInstalledPluginUse(f.api, f.context, installation)
+  expect(plan.activationRequired).toBe(true)
+  expect(f.calls).toEqual([])
+  await expect(applyInstalledPluginUse(f.api, f.context, plan, () => {})).rejects.toThrow(
+    "尚未启用"
+  )
+  expect(f.calls).toEqual([])
+  const result = await applyInstalledPluginUse(f.api, f.context, plan, () => {}, {
+    enable: async () => {
+      f.calls.push("enable")
+      f.status.functionMods![1].state = "needs-approval"
+    },
+    configurationReady: async () => true
+  })
+  expect(result).toEqual({ state: "ready" })
+  expect(f.calls).toEqual(["save", "apply", "enable", "grant", "save", "apply", "global", "project"])
+  expect(f.claw.active?.capabilities.map((row) => row.pluginId)).toEqual([
+    "weather", "other", "replay"
+  ])
+})
+
+it("uses a native retained exact grant after enablement without granting it a second time", async () => {
+  const f = fixture()
+  f.status.functionMods![1].state = "disabled"
+  const plan = await prepareInstalledPluginUse(f.api, f.context, {
+    ...f.installation,
+    activationRequired: true
+  })
+  await applyInstalledPluginUse(f.api, f.context, plan, () => {}, {
+    enable: async () => {
+      f.calls.push("enable")
+      f.status.functionMods![1].state = "ready"
+    },
+    configurationReady: async () => true
+  })
+  expect(f.calls.filter((call) => call === "enable")).toHaveLength(1)
+  expect(f.calls).not.toContain("grant")
+  const ready = await prepareInstalledPluginUse(f.api, f.context, f.installation)
+  expect(ready.selection.alreadySelected).toBe(true)
+  f.calls.length = 0
+  await applyInstalledPluginUse(f.api, f.context, ready, () => {})
+  expect(f.calls).toEqual([])
+})
+
+it("retains the one exact consent through required native configuration without authorizing early", async () => {
+  const f = fixture()
+  f.status.functionMods![1].state = "disabled"
+  const plan = await prepareInstalledPluginUse(f.api, f.context, {
+    ...f.installation,
+    activationRequired: true
+  })
+  const result = await applyInstalledPluginUse(f.api, f.context, plan, () => {}, {
+    enable: async () => {
+      f.calls.push("enable")
+      f.status.functionMods![1].state = "needs-approval"
+    },
+    configurationReady: async () => false
+  })
+  expect(result.state).toBe("configuration")
+  expect(f.calls).toEqual(["enable"])
+  if (result.state !== "configuration") throw Error("CONFIGURATION_PLAN_REQUIRED")
+  expect(result.plan.activationRequired).toBe(false)
+  await applyInstalledPluginUse(f.api, f.context, result.plan, () => {})
+  expect(f.calls).toEqual(["enable", "grant", "save", "apply", "global", "project"])
+})
+
+it.each(["digest", "chat", "workspace", "selection"])(
+  "refuses retained configuration consent after the %s changes",
+  async (change) => {
+    const f = fixture()
+    f.status.functionMods![1].state = "disabled"
+    const plan = await prepareInstalledPluginUse(f.api, f.context, {
+      ...f.installation,
+      activationRequired: true
+    })
+    const result = await applyInstalledPluginUse(f.api, f.context, plan, () => {}, {
+      enable: async () => { f.status.functionMods![1].state = "needs-approval" },
+      configurationReady: async () => false
+    })
+    if (result.state !== "configuration") throw Error("CONFIGURATION_PLAN_REQUIRED")
+    if (change === "digest") f.status.functionMods![1].digest = "e".repeat(64)
+    if (change === "selection") f.claw.bindingRevision++
+    const context = {
+      ...f.context,
+      ...(change === "chat" ? { threadId: "another-chat" } : {}),
+      ...(change === "workspace" ? { workspace: "C:/another" } : {})
+    }
+    await expect(applyInstalledPluginUse(f.api, context, result.plan, () => {})).rejects.toThrow(
+      "已变化"
+    )
+    expect(f.calls).toEqual([])
+  }
+)
+
+it("does not retry an unknown catalog enablement or grant execution on its behalf", async () => {
+  const f = fixture()
+  f.status.functionMods![1].state = "disabled"
+  const plan = await prepareInstalledPluginUse(f.api, f.context, {
+    ...f.installation,
+    activationRequired: true
+  })
+  const activation = {
+    enable: async () => {
+      f.calls.push("enable")
+      f.status.functionMods![1].state = "needs-approval"
+      throw Error("LOST_ENABLE_REPLY")
+    },
+    configurationReady: async () => true
+  }
+  await expect(applyInstalledPluginUse(f.api, f.context, plan, () => {}, activation)).rejects.toThrow(
+    "LOST_ENABLE_REPLY"
+  )
+  await expect(applyInstalledPluginUse(f.api, f.context, plan, () => {}, activation)).rejects.toThrow(
+    "已变化"
+  )
+  expect(f.calls).toEqual(["enable"])
+})
+
+it("requires a fresh installed plan after a lost grant reply and does not grant twice", async () => {
+  const f = fixture()
+  const plan = await prepareInstalledPluginUse(f.api, f.context, f.installation)
+  f.setAfterGrant(() => {
+    throw Error("lost grant reply")
+  })
+  await expect(applyInstalledPluginUse(f.api, f.context, plan, () => {})).rejects.toThrow(
+    "lost grant reply"
+  )
+  expect(f.calls).toEqual(["grant"])
+  await expect(applyInstalledPluginUse(f.api, f.context, plan, () => {})).rejects.toThrow("已变化")
+  expect(f.calls).toEqual(["grant"])
+  const refreshed = await prepareInstalledPluginUse(f.api, f.context, f.installation)
+  await applyInstalledPluginUse(f.api, f.context, refreshed, () => {})
+  expect(f.calls.filter((call) => call === "grant")).toHaveLength(1)
+})
+
+it.each(["capacity", "identity"])(
+  "blocks installed %s conflicts without removing another source",
+  async (change) => {
+    const f = fixture()
+    f.claw.active!.capabilities =
+      change === "capacity"
+        ? Array.from({ length: 8 }, (_, index) => ({
+            pluginId: `source-${index}`,
+            name: `source-${index}`,
+            digest: "f".repeat(64)
+          }))
+        : [{ pluginId: "different-id", name: f.installation.pluginName, digest: "f".repeat(64) }]
+    const previous = structuredClone(f.claw.active)
+    await expect(prepareInstalledPluginUse(f.api, f.context, f.installation)).rejects.toThrow(
+      change === "capacity" ? "上限" : "身份已变化"
+    )
+    expect(f.calls).toEqual([])
+    expect(f.claw.active).toEqual(previous)
+  }
+)
+
+it("does not call a selected source usable while native combination issues remain", async () => {
+  const f = fixture()
+  f.claw.issues = ["技能来源已变化"]
+  await expect(
+    prepareInstalledPluginUse(f.api, f.context, {
+      pluginId: "other",
+      pluginName: "other"
+    })
+  ).rejects.toThrow("待处理问题")
   expect(f.calls).toEqual([])
 })

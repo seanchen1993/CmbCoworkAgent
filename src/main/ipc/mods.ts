@@ -7,7 +7,7 @@ import { registerBuiltinAdvisorHandlers } from "./builtin-advisor"
 import { registerCommunityExampleHandlers } from "./mods-community-examples"
 import { registerPluginStartUseHandlers } from "./plugin-start-use"
 import { PluginStartUseService } from "../plugins/plugin-start-use"
-import { pluginStartUseConfigurationIssues, pluginStartUseDependencyIssues } from "../plugins/plugin-start-use-diagnostics"
+import { pluginStartUseDestinationConfigurationIssues, pluginStartUseDependencyIssues } from "../plugins/plugin-start-use-diagnostics"
 import { projectRuntimeDependencies } from "../harness-board/project-runtime-dependencies"
 import { pluginChatStartUseEntries } from "../plugins/plugin-chat-start-use"
 import { notifyHooksChanged } from "../hooks/notifications"
@@ -1258,7 +1258,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       await invalidateGlobalMcpCapabilityService("plugin:start-use-enable")
       notifyHooksChanged("plugin-enabled-changed")
     },
-    diagnostics: async (plugin, input, guard) => {
+    diagnostics: async (plugin, input, guard, destination) => {
       const facts = await functions.prepareRuntimeSourceFacts({ workspace: input.expectedWorkspace, plugin })
       guard()
       const dependencies = await projectRuntimeDependencies({
@@ -1270,10 +1270,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         globallyEnabled: manager.isGloballyEnabled()
       })
       if (facts?.userConfig) {
-        const view = await functions.userConfig(
+        issues.push(...await pluginStartUseDestinationConfigurationIssues(destination, () => functions.userConfig(
           input.expectedWorkspace, input.threadId, plugin.id, new AbortController().signal, guard
-        )
-        issues.push(...pluginStartUseConfigurationIssues(view))
+        )))
       }
       guard()
       return issues
@@ -1312,8 +1311,11 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       functions.creatorPlanningPrompt(workspace, selected, signal, guard),
     changed: threadId => window()?.webContents.send("mods:development-changed", { threadId })
   }))
-  projectAuthoringSessions.configurePersistence(manager.store,
-    join(app.getPath("userData"), "mods", "project-authoring"))
+  projectAuthoringSessions.configurePersistence(
+    manager.store,
+    join(app.getPath("userData"), "mods", "project-authoring"),
+    join(app.getPath("userData"), "project-trials")
+  )
   projectPreviewRegistry.configurePersistence(manager.store)
   development.configureProjectTrialStatus(threadId => {
     try { return projectAuthoringSessions.trialRequest(development.projectAuthoringContext(threadId).scope) }
@@ -2804,6 +2806,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       if (typeof input.enabled !== "boolean" || typeof input.outputPolicy !== "boolean")
         throw new ModError("MODS_SETTINGS_INVALID")
       manager.configure(workspace, input.enabled, input.outputPolicy)
+      const owner = window()
+      if (owner && !owner.isDestroyed()) owner.webContents.send("mods:configuration-changed")
       creatorComposition.reconcile()
       creatorReuse.reconcileAuthorizations()
     }

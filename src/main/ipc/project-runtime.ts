@@ -10,7 +10,7 @@ import {
 } from "../harness-board/project-runtime/package-snapshots"
 import { derivationContentIdentity, snapshotDerivationSource } from "../plugins/derivation-source"
 import { HostProjectService } from "../harness-board/project-runtime/host-service"
-import { readProjectRuntimeDescription } from "../harness-board/project-runtime/description"
+import { PROJECT_RUNTIME_FILE, readProjectRuntimeDescription } from "../harness-board/project-runtime/description"
 import { assertHostPackageSupported } from "../harness-board/project-runtime/package-preflight"
 import { inspectHostProjectExecution } from "../harness-board/project-runtime/host-execution-inspector"
 import { compareProjectVersions } from "../../shared/project-runtime/version-report"
@@ -60,6 +60,7 @@ import {
   registerLocalThreadRunAdmissionGuard
 } from "../agent/thread-run-lease"
 import type { ProjectLibraryApi } from "../../shared/project-runtime/project-library"
+import { LOCAL_PROJECT_SEARCH_MAX_CHARS } from "../../shared/project-runtime/platform-api"
 import type {
   LocalProjectCommand,
   LocalProjectSummary,
@@ -68,6 +69,8 @@ import type {
 } from "../../shared/project-runtime/platform-api"
 
 /** Separate from legacy Harness storage and enterprise configuration. */
+const MAX_TEMPLATE_INSTALLED_PLUGINS = 4096
+const MAX_TEMPLATE_RESPONSE_BYTES = 8 * 1024 * 1024
 export function registerProjectRuntimeHandlers(
   ipc: IpcMain,
   mainWindow: () => BrowserWindow | null
@@ -579,9 +582,11 @@ export function registerProjectRuntimeHandlers(
     trusted(event)
     const results: LocalProjectTemplate[] = []
     const identityGuards: Array<() => void> = []
-    for (const plugin of getPlugins()
-      .filter((plugin) => plugin.enabled)
-      .slice(0, 100)) {
+    const installed = getPlugins()
+    if (installed.length > MAX_TEMPLATE_INSTALLED_PLUGINS)
+      throw Error("PROJECT_TEMPLATE_PLUGIN_LIMIT")
+    for (const plugin of installed.filter((plugin) => plugin.enabled)) {
+      if (!existsSync(join(plugin.path, PROJECT_RUNTIME_FILE))) continue
       const identity = {
         id: plugin.id,
         path: plugin.path,
@@ -642,16 +647,20 @@ export function registerProjectRuntimeHandlers(
     }
     trusted(event)
     for (const assertIdentity of identityGuards) assertIdentity()
+    if (Buffer.byteLength(JSON.stringify(results), "utf8") > MAX_TEMPLATE_RESPONSE_BYTES)
+      throw Error("PROJECT_TEMPLATE_RESPONSE_LIMIT")
     return results
   })
-  ipc.handle("project-runtime:list", (event, afterProjectId = ""): LocalProjectSummary[] => {
+  ipc.handle("project-runtime:list", (event, afterProjectId = "", query = ""): LocalProjectSummary[] => {
     trusted(event)
     if (typeof afterProjectId !== "string" || afterProjectId.length > 256)
       throw Error("PROJECT_INVALID_CURSOR")
+    if (typeof query !== "string" || query.length > LOCAL_PROJECT_SEARCH_MAX_CHARS || query.includes("\0"))
+      throw Error("PROJECT_SEARCH_QUERY_INVALID")
     const visible: ReturnType<HostProjectService["list"]> = []
     let cursor = afterProjectId
     while (visible.length < 20) {
-      const page = platform().list(100, cursor)
+      const page = platform().list(100, cursor, query)
       if (!page.length) break
       for (const project of page) {
         if (!internalCompositionProject(project.projectId)) visible.push(project)

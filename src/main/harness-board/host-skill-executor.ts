@@ -33,6 +33,7 @@ import {
 import { readRuntimeRequiredHooks } from "../plugins/runtime-required-hooks"
 import { readPackageExtensionContract } from "../plugins/extension-contract"
 import { getProjectActionRuntime } from "./project-action-runtime"
+import { hostProjectActionSources } from "./host-action-sources"
 import {
   DEFAULT_PLUGIN_HOOKS_PATH,
   getPluginSkillSearchSources,
@@ -281,6 +282,16 @@ export async function executeHostProjectSkill(
   const executionResources = hasResources
     ? getProjectActionRuntime().readExecutionResources?.(project, snapshot.root) : undefined
   if (hasResources && !executionResources) hostStateError("EXECUTION_RESOURCES_UNAVAILABLE")
+  const actionSources = await hostProjectActionSources({
+    root: snapshot.root, project, plugins: getPlugins,
+    catalog: () => getProjectActionRuntime().catalog(project.workspace, threadId),
+    assertCurrent: () => {
+      context.signal.throwIfAborted()
+      assertInstallationCurrent()
+      assertThreadCurrent()
+      context.assertInputsCurrent?.()
+    }
+  })
   context.assertInputsCurrent?.()
   const token = issueRuntimePluginSourceToken(
     {
@@ -290,6 +301,7 @@ export async function executeHostProjectSkill(
       executionMode: agentMode,
       inputFingerprint: context.operation.inputFingerprint,
       capabilitySources: [],
+      actionSources,
       preserveParentContext: true,
       incarnationKey: JSON.stringify(incarnation),
       projectId: project.projectId,
@@ -334,7 +346,10 @@ export async function executeHostProjectSkill(
   )
   const workflowContinuation = agentMode === "workflow" ? createHostWorkflowContinuation({
     token, workspace: project.workspace, threadId,
-    assertCurrent: () => withRuntimePluginSource(token, assertCurrentRuntimePluginSourceContent)
+    assertCurrent: () => withRuntimePluginSource(token, assertCurrentRuntimePluginSourceContent),
+    // The same opaque token checks operation, installation and thread on every notice read.
+    // Source bytes remain at consume/capture and real model/tool/source execution boundaries.
+    assertNotificationCurrent: () => withRuntimePluginSource(token, () => {})
   }) : undefined
   let terminal: AgentRunTerminal | undefined
   const readTerminal = () => terminal
@@ -463,6 +478,7 @@ export async function executeHostProjectSkill(
         !context.signal.aborted && !getHostInputWait(context.operation.operationId)) {
       await workflowContinuation.consume(async notice => {
         notice.assertCurrent()
+        notice.assertSourceCurrent()
         const resultStreamRequestId = randomUUID()
         delivery.send(AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL, {
           runId: resultStreamRequestId, threadId, streamRequestId: resultStreamRequestId, agentMode

@@ -267,15 +267,49 @@ async function main() {
     )
     assert.equal(await page.locator('[data-app-guide="workspace"]').count(), 0)
     await page.evaluate("window.fixture.nativeDelivery()")
-    await page.locator('[data-app-guide="workspace"]').click()
-    await page.getByRole("heading", { name: "核对历史插件交付", exact: true }).waitFor()
+    // An unresolved native delivery opens the workspace directly at its saved-result controls.
+    await workspace.waitFor()
     assert.equal(
-      await page.getByRole("button", { name: "准备保存为新插件", exact: true }).count(),
+      await workspace
+        .getByRole("button", { name: "3 · 保存插件", exact: true })
+        .getAttribute("aria-current"),
+      "step"
+    )
+    await workspace.getByRole("heading", { name: "核对历史插件交付", exact: true }).waitFor()
+    assert.equal(await workspace.getByRole("button", { name: "保存插件", exact: true }).count(), 0)
+    assert.equal(
+      await workspace.getByRole("button", { name: "仅导出 ZIP…", exact: true }).count(),
       0
     )
-    assert.equal(await page.getByRole("button", { name: "确认安装新插件", exact: true }).count(), 0)
-    await page.getByRole("button", { name: "核对实际交付结果", exact: true }).click()
-    await page.getByText(/已核实：未发现本次交付的执行结果/).waitFor()
+    assert.equal(
+      await workspace.getByRole("button", { name: "确认安装新插件", exact: true }).count(),
+      0
+    )
+    assert.deepEqual(
+      await page.evaluate("window.fixture.calls.filter(row=>row[0]==='delivery-reconcile')"),
+      [],
+      "Opening an unresolved delivery must not reconcile or repeat a write automatically"
+    )
+    await workspace.getByRole("button", { name: "核对实际交付结果", exact: true }).click()
+    await workspace.getByText(/已核实：未发现本次交付的执行结果/).waitFor()
+    assert.deepEqual(
+      await page.evaluate("window.fixture.calls.filter(row=>row[0]==='delivery-reconcile')"),
+      [
+        [
+          "delivery-reconcile",
+          {
+            threadId: "delivery",
+            expectedWorkspace: "C:/guide",
+            deliveryId: "native-delivery",
+            digest: "d".repeat(64)
+          }
+        ]
+      ]
+    )
+    assert.deepEqual(
+      await page.evaluate("window.fixture.calls.filter(row=>row[0]==='business')"),
+      []
+    )
     assert.deepEqual(errors, [])
     console.log(
       "PASS creator anchored guide: first use, seven real destinations, stage disclosure, back/skip/close/Escape, reload persistence, manual reopen and mobile; no business actions"

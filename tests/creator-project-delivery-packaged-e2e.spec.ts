@@ -1,17 +1,37 @@
-/** Real ASAR: classic source -> native modularization -> Host draft -> explicit install/export.
+/** Classic source -> native modularization -> explicit install/export -> real Host stages -> restart.
  * Loopback decisions and bounded native file selection only; no private state writes or service mocks.
  */
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync
+} from "node:fs"
 import { join, resolve } from "node:path"
 import AdmZip from "adm-zip"
 import type { ElectronApplication, Page } from "playwright"
 import { parseProjectRuntimeManifest } from "../src/shared/project-runtime"
 import type { ModWorkspaceStatus } from "../src/shared/mods/types"
 import { projectBuiltPreview } from "./support/project-built-preview"
-import { createUnifiedHostProject, openUnifiedHostProject } from "./support/project-unified-native-journey"
+import {
+  createUnifiedHostProject,
+  openUnifiedHostProject
+} from "./support/project-unified-native-journey"
+import {
+  exerciseCreatorDeliveredProject,
+  exerciseCreatorCombinationProject
+} from "./support/creator-project-delivery-runtime"
+import {
+  CREATOR_DELIVERY_COMBINATIONS,
+  creatorDeliveryCombination,
+  type CreatorDeliveryCombinationId
+} from "./support/creator-delivery-combinations"
+import { openCreatorProjectPreview } from "./support/creator-navigation"
 import {
   createHeadlessProjectCompositionLaunch,
   projectCompositionCandidate,
@@ -100,19 +120,37 @@ assert.equal(
   "Freeze the reviewed source snapshot using the same paths as run-check.cjs"
 )
 const fixture = projectCompositionEnvironment(root)
-const model = creatorProjectDeliveryModel()
+const combinationId = process.env.CREATOR_DELIVERY_COMBINATION
+assert(
+  !combinationId ||
+    CREATOR_DELIVERY_COMBINATIONS.includes(combinationId as CreatorDeliveryCombinationId)
+)
+const combination = combinationId
+  ? creatorDeliveryCombination(combinationId as CreatorDeliveryCombinationId)
+  : undefined
+const model = creatorProjectDeliveryModel(combination)
 const evidence: Record<string, unknown> = {
   execution: selectedLaunch.execution,
   candidate,
   sourceSha256,
   isolated: fixture.isolated,
-  modelCapacity: { contextTokens: 64000, outputTokens: 4096, inputBudgetTokens: 58904,
-    alignedWith: "tests/mods-creator-business-e2e.spec.ts" },
+  combination: combination?.id ?? "original-two-stage",
+  modelCapacity: {
+    contextTokens: 64000,
+    outputTokens: 4096,
+    inputBudgetTokens: 58904,
+    alignedWith: "tests/mods-creator-business-e2e.spec.ts"
+  },
   limits: [
     "Actual public native tools and approval IPC; deterministic loopback is not external model quality.",
-    ...(selectedLaunch.preview ? ["Normal built Electron preview, not an ASAR/package validation."] : []),
+    ...(selectedLaunch.preview
+      ? ["Normal built Electron preview, not an ASAR/package validation."]
+      : []),
     "Native export/directory pickers receive bounded fixture responses; project creation uses the public form.",
-    "Doctor/contract/pack success validates this declared technical contract; business stages are not executed or claimed passed.",
+    "The same converted package runs every Host stage, original retained HTTP Hooks, native file tools and schema checks; no external model quality or AutoBiz lifecycle claim.",
+    combination
+      ? "The same native candidate completes its isolated pre-install trial before delivery and ordinary project execution. Model choices are controlled fixture decisions, not an independent creation-quality assessment."
+      : "The Host trial request is prepared but not executed before delivery; dialogue revision and pre-install trial execution are covered separately.",
     "Source authority is observed through native mods.status effective ready sources, not private stored grant records.",
     "No S6 debugger, rollback, inherited source authorization or automatic plugin update is claimed."
   ]
@@ -124,7 +162,13 @@ const save = () =>
   writeFileSync(
     join(fixture.isolated, "evidence.json"),
     JSON.stringify(
-      { ...evidence, passed, requests: model.requests, modelErrors: model.errors },
+      {
+        ...evidence,
+        passed,
+        requests: model.requests,
+        modelErrors: model.errors,
+        hooks: model.hooks
+      },
       null,
       2
     )
@@ -143,25 +187,49 @@ async function main() {
   await new Promise<void>((done) => model.server.listen(0, "127.0.0.1", done))
   const address = model.server.address()
   assert(address && typeof address !== "string")
-  const watchdog = setTimeout(() => void app?.close(), 300000)
-  try {
+  const sourceFiles = (combination?.sourceFiles ?? creatorDeliverySourceFiles)(
+    `http://127.0.0.1:${address.port}/retained-hook`
+  )
+  const addedFiles = combination?.addedFiles ?? creatorDeliveryAddedFiles
+  const launch = createHeadlessProjectCompositionLaunch(root, fixture, {
+    unobtrusivePresentation: true
+  })
+  const rendererErrors: string[] = []
+  const processHandles: ReturnType<ElectronApplication["process"]>[] = []
+  async function boot() {
     selectedLaunch.assertCurrent()
-    app = await createHeadlessProjectCompositionLaunch(root, fixture, {
-      unobtrusivePresentation: true
-    })()
-    evidence.application = await selectedLaunch.verify(app, fixture.isolated)
-    const processHandle = app.process()
-    processHandle.stdout?.on("data", (bytes) =>
+    app = await launch()
+    const identity = await selectedLaunch.verify(app, fixture.isolated)
+    const identities = (evidence.applications ??= []) as unknown[]
+    identities.push(identity)
+    const handle = app.process()
+    processHandles.push(handle)
+    handle.stdout?.on("data", (bytes) =>
       appendFileSync(join(fixture.isolated, "main.stdout.log"), bytes)
     )
-    processHandle.stderr?.on("data", (bytes) =>
+    handle.stderr?.on("data", (bytes) =>
       appendFileSync(join(fixture.isolated, "main.stderr.log"), bytes)
     )
     page = await app.firstWindow({ timeout: 60000 })
     page.setDefaultTimeout(30000)
-    await page.waitForFunction(() => Boolean(window.api?.mods?.development?.prepareProjectDelivery))
-    const rendererErrors: string[] = []
     page.on("pageerror", (error) => rendererErrors.push(String(error)))
+    await page.waitForFunction(() => Boolean(window.api?.mods?.development?.prepareProjectDelivery))
+    return identity
+  }
+  async function restart() {
+    const previous = app!.process()
+    await app!.close()
+    app = undefined
+    assert.equal(previous.exitCode, 0)
+    assert.equal(previous.signalCode, null)
+    await boot()
+    assert.notEqual(app!.process().pid, previous.pid, "A new Electron process must start")
+    return page
+  }
+  const watchdog = setTimeout(() => void app?.close(), 300000)
+  try {
+    evidence.application = await boot()
+    assert(app)
     const scope = await page.evaluate(
       async ({ workspace, url }) => {
         await window.api.autoCommit.saveSettings({ mode: "off", push: false })
@@ -195,7 +263,7 @@ async function main() {
       { workspace: fixture.workspace, url: `http://127.0.0.1:${address.port}/v1` }
     )
     const zip = new AdmZip()
-    for (const file of creatorDeliverySourceFiles) zip.addFile(file.path, Buffer.from(file.text))
+    for (const file of sourceFiles) zip.addFile(file.path, Buffer.from(file.text))
     const original = await page.evaluate(
       async (bytes) => {
         const installed = await window.api.plugins.install(
@@ -274,6 +342,60 @@ async function main() {
     assert.equal(model.results.get("trial")?.trialRoute, "host")
     assert.equal(model.results.get("trial")?.executed, false)
     assert.deepEqual(await page.evaluate(() => window.api.harnessBoard.localProjects.list()), [])
+    if (combination) {
+      const panel = await openCreatorProjectPreview(page)
+      await panel.getByRole("button", { name: "开始试用", exact: true }).click()
+      const preview = await until(
+        () =>
+          page.evaluate(
+            (id) => window.api.harnessBoard.localProjects.preview.list(id),
+            scope.threadId
+          ),
+        (value) => Boolean(value.drafts.find((draft) => draft.id === trial.draftId)?.projectId),
+        "native creation of the current candidate's isolated trial"
+      )
+      const previewProjectId = preview.drafts.find(
+        (draft) => draft.id === trial.draftId
+      )!.projectId!
+      const trialProject = await page.evaluate(
+        (id) => window.api.harnessBoard.localProjects.get(id),
+        previewProjectId
+      )
+      assert.deepEqual(
+        trialProject.project.manifest.stages.map((stage) => stage.id),
+        combination.stages.map((stage) => stage.id)
+      )
+      await openUnifiedHostProject(page, trialProject.project.name)
+      const executed = await exerciseCreatorCombinationProject({
+        page,
+        created: trialProject,
+        model,
+        combination,
+        artifacts: fixture.isolated,
+        restart,
+        trial: true,
+        retainedHookText: sourceFiles.find((file) => file.path === "hooks/hooks.json")!.text
+      })
+      const afterTrial = await status()
+      assert.equal(
+        executed.completed.preview?.state,
+        "expired",
+        "Completing the trial releases its live preview authority through the native command"
+      )
+      assert.equal(
+        afterTrial.projectTrial?.digest,
+        trial.digest,
+        "Delivery must retain the tested candidate identity"
+      )
+      assert.equal(afterTrial.projectTrial?.journey?.phase, "passed")
+      assert.equal(afterTrial.projectTrial?.journey?.canDeliver, true)
+      evidence.preInstallTrial = {
+        request: trial,
+        created: trialProject,
+        executed,
+        nativeStatus: afterTrial.projectTrial
+      }
+    }
     const name = "creator-independent-delivery",
       version = "2.3.4"
     const checked = await page.evaluate(
@@ -315,7 +437,7 @@ async function main() {
     assert.notEqual(output.id, original.id)
     assert.equal(output.name, name)
     assert.equal(output.version, version)
-    for (const file of [...creatorDeliverySourceFiles, ...creatorDeliveryAddedFiles]) {
+    for (const file of [...sourceFiles, ...addedFiles]) {
       if (file.path === "plugin.json") continue
       assert.equal(readFileSync(join(output.path, file.path), "utf8"), file.text)
     }
@@ -406,7 +528,7 @@ async function main() {
       !existsSync(join(output.path, "mods/manifest.json")),
       "Do not invent Function mappings for a classic source"
     )
-    for (const file of creatorDeliverySourceFiles)
+    for (const file of sourceFiles)
       assert.equal(readFileSync(join(original.path, file.path), "utf8"), file.text)
     assert(!existsSync(join(original.path, "devclaw.project-runtime.json")))
     assert(!existsSync(join(original.path, "tests/project-contract.json")))
@@ -417,26 +539,41 @@ async function main() {
       expected: { name: output.name, version: output.version }
     }
     const startUse = await page.evaluate(
-      (input) => window.api.plugins.prepareStartUse(input), startUseInput
+      (input) => window.api.plugins.prepareStartUse(input),
+      startUseInput
     )
-    assert.equal(startUse.activationRequired, true, "Creator delivery must require explicit enablement")
+    assert.equal(
+      startUse.activationRequired,
+      true,
+      "Creator delivery must require explicit enablement"
+    )
     assert.equal(startUse.canOpen, false)
-    const enabled = await page.evaluate(
-      (input) => window.api.plugins.enableStartUse(input),
-      { ...startUseInput, expected: {
-        name: output.name, version: output.version, digest: startUse.identity.digest
-      } }
-    )
+    const enabled = await page.evaluate((input) => window.api.plugins.enableStartUse(input), {
+      ...startUseInput,
+      expected: {
+        name: output.name,
+        version: output.version,
+        digest: startUse.identity.digest
+      }
+    })
     assert.equal(enabled.activationRequired, undefined)
-    assert.equal(enabled.canOpen, true)
+    if (combination)
+      assert(enabled.canOpen || enabled.issues.some((issue) => issue.code === "configuration"))
+    else assert.equal(enabled.canOpen, true)
     assert.equal(enabled.identity.digest, startUse.identity.digest)
     assert.deepEqual(
-      effectiveSourceAuthorization(await page.evaluate((id) => window.api.mods.status(id), scope.threadId)),
+      effectiveSourceAuthorization(
+        await page.evaluate((id) => window.api.mods.status(id), scope.threadId)
+      ),
       authorizationBefore,
       "Explicit catalog enablement must not grant executable source authority"
     )
-    evidence.activation = { before: startUse.activationRequired, after: enabled.activationRequired,
-      canOpen: enabled.canOpen, identity: enabled.identity }
+    evidence.activation = {
+      before: startUse.activationRequired,
+      after: enabled.activationRequired,
+      canOpen: enabled.canOpen,
+      identity: enabled.identity
+    }
     const projectWorkspace = join(fixture.isolated, "installed-project-workspace")
     mkdirSync(projectWorkspace)
     const modelRequestsBeforeCreate = model.requests.length
@@ -446,17 +583,89 @@ async function main() {
       installedPluginId: output.id,
       pluginName: output.name,
       version: output.version,
-      goal: "Verify ordinary project creation from the installed Host package; do not run a stage."
+      goal: "Run every converted package stage with the original policy, Hooks and checked artifacts; preserve explicit human control."
     })
     assert.deepEqual(created.project.manifest.stages, outputRuntime.stages)
+    assert.deepEqual(
+      outputRuntime.stages.map((stage) => stage.id),
+      combination?.stages.map((stage) => stage.id) ?? ["prepare", "review"]
+    )
     assert.equal(model.requests.length, modelRequestsBeforeCreate)
     await page.reload()
     await openUnifiedHostProject(page, created.project.name)
-    const reopened = await page.evaluate(id => window.api.harnessBoard.localProjects.get(id),
-      created.project.projectId)
+    const reopened = await page.evaluate(
+      (id) => window.api.harnessBoard.localProjects.get(id),
+      created.project.projectId
+    )
     assert.deepEqual(reopened, created)
     assert.equal(model.requests.length, modelRequestsBeforeCreate)
-    evidence.ordinaryProject = { created, reopened, stagesExecuted: false }
+    const journey = combination
+      ? await exerciseCreatorCombinationProject({
+          page,
+          created,
+          model,
+          combination,
+          trial: false,
+          artifacts: fixture.isolated,
+          restart,
+          retainedHookText: sourceFiles.find((file) => file.path === "hooks/hooks.json")!.text
+        })
+      : await exerciseCreatorDeliveredProject({
+          page,
+          created,
+          model,
+          artifacts: fixture.isolated,
+          restart,
+          retainedHookText: sourceFiles.find((file) => file.path === "hooks/hooks.json")!.text
+        })
+    const requestsBeforeFinalRestart = model.requests.length
+    const hooksBeforeFinalRestart = model.hooks.length
+    const libraryBeforeFinalRestart = await page.evaluate(
+      (id) => window.api.harnessBoard.localProjects.library.list(id),
+      created.project.projectId
+    )
+    await restart()
+    const completedRestored = await page.evaluate(
+      (id) => window.api.harnessBoard.localProjects.get(id),
+      created.project.projectId
+    )
+    assert.deepEqual(completedRestored, journey.completed)
+    assert.deepEqual(
+      await page.evaluate(
+        (id) => window.api.harnessBoard.localProjects.library.list(id),
+        created.project.projectId
+      ),
+      libraryBeforeFinalRestart
+    )
+    assert.equal(model.requests.length, requestsBeforeFinalRestart)
+    assert.equal(model.hooks.length, hooksBeforeFinalRestart)
+    if ("outputs" in journey) {
+      for (const [path, content] of Object.entries(journey.outputs))
+        assert.equal(readFileSync(join(projectWorkspace, path), "utf8"), content)
+    } else {
+      assert.equal(readFileSync(join(projectWorkspace, "draft.json"), "utf8"), journey.draft)
+      assert.equal(readFileSync(join(projectWorkspace, "review.json"), "utf8"), journey.review)
+    }
+    await openUnifiedHostProject(page, created.project.name)
+    await page
+      .getByRole("heading", { name: `${created.project.name} · 已完成`, exact: true })
+      .waitFor()
+    await page.screenshot({ path: join(fixture.isolated, "converted-project-restarted.png") })
+    assert.equal(
+      processHandles.length,
+      3,
+      "Initial process, stage continuation and final persistence"
+    )
+    evidence.ordinaryProject = {
+      created,
+      reopened,
+      stagesExecuted: true,
+      journey,
+      completedRestored,
+      requestsBeforeFinalRestart,
+      hooksBeforeFinalRestart,
+      processIds: processHandles.map((handle) => handle.pid)
+    }
     assert.deepEqual(rendererErrors, [])
     assert.deepEqual(model.errors, [])
     assert.equal(
@@ -483,17 +692,22 @@ async function main() {
       authorizationAfter,
       rendererErrors
     }
-    await app.close()
+    await app!.close()
     app = undefined
-    assert.equal(processHandle.exitCode, 0)
-    assert.equal(processHandle.signalCode, null)
+    for (const handle of processHandles) {
+      assert.equal(handle.exitCode, 0)
+      assert.equal(handle.signalCode, null)
+    }
     assert.deepEqual(rendererErrors, [], "Include late renderer failures during shutdown")
     passed = true
   } catch (error) {
     evidence.error = String(error)
     if (page && !page.isClosed()) {
       await page.screenshot({ path: join(fixture.isolated, "failure.png") }).catch(() => {})
-      const snapshot = await page.locator("body").ariaSnapshot().catch(() => "unavailable")
+      const snapshot = await page
+        .locator("body")
+        .ariaSnapshot()
+        .catch(() => "unavailable")
       writeFileSync(join(fixture.isolated, "failure-ui.txt"), snapshot)
     }
     throw error
@@ -504,7 +718,9 @@ async function main() {
     await new Promise<void>((done) => model.server.close(() => done()))
     save()
   }
-  console.log(`PASS ${selectedLaunch.execution} native Creator project delivery: ${fixture.isolated}`)
+  console.log(
+    `PASS ${selectedLaunch.execution} native Creator project delivery: ${fixture.isolated}`
+  )
 }
 void main().catch((error) => {
   console.error(error)

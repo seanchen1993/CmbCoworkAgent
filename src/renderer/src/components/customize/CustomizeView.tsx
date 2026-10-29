@@ -3,9 +3,9 @@ import { AssistantWorkbench } from "./AssistantWorkbench"
 import { creatorEntryError, enterCreatorMode } from "./creator-mode-entry"
 import { SparksTour, type SparksTourHandle } from "./SparksTour"
 import { useSettingsComposerReturn } from "./settings-return-focus"
+import { SettingsBackButton } from "./SettingsOverlay"
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react"
 import {
-  ArrowLeft,
   Brain,
   ChevronDown,
   ChevronRight,
@@ -28,7 +28,6 @@ import {
   Wrench,
   type LucideIcon
 } from "lucide-react"
-import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 import { useDevelopmentCreatorMode } from "@/lib/use-development-mode"
 import { cn } from "@/lib/utils"
@@ -137,12 +136,11 @@ const MENU_GROUPS: MenuGroup[] = [
     id: "basic",
     label: "基础功能",
     items: [
-      { tab: "mods", label: "灵件与使用设置", icon: Webhook },
+      { tab: "mods", label: "插件", icon: Puzzle },
       { tab: "general", label: "通用", icon: Settings2 },
       { tab: "appearance", label: "外观", icon: Palette },
       { tab: "skills", label: "技能", icon: Sparkles },
       { tab: "connectors", label: "连接工具", icon: Plug },
-      { tab: "plugins", label: "插件", icon: Puzzle },
       { tab: "sandbox", label: "沙盒环境", icon: Shield }
     ]
   },
@@ -307,14 +305,17 @@ export function CustomizeView(): React.JSX.Element {
       Object.fromEntries(
         MENU_GROUPS.map((group) => [
           group.id,
-          group.id === "creator" || group.id === "basic" ||
+          group.id === "creator" ||
+            group.id === "basic" ||
             group.items.some((item) => item.tab === activeTab)
         ])
       ) as Record<MenuGroupId, boolean>
   )
   useEffect(() => {
     let cancelled = false
-    const group = MENU_GROUPS.find((entry) => entry.items.some((item) => item.tab === activeTab))
+    const group = MENU_GROUPS.find((entry) =>
+      entry.items.some((item) => item.tab === (activeTab === "plugins" ? "mods" : activeTab))
+    )
     queueMicrotask(() => {
       if (group && !cancelled) {
         setExpandedGroups((groups) => (groups[group.id] ? groups : { ...groups, [group.id]: true }))
@@ -438,7 +439,7 @@ export function CustomizeView(): React.JSX.Element {
 
   const renderMenuItem = (item: MenuItem): React.JSX.Element => {
     const Icon = item.icon
-    const isActive = activeTab === item.tab
+    const isActive = activeTab === item.tab || (item.tab === "mods" && activeTab === "plugins")
 
     return (
       <button
@@ -466,16 +467,7 @@ export function CustomizeView(): React.JSX.Element {
     <div className="flex h-full flex-col overflow-hidden bg-background sm:flex-row">
       <div className="flex max-h-[35%] shrink-0 flex-col border-b border-border sm:max-h-none sm:w-[200px] sm:border-b-0 sm:border-r">
         <div className="p-3 flex items-center gap-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 w-9 p-0"
-            aria-label="返回应用"
-            onClick={() => setShowCustomizeView(false)}
-          >
-            <ArrowLeft className="size-6" strokeWidth={1} />
-          </Button>
-          <span className="text-base font-bold">返回应用</span>
+          <SettingsBackButton onClick={() => setShowCustomizeView(false)} />
         </div>
         <nav className="min-h-0 flex-1 px-3 pb-3 space-y-3 overflow-y-auto">
           {MENU_GROUPS.map((group) => {
@@ -512,9 +504,10 @@ export function CustomizeView(): React.JSX.Element {
       </div>
 
       <div className="relative flex min-w-0 min-h-0 flex-1 flex-col">
-        {["assistant", "mods", "claw", "flows", "evaluation"].includes(activeTab) && (
-          <ConfigurationTargetPicker threads={threads} />
-        )}
+        {["assistant", "mods", "claw", "flows", "evaluation"].includes(activeTab) &&
+          (activeTab !== "mods" || threads.some(supportsConfiguration)) && (
+            <ConfigurationTargetPicker threads={threads} chatPluginsOnly={activeTab === "mods"} />
+          )}
         <SparksTour
           key={JSON.stringify([
             accountRevision,
@@ -590,6 +583,7 @@ export function CustomizeView(): React.JSX.Element {
             scroll
           >
             <ModsPanel
+              onManageSources={() => setActiveTab("plugins")}
               onSectionChange={setTourModsSection}
               active={activeTab === "mods"}
               navigationRequest={
@@ -664,8 +658,30 @@ export function CustomizeView(): React.JSX.Element {
             ) : activeTab === "connectors" ? (
               <McpPanel />
             ) : activeTab === "plugins" ? (
-              <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
-                <PluginsPanel />
+              <div className="flex flex-1 min-w-0 min-h-0 flex-col overflow-hidden">
+                <div className="flex shrink-0 items-center gap-3 border-b px-4 py-3">
+                  <button
+                    type="button"
+                    className="text-sm text-muted-foreground hover:text-foreground"
+                    onClick={() => {
+                      setActiveTab("mods")
+                      setModsNavigation((previous) => ({
+                        id: (previous?.id ?? 0) + 1,
+                        scope: JSON.stringify([currentThreadId, currentWorkspacePath]),
+                        section: "installed"
+                      }))
+                    }}
+                  >
+                    返回插件
+                  </button>
+                  <h2 className="text-sm font-medium">导入与发布</h2>
+                </div>
+                <div
+                  className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden sm:flex-row"
+                  data-plugin-source-layout
+                >
+                  <PluginsPanel />
+                </div>
               </div>
             ) : activeTab === "heartbeat" ? (
               <HeartbeatPanel />

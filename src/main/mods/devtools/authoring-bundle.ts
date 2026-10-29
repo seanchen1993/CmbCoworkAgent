@@ -16,6 +16,25 @@ export const AUTHORING_BUNDLE_LIMITS = Object.freeze({
   totalBytes: 256 * 1024,
   pathLength: 160
 })
+type AuthoringSourceLimitDiagnostic = Readonly<
+  | { resource: "files"; observed: number; min: 1; limit: number }
+  | { resource: "totalBytes"; observedBytes: number; limit: number }
+>
+
+/** Native counts only; total bytes stop at the first rejected prefix, not the full package. */
+export class AuthoringSourceLimitError extends Error {
+  readonly diagnostic: AuthoringSourceLimitDiagnostic
+
+  constructor(resource: "files" | "totalBytes", observed: number) {
+    super("AUTHORING_SOURCE_LIMIT")
+    this.diagnostic = Object.freeze(
+      resource === "files"
+        ? { resource, observed, min: 1 as const, limit: AUTHORING_BUNDLE_LIMITS.files }
+        : { resource, observedBytes: observed, limit: AUTHORING_BUNDLE_LIMITS.totalBytes }
+    )
+    Object.defineProperty(this, "diagnostic", { writable: false, configurable: false })
+  }
+}
 
 /** Text may be preserved in a package without granting permission to execute it. */
 export const hasAuthoringTextExtension = (path: string): boolean =>
@@ -61,14 +80,10 @@ function sourcePath(value: unknown): string {
 }
 
 /** Author-supplied text only. This creates no package installation, grant or runtime authority. */
-export function createAuthoringSourceBundle(input: unknown): AuthoringSourceBundle {
-  if (
-    !Array.isArray(input) ||
-    types.isProxy(input) ||
-    input.length < 1 ||
-    input.length > AUTHORING_BUNDLE_LIMITS.files
-  )
-    throw Error("AUTHORING_SOURCE_LIMIT")
+function createBundle(input: unknown, requireManifest: boolean): AuthoringSourceBundle {
+  if (!Array.isArray(input) || types.isProxy(input)) throw Error("AUTHORING_SOURCE_LIMIT")
+  if (input.length < 1 || input.length > AUTHORING_BUNDLE_LIMITS.files)
+    throw new AuthoringSourceLimitError("files", input.length)
   const files: AuthoringSourceFile[] = []
   const names = new Set<string>()
   let bytes = 0
@@ -92,7 +107,8 @@ export function createAuthoringSourceBundle(input: unknown): AuthoringSourceBund
     if (names.has(key)) throw Error("AUTHORING_SOURCE_COLLISION")
     names.add(key)
     bytes += Buffer.byteLength(path, "utf8") + Buffer.byteLength(text, "utf8")
-    if (bytes > AUTHORING_BUNDLE_LIMITS.totalBytes) throw Error("AUTHORING_SOURCE_LIMIT")
+    if (bytes > AUTHORING_BUNDLE_LIMITS.totalBytes)
+      throw new AuthoringSourceLimitError("totalBytes", bytes)
     files.push({ path, text })
   }
   for (const path of names) {
@@ -101,7 +117,7 @@ export function createAuthoringSourceBundle(input: unknown): AuthoringSourceBund
       if (names.has(segments.slice(0, count).join("/"))) throw Error("AUTHORING_SOURCE_COLLISION")
   }
   if (
-    !files.some((file) =>
+    requireManifest && !files.some((file) =>
       ["plugin.json", ".claude-plugin/plugin.json", ".codex-plugin/plugin.json",
         "composition/source.json"].includes(file.path)
     )
@@ -115,6 +131,15 @@ export function createAuthoringSourceBundle(input: unknown): AuthoringSourceBund
       .digest("hex"),
     files
   }
+}
+
+export function createAuthoringSourceBundle(input: unknown): AuthoringSourceBundle {
+  return createBundle(input, true)
+}
+
+/** Identical file/path/size checks for a delta; its merged snapshot must still have a manifest. */
+export function readAuthoringFileChanges(input: unknown): AuthoringSourceFile[] {
+  return createBundle(input, false).files
 }
 
 /** Recompute the source digest when reading a saved version; never trust a stored digest alone. */

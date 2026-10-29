@@ -580,6 +580,27 @@ describe("Creator original plugin modularization journey", () => {
           )
         ]
       }
+      const rejected = JSON.parse(
+        await tool.invoke({
+          action: "request_modularization",
+          rawInspectionId: raw.result.rawInspectionId,
+          sourceDigest: raw.result.sourceDigest,
+          modularizationCatalog: catalog,
+          modularizationFiles: [...additions, additions[0]]
+        })
+      )
+      expect(rejected).toMatchObject({
+        ok: false,
+        error: "BUSINESS_MOD_CATALOG_INVALID",
+        diagnostics: [
+          {
+            path: `modularizationFiles.${additions.length}.path`,
+            code: "PLUGIN_MODULARIZATION_FILE_COLLISION",
+            message: expect.any(String)
+          }
+        ]
+      })
+      expect(f.service.status("creator").modularization).toBeUndefined()
       const requested = JSON.parse(
         await tool.invoke({
           action: "request_modularization",

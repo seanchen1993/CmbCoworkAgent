@@ -1,4 +1,8 @@
-import { ModFunctionError } from "../../shared/mods/v2/contracts"
+import {
+  ModFunctionError,
+  MODS_COMPOSITION_REVIEW_REQUIRED,
+  MODS_COMPOSITION_REVIEW_MESSAGE
+} from "../../shared/mods/v2/contracts"
 
 export class ModError extends Error {
   readonly code: string
@@ -7,6 +11,14 @@ export class ModError extends Error {
     this.name = "ModError"
     this.code = code
   }
+}
+
+/** Keep admission closed while exposing a stable recovery hint across Electron's error boundary. */
+export function compositionRecoveryError(error: unknown): unknown {
+  if (!(error instanceof ModFunctionError) || error.code !== "CLAW_CAPABILITY_CHANGED") return error
+  const result = new ModError(MODS_COMPOSITION_REVIEW_REQUIRED)
+  result.message += `: ${MODS_COMPOSITION_REVIEW_MESSAGE}`
+  return result
 }
 
 /** The reason has already crossed the host's output policy; generic exception text is not public. */
@@ -21,7 +33,8 @@ export class ModPermissionError extends ModError {
 export class ModPluginChangedError extends ModError {
   constructor() {
     super("MODS_PLUGIN_CHANGED")
-    this.message += ": 插件已停用或更新，本次插件调用已停止。制作草稿已保留，可以继续当前聊天；不会自动重试原操作。"
+    this.message +=
+      ": 插件已停用或更新，本次插件调用已停止。制作草稿已保留，可以继续当前聊天；不会自动重试原操作。"
   }
 }
 

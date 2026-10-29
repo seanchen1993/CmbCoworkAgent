@@ -50,11 +50,20 @@ export function captureProjectArtifactReference(
 ): { input: ModObject; files: Array<[string, string]>; bytes: number } {
   const stage = project.manifest.stages[project.stageIndex]
   if (!stage?.artifactIds.includes(currentId)) throw Error("PROJECT_ACTION_CHECK_INPUT_INVALID")
-  const priorIds = [
+  const precedingIds = [
     ...new Set(
       project.manifest.stages.slice(0, project.stageIndex).flatMap((item) => item.artifactIds)
     )
-  ].filter((id) => id !== currentId)
+  ]
+  const inputs = stage.inputArtifactIds ?? precedingIds
+  if (
+    !Array.isArray(inputs) ||
+    new Set(inputs).size !== inputs.length ||
+    inputs.some((id) => typeof id !== "string")
+  )
+    throw Error("PROJECT_ACTION_CHECK_INPUT_INVALID")
+  if (inputs.some((id) => !precedingIds.includes(id))) throw Error("PROJECT_ACTION_INPUT_NOT_PRIOR")
+  const priorIds = inputs.filter((id) => id !== currentId)
   if (priorIds.length + 1 > PROJECT_ARTIFACT_REFERENCE_MAX_FILES)
     throw Error("PROJECT_ARTIFACT_REFERENCE_LIMIT")
   const files: Array<[string, string]> = []
