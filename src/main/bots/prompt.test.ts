@@ -115,6 +115,16 @@ describe("Bot first conversation", () => {
 })
 
 describe("optional group review scope", () => {
+  it("keeps a nested group integration on the existing internal return contract", () => {
+    const prompt = buildBotPrompt(bot, { ...task, origin: {
+      kind: "bot", groupId: "g", fromBotId: "leaf", rootTaskId: "root",
+      depth: 2, expectsReply: false, upstreamTaskId: "original-relay"
+    } }, "/group")
+    expect(prompt).toContain("This is INTERNAL coordination")
+    expect(prompt).toContain("use bot_return_files")
+    expect(prompt).not.toContain("Use bot_send_message for standalone public progress")
+    expect(prompt).not.toContain("Generated workspace files are deliverables")
+  })
   it("distinguishes internal file returns from public room delivery without removing verification", () => {
     const prompt = buildBotPrompt(
       bot,

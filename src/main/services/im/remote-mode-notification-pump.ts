@@ -1,3 +1,4 @@
+import { readCommittedCoordinatorNotifications } from "../../agent/coordinator-notification-delivery"
 import { createHash, randomUUID } from "node:crypto"
 import { coordinatorWorkerManager } from "../../agent/coordinator-worker-manager"
 import { goalManager } from "../../agent/goals/runtime"
@@ -89,6 +90,7 @@ interface ImRemoteModeNotificationPumpDependencies {
   workflow: WorkflowPort
   getThread: typeof getThread
   executeTurn: (input: PreparedRemoteStandardTurnInput) => Promise<string>
+  readCommittedNotifications: typeof readCommittedCoordinatorNotifications
   createRunId: () => string
   now: () => number
   goalRuns: ImGoalRunBridge
@@ -218,6 +220,11 @@ function isRetryableCapability(
 export class ImRemoteModeNotificationPump {
   private readonly dependencies: ImRemoteModeNotificationPumpDependencies
   private readonly pending = new Map<string, ImDetachedResultNotice>()
+  // Retrying outbox delivery must reuse the generated result, never rerun the model.
+  private readonly pendingCoordinatorReplies = new Map<
+    string,
+    { deliveryId: string; text: string }
+  >()
   private readonly active = new Set<string>()
   private readonly retryAttempts = new Map<string, number>()
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -240,6 +247,8 @@ export class ImRemoteModeNotificationPump {
       workflow: dependencies.workflow ?? workflowRunManager,
       getThread: dependencies.getThread ?? getThread,
       executeTurn: dependencies.executeTurn ?? executePreparedRemoteStandardTurn,
+      readCommittedNotifications:
+        dependencies.readCommittedNotifications ?? readCommittedCoordinatorNotifications,
       createRunId: dependencies.createRunId ?? randomUUID,
       now: dependencies.now ?? Date.now,
       goalRuns: dependencies.goalRuns ?? new ImGoalRunBridge(),
@@ -448,7 +457,6 @@ export class ImRemoteModeNotificationPump {
     if (!decision.allowed) return isRetryableCapability(decision)
 
     const expectedMode = notice.kind === "coordinator" ? "coordinator" : "workflow"
-    if (getAgentModeFromMetadata(decision.metadata) !== expectedMode) return false
 
     const runId = `im-notification:${this.dependencies.createRunId()}`
     const claim = claimLocalThreadRunLease({
@@ -463,6 +471,8 @@ export class ImRemoteModeNotificationPump {
     // conversation and target, not the thread — so the thread travels with it.
     this.abortControllers.set(routeKey(notice), { controller, threadId: notice.threadId })
     try {
+      if (notice.kind === "coordinator") await this.flushCoordinatorReply(notice)
+      if (getAgentModeFromMetadata(decision.metadata) !== expectedMode) return false
       if (this.dependencies.hasActiveGoal(notice.threadId)) {
         return await this.processActiveGoalNotification(notice, decision, runId, controller.signal)
       }
@@ -501,42 +511,67 @@ export class ImRemoteModeNotificationPump {
     }
 
     const agentMode = notice.kind === "coordinator" ? "coordinator" : "workflow"
-    await this.dependencies.goalRuns.run({
-      threadId: notice.threadId,
-      target: notice.targetSnapshot,
-      metadata: decision.metadata,
-      prepared: {
-        kind: "ordinary",
-        visibleText:
-          notice.kind === "coordinator"
-            ? COORDINATOR_NOTIFICATION_PROMPT
-            : WORKFLOW_NOTIFICATION_TURN_PROMPT
-      },
-      runId,
-      signal,
-      userMessageId: `im:goal-${notice.kind}-notification:${runId}`,
-      agentMode,
-      coordinatorInternalNotification: notice.kind === "coordinator",
-      remotePolicy:
-        notice.targetSnapshot.kind === "inbox"
-          ? createImInboxRemotePolicy({ allowRequestUserInput: true })
-          : undefined,
-      onFinalAssistant: (result) =>
-        this.enqueueResult(
-          notice,
-          `im-detached-goal:${notice.kind}:${notice.threadId}:${result.messageId}`,
-          result.finalText
-        ),
-      onDetachedResultAvailable: (signal) =>
-        this.schedule({
-          kind: signal.kind,
-          ...(signal.runId ? { runId: signal.runId } : {}),
-          threadId: signal.threadId,
-          conversationKey: notice.conversationKey,
-          principalId: notice.principalId,
-          targetSnapshot: notice.targetSnapshot
+    let delivered = false
+    try {
+      await this.dependencies.goalRuns.run({
+        threadId: notice.threadId,
+        target: notice.targetSnapshot,
+        metadata: decision.metadata,
+        prepared: {
+          kind: "ordinary",
+          visibleText:
+            notice.kind === "coordinator"
+              ? COORDINATOR_NOTIFICATION_PROMPT
+              : WORKFLOW_NOTIFICATION_TURN_PROMPT
+        },
+        runId,
+        signal,
+        userMessageId: `im:goal-${notice.kind}-notification:${runId}`,
+        agentMode,
+        coordinatorInternalNotification: notice.kind === "coordinator",
+        onRunTerminated: (terminal) => {
+          delivered = terminal.coordinatorNotificationDelivered === true
+        },
+        remotePolicy:
+          notice.targetSnapshot.kind === "inbox"
+            ? createImInboxRemotePolicy({ allowRequestUserInput: true })
+            : undefined,
+        onFinalAssistant: (result) => {
+          const deliveryId = `im-detached-goal:${notice.kind}:${notice.threadId}:${result.messageId}`
+          if (notice.kind === "coordinator") {
+            this.pendingCoordinatorReplies.set(routeKey(notice), {
+              deliveryId,
+              text: result.finalText
+            })
+            return
+          }
+          return this.enqueueResult(notice, deliveryId, result.finalText)
+        },
+        onDetachedResultAvailable: (signal) =>
+          this.schedule({
+            kind: signal.kind,
+            ...(signal.runId ? { runId: signal.runId } : {}),
+            threadId: signal.threadId,
+            conversationKey: notice.conversationKey,
+            principalId: notice.principalId,
+            targetSnapshot: notice.targetSnapshot
+          })
+      })
+    } catch (error) {
+      if (
+        notice.kind !== "coordinator" ||
+        (!delivered && !this.pendingCoordinatorReplies.has(routeKey(notice)))
+      )
+        throw error
+      if (signal.aborted) return false
+      if (!this.pendingCoordinatorReplies.has(routeKey(notice))) {
+        this.pendingCoordinatorReplies.set(routeKey(notice), {
+          deliveryId: `im-detached-goal-error:${notice.threadId}:${runId}`,
+          text: `处理 worker 通知失败：${error instanceof Error ? error.message : String(error)}。通知已保留在会话上下文中，请继续会话处理。`
         })
-    })
+      }
+    }
+    if (notice.kind === "coordinator") await this.flushCoordinatorReply(notice)
 
     // "Is there another one for me", not "is anything still queued".
     return notice.kind === "coordinator"
@@ -576,9 +611,29 @@ export class ImRemoteModeNotificationPump {
     // Only what this transport launched. Draining the thread took the desktop's
     // pending results too, and reported them into Zhaohu instead of to the
     // person watching the desktop.
-    const queued = toNotifications(
+    let queued = toNotifications(
       this.dependencies.coordinator.drainNotifications(notice.threadId, { owner: "managed" })
     )
+    try {
+      const committed = await this.dependencies.readCommittedNotifications(
+        notice.threadId,
+        queued.map((item) => item.message)
+      )
+      if (committed.length > 0) {
+        await this.dependencies.coordinator.acknowledgeNotificationMessages(
+          notice.threadId,
+          committed
+        )
+        const saved = new Set(committed)
+        queued = queued.filter((item) => !saved.has(item.message))
+      }
+    } catch (error) {
+      this.dependencies.coordinator.restoreNotifications(
+        notice.threadId,
+        queued.map((item) => item.message)
+      )
+      throw error
+    }
     if (queued.length === 0) return false
 
     const { prompt, deferred } = limitNotifications(queued)
@@ -590,17 +645,19 @@ export class ImRemoteModeNotificationPump {
     }
 
     const selectedSkills: Record<string, CoordinatorSelectedSkill | undefined> = {}
-    for (const item of prompt) {
-      const id = workerId(item.message)
-      if (!id) continue
-      selectedSkills[item.id] = await this.dependencies.coordinator.getWorkerSelectedSkill(
-        notice.threadId,
-        id
-      )
-    }
     const consumed = new Set<string>()
     const rawMessage = coordinatorPrompt(prompt)
+    let enteredContext = false
+    let reply: { deliveryId: string; text: string }
     try {
+      for (const item of prompt) {
+        const id = workerId(item.message)
+        if (!id) continue
+        selectedSkills[item.id] = await this.dependencies.coordinator.getWorkerSelectedSkill(
+          notice.threadId,
+          id
+        )
+      }
       const result = await this.dependencies.executeTurn({
         rawMessage,
         userMessageId: `im:coordinator-notification:${stableDigest(prompt.map((item) => item.message))}`,
@@ -619,24 +676,48 @@ export class ImRemoteModeNotificationPump {
         disableAutoCommit: true,
         remotePolicy: { disableRequestUserInput: true },
         coordinatorNotificationSelectedSkills: selectedSkills,
+        coordinatorNotificationMessages: prompt.map((item) => item.message),
+        onCoordinatorNotificationInputCommitted: async () => {
+          enteredContext = true
+          await this.dependencies.coordinator.acknowledgeNotificationMessages(
+            notice.threadId,
+            prompt.map((item) => item.message)
+          )
+        },
         onCoordinatorNotificationAction: (ids) => {
           const valid = new Set(prompt.map((item) => item.id))
           for (const id of ids) if (valid.has(id)) consumed.add(id)
         },
         onDetachedResultAvailable: (resultSignal) => this.scheduleFromSignal(notice, resultSignal)
       })
-      await this.enqueueResult(
-        notice,
-        `im-detached:coordinator:${notice.threadId}:${stableDigest(prompt.map((item) => item.message))}`,
-        result
-      )
-      await this.dependencies.coordinator.acknowledgeNotificationMessages(
-        notice.threadId,
-        prompt.map((item) => item.message)
-      )
+      if (!enteredContext)
+        await this.dependencies.coordinator.acknowledgeNotificationMessages(
+          notice.threadId,
+          prompt.map((item) => item.message)
+        )
+      reply = {
+        deliveryId: `im-detached:coordinator:${notice.threadId}:${stableDigest(prompt.map((item) => item.message))}`,
+        text: result
+      }
     } catch (error) {
-      const acknowledged = prompt.filter((item) => consumed.has(item.id))
-      const restored = prompt.filter((item) => !consumed.has(item.id))
+      let committed: string[]
+      try {
+        committed = enteredContext
+          ? prompt.map((item) => item.message)
+          : await this.dependencies.readCommittedNotifications(
+              notice.threadId,
+              prompt.map((item) => item.message)
+            )
+      } catch (readError) {
+        await this.dependencies.coordinator.restoreNotificationMessages(
+          notice.threadId,
+          prompt.filter((item) => !consumed.has(item.id)).map((item) => item.message)
+        )
+        throw readError
+      }
+      const saved = new Set(committed)
+      const acknowledged = prompt.filter((item) => saved.has(item.message) || consumed.has(item.id))
+      const restored = prompt.filter((item) => !saved.has(item.message) && !consumed.has(item.id))
       await Promise.all([
         acknowledged.length > 0
           ? this.dependencies.coordinator.acknowledgeNotificationMessages(
@@ -651,8 +732,15 @@ export class ImRemoteModeNotificationPump {
             )
           : Promise.resolve()
       ])
-      throw error
+      if (restored.length > 0) throw error
+      if (signal.aborted) return false
+      reply = {
+        deliveryId: `im-detached:coordinator-error:${notice.threadId}:${stableDigest(prompt.map((item) => item.message))}`,
+        text: `处理 worker 通知失败：${error instanceof Error ? error.message : String(error)}。通知已保留在会话上下文中，请继续会话处理。`
+      }
     }
+    this.pendingCoordinatorReplies.set(routeKey(notice), reply)
+    await this.flushCoordinatorReply(notice)
     return (
       deferred.length > 0 ||
       this.dependencies.coordinator.hasNotifications(notice.threadId, { owner: "managed" })
@@ -743,6 +831,15 @@ export class ImRemoteModeNotificationPump {
       principalId: route.principalId,
       targetSnapshot: route.targetSnapshot
     })
+  }
+
+  private async flushCoordinatorReply(notice: ImDetachedResultNotice): Promise<void> {
+    const key = routeKey(notice)
+    const reply = this.pendingCoordinatorReplies.get(key)
+    if (!reply) return
+    await this.enqueueResult(notice, reply.deliveryId, reply.text)
+    if (this.pendingCoordinatorReplies.get(key) === reply)
+      this.pendingCoordinatorReplies.delete(key)
   }
 
   private async enqueueResult(

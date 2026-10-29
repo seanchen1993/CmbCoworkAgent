@@ -661,8 +661,7 @@ export function createLocalBotRunPort(
           const commandResults = checkpointId ? getHost().continuationCommandResults(task.id) : []
           const peerResultOwner =
             task.origin.kind === "bot" &&
-            (task.origin.expectsReply ||
-              (!botTaskGroupId(task) && Boolean(task.origin.upstreamTaskId)))
+            (task.origin.expectsReply || Boolean(task.origin.upstreamTaskId))
           const keepCommandSource = task.origin.kind === "schedule" || peerResultOwner
           const foregroundLifecycle =
             !simulated && keepCommandSource ? getHost().commandLifecycle(task.id, true) : undefined
@@ -719,7 +718,9 @@ export function createLocalBotRunPort(
               if (request.threadId === task.threadId)
                 getHost().recordGroupQuestion(task.id, request)
             })
-          const toolConcurrencyQueueId = botWorkspaceFileQueue(workspacePath)
+          const toolConcurrencyQueueId = groupId
+            ? `bot-group:${JSON.stringify([groupId, bot.id])}`
+            : botWorkspaceFileQueue(workspacePath)
           const profileContinuationRequest =
             task.origin.kind === "notification" && task.origin.notificationKind === "command"
               ? getHost().profileContinuationRequest(task.id)
@@ -1223,7 +1224,7 @@ export function createLocalBotRunPort(
                             undefined,
                             true
                           ),
-                          ...(task.origin.kind === "bot" && task.origin.expectsReply
+                          ...(peerResultOwner
                             ? createBotReturnFileTools(workspacePath, signal, captureReplyFiles)
                             : []),
                           ...createBotBrowserTools(
@@ -1367,7 +1368,7 @@ export function createLocalBotRunPort(
                     (task.origin.kind === "group" ||
                       task.origin.kind === "discussion" ||
                       (task.origin.kind === "bot" && !task.origin.expectsReply)) &&
-                    isBotGroupPass(finalText)
+                    (!splitBotInlineReasoning(finalText ?? "").body.trim() || isBotGroupPass(finalText))
                   )
                 }
               }

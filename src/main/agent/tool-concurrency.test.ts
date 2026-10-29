@@ -84,6 +84,7 @@ function createGate(
     queueId?: string
     workflowThreadId?: string
     activeWorkflowThreadIds?: readonly string[]
+    classifyCommandConcurrency?: () => "exclusive" | "parallel_safe"
   } = {}
 ): Gate {
   const queueId = options.queueId ?? "shared-test-workspace"
@@ -96,9 +97,11 @@ function createGate(
       isActive: (threadId: string) => options.activeWorkflowThreadIds?.includes(threadId) ?? false,
       activeRunId: () => "wf_existing_run"
     },
-    classifyCommandConcurrency: () => {
-      throw new Error("Unexpected command in tool-lock test")
-    },
+    classifyCommandConcurrency:
+      options.classifyCommandConcurrency ??
+      (() => {
+        throw new Error("Unexpected command in tool-lock test")
+      }),
     createGate: undefined as
       | undefined
       | ((
@@ -295,6 +298,95 @@ describe("active workflow rejection", () => {
 })
 
 describe("shared-workspace user input", () => {
+  it("allows another member to write while preserving the same member's tool serialization", async () => {
+    const gate = createGate(true, true, {
+      queueId: 'bot-group:["g","a"]',
+      classifyCommandConcurrency: () => "exclusive"
+    })
+    const sameMember = gate.forQueue('bot-group:["g","a"]')
+    const otherMember = gate.forQueue('bot-group:["g","b"]')
+    const entered = deferred(),
+      release = deferred()
+    const longTask = gate.wrapToolCall(
+      request("execute", "long-task", { command: "long command" }),
+      async () => {
+        entered.resolve()
+        await release.promise
+      }
+    )
+    await entered.promise
+    const sameWrite = vi.fn(async () => "same")
+    const otherWrite = vi.fn(async () => "other")
+    const samePending = sameMember.wrapToolCall(request("write_file", "same"), sameWrite)
+    const otherPending = otherMember.wrapToolCall(request("write_file", "other"), otherWrite)
+    try {
+      await turn()
+      expect(otherWrite).toHaveBeenCalledOnce()
+      expect(sameWrite).not.toHaveBeenCalled()
+    } finally {
+      release.resolve()
+      await Promise.all([longTask, samePending, otherPending])
+    }
+    expect(sameWrite).toHaveBeenCalledOnce()
+  })
+
+  it("same-request members keep the existing shared writer lock during cancellation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cmb-parallel-room-lock-"))
+    const file = join(dir, "result.txt")
+    writeFileSync(file, "")
+    const sqlite = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    const db = new BotStore(sqlite, () => 1000),
+      gate = createGate(true),
+      release = deferred()
+    const a = db.create({ name: "Writer A", instructions: "", color: "#ea2845", modelRef: null })
+    const b = db.create({ name: "Writer B", instructions: "", color: "#ea2845", modelRef: null })
+    const group = db.saveGroup({ name: "Parallel lock", memberIds: [a.id, b.id] })
+    const started: string[] = [],
+      entered: string[] = []
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      acquire: (_bot, task) => ({
+        release() {},
+        execute: async (signal) => {
+          started.push(task.id)
+          await gate.wrapToolCall(request("write_file", task.id), async () => {
+            entered.push(task.id)
+            appendFileSync(file, `start:${task.id}\n`)
+            if (entered.length === 1) await release.promise
+            if (!signal.aborted) appendFileSync(file, `end:${task.id}\n`)
+          })
+          return { state: "completed", explicitGroupMessages: true }
+        }
+      })
+    }
+    const host = new LocalBotHost(db, runtime, Number.POSITIVE_INFINITY)
+    try {
+      host.sendGroup({
+        groupId: group.id,
+        requestId: "parallel",
+        text: "Work in the shared room",
+        targetBotIds: group.memberIds
+      })
+      await vi.waitFor(() => expect(started).toHaveLength(2))
+      expect(entered).toHaveLength(1)
+      host.cancel(entered[0])
+      await turn()
+      expect(entered).toHaveLength(1)
+      release.resolve()
+      await vi.waitFor(() => expect(host.hasActiveRuns()).toBe(false))
+      expect(entered).toHaveLength(2)
+      const lines = readFileSync(file, "utf8").trim().split("\n")
+      expect(lines).toEqual([`start:${entered[0]}`, `start:${entered[1]}`, `end:${entered[1]}`])
+      expect(db.getTask(entered[0]).state).toBe("cancelled")
+      expect(db.getTask(entered[1]).state).toBe("completed")
+    } finally {
+      release.resolve()
+      await host.stop()
+      sqlite.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("releases a contested room file after member removal without losing the survivor's update", async () => {
     const directory = mkdtempSync(join(tmpdir(), "cmb-bot-room-lock-"))
     const file = join(directory, "result.txt"),

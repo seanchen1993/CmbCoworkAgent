@@ -94,7 +94,7 @@ export interface StreamConverterChunkOptions {
 export type SchedulerLifecycleEvent =
   | { type: "started" }
   | { type: "done" }
-  | { type: "error"; error: string }
+  | { type: "error"; error: string; coordinatorNotificationRunId?: string; errorDetail?: Record<string, unknown> }
 
 export type SchedulerRendererEvent = SchedulerEvent | SchedulerLifecycleEvent
 

@@ -1900,20 +1900,20 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "acknowledgeDeliveredCoordinatorNotificationsIfNeeded",
+    "coordinatorNotificationDelivery: {",
     "agent IPC acknowledges task-notifications when they are delivered into the coordinator turn, matching Claude Code queue removal"
   )
   assertSourceOrder(
     agentIpc,
     "const humanMessages",
-    "const acknowledgeDeliveredCoordinatorNotificationsIfNeeded",
+    "coordinatorNotificationDelivery: {",
     "agent IPC delivery-acknowledges task-notifications only after constructing the internal HumanMessage batch"
   )
   assertSourceOrder(
     agentIpc,
-    "for await (const chunk of source)",
-    "await acknowledgeDeliveredCoordinatorNotificationsIfNeeded()",
-    "agent IPC removes delivered task-notifications from the queue only after the coordinator stream starts producing output"
+    "onCommitted: async () =>",
+    "coordinatorNotificationsEnteredContext = true",
+    "agent IPC confirms durable conversation input before consuming notifications"
   )
   assertIncludes(
     agentIpc,
@@ -1950,9 +1950,15 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "drainedCoordinatorNotifications.length === 1",
     "agent IPC should not special-case single notification turns"
   )
+  assertSourceOrder(
+    agentIpc,
+    'name: "settle-coordinator-notification-input"',
+    'name: "settle-managed-workflow-handoff"',
+    "agent IPC settles coordinator input before releasing the physical run lease"
+  )
   assertIncludes(
     agentIpc,
-    'settleNotifications: () => settleDrainedCoordinatorNotifications("restore")',
+    'settleNotifications: () => settleDrainedCoordinatorNotifications()',
     "agent IPC routes pre-acknowledgement notification restoration through the physical-run finalizer"
   )
   assertIncludes(
@@ -2271,12 +2277,12 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    'void settleDrainedCoordinatorNotifications("ack").catch(',
+    'void settleDrainedCoordinatorNotifications().catch(',
     "agent IPC starts delivered task-notification acknowledgement after a successful turn without delaying the terminal event"
   )
   assertIncludes(
     agentIpc,
-    "coordinatorNotificationsDelivered",
+    "coordinatorNotificationsEnteredContext",
     "agent IPC separates task-notification delivery ack from final turn settlement"
   )
   assertIncludes(

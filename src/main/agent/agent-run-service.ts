@@ -82,6 +82,8 @@ export interface AgentRunTerminal {
   code: string
   message?: string
   error?: unknown
+  /** The coordinator notification input was saved; never retry that queue item. */
+  coordinatorNotificationDelivered?: boolean
 }
 
 export interface AgentGoalControlRequest {

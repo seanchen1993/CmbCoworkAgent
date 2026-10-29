@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { PendingNotificationScheduler } from "./pending-notification-scheduler"
 import { coordinatorWorkerManager } from "./coordinator-worker-manager"
 import { workflowRunManager } from "./workflow/run-manager"
-import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "./thread-run-lease"
+import {
+  onLocalThreadRunLeaseReleased,
+  claimLocalThreadRunLease,
+  releaseLocalThreadRunLease
+} from "./thread-run-lease"
 import type { AgentRunExecutionContext, AgentRunTerminal } from "./agent-run-service"
 import type { PersistedWorkflowRun } from "./workflow/types"
 
@@ -175,10 +179,99 @@ function lastContext(startRun: ReturnType<typeof vi.fn>): AgentRunExecutionConte
 }
 
 function coordinatorOwnedBy(owner: "desktop" | "managed"): void {
+  vi.spyOn(coordinatorWorkerManager, "hasNotifications").mockImplementation(
+    (_threadId, queryOptions) => (queryOptions?.owner ?? owner) === owner
+  )
   vi.spyOn(coordinatorWorkerManager, "hasAutoRunnableNotifications").mockImplementation(
     (_threadId, queryOptions) => (queryOptions?.owner ?? owner) === owner
   )
 }
+
+it("preserves B racing with the lease release of consumed failed A", async () => {
+  let pending = true
+  vi.spyOn(coordinatorWorkerManager, "hasNotifications").mockImplementation(() => pending)
+  vi.spyOn(coordinatorWorkerManager, "hasAutoRunnableNotifications").mockImplementation(
+    () => pending
+  )
+  const { scheduler, startRun, timers } = createHarness({
+    agentMode: "coordinator",
+    terminal: { outcome: "error", code: "provider_error", coordinatorNotificationDelivered: true },
+    runBody: async () => {
+      pending = false
+    }
+  })
+  let injected = false
+  const off = onLocalThreadRunLeaseReleased((lease) => {
+    if (lease.threadId !== THREAD || injected) return
+    injected = true
+    pending = true
+    scheduler.requestCheck(THREAD)
+  })
+  try {
+    await scheduler.check(THREAD)
+    expect(injected).toBe(true)
+    expect(startRun).toHaveBeenCalledTimes(2)
+    expect(pending).toBe(false)
+    expect(timers.pending()).toBe(0)
+  } finally {
+    off()
+    scheduler.stop()
+  }
+})
+
+it("drains a deferred batch after a consumed failure without relying on a renderer event", async () => {
+  let batches = 2
+  vi.spyOn(coordinatorWorkerManager, "hasAutoRunnableNotifications").mockImplementation(
+    () => batches > 0
+  )
+  const { scheduler, startRun, timers } = createHarness({
+    agentMode: "coordinator",
+    terminal: { outcome: "error", code: "provider_error", coordinatorNotificationDelivered: true },
+    runBody: async () => {
+      batches--
+    }
+  })
+  try {
+    await scheduler.check(THREAD)
+    expect(startRun).toHaveBeenCalledTimes(2)
+    expect(batches).toBe(0)
+    expect(timers.pending()).toBe(0)
+  } finally {
+    scheduler.stop()
+  }
+})
+
+it("retains a retry wake when pre-input notification restoration finishes after completion", async () => {
+  let pending = true
+  let restore!: () => void
+  const receiptRead = new Promise<void>((resolve) => {
+    restore = resolve
+  })
+  vi.spyOn(coordinatorWorkerManager, "hasNotifications").mockImplementation(() => pending)
+  vi.spyOn(coordinatorWorkerManager, "hasAutoRunnableNotifications").mockImplementation(
+    () => pending
+  )
+  const { scheduler, timers } = createHarness({
+    agentMode: "coordinator",
+    terminal: { outcome: "error", code: "provider_error" },
+    runBody: async () => {
+      pending = false
+      void receiptRead.then(() => {
+        pending = true
+      })
+    }
+  })
+  try {
+    await scheduler.check(THREAD)
+    restore()
+    await receiptRead
+    expect(pending).toBe(true)
+    expect(timers.pending()).toBe(1)
+  } finally {
+    restore()
+    scheduler.stop()
+  }
+})
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -491,6 +584,30 @@ describe("pending notification scheduler", () => {
     expect((await scheduler.check(THREAD)).started).toBe(false)
     expect(startRun).toHaveBeenCalledTimes(1)
     expect(timers.pending()).toBe(1)
+  })
+
+  it("ends a failed notification already committed to context without arming a retry", async () => {
+    coordinatorOwnedBy("desktop")
+    let pending = true
+    vi.mocked(coordinatorWorkerManager.hasNotifications).mockImplementation(() => pending)
+    vi.mocked(coordinatorWorkerManager.hasAutoRunnableNotifications).mockImplementation(
+      () => pending
+    )
+    const { scheduler, startRun, timers } = createHarness({
+      agentMode: "coordinator",
+      runBody: async () => {
+        pending = false
+      },
+      terminal: { outcome: "error", code: "provider_error", coordinatorNotificationDelivered: true }
+    })
+    await scheduler.check(THREAD)
+    expect(startRun).toHaveBeenCalledTimes(1)
+    expect(timers.pending()).toBe(0)
+    await scheduler.check(THREAD)
+    expect(startRun).toHaveBeenCalledTimes(1)
+    pending = true
+    await scheduler.check(THREAD)
+    expect(startRun).toHaveBeenCalledTimes(2)
   })
 
   it("does not retry a summary that was aborted", async () => {

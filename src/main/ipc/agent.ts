@@ -1,3 +1,9 @@
+import {
+  COORDINATOR_NOTIFICATION_RECEIPTS_KEY,
+  coordinatorNotificationReceipt,
+  createCoordinatorNotificationWriteTracker,
+  readCommittedCoordinatorNotifications
+} from "../agent/coordinator-notification-delivery"
 import { assertWorkConversationEntry } from "../bots/conversation-link-authority"
 import { isPersonalMemoryEnabled } from "../agent/personal-context"
 import { foregroundToolPolicy } from "../agent/foreground-tool-policy"
@@ -3207,10 +3213,21 @@ async function prepareQueuedCoordinatorNotificationsForPrompt(
   promptNotifications: CoordinatorTurnNotification[]
   notificationSelectedSkills: Record<string, CoordinatorSelectedSkill | undefined>
 }> {
-  const queuedNotifications = toCoordinatorTurnNotifications(
+  let queuedNotifications = toCoordinatorTurnNotifications(
     coordinatorWorkerManager.drainNotifications(threadId, { owner })
   )
   try {
+    if (queuedNotifications.length > 0) {
+      const committed = await readCommittedCoordinatorNotifications(
+        threadId,
+        queuedNotifications.map((item) => item.message)
+      )
+      if (committed.length > 0) {
+        await coordinatorWorkerManager.acknowledgeNotificationMessages(threadId, committed)
+        const saved = new Set(committed)
+        queuedNotifications = queuedNotifications.filter((item) => !saved.has(item.message))
+      }
+    }
     const { promptNotifications, deferredNotifications } =
       limitCoordinatorNotificationsForPrompt(queuedNotifications)
     const notificationSelectedSkills = await buildCoordinatorNotificationSelectedSkills(
@@ -4829,7 +4846,7 @@ function emitErrorDetail(
   window: BrowserWindow,
   channel: string,
   error: unknown,
-  extras?: ErrorDetailModelInfo
+  extras?: ErrorDetailModelInfo & { coordinatorNotificationRunId?: string }
 ): ApiErrorDetail {
   const fetchDetail = lastFetchErrorByChannel.get(channel)
   const attempts = lastFailoverByChannel.get(channel) ?? []
@@ -6648,7 +6665,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const fileWritePaths: string[] = []
         let drainedCoordinatorNotifications: CoordinatorTurnNotification[] = []
         let coordinatorNotificationsConsumed = false
-        let coordinatorNotificationsDelivered = false
+        let coordinatorNotificationsEnteredContext = false
+        const coordinatorNotificationWrites = createCoordinatorNotificationWriteTracker()
         let coordinatorNotificationSettlementInFlight: Promise<void> | undefined
         let clearCoordinatorNotificationSelectedSkillsOnExit = false
         const consumedCoordinatorNotificationIds = new Set<string>()
@@ -6858,45 +6876,57 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         }
 
-        const settleDrainedCoordinatorNotifications = async (
-          mode: "ack" | "restore"
-        ): Promise<void> => {
-          if (coordinatorNotificationsConsumed || drainedCoordinatorNotifications.length === 0) {
-            return
-          }
-          if (mode === "ack" && coordinatorNotificationsDelivered) {
-            drainedCoordinatorNotifications = []
-            consumedCoordinatorNotificationIds.clear()
-            coordinatorNotificationsConsumed = true
-            coordinatorNotificationsDelivered = false
-            return
-          }
-          const settlementMode =
-            mode === "ack" && !coordinatorNotificationsDelivered ? "restore" : mode
+        const settleDrainedCoordinatorNotifications = async (): Promise<void> => {
           if (coordinatorNotificationSettlementInFlight) {
             return coordinatorNotificationSettlementInFlight
           }
-          const settlement = settleCoordinatorTurnNotifications(
-            threadId,
-            drainedCoordinatorNotifications,
-            consumedCoordinatorNotificationIds,
-            settlementMode
-          )
-          const observedSettlement = settlement.then(() => {
+          if (coordinatorNotificationsConsumed || drainedCoordinatorNotifications.length === 0) return
+          const settlement = (async () => {
+            await coordinatorNotificationWrites.settle()
+            if (!coordinatorNotificationsEnteredContext) {
+              let committed: string[]
+              try {
+                committed = await readCommittedCoordinatorNotifications(
+                  threadId,
+                  drainedCoordinatorNotifications.map((item) => item.message)
+                )
+              } catch (error) {
+                // Keep unreadable inputs queued. Preparation checks receipts again
+                // before any later invocation, so an uncertain input cannot duplicate.
+                await settleCoordinatorTurnNotifications(
+                  threadId,
+                  drainedCoordinatorNotifications,
+                  consumedCoordinatorNotificationIds,
+                  "restore"
+                )
+                throw error
+              }
+              if (committed.length > 0) {
+                await coordinatorWorkerManager.acknowledgeNotificationMessages(threadId, committed)
+                const saved = new Set(committed)
+                drainedCoordinatorNotifications = drainedCoordinatorNotifications.filter(
+                  (item) => !saved.has(item.message)
+                )
+              }
+            }
+            await settleCoordinatorTurnNotifications(
+              threadId,
+              drainedCoordinatorNotifications,
+              consumedCoordinatorNotificationIds,
+              coordinatorNotificationsEnteredContext ? "ack" : "restore"
+            )
             drainedCoordinatorNotifications = []
             consumedCoordinatorNotificationIds.clear()
             coordinatorNotificationsConsumed = true
-            coordinatorNotificationsDelivered = false
-          })
-          coordinatorNotificationSettlementInFlight = observedSettlement
-          void observedSettlement
-            .catch(() => {})
-            .finally(() => {
-              if (coordinatorNotificationSettlementInFlight === observedSettlement) {
-                coordinatorNotificationSettlementInFlight = undefined
-              }
-            })
-          return observedSettlement
+          })()
+          coordinatorNotificationSettlementInFlight = settlement
+          try {
+            await settlement
+          } finally {
+            if (coordinatorNotificationSettlementInFlight === settlement) {
+              coordinatorNotificationSettlementInFlight = undefined
+            }
+          }
         }
 
         const onHookResult = guardPhysicalStreamRunCallback(
@@ -7007,6 +7037,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           runExecutionContext.onRunTerminated?.({
             outcome,
             code,
+            ...(coordinatorNotificationsEnteredContext ? { coordinatorNotificationDelivered: true } : {}),
             ...(terminalMessage ? { message: terminalMessage } : {}),
             ...(terminalError !== undefined ? { error: terminalError } : {})
           })
@@ -7842,8 +7873,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 })
               }
             )
-            throwIfInvokeAborted()
             drainedCoordinatorNotifications = promptNotifications
+            throwIfInvokeAborted()
             coordinatorNotificationsConsumed = promptNotifications.length === 0
             coordinatorNotificationSelectedSkills = notificationSelectedSkills
             for (const notificationId of Object.keys(notificationSelectedSkills)) {
@@ -7875,6 +7906,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               promptNotifications.length > 0
                 ? buildCoordinatorNotificationHumanMessage(promptNotifications)
                 : undefined
+            if (isCoordinatorNotificationTurn && promptNotifications.length === 0) {
+              safeSendToWindow(window, channel, { type: "done" })
+              finishTraceInBackground(
+                tracer, "success", "COORDINATOR_NOTIFICATION_ALREADY_DELIVERED", "Agent"
+              )
+              return
+            }
             // Symmetric to the workflow bridge (see pendingBackgroundResultEvidence
             // decl): a coordinator worker-notification DELIVERY turn surfaces worker
             // results only via the coordinator turn prompt, which the model restates
@@ -8063,13 +8101,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const notificationOccurrenceBoundary = isInternalNotificationTurn
             ? captureThreadMessageProviderOccurrenceBoundary(threadId)
             : undefined
+          const coordinatorNotificationMessageId = `coordinator-notification:${runToken}`
           const humanMessages: BaseMessage[] = [
             ...durableRuntimeTail.messages,
             coordinatorNotificationHumanMessage
               ? new HumanMessage({
+                  id: coordinatorNotificationMessageId,
                   content: coordinatorNotificationHumanMessage,
                   additional_kwargs: {
-                    [COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY]: true
+                    [COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY]: true,
+                    [COORDINATOR_NOTIFICATION_RECEIPTS_KEY]: drainedCoordinatorNotifications.map(
+                      (item) => coordinatorNotificationReceipt(item.message)
+                    )
                   }
                 })
               : undefined,
@@ -8077,6 +8120,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           ].filter((message): message is BaseMessage => message !== undefined)
           let currentTurnUserMessageForEvidence =
             coordinatorNotificationHumanMessage ?? effectiveMessage
+          if (isCoordinatorNotificationTurn) {
+            safeSendToWindow(window, channel, {
+              type: "custom",
+              data: { type: "coordinator_notification_turn_started", runId: runToken }
+            })
+          }
           const streamConfig = {
             configurable: { thread_id: threadId },
             signal: abortController.signal,
@@ -8172,6 +8221,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction,
+              ...(coordinatorNotificationHumanMessage
+                ? {
+                    coordinatorNotificationDelivery: {
+                      messageId: coordinatorNotificationMessageId,
+                      content: coordinatorNotificationHumanMessage,
+                      onPendingWrite: coordinatorNotificationWrites.track,
+                      onCommitted: async () => {
+                        coordinatorNotificationsEnteredContext = true
+                        await acknowledgeDeliveredCoordinatorNotifications(
+                          threadId, drainedCoordinatorNotifications
+                        )
+                      }
+                    }
+                  }
+                : {}),
               onWorkflowLaunched,
               backgroundNotificationOwner,
               onTurnCompletionRecovery: sendTurnCompletionNotice,
@@ -8769,22 +8833,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             reasoningLimit: MAX_TRACE_CONTENT
           })
 
-          const acknowledgeDeliveredCoordinatorNotificationsIfNeeded = async (): Promise<void> => {
-            if (
-              !coordinatorNotificationHumanMessage ||
-              drainedCoordinatorNotifications.length === 0 ||
-              coordinatorNotificationsConsumed ||
-              coordinatorNotificationsDelivered
-            ) {
-              return
-            }
-            await acknowledgeDeliveredCoordinatorNotifications(
-              threadId,
-              drainedCoordinatorNotifications
-            )
-            coordinatorNotificationsDelivered = true
-          }
-
           const consumeStreamWithSideEffects = async (
             source: AsyncIterable<unknown>
           ): Promise<void> => {
@@ -8812,7 +8860,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
                   continue
                 }
-                await acknowledgeDeliveredCoordinatorNotificationsIfNeeded()
                 const {
                   data: serialized,
                   valuesMessageIndexOffset,
@@ -9462,7 +9509,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
 
             clearCoordinatorNotificationSelectedSkillsOnExit = true
-            void settleDrainedCoordinatorNotifications("ack").catch((error) => {
+            void settleDrainedCoordinatorNotifications().catch((error) => {
               console.warn("[Agent] Coordinator notification settlement failed:", error)
             })
             throwIfInvokeAborted()
@@ -9909,6 +9956,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose = true
           }
         } catch (error) {
+          // The stream can reject before asynchronous checkpoint puts finish.
+          // Report the final delivery boundary after those writes settle.
+          await coordinatorNotificationWrites.settle()
           const failureDisposition = classifyPhysicalStreamRunFailure({
             ownsLease: ownsPhysicalStreamRunLease(threadId, runToken, abortController),
             signalAborted: abortController.signal.aborted,
@@ -10065,7 +10115,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             // Sent BEFORE the error event: the error event terminates the stream
             // in the renderer (useStream), so any custom event sent after it is
             // dropped. error_detail must go first to populate the detail card.
-            emitErrorDetail(window, channel, error, { modelId: usedModelId })
+            emitErrorDetail(window, channel, error, {
+              modelId: usedModelId,
+              ...(isCoordinatorNotificationTurn ? { coordinatorNotificationRunId: runToken } : {})
+            })
             safeSendToWindow(window, channel, {
               type: "error",
               error: errMsg
@@ -10147,6 +10200,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             runOwner: runExecutionContext.localRunLease?.owner ?? "desktop",
             releaseRunLease: !runExecutionContext.localRunLease?.managedExternally,
             criticalBeforeReleasePhases: [
+              {
+                // Receipt reads may take longer than the retry timer. Restore
+                // pre-input notifications before a successor can observe the queue.
+                name: "settle-coordinator-notification-input",
+                run: () => settleDrainedCoordinatorNotifications()
+              },
               {
                 name: "settle-managed-workflow-handoff",
                 run: async () => {
@@ -10259,7 +10318,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               removeWindowClosedSubscription()
               removeExternalAbortSubscription()
             },
-            settleNotifications: () => settleDrainedCoordinatorNotifications("restore"),
+            settleNotifications: () => settleDrainedCoordinatorNotifications(),
             cleanupNotificationSkills: () => {
               if (!clearCoordinatorNotificationSelectedSkillsOnExit) return
               const nextCoordinatorNotificationSelectedSkills =

@@ -1,0 +1,38 @@
+{
+  "todos": [
+    {
+      "id": "IM-COORDINATOR-REPLY-RECOVERY",
+      "title": "补齐 IM coordinator 回复在 outbox 提交前失败后的重启恢复",
+      "createdAt": "2026-10-29",
+      "priority": "P2",
+      "status": "deferred",
+      "decision": "用户决定本轮暂不修复；保留当前禁止重复处理已消费通知的补丁。",
+      "frequencyAssessment": "按触发条件判断为低频组合故障，暂无线上发生率统计。存储故障与进程退出可能相关，不能按独立事件估算概率。",
+      "trigger": [
+        "普通 IM coordinator 通知输入已持久化，worker 通知已确认消费。",
+        "已生成成功回复或终止错误回复，但 durable outbox 提交前写入失败。",
+        "内存中的待发回复重投成功前，进程退出或重启。"
+      ],
+      "impact": "重启后不会自动补发这条 IM 回复；通知输入和 worker 结果仍保留。待发回复当前仅存于 pendingCoordinatorReplies 内存 Map。",
+      "classification": "普通 IM coordinator 路径是本次通知消费改动引入的投递恢复回归；活跃 Goal 路径的类似缺口在 HEAD 基线已存在，不能都算作本次新增。",
+      "relevantFiles": [
+        "src/main/services/im/remote-mode-notification-pump.ts",
+        "src/main/services/im/event-store.ts",
+        "src/main/services/im/service.ts"
+      ],
+      "fixConstraints": [
+        "持久化并恢复待发回复或足够的输出恢复信息；不能只依赖进程内缓存。",
+        "保持已消费通知不重新入队、不追加重复通知消息、不为补发而重跑模型。",
+        "使用稳定投递 ID，避免 outbox 已提交但后续失败时重复发送。",
+        "控制在 IM 投递与恢复范围，不重构 worker 分派和现有 Agent Team 调度。"
+      ],
+      "acceptanceCriteria": [
+        "成功回复和错误回复均覆盖 outbox 提交前失败、退出及重启恢复。",
+        "覆盖 outbox 提交后退出，恢复时不重复投递。",
+        "验证不同通知批次、owner 隔离及 Goal 兼容性。",
+        "修复后运行定向测试，并以完全相同提示词启动三个 subagent 独立复核。"
+      ],
+      "evidence": "三个 subagent 均独立对比当前补丁与 HEAD ff72e8674ea372c40d45502f24e5405d7fac9eb9，并复现；其中两位使用真实 worker 状态、checkpoint 及独立进程恢复实验。"
+    }
+  ]
+}

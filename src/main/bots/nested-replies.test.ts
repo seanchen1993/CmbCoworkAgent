@@ -96,7 +96,7 @@ function finish(store: BotStore, task: BotTask, result: string, explicitGroupMes
 }
 
 describe("nested private collaboration result return", () => {
-  it.each(["private", "work"] as const)(
+  it.each(["private", "work", "group"] as const)(
     "retains the original %s report requirement until downstream integration",
     (scope) => {
       const f = fixture(2, scope, false, ["reports/final.json"])
@@ -115,7 +115,7 @@ describe("nested private collaboration result return", () => {
     }
   )
 
-  it.each(["private", "work"] as const)(
+  it.each(["private", "work", "group"] as const)(
     "does not report an intermediate %s handoff complete while its child is still pending",
     (scope) => {
       const f = fixture(2, scope, false)
@@ -323,7 +323,7 @@ describe("nested private collaboration result return", () => {
     expect(f.store.recentTasks().some((task) => task.requestId === `reply-${final.id}`)).toBe(false)
   })
 
-  it.each(["private", "work"] as const)(
+  it.each(["private", "work", "group"] as const)(
     "cleans an unstarted downstream receipt on restart of the original %s handoff",
     (scope) => {
       const f = fixture(2, scope, false)
@@ -341,7 +341,7 @@ describe("nested private collaboration result return", () => {
     }
   )
 
-  it.each(["private", "work"] as const)(
+  it.each(["private", "work", "group"] as const)(
     "cleans a queued child on restart even when its actual %s source is an ordinary receipt without upstream",
     (scope) => {
       const f = fixture(1, scope)
@@ -355,6 +355,9 @@ describe("nested private collaboration result return", () => {
         color: "#123456",
         modelRef: null
       })
+      if (f.group) f.store.saveGroup({
+        name: f.group.name, memberIds: [...f.group.memberIds, extra.id]
+      }, { id: f.group.id, version: f.group.version })
       const followup = f.store.delegate(first.id, extra.id, "Verify another fact", "followup")
       f.store.transition(first.id, "waiting_user")
       f.store.transition(followup.id, "running")
@@ -439,7 +442,7 @@ describe("nested private collaboration result return", () => {
     ).toThrow("待办")
   })
 
-  it.each(["private", "work"] as const)(
+  it.each(["private", "work", "group"] as const)(
     "does not reopen an archived %s caller when a final result is pending",
     (scope) => {
       const f = fixture(2, scope)
@@ -544,7 +547,7 @@ describe("nested private collaboration result return", () => {
     }
   )
 
-  it("preserves the group explicit-publication path without additional aggregate reply turns", () => {
+  it("returns the group aggregate internally without automatically publishing it again", () => {
     const f = fixture(2, "group")
     const leaf = f.chain[2]
     f.store.publishGroupMessage(leaf.id, "leaf", "PUBLIC_FACT")
@@ -555,9 +558,49 @@ describe("nested private collaboration result return", () => {
     expect(
       f.store.groupMessages(f.group!.id).filter((message) => message.text === "PUBLIC_FACT")
     ).toHaveLength(1)
-    expect(
-      f.store.recentTasks().some((task) => task.requestId === `reply-${intermediate.id}`)
-    ).toBe(false)
+    const final = receipt(f.store, intermediate)
+    expect(final.botId).toBe(f.bots[0].id)
+    finish(f.store, final, "Already public", true)
+    f.store.flushReplies()
+    expect(f.store.recentTasks().some((task) => task.requestId === `reply-${final.id}`)).toBe(false)
+    expect(f.store.groupMessages(f.group!.id).filter((message) => message.text === "PUBLIC_FACT"))
+      .toHaveLength(1)
+  })
+
+  it.each(["cancelled", "interrupted"] as const)(
+    "returns an intermediate group %s immediately and fences its late child",
+    (state) => {
+      const f = fixture(2, "group", false)
+      const middle = f.chain[1], leaf = f.chain[2]
+      f.store.settle(middle.id, state, "STOP_REASON", undefined, undefined, true)
+      const notice = receipt(f.store, middle)
+      expect(notice.botId).toBe(f.bots[0].id)
+      expect(notice.message).toContain("STOP_REASON")
+      f.store.settle(leaf.id, "completed", null, "LATE_RESULT", undefined, true)
+      f.store.flushReplies()
+      expect(f.store.recentTasks().some(task => task.requestId === `reply-${leaf.id}`)).toBe(false)
+    }
+  )
+
+  it("reports a group relay failure while preserving an already-running child's later result", () => {
+    const f = fixture(2, "group", false)
+    f.store.settle(f.chain[1].id, "failed", "RELAY_ERROR", undefined, undefined, true)
+    expect(receipt(f.store, f.chain[1]).message).toContain("RELAY_ERROR")
+    f.store.settle(f.chain[2].id, "completed", null, "ACTUAL_LATE_RESULT", undefined, true)
+    const integration = receipt(f.store, f.chain[2])
+    finish(f.store, integration, "Recovered using ACTUAL_LATE_RESULT", true)
+    expect(receipt(f.store, integration).message).toContain("ACTUAL_LATE_RESULT")
+  })
+
+  it("keeps a group relay pending until a queued child receipt has been integrated", () => {
+    const f = fixture(2, "group", false)
+    f.store.settle(f.chain[2].id, "completed", null, "FACT", undefined, true)
+    const integration = receipt(f.store, f.chain[2])
+    f.store.settle(f.chain[1].id, "completed", null, "Waiting", undefined, true)
+    f.store.flushReplies()
+    expect(f.store.recentTasks().some(task => task.requestId === `reply-${f.chain[1].id}`)).toBe(false)
+    finish(f.store, integration, "INTEGRATED", true)
+    expect(receipt(f.store, integration).message).toContain("INTEGRATED")
   })
 
   it("returns only this integration's verified files and imports their unchanged bytes through the existing delivery tool", async () => {

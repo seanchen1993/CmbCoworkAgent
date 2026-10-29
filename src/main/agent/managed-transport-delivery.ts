@@ -183,6 +183,7 @@ export function createManagedTransportAgentRunDelivery(
   // One converter per run: it carries per-turn state across frames.
   const converter = new StreamConverter()
   const startedThreads = new Set<string>()
+  const errorDetails = new Map<string, Record<string, unknown>>()
 
   const forward = (channel: string, payload: unknown): void => {
     const threadId = baseStreamThreadId(channel)
@@ -196,7 +197,22 @@ export function createManagedTransportAgentRunDelivery(
       // what the transport used to emit for itself.
       mirror(threadId, { type: "started" })
     }
-    for (const event of toRendererEvents(converter, payload)) mirror(threadId, event)
+    for (const event of toRendererEvents(converter, payload)) {
+      if (event.type === "custom" && event.data.type === "error_detail") {
+        const detail = event.data.detail
+        if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+          errorDetails.set(threadId, detail as Record<string, unknown>)
+        }
+      }
+      if (event.type === "error") {
+        const detail = errorDetails.get(threadId)
+        mirror(threadId, { ...event, ...(detail ? { errorDetail: detail } : {}) })
+        errorDetails.delete(threadId)
+      } else {
+        mirror(threadId, event)
+        if (event.type === "done") errorDetails.delete(threadId)
+      }
+    }
   }
 
   const managedWindow = explainUnsupportedWindowMembers({

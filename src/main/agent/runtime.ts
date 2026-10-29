@@ -1,3 +1,7 @@
+import {
+  withCoordinatorNotificationDelivery,
+  type CoordinatorNotificationDelivery
+} from "./coordinator-notification-delivery"
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
 import { createOpeningReplyReminderMiddleware } from "./opening-reply-reminder"
 import { createRuntimeToolAllowlistMiddleware } from "./runtime-tool-allowlist"
@@ -5024,6 +5028,7 @@ export interface CreateAgentRuntimeOptions {
     suppressNotificationAutoRun?: boolean
   }) => void
   onCoordinatorNotificationAction?: (notificationIds: string[]) => void
+  coordinatorNotificationDelivery?: CoordinatorNotificationDelivery
   /** Renderer user message id that owns this chat turn, used to group hook logs. */
   hookTurnId?: string
   /**
@@ -5273,6 +5278,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onCoordinatorWorkerHookResult,
     onCoordinatorWorkerEvent,
     onCoordinatorNotificationAction,
+    coordinatorNotificationDelivery,
     onWorkflowLaunched,
     backgroundNotificationOwner,
     hookTurnId,
@@ -7593,7 +7599,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     tools: mainTools,
     subagentDefaultTools: workerTools,
     subagents: coordinatorSubagents,
-    checkpointer,
+    checkpointer: coordinatorNotificationDelivery
+      ? withCoordinatorNotificationDelivery(checkpointer, coordinatorNotificationDelivery, () => checkpointer.flushStrict())
+      : checkpointer,
     backend,
     systemPrompt,
     outputStyle,
