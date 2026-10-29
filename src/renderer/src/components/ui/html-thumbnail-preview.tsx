@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Eye, Loader2 } from "lucide-react"
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -24,18 +24,30 @@ export function HtmlThumbnailPreview({
   className?: string
 }): React.JSX.Element {
   const [loading, setLoading] = useState(true)
-  const [showLoading, setShowLoading] = useState(false)
+  const settleTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
     setLoading(true)
-    setShowLoading(false)
-    const showTimer = window.setTimeout(() => setShowLoading(true), 120)
-    const settleTimer = window.setTimeout(() => setLoading(false), 800)
+    if (settleTimerRef.current !== null) {
+      window.clearTimeout(settleTimerRef.current)
+      settleTimerRef.current = null
+    }
     return () => {
-      window.clearTimeout(showTimer)
-      window.clearTimeout(settleTimer)
+      if (settleTimerRef.current !== null) {
+        window.clearTimeout(settleTimerRef.current)
+        settleTimerRef.current = null
+      }
     }
   }, [html])
+
+  const handleLoad = (): void => {
+    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current)
+    // iframe load 只代表文档资源完成，不代表页面脚本已经完成首轮渲染。
+    settleTimerRef.current = window.setTimeout(() => {
+      settleTimerRef.current = null
+      setLoading(false)
+    }, 500)
+  }
 
   const openInBrowser = (): void => {
     openResourcePanelOverlay("browser", {
@@ -48,10 +60,10 @@ export function HtmlThumbnailPreview({
       <iframe
         title={title}
         srcDoc={html}
-        sandbox={fit === "fill" ? "allow-scripts" : ""}
-        loading="lazy"
+        sandbox="allow-scripts"
+        loading={fit === "fill" ? "eager" : "lazy"}
         tabIndex={-1}
-        onLoad={() => setLoading(false)}
+        onLoad={handleLoad}
         onError={() => setLoading(false)}
         className={cn(
           "block border-0 bg-white",
@@ -60,7 +72,7 @@ export function HtmlThumbnailPreview({
             : "pointer-events-none h-[500%] w-[500%] origin-top-left scale-[0.2]"
         )}
       />
-      {loading && showLoading ? (
+      {loading ? (
         <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/90 text-primary backdrop-blur-[1px]">
           <div className="flex items-center gap-2 text-xs font-medium">
             <Loader2 className="size-4 animate-spin" />
