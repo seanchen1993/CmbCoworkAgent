@@ -21,7 +21,7 @@ import {applyThemePreference} from './src/renderer/src/lib/theme-preference';
 window.setFixtureTheme=applyThemePreference;applyThemePreference('cmbdevclaw-white');
 const state=window.fixture={connected:false,available:false,settingsOpened:0,attempts:[],bindings:[],opened:[],mainOpened:0,close:0,lost:true,targets:[],replacements:[],scope:'test-environment'};
 const api={status:async()=>({connected:state.connected,available:state.available,scope:state.scope}),replacementTargets:async(kind)=>state.targets.filter(b=>b.kind===kind),list:async()=>({items:state.bindings,before:null}),
-create:async(botId,kind,operationId,replace)=>{state.attempts.push(operationId);state.replacements.push(replace);if(state.lost){state.lost=false;throw new Error('回包丢失，请重试')}const b={id:'binding-one',botId,kind,label:'测试 Bot',state:'pending',version:1,conversationKey:null,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+600000).toISOString(),instruction:'/绑定Bot abcdefghijklmnopqrstuvwx'};state.bindings=[b];if(replace)state.targets=state.targets.filter(t=>t.id!==replace.bindingId);return b},
+create:async(botId,kind,operationId,replace)=>{state.attempts.push(operationId);state.replacements.push(replace);if(state.lost){state.lost=false;throw new Error('回包丢失，请重试')}const target=replace??(kind==='dm'?state.targets.find(t=>t.kind==='dm'):undefined);const b={id:'binding-one',botId,kind,label:'测试 Bot',state:'pending',version:1,conversationKey:null,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+600000).toISOString(),instruction:'/绑定Bot abcdefghijklmnopqrstuvwx',...(target?{replacedBindingId:target.bindingId??target.id}:{})};state.bindings=[b];if(target)state.targets=state.targets.filter(t=>t.id!==b.replacedBindingId);return b},
 revoke:async()=>{state.bindings=[{...state.bindings[0],state:'revoked',version:2,instruction:undefined}];return state.bindings[0]},
 history:async()=>({items:state.bindings[0]?.state==='active'?[{id:'reply',kind:'bot',text:'这是群内通知的回复',senderId:'Bot',state:'accepted',replyToMessageId:null,createdAt:1,workId:'work-one'}]:[],before:null})};
 createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{hostId:'local',im:api}} bot={{id:'bot',name:'测试 Bot',archived:false}} onOpenSettings={()=>state.settingsOpened++} onClose={()=>state.close++} onOpenWork={id=>state.opened.push(id)} onOpenMain={()=>state.mainOpened++}/>);`
@@ -200,7 +200,7 @@ createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{
       })
       .waitFor()
     assert.equal(await page.getByRole("combobox", { name: "换绑目标" }).count(), 0)
-    // Another binding update after opening is resolved afresh on generation.
+    // Private target resolution belongs to the main process, not renderer metadata.
     await page.evaluate(() => {
       const f = (window as any).fixture
       f.targets = f.targets.map((binding: any) =>
@@ -219,8 +219,8 @@ createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{
     const attempts = await page.evaluate(() => (window as any).fixture.attempts.slice(-2))
     assert.equal(attempts[0], attempts[1])
     assert.deepEqual(await page.evaluate(() => (window as any).fixture.replacements.slice(-2)), [
-      { botId: "old-bot", bindingId: "previous-dm", version: 2 },
-      { botId: "old-bot", bindingId: "previous-dm", version: 2 }
+      undefined,
+      undefined
     ])
     await page.getByRole("radio", { name: "群聊", exact: true }).check()
     await page.getByRole("combobox", { name: "换绑目标" }).waitFor()

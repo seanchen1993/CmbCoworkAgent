@@ -87,42 +87,48 @@ function fixture(
     (error) => errors.push(error)
   )
   const remote = new Map<string, BotImBinding>()
+  const createOperations = new Map<string, string>()
   let sequence = 0
   const client = {
     getStatus: () => ({ principalId: "owner" }) as ReturnType<BotImGatewayClient["getStatus"]>,
     supportsBotChannel: () => true,
     supportsMarkdownReplies: vi.fn(() => false),
-    botBindingCommand: vi.fn<BotImGatewayClient["botBindingCommand"]>(async (command) => {
-      if (command.action === "list")
-        return {
-          items: [...remote.values()].filter((binding) => binding.botId === command.botId),
-          before: null
+    botBindingCommand: vi.fn<BotImGatewayClient["botBindingCommand"]>(
+      async (command, operationId) => {
+        if (command.action === "list")
+          return {
+            items: [...remote.values()].filter((binding) => binding.botId === command.botId),
+            before: null
+          }
+        if (command.action === "revoke") {
+          const result = {
+            ...remote.get(command.bindingId)!,
+            version: command.expectedVersion + 1,
+            state: "revoked" as const
+          }
+          remote.set(result.id, result)
+          return result
         }
-      if (command.action === "revoke") {
-        const result = {
-          ...remote.get(command.bindingId)!,
-          version: command.expectedVersion + 1,
-          state: "revoked" as const
+        const known = operationId && createOperations.get(operationId)
+        if (known) return remote.get(known)!
+        sequence++
+        const binding: BotImBinding = {
+          id: externalBindingId ?? `binding-${sequence}`,
+          botId: command.botId,
+          kind: command.kind,
+          label: command.label,
+          version: 1,
+          state: "pending",
+          conversationKey: null,
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 600000).toISOString(),
+          instruction: "/绑定Bot abcdefghijklmnopqrstuvwx"
         }
-        remote.set(result.id, result)
-        return result
+        remote.set(binding.id, binding)
+        if (operationId) createOperations.set(operationId, binding.id)
+        return binding
       }
-      sequence++
-      const binding: BotImBinding = {
-        id: externalBindingId ?? `binding-${sequence}`,
-        botId: command.botId,
-        kind: command.kind,
-        label: command.label,
-        version: 1,
-        state: "pending",
-        conversationKey: null,
-        createdAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 600000).toISOString(),
-        instruction: "/绑定Bot abcdefghijklmnopqrstuvwx"
-      }
-      remote.set(binding.id, binding)
-      return binding
-    }),
+    ),
     sendAcknowledgement: vi.fn<BotImGatewayClient["sendAcknowledgement"]>(async () => {}),
     acquireBotPermit: vi.fn<BotImGatewayClient["acquireBotPermit"]>(async () => ({
       status: "granted",
@@ -2172,4 +2178,56 @@ it("stops the replaced IM route without stopping a different group", async () =>
   await eventually(() => f.store.getTask(oldTask.id).state === "cancelled")
   expect(f.store.getTask(groupTask.id).state).toBe("running")
   expect(f.store.imGateway.personalBinding(f.bot.id, Date.now())).toBeNull()
+})
+
+it("automatically replaces private bindings after a lost revoke reply and service restart", async () => {
+  const f = fixture(),
+    dm = await f.binding("dm"),
+    group = await f.binding()
+  const next = f.store.create({ name: "Next", instructions: "", color: "#123456", modelRef: null })
+  const original = f.client.botBindingCommand.getMockImplementation()!
+  let lose = true
+  f.client.botBindingCommand.mockImplementation(async (command, operationId) => {
+    const value = await original(command, operationId)
+    if (command.action === "revoke" && lose) {
+      lose = false
+      throw new Error("lost response")
+    }
+    return value
+  })
+  await expect(f.service.create(next.id, "dm", "restart-private")).rejects.toThrow("lost response")
+  const pending = [...f.remote.values()].find((binding) => binding.botId === next.id)!
+  expect(
+    new BotImGatewayStore(f.db).replacement(botImScopeId("realm", "owner", pending.id))
+  ).toEqual({ botId: f.bot.id, bindingId: dm.id, version: dm.version })
+  f.service.stop()
+  const restarted = new BotImChannelService(f.client, "realm", () => f.host)
+  try {
+    const retried = await restarted.create(next.id, "dm", "restart-private")
+    expect(retried).toMatchObject({ id: pending.id, state: "pending", replacedBindingId: dm.id })
+    expect(f.remote.get(dm.id)?.state).toBe("revoked")
+    expect(f.remote.get(group.id)?.state).toBe("active")
+  } finally {
+    restarted.stop()
+  }
+})
+
+it("does not let an old replacement retry revoke a newer private Bot binding", async () => {
+  const f = fixture(),
+    dm = await f.binding("dm")
+  const next = f.store.create({ name: "Next", instructions: "", color: "#123456", modelRef: null })
+  const newest = f.store.create({
+    name: "Newest",
+    instructions: "",
+    color: "#123456",
+    modelRef: null
+  })
+  const pending = await f.service.create(next.id, "dm", "old-attempt")
+  expect(pending.replacedBindingId).toBe(dm.id)
+  const latest = await f.service.create(newest.id, "dm", "new-attempt")
+  f.remote.set(latest.id, { ...latest, state: "active", conversationKey: "newest-private" })
+  await f.service.list(newest.id)
+  await expect(f.service.create(next.id, "dm", "old-attempt")).rejects.toThrow("私聊接入已变化")
+  expect(f.remote.get(latest.id)?.state).toBe("active")
+  expect(f.remote.get(pending.id)?.state).toBe("pending")
 })

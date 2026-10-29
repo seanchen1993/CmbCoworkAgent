@@ -28,6 +28,8 @@ export interface BotImBinding {
   peerLabel?: string
   /** App-only import failure; never part of the gateway protocol. */
   localError?: string
+  /** App-only receipt of automatic replacement, not a gateway protocol field. */
+  replacedBindingId?: string
 }
 export type BotImCommand =
   | { action: "create"; botId: string; kind: "dm" | "group"; label: string }

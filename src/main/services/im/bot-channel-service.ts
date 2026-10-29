@@ -149,15 +149,7 @@ export class BotImChannelService {
       bot = this.getHost().getBot(botId)
     if (bot.archived || bot.deleting) throw new Error("请先恢复 Bot")
     if (replace) {
-      const target = await this.remoteBinding(replace.botId, replace.bindingId)
-      if (
-        target.kind !== kind ||
-        !(
-          (target.state === "active" && target.version === replace.version) ||
-          (target.state === "revoked" && target.version === replace.version + 1)
-        )
-      )
-        throw new Error("原接入已变化，请刷新后重新选择")
+      await this.checkReplacement(kind, replace)
       if (epoch !== this.epoch || principal !== this.identity())
         throw new Error("连接已变化，请刷新绑定")
     }
@@ -167,17 +159,64 @@ export class BotImChannelService {
     )
     if ("items" in value || principal !== this.identity()) throw new Error("IM 身份已变化，请刷新")
     if (epoch !== this.epoch) throw new Error("连接已变化，请刷新绑定")
-    if (replace && value.state !== "active") {
+    if (value.state !== "active" && (kind === "dm" || replace)) {
       // Generate the new proof first so a create failure leaves the old route intact.
       // Retrying uses the same create operation and the gateway's idempotent revoke.
       if (value.state !== "pending" || Date.parse(value.expiresAt) <= Date.now())
         throw new Error("换绑指令已失效，请刷新后重新生成")
+      const host = this.getHost()
       this.register(value, principal)
-      await this.revoke(replace.botId, replace.bindingId, replace.version)
+      const localId = botImScopeId(this.realm, principal, value.id)
+      const saved = host.imGateway.replacement(localId)
+      if (
+        saved &&
+        replace &&
+        (saved.botId !== replace.botId ||
+          saved.bindingId !== replace.bindingId ||
+          saved.version !== replace.version)
+      )
+        throw new Error("同一绑定指令的替换目标已确定，请重新生成指令。")
+      replace = saved ?? replace
+      if (kind === "dm") {
+        // All callers (including retries from older renderers) get the same
+        // replacement behaviour. Never rely on optional renderer metadata.
+        const current = await this.replacementTargets("dm")
+        if (
+          current.length > 1 ||
+          (replace && current.some((binding) => binding.id !== replace!.bindingId))
+        )
+          throw new Error("私聊接入已变化，请重新生成绑定指令。")
+        if (!replace && current[0]) {
+          const binding = current[0]
+          replace = { botId: binding.botId, bindingId: binding.id, version: binding.version }
+        }
+      }
+      if (replace) {
+        await this.checkReplacement(kind, replace)
+        if (epoch !== this.epoch || principal !== this.identity())
+          throw new Error("连接已变化，请刷新绑定")
+        // The generated binding ID is stable across lost replies and restarts.
+        host.imGateway.rememberReplacement(localId, replace)
+        await this.revoke(replace.botId, replace.bindingId, replace.version)
+      }
       if (epoch !== this.epoch || principal !== this.identity())
         throw new Error("连接已变化，请刷新绑定")
     }
-    return this.register(value, principal)
+    return {
+      ...this.register(value, principal),
+      ...(replace && value.state === "pending" ? { replacedBindingId: replace.bindingId } : {})
+    }
+  }
+  private async checkReplacement(kind: "dm" | "group", replace: BotImReplacement): Promise<void> {
+    const target = await this.remoteBinding(replace.botId, replace.bindingId)
+    if (
+      target.kind !== kind ||
+      !(
+        (target.state === "active" && target.version === replace.version) ||
+        (target.state === "revoked" && target.version === replace.version + 1)
+      )
+    )
+      throw new Error("原接入已变化，请重新生成绑定指令。")
   }
   private async remoteBinding(botId: string, bindingId: string): Promise<BotImBinding> {
     this.getHost().getBot(botId)

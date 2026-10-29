@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto"
 import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
-import type { BotImBinding, BotImEvent, BotImConversation } from "../../shared/bots/im-channel"
+import type {
+  BotImBinding,
+  BotImEvent,
+  BotImConversation,
+  BotImReplacement
+} from "../../shared/bots/im-channel"
 import { BotError } from "../../shared/bots/contracts"
 
 export interface StoredBotImEvent {
@@ -27,6 +32,7 @@ export class BotImGatewayStore {
     db.run(`CREATE TABLE IF NOT EXISTS bot_im_routes (
       id TEXT PRIMARY KEY,realm TEXT NOT NULL,principal TEXT NOT NULL,bot_id TEXT NOT NULL,binding_json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS bot_im_routes_owner ON bot_im_routes(realm,principal,bot_id);
+      CREATE TABLE IF NOT EXISTS bot_im_replacements (binding_id TEXT PRIMARY KEY,target_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS bot_im_removed_bindings (binding_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS bot_im_ingress (
       id TEXT PRIMARY KEY,binding_id TEXT NOT NULL,payload_json TEXT NOT NULL,fingerprint TEXT NOT NULL,
@@ -208,6 +214,27 @@ export class BotImGatewayStore {
       [realm, principal]
     ).map((row) => String(row.bot_id))
   }
+  replacement(bindingId: string): BotImReplacement | undefined {
+    const row = this.rows("SELECT target_json FROM bot_im_replacements WHERE binding_id=?", [
+      bindingId
+    ])[0]
+    return row ? JSON.parse(String(row.target_json)) : undefined
+  }
+  rememberReplacement(bindingId: string, target: BotImReplacement): void {
+    const value = JSON.stringify({
+      botId: target.botId,
+      bindingId: target.bindingId,
+      version: target.version
+    })
+    this.db.run("INSERT OR IGNORE INTO bot_im_replacements VALUES(?,?)", [bindingId, value])
+    const saved = this.replacement(bindingId)!
+    if (
+      saved.botId !== target.botId ||
+      saved.bindingId !== target.bindingId ||
+      saved.version !== target.version
+    )
+      throw new BotError("CONFLICT", "同一绑定指令的替换目标已确定，请重新生成指令。")
+  }
   hasRoute(realm: string, principal: string, conversation: string): boolean {
     return (
       this.rows(
@@ -305,6 +332,10 @@ export class BotImGatewayStore {
     )
   }
   removeBot(botId: string): void {
+    this.db.run(
+      "DELETE FROM bot_im_replacements WHERE binding_id IN (SELECT id FROM bot_im_routes WHERE bot_id=?)",
+      [botId]
+    )
     this.db.run(
       "DELETE FROM bot_im_continuations WHERE owner_bot_id=? OR task_id IN (SELECT id FROM bot_tasks WHERE bot_id=?)",
       [botId, botId]

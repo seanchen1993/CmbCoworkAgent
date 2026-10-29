@@ -249,15 +249,9 @@ export function BotImChannelDialog({
   }, [createKey, loadTargets])
   const create = () =>
     action(async () => {
-      let replacement = target
-      if (!retryOperation && kind === "dm" && api.replacementTargets) {
-        // Resolve the current private route at the click, not from a stale dialog
-        // snapshot. The usual generate-and-send flow replaces it automatically.
-        const current = await api.replacementTargets("dm")
-        if (current.length > 1)
-          throw new Error("当前有多个私聊接入，无法确定要替换哪一个。请先检查并撤销多余接入。")
-        replacement = current[0]
-      }
+      // The main process resolves private replacement, including old retry records
+      // that have no target. Only groups require an explicit audience selection.
+      const replacement = kind === "group" ? target : undefined
       const operation = retryOperation ?? {
         operationId: crypto.randomUUID(),
         ...(replacement
@@ -278,9 +272,13 @@ export function BotImChannelDialog({
       localStorage.removeItem(createKey)
       if (live.current) {
         setRetryOperation(null)
-        setTargets((items) => items.filter((item) => item.id !== operation.replace?.bindingId))
+        setTargets((items) =>
+          items.filter(
+            (item) => item.id !== (binding.replacedBindingId ?? operation.replace?.bindingId)
+          )
+        )
         setTargetId("")
-        if (operation.replace)
+        if (binding.replacedBindingId || operation.replace)
           setSwitchNotice(
             kind === "dm"
               ? "原私聊绑定已解除。发送下方指令后连接此 Bot，历史消息与任务保留。"
