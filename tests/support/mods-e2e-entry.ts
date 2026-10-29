@@ -1,0 +1,375 @@
+// Compiled only by CMB_MODS_E2E=1. No IPC handler or production test backdoor.
+import { LocalSandbox } from "../../src/main/agent/local-sandbox"
+import { getModsManager, setModsManager, ModsManager } from "../../src/main/mods/manager"
+import { DEFAULT_MOD_POLICY } from "../../src/main/mods/policy"
+import {
+  claimLocalThreadRunLease,
+  releaseLocalThreadRunLease
+} from "../../src/main/agent/thread-run-lease"
+import { withModToolCall, withScopedModMcp } from "../../src/main/mods/adapters"
+import { upsertMcpConnector, deleteMcpConnector } from "../../src/main/storage"
+import { getGlobalMcpCapabilityService } from "../../src/main/mcp/capability-service"
+import { createEagerMcpTool } from "../../src/main/mcp/langchain-tool"
+import { ModRuntimeClient } from "../../src/main/mods/runtime-client"
+import { ModControlStore } from "../../src/main/mods/control-store"
+import { ModEngine, type ModDispatchRequest } from "../../src/main/mods/engine"
+import { join } from "node:path"
+
+interface Scope {
+  workspace: string
+  threadId: string
+  turnId: string
+}
+const backends = new Map<string, LocalSandbox>()
+const executionScopes = new Map<string, () => void>()
+export function bindExecutionScope(scope: Scope, executionWorkspace: string): void {
+  releaseExecutionScope(scope.threadId)
+  const controller = new AbortController()
+  const instance = getModsManager()!.createRuntimeAuthority({ ...scope, signal: controller.signal })
+  let release = () => {}
+  new LocalSandbox({
+    rootDir: executionWorkspace,
+    modRuntimeAuthority: instance.authority,
+    modWorkspace: scope.workspace,
+    modBlockedToolNames: new Set(["execute"]),
+    runId: scope.threadId,
+    hookTurnId: scope.turnId,
+    windowsSandbox: "none",
+    abortSignal: controller.signal,
+    onModBinding: (dispose) => {
+      release = dispose
+    },
+    worktreeIsolation: {
+      workspaceRoot: executionWorkspace,
+      worktreeRoot: executionWorkspace
+    } as import("../../src/main/agent/workflow/types").WorkflowWorktreeIsolationBoundary
+  })
+  executionScopes.set(scope.threadId, () => {
+    controller.abort()
+    release()
+  })
+}
+export function releaseExecutionScope(threadId: string): void {
+  executionScopes.get(threadId)?.()
+  executionScopes.delete(threadId)
+}
+export async function startFunctionMcpFixture(
+  workspace: string,
+  node: string,
+  server: string
+): Promise<string> {
+  const id = upsertMcpConnector({
+    name: "Mods SDK fixture",
+    kind: "stdio",
+    command: node,
+    args: [server, join(workspace, "mcp-sdk-counter.txt")],
+    enabled: true
+  })
+  await getGlobalMcpCapabilityService().invalidate("function-mcp-fixture")
+  return id
+}
+export async function stopFunctionMcpFixture(id: string): Promise<void> {
+  deleteMcpConnector(id)
+  await getGlobalMcpCapabilityService().invalidate("function-mcp-fixture-done")
+}
+export function removeFunctionMcpConfiguration(id: string): void {
+  // Deliberately retain the cached transport to test the post-approval configuration check.
+  deleteMcpConnector(id)
+}
+
+export function reserveFunctionMcpNamespace(name: string): string {
+  // A name reservation must be detected without trying to launch this nonexistent transport.
+  return upsertMcpConnector({
+    name,
+    kind: "stdio",
+    command: "mods-e2e-must-not-spawn",
+    args: [],
+    enabled: true
+  })
+}
+export async function mcpProbe(scope: Scope, node: string, server: string): Promise<unknown> {
+  const service = getGlobalMcpCapabilityService()
+  const id = upsertMcpConnector({
+    name: "Mods local fixture",
+    kind: "stdio",
+    command: node,
+    args: [server, join(scope.workspace, "mcp-counter.txt")],
+    enabled: true
+  })
+  const callbacks: unknown[] = []
+  try {
+    const tools = await service.listTools()
+    const echo = tools.find((tool) => tool.toolName === "mods_echo")!
+    const disconnect = tools.find((tool) => tool.toolName === "mods_disconnect")!
+    if (!echo || !disconnect) throw Error("Local MCP fixture discovery failed")
+    const direct = await withScopedModMcp(scope, echo, {}, (args) =>
+      service.invoke(echo.capabilityId, args)
+    )
+    const eager = await withModToolCall(
+      scope,
+      { toolCall: { id: "mcp-eager", name: echo.toolId, args: {} } },
+      new Set([echo.toolId]),
+      () =>
+        createEagerMcpTool(service, echo).invoke(
+          { type: "tool_call", id: "mcp-eager", name: echo.toolId, args: {} },
+          {
+            callbacks: [
+              {
+                handleToolEnd: (output) => {
+                  callbacks.push(output)
+                }
+              }
+            ]
+          }
+        )
+    )
+    let lostReply = false
+    try {
+      await withScopedModMcp(scope, disconnect, {}, (args) =>
+        service.invoke(disconnect.capabilityId, args)
+      )
+    } catch {
+      lostReply = true
+    }
+    const audit = getModsManager()!
+      .store.audit(getModsManager()!.workspaceKey(scope.workspace))
+      .filter((row) => row.toolId.startsWith("mcp:"))
+    return { direct, eager, callbacks, lostReply, audit }
+  } finally {
+    deleteMcpConnector(id)
+    await service.close()
+  }
+}
+export function setThreadBusy(threadId: string, busy: boolean): void {
+  if (busy) {
+    if (!claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "mods-e2e-model" }).acquired)
+      throw Error("Thread unexpectedly busy")
+  } else releaseLocalThreadRunLease(threadId, "desktop", "mods-e2e-model")
+}
+export async function finishTurn(threadId: string): Promise<void> {
+  await getModsManager()!.finishTurn(threadId)
+}
+export async function managedPolicyProbe(scope: Scope): Promise<unknown> {
+  const manager = new ModsManager(
+    join(scope.workspace, "managed-policy.sqlite"),
+    () => [],
+    async () => true,
+    () => {},
+    join(__dirname, "mod-host.js"),
+    {
+      ...DEFAULT_MOD_POLICY,
+      required: true,
+      denyTools: ["host:write_file"],
+      redactLiterals: ["corporate-sensitive-fixture"]
+    }
+  )
+  let executions = 0
+  let blocked = false
+  let required = false
+  try {
+    try {
+      manager.configure(scope.workspace, false, false)
+    } catch {
+      required = true
+    }
+    try {
+      await manager.dispatch(scope, "host:write_file", {}, async () => ++executions)
+    } catch {
+      blocked = true
+    }
+    const result = await manager.dispatch(scope, "host:read_file", {}, async () => ({
+      text: "corporate-sensitive-fixture",
+      raw: { value: "corporate-sensitive-fixture" },
+      metadata: { password: "do-not-publish" }
+    }))
+    manager.policy.stop()
+    const rebuilt = await manager.dispatch(
+      scope,
+      "host:read_file",
+      {},
+      async () => "corporate-sensitive-fixture"
+    )
+    return {
+      required,
+      blocked,
+      executions,
+      result,
+      rebuilt,
+      audit: manager.store.audit(manager.workspaceKey(scope.workspace))
+    }
+  } finally {
+    manager.close()
+  }
+}
+export async function runTool(
+  scope: Scope,
+  callId: string,
+  name: string,
+  args: Record<string, unknown>
+): Promise<unknown> {
+  let backend = backends.get(scope.threadId)
+  if (!backend) {
+    backend = new LocalSandbox({
+      rootDir: scope.workspace,
+      runId: scope.threadId,
+      hookTurnId: scope.turnId,
+      windowsSandbox: "none",
+      timeout: 30_000
+    })
+    backends.set(scope.threadId, backend)
+  }
+  return withModToolCall(
+    scope,
+    { toolCall: { id: callId, name, args } },
+    new Set(),
+    async (request) => {
+      const input = request.toolCall.args
+      if (name === "write_file")
+        return backend!.write(String(input.file_path), String(input.content))
+      if (name === "read_file") return backend!.read(String(input.file_path))
+      if (name === "execute") return backend!.execute(String(input.command))
+      throw new Error("Unknown fixture tool")
+    }
+  )
+}
+export async function context(scope: Scope): Promise<string[]> {
+  return getModsManager()!.context(scope)
+}
+export async function benchmark(scope: Scope, iterations = 100): Promise<Record<string, number>> {
+  const times: number[] = []
+  const startRss = process.memoryUsage().rss
+  for (let i = 0; i < iterations; i++) {
+    const start = performance.now()
+    await getModsManager()!.dispatch(
+      scope,
+      "host:fixture_read",
+      { index: i },
+      async () => "benchmark"
+    )
+    times.push(performance.now() - start)
+  }
+  times.sort((a, b) => a - b)
+  return {
+    iterations,
+    medianMs: times[Math.floor(iterations * 0.5)],
+    p95Ms: times[Math.floor(iterations * 0.95)],
+    maxMs: times.at(-1)!,
+    rssDeltaBytes: process.memoryUsage().rss - startRss
+  }
+}
+export function stopRuntime(): void {
+  const manager = getModsManager() as unknown as { clients: Map<string, ModRuntimeClient> }
+  for (const client of manager.clients.values()) client.stop("MODS_TEST_CRASH")
+}
+
+export async function disabledReadBenchmark(scope: Scope, iterations = 500): Promise<unknown> {
+  if (!Number.isSafeInteger(iterations) || iterations < 100 || iterations > 10000)
+    throw new Error("Invalid disabled-read benchmark size")
+  const manager = getModsManager()!
+  if (manager.isActive(scope.workspace)) throw new Error("Expected disabled Mods")
+  const samples = { baseline: [] as number[], disabled: [] as number[] }
+  try {
+    // Interleave order to reduce cache, GC and temperature bias on the same real read path.
+    for (let index = 0; index < iterations + 100; index++) {
+      const arms =
+        index % 2 ? (["disabled", "baseline"] as const) : (["baseline", "disabled"] as const)
+      for (const arm of arms) {
+        setModsManager(arm === "baseline" ? undefined : manager)
+        const start = performance.now()
+        await runTool(scope, `disabled-${index}-${arm}`, "read_file", {
+          file_path: join(scope.workspace, "secret.txt")
+        })
+        if (index >= 100) samples[arm].push(performance.now() - start)
+      }
+    }
+    const result = Object.fromEntries(
+      Object.entries(samples).map(([arm, times]) => {
+        times.sort((a, b) => a - b)
+        return [
+          arm,
+          {
+            iterations: times.length,
+            medianMs: times[Math.floor(iterations / 2)],
+            p95Ms: times[Math.floor(iterations * 0.95)]
+          }
+        ]
+      })
+    )
+    return {
+      ...result,
+      p95ChangePercent: (result.disabled.p95Ms / result.baseline.p95Ms - 1) * 100,
+      comparison: "same production read path, manager absent versus disabled; 100 warmups per arm"
+    }
+  } finally {
+    setModsManager(manager)
+    // Refresh the execution binding after the baseline temporarily omitted the manager.
+    backends.delete(scope.threadId)
+  }
+}
+
+export async function noopBenchmark(scope: Scope): Promise<unknown> {
+  const store = new ModControlStore(join(scope.workspace, "benchmark.sqlite"))
+  const client = new ModRuntimeClient(join(__dirname, "mod-host.js"))
+  const engine = new ModEngine(store, client, () => {})
+  const coldStart = performance.now()
+  try {
+    const grant = store.grant(scope.workspace, "benchmark", "controlled-fixture", true)
+    await engine.load([
+      {
+        grant,
+        compiled: {
+          pluginId: "benchmark",
+          digest: grant.digest,
+          manifest: {
+            apiVersion: "cmb.mods/v1",
+            id: "benchmark",
+            name: "Benchmark",
+            entry: "index.ts",
+            activation: "project",
+            events: ["tool.call"],
+            tools: ["host:fixture_read"],
+            permissions: { readTools: [], writeTools: [], context: [], store: false }
+          },
+          code: 'var __cmbMod={default:{register(on){on.tool({id:"noop",tools:["host:fixture_read"]},async($,e,next)=>{const r=await next({args:e.args});return {kind:"result",receipt:r.receipt,projection:r.projection}})}}}'
+        }
+      }
+    ])
+    const coldMs = performance.now() - coldStart
+    const times: number[] = []
+    let initialRss = 0
+    for (let i = 0; i < 1100; i++) {
+      const request: ModDispatchRequest = {
+        identity: {
+          callId: `bench-${Date.now()}-${i}`,
+          ...scope,
+          agentId: "main",
+          origin: "model",
+          grantEpoch: grant.epoch
+        },
+        toolId: "host:fixture_read",
+        effect: "read",
+        args: { index: i },
+        protectedOutput: false
+      }
+      const start = performance.now()
+      await engine.dispatch(request, async () => "ok")
+      if (i >= 100) times.push(performance.now() - start)
+      if (i === 99) initialRss = client.stats.rssBytes
+    }
+    times.sort((a, b) => a - b)
+    return {
+      iterations: times.length,
+      coldMs,
+      medianMs: times[500],
+      p95Ms: times[950],
+      maxMs: times.at(-1),
+      initialChildRss: initialRss,
+      finalChildRss: client.stats.rssBytes,
+      pendingRequests: client.stats.pending
+    }
+  } finally {
+    await engine.dispose()
+    client.stop()
+    store.close()
+  }
+}

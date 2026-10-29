@@ -15,6 +15,19 @@
  */
 
 import { createHash } from "crypto"
+import { TraceToolUsageCounter } from "./tool-usage"
+import { TraceStageUsageCounter } from "./stage-usage"
+import { TraceStageDuration } from "./stage-duration"
+import {
+  observeHarnessStage,
+  settleHarnessStageObservations
+} from "../../services/harness-stage-attribution"
+import {
+  CALL_STAGE_SETTLE_MS,
+  registerTraceStageUsage,
+  unregisterTraceStageUsage
+} from "./stage-usage-registry"
+import type { TraceCallStage } from "../../../shared/trace-stage-usage"
 import { join } from "path"
 import { homedir } from "os"
 import { lstat, opendir, readFile, rename, rmdir, unlink, writeFile } from "fs/promises"
@@ -40,7 +53,6 @@ import type {
 } from "./types"
 import { NoopTraceReporter, TRACE_OBSERVABILITY_SCHEMA_VERSION } from "./types"
 import { hasSuspectedTechnicalDetailSupplement } from "./technical-detail-supplement"
-import { summarizeTraceCacheTokens } from "./token-usage"
 import { app, safeStorage } from "electron"
 import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
@@ -423,6 +435,9 @@ export interface TraceCollectorOptions extends Partial<TraceObservabilityContext
   triggerSource?: TraceTriggerSource
   harnessFeature?: TraceHarnessFeatureContext
   includeSkillEval?: boolean
+  /** Supplied by the turn entry point; not persisted as another analytics field. */
+  isFirstProjectTurn?: boolean
+  hasExplicitSkill?: boolean
 }
 
 function compactUndefined<T extends Record<string, unknown>>(record: T): T {
@@ -738,10 +753,16 @@ export class TraceCollector {
    * operations dashboard aggregates.
    */
   private observedToolCallCount = 0
+  private readonly toolUsageCounter = new TraceToolUsageCounter()
+  private readonly stageUsageCounter = new TraceStageUsageCounter()
+  private readonly stageDuration: TraceStageDuration | undefined
+  private readonly stopObservingStage: (() => void) | undefined
+  private stageDurationEndedAt: number | undefined
   private observedModelCallCount = 0
   private observedInputTokens = 0
   private observedOutputTokens = 0
   private observedTotalTokens = 0
+  private observedCacheReadTokens = 0
 
   constructor(
     threadId: string,
@@ -751,7 +772,10 @@ export class TraceCollector {
   ) {
     this.traceId = clampText(options.traceId ?? uuid(), 256)
     this.threadId = clampText(threadId, 256)
-    this.suspectedTechnicalDetailSupplement = hasSuspectedTechnicalDetailSupplement(userMessage)
+    this.suspectedTechnicalDetailSupplement = hasSuspectedTechnicalDetailSupplement(userMessage, {
+      isFirstProjectTurn: Boolean(options.harnessFeature && options.isFirstProjectTurn),
+      hasExplicitSkill: options.hasExplicitSkill
+    })
     this.userMessage = clampText(userMessage, 64 * 1024)
     this.modelId = clampText(modelId, 1024)
     this.triggerSource = options.triggerSource ?? "chat"
@@ -770,9 +794,29 @@ export class TraceCollector {
     this.harnessAdapterPromise = this.harnessFeature
       ? getHarnessProjectAdapterSnapshot(this.harnessFeature.projectId).catch(() => null)
       : Promise.resolve(null)
+    if (this.harnessFeature) registerTraceStageUsage(this.traceId, this.stageUsageCounter)
     this.observability = buildObservabilityContext(this.traceId, this.threadId, options)
     this.includeSkillEval = options.includeSkillEval ?? this.observability.traceKind === "root"
     this.startedAt = nowIsoLocal()
+    if (
+      this.harnessFeature &&
+      this.observability.traceKind === "root" &&
+      this.triggerSource === "chat"
+    ) {
+      this.stageDuration = new TraceStageDuration(
+        new Date(this.startedAt).getTime(),
+        this.harnessFeature.nodeName
+      )
+      this.stopObservingStage = observeHarnessStage(
+        this.harnessFeature.projectId,
+        this.harnessFeature.slug,
+        (at, nodeName) => {
+          if (this.stageDurationEndedAt === undefined || at <= this.stageDurationEndedAt) {
+            this.stageDuration?.observe(at, nodeName)
+          }
+        }
+      )
+    }
     this.rootNodeId = `trace:${this.traceId}`
     this.pushNode({
       id: this.rootNodeId,
@@ -1083,16 +1127,28 @@ export class TraceCollector {
       )
     }, 0)
     const metadataToolCallCounts = this.nodes.reduce((sum, node) => {
+      if (["message", "error", "cancel"].includes(node.type)) return sum
       const count = node.metadata?.toolCallCount
       if (typeof count !== "number" || !Number.isFinite(count) || count <= 0) return sum
       return sum + Math.floor(count)
     }, 0)
+    // Child terminal nodes carry the whole run's total, while LLM nodes carry
+    // per-call counts. Adding the two doubles every tool once LLM tracing is on.
+    const terminalToolCallCount = this.nodes.reduce((max, node) => {
+      if (!["message", "error", "cancel"].includes(node.type)) return max
+      const count = node.metadata?.toolCallCount
+      return typeof count === "number" && Number.isFinite(count) && count > 0
+        ? Math.max(max, Math.floor(count))
+        : max
+    }, 0)
     return Math.max(
+      this.toolUsageCounter.totalCalls,
       this.observedToolCallCount,
       stepToolCalls,
       nodeToolCalls,
       metadataToolCalls,
-      metadataToolCallCounts
+      metadataToolCallCounts,
+      terminalToolCallCount
     )
   }
 
@@ -1172,6 +1228,8 @@ export class TraceCollector {
 
   /** Record one LLM run (input context + output message). */
   recordModelCall(call: TraceModelCall): void {
+    if (this.harnessFeature)
+      this.stageUsageCounter.recordModel(call.messageId, call.tokenUsage, call.stageAttribution)
     this.observedModelCallCount += 1
     const usage = call.tokenUsage
     if (usage) {
@@ -1180,11 +1238,13 @@ export class TraceCollector {
       this.observedInputTokens += input
       this.observedOutputTokens += output
       this.observedTotalTokens += usage.totalTokens ?? input + output
+      const cacheRead = usage.cacheReadTokens ?? 0
+      if (Number.isFinite(cacheRead) && cacheRead > 0) this.observedCacheReadTokens += cacheRead
     }
     if (this.modelCalls.length >= TRACE_MAX_MODEL_CALL_SKELETONS) return
-    // Token totals are summed off this array by the dashboard, and per-call
-    // usage is worth keeping on its own. Neither a spent budget nor the
-    // full-entry cap should cost the entry: they cost its messages.
+    // Per-call usage is worth keeping alongside the independent totals.
+    // Neither a spent budget nor the full-entry cap should cost the entry:
+    // they cost its messages.
     if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS || !this.collectionBudget.canAdd(512)) {
       // Only when this turn has an llm node. The conversation view reads
       // assistant text off nodes first, so once nodes hit their cap the same
@@ -1271,6 +1331,8 @@ export class TraceCollector {
   }
 
   addToolNode(params: {
+    /** A pending lookup when the node is added at tool start; the count moves once it lands. */
+    stageAttribution?: TraceCallStage | Promise<TraceCallStage>
     name: string
     input?: unknown
     parentId?: string
@@ -1279,6 +1341,22 @@ export class TraceCollector {
     startedAt?: string
     metadata?: Record<string, unknown>
   }): string {
+    // Record before node caps. Call IDs also dedupe repeated stream snapshots.
+    const usageKey = params.toolCallId
+      ? `call:${params.toolCallId}`
+      : params.llmMessageId
+        ? `message:${params.llmMessageId}:${params.metadata?.index ?? 0}`
+        : `node:${uuid()}`
+    this.toolUsageCounter.observe(usageKey, params.name || "unknown")
+    if (this.harnessFeature) {
+      const stage = params.stageAttribution
+      if (stage instanceof Promise) {
+        this.stageUsageCounter.recordTool(usageKey, params.name || "unknown")
+        this.stageUsageCounter.bindToolLater(usageKey, stage)
+      } else {
+        this.stageUsageCounter.recordTool(usageKey, params.name || "unknown", stage)
+      }
+    }
     if (params.toolCallId) {
       const existing = this.toolNodeByCallId.get(params.toolCallId)
       if (existing) {
@@ -1507,9 +1585,36 @@ export class TraceCollector {
   }
 
   private async finishOnce(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
+    unregisterTraceStageUsage(this.traceId)
     const endedAt = nowIsoLocal()
+    this.stageDurationEndedAt = new Date(endedAt).getTime()
     const durationMs = Date.now() - new Date(this.startedAt).getTime()
+    // Tool stages resolve alongside the tools; give the last few a moment to land.
+    if (this.harnessFeature) await this.stageUsageCounter.settle(CALL_STAGE_SETTLE_MS)
+    if (this.stageDuration && this.harnessFeature) {
+      const settled = await settleHarnessStageObservations(
+        this.harnessFeature.projectId,
+        this.harnessFeature.slug,
+        CALL_STAGE_SETTLE_MS
+      )
+      if (!settled) this.stageDuration.observe(this.stageDurationEndedAt, null)
+    }
+    this.stopObservingStage?.()
+    const stageDuration = this.stageDuration?.snapshot(
+      new Date(this.startedAt).getTime() + durationMs
+    )
     const totalToolCalls = this.getTotalToolCalls()
+    const toolUsage = this.toolUsageCounter.snapshot(totalToolCalls)
+    const stageUsage = this.harnessFeature
+      ? this.stageUsageCounter.snapshot({
+          toolCalls: totalToolCalls,
+          modelCalls: this.observedModelCallCount,
+          inputTokens: this.observedInputTokens,
+          outputTokens: this.observedOutputTokens,
+          totalTokens: this.observedTotalTokens
+        })
+      : undefined
+    if (stageUsage && !toolUsage.toolUsageComplete) stageUsage.stageUsageComplete = false
 
     // Resolve skill versions and merge into "name-version" format
     let skillAuthorByRawName: Record<string, string | undefined> = {}
@@ -1641,10 +1746,8 @@ export class TraceCollector {
       appVersion: getAppVersionForTrace(),
       steps: this.steps,
       modelCalls: this.modelCalls,
-      // Flattened for dashboard aggregation — `sum` cannot reach into the
-      // per-call array above.
-      ...summarizeTraceCacheTokens(this.modelCalls),
-      // Counted as the turn ran, so these stay right past TRACE_MAX_MODEL_CALLS.
+      // Counted as the turn ran, independent of the retained model-call array.
+      cacheReadTokens: this.observedCacheReadTokens,
       totalInputTokens: this.observedInputTokens,
       totalOutputTokens: this.observedOutputTokens,
       totalTokens: this.observedTotalTokens,
@@ -1658,6 +1761,9 @@ export class TraceCollector {
         boundedErrorMessage
       ),
       totalToolCalls,
+      ...toolUsage,
+      ...stageUsage,
+      ...stageDuration,
       outcome,
       ...(boundedErrorMessage ? { errorMessage: boundedErrorMessage } : {}),
       usedSkills: usedSkillsWithVersions,

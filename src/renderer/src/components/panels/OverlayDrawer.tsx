@@ -1,5 +1,10 @@
 import { X } from "lucide-react"
-import { useEffect, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
+
+const DEFAULT_DRAWER_WIDTH = 720
+const MIN_DRAWER_WIDTH = 250
+const MAX_DRAWER_WIDTH = 1600
+const MAX_VIEWPORT_WIDTH_RATIO = 0.9
 
 export interface OverlayDrawerProps {
   open: boolean
@@ -7,7 +12,6 @@ export interface OverlayDrawerProps {
   ariaLabel?: string
   onClose: () => void
   children: ReactNode
-  widthClassName?: string
 }
 
 export function OverlayDrawer({
@@ -15,11 +19,77 @@ export function OverlayDrawer({
   title,
   ariaLabel,
   onClose,
-  children,
-  widthClassName = "w-[min(720px,90vw)]"
+  children
 }: OverlayDrawerProps): React.JSX.Element | null {
   const [present, setPresent] = useState(open)
   const [leaving, setLeaving] = useState(false)
+  const [width, setWidth] = useState(DEFAULT_DRAWER_WIDTH)
+  const dragStartRef = useRef<{ clientX: number; width: number } | null>(null)
+  const suppressBackdropCloseRef = useRef(false)
+
+  const clampWidth = useCallback((nextWidth: number): number => {
+    const viewportMax = Math.max(MIN_DRAWER_WIDTH, window.innerWidth * MAX_VIEWPORT_WIDTH_RATIO)
+    return Math.min(MAX_DRAWER_WIDTH, viewportMax, Math.max(MIN_DRAWER_WIDTH, nextWidth))
+  }, [])
+
+  const handleResizeStart = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      event.preventDefault()
+      event.stopPropagation()
+      suppressBackdropCloseRef.current = true
+      dragStartRef.current = { clientX: event.clientX, width: clampWidth(width) }
+
+      let frame: number | null = null
+      let latestClientX = event.clientX
+
+      const flushResize = (): void => {
+        frame = null
+        const start = dragStartRef.current
+        if (!start) return
+        setWidth(clampWidth(start.width - (latestClientX - start.clientX)))
+      }
+
+      const handleMouseMove = (moveEvent: MouseEvent): void => {
+        latestClientX = moveEvent.clientX
+        if (frame === null) frame = window.requestAnimationFrame(flushResize)
+      }
+
+      const handleMouseUp = (): void => {
+        if (frame !== null) {
+          window.cancelAnimationFrame(frame)
+          flushResize()
+        }
+        dragStartRef.current = null
+        document.removeEventListener("mousemove", handleMouseMove)
+        document.removeEventListener("mouseup", handleMouseUp)
+        document.body.style.cursor = ""
+        document.body.style.userSelect = ""
+        // A drag released over the backdrop can synthesize a click on the
+        // overlay. Keep the guard through that click's event cycle.
+        window.setTimeout(() => {
+          suppressBackdropCloseRef.current = false
+        }, 0)
+      }
+
+      document.addEventListener("mousemove", handleMouseMove)
+      document.addEventListener("mouseup", handleMouseUp)
+      document.body.style.cursor = "col-resize"
+      document.body.style.userSelect = "none"
+    },
+    [clampWidth, width]
+  )
+
+  const handleBackdropClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (suppressBackdropCloseRef.current) {
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
+      onClose()
+    },
+    [onClose]
+  )
 
   useEffect(() => {
     if (open) {
@@ -43,16 +113,27 @@ export function OverlayDrawer({
       role="dialog"
       aria-modal="true"
       aria-label={ariaLabel ?? title}
-      onClick={onClose}
+      onClick={handleBackdropClick}
     >
       <aside
-        className={`flex h-full ${widthClassName} min-w-0 flex-col border-l border-border bg-background-elevated shadow-[-12px_0_32px_rgba(0,0,0,0.14)] motion-reduce:animate-none ${
+        className={`relative flex h-full min-w-0 flex-col border-l border-border bg-background-elevated shadow-[-12px_0_32px_rgba(0,0,0,0.14)] motion-reduce:animate-none ${
           leaving
             ? "animate-out slide-out-to-right-8 duration-150"
             : "animate-in slide-in-from-right-8 duration-200"
         }`}
+        style={{ width: clampWidth(width) }}
         onClick={(event) => event.stopPropagation()}
       >
+        <div
+          role="separator"
+          aria-label="调整右侧面板宽度"
+          aria-orientation="vertical"
+          title="拖动调整右侧面板宽度"
+          onMouseDown={handleResizeStart}
+          className="group absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize select-none"
+        >
+          <div className="absolute inset-y-0 left-1 w-px bg-border transition-colors group-hover:bg-border-emphasis group-active:bg-primary/70" />
+        </div>
         <div className="flex h-10 shrink-0 items-center justify-between border-b border-border/70 px-3">
           <span className="text-sm font-semibold text-foreground">{title}</span>
           <button

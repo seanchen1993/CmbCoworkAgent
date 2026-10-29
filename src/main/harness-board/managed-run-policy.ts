@@ -13,14 +13,12 @@ export interface ManagedRunPolicyEvaluation {
 
 export interface ManagedRunPolicyConfig {
   incompleteStageRetryMode: "adaptive" | ManagedBizRetryMode
-  maxBizRetries: number
   maxProviderRetries: number
   maxContextReuseRatio: number
 }
 
 export const DEFAULT_MANAGED_RUN_POLICY: ManagedRunPolicyConfig = {
   incompleteStageRetryMode: "adaptive",
-  maxBizRetries: 3,
   maxProviderRetries: 3,
   maxContextReuseRatio: 0.9
 }
@@ -102,7 +100,7 @@ function resolveBizRetryMode(input: {
     return {
       retryMode: "new_thread",
       reasonCode: "biz_retry_context_limit",
-      summary: "上下文占用超过复用阈值，使用新会话重新执行当前阶段",
+      summary: "上下文占用超过 90%，建议开启新会话继续",
       rule: "当前阶段尚未结束且上下文占用超过90%时，不复用当前会话，创建新会话重试。"
     }
   }
@@ -110,7 +108,7 @@ function resolveBizRetryMode(input: {
     return {
       retryMode: "new_thread",
       reasonCode: "biz_retry_forced_new_thread",
-      summary: "当前策略要求使用新会话重新执行当前阶段",
+      summary: "建议使用新会话重新执行当前阶段",
       rule: "当前阶段尚未结束且策略配置为新会话模式时，创建新会话重试。"
     }
   }
@@ -118,7 +116,7 @@ function resolveBizRetryMode(input: {
     return {
       retryMode: "reuse_thread",
       reasonCode: "biz_retry_forced_reuse_thread",
-      summary: "当前策略要求复用原会话继续当前任务",
+      summary: "建议在原会话继续当前任务",
       rule: "当前阶段尚未结束且策略配置为复用模式时，在原会话继续当前任务。"
     }
   }
@@ -126,14 +124,14 @@ function resolveBizRetryMode(input: {
     return {
       retryMode: "new_thread",
       reasonCode: "biz_retry_no_progress",
-      summary: "未识别到业务进展，使用新会话重新执行当前阶段",
+      summary: "会话结束但未识别到阶段、状态进展，建议开启新会话重试",
       rule: "当前阶段尚未结束、上下文可复用且执行基线完全不变时，创建新会话重新执行当前阶段。"
     }
   }
   return {
     retryMode: "reuse_thread",
     reasonCode: "biz_retry_progress_detected",
-    summary: "检测到业务进展，复用原会话继续当前任务",
+    summary: "会话结束但当前阶段未完成，建议复用当前会话继续当前任务",
     rule: "当前阶段尚未结束、上下文可复用且执行基线发生变化时，在原会话继续当前任务。"
   }
 }
@@ -250,22 +248,10 @@ export function resolveManagedRunDecision(input: {
         proposedAction: "start_new_thread",
         reasonCode: nodeChanged ? "current_node_changed" : "current_node_completed",
         rule: nodeChanged
-          ? "currentNodeId 变化表示进入新的工作阶段，创建新会话并清零 Biz Retry。"
-          : "当前阶段状态变化为已完成、已归档或已跳过时，创建新会话推进并清零 Biz Retry。"
+          ? "currentNodeId 变化表示进入新的工作阶段，创建新会话。"
+          : "当前阶段状态变化为已完成、已归档或已跳过时，创建新会话推进。"
       },
       summary: nodeChanged ? "当前阶段已经变化，创建新会话继续" : "当前阶段已经结束，创建新会话继续"
-    }
-  }
-
-  if (terminal?.outcome === "success" && run.bizRetryCount >= config.maxBizRetries) {
-    return {
-      policyResult: {
-        type: "biz_retry",
-        proposedAction: "fail_managed_run",
-        reasonCode: "biz_retry_limit_exceeded",
-        rule: "完成三次 Biz Retry 后当前阶段仍未结束时，结束托管运行。"
-      },
-      summary: "当前任务重试超过限制次数"
     }
   }
 

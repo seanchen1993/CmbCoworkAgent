@@ -4,16 +4,15 @@ import {
   Brain,
   ChevronDown,
   ChevronRight,
-  Clock,
   Code2,
   GitBranch,
   HeartPulse,
   Loader2,
   Network,
+  Palette,
   Plug,
   Puzzle,
   Sparkles,
-  ShoppingBag,
   Shield,
   Cpu,
   CircleUser,
@@ -30,17 +29,17 @@ import { cn } from "@/lib/utils"
 
 const SkillsPanel = lazy(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })))
 const GeneralPanel = lazy(() => import("./GeneralPanel").then((m) => ({ default: m.GeneralPanel })))
-const McpPanel = lazy(() => import("./McpPanel").then((m) => ({ default: m.McpPanel })))
-const ScheduledPanel = lazy(() =>
-  import("./ScheduledPanel").then((m) => ({ default: m.ScheduledPanel }))
+const AppearancePanel = lazy(() =>
+  import("./AppearancePanel").then((m) => ({ default: m.AppearancePanel }))
 )
+const McpPanel = lazy(() => import("./McpPanel").then((m) => ({ default: m.McpPanel })))
 const MemoryPanel = lazy(() => import("./MemoryPanel").then((m) => ({ default: m.MemoryPanel })))
 const TaskMmdPanel = lazy(() => import("./TaskMmdPanel").then((m) => ({ default: m.TaskMmdPanel })))
 const HeartbeatPanel = lazy(() =>
   import("./HeartbeatPanel").then((m) => ({ default: m.HeartbeatPanel }))
 )
 const PluginsPanel = lazy(() => import("./PluginsPanel").then((m) => ({ default: m.PluginsPanel })))
-const MarketPanel = lazy(() => import("./MarketPanel").then((m) => ({ default: m.MarketPanel })))
+const ModsPanel = lazy(() => import("./ModsPanel").then((m) => ({ default: m.ModsPanel })))
 const SandboxPanel = lazy(() => import("./SandboxPanel").then((m) => ({ default: m.SandboxPanel })))
 const EvolutionPanel = lazy(() =>
   import("./EvolutionPanel").then((m) => ({ default: m.EvolutionPanel }))
@@ -63,14 +62,14 @@ const ExpertTeamPanel = lazy(() =>
 
 type CustomizeTab =
   | "general"
+  | "appearance"
   | "skills"
   | "connectors"
   | "plugins"
-  | "scheduled"
+  | "mods"
   | "heartbeat"
   | "memory"
   | "taskMmd"
-  | "market"
   | "sandbox"
   | "evolution"
   | "robot"
@@ -102,11 +101,11 @@ const MENU_GROUPS: MenuGroup[] = [
     label: "基础功能",
     items: [
       { tab: "general", label: "通用", icon: Settings2 },
+      { tab: "appearance", label: "外观", icon: Palette },
       { tab: "skills", label: "技能", icon: Sparkles },
       { tab: "connectors", label: "MCP 连接器", icon: Plug },
       { tab: "plugins", label: "插件", icon: Puzzle },
-      { tab: "scheduled", label: "定时任务", icon: Clock },
-      { tab: "market", label: "应用市场", icon: ShoppingBag },
+      { tab: "mods", label: "Function Mods", icon: Webhook },
       { tab: "sandbox", label: "沙盒环境", icon: Shield }
     ]
   },
@@ -166,8 +165,7 @@ export function CustomizeView(): React.JSX.Element {
     pendingEvolution,
     currentThreadId,
     threads
-  } =
-    useAppStore()
+  } = useAppStore()
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
     customizeInitialTab === "commitPolicy"
       ? "skills"
@@ -235,11 +233,12 @@ export function CustomizeView(): React.JSX.Element {
             variant="ghost"
             size="sm"
             className="h-7 w-9 p-0"
+            aria-label="返回应用"
             onClick={() => setShowCustomizeView(false)}
           >
             <ArrowLeft className="size-6" strokeWidth={1} />
           </Button>
-          <span className="text-base font-bold">自定义</span>
+          <span className="text-base font-bold">返回应用</span>
         </div>
         <nav className="min-h-0 flex-1 px-3 pb-3 space-y-3 overflow-y-auto">
           {MENU_GROUPS.map((group) => {
@@ -278,22 +277,26 @@ export function CustomizeView(): React.JSX.Element {
       <Suspense fallback={<CustomizePanelFallback />}>
         {activeTab === "general" ? (
           <GeneralPanel targetSection={customizeInitialSection} />
+        ) : activeTab === "appearance" ? (
+          <AppearancePanel />
         ) : activeTab === "skills" ? (
           <SkillsPanel />
         ) : activeTab === "connectors" ? (
           <McpPanel />
         ) : activeTab === "plugins" ? (
-          <PluginsPanel />
-        ) : activeTab === "scheduled" ? (
-          <ScheduledPanel />
+          <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
+            <PluginsPanel />
+          </div>
+        ) : activeTab === "mods" ? (
+          <div className="flex flex-1 min-w-0 min-h-0 overflow-y-auto">
+            <ModsPanel threadId={currentThreadId} />
+          </div>
         ) : activeTab === "heartbeat" ? (
           <HeartbeatPanel />
         ) : activeTab === "memory" ? (
           <MemoryPanel workspacePath={currentWorkspacePath} />
         ) : activeTab === "taskMmd" ? (
           <TaskMmdPanel currentThreadId={currentThreadId} threads={threads} />
-        ) : activeTab === "market" ? (
-          <MarketPanel />
         ) : activeTab === "evolution" ? (
           <EvolutionPanel />
         ) : activeTab === "robot" ? (

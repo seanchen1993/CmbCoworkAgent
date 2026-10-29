@@ -1,23 +1,29 @@
+import type { ManagedHumanGateDecisionInput, ManagedHumanGateConflictInput } from "./notification-operation-types"
+import { registerNotificationActions } from "../services/notification-actions"
+import { harnessNotifications } from "./notifications"
 import { randomUUID } from "crypto"
-import { BrowserWindow } from "electron"
 import { AsyncKeyedLock } from "../ipc/async-keyed-lock"
 import { HookHaltError } from "../hooks/halt"
 import { trackEvent } from "../services/event-reporter"
-import { imHumanGateService } from "../services/im/human-gate-service"
+import { projectHumanGate } from "../../shared/harness-notifications"
 import type {
-  HarnessHumanGateChangedEvent,
   HarnessHumanGateDecisionInput,
   HarnessHumanGateSnapshot
 } from "../../shared/harness-board-types"
 import { managedRunStore } from "./managed-run-store"
-import {
-  formatGmt8Timestamp,
-  getHarnessFeatureBinding,
-  listHarnessHumanGates,
-  setHarnessHumanGate
-} from "./service"
+import { getHarnessFeatureBinding } from "./service"
+import { formatGmt8Timestamp } from "../../shared/gmt8-time"
 
-export const HUMAN_GATE_CHANGED_CHANNEL = "harnessBoard:humanGateChanged"
+interface HumanGateOperations {
+  recordDecision: (input: ManagedHumanGateDecisionInput) => Promise<boolean>
+  failConflict: (input: ManagedHumanGateConflictInput) => Promise<boolean>
+}
+let operations: HumanGateOperations | undefined
+function getOperations(): HumanGateOperations {
+  if (!operations) throw new Error("Human Gate source is not initialized")
+  return operations
+}
+
 const HUMAN_GATE_CONFLICT_MESSAGE = "该 Feature 已有待确认操作，不允许并行推进状态"
 const MESSAGE_MAX_LENGTH = 2_000
 
@@ -50,22 +56,6 @@ const activeGates = new Map<string, ActiveGate>()
 
 function featureKey(projectId: string, featureId: string): string {
   return `${projectId}\u0000${featureId}`
-}
-
-function publishHumanGateChanged(
-  gate: HarnessHumanGateSnapshot,
-  humanGate?: HarnessHumanGateSnapshot
-): void {
-  const event: HarnessHumanGateChangedEvent = {
-    projectId: gate.projectId,
-    featureId: gate.featureId,
-    sourceThreadId: gate.sourceThreadId,
-    ...(humanGate ? { humanGate } : {})
-  }
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (window.isDestroyed() || window.webContents.isDestroyed()) continue
-    window.webContents.send(HUMAN_GATE_CHANGED_CHANNEL, event)
-  }
 }
 
 function recordHumanGateEvent(
@@ -161,7 +151,10 @@ export async function requestHumanGate(input: HumanGateRequestInput): Promise<Hu
   await featureLocks.withKey(key, async () => {
     const existing =
       activeGates.get(key) ??
-      (await getHarnessFeatureBinding(input.projectId, input.featureId))?.humanGate
+      projectHumanGate(harnessNotifications.pending().find(
+        (value) => value.type === "human_gate" &&
+          value.projectId === input.projectId && value.featureId === input.featureId
+      ))
     if (existing) {
       const conflictGate = "gate" in existing ? existing.gate : existing
       const conflict = {
@@ -174,8 +167,7 @@ export async function requestHumanGate(input: HumanGateRequestInput): Promise<Hu
       }
       recordHumanGateEvent("human_gate_conflict", conflict, "human_gate_conflict")
       if (conflict.sourceManagedRunId) {
-        const { failManagedRunForHumanGateConflict } = await import("./auto-mode-controller")
-        await failManagedRunForHumanGateConflict({
+        await getOperations().failConflict({
           gateId: conflict.gateId,
           projectId: conflict.projectId,
           featureId: conflict.featureId,
@@ -208,18 +200,28 @@ export async function requestHumanGate(input: HumanGateRequestInput): Promise<Hu
       resolve: resolveDecision,
       runtimeThreadId: input.runtimeThreadId
     }
-    await setHarnessHumanGate(input.projectId, input.featureId, gate)
+    harnessNotifications.create({
+      notificationId: gate.gateId,
+      kind: "decision",
+      type: "human_gate",
+      projectId: gate.projectId,
+      featureId: gate.featureId,
+      sourceThreadId: gate.sourceThreadId,
+      runId: gate.sourceManagedRunId,
+      title: "Human Gate 需要人工确认",
+      message: gate.message,
+      humanGate: { hookId: gate.hookId },
+      nodeId: gate.sourceManagedRunId ? managedRunStore.getRun({ projectId: gate.projectId, featureId: gate.featureId, runId: gate.sourceManagedRunId }).snapshot?.decisionBaseline?.nodeId : undefined,
+      targets: ["app_view", "im", "system_notification"],
+      policyResult: { type: "human_gate", reasonCode: "human_gate_requested" }
+    })
     activeGates.set(key, active)
     recordHumanGateEvent("human_gate_requested", gate)
-    publishHumanGateChanged(gate, gate)
-    await imHumanGateService.publish(gate).catch((error) => {
-      console.warn("[HumanGate] Failed to publish IM decision request:", error)
-    })
 
     const onAbort = (): void => {
       void rejectHumanGate(
         { projectId: gate.projectId, featureId: gate.featureId, gateId: gate.gateId },
-        "human_gate_rejected",
+        "source_run_aborted",
         "system"
       ).catch((error) => console.warn("[HumanGate] Failed to reject aborted Gate:", error))
     }
@@ -245,22 +247,31 @@ export async function approveHumanGate(
   let approvedGate: HarnessHumanGateSnapshot | undefined
   let approvedActive: ActiveGate | undefined
   const result = await featureLocks.withKey(key, async () => {
+    const notification = harnessNotifications.get(input.gateId)
+    if (channel === "im" && notification?.disabledTargets?.im) return false
     const active = activeGates.get(key)
-    const persisted = (await getHarnessFeatureBinding(input.projectId, input.featureId))?.humanGate
+    const persisted = projectHumanGate(notification)
+    if (persisted?.projectId !== input.projectId || persisted.featureId !== input.featureId) return false
     if (!active || active.state !== "pending" || persisted?.gateId !== input.gateId) return false
+    if (
+      !harnessNotifications.finish(input.gateId, {
+        status: "resolved",
+        action: "approve",
+        channel,
+        reasonCode: "human_gate_approved",
+        result: "Human Gate 已批准"
+      })
+    )
+      return false
     active.state = "approved"
     approvedGate = active.gate
     approvedActive = active
     recordHumanGateEvent("human_gate_approved", active.gate)
-    await setHarnessHumanGate(input.projectId, input.featureId, undefined)
-    publishHumanGateChanged(active.gate)
-    imHumanGateService.removeGate(active.gate.gateId)
     return true
   })
   try {
     if (result && approvedGate?.sourceManagedRunId) {
-      const { recordManagedHumanGateDecision } = await import("./auto-mode-controller")
-      await recordManagedHumanGateDecision({
+      await getOperations().recordDecision({
         gateId: approvedGate.gateId,
         projectId: approvedGate.projectId,
         featureId: approvedGate.featureId,
@@ -280,29 +291,36 @@ export async function approveHumanGate(
 
 export async function rejectHumanGate(
   input: HarnessHumanGateDecisionInput,
-  reasonCode: "human_gate_rejected" | "app_closed_during_human_gate" = "human_gate_rejected",
+  reasonCode: "human_gate_rejected" | "source_run_aborted" = "human_gate_rejected",
   channel: "desktop" | "im" | "system" = "desktop"
 ): Promise<boolean> {
   const key = featureKey(input.projectId, input.featureId)
   let rejectedGate: HarnessHumanGateSnapshot | undefined
   let rejectedActive: ActiveGate | undefined
   const result = await featureLocks.withKey(key, async () => {
+    const notification = harnessNotifications.get(input.gateId)
+    if (channel === "im" && notification?.disabledTargets?.im) return false
     const active = activeGates.get(key)
-    const persisted = (await getHarnessFeatureBinding(input.projectId, input.featureId))?.humanGate
+    const persisted = projectHumanGate(notification)
+    if (persisted?.projectId !== input.projectId || persisted.featureId !== input.featureId) return false
     if (persisted?.gateId !== input.gateId) return false
     rejectedGate = persisted
     rejectedActive = active
     recordHumanGateEvent("human_gate_rejected", persisted, reasonCode, false)
-    await setHarnessHumanGate(input.projectId, input.featureId, undefined)
+    const finished = harnessNotifications.finish(input.gateId, {
+      status: channel === "system" ? "invalidated" : "resolved",
+      action: "reject",
+      channel,
+      reasonCode: channel === "system" ? "source_run_aborted" : "human_gate_rejected",
+      result: channel === "system" ? "来源执行已中断，Human Gate 已结束" : "Human Gate 已拒绝"
+    })
+    if (!finished) return false
     activeGates.delete(key)
-    imHumanGateService.removeGate(persisted.gateId)
-    publishHumanGateChanged(persisted)
     return true
   })
   try {
     if (result && rejectedGate?.sourceManagedRunId) {
-      const { recordManagedHumanGateDecision } = await import("./auto-mode-controller")
-      await recordManagedHumanGateDecision({
+      await getOperations().recordDecision({
         gateId: rejectedGate.gateId,
         projectId: rejectedGate.projectId,
         featureId: rejectedGate.featureId,
@@ -321,12 +339,6 @@ export async function rejectHumanGate(
   return result
 }
 
-export async function getHumanGateForThread(
-  threadId: string
-): Promise<HarnessHumanGateSnapshot | undefined> {
-  return (await listHarnessHumanGates()).find((gate) => gate.sourceThreadId === threadId)
-}
-
 export function listPendingHumanGateRuntimeThreadIds(): string[] {
   return [...activeGates.values()]
     .filter((active) => active.state === "pending")
@@ -341,9 +353,33 @@ export function hasPendingHumanGateForThread(threadId: string): boolean {
   )
 }
 
-export async function recoverHumanGatesAtStartup(): Promise<void> {
-  imHumanGateService.clear()
-  for (const gate of await listHarnessHumanGates()) {
-    await rejectHumanGate(gate, "app_closed_during_human_gate", "system")
+export function interruptHumanGatesForRun(runId: string): void {
+  for (const [key, active] of activeGates) {
+    if (active.gate.sourceManagedRunId !== runId || active.state !== "pending") continue
+    harnessNotifications.finish(active.gate.gateId, {
+      status: "invalidated",
+      channel: "system",
+      reasonCode: "managed_run_ended",
+      result: "托管运行已结束，Human Gate 中断"
+    })
+    activeGates.delete(key)
+    active.resolve("reject")
   }
+}
+
+let initialized = false
+export function initializeHumanGateSource(callbacks: HumanGateOperations): void {
+  if (initialized) return
+  initialized = true
+  operations = callbacks
+  registerNotificationActions("human_gate", async (notification, input, origin) => {
+    const gate = projectHumanGate(notification)
+    if (!gate || (input.action !== "approve" && input.action !== "reject")) {
+      return { applied: false, message: "Human Gate 操作无效。" }
+    }
+    const applied = input.action === "approve"
+      ? await approveHumanGate(gate, origin.channel)
+      : await rejectHumanGate(gate, "human_gate_rejected", origin.channel)
+    return { applied, message: applied ? "Human Gate 已处理。" : "该决策已处理或已失效。" }
+  })
 }

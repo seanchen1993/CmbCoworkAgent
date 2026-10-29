@@ -22,6 +22,20 @@ interface MarkdownPreviewProps {
   readBinaryFile?: (resolvedPath: string) => Promise<string | null>
 }
 
+/**
+ * 仅完整地址（http/https/mailto）允许跳转。
+ * 相对路径、盘符路径（D:/）、锚点等非完整地址一律不跳转。
+ */
+function isExternalHref(href: string | undefined): href is string {
+  if (!href) return false
+  try {
+    const url = new URL(href)
+    return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "mailto:"
+  } catch {
+    return false
+  }
+}
+
 // Hoisted to module scope so prop identities stay stable across renders.
 // Wide tables must scroll horizontally instead of overflowing the preview
 // (same treatment as StreamingMarkdown / DashboardAnalysisMarkdown).
@@ -33,6 +47,16 @@ const MARKDOWN_COMPONENTS: Components = {
       <div className="streaming-markdown-table-wrap">
         <table {...props}>{children}</table>
       </div>
+    )
+  },
+  // 非完整地址不渲染成链接，避免点击后触发同窗口默认跳转。
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  a({ node: _node, href, children, ...props }) {
+    if (!isExternalHref(href)) return <span {...props}>{children}</span>
+    return (
+      <a href={href} {...props}>
+        {children}
+      </a>
     )
   }
 }

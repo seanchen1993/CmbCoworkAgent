@@ -1,3 +1,7 @@
+import { getCapturedSubagentSession, subagentExportKey } from "../services/subagent-session-capture"
+import type { SubagentExportTarget as ExportScope } from "../../shared/subagent-session-export"
+import { formatHookDateTime } from "../../shared/hook-time"
+import { extractVisibleReasoning } from "../../shared/model-reasoning"
 import { IpcMain, BrowserWindow, dialog, type IpcMainInvokeEvent } from "electron"
 import { constants as fsConstants } from "fs"
 import { copyFile, lstat, mkdir } from "fs/promises"
@@ -7,10 +11,12 @@ import { v4 as uuid } from "uuid"
 import {
   copyThreadSubagentManifestRowsPage,
   getThreadCore,
+  getDb,
   getThreadHydrationCore,
   getThreadValuesJson,
   getThreadValuesJsonPage,
   getThreadMessages,
+  getThreadMessageCount,
   getThreadMessageIdentityContext,
   getThreadMessagesAfterAnyId,
   getThreadMessagesByIds,
@@ -36,6 +42,7 @@ import {
   mergeThreadValues as dbMergeThreadValues,
   replaceThreadMessageId,
   upsertThreadMessages,
+  applyThreadMessageStreamAuthority,
   deleteThread as dbDeleteThread,
   type ThreadRow
 } from "../db"
@@ -97,6 +104,8 @@ import {
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { stopWatching } from "../services/workspace-watcher"
+import { assertThreadDeletionWorkspace, isThreadDeletionBusy } from "./thread-deletion-busy"
+import { checkpointWalInBackground } from "../db/wal-checkpoint"
 import { isExternallyManagedThreadRunBusy } from "../services/thread-external-run-busy"
 import { threadMetadataMatchesGroupSelector } from "../services/thread-group-selector"
 import type {
@@ -244,6 +253,7 @@ interface ExportMessage {
   id: string
   role: ExportMessageRole
   content: string
+  reasoning?: string
   truncated?: boolean
   attachments: ExportAttachment[]
   toolCalls?: ExportToolCall[]
@@ -611,7 +621,11 @@ async function copyForkedThreadMessages(input: {
     if (messages.length > 0) {
       // Batches are inserted in visible order, so no target-lifetime baseline
       // is needed to preserve ordering between batches.
-      upsertThreadMessages(input.targetThreadId, messages, { preserveExistingOrder: true })
+      upsertThreadMessages(
+        input.targetThreadId,
+        applyThreadMessageStreamAuthority(input.sourceThreadId, messages),
+        { preserveExistingOrder: true }
+      )
     }
     await yieldForkColdPath()
   }
@@ -2521,7 +2535,10 @@ function truncateValue(value: string, limit: number): { value: string; truncated
   return { value: `${value.slice(0, limit)}\n...[truncated]`, truncated: true }
 }
 
-function buildExportToolCalls(toolCalls: CheckpointMessage["tool_calls"]): ExportToolCall[] {
+function buildExportToolCalls(
+  toolCalls: CheckpointMessage["tool_calls"],
+  complete = false
+): ExportToolCall[] {
   if (!Array.isArray(toolCalls)) return []
 
   return toolCalls.flatMap((toolCall): ExportToolCall[] => {
@@ -2529,7 +2546,9 @@ function buildExportToolCalls(toolCalls: CheckpointMessage["tool_calls"]): Expor
     if (!name) return []
 
     const serializedArgs = stringifyToolArgs(toolCall.args)
-    const truncated = truncateValue(serializedArgs, TOOL_CALL_ARGS_LIMIT)
+    const truncated = complete
+      ? { value: serializedArgs, truncated: false }
+      : truncateValue(serializedArgs, TOOL_CALL_ARGS_LIMIT)
 
     return [
       {
@@ -2564,6 +2583,7 @@ function formatMarkdown(payload: ExportPayload): string {
   for (const message of payload.messages) {
     if (
       !message.content.trim() &&
+      !message.reasoning &&
       message.attachments.length === 0 &&
       (!message.toolCalls || message.toolCalls.length === 0)
     ) {
@@ -2589,6 +2609,7 @@ function formatMarkdown(payload: ExportPayload): string {
         ""
       )
     }
+    if (message.reasoning) lines.push("### Reasoning", "", message.reasoning, "")
     if (message.content.trim()) {
       lines.push(message.content.trim(), "")
     }
@@ -2618,7 +2639,10 @@ async function getLatestCheckpoint(threadId: string): Promise<ThreadCheckpoint |
   })
 }
 
-function buildExportMessages(messages: CheckpointMessage[] | undefined): ExportMessage[] {
+function buildExportMessages(
+  messages: CheckpointMessage[] | undefined,
+  complete = false
+): ExportMessage[] {
   if (!Array.isArray(messages)) return []
 
   return messages.flatMap((msg, index): ExportMessage[] => {
@@ -2628,16 +2652,24 @@ function buildExportMessages(messages: CheckpointMessage[] | undefined): ExportM
     const rawContent = stringifyContent(getCheckpointMessageTranscriptContent(msg, role))
     // Drop the new workflow notification plumbing from the export. Coordinator
     // plumbing is intentionally left as-is (HEAD behavior) — see helper note.
-    if (isWorkflowPlumbingTranscriptContent(rawContent)) return []
+    if (!complete && isWorkflowPlumbingTranscriptContent(rawContent)) return []
     const { content, attachments } = sanitizeAttachmentContent(rawContent)
     const exportedContent =
-      role === "tool"
+      role === "tool" && !complete
         ? truncateValue(content, TOOL_RESULT_CONTENT_LIMIT)
         : { value: content, truncated: false }
-    const toolCalls = buildExportToolCalls(getCheckpointMessageToolCalls(msg))
+    const reasoning = complete
+      ? extractVisibleReasoning(getCheckpointMessageAdditionalKwargs(msg))
+      : ""
+    const toolCalls = buildExportToolCalls(getCheckpointMessageToolCalls(msg), complete)
     const toolCallNames = toolCalls.map((toolCall) => toolCall.name)
 
-    if (!exportedContent.value.trim() && attachments.length === 0 && toolCalls.length === 0) {
+    if (
+      !reasoning &&
+      !exportedContent.value.trim() &&
+      attachments.length === 0 &&
+      toolCalls.length === 0
+    ) {
       return []
     }
 
@@ -2646,6 +2678,7 @@ function buildExportMessages(messages: CheckpointMessage[] | undefined): ExportM
         id: getCheckpointMessageId(msg, index),
         role,
         content: exportedContent.value,
+        ...(reasoning ? { reasoning } : {}),
         ...(exportedContent.truncated ? { truncated: true } : {}),
         attachments,
         ...(toolCalls.length > 0 ? { toolCalls, toolCallNames } : {}),
@@ -3392,7 +3425,10 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
                   isSubagentTranscriptBlobRef(incomingRecord?.content_ref, "content") ||
                   isSubagentTranscriptBlobRef(incomingRecord?.reasoning_ref, "reasoning")
                 const preserveTextJournal =
-                  hasTextDelta || (hasDurableTextJournal && carriesProjectedTextRef)
+                  hasTextDelta ||
+                  (hasDurableTextJournal &&
+                    (carriesProjectedTextRef ||
+                      Array.isArray(incomingRecord?.subagent_text_snapshots)))
                 if (preserveTextJournal) {
                   const previousReferenceHashKey = getThreadSubagentManifestBlobReferenceHashes(
                     threadId,
@@ -3550,6 +3586,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     // After dbDeleteThread succeeds the thread is gone for good and the
     // tombstone must stay, whatever the later best-effort cleanups do.
     let workspacePath: string | undefined
+    let deletionCheckpoint: Promise<void> | undefined
     try {
       // Fallback workspace capture BEFORE cancelAndWait (which settles and
       // removes the active entry): if the thread's metadata lost its
@@ -3701,7 +3738,14 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
       // Delete from our metadata store — the point of no return.
       const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(threadId)
-      dbDeleteThread(threadId)
+      if (getThreadMessageCount(threadId) >= 1_000) {
+        getDb().withoutAutomaticCheckpoint(() => dbDeleteThread(threadId))
+        deletionCheckpoint = checkpointWalInBackground(getDbPath())
+      } else {
+        // Avoid a worker startup per item in batches of empty/small tasks.
+        dbDeleteThread(threadId)
+      }
+      getModsManager()?.closeFunctionThread(threadId)
       clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)
       forgetLegacySubagentTranscriptMigration(threadId)
       // Detach the deleted task from its shared physical workspace watcher so
@@ -3829,6 +3873,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     // walking/stat/removal stay outside the global write lock; only an
     // epoch-checked batch of canonical->quarantine renames holds it.
     scheduleTranscriptBlobGc()
+    await deletionCheckpoint
   }
 
   ipcMain.handle(
@@ -3843,35 +3888,39 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       cancelSubagentTranscriptStartupRead(threadId)
       cancelLegacyCheckpointTranscriptBootstrap(threadId)
       return withThreadMutationLeaseLock(lease, async (threadRow) => {
-        let metadata: Record<string, unknown> | null = null
-        if (options?.groupGuard || options?.requireIdle) {
-          try {
-            const parsed = threadRow.metadata ? (JSON.parse(threadRow.metadata) as unknown) : {}
-            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-              throw new Error("Thread metadata is not an object")
-            }
-            metadata = parsed as Record<string, unknown>
-          } catch {
-            // Malformed metadata is not safe to treat as idle for bulk deletion.
-            throw new Error("会话元数据异常，无法确认运行状态，请单独处理该会话。")
+        let metadata: Record<string, unknown>
+        try {
+          const parsed = threadRow.metadata ? (JSON.parse(threadRow.metadata) as unknown) : {}
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            throw new Error("Thread metadata is not an object")
           }
+          metadata = parsed as Record<string, unknown>
+        } catch {
+          throw new Error("会话元数据异常，无法确认删除条件，请修复后重试。")
         }
+        // Check before teardown: without a workspace the durable worktree guards
+        // below cannot prove that deleting a cold workflow/coordinator is safe.
+        // Apply this to individual deletion too, so retry cannot bypass protection.
+        assertThreadDeletionWorkspace(getAgentModeFromMetadata(metadata), metadata.workspacePath)
         if (
           options?.groupGuard &&
           (!matchesThreadIncarnation(threadRow, options.groupGuard.incarnation) ||
-            !threadMetadataMatchesGroupSelector(metadata!, options.groupGuard.selector))
+            !threadMetadataMatchesGroupSelector(metadata, options.groupGuard.selector))
         ) {
           throw new Error("会话已变更或已移出分组，请重新确认。")
         }
         if (options?.requireIdle) {
-          const workspacePath =
-            typeof metadata!.workspacePath === "string" ? metadata!.workspacePath : null
-          const agentMode = getAgentModeFromMetadata(metadata!)
           if (
-            isExternallyManagedThreadRunBusy(threadId, metadata!) ||
-            (await isThreadForkBusy({ threadId, workspacePath, agentMode }))
+            await isThreadDeletionBusy(threadId, {
+              hasActiveRun: hasActiveAgentRun,
+              isAborting: isActiveAgentRunAborting,
+              waitForSettlement: waitForActiveAgentRunToSettle,
+              hasExternalRun: (id) => isExternallyManagedThreadRunBusy(id, metadata),
+              hasWorkflowRun: (id) => workflowRunManager.isActive(id),
+              hasWorkerRun: (id) => coordinatorWorkerManager.hasRunningWorkersForThread(id)
+            })
           ) {
-            throw new Error("会话仍在运行或有待处理结果，已停止批量删除。")
+            throw new Error("会话仍在运行，已跳过该会话。")
           }
         }
         while (deletingThreads.has(threadId)) {
@@ -3999,18 +4048,30 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  ipcMain.handle("threads:exportSession", async (event, threadId: string) => {
+  ipcMain.handle("threads:exportSession", async (event, threadId: string, target?: ExportScope) => {
     try {
       const row = getThreadCore(threadId)
       if (!row) return { success: false, error: "Thread not found" }
-
-      const latestCheckpoint = await getLatestCheckpoint(threadId)
-      const messages = buildExportMessagesFromThreadMessages(
-        mergeCheckpointAndPersistedThreadMessagesForSession(
-          latestCheckpoint?.checkpoint,
-          getThreadMessages(threadId)
-        )
-      )
+      if (
+        target &&
+        (target.threadId !== threadId || !["multi", "workflow"].includes(target.kind))
+      ) {
+        return { success: false, error: "无效的子代理导出目标" }
+      }
+      const captured = target ? getCapturedSubagentSession(target) : null
+      if (target && !captured) {
+        return { success: false, error: "该子代理会话已不在内存中，无法导出" }
+      }
+      const rawApiCall = captured?.rawApiCall ?? getCapturedRawApiCall(threadId)
+      const latestCheckpoint = target ? null : await getLatestCheckpoint(threadId)
+      const messages = captured
+        ? buildExportMessages(captured.messages as CheckpointMessage[], true)
+        : buildExportMessagesFromThreadMessages(
+            mergeCheckpointAndPersistedThreadMessagesForSession(
+              latestCheckpoint?.checkpoint,
+              getThreadMessages(threadId)
+            )
+          )
 
       if (messages.length === 0) {
         return { success: false, error: "暂无可导出的消息" }
@@ -4022,16 +4083,19 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           ? metadata.workspacePath
           : null
       const title =
-        row.title || (typeof metadata?.title === "string" ? metadata.title : "") || row.thread_id
-      const exportedAt = new Date().toISOString()
+        captured?.title ||
+        row.title ||
+        (typeof metadata?.title === "string" ? metadata.title : "") ||
+        row.thread_id
+      const exportedAt = formatHookDateTime(Date.now())!
       const payload: ExportPayload = {
         version: 1,
         exportedAt,
         thread: {
-          threadId,
+          threadId: target ? subagentExportKey(target) : threadId,
           title,
-          createdAt: toIsoString(row.created_at),
-          updatedAt: toIsoString(row.updated_at),
+          createdAt: captured?.createdAt ?? formatHookDateTime(toIsoString(row.created_at))!,
+          updatedAt: captured?.updatedAt ?? formatHookDateTime(toIsoString(row.updated_at))!,
           workspacePath
         },
         messages
@@ -4052,7 +4116,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       const zip = new AdmZip()
       zip.addFile("session.md", Buffer.from(formatMarkdown(payload), "utf-8"))
       zip.addFile("session.json", Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, "utf-8"))
-      zip.addFile("raw_api_call.json", Buffer.from(getCapturedRawApiCall(threadId), "utf-8"))
+      zip.addFile("raw_api_call.json", Buffer.from(rawApiCall, "utf-8"))
       zip.writeZip(result.filePath)
 
       return { success: true, filePath: result.filePath }
@@ -4141,3 +4205,4 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     return generateTitle(message)
   })
 }
+import { getModsManager } from "../mods/manager"

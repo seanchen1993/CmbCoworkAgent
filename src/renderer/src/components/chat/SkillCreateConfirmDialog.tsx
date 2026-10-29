@@ -28,12 +28,15 @@ export interface SkillConfirmRequest {
 
 interface SkillCreateConfirmDialogProps {
   request: SkillConfirmRequest | null
+  // Hiding the Portal must not discard the pending request or edited draft.
+  visible?: boolean
   onApprove: (requestId: string, content: string) => void
   onReject: (requestId: string) => void
 }
 
 export function SkillCreateConfirmDialog({
   request,
+  visible = true,
   onApprove,
   onReject
 }: SkillCreateConfirmDialogProps): React.JSX.Element | null {
@@ -50,7 +53,7 @@ export function SkillCreateConfirmDialog({
   const canApprove = draftContent.trim().length > 0
 
   return (
-    <Dialog open={!!request} onOpenChange={(open) => {
+    <Dialog open={visible && !!request} onOpenChange={(open) => {
       // If the dialog is dismissed by clicking outside, treat as reject
       if (!open) onReject(request.requestId)
     }}>

@@ -5,6 +5,8 @@ import { projectGoalNoticeVisibleText } from "./goal-notice-presentation"
 import { SKILL_USE_TAG_NAME } from "./skill-use-block"
 import { createChatSearchPlan } from "./chat-search-plan"
 import {
+  LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX,
+  LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
   BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
   BUILTIN_BROWSER_PROMPT_PREFIX
 } from "./user-input-transport"
@@ -13,6 +15,8 @@ const SKILL_OPEN = `<${SKILL_USE_TAG_NAME}>`
 const SKILL_CLOSE = `</${SKILL_USE_TAG_NAME}>`
 const BROWSER_PREFIX = BUILTIN_BROWSER_PROMPT_PREFIX
 const BROWSER_NO_SCREENSHOT_PREFIX = BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX
+const LEGACY_BROWSER_PREFIX =
+  "使用内置浏览器 browser_*工具。仅当当前模型支持图片识别/视觉输入时，才允许调用截图工具；否则不要调用截图工具，改用 DOM 快照、文本、locator、evaluate 等非视觉方式："
 
 export const MAX_EXPANDED_CHAT_SEARCH_TEXT_CHARS = 256 * 1024
 interface ChatSearchProjectionOptions {
@@ -60,12 +64,18 @@ function parseUserTransportText(content: string): {
   }
 
   let browserSelected = false
-  if (visibleText.startsWith(BROWSER_NO_SCREENSHOT_PREFIX)) {
-    browserSelected = true
-    visibleText = visibleText.slice(BROWSER_NO_SCREENSHOT_PREFIX.length)
-  } else if (visibleText.startsWith(BROWSER_PREFIX)) {
-    browserSelected = true
-    visibleText = visibleText.slice(BROWSER_PREFIX.length)
+  for (const prefix of [
+    BROWSER_NO_SCREENSHOT_PREFIX,
+    BROWSER_PREFIX,
+    LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
+    LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX,
+    LEGACY_BROWSER_PREFIX
+  ]) {
+    if (visibleText.startsWith(prefix)) {
+      browserSelected = true
+      visibleText = visibleText.slice(prefix.length)
+      break
+    }
   }
 
   return { visibleText, skillName, browserSelected }

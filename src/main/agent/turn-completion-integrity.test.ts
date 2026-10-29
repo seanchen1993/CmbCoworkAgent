@@ -165,6 +165,19 @@ describe("final message inspection", () => {
     expect(inspection.defect).toBe("textual_tool_call")
   })
 
+  it.each([
+    '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="edit_file">',
+    "Notification 正确。现在编辑 ServicesReport。插入点在 jackson-core-asl 前：</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+    "现在编辑 ServicesReport：</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>",
+    String.raw`现在编辑 ServicesReport：\</｜DSML｜parameter>\</｜DSML｜invoke>\</｜DSML｜tool\_calls>`,
+    '<|DSML|tool_calls>\n<|DSML|invoke name="edit_file">',
+    '<｜DSML｜ tool_calls>\n<｜DSML｜ invoke name="edit_file">'
+  ])("flags DSML tool syntax leaked into a final answer: %s", (content) => {
+    expect(inspectFinalAssistantMessage(aiMessage(content, { finish_reason: "stop" })).defect).toBe(
+      "textual_tool_call"
+    )
+  })
+
   // 这个产品的用户就是开发者，问的就是工具调用怎么解析。误判的终点是把一个
   // 正确回合判成失败——比漏判贵得多，所以下面每一种都必须放行。
   it.each([
@@ -176,6 +189,19 @@ describe("final message inspection", () => {
     ["嵌套引用中的标签", '  > > <invoke name="read_file">'],
     ["列表内引用中的标签", '- > <tool_call>{"name":"read_file"}</tool_call>'],
     ["句中裸提及标签", "代码里判断的是 <function=foo> 这种写法，注意不要漏掉闭合。"],
+    ["DSML 行内代码", "异常尾部是 `</｜DSML｜invoke></｜DSML｜tool_calls>`。"],
+    [
+      "DSML 围栏示例",
+      "```xml\n<｜DSML｜tool_calls>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>\n```"
+    ],
+    [
+      "DSML 引用日志",
+      "引用的日志：\n> </｜DSML｜parameter>\n> </｜DSML｜invoke>\n> </｜DSML｜tool_calls>"
+    ],
+    ["DSML 嵌套列表引用", "- > > </｜DSML｜invoke></｜DSML｜tool_calls>"],
+    ["DSML 有序列表引用", "1. > </｜DSML｜invoke></｜DSML｜tool_calls>"],
+    ["DSML 括号有序列表引用", "1) > </｜DSML｜invoke></｜DSML｜tool_calls>"],
+    ["DSML 单个标签的正常提及", "模型使用 <｜DSML｜tool_calls> 标记工具调用。"],
     [
       "围栏代码块里的示例",
       '下面是模型误发的形态：\n```\n<tool_call>{"name":"x"}</tool_call>\n```\n应当被识别并重试。'
@@ -300,6 +326,40 @@ describe("gate: reported reproductions", () => {
 })
 
 describe("gate: bounded retries", () => {
+  it("observes background refusal without granting foreground retries", async () => {
+    const options = { ownerRunToken: undefined, observationRunToken: RUN }
+    expect(await runGate({ messages: [aiMessage("", {})] }, options)).toBeUndefined()
+    expect(readTurnCompletionGateReport(THREAD, RUN)).toBeNull()
+    expect(
+      await runGate({ messages: [aiMessage("", { finish_reason: "refusal" })] }, options)
+    ).toEqual({ jumpTo: "end" })
+    expect(readTurnCompletionGateReport(THREAD, RUN)?.refusal).toEqual({
+      category: null,
+      explanation: null
+    })
+  })
+
+  it("ends an explicit refusal without empty-answer or unfinished-todo recovery", async () => {
+    const state = {
+      messages: [aiMessage("", { finish_reason: "content_filter" })],
+      todos: [{ content: "Incomplete", status: "pending" }]
+    }
+    expect(await runGate(state)).toEqual({ jumpTo: "end" })
+    const report = readTurnCompletionGateReport(THREAD, RUN)!
+    expect(report).toMatchObject({
+      refusal: { category: null, explanation: null },
+      retriesUsed: 0,
+      todoNudgesUsed: 0
+    })
+    expect(describeTurnCompletionFailure(report)).toContain("提供商拒绝")
+    expect(inspectFinalAssistantMessage(state.messages[0]).defect).toBeNull()
+    // A subsequent explicit user turn is independently allowed to finish normally.
+    expect(
+      await runGate({ messages: [aiMessage("Next answer", { finish_reason: "stop" })] })
+    ).toBeUndefined()
+    expect(readTurnCompletionGateReport(THREAD, RUN)).not.toHaveProperty("refusal")
+  })
+
   it("stops retrying and records the defect so the turn cannot report success", async () => {
     const empty = { messages: toolResultThen(aiMessage("", { finish_reason: "stop" })) }
 

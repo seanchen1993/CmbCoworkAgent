@@ -1,3 +1,4 @@
+import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { describe, expect, it, vi } from "vitest"
 
 vi.mock("electron", () => ({
@@ -156,6 +157,50 @@ describe("TurnTraceRecorder", () => {
     expect(result.modelName).toBe("deepseek-v4-flash")
   })
 
+  it("does not let a malformed tool call name into the trace as a tool", async () => {
+    const collector = tracer()
+    const recorder = new TurnTraceRecorder({ tracer: collector, userMessageId: "u1" })
+    // Verbatim from a usage ranking: a model emitted DSML-format tool calls the
+    // harness could not parse, and the raw text landed in the name field.
+    // Recorded as-is, it outranked the real tools — the dashboard filter
+    // excludes built-ins by exact name, so `read_file` was hidden while this was
+    // not.
+    recorder.onStreamChunk("values", {
+      messages: [
+        human("u1"),
+        ai("a1", "", {
+          tool_calls: [
+            {
+              id: "call-bad",
+              name: 'read_file</think> <|DSML|tool_calls> <|DSML|invoke name="ls',
+              args: { file_path: "src" }
+            }
+          ],
+          usage_metadata: USAGE
+        })
+      ]
+    })
+    const trace = await collector.finish("success")
+    const toolNodes = (trace.nodes ?? []).filter((node) => node.type === "tool")
+
+    expect(toolNodes).toHaveLength(1)
+    expect(toolNodes[0]?.name).toBe("unknown")
+    // Marked, not silently renamed: a model producing unparseable tool calls is
+    // worth being able to see once the ranking stops showing it.
+    expect(toolNodes[0]?.metadata?.malformedToolName).toBe(true)
+  })
+
+  it("keeps a real tool name unmarked", async () => {
+    const collector = tracer()
+    const recorder = new TurnTraceRecorder({ tracer: collector, userMessageId: "u1" })
+    recorder.onStreamChunk("values", turnSnapshot())
+    const trace = await collector.finish("success")
+    const toolNodes = (trace.nodes ?? []).filter((node) => node.type === "tool")
+
+    expect(toolNodes[0]?.name).toBe("ls")
+    expect(toolNodes[0]?.metadata?.malformedToolName).toBeUndefined()
+  })
+
   it("counts a model call once when the same snapshot arrives repeatedly", async () => {
     const collector = tracer()
     const recorder = new TurnTraceRecorder({ tracer: collector, userMessageId: "u1" })
@@ -285,4 +330,98 @@ describe("desktop and IM produce the same trace", () => {
     expect(im.outputTokens).toBe(desktop.outputTokens)
     expect(im.modelName).toBe(desktop.modelName)
   })
+})
+
+describe("child model usage", () => {
+  it.each(["coordinator", "workflow"] as const)(
+    "counts %s live values, followups and repeated snapshots exactly once",
+    async (mode) => {
+      const collector = new TraceCollector("child-" + mode, "new turn", "model", {
+        traceKind: "subagent",
+        executionMode: mode,
+        includeSkillEval: false
+      })
+      const recorder = new TurnTraceRecorder({
+        tracer: collector,
+        userMessageId: "new",
+        requireUserMessageAnchor: true
+      })
+      const history = [
+        new HumanMessage({ id: "old-user", content: "old turn" }),
+        new AIMessage({ id: "old-ai", content: "old answer", usage_metadata: USAGE })
+      ]
+      // Reused worker checkpoints can be emitted before the new input is applied.
+      recorder.onRawValues({ messages: history })
+      const messages = [
+        ...history,
+        new HumanMessage({ id: "new", content: "new turn" }),
+        new AIMessage({ id: "call", content: "", tool_calls: [LS_CALL], usage_metadata: USAGE }),
+        new ToolMessage({ id: "result", tool_call_id: "call-1", content: "ok" }),
+        new AIMessage({ id: "answer", content: "done", usage_metadata: USAGE })
+      ]
+      recorder.onRawValues({ messages })
+      recorder.onRawValues({ messages })
+      // Workflow structured-output nudges / worker handoff and Stop-hook revisions
+      // share this trace and must retain the original anchor.
+      messages.push(new HumanMessage({ id: "revision", content: "revise" }))
+      messages.push(new AIMessage({ id: "revised", content: "revised", usage_metadata: USAGE }))
+      recorder.onRawValues({ messages })
+      recorder.onRawValues(JSON.parse(JSON.stringify({ messages })))
+      collector.addTerminalNode({
+        type: "message",
+        output: "revised",
+        metadata: { toolCallCount: 1 }
+      })
+      const trace = await collector.finish("success")
+      expect(trace.totalModelCalls).toBe(3)
+      expect(trace.totalInputTokens).toBe(360)
+      expect(trace.totalOutputTokens).toBe(105)
+      expect(trace.totalTokens).toBe(465)
+      expect(trace.totalToolCalls).toBe(1)
+      expect(trace.toolUsageComplete).toBe(true)
+      expect(trace.toolUsage).toEqual([{ name: LS_CALL.name, count: 1 }])
+      expect(trace.userInputRequestCount).toBe(0)
+    }
+  )
+
+  it("keeps observed usage on cancellation without serializing a large checkpoint", async () => {
+    const collector = tracer()
+    const recorder = new TurnTraceRecorder({
+      tracer: collector,
+      userMessageId: "u1",
+      requireUserMessageAnchor: true
+    })
+    const snapshot = {
+      ...(turnSnapshot() as object),
+      toJSON() {
+        throw new Error("must not serialize checkpoint")
+      }
+    }
+    recorder.onRawValues(snapshot)
+    const trace = await collector.finish("cancelled")
+    expect(trace.totalModelCalls).toBe(2)
+    expect(trace.totalInputTokens).toBe(320)
+    expect(trace.totalOutputTokens).toBe(47)
+  })
+})
+
+it("does not rescan a stable raw values prefix on repeated tail updates", async () => {
+  const collector = tracer()
+  const recorder = new TurnTraceRecorder({ tracer: collector, userMessageId: "u1" })
+  const messages = [human("u1"), ai("a1", "answer", { usage_metadata: USAGE })]
+  const prefix = messages[0]
+  let prefixReads = 0
+  Object.defineProperty(messages, "0", {
+    get() {
+      prefixReads++
+      return prefix
+    }
+  })
+  recorder.onRawValues({ messages })
+  prefixReads = 0
+  for (let i = 0; i < 1000; i++) recorder.onRawValues({ messages })
+  expect(prefixReads).toBe(0)
+  // Replacing the array is a semantic boundary and must be scanned normally.
+  recorder.onRawValues({ messages: [...messages, ai("a2", "second", { usage_metadata: USAGE })] })
+  expect((await collector.finish("success")).totalModelCalls).toBe(2)
 })

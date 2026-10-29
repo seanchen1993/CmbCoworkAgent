@@ -1,206 +1,77 @@
-# Harness 托管模式 V2 / V2.5 设计与 V3 路线
+# Harness 托管模式与消息通知设计
 
-- 状态：V2 已实现；V2.5 设计已确认、待实施；V3 能力已定边界、暂不实施
-- 更新日期：2026-09-04
-- 适用范围：CMBDevClaw 项目模式中的 Harness Feature
-- 当前代码基线：V2 托管模式、统一招乎机器人、项目模式 Human Gate
-- 参考实现：V1 `AutoModeController`、内置 Dynamic Workflow 的 RunStore/Journal/Structured Output
+本文描述当前实现的运行控制、消息源、持久化、通知渠道和消息操作。托管快照与领域事件的 schema 版本为 `2.5`。
 
-## 1. 结论
+## 1. 能力与事实源
 
-托管模式主线采用内置 Controller，不使用 Dynamic Workflow 作为插件阶段的默认执行容器。
+托管模式为一个 Feature 创建 ManagedRun，检查插件业务状态并驱动普通项目模式会话。业务未推进时，Biz Retry 产生人工决策；工具遇到 Human Gate 时，暂停工具并等待批准或拒绝。两类消息均可通过 APP 或招乎处理。
 
-V2 将当前无持久状态的事件处理器升级为持久化的 `ManagedRun` Process Manager：
+| 事实源 | 负责的数据 |
+|---|---|
+| `feature_status` | 插件业务状态、当前节点、合法 nextAction |
+| Thread / checkpoint | 单次会话的消息、工具交互及执行历史 |
+| `run.json` | 托管状态、当前会话、决策基线、Provider Retry 和最后决策 |
+| `events.ndjson` | 托管领域来源事件、决策、动作结果及生命周期历史 |
+| `app_messages` | 消息待处理/已处理状态、处理结果与投递目标 |
+| Thread grant | 会话消息同步和远程操作的实际授权 |
 
-```text
-用户点击“开始托管”
-  → 创建 ManagedRun
-  → 直接执行插件已有 feature_status
-  → 根据 workflow/currentNode/status/nextAction 创建普通项目会话
-  → 会话内按原 Skill 执行，保留 subagent、request_user_input、Hook 和多轮能力
-  → Agent Turn 结束后重新 feature_status
-  → Controller 决定进入下一节点、继续同一节点、重试、失败、取消或完成
-```
+ManagedRun 不复制插件计划、任务清单、Evidence 或产物正文。Human Gate 可来自非托管项目会话，因此 Run 关联可选；Biz Retry 必须关联运行中的 ManagedRun。消息处理完成与业务任务完成分别记录。
 
-V2 的插件准入协议只有 Harness 已有的：
+`app_messages` 是消息状态的持久化依据，不包含恢复执行所需的全部上下文。pending 只表示消息尚未结束；执行决策还必须具备有效的领域状态和当前进程内的执行上下文。Biz Retry 依赖来源事件与 delivery，Human Gate 依赖等待中的 Promise 和执行 lease；两者都不跨重启恢复执行，通知快照只能重建展示数据。
 
-- `inspectCommands.<platform>.feature_status`；
-- `workflow.nodes[].states[].nextAction`；
-- Feature/Thread 项目模式上下文。
+## 2. 模块职责与依赖
 
-插件不需要实现额外的托管动作协议，也不需要修改 Skill。V1 插件动作协议、动作数组、草稿恢复和能力门禁代码从 V2 中删除，避免形成第二控制源。
+| 模块 | 负责 | 不负责 |
+|---|---|---|
+| ManagedRun Controller / Store | run.json、events.ndjson、策略、会话启动和终止 | APP 消息通用存储、渠道实现 |
+| Biz Retry 消息源 | 检查 Run 与策略、产生待决策消息、执行继续/新建/退出 | 短码、IM 投递、工具审批 |
+| Human Gate 消息源 | 检查插件/Hook/绑定、等待与恢复工具、批准/拒绝 | Biz Retry 策略、工具授权规则、渠道投递 |
+| app-notifications.ts | SQLite 插入、pending 条件更新、查询、序列化 | Journal、消息源业务校验、广播、回调、IM |
+| notification-service.ts | 产生 ID/时间、保存后发布生命周期、重启失效、通用渠道禁用 | Run 终止、领域 payload 解释、审批决策 |
+| notification-channels.ts | 根据 targets/disabledTargets 和可选 sourceType 调用已注册适配器、隔离渠道错误 | 业务数据解释、数据库、领域日志 |
+| APP / 系统通知 / IM 适配器 | APP 刷新、系统弹窗显示/关闭、招乎文案/短码/路由/outbox | 改写业务状态、直接消费决策 |
+| notification-actions.ts | 读取消息、检查通用可操作状态，按消息源转交操作 | 解释 stop/continue/approve 等动作、直接置 resolved |
+| harness-board/notifications.ts | 将领域关联封装进 payload、领域查询投影、按 Run 失效及 Feature 禁用 IM | 数据库实现、渠道投递 |
+| harness-board/notification-journal.ts | 订阅领域消息生命周期，将关联 Run 的消息投影到 events.ndjson，持有去重索引 | 作为通用通知机制或决策状态真相源 |
 
-V3 才增加阶段结构化报告和按需 Side Agent：抽取现有 Workflow `structured_output` 的公共 Schema Capture 内核，但不改变原有 Workflow 行为；为托管会话新增 `managed_stage_result` 和最多三次报告补交。
+通用 shared/app-notifications.ts、存储、通知服务、渠道分发、操作路由及 APP IPC 都不依赖 Harness 类型或 ManagedRun Store。领域类型和页面投影位于 shared/harness-notifications.ts；Renderer 的通用订阅保留原始消息，Harness 订阅单独投影。
 
-V2.5 在 V2 托管能力上增加“通过招乎管理特性”、托管 Biz Retry 的招乎人工决策、Human Gate 招乎审批，并把托管控制与托管日志统一为“逻辑来源事件 → 托管决策事件 → 动作结果事件”的 V2.5 append-only 事件模型。V2.5 不实现 V3 能力，也不为未来 V3 保留兼容层。
+## 3. 消息与操作链路
 
-## 2. 背景与 V1 现状
-
-当前分支已经实现：
-
-- Main 侧 `AutoModeController`；
-- 顶层 Agent Turn 结束事件；
-- `ThreadService` 创建真实会话；
-- `AgentRunService` 从 Main 启动正常 Agent；
-- 插件驱动的多动作执行；
-- 后台创建会话且不抢占当前页面；
-- request_user_input、审批等待不误触发 Turn End；
-- Renderer 刷新 Thread。
-
-V1 的主要问题不是事件驱动，而是没有一个长期存在的执行实例。每次 Agent 结束后，Controller 临时调用插件、发起动作、发布内存事件，然后丢失执行上下文。因此缺少：
-
-- 循环和数量保护；
-- 持久重试计数；
-- action 幂等；
-- App 重启后的未终态 Run 失败化；
-- 用户主动停止和重新开始；
-- 决策审计和完整可视化；
-- 多会话的逻辑聚合；
-- 可验证的当前执行游标。
-
-V2 不把插件业务流程硬编码为 TypeScript if/else 图，而是增加固定的平台生命周期状态机；插件业务节点继续从 `feature_status` 动态读取。
-
-## 3. 设计目标
-
-### 3.1 V2 功能目标
-
-1. 插件零新增协议适配即可开启托管。
-2. 开启托管后立即创建 ManagedRun 并基于 `feature_status` 启动首个会话。
-3. 每个阶段完成后开启新的普通项目会话；Provider Error 除外。
-4. 普通会话保留原 Skill 的 subagent、request_user_input、Hook、产物和 checkpoint 行为。
-5. 一个 Feature 同时最多存在一个未终态 ManagedRun。
-6. ManagedRun 持久化快照、事件、动作和 Thread 关联。
-7. 支持用户主动停止托管，但不取消已创建的会话。
-8. App 重启后将未终态 Run 标记为 failed，不自动继续；下次开启创建新的 Run。
-9. 支持 Provider Error 在当前 App 生命周期内有界重试，并持久化该重试计数。
-10. 支持当前阶段未完成时有界 Biz Retry，并根据业务进展、上下文占用选择复用当前 Thread 或创建新 Thread。
-11. Feature 详情页展示完整托管总览、两类重试状态、决策原因和时间线。
-12. 自动创建的 Thread 在 V2 与普通 Feature 会话同等展示。
-13. 普通 Chat、非 Harness Thread、没有活跃 ManagedRun 的行为不变。
-
-### 3.2 V2 非目标
-
-V2 不实现：
-
-- `managed_stage_result`；
-- 修改 Workflow `structured_output`；
-- Recovery Side Agent；
-- action 幂等与执行恢复；
-- event journal replay；
-- App 重启后复用或找回旧 Thread；
-- 平台动作自动重试；
-- 通用会话/节点计数和硬上限（当前阶段 Biz Retry 上限除外）；
-- 跨会话自动并行和资源冲突调度；
-- worktree 隔离；
-- 精确 Token 硬预算；
-- 通用运行时长上限（托管会话 `execute` 固定 20 分钟前台超时除外）；
-- 插件自定义托管策略；
-- 隐藏或降级托管 Thread；
-- 全局跨项目托管运行中心；
-- 自动取消已运行的托管会话。
-
-### 3.3 V3 目标
-
-V3 规划：
-
-- action 索引、actionKey、执行恢复和跨重启幂等；
-- versioned event reducer、journal replay 和 snapshot reconcile；
-- 会话/节点计数、硬上限和平台动作重试；
-- 抽取 Workflow Structured Output 的公共 Schema Capture 内核；
-- 保持现有 `structured_output` 名称、错误、重试和 stop semantics 完全不变；
-- 新增 `managed_stage_result`；
-- 在派生的 `nextAction.userMessage` 后追加 `<managed-mode>` 控制信封；
-- 正常 Turn 结束但未提交合法报告时，在同一 Thread 最多自动补发三次；
-- 三次补交仍失败时将整个 ManagedRun 标记为 failed；
-- 报告缺失不调用 Side Agent；
-- 仅在报告与 feature_status 冲突、同节点进度模糊或异常恢复难以按规则判断时调用只读 Side Agent；
-- Side Agent 使用结构化输出、hash 缓存和有界重试。
-
-## 4. 术语与事实源
-
-### 4.1 ManagedRun
-
-一个 Feature 的一次完整托管执行实例，地位对应 Dynamic Workflow 的 `run.json + journal`，但执行节点是真实 Thread，而不是一次性 Workflow Agent。
-
-### 4.2 Stage Session
-
-Controller 为一个插件阶段、Review 或重试创建的普通项目模式会话。但一个阶段可能对应多个 Session，取决于创建会话时 feature_status 返回的阶段状态
-
-### 4.3 事实源边界
+### 3.1 创建消息
 
 ```text
-feature_status
-= 插件业务状态、当前节点、合法 nextAction 的事实源
-
-Thread / checkpoint
-= 单个阶段会话历史、工具、交互和运行终态的事实源
-
-ManagedRun
-= 平台托管状态、Provider 重试、当前 Thread、停止控制和审计事实源
+ManagedRun 策略 → Biz Retry 源 ─┐
+                              ├→ 构造领域 payload → NotificationService → SQLite
+Hook 工具执行 → Human Gate 源 ─┘                                      │ 保存成功
+                                                                     ├→ 生命周期观察者
+                                                                     │   └ 托管领域 Journal
+                                                                     └→ 按 targets 分发
+                                                                         ├ APP 界面刷新
+                                                                         ├ 系统通知
+                                                                         └ IM outbox
 ```
 
-ManagedRun 不复制：
+消息源负责业务参数正确性；通用插入层负责序列化和存取。消息保存成功后才通知观察者和渠道。领域日志写入失败或单个渠道投递失败，不回滚消息，也不阻断其他渠道。
 
-- 插件 `plan.json`；
-- Batch/task 私有状态；
-- 插件 checkpoint；
-- Evidence 正文；
-- Feature 产物正文。
-
-## 5. 总体架构
-
-```mermaid
-flowchart TD
-    UI["Feature 详情 / 开始/停止托管"] --> C["Main AutoModeController"]
-    C --> R["ManagedRunStore"]
-    C --> I["feature_status"]
-    I --> N["Resolve currentNode/status/nextAction"]
-    N --> D{"Controller Policy"}
-    D -->|"advance / biz_retry_new_thread"| T["ThreadService 创建项目会话"]
-    D -->|"biz_retry_reuse_thread"| B["原 Thread 自动发送继续当前任务"]
-    D -->|"provider retry"| S["原 Thread 自动发送继续当前任务"]
-    D -->|"cancel / fail / complete"| R
-    T --> A["AgentRunService 启动正常 Agent"]
-    A --> E["agent_turn_end"]
-    E --> C
-    R --> V["ManagedRun 总览与时间线"]
-```
-
-### 5.1 固定平台生命周期
-
-ManagedRun 状态：
-
-```ts
-type ManagedRunStatus =
-  | "running"
-  | "failed"
-  | "completed"
-  | "cancelled"
-```
-
-Provider Retry 等待期间仍属于 `running`，通过 `nextRetryAt` 表示当前 Run 已计划下一次重试，
-不再为等待重试单独建模平台状态。
-
-平台状态转换：
+### 3.2 处理消息
 
 ```text
-running
-  → running（Provider Retry 计划或发送，nextRetryAt 表示等待中的重试）
-  → failed
-  → completed
-  → cancelled（用户停止托管）
-
-failed / completed / cancelled
-  → 终态；再次开启创建新 runId
+APP decide IPC / IM 短码解析
+  → 通用操作路由（notificationId、action、来源渠道、源上下文）
+  → 按 source type 查找注册处理器
+  → Biz Retry / Human Gate 重新检查业务状态并执行
+  → 领域确认成功后结束消息
+  → 持久化完成 → APP 移除提示、短码失效、系统通知关闭
 ```
 
-插件节点不是这个状态机的一部分。`dev.plan`、`dev.code` 等始终来自 `feature_status`。
+通用路由检查消息是否待决策、是否投递到当前渠道及该渠道是否可用，随后转交消息源；不解释业务 action，也不直接把消息置为 resolved。APP 页面统一使用 `appNotifications:decide`；领域内部的执行中断路径可直接调用自身拒绝函数。
 
-## 6. ManagedRun 持久化
+Biz Retry 的动作是 `continue/new_thread/stop`；Human Gate 是 `approve/reject`。消息源在实际执行前重新检查持久状态和业务条件。APP 与招乎共用领域执行入口；运行时防重入标记和 Feature 锁防止重复启动。
 
-### 6.1 存储形式
+## 4. ManagedRun 模型与存储
 
-V2 采用项目实际目录中的文件模式。项目实际目录由 Harness项目元数据的 `workspacePath + projectDir`经过既有越界校验得到：
+### 4.1 文件布局
 
 ```text
 <workspacePath>/<projectDir>/.cmbdevclaw/managed-runs/<featureId>/<runId>/
@@ -208,28 +79,24 @@ V2 采用项目实际目录中的文件模式。项目实际目录由 Harness项
   events.ndjson
 ```
 
-目录已经归属于具体 Harness项目，因此不再增加 projectId层级。Store不自行读取项目配置；Main启动时由 Harness service注册 projectId→项目实际目录解析器，启动恢复通过同一解析器枚举所有项目目录。
+项目实际目录通过 Harness 元数据和路径越界检查解析。Main 启动时向 Store 注册 projectId 到项目目录的解析器；恢复流程通过同一解析器枚举项目。
 
-- `run.json`：原子更新的托管状态快照；
-- `events.ndjson`：append-only 决策、动作和生命周期日志，同时作为完整时间线 UI 的数据源。
+`run.json` 原子更新；`events.ndjson` 顺序追加。时间统一为 GMT+8 `YYYY-MM-DD HH:mm:ss`，本链路共用 `shared/gmt8-time.ts` 的格式化函数。损坏记录通过 Store 校验隔离，日志尾部不完整记录按现有尾部修复规则处理。
 
-所有写入使用 GMT+8 `YYYY-MM-DD HH:mm:ss`。
-
-### 6.2 run.json
+### 4.2 运行快照
 
 ```ts
 interface ManagedRunSnapshot {
-  version: 2
+  version: 2.5
   runId: string
   projectId: string
   featureId: string
   status: ManagedRunStatus
-
+  workspacePath?: string
   currentSession?: {
     threadId: string
     workspacePath?: string
   }
-
   decisionBaseline?: {
     nodeId: string
     featureStateHash: string
@@ -237,327 +104,265 @@ interface ManagedRunSnapshot {
     nodeStatus: HarnessNodeStatus
     nextActionHash: string
   }
-
   providerRetryCount: number
-  bizRetryCount: number
   nextRetryAt?: string
   failureReason?: string
   cancellationReason?: string
-
   startedAt: string
   updatedAt: string
   completedAt?: string
-
   lastDecision?: {
-    decision: string
-    reasonCode?: string
-    summary?: string
-    facts?: ManagedRunDecisionFacts
-    rule?: string
+    policyResult: ManagedRunPolicyResult
+    decisionActor: ManagedRunDecisionActor
+    decisionChannel: ManagedRunDecisionChannel
+    decisionAction: ManagedRunDecisionAction
+    summary: string
     createTime: string
   }
 }
 ```
 
-`run.json` 是 V2 的托管状态快照，不是执行 journal。`currentSession` 只负责当前 Thread/工作区指针；`decisionBaseline` 只负责下一次 Inspect 的结构化比较基线。`featureStateHash` 与 `nextActionHash` 使用带版本和域分隔的完整 SHA-256，不保存原始 nextAction/userMessage。Baseline 只在自动动作提交时整体更新。最后决策随快照保存，避免总览查询为查找最后决策而扫描完整事件文件。V2 不根据该文件恢复旧 action 或旧 Thread，也不保存通用会话数量和 Token 预算。
+`currentSession` 是当前会话指针，`decisionBaseline` 是下一次检查的比较基线，两者成对建立。状态与 nextAction 的 hash 使用带版本和域分隔的 SHA-256。Run 快照不保存 nextAction 正文；`lastDecision` 支持总览直接展示最近决策。
 
-### 6.3 events.ndjson
-
-事件示例：
-
-```json
-{"eventId":"uuid-1","createTime":"2026-08-19 10:00:00","type":"run_started","scope":"global"}
-{"eventId":"uuid-2","createTime":"2026-08-19 10:00:01","type":"feature_inspected","scope":"stage","nodeId":"dev.plan","nodeStatus":"done"}
-{"eventId":"uuid-3","createTime":"2026-08-19 10:00:01","type":"decision_made","scope":"stage","nodeId":"dev.plan","decision":"advance","reasonCode":"next_action_resolved"}
-{"eventId":"uuid-4","createTime":"2026-08-19 10:00:02","type":"session_created","scope":"stage","targetThreadId":"thread-1","nodeId":"dev.code"}
-{"eventId":"uuid-5","createTime":"2026-08-19 10:10:00","type":"session_completed","scope":"stage","threadId":"thread-1","outcome":"success"}
-```
-
-每条事件至少包含：
-
-- 唯一 `eventId`；
-- GMT+8 秒级 `createTime`；
-- `type`；
-- `runId`；
-- `scope=global/stage`；
-- 相关来源/目标 `threadId`；
-- 内部决策来源和 reasonCode；
-- 有界的人类可读摘要。
-
-`decision_made` 额外持久化 `decisionFacts` 和 `decisionRule`。facts 至少包含当前阶段、featureStatus、currentNodeStatus、slashSkill、相对上次基线变化的字段、两类重试计数和可用的会话终态；rule 是本次决策命中的有界中文规则。run.json 的 lastDecision 同步保存该 facts/rule，UI 不从 summary 或相邻事件反推决策依据。
-
-事件不使用 `seq`，NDJSON 的文件追加顺序是唯一权威顺序；`createTime` 只用于展示，不用于同秒事件排序。Main 内部使用字节偏移反向定位分页，但对 Renderer 只暴露包含版本和 Run 身份的 opaque string cursor：首次查询从文件尾读取最近 limit 条，后续 cursor 继续读取更早事件；每页返回后恢复文件追加顺序。Renderer 不直接读取文件，也不解释或修改 cursor。
-
-`events.ndjson` 必须包含渲染完整托管时间线所需的事实，而不是只记录调试字符串。Inspect 事件保存结构化 featureStatus、nodeStatus 和 slashSkill；`session_completed` 保存结构化 outcome 和 endReason；不保存完整 userMessage；所有 summary 有固定长度上限。Renderer 展示自动动作、动作原因、来源/目标 Thread、状态变化、重试和恢复结果。
-
-`source`、`reasonCode`、runId 和 Controller 英文决策枚举只用于内部诊断，不直接展示给用户。用户界面使用中文动作文案；决策标签通过 hover/focus tips 展示有界的具体决策原因。
-
-### 6.4 V2 写入与恢复边界
-
-V2 每次状态变化：
-
-1. 原子更新 `run.json`；
-2. append 一条有界事件到 `events.ndjson`；
-3. 将增量状态通知 Renderer。
-
-`run.json` 是状态权威，`events.ndjson` 是可视化和审计日志。V2 不实现 `lastAppliedEventCursor`、event reducer 或 journal replay。若 App 在快照更新后、事件追加前退出，时间线可能缺少最后一条精确事件；重启时将未终态 Run 标记为 failed，不尝试自动恢复或伪造丢失事件。
-
-快照采用同目录临时文件写入、文件 fsync、rename 和尽可能的父目录 fsync。事件以单个完整 JSON 行追加并 fsync，不为生成序号读取完整文件。每个 Run 在当前进程首次访问或文件大小/mtime 改变时校验 Journal：合法 JSON 尾记录仅缺换行时补写换行并 fsync；非法尾记录可以截断恢复；任意中间损坏均 fail closed，并隔离为 corrupt Run，不能中断其他 Run 或 App 启动。
-
-用户停止后不取消已有 Thread：Controller 只停止后续自动动作和 Provider Retry。已有会话可以自然结束，但其结果不再触发下一轮 Inspect 或创建新会话。再次开启始终创建新的 runId，并从最新 `feature_status` 开始。
-
-## 7. 开启、停止与终态
-
-### 7.1 开启托管
-
-用户点击“开始托管”时：
-
-1. 检查 Feature 下是否存在运行中的顶层会话；
-2. 存在则拒绝开启并提示“已有运行中的会话，无法开启托管”；
-3. 检查是否存在未终态 ManagedRun；
-4. 存在 running Run 则拒绝开启；
-5. 只有不存在活跃会话和未终态 Run 时才创建新 runId；
-6. 立即执行 `feature_status`；
-7. 解析合法 nextAction；
-8. 创建并启动第一个托管会话；
-9. Main 返回首轮处理后的 ManagedRunSummary；Renderer 仅在 status=running 时提示“已开始托管”，completed 显示“无需继续托管”，failed/corrupt 显示具体失败原因。
-
-一个 Feature 同时最多一个未终态 ManagedRun，且开始操作在 Renderer 侧防抖、Main 侧 keyed mutex 内再次校验。
-
-### 7.2 开始/停止按钮语义
-
-托管模式使用“开始托管”和“停止托管”两个明确按钮，不使用一个开关隐式区分新建和停止。
-
-- 无活跃 Run：开始按钮可用；
-- running：开始按钮禁用，停止按钮可用；
-- failed/completed/cancelled：开始按钮可用，停止按钮禁用；
-- 已取消但仍有旧会话运行：开始操作继续被活跃会话检查拒绝。
-
-停止 ManagedRun 只表示停止 Controller 自动推进，不表示取消或关闭已有 Thread。
-
-### 7.3 停止托管
-
-用户点击“停止托管”时：
-
-1. 请求必须携带当前页面看到的 expectedRunId；只有它与当前活跃 Run 的 runId 一致时才允许停止；
-2. 在等待 Feature mutex 前按该 runId 设置进程内 stop token；
-3. 立即取消 Provider Retry 定时器；
-4. 取得 mutex 后再次校验 runId，并将匹配的 ManagedRun 标记为 `cancelled`；
-5. 不取消、不关闭、不修改已有托管会话；
-6. Controller 在创建会话和发送 Provider Retry 前检查 stop token；
-7. 已有会话自然结束后只记录带结构化 outcome/endReason 的 `session_completed`，Controller 不再 Inspect 或创建新会话；
-8. 历史 Thread 的取消回调若 runId 不匹配当前活跃 Run，只取消该 Thread，不改变当前 ManagedRun。
-
-stop token 是当前进程内的最小竞态保护，不是 V3 actionKey 或可恢复 action 状态机。自动动作通过最终检查后即视为已经提交；随后到达的停止请求不取消该动作产生的既有会话。
-
-停止后的 Run 仍保留当前 Thread 和完整时间线。新的托管 Run 必须等 Feature 下已有运行会话自然结束后才能开始。
-
-### 7.4 App 重启
-
-App 启动时：
-
-1. 扫描所有未终态 ManagedRun；
-2. 读取 `run.json` 和 `events.ndjson`；
-3. 将 `running` Run 标记为 `failed`，reasonCode 为 `app_interrupted`；
-4. 清除未发送的 `nextRetryAt`；
-5. 恢复 Feature 详情页总览、状态和历史时间线；
-6. 不自动创建会话、不自动补发“继续”；
-7. 用户点击“开始托管”时创建新的 runId。
-
-App 重启不提供续跑语义。
-
-### 7.5 终态
-
-`completed`、`failed` 和 `cancelled` 都是终态：
-
-- `completed` 只能由 Feature 最终状态触发；
-- `failed` 表示 Provider Retry 用尽、Feature 阻塞、Hook/Agent/Skill 等不可继续；
-- `cancelled` 只表示用户停止托管；
-- 终态 Run 保留历史，再次点击“开始托管”创建新的 runId。
-
-## 8. feature_status 默认决策
-
-### 8.1 唯一默认插件协议
-
-V2 默认只使用现有：
+### 4.3 生命周期
 
 ```text
-inspectCommands.<platform>.feature_status
-workflow.nodes[].states[].nextAction
+running → running（自动推进、等待人工决策、等待 Provider Retry）
+running → completed / failed / cancelled
+终态 → 再次开始时创建新的 runId
 ```
 
-Controller 从 snapshot 提取：
+等待人工决策不增加 Run 状态，Provider Retry 通过 `nextRetryAt` 表示计划。只有 Feature 满足最终完成条件时才是 completed；错误或模型重试耗尽产生 failed；停止托管、拒绝关联 Human Gate 或终止当前 Agent Run 可产生 cancelled。
+
+## 5. 开启、停止与恢复
+
+### 5.1 开启
+
+1. Renderer 防重入；Main 在 Feature 锁内检查活跃顶层会话及 running Run。
+2. 存在任意一项时拒绝重复开启。
+3. 创建 runId，执行 `feature_status`，按策略处理检查结果。
+4. 需要执行时解析合法 nextAction，创建普通 Feature 顶层会话，并按 IM 配置物化 grant。
+5. 启动 Agent、更新当前会话和基线，返回实际状态。UI 区分 running、无需继续的 completed 和失败状态。
+
+### 5.2 停止
+
+停止请求携带 runId，Main 在等待 Feature 锁前设置进程内 stop token 并取消 Provider Retry 定时器。取得锁后再次校验运行身份，持久化 cancelled，再结束关联待决策消息。自动动作提交前检查 stop token；已经提交的普通会话继续执行，结束后不再触发自动推进。
+
+停止会中断该 Run 尚在等待的 Human Gate。新的 ManagedRun 仍需等待 Feature 下活跃会话结束后才能开启。
+
+通过 Biz Retry 选择退出时，当前通知在批量清理中保留，待 Run 终态写入成功后置为 resolved。终态已保存后的 Journal 写入失败只记录诊断，不撤销终止。
+
+### 5.3 重启
+
+应用装配入口 `main/notification-runtime.ts` 在数据库初始化后、通知恢复前显式注册领域 Journal 监听器、两个消息源的操作处理器以及 APP、系统通知和 IM 渠道。托管领域在恢复前加载一次 pending 并订阅持久化后的生命周期变化，维护按 notificationId 保存的内存待办索引；invoke 拦截、消息源冲突检查及 Run/Feature 清理从该索引读取，不反复查询数据库。该索引不承担持久化职责。注册函数可重复调用，不重复添加监听器；模块导入本身不注册消息处理逻辑。Controller 的决策记录、冲突终止和 Biz Retry 执行能力通过领域回调注入消息源，契约位于 `harness-board/notification-operation-types.ts`，消息源不反向加载 Controller。
+
+通知服务将 pending 决策置为 invalidated，原因码 `app_restarted`，不恢复短码、工具等待句柄或执行动作。保留窗口内最新最多 10,000 条终态决策发送 recovered 生命周期供领域补写日志，不再次投递请求。恢复按游标每批读取 200 条，批次之间让出主线程，不一次加载全表；先处理全部 pending 决策，再处理终态决策。
+
+ManagedRun 恢复流程检查快照和 Journal，将 running Run 标为 failed，原因码 `app_interrupted`，清除待发送的重试计划。用户再次开始时创建新 Run；会话历史按原有规则保留，已结束消息遵循下述留存规则。
+
+## 6. Controller 策略
+
+Controller 使用 `feature_status` 与 Agent 的结构化 outcome/endReason 决策。Main 和 Renderer 共用 `resolveHarnessRunNextAction()`；当前节点、节点状态和 nextAction 来自插件，最终节点由工作流顺序确定。
+
+| 优先条件 | 行为 |
+|---|---|
+| 最终节点，Feature 和节点均 done/archived | 完成 Run |
+| Feature blocked/warning/error/unknown | 失败，等待处理后重新开始 |
+| Hook halt、failure fuse | 失败 |
+| Provider Error 且节点未切换、尚未结束 | 安排 Provider Retry |
+| 其他 Agent Error | 失败 |
+| 尚无决策基线 | 校验 nextAction 后创建首个会话 |
+| 节点切换，或满足已完成节点推进条件 | 校验 nextAction 后创建下一会话 |
+| 其余可继续的业务状态 | 产生 Biz Retry 人工决策 |
+
+已完成节点的推进条件为：节点属于完成状态，且本轮并非 success 或节点状态相对基线发生变化。必须使用结构化状态，不能从自然语言总结推断完成。
+
+### 6.1 Biz Retry
+
+默认自适应建议：上下文占用超过 90% 时建议新会话；上下文可复用且 Feature 状态 hash 有变化时建议继续当前会话；未识别到业务进展时建议新会话。新会话建议要求合法 nextAction。
+
+建议不直接启动动作，始终创建人工决策。用户可以覆盖建议：
+
+- `continue`：来源 Thread 存在且仍是 currentSession；发送补充消息，空白默认“继续当前任务”。
+- `new_thread`：重新 Inspect 最新 nextAction，创建会话后先保存 currentSession 和执行基线，再创建授权并启动 Agent。创建结果在本次操作结束后发布，失败时也保留已创建会话供检查。
+- `stop`：结束本次托管。
+
+存在 pending Human Gate 时，继续与新建不可用，退出可用。Feature 存在活跃执行会话时不能重复启动；来源会话不可继续时仍可选择新会话或退出。等待无超时、无自动兜底和次数上限。
+
+源内只保存 delivery、来源事件引用和处理中的防重入状态；身份、策略和原因从持久消息读取。校验、消息准备或可用窗口检查等前置步骤失败，且尚未创建会话或开始提交消息时，保留待决策供重试。
+
+Controller 显式编排执行步骤：新会话依次准备消息、创建 Thread、保存 Run 关联、授权并启动；继续会话先准备并校验请求，再提交。执行器不通过 onCreated/onDispatch 回调修改 Controller 状态。部分执行失败统一调用领域失败收尾；动作完成后的记录异常走独立提示路径，不使用共享闭包变量推断执行阶段。
+
+一旦已创建会话或开始提交消息，后续失败不再允许用同一决策重试：移除消息源的执行上下文，将本次 Run 标为 failed，并将决策置为 invalidated，已有会话和消息保留供用户检查。失败快照保存不成功时，复用停止请求标记暂停当前进程的自动推进，并明确提示存储失败；不新增锁、队列或跨存储事务。
+
+成功执行后的日志或通知更新失败不撤销动作，返回“已执行，请勿重复执行”的提示。三个动作均检查通知完成结果；resolved 只在动作成功后写入，不作为执行前的领取状态，也不回滚为 pending。APP 操作结果使用独立提示展示，通知移除后仍可看到失败或记录异常信息。
+
+### 6.2 Provider Retry
+
+Provider Retry 始终复用当前 Thread，不受 Biz Retry 上下文阈值影响。使用 5/30/120 秒退避，最多三次，发送“继续当前任务”。每次发送前重新检查 Run、会话及 Feature 状态；已推进或终止时取消计划。计数和下一次重试时间保存在 Run 中；成功 Turn 清除相应失败等待，耗尽则失败。
+
+## 7. Human Gate
+
+Human Gate 由当前 Harness 插件的 Hook 发起。源检查：消息为 1–2,000 字符的非空文本，项目/特性/会话和 Hook 标识有效，插件归属匹配且 Feature 绑定存在。
+
+每个 Feature 的门禁通过运行时记录防止并行推进；批准后的门禁保留执行 lease，直到受保护操作释放。冲突请求被拒绝；涉及 ManagedRun 时记录冲突并按领域策略失败。
+
+持久消息保存公共身份、消息、时间和状态；Human Gate 专属 payload 仅包含 hookId。`gateId` 引用 notificationId；页面需要的 `HarnessHumanGateSnapshot` 即时投影，不回写 Feature 文件，也不放入 Binding、项目列表或 Run detail 的返回字段。页面只通过通用通知订阅刷新门禁；领域重复门禁检查直接查询待处理通知，并保留执行中的门禁句柄检查。
+
+批准/拒绝按通知 ID 查询并核对领域身份，检查与提交之间不异步读取 Feature 文件。批准恢复受保护工具；拒绝或来源执行中断结束等待，关联托管运行按领域规则终止。无 Run 关联的门禁不写托管 Journal。
+
+## 8. IM 接入与特性配置
+
+### 8.1 特性 IM 开关
+
+Feature 详情页提供开关：
+
+> 通过招乎管理特性
+
+开关是 Feature 本身的产品配置，不绑定 IM principal，也不是一条授权记录。它直接持久化在现有 `harness-board-features.json` 的 Feature binding 中：
 
 ```ts
-interface ManagedFeatureSnapshot {
-  featureStatus: string
-  currentNodeId: string
-  currentNodeStatus: string
-  isFinalNode: boolean
-  nextAction?: {
-    slashSkill?: string
-    userMessage?: string
-  }
-  fingerprint: string
+interface HarnessFeatureBinding {
+  // existing fields...
+  imManagementEnabled?: boolean;
 }
 ```
 
-Main 与 Renderer 共用同一个纯 `resolveHarnessRunNextAction()`，不得分别实现路由算法。
+字段缺失或为 `false` 均表示关闭。Feature binding 保存布尔配置，授权身份由 Thread grant 管理。“允许从招乎在 Feature 下新建会话”的 Feature grant 与本开关相互独立。
 
-### 8.2 决策优先级
+特性 IM 开关的运行时语义是：创建后续 Feature 顶层 Thread 时，通过现有 Thread grant 机制为该 Thread 接入招乎。Thread grant 仍是会话消息同步和远程操作的实际授权依据。
 
-Controller 优先使用插件 `feature_status` 返回的顶层 `featureStatus`。当顶层状态缺失或无法识别时，回退到
-`currentNodeId + currentNodeStatus` 推导有效 Feature 状态；`isFinalNode` 由 workflow 节点顺序计算。
+创建 Thread grant 时不引入新的路由选择逻辑，直接复用统一招乎机器人现有的 authoritative/default route 解析和授权基础设施。用户正常登录并连接招乎服务端后即可为新会话创建 grant；路由不可用或 grant 创建失败时，沿用现有 IM 基础设施的错误与失败路径。Feature binding 不保存 `principalId` 或 `conversationKey`。
 
-```text
-1. 有效 featureStatus=done/archived，且当前节点为 workflow 最后节点，且 nodeStatus=done/archived
-   → complete
+自动接入范围包括：
 
-2. 有效 featureStatus=blocked/warning/error/unknown
-   → fail
+- 用户通过 DevClaw 手动创建的 Feature 顶层会话；
+- Managed Controller 创建的托管顶层会话；
+- 其他通过现有 Feature 会话入口创建的顶层会话。
 
-3. hook_halt / failure_fuse / 非 provider Agent Error
-   → fail
+关闭开关后：
 
-4. 尚无 currentSession/decisionBaseline（首次启动）
-   → 校验 nextAction
-   → 创建第一个普通会话
-   → bizRetryCount=0
+- 后续普通 Feature 会话不再自动创建 Thread grant；
+- 不撤销或修改任何已有 Thread grant；
+- 当前托管会话和已有会话继续保持原有招乎连接；
+- UI 提示“后续会话将不再发送消息到招乎”。
 
-5. provider_error
-   → 不应用 90% 上下文阈值
-   → 原 Thread 按 5/30/120 秒退避发送“继续当前任务”
-   → providerRetryCount+1，最多三次
+通过有效招乎短码选择“托管开启新会话”时，使用短码保存的路由接入招乎。关闭特性 IM 开关会使当时所有 pending 短码失效；之后只能从 APP 处理，APP 新会话依据当前特性配置决定是否接入招乎。
 
-6. Agent success，currentNodeId 相对当前基线变化
-   → advance，新建会话，bizRetryCount=0
+### 8.2 开启托管运行弹窗
 
-7. Agent success，currentNodeStatus 相对当前基线发生变化，且新状态=done/archived/skipped
-   → advance，新建会话，bizRetryCount=0
+“开启托管运行”弹窗提供选项：
 
-8. Agent success，当前阶段未推进，且 bizRetryCount 已完成三次
-   → fail，原因“当前任务重试超过限制次数”
+> 通过招乎管理托管运行
 
-9. Agent success，当前阶段未推进，上下文占用 >90%
-   → biz_retry_new_thread
-   → bizRetryCount+1
+该选项每次打开弹窗都默认勾选；确认时直接写入特性 IM 开关：
 
-10. Agent success，当前阶段未推进，上下文占用 <=90% 或无法计算，featureStateHash 不变
-   → biz_retry_new_thread
-   → bizRetryCount+1
+- 勾选并确认：先把 `imManagementEnabled` 写为 `true`，再开启托管；
+- 取消勾选并确认：先把 `imManagementEnabled` 写为 `false`，再开启托管；
+- 关闭或取消弹窗：不修改特性 IM 开关。
 
-11. Agent success，当前阶段未推进，上下文占用 <=90% 或无法计算，featureStateHash 变化
-   → biz_retry_reuse_thread
-   → 原 Thread 发送“继续当前任务”
-   → bizRetryCount+1
-```
+因此，托管运行是否通过招乎管理不形成第二套持久配置，始终由特性 IM 开关及已物化的 Thread grant 决定。
 
-`nextAction.slashSkill` 和 `userMessage` 只在创建新 Thread 时必须同时为非空字符串，任一缺失都将 ManagedRun 标记为 failed。`biz_retry_reuse_thread` 和 Provider Retry 使用平台固定消息“继续当前任务”，不依赖 nextAction。slashSkill 可以解析为当前绑定 Harness 插件提供的可用 Skill，或已启用的本地非插件 Skill；不接受其他插件的 Skill。
+创建会话与 grant 的失败策略：
 
-### 8.3 每个工作单元新会话
+- 普通手动会话：Thread 创建成功但自动 grant 失败时保留 Thread，并向用户提示未能接入招乎；
+- 创建会话当时特性 IM 开关开启时，勾选后启动托管以及 Controller 后续自动新建托管会话都必须先成功创建 Thread grant 才启动 Agent；开关关闭时正常启动且不创建 grant；
+- 招乎决策“托管开启新会话”：必须先成功创建 Thread grant 才启动 Agent。若 Thread 已创建，grant 失败时保留该会话、结束本次决策并停止托管，不允许通过原短码重复创建；用户检查后可重新开始托管。
 
-`advance` 和 `biz_retry_new_thread` 创建新的普通项目会话；`biz_retry_reuse_thread` 继续当前会话：
+### 8.3 IM 接入架构
 
-```text
-dev.plan → Session 1
-dev.code/B001 → Session 2
-dev.code/B002 → Session 3
-dev.code/Review → Session 4
-dev.review → Session 5
-```
+IM 服务只负责消息投递、身份与会话路由校验，以及“短码 → 领域操作”的临时映射。业务事实源按以下边界管理：
 
-Controller 对规范化 nextAction 生成 `nextActionHash`，再对 `currentNodeId + featureStatus + currentNodeStatus + nextActionHash` 生成 `featureStateHash`。两者均为带版本/域分隔的完整 SHA-256。Hash 不直接决定是否推进阶段；只有 currentNodeId 变化，或 currentNodeStatus 相对基线发生变化并进入 done/archived/skipped，才视为推进。其余情况使用 Hash 判断是否仍有业务进展：hash 变化表示仍有进展，优先复用当前 Thread；hash 不变表示没有识别到进展，使用新 Thread 重新执行当前阶段。
+- 工具审批：沿用现有工具审批模型；
+- Human Gate：通知存储保存决策状态；现有 Human Gate Service 保留工具等待句柄；
+- Biz Retry：通知存储保存决策状态；ManagedRun Controller 保留执行与会话归属。
 
-两种行为是独立 Controller action：`biz_retry_reuse_thread` 和 `biz_retry_new_thread`，并共享当前阶段唯一的 `bizRetryCount`。每次 Biz Retry 均增加计数；currentNodeId 变化，或 currentNodeStatus 变化并进入 done/archived/skipped 且创建推进会话时清零。完成三次 Biz Retry 后阶段仍未推进，则 ManagedRun failed，failureReason 为“当前任务重试超过限制次数”，reasonCode 为 `biz_retry_limit_exceeded`。
+复用现有工具审批 IM 链路中的基础设施和实现模式，包括主动消息 outbox、分段与 drainer、短码生成、`principalId + conversationKey` 校验、首个有效操作生效和生命周期清理；但不复用或重构以下业务对象：
 
-上下文占用比例使用 Agent Turn 上报的 `inputTokens / maxTokens`。严格 `>0.9` 时强制 `retryMode=new_thread`；等于 90% 仍允许复用。缺少 contextUsage、数值无效或 maxTokens<=0 时视为无法计算，回退到 `featureStateHash` 的自适应规则。该阈值只覆盖 Biz Retry，不影响 Provider Retry。
+- `ApprovalDecisionBroker`；
+- 工具审批 `codes` Map；
+- 远程工具审批审计表；
+- `remoteApprovalEnabled` 总开关；
+- 工具审批的 10 分钟 TTL。
 
-Controller 内部配置：
+提供两个轻量领域适配器：
 
 ```ts
-interface ManagedRunPolicyConfig {
-  incompleteStageRetryMode: "adaptive" | "reuse_thread" | "new_thread"
-  maxBizRetries: number
-  maxProviderRetries: number
-  maxContextReuseRatio: number
-}
-
-const DEFAULT_MANAGED_RUN_POLICY = {
-  incompleteStageRetryMode: "adaptive",
-  maxBizRetries: 3,
-  maxProviderRetries: 3,
-  maxContextReuseRatio: 0.9
-}
+ImBizRetryAdapter
+ImHumanGateAdapter
 ```
 
-V2 只实现并使用默认 `adaptive`，暂不向插件或项目开放配置入口，保持插件零新增协议。
+二者位于 `services/im/biz-retry-adapter.ts` 和 `services/im/human-gate-adapter.ts`，按 `biz_retry` / `human_gate` 源类型注册到 IM 渠道；动作类型来自共享领域类型，不引用领域服务实现。二者维护各自的内存短码索引。只做最基础的一次性消费兜底：第一个到达且通过校验的有效决策生效；重复、过期或已在桌面处理的操作返回已失效提示，不引入锁、队列或独立幂等存储。
 
-## 9. 重试与保护
+消息 outbox 可继续按现有方式持久化，因此 App 重启后可能仍会投递一条已经失效的通知；短码映射不会恢复，用户操作返回已失效。这是 接受的限制。
 
-### 9.1 Provider Error
+Thread grant 在 Biz Retry 或 Human Gate pending 期间的行为与现有工具审批保持一致：允许用户关闭 grant，不增加 Renderer 禁用、Main 拦截或 pending 查询；已生成的短码继续使用创建时保存的路由快照，关闭 grant 不取消已经发起的等待，后续新消息和新审批不再通过该 grant 接入招乎。
 
-`provider_error` 表示模型 Provider/API 调用失败，例如请求超时、网关错误、连接中断、模型服务不可用或流式异常。
+## 9. 通用消息模型与渠道
 
-处理：
+### 9.1 持久化
 
-```text
-初始 Turn provider_error
-  → Run 保持 running，记录 nextRetryAt
-  → 5 秒后在原 Thread 自动发送“继续当前任务”（1/3）
-  → 仍失败，30 秒后发送“继续当前任务”（2/3）
-  → 仍失败，120 秒后发送“继续当前任务”（3/3）
-  → 仍失败，ManagedRun failed
-```
+消息使用 APP SQLite 中的 `app_messages` 表：
 
-约束：
+| 独立列 | 含义 |
+|---|---|
+| notification_id | 消息唯一身份 |
+| kind | decision |
+| source_type | 消息源类型，开放字符串 |
+| status | pending / resolved / invalidated |
+| created_at / updated_at | GMT+8 时间 |
+| completed_at | 终态完成时间，待处理消息为空；独立列，不在信封重复保存 |
+| envelope_json | 其余信封字段和不透明领域 payload |
 
-- 不创建新 Thread；
-- 不增加 stageSessionIndex；
-- 只增加当前节点 providerRetryCount；
-- 每次发送前检查 Run 仍为 `running`、runId 匹配且存在匹配的 `nextRetryAt`；
-- 每次发送前重新 Inspect；状态已推进则取消旧重试；
-- Provider Retry 始终复用原 Thread，不受 90% 上下文阈值影响；
-- 任意一次成功 Turn 后，在重新 Inspect 和决策前将当前节点 providerRetryCount 清零并清除 nextRetryAt；原计数非零时记录 `provider_retry_reset/turn_succeeded`；
-- App 重启后未发送的 retry 不自动恢复，Run 标记为 `failed`；
-- 用户停止后未发送的 retry 取消；
-- 三次失败后整个 Run failed。
+`disabledTargets` 是目标到禁用布尔值的映射。`targets` 表示投递目标；`channel` 表示决策来源，`system` 是自动结束来源，与 `system_notification` 投递目标不同。当前只支持 `kind: "decision"`，新增 kind 时须同时设计生命周期、恢复和留存策略。
 
-### 9.2 其他失败
+信封不重复保存独立列。索引覆盖待决策查询及终态决策按完成时间的恢复与清理；持久层按 notificationId + pending 条件更新，不增加消息源专属字段或校验规则。
 
-| 情况 | V2 行为 |
-| --- | --- |
-| currentNodeId 变化 | `advance`，新建会话并清零 bizRetryCount |
-| currentNodeStatus 变化并进入 done/archived/skipped | `advance`，新建会话并清零 bizRetryCount |
-| 当前阶段未推进且上下文占用 >90% | `biz_retry_new_thread`，增加 bizRetryCount |
-| 当前阶段未推进、上下文可复用且 featureStateHash 不变 | `biz_retry_new_thread`，增加 bizRetryCount |
-| 当前阶段未推进、上下文可复用且 featureStateHash 变化 | `biz_retry_reuse_thread`，原 Thread 发送“继续当前任务”，增加 bizRetryCount |
-| 完成三次 Biz Retry 后阶段仍未推进 | ManagedRun failed，原因“当前任务重试超过限制次数” |
-| `hook_halt` | ManagedRun failed |
-| `failure_fuse` | ManagedRun failed |
-| 用户停止 | `cancelled`，不取消已有会话 |
-| 有效 featureStatus blocked/warning/error/unknown | ManagedRun failed |
-| Thread 创建失败 | ManagedRun failed |
-| Skill 解析失败 | ManagedRun failed |
-| Agent 启动失败 | ManagedRun failed |
+| 信封字段 | 含义 |
+|---|---|
+| title / message | 展示内容 |
+| targets | 多选目标：app_view 为 APP 读目标，im、system_notification 为投递目标 |
+| disabledTargets | 目标到禁用布尔值的映射，true 表示禁用 |
+| payload | 通用层视为 unknown，由消息源定义 |
+| action / channel | 最终动作及处理来源 desktop/im/system |
+| reasonCode / result | 稳定原因码与展示结果 |
+| completedAt | 读取时从 completed_at 列投影的消息处理结束时间 |
 
-V2 不自动重试平台动作。用户重新开启失败 Run 时会创建新的 runId，并重新从 `feature_status` 开始。
+领域创建参数按 human_gate / biz_retry 区分各自必需的 payload 和策略字段，由消息源保证业务正确性；领域返回对象直接从已创建信封及已知 payload 构造，不依赖可失败的读取投影。
 
-### 9.3 V2 保护边界
+创建参数只包含源类型、种类、展示内容、投递目标、payload 和可选 ID；ID/时间及完成字段由生命周期入口产生。本期模型仅支持 decision，接入 Human Gate、Biz Retry 两类决策，不预留普通信息、通知中心或已读状态。
 
-V2 持久化两套相互独立的重试上限：
+Harness payload 保存 projectId、featureId、sourceThreadId、可选 runId/nodeId、policyResult，以及 humanGate.hookId 或 bizRetry.nextAction。预计 nextAction 仅用于展示，不替代执行时重新检查。扁平领域读取模型只在内存中投影。
 
-```text
-maxProviderRetriesPerNode = 3
-maxBizRetriesPerStage = 3
-```
+### 9.2 留存与清理
 
-Provider Retry 只处理模型服务失败并始终复用原 Thread；Biz Retry 只处理成功结束但当前阶段尚未结束的业务继续执行，并按自适应规则选择复用或新建 Thread。两者预算独立。V2 仍不实现通用会话总数、节点会话数或 Token 硬预算；托管会话仅为 `execute` 提供固定 20 分钟前台超时，不将该常量扩展为 ManagedRun 总时长预算。通用计数和硬限制进入 V3。
+所有 resolved / invalidated 消息统一按 completed_at 保留 60 天，且终态消息总数最多保留最新 10,000 条，按 completed_at、notification_id 倒序确定顺序。留存与终态历史扫描不区分 kind；pending 查询和重启失效仍只处理 decision，其他种类须另行定义生命周期，不能套用决策恢复规则。pending 消息不按终态留存策略清理。
 
-### 9.4 托管会话的后台执行边界
+启动分页恢复完成后清理，此后每隔 24 小时清理一次；先删除超期记录，再删除超过数量上限的记录。每批最多删除 200 条，批次之间让出主线程。清理周期之间允许暂时超过上限；失败记录诊断并在下一周期重试。终态部分索引覆盖完成时间与 ID，不解析 JSON 判断到期。删除释放的 SQLite 页供后续写入复用，不在日常清理中执行阻塞式 VACUUM。
 
-V2 将 Agent Turn 作为 Controller 的唯一会话结算输入，但必须避免一个 Turn 启动脱离当前 Turn 的工作后被误判为阶段已完成。平台只对两种内置异步能力制定托管规则：`execute(run_in_background=true)` 和 Dynamic Workflow；插件私有 Task/Batch 仍由插件状态与 `feature_status` 表达。
+消息服务负责通用留存，不查询领域 Journal。已写入 events.ndjson 的历史不受清理影响；超出保留时间或数量上限的消息不再提供补写依据。若领域日志长期写入失败，这部分历史可能无法恢复，这是有限补写窗口的明确取舍。
 
-#### 9.4.1 execute 强制前台与 20 分钟超时
+app_messages 为本期首次引入的表，不提供分支开发中间态缺列结构的迁移；此类开发数据库需单独重置该表。索引初始化将旧的决策专用终态索引替换为覆盖所有终态的索引，不重建已有消息表。
+
+### 9.3 渠道生命周期
+
+两个源指定 APP 界面为读目标、IM 和系统通知为投递目标；缺少有效 IM 路由时跳过招乎投递，APP 仍可处理。系统通知前后台均提醒，按 notificationId 保存实例，在消息结束时调用 close；操作系统通知历史的展示遵循系统行为。
+
+任一端成功后，消息结束生命周期驱动 APP 移除对应提示、IM 清理短码和系统通知关闭。迟到操作再次读取持久 pending 状态。招乎历史消息保留，消息中的短码不再有效。
+
+APP 不注册投递适配器。notification-service 在 created、ended、channel_disabled 的源监听器执行和投递生命周期分发后，统一发布读模型变更；运行时上下文失效也使用同一信号。IPC 层是 APP 刷新的唯一订阅入口。持久 ended 监听器只释放 Biz Retry 执行上下文，避免重复发布；运行时失效不依赖持久化成功。notification-read-model 只负责源可见性判定和读模型变更信号，不依赖 Electron。
+
+注册表先匹配投递目标和可选源类型，再分发生命周期。IM 适配器只接收对应源的消息，系统通知适配器可接收所有源。IM 入队失败删除本次短码，由渠道层记录失败；已入队但发送失败时保留短码，继续通过 outbox 重试。
+
+渠道禁用关闭对应投递资源并通知读模型变化，不重发 created。APP 查询只返回面向可用 app_view 的 pending 决策；同一窗口共享通知缓存，并发刷新合并为一个进行中的请求；查询期间再次收到刷新请求时，丢弃旧结果并合并补查，避免丢失新状态。切换 Feature 优先从共享缓存筛选，不按组件重复查询。查询失败保留当前显示并每 2 秒重试，窗口聚焦时补查，最后一个订阅退出后停止监听和重试。渠道异常互相隔离，招乎重试复用 outbox。
+
+工具审批继续使用独立的 ApprovalDecisionBroker、requestId/toolCallId、授权规则与远程审批审计；通知业务决策不接管工具授权。
+
+## 10. 后台执行与 Workflow 结算
+
+托管模式将 Agent Turn 作为 Controller 的唯一会话结算输入，但必须避免一个 Turn 启动脱离当前 Turn 的工作后被误判为阶段已完成。平台只对两种内置异步能力制定托管规则：`execute(run_in_background=true)` 和 Dynamic Workflow；插件私有 Task/Batch 仍由插件状态与 `feature_status` 表达。
+
+### 10.1 execute 强制前台与 20 分钟超时
 
 只有当前 Thread 仍是对应 `running` ManagedRun 的 `currentSession` 时，才属于 active Managed Session；历史 metadata 中仅保留非空 `harnessFeature.runId` 不足以启用托管执行。active Managed Session 及其继承运行时中，`execute` 禁止脱离当前 Agent Turn：
 
@@ -575,7 +380,7 @@ V2 将 Agent Turn 作为 Controller 的唯一会话结算输入，但必须避�
 
 20 分钟常量只覆盖 active Managed Session 的前台 shell 执行。Controller 启动首个会话或重试时额外携带仅对该次物理 Run 有效的内部 `managedExecution` 授权，用于桥接 Agent handler 先启动、`currentSession` 快照稍后落盘的竞态；该授权不写入 Thread metadata，后续人工 Turn 仍重新检查 active 状态。普通会话、已 completed/failed/cancelled 的历史托管 Thread 后续人工 Turn，保持前台 60 秒、后台任务返回 `task_id` 的现有行为。托管 Workflow 的叶子 Agent 和其他由托管 Runtime 派生、实际承担阶段工作的 Runtime 必须显式继承该约束，避免子 Runtime 再次创建可越过父 Turn 的后台命令。
 
-#### 9.4.2 Workflow launch Turn 与 notification Turn
+### 10.2 Workflow launch Turn 与 notification Turn
 
 Dynamic Workflow 的 launched、后台 engine、结果持久化、进度广播和 notification 注入协议保持不变。Managed Controller 不订阅 `workflow_progress`、engine completed/error、取消或其他 Workflow 生命周期事件，只消费 Agent Turn End。
 
@@ -587,7 +392,7 @@ interface AgentTurnExecutionFacts {
 }
 ```
 
-该事实在一次物理 Agent Run 内跨模型 failover、Goal continuation 等内部 LLM 子调用累积，并随该物理 Run 唯一的 `AgentTurnEndEvent` 进入 Managed Controller。内部 LLM 子调用不是独立的托管结算输入，不能在子调用之间重置该集合。Controller 在确认事件属于当前 ManagedRun/currentSession 后，若 `workflowLaunchedRunIds` 非空，则不写入 `session_completed`、不 Inspect、不重置 Retry、不推进或结束 ManagedRun。判断依据是“本次物理 Agent Run 是否实际启动过 Workflow”，不得在结束时查询 `workflowRunManager.isActive(threadId)`；后者无法覆盖 Workflow 在 Agent Run 结束前已经快速完成并移出 active 表的竞态。
+该事实在一次物理 Agent Run 内跨模型 failover、Goal continuation 等内部 LLM 子调用累积，并随该物理 Run 唯一的 `AgentTurnEndEvent` 进入 Managed Controller。内部 LLM 子调用不是独立的托管结算输入，不能在子调用之间重置该集合。Controller 在确认事件属于当前 ManagedRun/currentSession 后，若 `workflowLaunchedRunIds` 非空，则不写入 `managed_agent_turn_ended`、不 Inspect、不重置 Retry、不推进或结束 ManagedRun。判断依据是“本次物理 Agent Run 是否实际启动过 Workflow”，不得在结束时查询 `workflowRunManager.isActive(threadId)`；后者无法覆盖 Workflow 在 Agent Run 结束前已经快速完成并移出 active 表的竞态。
 
 ```text
 Workflow launch 所在 Agent Turn 正常结算
@@ -613,844 +418,16 @@ notification Turn 失败时优先由 Workflow 的 at-least-once 交付机制负�
 
 因此 Managed Provider Retry 只在普通托管 Agent Turn 的 Provider Error，或 Workflow re-notify 已耗尽后交接的最后一次 notification Provider Error 上生效；Workflow 业务执行 `status=error` 但 notification Turn 成功时，Agent outcome 仍为 success，由 Controller 重新 Inspect `feature_status` 决策。
 
-普通 Dynamic Workflow 不读取 ManagedRun 状态，也不改变 launched、engine、notification ack/re-notify 和取消逻辑。所有新增策略以有效 ManagedRun 绑定为边界，不能仅以 `agentMode="workflow"` 判断。
+普通 Dynamic Workflow 不读取 ManagedRun 状态，也不改变 launched、engine、notification ack/re-notify 和取消逻辑。托管策略以有效 ManagedRun 绑定为边界，不能仅以 `agentMode="workflow"` 判断。
 
-## 10. V2 并发与恢复边界
+## 11. 托管领域事件与日志
 
-### 10.1 进程内 Feature 互斥
-
-同一 `projectId + featureId` 的 Inspect → Decide → Persist → Launch 必须在 Main keyed mutex 内串行执行，防止多个 sibling 会话同时结束后创建重复会话。
-
-该 mutex 只在当前 App 进程内有效，不提供跨重启 action 幂等。
-
-### 10.2 重启边界
-
-App 重启时：
-
-- 未终态 Run 标记为 failed；
-- 不恢复旧平台动作；
-- 不扫描 actionKey；
-- 不复用退出前托管 Thread；
-- 不自动重新执行 feature_status；
-- 用户点击“开始托管”后以新 runId 重新执行；
-- Provider Retry 计数不跨 Run 继承；
-- 新 Run 可能根据 Feature 当前状态重新进入未完成工作。
-
-### 10.3 V3 提升
-
-V3 再增加：actionKey、Thread metadata 关联、action 索引、平台动作重试、跨重启幂等、会话/节点计数、硬预算和 event replay。
-
-## 11. V1 插件动作协议移除
-
-V2 删除 V1 插件动作命令映射、能力字段、动作数组、草稿恢复、旧状态通知和执行器，只保留 `feature_status + nextAction + Controller Policy`。插件配置中残留的旧字段被忽略；未来如需插件高级策略，必须重新版本化设计，不能恢复旧优先级或形成第二控制源。
-
-## 12. 决策审计与可视化
-
-### 12.1 UI 复用范围
-
-Feature 详情页是唯一主入口，复用现有：
-
-- Execution timeline；
-- 当前节点展示；
-- Selected stage；
-- Feature 会话列表。
-
-V2 不新建第二套阶段树。
-
-### 12.2 ManagedRun 总览
-
-右侧“托管模式信息”只回答当前状态，避免和已有 Current stage 及完整时间线重复：
-
-```text
-ManagedRun 状态
-活跃会话；没有活跃会话时显示最近会话
-等待 Provider Retry 时显示次数 / 上限和计划时间
-当前 bizRetryCount 非零时显示当前任务重试次数 / 上限
-failed/cancelled 时显示一行有界原因
-```
-
-开始/停止托管按钮保留在 Feature 页头。当前节点继续由已有 Current stage 展示。Managed Run 展示开始/更新时间、最近操作和历史状态，但不展示内部 runId。历史 ManagedRun 的 UI 入口仍默认只展示最新 Run，暂不增加历史 Run 切换器。
-
-### 12.3 Selected Stage 增强
-
-现有 Execution timeline、Selected stage、产物和 Hook 继续使用同一个 `selectedNodeId`。Managed Run 以 Workflow 节点顺序为排序事实源，但只渲染当前已加载记录中至少存在一条可见事件的阶段，避免空阶段冗余。Managed Run 与阶段流程双向联动：
-
-- 点击阶段流程节点，选中现有阶段并展开、滚动到对应 ManagedRun 事件分组；
-- 点击 ManagedRun 阶段分组，反向选中已有阶段；
-- 选择阶段只高亮和展开，不过滤或隐藏其他阶段事件；
-- 当前阶段存在可见事件时默认展开，所有非当前阶段默认收起；用户手动展开/收起状态在当前页面生命周期内保留；
-- 阶段分组保持稳定的 Workflow 顺序，阶段内部事件保持 NDJSON 文件顺序倒序；未知 nodeId 的事件分组追加在 Workflow 阶段之后；
-- 没有可见事件的阶段不显示；加载更早事件后若首次出现该阶段，则按 Workflow 顺序插入分组；
-- 当前阶段节点可展示轻量“托管中”或 Retry 状态，不复制完整审计信息。
-
-### 12.4 Managed Run
-
-Managed Run 放在左侧阶段内容列，宽度与 Selected stage 和阶段产物一致，紧贴阶段产物下方；不放在 340px 右侧栏，也不横跨整个 Feature 页面。时间线按以下层级分组：
-
-```text
-全局生命周期
-dev.plan
-dev.code
-dev.review
-```
-
-全局生命周期固定承载 Run 创建、停止、完成、失败、取消和 App 中断，不受阶段选择影响。阶段分组保持稳定的 Workflow 顺序；全局事件和各阶段组内事件严格按照 NDJSON 文件顺序倒序展示，加载更早事件时追加到对应倒序列表尾部。时间线详情至少支持：
-
-- Run 创建、停止、完成、失败、取消；
-- feature_status snapshot；
-- 会话创建/启动/结束；
-- nextAction；
-- Controller decision；
-- 自动会话创建/启动结果；
-- Provider Retry 计划和执行；
-- Provider Retry 成功清零；
-- App 重启导致 Run failed；
-- 停止后已有会话自然结束且不再推进。
-
-用户可见事件文案：
-
-```text
-run_started              → 启动托管运行
-decision_made            → 托管运行决策
-session_created          → 创建会话
-session_completed        → 会话结束
-provider_retry_sent      → 发起模型服务重试
-provider_retry_reset     → 模型服务已恢复
-biz_retry_reuse_thread   → 继续当前任务
-biz_retry_new_thread     → 重新执行当前阶段
-run_cancelled            → 已停止托管
-run_failed               → 托管失败
-run_completed            → 托管完成
-```
-
-`feature_inspected`、`provider_retry_scheduled` 和 `session_started` 正常持久记录，但不渲染到时间线。检查结果通过 `decision_made.decisionFacts` 进入决策 tips。决策使用动作导向的中文标签：`advance → 创建新会话执行后续任务`、`biz_retry_reuse_thread → 复用当前会话继续任务`、`biz_retry_new_thread → 创建新会话重试当前阶段任务`、`provider_retry → 复用当前会话重试模型服务`、`fail → 结束托管运行`、`complete → 完成托管运行`。决策标签 hover 或键盘 focus 时分为“判断事实”和“判断规则”两部分：事实来自结构化 decisionFacts，规则来自 decisionRule；不直接展示通用 summary。UI 不展示内部 action、source、reasonCode 或 runId。
-
-自适应 Biz Retry 六种分支必须分别持久化并展示以下 tips 依据：
-
-| 分支 | 判断事实至少包含 | 判断规则 |
-| --- | --- | --- |
-| currentNodeId 变化 | 上次阶段、当前阶段、bizRetryCount | 当前节点变化表示进入新的工作阶段，创建新会话并清零 Biz Retry |
-| currentNodeStatus 变化并进入 done/archived/skipped | 当前阶段、上次 nodeStatus、当前 nodeStatus、nextAction 是否合法 | 当前阶段状态变化并进入结束状态，创建新会话推进并清零 Biz Retry |
-| Biz Retry 已完成三次 | 当前阶段、nodeStatus、bizRetryCount=3 | 三次业务重试后阶段仍未推进，Run failed |
-| 上下文占用 >90% | inputTokens、maxTokens、占用百分比、90%阈值 | 上下文超过复用阈值，不复用当前会话，创建新会话重试 |
-| 上下文可复用且 featureStateHash 不变 | 上下文占用或“无法计算”、四项基线均未变化、bizRetryCount | 未识别到业务进展，创建新会话重新执行当前阶段 |
-| 上下文可复用且 featureStateHash 变化 | 上下文占用或“无法计算”、具体 changedFields、bizRetryCount | 仍有业务进展且上下文可复用，在原 Thread 输入“继续当前任务” |
-
-decisionFacts 因此增加：`previousNodeId`、`contextInputTokens`、`contextMaxTokens`、`contextUsageRatio`、`contextReuseThreshold`、`contextReusable` 和 `bizRetryCount`；具体 Biz Retry方式由独立 action 枚举表达。Hash 不直接展示，只展示由结构化 decisionBaseline 比较得到的 changedFields。
-
-自动创建的托管 Thread 在 V2 与普通 Feature 会话同等展示，不隐藏、不折叠、不改变 Sidebar 规则。
-
-### 12.5 UI 状态
-
-- Loading：读取 ManagedRun 文件时显示骨架，不阻塞 Feature 其他内容；
-- Empty：无历史 Run 时仅显示“尚未开始托管”；
-- Cancelled：显示 cancellationReason、已有会话状态和重新开始入口；
-- Failed：显示 failureReason、最后 Thread、重新开启入口；
-- Completed：显示完成时间、最终节点和历史时间线；
-- Corrupt：文件无法读取时显示“托管记录损坏”；损坏 Run 作为隔离历史保留，不提供 baseline、Retry、Thread 指针或自动动作。只要不存在有效 running Run 和活跃 Feature Thread，用户仍可开始新的 ManagedRun。
-- Timeline loading/error/corrupt 不阻塞已有阶段流程、产物和 Thread 访问；分页入口不依赖当前分组是否已有事件。
-
-## 13. Main 模块设计
-
-### 13.1 新增模块
-
-```text
-src/main/harness-board/managed-run-store.ts
-src/main/harness-board/managed-run-controller.ts
-src/main/harness-board/managed-feature-status.ts
-src/main/harness-board/managed-run-policy.ts
-src/main/harness-board/managed-run-recovery.ts
-```
-
-职责：
-
-- `managed-run-store`：精简快照、append-only 可视化事件；
-- `managed-run-controller`：持久状态管理和进程内 keyed mutex；
-- `managed-feature-status`：异步轻量 Inspect、nextAction、fingerprint；
-- `managed-run-policy`：纯规则决策与 reasonCode；
-- `managed-run-recovery`：App 启动将未终态 Run 标记为 failed。
-
-### 13.2 修改现有模块
-
-- `auto-mode-controller.ts`：从无状态入口改为 ManagedRunController 兼容适配层；
-- `auto-mode-action-executor.ts`：执行 Controller 内部 ManagedAction，关联 runId；
-- `agent-run-service.ts`：保持普通会话执行入口，支持 ManagedRun 关联元数据；
-- `agent.ts`：上报稳定 Turn 终态和 Provider Error；
-- `runtime.ts` / `workflow/tool.ts`：托管 Runtime 强制 `execute` 前台 20 分钟超时；Workflow launch 成功时只记录 Turn execution facts，不改变 launched/engine/notification 协议；
-- `service.ts`：提供 async feature_status snapshot、共享 nextAction 解析，并允许 `session_context_inject.agentConfig.agentMode` 配置 `solo/multi/agent_team/workflow`；
-- `harness-board-types.ts`：增加 ManagedRun/Action/Event/View 类型；
-- `thread-service.ts`：创建 Thread 时写入 runId/node/sessionIndex/attempt metadata；当 Thread 未显式指定 agentMode 时，将插件 `workflow` 默认值映射为 `metadata.agentMode="workflow"`；
-- preload/Renderer：查询 ManagedRun、订阅增量事件、开始/停止托管；
-- `HarnessBoardView.tsx`：ManagedRun 总览、Selected stage 增强和时间线详情。
-
-### 13.3 保持不变
-
-- 普通 Chat IPC；
-- 非 Harness Thread；
-- Skill 正文；
-- 插件 feature_status 协议；
-- request_user_input；
-- subagent/task；
-- Thread/checkpoint；
-- Hook 和 Agent Runtime；
-- Dynamic Workflow 公共 API。
-
-## 14. V3：结构化阶段结果与 Side Agent
-
-### 14.1 公共 Schema Capture
-
-将 Workflow `createStructuredOutputTool()` 中通用能力抽取为参数化内核：
-
-- JSON Schema tool input；
-- runtime validation；
-- repair feedback；
-- 最大 5 次不同无效输入；
-- 连续 3 次相同无效输入 hard stop；
-- 首个合法结果获胜。
-
-原 `structured_output` 必须保持：
-
-- 工具名；
-- Prompt；
-- 错误文本；
-- stopAfterAccepted；
-- nudge；
-- fresh-session retry；
-- journal/hash；
-- 全部现有测试。
-
-### 14.2 managed_stage_result
-
-托管会话注入独立工具 `managed_stage_result`，使用公共 Schema Capture，但：
-
-- 不替代用户最终回复；
-- 不自动 stop stream；
-- 结果持久写入 ManagedRun；
-- 与 stageExecutionId/turnId 关联；
-- 不允许指定任意 Skill、命令、workspace 或 checkpoint。
-
-实际发给 Agent 的模型消息在原 `nextAction.userMessage` 后追加：
-
-```xml
-<managed-mode>
-当前 Feature 已开启托管模式。
-本轮工作结束前必须调用 managed_stage_result 工具，提交符合 Schema 的阶段执行结果。
-该报告不替代 Skill 产物、Hook、runner、Evidence 或 checkpoint。
-</managed-mode>
-```
-
-插件 `feature_status` 原始对象不被修改；这是 Controller 派生的模型消息。
-
-### 14.3 缺失报告补交
-
-仅 `outcome=success` 正常结束但缺少合法报告时：
-
-1. ManagedRun 进入 `awaiting_stage_result`；
-2. 同一 Thread 自动发送报告补交 userMessage；
-3. 不重新执行业务、不增加 bizRetryCount；
-4. 初始业务 Turn 之后最多补发 3 个报告 Turn；
-5. 仍缺失则整个 ManagedRun failed；
-6. 此分支不调用 Side Agent。
-
-Provider Error 使用独立重试预算，不消耗报告补交次数；hook_halt、failure_fuse、用户取消和 pending user input 不触发补交。
-
-### 14.4 Recovery Side Agent
-
-V3 只在规则无法确定时调用只读 Side Agent：
-
-- feature_status 与合法报告冲突；
-- 路由未变化且报告语义不足；
-- 无法区分合法 handoff 和业务 retry；
-- 异常恢复证据冲突。
-
-Side Agent 输出结构化决策；相同证据使用 evidenceHash 缓存。Side Agent 不修改文件、不启动 subagent、不选择任意 nextAction，不覆盖 feature_status 明确事实。低置信度结果转为 failed 并等待人工重新开始。
-
-## 15. 安全与失败边界
-
-1. feature_status 输出视为插件输入，必须结构校验和有界解析。
-2. run.json 和 events.ndjson 在写入前与读取时使用同一套深层 schema 校验；currentSession、decisionBaseline、lastDecision.facts、decisionFacts.changedFields、状态枚举、时间和事件专属必填字段无效时标记 corrupt，不允许作为运行事实进入 Renderer。
-3. ManagedRun nextAction 必须同时包含 slashSkill 和 userMessage；slashSkill 只接受当前绑定插件的可用 Skill或已启用的本地非插件 Skill，不接受其他插件 Skill。
-4. 自动消息不接受插件任意 Tool、Shell 或附件。
-5. runId、nodeId、threadId 插入日志和路径前必须安全编码。
-6. ManagedRun 路径必须固定在经过校验的项目实际目录 `.cmbdevclaw/managed-runs`下，禁止由插件、Feature状态或 nextAction指定；featureId/runId仍需安全编码。
-7. 快照使用临时文件 + fsync/rename + 尽可能的父目录 fsync；事件追加完整行后 fsync。
-8. `events.ndjson` 只追加，文件顺序为权威顺序；损坏尾行可截断恢复，中间损坏 fail closed；单个 corrupt Run 不得中断 App 启动，UI 不得静默跳过损坏事件。
-9. V2 不承诺跨重启 action 幂等；自动创建的 Skill 必须能够根据插件真实状态安全恢复或拒绝重复执行。
-10. 所有当前进程内的自动决策在 Feature mutex 内完成。
-11. UI 不允许通过编辑展示数据直接修改 RunStore。
-
-## 16. 迁移与兼容
-
-### 16.1 V1 Feature binding
-
-- 删除 Feature binding 中的托管布尔字段，旧文件中的该字段在归一化后被忽略；
-- `ManagedRunSnapshot.status` 是唯一持久化托管生命周期事实源；
-- Renderer 从最新 ManagedRun 状态派生按钮状态；
-- V1 内存 action result 不迁移；
-- 现有 Thread 不修改归属，只有 V2 创建的新 Thread 带 ManagedRun metadata。
-- V2 不自动清理历史 ManagedRun；删除 Feature或项目时，由现有删除流程显式清理对应项目目录下的 ManagedRun。删除项目元数据前先解析并保留项目实际目录，确保删除后仍能清理 `.cmbdevclaw/managed-runs`。
-- 当前 V2开发阶段不迁移原全局应用目录中的 ManagedRun记录；新实现只读取项目实际目录。
-- 当前 V2 尚未提交，试运行期间生成的旧 `seq/time` 事件格式不提供迁移或兼容 reader；实施新 `eventId/createTime/cursor` 格式后，测试前显式清理旧试运行数据。
-
-### 16.2 V1 插件动作配置
-
-- V1 插件动作协议代码全部删除；
-- 插件配置中残留的旧字段不读取、不校验、不执行；
-- 旧 pending draft Thread value 不迁移，保留为无行为影响的历史数据。
-
-### 16.3 Workflow MVP
-
-V2 不合入或依赖 Harness Workflow MVP 的 Launcher、JS scheduler、Inspect relay 和 Runtime 叶子适配。若其他分支仍保留这些能力，应明确为独立实验/可选后端，不得与同一 Feature 的 ManagedRun 同时控制阶段。
-
-## 17. 实施分期
-
-### 17.1 V2-A：持久运行基础
-
-1. ManagedRun 类型和文件 Store；
-2. 精简 run.json 和可视化 events.ndjson；
-3. Feature 唯一未终态 Run；
-4. 显式 start/stop API 与 Run 状态门禁；
-5. App 重启将未终态 Run 标记为 failed；
-6. 查询 API 和基础总览。
-
-### 17.2 V2-B：feature_status 驱动
-
-1. async 轻量 Inspect；
-2. shared nextAction resolver；
-3. Controller 固定规则；
-4. 初始工作单元和阶段推进新建 Thread；
-5. 进程内 Feature mutex；
-6. 删除 V1 插件动作协议和能力门禁。
-
-### 17.3 V2-C：重试与停止
-
-1. Provider Retry 原 Thread“继续当前任务”3次，5/30/120秒退避；
-2. 自适应 Biz Retry：上下文>90%或 featureStateHash 不变使用新 Thread，否则复用当前 Thread；
-3. 两种 Biz Retry模式共享3次预算；
-4. 用户停止托管但不取消已有会话；
-5. 活跃会话自然结束后不再推进；
-6. completed/failed/cancelled 成为唯一托管生命周期终态。
-
-### 17.4 V2-D：决策可视化
-
-1. 右侧 ManagedRun 当前状态和活跃/最近会话；
-2. 位于左侧阶段产物下方、按全局生命周期与阶段分组的 Managed Run；
-3. Execution timeline、Selected stage 与 ManagedRun 阶段分组双向联动；
-4. 中文决策文案、原因 tips 和 Thread 跳转；
-5. loading/empty/running/failed/completed/cancelled/corrupt 状态。
-
-### 17.5 V3
-
-1. actionKey、action 索引和 Thread metadata 幂等关联；
-2. event replay、lastAppliedEventCursor 和 versioned reducer；
-3. 平台动作恢复/重试和跨重启 reconcile；
-4. 会话/节点计数、硬上限和精确预算；
-5. 公共 Schema Capture 抽取；
-6. `managed_stage_result`；
-7. `<managed-mode>` 控制信封；
-8. 最多三次报告补交；
-9. Side Agent；
-10. evidenceHash 缓存；
-11. 冲突决策可视化。
-
-## 18. 验证策略
-
-### 18.1 Store 与恢复
-
-- 原子 run.json 更新；
-- 无 seq 的 event append、opaque string cursor 分页和文件顺序稳定；
-- GMT+8 秒级 createTime；
-- 合法无换行尾记录补写换行；损坏尾行截断后可继续追加；中间损坏标记 corrupt 且不影响 App 启动；
-- latest decision 从 run.json 读取，不扫描完整 Journal；
-- current、lastDecision.facts 或 decisionFacts 嵌套结构无效时标记 corrupt，不能触发 Renderer 不安全访问；
-- 同 Feature 唯一未终态 Run；
-- App 重启 running → failed，并清除未发送的 `nextRetryAt`；
-- failed 可视化展示失败原因；
-- 用户重新开始时创建新的 runId；
-- 新 Run 从最新 `feature_status` 开始；
-- Provider Retry 计数不跨 Run 继承。
-
-### 18.2 Controller
-
-- 没有运行中会话才允许开启；
-- corrupt 历史不属于 active Run，不阻止新 Run；有效 running snapshot 或活跃 Feature Thread 仍阻止并发开启；
-- 开启后立即 Inspect 和启动首会话；
-- 启动 API 返回首轮后的 ManagedRun 状态；failed/completed 不显示“已开始托管”；
-- 最后 workflow 节点且有效 featureStatus/nodeStatus 为 done 或 archived → complete；
-- currentNodeId 变化 → advance，新建会话并清零 bizRetryCount；
-- currentNodeStatus 变化并进入 done/archived/skipped → advance，新建会话并清零 bizRetryCount；
-- 当前阶段未推进且上下文占用 >90% → biz_retry_new_thread；
-- 当前阶段未推进、上下文可复用且 featureStateHash 不变 → biz_retry_new_thread；
-- 当前阶段未推进、上下文可复用且 featureStateHash 变化 → biz_retry_reuse_thread，原 Thread 发送“继续当前任务”；
-- 第三次 Biz Retry 后阶段仍未推进 → fail，原因“当前任务重试超过限制次数”；
-- 有效 featureStatus blocked/warning/error/unknown → fail；顶层状态缺失时由 currentNodeId + nodeStatus 回退判断；
-- hook_halt/failure_fuse → fail；
-- Provider Retry 和 Biz Retry 使用相互独立的三次预算；
-- slashSkill 和 userMessage 任一缺失时 fail closed；
-- 已启用本地 Skill 可用，其他插件 Skill 不可用；
-- 成功 launch Workflow 的 Turn 正常结算，但 Controller 在写入 `session_completed` 前依据 `workflowLaunchedRunIds` 忽略本次托管判断；
-- Workflow 在 Turn 结束前快速完成时仍依据 Turn facts 忽略 launch Turn，不依赖 active 状态查询；
-- Workflow notification Turn 成功时使用普通 Agent Turn 的 Controller 路径；失败且 re-notify 未耗尽时不进入 Controller，耗尽后仅由仍 active 的 ManagedRun 接管最后一次 terminal；notification Turn 再次 launch/resume Workflow 时继续忽略本次判断；
-
-### 18.3 Provider Retry
-
-- 原 Thread 发送“继续当前任务”；
-- 5s/30s/120s 退避；
-- 成功后在 Inspect/Decide 前计数清零并记录 `provider_retry_reset`；
-- 第三次仍失败 → run failed；
-- stop 后定时 retry 不发送；
-- 重启后 retry 不自动发送；
-- Inspect 已推进时取消旧 retry。
-- 90% 上下文阈值不影响 Provider Retry，Provider Retry 始终复用原 Thread。
-
-### 18.4 竞态和 V2 恢复边界
-
-- 当前进程内两个 sibling 同时结束时由 Feature mutex 串行决策；
-- 重复 terminal event 在当前进程内保持现有 turnId 去重；
-- stop 请求携带 expectedRunId；只有当前活跃 Run 匹配时才设置 stop token；停止与 Agent 结束竞态不继续创建会话或发送 Retry；
-- 历史 Thread 取消不影响新的活跃 Run；
-- App 重启后不尝试找回旧 action/Thread；
-- 新 Run 只依据新的 feature_status 创建会话；
-- 时间线明确记录 `run_failed` 的 `app_interrupted` 原因。
-
-### 18.5 UI
-
-- 复用 Execution timeline 和 Selected stage；
-- 右侧 ManagedRun 当前状态和活跃/最近会话实时更新；
-- 每阶段会话/重试次数正确；
-- Managed Run 位于左侧阶段产物下方，宽度与 Selected stage 一致，并按全局生命周期和阶段分组；
-- 阶段流程与 ManagedRun 阶段分组双向联动，选择阶段不隐藏其他事件；
-- 仅展示存在可见事件的 Workflow 阶段；当前阶段存在事件时默认展开，非当前阶段默认收起；
-- 阶段分组保持 Workflow 顺序，所有组内事件保持文件顺序倒序；
-- 内部 runId、source、reasonCode 和英文 decision 不展示；决策使用中文文案并通过 hover/focus tips 展示具体原因；
-- 决策 tips 分别展示结构化判断事实和命中的判断规则，不直接复用 summary；
-- feature_inspected、provider_retry_scheduled 和 session_started 正常记录但不展示；
-- App 重启后历史恢复；
-- 自动 Thread 与普通会话同等展示；
-- 托管动作不抢占当前页面；
-- 键盘可访问开始/停止和时间线展开；
-- 状态不只依赖颜色表达。
-
-### 18.6 非回归
-
-- 没有活跃 ManagedRun 时不进入 Controller；
-- 普通 Chat 行为不变；
-- `threads:create` IPC 不变；
-- `agent:invoke` IPC 与 Stream 顺序不变；
-- request_user_input 等待不触发 Turn End；
-- subagent 内部运行不触发 Controller；
-- Dynamic Workflow 行为不变；
-- 普通 Dynamic Workflow 的 launched 返回、后台 engine、progress、notification ack/re-notify 和取消行为不变；
-- 普通会话前台 `execute` 仍为 60 秒，`run_in_background=true` 仍返回 task_id 并由 task_output 查询；
-- 托管会话及其工作 Runtime 的 `execute(run_in_background=true)` 强制前台等待，20 分钟后沿用现有前台超时行为；
-- V1 插件动作协议、能力字段、草稿和旧状态通知均不存在。
-
-## 19. 当前实现差距
-
-| 模块 | 当前 V1 | V2 目标 |
-| --- | --- | --- |
-| 决策源 | 插件动作协议 | `feature_status + nextAction + Controller Policy` |
-| Run 状态 | 内存事件 | 持久 ManagedRun |
-| Journal | 无 | run.json 状态快照 + events.ndjson 可视化日志 |
-| 幂等 | 仅部分 turnId 内存去重 | V2 仍只保证当前进程去重；跨重启幂等进 V3 |
-| 循环保护 | 无 | 当前阶段 Biz Retry 最多3次；通用计数和硬上限进 V3 |
-| Provider Retry | 无 | 原 Thread “继续当前任务”3次，不受上下文阈值影响 |
-| Biz Retry | 无 | 自适应复用/新建 Thread，共享3次预算，上下文>90%强制新 Thread |
-| Stop | 单 Thread cancel 提示 | ManagedRun cancelled；不取消已有会话、不再自动推进 |
-| Restart | 动作丢失 | 未终态 Run 标记 failed，下一次开始创建新 Run |
-| UI | Thread 刷新 | Run 总览、重试、原因、时间线 |
-| 插件适配 | 必须实现额外动作协议 | 零新增适配 |
-| Structured Stage Result | 无 | V3 |
-| Side Agent | 无 | V3 按需 |
-
-## 20. 架构决策记录
-
-### ADR-001：Controller 升级为 Durable Process Manager
-
-V2 继续事件驱动，但每个 Feature 的托管链拥有持久 ManagedRun；不把插件 workflow 硬编码为框架执行图。
-
-### ADR-002：feature_status 是默认唯一业务决策输入
-
-Controller 只解释标准 workflow/current status/nextAction；插件私有 Task、Batch 和 checkpoint 仍由 Skill/插件管理。
-
-### ADR-003：每个工作单元使用普通项目会话
-
-以 Thread 换取完整 subagent、request_user_input、多轮、历史、单阶段接管和重试能力。Provider Error 使用原 Thread“继续当前任务”；Biz Retry 根据自适应策略复用当前 Thread 或创建新 Thread。
-
-### ADR-004：ManagedRun 与插件状态分层
-
-ManagedRun 只记录托管状态、Provider Retry、Biz Retry、当前执行基线和可视化信息，不复制插件业务正文；停止后再次开始不找回旧动作，始终创建新的 Run 并重新执行 feature_status。
-
-### ADR-005：采用文件式 run.json + append-only journal
-
-V2 不增加数据库表。`run.json` 只负责状态、停止、两类重试和当前执行基线，`events.ndjson` 只负责可视化和审计；V2 不做 event replay 或 action 幂等，完整 journal 恢复进入 V3。
-
-### ADR-006：Stop 不取消运行中会话
-
-停止托管只阻止新动作并取消 Provider Retry；已运行会话自然结束并记账，Controller 不再推进。V2 不主动取消会话。
-
-### ADR-007：App 重启后不续跑
-
-重启恢复历史和可视化，但所有未终态 Run 标记为 failed；用户下一次开始托管时创建新的 Run。
-
-### ADR-008：V2 不实现结构化阶段结果和 Side Agent
-
-V2 使用 feature_status、Agent outcome/endReason 和固定规则。V3 同期引入 `managed_stage_result`、三次补交与按需 Side Agent。
-
-### ADR-009：删除 V1 插件动作协议
-
-V2 不保留旧命令、能力字段、动作数组、草稿和状态通知；`feature_status + nextAction + Controller Policy` 是唯一控制权来源。
-
-### ADR-010：当前阶段未推进时采用自适应 Biz Retry
-
-Stage Retry 和同 Thread Biz Retry 合并为共享单一 `bizRetryCount` 的两个独立 action：`biz_retry_reuse_thread` 与 `biz_retry_new_thread`。当前节点变化，或 currentNodeStatus 变化并进入 done/archived/skipped 时推进并清零；阶段未推进时，上下文占用 >90% 强制新 Thread，否则 featureStateHash 不变使用新 Thread、变化时复用当前 Thread。两个 action 共享三次预算，避免叠加为六次。选择策略以 Controller 内部配置建模，V2 暂不开放插件或项目自定义。
-
-### ADR-011：上下文阈值不影响 Provider Retry
-
-90% 上下文复用阈值只用于 Biz Retry 会话选择。Provider Retry 处理模型服务瞬时失败，继续沿用原 Thread、5/30/120 秒退避和独立三次预算；自动消息统一为“继续当前任务”。
-
-### ADR-012：托管 execute 不允许脱离 Agent Turn
-
-active Managed Session 及其工作 Runtime 将 `execute(run_in_background=true)` 强制为前台 Tool Call，并使用固定 20 分钟超时和现有前台完成/失败/取消语义。active 必须同时满足 ManagedRun `status=running` 且 `currentSession.threadId` 匹配；历史 `runId` 不构成有效托管状态。普通会话和终态托管 Thread 的后续人工 Turn 执行协议不变。该约束避免 shell 命令仍在修改插件状态或工作区时，Agent Turn 已结束并触发 Controller 推进。
-
-### ADR-013：Workflow 执行不变，Controller 过滤 launch Turn
-
-Workflow launched、后台 engine、结果持久化和 notification Turn 保持原协议。Workflow launch 所在物理 Agent Run 仍正常结算并产生 Turn End；Managed Controller 仅根据该物理 Run 累积上报的 `workflowLaunchedRunIds` 决定不消费该次结束。Workflow engine 事件不进入 Controller。notification Turn 成功后按普通 Agent Turn 处理；失败时先由 Workflow re-notify，耗尽后仅由仍 active 的 ManagedRun 接管最后一次 terminal。普通 Dynamic Workflow 不受影响。
-
-## 21. V2 验收标准
-
-- 插件只实现标准 feature_status 即可开启托管；
-- 无运行会话时点击“开始托管”会立即创建 ManagedRun 和首个会话；
-- 有运行会话时明确拒绝开启；
-- 一个 Feature 同时最多一个未终态 ManagedRun；
-- 创建新 Thread 时，nextAction 只有 slashSkill 和 userMessage 同时存在且 Skill 属于当前绑定插件或已启用本地 Skill 时才允许执行；复用 Thread 的 Biz/Provider Retry 使用平台固定消息；
-- 初始工作单元、阶段推进和 `biz_retry_new_thread` 创建普通项目会话；`biz_retry_reuse_thread` 与 Provider Retry 复用当前会话；
-- Provider Error 在原 Thread 最多自动发送三次“继续当前任务”，且不受 90% 上下文阈值影响；
-- 当前阶段未推进时使用统一 Biz Retry预算：上下文超过90%或 featureStateHash 不变执行 `biz_retry_new_thread`，否则执行 `biz_retry_reuse_thread` 并发送“继续当前任务”；
-- 两种 Biz Retry模式共享最多三次预算，第三次后阶段仍未推进时结束托管，原因“当前任务重试超过限制次数”；
-- 点击停止时 expectedRunId 必须匹配当前活跃 Run；匹配后 Run 标记 cancelled，不取消已运行会话且不再自动推进；历史 Thread 取消不影响新 Run；
-- App 重启后 ManagedRun 历史和可视化恢复，未终态 Run 标记 failed；
-- 再次开始托管时创建新的 runId，重新 Inspect，不使用旧 action/Thread；
-- run.json 能记录 Run 状态、Provider Retry 次数、Biz Retry 次数、currentSession、decisionBaseline 的两个 SHA-256 hash 和最后决策摘要，events.ndjson 以 eventId/createTime 和文件顺序解释每次自动动作、原因和时间；
-- 事件 API 使用 opaque string cursor 分页，Main 内部保留字节 offset，长 Run 不因生成 seq 或分页而读取完整 Journal；
-- 合法无换行尾记录可无损补齐；损坏尾行可截断恢复；中间损坏隔离为 corrupt 且不阻断 App 启动；
-- run.json 或 events.ndjson 无法恢复时只隔离对应历史 Run；不存在有效 running Run/活跃 Thread 时仍可创建新 runId，并仅从最新 feature_status 建立状态；
-- `session_completed` 持久化结构化 outcome 和 endReason，不从 summary 反向解析；
-- Feature 详情复用现有阶段 UI；右侧只展示当前托管状态和活跃/最近会话，Managed Run 紧贴左侧阶段产物下方并与阶段流程联动；
-- Managed Run 只展示存在可见事件的 Workflow 阶段，当前阶段默认展开，其他阶段默认收起，组内记录倒序；
-- 每次 Controller 决策都能通过中文 tooltip 解释结构化判断事实和命中的判断规则；
-- 自动 Thread 继续与普通会话同等展示；
-- 使用插件 session_context_inject 的 Feature 可通过 `agentConfig.agentMode="workflow"` 将新建 Thread 初始化为 Workflow Agent 模式；显式 Thread metadata 仍优先；
-- active 托管 Thread 和其工作 Runtime 中 `execute(run_in_background=true)` 不创建后台 task，改为前台等待并在 20 分钟后按现有前台超时结束；ManagedRun 终态后该历史 Thread 的新人工 Turn 恢复普通执行行为；
-- Workflow launch Turn 正常结算但不触发 Managed Controller 判断；engine completed/error/cancelled 不进入 Controller；notification 成功时驱动 Controller，失败时优先使用三次 Workflow re-notify，耗尽后才把最后一次 terminal 交给仍 active 的 ManagedRun；
-- completed/failed/cancelled 后再次开始创建新 runId，历史保留；
-- V2 明确不承诺跨重启执行幂等、旧 Thread 恢复或通用会话计数；除当前阶段 Biz Retry 上限外，其他循环硬限制仍进入 V3；
-- 普通 Chat、非 Harness Thread、没有活跃 ManagedRun、Dynamic Workflow 均无行为变化。
-
-## 22. V2.5：托管模式与招乎融合
-
-本章是基于 V2 的增量设计。V2.5 实施后，如本章与前述 V2 设计冲突，以本章为准。V2.5 不引入 V3 能力，也不考虑 V3 数据或行为兼容性。
-
-### 22.1 目标与边界
-
-V2.5 包含四项能力：
-
-1. Feature 详情页增加“通过招乎管理特性”开关，以下简称“特性 IM 开关”；
-2. 开启托管运行时可同时设置特性 IM 开关，并让普通项目会话和托管 Controller 创建的顶层会话自动接入招乎；
-3. 仅在现有策略命中 Biz Retry 时，把最终动作交给用户通过招乎决定；
-4. Human Gate 可通过招乎批准或拒绝。
-
-V2.5 不包含：
-
-- 不重构现有工具执行审批的招乎链路；
-- 不把 Biz Retry、Human Gate 或工具审批的业务等待状态复制到 IM 服务；
-- 不持久化 Biz Retry/Human Gate 的 IM 短码映射和等待对象；
-- 不增加 Biz Retry 的桌面端待决策恢复入口；
-- 不为等待设置超时或自动兜底动作；
-- 不把 subagent、Workflow 内部线程或其他派生 Runtime 当作 Feature 顶层会话接入招乎；
-- 不改变 Provider Retry、阶段推进、完成、Hook halt 和非 Provider Error 的现有控制策略。
-
-### 22.2 特性 IM 开关
-
-Feature 详情页增加开关：
-
-> 通过招乎管理特性
-
-开关是 Feature 本身的产品配置，不绑定 IM principal，也不是一条授权记录。它直接持久化在现有 `harness-board-features.json` 的 Feature binding 中：
-
-```ts
-interface HarnessFeatureBinding {
-  // existing fields...
-  imManagementEnabled?: boolean;
-}
-```
-
-字段缺失或为 `false` 均表示关闭。V2.5 不新增 Feature IM SQLite 表，不增加 `grant_id` 或 `principal_id`。现有“允许从招乎在 Feature 下新建会话”的 Feature grant 与本开关相互独立，不迁移、不复用旧数据。
-
-特性 IM 开关的运行时语义是：创建后续 Feature 顶层 Thread 时，通过现有 Thread grant 机制为该 Thread 接入招乎。Thread grant 仍是会话消息同步和远程操作的实际授权依据。
-
-创建 Thread grant 时不引入新的路由选择逻辑，直接复用统一招乎机器人现有的 authoritative/default route 解析和授权基础设施。用户正常登录并连接招乎服务端后即可为新增会话创建 grant；路由不可用或 grant 创建失败时，沿用现有 IM 基础设施的错误与失败路径。Feature binding 不保存 `principalId` 或 `conversationKey`。
-
-自动接入范围包括：
-
-- 用户通过 DevClaw 手动创建的 Feature 顶层会话；
-- Managed Controller 创建的托管顶层会话；
-- 其他通过现有 Feature 会话入口创建的顶层会话。
-
-关闭开关后：
-
-- 后续普通 Feature 会话不再自动创建 Thread grant；
-- 不撤销或修改任何已有 Thread grant；
-- 当前托管会话和已有会话继续保持原有招乎连接；
-- UI 提示“后续会话将不再发送消息到招乎”。
-
-如果用户正在通过招乎处理一次 Biz Retry，并选择“托管开启新会话”，该新会话必须使用该待决策对象已保存的 IM 路由继续接入招乎，即使此时特性 IM 开关已被关闭。这是当前待决策链路的延续，不属于普通的“后续会话自动接入”。
-
-### 22.3 开启托管运行弹窗
-
-“开启托管运行”弹窗新增选项：
-
-> 通过招乎管理托管运行
-
-该选项不单独持久化，不引入 `imSupervisionEnabled` 一类 Run 字段。每次打开弹窗都默认勾选；确认时直接写入特性 IM 开关：
-
-- 勾选并确认：先把 `imManagementEnabled` 写为 `true`，再开启托管；
-- 取消勾选并确认：先把 `imManagementEnabled` 写为 `false`，再开启托管；
-- 关闭或取消弹窗：不修改特性 IM 开关。
-
-因此，托管运行是否通过招乎管理不形成第二套持久配置，始终由特性 IM 开关及已物化的 Thread grant 决定。
-
-创建会话与 grant 的失败策略：
-
-- 普通手动会话：Thread 创建成功但自动 grant 失败时保留 Thread，并向用户提示未能接入招乎；
-- 创建会话当时特性 IM 开关开启时，勾选后启动托管以及 Controller 后续自动新建托管会话都必须先成功创建 Thread grant 才启动 Agent；开关关闭时正常启动且不创建 grant；
-- 招乎决策“托管开启新会话”：必须先成功创建 Thread grant；失败时不启动 Agent、不消费待决策，允许用户稍后重试或选择停止。
-
-### 22.4 IM 接入架构
-
-IM 服务只负责消息投递、身份与会话路由校验，以及“短码 → 领域操作”的临时映射。业务事实源仍归各自领域所有：
-
-- 工具审批：沿用现有工具审批模型；
-- Human Gate：沿用现有 Human Gate Service 和 active gate；
-- Biz Retry：沿用当前 ManagedRun 与 Controller，增加内存等待对象。
-
-V2.5 尽量复用现有工具审批 IM 链路中的基础设施和实现模式，包括主动消息 outbox、分段与 drainer、短码生成、`principalId + conversationKey` 校验、首个有效操作生效和生命周期清理；但不复用或重构以下业务对象：
-
-- `ApprovalDecisionBroker`；
-- 工具审批 `codes` Map；
-- 远程工具审批审计表；
-- `remoteApprovalEnabled` 总开关；
-- 工具审批的 10 分钟 TTL。
-
-新增两个轻量领域适配器：
-
-```ts
-ImManagedBizRetryService
-ImHumanGateService
-```
-
-二者维护各自的内存短码索引。只做最基础的一次性消费兜底：第一个到达且通过校验的有效决策生效；重复、过期或已在桌面处理的操作可以静默无响应，不引入锁、队列或独立幂等存储。
-
-消息 outbox 可继续按现有方式持久化，因此 App 重启后可能仍会投递一条已经失效的通知；短码映射不会恢复，用户操作将静默失效。这是 V2.5 接受的限制。
-
-Thread grant 在 Biz Retry 或 Human Gate pending 期间的行为与现有工具审批保持一致：允许用户关闭 grant，不增加 Renderer 禁用、Main 拦截或 pending 查询；已生成的短码继续使用创建时保存的路由快照，关闭 grant 不取消已经发起的等待，后续新消息和新审批不再通过该 grant 接入招乎。
-
-### 22.5 托管 Biz Retry 的招乎决策
-
-#### 22.5.1 接入点
-
-只有当前 Controller 策略已经判定为 Biz Retry 时才接入招乎。旧模型中的：
-
-```text
-biz_retry_reuse_thread
-biz_retry_new_thread
-```
-
-同时表达了“为什么进入重试”和“准备执行什么动作”。V2.5 将它拆成策略结果与最终动作：
-
-```ts
-type ManagedRunPolicyResult =
-  | {
-      type: "biz_progress";
-      proposedAction: "start_new_thread";
-      reasonCode: string;
-      facts?: ManagedRunDecisionFacts;
-      rule?: string;
-    }
-  | {
-      type: "biz_retry";
-      proposedAction:
-        | "continue_current_thread"
-        | "start_new_thread"
-        | "fail_managed_run";
-      reasonCode: string;
-      facts?: ManagedRunDecisionFacts;
-      rule?: string;
-    }
-  | {
-      type: "provider_retry";
-      proposedAction:
-        | "schedule_provider_retry"
-        | "continue_current_thread"
-        | "fail_managed_run";
-      reasonCode: string;
-      facts?: ManagedRunDecisionFacts;
-      rule?: string;
-    }
-  | {
-      type: "human_gate";
-      proposedAction?: "fail_managed_run";
-      reasonCode: string;
-      facts?: ManagedRunDecisionFacts;
-      rule?: string;
-    }
-  | {
-      type: "run_termination";
-      proposedAction:
-        | "stop_managed_run"
-        | "complete_managed_run"
-        | "fail_managed_run"
-        | "reject_human_gate";
-      reasonCode: string;
-      facts?: ManagedRunDecisionFacts;
-      rule?: string;
-    };
-```
-
-五种 `type` 表示五套稳定的 Controller 处理机制，而不是另一套动作枚举：
-
-- `biz_progress`：Feature 正常业务推进，包括首次工作单元、currentNode 变化，以及阶段进入 done/archived/skipped 后执行下一工作单元；
-- `biz_retry`：业务状态未按预期推进，使用 Biz Retry 预算并决定复用或新建会话；达到上限时仍保持该类型，`reasonCode=biz_retry_limit_exceeded`、`proposedAction=fail_managed_run`；
-- `provider_retry`：模型服务异常，使用 Provider Retry 预算、退避计时器和原 Thread 重试；达到上限时仍保持该类型并建议失败；
-- `human_gate`：Human Gate 等待、批准、拒绝或冲突处理；正常等待用户决定时没有 `proposedAction`，冲突时建议 `fail_managed_run`；
-- `run_termination`：因 Feature 完成、普通失败、用户停止、会话终止或 App 重启而结束 ManagedRun。
-
-来源事件说明“发生了什么”，`policyResult.type` 说明采用哪套 Controller 规则与预算，`reasonCode` 说明命中该规则的具体原因，`proposedAction` 是 Controller 建议，`decisionAction` 是 Controller、用户或系统最终决定执行的唯一动作。
-
-`reasonCode` 始终保留 Controller 命中 Biz Retry 的原始原因。用户通过招乎作出的选择可以偏离 `proposedAction`，但不改写 `policyResult`、`proposedAction` 或 `reasonCode`，只写入最终 `decisionAction`。
-
-所有 `ManagedRunPolicyResult` 分支统一使用 `proposedAction` 表示内部策略建议，`ManagedRunDecisionEvent.decisionAction` 才表示最终决定。只有 Biz Retry 接入 IM 时，用户可以覆盖策略建议：建议继续当前会话时，用户可以改为开启新会话或停止托管；建议开启新会话时，用户也可以改为继续当前会话或停止托管。其他自动决策的 `decisionAction` 等于 `proposedAction`。
-
-同一个动作可能来自不同策略并产生不同状态副作用。例如 `biz_progress + start_new_thread` 会建立新执行基线并清零 Biz Retry；`biz_retry + start_new_thread` 在自动决策成功后增加 Biz Retry 次数，IM 用户决策则不增加；`provider_retry + continue_current_thread` 使用独立的 Provider Retry 次数。实现不得从 action 或 `reasonCode` 前缀反推策略类型。
-
-- 当前 Thread 有有效 IM grant：暂停自动动作，创建内存待决策并发送招乎消息；
-- 当前 Thread 没有有效 IM grant：继续按 V2 策略自动执行 `proposedAction`，并沿用现有 Biz Retry 次数与上限；
-- 其他 Controller 分支：完全保持现有逻辑，不进入招乎决策。
-
-#### 22.5.2 等待对象与生命周期
-
-Biz Retry 等待事实源只存在于 Managed Controller 进程内存：
-
-```ts
-interface PendingManagedBizRetry {
-  decisionId: string;
-  projectId: string;
-  featureId: string;
-  runId: string;
-  originThreadId: string;
-  policyResult: Extract<ManagedRunPolicyResult, { type: "biz_retry" }>;
-  route: {
-    principalId: string;
-    conversationKey: string;
-  };
-  state: "pending" | "handling";
-  createdAt: string;
-}
-```
-
-主索引按 `runId` 管理，并维护短码索引。`originThreadId` 用于“继续当前会话”的一致性校验和上下文展示；真正的等待归属是 ManagedRun，不会因为用户选择新会话后 `currentSession` 改变而迁移或丢失。`route` 在发起等待时从来源 Thread grant 快照，避免后续 Feature 开关或活跃 Thread 变化影响本次交互。
-
-等待对象不写入 `run.json`、`events.ndjson` 或 SQLite。App 重启时：
-
-- 内存等待对象和短码全部消失；
-- 未结束的 V2.5 ManagedRun 按 22.9 的恢复流程结束；
-- 旧 IM 操作静默无响应。
-
-#### 22.5.3 消息内容与操作
-
-招乎通知包含：项目名称(projectName)、Feature名称、当前阶段、nodeStatus、“本轮 Agent 已结束但当前阶段未推进”、上下文占用，以及该 Agent Turn 最后一条 assistant 消息。不发送完整 Prompt、绝对工作区路径、环境变量、工具原始输出或 Controller 详细判断文本。
-
-最后一条 assistant 消息最多 4,000 个 Unicode 字符；超长时从尾部保留内容，优先保留结论及末尾 think/reasoning，并明确标记已截断。
-
-最后追加基于发送通知时最新 `feature_status.nextAction` 得到的 slashSkill 和 userMessage，并提示“若选择托管开启新会话，当前预计将调用 ${slashSkill} 并输入 ${userMessage}”。该内容只说明通知时的预计动作，不作为用户稍后决策时的执行快照。
-
-支持三个命令：
-
-```text
-/托管停止 <短码>
-/托管继续当前会话 <短码> <消息>
-/托管开启新会话 <短码>
-```
-
-“托管继续当前会话”如果用户未输入消息，则默认输入：继续当前任务；
-“托管开启新会话”V2.5 不支持附加消息。收到用户决定后必须重新 Inspect，并使用此时最新、合法的 `nextAction` 创建新会话；如果最新 `nextAction` 不合法，则不消费 pending。
-
-处理规则：
-
-- 托管停止：把当前 ManagedRun 置为 cancelled，不撤销已有 Thread grant；
-- 托管继续当前会话：要求 Run 仍为 running，且 `currentSession.threadId === originThreadId`、Thread 仍存在；随后在该 Thread 发送用户消息；
-- 托管开启新会话：要求 Run 仍为 running，重新 Inspect 后创建 Thread，使用等待对象快照的 IM 路由创建 grant，再启动 Agent 并更新 `currentSession`；
-- 来源 Thread 已取消、删除或已不是 currentSession 时，“继续当前会话”不执行且不消费等待，用户仍可选择开启新会话或停止；
-- 创建新 Thread 或 grant 失败时不消费等待；
-- 新 Thread 成为 currentSession 后，旧 Thread 的迟到事件继续由现有 currentSession 校验忽略。
-
-IM 用户决定只在目标动作成功后写入 `managed_run_decision` 和对应动作结果事件并消费 pending；动作失败时 pending 从 handling 回到 pending，不记录最终决策。V2.5 不增加事务、跨进程幂等或 `action_failed` 事件，接受动作成功但日志尚未写入时 App 崩溃的小窗口。
-
-用户通过招乎选择继续或新会话不增加 `bizRetryCount`，也不消耗 V2 自动 Biz Retry 三次预算；只有 `policyResult.type=biz_retry`、由 Controller 自动决定并成功执行继续/新建会话时才增加 Biz Retry 次数。后续再次命中 Biz Retry 时重新发起一次招乎决策。等待无超时，用户不操作时 ManagedRun 保持 running 且不执行任何新动作。
-
-### 22.6 Human Gate 招乎审批
-
-Human Gate 的 active gate 仍由现有 Human Gate Service 持有；现有 Feature `humanGate` 持久状态继续服务既有页面展示和崩溃标记。V2.5 不增加 `PendingHumanGateDecision` 持久模型，只增加内存短码映射：
-
-```ts
-interface ImHumanGateCodeEntry {
-  gateId: string;
-  projectId: string;
-  featureId: string;
-  principalId: string;
-  conversationKey: string;
-}
-```
-
-Human Gate 由执行工具的来源 Thread 触发，因此从该 Thread grant 获取并快照 IM 路由。是否发送招乎审批只受该 Thread 是否已接入招乎控制，不受“允许从招乎批准工具调用”总开关控制。
-
-Human Gate 招乎通知只发送项目名称、Feature 名称、来源会话名称、插件提供的 Human Gate `message`、审批短码和可用命令；不发送 execute 命令正文、工具参数、环境变量、工作区绝对路径或文件内容。`message` 沿用现有 2,000 字符纯文本限制。审批成功后分别回复“已批准”或“已拒绝”；过期操作可以静默无响应。
-
-命令为：
-
-```text
-/门禁批准 <短码>
-/门禁拒绝 <短码>
-```
-
-第一个合法操作调用现有 Human Gate approve/reject；桌面端与招乎端并发时采用相同的“首个有效决定生效”规则。gate 已结束、来源会话已取消或 App 已重启时，短码操作可以静默无响应。
-
-如果现有 Human Gate 日志已经记录审批结果，则补充 `decisionActor` 和 `decisionChannel`；不为此新建独立审批审计系统。托管运行中的 Human Gate：
-
-- 批准：记录托管决策，恢复现有 execute，Run 保持 running；
-- 拒绝：先记录拒绝决策和 `human_gate_rejected` 动作结果，再以 `human_gate_rejected` 原因取消 ManagedRun，并记录 `run_cancelled`；
-- 来源会话取消或删除：沿用现有 abort 按拒绝处理，以原 `human_gate_invoked` 作为来源写入自动拒绝决策，记录 `human_gate_rejected` 并取消关联 ManagedRun；随后清理 active gate 和短码，迟到 IM 操作无效。该路径不再为同一次会话终止追加一轮 `session_run_aborted` 决策。
-- 同 Feature 已存在 pending Gate 时，新的 `human_gate_invoked` 由 Controller 自动决定 `fail_managed_run`，依次记录 `human_gate_conflict` 动作结果和 `run_failed`；已有 Gate 不受影响。
-
-### 22.7 V2.5 统一托管决策与日志模型
-
-#### 22.7.1 原则
-
-V2.5 用同一组领域类型表达 Controller 控制过程和托管日志，不再维护一套内部动作名和另一套展示事件名。每轮逻辑托管处理遵循：
-
-```text
-决策来源事件 -> managed_run_decision -> 动作结果事件 -> 下一决策来源事件
-```
-
-三类事件均平铺追加到 `events.ndjson`，通过事件 ID 关联。UI 保留现有普通事件卡片，只细化 `managed_run_decision` 卡片并查找关联动作结果；不把来源事件或动作结果嵌入决策事件，也不构造决策树或新的持久化聚合模型。
-
-这里的“Turn”是 Managed Controller 消费的逻辑 Turn。Dynamic Workflow 的 launch Turn 虽然物理 Agent Turn 已结束，但不生成 `managed_agent_turn_ended`，也不触发托管决策；最终 notification Turn 被 Controller 消费时才进入上述循环。
-
-#### 22.7.2 顶层事件类型
+### 11.1 事件模型
 
 ```ts
 type ManagedRunEventType =
-  // lifecycle/source
+  | "decision_notification_created"
+  | "decision_notification_ended"
   | "run_started"
   | "managed_agent_turn_ended"
   | "provider_retry_timer_elapsed"
@@ -1458,9 +435,7 @@ type ManagedRunEventType =
   | "run_stop_requested"
   | "session_run_aborted"
   | "run_interrupted_after_restart"
-  // decision
   | "managed_run_decision"
-  // action result
   | "session_created"
   | "session_started"
   | "session_continued"
@@ -1468,440 +443,54 @@ type ManagedRunEventType =
   | "human_gate_approved"
   | "human_gate_rejected"
   | "human_gate_conflict"
-  // terminal
-  | "run_completed"
+  | "run_cancelled"
   | "run_failed"
-  | "run_cancelled";
+  | "run_completed"
 ```
 
-事件名统一采用“领域实体 + 已发生的动作/状态”结构：
-
-- `run_*`：ManagedRun 生命周期或外部请求；
-- `session_*`：ManagedRun 当前顶层会话及其 Agent Run；
-- `provider_retry_*`：Provider Retry 计时过程；
-- `human_gate_*`：Human Gate 生命周期；
-- `managed_agent_turn_ended`：特指被 Managed Controller 消费的逻辑 Agent Turn End，避免与普通 Agent Turn 混淆；
-- `managed_run_decision`：统一托管决策核心事件，保留已确定的领域名称。
-
-所有顶层事件的中文语义如下：
-
-| 类别 | 事件 | 中文语义 | 是否触发托管决策 |
-| --- | --- | --- | --- |
-| 决策来源 | `run_started` | 用户确认开启托管，ManagedRun 已创建并开始运行 | 是，触发首次 Inspect 和动作选择 |
-| 决策来源 | `managed_agent_turn_ended` | 当前托管逻辑 Agent Turn 已结束，并已取得结构化 outcome/endReason | 是，触发阶段推进、Biz Retry、Provider Retry、完成或失败判断 |
-| 决策来源 | `provider_retry_timer_elapsed` | 已安排的 Provider Retry 等待时间到期 | 是，触发重新检查 Run/Thread 状态并决定是否继续当前会话 |
-| 决策来源 | `human_gate_invoked` | 托管会话执行工具时命中 Human Gate，工具执行已暂停并等待审批 | 是，等待用户通过桌面或招乎批准/拒绝 |
-| 决策来源 | `run_stop_requested` | 用户直接请求停止 ManagedRun，例如点击“停止托管” | 是，决定把 ManagedRun 置为 cancelled |
-| 决策来源 | `session_run_aborted` | 当前托管顶层会话正在运行的 Agent Run 被用户从会话侧主动终止，此时 ManagedRun 本身仍为 running | 是，Controller 决定是否同时结束 ManagedRun；V2.5 固定建议 `stop_managed_run` |
-| 决策来源 | `run_interrupted_after_restart` | App 启动后发现一个因 App 重启而中断、仍未结束的 V2.5 ManagedRun | 是，由系统决定失败或取消该 Run，不恢复执行 |
-| 托管决策 | `managed_run_decision` | 针对一个来源事件形成的唯一最终托管决定，包含策略建议、决定人、决定渠道和最终动作 | 否，本身就是决策 |
-| 动作结果 | `session_created` | 根据决策成功创建了新的 Feature 顶层会话，但尚不表示 Agent 已启动 | 否 |
-| 动作结果 | `session_started` | 已在新会话提交合法 nextAction，并成功启动 Agent Run | 否；等待后续来源事件 |
-| 动作结果 | `session_continued` | 已在当前会话提交继续消息，并成功启动新的 Agent Run | 否；等待后续来源事件 |
-| 动作结果 | `provider_retry_scheduled` | 已创建 Provider Retry 计时器，记录 retryNumber、retryAt 和 delayMs | 否；计时器到期后另写 `provider_retry_timer_elapsed` |
-| 动作结果 | `human_gate_approved` | `approve_human_gate` 已成功应用，暂停的工具执行已恢复 | 否；工具和 Agent 继续运行，最终由 `managed_agent_turn_ended` 触发下一次决策 |
-| 动作结果 | `human_gate_rejected` | `reject_human_gate` 已成功应用，暂停的工具执行被拒绝 | 否；托管模式随后追加 `run_cancelled` |
-| 动作结果 | `human_gate_conflict` | 新 Gate 请求与同 Feature 已存在的 pending Gate 冲突，冲突请求已被拒绝且已有 Gate 不受影响 | 否；冲突会话对应的 ManagedRun 随后追加 `run_failed` |
-| 托管终态 | `run_completed` | Feature 已满足完成条件，ManagedRun 正常完成 | 否 |
-| 托管终态 | `run_failed` | ManagedRun 因不可恢复错误、重试耗尽或重启恢复策略而失败 | 否 |
-| 托管终态 | `run_cancelled` | ManagedRun 因用户停止、Human Gate 拒绝或当前 Agent Run 被终止而取消 | 否 |
-
-`human_gate_approved` 和 `human_gate_rejected` 是相对的 Human Gate 动作结果，都不是决策来源。Human Gate 的来源事件是 `human_gate_invoked`：批准时先写 `managed_run_decision(decisionAction=approve_human_gate)`，再用 `human_gate_approved` 确认审批已生效且工具执行已恢复；拒绝时则写对应拒绝决策和 `human_gate_rejected`。恢复后的 Agent 最终结束时，才以新的 `managed_agent_turn_ended` 开启下一轮托管决策。
-
-`human_gate_rejected` 不能由 `run_cancelled` 替代：前者表示 Human Gate 拒绝动作已生效，后者表示该动作进一步导致 ManagedRun 进入取消终态。两者按顺序追加并通过 `decisionEventId` 关联同一条拒绝决策。
-
-`session_run_aborted` 只在“ManagedRun 仍为 running，但当前托管顶层会话的 active Agent Run 被用户从会话侧终止”时产生。它不表示 Thread 被删除，只表示该会话中的本次 Agent Run 被提前终止。用户直接停止托管使用 `run_stop_requested`；ManagedRun 已终态、Human Gate 拒绝等决策内部引起的 Agent 结束，以及同一次 abort 后迟到的 Turn End，都不得再次写 `session_run_aborted` 或触发重复决策。
-
-V2.5 不保留 `feature_inspected` 顶层事件，Inspect 是 Controller 内部动作，必要事实写入决策的 `policyResult.facts`。`stage_advance`、`biz_retry` 是策略结果，不是决策来源事件。
-
-#### 22.7.3 决策事件
-
-```ts
-interface ManagedRunEventBase {
-  version: 2.5;
-  eventId: string;
-  runId: string;
-  createTime: string;
-  scope: "global" | "stage";
-  nodeId?: string;
-  summary: string;
-}
-
-type ManagedRunSourceEvent =
-  | (ManagedRunEventBase & {
-      type: "run_started";
-    })
-  | (ManagedRunEventBase & {
-      type: "managed_agent_turn_ended";
-      threadId: string;
-      outcome: string;
-      endReason?: string;
-    })
-  | (ManagedRunEventBase & {
-      type: "provider_retry_timer_elapsed";
-      threadId: string;
-      retryNumber: number;
-    })
-  | (ManagedRunEventBase & {
-      type: "human_gate_invoked";
-      gateId: string;
-      sourceThreadId: string;
-    })
-  | (ManagedRunEventBase & {
-      type: "run_stop_requested";
-    })
-  | (ManagedRunEventBase & {
-      type: "session_run_aborted";
-      threadId: string;
-      reasonCode: string;
-    })
-  | (ManagedRunEventBase & {
-      type: "run_interrupted_after_restart";
-      previousStatus: "running";
-    });
-
-type ManagedRunDecisionAction =
-  | "start_new_thread"
-  | "continue_current_thread"
-  | "schedule_provider_retry"
-  | "approve_human_gate"
-  | "reject_human_gate"
-  | "stop_managed_run"
-  | "complete_managed_run"
-  | "fail_managed_run";
-
-interface ManagedRunDecisionEvent extends ManagedRunEventBase {
-  type: "managed_run_decision";
-  sourceEventId: string;
-  sourceEventType: ManagedRunSourceEvent["type"];
-  policyResult: ManagedRunPolicyResult;
-  decisionActor: "controller" | "user" | "system";
-  decisionChannel: "system" | "desktop" | "im";
-  decisionAction: ManagedRunDecisionAction;
-  sourceThreadId?: string;
-  gateId?: string;
-}
-
-type ManagedRunActionEvent =
-  | (ManagedRunEventBase & {
-      type: "session_created";
-      decisionEventId: string;
-      targetThreadId: string;
-    })
-  | (ManagedRunEventBase & {
-      type: "session_started";
-      decisionEventId: string;
-      targetThreadId: string;
-    })
-  | (ManagedRunEventBase & {
-      type: "session_continued";
-      decisionEventId: string;
-      targetThreadId: string;
-    })
-  | (ManagedRunEventBase & {
-      type: "provider_retry_scheduled";
-      decisionEventId: string;
-      threadId: string;
-      retryNumber: number;
-      retryAt: string;
-      delayMs: number;
-    })
-  | (ManagedRunEventBase & {
-      type:
-        | "human_gate_approved"
-        | "human_gate_rejected"
-        | "human_gate_conflict";
-      decisionEventId: string;
-      gateId: string;
-      sourceThreadId: string;
-    });
-
-type ManagedRunTerminalEvent = ManagedRunEventBase & {
-  type: "run_completed" | "run_failed" | "run_cancelled";
-  decisionEventId: string;
-  reasonCode: string;
-};
-
-type ManagedRunEvent =
-  | ManagedRunSourceEvent
-  | ManagedRunDecisionEvent
-  | ManagedRunActionEvent
-  | ManagedRunTerminalEvent;
-```
-
-以上是 V2.5 `events.ndjson` 的完整 discriminated union。所有动作结果和终态事件都以必填 `decisionEventId` 指向产生它们的决策；决策以 `sourceEventId` 和 `sourceEventType` 指向来源事件。一个决策可以产生多个顺序追加的结果，例如开启新会话产生 `session_created` 和 `session_started`，拒绝 Human Gate 产生 `human_gate_rejected` 和 `run_cancelled`。
-
-不增加 `ManagedRunDecisionDomain`。`policyResult.type` 说明策略类别，`decisionAction` 说明唯一最终动作，二者足以区分业务。`ManagedRunDecisionFacts` 沿用 V2 已有结构化决策事实，不在事件模型中另建一份事实类型。
-
-当 Biz Retry 接入 IM 时，Controller 的 `policyResult` 只是待用户确认的内部结果，不单独写一条 Controller 决策事件。用户回复后只写一条 `managed_run_decision`：保留原 `policyResult` 和 `reasonCode`，把 `decisionActor` 设为 `user`、`decisionChannel` 设为 `im`，并把用户选择写为最终 `decisionAction`。因此不存在同一次处理同时写“Controller 决策”和“用户决策”的重复日志。
-
-来源、决策、动作结果和终态事件都保持顶层独立；不嵌套、不重放。现有 Human Gate 领域内部事件名无需重构，只有写入 V2.5 托管 Journal 时映射为上述 `human_gate_*` 事件。
-
-UI 必须展示决策来源：
-
-- `controller + system`：自动决策；
-- `user + desktop`：桌面决策；
-- `user + im`：招乎决策；
-- `system + system`：系统决策。
-
-#### 22.7.4 关键事件序列
-
-开启托管并启动首个会话：
-
-```text
-run_started
--> managed_run_decision(policyResult.type=biz_progress,
-                        decisionAction=start_new_thread)
--> session_created
--> session_started
-```
-
-普通阶段推进：
-
-```text
-managed_agent_turn_ended
--> managed_run_decision(policyResult.type=biz_progress,
-                        decisionAction=start_new_thread)
--> session_created
--> session_started
-```
-
-自动 Biz Retry：
-
-```text
-managed_agent_turn_ended
--> managed_run_decision(policyResult.type=biz_retry,
-                        decisionActor=controller,
-                        decisionChannel=system,
-                        decisionAction=proposedAction)
--> session_continued | session_created -> session_started
-```
-
-招乎 Biz Retry：
-
-```text
-managed_agent_turn_ended
--> [内存等待，不写 decision event]
--> managed_run_decision(policyResult.type=biz_retry,
-                        decisionActor=user,
-                        decisionChannel=im,
-                        decisionAction=用户选择)
--> session_continued | session_created -> session_started | run_cancelled
-```
-
-Provider Retry：
-
-```text
-managed_agent_turn_ended(endReason.code=provider_error)
--> managed_run_decision(policyResult.type=provider_retry,
-                        decisionAction=schedule_provider_retry)
--> provider_retry_scheduled
--> provider_retry_timer_elapsed
--> managed_run_decision(policyResult.type=provider_retry,
-                        decisionAction=continue_current_thread | fail_managed_run)
--> session_continued | run_failed
-```
-
-Human Gate：
-
-```text
-human_gate_invoked
--> managed_run_decision(policyResult.type=human_gate,
-                        decisionActor=user,
-                        decisionChannel=desktop|im,
-                        decisionAction=approve_human_gate|reject_human_gate)
--> approve: human_gate_approved
--> reject: human_gate_rejected -> run_cancelled
-```
-
-Human Gate 冲突：
-
-```text
-human_gate_invoked
--> managed_run_decision(policyResult.type=human_gate,
-                        policyResult.reasonCode=human_gate_conflict,
-                        policyResult.proposedAction=fail_managed_run,
-                        decisionActor=controller,
-                        decisionChannel=system,
-                        decisionAction=fail_managed_run)
--> human_gate_conflict
--> run_failed
-```
-
-用户直接停止托管：
-
-```text
-run_stop_requested
--> managed_run_decision(policyResult.type=run_termination,
-                        policyResult.proposedAction=stop_managed_run,
-                        decisionActor=user,
-                        decisionChannel=desktop,
-                        decisionAction=stop_managed_run)
--> run_cancelled
-```
-
-用户主动终止当前托管会话正在运行的 Agent Run：
-
-```text
-session_run_aborted
--> managed_run_decision(policyResult.type=run_termination,
-                        policyResult.proposedAction=stop_managed_run,
-                        decisionActor=controller,
-                        decisionChannel=system,
-                        decisionAction=stop_managed_run)
--> run_cancelled
-```
-
-`session_run_aborted` 记录用户触发的终止事实；`managed_run_decision` 表示 Controller 根据托管策略决定同时结束 ManagedRun，因此该决策在 UI 中显示为“自动决策”。如果未来允许终止当前 Agent Run 后继续托管，只需让策略返回其他 `proposedAction`，无需改变事件链。
-
-#### 22.7.5 托管日志 UI
-
-V2.5 保留 V2 现有托管日志的页面位置、全局生命周期/Workflow 阶段分组、组内倒序、分页和普通事件卡片，不把来源事件、决策事件和动作结果聚合成新的持久化模型或“决策周期”卡片。UI 只细化 `managed_run_decision` 卡片，使用户能直接看懂一次决策。
-
-卡片采用一个标题区和四行紧凑信息：
-
-```text
-托管运行决策                                      14:35:42
-[招乎决策]
-
-决策原因   当前阶段未推进，等待用户决定下一步
-建议动作   托管开启新会话
-最终动作   托管继续当前会话
-动作结果   已向「修复登录异常」发送消息
-```
-
-布局规则：
-
-- 标题沿用“托管运行决策”，右侧显示决策时间；
-- `decisionActor + decisionChannel` 映射为“自动决策 / 桌面决策 / 招乎决策 / 系统决策”标签，标签使用文字并辅以颜色，不只依赖颜色区分；
-- “决策原因”优先展示用户可读 `summary`，不直接展示内部 `reasonCode`；现有判断事实和判断规则继续放在可点击或可聚焦的详情 Tooltip/Popover 中；
-- “建议动作”展示 `policyResult.proposedAction` 的中文名称；没有策略建议时显示“无预设动作”；
-- “最终动作”展示唯一的 `decisionAction` 中文名称；即使与建议动作相同也保留两行，字段结构保持稳定；
-- “动作结果”由 Renderer 在当前已加载事件中查找 `decisionEventId === 当前决策 eventId` 的动作结果或终态事件，不修改 Journal；
-- 同一决策产生 `session_created + session_started` 时合并显示为“已开启新会话”；其他结果分别显示“已继续当前会话”“已安排模型服务重试”“Human Gate 已批准”“Human Gate 已拒绝”“Human Gate 发生冲突”“托管运行已完成/失败/取消”；
-- 找不到动作结果时显示“等待执行结果”，不额外查询、不推断成功，也不阻塞“加载更早事件”；
-- 关联 Thread 继续复用现有会话按钮，不新增跳转模式。
-
-建议动作和最终动作的中文映射：
-
-| 动作 | 中文文案 |
-| --- | --- |
-| `start_new_thread` | 托管开启新会话 |
-| `continue_current_thread` | 托管继续当前会话 |
-| `schedule_provider_retry` | 等待模型服务重试 |
-| `approve_human_gate` | 批准 Human Gate |
-| `reject_human_gate` | 拒绝 Human Gate |
-| `stop_managed_run` | 停止托管运行 |
-| `complete_managed_run` | 完成托管运行 |
-| `fail_managed_run` | 结束托管并标记失败 |
-
-动作结果仅作为 `managed_run_decision` 卡片中的一行摘要；对应原始事件仍按现有规则保留在托管日志中。V2.5 不新增展开层级、复杂树形连线或桌面端 Biz Retry 操作按钮。
-
-### 22.8 持久化模型
-
-V2.5 只新增或修改以下持久数据：
-
-| 数据 | 存储位置 | V2.5 处理 |
-| --- | --- | --- |
-| 特性 IM 开关 | `harness-board-features.json` | Feature binding 新增可选布尔字段 `imManagementEnabled` |
-| 会话 IM 授权 | 现有 Thread grant SQLite | 不改模型；创建 Feature 顶层 Thread 时按开关物化 grant |
-| ManagedRun 快照 | 现有 Run 目录 `run.json` | Schema 版本升级为 `2.5`，只读写 V2.5 |
-| 托管事件 | 现有 Run 目录 `events.ndjson` | 使用 22.7 的统一事件模型 |
-| IM 主动消息 | 现有 outbox | 复用现有投递与重试 |
-| Biz Retry 等待/短码 | 进程内存 | 不持久化 |
-| Human Gate 短码 | 进程内存 | 不持久化 |
-| Human Gate 业务状态 | 现有 Human Gate 领域 | 不新增副本 |
-
-保存到 JSON/Journal 的时间继续使用 GMT+8 的 `YYYY-MM-DD HH:mm:ss` 格式。
-
-`harness-board-features.json` 保持现有文件版本号，不因新增可选布尔字段升级版本。Feature binding 的类型和读取 normalizer 增加 `imManagementEnabled`；字段缺失、类型非法或为 `false` 均按关闭处理，不迁移存量数据。
-
-V2.5 的 `run.json` 与事件信封都明确写入：
-
-```json
-{
-  "version": 2.5
-}
-```
-
-V2.5 不兼容 V2 托管日志。升级后：
-
-- 不读取、不显示、不解析、不迁移 V2 `run.json` 和 `events.ndjson`；
-- 删除实现中的 V2 日志 parser、类型分支和 UI 兼容分支；
-- V2 文件可以原样留在磁盘，但不阻塞创建新的 V2.5 Run；
-- 不尝试续跑或重放 V2 Run，也不为 V2 非终态 Run补写 failed；
-- V2.5 只处理 `version: 2.5` 的 Run 与事件。
-
-### 22.9 App 重启与边角场景
-
-App 启动后若发现未终态的 V2.5 ManagedRun：
-
-1. 追加 `run_interrupted_after_restart`；
-2. 追加 `managed_run_decision`，`policyResult.type=run_termination`、`decisionActor=system`、`decisionChannel=system`；
-3. 普通未结束 Run 采用 `policyResult.proposedAction=fail_managed_run`、`decisionAction=fail_managed_run` 并追加 `run_failed`；
-4. 如果现有 Human Gate 恢复逻辑已先识别并拒绝 gate，则采用 `policyResult.proposedAction=reject_human_gate`、`decisionAction=reject_human_gate`，依次追加 `human_gate_rejected` 和 `run_cancelled`，不得再为同一 Run 追加一次通用 failed。
-
-因此，Biz Retry 和 Human Gate 的 IM 等待均不需要恢复。其余边角场景按以下规则处理：
-
-- Human Gate 来源 Thread 在用户操作前取消/删除：按拒绝处理，关联原 `human_gate_invoked` 写入 `managed_run_decision(decisionActor=controller, decisionChannel=system, decisionAction=reject_human_gate)`、`human_gate_rejected` 和 `run_cancelled`，再清理 active gate 与短码；不重复生成 `session_run_aborted` 决策，迟到操作无响应；
-- Biz Retry 来源 Thread 删除：继续当前会话失败但 pending 保留，可改选开启新会话或停止；
-- Biz Retry 来源 Thread 已结束：只要 Thread 仍存在且仍是 currentSession，允许继续发送新消息；
-- Biz Retry 等待期间 Feature IM 开关关闭：不影响当前 pending 和已有 grant；通过该 pending 开启的新 Thread 仍接入招乎；
-- Biz Retry 等待期间 Run 被桌面停止：清理 pending，迟到 IM 操作无响应；
-- Human Gate 已由桌面决定：清理短码，迟到 IM 操作无响应；
-- 两端操作近乎同时到达：只接受第一个在领域对象仍有效时到达的决定，不增加复杂并发设施。
-
-### 22.10 实施顺序
-
-1. 把 V2 内部 Controller 结果拆成 `policyResult + decisionAction`，建立 V2.5 统一事件类型；
-2. 将 Run/Event schema 升级为 2.5，并移除 V2 日志读取、展示和解析分支；
-3. 在 Feature binding 与详情页实现特性 IM 开关；
-4. 在顶层 Feature Thread 创建路径中统一物化 Thread grant，并覆盖手动会话和 Managed Controller 会话；
-5. 在托管开启弹窗接入同一个 Feature 开关；
-6. 基于现有 IM 基础设施实现 Human Gate 短码适配器；
-7. 实现 Biz Retry 内存等待、招乎通知与三个用户动作；
-8. 细化现有 `managed_run_decision` 卡片，通过关联 ID 展示动作结果，并展示决策来源、原因、建议动作和最终动作。
-
-### 22.11 ADR
-
-#### ADR-014：Feature IM 配置存入 Feature binding
-
-“通过招乎管理特性”只是 Feature 布尔配置，不是 principal grant，因此写入 `harness-board-features.json`；实际 Thread 权限继续复用现有 SQLite grant。
-
-#### ADR-015：IM 不持有领域等待事实
-
-Human Gate、Biz Retry、工具审批继续由各自领域维护状态。IM 只持有内存短码路由；重启后等待失效，未终态 V2.5 Run 按统一恢复规则结束。
-
-#### ADR-016：Biz Retry 拆分策略结果与最终动作
-
-`biz_retry_reuse_thread` / `biz_retry_new_thread` 不再作为新模型中的最终决策类型。Controller 先产出 `type=biz_retry + proposedAction`；无 IM 时 Controller 自动确认，有 IM 时用户选择最终 `decisionAction`。
-
-#### ADR-017：统一控制模型与托管 Journal
-
-内部控制与日志共用“来源事件、决策事件、动作结果事件”模型。Journal 平铺追加并通过 ID 关联；UI 保留普通事件卡片，只在 `managed_run_decision` 卡片中关联展示动作结果，不做 event replay 或跨事件聚合存储。
-
-#### ADR-018：V2.5 不读取 V2 日志
-
-V2.5 以 `version: 2.5` 建立新 schema。V2 日志留盘但完全忽略，不迁移、不展示、不续跑，以最小兼容成本换取事件模型收敛。
-
-### 22.12 V2.5 验收标准
-
-- Feature 详情页可配置“通过招乎管理特性”，并持久化到 Feature binding；
-- 开关开启后，后续手动和托管创建的 Feature 顶层会话自动获得 Thread grant，内部线程不受影响；
-- 关闭开关不撤销已有 grant，并明确提示只影响后续会话；
-- 托管开启弹窗的招乎选项每次默认打开，不独立持久化，确认后写入特性 IM 开关；
-- 只有现有策略命中 Biz Retry 且当前 Thread 有 IM grant 时才暂停并询问用户；其他 Controller 分支行为不变；
-- 招乎用户可停止托管、携带消息继续当前会话、或不带附加消息开启新会话；
-- 招乎 Biz Retry 决策不增加 `bizRetryCount`，无人操作时 Run 无限期保持 `running` 且不自动执行；
-- Biz Retry 通知包含最后一条 assistant 消息，最多 4,000 字符并从尾部保留；
-- Human Gate 可通过招乎批准或拒绝，只受来源 Thread IM grant 控制；
-- 过期、重复、会话已取消或领域状态已结束的 IM 操作可以静默无响应；
-- Biz Retry/Human Gate pending 和短码不落盘，IM 服务不复制领域状态；
-- 托管日志形成“逻辑来源事件 → 单一最终决策 → 动作结果”的闭环，并能在 UI 显示自动、桌面、招乎和系统决策来源；
-- 托管日志 UI 保持现有分组和普通事件卡片，只在“托管运行决策”卡片中稳定展示决策来源、决策原因、建议动作、最终动作和动作结果；动作结果通过现有事件关联 ID 在 Renderer 中查找，不改变存储模型；
-- 用户直接停止托管，以及用户主动终止当前托管会话的 Agent Run，分别以 `run_stop_requested` 和 `session_run_aborted` 作为来源事件，并各自经过一次 `managed_run_decision` 后写入 `run_cancelled`；
-- Provider Retry 形成“Provider Error Turn 结束 → 安排计时器 → 计时器到期 → 新决策”的两轮逻辑事件；
-- Workflow launch Turn 不生成逻辑来源事件，notification Turn 按普通逻辑 Turn 处理；
-- Human Gate 批准依次记录批准决策和 `human_gate_approved`；拒绝依次记录拒绝决策、`human_gate_rejected` 和 `run_cancelled`；
-- V2.5 Run 重启后按系统决策结束，不恢复 IM 等待；
-- 仅解析和展示 `version: 2.5` 的托管数据，V2 日志留盘但完全忽略。
+事件均包含 version、eventId、createTime、type、runId、scope 和 summary；stage 事件可关联 nodeId。决策通过 sourceEventId/sourceEventType 指向来源，动作结果及终态通过 decisionEventId 指向决策。
+
+`managed_run_decision` 保存 policyResult、decisionActor、decisionChannel 和 decisionAction。policyResult.type 区分 biz_progress、biz_retry、provider_retry、human_gate、run_termination；proposedAction 表示策略建议，decisionAction 表示最终选择。事实快照包含结构化状态、变化字段和上下文情况。
+
+Biz Retry 等待时记录消息创建事件，用户处理时记录用户决策；不额外生成一条相同动作的 Controller 决策。Human Gate 的来源是 human_gate_invoked，批准/拒绝分别产生决策和动作结果；取消关联 Run 另有终态事件。领域决策与消息展示事件通过 notificationId 关联。
+
+### 11.2 消息到 Journal 的投影
+
+`harness-board/notification-journal.ts` 订阅消息生命周期，仅处理具有 Run 关联的领域消息。通用存储和通知服务不读取 Run、不管理 Journal。
+
+创建和结束事件按 notificationId + 事件类型去重；首次访问 Run 时扫描其 Journal 建立领域内存集合，后续复用。缓存最多保留 128 个 Run，达到上限时淘汰最久未访问的索引（LRU）；再次访问被淘汰的 Run 时重新扫描日志，去重依据始终是领域持久日志。仅发现缺失事件时才读取 run.json，同一通知的创建与结束补写共用一次快照读取；已有完整历史不读取快照、不追加写入。首次扫描与实际补写仍有磁盘成本，保持逐事件 fsync，不另建持久化索引。创建事件使用消息 createdAt，结束事件使用 completedAt，阶段使用消息创建时保存的 nodeId。恢复可补写缺失事件，不改变事件发生时间或阶段。事件读取校验 `notificationAction` 为 stop / continue / new_thread / approve / reject；系统失效等无用户操作的记录允许省略该字段。通知事件携带 policyResult 时使用现有策略结果校验器验证。
+
+日志是旁路历史，写入异常不回滚消息状态或已完成动作。平台不承诺跨文件事务或跨重启执行恢复。
+
+## 12. APP 展示与分页
+
+- Feature 列表及项目卡片按领域待决策投影展示待处理标记。
+- Feature 详情顶部独立展示 Human Gate 与 Biz Retry，允许并存。
+- Biz Retry 提供继续消息输入及三个动作；Human Gate 提供批准/拒绝。
+- 来源会话在 Biz Retry 决策仍存活时禁用普通输入，Main 同时拦截绕过发送，提示“请在决策入口操作”。Main 输入守卫和 APP 通知投影复用消息源的存活性判断：持久通知为 pending、执行上下文存在、对应 Run 仍 running；正在处理的决策保留阻塞，避免动作中途保存终态或切换会话时被提前清理。Run 读取失败不视为已结束，单独禁用 IM 不解除输入阻塞。
+- 执行上下文移除时发布通用读模型变更信号，由 IPC 层订阅刷新 APP；该事件不表示持久化成功，不触发 Journal 或重复投递。消息源注册纯可见性判定，通用 IPC 不识别具体领域；Harness pending 查询直接读取持久通知并投影为 Human Gate / Biz Retry，不维护内存镜像或要求单独初始化；Run 终态保存后先移除该 Run 的其他 Biz Retry 上下文，再尝试持久通知清理。存活查询为纯读取，不清理运行时状态、不写库、不发事件；显式决策入口、动作收尾、Run 结束及启动恢复负责清理。已失效的残留 pending 即使写入失败，也不再阻塞输入或展示为可处理决策，不增加 TTL 缓存、等待超时或后台清理队列。
+- ManagedRun 总览展示状态、当前会话、最后决策和 Provider Retry 等待计划；Run 状态与待人工确认标记分开表达。
+- Journal 按全局/阶段分组倒序展示。消息创建、结束和用户决策通过 ID 聚合，避免同一决策重复显示。
+- 每个 Run 保存页面最早已加载事件 ID；刷新向前读取至该 ID 或日志开头，新增日志不会挤掉已加载记录。
+- 仅当前 Run 的消息变化触发日志刷新；请求版本淘汰过期响应。项目详情一次查询后按 Feature 建立 Human Gate 映射。
+
+## 13. 并发与失败边界
+
+同一 Feature 的托管检查和动作复用进程内 keyed mutex，自动操作提交前检查停止标记。消息源保留运行时防重入状态，持久消息只有 pending/resolved/invalidated。终态 Run 与已处理消息拒绝重复执行。
+
+没有消息等待超时、跨进程执行幂等、跨重启续跑或通用 Token/会话数硬预算。用户再次开启托管时依据当前 Feature 状态创建新 Run。插件配置解析、工具审批和动态 Workflow 的执行规则各自由对应模块维护。
+
+## 14. 验证要求
+
+- Store：快照/事件 schema、GMT+8 时间、损坏日志处理、游标分页和启动中断。
+- Controller：首次启动、阶段推进、Provider Retry、Biz Retry 人工决策、停止与迟到事件。
+- 消息源：身份与状态检查、动作限制、前置失败保留待决策、部分执行失败停止托管且不重复执行、Run 终止及重启失效。
+- 渠道：无 IM 时 APP 可处理，APP/IM 首个有效操作生效，短码失效、系统通知关闭及刷新恢复。
+- UI：两类提示并存、输入拦截、同 Run 日志更新与历史分页边界。
+- 非回归：IM 接入、会话授权、工具审批、远程审批和托管传输。
+
+验证使用类型检查、相关现有测试和局部 lint；跨端交互与操作系统弹窗另做端到端实测。
+
+## 历史规划
+
+[V3 历史路线](2026-07-28-managed-mode-v3-roadmap.md) 保留此前已记录的未来能力边界，不代表当前已实施。

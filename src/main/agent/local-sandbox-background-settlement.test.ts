@@ -8,13 +8,70 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }))
 
 vi.mock("node:child_process", async () => {
-  const actual = await vi.importActual<typeof import("node:child_process")>(
-    "node:child_process"
-  )
+  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process")
   return { ...actual, spawn: spawnMock }
 })
 
 import { LocalSandbox } from "./local-sandbox"
+import { modCallContext } from "../mods/context"
+
+describe("background result publication scope", () => {
+  it("rejects other threads and holds partial protected output", () => {
+    const sandbox = new LocalSandbox({
+      rootDir: tmpdir(),
+      runId: "mods-output-owner",
+      windowsSandbox: "none"
+    })
+    const foreign = new LocalSandbox({
+      rootDir: tmpdir(),
+      runId: "mods-output-foreign",
+      windowsSandbox: "none"
+    })
+    const tasks = (LocalSandbox as unknown as { backgroundTasks: Map<string, unknown> })
+      .backgroundTasks
+    const id = "mods-output-fixture"
+    tasks.set(id, {
+      threadId: "mods-output-owner",
+      modAgentId: "main",
+      startedAt: Date.now(),
+      lastOutputAt: Date.now(),
+      completed: false,
+      command: "echo fixture",
+      cwd: tmpdir(),
+      partialOutput: "sk-partial-secret",
+      partialTruncated: false
+    })
+    try {
+      expect(foreign.getTaskOutput(id)).toBeNull()
+      const context = {
+        identity: {
+          callId: "call",
+          threadId: "mods-output-owner",
+          turnId: "turn",
+          agentId: "main",
+          workspace: tmpdir(),
+          origin: "model" as const,
+          grantEpoch: 0
+        },
+        toolId: "host:task_output",
+        routeClaimed: true,
+        protectedOutput: true,
+        readOnly: false
+      }
+      expect(modCallContext.run(context, () => sandbox.getTaskOutput(id))?.partialOutput).toContain(
+        "pending policy"
+      )
+      expect(
+        modCallContext.run(
+          { ...context, identity: { ...context.identity, agentId: "worker" } },
+          () => sandbox.getTaskOutput(id)
+        )
+      ).toBeNull()
+    } finally {
+      tasks.delete(id)
+    }
+  })
+})
 
 interface Deferred<T> {
   promise: Promise<T>
@@ -173,7 +230,11 @@ describe("LocalSandbox background-task settlement", () => {
       windowsSandbox: "none"
     })
     const executeRaw = vi.fn()
-    Reflect.set(sandbox, "runPreToolUseHookForTool", vi.fn(() => preToolUse.promise))
+    Reflect.set(
+      sandbox,
+      "runPreToolUseHookForTool",
+      vi.fn(() => preToolUse.promise)
+    )
     Reflect.set(sandbox, "executeRaw", executeRaw)
 
     const started = sandbox.executeBackground("echo must-not-spawn")
@@ -197,7 +258,11 @@ describe("LocalSandbox background-task settlement", () => {
       runId: `background-pre-spawn-timeout-${Date.now()}-${Math.random()}`,
       windowsSandbox: "none"
     })
-    Reflect.set(sandbox, "runPreToolUseHookForTool", vi.fn(() => preToolUse.promise))
+    Reflect.set(
+      sandbox,
+      "runPreToolUseHookForTool",
+      vi.fn(() => preToolUse.promise)
+    )
     Reflect.set(sandbox, "executeRaw", vi.fn())
 
     const started = sandbox.executeBackground("echo delayed-hook")

@@ -8,7 +8,17 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
-import { AIMessage, HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages"
+import {
+  AIMessage,
+  HumanMessage,
+  SystemMessage,
+  ToolMessage,
+  type BaseMessage
+} from "@langchain/core/messages"
+import { BaseChatModel } from "@langchain/core/language_models/chat_models"
+import type { ChatResult } from "@langchain/core/outputs"
+import { convertToOpenAITool } from "@langchain/core/utils/function_calling"
+import { createMiddleware } from "langchain"
 import { convertMessagesToCompletionsMessageParams } from "@langchain/openai"
 
 import { loadAgentsPromptForWorkspace } from "../src/main/agent/agents-md.ts"
@@ -18,6 +28,7 @@ import {
   createConciseOutputStyleTurnReminderMiddleware,
   createDeepAgent,
   createOutputStyleTurnReminderMiddleware,
+  createToolStrategyTurnReminderMiddleware,
   getSystemPrompt
 } from "../src/main/agent/runtime.ts"
 import {
@@ -32,6 +43,15 @@ import {
 } from "../src/main/agent/system-prompt.ts"
 import type { HarnessFeatureAgentContext } from "../src/main/harness-board/service.ts"
 import type { AgentOutputStyle } from "../src/shared/agent-output-style.ts"
+import type { CoordinatorWorkerFilesystemAccess } from "../src/main/agent/coordinator-worker-access.ts"
+import {
+  getToolStrategyReminder,
+  resolveWorkflowToolStrategy
+} from "../src/main/agent/tool-strategy.ts"
+import {
+  configureAgentToolStrategy,
+  type AgentToolStrategy
+} from "../src/shared/agent-runtime-limits.ts"
 
 function assert(condition: unknown, message: string): void {
   if (!condition) {
@@ -934,6 +954,453 @@ function testDefaultCompletionAndRepetitionContract(workspacePath: string): void
   }
 }
 
+interface ToolStrategyRequest {
+  messages: BaseMessage[]
+  tools: Array<{ name: string; description?: string; parameters: unknown }>
+}
+
+// Real createDeepAgent graph + real middleware; only the model/backend I/O is fake.
+// Each bind gets a separate model view so concurrent task agents cannot mix tools.
+class ToolStrategyContractModel extends BaseChatModel {
+  constructor(
+    private readonly calls: ToolStrategyRequest[],
+    private readonly reply: (messages: BaseMessage[]) => AIMessage,
+    private readonly boundTools: ToolStrategyRequest["tools"] = []
+  ) {
+    super({})
+  }
+  _llmType(): string {
+    return "tool-strategy-contract"
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  bindTools(tools: any[]): ToolStrategyContractModel {
+    return new ToolStrategyContractModel(
+      this.calls,
+      this.reply,
+      tools.map((tool) => convertToOpenAITool(tool).function)
+    )
+  }
+  async _generate(messages: BaseMessage[]): Promise<ChatResult> {
+    this.calls.push({ messages, tools: this.boundTools })
+    const message = this.reply(messages)
+    return { generations: [{ text: String(message.content), message }] }
+  }
+}
+
+const finishedStrategyMessage = (): AIMessage =>
+  new AIMessage({
+    content: "Verified result",
+    response_metadata: { finish_reason: "stop" }
+  })
+const requestText = (messages: BaseMessage[]): string =>
+  messages
+    .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
+    .join("\n")
+
+async function testToolStrategyFinalRequests(workspacePath: string): Promise<void> {
+  let executeCount = 0
+  const backend = {
+    id: "tool-strategy-contract",
+    execute: async () => {
+      executeCount++
+      return { output: "sample", exitCode: 0 }
+    }
+  }
+  const makeOptions = (toolStrategy?: AgentToolStrategy, outputStyle?: AgentOutputStyle) => ({
+    backend,
+    toolStrategy,
+    outputStyle,
+    mainSubagentsEnabled: false,
+    mainTodosEnabled: false,
+    includeGeneralPurposeSubagent: false,
+    systemPrompt:
+      getSystemPrompt(workspacePath, undefined, {
+        toolStrategy,
+        includeBackgroundExec: false,
+        includeCurrentTime: false,
+        includeMemory: false,
+        includeSubagents: false
+      }) + "\nPROJECT_SENTINEL: use read_file for a special project workflow."
+  })
+  let defaultRequest: ToolStrategyRequest | undefined
+  for (const strategy of [undefined, "standard", "shell-first", "shell-first-relaxed"] as const) {
+    for (const style of ["default", "concise", "explanatory", "learning"] as const) {
+      const calls: ToolStrategyRequest[] = []
+      const model = new ToolStrategyContractModel(calls, (messages) =>
+        messages.at(-1)?._getType() === "tool"
+          ? finishedStrategyMessage()
+          : new AIMessage({
+              content: "",
+              tool_calls: [
+                {
+                  id: "inspect",
+                  name: "execute",
+                  args: { command: "inspect-fixture" },
+                  type: "tool_call"
+                }
+              ]
+            })
+      )
+      const original = new HumanMessage("Inspect the fixture")
+      const agent = createDeepAgent({ ...makeOptions(strategy, style), model })
+      const result = await agent.invoke({ messages: [original] })
+      assert(calls.length === 2, "strategy must not create an extra model/user turn")
+      assert(original.content === "Inspect the fixture", "source human content must stay unchanged")
+      assert(
+        !requestText(result.messages).includes("## Tool strategy:"),
+        "strategy reminder must not enter graph state/history"
+      )
+      const active = strategy === "shell-first" || strategy === "shell-first-relaxed"
+      for (const call of calls) {
+        const text = requestText(call.messages)
+        const count = text.split("## Tool strategy:").length - 1
+        assert(count === (active ? 1 : 0), `unexpected reminder count: ${strategy}/${style}`)
+        assert(
+          text.includes("PROJECT_SENTINEL: use read_file for a special project workflow."),
+          "project instructions must remain intact"
+        )
+        const description = call.tools.find((t) => t.name === "execute")!.description!
+        assert(
+          description.includes("MUST avoid") === !active,
+          "bound execute description must match strategy"
+        )
+        if (active) {
+          assert(
+            description.includes(
+              "subject to the active sandbox, approval, role, and workspace restrictions"
+            ),
+            "shell-first execute description must state the active execution restrictions"
+          )
+          assert(
+            !description.includes("on the user's machine"),
+            "shell-first execute description must not imply unrestricted host execution"
+          )
+        }
+        assert(
+          text.includes("Avoid using shell for file reading") === !active,
+          "final base prompt must match strategy"
+        )
+        for (const name of ["execute", "read_file", "edit_file", "write_file"]) {
+          assert(
+            call.tools.some((t) => t.name === name),
+            "strategy must preserve " + name
+          )
+        }
+      }
+      if (style === "default") {
+        if (strategy === undefined) defaultRequest = calls[0]
+        else if (strategy === "standard") {
+          assert(
+            requestText(calls[0].messages) === requestText(defaultRequest!.messages),
+            "explicit standard must preserve default outgoing messages"
+          )
+          assert(
+            JSON.stringify(calls[0].tools) === JSON.stringify(defaultRequest!.tools),
+            "explicit standard must preserve default bound tool schemas/descriptions"
+          )
+        } else {
+          assert(
+            JSON.stringify(calls[0].tools.map(({ name, parameters }) => ({ name, parameters }))) ===
+              JSON.stringify(
+                defaultRequest!.tools.map(({ name, parameters }) => ({ name, parameters }))
+              ),
+            "enabled strategy must not change tool schemas"
+          )
+        }
+      }
+    }
+  }
+  assert(executeCount === 16, "all modes must use the same execute backend")
+
+  // Each request is checked after late tool filtering, not just at construction.
+  const filtered: ToolStrategyRequest[] = []
+  const filteredAgent = createDeepAgent({
+    ...makeOptions("shell-first"),
+    model: new ToolStrategyContractModel(filtered, finishedStrategyMessage),
+    middleware: [
+      createMiddleware({
+        name: "lateToolFilter",
+        wrapModelCall: (request, handler) =>
+          handler({
+            ...request,
+            tools: request.tools.filter((tool) => !("name" in tool && tool.name === "execute"))
+          })
+      })
+    ]
+  })
+  await filteredAgent.invoke({ messages: [new HumanMessage("Report")] })
+  assert(
+    !requestText(filtered[0].messages).includes("## Tool strategy:"),
+    "removed execute must suppress the reminder"
+  )
+
+  // An already-assembled runtime does not hot-switch; metadata-only/default
+  // low-level construction does not implicitly read the global strategy either.
+  const frozen: ToolStrategyRequest[] = []
+  const frozenAgent = createDeepAgent({
+    ...makeOptions("shell-first"),
+    model: new ToolStrategyContractModel(frozen, finishedStrategyMessage)
+  })
+  try {
+    configureAgentToolStrategy("standard")
+    await frozenAgent.invoke({ messages: [new HumanMessage("Report")] })
+    assert(
+      requestText(frozen[0].messages).includes("## Tool strategy: shell-first"),
+      "runtime strategy must stay captured"
+    )
+    configureAgentToolStrategy("shell-first")
+    const lowLevel: ToolStrategyRequest[] = []
+    await createDeepAgent({
+      ...makeOptions(),
+      model: new ToolStrategyContractModel(lowLevel, finishedStrategyMessage)
+    }).invoke({ messages: [new HumanMessage("Report")] })
+    assert(
+      !requestText(lowLevel[0].messages).includes("## Tool strategy:"),
+      "low-level default must remain standard independently of global configuration"
+    )
+  } finally {
+    configureAgentToolStrategy("standard")
+  }
+
+  const noOp = createToolStrategyTurnReminderMiddleware("standard")
+  const request = {
+    messages: [new HumanMessage("original")],
+    tools: [{ name: "execute" }, { name: "write_file" }]
+  }
+  await noOp.wrapModelCall!(request as never, async (forwarded: unknown) => {
+    assert(forwarded === request, "standard reminder must forward the identical request")
+    return {} as never
+  })
+}
+
+async function testWorkflowToolStrategyRequests(workspacePath: string): Promise<void> {
+  let standard: ToolStrategyRequest | undefined
+  for (const requested of ["standard", "shell-first", "shell-first-relaxed"] as const) {
+    for (const yoloMode of [false, true]) {
+      const calls: ToolStrategyRequest[] = []
+      const toolStrategy = resolveWorkflowToolStrategy(requested, yoloMode)
+      const agent = createDeepAgent({
+        model: new ToolStrategyContractModel(calls, finishedStrategyMessage),
+        toolStrategy,
+        systemPrompt: getSystemPrompt(workspacePath, undefined, {
+          toolStrategy,
+          includeBackgroundExec: false,
+          includeCurrentTime: false,
+          includeMemory: false,
+          includeSubagents: false
+        }),
+        backend: { id: "workflow-strategy", execute: async () => ({ output: "", exitCode: 0 }) },
+        mainSubagentsEnabled: false,
+        mainTodosEnabled: false,
+        includeGeneralPurposeSubagent: false
+      })
+      await agent.invoke({ messages: [new HumanMessage("Edit the workflow files")] })
+      assert(calls.length === 1, "workflow strategy must not add a model turn")
+      const call = calls[0]
+      const active = yoloMode && requested !== "standard"
+      if (!standard) standard = call
+      if (!active) {
+        assert(
+          !requestText(call.messages).includes("## Tool strategy:"),
+          "standard and approval-gated workflow leaves must not receive Bash First steering"
+        )
+        assert(
+          requestText(call.messages) === requestText(standard.messages),
+          "approval-gated workflow leaves must retain the complete standard prompt"
+        )
+        assert(
+          JSON.stringify(call.tools) === JSON.stringify(standard.tools),
+          "approval-gated workflow leaves must retain standard tool descriptions and schemas"
+        )
+      } else {
+        assert(
+          requestText(call.messages).includes(getToolStrategyReminder(requested)),
+          "YOLO workflow leaves must retain the requested Bash First reminder"
+        )
+        assert(
+          !call.tools.find((tool) => tool.name === "execute")!.description!.includes("MUST avoid"),
+          "YOLO workflow leaves must not receive conflicting shell guidance"
+        )
+      }
+    }
+  }
+}
+
+async function testRestrictedRuntimeToolStrategyRequests(workspacePath: string): Promise<void> {
+  const roles: Array<{
+    name: string
+    filesystemAccess?: CoordinatorWorkerFilesystemAccess
+    mainBlockedToolNames?: string[]
+    mainFilesystemEnabled?: boolean
+  }> = [
+    { name: "read-only worker", filesystemAccess: { workload: "read_only" } },
+    { name: "verify worker", filesystemAccess: { workload: "verify" } },
+    { name: "no shell", filesystemAccess: { shellAccess: "none" } },
+    { name: "read-only shell", filesystemAccess: { shellAccess: "read_only" } },
+    {
+      name: "owned files",
+      filesystemAccess: { ownedFiles: [join(workspacePath, "owned.ts")] }
+    },
+    { name: "blocked execute", mainBlockedToolNames: ["execute"] },
+    { name: "blocked writers", mainBlockedToolNames: ["edit_file", "write_file"] },
+    { name: "no filesystem", mainFilesystemEnabled: false }
+  ]
+  for (const role of roles) {
+    let standard: ToolStrategyRequest | undefined
+    for (const toolStrategy of ["standard", "shell-first", "shell-first-relaxed"] as const) {
+      const calls: ToolStrategyRequest[] = []
+      const promptOptions = {
+        toolStrategy,
+        filesystemAccess: role.filesystemAccess,
+        blockedToolNames: role.mainBlockedToolNames,
+        filesystemEnabled: role.mainFilesystemEnabled,
+        includeBackgroundExec: false,
+        includeCurrentTime: false,
+        includeMemory: false,
+        includeSubagents: false
+      }
+      await createDeepAgent({
+        ...role,
+        model: new ToolStrategyContractModel(calls, finishedStrategyMessage),
+        backend: {
+          id: "restricted-strategy-contract",
+          execute: async () => {
+            throw new Error("No shell I/O expected in prompt test")
+          }
+        },
+        toolStrategy,
+        systemPrompt: getSystemPrompt(workspacePath, undefined, promptOptions),
+        mainSubagentsEnabled: false,
+        mainTodosEnabled: false,
+        includeGeneralPurposeSubagent: false
+      }).invoke({ messages: [new HumanMessage("Report status")] })
+      assert(calls.length === 1, `${role.name}: expected one model request`)
+      const call = calls[0]
+      const text = requestText(call.messages)
+      assert(!text.includes("## Tool strategy:"), `${role.name}: no Bash First reminder`)
+      assert(
+        text.includes("Avoid using shell for file reading"),
+        `${role.name}: original file-reading guidance must remain in ${toolStrategy}`
+      )
+      assert(
+        text.includes("Avoid using shell for file searching"),
+        `${role.name}: original file-search guidance must remain in ${toolStrategy}`
+      )
+      if (toolStrategy === "standard") standard = call
+      else {
+        assert(
+          text === requestText(standard!.messages),
+          `${role.name}: restricted outgoing prompt must match standard in ${toolStrategy}`
+        )
+        assert(
+          JSON.stringify(call.tools) === JSON.stringify(standard!.tools),
+          `${role.name}: tool descriptions and schemas must match standard in ${toolStrategy}`
+        )
+      }
+    }
+  }
+}
+
+async function testToolStrategySubagentRequests(
+  toolStrategy: "shell-first" | "shell-first-relaxed",
+  mainFilesystemEnabled = false
+): Promise<void> {
+  const calls: ToolStrategyRequest[] = []
+  const model = new ToolStrategyContractModel(calls, (messages) => {
+    const text = requestText(messages.filter((m) => m._getType() === "system"))
+    if (
+      text.includes("ROLE_READER") ||
+      text.includes("ROLE_WRITER") ||
+      messages.at(-1)?._getType() === "tool"
+    )
+      return finishedStrategyMessage()
+    return new AIMessage({
+      content: "",
+      tool_calls: ["Reader", "Writer"].map((role) => ({
+        id: role,
+        name: "task",
+        type: "tool_call" as const,
+        args: { description: "Report the fixture status", subagent_type: role }
+      }))
+    })
+  })
+  const agent = createDeepAgent({
+    model,
+    toolStrategy,
+    systemPrompt: "ROLE_COORDINATOR",
+    backend: { id: "subagent-strategy", execute: async () => ({ output: "", exitCode: 0 }) },
+    mainFilesystemEnabled,
+    mainBlockedToolNames: mainFilesystemEnabled ? ["write_file", "edit_file"] : [],
+    mainTodosEnabled: false,
+    includeGeneralPurposeSubagent: false,
+    registrySubagentSpecs: [
+      {
+        name: "Reader",
+        description: "Read only",
+        systemPrompt: "ROLE_READER",
+        shellAccess: "read_only",
+        disallowedTools: ["write_file", "edit_file"]
+      },
+      { name: "Writer", description: "Writable", systemPrompt: "ROLE_WRITER", shellAccess: "full" }
+    ]
+  })
+  await agent.invoke({ messages: [new HumanMessage("Delegate inspection")] })
+  const reader = calls.find((call) => requestText(call.messages).includes("ROLE_READER"))
+  const writer = calls.find((call) => requestText(call.messages).includes("ROLE_WRITER"))
+  assert(reader && writer, "both actual task subagents must reach the model")
+  assert(
+    !requestText(reader.messages).includes("## Tool strategy:"),
+    "read-only task must not receive edit steering"
+  )
+  assert(
+    !reader.tools.some((tool) => tool.name === "edit_file" || tool.name === "write_file"),
+    "read-only task must stay read-only"
+  )
+  const readerExecute = reader.tools.find((tool) => tool.name === "execute")
+  const writerExecute = writer.tools.find((tool) => tool.name === "execute")
+  assert(readerExecute && writerExecute, "both roles must retain their existing execute tool")
+  const sharedDescription = readerExecute.description ?? ""
+  assert(
+    !sharedDescription.includes("ordinary local text-file inspection and edits"),
+    "shared execute description must not advertise text-file editing to a read-only task"
+  )
+  assert(
+    sharedDescription.includes("active sandbox, approval, role, and workspace restrictions") &&
+      sharedDescription.includes("this tool grants no additional permission"),
+    "shared execute description must preserve explicit permission boundaries"
+  )
+  assert(
+    sharedDescription === writerExecute.description,
+    "siblings must keep the same neutral execute description without per-role mutation"
+  )
+  assert(
+    requestText(writer.messages).includes(getToolStrategyReminder(toolStrategy)),
+    "writable task must inherit requested preference from a non-filesystem parent"
+  )
+  assert(
+    writer.tools.some((tool) => tool.name === "edit_file"),
+    "writable sibling must retain its writer"
+  )
+  assert(
+    !writerExecute.description!.includes("MUST avoid"),
+    "parent downgrade must not restore conflicting shared descriptions for a writable child"
+  )
+  for (const call of calls.filter((call) =>
+    requestText(call.messages.filter((m) => m._getType() === "system")).includes("ROLE_COORDINATOR")
+  )) {
+    assert(
+      !requestText(call.messages).includes("## Tool strategy:"),
+      "parent without filesystem or file writers must not be steered"
+    )
+    if (mainFilesystemEnabled) {
+      assert(
+        call.tools.find((tool) => tool.name === "execute")!.description!.includes("MUST avoid"),
+        "parent without writers must retain its standard execute description"
+      )
+    }
+  }
+}
+
 async function run(): Promise<void> {
   const cliOptions = parseCliOptions(process.argv.slice(2))
   if (cliOptions.help) {
@@ -963,6 +1430,17 @@ async function run(): Promise<void> {
     console.log("PASS concise output style contract")
     await testAdditionalOutputStyleContracts()
     console.log("PASS additional output style contracts")
+    await testToolStrategyFinalRequests(workspacePath)
+    console.log("PASS tool strategy final requests, tool schemas, and output-style matrix")
+    await testWorkflowToolStrategyRequests(workspacePath)
+    console.log("PASS workflow tool strategy approval-mode matrix")
+    await testRestrictedRuntimeToolStrategyRequests(workspacePath)
+    console.log("PASS restricted runtime prompts and tool descriptions remain standard")
+    for (const toolStrategy of ["shell-first", "shell-first-relaxed"] as const) {
+      await testToolStrategySubagentRequests(toolStrategy)
+      await testToolStrategySubagentRequests(toolStrategy, true)
+    }
+    console.log("PASS tool strategy per-role task subagent requests")
   })
 }
 

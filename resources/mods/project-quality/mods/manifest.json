@@ -1,0 +1,16 @@
+{
+  "apiVersion": "cmb.mods/v1",
+  "id": "project-quality",
+  "name": "项目规范助手",
+  "entry": "index.ts",
+  "activation": "project",
+  "events": ["tool.call", "prompt.context", "command.run", "ui.render"],
+  "tools": ["host:write_file", "host:edit_file"],
+  "permissions": {
+    "readTools": [],
+    "writeTools": ["host:execute"],
+    "context": ["project.name"],
+    "store": false,
+    "artifacts": true
+  }
+}

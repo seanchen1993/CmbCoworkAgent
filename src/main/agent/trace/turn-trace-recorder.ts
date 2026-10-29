@@ -4,8 +4,10 @@ import {
   mergeStreamingReasoning,
   truncateReasoningForTrace
 } from "../../../shared/model-reasoning"
+import { isPlausibleToolName } from "../../../shared/tool-name"
 import { nowIsoLocal } from "../../util/local-time"
 import { normalizeTraceTokenUsage } from "./token-usage"
+import { readModelCallStage, type TraceCallStage } from "../../../shared/trace-stage-usage"
 import type { TraceChatMessage, TraceNodeStatus, TraceToolCall, TraceTokenUsage } from "./types"
 
 /**
@@ -41,6 +43,7 @@ export interface TraceToolCallLike {
 
 /** The slice of TraceCollector this module records through. */
 export interface TurnTraceCollector {
+  getTraceContext?(): { traceId: string }
   setModelName(name: string): void
   beginStep(): void
   recordToolCall(call: TraceToolCall): void
@@ -53,6 +56,7 @@ export interface TurnTraceCollector {
     metadata?: Record<string, unknown>
   }): string
   recordModelCall(call: {
+    stageAttribution?: TraceCallStage
     messageId?: string
     startedAt: string
     inputMessages: TraceChatMessage[]
@@ -199,8 +203,18 @@ export function traceToolCallId(toolCall: TraceToolCallLike | undefined): string
   return typeof toolCall?.id === "string" ? toolCall.id : ""
 }
 
+/**
+ * The name a tool node carries, or "unknown".
+ *
+ * A name that could not be a tool name is treated the same as a missing one. It
+ * reaches here when a model emits a tool call the harness could not parse and
+ * its raw text lands in the name field, and recording it verbatim put that text
+ * into usage statistics as though it were a tool — outranking the real ones,
+ * since the dashboard's filter excludes built-ins by exact name and matched
+ * none of these. See isPlausibleToolName.
+ */
 export function traceToolCallName(toolCall: TraceToolCallLike | undefined): string {
-  return typeof toolCall?.name === "string" && toolCall.name ? toolCall.name : "unknown"
+  return isPlausibleToolName(toolCall?.name) ? toolCall.name : "unknown"
 }
 
 function traceToolCallArgs(toolCall: TraceToolCallLike | undefined): Record<string, unknown> {
@@ -288,6 +302,10 @@ export function recordAssistantMessageTrace(input: {
   const content = extractTraceText(kwargs.content)
 
   tracer.recordModelCall({
+    stageAttribution: readModelCallStage(
+      responseMetadata?.cmbTraceStage,
+      tracer.getTraceContext?.().traceId
+    ),
     messageId: providerMessageId || messageKey,
     startedAt: nowIsoLocal(),
     inputMessages,
@@ -321,13 +339,18 @@ export function recordToolCallTraceNode(input: {
   llmMessageId: string
   parentId?: string
 }): string {
+  // Marked rather than silently renamed to "unknown". A model emitting tool
+  // calls the harness cannot parse is worth being able to see, and cleaning the
+  // usage ranking without leaving a trace of it would hide the very signal that
+  // made the problem visible.
+  const malformed = input.toolCall?.name !== undefined && !isPlausibleToolName(input.toolCall.name)
   return input.tracer.addToolNode({
     name: traceToolCallName(input.toolCall),
     input: traceToolCallArgs(input.toolCall),
     ...(input.parentId ? { parentId: input.parentId } : {}),
     llmMessageId: input.llmMessageId,
     ...(traceToolCallId(input.toolCall) ? { toolCallId: traceToolCallId(input.toolCall) } : {}),
-    metadata: { index: input.index }
+    metadata: { index: input.index, ...(malformed ? { malformedToolName: true } : {}) }
   })
 }
 
@@ -363,6 +386,11 @@ export function recordToolResultTraceNode(input: {
 export class TurnTraceRecorder {
   private readonly tracer: TurnTraceCollector
   private readonly userMessageId: string
+  private readonly requireUserMessageAnchor: boolean
+  private hasSeenUserMessageAnchor = false
+  private rawValuesMessages?: unknown[]
+  private rawValuesLength = 0
+  private rawValuesTailId?: string
   private readonly steppedMessageIds = new Set<string>()
   private readonly recordedModelMessageKeys = new Set<string>()
   private readonly recordedToolResultIds = new Set<string>()
@@ -370,9 +398,14 @@ export class TurnTraceRecorder {
   private readonly toolNodeByRef = new Map<string, string>()
   private readonly reasoningByMessageId = new Map<string, string>()
 
-  constructor(input: { tracer: TurnTraceCollector; userMessageId?: string }) {
+  constructor(input: {
+    tracer: TurnTraceCollector
+    userMessageId?: string
+    requireUserMessageAnchor?: boolean
+  }) {
     this.tracer = input.tracer
     this.userMessageId = input.userMessageId ?? ""
+    this.requireUserMessageAnchor = input.requireUserMessageAnchor ?? false
   }
 
   onStreamChunk(mode: string, data: unknown): void {
@@ -382,6 +415,50 @@ export class TurnTraceRecorder {
     } catch (error) {
       // Tracing is observational; a malformed payload must not fail the turn.
       console.error("[TurnTrace] stream observation failed:", error)
+    }
+  }
+
+  /** Child runtimes expose live LangChain messages, not IPC-serialized values.
+   * Keep references to their fields; serializing an entire checkpoint here would
+   * copy large tool outputs on every update just to recover usage metadata. */
+  onRawValues(snapshot: unknown): void {
+    try {
+      const raw = (snapshot as { messages?: unknown[] } | null)?.messages
+      if (!Array.isArray(raw)) return
+      const tail = raw.at(-1) as Record<string, unknown> | undefined
+      const tailFields = (tail?.kwargs ?? tail) as Record<string, unknown> | undefined
+      const tailClass = Array.isArray(tail?.id)
+        ? String(tail.id.at(-1))
+        : (tail?.constructor?.name ?? "")
+      const plainAssistantTail =
+        traceMessageRole(tailClass, tailFields) === "assistant" &&
+        (!Array.isArray(tailFields?.tool_calls) || tailFields.tool_calls.length === 0)
+      const tailId = typeof tailFields?.id === "string" ? tailFields.id : undefined
+      // Same stable-tail contract as WorkerValuesSnapshotAccumulator: only reuse
+      // the exact array, never a sampled prefix of a replacement/resume snapshot.
+      if (
+        raw === this.rawValuesMessages &&
+        raw.length === this.rawValuesLength &&
+        plainAssistantTail &&
+        tailId &&
+        tailId === this.rawValuesTailId
+      )
+        return
+      const messages = raw.map((value): SerializedTraceMessage => {
+        if (!value || typeof value !== "object") return {}
+        const message = value as Record<string, unknown>
+        if (message.kwargs && typeof message.kwargs === "object") {
+          return message as SerializedTraceMessage
+        }
+        const className = message.constructor?.name
+        return { id: [className ?? ""], kwargs: message }
+      })
+      this.onStreamChunk("values", { messages })
+      this.rawValuesMessages = raw
+      this.rawValuesLength = raw.length
+      this.rawValuesTailId = plainAssistantTail ? tailId : undefined
+    } catch (error) {
+      console.error("[TurnTrace] raw values observation failed:", error)
     }
   }
 
@@ -508,7 +585,11 @@ export class TurnTraceRecorder {
   private turnStartIndex(messages: SerializedTraceMessage[]): number {
     if (this.userMessageId) {
       const anchored = messages.findIndex((message) => message?.kwargs?.id === this.userMessageId)
-      if (anchored >= 0) return anchored + 1
+      if (anchored >= 0) {
+        this.hasSeenUserMessageAnchor = true
+        return anchored + 1
+      }
+      if (this.requireUserMessageAnchor && !this.hasSeenUserMessageAnchor) return messages.length
     }
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       if (traceMessageRole(traceMessageClassName(messages[i]), messages[i]?.kwargs) === "user") {

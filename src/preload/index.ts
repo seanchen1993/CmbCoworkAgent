@@ -1,7 +1,27 @@
 import type { DesignSessionApi, DesignSessionChange } from "../shared/managed-design-session"
 import type { DesignTemplateApi } from "../shared/design-template"
+import type {
+  KnowledgeAccumulationData,
+  KnowledgeActiveDetails,
+  KnowledgeFileReaders,
+  KnowledgeProjectStats,
+  KnowledgeReadDetails,
+  KnowledgeReadFileRef,
+  KnowledgeRecentConstraintFiles
+} from "../shared/dashboard-knowledge-overview"
+import type { EfficiencyPluginFilter } from "../shared/dashboard-efficiency-compute"
+import type { ProjectCodeTraceRequest } from "../shared/project-code-trace"
+import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
+import type {
+  AppNotification,
+  AppDecisionInput,
+  AppDecisionResult
+} from "../shared/app-notifications"
+import type { SubagentExportTarget } from "../shared/subagent-session-export"
+import type { UiGuideConfig, UiGuideState } from "../shared/ui-guides"
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
+import type { ModCard, ModProjection, ModWorkspaceStatus } from "../shared/mods/types"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import { requirementsApi } from "./requirements-api"
 import {
@@ -10,7 +30,7 @@ import {
   type CloseToTrayPromptEvent,
   type WindowCloseBehavior
 } from "../shared/close-to-tray"
-import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
+import type { AgentRuntimeSettings, AgentToolStrategy } from "../shared/agent-runtime-limits"
 import type {
   Thread,
   Message,
@@ -150,15 +170,13 @@ import type {
   HarnessRunArtifactRevealInput,
   HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
+  HarnessDeployUnitConfig,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
   HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent,
-  HarnessHumanGateChangedEvent,
-  HarnessHumanGateDecisionInput,
-  HarnessHumanGateSnapshot,
   ManagedRunEventCursor,
   ManagedRunEventsPage,
   ManagedRunIdentity,
@@ -284,6 +302,7 @@ const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed
 const GIT_CHANGE_NOTICE_GET_CHANNEL = "app:get-git-change-notice-enabled"
 const GIT_CHANGE_NOTICE_SET_CHANNEL = "app:set-git-change-notice-enabled"
 const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
+const AGENT_TOOL_STRATEGY_SET_CHANNEL = "app:set-agent-tool-strategy"
 const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursion-limit"
 const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
 const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-remove-timeout"
@@ -353,6 +372,8 @@ const electronAPI = {
     ipcRenderer.invoke(GIT_CHANGE_NOTICE_SET_CHANNEL, enabled) as Promise<boolean>,
   getAgentRuntimeSettings: (): Promise<AgentRuntimeSettings> =>
     ipcRenderer.invoke(AGENT_RUNTIME_SETTINGS_GET_CHANNEL) as Promise<AgentRuntimeSettings>,
+  setAgentToolStrategy: (value: AgentToolStrategy): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(AGENT_TOOL_STRATEGY_SET_CHANNEL, value) as Promise<AgentRuntimeSettings>,
   setAgentRuntimeRecursionLimit: (value: number): Promise<AgentRuntimeSettings> =>
     ipcRenderer.invoke(
       AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL,
@@ -369,9 +390,9 @@ const electronAPI = {
       value
     ) as Promise<AgentRuntimeSettings>,
   onNotifyMsg: (callback: (msg: string) => void) => {
-    ipcRenderer.on("notify-login-msg", (_event, data) => {
-      callback(data)
-    })
+    const handler = (_event: unknown, data: string): void => callback(data)
+    ipcRenderer.on("notify-login-msg", handler)
+    return () => ipcRenderer.removeListener("notify-login-msg", handler)
   },
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => ipcRenderer.send(channel, ...args),
@@ -401,6 +422,9 @@ function createBrowserApi() {
     },
     setBounds: (bounds: BrowserBounds, visible?: boolean): Promise<BrowserState> => {
       return ipcRenderer.invoke("browser:setBounds", bounds, visible) as Promise<BrowserState>
+    },
+    setZoomFactor: (zoomFactor: number): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:setZoomFactor", zoomFactor) as Promise<BrowserState>
     },
     navigate: (url: string, options?: BrowserNavigateOptions): Promise<BrowserState> => {
       return ipcRenderer.invoke("browser:navigate", url, options) as Promise<BrowserState>
@@ -638,6 +662,14 @@ ipcRenderer.on(
 
 // Custom APIs for renderer
 const api = {
+  uiGuides: {
+    getState: (config: UiGuideConfig): Promise<UiGuideState> =>
+      ipcRenderer.invoke("uiGuides:getState", config),
+    recordDisplay: (config: UiGuideConfig): Promise<boolean> =>
+      ipcRenderer.invoke("uiGuides:recordDisplay", config),
+    acknowledge: (config: UiGuideConfig): Promise<void> =>
+      ipcRenderer.invoke("uiGuides:acknowledge", config)
+  },
   agent: {
     // Send message and receive events via callback
     invoke: (
@@ -1030,6 +1062,19 @@ const api = {
     hydrate: (threadId: string): Promise<unknown> => {
       return ipcRenderer.invoke("workflow:hydrate", { threadId }) as Promise<unknown>
     },
+    /** Holds off the automatic summary after the user presses Stop. */
+    suppressPendingNotification: (threadId: string, suppressed = true): Promise<void> => {
+      return ipcRenderer.invoke("agent:suppress-pending-notification", {
+        threadId,
+        suppressed
+      }) as Promise<void>
+    },
+    /** Asks the main process to consider a pending summary; it decides and runs it. */
+    requestPendingNotification: (threadId: string): Promise<void> => {
+      return ipcRenderer.invoke("agent:request-pending-notification", {
+        threadId
+      }) as Promise<void>
+    },
     onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void): (() => void) => {
       // Durable per-thread channel for background workflow runs. Unlike the
       // run stream, this survives past the launching turn so progress and the
@@ -1179,6 +1224,11 @@ const api = {
       role?: Message["role"]
     ): Promise<{ replaced: boolean }> => {
       return ipcRenderer.invoke("threads:replaceMessageId", { threadId, fromId, toId, role })
+    },
+    exportSubagentSession: (
+      target: SubagentExportTarget
+    ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> => {
+      return ipcRenderer.invoke("threads:exportSession", target.threadId, target)
     },
     exportSession: (
       threadId: string
@@ -1539,6 +1589,11 @@ const api = {
     getUserInfo: (): Promise<UserInfoConfig | null> => {
       return ipcRenderer.invoke("models:getUserInfo") as Promise<UserInfoConfig | null>
     },
+    onUserInfoChanged: (callback: () => void): (() => void) => {
+      const handler = (): void => callback()
+      ipcRenderer.on("models:userInfoChanged", handler)
+      return () => ipcRenderer.removeListener("models:userInfoChanged", handler)
+    },
     deleteCustomConfig: (id: string): Promise<void> => {
       return ipcRenderer.invoke("models:deleteCustomConfig", id) as Promise<void>
     },
@@ -1781,6 +1836,7 @@ const api = {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
@@ -1808,6 +1864,7 @@ const api = {
         changedFiles?: string[]
         changedFilesTotal?: number
         omittedFileCount?: number
+        skippedDirs?: string[]
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         hasPushableCommit: boolean
@@ -1878,6 +1935,7 @@ const api = {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       suggestedCommitMessage?: string
@@ -1900,6 +1958,7 @@ const api = {
         changedFiles?: string[]
         changedFilesTotal?: number
         omittedFileCount?: number
+        skippedDirs?: string[]
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         suggestedCommitMessage?: string
@@ -1944,6 +2003,29 @@ const api = {
           additions: number
           deletions: number
         }
+        error?: string
+      }>
+    },
+    addGitignoreEntry: (
+      threadId: string,
+      targetPath: string,
+      kind: "file" | "directory",
+      options?: { worktreePath?: string }
+    ): Promise<{
+      success: boolean
+      entry?: string
+      alreadyExists?: boolean
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:addGitignoreEntry", {
+        threadId,
+        targetPath,
+        kind,
+        options
+      }) as Promise<{
+        success: boolean
+        entry?: string
+        alreadyExists?: boolean
         error?: string
       }>
     },
@@ -2860,6 +2942,8 @@ const api = {
     }
   },
   builtinRobot: {
+    cancelThread: (threadId: string): Promise<boolean> =>
+      ipcRenderer.invoke("builtinRobot:cancelThread", threadId),
     getStatus: (): Promise<BuiltinRobotStatus> =>
       ipcRenderer.invoke("builtinRobot:getStatus") as Promise<BuiltinRobotStatus>,
     getRemoteAccess: (): Promise<BuiltinRobotRemoteAccessOverview> =>
@@ -3010,22 +3094,76 @@ const api = {
       }
     }
   },
+  mods: {
+    globalEnabled: (): Promise<boolean> => ipcRenderer.invoke("mods:global-enabled"),
+    configureGlobal: (enabled: boolean): Promise<boolean> =>
+      ipcRenderer.invoke("mods:configure-global", enabled),
+    functionUnlocked: (): Promise<boolean> => ipcRenderer.invoke("mods:function-unlocked"),
+    unlockFunction: (password: string): Promise<boolean> =>
+      ipcRenderer.invoke("mods:unlock-function", password),
+    turnNotices: (
+      threadId: string
+    ): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]> =>
+      ipcRenderer.invoke("mods:function-turn-notices", threadId),
+    panes: (threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]> =>
+      ipcRenderer.invoke("mods:function-panes", threadId),
+    paneAct: (
+      threadId: string,
+      action: import("../shared/mods/v2/ui").FunctionUiAction
+    ): Promise<void> => ipcRenderer.invoke("mods:function-ui-act", { threadId, action }),
+    clientAct: (
+      threadId: string,
+      action: import("../shared/mods/v2/ui").FunctionClientAction
+    ): Promise<void> => ipcRenderer.invoke("mods:function-client-act", { threadId, action }),
+    approveFunction: (threadId: string, pluginId: string, digest: string): Promise<void> => ipcRenderer.invoke("mods:approve-function", { threadId, pluginId, digest }),
+    revokeFunction: (threadId: string, name: string): Promise<void> => ipcRenderer.invoke("mods:revoke-function", { threadId, name }),
+    status: (threadId: string): Promise<ModWorkspaceStatus> => ipcRenderer.invoke("mods:status", threadId),
+    configure: (threadId: string, enabled: boolean, outputPolicy: boolean): Promise<void> =>
+      ipcRenderer.invoke("mods:configure", { threadId, enabled, outputPolicy }),
+    approve: (threadId: string, pluginId: string, digest: string): Promise<void> =>
+      ipcRenderer.invoke("mods:approve", { threadId, pluginId, digest }),
+    revoke: (threadId: string, modId: string): Promise<void> => ipcRenderer.invoke("mods:revoke", { threadId, modId }),
+    cards: (threadId: string, callId: string): Promise<ModCard[]> => ipcRenderer.invoke("mods:cards", { threadId, callId }),
+    act: (threadId: string, actionId: string): Promise<ModProjection> => ipcRenderer.invoke("mods:act", { threadId, actionId }),
+    installExamples: (): Promise<void> => ipcRenderer.invoke("mods:install-examples"),
+    audit: (threadId: string, before?: number): Promise<import("../shared/mods/types").ModAuditEntry[]> => ipcRenderer.invoke("mods:audit", { threadId, before }),
+    reconcile: (threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure"): Promise<void> => ipcRenderer.invoke("mods:reconcile", { threadId, callId, resolution }),
+    backup: (): Promise<boolean> => ipcRenderer.invoke("mods:backup"),
+    artifact: (threadId: string, id: string): Promise<{ label: string; text: string }> => ipcRenderer.invoke("mods:artifact", { threadId, id }),
+    saveArtifact: (threadId: string, id: string): Promise<boolean> => ipcRenderer.invoke("mods:save-artifact", { threadId, id }),
+    commands: (threadId: string): Promise<import("../shared/mods/types").ModCommandDescriptor[]> => ipcRenderer.invoke("mods:commands", threadId),
+    enqueue: (threadId: string, descriptor: import("../shared/mods/types").ModCommandDescriptor, args: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/types").ModCommandJob> => ipcRenderer.invoke("mods:enqueue", { threadId, descriptor, args }),
+    jobs: (threadId: string): Promise<import("../shared/mods/types").ModCommandJob[]> => ipcRenderer.invoke("mods:jobs", threadId),
+    cancelJob: (threadId: string, id: string): Promise<void> => ipcRenderer.invoke("mods:cancel-job", { threadId, id }),
+    onJobsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { threadId: string }): void => callback(payload)
+      ipcRenderer.on("mods:jobs-changed", listener)
+      return () => ipcRenderer.removeListener("mods:jobs-changed", listener)
+    },
+    onCardsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, value: { threadId: string }): void => callback(value)
+      ipcRenderer.on("mods:cards-changed", listener)
+      return () => ipcRenderer.removeListener("mods:cards-changed", listener)
+    }
+  },
   plugins: {
+    // Existing plugin APIs remain independent of project-scoped module grants.
     list: (): Promise<PluginMetadata[]> =>
       ipcRenderer.invoke("plugins:list") as Promise<PluginMetadata[]>,
     install: (
       buffer: ArrayBuffer,
       fileName: string,
       origin?: "market" | "local",
-      version?: string
+      version?: string,
+      requireMods?: boolean
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version }) as Promise<{
+      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, requireMods }) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
       }>,
-    installFromDir: (): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:installFromDir") as Promise<{
+    installFromDir: (requireMods?: boolean): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
+      ipcRenderer.invoke("plugins:installFromDir", requireMods) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
@@ -3863,20 +4001,91 @@ const api = {
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | string[] | null }
+      opts?: {
+        upperOrgLv1?: string | string[] | null
+        fromLeanOnly?: boolean | null
+        createdInRangeOnly?: boolean | null
+        refreshProjects?: boolean
+        skipProjectList?: boolean
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMode", range, granularity, opts),
     projectModeCodeStats: (
       range: { from: string; to: string },
-      opts: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null } | undefined,
+      opts:
+        | {
+            upperOrgLv1?: string | string[] | null
+            fromLeanOnly?: boolean | null
+            createdInRangeOnly?: boolean | null
+          }
+        | undefined,
       source: string | null
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeCodeStats", range, opts, source),
-    efficiency: (
+    knowledgeAccumulation: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeAccumulationData
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeAccumulation", opts),
+    knowledgeActiveDetails: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeActiveDetails
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeActiveDetails", opts),
+    knowledgeReadDetails: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeReadDetails
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeReadDetails", opts),
+    knowledgeReadReaders: (
+      file: KnowledgeReadFileRef,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{
+      success: boolean
+      data?: KnowledgeFileReaders
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeReadReaders", file, opts),
+    knowledgeProjectStats: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{
+      success: boolean
+      data?: KnowledgeProjectStats
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeProjectStats", range, opts),
+    knowledgeRecentConstraintFiles: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeRecentConstraintFiles
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeRecentConstraintFiles", opts),
+    knowledgeCommitRate: (
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:knowledgeCommitRate", range, opts),
+    efficiency: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null } & EfficiencyPluginFilter
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:efficiency", range, opts),
+    projectMetricGroupOptions: (
+      filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
+    ): Promise<{ success: boolean; data?: string[]; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMetricGroupOptions", filters),
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -3906,12 +4115,18 @@ const api = {
       ipcRenderer.invoke("dashboard:projectModeProjects", range, options),
     projectModeExportData: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+      opts?: {
+        upperOrgLv1?: string | string[] | null
+        fromLeanOnly?: boolean | null
+        createdInRangeOnly?: boolean | null
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeExportData", range, opts),
+    projectCodeTrace: (input: ProjectCodeTraceRequest) =>
+      ipcRenderer.invoke("dashboard:projectCodeTrace", input),
     projectModeTraces: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: {
         limit?: number
         page?: number
@@ -3930,15 +4145,22 @@ const api = {
     projectModeFeatureNodes: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string }
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:projectModeFeatureNodes", projectId, featureSlug, range),
+      ipcRenderer.invoke("dashboard:projectModeFeatureNodes", projectId, featureSlug, range, opts),
     projectModeOperationalDetails: (
       scope: { projectId: string; featureSlug?: string; nodeName?: string },
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeOperationalDetails", scope, range, opts),
+    projectModeStageAnalysis: (
+      projectId: string,
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeStageAnalysis", projectId, range, opts),
     pluginAggregate: (
       adapterName: string,
       range: { from: string; to: string }
@@ -3947,7 +4169,7 @@ const api = {
     projectModeFeatureCommits: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: {
         page?: number
         pageSize?: number
@@ -3966,7 +4188,7 @@ const api = {
       ),
     projectModeProjectCommits: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: {
         page?: number
         pageSize?: number
@@ -4139,7 +4361,7 @@ const api = {
       ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit, mode, triggerScope),
     threadTraces: (
       threadId: string,
-      options?: { scope?: "platform" | "project" }
+      options?: DashboardThreadTraceScope
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:threadTraces", threadId, options),
     marketSkillRecentTraces: (
@@ -4209,6 +4431,8 @@ const api = {
       page: number
       pageSize: number
       totalTraces: number
+      viewMode?: "thread" | "trace"
+      triggerScope?: "active" | "all"
       traces: unknown[]
     }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportSkillTraces", payload),
@@ -4244,6 +4468,16 @@ const api = {
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("adoption:commitLines", commitSha, genEventIds)
   },
+  appNotifications: {
+    list: (): Promise<AppNotification[]> => ipcRenderer.invoke("appNotifications:list"),
+    decide: (input: AppDecisionInput): Promise<AppDecisionResult> =>
+      ipcRenderer.invoke("appNotifications:decide", input),
+    onChanged: (callback: () => void): (() => void) => {
+      const handler = (): void => callback()
+      ipcRenderer.on("appNotifications:changed", handler)
+      return () => ipcRenderer.removeListener("appNotifications:changed", handler)
+    }
+  },
   harnessBoard: {
     catalogPage: (input: HarnessBoardCatalogPageInput): Promise<HarnessBoardCatalogPageResult> =>
       ipcRenderer.invoke(
@@ -4266,25 +4500,17 @@ const api = {
       ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessAdapterRegistryItem[]>,
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
-    getHumanGateForThread: (threadId: string): Promise<HarnessHumanGateSnapshot | undefined> =>
-      ipcRenderer.invoke("harnessBoard:getHumanGateForThread", threadId) as Promise<
-        HarnessHumanGateSnapshot | undefined
-      >,
-    approveHumanGate: (input: HarnessHumanGateDecisionInput): Promise<boolean> =>
-      ipcRenderer.invoke("harnessBoard:approveHumanGate", input) as Promise<boolean>,
-    rejectHumanGate: (input: HarnessHumanGateDecisionInput): Promise<boolean> =>
-      ipcRenderer.invoke("harnessBoard:rejectHumanGate", input) as Promise<boolean>,
-    getDeployUnitMappings: (): Promise<HarnessDeployUnitMapping[]> =>
+    getDeployUnitMappings: (): Promise<HarnessDeployUnitConfig[]> =>
       ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<
-        HarnessDeployUnitMapping[]
+        HarnessDeployUnitConfig[]
       >,
     getLeanTokenConfig: (): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke("harnessBoard:getLeanTokenConfig") as Promise<HarnessLeanTokenConfig>,
     saveDeployUnitMappings: (
-      mappings: HarnessDeployUnitMapping[]
-    ): Promise<HarnessDeployUnitMapping[]> =>
+      mappings: HarnessDeployUnitConfig[]
+    ): Promise<HarnessDeployUnitConfig[]> =>
       ipcRenderer.invoke("harnessBoard:saveDeployUnitMappings", mappings) as Promise<
-        HarnessDeployUnitMapping[]
+        HarnessDeployUnitConfig[]
       >,
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke(
@@ -4312,6 +4538,11 @@ const api = {
         "harnessBoard:searchEnterpriseProjects",
         input
       ) as Promise<HarnessEnterpriseProjectSearchResult>,
+    verifyEnterpriseProjectCode: (projectCode: string): Promise<boolean> =>
+      ipcRenderer.invoke(
+        "harnessBoard:verifyEnterpriseProjectCode",
+        projectCode
+      ) as Promise<boolean>,
     searchDeployUnits: (
       input: HarnessDeployUnitSearchInput
     ): Promise<HarnessDeployUnitSearchResult> =>
@@ -4457,6 +4688,11 @@ const api = {
         "harnessBoard:getManagedRunEvents",
         input
       ) as Promise<ManagedRunEventsPage>,
+    getLatestManagedRun: (
+      projectId: string,
+      featureId: string
+    ): Promise<ManagedRunSummary | null> =>
+      ipcRenderer.invoke("harnessBoard:getLatestManagedRun", projectId, featureId),
     cancelDialogTips: (): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelDialogTips") as Promise<void>,
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void): (() => void) => {
@@ -4477,12 +4713,6 @@ const api = {
         callback(payload)
       ipcRenderer.on("harnessBoard:managedRunThreadCreated", handler)
       return () => ipcRenderer.removeListener("harnessBoard:managedRunThreadCreated", handler)
-    },
-    onHumanGateChanged: (callback: (event: HarnessHumanGateChangedEvent) => void): (() => void) => {
-      const handler = (_event: unknown, payload: HarnessHumanGateChangedEvent): void =>
-        callback(payload)
-      ipcRenderer.on("harnessBoard:humanGateChanged", handler)
-      return () => ipcRenderer.removeListener("harnessBoard:humanGateChanged", handler)
     }
   },
   design: {

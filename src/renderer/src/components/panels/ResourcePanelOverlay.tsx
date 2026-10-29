@@ -65,6 +65,12 @@ export function ResourcePanelOverlay({
     clearPreviewRequest()
   }, [clearPreviewRequest])
 
+  useEffect(() => {
+    if (!standardRightPanelMounted) return
+    setOpen(false)
+    clearPreviewRequest()
+  }, [clearPreviewRequest, standardRightPanelMounted])
+
   const selectMode = useCallback(
     (
       nextMode: ResourcePanelOverlayMode,
@@ -75,6 +81,7 @@ export function ResourcePanelOverlay({
       }
     ) => {
       if (standardRightPanelMounted) {
+        setOpen(false)
         setRightModule(nextMode)
         if (options?.filePreview) emitOpenResourcePreview(options.filePreview)
         return

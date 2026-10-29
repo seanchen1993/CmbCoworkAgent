@@ -1,5 +1,5 @@
 /**
- * Real Electron E2E for tool-file source preview and workspace-tab static HTML UI.
+ * Real Electron E2E for tool-file source preview and isolated workspace HTML/JavaScript UI.
  *
  * Run:
  *   npm run test:workspace-html:e2e
@@ -392,6 +392,7 @@ async function selectWorkspaceThread(page: Page): Promise<void> {
 }
 
 async function openWorkspaceFiles(page: Page, blockedPreviewRequests: string[]): Promise<void> {
+  await page.setViewportSize({ width: 1500, height: 900 })
   await selectWorkspaceThread(page)
   const showRightPanel = page.getByRole("button", { name: "显示右侧面板" })
   if ((await showRightPanel.count()) > 0) await showRightPanel.first().click()
@@ -416,7 +417,10 @@ async function openWorkspaceFiles(page: Page, blockedPreviewRequests: string[]):
       iframeTitle === fixture.fileName || iframeTitle.endsWith(`/${fixture.fileName}`),
       `${fixture.fileName} 工作目录入口打开对应 HTML`
     )
-    assert((await iframe.getAttribute("sandbox")) === "", `${fixture.fileName} 使用零权限沙箱`)
+    assert(
+      (await iframe.getAttribute("sandbox")) === "allow-scripts",
+      `${fixture.fileName} 使用脚本可运行的隔离沙箱`
+    )
 
     const frame = iframe.contentFrame()
     const ui = frame.getByTestId(fixture.testId)
@@ -439,10 +443,10 @@ async function openWorkspaceFiles(page: Page, blockedPreviewRequests: string[]):
       `${fixture.fileName} 展示 UI 圆角样式`
     )
     assert(
-      (await frame.locator("html").getAttribute("data-e2e-executed")) === null,
-      `${fixture.fileName} 不执行工作区脚本`
+      (await frame.locator("html").getAttribute("data-e2e-executed")) === "true",
+      `${fixture.fileName} 执行工作区脚本`
     )
-    assert((await frame.locator("script").count()) === 0, `${fixture.fileName} 移除脚本节点`)
+    assert((await frame.locator("script").count()) > 0, `${fixture.fileName} 保留页面脚本`)
     assert((await frame.locator("iframe").count()) === 0, `${fixture.fileName} 移除嵌套页面`)
     assert(
       (await frame.locator('meta[http-equiv="refresh" i]').count()) === 0,
@@ -452,9 +456,124 @@ async function openWorkspaceFiles(page: Page, blockedPreviewRequests: string[]):
       (await page.locator(".shiki-wrapper").filter({ hasText: fixture.sentinel }).count()) === 0,
       `${fixture.fileName} 工作目录入口不展示源码视图`
     )
+    if (fixture.fileName === LAYOUT_FILE_NAME) {
+      assert((await ui.getAttribute("data-created-by-js")) === "true", "页面主体由本地 JS 创建")
+      assert(
+        (await frame.locator("body").evaluate((element) => getComputedStyle(element).opacity)) ===
+          "1",
+        "JS 初始化后展示原本隐藏的页面"
+      )
+      assert(
+        (await frame.locator("html").getAttribute("data-module-ready")) === "true",
+        "内联 module 脚本正常执行"
+      )
+      const button = frame.getByRole("button", { name: "计数 0" })
+      await button.click()
+      await frame.getByRole("button", { name: "计数 1" }).waitFor({ state: "visible" })
+      log("PASS JS 按钮交互更新页面")
+      const isolation = await frame.locator("html").evaluate(() => {
+        const result = {
+          bridge: typeof (window as unknown as { api?: unknown }).api,
+          parentReadable: false,
+          storageReadable: false
+        }
+        try {
+          result.parentReadable = Boolean(parent.document.body)
+        } catch {
+          /* opaque origin */
+        }
+        try {
+          result.storageReadable = Boolean(localStorage)
+        } catch {
+          /* opaque origin */
+        }
+        return result
+      })
+      assert(
+        isolation.bridge === "undefined" && !isolation.parentReadable && !isolation.storageReadable,
+        "JS 无法读取应用 API、父页面及持久存储"
+      )
+
+      // Exercise a real script-created link and location assignment. CSP alone does not stop these.
+      await frame.getByRole("button", { name: "测试页面跳转" }).click()
+      await frame.getByRole("button", { name: "测试动态链接" }).click()
+      await page.waitForTimeout(300)
+      await ui.waitFor({ state: "visible" })
+      assert(blockedPreviewRequests.length === 0, "JS 自身导航和动态链接在发出请求前被阻止")
+
+      for (const viewport of [
+        { width: 1500, height: 900 },
+        { width: 1200, height: 700 }
+      ]) {
+        await page.setViewportSize(viewport)
+        await waitForStableLayout(page)
+        const geometry = await iframe.evaluate((element) => ({
+          height: element.getBoundingClientRect().height,
+          containerHeight: element.parentElement!.clientHeight
+        }))
+        assert(
+          geometry.height > 350 && closeEnough(geometry.height, geometry.containerHeight),
+          `工作目录 ${viewport.width}×${viewport.height} 预览填满可用高度，没有上下空白分块`
+        )
+        const tail = frame.locator("#page-tail")
+        await tail.scrollIntoViewIfNeeded()
+        const tailVisible = await tail.evaluate((element) => {
+          const rect = element.getBoundingClientRect()
+          return rect.top >= 0 && rect.bottom <= innerHeight
+        })
+        assert(tailVisible, `工作目录 ${viewport.width}×${viewport.height} 可滚动到 JS 页面末尾`)
+        await frame.locator("html").evaluate(() => window.scrollTo(0, 0))
+      }
+      await page.setViewportSize({ width: 1500, height: 900 })
+      const artifactDirectory = join(PROJECT_ROOT, "output", "html-preview")
+      mkdirSync(artifactDirectory, { recursive: true })
+      await page.screenshot({ path: join(artifactDirectory, "workspace-javascript-preview.png") })
+
+      await page.getByRole("button", { name: "原文", exact: true }).click()
+      await page
+        .locator(".shiki-wrapper")
+        .filter({ hasText: PREVIEW_END_SENTINEL })
+        .waitFor({ state: "visible" })
+      assert(
+        (await page.locator("iframe.html-preview-light-canvas").count()) === 0,
+        "工作目录可切换原文并卸载脚本页面"
+      )
+      await page.getByRole("button", { name: "预览", exact: true }).click()
+      await page
+        .frameLocator("iframe.html-preview-light-canvas")
+        .getByTestId(fixture.testId)
+        .waitFor({ state: "visible" })
+      log("PASS 从原文切回 JS 页面可重新渲染")
+      for (let reopen = 0; reopen < 10; reopen += 1) {
+        await page.getByRole("button", { name: "原文", exact: true }).click()
+        await page.getByRole("button", { name: "预览", exact: true }).click()
+        await page
+          .frameLocator("iframe.html-preview-light-canvas")
+          .getByRole("button", { name: "计数 0", exact: true })
+          .waitFor({ state: "visible" })
+      }
+      log("PASS 连续切换原文/预览 10 次仍可加载本地 JS，不耗尽依赖预算")
+    }
   }
 
-  assert(blockedPreviewRequests.length === 0, "静态 HTML 预览没有发起外部网络请求")
+  for (const fileName of ["broken-script.html", "missing-script.html"]) {
+    await page.getByText(fileName, { exact: true }).last().click()
+    const issue = page.getByTestId("html-preview-issue")
+    await issue.waitFor({ state: "visible" })
+    assert(
+      (await issue.textContent())?.includes(
+        fileName === "broken-script.html" ? "脚本运行出错" : "无法加载脚本"
+      ),
+      `${fileName} 显示可理解的错误原因`
+    )
+    await page.getByRole("button", { name: "原文", exact: true }).click()
+    await page
+      .locator(".shiki-wrapper")
+      .filter({ hasText: "<script" })
+      .waitFor({ state: "visible" })
+    log(`PASS ${fileName} 出错后仍可查看原文`)
+  }
+  assert(blockedPreviewRequests.length === 0, "HTML/JS 预览没有发起外部网络请求")
 }
 
 interface PreviewGeometry {
@@ -487,7 +606,9 @@ async function assertPreviewGeometry(page: Page, scope: Locator, label: string):
 
   const geometry = await surface.evaluate<PreviewGeometry>((surfaceElement) => {
     const parentElement = surfaceElement.parentElement
-    const rootElement = surfaceElement.querySelector<HTMLElement>('[data-testid="resource-preview"]')
+    const rootElement = surfaceElement.querySelector<HTMLElement>(
+      '[data-testid="resource-preview"]'
+    )
     const contentElement = surfaceElement.querySelector<HTMLElement>(
       '[data-testid="resource-preview-content"]'
     )
@@ -517,10 +638,7 @@ async function assertPreviewGeometry(page: Page, scope: Locator, label: string):
   assert(closeEnough(geometry.root.top, geometry.surface.top), `${label} 文件预览顶部完整`)
   assert(closeEnough(geometry.root.bottom, geometry.surface.bottom), `${label} 文件预览底部完整`)
   assert(closeEnough(geometry.root.height, geometry.surface.height), `${label} 文件预览高度完整`)
-  assert(
-    geometry.content.height > geometry.surface.height * 0.7,
-    `${label} 内容区占据主要可用高度`
-  )
+  assert(geometry.content.height > geometry.surface.height * 0.7, `${label} 内容区占据主要可用高度`)
   assert(closeEnough(geometry.content.bottom, geometry.surface.bottom), `${label} 内容区延伸到底部`)
   assert(geometry.bottomHitsContent, `${label} 底部不存在独立空白分块`)
 
@@ -593,6 +711,8 @@ async function assertToolHtmlSource(scope: Locator, label: string): Promise<void
 async function openToolFilePreviewLayout(page: Page): Promise<void> {
   await page.setViewportSize({ width: 1500, height: 900 })
   await selectWorkspaceThread(page)
+  const backToConversation = page.getByRole("button", { name: "返回对话", exact: true })
+  if (await backToConversation.isVisible()) await backToConversation.click()
 
   const showRightPanel = page.getByRole("button", { name: "显示右侧面板" })
   if ((await showRightPanel.count()) > 0) await showRightPanel.first().click()
@@ -603,7 +723,9 @@ async function openToolFilePreviewLayout(page: Page): Promise<void> {
   const previewEye = previewEyes.first()
   await previewEye.click()
   await page.waitForFunction(
-    () => document.querySelector('button[aria-label="文件预览"]')?.getAttribute("aria-pressed") === "true",
+    () =>
+      document.querySelector('button[aria-label="文件预览"]')?.getAttribute("aria-pressed") ===
+      "true",
     undefined,
     { timeout: 30_000 }
   )
@@ -684,6 +806,31 @@ async function main(): Promise<void> {
     mkdirSync(directory, { recursive: true })
   }
   initializeRepository(mainRepository, linkedWorktree)
+  mkdirSync(join(workspace, "assets"), { recursive: true })
+  writeFileSync(
+    join(workspace, "assets", "source-proof.js"),
+    [
+      'const root = document.getElementById("script-root")',
+      `root.innerHTML = '<main data-testid="${HTML_FIXTURES[0].testId}" class="workspace-preview-card network-probe" data-created-by-js="true">${HTML_FIXTURES[0].sentinel} · JS 工作目录预览</main><button id="counter">计数 0</button><button id="navigate">测试页面跳转</button><button id="link">测试动态链接</button>'`,
+      "let count = 0",
+      'document.getElementById("counter").onclick = (event) => { event.target.textContent = `计数 ${++count}` }',
+      `document.getElementById("navigate").onclick = () => { location.href = "${BLOCKED_PREVIEW_ORIGIN}/navigation" }`,
+      `document.getElementById("link").onclick = () => { const link = document.createElement("a"); link.href = "${BLOCKED_PREVIEW_ORIGIN}/dynamic-link"; document.body.append(link); link.click() }`,
+      'document.body.style.opacity = "1"',
+      'root.insertAdjacentHTML("beforeend", Array.from({ length: 10 }, (_, index) => `<section style="padding:24px;margin:12px;background:#eef4fa;min-height:90px">JS 动态生成内容 ${index + 1}</section>`).join("") + \'<footer id="page-tail">JS 页面末尾</footer>\')'
+    ].join("\n"),
+    "utf8"
+  )
+  writeFileSync(
+    join(workspace, "broken-script.html"),
+    '<!doctype html><body><script>throw new Error("intentional fixture initialization failure")</script></body>',
+    "utf8"
+  )
+  writeFileSync(
+    join(workspace, "missing-script.html"),
+    '<!doctype html><body><script src="missing.js"></script></body>',
+    "utf8"
+  )
   writeFileSync(
     join(workspace, STATIC_STYLE_FILE_NAME),
     [
@@ -708,24 +855,27 @@ async function main(): Promise<void> {
       "<!doctype html>",
       "<html>",
       "  <head>",
+      '    <script defer src="./assets/source-proof.js"></script>',
       `    <link rel="stylesheet" href="./${STATIC_STYLE_FILE_NAME}">`,
       `    <link rel="stylesheet" href="${BLOCKED_PREVIEW_ORIGIN}/external.css">`,
       `    <meta http-equiv="refresh" content="0;url=${BLOCKED_PREVIEW_ORIGIN}/refresh">`,
       "  </head>",
-      "  <body>",
+      '  <body style="opacity:0">',
       `    <!-- ${PREVIEW_START_SENTINEL} -->`,
+      // Keep this layout fixture under CodeViewer's 100-line virtualization threshold.
+      // It remains taller than the viewport so the same non-virtualized source layout is exercised.
       ...Array.from(
-        { length: 78 },
+        { length: 70 },
         (_, index) => `    <!-- layout line ${String(index + 2).padStart(2, "0")} -->`
       ),
-      `    <main data-testid="${HTML_FIXTURES[0].testId}" class="workspace-preview-card network-probe">`,
-      `      ${HTML_FIXTURES[0].sentinel} · 工作目录 HTML UI 预览`,
-      "    </main>",
+      `    <!-- ${HTML_FIXTURES[0].sentinel} -->`,
+      '    <div id="script-root"></div>',
+      '    <script type="module">document.documentElement.dataset.moduleReady = "true"</script>',
       `    <img src="${BLOCKED_PREVIEW_ORIGIN}/image.png" alt="blocked network probe">`,
       `    <iframe src="${BLOCKED_PREVIEW_ORIGIN}/nested-frame"></iframe>`,
       "    <script>",
       '      document.documentElement.dataset.e2eExecuted = "true"',
-      `      fetch("${BLOCKED_PREVIEW_ORIGIN}/script-fetch")`,
+      `      fetch("${BLOCKED_PREVIEW_ORIGIN}/script-fetch").catch(() => {})`,
       "    </script>",
       `    <!-- ${PREVIEW_END_SENTINEL} -->`,
       "  </body>",
@@ -752,7 +902,11 @@ async function main(): Promise<void> {
     ].join("\n"),
     "utf8"
   )
-  writeFileSync(unauthorizedFilePath, "<!doctype html><script>window.pwned = true</script>\n", "utf8")
+  writeFileSync(
+    unauthorizedFilePath,
+    "<!doctype html><script>window.pwned = true</script>\n",
+    "utf8"
+  )
 
   const cleanEnv = createElectronEnvironment({
     isolatedHome,
@@ -792,14 +946,25 @@ async function main(): Promise<void> {
     // through both file opens, any unhandled renderer exception fails the E2E.
     const rendererPageErrors: string[] = []
     page.on("pageerror", (error) => {
+      if (error.message === "intentional fixture initialization failure") return
       rendererPageErrors.push(error.stack ?? error.message)
       console.error(`[workspace-html-e2e renderer:pageerror] ${error.stack ?? error.message}`)
     })
     await page.reload({ waitUntil: "domcontentloaded" })
-    await openToolFilePreviewLayout(page)
     await openWorkspaceFiles(page, blockedPreviewRequests)
+    await openToolFilePreviewLayout(page)
     assert(rendererPageErrors.length === 0, "页面重载及文件操作未出现 renderer 异常")
     log("ALL PASS workspace HTML source E2E")
+  } catch (error) {
+    if (page && !page.isClosed()) {
+      console.error(
+        `[workspace-html-e2e] preview snapshot: ${await page.locator("body").innerText()}`
+      )
+      const artifactDirectory = join(PROJECT_ROOT, "output", "html-preview")
+      mkdirSync(artifactDirectory, { recursive: true })
+      await page.screenshot({ path: join(artifactDirectory, "e2e-failure.png") })
+    }
+    throw error
   } finally {
     if (app) {
       if (page && threadId) {

@@ -175,7 +175,7 @@ export class ImIngressSequencer {
 
   receiveControlEvent(
     event: RemoteImEventV1,
-    handle: () => Promise<string>
+    handle: (storedEvent: ImEventRecord) => Promise<string>
   ): Promise<ImIngressResult> {
     assertRemoteImEventV1(event)
     return this.runExclusive(event.conversationKey, async () => {
@@ -201,7 +201,7 @@ export class ImIngressSequencer {
       await this.emit(receivedAck)
       let terminal: ImEventRecord
       try {
-        const text = await handle()
+        const text = await handle(received.event)
         terminal = await this.eventStore.finalizeEventWithReplies({
           eventId: received.event.eventId,
           state: "completed",

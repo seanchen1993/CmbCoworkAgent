@@ -51,6 +51,32 @@ function rebuildWithoutLegacyColumn(input: {
   input.database.run(`DROP TABLE ${legacyTable}`)
 }
 
+/**
+ * How this conversation is written to: gates as interactive cards and Agent
+ * answers as Markdown cards, or everything as the plain text that predates
+ * them — gates with their short codes, answers exactly as the Agent wrote them.
+ * Cards are the default; the reader chooses text with /文字模式 when the
+ * Zhaohu client cannot show a card in full.
+ *
+ * ensureColumn below is what guarantees the column: it runs on every start,
+ * after the device_epoch rebuild, so it reaches fresh, existing and rebuilt
+ * databases alike, and every existing row takes the default. It is declared
+ * here as well, as the other added columns are, so a fresh database's table
+ * definition is complete.
+ */
+const CONVERSATION_REPLY_MODE_DECLARATION =
+  "TEXT NOT NULL DEFAULT 'card' CHECK(reply_mode IN ('card', 'text'))"
+
+/**
+ * What a queued reply's content is: plain text, or Markdown the gateway may
+ * render as a card. Markdown only permits the card — the drainer still sends it
+ * as text unless the connection agreed to markdown-reply-v1 and the
+ * conversation is not in /文字模式. Guaranteed the same way as reply_mode, by
+ * ensureColumn after the rebuild; rows queued before it existed are text.
+ */
+const REPLY_CONTENT_FORMAT_DECLARATION =
+  "TEXT NOT NULL DEFAULT 'text' CHECK(content_format IN ('text', 'markdown'))"
+
 function createConversationsTable(database: SqlJsDatabase): void {
   database.run(`
     CREATE TABLE IF NOT EXISTS im_conversations (
@@ -59,6 +85,7 @@ function createConversationsTable(database: SqlJsDatabase): void {
       active_target_id TEXT,
       state TEXT NOT NULL CHECK(state IN ('active', 'suspended', 'revoked')),
       last_received_seq INTEGER NOT NULL DEFAULT 0 CHECK(last_received_seq >= 0),
+      reply_mode ${CONVERSATION_REPLY_MODE_DECLARATION},
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       UNIQUE(principal_id, conversation_key)
@@ -112,6 +139,7 @@ function createReplyOutboxTable(database: SqlJsDatabase): void {
       segment_index INTEGER NOT NULL CHECK(segment_index >= 0 AND segment_index < 8),
       segment_count INTEGER NOT NULL CHECK(segment_count >= 1 AND segment_count <= 8),
       content TEXT NOT NULL,
+      content_format ${REPLY_CONTENT_FORMAT_DECLARATION},
       state TEXT NOT NULL CHECK(state IN ('pending', 'sending', 'sent', 'unknown', 'failed')),
       platform_reply_id TEXT,
       attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
@@ -297,6 +325,8 @@ export function ensureImServiceSchema(database: SqlJsDatabase): void {
     ],
     create: createConversationsTable
   })
+  // After the rebuild, so it inspects the table that survives it.
+  ensureColumn(database, "im_conversations", "reply_mode", CONVERSATION_REPLY_MODE_DECLARATION)
 
   createTargetsTable(database)
   ensureTargetsSupportThread(database)
@@ -381,6 +411,7 @@ export function ensureImServiceSchema(database: SqlJsDatabase): void {
     ],
     create: createReplyOutboxTable
   })
+  ensureColumn(database, "im_reply_outbox", "content_format", REPLY_CONTENT_FORMAT_DECLARATION)
 
   createSelectionContextsTable(database)
   ensureSelectionContextsSupportRemoteTargets(database)

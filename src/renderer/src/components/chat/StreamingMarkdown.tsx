@@ -1,11 +1,10 @@
-import ReactMarkdown, { type Components } from "react-markdown"
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown"
 import rehypeHighlight from "rehype-highlight"
 import remarkGfm from "remark-gfm"
 import type { ChatSearchLocation } from "../../../../shared/chat-search-types"
 import { ChatSearchContext } from "./ChatSearchContext"
 import { Check, Copy } from "lucide-react"
 import {
-  isValidElement,
   memo,
   startTransition,
   useEffect,
@@ -18,24 +17,19 @@ import {
   buildStreamingMarkdownRenderPlan,
   getStreamingMarkdownDelayMs
 } from "../../lib/streaming-markdown-schedule"
+import {
+  getMarkdownLanguageLabel,
+  getMarkdownNodeText,
+  useMarkdownFilePreviewComponents
+} from "./markdown-file-preview-components"
+import { isLocalFileLikeHref } from "@/lib/markdown-file-preview-links"
 
 interface StreamingMarkdownProps {
   children: string
   isStreaming?: boolean
+  threadId?: string
   searchBlockIndex?: number
   searchLocation?: ChatSearchLocation
-}
-
-function getLanguageLabel(className?: string): string | null {
-  const match = /language-([\w-]+)/.exec(className || "")
-  return match?.[1] ?? null
-}
-
-function getNodeText(node: ReactNode): string {
-  if (typeof node === "string" || typeof node === "number") return String(node)
-  if (Array.isArray(node)) return node.map(getNodeText).join("")
-  if (isValidElement<{ children?: ReactNode }>(node)) return getNodeText(node.props.children)
-  return ""
 }
 
 function MarkdownCodeBlock({
@@ -91,6 +85,16 @@ const REHYPE_PLUGINS = [rehypeHighlight]
 // While streaming we skip syntax highlighting (the expensive rehype pass) and
 // reuse a single empty array identity so react-markdown doesn't see a new prop.
 const NO_REHYPE_PLUGINS: typeof REHYPE_PLUGINS = []
+
+// react-markdown's default URL sanitizer treats a Windows drive letter and
+// custom local schemes as unsafe protocols (for example, `C:/repo/a.ts` and
+// `codex-file:///repo/a.ts`) and clears the href before our link component can
+// resolve it. Preserve only path-like hrefs for threaded messages; all other
+// URLs continue through the package's protocol allowlist.
+function transformStreamingMarkdownUrl(value: string, key: string): string {
+  if (key === "href" && isLocalFileLikeHref(value)) return value
+  return defaultUrlTransform(value)
+}
 
 // During streaming the parent re-renders on every token. Re-parsing the full
 // Markdown each time is ~O(n²) over a long answer, so the refresh interval grows
@@ -155,8 +159,8 @@ const MARKDOWN_COMPONENTS: Components = {
   },
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   code({ node: _node, className, children, ...props }) {
-    const rawCode = getNodeText(children)
-    const language = getLanguageLabel(className)
+    const rawCode = getMarkdownNodeText(children)
+    const language = getMarkdownLanguageLabel(className)
     const isBlock = !!language || rawCode.includes("\n")
 
     if (isBlock) {
@@ -182,19 +186,55 @@ const MARKDOWN_COMPONENTS: Components = {
 const MarkdownFragment = memo(function MarkdownFragment({
   text,
   isStreaming,
+  threadId,
   start = 0
 }: {
   text: string
   isStreaming: boolean
+  threadId?: string
   start?: number
 }): React.JSX.Element {
+  const renderCodeBlock = useMemo(
+    () =>
+      ({
+        rawCode,
+        language,
+        className,
+        children
+      }: {
+        rawCode: string
+        language: string | null
+        className?: string
+        children: ReactNode
+      }) => (
+        <MarkdownCodeBlock
+          code={rawCode.replace(/\n$/, "")}
+          language={language}
+          className={className}
+        >
+          {children}
+        </MarkdownCodeBlock>
+      ),
+    []
+  )
+  const components = useMarkdownFilePreviewComponents({
+    baseComponents: MARKDOWN_COMPONENTS,
+    threadId,
+    text,
+    renderCodeBlock
+  })
+
   return (
-    <div data-chat-search-text data-chat-search-source-start={start}
-      data-chat-search-source-end={start + text.length}>
+    <div
+      data-chat-search-text
+      data-chat-search-source-start={start}
+      data-chat-search-source-end={start + text.length}
+    >
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
         rehypePlugins={isStreaming ? NO_REHYPE_PLUGINS : REHYPE_PLUGINS}
-        components={MARKDOWN_COMPONENTS}
+        components={components}
+        urlTransform={threadId ? transformStreamingMarkdownUrl : undefined}
       >
         {text}
       </ReactMarkdown>
@@ -205,6 +245,7 @@ const MarkdownFragment = memo(function MarkdownFragment({
 export const StreamingMarkdown = memo(function StreamingMarkdown({
   children,
   isStreaming = false,
+  threadId,
   searchBlockIndex = 0,
   searchLocation
 }: StreamingMarkdownProps): React.JSX.Element {
@@ -233,14 +274,14 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
                 收起长内容
               </button>
             )}
-            <MarkdownFragment text={plan.head} isStreaming={isStreaming} />
+            <MarkdownFragment text={plan.head} isStreaming={isStreaming} threadId={threadId} />
           </>
         )
       }
 
       return (
         <>
-          <MarkdownFragment text={plan.head} isStreaming={isStreaming} />
+          <MarkdownFragment text={plan.head} isStreaming={isStreaming} threadId={threadId} />
           <div
             data-chat-search-ignore
             className="my-3 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
@@ -262,13 +303,21 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
             )}
           </div>
           <ChatSearchContext location={searchLocation} />
-          <MarkdownFragment text={plan.tail} start={text.length - plan.tail.length}
-            isStreaming={isStreaming} />
+          <MarkdownFragment
+            text={plan.tail}
+            start={text.length - plan.tail.length}
+            isStreaming={isStreaming}
+            threadId={threadId}
+          />
         </>
       )
     },
-    [text, isStreaming, isExpanded, searchLocation]
+    [text, isStreaming, isExpanded, threadId, searchLocation]
   )
 
-  return <div className="streaming-markdown" data-chat-search-block-index={searchBlockIndex}>{rendered}</div>
+  return (
+    <div className="streaming-markdown" data-chat-search-block-index={searchBlockIndex}>
+      {rendered}
+    </div>
+  )
 })

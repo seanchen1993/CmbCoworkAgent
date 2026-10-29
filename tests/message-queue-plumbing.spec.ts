@@ -63,6 +63,7 @@ const runSettlementFence = read("src/main/agent/run-settlement-fence.ts")
 const localSandbox = read("src/main/agent/local-sandbox.ts")
 const agentIpc = read("src/main/ipc/agent.ts")
 const streamTranscriptFlush = read("src/main/ipc/stream-transcript-flush.ts")
+const streamTranscriptPayload = read("src/main/ipc/stream-transcript-payload.ts")
 const threadsIpc = read("src/main/ipc/threads.ts")
 const preload = read("src/preload/index.ts")
 const threadContext = read("src/renderer/src/lib/thread-context.tsx")
@@ -314,9 +315,9 @@ function testClearOnEveryRunExit(): void {
   )
   assertSourceOrder(
     agentIpc,
-    "const nextInvokeRunToken = uuid()",
+    "const nextInvokeRunToken = runExecutionContext.localRunLease?.runId ?? uuid()",
     "const replacement = await withThreadRunMutationLock",
-    "new invoke reserves its physical token before entering replacement"
+    "new invoke fixes its physical token before entering replacement, reusing an externally held IM lease when present"
   )
   assertSourceOrder(
     replacementBody,
@@ -605,8 +606,19 @@ function testClearOnEveryRunExit(): void {
     "disposeDeletedAgentThreadRuntime(threadId)",
     "thread deletion synchronously blocks late transcript chunks after the point of no return"
   )
-  const goalControlStart = agentIpc.indexOf('"agent:goal-control"')
-  assert(goalControlStart >= 0, "goal control handler exists")
+  const goalControlAdapterStart = agentIpc.indexOf('"agent:goal-control"')
+  assert(goalControlAdapterStart >= 0, "goal control handler exists")
+  const goalControlAdapterBody = agentIpc.slice(
+    goalControlAdapterStart,
+    goalControlAdapterStart + 700
+  )
+  assertIncludes(
+    goalControlAdapterBody,
+    "return executeAgentGoalControl(",
+    "desktop goal control delegates to the shared desktop/IM implementation"
+  )
+  const goalControlStart = agentIpc.indexOf("async function executeAgentGoalControl(")
+  assert(goalControlStart >= 0, "shared goal control implementation exists")
   const goalControlBody = agentIpc.slice(goalControlStart, goalControlStart + 2200)
   assertSourceOrder(
     goalControlBody,
@@ -793,11 +805,12 @@ function testPhysicalRunSettlementCannotStrandQueuedReplacements(): void {
     'name: "release-active-controller"',
     "ownership-critical workflow claims release before successor publication"
   )
-  const workflowClaimPhaseStart = agentIpc.indexOf(
-    'name: "release-workflow-notification-claim"'
-  )
+  const workflowClaimPhaseStart = agentIpc.indexOf('name: "release-workflow-notification-claim"')
   assert(workflowClaimPhaseStart >= 0, "workflow claim release phase exists")
-  const workflowClaimPhaseBody = agentIpc.slice(workflowClaimPhaseStart, workflowClaimPhaseStart + 700)
+  const workflowClaimPhaseBody = agentIpc.slice(
+    workflowClaimPhaseStart,
+    workflowClaimPhaseStart + 700
+  )
   assertIncludes(
     workflowClaimPhaseBody,
     "workflowNotificationToSettle?.ownerRunToken === runToken",
@@ -910,7 +923,7 @@ function testPhysicalRunSettlementCannotStrandQueuedReplacements(): void {
   )
   assertIncludes(
     agentIpc,
-    "normalizedWorkspace,\n    input.featureId ?? \"<no-feature>\"",
+    'normalizedWorkspace,\n    input.featureId ?? "<no-feature>"',
     "same-thread workspace or memory-scope changes cannot merge pending batches"
   )
   assertIncludes(
@@ -1140,17 +1153,18 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "mergeIncrementalMessageContent(existing, incoming)",
     "main transcript coalescing uses block-aware delta merging"
   )
-  const physicalForwardStart = agentIpc.indexOf(
-    "function persistAndForwardPhysicalRunStreamChunk("
+  const physicalForwardStart = agentIpc.indexOf("function persistAndForwardPhysicalRunStreamChunk(")
+  const physicalForwardBody = agentIpc.slice(
+    physicalForwardStart,
+    agentIpc.indexOf("function persistVisibleUserTranscriptMessage(", physicalForwardStart)
   )
-  const physicalForwardBody = agentIpc.slice(physicalForwardStart, physicalForwardStart + 1800)
   assertIncludes(
     physicalForwardBody,
     "persistStreamTranscriptChunk(threadId, runToken, mode, payload)",
     "physical token streams arm the bounded 250ms transcript flush window"
   )
   assertNotIncludes(
-    physicalForwardBody,
+    physicalForwardBody.slice(0, physicalForwardBody.indexOf('if (mode === "values")')),
     "deferFlush: true",
     "long model outputs must not retain every token delta until the terminal values event"
   )
@@ -1191,12 +1205,12 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "main transcript persistence retains split tool-call arguments across debounce flushes"
   )
   assertIncludes(
-    agentIpc,
-    "streamToolCallContentModeFromMessageMode(streamContentMode)",
+    streamTranscriptPayload,
+    "streamToolCallContentModeFromMessageMode(wireContentMode)",
     "main persistence does not misclassify provider tool args from the message class"
   )
   assertIncludes(
-    agentIpc,
+    streamTranscriptPayload,
     "streamToolCallChunks.length === 0",
     "a continuation containing only tool-call chunks is retained"
   )
@@ -1565,7 +1579,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     // 顺序本身。留出余量，别让「加一行就撞窗口」变成改测试的理由。
     const body = agentIpc.slice(
       completionBoundaryIndexes[index],
-      completionBoundaryIndexes[index] + 1600
+      completionBoundaryIndexes[index] + 1800
     )
     const fence =
       label === "invoke"

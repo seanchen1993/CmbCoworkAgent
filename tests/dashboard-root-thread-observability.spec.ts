@@ -31,6 +31,10 @@ function section(source: string, start: string, end: string): string {
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const dashboardSource = readFileSync(join(__dirname, "../src/main/ipc/dashboard.ts"), "utf8")
+const stageBucketsSource = readFileSync(
+  join(__dirname, "../src/main/ipc/dashboard-stage-buckets.ts"),
+  "utf8"
+)
 // thread 视图的「按会话分页」查询构造已抽成纯函数模块（两阶段：先定位当页会话，
 // 再只为当页会话回带不含 _raw 的预览 trace）。见 dashboard-trace-thread-list.ts。
 const threadListSource = readFileSync(
@@ -177,9 +181,9 @@ function testDevMockThreadTracesResolveNamespacedRootThread(): void {
 
 function testProjectListConversationCountUsesActiveMainAgentTraces(): void {
   const filterSource = section(
-    dashboardSource,
-    "function projectModeMainAgentConversationFilter",
-    "/** Build the `name@version` key"
+    stageBucketsSource,
+    "export function projectModeMainAgentConversationFilter",
+    "const MAIN_AGENT_AGG_KEY"
   )
   assertIncludes(
     filterSource,
@@ -204,7 +208,7 @@ function testProjectListConversationCountUsesActiveMainAgentTraces(): void {
   )
   assertIncludes(
     usageSource,
-    "filter: projectModeMainAgentConversationFilter(),",
+    "buildProjectModeConversationAndCostAggs({",
     "per-project usage should aggregate active main-Agent conversations separately"
   )
   assertIncludes(

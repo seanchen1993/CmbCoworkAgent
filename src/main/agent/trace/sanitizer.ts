@@ -1,3 +1,4 @@
+import { compactSkillUseBlockForTrace } from "../../../shared/skill-use-block"
 import {
   TRACE_TRUNCATION_MARKER_PREFIX,
   TRACE_TRUNCATION_MARKER_SUFFIX,
@@ -633,11 +634,41 @@ function summarizeOversizedTrace(trace: AgentTrace, state: TruncationState): Age
   }
 }
 
+/** The root node mirrors trace.userMessage, and the conversation view falls back to it. */
+function compactNodeUserMessage(node: TraceNode): TraceNode {
+  if (node.type !== "trace") return node
+  const input = node.input
+  if (!input || typeof input !== "object" || Array.isArray(input)) return node
+  const record = input as Record<string, unknown>
+  if (typeof record.userMessage !== "string") return node
+  return {
+    ...node,
+    input: { ...record, userMessage: compactSkillUseBlockForTrace(record.userMessage) }
+  }
+}
+
+/**
+ * Upload only. The collector keeps the payload the model was given, so skill
+ * activation, skill-eval attribution and the suspected-technical-detail metric
+ * all still see the block; what goes to the cloud keeps only the skill's name,
+ * which is the part a reader of the trace can use.
+ */
+function compactSkillUseBlocks(trace: AgentTrace): AgentTrace {
+  const userMessage = compactSkillUseBlockForTrace(trace.userMessage)
+  if (userMessage === trace.userMessage) return trace
+  return {
+    ...trace,
+    userMessage,
+    ...(trace.nodes ? { nodes: trace.nodes.map(compactNodeUserMessage) } : {})
+  }
+}
+
 export function sanitizeTraceForCloudUpload(trace: AgentTrace): AgentTrace {
-  let { trace: sanitized, state } = sanitizeTraceFields(trace)
+  const compacted = compactSkillUseBlocks(trace)
+  let { trace: sanitized, state } = sanitizeTraceFields(compacted)
 
   if (byteSize(sanitized) > SOFT_TRACE_BYTES) {
-    const compressed = sanitizeTraceFields(trace, true)
+    const compressed = sanitizeTraceFields(compacted, true)
     sanitized = compressed.trace
     state = compressed.state
   }

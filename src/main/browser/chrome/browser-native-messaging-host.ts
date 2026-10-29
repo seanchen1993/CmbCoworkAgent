@@ -15,6 +15,7 @@ import { encodeNativeMessage, NativeMessageDecoder } from "./native-messaging-fr
 export const CMB_BROWSER_NATIVE_HOST_FLAG = "--cmb-browser-native-host"
 
 const TAG = "[CmbBrowserNativeHost]"
+const MAIN_CONNECT_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000]
 
 function log(message: string): void {
   process.stderr.write(`${TAG} ${message}\n`)
@@ -64,6 +65,7 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
   let mainDecoder = new NativeMessageDecoder()
   let lastReadyMessage: CmbChromeExtensionReadyMessage | null = null
   let closed = false
+  let mainConnectRetryTimer: NodeJS.Timeout | null = null
 
   const statusMessage = (connected: boolean, error?: unknown): CmbHostStatusMessage => ({
     connected,
@@ -72,7 +74,7 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
     type: "host-status"
   })
 
-  const connectToMain = (): void => {
+  const connectToMain = (attempt = 0): void => {
     if (closed) return
     if (mainSocket) {
       log("connectToMain skipped, already connecting")
@@ -114,6 +116,15 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
       mainConnected = false
       mainSocket = null
       const reason = error ? `${error.message}` : "socket closed"
+      const retryDelay = MAIN_CONNECT_RETRY_DELAYS_MS[attempt]
+      if (!closed && retryDelay !== undefined) {
+        log(`disconnected: ${reason}, retrying in ${retryDelay}ms`)
+        mainConnectRetryTimer = setTimeout(() => {
+          mainConnectRetryTimer = null
+          connectToMain(attempt + 1)
+        }, retryDelay)
+        return
+      }
       log(`disconnected: ${reason}, exiting`)
       writeChromeMessage(statusMessage(false, error))
       process.exit(0)
@@ -134,6 +145,9 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
         }
         if (mainSocket && mainConnected && !mainSocket.destroyed) {
           mainSocket.write(encodeNativeMessage(message))
+        } else if (record.type === "extension-ready") {
+          // The app bridge may still be starting. Cache readiness and replay it after connect.
+          log("buffering extension-ready until main app bridge connects")
         } else {
           log(
             `Chrome message received but socket not connected, type=${record.type ?? "(unknown)"}, mainSocket=${mainSocket !== null}, mainConnected=${mainConnected}, exiting`
@@ -152,12 +166,14 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
     process.stdin.once("end", () => {
       log("stdin ended (Chrome disconnected), cleaning up")
       closed = true
+      if (mainConnectRetryTimer) clearTimeout(mainConnectRetryTimer)
       mainSocket?.destroy()
       resolve()
     })
     process.stdin.once("error", (error) => {
       log(`stdin error: ${error instanceof Error ? error.message : String(error)}, cleaning up`)
       closed = true
+      if (mainConnectRetryTimer) clearTimeout(mainConnectRetryTimer)
       mainSocket?.destroy()
       resolve()
     })

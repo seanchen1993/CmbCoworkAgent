@@ -1,6 +1,25 @@
+import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
+import {
+  assertHarnessConfigAvailable,
+  readHarnessConfigV2File,
+  DEPLOY_UNIT_V2_FILE,
+  FEATURE_V2_FILE,
+  validateDeployUnitConfigs,
+  parseFeatureV2,
+  normalizeDeployUnitMappings,
+  normalizeSessionContextInjectionSource,
+  assertFeatureBindingKeyBudgets,
+  type HarnessFeatureDeployUnitBindingRecord
+} from "./config-v2"
+import {
+  resolveFeatureWorkspace,
+  MISSING_FEATURE_WORKSPACE
+} from "../../shared/harness-feature-workspace"
+import { formatGmt8Timestamp } from "../../shared/gmt8-time"
+import { harnessNotifications } from "./notifications"
 import { spawn, type ChildProcess } from "child_process"
 import { createHash } from "crypto"
-import { access, mkdir } from "node:fs/promises"
+import { access, mkdir, stat } from "node:fs/promises"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import { serialize } from "node:v8"
 import * as chardet from "jschardet"
@@ -45,6 +64,8 @@ import {
 } from "./async-json-store"
 import {
   assertHarnessProjectFieldBudgets,
+  HARNESS_CONFIG_V2_STORE_MAX_BYTES,
+  HARNESS_FEATURE_BINDING_MAX_ENTRIES,
   HARNESS_PROJECT_DESCRIPTION_MAX_CHARS,
   HARNESS_PROJECT_PATH_MAX_CHARS,
   HARNESS_PROJECT_STORE_MAX_BYTES,
@@ -85,11 +106,12 @@ import type {
   HarnessRunDetailViewModel,
   HarnessSessionContextInjectionSource,
   HarnessDeployUnitMapping,
+  HarnessDeployUnitConfig,
+  HarnessSessionWorkspace,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessFeatureSummary,
-  HarnessHumanGateSnapshot,
   ManagedFeatureStatusSnapshot,
   ManagedRunViewStatus,
   HarnessStatus,
@@ -132,25 +154,21 @@ function hashManagedState(domain: "feature-state" | "next-action", value: unknow
 
 interface HarnessProjectStoreFile {
   version: 1
-  projects: HarnessProjectMetadata[]
+  // Opaque legacy data is retained only in storage, never exposed as business configuration.
+  projects: Array<HarnessProjectMetadata & { sessionWorkspacePath?: unknown }>
 }
 
 interface HarnessDeployUnitMappingStoreFile {
-  version: 1
-  mappings: HarnessDeployUnitMapping[]
+  version: 2
+  mappings: HarnessDeployUnitConfig[]
 }
 
 interface HarnessLeanTokenStoreFile {
   leanToken: string
 }
 
-interface HarnessFeatureDeployUnitBindingRecord extends HarnessFeatureDeployUnitBinding {
-  createdAt: string
-  updatedAt?: string
-}
-
 interface HarnessFeatureDeployUnitBindingStoreFile {
-  version: 1
+  version: 2
   bindings: HarnessFeatureDeployUnitBindingRecord[]
 }
 
@@ -252,11 +270,8 @@ interface HarnessCommandParseOptions {
 }
 
 const HARNESS_BOARD_FILE = join(getOpenworkDir(), "harness-board-projects.json")
-const HARNESS_DEPLOY_UNIT_MAPPING_FILE = join(getOpenworkDir(), "harness-deployUnitId-mapping.json")
-const HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE = join(
-  getOpenworkDir(),
-  "harness-board-features.json"
-)
+const HARNESS_DEPLOY_UNIT_MAPPING_FILE = join(getOpenworkDir(), DEPLOY_UNIT_V2_FILE)
+const HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE = join(getOpenworkDir(), FEATURE_V2_FILE)
 const HARNESS_LEAN_TOKEN_FILE = join(getOpenworkDir(), "leanstar-config.json")
 
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
@@ -266,10 +281,6 @@ const HARNESS_INVOCATION_MAX_CONCURRENCY = 2
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const HARNESS_LOG_OUTPUT_PREVIEW_BYTES = 16 * 1024
-const HARNESS_DEPLOY_UNIT_MAPPING_MAX_BYTES = 2 * 1024 * 1024
-const HARNESS_FEATURE_BINDING_MAX_ENTRIES = 4_096
-const HARNESS_FEATURE_BINDING_MAX_BYTES = 2 * 1024 * 1024
-const HARNESS_FEATURE_ID_MAX_CHARS = 2_048
 const HARNESS_LEAN_TOKEN_MAX_BYTES = 64 * 1024
 const HARNESS_LEAN_TOKEN_MAX_CHARS = 8 * 1024
 const HARNESS_BOARD_CONFIG_MAX_BYTES = 1024 * 1024
@@ -340,11 +351,6 @@ const HARNESS_FEATURE_STATUSES = new Set<HarnessFeatureStatus>([
   "unknown"
 ])
 
-const HARNESS_SESSION_CONTEXT_INJECTION_SOURCES = new Set<HarnessSessionContextInjectionSource>([
-  "cmbdevclaw",
-  "plugin"
-])
-
 const DEFAULT_NODE_STATUS_LABELS: Record<HarnessNodeStatus, string> = {
   not_started: "未开始",
   in_progress: "进行中",
@@ -381,40 +387,10 @@ function emptyProjectStore(): HarnessProjectStoreFile {
   }
 }
 
-function emptyDeployUnitMappingStore(): HarnessDeployUnitMappingStoreFile {
-  return {
-    version: 1,
-    mappings: []
-  }
-}
-
 function emptyLeanTokenStore(): HarnessLeanTokenStoreFile {
   return {
     leanToken: ""
   }
-}
-
-function emptyFeatureDeployUnitBindingStore(): HarnessFeatureDeployUnitBindingStoreFile {
-  return {
-    version: 1,
-    bindings: []
-  }
-}
-
-export function formatGmt8Timestamp(date = new Date()): string {
-  const gmt8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000)
-  const pad = (value: number): string => String(value).padStart(2, "0")
-  return (
-    [gmt8Date.getUTCFullYear(), pad(gmt8Date.getUTCMonth() + 1), pad(gmt8Date.getUTCDate())].join(
-      "-"
-    ) +
-    " " +
-    [
-      pad(gmt8Date.getUTCHours()),
-      pad(gmt8Date.getUTCMinutes()),
-      pad(gmt8Date.getUTCSeconds())
-    ].join(":")
-  )
 }
 
 function isGmt8Timestamp(value: string | undefined): value is string {
@@ -1081,24 +1057,13 @@ function projectDirectoryMissingMessage(project: HarnessProjectMetadata): string
   return `请确认项目「${project.projectCode}」的工作区「${project.workspacePath}」下存在项目文件夹「${projectDirectoryName(project)}」。`
 }
 
-async function resolveDeployUnitMappingSnapshots(
-  snapshots: HarnessDeployUnitMapping[]
-): Promise<HarnessDeployUnitMapping[]> {
-  const mappingsById = new Map(
-    (await readDeployUnitMappingStore()).mappings.map((mapping) => [
-      mapping.deployUnitIdMapping,
-      mapping
-    ])
-  )
-  return snapshots.map((snapshot) => mappingsById.get(snapshot.deployUnitIdMapping) ?? snapshot)
-}
-
 async function resolveFeatureDeployUnitMappings(
   projectId: string,
   featureId: string
 ): Promise<HarnessDeployUnitMapping[]> {
-  const binding = await findFeatureDeployUnitBinding(projectId, featureId)
-  return binding ? await resolveDeployUnitMappingSnapshots(binding.selectedDeployUnitMappings) : []
+  return (
+    (await findFeatureDeployUnitBinding(projectId, featureId))?.selectedDeployUnitMappings ?? []
+  )
 }
 
 async function getHarnessSelectedDeployUnitsCommandOptions(
@@ -1400,10 +1365,13 @@ async function runHarnessInvocationAsync(
 
 async function runInspectAdapter(
   project: HarnessProjectMetadata,
+  context: HarnessProjectConfigContext,
   mode: "project" | "run",
   feature?: string
 ): Promise<Record<string, unknown>> {
-  const invocation = await buildConfiguredHarnessInvocation(project, mode, { feature })
+  const invocation = buildConfiguredHarnessInvocationFromContext(project, context, mode, {
+    feature
+  })
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
   const stdoutBuffer = await runHarnessInvocationAsync(
     invocation,
@@ -1768,6 +1736,9 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
   const systemConstraintFirstLoadedAt = normalizeText(value.systemConstraintFirstLoadedAt)
     .trim()
     .slice(0, 128)
+  const managedRunFirstStartedAt = normalizeText(value.managedRunFirstStartedAt)
+    .trim()
+    .slice(0, 128)
   if (!adapterId || !adapterName || harnessAdapter.type !== "plugin") return null
   const now = new Date().toISOString()
 
@@ -1784,10 +1755,8 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
       0,
       HARNESS_PROJECT_PATH_MAX_CHARS
     ),
-    sessionWorkspacePath:
-      normalizeText(value.sessionWorkspacePath).slice(0, HARNESS_PROJECT_PATH_MAX_CHARS) ||
-      undefined,
     ...(systemConstraintFirstLoadedAt ? { systemConstraintFirstLoadedAt } : {}),
+    ...(managedRunFirstStartedAt ? { managedRunFirstStartedAt } : {}),
     "harness-adapter": {
       id: adapterId,
       name: adapterName,
@@ -1818,155 +1787,6 @@ function normalizeProjectCreator(value: unknown): HarnessProjectCreatorMetadata 
   return Object.values(creator).some((item) => item.trim()) ? creator : null
 }
 
-function createUniqueDeployUnitMappingId(seenIds: Set<string>): string {
-  let id = uuid()
-  while (seenIds.has(id)) {
-    id = uuid()
-  }
-  return id
-}
-
-function normalizeDeployUnitMappings(
-  value: unknown,
-  options: { assignMissingOrDuplicateMappingId?: boolean } = {}
-): HarnessDeployUnitMapping[] {
-  if (!Array.isArray(value)) return []
-  if (value.length > HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES) {
-    throw new Error(
-      `发布单元映射超过 ${HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES} 条上限，` + `已拒绝不完整读取`
-    )
-  }
-  const seen = new Set<string>()
-  const seenIds = new Set<string>()
-  const mappings: HarnessDeployUnitMapping[] = []
-  for (const item of value) {
-    if (mappings.length >= HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES) break
-    if (!isObject(item)) continue
-    const deployUnitId = normalizeText(item.deployUnitId).trim().slice(0, 2_048)
-    const localRepoPath = normalizeText(item.localRepoPath).trim().slice(0, 8_192)
-    const description = normalizeText(item.description).trim().slice(0, 4_096)
-    if (!deployUnitId || !localRepoPath || seen.has(deployUnitId)) continue
-
-    let deployUnitIdMapping = normalizeText(item.deployUnitIdMapping).trim().slice(0, 512)
-    if (!deployUnitIdMapping || seenIds.has(deployUnitIdMapping)) {
-      if (!options.assignMissingOrDuplicateMappingId) continue
-      deployUnitIdMapping = createUniqueDeployUnitMappingId(seenIds)
-    }
-
-    seen.add(deployUnitId)
-    seenIds.add(deployUnitIdMapping)
-    mappings.push({
-      deployUnitIdMapping,
-      deployUnitId,
-      localRepoPath,
-      ...(description ? { description } : {})
-    })
-  }
-  return mappings
-}
-
-function normalizeDeployUnitMappingsForSave(value: unknown): HarnessDeployUnitMapping[] {
-  return normalizeDeployUnitMappings(value, { assignMissingOrDuplicateMappingId: true })
-}
-
-function normalizeSessionContextInjectionSource(
-  value: unknown
-): HarnessSessionContextInjectionSource {
-  const source = normalizeText(value).trim()
-  return HARNESS_SESSION_CONTEXT_INJECTION_SOURCES.has(
-    source as HarnessSessionContextInjectionSource
-  )
-    ? (source as HarnessSessionContextInjectionSource)
-    : "cmbdevclaw"
-}
-
-function normalizeFeatureDeployUnitBinding(
-  value: unknown
-): HarnessFeatureDeployUnitBindingRecord | null {
-  if (!isObject(value)) return null
-  const projectId = normalizeText(value.projectId).trim()
-  const featureId = normalizeText(value.featureId).trim()
-  assertFeatureBindingKeyBudgets(projectId, featureId)
-  const sessionContextInjectionSource = normalizeSessionContextInjectionSource(
-    value.sessionContextInjectionSource
-  )
-  requireCompleteHarnessDeployUnitContext(
-    Array.isArray(value.selectedDeployUnitMappings) ? value.selectedDeployUnitMappings.length : 0,
-    sessionContextInjectionSource
-  )
-  const selectedDeployUnitMappings = normalizeDeployUnitMappings(value.selectedDeployUnitMappings)
-  if (!projectId || !featureId) return null
-  const humanGate = normalizeHumanGate(value.humanGate, projectId, featureId)
-  return {
-    projectId,
-    featureId,
-    selectedDeployUnitMappings,
-    sessionContextInjectionSource,
-    ...(value.imManagementEnabled === true ? { imManagementEnabled: true } : {}),
-    ...(humanGate ? { humanGate } : {}),
-    createdAt: normalizeText(value.createdAt).trim() || formatGmt8Timestamp(),
-    updatedAt: normalizeText(value.updatedAt).trim() || undefined
-  }
-}
-
-function normalizeHumanGate(
-  value: unknown,
-  projectId: string,
-  featureId: string
-): HarnessHumanGateSnapshot | undefined {
-  if (value === undefined) return undefined
-  if (!isObject(value)) return undefined
-  const gateId = normalizeText(value.gateId).trim()
-  const sourceThreadId = normalizeText(value.sourceThreadId).trim()
-  const sourceManagedRunId = normalizeText(value.sourceManagedRunId).trim()
-  const hookId = normalizeText(value.hookId).trim()
-  const message = normalizeText(value.message).trim()
-  const createdAt = normalizeText(value.createdAt).trim()
-  if (
-    value.status !== "pending" ||
-    !gateId ||
-    !sourceThreadId ||
-    !hookId ||
-    !message ||
-    message.length > 2_000 ||
-    !isGmt8Timestamp(createdAt)
-  ) {
-    console.error("[HumanGate] Ignoring invalid persisted Gate", { projectId, featureId })
-    return undefined
-  }
-  return {
-    gateId,
-    status: "pending",
-    projectId,
-    featureId,
-    sourceThreadId,
-    ...(sourceManagedRunId ? { sourceManagedRunId } : {}),
-    hookId,
-    message,
-    createdAt
-  }
-}
-
-function normalizeFeatureDeployUnitBindings(
-  value: unknown
-): HarnessFeatureDeployUnitBindingRecord[] {
-  if (!Array.isArray(value)) return []
-  if (value.length > HARNESS_FEATURE_BINDING_MAX_ENTRIES) {
-    throw new Error(`特性发布单元绑定超过 ${HARNESS_FEATURE_BINDING_MAX_ENTRIES} 条上限`)
-  }
-  const seen = new Set<string>()
-  const bindings: HarnessFeatureDeployUnitBindingRecord[] = []
-  for (const item of value) {
-    const binding = normalizeFeatureDeployUnitBinding(item)
-    if (!binding) continue
-    const key = featureDeployUnitBindingKey(binding.projectId, binding.featureId)
-    if (seen.has(key)) continue
-    seen.add(key)
-    bindings.push(binding)
-  }
-  return bindings
-}
-
 function getCurrentProjectCreator(): HarnessProjectCreatorMetadata | undefined {
   const userInfo = getUserInfo()
   const orgLevels = deriveUpperOrgLevelsFromPath(userInfo?.pathName)
@@ -1994,17 +1814,17 @@ function normalizeProjectStore(value: unknown): HarnessProjectStoreFile {
   return {
     version: 1,
     projects: rows
-      .map((item) => normalizeProject(item))
-      .filter((item): item is HarnessProjectMetadata => item !== null)
-  }
-}
-
-function assertFeatureBindingKeyBudgets(projectId: string, featureId: string): void {
-  if (projectId.length > HARNESS_PROJECT_TEXT_MAX_CHARS) {
-    throw new Error(`特性绑定项目 ID 超过 ${HARNESS_PROJECT_TEXT_MAX_CHARS} 字符上限`)
-  }
-  if (featureId.length > HARNESS_FEATURE_ID_MAX_CHARS) {
-    throw new Error(`特性名称超过 ${HARNESS_FEATURE_ID_MAX_CHARS} 字符上限`)
+      .map((item) => {
+        const project = normalizeProject(item)
+        return project &&
+          isObject(item) &&
+          Object.prototype.hasOwnProperty.call(item, "sessionWorkspacePath")
+          ? { ...project, sessionWorkspacePath: item.sessionWorkspacePath }
+          : project
+      })
+      .filter(
+        (item): item is HarnessProjectMetadata & { sessionWorkspacePath?: unknown } => item !== null
+      )
   }
 }
 
@@ -2025,6 +1845,7 @@ function refreshManagedRunProjectDirectoryCache(store: HarnessProjectStoreFile):
 }
 
 async function readProjectStore(): Promise<HarnessProjectStoreFile> {
+  assertHarnessConfigAvailable()
   const parsed = await readHarnessJsonFileBounded(
     HARNESS_BOARD_FILE,
     HARNESS_PROJECT_STORE_MAX_BYTES,
@@ -2057,17 +1878,14 @@ async function mutateProjectStore<T>(
 }
 
 function normalizeDeployUnitMappingStore(value: unknown): HarnessDeployUnitMappingStoreFile {
-  if (!isObject(value)) return emptyDeployUnitMappingStore()
-  return { version: 1, mappings: normalizeDeployUnitMappings(value.mappings) }
+  if (!isObject(value)) throw new Error("发布单元配置格式无效")
+  if (value.version !== 2) throw new Error("发布单元配置版本不支持")
+  return { version: 2, mappings: validateDeployUnitConfigs(value.mappings) }
 }
 
 async function readDeployUnitMappingStore(): Promise<HarnessDeployUnitMappingStoreFile> {
-  const parsed = await readHarnessJsonFileBounded(
-    HARNESS_DEPLOY_UNIT_MAPPING_FILE,
-    HARNESS_DEPLOY_UNIT_MAPPING_MAX_BYTES,
-    "Harness deploy unit mapping store"
-  )
-  return parsed === null ? emptyDeployUnitMappingStore() : normalizeDeployUnitMappingStore(parsed)
+  const parsed = await readHarnessConfigV2File(HARNESS_DEPLOY_UNIT_MAPPING_FILE)
+  return normalizeDeployUnitMappingStore(parsed)
 }
 
 function normalizeLeanTokenStore(value: unknown): HarnessLeanTokenStoreFile {
@@ -2099,18 +1917,12 @@ function normalizeFeatureDeployUnitBindingStore(
   if ("bindings" in value && !Array.isArray(value.bindings)) {
     throw new Error("Harness feature binding store bindings 字段格式无效")
   }
-  return { version: 1, bindings: normalizeFeatureDeployUnitBindings(value.bindings) }
+  return parseFeatureV2(value)
 }
 
 async function readFeatureDeployUnitBindingStore(): Promise<HarnessFeatureDeployUnitBindingStoreFile> {
-  const parsed = await readHarnessJsonFileBounded(
-    HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE,
-    HARNESS_FEATURE_BINDING_MAX_BYTES,
-    "Harness feature binding store"
-  )
-  return parsed === null
-    ? emptyFeatureDeployUnitBindingStore()
-    : normalizeFeatureDeployUnitBindingStore(parsed)
+  const parsed = await readHarnessConfigV2File(HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE)
+  return normalizeFeatureDeployUnitBindingStore(parsed)
 }
 
 async function findFeatureDeployUnitBinding(
@@ -2118,18 +1930,18 @@ async function findFeatureDeployUnitBinding(
   featureId: string
 ): Promise<HarnessFeatureDeployUnitBindingRecord | null> {
   const key = featureDeployUnitBindingKey(projectId, featureId)
-  return (
-    (await readFeatureDeployUnitBindingStore()).bindings.find(
-      (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
-    ) ?? null
+  const binding = (await readFeatureDeployUnitBindingStore()).bindings.find(
+    (item) => featureDeployUnitBindingKey(item.projectId, item.featureId) === key
   )
+  return binding ?? null
 }
 
 async function saveFeatureDeployUnitBinding(
   projectId: string,
   featureId: string,
   selectedDeployUnitMappings: HarnessDeployUnitMapping[],
-  sessionContextInjectionSource: HarnessSessionContextInjectionSource
+  sessionContextInjectionSource: HarnessSessionContextInjectionSource,
+  sessionWorkspace: HarnessSessionWorkspace
 ): Promise<HarnessFeatureDeployUnitBindingRecord> {
   assertFeatureBindingKeyBudgets(projectId, featureId)
   requireCompleteHarnessDeployUnitContext(
@@ -2149,8 +1961,8 @@ async function saveFeatureDeployUnitBinding(
       featureId,
       selectedDeployUnitMappings,
       sessionContextInjectionSource,
+      sessionWorkspace,
       ...(existing?.imManagementEnabled ? { imManagementEnabled: true } : {}),
-      ...(existing?.humanGate ? { humanGate: existing.humanGate } : {}),
       createdAt:
         existing?.createdAt && isGmt8Timestamp(existing.createdAt) ? existing.createdAt : now,
       updatedAt: now
@@ -2165,7 +1977,7 @@ async function saveFeatureDeployUnitBinding(
     await writeHarnessJsonFileAtomic(
       HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE,
       store,
-      HARNESS_FEATURE_BINDING_MAX_BYTES,
+      HARNESS_CONFIG_V2_STORE_MAX_BYTES,
       "Harness feature binding store"
     )
     return binding
@@ -2175,30 +1987,54 @@ async function saveFeatureDeployUnitBinding(
 async function updateFeatureDeployUnitBinding(
   projectId: string,
   featureId: string,
-  selectedDeployUnitMappings: HarnessDeployUnitMapping[]
+  selectedDeployUnitMappings: HarnessDeployUnitMapping[],
+  sessionWorkspace: HarnessSessionWorkspace
 ): Promise<HarnessFeatureDeployUnitBindingRecord> {
   assertFeatureBindingKeyBudgets(projectId, featureId)
+  // Only a verified historical feature may acquire a missing binding.
+  let initialSource: HarnessSessionContextInjectionSource | undefined
+  if (!(await findFeatureDeployUnitBinding(projectId, featureId))) {
+    const detail = await getHarnessProjectDetail(projectId)
+    if (!detail.runs.some((feature) => feature.kind === "feature" && feature.slug === featureId)) {
+      throw new Error("未找到该特性，无法保存配置")
+    }
+    const project = (await listHarnessProjects()).find((item) => item.projectId === projectId)
+    if (!project) throw new Error("Project not found")
+    initialSource = project.supportsSessionContextInjection ? "plugin" : "cmbdevclaw"
+  }
   return withHarnessStoreMutation(HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE, async () => {
     const store = await readFeatureDeployUnitBindingStore()
     const key = featureDeployUnitBindingKey(projectId, featureId)
     const existingIndex = store.bindings.findIndex(
       (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
     )
-    if (existingIndex < 0) throw new Error("未找到该特性的发布单元绑定记录")
+    if (existingIndex < 0 && !initialSource) throw new Error("未找到该特性的项目模式绑定记录")
+    if (existingIndex < 0 && store.bindings.length >= HARNESS_FEATURE_BINDING_MAX_ENTRIES) {
+      throw new Error(`特性发布单元绑定最多支持 ${HARNESS_FEATURE_BINDING_MAX_ENTRIES} 条`)
+    }
+    const existing = existingIndex >= 0 ? store.bindings[existingIndex] : undefined
+    const sessionContextInjectionSource = existing?.sessionContextInjectionSource ?? initialSource
+    if (!sessionContextInjectionSource) throw new Error("未找到该特性的项目模式绑定记录")
     requireCompleteHarnessDeployUnitContext(
       selectedDeployUnitMappings.length,
-      store.bindings[existingIndex].sessionContextInjectionSource
+      sessionContextInjectionSource
     )
     const binding: HarnessFeatureDeployUnitBindingRecord = {
-      ...store.bindings[existingIndex],
+      ...existing,
+      projectId,
+      featureId,
+      sessionContextInjectionSource,
+      createdAt: existing?.createdAt ?? formatGmt8Timestamp(),
       selectedDeployUnitMappings,
+      sessionWorkspace,
       updatedAt: formatGmt8Timestamp()
     }
-    store.bindings[existingIndex] = binding
+    if (existingIndex >= 0) store.bindings[existingIndex] = binding
+    else store.bindings.push(binding)
     await writeHarnessJsonFileAtomic(
       HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE,
       store,
-      HARNESS_FEATURE_BINDING_MAX_BYTES,
+      HARNESS_CONFIG_V2_STORE_MAX_BYTES,
       "Harness feature binding store"
     )
     return binding
@@ -2210,43 +2046,6 @@ export async function getHarnessFeatureBinding(
   featureId: string
 ): Promise<HarnessFeatureDeployUnitBinding | null> {
   return findFeatureDeployUnitBinding(projectId, featureId)
-}
-
-export async function listHarnessHumanGates(): Promise<HarnessHumanGateSnapshot[]> {
-  return (await readFeatureDeployUnitBindingStore()).bindings.flatMap((binding) =>
-    binding.humanGate ? [binding.humanGate] : []
-  )
-}
-
-export async function setHarnessHumanGate(
-  projectId: string,
-  featureId: string,
-  humanGate: HarnessHumanGateSnapshot | undefined
-): Promise<HarnessFeatureDeployUnitBinding> {
-  assertFeatureBindingKeyBudgets(projectId, featureId)
-  return withHarnessStoreMutation(HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE, async () => {
-    const store = await readFeatureDeployUnitBindingStore()
-    const key = featureDeployUnitBindingKey(projectId, featureId)
-    const existingIndex = store.bindings.findIndex(
-      (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
-    )
-    if (existingIndex < 0) throw new Error("未找到该特性的项目模式绑定记录")
-    const existing = store.bindings[existingIndex]
-    const next: HarnessFeatureDeployUnitBindingRecord = {
-      ...existing,
-      ...(humanGate ? { humanGate } : {}),
-      updatedAt: formatGmt8Timestamp()
-    }
-    if (!humanGate) delete next.humanGate
-    store.bindings[existingIndex] = next
-    await writeHarnessJsonFileAtomic(
-      HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE,
-      store,
-      HARNESS_FEATURE_BINDING_MAX_BYTES,
-      "Harness feature binding store"
-    )
-    return next
-  })
 }
 
 export async function setHarnessFeatureImManagement(
@@ -2272,9 +2071,10 @@ export async function setHarnessFeatureImManagement(
     await writeHarnessJsonFileAtomic(
       HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE,
       store,
-      HARNESS_FEATURE_BINDING_MAX_BYTES,
+      HARNESS_CONFIG_V2_STORE_MAX_BYTES,
       "Harness feature binding store"
     )
+    if (!enabled) harnessNotifications.disableIm(projectId, featureId)
     return next
   })
 }
@@ -2299,22 +2099,24 @@ export function listHarnessManagedRunProjectDirectories(): Array<{
   }))
 }
 
-export async function listHarnessDeployUnitMappings(): Promise<HarnessDeployUnitMapping[]> {
+export async function listHarnessDeployUnitMappings(): Promise<HarnessDeployUnitConfig[]> {
   return (await readDeployUnitMappingStore()).mappings
 }
 
 export async function saveHarnessDeployUnitMappings(
-  mappings: HarnessDeployUnitMapping[]
-): Promise<HarnessDeployUnitMapping[]> {
+  mappings: HarnessDeployUnitConfig[]
+): Promise<HarnessDeployUnitConfig[]> {
   if (mappings.length > HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES) {
     throw new Error(`发布单元最多支持 ${HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES} 条`)
   }
-  const normalized = normalizeDeployUnitMappingsForSave(mappings)
+  const normalized = validateDeployUnitConfigs(mappings)
   await withHarnessStoreMutation(HARNESS_DEPLOY_UNIT_MAPPING_FILE, async () => {
+    // Do not overwrite a deleted or corrupt store with a new empty/default configuration.
+    await readDeployUnitMappingStore()
     await writeHarnessJsonFileAtomic(
       HARNESS_DEPLOY_UNIT_MAPPING_FILE,
-      { version: 1, mappings: normalized },
-      HARNESS_DEPLOY_UNIT_MAPPING_MAX_BYTES,
+      { version: 2, mappings: normalized },
+      HARNESS_CONFIG_V2_STORE_MAX_BYTES,
       "Harness deploy unit mapping store"
     )
   })
@@ -2356,10 +2158,14 @@ async function readProjectContextInWorker(
   return result.projects[projectId] ?? null
 }
 
-async function requireProject(projectId: string): Promise<HarnessProjectMetadata> {
+async function requireProjectContext(projectId: string): Promise<HarnessProjectContextItem> {
   const context = await readProjectContextInWorker(projectId, "harness-project-read")
   if (!context) throw new Error("Project not found")
-  return context.project
+  return context
+}
+
+async function requireProject(projectId: string): Promise<HarnessProjectMetadata> {
+  return (await requireProjectContext(projectId)).project
 }
 
 function validateCreateInput(input: HarnessProjectCreateInput): void {
@@ -2369,13 +2175,15 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
     input.name,
     input.projectCode,
     input.projectDir,
-    input.description,
     input.systemId,
     input.systemName,
     input.workspacePath
   ]
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
-    throw new Error("Project name, code, description, system and workspace are required")
+    throw new Error("Project name, code, system and workspace are required")
+  }
+  if (typeof input.description !== "string") {
+    throw new Error("Project description must be a string")
   }
   validateHarnessName(input.projectCode, "项目编号")
   validateHarnessName(input.projectDir, "项目文件夹")
@@ -2388,13 +2196,15 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
     input.name,
     input.projectCode,
     input.projectDir,
-    input.description,
     input.systemId,
     input.systemName,
     input.workspacePath
   ]
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
-    throw new Error("Project name, code, description, system and workspace are required")
+    throw new Error("Project name, code, system and workspace are required")
+  }
+  if (typeof input.description !== "string") {
+    throw new Error("Project description must be a string")
   }
   validateHarnessName(input.projectCode, "项目编号")
   validateHarnessName(input.projectDir, "项目文件夹")
@@ -2438,7 +2248,7 @@ function validateProjectDirUnique(
       item.projectId !== excludeProjectId
   )
   if (duplicate) {
-    throw new Error(`项目根路径下已有文件夹：${trimmedProjectDir}`)
+    throw new Error(`插件工作目录下已有文件夹：${trimmedProjectDir}`)
   }
 }
 
@@ -2459,20 +2269,18 @@ async function resolveFeatureSelectedDeployUnits(
 ): Promise<HarnessDeployUnitMapping[]> {
   if (!Array.isArray(selectedDeployUnits)) return []
 
+  // Feature snapshots are autonomous; the global catalog is not a path allowlist.
   const selected = normalizeDeployUnitMappings(selectedDeployUnits)
+  if (selected.length !== selectedDeployUnits.length)
+    throw new Error("发布单元配置无效或重复，请检查所选发布单元和路径")
   if (selected.length === 0 && !(options.allowEmpty && selectedDeployUnits.length === 0)) {
     throw new Error("请至少选择一个发布单元")
   }
 
-  const configuredMappings = (await readDeployUnitMappingStore()).mappings
-  const configuredById = new Map(
-    configuredMappings.map((mapping) => [mapping.deployUnitIdMapping, mapping])
-  )
   const resolved: HarnessDeployUnitMapping[] = []
 
   for (const item of selected) {
-    const configured = configuredById.get(item.deployUnitIdMapping)
-    const resolvedMapping = configured ?? item
+    const resolvedMapping = item
     const deployUnitId = resolvedMapping.deployUnitId.trim()
     const localRepoPath = resolvedMapping.localRepoPath.trim()
     if (!isAbsolute(localRepoPath)) {
@@ -2492,8 +2300,7 @@ async function resolveFeatureSelectedDeployUnits(
     const exists = await Promise.all(
       batch.map(async (mapping) => {
         try {
-          await access(mapping.localRepoPath)
-          return true
+          return (await stat(mapping.localRepoPath)).isDirectory()
         } catch {
           return false
         }
@@ -2791,7 +2598,6 @@ function makeProjectDetailViewModel(
       systemId: project.systemId,
       systemName: project.systemName,
       workspacePath: project.workspacePath,
-      sessionWorkspacePath: project.sessionWorkspacePath,
       projectRootPath: projectDirectoryPath(project)
     },
     adapterSnapshot: {
@@ -2806,19 +2612,6 @@ function makeProjectDetailViewModel(
     loading: false,
     error: data.error
   }
-}
-
-function attachHumanGatesToProjectDetail(
-  detail: HarnessProjectDetailViewModel,
-  bindingByFeature: ReadonlyMap<string, HarnessFeatureDeployUnitBindingRecord>
-): HarnessProjectDetailViewModel {
-  const runs = detail.runs.map((run) => {
-    const humanGate = bindingByFeature.get(
-      featureDeployUnitBindingKey(detail.project.projectId, run.slug)
-    )?.humanGate
-    return humanGate ? { ...run, humanGate } : run
-  })
-  return { ...detail, runs }
 }
 
 async function initializeHarnessProject(project: HarnessProjectMetadata): Promise<void> {
@@ -3094,6 +2887,27 @@ async function readHarnessFeatureSessionContextAgentPrompt(
   }
 }
 
+export async function resolveHarnessFeaturePluginIdentity(
+  metadata: unknown
+): Promise<{ pluginId?: string; pluginName?: string }> {
+  const feature = readHarnessFeatureMetadata(metadata)
+  if (!feature) return {}
+  const workerContext = await readProjectContextInWorker(
+    feature.projectId,
+    "harness-plugin-identity"
+  )
+  if (!workerContext) throw new Error("Project not found")
+  const context = projectConfigContextFromWorker(workerContext)
+  if (!context.plugin || !context.configSnapshot || context.configSnapshot.error) {
+    throw context.configSnapshot?.error ?? new Error("Harness board config unavailable")
+  }
+  const adapter = workerContext.project["harness-adapter"]
+  return {
+    pluginId: normalizeText(context.plugin.id) || adapter.id,
+    pluginName: normalizeText(context.plugin.name) || adapter.name
+  }
+}
+
 export async function buildHarnessFeatureAgentContext(
   metadata: unknown,
   options: HarnessFeatureAgentContextOptions = {}
@@ -3131,6 +2945,7 @@ export async function buildHarnessFeatureAgentContext(
   const systemId = normalizeText(project.systemId).trim()
   const sessionContextInjectionSource = workerContext.sessionContextInjectionSource ?? "cmbdevclaw"
   const usePluginAgentsPrompt = sessionContextInjectionSource === "plugin"
+  // Plugin templates receive the actual thread/run directory, including Fork and managed overrides.
   const sessionWorkspacePath = normalizeText(options.workspacePath).trim() || project.workspacePath
   const render = (
     template: string | null,
@@ -3230,8 +3045,13 @@ export async function resolveHarnessFeatureCurrentStage(
     const normalizedProjectId = normalizeText(projectId).trim()
     const normalizedSlug = normalizeText(slug).trim()
     if (!normalizedProjectId || !normalizedSlug) return null
-    const project = await requireProject(normalizedProjectId)
-    const snapshot = await runInspectAdapter(project, "run", normalizedSlug)
+    const context = await requireProjectContext(normalizedProjectId)
+    const snapshot = await runInspectAdapter(
+      context.project,
+      projectConfigContextFromWorker(context),
+      "run",
+      normalizedSlug
+    )
     return resolveCurrentStageFromSnapshot(snapshot)
   } catch {
     return null
@@ -3242,11 +3062,16 @@ export async function inspectHarnessManagedFeatureStatus(
   projectId: string,
   featureId: string
 ): Promise<ManagedFeatureStatusSnapshot> {
-  const project = await requireProject(normalizeText(projectId).trim())
+  const context = await requireProjectContext(normalizeText(projectId).trim())
   const normalizedFeatureId = normalizeText(featureId).trim()
   if (!normalizedFeatureId) throw new Error("Feature is required")
 
-  const snapshot = await runInspectAdapter(project, "run", normalizedFeatureId)
+  const snapshot = await runInspectAdapter(
+    context.project,
+    projectConfigContextFromWorker(context),
+    "run",
+    normalizedFeatureId
+  )
   const workflow = normalizeWorkflow(snapshot.workflow)
   const run = isObject(snapshot.run) ? snapshot.run : {}
   const currentNodeId = normalizeText(run.currentNodeId).trim() || "unknown"
@@ -3450,7 +3275,6 @@ export async function createHarnessProject(
     systemId: input.systemId.trim(),
     systemName: input.systemName.trim(),
     workspacePath: input.workspacePath.trim(),
-    sessionWorkspacePath: input.sessionWorkspacePath?.trim() || undefined,
     "harness-adapter": harnessAdapter,
     creator: getCurrentProjectCreator(),
     lifecycle: {
@@ -3473,11 +3297,13 @@ export async function createHarnessFeature(
   input: HarnessFeatureCreateInput
 ): Promise<HarnessFeatureCreateResult> {
   validateFeatureCreateInput(input)
+  await readFeatureDeployUnitBindingStore()
   const project = await requireProject(input.projectId)
   const feature = input.feature.trim()
   const workspacePath = projectDirectoryPath(project)
   const workflowOptions = buildFeatureWorkflowCommandOptions(input)
   const selectedDeployUnits = await resolveFeatureSelectedDeployUnits(input.selectedDeployUnits)
+  await validateFeatureWorkspace(input.sessionWorkspace, selectedDeployUnits)
   const sessionContextInjectionSource = normalizeSessionContextInjectionSource(
     input.sessionContextInjectionSource
   )
@@ -3517,7 +3343,8 @@ export async function createHarnessFeature(
     project.projectId,
     feature,
     selectedDeployUnits,
-    sessionContextInjectionSource
+    sessionContextInjectionSource,
+    input.sessionWorkspace
   )
 
   return {
@@ -3542,7 +3369,13 @@ export async function updateHarnessFeatureDeployUnits(
   const selectedDeployUnits = await resolveFeatureSelectedDeployUnits(input.selectedDeployUnits, {
     allowEmpty: true
   })
-  return updateFeatureDeployUnitBinding(projectId, featureId, selectedDeployUnits)
+  await validateFeatureWorkspace(input.sessionWorkspace, selectedDeployUnits)
+  return updateFeatureDeployUnitBinding(
+    projectId,
+    featureId,
+    selectedDeployUnits,
+    input.sessionWorkspace
+  )
 }
 
 export async function skipHarnessRunNode(
@@ -3574,6 +3407,8 @@ export async function skipHarnessRunNode(
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
     throw new Error(`跳过节点失败：${raw}`)
+  } finally {
+    markHarnessStageAttributionDirty(projectId, slug)
   }
 
   return {
@@ -3618,6 +3453,36 @@ export async function markHarnessProjectSystemConstraintsLoaded(
   })
 }
 
+/**
+ * 记录项目第一次开启托管运行。口径和上面那个系统约束标记完全一致：单调、只写一次、
+ * 不碰 lifecycle.updateAt，免得埋点把项目列表的排序搅乱。
+ *
+ * 看板的「托管运行」标签读的是这个标记而不是事件，理由是它能回填——托管运行的记录本
+ * 来就落在 `<工作区>/.cmbdevclaw/managed-runs/` 下，启动时扫一遍就能把存量项目标上。
+ * 若改从事件推，上线当天所有老项目都是灭的，看板会显示成没人用托管。
+ */
+export async function markHarnessProjectManagedRunStarted(
+  projectId: string,
+  startedAt = new Date().toISOString()
+): Promise<boolean> {
+  const id = normalizeText(projectId).trim()
+  if (!id) return false
+
+  return mutateProjectStore((store) => {
+    const index = store.projects.findIndex((item) => item.projectId === id)
+    if (index === -1 || store.projects[index].managedRunFirstStartedAt) return false
+    const parsedStartedAt = new Date(startedAt)
+    const firstStartedAt = Number.isNaN(parsedStartedAt.getTime())
+      ? new Date().toISOString()
+      : parsedStartedAt.toISOString()
+    store.projects[index] = {
+      ...store.projects[index],
+      managedRunFirstStartedAt: firstStartedAt
+    }
+    return true
+  })
+}
+
 export async function updateHarnessProjectMetadata(
   projectId: string,
   input: HarnessProjectMetadataUpdateInput
@@ -3650,12 +3515,11 @@ export async function updateHarnessProjectMetadata(
       systemId: input.systemId.trim(),
       systemName: input.systemName.trim(),
       workspacePath: existing.workspacePath,
-      sessionWorkspacePath: input.sessionWorkspacePath?.trim() || undefined,
       "harness-adapter": harnessAdapter,
       lifecycle: { ...existing.lifecycle, updateAt: new Date().toISOString() }
     }
     store.projects[index] = updated
-    return updated
+    return normalizeProject(updated)!
   })
 }
 
@@ -3672,7 +3536,7 @@ export async function archiveHarnessProject(projectId: string): Promise<HarnessP
       }
     }
     store.projects[index] = archived
-    return archived
+    return normalizeProject(archived)!
   })
 }
 
@@ -3681,13 +3545,14 @@ export async function deleteHarnessProject(projectId: string): Promise<HarnessPr
     const index = store.projects.findIndex((item) => item.projectId === projectId)
     if (index === -1) throw new Error("Project not found")
     const [deleted] = store.projects.splice(index, 1)
-    return deleted
+    return normalizeProject(deleted)!
   })
 }
 
 async function findCompatibleKnowledgePlugin(adapterId: string): Promise<{
   plugin: PluginMetadata
   adapter: HarnessAdapterRegistryItem
+  config: Record<string, unknown>
 }> {
   const normalizedAdapterId = normalizeText(adapterId).trim()
   const plugin = getPlugins().find((item) => pluginMatchesAdapterId(item, normalizedAdapterId))
@@ -3702,7 +3567,7 @@ async function findCompatibleKnowledgePlugin(adapterId: string): Promise<{
     throw new Error(adapter.boardCompatibility.message || adapter.boardCompatibility.label)
   }
 
-  return { plugin, adapter }
+  return { plugin, adapter, config }
 }
 
 function createKnowledgeCommandProject(
@@ -3730,8 +3595,8 @@ function createKnowledgeCommandProject(
 export async function syncHarnessProjectConstraints(
   adapterId: string
 ): Promise<HarnessProjectConstraintSyncResult> {
-  const { plugin, adapter } = await findCompatibleKnowledgePlugin(adapterId)
-  const configuredCommand = await readBoardConfigInspectCommand(plugin.path, "pullKnowledge")
+  const { plugin, adapter, config } = await findCompatibleKnowledgePlugin(adapterId)
+  const configuredCommand = readBoardConfigPlatformTextFromValue(config, "pull_knowledge")
   if (!configuredCommand) {
     throw new Error(`插件未配置 inspectCommands.${process.platform}.pull_knowledge，请检查插件设置`)
   }
@@ -3936,7 +3801,6 @@ async function loadHarnessProjectDetails(
   const result: Record<string, HarnessProjectDetailViewModel> = {}
   const configContextByProjectId = new Map<string, HarnessProjectConfigContext>()
   const projectDirectoryExistsById = new Map<string, boolean>()
-  let featureBindingByKey: Map<string, HarnessFeatureDeployUnitBindingRecord> | null = null
   const groups = new Map<
     string,
     {
@@ -4024,14 +3888,6 @@ async function loadHarnessProjectDetails(
         )
         throwIfHarnessDetailCancelled(signal)
         const workflow = snapshot.workflow
-        if (!featureBindingByKey) {
-          featureBindingByKey = new Map(
-            (await readFeatureDeployUnitBindingStore()).bindings.map((binding) => [
-              featureDeployUnitBindingKey(binding.projectId, binding.featureId),
-              binding
-            ])
-          )
-        }
 
         for (const project of batch) {
           const projectDir = projectDirectoryName(project)
@@ -4046,19 +3902,16 @@ async function loadHarnessProjectDetails(
             continue
           }
 
-          result[project.projectId] = attachHumanGatesToProjectDetail(
-            makeProjectDetailViewModel(
-              project,
-              {
-                workflow,
-                runs: projectData.runs,
-                watchRefs: projectData.watchRefs,
-                projectState: projectAdapterLoadedStatus(project),
-                error: null
-              },
-              configContextByProjectId.get(project.projectId)
-            ),
-            featureBindingByKey
+          result[project.projectId] = makeProjectDetailViewModel(
+            project,
+            {
+              workflow,
+              runs: projectData.runs,
+              watchRefs: projectData.watchRefs,
+              projectState: projectAdapterLoadedStatus(project),
+              error: null
+            },
+            configContextByProjectId.get(project.projectId)
           )
         }
       } catch (error) {
@@ -4147,7 +4000,6 @@ async function loadHarnessRunDetail(
       projectDir: projectDirectoryName(project),
       systemId: project.systemId,
       workspacePath: project.workspacePath,
-      sessionWorkspacePath: project.sessionWorkspacePath,
       projectRootPath: projectDirectoryPath(project)
     },
     adapterSnapshot: {
@@ -4162,9 +4014,13 @@ async function loadHarnessRunDetail(
       },
       skipNodeAvailable,
       selectedDeployUnits,
+      sessionWorkspace: featureBinding?.sessionWorkspace,
+      resolvedSessionWorkspacePath: resolveFeatureWorkspace(
+        featureBinding?.sessionWorkspace,
+        selectedDeployUnits
+      ),
       ...(managedRun ? { managedRun } : {}),
-      ...(featureBinding?.imManagementEnabled ? { imManagementEnabled: true } : {}),
-      ...(featureBinding?.humanGate ? { humanGate: featureBinding.humanGate } : {})
+      ...(featureBinding?.imManagementEnabled ? { imManagementEnabled: true } : {})
     },
     sessions: []
   }
@@ -4175,4 +4031,28 @@ async function loadHarnessRunDetail(
     )
   }
   return detail
+}
+
+async function validateFeatureWorkspace(
+  workspace: HarnessSessionWorkspace | undefined,
+  snapshots: HarnessDeployUnitMapping[]
+): Promise<string> {
+  const path = resolveFeatureWorkspace(workspace, snapshots)
+  if (!path) throw new Error(MISSING_FEATURE_WORKSPACE)
+  if (!isAbsolute(path) || path.length > HARNESS_PROJECT_PATH_MAX_CHARS)
+    throw new Error("会话工作区必须为有效的绝对路径")
+  if (!(await stat(path).catch(() => null))?.isDirectory())
+    throw new Error("会话工作区不存在或不是文件夹，请重新配置")
+  return path
+}
+
+export async function requireHarnessFeatureWorkspace(
+  projectId: string,
+  featureId: string
+): Promise<string> {
+  const binding = await findFeatureDeployUnitBinding(projectId, featureId)
+  return validateFeatureWorkspace(
+    binding?.sessionWorkspace,
+    binding?.selectedDeployUnitMappings ?? []
+  )
 }

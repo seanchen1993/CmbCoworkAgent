@@ -1,10 +1,26 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { flushSync } from "react-dom"
-import { Check, Copy, Loader2, Play, RotateCcw, Save, Trash2 } from "lucide-react"
+import {
+  Check,
+  CheckCircle2,
+  CircleStop,
+  Copy,
+  Info,
+  Loader2,
+  Play,
+  RotateCcw,
+  Save,
+  Search,
+  Trash2,
+  X,
+  XCircle
+} from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { Input } from "@/components/ui/input"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
   Dialog,
   DialogContent,
@@ -14,15 +30,25 @@ import {
 } from "@/components/ui/dialog"
 import { MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES } from "../../../../shared/browser-types"
 import type { BrowserScriptLibraryEntry } from "../../../../shared/browser-types"
+import { countTextLines } from "@/lib/browser-script-text"
 import { BrowserScriptEditor } from "./BrowserScriptEditor"
+import {
+  formatPlaybackDuration,
+  type BrowserPlaybackHistoryEntry
+} from "./browser-playback-history"
+import { hasBrowserRecordingNameConflict } from "@/lib/browser-recording-name"
 
 export interface BrowserRecordingListDialogProps {
   open: boolean
+  visible?: boolean
   onOpenChange: (open: boolean) => void
+  initialSelectedFileName?: string | null
   isPlaybackRunning: boolean
   isLoading: boolean
   error: string | null
   entries: BrowserScriptLibraryEntry[]
+  playbackHistory: BrowserPlaybackHistoryEntry[]
+  onClearPlaybackHistory: () => void
   loadingFileName: string | null
   loadingAction: "detail" | "execution" | "save" | "saveAs" | "continue" | "delete" | null
   onRefresh: () => void
@@ -45,17 +71,104 @@ export interface BrowserRecordingListDialogProps {
 function formatRecordingTime(createdAt: string): string {
   const date = new Date(createdAt)
   if (Number.isNaN(date.getTime())) return createdAt
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false
-  })
-    .format(date)
-    .replace(/\//g, "-")
+  return RECORDING_TIME_FORMATTER.format(date).replace(/\//g, "-")
+}
+
+const RECORDING_TIME_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false
+})
+
+function formatPlaybackHistoryStatus(status: BrowserPlaybackHistoryEntry["status"]): string {
+  switch (status) {
+    case "completed":
+      return "运行完成"
+    case "error":
+      return "运行异常"
+    case "cancelled":
+      return "运行已终止"
+  }
+}
+
+function PlaybackHistoryStatus({
+  status,
+  error
+}: {
+  status: BrowserPlaybackHistoryEntry["status"]
+  error?: string
+}): React.JSX.Element {
+  const [errorCopied, setErrorCopied] = useState(false)
+  const label = formatPlaybackHistoryStatus(status)
+
+  const handleCopyError = async (): Promise<void> => {
+    if (!error) return
+    try {
+      await navigator.clipboard.writeText(error)
+      setErrorCopied(true)
+      window.setTimeout(() => setErrorCopied(false), 1500)
+      toast.success("异常信息已复制")
+    } catch {
+      toast.error("复制异常信息失败")
+    }
+  }
+
+  switch (status) {
+    case "completed":
+      return (
+        <span className="inline-flex items-center gap-1.5 text-emerald-500">
+          <CheckCircle2 className="size-3.5 shrink-0" strokeWidth={2} />
+          {label}
+        </span>
+      )
+    case "cancelled":
+      return (
+        <span className="inline-flex items-center gap-1.5 text-amber-500">
+          <CircleStop className="size-3.5 shrink-0" strokeWidth={2} />
+          {label}
+        </span>
+      )
+    case "error":
+      return (
+        <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-red-500">
+          <XCircle className="size-3.5 shrink-0" strokeWidth={2} />
+          {label}
+          {error ? (
+            <IconPopoverButton
+              icon={<Info className="size-3.5" strokeWidth={2} />}
+              popoverContent={
+                <div className="flex min-w-0 flex-col gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 self-end px-2 text-[11px]"
+                    onClick={() => void handleCopyError()}
+                  >
+                    {errorCopied ? (
+                      <Check className="size-3.5" strokeWidth={1.8} />
+                    ) : (
+                      <Copy className="size-3.5" strokeWidth={1.8} />
+                    )}
+                    {errorCopied ? "已复制" : "复制异常"}
+                  </Button>
+                  <span className="whitespace-pre-wrap break-words">{error}</span>
+                </div>
+              }
+              popoverClassName="max-h-64 w-80 max-w-80 overflow-auto text-destructive"
+              className="size-5 p-0 text-red-500 hover:text-red-600"
+              aria-label="查看回放错误信息"
+              side="left"
+              align="center"
+            />
+          ) : null}
+        </span>
+      )
+  }
 }
 
 const PAGE_SIZE = 10
@@ -69,11 +182,15 @@ interface DetailDraftState {
 
 export function BrowserRecordingListDialog({
   open,
+  visible = true,
   onOpenChange,
+  initialSelectedFileName,
   isPlaybackRunning,
   isLoading,
   error,
   entries,
+  playbackHistory,
+  onClearPlaybackHistory,
   loadingFileName,
   loadingAction,
   onRefresh,
@@ -84,16 +201,27 @@ export function BrowserRecordingListDialog({
   onExecuteScript,
   onDelete
 }: BrowserRecordingListDialogProps): React.JSX.Element {
-  const [selectedFileName, setSelectedFileName] = useState<string | null>(null)
+  const initialSelectedEntryIndex = initialSelectedFileName
+    ? entries.findIndex((entry) => entry.fileName === initialSelectedFileName)
+    : -1
+  const [selectedFileName, setSelectedFileName] = useState<string | null>(
+    initialSelectedFileName ?? null
+  )
   const [detailScript, setDetailScript] = useState("")
   const [detailInitialScript, setDetailInitialScript] = useState("")
   const [detailDisplayName, setDetailDisplayName] = useState("")
   const [detailInitialDisplayName, setDetailInitialDisplayName] = useState("")
   const [detailCopied, setDetailCopied] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
-  const [currentPage, setCurrentPage] = useState(1)
+  const [currentPage, setCurrentPage] = useState(
+    initialSelectedEntryIndex >= 0 ? Math.floor(initialSelectedEntryIndex / PAGE_SIZE) + 1 : 1
+  )
+  const [historyCurrentPage, setHistoryCurrentPage] = useState(1)
   const [displayNameFilter, setDisplayNameFilter] = useState("")
-  const detailDraftsRef = useRef<Record<string, DetailDraftState>>({})
+  const [activeTab, setActiveTab] = useState<"recordings" | "history">("recordings")
+  const detailDraftsRef = useRef(new Map<string, DetailDraftState>())
+  const detailReadsRef = useRef(new Map<string, Promise<string>>())
+  const detailCacheGenerationRef = useRef(0)
 
   const saveDetailDraft = useCallback(
     (
@@ -103,15 +231,12 @@ export function BrowserRecordingListDialog({
       displayName: string,
       initialDisplayName: string
     ): void => {
-      detailDraftsRef.current = {
-        ...detailDraftsRef.current,
-        [fileName]: {
-          initialScript,
-          script,
-          initialDisplayName,
-          displayName
-        }
-      }
+      detailDraftsRef.current.set(fileName, {
+        initialScript,
+        script,
+        initialDisplayName,
+        displayName
+      })
     },
     []
   )
@@ -126,45 +251,93 @@ export function BrowserRecordingListDialog({
   const currentPageSafe = Math.max(1, Math.min(currentPage, totalPages))
   const pageStart = (currentPageSafe - 1) * PAGE_SIZE
   const currentEntries = filteredEntries.slice(pageStart, pageStart + PAGE_SIZE)
+  const historyTotalPages = Math.max(1, Math.ceil(playbackHistory.length / PAGE_SIZE))
+  const historyCurrentPageSafe = Math.max(1, Math.min(historyCurrentPage, historyTotalPages))
+  const historyPageStart = (historyCurrentPageSafe - 1) * PAGE_SIZE
+  const currentPlaybackHistory = playbackHistory.slice(
+    historyPageStart,
+    historyPageStart + PAGE_SIZE
+  )
   const selectedEntry =
     currentEntries.find((entry) => entry.fileName === selectedFileName) ?? currentEntries[0] ?? null
 
-  useEffect(() => {
-    // A continued recording can update the same file while this component stays mounted.
-    // Scope drafts to the current list snapshot and open dialog session.
-    detailDraftsRef.current = {}
-  }, [entries, open])
+  const findHistoryLibraryEntry = (
+    historyEntry: BrowserPlaybackHistoryEntry
+  ): BrowserScriptLibraryEntry | undefined =>
+    entries.find((entry) => entry.fileName === historyEntry.fileName)
+
+  const openHistoryScript = (historyEntry: BrowserPlaybackHistoryEntry): void => {
+    const libraryEntry = findHistoryLibraryEntry(historyEntry)
+    if (!libraryEntry) return
+    const entryIndex = entries.findIndex((entry) => entry.fileName === libraryEntry.fileName)
+    setDisplayNameFilter("")
+    setCurrentPage(Math.floor(Math.max(0, entryIndex) / PAGE_SIZE) + 1)
+    setSelectedFileName(libraryEntry.fileName)
+    setActiveTab("recordings")
+  }
+
+  const invalidateDetailCache = useCallback(() => {
+    detailCacheGenerationRef.current += 1
+    detailDraftsRef.current.clear()
+    detailReadsRef.current.clear()
+  }, [])
 
   useEffect(() => {
-    if (!open || !selectedEntry || error || isLoading) return
+    // Keep drafts for ordinary metadata updates. A new dialog session starts clean.
+    invalidateDetailCache()
+  }, [invalidateDetailCache, open])
 
-    const cachedDraft = detailDraftsRef.current[selectedEntry.fileName]
+  const handleRefresh = (): void => {
+    invalidateDetailCache()
+    onRefresh()
+  }
+
+  useEffect(() => {
+    if (!open || activeTab !== "recordings" || !selectedEntry || error || isLoading) return
+
+    const cachedDraft = detailDraftsRef.current.get(selectedEntry.fileName)
     let cancelled = false
 
     if (cachedDraft) {
-      const cachedDraftTimer = window.setTimeout(() => {
-        if (cancelled) return
-        setDetailScript(cachedDraft.script)
-        setDetailInitialScript(cachedDraft.initialScript)
-        setDetailDisplayName(cachedDraft.displayName)
-        setDetailInitialDisplayName(cachedDraft.initialDisplayName)
-        setDetailCopied(false)
-        setDetailLoading(false)
-      }, 0)
-      return () => {
-        cancelled = true
-        window.clearTimeout(cachedDraftTimer)
-      }
+      setDetailScript(cachedDraft.script)
+      setDetailInitialScript(cachedDraft.initialScript)
+      setDetailDisplayName(cachedDraft.displayName)
+      setDetailInitialDisplayName(cachedDraft.initialDisplayName)
+      setDetailCopied(false)
+      setDetailLoading(false)
+      return
     }
 
-    const loadingTimer = window.setTimeout(() => {
-      if (!cancelled) {
-        setDetailCopied(false)
-        setDetailLoading(true)
+    setDetailCopied(false)
+    setDetailLoading(true)
+    let detailRead = detailReadsRef.current.get(selectedEntry.fileName)
+    if (!detailRead) {
+      const entry = selectedEntry
+      const cacheGeneration = detailCacheGenerationRef.current
+      detailRead = onReadScript(entry).then((script) => {
+        if (
+          detailCacheGenerationRef.current === cacheGeneration &&
+          !detailDraftsRef.current.has(entry.fileName)
+        ) {
+          detailDraftsRef.current.set(entry.fileName, {
+            initialScript: script,
+            script,
+            initialDisplayName: entry.displayName,
+            displayName: entry.displayName
+          })
+        }
+        return script
+      })
+      detailReadsRef.current.set(selectedEntry.fileName, detailRead)
+      const clearRead = (): void => {
+        if (detailReadsRef.current.get(selectedEntry.fileName) === detailRead) {
+          detailReadsRef.current.delete(selectedEntry.fileName)
+        }
       }
-    }, 0)
+      void detailRead.then(clearRead, clearRead)
+    }
 
-    void onReadScript(selectedEntry)
+    void detailRead
       .then((script) => {
         if (cancelled) return
         setDetailScript(script)
@@ -188,9 +361,8 @@ export function BrowserRecordingListDialog({
 
     return () => {
       cancelled = true
-      window.clearTimeout(loadingTimer)
     }
-  }, [error, entries, isLoading, onReadScript, open, saveDetailDraft, selectedEntry])
+  }, [activeTab, error, isLoading, onReadScript, open, saveDetailDraft, selectedEntry])
 
   const handleCopyDetailScript = async (): Promise<void> => {
     if (!detailScriptValue.trim()) return
@@ -207,8 +379,7 @@ export function BrowserRecordingListDialog({
   const detailViewActive = Boolean(selectedEntry && !error && !isLoading)
   const detailScriptValue = detailViewActive ? detailScript : ""
   const detailDisplayNameValue = detailViewActive ? detailDisplayName : ""
-  const detailScriptLineCount =
-    detailScriptValue.trim().length > 0 ? detailScriptValue.split(/\r?\n/u).length : 0
+  const detailScriptLineCount = useMemo(() => countTextLines(detailScript), [detailScript])
   const detailDirty =
     detailViewActive &&
     (detailScript !== detailInitialScript || detailDisplayName !== detailInitialDisplayName)
@@ -225,6 +396,7 @@ export function BrowserRecordingListDialog({
     loadingFileName === selectedEntry?.fileName &&
     loadingAction === "saveAs"
   const isLibraryFull = entries.length >= MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES
+  const saveAsNameConflict = hasBrowserRecordingNameConflict(entries, detailDisplayNameValue)
 
   const handleSaveDetailScript = async (): Promise<void> => {
     const displayName = detailDisplayNameValue.trim()
@@ -245,6 +417,10 @@ export function BrowserRecordingListDialog({
   const handleSaveAsScript = async (): Promise<void> => {
     const displayName = detailDisplayNameValue.trim()
     if (!selectedEntry || !detailScriptValue.trim() || !displayName) return
+    if (saveAsNameConflict) {
+      toast.error("另存为必须使用新的操作名称")
+      return
+    }
     const savedEntry = await onSaveAsScript(selectedEntry, detailScriptValue, displayName)
     setSelectedFileName(savedEntry.fileName)
     setDetailScript(detailScriptValue)
@@ -266,423 +442,611 @@ export function BrowserRecordingListDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88vh] max-w-[1300px] gap-0 overflow-hidden border-border/70 p-0 shadow-2xl">
-        <DialogHeader className="border-b border-border/70 bg-[linear-gradient(180deg,color-mix(in_srgb,var(--primary)_7%,transparent),transparent)] px-5 pt-2 pb-1">
+    // 设置只遮住弹层，不改变 open，避免触发上面的草稿重置和文件重读。
+    <Dialog open={open && visible} onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-[1300px] flex-col gap-0 overflow-hidden border-border/70 p-0 shadow-2xl sm:max-h-[88vh]">
+        <DialogHeader className="shrink-0 border-b border-border/70 bg-[linear-gradient(180deg,color-mix(in_srgb,var(--primary)_7%,transparent),transparent)] px-5 pt-2 pb-1">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <DialogTitle className="text-base">录制列表</DialogTitle>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                已保存 {entries.length}/{MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES} 个录制文件
-              </p>
+            <div className="flex min-w-0 flex-col gap-2">
+              <DialogTitle className="text-base">可复用操作</DialogTitle>
+              <Tabs
+                value={activeTab}
+                onValueChange={(value) => setActiveTab(value as "recordings" | "history")}
+              >
+                <TabsList className="h-8 w-fit">
+                  <TabsTrigger value="recordings" className="h-6 px-3 text-xs">
+                    操作库
+                  </TabsTrigger>
+                  <TabsTrigger value="history" className="h-6 px-3 text-xs">
+                    回放历史
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
             </div>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="mr-10 h-8 shrink-0 rounded-lg"
-              disabled={isLoading}
-              onClick={onRefresh}
-            >
-              {isLoading ? (
-                <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-              ) : (
-                <RotateCcw className="size-3.5" strokeWidth={1.8} />
-              )}
-              刷新
-            </Button>
+            {activeTab === "recordings" ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="mr-10 h-8 shrink-0 rounded-lg"
+                disabled={isLoading}
+                onClick={handleRefresh}
+              >
+                {isLoading ? (
+                  <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                ) : (
+                  <RotateCcw className="size-3.5" strokeWidth={1.8} />
+                )}
+                刷新
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="mr-10 h-8 shrink-0 rounded-lg text-destructive hover:text-destructive"
+                disabled={playbackHistory.length === 0}
+                onClick={onClearPlaybackHistory}
+              >
+                <Trash2 className="size-3.5" strokeWidth={1.8} />
+                清空历史
+              </Button>
+            )}
           </div>
         </DialogHeader>
 
-        <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-          <div className="flex min-h-0 w-full min-w-0 flex-col border-b border-border/70 lg:w-1/2 lg:flex-none lg:border-b-0 lg:border-r">
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-5">
-              {error ? (
-                <div className="rounded-xl border border-status-warning/30 bg-status-warning/10 px-4 py-5 text-sm text-status-warning">
-                  {error}
-                </div>
-              ) : isLoading ? (
-                <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
-                  <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
-                  正在读取脚本文件...
-                </div>
-              ) : (
-                <div className="flex min-h-0 flex-1 flex-col gap-3">
-                  <Input
-                    value={displayNameFilter}
-                    onChange={(event) => {
-                      setDisplayNameFilter(event.target.value)
-                      setCurrentPage(1)
-                    }}
-                    placeholder="输入文件中文名筛选"
-                    className="h-9 rounded-lg border-border/80 bg-background text-sm shadow-none"
-                  />
-                  {isLibraryFull && (
-                    <div
-                      className="rounded-lg border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-[11px] text-status-warning"
-                      role="status"
-                    >
-                      已达到 {MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES}{" "}
-                      个录制文件上限。请删除不需要的文件后再新增。
-                    </div>
-                  )}
-                  {filteredEntries.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
-                      没有匹配当前中文名筛选的脚本。
-                    </div>
-                  ) : (
-                    <>
-                      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-xl border border-border/70">
-                        <table className="w-full table-fixed border-collapse text-left text-[12px]">
-                          <colgroup>
-                            <col />
-                            <col className="w-[76px]" />
-                            <col className="w-[72px]" />
-                            <col className="w-[72px]" />
-                            <col className="w-[120px]" />
-                          </colgroup>
-                          <thead className="sticky top-0 z-10 bg-muted/95 text-[11px] font-medium text-muted-foreground backdrop-blur supports-[backdrop-filter]:bg-muted/85">
-                            <tr>
-                              <th className="border-b border-border/70 px-2 py-2.5">中文名称</th>
-                              <th className="border-b border-border/70 px-2 py-2.5 text-center">
-                                存在变量
-                              </th>
-                              <th className="border-b border-border/70 px-2 py-2.5 text-center">
-                                是否编辑
-                              </th>
-                              <th className="border-b border-border/70 px-2 py-2.5">时间</th>
-                              <th className="border-b border-border/70 px-2 py-2.5 text-right">
-                                操作
-                              </th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {currentEntries.map((entry) => {
-                              const isEntryLoading = loadingFileName === entry.fileName
-                              const isExecutionLoading =
-                                isEntryLoading && loadingAction === "execution"
-                              const isDeleteLoading = isEntryLoading && loadingAction === "delete"
-                              const isSelected = selectedFileName === entry.fileName
-                              const isEdited =
-                                entry.isEdited === true || entry.hasVariables === true
-
-                              return (
-                                <tr
-                                  key={entry.fileName}
-                                  className={[
-                                    "cursor-pointer border-b border-border/60 transition-colors last:border-0 hover:bg-primary/5",
-                                    isSelected ? "bg-primary/5" : ""
-                                  ].join(" ")}
-                                  onClick={() => setSelectedFileName(entry.fileName)}
-                                >
-                                  <td
-                                    className="overflow-hidden px-2 py-3 align-middle font-medium text-foreground"
-                                    title={entry.displayName}
-                                  >
-                                    <span className="block truncate">{entry.displayName}</span>
-                                  </td>
-                                  <td
-                                    className="px-2 py-3 text-center align-middle text-[11px]"
-                                    title={
-                                      entry.hasVariables === undefined
-                                        ? "无法读取脚本内容"
-                                        : entry.hasVariables
-                                          ? "存在变量"
-                                          : "不存在变量"
-                                    }
-                                  >
-                                    {entry.hasVariables === undefined ? (
-                                      <span className="text-muted-foreground">未知</span>
-                                    ) : entry.hasVariables ? (
-                                      <span className="text-emerald-500">有</span>
-                                    ) : (
-                                      <span className="text-muted-foreground">无</span>
-                                    )}
-                                  </td>
-                                  <td
-                                    className="px-2 py-3 text-center align-middle text-[11px]"
-                                    title={isEdited ? "用户编辑过脚本或设置过变量" : "未编辑"}
-                                  >
-                                    {isEdited ? (
-                                      <span className="text-emerald-500">是</span>
-                                    ) : (
-                                      <span className="text-muted-foreground">否</span>
-                                    )}
-                                  </td>
-                                  <td
-                                    className="truncate px-2 py-3 align-middle text-[11px] text-muted-foreground"
-                                    title={entry.createdAt}
-                                  >
-                                    {formatRecordingTime(entry.createdAt)}
-                                  </td>
-                                  <td className="px-2 py-3 align-middle">
-                                    <div className="flex justify-end gap-1">
-                                      <IconPopoverButton
-                                        icon={
-                                          isExecutionLoading ? (
-                                            <Loader2
-                                              className="size-3.5 animate-spin"
-                                              strokeWidth={1.8}
-                                            />
-                                          ) : (
-                                            <Play className="size-3.5" strokeWidth={1.8} />
-                                          )
-                                        }
-                                        popoverContent="内置浏览器执行"
-                                        disabled={isEntryLoading || isPlaybackRunning}
-                                        stopPropagation
-                                        className="size-7 rounded-md"
-                                        onClick={async () => {
-                                          flushSync(() => onOpenChange(false))
-                                          try {
-                                            const script =
-                                              selectedEntry?.fileName === entry.fileName &&
-                                              !detailLoading
-                                                ? detailScriptValue
-                                                : await onReadScript(entry)
-                                            await onExecuteScript(entry, script)
-                                          } catch {
-                                            // Parent handlers already surface the error.
-                                          }
-                                        }}
-                                      />
-                                      <IconPopoverButton
-                                        icon={
-                                          isDeleteLoading ? (
-                                            <Loader2
-                                              className="size-3.5 animate-spin"
-                                              strokeWidth={1.8}
-                                            />
-                                          ) : (
-                                            <Trash2 className="size-3.5" strokeWidth={1.8} />
-                                          )
-                                        }
-                                        popoverContent="删除脚本"
-                                        disabled={isEntryLoading}
-                                        stopPropagation
-                                        className="size-7 rounded-md"
-                                        onClick={() => {
-                                          onDelete(entry)
-                                        }}
-                                      />
-                                    </div>
-                                  </td>
-                                </tr>
-                              )
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                      <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
-                        <span>
-                          共 {filteredEntries.length}/{entries.length} 条，当前第 {currentPageSafe}/
-                          {totalPages} 页
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            className="h-7 rounded-md px-2 text-[11px]"
-                            disabled={currentPageSafe <= 1}
-                            onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
-                          >
-                            上一页
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            className="h-7 rounded-md px-2 text-[11px]"
-                            disabled={currentPageSafe >= totalPages}
-                            onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
-                          >
-                            下一页
-                          </Button>
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="flex min-h-0 w-full min-w-0 flex-col lg:w-1/2 lg:flex-none">
-            <div className="border-b border-border/70 px-5 py-4">
-              <div className="flex flex-col gap-3">
-                <div className="flex-1 min-w-0">
-                  <DialogTitle className="text-base">编辑录制脚本</DialogTitle>
-                  <DialogDescription className="mt-1 text-[12px] leading-5">
-                    {selectedEntry
-                      ? "可编辑脚本内容和文件中文名；保存修改会更新当前文件，另存为会创建新的脚本文件。"
-                      : "请选择一条录制查看脚本。"}
-                  </DialogDescription>
-                </div>
-                {selectedEntry ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <label
-                      htmlFor="browser-script-library-display-name"
-                      className="shrink-0 text-xs font-medium text-foreground"
-                    >
-                      文件中文名
-                    </label>
-                    <Input
-                      id="browser-script-library-display-name"
-                      value={detailDisplayNameValue}
-                      disabled={
-                        !detailViewActive ||
-                        detailLoading ||
-                        isSaveLoading ||
-                        isSaveAsLoading ||
-                        isContinueLoading
-                      }
-                      onChange={(event) => {
-                        const nextDisplayName = event.target.value
-                        setDetailDisplayName(nextDisplayName)
-                        saveDetailDraft(
-                          selectedEntry.fileName,
-                          detailScript,
-                          detailInitialScript,
-                          nextDisplayName,
-                          detailInitialDisplayName
-                        )
-                      }}
-                      placeholder="请输入文件中文名"
-                      className="h-8 w-[240px] rounded-lg border-border/80 bg-background text-xs shadow-none"
-                    />
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="h-8 rounded-lg text-[11px]"
-                      disabled={
-                        !selectedEntry ||
-                        !detailDirty ||
-                        !detailScriptValue.trim() ||
-                        !detailDisplayNameValue.trim() ||
-                        detailLoading ||
-                        isSaveAsLoading ||
-                        isContinueLoading
-                      }
-                      onClick={() => void handleSaveDetailScript()}
-                    >
-                      {isSaveLoading ? (
-                        <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                      ) : (
-                        <Save className="size-3.5" strokeWidth={1.8} />
-                      )}
-                      保存修改
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="h-8 rounded-lg text-[11px]"
-                      disabled={
-                        !selectedEntry ||
-                        !detailScriptValue.trim() ||
-                        !detailDisplayNameValue.trim() ||
-                        detailLoading ||
-                        isSaveLoading ||
-                        isSaveAsLoading ||
-                        isContinueLoading ||
-                        isLibraryFull
-                      }
-                      onClick={() => void handleSaveAsScript()}
-                    >
-                      {isSaveAsLoading ? (
-                        <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                      ) : (
-                        <Copy className="size-3.5" strokeWidth={1.8} />
-                      )}
-                      另存为
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      className="h-8 rounded-lg text-[11px]"
-                      disabled={
-                        !selectedEntry ||
-                        !detailScriptValue.trim() ||
-                        detailLoading ||
-                        isSaveLoading ||
-                        isSaveAsLoading
-                      }
-                      onClick={() => void handleContinueRecording()}
-                    >
-                      {isContinueLoading ? (
-                        <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                      ) : (
-                        <Play className="size-3.5" strokeWidth={1.8} />
-                      )}
-                      继续录制
-                    </Button>
+        {activeTab === "recordings" ? (
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto [scrollbar-gutter:stable] lg:flex-row lg:overflow-hidden">
+            <div className="flex min-h-0 w-full min-w-0 flex-none flex-col border-b border-border/70 lg:w-1/2 lg:border-b-0 lg:border-r">
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-5">
+                {error ? (
+                  <div className="rounded-xl border border-status-warning/30 bg-status-warning/10 px-4 py-5 text-sm text-status-warning">
+                    {error}
                   </div>
-                ) : null}
+                ) : isLoading ? (
+                  <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
+                    正在读取可复用操作...
+                  </div>
+                ) : (
+                  <div className="flex min-h-0 flex-1 flex-col gap-3">
+                    <div className="space-y-1.5">
+                      <label
+                        htmlFor="browser-recording-name-filter"
+                        className="text-xs font-medium text-foreground"
+                      >
+                        筛选操作
+                      </label>
+                      <div className="relative">
+                        <Search
+                          className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+                          strokeWidth={1.8}
+                        />
+                        <Input
+                          id="browser-recording-name-filter"
+                          value={displayNameFilter}
+                          onChange={(event) => {
+                            setDisplayNameFilter(event.target.value)
+                            setCurrentPage(1)
+                          }}
+                          placeholder="输入操作名称筛选"
+                          className="h-10 rounded-lg border-border bg-muted/30 pl-9 pr-9 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:border-primary/60 focus-visible:bg-background focus-visible:ring-2 focus-visible:ring-primary/20"
+                        />
+                        {displayNameFilter ? (
+                          <button
+                            type="button"
+                            className="absolute right-2.5 top-1/2 inline-flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            aria-label="清空操作名称筛选"
+                            onClick={() => {
+                              setDisplayNameFilter("")
+                              setCurrentPage(1)
+                            }}
+                          >
+                            <X className="size-3.5" strokeWidth={1.8} />
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                    {isLibraryFull && (
+                      <div
+                        className="rounded-lg border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-[11px] text-status-warning"
+                        role="status"
+                      >
+                        已达到 {MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES}{" "}
+                        个可复用操作上限。请删除不需要的操作后再新增。
+                      </div>
+                    )}
+                    {filteredEntries.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
+                        没有匹配当前中文名筛选的可复用操作。
+                      </div>
+                    ) : (
+                      <>
+                        <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-xl border border-border/70">
+                          <table className="w-full table-fixed border-collapse text-left text-[12px]">
+                            <colgroup>
+                              <col />
+                              <col className="w-[76px]" />
+                              <col className="w-[72px]" />
+                              <col className="w-[144px]" />
+                              <col className="w-[120px]" />
+                            </colgroup>
+                            <thead className="sticky top-0 z-10 bg-muted/95 text-[11px] font-medium text-muted-foreground backdrop-blur supports-[backdrop-filter]:bg-muted/85">
+                              <tr>
+                                <th className="border-b border-border/70 px-2 py-2.5">操作名称</th>
+                                <th className="border-b border-border/70 px-2 py-2.5 text-center">
+                                  存在变量
+                                </th>
+                                <th className="border-b border-border/70 px-2 py-2.5 text-center">
+                                  是否编辑
+                                </th>
+                                <th className="border-b border-border/70 px-2 py-2.5">时间</th>
+                                <th className="border-b border-border/70 px-2 py-2.5 text-right">
+                                  操作
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {currentEntries.map((entry) => {
+                                const isEntryLoading = loadingFileName === entry.fileName
+                                const isExecutionLoading =
+                                  isEntryLoading && loadingAction === "execution"
+                                const isDeleteLoading = isEntryLoading && loadingAction === "delete"
+                                const isSelected = selectedFileName === entry.fileName
+                                const isEdited =
+                                  entry.isEdited === true || entry.hasVariables === true
+
+                                return (
+                                  <tr
+                                    key={entry.fileName}
+                                    className={[
+                                      "cursor-pointer border-b border-border/60 transition-colors last:border-0 hover:bg-primary/5",
+                                      isSelected ? "bg-primary/5" : ""
+                                    ].join(" ")}
+                                    onClick={() => setSelectedFileName(entry.fileName)}
+                                  >
+                                    <td
+                                      className="overflow-hidden px-2 py-3 align-middle font-medium text-foreground"
+                                      title={entry.displayName}
+                                    >
+                                      <span className="block truncate">{entry.displayName}</span>
+                                    </td>
+                                    <td
+                                      className="px-2 py-3 text-center align-middle text-[11px]"
+                                      title={
+                                        entry.hasVariables === undefined
+                                          ? "无法读取自动化内容"
+                                          : entry.hasVariables
+                                            ? "存在变量"
+                                            : "不存在变量"
+                                      }
+                                    >
+                                      {entry.hasVariables === undefined ? (
+                                        <span className="text-muted-foreground">未知</span>
+                                      ) : entry.hasVariables ? (
+                                        <span className="text-emerald-500">有</span>
+                                      ) : (
+                                        <span className="text-muted-foreground">无</span>
+                                      )}
+                                    </td>
+                                    <td
+                                      className="px-2 py-3 text-center align-middle text-[11px]"
+                                      title={isEdited ? "用户编辑过操作或设置过变量" : "未编辑"}
+                                    >
+                                      {isEdited ? (
+                                        <span className="text-emerald-500">是</span>
+                                      ) : (
+                                        <span className="text-muted-foreground">否</span>
+                                      )}
+                                    </td>
+                                    <td
+                                      className="whitespace-nowrap px-2 py-3 align-middle text-[11px] text-muted-foreground"
+                                      title={formatRecordingTime(entry.createdAt)}
+                                    >
+                                      {formatRecordingTime(entry.createdAt)}
+                                    </td>
+                                    <td className="px-2 py-3 align-middle">
+                                      <div className="flex justify-end gap-1">
+                                        <IconPopoverButton
+                                          icon={
+                                            isExecutionLoading ? (
+                                              <Loader2
+                                                className="size-3.5 animate-spin"
+                                                strokeWidth={1.8}
+                                              />
+                                            ) : (
+                                              <Play className="size-3.5" strokeWidth={1.8} />
+                                            )
+                                          }
+                                          popoverContent="内置浏览器执行"
+                                          disabled={isEntryLoading || isPlaybackRunning}
+                                          stopPropagation
+                                          className="size-7 rounded-md"
+                                          onClick={async () => {
+                                            flushSync(() => onOpenChange(false))
+                                            try {
+                                              const script =
+                                                selectedEntry?.fileName === entry.fileName &&
+                                                !detailLoading
+                                                  ? detailScriptValue
+                                                  : await onReadScript(entry)
+                                              await onExecuteScript(entry, script)
+                                            } catch {
+                                              // Parent handlers already surface the error.
+                                            }
+                                          }}
+                                        />
+                                        <IconPopoverButton
+                                          icon={
+                                            isDeleteLoading ? (
+                                              <Loader2
+                                                className="size-3.5 animate-spin"
+                                                strokeWidth={1.8}
+                                              />
+                                            ) : (
+                                              <Trash2 className="size-3.5" strokeWidth={1.8} />
+                                            )
+                                          }
+                                          popoverContent="删除操作"
+                                          disabled={isEntryLoading}
+                                          stopPropagation
+                                          className="size-7 rounded-md"
+                                          onClick={() => {
+                                            onDelete(entry)
+                                          }}
+                                        />
+                                      </div>
+                                    </td>
+                                  </tr>
+                                )
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                        <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+                          <span>
+                            共 {filteredEntries.length}/{entries.length} 条，当前第{" "}
+                            {currentPageSafe}/{totalPages} 页
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 rounded-md px-2 text-[11px]"
+                              disabled={currentPageSafe <= 1}
+                              onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                            >
+                              上一页
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 rounded-md px-2 text-[11px]"
+                              disabled={currentPageSafe >= totalPages}
+                              onClick={() =>
+                                setCurrentPage((page) => Math.min(totalPages, page + 1))
+                              }
+                            >
+                              下一页
+                            </Button>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
-            <div className="min-h-0 flex-1 p-4">
-              <BrowserScriptEditor
-                className="h-[60vh] min-h-[420px]"
-                textareaClassName="disabled:cursor-wait"
-                title={
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="truncate font-mono">
-                      {selectedEntry?.fileName ?? "playwright.spec.ts"}
-                    </span>
-                    {detailDirty ? (
-                      <span className="rounded-full border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[10px] text-status-warning-foreground">
-                        未保存
-                      </span>
-                    ) : null}
+
+            <div className="flex min-h-0 w-full min-w-0 flex-none flex-col lg:w-1/2">
+              <div className="border-b border-border/70 px-5 py-4">
+                <div className="flex flex-col gap-3">
+                  <div className="flex-1 min-w-0">
+                    <DialogTitle className="text-base">编辑可复用操作</DialogTitle>
+                    <DialogDescription className="mt-1 text-[12px] leading-5">
+                      {selectedEntry ? (
+                        <>
+                          可编辑自动化脚本和操作名称；保存修改会更新当前操作，另存为会创建新的可复用操作。
+                          <span className="font-medium text-primary">
+                            建议使用清晰、具体的名称描述操作要完成的任务，方便 Agent
+                            后续准确识别并直接复用。
+                          </span>
+                        </>
+                      ) : (
+                        "请选择一项可复用操作查看详情。"
+                      )}
+                    </DialogDescription>
                   </div>
-                }
-                headerRight={
-                  detailLoading || isSaveLoading || isSaveAsLoading || isContinueLoading ? (
-                    <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                  ) : (
-                    <div className="flex shrink-0 items-center gap-2">
-                      <span className="font-mono tabular-nums text-[11px] text-muted-foreground">
-                        {detailScriptLineCount > 0 ? `${detailScriptLineCount} lines` : "waiting"}
-                      </span>
+                  {selectedEntry ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label
+                        htmlFor="browser-script-library-display-name"
+                        className="shrink-0 text-xs font-medium text-foreground"
+                      >
+                        操作名称
+                      </label>
+                      <Input
+                        id="browser-script-library-display-name"
+                        value={detailDisplayNameValue}
+                        disabled={
+                          !detailViewActive ||
+                          detailLoading ||
+                          isSaveLoading ||
+                          isSaveAsLoading ||
+                          isContinueLoading
+                        }
+                        onChange={(event) => {
+                          const nextDisplayName = event.target.value
+                          setDetailDisplayName(nextDisplayName)
+                          saveDetailDraft(
+                            selectedEntry.fileName,
+                            detailScript,
+                            detailInitialScript,
+                            nextDisplayName,
+                            detailInitialDisplayName
+                          )
+                        }}
+                        placeholder="请输入操作名称"
+                        aria-invalid={saveAsNameConflict || undefined}
+                        className="h-8 w-[240px] rounded-lg border-border/80 bg-background text-xs shadow-none"
+                      />
                       <Button
                         type="button"
-                        size="icon"
-                        variant="ghost"
-                        className="size-6 rounded-md text-muted-foreground hover:bg-foreground/5 hover:text-foreground"
-                        disabled={!detailViewActive || !detailScriptValue.trim()}
-                        onClick={() => void handleCopyDetailScript()}
+                        size="sm"
+                        variant="outline"
+                        className="h-8 rounded-lg text-[11px]"
+                        disabled={
+                          !selectedEntry ||
+                          !detailDirty ||
+                          !detailScriptValue.trim() ||
+                          !detailDisplayNameValue.trim() ||
+                          detailLoading ||
+                          isSaveAsLoading ||
+                          isContinueLoading
+                        }
+                        onClick={() => void handleSaveDetailScript()}
                       >
-                        {detailCopied ? (
-                          <Check className="size-3.5" strokeWidth={1.8} />
+                        {isSaveLoading ? (
+                          <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
                         ) : (
-                          <Copy className="size-3.5" strokeWidth={1.8} />
+                          <Save className="size-3.5" strokeWidth={1.8} />
                         )}
+                        保存修改
+                      </Button>
+                      <TooltipProvider delayDuration={150}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span
+                              className="inline-flex"
+                              tabIndex={saveAsNameConflict ? 0 : undefined}
+                            >
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-8 rounded-lg text-[11px]"
+                                disabled={
+                                  !selectedEntry ||
+                                  !detailScriptValue.trim() ||
+                                  !detailDisplayNameValue.trim() ||
+                                  detailLoading ||
+                                  isSaveLoading ||
+                                  isSaveAsLoading ||
+                                  isContinueLoading ||
+                                  isLibraryFull ||
+                                  saveAsNameConflict
+                                }
+                                onClick={() => void handleSaveAsScript()}
+                              >
+                                {isSaveAsLoading ? (
+                                  <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                                ) : (
+                                  <Copy className="size-3.5" strokeWidth={1.8} />
+                                )}
+                                另存为
+                              </Button>
+                            </span>
+                          </TooltipTrigger>
+                          {saveAsNameConflict ? (
+                            <TooltipContent side="top" className="z-[70] text-xs">
+                              另存为必须使用新的操作名称
+                            </TooltipContent>
+                          ) : null}
+                        </Tooltip>
+                      </TooltipProvider>
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-8 rounded-lg text-[11px]"
+                        disabled={
+                          !selectedEntry ||
+                          !detailScriptValue.trim() ||
+                          detailLoading ||
+                          isSaveLoading ||
+                          isSaveAsLoading
+                        }
+                        onClick={() => void handleContinueRecording()}
+                      >
+                        {isContinueLoading ? (
+                          <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                        ) : (
+                          <Play className="size-3.5" strokeWidth={1.8} />
+                        )}
+                        继续录制
                       </Button>
                     </div>
-                  )
-                }
-                value={detailScriptValue}
-                disabled={!detailViewActive || detailLoading}
-                onChange={(nextScript) => {
-                  setDetailScript(nextScript)
-                  if (selectedEntry) {
-                    saveDetailDraft(
-                      selectedEntry.fileName,
-                      nextScript,
-                      detailInitialScript,
-                      detailDisplayName,
-                      detailInitialDisplayName
+                  ) : null}
+                </div>
+              </div>
+              <div className="min-h-0 flex-1 p-4">
+                <BrowserScriptEditor
+                  className="h-[60vh] min-h-[420px]"
+                  textareaClassName="disabled:cursor-wait"
+                  title={
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="truncate font-mono">
+                        {selectedEntry?.fileName ?? "playwright.spec.ts"}
+                      </span>
+                      {detailDirty ? (
+                        <span className="rounded-full border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[10px] text-status-warning-foreground">
+                          未保存
+                        </span>
+                      ) : null}
+                    </div>
+                  }
+                  headerRight={
+                    detailLoading || isSaveLoading || isSaveAsLoading || isContinueLoading ? (
+                      <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                    ) : (
+                      <div className="flex shrink-0 items-center gap-2">
+                        <span className="font-mono tabular-nums text-[11px] text-muted-foreground">
+                          {detailScriptLineCount > 0 ? `${detailScriptLineCount} lines` : "waiting"}
+                        </span>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="size-6 rounded-md text-muted-foreground hover:bg-foreground/5 hover:text-foreground"
+                          disabled={!detailViewActive || !detailScriptValue.trim()}
+                          onClick={() => void handleCopyDetailScript()}
+                        >
+                          {detailCopied ? (
+                            <Check className="size-3.5" strokeWidth={1.8} />
+                          ) : (
+                            <Copy className="size-3.5" strokeWidth={1.8} />
+                          )}
+                        </Button>
+                      </div>
                     )
                   }
-                }}
-                ariaLabel="录制脚本编辑器"
-                placeholder={detailLoading ? "正在读取脚本内容..." : "// Script content"}
-              />
+                  value={detailScriptValue}
+                  disabled={!detailViewActive || detailLoading}
+                  onChange={(nextScript) => {
+                    setDetailScript(nextScript)
+                    if (selectedEntry) {
+                      saveDetailDraft(
+                        selectedEntry.fileName,
+                        nextScript,
+                        detailInitialScript,
+                        detailDisplayName,
+                        detailInitialDisplayName
+                      )
+                    }
+                  }}
+                  ariaLabel="可复用操作脚本编辑器"
+                  placeholder={detailLoading ? "正在读取脚本内容..." : "// Script content"}
+                />
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-auto p-5">
+            {playbackHistory.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-4 py-12 text-center text-sm text-muted-foreground">
+                暂无回放历史。执行可复用操作后，运行结果会保存在这里。
+              </div>
+            ) : (
+              <div className="flex min-h-0 flex-col gap-3">
+                <div className="overflow-hidden rounded-xl border border-border/70">
+                  <table className="w-full table-fixed border-collapse text-left text-[12px]">
+                    <colgroup>
+                      <col />
+                      <col className="w-[210px]" />
+                      <col className="w-[100px]" />
+                      <col className="w-[100px]" />
+                      <col className="w-[100px]" />
+                      <col className="w-[170px]" />
+                    </colgroup>
+                    <thead className="sticky top-0 z-10 bg-muted/95 text-[11px] font-medium text-muted-foreground backdrop-blur">
+                      <tr>
+                        <th className="border-b border-border/70 px-4 py-3">操作名称</th>
+                        <th className="border-b border-border/70 px-4 py-3">运行时间</th>
+                        <th className="border-b border-border/70 px-4 py-3 text-right">运行进度</th>
+                        <th className="border-b border-border/70 px-4 py-3 text-right">执行步骤</th>
+                        <th className="border-b border-border/70 px-4 py-3 text-right">耗时</th>
+                        <th className="border-b border-border/70 px-4 py-3">运行状态</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {currentPlaybackHistory.map((entry) => {
+                        const libraryEntry = findHistoryLibraryEntry(entry)
+                        return (
+                          <tr key={entry.id} className="border-b border-border/60 last:border-0">
+                            <td
+                              className="truncate px-4 py-3 font-medium text-foreground"
+                              title={entry.scriptName}
+                            >
+                              <button
+                                type="button"
+                                className="max-w-full truncate text-left text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                                disabled={!libraryEntry}
+                                onClick={() => openHistoryScript(entry)}
+                                title={
+                                  libraryEntry
+                                    ? `打开可复用操作：${entry.scriptName}`
+                                    : `可复用操作已不存在：${entry.scriptName}`
+                                }
+                              >
+                                {entry.scriptName}
+                              </button>
+                            </td>
+                            <td className="px-4 py-3 tabular-nums text-muted-foreground">
+                              {formatRecordingTime(entry.runAt)}
+                            </td>
+                            <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
+                              {entry.progressPercent}%
+                            </td>
+                            <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
+                              {entry.completedSteps}/{entry.totalSteps} 步
+                            </td>
+                            <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
+                              {formatPlaybackDuration(entry.durationMs)}
+                            </td>
+                            <td className="whitespace-nowrap px-4 py-3">
+                              <PlaybackHistoryStatus status={entry.status} error={entry.error} />
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+                  <span>
+                    共 {playbackHistory.length} 条，当前第 {historyCurrentPageSafe}/
+                    {historyTotalPages} 页
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-7 rounded-md px-2 text-[11px]"
+                      disabled={historyCurrentPageSafe <= 1}
+                      onClick={() => setHistoryCurrentPage((page) => Math.max(1, page - 1))}
+                    >
+                      上一页
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-7 rounded-md px-2 text-[11px]"
+                      disabled={historyCurrentPageSafe >= historyTotalPages}
+                      onClick={() =>
+                        setHistoryCurrentPage((page) => Math.min(historyTotalPages, page + 1))
+                      }
+                    >
+                      下一页
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   )

@@ -138,6 +138,37 @@ function mergeReasoningIntoContent(content: unknown, reasoning: unknown): string
 }
 
 export class ToolCallAwareChatOpenAICompletions extends ChatOpenAICompletions {
+  override _convertCompletionsMessageToBaseMessage(
+    ...args: Parameters<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]>
+  ): ReturnType<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]> {
+    const [message, rawResponse] = args
+    const result = super._convertCompletionsMessageToBaseMessage(
+      {
+        ...message,
+        content: message.content || message.refusal || ""
+      },
+      rawResponse
+    )
+    return attachProviderRefusal(result, message, rawResponse)
+  }
+
+  override async *_streamResponseChunks(
+    messages: BaseMessage[],
+    options: this["ParsedCallOptions"],
+    runManager?: CallbackManagerForLLMRun
+  ): AsyncGenerator<ChatGenerationChunk> {
+    for await (const chunk of super._streamResponseChunks(messages, options, runManager)) {
+      // Core's graph-triggered streaming invoke aggregates messages without copying
+      // generationInfo, unlike direct stream(). Preserve actual provider metadata
+      // before that boundary so checkpoints and all observers see the same facts.
+      chunk.message.response_metadata = {
+        ...chunk.generationInfo,
+        ...chunk.message.response_metadata
+      }
+      yield chunk
+    }
+  }
+
   override _convertCompletionsDeltaToBaseMessageChunk(
     ...args: Parameters<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]>
   ): ReturnType<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]> {
@@ -146,12 +177,45 @@ export class ToolCallAwareChatOpenAICompletions extends ChatOpenAICompletions {
     // A generic leading text or empty chunk also loses later tools during concat,
     // so every role-less chunk must use the assistant completion default.
     // The upstream converter still prefers delta.role over this fallback.
-    return super._convertCompletionsDeltaToBaseMessageChunk(
-      delta,
+    const result = super._convertCompletionsDeltaToBaseMessageChunk(
+      { ...delta, content: delta.content || delta.refusal || "" },
       rawResponse,
       defaultRole ?? "assistant"
     )
+    return attachProviderRefusal(result, delta, rawResponse)
   }
+}
+
+/** Keep the original refusal in durable metadata as well as its user-visible text. */
+function attachProviderRefusal<T extends BaseMessage>(
+  message: T,
+  providerMessage: unknown,
+  rawResponse: unknown
+): T {
+  const provider = asRecord(providerMessage)
+  if (typeof provider?.refusal === "string" && provider.refusal.length) {
+    message.additional_kwargs = { ...message.additional_kwargs, refusal: provider.refusal }
+    if (message.lc_kwargs)
+      message.lc_kwargs.additional_kwargs = {
+        ...asRecord(message.lc_kwargs.additional_kwargs),
+        refusal: provider.refusal
+      }
+  }
+  const raw = asRecord(rawResponse)
+  const choice = Array.isArray(raw?.choices) ? asRecord(raw.choices[0]) : undefined
+  const reason = choice?.finish_reason ?? raw?.stop_reason
+  if (reason === "refusal") {
+    const details = asRecord(choice?.stop_details ?? raw?.stop_details)
+    message.response_metadata = {
+      ...message.response_metadata,
+      stop_reason: "refusal",
+      stop_details: {
+        category: typeof details?.category === "string" ? details.category : null,
+        explanation: typeof details?.explanation === "string" ? details.explanation : null
+      }
+    }
+  }
+  return message
 }
 
 export class InterleavedThinkingChatOpenAICompletions extends ToolCallAwareChatOpenAICompletions {
@@ -200,7 +264,7 @@ export class InterleavedThinkingChatOpenAICompletions extends ToolCallAwareChatO
       const reasoning = extractReasoningFromRecord(message as unknown as Record<string, unknown>)
       const normalizedMessage = {
         ...message,
-        content: mergeReasoningIntoContent(message.content, reasoning)
+        content: mergeReasoningIntoContent(message.content || message.refusal, reasoning)
       }
       const baseMessage = super._convertCompletionsMessageToBaseMessage(
         normalizedMessage,
@@ -224,7 +288,7 @@ export class InterleavedThinkingChatOpenAICompletions extends ToolCallAwareChatO
     try {
       const [delta, rawResponse, defaultRole] = args
       const reasoningText = extractReasoningFromRecord(delta as unknown as Record<string, unknown>)
-      const contentText = typeof delta.content === "string" ? delta.content : ""
+      const contentText = delta.content || delta.refusal || ""
       const hasToolCalls = Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0
       const shouldCloseThink =
         this.thinkingOpen &&

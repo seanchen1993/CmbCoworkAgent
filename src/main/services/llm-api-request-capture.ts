@@ -1,3 +1,5 @@
+import { captureSubagentRawApiCall } from "./subagent-session-capture"
+
 const MAX_CAPTURED_THREADS = 3
 
 const rawApiCallsByThread = new Map<string, string>()
@@ -26,9 +28,11 @@ export function getCapturedRawApiCall(threadId: string): string {
   return rawApiCallsByThread.get(threadId) ?? ""
 }
 
-export function withRawApiCallCapture(fetchImpl: typeof fetch, threadId: string): typeof fetch {
+export function withRawApiCallCapture(fetchImpl: typeof fetch, threadId?: string): typeof fetch {
   return async (input, init) => {
-    captureRawApiCall(threadId, init?.body)
+    if (!captureSubagentRawApiCall(init?.body) && threadId) {
+      captureRawApiCall(threadId, init?.body)
+    }
     return fetchImpl(input, init)
   }
 }

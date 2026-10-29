@@ -120,6 +120,15 @@ describe("dashboard worker view-model projection", () => {
     ])
   })
 
+  it.each([{ timed_out: true }, { _shards: { failed: 1 } }])(
+    "rejects incomplete user-directory responses: %j",
+    (partial) => {
+      expect(() => projectDashboardEsResponse(partial, { kind: "user-directory" })).toThrow(
+        "未完整"
+      )
+    }
+  )
+
   it("projects user-directory pages and preserves composite pagination", () => {
     const projected = projectDashboardEsResponse(
       {
@@ -328,6 +337,69 @@ describe("dashboard worker view-model projection", () => {
     })
   })
 
+  it("counts what the robot sent to Zhaohu, split by why it sent it", () => {
+    const metrics = record(
+      projectDashboardEsResponse(
+        {
+          aggregations: {
+            im: {
+              doc_count: 6,
+              by_outcome: {
+                buckets: [
+                  { key: "completed", doc_count: 4 },
+                  { key: "cancelled", doc_count: 1 },
+                  { key: "outcome_unknown", doc_count: 1 }
+                ]
+              }
+            },
+            im_out: {
+              doc_count: 11,
+              by_kind: {
+                buckets: [
+                  { key: "reply", doc_count: 7 },
+                  { key: "push", doc_count: 3 },
+                  { key: "card", doc_count: 1 }
+                ]
+              },
+              by_outcome: {
+                buckets: [
+                  { key: "sent", doc_count: 9 },
+                  { key: "unknown", doc_count: 1 },
+                  { key: "failed", doc_count: 1 }
+                ]
+              }
+            }
+          }
+        },
+        { kind: "advanced-event" }
+      )
+    )
+    expect(metrics).toMatchObject({
+      imCompleted: 4,
+      imReplied: 7,
+      imPushed: 3,
+      imCards: 1,
+      // A send the gateway never confirmed is grouped with the failures, not
+      // the successes: "may have been delivered" is not "was delivered", and
+      // the card labels this pair 发送未确认 rather than claiming either.
+      imSendFailed: 2
+    })
+  })
+
+  it("reads a response with no outbound traffic as zero, not as missing", () => {
+    // Every deployment that has not picked up the outbound instrumentation yet
+    // returns exactly this. The card must render 0 rather than NaN.
+    const metrics = record(
+      projectDashboardEsResponse(
+        { aggregations: { im: { doc_count: 0 } } },
+        {
+          kind: "advanced-event"
+        }
+      )
+    )
+    expect(metrics).toMatchObject({ imReplied: 0, imPushed: 0, imCards: 0, imSendFailed: 0 })
+  })
+
   it("defines a quantified hard envelope for every home endpoint and the full page", () => {
     const endpointBudget = Object.values(DASHBOARD_HOME_ENDPOINT_OUTPUT_BYTE_LIMITS).reduce(
       (sum, value) => sum + value,
@@ -338,7 +410,7 @@ describe("dashboard worker view-model projection", () => {
       3 * DASHBOARD_HOME_RANKING_QUERY_OUTPUT_BYTE_LIMIT +
         5 * DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
     )
-    expect(DASHBOARD_HOME_PAGE_OUTPUT_BYTE_LIMIT).toBe(4.875 * 1024 * 1024)
+    expect(DASHBOARD_HOME_PAGE_OUTPUT_BYTE_LIMIT).toBe(9.75 * 1024 * 1024)
 
     const projected = projectDashboardEsResponse(
       {
@@ -366,6 +438,6 @@ describe("dashboard worker view-model projection", () => {
     expect(DASHBOARD_USER_DIRECTORY_PAGE_SIZE).toBe(1000)
     expect(DASHBOARD_USER_DIRECTORY_MAX_PAGES).toBe(5)
     expect(DASHBOARD_USER_DIRECTORY_MAX_ITEMS).toBe(5000)
-    expect(DASHBOARD_USER_DIRECTORY_OUTPUT_BYTE_LIMIT).toBe(2 * 1024 * 1024)
+    expect(DASHBOARD_USER_DIRECTORY_OUTPUT_BYTE_LIMIT).toBe(4 * 1024 * 1024)
   })
 })

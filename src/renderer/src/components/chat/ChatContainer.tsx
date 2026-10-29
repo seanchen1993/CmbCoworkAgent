@@ -1,3 +1,11 @@
+import { projectHumanGate } from "../../../../shared/harness-notifications"
+import { useModCommands } from "../../features/slash-commands/useModCommands"
+import { ModCommandJobs } from "./ModCommandJobs"
+import { FunctionPanes } from "./FunctionPanes"
+import { useFunctionTurnNotices } from "@/lib/use-function-turn-notices"
+import { ModCards } from "./ModCards"
+import { useHarnessNotifications } from "@/lib/harness-notifications"
+import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
 import React, {
   useRef,
   useEffect,
@@ -115,7 +123,6 @@ import {
 import type {
   GoalUiState,
   ForkableCheckpoint,
-  HarnessHumanGateSnapshot,
   Message,
   SkillMetadata,
   Thread,
@@ -1647,8 +1654,18 @@ function SystemPromptPreviewButton({
         sideOffset={8}
         className="w-[420px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border-border bg-popover p-0 shadow-xl"
       >
-        <div className="border-b border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
-          {loading ? "加载中..." : `更新时间：${updatedAtLabel}`}
+        <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
+          <span>{loading ? "加载中..." : `更新时间：${updatedAtLabel}`}</span>
+          <button
+            type="button"
+            disabled={loading || !prompt}
+            onClick={() => void navigator.clipboard.writeText(prompt || "").catch(() => {})}
+            className="rounded p-1 hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-50"
+            title="复制系统提示词"
+            aria-label="复制系统提示词"
+          >
+            <Copy className="size-3.5" />
+          </button>
         </div>
         <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-5 text-popover-foreground">
           {prompt || "暂无系统提示词；请先运行一次当前会话。"}
@@ -1665,6 +1682,7 @@ export function ChatContainer({
   readOnlyReason = null,
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
+  const functionTurnNotices = useFunctionTurnNotices(threadId)
   const remoteThread = useAppStore(
     (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
   )
@@ -1901,6 +1919,7 @@ export function ChatContainer({
     patchThreadMetadata,
     generateTitleForFirstMessage,
     setShowCustomizeView,
+    showCustomizeView,
     rightPanelCollapsed,
     pluginVersion,
     requestOpenRightPanelSystemConstraints
@@ -1913,6 +1932,7 @@ export function ChatContainer({
       patchThreadMetadata: state.patchThreadMetadata,
       generateTitleForFirstMessage: state.generateTitleForFirstMessage,
       setShowCustomizeView: state.setShowCustomizeView,
+      showCustomizeView: state.showCustomizeView,
       rightPanelCollapsed: state.rightPanelCollapsed,
       pluginVersion: state.pluginVersion,
       requestOpenRightPanelSystemConstraints: state.requestOpenRightPanelSystemConstraints
@@ -1943,7 +1963,26 @@ export function ChatContainer({
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
   const [isManagedRunSessionActive, setIsManagedRunSessionActive] = useState(false)
-  const [humanGate, setHumanGate] = useState<HarnessHumanGateSnapshot | null>(null)
+  const appNotifications = useHarnessNotifications()
+  const bizRetry = appNotifications.find(
+    (item) =>
+      item.type === "biz_retry" && item.status === "pending" && item.sourceThreadId === threadId
+  )
+  const bizRetryPending = Boolean(bizRetry)
+  const bizRetryHumanGatePending = Boolean(
+    bizRetry &&
+      appNotifications.some(
+        (item) =>
+          item.type === "human_gate" &&
+          item.status === "pending" &&
+          item.projectId === bizRetry.projectId &&
+          item.featureId === bizRetry.featureId
+      )
+  )
+  const humanGate = projectHumanGate(appNotifications.find(
+    (item) =>
+      item.type === "human_gate" && item.status === "pending" && item.sourceThreadId === threadId
+  ))
   const [humanGateDecisionBusy, setHumanGateDecisionBusy] = useState<"approve" | "reject" | null>(
     null
   )
@@ -1976,8 +2015,8 @@ export function ChatContainer({
       applyManagedRunStatus(event.run)
     })
     void window.api.harnessBoard
-      .getRunDetail(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
-      .then((detail) => applyManagedRunStatus(detail.run.managedRun))
+      .getLatestManagedRun(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
+      .then((managedRun) => applyManagedRunStatus(managedRun ?? undefined))
       .catch((error) => {
         if (!cancelled) {
           console.warn("[ChatContainer] Failed to load managed run status:", error)
@@ -1991,36 +2030,15 @@ export function ChatContainer({
     }
   }, [harnessFeatureBinding, threadId])
 
-  useEffect(() => {
-    let cancelled = false
-    void window.api.harnessBoard.getHumanGateForThread(threadId).then((gate) => {
-      if (cancelled) return
-      setHumanGate(gate ?? null)
-    })
-    const unsubscribe = window.api.harnessBoard.onHumanGateChanged((event) => {
-      if (event.sourceThreadId !== threadId) return
-      setHumanGate(event.humanGate ?? null)
-    })
-    return () => {
-      cancelled = true
-      unsubscribe()
-    }
-  }, [threadId])
-
   const decideHumanGate = useCallback(
     async (decision: "approve" | "reject"): Promise<void> => {
       if (!humanGate || humanGateDecisionBusy) return
       setHumanGateDecisionBusy(decision)
       try {
-        const input = {
-          projectId: humanGate.projectId,
-          featureId: humanGate.featureId,
-          gateId: humanGate.gateId
-        }
-        const changed =
-          decision === "approve"
-            ? await window.api.harnessBoard.approveHumanGate(input)
-            : await window.api.harnessBoard.rejectHumanGate(input)
+        const { applied: changed } = await window.api.appNotifications.decide({
+          notificationId: humanGate.gateId,
+          action: decision
+        })
         if (!changed) toast.error("Human Gate 已发生变化，请刷新后重试")
       } catch (error) {
         toast.error(error instanceof Error ? error.message : String(error))
@@ -2467,22 +2485,6 @@ export function ChatContainer({
       }
       const requestId = ++agentModeChangeRequestRef.current
       const operation = agentModeChangeChainRef.current.then(async () => {
-        // Temporary guard: a Thread granted to the Zhaohu robot must not change
-        // its execution mode. Remote turns are hard-wired to the normal/Multi
-        // runtime, so Team/Workflow on a granted thread would render a mode the
-        // IM side never executes. Remove together with per-mode remote support.
-        const remoteAccess = await window.api.builtinRobot
-          .getRemoteAccess()
-          .catch(() => null)
-        if (requestId !== agentModeChangeRequestRef.current) return
-        if (
-          remoteAccess?.threadGrants.some(
-            (grant) => grant.threadId === threadId && grant.state === "active"
-          )
-        ) {
-          toast.error("当前会话已接入招乎，暂不能切换执行模式")
-          return
-        }
         if (disableCoordinatorModeOption && nextMode === "coordinator") {
           toast.error("项目模式暂不支持 Agent Team。")
           return
@@ -4414,6 +4416,7 @@ export function ChatContainer({
       lastTouchY = nextTouchY
     }
     const detachFromKeyboardScroll = (event: KeyboardEvent): void => {
+      if (useAppStore.getState().showCustomizeView) return
       if (!chatRootRef.current || chatRootRef.current.offsetParent === null) return
       if (
         !chatRootRef.current.contains(document.activeElement) &&
@@ -4889,6 +4892,7 @@ export function ChatContainer({
   // only one ChatContainer is mounted per panel (keyed + conditionally rendered).
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
+      if (useAppStore.getState().showCustomizeView) return
       if (!((event.ctrlKey || event.metaKey) && (event.key === "f" || event.key === "F"))) return
       const root = chatRootRef.current
       if (!root || root.offsetParent === null) return
@@ -5000,7 +5004,8 @@ export function ChatContainer({
       nextSkill = selectSkillForSlashName(
         enabledSkillsForSlash,
         slashSkill,
-        harnessFeatureBinding ? skillsHarnessPreferredPlugin : pendingPreferredPlugin
+        harnessFeatureBinding ? skillsHarnessPreferredPlugin : pendingPreferredPlugin,
+        isProjectModeAgentContext
       )
     }
 
@@ -5012,6 +5017,7 @@ export function ChatContainer({
     harnessFeatureBinding,
     historyLoading,
     input,
+    isProjectModeAgentContext,
     pendingHarnessNextAction,
     selectedSkill,
     setInput,
@@ -5026,11 +5032,14 @@ export function ChatContainer({
     threadMessages.length
   ])
 
+  const modCommands = useModCommands(threadId)
+  const isModCommandInput = modCommands.handles(input.trim())
   const slash = useSlashCommands({
     input,
     skills: enabledSkillsForSlash,
     skillSelected: selectedSkill !== null,
-    browserSelected: selectedBuiltinBrowser
+    browserSelected: selectedBuiltinBrowser,
+    modCommands: modCommands.items
   })
   const loadMoreWorkspaceMentionFiles = useCallback(
     async (signal: AbortSignal) => {
@@ -5102,10 +5111,12 @@ export function ChatContainer({
     contextReminder
   )
   // 项目已删除时，会话仅可查看历史：禁用输入框与编辑器控件。
-  const effectiveInputDisabled = inputDisabled || contextReminderPending || readOnly
+  const effectiveInputDisabled =
+    inputDisabled || contextReminderPending || readOnly || bizRetryPending
   const effectiveComposerControlsDisabled =
-    composerControlsDisabled || contextReminderPending || readOnly
+    composerControlsDisabled || contextReminderPending || readOnly || bizRetryPending
   const inputPlaceholder = useMemo(() => {
+    if (bizRetryPending) return "请在决策入口操作"
     if (resolvedReadOnlyReason) return resolvedReadOnlyReason
     if (contextReminderPending) return "请先处理上下文提醒"
     const goal = goalUi.goal
@@ -5132,6 +5143,7 @@ export function ChatContainer({
     }
     return "输入新问题，或用 /goal <目标> 开始新的长期任务"
   }, [
+    bizRetryPending,
     contextReminderPending,
     goalUi.goal,
     hasPendingFilePayload,
@@ -5456,6 +5468,22 @@ export function ChatContainer({
     if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
     if (readOnly) return
     if (contextReminderPending) return
+    if (modCommands.mayHandle(trimmedInput)) {
+      if (historyLoading) return
+      try {
+        const handled = await modCommands.submit(trimmedInput, () => {
+          if (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser)
+            throw new Error("Mods 命令接收文本参数，请先移除附件、技能和浏览器选择。")
+        })
+        if (handled) {
+          setInput("")
+          return
+        }
+      } catch (error) {
+        setError(error instanceof Error ? error.message : "Mods 命令提交失败")
+        return
+      }
+    }
     // A plain (non-/goal) message submitted while the thread is busy — running,
     // or a tool approval is pending — is parked in the draft queue instead of
     // being blocked (running) or interrupting the run (approval). Every /goal
@@ -6511,7 +6539,7 @@ export function ChatContainer({
     if (queueAutoDrainSuppressed) return
     if (submitInFlightRef.current.has(threadId)) return
     if (isLoading || pendingApproval || threadError || !stream) return
-    if (historyLoading || readOnly || contextReminderPending) return
+    if (historyLoading || readOnly || contextReminderPending || bizRetryPending) return
     if (hasActiveGoalRunning) return
     // Reconciliation owns transcript ordering for every handed-off draft, not
     // only the queue head. Draining any ordinary item first could append it
@@ -6567,6 +6595,7 @@ export function ChatContainer({
         releaseSubmitInFlightLock(submitInFlightRef, true, threadId)
       })
   }, [
+    bizRetryPending,
     contextReminderPending,
     currentModel,
     hasActiveGoalRunning,
@@ -6745,9 +6774,14 @@ export function ChatContainer({
       }
       threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading) {
-      // Passive remote streams are owned by IM. Desktop must not cross-source
-      // cancel them; use /停止 from the originating conversation instead.
-      return
+      // Cancel through IM's queue so its event, replies and runtime settle
+      // together. The managed stream terminal clears loading after cleanup.
+      try {
+        await window.api.builtinRobot.cancelThread(threadId)
+      } catch (err) {
+        console.error("[ChatContainer] Failed to cancel remote task:", err)
+        toast.error("停止远程任务失败，请重试")
+      }
     } else {
       // Match Claude Code coordinator semantics: the main stop button stops the
       // foreground turn only. Durable background workers are stopped explicitly
@@ -7727,6 +7761,7 @@ export function ChatContainer({
       {/* Skill creation confirmation dialog */}
       <SkillCreateConfirmDialog
         request={skillConfirmRequest}
+        visible={!showCustomizeView}
         onApprove={handleSkillApprove}
         onReject={handleSkillReject}
       />
@@ -7739,7 +7774,7 @@ export function ChatContainer({
       />
 
       <Dialog
-        open={!!messageForkTarget}
+        open={!!messageForkTarget && !showCustomizeView}
         onOpenChange={(open) => {
           if (!open && !isMessageForkBusy) resetMessageForkDialog()
         }}
@@ -7925,6 +7960,8 @@ export function ChatContainer({
                     />
                   )}
                   <ChatMessageVirtualList
+                    functionTurnNotices={functionTurnNotices}
+                    messageAttempts={streamData.messageAttempts}
                     searchReveal={searchOpen ? searchReveal : null}
                     messages={displayMessages}
                     visibleMessageIndexes={visibleMessageIndexes}
@@ -7975,6 +8012,19 @@ export function ChatContainer({
                 </div>
               </div>
             </ScrollArea>
+            {bizRetry && (
+              <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
+                <div className="mx-auto w-full max-w-3xl">
+                  <BizRetryDecisionCard
+                    key={bizRetry.notificationId}
+                    notificationId={bizRetry.notificationId}
+                    message={bizRetry.message}
+                    humanGatePending={bizRetryHumanGatePending}
+                    className="mb-0 rounded-md px-3 py-2.5"
+                  />
+                </div>
+              </div>
+            )}
             {humanGate && (
               <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
                 <div className="mx-auto flex w-full max-w-3xl items-center gap-3 rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2.5">
@@ -8315,6 +8365,9 @@ export function ChatContainer({
               )}
             >
               <GitChangeNotice threadId={threadId} />
+              <div className="max-w-3xl mx-auto"><ModCards threadId={threadId} slot="turn.summary" /></div>
+              <ModCommandJobs key={threadId} threadId={threadId} />
+              <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
                   visible={chatScrollUiState.mode === "detached"}
@@ -8983,11 +9036,12 @@ export function ChatContainer({
                         <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
                           {isLoading ? (
                             <>
-                              {!isRequirementMode && canSubmitGoalCommandWhileLoading && (
+                              {!isRequirementMode &&
+                                (canSubmitGoalCommandWhileLoading || isModCommandInput) && (
                                 <button
                                   type="submit"
-                                  disabled={goalSendButtonDisabledWhileLoading}
-                                  aria-label="发送 goal 命令"
+                                  disabled={isModCommandInput ? slash.mode.kind === "slash" : goalSendButtonDisabledWhileLoading}
+                                  aria-label={isModCommandInput ? "执行 Mods 命令" : "发送 goal 命令"}
                                   className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                                 >
                                   <ArrowUp className="size-5" strokeWidth={1.75} />
@@ -9048,7 +9102,8 @@ export function ChatContainer({
                       </div>
                       <AgentGitCommitDialog
                         key={agentCommitApproval?.id ?? "agent-commit-idle"}
-                        open={Boolean(agentCommitApproval)}
+                        // Portal 不受工作区 inert 限制；设置期间只隐藏，保留待审批请求。
+                        open={Boolean(agentCommitApproval) && !showCustomizeView}
                         threadId={threadId}
                         workspacePath={workspacePath}
                         suggestedMessage={agentCommitApproval?.suggestedCommitMessage}

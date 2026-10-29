@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TraceExplorer } from "./TraceHistoryDialog"
+import { DrilldownArrow } from "./DrilldownArrow"
 import { unwrapThreadTracesResponse } from "./thread-traces-response"
 import type { DashboardTraceDetail } from "./use-dashboard"
 
@@ -166,7 +167,10 @@ function BreakdownTable({
                   <MessagesSquare className="size-3 shrink-0 text-muted-foreground" />
                   {label}
                 </span>
-                {metrics}
+                <span className="inline-flex shrink-0 items-center gap-1">
+                  {metrics}
+                  <DrilldownArrow />
+                </span>
               </button>
             ) : (
               <div key={row.key} className="flex items-center justify-between gap-2 text-[11px]">
@@ -661,7 +665,10 @@ export function UncommittedCodeAnalysisPanel({
                   onClick={() => openDetail(item)}
                 >
                   <div className="min-w-0">
-                    <div className="truncate font-medium text-foreground">{item.userName}</div>
+                    <div className="flex items-center gap-1 font-medium text-foreground">
+                      <span className="truncate">{item.userName}</span>
+                      <DrilldownArrow />
+                    </div>
                     <div className="truncate text-[10px] text-muted-foreground">
                       {orgLabel(item)}
                     </div>

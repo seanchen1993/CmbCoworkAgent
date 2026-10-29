@@ -56,30 +56,11 @@ export function useBrowserViewLifecycle({
   }, [])
 
   useEffect(() => {
-    console.info(
-      `${BROWSER_APP_LOG_PREFIX} Browser panel visibility snapshot: visible=${isBrowserPanelVisible} module=${rightModule} collapsed=${rightPanelCollapsed} agentFocus=${isAgentFocusActive} mainView=${mainView} currentThreadId=${currentThreadId ?? "(none)"} harnessThreadId=${harnessSessionThreadId ?? "(none)"} session=${BROWSER_SESSION_ID}.`
-    )
-  }, [
-    currentThreadId,
-    harnessSessionThreadId,
-    isAgentFocusActive,
-    isBrowserPanelVisible,
-    mainView,
-    overlayModule,
-    overlayThreadId,
-    rightModule,
-    rightPanelCollapsed
-  ])
-
-  useEffect(() => {
     rendererUnloadBrowserCleanupSentRef.current = false
 
     const handleRendererUnloadBrowserCleanup = (): void => {
       if (rendererUnloadBrowserCleanupSentRef.current) return
       rendererUnloadBrowserCleanupSentRef.current = true
-      console.info(
-        `${BROWSER_APP_LOG_PREFIX} Renderer unload requested BrowserView cleanup; session=${BROWSER_SESSION_ID} browserPanelVisible=${isBrowserPanelVisible}.`
-      )
       window.api.browser.disposeAllForRendererUnload()
     }
 
@@ -90,7 +71,7 @@ export function useBrowserViewLifecycle({
       window.removeEventListener("beforeunload", handleRendererUnloadBrowserCleanup)
       window.removeEventListener("pagehide", handleRendererUnloadBrowserCleanup)
     }
-  }, [isBrowserPanelVisible])
+  }, [])
 
   useEffect(() => {
     if (isBrowserPanelVisible) {
@@ -122,9 +103,6 @@ export function useBrowserViewLifecycle({
 
       modalDialogOpenRef.current = modalDialogOpen
       window.dispatchEvent(new Event(MODAL_DIALOG_CHANGE_EVENT))
-      console.info(
-        `${BROWSER_APP_LOG_PREFIX} Modal dialog visibility changed: open=${modalDialogOpen}; session=${BROWSER_SESSION_ID}.`
-      )
       if (modalDialogOpen && wasBrowserPanelVisibleRef.current) {
         hideBrowserSession("a modal dialog is open")
       }
@@ -162,9 +140,6 @@ export function useBrowserViewLifecycle({
       if (requestedThreadId && activeThreadId && requestedThreadId !== activeThreadId) return
       if (requestedThreadId && !activeThreadId) return
       onRequestBrowserPanel()
-      console.info(
-        `${BROWSER_APP_LOG_PREFIX} Showing Browser panel for ${requestedThreadId || activeThreadId || "active thread"}.`
-      )
     })
   }, [currentThreadId, harnessSessionThreadId, mainView, onRequestBrowserPanel, overlayThreadId])
 }

@@ -1,3 +1,8 @@
+import { attachModBackend, protectCurrentModData, publishCurrentModResult } from "../mods/adapters"
+import { authorizeCurrentModInput } from "../mods/manager"
+import { getModCallContext } from "../mods/context"
+import type { ModRuntimeAuthority } from "../mods/runtime-instance"
+import { currentFunctionExecution } from "../mods/v2/execution-context"
 /**
  * LocalSandbox: Execute shell commands locally on the host machine.
  *
@@ -97,8 +102,15 @@ import { isMemoryStoragePath } from "../memory/paths"
 import {
   isCodeFile,
   recordGen as recordAdoptionGen,
+  recordShellEdit as recordAdoptionShellEdit,
   recordShellFileOps as recordAdoptionShellFileOps
 } from "../services/adoption-tracker"
+import {
+  beginShellFileCapture,
+  noteFileToolWrite,
+  type ShellFileCapture
+} from "./shell-file-effects"
+import { extractShellCommandReadPaths } from "./shell-command-profile"
 import {
   openStableWritableFileHandle,
   type StableWritableFileHandle
@@ -117,8 +129,10 @@ import {
   trimReadFileOutputLines
 } from "./read-file-output"
 import { resolveWindowsBackgroundJobControllerPath } from "./windows-background-job-controller-path"
+import type { ToolPermissionResult } from "../../shared/tool-permission"
 
 const execFileP = promisify(execFile)
+const permissionProbe = Symbol("permission-probe")
 
 // DeepAgents keeps these helpers private even though LocalSandbox must wrap
 // them to preserve its virtual-path and ripgrep behavior. Keep the compatibility
@@ -339,6 +353,16 @@ function gitConfigEnvironmentPreamble(
  * Options for LocalSandbox configuration.
  */
 export interface LocalSandboxOptions {
+  /** Host grant/policy realm; file operations still use rootDir. */
+  modWorkspace?: string
+  /** Runtime capabilities must also constrain SDK calls that bypass model middleware. */
+  modBlockedToolNames?: ReadonlySet<string>
+  modDelegatedBlockedToolNames?: ReadonlySet<string>
+  modReadOnly?: boolean
+  modRuntimeAuthority?: ModRuntimeAuthority
+  /** Host-created command-only context; a model turn replaces it with its own full runtime. */
+  modCommandOnly?: boolean
+  onModBinding?: (release: () => void) => void
   /** Root directory for file operations and command execution (default: process.cwd()) */
   rootDir?: string
   /** Dynamic-workflow checkout identity and best-effort Git/path guards. */
@@ -409,6 +433,8 @@ export interface LocalSandboxOptions {
   internalArtifactRoots?: string[]
   /** Records successful agent-owned file mutations for post-run automation. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  /** Bash First file telemetry only; never changes execution permissions. */
+  shellFileTelemetry?: boolean
   /** Detects reads of skill files so skill lifecycle hooks can wrap the load. */
   skillLifecycleRegistry?: SkillLifecycleRegistry
   /** Shared run-scoped set used to avoid firing skill lifecycle hooks twice. */
@@ -648,6 +674,8 @@ export const readOnlyShellExecutionContext = new AsyncLocalStorage<boolean>()
  * logical /large_tool_results directory.
  */
 export const agentFileWriteContext = new AsyncLocalStorage<boolean>()
+const shellFileCaptureContext = new AsyncLocalStorage<boolean>()
+export const executeTraceContext = new AsyncLocalStorage<TraceContext>()
 
 export class LocalSandbox
   extends FilesystemBackend
@@ -730,6 +758,7 @@ export class LocalSandbox
   /** mtime recorded after each successful read/write, for external-modification detection */
   private readonly _fileReadTimes = new Map<string, number>()
   private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  private readonly _shellFileTelemetry: boolean
   private _skillLifecycleRegistry?: SkillLifecycleRegistry
   private readonly _skillHooksFired: Set<string>
   private readonly _skillUseTracker?: SkillUseTracker
@@ -1950,7 +1979,7 @@ export class LocalSandbox
     return LocalSandbox.isPythonCliTool(command)
   }
 
-  constructor(options: LocalSandboxOptions = {}) {
+  constructor(options: LocalSandboxOptions = {}, mode?: typeof permissionProbe) {
     super({
       rootDir: options.rootDir,
       virtualMode: options.virtualMode,
@@ -2064,6 +2093,7 @@ export class LocalSandbox
     this._humanGateThreadId = options.humanGateThreadId?.trim() || this.runId
     this._hookTurnId = options.hookTurnId
     this._onFileMutation = options.onFileMutation
+    this._shellFileTelemetry = options.shellFileTelemetry === true
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
     this._skillHooksFired = options.skillHookKeys ?? new Set<string>()
     this._skillUseTracker = options.skillUseTracker
@@ -2071,19 +2101,20 @@ export class LocalSandbox
       baseEnv,
       path.resolve(this.workingDir)
     )
-    this._sandboxCacheRootPromise = LocalSandbox.buildSandboxCacheRoot(
-      baseEnv,
-      this.workingDir
-    ).catch((err) => {
-      console.warn("[LocalSandbox] failed to canonicalize sandbox cache root:", err)
-      return this._sandboxCacheRoot
-    })
+    this._sandboxCacheRootPromise =
+      mode === permissionProbe
+        ? Promise.resolve(this._sandboxCacheRoot)
+        : LocalSandbox.buildSandboxCacheRoot(baseEnv, this.workingDir).catch((err) => {
+            console.warn("[LocalSandbox] failed to canonicalize sandbox cache root:", err)
+            return this._sandboxCacheRoot
+          })
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
 
     // Prewarm sandbox state during construction so command execution avoids
     // kicking off expensive setup work on the hot path.
-    LocalSandbox.prewarmForWorkspace(this.workingDir, this.windowsSandbox, baseEnv)
+    if (mode !== permissionProbe)
+      LocalSandbox.prewarmForWorkspace(this.workingDir, this.windowsSandbox, baseEnv)
 
     // Redirect deepagents' virtual eviction paths (e.g. /large_tool_results/)
     // to app-managed storage, since virtualMode=false treats "/" as absolute
@@ -2097,6 +2128,133 @@ export class LocalSandbox
     this._virtualMode = this.virtualMode
     this._cwd = this.cwd
     this._maxFileSizeBytes = (options.maxFileSizeMb ?? 10) * 1024 * 1024
+    if (mode !== permissionProbe) {
+      const owner = {
+        commandOnly: options.modCommandOnly,
+        workspace: options.modWorkspace ?? this.workingDir,
+        executionWorkspace: this.workingDir,
+        blockedToolNames: options.modBlockedToolNames,
+        delegatedBlockedToolNames: options.modDelegatedBlockedToolNames,
+        threadId: this.runId,
+        turnId: this._hookTurnId ?? this.runId,
+        agentId: this.agentId,
+        signal: this.abortSignal,
+        activePluginIds: this._hookScope?.activePluginIds
+      }
+      const runtimeAuthority = options.modRuntimeAuthority
+      const binding = () => {
+        const call = getModCallContext(),
+          execution = currentFunctionExecution()
+        return {
+          ...owner,
+          runtimeAuthority: call
+            ? call.runtimeAuthority
+            : execution
+              ? execution.runtimeAuthority
+              : runtimeAuthority,
+          agentId: call?.identity.agentId ?? execution?.agentId ?? owner.agentId,
+          turnId: call?.identity.turnId ?? execution?.turnId ?? owner.turnId,
+          readOnly:
+            options.modReadOnly === true ||
+            this.readOnlyShellEnforced ||
+            readOnlyShellExecutionContext.getStore() === true
+        }
+      }
+      const release = attachModBackend(this, binding, {
+        ...owner,
+        runtimeAuthority,
+        readOnly: options.modReadOnly === true || this.readOnlyShellEnforced
+      })
+      options.onModBinding?.(release)
+    }
+  }
+
+  /** The probe exposes only a query closure: no setup, hooks, ACLs, adapter binding or tools. */
+  static createPermissionProbe(
+    options: LocalSandboxOptions
+  ): (tool: string, input: Record<string, unknown>) => Promise<ToolPermissionResult> {
+    const sandbox = new LocalSandbox(options, permissionProbe)
+    return (tool, input) => sandbox.queryToolPermission(tool, input)
+  }
+
+  /** Inspect the same sandbox/path/command predicates used below, without running a tool. */
+  async queryToolPermission(
+    tool: string,
+    input: Record<string, unknown>
+  ): Promise<ToolPermissionResult> {
+    this.abortSignal?.throwIfAborted()
+    const deny = (reason: string): ToolPermissionResult => ({ decision: "deny", reason })
+    const readOnly = this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true
+    if (tool === "execute") {
+      if (typeof input.command !== "string" || !input.command.trim())
+        return deny("COMMAND_ARGUMENTS_INVALID")
+      if (input.cwd !== undefined && typeof input.cwd !== "string")
+        return deny("COMMAND_ARGUMENTS_INVALID")
+      const cwd = this.resolveExecutionCwd(input.cwd as string | undefined)
+      if (this.validateExecutionCwd(cwd)) return deny("COMMAND_CWD_DENIED")
+      const syntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
+      this.abortSignal?.throwIfAborted()
+      if (
+        this.worktreeIsolation &&
+        getWorktreeShellIsolationViolation(
+          input.command,
+          cwd,
+          this.worktreeIsolation,
+          this.worktreeAdditionalExecutionRoots(cwd),
+          syntax
+        )
+      )
+        return deny("WORKTREE_COMMAND_DENIED")
+      const windowsShell =
+        process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
+      const safety = assessCommandSafety(input.command, cwd, {
+        windowsShell,
+        enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly,
+        nativeGitWorktree: Boolean(this.worktreeIsolation),
+        shellSyntax: syntax
+      })
+      if (safety.level === "forbidden") return deny("COMMAND_FORBIDDEN")
+      if (readOnly && !isReadOnlyShellCommand(input.command, cwd, windowsShell))
+        return deny("READ_ONLY_COMMAND_DENIED")
+      if (readOnly && this.commandReadsSensitivePath(input.command, cwd))
+        return deny("SENSITIVE_PATH_DENIED")
+      return (
+        this.orchestrator?.queryExecute(input.command, cwd, this.windowsSandbox, syntax) ?? {
+          decision: "allow"
+        }
+      )
+    }
+    if (tool === "task_output") {
+      const task =
+        typeof input.task_id === "string"
+          ? LocalSandbox.backgroundTasks.get(input.task_id)
+          : undefined
+      const context = getModCallContext()
+      return task?.threadId === this.runId &&
+        (!context || !task.modAgentId || context.identity.agentId === task.modAgentId)
+        ? { decision: "allow" }
+        : deny("TASK_CONTEXT_UNAVAILABLE")
+    }
+    const write = tool === "write_file" || tool === "edit_file"
+    const file = write || tool === "read_file"
+    if (!file && !["ls", "glob", "grep"].includes(tool)) return deny("TOOL_UNAVAILABLE")
+    const requested = file ? (input.file_path ?? input.filePath) : (input.path ?? ".")
+    if (typeof requested !== "string" || !requested) return deny("FILE_ARGUMENTS_INVALID")
+    const target = tool === "ls" && requested === "/" ? "." : requested
+    try {
+      this._resolvePath(target)
+    } catch {
+      return deny("FILE_PATH_DENIED")
+    }
+    if (this.isBlockedBySandbox(target)) return deny("SANDBOX_PATH_DENIED")
+    if (this.isHiddenSkillPath(target)) return deny("DISABLED_SKILL_PATH")
+    if (!write) return { decision: "allow" }
+    if (readOnly) return deny("READ_ONLY_FILE_DENIED")
+    if (this.isMemoryStorageWritePath(target)) return deny("MANAGED_MEMORY_WRITE_DENIED")
+    if (await this.isWorktreeFileWriteBlocked(target)) return deny("WORKTREE_FILE_DENIED")
+    if (await this.isWriteBlocked(target)) return deny("SANDBOX_FILE_WRITE_DENIED")
+    this.abortSignal?.throwIfAborted()
+    return this.orchestrator?.queryFileOp(tool, target, this.workingDir) ?? { decision: "allow" }
   }
 
   /**
@@ -2840,6 +2998,9 @@ export class LocalSandbox
   }
 
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
+    if (event !== "PreToolUse" && context.toolResult !== undefined) {
+      context = { ...context, toolResult: await publishCurrentModResult(context.toolResult) }
+    }
     const hookContext: HookContext = {
       ...context,
       ...(this.pluginOutputDir && !context.pluginOutputDir
@@ -2854,6 +3015,7 @@ export class LocalSandbox
       ...(this.harnessProjectId && !context.harnessProjectId
         ? { harnessProjectId: this.harnessProjectId }
         : {}),
+      ...(this.pluginId && !context.harnessAdapterId ? { harnessAdapterId: this.pluginId } : {}),
       ...(this.harnessAdapterName && !context.harnessAdapterName
         ? { harnessAdapterName: this.harnessAdapterName }
         : {}),
@@ -3010,6 +3172,12 @@ export class LocalSandbox
     }
     const preResult = await this.runHooks("PreToolUse", context)
     throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
+    if (toolName !== "execute" && !preResult?.blocked && preResult?.decision !== "block") {
+      await authorizeCurrentModInput(
+        `host:${toolName}`,
+        LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput)
+      )
+    }
     return preResult
   }
 
@@ -3034,7 +3202,7 @@ export class LocalSandbox
     })
     throwIfHookHalt("PostToolUse", postResult, `${toolName} was stopped by a PostToolUse hook`)
     const feedback = LocalSandbox.formatPostHookTextFeedback(postResult)
-    return feedback ? `${toolResult}\n\n${feedback}` : toolResult
+    return publishCurrentModResult(feedback ? `${toolResult}\n\n${feedback}` : toolResult)
   }
 
   private getSkillHookKey(skill: SkillLifecycleMatch): string {
@@ -4719,6 +4887,20 @@ export class LocalSandbox
     }
   }
 
+  /** Remove a staged application artifact during a failed checkpoint commit. */
+  async removeInternalArtifact(filePath: string): Promise<WriteResult> {
+    const resolvedPath = await this.validateInternalArtifactPath(filePath)
+    if (!resolvedPath) return { error: `Invalid internal artifact path: ${filePath}` }
+    return this.withFileLock(resolvedPath, async () => {
+      try {
+        await fs.rm(resolvedPath, { force: true })
+        return {}
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    })
+  }
+
   /** Append to an app-managed artifact under the same path and symlink checks. */
   async appendInternalArtifact(filePath: string, content: string): Promise<WriteResult> {
     const resolvedPath = await this.validateInternalArtifactPath(filePath)
@@ -4831,8 +5013,12 @@ export class LocalSandbox
       if (this.isAborted) {
         return { error: "文件写入已取消。" }
       }
+      getModCallContext()?.assertLive?.()
       const r = await super.write(effectiveFilePath, effectiveContent)
-      if (!r.error) await this.recordReadTime(resolvedPath)
+      if (!r.error) {
+        await this.recordReadTime(resolvedPath)
+        await noteFileToolWrite(resolvedPath, effectiveContent)
+      }
       return r
     })
     if (!result.error) {
@@ -5132,12 +5318,15 @@ export class LocalSandbox
             }
           }
           if (managedCapability) {
+            getModCallContext()?.assertLive?.()
             await this.writeStableFileHandleEncoded(managedCapability, expectedContent, encoding)
             await this.recordStableReadTime(managedCapability)
           } else {
+            getModCallContext()?.assertLive?.()
             await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
             await this.recordReadTime(resolvedPath)
           }
+          await noteFileToolWrite(resolvedPath, () => iconv.encode(expectedContent, encoding))
           return { path: effectiveFilePath, filesUpdate: null, occurrences }
         } finally {
           await managedCapability?.handle.close().catch(() => undefined)
@@ -5473,6 +5662,16 @@ export class LocalSandbox
    */
   private static _cachedResolvedShell: string | null = null
   private static _resolvedShellPromise: Promise<string> | null = null
+
+  /** Resolve the execution shell before synchronous environment prompts read its cache. */
+  static async ensureShellReady(windowsSandbox: WindowsSandboxMode): Promise<void> {
+    if (process.platform !== "win32") return
+    if (windowsSandbox === "none") {
+      await LocalSandbox.resolveShell()
+    } else {
+      await LocalSandbox.resolveWindowsSandboxShell()
+    }
+  }
 
   /** Public accessor for the resolved shell path (used by system prompt). */
   static resolvedShell(): string {
@@ -6639,6 +6838,7 @@ export class LocalSandbox
     {
       id: string
       threadId: string
+      modAgentId?: string
       command: string
       cwd: string
       startedAt: number
@@ -6856,12 +7056,14 @@ export class LocalSandbox
       (isGitCommitCommand(effectiveCommand, shellSyntax) ||
         isGitPushCommand(effectiveCommand, shellSyntax))
     ) {
-      const result = await this.orchestrator.execute(
-        effectiveCommand,
-        effectiveCwd,
-        this.windowsSandbox,
-        shellSyntax,
-        outsideShellSyntax
+      const result = await shellFileCaptureContext.run(true, () =>
+        this.orchestrator!.execute(
+          effectiveCommand,
+          effectiveCwd,
+          this.windowsSandbox,
+          shellSyntax,
+          outsideShellSyntax
+        )
       )
       if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
         this.markHarnessStageAttributionDirty()
@@ -6886,11 +7088,13 @@ export class LocalSandbox
     if (taskAbortController.signal.aborted) {
       return LocalSandbox.backgroundStartCancelledMessage()
     }
+    await authorizeCurrentModInput("host:execute", { command: effectiveCommand, cwd: effectiveCwd })
     const taskId = randomUUID().slice(0, 8)
     const task = {
       id: taskId,
       threadId: this.runId,
       command: effectiveCommand,
+      modAgentId: getModCallContext()?.identity.agentId,
       cwd: effectiveCwd,
       startedAt: Date.now(),
       completed: false as boolean,
@@ -7067,22 +7271,30 @@ export class LocalSandbox
     capReached?: boolean
   } | null {
     const task = LocalSandbox.backgroundTasks.get(taskId)
-    if (!task) return null
+    if (!task || task.threadId !== this.runId) return null
+    const modContext = getModCallContext()
+    if (modContext && task.modAgentId && task.modAgentId !== modContext.identity.agentId)
+      return null
     const elapsedSeconds = Math.round((Date.now() - task.startedAt) / 1000)
     if (!task.completed) {
       return {
         completed: false,
         elapsedSeconds,
-        command: task.command,
+        command: protectCurrentModData(task.command),
         cwd: task.cwd,
-        partialOutput: task.partialOutput,
+        partialOutput: getModCallContext()?.protectedOutput
+          ? "[Output pending policy check]"
+          : task.partialOutput,
         partialTruncated: task.partialTruncated,
         idleSeconds: Math.round((Date.now() - task.lastOutputAt) / 1000)
       }
     }
     return {
       completed: true,
-      output: task.result?.output,
+      output:
+        task.result?.truncated && getModCallContext()?.protectedOutput
+          ? "[Truncated output suppressed]"
+          : protectCurrentModData(task.result?.output),
       exitCode: task.result?.exitCode,
       elapsedSeconds,
       capReached: task.result?.capReached
@@ -7286,20 +7498,24 @@ export class LocalSandbox
 
     // If an orchestrator is configured, delegate to it for approval + sandbox retry.
     // The orchestrator calls back into executeRaw() for actual execution.
+    await authorizeCurrentModInput("host:execute", { command: effectiveCommand, cwd: effectiveCwd })
     if (this.orchestrator) {
-      const result = await this.orchestrator.execute(
-        effectiveCommand,
-        effectiveCwd,
-        this.windowsSandbox,
-        shellSyntax,
-        outsideShellSyntax
+      const result = await shellFileCaptureContext.run(true, () =>
+        this.orchestrator!.execute(
+          effectiveCommand,
+          effectiveCwd,
+          this.windowsSandbox,
+          shellSyntax,
+          outsideShellSyntax
+        )
       )
       if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
         this.markHarnessStageAttributionDirty()
       }
       // Adoption tracking: react to agent rm/mv of generated files (side-effect
       // only, never throws). Only successful commands act (exitCode === 0).
-      recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
+      recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
+      this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
       const postResult = await this.runHooks("PostToolUse", {
         toolName: "execute",
         toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
@@ -7310,13 +7526,16 @@ export class LocalSandbox
       return LocalSandbox.applyPostHookToExecResult(result, postResult)
     }
 
-    const result = await this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
-      cwd: effectiveCwd
-    })
+    const result = await shellFileCaptureContext.run(true, () =>
+      this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
+        cwd: effectiveCwd
+      })
+    )
     if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
       this.markHarnessStageAttributionDirty()
     }
-    recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
+    recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
+    this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
       toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
@@ -7446,6 +7665,7 @@ export class LocalSandbox
     cwd?: string,
     options?: ExecuteRawOptions
   ): Promise<LocalExecuteResponse> {
+    getModCallContext()?.assertLive?.()
     const effectiveSandboxMode = (sandboxModeOverride ?? this.windowsSandbox) as WindowsSandboxMode
     const effectiveTimeout = timeoutMs ?? this.timeout
     const effectiveCwd = this.resolveExecutionCwd(cwd)
@@ -7460,7 +7680,11 @@ export class LocalSandbox
           `[HarnessMode][LocalSandbox] project plugin hook sandbox bypass check: allowed=${shouldBypassSandboxForProjectPluginHook} mode=${effectiveSandboxMode} pluginRoot="${this.pluginRoot}"`
         )
       }
-      if (shouldBypassSandboxForProjectPluginHook && !this.worktreeIsolation) {
+      if (
+        shouldBypassSandboxForProjectPluginHook &&
+        !this.worktreeIsolation &&
+        !getModCallContext()
+      ) {
         const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
         const outsideSafety = assessCommandSafety(command, effectiveCwd, {
           shellSyntax: outsideShellSyntax
@@ -7519,7 +7743,7 @@ export class LocalSandbox
 
     // On Windows, spawn can transiently fail with EPERM (antivirus file lock, handle
     // contention). Retry up to SPAWN_RETRY_COUNT times with a short delay.
-    const maxAttempts = isWindows ? LocalSandbox.SPAWN_RETRY_COUNT + 1 : 1
+    const maxAttempts = isWindows && !getModCallContext() ? LocalSandbox.SPAWN_RETRY_COUNT + 1 : 1
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const result = await this.executeOnce(
         effectiveCommand,
@@ -7560,6 +7784,11 @@ export class LocalSandbox
       overrideAbortSignal,
       options
     )
+    const modSignal = getModCallContext()?.signal
+    if (modSignal)
+      overrideAbortSignal = overrideAbortSignal
+        ? AbortSignal.any([overrideAbortSignal, modSignal])
+        : modSignal
     const effectiveCwd = this.resolveExecutionCwd(options?.cwd)
     const cwdError = this.validateExecutionCwd(effectiveCwd)
     if (cwdError) {
@@ -7587,19 +7816,30 @@ export class LocalSandbox
         truncated: false
       }
     }
+    // Read the request flag here, in the caller's async context; the capture
+    // window itself starts after any Windows sandbox queue wait, right before
+    // the process starts.
+    const captureFileEffects =
+      this._shellFileTelemetry &&
+      !backgroundExecution &&
+      shellFileCaptureContext.getStore() === true
+    const runUnserialized = (): Promise<LocalExecuteResponse> =>
+      this.runWithShellFileCapture(command, effectiveCwd, captureFileEffects, shellSyntax, () =>
+        this.executeRawUnserialized(
+          command,
+          sandboxModeOverride,
+          timeoutMs,
+          overrideAbortSignal,
+          effectiveCwd,
+          options
+        )
+      )
     if (
       process.platform !== "win32" ||
       effectiveSandboxMode === "none" ||
       (backgroundExecution && !this.worktreeIsolation)
     ) {
-      return this.executeRawUnserialized(
-        command,
-        sandboxModeOverride,
-        timeoutMs,
-        overrideAbortSignal,
-        effectiveCwd,
-        options
-      )
+      return runUnserialized()
     }
 
     const sandboxWorkspaceRoot = path.resolve(this.workingDir)
@@ -7610,27 +7850,119 @@ export class LocalSandbox
     )
     const commandConcurrency = classifyCommandConcurrency(command)
     if (commandConcurrency === "parallel_safe") {
-      return LocalSandbox.runParallelSafeExecution(queueKey, () =>
-        this.executeRawUnserialized(
-          command,
-          sandboxModeOverride,
-          timeoutMs,
-          overrideAbortSignal,
-          effectiveCwd,
-          options
-        )
-      )
+      return LocalSandbox.runParallelSafeExecution(queueKey, runUnserialized)
     }
 
-    return LocalSandbox.runSerializedExecution(queueKey, () =>
-      this.executeRawUnserialized(
+    return LocalSandbox.runSerializedExecution(queueKey, runUnserialized)
+  }
+
+  /**
+   * Bash First telemetry: compare the workspace around a foreground agent
+   * command and report the file effects the way write_file/edit_file report
+   * theirs. Commands that cannot write are not captured; capture failures never
+   * reach the command result.
+   */
+  private async runWithShellFileCapture(
+    command: string,
+    cwd: string,
+    captureFileEffects: boolean,
+    shellSyntax: CommandShellSyntax,
+    run: () => Promise<LocalExecuteResponse>
+  ): Promise<LocalExecuteResponse> {
+    if (!captureFileEffects) return run()
+    let capture: ShellFileCapture | null = null
+    try {
+      capture = await beginShellFileCapture({
+        workspaceRoot: this.workingDir,
         command,
-        sandboxModeOverride,
-        timeoutMs,
-        overrideAbortSignal,
-        effectiveCwd,
-        options
-      )
+        cwd,
+        shellSyntax,
+        isCodeFile
+      })
+    } catch (error) {
+      console.warn("[LocalSandbox] shell file capture unavailable:", error)
+    }
+    if (!capture) return run()
+    // Stage at command start, like write/edit capture it right before mutating.
+    const harnessStage = this.captureHarnessStageForShellEdit()
+    try {
+      return await run()
+    } finally {
+      await this.applyShellFileCapture(capture, harnessStage)
+    }
+  }
+
+  private captureHarnessStageForShellEdit(): Promise<HarnessStageAttribution | undefined> {
+    if (!this.harnessProjectId || !this.featureId) return Promise.resolve(undefined)
+    return getHarnessStageAttributionForCodeGeneration(this.harnessProjectId, this.featureId).catch(
+      () => undefined
+    )
+  }
+
+  private async applyShellFileCapture(
+    capture: ShellFileCapture,
+    harnessStagePromise: Promise<HarnessStageAttribution | undefined>
+  ): Promise<void> {
+    try {
+      const { changes } = await capture.finish()
+      for (const change of changes) {
+        if (change.decision !== "unattributed") this._onFileMutation?.(change.absPath, "shell")
+      }
+      const counted = changes.filter((change) => change.decision === "counted")
+      if (changes.length) {
+        console.info("[LocalSandbox] Shell file capture completed", {
+          threadId: executeTraceContext.getStore()?.threadId || this.runId,
+          counted: counted.length,
+          attributed: changes.filter((change) => change.decision === "attributed").length,
+          unattributed: changes.filter((change) => change.decision === "unattributed").length
+        })
+      }
+      if (counted.length > 0) {
+        const threadId = executeTraceContext.getStore()?.threadId || this.runId
+        for (const change of counted) {
+          void recordAdoptionShellEdit({
+            threadId,
+            filePath: change.absPath,
+            beforeContent: change.before ?? "",
+            afterContent: change.after ?? "",
+            workspacePath: this.workingDir,
+            harnessStagePromise
+          })
+        }
+      }
+    } catch (error) {
+      console.warn("[LocalSandbox] shell file capture failed:", error)
+    }
+  }
+
+  /**
+   * read_file reports constraint-file reads itself; a Bash First `cat` of the
+   * same file reports here once the command succeeded with output.
+   */
+  private recordShellReadTelemetry(
+    command: string,
+    cwd: string,
+    result: ExecuteResponse,
+    shellSyntax: CommandShellSyntax
+  ): void {
+    if (!this._shellFileTelemetry || !this.pluginRoot || result.exitCode !== 0) return
+    if (!LocalSandbox.hasStdoutContent(result.output)) return
+    const traceContext = executeTraceContext.getStore()
+    for (const readPath of extractShellCommandReadPaths(command, cwd, shellSyntax)) {
+      void this.recordPluginSystemConstraintRead(readPath, traceContext)
+    }
+  }
+
+  /** True when an execute result carries real stdout, not only markers or stderr. */
+  private static hasStdoutContent(output: string | undefined): boolean {
+    if (!output) return false
+    return (
+      output
+        .replace(/<execute_metadata>[\s\S]*?<\/execute_metadata>/g, "")
+        .split("\n")
+        .filter((line) => !line.startsWith("[stderr] ") && line.trim() !== "<no output>")
+        .join("\n")
+        .trim().length > 0
     )
   }
 

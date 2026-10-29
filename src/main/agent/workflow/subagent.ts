@@ -1,3 +1,9 @@
+import { randomUUID } from "crypto"
+import { TurnTraceRecorder } from "../trace/turn-trace-recorder"
+import {
+  withSubagentSessionCapture,
+  subagentSessionCallbacks
+} from "../../services/subagent-session-capture"
 import { HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { NodeInterrupt } from "@langchain/langgraph"
@@ -15,7 +21,7 @@ import {
   type TraceCollector
 } from "../trace/collector"
 import type { TraceContext, TraceNodeStatus, TraceOutcome } from "../trace/types"
-import { setAdoptionContext } from "../../services/adoption-tracker"
+import { createSubagentSkillAttribution } from "../turn-attribution"
 import { validateJsonSchemaValue } from "./json-schema"
 import {
   WORKFLOW_STRUCTURED_OUTPUT_MAX_ATTEMPTS,
@@ -193,6 +199,22 @@ export async function runWorkflowSubagent(
   deps: WorkflowSubagentDeps,
   request: RunWorkflowSubagentRequest
 ): Promise<WorkflowSubagentResult> {
+  return withSubagentSessionCapture(
+    {
+      kind: "workflow",
+      threadId: deps.parentThreadId,
+      runId: request.runId,
+      agentIndex: request.agentIndex
+    },
+    request.label,
+    () => runWorkflowSubagentAttempts(deps, request)
+  )
+}
+
+async function runWorkflowSubagentAttempts(
+  deps: WorkflowSubagentDeps,
+  request: RunWorkflowSubagentRequest
+): Promise<WorkflowSubagentResult> {
   const timeoutMs = getWorkflowAgentTimeoutMs()
   let lastError: unknown
 
@@ -323,6 +345,10 @@ async function runOnce(
   const attemptSuffix = attempt > 1 ? `_r${attempt}` : ""
   const threadId = `${deps.parentThreadId}__wf_${runShort}_a${request.agentIndex}${attemptSuffix}`
   const agentId = `${request.runId}:agent:${request.agentIndex}`
+  const syncCodeSkills = createSubagentSkillAttribution({
+    threadId,
+    parentThreadId: deps.parentThreadId
+  })
 
   // Subagent lifetime signal: parent abort, plus optional per-agent timeout when
   // CMB_WORKFLOW_AGENT_TIMEOUT_MS is configured.
@@ -334,6 +360,8 @@ async function runOnce(
   timeoutTimer?.unref?.()
 
   const structured: { value: unknown; called: boolean } = { value: undefined, called: false }
+  const promptMessage = new HumanMessage({ content: request.prompt, id: randomUUID() })
+  let traceRecorder: TurnTraceRecorder | undefined
   let tracer: TraceCollector | undefined
   let latestSnapshot: unknown
   let traceTerminalRecorded = false
@@ -344,26 +372,19 @@ async function runOnce(
     deriveWorkerState: false
   })
   const syncSkillAttribution = (): void => {
-    if (!tracer) return
     const usedSkills = skillUsageDetector.getUsedSkillNames()
     const skillSource = skillUsageDetector.getUsedSkillSourceRefs()
-    tracer.setUsedSkills(usedSkills)
-    tracer.setSkillSource(skillSource)
-    tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
-    setAdoptionContext(threadId, { usedSkills, skillSource })
+    tracer?.setUsedSkills(usedSkills)
+    tracer?.setSkillSource(skillSource)
+    tracer?.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
+    syncCodeSkills({ usedSkills, skillSource })
   }
   const recordValuesSnapshot = (snapshot: unknown): void => {
     latestSnapshot = snapshot
+    traceRecorder?.onRawValues(snapshot)
     const valuesContext = valuesSnapshotAccumulator.createContext("values", snapshot)
     runTraceSideEffect("Workflow Skill observer", () => {
-      if (
-        observeSkillUsageFromStream(
-          "values",
-          snapshot,
-          skillUsageDetector,
-          valuesContext
-        )
-      ) {
+      if (observeSkillUsageFromStream("values", snapshot, skillUsageDetector, valuesContext)) {
         syncSkillAttribution()
       }
     })
@@ -377,6 +398,15 @@ async function runOnce(
     // Purge any stale per-thread state before creating the runtime.
     await deps.cleanupThread(threadId).catch(() => undefined)
     tracer = createWorkflowSubagentTrace(deps, request, threadId)
+    // Trace creation resets adoption context. Restore inherited Skills before
+    // the first tool can generate code, even if this agent never reads a Skill.
+    runTraceSideEffect("Workflow Skill initialization", syncSkillAttribution)
+    if (tracer)
+      traceRecorder = new TurnTraceRecorder({
+        tracer,
+        userMessageId: promptMessage.id,
+        requireUserMessageAnchor: true
+      })
 
     const additionalTools = request.schema
       ? [
@@ -427,7 +457,7 @@ async function runOnce(
 
     const streamConfig = {
       configurable: { thread_id: threadId },
-      callbacks: [],
+      callbacks: subagentSessionCallbacks([]),
       signal: controller.signal,
       // "messages" is subscribed for its side effect, not for display: it attaches
       // LangGraph's StreamMessagesHandler (lc_prefer_streaming), which switches the
@@ -452,7 +482,7 @@ async function runOnce(
     let snapshot = await raceWithAbort(
       (async () =>
         consumeValuesStream(
-          await runtime.stream({ messages: [new HumanMessage(request.prompt)] }, streamConfig),
+          await runtime.stream({ messages: [promptMessage] }, streamConfig),
           controller.signal,
           stopAfterStructuredAccepted,
           recordValuesSnapshot
@@ -625,10 +655,7 @@ async function runOnce(
           traceTerminalRecorded = true
         }
       })
-      const traceSnapshot = latestSnapshot
-      finishTraceInBackground(tracerToFinish, traceOutcome, traceError, "Workflow", () => {
-        recordWorkflowTraceToolDetails(tracerToFinish, traceSnapshot)
-      })
+      finishTraceInBackground(tracerToFinish, traceOutcome, traceError, "Workflow")
     }
     if (timeoutTimer) clearTimeout(timeoutTimer)
     request.signal.removeEventListener("abort", onParentAbort)
@@ -1803,6 +1830,31 @@ function structuredOutputInterruptMessage(snapshot: unknown): string | null {
 /** Consumes a [mode, data] stream and returns the last "values" snapshot. */
 /** Exported for the tap-isolation regression test (display-only onValues must not
  * change the return value or stop semantics; a throwing tap must be swallowed). */
+/**
+ * Stops the graph, not just our reading of it.
+ *
+ * Breaking out of a `for await` calls the iterator's `return()`, which cancels
+ * the ReadableStream we are reading — and nothing else. LangGraph aborts a run
+ * only from `IterableReadableStreamWithAbortSignal.cancel()`, and the source it
+ * builds has no cancel handler for `reader.cancel()` to reach, so the graph runs
+ * on: more model turns, more tool calls, unsupervised and billed, writing tokens
+ * into a controller we already closed (which is where the flood of
+ * "Controller is already closed" warnings came from).
+ *
+ * Cancels only this stream's own derived controller, never the caller's signal —
+ * aborting that would reject the raceWithAbort around this call and throw away
+ * the result we just accepted.
+ */
+async function stopGraphStream(stream: AsyncIterable<unknown>): Promise<void> {
+  const cancel = (stream as { cancel?: (reason?: unknown) => Promise<void> | void }).cancel
+  if (typeof cancel !== "function") return
+  try {
+    await cancel.call(stream)
+  } catch {
+    /* teardown is best-effort; the caller already has what it needs */
+  }
+}
+
 export async function consumeValuesStream(
   stream: AsyncIterable<unknown>,
   signal: AbortSignal,
@@ -1811,7 +1863,13 @@ export async function consumeValuesStream(
 ): Promise<unknown> {
   let lastValues: unknown
   for await (const chunk of stream) {
-    if (signal.aborted) break
+    // The config signal already tears the run down here, so this is belt and
+    // braces — but this file has long guarded against a stream that never
+    // honours that signal, and the cost of asking twice is nothing.
+    if (signal.aborted) {
+      await stopGraphStream(stream)
+      break
+    }
     if (!Array.isArray(chunk) || chunk.length < 2) continue
     const [mode, data] = chunk as [string, unknown]
     if (mode === "values") {
@@ -1829,7 +1887,13 @@ export async function consumeValuesStream(
       // Structured subagents can stop as soon as a schema-valid structured_output
       // call has been captured; invalid tool calls keep streaming so the model can
       // read the repair feedback and call the tool again.
-      if (shouldStop?.(lastValues)) break
+      //
+      // Nothing has aborted the run at this point — we are leaving early because
+      // we have the answer — so this is the path that actually needed stopping.
+      if (shouldStop?.(lastValues)) {
+        await stopGraphStream(stream)
+        break
+      }
     }
   }
   return lastValues
@@ -2128,22 +2192,6 @@ export function extractWorkflowTraceToolDetails(snapshot: unknown): WorkflowTrac
       status: result?.status ?? "unknown"
     }
   })
-}
-
-function recordWorkflowTraceToolDetails(tracer: TraceCollector, snapshot: unknown): void {
-  for (const tool of extractWorkflowTraceToolDetails(snapshot)) {
-    const toolNodeId = tracer.addToolNode({
-      name: tool.name,
-      ...(tool.input !== undefined ? { input: tool.input } : {}),
-      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {})
-    })
-    tracer.addToolResultNode({
-      parentId: toolNodeId,
-      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
-      ...(tool.output !== undefined ? { output: tool.output } : {}),
-      status: tool.status
-    })
-  }
 }
 
 /**

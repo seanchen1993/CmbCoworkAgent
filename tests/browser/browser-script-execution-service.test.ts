@@ -39,6 +39,7 @@ describe("browser script execution service", () => {
         isLoading: false,
         canGoBack: false,
         canGoForward: false,
+        zoomFactor: 1,
         visible: true,
         created: true,
         consoleEntries: []
@@ -78,7 +79,8 @@ const baseUrl = "https://example.com";
 
 test("recorded script flow", async ({ page }) => {
   await page.goto(baseUrl);
-  await page.getByRole("button", { name: "Save" }).click();
+  const saveButton = page.getByRole("button", { name: "Save" });
+  await saveButton.click();
 });
 `,
       threadId: "thread-1",
@@ -94,8 +96,13 @@ test("recorded script flow", async ({ page }) => {
     expect(browser.disconnect).toHaveBeenCalledOnce()
     expect(states).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ status: "running", progressPercent: 0 }),
-        expect.objectContaining({ status: "completed", progressPercent: 100 })
+        expect.objectContaining({ status: "running", progressPercent: 0, totalSteps: 3 }),
+        expect.objectContaining({
+          status: "completed",
+          progressPercent: 100,
+          completedSteps: 3,
+          totalSteps: 3
+        })
       ])
     )
     expect(
@@ -251,6 +258,10 @@ test("recorded script flow", async ({ page }) => {
   })
 
   it("supports cancelling a running replay", async () => {
+    const states = [] as Array<ReturnType<typeof getBrowserScriptExecutionState>>
+    const dispose = onBrowserScriptExecutionStateChange((state) => {
+      states.push(state)
+    })
     const waitForTimeout = vi.fn(
       () =>
         new Promise<void>(() => {
@@ -285,9 +296,13 @@ test("recorded script flow", async ({ page }) => {
       status: "running",
       progressPercent: 0
     })
+    await vi.waitFor(() => expect(waitForTimeout).toHaveBeenCalledOnce())
     expect(await cancelRecordingScriptExecutionInBuiltinBrowser()).toBe(true)
     await expect(executionPromise).rejects.toThrow("回放已终止")
     expect(getBrowserScriptExecutionState().status).toBe("cancelled")
+    expect(states.filter((state) => state.status === "cancelled")).toHaveLength(1)
+    expect(browser.disconnect).toHaveBeenCalledOnce()
+    dispose()
   })
 
   it("resolves relative upload paths against the workspace path", async () => {

@@ -35,6 +35,9 @@ import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../share
 import { readdir, rm, mkdir, readFile, writeFile } from "fs/promises"
 import {
   isAgentGraphRecursionLimit,
+  isAgentToolStrategy,
+  normalizeAgentToolStrategy,
+  type AgentToolStrategy,
   isWorkflowWorktreeRemoveTimeoutMinutes,
   isWorkflowWorktreeTimeoutMinutes,
   normalizeAgentGraphRecursionLimit,
@@ -98,6 +101,7 @@ import {
   calculateSummarizationTriggerTokens
 } from "../shared/model-token-budget"
 import { getHookDateKey } from "../shared/hook-time"
+import { isProjectModePluginRoot } from "./harness-board/plugin-mode"
 
 const OPENWORK_DIR = getCmbCoworkAgentDataRoot()
 const ENV_FILE = join(OPENWORK_DIR, ".env")
@@ -380,6 +384,11 @@ export function getThreadCheckpointPath(threadId: string): string {
   const directory = getThreadCheckpointDir()
   registerCheckpointThreadId(checkpointArtifactIndexForDirectory(directory), threadId)
   return threadCheckpointPath(directory, threadId)
+}
+
+/** Read-only discovery must not create directories or register a new durable artifact. */
+export function peekThreadCheckpointPath(threadId: string): string {
+  return threadCheckpointPath(join(OPENWORK_DIR, "threads"), threadId)
 }
 
 export function deleteThreadCheckpoint(threadId: string): void {
@@ -2012,6 +2021,23 @@ export function setStoredDefaultModelId(modelId: string): void {
 
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
 const GIT_CHANGE_NOTICE_ENABLED_KEY = "gitChangeNoticeEnabled"
+const MODS_GLOBAL_ENABLED_KEY = "modsGlobalEnabled"
+
+/** Application-level safety switch for both legacy Mods and Function Mods. */
+export function getModsGlobalEnabled(): boolean {
+  try {
+    return getSettingsStore().get(MODS_GLOBAL_ENABLED_KEY, false) === true
+  } catch (error) {
+    console.warn("[Storage] Failed to load Mods global switch; using disabled:", error)
+    return false
+  }
+}
+
+export function setModsGlobalEnabled(enabled: boolean): boolean {
+  const normalized = Boolean(enabled)
+  getSettingsStore().set(MODS_GLOBAL_ENABLED_KEY, normalized)
+  return normalized
+}
 
 export function getGitChangeNoticeEnabled(): boolean {
   try {
@@ -2044,6 +2070,23 @@ export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowClo
 }
 
 const AGENT_GRAPH_RECURSION_LIMIT_KEY = "agentGraphRecursionLimit"
+
+const AGENT_TOOL_STRATEGY_KEY = "agentToolStrategy"
+
+export function getStoredAgentToolStrategy(): AgentToolStrategy {
+  try {
+    return normalizeAgentToolStrategy(getSettingsStore().get(AGENT_TOOL_STRATEGY_KEY))
+  } catch (error) {
+    console.warn("[Storage] Failed to load tool strategy; using standard:", error)
+    return "standard"
+  }
+}
+
+export function setStoredAgentToolStrategy(value: unknown): AgentToolStrategy {
+  if (!isAgentToolStrategy(value)) throw new Error("Invalid agent tool strategy")
+  getSettingsStore().set(AGENT_TOOL_STRATEGY_KEY, value)
+  return value
+}
 
 export function getStoredAgentGraphRecursionLimit(): number {
   try {
@@ -3252,10 +3295,12 @@ export function getEnabledPluginSkillsSources(): string[] {
   return _pluginSkillsCache
 }
 
-export async function getEnabledPluginSkillMiddlewareSources(): Promise<string[]> {
+export async function getEnabledPluginSkillMiddlewareSources(
+  sources = getEnabledPluginSkillSourceMetadata()
+): Promise<string[]> {
   const rootOnlySources: string[] = []
   const nestedSources: string[] = []
-  for (const source of getEnabledPluginSkillSourceMetadata()) {
+  for (const source of sources) {
     if (source.maxDepth === 0) rootOnlySources.push(source.sourceDir)
     else nestedSources.push(source.sourceDir)
   }
@@ -3267,6 +3312,7 @@ export interface PluginSkillSourceMetadata {
   pluginId: string
   pluginName: string
   pluginRoot: string
+  isProjectModePlugin: boolean
   maxDepth?: number
 }
 
@@ -3281,12 +3327,14 @@ export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata
   const sources: PluginSkillSourceMetadata[] = []
   for (const plugin of plugins) {
     const manifest = readPluginManifest(plugin.path)?.manifest ?? null
+    const isProjectModePlugin = isProjectModePluginRoot(plugin.path)
     for (const source of getPluginSkillSearchSources(plugin.path, manifest)) {
       sources.push({
         sourceDir: source.sourceDir,
         pluginId: plugin.id,
         pluginName: plugin.name,
         pluginRoot: plugin.path,
+        isProjectModePlugin,
         maxDepth: source.maxDepth
       })
     }
@@ -3403,8 +3451,7 @@ const DEFAULT_BUILTIN_ROBOT_SETTINGS: import("./types").BuiltinRobotSettings = {
   enabled: true,
   gatewayUrl: null,
   remoteAccess: "inbox-only",
-  remoteApprovalEnabled: true,
-  waitingDesktopTtlMinutes: 10
+  remoteApprovalEnabled: true
 }
 
 export function getBuiltinRobotSettings(): import("./types").BuiltinRobotSettings {
@@ -3426,13 +3473,7 @@ export function getBuiltinRobotSettings(): import("./types").BuiltinRobotSetting
       remoteApprovalEnabled:
         typeof value.remoteApprovalEnabled === "boolean"
           ? value.remoteApprovalEnabled
-          : DEFAULT_BUILTIN_ROBOT_SETTINGS.remoteApprovalEnabled,
-      waitingDesktopTtlMinutes:
-        Number.isSafeInteger(value.waitingDesktopTtlMinutes) &&
-        Number(value.waitingDesktopTtlMinutes) >= 1 &&
-        Number(value.waitingDesktopTtlMinutes) <= 60
-          ? Number(value.waitingDesktopTtlMinutes)
-          : DEFAULT_BUILTIN_ROBOT_SETTINGS.waitingDesktopTtlMinutes
+          : DEFAULT_BUILTIN_ROBOT_SETTINGS.remoteApprovalEnabled
     }
   } catch {
     return { ...DEFAULT_BUILTIN_ROBOT_SETTINGS }
@@ -3459,13 +3500,7 @@ export function saveBuiltinRobotSettings(
     remoteApprovalEnabled:
       typeof updates.remoteApprovalEnabled === "boolean"
         ? updates.remoteApprovalEnabled
-        : current.remoteApprovalEnabled,
-    waitingDesktopTtlMinutes:
-      Number.isSafeInteger(updates.waitingDesktopTtlMinutes) &&
-      Number(updates.waitingDesktopTtlMinutes) >= 1 &&
-      Number(updates.waitingDesktopTtlMinutes) <= 60
-        ? Number(updates.waitingDesktopTtlMinutes)
-        : current.waitingDesktopTtlMinutes
+        : current.remoteApprovalEnabled
   }
   writeFileSync(BUILTIN_ROBOT_SETTINGS_FILE, JSON.stringify(next, null, 2), "utf-8")
   return next
@@ -4338,6 +4373,7 @@ interface SkillHookSource {
   pluginId?: string
   pluginName?: string
   pluginRoot?: string
+  isProjectModePlugin?: boolean
 }
 
 function collectSkillHookSourcesFromDir(
@@ -4345,7 +4381,12 @@ function collectSkillHookSourcesFromDir(
   runtimePolicy: DisabledSkillRuntimePolicy,
   respectDisabledList: boolean,
   seenDirs: Set<string>,
-  pluginMeta?: { pluginId: string; pluginName: string; pluginRoot: string },
+  pluginMeta?: {
+    pluginId: string
+    pluginName: string
+    pluginRoot: string
+    isProjectModePlugin: boolean
+  },
   maxDepth?: number
 ): SkillHookSource[] {
   const result: SkillHookSource[] = []
@@ -4390,7 +4431,12 @@ function getEnabledSkillHookSources(): SkillHookSource[] {
         runtimePolicy,
         false,
         seenDirs,
-        { pluginId: source.pluginId, pluginName: source.pluginName, pluginRoot: source.pluginRoot },
+        {
+          pluginId: source.pluginId,
+          pluginName: source.pluginName,
+          pluginRoot: source.pluginRoot,
+          isProjectModePlugin: source.isProjectModePlugin
+        },
         source.maxDepth
       )
     )
@@ -4478,7 +4524,14 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
 
 function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
   return getEnabledSkillHookSources().flatMap(
-    ({ skillDir, skillName, pluginId, pluginName, pluginRoot }): SkillHookMetadata[] => {
+    ({
+      skillDir,
+      skillName,
+      pluginId,
+      pluginName,
+      pluginRoot,
+      isProjectModePlugin
+    }): SkillHookMetadata[] => {
       const skillMdPath = join(skillDir, "SKILL.md")
       const addSkillMeta = (hookPath: string, hooks: HookConfig[]): SkillHookMetadata[] =>
         hooks.map((hook) => ({
@@ -4490,6 +4543,7 @@ function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
           pluginId,
           pluginName,
           pluginRoot,
+          isProjectModePlugin,
           hookSourceType: "skill",
           hookSourceRoot: skillDir,
           hookSourcePath: hookPath

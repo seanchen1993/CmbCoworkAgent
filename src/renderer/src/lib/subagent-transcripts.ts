@@ -52,6 +52,130 @@ export function appendSubagentLiveTextProjection(
   }
 }
 
+/** Scheduler interior events use the same bounded transcript and durable journal. */
+export function projectSchedulerSubagentMessage(
+  tracker: {
+    currentMsgId: string | null
+    subagentContentProjection?: SubagentLiveTextProjection
+    subagentReasoningProjection?: SubagentLiveTextProjection
+    subagentMessageIdentity?: {
+      rawId: string
+      identity: Pick<Message, "id" | "role" | "provider_source_id" | "provider_occurrence">
+      toolCallIds: Set<string>
+      checkedToolTail?: Message
+    }
+  },
+  event: {
+    id: string
+    content: string
+    reasoning?: string
+    contentMode?: "delta" | "snapshot"
+    reasoningMode?: "delta" | "snapshot"
+    toolCalls?: Message["tool_calls"]
+  },
+  baseline?: Message[]
+): Message {
+  const previousIdentity = tracker.subagentMessageIdentity
+  const tail = baseline?.at(-1)
+  if (previousIdentity && tail?.role === "tool" && previousIdentity.checkedToolTail !== tail) {
+    // History/values may supply completed tool arguments after the live text
+    // event. Refresh from that row once at the result boundary, never per token.
+    previousIdentity.checkedToolTail = tail
+    const index = baseline && liveTranscriptIndexes.get(baseline)
+    const position = index?.length === baseline?.length
+      ? index?.indexById.get(previousIdentity.identity.id)
+      : undefined
+    const owner = position !== undefined
+      ? baseline?.[position]
+      : baseline?.findLast(message => message.id === previousIdentity.identity.id && message.role === "assistant")
+    for (const call of owner?.tool_calls ?? []) previousIdentity.toolCallIds.add(call.id)
+  }
+  // Only a result owned by this assistant ends its occurrence. A late result
+  // from an earlier cycle must not split the currently streaming assistant.
+  const crossesOwnToolBoundary =
+    tail?.role === "tool" &&
+    !!tail.tool_call_id &&
+    previousIdentity?.toolCallIds.has(tail.tool_call_id) === true
+  const incomingToolIds = event.toolCalls?.map((call) => call.id)
+  const replaysCurrentTools =
+    !!incomingToolIds?.length &&
+    incomingToolIds.every((id) => previousIdentity?.toolCallIds.has(id))
+  // Normal tokens and exact call replays retain an O(1) identity lookup.
+  const canReuseIdentity =
+    previousIdentity?.rawId === event.id &&
+    (!crossesOwnToolBoundary || replaysCurrentTools)
+  const identity: Pick<Message, "id" | "role" | "provider_source_id" | "provider_occurrence"> = baseline
+    ? canReuseIdentity
+      ? previousIdentity.identity
+      : normalizeAppendedMessageIds(baseline, [{ id: event.id, role: "assistant" as const }], {
+          splitAssistantAfterTool: true
+        })[0]
+    : { id: event.id, role: "assistant" }
+  const startsMessage = tracker.currentMsgId !== identity.id
+  if (startsMessage) {
+    tracker.currentMsgId = identity.id
+    tracker.subagentContentProjection = undefined
+    tracker.subagentReasoningProjection = undefined
+  }
+  const toolCallIds =
+    startsMessage || !previousIdentity ? new Set<string>() : previousIdentity.toolCallIds
+  for (const id of incomingToolIds ?? []) toolCallIds.add(id)
+  tracker.subagentMessageIdentity = {
+    rawId: event.id,
+    identity,
+    toolCallIds,
+    ...(canReuseIdentity && { checkedToolTail: previousIdentity?.checkedToolTail })
+  }
+  const contentSnapshot = event.contentMode === "snapshot"
+  const reasoningSnapshot = event.reasoningMode === "snapshot" && event.reasoning !== undefined
+  const hasContentUpdate = contentSnapshot || event.content.length > 0
+  const content = hasContentUpdate
+    ? appendSubagentLiveTextProjection(
+        contentSnapshot ? undefined : tracker.subagentContentProjection,
+        event.content
+      )
+    : undefined
+  if (content) tracker.subagentContentProjection = content
+  const reasoning =
+    event.reasoning !== undefined
+      ? appendSubagentLiveTextProjection(
+          reasoningSnapshot ? undefined : tracker.subagentReasoningProjection,
+          event.reasoning
+        )
+      : tracker.subagentReasoningProjection
+  tracker.subagentReasoningProjection = reasoning
+  return {
+    ...identity,
+    role: "assistant",
+    content: content?.content ?? "",
+    ...(content && {
+      content_is_projection: true,
+      content_full_length: content.totalLength,
+      ...(contentSnapshot
+        ? { content_stream_snapshot: true, content_pending_delta: event.content }
+        : {
+            content_stream_delta: event.content,
+            ...(startsMessage && { content_pending_delta: event.content })
+          })
+    }),
+    ...(reasoning && event.reasoning !== undefined && {
+      reasoning: reasoning.content,
+      reasoning_is_projection: true,
+      reasoning_full_length: reasoning.totalLength,
+      ...(reasoningSnapshot
+        ? { reasoning_stream_snapshot: true, reasoning_pending_delta: event.reasoning ?? "" }
+        : event.reasoning !== undefined
+          ? {
+              reasoning_stream_delta: event.reasoning,
+              ...(startsMessage && { reasoning_pending_delta: event.reasoning })
+            }
+          : {})
+    }),
+    ...(event.toolCalls?.length && { tool_calls: event.toolCalls }),
+    created_at: new Date()
+  }
+}
+
 /**
  * Drain transcript changes in batches. Callers atomically detach the currently
  * dirty ids in `takePending`; changes arriving while one write is in flight are
@@ -120,6 +244,10 @@ export function restoreSubagentsFromTranscripts(
     }
     const firstMessage = messages[0]
     const lastMessage = messages[messages.length - 1]
+    const startedAt =
+      parsePersistedDate(prompt?.created_at) ?? parsePersistedDate(firstMessage.created_at)
+    const completedAt =
+      parsePersistedDate(final?.created_at) ?? parsePersistedDate(lastMessage.created_at)
     const subagentType = prompt?.subagent_type || "general-purpose"
     const promptContent = typeof prompt?.content === "string" ? prompt.content : ""
     const scopedExecutionMatch = /^(.*)::(?:execution-\d+|invocation-[a-z0-9-]+)$/.exec(
@@ -150,7 +278,7 @@ export function restoreSubagentsFromTranscripts(
         ...(prompt?.subagent_type && { subagentType: prompt.subagent_type }),
         ...(final && {
           status: terminalStatus,
-          completedAt: final.created_at,
+          ...(completedAt && { completedAt }),
           restoredFromPromptOnly: undefined
         })
       }
@@ -165,8 +293,8 @@ export function restoreSubagentsFromTranscripts(
         projectSubagentDescription(promptContent) ||
         "已恢复的子代理任务",
       status: terminalStatus,
-      startedAt: prompt?.created_at ?? firstMessage.created_at,
-      completedAt: final?.created_at ?? lastMessage.created_at,
+      ...(startedAt && { startedAt }),
+      ...(completedAt && { completedAt }),
       subagentType,
       spawnIndex,
       ...(!final && { restoredFromPromptOnly: true })
@@ -403,7 +531,8 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
     !tightensToError
   const shouldUseIncomingContent =
     !preservesExistingError &&
-    (trustedIncomingContentDelta ||
+    (incoming.content_stream_snapshot === true ||
+      trustedIncomingContentDelta ||
       (incomingContentPriority > existingContentPriority && incomingHasContent) ||
       (incomingContentPriority === existingContentPriority &&
         ((existingIsProjection && !incomingIsProjection && incomingHasContent) ||
@@ -434,7 +563,8 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
     (incoming.reasoning_full_length ?? -1) >= incoming.reasoning_stream_delta.length
   const shouldUseIncomingReasoning =
     typeof incoming.reasoning === "string" &&
-    (trustedIncomingReasoningDelta ||
+    (incoming.reasoning_stream_snapshot === true ||
+      trustedIncomingReasoningDelta ||
       !(
       incoming.reasoning_is_projection === true &&
       existing.reasoning_is_projection !== true &&
@@ -1311,10 +1441,7 @@ function hasStableTranscriptToolIdentity(existing: Message, incoming: Message): 
   return existingToolCalls.every((toolCall, index) => {
     const incomingToolCall = incoming.tool_calls?.[index]
     if (!incomingToolCall) return false
-    return (
-      toolCall.id === incomingToolCall.id &&
-      toolCall.name === incomingToolCall.name
-    )
+    return toolCall.id === incomingToolCall.id && toolCall.name === incomingToolCall.name
   })
 }
 
@@ -1461,13 +1588,40 @@ export function mergeSubagentTranscripts(
   }
 }
 
-function revivePersistedDate(value: unknown): Date {
+function parsePersistedDate(value: unknown): Date | null {
   if (value instanceof Date && Number.isFinite(value.getTime())) return value
   if (typeof value === "string" || typeof value === "number") {
     const parsed = new Date(value)
     if (Number.isFinite(parsed.getTime())) return parsed
   }
-  return new Date()
+  return null
+}
+
+function revivePersistedDate(value: unknown): Date {
+  // Missing legacy timestamps must stay unknown. Using `new Date()` here made
+  // opening a subagent transcript look like the execution start time.
+  return parsePersistedDate(value) ?? new Date(Number.NaN)
+}
+
+/**
+ * Anchor the first assistant row to the execution timestamp captured when the
+ * subagent was registered. This is an O(n) panel projection and never mutates
+ * or rewrites the persisted transcript.
+ */
+export function applySubagentTranscriptStartTime(
+  messages: Message[],
+  startedAt: Date | string | number | undefined
+): Message[] {
+  const actualStart = parsePersistedDate(startedAt)
+  if (!actualStart) return messages
+  const firstAssistantIndex = messages.findIndex((message) => message.role === "assistant")
+  if (firstAssistantIndex < 0) return messages
+  const firstAssistant = messages[firstAssistantIndex]
+  if (parsePersistedDate(firstAssistant.start_at)) return messages
+
+  const projected = messages.slice()
+  projected[firstAssistantIndex] = { ...firstAssistant, start_at: actualStart }
+  return projected
 }
 
 function revivePersistedSubagentMessage(value: unknown): Message | null {
@@ -1632,12 +1786,18 @@ export function getSubagentTranscriptsFromThreadValues(
 }
 
 function serializeSubagentMessage(message: Message): Record<string, unknown> {
+  const createdAt = parsePersistedDate(message.created_at)
+  const startAt = parsePersistedDate(message.start_at)
+  const endAt = parsePersistedDate(message.end_at)
   const serialized: Record<string, unknown> = {
     ...message,
-    created_at: message.created_at.toISOString(),
-    ...(message.start_at && { start_at: message.start_at.toISOString() }),
-    ...(message.end_at && { end_at: message.end_at.toISOString() })
+    ...(createdAt && { created_at: createdAt.toISOString() }),
+    ...(startAt && { start_at: startAt.toISOString() }),
+    ...(endAt && { end_at: endAt.toISOString() })
   }
+  if (!createdAt) delete serialized.created_at
+  if (!startAt) delete serialized.start_at
+  if (!endAt) delete serialized.end_at
   const contentPendingDelta =
     typeof message.content_pending_delta === "string" ? message.content_pending_delta : ""
   const reasoningPendingDelta =
@@ -1670,9 +1830,11 @@ function serializeSubagentMessage(message: Message): Record<string, unknown> {
     "content_persisted_length",
     "content_pending_delta",
     "content_stream_delta",
+    "content_stream_snapshot",
     "reasoning_persisted_length",
     "reasoning_pending_delta",
-    "reasoning_stream_delta"
+    "reasoning_stream_delta",
+    "reasoning_stream_snapshot"
   ]) {
     delete serialized[key]
   }
@@ -1754,8 +1916,14 @@ function serializeSubagentMessage(message: Message): Record<string, unknown> {
     delete serialized.tool_calls
   }
   if (requiresLiveTextBootstrap) {
-    serialized.content = contentPendingDelta
-    serialized.reasoning = reasoningPendingDelta
+    // A single-field update may bootstrap a hydrated message. Missing pending
+    // text is not an instruction to clear the other field.
+    if (typeof message.content_pending_delta === "string") {
+      serialized.content = contentPendingDelta
+    }
+    if (typeof message.reasoning_pending_delta === "string") {
+      serialized.reasoning = reasoningPendingDelta
+    }
     delete serialized.content_ref
     delete serialized.content_is_projection
     delete serialized.content_full_length
@@ -1766,6 +1934,20 @@ function serializeSubagentMessage(message: Message): Record<string, unknown> {
   } else if (Object.keys(textDeltas).length > 0) {
     serialized.subagent_text_deltas = textDeltas
   }
+  const snapshots: string[] = []
+  for (const field of ["content", "reasoning"] as const) {
+    if (message[`${field}_stream_snapshot`] !== true) continue
+    snapshots.push(field)
+    // A rewrite invalidates the old blob/journal base; persist the new full
+    // value, including empty, before resuming ordinary suffix acknowledgements.
+    serialized[field] = message[`${field}_pending_delta`] ?? ""
+    delete serialized[`${field}_ref`]
+    delete serialized[`${field}_is_projection`]
+    delete serialized[`${field}_full_length`]
+    delete textDeltas[field]
+  }
+  if (snapshots.length > 0) serialized.subagent_text_snapshots = snapshots
+  if (Object.keys(textDeltas).length === 0) delete serialized.subagent_text_deltas
   return serialized
 }
 
@@ -1837,7 +2019,7 @@ export function applyPersistedSubagentTranscriptRefs(
       persistedContentLength !== undefined &&
       currentContentBase === sentContentBase &&
       persistedContentLength === sentContentBase + sentContentDelta.length &&
-      currentContentDelta.length >= sentContentDelta.length
+      currentContentDelta.startsWith(sentContentDelta)
     const sentReasoningBase = sentMessage.reasoning_persisted_length ?? 0
     const currentReasoningBase = message.reasoning_persisted_length ?? 0
     const sentReasoningDelta = sentMessage.reasoning_pending_delta ?? ""
@@ -1847,14 +2029,17 @@ export function applyPersistedSubagentTranscriptRefs(
       persistedReasoningLength !== undefined &&
       currentReasoningBase === sentReasoningBase &&
       persistedReasoningLength === sentReasoningBase + sentReasoningDelta.length &&
-      currentReasoningDelta.length >= sentReasoningDelta.length
+      currentReasoningDelta.startsWith(sentReasoningDelta)
     const canAttachContentRef =
       !!contentRef &&
-      (acknowledgesContentDelta || transcriptFieldEquals(message.content, sentMessage.content))
+      (acknowledgesContentDelta ||
+        (transcriptFieldEquals(message.content, sentMessage.content) &&
+          (!message.content_stream_snapshot || currentContentDelta === sentContentDelta)))
     const canAttachReasoningRef =
       !!reasoningRef &&
       (acknowledgesReasoningDelta ||
-        transcriptFieldEquals(message.reasoning, sentMessage.reasoning))
+        (transcriptFieldEquals(message.reasoning, sentMessage.reasoning) &&
+          (!message.reasoning_stream_snapshot || currentReasoningDelta === sentReasoningDelta)))
     const canAttachToolCallsRef =
       !!toolCallsRef && transcriptFieldEquals(message.tool_calls, sentMessage.tool_calls)
     if (
@@ -1880,7 +2065,8 @@ export function applyPersistedSubagentTranscriptRefs(
         content_pending_delta: acknowledgesContentDelta
           ? currentContentDelta.slice(sentContentDelta.length)
           : message.content_pending_delta,
-        content_stream_delta: undefined
+        content_stream_delta: undefined,
+        content_stream_snapshot: undefined
       }),
       ...(canAttachReasoningRef && {
         reasoning_ref: reasoningRef,
@@ -1890,7 +2076,8 @@ export function applyPersistedSubagentTranscriptRefs(
         reasoning_pending_delta: acknowledgesReasoningDelta
           ? currentReasoningDelta.slice(sentReasoningDelta.length)
           : message.reasoning_pending_delta,
-        reasoning_stream_delta: undefined
+        reasoning_stream_delta: undefined,
+        reasoning_stream_snapshot: undefined
       }),
       ...(canAttachToolCallsRef && { tool_calls_ref: toolCallsRef })
     }

@@ -19,7 +19,8 @@ import {
 import {
   ImFeatureBindingError,
   imFeatureBindingService,
-  type ImFeatureBindingService
+  type ImFeatureBindingService,
+  type ImFeatureSessionMode
 } from "./feature-binding-service"
 import {
   imRemoteGrantStore,
@@ -28,6 +29,7 @@ import {
   type ImRemoteGrantStore,
   type ImThreadGrantRecord
 } from "./remote-grant-store"
+import { imActivityTime, projectThreadAlias, projectThreadAliasParts } from "./thread-alias"
 
 export type ImAuthorizedRemoteTarget =
   | {
@@ -36,6 +38,7 @@ export type ImAuthorizedRemoteTarget =
       grantVersion: number
       label: string
       threadId: string
+      sourceTitle?: string
       sessionKind: "ordinary" | "project"
     }
   | {
@@ -134,8 +137,27 @@ export class ImRemoteAccessService {
     return this.dependencies.grants.enableThreadGrant({
       route: input.route,
       threadId: validation.thread.thread_id,
-      title: validation.thread.title?.trim() || `会话 ${validation.thread.thread_id.slice(0, 8)}`
+      title: await this.threadLabel(
+        validation.thread,
+        `会话 ${validation.thread.thread_id.slice(0, 8)}`
+      )
     })
+  }
+
+  private async threadLabel(
+    thread: ThreadRow,
+    fallback: string,
+    featureTitles?: Map<string, Promise<Map<string, string>>>
+  ): Promise<string> {
+    const parts = projectThreadAliasParts(thread)
+    if (!parts) return currentThreadTitle(thread, fallback)
+    let titles = featureTitles?.get(parts.projectId)
+    if (!titles) {
+      titles = this.dependencies.features.getFeatureTitles(parts.projectId)
+      featureTitles?.set(parts.projectId, titles)
+    }
+    const title = (await titles).get(parts.featureSlug) || parts.featureSlug
+    return projectThreadAlias(title, parts.launchStageName)
   }
 
   /** Align local desktop grants with a route confirmed by sync or real ingress. */
@@ -186,6 +208,8 @@ export class ImRemoteAccessService {
       route.principalId
     )
     const targets: ImAuthorizedRemoteTarget[] = []
+    const activityByThreadId = new Map<string, number>()
+    const featureTitles = new Map<string, Promise<Map<string, string>>>()
     for (const grant of this.dependencies.grants.listThreadGrants(route.conversationKey)) {
       if (grant.state !== "active" || !threadGrantRouteMatches(route, grant)) continue
       let thread: ThreadRow
@@ -200,22 +224,62 @@ export class ImRemoteAccessService {
         kind: "thread_grant",
         grantId: grant.grantId,
         grantVersion: grant.grantVersion,
-        label: currentThreadTitle(thread, grant.titleSnapshot),
+        label: await this.threadLabel(thread, grant.titleSnapshot, featureTitles),
         threadId: grant.threadId,
+        sourceTitle: thread.title?.trim() || undefined,
         sessionKind: projectMode ? "project" : "ordinary"
       })
+      if (projectThreadAliasParts(thread)) activityByThreadId.set(grant.threadId, thread.updated_at)
     }
-    for (const grant of this.dependencies.grants.listFeatureGrants(route.principalId)) {
-      if (grant.state !== "active" || !featureGrantPrincipalMatches(route.principalId, grant))
-        continue
-      targets.push({
-        kind: "feature_grant",
-        grantId: grant.grantId,
-        grantVersion: grant.grantVersion,
-        label: `${grant.projectNameSnapshot} / ${grant.featureTitleSnapshot}`,
-        projectId: grant.projectId,
-        featureSlug: grant.featureSlug
-      })
+    const labelCounts = new Map<string, number>()
+    for (const target of targets) {
+      labelCounts.set(target.label, (labelCounts.get(target.label) ?? 0) + 1)
+    }
+    const minuteCounts = new Map<string, number>()
+    const secondCounts = new Map<string, number>()
+    for (const target of targets) {
+      if (target.kind !== "thread_grant" || !activityByThreadId.has(target.threadId)) continue
+      const timestamp = activityByThreadId.get(target.threadId)!
+      const minuteKey = `${target.label}\u0000${imActivityTime(timestamp)}`
+      const secondKey = `${target.label}\u0000${imActivityTime(timestamp, true)}`
+      minuteCounts.set(minuteKey, (minuteCounts.get(minuteKey) ?? 0) + 1)
+      secondCounts.set(secondKey, (secondCounts.get(secondKey) ?? 0) + 1)
+    }
+    for (const target of targets) {
+      if (target.kind !== "thread_grant" || (labelCounts.get(target.label) ?? 0) < 2) continue
+      const timestamp = activityByThreadId.get(target.threadId)
+      if (timestamp === undefined) continue
+      const minute = imActivityTime(timestamp)
+      const minuteKey = `${target.label}\u0000${minute}`
+      const second = imActivityTime(timestamp, true)
+      const secondKey = `${target.label}\u0000${second}`
+      const time = (minuteCounts.get(minuteKey) ?? 0) > 1 ? second : minute
+      target.label = `${target.label} · ${time}${(secondCounts.get(secondKey) ?? 0) > 1 ? ` #${target.threadId.slice(0, 8)}` : ""}`
+    }
+    const featureGrants = this.dependencies.grants
+      .listFeatureGrants(route.principalId)
+      .filter(
+        (grant) =>
+          grant.state === "active" && featureGrantPrincipalMatches(route.principalId, grant)
+      )
+    if (featureGrants.length > 0) {
+      const catalog = await this.dependencies.features.listRemoteFeatureCatalog(
+        new Set(featureGrants.map((grant) => grant.projectId))
+      )
+      const projects = new Map(catalog.map((entry) => [entry.project.id, entry]))
+      for (const grant of featureGrants) {
+        const entry = projects.get(grant.projectId)
+        const feature = entry?.features.find((candidate) => candidate.slug === grant.featureSlug)
+        if (!entry || !feature) continue
+        targets.push({
+          kind: "feature_grant",
+          grantId: grant.grantId,
+          grantVersion: grant.grantVersion,
+          label: `${entry.project.name} / ${feature.title}`,
+          projectId: grant.projectId,
+          featureSlug: grant.featureSlug
+        })
+      }
     }
     return targets.sort((left, right) => left.label.localeCompare(right.label, "zh-CN"))
   }
@@ -236,7 +300,10 @@ export class ImRemoteAccessService {
       threadId: grant.threadId
     })
     const validation = this.validateGrantableThread(grant.threadId)
-    const title = currentThreadTitle(validation.thread, grant.titleSnapshot)
+    const title =
+      (await this.listAuthorizedTargets(input.route)).find(
+        (target) => target.kind === "thread_grant" && target.grantId === grant.grantId
+      )?.label ?? (await this.threadLabel(validation.thread, grant.titleSnapshot))
     const reusable = this.dependencies.conversations
       .listTargets(input.route.conversationKey)
       .find(
@@ -275,6 +342,8 @@ export class ImRemoteAccessService {
     route: ImGrantRouteIdentity
     grantId: string
     grantVersion: number
+    /** Omitted lets the Feature's own configuration choose the session's mode. */
+    sessionMode?: ImFeatureSessionMode
   }): Promise<Extract<ImTargetSnapshot, { kind: "thread" }>> {
     const grant = this.dependencies.grants.getFeatureGrantById(input.grantId)
     if (!grant || grant.grantVersion !== input.grantVersion || grant.state !== "active") {
@@ -294,7 +363,8 @@ export class ImRemoteAccessService {
         ...input.route,
         projectId: grant.projectId,
         featureSlug: grant.featureSlug,
-        targetId
+        targetId,
+        ...(input.sessionMode ? { sessionMode: input.sessionMode } : {})
       })
     } catch (error) {
       if (error instanceof ImFeatureBindingError) {
@@ -305,10 +375,14 @@ export class ImRemoteAccessService {
 
     let threadGrant: ImThreadGrantRecord | null = null
     try {
+      const createdThread = this.dependencies.getThread(created.threadId)
+      const title = createdThread
+        ? await this.threadLabel(createdThread, created.title)
+        : projectThreadAlias(created.featureTitle, null)
       threadGrant = await this.dependencies.grants.enableThreadGrant({
         route: input.route,
         threadId: created.threadId,
-        title: created.title
+        title
       })
       const target: Extract<ImTargetSnapshot, { kind: "thread" }> = {
         kind: "thread",
@@ -316,7 +390,7 @@ export class ImRemoteAccessService {
         grantId: threadGrant.grantId,
         grantVersion: threadGrant.grantVersion,
         threadId: created.threadId,
-        title: created.title,
+        title,
         workspacePath: created.workspacePath
       }
       await this.dependencies.conversations.registerTarget(input.route.conversationKey, target, {
@@ -368,28 +442,11 @@ export class ImRemoteAccessService {
     thread: ThreadRow
     workspacePath: string
   } {
-    const { thread, workspacePath, parsed } = this.validateThreadStructure(threadId)
-    if (parsed.agentMode !== "normal") {
-      throw new ImRemoteAccessError(
-        "REMOTE_THREAD_UNSUPPORTED",
-        "第一阶段只支持普通 Agent 模式的会话。"
-      )
-    }
-    const goal = this.dependencies.getGoal(threadId)
-    if (
-      (goal && goal.status !== "complete") ||
-      this.dependencies.coordinator.hasRunningWorkersForThread(threadId) ||
-      this.dependencies.coordinator.hasNotifications(threadId) ||
-      this.dependencies.coordinator.hasTerminalWorkerAwaitingNotificationForThread(threadId) ||
-      this.dependencies.workflow.isBusyForThread(threadId, workspacePath) ||
-      this.dependencies.hasPendingApproval(threadId) ||
-      this.dependencies.hasPendingUserInput(threadId)
-    ) {
-      throw new ImRemoteAccessError(
-        "REMOTE_THREAD_UNSUPPORTED",
-        "会话仍有高级模式任务或桌面交互待处理，暂不能接入招乎。"
-      )
-    }
+    // A grant describes which durable Thread IM may address. Execution mode,
+    // detached workers/workflows and transient HITL state are evaluated at turn
+    // time; treating them as grant structure made an otherwise valid switch
+    // silently disappear from /会话.
+    const { thread, workspacePath } = this.validateThreadStructure(threadId)
     return { thread, workspacePath }
   }
 

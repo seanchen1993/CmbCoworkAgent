@@ -1,4 +1,4 @@
-export type LocalThreadRunOwner = "desktop" | "im" | "scheduler"
+export type LocalThreadRunOwner = "desktop" | "im" | "scheduler" | "mods"
 
 export interface LocalThreadRunLease {
   threadId: string

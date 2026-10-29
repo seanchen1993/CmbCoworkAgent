@@ -220,6 +220,97 @@ function rejectLargeDeserialization(
 }
 
 describe("checkpoint runtime projection worker", () => {
+  it("bounds concurrent session reads even when all requests arrive during worker startup", async () => {
+    const emitter = new EventEmitter()
+    const posted: Array<Record<string, unknown>> = []
+    const fakeWorker = Object.assign(emitter, {
+      postMessage(message: Record<string, unknown>) {
+        if (message.type === "shutdown")
+          queueMicrotask(() => emitter.emit("message", { type: "shutdown-complete" }))
+        else posted.push(message)
+      },
+      unref() {
+        return fakeWorker
+      },
+      terminate: async () => 0
+    }) as unknown as Worker
+    const client = new CheckpointRuntimeProjectionClient(async () => fakeWorker)
+    clients.push(client)
+    const controllers = Array.from({ length: 129 }, () => new AbortController())
+    const settled = Promise.allSettled(
+      controllers.map((controller) =>
+        client.readSessionTranscript("checkpoint.sqlite", "thread", controller.signal)
+      )
+    )
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(posted).toHaveLength(128)
+    expect((client as unknown as { pending: Map<number, unknown> }).pending.size).toBe(128)
+    for (const controller of controllers) controller.abort(Error("done"))
+    const results = await settled
+    expect(results[128]).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({ message: "CHECKPOINT_QUERY_CAPACITY" })
+    })
+    expect((client as unknown as { pending: Map<number, unknown> }).pending.size).toBe(0)
+  })
+
+  it("reads exact session projections through the real worker and separates turns from message budgets", async () => {
+    const { databasePath } = await seedLegacyInlineFixture({
+      threadId: "session-read",
+      messages: [
+        { type: "human", content: "x".repeat(600000) },
+        { type: "ai", content: "y".repeat(600000) },
+        { type: "human", isMeta: true, content: "hidden" }
+      ]
+    })
+    const client = createClient()
+    const signal = new AbortController().signal
+    await expect(
+      client.readSessionTranscript(databasePath, "session-read", signal)
+    ).rejects.toThrow("MODS_JSON_SIZE")
+    await expect(
+      client.readSessionTranscript(databasePath, "session-read", signal, "", "turns")
+    ).resolves.toMatchObject({ turns: 1, messageCount: 3 })
+  })
+
+  it("aborts session reads without retaining listeners, requests, or accepting late responses", async () => {
+    const emitter = new EventEmitter()
+    const posted: Array<Record<string, unknown>> = []
+    const fakeWorker = Object.assign(emitter, {
+      postMessage(message: Record<string, unknown>) {
+        if (message.type === "shutdown")
+          queueMicrotask(() => emitter.emit("message", { type: "shutdown-complete" }))
+        else posted.push(message)
+      },
+      unref() {
+        return fakeWorker
+      },
+      terminate: async () => 0
+    }) as unknown as Worker
+    const client = new CheckpointRuntimeProjectionClient(async () => fakeWorker)
+    clients.push(client)
+    const controller = new AbortController()
+    const pending = client.readSessionTranscript("checkpoint.sqlite", "thread", controller.signal)
+    const rejected = expect(pending).rejects.toThrow("closed")
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    controller.abort(Error("closed"))
+    await rejected
+    expect(Atomics.load(new Int32Array(posted[0].cancellationBuffer as SharedArrayBuffer), 0)).toBe(
+      1
+    )
+    expect((client as unknown as { pending: Map<number, unknown> }).pending.size).toBe(0)
+    emitter.emit("message", {
+      type: "read-session-transcript-result",
+      requestId: posted[0].requestId,
+      ok: true,
+      transcript: { turns: 999 }
+    })
+    await expect(
+      client.readSessionTranscript("checkpoint.sqlite", "thread", controller.signal)
+    ).rejects.toThrow("closed")
+    expect(posted).toHaveLength(1)
+  })
+
   it("returns an authoritative empty result when the checkpoint database is absent", async () => {
     const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-absent-"))
     temporaryDirectories.push(directory)
@@ -619,9 +710,7 @@ describe("checkpoint runtime projection worker", () => {
     })
     expect(inlineMessages?.messages?.at(-1)).toMatchObject({ id: "history-2999" })
     expect(inlineMessages?.__cmb_original_message_count).toBe(messages.length)
-    expect(Buffer.byteLength(JSON.stringify(inlineTail.tuple), "utf8")).toBeLessThan(
-      1024 * 1024
-    )
+    expect(Buffer.byteLength(JSON.stringify(inlineTail.tuple), "utf8")).toBeLessThan(1024 * 1024)
     expect(inlineTail.tickerCount).toBeGreaterThan(5)
 
     const external = new DatabaseSync(databasePath)
@@ -669,9 +758,7 @@ describe("checkpoint runtime projection worker", () => {
     })
     expect(externalMessages?.messages?.at(-1)).toMatchObject({ id: "history-2999" })
     expect(externalMessages?.__cmb_original_message_count).toBe(messages.length)
-    expect(Buffer.byteLength(JSON.stringify(externalTail.tuple), "utf8")).toBeLessThan(
-      1024 * 1024
-    )
+    expect(Buffer.byteLength(JSON.stringify(externalTail.tuple), "utf8")).toBeLessThan(1024 * 1024)
     expect(externalTail.tickerCount).toBeGreaterThan(5)
 
     const withoutSnapshots = new DatabaseSync(databasePath)
@@ -800,6 +887,13 @@ describe("checkpoint runtime projection worker", () => {
       "h"
     ])
     expect(tuple.checkpoint?.channel_values?.__cmb_original_message_count).toBe(5)
+    const exact = await client.readSessionTranscript(
+      databasePath,
+      threadId,
+      new AbortController().signal
+    )
+    expect(exact?.messages?.map((entry) => entry.text)).toEqual(["a", "b", "e", "g", "h"])
+    expect(exact?.turns).toBe(0)
     expect(tuple.checkpoint?.channel_values?.todos).toMatchObject([
       { id: "todo-1", content: "chain todo", status: "pending" }
     ])
@@ -1234,9 +1328,7 @@ describe("checkpoint runtime projection worker", () => {
     }
     expect(Atomics.load(new Int32Array(staleRequest.cancellationBuffer), 0)).toBe(1)
     expect(Atomics.load(new Int32Array(currentRequest.cancellationBuffer), 0)).toBe(0)
-    expect(
-      (client as unknown as { pending: Map<number, unknown> }).pending.size
-    ).toBe(1)
+    expect((client as unknown as { pending: Map<number, unknown> }).pending.size).toBe(1)
 
     emitter.emit("message", {
       type: "inspect-transcript-presence-result",
@@ -1296,9 +1388,9 @@ describe("checkpoint runtime projection worker", () => {
     expect(state.pending.size).toBe(0)
     expect(state.foregroundRequests.size).toBe(0)
 
-    await expect(
-      client.hasTranscript("second.sqlite", "thread-1", "", "renderer-1")
-    ).resolves.toBe(true)
+    await expect(client.hasTranscript("second.sqlite", "thread-1", "", "renderer-1")).resolves.toBe(
+      true
+    )
   })
 
   it("rejects a request that resumes after shutdown has drained pending work", async () => {
@@ -1558,13 +1650,11 @@ describe("checkpoint runtime projection worker", () => {
          FROM checkpoints
          WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?`
       )
-      .get(
-        threadId,
-        threadId,
-        legacyCheckpoint.id,
-        threadId,
-        legacyCheckpoint.id
-      ) as { checkpoint_bytes: number; projection_bytes: number; message_count: number }
+      .get(threadId, threadId, legacyCheckpoint.id, threadId, legacyCheckpoint.id) as {
+      checkpoint_bytes: number
+      projection_bytes: number
+      message_count: number
+    }
     raw.close()
     expect(Number(sizes.checkpoint_bytes)).toBeLessThan(64 * 1024)
     expect(Number(sizes.projection_bytes)).toBeLessThan(64 * 1024)
@@ -1587,7 +1677,10 @@ describe("checkpoint runtime projection worker", () => {
 
     let largeMainJsonParses = 0
     const originalJsonParse = JSON.parse
-    JSON.parse = ((text: string, reviver?: (this: unknown, key: string, value: unknown) => unknown) => {
+    JSON.parse = ((
+      text: string,
+      reviver?: (this: unknown, key: string, value: unknown) => unknown
+    ) => {
       if (text.length >= 64 * 1024) largeMainJsonParses += 1
       return originalJsonParse(text, reviver)
     }) as JSON["parse"]
@@ -1619,14 +1712,10 @@ describe("checkpoint runtime projection worker", () => {
       pendingWrites?: unknown
     }
     expect(boundedCheckpoint.checkpoint?.channel_values?.messages).toHaveLength(128)
-    expect(
-      boundedCheckpoint.checkpoint?.channel_values?.__cmb_original_message_count
-    ).toBe(563)
+    expect(boundedCheckpoint.checkpoint?.channel_values?.__cmb_original_message_count).toBe(563)
     expect("metadata" in boundedCheckpoint).toBe(false)
     expect("pendingWrites" in boundedCheckpoint).toBe(false)
-    expect(Buffer.byteLength(JSON.stringify(boundedCheckpoint), "utf8")).toBeLessThan(
-      1024 * 1024
-    )
+    expect(Buffer.byteLength(JSON.stringify(boundedCheckpoint), "utf8")).toBeLessThan(1024 * 1024)
   }, 30_000)
 
   it("does not let a prepared legacy migration overwrite a concurrent newer put", async () => {

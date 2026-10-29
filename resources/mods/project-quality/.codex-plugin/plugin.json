@@ -1,0 +1,6 @@
+{
+  "name": "项目规范助手",
+  "version": "1.0.0",
+  "description": "项目规范上下文、敏感文件检查和受控验证操作。",
+  "mods": "mods/manifest.json"
+}

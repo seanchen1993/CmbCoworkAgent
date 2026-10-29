@@ -7,7 +7,9 @@ import type {
 } from "../../shared/harness-board-types"
 import {
   buildHarnessFeatureAgentContext,
+  getHarnessProjectAdapterSnapshot,
   readHarnessFeatureMetadata,
+  resolveHarnessFeaturePluginIdentity,
   resolveHarnessFeatureCurrentStage
 } from "../harness-board/service"
 import {
@@ -16,6 +18,10 @@ import {
   getEnabledSkillsSources,
   getGlobalRoutingMode
 } from "../storage"
+import {
+  isSkillVisibleForProjectMode,
+  type ProjectModeSkillScope
+} from "../../shared/skill-visibility"
 import { runHooksEnriched } from "../hooks/required-skill"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import {
@@ -40,6 +46,10 @@ import { TraceCollector, type TraceCollectorOptions } from "./trace/collector"
 import { createAgentRuntime, type CreateAgentRuntimeOptions, type DeepAgent } from "./runtime"
 import { assertLocalThreadRunLease, type LocalThreadRunOwner } from "./thread-run-lease"
 import { primeHarnessStageAttribution } from "../services/harness-stage-attribution"
+import {
+  formatSkillUseBlock as formatTrustedSkillUseBlock,
+  type SkillUseBlockMetadata
+} from "../../shared/skill-use-block"
 
 export type StandardTurnSource = "desktop" | "im" | "scheduler" | "heartbeat"
 
@@ -136,6 +146,7 @@ export function getHarnessHookContext(
   | "pluginWorkspace"
   | "featureId"
   | "harnessProjectId"
+  | "harnessAdapterId"
   | "harnessAdapterName"
   | "harnessAdapterVersion"
   | "harnessNodeName"
@@ -147,6 +158,7 @@ export function getHarnessHookContext(
     pluginWorkspace: context.pluginWorkspace,
     featureId: context.featureId,
     harnessProjectId: context.harnessProjectId,
+    harnessAdapterId: context.pluginId,
     harnessAdapterName: context.harnessAdapterName,
     harnessAdapterVersion: context.harnessAdapterVersion,
     harnessNodeName: context.harnessNodeName,
@@ -190,7 +202,11 @@ export async function resolveHarnessFeatureBindingContext(
 
 export async function getHarnessAgentContext(
   metadata: Record<string, unknown>,
-  options: { workspacePath?: string; featureBinding?: HarnessFeatureBindingContext } = {}
+  options: {
+    workspacePath?: string
+    featureBinding?: HarnessFeatureBindingContext
+    purpose?: "execution" | "plugin-identity"
+  } = {}
 ): Promise<HarnessAgentContext> {
   const harnessProjectSession =
     metadata.harnessProjectSession &&
@@ -198,6 +214,34 @@ export async function getHarnessAgentContext(
     !Array.isArray(metadata.harnessProjectSession)
       ? (metadata.harnessProjectSession as Record<string, unknown>)
       : undefined
+  const projectSessionProjectId =
+    typeof harnessProjectSession?.projectId === "string"
+      ? harnessProjectSession.projectId.trim()
+      : ""
+  const getProjectSessionAdapter = async () => {
+    if (!projectSessionProjectId) return null
+    try {
+      return await getHarnessProjectAdapterSnapshot(projectSessionProjectId)
+    } catch (error) {
+      console.warn("[HarnessBoard] Failed to resolve project-session adapter:", error)
+      return null
+    }
+  }
+  if (options.purpose === "plugin-identity") {
+    const featureIdentity = await resolveHarnessFeaturePluginIdentity(metadata)
+    if (featureIdentity.pluginId || !projectSessionProjectId) {
+      return featureIdentity
+    }
+    const adapter = await getProjectSessionAdapter()
+    return adapter
+      ? {
+          pluginId: adapter.id,
+          pluginName: adapter.name,
+          harnessAdapterName: adapter.name,
+          harnessAdapterVersion: adapter.version
+        }
+      : featureIdentity
+  }
   const isHarnessProjectSession = Boolean(harnessProjectSession)
   const harnessFeature = readHarnessFeatureMetadata(metadata)
   const disableAgentsPrompt = metadata.disableAgentsPrompt === true
@@ -219,9 +263,17 @@ export async function getHarnessAgentContext(
     throw unavailable
   }
   if (!featureContext) {
+    const projectSessionAdapter = await getProjectSessionAdapter()
     return {
       ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
-      ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
+      ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {}),
+      ...(projectSessionProjectId ? { harnessProjectId: projectSessionProjectId } : {}),
+      ...(projectSessionAdapter?.id ? { pluginId: projectSessionAdapter.id } : {}),
+      ...(projectSessionAdapter?.name ? { pluginName: projectSessionAdapter.name } : {}),
+      ...(projectSessionAdapter?.name ? { harnessAdapterName: projectSessionAdapter.name } : {}),
+      ...(projectSessionAdapter?.version
+        ? { harnessAdapterVersion: projectSessionAdapter.version }
+        : {})
     }
   }
   let currentStage: Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus">
@@ -321,18 +373,22 @@ function isDisabledSkillMatch(skill: SkillLifecycleMatch): boolean {
   return getDisabledSkillDirs().some((dir) => isSameOrChildSkillPath(skill.rootDir, dir))
 }
 
-async function buildSkillLifecycleRegistryForHooks(): Promise<SkillLifecycleRegistry | null> {
+async function buildSkillLifecycleRegistryForHooks(
+  visibilityScope?: ProjectModeSkillScope
+): Promise<SkillLifecycleRegistry | null> {
   const rootSources = await getEnabledSkillsSources()
-  const pluginSources = getEnabledPluginSkillSourceMetadata()
+  const pluginSources = getEnabledPluginSkillSourceMetadata().filter(
+    (source) => !visibilityScope || isSkillVisibleForProjectMode(source, visibilityScope)
+  )
   const sources = [...rootSources, ...pluginSources]
   return sources.length > 0 ? new SkillLifecycleRegistry(sources) : null
 }
 
-export async function validateExplicitSkillReference(input: {
-  name: string
-  path: string
-}): Promise<string | null> {
-  const registry = await buildSkillLifecycleRegistryForHooks()
+export async function validateExplicitSkillReference(
+  input: { name: string; path: string },
+  visibilityScope?: ProjectModeSkillScope
+): Promise<string | null> {
+  const registry = await buildSkillLifecycleRegistryForHooks(visibilityScope)
   const skill = registry?.resolveExplicit({ skillName: input.name, skillPath: input.path })
   return !skill || isDisabledSkillMatch(skill)
     ? `显式选择的技能不存在或已禁用：${input.name}`
@@ -347,6 +403,7 @@ async function activateExplicitSkillFromMessage({
   pluginWorkspace,
   featureId,
   harnessProjectId,
+  harnessAdapterId,
   harnessAdapterName,
   harnessAdapterVersion,
   harnessNodeName,
@@ -359,7 +416,8 @@ async function activateExplicitSkillFromMessage({
   firedSkillKeys,
   skillUseTracker,
   onHookResult,
-  onHookSkippedFactory
+  onHookSkippedFactory,
+  skillVisibility
 }: {
   message: string
   workspacePath: string
@@ -368,6 +426,7 @@ async function activateExplicitSkillFromMessage({
   pluginWorkspace?: string
   featureId?: string
   harnessProjectId?: string
+  harnessAdapterId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
   harnessNodeName?: string
@@ -381,11 +440,12 @@ async function activateExplicitSkillFromMessage({
   skillUseTracker: SkillUseTracker
   onHookResult?: HookResultCallback
   onHookSkippedFactory?: (event: HookEvent) => ScopeSkipCallback | undefined
+  skillVisibility?: ProjectModeSkillScope
 }): Promise<ExplicitSkillActivation | null> {
   const parsed = parseSkillUseBlock(message)
   if (!parsed) return null
 
-  const registry = await buildSkillLifecycleRegistryForHooks()
+  const registry = await buildSkillLifecycleRegistryForHooks(skillVisibility)
   const skill = registry?.resolveExplicit({
     skillName: parsed.skillName,
     skillPath: parsed.skillPath
@@ -419,6 +479,7 @@ async function activateExplicitSkillFromMessage({
     pluginWorkspace,
     featureId,
     harnessProjectId,
+    harnessAdapterId,
     harnessAdapterName,
     harnessAdapterVersion,
     harnessNodeName,
@@ -453,6 +514,8 @@ async function activateExplicitSkillFromMessage({
 export async function prepareStandardUserPrompt({
   rawMessage,
   initialModelInput,
+  trustedExplicitSkill,
+  allowExplicitSkillFromMessage = true,
   threadId,
   workspacePath,
   turnState,
@@ -465,6 +528,13 @@ export async function prepareStandardUserPrompt({
 }: {
   rawMessage: string
   initialModelInput: string
+  /**
+   * Host-resolved explicit skill. Remote transports use this instead of
+   * trusting a user-authored CMBDEVCLAW-SKILL-USE block.
+   */
+  trustedExplicitSkill?: SkillUseBlockMetadata
+  /** Desktop transport payloads are trusted by default; untrusted transports disable this. */
+  allowExplicitSkillFromMessage?: boolean
   threadId: string
   workspacePath: string
   turnState: PromptPreparationTurnState
@@ -476,9 +546,23 @@ export async function prepareStandardUserPrompt({
   isPreparationCurrent?: () => boolean
 }): Promise<PreparedUserPrompt> {
   let preparedMessage = initialModelInput
-  const explicitSkillActivationMessage = parseSkillUseBlock(rawMessage)
-    ? rawMessage
-    : initialModelInput
+  const trustedExplicitSkillBlock = trustedExplicitSkill
+    ? formatTrustedSkillUseBlock(trustedExplicitSkill)
+    : undefined
+  const explicitSkillActivationMessage = trustedExplicitSkillBlock
+    ? [initialModelInput.trimEnd(), trustedExplicitSkillBlock].filter(Boolean).join("\n\n")
+    : allowExplicitSkillFromMessage
+      ? parseSkillUseBlock(rawMessage)
+        ? rawMessage
+        : initialModelInput
+      : ""
+  const skillVisibility: ProjectModeSkillScope = {
+    projectMode: Boolean(
+      harnessAgentContext.featureId || harnessAgentContext.isHarnessProjectSession
+    ),
+    boundPluginId: harnessAgentContext.pluginId,
+    boundPluginName: harnessAgentContext.pluginName
+  }
   const explicitSkillActivation = await activateExplicitSkillFromMessage({
     message: explicitSkillActivationMessage,
     workspacePath,
@@ -491,7 +575,8 @@ export async function prepareStandardUserPrompt({
     firedSkillKeys: turnState.skillHookKeys,
     skillUseTracker: turnState.skillUseTracker,
     onHookResult,
-    onHookSkippedFactory
+    onHookSkippedFactory,
+    skillVisibility
   })
   if (isPreparationCurrent && !isPreparationCurrent()) {
     return {
@@ -664,6 +749,15 @@ export interface RemoteTurnPolicy {
   disableMcpTools?: boolean
   blockedToolNames?: string[]
   filesystemAccess?: CreateAgentRuntimeOptions["filesystemAccess"]
+  /**
+   * An inbox turn has no human in front of it to approve an edit, and its tool
+   * surface is already narrowed by blockedToolNames + filesystemAccess. Carried
+   * on the policy rather than derived inside a run body, so every entry point
+   * that accepts a policy grants the same thing.
+   */
+  autoApproveFileEdits?: boolean
+  /** Binds an inbox turn's scheduler tool to the delivery that triggered it. */
+  imDeliveryContext?: CreateAgentRuntimeOptions["imDeliveryContext"]
 }
 
 export interface StandardThreadRuntimeFactoryInput {
@@ -706,7 +800,9 @@ function applyRemoteTurnPolicy(
     ...(policy.disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
     ...(policy.disableMcpTools ? { disableMcpTools: true } : {}),
     ...(policy.blockedToolNames ? { blockedToolNames: policy.blockedToolNames } : {}),
-    ...(policy.filesystemAccess ? { filesystemAccess: policy.filesystemAccess } : {})
+    ...(policy.filesystemAccess ? { filesystemAccess: policy.filesystemAccess } : {}),
+    ...(policy.autoApproveFileEdits ? { autoApproveFileEdits: true } : {}),
+    ...(policy.imDeliveryContext ? { imDeliveryContext: policy.imDeliveryContext } : {})
   }
 }
 
@@ -724,7 +820,8 @@ export function prepareStandardThreadRuntimeFactory(
         },
         input.remotePolicy
       ),
-      modelId
+      modelId,
+      modTurnRunId: input.runLease.runId
     }
   }
   return {

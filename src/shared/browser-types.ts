@@ -23,6 +23,7 @@ export interface BrowserState {
   isLoading: boolean
   canGoBack: boolean
   canGoForward: boolean
+  zoomFactor: number
   visible: boolean
   created: boolean
   consoleEntries: BrowserConsoleEntry[]
@@ -179,6 +180,8 @@ export interface BrowserScriptLibraryEntry {
 }
 
 export interface BrowserScriptLibraryListOptions {
+  /** Skip reading script bodies when only manifest metadata is needed. */
+  includeVariableInfo?: boolean
   workspacePath?: string | null
 }
 
@@ -212,6 +215,8 @@ export interface BrowserScriptExecutionState {
   endedAt?: string
   error?: string
   progressPercent?: number
+  completedSteps?: number
+  totalSteps?: number
 }
 
 export interface BrowserScriptLibrarySaveInput {
@@ -255,6 +260,7 @@ export interface BrowserProfileImportPreview {
 }
 
 export interface BrowserProfileImportOptions {
+  autoImport?: boolean
   importCookies?: boolean
   profileDirectory?: string
   sourceBrowser: BrowserProfileImportSource

@@ -31,13 +31,31 @@
 
 import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises"
 import { existsSync, mkdirSync, statSync } from "fs"
-import { basename, dirname, extname, join, relative, resolve as resolvePath, sep } from "path"
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve as resolvePath,
+  sep
+} from "path"
 import { createHash, randomUUID } from "crypto"
 import { execFile } from "child_process"
 import { promisify } from "util"
 import { gzipSync, gunzipSync } from "zlib"
-import * as iconv from "iconv-lite"
-import * as chardet from "jschardet"
+import {
+  computeLineEntries,
+  computeLineHashes,
+  decodeCodeBuffer,
+  fnv1a32,
+  lineEntriesToTexts,
+  normalizeLine,
+  subtractLineEntryMultiset,
+  type LineEntry
+} from "./adoption-lines"
+import { diffShellEdit } from "./shell-edit-diff-client"
 import { getOpenworkDir } from "../storage"
 import {
   TRACE_OBSERVABILITY_SCHEMA_VERSION,
@@ -67,10 +85,20 @@ import {
 } from "./change-kind-classifier"
 import { getTestCodeMatchRule, type TestCodeMatchRule } from "./adoption-file-policy"
 import {
+  countAddedNonBlankLines,
+  emptyCommitFileDiff,
+  formatLineRanges,
+  placeAgentLines,
+  readCommitFileDiffs,
+  type CommitFileDiff,
+  type CommittedLineIndex
+} from "./commit-file-agent-lines"
+import {
   cleanupAdoptionDeliveryRecords,
   closeAdoptionIndex,
   commitAdoptionMeasurements,
   deleteAdoptLineDetailsOlderThan,
+  deleteThreadActiveSkillsOlderThan,
   enqueueCommitJob,
   enqueueEventOutbox,
   enqueueEventOutboxBatch,
@@ -100,6 +128,7 @@ import {
   trimToRowCap,
   vacuumAdoptionIndex,
   type AdoptLineDetailsInput,
+  type AdoptionFileEventWrite,
   type AdoptionMeasurementWrite,
   type CommitJobStatus,
   type CommitJobRow,
@@ -180,6 +209,10 @@ const INDEX_MEASURED_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
 // get a window that is genuinely 14 days rather than being silently truncated by
 // the cap. 10000 rows is still a tiny sql.js file loaded fully into memory.
 const INDEX_MAX_ROWS = 10000 // hard row cap (oldest measured dropped first)
+// Sticky skill sets are keyed by thread and only matter for code a thread may
+// still generate, so they outlive the gen rows by a wide margin — a thread
+// resumed after a holiday must not silently lose its attribution.
+const THREAD_ACTIVE_SKILLS_RETENTION_MS = 90 * 24 * 60 * 60 * 1000
 const INDEX_VACUUM_EVERY_N_SWEEPS = 12 // VACUUM cadence (12 × 5min = 1h)
 
 const CODE_EXTENSIONS = new Set<string>([
@@ -298,13 +331,15 @@ export interface AdoptionContext extends Partial<TraceObservabilityContext> {
 
 export interface RecordGenInput {
   threadId: string
-  tool: "write_file" | "edit_file"
+  /** `execute` marks a Bash First edit observed around an agent shell command. */
+  tool: "write_file" | "edit_file" | "execute"
   /** Absolute or workspace-relative path (tracker resolves it). */
   filePath: string
   /**
-   * The content that was written (write_file) or one copy of the new_string
-   * (edit_file). For replaceAll edits, `occurrences` expands this baseline into
-   * a repeated line-hash multiset without materialising a repeated string.
+   * The content that was written (write_file), one copy of the new_string
+   * (edit_file), or the new-only lines of a shell edit (execute). For replaceAll
+   * edits, `occurrences` expands this baseline into a repeated line-hash
+   * multiset without materialising a repeated string.
    */
   generatedContent: string
   /** Optional: when provided, stepIndex is included in the gen event. */
@@ -387,6 +422,10 @@ let appendChain: Promise<unknown> = Promise.resolve()
 
 /** Accepted recordGen calls that have not finished their asynchronous git/JSONL/index work. */
 const inFlightRecordGenTasks = new Set<Promise<void>>()
+const pendingGenerationPaths = new Map<Promise<void>, { absPath: string; createdAt: number }>()
+const generationTailByPath = new Map<string, Promise<void>>()
+let pendingShellBytes = 0
+let pendingShellCount = 0
 
 /** In-flight measurement dedup keyed by absolute file path. */
 const inFlightFileMeasurements = new Set<string>()
@@ -555,44 +594,28 @@ async function isInsideGitWorkTree(absPath: string): Promise<boolean> {
 // Line hashing (FNV-1a 32-bit) + normalisation
 // ─────────────────────────────────────────────────────────
 
-function fnv1a32(input: string): number {
-  let h = 0x811c9dc5
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i)
-    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0
-  }
-  return h >>> 0
-}
-
-function normalizeLine(line: string): string {
-  return line.trim().replace(/\s+/g, " ")
-}
-
-function computeLineHashes(content: string): Uint32Array {
+/** `computeLineHashes` plus the physical line number of every hashed line. */
+function computeCommittedLineIndex(content: string): CommittedLineIndex {
   const lines = content.split(/\r?\n/)
+  const lineNumbers: number[] = []
   const hashes: number[] = []
-  for (const raw of lines) {
-    const norm = normalizeLine(raw)
-    if (norm.length === 0) continue // skip blank lines — noise for matching
+  for (let i = 0; i < lines.length; i++) {
+    const norm = normalizeLine(lines[i])
+    if (norm.length === 0) continue
+    lineNumbers.push(i + 1)
     hashes.push(fnv1a32(norm))
   }
-  return new Uint32Array(hashes)
-}
-
-interface LineEntry {
-  hash: number
-  text: string
-}
-
-function computeLineEntries(content: string): LineEntry[] {
-  const lines = content.split(/\r?\n/)
-  const entries: LineEntry[] = []
-  for (const raw of lines) {
-    const norm = normalizeLine(raw)
-    if (norm.length === 0) continue
-    entries.push({ hash: fnv1a32(norm), text: raw })
+  return {
+    lineNumbers: Uint32Array.from(lineNumbers),
+    hashes: Uint32Array.from(hashes),
+    totalLines: lines.length
   }
-  return entries
+}
+
+function hasReplacedFragment<T extends Pick<RecordGenInput, "tool" | "oldString">>(
+  input: T
+): input is T & { oldString: string } {
+  return input.tool !== "write_file" && typeof input.oldString === "string"
 }
 
 function getGenerationOccurrenceCount(input: Pick<RecordGenInput, "tool" | "occurrences">): number {
@@ -621,7 +644,7 @@ export function countNetLineChanges(
   const generatedCounts = buildLineHashCounts(computeLineHashes(input.generatedContent))
   const generationOccurrences = getGenerationOccurrenceCount(input)
 
-  if (input.tool !== "edit_file" || typeof input.oldString !== "string") {
+  if (!hasReplacedFragment(input)) {
     let generatedLineCount = 0
     for (const count of generatedCounts.values()) {
       generatedLineCount += count * generationOccurrences
@@ -664,30 +687,6 @@ function lineEntriesToHashes(entries: LineEntry[]): Uint32Array {
   return new Uint32Array(entries.map((entry) => entry.hash))
 }
 
-function lineEntriesToTexts(entries: LineEntry[]): string[] {
-  return entries.map((entry) => entry.text)
-}
-
-function subtractLineEntryMultiset(source: LineEntry[], subtract: LineEntry[]): LineEntry[] {
-  if (source.length === 0) return source
-  if (subtract.length === 0) return source
-
-  const subtractCounts = new Map<number, number>()
-  for (const entry of subtract) {
-    subtractCounts.set(entry.hash, (subtractCounts.get(entry.hash) ?? 0) + 1)
-  }
-  const kept: LineEntry[] = []
-  for (const entry of source) {
-    const count = subtractCounts.get(entry.hash)
-    if (count && count > 0) {
-      subtractCounts.set(entry.hash, count - 1)
-    } else {
-      kept.push(entry)
-    }
-  }
-  return kept
-}
-
 export function buildAdoptionLineBaseline(
   input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
 ): AdoptionLineBaseline {
@@ -696,7 +695,7 @@ export function buildAdoptionLineBaseline(
     computeLineEntries(input.generatedContent),
     generationOccurrences
   )
-  if (input.tool !== "edit_file" || typeof input.oldString !== "string") {
+  if (!hasReplacedFragment(input)) {
     return {
       generatedLineHashes: lineEntriesToHashes(rawGeneratedLineEntries),
       supersededLineHashes: new Uint32Array(0),
@@ -769,35 +768,6 @@ function unpackLocalLineTexts(bytes: Uint8Array | null | undefined): string[] | 
 function contentFingerprint(content: string): string {
   // Cheap whole-content 32-bit fingerprint (not cryptographic — just a quick diff hint).
   return fnv1a32(content).toString(16).padStart(8, "0")
-}
-
-function isValidUtf8(buffer: Buffer): boolean {
-  try {
-    new TextDecoder("utf-8", { fatal: true }).decode(buffer)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function detectTextEncoding(buffer: Buffer): string {
-  if (buffer.length === 0) return "utf-8"
-  try {
-    const detected = chardet.detect(buffer)
-    const encoding = typeof detected === "string" ? detected : detected?.encoding
-    const confidence = typeof detected === "string" ? 1 : (detected?.confidence ?? 0)
-    if (!encoding || encoding.toLowerCase() === "ascii" || !iconv.encodingExists(encoding)) {
-      return "utf-8"
-    }
-    if (confidence >= 0.8) return encoding
-    return isValidUtf8(buffer) ? "utf-8" : encoding
-  } catch {
-    return "utf-8"
-  }
-}
-
-function decodeCodeBuffer(buffer: Buffer): string {
-  return iconv.decode(buffer, detectTextEncoding(buffer))
 }
 
 function generationFingerprint(content: string, occurrences: number): string {
@@ -1046,6 +1016,43 @@ function getContext(threadId: string): AdoptionContext {
   return threadContexts.get(threadId) ?? {}
 }
 
+function snapshotContext(threadId: string): AdoptionContext {
+  const ctx = getContext(threadId)
+  return {
+    ...ctx,
+    ...(ctx.usedSkills ? { usedSkills: [...ctx.usedSkills] } : {}),
+    ...(ctx.skillSource ? { skillSource: [...ctx.skillSource] } : {})
+  }
+}
+
+function trackGeneration(
+  task: Promise<void>,
+  input: Pick<RecordGenInput, "filePath" | "workspacePath">,
+  createdAt: number
+): void {
+  const absPath = input.workspacePath
+    ? resolvePath(input.workspacePath, input.filePath)
+    : resolvePath(input.filePath)
+  inFlightRecordGenTasks.add(task)
+  pendingGenerationPaths.set(task, { absPath, createdAt })
+  generationTailByPath.set(absPath, task)
+  void task.then(() => {
+    inFlightRecordGenTasks.delete(task)
+    pendingGenerationPaths.delete(task)
+    if (generationTailByPath.get(absPath) === task) generationTailByPath.delete(absPath)
+  })
+}
+
+function previousGeneration(
+  input: Pick<RecordGenInput, "filePath" | "workspacePath">
+): Promise<void> | undefined {
+  return generationTailByPath.get(
+    input.workspacePath
+      ? resolvePath(input.workspacePath, input.filePath)
+      : resolvePath(input.filePath)
+  )
+}
+
 // ─────────────────────────────────────────────────────────
 // Shard rotation / retention
 // ─────────────────────────────────────────────────────────
@@ -1152,7 +1159,16 @@ async function enforceRetention(): Promise<void> {
   } catch {
     // ignore
   }
-  // 5. Belt-and-suspenders row cap — protects against a single-day generation
+  // 5. Drop sticky skill sets for threads nobody has touched in a long while.
+  //    Kept on its own, much longer window than the gen rows: this set has to
+  //    survive a thread being resumed after a holiday, and a row is only a few
+  //    hundred bytes.
+  try {
+    deleteThreadActiveSkillsOlderThan(Date.now() - THREAD_ACTIVE_SKILLS_RETENTION_MS)
+  } catch {
+    // ignore
+  }
+  // 6. Belt-and-suspenders row cap — protects against a single-day generation
   //    spree blowing up the sqlite file.
   try {
     trimToRowCap(INDEX_MAX_ROWS)
@@ -1205,19 +1221,101 @@ export function recordGen(input: RecordGenInput): void {
   console.log(
     `[AdoptionTracker] recordGen: tool=${input.tool} file=${input.filePath} threadId=${input.threadId}`
   )
+  const context = snapshotContext(input.threadId)
+  const createdAt = Date.now()
+  const previous = previousGeneration(input)
   const task = new Promise<void>((resolveTask) => {
     queueMicrotask(() => {
-      void doRecordGen(input)
+      void (previous ?? Promise.resolve())
+        .then(() => doRecordGen(input, context, createdAt))
         .catch((e) => {
           console.warn("[AdoptionTracker] recordGen unexpected error:", e)
         })
         .finally(resolveTask)
     })
   })
-  inFlightRecordGenTasks.add(task)
-  void task.then(() => {
-    inFlightRecordGenTasks.delete(task)
-  })
+  trackGeneration(task, input, createdAt)
+}
+
+export interface RecordShellEditInput {
+  threadId: string
+  /** Absolute path of the changed code file. */
+  filePath: string
+  /** Raw bytes are decoded like committed blobs, so non-UTF-8 files hash alike. */
+  beforeContent: Buffer | string
+  afterContent: Buffer | string
+  workspacePath?: string
+  harnessStage?: RecordGenInput["harnessStage"]
+  harnessStagePromise?: Promise<RecordGenInput["harnessStage"]>
+}
+
+/**
+ * Called by LocalSandbox when an agent shell command changed a code file
+ * (Bash First). Only the changed lines are recorded, so a small edit to a
+ * large file stays below MAX_LINES_FOR_MEASURE. Decoding and diffing large
+ * files runs in a worker thread. Never rejects.
+ */
+export function recordShellEdit(input: RecordShellEditInput): Promise<void> {
+  if (!initialized) return Promise.resolve()
+  const bytes = Buffer.byteLength(input.beforeContent) + Buffer.byteLength(input.afterContent)
+  if (pendingShellCount >= 64 || pendingShellBytes + bytes > 32 * 1024 * 1024) {
+    console.warn("[AdoptionTracker] shell edit skipped: pending byte/task budget exceeded", {
+      filePath: input.filePath,
+      bytes
+    })
+    return Promise.resolve()
+  }
+  const context = snapshotContext(input.threadId)
+  const createdAt = Date.now()
+  const lifecycle = outboxLifecycleGeneration
+  const previous = previousGeneration(input)
+  pendingShellCount++
+  pendingShellBytes += bytes
+  const task = (async () => {
+    // Register ownership/time before the tool returns; defer CPU work until
+    // the next event-loop turn. A later trace/commit must not steal attribution.
+    await previous
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    let stageTimer: NodeJS.Timeout | undefined
+    try {
+      const stage = input.harnessStagePromise
+        ? Promise.race([
+            input.harnessStagePromise,
+            new Promise<undefined>((resolve) => {
+              stageTimer = setTimeout(() => resolve(undefined), 2000)
+            })
+          ])
+        : Promise.resolve(input.harnessStage)
+      const [fragments, harnessStage] = await Promise.all([
+        diffShellEdit(input.beforeContent, input.afterContent),
+        stage
+      ])
+      if (!fragments || !initialized || lifecycle !== outboxLifecycleGeneration) return
+      await doRecordGen(
+        {
+          threadId: input.threadId,
+          tool: "execute",
+          filePath: input.filePath,
+          ...fragments,
+          workspacePath: input.workspacePath,
+          ...(harnessStage ? { harnessStage } : {})
+        },
+        context,
+        createdAt
+      )
+    } finally {
+      if (stageTimer) clearTimeout(stageTimer)
+    }
+  })()
+    .catch((e) => {
+      console.warn("[AdoptionTracker] shell edit not recorded:", input.filePath, e)
+    })
+    .finally(() => {
+      pendingShellCount--
+      pendingShellBytes -= bytes
+    })
+  trackGeneration(task, input, createdAt)
+  return task
 }
 
 /** @internal Standalone regression seam; production recordGen remains fire-and-forget. */
@@ -1304,7 +1402,11 @@ function enqueueTestCodeGeneration(
   return true
 }
 
-async function doRecordGen(input: RecordGenInput): Promise<void> {
+async function doRecordGen(
+  input: RecordGenInput,
+  turnContext = snapshotContext(input.threadId),
+  recordedAt = Date.now()
+): Promise<void> {
   try {
     if (!isCodeFile(input.filePath)) {
       console.log(`[AdoptionTracker] recordGen skip — not a code file: ${input.filePath}`)
@@ -1316,7 +1418,6 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // can run and clearAdoptionContext(threadId) — which would zero out the
     // skill/model/trace fields on both the cloud event and the sqlite row,
     // and in turn strip skill attribution from the downstream code_adopt.
-    const turnContext = getContext(input.threadId)
     const ctx: AdoptionContext = input.harnessStage
       ? {
           ...turnContext,
@@ -1354,7 +1455,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
         ? input.oldString.split(/\r?\n/).length * getDeletionOccurrenceCount(input)
         : 0
     const eventId = `g_${randomUUID()}`
-    const createdAt = Date.now()
+    const createdAt = recordedAt
 
     if (Math.max(rawLineCount, rawOldLineCount) > MAX_LINES_FOR_MEASURE) {
       const lineChanges = countNetLineChanges(input)
@@ -1636,6 +1737,109 @@ interface MeasureOpts {
    * or comparing hashes. Used by the commit path for files staged as deletions.
    */
   stagedDeleted?: boolean
+  /** Git root the commit belongs to; `code_commit_file.filePath` is relative to it. */
+  repoRoot?: string
+  /**
+   * This file's slice of the commit diff, used only to place agent lines. Null
+   * or absent when git could not provide it; counts never depend on it.
+   */
+  fileDiff?: CommitFileDiff | null
+}
+
+/** One file's terminal adoption writes, plus its `code_commit_file` rollup when it has one. */
+interface FileMeasurement {
+  writes: AdoptionMeasurementWrite[]
+  fileEvent?: AdoptionFileEventWrite
+}
+
+/** Sums over the `code_adopt` events one file emits for one commit. */
+interface CommitFileRollup {
+  generatedLineCount: number
+  effectiveGeneratedLineCount: number
+  adoptedLineCount: number
+  genEventIds: string[]
+}
+
+function addToCommitFileRollup(
+  rollup: CommitFileRollup,
+  genEventId: string,
+  counts: { generated: number; effective: number; adopted: number | null }
+): void {
+  // Mirrors the dashboard's per-commit sums, which skip adopt events without
+  // an adoptedLineCount (skipped_large), so the two always agree.
+  if (counts.adopted === null) return
+  rollup.generatedLineCount += counts.generated
+  rollup.effectiveGeneratedLineCount += counts.effective
+  rollup.adoptedLineCount += counts.adopted
+  rollup.genEventIds.push(genEventId)
+}
+
+/** Hash → how many copies of that line the measurement consumed as adopted. */
+function consumedHashCounts(
+  before: Map<number, number>,
+  after: Map<number, number>
+): Map<number, number> {
+  const consumed = new Map<number, number>()
+  for (const [hash, count] of before) {
+    const used = count - (after.get(hash) ?? 0)
+    if (used > 0) consumed.set(hash, used)
+  }
+  return consumed
+}
+
+/**
+ * Build the `code_commit_file` event: one file of one commit, its agent line
+ * count (the same sums as its `code_adopt` events) and where those lines sit
+ * in the committed file. Placement never changes a count.
+ */
+function buildCommitFileEvent(args: {
+  commitSha: string
+  absPath: string
+  relPath: string
+  rollup: CommitFileRollup
+  committedLines: CommittedLineIndex | null
+  adoptedCounts: Map<number, number>
+  fileDiff: CommitFileDiff | null
+  measuredAt: number
+}): CoworkEvent {
+  const { commitSha, absPath, relPath, rollup, committedLines, adoptedCounts, measuredAt } = args
+  // A binary-looking diff carries no line numbers; treat it like a missing diff.
+  const fileDiff = args.fileDiff && !args.fileDiff.binary ? args.fileDiff : null
+  const placement = committedLines
+    ? placeAgentLines(committedLines, adoptedCounts, fileDiff ? fileDiff.addedRanges : null)
+    : { lineNumbers: [], outsideDiff: fileDiff ? 0 : null }
+  const { ranges, truncated } = formatLineRanges(placement.lineNumbers)
+  const addedNonBlankLineCount = !fileDiff
+    ? null
+    : committedLines
+      ? countAddedNonBlankLines(committedLines, fileDiff.addedRanges)
+      : 0
+  return buildEvent("code_commit_file", "code_adoption", {
+    schemaVersion: 1,
+    commitSha,
+    filePath: relPath,
+    language: extname(absPath).slice(1).toLowerCase() || null,
+    fileDeleted: committedLines === null,
+    agentLineCount: rollup.adoptedLineCount,
+    agentLineRanges: ranges,
+    agentLineRangesTruncated: truncated,
+    lineMapping: fileDiff ? "diff" : "file_order",
+    agentLineCountOutsideDiff: placement.outsideDiff,
+    generatedLineCount: rollup.generatedLineCount,
+    effectiveGeneratedLineCount: rollup.effectiveGeneratedLineCount,
+    addedLineCount: fileDiff?.addedLineCount ?? null,
+    addedNonBlankLineCount,
+    deletedLineCount: fileDiff?.deletedLineCount ?? null,
+    genEventIds: rollup.genEventIds,
+    measuredAt: new Date(measuredAt).toISOString()
+  })
+}
+
+/** Repository-relative path with `/` separators, or null when `absPath` is outside `repoRoot`. */
+function toRepoRelativePath(repoRoot: string, absPath: string): string | null {
+  const rel = relative(resolvePath(repoRoot), absPath)
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null
+  return rel.replace(/\\/g, "/")
 }
 
 /**
@@ -1805,13 +2009,16 @@ function buildLocalAdoptLineDetailsRow(args: {
  * window) and build their terminal writes. The caller persists every returned
  * measured marker and immutable outbox event in one SQLite transaction.
  *
+ * With a commit sha, the file's `code_adopt` events are also rolled up into one
+ * `code_commit_file` event that says where the adopted lines sit.
+ *
  * Only commit-driven measurements remain — the 10-min timer was retired for
  * being the dominant I/O spike source with marginal value over L1 + L3.
  */
 async function buildMeasurementsForFile(
   filePath: string,
   opts?: MeasureOpts
-): Promise<AdoptionMeasurementWrite[]> {
+): Promise<FileMeasurement> {
   const absPath = resolvePath(filePath)
   const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
   const maxCreated = resolveMaxGenCreatedAt(opts?.commitTimeMs)
@@ -1819,7 +2026,7 @@ async function buildMeasurementsForFile(
   console.log(
     `[AdoptionTracker] buildMeasurementsForFile: absPath=${absPath} pendingGens=${pendingRows.length} commitSha=${opts?.commitSha ?? "none"} commitTimeMs=${opts?.commitTimeMs ?? "none"} stagedDeleted=${opts?.stagedDeleted ?? false}`
   )
-  if (pendingRows.length === 0) return []
+  if (pendingRows.length === 0) return { writes: [] }
 
   // Concurrent measurement of the same pending rows could build two different
   // event ids before either transaction closes the rows. Retry the owning job
@@ -1831,10 +2038,17 @@ async function buildMeasurementsForFile(
 
   try {
     let currentHashCounts: Map<number, number> | null = null
+    let committedLines: CommittedLineIndex | null = null
     let missingCurrentContent = false
     const supersededHashCounts = new Map<number, number>()
     const localTraceRelPath = opts?.commitSha ? await resolveLocalTraceRelPath(absPath) : null
     const writes: AdoptionMeasurementWrite[] = []
+    const rollup: CommitFileRollup = {
+      generatedLineCount: 0,
+      effectiveGeneratedLineCount: 0,
+      adoptedLineCount: 0,
+      genEventIds: []
+    }
 
     if (!opts?.stagedDeleted) {
       let current = opts?.currentContent
@@ -1848,9 +2062,12 @@ async function buildMeasurementsForFile(
 
       if (!missingCurrentContent && current !== undefined) {
         const currentText = Buffer.isBuffer(current) ? decodeCodeBuffer(current) : current
-        currentHashCounts = buildLineHashCounts(computeLineHashes(currentText))
+        committedLines = computeCommittedLineIndex(currentText)
+        currentHashCounts = buildLineHashCounts(committedLines.hashes)
       }
     }
+    // Snapshot before generations consume it; the difference is what was adopted.
+    const committedHashCounts = currentHashCounts ? new Map(currentHashCounts) : null
 
     let sawFullRewrite = false
     for (const pending of pendingRows) {
@@ -1874,6 +2091,11 @@ async function buildMeasurementsForFile(
               localTraceRelPath
             )
           )
+          addToCommitFileRollup(rollup, pending.event_id, {
+            generated: storedHashes.length,
+            effective: 0,
+            adopted: 0
+          })
         } else {
           writes.push({ genEventId: pending.event_id })
         }
@@ -2002,6 +2224,11 @@ async function buildMeasurementsForFile(
             }
           : {})
       })
+      addToCommitFileRollup(rollup, pending.event_id, {
+        generated: generatedLineCount,
+        effective: effectiveLineCount,
+        adopted: adoptedLineCount
+      })
 
       console.log(
         `[AdoptionTracker] measure verdict=${verdict} genEventId=${pending.event_id} file=${absPath} generatedLines=${generatedLineCount} effectiveLines=${effectiveLineCount} adoptedLines=${adoptedLineCount} commitSha=${opts?.commitSha ?? "none"} threadId=${pending.thread_id ?? "none"}`
@@ -2019,7 +2246,43 @@ async function buildMeasurementsForFile(
       // row is a pre-rewrite draft that cannot have survived — void it next.
       if (pending.tool === "write_file") sawFullRewrite = true
     }
-    return writes
+
+    const commitSha = opts?.commitSha?.trim()
+    if (!commitSha || rollup.genEventIds.length === 0) return { writes }
+    const relPath =
+      (opts?.repoRoot ? toRepoRelativePath(opts.repoRoot, absPath) : null) ?? localTraceRelPath
+    if (!relPath) {
+      console.warn(
+        `[AdoptionTracker] code_commit_file skipped — no repository-relative path: file=${absPath} commitSha=${commitSha}`
+      )
+      return { writes }
+    }
+    const measuredAt = Date.now()
+    const fileEvent = buildCommitFileEvent({
+      commitSha,
+      absPath,
+      relPath,
+      rollup,
+      committedLines,
+      adoptedCounts:
+        committedHashCounts && currentHashCounts
+          ? consumedHashCounts(committedHashCounts, currentHashCounts)
+          : new Map(),
+      fileDiff: opts?.fileDiff ?? null,
+      measuredAt
+    })
+    console.log(
+      `[AdoptionTracker] code_commit_file: file=${relPath} commitSha=${commitSha} agentLines=${rollup.adoptedLineCount} lineMapping=${String(fileEvent.properties?.lineMapping)} outsideDiff=${String(fileEvent.properties?.agentLineCountOutsideDiff)}`
+    )
+    return {
+      writes,
+      fileEvent: {
+        // Every generation this rollup read, including ones without an adopt
+        // event: the rollup is only valid if all of them close in one transaction.
+        genEventIds: writes.map((write) => write.genEventId),
+        outboxEvent: toOutboxEvent(fileEvent, measuredAt)
+      }
+    }
   } finally {
     inFlightFileMeasurements.delete(absPath)
   }
@@ -2294,48 +2557,72 @@ interface ResolvedCommitIdentity {
   jobId: string
 }
 
+async function gitIdentityOutput(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, {
+    cwd,
+    encoding: "utf-8",
+    timeout: 5000,
+    maxBuffer: 1024 * 1024,
+    windowsHide: true
+  })
+  return stdout.trim()
+}
+
+/**
+ * `gitCwd` is a fallback directory to run git in when `repoPath` no longer
+ * exists — in practice the main checkout behind a removed linked worktree.
+ *
+ * The two cannot be collapsed. Attribution is keyed by absolute file path
+ * (see the shell-file-ops note below), and those paths were recorded under the
+ * ORIGINAL root, so the identity has to keep reporting that root even once git
+ * has to run somewhere else. Using the fallback for both would rebuild every
+ * path under the main checkout and silently match nothing.
+ */
 async function resolveCommitIdentity(
   snapshots: StagedSnapshot[],
   commitSha?: string,
   commitTimeMs?: number,
-  repoPath?: string
+  repoPath?: string,
+  gitCwd?: string
 ): Promise<ResolvedCommitIdentity | null> {
   const cwd = repoPath || (snapshots[0]?.absPath ? dirname(snapshots[0].absPath) : "")
-  if (!cwd) return null
+  if (!cwd && !gitCwd) return null
   try {
-    const root = (
-      await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
-        cwd,
-        encoding: "utf-8",
-        timeout: 5000,
-        maxBuffer: 1024 * 1024,
-        windowsHide: true
-      })
-    ).stdout.trim()
+    let root = ""
+    let execCwd = ""
+    if (cwd) {
+      try {
+        root = await gitIdentityOutput(cwd, ["rev-parse", "--show-toplevel"])
+        execCwd = root
+      } catch {
+        // Work tree gone (removed worktree, deleted checkout) — try the fallback.
+      }
+    }
+    if (!root) {
+      // Without an explicit sha the fallback would resolve the FALLBACK repo's
+      // HEAD, attributing an unrelated commit. Refuse instead.
+      if (!gitCwd || !repoPath || !commitSha?.trim()) {
+        // Callers with no fallback used to reach this through the outer catch,
+        // which logged. Keep the log so a vanished repo is still diagnosable.
+        console.warn(
+          `[AdoptionTracker] failed to resolve commit identity: repo unavailable at ${cwd}`
+        )
+        return null
+      }
+      // Already canonical: callers pass the root git itself reported earlier.
+      root = resolvePath(repoPath)
+      execCwd = gitCwd
+    }
     const requestedSha = commitSha?.trim() || "HEAD"
-    const sha = (
-      await execFileAsync("git", ["rev-parse", "--verify", `${requestedSha}^{commit}`], {
-        cwd: root,
-        encoding: "utf-8",
-        timeout: 5000,
-        maxBuffer: 1024 * 1024,
-        windowsHide: true
-      })
-    ).stdout.trim()
+    const sha = await gitIdentityOutput(execCwd, [
+      "rev-parse",
+      "--verify",
+      `${requestedSha}^{commit}`
+    ])
     if (!root || !/^[0-9a-f]{40,64}$/i.test(sha)) return null
     let resolvedCommitTimeMs = commitTimeMs
     if (typeof resolvedCommitTimeMs !== "number" || !Number.isFinite(resolvedCommitTimeMs)) {
-      const seconds = Number(
-        (
-          await execFileAsync("git", ["show", "-s", "--format=%ct", sha], {
-            cwd: root,
-            encoding: "utf-8",
-            timeout: 5000,
-            maxBuffer: 1024 * 1024,
-            windowsHide: true
-          })
-        ).stdout.trim()
-      )
+      const seconds = Number(await gitIdentityOutput(execCwd, ["show", "-s", "--format=%ct", sha]))
       resolvedCommitTimeMs = Number.isFinite(seconds) ? seconds * 1000 : undefined
     }
     const normalizedRoot = resolvePath(root)
@@ -2358,10 +2645,11 @@ async function resolveCommitIdentity(
  * adoption commit from an unrelated commit that never had a code_gen match. */
 export async function getCommitMeasurementStatus(
   repoPath: string,
-  commitSha: string
+  commitSha: string,
+  gitCwd?: string
 ): Promise<CommitJobStatus | null> {
   if (!initialized) return null
-  const identity = await resolveCommitIdentity([], commitSha, undefined, repoPath)
+  const identity = await resolveCommitIdentity([], commitSha, undefined, repoPath, gitCwd)
   if (!identity) return null
   return getCommitJob(identity.jobId)?.status ?? null
 }
@@ -2423,7 +2711,42 @@ async function captureSnapshotsFromCommit(job: CommitJobRow): Promise<StagedSnap
   return snapshots.filter((snapshot): snapshot is StagedSnapshot => snapshot !== undefined)
 }
 
-async function runCommitJob(jobId: string, suppliedSnapshots?: StagedSnapshot[]): Promise<boolean> {
+/**
+ * Read the commit's diff for the files that still have pending generations. It
+ * only places agent lines, so every failure degrades to null (lines placed by
+ * file content alone) and never fails the job or changes a count.
+ */
+async function readPendingCommitFileDiffs(
+  job: CommitJobRow,
+  absPaths: string[],
+  gitCwd?: string
+): Promise<Map<string, CommitFileDiff> | null> {
+  const pendingPaths = new Set(
+    listPendingGenPaths(Date.now() - GEN_ATTRIBUTION_WINDOW_MS).map((row) => row.file_path)
+  )
+  const relPaths: string[] = []
+  for (const absPath of absPaths) {
+    if (!pendingPaths.has(absPath)) continue
+    const relPath = toRepoRelativePath(job.repo_path, absPath)
+    if (relPath) relPaths.push(relPath)
+  }
+  if (relPaths.length === 0) return null
+  // The job's work tree may be gone (a removed linked worktree); the commit is
+  // still readable from the main checkout that shares its object store.
+  const cwd = gitCwd && !existsSync(job.repo_path) ? gitCwd : job.repo_path
+  const startedAt = Date.now()
+  const diffs = await readCommitFileDiffs({ cwd, commitSha: job.commit_sha, relPaths })
+  console.log(
+    `[AdoptionTracker] commit diff: commitSha=${job.commit_sha} files=${relPaths.length} ok=${diffs !== null} durationMs=${Date.now() - startedAt}`
+  )
+  return diffs
+}
+
+async function runCommitJob(
+  jobId: string,
+  suppliedSnapshots?: StagedSnapshot[],
+  gitCwd?: string
+): Promise<boolean> {
   const initial = getCommitJob(jobId)
   if (!initial) return false
   if (initial.status === "completed") return true
@@ -2435,23 +2758,63 @@ async function runCommitJob(jobId: string, suppliedSnapshots?: StagedSnapshot[])
     const job = getCommitJob(jobId)
     if (!job) throw new Error(`commit job disappeared: ${jobId}`)
     const snapshots = suppliedSnapshots ?? (await captureSnapshotsFromCommit(job))
-    const writes: AdoptionMeasurementWrite[] = []
+    const measurable: StagedSnapshot[] = []
     const seenPaths = new Set<string>()
     for (const snapshot of snapshots) {
       const absPath = resolvePath(snapshot.absPath)
       if (!isCodeFile(absPath) || seenPaths.has(absPath)) continue
       seenPaths.add(absPath)
-      writes.push(
-        ...(await buildMeasurementsForFile(absPath, {
-          ...(snapshot.stagedContent === null
-            ? { stagedDeleted: true }
-            : { currentContent: snapshot.stagedContent }),
-          commitSha: job.commit_sha,
-          commitTimeMs: job.commit_time_ms ?? undefined
-        }))
-      )
+      measurable.push({ absPath, stagedContent: snapshot.stagedContent })
     }
-    const result = commitAdoptionMeasurements(writes, jobId)
+    // Async Shell diffing may still be in flight when auto-commit or a Git
+    // hook arrives. Keep the durable job retryable, not completed with no gens.
+    const paths = new Set(measurable.map((snapshot) => snapshot.absPath))
+    const maxCreated = resolveMaxGenCreatedAt(job.commit_time_ms ?? undefined)
+    const pending = [...pendingGenerationPaths]
+      .filter(
+        ([, info]) =>
+          paths.has(info.absPath) && (maxCreated === undefined || info.createdAt <= maxCreated)
+      )
+      .map(([task]) => task)
+    if (pending.length) {
+      let timer: NodeJS.Timeout | undefined
+      try {
+        const ready = await Promise.race([
+          Promise.all(pending).then(() => true),
+          new Promise<false>((resolve) => {
+            timer = setTimeout(() => resolve(false), 250)
+          })
+        ])
+        if (!ready)
+          throw new Error(`generation capture still pending for ${pending.length} task(s)`)
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    }
+    const fileDiffs = await readPendingCommitFileDiffs(
+      job,
+      measurable.map((snapshot) => snapshot.absPath),
+      gitCwd
+    )
+    const writes: AdoptionMeasurementWrite[] = []
+    const fileEvents: AdoptionFileEventWrite[] = []
+    for (const snapshot of measurable) {
+      const relPath = toRepoRelativePath(job.repo_path, snapshot.absPath)
+      const measurement = await buildMeasurementsForFile(snapshot.absPath, {
+        ...(snapshot.stagedContent === null
+          ? { stagedDeleted: true }
+          : { currentContent: snapshot.stagedContent }),
+        commitSha: job.commit_sha,
+        commitTimeMs: job.commit_time_ms ?? undefined,
+        repoRoot: job.repo_path,
+        // A file missing from a successful diff is unchanged against the first
+        // parent (a merge brought it in), so it simply has no added lines.
+        fileDiff: fileDiffs && relPath ? (fileDiffs.get(relPath) ?? emptyCommitFileDiff()) : null
+      })
+      writes.push(...measurement.writes)
+      if (measurement.fileEvent) fileEvents.push(measurement.fileEvent)
+    }
+    const result = commitAdoptionMeasurements(writes, jobId, fileEvents)
     if (!result.success) throw new Error("failed to persist adoption measurement transaction")
     if (result.enqueuedCount > 0) scheduleOutboxDrain()
     console.log(
@@ -2471,11 +2834,12 @@ async function runCommitJob(jobId: string, suppliedSnapshots?: StagedSnapshot[])
 
 function runCommitJobDeduped(
   jobId: string,
-  suppliedSnapshots?: StagedSnapshot[]
+  suppliedSnapshots?: StagedSnapshot[],
+  gitCwd?: string
 ): Promise<boolean> {
   const existing = inFlightCommitJobs.get(jobId)
   if (existing) return existing
-  const task = runCommitJob(jobId, suppliedSnapshots).catch((e) => {
+  const task = runCommitJob(jobId, suppliedSnapshots, gitCwd).catch((e) => {
     console.warn(`[AdoptionTracker] unexpected commit job failure: jobId=${jobId}`, e)
     return false
   })
@@ -2496,13 +2860,14 @@ export async function measureForCommit(
   snapshots: StagedSnapshot[],
   commitSha?: string,
   commitTimeMs?: number,
-  repoPath?: string
+  repoPath?: string,
+  gitCwd?: string
 ): Promise<boolean> {
   if (!initialized) {
     console.warn("[AdoptionTracker] measureForCommit skipped — tracker not initialized")
     return false
   }
-  const identity = await resolveCommitIdentity(snapshots, commitSha, commitTimeMs, repoPath)
+  const identity = await resolveCommitIdentity(snapshots, commitSha, commitTimeMs, repoPath, gitCwd)
   if (!identity) {
     console.warn("[AdoptionTracker] measureForCommit skipped — commit identity unavailable")
     return false
@@ -2519,7 +2884,7 @@ export async function measureForCommit(
   console.log(
     `[AdoptionTracker] measureForCommit: jobId=${job.job_id} snapshotCount=${snapshots.length} commitSha=${job.commit_sha} commitTimeMs=${job.commit_time_ms ?? "none"}`
   )
-  return runCommitJobDeduped(job.job_id, snapshots.length > 0 ? snapshots : undefined)
+  return runCommitJobDeduped(job.job_id, snapshots.length > 0 ? snapshots : undefined, gitCwd)
 }
 
 export function hasPendingGenerationsForCommit(
@@ -2535,6 +2900,16 @@ export function hasPendingGenerationsForCommit(
   const maxCreated = resolveMaxGenCreatedAt(commitTimeMs)
   for (const snap of snapshots) {
     if (!isCodeFile(snap.absPath)) continue
+    const absPath = resolvePath(snap.absPath)
+    if (
+      [...pendingGenerationPaths.values()].some(
+        (info) =>
+          info.absPath === absPath &&
+          info.createdAt >= minCreated &&
+          (maxCreated === undefined || info.createdAt <= maxCreated)
+      )
+    )
+      return true
     if (findPendingGensForFile(snap.absPath, minCreated, maxCreated).length > 0) return true
   }
   return false
@@ -2584,9 +2959,13 @@ export function recordShellFileOps(command: string, cwd: string, exitCode: numbe
   if (!initialized) return
   if (exitCode !== 0 || !command) return
   queueMicrotask(() => {
-    doRecordShellFileOps(command, cwd).catch((e) => {
-      console.warn("[AdoptionTracker] recordShellFileOps unexpected error:", e)
-    })
+    // A preceding Shell generation can still be diffing when rm/mv finishes.
+    // Resolve accepted generations first so the path operation can find them.
+    Promise.all([...inFlightRecordGenTasks])
+      .then(() => doRecordShellFileOps(command, cwd))
+      .catch((e) => {
+        console.warn("[AdoptionTracker] recordShellFileOps unexpected error:", e)
+      })
   })
 }
 

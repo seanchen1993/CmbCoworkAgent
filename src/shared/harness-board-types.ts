@@ -120,12 +120,25 @@ export interface HarnessKnowledgePreviewResult {
   error?: string
 }
 
+/** Single-directory feature snapshot; never refreshed from the global repository catalog. */
 export interface HarnessDeployUnitMapping {
   deployUnitIdMapping: string
   deployUnitId: string
   localRepoPath: string
   description?: string
 }
+
+/** Global multi-directory catalog entry used when configuring a feature. */
+export interface HarnessDeployUnitConfig {
+  deployUnitIdMapping: string
+  deployUnitId: string
+  description?: string
+  repositoryPaths: Array<{ pathId: string; localRepoPath: string }>
+}
+
+export type HarnessSessionWorkspace =
+  | { source: "directory"; path: string }
+  | { source: "deployUnit"; deployUnitId: string }
 
 export interface HarnessLeanTokenConfig {
   leanToken: string
@@ -134,6 +147,7 @@ export interface HarnessLeanTokenConfig {
 export type HarnessSessionContextInjectionSource = "cmbdevclaw" | "plugin"
 
 export interface HarnessHumanGateSnapshot {
+  /** Alias of the Human Gate notificationId; retained by the managed-run event contract. */
   gateId: string
   status: "pending"
   projectId: string
@@ -149,13 +163,6 @@ export interface HarnessHumanGateDecisionInput {
   projectId: string
   featureId: string
   gateId: string
-}
-
-export interface HarnessHumanGateChangedEvent {
-  projectId: string
-  featureId: string
-  sourceThreadId: string
-  humanGate?: HarnessHumanGateSnapshot
 }
 
 export interface HarnessAgentmdLoadStatusItem {
@@ -177,9 +184,9 @@ export interface HarnessFeatureDeployUnitBinding {
   projectId: string
   featureId: string
   selectedDeployUnitMappings: HarnessDeployUnitMapping[]
+  sessionWorkspace?: HarnessSessionWorkspace
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
   imManagementEnabled?: boolean
-  humanGate?: HarnessHumanGateSnapshot
 }
 
 function normalizeHarnessText(value: unknown): string {
@@ -229,9 +236,10 @@ export interface HarnessProjectMetadata {
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
   /** First feature-session run whose complete system-constraint set loaded successfully. */
   systemConstraintFirstLoadedAt?: string
+  /** 该项目第一次开启托管运行的时间。与上面那个约束标记同样是单调的，只写一次。 */
+  managedRunFirstStartedAt?: string
   "harness-adapter": HarnessAdapterSnapshot
   creator?: HarnessProjectCreatorMetadata
   lifecycle: {
@@ -252,7 +260,6 @@ export interface HarnessProjectCreateInput {
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
 }
 
 export interface HarnessEnterpriseProjectSearchInput {
@@ -371,6 +378,7 @@ export interface HarnessProjectReviewResult {
 }
 
 export interface HarnessFeatureCreateInput {
+  sessionWorkspace: HarnessSessionWorkspace
   projectId: string
   feature: string
   selectedDeployUnits?: HarnessDeployUnitMapping[]
@@ -388,6 +396,7 @@ export interface HarnessFeatureCreateResult {
 }
 
 export interface HarnessFeatureDeployUnitUpdateInput {
+  sessionWorkspace: HarnessSessionWorkspace
   projectId: string
   featureId: string
   selectedDeployUnits: HarnessDeployUnitMapping[]
@@ -415,6 +424,7 @@ export interface ManagedRunStartInput {
   projectId: string
   featureId: string
   workspacePath: string
+  initialUserMessage?: string
 }
 
 export interface ManagedRunStartValidationInput {
@@ -468,7 +478,6 @@ export interface HarnessProjectMetadataUpdateInput {
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
 }
 
 export interface HarnessProjectListItem {
@@ -481,8 +490,8 @@ export interface HarnessProjectListItem {
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
   systemConstraintFirstLoadedAt?: string
+  managedRunFirstStartedAt?: string
   harnessAdapter: {
     id: string
     name: string
@@ -583,7 +592,6 @@ export interface ManagedRunSnapshot {
     nextActionHash: string
   }
   providerRetryCount: number
-  bizRetryCount: number
   nextRetryAt?: string
   failureReason?: string
   cancellationReason?: string
@@ -616,7 +624,6 @@ export interface ManagedRunDecisionFacts {
   changedFields: ManagedRunDecisionChangedField[]
   initialInspection: boolean
   previousNodeId?: string
-  bizRetryCount: number
   providerRetryCount: number
   contextInputTokens?: number
   contextMaxTokens?: number
@@ -682,6 +689,8 @@ export type ManagedRunDecisionActor = "controller" | "user" | "system"
 export type ManagedRunDecisionChannel = "system" | "desktop" | "im"
 
 export type ManagedRunEventType =
+  | "decision_notification_created"
+  | "decision_notification_ended"
   | "run_started"
   | "managed_agent_turn_ended"
   | "provider_retry_timer_elapsed"
@@ -704,6 +713,9 @@ export type ManagedRunEventType =
 export interface ManagedRunEvent {
   version: 2.5
   eventId: string
+  notificationId?: string
+  notificationStatus?: "pending" | "resolved" | "invalidated"
+  notificationAction?: "stop" | "continue" | "new_thread" | "approve" | "reject"
   createTime: string
   type: ManagedRunEventType
   runId: string
@@ -806,7 +818,6 @@ export interface HarnessFeatureSummary {
   currentNodeId: string
   currentNodeStatus: HarnessNodeStatus
   currentNodeStatusLabel?: string
-  humanGate?: HarnessHumanGateSnapshot
   summary: {
     text: string
     updatedAt: string
@@ -822,7 +833,6 @@ export interface HarnessProjectDetailViewModel {
     systemId: string
     systemName: string
     workspacePath: string
-    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {
@@ -1020,7 +1030,6 @@ export interface HarnessRunDetailViewModel {
     projectDir: string
     systemId: string
     workspacePath: string
-    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {
@@ -1047,12 +1056,13 @@ export interface HarnessRunDetailViewModel {
     overallStatus?: HarnessStatus
     skipNodeAvailable: boolean
     selectedDeployUnits: HarnessDeployUnitMapping[]
+    sessionWorkspace?: HarnessSessionWorkspace
+    resolvedSessionWorkspacePath?: string
     currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]
     managedRun?: ManagedRunSummary
     imManagementEnabled?: boolean
-    humanGate?: HarnessHumanGateSnapshot
   }
   sessions: HarnessSessionBinding[]
 }

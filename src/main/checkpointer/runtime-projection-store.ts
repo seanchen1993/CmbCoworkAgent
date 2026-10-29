@@ -126,10 +126,7 @@ function sqliteTableHasColumns(
 
 function checkpointSchemaLayout(database: DatabaseSync): CheckpointSchemaLayout | null {
   const columns = sqliteTableColumns(database, "checkpoints")
-  if (
-    columns.size === 0 ||
-    !CHECKPOINT_REQUIRED_COLUMNS.every((column) => columns.has(column))
-  ) {
+  if (columns.size === 0 || !CHECKPOINT_REQUIRED_COLUMNS.every((column) => columns.has(column))) {
     return null
   }
   return { hasCheckpointTs: columns.has("checkpoint_ts") }
@@ -336,11 +333,7 @@ function sanitizeRuntimeCheckpoint(
 }
 
 function runtimeTupleFromProjectionRow(row: StoredRuntimeProjectionRow): unknown {
-  const runtimeCheckpoint = parseTypedJson(
-    row.type,
-    row.runtimeCheckpoint,
-    "runtime checkpoint"
-  )
+  const runtimeCheckpoint = parseTypedJson(row.type, row.runtimeCheckpoint, "runtime checkpoint")
   return {
     config: {
       configurable: {
@@ -659,12 +652,7 @@ export function prepareLatestRuntimeProjectionMigration(
   checkpointNs = ""
 ): PreparedRuntimeProjectionMigration | null {
   const layout = assertCheckpointSchemaIsPublished(database)
-  return prepareLatestRuntimeProjectionMigrationWithLayout(
-    database,
-    threadId,
-    checkpointNs,
-    layout
-  )
+  return prepareLatestRuntimeProjectionMigrationWithLayout(database, threadId, checkpointNs, layout)
 }
 
 function prepareLatestRuntimeProjectionMigrationWithLayout(
@@ -726,9 +714,7 @@ function isVisibleSerializedCheckpointMessage(raw: unknown): boolean {
       ? visibleUserMessage
       : rawContent
   const content =
-    typeof effectiveContent === "string" || Array.isArray(effectiveContent)
-      ? effectiveContent
-      : ""
+    typeof effectiveContent === "string" || Array.isArray(effectiveContent) ? effectiveContent : ""
   return isRestorableConversationTranscriptMessage(role, content)
 }
 
@@ -755,13 +741,7 @@ export function hasVisibleCheckpointTranscript(
     // projection and writes tables. Only the authoritative checkpoint table is
     // required until the payload proves that it references external messages.
     const checkpointSchema = assertCheckpointSchemaIsPublished(database)
-    const row = readLatestCheckpointRow(
-      database,
-      threadId,
-      checkpointNs,
-      true,
-      checkpointSchema
-    )
+    const row = readLatestCheckpointRow(database, threadId, checkpointNs, true, checkpointSchema)
     if (!row || row.metadata === undefined) return false
     throwIfCancelled(cancellation)
     if (payloadBytes(row.checkpoint) > CHECKPOINT_TRANSCRIPT_PRESENCE_BYTE_BUDGET) return true
@@ -1015,12 +995,7 @@ export function readLatestCheckpointRuntimeTuple(
     const layout = assertCheckpointSchemaIsPublished(database)
     for (let attempt = 0; attempt < 3; attempt += 1) {
       throwIfCancelled(cancellation)
-      const current = readCurrentRuntimeProjectionRow(
-        database,
-        threadId,
-        checkpointNs,
-        layout
-      )
+      const current = readCurrentRuntimeProjectionRow(database, threadId, checkpointNs, layout)
       if (current) {
         try {
           return runtimeTupleFromProjectionRow(current)
@@ -1071,7 +1046,11 @@ function hydrateRawCheckpointMessages(
 ): Record<string, unknown> {
   throwIfCancelled(cancellation)
   const rawChannelValues = checkpoint.channel_values
-  if (!rawChannelValues || typeof rawChannelValues !== "object" || Array.isArray(rawChannelValues)) {
+  if (
+    !rawChannelValues ||
+    typeof rawChannelValues !== "object" ||
+    Array.isArray(rawChannelValues)
+  ) {
     return checkpoint
   }
   const channelValues = rawChannelValues as Record<string, unknown>
@@ -1138,7 +1117,9 @@ function hydrateRawCheckpointMessages(
       !Number.isSafeInteger(snapshot.messageCount) ||
       snapshot.messageCount < snapshot.prefixLength
     ) {
-      throw new Error(`[CheckpointRuntimeWorker] Invalid message snapshot: ${snapshot.checkpointId}`)
+      throw new Error(
+        `[CheckpointRuntimeWorker] Invalid message snapshot: ${snapshot.checkpointId}`
+      )
     }
     const suffix = parseTypedJson(snapshot.type, snapshot.suffix, "message snapshot")
     if (!Array.isArray(suffix)) {
@@ -1230,10 +1211,7 @@ function splitLegacyTranscriptText(value: string): string[] {
 function boundedLegacyStructuredContent(value: unknown): unknown {
   const projected = boundedTransferContent(value)
   if (!Array.isArray(projected)) return projected
-  return [
-    ...projected,
-    { type: "text", text: "[旧检查点结构化正文过大，已显示有界投影]" }
-  ]
+  return [...projected, { type: "text", text: "[旧检查点结构化正文过大，已显示有界投影]" }]
 }
 
 function buildDurableLegacyCheckpointMessages(
@@ -1244,7 +1222,10 @@ function buildDurableLegacyCheckpointMessages(
   const checkpointTime = Date.parse(checkpointTs)
   const baseTime = Number.isFinite(checkpointTime) ? checkpointTime : Date.now()
   const candidates: Array<
-    Omit<DurableLegacyCheckpointMessage, "messageId" | "providerSourceId" | "providerOccurrence"> & {
+    Omit<
+      DurableLegacyCheckpointMessage,
+      "messageId" | "providerSourceId" | "providerOccurrence"
+    > & {
       id: string
       content: unknown
       provider_source_id?: string
@@ -1295,15 +1276,13 @@ function buildDurableLegacyCheckpointMessages(
         : null
     const contentJson = contentFragments
       ? JSON.stringify("")
-      : Buffer.byteLength(rawContentJson, "utf8") >
-          LEGACY_TRANSCRIPT_STRUCTURED_PROJECTION_BYTES
+      : Buffer.byteLength(rawContentJson, "utf8") > LEGACY_TRANSCRIPT_STRUCTURED_PROJECTION_BYTES
         ? JSON.stringify(boundedLegacyStructuredContent(content))
         : rawContentJson
     const rawToolCallsJson = toolCalls ? JSON.stringify(toolCalls) : null
     const toolCallsJson =
       rawToolCallsJson &&
-      Buffer.byteLength(rawToolCallsJson, "utf8") >
-        LEGACY_TRANSCRIPT_STRUCTURED_PROJECTION_BYTES
+      Buffer.byteLength(rawToolCallsJson, "utf8") > LEGACY_TRANSCRIPT_STRUCTURED_PROJECTION_BYTES
         ? JSON.stringify(boundedTransferToolCalls(toolCalls) ?? [])
         : rawToolCallsJson
     const toolCallId = message.tool_call_id ?? kwargs.tool_call_id
@@ -1569,7 +1548,9 @@ function migrateLegacyMessagesIntoDurableRows(input: {
             break
           }
           if (
-            !database.prepare("SELECT 1 FROM threads WHERE thread_id = ? LIMIT 1").get(input.threadId)
+            !database
+              .prepare("SELECT 1 FROM threads WHERE thread_id = ? LIMIT 1")
+              .get(input.threadId)
           ) {
             database
               .prepare("DELETE FROM legacy_checkpoint_transcript_migrations WHERE thread_id = ?")
@@ -1647,8 +1628,7 @@ function migrateLegacyMessagesIntoDurableRows(input: {
             nextFragmentOffset = fragmentMessage.contentFragments.length
           }
 
-          const messageComplete =
-            nextFragmentOffset >= fragmentMessage.contentFragments.length
+          const messageComplete = nextFragmentOffset >= fragmentMessage.contentFragments.length
           database
             .prepare(
               `UPDATE legacy_checkpoint_transcript_migrations
@@ -2065,17 +2045,10 @@ function boundedTransferContent(value: unknown): unknown {
     const bounded: Record<string, unknown> = {}
     for (const [key, nested] of Object.entries(block).slice(0, 20)) {
       if (typeof nested === "string") {
-        const text = nested.slice(
-          0,
-          Math.min(remainingText, CHECKPOINT_TRANSFER_BLOCK_TEXT_LIMIT)
-        )
+        const text = nested.slice(0, Math.min(remainingText, CHECKPOINT_TRANSFER_BLOCK_TEXT_LIMIT))
         remainingText -= text.length
         bounded[key] = text
-      } else if (
-        nested === null ||
-        typeof nested === "number" ||
-        typeof nested === "boolean"
-      ) {
+      } else if (nested === null || typeof nested === "number" || typeof nested === "boolean") {
         bounded[key] = nested
       } else if (Array.isArray(nested)) {
         bounded[key] = `[Array ${nested.length}]`
@@ -2140,8 +2113,10 @@ function boundedTransferCheckpointMessage(raw: unknown, index: number): unknown 
     ...(additionalKwargs.is_error === true ? { is_error: true } : {}),
     ...(typeof additionalKwargs.cmb_internal_provider_source_id === "string"
       ? {
-          cmb_internal_provider_source_id:
-            additionalKwargs.cmb_internal_provider_source_id.slice(0, 256)
+          cmb_internal_provider_source_id: additionalKwargs.cmb_internal_provider_source_id.slice(
+            0,
+            256
+          )
         }
       : {}),
     ...(typeof additionalKwargs.cmb_internal_provider_occurrence === "number"
@@ -2174,26 +2149,26 @@ function normalizeBoundedCheckpointTransferOptions(options: {
     ),
     messageByteBudget: Math.min(
       CHECKPOINT_TRANSFER_MAX_BYTE_BUDGET,
-      Math.max(
-        0,
-        Math.floor(options.messageByteBudget ?? CHECKPOINT_TRANSFER_DEFAULT_BYTE_BUDGET)
-      )
+      Math.max(0, Math.floor(options.messageByteBudget ?? CHECKPOINT_TRANSFER_DEFAULT_BYTE_BUDGET))
     )
   }
 }
 
-function boundedTransferCheckpointMessageFromRow(
-  row: BoundedCheckpointMessageRow
-): unknown | null {
+function boundedTransferCheckpointMessageFromRow(row: BoundedCheckpointMessageRow): unknown | null {
   const serialized = row.rawMessage ?? row.fallbackMessage
   if (serialized === null) return null
-  return boundedTransferCheckpointMessage(
-    JSON.parse(serialized) as unknown,
-    row.messageIndex
-  )
+  return boundedTransferCheckpointMessage(JSON.parse(serialized) as unknown, row.messageIndex)
 }
 
-class BoundedCheckpointMessageWindow {
+interface CheckpointMessageSink {
+  readonly isDisabled: boolean
+  readonly scanMessageLimit: number
+  readonly rawMessageByteLimit?: number
+  readonly exact?: boolean
+  pushChronological(row: BoundedCheckpointMessageRow): void
+}
+
+class BoundedCheckpointMessageWindow implements CheckpointMessageSink {
   readonly messages: unknown[] = []
   private messageBytes: number[] = []
   private selectedBytes = 0
@@ -2515,7 +2490,8 @@ type BoundedCheckpointMessageSource =
 
 function inspectBoundedCheckpointMessageSource(
   database: DatabaseSync,
-  row: StoredRuntimeProjectionRow
+  row: StoredRuntimeProjectionRow,
+  strict = false
 ): BoundedCheckpointMessageSource {
   const source = database
     .prepare(
@@ -2559,14 +2535,127 @@ function inspectBoundedCheckpointMessageSource(
           : null
     }
   }
+  if (strict && source.message_type !== null && source.message_type !== undefined)
+    throw new Error("CHECKPOINT_MESSAGES_INVALID")
   return { kind: "empty", messageCount: 0 }
+}
+
+// Exact consumers must never see the lossy renderer fallback. Keep both bound
+// parameters so the shared traversal has the same prepared-statement shape.
+const EXACT_CHECKPOINT_MESSAGE_SELECT = `
+  CAST(message.key AS INTEGER) AS message_index,
+  CASE WHEN length(CAST(message.value AS BLOB)) <= ?
+    THEN CAST(message.value AS TEXT) ELSE NULL END AS raw_message,
+  CASE WHEN ? >= 0 THEN NULL ELSE NULL END AS fallback_message`
+
+/** Stream an authoritative read-only snapshot inside the worker, with bounded rows. */
+export function visitLatestCheckpointMessages(
+  databasePath: string,
+  threadId: string,
+  checkpointNs: string,
+  visit: (message: unknown) => void,
+  options: {
+    cancellationBuffer?: SharedArrayBuffer
+    onContextUsageStart?(startIndex: number | undefined): void
+  } = {}
+): { checkpointId: string; messageCount: number } | null {
+  const cancellation = options.cancellationBuffer
+    ? new Int32Array(options.cancellationBuffer)
+    : undefined
+  throwIfCancelled(cancellation)
+  if (!existsSync(databasePath)) return null
+  const database = new DatabaseSync(databasePath, { readOnly: true, timeout: 5000 })
+  try {
+    database.exec("PRAGMA query_only = ON")
+    database.exec("BEGIN")
+    const layout = assertCheckpointSchemaIsPublished(database)
+    const runtime = readBoundedRuntimeCheckpoint(
+      database,
+      threadId,
+      checkpointNs,
+      layout,
+      cancellation
+    )
+    if (!runtime) return null
+    if (options.onContextUsageStart) {
+      // The renderer projection deliberately drops graph channels. Read only the scalar
+      // context boundary from the same authoritative checkpoint/transaction, never its summary.
+      const boundary = database
+        .prepare(
+          `SELECT
+        json_type(CAST(checkpoint AS TEXT), '$.channel_values._summarizationEvent') AS event_type,
+        CASE WHEN json_type(CAST(checkpoint AS TEXT), '$.channel_values._summarizationEvent.usageStartIndex') = 'integer'
+          THEN json_extract(CAST(checkpoint AS TEXT), '$.channel_values._summarizationEvent.usageStartIndex')
+          ELSE NULL END AS usage_start
+        FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`
+        )
+        .get(threadId, checkpointNs, runtime.row.checkpointId) as
+        | { event_type: string | null; usage_start: number | null }
+        | undefined
+      if (!boundary) throw new Error("CHECKPOINT_CONTEXT_UNAVAILABLE")
+      const startIndex = boundary.usage_start
+      options.onContextUsageStart(
+        boundary.event_type && boundary.event_type !== "null"
+          ? typeof startIndex === "number" && Number.isSafeInteger(startIndex) && startIndex >= 0
+            ? startIndex
+            : undefined
+          : 0
+      )
+    }
+    const source = inspectBoundedCheckpointMessageSource(database, runtime.row, true)
+    const window: CheckpointMessageSink = {
+      isDisabled: false,
+      exact: true,
+      scanMessageLimit: 100000,
+      rawMessageByteLimit: 1024 * 1024,
+      pushChronological(row) {
+        throwIfCancelled(cancellation)
+        if (row.rawMessage === null) throw new Error("CHECKPOINT_MESSAGE_SIZE_LIMIT")
+        visit(JSON.parse(row.rawMessage))
+      }
+    }
+    let messageCount = source.kind === "external" ? 0 : source.messageCount
+    if (source.kind === "inline") {
+      if (messageCount > window.scanMessageLimit) throw new Error("CHECKPOINT_MESSAGE_SCAN_LIMIT")
+      readInlineBoundedCheckpointMessages({
+        database,
+        row: runtime.row,
+        messageCount,
+        window,
+        cancellation
+      })
+    } else if (source.kind === "external") {
+      const external = readExternalMessageSnapshotSegments({
+        database,
+        row: runtime.row,
+        markerMessageCount: source.markerMessageCount,
+        scanMessageLimit: window.scanMessageLimit,
+        cancellation
+      })
+      messageCount = external.messageCount
+      if (messageCount > window.scanMessageLimit) throw new Error("CHECKPOINT_MESSAGE_SCAN_LIMIT")
+      readExternalBoundedCheckpointMessages({
+        database,
+        row: runtime.row,
+        segments: external.segments,
+        window,
+        cancellation
+      })
+    }
+    throwIfCancelled(cancellation)
+    database.exec("COMMIT")
+    return { checkpointId: runtime.row.checkpointId, messageCount }
+  } finally {
+    // Closing a read-only connection rolls back on errors/absent checkpoints.
+    database.close()
+  }
 }
 
 function readInlineBoundedCheckpointMessages(input: {
   database: DatabaseSync
   row: StoredRuntimeProjectionRow
   messageCount: number
-  window: BoundedCheckpointMessageWindow
+  window: CheckpointMessageSink
   cancellation?: Int32Array
 }): void {
   if (input.window.isDisabled || input.messageCount === 0) return
@@ -2575,7 +2664,7 @@ function readInlineBoundedCheckpointMessages(input: {
   let visited = 0
   const rows = input.database
     .prepare(
-      `SELECT ${BOUNDED_CHECKPOINT_MESSAGE_SELECT}
+      `SELECT ${input.window.exact ? EXACT_CHECKPOINT_MESSAGE_SELECT : BOUNDED_CHECKPOINT_MESSAGE_SELECT}
        FROM checkpoints AS checkpoint,
             json_each(
               CAST(checkpoint.checkpoint AS TEXT),
@@ -2589,8 +2678,8 @@ function readInlineBoundedCheckpointMessages(input: {
        ORDER BY CAST(message.key AS INTEGER)`
     )
     .iterate(
-      CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
-      CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
+      input.window.rawMessageByteLimit ?? CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
+      input.window.rawMessageByteLimit ?? CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
       input.row.threadId,
       input.row.checkpointNs,
       input.row.checkpointId,
@@ -2602,6 +2691,8 @@ function readInlineBoundedCheckpointMessages(input: {
       throwIfCancelled(input.cancellation)
     }
     const row = boundedCheckpointMessageRow(raw)
+    if (input.window.exact && row.messageIndex !== previousIndex + 1)
+      throw new Error("CHECKPOINT_MESSAGES_INVALID")
     if (row.messageIndex <= previousIndex || row.messageIndex >= input.messageCount) {
       throw new Error("[CheckpointRuntimeWorker] Unordered inline checkpoint messages")
     }
@@ -2609,6 +2700,8 @@ function readInlineBoundedCheckpointMessages(input: {
     visited += 1
     input.window.pushChronological(row)
   }
+  if (input.window.exact && visited !== input.messageCount - scanStart)
+    throw new Error("CHECKPOINT_MESSAGES_INVALID")
 }
 
 function readExternalMessageSnapshotSegments(input: {
@@ -2637,9 +2730,7 @@ function readExternalMessageSnapshotSegments(input: {
       )
     }
     if (input.markerMessageCount !== null && input.markerMessageCount !== messageCount) {
-      throw new Error(
-        `[CheckpointRuntimeWorker] Message count mismatch: ${input.row.checkpointId}`
-      )
+      throw new Error(`[CheckpointRuntimeWorker] Message count mismatch: ${input.row.checkpointId}`)
     }
     return { messageCount, segments: [] }
   }
@@ -2687,10 +2778,7 @@ function readExternalMessageSnapshotSegments(input: {
     }
     if (messageCount === null) {
       messageCount = snapshotMessageCount
-      if (
-        input.markerMessageCount !== null &&
-        input.markerMessageCount !== snapshotMessageCount
-      ) {
+      if (input.markerMessageCount !== null && input.markerMessageCount !== snapshotMessageCount) {
         throw new Error(`[CheckpointRuntimeWorker] Message count mismatch: ${checkpointId}`)
       }
       visibleStart = Math.max(0, messageCount - input.scanMessageLimit)
@@ -2720,7 +2808,9 @@ function readExternalMessageSnapshotSegments(input: {
     throw new Error(`[CheckpointRuntimeWorker] Missing message snapshot: ${input.row.checkpointId}`)
   }
   if (visibleEnd > visibleStart) {
-    throw new Error(`[CheckpointRuntimeWorker] Missing message snapshot prefix: ${input.row.checkpointId}`)
+    throw new Error(
+      `[CheckpointRuntimeWorker] Missing message snapshot prefix: ${input.row.checkpointId}`
+    )
   }
   return { messageCount, segments: segments.reverse() }
 }
@@ -2729,14 +2819,14 @@ function readExternalBoundedCheckpointMessages(input: {
   database: DatabaseSync
   row: StoredRuntimeProjectionRow
   segments: ExternalMessageSnapshotSegment[]
-  window: BoundedCheckpointMessageWindow
+  window: CheckpointMessageSink
   cancellation?: Int32Array
 }): void {
   if (input.window.isDisabled) return
   let previousGlobalIndex = -1
   let visited = 0
   const statement = input.database.prepare(
-    `SELECT ${BOUNDED_CHECKPOINT_MESSAGE_SELECT}
+    `SELECT ${input.window.exact ? EXACT_CHECKPOINT_MESSAGE_SELECT : BOUNDED_CHECKPOINT_MESSAGE_SELECT}
      FROM checkpoint_message_snapshots AS snapshot,
           json_each(CAST(snapshot.suffix AS TEXT)) AS message
      WHERE snapshot.thread_id = ? AND snapshot.checkpoint_ns = ?
@@ -2747,9 +2837,10 @@ function readExternalBoundedCheckpointMessages(input: {
      ORDER BY CAST(message.key AS INTEGER)`
   )
   for (const segment of input.segments) {
+    let expectedIndex = segment.localStart
     const rows = statement.iterate(
-      CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
-      CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
+      input.window.rawMessageByteLimit ?? CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
+      input.window.rawMessageByteLimit ?? CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
       input.row.threadId,
       input.row.checkpointNs,
       segment.checkpointId,
@@ -2761,6 +2852,8 @@ function readExternalBoundedCheckpointMessages(input: {
         throwIfCancelled(input.cancellation)
       }
       const localRow = boundedCheckpointMessageRow(raw)
+      if (input.window.exact && localRow.messageIndex !== expectedIndex++)
+        throw new Error("CHECKPOINT_MESSAGES_INVALID")
       const globalIndex = segment.globalOffset + localRow.messageIndex
       if (globalIndex <= previousGlobalIndex) {
         throw new Error("[CheckpointRuntimeWorker] Unordered external checkpoint messages")
@@ -2769,6 +2862,8 @@ function readExternalBoundedCheckpointMessages(input: {
       visited += 1
       input.window.pushChronological({ ...localRow, messageIndex: globalIndex })
     }
+    if (input.window.exact && expectedIndex !== segment.localEnd)
+      throw new Error("CHECKPOINT_MESSAGES_INVALID")
   }
 }
 
@@ -2885,13 +2980,7 @@ export function readLatestCheckpointTuple(
       database.exec("COMMIT")
       return tuple
     }
-    const row = readLatestCheckpointRow(
-      database,
-      threadId,
-      checkpointNs,
-      true,
-      checkpointSchema
-    )
+    const row = readLatestCheckpointRow(database, threadId, checkpointNs, true, checkpointSchema)
     if (!row || row.metadata === undefined) {
       database.exec("COMMIT")
       return null

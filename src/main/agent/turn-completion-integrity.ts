@@ -45,6 +45,7 @@
 import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
 import { TURN_COMPLETION_GATE_MARKER_PREFIX } from "../../shared/checkpoint-transcript"
+import { ModelRefusalError, readModelRefusal, type ModelRefusal } from "./model-refusal"
 
 /** Protocol-level defects in a model's FINAL (tool-call-free) message. */
 export type TurnCompletionDefect =
@@ -104,6 +105,14 @@ const TEXTUAL_TOOL_CALL_MARKERS = [
   "<function="
 ]
 
+// DSML can leak as closing tags only, including a tail joined to the preceding
+// prose. A complete invoke/tool_calls closing pair is a stronger signal than
+// a single inline tag, which may just be mentioned in an explanation.
+const DSML_TOOL_LINE_RE =
+  /(^|\n)[ \t*-]*<\/?[｜|]dsml[｜|][ \t]*(?:tool_calls|invoke|parameter)(?=[\s>])/
+const DSML_TOOL_TAIL_RE =
+  /<\/[｜|]dsml[｜|][ \t]*invoke>[ \t\r\n]*<\/[｜|]dsml[｜|][ \t]*tool_calls>\s*$/
+
 /**
  * Models observed emitting an explicit finish signal at least once in this
  * process, keyed by the model name the provider reports.
@@ -121,6 +130,7 @@ const TEXTUAL_TOOL_CALL_MARKERS = [
 const modelsWithObservedFinishSignal = new Set<string>()
 
 interface GateRunState {
+  refusal?: ModelRefusal
   retriesUsed: number
   todoNudgesUsed: number
   unresolved: TurnCompletionInspection | null
@@ -145,6 +155,7 @@ function runScopedKey(threadId: string, ownerRunToken: string): string {
  * valid message ends the sub-turn.
  */
 function settleRunState(state: GateRunState): void {
+  state.refusal = undefined
   state.retriesUsed = 0
   state.todoNudgesUsed = 0
   state.unresolved = null
@@ -165,6 +176,7 @@ function ensureRunState(key: string): GateRunState {
 }
 
 export interface TurnCompletionGateReport {
+  refusal?: ModelRefusal
   retriesUsed: number
   todoNudgesUsed: number
   /** Non-null when the model never produced a valid final message. */
@@ -183,11 +195,17 @@ export function readTurnCompletionGateReport(
   const state = gateStateByRun.get(runScopedKey(threadId, ownerRunToken))
   if (!state) return null
   return {
+    ...(state.refusal ? { refusal: { ...state.refusal } } : {}),
     retriesUsed: state.retriesUsed,
     todoNudgesUsed: state.todoNudgesUsed,
     unresolved: state.unresolved,
     unfinishedTodos: [...state.unfinishedTodos]
   }
+}
+
+/** Managed transports must settle provider refusals before success-only effects. */
+export function assertNoTurnModelRefusal(threadId: string, runId: string): void {
+  if (gateStateByRun.get(runScopedKey(threadId, runId))?.refusal) throw new ModelRefusalError()
 }
 
 /** Drop a run's gate state. Must run on EVERY exit of a physical run (success,
@@ -295,6 +313,7 @@ function stripCodeSpans(text: string): string {
  *   - the marker must OPEN an unquoted line. A model that emits a call instead of using
  *     the tool API puts it on its own line; prose that mentions one has it mid
  *     sentence ("代码里判断的是 <function=foo> 这种写法").
+ *     DSML also permits its paired closing tags at the end of unquoted prose.
  *
  * This is deliberately biased toward MISSING a real textual call: a miss just
  * returns to "the turn ends normally", which the other defect classes
@@ -303,9 +322,22 @@ function stripCodeSpans(text: string): string {
  */
 export function containsTextualToolCall(text: string): boolean {
   const prose = stripCodeSpans(text).toLowerCase()
-  return TEXTUAL_TOOL_CALL_MARKERS.some((marker) =>
-    new RegExp(`(^|\n)[ \t*-]*${escapeRegExp(marker.toLowerCase())}`).test(prose)
+  if (
+    TEXTUAL_TOOL_CALL_MARKERS.some((marker) =>
+      new RegExp(`(^|\n)[ \t*-]*${escapeRegExp(marker.toLowerCase())}`).test(prose)
+    )
   )
+    return true
+
+  // Keep quoted logs/documentation out of the suffix check as well. Normalize
+  // Markdown escapes only for DSML matching; do not reinterpret arbitrary text
+  // or try to execute incomplete tool arguments recovered from the answer.
+  const dsmlProse = prose
+    .split("\n")
+    .filter((line) => !/^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)*>/.test(line))
+    .join("\n")
+    .replace(/\\([<>_/])/g, "$1")
+  return DSML_TOOL_LINE_RE.test(dsmlProse) || DSML_TOOL_TAIL_RE.test(dsmlProse)
 }
 
 export interface InspectFinalMessageOptions {
@@ -331,6 +363,7 @@ export function inspectFinalAssistantMessage(
   const finishSignal = readFinishSignal(message)
   const modelKey = readModelKey(message)
   if (finishSignal) modelsWithObservedFinishSignal.add(modelKey)
+  if (readModelRefusal(message)) return { defect: null, detail: "" }
 
   const invalidToolCalls = Array.isArray(message.invalid_tool_calls)
     ? message.invalid_tool_calls.length
@@ -463,6 +496,7 @@ export function collectUnfinishedTodos(todos: unknown): string[] {
 
 /** User-facing reason for a turn the gate refused to call successful. */
 export function describeTurnCompletionFailure(report: TurnCompletionGateReport): string | null {
+  if (report.refusal) return "模型提供商拒绝了本次请求，本回合按未完成处理。"
   if (report.unresolved) {
     return `模型未能给出有效的最终结果：${report.unresolved.detail}（已重试 ${report.retriesUsed} 次）。本回合按未完成处理。`
   }
@@ -483,9 +517,10 @@ export type TurnCompletionRecoveryCallback = (input: {
 }) => void
 
 export interface TurnCompletionGateOptions {
-  /** Physical run token; without one the gate is inert (subagent/task graphs
-   * that the IPC layer does not settle on their own). */
+  /** Foreground physical run token that enables completion and todo recovery. */
   ownerRunToken?: string
+  /** Records refusal for managed transports without enabling foreground retries or queue access. */
+  observationRunToken?: string
   maxRetries?: number
   maxTodoNudges?: number
   todoGateEnabled?: boolean
@@ -510,6 +545,7 @@ export function createTurnCompletionGateMiddleware(
 ): ReturnType<typeof createMiddleware> {
   const {
     ownerRunToken,
+    observationRunToken,
     maxRetries = DEFAULT_MAX_COMPLETION_RETRIES,
     maxTodoNudges = DEFAULT_MAX_TODO_NUDGES,
     todoGateEnabled = true,
@@ -519,13 +555,14 @@ export function createTurnCompletionGateMiddleware(
   return createMiddleware({
     name: "turnCompletionGate",
     afterModel: {
-      canJumpTo: ["model"],
+      canJumpTo: ["model", "end"],
       hook: async (state, runtime) => {
         const threadId =
           typeof runtime.configurable?.thread_id === "string"
             ? runtime.configurable.thread_id
             : undefined
-        if (!threadId || !ownerRunToken) return undefined
+        const runId = ownerRunToken ?? observationRunToken
+        if (!threadId || !runId) return undefined
 
         const messages = Array.isArray((state as GateGraphState).messages)
           ? ((state as GateGraphState).messages as BaseMessage[])
@@ -533,7 +570,15 @@ export function createTurnCompletionGateMiddleware(
         const lastMessage = messages.at(-1)
         if (!AIMessage.isInstance(lastMessage)) return undefined
 
-        const key = runScopedKey(threadId, ownerRunToken)
+        const key = runScopedKey(threadId, runId)
+        const refusal = readModelRefusal(lastMessage)
+        if (refusal) {
+          const runState = ensureRunState(key)
+          settleRunState(runState)
+          runState.refusal = refusal
+          return { jumpTo: "end" as const }
+        }
+        if (!ownerRunToken) return undefined
 
         // Tools were requested: the loop continues on its own. Record the finish
         // signal (a tool-call turn is the most reliable place to learn that this

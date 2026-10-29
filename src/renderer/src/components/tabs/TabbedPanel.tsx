@@ -97,7 +97,7 @@ export function TabbedPanel({
                 workspacePathKind="relative"
                 previewMode={activeFilePreviewMode}
                 htmlPreviewPolicy={
-                  activeFilePreviewMode === "preview" ? "workspace-static" : undefined
+                  activeFilePreviewMode === "preview" ? "workspace-scripted" : undefined
                 }
                 requestLane="active-file-tab"
               />

@@ -1,6 +1,6 @@
 export type FilePreviewMode = "preview" | "source"
 
-export type HtmlPreviewPolicy = "workspace-static"
+export type HtmlPreviewPolicy = "workspace-scripted"
 
 export type TextPreviewKind = "markdown" | "html" | "code"
 
