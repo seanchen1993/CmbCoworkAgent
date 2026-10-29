@@ -2574,7 +2574,7 @@ export class BotStore {
       THEN substr(message,instr(message,${boundary})+length(${boundary}),600)
       ELSE substr(message,1,600) END`
     const projection = previewsOnly
-      ? `id,bot_id,thread_id,work_id,request_id,${preview} AS message,state,error,created_at,updated_at,origin_json`
+      ? `id,bot_id,thread_id,work_id,request_id,${preview} AS message,state,error,created_at,updated_at,origin_json,mock_source_json`
       : "*"
     return this.rows(
       `SELECT ${projection} FROM bot_tasks WHERE state IN ('queued','running','waiting_user')

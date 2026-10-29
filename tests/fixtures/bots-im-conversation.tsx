@@ -92,6 +92,8 @@ const f = ((window as any).fixture = {
   opened: [] as any[],
   manage: 0,
   tasks: [] as any[],
+  backgroundThreads: [] as string[],
+  stoppedBackgroundThreads: [] as string[],
   cancelled: [] as string[],
   hold: false,
   release: null as any,
@@ -155,6 +157,7 @@ const client = {
     groups: [],
     imConversations: groups.map((g) => ({ ...g, activity: { ...g.activity } })),
     tasks: f.tasks.map((task) => ({ ...task })),
+    backgroundThreads: [...f.backgroundThreads],
     activities: [
       { kind: "bot", id: "bot", version: 1, unread: true, updatedAt: 1, preview: "私人主对话" }
     ],
@@ -205,6 +208,11 @@ const client = {
       )) {
         f.cancelled.push(task.id)
         task.state = "cancelled"
+      }
+      const thread = groups.find((group) => group.id === id)?.threadId
+      if (thread && f.backgroundThreads.includes(thread)) {
+        f.stoppedBackgroundThreads.push(thread)
+        f.backgroundThreads = f.backgroundThreads.filter((id) => id !== thread)
       }
       f.bump()
     },

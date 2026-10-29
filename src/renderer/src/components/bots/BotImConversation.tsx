@@ -114,6 +114,7 @@ export function BotImConversation({
   client,
   revision,
   tasks = [],
+  backgroundThreads = [],
   detailOpen,
   onDetails,
   onManage,
@@ -125,6 +126,7 @@ export function BotImConversation({
   client: BotClient
   revision: number
   tasks?: BotTask[]
+  backgroundThreads?: string[]
   detailOpen: boolean
   onDetails(): void
   onManage(): void
@@ -147,6 +149,9 @@ export function BotImConversation({
   )
   const activeTasks = groupTasks.filter((task) =>
     ["queued", "running", "waiting_user"].includes(task.state)
+  )
+  const backgroundBusy = Boolean(
+    conversation.threadId && backgroundThreads.includes(conversation.threadId)
   )
   const stop = async () => {
     if (stopping) return
@@ -355,7 +360,8 @@ export function BotImConversation({
               readOnlyReason="请在招乎群中继续交流；当前审批可在此处理。"
               allowUserInputInReadOnly
               managedTurn={{
-                busy: activeTasks.some((task) => task.threadId === executionThreadId),
+                busy:
+                  backgroundBusy || activeTasks.some((task) => task.threadId === executionThreadId),
                 cancel: stop,
                 submit: async () => {
                   throw new Error("请在招乎群中发送消息")
@@ -479,10 +485,10 @@ export function BotImConversation({
           )
         })}
       </div>
-      {activeTasks.length > 0 && (
+      {(activeTasks.length > 0 || backgroundBusy) && (
         <div className="bot-im-execution-bar" role="status">
           <span>
-            {activeTasks.some((task) => task.state === "running")
+            {backgroundBusy || activeTasks.some((task) => task.state === "running")
               ? "正在处理"
               : activeTasks.some((task) => task.state === "waiting_user")
                 ? "等待你处理"

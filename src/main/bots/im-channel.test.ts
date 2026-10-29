@@ -61,11 +61,13 @@ function fixture(
   })
   const calls: BotTask[] = [],
     errors: unknown[] = []
+  const cancelBackground = vi.fn(async (_threadId: string) => {})
   const host: LocalBotHost = new LocalBotHost(
     store,
     {
       workspaces,
       workHistory,
+      cancelBackground,
       onAvailable: () => () => {},
       acquire: (_bot, task) =>
         available()
@@ -173,7 +175,20 @@ function fixture(
       lease: { id: "lease", expiresAt: new Date(Date.now() + 90000).toISOString() }
     }
   })
-  return { db, store, bot, host, calls, errors, service, client, binding, event, remote }
+  return {
+    db,
+    store,
+    bot,
+    host,
+    calls,
+    errors,
+    service,
+    client,
+    binding,
+    event,
+    remote,
+    cancelBackground
+  }
 }
 
 describe("authenticated IM on the existing Bot host", () => {
@@ -224,6 +239,23 @@ describe("authenticated IM on the existing Bot host", () => {
       expect(imPrivate.threadId).toBe(own.threadId)
       expect(new Set([first.threadId, other.threadId, own.threadId]).size).toBe(3)
       expect(botMemoryContext(first)).not.toEqual(botMemoryContext(other))
+      // Exercise the renderer's actual snapshot, not full store rows: the group
+      // stop control needs the IM source even when message bodies are projected.
+      const snapshot = f.host.snapshot()
+      const conversation = snapshot.imConversations!.find((item) => item.bindingId === a.id)!
+      const visibleGroupTasks = snapshot.tasks.filter(
+        (task) =>
+          task.mockSource?.transport === "im" &&
+          task.mockSource.bindingId === conversation.id &&
+          task.botId === f.bot.id &&
+          !task.workId &&
+          ["queued", "running", "waiting_user"].includes(task.state)
+      )
+      expect(visibleGroupTasks.map((task) => task.id).sort()).toEqual([first.id, second.id].sort())
+      expect(snapshot.tasks.find((task) => task.id === other.id)?.mockSource).toEqual(
+        other.mockSource
+      )
+      expect(snapshot.tasks.find((task) => task.id === own.id)?.mockSource).toBeUndefined()
       f.host.stopImConversation(f.bot.id, botImScopeId("realm", "owner", a.id))
       await eventually(() => f.store.getTask(first.id).state === "cancelled")
       expect(f.store.getTask(second.id).state).toBe("cancelled")
@@ -563,6 +595,45 @@ describe("authenticated IM on the existing Bot host", () => {
       f.client.submitReply.mock.calls.every(([r]) => r.conversationKey === binding.conversationKey)
     ).toBe(true)
     expect(f.errors).toEqual([])
+  })
+
+  it("keeps completed group turns stoppable while their own background commands remain active", async () => {
+    const f = fixture(async (task, host) => {
+      host.commandLifecycle(task.id).accepted({
+        id: `command-${task.id}`,
+        threadId: task.threadId,
+        command: "sleep 30",
+        cwd: "/tmp",
+        startedAt: Date.now()
+      })
+      return { state: "completed", result: "已在后台执行" }
+    })
+    const a = await f.binding()
+    const b = await f.binding()
+    await f.service.receive(f.event(a, "background-a"))
+    await f.service.receive(f.event(b, "background-b"))
+    await eventually(
+      () => f.calls.length === 2 && f.store.recentTasks().every((t) => t.state === "completed")
+    )
+    const snapshot = f.host.snapshot()
+    const own = snapshot.imConversations!.find((item) => item.bindingId === a.id)!
+    const other = snapshot.imConversations!.find((item) => item.bindingId === b.id)!
+    expect(snapshot.backgroundThreads).toEqual(
+      expect.arrayContaining([own.threadId, other.threadId])
+    )
+    f.host.stopImConversation(f.bot.id, own.id)
+    expect(f.cancelBackground.mock.calls).toEqual([[own.threadId]])
+    const row = f.db.prepare("SELECT thread_id,suppressed FROM bot_commands ORDER BY thread_id")
+    try {
+      const suppressed: Record<string, unknown> = {}
+      while (row.step()) {
+        const value = row.getAsObject()
+        suppressed[String(value.thread_id)] = value.suppressed
+      }
+      expect(suppressed).toEqual({ [own.threadId!]: 1, [other.threadId!]: 0 })
+    } finally {
+      row.free()
+    }
   })
 
   it("keeps workflow and detached command callbacks in the IM group after ingress completion", async () => {
