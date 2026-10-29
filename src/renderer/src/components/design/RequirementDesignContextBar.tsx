@@ -1,10 +1,15 @@
-import { useState } from "react"
-import { ArrowLeft, Eye, Loader2, Save, WandSparkles } from "lucide-react"
+import { useMemo, useRef, useState } from "react"
+import { ArrowLeft, ChevronLeft, ChevronRight, FileText, Loader2, RefreshCw } from "lucide-react"
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { ActiveRequirementDesignEntry } from "./use-requirement-design-entry"
-import { returnToRequirementConversation } from "@/lib/requirement-design-entry"
+import {
+  listRequirementDesignEntries,
+  returnToRequirementConversation
+} from "@/lib/requirement-design-entry"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
+import type { SessionMeta } from "./types"
+import { getDesignSessionClient } from "./session-client"
 
 export function RequirementDesignContextBar({
   entry,
@@ -13,8 +18,9 @@ export function RequirementDesignContextBar({
   artifactPath,
   artifactMetadata,
   disabledReason,
-  onArtifactPathChange,
   onEntryChange,
+  onOpenSession,
+  sessions,
   showToast
 }: {
   entry: ActiveRequirementDesignEntry
@@ -23,13 +29,25 @@ export function RequirementDesignContextBar({
   artifactPath?: string | null
   artifactMetadata?: Record<string, unknown> | null
   disabledReason?: string
-  onArtifactPathChange: (filePath: string) => void
   onEntryChange: (entry: ActiveRequirementDesignEntry) => void
+  onOpenSession: (sessionId: string) => void
+  sessions: SessionMeta[]
   showToast: (message: string) => void
 }): React.JSX.Element {
   const [saving, setSaving] = useState(false)
+  const savingRef = useRef(false)
+  const sessionListRef = useRef<HTMLDivElement>(null)
   const requirementName = entry.requirementName?.trim() || "未命名需求"
-  const functionName = entry.functionName?.trim() || "未命名功能"
+  const designEntries = useMemo(
+    () => listRequirementDesignEntries(entry.requirementId, localStorage, entry.htmlId),
+    [entry]
+  )
+  const sessionStates = useMemo(
+    () => new Map(sessions.map((session) => [session.id, session.generationState])),
+    [sessions]
+  )
+  const completedCount = designEntries.filter((designEntry) => designEntry.htmlFile?.trim()).length
+  const progress = designEntries.length > 0 ? Math.round((completedCount / designEntries.length) * 100) : 0
   const effectiveDisabledReason = saving ? "正在同步设计，请稍候" : disabledReason
 
   const previewButton = (filePath: string | undefined, title: string): React.JSX.Element => (
@@ -48,13 +66,15 @@ export function RequirementDesignContextBar({
       }}
       aria-label={`预览${title}`}
       title={filePath ? `在右侧预览${title}` : `暂无${title}文件`}
-      className="ml-1 inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-status-info/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+      className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
     >
-      <Eye className="size-3.5" />
+      <FileText className="size-3" />
     </button>
   )
 
   const save = async (): Promise<void> => {
+    if (savingRef.current) return
+    savingRef.current = true
     setSaving(true)
     try {
       if (!html.trim()) throw new Error("请先生成设计内容")
@@ -86,7 +106,7 @@ export function RequirementDesignContextBar({
       if (!result.success || !htmlFile) throw new Error(result.error || "保存设计文件失败")
 
       await window.api.design.storeHtml(artifactId, html)
-      onArtifactPathChange(htmlFile)
+      await getDesignSessionClient().patch(htmlId, { artifactPath: htmlFile })
       const synced = await window.api.requirements.updateFunctionHtml({
         reqId: entry.requirementId,
         workspacePath: entry.workspacePath,
@@ -100,31 +120,114 @@ export function RequirementDesignContextBar({
     } catch (error) {
       showToast(error instanceof Error ? error.message : "保存需求设计失败")
     } finally {
+      savingRef.current = false
       setSaving(false)
     }
   }
 
   return (
-    <div className="flex h-11 shrink-0 items-center gap-4 border-y border-status-info/30 bg-status-info/10 px-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-status-info px-2 py-0.5 text-[11px] font-semibold text-white">
-        <WandSparkles className="size-3 animate-pulse" aria-hidden="true" />
-        需求原型设计中
-      </span>
-      <div className="flex min-w-0 flex-1 items-center gap-4 text-xs">
-        <span className="flex min-w-0 items-center text-muted-foreground">
-          <span className="shrink-0">需求名称</span>
-          <strong className="ml-1.5 truncate font-semibold text-foreground">
+    <div className="relative z-10 flex h-[58px] shrink-0 items-center border-y border-b-slate-300 border-t-border/70 bg-slate-50/95 px-3 shadow-[0_3px_10px_rgba(15,23,42,0.10)]">
+      <div className="w-52 shrink-0 pr-3">
+        <div className="flex items-center gap-1.5">
+          <strong className="min-w-0 truncate text-xs font-semibold text-foreground">
             {requirementName}
           </strong>
           {previewButton(entry.requirementOverviewFilePath, "需求文件")}
-        </span>
-        <span className="h-4 w-px shrink-0 bg-status-info/30" />
-        <span className="flex min-w-0 items-center text-muted-foreground">
-          <span className="shrink-0">功能名称</span>
-          <strong className="ml-1.5 truncate font-semibold text-foreground">{functionName}</strong>
-          {previewButton(entry.requirementFilePath, "功能文件")}
-        </span>
+          <span className="shrink-0 rounded bg-orange-50 px-1.5 py-0.5 text-[10px] font-medium text-orange-500">
+            设计进度 {progress}%
+          </span>
+        </div>
+        <p className="mt-0.5 text-[10px] text-muted-foreground">
+          {designEntries.length} 个功能模块 · 会话并行执行
+        </p>
       </div>
+
+      <div className="flex min-w-0 flex-1 items-center gap-1.5 border-l border-border/70 pl-2.5">
+        <button
+          type="button"
+          onClick={() => sessionListRef.current?.scrollBy({ left: -260, behavior: "smooth" })}
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          aria-label="查看前面的设计会话"
+        >
+          <ChevronLeft className="size-3.5" />
+        </button>
+        <div ref={sessionListRef} className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto py-1">
+          {designEntries.map((designEntry) => {
+            const active = designEntry.htmlId === entry.htmlId
+            const completed = Boolean(designEntry.htmlFile?.trim())
+            const generationState = sessionStates.get(designEntry.htmlId)
+            const generating =
+              generationState === "generating" ||
+              generationState === "asking" ||
+              generationState === "questions_ready" ||
+              generationState === "waiting_approval"
+            const statusLabel = completed
+              ? "已完成"
+              : generating
+                ? "生成中"
+                : generationState === "done"
+                  ? "待同步"
+                  : "待设计"
+            return (
+              <div
+                key={designEntry.htmlId}
+                className={`flex h-8 max-w-52 shrink-0 items-center rounded-md border bg-white shadow-sm transition-colors ${
+                  active ? "border-orange-400" : "border-border"
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => onOpenSession(designEntry.htmlId)}
+                  className="flex min-w-0 items-center gap-1.5 pl-2.5"
+                  title={designEntry.functionName || "未命名功能"}
+                >
+                  <span className="relative flex size-2 shrink-0">
+                    {generating ? (
+                      <span className="absolute inline-flex size-full animate-ping rounded-full bg-orange-400 opacity-60" />
+                    ) : null}
+                    <span
+                      className={`relative inline-flex size-2 rounded-full ${
+                        completed
+                          ? "bg-emerald-500"
+                          : generating
+                            ? "animate-pulse bg-orange-500"
+                            : "bg-slate-400"
+                      }`}
+                    />
+                  </span>
+                  <span className="truncate text-[11px] font-medium text-foreground">
+                    {designEntry.functionName || "未命名功能"}
+                  </span>
+                </button>
+                <span className="ml-1.5 flex shrink-0 items-center gap-1 pr-2">
+                  {previewButton(designEntry.requirementFilePath, "功能文件")}
+                  <span
+                    className={`text-[10px] font-medium ${
+                      completed
+                        ? "text-emerald-600"
+                        : generating
+                          ? "animate-pulse text-orange-500"
+                          : "text-muted-foreground"
+                    }`}
+                  >
+                    {statusLabel}
+                  </span>
+                </span>
+              </div>
+            )
+          })}
+        </div>
+        <button
+          type="button"
+          onClick={() => sessionListRef.current?.scrollBy({ left: 260, behavior: "smooth" })}
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          aria-label="查看更多设计会话"
+        >
+          <ChevronRight className="size-3.5" />
+        </button>
+      </div>
+
+      <div className="ml-2.5 flex shrink-0 items-center gap-1.5 border-l border-border/70 pl-2.5">
       <TooltipProvider delayDuration={200}>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -136,14 +239,14 @@ export function RequirementDesignContextBar({
                 type="button"
                 disabled={Boolean(effectiveDisabledReason)}
                 onClick={() => void save()}
-                className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md bg-status-info px-3 text-xs font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-55"
+                className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md bg-primary px-2.5 text-[11px] font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-55"
               >
                 {saving ? (
                   <Loader2 className="size-3.5 animate-spin" />
                 ) : (
-                  <Save className="size-3" />
+                  <RefreshCw className="size-3" />
                 )}
-                {saving ? "同步中..." : "同步到需求里"}
+                {saving ? "同步中..." : "同步到需求"}
               </button>
             </span>
           </TooltipTrigger>
@@ -155,11 +258,12 @@ export function RequirementDesignContextBar({
       <button
         type="button"
         onClick={() => returnToRequirementConversation(entry.requirementId)}
-        className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-status-info/40 bg-background/80 px-3 text-xs font-semibold text-foreground shadow-sm transition-colors hover:bg-status-info/15"
+        className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-border bg-white px-2.5 text-[11px] font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
       >
         <ArrowLeft className="size-3" />
         返回需求
       </button>
+      </div>
     </div>
   )
 }

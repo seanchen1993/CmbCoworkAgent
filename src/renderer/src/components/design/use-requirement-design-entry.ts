@@ -2,7 +2,9 @@ import { useEffect } from "react"
 
 import {
   REQUIREMENT_DESIGN_ENTRY_KEY,
-  type RequirementDesignEntry
+  storeRequirementDesignEntries,
+  type RequirementDesignEntry,
+  type RequirementDesignEntryPayload
 } from "@/lib/requirement-design-entry"
 import { getDesignSessionClient } from "./session-client"
 import type { FileAttachment, SessionMeta } from "./types"
@@ -88,44 +90,60 @@ export function useRequirementDesignEntry({
     if (!raw) return
     localStorage.removeItem(REQUIREMENT_DESIGN_ENTRY_KEY)
     void (async () => {
+      const readyEntries: ActiveRequirementDesignEntry[] = []
       try {
-        const entry = JSON.parse(raw) as RequirementDesignEntry
-        if (!entry.requirementId || !entry.workspacePath || !entry.requirementFilePath)
-          throw new Error("需求设计入口无效")
-        onEntryChange({ ...entry, bindingReady: false })
-        setWorkspacePath(entry.workspacePath)
-        const client = getDesignSessionClient()
-        const requirementAttachment = await readRequirementAttachment(entry.requirementFilePath)
-        if (!entry.htmlId) {
-          const sessionId = createSession(
-            { title: entry.requirementFilePath.split(/[\\/]/).pop() || "需求原型" },
-            {
-              initialInputValue: entry.prompt,
-              initialAttachedFiles: [requirementAttachment],
-              workspacePath: entry.workspacePath
-            }
+        const payload = JSON.parse(raw) as RequirementDesignEntryPayload
+        const entries = "entries" in payload ? payload.entries : [payload]
+        if (
+          entries.length === 0 ||
+          entries.some(
+            (entry) => !entry.requirementId || !entry.workspacePath || !entry.requirementFilePath
           )
-          await client.waitUntilReady(sessionId)
-          const updated = await window.api.requirements.updateFunctionHtml({
-            reqId: entry.requirementId,
-            workspacePath: entry.workspacePath,
-            requirementFilePath: entry.requirementFilePath,
-            htmlId: sessionId
-          })
-          if (!updated.success) throw new Error(updated.error || "同步设计会话失败")
-          onEntryChange({ ...entry, htmlId: sessionId, bindingReady: true })
-          return
+        ) {
+          throw new Error("需求设计入口无效")
         }
-        if (!client.list().some((session) => session.id === entry.htmlId)) {
-          throw new Error("设计会话不存在")
+        const firstEntry = entries[0]
+        onEntryChange({ ...firstEntry, bindingReady: false })
+        setWorkspacePath(firstEntry.workspacePath)
+        const client = getDesignSessionClient()
+        const sessionIds = new Set(client.list().map((session) => session.id))
+        for (const entry of entries) {
+          const requirementAttachment = await readRequirementAttachment(entry.requirementFilePath)
+          let readyEntry: ActiveRequirementDesignEntry
+          if (!entry.htmlId || !sessionIds.has(entry.htmlId)) {
+            const sessionId = createSession(
+              { title: entry.functionName?.trim() || "需求原型" },
+              {
+                initialInputValue: entry.prompt,
+                initialAttachedFiles: [requirementAttachment],
+                workspacePath: entry.workspacePath
+              }
+            )
+            await client.waitUntilReady(sessionId)
+            sessionIds.add(sessionId)
+            const updated = await window.api.requirements.updateFunctionHtml({
+              reqId: entry.requirementId,
+              workspacePath: entry.workspacePath,
+              requirementFilePath: entry.requirementFilePath,
+              htmlId: sessionId
+            })
+            if (!updated.success) throw new Error(updated.error || "同步设计会话失败")
+            readyEntry = { ...entry, htmlId: sessionId, bindingReady: true }
+          } else {
+            if (client.get(entry.htmlId)?.workspacePath !== entry.workspacePath) {
+              await client.setWorkspace(entry.htmlId, entry.workspacePath)
+            }
+            await bindRequirementAttachment(entry.htmlId, requirementAttachment)
+            readyEntry = { ...entry, bindingReady: true }
+          }
+          readyEntries.push(readyEntry)
         }
-        if (client.get(entry.htmlId)?.workspacePath !== entry.workspacePath) {
-          await client.setWorkspace(entry.htmlId, entry.workspacePath)
-        }
-        await bindRequirementAttachment(entry.htmlId, requirementAttachment)
-        openSession(entry.htmlId)
-        onEntryChange({ ...entry, bindingReady: true })
+        const activeEntry = readyEntries[0]
+        storeRequirementDesignEntries(readyEntries.slice(1))
+        openSession(activeEntry.htmlId)
+        onEntryChange(activeEntry)
       } catch (error) {
+        storeRequirementDesignEntries(readyEntries)
         onEntryChange(null)
         showToast(error instanceof Error ? error.message : "打开需求设计失败")
       }

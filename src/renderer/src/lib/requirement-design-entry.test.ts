@@ -3,8 +3,10 @@ import { beforeEach, describe, expect, it } from "vitest"
 import {
   REQUIREMENT_DESIGN_ASSOCIATIONS_KEY,
   buildRequirementDesignPrompt,
+  listRequirementDesignEntries,
   loadActiveRequirementDesignEntry,
   storeActiveRequirementDesignEntry,
+  storeRequirementDesignEntries,
   type RequirementDesignEntry
 } from "./requirement-design-entry"
 
@@ -67,6 +69,30 @@ describe("active requirement design entry", () => {
 
     expect(loadActiveRequirementDesignEntry(entry.htmlId, storage)).toBeNull()
     expect(loadActiveRequirementDesignEntry(another.htmlId, storage)).toEqual(another)
+  })
+
+  it("stores a batch without discarding existing session associations", () => {
+    const second = {
+      ...entry,
+      functionName: "FR2 待办总结",
+      requirementFilePath: "/workspace/requirements/FR2.md",
+      htmlId: "design-session-2"
+    }
+    storeActiveRequirementDesignEntry(entry, entry.htmlId, storage)
+    storeRequirementDesignEntries([second], storage)
+
+    expect(loadActiveRequirementDesignEntry(entry.htmlId, storage)).toEqual(entry)
+    expect(loadActiveRequirementDesignEntry(second.htmlId, storage)).toEqual(second)
+  })
+
+  it("deduplicates function tabs while preferring the active historical session", () => {
+    const newer = { ...entry, htmlId: "design-session-new" }
+    storeRequirementDesignEntries([entry, newer], storage)
+
+    expect(listRequirementDesignEntries(entry.requirementId, storage)).toEqual([newer])
+    expect(
+      listRequirementDesignEntries(entry.requirementId, storage, entry.htmlId)
+    ).toEqual([entry])
   })
 })
 

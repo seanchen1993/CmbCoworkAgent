@@ -58,8 +58,6 @@ export function ResourcePanelOverlay({
 
   const close = useCallback(() => {
     setOpen(false)
-    setFilePreview(null)
-    setFilePreviewThreadId(null)
     clearPreviewRequest()
   }, [clearPreviewRequest])
   const clearHandledPreviewRequest = useCallback(() => {

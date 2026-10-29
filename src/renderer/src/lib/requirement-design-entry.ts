@@ -15,7 +15,12 @@ export type RequirementDesignEntry = {
   requirementFilePath: string
   prompt: string
   htmlId: string
+  htmlFile?: string
 }
+
+export type RequirementDesignEntryPayload =
+  | RequirementDesignEntry
+  | { entries: RequirementDesignEntry[] }
 
 export function buildRequirementDesignPrompt(
   functionName: string,
@@ -46,6 +51,12 @@ export function openRequirementDesign(entry: RequirementDesignEntry): void {
   window.dispatchEvent(new Event(REQUIREMENT_DESIGN_NAVIGATE_EVENT))
 }
 
+export function openRequirementDesignBatch(entries: RequirementDesignEntry[]): void {
+  if (entries.length === 0) return
+  localStorage.setItem(REQUIREMENT_DESIGN_ENTRY_KEY, JSON.stringify({ entries }))
+  window.dispatchEvent(new Event(REQUIREMENT_DESIGN_NAVIGATE_EVENT))
+}
+
 export function returnToRequirementConversation(requirementId: string): void {
   localStorage.setItem(REQUIREMENT_CONVERSATION_ENTRY_KEY, requirementId)
   window.dispatchEvent(new Event(REQUIREMENT_CONVERSATION_NAVIGATE_EVENT))
@@ -71,12 +82,45 @@ export function storeActiveRequirementDesignEntry(
   }
 }
 
+export function storeRequirementDesignEntries(
+  entries: RequirementDesignEntry[],
+  storage: RequirementEntryStorage = localStorage
+): void {
+  const associations = readRequirementDesignAssociations(storage)
+  for (const entry of entries) {
+    if (entry.htmlId) associations[entry.htmlId] = entry
+  }
+  if (Object.keys(associations).length > 0) {
+    storage.setItem(REQUIREMENT_DESIGN_ASSOCIATIONS_KEY, JSON.stringify(associations))
+  }
+}
+
 export function loadActiveRequirementDesignEntry(
   sessionId: string | null,
   storage: RequirementEntryStorage = localStorage
 ): RequirementDesignEntry | null {
   if (!sessionId) return null
   return readRequirementDesignAssociations(storage)[sessionId] ?? null
+}
+
+export function listRequirementDesignEntries(
+  requirementId: string,
+  storage: RequirementEntryStorage = localStorage,
+  preferredSessionId?: string
+): RequirementDesignEntry[] {
+  const entriesByFunction = new Map<string, RequirementDesignEntry>()
+  for (const entry of Object.values(readRequirementDesignAssociations(storage))) {
+    if (entry.requirementId !== requirementId) continue
+    const existing = entriesByFunction.get(entry.requirementFilePath)
+    if (
+      !existing ||
+      entry.htmlId === preferredSessionId ||
+      existing.htmlId !== preferredSessionId
+    ) {
+      entriesByFunction.set(entry.requirementFilePath, entry)
+    }
+  }
+  return [...entriesByFunction.values()]
 }
 
 function readRequirementDesignAssociations(

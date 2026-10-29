@@ -38,11 +38,11 @@ export function RequirementPrototypeMenu({
           disabled={disabled}
           aria-label="更改原型设计选项"
           className={cn(
-            "inline-flex size-10 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-white/90 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-50",
+            "inline-flex size-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/90 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-50",
             className
           )}
         >
-          <EllipsisVertical className="size-4" />
+          <EllipsisVertical className="size-3.5" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
@@ -81,26 +81,26 @@ export function RequirementPrototypeAction({
 }): React.JSX.Element {
   if (!choiceMade) {
     return (
-      <div className="flex w-full flex-col items-center gap-2 px-4 py-3">
+      <div className="flex w-full flex-wrap items-center justify-center gap-1.5 px-3 py-2">
         <Button
           type="button"
           size="sm"
-          className="h-9 w-28 gap-1.5 rounded-lg shadow-sm"
+          className="h-7 gap-1 rounded-md px-2.5 text-[11px] shadow-none"
           disabled={disabled}
           onClick={onDesign}
         >
-          <Palette className="size-3.5" />
+          <Palette className="size-3" />
           去设计
         </Button>
         <Button
           type="button"
           size="sm"
           variant="outline"
-          className="h-9 w-28 gap-1.5 rounded-lg border-border/80 bg-white/90 text-muted-foreground"
+          className="h-7 gap-1 rounded-md border-border/80 bg-white/90 px-2.5 text-[11px] text-muted-foreground shadow-none"
           disabled={disabled}
           onClick={() => onChange("0")}
         >
-          <CheckCircle2 className="size-3.5" />
+          <CheckCircle2 className="size-3" />
           无需设计
         </Button>
       </div>
@@ -111,7 +111,7 @@ export function RequirementPrototypeAction({
   return (
     <div
       className={cn(
-        "relative flex h-full min-h-[112px] w-full items-center justify-center overflow-hidden px-4 py-3",
+        "relative flex h-full min-h-[88px] w-full items-center justify-center overflow-hidden px-3 py-2",
         needsDesign
           ? "bg-gradient-to-br from-primary/5 via-white to-status-info/10"
           : "bg-gradient-to-br from-status-nominal/5 via-white to-emerald-50/80"
@@ -131,20 +131,17 @@ export function RequirementPrototypeAction({
           size="sm"
           disabled={disabled}
           onClick={onDesign}
-          className="h-9 w-28 gap-2 rounded-lg px-4 shadow-sm transition-transform hover:-translate-y-0.5"
+          className="h-7 gap-1 rounded-md px-2.5 text-[11px] shadow-none"
         >
-          <Palette className="size-4" />
+          <Palette className="size-3" />
           继续设计
         </Button>
       ) : (
-        <div className="flex max-w-[150px] flex-col items-center text-center">
-          <span className="mb-2 inline-flex size-8 items-center justify-center rounded-full border border-status-nominal/20 bg-status-nominal/10 text-status-nominal shadow-sm">
-            <CheckCircle2 className="size-4" />
+        <div className="inline-flex items-center gap-1.5 rounded-md border border-status-nominal/20 bg-status-nominal/10 px-2.5 py-1.5 text-status-nominal">
+          <span className="inline-flex items-center justify-center">
+            <CheckCircle2 className="size-3.5" />
           </span>
-          <span className="text-sm font-semibold text-foreground">无需设计</span>
-          <span className="mt-1 text-[11px] leading-4 text-muted-foreground">
-            此功能已跳过原型设计
-          </span>
+          <span className="text-[11px] font-medium">无需设计</span>
         </div>
       )}
     </div>

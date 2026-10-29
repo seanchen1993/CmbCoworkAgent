@@ -5,6 +5,7 @@ import { DESIGN_PREVIEW_NAVIGATION_SCRIPT } from "@/lib/design-preview-navigatio
 import { buildDesignVariationDocument } from "@/lib/design-variation-document"
 import { getDesignPreviewViewport } from "@/lib/design-preview-viewport"
 import { useAppStore } from "@/lib/store"
+import { loadActiveRequirementDesignEntry } from "@/lib/requirement-design-entry"
 // 需求详情进入设计模式的适配逻辑集中在独立 Hook，避免侵入设计器主体流程。
 import { useRequirementDesignEntry } from "./use-requirement-design-entry"
 import { usePersistentRequirementDesignEntry } from "./use-persistent-requirement-design-entry"
@@ -1535,6 +1536,8 @@ export function DesignView(): React.JSX.Element {
 
   const scheduleArtifactSave = useCallback(
     (pendingSave: PendingArtifactSave) => {
+      // 需求设计只自动持久化会话本身；HTML 文件必须由顶部“同步到需求”按钮显式保存。
+      if (requirementEntry) return
       pendingArtifactSaveRef.current = pendingSave
       if (artifactSaveTimerRef.current) clearTimeout(artifactSaveTimerRef.current)
       artifactSaveTimerRef.current = setTimeout(() => {
@@ -1544,7 +1547,7 @@ export function DesignView(): React.JSX.Element {
         flushPendingArtifactSave(save, updateTs)
       }, 350)
     },
-    [updateTs]
+    [requirementEntry, updateTs]
   )
 
   useEffect(() => {
@@ -2055,15 +2058,17 @@ export function DesignView(): React.JSX.Element {
       window.api.design.storeHtml(storeKey, importedHtml).catch((err) => {
         console.warn("[Design] storeHtml failed", err)
       })
-      saveDesignArtifactForTab(
-        storeKey,
-        importedHtml,
-        workspacePath,
-        tabId,
-        updateTs,
-        undefined,
-        artifactMetadata
-      )
+      if (!loadActiveRequirementDesignEntry(options.sessionId)) {
+        saveDesignArtifactForTab(
+          storeKey,
+          importedHtml,
+          workspacePath,
+          tabId,
+          updateTs,
+          undefined,
+          artifactMetadata
+        )
+      }
 
       updateTs(tabId, (prev) => ({
         messages: [
@@ -4305,8 +4310,9 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                   ? "尚未生成设计内容，无法同步到需求"
                   : undefined
           }
-          onArtifactPathChange={(filePath) => updateTs(activeTabId, { artifactPath: filePath })}
           onEntryChange={setRequirementEntry}
+          onOpenSession={openSession}
+          sessions={sessionIndex}
           showToast={showToast}
         />
       ) : null}

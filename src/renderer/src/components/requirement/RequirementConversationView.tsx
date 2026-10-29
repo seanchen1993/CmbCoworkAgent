@@ -35,7 +35,13 @@ import {
   type RequirementPrdManifest,
   type RequirementRecord
 } from "./requirement-data"
-import { buildRequirementDesignPrompt, openRequirementDesign } from "@/lib/requirement-design-entry"
+import {
+  buildRequirementDesignPrompt,
+  listRequirementDesignEntries,
+  openRequirementDesign,
+  openRequirementDesignBatch,
+  type RequirementDesignEntry
+} from "@/lib/requirement-design-entry"
 import {
   enableRequirementSessionExperts,
   getRequirementSessionCapabilities
@@ -466,9 +472,14 @@ function RequirementConversationSession({
     await persistPrototypeState("design", 5)
     setPreviewTab("requirement-space")
   }, [persistPrototypeState])
-  const requestPrototypeDesign = useCallback(
-    (functionInfo: { fr: string; name: string; file: string; htmlId?: string }): void => {
-      if (conversationLoading) return
+  const buildPrototypeDesignEntry = useCallback(
+    (functionInfo: {
+      fr: string
+      name: string
+      file: string
+      htmlId?: string
+      htmlFile?: string
+    }): RequirementDesignEntry => {
       const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
       const workspaceRoot = workspacePath.replace(/[\\/]+$/, "")
       const relativeFile = normalizePrdFilePath(functionInfo.file).replace(/^\/+/, "")
@@ -477,32 +488,104 @@ function RequirementConversationSession({
       ).replace(/^\/+/, "")
       const separator = workspacePath.includes("\\") ? "\\" : "/"
       const requirementFilePath = `${workspaceRoot}${separator}${relativeFile.replace(/\//g, separator)}`
-      const requirementOverviewFilePath = relativeOverviewFile
-        ? `${workspaceRoot}${separator}${relativeOverviewFile.replace(/\//g, separator)}`
-        : undefined
-      openRequirementDesign({
+      return {
         requirementId: requirement.id,
         requirementName: requirement.title,
         functionName: `${functionInfo.fr} ${functionInfo.name}`.trim(),
         workspacePath,
         previewThreadId: threadId ?? undefined,
-        requirementOverviewFilePath,
+        requirementOverviewFilePath: relativeOverviewFile
+          ? `${workspaceRoot}${separator}${relativeOverviewFile.replace(/\//g, separator)}`
+          : undefined,
         requirementFilePath,
         prompt: buildRequirementDesignPrompt(
           `${functionInfo.fr} ${functionInfo.name}`,
           relativeFile
         ),
-        htmlId: functionInfo.htmlId?.trim() ?? ""
-      })
+        htmlId: functionInfo.htmlId?.trim() || "",
+        htmlFile: functionInfo.htmlFile?.trim() || undefined
+      }
     },
     [
-      conversationLoading,
       requirement.id,
       requirement.requirementPath,
       requirement.title,
       requirementSpaceManifest?.prd.file,
       threadId,
       threadState?.workspacePath
+    ]
+  )
+  const requestPrototypeDesign = useCallback(
+    (functionInfo: {
+      fr: string
+      name: string
+      file: string
+      htmlId?: string
+      htmlFile?: string
+    }): void => {
+      if (conversationLoading) return
+      const designEntry = buildPrototypeDesignEntry(functionInfo)
+      const existingEntry = listRequirementDesignEntries(requirement.id).find(
+        (entry) => entry.requirementFilePath === designEntry.requirementFilePath
+      )
+      openRequirementDesign({
+        ...designEntry,
+        htmlId: designEntry.htmlId || existingEntry?.htmlId || ""
+      })
+    },
+    [buildPrototypeDesignEntry, conversationLoading, requirement.id]
+  )
+  const startBatchPrototypeDesign = useCallback(
+    async (functionInfos: RequirementPrdManifest["functions"]): Promise<void> => {
+      if (conversationLoading) throw new Error("当前会话正在处理中，请稍后再试")
+      const selectedKeys = new Set(functionInfos.map(getPrototypeFunctionKey))
+      const result = await window.api.requirements.saveStepState({
+        reqId: requirement.id,
+        needDesign: "1",
+        currentStep: Math.max(requirementSpaceManifest?.prd.currentStep ?? 1, 4),
+        functions: prototypeFunctions.map((functionInfo) => ({
+          fr: functionInfo.fr,
+          file: functionInfo.file,
+          htmlFile: functionInfo.htmlFile,
+          needDesign: selectedKeys.has(getPrototypeFunctionKey(functionInfo)) ? "1" : "0"
+        }))
+      })
+      if (!result.success || !result.requirement) {
+        throw new Error(result.error || "保存批量原型设计选择失败")
+      }
+      if (result.manifest) {
+        setRequirementSpaceManifest(normalizeRequirementSpaceManifest(result.manifest))
+      }
+      onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
+      if (functionInfos.length > 0) {
+        const existingEntries = new Map(
+          listRequirementDesignEntries(requirement.id).map((entry) => [
+            entry.requirementFilePath,
+            entry
+          ])
+        )
+        openRequirementDesignBatch(
+          functionInfos.map((functionInfo) => {
+            const designEntry = buildPrototypeDesignEntry(functionInfo)
+            return {
+              ...designEntry,
+              htmlId:
+                designEntry.htmlId ||
+                existingEntries.get(designEntry.requirementFilePath)?.htmlId ||
+                ""
+            }
+          })
+        )
+      }
+    },
+    [
+      buildPrototypeDesignEntry,
+      conversationLoading,
+      onRequirementUpdated,
+      prototypeFunctions,
+      requirement.id,
+      requirement.system,
+      requirementSpaceManifest?.prd.currentStep
     ]
   )
   const revealRequirementFile = useCallback(
@@ -1219,6 +1302,7 @@ function RequirementConversationSession({
             onChoosePrototypeRoute={choosePrototypeRoute}
             onRevealRequirementFile={revealRequirementFile}
             onRequestPrototypeDesign={requestPrototypeDesign}
+            onStartBatchPrototypeDesign={startBatchPrototypeDesign}
             onUpdatePrototypeFunctionDesign={updatePrototypeFunctionDesign}
             onCompletePrototypeDesign={completePrototypeDesign}
             onPublishToRequirementSpace={handlePublishToRequirementSpace}
