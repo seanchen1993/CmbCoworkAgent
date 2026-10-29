@@ -75,6 +75,41 @@ function setup(name: string) {
   return { work, history: createLocalBotWorkHistory(() => host) }
 }
 describe("linked task history", () => {
+  it("reads and locates an IM task transcript only with matching stored audience metadata", async () => {
+    const { work, history } = setup("im-history")
+    work.conversation = undefined
+    work.audienceKey = "im:binding"
+    work.source = {
+      transport: "im",
+      bindingId: "binding",
+      grantVersion: 1,
+      conversationId: "group",
+      audienceKey: "im:binding",
+      eventId: "event",
+      messageId: "message",
+      senderId: "member"
+    }
+    db.updateThread(work.threadId, {
+      metadata: JSON.stringify({
+        botId: work.botId,
+        botHostId: "local",
+        botWorkId: work.id,
+        botAudienceKey: work.audienceKey,
+        botMockBindingId: "binding",
+        botMockConversationId: "group",
+        botMockGrantVersion: 1,
+        workspacePath: directory
+      })
+    })
+    db.upsertThreadMessages(work.threadId, [
+      { id: "group-fact", role: "assistant", content: "本群决定下周演示", created_at: new Date() }
+    ])
+    const page = await history.query(work, { workId: work.id, query: "下周演示" })
+    expect(page.entries).toHaveLength(1)
+    expect((await history.resolve(work, page.entries[0].source)).threadId).toBe(work.threadId)
+    work.source = { ...work.source, bindingId: "other" }
+    await expect(history.query(work, { workId: work.id })).rejects.toThrow()
+  })
   it("searches old durable history with empty continuation pages, then reads and resolves an exact citation", async () => {
     const { work, history } = setup("paged-history")
     db.upsertThreadMessages(

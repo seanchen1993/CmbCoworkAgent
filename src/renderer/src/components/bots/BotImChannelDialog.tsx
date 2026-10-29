@@ -1,19 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import {
+  ArrowRight,
+  ArrowUpRight,
+  Check,
+  ChevronDown,
+  Copy,
+  MessageCircle,
+  RefreshCw,
+  Users
+} from "lucide-react"
+import "./bot-im-channel-dialog.css"
 import type { BotClient, BotDefinition } from "../../../../shared/bots/contracts"
 import type { BotImBinding } from "../../../../shared/bots/im-channel"
 import type { BotMockFeedEntry } from "../../../../shared/bots/mock-channel"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { botErrorMessage } from "@/lib/bot-error-message"
 
 const bindingLabels = {
   pending: "等待绑定",
-  active: "已连接",
+  active: "已绑定",
   revoked: "已撤销",
   expired: "指令已过期"
 }
@@ -32,27 +37,34 @@ const states: Record<string, string> = {
   unknown: "结果待核对",
   outcome_unknown: "结果待核对"
 }
-const button = "rounded-xl border px-3 py-2 text-sm hover:bg-accent disabled:opacity-50"
+const button = "bot-im-connect-button"
 
 export function BotImChannelDialog({
   client,
   bot,
   onClose,
   onOpenWork,
-  onOpenMain
+  onOpenMain,
+  onOpenConversation,
+  onOpenSettings,
+  initialBindingId
 }: {
   client: BotClient
   bot: BotDefinition
   onClose(): void
   onOpenWork(id: string): void
   onOpenMain?(): void
+  onOpenConversation?(bindingId: string): void
+  onOpenSettings?(): void
+  initialBindingId?: string | null
 }) {
   const api = client.im!
+  const titleRef = useRef<HTMLHeadingElement>(null)
   const [status, setStatus] = useState<{ connected: boolean; available: boolean } | null>(null)
   const [bindings, setBindings] = useState<BotImBinding[]>([])
   const [cursor, setCursor] = useState<string | null>(null)
   const [kind, setKind] = useState<"dm" | "group">("dm")
-  const [selected, setSelected] = useState<string | null>(null)
+  const [selected, setSelected] = useState<string | null>(initialBindingId ?? null)
   const [entries, setEntries] = useState<BotMockFeedEntry[]>([])
   const [historyCursor, setHistoryCursor] = useState<string | null>(null)
   const [historyNotice, setHistoryNotice] = useState<string | null>(null)
@@ -61,8 +73,11 @@ export function BotImChannelDialog({
     items: BotMockFeedEntry[]
     before: string | null
   } | null>(null)
+  const removedBindings = useRef(new Set<string>())
   const loadedBindingPages = useRef(false)
   const [busy, setBusy] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+  const [copied, setCopied] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const live = useRef(true)
   const loading = useRef(false)
@@ -70,14 +85,17 @@ export function BotImChannelDialog({
   selection.current = selected
   const merge = (values: BotImBinding[]) =>
     setBindings((old) =>
-      [...new Map([...old, ...values].map((value) => [value.id, value])).values()].sort(
-        (a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id)
-      )
+      [...new Map([...old, ...values].map((value) => [value.id, value])).values()]
+        .filter((value) =>
+          !["revoked", "expired"].includes(value.state) || !removedBindings.current.has(value.id)
+        )
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
     )
 
   const refresh = useCallback(async () => {
     if (loading.current) return
     loading.current = true
+    setRefreshing(true)
     try {
       const next = await api.status()
       if (!live.current) return
@@ -119,6 +137,7 @@ export function BotImChannelDialog({
       if (live.current) setError(botErrorMessage(e))
     } finally {
       loading.current = false
+      if (live.current) setRefreshing(false)
     }
   }, [api, bot.id])
   useEffect(() => {
@@ -139,6 +158,11 @@ export function BotImChannelDialog({
     setHistoryNotice(null)
     void refresh()
   }, [selected, refresh])
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(null), 1800)
+    return () => clearTimeout(timer)
+  }, [copied])
   const action = async (run: () => Promise<void>) => {
     setBusy(true)
     setError(null)
@@ -171,237 +195,390 @@ export function BotImChannelDialog({
         if (!open) onClose()
       }}
     >
-      <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto rounded-2xl">
-        <DialogHeader>
-          <DialogTitle>IM 接入 · {bot.name}</DialogTitle>
-          <DialogDescription>
-            本人招乎私聊与 App 主对话共用历史和独立任务，App 的回复和任务结果也会同步到私聊。
-            群聊各自保留独立会话，回复回到原群。
-          </DialogDescription>
-        </DialogHeader>
-        <div className="flex items-center justify-between gap-3 text-sm">
-          <p className="text-muted-foreground">
-            {status === null
-              ? "正在检查连接…"
-              : status.available
-                ? "IM 网关已连接"
-                : status.connected
-                  ? "当前网关尚未开启 Bot 接入，请升级并启用后重试。"
-                  : "请先在设置 → 内置机器人中登录并连接 IM 网关。"}
-          </p>
-          <button className={button} disabled={busy} onClick={() => void refresh()}>
-            刷新
-          </button>
-        </div>
-        <p className="text-sm text-muted-foreground">
-          接入后，本人或绑定群的成员可以与此 Bot
-          交流、创建和继续文字任务。不会开放本机文件、电脑操作或私人记忆。
-        </p>
-        {kind === "dm" && (
-          <p className="text-sm text-muted-foreground">
-            请使用本人账号绑定。关联后开始同步新消息；之前的渠道记录仍可在下方查看，不会重复推送。
-          </p>
-        )}
-        <div className="flex flex-wrap gap-2">
-          <select
-            aria-label="IM 绑定类型"
-            className={button}
-            value={kind}
-            disabled={busy}
-            onChange={(e) => setKind(e.target.value as "dm" | "group")}
-          >
-            <option value="dm">本人私聊</option>
-            <option value="group">群聊</option>
-          </select>
-          <button
-            className={button}
-            disabled={busy || !status?.available || bot.archived}
-            onClick={() => void create()}
-          >
-            生成绑定指令
-          </button>
-        </div>
-        {error && (
-          <p role="alert" className="text-sm text-destructive">
-            {error}
-          </p>
-        )}
-        {bindings.length === 0 && status?.available && (
-          <p className="py-6 text-center text-sm text-muted-foreground">
-            尚未接入 IM。生成指令后，发给 CMBDevCaw Bot 即可完成绑定。
-          </p>
-        )}
-        <div className="space-y-2">
-          {bindings.map((binding) => (
-            <div
-              key={binding.id}
-              className={`rounded-xl border p-3 ${selected === binding.id ? "bg-muted" : ""}`}
-            >
-              <div className="flex items-center justify-between gap-3">
+      <DialogContent
+        className="bot-im-connect"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault()
+          titleRef.current?.focus()
+        }}
+      >
+        <header className="bot-im-connect-header">
+          <DialogTitle ref={titleRef} tabIndex={-1}>
+            IM 接入 · {bot.name}
+          </DialogTitle>
+          <DialogDescription>将此 Bot 连接到招乎私聊或群聊。</DialogDescription>
+        </header>
+        <div className="bot-im-connect-body">
+          <div className="bot-im-connect-status" aria-live="polite">
+            <span className="bot-im-connect-dot" data-online={Boolean(status?.available)} />
+            <div className="bot-im-connect-status-copy">
+              <strong>
+                {status === null
+                  ? "正在检查连接…"
+                  : status.available
+                    ? "招乎已连接"
+                    : status.connected
+                      ? "需要启用 Bot 接入"
+                      : "尚未连接招乎"}
+              </strong>
+              {!status?.available && status !== null && (
+                <p>
+                  {status.connected
+                    ? "当前网关尚未开启 Bot 接入，请升级并启用后重试。"
+                    : "在设置的「机器人管理」中登录并连接 IM 网关。"}
+                </p>
+              )}
+              {status !== null && !status.available && onOpenSettings && (
                 <button
-                  className="min-w-0 flex-1 text-left"
-                  onClick={() => setSelected(binding.id)}
+                  className="bot-im-connect-link"
+                  onClick={() => {
+                    onOpenSettings()
+                    onClose()
+                  }}
                 >
-                  <span className="text-sm font-medium">
-                    {binding.peerLabel ?? (binding.kind === "dm" ? "本人私聊" : "群聊")} ·{" "}
-                    {bindingLabels[binding.state]}
-                  </span>
-                  <span className="mt-1 block text-xs text-muted-foreground">
-                    {new Date(binding.createdAt).toLocaleString()} · {binding.id.slice(0, 8)}
-                  </span>
+                  去设置 <ArrowUpRight size={13} aria-hidden="true" />
                 </button>
-                {["pending", "active"].includes(binding.state) && (
+              )}
+            </div>
+            <button
+              className="bot-im-connect-icon"
+              aria-label="刷新"
+              title="刷新连接状态"
+              disabled={busy || refreshing}
+              onClick={() => void refresh()}
+            >
+              <RefreshCw
+                size={15}
+                className={refreshing ? "animate-spin" : undefined}
+                aria-hidden="true"
+              />
+            </button>
+          </div>
+
+          <section className="bot-im-connect-setup" aria-label="新增 IM 接入">
+            <h3>接入方式</h3>
+            <div className="bot-im-connect-choices" role="radiogroup" aria-label="IM 绑定类型">
+              {(["dm", "group"] as const).map((value) => (
+                <label key={value} className="bot-im-connect-choice" data-selected={kind === value}>
+                  <input
+                    type="radio"
+                    name="bot-im-kind"
+                    value={value}
+                    checked={kind === value}
+                    disabled={busy}
+                    onChange={() => setKind(value)}
+                    aria-label={value === "dm" ? "本人私聊" : "群聊"}
+                  />
+                  <span className="bot-im-connect-choice-top">
+                    {value === "dm" ? (
+                      <MessageCircle size={20} aria-hidden="true" />
+                    ) : (
+                      <Users size={20} aria-hidden="true" />
+                    )}
+                    <span className="bot-im-connect-choice-check">
+                      {kind === value && <Check size={11} strokeWidth={2.5} aria-hidden="true" />}
+                    </span>
+                  </span>
+                  <strong>{value === "dm" ? "本人私聊" : "招乎群聊"}</strong>
+                  <span>
+                    {value === "dm"
+                      ? "与 App 主对话共用消息和任务"
+                      : "每个群独立交流，回复留在原群"}
+                  </span>
+                </label>
+              ))}
+            </div>
+            <div className="bot-im-connect-create">
+              <p>
+                {bot.archived
+                  ? "恢复此 Bot 后，可新增接入。"
+                  : kind === "dm"
+                    ? "用本人账号，在招乎私聊机器人发送指令。"
+                    : "用本人账号，在目标群 @机器人发送指令。"}
+              </p>
+              <button
+                className={`${button} bot-im-connect-primary`}
+                disabled={busy || !status?.available || bot.archived}
+                onClick={() => void create()}
+              >
+                生成绑定指令 <ArrowRight size={15} aria-hidden="true" />
+              </button>
+            </div>
+          </section>
+          {error && (
+            <p role="alert" className="bot-im-connect-error">
+              {error}
+            </p>
+          )}
+
+          {(bindings.length > 0 || cursor) && (
+            <section className="bot-im-connect-bindings" aria-label="已有接入">
+              <h3>
+                已有接入 <span>{bindings.length}</span>
+              </h3>
+              {bindings.map((binding) => {
+                const expanded = selected === binding.id
+                return (
+                  <div key={binding.id} className="bot-im-connect-binding" data-selected={expanded}>
+                    <div className="bot-im-connect-binding-row">
+                      <button
+                        className="bot-im-connect-binding-select"
+                        aria-expanded={expanded}
+                        onClick={() => setSelected(expanded ? null : binding.id)}
+                      >
+                        <span className="bot-im-connect-binding-icon">
+                          {binding.kind === "dm" ? (
+                            <MessageCircle size={17} aria-hidden="true" />
+                          ) : (
+                            <Users size={17} aria-hidden="true" />
+                          )}
+                        </span>
+                        <span className="bot-im-connect-binding-name">
+                          <strong>
+                            {binding.peerLabel ?? (binding.kind === "dm" ? "本人私聊" : "群聊")}
+                          </strong>
+                          <time dateTime={binding.createdAt}>
+                            {new Date(binding.createdAt).toLocaleString(undefined, {
+                              month: "short",
+                              day: "numeric",
+                              hour: "2-digit",
+                              minute: "2-digit"
+                            })}
+                          </time>
+                        </span>
+                        <span className="bot-im-connect-binding-state" data-state={binding.state}>
+                          {bindingLabels[binding.state]}
+                        </span>
+                        <ChevronDown
+                          size={14}
+                          className="bot-im-connect-chevron"
+                          aria-hidden="true"
+                        />
+                      </button>
+                      {["revoked", "expired"].includes(binding.state) && (
+                        <button
+                          className="bot-im-connect-revoke"
+                          disabled={busy || !status?.available}
+                          title="从本机接入列表删除，保留会话和任务历史"
+                          aria-label={`删除${binding.peerLabel ?? (binding.kind === "dm" ? "本人私聊" : "群聊")}接入记录`}
+                          onClick={() =>
+                            void action(async () => {
+                              await api.remove(bot.id, binding.id)
+                              removedBindings.current.add(binding.id)
+                              if (live.current) {
+                                setBindings((old) => old.filter((item) => item.id !== binding.id))
+                                if (selection.current === binding.id) {
+                                  selection.current = null
+                                  setSelected(null)
+                                }
+                              }
+                            })
+                          }
+                        >
+                          删除
+                        </button>
+                      )}
+                      {["pending", "active"].includes(binding.state) && (
+                        <button
+                          className="bot-im-connect-revoke"
+                          disabled={busy || !status?.available}
+                          onClick={() =>
+                            void action(async () => {
+                              const value = await api.revoke(bot.id, binding.id, binding.version)
+                              if (live.current) merge([value])
+                            })
+                          }
+                        >
+                          撤销
+                        </button>
+                      )}
+                    </div>
+                    {expanded && (
+                      <div className="bot-im-connect-binding-detail">
+                        {binding.instruction && (
+                          <>
+                            <p>
+                              {binding.kind === "group"
+                                ? "在目标招乎群 @机器人，粘贴并发送这条指令。"
+                                : "在招乎私聊机器人，粘贴并发送这条指令。"}
+                            </p>
+                            <div className="bot-im-connect-code">
+                              <code>{binding.instruction}</code>
+                              <button
+                                className="bot-im-connect-icon"
+                                aria-label={copied === binding.id ? "已复制" : "复制绑定指令"}
+                                title={copied === binding.id ? "已复制" : "复制绑定指令"}
+                                disabled={busy}
+                                onClick={() =>
+                                  void action(async () => {
+                                    await navigator.clipboard.writeText(binding.instruction!)
+                                    if (live.current) setCopied(binding.id)
+                                  })
+                                }
+                              >
+                                {copied === binding.id ? (
+                                  <Check size={16} aria-hidden="true" />
+                                ) : (
+                                  <Copy size={16} aria-hidden="true" />
+                                )}
+                              </button>
+                            </div>
+                            <div className="bot-im-connect-code-meta">
+                              <span>
+                                {new Date(binding.expiresAt).toLocaleTimeString(undefined, {
+                                  hour: "2-digit",
+                                  minute: "2-digit"
+                                })}{" "}
+                                前有效
+                              </span>
+                              <span role="status">
+                                {copied === binding.id ? "已复制" : "发送后将自动更新绑定状态"}
+                              </span>
+                            </div>
+                          </>
+                        )}
+                        {binding.kind === "dm" && binding.state === "active" && (
+                          <div className="bot-im-connect-binding-action">
+                            <p>已关联个人主对话 · 回复同步到招乎</p>
+                            {onOpenMain && (
+                              <button
+                                className="bot-im-connect-link"
+                                onClick={() => {
+                                  onOpenMain()
+                                  onClose()
+                                }}
+                              >
+                                打开主对话 <ArrowUpRight size={14} aria-hidden="true" />
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        {binding.kind === "group" &&
+                          ["active", "revoked"].includes(binding.state) &&
+                          onOpenConversation && (
+                            <button
+                              className="bot-im-connect-link"
+                              onClick={() => {
+                                onOpenConversation(binding.id)
+                                onClose()
+                              }}
+                            >
+                              打开群会话 <ArrowUpRight size={14} aria-hidden="true" />
+                            </button>
+                          )}
+                        {binding.state === "expired" && <p>这条指令已过期，可以重新生成。</p>}
+                        {binding.state === "revoked" && <p>已停止接收新消息，已有记录仍可查看。</p>}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+              {cursor && (
+                <button
+                  className="bot-im-connect-link"
+                  disabled={busy}
+                  onClick={() =>
+                    void action(async () => {
+                      const page = await api.list(bot.id, cursor)
+                      if (live.current) {
+                        loadedBindingPages.current = true
+                        merge(page.items)
+                        setCursor(page.before)
+                      }
+                    })
+                  }
+                >
+                  更多绑定 <ChevronDown size={14} aria-hidden="true" />
+                </button>
+              )}
+            </section>
+          )}
+
+          {chosen && (
+            <details key={chosen.id} className="bot-im-connect-history">
+              <summary>
+                接入记录 <ChevronDown size={14} aria-hidden="true" />
+              </summary>
+              <div className="bot-im-connect-history-content">
+                <p className="bot-im-connect-hint">
+                  “网关已接收”表示回复已交给网关，实际送达以招乎会话为准。
+                </p>
+                {historyNotice && (
+                  <p role="status" className="bot-im-connect-hint">
+                    {historyNotice}
+                  </p>
+                )}
+                {historyCursor && (
                   <button
-                    className={button}
-                    disabled={busy || !status?.available}
+                    className="bot-im-connect-link"
+                    disabled={busy}
                     onClick={() =>
                       void action(async () => {
-                        const value = await api.revoke(bot.id, binding.id, binding.version)
-                        if (live.current) merge([value])
+                        const id = chosen.id,
+                          page = await api.history(bot.id, id, historyCursor)
+                        const window = historyWindow.current
+                        if (
+                          live.current &&
+                          selection.current === id &&
+                          window?.id === id &&
+                          window.before === historyCursor
+                        ) {
+                          window.items = [
+                            ...new Map(
+                              [...window.items, ...page.items].map((entry) => [entry.id, entry])
+                            ).values()
+                          ]
+                          window.before = page.before
+                          setEntries(window.items)
+                          setHistoryCursor(window.before)
+                        }
                       })
                     }
                   >
-                    撤销
+                    更早记录
                   </button>
                 )}
+                {entries.length === 0 && (
+                  <p className="bot-im-connect-hint">
+                    暂无接入记录。绑定后在招乎发送消息，群聊请 @机器人。
+                  </p>
+                )}
+                {[...entries]
+                  .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+                  .map((entry) => (
+                    <article key={entry.id} className="bot-im-connect-record">
+                      <header>
+                        <span>{entry.kind === "bot" ? bot.name : "IM 消息"}</span>
+                        <span>{states[entry.state] ?? entry.state}</span>
+                      </header>
+                      <p>{entry.text}</p>
+                      {entry.workId && (
+                        <button
+                          className="bot-im-connect-link"
+                          onClick={() => {
+                            onOpenWork(entry.workId!)
+                            onClose()
+                          }}
+                        >
+                          打开独立任务 <ArrowUpRight size={14} aria-hidden="true" />
+                        </button>
+                      )}
+                    </article>
+                  ))}
               </div>
-              {binding.kind === "dm" && binding.state === "active" && (
-                <div className="mt-2 flex items-center justify-between gap-2 text-sm">
-                  <span className="text-muted-foreground">已关联个人主对话 · 回复同步到招乎</span>
-                  {onOpenMain && (
-                    <button
-                      className={button}
-                      onClick={() => {
-                        onOpenMain()
-                        onClose()
-                      }}
-                    >
-                      打开主对话
-                    </button>
-                  )}
-                </div>
-              )}
-              {binding.instruction && (
-                <div className="mt-3 space-y-2 text-sm">
-                  <p>
-                    {binding.kind === "group"
-                      ? "用当前登录账号在目标群 @CMBDevCaw Bot，发送以下指令。"
-                      : "用当前登录账号私聊 CMBDevCaw Bot，发送以下指令。"}
-                  </p>
-                  <div className="flex items-center gap-2">
-                    <code className="min-w-0 flex-1 select-all break-all rounded-lg bg-muted p-2">
-                      {binding.instruction}
-                    </code>
-                    <button
-                      className={button}
-                      onClick={() =>
-                        void action(() => navigator.clipboard.writeText(binding.instruction!))
-                      }
-                    >
-                      复制
-                    </button>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {new Date(binding.expiresAt).toLocaleTimeString()}{" "}
-                    前有效。每个私聊或群聊只能绑定一个 Bot；变更时先撤销原绑定。
-                    {binding.kind === "dm" &&
-                      "绑定后，CMBDevCaw Bot 的私聊文字将交给此 Bot；原 CMBDevClaw 的项目和对话入口保持独立。"}
-                  </p>
-                </div>
-              )}
-            </div>
-          ))}
-          {cursor && (
-            <button
-              className={button}
-              disabled={busy}
-              onClick={() =>
-                void action(async () => {
-                  const page = await api.list(bot.id, cursor)
-                  if (live.current) {
-                    loadedBindingPages.current = true
-                    merge(page.items)
-                    setCursor(page.before)
-                  }
-                })
-              }
-            >
-              更多绑定
-            </button>
+            </details>
           )}
+          <details className="bot-im-connect-help">
+            <summary>
+              接入说明 <ChevronDown size={14} aria-hidden="true" />
+            </summary>
+            <div>
+              <p>每个私聊或群聊可绑定一个 Bot，更换时先撤销原绑定。</p>
+              <p>本人私聊与 App 主对话共用历史和任务，绑定后开始同步新消息。</p>
+              <p>私聊和群聊可使用 Bot 的本机执行能力；群聊使用 Bot 共享与本群记忆。</p>
+            </div>
+          </details>
         </div>
-        {chosen && (
-          <section className="space-y-3 border-t pt-4">
-            <h3 className="text-sm font-medium">
-              {chosen.kind === "group" ? "群聊" : "私聊"}接入记录
-            </h3>
-            <p className="text-xs text-muted-foreground">
-              “网关已接收”表示回复已交给网关，实际送达以招乎会话为准。
-            </p>
-            {historyNotice && (
-              <p role="status" className="text-xs text-muted-foreground">
-                {historyNotice}
-              </p>
-            )}
-            {historyCursor && (
-              <button
-                className={button}
-                disabled={busy}
-                onClick={() =>
-                  void action(async () => {
-                    const id = chosen.id,
-                      page = await api.history(bot.id, id, historyCursor)
-                    const window = historyWindow.current
-                    if (
-                      live.current &&
-                      selection.current === id &&
-                      window?.id === id &&
-                      window.before === historyCursor
-                    ) {
-                      window.items = [
-                        ...new Map(
-                          [...window.items, ...page.items].map((entry) => [entry.id, entry])
-                        ).values()
-                      ]
-                      window.before = page.before
-                      setEntries(window.items)
-                      setHistoryCursor(window.before)
-                    }
-                  })
-                }
-              >
-                更早记录
-              </button>
-            )}
-            {entries.length === 0 && (
-              <p className="py-3 text-sm text-muted-foreground">
-                暂时没有本机接收记录。绑定完成后，请在招乎发送消息；群聊需要 @机器人。
-              </p>
-            )}
-            {[...entries]
-              .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
-              .map((entry) => (
-                <div key={entry.id} className="rounded-xl bg-muted/60 p-3 text-sm">
-                  <div className="mb-2 flex justify-between text-xs text-muted-foreground">
-                    <span>{entry.kind === "bot" ? bot.name : "IM 消息"}</span>
-                    <span>{states[entry.state] ?? entry.state}</span>
-                  </div>
-                  <p className="whitespace-pre-wrap break-words">{entry.text}</p>
-                  {entry.workId && (
-                    <button
-                      className="mt-2 text-sm underline"
-                      onClick={() => {
-                        onOpenWork(entry.workId!)
-                        onClose()
-                      }}
-                    >
-                      打开独立任务 →
-                    </button>
-                  )}
-                </div>
-              ))}
-          </section>
-        )}
       </DialogContent>
     </Dialog>
   )

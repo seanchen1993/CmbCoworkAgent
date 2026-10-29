@@ -17,18 +17,21 @@ async function main() {
         loader: "tsx",
         contents: `
 import React from 'react';import {createRoot} from 'react-dom/client';import {BotImChannelDialog} from './src/renderer/src/components/bots/BotImChannelDialog';
-const state=window.fixture={available:false,attempts:[],bindings:[],opened:[],mainOpened:0,close:0,lost:true};
-const api={status:async()=>({connected:true,available:state.available}),list:async()=>({items:state.bindings,before:null}),
+import {applyThemePreference} from './src/renderer/src/lib/theme-preference';
+window.setFixtureTheme=applyThemePreference;applyThemePreference('cmbdevclaw-white');
+const state=window.fixture={connected:false,available:false,settingsOpened:0,attempts:[],bindings:[],opened:[],mainOpened:0,close:0,lost:true};
+const api={status:async()=>({connected:state.connected,available:state.available}),list:async()=>({items:state.bindings,before:null}),
 create:async(botId,kind,operationId)=>{state.attempts.push(operationId);if(state.lost){state.lost=false;throw new Error('回包丢失，请重试')}const b={id:'binding-one',botId,kind,label:'测试 Bot',state:'pending',version:1,conversationKey:null,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+600000).toISOString(),instruction:'/绑定Bot abcdefghijklmnopqrstuvwx'};state.bindings=[b];return b},
 revoke:async()=>{state.bindings=[{...state.bindings[0],state:'revoked',version:2,instruction:undefined}];return state.bindings[0]},
 history:async()=>({items:state.bindings[0]?.state==='active'?[{id:'reply',kind:'bot',text:'这是群内通知的回复',senderId:'Bot',state:'accepted',replyToMessageId:null,createdAt:1,workId:'work-one'}]:[],before:null})};
-createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{hostId:'local',im:api}} bot={{id:'bot',name:'测试 Bot',archived:false}} onClose={()=>state.close++} onOpenWork={id=>state.opened.push(id)} onOpenMain={()=>state.mainOpened++}/>);`
+createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{hostId:'local',im:api}} bot={{id:'bot',name:'测试 Bot',archived:false}} onOpenSettings={()=>state.settingsOpened++} onClose={()=>state.close++} onOpenWork={id=>state.opened.push(id)} onOpenMain={()=>state.mainOpened++}/>);`
       },
       bundle: true,
       format: "iife",
       platform: "browser",
       jsx: "automatic",
       write: false,
+      outfile: join(dir, "fixture.js"),
       define: { "process.env.NODE_ENV": '"production"' },
       alias: { "@": resolve("src/renderer/src") }
     })
@@ -45,8 +48,13 @@ createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{
           .map((name) => `<link rel="stylesheet" href="${pathToFileURL(join(assets!, name))}">`)
           .join("") +
         '<div id="root"></div><script>' +
-        result.outputFiles[0].text +
-        "</script>"
+        result.outputFiles.find((file) => file.path.endsWith(".js"))!.text +
+        "</script><style>" +
+        result.outputFiles
+          .filter((file) => file.path.endsWith(".css"))
+          .map((file) => file.text)
+          .join("\n") +
+        "</style>"
     )
     await writeFile(
       join(dir, "main.cjs"),
@@ -64,6 +72,22 @@ createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{
       errors: string[] = []
     page.setDefaultTimeout(15000)
     page.on("pageerror", (error) => errors.push(error.message))
+    const screenshot = async (name: string) => {
+      if (process.env.BOT_TEST_APP_OUT)
+        await page.screenshot({
+          path: join(process.env.BOT_TEST_APP_OUT, "artifacts", name),
+          animations: "disabled"
+        })
+    }
+    await page.getByText("尚未连接招乎", { exact: true }).waitFor()
+    assert(await page.getByRole("button", { name: "生成绑定指令" }).isDisabled())
+    await screenshot("bot-im-connect-offline.png")
+    await page.getByRole("button", { name: "去设置", exact: true }).click()
+    assert.equal(await page.evaluate(() => (window as any).fixture.settingsOpened), 1)
+    await page.evaluate(() => {
+      ;(window as any).fixture.connected = true
+    })
+    await page.getByRole("button", { name: "刷新", exact: true }).click()
     await page
       .getByText("当前网关尚未开启 Bot 接入，请升级并启用后重试。", { exact: true })
       .waitFor()
@@ -72,12 +96,31 @@ createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{
       ;(window as any).fixture.available = true
     })
     await page.getByRole("button", { name: "刷新", exact: true }).click()
-    await page.getByLabel("IM 绑定类型").selectOption("group")
+    await page.getByRole("radio", { name: "群聊", exact: true }).check()
+    assert(await page.getByRole("radio", { name: "群聊", exact: true }).isChecked())
+    await screenshot("bot-im-connect-ready.png")
     await page.getByRole("button", { name: "生成绑定指令" }).click()
     await page.getByRole("alert").getByText("回包丢失，请重试").waitFor()
     await page.getByRole("button", { name: "生成绑定指令" }).click()
     await page.getByText("/绑定Bot abcdefghijklmnopqrstuvwx", { exact: true }).waitFor()
     assert.equal(await page.evaluate(() => new Set((window as any).fixture.attempts).size), 1)
+    await page.getByRole("button", { name: "复制绑定指令", exact: true }).click()
+    await page.getByRole("button", { name: "已复制", exact: true }).waitFor()
+    await screenshot("bot-im-connect-pending.png")
+    await page.evaluate(() => (window as any).setFixtureTheme("codex-dark"))
+    await screenshot("bot-im-connect-pending-dark.png")
+    await page.setViewportSize({ width: 420, height: 760 })
+    await screenshot("bot-im-connect-compact.png")
+    assert.equal(
+      await page.locator("[role=dialog]").evaluate((el) => el.scrollWidth > el.clientWidth),
+      false
+    )
+    assert.equal(
+      await page.locator(".bot-im-connect-body").evaluate((el) => el.scrollWidth > el.clientWidth),
+      false
+    )
+    await page.setViewportSize({ width: 1100, height: 950 })
+    await page.evaluate(() => (window as any).setFixtureTheme("cmbdevclaw-white"))
     await page.evaluate(() => {
       const b = (window as any).fixture.bindings[0]
       b.state = "active"
@@ -85,6 +128,7 @@ createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{
       delete b.instruction
     })
     await page.getByRole("button", { name: "刷新", exact: true }).click()
+    await page.getByText("接入记录", { exact: true }).click()
     await page.getByText("这是群内通知的回复", { exact: true }).waitFor()
     await page.getByText("网关已接收", { exact: true }).waitFor()
     if (process.env.BOT_TEST_APP_OUT)
@@ -92,10 +136,10 @@ createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{
         path: join(process.env.BOT_TEST_APP_OUT, "artifacts/bot-im-dialog.png"),
         fullPage: true
       })
-    await page.getByRole("button", { name: "打开独立任务 →" }).click()
+    await page.getByRole("button", { name: "打开独立任务" }).click()
     assert.deepEqual(await page.evaluate(() => (window as any).fixture.opened), ["work-one"])
     await page.getByRole("button", { name: "撤销", exact: true }).click()
-    await page.getByText("群聊 · 已撤销", { exact: true }).waitFor()
+    await page.getByText("已撤销", { exact: true }).waitFor()
     assert.equal(await page.getByRole("button", { name: "撤销", exact: true }).count(), 0)
     await page.evaluate(() => {
       ;(window as any).fixture.bindings = [
@@ -112,6 +156,7 @@ createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{
       ]
     })
     await page.getByRole("button", { name: "刷新", exact: true }).click()
+    await page.getByRole("button", { name: /^本人私聊/ }).click()
     await page.getByText("已关联个人主对话 · 回复同步到招乎", { exact: true }).waitFor()
     if (process.env.BOT_TEST_APP_OUT)
       await page.screenshot({

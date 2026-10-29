@@ -1,3 +1,6 @@
+import { botInteractionRoutes } from "./bot-interaction-route"
+import { submitFormattedImReply } from "./submit-formatted-reply"
+import { conversationSwitchedToText } from "./withheld-text-notices"
 import type { LocalBotHost } from "../../bots/host"
 import { botImScopeId, type StoredBotImEvent } from "../../bots/im-gateway-store"
 import type { BotImBinding, BotImBindingPage, BotImEvent } from "../../../shared/bots/im-channel"
@@ -14,7 +17,8 @@ export type BotImGatewayClient = Pick<
   | "acquireBotPermit"
   | "renewBotPermit"
   | "submitReply"
->
+> &
+  Partial<Pick<ImGatewayWsClient, "supportsMarkdownReplies" | "supportsBotCards">>
 
 /** Authenticated IM -> local Bot adapter. Renderer has no event injection API. */
 export class BotImChannelService {
@@ -35,8 +39,19 @@ export class BotImChannelService {
     private readonly client: BotImGatewayClient,
     private readonly realm: string,
     private readonly resolveHost: () => LocalBotHost,
-    private readonly reportError: (error: unknown) => void = console.error
-  ) {}
+    private readonly reportError: (error: unknown) => void = console.error,
+    private readonly usesTextReplies = (key: string) =>
+      conversationSwitchedToText(key, console.warn)
+  ) {
+    this.releaseTransport = botInteractionRoutes.setTransport(
+      (realm, principal) =>
+        !this.stopped &&
+        realm === this.realm &&
+        this.client.supportsBotCards?.() === true &&
+        this.client.getStatus().principalId === principal
+    )
+  }
+  private readonly releaseTransport: () => void
 
   isRouteConfirmed(conversation: string, principal: string): boolean {
     return (
@@ -111,7 +126,11 @@ export class BotImChannelService {
     if (!("items" in value) || principal !== this.identity())
       throw new Error("IM 身份已变化，请刷新")
     if (epoch !== this.epoch) throw new Error("连接已变化，请刷新绑定")
-    return { ...value, items: value.items.map((binding) => this.register(binding, principal)) }
+    const items = value.items.map((binding) => this.register(binding, principal))
+    return {
+      ...value,
+      items: this.getHost().imGateway.visibleBindings(this.realm, principal, items)
+    }
   }
   async revoke(botId: string, bindingId: string, expectedVersion: number): Promise<BotImBinding> {
     const epoch = this.epoch,
@@ -126,6 +145,11 @@ export class BotImChannelService {
     if ("items" in value || principal !== this.identity()) throw new Error("IM 身份已变化，请刷新")
     if (epoch !== this.epoch) throw new Error("连接已变化，请刷新绑定")
     return this.register(value, principal)
+  }
+  remove(botId: string, bindingId: string): void {
+    const principal = this.identity()
+    this.getHost().getBot(botId)
+    this.getHost().imGateway.removeBinding(botId, botImScopeId(this.realm, principal, bindingId))
   }
   history(botId: string, bindingId: string, before?: string) {
     const host = this.getHost(),
@@ -218,6 +242,21 @@ export class BotImChannelService {
         principal
       )
       host.imGateway.settle(receipt.id, "active", undefined, expiry)
+      if (
+        !receipt.taskId &&
+        /^\/(?:回答|批准|拒绝|文字模式)(?:\s|$)/u.test(wire.message.text.trim())
+      ) {
+        const { handleBotImInteractionCommand } = await import("./bot-interaction-command")
+        await this.client.sendAcknowledgement({
+          type: "accepted",
+          eventId: wire.eventId,
+          leaseId: wire.lease.id
+        })
+        await handleBotImInteractionCommand(payload, principal, receipt.id)
+        host.imGateway.settle(receipt.id, "completed")
+        await this.ackTerminal(host.imGateway.event(receipt.id)!)
+        return
+      }
       if (!receipt.taskId) {
         const accepted = host.acceptImEvent({
           bindingId: receipt.bindingId,
@@ -398,12 +437,19 @@ export class BotImChannelService {
       const messages = buildImProactiveReplies({
         deliveryId: reply.id,
         conversationKey: registered.binding.conversationKey,
-        text: reply.text
+        text: reply.text,
+        format: "markdown"
       })
       for (const message of messages) {
         if (this.stopped || epoch !== this.epoch) throw new Error("IM 连接已变化")
         if (!host.imChannel.mayDeliver(reply.id)) return
-        const result = await this.client.submitReply(message)
+        const markdown =
+          this.client.supportsMarkdownReplies?.() === true &&
+          !this.usesTextReplies(registered.binding.conversationKey)
+        const result = await submitFormattedImReply(this.client, {
+          ...message,
+          message: { ...message.message, type: markdown ? "markdown" : "text" }
+        })
         if (result.state === "platform_unknown") {
           host.imChannel.delivered(reply.id, "unknown")
           return
@@ -414,7 +460,11 @@ export class BotImChannelService {
       if (reply)
         host.imChannel.delivered(
           reply.id,
-          error instanceof ImGatewayCommandError && error.permanent ? "blocked" : "pending"
+          error instanceof ImGatewayCommandError && error.resultUnknown
+            ? "unknown"
+            : error instanceof ImGatewayCommandError && error.permanent
+              ? "blocked"
+              : "pending"
         )
       this.nextDelivery = Date.now() + 5000
       this.reportError(error)
@@ -432,6 +482,7 @@ export class BotImChannelService {
   }
   stop(): void {
     this.stopped = true
+    this.releaseTransport()
     if (this.timer) clearInterval(this.timer)
     this.disconnected()
   }

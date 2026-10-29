@@ -36,6 +36,19 @@ export interface BotImBindingPage {
   before: string | null
 }
 
+/** Local read model only: no gateway credentials or private account identifiers. */
+export interface BotImConversation {
+  id: string
+  botId: string
+  bindingId: string
+  /** Native execution thread, present after the first admitted group message. */
+  threadId?: string
+  title: string
+  state: "active" | "revoked"
+  connected: boolean
+  activity: import("./contracts").BotConversationActivity
+}
+
 function object(
   value: unknown,
   required: string[],
@@ -137,6 +150,19 @@ export function assertBotImBindingResult(
 }
 
 export interface BotImClient {
+  stopConversation(botId: string, conversationId: string): Promise<void>
+  conversationWorks?(
+    botId: string,
+    conversationId: string,
+    cursor?: string,
+    query?: string
+  ): Promise<import("./work").BotWorkPage>
+  /** Local retained group history remains readable while disconnected or revoked. */
+  conversationHistory?(
+    botId: string,
+    conversationId: string,
+    before?: string
+  ): Promise<{ items: import("./mock-channel").BotMockFeedEntry[]; before: string | null }>
   history(
     botId: string,
     bindingId: string,
@@ -146,4 +172,11 @@ export interface BotImClient {
   list(botId: string, before?: string): Promise<BotImBindingPage>
   create(botId: string, kind: "dm" | "group", operationId: string): Promise<BotImBinding>
   revoke(botId: string, bindingId: string, version: number): Promise<BotImBinding>
+  /** Remove an inactive record from this device's configuration list, retaining history. */
+  remove(botId: string, bindingId: string): Promise<void>
+}
+
+/** Local binding ID scopes pages to one IM audience; never use the platform group ID. */
+export function botImBrowserScope(bindingId: string, botId: string): string {
+  return `im-${bindingId}--${botId}`
 }

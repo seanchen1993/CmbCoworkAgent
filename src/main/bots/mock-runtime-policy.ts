@@ -7,8 +7,24 @@ export const BOT_MOCK_TOOL_NAMES = [
   "bot_work_complete",
   "bot_work_continue"
 ]
-export function botMockRemotePolicy(): RemoteTurnPolicy {
-  return botTextOnlyRemotePolicy(BOT_MOCK_TOOL_NAMES)
+export const BOT_SCOPED_MEMORY_TOOLS = [
+  "bot_memory_search",
+  "bot_memory_list",
+  "bot_memory_get",
+  "bot_remember",
+  "bot_forget"
+]
+export function botMockRemotePolicy(
+  memoryEnabled = false,
+  allowUserInput = false
+): RemoteTurnPolicy {
+  const policy = botTextOnlyRemotePolicy([
+    ...BOT_MOCK_TOOL_NAMES,
+    ...(allowUserInput ? ["request_user_input"] : []),
+    ...(memoryEnabled ? BOT_SCOPED_MEMORY_TOOLS : [])
+  ])
+  policy.disableRequestUserInput = !allowUserInput
+  return policy
 }
 /** Text-only receipts and external text scopes cannot execute local actions. */
 export function botTextOnlyRemotePolicy(allowedToolNames: string[]): RemoteTurnPolicy {
@@ -39,6 +55,14 @@ export function assertBotMockThreadEntry(
   context?: AgentRunExecutionContext
 ): void {
   if (!metadata.botMockBindingId) return
+  // Host verification still checks the live binding/lease and exact audience. IM now
+  // uses ordinary local capabilities; simulation retains its separate text sandbox.
+  if (
+    metadata.botMockTransport === "im" &&
+    context?.source === "bot" &&
+    context.verifyResolvedThread
+  )
+    return
   const policy = context?.remotePolicy
   if (
     context?.source !== "bot" ||
@@ -53,8 +77,16 @@ export function assertBotMockThreadEntry(
     !policy.sharedTaskContext ||
     policy.allowedSkillNames?.length !== 0 ||
     policy.allowedExpertNames?.length !== 0 ||
-    policy.allowedToolNames?.length !== BOT_MOCK_TOOL_NAMES.length ||
-    policy.allowedToolNames.some((name) => !BOT_MOCK_TOOL_NAMES.includes(name))
+    !policy.allowedToolNames ||
+    BOT_MOCK_TOOL_NAMES.some((name) => !policy.allowedToolNames!.includes(name)) ||
+    policy.allowedToolNames.some(
+      (name) =>
+        ![
+          ...BOT_MOCK_TOOL_NAMES,
+          ...BOT_SCOPED_MEMORY_TOOLS,
+          ...(!policy.disableRequestUserInput ? ["request_user_input"] : [])
+        ].includes(name)
+    )
   )
     throw new Error("外部渠道会话只能经已授权的 Bot 绑定执行；请返回原任务或接入渠道继续。")
 }

@@ -7,10 +7,14 @@ import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "../bots/store"
 import { LocalBotHost } from "../bots/host"
 import { BotImChannelService, type BotImGatewayClient } from "../services/im/bot-channel-service"
-import { assertBotImBinding, assertBotImEvent, type BotImBinding } from "../../shared/bots/im-channel"
+import {
+  assertBotImBinding,
+  assertBotImEvent,
+  type BotImBinding
+} from "../../shared/bots/im-channel"
 const fixture = vi.hoisted(() => ({
   getHost: vi.fn(),
-  conversationLinks:{forBot:()=>[],forThread:()=>null},
+  conversationLinks: { forBot: () => [], forThread: () => null },
   introduce: vi.fn(),
   getThread: vi.fn(),
   removeBot: vi.fn(),
@@ -21,6 +25,7 @@ const fixture = vi.hoisted(() => ({
   share: vi.fn(),
   remove: vi.fn(),
   write: vi.fn(),
+  listMemory: vi.fn(),
   create: vi.fn(),
   preview: vi.fn(),
   giveBack: vi.fn(),
@@ -47,10 +52,10 @@ const fixture = vi.hoisted(() => ({
   createWork: vi.fn(),
   changeWork: vi.fn(),
   markWorksRead: vi.fn(),
-  windowFor:vi.fn(()=>({})),mockBindings:vi.fn(),mockBinding:vi.fn(),createMockBinding:vi.fn(),injectMockEvent:vi.fn(),revokeMockBinding:vi.fn(),setMockOnline:vi.fn(),mockHistory:vi.fn()
+  windowFor: vi.fn(() => ({}))
 }))
 vi.mock("electron", () => ({
-  BrowserWindow: { getAllWindows: () => [], fromWebContents:fixture.windowFor },
+  BrowserWindow: { getAllWindows: () => [], fromWebContents: fixture.windowFor },
   powerMonitor: { on: vi.fn() }
 }))
 vi.mock("../bots/local-service", () => ({
@@ -60,6 +65,7 @@ vi.mock("../bots/local-service", () => ({
     removeBot: fixture.removeBot,
     share: fixture.share,
     write: fixture.write,
+    list: fixture.listMemory,
     remove: fixture.remove
   }),
   getBotBrowserService: () => ({
@@ -70,7 +76,14 @@ vi.mock("../bots/local-service", () => ({
     removeGroup: fixture.removeBrowserGroup
   })
 }))
-vi.mock("../bots/conversation-link-service",()=>({resolveWorkConversation:vi.fn(),exposeWorkConversation:vi.fn(),linkExistingConversation:vi.fn(),unlinkWorkConversation:vi.fn(),unlinkDeletingWorkConversation:vi.fn()}))
+vi.mock("../bots/conversation-link-service", () => ({
+  resolveWorkConversation: vi.fn(),
+  exposeWorkConversation: vi.fn(),
+  linkExistingConversation: vi.fn(),
+  unlinkWorkConversation: vi.fn(),
+  unlinkDeletingWorkConversation: vi.fn()
+}))
+vi.mock("../services/im/withheld-text-notices", () => ({ conversationSwitchedToText: () => false }))
 vi.mock("../db", () => ({ getThreadCore: fixture.getThread }))
 vi.mock("../bots/runtime-adapter", () => ({ prepareBotThread: vi.fn() }))
 vi.mock("./bot-files", () => ({ registerBotFileHandlers: vi.fn() }))
@@ -127,7 +140,9 @@ describe("Bot IPC boundaries", () => {
         }),
         sendAcknowledgement: vi.fn<BotImGatewayClient["sendAcknowledgement"]>(async () => {}),
         acquireBotPermit: vi.fn<BotImGatewayClient["acquireBotPermit"]>(async () => ({
-          status: "granted", leaseId: "lease", expiresAt: new Date(Date.now() + 90000).toISOString()
+          status: "granted",
+          leaseId: "lease",
+          expiresAt: new Date(Date.now() + 90000).toISOString()
         })),
         renewBotPermit: vi.fn<BotImGatewayClient["renewBotPermit"]>(),
         submitReply: vi.fn<BotImGatewayClient["submitReply"]>()
@@ -147,12 +162,20 @@ describe("Bot IPC boundaries", () => {
         expect(await call("bots:im:list", "local", bot.id)).toMatchObject({ items: [binding] })
         const input = {
           route: {
-            bindingId, botId: bot.id, kind: binding.kind, label: binding.label,
-            version: binding.version, senderId: "employee:42"
+            bindingId,
+            botId: bot.id,
+            kind: binding.kind,
+            label: binding.label,
+            version: binding.version,
+            senderId: "employee:42"
           },
           event: {
-            schemaVersion: 1 as const, eventId: "event", platformMessageId: "message",
-            principalId: "owner", conversationKey: binding.conversationKey!, conversationSeq: 1,
+            schemaVersion: 1 as const,
+            eventId: "event",
+            platformMessageId: "message",
+            principalId: "owner",
+            conversationKey: binding.conversationKey!,
+            conversationSeq: 1,
             message: { type: "text" as const, text: "Synthetic pending message" },
             occurredAt: new Date().toISOString(),
             lease: { id: "lease", expiresAt: new Date(Date.now() + 90000).toISOString() }
@@ -164,24 +187,116 @@ describe("Bot IPC boundaries", () => {
           items: [expect.objectContaining({ kind: "user", text: input.event.message.text })]
         })
         expect(() => call("bots:im:history", "local", other.id, bindingId)).toThrow("不属于")
+        const localId = host.snapshot().imConversations![0].id
+        call("bots:memory:list", "local", bot.id, localId)
+        expect(fixture.listMemory).toHaveBeenLastCalledWith(bot.id, { groupId: localId })
+        call("bots:memory:list", "local", bot.id)
+        expect(fixture.listMemory).toHaveBeenLastCalledWith(bot.id, {})
+        expect(() => call("bots:memory:list", "local", other.id, localId)).toThrow("不属于")
+        expect(() =>
+          call("bots:memory:write", "local", other.id, {
+            name: "Fact",
+            content: "No",
+            scope: { kind: "group", groupId: localId }
+          })
+        ).toThrow("不属于")
+        call("bots:memory:write", "local", bot.id, {
+          name: "Fact",
+          content: "Yes",
+          scope: { kind: "group", groupId: localId }
+        })
+        expect(fixture.write).toHaveBeenLastCalledWith(bot.id, {
+          name: "Fact",
+          content: "Yes",
+          scope: { kind: "group", groupId: localId }
+        })
+        expect(call("bots:im:conversation-history", "local", bot.id, localId)).toMatchObject({
+          items: [expect.objectContaining({ text: input.event.message.text })]
+        })
+        expect(call("bots:im:conversation-works", "local", bot.id, localId)).toMatchObject({
+          items: []
+        })
+        expect(() => call("bots:im:conversation-history", "local", other.id, localId)).toThrow(
+          "不存在"
+        )
+        expect(() => call("bots:im:conversation-works", "remote", bot.id, localId)).toThrow("本机")
+        expect(() => call("bots:im:conversation-stop", "remote", bot.id, localId)).toThrow("本机")
+        expect(() => call("bots:im:conversation-stop", "local", other.id, localId)).toThrow(
+          "不存在"
+        )
+        expect(() => call("bots:im:conversation-stop", "local", bot.id, "../invalid")).toThrow(
+          "标识"
+        )
+        expect(() =>
+          register(undefined, { ...event, senderFrame: {} }, manager)(
+            "bots:im:conversation-stop",
+            "local",
+            bot.id,
+            localId
+          )
+        ).toThrow("桌面")
+        expect(() => call("bots:im:conversation-history", "local", bot.id, localId, "bad")).toThrow(
+          "游标"
+        )
+        expect(() =>
+          register(undefined, { ...event, senderFrame: {} }, manager)(
+            "bots:im:conversation-history",
+            "local",
+            bot.id,
+            localId
+          )
+        ).toThrow("桌面")
         expect(() => call("bots:im:history", "remote", bot.id, bindingId)).toThrow("本机")
         expect(() => call("bots:im:history", "local", "bot:invalid", bindingId)).toThrow("标识")
-        expect(() => call("bots:im:create", "local", bot.id, "group", "operation:invalid")).toThrow("标识")
+        expect(() => call("bots:im:create", "local", bot.id, "group", "operation:invalid")).toThrow(
+          "标识"
+        )
         expect(() => call("bots:im:revoke", "local", bot.id, bindingId, 0)).toThrow("版本")
-        expect(() => call("bots:im:history", "local", bot.id, bindingId, "x".repeat(1025))).toThrow("游标")
-        expect(() => register(undefined, { ...event, senderFrame: {} }, manager)(
-          "bots:im:history", "local", bot.id, bindingId
-        )).toThrow("桌面")
-        for (const invalid of [undefined, null, {}, [], "", "../binding", "binding/path", "binding.id", "b".repeat(129), "binding\n"]) {
+        expect(() => call("bots:im:history", "local", bot.id, bindingId, "x".repeat(1025))).toThrow(
+          "游标"
+        )
+        expect(() =>
+          register(undefined, { ...event, senderFrame: {} }, manager)(
+            "bots:im:history",
+            "local",
+            bot.id,
+            bindingId
+          )
+        ).toThrow("桌面")
+        for (const invalid of [
+          undefined,
+          null,
+          {},
+          [],
+          "",
+          "../binding",
+          "binding/path",
+          "binding.id",
+          "b".repeat(129),
+          "binding\n"
+        ]) {
           expect(() => call("bots:im:history", "local", bot.id, invalid)).toThrow("标识")
           expect(() => call("bots:im:revoke", "local", bot.id, invalid, 1)).toThrow("标识")
+          expect(() => call("bots:im:remove", "local", bot.id, invalid)).toThrow("标识")
         }
         expect(client.botBindingCommand).toHaveBeenCalledTimes(1)
         expect(await call("bots:im:revoke", "local", bot.id, bindingId, 1)).toMatchObject({
-          id: bindingId, version: 2, state: "revoked"
+          id: bindingId,
+          version: 2,
+          state: "revoked"
         })
         expect(store.recentTasks()).toEqual([expect.objectContaining({ state: "cancelled" })])
         expect(call("bots:im:history", "local", bot.id, bindingId)).toMatchObject({
+          items: [expect.objectContaining({ kind: "user", state: "cancelled" })]
+        })
+        expect(() => call("bots:im:remove", "remote", bot.id, bindingId)).toThrow("本机")
+        expect(() => call("bots:im:remove", "local", other.id, bindingId)).toThrow("不属于")
+        call("bots:im:remove", "local", bot.id, bindingId)
+        expect(call("bots:im:history", "local", bot.id, bindingId)).toMatchObject({
+          items: [expect.objectContaining({ kind: "user", state: "cancelled" })]
+        })
+        service.disconnected()
+        expect(call("bots:im:conversation-history", "local", bot.id, localId)).toMatchObject({
           items: [expect.objectContaining({ kind: "user", state: "cancelled" })]
         })
       } finally {
@@ -288,40 +403,46 @@ describe("Bot IPC boundaries", () => {
   })
 
   it("validates scoped reaction identity, full catalog emoji and explicit idempotent state", () => {
-    const call = register(), target = { kind: "bot", botId: "a", workId: "work-a" }
+    const call = register(),
+      target = { kind: "bot", botId: "a", workId: "work-a" }
     call("bots:message-reactions", "local", target, ["native:assistant.1"])
     expect(fixture.messageReactions).toHaveBeenCalledWith(target, ["native:assistant.1"])
     call("bots:set-message-reaction", "local", target, "native:assistant.1", "❤", false)
-    expect(fixture.setMessageReaction).toHaveBeenCalledWith(target, "native:assistant.1", "❤️", false)
+    expect(fixture.setMessageReaction).toHaveBeenCalledWith(
+      target,
+      "native:assistant.1",
+      "❤️",
+      false
+    )
     fixture.setMessageReaction.mockClear()
     for (const [scope, id, emoji, present] of [
       [{ ...target, groupId: "group" }, "m", "👍", true],
       [{ kind: "group", groupId: "g", threadId: "other" }, "m", "👍", true],
-      [target, "trim ", "👍", true], [target, "m", "👍👍", true], [target, "m", "👍", "false"]
-    ]) expect(() => call("bots:set-message-reaction", "local", scope, id, emoji, present)).toThrow()
+      [target, "trim ", "👍", true],
+      [target, "m", "👍👍", true],
+      [target, "m", "👍", "false"]
+    ])
+      expect(() => call("bots:set-message-reaction", "local", scope, id, emoji, present)).toThrow()
     expect(() => call("bots:message-reactions", "local", target, Array(101).fill("m"))).toThrow()
-    expect(() => call("bots:set-message-reaction", "remote", target, "m", "👍", true)).toThrow("本机")
+    expect(() => call("bots:set-message-reaction", "remote", target, "m", "👍", true)).toThrow(
+      "本机"
+    )
     expect(fixture.setMessageReaction).not.toHaveBeenCalled()
   })
-  it("keeps simulation binding authority in a top-level local desktop window and rejects injected source/paths",()=>{
-    const frame={},event={senderFrame:frame,sender:{mainFrame:frame}}
-    const call=register(undefined,event)
-    const input={simulation:true,botId:"a",operationId:"bind",kind:"dm",channelKey:"dm-a",label:"Personal",allowedSenderIds:["alice"]}
-    call("bots:mock:create","local",input)
-    expect(fixture.createMockBinding).toHaveBeenCalledWith(input)
-    for(const extra of [{owner:true},{threadId:"private"},{source:{audienceKey:"desktop"}},{modelRef:"model"},{workspacePath:"/private"}])expect(()=>call("bots:mock:create","local",{...input,...extra})).toThrow()
-    const message={simulation:true,bindingId:"b",eventId:"e",messageId:"m",senderId:"alice",text:"Hello",mentionsBotIds:[]}
-    call("bots:mock:inject","local",message)
-    expect(fixture.injectMockEvent).toHaveBeenCalledWith(message)
-    for(const extra of [{origin:"user"},{mockSource:{}},{workId:"w"},{threadId:"private"},{credentials:"secret"}])expect(()=>call("bots:mock:inject","local",{...message,...extra})).toThrow()
-    expect(()=>call("bots:mock:inject","local",{...message,text:'<attachment filename="private">x</attachment>'})).toThrow()
-    expect(()=>register(undefined,{...event,senderFrame:{}})("bots:mock:create","local",input)).toThrow("桌面")
+  it("keeps IM access in the top-level local desktop window", () => {
+    const frame = {},
+      event = { senderFrame: frame, sender: { mainFrame: frame } }
+    const call = register(undefined, event)
+    expect(call("bots:im:status", "local")).toEqual({ connected: false, available: false })
+    expect(() =>
+      register(undefined, { ...event, senderFrame: {} })("bots:im:status", "local")
+    ).toThrow("桌面")
     fixture.windowFor.mockReturnValueOnce(null as any)
-    expect(()=>call("bots:mock:create","local",input)).toThrow("桌面")
-    expect(()=>call("bots:mock:create","remote",input)).toThrow()
-    expect(()=>call("bots:mock:online","local","a","b","yes")).toThrow()
-    expect(()=>call("bots:mock:revoke","local","a","b",0)).toThrow()
-    expect(()=>call("bots:mock:history","local","a","b","x".repeat(1025))).toThrow()
+    expect(() => call("bots:im:status", "local")).toThrow("桌面")
+    expect(() => call("bots:im:status", "remote")).toThrow("本机")
+    expect(() =>
+      call("bots:im:conversation-history", "local", "a", "b", "x".repeat(1025))
+    ).toThrow("游标")
   })
   it("accepts only bounded local work controls and never renderer authority or conversation paths", () => {
     const call = register(),
@@ -460,14 +581,25 @@ describe("Bot IPC boundaries", () => {
     for (const outcome of [null, true, "done", "dismissed", {}, []])
       expect(() => call("bots:browser:give-back", "local", "a", 3, outcome)).toThrow("方式")
     expect(fixture.giveBack).not.toHaveBeenCalled()
-    expect(() => call("bots:browser:give-back", "local", "a", undefined, "skipped")).toThrow("控制版本")
+    expect(() => call("bots:browser:give-back", "local", "a", undefined, "skipped")).toThrow(
+      "控制版本"
+    )
     call("bots:browser:give-back", "local", "a", 3, "skipped")
     expect(fixture.giveBack).toHaveBeenCalledWith("a", 3, "skipped")
   })
   it("validates human browser operations and their exact scope, target and lease before forwarding", () => {
     const call = register()
     const reload = { action: "reload", pageId: "page-a" }
-    for (const generation of [undefined, null, -1, 1.5, NaN, Infinity, "3", Number.MAX_SAFE_INTEGER + 1])
+    for (const generation of [
+      undefined,
+      null,
+      -1,
+      1.5,
+      NaN,
+      Infinity,
+      "3",
+      Number.MAX_SAFE_INTEGER + 1
+    ])
       expect(() => call("bots:browser:operate", "local", "a", reload, generation)).toThrow("版本")
     for (const input of [
       undefined,
@@ -487,7 +619,9 @@ describe("Bot IPC boundaries", () => {
       expect(() => call("bots:browser:operate", "local", "a", input, 3)).toThrow()
     expect(() => call("bots:browser:operate", "remote", "a", reload, 3)).toThrow("本机")
     expect(() => call("bots:browser:operate", "local", "../a", reload, 3)).toThrow()
-    expect(() => call("bots:browser:operate", "local", "group-missing", reload, 3)).toThrow("不存在")
+    expect(() => call("bots:browser:operate", "local", "group-missing", reload, 3)).toThrow(
+      "不存在"
+    )
     expect(fixture.operateBrowser).not.toHaveBeenCalled()
     for (const action of ["back", "forward", "reload", "close"])
       call("bots:browser:operate", "local", "group-g--a", { action, pageId: "page-a" }, 3)

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
-import type { BotImBinding, BotImEvent } from "../../shared/bots/im-channel"
+import type { BotImBinding, BotImEvent, BotImConversation } from "../../shared/bots/im-channel"
 import { BotError } from "../../shared/bots/contracts"
 
 export interface StoredBotImEvent {
@@ -27,6 +27,7 @@ export class BotImGatewayStore {
     db.run(`CREATE TABLE IF NOT EXISTS bot_im_routes (
       id TEXT PRIMARY KEY,realm TEXT NOT NULL,principal TEXT NOT NULL,bot_id TEXT NOT NULL,binding_json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS bot_im_routes_owner ON bot_im_routes(realm,principal,bot_id);
+      CREATE TABLE IF NOT EXISTS bot_im_removed_bindings (binding_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS bot_im_ingress (
       id TEXT PRIMARY KEY,binding_id TEXT NOT NULL,payload_json TEXT NOT NULL,fingerprint TEXT NOT NULL,
       state TEXT NOT NULL,lease_id TEXT NOT NULL,expires_at INTEGER NOT NULL,task_id TEXT);
@@ -100,6 +101,30 @@ export class BotImGatewayStore {
     )
     return { id, realm, principal, binding }
   }
+  /** Remove only the local configuration entry; retain routing proofs and conversation history. */
+  removeBinding(botId: string, id: string): void {
+    const route = this.binding(id)
+    if (!route || route.binding.botId !== botId)
+      throw new BotError("NOT_FOUND", "绑定不属于当前 Bot")
+    if (!["revoked", "expired"].includes(route.binding.state))
+      throw new BotError("CONFLICT", "只能删除已撤销或已过期的接入记录")
+    this.db.run("INSERT OR IGNORE INTO bot_im_removed_bindings(binding_id) VALUES(?)", [id])
+  }
+  visibleBindings(realm: string, principal: string, bindings: BotImBinding[]): BotImBinding[] {
+    if (!bindings.length) return bindings
+    const ids = bindings.map((binding) => botImScopeId(realm, principal, binding.id))
+    const removed = new Set(
+      this.rows(
+        `SELECT binding_id FROM bot_im_removed_bindings WHERE binding_id IN (${ids.map(() => "?").join(",")})`,
+        ids
+      ).map((row) => String(row.binding_id))
+    )
+    // A newer live binding must remain visible even if an earlier expired snapshot was removed.
+    return bindings.filter(
+      (binding, index) =>
+        !["revoked", "expired"].includes(binding.state) || !removed.has(ids[index])
+    )
+  }
   isPersonalBinding(id: string): boolean {
     return (
       this.rows(
@@ -132,6 +157,36 @@ export class BotImGatewayStore {
       WHERE b.revoked=0 AND json_extract(r.binding_json,'$.state')='active'
       GROUP BY r.bot_id HAVING COUNT(*)=1`
     ).map((row) => ({ botId: String(row.bot_id), connected: Boolean(row.online) }))
+  }
+  groupConversations(): BotImConversation[] {
+    // One local metadata query; no network calls or transcript scans per sidebar row.
+    return this.rows(
+      `SELECT r.id,r.bot_id,json_extract(r.binding_json,'$.id') AS binding_id,
+        json_extract(r.binding_json,'$.peerLabel') AS title,b.revoked,b.online,b.created_at,
+        a.version,a.updated_at,a.preview,a.attention_version,a.seen_version,c.thread_id
+       FROM bot_im_routes r JOIN bot_im_bindings b ON b.id=r.id
+       JOIN bots bot ON bot.id=r.bot_id
+       LEFT JOIN bot_activity a ON a.kind='im' AND a.id=r.id
+       LEFT JOIN bot_im_conversations c ON c.binding_id=r.id AND c.bot_id=r.bot_id
+       WHERE b.kind='group'
+       ORDER BY COALESCE(a.updated_at,b.created_at) DESC,r.id`
+    ).map((row) => ({
+      id: String(row.id),
+      botId: String(row.bot_id),
+      bindingId: String(row.binding_id),
+      ...(row.thread_id ? { threadId: String(row.thread_id) } : {}),
+      title: String(row.title || "招乎群聊"),
+      state: row.revoked ? "revoked" : "active",
+      connected: !row.revoked && Boolean(row.online),
+      activity: {
+        kind: "im",
+        id: String(row.id),
+        version: Number(row.version ?? 0),
+        updatedAt: Number(row.updated_at ?? row.created_at),
+        preview: String(row.preview ?? ""),
+        unread: Number(row.attention_version ?? 0) > Number(row.seen_version ?? 0)
+      }
+    }))
   }
   binding(id: string): StoredBotImBinding | null {
     const row = this.rows("SELECT * FROM bot_im_routes WHERE id=?", [id])[0]
@@ -247,6 +302,10 @@ export class BotImGatewayStore {
     )
   }
   removeBot(botId: string): void {
+    this.db.run(
+      "DELETE FROM bot_im_continuations WHERE owner_bot_id=? OR task_id IN (SELECT id FROM bot_tasks WHERE bot_id=?)",
+      [botId, botId]
+    )
     this.db.run("DELETE FROM bot_im_personal_links WHERE bot_id=?", [botId])
     this.db.run("DELETE FROM bot_im_personal_owners WHERE bot_id=?", [botId])
     this.db.run(
@@ -255,6 +314,10 @@ export class BotImGatewayStore {
     )
     this.db.run(
       "DELETE FROM bot_im_ingress WHERE binding_id IN (SELECT id FROM bot_im_routes WHERE bot_id=?)",
+      [botId]
+    )
+    this.db.run(
+      "DELETE FROM bot_im_removed_bindings WHERE binding_id IN (SELECT id FROM bot_im_routes WHERE bot_id=?)",
       [botId]
     )
     this.db.run("DELETE FROM bot_im_routes WHERE bot_id=?", [botId])

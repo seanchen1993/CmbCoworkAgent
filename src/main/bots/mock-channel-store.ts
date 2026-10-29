@@ -49,8 +49,25 @@ export class BotMockChannelStore {
           id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,binding_id TEXT NOT NULL,grant_version INTEGER NOT NULL,
           conversation_id TEXT NOT NULL,reply_to_message_id TEXT NOT NULL,source_task_id TEXT UNIQUE NOT NULL,
           work_id TEXT,text TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS bot_im_continuations (task_id TEXT PRIMARY KEY,source_task_id TEXT NOT NULL,owner_bot_id TEXT NOT NULL,thread_id TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS bot_im_continuations_source ON bot_im_continuations(source_task_id);
         CREATE INDEX IF NOT EXISTS bot_mock_outbox_pending ON bot_mock_outbox(state,created_at,id);
         CREATE INDEX IF NOT EXISTS bot_mock_outbox_page ON bot_mock_outbox(binding_id,created_at,id);`)
+      // Preserve existing receipts while allowing one opening and one final reply per task.
+      if (
+        !this.rows("PRAGMA table_info(bot_mock_outbox)").some((row) => row.name === "delivery_kind")
+      ) {
+        this.run(`ALTER TABLE bot_mock_outbox RENAME TO bot_mock_outbox_legacy;
+          CREATE TABLE bot_mock_outbox (
+            id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,binding_id TEXT NOT NULL,grant_version INTEGER NOT NULL,
+            conversation_id TEXT NOT NULL,reply_to_message_id TEXT NOT NULL,source_task_id TEXT NOT NULL,
+            work_id TEXT,text TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,
+            delivery_kind TEXT NOT NULL DEFAULT 'final',UNIQUE(source_task_id,delivery_kind));
+          INSERT INTO bot_mock_outbox SELECT *, 'final' FROM bot_mock_outbox_legacy;
+          DROP TABLE bot_mock_outbox_legacy;
+          CREATE INDEX bot_mock_outbox_pending ON bot_mock_outbox(state,created_at,id);
+          CREATE INDEX bot_mock_outbox_page ON bot_mock_outbox(binding_id,created_at,id);`)
+      }
       for (const [table, column] of [
         ["bot_tasks", "mock_source_json"],
         ["bot_task_receipts", "mock_source_json"],
@@ -237,6 +254,44 @@ export class BotMockChannelStore {
     )
       this.run("INSERT OR IGNORE INTO bot_im_local_execution VALUES(?)", [task.id])
   }
+  /** Durable route captured only by the host when admitting an internal continuation. */
+  registerContinuation(task: BotTask, parent: BotTask): void {
+    if (
+      this.transport !== "im" ||
+      task.mockSource?.transport !== "im" ||
+      JSON.stringify(task.mockSource) !== JSON.stringify(parent.mockSource)
+    )
+      throw new BotError("CONFLICT", "后台任务来源已改变")
+    const owner = this.continuationOwner(parent)
+    this.validateSource(task.mockSource, owner)
+    this.run("INSERT OR IGNORE INTO bot_im_continuations VALUES(?,?,?,?)", [
+      task.id,
+      parent.id,
+      owner,
+      task.threadId
+    ])
+    this.run("INSERT OR IGNORE INTO bot_im_local_execution VALUES(?)", [task.id])
+  }
+  continuationOwner(task: BotTask): string {
+    if (this.transport !== "im") return task.botId
+    const row = this.rows(
+      "SELECT owner_bot_id,thread_id FROM bot_im_continuations WHERE task_id=?",
+      [task.id]
+    )[0]
+    if (row && row.thread_id !== task.threadId) throw new BotError("CONFLICT", "后台任务会话已改变")
+    return row ? String(row.owner_bot_id) : task.botId
+  }
+  isContinuation(task: BotTask): boolean {
+    return (
+      this.transport === "im" &&
+      Boolean(
+        this.rows("SELECT 1 FROM bot_im_continuations WHERE task_id=? AND thread_id=?", [
+          task.id,
+          task.threadId
+        ]).length
+      )
+    )
+  }
   private permitSql(taskAlias: string): string {
     return `(EXISTS(SELECT 1 FROM bot_im_local_execution l WHERE l.task_id=${taskAlias}.id) OR EXISTS(SELECT 1 FROM bot_im_ingress ie WHERE ie.id=json_extract(${taskAlias}.mock_source_json,'$.eventId') AND ie.state='active' AND ie.expires_at>${this.now()}))`
   }
@@ -341,8 +396,12 @@ export class BotMockChannelStore {
         throw new BotError("CONFLICT", "模拟来源证明缺失")
       return undefined
     }
-    const source = this.validateSource(task.mockSource, task.botId, requireActive),
-      binding = this.get(task.botId, source.bindingId)
+    const source = this.validateSource(
+        task.mockSource,
+        this.continuationOwner(task),
+        requireActive
+      ),
+      binding = this.get(this.continuationOwner(task), source.bindingId)
     if (
       requireActive &&
       this.transport === "im" &&
@@ -351,6 +410,14 @@ export class BotMockChannelStore {
           .length)
     )
       throw new BotError("CONFLICT", "IM 执行许可已失效，已停止处理")
+    if (this.isContinuation(task)) {
+      if (task.workId) {
+        const work = this.owner.getWork(task.botId, task.workId)
+        if (work.threadId !== task.threadId || work.audienceKey !== source.audienceKey)
+          throw new BotError("CONFLICT", "后台任务与原受众不一致")
+      }
+      return { source, threadId: task.threadId, threadInitialized: true, label: binding.label }
+    }
     if (task.workId) {
       const work = this.owner.getWork(task.botId, task.workId)
       if (
@@ -568,27 +635,66 @@ export class BotMockChannelStore {
       return receipt
     })
   }
-  settle(task: BotTask, state: BotTaskState, text: string): void {
-    if (!task.mockSource) return
-    const source = this.validateSource(task.mockSource, task.botId, false)
-    this.run("UPDATE bot_mock_events SET execution_state=? WHERE task_id=?", [state, task.id])
-    // Personal work reports once through the existing main-conversation result notification.
-    if (source.personal && task.workId) return
-    const binding = this.get(task.botId, source.bindingId)
-    const output = text.trim() || "本轮没有可确认的文字结果，请查看执行状态。"
-    this.run("INSERT OR IGNORE INTO bot_mock_outbox VALUES(?,?,?,?,?,?,?,?,?,?,?)", [
-      `mock-reply-${task.id}`,
+  openingReply(taskId: string, text: string): void {
+    if (this.transport !== "im" || !text.trim()) return
+    const task = this.owner.getTask(taskId)
+    if (
+      !task.mockSource ||
+      task.mockSource.transport !== "im" ||
+      task.workId ||
+      !["mock", "user"].includes(task.origin.kind) ||
+      task.state !== "running"
+    )
+      return
+    const source = this.validateSource(task.mockSource, task.botId)
+    this.run("INSERT OR IGNORE INTO bot_mock_outbox VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", [
+      `im-opening-${task.id}`,
       task.botId,
       source.bindingId,
       source.grantVersion,
       source.conversationId,
       source.messageId,
       task.id,
-      task.workId ?? null,
-      output.slice(0, 60000),
-      binding.revoked || binding.grantVersion !== source.grantVersion ? "blocked" : "pending",
-      this.now()
+      null,
+      text.trim().slice(0, 6000),
+      "pending",
+      this.now(),
+      "opening"
     ])
+    if (this.db.getRowsModified()) this.changed()
+  }
+  settle(task: BotTask, state: BotTaskState, text: string): void {
+    if (!task.mockSource) return
+    const owner = this.continuationOwner(task)
+    const source = this.validateSource(task.mockSource, owner, false)
+    // A collaborator returns to its caller through the existing Bot reply outbox.
+    if (task.origin.kind === "bot" && task.origin.expectsReply) return
+    this.run("UPDATE bot_mock_events SET execution_state=? WHERE task_id=?", [state, task.id])
+    if (state !== "completed")
+      this.run(
+        "UPDATE bot_mock_outbox SET state='blocked' WHERE source_task_id=? AND delivery_kind='opening' AND state='pending'",
+        [task.id]
+      )
+    // Personal work reports once through the existing main-conversation result notification.
+    if (source.personal && task.workId) return
+    const binding = this.get(owner, source.bindingId)
+    const output = text.trim() || "本轮没有可确认的文字结果，请查看执行状态。"
+    this.run(
+      "INSERT OR IGNORE INTO bot_mock_outbox(id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,work_id,text,state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+      [
+        `mock-reply-${task.id}`,
+        task.botId,
+        source.bindingId,
+        source.grantVersion,
+        source.conversationId,
+        source.messageId,
+        task.id,
+        task.workId ?? null,
+        output.slice(0, 60000),
+        binding.revoked || binding.grantVersion !== source.grantVersion ? "blocked" : "pending",
+        this.now()
+      ]
+    )
     this.changed()
   }
   /** Mirror new personal main-conversation responses; never copy group/external transcripts. */
@@ -610,19 +716,22 @@ export class BotMockChannelStore {
       binding.id
     ])[0]
     if (!convo) return
-    this.run("INSERT OR IGNORE INTO bot_mock_outbox VALUES(?,?,?,?,?,?,?,?,?,?,?)", [
-      `im-personal-${task.id}`,
-      task.botId,
-      binding.id,
-      binding.grantVersion,
-      String(convo.id),
-      `app-${task.id}`,
-      task.id,
-      task.origin.kind === "work_result" ? task.origin.workId : null,
-      text.trim().slice(0, 60000),
-      "pending",
-      this.now()
-    ])
+    this.run(
+      "INSERT OR IGNORE INTO bot_mock_outbox(id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,work_id,text,state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+      [
+        `im-personal-${task.id}`,
+        task.botId,
+        binding.id,
+        binding.grantVersion,
+        String(convo.id),
+        `app-${task.id}`,
+        task.id,
+        task.origin.kind === "work_result" ? task.origin.workId : null,
+        text.trim().slice(0, 60000),
+        "pending",
+        this.now()
+      ]
+    )
     this.changed()
   }
   outbox(row: Record<string, unknown>): BotMockOutbox {
@@ -693,7 +802,7 @@ export class BotMockChannelStore {
     if (!this.recoveryHighId) return false
     const outcome = this.transaction(() => {
       const batch = this.rows(
-        "SELECT t.id,o.source_task_id AS recorded FROM bot_tasks t LEFT JOIN bot_mock_outbox o ON o.source_task_id=t.id WHERE t.mock_source_json IS NOT NULL AND COALESCE(json_extract(t.mock_source_json,'$.transport'),'mock')=? AND t.state='interrupted' AND t.id>? AND t.id<=? ORDER BY t.id LIMIT 40",
+        "SELECT t.id,o.source_task_id AS recorded FROM bot_tasks t LEFT JOIN bot_mock_outbox o ON o.source_task_id=t.id AND o.delivery_kind='final' WHERE t.mock_source_json IS NOT NULL AND COALESCE(json_extract(t.mock_source_json,'$.transport'),'mock')=? AND t.state='interrupted' AND t.id>? AND t.id<=? ORDER BY t.id LIMIT 40",
         [this.transport, this.recoveryAfterId, this.recoveryHighId]
       )
       for (const row of batch) {
@@ -757,7 +866,7 @@ export class BotMockChannelStore {
       }
     const rows = this.rows(
       `SELECT * FROM (
-        SELECT * FROM (SELECT 'event-'||e.event_id AS id,'user' AS kind,json_extract(e.payload_json,'$.text') AS text,json_extract(e.payload_json,'$.senderId') AS sender,json_extract(e.payload_json,'$.replyToMessageId') AS reply,COALESCE(t.state,e.execution_state) AS state,NULL AS work_id,e.created_at
+        SELECT * FROM (SELECT 'event-'||e.event_id AS id,'user' AS kind,json_extract(e.payload_json,'$.text') AS text,json_extract(e.payload_json,'$.senderId') AS sender,json_extract(e.payload_json,'$.replyToMessageId') AS reply,COALESCE(t.state,e.execution_state) AS state,t.work_id,e.created_at
           FROM bot_mock_events e LEFT JOIN bot_tasks t ON t.id=e.task_id WHERE e.binding_id=? AND (e.created_at<? OR (e.created_at=? AND 'event-'||e.event_id<?)) ORDER BY e.created_at DESC,e.event_id DESC LIMIT 41)
         UNION ALL SELECT * FROM (SELECT id,'bot',text,'Bot',reply_to_message_id,state,work_id,created_at FROM bot_mock_outbox WHERE binding_id=? AND (created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT 41)
       ) ORDER BY created_at DESC,id DESC LIMIT 41`,

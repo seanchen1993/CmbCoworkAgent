@@ -196,8 +196,16 @@ export function parseWriteBotMemory(input: unknown): WriteBotMemoryInput {
       ? {}
       : { id: botIdentifier(item.id), expectedVersion: memoryVersion(item.expectedVersion) }),
     name: boundedString(item.name, "记忆名称", 120),
-    content: boundedString(item.content, "记忆内容", 12_000)
+    content: boundedString(item.content, "记忆内容", 12_000),
+    ...(item.scope === undefined ? {} : { scope: parseBotMemoryScope(item.scope) })
   }
+}
+
+export function parseBotMemoryScope(input: unknown): import("./memory-scope").BotMemoryScope {
+  const scope = record(input)
+  if (scope.kind === "private" || scope.kind === "shared") return { kind: scope.kind }
+  if (scope.kind === "group") return { kind: "group", groupId: botIdentifier(scope.groupId) }
+  throw new BotError("INVALID_INPUT", "记忆范围无效")
 }
 
 export function parseSchedule(input: unknown): BotScheduleInput {

@@ -48,7 +48,7 @@ export interface CreateBotWorkInput {
   operationId: string
   title: string
   goal: string
-  /** Only host-resolved messages from the source conversation may be carried. */
+  /** Verified source references. Bot dispatches retain IDs only; necessary context belongs in goal. */
   contextMessageIds?: string[]
   workspace?: BotWorkWorkspaceRequest
 }

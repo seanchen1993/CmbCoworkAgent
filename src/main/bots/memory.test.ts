@@ -20,6 +20,166 @@ afterEach(async () => {
 })
 
 describe("Bot private memory", () => {
+  it("filters scope before search ranking and keeps both shared facts and each group's own facts", async () => {
+    const { memory } = setup()
+    const shared = memory.write("bot-a", {
+      name: "Sapphire",
+      content: "Sapphire shared format",
+      scope: { kind: "shared" }
+    })
+    const groupA = memory.writeInContext(
+      "bot-a",
+      { name: "Sapphire", content: "Sapphire group A" },
+      { groupId: "a" }
+    )
+    const groupB = memory.writeInContext(
+      "bot-a",
+      { name: "Sapphire", content: "Sapphire group B" },
+      { groupId: "b" }
+    )
+    for (let i = 0; i < 12; i++)
+      memory.write("bot-a", { name: "Sapphire", content: "Sapphire private " + i })
+    const ids = (groupId: string) =>
+      memory
+        .list("bot-a", { groupId })
+        .map((entry) => entry.id)
+        .sort()
+    expect(ids("a")).toEqual([shared.id, groupA.id].sort())
+    expect(ids("b")).toEqual([shared.id, groupB.id].sort())
+    expect(memory.list("bot-a", {}).every((entry) => entry.scope?.kind !== "group")).toBe(true)
+    expect(
+      (await memory.search("bot-a", "Sapphire", { groupId: "a" })).map((entry) => entry.id).sort()
+    ).toEqual([shared.id, groupA.id].sort())
+    // Scope changes invalidate access immediately, including the existing search index.
+    memory.write("bot-a", {
+      ...shared,
+      expectedVersion: shared.version,
+      scope: { kind: "private" }
+    })
+    expect(
+      (await memory.search("bot-a", "Sapphire", { groupId: "a" })).map((entry) => entry.id)
+    ).toEqual([groupA.id])
+  })
+  it("limits group writes to that group and leaves sharing decisions to the owner", () => {
+    const { memory } = setup()
+    const privateFact = memory.write("bot-a", { name: "Private", content: "Private" })
+    const shared = memory.write("bot-a", {
+      name: "Shared",
+      content: "Shared",
+      scope: { kind: "shared" }
+    })
+    const own = memory.writeInContext(
+      "bot-a",
+      { name: "Group", content: "Group" },
+      { groupId: "a" }
+    )
+    const other = memory.writeInContext(
+      "bot-a",
+      { name: "Other", content: "Other" },
+      { groupId: "b" }
+    )
+    for (const entry of [privateFact, shared, other]) {
+      expect(() =>
+        memory.writeInContext(
+          "bot-a",
+          { ...entry, expectedVersion: entry.version, content: "Overwrite" },
+          { groupId: "a" }
+        )
+      ).toThrow()
+      expect(() =>
+        memory.removeInContext("bot-a", entry.id, entry.version, { groupId: "a" })
+      ).toThrow()
+    }
+    expect(() =>
+      memory.writeInContext(
+        "bot-a",
+        { name: "Escape", content: "No", scope: { kind: "shared" } },
+        { groupId: "a" }
+      )
+    ).toThrow()
+    const updated = memory.writeInContext(
+      "bot-a",
+      { ...own, expectedVersion: own.version, content: "Corrected" },
+      { groupId: "a" }
+    )
+    expect(updated.scope).toEqual({ kind: "group", groupId: "a" })
+    const promoted = memory.write("bot-a", {
+      ...updated,
+      expectedVersion: updated.version,
+      scope: { kind: "shared" }
+    })
+    expect(memory.list("bot-a", { groupId: "b" }).map((entry) => entry.id)).toContain(promoted.id)
+  })
+  it("does not let private automatic summaries update shared or group facts", () => {
+    const { memory } = setup()
+    const shared = memory.write("bot-a", {
+      name: "Shared",
+      content: "Original",
+      scope: { kind: "shared" }
+    })
+    const group = memory.writeInContext(
+      "bot-a",
+      { name: "Group", content: "Original" },
+      { groupId: "a" }
+    )
+    memory.applySummary(
+      "bot-a",
+      memory.editVersion("bot-a"),
+      [shared, group].map((entry) => ({
+        action: "update",
+        filename: `${entry.id}.md`,
+        name: entry.name,
+        description: entry.name,
+        content: "Changed"
+      }))
+    )
+    expect(memory.list("bot-a").every((entry) => entry.content.trim() === "Original")).toBe(true)
+  })
+  it("deduplicates new private facts within the same automatic summary batch", () => {
+    const { memory } = setup()
+    const operation = {
+      action: "create" as const,
+      type: "reference" as const,
+      filename: "reference_fact.md",
+      name: "Format",
+      description: "Format",
+      content: "Prefer concise answers"
+    }
+    memory.applySummary("bot-a", 0, [operation, operation])
+    expect(memory.list("bot-a")).toHaveLength(1)
+  })
+  it("keeps legacy facts private and preserves scope when editing without a new scope", () => {
+    const { root, memory } = setup()
+    memory.list("bot-a")
+    const id = "legacy"
+    writeFileSync(
+      join(root, "memories", "bot-a", `${id}.md`),
+      "---\nname: Legacy\ndescription: Legacy\ntype: reference\n---\n\nOnly in private\n"
+    )
+    const legacy = memory.list("bot-a")[0]
+    expect(legacy.scope).toEqual({ kind: "private" })
+    expect(memory.forPrompt("bot-a", { groupId: "g" })).toEqual([])
+    const updated = memory.write("bot-a", {
+      id,
+      name: "Legacy",
+      content: "Updated",
+      expectedVersion: legacy.version
+    })
+    expect(updated.scope).toEqual({ kind: "private" })
+    const shared = memory.write("bot-a", {
+      ...updated,
+      expectedVersion: updated.version,
+      scope: { kind: "shared" }
+    })
+    const edited = memory.write("bot-a", {
+      id,
+      name: "Legacy",
+      content: "Shared update",
+      expectedVersion: shared.version
+    })
+    expect(edited.scope).toEqual({ kind: "shared" })
+    expect(memory.forPrompt("bot-a", { groupId: "g" }).map((entry) => entry.id)).toEqual([id])
+  })
   it("snapshots only current private facts newest first without retaining edited or deleted copies", () => {
     const changed = vi.fn()
     const { root, memory } = setup(changed)

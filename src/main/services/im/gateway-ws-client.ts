@@ -189,6 +189,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   /** Set by this connection's WELCOME only; every new connection starts at text. */
   private markdownReplies = false
   private botChannel = false
+  private botCards = false
   private readonly botCommands = new Map<
     string,
     PendingCommand<BotImBinding | BotImBindingPage> & { request: BotImCommand }
@@ -231,6 +232,10 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
 
   supportsMarkdownReplies(): boolean {
     return this.markdownReplies
+  }
+
+  supportsBotCards(): boolean {
+    return this.supportsBotChannel() && this.botCards
   }
 
   supportsBotChannel(): boolean {
@@ -297,6 +302,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.syncCommandId = null
     this.markdownReplies = false
     this.botChannel = false
+    this.botCards = false
     this.clearTimers()
     this.rejectPending(
       new ImGatewayCommandError("统一机器人连接已断开", { reasonCode: "DESKTOP_OFFLINE" })
@@ -374,7 +380,12 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     const previous = this.cardChains.get(interactionId) ?? Promise.resolve()
     const chained = previous
       .catch(() => undefined)
-      .then(() => this.sendCardCommand(type, interactionId, payload))
+      .then(async () => {
+        const result = await this.sendCardCommand(type, interactionId, payload)
+        if (type !== "CARD_SEND" || result.state !== "accepted" || !this.supportsBotCards())
+          return result
+        return this.waitForCardDelivery(interactionId)
+      })
     const link = chained.then(
       () => undefined,
       () => undefined
@@ -389,13 +400,48 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     return chained
   }
 
+  private async waitForCardDelivery(interactionId: string): Promise<ImCardSubmissionResult> {
+    const deadline = Date.now() + 15_000
+    for (let attempt = 0; attempt < 10 && Date.now() < deadline; attempt++) {
+      if (!this.isAuthenticated()) break
+      const result = await this.sendCardCommand(
+        "CARD_STATUS",
+        interactionId,
+        { interactionId },
+        Math.min(3_000, deadline - Date.now())
+      )
+      if (result.state === "rejected")
+        return {
+          ...result,
+          resultUnknown:
+            result.resultUnknown ||
+            ![
+              "CARD_DELIVERY_FAILED",
+              "CARD_SEND_NOT_FOUND",
+              "BOT_CARD_ROUTE_INVALID",
+              "ROUTE_NOT_FOUND"
+            ].includes(result.reasonCode ?? "")
+        }
+      if (result.deliveryState === "sent") return result
+      if (result.deliveryState !== "pending") break
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+    }
+    // Queued or unknown: keep the interaction live and expose the text answer path.
+    return { state: "rejected", reasonCode: "CARD_DELIVERY_PENDING", resultUnknown: true }
+  }
+
   private sendCardCommand(
-    type: "CARD_SEND" | "CARD_UPDATE",
+    type: "CARD_SEND" | "CARD_UPDATE" | "CARD_STATUS",
     interactionId: string,
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
+    timeoutMs = COMMAND_TIMEOUT_MS
   ): Promise<ImCardSubmissionResult> {
     if (!this.isAuthenticated()) {
-      return Promise.resolve({ state: "rejected", reasonCode: "DESKTOP_OFFLINE" })
+      return Promise.resolve({
+        state: "rejected",
+        reasonCode: "DESKTOP_OFFLINE",
+        resultUnknown: type === "CARD_STATUS"
+      })
     }
     return new Promise<ImCardSubmissionResult>((resolve) => {
       const commandId = randomUUID()
@@ -409,7 +455,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       const timer = setTimeout(
         () =>
           settle({ state: "rejected", reasonCode: "GATEWAY_CARD_TIMEOUT", resultUnknown: true }),
-        COMMAND_TIMEOUT_MS
+        timeoutMs
       )
       this.cardCommands.set(commandId, {
         resolve: (result) => {
@@ -433,7 +479,11 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         this.sendCommand(type, payload, commandId)
       } catch {
         clearTimeout(timer)
-        settle({ state: "rejected", reasonCode: "GATEWAY_CARD_FAILED" })
+        settle({
+          state: "rejected",
+          reasonCode: "GATEWAY_CARD_FAILED",
+          resultUnknown: type === "CARD_STATUS"
+        })
       }
     })
   }
@@ -442,7 +492,11 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     if (!commandId) throw new ImGatewayProtocolError("Card result is missing correlation fields")
     const pending = this.cardCommands.get(commandId)
     if (!pending) return
-    assertOnlyKeys(payload, ["interactionId", "state", "reasonCode"], "CARD_ACCEPTED payload")
+    assertOnlyKeys(
+      payload,
+      ["interactionId", "state", "reasonCode", "deliveryState"],
+      "CARD_ACCEPTED payload"
+    )
     const interactionId = nonEmptyString(payload.interactionId)
     if (!interactionId || this.cardCommandByInteraction.get(interactionId) !== commandId) {
       throw new ImGatewayProtocolError("Card result correlation does not match")
@@ -451,10 +505,24 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     if (state !== "ACCEPTED" && state !== "REJECTED") {
       throw new ImGatewayProtocolError("Card result has an invalid state")
     }
+    const delivery = payload.deliveryState
+    if (delivery !== undefined && !["PENDING", "SENT", "UNKNOWN"].includes(String(delivery)))
+      throw new ImGatewayProtocolError("Card result has an invalid delivery state")
+    const deliveryFields =
+      delivery === undefined
+        ? {}
+        : {
+            deliveryState: String(delivery).toLowerCase() as "pending" | "sent" | "unknown",
+            ...(delivery === "UNKNOWN" ? { resultUnknown: true } : {})
+          }
     pending.resolve(
       state === "ACCEPTED"
-        ? { state: "accepted" }
-        : { state: "rejected", reasonCode: nonEmptyString(payload.reasonCode) ?? "CARD_REJECTED" }
+        ? { state: "accepted", ...deliveryFields }
+        : {
+            state: "rejected",
+            reasonCode: nonEmptyString(payload.reasonCode) ?? "CARD_REJECTED",
+            ...deliveryFields
+          }
     )
   }
 
@@ -574,6 +642,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.syncCommandId = null
     this.markdownReplies = false
     this.botChannel = false
+    this.botCards = false
     const url = this.options.url()?.trim()
     const token = this.options.token()?.trim()
     if (!url || !token) {
@@ -651,7 +720,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         protocolExtensions: [
           DEFAULT_ROUTE_SYNC_EXTENSION,
           IM_MARKDOWN_REPLY_EXTENSION,
-          ...(this.options.onBotEvent ? [BOT_IM_EXTENSION] : [])
+          ...(this.options.onBotEvent ? [BOT_IM_EXTENSION, "bot-cards-v1"] : [])
         ]
       })
     })
@@ -810,6 +879,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
           Array.isArray(extensions) &&
           extensions.includes(BOT_IM_EXTENSION)
         )
+        this.botCards =
+          this.botChannel && Array.isArray(extensions) && extensions.includes("bot-cards-v1")
         this.markdownReplies =
           Array.isArray(extensions) && extensions.includes(IM_MARKDOWN_REPLY_EXTENSION)
         console.log(

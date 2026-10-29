@@ -96,6 +96,9 @@ async function main(): Promise<void> {
   let markdownTokenHelloCount = 0
   let offerMarkdown = true
   const replyTypes: unknown[] = []
+  let botCardDelivery = "SENT"
+  let botCardStatusReads = 0
+  let botCardSends = 0
   server.on("connection", (connected, request) => {
     socket = connected
     const connectionAuthorization = String(request.headers.authorization ?? "")
@@ -142,11 +145,13 @@ async function main(): Promise<void> {
               heartbeatIntervalSeconds: 60,
               // Only a gateway with markdown answers the extension; every other
               // WELCOME here is the released shape, with no such key at all.
-              ...(connectionAuthorization === "Bearer markdown-token" && offerMarkdown
-                ? { protocolExtensions: ["markdown-reply-v1"] }
-                : connectionAuthorization === "Bearer malformed-extension-token"
-                  ? { protocolExtensions: "markdown-reply-v1" }
-                  : {})
+              ...(connectionAuthorization === "Bearer bot-card-token"
+                ? { protocolExtensions: ["bot-channel-v1", "bot-cards-v1"] }
+                : connectionAuthorization === "Bearer markdown-token" && offerMarkdown
+                  ? { protocolExtensions: ["markdown-reply-v1"] }
+                  : connectionAuthorization === "Bearer malformed-extension-token"
+                    ? { protocolExtensions: "markdown-reply-v1" }
+                    : {})
             }
           })
         )
@@ -191,6 +196,37 @@ async function main(): Promise<void> {
             }
           })
         )
+      } else if (
+        (envelope.type === "CARD_SEND" || envelope.type === "CARD_STATUS") &&
+        connectionAuthorization === "Bearer bot-card-token"
+      ) {
+        const status = envelope.type === "CARD_STATUS"
+        if (status) botCardStatusReads++
+        else botCardSends++
+        connected.send(
+          JSON.stringify({
+            schemaVersion: 1,
+            type: "CARD_ACCEPTED",
+            commandId: envelope.commandId,
+            sentAt: new Date().toISOString(),
+            payload: {
+              interactionId: envelope.payload.interactionId,
+              state:
+                !status || ["PENDING", "SENT"].includes(botCardDelivery) ? "ACCEPTED" : "REJECTED",
+              ...(status
+                ? botCardDelivery === "FAILED"
+                  ? { reasonCode: "CARD_DELIVERY_FAILED" }
+                  : {
+                      deliveryState: botCardDelivery,
+                      ...(botCardDelivery === "UNKNOWN"
+                        ? { reasonCode: "CARD_DELIVERY_UNKNOWN" }
+                        : {})
+                    }
+                : {})
+            }
+          })
+        )
+        if (status && botCardDelivery === "PENDING") botCardDelivery = "SENT"
       } else if (envelope.type === "CARD_SEND" && connectionAuthorization === "Bearer card-token") {
         cardFrames.push("CARD_SEND")
         const commandId = envelope.commandId
@@ -628,6 +664,38 @@ async function main(): Promise<void> {
     "the update must reach the gateway, and only after the send"
   )
   overlappingClient.stop()
+
+  // Acceptance means queued. A Bot gate hides its text fallback only after delivery,
+  // and unknown delivery must retain the interaction instead of forgetting live buttons.
+  const botCardClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => "bot-card-token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined,
+    onBotEvent: () => undefined
+  })
+  botCardClient.start()
+  await waitFor(() => botCardClient.isAuthenticated(), "Bot card session")
+  assert.equal(botCardClient.supportsBotCards(), true)
+  for (const outcome of ["SENT", "FAILED", "UNKNOWN", "PENDING"]) {
+    botCardDelivery = outcome
+    const result = await botCardClient.sendCard({
+      schemaVersion: 1,
+      interactionId: `bot-card-${outcome}`,
+      conversationKey: "bot-group",
+      idempotencyKey: `bot-idem-${outcome}`,
+      tag: "B".repeat(32),
+      kind: "user_input",
+      content: [{ type: "title", content: "请选择" }],
+      botEventId: "source-event"
+    })
+    assert.equal(result.state, ["SENT", "PENDING"].includes(outcome) ? "accepted" : "rejected")
+    if (outcome === "UNKNOWN") assert.equal(result.resultUnknown, true)
+    if (outcome === "FAILED") assert.equal(result.reasonCode, "CARD_DELIVERY_FAILED")
+  }
+  assert.equal(botCardSends, 4, "status polling must never resubmit a card")
+  assert.equal(botCardStatusReads, 5)
+  botCardClient.stop()
 
   // A receipt this desktop cannot parse is permanent: the same bytes will not
   // become readable, and the gateway redelivers without a cap. Acknowledging it

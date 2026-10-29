@@ -32,8 +32,10 @@ export interface BotSidebarSection {
 
 export interface BotViewState {
   activeWorkIdByBot: Record<string, string | null>
+  activeImWorkIdByConversation?: Record<string, string | null>
   selectedId: string | null
   groupId: string | null
+  imConversationId?: string | null
   detailOpen: boolean
   detailTab: "details" | "memory" | "files" | "computer"
   groupDetailTab: "details" | "files" | "members" | "computer"
@@ -52,8 +54,10 @@ export interface BotViewState {
 }
 export const DEFAULT_BOT_VIEW: BotViewState = {
   activeWorkIdByBot: {},
+  activeImWorkIdByConversation: {},
   selectedId: null,
   groupId: null,
+  imConversationId: null,
   detailOpen: true,
   detailTab: "details",
   groupDetailTab: "details",
@@ -108,7 +112,16 @@ export const useBotViewStore = create<BotViewStore>()((set, get, api) =>
                 .filter(([id]) => id !== hostId)
                 .slice(-7)
             ),
-            [hostId]: { ...DEFAULT_BOT_VIEW, ...state.hosts[hostId], ...patch }
+            [hostId]: {
+              ...DEFAULT_BOT_VIEW,
+              ...state.hosts[hostId],
+              // Entry points outside BotsWorkspace (e.g. task/routine links) also leave
+              // the retained IM view when explicitly selecting a Bot or native group.
+              ...(("selectedId" in patch || "groupId" in patch) && !("imConversationId" in patch)
+                ? { imConversationId: null }
+                : {}),
+              ...patch
+            }
           }
         }))
     }),

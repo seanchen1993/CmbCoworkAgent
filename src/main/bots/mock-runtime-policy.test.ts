@@ -6,6 +6,40 @@ import {
 } from "./mock-runtime-policy"
 import type { AgentRunExecutionContext } from "../agent/agent-run-service"
 describe("persistent mock runtime boundary", () => {
+  it("allows verified IM local capabilities but rejects a generic owner-thread bypass", () => {
+    const metadata = { botMockBindingId: "g", botMockTransport: "im" }
+    const context = {
+      source: "bot",
+      verifyResolvedThread: () => null,
+      remotePolicy: { disableScheduler: true }
+    } as AgentRunExecutionContext
+    expect(() => assertBotMockThreadEntry(metadata, context)).not.toThrow()
+    expect(() => assertBotMockThreadEntry(metadata)).toThrow()
+    expect(() =>
+      assertBotMockThreadEntry(metadata, { ...context, verifyResolvedThread: undefined })
+    ).toThrow()
+  })
+  it("permits scoped memory tools without opening filesystem or global memory injection", () => {
+    const policy = botMockRemotePolicy(true)
+    const context = {
+      source: "bot",
+      verifyResolvedThread: () => {},
+      remotePolicy: policy
+    } as unknown as AgentRunExecutionContext
+    expect(() => assertBotMockThreadEntry({ botMockBindingId: "g" }, context)).not.toThrow()
+    expect(policy.allowedToolNames).toContain("bot_memory_get")
+    expect(policy.disableMemoryInjection).toBe(true)
+    expect(policy.filesystemAccess?.shellAccess).toBe("none")
+    expect(() =>
+      assertBotMockThreadEntry(
+        { botMockBindingId: "g" },
+        {
+          ...context,
+          remotePolicy: { ...policy, allowedToolNames: [...policy.allowedToolNames!, "read_file"] }
+        }
+      )
+    ).toThrow()
+  })
   it("refuses generic invoke/resume/forged desktop authority but leaves ordinary beta unchanged", () => {
     const meta = { botMockBindingId: "binding" }
     expect(() => assertBotMockThreadEntry({})).not.toThrow()

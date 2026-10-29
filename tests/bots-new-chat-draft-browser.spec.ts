@@ -78,6 +78,7 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
             else {
               const names = [
                 "BotConversation",
+                "BotExecutionDetailsToggle",
                 "BotGroupAvatar",
                 "BotStorefrontIcon",
                 "BotAvatar",
@@ -100,7 +101,9 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
                 "BotFilesPanel",
                 "BotWorkPanel",
                 "BotImChannelDialog",
-                "BotMockChannelDialog",
+                "BotImConversation",
+                "BotImConversationRows",
+                "BotImConversationDetails",
                 "BotPanelDivider",
                 "CustomModelDialog"
               ]
@@ -653,13 +656,11 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
     assert.equal(await page.getByRole("dialog").count(), 0)
     assert.equal(await page.evaluate(() => (window as any).fixture.createCalls), 1)
     await draft.fill("New text while original profile is pending")
-    await page
-      .locator('input[type="file"]')
-      .setInputFiles({
-        name: "empty-later.txt",
-        mimeType: "text/plain",
-        buffer: Buffer.from("editable source File")
-      })
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "empty-later.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("editable source File")
+    })
     await page.evaluate(() => (window as any).fixture.releaseBot())
     await page.waitForFunction(() =>
       (window as any).fixture.store
@@ -973,7 +974,8 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
     assert.deepEqual(
       await page.evaluate(() => {
         const f = (window as any).fixture,
-          target = f.groupStore.getState().drafts[JSON.stringify(["synthetic", "preexisting-group"])]
+          target =
+            f.groupStore.getState().drafts[JSON.stringify(["synthetic", "preexisting-group"])]
         return {
           creates: f.creates.length,
           groups: f.groups.length,

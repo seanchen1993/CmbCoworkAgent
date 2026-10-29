@@ -95,7 +95,7 @@ it.each(["group", "dm"] as const)("routes %s through WebSocket", async (kind) =>
             principalId: "owner",
             serverTime: new Date().toISOString(),
             heartbeatIntervalSeconds: 60,
-            ...(offerBot ? { protocolExtensions: ["bot-channel-v1"] } : {})
+            ...(offerBot ? { protocolExtensions: ["bot-channel-v1", "bot-cards-v1"] } : {})
           },
           frame.commandId
         )
@@ -172,6 +172,7 @@ it.each(["group", "dm"] as const)("routes %s through WebSocket", async (kind) =>
   service.start()
   client.start()
   await wait(() => client.supportsBotChannel())
+  expect(client.supportsBotCards()).toBe(true)
   await service.create(bot.id, kind, "create")
   const event = {
     schemaVersion: 1,
@@ -223,6 +224,7 @@ it.each(["group", "dm"] as const)("routes %s through WebSocket", async (kind) =>
   offerBot = false
   client.reconnect()
   await wait(() => client.isAuthenticated() && !client.supportsBotChannel())
+  expect(client.supportsBotCards()).toBe(false)
   await expect(client.botBindingCommand({ action: "list", botId: bot.id })).rejects.toThrow()
   send(
     socket!,

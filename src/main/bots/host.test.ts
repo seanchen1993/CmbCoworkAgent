@@ -351,7 +351,7 @@ describe("Bot control state", () => {
     expect(db.nextQueued([])?.id).toBe(direct.id)
     expect(db.groupMessages(group.id).filter((m) => m.authorBotId === a.id)).toHaveLength(1)
   })
-  it("keeps a yielded group task's identity, prioritizes private input and settles one group result", () => {
+  it("resumes a deferred group independently of private input and settles one group result", () => {
     const db = store(),
       a = db.create(input),
       b = db.create(input)
@@ -369,7 +369,7 @@ describe("Bot control state", () => {
     const direct = db.enqueue({ botId: a.id, requestId: "private-priority", message: "Private" })
     expect(db.nextQueued([])?.id).toBe(direct.id)
     db.transition(direct.id, "running")
-    expect(db.nextQueued([])).toBeNull()
+    expect(db.nextQueued([])?.id).toBe(original.id)
     db.settle(direct.id, "completed", null, "Private reply")
     expect(db.nextQueued([])?.id).toBe(original.id)
     expect(db.taskCheckpoint(original.id)).toBe("checkpoint")
@@ -2513,17 +2513,13 @@ describe("Bot host scheduling", () => {
     expect(acquired).toEqual([background.id, direct.id, replies[0].id])
     finishPrivate()
   })
-  it("still yields for an earlier private message when the newest queued message is cancelled", async () => {
+  it("still yields within the same conversation when the newest queued private message is cancelled", async () => {
     const db = store(),
-      a = db.create(input),
-      b = db.create(input)
-    const group = db.saveGroup({ name: "Private cancellation", memberIds: [a.id, b.id] })
-    db.sendGroup({
-      groupId: group.id,
-      requestId: "group-pending",
-      text: "Group",
-      targetBotIds: [a.id]
-    })
+      a = db.create(input)
+    const background = db.enqueue(
+      { botId: a.id, requestId: "routine-pending", message: "Routine" },
+      { kind: "schedule", scheduleId: "daily" }
+    )
     let pendingUser: (() => boolean) | undefined
     let finish!: () => void
     const runtime: BotRunPort = {
@@ -2534,7 +2530,7 @@ describe("Bot host scheduling", () => {
         },
         execute: async () => {
           if (task.origin.kind === "discussion") return { state: "completed", result: "(pass)" }
-          host.onSteeringReady(db.recentTasks().find((t) => t.origin.kind === "group")!.id)
+          host.onSteeringReady(background.id)
           await new Promise<void>((resolve) => {
             finish = resolve
           })
@@ -2554,21 +2550,13 @@ describe("Bot host scheduling", () => {
     expect(pendingUser?.()).toBe(false)
     finish()
   })
-  it.each(["group", "bot", "schedule", "command", "reaction"] as const)(
+  it.each(["bot", "schedule", "command", "reaction"] as const)(
     "yields %s at a model boundary, runs private input, then resumes the same task after lease release",
     async (kind) => {
       const db = store(),
         a = db.create(input),
         b = db.create(input)
-      const group = db.saveGroup({ name: "Priority", memberIds: [a.id, b.id] })
-      if (kind === "group")
-        db.sendGroup({
-          groupId: group.id,
-          requestId: "host-pause",
-          text: "Group",
-          targetBotIds: [a.id]
-        })
-      else if (kind === "bot") {
+      if (kind === "bot") {
         const root = db.enqueue({ botId: b.id, requestId: "host-root", message: "Delegate" })
         db.transition(root.id, "running")
         db.delegate(root.id, a.id, "Background", "host-pause")
@@ -2635,13 +2623,6 @@ describe("Bot host scheduling", () => {
         "release"
       ])
       expect(db.recentTasks().filter((t) => t.id === original.id)).toHaveLength(1)
-      if (kind === "group")
-        expect(
-          db
-            .groupMessages(group.id)
-            .filter((m) => m.authorBotId === a.id)
-            .map((m) => m.text)
-        ).toEqual(["Group reply"])
     }
   )
   it("keeps peer handoffs and their receipts inside the group, including deduplication and member removal", () => {
@@ -3216,7 +3197,7 @@ describe("Bot host scheduling", () => {
     expect(next).toHaveBeenCalledTimes(1)
   })
 
-  it("disables the global cap with positive infinity while retaining same-Bot serialization", async () => {
+  it("disables the global cap with positive infinity while retaining same-conversation serialization", async () => {
     const db = store()
     const runs: string[] = []
     const finish = new Map<string, () => void>()
@@ -3255,7 +3236,127 @@ describe("Bot host scheduling", () => {
     for (const task of [...tasks, next]) expect(db.getTask(task.id).state).toBe("completed")
   })
 
-  it("wakes another group member while a question is pending without releasing the waiting Bot", async () => {
+  it("does not yield another group's run when private input arrives for the same Bot", async () => {
+    const db = store()
+    const started: string[] = [],
+      finish = new Map<string, () => void>()
+    const yieldToUser = vi.fn()
+    const host = new LocalBotHost(
+      db,
+      {
+        onAvailable: () => () => {},
+        acquire: (_bot, task) => ({
+          release() {},
+          yieldToUser,
+          execute: async (signal) => {
+            started.push(task.id)
+            host.onSteeringReady(task.id)
+            await new Promise<void>((resolve) => {
+              finish.set(task.id, resolve)
+              signal.addEventListener("abort", () => resolve(), { once: true })
+            })
+            return { state: "completed", explicitGroupMessages: true }
+          }
+        })
+      },
+      Number.POSITIVE_INFINITY
+    )
+    hosts.push(host)
+    const bot = host.create(input)
+    const groups = ["A", "B"].map((name) => host.saveGroup({ name, memberIds: [bot.id] }))
+    for (const group of groups)
+      host.sendGroup({
+        groupId: group.id,
+        requestId: group.id,
+        text: "Group",
+        targetBotIds: [bot.id]
+      })
+    await vi.waitFor(() => expect(started).toHaveLength(2))
+    const own = host.send({ botId: bot.id, requestId: "own", message: "Private" })
+    try {
+      await vi.waitFor(() => expect(started).toContain(own.id))
+      expect(yieldToUser).not.toHaveBeenCalled()
+      expect(started.map((id) => db.getTask(id).state)).toEqual(["running", "running", "running"])
+    } finally {
+      for (const resolve of finish.values()) resolve()
+    }
+    await vi.waitFor(() => expect(host.hasActiveRuns()).toBe(false))
+  })
+
+  it("holds only the cancelled command's conversation during physical cleanup", async () => {
+    const db = store(),
+      bot = db.create(input)
+    let release!: () => void
+    const started: string[] = []
+    const host = new LocalBotHost(
+      db,
+      {
+        onAvailable: () => () => {},
+        cancelCommands: () =>
+          new Promise<void>((resolve) => {
+            release = resolve
+          }),
+        acquire: (_bot, task) => ({
+          release() {},
+          execute: async () => {
+            started.push(task.id)
+            return { state: "completed", explicitGroupMessages: true }
+          }
+        })
+      },
+      Number.POSITIVE_INFINITY
+    )
+    hosts.push(host)
+    const a = db.saveGroup({ name: "Cleanup A", memberIds: [bot.id] })
+    const b = db.saveGroup({ name: "Cleanup B", memberIds: [bot.id] })
+    const background = db.enqueue(
+      { botId: bot.id, requestId: "command", message: "Background" },
+      { kind: "group", groupId: a.id, messageId: "m" }
+    )
+    db.transition(background.id, "running")
+    db.acceptCommand(
+      background.id,
+      {
+        id: "owned",
+        threadId: background.threadId,
+        command: "node job",
+        cwd: "/test",
+        startedAt: 1
+      },
+      true
+    )
+    db.deferTask(background.id, "checkpoint")
+    host.cancel(background.id)
+    const next = db.enqueue(
+      { botId: bot.id, requestId: "next-a", message: "Next A" },
+      { kind: "group", groupId: a.id, messageId: "m2" }
+    )
+    const other = db.enqueue(
+      { botId: bot.id, requestId: "next-b", message: "B" },
+      { kind: "group", groupId: b.id, messageId: "m3" }
+    )
+    const own = host.send({ botId: bot.id, requestId: "own-cleanup", message: "Private" })
+    try {
+      await vi.waitFor(() => expect(started).toEqual(expect.arrayContaining([other.id, own.id])))
+      expect(db.getTask(background.id).state).toBe("queued")
+      expect(db.getTask(next.id).state).toBe("queued")
+      db.settleCommand({
+        id: "owned",
+        threadId: background.threadId,
+        output: "Stopped",
+        exitCode: 130,
+        cancelled: true,
+        truncated: false
+      })
+      release()
+      await vi.waitFor(() => expect(started).toContain(next.id))
+      expect(db.getTask(background.id).state).toBe("cancelled")
+    } finally {
+      release?.()
+    }
+  })
+
+  it("keeps a group approval pending while the same Bot's private conversation and another member run", async () => {
     const db = store()
     const runs: string[] = []
     const finish = new Map<string, () => void>()
@@ -3296,7 +3397,8 @@ describe("Bot host scheduling", () => {
     waiting.get(first.id)!(true)
     await vi.waitFor(() => expect(runs).toContain(second.id))
     expect(db.getTask(first.id).state).toBe("waiting_user")
-    expect(db.getTask(own.id).state).toBe("queued")
+    await vi.waitFor(() => expect(runs).toContain(own.id))
+    expect(db.getTask(own.id).state).toBe("running")
     finish.get(second.id)!()
     await vi.waitFor(() => expect(db.getTask(second.id).state).toBe("completed"))
     expect(db.getTask(first.id).state).toBe("waiting_user")
@@ -3305,10 +3407,10 @@ describe("Bot host scheduling", () => {
     await vi.waitFor(() => expect(runs).toContain(own.id))
     finish.get(own.id)!()
     await vi.waitFor(() => expect(host.hasActiveRuns()).toBe(false))
-    expect(runs).toEqual([first.id, second.id, own.id])
+    expect(new Set(runs)).toEqual(new Set([first.id, second.id, own.id]))
   })
 
-  it("runs initial room members concurrently while preserving same-Bot cancellation cleanup", async () => {
+  it("runs initial room members concurrently while preserving same-thread cancellation cleanup", async () => {
     const db = store()
     const runs: import("../../shared/bots/contracts").BotTask[] = []
     const finish = new Map<string, () => void>()
@@ -3352,24 +3454,33 @@ describe("Bot host scheduling", () => {
       expect(db.getTask(second.id).state).toBe("running")
       expect(runs.some((t) => t.id === personal.id)).toBe(true)
       const own = host.send({ botId: first.botId, requestId: "after-cancel", message: "Next" })
-      // The cancelled Bot must retain its lease until physical cleanup completes.
+      host.sendGroup({ groupId: room.id, requestId: "same-room-after-cancel",
+        text: "Next room task", targetBotIds: [first.botId] })
+      const nextRoom = db.recentTasks().find((t) =>
+        t.origin.kind === "group" && t.origin.messageId === "same-room-after-cancel")!
+      // Physical cleanup holds this thread; an independent private thread can run.
       host.cancel(first.id)
       host.resume()
       await new Promise<void>((resolve) => setImmediate(resolve))
-      expect(db.getTask(own.id).state).toBe("queued")
+      expect(db.getTask(own.id).state).toBe("running")
+      expect(db.getTask(nextRoom.id).state).toBe("queued")
       expect(db.getTask(second.id).state).toBe("running")
       finish.get(first.id)!()
-      await vi.waitFor(() => expect(runs.some((t) => t.id === own.id)).toBe(true))
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      // A later group request also waits for the other member of the earlier request.
+      expect(db.getTask(nextRoom.id).state).toBe("queued")
+      finish.get(second.id)!()
+      await vi.waitFor(() => expect(runs.some((t) => t.id === nextRoom.id)).toBe(true))
       expect(db.getTask(first.id).state).toBe("cancelled")
       for (const resolve of finish.values()) resolve()
       await vi.waitFor(() => expect(host.hasActiveRuns()).toBe(false))
-      expect(runs).toHaveLength(5)
+      expect(runs).toHaveLength(6)
     } finally {
       for (const resolve of finish.values()) resolve()
     }
   })
 
-  it("runs independent bots concurrently, serializes a bot, and releases after cancellation cleanup", async () => {
+  it("runs independent bots concurrently, serializes each conversation, and releases after cancellation cleanup", async () => {
     const db = store()
     const runs: string[] = [],
       released: string[] = []

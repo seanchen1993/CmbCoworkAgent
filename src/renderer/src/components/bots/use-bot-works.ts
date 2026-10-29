@@ -8,7 +8,8 @@ export function useBotWorks(
   client: BotClient,
   botId: string | undefined,
   selectedId: string | null,
-  revision: number
+  revision: number,
+  audience = "desktop"
 ) {
   const [items, setItems] = useState<BotWorkSummary[]>([])
   const [priority, setPriority] = useState<BotWorkSummary[]>([])
@@ -17,7 +18,7 @@ export function useBotWorks(
   const [selected, setSelected] = useState<BotWorkItem | null>(null)
   const [cursor, setCursor] = useState<string | null>(null)
   const [query, setQuery] = useState("")
-  const scope = JSON.stringify([client.hostId, botId, query])
+  const scope = JSON.stringify([client.hostId, botId, audience, query])
   const [loadedScope, setLoadedScope] = useState("")
   const pending = useRef<Promise<void> | null>(null),
     dirty = useRef(false),

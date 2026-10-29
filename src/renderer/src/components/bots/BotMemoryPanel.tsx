@@ -1,3 +1,4 @@
+import { botMemoryScopeLabel, type BotMemoryScope } from "../../../../shared/bots/memory-scope"
 import { botErrorMessage } from "@/lib/bot-error-message"
 import { useEffect, useId, useRef, useState } from "react"
 import { Check, Loader2, Pencil, Plus, Share2, Trash2, X } from "lucide-react"
@@ -25,17 +26,20 @@ const memoryDescriptions: Record<BotMemoryMode, string> = {
 export function BotMemoryPanel({
   bot,
   client,
-  peers
+  peers,
+  groupId
 }: {
   bot: BotDefinition
   client: BotClient
   peers: BotDefinition[]
+  groupId?: string
 }) {
   const botId = bot.id
   const memoryMode = bot.memoryMode ?? "inherit"
   const memoryDescriptionId = useId()
   const [entries, setEntries] = useState<BotMemory[] | null>(null)
   const [editing, setEditing] = useState<BotMemory | "new" | null>(null)
+  const [scopeKind, setScopeKind] = useState<BotMemoryScope["kind"]>(groupId ? "group" : "private")
   const [name, setName] = useState("")
   const [content, setContent] = useState("")
   const [deleting, setDeleting] = useState<string | null>(null)
@@ -62,7 +66,7 @@ export function BotMemoryPanel({
       try {
         while (dirty && !disposed) {
           dirty = false
-          const result = await client.listMemory(botId)
+          const result = await client.listMemory(botId, groupId)
           if (!disposed) {
             setEntries(result)
             setReadError(null)
@@ -90,8 +94,11 @@ export function BotMemoryPanel({
       unsubscribe()
       window.removeEventListener("focus", onFocus)
     }
-  }, [botId, client])
+  }, [botId, client, groupId])
   const edit = (entry: BotMemory | "new") => {
+    setScopeKind(
+      entry === "new" ? (groupId ? "group" : "private") : (entry.scope?.kind ?? "private")
+    )
     setEditing(entry)
     setError(null)
     setDeleting(null)
@@ -106,7 +113,7 @@ export function BotMemoryPanel({
     setError(null)
     try {
       await operation()
-      const result = await client.listMemory(botId)
+      const result = await client.listMemory(botId, groupId)
       if (mounted.current) {
         setEntries(result)
         setEditing(null)
@@ -163,7 +170,7 @@ export function BotMemoryPanel({
         </p>
       </div>
       <div className="mb-4 flex items-center justify-between">
-        <h3 className="!mb-0">私有记忆</h3>
+        <h3 className="!mb-0">记忆</h3>
         <button
           className="bot-icon-button"
           aria-label="添加记忆"
@@ -197,11 +204,45 @@ export function BotMemoryPanel({
               client.writeMemory(botId, {
                 name,
                 content,
+                scope:
+                  scopeKind === "group"
+                    ? { kind: "group", groupId: groupId! }
+                    : { kind: scopeKind },
                 ...(editing === "new" ? {} : { id: editing.id, expectedVersion: editing.version })
               })
             )
           }}
         >
+          <div className="bot-memory-scope-field">
+            <span>使用范围</span>
+            <Select
+              value={scopeKind}
+              onValueChange={(value) => setScopeKind(value as BotMemoryScope["kind"])}
+              disabled={busy}
+            >
+              <SelectTrigger
+                aria-label="记忆使用范围"
+                className="h-8 w-auto gap-2 rounded-lg border-0 px-2 text-xs shadow-none"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                <SelectItem value="shared">Bot 共享</SelectItem>
+                {groupId ? (
+                  <SelectItem value="group">群内</SelectItem>
+                ) : (
+                  <SelectItem value="private">仅私聊</SelectItem>
+                )}
+              </SelectContent>
+            </Select>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {scopeKind === "shared"
+              ? "此 Bot 的私聊和各群均可使用。"
+              : scopeKind === "group"
+                ? "仅当前群及其任务使用。"
+                : "仅私聊及其任务使用。"}
+          </p>
           <label className="bot-field">
             名称
             <input
@@ -246,19 +287,21 @@ export function BotMemoryPanel({
               <div className="flex items-center justify-between gap-2">
                 <h4 className="truncate font-medium">{entry.name}</h4>
                 <div className="flex shrink-0">
-                  <button
-                    className="bot-icon-button"
-                    aria-label={`分享 ${entry.name}`}
-                    disabled={busy}
-                    onClick={() => {
-                      setSharing(entry.id)
-                      setRecipient("")
-                      setDeleting(null)
-                      setNotice(null)
-                    }}
-                  >
-                    <Share2 size={13} />
-                  </button>
+                  {recipients.length > 0 && (
+                    <button
+                      className="bot-icon-button"
+                      aria-label={`分享 ${entry.name}`}
+                      disabled={busy}
+                      onClick={() => {
+                        setSharing(entry.id)
+                        setRecipient("")
+                        setDeleting(null)
+                        setNotice(null)
+                      }}
+                    >
+                      <Share2 size={13} />
+                    </button>
+                  )}
                   <button
                     className="bot-icon-button"
                     aria-label={`编辑 ${entry.name}`}
@@ -280,6 +323,7 @@ export function BotMemoryPanel({
                   </button>
                 </div>
               </div>
+              <span className="bot-memory-scope-label">{botMemoryScopeLabel(entry.scope)}</span>
               <p>{entry.content}</p>
               {sharing === entry.id && (
                 <div className="mt-3 space-y-3">

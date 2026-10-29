@@ -112,7 +112,11 @@ import { botWorkClient } from "@/lib/bot-work-client"
 import { useBotWorks } from "./use-bot-works"
 import { BotWorkPanel } from "./BotWorkPanel"
 import { BotImChannelDialog } from "./BotImChannelDialog"
-import { BotMockChannelDialog } from "./BotMockChannelDialog"
+import {
+  BotImConversation,
+  BotImConversationDetails,
+  BotImConversationRows
+} from "./BotImConversation"
 import { botChatAccent } from "@/lib/bot-chat-accent"
 import { BotWorkspaceMenu } from "./BotWorkspaceMenu"
 import { BotPanelDivider } from "./BotPanelDivider"
@@ -367,6 +371,58 @@ function BotEditor({
           if (!open) void useAppStore.getState().loadModels(true)
         }}
       />
+    </>
+  )
+}
+
+function GroupMemory({
+  group,
+  bots,
+  client
+}: {
+  group: BotGroup
+  bots: BotDefinition[]
+  client: BotClient
+}) {
+  const [open, setOpen] = useState(false)
+  const [memberId, setMemberId] = useState(group.memberIds[0])
+  const members = bots.filter((bot) => group.memberIds.includes(bot.id) && !bot.deleting)
+  const member = members.find((bot) => bot.id === memberId) ?? members[0]
+  if (!member) return null
+  return (
+    <>
+      <section className="bot-detail-section">
+        <button
+          className="text-sm text-muted-foreground hover:text-foreground"
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+        >
+          {open ? "收起记忆" : "管理记忆"}
+        </button>
+        {open && members.length > 1 && (
+          <Select value={member.id} onValueChange={setMemberId}>
+            <SelectTrigger aria-label="查看成员记忆" className="mt-3 rounded-xl shadow-none">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {members.map((bot) => (
+                <SelectItem key={bot.id} value={bot.id}>
+                  {bot.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+      </section>
+      {open && (
+        <BotMemoryPanel
+          key={`${group.id}:${member.id}`}
+          bot={member}
+          client={client}
+          peers={[]}
+          groupId={group.id}
+        />
+      )}
     </>
   )
 }
@@ -633,6 +689,28 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     setGroupEditor(group)
   }
   const selectedGroup = snapshot?.groups.find((group) => group.id === groupId) ?? null
+  const selectedIm = !selectedGroup
+    ? snapshot?.imConversations?.find(
+        (group) => group.id === view.imConversationId && group.botId === selectedId
+      )
+    : undefined
+  const openImConversation = (id: string) => {
+    const group = snapshot?.imConversations?.find((item) => item.id === id)
+    if (!group) return
+    closeNewChat()
+    updateView({
+      selectedId: group.botId,
+      groupId: null,
+      imConversationId: id,
+      activeImWorkIdByConversation: { ...view.activeImWorkIdByConversation, [id]: null }
+    })
+  }
+  const openImWork = (botId: string, id: string) => {
+    if (!selectedIm || selectedIm.botId !== botId) return
+    updateView({
+      activeImWorkIdByConversation: { ...view.activeImWorkIdByConversation, [selectedIm.id]: id }
+    })
+  }
   const [deleting, setDeleting] = useState<BotDefinition | null>(null)
   const [deletingGroup, setDeletingGroup] = useState<BotGroup | null>(null)
   const [renamingGroup, setRenamingGroup] = useState<BotGroup | null>(null)
@@ -640,7 +718,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   const [editor, setEditor] = useState<BotDefinition | "new" | null>(null)
   const [newBotName, setNewBotName] = useState("")
   const [imBot, setImBot] = useState<BotDefinition | null>(null)
-  const [mockBot, setMockBot] = useState<BotDefinition | null>(null)
+  const [imBindingId, setImBindingId] = useState<string | null>(null)
   const editorTrigger = useRef<HTMLElement | null>(null)
   const profileMenuTrigger = useRef<HTMLButtonElement | null>(null)
   const newConversationTrigger = useRef<HTMLButtonElement | null>(null)
@@ -735,6 +813,19 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     [snapshot?.bots, showArchived, query, view.hiddenBotIds, showHidden]
   )
   const pinnedIds = view.pinnedBotIds ?? []
+  const visibleImConversations = showHidden
+    ? []
+    : (snapshot?.imConversations ?? []).filter((group) => {
+        const bot = snapshot?.bots.find((item) => item.id === group.botId)
+        return (
+          bot &&
+          !bot.deleting &&
+          bot.archived === showArchived &&
+          `${group.title} ${bot.name}`
+            .toLocaleLowerCase()
+            .includes(query.trim().toLocaleLowerCase())
+        )
+      })
   const pinnedBots = pinnedIds.flatMap((id) => {
     const bot = visible.find((candidate) => candidate.id === id && !candidate.archived)
     return bot ? [bot] : []
@@ -782,9 +873,60 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     }
     return result
   }, [snapshot?.tasks])
-  const activeWorkId = selected ? (view.activeWorkIdByBot?.[selected.id] ?? null) : null
-  const works = useBotWorks(client, selected?.id, activeWorkId, snapshot?.revision ?? 0)
-  const selectedWork = activeWorkId && works.selected?.id === activeWorkId ? works.selected : null
+  const activeWorkId = selectedIm
+    ? (view.activeImWorkIdByConversation?.[selectedIm.id] ?? null)
+    : selected
+      ? (view.activeWorkIdByBot?.[selected.id] ?? null)
+      : null
+  const workListClient = useMemo(
+    () =>
+      selectedIm && client.works && client.im?.conversationWorks
+        ? {
+            ...client,
+            works: {
+              ...client.works,
+              list: (botId: string, cursor?: string, query?: string) =>
+                client.im!.conversationWorks!(botId, selectedIm.id, cursor, query)
+            }
+          }
+        : client,
+    [client, selectedIm?.id]
+  )
+  const works = useBotWorks(
+    workListClient,
+    selected?.id,
+    activeWorkId,
+    snapshot?.revision ?? 0,
+    selectedIm?.id ?? "desktop"
+  )
+  const loadedWork = activeWorkId && works.selected?.id === activeWorkId ? works.selected : null
+  const selectedWork =
+    loadedWork &&
+    (selectedIm
+      ? loadedWork.source?.transport === "im" && loadedWork.source.bindingId === selectedIm.id
+      : loadedWork.source?.transport !== "im")
+      ? loadedWork
+      : null
+  // Old saved navigation and workbench deep links still arrive by Bot ID. Resolve the
+  // host-owned source before rendering, then keep the source group selected.
+  useEffect(() => {
+    if (!loadedWork || selectedIm || !selected) return
+    if (loadedWork.source?.transport === "im") {
+      const group = snapshot?.imConversations?.find(
+        (item) => item.id === loadedWork.source!.bindingId && item.botId === selected.id
+      )
+      if (group)
+        updateView({
+          imConversationId: group.id,
+          activeWorkIdByBot: { ...view.activeWorkIdByBot, [selected.id]: null },
+          activeImWorkIdByConversation: {
+            ...view.activeImWorkIdByConversation,
+            [group.id]: loadedWork.id
+          }
+        })
+      else updateView({ activeWorkIdByBot: { ...view.activeWorkIdByBot, [selected.id]: null } })
+    }
+  }, [loadedWork?.id, selectedIm?.id, selected?.id, snapshot?.imConversations])
   const selectedThreadId = activeWorkId
     ? (selectedWork?.threadId ?? "")
     : (selected?.threadId ?? "")
@@ -795,7 +937,14 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   const selectWork = (id: string | null) => {
     if (!selected) return
     const prefs = useBotViewStore.getState().hosts[client.hostId]
-    updateView({ activeWorkIdByBot: { ...prefs?.activeWorkIdByBot, [selected.id]: id } })
+    if (selectedIm)
+      updateView({
+        activeImWorkIdByConversation: {
+          ...prefs?.activeImWorkIdByConversation,
+          [selectedIm.id]: id
+        }
+      })
+    else updateView({ activeWorkIdByBot: { ...prefs?.activeWorkIdByBot, [selected.id]: id } })
   }
   const tasks = selected ? (tasksByThread.get(selectedThreadId) ?? []) : []
   const selectedState = botConversationState(
@@ -813,7 +962,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   }, [selectedConversationKey, newChat])
   useBotReadState(
     client,
-    newChat || suppressedRead === selectedConversationKey
+    newChat || (Boolean(selectedIm) && !activeWorkId) || suppressedRead === selectedConversationKey
       ? undefined
       : activeWorkId
         ? selectedWork?.activity
@@ -1496,7 +1645,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
           className="bot-list-item"
           data-bot-row-key={`bot:${bot.id}`}
           data-bot-unread-count={activity?.unread ? 1 : undefined}
-          data-selected={!newChat && selected?.id === bot.id}
+          data-selected={!newChat && !selectedIm && selected?.id === bot.id}
           aria-label={bot.name}
           onClick={() => {
             setSuppressedRead(null)
@@ -1776,7 +1925,9 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                         data-bot-unread-count={
                           activityByConversation.get(`bot:${bot.id}`)?.unread ? 1 : undefined
                         }
-                        data-selected={!newChat && !selectedGroup && selected?.id === bot.id}
+                        data-selected={
+                          !newChat && !selectedGroup && !selectedIm && selected?.id === bot.id
+                        }
                         aria-label={`${bot.name}，已置顶`}
                         onClick={() => {
                           setSuppressedRead(null)
@@ -1962,18 +2113,30 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                     !sections.some((section) => section.groupIds?.includes(group.id)))
               )
             )}
-            {!snapshot && !error && <Loader2 className="mx-auto mt-12 size-5 animate-spin" />}
-            {snapshot && !visible.length && !visibleGroups.length && !showCreateGroupAction && (
-              <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-                {query.trim()
-                  ? "没有匹配的会话"
-                  : showArchived
-                    ? "没有已归档的 Bot"
-                    : showHidden
-                      ? "没有隐藏的会话"
-                      : "创建你的第一个 Bot"}
-              </p>
+            {!showHidden && (
+              <BotImConversationRows
+                conversations={visibleImConversations}
+                bots={snapshot?.bots ?? []}
+                selectedId={newChat ? null : selectedIm?.id}
+                onSelect={openImConversation}
+              />
             )}
+            {!snapshot && !error && <Loader2 className="mx-auto mt-12 size-5 animate-spin" />}
+            {snapshot &&
+              !visible.length &&
+              !visibleGroups.length &&
+              !visibleImConversations.length &&
+              !showCreateGroupAction && (
+                <p className="px-4 py-8 text-center text-sm text-muted-foreground">
+                  {query.trim()
+                    ? "没有匹配的会话"
+                    : showArchived
+                      ? "没有已归档的 Bot"
+                      : showHidden
+                        ? "没有隐藏的会话"
+                        : "创建你的第一个 Bot"}
+                </p>
+              )}
           </BotConversationList>
           <footer className="bots-sidebar-footer">
             {sidebarCollapsed ? [footerActions[1], footerActions[0]] : footerActions}
@@ -2045,6 +2208,30 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
               }}
               onClose={closeNewChat}
             />
+          ) : selectedIm && selected && !activeWorkId ? (
+            <BotImConversation
+              tasks={snapshot?.tasks ?? []}
+              backgroundThreads={snapshot?.backgroundThreads ?? []}
+              key={selectedIm.id}
+              conversation={selectedIm}
+              bot={selected}
+              client={client}
+              revision={snapshot.revision}
+              detailOpen={detailOpen}
+              onDetails={() => setDetailOpen(!detailOpen)}
+              onManage={() => {
+                setImBindingId(selectedIm.bindingId)
+                setImBot(selected)
+              }}
+              onMain={() =>
+                updateView({
+                  selectedId: selected.id,
+                  groupId: null,
+                  activeWorkIdByBot: { ...view.activeWorkIdByBot, [selected.id]: null }
+                })
+              }
+              onWork={(id) => openImWork(selected.id, id)}
+            />
           ) : selectedGroup ? (
             <BotGroupConversation
               key={`${client.hostId}:${selectedGroup.id}`}
@@ -2076,7 +2263,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 <button
                   className="bot-title-pill"
                   ref={detailTriggerRef}
-                  aria-label="查看 Bot 详情"
+                  aria-label={selectedIm ? "查看招乎群详情" : "查看 Bot 详情"}
                   aria-expanded={detailOpen}
                   onClick={() => setDetailOpen(!detailOpen)}
                 >
@@ -2094,7 +2281,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 </button>
                 <button
                   className="bot-icon-button"
-                  aria-label={detailOpen ? "关闭 Bot 详情" : "打开 Bot 详情"}
+                  aria-label={detailOpen ? "关闭详情" : "打开详情"}
                   aria-expanded={detailOpen}
                   onClick={() => setDetailOpen(!detailOpen)}
                 >
@@ -2111,14 +2298,28 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 )}
               {activeWorkId && (
                 <div className="bot-work-breadcrumb">
-                  <button onClick={() => selectWork(null)}>← {selected.name} 主对话</button>
+                  <button
+                    onClick={() => {
+                      const group = snapshot?.imConversations?.find(
+                        (item) => item.id === selectedWork?.source?.bindingId
+                      )
+                      if (selectedIm) selectWork(null)
+                      else if (group) openImConversation(group.id)
+                      else selectWork(null)
+                    }}
+                  >
+                    ←{" "}
+                    {snapshot?.imConversations?.find(
+                      (item) => item.id === selectedWork?.source?.bindingId
+                    )?.title ?? `${selected.name} 主对话`}
+                  </button>
                   <span>{selectedWork?.state === "completed" ? "已完成" : "独立任务"}</span>
                 </div>
               )}
               {selectedWork?.source && (
                 <div className="bot-work-source" role="note">
                   {selectedWork.source.transport === "im" ? "IM 任务" : "模拟渠道任务"} ·
-                  此处文字与结果将回到原接入会话。仅支持文字和同受众工作，不提供本机文件、电脑或私人记忆。
+                  此处文字与结果将回到原接入会话。可使用 Bot 共享与本群记忆，不提供本机文件和电脑。
                 </div>
               )}
               {activeWorkId && !selectedWork ? (
@@ -2133,12 +2334,21 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   work={selectedWork}
                   onConfigureModel={() => openBotEditor(selected)}
                   onOpenWork={(id) => selectWork(id)}
-                  onOpenBot={(id) => updateView({
-                    selectedId: id, groupId: null, detailTab: "details",
-                    activeWorkIdByBot: { ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot, [id]: null }
-                  })}
+                  onOpenBot={(id) =>
+                    updateView({
+                      selectedId: id,
+                      groupId: null,
+                      detailTab: "details",
+                      activeWorkIdByBot: {
+                        ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
+                        [id]: null
+                      }
+                    })
+                  }
                   groups={snapshot?.groups ?? []}
-                  onOpenGroup={(id) => updateView({ groupId: id, selectedId: null, groupDetailTab: "details" })}
+                  onOpenGroup={(id) =>
+                    updateView({ groupId: id, selectedId: null, groupDetailTab: "details" })
+                  }
                   bots={snapshot?.bots ?? []}
                   schedules={snapshot?.schedules ?? []}
                   tasks={tasks}
@@ -2166,6 +2376,43 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
             </div>
           )}
         </main>
+        {!newChat && selectedIm && selected && (
+          <>
+            {detailOpen && (
+              <BotPanelDivider
+                kind="detail"
+                width={clampBotPanelWidth("detail", view.detailWidth)}
+                onChange={(detailWidth) => updateView({ detailWidth })}
+              />
+            )}
+            <BotDetailsPane open={detailOpen} label="招乎群详情">
+              <BotImConversationDetails
+                key={selectedIm.id}
+                conversation={selectedIm}
+                schedules={snapshot?.schedules ?? []}
+                bot={selected}
+                client={client}
+                revision={snapshot?.revision ?? 0}
+                onClose={() => setDetailOpen(false)}
+                onManage={() => {
+                  setImBindingId(selectedIm.bindingId)
+                  setImBot(selected)
+                }}
+                onMain={() =>
+                  updateView({
+                    selectedId: selected.id,
+                    groupId: null,
+                    activeWorkIdByBot: { ...view.activeWorkIdByBot, [selected.id]: null }
+                  })
+                }
+                onWork={(id) => openImWork(selected.id, id)}
+                controller={works}
+                selectedWork={selectedWork}
+                onBack={() => selectWork(null)}
+              />
+            </BotDetailsPane>
+          </>
+        )}
         {!newChat && selectedGroup && (
           <>
             {detailOpen && (
@@ -2248,8 +2495,8 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 <TabsContent value="details" className="mt-0">
                   <section className="bot-group-members text-sm text-muted-foreground">
                     <p>
-                      {selectedGroup.memberIds.length} 位 Bot
-                      在此协作。群内共享消息和工作资料，成员私聊与私有记忆保持独立。
+                      {selectedGroup.memberIds.length} 位 Bot 在此协作。群内共享消息和工作资料；每位
+                      Bot 可使用共享记忆和本群记忆。
                     </p>
                     <button
                       className="bot-member-add"
@@ -2259,6 +2506,12 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                       群聊设置
                     </button>
                   </section>
+                  <GroupMemory
+                    key={selectedGroup.id}
+                    group={selectedGroup}
+                    bots={snapshot?.bots ?? []}
+                    client={client}
+                  />
                 </TabsContent>
                 <TabsContent value="members" className="mt-0">
                   <BotGroupMembers
@@ -2293,7 +2546,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
             </BotDetailsPane>
           </>
         )}
-        {!newChat && selected && (
+        {!newChat && selected && !selectedIm && (
           <>
             {detailOpen && (
               <BotPanelDivider
@@ -2342,17 +2595,12 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                     {client.im && (
                       <button
                         className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
-                        onClick={() => setImBot(selected)}
+                        onClick={() => {
+                          setImBindingId(null)
+                          setImBot(selected)
+                        }}
                       >
                         IM 接入
-                      </button>
-                    )}
-                    {client.mock && (
-                      <button
-                        className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
-                        onClick={() => setMockBot(selected)}
-                      >
-                        模拟 IM 接入
                       </button>
                     )}
                     <button
@@ -2514,7 +2762,10 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                         botId={selected.id}
                         client={client}
                         schedules={(snapshot?.schedules ?? []).filter(
-                          (item) => item.botId === selected.id
+                          (item) =>
+                            item.botId === selected.id &&
+                            (item.audienceKey ?? "desktop") ===
+                              (selectedWork?.audienceKey ?? "desktop")
                         )}
                       />
                       <section className="bot-detail-section">
@@ -2608,6 +2859,14 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
             key={`${client.hostId}:${imBot.id}`}
             client={client}
             bot={imBot}
+            initialBindingId={imBindingId}
+            onOpenSettings={() => useAppStore.getState().setShowCustomizeView(true, "robot")}
+            onOpenConversation={(bindingId) => {
+              const group = snapshot?.imConversations?.find(
+                (item) => item.botId === imBot.id && item.bindingId === bindingId
+              )
+              if (group) openImConversation(group.id)
+            }}
             onClose={() => setImBot(null)}
             onOpenMain={() =>
               updateView({
@@ -2631,27 +2890,6 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 }
               })
             }
-          />
-        )}
-        {mockBot && client.mock && (
-          <BotMockChannelDialog
-            key={`${client.hostId}:${mockBot.id}`}
-            bot={mockBot}
-            client={client}
-            revision={snapshot?.revision ?? 0}
-            onClose={() => setMockBot(null)}
-            onOpenWork={(id) => {
-              updateView({
-                selectedId: mockBot.id,
-                groupId: null,
-                detailOpen: true,
-                detailTab: "details",
-                activeWorkIdByBot: {
-                  ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
-                  [mockBot.id]: id
-                }
-              })
-            }}
           />
         )}
         {editor && (

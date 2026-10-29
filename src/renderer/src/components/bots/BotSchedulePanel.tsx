@@ -23,11 +23,13 @@ import { botSchedulePresentation } from "@/lib/bot-schedule-view"
 export function BotSchedulePanel({
   botId,
   schedules,
-  client
+  client,
+  allowCreate = true
 }: {
   botId: string
   schedules: BotSchedule[]
   client: BotClient
+  allowCreate?: boolean
 }) {
   const [editing, setEditing] = useState<BotSchedule | "new" | null>(null)
   const [input, setInput] = useState<BotScheduleInput>({
@@ -82,13 +84,15 @@ export function BotSchedulePanel({
     <section className="bot-detail-section">
       <div className="mb-3 flex items-center justify-between">
         <h3 className="!mb-0">例行任务</h3>
-        <button
-          className="bot-icon-button"
-          aria-label="创建例行任务"
-          onClick={(event) => edit("new", event.currentTarget)}
-        >
-          <Plus size={15} />
-        </button>
+        {allowCreate && (
+          <button
+            className="bot-icon-button"
+            aria-label="创建例行任务"
+            onClick={(event) => edit("new", event.currentTarget)}
+          >
+            <Plus size={15} />
+          </button>
+        )}
       </div>
       {error && !editing && (
         <p role="alert" className="text-xs text-destructive">
@@ -96,7 +100,11 @@ export function BotSchedulePanel({
         </p>
       )}
       {!schedules.length && (
-        <p className="text-muted-foreground">在聊天中安排一项定期工作，或点击 + 创建。</p>
+        <p className="text-muted-foreground">
+          {allowCreate
+            ? "在聊天中安排一项定期工作，或点击 + 创建。"
+            : "在群聊中告诉 Bot 要定期做什么。"}
+        </p>
       )}
       {schedules.map((schedule) => {
         const presentation = botSchedulePresentation(schedule)

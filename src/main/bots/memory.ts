@@ -14,8 +14,14 @@ import { MemoryStore } from "../memory/store"
 import { buildFrontmatter, parseFrontmatter } from "../memory/manifest"
 import { botDirectory } from "./paths"
 import { BotError, type BotMemory, type WriteBotMemoryInput } from "../../shared/bots/contracts"
-import { botIdentifier } from "../../shared/bots/validation"
+import { botIdentifier, parseBotMemoryScope } from "../../shared/bots/validation"
 import type { MemoryOperation } from "../memory/summarizer"
+
+import {
+  botMemoryVisible,
+  type BotMemoryContext,
+  type BotMemoryScope
+} from "../../shared/bots/memory-scope"
 
 const MAX_FILE_BYTES = 48_000
 const digest = (text: string) => createHash("sha256").update(text).digest("hex")
@@ -54,7 +60,7 @@ export class BotMemoryService {
       throw new BotError("INVALID_INPUT", "记忆文件格式或大小不受支持")
     return readFileSync(path, "utf8")
   }
-  list(botId: string): BotMemory[] {
+  list(botId: string, context?: BotMemoryContext): BotMemory[] {
     const directory = this.directory(botId)
     const files = readdirSync(directory).filter((name) => name.endsWith(".md"))
     if (files.length > 201) throw new BotError("CONFLICT", "记忆数量已达上限，请先整理")
@@ -78,14 +84,20 @@ export class BotMemoryService {
           id: name.slice(0, -3),
           name: parsed.frontmatter.name ?? name,
           content: parsed.body,
-          version: digest(text)
+          version: digest(text),
+          scope: this.scopeFromFile(parsed.frontmatter)
         }
       })
+      .filter((entry) => !context || botMemoryVisible(entry, context))
+  }
+  private scopeFromFile(header: Record<string, string>): BotMemoryScope {
+    if (!header.bot_scope) return { kind: "private" }
+    return parseBotMemoryScope({ kind: header.bot_scope, groupId: header.bot_group_id })
   }
   /** Fresh per-run snapshot, newest first like the original memory manifest. No second cache. */
-  forPrompt(botId: string): BotMemory[] {
+  forPrompt(botId: string, context: BotMemoryContext = {}): BotMemory[] {
     const directory = this.directory(botId)
-    return this.list(botId)
+    return this.list(botId, context)
       .map((entry) => ({ entry, modified: lstatSync(join(directory, `${entry.id}.md`)).mtimeMs }))
       .sort((a, b) => b.modified - a.modified || a.entry.id.localeCompare(b.entry.id))
       .map(({ entry }) => entry)
@@ -95,6 +107,36 @@ export class BotMemoryService {
     this.edits.set(botId, this.editVersion(botId) + 1)
     this.changed(botId)
     return result
+  }
+
+  writeInContext(botId: string, input: WriteBotMemoryInput, context: BotMemoryContext): BotMemory {
+    const prior = input.id
+      ? this.list(botId, context).find((entry) => entry.id === input.id)
+      : undefined
+    if (input.id && !prior) throw new BotError("NOT_FOUND", "当前会话没有这条记忆")
+    const scope =
+      input.scope ??
+      prior?.scope ??
+      (context.groupId
+        ? { kind: "group" as const, groupId: context.groupId }
+        : { kind: "private" as const })
+    if (
+      context.groupId &&
+      (scope.kind !== "group" ||
+        scope.groupId !== context.groupId ||
+        prior?.scope?.kind === "shared")
+    )
+      throw new BotError("CONFLICT", "群聊只能修改本群记忆；Bot 共享记忆请在记忆面板中管理")
+    if (!context.groupId && scope.kind === "group")
+      throw new BotError("CONFLICT", "请在对应群聊中保存群内记忆")
+    return this.write(botId, { ...input, scope })
+  }
+  removeInContext(botId: string, id: string, version: string, context: BotMemoryContext): void {
+    const entry = this.list(botId, context).find((entry) => entry.id === id)
+    if (!entry) throw new BotError("NOT_FOUND", "当前会话没有这条记忆")
+    if (context.groupId && entry.scope?.kind === "shared")
+      throw new BotError("CONFLICT", "请在记忆面板中管理 Bot 共享记忆")
+    this.remove(botId, id, version)
   }
 
   editVersion(botId: string): number {
@@ -117,7 +159,9 @@ export class BotMemoryService {
       this.editVersion(botId) !== expectedEditVersion
     )
       return
-    const before = this.list(botId),
+    const before = this.list(botId).filter(
+        (entry) => (entry.scope?.kind ?? "private") === "private"
+      ),
       known = new Map(before.map((item) => [`${item.id}.md`, item]))
     let committed = false
     try {
@@ -129,7 +173,7 @@ export class BotMemoryService {
           content = operation.content.slice(0, 12_000)
         if (
           operation.action === "create" &&
-          this.list(botId).some((item) => item.content === content)
+          [...known.values()].some((item) => item.content.trim() === content.trim())
         )
           continue
         const saved = this.persist(botId, {
@@ -149,6 +193,10 @@ export class BotMemoryService {
     if (this.stopping) throw new BotError("STOPPING", "记忆服务正在退出")
     const id = input.id ?? randomUUID(),
       file = this.file(botId, id)
+    const priorScope = input.id
+      ? this.scopeFromFile(parseFrontmatter(this.readFile(file)).frontmatter)
+      : undefined
+    const scope = parseBotMemoryScope(input.scope ?? priorScope ?? { kind: "private" })
     if (input.id) {
       if (digest(this.readFile(file)) !== input.expectedVersion)
         throw new BotError("CONFLICT", "记忆已被更新，请刷新后修改")
@@ -164,7 +212,14 @@ export class BotMemoryService {
       /\0/.test(name + content)
     )
       throw new BotError("INVALID_INPUT", "记忆名称或内容无效")
-    const text = buildFrontmatter({ name, description: name, type: "reference" }) + content + "\n"
+    const header = buildFrontmatter({ name, description: name, type: "reference" })
+    const text =
+      header.replace(
+        "\n---\n\n",
+        `\nbot_scope: ${scope.kind}\n${scope.kind === "group" ? `bot_group_id: ${scope.groupId}\n` : ""}---\n\n`
+      ) +
+      content +
+      "\n"
     if (Buffer.byteLength(text) > MAX_FILE_BYTES)
       throw new BotError("INVALID_INPUT", "记忆内容过长")
     const temporary = `${file}.${randomUUID()}.tmp`
@@ -178,7 +233,7 @@ export class BotMemoryService {
         /* Atomic rename already removed it. */
       }
     }
-    return { id, name, content, version: digest(text) }
+    return { id, name, content, version: digest(text), scope }
   }
   remove(botId: string, id: string, expectedVersion: string): void {
     const file = this.file(botId, id)
@@ -196,7 +251,11 @@ export class BotMemoryService {
       throw new BotError("CONFLICT", "记忆已更新，请刷新后分享")
     return this.write(targetBotId, { name: entry.name, content: entry.content })
   }
-  async search(botId: string, query: string): Promise<Array<{ id: string; text: string }>> {
+  async search(
+    botId: string,
+    query: string,
+    context: BotMemoryContext = {}
+  ): Promise<Array<{ id: string; text: string }>> {
     if (this.stopping) throw new BotError("STOPPING", "记忆服务正在退出")
     if (!query.trim() || query.length > 1000) throw new BotError("INVALID_INPUT", "搜索内容无效")
     // Validate the directory contents before the reused index follows any file paths.
@@ -220,13 +279,18 @@ export class BotMemoryService {
       const store = await pending
       store.syncMemoryFiles()
       const directory = this.directory(botId)
-      return store.search(query, 5).map((result) => {
-        // Never return an absolute host path as a remotely meaningful identity.
-        const name = result.path.startsWith(directory + "/")
-          ? result.path.slice(directory.length + 1)
-          : result.path.split(/[\\/]/).at(-1)!
-        return { id: name.replace(/\.md$/, ""), text: result.text.slice(0, 1500) }
-      })
+      const visible = this.list(botId, context)
+      return store
+        .search(query, 5, {
+          allowedPaths: visible.map((entry) => join(directory, `${entry.id}.md`))
+        })
+        .map((result) => {
+          // Never return an absolute host path as a remotely meaningful identity.
+          const name = result.path.startsWith(directory + "/")
+            ? result.path.slice(directory.length + 1)
+            : result.path.split(/[\\/]/).at(-1)!
+          return { id: name.replace(/\.md$/, ""), text: result.text.slice(0, 1500) }
+        })
     } finally {
       this.users.set(botId, Math.max(0, (this.users.get(botId) ?? 1) - 1))
       await this.evict()

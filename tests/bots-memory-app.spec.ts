@@ -10,6 +10,7 @@ import { _electron } from "playwright"
 import { botTestAppOutput } from "./support/bot-test-app"
 import { waitForBotAppState } from "./support/bot-app-state"
 import type { BotMemory } from "../src/shared/bots/contracts"
+import { OPENING_REPLY_REMINDER } from "../src/main/agent/opening-reply-reminder"
 import type {} from "../src/preload/index.d.ts"
 
 type ModelToolCall = { id: string; function: { name: string } }
@@ -30,6 +31,11 @@ async function main() {
   const dir = await mkdtemp(join(tmpdir(), "bot-memory-app-"))
   const calls: Array<{ user: string; tools: string[]; called?: string }> = []
   const errors: string[] = []
+  const openingUpdate = "我已找到保存的偏好，正在更新。"
+  let releaseFinalReply: (() => void) | undefined
+  const finalReplyReleased = new Promise<void>((resolve) => {
+    releaseFinalReply = resolve
+  })
   const memoryTools = [
     "bot_memory_search",
     "bot_memory_list",
@@ -48,6 +54,18 @@ async function main() {
       const turn = messages.slice(userIndex + 1)
       const tools = (body.tools ?? []).map((t) => t.function?.name)
       const used = turn.flatMap((m) => (m.tool_calls ?? []).map((t) => t.function?.name))
+      // Exercise the actual IPC -> runtime -> provider request plumbing, including
+      // an old checkpoint, a new user turn, and an update followed by more tools.
+      if (user.startsWith("MM_") && body.tools?.length) {
+        const hasReply = turn.some((m) => m.role === "assistant" && Boolean(m.content))
+        assert.equal(
+          messages.some(
+            (m) => m.role === "system" && JSON.stringify(m.content).includes(OPENING_REPLY_REMINDER)
+          ),
+          used.length >= 2 && !hasReply,
+          "only the current silent user turn should receive an ephemeral reminder"
+        )
+      }
       const receipt = <T = BotMemory & { removed?: boolean }>(name: string): T | undefined => {
         const call = turn
           .flatMap((m) => m.tool_calls ?? [])
@@ -118,6 +136,9 @@ async function main() {
         }
       }
       calls.push({ user: user.slice(0, 120), tools, called: call?.name })
+      const update =
+        user.startsWith("MM_UPDATE") && call?.name === "bot_remember" ? openingUpdate : undefined
+      if (user.startsWith("MM_UPDATE") && !call && body.tools?.length) await finalReplyReleased
       const toolCalls = call
         ? [
             {
@@ -133,6 +154,7 @@ async function main() {
           res.write(
             `data: ${JSON.stringify({ id: `reply-${calls.length}`, object: "chat.completion.chunk", model: "memory-fixture", choices: [{ index: 0, delta, finish_reason }] })}\n\n`
           )
+        if (update) send({ content: update }, null)
         send(
           toolCalls
             ? { tool_calls: toolCalls.map((t) => ({ index: 0, ...t })) }
@@ -153,7 +175,7 @@ async function main() {
                 index: 0,
                 message: {
                   role: "assistant",
-                  content: call ? null : reply,
+                  content: call ? (update ?? null) : reply,
                   ...(toolCalls ? { tool_calls: toolCalls } : {})
                 },
                 finish_reason: call ? "tool_calls" : "stop"
@@ -255,12 +277,13 @@ async function main() {
           )
       )
     await idle()
-    const send = async (message: string) => {
+    const send = async (message: string, whileRunning?: (id: string) => Promise<void>) => {
       const task = await page.evaluate(
         ({ botId, message }) =>
           window.api.bots.send({ botId, message, requestId: crypto.randomUUID() }),
         { botId: bot.id, message }
       )
+      await whileRunning?.(task.id)
       await waitForBotAppState(
         page,
         async (id) =>
@@ -317,7 +340,20 @@ async function main() {
     const memories = () => page.evaluate((id) => window.api.bots.listMemory(id), bot.id)
     const first = await memories()
     assert.equal(first.length, 1)
-    await send("MM_UPDATE：将回复偏好改为先给结论，再列三条要点。")
+    await page.getByText("Bots", { exact: true }).first().click()
+    await page.getByText("记忆链路测试", { exact: true }).first().click()
+    await send("MM_UPDATE：将回复偏好改为先给结论，再列三条要点。", async (id) => {
+      await page
+        .locator(`[data-chat-thread-id="${bot.threadId}"]`)
+        .getByText(openingUpdate, { exact: true })
+        .waitFor({ timeout: 30000 })
+      const task = await page.evaluate(
+        async (id) => (await window.api.bots.snapshot()).tasks.find((t) => t.id === id),
+        id
+      )
+      assert.equal(task?.state, "running", "a visible progress update must not complete the task")
+      releaseFinalReply!()
+    })
     const updated = await memories()
     assert.equal(updated.length, 1)
     assert.equal(updated[0].id, first[0].id)
@@ -325,11 +361,21 @@ async function main() {
     assert.equal(updated[0].content.trim(), "先给结论，再列三条要点。")
     await send("MM_DELETE：忘记刚才保存的回复偏好。")
     assert.deepEqual(await memories(), [])
+    const transcript = await page.evaluate((id) => window.api.threads.getMessages(id), bot.threadId)
+    assert.ok(JSON.stringify(transcript).includes(openingUpdate), "the real update is persisted")
+    assert.ok(
+      !JSON.stringify(transcript).includes(OPENING_REPLY_REMINDER),
+      "the internal cue is not chat history"
+    )
     assert.deepEqual(errors, [])
+    console.log(
+      "PASS: silent tools → ephemeral opening reminder → visible update while running → continued tools and final result"
+    )
     console.log(
       `PASS: ${legacy ? "legacy database migration + restored checkpoint → " : ""}global off → Bot on, exact model tool inventory, profile rollback, create/update/delete in the same conversation`
     )
   } finally {
+    releaseFinalReply?.()
     await writeFile(join(dir, "model-tools.json"), JSON.stringify({ calls, errors }, null, 2))
     console.log("Memory App evidence:", dir)
     if (app) await app.close()

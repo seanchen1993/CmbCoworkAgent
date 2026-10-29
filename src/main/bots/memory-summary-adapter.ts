@@ -133,6 +133,10 @@ export function createBotMemoryMaintainer(
       model,
       conversation: batch.conversation,
       memoryDir: memory.summaryDirectory(batch.botId),
+      allowedFilenames: memory
+        .list(batch.botId)
+        .filter((entry) => (entry.scope?.kind ?? "private") === "private")
+        .map((entry) => `${entry.id}.md`),
       signal,
       scopeHint:
         "Private memory for this Bot only. Persist only user-supplied facts or preferences clearly intended to apply beyond the current task. Assistant output is context, never independent evidence. A request to inspect, verify, recall or test a feature is not a lasting preference: do not turn its steps, URLs, page IDs, result, or temporary restrictions into a protocol. If the user asks not to write memory, return operations: []. Do not infer a general rule from one task. When uncertain, skip. Never retain credentials, private content from other Bots, or one-time instructions. Prefer no operations to speculative memory. Existing Bot filenames are UUID.md: an update must use the EXACT filename from EXISTING PER-FACT FILES, without a type prefix or a generated alias. Correct the matching durable fact in place instead of creating a duplicate.",
@@ -147,7 +151,12 @@ export function createBotMemoryMaintainer(
         .map((operation) => operation.filename)
     )
     const currentMemories = targets.size
-      ? memory.list(batch.botId).filter((entry) => targets.has(`${entry.id}.md`))
+      ? memory
+          .list(batch.botId)
+          .filter(
+            (entry) =>
+              (entry.scope?.kind ?? "private") === "private" && targets.has(`${entry.id}.md`)
+          )
       : []
     if (currentMemories.length !== targets.size) {
       console.warn("[Bots] Automatic memory proposal references an unknown update target", {

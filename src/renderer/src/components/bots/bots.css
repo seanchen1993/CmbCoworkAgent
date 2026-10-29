@@ -2819,6 +2819,22 @@ button.bot-json-caret:focus-visible {
 .bot-routine-event[open] > summary > svg:last-of-type {
   transform: rotate(90deg);
 }
+.bot-work-instruction {
+  max-width: 100%;
+  border-left: 2px solid var(--bot-line, #e5e5e5);
+  padding: 4px 0 4px 14px;
+}
+.bot-work-instruction-label {
+  margin-bottom: 6px;
+  color: var(--bot-muted, #888);
+  font-size: 12px;
+}
+.bot-work-instruction-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.65;
+}
 .bot-routine-instructions {
   padding: 10px 16px;
   margin-top: 4px;
@@ -3365,6 +3381,14 @@ button.bot-inline-mention:focus-visible {
   font-size: 11px;
   color: var(--bot-muted);
 }
+.bot-work-current > .bot-work-origin {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+.bot-work-origin > span {
+  font-size: 11px;
+  color: var(--bot-muted);
+}
 .bot-work-current button {
   display: inline-flex;
   align-items: center;
@@ -3444,106 +3468,20 @@ button.bot-inline-mention:focus-visible {
   border-bottom: 1px solid var(--bot-line);
   font-size: 12px;
 }
-.bot-mock-dialog {
-  width: min(850px, calc(100vw - 32px));
-  max-width: 850px;
-  max-height: 90vh;
-  overflow-y: auto;
-  color: var(--bot-text, var(--foreground));
-  background: var(--bot-elevated, var(--background));
-}
-.bot-mock-toolbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  font-size: 12px;
-}
-.bot-mock-dialog button {
-  border: 1px solid var(--bot-line, var(--border));
-  border-radius: 7px;
-  padding: 5px 9px;
-}
-.bot-mock-dialog button:disabled {
-  opacity: 0.45;
-}
-.bot-mock-dialog input:not([type="checkbox"]),
-.bot-mock-dialog select,
-.bot-mock-dialog textarea {
-  border: 1px solid var(--bot-line, var(--border));
-  border-radius: 7px;
-  background: var(--bot-elevated, var(--background));
-  color: var(--bot-text, var(--foreground));
-  padding: 6px 8px;
-  min-width: 0;
-}
-.bot-mock-create {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-.bot-mock-create label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-}
-.bot-mock-create p {
-  grid-column: 1 / -1;
-  color: var(--bot-muted, var(--muted-foreground));
-  font-size: 12px;
-}
-.bot-mock-history {
-  min-height: 100px;
-  max-height: 38vh;
-  overflow-y: auto;
-  border-block: 1px solid var(--bot-line, var(--border));
-  padding: 10px;
-}
-.bot-mock-history article {
-  margin-block: 10px;
-}
-.bot-mock-history article[data-mock-kind="bot"] {
-  margin-left: 20px;
-}
-.bot-mock-history p {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  margin: 4px 0;
-  font-size: 13px;
-}
-.bot-mock-history small {
-  color: var(--bot-muted, var(--muted-foreground));
-}
-.bot-mock-compose {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.bot-mock-compose textarea {
-  min-height: 70px;
-  resize: vertical;
-}
-.bot-mock-compose > button {
-  align-self: flex-end;
-}
-@media (max-width: 600px) {
-  .bot-mock-create {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
 /* Private chat uses the same atomic mention editor inside the original composer. */
-.bot-private-input { padding: 14px 94px 14px 46px; line-height: 22px; }
-.bot-private-input .bot-group-editor { min-height: 20px; max-height: 176px; padding: 0; }
-.bot-private-input .bot-group-editor[contenteditable="false"] { opacity: .7; }
-/* Conversation associations and citations share the quiet Bot disclosure treatment. */
-.bot-association-notices {
-  margin: 0 24px 8px;
-  font-size: 12px;
-  color: var(--bot-muted, var(--muted-foreground));
+.bot-private-input {
+  padding: 14px 94px 14px 46px;
+  line-height: 22px;
 }
-.bot-association-notices summary,
+.bot-private-input .bot-group-editor {
+  min-height: 20px;
+  max-height: 176px;
+  padding: 0;
+}
+.bot-private-input .bot-group-editor[contenteditable="false"] {
+  opacity: 0.7;
+}
+/* History citations use the quiet Bot disclosure treatment. */
 .bot-history-sources summary {
   display: flex;
   align-items: center;
@@ -3553,24 +3491,11 @@ button.bot-inline-mention:focus-visible {
   cursor: pointer;
   list-style: none;
 }
-.bot-association-notices summary::-webkit-details-marker,
 .bot-history-sources summary::-webkit-details-marker {
   display: none;
 }
-.bot-association-notices summary > svg,
 .bot-history-sources summary > svg,
-.bot-association-list button > svg,
 .bot-history-source-list button > svg {
-  flex-shrink: 0;
-}
-.bot-association-preview {
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  color: var(--bot-text, var(--foreground));
-}
-.bot-association-notices summary > span:not(.bot-association-preview) {
   flex-shrink: 0;
 }
 .bot-source-count {
@@ -3580,19 +3505,9 @@ button.bot-inline-mention:focus-visible {
 .bot-source-chevron {
   transition: transform 140ms ease;
 }
-.bot-association-notices[open] > summary .bot-source-chevron,
 .bot-history-sources[open] > summary .bot-source-chevron {
   transform: rotate(90deg);
 }
-.bot-association-notices p {
-  margin: 4px 0 8px 24px;
-}
-.bot-association-list {
-  max-height: 192px;
-  overflow-y: auto;
-  margin-left: 24px;
-}
-.bot-association-list button,
 .bot-history-source-list button {
   display: flex;
   align-items: center;
@@ -3603,7 +3518,6 @@ button.bot-inline-mention:focus-visible {
   text-align: left;
   cursor: pointer;
 }
-.bot-association-list button:hover,
 .bot-history-source-list button:hover {
   background: var(--bot-hover, var(--muted));
 }
@@ -3611,19 +3525,6 @@ button.bot-inline-mention:focus-visible {
   display: block;
   flex: 1;
   min-width: 0;
-}
-.bot-association-title,
-.bot-association-goal {
-  display: block;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.bot-association-title {
-  color: var(--bot-text, var(--foreground));
-}
-.bot-association-goal {
-  margin-top: 3px;
 }
 .bot-history-sources {
   width: min(100%, 520px);
@@ -3683,13 +3584,10 @@ button.bot-inline-mention:focus-visible {
 .bot-history-citation:hover {
   text-decoration-color: currentColor;
 }
-.bot-association-notices summary:hover,
 .bot-history-sources summary:hover {
   color: var(--bot-text, var(--foreground));
 }
-.bot-association-notices summary:focus-visible,
 .bot-history-sources summary:focus-visible,
-.bot-association-list button:focus-visible,
 .bot-history-source-list button:focus-visible,
 .bot-history-citation:focus-visible {
   outline: 2px solid var(--ring);
@@ -3700,4 +3598,20 @@ button.bot-inline-mention:focus-visible {
   .bot-source-chevron {
     transition: none;
   }
+}
+
+.bot-memory-scope-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.bot-memory-scope-label {
+  display: inline-block;
+  margin: 4px 0 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
 }

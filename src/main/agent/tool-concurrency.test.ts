@@ -140,6 +140,43 @@ const humanWaits = [
   { name: "bot_browser", args: { action: "request_help" } }
 ]
 
+describe("shared Bot workspaces", () => {
+  it("serializes writes across conversations sharing a directory while other directories proceed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bot-workspace-lock-"))
+    const file = join(dir, "shared.txt")
+    writeFileSync(file, "")
+    const gate = createGate(),
+      entered = deferred(),
+      finish = deferred()
+    const a = gate.forQueue(`workspace:${dir}`, "private-thread")
+    const b = gate.forQueue(`workspace:${dir}`, "group-task-thread")
+    const other = gate.forQueue(`workspace:${dir}/other`, "other-group-thread")
+    const writer = a.wrapToolCall(request("write_file", "a"), async () => {
+      const before = readFileSync(file, "utf8")
+      entered.resolve()
+      await finish.promise
+      writeFileSync(file, before + "A")
+    })
+    await entered.promise
+    const next = vi.fn(async () => writeFileSync(file, readFileSync(file, "utf8") + "B"))
+    const blocked = b.wrapToolCall(request("write_file", "b"), next)
+    try {
+      await other.wrapToolCall(request("write_file", "c"), async () =>
+        writeFileSync(join(dir, "other.txt"), "C")
+      )
+      expect(next).not.toHaveBeenCalled()
+      expect(readFileSync(join(dir, "other.txt"), "utf8")).toBe("C")
+      finish.resolve()
+      await Promise.all([writer, blocked])
+      expect(readFileSync(file, "utf8")).toBe("AB")
+    } finally {
+      finish.resolve()
+      await Promise.all([writer, blocked])
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("active workflow rejection", () => {
   it.each([
     { queueId: "bot-private", workflowThreadId: "private-thread" },

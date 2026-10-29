@@ -1,6 +1,5 @@
 import type { BuiltinRobotManager } from "../services/im/manager"
 import { BrowserWindow, powerMonitor, type IpcMain, type IpcMainInvokeEvent } from "electron"
-import { parseBotMockBinding, parseBotMockEvent } from "../bots/mock-channel-validation"
 import { botImExternalId } from "../../shared/bots/im-channel"
 import {
   BotError,
@@ -88,29 +87,29 @@ export function registerBotHandlers(
   }
 
   registerBotFileHandlers(ipcMain, hostFor)
-  const mockDesktop = (event: IpcMainInvokeEvent, hostId: unknown) => {
+  const desktopHost = (event: IpcMainInvokeEvent, hostId: unknown) => {
     if (
       !event.senderFrame ||
       event.senderFrame !== event.sender.mainFrame ||
       !BrowserWindow.fromWebContents(event.sender)
     )
-      throw new BotError("CONFLICT", "模拟绑定只能从本机桌面窗口操作")
+      throw new BotError("CONFLICT", "此操作仅支持本机桌面窗口")
     return hostFor(hostId)
   }
-  const mockCursor = (value: unknown): string | undefined => {
+  const historyCursor = (value: unknown): string | undefined => {
     if (value === undefined) return undefined
     if (typeof value !== "string" || value.length > 1024)
-      throw new BotError("INVALID_INPUT", "模拟游标无效")
+      throw new BotError("INVALID_INPUT", "会话游标无效")
     return value
   }
   ipcMain.handle("bots:conversation:resolve", (event, hostId, threadId) =>
-    resolveWorkConversation(mockDesktop(event, hostId), botIdentifier(threadId))
+    resolveWorkConversation(desktopHost(event, hostId), botIdentifier(threadId))
   )
   ipcMain.handle("bots:conversation:expose", async (event, hostId, botId, workId) => {
-    const host = mockDesktop(event, hostId),
+    const host = desktopHost(event, hostId),
       bot = host.getBot(botIdentifier(botId)),
       work = host.getWork(bot.id, botIdentifier(workId))
-    if (work.source) throw new BotError("CONFLICT", "模拟渠道任务不能转为本机私有对话。")
+    if (work.source) throw new BotError("CONFLICT", "渠道任务不能转为本机私有对话。")
     if (!work.conversation) {
       prepareBotThread(bot, { threadId: work.threadId, origin: { kind: "user" } }, work)
       host.initializeWorkThread(bot.id, work.id)
@@ -118,7 +117,7 @@ export function registerBotHandlers(
     return exposeWorkConversation(host, bot.id, work.id)
   })
   ipcMain.handle("bots:conversation:link", (event, hostId, input) => {
-    const host = mockDesktop(event, hostId)
+    const host = desktopHost(event, hostId)
     if (
       !input ||
       typeof input !== "object" ||
@@ -142,67 +141,61 @@ export function registerBotHandlers(
     if (!Number.isSafeInteger(version) || version < 1)
       throw new BotError("INVALID_INPUT", "任务版本无效")
     return unlinkWorkConversation(
-      mockDesktop(event, hostId),
+      desktopHost(event, hostId),
       botIdentifier(botId),
       botIdentifier(workId),
       version
     )
   })
   ipcMain.handle("bots:im:status", (event, hostId) => {
-    mockDesktop(event, hostId)
+    desktopHost(event, hostId)
     return im?.botChannelStatus() ?? { connected: false, available: false }
   })
   ipcMain.handle("bots:im:list", (event, hostId, botId, before) => {
-    mockDesktop(event, hostId).getBot(botIdentifier(botId))
+    desktopHost(event, hostId).getBot(botIdentifier(botId))
     if (before !== undefined && (typeof before !== "string" || !/^[1-9]\d{0,18}$/.test(before)))
       throw new BotError("INVALID_INPUT", "IM 绑定游标无效")
     return imChannel().list(botId, before)
   })
   ipcMain.handle("bots:im:history", (event, hostId, botId, id, before) => {
-    mockDesktop(event, hostId).getBot(botIdentifier(botId))
-    return imChannel().history(botId, botImExternalId(id), mockCursor(before))
+    desktopHost(event, hostId).getBot(botIdentifier(botId))
+    return imChannel().history(botId, botImExternalId(id), historyCursor(before))
+  })
+  ipcMain.handle("bots:im:conversation-stop", (event, hostId, botId, id) =>
+    desktopHost(event, hostId).stopImConversation(botIdentifier(botId), botIdentifier(id))
+  )
+  ipcMain.handle("bots:im:conversation-history", (event, hostId, botId, id, before) =>
+    desktopHost(event, hostId).imConversationHistory(
+      botIdentifier(botId),
+      botIdentifier(id),
+      historyCursor(before)
+    )
+  )
+  ipcMain.handle("bots:im:conversation-works", (event, hostId, botId, id, cursor, query) => {
+    if (query !== undefined && (typeof query !== "string" || query.length > 160))
+      throw new BotError("INVALID_INPUT", "任务搜索内容无效")
+    return desktopHost(event, hostId).imConversationWorks(
+      botIdentifier(botId),
+      botIdentifier(id),
+      historyCursor(cursor),
+      query
+    )
   })
   ipcMain.handle("bots:im:create", (event, hostId, botId, kind, operationId) => {
-    mockDesktop(event, hostId).getBot(botIdentifier(botId))
+    desktopHost(event, hostId).getBot(botIdentifier(botId))
     if (kind !== "dm" && kind !== "group") throw new BotError("INVALID_INPUT", "IM 受众无效")
     return imChannel().create(botId, kind, botIdentifier(operationId))
   })
+  ipcMain.handle("bots:im:remove", (event, hostId, botId, id) => {
+    desktopHost(event, hostId).getBot(botIdentifier(botId))
+    return imChannel().remove(botId, botImExternalId(id))
+  })
   ipcMain.handle("bots:im:revoke", (event, hostId, botId, id, version) => {
-    mockDesktop(event, hostId).getBot(botIdentifier(botId))
+    desktopHost(event, hostId).getBot(botIdentifier(botId))
     if (!Number.isSafeInteger(version) || version < 1)
       throw new BotError("INVALID_INPUT", "IM 绑定版本无效")
     return imChannel().revoke(botId, botImExternalId(id), version)
   })
-  ipcMain.handle("bots:mock:bindings", (event, hostId, botId, before) =>
-    mockDesktop(event, hostId).mockBindings(botIdentifier(botId), mockCursor(before))
-  )
-  ipcMain.handle("bots:mock:binding", (event, hostId, botId, id) =>
-    mockDesktop(event, hostId).mockBinding(botIdentifier(botId), botIdentifier(id))
-  )
-  ipcMain.handle("bots:mock:create", (event, hostId, input) =>
-    mockDesktop(event, hostId).createMockBinding(parseBotMockBinding(input))
-  )
-  ipcMain.handle("bots:mock:inject", (event, hostId, input) =>
-    mockDesktop(event, hostId).injectMockEvent(parseBotMockEvent(input))
-  )
-  ipcMain.handle("bots:mock:revoke", (event, hostId, botId, id, version) => {
-    const host = mockDesktop(event, hostId)
-    if (!Number.isSafeInteger(version) || version < 1)
-      throw new BotError("INVALID_INPUT", "模拟授权版本无效")
-    return host.revokeMockBinding(botIdentifier(botId), botIdentifier(id), version)
-  })
-  ipcMain.handle("bots:mock:online", (event, hostId, botId, id, online) => {
-    const host = mockDesktop(event, hostId)
-    if (typeof online !== "boolean") throw new BotError("INVALID_INPUT", "模拟在线状态无效")
-    return host.setMockOnline(botIdentifier(botId), botIdentifier(id), online)
-  })
-  ipcMain.handle("bots:mock:history", (event, hostId, botId, id, before) =>
-    mockDesktop(event, hostId).mockHistory(
-      botIdentifier(botId),
-      botIdentifier(id),
-      mockCursor(before)
-    )
-  )
   ipcMain.handle(
     "bots:browser:preview",
     (_event, hostId: unknown, id: unknown, pageId: unknown) => {
@@ -254,11 +247,7 @@ export function registerBotHandlers(
     "bots:browser:operate",
     (_event, hostId: unknown, id: unknown, input: unknown, generation: unknown) => {
       const scope = hostFor(hostId).browserScope(botIdentifier(id))
-      if (
-        typeof generation !== "number" ||
-        !Number.isSafeInteger(generation) ||
-        generation < 0
-      )
+      if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 0)
         throw new BotError("INVALID_INPUT", "浏览器控制版本无效")
       if (
         !input ||
@@ -337,7 +326,7 @@ export function registerBotHandlers(
     }
   )
   ipcMain.handle("bots:work:associations", (event, hostId, botId) =>
-    mockDesktop(event, hostId).associatedWorks(botIdentifier(botId))
+    desktopHost(event, hostId).associatedWorks(botIdentifier(botId))
   )
   ipcMain.handle("bots:work:source", (event, hostId, botId, source) => {
     if (
@@ -348,7 +337,7 @@ export function registerBotHandlers(
       )
     )
       throw new BotError("INVALID_INPUT", "历史来源无效")
-    return mockDesktop(event, hostId).resolveWorkHistorySource(botIdentifier(botId), {
+    return desktopHost(event, hostId).resolveWorkHistorySource(botIdentifier(botId), {
       workId: botIdentifier(source.workId),
       messageId: source.messageId,
       incarnation: source.incarnation
@@ -452,7 +441,7 @@ export function registerBotHandlers(
     "bots:mark-read",
     (_event, hostId: unknown, kind: unknown, id: unknown, version: unknown) => {
       if (
-        (kind !== "bot" && kind !== "group" && kind !== "work") ||
+        (kind !== "bot" && kind !== "group" && kind !== "work" && kind !== "im") ||
         !Number.isSafeInteger(version) ||
         Number(version) < 1
       )
@@ -460,13 +449,19 @@ export function registerBotHandlers(
       return hostFor(hostId).markRead(kind, botIdentifier(id), Number(version))
     }
   )
-  ipcMain.handle("bots:memory:list", (_event, hostId: unknown, id: unknown) => {
-    const bot = hostFor(hostId).getBot(botIdentifier(id))
-    return getBotMemoryService().list(bot.id)
+  ipcMain.handle("bots:memory:list", (_event, hostId: unknown, id: unknown, groupId: unknown) => {
+    const host = hostFor(hostId)
+    const bot = host.getBot(botIdentifier(id))
+    return getBotMemoryService().list(
+      bot.id,
+      host.memoryContext(bot.id, groupId == null ? undefined : botIdentifier(groupId))
+    )
   })
   ipcMain.handle("bots:memory:write", (_event, hostId: unknown, id: unknown, input: unknown) => {
     const bot = hostFor(hostId).getBot(botIdentifier(id))
-    return getBotMemoryService().write(bot.id, parseWriteBotMemory(input))
+    const parsed = parseWriteBotMemory(input)
+    if (parsed.scope?.kind === "group") hostFor(hostId).memoryContext(bot.id, parsed.scope.groupId)
+    return getBotMemoryService().write(bot.id, parsed)
   })
   ipcMain.handle(
     "bots:memory:remove",
@@ -538,14 +533,26 @@ export function registerBotHandlers(
   ipcMain.handle(
     "bots:message-reactions",
     (_event, hostId: unknown, target: unknown, messageIds: unknown) =>
-      hostFor(hostId).messageReactions(parseBotReactionTarget(target), parseBotReactionMessageIds(messageIds))
+      hostFor(hostId).messageReactions(
+        parseBotReactionTarget(target),
+        parseBotReactionMessageIds(messageIds)
+      )
   )
   ipcMain.handle(
     "bots:set-message-reaction",
-    (_event, hostId: unknown, target: unknown, messageId: unknown, emoji: unknown, present: unknown) =>
+    (
+      _event,
+      hostId: unknown,
+      target: unknown,
+      messageId: unknown,
+      emoji: unknown,
+      present: unknown
+    ) =>
       hostFor(hostId).setMessageReaction(
-        parseBotReactionTarget(target), parseBotReactionMessageId(messageId),
-        parseBotReactionEmoji(emoji), parseBotReactionPresent(present)
+        parseBotReactionTarget(target),
+        parseBotReactionMessageId(messageId),
+        parseBotReactionEmoji(emoji),
+        parseBotReactionPresent(present)
       )
   )
   ipcMain.handle(

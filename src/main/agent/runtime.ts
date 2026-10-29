@@ -3,6 +3,7 @@ import {
   type CoordinatorNotificationDelivery
 } from "./coordinator-notification-delivery"
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
+import { createOpeningReplyReminderMiddleware } from "./opening-reply-reminder"
 import { createRuntimeToolAllowlistMiddleware } from "./runtime-tool-allowlist"
 import { randomUUID } from "crypto"
 import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
@@ -2452,6 +2453,7 @@ function assembleDeepAgent(
     onFailureFuseNotice,
     onTurnCompletionRecovery,
     checkFinalDelivery,
+    openingReplyReminder = false,
     turnCompletionTodoGateEnabled = true,
     outputStyle,
     toolStrategy = "standard",
@@ -2468,6 +2470,7 @@ function assembleDeepAgent(
     onFailureFuseNotice?: FailureFuseNoticeCallback
     onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
     checkFinalDelivery?: TurnFinalDeliveryCheck
+    openingReplyReminder?: boolean
     turnCompletionTodoGateEnabled?: boolean
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     [k: string]: any
@@ -3400,6 +3403,7 @@ function assembleDeepAgent(
       ...memoryMiddlewareArray,
       ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
       ...customMiddleware,
+      ...(openingReplyReminder ? [createOpeningReplyReminderMiddleware()] : []),
       ...outputStyleTurnReminderMiddleware,
       ...(toolStrategy !== "standard"
         ? [createToolStrategyTurnReminderMiddleware(toolStrategy, filesystemAccess)]
@@ -4855,6 +4859,8 @@ export interface CreateAgentRuntimeOptions {
   onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
   /** Trusted main-turn delivery only; not forwarded to leaf agents. */
   checkFinalDelivery?: TurnFinalDeliveryCheck
+  /** Host opt-in for a user-facing main turn; never inherited by workers or subagents. */
+  openingReplyReminder?: boolean
   /** Ordinary-path todo completion gate. Defaults to enabled. */
   turnCompletionTodoGateEnabled?: boolean
   /** Optional UI thread ID for approval prompts. Async worker runtimes keep their own checkpoint thread but surface approvals on the parent thread UI. */
@@ -7669,6 +7675,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     onPrimaryModelRequestState: options.onPrimaryModelRequestState,
     onTurnCompletionRecovery: options.onTurnCompletionRecovery,
     checkFinalDelivery: options.checkFinalDelivery,
+    openingReplyReminder: options.openingReplyReminder,
     turnCompletionTodoGateEnabled: options.turnCompletionTodoGateEnabled,
     soloTaskTraceManager,
     actionStationarityTurnId,

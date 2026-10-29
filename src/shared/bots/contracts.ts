@@ -5,7 +5,7 @@ import type {
   BotMessageReactionUpdate
 } from "./message-reactions"
 import type { BotWorkClient } from "./work"
-import type { BotMockClient, BotMockSource } from "./mock-channel"
+import type { BotMockSource } from "./mock-channel"
 import type { WorkspaceFileScanEntry } from "../workspace-file-scan"
 import type { BotDeliveredFile } from "./file-delivery"
 import type { UserInputRequest } from "../../main/types"
@@ -176,7 +176,16 @@ export type BotTaskOrigin =
       mentions?: BotMessageMention[]
     }
   | { kind: "introduction" }
-  | { kind: "work"; sourceTaskId: string; instructionSummary?: string }
+  | {
+      kind: "work"
+      sourceTaskId: string
+      /** Present on new dispatches; their message is the actual Bot-authored instruction. */
+      dispatch?: "create" | "follow_up"
+      /** Host-captured source references, never copied into the task's model input. */
+      sourceMessageIds?: string[]
+      /** Legacy forwarded turns kept the Bot's brief separate from the user message. */
+      instructionSummary?: string
+    }
   | {
       /** Host-recorded result of one independent task turn, delivered to this Bot's main chat. */
       kind: "work_result"
@@ -192,6 +201,8 @@ export type BotTaskOrigin =
       /** Captured by the host at delivery, never supplied by the receiving model. */
       fromBotName?: string
       rootTaskId: string
+      /** Exact caller turn; preserves IM audience across asynchronous handoffs. */
+      sourceTaskId?: string
       /** Host-captured return route; a peer cannot choose another private conversation. */
       returnWorkId?: string
       /** Trusted work lineage shared by all async collaborators, separate from the return hop. */
@@ -209,6 +220,8 @@ export type BotTaskOrigin =
   | {
       kind: "notification"
       notificationKind: "workflow" | "coordinator" | "command" | "reaction"
+      /** Host-owned originating turn, used to retain an authenticated IM route. */
+      sourceTaskId?: string
       /** Inherits the host-owned collaboration quota; never an owner permission. */
       rootWorkId?: string
       key: string
@@ -218,7 +231,7 @@ export type BotTaskOrigin =
       runStartedAt?: string
       groupId?: string
     }
-  | { kind: "schedule"; scheduleId: string }
+  | { kind: "schedule"; scheduleId: string; sourceTaskId?: string }
   | { kind: "discussion"; groupId: string; messageId: string; round: number }
   | { kind: "group"; groupId: string; messageId: string }
 
@@ -311,6 +324,10 @@ export interface BotScheduleInput {
   enabled: boolean
 }
 export interface BotSchedule extends BotScheduleInput {
+  /** Host-captured source; cannot be chosen by model or renderer input. */
+  sourceTaskId?: string
+  audienceKey?: string
+  workId?: string
   id: string
   botId: string
   version: number
@@ -362,11 +379,12 @@ export interface BotSnapshot {
   backgroundThreads?: string[]
   /** Verified owner DMs linked to the personal main conversation; no account identifiers. */
   personalIm?: Array<{ botId: string; connected: boolean }>
+  imConversations?: import("./im-channel").BotImConversation[]
 }
 
 /** Bounded list metadata, not a second transcript. Revisions also survive clock changes. */
 export interface BotConversationActivity {
-  kind: "bot" | "group" | "work"
+  kind: "bot" | "group" | "work" | "im"
   id: string
   version: number
   updatedAt: number
@@ -388,6 +406,8 @@ export interface BotMemory {
   name: string
   content: string
   version: string
+  /** Legacy entries without a scope remain private. */
+  scope?: import("./memory-scope").BotMemoryScope
 }
 
 export interface BotBrowserHumanAction {
@@ -434,6 +454,7 @@ export interface WriteBotMemoryInput {
   expectedVersion?: string
   name: string
   content: string
+  scope?: import("./memory-scope").BotMemoryScope
 }
 
 /** The local implementation uses IPC. A future remote implementation must preserve this contract. */
@@ -441,7 +462,6 @@ export type BotGroupHistoryCursor = number | { targetMessageId: string }
 
 export interface BotClient {
   im?: BotImClient
-  mock?: BotMockClient
   readonly hostId: string
   readonly filePreview: BotFilePreviewTransport
   readonly works?: BotWorkClient
@@ -506,7 +526,10 @@ export interface BotClient {
   messageReply(botId: string, messageId: string, workId?: string): Promise<BotMessageReply>
   messageReactions(target: BotReactionTarget, messageIds: string[]): Promise<BotMessageReactions>
   setMessageReaction(
-    target: BotReactionTarget, messageId: string, emoji: string, present: boolean
+    target: BotReactionTarget,
+    messageId: string,
+    emoji: string,
+    present: boolean
   ): Promise<BotMessageReactionUpdate>
   requestReceipts(
     botId: string,
@@ -521,9 +544,9 @@ export interface BotClient {
     workId?: string
   ): Promise<BotExchangePage>
   markUnread(kind: "bot" | "group", id: string): Promise<void>
-  markRead(kind: "bot" | "group" | "work", id: string, throughVersion: number): Promise<void>
+  markRead(kind: "bot" | "group" | "work" | "im", id: string, throughVersion: number): Promise<void>
   open(botId: string, workId?: string): Promise<{ threadId: string }>
-  listMemory(botId: string): Promise<BotMemory[]>
+  listMemory(botId: string, groupId?: string): Promise<BotMemory[]>
   writeMemory(botId: string, input: WriteBotMemoryInput): Promise<BotMemory>
   removeMemory(botId: string, id: string, expectedVersion: string): Promise<void>
   shareMemory(

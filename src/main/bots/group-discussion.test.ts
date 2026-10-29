@@ -228,26 +228,26 @@ describe("public group turn admission", () => {
     expect(f.store.recentTasks().filter((t) => t.origin.kind === "group")).toHaveLength(2)
   })
 
-  it("runs an available member while another selected Bot is busy in a private conversation", () => {
+  it("runs both initial members without blocking on a separate private conversation", () => {
     const f = fixture()
     const firstMember = [...f.members].sort((a, b) => a.id.localeCompare(b.id))[0]
-    const privateTask = f.store.enqueue({
-      botId: firstMember.id,
-      requestId: "private",
-      message: "Private"
-    })
+    const privateTask = f.store.enqueue({ botId: firstMember.id, requestId: "private", message: "Private" })
     f.store.transition(privateTask.id, "running")
-    f.send(
-      "ordered",
-      f.members.map((bot) => bot.id)
-    )
-    const available = f.store.nextQueued([])!
-    expect(available.botId).not.toBe(firstMember.id)
-    f.store.transition(available.id, "running", null, available.groupSnapshotOrdinal)
-    f.store.settle(privateTask.id, "completed", null, "PRIVATE_ONLY")
+    f.send("ordered", f.members.map((bot) => bot.id))
     const first = f.store.nextQueued([])!
     expect(first.botId).toBe(firstMember.id)
+    f.store.transition(first.id, "running", null, first.groupSnapshotOrdinal)
+    const second = f.store.nextQueued([])!
+    expect(second.botId).not.toBe(firstMember.id)
+    f.store.transition(second.id, "running", null, second.groupSnapshotOrdinal)
+    expect(f.store.getTask(privateTask.id).state).toBe("running")
+    expect(f.store.getTask(first.id).state).toBe("running")
+    expect(f.store.nextQueued([])).toBeNull()
+    f.store.settle(privateTask.id, "completed", null, "PRIVATE_ONLY")
     expect(first.message).not.toContain("PRIVATE_ONLY")
+    expect(second.message).not.toContain("PRIVATE_ONLY")
+    f.finish(first)
+    f.finish(second)
   })
 
   it("allows another room and peer jobs during a public turn, then delivers the peer receipt", () => {
