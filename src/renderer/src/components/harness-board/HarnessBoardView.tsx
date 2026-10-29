@@ -4519,11 +4519,13 @@ function FeatureCard({
   projectId,
   run,
   workflowNodes,
+  scheduledAt,
   onOpen
 }: {
   projectId: string
   run: HarnessFeatureSummary
   workflowNodes: Array<{ id: string; label: string }>
+  scheduledAt?: string
   onOpen: () => void
 }): React.JSX.Element {
   const pendingDecision = useHarnessNotifications().some(
@@ -4544,7 +4546,9 @@ function FeatureCard({
   const managedRunStatus =
     run.managedRunStatus === "running"
       ? { label: MANAGED_RUN_STATUS_LABELS.running, uiKind: "active" as const }
-      : null
+      : scheduledAt
+        ? { label: "已预约托管运行", uiKind: "ok" as const }
+        : null
 
   return (
     <button
@@ -5978,6 +5982,7 @@ function ProjectDetailPage({
   onCreateFeature,
   onOpenSystemConstraintUpdate,
   onRefresh,
+  managedScheduleRefreshRevision,
   onEditProject,
   onUpdatePlugin,
   onOpenLeanTokenSettings,
@@ -6001,11 +6006,13 @@ function ProjectDetailPage({
     config: NonNullable<HarnessProjectDetailViewModel["systemConstraintUpdate"]>
   ) => void
   onRefresh: (projectId: string) => void
+  managedScheduleRefreshRevision: number
   onEditProject: (project: HarnessProjectListItem) => void
   onUpdatePlugin: (project: HarnessProjectListItem, updateInfo: MarketPluginUpdateInfo) => void
   onOpenLeanTokenSettings: () => void
   onOpenFeature: (projectId: string, slug: string) => void
 }): React.JSX.Element {
+  const managedScheduleIndex = useManagedRunScheduleIndex(managedScheduleRefreshRevision)
   const runs = detail?.runs ?? []
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
@@ -6280,6 +6287,9 @@ function ProjectDetailPage({
                               projectId={project.projectId}
                               key={run.slug}
                               run={run}
+                              scheduledAt={managedScheduleIndex.get(
+                                JSON.stringify([project.projectId, run.slug])
+                              )}
                               workflowNodes={workflowForProjectRun(detail, run).nodes}
                               onOpen={() => onOpenFeature(project.projectId, run.slug)}
                             />
@@ -11937,7 +11947,11 @@ export function HarnessBoardView({
           onOpenSystemConstraintUpdate={(project, config) => {
             void handleOpenSystemConstraintUpdate(project, config)
           }}
-          onRefresh={(projectId) => void loadProjectDetail(projectId)}
+          onRefresh={(projectId) => {
+            setManagedScheduleRefreshRevision((revision) => revision + 1)
+            void loadProjectDetail(projectId)
+          }}
+          managedScheduleRefreshRevision={managedScheduleRefreshRevision}
           onEditProject={handleEditProject}
           onUpdatePlugin={(project, updateInfo) => {
             void handleUpdateProjectPlugin(project, updateInfo)
