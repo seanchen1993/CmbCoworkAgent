@@ -52,8 +52,12 @@ function allowed(agentMode: "coordinator" | "workflow"): ImRemoteCapabilityDecis
   }
 }
 
-async function waitFor(predicate: () => boolean, message: string): Promise<void> {
-  const deadline = Date.now() + 2_000
+async function waitFor(
+  predicate: () => boolean,
+  message: string,
+  timeoutMs = 2_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error(message)
     await new Promise<void>((resolve) => setTimeout(resolve, 5))
@@ -99,6 +103,7 @@ async function testCoordinatorResultIsFoldedAndAcknowledged(): Promise<void> {
       })
     } as never,
     workflow: {} as never,
+    readCommittedNotifications: async () => [],
     executeTurn: async (input) => {
       executions.push(input)
       assert.equal(input.agentMode, "coordinator")
@@ -201,6 +206,7 @@ async function testWorkflowResultIsFoldedAndSettled(): Promise<void> {
       },
       clearRenotify: () => undefined
     } as never,
+    readCommittedNotifications: async () => [],
     executeTurn: async (input) => {
       assert.equal(input.agentMode, "workflow")
       assert.equal(input.internalNotificationTurn, true)
@@ -230,7 +236,9 @@ async function testWorkflowResultIsFoldedAndSettled(): Promise<void> {
   }
 }
 
-async function testActiveGoalConsumesCoordinatorNotificationThroughSharedRun(): Promise<void> {
+async function testActiveGoalConsumesCoordinatorNotificationThroughSharedRun(
+  fails = false
+): Promise<void> {
   let hasNotification = true
   let goalRuns = 0
   const deliveries: string[] = []
@@ -244,6 +252,7 @@ async function testActiveGoalConsumesCoordinatorNotificationThroughSharedRun(): 
       hasAutoRunnableNotifications: () => hasNotification
     } as never,
     workflow: {} as never,
+    readCommittedNotifications: async () => [],
     executeTurn: async () => {
       throw new Error("active Goal notification must not use the standalone mode runner")
     },
@@ -253,6 +262,14 @@ async function testActiveGoalConsumesCoordinatorNotificationThroughSharedRun(): 
         assert.equal(input.coordinatorInternalNotification, true)
         assert.match(input.prepared.visibleText, /CMB_COORDINATOR_WORKER_NOTIFICATION/u)
         hasNotification = false
+        if (fails) {
+          input.onRunTerminated?.({
+            outcome: "error",
+            code: "provider_error",
+            coordinatorNotificationDelivered: true
+          })
+          throw new Error("Goal API exhausted")
+        }
         await input.onFinalAssistant?.({
           messageId: "assistant-goal-notification",
           finalText: "Goal 已吸收并行任务结果。"
@@ -274,7 +291,14 @@ async function testActiveGoalConsumesCoordinatorNotificationThroughSharedRun(): 
     pump.schedule(notice("coordinator"))
     await waitFor(() => deliveries.length === 1, "active Goal result was not delivered")
     assert.equal(goalRuns, 1)
-    assert.match(deliveries[0], /Goal 已吸收并行任务结果/u)
+    assert.match(
+      deliveries[0],
+      fails ? /Goal API exhausted.*请继续会话处理/u : /Goal 已吸收并行任务结果/u
+    )
+    if (fails) {
+      await new Promise((resolve) => setTimeout(resolve, 1_200))
+      assert.equal(goalRuns, 1, "a committed Goal notification must not retry")
+    }
   } finally {
     pump.stop()
   }
@@ -309,6 +333,7 @@ async function testActiveGoalLeavesDesktopCoordinatorResultsAlone(): Promise<voi
         options?.owner !== "managed"
     } as never,
     workflow: {} as never,
+    readCommittedNotifications: async () => [],
     executeTurn: async () => {
       throw new Error("active Goal notification must not use the standalone mode runner")
     },
@@ -357,6 +382,7 @@ async function testActiveGoalLeavesDesktopWorkflowRunsAlone(): Promise<void> {
         return options?.owner === "managed" ? null : { runId: "wf_desktop" }
       }
     } as never,
+    readCommittedNotifications: async () => [],
     executeTurn: async () => {
       throw new Error("active Goal notification must not use the standalone mode runner")
     },
@@ -410,6 +436,7 @@ async function testStopReachesASummaryThisPumpIsRunning(): Promise<void> {
       acknowledgeNotificationMessages: async () => undefined
     } as never,
     workflow: {} as never,
+    readCommittedNotifications: async () => [],
     executeTurn: async (input) =>
       await new Promise<string>((resolve, reject) => {
         started = true
@@ -466,6 +493,7 @@ async function testAStoppedSummaryIsNotRetried(): Promise<void> {
       acknowledgeNotificationMessages: async () => undefined
     } as never,
     workflow: {} as never,
+    readCommittedNotifications: async () => [],
     executeTurn: async (input) =>
       await new Promise<string>((resolve, reject) => {
         runs += 1
@@ -490,11 +518,139 @@ async function testAStoppedSummaryIsNotRetried(): Promise<void> {
   }
 }
 
+async function testCoordinatorDeliveryLifecycle(
+  stage:
+    | "committed"
+    | "crash-gap"
+    | "before-input"
+    | "read-failure"
+    | "outbox-success"
+    | "outbox-error"
+): Promise<void> {
+  const first =
+    "<task-notification><task-id>worker-A</task-id><turn>1</turn><result>RESULT_A</result></task-notification>"
+  const second =
+    "<task-notification><task-id>worker-B</task-id><turn>1</turn><result>RESULT_B</result></task-notification>"
+  let queued = [first]
+  const saved = new Set<string>()
+  const inputs: PreparedRemoteStandardTurnInput[] = []
+  const replies: string[] = []
+  let mode: "coordinator" | "normal" = "coordinator"
+  let reads = 0
+  let outboxAttempts = 0
+  const pump = new ImRemoteModeNotificationPump({
+    conversations: conversations() as never,
+    capabilityGuard: {
+      evaluate: async () => ({
+        ...allowed("coordinator"),
+        metadata: { workspacePath: target.workspacePath, agentMode: mode }
+      })
+    } as never,
+    getThread: () => thread("coordinator"),
+    coordinator: {
+      restoreWorkersForThread: async () => [],
+      drainNotifications: () => {
+        const items = queued
+        queued = []
+        return items
+      },
+      hasNotifications: () => queued.length > 0,
+      hasAutoRunnableNotifications: () => queued.length > 0,
+      restoreNotifications: (_id, items) => queued.push(...items),
+      restoreNotificationMessages: async (_id, items) => {
+        queued.push(...items)
+      },
+      acknowledgeNotificationMessages: async () => {},
+      getWorkerSelectedSkill: async () => undefined
+    } as never,
+    workflow: {} as never,
+    readCommittedNotifications: async (_id, items) => {
+      reads++
+      if (stage === "read-failure" && reads === 2) throw new Error("checkpoint read unavailable")
+      return items.filter((item) => saved.has(item))
+    },
+    executeTurn: async (input) => {
+      inputs.push(input)
+      if (inputs.length === 1) {
+        if (stage.startsWith("outbox-")) {
+          await input.onCoordinatorNotificationInputCommitted?.()
+          if (stage === "outbox-success") return "generated result A"
+        }
+        if (stage === "committed") await input.onCoordinatorNotificationInputCommitted?.()
+        if (stage === "crash-gap") saved.add(first)
+        throw new Error("485 exhausted")
+      }
+      await input.onCoordinatorNotificationInputCommitted?.()
+      return "notification processed"
+    },
+    events: {
+      enqueueProactiveReplies: async (items) => {
+        outboxAttempts++
+        if (stage.startsWith("outbox-") && outboxAttempts <= 2) {
+          mode = "normal"
+          throw new Error("outbox temporarily unavailable")
+        }
+        replies.push(items.map((item) => item.message.content).join(""))
+        return []
+      }
+    },
+    replyClient: { sendPending: async () => ({ sent: 1, unknown: 0, failed: 0, deferred: 0 }) },
+    createRunId: () => `lifecycle-${stage}`,
+    hasActiveGoal: () => false
+  })
+  try {
+    pump.schedule(notice("coordinator"))
+    await waitFor(() => replies.length === 1, `${stage}: no result or failure returned`, 5_000)
+    if (stage.startsWith("outbox-")) {
+      assert.equal(inputs.length, 1, "outbox retries must not execute the model again")
+      assert.equal(outboxAttempts, 3)
+      assert.match(
+        replies[0],
+        stage === "outbox-success" ? /generated result A/u : /485 exhausted/u
+      )
+    } else if (stage === "committed" || stage === "crash-gap") {
+      assert.equal(inputs.length, 1, "a committed notification must end on API failure")
+      assert.match(replies[0], /485 exhausted.*请继续会话处理/u)
+      await new Promise((resolve) => setTimeout(resolve, 1_200))
+      assert.equal(inputs.length, 1, "a committed notification must not retry on the pump timer")
+    } else {
+      assert.equal(
+        inputs.length,
+        2,
+        "failure before input must keep the original notification available"
+      )
+      assert.match(inputs[1].rawMessage, /RESULT_A/u)
+    }
+    assert.deepEqual(queued, [])
+    mode = "coordinator"
+    queued.push(second)
+    pump.schedule(notice("coordinator"))
+    await waitFor(() => replies.length === 2, `${stage}: new B was not delivered`)
+    assert.match(inputs.at(-1)!.rawMessage, /RESULT_B/u)
+    assert.doesNotMatch(inputs.at(-1)!.rawMessage, /RESULT_A/u)
+  } finally {
+    pump.stop()
+  }
+}
+
 async function main(): Promise<void> {
+  for (const stage of [
+    "committed",
+    "crash-gap",
+    "before-input",
+    "read-failure",
+    "outbox-success",
+    "outbox-error"
+  ] as const) {
+    await testCoordinatorDeliveryLifecycle(stage)
+    console.log(`PASS testCoordinatorDeliveryLifecycle ${stage}`)
+  }
   await testCoordinatorResultIsFoldedAndAcknowledged()
   console.log("PASS testCoordinatorResultIsFoldedAndAcknowledged")
   await testWorkflowResultIsFoldedAndSettled()
   console.log("PASS testWorkflowResultIsFoldedAndSettled")
+  await testActiveGoalConsumesCoordinatorNotificationThroughSharedRun(true)
+  console.log("PASS Goal notification reports exhausted failure once")
   await testActiveGoalConsumesCoordinatorNotificationThroughSharedRun()
   console.log("PASS testActiveGoalConsumesCoordinatorNotificationThroughSharedRun")
   await testActiveGoalLeavesDesktopCoordinatorResultsAlone()

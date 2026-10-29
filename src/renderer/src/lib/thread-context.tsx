@@ -1,3 +1,4 @@
+import { shouldClearCoordinatorNotificationError } from "./coordinator-notification-error"
 import {
   createContext,
   memo,
@@ -522,6 +523,7 @@ export interface ApiErrorFailoverAttempt {
  * gracefully when a field is unavailable.
  */
 export interface ApiErrorDetailState {
+  coordinatorNotificationRunId?: string
   code?: string
   status?: number
   statusLabel?: string
@@ -1512,6 +1514,7 @@ const ThreadContext = createContext<ThreadContextValue | null>(null)
 
 // Custom event types from the stream
 interface CustomEventData {
+  runId?: string
   type?: string
   compaction?: unknown
   request?: HITLRequest
@@ -4379,6 +4382,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             scheduleCoordinatorNotificationTurn(threadId)
           }
           break
+        case "coordinator_notification_turn_started":
+          updateThreadState(threadId, (state) =>
+            shouldClearCoordinatorNotificationError(state.errorDetail, data.runId)
+              ? { error: null, errorDetail: null }
+              : {}
+          )
+          break
         case "coordinator_notification_deferred":
           scheduleCoordinatorNotificationTurn(threadId)
           break
@@ -5654,7 +5664,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           updateThreadState(threadId, (state) => userInputDraftPatch(state, requestId, update))
         },
         setError: (error: string | null) => {
-          updateThreadState(threadId, () => ({ error }))
+          updateThreadState(threadId, () => ({ error, errorDetail: null }))
         },
         clearError: () => {
           updateThreadState(threadId, () => ({ error: null, errorDetail: null }))
@@ -6781,6 +6791,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         finalizeRunningSubagentsForStoppedStream(threadId)
         updateThreadState(threadId, () => ({
           scheduledTaskLoading: false,
+          errorDetail: event.errorDetail && typeof event.errorDetail === "object" && !Array.isArray(event.errorDetail)
+            ? event.errorDetail as ApiErrorDetailState
+            : typeof event.coordinatorNotificationRunId === "string"
+              ? { coordinatorNotificationRunId: event.coordinatorNotificationRunId }
+              : null,
           error: (event.error as string) || "Scheduled task failed"
         }))
         // Remount only after persistence succeeded. A disk failure must leave

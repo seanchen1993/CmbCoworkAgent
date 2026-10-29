@@ -88,6 +88,21 @@ function testLifecycleAndCustomEventsSurviveTranslation(): void {
   assert.deepEqual(events[2], { type: "error", error: "boom" })
 }
 
+function testErrorDetailsBelongToTheirOwnManagedRun(): void {
+  const { mirrored, deps } = recorder()
+  const delivery = createManagedTransportAgentRunDelivery(deps)
+  const detail = { status: 485, reason: "provider failure", coordinatorNotificationRunId: "A" }
+  delivery.send("agent:stream:t1", { type: "custom", data: { type: "error_detail", detail } })
+  delivery.send("agent:stream:t1", { type: "error", error: "485" })
+  assert.deepEqual(mirrored.at(-1)?.event, { type: "error", error: "485", errorDetail: detail })
+  delivery.send("agent:stream:t1", { type: "error", error: "new unrelated error" })
+  assert.deepEqual(mirrored.at(-1)?.event, { type: "error", error: "new unrelated error" })
+  delivery.send("agent:stream:t1", { type: "custom", data: { type: "error_detail", detail } })
+  delivery.send("agent:stream:t1", { type: "done" })
+  delivery.send("agent:stream:t1", { type: "error", error: "later error" })
+  assert.deepEqual(mirrored.at(-1)?.event, { type: "error", error: "later error" })
+}
+
 function testOnlyTheThreadWideChannelIsTranslated(): void {
   const { mirrored, broadcasts, deps } = recorder()
   const delivery = createManagedTransportAgentRunDelivery(deps)
@@ -285,6 +300,7 @@ async function main(): Promise<void> {
     testRunIsNeverGatedOnAWindow,
     testStreamFramesReachTheChannelTheRendererListensOn,
     testLifecycleAndCustomEventsSurviveTranslation,
+    testErrorDetailsBelongToTheirOwnManagedRun,
     testOnlyTheThreadWideChannelIsTranslated,
     testTheCoordinatorInternalChannelReachesTheThreadStream,
     testWindowShimRoutesThroughTheSameTranslation,

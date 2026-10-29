@@ -494,6 +494,15 @@ export class PendingNotificationScheduler {
       code: terminal.code,
       retryable: this.isRetryable(terminal)
     })
+    // A checkpointed coordinator notification is delivered even if the model failed.
+    // Only failures before delivery may retry the same queued notification.
+    if (kind === "coordinator" && terminal.coordinatorNotificationDelivered) {
+      this.clearFailureBudget(threadId)
+      if (coordinatorWorkerManager.hasAutoRunnableNotifications(threadId, { owner: "desktop" })) {
+        this.recheckRequested.add(threadId)
+      }
+      return { started: true }
+    }
     if (this.isRetryable(terminal)) this.noteFailure(threadId, kind)
     else this.clearFailureBudget(threadId)
     return { started: false, reason: "thread-busy" }
