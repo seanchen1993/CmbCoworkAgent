@@ -4,6 +4,7 @@ import type * as TS from "typescript"
 import type { FunctionModelProtocol } from "../../../shared/mods/v2/model-protocol"
 import { FUNCTION_SDK_METHODS } from "../v2/sdk-capabilities"
 import { matchesEventPattern } from "../../../shared/mods/v2/contracts"
+import { isFunctionCommandName } from "../../../shared/mods/v2/commands"
 import { FUNCTION_NATIVE_TOOL_COMPATIBILITY, FUNCTION_LOCAL_TOOL_NAMES }
   from "../../../shared/mods/v2/compatibility-catalog"
 
@@ -456,6 +457,21 @@ async function analyzeSnapshot(snapshot: Snapshot) {
     return current
   }
   function checkOptions(call: TS.CallExpression, method: string) {
+    if (method === "command.register") {
+      const input = call.arguments[0] && unwrap(call.arguments[0])
+      // Only diagnose an unambiguous literal. Runtime still validates all dynamic inputs.
+      if (input && ts.isObjectLiteralExpression(input) &&
+        input.properties.every((item) => ts.isPropertyAssignment(item) &&
+          !!item.name && property(item.name) !== undefined)) {
+        const names = input.properties.filter((item) => item.name && property(item.name) === "name")
+        const name = names.length === 1 && ts.isPropertyAssignment(names[0])
+          ? unwrap(names[0].initializer) : undefined
+        if (name && ts.isStringLiteralLike(name) && !isFunctionCommandName(name.text))
+          diagnostic(name, "MODS_SDK_UNSUPPORTED",
+            "command.register.name 仅接受 1～64 个英文字母、数字、下划线或连字符；请使用灵件专属英文标识，在 description 中提供中文说明，并同步修改 command.run 的匹配名称。")
+      }
+      return
+    }
     if (method === "tool.call" || method === "tool.check") {
       checkToolObject(call.arguments[0], false)
       return

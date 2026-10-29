@@ -1,6 +1,7 @@
 export const AUTHORING_TEMPLATE_KINDS = [
   "command",
   "tool",
+  "capability",
   "rule",
   "panel",
   "flow-action",

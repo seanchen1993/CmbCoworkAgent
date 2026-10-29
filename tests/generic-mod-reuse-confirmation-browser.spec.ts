@@ -15,12 +15,14 @@ let listeners=new Set(),calls=[],requests=[],reads=0;
 let current={threadId:"chat",workspace:"c:/fixture",enabled:true,mode:"creator",drafts:[],trials:[]};
 const api={status:async()=>{reads++;return structuredClone(current)},onChanged:fn=>{listeners.add(fn);return()=>listeners.delete(fn)},
 requestReuse:async input=>{requests.push(input);window.fixture.pending(1);return structuredClone(current)},
-approveReuse:async input=>{calls.push(input);current.reuse={...current.reuse,phase:"active"};return structuredClone(current)}};
+approveReuse:async input=>{calls.push(input);current.reuse={...current.reuse,phase:"active"};
+current.trials=current.trials.map(row=>({...row,phase:"stopped",revision:current.reuse.revision}));return structuredClone(current)}};
 window.electron={process:{platform:"win32"}};window.api={mods:{development:api}};
 const emit=()=>listeners.forEach(fn=>fn({threadId:"chat"}));
-window.fixture={get:()=>({reads,calls,requests}),refresh:emit,active:()=>{
+window.fixture={get:()=>({reads,calls,requests}),refresh:emit,
+anotherDraft:()=>{current.drafts.push({id:"text-report",name:"文本报告",revision:1,digest:"3".repeat(64)});emit()},active:()=>{
 current.drafts=[{id:"plain-mod",name:"文本处理",revision:1,digest:"1".repeat(64)}];
-current.trials=[{componentId:"plain-mod",name:"文本处理",phase:"active",revision:1,activeRevision:1,
+current.trials=[{componentId:"plain-mod",draftId:"plain-mod",name:"文本处理",phase:"active",revision:1,activeRevision:1,
 bundleDigest:"1".repeat(64),compiledDigest:"f".repeat(64),capabilities:["ui.render"]}];emit()},pending:version=>{
 const digest=String(version).repeat(64);current.drafts=[{id:"plain-mod",name:"文本处理",revision:version,digest}];
 current.reuse={phase:"needs-approval",planId:"plan-"+version,name:"文本处理",draftId:"plain-mod",revision:version,
@@ -64,9 +66,13 @@ createRoot(document.getElementById("root")).render(<ModsDevelopmentPanel threadI
             summary: element.querySelector("summary")?.textContent }))) }, null, 2))
       throw error
     })
-    assert(await details.evaluate((element) => (element as HTMLDetailsElement).open))
+    assert.equal(await details.evaluate((element) => (element as HTMLDetailsElement).open), false)
+    assert.equal(await dialog.getByLabel("组件试用 plain-mod", { exact: true }).count(), 0,
+      "The same exact source has one native save confirmation, without a competing trial card")
     assert.equal(await page.evaluate("window.fixture.get().calls.length"), 0)
     await details.locator(":scope > summary").click()
+    await details.locator(":scope > summary").click()
+    assert(await confirm.isVisible(), "Advanced disclosure cannot hide the native save review")
     const reads = await page.evaluate("window.fixture.get().reads")
     await page.evaluate("window.fixture.refresh()")
     await page.waitForFunction((before) =>
@@ -76,23 +82,37 @@ createRoot(document.getElementById("root")).render(<ModsDevelopmentPanel threadI
     await dialog.getByRole("button", { name: "Close", exact: true }).click()
     await page.getByRole("button", { name: "确认跨聊天复用", exact: true }).click()
     await confirm.waitFor()
-    assert(await details.evaluate((element) => (element as HTMLDetailsElement).open),
-      "Reopening the same pending plan creates a fresh visible confirmation")
+    assert.equal(await details.evaluate((element) => (element as HTMLDetailsElement).open), false,
+      "Reopening a pending plan keeps the primary confirmation visible without advanced settings")
     assert.equal(await page.evaluate("window.fixture.get().calls.length"), 0)
     await page.evaluate("window.fixture.pending(2)")
     await confirm.waitFor()
     await page.screenshot({ path: join(output, "pending-confirmation.png") })
     assert.equal(await page.evaluate("window.fixture.get().calls.length"), 0)
     await confirm.click()
+    await dialog.getByText("正式版本和可复用组合已保存，当前聊天已使用。可在其他聊天选择这份组合。", {
+      exact: true
+    }).waitFor()
+    await details.locator(":scope > summary").click()
+    await dialog.getByText("已保存为插件，当前聊天正在使用正式版本", { exact: true }).waitFor()
+    await details.locator(":scope > summary").click()
+    assert.equal(await dialog.getByText("已停止试用", { exact: true }).count(), 0)
     assert.deepEqual(await page.evaluate("window.fixture.get().calls"), [{ threadId: "chat",
       expectedWorkspace: "c:/fixture", planId: "plan-2", sourceDigest: "2".repeat(64),
       compiledDigest: "f".repeat(64), targetProfileDigest: "9".repeat(64) }])
+    await page.evaluate("window.fixture.anotherDraft()")
+    await dialog.getByRole("button", { name: "保存“文本报告”并在其他聊天复用…", exact: true }).waitFor()
+    assert.equal(await dialog.getByRole("button", {
+      name: "保存“文本处理”并在其他聊天复用…", exact: true
+    }).count(), 0)
+    assert.equal(await page.evaluate("window.fixture.get().requests.length"), 1)
     assert.deepEqual(errors, [])
     writeFileSync(join(output, "report.json"), JSON.stringify({ passed: true,
       checks: ["Active trial exposes save without opening advanced settings or stopping the trial",
         "Save prepares the exact current draft without approving it",
-        "New native reuse confirmation is visible", "Refresh preserves manual collapse",
-        "New source confirmation opens once", "Only explicit confirmation approves exact native plan"] }))
+        "Native save review and success stay visible outside advanced settings",
+        "Refresh preserves manual collapse", "New source review stays visible",
+        "Only explicit confirmation approves exact native plan"] }))
     console.log(`PASS generic reuse confirmation: ${output}`)
   } finally { await browser.close() }
 }

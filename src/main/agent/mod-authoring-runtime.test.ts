@@ -74,6 +74,17 @@ it("routes native source edits and dependency reuse before legacy modularization
   expect(modAuthoringRuntimePrompt([{ name: "mod_business" }])).not.toContain("dependency_save")
 })
 
+it("routes independent cooperating Mods through public contracts and separate native package review", () => {
+  const prompt = modAuthoringRuntimePrompt([{ name: "mod_authoring" }, { name: "mod_composition" }])!
+  expect(prompt.indexOf("独立灵件不需要创建项目流程")).toBeLessThan(
+    prompt.indexOf("先按真实源码选择创作入口"))
+  for (const text of ['scaffold(kind:"capability"', 'catalog(query:"on.capability")',
+    "$.platform.act", "只有一个开发试用槽", "确认安装后再制作和保存调用方", "保留已有选择",
+    "无需写工作区临时文件", "不要让用户选择内部实现路线"])
+    expect(prompt).toContain(text)
+  expect(modAuthoringRuntimePrompt([{ name: "mod_composition" }])).not.toContain("scaffold(kind")
+})
+
 it("does not inject creator tools or guidance into another scope, a subagent, a project runtime or a disabled chat", () => {
   fixture()
   for (const other of [

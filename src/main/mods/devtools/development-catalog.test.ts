@@ -75,8 +75,9 @@ it("retains unfiltered events and SDK pages and rejects ambiguous query sections
   expect(developmentCatalogPage("sdk")).toMatchObject({
     content: developmentCatalog().sdkMethods.slice(0, 60)
   })
-  expect(() => developmentCatalogPage("types", 0, "tool.call"))
-    .toThrow("DEVELOPMENT_CATALOG_QUERY_SECTION")
+  expect(developmentCatalogPage("types", 0, "tool.call")).toMatchObject({
+    matched: true, declarationAvailable: true, grantsAuthority: false
+  })
   expect(() => developmentCatalogPage("support", 0, "tool.call"))
     .toThrow("DEVELOPMENT_CATALOG_QUERY_SECTION")
   for (const cursor of [-1, 0.5, Number.NaN, 100000])
@@ -85,6 +86,18 @@ it("retains unfiltered events and SDK pages and rejects ambiguous query sections
   for (const query of ["", " ", "x".repeat(121)])
     expect(() => developmentCatalogPage("sdk", 0, query)).toThrow("DEVELOPMENT_CATALOG_QUERY")
 })
+
+it.each(["overview", "types", "events", "sdk"] as const)(
+  "discovers public registration by its actual author syntax from %s", (section) => {
+    const page = developmentCatalogPage(section, 0, "on.capability")
+    expect(page).toMatchObject({ matched: true, declarationAvailable: true,
+      registration: "on.capability", event: "platform.action", grantsAuthority: false })
+    if (!("content" in page) || typeof page.content !== "string") throw Error("Expected declaration")
+    expect(page.content).toContain("capability(descriptor:PlatformDescriptor")
+    expect(page.content).toContain('apiVersion:"devclaw.capability/v1"')
+    expect(JSON.stringify(page).length).toBeLessThan(8000)
+  }
+)
 
 it("makes draft persistence, complete source and exact revision semantics available in overview", () => {
   const catalog = developmentCatalog()

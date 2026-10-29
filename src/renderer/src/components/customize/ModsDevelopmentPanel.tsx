@@ -246,7 +246,6 @@ function ScopedDevelopment({
   const announcedTrialAttention = useRef("")
   const announcedCompositionFailure = useRef("")
   const announcedReuse = useRef("")
-  const expandedReuseConfirmation = useRef<{ node: HTMLDetailsElement; key: string } | null>(null)
   const [projectPreviewOpen, setProjectPreviewOpen] = useState(false)
   const [stageDebugReview, setStageDebugReview] = useState<StageDebugReviewIntent>()
   const [creatorOptionsOpen, setCreatorOptionsOpen] = useState(false)
@@ -487,19 +486,6 @@ function ScopedDevelopment({
     }
     if (!reuseKey) announcedReuse.current = ""
   }, [mode, reuseKey])
-  const reuseConfirmationKey = reuse?.phase === "needs-approval"
-    ? JSON.stringify([reuse.planId, reuse.sourceDigest, reuse.compiledDigest]) : ""
-  const mountReuseConfirmationDetails = useCallback((node: HTMLDetailsElement | null) => {
-    if (!reuseConfirmationKey) {
-      expandedReuseConfirmation.current = null
-      return
-    }
-    if (node && (expandedReuseConfirmation.current?.key !== reuseConfirmationKey ||
-      expandedReuseConfirmation.current.node !== node)) {
-      node.open = true
-      expandedReuseConfirmation.current = { node, key: reuseConfirmationKey }
-    }
-  }, [reuseConfirmationKey])
   const compositionRuntimeUnconfirmed =
     composition?.phase === "failed" && composition.error === "COMPOSITION_RUNTIME_UNCONFIRMED"
   const compositionUnconfirmed =
@@ -1113,9 +1099,10 @@ function ScopedDevelopment({
           灵件已在当前聊天生效。返回聊天验证效果，满意后保存为插件。
         </p>
       )}
-      {!projectCreation && !reuse && !!status?.drafts.length && (
+      {!projectCreation && (!reuse || reuse.phase === "active") && !!status?.drafts.length && (
         <div className="flex flex-wrap gap-2" aria-label="保存灵件插件">
-          {status.drafts.map((draft) => (
+          {status.drafts.filter((draft) => !(reuseCurrent && reuse?.draftId === draft.id))
+            .map((draft) => (
             <button
               key={draft.id}
               type="button"
@@ -1133,8 +1120,59 @@ function ScopedDevelopment({
           ))}
         </div>
       )}
+      {reuse && (
+        <DevelopmentReusePlanCard
+          plan={reuse}
+          save={status?.save}
+          current={reuseCurrent}
+          busy={busy}
+          onApprove={() => {
+            if (
+              !reuse.planId ||
+              !reuse.compiledDigest ||
+              !reuse.targetProfileDigest ||
+              !reuseCurrent
+            )
+              return
+            void operate(
+              (expectedWorkspace) =>
+                api.approveReuse({
+                  threadId,
+                  expectedWorkspace,
+                  planId: reuse.planId!,
+                  sourceDigest: reuse.sourceDigest,
+                  compiledDigest: reuse.compiledDigest!,
+                  targetProfileDigest: reuse.targetProfileDigest!
+                }),
+              accept
+            )
+          }}
+          onPrepare={
+            reuseDraft
+              ? () =>
+                  void operate(
+                    (expectedWorkspace) =>
+                      api.requestReuse({
+                        threadId,
+                        expectedWorkspace,
+                        id: reuseDraft.id,
+                        revision: reuseDraft.revision
+                      }),
+                    accept
+                  )
+              : undefined
+          }
+          onRead={() => void read()}
+        />
+      )}
+      {reuseCurrent && reuse?.phase === "active" && onReturnToChat && (
+        <button type="button" className={primaryButton} onClick={() => {
+          focusChatAfterClose.current = true
+          setOpen(false)
+          if (mode === "entry") onReturnToChat()
+        }}>返回聊天使用</button>
+      )}
       <details
-        ref={mountReuseConfirmationDetails}
         data-creator-section="create"
         className="scroll-mt-4 space-y-3 rounded-xl border p-4"
         open={
@@ -1145,51 +1183,6 @@ function ScopedDevelopment({
         }
       >
         <summary className="cursor-pointer text-sm text-muted-foreground">组件与高级设置</summary>
-        {reuse && (
-          <DevelopmentReusePlanCard
-            plan={reuse}
-            save={status?.save}
-            current={reuseCurrent}
-            busy={busy}
-            onApprove={() => {
-              if (
-                !reuse.planId ||
-                !reuse.compiledDigest ||
-                !reuse.targetProfileDigest ||
-                !reuseCurrent
-              )
-                return
-              void operate(
-                (expectedWorkspace) =>
-                  api.approveReuse({
-                    threadId,
-                    expectedWorkspace,
-                    planId: reuse.planId!,
-                    sourceDigest: reuse.sourceDigest,
-                    compiledDigest: reuse.compiledDigest!,
-                    targetProfileDigest: reuse.targetProfileDigest!
-                  }),
-                accept
-              )
-            }}
-            onPrepare={
-              reuseDraft
-                ? () =>
-                    void operate(
-                      (expectedWorkspace) =>
-                        api.requestReuse({
-                          threadId,
-                          expectedWorkspace,
-                          id: reuseDraft.id,
-                          revision: reuseDraft.revision
-                        }),
-                      accept
-                    )
-                : undefined
-            }
-            onRead={() => void read()}
-          />
-        )}
         {status?.undo && (
           <div role="status" className="rounded-lg bg-muted/50 p-3 text-xs">
             {status.undo.phase === "active"
@@ -1225,6 +1218,8 @@ function ScopedDevelopment({
                       ? "组合未能应用。请让助手检查当前权限和功能可用状态后重试。"
                       : composition.phase === "cancelled"
                         ? "已取消这次组合变更，原有设置继续使用。"
+                  : composition.phase === "superseded"
+                    ? "该组合已被后续选择替换，请以当前聊天的实际组合为准。"
                         : composition.phase === "applying"
                           ? "正在应用组合，完成后会更新这里的状态。"
                           : "组合已准备好，本轮任务结束且聊天空闲后自动应用。"}
@@ -1321,6 +1316,9 @@ function ScopedDevelopment({
           </details>
         )}
         {status?.trials.map((row) => {
+          if (reuseCurrent && reuse?.draftId === row.draftId &&
+            reuse.revision === row.revision && reuse.sourceDigest === row.bundleDigest &&
+            ["preparing", "needs-approval", "applying", "unknown"].includes(reuse.phase)) return null
           const key = JSON.stringify([
             row.componentId,
             row.revision,

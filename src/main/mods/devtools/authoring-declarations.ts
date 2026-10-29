@@ -103,7 +103,7 @@ declare namespace DevClawMods {
     // __MODEL_PROTOCOL_METHODS__
     plugin:{readonly name:string;readonly root:string}
     session:{id():Promise<string>;cwd():Promise<string>;surface():Promise<"desktop">;surfaces():Promise<"desktop"[]>}
-    command:{register(input:{name:string;description:string;immediate?:boolean;argumentHint?:string;isHidden?:boolean}):Promise<void>}
+    command:{register(input:{/** 1..64 ASCII letters, digits, underscore or hyphen; use description for Chinese labels. */name:string;description:string;immediate?:true;argumentHint?:string;isHidden?:boolean}):Promise<void>}
     agent:{register(spec:AgentSpec):Promise<{agent:string}>;spawn(input:AgentSpawnInput):Promise<AgentSpawnResult>}
     clock:{now():Promise<number>;sleep(ms:number,options?:{signal?:AbortSignal}):Promise<void>;
       /** Maximum supported interval is 60000 ms. */

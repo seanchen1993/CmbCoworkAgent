@@ -147,8 +147,8 @@ export function developmentCatalog() {
       "用户参数在灵件清单 userConfig 声明，由原生参数表单绑定；缺必填项不批准执行。升级重命名或删除字段可在同份声明加入 userConfigSchema:{version:1,migrations:[{fromVersion:0,toVersion:1,changes:[{kind:'rename',from:'oldLabel',to:'label'}]}]}，并声明 cmbCompatibility:{modelProtocol:'result-v1',userConfigMigrations:'v1'}；后续版本逐一连续迁移，删除用 {kind:'remove',key:'字段名'}，不运行迁移脚本。迁移须原生确认，失败保留旧配置；导出不携带本机保存值、凭据或授权。",
       "公共快捷指令应采用灵件专属名称，避免与已启用灵件重名。出现 MODS_COMMAND_CONFLICT 时修改本草稿的指令名称及使用说明，再重新请求试用；不要替用户关闭其他插件来绕开冲突。",
       "试用状态先 list，按最新 trials.phase/error 回答；needs-approval 仅为快照，failed 是加载失败。勿循环轮询或重试；先读失败原因，再修复并申请确认。",
-      "优先 submit 最小完整效果；诊断失败再修复，有效即结束本轮等确认。恢复当前聊天用 resume_trial，跨聊天复用才 request_reuse；原安装事务仍须原生卡确认。",
-      "交付只说明触发、预期结果和必要设置，不罗列源码摘要、内部状态或接口。",
+      "优先 submit；失败按诊断修复，有效即结束本轮等确认。当前聊天恢复用 resume_trial，跨聊天复用用 request_reuse；安装仍须原生确认。",
+      "交付说明触发、效果和必要设置，省略内部技术细节。",
       "说明实际聊天与生效状态；切回普通模式不停止试用。",
       "明确触发条件，例如 edit_file 完成后触发，不等于发送普通消息后触发。注册的命令写明参数示例。",
       "需要文件、网络、模型、进程或业务能力时，可直接请求授权后的真实试用，无需先正式安装。确认绑定当前源码与目标，实际动作仍走宿主原权限；静态检查、隔离预览或批准都不是实际结果。",
@@ -192,11 +192,14 @@ export function developmentCatalogPage(
   const catalog = developmentCatalog()
   if (query !== undefined) {
     if (!query.trim() || query.length > 120) throw Error("DEVELOPMENT_CATALOG_QUERY")
-    if (!["overview", "events", "sdk"].includes(section))
+    if (!["overview", "types", "events", "sdk"].includes(section))
       throw Error("DEVELOPMENT_CATALOG_QUERY_SECTION")
     const exact = query.trim()
-    const events = section === "sdk" ? [] : catalog.events.filter((event) => event.name === exact)
-    const methods = section === "events" ? [] : catalog.sdkMethods.filter((method) => method === exact)
+    const registration = exact === "on.capability"
+    const events = section === "sdk" && !registration ? [] : catalog.events.filter((event) =>
+      event.name === (registration ? "platform.action" : exact))
+    const methods = section === "events" || registration ? []
+      : catalog.sdkMethods.filter((method) => method === exact)
     const declarations = targetedDeclarations(catalog.types, events.map((event) => event.name), methods)
     const text = [...declarations.signatures, ...declarations.types].join("\n\n")
     if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > text.length)
@@ -206,6 +209,7 @@ export function developmentCatalogPage(
       contract: catalog.contract, section, query: exact, cursor,
       scope: "static-authoring-contract", grantsAuthority: false,
       events, sdkMethods: methods,
+      ...(registration ? { registration: "on.capability", event: "platform.action" } : {}),
       matched: events.length + methods.length > 0,
       declarationAvailable: declarations.signatures.length > 0,
       content: text.slice(cursor, end), totalCharacters: text.length,

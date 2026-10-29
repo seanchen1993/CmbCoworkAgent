@@ -4,7 +4,7 @@ import type {
   FunctionSessionVersion
 } from "../../../shared/mods/v2/session"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
-import type { FunctionCommand } from "../../../shared/mods/v2/commands"
+import { isFunctionCommandName, type FunctionCommand } from "../../../shared/mods/v2/commands"
 import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
 import type { FunctionStateAccess } from "./state-store"
 import { FILE_CAPABILITIES, type FunctionFileAccess, type FunctionFileMethod } from "./file-access"
@@ -145,8 +145,7 @@ export function validateBasicInput(name: string, value: ModObject): void {
   }
   if (name === "command.register") {
     if (
-      typeof value.name !== "string" ||
-      !/^[a-zA-Z0-9_-]{1,64}$/.test(value.name) ||
+      !isFunctionCommandName(value.name) ||
       typeof value.description !== "string" ||
       value.description.length > 4096 ||
       (value.argumentHint !== undefined &&

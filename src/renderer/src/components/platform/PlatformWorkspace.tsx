@@ -166,7 +166,7 @@ export function PlatformWorkspace({
       if (!current() || ticket !== request.current) return
       setCatalog({ threadId, value: surfaces })
       setBehaviors({ threadId, value: behavior })
-      setError("")
+      setError((previous) => previous === "扩展暂时不可用，聊天仍可继续" ? "" : previous)
       await refreshFrame.current()
     } catch {
       if (current() && ticket === request.current) setError("扩展暂时不可用，聊天仍可继续")

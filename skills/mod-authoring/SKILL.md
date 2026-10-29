@@ -5,11 +5,13 @@ description: 在创造者模式中根据一句话需求制作、修改或组合�
 
 灵件（Mods / Sparks）是本应用可组合的 TypeScript 扩展。用户在当前本地聊天选择“创造者模式”后直接描述需求，由你选择复用、组合或编写的实现路径。普通模式用于做事，创造者模式用于改变助手；不要让用户先区分添加功能、常用搭配、执行步骤或填写技术字段。若作者工具尚未提供，说明需要在输入框旁选择创造者模式。制作指引、目录和类型随应用提供，无需安装个人技能或提供本应用源码路径。不能用终端直接覆盖应用安装目录。
 
-先读取 `catalog` 入门范围，再按需用 catalogSection=types/events/sdk 获取当前类型或接口，按 nextCursor 继续分页。使用当前应用返回的类型、支持范围和例子，不照搬 Claude Code 官网的新接口或猜测权限。`scaffold` 只是起始模板；需要根据用户需求实际编写 TypeScript，不能把描述原样回显当作功能完成。
+先读取 `catalog` 入门范围，再优先用 `catalog(query:精确事件或SDK方法名)` 取得相关签名；需要完整声明时用 catalogSection=types/events/sdk，按 nextCursor 继续分页。使用当前应用返回的类型、支持范围和例子，不照搬其他工具的新接口或猜测权限。`scaffold` 只是起始模板；需要根据用户需求实际编写 TypeScript，不能把描述原样回显当作功能完成。源码直接修改 scaffold/read 返回的 files 后提交原生草稿，不为生成纯灵件创建工作区临时文件或申请命令审批。
 
 优先使用 `submit` 一次保存完整文件集合、检查并请求试用，首次 revision 为 0，更新使用 `read` 返回的 revision。诊断失败修复后再提交；需要分步调试仍可 `save/check/request_trial`。保留 plugin.json、mods/manifest.json 与模块源码，按目录结构使用相对引用。不附带凭据、运行日志、node_modules 或编译输出。
 
 连续修改先 `list/read` 读取当前草稿，保留已有功能并更新同一个开发组件。同一聊天只有一个开发试用组件，包内可以包含多个模块；已有正式 Mods 则通过当前聊天的组合能力复用，不复制它们的源码重新制作。
+
+多个独立灵件需要互相调用时，优先使用公共能力契约：`scaffold(kind:"capability",id,name,instruction)` 提供完整的无外部副作用能力骨架，需将其中占位的 act 改成实际逻辑。`catalog(query:"on.capability")`（或 platform.action）发现提供者声明，`catalog(query:"platform.act",catalogSection:"sdk")` 发现调用方接口。不要猜测另一个灵件的工具名，不复制它的算法，也不要将单个试用槽的轮流替换描述为两个灵件同时生效。用户要求独立复用时，先编写、保存并检查提供者，再 `request_reuse` 准备当前确切版本的原生确认卡，结束本轮等待用户确认；确认安装后再制作并保存调用方，最后通过真实已安装目录组合并验证。用户只需要确认实际用途和权限，无需选择内部实现路线。快捷指令 name 使用 1～64 位英文字母、数字、下划线或连字符，中文写入 description；需要直接运行且不经过模型时使用 immediate:true。
 
 组合已有 Mods 使用原生 `mod_composition`：先 `list` 搜索摘要、真实身份和可用选择，需要配置才 `details` 读取对应 schema，再 `stage` 提交 `capabilities` 和设置。同轮操作累积，默认保留已有组合、深合并对象，数组整体替换；删除字段使用 `removeConfigPaths`。模型、技能、MCP 和已保存步骤只能引用真实目录。只有明确要求时才替换或移除。用 `save/apply_saved` 保存和套用命名组合，用 `undo/cancel` 撤销选择或取消排队，不回放外部效果。结束本轮后由宿主在空闲时应用，用 `status` 核对实际结果。
 

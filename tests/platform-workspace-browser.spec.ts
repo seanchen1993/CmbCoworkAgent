@@ -117,9 +117,10 @@ async function main() {
     const region = page.getByRole("region", { name: "通用作者页面", exact: true })
     await page.getByRole("button", { name: "作者侧栏", exact: true }).waitFor()
     await page.evaluate("window.platformFixture.catalogFail(true)")
-    await page.getByText("扩展暂时不可用，聊天仍可继续", { exact: true }).waitFor()
+    const catalogueError = page.getByRole("alert").filter({ hasText: "扩展暂时不可用，聊天仍可继续" })
+    await catalogueError.waitFor()
     await page.evaluate("window.platformFixture.catalogFail(false)")
-    await page.getByText("扩展暂时不可用，聊天仍可继续", { exact: true }).waitFor({ state: "hidden" })
+    await catalogueError.waitFor({ state: "hidden" })
     checks.push("a successful catalogue reread clears the obsolete failure notice")
     for (const width of [375, 1280]) {
       await page.setViewportSize({ width, height: 812 })

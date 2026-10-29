@@ -82,6 +82,9 @@ describe("conversation Mod tool", () => {
     expect(author.description).toContain("Do not write temporary workspace files")
     expect(author.description).toContain("catalog(query:'platform.action',catalogSection:'events')")
     expect(author.description).toContain("catalog(query:'platform.act',catalogSection:'sdk')")
+    expect(author.description).toContain("one development trial slot")
+    expect(author.description).toContain("request_reuse for its exact draft and end the turn")
+    expect(author.description).toContain("preserving existing functions")
     const result = JSON.parse(await author.invoke({
       action: "scaffold", id: "demo", kind: "tool", instruction: "Normalize text"
     }))

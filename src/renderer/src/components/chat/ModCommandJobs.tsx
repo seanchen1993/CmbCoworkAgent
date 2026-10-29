@@ -14,6 +14,7 @@ const labels = {
   unknown: "结果待核查"
 }
 const errorMessages: Record<string, string> = {
+  MODS_COMMAND_UNHANDLED: "插件命令未能完成处理。请让创造者检查命令实现和依赖，再重新验证效果。",
   MODS_TOOL_UNAVAILABLE: "当前会话未提供该工具，请检查插件使用的工具名称和会话配置。",
   MODS_TOOL_ARGUMENTS: "工具参数不符合当前接口，请检查插件的工具调用。",
   MODS_MODEL_UNAVAILABLE: "指定的模型未配置或缺少密钥，请在模型设置中检查。",

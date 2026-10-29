@@ -29,6 +29,30 @@ afterEach(async () => {
 })
 
 describe("installable authoring starters", () => {
+  it("exposes the capability starter through the real guest and checks cross-Mod inputs", async () => {
+    const root = await materialize(createAuthoringTemplate({
+      kind: "capability", id: "text-provider", name: "共享文本处理", instruction: "待实现文本转换"
+    }))
+    const compiled = await compileFunctionPlugin(root)
+    const provider = { name: compiled.name, root, tier: "user" as const,
+      guest: await FunctionGuestRuntime.create(compiled.code), capabilities: [...SESSION_CAPABILITIES] }
+    const caller = { name: "text-consumer", root, tier: "user" as const,
+      guest: await FunctionGuestRuntime.create("globalThis.__cmbFunctionMod={register(){}}"),
+      capabilities: ["platform.act"] }
+    const session = new FunctionSession([provider, caller], {
+      workspace: root, threadId: "starter-composition", assertLive: () => {},
+      publish: async (value) => value
+    })
+    try {
+      const action = { ref: { provider: "text-provider", id: "text-provider", version: "1.0.0" },
+        target: { kind: "current" as const }, action: "run", input: { text: "原文保留" },
+        requestKey: "starter-probe" }
+      const result = await session.platform.act(caller, action, new AbortController().signal)
+      expect(result).toMatchObject({ status: "succeeded", value: { text: "原文保留" } })
+      await expect(session.platform.act(caller, { ...action, input: {}, requestKey: "invalid" },
+        new AbortController().signal)).rejects.toThrow("MODS_REGISTERED_TOOL_INPUT")
+    } finally { await session.close() }
+  })
   it.each(AUTHORING_TEMPLATE_KINDS)(
     "builds and checks a complete %s starter through the real compiler and guest",
     async (kind) => {

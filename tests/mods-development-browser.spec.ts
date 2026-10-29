@@ -127,6 +127,7 @@ async function main() {
     await approve.waitFor()
     assert(await approve.isEnabled())
     await call("requestBudget", { runId: "original-run", startedAt: 1, operations: 4, candidates: 3 })
+    await page.getByText("制作记录与用量", { exact: true }).click()
     await page.getByText("最近一次需求已检查 3/3 个候选；重新打开界面不会重置修复次数。", { exact: true }).waitFor()
     await call("requestBudget", { error: "DEVELOPMENT_BUDGET_UNCONFIRMED" })
     await page.getByText("本次制作预算无法核对，已停止继续提交。草稿和当前功能仍保留。", { exact: true }).waitFor()

@@ -809,7 +809,9 @@ describe("creator current-chat Mod composition", () => {
             : "COMPOSITION_AUTHORITY_CHANGED"
       f.service.reconcile()
       for (let i = 0; i < 3; i++)
-        expect(f.service.status(threadId)).toMatchObject({ phase: "failed", error: expected })
+        expect(f.service.status(threadId)).toMatchObject(reason === "binding"
+          ? { phase: "superseded", error: undefined, canCancel: false, canUndo: false }
+          : { phase: "failed", error: expected })
       await new Promise<void>((resolve) => queueMicrotask(resolve))
       expect(f.changed).toHaveBeenCalledTimes(calls + 1)
     }

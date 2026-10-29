@@ -33,7 +33,29 @@ export function createAuthoringTemplate(input: {
   const command = `await $.command.register({ name: ${id}, description: ${title}, immediate: true })`
   const start = `on("session.start", async ($, event, next) => { ${command}; return next(event) })`
   let source: string
-  if (input.kind === "command" || input.kind === "flow-action") {
+  if (input.kind === "capability") {
+    source = `import type { Register } from "devclaw-mods"
+export const register: Register<${id}> = (on) => {
+  on.capability({
+    apiVersion: "devclaw.capability/v1", id: ${id}, version: "1.0.0",
+    title: ${title}, scope: "conversation",
+    stateSchema: { type: "object", properties: {}, additionalProperties: false },
+    actions: [{
+      id: "run", title: ${title},
+      inputSchema: { type: "object", properties: { text: { type: "string", maxLength: 8000 } }, required: ["text"], additionalProperties: false },
+      outputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false },
+      requiredPermissions: [], cancellable: false, idempotency: "keyed"
+    }]
+  }, {
+    act: (_sdk, event) => {
+      // Placeholder only: implement the requested transformation before submitting.
+      if (event.action !== "run" || typeof event.input.text !== "string") throw Error("INVALID_INPUT")
+      return { text: event.input.text }
+    }
+  })
+}
+`
+  } else if (input.kind === "command" || input.kind === "flow-action") {
     source = `import type { Register } from "devclaw-mods"
 export const register: Register<${id}> = (on) => {
   ${start}

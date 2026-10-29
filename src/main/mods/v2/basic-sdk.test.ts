@@ -2,6 +2,15 @@ import { expect, it } from "vitest"
 import { basicSdkInput, runBasicSdk, validateBasicInput, validateBasicResult } from "./basic-sdk"
 import type { ModObject } from "../../../shared/mods/types"
 
+it("keeps native command name limits and Chinese descriptions aligned with authoring", () => {
+  for (const name of ["检查文本", "text review", "", "a".repeat(65), null])
+    expect(() => validateBasicInput("command.register", { name, description: "检查文本" }))
+      .toThrow("MODS_COMMAND_SPEC")
+  for (const name of ["text-review", "text_review_1", "a".repeat(64)])
+    expect(() => validateBasicInput("command.register", { name, description: "检查文本" }))
+      .not.toThrow()
+})
+
 it("preserves strict messages selectors and validates the original API return format", async () => {
   const input = basicSdkInput("session.messages", [{ as: "api", agentId: "actual-child" }])
   expect(input).toEqual({ as: "api", agentId: "actual-child" })

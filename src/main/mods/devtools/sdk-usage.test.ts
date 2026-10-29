@@ -10,6 +10,27 @@ const scan = (body: string, modelProtocol: "legacy-v1" | "result-v1" = "legacy-v
   })
 
 describe("static SDK compatibility", () => {
+  it.each(["检查文本", "text review", "", "a".repeat(65)])(
+    "rejects an invalid literal command name before native startup: %s", async (name) => {
+      const report = await scan(`on("session.start", async ($, event, next) => {
+        await $.command.register({name:${JSON.stringify(name)},description:"检查文本"})
+        return next(event)
+      })`, "result-v1")
+      expect(report.strictCompatible).toBe(false)
+      expect(report.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({
+        code: "MODS_SDK_UNSUPPORTED", message: expect.stringContaining("command.register.name")
+      })]))
+    }
+  )
+  it.each(["text-review", "text_review_1", "a".repeat(64)])(
+    "preserves valid command names with Chinese descriptions: %s", async (name) => {
+      const report = await scan(`on("session.start", async ($, event, next) => {
+        await $.command.register({name:${JSON.stringify(name)},description:"检查文本"})
+        return next(event)
+      })`, "result-v1")
+      expect(report.strictCompatible).toBe(true)
+    }
+  )
   const scanOwnTool = (registration: string, selector = "mcp__own_mod__format", name: string | undefined = "own.mod") =>
     analyzeFunctionSdk({
       name, digest: "immutable-own-tool", modelProtocol: "result-v1",

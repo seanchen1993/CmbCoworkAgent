@@ -94,6 +94,9 @@ it("does not admit a type-correct SDK escape through the shared source snapshot"
   expect(checked.runtimeVerified).toBe(false)
   expect(checked.repairHints).toHaveLength(1)
   expect(checked.repairHints?.[0]).toContain("不要把 SDK 对象或方法传给")
+  expect(checked.repairHints?.[0]).toContain("先按具体诊断区分原因")
+  expect(checked.repairHints?.[0]).toContain("不要猜测或反复更改工具名")
+  expect(checked.repairHints?.[0]).toContain("catalog(query:'platform.act'")
   expect(checked.diagnostics).toEqual(
     expect.arrayContaining([
       expect.objectContaining({ file: "mods/main.ts", code: "MODS_SDK_UNVERIFIED" })

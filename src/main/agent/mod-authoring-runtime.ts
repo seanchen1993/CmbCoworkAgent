@@ -51,6 +51,11 @@ export function createModAuthoringRuntimeTools(scope: {
   ] as const
 }
 
+const nativeFunctionRouting = `
+独立灵件不需要创建项目流程。多个独立可复用 Mods 需要互相调用时，优先使用公共能力：提供方用 scaffold(kind:"capability",id,name,instruction) 的完整包起步，将占位 act 改成实际逻辑；catalog(query:"on.capability") 可读取真实声明，调用方用 $.platform.act。不要因把注册语法当普通 SDK 方法而误判能力缺失，也不要猜第三方工具名或重复实现提供方算法。
+当前聊天只有一个开发试用槽。多个独立包应先保存、检查提供方并 request_reuse，结束本轮等待用户在原生卡确认；确认安装后再制作和保存调用方，最后保留已有选择并组合验证。不要把替换试用槽当作多个 Mod 同时运行，也不要让用户选择内部实现路线。源码直接提交原生 files，无需写工作区临时文件。指令 name 用英文标识，中文写入 description，直接运行用 immediate:true。
+`
+
 const nativeProjectRouting = `
 先按真实源码选择创作入口，不能按插件名称或历史实现推定：
 - mod_authoring.project_list/project_read 中已有 composition/source.json：这是原生可组合项目，继续 project_read/project_patch/project_compile/project_request_trial。不再 inspect_raw、首次模块化或寻找旧 Python 适配器。
@@ -100,7 +105,7 @@ export function modAuthoringRuntimePrompt(tools: readonly { name?: string }[]): 
   const workflowGuide =
     "\n\n制作与试用使用同一原创作会话的‘创作工作区’：制作→试用→验收→保存。仅原始插件同时没有 composition/source.json 和业务 Mods 清单时，先 mod_business.inspect_raw(pluginId)，用 read_raw_asset 理解真实源码，再 request_modularization 准备可核对迁移方案；结束本轮由用户原生确认。确认后 status.modularization.inspectionId 才是可用于 inspect/preview 的新来源，不修改已安装原插件。遇阻断应保留知识、Hooks、上下文、配置及检查并补齐映射，不凭空假造成功。Host 的 project_list/project_read 返回匹配原请求的 trial.journey，业务 mod_business.status 返回 trial.journey：核对候选版本、阶段原生检查、产物、人工批准和执行会话归属。不同阶段会话属于原执行器隔离，不要求用户逐个猜成功；模型终止、completed、单个会话结束均不能代替整轮验收。反馈送回原创作会话，再保存新候选从起点试用，未知操作不重放。用户在工作区‘保存’页为当前Host候选指定独立新名称与版本，再显式确认安装或导出；业务组装候选用原安装/导出确认。保存源码、包检查、安装和整轮业务验收分别说明，不将改名的新包说成已经重跑通过。阶段调试使用 mod_authoring.project_stage_debug_list 读取真实阶段进入快照；用户要求局部调试时，保留契约与共享知识，仅修改目标或后续未共享的 Skill 正文，project_save 后用 project_stage_debug_prepare(id,revision,snapshotId,debugMode:stage或downstream)准备，结束本轮交给创作工作区原生确认。创建和启动不能由模型代批。仅支持受控文件阶段；带用户配置、外部知识提供器、Hooks、MCP、公开动作、Git或未知副作用时明确诊断，不能删除这些行为来获得调试通过。原运行和原产物保留，新分支没有旧授权或旧通过收据；单阶段检查通过不代表整轮通过。"
   const finish = (prompt: string) =>
-    (authoring ? nativeProjectRouting : "") +
+    (authoring ? nativeFunctionRouting + nativeProjectRouting : "") +
     (business ? prompt + businessGuide + workflowGuide : prompt)
   if (authoring && composition)
     return finish(

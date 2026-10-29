@@ -9050,6 +9050,14 @@ export function ChatContainer({
                 <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
                 <FunctionCompletionEvidence key={`evidence:${threadId}`} threadId={threadId} isWorking={isLoading} />
               </>}
+              {modsChatScope.error && (
+                <p role={currentForkWorkspacePath ? "alert" : "status"}
+                  className="mx-auto w-full max-w-3xl px-3 text-xs text-muted-foreground">
+                  {modsChatScope.error}
+                  {modsChatScope.retry && <button type="button" className="ml-2 underline"
+                    onClick={modsChatScope.retry}>重试读取</button>}
+                </p>
+              )}
               <FunctionSite key={`above:${threadId}`} threadId={threadId} component="AbovePrompt"
                 facts={{ isWorking: isLoading }}
                 className="sparks-inline-surface mx-auto w-full max-w-3xl overflow-auto text-xs text-muted-foreground" />

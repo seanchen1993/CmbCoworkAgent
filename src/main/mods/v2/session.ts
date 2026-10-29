@@ -1896,7 +1896,12 @@ export class FunctionSession {
           origin: { kind: "composer" },
           presentation: { isFullscreen: false, columns: 80 }
         },
-        signal
+        signal,
+        undefined,
+        0,
+        undefined,
+        undefined,
+        { core: async () => { throw new ModFunctionError("MODS_COMMAND_UNHANDLED") } }
       )
     )
     if (!isModObject(value) || (value.text !== undefined && typeof value.text !== "string"))

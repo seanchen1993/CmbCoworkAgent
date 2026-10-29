@@ -481,7 +481,7 @@ export function ClawSidebar({
           <p className="text-xs text-muted-foreground">
             已产生的结果显示在这里。任务进度和需要你确认的事项在“当前任务”中查看。
           </p>
-          <details>
+          <details open>
             <summary className="cursor-pointer text-sm">命令与完成记录</summary>
             {records}
           </details>

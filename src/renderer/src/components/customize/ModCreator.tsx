@@ -20,6 +20,7 @@ import type {
 const templates: [AuthoringTemplateKind, string][] = [
   ["command", "命令"],
   ["tool", "工具"],
+  ["capability", "共享能力（供其他灵件调用）"],
   ["rule", "规则"],
   ["panel", "面板"],
   ["flow-action", "流程动作"],

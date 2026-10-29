@@ -147,7 +147,7 @@ export interface DevelopmentBusinessStatus {
   }
 }
 export interface DevelopmentCompositionStatus {
-  phase: "queued" | "applying" | "active" | "failed" | "cancelled"
+  phase: "queued" | "applying" | "active" | "failed" | "cancelled" | "superseded"
   name: string
   pluginNames: string[]
   error?: string

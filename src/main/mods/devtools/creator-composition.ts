@@ -201,15 +201,14 @@ export class CreatorCompositionService {
         if (
           binding.revision !== committed.revision ||
           JSON.stringify(binding.profile) !== JSON.stringify(entry.profile)
-        )
-          throw Error("COMPOSITION_SELECTION_CHANGED")
-        this.deps.assertAuthorized(entry.context.scope, entry.profile)
+        ) this.invalidateActiveReceipt(threadId, entry, "COMPOSITION_SELECTION_CHANGED", true)
+        else this.deps.assertAuthorized(entry.context.scope, entry.profile)
       } catch (error) {
         const code =
           error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message)
             ? error.message
             : "COMPOSITION_AUTHORITY_CHANGED"
-        this.failActiveReceipt(threadId, entry, code)
+        this.invalidateActiveReceipt(threadId, entry, code)
       }
     }
     const binding = this.deps.store.selection(
@@ -232,13 +231,15 @@ export class CreatorCompositionService {
         : {}),
       pluginNames: [...entry.receipt.pluginNames],
       canCancel: entry.receipt.phase === "queued" && !entry.applying,
-      canUndo: !entry.applying && entry.receipt.phase !== "queued" && !!history?.undo.length
+      canUndo: !entry.applying && !["queued", "superseded"].includes(entry.receipt.phase) &&
+        !!history?.undo.length
     }
   }
-  private failActiveReceipt(threadId: string, entry: Entry, code: string): void {
+  private invalidateActiveReceipt(threadId: string, entry: Entry, code: string, superseded = false): void {
     if (this.entries.get(threadId) !== entry || entry.receipt.phase !== "active") return
     this.catalogs.delete(threadId)
-    entry.receipt = { ...entry.receipt, phase: "failed", error: code }
+    entry.receipt = { ...entry.receipt, phase: superseded ? "superseded" : "failed",
+      error: superseded ? undefined : code }
     // The state changes before publication, so a UI re-read cannot schedule another event.
     queueMicrotask(() => {
       if (!this.closed) this.deps.changed(threadId)
@@ -281,14 +282,14 @@ export class CreatorCompositionService {
         (entry.profile &&
           this.deps.issues(entry.context.scope.workspace, entry.profile, sources).length)
       )
-        this.failActiveReceipt(threadId, entry, "COMPOSITION_SOURCE_CHANGED")
+        this.invalidateActiveReceipt(threadId, entry, "COMPOSITION_SOURCE_CHANGED")
       else this.validateResources(entry.profile, resources, entry.profile)
     } catch (error) {
       const code =
         error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message)
           ? error.message
           : "COMPOSITION_STATUS_UNCONFIRMED"
-      this.failActiveReceipt(threadId, entry, code)
+      this.invalidateActiveReceipt(threadId, entry, code)
     }
     return this.status(threadId)
   }

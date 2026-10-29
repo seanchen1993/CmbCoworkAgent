@@ -428,9 +428,11 @@ function App(): React.JSX.Element {
   const renderRoutePending = renderedRoute !== selectedRenderRoute
   const renderedMainView = renderedRoute.mainView
   const renderedThreadId = renderedRoute.threadId
-  const platformWorkspaceReady = useAppStore((state) => Boolean(
-    state.threads.find((thread) => thread.thread_id === renderedThreadId)?.metadata?.workspacePath
-  ))
+  const platformWorkspaceReady = useAppStore((state) => {
+    const workspace = state.threads.find((thread) =>
+      thread.thread_id === renderedThreadId)?.metadata?.workspacePath
+    return typeof workspace === "string" && !!workspace.trim()
+  })
   const renderedHarnessSessionThreadId = renderedRoute.harnessSessionThreadId
   const isRightPanelFullscreen = previewFullscreen || browserFullscreen
   const showRightResizeHandle = !previewFullscreen
