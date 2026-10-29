@@ -5,6 +5,7 @@ import {
   buildRequirementDesignPrompt,
   listRequirementDesignEntries,
   loadActiveRequirementDesignEntry,
+  shouldCreateRequirementDesignSession,
   storeActiveRequirementDesignEntry,
   storeRequirementDesignEntries,
   type RequirementDesignEntry
@@ -93,6 +94,14 @@ describe("active requirement design entry", () => {
     expect(
       listRequirementDesignEntries(entry.requirementId, storage, entry.htmlId)
     ).toEqual([entry])
+  })
+
+  it("only initializes the requirement attachment for a new design session", () => {
+    const sessionIds = new Set([entry.htmlId])
+
+    expect(shouldCreateRequirementDesignSession("", sessionIds)).toBe(true)
+    expect(shouldCreateRequirementDesignSession("missing-session", sessionIds)).toBe(true)
+    expect(shouldCreateRequirementDesignSession(entry.htmlId, sessionIds)).toBe(false)
   })
 })
 

@@ -2,6 +2,7 @@ import { useEffect } from "react"
 
 import {
   REQUIREMENT_DESIGN_ENTRY_KEY,
+  shouldCreateRequirementDesignSession,
   storeRequirementDesignEntries,
   type RequirementDesignEntry,
   type RequirementDesignEntryPayload
@@ -40,32 +41,6 @@ async function readRequirementAttachment(filePath: string): Promise<FileAttachme
     size: new TextEncoder().encode(result.content).byteLength,
     truncated: result.content.length > REQUIREMENT_ATTACHMENT_MAX_CHARS
   }
-}
-
-async function bindRequirementAttachment(
-  sessionId: string,
-  attachment: FileAttachment
-): Promise<void> {
-  const client = getDesignSessionClient()
-  const snapshot = client.get(sessionId) ?? (await client.open(sessionId))
-  const current = snapshot.state.attachedFiles ?? []
-  const attachedFiles = [
-    ...current.filter((file) => file.filePath !== attachment.filePath),
-    attachment
-  ]
-  const existing = current.find((file) => file.filePath === attachment.filePath)
-  // 文件内容没有变化时不写回会话，避免无意义的持久化和会话列表重排。
-  if (
-    existing &&
-    existing.filename === attachment.filename &&
-    existing.content === attachment.content &&
-    existing.mimeType === attachment.mimeType &&
-    existing.size === attachment.size &&
-    existing.truncated === attachment.truncated
-  ) {
-    return
-  }
-  await client.patch(sessionId, { attachedFiles })
 }
 
 export function useRequirementDesignEntry({
@@ -108,9 +83,9 @@ export function useRequirementDesignEntry({
         const client = getDesignSessionClient()
         const sessionIds = new Set(client.list().map((session) => session.id))
         for (const entry of entries) {
-          const requirementAttachment = await readRequirementAttachment(entry.requirementFilePath)
           let readyEntry: ActiveRequirementDesignEntry
-          if (!entry.htmlId || !sessionIds.has(entry.htmlId)) {
+          if (shouldCreateRequirementDesignSession(entry.htmlId, sessionIds)) {
+            const requirementAttachment = await readRequirementAttachment(entry.requirementFilePath)
             const sessionId = createSession(
               { title: entry.functionName?.trim() || "需求原型" },
               {
@@ -133,7 +108,8 @@ export function useRequirementDesignEntry({
             if (client.get(entry.htmlId)?.workspacePath !== entry.workspacePath) {
               await client.setWorkspace(entry.htmlId, entry.workspacePath)
             }
-            await bindRequirementAttachment(entry.htmlId, requirementAttachment)
+            // 继续已有设计时保留用户当前的草稿状态。需求附件只在首次创建会话时注入；
+            // 若用户已经发送或移除了附件，重新进入设计模式不应把它加回来。
             readyEntry = { ...entry, bindingReady: true }
           }
           readyEntries.push(readyEntry)

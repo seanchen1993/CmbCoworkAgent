@@ -22,6 +22,13 @@ export type RequirementDesignEntryPayload =
   | RequirementDesignEntry
   | { entries: RequirementDesignEntry[] }
 
+export function shouldCreateRequirementDesignSession(
+  htmlId: string,
+  existingSessionIds: ReadonlySet<string>
+): boolean {
+  return !htmlId || !existingSessionIds.has(htmlId)
+}
+
 export function buildRequirementDesignPrompt(
   functionName: string,
   requirementFile: string

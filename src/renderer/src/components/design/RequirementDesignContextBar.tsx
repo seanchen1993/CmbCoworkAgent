@@ -47,7 +47,8 @@ export function RequirementDesignContextBar({
     [sessions]
   )
   const completedCount = designEntries.filter((designEntry) => designEntry.htmlFile?.trim()).length
-  const progress = designEntries.length > 0 ? Math.round((completedCount / designEntries.length) * 100) : 0
+  const progress =
+    designEntries.length > 0 ? Math.round((completedCount / designEntries.length) * 100) : 0
   const effectiveDisabledReason = saving ? "正在同步设计，请稍候" : disabledReason
 
   const previewButton = (filePath: string | undefined, title: string): React.JSX.Element => (
@@ -129,17 +130,43 @@ export function RequirementDesignContextBar({
     <div className="relative z-10 flex h-[58px] shrink-0 items-center border-y border-b-slate-300 border-t-border/70 bg-slate-50/95 px-3 shadow-[0_3px_10px_rgba(15,23,42,0.10)]">
       <div className="w-52 shrink-0 pr-3">
         <div className="flex items-center gap-1.5">
-          <strong className="min-w-0 truncate text-xs font-semibold text-foreground">
+          <strong className="min-w-0 truncate text-xs font-semibold text-foreground ml-1.5">
             {requirementName}
           </strong>
           {previewButton(entry.requirementOverviewFilePath, "需求文件")}
-          <span className="shrink-0 rounded bg-orange-50 px-1.5 py-0.5 text-[10px] font-medium text-orange-500">
-            设计进度 {progress}%
-          </span>
         </div>
-        <p className="mt-0.5 text-[10px] text-muted-foreground">
-          {designEntries.length} 个功能模块 · 会话并行执行
-        </p>
+        <div className="mt-0.5 flex w-full items-center text-[10px]">
+          <TooltipProvider delayDuration={200}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="inline-flex w-full cursor-help items-center gap-1.5 rounded  px-1.5 py-0.5 font-medium text-orange-500">
+                  <span>设计进度</span>
+                  <span
+                    role="progressbar"
+                    aria-label="设计进度"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={progress}
+                    className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-orange-200"
+                  >
+                    <span
+                      className="block h-full rounded-full bg-orange-500 transition-[width] duration-300"
+                      style={{ width: `${progress}%` }}
+                    />
+                  </span>
+                  <span className="tabular-nums">{progress}%</span>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="max-w-64">
+                <p>
+                  已完成 {completedCount}/{designEntries.length} 个功能模块
+                </p>
+                <p>计算方式：已同步模块数 ÷ 模块总数 × 100%</p>
+                <p>设计成功同步到需求后，该模块才计为完成。</p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </div>
       </div>
 
       <div className="flex min-w-0 flex-1 items-center gap-1.5 border-l border-border/70 pl-2.5">
@@ -228,41 +255,43 @@ export function RequirementDesignContextBar({
       </div>
 
       <div className="ml-2.5 flex shrink-0 items-center gap-1.5 border-l border-border/70 pl-2.5">
-      <TooltipProvider delayDuration={200}>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span
-              tabIndex={effectiveDisabledReason ? 0 : -1}
-              className={effectiveDisabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"}
-            >
-              <button
-                type="button"
-                disabled={Boolean(effectiveDisabledReason)}
-                onClick={() => void save()}
-                className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md bg-primary px-2.5 text-[11px] font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-55"
+        <TooltipProvider delayDuration={200}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span
+                tabIndex={effectiveDisabledReason ? 0 : -1}
+                className={
+                  effectiveDisabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+                }
               >
-                {saving ? (
-                  <Loader2 className="size-3.5 animate-spin" />
-                ) : (
-                  <RefreshCw className="size-3" />
-                )}
-                {saving ? "同步中..." : "同步到需求"}
-              </button>
-            </span>
-          </TooltipTrigger>
-          {effectiveDisabledReason ? (
-            <TooltipContent side="bottom">{effectiveDisabledReason}</TooltipContent>
-          ) : null}
-        </Tooltip>
-      </TooltipProvider>
-      <button
-        type="button"
-        onClick={() => returnToRequirementConversation(entry.requirementId)}
-        className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-border bg-white px-2.5 text-[11px] font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
-      >
-        <ArrowLeft className="size-3" />
-        返回需求
-      </button>
+                <button
+                  type="button"
+                  disabled={Boolean(effectiveDisabledReason)}
+                  onClick={() => void save()}
+                  className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md bg-primary px-2.5 text-[11px] font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-55"
+                >
+                  {saving ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="size-3" />
+                  )}
+                  {saving ? "同步中..." : "同步到需求"}
+                </button>
+              </span>
+            </TooltipTrigger>
+            {effectiveDisabledReason ? (
+              <TooltipContent side="bottom">{effectiveDisabledReason}</TooltipContent>
+            ) : null}
+          </Tooltip>
+        </TooltipProvider>
+        <button
+          type="button"
+          onClick={() => returnToRequirementConversation(entry.requirementId)}
+          className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-border bg-white px-2.5 text-[11px] font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+        >
+          <ArrowLeft className="size-3" />
+          返回需求
+        </button>
       </div>
     </div>
   )
