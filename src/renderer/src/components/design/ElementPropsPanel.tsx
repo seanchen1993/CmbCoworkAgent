@@ -222,9 +222,13 @@ function TRBLRows({
 export function ElementPropsPanel({
   selectedElement,
   onStyleChange,
+  onTextEdit,
+  onDelete,
 }: {
   selectedElement: { edId: string; tagName: string; styles: ElementStyles } | null
   onStyleChange: (property: string, value: unknown) => void
+  onTextEdit?: () => void
+  onDelete?: () => void
 }) {
   const s = selectedElement?.styles
   const [paddingOpen, setPaddingOpen] = useState(false)
@@ -285,6 +289,10 @@ export function ElementPropsPanel({
         </div>
       ) : (
         <div style={{ flex: 1, overflowY: "auto", background: "#ffffff" }}>
+          <div style={{ display: "flex", gap: 8, padding: 12 }}>
+            <button type="button" onClick={onTextEdit}>修改文字</button>
+            <button type="button" onClick={onDelete}>删除元素</button>
+          </div>
           <PropSectionHeader label="Typography" />
 
           <PropLineRow label="Font">

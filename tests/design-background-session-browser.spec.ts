@@ -3,7 +3,9 @@ import assert from "node:assert/strict"
 import { createServer } from "node:http"
 import { DatabaseSync } from "node:sqlite"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { build, transformSync } from "esbuild"
+import { readFileSync } from "node:fs"
+import { prepareEditableSource } from "../src/main/services/design/direct-edit"
 import { chromium } from "playwright"
 import { NativeSqliteAdapter } from "../src/main/db/native-sqlite-adapter"
 import { DesignSessionStore } from "../src/main/services/design/session-store"
@@ -59,7 +61,15 @@ const bundle = await build({
     }
   ]
 })
+const reactRuntime = await build({ stdin: { contents: `import * as React from 'react'; import {createRoot} from 'react-dom/client'; window.React=React; window.ReactDOM={createRoot};`, resolveDir: process.cwd() }, bundle: true, write: false, platform: "browser", format: "iife" })
+const vueRuntime = process.env.DESIGN_VUE_RUNTIME ? readFileSync(process.env.DESIGN_VUE_RUNTIME, "utf8") : null
 const server = createServer((_request, response) => {
+  if (_request.url === "/react.js" || _request.url === "/babel.js" || _request.url === "/vue.js") {
+    response.setHeader("Content-Type", "text/javascript")
+    response.end(_request.url === "/react.js" ? reactRuntime.outputFiles[0].contents : _request.url === "/vue.js" ? vueRuntime ?? "" :
+      `document.addEventListener('DOMContentLoaded',async()=>{for(const source of document.querySelectorAll('script[type="text/babel"]')){const text=await window.parent.compileDesignJsx(source.textContent);const script=document.createElement('script');script.dataset.designHostRuntime='test-compiler';script.textContent=text;document.body.append(script)}});`)
+    return
+  }
   response.setHeader(
     "Content-Type",
     _request.url === "/app.js" ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8"
@@ -109,7 +119,7 @@ try {
   page.on("console", (message) => {
     if (message.type() === "error") console.log("BROWSER", message.text())
   })
-  page.on("pageerror", (error) => errors.push(error.message))
+  page.on("pageerror", (error) => { errors.push(error.message); console.log("PAGE ERROR", error.stack) })
   await page.exposeFunction("designRpc", (method: string, ...args: unknown[]) => {
     const id = String(args[0])
     if (method === "list") return manager.list()
@@ -123,6 +133,8 @@ try {
       return
     }
     if (method === "patch") return manager.patch(id, args[1] as never, args[2] as never)
+    if (method === "inspectEditable") return manager.inspectEditable(id)
+    if (method === "edit") return manager.edit(id, args[1] as never)
     if (method === "tweak") return manager.tweak(id, args[1] as never)
     if (method === "patchHistory")
       return manager.patchHistory(id, args[1] as "undo" | "redo", Number(args[2]))
@@ -137,6 +149,7 @@ try {
     if (method === "create") return manager.create(args[0] as never)
     throw new Error(`Unknown RPC ${method}`)
   })
+  await page.exposeFunction("compileDesignJsx", (source: string) => transformSync(source, { loader: "jsx", jsx: "transform" }).code)
   deliver = (change) => {
     void page
       .evaluate(
@@ -169,6 +182,8 @@ try {
     const sessions = Object.fromEntries(
       [
         "list",
+        "inspectEditable",
+        "edit",
         "tweak",
         "patchHistory",
         "previewVisible",
@@ -192,6 +207,8 @@ try {
     ;(window as unknown as { api: unknown }).api = {
       design: {
         sessions,
+        listImportedTemplates: async () => [],
+        importTemplate: async () => ({ template: { id: "fixture-template", name: "import.html", entryPath: "index.html", rootDir: "/workspace/template", html: "<h1>HTML 导入页面</h1>", files: ["index.html"], pages: ["index.html"], warnings: [], previewUrl: "about:blank", framework: "html", sourceKind: "html", importedAt: "2026-10-29", totalBytes: 25 } }),
         listSystems: async () => [
           {
             id: "neutral-modern",
@@ -210,6 +227,7 @@ try {
             previewHtml: `<h1>模板内容 ${i + 1}</h1>`
           })),
         storeHtml: async () => ({ ok: true }),
+        getArtifactPackageInfo: async () => ({ success: true, filePath: "/workspace/design.html", relatedFileCount: 0 }),
         saveArtifact: async (id: string) => ({ success: true, filePath: `/workspace/${id}.html` }),
         importFromUrl: async () => ({
           success: true,
@@ -429,6 +447,7 @@ try {
       (frame) =>
         (frame as HTMLIFrameElement).contentDocument!.documentElement.dataset.designPreviewInstance
     )
+  await page.getByRole("button", { name: "预览", exact: true }).click()
   await page.getByLabel("主色", { exact: true }).fill("#aa0000")
   await page.getByLabel("主色", { exact: true }).blur()
   await page.waitForFunction(async () => {
@@ -547,6 +566,7 @@ try {
       ),
     finalIdentity
   )
+  await page.getByRole("button", { name: "预览", exact: true }).click()
   await page.frameLocator("iframe").locator("button").click()
   assert.equal(
     await page
@@ -680,7 +700,9 @@ try {
   await page.getByTitle("返回历史记录").click()
   const originalCount = manager.list().length
   await page.getByRole("button", { name: "新建设计" }).first().click()
-  await page.getByRole("heading", { name: "新建设计", exact: true }).waitFor()
+  await page.getByRole("heading", { name: "新建设计", exact: true }).waitFor().catch(async (error) => {
+    console.log("CREATION BODY", (await page.locator("body").innerText()).slice(-1800)); throw error
+  })
   assert.equal(await page.getByText("选择新建设计方式").count(), 0, "new designs use a full page")
   await page.getByLabel("设计系统", { exact: true }).selectOption("wealth")
   await page.getByRole("button", { name: "切换目录", exact: true }).click()
@@ -764,15 +786,18 @@ try {
   await page.getByRole("button", { name: "返回设计历史", exact: true }).click()
   await page.getByText("My Designs", { exact: true }).waitFor()
   await page.reload()
-  await page.getByRole("heading", { name: "新建设计", exact: true }).waitFor()
+  await page.getByRole("heading", { name: "新建设计", exact: true }).waitFor().catch(async (error) => {
+    console.log("RELOAD BODY", (await page.locator("body").innerText()).slice(-1800));
+    console.log("LAST", await page.evaluate(() => localStorage.getItem("design_last_session"))); throw error
+  })
   await page.getByRole("button", { name: "上传模板", exact: true }).click()
-  await page.getByRole("button", { name: "选择文件", exact: true }).click()
-  await page.getByRole("combobox").nth(1).click()
+  await page.getByRole("button", { name: "选择 HTML / ZIP", exact: true }).click()
+  await page.getByRole("combobox").filter({ hasText: "请选择命名空间" }).click()
   await page
     .getByRole("option", { name: /Mock 开发组 A/ })
     .first()
     .click()
-  await page.getByRole("combobox").nth(2).click()
+  await page.getByRole("combobox").filter({ hasText: "请选择需求特性" }).click()
   await page.getByRole("option", { name: /Mock 需求 A-1/ }).click()
   await page.getByRole("button", { name: "进入设计", exact: false }).click()
   await page.locator("textarea").first().waitFor()
@@ -792,6 +817,146 @@ try {
   assert.equal(manager.get(blankId).state.creationSelection?.template.html, null)
   assert.equal(manager.get(blankId).state.creationSelection?.requirement.requirement, null)
   assert.equal(manager.get(blankId).state.attachedFiles, null)
+
+  // User gestures run through the real DesignView, IPC-style client and durable manager.
+  const directRunsBefore = requests.length
+  const openDirectFixture = async (id: string, html: string) => {
+    manager.create({ id, meta: { id, title: id, createdAt: 1, updatedAt: 1 }, workspacePath: "/workspace",
+      state: { ...createDesignState(), html, artifactPath: "/workspace/design.html", activeMode: "edit", generationState: "done" } })
+    await page.evaluate((value) => localStorage.setItem("design_last_session", value), id)
+    await page.reload()
+    await page.frameLocator("iframe").locator('[data-design-host-runtime="editor"]').waitFor({ state: "attached" })
+  }
+  const editText = async (selector: string, text: string) => {
+    const frame = page.frameLocator("iframe")
+    await frame.locator(selector).dblclick()
+    const editor = frame.getByRole("textbox", { name: "编辑文字" })
+    await editor.fill(text)
+    await editor.dispatchEvent("compositionstart")
+    await editor.dispatchEvent("keydown", { key: "Enter", isComposing: true })
+    assert.equal(await editor.count(), 1, "IME confirmation does not submit prematurely")
+    await editor.dispatchEvent("compositionend")
+    await editor.press("Enter")
+    await frame.locator(selector).filter({ hasText: text }).waitFor().catch(async (error) => {
+      const id = await page.evaluate(() => localStorage.getItem("design_last_session"))
+      console.log("EDIT FAILED", id, id ? manager.get(id).state.html.slice(-2200) : "")
+      console.log("EDIT DOM", await frame.locator("body").innerText())
+      console.log("EDIT STATUS", (await page.locator("body").innerText()).slice(-900))
+      throw error
+    })
+    await frame.getByRole("textbox", { name: "编辑文字" }).waitFor({ state: "detached" })
+  }
+  await openDirectFixture("ds_useredit", '<!doctype html><html><head><style>article{padding:20px;margin:10px}button{padding:12px}</style></head><body><h1>原始标题</h1><button id="icon-action"><svg width="10" height="10"><path d="M0 0L10 10"/></svg>保存</button><article id="remove-card"><span>内部文字</span></article><article id="keep-card">保留卡片</article><script>document.getElementById("icon-action").addEventListener("click",()=>window.clicks=(window.clicks||0)+1)</script></body></html>')
+  const directFrame = page.frameLocator("iframe")
+  const staticInstance = await directFrame.locator("html").getAttribute("data-design-preview-instance")
+  await editText("h1", "中文直接编辑")
+  assert.equal(await directFrame.locator("html").getAttribute("data-design-preview-instance"), staticInstance, "direct text keeps the iframe")
+  await editText("#icon-action", "提交申请")
+  assert.equal(await directFrame.locator("#icon-action svg").count(), 1)
+  assert.match(manager.get("ds_useredit").state.html, /提交申请/)
+  await directFrame.locator("#remove-card span").click()
+  await directFrame.getByRole("button", { name: "article", exact: true }).click()
+  await directFrame.getByRole("button", { name: "删除", exact: true }).click()
+  await directFrame.locator("#remove-card").waitFor({ state: "detached" })
+  assert.equal(await directFrame.locator("#keep-card").count(), 1)
+  await page.getByTitle("撤销局部修改").click()
+  await directFrame.locator("#remove-card").waitFor()
+  await page.getByTitle("重做局部修改").click()
+  await directFrame.locator("#remove-card").waitFor({ state: "detached" })
+  await directFrame.locator("#keep-card").click()
+  await page.keyboard.press("Delete")
+  await directFrame.locator("#keep-card").waitFor({ state: "detached" })
+  await page.getByTitle("撤销局部修改").click()
+  await directFrame.locator("#keep-card").waitFor()
+  await directFrame.locator("h1").dblclick()
+  const cancelledText = directFrame.getByRole("textbox", { name: "编辑文字" })
+  await cancelledText.fill("这段取消")
+  await cancelledText.press("Backspace")
+  assert.equal(await directFrame.locator("h1").count(), 1, "Backspace inside text does not delete the element")
+  if (process.env.DESIGN_EDIT_SCREENSHOT) await page.screenshot({ path: process.env.DESIGN_EDIT_SCREENSHOT, fullPage: true })
+  await cancelledText.press("Escape")
+  assert.equal(await directFrame.locator("h1").textContent(), "中文直接编辑")
+  await page.getByRole("button", { name: "预览", exact: true }).click()
+  await directFrame.locator("#icon-action").click()
+  assert.equal(await directFrame.locator("html").evaluate(() => (window as Window & { clicks?: number }).clicks), 1)
+  await page.getByRole("button", { name: "编辑", exact: true }).click()
+  await directFrame.locator("h1").dblclick()
+  await directFrame.getByRole("textbox", { name: "编辑文字" }).fill("离开页面仍保存")
+  await page.locator("#toggle-mode").click()
+  await page.waitForFunction(async () => {
+    const snapshot = await (window as unknown as { designRpc: (...args: unknown[]) => Promise<any> }).designRpc("open", "ds_useredit")
+    return snapshot.state.html.includes("离开页面仍保存")
+  })
+  await page.locator("#toggle-mode").click()
+  await directFrame.locator("h1").filter({ hasText: "离开页面仍保存" }).waitFor()
+  await page.reload()
+  await directFrame.locator("h1").filter({ hasText: "离开页面仍保存" }).waitFor()
+  assert.equal(await directFrame.locator("#remove-card").count(), 0)
+  const savedDirect = manager.get("ds_useredit").state.html
+  assert.ok(!savedDirect.includes('data-design-host-runtime="editor"'))
+  assert.ok(!savedDirect.includes("<textarea"))
+  await page.getByTitle("导出设计", { exact: true }).click()
+  await page.getByLabel("导出格式", { exact: true }).selectOption("html")
+  const downloaded = page.waitForEvent("download")
+  await page.getByRole("button", { name: "导出 HTML", exact: true }).click()
+  const exported = readFileSync((await (await downloaded).path())!, "utf8")
+  assert.match(exported, /离开页面仍保存/)
+  assert.match(exported, /提交申请/)
+  assert.ok(!exported.includes('id="remove-card"'))
+  assert.ok(!exported.includes('data-design-host-runtime="editor"'))
+
+  const base = `http://127.0.0.1:${address.port}`
+  await openDirectFixture("ds_reactedit", `<!doctype html><html><head><script src="${base}/react.js"></script><script defer src="${base}/babel.js"></script></head><body><div id="root"></div><script type="text/babel">function App(){const [n,setN]=React.useState(0);return <main><h1>React原文</h1><button onClick={()=>setN(n+1)}>重新渲染 {n}</button><section>React可删除区</section></main>};ReactDOM.createRoot(document.getElementById('root')).render(<App/>);</script></body></html>`)
+  await editText("h1", "React新文案")
+  await page.getByRole("button", { name: "预览", exact: true }).click()
+  await page.frameLocator("iframe").getByRole("button", { name: "重新渲染 0" }).click()
+  await page.frameLocator("iframe").getByRole("button", { name: "重新渲染 1" }).waitFor()
+  assert.equal(await page.frameLocator("iframe").locator("h1").textContent(), "React新文案")
+  await page.getByRole("button", { name: "编辑", exact: true }).click()
+  await page.frameLocator("iframe").locator("section").click()
+  await page.frameLocator("iframe").getByRole("button", { name: "删除", exact: true }).click()
+  await page.frameLocator("iframe").locator("section").waitFor({ state: "detached" })
+  await page.reload()
+  await page.frameLocator("iframe").locator("h1").filter({ hasText: "React新文案" }).waitFor()
+  assert.equal(await page.frameLocator("iframe").locator("section").count(), 0)
+
+  const recordData = { data: { records: { a: { title: "甲记录" }, b: { title: "乙记录" } } }, bindings: {
+    "a-title": { kind: "text", path: "/records/a/title" }, "b-title": { kind: "text", path: "/records/b/title" },
+    "a-row": { kind: "record", path: "/records/a" }, "b-row": { kind: "record", path: "/records/b" }
+  } }
+  await openDirectFixture("ds_recordedit", prepareEditableSource(`<!doctype html><html><head><script type="application/design-edit+json">${JSON.stringify(recordData)}</script><script src="${base}/react.js"></script><script defer src="${base}/babel.js"></script><style>article{padding:15px}</style></head><body><div id="root"></div><script type="text/babel">function App(){const [n,setN]=React.useState(0);return <main><button onClick={()=>setN(n+1)}>刷新记录 {n}</button>{Object.entries(window.designData.data.records).map(([key,record])=><article key={key} data-design-bind={key+'-row'}><h2 data-design-bind={key+'-title'}>{record.title}</h2></article>)}</main>};ReactDOM.createRoot(document.getElementById('root')).render(<App/>);</script></body></html>`))
+  await editText('[data-design-bind="a-title"]', "只修改甲记录")
+  assert.equal(await page.frameLocator("iframe").locator('[data-design-bind="b-title"]').textContent(), "乙记录")
+  await page.frameLocator("iframe").locator('[data-design-bind="a-row"]').click({ position: { x: 2, y: 2 } })
+  await page.frameLocator("iframe").getByRole("button", { name: "删除", exact: true }).click()
+  await page.frameLocator("iframe").locator('[data-design-bind="a-row"]').waitFor({ state: "detached" })
+  await page.getByRole("button", { name: "预览", exact: true }).click()
+  await page.frameLocator("iframe").getByRole("button", { name: "刷新记录 0" }).click()
+  await page.frameLocator("iframe").getByRole("button", { name: "刷新记录 1" }).waitFor()
+  assert.equal(await page.frameLocator("iframe").locator("article").count(), 1)
+  assert.equal(await page.frameLocator("iframe").locator('[data-design-bind="b-title"]').textContent(), "乙记录")
+  await page.reload()
+  await page.frameLocator("iframe").locator('[data-design-bind="b-title"]').waitFor()
+  assert.equal(await page.frameLocator("iframe").locator("article").count(), 1)
+
+  if (vueRuntime) {
+    await openDirectFixture("ds_vueedit", `<!doctype html><html><head><script src="${base}/vue.js"></script></head><body><div id="app"></div><script>Vue.createApp({data(){return {n:0}},template:${JSON.stringify('<main><h1>Vue原文</h1><button @click="n++">重新渲染 {{n}}</button><section>Vue可删除区</section></main>') }}).mount('#app')</script></body></html>`)
+    await editText("h1", "Vue新文案")
+    await page.getByRole("button", { name: "预览", exact: true }).click()
+    await page.frameLocator("iframe").getByRole("button", { name: "重新渲染 0" }).click()
+    await page.frameLocator("iframe").getByRole("button", { name: "重新渲染 1" }).waitFor()
+    assert.equal(await page.frameLocator("iframe").locator("h1").textContent(), "Vue新文案")
+    await page.getByRole("button", { name: "编辑", exact: true }).click()
+    await page.frameLocator("iframe").locator("section").click()
+    await page.frameLocator("iframe").getByRole("button", { name: "删除", exact: true }).click()
+    await page.frameLocator("iframe").locator("section").waitFor({ state: "detached" })
+    await page.reload()
+    await page.frameLocator("iframe").locator("h1").filter({ hasText: "Vue新文案" }).waitFor()
+    assert.equal(await page.frameLocator("iframe").locator("section").count(), 0)
+    console.log("PASS: real Vue source editing survives reactive updates and reopen")
+  }
+  assert.equal(requests.length, directRunsBefore, "direct edits never invoke the model")
+  console.log("PASS: direct double-click/IME text, icon retention, nested selection/deletion, history, persistence and real React rerender")
   assert.deepEqual(errors, [])
   console.log(
     "PASS: progressive previews, bounded chat/comment patches, live node/listener preservation, durable undo/redo, background recovery, full-page creation, template/requirement persistence and URL/HTML/ZIP imports"

@@ -8,6 +8,7 @@ import type {
   TabState
 } from "../../../../shared/managed-design-session"
 import type { DesignTweakCommand } from "../../../../shared/design-tweaks"
+import type { DesignEditCommand, DesignEditableDocument } from "../../../../shared/design-edit"
 
 /** One client per renderer, not per DesignView. Sequenced snapshots make reconnect idempotent. */
 export class DesignSessionClient {
@@ -112,6 +113,44 @@ export class DesignSessionClient {
     const snapshot = this.get(id)
     if (!snapshot) throw new Error("设计会话创建失败")
     return snapshot
+  }
+  flush(id: string): Promise<unknown> {
+    return this.pending.get(id) ?? Promise.resolve()
+  }
+  inspectEditable(id: string): Promise<DesignEditableDocument> {
+    return this.enqueue(id, async () => {
+      if (!this.api.inspectEditable) throw new Error("请更新应用以使用直接编辑")
+      return this.api.inspectEditable(id)
+    })
+  }
+  edit(id: string, command: DesignEditCommand): Promise<DesignSessionSnapshot> {
+    return this.enqueue(id, async () => {
+      if (!this.api.edit) throw new Error("请更新应用以使用直接编辑")
+      return this.apply(await this.api.edit(id, command))
+    })
+  }
+  editStyles(
+    id: string,
+    nodeId: string,
+    declarations: Record<string, string>,
+    variationId: string | null
+  ): Promise<DesignSessionSnapshot> {
+    return this.enqueue(id, async () => {
+      if (!this.api.inspectEditable || !this.api.edit) throw new Error("请更新应用以使用直接编辑")
+      const doc = await this.api.inspectEditable(id)
+      const node = doc.nodes.find((n) => n.id === nodeId)
+      if (!node?.canStyle) throw new Error(node?.reason || "此节点无法直接修改样式")
+      return this.apply(
+        await this.api.edit(id, {
+          protocol: "design-edit/1",
+          commandId: crypto.randomUUID(),
+          baseRevision: doc.revision,
+          baseTweakRevision: doc.tweakRevision,
+          variationId,
+          operations: [{ type: "set_style", nodeId, expectedHash: node.hash, declarations }]
+        })
+      )
+    })
   }
   patch(
     id: string,

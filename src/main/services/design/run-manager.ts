@@ -15,7 +15,20 @@ import {
   type TabState,
   type SessionMeta
 } from "../../../shared/managed-design-session"
-import type { DesignSessionStore, DesignPatchJournal } from "./session-store"
+import type { DesignSessionStore, DesignPatchJournal, DesignEditReceipt } from "./session-store"
+import {
+  prepareEditableSource,
+  inspectEditableSource,
+  applyDirectEdit,
+  directEditValues,
+  type DirectEditCandidate
+} from "./direct-edit"
+import {
+  parseDesignEditCommand,
+  serializeDesignEditCommand,
+  type DesignEditCommand,
+  type DesignEditableDocument
+} from "../../../shared/design-edit"
 import { sourceHash, verifyDesignPatchDependencies } from "./document-index"
 import { inspectDesignDocument } from "../../../shared/design-progressive"
 import {
@@ -38,6 +51,10 @@ interface ActiveRun {
 }
 
 export interface DesignRunDependencies {
+  validateDirectEdit?: (
+    candidate: DirectEditCandidate,
+    before: DesignSessionSnapshot
+  ) => Promise<void>
   project?: (snapshot: DesignSessionSnapshot) => void
   execute: (
     request: DesignRunRequest,
@@ -65,6 +82,7 @@ export class DesignRunManager {
   private readonly active = new Map<string, ActiveRun>()
   private readonly queue: Array<() => void> = []
   private executing = 0
+  private readonly editing = new Set<string>()
 
   constructor(
     private readonly store: DesignSessionStore,
@@ -123,6 +141,100 @@ export class DesignRunManager {
     return clone(snapshot)
   }
 
+  inspectEditable(id: string): DesignEditableDocument {
+    const next = this.get(id)
+    if (next.activeRunId || next.state.draftPreview || this.editing.has(id))
+      throw new Error("页面正在修改，请稍后编辑")
+    if (!next.state.html) throw new Error("没有可编辑的页面")
+    const html = prepareEditableSource(next.state.html)
+    if (html !== next.state.html) {
+      next.state.html = html
+      next.state.artifactRevision = (next.state.artifactRevision ?? 0) + 1
+      next.state.appliedPatch = {
+        id: `identity-${randomUUID()}`,
+        revision: next.state.artifactRevision,
+        mode: "live",
+        targetIds: [],
+        summary: "编辑节点已就绪"
+      }
+      next.state.canUndoPatch = false
+      next.state.canRedoPatch = false
+      this.commit(next, [{ type: "editor_initialized" }])
+      this.replayProjections()
+    }
+    return inspectEditableSource(html, next.state.artifactRevision ?? 0, next.state.tweaks)
+  }
+
+  async edit(id: string, input: DesignEditCommand): Promise<DesignSessionSnapshot> {
+    const command = parseDesignEditCommand(input)
+    const hash = sourceHash(serializeDesignEditCommand(command))
+    const receipt = this.store.editReceipt(id, command.commandId)
+    if (receipt) {
+      if (receipt.hash !== hash) throw new Error("相同编辑命令不能使用不同内容")
+      return this.get(id)
+    }
+    const before = this.get(id)
+    if (before.activeRunId || before.state.draftPreview || this.editing.has(id))
+      throw new Error("页面正在修改，请稍后重试")
+    if ((before.state.artifactRevision ?? 0) !== command.baseRevision)
+      throw new Error("页面版本已变化，请重新选择元素")
+    if (
+      command.baseTweakRevision !== undefined &&
+      command.baseTweakRevision !== (before.state.tweaks?.revision ?? 0)
+    )
+      throw new Error("相关参数已变化，请重新选择文字")
+    this.editing.add(id)
+    try {
+      const candidate = applyDirectEdit(before.state.html, before.state.tweaks ?? null, command)
+      await this.deps.validateDirectEdit?.(candidate, before)
+      const next = this.get(id)
+      if (
+        next.activeRunId ||
+        next.state.artifactRevision !== before.state.artifactRevision ||
+        next.state.tweaks?.revision !== before.state.tweaks?.revision
+      )
+        throw new Error("校验期间页面或参数已变化，请重新提交")
+      next.state.html = candidate.html
+      next.state.tweaks = candidate.tweaks
+      next.state.artifactRevision = command.baseRevision + 1
+      next.state.appliedPatch = {
+        id: command.commandId,
+        revision: next.state.artifactRevision,
+        mode: candidate.mode,
+        targetIds: candidate.targetIds,
+        summary: candidate.summary
+      }
+      next.state.patchStatus = { phase: "applied", message: candidate.summary }
+      next.state.canUndoPatch = true
+      next.state.canRedoPatch = false
+      next.state.variations = []
+      const journal: DesignPatchJournal = {
+        id: command.commandId,
+        action: "apply",
+        beforeHtml: before.state.html,
+        afterHtml: candidate.html,
+        beforeTweaks: {},
+        afterTweaks: {},
+        patch: next.state.appliedPatch,
+        direct: {
+          before: before.state.tweaks ?? null,
+          after: candidate.tweaks,
+          keys: candidate.touchedTweaks
+        }
+      }
+      return this.commit(
+        next,
+        [{ type: "direct_edit", commandId: command.commandId, summary: candidate.summary }],
+        undefined,
+        undefined,
+        journal,
+        { commandId: command.commandId, hash, revision: next.state.artifactRevision }
+      )
+    } finally {
+      this.editing.delete(id)
+    }
+  }
+
   create(seed: DesignSessionSeed): DesignSessionSnapshot {
     if (this.sessions.has(seed.id)) return this.get(seed.id)
     if (this.store.wasDeleted(seed.id)) throw new Error("设计会话已删除")
@@ -149,6 +261,7 @@ export class DesignRunManager {
   }
 
   patch(id: string, patch: Partial<TabState>, meta?: Partial<SessionMeta>): DesignSessionSnapshot {
+    if (this.editing.has(id) && patch.html !== undefined) throw new Error("直接编辑正在保存")
     const next = this.get(id)
     const updates = clone(patch)
     if (next.activeRunId) {
@@ -192,6 +305,7 @@ export class DesignRunManager {
   }
 
   tweak(id: string, command: DesignTweakCommand): DesignSessionSnapshot {
+    if (this.editing.has(id)) throw new Error("直接编辑正在保存，请稍后调整参数")
     const next = this.get(id)
     const draft = next.state.draftPreview
     // A debounced edit submitted just as validation completes still belongs to this result.
@@ -257,6 +371,8 @@ export class DesignRunManager {
   }
 
   start(request: DesignRunRequest): DesignSessionSnapshot {
+    if (this.editing.has(request.designSessionId))
+      throw new Error("直接编辑尚未保存，请稍后开始生成")
     const previous = this.store.findRequest(request.requestId)
     if (previous) {
       if (previous.sessionId !== request.designSessionId)
@@ -560,6 +676,7 @@ export class DesignRunManager {
             )
               throw new Error("页面还有未完成区块，已保留草稿")
             state.html = event.html
+            if (!run.request.isIteration) state.activeMode = "edit"
             state.artifactRevision = (state.artifactRevision ?? 0) + 1
             state.appliedPatch = event.patchResult?.patch ?? null
             state.patchStatus = event.patchResult
@@ -654,6 +771,7 @@ export class DesignRunManager {
   }
 
   patchHistory(id: string, operation: "undo" | "redo", revision: number): DesignSessionSnapshot {
+    if (this.editing.has(id)) throw new Error("直接编辑正在保存")
     if (operation !== "undo" && operation !== "redo") throw new Error("撤销操作无效")
     const next = this.get(id)
     if (next.activeRunId || (next.state.artifactRevision ?? 0) !== revision)
@@ -663,6 +781,24 @@ export class DesignRunManager {
     const undo = operation === "undo"
     if (sourceHash(next.state.html) !== sourceHash(undo ? journal.afterHtml : journal.beforeHtml))
       throw new Error("后续源码已变化，不能覆盖后续修改")
+    if (journal.direct) {
+      const expectedState = undo ? journal.direct.after : journal.direct.before
+      const desiredState = undo ? journal.direct.before : journal.direct.after
+      const currentValues = directEditValues(next.state.tweaks ?? null)
+      const expectedValues = directEditValues(expectedState)
+      for (const key of journal.direct.keys) {
+        if (currentValues[key] !== expectedValues[key])
+          throw new Error("相关参数之后已调整，不能覆盖后续设置")
+      }
+      const restored = reconcileTweaks(desiredState?.declaration ?? null, next.state.tweaks)
+      if (restored)
+        for (const key of journal.direct.keys) {
+          if (desiredState && Object.hasOwn(desiredState.overrides, key))
+            restored.overrides[key] = desiredState.overrides[key]
+          else delete restored.overrides[key]
+        }
+      next.state.tweaks = restored
+    }
     const expected = undo ? journal.afterTweaks : journal.beforeTweaks
     const desired = undo ? journal.beforeTweaks : journal.afterTweaks
     const values = next.state.tweaks ? effectiveTweaks(next.state.tweaks) : {}
@@ -795,7 +931,8 @@ export class DesignRunManager {
     events: unknown[],
     request?: DesignRunRequest,
     completedRun?: { id: string; status: string },
-    patchJournal?: DesignPatchJournal
+    patchJournal?: DesignPatchJournal,
+    editReceipt?: DesignEditReceipt
   ): DesignSessionSnapshot {
     const previousDraft = this.sessions.get(next.id)?.state.draftPreview
     next.seq++
@@ -816,7 +953,7 @@ export class DesignRunManager {
     )
       next.meta.lastActivitySeq = next.seq
     next.meta.unread = next.lastSeenSeq < (next.meta.lastActivitySeq ?? 0)
-    this.store.save(next, events, request, completedRun, patchJournal)
+    this.store.save(next, events, request, completedRun, patchJournal, editReceipt)
     this.sessions.set(next.id, clone(next))
     if (patchJournal) this.replayProjections()
     const result = clone(next)

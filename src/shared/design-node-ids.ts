@@ -22,6 +22,15 @@ export function designSourceNodes(html: string): DesignSourceNode[] {
   const doc = parse(html, { sourceCodeLocationInfo: true })
   const result: DesignSourceNode[] = []
   const used = new Set<string>()
+  const reserved = new Set<string>()
+  function reserve(node: Tree.Node) {
+    if ("tagName" in node) {
+      const id = designAttr(node, "data-design-node")
+      if (id) reserved.add(id)
+    }
+    if ("childNodes" in node) node.childNodes.forEach(reserve)
+  }
+  reserve(doc)
   function walk(
     node: Tree.Node,
     path: string,
@@ -54,7 +63,13 @@ export function designSourceNodes(html: string): DesignSourceNode[] {
         loc.endOffset
       ) {
         const explicit = designAttr(node, "data-design-node")
-        const id = explicit || `n_${fingerprint(`${path}:${node.tagName}:${businessId ?? ""}`)}`
+        let id = explicit || `n_${fingerprint(`${path}:${node.tagName}:${businessId ?? ""}`)}`
+        // A newly inserted implicit node may occupy an old explicit node's former path.
+        if (!explicit) {
+          let suffix = 0
+          const base = id
+          while (used.has(id) || reserved.has(id)) id = `${base}_${++suffix}`
+        }
         if (used.has(id)) throw new Error("页面包含重复编辑节点 ID")
         used.add(id)
         current = {

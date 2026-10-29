@@ -5,7 +5,7 @@ import type {
   Message
 } from "../../../shared/managed-design-session"
 import type { DesignAppliedPatch } from "../../../shared/design-patch"
-import type { TweakValues } from "../../../shared/design-tweaks"
+import type { TweakValues, DesignTweaksState } from "../../../shared/design-tweaks"
 
 export interface DesignPatchJournal {
   id: string
@@ -16,6 +16,12 @@ export interface DesignPatchJournal {
   beforeOverrides?: Record<string, TweakValues[string] | null>
   afterTweaks: TweakValues
   patch: DesignAppliedPatch
+  direct?: { before: DesignTweaksState | null; after: DesignTweaksState | null; keys: string[] }
+}
+export interface DesignEditReceipt {
+  commandId: string
+  hash: string
+  revision: number
 }
 
 /** Separate from model checkpoints: this is the durable, user-visible transcript. */
@@ -49,6 +55,10 @@ export class DesignSessionStore {
       );
       CREATE TABLE IF NOT EXISTS design_artifact_outbox (
         session_id TEXT PRIMARY KEY, revision INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS design_edit_receipts (
+        session_id TEXT NOT NULL, command_id TEXT NOT NULL, hash TEXT NOT NULL,
+        revision INTEGER NOT NULL, PRIMARY KEY(session_id, command_id)
       );
     `)
   }
@@ -110,7 +120,8 @@ export class DesignSessionStore {
     events: unknown[],
     request?: DesignRunRequest,
     completedRun?: { id: string; status: string },
-    patchJournal?: DesignPatchJournal
+    patchJournal?: DesignPatchJournal,
+    editReceipt?: DesignEditReceipt
   ): void {
     const { messages, ...state } = snapshot.state
     this.db.run("BEGIN IMMEDIATE")
@@ -123,7 +134,11 @@ export class DesignSessionStore {
         this.db.run("UPDATE design_patch_journal SET status='discarded' WHERE session_id=?", [
           snapshot.id
         ])
-        this.db.run("DELETE FROM design_artifact_outbox WHERE session_id=?", [snapshot.id])
+        if (snapshot.state.artifactPath)
+          this.db.run(
+            "INSERT INTO design_artifact_outbox VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET revision=excluded.revision",
+            [snapshot.id, snapshot.state.artifactRevision ?? 0]
+          )
       }
       if (patchJournal) {
         if (patchJournal.action === "apply") {
@@ -151,6 +166,13 @@ export class DesignSessionStore {
           [snapshot.id, snapshot.state.artifactRevision ?? 0]
         )
       }
+      if (editReceipt)
+        this.db.run("INSERT INTO design_edit_receipts VALUES (?, ?, ?, ?)", [
+          snapshot.id,
+          editReceipt.commandId,
+          editReceipt.hash,
+          editReceipt.revision
+        ])
       const draft = state.draftPreview
       if (draft)
         this.db.run(
@@ -234,6 +256,14 @@ export class DesignSessionStore {
     )[0]
     return row ? JSON.parse(String(row.payload)) : null
   }
+
+  editReceipt(id: string, commandId: string): DesignEditReceipt | null {
+    const row = this.rows(
+      "SELECT * FROM design_edit_receipts WHERE session_id=? AND command_id=?",
+      [id, commandId]
+    )[0]
+    return row ? { commandId, hash: String(row.hash), revision: Number(row.revision) } : null
+  }
   hasOtherPatch(id: string, operation: "undo" | "redo", exclude: string): boolean {
     return (
       this.rows(
@@ -280,7 +310,8 @@ export class DesignSessionStore {
         "design_session_events",
         "design_draft_previews",
         "design_patch_journal",
-        "design_artifact_outbox"
+        "design_artifact_outbox",
+        "design_edit_receipts"
       ]) {
         this.db.run(`DELETE FROM ${table} WHERE session_id = ?`, [id])
       }

@@ -78,6 +78,7 @@ try {
   } else {
     await frame.locator("#status").filter({ hasText: "ready" }).waitFor()
     await frame.locator("#increment").click()
+    await frame.locator("#status").filter({ hasText: /^1$/ }).waitFor()
     assert.equal(await frame.locator("#status").textContent(), "1")
   }
   const child = page.frames().find((item) => item.url() === url)!
