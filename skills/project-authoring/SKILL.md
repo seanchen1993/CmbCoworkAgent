@@ -61,9 +61,17 @@ description: 在用户明确要制作项目插件、轻量文档流程、全栈�
 
 每草稿最多 8 个版本，scaffold/save/compile/bind_action 都消耗版本；每制作会话最多 4 个草稿，本次进程最多 16 个制作会话。`PROJECT_DRAFT_LIMIT` 的 `limit` 字段区分 `revision`、`drafts`、`sessions`，按返回 hint 处理，不能反复重试同一保存或声称换聊天自动恢复。
 
-`revision` 满时，先调用 `{"action":"project_read","id":"my-data"}`。再调用 `project_save`，传 `id: "my-data-next"`（未占用的新草稿 ID）、`name: result.name`、`revision: 0`、`files: result.source.files`。必须逐字复制完整文件数组，不重新 scaffold，不省略 Skill、合同、Harness、runtime 或 action-lock；保留 plugin.json 名称/version、运行声明身份和公开动作锁。只变制作草稿编号，不变插件身份。按新返回 revision 继续编辑、compile、doctor/test；新草稿不继承试用，旧预览租约、原源码和正式安装版本继续保留。
+用户只需说“继续修改”“对比上一版”或“这次修改会影响谁”。草稿编号、修订、摘要和分页由创造者依据工具返回值处理，不要求用户手动抄文件或理解内部字段。
 
-`drafts` 或 `sessions` 满时，先读取已有草稿的完整源码和 directory；检查通过的版本 pack 导出 ZIP，再将源码目录完整复制到用户保存的新目录，按 CLI 路线继续。最新版本检查失败则先保存完整源码副本，在副本中修复，不把失败源码称为已通过的安装包。带动作锁的 doctor/pack 仍依赖真实授权目录，CLI 无该目录时明确告知，不能删除锁规避。其他制作聊天不会自动读取旧草稿；需显式提供完整文件集后以 revision:0 保存、重新验证。进程名额满时先保存成果并核对仍在运行/结果未知的试用，重启后需重新创建试用。inspect_plugin/read_plugin_asset 不提供完整根 JSON 配置，不能当作已安装版本完整导回创作的工具。
+`revision` 满时，先 `project_read(id)` 核对真实 revision 和 source.digest/sourceDigest，再 `project_continue(id,revision,sourceDigest,newId)`。宿主从最新不可变源码精确复制到未占用的新草稿，从修订 1 继续；不需要重抄 files、不重新 scaffold。插件名称/version、原运行声明、公开动作锁、Skills、Hooks、知识、配置声明和资源闭包保留。新草稿不继承试用、权限或业务通过，旧源码、运行中的预览和正式版本不变；按返回 revision 继续修改、编译、doctor/test，再明确请求新试用。失败先核对实际源和状态，不猜修订重放。
+
+`project_versions(id)` 列出真正保留的版本、源码摘要和续作来源；旧存储只有最近版本时会明确 historyComplete:false，不能声称已恢复不存在的历史。`project_compare(id,revision,otherRevision,otherId?)` 返回变更文件索引，按 nextCursor 继续；需要正文时再提供 assetPath 和 cursor，读取两版本对应字符窗口。窗口不等于完整文件或对齐的行补丁，不把一页结果当完整源码保存。可以跨原稿和续作草稿比较；摘要一致仍不代表运行效果相同。
+
+4 个活跃草稿槽位满时，先 `project_list` 核对状态，显式 `project_archive(id,revision,sourceDigest)` 归档不在试用的旧草稿，释放一个槽位。归档保留源码历史，可比较、从最新版本再次 project_continue；原 ID 不可作为新草稿重用。仅准备或待确认、正在运行、结果未核对的试用不能归档。已完成或明确失败/取消的试用，只有原 Host 日志身份和终态可核对、没有在用租约时才可归档；保留试用引用和项目证据，不取消、不释放或重建执行权。旧版本缺少绑定或记录截断时保守拒绝，不得为了腾槽位停止真实运行或隐藏未知结果。历史最多 16 个草稿身份，活跃源码与去重历史共同受原 2 MiB 存储预算限制，不提高限额、不自动淘汰版本。
+
+公共 Mod 修改前使用 `dependency_impact(name或pluginId,cursor?)` 核对实际已安装插件与当前聊天候选中的声明依赖，继续读取 nextCursor 并单独处理读取失败项。保存原生卡片也显示宿主核对出的已知依赖及覆盖限制。输出没有包含任意动态 JavaScript 引用、其他聊天和所有既有项目的完整依赖图，不能以零匹配承诺无影响。固定旧摘要的调用方不会默默切到新版本，须重新绑定和真实验证；不自动改写调用方或扩大授权。
+
+历史存储或制作进程容量满时，停止机械重试；归档只释放活跃草稿槽位，不释放历史字节或制作会话名额。先保留当前成果：已有活跃草稿可读取完整源码与 directory；检查通过再 pack 导出 ZIP，并保存源码目录副本，按 CLI 路线继续。检查失败不能称为可安装或已通过。其他聊天不自动读取旧草稿；转移须显式提供完整文件集并重新验证，不恢复试用和授权。带动作锁的 doctor/pack 仍依赖真实授权目录；缺少时明确说明，不能删除锁规避。inspect_plugin/read_plugin_asset 不提供已安装版本的完整根 JSON 导回。
 
 ## 本地命令路线
 

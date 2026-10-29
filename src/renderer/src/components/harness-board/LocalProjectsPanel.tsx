@@ -6,7 +6,11 @@ import { ProjectLibraryPanel } from "./ProjectLibraryPanel"
 import { ProjectFunctionConsent } from "./ProjectFunctionConsent"
 import { navigateProjectThread } from "./project-thread-navigation"
 import { SparksDocumentationLink } from "../customize/SparksDocumentationLink"
-import { projectRuntimeRecoveryMessage } from "./project-runtime-message"
+import {
+  projectCheckKindLabel,
+  projectPreviewStatusMessage,
+  projectRuntimeRecoveryMessage
+} from "./project-runtime-message"
 import { projectLocalMetrics } from "../../../../shared/project-runtime/metrics"
 import { isSameWorkspacePath } from "../../../../shared/workspace-path"
 import { useAppStore } from "@/lib/store"
@@ -795,9 +799,7 @@ export function LocalProjectRun({
       )}
       {view.preview && (
         <p className="text-xs text-muted-foreground">
-          {view.preview.state === "active"
-            ? `正在试用版本 ${view.preview.revision}`
-            : "此试用已结束或随应用重启失效，历史仍可查看。请回制作会话重新准备，不能从旧试用继续执行。"}
+          {projectPreviewStatusMessage(view.preview, project.status === "completed")}
         </p>
       )}
       {stageActions.length > 0 && (
@@ -1295,6 +1297,7 @@ export function LocalProjectRun({
                 return (
                   <p key={receipt.checkId} className="mt-1 break-all">
                     {receipt.result === "passed" ? "通过" : "待修复"} ·{" "}
+                    {projectCheckKindLabel(check?.kind)} ·{" "}
                     {artifact?.path ?? receipt.checkId}
                     {receipt.result !== "passed" &&
                       (check?.kind === "file-exists"

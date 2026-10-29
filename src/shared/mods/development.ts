@@ -176,6 +176,15 @@ export interface DevelopmentCompositionSaveStatus {
   error?: string
 }
 
+export interface DevelopmentDependencyImpact {
+  inspectedSources: number
+  knownDependants: Array<{ id: string; name: string; kind: "installed" | "candidate";
+    actionIds: string[] }>
+  uninspectedSources: number
+  moreSources: boolean
+  complete: false
+}
+
 export interface DevelopmentReuseStatus {
   phase: "preparing" | "needs-approval" | "applying" | "active" | "failed" | "unknown"
   planId?: string
@@ -189,6 +198,7 @@ export interface DevelopmentReuseStatus {
   installationId?: string
   savedProfileId?: string
   error?: string
+  dependencyImpact?: DevelopmentDependencyImpact
 }
 
 /** Current native observations only; missing counts are unknown, never an inferred zero. */

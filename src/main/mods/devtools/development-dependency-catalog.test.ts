@@ -83,6 +83,13 @@ it("discovers uninstalled public source separately from installed identities and
     "dependency_prepare(sourceId) for unchanged bundled source",
     "end the turn for original native confirmation"
   ])
+  expect(PROJECT_DEPENDENCY_AUTHORING.businessValidation).toMatchObject({
+    discoverInstalled: { action: "project_actions", query: "evidence-validation" },
+    bundledSourceId: "evidence-validation"
+  })
+  expect(PROJECT_DEPENDENCY_AUTHORING.businessValidation.scope).toContain("no truth")
+  expect(PROJECT_DEPENDENCY_AUTHORING.businessValidation.confirmation).toContain("end the turn")
+  expect(PROJECT_DEPENDENCY_AUTHORING.businessValidation.proof).toContain("native gate")
   const overview = developmentCatalogPage()
   if (!("discovery" in overview)) throw Error("expected overview")
   expect(overview.discovery).toContain("project-dependencies")

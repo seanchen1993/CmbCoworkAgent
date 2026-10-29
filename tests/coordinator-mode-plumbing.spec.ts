@@ -2654,8 +2654,13 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    'options.abortSignal?.addEventListener("abort", onAbort',
-    "runtime rejects pending approvals when the owning run is aborted"
+    "withNativeApprovalWait(threadId, options.abortSignal, async (approvalSignal) =>",
+    "runtime retains run ownership while combining native approval and Mods cancellation"
+  )
+  assertIncludes(
+    runtime,
+    'approvalSignal?.addEventListener("abort", onAbort',
+    "runtime rejects pending approvals when the owning run or Mods operation is aborted"
   )
   assertIncludes(
     runtime,

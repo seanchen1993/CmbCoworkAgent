@@ -97,7 +97,7 @@ it("denied notifications never create presentation state", async () => {
     on("command.run",{command:"denied-feedback"},($)=>{ $.ui.toast("denied"); return {text:"done"}; });
     on("ui.toast",{},()=>({deny:"policy"}));
   `)
-  expect(await session.run("denied-feedback", "")).toEqual({})
+  await expect(session.run("denied-feedback", "")).rejects.toThrow("MODS_COMMAND_UNHANDLED")
   expect(await session.feedbackSnapshot()).toEqual([])
 })
 

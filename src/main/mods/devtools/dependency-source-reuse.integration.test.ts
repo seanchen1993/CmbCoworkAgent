@@ -20,6 +20,7 @@ import {
   readDevelopmentDependencySource
 } from "./development-dependency-catalog"
 import { prepareDevelopmentDependency } from "./development-dependency-prepare"
+import { projectDependencyImpact, summarizeProjectDependencyImpact } from "./project-dependency-impact"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -170,6 +171,15 @@ it("preserves every pinned dependency and inert project companion through real s
   })
   cleanup.push(async () => reuse.close())
   development.configureReuse(reuse)
+  const inspectedProviderNames: string[] = []
+  development.configureDependencyImpact(async (currentContext, document) => {
+    currentContext.assertCurrent()
+    const plugin = JSON.parse(document.source.files.find(file => file.path === "plugin.json")!.text).name
+    inspectedProviderNames.push(plugin)
+    return summarizeProjectDependencyImpact(await projectDependencyImpact({
+      plugin, sources: [], assertCurrent: currentContext.assertCurrent
+    }))
+  })
   await development.setEnabled(scope.threadId, root, true)
 
   const mainDirectory = resolve("main")
@@ -239,6 +249,8 @@ it("preserves every pinned dependency and inert project companion through real s
   expect(requestAgain).not.toHaveBeenCalled()
   const prepared = reuse.status(scope)!
   expect(prepared).toMatchObject({ sourceDigest: source.digest, phase: "needs-approval" })
+  expect(inspectedProviderNames).toContain("test-verification")
+  expect(prepared.dependencyImpact).toMatchObject({ inspectedSources: 0, knownDependants: [] })
   expect(applyInstall).not.toHaveBeenCalled()
   expect(authorized).toBe(false)
   expect(stage).not.toHaveBeenCalled()
@@ -278,4 +290,5 @@ it("preserves every pinned dependency and inert project companion through real s
   expect(getPluginSkillSearchSources(installed.path, metadata)).toEqual([])
   expect(metadata.hooks).toBeUndefined()
   expect(metadata.mcpServers).toBeUndefined()
+
 }, 45_000)

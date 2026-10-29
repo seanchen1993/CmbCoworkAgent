@@ -1062,7 +1062,7 @@ test("cleanupThread tears down the workflow_progress RAF buffer (#2 ghost/leak)"
   )
 })
 
-test("approval requests do not auto-timeout and are cleaned up on run abort", () => {
+test("approval requests use native human waits and are cleaned up on run or operation abort", () => {
   const runtimeApprovalSection = sectionBetween(
     runtimeSource,
     "  // ── Wire up the approval orchestrator ──",
@@ -1081,8 +1081,18 @@ test("approval requests do not auto-timeout and are cleaned up on run abort", ()
   )
   assert.match(
     runtimeApprovalSection,
-    /options\.abortSignal\?\.addEventListener\("abort", onAbort, \{ once: true \}\)/,
-    "approval requests should subscribe to the run abort signal"
+    /withNativeApprovalWait\(threadId, options\.abortSignal, async \(approvalSignal\) =>/,
+    "approval requests retain their owning run signal through the native trusted wait"
+  )
+  assert.match(
+    runtimeApprovalSection,
+    /approvalSignal\?\.addEventListener\("abort", onAbort, \{ once: true \}\)/,
+    "approval requests subscribe to the composed run and Mods operation abort signal"
+  )
+  assert.match(
+    runtimeApprovalSection,
+    /approvalSignal\?\.removeEventListener\("abort", onAbort\)/,
+    "settled approval requests remove their composed abort listener"
   )
   // On run abort: onAbort → rejectPending("abort") notifies the renderer on the
   // cancel channel, then resolveOnce removes the pending approval and resolves a
@@ -1107,6 +1117,11 @@ test("approval requests do not auto-timeout and are cleaned up on run abort", ()
     runtimeApprovalSection,
     /pendingApprovals\.delete\(req\.id\)[\s\S]*resolve\(decision\)/,
     "resolving an approval should remove the pending entry before resolving the decision"
+  )
+  assert.match(
+    runtimeApprovalSection,
+    /approvalDecisionBroker\.unregister\(req\.id\)[\s\S]*resolve\(decision\)/,
+    "settled or cancelled approvals unregister the broker before resolving the decision"
   )
   assert.match(
     runtimeApprovalSection,

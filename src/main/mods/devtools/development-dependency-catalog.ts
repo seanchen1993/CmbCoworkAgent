@@ -27,7 +27,16 @@ export const PROJECT_DEPENDENCY_AUTHORING = Object.freeze({
   resume:
     "Re-read project_actions after confirmation. Inspect the actual schemas/identity; patch composition/source.json provider plugin/actionId, preserve Hooks/knowledge/config/checks, then project_compile with the actual latest revision. Execution actions can be separately bound with project_bind_action; config is not input. Companion files used by project Skills/workflows must also be copied into the current project source and declared in resources. Installing a provider does not supply project-relative files.",
   unavailable:
-    "If no actual source/action fits, author an ordinary Function Mod with public claw.actions and on.capability using the catalog types. Do not invent a provider, bypass consent or weaken checks."
+    "If no actual source/action fits, author an ordinary Function Mod with public claw.actions and on.capability using the catalog types. Do not invent a provider, bypass consent or weaken checks.",
+  businessValidation: {
+    discoverInstalled: { action: "project_actions", query: "evidence-validation" },
+    bundledSourceId: "evidence-validation",
+    scope: "Exact source quotations and unchanged upstream summary/citations; no truth, entailment or causality claim.",
+    contracts: "sources={sources:[{id,text}]}; summary/report={summary,citations:[{sourceId,quote}]}. Read source README and actual installed schemas before binding.",
+    checks: "Use native composition action checks with artifact-reference-v1 and maxBytes:28000. Declare the source artifact in summary inputs, and both source+summary artifacts in report inputs. config.sourceArtifactId selects the real source artifact; check-report also needs config.summaryArtifactId. These are artifact IDs, not filesystem paths.",
+    confirmation: "Discover installed once; if unavailable prepare this bundled source once and end the turn for native confirmation. Resume by rereading project_actions after confirmation. Do not poll discovery, invent a provider or repeatedly prepare installation.",
+    proof: "The independent Mod reads actual Host-declared files through authorized fs.read. Run the original project trial: bad quotes/changed report fields must block its native gate. Schema tests or a model-supplied passed:true do not prove business validation."
+  }
 })
 
 /** This root is selected by the Host build, never by a tool argument or author source. */

@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks"
 
 const buckets = [
   "authority", "threadRead", "hostFacts", "snapshot", "inputs",
-  "describeTools", "composePrompt", "policyQueue"
+  "describeTools", "composePrompt", "policyQueue", "streamGuard", "streamFrame", "streamPull"
 ] as const
 type Bucket = typeof buckets[number]
 type Metric = { calls: number; ms: number }
@@ -17,7 +17,18 @@ const empty = (): Record<Bucket, Metric> => Object.fromEntries(
 
 /** Observation only: inherits the existing physical Host run, never grants or owns execution. */
 export function withHostRuntimeTiming<T>(work: () => T): T {
-  return observations.run({ round: 0, metrics: empty() }, work)
+  return observations.run({ round: 0, metrics: empty() }, () => {
+    const finish = () => reportHostRuntimeTiming(0, false, "settlement")
+    try {
+      const result = work()
+      if (result instanceof Promise) return result.finally(finish) as T
+      finish()
+      return result
+    } catch (error) {
+      finish()
+      throw error
+    }
+  })
 }
 
 export function startHostRuntimeTiming(bucket: Bucket): () => void {
@@ -50,7 +61,9 @@ export async function measureHostRuntimeAsync<T>(bucket: Bucket, work: () => Pro
  * Flush before provider IO, so model thinking is excluded from preparationMs. No task content,
  * paths, configuration, errors or externally supplied labels are accepted by this logger.
  */
-export function reportHostRuntimeTiming(preparationMs: number, failed = false): void {
+export function reportHostRuntimeTiming(
+  preparationMs: number, failed = false, phase: "preparation" | "settlement" = "preparation"
+): void {
   const state = observations.getStore()
   if (!state) return
   const metrics = state.metrics
@@ -62,7 +75,7 @@ export function reportHostRuntimeTiming(preparationMs: number, failed = false): 
   try {
     console.info("[HostRuntimeTiming]", JSON.stringify({
       round: Math.min(state.round, 1_000_000), preparationMs: bounded(preparationMs),
-      failed: Number(failed), inclusive: 1,
+      failed: Number(failed), inclusive: 1, phase,
       ...Object.fromEntries(buckets.map(bucket => [bucket, {
         calls: Math.min(metrics[bucket].calls, 1_000_000), ms: bounded(metrics[bucket].ms)
       }]))

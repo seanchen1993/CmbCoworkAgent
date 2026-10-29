@@ -411,6 +411,30 @@ describe("conversational authoring scope", () => {
     await f.service.refreshReuse("one")
     expect(reconcile).toHaveBeenCalledTimes(1)
   })
+  it("binds host-observed dependency impact to the exact source before preparing native reuse", async () => {
+    const f = fixture()
+    await f.service.setMode("one", "workspace", "creator")
+    const draft = f.save()
+    const request = vi.fn<CreatorReuseService["request"]>(async () => {})
+    f.service.configureReuse({ status: () => undefined, reconcile: async () => undefined,
+      request } as unknown as CreatorReuseService)
+    const report = { inspectedSources: 3, knownDependants: [{ id: "caller", name: "调用者",
+      kind: "installed" as const, actionIds: ["check"] }], uninspectedSources: 1,
+      moreSources: true, complete: false as const }
+    const inspect = vi.fn(async () => report)
+    f.service.configureDependencyImpact(inspect)
+    await f.service.requestReuse("one", draft.id, draft.revision)
+    expect(inspect).toHaveBeenCalledOnce()
+    expect(request.mock.calls[0]?.[2]).toMatchObject({ dependencyImpact: report })
+    expect(f.runtime.approveDevelopment).not.toHaveBeenCalled()
+    f.service.configureDependencyImpact(async () => {
+      f.save(draft.revision)
+      return report
+    })
+    await expect(f.service.requestReuse("one", draft.id, draft.revision))
+      .rejects.toThrow("AUTHORING_VERSION_CHANGED")
+    expect(request).toHaveBeenCalledOnce()
+  })
   it("restores the immediately preceding active source as a new checked revision after service recreation", async () => {
     mockPreparedVersions()
     const f = fixture()

@@ -1,7 +1,29 @@
 import { describe, expect, it } from "vitest"
-import { projectDeliveryError, projectDeliveryReconciliationText } from "./project-delivery-view"
+import { projectDeliveryError, projectDeliveryInitialName, projectDeliveryReconciliationText } from "./project-delivery-view"
 
 describe("project delivery recovery guidance", () => {
+  it("derives a recognizable independent name from a real draft when the display title is Chinese", () => {
+    expect(projectDeliveryInitialName({ id: "6898fe88", name: "事实核对报告",
+      draftId: "fact-check-report" })).toBe("fact-check-report-custom")
+    expect(projectDeliveryInitialName({ id: "6898fe88", name: "fact-check-report",
+      draftId: "continued" })).toBe("fact-check-report-custom")
+  })
+  it("retains a saved or edited name instead of re-deriving it from a refreshed request", () => {
+    const request = { id: "new-request", name: "新的标题", draftId: "new-draft" }
+    expect(projectDeliveryInitialName(request, "previously-saved")).toBe("previously-saved")
+    expect(projectDeliveryInitialName(request, "my-edited-name")).toBe("my-edited-name")
+  })
+  it("uses the bounded fallback only when the request has no valid recognizable identity", () => {
+    expect(projectDeliveryInitialName({ id: "ABC-12345678", name: "中文", draftId: "../unsafe" }))
+      .toBe("my-plugin-12345678")
+    expect(projectDeliveryInitialName()).toBe("my-plugin-custom")
+    const name = projectDeliveryInitialName({ id: "unused", name: "a".repeat(48), draftId: "draft" })
+    expect(name).toHaveLength(48)
+    expect(name).toMatch(/^[a-z][a-z0-9-]{0,47}$/)
+    expect(name).toBe(`${"a".repeat(41)}-custom`)
+    expect(projectDeliveryInitialName({ id: "unused", name: `a${"-".repeat(47)}`, draftId: "draft" }))
+      .toBe("a-custom")
+  })
   it("separates an existing export target from uncertain side effects", () => {
     const message = projectDeliveryError(Error("IPC: PROJECT_DELIVERY_EXPORT_TARGET_EXISTS"))
     expect(message).toContain("原文件未覆盖")

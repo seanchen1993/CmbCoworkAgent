@@ -1,5 +1,30 @@
 import { describe, expect, it } from "vitest"
-import { projectRuntimeRecoveryMessage } from "./project-runtime-message"
+import {
+  projectCheckKindLabel,
+  projectPreviewStatusMessage,
+  projectRuntimeRecoveryMessage
+} from "./project-runtime-message"
+
+it("distinguishes actual business receipts from structural and file checks", () => {
+  expect(projectCheckKindLabel("action")).toBe("业务校验")
+  expect(projectCheckKindLabel("json-schema")).toBe("结构检查")
+  expect(projectCheckKindLabel("file-exists")).toBe("文件检查")
+  expect(projectCheckKindLabel(undefined)).toBe("检查")
+})
+
+it("distinguishes completed trials from expired execution authority without declaring stale work reusable", () => {
+  for (const state of ["active", "ended"]) {
+    const message = projectPreviewStatusMessage({ state, revision: 5 }, true)
+    expect(message).toContain("本次试用已完成")
+    expect(message).toContain("插件保存选项")
+    expect(message).not.toContain("重新准备")
+  }
+  expect(projectPreviewStatusMessage({ state: "active", revision: 5 }, false))
+    .toBe("正在试用版本 5")
+  expect(projectPreviewStatusMessage({ state: "active" }, false)).toBe("正在试用")
+  expect(projectPreviewStatusMessage({ state: "ended", revision: 5 }, false))
+    .toContain("不能从旧试用继续执行")
+})
 
 describe("native task recovery guidance", () => {
   it.each([

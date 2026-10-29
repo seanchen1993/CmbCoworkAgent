@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { HostProjectStore } from "./host-store"
 import { hostResultReview, parseHostOperation } from "./host-state-protocol"
 import { boundHostCheckDiagnostic } from "./host-check-diagnostics"
@@ -30,11 +30,47 @@ function openStore(path: string) {
   return store
 }
 afterEach(() => {
+  vi.restoreAllMocks()
   stores.splice(0).forEach((store) => store.close())
   roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true }))
 })
 
 describe("persistent host project state", () => {
+  it("reuses SQL compilation while observing peer cancellation and rejecting changed corrupt rows", () => {
+    const { store, path } = fixture()
+    const operation = store.prepare(prepareFixture())
+    const peer = openStore(path)
+    store.getOperation(operation.operationId)
+    store.getRecentBindingOperation("local-docs", operation.operationId)
+    const prepare = vi.spyOn(DatabaseSync.prototype, "prepare")
+    for (let i = 0; i < 10; i++) {
+      expect(store.get("local-docs")?.version).toBe(1)
+      expect(store.getOperation(operation.operationId)?.status).toBe("prepared")
+      expect(store.getRecentBindingOperation("local-docs", operation.operationId)?.status)
+        .toBe("prepared")
+    }
+    expect(prepare).not.toHaveBeenCalled()
+    peer.cancel(operation.operationId)
+    expect(store.getOperation(operation.operationId)?.status).toBe("cancelled")
+    expect(store.getRecentBindingOperation("local-docs", operation.operationId)?.status)
+      .toBe("cancelled")
+    const returned = store.get("local-docs")!
+    returned.name = "caller mutation"
+    expect(store.get("local-docs")?.name).not.toBe("caller mutation")
+    const raw = new DatabaseSync(path)
+    try {
+      raw.prepare("UPDATE host_projects SET data=json_set(data,'$.name',?) WHERE id=?")
+        .run("peer name", "local-docs")
+      expect(store.get("local-docs")?.name).toBe("peer name")
+      raw.prepare("UPDATE host_operations SET status='started' WHERE id=?")
+        .run(operation.operationId)
+      expect(() => store.getOperation(operation.operationId)).toThrow("STORAGE_MISMATCH")
+      expect(() => store.getRecentBindingOperation("local-docs", operation.operationId))
+        .toThrow("STORAGE_MISMATCH")
+      raw.prepare("UPDATE host_projects SET version=2 WHERE id=?").run("local-docs")
+      expect(() => store.get("local-docs")).toThrow("STORAGE_MISMATCH")
+    } finally { raw.close() }
+  })
   it("keeps Unicode case matching before pagination and after reopening storage", () => {
     const { store, root, path } = fixture()
     for (let index = 0; index < 24; index++)

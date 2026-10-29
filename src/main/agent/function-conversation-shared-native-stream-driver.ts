@@ -1,6 +1,7 @@
 import { IterableReadableStream } from "@langchain/core/utils/stream"
 import type { RunnableConfig } from "@langchain/core/runnables"
 import { types } from "node:util"
+import { measureHostRuntimeSync, measureHostRuntimeAsync } from "../services/host-runtime-timing"
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import { FUNCTION_STREAM_TERMINAL } from "../mods/v2/host-stream-lifetime"
 import { filterModData } from "../mods/publication"
@@ -116,14 +117,14 @@ export function createSharedNativeStreamDriver(mode: "stream" | "events",
   let signal = cut.signal, failed = false, failure: unknown
   const frames: SharedNativeRoutedFrame[] = []
   const wake = () => { const previous = changed; changed = deferred<void>(); previous.resolve() }
-  const guard = () => {
+  const guard = () => measureHostRuntimeSync("streamGuard", () => {
     if (!opening || !domain) fail()
     signal.throwIfAborted()
     if (stopped) fail()
     opening.assertCurrent()
     if (!isSharedNativeDomainCurrent(domain)) fail()
     if (view) { view.assertCurrent(); view.assertDataCurrent() }
-  }
+  })
   const stop = (reason: unknown, isReturn: boolean) => {
     returned ||= isReturn
     stopped = true
@@ -284,7 +285,7 @@ export function createSharedNativeStreamDriver(mode: "stream" | "events",
             guard()
             const frame = frames.shift()
             if (!frame) fail()
-            frame.assertCurrent()
+            measureHostRuntimeSync("streamFrame", () => frame.assertCurrent())
             const waiting = demand
             demand = undefined
             waiting.resolve({ done: false, value: frame.value })
@@ -292,7 +293,8 @@ export function createSharedNativeStreamDriver(mode: "stream" | "events",
           }
           if (view && !demand) { await changed.promise; continue }
           if (!next) {
-            next = Promise.resolve(source.run(() => iterator!.next()))
+            next = measureHostRuntimeAsync("streamPull", () =>
+              Promise.resolve(source.run(() => iterator!.next())))
             void next.catch(() => undefined)
           }
           const selected = mode === "events" && !view
@@ -361,7 +363,7 @@ export function createSharedNativeStreamDriver(mode: "stream" | "events",
             guard()
             const frame = frames.shift()
             if (!frame) fail()
-            frame.assertCurrent()
+            measureHostRuntimeSync("streamFrame", () => frame.assertCurrent())
             const waiting = demand; demand = undefined
             waiting.resolve({ done: false, value: frame.value })
           }

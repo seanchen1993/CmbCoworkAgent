@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
 import type { AuthoringDocument } from "../../../shared/mods/authoring"
-import type { DevelopmentReuseStatus } from "../../../shared/mods/development"
+import type { DevelopmentReuseStatus, DevelopmentDependencyImpact } from "../../../shared/mods/development"
 import type {
   AuthoringInstalledReceipt,
   AuthoringPreparedInstallation,
@@ -59,6 +59,19 @@ const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 const key = (scope: DevelopmentScope) => `mods-creator-reuse-v1:${sha(scope)}`
 const phases = ["preparing", "needs-approval", "applying", "active", "failed", "unknown"]
+
+function validDependencyImpact(value: unknown): value is DevelopmentDependencyImpact {
+  if (!value || typeof value !== "object") return false
+  const row = value as DevelopmentDependencyImpact
+  return row.complete === false && typeof row.moreSources === "boolean" &&
+    Number.isSafeInteger(row.inspectedSources) && row.inspectedSources >= 0 && row.inspectedSources <= 16 &&
+    Number.isSafeInteger(row.uninspectedSources) && row.uninspectedSources >= 0 && row.uninspectedSources <= 16 &&
+    Array.isArray(row.knownDependants) && row.knownDependants.length <= 16 && row.knownDependants.every(item =>
+      !!item && typeof item.id === "string" && item.id.length <= 256 &&
+      typeof item.name === "string" && item.name.length <= 100 &&
+      ["installed", "candidate"].includes(item.kind) && Array.isArray(item.actionIds) &&
+      item.actionIds.length <= 256 && item.actionIds.every(id => typeof id === "string" && id.length <= 100))
+}
 
 /** A local convenience over the existing formal installer. Stored progress is never consent. */
 export class CreatorReuseService {
@@ -145,6 +158,7 @@ export class CreatorReuseService {
       !Array.isArray(plan.status.capabilities) ||
       plan.status.capabilities.length > 512 ||
       plan.status.capabilities.some((value) => typeof value !== "string") ||
+      (plan.status.dependencyImpact !== undefined && !validDependencyImpact(plan.status.dependencyImpact)) ||
       !Number.isSafeInteger(plan.status.revision) ||
       plan.status.revision < 1 ||
       typeof plan.formalDraftId !== "string" ||
@@ -470,10 +484,13 @@ export class CreatorReuseService {
       turnId?: string
       signal: AbortSignal
       assertTurn(): void
+      dependencyImpact?: DevelopmentDependencyImpact
     }
   ): Promise<void> {
     context.assertCurrent()
     input.assertTurn()
+    if (input.dependencyImpact !== undefined && !validDependencyImpact(input.dependencyImpact))
+      throw Error("CREATOR_REUSE_RECORD_INVALID")
     const { scope } = context
     if (this.closed || this.entries.get(scope.threadId)?.applying) throw Error("CREATOR_REUSE_BUSY")
     if (!this.entries.has(scope.threadId) && this.entries.size >= 32) {
@@ -540,6 +557,7 @@ export class CreatorReuseService {
           draftId: document.id,
           revision: document.revision,
           sourceDigest: document.source.digest,
+          ...(input.dependencyImpact ? { dependencyImpact: structuredClone(input.dependencyImpact) } : {}),
           capabilities: []
         }
       }

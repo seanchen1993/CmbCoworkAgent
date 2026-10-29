@@ -71,7 +71,8 @@ it("routes native source edits and dependency reuse before legacy modularization
     "sourcePatch", "add /modules/-", "test 目标模块的 id",
     "不能按插件名称", "不再 inspect_raw", "由项目使用入口填写",
     'project_scaffold(template:"native-modular")', "用户不需要选择内部模板", "当前 JSON Schema 子集要求对象根",
-    "一次原子提交完整模块", "不静默改格式"])
+    "按依赖范围原子提交", "按完整模块分批", "不静默改格式",
+    "独立检查 Mod 接入原项目门禁", "不信任模型自报 passed:true"])
     expect(prompt).toContain(text)
   expect(modAuthoringRuntimePrompt([{ name: "mod_business" }])).not.toContain("dependency_save")
 })

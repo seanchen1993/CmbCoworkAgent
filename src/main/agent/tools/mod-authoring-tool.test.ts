@@ -64,7 +64,10 @@ function fixture(existing: Record<string, number> = {}) {
     submit: vi.fn(async () => ({ check: { valid: true, runtimeVerified: false } })),
     resumeTrial: vi.fn(async () => ({ trials: [] })),
     undoTrial: vi.fn(async () => ({ action: "restore-queued" })),
-    requestReuse: vi.fn(async () => ({ reuse: { phase: "needs-approval" } }))
+    requestReuse: vi.fn(async () => ({ reuse: { phase: "needs-approval" } })),
+    projectAuthoringContext: () => ({ scope: { threadId, workspace,
+      incarnation: { token: "tool-test", legacyCreatedAt: 1 } }, assertCurrent: () => {} }),
+    assertScope: () => {}
   }
   setModDevelopmentService(service as unknown as ModDevelopmentService)
   claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "first" })

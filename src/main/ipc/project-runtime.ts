@@ -214,7 +214,7 @@ export function registerProjectRuntimeHandlers(
   projectAuthoringSessions.configureTrialObservation((projectId) => ({
     project: platform().get(projectId),
     operations: platform().operations(projectId, 100)
-  }))
+  }), (scope, draftId) => !!projectPreviewRegistry.retained(scope, draftId))
   registerBuiltinProjectBinding((threadId, workspace, projectId) => {
     if (!service) return false
     const row = getThreadRuntimeScope(threadId)

@@ -225,12 +225,12 @@ export async function executeHostProjectSkill(
       try {
         if (
           context.signal.aborted &&
-          terminal &&
-          terminal.outcome !== "unknown" &&
           context.assertSettlementCurrent
         ) {
           // The original run and its owned workflows have physically stopped. Inspect the
           // captured facts directly; the aborted token stays revoked for all ordinary IO.
+          // Unknown execution evidence still needs this read-only fence: using the
+          // revoked token would misreport cancellation as changed runtime inputs.
           snapshots.read(project.pluginDigest)
           assertInstallationCurrent()
           assertThreadCurrent()

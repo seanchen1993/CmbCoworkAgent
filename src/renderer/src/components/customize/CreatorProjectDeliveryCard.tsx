@@ -6,7 +6,7 @@ import type {
 } from "../../../../shared/mods/development"
 import { isSameWorkspacePath } from "../../../../shared/workspace-path"
 import { useAppStore } from "@/lib/store"
-import { projectDeliveryError, projectDeliveryReconciliationText } from "./project-delivery-view"
+import { projectDeliveryError, projectDeliveryInitialName, projectDeliveryReconciliationText } from "./project-delivery-view"
 import { InstalledPluginStartUse } from "./InstalledPluginStartUse"
 import { creatorJourneyView } from "./creator-journey-view"
 
@@ -47,16 +47,8 @@ function ScopedDelivery({
 }: Parameters<typeof CreatorProjectDeliveryCard>[0]) {
   const current =
     !!request && delivery?.requestId === request.id && delivery.sourceDigest === request.digest
-  const [name, setName] = useState(
-    current && delivery
-      ? delivery.name
-      : `${request && /^[a-z][a-z0-9-]{0,38}$/.test(request.name) ? request.name : "my-plugin"}-${
-          request?.id
-            .replace(/[^a-z0-9]/gi, "")
-            .toLowerCase()
-            .slice(-8) || "custom"
-        }`
-  )
+  const [name, setName] = useState(() =>
+    projectDeliveryInitialName(request, current && delivery ? delivery.name : undefined))
   const [version, setVersion] = useState(current && delivery ? delivery.version : "1.0.0")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")

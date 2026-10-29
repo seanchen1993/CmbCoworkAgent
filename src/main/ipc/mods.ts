@@ -1,3 +1,4 @@
+import { projectDependencyImpact, summarizeProjectDependencyImpact } from "../mods/devtools/project-dependency-impact"
 import { withTrustedFunctionWait } from "../mods/v2/trusted-function-wait"
 import { setProjectRuntimeFunctions } from "../harness-board/project-runtime-function-source"
 import { ApplicationCompletionPolicies } from "../mods/v2/application-completion-policy"
@@ -1490,6 +1491,19 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     }
   })
   development.configureReuse(creatorReuse)
+  development.configureDependencyImpact(async (context, document) => {
+    context.assertCurrent()
+    const plugin = JSON.parse(document.source.files.find(file => file.path === "plugin.json")!.text).name
+    const report = await projectDependencyImpact({ plugin,
+      sources: [...getPlugins().map(item => ({ id: item.id, name: item.name,
+        kind: "installed" as const, enabled: item.enabled, directory: item.path })),
+        ...projectAuthoringSessions.dependencySources(context.scope),
+        ...development.status(context.scope.threadId).drafts.map(draft => ({ id: `mod:${draft.id}`,
+          name: draft.name, kind: "candidate" as const,
+          source: development.read(context.scope.threadId, draft.id).source }))],
+      assertCurrent: context.assertCurrent })
+    return summarizeProjectDependencyImpact(report)
+  })
   reconcileCreatorReuse = threadId => creatorReuse.reconcileAuthorizations(threadId)
   const trialUndo = new CreatorTrialUndoScheduler({
     read: scope => functions.developmentStatus(scope),

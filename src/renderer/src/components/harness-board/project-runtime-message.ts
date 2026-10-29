@@ -1,3 +1,20 @@
+export function projectPreviewStatusMessage(
+  preview: { state: string; revision?: number },
+  completed: boolean
+): string {
+  if (completed) return "本次试用已完成。请回制作会话查看验收结果和插件保存选项。"
+  if (preview.state === "active")
+    return preview.revision === undefined ? "正在试用" : `正在试用版本 ${preview.revision}`
+  return "此试用已结束或随应用重启失效，历史仍可查看。请回制作会话重新准备，不能从旧试用继续执行。"
+}
+
+export function projectCheckKindLabel(kind: string | undefined): string {
+  if (kind === "action") return "业务校验"
+  if (kind === "json-schema") return "结构检查"
+  if (kind === "file-exists") return "文件检查"
+  return "检查"
+}
+
 /** Shared recovery wording for both project entry points; technical details remain expandable. */
 export function projectRuntimeRecoveryMessage(error: string): string | undefined {
   if (/PROJECT_TEMPLATE_(PLUGIN|RESPONSE)_LIMIT/.test(error))

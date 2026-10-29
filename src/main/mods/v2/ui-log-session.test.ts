@@ -112,7 +112,7 @@ it("denied logs reach neither transcript nor debug", async () => {
     on("command.run", {command:"log"}, ($) => { $.ui.log("denied"); return {text:"done"}; });
     on("ui.log", () => ({deny:"no logging"}));
   `)
-  await session.run("log", "")
+  await expect(session.run("log", "")).rejects.toThrow("MODS_COMMAND_UNHANDLED")
   expect(await session.logSnapshot()).toEqual([])
   expect(debugLog).not.toHaveBeenCalled()
 })
@@ -124,7 +124,7 @@ it.each(['{to:"network"}', "{to:null}", '{to:"transcript",plugin:"other"}', "nul
     on("session.start", async ($, e, next) => { await $.command.register({name:"invalid",description:"test"}); return next(e); });
     on("command.run", {command:"invalid"}, ($) => { $.ui.log("invalid", ${options}); return {text:"bad"}; });
   `)
-    await session.run("invalid", "")
+    await expect(session.run("invalid", "")).rejects.toThrow("MODS_COMMAND_UNHANDLED")
     expect(await session.logSnapshot()).toEqual([])
     expect(debugLog).not.toHaveBeenCalled()
   }

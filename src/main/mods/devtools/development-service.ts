@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import { join } from "node:path"
 import type { AuthoringDocument, AuthoringFile } from "../../../shared/mods/authoring"
-import type { DevelopmentMode, DevelopmentStatus } from "../../../shared/mods/development"
+import type { DevelopmentMode, DevelopmentStatus, DevelopmentDependencyImpact } from "../../../shared/mods/development"
 import type { DevelopmentScope, DevelopmentRevision } from "../v2/development-session"
 import { DEVELOPMENT_CAPABILITIES, DEVELOPMENT_EVENT_CAPABILITIES } from "../v2/development-session"
 import type { AuthoringDraft } from "./authoring-store"
@@ -108,6 +108,12 @@ export function developmentTrialEnvelope(review: {
 
 /** Model tools manage drafts only. Trusted renderer controls own enable, consent and promotion. */
 export class ModDevelopmentService {
+  private dependencyImpact?: (context: DevelopmentContext,
+    document: AuthoringDocument) => Promise<DevelopmentDependencyImpact>
+
+  configureDependencyImpact(read: NonNullable<ModDevelopmentService["dependencyImpact"]>) {
+    this.dependencyImpact = read
+  }
   private planning?: CreatorPlanningService
   configurePlanning(service: CreatorPlanningService): void { this.planning = service }
   planningCatalog(threadId: string, workspace: string) {
@@ -896,7 +902,13 @@ export class ModDevelopmentService {
     if (document.revision !== revision) throw Error("AUTHORING_VERSION_CHANGED")
     await this.reuse.reconcile(context)
     assertTurn()
-    await this.reuse.request(context, document, { turnId, signal, assertTurn })
+    const dependencyImpact = await this.dependencyImpact?.(context, document)
+    context.assertCurrent()
+    assertTurn()
+    const current = this.read(threadId, id)
+    if (current.revision !== document.revision || current.source.digest !== document.source.digest)
+      throw Error("AUTHORING_VERSION_CHANGED")
+    await this.reuse.request(context, document, { turnId, signal, assertTurn, dependencyImpact })
     return this.status(threadId)
   }
   async approveReuse(threadId: string, expectedWorkspace: string, input: CreatorReuseApproval) {

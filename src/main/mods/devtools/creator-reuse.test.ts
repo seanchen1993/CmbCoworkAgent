@@ -10,6 +10,7 @@ import type { DevelopmentScope } from "../v2/development-session"
 import type { ClawProfile } from "../../../shared/mods/claw"
 import { CreatorCompositionSave } from "./creator-composition-save"
 import { CreatorCompositionHistory } from "./creator-composition-history"
+import { projectDependencyImpact, summarizeProjectDependencyImpact } from "./project-dependency-impact"
 import type { DevelopmentTrialStatus } from "../../../shared/mods/development"
 import { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
@@ -817,6 +818,21 @@ describe("native creator review handoff in the actual agent graph", () => {
 })
 
 describe("one-review formal creator reuse", () => {
+  it("prepares native reuse with a bounded long consumer display name without changing any identity", async () => {
+    const f = fixture()
+    const report = await projectDependencyImpact({ plugin: "demo", sources: [], assertCurrent: () => {} })
+    report.dependants.push({ id: "actual-consumer", name: "合法已安装长名称".repeat(30), kind: "installed",
+      references: [{ actionId: "verify", usedBy: "artifact-check", identityPinned: true,
+        pluginId: "actual-provider", digest: "a".repeat(64) }] })
+    report.inspectedSources = 1
+    const dependencyImpact = summarizeProjectDependencyImpact(report)
+    await f.service.request(f.context, f.deps.readDraft(), {
+      signal: new AbortController().signal, assertTurn: () => {}, dependencyImpact })
+    expect(f.service.status(f.scope)).toMatchObject({ phase: "needs-approval",
+      dependencyImpact: { knownDependants: [{ id: "actual-consumer", name: expect.stringContaining("…"),
+        actionIds: ["verify"] }] } })
+    expect(f.install.apply).not.toHaveBeenCalled()
+  })
   it("projects a cold unstarted review as requiring fresh preparation without changing its record", async () => {
     const f = fixture()
     const write = vi.spyOn(f.deps.settings, "compareAndSetSetting")

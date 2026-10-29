@@ -4,12 +4,17 @@ import { describe, expect, it, vi } from "vitest"
 import { DevelopmentReusePlanCard } from "../components/customize/DevelopmentReusePlanCard"
 import type { DevelopmentStatus } from "../../../shared/mods/development"
 
-function render(save: NonNullable<DevelopmentStatus["save"]>, phase: "needs-approval" | "active") {
+function render(
+  save: NonNullable<DevelopmentStatus["save"]>,
+  phase: "needs-approval" | "active" | "unknown",
+  error?: string
+) {
   const approve = vi.fn()
   const html = renderToStaticMarkup(
     React.createElement(DevelopmentReusePlanCard, {
       plan: {
         phase,
+        error,
         planId: "plan",
         name: "Weather",
         draftId: "weather",
@@ -55,5 +60,32 @@ describe("named combination save feedback", () => {
       "active"
     )
     expect(html).toContain("已保存搭配「日常开发」，版本 2")
+  })
+  it("does not mistake a saved dependency awaiting runtime readiness for complete named-save success", () => {
+    const { html, approve } = render(
+      { saved: false, phase: "unknown", name: "日常开发", revision: 0, dependencies: [] },
+      "unknown",
+      "CREATOR_REUSE_RUNTIME_UNCONFIRMED"
+    )
+    expect(html).toContain("这个正式功能版本已保存，当前聊天尚未确认运行就绪")
+    expect(html).toContain("完整搭配的保存结果以上方状态为准")
+    expect(html).not.toContain("正式版本和可复用组合已保存")
+    expect(html).not.toContain("已保存搭配")
+    expect(html).toContain("核对运行状态")
+    expect(html).not.toContain("确认保存并复用")
+    expect(approve).not.toHaveBeenCalled()
+  })
+  it("keeps true unconfirmed installation outcomes protected rather than claiming a saved version", () => {
+    const { html, approve } = render(
+      { saved: false, phase: "unknown", name: "日常开发", revision: 0, dependencies: [] },
+      "unknown",
+      "CREATOR_REUSE_RESTART_UNCONFIRMED"
+    )
+    expect(html).toContain("保存或切换结果待核对")
+    expect(html).toContain("不要重复安装或授权")
+    expect(html).toContain("核对复用状态")
+    expect(html).not.toContain("核对运行状态")
+    expect(html).not.toContain("这个正式功能版本已保存")
+    expect(approve).not.toHaveBeenCalled()
   })
 })

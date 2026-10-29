@@ -85,7 +85,7 @@ it.each(["", "keep drawing"])(
   "honors a before-next deny %j without changing the drawing",
   async (deny) => {
     const f = await fixture(`on("ui.invalidate",()=>({deny:${JSON.stringify(deny)}}));`)
-    await f.session.run("redraw", "")
+    await expect(f.session.run("redraw", "")).rejects.toThrow("MODS_COMMAND_UNHANDLED")
     expect((await f.session.panes.snapshot())[0].generation).toBe(f.initial.generation)
   }
 )
@@ -114,7 +114,7 @@ it.each(["prompt.compose", "extra-args"])(
     const f = await fixture(
       `on("ui.invalidate",async($,e,next)=>{await $.store.set("entered",true);return next(e)});`
     )
-    await f.session.run("redraw", args)
+    await expect(f.session.run("redraw", args)).rejects.toThrow("MODS_COMMAND_UNHANDLED")
     expect(f.state.has("entered")).toBe(false)
     expect((await f.session.panes.snapshot())[0].generation).toBe(f.initial.generation)
   }
@@ -133,7 +133,7 @@ it("does not roll back a real invalidation when a hook denies after next", async
   const f = await fixture(`on("ui.invalidate",async($,e,next)=>{
     await next(e);await $.store.set("after",true);return {deny:"late veto"}
   });`)
-  await f.session.run("redraw", "")
+  await expect(f.session.run("redraw", "")).rejects.toThrow("MODS_COMMAND_UNHANDLED")
   expect(f.state.get("after")).toBe(true)
   expect((await f.session.panes.snapshot())[0].generation).not.toBe(f.initial.generation)
 })
@@ -141,7 +141,7 @@ it("rejects a rewritten unsupported target before the invalidation core", async 
   const f = await fixture(`on("ui.invalidate",async($,e,next)=>{
     await $.store.set("entered",true);return next({event:"prompt.compose"})
   });`)
-  await f.session.run("redraw", "")
+  await expect(f.session.run("redraw", "")).rejects.toThrow("MODS_COMMAND_UNHANDLED")
   expect(f.state.get("entered")).toBe(true)
   expect((await f.session.panes.snapshot())[0].generation).toBe(f.initial.generation)
 })

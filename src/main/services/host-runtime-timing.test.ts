@@ -22,6 +22,31 @@ function fixture() {
 }
 
 describe("Host runtime timing observations", () => {
+  it.each([false, true])("flushes the final stream costs without changing values or failures (%s)", async (fail) => {
+    const f = fixture(), error = Error("private path and task contents")
+    const guard = vi.fn(() => { f.advance(300) })
+    const frame = vi.fn(() => { f.advance(280) })
+    const next = vi.fn(async () => {
+      f.advance(400)
+      if (fail) throw error
+      return { done: false, value: "private result" }
+    })
+    const run = withHostRuntimeTiming(async () => {
+      measureHostRuntimeSync("streamGuard", guard)
+      measureHostRuntimeSync("streamFrame", frame)
+      return measureHostRuntimeAsync("streamPull", next)
+    })
+    if (fail) await expect(run).rejects.toBe(error)
+    else await expect(run).resolves.toEqual({ done: false, value: "private result" })
+    expect(guard).toHaveBeenCalledOnce()
+    expect(frame).toHaveBeenCalledOnce()
+    expect(next).toHaveBeenCalledOnce()
+    expect(f.log).toHaveBeenCalledOnce()
+    expect(f.summary()).toMatchObject({ phase: "settlement",
+      streamGuard: { calls: 1, ms: 300 }, streamFrame: { calls: 1, ms: 280 },
+      streamPull: { calls: 1, ms: 400 } })
+    expect(String(f.log.mock.calls[0][1])).not.toContain("private")
+  })
   it("leaves ordinary execution and errors untouched without a Host scope", async () => {
     const f = fixture(), error = Error("ordinary failure")
     expect(measureHostRuntimeSync("authority", () => 42)).toBe(42)

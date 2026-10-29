@@ -105,8 +105,8 @@ it("dispatches mcp.call as an operation with plugin origin and revalidates rewri
   })
   expect(callMcp).toHaveBeenCalledOnce()
   const invalid = await session(`on("mcp.call",(_,e,next)=>next({...e,args:[]}));`, { callMcp })
-  // The optional command hook recovers to core's empty result when its SDK call fails.
-  expect(await invalid.run("mcp", "{}")).toEqual({})
+  // The failing optional command falls through to the unhandled core, never empty success.
+  await expect(invalid.run("mcp", "{}")).rejects.toThrow("MODS_COMMAND_UNHANDLED")
   expect(callMcp).toHaveBeenCalledOnce()
 })
 
@@ -124,7 +124,7 @@ it("allows synthetic results and deny without contacting the host and protects e
     isError: true
   })
   const denied = await session(`on("mcp.call",()=>({deny:"blocked"}));`, { callMcp })
-  expect(await denied.run("mcp", "{}")).toEqual({})
+  await expect(denied.run("mcp", "{}")).rejects.toThrow("MODS_COMMAND_UNHANDLED")
   expect(callMcp).not.toHaveBeenCalled()
 })
 

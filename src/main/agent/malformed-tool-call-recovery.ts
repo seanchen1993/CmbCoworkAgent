@@ -92,8 +92,9 @@ const MALFORMED_TRUNCATED_MESSAGE =
 const MALFORMED_SYNTAX_MESSAGE =
   "The arguments for this tool call had a JSON SYNTAX ERROR (for example an unescaped quote or newline inside a string, " +
   "a trailing comma, or mismatched brackets/quotes), so the tool was NOT run. Fix the JSON syntax and re-issue the call. " +
-  "The content you intended is probably fine — you most likely just need to correct the escaping or punctuation, not " +
-  "shrink or change what you are trying to do."
+  "Use the parser position and nearby excerpt to repair the actual structure. If this repeats, send smaller " +
+  "coherent edits supported by the tool, preserving required checks and atomic dependencies. Do not regenerate " +
+  "the same large malformed payload or remove requirements to make it parse."
 
 /** Best-effort classification of WHY the args JSON failed to parse, so the model
  * gets targeted advice. Truncation (args cut off in transit — common with a big
@@ -162,6 +163,15 @@ const SNIPPET_EDGE_CHARS = 300
 export function argsSnippet(raw: unknown): string {
   if (typeof raw !== "string" || raw.trim() === "") return ""
   if (raw.length <= SNIPPET_WHOLE_MAX_CHARS) return raw
+  const positionText = /\bposition (\d+)\b/.exec(jsonParseErrorDetail(raw))?.[1]
+  const position = positionText === undefined ? -1 : Number(positionText)
+  if (position > SNIPPET_EDGE_CHARS && position < raw.length - SNIPPET_EDGE_CHARS) {
+    const start = Math.max(0, position - 125)
+    const end = Math.min(raw.length, position + 125)
+    return `${raw.slice(0, 150)}\n…[${start - 150} characters omitted]…\n` +
+      `[near parser position ${position}] ${raw.slice(start, end)}\n` +
+      `…[${raw.length - 150 - end} characters omitted]…\n${raw.slice(-150)}`
+  }
   const omitted = raw.length - 2 * SNIPPET_EDGE_CHARS
   return `${raw.slice(0, SNIPPET_EDGE_CHARS)}\n…[${omitted} characters omitted]…\n${raw.slice(-SNIPPET_EDGE_CHARS)}`
 }

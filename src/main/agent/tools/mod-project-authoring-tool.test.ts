@@ -26,6 +26,51 @@ afterEach(async () => {
 })
 
 describe("natural language project authoring actions", () => {
+  it("offers native source continuation, comparison and archive through the real creator authority", async () => {
+    const scope = { threadId, workspace: "workspace",
+      incarnation: { token: `continuous-${++sequence}`, legacyCreatedAt: 1 } }
+    setModDevelopmentService({ isCreatorMode: () => true, status: () => ({ drafts: [] }),
+      projectAuthoringContext: () => ({ scope, assertCurrent: () => {} }), assertScope: () => {}
+    } as unknown as ModDevelopmentService)
+    claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "run" })
+    const draft = await projectAuthoringSessions.scaffold(scope, "continuous", "项目", () => {})
+    roots.add(dirname(draft.directory))
+    const author = createModAuthoringTool({ threadId, workspace: scope.workspace })
+    expect(JSON.parse(await author.invoke({ action: "project_versions", id: draft.id })))
+      .toMatchObject({ ok: true, result: { historyComplete: true, versions: [{ revision: 1 }] } })
+    expect(JSON.parse(await author.invoke({ action: "project_continue", id: draft.id, revision: 1 })))
+      .toMatchObject({ ok: false, error: "DEVELOPMENT_INPUT",
+        missingFields: ["sourceDigest", "newId"] })
+    const continued = JSON.parse(await author.invoke({ action: "project_continue", id: draft.id,
+      revision: 1, sourceDigest: draft.source.digest, newId: "continued" }))
+    expect(continued).toMatchObject({ ok: true, result: { id: "continued", revision: 1,
+      sourceDigest: draft.source.digest, executed: false, previousTrialPreserved: true,
+      nextStep: { action: "project_compile", id: "continued", revision: 1 } } })
+    expect(continued.result).not.toHaveProperty("source")
+    expect(continued.result).not.toHaveProperty("directory")
+    expect(continued.result).not.toHaveProperty("fileIndex")
+    expect(JSON.stringify(continued.result).length).toBeLessThan(1500)
+    expect(JSON.parse(await author.invoke({ action: "project_compare", id: draft.id, revision: 1,
+      otherId: "continued", otherRevision: 1 }))).toMatchObject({ ok: true, result: { equal: true } })
+    expect(JSON.parse(await author.invoke({ action: "project_archive", id: draft.id, revision: 1,
+      sourceDigest: draft.source.digest }))).toMatchObject({ ok: true,
+        result: { archived: true, sourceHistoryPreserved: true } })
+    expect(JSON.parse(await author.invoke({ action: "project_list" })).result)
+      .toContainEqual(expect.objectContaining({ id: draft.id, archived: true }))
+    expect(JSON.parse(await author.invoke({ action: "dependency_impact", name: "unrelated-provider" })))
+      .toMatchObject({ ok: true, result: { complete: false, dependants: [], grantsAuthority: false } })
+    expect(author.description).toContain("project_continue(id,revision,sourceDigest,newId)")
+    expect(author.description).not.toContain("project_save with a new draft id")
+    expect(author.description).not.toContain("At 4 drafts per creator session or 16 sessions")
+    expect(author.description).toContain("archival does not free historical bytes or creator-session capacity")
+    expect(author.description).toContain("Continuation inherits no preview authority, grants or execution")
+    expect(author.description).toContain("dynamic script references")
+    vi.spyOn(projectAuthoringSessions, "continue").mockRejectedValueOnce(Error("PROJECT_DRAFT_HISTORY_STORAGE_LIMIT"))
+    expect(JSON.parse(await author.invoke({ action: "project_continue", id: "continued", revision: 1,
+      sourceDigest: draft.source.digest, newId: "no-capacity" }))).toMatchObject({ ok: false,
+        error: "PROJECT_DRAFT_HISTORY_STORAGE_LIMIT", hint: expect.stringContaining("归档仅释放活跃槽位") })
+  })
+
   it("reports the exact saved author schema and keeps its real revision when compile rejects a text root", async () => {
     const scope = {
       threadId,
@@ -425,9 +470,15 @@ describe("natural language project authoring actions", () => {
       const result = JSON.parse(raw)
       expect(result).toMatchObject({ ok: false, error: "PROJECT_DRAFT_LIMIT", limit: reason })
       expect(result.hint).toContain("project_read")
-      expect(result.hint).toContain(reason === "revision" ? "revision:0" : "project_pack")
+      expect(result.hint).toContain(reason === "revision" ? "project_continue" : "project_pack")
+      if (reason === "drafts") {
+        expect(result.hint).toContain("project_archive(id,revision,sourceDigest)")
+        expect(result.hint).toContain("归档不释放历史字节")
+        expect(result.hint).toContain("unknown")
+      }
       expect(result.hint).toContain(
-        reason === "revision" ? "公开动作锁" : "运行、权限与未核对试用不会自动恢复"
+        reason === "revision" ? "project_compare"
+          : reason === "drafts" ? "新草稿不继承权限和试用" : "运行、权限与未核对试用不会自动恢复"
       )
     }
   )

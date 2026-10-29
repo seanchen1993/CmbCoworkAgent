@@ -6,6 +6,7 @@ import { createRequire } from "node:module"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { build } from "esbuild"
+import { AUTHORING_TEMPLATE_KINDS } from "../src/main/mods/devtools/authoring-templates"
 
 async function main() {
   const root = resolve(__dirname, "..")
@@ -36,10 +37,11 @@ async function main() {
       [join(owned, "preview.cjs")],
       { cwd: root, env, windowsHide: true, timeout: 60000, maxBuffer: 2 * 1024 * 1024 }
     )
-    for (const kind of ["command", "tool", "rule", "panel", "flow-action"])
+    for (const kind of AUTHORING_TEMPLATE_KINDS)
       assert(stdout.includes(`PASS actual worker and utility preview: ${kind}`))
+    assert(stdout.includes("PASS actual utility public capability: exact result and invalid-input refusal"))
     console.log(
-      "PASS authoring preview: five real handlers, analysis Worker and isolated utility process"
+      `PASS authoring preview: ${AUTHORING_TEMPLATE_KINDS.length} actual templates, analysis Worker, isolated utility process and public capability input checks`
     )
   } finally {
     assert.equal(dirname(resolve(owned)), parent)

@@ -228,9 +228,9 @@ it("remote 502 with a budget-looking message remains the original provider api-e
 it("a Guest cannot inject a wider billing budget through its public model request", async () => {
   const f = await fixture()
   await f.run(async () => {
-    // Invalid optional handler arguments are isolated by the original guest dispatcher;
-    // they cannot fabricate a completion result or enter the native provider.
-    expect((await f.rawAsk("forge")).text).toBeUndefined()
+    // Invalid optional handler arguments are isolated by the guest dispatcher, then
+    // the current command core rejects unhandled work instead of returning fake success.
+    await expect(f.rawAsk("forge")).rejects.toThrow("MODS_COMMAND_UNHANDLED")
     expect(() =>
       functionModelRequest(
         { model: "fixture", prompt: "invalid", budget: { modelAttemptLimit: 999 } },

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { mkdirSync } from "node:fs"
 import { dirname, isAbsolute, resolve } from "node:path"
-import { DatabaseSync } from "node:sqlite"
+import { DatabaseSync, type StatementSync } from "node:sqlite"
 import type { ProjectWorkspaceModeGuard } from "./workspace-mode-guard"
 import { parseHostLegacyImportReceipt } from "./legacy-import-protocol"
 import { effectiveHostResultApproval } from "../../../shared/project-runtime/import-approval-policy"
@@ -43,6 +43,9 @@ const ACTIVE_STATUSES = ["prepared", "started", "cancel_requested", "succeeded",
 /** Local host projects only. Never use this database as an alternate legacy plugin state store. */
 export class HostProjectStore {
   private readonly db: DatabaseSync
+  private projectRead?: StatementSync
+  private operationRead?: StatementSync
+  private bindingOperationsRead?: StatementSync
   private readonly tickets = new WeakMap<HostExecutionTicket, string>()
 
   constructor(
@@ -121,8 +124,10 @@ export class HostProjectStore {
   }
 
   get(projectId: string): HostProjectState | undefined {
-    const row = this.db
-      .prepare("SELECT id,version,data FROM host_projects WHERE id=?")
+    // Reuse compiled SQL only. Every admission still reads current rows and runs
+    // the complete schema/column consistency checks below; no state is cached.
+    const row = (this.projectRead ??= this.db
+      .prepare("SELECT id,version,data FROM host_projects WHERE id=?"))
       .get(hostText(projectId))
     if (!row) return undefined
     const state = parseHostProjectState(JSON.parse(String(row.data)))
@@ -149,8 +154,8 @@ export class HostProjectStore {
   }
 
   getOperation(operationId: string): HostProjectOperation | undefined {
-    const row = this.db
-      .prepare("SELECT id,project_id,idempotency_key,status,data FROM host_operations WHERE id=?")
+    const row = (this.operationRead ??= this.db
+      .prepare("SELECT id,project_id,idempotency_key,status,data FROM host_operations WHERE id=?"))
       .get(hostText(operationId))
     if (!row) return undefined
     return this.parseOperationRow(row)
@@ -181,10 +186,10 @@ export class HostProjectStore {
    * Read once without constructing UI facts, diagnostics or issuing one SQL read per operation.
    */
   getRecentBindingOperation(projectId: string, operationId: string): HostProjectOperation | undefined {
-    const rows = this.db.prepare(
+    const rows = (this.bindingOperationsRead ??= this.db.prepare(
       "SELECT id,project_id,idempotency_key,status,data FROM host_operations " +
       "WHERE project_id=? ORDER BY rowid DESC LIMIT 20"
-    ).all(hostText(projectId))
+    )).all(hostText(projectId))
     const operations = rows.map(row => this.parseOperationRow(row))
     return operations.find(operation => operation.operationId === operationId)
   }

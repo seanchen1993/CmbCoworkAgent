@@ -331,6 +331,14 @@ describe("jsonParseErrorDetail (ground-truth parser message)", () => {
 })
 
 describe("argsSnippet (bounded original-text excerpt)", () => {
+  it("preserves an interior syntax failure while bounding the recovery context", () => {
+    const raw = `{"prefix":"${"a".repeat(900)}","checks":[{"required":true}},"tail":"${"b".repeat(900)}"}`
+    const snippet = argsSnippet(raw)
+    expect(snippet).toContain('"checks":[{"required":true}}')
+    expect(snippet).toContain("near parser position")
+    expect(snippet.length).toBeLessThan(750)
+  })
+
   it("keeps small args whole so the model can fix its own text", () => {
     const raw = '{"path": "a",}'
     expect(argsSnippet(raw)).toBe(raw)

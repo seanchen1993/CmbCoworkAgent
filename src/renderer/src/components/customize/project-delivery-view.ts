@@ -1,3 +1,18 @@
+import type { DevelopmentProjectTrialRequest } from "../../../../shared/mods/development"
+
+/** Initialization only. A native saved name or an already edited input is never re-derived. */
+export function projectDeliveryInitialName(
+  request?: Pick<DevelopmentProjectTrialRequest, "id" | "name" | "draftId">,
+  retainedName?: string
+): string {
+  if (retainedName !== undefined) return retainedName
+  const base = [request?.name, request?.draftId].find(value =>
+    typeof value === "string" && /^[a-z][a-z0-9-]{0,47}$/.test(value))
+  if (base) return `${base.slice(0, 41).replace(/-+$/, "")}-custom`
+  const suffix = request?.id.replace(/[^a-z0-9]/gi, "").toLowerCase().slice(-8) || "custom"
+  return `my-plugin-${suffix}`
+}
+
 /** Public recovery guidance only; native delivery remains the operation authority. */
 export function projectDeliveryError(cause: unknown): string {
   const message = cause instanceof Error ? cause.message : ""

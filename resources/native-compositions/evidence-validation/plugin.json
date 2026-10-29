@@ -1,0 +1,6 @@
+{
+  "name": "evidence-validation",
+  "version": "1.0.0",
+  "description": "可复用的来源逐字引用与上游摘要衔接校验。读取项目声明的真实产物；不判断事实真实性或因果关系。",
+  "mods": "mods/manifest.json"
+}

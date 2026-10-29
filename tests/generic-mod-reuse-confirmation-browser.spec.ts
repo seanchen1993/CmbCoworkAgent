@@ -20,6 +20,9 @@ current.trials=current.trials.map(row=>({...row,phase:"stopped",revision:current
 window.electron={process:{platform:"win32"}};window.api={mods:{development:api}};
 const emit=()=>listeners.forEach(fn=>fn({threadId:"chat"}));
 window.fixture={get:()=>({reads,calls,requests}),refresh:emit,
+runtimeUnconfirmed:()=>{current.reuse={...current.reuse,phase:"unknown",error:"CREATOR_REUSE_RUNTIME_UNCONFIRMED"};emit()},
+installUnconfirmed:()=>{current.reuse={...current.reuse,phase:"unknown",error:"CREATOR_REUSE_RESTART_UNCONFIRMED"};emit()},
+reuseActive:()=>{current.reuse={...current.reuse,phase:"active",error:undefined};emit()},
 editSaved:()=>{current.drafts[0]={...current.drafts[0],revision:3,digest:"4".repeat(64)};emit()},
 anotherDraft:()=>{current.drafts.push({id:"text-report",name:"文本报告",revision:1,digest:"3".repeat(64)});emit()},active:()=>{
 current.drafts=[{id:"plain-mod",name:"文本处理",revision:1,digest:"1".repeat(64)}];
@@ -101,6 +104,24 @@ createRoot(document.getElementById("root")).render(<ModsDevelopmentPanel threadI
     assert.deepEqual(await page.evaluate("window.fixture.get().calls"), [{ threadId: "chat",
       expectedWorkspace: "c:/fixture", planId: "plan-2", sourceDigest: "2".repeat(64),
       compiledDigest: "f".repeat(64), targetProfileDigest: "9".repeat(64) }])
+    await page.evaluate("window.fixture.runtimeUnconfirmed()")
+    await dialog.getByText("正式版本和可复用组合已保存，当前聊天尚未确认运行就绪。", { exact: true }).waitFor()
+    assert.equal(await dialog.getByRole("button", { name: "核对复用状态", exact: true }).count(), 0)
+    const runtimeRead = dialog.getByRole("button", { name: "核对运行状态", exact: true })
+    const beforeRuntimeRead = await page.evaluate("window.fixture.get().reads")
+    await runtimeRead.click()
+    await page.waitForFunction((before) =>
+      (window as unknown as { fixture: { get(): { reads: number } } }).fixture.get().reads > before,
+    beforeRuntimeRead)
+    assert.equal(await dialog.getByRole("button", { name: "确认保存并复用", exact: true }).count(), 0)
+    assert.equal(await page.evaluate("window.fixture.get().calls.length"), 1)
+    assert.equal(await page.evaluate("window.fixture.get().requests.length"), 1)
+    await page.evaluate("window.fixture.installUnconfirmed()")
+    await dialog.getByText("保存或切换结果待核对。请先核对当前状态，不要重复安装或授权。", { exact: true }).waitFor()
+    await dialog.getByRole("button", { name: "核对复用状态", exact: true }).waitFor()
+    assert.equal(await dialog.getByRole("button", { name: "核对运行状态", exact: true }).count(), 0)
+    assert.equal(await dialog.getByText("正式版本和可复用组合已保存，当前聊天尚未确认运行就绪。", { exact: true }).count(), 0)
+    await page.evaluate("window.fixture.reuseActive()")
     await page.evaluate("window.fixture.anotherDraft()")
     await dialog.getByRole("button", { name: "保存“文本报告”并在其他聊天复用…", exact: true }).waitFor()
     assert.equal(await dialog.getByRole("button", {

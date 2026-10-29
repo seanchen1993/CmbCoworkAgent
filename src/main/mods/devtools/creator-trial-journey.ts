@@ -15,6 +15,8 @@ export interface CreatorTrialProjectReference {
   installedPluginId: string
   pluginDigest: string
   workspace: string
+  /** Source-history capacity may prevent retaining all earlier links; never infer full coverage. */
+  untrackedDraftIds?: string[]
 }
 
 export function projectCreatorTrialJourney(input: {

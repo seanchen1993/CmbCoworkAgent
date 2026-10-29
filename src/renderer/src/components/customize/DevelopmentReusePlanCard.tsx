@@ -25,6 +25,8 @@ export function DevelopmentReusePlanCard({
   const canApprove = current && !!plan.planId && !!plan.compiledDigest && !!plan.targetProfileDigest
   const needsPreparation =
     plan.phase === "failed" && plan.error === "CREATOR_REUSE_PREPARE_REQUIRED"
+  const runtimeUnconfirmed =
+    plan.phase === "unknown" && plan.error === "CREATOR_REUSE_RUNTIME_UNCONFIRMED"
   return (
     <article
       aria-label="保存并在其他聊天复用"
@@ -62,6 +64,28 @@ export function DevelopmentReusePlanCard({
           <p className="text-xs text-muted-foreground">
             可在其他聊天选择这份组合；使用默认继承设置的聊天也会包含本项目已授权的功能。保存不会发送消息或执行任务。
           </p>
+          {plan.dependencyImpact && (
+            <details className="rounded-lg border border-amber-500/30 p-2 text-xs">
+              <summary className="cursor-pointer font-medium">
+                已识别 {plan.dependencyImpact.knownDependants.length} 个声明依赖 · 查看影响
+              </summary>
+              <p className="mt-2 text-muted-foreground">
+                已核对 {plan.dependencyImpact.inspectedSources} 个已安装插件或当前聊天草稿。
+                {plan.dependencyImpact.moreSources && "还有来源未核对。"}
+                {!!plan.dependencyImpact.uninspectedSources &&
+                  `${plan.dependencyImpact.uninspectedSources} 个来源读取或声明校验失败。`}
+                动态脚本、其他创作聊天和已有项目版本未完整覆盖；未发现依赖不代表没有影响。
+              </p>
+              {plan.dependencyImpact.knownDependants.map(item => (
+                <p key={`${item.kind}:${item.id}`} className="mt-1 break-words">
+                  {item.name} · {item.kind === "installed" ? "已安装" : "草稿"} · {item.actionIds.join("、")}
+                </p>
+              ))}
+              <p className="mt-2 text-muted-foreground">
+                已固定旧版本的调用不会自动改用新版。替换公共功能后，请重新绑定并验证调用方。
+              </p>
+            </details>
+          )}
           {!current && (
             <p role="status" className="text-xs text-amber-700 dark:text-amber-400">
               当前草稿已更新，请先重新准备最新版本。
@@ -89,6 +113,10 @@ export function DevelopmentReusePlanCard({
               : save
               ? "这个正式功能版本已生效。完整搭配是否保存成功，以上方搭配状态为准。"
               : "正式版本和可复用组合已保存，当前聊天已使用。可在其他聊天选择这份组合。"
+            : runtimeUnconfirmed
+              ? save
+                ? "这个正式功能版本已保存，当前聊天尚未确认运行就绪。完整搭配的保存结果以上方状态为准。"
+                : "正式版本和可复用组合已保存，当前聊天尚未确认运行就绪。"
             : plan.phase === "unknown"
               ? "保存或切换结果待核对。请先核对当前状态，不要重复安装或授权。"
               : needsPreparation
@@ -107,7 +135,7 @@ export function DevelopmentReusePlanCard({
       )}
       {["failed", "unknown"].includes(plan.phase) && (
         <button type="button" className={button} disabled={busy} onClick={onRead}>
-          核对复用状态
+          {runtimeUnconfirmed ? "核对运行状态" : "核对复用状态"}
         </button>
       )}
       <details className="text-xs text-muted-foreground">

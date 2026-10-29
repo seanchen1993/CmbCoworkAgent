@@ -87,6 +87,7 @@ import {
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
 import { validateWorkspaceDirectory } from "../services/workspace-validation"
 import { getModCallContext } from "../mods/context"
+import { withNativeApprovalWait } from "./native-approval-wait"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import { ModError } from "../mods/errors"
 import { collectRuntimeToolCatalog } from "./runtime-tool-catalog"
@@ -6334,166 +6335,169 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // because the user stepped away. They are resolved by an explicit user
   // decision, or by the run abort signal when the user stops/cancels the turn.
   const APPROVAL_TIMEOUT_MS: number | null = null
-  const requestApproval = async (req: ApprovalRequest): Promise<ApprovalDecision> => {
-    observeBuiltinPolicyDecision({ threadId: approvalThreadId, workspace: workspacePath, id: req.id,
-      source: "tool-approval", event: "tool-approval", decision: "ask", code: "HUMAN_APPROVAL_PENDING" })
-    // IPC fires immediately; the renderer owns the queue (pendingApprovals[]).
-    // Multiple concurrent tool calls each register their own resolver here —
-    // the renderer shows them one at a time, but the events are not serialized
-    // back-end side. This matches how Codex surfaces ExecApprovalRequest events.
-    const waitEvent: RuntimeInteractionWaitEvent = {
-      id: req.id,
-      kind: "approval",
-      threadId: approvalThreadId
-    }
-    await options.interactionWaitHooks?.onWaitStart(waitEvent)
-    const decision = await new Promise<ApprovalDecision>((resolve) => {
-      let settled = false
-      let attentionRaised = false
-      let timeoutId: ReturnType<typeof setTimeout> | undefined
-      const rejectDecision = (): ApprovalDecision => ({
-        type: "reject",
-        tool_call_id: req.tool_call?.id ?? req.id
-      })
-      const cleanup = (): void => {
-        if (timeoutId) clearTimeout(timeoutId)
-        options.abortSignal?.removeEventListener("abort", onAbort)
-      }
-      const resolveOnce = (decision: ApprovalDecision): void => {
-        if (settled) return
-        settled = true
-        cleanup()
-        pendingApprovals.delete(req.id)
-        approvalDecisionBroker.unregister(req.id)
-        if (attentionRaised) {
-          attentionRaised = false
-          emitAppAttention({
-            action: "resolve",
-            kind: "approval",
-            threadId: approvalThreadId,
-            key: `approval:${req.id}`
-          })
-        }
-        resolve(decision)
-      }
-      const rejectPending = (reason: "timeout" | "abort"): void => {
-        if (pendingApprovals.has(req.id)) {
-          console.warn(`[Orchestrator] approval request ${reason}: reqId=${req.id}`)
-          const channel =
-            reason === "timeout"
-              ? `approval:timeout:${approvalThreadId}`
-              : `approval:cancel:${approvalThreadId}`
-          for (const win of BrowserWindow.getAllWindows()) {
-            win.webContents.send(channel, { requestId: req.id, reason })
-          }
-          resolveOnce(rejectDecision())
-        }
-      }
-
-      const onAbort = (): void => {
-        rejectPending("abort")
-      }
-
-      if (options.abortSignal?.aborted) {
-        resolve({ type: "reject", tool_call_id: req.tool_call?.id ?? req.id })
-        return
-      }
-
-      if (APPROVAL_TIMEOUT_MS !== null) {
-        timeoutId = setTimeout(() => rejectPending("timeout"), APPROVAL_TIMEOUT_MS)
-      }
-
-      pendingApprovals.set(req.id, {
-        resolve: (decision: ApprovalDecision) => {
-          resolveOnce(decision)
-        },
-        request: req,
-        threadId: approvalThreadId,
-        // The runtime's own thread (subagent `__wf_…` for a workflow leaf), so
-        // hasPendingWorkflowApproval can tell which workflow run is blocked.
-        runtimeThreadId: threadId,
-        targetWebContentsIds: BrowserWindow.getAllWindows().map((w) => w.webContents.id)
-      })
-      approvalDecisionBroker.register({
-        request: req,
-        threadId: approvalThreadId,
-        runtimeThreadId: threadId,
-        resolve: (decision) => pendingApprovals.get(req.id)?.resolve(decision)
-      })
-      options.abortSignal?.addEventListener("abort", onAbort, { once: true })
-      if (options.abortSignal?.aborted) {
-        onAbort()
-        return
-      }
-      console.log(
-        `[Orchestrator] sending approval request on channel: approval:request:${approvalThreadId}, reqId=${req.id}, runtimeThreadId=${threadId}, command=${req.command}`
-      )
-      attentionRaised = true
-      emitAppAttention({
+  const requestApproval = async (req: ApprovalRequest): Promise<ApprovalDecision> =>
+    withNativeApprovalWait(threadId, options.abortSignal, async (approvalSignal) => {
+      observeBuiltinPolicyDecision({ threadId: approvalThreadId, workspace: workspacePath, id: req.id,
+        source: "tool-approval", event: "tool-approval", decision: "ask", code: "HUMAN_APPROVAL_PENDING" })
+      // IPC fires immediately; the renderer owns the queue (pendingApprovals[]).
+      // Multiple concurrent tool calls each register their own resolver here —
+      // the renderer shows them one at a time, but the events are not serialized
+      // back-end side. This matches how Codex surfaces ExecApprovalRequest events.
+      const waitEvent: RuntimeInteractionWaitEvent = {
+        id: req.id,
         kind: "approval",
-        threadId: approvalThreadId,
-        key: `approval:${req.id}`
-      })
-      // Fire Notification hook — agent is now waiting on user input.
-      // Fire-and-forget so it doesn't delay the UI prompt.
-      const notificationContext: HookContext = {
-        toolName: req.tool_call?.name,
-        toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
-        workspacePath,
-        sessionId: approvalThreadId,
-        functionSessionId: threadId,
-        agentId,
-        turnId: hookTurnId,
-        pluginOutputDir,
-        systemId,
-        pluginWorkspace,
-        featureId,
-        harnessProjectId,
-        harnessAdapterId: pluginId,
-        harnessAdapterName,
-        harnessAdapterVersion,
-        harnessNodeName,
-        harnessNodeStatus,
-        projectCode,
-        projectDir,
-        ...isolatedWorkspaceHookContext,
-        // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
-        // Lets a Notification hook know whether the user is in YOLO mode (where
-        // approvals only fire for sandbox-escape) vs the default approve flow.
-        permissionMode: getYoloMode() ? "yolo" : "approve",
-        // PR-16 follow-up — CC matcher target for Notification is
-        // `notification_type`. The approval queue is the only Notification
-        // fire path today, so the value is always "permission_prompt".
-        notificationType: "permission_prompt"
+        threadId: approvalThreadId
       }
-      try {
-        runHooks(
-          resolveHooksForContext("Notification", notificationContext),
-          "Notification",
-          notificationContext,
-          onHookResult
-        ).catch((e) => console.warn("[Hooks] Notification hook error:", e))
-        for (const win of BrowserWindow.getAllWindows()) {
-          win.webContents.send(`approval:request:${approvalThreadId}`, req)
-        }
-      } catch (error) {
-        console.warn("[Orchestrator] Approval dispatch diagnostic", {
-          stage: "notification-and-renderer-dispatch",
-          error: runtimeErrorDiagnostic(error)
+      await options.interactionWaitHooks?.onWaitStart(waitEvent)
+      const decision = await new Promise<ApprovalDecision>((resolve) => {
+        let settled = false
+        let attentionRaised = false
+        let timeoutId: ReturnType<typeof setTimeout> | undefined
+        const rejectDecision = (): ApprovalDecision => ({
+          type: "reject",
+          tool_call_id: req.tool_call?.id ?? req.id
         })
-        throw error
+        const cleanup = (): void => {
+          if (timeoutId) clearTimeout(timeoutId)
+          approvalSignal?.removeEventListener("abort", onAbort)
+        }
+        const resolveOnce = (decision: ApprovalDecision): void => {
+          if (settled) return
+          settled = true
+          cleanup()
+          pendingApprovals.delete(req.id)
+          approvalDecisionBroker.unregister(req.id)
+          if (attentionRaised) {
+            attentionRaised = false
+            emitAppAttention({
+              action: "resolve",
+              kind: "approval",
+              threadId: approvalThreadId,
+              key: `approval:${req.id}`
+            })
+          }
+          resolve(decision)
+        }
+        const rejectPending = (reason: "timeout" | "abort"): void => {
+          if (pendingApprovals.has(req.id)) {
+            console.warn(`[Orchestrator] approval request ${reason}: reqId=${req.id}`)
+            const channel =
+              reason === "timeout"
+                ? `approval:timeout:${approvalThreadId}`
+                : `approval:cancel:${approvalThreadId}`
+            for (const win of BrowserWindow.getAllWindows()) {
+              win.webContents.send(channel, { requestId: req.id, reason })
+            }
+            resolveOnce(rejectDecision())
+          }
+        }
+
+        const onAbort = (): void => {
+          rejectPending("abort")
+        }
+
+        if (approvalSignal?.aborted) {
+          resolve({ type: "reject", tool_call_id: req.tool_call?.id ?? req.id })
+          return
+        }
+
+        if (APPROVAL_TIMEOUT_MS !== null) {
+          timeoutId = setTimeout(() => rejectPending("timeout"), APPROVAL_TIMEOUT_MS)
+        }
+
+        pendingApprovals.set(req.id, {
+          resolve: (decision: ApprovalDecision) => {
+            resolveOnce(decision)
+          },
+          request: req,
+          threadId: approvalThreadId,
+          // The runtime's own thread (subagent `__wf_…` for a workflow leaf), so
+          // hasPendingWorkflowApproval can tell which workflow run is blocked.
+          runtimeThreadId: threadId,
+          targetWebContentsIds: BrowserWindow.getAllWindows().map((w) => w.webContents.id)
+        })
+        approvalDecisionBroker.register({
+          request: req,
+          threadId: approvalThreadId,
+          runtimeThreadId: threadId,
+          resolve: (decision) => pendingApprovals.get(req.id)?.resolve(decision)
+        })
+        approvalSignal?.addEventListener("abort", onAbort, { once: true })
+        if (approvalSignal?.aborted) {
+          onAbort()
+          return
+        }
+        console.log(
+          `[Orchestrator] sending approval request on channel: approval:request:${approvalThreadId}, reqId=${req.id}, runtimeThreadId=${threadId}, command=${req.command}`
+        )
+        attentionRaised = true
+        emitAppAttention({
+          kind: "approval",
+          threadId: approvalThreadId,
+          key: `approval:${req.id}`
+        })
+        // Fire Notification hook — agent is now waiting on user input.
+        // Fire-and-forget so it doesn't delay the UI prompt.
+        const notificationContext: HookContext = {
+          toolName: req.tool_call?.name,
+          toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
+          workspacePath,
+          sessionId: approvalThreadId,
+          functionSessionId: threadId,
+          agentId,
+          turnId: hookTurnId,
+          pluginOutputDir,
+          systemId,
+          pluginWorkspace,
+          featureId,
+          harnessProjectId,
+          harnessAdapterId: pluginId,
+          harnessAdapterName,
+          harnessAdapterVersion,
+          harnessNodeName,
+          harnessNodeStatus,
+          projectCode,
+          projectDir,
+          ...isolatedWorkspaceHookContext,
+          // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
+          // Lets a Notification hook know whether the user is in YOLO mode (where
+          // approvals only fire for sandbox-escape) vs the default approve flow.
+          permissionMode: getYoloMode() ? "yolo" : "approve",
+          // PR-16 follow-up — CC matcher target for Notification is
+          // `notification_type`. The approval queue is the only Notification
+          // fire path today, so the value is always "permission_prompt".
+          notificationType: "permission_prompt"
+        }
+        try {
+          runHooks(
+            resolveHooksForContext("Notification", notificationContext),
+            "Notification",
+            notificationContext,
+            onHookResult
+          ).catch((e) => console.warn("[Hooks] Notification hook error:", e))
+          for (const win of BrowserWindow.getAllWindows()) {
+            win.webContents.send(`approval:request:${approvalThreadId}`, req)
+          }
+        } catch (error) {
+          console.warn("[Orchestrator] Approval dispatch diagnostic", {
+            stage: "notification-and-renderer-dispatch",
+            error: runtimeErrorDiagnostic(error)
+          })
+          throw error
+        }
+      })
+      // A local Mod cancellation can end this dialog while the native turn stays
+      // alive; release its interaction-wait marker in that case as well.
+      if (!options.abortSignal?.aborted) {
+        await options.interactionWaitHooks?.onWaitEnd(waitEvent)
       }
+      observeBuiltinPolicyDecision({ threadId: approvalThreadId, workspace: workspacePath, id: req.id,
+        source: "tool-approval", event: "tool-approval",
+        decision: approvalSignal?.aborted ? "unknown" : ["approve", "approve_session", "approve_permanent"].includes(decision.type) ? "allow" : "deny",
+        code: approvalSignal?.aborted ? "HUMAN_APPROVAL_CANCELLED" : ["approve", "approve_session", "approve_permanent"].includes(decision.type) ? "HUMAN_APPROVAL_ALLOWED" : "HUMAN_APPROVAL_DENIED" })
+      notifyExplicitToolRejection(decision, approvalSignal, options.onToolRejected)
+      return decision
     })
-    if (!options.abortSignal?.aborted) {
-      await options.interactionWaitHooks?.onWaitEnd(waitEvent)
-    }
-    observeBuiltinPolicyDecision({ threadId: approvalThreadId, workspace: workspacePath, id: req.id,
-      source: "tool-approval", event: "tool-approval",
-      decision: options.abortSignal?.aborted ? "unknown" : ["approve", "approve_session", "approve_permanent"].includes(decision.type) ? "allow" : "deny",
-      code: options.abortSignal?.aborted ? "HUMAN_APPROVAL_CANCELLED" : ["approve", "approve_session", "approve_permanent"].includes(decision.type) ? "HUMAN_APPROVAL_ALLOWED" : "HUMAN_APPROVAL_DENIED" })
-    notifyExplicitToolRejection(decision, options.abortSignal, options.onToolRejected)
-    return decision
-  }
 
   const approvalStore = getOrCreateApprovalStore(approvalThreadId)
 

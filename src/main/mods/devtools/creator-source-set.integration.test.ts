@@ -333,6 +333,12 @@ it("drives real vendor import, compile, install and start-use services through t
     deliveries = f.deliveries,
     sessions = f.sessions
   const startUseWork: Promise<unknown>[] = []
+  const sourcePreparationWork: Promise<unknown>[] = []
+  const settlePreparation = async (expected: number) => {
+    await expect.poll(() => sourcePreparationWork.length).toBe(expected)
+    // Await the original compile/permission work, not a short UI propagation poll.
+    await sourcePreparationWork[expected - 1]
+  }
   const observeStartUse = (work: Promise<unknown>) => {
     startUseWork.push(work)
     return work
@@ -356,9 +362,11 @@ it("drives real vendor import, compile, install and start-use services through t
         expect(Object.keys(input).sort()).toEqual(["expectedWorkspace", "threadId"])
         // Native directory-picker result is the only fixture boundary; installation is the original service.
         await sets.import(f.threadId, f.workspace, selected)
-      } else if (method === "advanceSourceSet")
-        await sets.advance(f.threadId, f.workspace, input.id)
-      else if (method === "installProjectDelivery")
+      } else if (method === "advanceSourceSet") {
+        const work = sets.advance(f.threadId, f.workspace, input.id)
+        sourcePreparationWork.push(work)
+        await work
+      } else if (method === "installProjectDelivery")
         await deliveries.install(f.threadId, f.workspace, {
           deliveryId: input.deliveryId,
           digest: input.digest
@@ -379,6 +387,7 @@ it("drives real vendor import, compile, install and start-use services through t
   try {
     await h.page.getByRole("button", { name: "选择作者源码目录", exact: true }).click()
     await h.page.getByRole("button", { name: "核对权限并准备模板", exact: true }).click()
+    await settlePreparation(1)
     await h.page.getByRole("button", { name: "保存插件", exact: true }).waitFor()
     expect(status().projectDelivery!.name).not.toBe(
       JSON.parse(
@@ -404,6 +413,7 @@ it("drives real vendor import, compile, install and start-use services through t
     expect(status().sourceSet?.phase).toBe("needs-review")
     expect(f.installed).not.toHaveBeenCalled()
     await h.page.getByRole("button", { name: "核对权限并准备模板", exact: true }).click()
+    await settlePreparation(2)
     await expect.poll(() => status().sourceSet?.phase).toBe("ready")
     expect(sessions.list(f.scope)[0].revision).toBe(revision)
     const exported = deliveries.status(f.threadId)!
@@ -424,6 +434,7 @@ it("drives real vendor import, compile, install and start-use services through t
     }, status())
     await h.page.evaluate("window.fixture.setStatus(window.coldStatus)")
     await h.page.getByRole("button", { name: "核对权限并准备模板", exact: true }).click()
+    await settlePreparation(3)
     await expect.poll(() => status().sourceSet?.phase).toBe("ready")
     expect(f.installed).not.toHaveBeenCalled()
     expect(sessions.list(f.scope)[0].revision).toBe(revision)
@@ -466,7 +477,7 @@ it("drives real vendor import, compile, install and start-use services through t
     )
     throw error
   } finally {
-    await Promise.allSettled(startUseWork)
+    await Promise.allSettled([...sourcePreparationWork, ...startUseWork])
     await h.browser.close()
   }
 }, 120_000)

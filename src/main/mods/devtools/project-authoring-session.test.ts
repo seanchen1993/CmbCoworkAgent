@@ -111,16 +111,10 @@ it("continues an exhausted draft with exact files while preserving action locks 
       reason: "revision"
     })
     const original = sessions.read(scope, draft.id)
-    const copied = await sessions.save(
-      scope,
-      {
-        id: "continued",
-        name: original.name,
-        revision: 0,
-        files: original.source.files
-      },
-      guard
-    )
+    const copied = await sessions.continue(scope, {
+      id: original.id, revision: original.revision, sourceDigest: original.source.digest,
+      newId: "continued"
+    }, guard)
     expect(copied.source).toEqual(original.source)
     expect(copied.development).toBeUndefined()
     expect(copied.directory).not.toBe(original.directory)

@@ -29,7 +29,10 @@ function backend() {
   return {
     stats: () => ({ disposed, stopped, calls, pluginRoot }),
     create: () => ({
-      preflight: analyzeAuthoringPreview,
+      preflight: async (...args: Parameters<typeof analyzeAuthoringPreview>) => {
+        pluginRoot = args[0]
+        return analyzeAuthoringPreview(...args)
+      },
       load: async (...args: Parameters<typeof FunctionGuestRuntime.create>) => {
         calls++
         const guest = await FunctionGuestRuntime.create(...args)
@@ -105,7 +108,7 @@ describe("real authoring preview invocation", () => {
     expect(existsSync(host.stats().pluginRoot)).toBe(false)
   })
   it.each(AUTHORING_TEMPLATE_KINDS)(
-    "executes the actual %s template and cleans its isolated session",
+    "uses the actual %s template's supported preview entry and cleans its isolated session",
     async (kind) => {
       const source = createAuthoringTemplate({
         kind,
@@ -115,7 +118,9 @@ describe("real authoring preview invocation", () => {
       })
       const host = backend()
       const action: AuthoringPreviewAction =
-        kind === "tool"
+        kind === "capability"
+          ? inspect
+          : kind === "tool"
           ? { kind: "tool", target: "mcp__preview-demo__format", input: '{"text":"样例"}' }
           : kind === "rule"
             ? { kind: "rule", target: "", input: "样例" }
@@ -129,12 +134,35 @@ describe("real authoring preview invocation", () => {
       expect(report.failures).toBe(0)
       expect(report.authorized).toBe(false)
       expect(report.scope).toBe("isolated-invocation")
-      if (kind === "panel") expect(JSON.stringify(report.panes)).toContain("整理输入")
+      if (kind === "capability") {
+        // Public capability providers have no slash command. The existing real guest
+        // platform.act/invalid-input coverage lives in authoring-templates.test.ts.
+        expect(report.commands).toEqual([])
+        expect(report.result).toBeNull()
+        expect(report.compatibility.registrations).toEqual(expect.arrayContaining([
+          expect.objectContaining({ pattern: "platform.action", supportedEvents: ["platform.action"] })
+        ]))
+        expect(report.sdkCompatibility.strictCompatible).toBe(true)
+        expect(report.typecheck.valid).toBe(true)
+      } else if (kind === "panel") expect(JSON.stringify(report.panes)).toContain("整理输入")
       else expect(JSON.stringify(report.result)).toContain("整理输入")
       expect(host.stats()).toMatchObject({ calls: 1, stopped: true, disposed: true })
       expect(existsSync(host.stats().pluginRoot)).toBe(false)
     }
   )
+
+  it("does not invent a slash command for a public capability provider", async () => {
+    const source = createAuthoringTemplate({
+      kind: "capability", id: "public-provider", name: "公开能力", instruction: "保留真实公开契约"
+    })
+    const host = backend()
+    await expect(previewAuthoringSource(source,
+      { kind: "command", target: "public-provider", input: "样例" }, {
+        backend: host.create, assertCurrent: () => {}, signal: new AbortController().signal
+      })).rejects.toThrow("MODS_COMMAND_MISSING")
+    expect(host.stats()).toMatchObject({ calls: 1, stopped: true, disposed: true })
+    expect(existsSync(host.stats().pluginRoot)).toBe(false)
+  })
 
   it("does not turn denied SDK access recovered by optional hooks into a clean preview", async () => {
     const source = createAuthoringTemplate({

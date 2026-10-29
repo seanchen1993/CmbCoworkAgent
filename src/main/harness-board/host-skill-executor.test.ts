@@ -1250,6 +1250,37 @@ describe("original agent run bridge", () => {
       })
     ).toThrow()
   })
+  it.each([false, true])(
+    "preserves unknown cancellation evidence unless original inputs actually changed (%s)",
+    async (sourceChanged) => {
+      const { service, workspace } = await fixture()
+      const entered = Promise.withResolvers<void>()
+      registerAgentRunImplementation(async (_request, _delivery, context) => {
+        markRunCancellationEffectDispatched()
+        writeFileSync(join(workspace, "document.md"), "partial output; not validated")
+        entered.resolve()
+        await new Promise<void>((resolve) => {
+          context.signal!.addEventListener("abort", () => resolve(), { once: true })
+        })
+        expect(() => currentRuntimePluginSource()).toThrow()
+        if (sourceChanged) mock.plugins = []
+        context.onRunCancelled?.()
+        context.onRunTerminated?.({ outcome: "unknown", code: "cancellation_unconfirmed" })
+      })
+      const operation = service.prepare({ projectId: "local-docs", expectedVersion: 1,
+        idempotencyKey: "unknown-stop-diagnostic" })
+      const pending = service.start(operation.operationId)
+      await entered.promise
+      service.cancel(operation.operationId)
+      const result = await pending
+      expect(result).toMatchObject({ status: "unknown", receipts: [],
+        execution: { terminal: { outcome: "unknown", code: sourceChanged
+          ? "project_runtime_inputs_changed" : "cancellation_unconfirmed" } } })
+      expect(service.get("local-docs")?.version).toBe(1)
+      expect(() => service.prepare({ projectId: "local-docs", expectedVersion: 1,
+        idempotencyKey: "unsafe-retry" })).toThrow()
+    }
+  )
   it.each(["missing", "unknown"])(
     "keeps unknown ownership after cancellation with %s terminal evidence",
     async (evidence) => {

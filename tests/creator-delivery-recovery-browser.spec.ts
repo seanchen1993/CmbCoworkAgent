@@ -279,7 +279,11 @@ async function main() {
     )
     await page.evaluate("window.fixture.fresh('save')")
     const beforeSave = await count("install")
-    assert.equal(await page.getByRole("textbox", { name: "新插件标识", exact: true }).inputValue(), "source-request")
+    assert.equal(
+      await page.getByRole("textbox", { name: "新插件标识", exact: true }).inputValue(),
+      "source-custom",
+      "A real candidate name produces a recognizable independent derived identifier"
+    )
     await prepare.evaluate(button => {
       ;(button as HTMLButtonElement).click()
       ;(button as HTMLButtonElement).click()

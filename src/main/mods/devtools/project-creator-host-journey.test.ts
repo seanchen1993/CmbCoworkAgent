@@ -2,8 +2,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { randomUUID } from "node:crypto"
-import { afterEach, expect, it } from "vitest"
-import { ProjectAuthoringSessions } from "./project-authoring-session"
+import { afterEach, expect, it, vi } from "vitest"
+import { ProjectAuthoringSessions, ProjectDraftHistoryStorageLimitError } from "./project-authoring-session"
 import { ProjectPreviewRegistry } from "./project-preview-registry"
 import { HostProjectStore } from "../../harness-board/project-runtime/host-store"
 import { HostPackageSnapshots } from "../../harness-board/project-runtime/package-snapshots"
@@ -13,7 +13,7 @@ import type { DevelopmentScope } from "../v2/development-session"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
-async function fixture(template: "harness-lite" | "harness-data", invalidReview: boolean) {
+async function fixture(template: "harness-lite" | "harness-data", invalidReview: boolean, bind = true) {
   const root = await mkdtemp(join(tmpdir(), "creator-host-journey-"))
   const controls = new ModControlStore(join(root, "controls.sqlite"))
   const store = new HostProjectStore(join(root, "projects.sqlite"))
@@ -75,7 +75,7 @@ async function fixture(template: "harness-lite" | "harness-data", invalidReview:
     workspace: lease.snapshot.workspace, installedPluginId: plugin.id, goal: request.request.goal })
   await registry.bind(project, snapshots.read(project.pluginDigest).root)
   sessions.configureTrialObservation(id => ({ project: service.get(id), operations: service.operations(id, 100) }))
-  sessions.bindTrialProject(scope, draft.id, project, () => {})
+  if (bind) sessions.bindTrialProject(scope, draft.id, project, () => {})
   return { root, scope, sessions, draft, service, registry, project, observed, controls }
 }
 
@@ -169,3 +169,151 @@ it.each(["harness-lite", "harness-data"] as const)(
     expect(f.observed).toHaveLength(project.manifest.stages.length)
   }
 )
+
+it("archives only fully settled original journals and never clears a live or unknown preview", async () => {
+  const f = await fixture("harness-lite", false)
+  let project = f.project
+  for (const stage of project.manifest.stages) {
+    const operation = f.service.prepare({ projectId: project.projectId,
+      expectedVersion: project.version, idempotencyKey: stage.id })
+    if (stage.approval === "human") f.service.approve(operation.operationId, {
+      expectedVersion: project.version, inputFingerprint: operation.inputFingerprint,
+      decision: "approved", actorId: "native-user" })
+    expect((await f.service.start(operation.operationId)).status).toBe("succeeded")
+    project = f.service.transition(operation.operationId)
+  }
+  const originalOperations = f.service.operations(project.projectId)
+  const archive = () => f.sessions.archive(f.scope, { id: f.draft.id, revision: f.draft.revision,
+    sourceDigest: f.draft.source.digest }, () => {})
+  expect(archive).toThrow("PROJECT_DRAFT_ARCHIVE_IN_USE")
+  expect(f.sessions.developmentStatus(f.scope, f.draft.id)?.activeRuns).toBe(1)
+  f.registry.finish(project, f.scope, originalOperations)
+  const unknown = originalOperations.map((operation, index) => index === 0
+    ? { ...operation, status: "unknown" as const } : operation)
+  f.sessions.configureTrialObservation(() => ({ project, operations: unknown }))
+  expect(archive).toThrow("PROJECT_DRAFT_ARCHIVE_IN_USE")
+  f.sessions.configureTrialObservation(() => ({ operations: [] }))
+  expect(archive).toThrow("PROJECT_DRAFT_ARCHIVE_IN_USE")
+  f.sessions.configureTrialObservation(() => ({ project,
+    operations: Array.from({ length: 100 }, () => originalOperations[0]) }))
+  expect(archive).toThrow("PROJECT_DRAFT_ARCHIVE_IN_USE")
+  f.sessions.configureTrialObservation(() => ({ project: { ...project, pluginDigest: "c".repeat(64) },
+    operations: originalOperations }))
+  expect(archive).toThrow("PROJECT_DRAFT_ARCHIVE_IN_USE")
+  expect(f.sessions.read(f.scope, f.draft.id).source).toEqual(f.draft.source)
+  expect(f.service.operations(project.projectId)).toEqual(originalOperations)
+  f.sessions.configureTrialObservation(() => ({ project, operations: originalOperations }))
+  // An old completed project must not conceal a newer native trial awaiting confirmation.
+  await f.sessions.requestTrial(f.scope, f.draft.id, f.draft.revision, "新的未执行目标", () => {})
+  expect(archive).toThrow("PROJECT_DRAFT_ARCHIVE_IN_USE")
+  expect(f.sessions.read(f.scope, f.draft.id).source).toEqual(f.draft.source)
+})
+
+it("frees a full creator slot after a completed real trial and retains its evidence after restart", async () => {
+  const f = await fixture("harness-lite", false)
+  let project = f.project
+  for (const stage of project.manifest.stages) {
+    const operation = f.service.prepare({ projectId: project.projectId,
+      expectedVersion: project.version, idempotencyKey: stage.id })
+    if (stage.approval === "human") f.service.approve(operation.operationId, {
+      expectedVersion: project.version, inputFingerprint: operation.inputFingerprint,
+      decision: "approved", actorId: "native-user" })
+    expect((await f.service.start(operation.operationId)).status).toBe("succeeded")
+    project = f.service.transition(operation.operationId)
+  }
+  const operations = f.service.operations(project.projectId)
+  f.registry.finish(project, f.scope, operations)
+  for (const id of ["second", "third", "fourth"])
+    await f.sessions.save(f.scope, { id, name: f.draft.name, revision: 0,
+      files: f.draft.source.files }, () => {})
+  const input = { id: f.draft.id, revision: f.draft.revision,
+    sourceDigest: f.draft.source.digest, newId: "fifth" }
+  await expect(f.sessions.continue(f.scope, input, () => {})).rejects.toMatchObject({
+    message: "PROJECT_DRAFT_LIMIT", reason: "drafts" })
+  f.sessions.archive(f.scope, input, () => {})
+  expect(f.sessions.developmentStatus(f.scope, f.draft.id)?.activeRuns).toBe(0)
+  expect(f.sessions.trialRequest(f.scope)?.journey).toMatchObject({ phase: "passed", canDeliver: false })
+  const copy = await f.sessions.continue(f.scope, input, () => {})
+  expect(copy.source).toEqual(f.draft.source)
+  expect(copy.development).toBeUndefined()
+  expect(f.sessions.list(f.scope)).toHaveLength(4)
+  const restored = new ProjectAuthoringSessions()
+  restored.configurePersistence(f.controls, join(f.root, "source"))
+  restored.configureTrialObservation(id => ({ project: f.service.get(id), operations: f.service.operations(id, 100) }))
+  expect(restored.versions(f.scope, f.draft.id)).toMatchObject({ archived: true,
+    versions: [expect.objectContaining({ trialProjectIds: [project.projectId] })] })
+  expect(restored.trialRequest(f.scope)?.journey).toMatchObject({ phase: "passed", canDeliver: false })
+  expect(restored.developmentStatus(f.scope, f.draft.id)).toBeUndefined()
+  expect(f.service.operations(project.projectId)).toEqual(operations)
+})
+
+it("archives a known failed trial only after its native execution lease has been explicitly finished", async () => {
+  const f = await fixture("harness-lite", true)
+  let project = f.project
+  for (const stage of project.manifest.stages) {
+    const operation = f.service.prepare({ projectId: project.projectId,
+      expectedVersion: project.version, idempotencyKey: stage.id })
+    if (stage.approval === "human") f.service.approve(operation.operationId, {
+      expectedVersion: project.version, inputFingerprint: operation.inputFingerprint,
+      decision: "approved", actorId: "native-user" })
+    const result = await f.service.start(operation.operationId)
+    if (result.status === "succeeded") project = f.service.transition(operation.operationId)
+    else expect(result.status).toBe("failed")
+  }
+  const input = { id: f.draft.id, revision: f.draft.revision, sourceDigest: f.draft.source.digest }
+  expect(() => f.sessions.archive(f.scope, input, () => {})).toThrow("PROJECT_DRAFT_ARCHIVE_IN_USE")
+  const operations = f.service.operations(project.projectId)
+  f.registry.finish(project, f.scope, operations)
+  expect(f.sessions.archive(f.scope, input, () => {})).toMatchObject({ archived: true })
+  expect(f.sessions.trialRequest(f.scope)?.journey).toMatchObject({ phase: "failed", canDeliver: false })
+  expect(f.service.operations(project.projectId)).toEqual(operations)
+})
+
+it("retains an already-created Host binding on typed history capacity failure and blocks incomplete archival", async () => {
+  const f = await fixture("harness-lite", false, false)
+  const persist = vi.spyOn(f.sessions as unknown as { persistState(...args: unknown[]): void }, "persistState")
+  for (const error of [Error("permission-revoked"), Error("PROJECT_DRAFT_REVISION_CHANGED"),
+    Error("PROJECT_DRAFT_HISTORY_STORAGE_LIMIT")]) {
+    persist.mockImplementationOnce(() => { throw error })
+    expect(() => f.sessions.bindTrialProject(f.scope, f.draft.id, f.project, () => {})).toThrow(error.message)
+    expect(f.sessions.trialRequest(f.scope)?.journey).toBeUndefined()
+  }
+  persist.mockImplementationOnce(() => { throw new ProjectDraftHistoryStorageLimitError() })
+  expect(() => f.sessions.bindTrialProject(f.scope, f.draft.id, f.project, () => {})).not.toThrow()
+  persist.mockRestore()
+  expect(f.sessions.trialRequest(f.scope)?.journey?.projectId).toBe(f.project.projectId)
+  expect(f.sessions.versions(f.scope, f.draft.id)).toMatchObject({ trialEvidenceIncomplete: true })
+  expect(f.sessions.versions(f.scope, f.draft.id).versions[0]).not.toHaveProperty("trialProjectCount")
+  let project = f.project
+  for (const stage of project.manifest.stages) {
+    const operation = f.service.prepare({ projectId: project.projectId,
+      expectedVersion: project.version, idempotencyKey: stage.id })
+    if (stage.approval === "human") f.service.approve(operation.operationId, {
+      expectedVersion: project.version, inputFingerprint: operation.inputFingerprint,
+      decision: "approved", actorId: "native-user" })
+    expect((await f.service.start(operation.operationId)).status).toBe("succeeded")
+    project = f.service.transition(operation.operationId)
+  }
+  f.registry.finish(project, f.scope, f.service.operations(project.projectId))
+  expect(f.sessions.trialRequest(f.scope)?.journey).toMatchObject({ phase: "passed", canDeliver: true })
+  const input = { id: f.draft.id, revision: f.draft.revision, sourceDigest: f.draft.source.digest }
+  expect(() => f.sessions.archive(f.scope, input, () => {})).toThrow("PROJECT_DRAFT_ARCHIVE_IN_USE")
+  const copied = await f.sessions.continue(f.scope, { ...input, newId: "following" }, () => {})
+  await f.sessions.requestTrial(f.scope, copied.id, copied.revision, "后续目标", () => {})
+  const lease = f.sessions.acquireDevelopment(f.scope, copied.id, copied.revision, () => {})
+  const nextId = randomUUID()
+  const plugin = await f.registry.register({ projectId: nextId, scope: f.scope,
+    snapshot: lease.snapshot, guard: () => {}, release: lease.release, actions: [] })
+  const next = await f.service.localCreate({ projectId: nextId, name: copied.name,
+    workspace: lease.snapshot.workspace, installedPluginId: plugin.id, goal: "后续目标" })
+  await f.registry.bind(next, new HostPackageSnapshots(join(f.root, "snapshots")).read(next.pluginDigest).root)
+  f.sessions.bindTrialProject(f.scope, copied.id, next, () => {})
+  const restored = new ProjectAuthoringSessions()
+  restored.configurePersistence(f.controls, join(f.root, "source"))
+  restored.configureTrialObservation(id => ({ project: f.service.get(id), operations: f.service.operations(id, 100) }))
+  expect(restored.versions(f.scope, f.draft.id).trialEvidenceIncomplete).toBe(true)
+  expect(() => restored.archive(f.scope, input, () => {})).toThrow("PROJECT_DRAFT_ARCHIVE_IN_USE")
+  expect(restored.read(f.scope, f.draft.id).source).toEqual(f.draft.source)
+  expect(f.registry.resolve(plugin.id)).toBeDefined()
+  f.registry.finish(next, f.scope, [])
+})

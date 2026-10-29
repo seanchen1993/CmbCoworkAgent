@@ -57,6 +57,7 @@ function sliceBetween(source: string, start: string, end: string, label: string)
 
 const agentIpc = read("src/main/ipc/agent.ts")
 const runtime = read("src/main/agent/runtime.ts")
+const nativeApprovalWait = read("src/main/agent/native-approval-wait.ts")
 const standardTurn = read("src/main/agent/standard-thread-turn.ts")
 const sandboxIpc = read("src/main/ipc/sandbox.ts")
 const approvalBroker = read("src/main/agent/approval-decision-broker.ts")
@@ -384,8 +385,41 @@ function testApprovalAndStructuredInputRemainDesktopManaged(): void {
   assertIncludes(runtime, "pendingApprovals.set(req.id", "Runtime registers approval ownership")
   assertIncludes(
     runtime,
-    'options.abortSignal?.addEventListener("abort", onAbort',
-    "stopping the run rejects its pending approval"
+    "withNativeApprovalWait(threadId, options.abortSignal, async (approvalSignal) =>",
+    "native approvals retain the runtime thread and owning run signal"
+  )
+  assertIncludes(
+    runtime,
+    'approvalSignal?.addEventListener("abort", onAbort',
+    "stopping the run or Mods operation rejects its pending approval"
+  )
+  assertIncludes(
+    nativeApprovalWait,
+    "operation?.identity.threadId === threadId ? operation.signal : undefined",
+    "native approval only borrows a Mods operation signal from its own runtime thread"
+  )
+  assertIncludes(
+    nativeApprovalWait,
+    'withTrustedFunctionWait("user-approval", signal, () => wait(signal))',
+    "human approval uses the bounded trusted wait instead of consuming execution time"
+  )
+  assertIncludes(
+    nativeApprovalWait,
+    'lifetime.abort(new Error("NATIVE_APPROVAL_WAIT_ENDED"))',
+    "leaving the native wait cancels any remaining approval card"
+  )
+  for (const cleanup of [
+    'approvalSignal?.removeEventListener("abort", onAbort)',
+    "pendingApprovals.delete(req.id)",
+    "approvalDecisionBroker.unregister(req.id)",
+    "approval:cancel:${approvalThreadId}"
+  ]) {
+    assertIncludes(runtime, cleanup, "native approval cancellation retains broker and UI cleanup")
+  }
+  assertIncludes(
+    nativeApprovalWait,
+    "...[runSignal, operationSignal]",
+    "native approval cancellation combines the owning run and current operation"
   )
   assertIncludes(
     sandboxIpc,
