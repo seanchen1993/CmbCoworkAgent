@@ -82,13 +82,15 @@ export class BotImGatewayStore {
       const owner = this.rows("SELECT realm,principal FROM bot_im_personal_owners WHERE bot_id=?", [
         binding.botId
       ])[0]
-      if (owner && (owner.realm !== realm || owner.principal !== principal))
+      // A locally created binding proves that the user chose this Bot in the new
+      // environment. Listing an unknown remote binding alone cannot migrate it.
+      if (owner && (owner.realm === realm ? owner.principal !== principal : !old))
         throw new BotError("CONFLICT", "此 Bot 的个人主会话已关联另一登录身份，请使用该身份连接。")
-      this.db.run("INSERT OR IGNORE INTO bot_im_personal_owners VALUES(?,?,?)", [
-        binding.botId,
-        realm,
-        principal
-      ])
+      this.db.run(
+        `INSERT INTO bot_im_personal_owners VALUES(?,?,?)
+        ON CONFLICT(bot_id) DO UPDATE SET realm=excluded.realm,principal=excluded.principal`,
+        [binding.botId, realm, principal]
+      )
       this.db.run("INSERT OR IGNORE INTO bot_im_personal_links VALUES(?,?,?)", [
         id,
         binding.botId,
@@ -125,11 +127,12 @@ export class BotImGatewayStore {
         !["revoked", "expired"].includes(binding.state) || !removed.has(ids[index])
     )
   }
+  // Historical proofs remain valid across environments; outbound delivery still
+  // requires the current owner below and the original binding's active grant.
   isPersonalBinding(id: string): boolean {
     return (
       this.rows(
         `SELECT 1 FROM bot_im_personal_links l JOIN bot_im_routes r ON r.id=l.binding_id
-      JOIN bot_im_personal_owners o ON o.bot_id=r.bot_id AND o.realm=r.realm AND o.principal=r.principal
       WHERE l.binding_id=? AND json_extract(r.binding_json,'$.kind')='dm'`,
         [id]
       ).length > 0

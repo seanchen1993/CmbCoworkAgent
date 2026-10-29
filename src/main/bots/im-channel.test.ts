@@ -93,7 +93,11 @@ function fixture(
     supportsBotChannel: () => true,
     supportsMarkdownReplies: vi.fn(() => false),
     botBindingCommand: vi.fn<BotImGatewayClient["botBindingCommand"]>(async (command) => {
-      if (command.action === "list") return { items: [...remote.values()], before: null }
+      if (command.action === "list")
+        return {
+          items: [...remote.values()].filter((binding) => binding.botId === command.botId),
+          before: null
+        }
       if (command.action === "revoke") {
         const result = {
           ...remote.get(command.bindingId)!,
@@ -1962,4 +1966,210 @@ describe("authenticated IM on the existing Bot host", () => {
     expect(f.store.im.beginDelivery()).toBeNull()
     expect(f.client.submitReply).toHaveBeenCalledTimes(1)
   })
+})
+
+it("moves an explicitly bound personal Bot between gateways while retaining history and delivery scope", async () => {
+  const f = fixture()
+  const old = await f.binding("dm")
+  await f.service.receive(f.event(old, "before-switch"))
+  await eventually(() => f.calls.length === 1 && f.store.recentTasks()[0].state === "completed")
+  f.service.stop()
+  f.remote.clear()
+  const production = new BotImChannelService(f.client, "production-realm", () => f.host)
+  try {
+    const pending = await production.create(f.bot.id, "dm", "production-create")
+    const active = { ...pending, state: "active" as const, conversationKey: "production-dm" }
+    f.remote.set(active.id, active)
+    expect((await production.list(f.bot.id)).items[0].localError).toBeUndefined()
+    await production.receive(f.event(active, "after-switch"))
+    await eventually(() => f.calls.length === 2)
+    expect(f.calls[1].threadId).toBe(f.calls[0].threadId)
+    expect(f.calls[1].mockSource?.personal).toBe(true)
+    expect(f.store.imGateway.isPersonalBinding(botImScopeId("realm", "owner", old.id))).toBe(true)
+    expect(f.store.imGateway.personalBinding(f.bot.id, Date.now())?.realm).toBe("production-realm")
+    expect(
+      f.store.im.history(f.bot.id, botImScopeId("realm", "owner", old.id)).items.length
+    ).toBeGreaterThan(0)
+    expect(f.store.recentTasks().some((task) => task.id === f.calls[0].id)).toBe(true)
+    expect(f.errors).toEqual([])
+  } finally {
+    production.stop()
+  }
+})
+
+it("keeps a conflicting remote binding manageable without disconnecting the shared transport", async () => {
+  const f = fixture()
+  await f.binding("dm")
+  f.service.stop()
+  const other = new BotImChannelService(
+    {
+      ...f.client,
+      getStatus: () =>
+        ({ principalId: "someone-else" }) as ReturnType<BotImGatewayClient["getStatus"]>
+    },
+    "realm",
+    () => f.host,
+    (e) => f.errors.push(e)
+  )
+  try {
+    const pending = await other.create(f.bot.id, "dm", "other-create")
+    const active = { ...pending, state: "active" as const, conversationKey: "other-dm" }
+    f.remote.clear()
+    f.remote.set(active.id, active)
+    expect((await other.list(f.bot.id)).items[0].localError).toContain("另一登录身份")
+    // No authorisation from the old owner's private transcript is granted.
+    const input = f.event(active, "other-message")
+    input.event.principalId = "someone-else"
+    await expect(other.receive(input)).resolves.toBeUndefined()
+    expect(f.calls).toHaveLength(0)
+    expect(f.client.sendAcknowledgement.mock.calls.at(-1)?.[0].type).toBe("failed")
+    expect((await other.revoke(f.bot.id, active.id, active.version)).state).toBe("revoked")
+  } finally {
+    other.stop()
+  }
+})
+
+it("replaces only the selected binding using existing create and revoke commands", async () => {
+  const f = fixture()
+  const dm = await f.binding("dm"),
+    group = await f.binding()
+  await f.service.receive(f.event(dm, "old-bot-message"))
+  await eventually(
+    () => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed"
+  )
+  const next = f.store.create({
+    name: "Next Bot",
+    instructions: "Help",
+    color: "#123456",
+    modelRef: null
+  })
+  expect((await f.service.replacementTargets("dm")).map((item) => item.id)).toEqual([dm.id])
+  expect((await f.service.replacementTargets("group")).map((item) => item.id)).toEqual([group.id])
+  const count = f.client.botBindingCommand.mock.calls.length
+  const result = await f.service.create(next.id, "dm", "replace-dm", {
+    botId: f.bot.id,
+    bindingId: dm.id,
+    version: dm.version
+  })
+  const changes = f.client.botBindingCommand.mock.calls
+    .slice(count)
+    .map(([input]) => input.action)
+    .filter((action) => action !== "list")
+  expect(changes).toEqual(["create", "revoke"])
+  expect(result.state).toBe("pending")
+  expect(f.remote.get(dm.id)?.state).toBe("revoked")
+  expect(f.remote.get(group.id)?.state).toBe("active")
+  await expect(
+    f.service.create(next.id, "dm", "wrong-kind", {
+      botId: f.bot.id,
+      bindingId: group.id,
+      version: group.version
+    })
+  ).rejects.toThrow("原接入已变化")
+  expect(f.remote.get(group.id)?.state).toBe("active")
+  // Simulate consuming the generated code through the unchanged gateway callback.
+  const active = { ...result, state: "active" as const, conversationKey: "next-bot-dm" }
+  delete active.instruction
+  f.remote.set(active.id, active)
+  await f.service.list(next.id)
+  const message = f.event(active, "new-bot-message")
+  message.route.botId = next.id
+  await f.service.receive(message)
+  await eventually(
+    () => f.calls.length === 2 && f.store.getTask(f.calls[1].id).state === "completed"
+  )
+  expect(f.calls[1]).toMatchObject({
+    botId: next.id,
+    threadId: next.threadId,
+    mockSource: { personal: true }
+  })
+  expect(f.service.history(f.bot.id, dm.id).items.some((item) => item.kind === "user")).toBe(true)
+  await f.service.receive(f.event(dm, "late-old-route"))
+  expect(f.calls).toHaveLength(2)
+  expect(f.store.imGateway.personalBinding(f.bot.id, Date.now())).toBeNull()
+  expect(f.store.imGateway.personalBinding(next.id, Date.now())?.binding.id).toBe(active.id)
+  expect(f.errors).toEqual([])
+})
+
+it("does not revoke on failed proof creation and retries a lost revoke response idempotently", async () => {
+  const f = fixture()
+  const dm = await f.binding("dm")
+  const next = f.store.create({
+    name: "Next Bot",
+    instructions: "Help",
+    color: "#123456",
+    modelRef: null
+  })
+  const replace = { botId: f.bot.id, bindingId: dm.id, version: dm.version }
+  const original = f.client.botBindingCommand.getMockImplementation()!
+  let proof: BotImBinding | undefined
+  let failCreate = true,
+    loseRevoke = true
+  f.client.botBindingCommand.mockImplementation(async (command, id) => {
+    if (command.action === "create") {
+      if (failCreate) {
+        failCreate = false
+        throw new Error("create offline")
+      }
+      if (proof) return proof
+      proof = (await original(command, id)) as BotImBinding
+      return proof
+    }
+    const result = await original(command, id)
+    if (command.action === "revoke" && loseRevoke) {
+      loseRevoke = false
+      throw new Error("lost revoke response")
+    }
+    return result
+  })
+  await expect(f.service.create(next.id, "dm", "stable", replace)).rejects.toThrow("create offline")
+  expect(f.remote.get(dm.id)?.state).toBe("active")
+  await expect(f.service.create(next.id, "dm", "stable", replace)).rejects.toThrow(
+    "lost revoke response"
+  )
+  expect(f.remote.get(dm.id)?.state).toBe("revoked")
+  const retry = await f.service.create(next.id, "dm", "stable", replace)
+  expect(retry.id).toBe(proof!.id)
+  expect(retry.instruction).toBeTruthy()
+})
+
+it("stops the replaced IM route without stopping a different group", async () => {
+  const f = fixture(
+    async (_task, _host, signal) => {
+      await new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true })
+      )
+      return { state: "completed", result: "done" }
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    Infinity
+  )
+  const dm = await f.binding("dm"),
+    group = await f.binding()
+  await f.service.receive(f.event(dm, "replace-running-dm"))
+  await f.service.receive(f.event(group, "keep-running-group"))
+  await eventually(() => f.calls.length === 2)
+  const oldTask = f.calls.find(
+    (task) => task.mockSource?.bindingId === botImScopeId("realm", "owner", dm.id)
+  )!
+  const groupTask = f.calls.find(
+    (task) => task.mockSource?.bindingId === botImScopeId("realm", "owner", group.id)
+  )!
+  const next = f.store.create({
+    name: "Next Bot",
+    instructions: "Help",
+    color: "#123456",
+    modelRef: null
+  })
+  await f.service.create(next.id, "dm", "switch-running", {
+    botId: f.bot.id,
+    bindingId: dm.id,
+    version: dm.version
+  })
+  await eventually(() => f.store.getTask(oldTask.id).state === "cancelled")
+  expect(f.store.getTask(groupTask.id).state).toBe("running")
+  expect(f.store.imGateway.personalBinding(f.bot.id, Date.now())).toBeNull()
 })

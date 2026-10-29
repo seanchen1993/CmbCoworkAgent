@@ -19,9 +19,9 @@ async function main() {
 import React from 'react';import {createRoot} from 'react-dom/client';import {BotImChannelDialog} from './src/renderer/src/components/bots/BotImChannelDialog';
 import {applyThemePreference} from './src/renderer/src/lib/theme-preference';
 window.setFixtureTheme=applyThemePreference;applyThemePreference('cmbdevclaw-white');
-const state=window.fixture={connected:false,available:false,settingsOpened:0,attempts:[],bindings:[],opened:[],mainOpened:0,close:0,lost:true};
-const api={status:async()=>({connected:state.connected,available:state.available}),list:async()=>({items:state.bindings,before:null}),
-create:async(botId,kind,operationId)=>{state.attempts.push(operationId);if(state.lost){state.lost=false;throw new Error('回包丢失，请重试')}const b={id:'binding-one',botId,kind,label:'测试 Bot',state:'pending',version:1,conversationKey:null,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+600000).toISOString(),instruction:'/绑定Bot abcdefghijklmnopqrstuvwx'};state.bindings=[b];return b},
+const state=window.fixture={connected:false,available:false,settingsOpened:0,attempts:[],bindings:[],opened:[],mainOpened:0,close:0,lost:true,targets:[],replacements:[],scope:'test-environment'};
+const api={status:async()=>({connected:state.connected,available:state.available,scope:state.scope}),replacementTargets:async(kind)=>state.targets.filter(b=>b.kind===kind),list:async()=>({items:state.bindings,before:null}),
+create:async(botId,kind,operationId,replace)=>{state.attempts.push(operationId);state.replacements.push(replace);if(state.lost){state.lost=false;throw new Error('回包丢失，请重试')}const b={id:'binding-one',botId,kind,label:'测试 Bot',state:'pending',version:1,conversationKey:null,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+600000).toISOString(),instruction:'/绑定Bot abcdefghijklmnopqrstuvwx'};state.bindings=[b];if(replace)state.targets=state.targets.filter(t=>t.id!==replace.bindingId);return b},
 revoke:async()=>{state.bindings=[{...state.bindings[0],state:'revoked',version:2,instruction:undefined}];return state.bindings[0]},
 history:async()=>({items:state.bindings[0]?.state==='active'?[{id:'reply',kind:'bot',text:'这是群内通知的回复',senderId:'Bot',state:'accepted',replyToMessageId:null,createdAt:1,workId:'work-one'}]:[],before:null})};
 createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{hostId:'local',im:api}} bot={{id:'bot',name:'测试 Bot',archived:false}} onOpenSettings={()=>state.settingsOpened++} onClose={()=>state.close++} onOpenWork={id=>state.opened.push(id)} onOpenMain={()=>state.mainOpened++}/>);`
@@ -167,9 +167,99 @@ createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{
     await page.getByRole("button", { name: "打开主对话", exact: true }).click()
     assert.equal(await page.evaluate(() => (window as any).fixture.mainOpened), 1)
     assert.equal(await page.evaluate(() => (window as any).fixture.close), closedBeforeMain + 1)
+    // Private binding keeps the original generate-and-send path, with no
+    // replacement selector. Retry keeps the exact old target.
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.targets = [
+        {
+          id: "previous-dm",
+          botId: "old-bot",
+          kind: "dm",
+          label: "原服务 Bot",
+          state: "active",
+          version: 1
+        },
+        {
+          id: "previous-group",
+          botId: "old-bot",
+          kind: "group",
+          peerLabel: "产品协作群",
+          label: "原服务 Bot",
+          state: "active",
+          version: 1
+        }
+      ]
+      f.lost = true
+    })
+    await page.getByRole("radio", { name: "本人私聊", exact: true }).check()
+    await page.getByRole("button", { name: "生成绑定指令", exact: true }).waitFor()
+    await page
+      .getByText("生成新指令会自动解除原私聊绑定；发送后连接此 Bot，历史消息与任务保留。", {
+        exact: true
+      })
+      .waitFor()
+    assert.equal(await page.getByRole("combobox", { name: "换绑目标" }).count(), 0)
+    // Another binding update after opening is resolved afresh on generation.
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.targets = f.targets.map((binding: any) =>
+        binding.kind === "dm" ? { ...binding, version: 2 } : binding
+      )
+    })
+    await screenshot("bot-im-replace-dm.png")
+    await page.getByRole("button", { name: "生成绑定指令", exact: true }).click()
+    await page.getByRole("alert").getByText("回包丢失，请重试").waitFor()
+    await page.getByRole("button", { name: "生成绑定指令", exact: true }).click()
+    await page
+      .getByText("原私聊绑定已解除。发送下方指令后连接此 Bot，历史消息与任务保留。", {
+        exact: true
+      })
+      .waitFor()
+    const attempts = await page.evaluate(() => (window as any).fixture.attempts.slice(-2))
+    assert.equal(attempts[0], attempts[1])
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.replacements.slice(-2)), [
+      { botId: "old-bot", bindingId: "previous-dm", version: 2 },
+      { botId: "old-bot", bindingId: "previous-dm", version: 2 }
+    ])
+    await page.getByRole("radio", { name: "群聊", exact: true }).check()
+    await page.getByRole("combobox", { name: "换绑目标" }).waitFor()
+    assert.equal(await page.getByRole("combobox", { name: "换绑目标" }).inputValue(), "")
+    await page.getByRole("combobox", { name: "换绑目标" }).selectOption("previous-group")
+    await screenshot("bot-im-replace-group.png")
+    await page.evaluate(() => (window as any).setFixtureTheme("codex-dark"))
+    await screenshot("bot-im-replace-group-dark.png")
+    await page.setViewportSize({ width: 420, height: 760 })
+    await screenshot("bot-im-replace-compact.png")
+    assert.equal(
+      await page.locator(".bot-im-connect-body").evaluate((el) => el.scrollWidth > el.clientWidth),
+      false
+    )
+    await page.getByRole("button", { name: "换绑并生成指令", exact: true }).click()
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.replacements.at(-1)), {
+      botId: "old-bot",
+      bindingId: "previous-group",
+      version: 1
+    })
+    await page
+      .getByText("原接入已解除。发送下方指令后完成换绑，原会话记录会保留。", { exact: true })
+      .waitFor()
+    // An in-place gateway switch must discard old history and retry operations.
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.scope = "production-environment"
+      f.bindings = []
+      f.targets = []
+    })
+    await page.getByRole("button", { name: "刷新", exact: true }).click()
+    await page.getByRole("region", { name: "已有接入" }).waitFor({ state: "detached" })
+    assert.equal(await page.getByRole("button", { name: "换绑并生成指令", exact: true }).count(), 0)
+    await page.getByRole("button", { name: "生成绑定指令", exact: true }).click()
+    assert.equal(await page.evaluate(() => (window as any).fixture.replacements.at(-1)), undefined)
+    await page.getByText("/绑定Bot abcdefghijklmnopqrstuvwx", { exact: true }).waitFor()
     assert.deepEqual(errors, [])
     console.log(
-      "PASS: IM dialog capability fallback, stable create retry, group proof, reply status, task navigation, revoke and owner main conversation navigation"
+      "PASS: IM dialog capability fallback, stable replacement retry, selected group replacement, environment isolation, reply status and navigation"
     )
   } finally {
     await app?.close()

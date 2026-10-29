@@ -441,3 +441,26 @@
     gap: 8px;
   }
 }
+
+.bot-im-connect-replacement {
+  margin-top: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.bot-im-connect-replacement label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.bot-im-connect-replacement select {
+  min-width: 0;
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid var(--im-line);
+  border-radius: 8px;
+  background: var(--im-soft);
+  color: inherit;
+}
+.bot-im-connect-replacement + .bot-im-connect-create {
+  margin-top: 12px;
+}

@@ -11,7 +11,7 @@ import {
 } from "lucide-react"
 import "./bot-im-channel-dialog.css"
 import type { BotClient, BotDefinition } from "../../../../shared/bots/contracts"
-import type { BotImBinding } from "../../../../shared/bots/im-channel"
+import type { BotImBinding, BotImReplacement } from "../../../../shared/bots/im-channel"
 import type { BotMockFeedEntry } from "../../../../shared/bots/mock-channel"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { botErrorMessage } from "@/lib/bot-error-message"
@@ -60,7 +60,22 @@ export function BotImChannelDialog({
 }) {
   const api = client.im!
   const titleRef = useRef<HTMLHeadingElement>(null)
-  const [status, setStatus] = useState<{ connected: boolean; available: boolean } | null>(null)
+  const [status, setStatus] = useState<{
+    connected: boolean
+    available: boolean
+    scope?: string
+  } | null>(null)
+  const [targets, setTargets] = useState<BotImBinding[]>([])
+  const [targetId, setTargetId] = useState("")
+  const [targetLoading, setTargetLoading] = useState(false)
+  const targetGeneration = useRef(0)
+  const [targetError, setTargetError] = useState<string | null>(null)
+  const [retryOperation, setRetryOperation] = useState<{
+    operationId: string
+    replace?: BotImReplacement
+    label?: string
+  } | null>(null)
+  const [switchNotice, setSwitchNotice] = useState<string | null>(null)
   const [bindings, setBindings] = useState<BotImBinding[]>([])
   const [cursor, setCursor] = useState<string | null>(null)
   const [kind, setKind] = useState<"dm" | "group">("dm")
@@ -81,13 +96,15 @@ export function BotImChannelDialog({
   const [error, setError] = useState<string | null>(null)
   const live = useRef(true)
   const loading = useRef(false)
+  const connectionScope = useRef<string | null>(null)
   const selection = useRef(selected)
   selection.current = selected
   const merge = (values: BotImBinding[]) =>
     setBindings((old) =>
       [...new Map([...old, ...values].map((value) => [value.id, value])).values()]
-        .filter((value) =>
-          !["revoked", "expired"].includes(value.state) || !removedBindings.current.has(value.id)
+        .filter(
+          (value) =>
+            !["revoked", "expired"].includes(value.state) || !removedBindings.current.has(value.id)
         )
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
     )
@@ -101,6 +118,19 @@ export function BotImChannelDialog({
       if (!live.current) return
       setStatus(next)
       if (!next.available) return
+      const scope = next.scope ?? "default"
+      if (connectionScope.current !== null && connectionScope.current !== scope) {
+        setBindings([])
+        setCursor(null)
+        loadedBindingPages.current = false
+        removedBindings.current.clear()
+        historyWindow.current = null
+        selection.current = null
+        setSelected(null)
+        setEntries([])
+        setHistoryCursor(null)
+      }
+      connectionScope.current = scope
       const page = await api.list(bot.id)
       if (!live.current) return
       merge(page.items)
@@ -174,17 +204,91 @@ export function BotImChannelDialog({
       if (live.current) setBusy(false)
     }
   }
+  const createKey = `bot-im-create:${client.hostId}:${status?.scope ?? "default"}:${bot.id}:${kind}`
+  const target = targets.find((binding) => binding.id === targetId)
+  const loadTargets = useCallback(async () => {
+    const generation = ++targetGeneration.current
+    if (!status?.available || !api.replacementTargets) {
+      setTargetLoading(false)
+      return
+    }
+    setTargetLoading(true)
+    setTargetError(null)
+    try {
+      const values = await api.replacementTargets(kind)
+      if (!live.current || generation !== targetGeneration.current) return
+      setTargets(values)
+      setTargetId((id) =>
+        values.some((binding) => binding.id === id)
+          ? id
+          : kind === "dm" && values.length === 1
+            ? values[0].id
+            : ""
+      )
+    } catch (cause) {
+      if (live.current && generation === targetGeneration.current)
+        setTargetError(botErrorMessage(cause))
+    } finally {
+      if (live.current && generation === targetGeneration.current) setTargetLoading(false)
+    }
+  }, [api, kind, status?.available, status?.scope])
+  useEffect(() => {
+    setTargets([])
+    setTargetId("")
+    setSwitchNotice(null)
+    setRetryOperation(null)
+    const saved = localStorage.getItem(createKey)
+    if (saved) {
+      try {
+        setRetryOperation(JSON.parse(saved))
+      } catch {
+        localStorage.removeItem(createKey)
+      }
+    }
+    void loadTargets()
+  }, [createKey, loadTargets])
   const create = () =>
     action(async () => {
-      // Retain the operation ID on an unknown transport outcome, including closing this dialog.
-      const key = `bot-im-create:${client.hostId}:${bot.id}:${kind}`
-      const operationId = localStorage.getItem(key) ?? crypto.randomUUID()
-      localStorage.setItem(key, operationId)
-      const binding = await api.create(bot.id, kind, operationId)
-      localStorage.removeItem(key)
+      let replacement = target
+      if (!retryOperation && kind === "dm" && api.replacementTargets) {
+        // Resolve the current private route at the click, not from a stale dialog
+        // snapshot. The usual generate-and-send flow replaces it automatically.
+        const current = await api.replacementTargets("dm")
+        if (current.length > 1)
+          throw new Error("当前有多个私聊接入，无法确定要替换哪一个。请先检查并撤销多余接入。")
+        replacement = current[0]
+      }
+      const operation = retryOperation ?? {
+        operationId: crypto.randomUUID(),
+        ...(replacement
+          ? {
+              replace: {
+                botId: replacement.botId,
+                bindingId: replacement.id,
+                version: replacement.version
+              },
+              label: replacement.label
+            }
+          : {})
+      }
+      // Keep the exact replacement across a lost response or dialog reopen.
+      localStorage.setItem(createKey, JSON.stringify(operation))
+      setRetryOperation(operation)
+      const binding = await api.create(bot.id, kind, operation.operationId, operation.replace)
+      localStorage.removeItem(createKey)
       if (live.current) {
+        setRetryOperation(null)
+        setTargets((items) => items.filter((item) => item.id !== operation.replace?.bindingId))
+        setTargetId("")
+        if (operation.replace)
+          setSwitchNotice(
+            kind === "dm"
+              ? "原私聊绑定已解除。发送下方指令后连接此 Bot，历史消息与任务保留。"
+              : "原接入已解除。发送下方指令后完成换绑，原会话记录会保留。"
+          )
         merge([binding])
         setSelected(binding.id)
+        void refresh()
       }
     })
   const chosen = bindings.find((binding) => binding.id === selected)
@@ -245,7 +349,10 @@ export function BotImChannelDialog({
               aria-label="刷新"
               title="刷新连接状态"
               disabled={busy || refreshing}
-              onClick={() => void refresh()}
+              onClick={() => {
+                void refresh()
+                void loadTargets()
+              }}
             >
               <RefreshCw
                 size={15}
@@ -288,6 +395,51 @@ export function BotImChannelDialog({
                 </label>
               ))}
             </div>
+            {targets.length > 0 && !retryOperation && (
+              <div className="bot-im-connect-replacement">
+                {kind === "dm" ? (
+                  <p className="bot-im-connect-hint">
+                    生成新指令会自动解除原私聊绑定；发送后连接此 Bot，历史消息与任务保留。
+                  </p>
+                ) : (
+                  <label>
+                    <span>绑定目标</span>
+                    <select
+                      aria-label="换绑目标"
+                      value={targetId}
+                      disabled={busy || targetLoading}
+                      onChange={(event) => setTargetId(event.target.value)}
+                    >
+                      <option value="">接入新的群聊</option>
+                      {targets.map((binding) => (
+                        <option key={binding.id} value={binding.id}>
+                          {binding.peerLabel ?? (binding.kind === "dm" ? "本人私聊" : "群聊")} ·{" "}
+                          {binding.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {kind === "group" && target && (
+                  <p className="bot-im-connect-hint">
+                    先解除所选接入，再发送新指令完成换绑。原消息与任务保留。
+                  </p>
+                )}
+              </div>
+            )}
+            {retryOperation?.replace && (
+              <p className="bot-im-connect-hint">上次操作尚未完成，重试会继续处理。</p>
+            )}
+            {targetError && (
+              <p role="alert" className="bot-im-connect-error">
+                {targetError}
+              </p>
+            )}
+            {switchNotice && (
+              <p role="status" className="bot-im-connect-hint">
+                {switchNotice}
+              </p>
+            )}
             <div className="bot-im-connect-create">
               <p>
                 {bot.archived
@@ -298,12 +450,39 @@ export function BotImChannelDialog({
               </p>
               <button
                 className={`${button} bot-im-connect-primary`}
-                disabled={busy || !status?.available || bot.archived}
+                disabled={
+                  busy ||
+                  targetLoading ||
+                  Boolean(targetError) ||
+                  !status?.available ||
+                  bot.archived
+                }
                 onClick={() => void create()}
               >
-                生成绑定指令 <ArrowRight size={15} aria-hidden="true" />
+                {kind === "dm"
+                  ? "生成绑定指令"
+                  : retryOperation?.replace
+                    ? "重试换绑"
+                    : target
+                      ? "换绑并生成指令"
+                      : "生成绑定指令"}{" "}
+                <ArrowRight size={15} aria-hidden="true" />
               </button>
             </div>
+            {retryOperation && (
+              <button
+                className="bot-im-connect-link"
+                disabled={busy}
+                onClick={() => {
+                  localStorage.removeItem(createKey)
+                  setRetryOperation(null)
+                  setError(null)
+                  void loadTargets()
+                }}
+              >
+                重新选择接入
+              </button>
+            )}
           </section>
           {error && (
             <p role="alert" className="bot-im-connect-error">
@@ -437,22 +616,29 @@ export function BotImChannelDialog({
                             </div>
                           </>
                         )}
-                        {binding.kind === "dm" && binding.state === "active" && (
-                          <div className="bot-im-connect-binding-action">
-                            <p>已关联个人主对话 · 回复同步到招乎</p>
-                            {onOpenMain && (
-                              <button
-                                className="bot-im-connect-link"
-                                onClick={() => {
-                                  onOpenMain()
-                                  onClose()
-                                }}
-                              >
-                                打开主对话 <ArrowUpRight size={14} aria-hidden="true" />
-                              </button>
-                            )}
-                          </div>
+                        {binding.localError && (
+                          <p role="alert" className="bot-im-connect-error">
+                            {binding.localError} 可撤销此接入后重新绑定。
+                          </p>
                         )}
+                        {binding.kind === "dm" &&
+                          binding.state === "active" &&
+                          !binding.localError && (
+                            <div className="bot-im-connect-binding-action">
+                              <p>已关联个人主对话 · 回复同步到招乎</p>
+                              {onOpenMain && (
+                                <button
+                                  className="bot-im-connect-link"
+                                  onClick={() => {
+                                    onOpenMain()
+                                    onClose()
+                                  }}
+                                >
+                                  打开主对话 <ArrowUpRight size={14} aria-hidden="true" />
+                                </button>
+                              )}
+                            </div>
+                          )}
                         {binding.kind === "group" &&
                           ["active", "revoked"].includes(binding.state) &&
                           onOpenConversation && (

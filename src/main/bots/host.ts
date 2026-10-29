@@ -236,6 +236,11 @@ export class LocalBotHost {
     }
   }
 
+  listBotIds(): string[] {
+    this.requireRunning()
+    return this.store.listBots().map((bot) => bot.id)
+  }
+
   snapshot(): BotSnapshot {
     if (this.stopping) throw new BotError("STOPPING", "应用正在退出，请稍后重试")
     return {
