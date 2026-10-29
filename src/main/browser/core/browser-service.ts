@@ -45,6 +45,46 @@ const MIN_BROWSER_ZOOM_FACTOR = 0.25
 const MAX_BROWSER_ZOOM_FACTOR = 5
 const BROWSER_PROFILE_PARTITION = "persist:cmbdevclaw-browser-profile"
 const BROWSER_SERVICE_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserService]`
+const MAX_EXTRACTED_IFRAME_LINKS = 100
+
+function buildIframeExtractionScript(options: {
+  textOffset: number
+  maxTextChars: number
+  linkOffset: number
+}): string {
+  const { textOffset, maxTextChars, linkOffset } = options
+  return `(() => {
+    const fullText = ${linkOffset === 0 ? `(document.body?.innerText || "").replace(/\\s+\\n/g, "\\n").trim()` : `""`}
+    const allLinks = ${
+      textOffset === 0
+        ? `Array.from(document.querySelectorAll("a[href]"), (node) => ({
+      text: (node.innerText || node.getAttribute("aria-label") || "").trim(),
+      href: node.href,
+      visible: node.getClientRects().length > 0
+    })).filter((item) => item.visible && item.text && item.href).map(({ text, href }) => ({ text, href }))`
+        : "[]"
+    }
+    return {
+      text: ${linkOffset === 0 ? `fullText.slice(${textOffset}, ${textOffset + maxTextChars})` : "undefined"},
+      textLength: fullText.length,
+      links: ${textOffset === 0 ? `allLinks.slice(${linkOffset}, ${linkOffset + MAX_EXTRACTED_IFRAME_LINKS})` : "undefined"},
+      linkCount: allLinks.length
+    }
+  })()`
+}
+
+interface BrowserIframeInformation {
+  index: number
+  url: string
+  depth: number
+  text?: string
+  links?: Array<{ text: string; href: string }>
+  linksTruncated?: boolean
+  nextLinkOffset?: number
+  truncated?: boolean
+  nextTextOffset?: number
+  error?: string
+}
 
 interface BrowserSession {
   id: string
@@ -371,6 +411,64 @@ export class BrowserService {
     const session = this.requireSession()
     await session.targetReady
     return this.getState()
+  }
+
+  async extractIframeInformation(
+    options: {
+      maxTextCharsPerFrame?: number
+      textOffset?: number
+      linkOffset?: number
+      frameIndex?: number
+    } = {}
+  ): Promise<{
+    frames: BrowserIframeInformation[]
+  }> {
+    const session = this.requireSession()
+    await session.targetReady
+    const mainFrame = session.view.webContents.mainFrame
+    const iframeFrames = mainFrame.framesInSubtree.filter((frame) => frame !== mainFrame)
+    const frames = iframeFrames
+      .map((frame, index) => ({ frame, index }))
+      .filter(({ index }) => options.frameIndex === undefined || index === options.frameIndex)
+    const maxTextCharsPerFrame =
+      options.maxTextCharsPerFrame ?? (options.frameIndex === undefined ? 4_000 : 12_000)
+    const textOffset = options.textOffset ?? 0
+    const linkOffset = options.linkOffset ?? 0
+    const results = await Promise.all(
+      frames.map(async ({ frame, index }): Promise<BrowserIframeInformation> => {
+        let depth = 0
+        for (let parent = frame.parent; parent; parent = parent.parent) depth += 1
+        try {
+          const { textLength, linkCount, ...data } = (await frame.executeJavaScript(
+            buildIframeExtractionScript({
+              textOffset,
+              maxTextChars: maxTextCharsPerFrame,
+              linkOffset
+            })
+          )) as Omit<BrowserIframeInformation, "index" | "url" | "depth"> & {
+            textLength: number
+            linkCount: number
+          }
+          const nextTextOffset = textOffset + (data.text?.length ?? 0)
+          const truncated = nextTextOffset < textLength
+          const nextLinkOffset = linkOffset + (data.links?.length ?? 0)
+          const linksTruncated = nextLinkOffset < linkCount
+          return {
+            index,
+            url: frame.url,
+            depth,
+            ...data,
+            truncated: truncated || undefined,
+            nextTextOffset: truncated ? nextTextOffset : undefined,
+            linksTruncated: linksTruncated || undefined,
+            nextLinkOffset: linksTruncated ? nextLinkOffset : undefined
+          }
+        } catch (error) {
+          return { index, url: frame.url, depth, error: formatError(error) }
+        }
+      })
+    )
+    return { frames: results }
   }
 
   detach(): BrowserState {

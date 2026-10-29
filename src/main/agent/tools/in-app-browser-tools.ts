@@ -3,6 +3,8 @@ import type { DynamicStructuredTool } from "@langchain/core/tools"
 import { z } from "zod"
 import { getBrowserCdpConfigAsync } from "../../storage"
 import { getCurrentBrowserCdpPort } from "../../browser/cdp/browser-cdp"
+import { preparePlaywrightInAppBrowser } from "../../browser/cdp/playwright-mcp-bridge"
+import { getGlobalBrowserService } from "../../browser/core/browser-service-registry"
 import type { McpCapabilityTool } from "../../mcp/capability-types"
 import {
   listBrowserScriptLibraryEntries,
@@ -15,9 +17,7 @@ import {
 } from "../../browser/record/common/browser-script-execution-service"
 import { extractScriptRecordingVariables } from "../../../shared/browser-script-recording"
 
-type BrowserScriptLibraryEntry = Awaited<
-  ReturnType<typeof listBrowserScriptLibraryEntries>
->[number]
+type BrowserScriptLibraryEntry = Awaited<ReturnType<typeof listBrowserScriptLibraryEntries>>[number]
 
 function resolveRecordingEntry(
   entries: BrowserScriptLibraryEntry[],
@@ -46,7 +46,7 @@ async function isInAppBrowserEnabled(): Promise<boolean> {
 }
 
 /** Require explicit opt-in, a running browser endpoint, and snapshot support. */
-export async function createBrowserRecordingTools(
+export async function createInAppBrowserTools(
   capabilities: McpCapabilityTool[],
   context: { workspacePath: string; threadId?: string; abortSignal?: AbortSignal }
 ): Promise<DynamicStructuredTool[]> {
@@ -136,7 +136,7 @@ export async function createBrowserRecordingTools(
             status: "completed",
             fileName: resolvedFileName,
             nextStep:
-              "必须调用 In-app-browser 的 browser_snapshot 读取当前页面，确认查询对象和结果后再回答用户。回放成功不代表业务成功；若页面仍在加载，等待后重新读取。不要凭脚本名称或参数编造结果。"
+              "必须先调用 browser_snapshot 确认页面实际结果后再回答用户；若快照发现 iframe 或需要读取 iframe 内容，再调用 inAppBrowser_extract_iframes。回放成功不代表业务成功；若页面仍在加载，等待后重新读取。不要凭操作名称或参数编造结果。"
           })
         } finally {
           context.abortSignal?.removeEventListener("abort", cancel)
@@ -145,12 +145,63 @@ export async function createBrowserRecordingTools(
       {
         name: "inAppBrowser_execute_recording",
         description:
-          "执行 inAppBrowser_list_recordings 返回的已保存脚本并等待回放完成。只传实际 identifier 对应的变量，必须明确提供全部变量，不能沿用录制时的旧值。执行后必须调用 In-app-browser 的 browser_snapshot，依据页面内容总结业务结果。脚本匹配和参数提取由模型根据用户意图完成。",
+          "执行 inAppBrowser_list_recordings 返回的可复用操作并等待完成。只传实际 identifier 对应的变量，必须明确提供全部变量，不能沿用历史值。执行后先调用 browser_snapshot 验证页面实际结果；若快照发现 iframe 或需要读取 iframe 内容，再调用 inAppBrowser_extract_iframes。操作匹配和参数提取由模型根据用户意图完成。",
         schema: z.object({
-          fileName: z.string().describe("优先传列表返回的完整 fileName；也兼容唯一显示名称或含该文件名的路径"),
+          fileName: z
+            .string()
+            .describe("优先传列表返回的完整 fileName；也兼容唯一显示名称或含该文件名的路径"),
           variableValues: z
             .record(z.string(), z.union([z.string(), z.array(z.string())]))
             .describe("从用户请求提取的参数，键为变量 identifier；无变量时传 {}")
+        })
+      }
+    ),
+    tool(
+      async ({ maxTextCharsPerFrame, textOffset, linkOffset, frameIndex }) => {
+        if (!(await isInAppBrowserEnabled())) throw new Error("请先开启内置浏览器控制并重启应用")
+        context.abortSignal?.throwIfAborted()
+        const service = getGlobalBrowserService()
+        if (!service) throw new Error("内置浏览器服务不可用")
+        await preparePlaywrightInAppBrowser({
+          workspacePath: context.workspacePath,
+          threadId: context.threadId,
+          service
+        })
+        context.abortSignal?.throwIfAborted()
+        return JSON.stringify(
+          await service.extractIframeInformation({
+            maxTextCharsPerFrame,
+            textOffset,
+            linkOffset,
+            frameIndex
+          })
+        )
+      },
+      {
+        name: "inAppBrowser_extract_iframes",
+        description:
+          "在 browser_snapshot 发现 iframe 后，读取全部 iframe（包括跨域和嵌套 iframe）的可见文本与链接，不重复返回主页面。若 truncated=true，用 frameIndex 和 nextTextOffset 继续读取文本；若 linksTruncated=true，用 frameIndex 和 nextLinkOffset 作为 linkOffset 继续读取链接。",
+        schema: z.object({
+          maxTextCharsPerFrame: z
+            .number()
+            .int()
+            .min(1_000)
+            .max(30_000)
+            .optional()
+            .describe("每次为每个 frame 返回的文本字符数"),
+          textOffset: z
+            .number()
+            .int()
+            .min(0)
+            .default(0)
+            .describe("从 frame 文本的哪个字符位置开始读取"),
+          linkOffset: z.number().int().min(0).default(0).describe("从 frame 的第几个链接开始读取"),
+          frameIndex: z
+            .number()
+            .int()
+            .min(0)
+            .optional()
+            .describe("只读取 frames 数组中的指定 iframe；省略则读取全部 iframe")
         })
       }
     )

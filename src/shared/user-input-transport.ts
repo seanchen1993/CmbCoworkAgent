@@ -15,12 +15,28 @@ import { SKILL_USE_TAG_NAME } from "./skill-use-block"
 export const LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX = "使用内置浏览器 browser_*工具："
 export const LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX =
   "使用内置浏览器 browser_*工具（不允许使用截图功能）："
-const BROWSER_RECORDING_PRIORITY_PROMPT =
-  "开始任务时，先调用 inAppBrowser_list_recordings 查找匹配的录制脚本（工具可用时），不需要用户额外提醒。根据名称、描述和变量语义匹配用户意图，优先使用 inAppBrowser_execute_recording 完成任务，不要直接从 browser_navigate 等工具重新开始。变量从当前请求或已确认的上下文提取，缺少参数或匹配不明确时先询问，不沿用录制时的旧值。仅在无匹配脚本、工具不可用、用户要求手动操作或脚本无法完成任务时使用普通浏览器工具；回放失败后先检查页面，避免重复已完成的操作。执行后使用 browser_snapshot 验证实际结果。用户任务："
-export const BUILTIN_BROWSER_PROMPT_PREFIX =
-  LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX + BROWSER_RECORDING_PRIORITY_PROMPT
-export const BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX =
-  LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX + BROWSER_RECORDING_PRIORITY_PROMPT
+const BROWSER_TASK_ROUTING_PROMPT =
+  "先用 inAppBrowser_list_recordings 查找匹配的可复用操作，匹配时优先执行；否则使用普通浏览器工具。页面读取先用 browser_snapshot；发现 iframe 时再用 inAppBrowser_extract_iframes（支持跨域）。按返回的 nextTextOffset 或 nextLinkOffset 继续读取截断内容。"
+export const BUILTIN_BROWSER_INSTRUCTIONS_OPEN = "<builtin-browser-instructions>"
+export const BUILTIN_BROWSER_INSTRUCTIONS_CLOSE = "</builtin-browser-instructions>"
+
+function wrapBuiltinBrowserInstructions(instructions: string): string {
+  return `${BUILTIN_BROWSER_INSTRUCTIONS_OPEN}\n${instructions}\n${BUILTIN_BROWSER_INSTRUCTIONS_CLOSE}\n`
+}
+
+export const BUILTIN_BROWSER_PROMPT_PREFIX = wrapBuiltinBrowserInstructions(
+  `使用内置浏览器 browser_* 工具。${BROWSER_TASK_ROUTING_PROMPT}`
+)
+export const BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX = wrapBuiltinBrowserInstructions(
+  `使用内置浏览器 browser_* 工具，不允许使用截图功能。${BROWSER_TASK_ROUTING_PROMPT}`
+)
+
+export function stripBuiltinBrowserInstructions(content: string): string | null {
+  if (!content.startsWith(BUILTIN_BROWSER_INSTRUCTIONS_OPEN)) return null
+  const closeAt = content.indexOf(BUILTIN_BROWSER_INSTRUCTIONS_CLOSE)
+  if (closeAt < 0) return null
+  return content.slice(closeAt + BUILTIN_BROWSER_INSTRUCTIONS_CLOSE.length).replace(/^\r?\n/, "")
+}
 
 const SKILL_USE_BLOCK_PATTERN = new RegExp(
   `<${SKILL_USE_TAG_NAME}>[\\s\\S]*?</${SKILL_USE_TAG_NAME}>`,
@@ -42,10 +58,9 @@ const SLASH_COMMAND_PATTERN = /^\s*\/[a-z][a-z0-9-]*(?=\s|$)/
  */
 export function stripUserInputTransportDecorations(content: string): string {
   let text = content
-  if (text.startsWith(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX)) {
-    text = text.slice(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX.length)
-  } else if (text.startsWith(BUILTIN_BROWSER_PROMPT_PREFIX)) {
-    text = text.slice(BUILTIN_BROWSER_PROMPT_PREFIX.length)
+  const browserText = stripBuiltinBrowserInstructions(text)
+  if (browserText !== null) {
+    text = browserText
   } else if (text.startsWith(LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX)) {
     text = text.slice(LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX.length)
   } else if (text.startsWith(LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX)) {

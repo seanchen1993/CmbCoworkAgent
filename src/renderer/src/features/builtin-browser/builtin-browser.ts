@@ -4,7 +4,8 @@ import {
   LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX as PREVIOUS_BROWSER_PROMPT_PREFIX,
   LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
   BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
-  BUILTIN_BROWSER_PROMPT_PREFIX
+  BUILTIN_BROWSER_PROMPT_PREFIX,
+  stripBuiltinBrowserInstructions
 } from "../../../../shared/user-input-transport"
 
 export { BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX, BUILTIN_BROWSER_PROMPT_PREFIX }
@@ -65,9 +66,11 @@ export function parseBuiltinBrowserPrompt(input: string): {
   visibleText: string
   browserSelected: boolean
 } {
+  const wrappedText = stripBuiltinBrowserInstructions(input)
+  if (wrappedText !== null) {
+    return { visibleText: wrappedText, browserSelected: true }
+  }
   for (const prefix of [
-    BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
-    BUILTIN_BROWSER_PROMPT_PREFIX,
     LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
     PREVIOUS_BROWSER_PROMPT_PREFIX,
     LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX
