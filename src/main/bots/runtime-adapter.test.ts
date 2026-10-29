@@ -350,7 +350,7 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
-  it("lets an unassigned public member pass while retaining delivery checks for real output", async () => {
+  it.each(["(pass)", ""])("lets an unassigned public member stay silent with %j while retaining delivery checks", async (silent) => {
     fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
     fixture.start.mockImplementationOnce(async (request, _delivery, context) => {
       expect(request.message).toContain("Being selected to take a room turn does not require")
@@ -358,7 +358,7 @@ describe("Bot Runtime integration", () => {
       expect(
         context.checkFinalDelivery!([
           new HumanMessage("Only the other member has work"),
-          new AIMessage("(pass)")
+          new AIMessage({ content: silent, response_metadata: { finish_reason: "stop" } })
         ])
       ).toBeUndefined()
       expect(
@@ -367,7 +367,7 @@ describe("Bot Runtime integration", () => {
           new AIMessage("Done")
         ])
       ).toContain("bot_send_message")
-      context.onFinalAssistant?.({ messageId: "quiet", finalText: "(pass)" })
+      context.onFinalAssistant?.({ messageId: "quiet", finalText: silent })
       expect(context.shouldRaiseCompletionAttention?.()).toBe(false)
       context.onFinalAssistant?.({ messageId: "result", finalText: "New result" })
       expect(context.shouldRaiseCompletionAttention?.()).toBe(true)
@@ -1518,7 +1518,7 @@ describe("Bot Runtime integration", () => {
     { id: "send-other-task-call", author: "b", posted: false },
     { id: "send-peer-task-call", author: "other", posted: false }
   ])(
-    "only permits a silent internal callback after a host-bound peer delivery ($id/$author)",
+    "keeps exact delivery provenance while allowing a text-only callback to abstain ($id/$author)",
     async ({ id, author, posted }) => {
       fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
       const row = (id: string, authorBotId: string | null, text: string): BotGroupMessage => ({
@@ -1555,8 +1555,11 @@ describe("Bot Runtime integration", () => {
         new HumanMessage("Peer result"),
         new AIMessage("(pass)")
       ])
-      if (posted) expect(result).toBeUndefined()
-      else expect(result).toContain("bot_send_message")
+      expect(result).toBeUndefined()
+      expect(context.checkFinalDelivery!([
+        new HumanMessage("Peer result"),
+        new AIMessage("The peer found a new correction.")
+      ])).toContain("bot_send_message")
     }
   )
 
@@ -2122,6 +2125,28 @@ describe("Bot Runtime integration", () => {
     await expect(port().acquire(bot, relay)!.execute(new AbortController().signal, vi.fn()))
       .resolves.toMatchObject({ state: "completed" })
     expect(fixture.verifyFiles).not.toHaveBeenCalled()
+  })
+
+  it("preserves group relay output verification and managed command ownership at integration", async () => {
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+    const relay: BotTask = {
+      ...task, threadId: "group-g-a",
+      origin: { kind: "bot", fromBotId: "caller", rootTaskId: "root", depth: 1,
+        groupId: "g", expectsReply: true, outputFiles: ["report.json"] }
+    }
+    fixture.peerHandoff.mockReturnValue({ pending: true, outputFiles: ["report.json"] })
+    fixture.verifyFiles.mockRejectedValue(new Error("Report not ready"))
+    await expect(port().acquire(bot, relay)!.execute(new AbortController().signal, vi.fn()))
+      .resolves.toMatchObject({ state: "completed" })
+    expect(fixture.verifyFiles).not.toHaveBeenCalled()
+    fixture.peerHandoff.mockReturnValue({ pending: false, outputFiles: ["report.json"] })
+    const result: BotTask = { ...relay, origin: { kind: "bot", fromBotId: "leaf",
+      rootTaskId: "root", depth: 2, groupId: "g", expectsReply: false, upstreamTaskId: relay.id } }
+    await expect(port().acquire(bot, result)!.execute(new AbortController().signal, vi.fn()))
+      .rejects.toThrow("Report not ready")
+    expect(fixture.verifyFiles).toHaveBeenCalledWith("/synthetic/workspaces/group-g", ["report.json"], expect.any(AbortSignal))
+    expect(fixture.start.mock.calls.at(-1)![2].foregroundCommandLifecycle).toHaveProperty("settled")
+    expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toBeUndefined()
   })
 
   it("enforces the original report contract when the private result turn actually integrates it", async () => {
@@ -3007,7 +3032,7 @@ describe("Bot Runtime integration", () => {
     expect(prompt).toContain("never simulate an action or predict its result")
     expect(prompt).toContain("calculations that need no external action can be answered directly")
     expect(prompt).toContain("Never ask for passwords")
-    if (origin.kind === "user" || origin.kind === "group")
+    if (origin.kind === "user")
       expect(prompt).toContain("Before tools for substantive work")
     else expect(prompt).not.toContain("Before tools for substantive work")
   })
@@ -3317,7 +3342,7 @@ describe("Bot Runtime integration", () => {
       expect.any(Function)
     )
     expect(context.allowTrustedTransportSkillMarker).toBe(false)
-    expect(context.toolConcurrencyQueueId).toBe("bot-group-g")
+    expect(context.toolConcurrencyQueueId).toBe('bot-group:["g","a"]')
     expect(context.userInputWithoutToolLock).toBe(true)
     expect(context.botBrowserToolsOwnFileLock).toBe(true)
     const upload = vi.fn(async () => "attached")
@@ -3325,12 +3350,42 @@ describe("Bot Runtime integration", () => {
       operation: typeof upload
     ) => Promise<string>
     expect(await withFileLock(upload)).toBe("attached")
-    expect(fixture.fileLock).toHaveBeenCalledWith("bot-group-g", upload)
+    expect(fixture.fileLock).toHaveBeenCalledWith('bot-group:["g","a"]', upload)
     expect(upload).toHaveBeenCalledTimes(1)
     expect(fixture.announce).not.toHaveBeenCalled()
     expect(fixture.summary).not.toHaveBeenCalled()
     expect(fixture.memorySnapshot).not.toHaveBeenCalled()
     expect(context.extraSystemPrompt).not.toContain("Private Bot memory reference")
+  })
+  it("uses a stable tool queue per group and bot, rather than sharing it across members", async () => {
+    for (const [groupId, memberId] of [
+      ["g", "a"],
+      ["g", "b"],
+      ["g", "a"],
+      ["h", "a"]
+    ]) {
+      fixture.thread.mockReturnValue({
+        metadata: JSON.stringify({ ...metadata(groupId), botId: memberId })
+      })
+      await port()
+        .acquire(
+          { ...bot, id: memberId },
+          {
+            ...task,
+            botId: memberId,
+            threadId: `group-${groupId}-${memberId}`,
+            origin: { kind: "group", groupId, messageId: "request" }
+          }
+        )!
+        .execute(new AbortController().signal, vi.fn())
+    }
+    const queues = fixture.start.mock.calls.map((call) => call[2].toolConcurrencyQueueId)
+    expect(queues).toEqual([
+      'bot-group:["g","a"]',
+      'bot-group:["g","b"]',
+      'bot-group:["g","a"]',
+      'bot-group:["h","a"]'
+    ])
   })
   it("offers the existing own-profile tool to direct group users without exposing private memory", async () => {
     fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })

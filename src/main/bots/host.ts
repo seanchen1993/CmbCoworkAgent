@@ -1294,7 +1294,7 @@ export class LocalBotHost {
       )
       if (!lease) continue
       try {
-        this.store.transition(task.id, "running")
+        this.store.transition(task.id, "running", null, task.groupSnapshotOrdinal)
       } catch (error) {
         lease.release()
         throw error

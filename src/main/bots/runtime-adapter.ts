@@ -586,8 +586,7 @@ export function createLocalBotRunPort(
           const commandResults = checkpointId ? getHost().continuationCommandResults(task.id) : []
           const peerResultOwner =
             task.origin.kind === "bot" &&
-            (task.origin.expectsReply ||
-              (!botTaskGroupId(task) && Boolean(task.origin.upstreamTaskId)))
+            (task.origin.expectsReply || Boolean(task.origin.upstreamTaskId))
           const keepCommandSource = task.origin.kind === "schedule" || peerResultOwner
           const foregroundLifecycle =
             !mock && keepCommandSource ? getHost().commandLifecycle(task.id, true) : undefined
@@ -634,7 +633,7 @@ export function createLocalBotRunPort(
                 getHost().recordGroupQuestion(task.id, request)
             })
           const toolConcurrencyQueueId = groupId
-            ? `bot-group-${groupId}`
+            ? `bot-group:${JSON.stringify([groupId, bot.id])}`
             : localWorkFileQueue(bot, workspacePath, work)
           const profileContinuationRequest =
             task.origin.kind === "notification" && task.origin.notificationKind === "command"
@@ -1074,7 +1073,7 @@ export function createLocalBotRunPort(
                             undefined,
                             true
                           ),
-                          ...(task.origin.kind === "bot" && task.origin.expectsReply
+                          ...(peerResultOwner
                             ? createBotReturnFileTools(workspacePath, signal, captureReplyFiles)
                             : []),
                           ...createBotBrowserTools(
@@ -1218,7 +1217,7 @@ export function createLocalBotRunPort(
                     (task.origin.kind === "group" ||
                       task.origin.kind === "discussion" ||
                       (task.origin.kind === "bot" && !task.origin.expectsReply)) &&
-                    isBotGroupPass(finalText)
+                    (!splitBotInlineReasoning(finalText ?? "").body.trim() || isBotGroupPass(finalText))
                   )
                 }
               }

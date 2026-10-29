@@ -3285,7 +3285,7 @@ describe("Bot host scheduling", () => {
       text: "Independent roles",
       targetBotIds: room.memberIds
     })
-    await vi.waitFor(() => expect(runs).toHaveLength(1))
+    await vi.waitFor(() => expect(runs).toHaveLength(2))
     const first = db.getTask(runs[0])
     const second = db.recentTasks().find((task) => task.botId !== first.botId)!
     const own = host.send({
@@ -3308,7 +3308,7 @@ describe("Bot host scheduling", () => {
     expect(runs).toEqual([first.id, second.id, own.id])
   })
 
-  it("serializes public room turns with no global cap, preserving other rooms and cancellation cleanup", async () => {
+  it("runs initial room members concurrently while preserving same-Bot cancellation cleanup", async () => {
     const db = store()
     const runs: import("../../shared/bots/contracts").BotTask[] = []
     const finish = new Map<string, () => void>()
@@ -3342,26 +3342,28 @@ describe("Bot host scheduling", () => {
     })
     const personal = host.send({ botId: bots[3].id, requestId: "personal", message: "Private" })
     try {
-      await vi.waitFor(() => expect(runs).toHaveLength(3))
+      await vi.waitFor(() => expect(runs).toHaveLength(4))
       const first = runs.find((t) => t.origin.kind === "group" && t.origin.groupId === room.id)!
       const second = db
         .recentTasks()
         .find(
           (t) => t.origin.kind === "group" && t.origin.groupId === room.id && t.id !== first.id
         )!
-      expect(db.getTask(second.id).state).toBe("queued")
+      expect(db.getTask(second.id).state).toBe("running")
       expect(runs.some((t) => t.id === personal.id)).toBe(true)
-      // Abort must retain the room until physical cleanup has completed.
+      const own = host.send({ botId: first.botId, requestId: "after-cancel", message: "Next" })
+      // The cancelled Bot must retain its lease until physical cleanup completes.
       host.cancel(first.id)
       host.resume()
       await new Promise<void>((resolve) => setImmediate(resolve))
-      expect(runs).toHaveLength(3)
+      expect(db.getTask(own.id).state).toBe("queued")
+      expect(db.getTask(second.id).state).toBe("running")
       finish.get(first.id)!()
-      await vi.waitFor(() => expect(runs.some((t) => t.id === second.id)).toBe(true))
+      await vi.waitFor(() => expect(runs.some((t) => t.id === own.id)).toBe(true))
       expect(db.getTask(first.id).state).toBe("cancelled")
       for (const resolve of finish.values()) resolve()
       await vi.waitFor(() => expect(host.hasActiveRuns()).toBe(false))
-      expect(runs).toHaveLength(4)
+      expect(runs).toHaveLength(5)
     } finally {
       for (const resolve of finish.values()) resolve()
     }

@@ -44,6 +44,207 @@ function receipt(groupId = "g", taskId = task.id, status: "success" | "error" = 
 }
 
 describe("formal group delivery", () => {
+  it("does not redrive a clean private callback final into a duplicate public delivery", async () => {
+    const callback: BotTask = {
+      ...task,
+      origin: {
+        kind: "bot",
+        groupId: "g",
+        fromBotId: "b",
+        rootTaskId: "root",
+        depth: 1,
+        expectsReply: false
+      }
+    }
+    class CallbackModel extends BaseChatModel {
+      calls = 0
+      _llmType() {
+        return "callback-envelope-regression"
+      }
+      bindTools() {
+        return this
+      }
+      async _generate(): Promise<ChatResult> {
+        this.calls++
+        const content =
+          this.calls === 1 ? "The peer confirmed the already delivered result; no correction." : ""
+        return {
+          generations: [
+            {
+              text: content,
+              message: new AIMessage({
+                content,
+                response_metadata: { finish_reason: "stop" }
+              })
+            }
+          ]
+        }
+      }
+    }
+    const run = "callback-envelope"
+    const model = new CallbackModel({})
+    const agent = createAgent({
+      model,
+      tools: [],
+      middleware: [
+        createTurnCompletionGateMiddleware({
+          ownerRunToken: run,
+          checkFinalDelivery: createBotGroupDeliveryCheck(callback)
+        })
+      ]
+    })
+    try {
+      await agent.invoke(
+        { messages: [new HumanMessage("Peer confirmation")] },
+        { configurable: { thread_id: callback.threadId } }
+      )
+      expect(model.calls).toBe(1)
+      expect(readTurnCompletionGateReport(callback.threadId, run)?.unresolved).toBeNull()
+    } finally {
+      clearTurnCompletionGateState(callback.threadId, run)
+    }
+  })
+
+  it("lets a text-only callback settle silently without declaring its result delivered", () => {
+    const callback: BotTask = {
+      ...task,
+      origin: {
+        kind: "bot",
+        groupId: "g",
+        fromBotId: "b",
+        rootTaskId: "root",
+        depth: 1,
+        expectsReply: false
+      }
+    }
+    const check = createBotGroupDeliveryCheck(callback)
+    const end = (content: string, finish = "stop") => [
+      new HumanMessage("Peer confirmation arrived"),
+      new AIMessage({ content, response_metadata: { finish_reason: finish } })
+    ]
+    expect(check(end(""))).toBeUndefined()
+    expect(check(end("（pass）"))).toBeUndefined()
+    // Final prose is private scratch regardless of wording; only the send tool
+    // publishes it. The host cannot infer that prose is a new room message.
+    expect(check(end("The total needs correction to 80."))).toBeUndefined()
+    expect(check(end("", "length"))).toContain("bot_send_message")
+    const files: BotTask = {
+      ...callback,
+      origin: {
+        ...(callback.origin as Extract<BotTask["origin"], { kind: "bot" }>),
+        replyFiles: [{ filePath: "result.json", name: "result.json", size: 43 }]
+      }
+    }
+    expect(createBotGroupDeliveryCheck(files)(end(""))).toContain("bot_deliver_files")
+    expect(createBotGroupDeliveryCheck(files)(end("(pass)"))).toContain("bot_deliver_files")
+    expect(createBotGroupDeliveryCheck(files, true)(end(""))).toBeUndefined()
+    expect(createBotGroupDeliveryCheck(files, true)(end("Correction: total 80"))).toContain(
+      "bot_send_message"
+    )
+  })
+
+  it.each(["（pass）", ""])(
+    "does not turn a clean silent response %j into a public-delivery retry",
+    async (silent) => {
+      class SilentModel extends BaseChatModel {
+        calls = 0
+        _llmType() {
+          return "group-silent-marker-regression"
+        }
+        bindTools() {
+          return this
+        }
+        async _generate(): Promise<ChatResult> {
+          this.calls++
+          const message = new AIMessage({
+            content: silent,
+            response_metadata: { finish_reason: "stop" }
+          })
+          return { generations: [{ text: silent, message }] }
+        }
+      }
+      const model = new SilentModel({})
+      const onRecovery = vi.fn()
+      const run = "group-fullwidth-pass"
+      const agent = createAgent({
+        model,
+        tools: [],
+        middleware: [
+          createTurnCompletionGateMiddleware({
+            ownerRunToken: run,
+            checkFinalDelivery: createBotGroupDeliveryCheck(task),
+            onRecovery
+          })
+        ]
+      })
+      try {
+        await agent.invoke(
+          { messages: [new HumanMessage("No new contribution is needed.")] },
+          { configurable: { thread_id: task.threadId } }
+        )
+        expect(model.calls).toBe(1)
+        expect(onRecovery).not.toHaveBeenCalled()
+        expect(readTurnCompletionGateReport(task.threadId, run)?.unresolved).toBeNull()
+      } finally {
+        clearTurnCompletionGateState(task.threadId, run)
+      }
+    }
+  )
+
+  it("retains unfinished todo checks after a clean silent room turn", async () => {
+    const run = "silent-with-open-work"
+    const onRecovery = vi.fn()
+    const gate = createTurnCompletionGateMiddleware({
+      ownerRunToken: run,
+      checkFinalDelivery: createBotGroupDeliveryCheck(task),
+      onRecovery
+    }) as unknown as {
+      afterModel: { hook: (state: unknown, runtime: unknown) => Promise<{ jumpTo?: string }> }
+    }
+    try {
+      const result = await gate.afterModel.hook(
+        {
+          messages: [
+            new HumanMessage("Finish assigned report"),
+            new AIMessage({ content: "", response_metadata: { finish_reason: "stop" } })
+          ],
+          todos: [{ content: "Deliver assigned report", status: "in_progress" }]
+        },
+        { configurable: { thread_id: task.threadId } }
+      )
+      expect(result?.jumpTo).toBe("model")
+      expect(onRecovery).toHaveBeenCalledWith(expect.objectContaining({ kind: "todo" }))
+    } finally {
+      clearTurnCompletionGateState(task.threadId, run)
+    }
+  })
+
+  it("does not accept incomplete transport or private work as room silence", () => {
+    for (const finish of [undefined, "length", "tool_calls"]) {
+      const final = new AIMessage({ content: "", response_metadata: { finish_reason: finish } })
+      expect(
+        createBotGroupDeliveryCheck(task)([new HumanMessage("Current request"), final])
+      ).toContain("bot_send_message")
+    }
+    const empty = new AIMessage({ content: "", response_metadata: { finish_reason: "stop" } })
+    const peer = {
+      ...task,
+      origin: { kind: "bot", fromBotId: "parent", expectsReply: true, groupId: "g" }
+    } as BotTask
+    expect(createBotGroupDeliveryCheck(peer)([empty])).toContain("private result")
+    const command = {
+      ...task,
+      origin: {
+        kind: "notification",
+        notificationKind: "command",
+        groupId: "g",
+        key: "cmd",
+        commandSucceeded: false
+      }
+    } as BotTask
+    expect(createBotGroupDeliveryCheck(command)([empty])).toContain("bot_send_message")
+  })
+
   it("does not force an unassigned room member to acknowledge a user request", () => {
     const check = createBotGroupDeliveryCheck(task)
     expect(
@@ -438,7 +639,7 @@ describe("formal group delivery", () => {
       new AIMessage("")
     ]
     expect(publishGroupMessage).not.toHaveBeenCalled()
-    expect(createBotGroupDeliveryCheck(callback, false)(transcript)).toContain("bot_send_message")
+    expect(createBotGroupDeliveryCheck(callback, false)(transcript)).toBeUndefined()
     expect(createBotGroupDeliveryCheck(callback, true)(transcript)).toBeUndefined()
   })
 
@@ -549,6 +750,20 @@ describe("formal group delivery", () => {
     expect(createBotGroupDeliveryCheck(peer)(final("Verified privately"))).toBeUndefined()
     expect(createBotGroupDeliveryCheck(peer)(final(""))).toContain("private result")
     expect(createBotGroupDeliveryCheck(peer)(final("(pass)"))).toContain("private result")
+    const aggregate: BotTask = {
+      ...peer,
+      origin: {
+        kind: "bot",
+        groupId: "g",
+        fromBotId: "leaf",
+        rootTaskId: "root",
+        depth: 2,
+        expectsReply: false,
+        upstreamTaskId: "original-relay"
+      }
+    }
+    expect(createBotGroupDeliveryCheck(aggregate)(final("Integrated privately"))).toBeUndefined()
+    expect(createBotGroupDeliveryCheck(aggregate)(final("(pass)"))).toContain("private result")
     const review: BotTask = {
       ...task,
       origin: { kind: "discussion", groupId: "g", messageId: "m", round: 1 }
@@ -563,7 +778,7 @@ describe("formal group delivery", () => {
         expectsReply: false
       }
     }
-    expect(createBotGroupDeliveryCheck(callback)(final("(pass)"))).toContain("bot_send_message")
+    expect(createBotGroupDeliveryCheck(callback)(final("(pass)"))).toBeUndefined()
     expect(createBotGroupDeliveryCheck(callback, true)(final("(pass)"))).toBeUndefined()
   })
 
@@ -590,14 +805,24 @@ describe("formal group delivery", () => {
   )
 
   it("allows quiet group reaction feedback but still requires real delivery for a correction", () => {
-    const feedback: BotTask = { ...task, origin: {
-      kind: "notification", notificationKind: "reaction", groupId: "g", key: "answer"
-    } }
+    const feedback: BotTask = {
+      ...task,
+      origin: {
+        kind: "notification",
+        notificationKind: "reaction",
+        groupId: "g",
+        key: "answer"
+      }
+    }
     const check = createBotGroupDeliveryCheck(feedback)
     expect(check([new HumanMessage("Feedback"), new AIMessage(BOT_ROUTINE_SILENT)])).toBeUndefined()
-    expect(check([new HumanMessage("Feedback"), new AIMessage("Corrected")])).toContain("bot_send_message")
+    expect(check([new HumanMessage("Feedback"), new AIMessage("Corrected")])).toContain(
+      "bot_send_message"
+    )
     expect(check(receipt())).toBeUndefined()
-    expect(createBotGroupDeliveryCheck(task)([new AIMessage(BOT_ROUTINE_SILENT)])).toContain("bot_send_message")
+    expect(createBotGroupDeliveryCheck(task)([new AIMessage(BOT_ROUTINE_SILENT)])).toContain(
+      "bot_send_message"
+    )
   })
 
   it("returns the real host receipt, preserves tool errors, and honors cancellation", async () => {

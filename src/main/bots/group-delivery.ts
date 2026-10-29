@@ -8,7 +8,11 @@ import { isBotRoutineSilent } from "../../shared/bots/routine-silence"
 import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
 import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
 import type { LocalBotHost } from "./host"
-import { extractVisibleText, type TurnFinalDeliveryCheck } from "../agent/turn-completion-integrity"
+import {
+  extractVisibleText,
+  readFinishSignal,
+  type TurnFinalDeliveryCheck
+} from "../agent/turn-completion-integrity"
 import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../agent/runtime-tool-catalog"
 import { getHookAgentIdFromRequest } from "../hooks/execution-context"
 
@@ -88,10 +92,14 @@ export function createBotGroupDeliveryCheck(
 ): TurnFinalDeliveryCheck {
   const groupId = botTaskGroupId(task)
   return (messages: readonly BaseMessage[]) => {
+    const origin = task.origin
+    const privateCallback =
+      origin.kind === "bot" && !origin.expectsReply && !origin.upstreamTaskId
+    const textOnlyCallback = privateCallback && !origin.replyFiles?.length
     const mayPass =
       task.origin.kind === "group" ||
       task.origin.kind === "discussion" ||
-      (task.origin.kind === "bot" && !task.origin.expectsReply && peerDeliveryPosted)
+      (privateCallback && (peerDeliveryPosted || textOnlyCallback))
     let start = 0
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i]
@@ -157,11 +165,25 @@ export function createBotGroupDeliveryCheck(
         ? splitBotInlineReasoning(extractVisibleText(final.content)).body.trim()
         : ""
     // Internal work still owes its parent a useful result, not a forced public message.
-    if (task.origin.kind === "bot" && task.origin.expectsReply)
+    if (
+      task.origin.kind === "bot" &&
+      (task.origin.expectsReply || Boolean(task.origin.upstreamTaskId))
+    )
       return body && !isBotGroupPass(body)
         ? undefined
         : "Return a useful private result or concrete blocker to the delegating Bot using the existing results. Only use bot_send_message when a public room contribution is actually needed; do not repeat completed actions."
-    if (mayPass && isBotGroupPass(body)) return undefined
+    // Text-only callbacks are private scratch; ordinary room turns must explicitly
+    // post or stay silent. Without a pass marker, require a clean provider finish.
+    // Returned files and upstream results retain their delivery checks.
+    if (
+      mayPass &&
+      (isBotGroupPass(body) ||
+        ((body === "" || textOnlyCallback) &&
+          final &&
+          AIMessage.isInstance(final) &&
+          ["stop", "end_turn", "completed"].includes(readFinishSignal(final) ?? "")))
+    )
+      return undefined
     if (
       task.origin.kind === "notification" &&
       (task.origin.notificationKind === "reaction" ||
@@ -172,7 +194,7 @@ export function createBotGroupDeliveryCheck(
     return (
       "Use bot_send_message to post the actual reply to this shared group, or bot_deliver_files for requested attachments. Plain assistant text is private and does not reach the room. Use verified existing results; do not redo completed actions." +
       (mayPass
-        ? " If this member owes no work or new public contribution under the current request, return exactly (pass). Do not skip assigned work, requested files, or reporting a blocker."
+        ? " If that private text was an answer, correction or assigned result, publish it now. If it only said you are waiting, have nothing new to add, or intend to act later, return exactly (pass). Do not skip assigned work, requested files, or reporting a blocker."
         : " The host has not confirmed a public reply for this result; plain text and a pass marker do not satisfy delivery.")
     )
   }
