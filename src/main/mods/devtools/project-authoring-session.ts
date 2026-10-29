@@ -31,6 +31,12 @@ import type { DevelopmentProjectTrialRequest } from "../../../shared/mods/develo
 import { normalizeProjectResourcePaths } from "./project-resource-paths"
 import { ProjectDraftFileError } from "./project-draft-file-error"
 import { patchProjectComposition, ProjectSourcePatchError } from "./project-source-patch"
+import {
+  parseProjectAuthorJson,
+  parseProjectAuthorSchema,
+  ProjectCompileDiagnosticError,
+  ProjectCompilePatchDiagnosticError
+} from "./project-compile-diagnostics"
 import type { HostProjectOperation, HostProjectState } from "../../../shared/project-runtime/host-types"
 import {
   projectCreatorTrialJourney,
@@ -477,9 +483,12 @@ export class ProjectAuthoringSessions {
     if (native) assertProjectAuthoringSkillMetadata(draft.source)
     const availableActions = native ? await this.actions(scope.workspace, scope.threadId) : []
     guard()
+    const nativeValue = native
+      ? parseProjectAuthorJson(NATIVE_COMPOSITION_PATH, native.text)
+      : undefined
     const source = native
       ? createAuthoringSourceBundle(
-          compileNativeComposition(JSON.parse(native.text), {
+          compileNativeComposition(nativeValue, {
             files: draft.source.files.map((file) => ({
               path: file.path,
               bytes: Buffer.from(file.text)
@@ -559,7 +568,12 @@ export class ProjectAuthoringSessions {
       const source = createAuthoringSourceBundle(input.files)
       const nativeSource = source.files.find(file => file.path === NATIVE_COMPOSITION_PATH)
       const nativeResources = nativeSource
-        ? nativeCompositionSchema.parse(JSON.parse(nativeSource.text)).resources : undefined
+        ? parseProjectAuthorSchema(
+            NATIVE_COMPOSITION_PATH,
+            parseProjectAuthorJson(NATIVE_COMPOSITION_PATH, nativeSource.text),
+            nativeCompositionSchema
+          ).resources
+        : undefined
       const resourcePaths = normalizeProjectResourcePaths(checkedResourcePaths ?? nativeResources ??
         this.session(scope)?.drafts.get(input.id)?.resourcePaths ?? [])
       const unsupportedPaths = source.files
@@ -653,12 +667,24 @@ export class ProjectAuthoringSessions {
         throw new ProjectSourcePatchError("CONFLICT")
       const nativeSource = files.get(NATIVE_COMPOSITION_PATH)
       if (!nativeSource) throw new ProjectSourcePatchError("NATIVE_REQUIRED")
+      parseProjectAuthorJson(NATIVE_COMPOSITION_PATH, nativeSource.text)
       const text = patchProjectComposition(nativeSource.text, input.sourcePatch)
-      const validation = nativeCompositionSchema.safeParse(JSON.parse(text))
-      if (!validation.success)
-        throw new ProjectSourcePatchError("SCHEMA", undefined,
-          "/" + validation.error.issues[0].path.map(part => String(part)
-            .replace(/~/g, "~0").replace(/\//g, "~1")).join("/"))
+      try {
+        parseProjectAuthorSchema(
+          NATIVE_COMPOSITION_PATH,
+          parseProjectAuthorJson(NATIVE_COMPOSITION_PATH, text),
+          nativeCompositionSchema
+        )
+      } catch (error) {
+        if (
+          error instanceof ProjectCompileDiagnosticError &&
+          ["PROJECT_AUTHORING_SCHEMA_INVALID", "PROJECT_CHECK_CONFIGURATION_KEYS_INVALID"].includes(
+            error.message
+          )
+        )
+          throw new ProjectCompilePatchDiagnosticError(error)
+        throw error
+      }
       files.set(NATIVE_COMPOSITION_PATH, {
         path: NATIVE_COMPOSITION_PATH,
         text

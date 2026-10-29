@@ -1,4 +1,4 @@
-import { rm } from "node:fs/promises"
+import { readdir, rm } from "node:fs/promises"
 import { dirname } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createModAuthoringTool } from "./mod-authoring-tool"
@@ -26,6 +26,79 @@ afterEach(async () => {
 })
 
 describe("natural language project authoring actions", () => {
+  it("reports the exact saved author schema and keeps its real revision when compile rejects a text root", async () => {
+    const scope = {
+      threadId,
+      workspace: "workspace",
+      incarnation: { token: `schema-root-${++sequence}`, legacyCreatedAt: 1 }
+    }
+    setModDevelopmentService({
+      isCreatorMode: () => true,
+      projectAuthoringContext: () => ({ scope, assertCurrent: () => undefined }),
+      assertScope: () => undefined
+    } as unknown as ModDevelopmentService)
+    claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "run" })
+    const original = await projectAuthoringSessions.scaffold(
+      scope,
+      "schema-root",
+      "Schema root",
+      () => {},
+      "native-modular"
+    )
+    roots.add(dirname(original.directory))
+    const native = original.source.files.find((file) => file.path === "composition/source.json")!
+    const value = JSON.parse(native.text)
+    value.modules[0].checks[0].schema = { type: "string", minLength: 1 }
+    const saved = await projectAuthoringSessions.patch(
+      scope,
+      {
+        id: original.id,
+        revision: 1,
+        sourceDigest: original.source.digest,
+        files: [{ path: native.path, text: JSON.stringify(value) }]
+      },
+      () => {}
+    )
+    expect(saved.revision).toBe(2)
+    const before = await readdir(dirname(saved.directory))
+    vi.spyOn(
+      projectAuthoringSessions as unknown as {
+        actions: (workspace: string, threadId: string) => Promise<ClawActionDescriptor[]>
+      },
+      "actions"
+    ).mockResolvedValue([])
+    const author = createModAuthoringTool({ threadId, workspace: scope.workspace })
+    const raw = await author.invoke({
+      action: "project_compile",
+      id: saved.id,
+      revision: saved.revision
+    })
+    const response = JSON.parse(raw)
+    expect(response).toMatchObject({
+      ok: false,
+      error: "MODS_TOOL_SCHEMA",
+      sourceUnchanged: true,
+      executed: false,
+      diagnosticCount: 1,
+      diagnostics: [
+        {
+          file: native.path,
+          path: "/modules/0/checks/0/schema/type",
+          code: "PROJECT_JSON_SCHEMA_ROOT_OBJECT_REQUIRED",
+          message: expect.stringContaining(
+            "Do not silently change the artifact format or remove its checks"
+          )
+        }
+      ]
+    })
+    expect(raw).not.toMatch(/stack|Error:/)
+    expect(projectAuthoringSessions.read(scope, saved.id)).toMatchObject({
+      revision: 2,
+      source: saved.source
+    })
+    expect(await readdir(dirname(saved.directory))).toEqual(before)
+  })
+
   it("applies fixed native source deltas alone or atomically with resources through the real tool", async () => {
     const scope = {
       threadId,
@@ -116,7 +189,11 @@ describe("natural language project authoring actions", () => {
       ok: false,
       error: "PROJECT_SOURCE_PATCH_SCHEMA",
       sourcePatch: { path: "/plugin/version" },
-      currentDraft: { revision: 3 }
+      currentDraft: { revision: 3 },
+      diagnostics: [{ file: "composition/source.json", path: "/plugin/version",
+        code: "PROJECT_SCHEMA_INVALID_FORMAT", message: expect.any(String) }],
+      sourceUnchanged: true,
+      executed: false
     })
     expect(
       author.schema.safeParse({
@@ -126,6 +203,79 @@ describe("natural language project authoring actions", () => {
     ).toBe(false)
     expect(author.description).toContain("sourcePatch")
     expect(author.description).toContain("add /modules/-")
+  })
+  it("diagnoses an unsupported native check kind through real files-patch and complete save without changing r1", async () => {
+    const scope = {
+      threadId,
+      workspace: "workspace",
+      incarnation: { token: `schema-${++sequence}`, legacyCreatedAt: 1 }
+    }
+    setModDevelopmentService({
+      isCreatorMode: () => true,
+      projectAuthoringContext: () => ({ scope, assertCurrent: () => undefined }),
+      assertScope: () => undefined
+    } as unknown as ModDevelopmentService)
+    claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "run" })
+    const original = await projectAuthoringSessions.scaffold(
+      scope,
+      "schema",
+      "Schema",
+      () => {},
+      "native-modular"
+    )
+    roots.add(dirname(original.directory))
+    const native = original.source.files.find((file) => file.path === "composition/source.json")!
+    const value = JSON.parse(native.text)
+    value.modules.push({
+      ...value.modules[1],
+      id: "final",
+      checks: [
+        {
+          id: "report-content",
+          kind: "text-nonempty",
+          artifactId: "report"
+        }
+      ]
+    })
+    const file = { path: native.path, text: JSON.stringify(value) }
+    const author = createModAuthoringTool({ threadId, workspace: scope.workspace })
+    const before = await readdir(dirname(original.directory))
+    for (const action of ["project_patch", "project_save"] as const) {
+      const raw = await author.invoke({
+        action,
+        id: original.id,
+        name: original.name,
+        revision: original.revision,
+        sourceDigest: original.source.digest,
+        files:
+          action === "project_patch"
+            ? [file]
+            : original.source.files.map((item) => (item.path === file.path ? file : item))
+      })
+      const response = JSON.parse(raw)
+      expect(response).toMatchObject({
+        ok: false,
+        error: "PROJECT_AUTHORING_SCHEMA_INVALID",
+        sourceUnchanged: true,
+        executed: false,
+        diagnosticCount: 1,
+        diagnostics: [
+          {
+            file: native.path,
+            path: "/modules/2/checks/0/kind",
+            code: "PROJECT_SCHEMA_INVALID_UNION",
+            message: expect.stringContaining("json-schema or action")
+          }
+        ]
+      })
+      expect(response.hint).toContain("不得删除要求或用 execute 绕过编译")
+      expect(raw).not.toMatch(/text-nonempty|stack|Error:/)
+      expect(projectAuthoringSessions.read(scope, original.id)).toMatchObject({
+        revision: 1,
+        source: original.source
+      })
+      expect(await readdir(dirname(original.directory))).toEqual(before)
+    }
   })
   it("returns exact undeclared paths and unchanged native source so one atomic patch can repair them", async () => {
     const scope = {

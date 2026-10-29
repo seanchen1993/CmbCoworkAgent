@@ -755,6 +755,38 @@ it("does not mark a deliberately draining trial as lost when configuration idle 
   expect((await f.manager.commands(f.root, f.scope.threadId))[0].command).toBe("weather-city")
 })
 
+it("reviews a same-name installed package update privately and restores the formal version on stop", async () => {
+  const f = await fixture()
+  const body = (label: string) => `export function register(on) {
+    on("session.start",async($,e,next)=>{
+      await $.command.register({name:"same-package",description:"Same package",immediate:true});return next(e)
+    });
+    on("command.run",{command:"same-package"},()=>({text:${JSON.stringify(label)}}))
+  }`
+  const formal = await f.stage(1, body("formal"), false)
+  f.setPlugins([{ id: "formal", name: "dev-example", path: formal.sourcePath, enabled: true }])
+  f.store.grant(f.root, "function:dev-example", formal.compiledDigest, true)
+  const run = async () => {
+    const commands = await f.manager.commands(f.root, f.scope.threadId)
+    expect(commands).toHaveLength(1)
+    return f.manager.runCommand(f.root, f.scope.threadId, commands[0], "", new AbortController().signal)
+  }
+  expect(await run()).toMatchObject({ text: "formal" })
+  const updated = await f.stage(2, body("trial"), false)
+  await f.manager.preflightDevelopment(f.scope, updated, () => {})
+  expect(await run()).toMatchObject({ text: "formal" })
+  f.manager.stageDevelopment(f.scope, updated, () => {})
+  f.manager.noteDevelopmentTurnSettled(f.scope, updated.turnId, "completed")
+  expect(f.manager.developmentStatus(f.scope)[0].phase).toBe("needs-approval")
+  expect(await run()).toMatchObject({ text: "formal" })
+  f.manager.approveDevelopment(f.scope, f.componentId, updated.compiledDigest, updated.capabilities, () => {})
+  await vi.waitFor(() => expect(f.manager.developmentStatus(f.scope)[0].phase).toBe("active"))
+  expect(await run()).toMatchObject({ text: "trial" })
+  expect(f.store.getGrant(f.root, "function:dev-example")?.digest).toBe(formal.compiledDigest)
+  await f.manager.stopDevelopment(f.scope, f.componentId, () => {})
+  expect(await run()).toMatchObject({ text: "formal" })
+})
+
 it("reports a formal command conflict and permits explicit retry after that source is removed", async () => {
   const f = await fixture()
   const body = `export function register(on) {

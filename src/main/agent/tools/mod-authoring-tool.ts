@@ -54,6 +54,10 @@ import { getProjectStageDebugSessions } from "../../mods/devtools/project-stage-
 import { HARNESS_SOURCE_PATH } from "../../mods/devtools/project-harness"
 import { projectAuthoringReadView } from "../../mods/devtools/project-authoring-view"
 import { ProjectContractError } from "../../mods/devtools/project-contract"
+import {
+  ProjectCompileDiagnosticError,
+  ProjectCompilePatchDiagnosticError
+} from "../../mods/devtools/project-compile-diagnostics"
 import { ProjectAuthoringSkillMetadataError } from "../../mods/devtools/project-authoring-skill-metadata"
 import { AuthoringStructureError } from "../../mods/devtools/authoring-structure-diagnostics"
 import {
@@ -760,6 +764,10 @@ export function createModAuthoringTool(input: {
             diagnostics: error.diagnostics.slice(0, 16), diagnosticCount: error.diagnostics.length,
             sourceUnchanged: true, executed: false
           } : {}),
+          ...(error instanceof ProjectCompileDiagnosticError || error instanceof ProjectCompilePatchDiagnosticError ? {
+            diagnostics: error.diagnostics.slice(0, 16), diagnosticCount: error.diagnostics.length,
+            sourceUnchanged: true, executed: false
+          } : {}),
           ...(error instanceof ProjectAuthoringSkillMetadataError ? {
             diagnostics: error.diagnostics,
             diagnosticCount: error.diagnostics.length,
@@ -810,7 +818,9 @@ export function createModAuthoringTool(input: {
             : {}),
           ...(error instanceof ProjectDraftLimitError ? { limit: error.reason } : {}),
           hint:
-            error instanceof AuthoringStructureError
+            error instanceof ProjectCompileDiagnosticError || error instanceof ProjectCompilePatchDiagnosticError
+              ? "按 diagnostics.file 和 path（相对该文件的 JSON Pointer，空字符串为根）读取当前作者源并修正 JSON 或 schema；先 project_read 核对真实 revision，再保存必要修改并用最新 revision project_compile。保留 runtime、动作锁、产物校验、Skills、Hooks、知识与配置，不得删除要求或用 execute 绕过编译。"
+            : error instanceof AuthoringStructureError
               ? "这是清单结构错误。先 read 核对当前完整作者源，按 diagnostics.path 和 message 修正清单，用实际最新 revision 保存并重新检查；保留组件源码、知识、Hooks、配置与权限边界。不要盲目重试、删除必要能力或代用户批准。"
             : error instanceof AuthoringSourceLimitError
               ? (error.diagnostic.resource === "files"

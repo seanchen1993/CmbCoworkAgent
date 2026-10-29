@@ -69,7 +69,9 @@ it("routes native source edits and dependency reuse before legacy modularization
   expect(prompt.indexOf("先按真实源码选择创作入口")).toBeLessThan(prompt.indexOf("inspect_raw(pluginId)"))
   for (const text of ["composition/source.json", "dependency_prepare", "project-dependencies",
     "sourcePatch", "add /modules/-", "test 目标模块的 id",
-    "不能按插件名称", "不再 inspect_raw", "由项目使用入口填写"])
+    "不能按插件名称", "不再 inspect_raw", "由项目使用入口填写",
+    'project_scaffold(template:"native-modular")', "用户不需要选择内部模板", "当前 JSON Schema 子集要求对象根",
+    "一次原子提交完整模块", "不静默改格式"])
     expect(prompt).toContain(text)
   expect(modAuthoringRuntimePrompt([{ name: "mod_business" }])).not.toContain("dependency_save")
 })
@@ -80,7 +82,8 @@ it("routes independent cooperating Mods through public contracts and separate na
     prompt.indexOf("先按真实源码选择创作入口"))
   for (const text of ['scaffold(kind:"capability"', 'catalog(query:"on.capability")',
     "$.platform.act", "只有一个开发试用槽", "确认安装后再制作和保存调用方", "保留已有选择",
-    "无需写工作区临时文件", "不要让用户选择内部实现路线"])
+      "无需写工作区临时文件", "不要让用户选择内部实现路线", "不要用动作名替换 ref.id",
+      "完整传递该项 ref", "不能把空白结果当作成功"])
     expect(prompt).toContain(text)
   expect(modAuthoringRuntimePrompt([{ name: "mod_composition" }])).not.toContain("scaffold(kind")
 })

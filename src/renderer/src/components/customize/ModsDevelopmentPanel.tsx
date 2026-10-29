@@ -1507,7 +1507,7 @@ function ScopedDevelopment({
                     ))}
                   </ul>
                   <p className="text-xs text-muted-foreground">
-                    仅在这段聊天试用，不会自动安装。同范围更新自动应用，新增权限会再请你确认。
+                    仅在这段聊天试用，不会自动安装。同名正式版会在此临时替换，停止试用后恢复；新增权限会再请你确认。
                   </p>
                   <p className="text-xs">点击下方按钮，即表示同意以上用途与权限范围。</p>
                   <button

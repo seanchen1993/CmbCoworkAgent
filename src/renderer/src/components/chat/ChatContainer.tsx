@@ -5866,6 +5866,7 @@ export function ChatContainer({
             throw new Error("这项灵件操作只接收文字，请先移除附件、技能和浏览器选择。")
         })
         if (handled) {
+          clearError()
           if (applyPromptDraft(submittedDraft.revision, "")) promptComposer.reset()
           return
         }
@@ -9379,7 +9380,7 @@ export function ChatContainer({
                                         ? "无法确认全局自动审批状态；部分操作仍可能按已保存设置自动批准。"
                                         : yoloModeLoadState === "loading"
                                           ? "正在读取全局自动审批状态…"
-                                          : "全局自动审批设置；切换后立即影响后续操作。"}
+                                          : "自动审批与沙箱隔离独立设置；切换后立即生效。"}
                                     </span>
                                   </span>
                                   {yoloModeLoadFailed ? (

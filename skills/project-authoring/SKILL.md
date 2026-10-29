@@ -9,17 +9,19 @@ description: 在用户明确要制作项目插件、轻量文档流程、全栈�
 
 例如用户说：“帮我做一个起草和确认两个阶段的文档项目。”先确认目标和必要的产物要求，不要求企业编码、系统 ID、Python 或外部服务。
 
-1. 当前创作会话提供 `mod_authoring` 后，调用 `project_scaffold`，传入小写连字符 `id`、`name` 和可选 `template`。新节点项目选 `harness-lite`（起草/复核）、`harness-fullstack`（设计/实现/复核）或 `harness-data`（数据口径/转换/复核）。不传 template 保留旧 `project-lite` 两阶段文档格式。没有该工具时，指导用户在灵件“自己制作”开启当前会话的制作功能；不要覆盖应用安装目录。
-2. 返回值包含 `revision` 和完整 `source.files`。Harness 项目按用户目标修改 `devclaw.harness.json` 与 `skills/*/SKILL.md`，使用 `project_save` 传入 `id`、`name`、最新 `revision` 和完整 `files`。随后调用 `project_compile(id,revision)`：它把节点编译成现有严格运行声明和合同，运行真实隔离产物校验后产生新 revision。不要直接维护生成的 `devclaw.project-runtime.json`；重新编译会重建 `tests/project-contract.json`，需要附加案例时在编译后添加。旧 `project-lite` 继续直接编辑运行声明和合同，无须 compile。保存和编译都不会替换正式插件或正在运行的版本。
+1. 当前创作会话提供 `mod_authoring` 后，调用 `project_scaffold`，传入小写连字符 `id`、`name` 和 `template:"native-modular"`。新项目优先使用原生可组合模块，用户无需选择内部模板。不传 template 的旧 `project-lite` 和显式 `harness-*` 仅保留兼容；不要在新插件里混用三种源码格式。没有该工具时，指导用户在当前聊天选择“创造者模式”；不要覆盖应用安装目录。
+2. 返回值包含 `revision` 和完整 `source.files`。原生项目按真实示例修改 `composition/source.json` 和 `skills/*/SKILL.md`，声明各模块的输入、产物、校验及前序引用；已有原生草稿优先 `project_patch`，它保留未修改的资源。使用 `project_save` 时必须传完整快照。随后调用 `project_compile(id,revision)`，由宿主生成运行声明并执行隔离产物校验，使用返回的新 revision。不要手写或删除生成的 runtime、动作锁和知识配置以绕过错误；不要加入 `devclaw.harness.json`。显式选择的兼容 Harness 项目继续编辑其节点定义并编译，旧 `project-lite` 无须 compile。保存和编译都不会替换正式插件或正在运行的版本。
 3. 调用 `project_doctor`。根据实际诊断修复；需要重新读取时用 `project_read`，避免使用旧 revision。
 4. 调用 `project_test`。这会在新临时目录写入样例产物，使用生产宿主的文件存在性和受限 JSON Schema 校验器。它不调用模型、不执行 Skill 或插件脚本，也不批准阶段。故意缺文件、JSON 不合格的样例应该被拒绝。
 5. 失败后修改真实节点定义、Skill 或合同，再次 `project_save`；Harness 节点变更需 `project_compile`，随后 `project_doctor`、`project_test`。不要改期望结果来掩盖未修复的缺陷。
-6. `project_dev` 只准备独立源码快照和空工作区，返回 `prepared`，不代表试用已执行。用户需要在宿主项目入口实际运行目标、查看产物和处理确认。
-7. `project_pack` 生成 ZIP 和检查范围报告。给出真实输出路径，让用户经原插件安装入口安装，再由项目入口选择插件开始任务。模型没有项目安装、审批或推进工具，不得声称打包即应用成功。
+6. 使用用户已给的真实目标调用 `project_request_trial(id,revision,goal)`，准备当前创作聊天里的原生试用卡后结束本轮，等待用户确认。由原项目运行器执行阶段、检查实际产物和请求必要确认。`project_dev` 仅准备目录，不能代替试用，更不能把 prepared 当作成功。
+7. 用户从试用卡核对阶段和验收结果后，可直接“保存插件”，由原生入口核对名称、版本并安装，再“开始使用”进入普通项目模式；不要求先导出再导入。需要文件交付时 `project_pack` 生成 ZIP 和检查范围报告。模型没有安装、审批或推进工具，不得声称编译、打包或候选准备等于业务执行成功。
 
 文件存在只能证明存在；JSON 结构符合只能证明所检查的结构。模型自述不构成阶段通过证据。`plugin.id` 是作者包标识，`installedPluginId` 是安装后宿主分配的身份，不要填写假 UUID。
 
-## 节点定义
+原生组合的 `modules[].checks[].kind` 仅支持 `json-schema` 和 `action`，不要发明 `text-nonempty` 等类型。用户未限定文件格式时，可沿模板用 JSON 对象承载文本，通过必需字段和 `minLength` 检查非空；业务事实仍需真实复核。用户明确要求文本文件或其他校验时，发现或制作真实校验动作并绑定其契约，不能静默改格式或删除必要检查。`sourcePatch` 每次最多 16 项；新建小项目可完整保存源码，较大调整按完整模块替换组织，不能通过猜版本拆开不完整依赖。
+
+## 兼容 Harness 的节点定义
 
 `devclaw.harness.json` 仅描述按顺序运行的节点，不新增执行器或任意脚本字段：
 
@@ -65,4 +67,4 @@ description: 在用户明确要制作项目插件、轻量文档流程、全栈�
 
 ## 本地命令路线
 
-已有可用 `openwork` CLI 时，可使用 `plugin init <新目录> --template harness-lite|harness-fullstack|harness-data`（旧 `project-lite` 仍可用）。修改节点后执行 `plugin compile <源码目录> --out <新目录>`，它校验并写入独立编译结果，不覆盖源码。对新目录再执行 `plugin doctor`、`plugin test`、`plugin dev --out`、`plugin pack --out`。开发仓库对应 `node bin/cli.js plugin ...`，需要先构建 CLI bundle。`dev` 当前准备目录，不启动服务器或模型。不要在未构建的安装版本中声称命令已存在。
+已有可用 `openwork` CLI 时，新项目使用 `plugin init <新目录> --template native-modular`；旧 `project-lite` 和 `harness-lite|harness-fullstack|harness-data` 仍保留兼容。修改作者源后执行 `plugin compile <源码目录> --out <新目录>`，它校验并写入独立编译结果，不覆盖源码。对新目录再执行 `plugin doctor`、`plugin test`、`plugin dev --out`、`plugin pack --out`。开发仓库对应 `node bin/cli.js plugin ...`，需要先构建 CLI bundle。`dev` 当前准备目录，不启动服务器或模型。不要在未构建的安装版本中声称命令已存在。

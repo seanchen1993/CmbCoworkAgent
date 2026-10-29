@@ -31,7 +31,7 @@ Usage:
   openwork plugin check <directory>    Validate a function-hooks plugin
   openwork plugin inspect <directory>  Inspect its profile, digest and registrations
   openwork plugin types <directory> [--out <new-file.d.ts>]  Export the supported authoring subset
-  openwork plugin init <new-directory> --template project-lite|harness-lite|harness-fullstack|harness-data|command [--id package-id] [--name name]
+  openwork plugin init <new-directory> --template native-modular|project-lite|harness-lite|harness-fullstack|harness-data|command [--id package-id] [--name name]
   openwork plugin compile <source-directory> --out <new-directory>
   openwork plugin doctor <directory>  Diagnose a lightweight project package without executing it
   openwork plugin test <directory>    Check generated fixtures with production artifact validators

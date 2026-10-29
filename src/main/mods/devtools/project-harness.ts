@@ -6,11 +6,17 @@ import {
 } from "../../../shared/project-runtime"
 import { createAuthoringSourceBundle, type AuthoringSourceBundle } from "./authoring-bundle"
 import { parseSkillNameFromFrontmatterYaml } from "../../skills/frontmatter"
-import { validateRegisteredToolInput, validateToolSchema } from "../v2/tool-schema"
+import { validateRegisteredToolInput } from "../v2/tool-schema"
 import type { ModObject } from "../../../shared/mods/types"
 import { clawActionObject } from "../../../shared/mods/claw-actions"
 import { assertProjectActionLock } from "../../harness-board/project-runtime/action-input"
 import { PROJECT_ACTION_LOCK_PATH } from "../../../shared/project-runtime/action-bindings"
+import {
+  parseExistingProjectRuntime,
+  parseProjectAuthorJson,
+  projectHarnessSchemaError,
+  validateProjectAuthorJsonSchema
+} from "./project-compile-diagnostics"
 
 export const HARNESS_SOURCE_PATH = "devclaw.harness.json"
 const id = z.string().regex(/^[a-z][a-z0-9-]{0,39}$/)
@@ -48,14 +54,22 @@ const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`
 /** Authoring sugar only: the output is the existing production manifest and real contract fixtures. */
 export function compileProjectHarness(source: AuthoringSourceBundle): AuthoringSourceBundle {
   const get = (path: string) => source.files.find((file) => file.path === path)?.text
-  const parsed = harnessDefinitionSchema.safeParse(JSON.parse(get(HARNESS_SOURCE_PATH) ?? "null"))
-  if (!parsed.success) throw Error("PROJECT_HARNESS_INVALID")
+  const parsed = harnessDefinitionSchema.safeParse(
+    parseProjectAuthorJson(HARNESS_SOURCE_PATH, get(HARNESS_SOURCE_PATH) ?? "null")
+  )
+  if (!parsed.success) throw projectHarnessSchemaError(parsed.error.issues)
   const definition = parsed.data
-  const plugin = JSON.parse(get("plugin.json") ?? "null")
+  const plugin = parseProjectAuthorJson("plugin.json", get("plugin.json") ?? "null") as {
+    name?: unknown
+    version?: unknown
+  } | null
   if (!plugin || typeof plugin.name !== "string" || typeof plugin.version !== "string")
     throw Error("PROJECT_PLUGIN_IDENTITY")
   const previous = get("devclaw.project-runtime.json")
-  const existing = previous ? parseProjectRuntimeManifest(JSON.parse(previous)) : undefined
+  const previousValue = previous
+    ? parseProjectAuthorJson("devclaw.project-runtime.json", previous)
+    : undefined
+  const existing = previous ? parseExistingProjectRuntime(previousValue) : undefined
   if (existing && (existing.mode !== "host" || existing.plugin.id !== plugin.name))
     throw Error("PROJECT_HARNESS_IDENTITY_CHANGED")
   if (
@@ -74,22 +88,34 @@ export function compileProjectHarness(source: AuthoringSourceBundle): AuthoringS
     files: Array<{ path: string; text: string }>
     expected: "passed" | "failed"
   }> = []
-  const stages = definition.nodes.map((node) => {
+  const stages = definition.nodes.map((node, nodeIndex) => {
     const skill = get(node.skill)
     if (!skill || !parseSkillNameFromFrontmatterYaml(skill))
       throw Error("PROJECT_HARNESS_SKILL_MISSING")
     const files = node.artifacts.map((item) => ({ path: item.path, text: item.example }))
-    const checkIds = node.artifacts.map((item) => {
+    const checkIds = node.artifacts.map((item, artifactIndex) => {
       const key = item.path.toLowerCase()
       if (paths.has(key)) throw Error("PROJECT_HARNESS_ARTIFACT_DUPLICATE")
       paths.add(key)
       artifacts.push({ id: item.id, path: item.path, required: true })
       const checkId = `${item.id}-check`
       if (item.schema) {
-        validateToolSchema(item.schema as ModObject, { allowReservedKeys: true })
+        validateProjectAuthorJsonSchema(
+          HARNESS_SOURCE_PATH,
+          ["nodes", nodeIndex, "artifacts", artifactIndex, "schema"],
+          item.schema as ModObject
+        )
         validateRegisteredToolInput(
           item.schema as ModObject,
-          clawActionObject(JSON.parse(item.example))
+          clawActionObject(
+            parseProjectAuthorJson(HARNESS_SOURCE_PATH, item.example, [
+              "nodes",
+              nodeIndex,
+              "artifacts",
+              artifactIndex,
+              "example"
+            ])
+          )
         )
       }
       checks.push({
@@ -143,16 +169,17 @@ export function compileProjectHarness(source: AuthoringSourceBundle): AuthoringS
       throw Error("PROJECT_HARNESS_ARTIFACT_DUPLICATE")
   }
   if (manifest.actions.length || get(PROJECT_ACTION_LOCK_PATH))
-    assertProjectActionLock(manifest, JSON.parse(get(PROJECT_ACTION_LOCK_PATH) ?? "null"))
+    assertProjectActionLock(
+      manifest,
+      parseProjectAuthorJson(PROJECT_ACTION_LOCK_PATH, get(PROJECT_ACTION_LOCK_PATH) ?? "null")
+    )
   return createAuthoringSourceBundle([
     ...source.files.filter(
       (file) => !["devclaw.project-runtime.json", "tests/project-contract.json"].includes(file.path)
     ),
     {
       path: "devclaw.project-runtime.json",
-      text: json(
-        preserveProjectRuntimeEnvelope(previous ? JSON.parse(previous) : undefined, manifest)
-      )
+      text: json(preserveProjectRuntimeEnvelope(previousValue, manifest))
     },
     ...(!get("devclaw.capabilities.json")
       ? [

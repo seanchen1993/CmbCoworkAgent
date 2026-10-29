@@ -84,7 +84,9 @@ export function DevelopmentReusePlanCard({
       ) : (
         <p role="status" className="text-xs">
           {plan.phase === "active"
-            ? save
+            ? !current
+              ? `已保存版本 v${plan.revision}。当前草稿已修改，尚未保存为正式版本。`
+              : save
               ? "这个正式功能版本已生效。完整搭配是否保存成功，以上方搭配状态为准。"
               : "正式版本和可复用组合已保存，当前聊天已使用。可在其他聊天选择这份组合。"
             : plan.phase === "unknown"

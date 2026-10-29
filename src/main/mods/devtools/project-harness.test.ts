@@ -20,6 +20,7 @@ import { discoverSkillsSync } from "../../skills/discovery"
 import { HostProjectStore } from "../../harness-board/project-runtime/host-store"
 import { HostProjectService } from "../../harness-board/project-runtime/host-service"
 import { validateHostStage } from "../../harness-board/project-runtime/host-validators"
+import { ProjectCompileDiagnosticError } from "./project-compile-diagnostics"
 import {
   wrapProjectRuntimeManifest,
   CONTEXT_HANDOFF_PROTOCOL
@@ -43,6 +44,132 @@ function edit(bundle: AuthoringSourceBundle, change: (value: HarnessDefinition) 
 }
 
 describe("declarative Harness authoring", () => {
+  it("locates the same retained object-root schema limit in a harness artifact", () => {
+    const invalid = edit(source(), (harness) => {
+      harness.nodes[0].artifacts[0].schema = { type: "string", minLength: 1 }
+    })
+    expect(() => compileProjectHarness(invalid)).toThrowError(
+      expect.objectContaining({
+        message: "MODS_TOOL_SCHEMA",
+        diagnostics: [
+          expect.objectContaining({
+            file: HARNESS_SOURCE_PATH,
+            path: "/nodes/0/artifacts/0/schema/type",
+            code: "PROJECT_JSON_SCHEMA_ROOT_OBJECT_REQUIRED"
+          })
+        ]
+      })
+    )
+  })
+
+  it("reports exact safe harness fields and bounds diagnostics without leaking values or unknown keys", () => {
+    const invalid = edit(source(), (harness) => {
+      Object.assign(harness, { "C:/PRIVATE_MACHINE/PRIVATE_CREDENTIAL": "PRIVATE_VALUE" })
+      for (const node of harness.nodes) {
+        Object.assign(node, { title: null, skill: "C:/PRIVATE_MACHINE/PRIVATE_CREDENTIAL" })
+        node.artifacts = Array.from({ length: 8 }, () => ({
+          id: "PRIVATE_VALUE",
+          path: "x",
+          example: ""
+        }))
+      }
+    })
+    const before = JSON.stringify(invalid)
+    let error: unknown
+    try {
+      compileProjectHarness(invalid)
+    } catch (failure) {
+      error = failure
+    }
+    expect(error).toBeInstanceOf(ProjectCompileDiagnosticError)
+    const diagnostics = (error as ProjectCompileDiagnosticError).diagnostics
+    expect(diagnostics).toHaveLength(16)
+    expect(diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          file: HARNESS_SOURCE_PATH,
+          path: "/nodes/0/title",
+          code: "PROJECT_SCHEMA_INVALID_TYPE"
+        }),
+        expect.objectContaining({ path: "/nodes/0/skill", code: "PROJECT_SCHEMA_INVALID_FORMAT" }),
+        expect.objectContaining({ path: "/nodes/0/artifacts/0/id" })
+      ])
+    )
+    expect(JSON.stringify(diagnostics)).not.toMatch(/PRIVATE_|stack|Error:/)
+    expect(JSON.stringify(invalid)).toBe(before)
+  })
+
+  it.each([
+    HARNESS_SOURCE_PATH,
+    "plugin.json",
+    "devclaw.project-runtime.json",
+    "devclaw.project-actions.lock.json"
+  ])("reports bounded JSON syntax diagnostics for %s", (path) => {
+    const base = source()
+    const invalid = createAuthoringSourceBundle([
+      ...base.files.filter((file) => file.path !== path),
+      { path, text: '{"secret":"PRIVATE_VALUE" "C:/PRIVATE_MACHINE":' }
+    ])
+    let error: unknown
+    try {
+      compileProjectHarness(invalid)
+    } catch (failure) {
+      error = failure
+    }
+    expect(error).toBeInstanceOf(ProjectCompileDiagnosticError)
+    expect((error as ProjectCompileDiagnosticError).diagnostics).toEqual([
+      {
+        file: path,
+        path: "",
+        code: "PROJECT_JSON_SYNTAX",
+        message: expect.any(String)
+      }
+    ])
+    expect(JSON.stringify((error as ProjectCompileDiagnosticError).diagnostics)).not.toMatch(
+      /PRIVATE_|stack|Error:/
+    )
+  })
+
+  it("locates malformed JSON examples in the harness rather than an artifact or machine path", () => {
+    const invalid = edit(source(), (harness) => {
+      harness.nodes[1].artifacts[0].example = "PRIVATE_VALUE is not JSON"
+    })
+    expect(() => compileProjectHarness(invalid)).toThrowError(
+      expect.objectContaining({
+        diagnostics: [
+          expect.objectContaining({
+            file: HARNESS_SOURCE_PATH,
+            path: "/nodes/1/artifacts/0/example",
+            code: "PROJECT_JSON_SYNTAX"
+          })
+        ]
+      })
+    )
+  })
+
+  it("identifies an invalid retained runtime without bypassing the production schema", () => {
+    const base = source()
+    const invalid = createAuthoringSourceBundle(
+      base.files.map((file) =>
+        file.path === "devclaw.project-runtime.json"
+          ? { ...file, text: JSON.stringify({ ...JSON.parse(file.text), stages: "PRIVATE_VALUE" }) }
+          : file
+      )
+    )
+    expect(() => compileProjectHarness(invalid)).toThrowError(
+      expect.objectContaining({
+        message: "PROJECT_RUNTIME_MANIFEST_INVALID",
+        diagnostics: [
+          expect.objectContaining({
+            file: "devclaw.project-runtime.json",
+            path: "",
+            code: "PROJECT_RUNTIME_SCHEMA_INVALID"
+          })
+        ]
+      })
+    )
+  })
+
   it("compares compiled runtime semantics while preserving an independent extension envelope", () => {
     const base = source()
     const extended = createAuthoringSourceBundle(

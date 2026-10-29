@@ -37,7 +37,7 @@ const SANDBOX_MODE_OPTIONS: SandboxModeOption[] = [
     value: "none",
     label: "无沙箱",
     shortLabel: "无沙箱",
-    description: "命令不经过沙箱隔离，直接使用当前用户权限执行。",
+    description: "命令直接使用当前用户权限执行；是否审批由 YOLO 设置单独控制。",
     riskLabel: "风险较高",
     icon: ShieldOff
   },

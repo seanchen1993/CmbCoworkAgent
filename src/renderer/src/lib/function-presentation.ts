@@ -1,5 +1,6 @@
 import type { FunctionFeedbackEntry } from "../../../shared/mods/v2/ui-feedback"
 import { isModSiteChangeScope } from "../../../shared/mods/types"
+import { functionSiteErrorCode } from "./function-site-recovery"
 import type { FunctionPresentationSnapshot } from "../../../shared/mods/v2/presentation"
 import {
   desktopChatRegions,
@@ -56,6 +57,9 @@ export class FunctionPresentation {
   private fingerprint = ""
   private frame = 0
   private closed = false
+  private revoked = false
+  private refreshing = false
+  private refreshPending = false
   private observer: MutationObserver
   private stopCards: () => void
   private root: () => HTMLElement | null
@@ -116,7 +120,9 @@ export class FunctionPresentation {
     )
   }
   rebind(ready: Promise<unknown>): void {
+    if (this.closed) return
     this.ready = ready
+    this.revoked = false
     this.publication = { entries: [] }
     this.snapshot = { entries: [], held: false, owner: this.owner }
     this.fingerprint = ""
@@ -124,12 +130,26 @@ export class FunctionPresentation {
     this.refresh()
   }
   refresh = (): void => {
-    const request = ++this.request
-    void this.ready
-      .then(() => window.api.mods.desktopFeedback(this.thread, this.owner))
+    if (this.closed || this.revoked) return
+    this.request++
+    this.refreshPending = true
+    this.readFeedback()
+  }
+  private readFeedback(): void {
+    if (this.closed || this.revoked || this.refreshing || !this.refreshPending) return
+    const request = this.request
+    const ready = this.ready
+    this.refreshPending = false
+    this.refreshing = true
+    void ready
+      .then(() => {
+        // An attach may settle after this chat was replaced or a newer bind arrived.
+        if (this.closed || this.revoked || request !== this.request || ready !== this.ready) return
+        return window.api.mods.desktopFeedback(this.thread, this.owner)
+      })
       .then(
         (value) => {
-          if (this.closed || request !== this.request) return
+          if (!value || this.closed || request !== this.request) return
           this.publication = value
           const retained = new Set(
             value.entries.filter((row) => row.kind === "toast").map((row) => row.id)
@@ -144,13 +164,25 @@ export class FunctionPresentation {
           notify(this.thread)
           this.schedule()
         },
-        () => {
-          if (this.closed || request !== this.request) return
+        (cause) => {
+          // Reads are serialized, so this bind cannot supersede its own publisher revision.
+          // A revoked owner may resume only after the hook explicitly attaches and rebinds.
+          if (
+            !this.closed &&
+            ready === this.ready &&
+            functionSiteErrorCode(cause) === "MODS_DESKTOP_OWNER"
+          )
+            this.revoked = true
+          if (this.closed || (request !== this.request && !this.revoked)) return
           this.publication = { entries: [] }
           this.snapshot = { ...this.snapshot, entries: [] }
           notify(this.thread)
         }
       )
+      .finally(() => {
+        this.refreshing = false
+        this.readFeedback()
+      })
   }
   dismiss(id: string): void {
     if (!this.publication.entries.some((row) => row.id === id && row.kind === "toast")) return
@@ -163,7 +195,7 @@ export class FunctionPresentation {
     this.schedule()
   }
   private schedule = (): void => {
-    if (this.closed || this.frame || document.visibilityState !== "visible") return
+    if (this.closed || this.revoked || this.frame || document.visibilityState !== "visible") return
     this.frame = requestAnimationFrame(() => {
       this.frame = 0
       this.layout()
@@ -178,6 +210,7 @@ export class FunctionPresentation {
     } else this.schedule()
   }
   private layout(): void {
+    if (this.closed || this.revoked) return
     const root = this.root()
     const present = root?.dataset.chatThreadId === this.thread && desktopElementPresented(root)
     const regions = present && root ? desktopChatRegions(root, this.thread) : []

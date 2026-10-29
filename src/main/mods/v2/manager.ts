@@ -4527,6 +4527,17 @@ export class FunctionModsManager {
           const selected = this.clawSelection(workspace, threadId)
           const sources = this.sources(selected)
           assertLive()
+          const localDevelopment = development ?? this.development?.activeFor(workspace, threadId)
+          const developmentCompiled = localDevelopment
+            ? await this.configurationSourceCache.read(localDevelopment.revision.sourcePath) : undefined
+          if (localDevelopment) {
+            localDevelopment.assertCurrent()
+            assertLive()
+            if (developmentCompiled!.configurationOnly || developmentCompiled!.userConfig ||
+              developmentCompiled!.digest !== localDevelopment.revision.compiledDigest ||
+              developmentCompiled!.name === CONTEXT_METER_NAME)
+              throw new ModFunctionError("MODS_DEVELOPMENT_SOURCE_CHANGED")
+          }
           if (runtimeSource?.mode === "host" && sources.some(source =>
             source.enabled && (prepared ? !prepared.sourcePlugins.has(source.id)
               : !ready.has(source.id))))
@@ -4540,6 +4551,9 @@ export class FunctionModsManager {
             const compiled = original ? original.compiled : runtimeSource
               ? await this.configurationSourceCache.read(source.path)
               : await compileFunctionPlugin(source.path)
+            // The reviewed trial replaces this package only in its own conversation.
+            // It receives its own development authority, never the installed package's grant.
+            if (developmentCompiled?.name === compiled.name) continue
             if (compiled.configurationOnly) throw new ModFunctionError("MODS_CONFIGURATION_ONLY")
             const actionSource = runtimeSource?.actionSources?.find(item => item.plugin.id === source.id)
             if (actionSource && (compiled.name !== actionSource.name || compiled.digest !== actionSource.digest))
@@ -4616,11 +4630,10 @@ export class FunctionModsManager {
               capabilities: [...SESSION_CAPABILITIES]
             })
           }
-          const localDevelopment = development ?? this.development?.activeFor(workspace, threadId)
           if (localDevelopment) {
             localDevelopment.assertCurrent()
             current.sourceDirectories.add(localDevelopment.revision.sourcePath)
-            const compiled = await this.configurationSourceCache.read(localDevelopment.revision.sourcePath)
+            const compiled = developmentCompiled!
             localDevelopment.assertCurrent()
             assertLive()
             if (compiled.configurationOnly || compiled.digest !== localDevelopment.revision.compiledDigest || compiled.userConfig ||

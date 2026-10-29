@@ -53,11 +53,14 @@ export function createModAuthoringRuntimeTools(scope: {
 
 const nativeFunctionRouting = `
 独立灵件不需要创建项目流程。多个独立可复用 Mods 需要互相调用时，优先使用公共能力：提供方用 scaffold(kind:"capability",id,name,instruction) 的完整包起步，将占位 act 改成实际逻辑；catalog(query:"on.capability") 可读取真实声明，调用方用 $.platform.act。不要因把注册语法当普通 SDK 方法而误判能力缺失，也不要猜第三方工具名或重复实现提供方算法。
+调用方从 $.platform.list().capabilities 选择 available 的目标，完整传递该项 ref（provider、id、version），另用 action 指定 descriptor.actions 中的动作 id。不要用动作名替换 ref.id，也不要从插件版本猜能力版本；查询或调用失败应返回可读诊断，不能把空白结果当作成功。
 当前聊天只有一个开发试用槽。多个独立包应先保存、检查提供方并 request_reuse，结束本轮等待用户在原生卡确认；确认安装后再制作和保存调用方，最后保留已有选择并组合验证。不要把替换试用槽当作多个 Mod 同时运行，也不要让用户选择内部实现路线。源码直接提交原生 files，无需写工作区临时文件。指令 name 用英文标识，中文写入 description，直接运行用 immediate:true。
 `
 
 const nativeProjectRouting = `
 先按真实源码选择创作入口，不能按插件名称或历史实现推定：
+- 从零创建项目插件：project_scaffold(template:"native-modular") 起步，编辑 composition/source.json 和真实 Skills，再 project_compile；不要因旧技能说明选兼容格式或手写生成的运行声明。用户不需要选择内部模板和技术路线。
+原生模块检查只支持 kind:"json-schema" 或真实提供者的 kind:"action"；当前 JSON Schema 子集要求对象根。未指定文件格式的文本产物沿模板用 {content:string} 等对象承载，以 required 和 minLength 保留非空要求；不要发明 text-nonempty、使用字符串根或删除检查。用户明确要求原文本格式时发现或制作真实校验动作，不静默改格式。新建小流程应一次原子提交完整模块、Skills及合同样例；已有大项目才按依赖范围局部修改，避免逐字段保存耗尽修订。
 - mod_authoring.project_list/project_read 中已有 composition/source.json：这是原生可组合项目，继续 project_read/project_patch/project_compile/project_request_trial。不再 inspect_raw、首次模块化或寻找旧 Python 适配器。
 - 原生项目新增执行或校验能力：先 project_actions(query=需要的能力或插件名称，不带id) 检查已有且已授权的动作与契约，满足需求则直接复用。project_actions(id) 只列该草稿已声明的依赖；localActionId 是已有需求的 usedBy，不是新动作的搜索词。缺少时用 catalog(catalogSection="project-dependencies") 发现可复用源码，匹配需求的来源直接 dependency_prepare(sourceId)，由 Host 固定完整源码、检查并准备原生复用方案，然后结束本轮。准备方案不会安装、授权或执行，不必先请用户决定技术方案；实际安装等待原生确认。定制源码才用 save/check/request_reuse；dependency_save 是精确摘要复制的分步入口。确认后重新查询已授权动作的真实身份与契约，再绑定流程。不能猜动作名、重复安装或把安装当执行。
 - 仅当真实来源是 mods/business/manifest.json 时，使用 mod_business 的 inspect/preview/transform_workflow；仅未模块化原始插件才使用 inspect_raw/request_modularization。业务清单的旧适配器说明不能覆盖原生组合的 Host 状态所有权。

@@ -20,6 +20,7 @@ current.trials=current.trials.map(row=>({...row,phase:"stopped",revision:current
 window.electron={process:{platform:"win32"}};window.api={mods:{development:api}};
 const emit=()=>listeners.forEach(fn=>fn({threadId:"chat"}));
 window.fixture={get:()=>({reads,calls,requests}),refresh:emit,
+editSaved:()=>{current.drafts[0]={...current.drafts[0],revision:3,digest:"4".repeat(64)};emit()},
 anotherDraft:()=>{current.drafts.push({id:"text-report",name:"文本报告",revision:1,digest:"3".repeat(64)});emit()},active:()=>{
 current.drafts=[{id:"plain-mod",name:"文本处理",revision:1,digest:"1".repeat(64)}];
 current.trials=[{componentId:"plain-mod",draftId:"plain-mod",name:"文本处理",phase:"active",revision:1,activeRevision:1,
@@ -106,6 +107,9 @@ createRoot(document.getElementById("root")).render(<ModsDevelopmentPanel threadI
       name: "保存“文本处理”并在其他聊天复用…", exact: true
     }).count(), 0)
     assert.equal(await page.evaluate("window.fixture.get().requests.length"), 1)
+    await page.evaluate("window.fixture.editSaved()")
+    await dialog.getByText("已保存版本 v2。当前草稿已修改，尚未保存为正式版本。", { exact: true }).waitFor()
+    assert.equal(await dialog.getByText("正式版本和可复用组合已保存，当前聊天已使用。可在其他聊天选择这份组合。", { exact: true }).count(), 0)
     assert.deepEqual(errors, [])
     writeFileSync(join(output, "report.json"), JSON.stringify({ passed: true,
       checks: ["Active trial exposes save without opening advanced settings or stopping the trial",

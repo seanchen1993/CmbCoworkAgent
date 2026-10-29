@@ -33,6 +33,10 @@ import { businessModExtensionContract } from "./business-mod-assembly-contract"
 import { parsePortableBusinessModUserConfig } from "./business-mod-user-config"
 import { parseFunctionUserConfigSchema } from "../../shared/mods/v2/user-config-schema"
 import { assertNativeCompositionDependencies } from "./native-composition-dependencies"
+import {
+  parseProjectAuthorSchema,
+  validateProjectAuthorJsonSchema
+} from "../mods/devtools/project-compile-diagnostics"
 export { NativeCompositionDependencyError } from "./native-composition-dependencies"
 export type { NativeCompositionDependencyDiagnostic } from "./native-composition-dependencies"
 
@@ -174,7 +178,7 @@ export function compileNativeComposition(
 ) {
   const encoded = JSON.stringify(value)
   if (!encoded || Buffer.byteLength(encoded) > 256 * 1024) throw Error("NATIVE_COMPOSITION_LIMIT")
-  const source = nativeCompositionSchema.parse(value)
+  const source = parseProjectAuthorSchema(NATIVE_COMPOSITION_PATH, value, nativeCompositionSchema)
   const userConfig = parsePortableBusinessModUserConfig(source.configuration?.userConfig)
   for (const module of source.modules) {
     const selected = [
@@ -341,7 +345,7 @@ export function compileNativeComposition(
   }
   const checks: ProjectRuntimeManifest["checks"] = []
   const stages: ProjectRuntimeManifest["stages"] = []
-  for (const module of source.modules) {
+  for (const [moduleIndex, module] of source.modules.entries()) {
     unique(
       module.inputs.map((input) => input.artifactId),
       "NATIVE_COMPOSITION_INPUT_DUPLICATE"
@@ -364,10 +368,15 @@ export function compileNativeComposition(
       if (!module.checks.some((check) => check.artifactId === output.id))
         throw Error("NATIVE_COMPOSITION_OUTPUT_UNCHECKED")
     }
-    for (const check of module.checks) {
+    for (const [checkIndex, check] of module.checks.entries()) {
       if (!module.outputs.some((output) => output.id === check.artifactId))
         throw Error("NATIVE_COMPOSITION_CHECK_NOT_OUTPUT")
       if (check.kind === "json-schema") {
+        validateProjectAuthorJsonSchema(
+          NATIVE_COMPOSITION_PATH,
+          ["modules", moduleIndex, "checks", checkIndex, "schema"],
+          clawActionObject(check.schema)
+        )
         checks.push({
           id: check.id,
           artifactId: check.artifactId,

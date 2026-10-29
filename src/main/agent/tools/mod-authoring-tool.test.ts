@@ -29,6 +29,8 @@ import { resolve } from "node:path"
 import { readProjectSource } from "../../mods/devtools/project-source"
 import { assertProjectAuthoringSkillMetadata } from "../../mods/devtools/project-authoring-skill-metadata"
 import { AuthoringStructureError } from "../../mods/devtools/authoring-structure-diagnostics"
+import { compileProjectHarness } from "../../mods/devtools/project-harness"
+import { createProjectTemplate } from "../../mods/devtools/project-template"
 
 vi.mock("../../storage", () => ({ getPlugins: vi.fn(() => []) }))
 
@@ -189,6 +191,87 @@ describe("conversation Mod tool", () => {
     const raw = await author.invoke({ action: "project_compile", id: "demo", revision: 3 })
     expect(JSON.parse(raw)).not.toHaveProperty("diagnostics")
     expect(raw).not.toContain("PRIVATE_VALUE")
+  })
+
+  it.each([
+    ["devclaw.harness.json", "schema", "PROJECT_HARNESS_INVALID", "/nodes/0/approval"],
+    ["devclaw.project-runtime.json", "schema", "PROJECT_RUNTIME_MANIFEST_INVALID", ""],
+    ["plugin.json", "json", "PROJECT_AUTHORING_JSON_INVALID", ""]
+  ])(
+    "returns real compile diagnostics for %s %s without changing source or executing",
+    async (path, kind, errorCode, fieldPath) => {
+      const service = fixture()
+      Object.assign(service, {
+        projectAuthoringContext: () => ({
+          scope: { threadId, workspace },
+          assertCurrent: () => undefined
+        }),
+        assertScope: () => undefined
+      })
+      const base = createProjectTemplate({
+        packageId: "demo",
+        name: "Demo",
+        template: "harness-lite"
+      })
+      const source = createAuthoringSourceBundle(
+        base.files.map((file) => {
+          if (file.path !== path) return file
+          if (kind === "json")
+            return { ...file, text: '{"secret":"PRIVATE_VALUE" "C:/PRIVATE_MACHINE":' }
+          const value = JSON.parse(file.text)
+          if (path === "devclaw.harness.json") value.nodes[0].approval = "PRIVATE_VALUE"
+          else value.stages = "PRIVATE_VALUE"
+          return { ...file, text: JSON.stringify(value) }
+        })
+      )
+      const before = JSON.stringify(source)
+      const save = vi.spyOn(projectAuthoringSessions, "save")
+      vi.spyOn(projectAuthoringSessions, "compile").mockImplementation(async () => {
+        compileProjectHarness(source)
+        throw Error("EXPECTED_COMPILE_REJECTION")
+      })
+      const author = createModAuthoringTool({ threadId, workspace })
+      const raw = await author.invoke({ action: "project_compile", id: "demo", revision: 3 })
+      expect(JSON.parse(raw)).toMatchObject({
+        ok: false,
+        error: errorCode,
+        sourceUnchanged: true,
+        executed: false,
+        diagnosticCount: 1,
+        diagnostics: [
+          { file: path, path: fieldPath, code: expect.any(String), message: expect.any(String) }
+        ]
+      })
+      expect(JSON.parse(raw).hint).toContain("不得删除要求或用 execute 绕过编译")
+      expect(raw).not.toMatch(/PRIVATE_|stack|Error:/)
+      expect(JSON.stringify(source)).toBe(before)
+      expect(save).not.toHaveBeenCalled()
+      expect(service.requestTrial).not.toHaveBeenCalled()
+    }
+  )
+
+  it("does not expose a diagnostic-shaped unknown compile error", async () => {
+    const service = fixture()
+    Object.assign(service, {
+      projectAuthoringContext: () => ({
+        scope: { threadId, workspace },
+        assertCurrent: () => undefined
+      }),
+      assertScope: () => undefined
+    })
+    vi.spyOn(projectAuthoringSessions, "compile").mockRejectedValue(
+      Object.assign(Error("unexpected PRIVATE_VALUE C:/PRIVATE_MACHINE"), {
+        diagnostics: [{ file: "plugin.json", path: "/secret", message: "PRIVATE_VALUE" }]
+      })
+    )
+    const raw = await createModAuthoringTool({ threadId, workspace }).invoke({
+      action: "project_compile",
+      id: "demo",
+      revision: 3
+    })
+    expect(JSON.parse(raw)).toMatchObject({ ok: false, error: "DEVELOPMENT_OPERATION_FAILED" })
+    expect(JSON.parse(raw)).not.toHaveProperty("diagnostics")
+    expect(raw).not.toMatch(/PRIVATE_|stack|Error:/)
   })
 
   it.each(["plugin", "actionId", "name"] as const)(
