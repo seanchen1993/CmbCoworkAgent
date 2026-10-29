@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
-import { ChatOpenAI } from "@langchain/openai"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
 import { HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { getModelConnection, getModelClientOptions } from "./connection"
 
@@ -28,6 +28,10 @@ function jsonReply() {
 
 beforeEach(() => {
   state.sapId = "12345678"
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
 })
 
 describe("idle gateway OpenAI transport", () => {
@@ -91,6 +95,8 @@ describe("idle gateway OpenAI transport", () => {
   })
 
   it("preserves streamed tool-call fragments and accepts the tool result on the next request", async () => {
+    // The wire fixture does not need the SDK's external tokenizer vocabulary.
+    vi.spyOn(ChatOpenAICompletions.prototype, "getNumTokens").mockResolvedValue(1)
     const bodies: Array<{
       messages: Array<{ role: string; tool_call_id?: string }>
       tools: unknown[]

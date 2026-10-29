@@ -38,7 +38,10 @@ import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { getModelClientOptions } from "../models/connection"
 import type { ModelTransport } from "../../shared/model-catalog"
-import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
+import {
+  createCmbSummarizationMiddleware,
+  isGatewayContextOverflow
+} from "./context-summarization-middleware"
 import {
   createTurnCompletionGateMiddleware,
   type TurnCompletionRecoveryCallback
@@ -3944,11 +3947,24 @@ function createRetryingFetch(
           `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${res.headers.get("content-type") ?? "unknown"}, request-id=${res.headers.get("x-request-id") ?? "unknown"}`
         )
 
-        // Success or non-retryable error — return as-is.
-        if (!isRetryableStatus(res.status)) {
+        // 580 also represents context overflow. Let summarization reduce the
+        // request before trying it again instead of repeating an oversized body.
+        let contextOverflow = false
+        if (res.status === 580) {
+          try {
+            contextOverflow = isGatewayContextOverflow({
+              status: res.status,
+              responseBody: await res.clone().text()
+            })
+          } catch {
+            // Unreadable error bodies retain the normal server-error policy.
+          }
+        }
+
+        // Success, non-retryable error, or overflow handled by summarization.
+        if (!isRetryableStatus(res.status) || contextOverflow) {
           await captureFetchError(res)
-          // If this is a successful retry (not the first attempt), notify the UI
-          // so the retry indicator can be cleared immediately.
+          // Clear any previous retry indicator when this retry loop ends.
           if (attempt > 1) hooks?.onRetrySuccess?.()
           return res
         }
