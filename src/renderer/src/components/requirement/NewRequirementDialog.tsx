@@ -22,7 +22,6 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { marketApi } from "@/api/market"
 import {
@@ -355,47 +354,31 @@ export function NewRequirementDialog({
             </p>
           </div>
 
-          <TooltipProvider delayDuration={150}>
-            <div className="inline-flex w-fit rounded-lg bg-[#f3ede6] p-1">
-              {[
-                { id: "file" as const, label: "文件", icon: Upload },
-                { id: "text" as const, label: "文本", icon: ArrowRight },
-                { id: "link" as const, label: "链接", icon: Link }
-              ].map((item) => {
-                const Icon = item.icon
-                const disabled = item.id === "link"
-                const tab = (
-                  <button
-                    type="button"
-                    disabled={disabled}
-                    onClick={() => setSource(item.id)}
-                    className={cn(
-                      "flex h-8 items-center gap-1.5 rounded px-3 text-sm font-semibold transition-colors",
-                      disabled
-                        ? "cursor-not-allowed text-muted-foreground/50"
-                        : source === item.id
-                          ? "bg-white text-foreground shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
-                          : "text-muted-foreground hover:text-foreground"
-                    )}
-                  >
-                    <Icon className="size-3.5" />
-                    {item.label}
-                  </button>
-                )
-
-                return disabled ? (
-                  <Tooltip key={item.id}>
-                    <TooltipTrigger asChild>
-                      <span className="inline-flex">{tab}</span>
-                    </TooltipTrigger>
-                    <TooltipContent side="top">敬请期待</TooltipContent>
-                  </Tooltip>
-                ) : (
-                  <span key={item.id}>{tab}</span>
-                )
-              })}
-            </div>
-          </TooltipProvider>
+          <div className="inline-flex w-fit rounded-lg bg-[#f3ede6] p-1">
+            {[
+              { id: "file" as const, label: "文件", icon: Upload },
+              { id: "text" as const, label: "文本", icon: ArrowRight },
+              { id: "link" as const, label: "链接", icon: Link }
+            ].map((item) => {
+              const Icon = item.icon
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setSource(item.id)}
+                  className={cn(
+                    "flex h-8 items-center gap-1.5 rounded px-3 text-sm font-semibold transition-colors",
+                    source === item.id
+                      ? "bg-white text-foreground shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <Icon className="size-3.5" />
+                  {item.label}
+                </button>
+              )
+            })}
+          </div>
 
           {source === "file" ? (
             <div className="space-y-3">

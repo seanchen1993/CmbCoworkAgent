@@ -158,34 +158,13 @@ export async function preparePlaywrightInAppBrowser(options: {
 
   const state = await waitForBrowserPanelReady(service)
   if (!state) {
-    throw new Error(
-      '已尝试自动打开右侧"浏览器"Tab，但内置浏览器未及时就绪，请稍后重试。'
-    )
+    throw new Error('已尝试自动打开右侧"浏览器"Tab，但内置浏览器未及时就绪，请稍后重试。')
   }
 
   await service.prepareTarget({
     workspacePath: options.workspacePath,
     visible: false
   })
-}
-
-export function requestPlaywrightInAppBrowserPanelAfterInvoke(options: {
-  tool: McpCapabilityTool
-  result: McpInvocationResult
-  threadId?: string
-  browserService?: PlaywrightBrowserTargetService | null
-}): void {
-  if (!shouldAutoSelectPlaywrightInAppBrowserTab(options.tool)) return
-  if (options.result.isError || options.result.fallbackCapabilityId) return
-
-  const browserService =
-    options.browserService === undefined ? getGlobalBrowserService() : options.browserService
-  if (!browserService) return
-
-  const state = browserService.getState()
-  if (!state.created) return
-
-  browserService.requestPanel(options.threadId)
 }
 
 export async function invokeMcpToolWithPlaywrightInAppBrowserSupport(options: {
@@ -205,14 +184,7 @@ export async function invokeMcpToolWithPlaywrightInAppBrowserSupport(options: {
     })
   }
 
-  const result = await options.invoke()
-  requestPlaywrightInAppBrowserPanelAfterInvoke({
-    tool: options.tool,
-    result,
-    threadId: options.threadId,
-    browserService: options.browserService
-  })
-  return result
+  return options.invoke()
 }
 
 export async function autoSelectPlaywrightInAppBrowserTab(options: {

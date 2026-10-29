@@ -204,7 +204,11 @@ function buildRequirementInitializationMessage(requirement: RequirementRecord): 
       ? "请通过对话从零梳理需求，先了解目标和使用场景"
       : "请先基于 source 文件夹中的原始需求资料完成需求分析"
   const initialDescription = requirement.initialDescription.trim()
-  return `为「${requirement.title}」撰写一份产品需求文档。${sourceInstruction}，梳理目标用户、使用场景、用户故事、关键流程、业务规则、异常处理、权限、通知机制、成功指标和验收标准；先与我确认待澄清事项，再生成正式 PRD。${initialDescription ? `\n\n用户的初始需求描述：\n${initialDescription}` : ""}`
+  const prdInstruction = `为「${requirement.title}」撰写一份产品需求文档。${sourceInstruction}，梳理目标用户、使用场景、用户故事、关键流程、业务规则、异常处理、权限、通知机制、成功指标和验收标准；先与我确认待澄清事项，再生成正式 PRD。${initialDescription ? `\n\n用户的初始需求描述：\n${initialDescription}` : ""}`
+
+  if (requirement.sourceType !== "link") return prdInstruction
+
+  return `请先使用内置浏览器访问以下需求线上链接：\n${requirement.link}\n\n完整读取并逐字输出页面中看到的全部需求内容。不要总结、改写、压缩或遗漏，必须与页面原文一模一样。完成上述内容读取后，再继续执行以下任务：\n\n${prdInstruction}`
 }
 
 function RequirementConversationSession({
@@ -253,7 +257,7 @@ function RequirementConversationSession({
   const observedSubagentStatesRef = useRef(new Map<string, string>())
   // ChatContainer treats this stream state as the source of truth for an active turn.
   const streamLoading = useThreadStream(threadId ?? "").isLoading
-  const autoQueuedPrdGenerationRef = useRef(false)
+  const autoQueuedPrdGenerationThreadIdsRef = useRef(new Set<string>())
   const continuationMessageThreadIdsRef = useRef(new Set<string>())
   const conversationLoadingObservedRef = useRef(false)
   const restoredManifestThreadRef = useRef<string | null>(null)
@@ -1101,7 +1105,8 @@ function RequirementConversationSession({
   useEffect(() => {
     if (
       !autoGeneratePrd ||
-      autoQueuedPrdGenerationRef.current ||
+      !threadId ||
+      autoQueuedPrdGenerationThreadIdsRef.current.has(threadId) ||
       isRequirementGenerated(requirement) ||
       isRequirementPublished(requirement) ||
       !threadState ||
@@ -1112,17 +1117,19 @@ function RequirementConversationSession({
       return
     }
 
-    autoQueuedPrdGenerationRef.current = true
+    autoQueuedPrdGenerationThreadIdsRef.current.add(threadId)
     threadState.addQueuedMessage({
       id: crypto.randomUUID(),
       text: buildRequirementInitializationMessage(requirement),
       contextLabel: "requirement-workbench",
+      builtinBrowser: requirement.sourceType === "link",
       created_at: new Date(),
       updated_at: new Date()
     })
   }, [
     autoGeneratePrd,
     requirement,
+    threadId,
     threadState,
     threadState?.historyLoading,
     threadState?.messages.length,
