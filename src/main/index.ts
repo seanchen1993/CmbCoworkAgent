@@ -370,6 +370,9 @@ import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { recoverManagedRunsAtStartup } from "./harness-board/managed-run-recovery"
+import { managedRunController } from "./harness-board/managed-run-controller"
+import { managedRunScheduler } from "./harness-board/managed-run-scheduler"
+import { createBrowserWindowAgentRunDelivery } from "./agent/agent-run-service"
 import { configureManagedRunProjectDirectories } from "./harness-board/managed-run-store"
 import {
   getHarnessProjectRootPath,
@@ -1544,6 +1547,32 @@ if (browserNativeMessagingHostLaunch) {
     const initialModelCatalogLoad = startBuiltinModelCatalogRefresh()
     createWindow()
     mainWindowStartupReady = true
+    if (harnessConfigAvailable) {
+      managedRunScheduler.initialize({
+        async start(schedule) {
+          const window = mainWindow
+          if (!window || window.isDestroyed()) {
+            throw new Error("没有可用的应用主窗口，无法开始托管")
+          }
+          return managedRunController.start({
+            projectId: schedule.projectId,
+            featureId: schedule.featureId,
+            workspacePath: schedule.workspacePath,
+            initialUserMessage: schedule.initialUserMessage,
+            existingThreadId: schedule.existingThreadId,
+            scheduledStartId: schedule.scheduleId,
+            delivery: createBrowserWindowAgentRunDelivery(window)
+          })
+        },
+        changed(event) {
+          for (const window of BrowserWindow.getAllWindows()) {
+            if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+              window.webContents.send("harnessBoard:managedRunScheduleChanged", event)
+            }
+          }
+        }
+      })
+    }
     // An IM turn must not depend on someone having the desktop open, and must
     // not be tied to whichever window happened to be focused when it arrived.
     // The managed delivery broadcasts on the thread-scoped channel the renderer
@@ -1569,7 +1598,7 @@ if (browserNativeMessagingHostLaunch) {
 
     // Start scheduled task scheduler and heartbeat service
     await builtinRobotManager.start(app.getVersion())
-    startScheduler()
+    startScheduler(harnessConfigAvailable ? (now) => managedRunScheduler.tick(now) : undefined)
     startHeartbeat()
     startHookConfigWatcher()
     startUpdateChecker()

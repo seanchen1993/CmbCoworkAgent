@@ -60,6 +60,11 @@ import {
 } from "../harness-board/watch-ref-watcher"
 import { managedRunStore } from "../harness-board/managed-run-store"
 import { createBrowserWindowAgentRunDelivery } from "../agent/agent-run-service"
+import { managedRunScheduler } from "../harness-board/managed-run-scheduler"
+import type {
+  ManagedRunScheduleInput,
+  ManagedRunScheduleIdentity
+} from "../../shared/managed-run-schedule"
 import { managedRunController } from "../harness-board/managed-run-controller"
 import { assertHarnessProjectCanBeDeleted } from "../harness-board/project-deletion-gate"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
@@ -539,6 +544,32 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     }
   )
 
+  ipcMain.handle("harnessBoard:getActiveManagedRunSchedules", () =>
+    managedRunScheduler.listActive()
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getManagedRunSchedule",
+    (_event, projectId: string, featureId: string) => managedRunScheduler.get(projectId, featureId)
+  )
+  ipcMain.handle(
+    "harnessBoard:scheduleManagedRun",
+    async (_event, input: ManagedRunScheduleInput) => {
+      await requireHarnessFeatureWorkspace(input.projectId, input.featureId)
+      managedRunController.validateStart(input)
+      return managedRunScheduler.create(input)
+    }
+  )
+  ipcMain.handle(
+    "harnessBoard:cancelManagedRunSchedule",
+    (_event, input: ManagedRunScheduleIdentity) => managedRunScheduler.cancel(input)
+  )
+  ipcMain.handle(
+    "harnessBoard:updateManagedRunSchedule",
+    (_event, input: ManagedRunScheduleIdentity & { scheduledAt: string }) =>
+      managedRunScheduler.reschedule(input)
+  )
+
   ipcMain.handle(
     "harnessBoard:stopManagedRun",
     async (_event, input: ManagedRunStopInput): Promise<boolean> => {
@@ -598,6 +629,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       const projectDirectory = getHarnessProjectRootPath(projectId)
       const deleted = await deleteHarnessProject(projectId)
       managedRunStore.removeProject(projectId, projectDirectory)
+      managedRunScheduler.removeProject(projectId)
       // 项目本地删除后，后台清理其在 ES 中的 trace/event 文档，使其不再出现在运营面板统计中。
       // 尽力而为（fire-and-forget）：内网部分机器无法直连 ES/后端，清理失败不应阻断或回滚删除。
       void purgeProjectAnalytics(projectId)

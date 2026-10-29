@@ -1,6 +1,11 @@
 import { useId, useRef, useState } from "react"
 import { Check, ChevronDown, Info, Loader2 } from "lucide-react"
 import { toast } from "sonner"
+import { ManagedRunStartTimeField } from "./ManagedRunStartTimeField"
+import {
+  nextManagedRunScheduleTime,
+  parseManagedRunScheduleTime
+} from "../../../../shared/managed-run-schedule"
 import { ManagedSessionPreview } from "./ManagedSessionPreview"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -26,6 +31,7 @@ export interface ManagedRunStartDialogInput {
   initialUserMessage?: string
   existingThreadId?: string
   imEnabled: boolean
+  scheduledAt?: string
 }
 
 function ManagedSessionList({
@@ -140,6 +146,8 @@ export function ManagedRunStartDialog({
   onClose: () => void
   onConfirm: (input: ManagedRunStartDialogInput) => Promise<boolean>
 }): React.JSX.Element {
+  const [scheduled, setScheduled] = useState(false)
+  const [scheduledAt, setScheduledAt] = useState(() => nextManagedRunScheduleTime())
   const hasMoreSessions = useAppStore((state) => state.threadDirectoryHasMore)
   const loadingMoreSessions = useAppStore((state) => state.threadDirectoryLoadingMore)
   const loadMoreSessions = useAppStore((state) => state.loadMoreThreads)
@@ -188,13 +196,18 @@ export function ManagedRunStartDialog({
       (useExistingSession && (!selectedSession || selectedSession.disabledReason))
     )
       return
+    if (scheduled && !(parseManagedRunScheduleTime(scheduledAt) > Date.now())) {
+      toast.error("请选择晚于当前时间的预约时间")
+      return
+    }
     const message = managedRunUserMessage.trim()
     const started = await onConfirm({
       workspacePath: effectiveWorkspacePath,
       initialUserMessage:
         message && message !== defaultMessageRef.current.trim() ? message : undefined,
       existingThreadId: useExistingSession ? (selectedThreadId ?? undefined) : undefined,
-      imEnabled: managedRunImEnabled
+      imEnabled: managedRunImEnabled,
+      scheduledAt: scheduled ? scheduledAt : undefined
     })
     if (started) onClose()
   }
@@ -422,6 +435,13 @@ export function ManagedRunStartDialog({
               onCheckedChange={setManagedRunImEnabled}
             />
           </div>
+          <ManagedRunStartTimeField
+            scheduled={scheduled}
+            onScheduledChange={setScheduled}
+            scheduledAt={scheduledAt}
+            onTimeChange={setScheduledAt}
+            disabled={updatingManagedRun}
+          />
         </div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose} disabled={updatingManagedRun}>
@@ -438,7 +458,7 @@ export function ManagedRunStartDialog({
             }
           >
             {updatingManagedRun && <Loader2 className="size-4 animate-spin" />}
-            确认并开启托管
+            {scheduled ? "确认预约" : "确认并开启托管"}
           </Button>
         </DialogFooter>
       </DialogContent>
