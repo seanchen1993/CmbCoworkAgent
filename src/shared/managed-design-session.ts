@@ -19,6 +19,7 @@ import type {
   DesignPatchStatus
 } from "./design-patch"
 import type { DesignTweakValue } from "./design-protocol"
+import type { DesignEditCommand, DesignEditableDocument } from "./design-edit"
 
 export type { TabState, Message, SessionMeta }
 export type DesignRunKind = "questions" | "agent" | "image" | "patch"
@@ -90,6 +91,8 @@ export interface DesignSessionSeed {
   workspacePath: string | null
 }
 export interface DesignSessionApi {
+  inspectEditable?: (id: string) => Promise<DesignEditableDocument>
+  edit?: (id: string, command: DesignEditCommand) => Promise<DesignSessionSnapshot>
   patchHistory?: (
     id: string,
     operation: "undo" | "redo",

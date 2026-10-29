@@ -60,5 +60,6 @@ export const S: Record<string, CSSProperties> = {
   tweaksDivider:     { width: 1, height: 18, background: "#d4d2cc", margin: "0 4px", flexShrink: 0 },
   toggleTrack:       { width: 28, height: 16, borderRadius: 999, border: "none", cursor: "pointer", position: "relative" as const, padding: 0, transition: "background 0.2s", flexShrink: 0 },
   toggleThumb:       { position: "absolute" as const, top: 2, left: 2, width: 12, height: 12, borderRadius: "50%", background: "#ffffff", transition: "transform 0.2s", display: "block" },
+  historyBtn:        { width: 28, height: 28, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, border: "none", borderRadius: 6, cursor: "pointer", color: "#4a4a4a" },
   zoomBtn:           { width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "1px solid #d4d2cc", borderRadius: 5, cursor: "pointer", fontSize: 13, color: "#4a4a4a", fontFamily: "inherit", lineHeight: 1 },
 }

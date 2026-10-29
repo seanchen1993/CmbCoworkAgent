@@ -22,6 +22,7 @@ import { DesignDraftPublisher } from "../services/design/draft-preview"
 import { executeDesignPatch, DESIGN_PATCH_TOOLS, normalizeDesignPatchReply, readDesignPatchStream } from "../services/design/patch-executor"
 import { DesignPatchScopeError } from "../services/design/patch-context"
 import { decorateDesignNodes } from "../../shared/design-node-ids"
+import { installDesignEditDataRuntime } from "../../shared/design-edit-data"
 import type { DesignPatchMetrics } from "../../shared/design-patch"
 import { designPatchLayoutProbe, inspectDesignPatchStyles, compareDesignPatchLayouts, withDesignValidationDeadline, type DesignLayoutProbe } from "../services/design/artifact-validator"
 import { DESIGN_PROGRESSIVE_PROMPT, DESIGN_DECLARATIVE_TWEAKS_PROMPT } from "../services/design/generation-prompt"
@@ -1472,6 +1473,8 @@ function prepareDesignArtifact(tabId: string, workspacePath?: string): { filePat
 
 function sanitizeDesignContextName(name: string): string {
   const trimmed = String(name || "").trim()
+  // File names must exclude ASCII control characters as well as reserved punctuation.
+  // eslint-disable-next-line no-control-regex
   const normalized = trimmed.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
   return (normalized || "file").slice(0, 120)
 }
@@ -2760,6 +2763,17 @@ export function registerDesignHandlers(): void {
     }
   }
   const manager = new DesignRunManager(new DesignSessionStore(getDb()), {
+    validateDirectEdit: async (candidate, before) => {
+      const resolved = resolveDesignArtifactPath(`${before.id}_design-main`, before.workspacePath ?? undefined)
+      if (!resolved.filePath) throw new Error(resolved.error ?? "无法准备编辑校验")
+      fs.mkdirSync(path.dirname(resolved.filePath), { recursive: true })
+      const temporary = path.join(path.dirname(resolved.filePath), `.direct-${crypto.randomUUID()}.html`)
+      try {
+        fs.writeFileSync(temporary, materializeTweaks(candidate.html, candidate.tweaks), "utf8")
+        const result = await validateDesignArtifactInHiddenBrowser(temporary, new AbortController().signal)
+        if (!result.ok) throw new Error(formatDesignBrowserValidation(result))
+      } finally { try { fs.unlinkSync(temporary) } catch { /* Already removed. */ } }
+    },
     publish,
     project: (snapshot) => {
       if (!snapshot.state.artifactPath) return
@@ -3007,6 +3021,8 @@ export function registerDesignHandlers(): void {
     return snapshot
   })
   ipcMain.handle("design:preview-visible", (_event, { id, runId, revision }: { id: string; runId: string; revision: number }) => manager.previewVisible(id, runId, revision))
+  ipcMain.handle("design:inspect-editable", (_event, id: string) => manager.inspectEditable(id))
+  ipcMain.handle("design:direct-edit", (_event, { id, command }) => manager.edit(id, command))
   ipcMain.handle("design:patch-history", (_event, { id, operation, revision }: { id: string; operation: "undo" | "redo"; revision: number }) => manager.patchHistory(id, operation, revision))
   ipcMain.handle("design:session-start", (_event, request: DesignRunRequest) =>
     manager.start(request),
@@ -4223,7 +4239,7 @@ export function registerDesignHandlers(): void {
           draftPublisher?.validating()
           const liveState = managedDesignStateReaders.get(sessionId)?.()
           const tweaks = reconcileTweaks(readTweakDeclaration(artifactHtml), liveState?.draftPreview?.tweaks ?? liveState?.tweaks, true)
-          artifactHtml = materializeTweaks(artifactHtml, tweaks)
+          artifactHtml = installDesignEditDataRuntime(materializeTweaks(artifactHtml, tweaks))
           const validationStartedAt = Date.now()
           send({ type: "metrics", metrics: { validationStartedAt } })
           const validationDraftPath = makeDesignArtifactDraftPath(outputArtifactPath)

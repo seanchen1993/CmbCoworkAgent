@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
+import { Redo2, Undo2 } from "lucide-react"
 import { buildDesignHtmlPreviewDocument } from "@/lib/design-html-srcdoc"
 import { DESIGN_PREVIEW_NAVIGATION_SCRIPT } from "@/lib/design-preview-navigation"
 import { buildDesignVariationDocument } from "@/lib/design-variation-document"
@@ -52,6 +53,7 @@ import { TweaksFloatingPanel } from "./TweaksFloatingPanel"
 import { DesignPreviewFrame } from "./DesignPreviewFrame"
 import { TweaksParameterPanel } from "./TweaksParameterPanel"
 import { useDesignTweaks } from "./use-design-tweaks"
+import { useDesignDirectEdit } from "./use-design-direct-edit"
 import { materializeTweaks, readTweakDeclaration, readyTweakKeys } from "../../../../shared/design-tweaks"
 import { decorateDesignNodes, stripDesignHostRuntime } from "../../../../shared/design-node-ids"
 import { shouldUseDesignPatch, type DesignPatchTarget } from "../../../../shared/design-patch"
@@ -1506,11 +1508,12 @@ export function DesignView(): React.JSX.Element {
     updateTs(activeTabId, (prev) => ({
       tweaksOn: typeof val === "function" ? val(prev.tweaksOn) : val
     }))
-  const setActiveMode = (val: "comment" | "edit" | "draw" | null) =>
-    updateTs(activeTabId, (prev) => ({
+  const setActiveMode = (val: "comment" | "edit" | "draw" | null) => {
+    void directEditor.flush().then(() => updateTs(activeTabId, (prev) => ({
       activeMode: visibleDraft || prev.generationState === "generating" ? null : val,
       draftDrawNote: val === "draw" ? prev.draftDrawNote : null
-    }))
+    }))).catch((error) => showToast(`编辑尚未保存：${String(error)}`))
+  }
   const setZoom = (val: number | ((v: number) => number)) =>
     updateTs(activeTabId, (prev) => ({ zoom: typeof val === "function" ? val(prev.zoom) : val }))
 
@@ -1549,6 +1552,18 @@ export function DesignView(): React.JSX.Element {
     },
     [requirementEntry, updateTs]
   )
+
+  const directEditor = useDesignDirectEdit({
+    id: currentSessionId,
+    active: activeMode === "edit" && !sessionOpening,
+    html: ts.html,
+    revision: ts.artifactRevision ?? 0,
+    tweakRevision: ts.tweaks?.revision,
+    variationId: ts.activeVariationId,
+    iframe: iframeRef,
+    onSelect: (selectedElement) => updateTs(activeTabIdRef.current, { selectedElement }),
+    onError: showToast
+  })
 
   useEffect(() => {
     return () => {
@@ -1794,7 +1809,7 @@ export function DesignView(): React.JSX.Element {
         return
       appliedSeq = snapshot.seq
       const previous = tabStatesRef.current[SINGLE_DESIGN_TAB_ID] ?? makeTabState()
-      let state = { ...makeTabState(), ...snapshot.state }
+      const state = { ...makeTabState(), ...snapshot.state }
       const htmlChanged = sourceHtml !== snapshot.state.html
       if (htmlChanged && state.html) {
         // Prepare dependencies before mounting the final document: business scripts run once.
@@ -2453,14 +2468,15 @@ export function DesignView(): React.JSX.Element {
     showToast
   })
 
-  const backToGallery = useCallback(() => {
+  const backToGallery = useCallback(async () => {
+    try { await directEditor.flush() } catch (error) { showToast(`编辑尚未保存：${String(error)}`); return }
     flushArtifactEdits()
     currentSessionIdRef.current = null
     setCurrentSessionId(null)
     setSessionOpening(false)
     localStorage.removeItem(SESSION_LAST_KEY)
     setSessionIndex(getDesignSessionClient().list())
-  }, [flushArtifactEdits])
+  }, [flushArtifactEdits, directEditor.flush, showToast])
 
   const deleteSession = useCallback(
     (id: string) => {
@@ -2485,7 +2501,7 @@ export function DesignView(): React.JSX.Element {
       injectIntoIframe(iframeRef.current, EDIT_SELECT_CLEANUP)
     } else if (activeMode === "edit") {
       injectIntoIframe(iframeRef.current, COMMENT_CLEANUP)
-      injectIntoIframe(iframeRef.current, EDIT_SELECT_INJECT)
+      if (!window.api.design.sessions.inspectEditable) injectIntoIframe(iframeRef.current, EDIT_SELECT_INJECT)
     } else if (activeMode === "draw") {
       injectIntoIframe(iframeRef.current, COMMENT_CLEANUP)
       injectIntoIframe(iframeRef.current, EDIT_SELECT_CLEANUP)
@@ -2582,6 +2598,7 @@ export function DesignView(): React.JSX.Element {
 
       // ── Edit select: iframe sent its current outerHTML for saving ─
       if (msg.type === "__edit_html") {
+        if (window.api.design.sessions.edit) return // New editor persists source commands, never runtime outerHTML.
         const { html } = msg as { html: string }
         const tabId = activeTabIdRef.current
         const state = tabStatesRef.current[tabId]
@@ -2654,6 +2671,7 @@ export function DesignView(): React.JSX.Element {
     async (request: Omit<DesignRunRequest, "requestId" | "designSessionId">) => {
       const id = currentSessionIdRef.current
       if (!id) return
+      try { await directEditor.flush() } catch (error) { showToast(`编辑尚未保存：${String(error)}`); return }
       try { await tweakEditor.flush() } catch (error) { showToast(`微调尚未保存：${error instanceof Error ? error.message : String(error)}`); return }
       const state = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
       tabStatesRef.current = {
@@ -2676,7 +2694,7 @@ export function DesignView(): React.JSX.Element {
           }
         })
     },
-    [showToast, tweakEditor.flush]
+    [showToast, tweakEditor.flush, directEditor.flush]
   )
 
   const startGeneration = useCallback(
@@ -3016,6 +3034,12 @@ ${commentLines}${variantNote}`
   // ── Edit select: apply a style property to the selected element live ─
   const handleEditStyleChange = useCallback(
     (property: string, value: unknown) => {
+      if (window.api.design.sessions.edit) {
+        directEditor.changeStyle(property, value)
+        updateTs(activeTabId, (prev) => prev.selectedElement ? { selectedElement: { ...prev.selectedElement,
+          styles: { ...prev.selectedElement.styles, [property]: value } as ElementStyles } } : {})
+        return
+      }
       sendToIframe(iframeRef.current, { type: "__edit_style", property, value })
       // Optimistic UI: update panel immediately without waiting for __edit_click echo
       updateTs(activeTabId, (prev) => {
@@ -3028,7 +3052,7 @@ ${commentLines}${variantNote}`
         }
       })
     },
-    [activeTabId, updateTs]
+    [activeTabId, updateTs, directEditor.changeStyle]
   )
 
   // ── Apply ALL saved comments → send to model ─────────────
@@ -3928,10 +3952,11 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
 
   const handleExportDesign = useCallback(
     async (state: TabState) => {
+      try { await directEditor.flush() } catch (error) { showToast(`编辑尚未保存：${String(error)}`); return }
       try { await tweakEditor.flush() } catch (error) { showToast(`微调尚未保存：${error instanceof Error ? error.message : String(error)}`); return }
       const id = currentSessionIdRef.current
       const saved = id ? getDesignSessionClient().get(id)?.state : undefined
-      const html = getCurrentDesignHtml({ ...state, tweaks: saved?.tweaks ?? state.tweaks })
+      const html = getCurrentDesignHtml({ ...state, html: saved?.html ?? state.html, variations: saved?.html ? parseVariations(saved.html) : state.variations, tweaks: saved?.tweaks ?? state.tweaks })
       if (!html.trim()) return
       const defaultName =
         state.artifactMetadata?.title?.trim() || state.sourceInfo?.label?.trim() || "design"
@@ -3969,7 +3994,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
         })
       }
     },
-    [workspacePath, tweakEditor.flush, showToast]
+    [workspacePath, tweakEditor.flush, showToast, directEditor.flush]
   )
 
   // ── Render ─────────────────────────────────────────────────
@@ -4811,6 +4836,11 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                   active={activeMode === null}
                   onClick={() => setActiveMode(null)}
                 />
+                {!visibleDraft && !isGenerating && <TweaksBtn label="编辑" icon={<EditIcon active={activeMode === "edit"} />}
+                  active={activeMode === "edit"} onClick={() => setActiveMode(activeMode === "edit" ? null : "edit")} />}
+                {activeMode === "edit" && <span style={{ fontSize: 11, color: "#64748b", whiteSpace: "nowrap" }}>
+                  {directEditor.status || "单击选中 · 双击改文字 · Delete 删除"}
+                </span>}
                 <div style={S.tweaksDivider} />
                 {/* Tweaks toggle */}
                 <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
@@ -4850,12 +4880,6 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                       onClick={() => setActiveMode(activeMode === "comment" ? null : "comment")}
                     />
                     <TweaksBtn
-                      label="编辑"
-                      icon={<EditIcon active={activeMode === "edit"} />}
-                      active={activeMode === "edit"}
-                      onClick={() => setActiveMode(activeMode === "edit" ? null : "edit")}
-                    />
-                    <TweaksBtn
                       label="绘制"
                       icon={<DrawIcon active={activeMode === "draw"} />}
                       active={activeMode === "draw"}
@@ -4865,18 +4889,36 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                 )}
 
                 <div style={S.tweaksDivider} />
-                {/* Zoom */}
                 {(ts.canUndoPatch || ts.canRedoPatch) && <>
-                  <button style={S.zoomBtn} disabled={!ts.canUndoPatch || isGenerating} title="撤销局部修改" onClick={() => {
-                    const id = currentSessionIdRef.current
-                    if (id) void getDesignSessionClient().patchHistory(id, "undo").catch((error) => showToast(String(error)))
-                  }}>撤销</button>
-                  <button style={S.zoomBtn} disabled={!ts.canRedoPatch || isGenerating} title="重做局部修改" onClick={() => {
-                    const id = currentSessionIdRef.current
-                    if (id) void getDesignSessionClient().patchHistory(id, "redo").catch((error) => showToast(String(error)))
-                  }}>重做</button>
+                  <div role="group" aria-label="修改历史" style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
+                    <button
+                      type="button"
+                      style={S.historyBtn}
+                      className="bg-transparent transition-colors enabled:hover:bg-black/5 disabled:cursor-default disabled:opacity-30"
+                      disabled={!ts.canUndoPatch || isGenerating}
+                      title="撤销局部修改"
+                      aria-label="撤销"
+                      onClick={() => {
+                        const id = currentSessionIdRef.current
+                        if (id) void directEditor.flush().then(() => getDesignSessionClient().patchHistory(id, "undo")).catch((error) => showToast(String(error)))
+                      }}
+                    ><Undo2 size={16} strokeWidth={1.8} aria-hidden="true" /></button>
+                    <button
+                      type="button"
+                      style={S.historyBtn}
+                      className="bg-transparent transition-colors enabled:hover:bg-black/5 disabled:cursor-default disabled:opacity-30"
+                      disabled={!ts.canRedoPatch || isGenerating}
+                      title="重做局部修改"
+                      aria-label="重做"
+                      onClick={() => {
+                        const id = currentSessionIdRef.current
+                        if (id) void directEditor.flush().then(() => getDesignSessionClient().patchHistory(id, "redo")).catch((error) => showToast(String(error)))
+                      }}
+                    ><Redo2 size={16} strokeWidth={1.8} aria-hidden="true" /></button>
+                  </div>
                   <div style={S.tweaksDivider} />
                 </>}
+                {/* Zoom */}
                 <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                   <button onClick={() => setZoom((z) => Math.max(25, z - 25))} style={S.zoomBtn}>
                     −
@@ -5124,6 +5166,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                       : "none"
                                 }}
                                 onLoad={(isDraft) => {
+                                  directEditor.onLoad()
                                   // Block link/form navigation so clicks inside the preview
                                   // never navigate the iframe away from the design
                                   injectIntoIframe(
@@ -5148,7 +5191,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                   // Re-inject mode scripts after iframe reloads (variation switch, etc.)
                                   if (activeMode === "comment")
                                     injectIntoIframe(iframeRef.current, COMMENT_INJECT)
-                                  if (activeMode === "edit")
+                                  if (activeMode === "edit" && !window.api.design.sessions.inspectEditable)
                                     injectIntoIframe(iframeRef.current, EDIT_SELECT_INJECT)
                                 }}
                               />
@@ -5372,6 +5415,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                           <ElementPropsPanel
                             key={ts.selectedElement?.edId ?? "none"}
                             selectedElement={ts.selectedElement}
+                            onTextEdit={directEditor.editSelected}
+                            onDelete={directEditor.deleteSelected}
                             onStyleChange={handleEditStyleChange}
                           />
                         )}

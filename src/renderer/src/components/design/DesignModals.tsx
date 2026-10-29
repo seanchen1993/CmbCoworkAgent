@@ -555,6 +555,7 @@ export function ExportDesignModal({
           <label style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <span style={{ fontSize: 13, fontWeight: 650, color: "#344054" }}>导出格式</span>
             <select
+              aria-label="导出格式"
               value={format}
               onChange={(event) => setFormat(event.target.value as ExportFormat)}
               style={{

@@ -4490,6 +4490,8 @@ const api = {
     listImportedTemplates: (() => ipcRenderer.invoke("design:list-imported-templates")) satisfies DesignTemplateApi["listImportedTemplates"],
     readTemplate: ((reference) => ipcRenderer.invoke("design:read-template", reference)) satisfies DesignTemplateApi["readTemplate"],
     sessions: {
+      inspectEditable: (id) => ipcRenderer.invoke("design:inspect-editable", id),
+      edit: (id, command) => ipcRenderer.invoke("design:direct-edit", { id, command }),
       tweak: (id, command) => ipcRenderer.invoke("design:session-tweak", { id, command }),
       patchHistory: (id, operation, revision) => ipcRenderer.invoke("design:patch-history", { id, operation, revision }),
       previewVisible: (id, runId, revision) => ipcRenderer.invoke("design:preview-visible", { id, runId, revision }),
