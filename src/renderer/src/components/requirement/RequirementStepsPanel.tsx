@@ -806,7 +806,7 @@ export function RequirementStepsPanel({
                         if (nextFunction) requestPrototypeDesign(nextFunction.functionInfo)
                       }}
                     >
-                      继续设计原型
+                      批量设计全部原型
                     </Button>
                   ) : (
                     <Button

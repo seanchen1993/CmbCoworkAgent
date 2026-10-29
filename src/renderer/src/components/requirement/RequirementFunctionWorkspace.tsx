@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { ArrowLeft, FileText, Loader2, Pencil, Save } from "lucide-react"
+import { ArrowLeft, ExternalLink, FileText, Loader2, Pencil, Save } from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -138,7 +138,7 @@ export function RequirementFunctionWorkspace({
 
       <div className="grid min-h-0 flex-1 grid-cols-2 gap-3">
         <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border/80 bg-white transition-colors duration-200 hover:border-primary/70">
-          <header className="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-primary/20 bg-primary/[0.08] px-3.5">
+          <header className="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-slate-100/80 px-3.5">
             <span className="text-xs font-semibold text-foreground/75">MD 预览</span>
             <span
               className="min-w-0 flex-1 truncate text-center text-xs text-muted-foreground/80"
@@ -223,21 +223,18 @@ export function RequirementFunctionWorkspace({
         </section>
 
         <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border/80 bg-white transition-colors duration-200 hover:border-primary/70">
-          <header className="flex h-10 shrink-0 items-center justify-between border-b border-primary/20 bg-primary/[0.08] px-3.5">
+          <header className="flex h-10 shrink-0 items-center justify-between border-b border-border/80 bg-slate-100/80 px-3.5">
             <span className="text-xs font-semibold text-foreground/75">原型预览</span>
-            {prototypeGenerated ? (
-              <span className="rounded-full bg-status-nominal/10 px-2.5 py-1 text-[11px] font-medium text-status-nominal">
-                动态原型 v1
-              </span>
-            ) : null}
             {prototypeGenerated ? (
               <Button
                 type="button"
+                variant="ghost"
                 size="sm"
-                className="h-7 px-2.5 text-xs"
+                className="h-7 gap-1 px-2 text-xs text-primary hover:text-primary"
                 disabled={conversationLoading}
                 onClick={onRequestPrototypeDesign}
               >
+                <ExternalLink className="size-3" />
                 继续完善设计
               </Button>
             ) : null}
