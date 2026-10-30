@@ -1,3 +1,9 @@
+import type {
+  RunAnalysisFeature,
+  RunAnalysisOptions,
+  RunAnalysisRange
+} from "../../../../../shared/project-run-analysis"
+import { ProjectRunAnalysis } from "../ProjectRunAnalysis"
 import {
   createContext,
   useContext,
@@ -3428,6 +3434,9 @@ function ProjectModePanelContent({
   codeStatsLoading,
   onCodeSourceChange,
   createdInRangeProjectsOnly,
+  runAnalysisRange,
+  runAnalysisOptions,
+  runAnalysisRefreshKey,
   headerAction,
   projectPages,
   projectPageLoading,
@@ -3463,6 +3472,9 @@ function ProjectModePanelContent({
   /** 切换 source 下拉（null = 全部来源）。 */
   onCodeSourceChange: (source: string | null) => void
   createdInRangeProjectsOnly: boolean
+  runAnalysisRange: RunAnalysisRange
+  runAnalysisOptions: RunAnalysisOptions
+  runAnalysisRefreshKey?: number
   headerAction?: ReactNode
   projectPages: Partial<
     Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>
@@ -3510,6 +3522,39 @@ function ProjectModePanelContent({
   onSkillFunnelFirstStageClick?: () => void
   marketSkillKeys?: Set<string>
 }): React.JSX.Element {
+  const [projectView, setProjectView] = useState<"list" | "analysis">("list")
+  const [analysisOpened, setAnalysisOpened] = useState(false)
+  const openCodeTrace = useContext(OpenProjectCodeTrace)
+  const analysisProject = (row: RunAnalysisFeature): DashboardProjectModeProject => ({
+    projectId: row.projectId,
+    name: row.projectName,
+    adapterName: row.adapterName ?? undefined,
+    lifecycleStatus: row.lifecycleStatus ?? undefined,
+    featureCount: row.snapshotFeatureCount,
+    managedRunCount: 0,
+    conversationCount: row.conversationCount,
+    devStageConversationCount: 0,
+    devAssociatedFeatureCount: 0,
+    hasError: false,
+    features: [],
+    topSkills: [],
+    codeStats: row.codeStats,
+    runCost: {
+      toolCalls: row.toolCalls ?? 0,
+      modelCalls: row.modelCalls ?? 0,
+      totalTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      userInputRequests: 0,
+      userInputRequestDocs: 0
+    },
+    userInputRequestCountComplete: false,
+    stageBuckets: {
+      pluginConstrained: { conversationCount: 0, codeStats: null },
+      vibecoding: { conversationCount: 0, codeStats: null },
+      unattributed: { conversationCount: 0, codeStats: null }
+    }
+  })
   const adapters = useMemo(() => data?.adapters ?? [], [data?.adapters])
   const adapterOptions = useMemo(
     () =>
@@ -3814,23 +3859,80 @@ function ProjectModePanelContent({
         </div>
       </section>
 
-      {/* Project list */}
-      <ProjectListSection
-        projectCounts={projectCounts}
-        projectPages={projectPages}
-        adapterOptions={adapterOptions}
-        pageLoading={projectPageLoading}
-        pageError={projectPageError}
-        loading={projectListLoading}
-        onPageChange={onProjectPageChange}
-        onOpenTraces={onOpenTraces}
-        onOpenFeatureCommits={onOpenFeatureCommits}
-        onOpenProjectCommits={onOpenProjectCommits}
-        loadFeatureNodes={loadFeatureNodes}
-        loadOperationalDetails={loadOperationalDetails}
-        loadStageAnalysis={loadStageAnalysis}
-        createdInRangeProjectsOnly={createdInRangeProjectsOnly}
-      />
+      {/* The inventory stays mounted; analysis loads only after the user opens it. */}
+      <div className="min-w-0 space-y-3">
+        <div
+          role="tablist"
+          aria-label="项目视图"
+          className="inline-flex rounded-md border border-border p-1 text-xs"
+        >
+          <button
+            role="tab"
+            aria-selected={projectView === "list"}
+            className={cn("rounded px-3 py-1.5", projectView === "list" && "bg-muted font-medium")}
+            onClick={() => setProjectView("list")}
+          >
+            项目列表
+          </button>
+          <button
+            role="tab"
+            aria-selected={projectView === "analysis"}
+            className={cn(
+              "rounded px-3 py-1.5",
+              projectView === "analysis" && "bg-muted font-medium"
+            )}
+            onClick={() => {
+              setAnalysisOpened(true)
+              setProjectView("analysis")
+            }}
+          >
+            运行分析
+          </button>
+        </div>
+        {analysisOpened && (
+          <div hidden={projectView !== "analysis"}>
+            <ProjectRunAnalysis
+              range={runAnalysisRange}
+              options={runAnalysisOptions}
+              active={projectView === "analysis"}
+              refreshKey={runAnalysisRefreshKey}
+              onOpenFeatureCommits={(row, pushed) => {
+                if (row.featureSlug)
+                  onOpenFeatureCommits(
+                    analysisProject(row),
+                    { slug: row.featureSlug, title: row.featureTitle, codeStats: row.codeStats },
+                    pushed
+                  )
+              }}
+              onOpenCodeTrace={(row) =>
+                openCodeTrace?.({
+                  projectId: row.projectId,
+                  name: row.projectName,
+                  bucket: "plugin_constrained"
+                })
+              }
+            />
+          </div>
+        )}
+        <div hidden={projectView !== "list"}>
+          <ProjectListSection
+            projectCounts={projectCounts}
+            projectPages={projectPages}
+            adapterOptions={adapterOptions}
+            pageLoading={projectPageLoading}
+            pageError={projectPageError}
+            loading={projectListLoading}
+            onPageChange={onProjectPageChange}
+            onOpenTraces={onOpenTraces}
+            onOpenFeatureCommits={onOpenFeatureCommits}
+            onOpenProjectCommits={onOpenProjectCommits}
+            loadFeatureNodes={loadFeatureNodes}
+            loadOperationalDetails={loadOperationalDetails}
+            loadStageAnalysis={loadStageAnalysis}
+            createdInRangeProjectsOnly={createdInRangeProjectsOnly}
+          />
+        </div>
+      </div>
 
       {/* Adapter (plugin) distribution — 紧随项目列表之后 */}
       <AdapterListSection

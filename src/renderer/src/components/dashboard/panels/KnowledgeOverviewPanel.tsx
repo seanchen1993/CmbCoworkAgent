@@ -1,6 +1,7 @@
 import { useState, type ComponentType, type ReactNode } from "react"
 import {
   BookOpen,
+  Filter,
   ChevronRight,
   Download,
   Eye,
@@ -22,6 +23,7 @@ import type {
   DashboardKnowledgeCommitRate,
   DashboardKnowledgeCommitRateUnavailableReason
 } from "../../../../../shared/dashboard-knowledge-commit-rate"
+import { Button } from "@/components/ui/button"
 import { InfoHint } from "./dashboard-shared"
 import { KnowledgeActiveDetailsDialog } from "../KnowledgeActiveDetailsDialog"
 
@@ -200,7 +202,9 @@ export function KnowledgeOverviewPanel({
   rateLoading,
   rateError,
   rooms,
-  refreshKey
+  refreshKey,
+  createdInRangeOnly = false,
+  onCreatedInRangeOnlyChange
 }: {
   accumulation: KnowledgeAccumulationData | null
   accumulationLoading: boolean
@@ -216,6 +220,8 @@ export function KnowledgeOverviewPanel({
   rateError: string | null
   rooms: string[]
   refreshKey: number
+  createdInRangeOnly?: boolean
+  onCreatedInRangeOnlyChange?: (value: boolean) => void
 }): React.JSX.Element {
   const [detailsOpen, setDetailsOpen] = useState(false)
   const totals = accumulation?.totals ?? undefined
@@ -234,10 +240,32 @@ export function KnowledgeOverviewPanel({
   return (
     <div className="space-y-5">
       <section className="space-y-3">
-        <div className="flex items-center gap-1.5 text-sm font-semibold">
-          项目系统约束阅读情况
-          <InfoHint content="项目数和加载情况按当前项目状态统计；读取项目数和次数按所选日期统计。" />
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 text-sm font-semibold">
+            项目系统约束阅读情况
+            <InfoHint
+              content={
+                createdInRangeOnly
+                  ? "仅统计顶部所选日期内新建的项目；加载情况取这些项目的累计状态，读取项目数和次数仅统计它们在所选日期内的成功读取。加载率和读取率均以本期新建项目数为分母。"
+                  : "统计当前权限和室范围内的全部项目，加载情况及成功读取数据均为累计口径，不受顶部日期筛选影响。"
+              }
+            />
+          </div>
+          <Button
+            size="sm"
+            variant={createdInRangeOnly ? "default" : "outline"}
+            className="gap-1.5 text-xs"
+            aria-pressed={createdInRangeOnly}
+            onClick={() => onCreatedInRangeOnlyChange?.(!createdInRangeOnly)}
+            title="仅统计所选日期内新建的项目及其本期读取数据"
+          >
+            <Filter className="size-3.5" />
+            仅本期新建
+          </Button>
         </div>
+        <p className="text-[11px] text-muted-foreground">
+          {createdInRangeOnly ? "仅本期新建项目 · 读取数据按所选日期统计" : "全部项目 · 累计数据"}
+        </p>
         {projectsError && (
           <div role="alert" className="text-xs text-destructive">
             {projectsError}
@@ -265,7 +293,11 @@ export function KnowledgeOverviewPanel({
             sub={`读取率 · ${percent(ratio(projects?.readProjectCount, projects?.projectCount))}`}
             icon={Eye}
             color="bg-teal-500"
-            hint="所选日期内至少有效读取一次系统约束的项目数，同一项目只计一次。"
+            hint={
+              createdInRangeOnly
+                ? "本期新建项目中，在所选日期内至少成功读取一次系统约束的项目数，同一项目只计一次。"
+                : "历史累计至少成功读取一次系统约束的项目数，同一项目只计一次。"
+            }
           />
           <StatCard
             label="读取系统约束总次数"
@@ -273,7 +305,11 @@ export function KnowledgeOverviewPanel({
             sub="次 · 计数"
             icon={BookOpen}
             color="bg-violet-600"
-            hint="所选日期内成功读取系统约束的次数。"
+            hint={
+              createdInRangeOnly
+                ? "本期新建项目在所选日期内成功读取系统约束的次数。"
+                : "历史累计成功读取系统约束的次数。"
+            }
           />
         </div>
       </section>
