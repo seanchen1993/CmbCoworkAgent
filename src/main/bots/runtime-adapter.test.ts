@@ -3109,6 +3109,37 @@ describe("Bot Runtime integration", () => {
       await port().acquire(bot, peer)!.execute(new AbortController().signal, vi.fn())
     ).toMatchObject({ state: "completed", result: "Verified actual output" })
   })
+  it.each([false, true])(
+    "acknowledges only observed receipts after a successful continuation (preempted=%s)",
+    async (preempted) => {
+      const peer: BotTask = {
+        ...task,
+        origin: { kind: "bot", fromBotId: "peer", rootTaskId: "root", depth: 1, expectsReply: true }
+      }
+      fixture.groupCheckpoint.mockReturnValue("previous")
+      fixture.commandIds.mockReturnValue(["long-running"])
+      fixture.commandResults.mockReturnValue([{ task_id: "observed", output: "done", exitCode: 0 }])
+      fixture.checkpointTuple.mockResolvedValue({ checkpoint: { id: "next" } })
+      const lease = port().acquire(bot, peer)!
+      fixture.start.mockImplementation(async (_request, _delivery, context) => {
+        expect(context.extraSystemPrompt).toContain('"task_id":"observed"')
+        fixture.commandResults.mockReturnValue([
+          { task_id: "observed", output: "done", exitCode: 0 },
+          { task_id: "racing", output: "new result", exitCode: 7 }
+        ])
+        if (preempted) {
+          lease.yieldToUser!(() => true)
+          context.onModelRequestState?.(() => true)
+        } else context.onRunTerminated?.({ outcome: "success", code: "done" })
+        return { completion: Promise.resolve() }
+      })
+      expect(await lease.execute(new AbortController().signal, vi.fn())).toEqual({
+        state: "deferred",
+        checkpointId: "next",
+        ...(!preempted ? { consumedCommandIds: ["observed"] } : {})
+      })
+    }
+  )
   it("does not fabricate a peer checkpoint when a pending build cannot be resumed", async () => {
     fixture.commandIds.mockReturnValue(["pending-build"])
     fixture.checkpointTuple.mockResolvedValue(undefined)

@@ -1404,6 +1404,10 @@ export function createLocalBotRunPort(
             return {
               state: "deferred",
               checkpointId,
+              // A preempted model request may not have read these receipts yet.
+              ...(!yielded && commandResults.length
+                ? { consumedCommandIds: commandResults.map((result) => String(result.task_id)) }
+                : {}),
               ...(replyFiles.size ? { files: [...replyFiles.values()] } : {})
             }
           }

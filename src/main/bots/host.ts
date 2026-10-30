@@ -69,6 +69,7 @@ export interface BotRunLease {
     | {
         state: "deferred"
         checkpointId: string
+        consumedCommandIds?: string[]
         error?: never
         result?: never
         files?: BotDeliveredFile[]
@@ -1417,6 +1418,7 @@ export class LocalBotHost {
     let waitingCount = 0
     let deferredCheckpoint: string | undefined
     let deferredFiles: BotDeliveredFile[] | undefined
+    let consumedCommandIds: string[] | undefined
     try {
       const result = await lease.execute(controller.signal, (waiting) => {
         if (controller.signal.aborted) return
@@ -1428,6 +1430,7 @@ export class LocalBotHost {
       if (result.state === "deferred") {
         deferredCheckpoint = result.checkpointId
         deferredFiles = result.files
+        consumedCommandIds = result.consumedCommandIds
       } else {
         state = result.state
         reason = result.error ?? null
@@ -1465,7 +1468,8 @@ export class LocalBotHost {
       try {
         // These messages were consumed by this exact graph, not separate queued runs.
         // Unconsumed messages stay queued and run normally after the lease releases.
-        if (deferredCheckpoint) this.store.deferTask(task.id, deferredCheckpoint, deferredFiles)
+        if (deferredCheckpoint)
+          this.store.deferTask(task.id, deferredCheckpoint, deferredFiles, consumedCommandIds)
         else
           this.store.settleRun(
             task.id,

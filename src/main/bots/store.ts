@@ -319,6 +319,12 @@ export class BotStore {
         )
       )
         db.run("ALTER TABLE bot_commands ADD COLUMN continuation_result_json TEXT")
+      if (
+        !this.rows("PRAGMA table_info(bot_commands)").some(
+          (column) => column.name === "continuation_consumed"
+        )
+      )
+        db.run("ALTER TABLE bot_commands ADD COLUMN continuation_consumed INTEGER NOT NULL DEFAULT 0")
       // Repair partially applied older migrations without changing valid group/private ownership.
       db.run(
         "UPDATE bot_tasks SET thread_id=(SELECT thread_id FROM bots WHERE bots.id=bot_tasks.bot_id) WHERE thread_id IS NULL"
@@ -2749,9 +2755,17 @@ export class BotStore {
           (turn.created_at<t.created_at OR (turn.created_at=t.created_at AND turn.rowid<t.rowid))
         ))
       ))
-      AND NOT EXISTS (SELECT 1 FROM bot_commands c WHERE c.source_task_id=t.id
+      AND (NOT EXISTS (SELECT 1 FROM bot_commands c WHERE c.source_task_id=t.id
         AND c.bot_id=t.bot_id AND c.thread_id=t.thread_id
         AND c.continuation_result_json IS NOT NULL AND c.state='accepted')
+        OR (t.continuation_checkpoint_id IS NOT NULL
+          AND json_extract(t.origin_json,'$.kind')='bot'
+          AND (json_extract(t.origin_json,'$.expectsReply')=1 OR json_extract(t.origin_json,'$.upstreamTaskId') IS NOT NULL)
+          AND EXISTS (
+          SELECT 1 FROM bot_commands c WHERE c.source_task_id=t.id
+          AND c.bot_id=t.bot_id AND c.thread_id=t.thread_id
+          AND c.continuation_result_json IS NOT NULL AND c.state!='accepted'
+          AND c.continuation_consumed=0)))
       AND NOT (json_extract(t.origin_json,'$.kind')='discussion'
         AND EXISTS (SELECT 1 FROM bot_group_messages m WHERE m.id=json_extract(t.origin_json,'$.messageId')
           AND m.group_id=json_extract(t.origin_json,'$.groupId') AND m.author_bot_id IS NOT NULL)
@@ -2867,7 +2881,12 @@ export class BotStore {
   }
 
   /** Requeue the same task only after its physical graph has stopped at a model boundary. */
-  deferTask(id: string, checkpointId: string, files: BotDeliveredFile[] = []): void {
+  deferTask(
+    id: string,
+    checkpointId: string,
+    files: BotDeliveredFile[] = [],
+    consumedCommandIds: string[] = []
+  ): void {
     this.transaction(() => {
       const task = this.getTask(id)
       if (
@@ -2884,6 +2903,14 @@ export class BotStore {
         "UPDATE bot_tasks SET state='queued', continuation_checkpoint_id=?, continuation_files_json=?, updated_at=? WHERE id=?",
         [checkpointId, fileRecord, this.now(), id]
       )
+      // Commit only the snapshot supplied to this completed turn. A result arriving
+      // during execution must remain eligible to wake the next checkpoint.
+      for (const commandId of new Set(consumedCommandIds))
+        this.db.run(
+          `UPDATE bot_commands SET continuation_consumed=1 WHERE id=? AND source_task_id=?
+           AND bot_id=? AND thread_id=? AND state!='accepted' AND continuation_result_json IS NOT NULL`,
+          [commandId, id, task.botId, task.threadId]
+        )
       this.changed()
     })
   }

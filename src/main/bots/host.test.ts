@@ -2606,6 +2606,65 @@ describe("Bot control state", () => {
 })
 
 describe("Bot host scheduling", () => {
+  it("resumes a peer once per new receipt while retaining its pending command and final reply", async () => {
+    const db = store(),
+      sender = db.create(input),
+      worker = db.create(input)
+    let continuations = 0
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      acquire: (_bot, task) => ({
+        release() {},
+        execute: async () => {
+          if (task.id === peer.id && ++continuations === 1)
+            return { state: "deferred", checkpointId: "read-short", consumedCommandIds: ["short"] }
+          return { state: "completed", result: "Verified both results" }
+        }
+      })
+    }
+    const host = new LocalBotHost(db, runtime, 2)
+    hosts.push(host)
+    const root = db.enqueue({ botId: sender.id, requestId: "partial-root", message: "Delegate" })
+    db.transition(root.id, "running")
+    const peer = db.delegate(root.id, worker.id, "Verify all checks", "partial-child")
+    db.settle(root.id, "completed", null, "Dispatched")
+    db.transition(peer.id, "running")
+    for (const id of ["long", "short"])
+      db.acceptCommand(
+        peer.id,
+        { id, threadId: peer.threadId, command: "check", cwd: "/workspace", startedAt: 1 },
+        true
+      )
+    const settle = (id: string) =>
+      db.settleCommand({
+        id,
+        threadId: peer.threadId,
+        exitCode: 0,
+        output: id,
+        cancelled: false,
+        truncated: false
+      })
+    settle("short")
+    db.deferTask(peer.id, "launched")
+    await vi.waitFor(() => expect(db.taskCheckpoint(peer.id)).toBe("read-short"))
+    expect(continuations).toBe(1)
+    expect(db.continuationCommandIds(peer.id)).toEqual(["long"])
+    expect(db.nextQueued([])).toBeNull()
+    expect(db.recentTasks().filter((t) => t.requestId === `reply-${peer.id}`)).toHaveLength(0)
+    host.commandLifecycle(peer.id, true).settled({
+      id: "long",
+      threadId: peer.threadId,
+      exitCode: 0,
+      output: "long",
+      cancelled: false,
+      truncated: false
+    })
+    await vi.waitFor(() => expect(db.getTask(peer.id).state).toBe("completed"))
+    await vi.waitFor(() =>
+      expect(db.recentTasks().filter((t) => t.requestId === `reply-${peer.id}`)).toHaveLength(1)
+    )
+    expect(continuations).toBe(2)
+  })
   it("dispatches a withdrawn continuation's receipt while the independent private turn remains waiting", async () => {
     const db = store(),
       sender = db.create(input),

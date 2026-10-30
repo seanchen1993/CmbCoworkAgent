@@ -131,11 +131,17 @@ it.each([0, 7])(
       settle(i, 0)
     }
     f.store.deferTask(f.task.id, "waiting-for-build")
-    expect(f.store.nextQueued([])).toBeNull()
     const firstEight = f.store.continuationCommandResults(f.task.id)
+    // A completed sibling must unblock the owner even while the earliest job is waiting.
+    expect(f.store.nextQueued([])?.id).toBe(f.task.id)
     expect(firstEight).toHaveLength(8)
     expect(firstEight[0]).toMatchObject({ command: "x".repeat(8_000), truncated: false })
     expect(firstEight[7].truncated).toBe(true)
+    f.store.transition(f.task.id, "running")
+    f.store.deferTask(f.task.id, "read-eight-results", [], firstEight.map(r => String(r.task_id)))
+    expect(f.store.nextQueued([])).toBeNull()
+    settle(9, 0)
+    expect(f.store.nextQueued([])).toBeNull()
     settle(1, exitCode)
     expect(f.store.nextQueued([])?.id).toBe(f.task.id)
     const receipts = f.store.continuationCommandResults(f.task.id)
@@ -159,6 +165,107 @@ it.each([0, 7])(
   }
 )
 
+it("consumes only checkpointed receipts and preserves racing completions and other owners", async () => {
+  const f = await fixture()
+  const start = (id: string, source = f.task) =>
+    f.store.acceptCommand(
+      source.id,
+      {
+        id,
+        threadId: source.threadId,
+        command: "node check",
+        cwd: f.dir,
+        startedAt: 1
+      },
+      true
+    )
+  const finish = (id: string, source = f.task) =>
+    f.store.settleCommand({
+      id,
+      threadId: source.threadId,
+      exitCode: 0,
+      output: id,
+      cancelled: false,
+      truncated: false
+    })
+  start("waiting-for-dependency")
+  start("observed")
+  start("racing")
+  finish("observed")
+  f.store.deferTask(f.task.id, "first")
+  expect(f.store.nextQueued([])?.id).toBe(f.task.id)
+  const observed = f.store.continuationCommandResults(f.task.id).map((r) => String(r.task_id))
+  f.store.transition(f.task.id, "running")
+  const other = f.store.enqueue(
+    { botId: f.b.id, requestId: "other", message: "Routine" },
+    { kind: "schedule", scheduleId: "other" }
+  )
+  f.store.transition(other.id, "running")
+  start("other-owner", other)
+  finish("other-owner", other)
+  finish("racing")
+  expect(() => f.store.deferTask(f.task.id, "", [], observed)).toThrow()
+  const consumed = () =>
+    f.db.exec("SELECT id FROM bot_commands WHERE continuation_consumed=1")[0]?.values.flat() ?? []
+  expect(consumed()).toEqual([])
+  f.db.run(`CREATE TEMP TRIGGER reject_receipt_consumption BEFORE UPDATE OF continuation_consumed
+    ON bot_commands WHEN NEW.id='racing' BEGIN SELECT RAISE(ABORT, 'write failed'); END`)
+  expect(() => f.store.deferTask(f.task.id, "must-not-save", [], ["observed", "racing"])).toThrow(
+    "write failed"
+  )
+  expect(consumed()).toEqual([])
+  expect(f.store.getTask(f.task.id).state).toBe("running")
+  expect(f.store.taskCheckpoint(f.task.id)).toBe("first")
+  f.db.run("DROP TRIGGER reject_receipt_consumption")
+  f.store.deferTask(f.task.id, "second", [], [...observed, "other-owner", "waiting-for-dependency"])
+  expect(consumed()).toEqual(["observed"])
+  expect(f.store.nextQueued([])?.id).toBe(f.task.id)
+  f.store.transition(f.task.id, "running")
+  f.store.deferTask(f.task.id, "third", [], ["observed", "racing"])
+  expect(f.store.nextQueued([])).toBeNull()
+  // Reopening preserves consumed markers; result text is still available in full.
+  const reopened = new BotStore(f.db)
+  expect(reopened.nextQueued([])).toBeNull()
+  expect(reopened.continuationCommandResults(f.task.id)).toHaveLength(2)
+  finish("waiting-for-dependency")
+  expect(reopened.nextQueued([])?.id).toBe(f.task.id)
+  expect(reopened.continuationCommandResults(f.task.id)).toHaveLength(3)
+  expect(f.replies()).toHaveLength(0)
+})
+
+it("keeps routine waits unchanged when only some retained commands have finished", async () => {
+  const f = await fixture()
+  const routine = f.store.enqueue(
+    { botId: f.b.id, requestId: "routine", message: "Routine" },
+    { kind: "schedule", scheduleId: "daily" }
+  )
+  f.store.transition(routine.id, "running")
+  for (const id of ["first", "last"])
+    f.store.acceptCommand(
+      routine.id,
+      { id, threadId: routine.threadId, command: "check", cwd: f.dir, startedAt: 1 },
+      true
+    )
+  f.store.settleCommand({
+    id: "first",
+    threadId: routine.threadId,
+    exitCode: 0,
+    output: "done",
+    cancelled: false,
+    truncated: false
+  })
+  f.store.deferTask(routine.id, "routine-checkpoint")
+  expect(f.store.nextQueued([])).toBeNull()
+  f.store.settleCommand({
+    id: "last",
+    threadId: routine.threadId,
+    exitCode: 0,
+    output: "done",
+    cancelled: false,
+    truncated: false
+  })
+  expect(f.store.nextQueued([])?.id).toBe(routine.id)
+})
 it("checks a live HTTP service and returns the verified result without waiting for service exit", async () => {
   const f = await fixture()
   const portFile = join(f.dir, "port")
