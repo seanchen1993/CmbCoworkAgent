@@ -306,6 +306,17 @@ try {
     })
   await new Promise<void>((done) => setTimeout(done, 200))
   assert.equal(emitters.length, 1)
+  const waiting = page.getByTestId("design-generation-waiting")
+  await waiting.waitFor()
+  await waiting.getByRole("heading", { name: "先看结构，再调细节" }).waitFor()
+  emitters[0]({ type: "metrics", metrics: { firstModelChunkAt: Date.now() } })
+  await waiting.getByRole("status").filter({ hasText: "正在生成首个页面框架" }).waitFor()
+  await waiting.getByRole("button", { name: "下一张灵感卡片", exact: true }).click()
+  await waiting.getByRole("heading", { name: "把修改说到具体位置" }).waitFor()
+  await waiting.getByRole("button", { name: "上一张灵感卡片", exact: true }).click()
+  if (process.env.DESIGN_WAITING_SCREENSHOT) {
+    await page.screenshot({ path: process.env.DESIGN_WAITING_SCREENSHOT, fullPage: true, animations: "disabled" })
+  }
   const declaration = {
     defaults: { primary: "#123456", radius: 12, label: "开始" },
     schema: {
@@ -340,6 +351,7 @@ try {
     })
   preview(1, makeHtml(true))
   await page.frameLocator("iframe").getByText("布局占位", { exact: true }).waitFor()
+  assert.equal(await waiting.count(), 0, "the first framework immediately replaces the waiting card")
   await page.locator("iframe").evaluate((frame) => {
     const w = (frame as HTMLIFrameElement).contentWindow as Window & {
       kept?: Element | null
@@ -488,6 +500,7 @@ try {
   await page.getByRole("button", { name: "▶ 发送", exact: true }).click()
   await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
   assert.equal(requests[1].kind, "patch", "chat edits route to the bounded executor")
+  assert.equal(await waiting.count(), 0, "edits keep the previous design visible")
   assert.equal(
     requests[1].currentHtml,
     undefined,
@@ -969,6 +982,7 @@ try {
   await page.locator("textarea").first().waitFor()
   manager.start({ requestId: "stream-questions", designSessionId: "ds_stream_questions", kind: "questions", prompt: "创建销售看板" })
   await page.getByText("正在生成问题...", { exact: true }).waitFor()
+  assert.equal(await waiting.count(), 0, "questions remain visible without the waiting card")
   const questionEmit = emitters.at(-1)!
   const questionFinish = completions.at(-1)!
   const nameQuestion = { id: "product_name", type: "text", label: "看板名称" }
@@ -998,7 +1012,10 @@ try {
   await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
   assert.equal(requests.at(-1)!.kind, "agent")
   assert.match(requests.at(-1)!.prompt, /华东销售中心/)
-  manager.stop("ds_stream_questions")
+  await waiting.waitFor()
+  await waiting.getByRole("button", { name: "停止生成", exact: true }).click()
+  await waiting.waitFor({ state: "detached" })
+  assert.equal(manager.get("ds_stream_questions").activeRunId, null)
   completions.at(-1)!()
   console.log("PASS: questions appear before completion, accept answers while streaming, and preserve them across refresh and submission")
   assert.deepEqual(errors, [])

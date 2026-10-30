@@ -52,6 +52,7 @@ import {
 } from "../../../../shared/managed-design-session"
 import { TweaksFloatingPanel } from "./TweaksFloatingPanel"
 import { DesignPreviewFrame } from "./DesignPreviewFrame"
+import { DesignGenerationWaiting } from "./DesignGenerationWaiting"
 import { TweaksParameterPanel } from "./TweaksParameterPanel"
 import { useDesignTweaks } from "./use-design-tweaks"
 import { useDesignDirectEdit } from "./use-design-direct-edit"
@@ -4974,12 +4975,12 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
               /* ── Design Preview ── */
               <>
                 {isGenerating && !visibleHtml ? (
-                  <div style={S.canvasEmpty}>
-                    <div style={S.generatingRow}>
-                      <PulsingDot />
-                      <span style={{ fontSize: 14, color: "#8a8a8a" }}>正在生成方案…</span>
-                    </div>
-                  </div>
+                  <DesignGenerationWaiting
+                    key={`${currentSessionId}:${ts.generationMetrics?.startedAt ?? ""}`}
+                    metrics={ts.generationMetrics}
+                    pendingApproval={!!ts.pendingApproval}
+                    onCancel={handleCancel}
+                  />
                 ) : visibleHtml ? (
                   (() => {
                     // Resolve which HTML to show: active variation or full HTML
